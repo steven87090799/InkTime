@@ -118,6 +118,44 @@ class PhotoRepository:
                 (photo_id,),
             ).fetchone()
 
+    def search(self, *, query: str = "", status: str = "", photo_type: str = "", minimum_score: float | None = None, duplicate_only: bool = False, limit: int = 60, offset: int = 0):
+        clauses = ["1=1"]
+        parameters: list = []
+        if query:
+            clauses.append("(p.relative_path LIKE ? ESCAPE '\\' OR a.caption LIKE ? ESCAPE '\\')")
+            escaped = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            parameters.extend([escaped, escaped])
+        if status:
+            clauses.append("p.status=?")
+            parameters.append(status)
+        if photo_type:
+            clauses.append("a.types_json LIKE ?")
+            parameters.append(f'%"{photo_type}"%')
+        if minimum_score is not None:
+            clauses.append("a.memory_score>=?")
+            parameters.append(minimum_score)
+        if duplicate_only:
+            clauses.append("p.duplicate_group_id IS NOT NULL")
+        where = " AND ".join(clauses)
+        with self.database.session() as connection:
+            total = int(connection.execute(
+                f"""
+                SELECT COUNT(*) FROM photos p
+                LEFT JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id ORDER BY created_at DESC LIMIT 1)
+                WHERE {where}
+                """, parameters).fetchone()[0])
+            rows = connection.execute(
+                f"""
+                SELECT p.*,l.name AS library_name,a.caption,a.types_json,a.memory_score,a.beauty_score,a.side_caption,
+                       a.provider,a.model,a.raw_json,a.created_at AS analyzed_at,
+                       (SELECT COALESCE(SUM(input_tokens+output_tokens),0) FROM api_usage u WHERE u.photo_id=p.id) AS tokens,
+                       (SELECT COALESCE(SUM(COALESCE(actual_cost,estimated_cost)),0) FROM api_usage u WHERE u.photo_id=p.id) AS cost
+                FROM photos p JOIN libraries l ON l.id=p.library_id
+                LEFT JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id ORDER BY created_at DESC LIMIT 1)
+                WHERE {where} ORDER BY COALESCE(p.captured_at,p.created_at) DESC,p.id LIMIT ? OFFSET ?
+                """, (*parameters, limit, offset)).fetchall()
+        return rows, total
+
     def save_analysis(self, photo_id: str, job_id: str | None, stage: str, provider: str, model: str, result: dict, raw_json: str, analysis_source: str = "direct") -> None:
         import json
         now = datetime.now(timezone.utc).isoformat()

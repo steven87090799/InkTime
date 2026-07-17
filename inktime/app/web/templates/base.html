@@ -6,14 +6,15 @@
   <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>{% block title %}InkTime{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='platform.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='platform-extra.css') }}">
 </head>
 <body>
   <header class="topbar">
     <a class="brand" href="/dashboard">InkTime <span>回憶管理平台</span></a>
     {% if g.user %}
       <nav aria-label="主要導覽">
-        <a href="/dashboard">儀表板</a><a href="/review">照片</a><a href="/jobs">工作</a><a href="/devices">裝置</a>
-        <a href="/account/password">帳號</a>
+        <a href="/dashboard">儀表板</a><a href="/photos">照片</a><a href="/jobs">工作</a><a href="/providers">模型</a><a href="/costs">成本</a><a href="/devices">裝置</a>
+        <a href="/diagnostics">診斷</a><a href="/settings">設定</a><a href="/account/password">帳號</a>
         <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="link-button">登出</button></form>
       </nav>
     {% endif %}

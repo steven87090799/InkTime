@@ -10,12 +10,19 @@ from jinja2 import ChoiceLoader, FileSystemLoader
 from werkzeug.exceptions import HTTPException
 
 from inktime import __version__
-from inktime.app.api import auth, dashboard, devices, health, jobs
+from inktime.app.api import auth, dashboard, devices, health, jobs, operations, photos, settings
 from inktime.app.db import Database, migrate
 from inktime.app.repositories.auth import AuthRepository
 from inktime.app.repositories.devices import DeviceRepository
 from inktime.app.repositories.jobs import JobRepository
+from inktime.app.repositories.photos import PhotoRepository
+from inktime.app.repositories.providers import ProviderRepository
+from inktime.app.repositories.settings import SecretStore, SettingsRepository
+from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.jobs import JobService
+from inktime.app.services.backups import BackupService
+from inktime.app.services.diagnostics import DiagnosticsService
+from inktime.app.domain.photos import ThumbnailCache
 from inktime.app.web.access import csrf_token, verify_csrf
 
 
@@ -61,6 +68,17 @@ def initialize_platform(
     app.extensions["inktime_device_repository"] = DeviceRepository(database, secret)
     app.extensions["inktime_job_repository"] = JobRepository(database)
     app.extensions["inktime_job_service"] = JobService(app.extensions["inktime_job_repository"])
+    settings_repository = SettingsRepository(database)
+    settings_repository.ensure_defaults()
+    secret_store = SecretStore(database, secret)
+    app.extensions["inktime_settings_repository"] = settings_repository
+    app.extensions["inktime_secret_store"] = secret_store
+    app.extensions["inktime_provider_repository"] = ProviderRepository(database, secret_store)
+    app.extensions["inktime_photo_repository"] = PhotoRepository(database)
+    app.extensions["inktime_usage_repository"] = UsageRepository(database)
+    app.extensions["inktime_thumbnail_cache"] = ThumbnailCache(data_dir / "cache" / "thumbnails")
+    app.extensions["inktime_backup_service"] = BackupService(database, data_dir / "backups")
+    app.extensions["inktime_diagnostics_service"] = DiagnosticsService(database, data_dir, data_dir / "cache" / "thumbnails")
 
     web_root = Path(__file__).resolve().parent / "web"
     app.jinja_loader = ChoiceLoader(
@@ -73,6 +91,9 @@ def initialize_platform(
     app.register_blueprint(devices.bp)
     app.register_blueprint(health.bp)
     app.register_blueprint(jobs.bp)
+    app.register_blueprint(photos.bp)
+    app.register_blueprint(settings.bp)
+    app.register_blueprint(operations.bp)
     app.jinja_env.globals["csrf_token"] = csrf_token
 
     public_endpoints = {
