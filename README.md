@@ -11,7 +11,7 @@ InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複
 - 以 SHA-256、pHash、dHash、EXIF、亮度、對比、模糊與曝光做本地預處理；相同內容不重複呼叫模型。
 - 512／1024／1600px 內容雜湊縮圖快取；預設不傳原始 4K／8K 圖片。
 - 單一分析請求同時回傳描述、類型、四種分數、短文案與敏感判斷；JSON 最多純文字修復一次。
-- 低成本第一階段與高品質第二階段；支援 OpenAI 即時、OpenAI Batch、OpenAI 相容端點與本地相容端點。
+- 低成本第一階段與高品質第二階段；支援 OpenAI 即時、OpenAI 相容端點與本地相容端點；OpenAI Batch 已完成提交／查詢／取消 Provider 介面，但尚未接入背景工作的完整生命週期。
 - 持久化 Job、逐張狀態、有界佇列、暫停、續跑、取消、失敗重跑、重啟恢復與成本停止線。
 - administrator／viewer、Session、CSRF、登入限制與每台 ESP32 獨立 Bearer Token。
 - 480×800 四色 2bpp 版本化發布，單張 96,000 bytes；Manifest、SHA-256、原子發布與回滾。

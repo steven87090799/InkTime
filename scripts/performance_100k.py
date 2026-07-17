@@ -105,8 +105,8 @@ def main() -> None:
 
     report = f"""# InkTime 100,000 筆效能驗收報告
 
-測試日期：{now}  
-環境：{platform.platform()}／Python {platform.python_version()}  
+測試日期：{now}
+環境：{platform.platform()}／Python {platform.python_version()}
 測試性質：使用 100,000 筆照片中繼資料與 Mock／本地流程，不呼叫真實模型、不含原始照片解碼時間。
 
 | 指標 | 結果 |
