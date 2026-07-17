@@ -34,3 +34,15 @@
 | `backup.retention` | 14 | 1–365 | 過低縮短回復期 | 否 |
 
 所有修改寫入 `setting_history`；Secret 永不寫入摘要。修改需重啟欄位後，使用 `docker compose restart`。
+
+## 照片評分與門檻
+
+模型會直接輸出回憶、美觀、技術品質與情緒四個 0–100 分；目前沒有四項加權總分，也沒有權重滑桿。`analysis.stage_two_threshold` 只決定是否進入第二階段，`render.memory_threshold` 只決定電子紙候選門檻，兩者都不是模型權重。
+
+- 改模型：在「設定」調整 `model.low_model`／`model.high_model`，並在「模型」頁設定 Provider。
+- 改第二階段成本與品質取捨：調整 `analysis.stage_two_threshold`。
+- 改電子紙最低回憶分：調整 `render.memory_threshold`。
+- 改模型評分規則：目前需修改 `inktime/app/providers/openai_compatible.py` 的 `SYSTEM_PROMPT` 並重建映像。
+- 舊版詳細評分細則在 `legacy_analyze_photos.py`，新版 Worker 不會載入它。
+
+完整流程圖與程式入口見 [專案架構與評分流程](ARCHITECTURE_ZH_TW.md)。

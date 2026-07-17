@@ -57,17 +57,7 @@ class RenderService:
         quantity = int(self.settings.get("render.quantity", 5))
         selected = photo_ids[:quantity]
         if not selected:
-            with self.database.session() as connection:
-                selected = [
-                    row[0]
-                    for row in connection.execute(
-                        """
-                    SELECT p.id FROM photos p JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id ORDER BY created_at DESC LIMIT 1)
-                    WHERE p.status='analyzed' ORDER BY a.memory_score DESC LIMIT ?
-                    """,
-                        (quantity,),
-                    ).fetchall()
-                ]
+            selected = self.select_candidates(quantity)
         images = [(photo_id, self.render_photo(photo_id)) for photo_id in selected]
         manifest = self.publisher.publish(images)
         with self.database.session() as connection:
@@ -89,6 +79,25 @@ class RenderService:
                 ),
             )
         return manifest
+
+    def select_candidates(self, quantity: int | None = None) -> list[str]:
+        limit = quantity if quantity is not None else int(self.settings.get("render.quantity", 5))
+        memory_threshold = float(self.settings.get("render.memory_threshold", 70))
+        with self.database.session() as connection:
+            return [
+                str(row[0])
+                for row in connection.execute(
+                    """
+                    SELECT p.id FROM photos p
+                    JOIN photo_analysis a ON a.id=(
+                        SELECT id FROM photo_analysis WHERE photo_id=p.id ORDER BY created_at DESC LIMIT 1
+                    )
+                    WHERE p.status='analyzed' AND a.memory_score>=?
+                    ORDER BY a.memory_score DESC LIMIT ?
+                    """,
+                    (memory_threshold, limit),
+                ).fetchall()
+            ]
 
     def rollback(self, release_id: str) -> None:
         self.publisher.rollback(release_id)

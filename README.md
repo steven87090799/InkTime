@@ -1,6 +1,6 @@
 # InkTime｜照片分析與電子紙回憶管理平台
 
-[English legacy README](README.en.md) · [快速開始](docs/QUICK_START_ZH_TW.md) · [使用指南](docs/USER_GUIDE_ZH_TW.md) · [管理指南](docs/ADMIN_GUIDE_ZH_TW.md)
+[English legacy README](README.en.md) · [快速開始](docs/QUICK_START_ZH_TW.md) · [專案架構與評分流程](docs/ARCHITECTURE_ZH_TW.md) · [使用指南](docs/USER_GUIDE_ZH_TW.md) · [管理指南](docs/ADMIN_GUIDE_ZH_TW.md)
 
 InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複與低價值照片，再以可控預算的視覺模型產生繁體中文描述、分類、分數與電子紙短文案。所有工作、模型、成本、裝置、渲染、備份與診斷都能由登入後的 Web 管理介面操作。
 
@@ -20,18 +20,59 @@ InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複
 ## 架構
 
 ```mermaid
-flowchart LR
-    UI["繁中 Web UI"] --> WEB["Gunicorn / Flask API"]
-    ESP["ESP32 裝置"] -->|"Bearer Token"| WEB
-    WEB --> SVC["Service"] --> REPO["Repository"] --> DB[("SQLite WAL")]
-    WORKER["有界 Worker"] --> SVC
-    SCHED["Scheduler"] --> DB
-    SVC --> CACHE["縮圖快取"]
-    SVC --> PROVIDER["VisionProvider / Batch"]
-    SVC --> RELEASE["原子 2bpp Releases"]
+flowchart TB
+    subgraph clients["使用端"]
+        UI["繁體中文 Web 管理介面"]
+        ESP["ESP32 電子紙裝置"]
+    end
+
+    subgraph processes["Docker 三個程序"]
+        WEB["inktime-web<br/>Gunicorn + Flask API"]
+        WORKER["inktime-worker<br/>掃描／分析／渲染"]
+        SCHED["inktime-scheduler<br/>排程／租約回收／備份"]
+    end
+
+    subgraph application["inktime/app 分層"]
+        API["api + web<br/>HTTP／登入／權限／CSRF"]
+        SVC["services<br/>商業規則與流程編排"]
+        DOMAIN["domain<br/>圖片分析／2bpp 渲染"]
+        REPO["repositories<br/>SQL 與持久化"]
+        PROVIDER["providers<br/>外部視覺模型 API"]
+    end
+
+    subgraph storage["共用資料"]
+        DB[("SQLite WAL")]
+        PHOTOS["唯讀原始照片 /photos"]
+        DATA["/data<br/>縮圖／字型／備份／發布版本"]
+    end
+
+    UI --> WEB --> API --> SVC
+    ESP -->|"Bearer Token"| WEB
+    WORKER --> SVC
+    SCHED --> SVC
+    SVC --> DOMAIN
+    SVC --> PROVIDER
+    SVC --> REPO --> DB
+    DOMAIN --> PHOTOS
+    DOMAIN --> DATA
 ```
 
-詳細邊界請見 [目標架構](docs/ARCHITECTURE_TARGET.md)；重構前證據在 [工程稽核](docs/PROJECT_AUDIT_ZH_TW.md)。
+從哪個目錄開始看、照片如何從掃描走到模型評分與電子紙發布，請見 [專案架構與評分流程](docs/ARCHITECTURE_ZH_TW.md)。詳細分層邊界請見 [目標架構](docs/ARCHITECTURE_TARGET.md)；重構前證據在 [工程稽核](docs/PROJECT_AUDIT_ZH_TW.md)。
+
+### 目錄入口
+
+| 路徑 | 用途 |
+|---|---|
+| `server.py` | Web 正式入口，組裝新版平台與舊版相容層 |
+| `inktime/app/api/` | Route、登入權限、HTTP 輸入輸出 |
+| `inktime/app/services/` | 分析、成本、渲染、備份等流程 |
+| `inktime/app/repositories/` | SQLite 查詢、設定與資料存取 |
+| `inktime/app/providers/` | OpenAI／相容模型呼叫、重試與用量 |
+| `inktime/app/domain/` | 不依賴 Flask 的圖片、Schema、日期與 2bpp 邏輯 |
+| `inktime/app/workers/` | 背景 Worker、Scheduler 與掃描器 |
+| `inktime/app/web/` | 繁中管理介面的模板與 CSS |
+| `esp32/` | 電子紙裝置韌體 |
+| `docs/` | 安裝、架構、管理、成本、安全與維運文件 |
 
 ## Docker 快速安裝
 
@@ -66,6 +107,16 @@ docker compose up -d --build
 ## 不用修改程式碼的日常設定
 
 一般、分析、模型、成本、渲染、裝置、系統、安全與備份設定都在「設定」頁。每次修改會記錄時間、使用者、來源 IP、舊值／新值摘要與是否需重新啟動；Secret 不會寫入歷史。完整欄位、預設值、範圍與風險見 [管理指南](docs/ADMIN_GUIDE_ZH_TW.md)。
+
+## 照片評分與模型調整在哪裡
+
+管理介面的「設定」頁目前可調整：
+
+- `model.low_model`、`model.high_model`：第一、第二階段使用哪個模型。
+- `analysis.stage_two_threshold`：第一階段的回憶分達到多少才升級到高品質分析；人物或最愛照片也會升級。
+- `render.memory_threshold`：電子紙歷史今日選片的最低回憶分門檻。
+
+四項分數 `memory_score`、`beauty_score`、`technical_quality_score`、`emotion_score` 是模型依固定 Prompt 各自輸出的 0–100 分，目前**沒有可調整的加權總分或權重滑桿**。評分 Prompt 位於 `inktime/app/providers/openai_compatible.py` 的 `SYSTEM_PROMPT`，欄位與範圍位於 `inktime/app/domain/analysis/schema.py`；僅本地分析的固定公式位於 `inktime/app/services/analysis.py`。完整資料流與現況邊界請見 [專案架構與評分流程](docs/ARCHITECTURE_ZH_TW.md)。
 
 ## Token 與成本控制
 
