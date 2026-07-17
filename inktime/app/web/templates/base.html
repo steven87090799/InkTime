@@ -5,19 +5,40 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>{% block title %}InkTime{% endblock %}</title>
+  <script>
+    (() => {
+      let savedTheme = null;
+      try {
+        savedTheme = localStorage.getItem('inktime-theme');
+      } catch (_error) {
+        // Storage may be unavailable in privacy-restricted browser contexts.
+      }
+      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      document.documentElement.dataset.theme =
+        savedTheme === 'dark' || savedTheme === 'light'
+          ? savedTheme
+          : (prefersDark ? 'dark' : 'light');
+    })();
+  </script>
   <link rel="stylesheet" href="{{ url_for('static', filename='platform.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='platform-extra.css') }}">
 </head>
 <body>
   <header class="topbar">
     <a class="brand" href="/dashboard">InkTime <span>回憶管理平台</span></a>
-    {% if g.user %}
-      <nav aria-label="主要導覽">
-        <a href="/dashboard">儀表板</a><a href="/photos">照片</a><a href="/jobs">工作</a><a href="/providers">模型</a><a href="/costs">成本</a><a href="/rendering">渲染</a><a href="/devices">裝置</a>
-        <a href="/maintenance">維護</a><a href="/diagnostics">診斷</a><a href="/settings">設定</a><a href="/account/password">帳號</a>
-        <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="link-button">登出</button></form>
-      </nav>
-    {% endif %}
+    <div class="top-actions">
+      {% if g.user %}
+        <nav aria-label="主要導覽">
+          <a href="/dashboard">儀表板</a><a href="/photos">照片</a><a href="/jobs">工作</a><a href="/providers">模型</a><a href="/costs">成本</a><a href="/rendering">渲染</a><a href="/devices">裝置</a>
+          <a href="/maintenance">維護</a><a href="/diagnostics">診斷</a><a href="/settings">設定</a><a href="/account/password">帳號</a>
+          <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="link-button">登出</button></form>
+        </nav>
+      {% endif %}
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="切換為深色模式" aria-pressed="false">
+        <span class="theme-icon" aria-hidden="true">◐</span>
+        <span class="theme-label">深色模式</span>
+      </button>
+    </div>
   </header>
   <main class="shell">
     {% for category, message in get_flashed_messages(with_categories=true) %}
@@ -30,6 +51,31 @@
       options.headers = Object.assign({'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]').content}, options.headers || {});
       return fetch(url, options);
     };
+
+    (() => {
+      const toggle = document.getElementById('theme-toggle');
+      if (!toggle) return;
+
+      const applyTheme = (theme, persist = false) => {
+        const isDark = theme === 'dark';
+        document.documentElement.dataset.theme = isDark ? 'dark' : 'light';
+        toggle.setAttribute('aria-pressed', String(isDark));
+        toggle.setAttribute('aria-label', isDark ? '切換為淺色模式' : '切換為深色模式');
+        toggle.querySelector('.theme-label').textContent = isDark ? '淺色模式' : '深色模式';
+        if (persist) {
+          try {
+            localStorage.setItem('inktime-theme', isDark ? 'dark' : 'light');
+          } catch (_error) {
+            // The selected theme still applies for the current page.
+          }
+        }
+      };
+
+      applyTheme(document.documentElement.dataset.theme);
+      toggle.addEventListener('click', () => {
+        applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark', true);
+      });
+    })();
   </script>
   {% block scripts %}{% endblock %}
 </body>

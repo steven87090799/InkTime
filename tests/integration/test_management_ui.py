@@ -26,6 +26,18 @@ def test_primary_management_pages_render(client, app):
         assert "zh-Hant-TW" in response.get_data(as_text=True)
 
 
+def test_theme_toggle_is_available_before_and_after_login(client, app):
+    setup_page = client.get("/setup").get_data(as_text=True)
+    assert 'id="theme-toggle"' in setup_page
+    assert "inktime-theme" in setup_page
+
+    create_admin(app)
+    login(client)
+    dashboard = client.get("/dashboard").get_data(as_text=True)
+    assert 'id="theme-toggle"' in dashboard
+    assert "深色模式" in dashboard
+
+
 def test_backup_is_integrity_checked_and_downloadable(client, app):
     create_admin(app)
     login(client)
