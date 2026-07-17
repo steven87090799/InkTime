@@ -12,7 +12,7 @@
     <a class="brand" href="/dashboard">InkTime <span>回憶管理平台</span></a>
     {% if g.user %}
       <nav aria-label="主要導覽">
-        <a href="/dashboard">儀表板</a><a href="/review">照片</a><a href="/devices">裝置</a>
+        <a href="/dashboard">儀表板</a><a href="/review">照片</a><a href="/jobs">工作</a><a href="/devices">裝置</a>
         <a href="/account/password">帳號</a>
         <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="link-button">登出</button></form>
       </nav>

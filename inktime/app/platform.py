@@ -10,10 +10,12 @@ from jinja2 import ChoiceLoader, FileSystemLoader
 from werkzeug.exceptions import HTTPException
 
 from inktime import __version__
-from inktime.app.api import auth, dashboard, devices, health
+from inktime.app.api import auth, dashboard, devices, health, jobs
 from inktime.app.db import Database, migrate
 from inktime.app.repositories.auth import AuthRepository
 from inktime.app.repositories.devices import DeviceRepository
+from inktime.app.repositories.jobs import JobRepository
+from inktime.app.services.jobs import JobService
 from inktime.app.web.access import csrf_token, verify_csrf
 
 
@@ -57,6 +59,8 @@ def initialize_platform(
     app.extensions["inktime_database"] = database
     app.extensions["inktime_auth_repository"] = AuthRepository(database)
     app.extensions["inktime_device_repository"] = DeviceRepository(database, secret)
+    app.extensions["inktime_job_repository"] = JobRepository(database)
+    app.extensions["inktime_job_service"] = JobService(app.extensions["inktime_job_repository"])
 
     web_root = Path(__file__).resolve().parent / "web"
     app.jinja_loader = ChoiceLoader(
@@ -68,6 +72,7 @@ def initialize_platform(
     app.register_blueprint(dashboard.bp)
     app.register_blueprint(devices.bp)
     app.register_blueprint(health.bp)
+    app.register_blueprint(jobs.bp)
     app.jinja_env.globals["csrf_token"] = csrf_token
 
     public_endpoints = {

@@ -265,6 +265,44 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        2,
+        "加入工作租約與分析結果",
+        (
+            "ALTER TABLE job_items ADD COLUMN lease_until TEXT",
+            "ALTER TABLE job_items ADD COLUMN estimated_cost REAL NOT NULL DEFAULT 0",
+            "CREATE INDEX IF NOT EXISTS idx_job_items_lease ON job_items(status, lease_until)",
+            """
+            CREATE TABLE IF NOT EXISTS photo_analysis (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+                schema_version INTEGER NOT NULL,
+                stage TEXT NOT NULL,
+                provider TEXT,
+                model TEXT,
+                caption TEXT,
+                types_json TEXT NOT NULL DEFAULT '[]',
+                memory_score REAL,
+                beauty_score REAL,
+                technical_quality_score REAL,
+                emotion_score REAL,
+                side_caption TEXT,
+                should_keep INTEGER,
+                sensitive INTEGER,
+                reason TEXT,
+                raw_json TEXT NOT NULL,
+                analysis_source TEXT NOT NULL DEFAULT 'direct',
+                created_at TEXT NOT NULL,
+                CHECK(memory_score IS NULL OR memory_score BETWEEN 0 AND 100),
+                CHECK(beauty_score IS NULL OR beauty_score BETWEEN 0 AND 100),
+                CHECK(technical_quality_score IS NULL OR technical_quality_score BETWEEN 0 AND 100),
+                CHECK(emotion_score IS NULL OR emotion_score BETWEEN 0 AND 100)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_photo_analysis_photo ON photo_analysis(photo_id, created_at DESC)",
+        ),
+    ),
 )
 
 

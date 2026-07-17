@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}分析工作｜InkTime{% endblock %}
+{% block content %}
+<div class="page-head"><div><p class="eyebrow">背景工作</p><h1>分析工作</h1><p>工作可暫停、續跑、取消，Docker 重啟後會從資料庫恢復。</p></div>{% if g.user.role == 'administrator' %}<button class="primary" id="new-job">建立工作</button>{% endif %}</div>
+<section class="panel"><div class="table-wrap"><table><thead><tr><th>名稱</th><th>狀態</th><th>進度</th><th>已花費</th><th>建立時間</th></tr></thead><tbody>
+{% for job in jobs %}<tr><td><a href="/jobs/{{ job.id }}"><strong>{{ job.name }}</strong></a><small>{{ job.strategy }}</small></td><td><span class="status">{{ job.status }}</span></td><td>{{ job.completed_items + job.failed_items }} / {{ job.total_items }}</td><td>US$ {{ '%.4f'|format(job.spent) }}</td><td>{{ job.created_at }}</td></tr>{% else %}<tr><td colspan="5" class="empty">尚未建立分析工作。</td></tr>{% endfor %}
+</tbody></table></div></section>
+<dialog id="job-wizard"><form id="job-form"><p class="eyebrow">四步驟精靈</p><h2>建立分析工作</h2><div class="form-stack">
+<label>工作名稱<input name="name" value="未分析照片智慧分析" required></label>
+<label>照片數量（最多 100,000）<input name="limit" type="number" min="1" max="100000" value="100"></label>
+<label>分析策略<select name="strategy"><option value="smart_two_stage">兩階段智慧分析</option><option value="local">僅本地分析</option><option value="low_cost">單階段低成本</option><option value="high_quality">單階段高品質</option></select></label>
+<label>單一工作預算上限（美元）<input name="budget" type="number" min="0" step="0.01" value="10"></label>
+<div id="estimate" class="notice"></div><button class="primary">確認建立</button><button type="button" onclick="this.closest('dialog').close()">取消</button></div></form></dialog>
+{% endblock %}
+{% block scripts %}{% if g.user.role == 'administrator' %}<script>
+const wizard=document.getElementById('job-wizard'),form=document.getElementById('job-form'),estimate=document.getElementById('estimate');
+async function updateEstimate(){const data=await (await window.inktimeFetch('/api/v1/jobs/estimate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({photo_count:Number(form.limit.value),strategy:form.strategy.value})})).json();estimate.textContent=`預估第一階段 ${data.stage_one_photos} 張、第二階段 ${data.stage_two_photos} 張；平均 US$ ${data.average_cost}，最高 US$ ${data.maximum_cost}`;}
+document.getElementById('new-job').onclick=()=>{wizard.showModal();updateEstimate()};form.limit.onchange=updateEstimate;form.strategy.onchange=updateEstimate;
+form.onsubmit=async event=>{event.preventDefault();const response=await window.inktimeFetch('/api/v1/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:form.name.value,limit:Number(form.limit.value),strategy:form.strategy.value,budget_limit:Number(form.budget.value)})});const data=await response.json();if(response.ok)location.href=data.detail_url;else estimate.textContent=data.message||'建立失敗';};
+</script>{% endif %}{% endblock %}
