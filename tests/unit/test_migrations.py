@@ -10,7 +10,7 @@ from inktime.app.db.migrations import Migration, MIGRATIONS
 
 def test_fresh_database_is_migrated(tmp_path):
     database = Database(tmp_path / "inktime.db")
-    assert migrate(database) == [1, 2]
+    assert migrate(database) == [1, 2, 3]
     assert database.integrity_check() == "ok"
     with database.session() as connection:
         tables = {

@@ -303,6 +303,56 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_photo_analysis_photo ON photo_analysis(photo_id, created_at DESC)",
         ),
     ),
+    Migration(
+        3,
+        "加入本地影像特徵與 Provider 設定",
+        (
+            "ALTER TABLE photos ADD COLUMN exif_json TEXT",
+            "ALTER TABLE photos ADD COLUMN captured_at TEXT",
+            "ALTER TABLE photos ADD COLUMN gps_lat REAL",
+            "ALTER TABLE photos ADD COLUMN gps_lon REAL",
+            "ALTER TABLE photos ADD COLUMN brightness REAL",
+            "ALTER TABLE photos ADD COLUMN contrast REAL",
+            "ALTER TABLE photos ADD COLUMN blur_score REAL",
+            "ALTER TABLE photos ADD COLUMN overexposed_ratio REAL",
+            "ALTER TABLE photos ADD COLUMN underexposed_ratio REAL",
+            "ALTER TABLE photos ADD COLUMN screenshot_likelihood REAL",
+            """
+            CREATE TABLE IF NOT EXISTS providers (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                api_key_secret TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                priority INTEGER NOT NULL DEFAULT 100,
+                supports_vision INTEGER NOT NULL DEFAULT 1,
+                supports_batch INTEGER NOT NULL DEFAULT 0,
+                supports_json_schema INTEGER NOT NULL DEFAULT 1,
+                rate_limit_rpm INTEGER,
+                token_limit_tpm INTEGER,
+                max_concurrency INTEGER NOT NULL DEFAULT 2,
+                timeout_seconds INTEGER NOT NULL DEFAULT 120,
+                cooldown_seconds INTEGER NOT NULL DEFAULT 300,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS model_pricing (
+                provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+                model TEXT NOT NULL,
+                input_per_million REAL NOT NULL DEFAULT 0,
+                cached_input_per_million REAL NOT NULL DEFAULT 0,
+                output_per_million REAL NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY(provider_id, model)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_photos_captured ON photos(captured_at)",
+            "CREATE INDEX IF NOT EXISTS idx_photos_duplicate ON photos(duplicate_group_id)",
+        ),
+    ),
 )
 
 
