@@ -58,6 +58,7 @@ body,
 .auth-card,
 input,
 select,
+textarea,
 dialog {
   transition: background-color .2s ease, border-color .2s ease, color .2s ease;
 }
@@ -156,7 +157,7 @@ dialog::backdrop { background: rgba(0, 0, 0, .58); }
 dialog pre { padding: 14px; background: var(--code-bg); white-space: pre-wrap; word-break: break-all; }
 
 @media (prefers-reduced-motion: reduce) {
-  body, .topbar, .metrics article, .panel, .auth-card, input, select, dialog { transition: none; }
+  body, .topbar, .metrics article, .panel, .auth-card, input, select, textarea, dialog { transition: none; }
 }
 
 @media (max-width: 1100px) {

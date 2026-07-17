@@ -113,10 +113,11 @@ docker compose up -d --build
 管理介面的「設定」頁目前可調整：
 
 - `model.low_model`、`model.high_model`：第一、第二階段使用哪個模型。
+- `analysis.scoring_rules`：哪些照片應提高或降低回憶、美觀、技術品質與情緒分。
 - `analysis.stage_two_threshold`：第一階段的回憶分達到多少才升級到高品質分析；人物或最愛照片也會升級。
 - `render.memory_threshold`：電子紙歷史今日選片的最低回憶分門檻。
 
-四項分數 `memory_score`、`beauty_score`、`technical_quality_score`、`emotion_score` 是模型依固定 Prompt 各自輸出的 0–100 分，目前**沒有可調整的加權總分或權重滑桿**。評分 Prompt 位於 `inktime/app/providers/openai_compatible.py` 的 `SYSTEM_PROMPT`，欄位與範圍位於 `inktime/app/domain/analysis/schema.py`；僅本地分析的固定公式位於 `inktime/app/services/analysis.py`。完整資料流與現況邊界請見 [專案架構與評分流程](docs/ARCHITECTURE_ZH_TW.md)。
+四項分數 `memory_score`、`beauty_score`、`technical_quality_score`、`emotion_score` 是模型依管理介面的評分規則各自輸出的 0–100 分，目前**沒有加權總分或權重滑桿**。預設規則位於 `inktime/app/domain/analysis/scoring.py`，固定輸出約束位於 `inktime/app/providers/openai_compatible.py`，欄位與範圍位於 `inktime/app/domain/analysis/schema.py`；僅本地分析的固定公式位於 `inktime/app/services/analysis.py`。完整資料流與現況邊界請見 [專案架構與評分流程](docs/ARCHITECTURE_ZH_TW.md)。
 
 ## Token 與成本控制
 

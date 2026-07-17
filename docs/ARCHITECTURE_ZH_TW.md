@@ -103,6 +103,7 @@ flowchart LR
 |---|---|---:|
 | `model.low_model` | 第一階段低成本模型 | `gpt-4o-mini` |
 | `model.high_model` | 第二階段高品質模型 | `gpt-4o` |
+| `analysis.scoring_rules` | 可從網頁編輯的照片高低分準則 | 內建完整舊版規則 |
 | `analysis.stage_two_threshold` | 第一階段回憶分達此值才升級；人物／最愛例外 | 65 |
 | `render.memory_threshold` | 電子紙候選照片最低回憶分 | 70 |
 
@@ -110,13 +111,15 @@ flowchart LR
 
 ### 要改評分規則時看哪裡
 
-- 新版模型固定 Prompt：`inktime/app/providers/openai_compatible.py` 的 `SYSTEM_PROMPT`。
+- 可編輯評分規則：管理介面「設定」頁的 `analysis.scoring_rules`。
+- 評分規則版本化預設：`inktime/app/domain/analysis/scoring.py` 的 `DEFAULT_SCORING_RULES`。
+- 不可由網頁覆寫的 JSON／語言／防虛構指令：`inktime/app/providers/openai_compatible.py` 的 `SYSTEM_PROMPT`。
 - 分數欄位、型別與 0–100 範圍：`inktime/app/domain/analysis/schema.py`。
 - 兩階段門檻判斷：`inktime/app/services/analysis.py` 的 `requires_second`。
 - 僅本地策略的固定分數公式：同檔案的 `_local_result()`。
 - Worker 如何讀取設定：`inktime/app/workers/runner.py`。
 - 電子紙自動選片排序：`inktime/app/services/rendering.py`。
-- 舊版較長的回憶分／美觀分評分細則：`legacy_analyze_photos.py`；新版流程不會載入此檔案。
+- 舊版原始回憶分／美觀分細則仍保留在 `legacy_analyze_photos.py`；其有效規則已整理為新版預設。
 
 若要新增真正的可調權重，應另外定義「綜合排序分數」，保留四個模型原始分數，再以版本化設定計算並保存綜合分；不應覆寫 `memory_score`，否則舊分析結果會失去可比較性。
 
@@ -126,7 +129,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    SETTINGS_UI["設定頁"] --> SETTINGS_API["POST /api/v1/settings"]
+    SETTINGS_UI["設定頁<br/>包含照片評分規則"] --> SETTINGS_API["POST /api/v1/settings"]
     SETTINGS_API --> VALIDATE["SettingsRepository 驗證"]
     VALIDATE --> SETTINGS_DB[("settings")]
     VALIDATE --> HISTORY[("setting_history")]

@@ -38,6 +38,23 @@ def test_theme_toggle_is_available_before_and_after_login(client, app):
     assert "深色模式" in dashboard
 
 
+def test_scoring_rules_are_editable_from_settings_page(client, app):
+    create_admin(app)
+    login(client)
+    page = client.get("/settings").get_data(as_text=True)
+    assert 'textarea name="analysis.scoring_rules"' in page
+    assert "人物互動或合照，大幅提高評分" in page
+
+    custom_rules = ("家庭合照提高回憶分；收據與截圖降低回憶分。" * 6).strip()
+    response = client.post(
+        "/api/v1/settings",
+        json={"analysis.scoring_rules": custom_rules},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert response.status_code == 200
+    assert app.extensions["inktime_settings_repository"].get("analysis.scoring_rules") == custom_rules
+
+
 def test_backup_is_integrity_checked_and_downloadable(client, app):
     create_admin(app)
     login(client)

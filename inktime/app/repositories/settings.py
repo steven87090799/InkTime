@@ -9,6 +9,7 @@ from typing import Any
 from cryptography.fernet import Fernet, InvalidToken
 
 from inktime.app.db import Database
+from inktime.app.domain.analysis.scoring import DEFAULT_SCORING_RULES
 
 
 SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
@@ -37,6 +38,19 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "min": 0,
         "max": 100,
         "restart": False,
+    },
+    "analysis.scoring_rules": {
+        "category": "照片評分規則",
+        "default": DEFAULT_SCORING_RULES,
+        "type": "string",
+        "description": "模型判斷哪些照片應取得較高或較低分的規則",
+        "risk": "修改後會影響新分析結果；既有照片分數不會自動重算",
+        "restart": False,
+        "multiline": True,
+        "rows": 26,
+        "min_length": 100,
+        "max_length": 12000,
+        "full_width": True,
     },
     "analysis.concurrency": {
         "category": "分析設定",
@@ -278,6 +292,10 @@ class SettingsRepository:
             value = value is True or str(value).lower() in {"1", "true", "on", "yes"}
         else:
             value = str(value)
+            if "min_length" in definition and len(value.strip()) < definition["min_length"]:
+                raise ValueError(f"{key} 內容不可少於 {definition['min_length']} 個字元")
+            if "max_length" in definition and len(value) > definition["max_length"]:
+                raise ValueError(f"{key} 內容不可超過 {definition['max_length']} 個字元")
         if (
             "min" in definition
             and value < definition["min"]

@@ -1,7 +1,9 @@
 .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; margin-top: 18px; }
 .settings-grid label > span { display: block; font-weight: 750; }
 .settings-grid small { display: block; min-height: 42px; color: var(--muted); }
-.settings-grid input, .settings-grid select, .filterbar input, .filterbar select, .form-stack select { width: 100%; padding: 10px; border: 1px solid var(--field-line); border-radius: 8px; background: var(--field); color: var(--ink); font: inherit; }
+.settings-grid input, .settings-grid select, .settings-grid textarea, .filterbar input, .filterbar select, .form-stack select { width: 100%; padding: 10px; border: 1px solid var(--field-line); border-radius: 8px; background: var(--field); color: var(--ink); font: inherit; }
+.settings-grid textarea { min-height: 440px; resize: vertical; line-height: 1.6; }
+.settings-grid .setting-full-width { grid-column: 1 / -1; }
 .filterbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 20px; }
 .filterbar button { padding: 10px 16px; }
 .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 16px; }
