@@ -6,6 +6,7 @@ __pycache__/
 
 # Virtual environment
 venv/
+.venv/
 
 # IDE
 .idea/
@@ -28,6 +29,7 @@ filelist.txt
 *.db
 
 # Logs
+logs/
 
 # Others
 test/
