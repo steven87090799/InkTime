@@ -10,7 +10,7 @@ from jinja2 import ChoiceLoader, FileSystemLoader
 from werkzeug.exceptions import HTTPException
 
 from inktime import __version__
-from inktime.app.api import auth, dashboard, devices, health, jobs, operations, photos, settings
+from inktime.app.api import auth, dashboard, devices, health, jobs, operations, photos, rendering, settings
 from inktime.app.db import Database, migrate
 from inktime.app.repositories.auth import AuthRepository
 from inktime.app.repositories.devices import DeviceRepository
@@ -23,6 +23,8 @@ from inktime.app.services.jobs import JobService
 from inktime.app.services.backups import BackupService
 from inktime.app.services.diagnostics import DiagnosticsService
 from inktime.app.domain.photos import ThumbnailCache
+from inktime.app.domain.rendering import AtomicReleasePublisher, FontManager
+from inktime.app.services.rendering import RenderService
 from inktime.app.web.access import csrf_token, verify_csrf
 
 
@@ -79,6 +81,13 @@ def initialize_platform(
     app.extensions["inktime_thumbnail_cache"] = ThumbnailCache(data_dir / "cache" / "thumbnails")
     app.extensions["inktime_backup_service"] = BackupService(database, data_dir / "backups")
     app.extensions["inktime_diagnostics_service"] = DiagnosticsService(database, data_dir, data_dir / "cache" / "thumbnails")
+    font_manager = FontManager(data_dir / "fonts")
+    release_publisher = AtomicReleasePublisher(release_dir)
+    app.extensions["inktime_font_manager"] = font_manager
+    app.extensions["inktime_release_publisher"] = release_publisher
+    app.extensions["inktime_render_service"] = RenderService(
+        database, app.extensions["inktime_photo_repository"], settings_repository, font_manager, release_publisher
+    )
 
     web_root = Path(__file__).resolve().parent / "web"
     app.jinja_loader = ChoiceLoader(
@@ -94,6 +103,7 @@ def initialize_platform(
     app.register_blueprint(photos.bp)
     app.register_blueprint(settings.bp)
     app.register_blueprint(operations.bp)
+    app.register_blueprint(rendering.bp)
     app.jinja_env.globals["csrf_token"] = csrf_token
 
     public_endpoints = {

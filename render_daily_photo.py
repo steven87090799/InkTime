@@ -19,6 +19,7 @@ import datetime as dt
 import os
 from typing import List, Dict, Any, Tuple, Optional
 from PIL import Image, ImageDraw, ImageFont, ImageOps
+from inktime.app.domain.rendering.dates import current_local_date, day_of_year_to_month_day, month_day_to_day_of_year
 try:
     import config as cfg
 except ModuleNotFoundError:
@@ -27,8 +28,6 @@ except ModuleNotFoundError:
 
     cfg = _DefaultConfig()
 
-
-TODAY = dt.date.today()
 
 # === 路径配置（来自 config.py） ===
 ROOT_DIR = Path(__file__).resolve().parent
@@ -48,6 +47,7 @@ if str(FONT_PATH) and not FONT_PATH.is_absolute():
 
 MEMORY_THRESHOLD = float(getattr(cfg, "MEMORY_THRESHOLD", 70.0) or 70.0)
 DAILY_PHOTO_QUANTITY = int(getattr(cfg, "DAILY_PHOTO_QUANTITY", 5) or 5)
+TIMEZONE = str(getattr(cfg, "TIMEZONE", "Asia/Taipei") or "Asia/Taipei")
 
 # 墨水屏尺寸
 CANVAS_WIDTH = 480
@@ -146,21 +146,14 @@ def load_sim_rows() -> List[Dict[str, Any]]:
 # ========== “历史上的今天”选片 ==========
 
 def md_to_day_of_year(md: str) -> Optional[int]:
-    """把 'MM-DD' 转成非闰年的第几天（1~365）。"""
     try:
-        m, d = map(int, md.split("-"))
-        days_before = [0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
-        if m < 1 or m > 12:
-            return None
-        return days_before[m] + d
-    except Exception:
+        return month_day_to_day_of_year(md)
+    except ValueError:
         return None
 
 
 def day_of_year_to_md(day: int) -> str:
-    # 选一个非闰年（2001/2005 随便），只依赖 day-of-year。
-    base = dt.date(2001, 1, 1) + dt.timedelta(days=day - 1)
-    return f"{base.month:02d}-{base.day:02d}"
+    return day_of_year_to_month_day(day)
 
 
 def choose_photo_for_today(items: List[Dict[str, Any]], today: dt.date) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -192,10 +185,10 @@ def choose_photo_for_today(items: List[Dict[str, Any]], today: dt.date) -> Tuple
 
     import random
 
-    for offset in range(0, 365):
+    for offset in range(0, 366):
         doy = target_doy - offset
         if doy <= 0:
-            doy += 365
+            doy += 366
         md = day_of_year_to_md(doy)
 
         arr = by_md.get(md, [])
@@ -257,10 +250,10 @@ def choose_photos_for_today(items: List[Dict[str, Any]], today: dt.date, count: 
 
     import random
 
-    for offset in range(0, 365):
+    for offset in range(0, 366):
         doy = target_doy - offset
         if doy <= 0:
-            doy += 365
+            doy += 366
         md = day_of_year_to_md(doy)
 
         arr = by_md.get(md, [])
@@ -594,7 +587,7 @@ def main():
     if not items:
         raise SystemExit("没有可用照片（exif_json 为空或解析失败）。")
 
-    photos, info = choose_photos_for_today(items, TODAY, count=DAILY_PHOTO_QUANTITY)
+    photos, info = choose_photos_for_today(items, current_local_date(TIMEZONE), count=DAILY_PHOTO_QUANTITY)
 
     print("[INFO] 目标月日:", info["target_md"])
     print("[INFO] 实际使用月日:", info["used_md"])

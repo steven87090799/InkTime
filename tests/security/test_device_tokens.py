@@ -40,3 +40,23 @@ def test_device_token_is_not_accepted_in_url(client, app):
     _, token = app.extensions["inktime_device_repository"].create("書房")
     response = client.get(f"/api/device/v1/releases/latest?token={token}")
     assert response.status_code == 401
+
+
+def test_device_downloads_versioned_manifest_and_verified_file(client, app):
+    from PIL import Image
+    from hashlib import sha256
+
+    _, token = app.extensions["inktime_device_repository"].create("客廳")
+    manifest = app.extensions["inktime_release_publisher"].publish(
+        [("photo-1", Image.new("RGB", (480, 800), "white"))]
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.get("/api/device/v1/releases/latest", headers=headers)
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["release_id"] == manifest["release_id"]
+    assert body["pixel_format"] == "2bpp"
+    file_response = client.get(body["download_base_url"] + body["files"][0]["name"], headers=headers)
+    assert file_response.status_code == 200
+    assert len(file_response.data) == 96_000
+    assert sha256(file_response.data).hexdigest() == body["files"][0]["sha256"]

@@ -77,13 +77,12 @@ def latest_release():
         abort(404, description="找不到發布 Manifest")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["download_base_url"] = f"/api/device/v1/releases/{release_id}/files/"
-    _repository().record_download(device["id"], release_id, True)
     return manifest
 
 
 @bp.get("/api/device/v1/releases/<release_id>/files/<path:filename>")
 def release_file(release_id: str, filename: str):
-    _authenticated_device()
+    device = _authenticated_device()
     from flask import send_file
 
     try:
@@ -92,4 +91,5 @@ def release_file(release_id: str, filename: str):
         abort(400, description="PATH-001 路徑超出允許範圍")
     if not path.is_file() or path.name == "manifest.json":
         abort(404)
+    _repository().record_download(device["id"], release_id, True)
     return send_file(path, mimetype="application/octet-stream", conditional=True)

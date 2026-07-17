@@ -1,6 +1,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
+#include <ArduinoJson.h>
 #include <Preferences.h>
 #include <SPI.h>
 #include <time.h>
@@ -11,6 +12,7 @@
 #include <HardwareSerial.h>
 #include "esp_wifi.h"
 #include "esp_bt.h"
+#include "mbedtls/sha256.h"
 
 #include "driver/gpio.h"
 #include "driver/rtc_io.h"
@@ -79,10 +81,9 @@ GxEPD2_7C<
 );
 
 // =======================
-//  静态每日相册 BIN 路径前缀，建议修改，防止隐私泄露。需同步修改 config.py 中的 DOWNLOAD_KEY。
+//  舊版 URL 金鑰 API 已停用；新版透過每台裝置獨立 Bearer Token 取得 Manifest。
 // =======================
-#define DAILY_PHOTO_PATH_PREFIX "/static/inktime/yourdownloadkey/photo_"
-#define DAILY_PHOTO_COUNT       5   // 0..4
+#define DEVICE_MANIFEST_PATH "/api/device/v1/releases/latest"
 
 // =======================
 //  配置存储 / WiFi / WebServer
@@ -94,6 +95,7 @@ struct Config {
   String  wifi_ssid;
   String  wifi_pass;
   String  backend_hostport;
+  String  device_token;
   int32_t tz_offset_hours;
   uint8_t refresh_hour;
   bool    rotate180;
@@ -183,6 +185,7 @@ void loadConfig(Config &cfg) {
   cfg.wifi_ssid        = prefs.getString("ssid", "");
   cfg.wifi_pass        = prefs.getString("pass", "");
   cfg.backend_hostport = prefs.getString("hostport", DEFAULT_HOSTPORT);
+  cfg.device_token     = prefs.getString("devtoken", "");
   cfg.tz_offset_hours  = prefs.getInt("tz", DEFAULT_TZ);
   cfg.refresh_hour     = (uint8_t)prefs.getUChar("hour", DEFAULT_HOUR);
   cfg.rotate180        = prefs.getBool("rot180", false);
@@ -206,6 +209,7 @@ void saveConfig(const Config &cfg) {
   prefs.putString("ssid", cfg.wifi_ssid);
   prefs.putString("pass", cfg.wifi_pass);
   prefs.putString("hostport", cfg.backend_hostport);
+  prefs.putString("devtoken", cfg.device_token);
   prefs.putInt("tz", cfg.tz_offset_hours);
   prefs.putUChar("hour", cfg.refresh_hour);
   prefs.putBool("rot180", cfg.rotate180);
@@ -306,6 +310,9 @@ String buildConfigPage() {
   html += host;
   html += F("'><br><br>");
 
+  html += F("裝置 Token（留空會保留現有 Token）：<br><input name='device_token' type='password' size='48' autocomplete='off'><br>");
+  html += F("<small>請從 InkTime 裝置管理頁配對；Token 不會顯示在網址或序列埠。</small><br><br>");
+
   html += F("每日刷新时间（0-23 点整）：<br><select name='hour'>");
   for (int h = 0; h < 24; ++h) {
     html += "<option value='";
@@ -362,12 +369,14 @@ void handleSave() {
   String ssid     = server.arg("ssid");
   String pass     = server.arg("pass");
   String host     = server.arg("hostport");
+  String deviceToken = server.arg("device_token");
   String hourStr  = server.arg("hour");
   String tzStr    = server.arg("tz");
   bool rot180Req  = (server.arg("rot180") == "1");
 
   ssid.trim();
   host.trim();
+  deviceToken.trim();
 
   Config newCfg = g_cfg;
 
@@ -375,6 +384,7 @@ void handleSave() {
   if (pass.length() > 0) newCfg.wifi_pass = pass;
 
   newCfg.backend_hostport = host;
+  if (deviceToken.length() > 0) newCfg.device_token = deviceToken;
 
   int32_t tz = tzStr.toInt();
   if (tz < -12) tz = -12;
@@ -599,21 +609,22 @@ bool syncTime(const Config &cfg, struct tm &outLocal) {
 //  下载每日相册 BIN
 // =======================
 bool downloadDailyPhotoBin(const Config &cfg) {
-  size_t target = (size_t)FB_WIDTH * FB_HEIGHT; // 384000 bytes
+  const size_t unpackedSize = (size_t)FB_WIDTH * FB_HEIGHT; // 384000 bytes
+  const size_t packedSize = unpackedSize / 4;                // 2bpp = 96000 bytes
 
   if (!framebuffer) {
 #if DEBUG_LOG
-    DBG_PRINT("[FB] malloc framebuffer size="); DBG_PRINTLN((int)target);
+    DBG_PRINT("[FB] malloc framebuffer size="); DBG_PRINTLN((int)unpackedSize);
 #endif
     framebuffer = (uint8_t*)heap_caps_malloc(
-      target,
+      unpackedSize,
       MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM
     );
     if (!framebuffer) {
 #if DEBUG_LOG
       DBG_PRINTLN("[FB] malloc PSRAM failed, try internal RAM");
 #endif
-      framebuffer = (uint8_t*)heap_caps_malloc(target, MALLOC_CAP_8BIT);
+      framebuffer = (uint8_t*)heap_caps_malloc(unpackedSize, MALLOC_CAP_8BIT);
     }
   }
   if (!framebuffer) {
@@ -623,94 +634,105 @@ bool downloadDailyPhotoBin(const Config &cfg) {
     return false;
   }
 
-  if (cfg.backend_hostport.length() == 0) {
+  if (cfg.backend_hostport.length() == 0 || cfg.device_token.length() == 0) {
 #if DEBUG_LOG
-    DBG_PRINTLN("[HTTP] hostport empty, skip download");
+    DBG_PRINTLN("[HTTP] 伺服器或裝置 Token 尚未設定，跳過下載");
 #endif
     return false;
   }
 
-  int idx = random(0, DAILY_PHOTO_COUNT);
-
-  String url;
-  String hp = cfg.backend_hostport;
-  hp.trim();
-
-  if (hp.startsWith("http://") || hp.startsWith("https://")) {
-    url = hp + String(DAILY_PHOTO_PATH_PREFIX) + String(idx) + ".bin";
-  } else {
-    url  = "http://" + hp;
-    url += String(DAILY_PHOTO_PATH_PREFIX);
-    url += String(idx);
-    url += ".bin";
-  }
+  String base = cfg.backend_hostport;
+  base.trim();
+  if (!base.startsWith("http://") && !base.startsWith("https://")) base = "http://" + base;
+  while (base.endsWith("/")) base.remove(base.length() - 1);
+  String manifestUrl = base + String(DEVICE_MANIFEST_PATH);
 
 #if DEBUG_LOG
-  DBG_PRINT("[HTTP] GET "); DBG_PRINTLN(url);
+  DBG_PRINTLN("[HTTP] 取得版本 Manifest（Authorization 已遮蔽）");
 #endif
 
-  HTTPClient http;
-  http.begin(url);
-  int code = http.GET();
-  if (code != HTTP_CODE_OK) {
+  HTTPClient manifestHttp;
+  manifestHttp.begin(manifestUrl);
+  manifestHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
+  int manifestCode = manifestHttp.GET();
+  if (manifestCode != HTTP_CODE_OK) {
 #if DEBUG_LOG
-    DBG_PRINT("[HTTP] code="); DBG_PRINTLN(code);
+    DBG_PRINT("[HTTP] Manifest code="); DBG_PRINTLN(manifestCode);
 #endif
-    http.end();
+    manifestHttp.end();
     return false;
   }
 
-  int len = http.getSize();
+  DynamicJsonDocument manifest(12288);
+  DeserializationError jsonError = deserializeJson(manifest, manifestHttp.getStream());
+  manifestHttp.end();
+  if (jsonError || manifest["schema_version"].as<int>() != 1 || String((const char*)manifest["pixel_format"]) != "2bpp") {
 #if DEBUG_LOG
-  DBG_PRINT("[HTTP] content-length="); DBG_PRINTLN(len);
+    DBG_PRINTLN("[HTTP] Manifest 格式或版本不相容");
 #endif
+    return false;
+  }
 
-  WiFiClient *stream = http.getStreamPtr();
-  size_t total = 0;
+  int width = manifest["width"] | 0;
+  int height = manifest["height"] | 0;
+  JsonArray files = manifest["files"].as<JsonArray>();
+  const char* downloadBaseRaw = manifest["download_base_url"] | "";
+  if (width != FB_WIDTH || height != FB_HEIGHT || files.size() == 0 || strlen(downloadBaseRaw) == 0) return false;
 
-  const uint32_t DOWNLOAD_TIMEOUT_MS = 60 * 1000;
-  uint32_t start_ms = millis();
+  uint8_t* packed = (uint8_t*)heap_caps_malloc(packedSize, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
+  if (!packed) packed = (uint8_t*)heap_caps_malloc(packedSize, MALLOC_CAP_8BIT);
+  if (!packed) return false;
 
-  while (http.connected() && (len > 0 || len == -1) && total < target) {
-    if (millis() - start_ms > DOWNLOAD_TIMEOUT_MS) {
-#if DEBUG_LOG
-      DBG_PRINTLN("[HTTP] download timeout");
-#endif
-      http.end();
-      return false;
+  // 隨機起點；若某張下載或校驗失敗，依序嘗試 Manifest 中其他照片。
+  size_t startIndex = (size_t)random(0, files.size());
+  for (size_t attempt = 0; attempt < files.size(); ++attempt) {
+    JsonObject file = files[(startIndex + attempt) % files.size()];
+    String fileName = file["name"] | "";
+    size_t expectedSize = file["size"] | 0;
+    String expectedSha = file["sha256"] | "";
+    if (fileName.length() == 0 || expectedSize != packedSize || expectedSha.length() != 64) continue;
+
+    String fileUrl = base + String(downloadBaseRaw) + fileName;
+    HTTPClient fileHttp;
+    fileHttp.begin(fileUrl);
+    fileHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
+    int code = fileHttp.GET();
+    if (code != HTTP_CODE_OK || fileHttp.getSize() != (int)packedSize) {
+      fileHttp.end();
+      continue;
     }
 
-    size_t avail = stream->available();
-    if (avail) {
-      size_t toRead = avail;
-      if (toRead > target - total) toRead = target - total;
-      int r = stream->read(framebuffer + total, toRead);
-      if (r > 0) {
-        total += r;
-        if (len > 0) len -= r;
-      }
-    } else {
-      delay(1);
+    WiFiClient *stream = fileHttp.getStreamPtr();
+    size_t total = 0;
+    uint32_t started = millis();
+    while (fileHttp.connected() && total < packedSize && millis() - started < 60000) {
+      size_t available = stream->available();
+      if (!available) { delay(1); continue; }
+      size_t count = min(available, packedSize - total);
+      int received = stream->read(packed + total, count);
+      if (received > 0) total += received;
     }
+    fileHttp.end();
+    if (total != packedSize) continue;
+
+    unsigned char digest[32];
+    if (mbedtls_sha256_ret(packed, packedSize, digest, 0) != 0) continue;
+    char actualSha[65];
+    for (int i = 0; i < 32; ++i) sprintf(actualSha + i * 2, "%02x", digest[i]);
+    actualSha[64] = '\0';
+    if (!expectedSha.equalsIgnoreCase(String(actualSha))) continue;
+
+    // 完整下載與 SHA-256 都通過後才更新 framebuffer；失敗會保留舊畫面。
+    for (size_t pixel = 0; pixel < unpackedSize; ++pixel) {
+      uint8_t byteValue = packed[pixel / 4];
+      framebuffer[pixel] = (byteValue >> (6 - (pixel % 4) * 2)) & 0x03;
+    }
+    heap_caps_free(packed);
+    return true;
   }
 
-  http.end();
-
-#if DEBUG_LOG
-  DBG_PRINT("[HTTP] total read="); DBG_PRINTLN((int)total);
-#endif
-
-  if (total != target) {
-#if DEBUG_LOG
-    DBG_PRINT("[HTTP] size mismatch, expect=");
-    DBG_PRINT((int)target);
-    DBG_PRINT(" got=");
-    DBG_PRINTLN((int)total);
-#endif
-    return false;
-  }
-
-  return true;
+  heap_caps_free(packed);
+  return false;
 }
 
 // =======================
