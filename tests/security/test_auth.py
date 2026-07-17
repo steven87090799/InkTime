@@ -39,9 +39,7 @@ def test_csrf_is_required_for_mutation(client, app):
 
 
 def test_viewer_cannot_create_device(client, app):
-    app.extensions["inktime_auth_repository"].create_user(
-        "viewer", "very-safe-viewer-password", "viewer"
-    )
+    app.extensions["inktime_auth_repository"].create_user("viewer", "very-safe-viewer-password", "viewer")
     login(client, "viewer", "very-safe-viewer-password")
     response = client.post(
         "/api/v1/devices",

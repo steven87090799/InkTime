@@ -15,7 +15,12 @@ FOUR_COLORS = ((0, 0, 0), (255, 255, 255), (220, 30, 30), (245, 190, 25))
 
 
 def _nearest_color(pixel) -> int:
-    return min(range(4), key=lambda index: sum((int(pixel[channel]) - FOUR_COLORS[index][channel]) ** 2 for channel in range(3)))
+    return min(
+        range(4),
+        key=lambda index: sum(
+            (int(pixel[channel]) - FOUR_COLORS[index][channel]) ** 2 for channel in range(3)
+        ),
+    )
 
 
 def pack_four_color_2bpp(image: Image.Image) -> bytes:
@@ -32,7 +37,14 @@ class AtomicReleasePublisher:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def publish(self, images: list[tuple[str, Image.Image]], *, display_type: str = "7.3-inch-four-color", width: int = 480, height: int = 800) -> dict:
+    def publish(
+        self,
+        images: list[tuple[str, Image.Image]],
+        *,
+        display_type: str = "7.3-inch-four-color",
+        width: int = 480,
+        height: int = 800,
+    ) -> dict:
         if not images:
             raise ValueError("RENDER-001 至少需要一張圖片")
         release_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(3)
@@ -53,11 +65,24 @@ class AtomicReleasePublisher:
                 preview = f"preview_{index}.png"
                 (temporary / filename).write_bytes(payload)
                 rendered.save(temporary / preview, "PNG")
-                files.append({"name": filename, "size": len(payload), "sha256": sha256(payload).hexdigest(), "source_photo_id": photo_id, "preview": preview})
+                files.append(
+                    {
+                        "name": filename,
+                        "size": len(payload),
+                        "sha256": sha256(payload).hexdigest(),
+                        "source_photo_id": photo_id,
+                        "preview": preview,
+                    }
+                )
             manifest = {
-                "schema_version": 1, "release_id": release_id,
-                "created_at": datetime.now(timezone.utc).isoformat(), "display_type": display_type,
-                "width": width, "height": height, "pixel_format": "2bpp", "files": files,
+                "schema_version": 1,
+                "release_id": release_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "display_type": display_type,
+                "width": width,
+                "height": height,
+                "pixel_format": "2bpp",
+                "files": files,
             }
             manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
             (temporary / "manifest.json").write_bytes(manifest_bytes)

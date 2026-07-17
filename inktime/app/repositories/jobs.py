@@ -21,7 +21,9 @@ class JobRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
 
-    def iter_photo_ids(self, *, statuses: tuple[str, ...] = ("discovered",), limit: int | None = None) -> Iterator[str]:
+    def iter_photo_ids(
+        self, *, statuses: tuple[str, ...] = ("discovered",), limit: int | None = None
+    ) -> Iterator[str]:
         placeholders = ",".join("?" for _ in statuses)
         last_id = ""
         remaining = limit
@@ -29,7 +31,7 @@ class JobRepository:
             batch_size = min(500, remaining) if remaining is not None else 500
             with self.database.session() as connection:
                 rows = connection.execute(
-                    f"SELECT id FROM photos WHERE status IN ({placeholders}) AND id>? ORDER BY id LIMIT ?",
+                    f"SELECT id FROM photos WHERE status IN ({placeholders}) AND id>? ORDER BY id LIMIT ?",  # noqa: S608 -- placeholders are generated, values remain bound
                     (*statuses, last_id, batch_size),
                 ).fetchall()
             if not rows:
@@ -40,7 +42,16 @@ class JobRepository:
             if remaining is not None:
                 remaining -= len(rows)
 
-    def create(self, *, name: str, strategy: str, settings: dict, photo_ids: Iterable[str], created_by: str | None, budget_limit: float | None = None) -> str:
+    def create(
+        self,
+        *,
+        name: str,
+        strategy: str,
+        settings: dict,
+        photo_ids: Iterable[str],
+        created_by: str | None,
+        budget_limit: float | None = None,
+    ) -> str:
         job_id = str(uuid4())
         now = utc_now()
         total = 0
@@ -53,24 +64,38 @@ class JobRepository:
                                      budget_limit, created_by, created_at)
                     VALUES (?, 'analysis', ?, 'pending', ?, ?, ?, ?, ?)
                     """,
-                    (job_id, name, strategy, json.dumps(settings, ensure_ascii=False), budget_limit, created_by, now),
+                    (
+                        job_id,
+                        name,
+                        strategy,
+                        json.dumps(settings, ensure_ascii=False),
+                        budget_limit,
+                        created_by,
+                        now,
+                    ),
                 )
                 batch: list[tuple] = []
                 for photo_id in photo_ids:
                     batch.append((str(uuid4()), job_id, str(photo_id), now))
                     if len(batch) == 500:
                         connection.executemany(
-                            "INSERT OR IGNORE INTO job_items(id, job_id, photo_id, available_at) VALUES (?, ?, ?, ?)", batch
+                            "INSERT OR IGNORE INTO job_items(id, job_id, photo_id, available_at) VALUES (?, ?, ?, ?)",
+                            batch,
                         )
                         total += len(batch)
                         batch.clear()
                 if batch:
                     connection.executemany(
-                        "INSERT OR IGNORE INTO job_items(id, job_id, photo_id, available_at) VALUES (?, ?, ?, ?)", batch
+                        "INSERT OR IGNORE INTO job_items(id, job_id, photo_id, available_at) VALUES (?, ?, ?, ?)",
+                        batch,
                     )
                     total += len(batch)
                 # OR IGNORE 可能排除同一工作中的重複照片，以實際筆數為準。
-                total = int(connection.execute("SELECT COUNT(*) FROM job_items WHERE job_id=?", (job_id,)).fetchone()[0])
+                total = int(
+                    connection.execute("SELECT COUNT(*) FROM job_items WHERE job_id=?", (job_id,)).fetchone()[
+                        0
+                    ]
+                )
                 connection.execute("UPDATE jobs SET total_items=? WHERE id=?", (total, job_id))
                 connection.execute("COMMIT")
             except Exception:
@@ -83,9 +108,35 @@ class JobRepository:
         with self.database.session() as connection:
             return connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
 
+    def create_maintenance(self, *, kind: str, name: str, settings: dict, created_by: str | None) -> str:
+        if kind not in {"scan", "backup", "render", "cleanup"}:
+            raise ValueError("不支援的維護工作")
+        job_id = str(uuid4())
+        item_id = str(uuid4())
+        now = utc_now()
+        with self.database.session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    "INSERT INTO jobs(id,kind,name,status,strategy,settings_json,total_items,created_by,created_at) VALUES (?,?,?,'pending','local',?,1,?,?)",
+                    (job_id, kind, name, json.dumps(settings, ensure_ascii=False), created_by, now),
+                )
+                connection.execute(
+                    "INSERT INTO job_items(id,job_id,photo_id,available_at) VALUES (?,?,NULL,?)",
+                    (item_id, job_id, now),
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        self.add_event(job_id, "created", f"已建立 {kind} 維護工作")
+        return job_id
+
     def list(self, limit: int = 100):
         with self.database.session() as connection:
-            return connection.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+            return connection.execute(
+                "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
 
     def list_items(self, job_id: str, *, limit: int = 100, offset: int = 0):
         with self.database.session() as connection:
@@ -106,7 +157,7 @@ class JobRepository:
         placeholders = ",".join("?" for _ in from_statuses)
         with self.database.session() as connection:
             cursor = connection.execute(
-                f"UPDATE jobs SET status=?, heartbeat_at=? WHERE id=? AND status IN ({placeholders})",
+                f"UPDATE jobs SET status=?, heartbeat_at=? WHERE id=? AND status IN ({placeholders})",  # noqa: S608 -- only placeholder count is dynamic
                 (to_status, now, job_id, *sorted(from_statuses)),
             )
         if cursor.rowcount:
@@ -182,7 +233,8 @@ class JobRepository:
                         (worker_id, now, lease_until, *ids),
                     )
                     rows = connection.execute(
-                        f"SELECT * FROM job_items WHERE id IN ({placeholders})", ids
+                        f"SELECT * FROM job_items WHERE id IN ({placeholders})",  # noqa: S608 -- ids are bound parameters
+                        ids,
                     ).fetchall()
                 connection.execute("UPDATE jobs SET heartbeat_at=? WHERE id=?", (now, job_id))
                 connection.execute("COMMIT")
@@ -221,13 +273,29 @@ class JobRepository:
                 connection.execute("ROLLBACK")
                 raise
 
-    def fail_item(self, job_id: str, item_id: str, error_code: str, message: str, *, max_attempts: int = 3) -> None:
+    def defer_item(self, item_id: str) -> None:
+        """預算阻擋時歸還租約，不把尚未送出的項目記成分析失敗。"""
+        with self.database.session() as connection:
+            connection.execute(
+                """
+                UPDATE job_items
+                SET status='pending',worker_id=NULL,lease_until=NULL,available_at=?,attempts=MAX(0,attempts-1)
+                WHERE id=? AND status='running'
+                """,
+                (utc_now(), item_id),
+            )
+
+    def fail_item(
+        self, job_id: str, item_id: str, error_code: str, message: str, *, max_attempts: int = 3
+    ) -> None:
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                item = connection.execute("SELECT attempts, photo_id FROM job_items WHERE id=?", (item_id,)).fetchone()
+                item = connection.execute(
+                    "SELECT attempts, photo_id FROM job_items WHERE id=?", (item_id,)
+                ).fetchone()
                 terminal = item is None or int(item["attempts"]) >= max_attempts
                 if terminal:
                     connection.execute(
@@ -258,7 +326,17 @@ class JobRepository:
                         INSERT INTO job_errors(job_id,job_item_id,photo_id,component,error_code,fingerprint,severity,message,first_seen_at,last_seen_at)
                         VALUES (?,?,?,'worker',?,?,?,?,?,?)
                         """,
-                        (job_id, item_id, item["photo_id"] if item else None, error_code, fingerprint, "error", message[:1000], now, now),
+                        (
+                            job_id,
+                            item_id,
+                            item["photo_id"] if item else None,
+                            error_code,
+                            fingerprint,
+                            "error",
+                            message[:1000],
+                            now,
+                            now,
+                        ),
                     )
                 connection.execute("COMMIT")
             except Exception:

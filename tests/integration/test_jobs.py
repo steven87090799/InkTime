@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from inktime.app.repositories.jobs import JobRepository
 from inktime.app.services.jobs import JobService
 from inktime.app.workers.job_worker import BoundedJobWorker
 
@@ -71,7 +70,9 @@ def test_pause_resume_cancel_state_machine(app):
 def test_worker_never_submits_all_items_at_once(app):
     service, repository, job_id = create_job(app, 250)
     service.start(job_id)
-    worker = BoundedJobWorker(repository, lambda item: {"photo_id": item["photo_id"]}, concurrency=4, queue_multiplier=2)
+    worker = BoundedJobWorker(
+        repository, lambda item: {"photo_id": item["photo_id"]}, concurrency=4, queue_multiplier=2
+    )
     worker.run_job(job_id)
     assert worker.max_observed_futures <= 8
     job = repository.get(job_id)
@@ -95,10 +96,27 @@ def test_stale_running_items_are_recovered_after_restart(app):
 def test_failed_items_can_be_retried(app):
     service, repository, job_id = create_job(app, 1)
     service.start(job_id)
-    worker = BoundedJobWorker(repository, lambda item: (_ for _ in ()).throw(RuntimeError("失敗")), max_attempts=1)
+    worker = BoundedJobWorker(
+        repository, lambda item: (_ for _ in ()).throw(RuntimeError("失敗")), max_attempts=1
+    )
     worker.run_job(job_id)
     assert repository.get(job_id)["status"] == "completed_with_errors"
     assert service.retry_failed(job_id) == 1
     service.start(job_id)
     BoundedJobWorker(repository, lambda item: {"ok": True}).run_job(job_id)
     assert repository.get(job_id)["status"] == "completed"
+
+
+def test_budget_block_returns_item_and_pauses_new_work(app):
+    class BudgetBlocked(RuntimeError):
+        code = "BUDGET-001"
+
+    service, repository, job_id = create_job(app, 1)
+    service.start(job_id)
+    BoundedJobWorker(repository, lambda item: (_ for _ in ()).throw(BudgetBlocked("已達上限"))).run_job(
+        job_id
+    )
+    assert repository.get(job_id)["status"] == "budget_exceeded"
+    item = repository.list_items(job_id)[0]
+    assert item["status"] == "pending"
+    assert item["attempts"] == 0

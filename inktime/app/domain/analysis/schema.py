@@ -6,13 +6,37 @@ from typing import Any
 
 
 ALLOWED_TYPES = {
-    "人物", "孩子", "家庭", "旅行", "風景", "美食", "寵物", "貓咪",
-    "日常", "活動", "建築", "夜景", "植物", "文件", "收據", "截圖", "雜物", "其他",
+    "人物",
+    "孩子",
+    "家庭",
+    "旅行",
+    "風景",
+    "美食",
+    "寵物",
+    "貓咪",
+    "日常",
+    "活動",
+    "建築",
+    "夜景",
+    "植物",
+    "文件",
+    "收據",
+    "截圖",
+    "雜物",
+    "其他",
 }
 REQUIRED_FIELDS = {
-    "schema_version", "caption", "types", "memory_score", "beauty_score",
-    "technical_quality_score", "emotion_score", "side_caption", "should_keep",
-    "sensitive", "reason",
+    "schema_version",
+    "caption",
+    "types",
+    "memory_score",
+    "beauty_score",
+    "technical_quality_score",
+    "emotion_score",
+    "side_caption",
+    "should_keep",
+    "sensitive",
+    "reason",
 }
 
 
@@ -30,7 +54,12 @@ ANALYSIS_JSON_SCHEMA = {
         "properties": {
             "schema_version": {"type": "integer", "const": 1},
             "caption": {"type": "string", "minLength": 1, "maxLength": 1000},
-            "types": {"type": "array", "items": {"type": "string", "enum": sorted(ALLOWED_TYPES)}, "minItems": 1, "uniqueItems": True},
+            "types": {
+                "type": "array",
+                "items": {"type": "string", "enum": sorted(ALLOWED_TYPES)},
+                "minItems": 1,
+                "uniqueItems": True,
+            },
             "memory_score": {"type": "number", "minimum": 0, "maximum": 100},
             "beauty_score": {"type": "number", "minimum": 0, "maximum": 100},
             "technical_quality_score": {"type": "number", "minimum": 0, "maximum": 100},
@@ -78,7 +107,12 @@ def validate_analysis_result(raw: str | dict) -> dict:
     if not isinstance(value["reason"], str) or not value["reason"].strip() or len(value["reason"]) > 240:
         raise AnalysisValidationError("reason 格式不合法")
     types = value["types"]
-    if not isinstance(types, list) or not types or len(types) != len(set(types)) or any(item not in ALLOWED_TYPES for item in types):
+    if (
+        not isinstance(types, list)
+        or not types
+        or len(types) != len(set(types))
+        or any(item not in ALLOWED_TYPES for item in types)
+    ):
         raise AnalysisValidationError("types 含有不允許或重複的類型")
     if not isinstance(value["should_keep"], bool) or not isinstance(value["sensitive"], bool):
         raise AnalysisValidationError("布林欄位格式不合法")

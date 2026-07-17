@@ -22,7 +22,9 @@ def iter_images(root: Path) -> Iterator[Path]:
 
 
 class PhotoScanner:
-    def __init__(self, repository: PhotoRepository, preprocessor: PhotoPreprocessor, thumbnails: ThumbnailCache) -> None:
+    def __init__(
+        self, repository: PhotoRepository, preprocessor: PhotoPreprocessor, thumbnails: ThumbnailCache
+    ) -> None:
         self.repository = repository
         self.preprocessor = preprocessor
         self.thumbnails = thumbnails

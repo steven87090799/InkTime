@@ -3,7 +3,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 
 @dataclass(frozen=True)
@@ -21,14 +20,35 @@ class ProviderResponse:
 
 
 class VisionProvider(ABC):
-    name: str
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @name.setter
+    def name(self, value: str) -> None:
+        self._name = value
 
     @abstractmethod
-    def analyze(self, *, image_path: Path, model: str, detail: str, stage: str) -> ProviderResponse:
+    def analyze(
+        self,
+        *,
+        image_path: Path,
+        model: str,
+        detail: str,
+        stage: str,
+        max_tokens: int | None = None,
+    ) -> ProviderResponse:
         raise NotImplementedError
 
     @abstractmethod
-    def repair_json(self, *, invalid_content: str, validation_error: str, model: str) -> ProviderResponse:
+    def repair_json(
+        self,
+        *,
+        invalid_content: str,
+        validation_error: str,
+        model: str,
+        max_tokens: int | None = None,
+    ) -> ProviderResponse:
         """只傳文字修復 JSON，不得再次上傳圖片。"""
         raise NotImplementedError
 

@@ -49,6 +49,37 @@ class DeviceRepository:
                 raise KeyError(device_id)
         return token
 
+    def update(
+        self,
+        device_id: str,
+        *,
+        name: str,
+        enabled: bool,
+        timezone_name: str,
+        schedule: str,
+        rotation: int,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.session() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE devices
+                SET name=?,enabled=?,timezone=?,schedule=?,rotation=?,updated_at=?
+                WHERE id=?
+                """,
+                (
+                    name.strip(),
+                    int(enabled),
+                    timezone_name,
+                    schedule[:100],
+                    rotation,
+                    now,
+                    device_id,
+                ),
+            )
+        if cursor.rowcount != 1:
+            raise KeyError(device_id)
+
     def authenticate(self, token: str, ip_address: str):
         digest = hash_device_token(token, self.pepper)
         now = datetime.now(timezone.utc).isoformat()
@@ -64,14 +95,16 @@ class DeviceRepository:
         return row
 
     def record_download(self, device_id: str, release_id: str, succeeded: bool) -> None:
-        column = "download_success_count" if succeeded else "download_failure_count"
         now = datetime.now(timezone.utc).isoformat()
         with self.database.session() as connection:
             connection.execute(
-                f"""
-                UPDATE devices SET {column}={column}+1, last_download_at=?,
+                """
+                UPDATE devices SET
+                    download_success_count=download_success_count+CASE WHEN ? THEN 1 ELSE 0 END,
+                    download_failure_count=download_failure_count+CASE WHEN ? THEN 0 ELSE 1 END,
+                    last_download_at=?,
                     last_release_id=CASE WHEN ? THEN ? ELSE last_release_id END, updated_at=?
                 WHERE id=?
                 """,
-                (now, int(succeeded), release_id, now, device_id),
+                (int(succeeded), int(succeeded), now, int(succeeded), release_id, now, device_id),
             )

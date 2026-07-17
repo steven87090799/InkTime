@@ -54,12 +54,25 @@ class ProviderRepository:
                     token_limit_tpm=excluded.token_limit_tpm,max_concurrency=excluded.max_concurrency,
                     timeout_seconds=excluded.timeout_seconds,cooldown_seconds=excluded.cooldown_seconds,updated_at=excluded.updated_at
                 """,
-                (provider_id, str(payload.get("name", "Provider")), str(payload.get("kind", "openai_compatible")),
-                 str(payload.get("base_url", "")), secret_key if api_key else None, int(bool(payload.get("enabled", True))),
-                 int(payload.get("priority", 100)), 1, int(bool(payload.get("supports_batch", False))),
-                 int(bool(payload.get("supports_json_schema", True))), payload.get("rate_limit_rpm"), payload.get("token_limit_tpm"),
-                 int(payload.get("max_concurrency", 2)), int(payload.get("timeout_seconds", 120)),
-                 int(payload.get("cooldown_seconds", 300)), now, now),
+                (
+                    provider_id,
+                    str(payload.get("name", "Provider")),
+                    str(payload.get("kind", "openai_compatible")),
+                    str(payload.get("base_url", "")),
+                    secret_key if api_key else None,
+                    int(bool(payload.get("enabled", True))),
+                    int(payload.get("priority", 100)),
+                    1,
+                    int(bool(payload.get("supports_batch", False))),
+                    int(bool(payload.get("supports_json_schema", True))),
+                    payload.get("rate_limit_rpm"),
+                    payload.get("token_limit_tpm"),
+                    int(payload.get("max_concurrency", 2)),
+                    int(payload.get("timeout_seconds", 120)),
+                    int(payload.get("cooldown_seconds", 300)),
+                    now,
+                    now,
+                ),
             )
         return provider_id
 

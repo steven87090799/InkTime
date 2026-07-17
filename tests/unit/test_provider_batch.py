@@ -25,11 +25,17 @@ class FakeSession:
 
 def test_batch_uploads_jsonl_then_creates_batch():
     session = FakeSession()
-    provider = OpenAICompatibleProvider(name="OpenAI", base_url="https://api.openai.com/v1", api_key="secret", session=session)
+    provider = OpenAICompatibleProvider(
+        name="OpenAI", base_url="https://api.openai.com/v1", api_key="secret", session=session
+    )
     batch_id = provider.submit_batch([{"custom_id": "photo-1", "body": {"model": "vision"}}])
     assert batch_id == "batch-123"
     upload = session.calls[0][1]
     assert upload["data"]["purpose"] == "batch"
     assert b'"custom_id":"photo-1"' in upload["files"]["file"][1]
     creation = session.calls[1][1]["json"]
-    assert creation == {"input_file_id": "file-123", "endpoint": "/v1/chat/completions", "completion_window": "24h"}
+    assert creation == {
+        "input_file_id": "file-123",
+        "endpoint": "/v1/chat/completions",
+        "completion_window": "24h",
+    }

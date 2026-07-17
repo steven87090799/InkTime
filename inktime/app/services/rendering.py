@@ -13,7 +13,14 @@ from inktime.app.repositories.settings import SettingsRepository
 
 
 class RenderService:
-    def __init__(self, database: Database, photos: PhotoRepository, settings: SettingsRepository, fonts: FontManager, publisher: AtomicReleasePublisher) -> None:
+    def __init__(
+        self,
+        database: Database,
+        photos: PhotoRepository,
+        settings: SettingsRepository,
+        fonts: FontManager,
+        publisher: AtomicReleasePublisher,
+    ) -> None:
         self.database = database
         self.photos = photos
         self.settings = settings
@@ -26,7 +33,8 @@ class RenderService:
             raise KeyError(photo_id)
         with self.database.session() as connection:
             analysis = connection.execute(
-                "SELECT side_caption FROM photo_analysis WHERE photo_id=? ORDER BY created_at DESC LIMIT 1", (photo_id,)
+                "SELECT side_caption FROM photo_analysis WHERE photo_id=? ORDER BY created_at DESC LIMIT 1",
+                (photo_id,),
             ).fetchone()
         caption = str(analysis["side_caption"] if analysis else "").strip()
         path = safe_join(Path(photo["root_path"]), photo["relative_path"])
@@ -50,11 +58,16 @@ class RenderService:
         selected = photo_ids[:quantity]
         if not selected:
             with self.database.session() as connection:
-                selected = [row[0] for row in connection.execute(
-                    """
+                selected = [
+                    row[0]
+                    for row in connection.execute(
+                        """
                     SELECT p.id FROM photos p JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id ORDER BY created_at DESC LIMIT 1)
                     WHERE p.status='analyzed' ORDER BY a.memory_score DESC LIMIT ?
-                    """, (quantity,)).fetchall()]
+                    """,
+                        (quantity,),
+                    ).fetchall()
+                ]
         images = [(photo_id, self.render_photo(photo_id)) for photo_id in selected]
         manifest = self.publisher.publish(images)
         with self.database.session() as connection:
@@ -63,13 +76,24 @@ class RenderService:
                 INSERT INTO releases(id,display_type,width,height,pixel_format,manifest_json,status,created_at,published_at,created_by)
                 VALUES (?,?,?,?,?,?,'published',?,?,?)
                 """,
-                (manifest["release_id"], manifest["display_type"], manifest["width"], manifest["height"],
-                 manifest["pixel_format"], json.dumps(manifest, ensure_ascii=False), manifest["created_at"],
-                 manifest["created_at"], created_by),
+                (
+                    manifest["release_id"],
+                    manifest["display_type"],
+                    manifest["width"],
+                    manifest["height"],
+                    manifest["pixel_format"],
+                    json.dumps(manifest, ensure_ascii=False),
+                    manifest["created_at"],
+                    manifest["created_at"],
+                    created_by,
+                ),
             )
         return manifest
 
     def rollback(self, release_id: str) -> None:
         self.publisher.rollback(release_id)
         with self.database.session() as connection:
-            connection.execute("UPDATE releases SET status=CASE WHEN id=? THEN 'published' ELSE 'superseded' END", (release_id,))
+            connection.execute(
+                "UPDATE releases SET status=CASE WHEN id=? THEN 'published' ELSE 'superseded' END",
+                (release_id,),
+            )

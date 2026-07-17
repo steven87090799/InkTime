@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-
 from PIL import Image
 
 from inktime.app.domain.photos import PhotoPreprocessor, ThumbnailCache
@@ -25,12 +23,16 @@ class MockProvider(VisionProvider):
     def analyze(self, **kwargs):
         self.analyze_calls += 1
         value = self.responses.pop(0)
-        return ProviderResponse(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False), Usage(1000, 100, 0))
+        return ProviderResponse(
+            value if isinstance(value, str) else json.dumps(value, ensure_ascii=False), Usage(1000, 100, 0)
+        )
 
     def repair_json(self, **kwargs):
         self.repair_calls += 1
         value = self.responses.pop(0)
-        return ProviderResponse(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False), Usage(200, 100, 0))
+        return ProviderResponse(
+            value if isinstance(value, str) else json.dumps(value, ensure_ascii=False), Usage(200, 100, 0)
+        )
 
     def submit_batch(self, requests, completion_window="24h"):
         return "batch"
@@ -66,7 +68,9 @@ def prepare(app, tmp_path, duplicate=False):
 def test_single_model_call_returns_all_fields_and_usage(app, tmp_path):
     _, ids, service = prepare(app, tmp_path)
     provider = MockProvider([valid_result()])
-    result = service.analyze_photo(photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock")
+    result = service.analyze_photo(
+        photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock"
+    )
     assert provider.analyze_calls == 1
     assert provider.repair_calls == 0
     assert result["analysis"]["side_caption"]
@@ -78,7 +82,9 @@ def test_single_model_call_returns_all_fields_and_usage(app, tmp_path):
 def test_invalid_json_is_repaired_only_once_without_second_image_call(app, tmp_path):
     _, ids, service = prepare(app, tmp_path)
     provider = MockProvider(["not-json", valid_result()])
-    service.analyze_photo(photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock")
+    service.analyze_photo(
+        photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock"
+    )
     assert provider.analyze_calls == 1
     assert provider.repair_calls == 1
 
@@ -86,7 +92,14 @@ def test_invalid_json_is_repaired_only_once_without_second_image_call(app, tmp_p
 def test_smart_stage_filters_low_value_photo(app, tmp_path):
     _, ids, service = prepare(app, tmp_path)
     provider = MockProvider([valid_result(memory_score=40, types=["雜物"])])
-    result = service.analyze_photo(photo_id=ids[0], job_id=None, provider=provider, strategy="smart_two_stage", low_model="cheap", high_model="quality")
+    result = service.analyze_photo(
+        photo_id=ids[0],
+        job_id=None,
+        provider=provider,
+        strategy="smart_two_stage",
+        low_model="cheap",
+        high_model="quality",
+    )
     assert result["stage"] == "stage_one"
     assert provider.analyze_calls == 1
 
@@ -96,8 +109,12 @@ def test_identical_photo_inherits_without_model_call(app, tmp_path):
     assert scan["inherited"] == 1
     assert len(ids) == 2
     first = MockProvider([valid_result()])
-    service.analyze_photo(photo_id=ids[0], job_id=None, provider=first, strategy="high_quality", high_model="mock")
+    service.analyze_photo(
+        photo_id=ids[0], job_id=None, provider=first, strategy="high_quality", high_model="mock"
+    )
     second = MockProvider([])
-    result = service.analyze_photo(photo_id=ids[1], job_id=None, provider=second, strategy="high_quality", high_model="mock")
+    result = service.analyze_photo(
+        photo_id=ids[1], job_id=None, provider=second, strategy="high_quality", high_model="mock"
+    )
     assert result["stage"] == "inherited"
     assert second.analyze_calls == 0

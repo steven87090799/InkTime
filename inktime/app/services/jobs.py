@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 from inktime.app.repositories.jobs import JobRepository
 
 
@@ -15,7 +13,17 @@ class JobService:
     def __init__(self, repository: JobRepository) -> None:
         self.repository = repository
 
-    def create_analysis_job(self, *, name: str, strategy: str, settings: dict, created_by: str, budget_limit: float | None, limit: int | None = None, photo_ids=None) -> str:
+    def create_analysis_job(
+        self,
+        *,
+        name: str,
+        strategy: str,
+        settings: dict,
+        created_by: str,
+        budget_limit: float | None,
+        limit: int | None = None,
+        photo_ids=None,
+    ) -> str:
         if strategy not in self.STRATEGIES:
             raise ValueError("不支援的分析策略")
         if budget_limit is not None and budget_limit < 0:
@@ -49,9 +57,23 @@ class JobService:
     def retry_failed(self, job_id: str) -> int:
         return self.repository.retry_failed(job_id)
 
-    def estimate(self, photo_count: int, strategy: str, *, low_cost_per_photo: float = 0.001, high_cost_per_photo: float = 0.01, second_stage_ratio: float = 0.35) -> dict:
+    def estimate(
+        self,
+        photo_count: int,
+        strategy: str,
+        *,
+        low_cost_per_photo: float = 0.001,
+        high_cost_per_photo: float = 0.01,
+        second_stage_ratio: float = 0.35,
+    ) -> dict:
         first = 0 if strategy == "local" else photo_count
-        second = photo_count if strategy == "high_quality" else int(photo_count * second_stage_ratio) if strategy == "smart_two_stage" else 0
+        second = (
+            photo_count
+            if strategy == "high_quality"
+            else int(photo_count * second_stage_ratio)
+            if strategy == "smart_two_stage"
+            else 0
+        )
         average = first * low_cost_per_photo + second * high_cost_per_photo
         return {
             "photos": photo_count,

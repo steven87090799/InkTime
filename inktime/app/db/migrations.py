@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import fcntl
 from pathlib import Path
-import shutil
 import sqlite3
 
 from .connection import Database
@@ -353,6 +353,35 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_photos_duplicate ON photos(duplicate_group_id)",
         ),
     ),
+    Migration(
+        4,
+        "加入照片人工修正歷史與功能旗標",
+        (
+            """
+            CREATE TABLE IF NOT EXISTS photo_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                event TEXT NOT NULL,
+                changes_json TEXT NOT NULL,
+                changed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_photo_events_photo ON photo_events(photo_id,created_at DESC)",
+            """
+            CREATE TABLE IF NOT EXISTS feature_flags (
+                key TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),
+                description TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            "INSERT OR IGNORE INTO feature_flags(key,enabled,description,updated_at) VALUES ('face_groups',0,'人臉群組（尚未啟用）',datetime('now'))",
+            "INSERT OR IGNORE INTO feature_flags(key,enabled,description,updated_at) VALUES ('notifications',0,'Webhook、Email 與即時通訊通知（尚未啟用）',datetime('now'))",
+            "INSERT OR IGNORE INTO feature_flags(key,enabled,description,updated_at) VALUES ('remote_workers',0,'遠端或 GPU Worker（尚未啟用）',datetime('now'))",
+            "INSERT OR IGNORE INTO feature_flags(key,enabled,description,updated_at) VALUES ('object_storage',0,'S3 相容物件儲存（尚未啟用）',datetime('now'))",
+        ),
+    ),
 )
 
 
@@ -381,32 +410,37 @@ def backup_database(database: Database, backup_dir: Path) -> Path | None:
 
 def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
     """依版本套用 Migration；任何失敗都會回滾當次版本並停止。"""
-    if backup_dir is not None:
-        backup_database(database, backup_dir)
+    database.path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = Path(f"{database.path}.migration.lock")
+    with lock_path.open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if backup_dir is not None:
+            backup_database(database, backup_dir)
 
-    applied: list[int] = []
-    with database.session() as connection:
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
-        )
-        known = {int(row[0]) for row in connection.execute("SELECT version FROM schema_migrations")}
-        for migration in MIGRATIONS:
-            if migration.version in known:
-                continue
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                for statement in migration.statements:
-                    connection.execute(statement)
-                connection.execute(
-                    "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
-                    (migration.version, migration.name, _utc_now()),
-                )
-                connection.execute("COMMIT")
-                applied.append(migration.version)
-            except Exception as exc:
-                if connection.in_transaction:
-                    connection.execute("ROLLBACK")
-                raise MigrationError(
-                    f"Migration {migration.version}（{migration.name}）失敗"
-                ) from exc
-    return applied
+        applied: list[int] = []
+        with database.session() as connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
+            )
+            for migration in MIGRATIONS:
+                try:
+                    connection.execute("BEGIN IMMEDIATE")
+                    already_applied = connection.execute(
+                        "SELECT 1 FROM schema_migrations WHERE version=?", (migration.version,)
+                    ).fetchone()
+                    if already_applied:
+                        connection.execute("COMMIT")
+                        continue
+                    for statement in migration.statements:
+                        connection.execute(statement)
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
+                        (migration.version, migration.name, _utc_now()),
+                    )
+                    connection.execute("COMMIT")
+                    applied.append(migration.version)
+                except Exception as exc:
+                    if connection.in_transaction:
+                        connection.execute("ROLLBACK")
+                    raise MigrationError(f"Migration {migration.version}（{migration.name}）失敗") from exc
+        return applied

@@ -25,6 +25,7 @@ def rendering_page():
 @login_required
 def preview(photo_id: str):
     from io import BytesIO
+
     try:
         image = current_app.extensions["inktime_render_service"].render_photo(photo_id)
     except KeyError:
@@ -39,10 +40,15 @@ def preview(photo_id: str):
 @administrator_required
 def publish_release():
     payload = request.get_json(silent=True) or {}
-    manifest = current_app.extensions["inktime_render_service"].publish(
-        [str(value) for value in payload.get("photo_ids", [])], g.user["id"]
+    repository = current_app.extensions["inktime_job_repository"]
+    job_id = repository.create_maintenance(
+        kind="render",
+        name="電子紙正式發布",
+        settings={"photo_ids": [str(value) for value in payload.get("photo_ids", [])]},
+        created_by=g.user["id"],
     )
-    return manifest, 201
+    current_app.extensions["inktime_job_service"].start(job_id)
+    return {"id": job_id, "detail_url": f"/jobs/{job_id}"}, 202
 
 
 @bp.post("/api/v1/releases/<release_id>/rollback")
@@ -72,6 +78,9 @@ def upload_font():
     finally:
         temporary_path.unlink(missing_ok=True)
     current_app.extensions["inktime_settings_repository"].update(
-        "render.font_path", str(destination), changed_by=g.user["id"], source_ip=request.remote_addr or "unknown"
+        "render.font_path",
+        str(destination),
+        changed_by=g.user["id"],
+        source_ip=request.remote_addr or "unknown",
     )
     return {"name": destination.name}, 201

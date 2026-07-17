@@ -5,13 +5,14 @@ from pathlib import Path
 import mimetypes
 import os
 
-from legacy_server import DB_PATH as LEGACY_DB_PATH, app
+import legacy_server
 from inktime.app.platform import initialize_platform
 
 
 ROOT_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("INKTIME_DATA_DIR", ROOT_DIR / "data")).expanduser().resolve()
-DATABASE_PATH = Path(os.environ.get("INKTIME_DATABASE", LEGACY_DB_PATH)).expanduser().resolve()
+app = legacy_server.app
+DATABASE_PATH = Path(os.environ.get("INKTIME_DATABASE", legacy_server.DB_PATH)).expanduser().resolve()
 RELEASE_DIR = Path(os.environ.get("INKTIME_RELEASE_DIR", DATA_DIR / "releases")).expanduser().resolve()
 
 initialize_platform(
@@ -19,6 +20,10 @@ initialize_platform(
     database_path=DATABASE_PATH,
     data_dir=DATA_DIR,
     release_dir=RELEASE_DIR,
+)
+# 舊 URL 金鑰 API 僅在管理員明確啟用並重啟後開放；預設保持關閉。
+legacy_server.ENABLE_LEGACY_DEVICE_API = bool(
+    app.extensions["inktime_settings_repository"].get("device.legacy_api_enabled", False)
 )
 
 

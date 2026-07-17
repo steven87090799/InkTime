@@ -9,6 +9,7 @@ import mimetypes
 import sqlite3
 import json
 import html
+import os
 try:
     import config as cfg
 except ModuleNotFoundError:
@@ -25,15 +26,17 @@ ROOT_DIR = Path(__file__).resolve().parent
 DOWNLOAD_KEY = str(getattr(cfg, "DOWNLOAD_KEY", "") or "").strip()
 ENABLE_LEGACY_DEVICE_API = bool(getattr(cfg, "ENABLE_LEGACY_DEVICE_API", False))
 
-DB_PATH = Path(str(getattr(cfg, "DB_PATH", "./photos.db") or "./photos.db")).expanduser()
+DB_PATH = Path(os.environ.get("INKTIME_DATABASE", str(getattr(cfg, "DB_PATH", "./photos.db") or "./photos.db"))).expanduser()
 if not DB_PATH.is_absolute():
     DB_PATH = (ROOT_DIR / DB_PATH).resolve()
 
-IMAGE_DIR = Path(str(getattr(cfg, "IMAGE_DIR", "") or "")).expanduser()
+IMAGE_DIR = Path(os.environ.get("INKTIME_PHOTO_DIR", str(getattr(cfg, "IMAGE_DIR", "") or ""))).expanduser()
 if not IMAGE_DIR.is_absolute():
     IMAGE_DIR = (ROOT_DIR / IMAGE_DIR).resolve()
 
-BIN_OUTPUT_DIR = Path(str(getattr(cfg, "BIN_OUTPUT_DIR", "./output") or "./output")).expanduser()
+BIN_OUTPUT_DIR = Path(
+    os.environ.get("INKTIME_LEGACY_OUTPUT_DIR", str(getattr(cfg, "BIN_OUTPUT_DIR", "./output") or "./output"))
+).expanduser()
 if not BIN_OUTPUT_DIR.is_absolute():
     BIN_OUTPUT_DIR = (ROOT_DIR / BIN_OUTPUT_DIR).resolve()
 BIN_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

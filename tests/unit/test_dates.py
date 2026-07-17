@@ -4,7 +4,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-from inktime.app.domain.rendering.dates import current_local_date, day_of_year_to_month_day, month_day_to_day_of_year
+from inktime.app.domain.rendering.dates import (
+    current_local_date,
+    day_of_year_to_month_day,
+    month_day_to_day_of_year,
+)
 
 
 @pytest.mark.parametrize("month_day", ["02-28", "02-29", "03-01", "12-31", "01-01"])

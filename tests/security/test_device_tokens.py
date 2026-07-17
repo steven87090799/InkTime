@@ -60,3 +60,32 @@ def test_device_downloads_versioned_manifest_and_verified_file(client, app):
     assert file_response.status_code == 200
     assert len(file_response.data) == 96_000
     assert sha256(file_response.data).hexdigest() == body["files"][0]["sha256"]
+
+
+def test_administrator_can_disable_device_and_failed_download_is_counted(client, app):
+    create_admin(app)
+    login(client)
+    repository = app.extensions["inktime_device_repository"]
+    device_id, token = repository.create("測試裝置")
+    response = client.get(
+        "/api/device/v1/releases/missing/files/photo.bin",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 404
+    assert repository.list()[0]["download_failure_count"] == 1
+    response = client.patch(
+        f"/api/v1/devices/{device_id}",
+        json={
+            "name": "已停用裝置",
+            "enabled": False,
+            "timezone": "Asia/Taipei",
+            "schedule": "daily",
+            "rotation": 0,
+        },
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert response.status_code == 200
+    assert (
+        client.get("/api/device/v1/releases/latest", headers={"Authorization": f"Bearer {token}"}).status_code
+        == 401
+    )

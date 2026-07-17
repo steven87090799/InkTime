@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from flask import Blueprint, abort, current_app, g, render_template, request
+from flask import Blueprint, abort, current_app, render_template, request
 
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.repositories.devices import DeviceRepository
@@ -61,9 +62,38 @@ def regenerate_device_token(device_id: str):
     return {"token": token, "warning": "舊 Token 已立即撤銷；新 Token 只顯示一次。"}
 
 
+@bp.patch("/api/v1/devices/<device_id>")
+@administrator_required
+def update_device(device_id: str):
+    payload = request.get_json(silent=True) or {}
+    timezone_name = str(payload.get("timezone", "Asia/Taipei"))
+    try:
+        ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        abort(400, description="DEVICE-003 時區不是有效的 IANA 時區")
+    rotation = int(payload.get("rotation", 0))
+    if rotation not in {0, 90, 180, 270}:
+        abort(400, description="DEVICE-003 旋轉角度只支援 0、90、180、270")
+    name = str(payload.get("name", "")).strip()
+    if not name:
+        abort(400, description="DEVICE-003 裝置名稱不可空白")
+    try:
+        _repository().update(
+            device_id,
+            name=name,
+            enabled=bool(payload.get("enabled", True)),
+            timezone_name=timezone_name,
+            schedule=str(payload.get("schedule", "daily")),
+            rotation=rotation,
+        )
+    except KeyError:
+        abort(404)
+    return {"status": "ok"}
+
+
 @bp.get("/api/device/v1/releases/latest")
 def latest_release():
-    device = _authenticated_device()
+    _authenticated_device()
     release_root = current_app.config["INKTIME_RELEASE_DIR"]
     latest_pointer = release_root / "latest"
     if not latest_pointer.exists():
@@ -88,8 +118,10 @@ def release_file(release_id: str, filename: str):
     try:
         path = safe_join(current_app.config["INKTIME_RELEASE_DIR"], f"{release_id}/{filename}")
     except UnsafePathError:
+        _repository().record_download(device["id"], release_id, False)
         abort(400, description="PATH-001 路徑超出允許範圍")
     if not path.is_file() or path.name == "manifest.json":
+        _repository().record_download(device["id"], release_id, False)
         abort(404)
     _repository().record_download(device["id"], release_id, True)
     return send_file(path, mimetype="application/octet-stream", conditional=True)

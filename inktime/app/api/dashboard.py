@@ -15,12 +15,10 @@ def dashboard():
     with database.session() as connection:
         counts = {
             "photos": connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0],
-            "analyzed": connection.execute(
-                "SELECT COUNT(*) FROM photos WHERE status='analyzed'"
-            ).fetchone()[0],
-            "failed": connection.execute(
-                "SELECT COUNT(*) FROM photos WHERE status='failed'"
-            ).fetchone()[0],
+            "analyzed": connection.execute("SELECT COUNT(*) FROM photos WHERE status='analyzed'").fetchone()[
+                0
+            ],
+            "failed": connection.execute("SELECT COUNT(*) FROM photos WHERE status='failed'").fetchone()[0],
             "duplicates": connection.execute(
                 "SELECT COUNT(*) FROM photos WHERE duplicate_group_id IS NOT NULL"
             ).fetchone()[0],

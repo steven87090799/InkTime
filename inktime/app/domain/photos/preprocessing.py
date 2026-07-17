@@ -50,7 +50,7 @@ def _dhash(image: Image.Image) -> str:
 
 def _phash(image: Image.Image) -> str:
     sample = image.convert("L").resize((32, 32), Image.Resampling.LANCZOS)
-    pixels = [float(value) for value in sample.getdata()]
+    pixels = [float(value) for value in sample.getdata()]  # type: ignore[attr-defined]
     coefficients: list[float] = []
     for u in range(8):
         for v in range(8):
@@ -70,11 +70,13 @@ def _blur_variance(image: Image.Image) -> float:
     width, height = sample.size
     if width < 3 or height < 3:
         return 0.0
-    pixels = sample.load()
+    pixels: Any = sample.load()
     values = []
     for y in range(1, height - 1):
         for x in range(1, width - 1):
-            values.append(4 * pixels[x, y] - pixels[x - 1, y] - pixels[x + 1, y] - pixels[x, y - 1] - pixels[x, y + 1])
+            values.append(
+                4 * pixels[x, y] - pixels[x - 1, y] - pixels[x + 1, y] - pixels[x, y - 1] - pixels[x, y + 1]
+            )
     mean = sum(values) / len(values)
     return sum((value - mean) ** 2 for value in values) / len(values)
 
@@ -102,7 +104,9 @@ class PhotoPreprocessor:
         with Image.open(path) as opened:
             original_format = opened.format or path.suffix.lstrip(".").upper()
             exif = opened.getexif()
-            exif_named = {ExifTags.TAGS.get(key, str(key)): value for key, value in exif.items() if key != 34853}
+            exif_named = {
+                ExifTags.TAGS.get(key, str(key)): value for key, value in exif.items() if key != 34853
+            }
             gps_raw = exif.get_ifd(34853) if exif and 34853 in exif else {}
             gps = {ExifTags.GPSTAGS.get(key, str(key)): value for key, value in gps_raw.items()}
             lat = _gps_coordinate(gps.get("GPSLatitude"), gps.get("GPSLatitudeRef"))
@@ -123,8 +127,15 @@ class PhotoPreprocessor:
             histogram = sample.histogram()
             total_pixels = max(1, sample.width * sample.height)
             common_ratios = {(1170, 2532), (1080, 1920), (1242, 2688), (1440, 2560), (1080, 2340)}
-            exact_screen_ratio = any(abs(width / height - w / h) < 0.006 for w, h in common_ratios) if height else False
-            screenshot_likelihood = min(1.0, (0.65 if exact_screen_ratio else 0) + (0.2 if not exif_named.get("Make") else 0) + (0.15 if path.name.lower().startswith(("screenshot", "截圖")) else 0))
+            exact_screen_ratio = (
+                any(abs(width / height - w / h) < 0.006 for w, h in common_ratios) if height else False
+            )
+            screenshot_likelihood = min(
+                1.0,
+                (0.65 if exact_screen_ratio else 0)
+                + (0.2 if not exif_named.get("Make") else 0)
+                + (0.15 if path.name.lower().startswith(("screenshot", "截圖")) else 0),
+            )
             serializable_exif = {key: str(value) for key, value in exif_named.items()}
             if lat is not None and lon is not None:
                 serializable_exif["gps"] = "[已擷取；診斷包會遮蔽精確座標]"

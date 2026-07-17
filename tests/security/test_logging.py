@@ -16,4 +16,18 @@ def test_structured_log_redacts_secrets():
     assert payload["details"]["api_key"] == "[已遮蔽]"
     assert payload["details"]["nested"]["device_token"] == "[已遮蔽]"
     assert "sk-secret" not in json.dumps(payload)
-    assert set(payload) == {"timestamp","level","component","event","error_code","message","job_id","photo_id","provider","model","duration_ms","retry_count","details"}
+    assert set(payload) == {
+        "timestamp",
+        "level",
+        "component",
+        "event",
+        "error_code",
+        "message",
+        "job_id",
+        "photo_id",
+        "provider",
+        "model",
+        "duration_ms",
+        "retry_count",
+        "details",
+    }

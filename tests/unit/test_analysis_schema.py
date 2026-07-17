@@ -37,7 +37,9 @@ def test_strict_schema_accepts_expected_result():
         "not-json",
         json.dumps(valid_result(memory_score=101), ensure_ascii=False),
         json.dumps(valid_result(types=["未允許類型"]), ensure_ascii=False),
-        json.dumps({key: value for key, value in valid_result().items() if key != "side_caption"}, ensure_ascii=False),
+        json.dumps(
+            {key: value for key, value in valid_result().items() if key != "side_caption"}, ensure_ascii=False
+        ),
         json.dumps(valid_result(extra="no"), ensure_ascii=False),
     ],
 )

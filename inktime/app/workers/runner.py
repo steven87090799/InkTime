@@ -5,10 +5,12 @@ import json
 import logging
 import signal
 import threading
-import time
+from pathlib import Path
 
 from inktime.app.core.logging import log_event
 from inktime.app.workers.job_worker import BoundedJobWorker
+from inktime.app.workers.scanner import PhotoScanner
+from inktime.app.domain.photos import PhotoPreprocessor
 
 
 LOGGER = logging.getLogger("worker")
@@ -36,22 +38,73 @@ class WorkerRunner:
             provider = self.app.extensions["inktime_provider_service"].build_router()
             analysis = self.app.extensions["inktime_analysis_service"]
 
-            def processor(item):
+            def processor(item, *, job=job, settings=settings, provider=provider, analysis=analysis):
+                if job["kind"] == "scan":
+                    scanner = PhotoScanner(
+                        self.app.extensions["inktime_photo_repository"],
+                        PhotoPreprocessor(),
+                        self.app.extensions["inktime_thumbnail_cache"],
+                    )
+                    return scanner.scan(
+                        settings.get("library_name", "主要照片庫"),
+                        Path(settings["root_path"]),
+                        build_thumbnails=bool(settings.get("build_thumbnails", True)),
+                    )
+                if job["kind"] == "render":
+                    return self.app.extensions["inktime_render_service"].publish(
+                        [str(value) for value in settings.get("photo_ids", [])],
+                        str(job["created_by"] or "system"),
+                    )
+                if job["kind"] == "backup":
+                    path = self.app.extensions["inktime_backup_service"].create()
+                    return {"backup": path.name}
                 return analysis.analyze_photo(
-                    photo_id=item["photo_id"], job_id=job["id"], provider=provider,
+                    photo_id=item["photo_id"],
+                    job_id=job["id"],
+                    provider=provider,
                     strategy=job["strategy"],
-                    low_model=settings.get("low_model", self.app.extensions["inktime_settings_repository"].get("model.low_model")),
-                    high_model=settings.get("high_model", self.app.extensions["inktime_settings_repository"].get("model.high_model")),
-                    stage_two_threshold=float(settings.get("stage_two_threshold", self.app.extensions["inktime_settings_repository"].get("analysis.stage_two_threshold"))),
+                    low_model=settings.get(
+                        "low_model", self.app.extensions["inktime_settings_repository"].get("model.low_model")
+                    ),
+                    high_model=settings.get(
+                        "high_model",
+                        self.app.extensions["inktime_settings_repository"].get("model.high_model"),
+                    ),
+                    stage_two_threshold=float(
+                        settings.get(
+                            "stage_two_threshold",
+                            self.app.extensions["inktime_settings_repository"].get(
+                                "analysis.stage_two_threshold"
+                            ),
+                        )
+                    ),
                 )
 
             self.current = BoundedJobWorker(
-                repository, processor,
-                concurrency=int(settings.get("concurrency", self.app.extensions["inktime_settings_repository"].get("analysis.concurrency"))),
+                repository,
+                processor,
+                concurrency=int(
+                    settings.get(
+                        "concurrency",
+                        self.app.extensions["inktime_settings_repository"].get("analysis.concurrency"),
+                    )
+                ),
                 queue_multiplier=2,
-                max_attempts=int(settings.get("max_retries", self.app.extensions["inktime_settings_repository"].get("analysis.max_retries"))),
+                max_attempts=int(
+                    settings.get(
+                        "max_retries",
+                        self.app.extensions["inktime_settings_repository"].get("analysis.max_retries"),
+                    )
+                ),
             )
-            log_event(LOGGER, logging.INFO, "開始處理工作", event="job_started", job_id=job["id"], details={"recovered_items": recovered})
+            log_event(
+                LOGGER,
+                logging.INFO,
+                "開始處理工作",
+                event="job_started",
+                job_id=job["id"],
+                details={"recovered_items": recovered},
+            )
             self.current.run_job(job["id"])
             self.current = None
             processed_jobs += 1

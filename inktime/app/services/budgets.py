@@ -24,14 +24,28 @@ class BudgetService:
                 """,
                 (photo_id,),
             ).fetchone()
-            job = connection.execute("SELECT spent,budget_limit FROM jobs WHERE id=?", (job_id,)).fetchone() if job_id else None
-        return {"daily": float(row["daily"]), "monthly": float(row["monthly"]), "photo": float(row["photo"]), "job": float(job["spent"]) if job else 0, "job_limit": float(job["budget_limit"]) if job and job["budget_limit"] is not None else None}
+            job = (
+                connection.execute("SELECT spent,budget_limit FROM jobs WHERE id=?", (job_id,)).fetchone()
+                if job_id
+                else None
+            )
+        return {
+            "daily": float(row["daily"]),
+            "monthly": float(row["monthly"]),
+            "photo": float(row["photo"]),
+            "job": float(job["spent"]) if job else 0,
+            "job_limit": float(job["budget_limit"]) if job and job["budget_limit"] is not None else None,
+        }
 
     def assert_request_allowed(self, job_id: str | None, photo_id: str) -> None:
         usage = self.snapshot(job_id, photo_id)
         checks = (
             (usage["daily"], float(self.settings.get("budget.daily_stop", 10)), "每日 API 預算已達停止值"),
-            (usage["monthly"], float(self.settings.get("budget.monthly_stop", 100)), "每月 API 預算已達停止值"),
+            (
+                usage["monthly"],
+                float(self.settings.get("budget.monthly_stop", 100)),
+                "每月 API 預算已達停止值",
+            ),
             (usage["photo"], float(self.settings.get("budget.photo_max", 0.25)), "單張照片成本已達上限"),
         )
         for current, maximum, message in checks:

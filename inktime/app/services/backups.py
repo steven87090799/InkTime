@@ -43,7 +43,9 @@ class BackupService:
         return archive
 
     def list(self):
-        return sorted(self.backup_dir.glob("inktime-backup-*.zip"), key=lambda path: path.stat().st_mtime, reverse=True)
+        return sorted(
+            self.backup_dir.glob("inktime-backup-*.zip"), key=lambda path: path.stat().st_mtime, reverse=True
+        )
 
     def validate(self, archive: Path) -> dict:
         with zipfile.ZipFile(archive) as bundle:
@@ -57,7 +59,7 @@ class BackupService:
 
     def enforce_retention(self, keep: int) -> int:
         removed = 0
-        for path in self.list()[max(1, keep):]:
+        for path in self.list()[max(1, keep) :]:
             path.unlink()
             removed += 1
         return removed

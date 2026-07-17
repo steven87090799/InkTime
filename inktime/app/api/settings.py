@@ -16,7 +16,9 @@ def settings_page():
     categories = {}
     for row in rows:
         categories.setdefault(row["category"], []).append(row)
-    return render_template("settings.html", categories=categories)
+    with current_app.extensions["inktime_database"].session() as connection:
+        feature_flags = connection.execute("SELECT * FROM feature_flags ORDER BY key").fetchall()
+    return render_template("settings.html", categories=categories, feature_flags=feature_flags)
 
 
 @bp.post("/api/v1/settings")
@@ -26,7 +28,9 @@ def update_settings():
     repository = current_app.extensions["inktime_settings_repository"]
     for key, value in payload.items():
         try:
-            repository.update(str(key), value, changed_by=g.user["id"], source_ip=request.remote_addr or "unknown")
+            repository.update(
+                str(key), value, changed_by=g.user["id"], source_ip=request.remote_addr or "unknown"
+            )
         except KeyError:
             abort(400, description=f"SET-001 未知設定：{key}")
         except ValueError as exc:
@@ -37,7 +41,9 @@ def update_settings():
 @bp.get("/providers")
 @login_required
 def providers_page():
-    return render_template("providers.html", providers=current_app.extensions["inktime_provider_repository"].list())
+    return render_template(
+        "providers.html", providers=current_app.extensions["inktime_provider_repository"].list()
+    )
 
 
 @bp.post("/api/v1/providers")
@@ -57,8 +63,11 @@ def test_provider(provider_id: str):
     if config is None:
         abort(404)
     provider = OpenAICompatibleProvider(
-        name=config["name"], base_url=config["base_url"], api_key=config.get("api_key", ""),
-        timeout=min(15, config["timeout_seconds"]), supports_json_schema=bool(config["supports_json_schema"]),
+        name=config["name"],
+        base_url=config["base_url"],
+        api_key=config.get("api_key", ""),
+        timeout=min(15, config["timeout_seconds"]),
+        supports_json_schema=bool(config["supports_json_schema"]),
     )
     ok, message = provider.validate_config()
     return {"ok": ok, "message": message}, 200 if ok else 502

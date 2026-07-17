@@ -15,9 +15,11 @@ class ProviderChannel:
     priority: int = 100
     max_concurrency: int = 2
     requests_per_minute: int | None = None
+    tokens_per_minute: int | None = None
     cooldown_seconds: int = 300
     semaphore: threading.BoundedSemaphore = field(init=False)
     request_times: deque = field(default_factory=deque)
+    token_events: deque = field(default_factory=deque)
     failures: int = 0
     circuit_until: float = 0
 
@@ -39,14 +41,25 @@ class FailoverVisionProvider(VisionProvider):
         channel = getattr(self._local, "channel", None)
         return channel.provider.name if channel else "Provider Router"
 
+    @name.setter
+    def name(self, value: str) -> None:
+        self._name = value
+
     def _available(self, channel: ProviderChannel) -> bool:
         now = time.monotonic()
         with self._lock:
             while channel.request_times and channel.request_times[0] <= now - 60:
                 channel.request_times.popleft()
+            while channel.token_events and channel.token_events[0][0] <= now - 60:
+                channel.token_events.popleft()
             if channel.circuit_until > now:
                 return False
             if channel.requests_per_minute and len(channel.request_times) >= channel.requests_per_minute:
+                return False
+            if (
+                channel.tokens_per_minute
+                and sum(event[1] for event in channel.token_events) >= channel.tokens_per_minute
+            ):
                 return False
             channel.request_times.append(now)
             return True
@@ -64,12 +77,17 @@ class FailoverVisionProvider(VisionProvider):
                     channel.failures += 1
                     retry_after = getattr(exc, "retry_after", None)
                     if channel.failures >= self.failure_threshold or retry_after:
-                        channel.circuit_until = time.monotonic() + max(float(retry_after or 0), channel.cooldown_seconds)
+                        channel.circuit_until = time.monotonic() + max(
+                            float(retry_after or 0), channel.cooldown_seconds
+                        )
                 continue
             finally:
                 channel.semaphore.release()
             with self._lock:
                 channel.failures = 0
+                used_tokens = response.usage.input_tokens + response.usage.output_tokens
+                if used_tokens:
+                    channel.token_events.append((time.monotonic(), used_tokens))
             self._local.channel = channel
             return response
         if last_error:
@@ -86,14 +104,17 @@ class FailoverVisionProvider(VisionProvider):
         return channel.provider.repair_json(**kwargs)
 
     def submit_batch(self, requests, completion_window="24h") -> str:
+        last_error: Exception | None = None
         for channel in self.channels:
             try:
                 result = channel.provider.submit_batch(requests, completion_window=completion_window)
                 self._local.channel = channel
                 return result
-            except Exception:
+            except Exception as exc:
+                last_error = exc
                 continue
-        raise ProviderHTTPError("所有 Provider 的 Batch 提交均失敗", "VLM-007")
+        error = ProviderHTTPError("所有 Provider 的 Batch 提交均失敗", "VLM-007")
+        raise error from last_error
 
     def poll_batch(self, batch_id: str) -> dict:
         channel = getattr(self._local, "channel", self.channels[0])

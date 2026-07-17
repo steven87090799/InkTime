@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
-import time
 from typing import Any
 
 import requests
@@ -23,7 +22,17 @@ class ProviderHTTPError(RuntimeError):
 
 
 class OpenAICompatibleProvider(VisionProvider):
-    def __init__(self, *, name: str, base_url: str, api_key: str, pricing: dict[str, dict[str, float]] | None = None, timeout: float = 120, supports_json_schema: bool = True, session: requests.Session | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        name: str,
+        base_url: str,
+        api_key: str,
+        pricing: dict[str, dict[str, float]] | None = None,
+        timeout: float = 120,
+        supports_json_schema: bool = True,
+        session: requests.Session | None = None,
+    ) -> None:
         self.name = name
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -55,50 +64,96 @@ class OpenAICompatibleProvider(VisionProvider):
 
     def _post_completion(self, body: dict) -> ProviderResponse:
         try:
-            response = self.session.post(self._url("/chat/completions"), headers=self._headers(), json=body, timeout=self.timeout)
+            response = self.session.post(
+                self._url("/chat/completions"), headers=self._headers(), json=body, timeout=self.timeout
+            )
         except requests.Timeout as exc:
             raise ProviderHTTPError("Provider API 逾時", "VLM-001") from exc
         except requests.RequestException as exc:
             raise ProviderHTTPError("Provider 連線失敗", "VLM-001") from exc
         if response.status_code == 429:
             retry_after = response.headers.get("Retry-After")
-            raise ProviderHTTPError("Provider Rate Limit", "VLM-002", float(retry_after) if retry_after and retry_after.isdigit() else None)
+            raise ProviderHTTPError(
+                "Provider Rate Limit",
+                "VLM-002",
+                float(retry_after) if retry_after and retry_after.isdigit() else None,
+            )
         if response.status_code >= 400:
             raise ProviderHTTPError(f"Provider 回應 HTTP {response.status_code}", "VLM-006")
         payload = response.json()
         content = payload["choices"][0]["message"]["content"]
         if isinstance(content, list):
             content = "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
-        return ProviderResponse(str(content).strip(), self._usage(payload), response.headers.get("x-request-id"))
+        return ProviderResponse(
+            str(content).strip(), self._usage(payload), response.headers.get("x-request-id")
+        )
 
-    def analyze(self, *, image_path: Path, model: str, detail: str, stage: str) -> ProviderResponse:
+    def analyze(
+        self,
+        *,
+        image_path: Path,
+        model: str,
+        detail: str,
+        stage: str,
+        max_tokens: int | None = None,
+    ) -> ProviderResponse:
         encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
         body: dict[str, Any] = {
             "model": model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": [
-                    {"type": "text", "text": f"分析階段：{stage}。請分析這張照片。"},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}", "detail": detail}},
-                ]},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"分析階段：{stage}。請分析這張照片。"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{encoded}", "detail": detail},
+                        },
+                    ],
+                },
             ],
             "temperature": 0.1,
         }
         if self.supports_json_schema:
             body["response_format"] = {"type": "json_schema", "json_schema": ANALYSIS_JSON_SCHEMA}
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
         return self._post_completion(body)
 
-    def repair_json(self, *, invalid_content: str, validation_error: str, model: str) -> ProviderResponse:
+    def repair_json(
+        self,
+        *,
+        invalid_content: str,
+        validation_error: str,
+        model: str,
+        max_tokens: int | None = None,
+    ) -> ProviderResponse:
         body = {
             "model": model,
             "messages": [
-                {"role": "system", "content": "只修復 JSON 使其符合提供的 Schema；不可新增圖片推測，不可輸出 Markdown。"},
-                {"role": "user", "content": json.dumps({"invalid_json": invalid_content[:12000], "error": validation_error, "schema": ANALYSIS_JSON_SCHEMA["schema"]}, ensure_ascii=False)},
+                {
+                    "role": "system",
+                    "content": "只修復 JSON 使其符合提供的 Schema；不可新增圖片推測，不可輸出 Markdown。",
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "invalid_json": invalid_content[:12000],
+                            "error": validation_error,
+                            "schema": ANALYSIS_JSON_SCHEMA["schema"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
             ],
             "temperature": 0,
         }
         if self.supports_json_schema:
             body["response_format"] = {"type": "json_schema", "json_schema": ANALYSIS_JSON_SCHEMA}
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
         return self._post_completion(body)
 
     def submit_batch(self, requests: list[dict], *, completion_window: str = "24h") -> str:
@@ -120,16 +175,23 @@ class OpenAICompatibleProvider(VisionProvider):
         if self.api_key:
             upload_headers["Authorization"] = f"Bearer {self.api_key}"
         upload = self.session.post(
-            self._url("/files"), headers=upload_headers,
-            data={"purpose": "batch"}, files={"file": ("inktime-batch.jsonl", content, "application/jsonl")},
+            self._url("/files"),
+            headers=upload_headers,
+            data={"purpose": "batch"},
+            files={"file": ("inktime-batch.jsonl", content, "application/jsonl")},
             timeout=self.timeout,
         )
         if upload.status_code >= 400:
             raise ProviderHTTPError(f"Batch 檔案上傳失敗 HTTP {upload.status_code}", "VLM-007")
         input_file_id = upload.json()["id"]
         response = self.session.post(
-            self._url("/batches"), headers=self._headers(),
-            json={"input_file_id": input_file_id, "endpoint": "/v1/chat/completions", "completion_window": completion_window},
+            self._url("/batches"),
+            headers=self._headers(),
+            json={
+                "input_file_id": input_file_id,
+                "endpoint": "/v1/chat/completions",
+                "completion_window": completion_window,
+            },
             timeout=self.timeout,
         )
         if response.status_code >= 400:
@@ -137,13 +199,17 @@ class OpenAICompatibleProvider(VisionProvider):
         return str(response.json()["id"])
 
     def poll_batch(self, batch_id: str) -> dict:
-        response = self.session.get(self._url(f"/batches/{batch_id}"), headers=self._headers(), timeout=self.timeout)
+        response = self.session.get(
+            self._url(f"/batches/{batch_id}"), headers=self._headers(), timeout=self.timeout
+        )
         if response.status_code >= 400:
             raise ProviderHTTPError(f"Batch 查詢失敗 HTTP {response.status_code}", "VLM-007")
         return dict(response.json())
 
     def cancel_batch(self, batch_id: str) -> dict:
-        response = self.session.post(self._url(f"/batches/{batch_id}/cancel"), headers=self._headers(), timeout=self.timeout)
+        response = self.session.post(
+            self._url(f"/batches/{batch_id}/cancel"), headers=self._headers(), timeout=self.timeout
+        )
         if response.status_code >= 400:
             raise ProviderHTTPError(f"Batch 取消失敗 HTTP {response.status_code}", "VLM-007")
         return dict(response.json())
@@ -153,13 +219,16 @@ class OpenAICompatibleProvider(VisionProvider):
         uncached = max(0, usage.input_tokens - usage.cached_tokens)
         return (
             uncached * float(price.get("input_per_million", 0))
-            + usage.cached_tokens * float(price.get("cached_input_per_million", price.get("input_per_million", 0)))
+            + usage.cached_tokens
+            * float(price.get("cached_input_per_million", price.get("input_per_million", 0)))
             + usage.output_tokens * float(price.get("output_per_million", 0))
         ) / 1_000_000
 
     def validate_config(self) -> tuple[bool, str]:
         try:
-            response = self.session.get(self._url("/models"), headers=self._headers(), timeout=min(self.timeout, 15))
+            response = self.session.get(
+                self._url("/models"), headers=self._headers(), timeout=min(self.timeout, 15)
+            )
         except requests.RequestException as exc:
             return False, f"無法連線：{exc.__class__.__name__}"
         if response.status_code >= 400:

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import fcntl
 from pathlib import Path
 import os
 import secrets
 
 from flask import Flask, g, redirect, request, session, url_for
-from jinja2 import ChoiceLoader, FileSystemLoader
+from jinja2 import BaseLoader, ChoiceLoader, FileSystemLoader
 from werkzeug.exceptions import HTTPException
 
 from inktime import __version__
@@ -37,12 +38,17 @@ def _persistent_secret(path: Path) -> str:
     if configured:
         return configured
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        return path.read_text(encoding="utf-8").strip()
-    value = secrets.token_urlsafe(64)
-    path.write_text(value, encoding="utf-8")
-    path.chmod(0o600)
-    return value
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with lock_path.open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if path.exists():
+            value = path.read_text(encoding="utf-8").strip()
+            if value:
+                return value
+        value = secrets.token_urlsafe(64)
+        path.write_text(value, encoding="utf-8")
+        path.chmod(0o600)
+        return value
 
 
 def initialize_platform(
@@ -86,25 +92,36 @@ def initialize_platform(
     app.extensions["inktime_thumbnail_cache"] = ThumbnailCache(data_dir / "cache" / "thumbnails")
     budget_service = BudgetService(database, settings_repository)
     app.extensions["inktime_budget_service"] = budget_service
-    app.extensions["inktime_provider_service"] = ProviderService(app.extensions["inktime_provider_repository"])
+    app.extensions["inktime_provider_service"] = ProviderService(
+        app.extensions["inktime_provider_repository"]
+    )
     app.extensions["inktime_analysis_service"] = PhotoAnalysisService(
-        app.extensions["inktime_photo_repository"], app.extensions["inktime_usage_repository"],
-        app.extensions["inktime_thumbnail_cache"], budget_service,
+        app.extensions["inktime_photo_repository"],
+        app.extensions["inktime_usage_repository"],
+        app.extensions["inktime_thumbnail_cache"],
+        budget_service,
     )
     app.extensions["inktime_backup_service"] = BackupService(database, data_dir / "backups")
-    app.extensions["inktime_diagnostics_service"] = DiagnosticsService(database, data_dir, data_dir / "cache" / "thumbnails")
+    app.extensions["inktime_diagnostics_service"] = DiagnosticsService(
+        database, data_dir, data_dir / "cache" / "thumbnails"
+    )
     font_manager = FontManager(data_dir / "fonts")
     release_publisher = AtomicReleasePublisher(release_dir)
     app.extensions["inktime_font_manager"] = font_manager
     app.extensions["inktime_release_publisher"] = release_publisher
     app.extensions["inktime_render_service"] = RenderService(
-        database, app.extensions["inktime_photo_repository"], settings_repository, font_manager, release_publisher
+        database,
+        app.extensions["inktime_photo_repository"],
+        settings_repository,
+        font_manager,
+        release_publisher,
     )
 
     web_root = Path(__file__).resolve().parent / "web"
-    app.jinja_loader = ChoiceLoader(
-        [app.jinja_loader, FileSystemLoader(str(web_root / "templates"))]
-    )
+    loaders: list[BaseLoader] = [FileSystemLoader(str(web_root / "templates"))]
+    if app.jinja_loader is not None:
+        loaders.insert(0, app.jinja_loader)
+    app.jinja_loader = ChoiceLoader(loaders)
     app.static_folder = str(web_root / "static")
 
     app.register_blueprint(auth.bp)

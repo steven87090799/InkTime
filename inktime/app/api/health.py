@@ -28,17 +28,21 @@ def ready():
             SELECT COUNT(*) FROM jobs
             WHERE status IN ('running','retrying','pausing')
               AND (heartbeat_at IS NULL OR heartbeat_at<?)
-            """
-            , ((datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),)
+            """,
+            ((datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),),
         ).fetchone()[0]
     checks = {
         "database": database.integrity_check() == "ok",
         "release_directory": os.access(current_app.config["INKTIME_RELEASE_DIR"], os.R_OK | os.W_OK),
-        "migrations": int(migrations or 0) >= 3,
+        "migrations": int(migrations or 0) >= 4,
         "worker": int(stalled) == 0,
         "settings": current_app.extensions["inktime_settings_repository"].get("general.timezone") is not None,
     }
-    return ({"status": "ready", "checks": checks}, 200) if all(checks.values()) else ({"status": "not_ready", "checks": checks}, 503)
+    return (
+        ({"status": "ready", "checks": checks}, 200)
+        if all(checks.values())
+        else ({"status": "not_ready", "checks": checks}, 503)
+    )
 
 
 @bp.get("/health/detail")

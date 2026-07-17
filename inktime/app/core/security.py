@@ -11,9 +11,7 @@ from typing import Any
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
-SENSITIVE_KEY = re.compile(
-    r"(api[_-]?key|token|password|secret|authorization|cookie|session)", re.IGNORECASE
-)
+SENSITIVE_KEY = re.compile(r"(api[_-]?key|token|password|secret|authorization|cookie|session)", re.IGNORECASE)
 
 
 def hash_password(password: str) -> str:

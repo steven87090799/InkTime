@@ -32,11 +32,16 @@ except ModuleNotFoundError:
 # === 路径配置（来自 config.py） ===
 ROOT_DIR = Path(__file__).resolve().parent
 
-DB_PATH = Path(str(getattr(cfg, "DB_PATH", "photos.db") or "photos.db")).expanduser()
+DB_PATH = Path(os.environ.get("INKTIME_DATABASE", str(getattr(cfg, "DB_PATH", "photos.db") or "photos.db"))).expanduser()
 if not DB_PATH.is_absolute():
     DB_PATH = (ROOT_DIR / DB_PATH).resolve()
 
-BIN_OUTPUT_DIR = Path(str(getattr(cfg, "BIN_OUTPUT_DIR", "output/inktime") or "output/inktime")).expanduser()
+BIN_OUTPUT_DIR = Path(
+    os.environ.get(
+        "INKTIME_LEGACY_OUTPUT_DIR",
+        str(getattr(cfg, "BIN_OUTPUT_DIR", "output/inktime") or "output/inktime"),
+    )
+).expanduser()
 if not BIN_OUTPUT_DIR.is_absolute():
     BIN_OUTPUT_DIR = (ROOT_DIR / BIN_OUTPUT_DIR).resolve()
 BIN_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

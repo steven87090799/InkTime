@@ -16,7 +16,11 @@ class FontManager:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def scan(self) -> list[Path]:
-        return sorted(path for path in self.root.iterdir() if path.is_file() and path.suffix.lower() in {".ttf", ".otf", ".ttc"})
+        return sorted(
+            path
+            for path in self.root.iterdir()
+            if path.is_file() and path.suffix.lower() in {".ttf", ".otf", ".ttc"}
+        )
 
     def install(self, source: Path) -> Path:
         if source.suffix.lower() not in {".ttf", ".otf", ".ttc"}:
@@ -33,7 +37,9 @@ class FontManager:
     def missing_characters(font_path: Path, text: str) -> list[str]:
         with TTFont(font_path, fontNumber=0, lazy=True) as font:
             cmap = font.getBestCmap() or {}
-        return sorted({character for character in text if not character.isspace() and ord(character) not in cmap})
+        return sorted(
+            {character for character in text if not character.isspace() and ord(character) not in cmap}
+        )
 
     def validate(self, font_path: Path, text: str) -> None:
         if not font_path.is_file():

@@ -64,7 +64,9 @@ class AuthRepository:
             ).fetchone()[0]
         return int(failures) >= maximum
 
-    def record_login(self, username: str, ip_address: str, succeeded: bool, user_id: str | None = None) -> None:
+    def record_login(
+        self, username: str, ip_address: str, succeeded: bool, user_id: str | None = None
+    ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self.database.session() as connection:
             connection.execute(
