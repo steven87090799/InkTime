@@ -1,0 +1,7 @@
+-r requirements.txt
+pytest==8.4.1
+pytest-cov==6.2.1
+ruff==0.12.4
+mypy==1.17.0
+types-requests==2.32.4.20250611
+pip-audit==2.9.0

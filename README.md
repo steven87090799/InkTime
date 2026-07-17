@@ -1,263 +1,117 @@
-# InkTime · 墨水屏回忆相框
+# InkTime｜照片分析與電子紙回憶管理平台
 
-**中文** | [English](README.en.md)
+[English legacy README](README.en.md) · [快速開始](docs/QUICK_START_ZH_TW.md) · [使用指南](docs/USER_GUIDE_ZH_TW.md) · [管理指南](docs/ADMIN_GUIDE_ZH_TW.md)
 
-<p align="left">
-  <img src="esp32/InkTime.jpeg" width="80%">
-</p>
+InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複與低價值照片，再以可控預算的視覺模型產生繁體中文描述、分類、分數與電子紙短文案。所有工作、模型、成本、裝置、渲染、備份與診斷都能由登入後的 Web 管理介面操作。
 
-InkTime 是一个「拉回你相册里的记忆」的墨水屏电子相框项目。
+![InkTime 繁體中文儀表板](docs/images/dashboard.png)
 
-它不会随机展示照片，也不是简单的按时间轴播放，而是：
+## 主要能力
 
-- 用 AI 理解每一张照片在「拍什么」
-- 给照片按照「值得回忆度」、「美观度」打分
-- 写一句灵光一现的旁白文案
-- 每天从「历史上的今天」里选出**最值得被再次看到的照片**
-- 推送到 ESP32 墨水屏上展示
+- 以 SHA-256、pHash、dHash、EXIF、亮度、對比、模糊與曝光做本地預處理；相同內容不重複呼叫模型。
+- 512／1024／1600px 內容雜湊縮圖快取；預設不傳原始 4K／8K 圖片。
+- 單一分析請求同時回傳描述、類型、四種分數、短文案與敏感判斷；JSON 最多純文字修復一次。
+- 低成本第一階段與高品質第二階段；支援 OpenAI 即時、OpenAI 相容端點與本地相容端點；OpenAI Batch 已完成提交／查詢／取消 Provider 介面，但尚未接入背景工作的完整生命週期。
+- 持久化 Job、逐張狀態、有界佇列、暫停、續跑、取消、失敗重跑、重啟恢復與成本停止線。
+- administrator／viewer、Session、CSRF、登入限制與每台 ESP32 獨立 Bearer Token。
+- 480×800 四色 2bpp 版本化發布，單張 96,000 bytes；Manifest、SHA-256、原子發布與回滾。
+- 繁體中文管理介面、結構化 Log、錯誤中心、CPU／記憶體／SQLite／Worker 診斷與已遮蔽診斷包。
 
----
-## 项目整体结构
+## 架構
 
-InkTime 分为三部分：
+```mermaid
+flowchart LR
+    UI["繁中 Web UI"] --> WEB["Gunicorn / Flask API"]
+    ESP["ESP32 裝置"] -->|"Bearer Token"| WEB
+    WEB --> SVC["Service"] --> REPO["Repository"] --> DB[("SQLite WAL")]
+    WORKER["有界 Worker"] --> SVC
+    SCHED["Scheduler"] --> DB
+    SVC --> CACHE["縮圖快取"]
+    SVC --> PROVIDER["VisionProvider / Batch"]
+    SVC --> RELEASE["原子 2bpp Releases"]
+```
 
-1. **照片分析（Python）**  
-   扫描相册 → 调用视觉模型 → 分类 / 评分 / 写文案 → 存入数据库
+詳細邊界請見 [目標架構](docs/ARCHITECTURE_TARGET.md)；重構前證據在 [工程稽核](docs/PROJECT_AUDIT_ZH_TW.md)。
 
+## Docker 快速安裝
 
-2. **图片渲染（Python）**  
-   从数据库里选出「历史上的今天」高分照片 → 渲染成 ESP32 可直接显示的 `.bin`
-
-
-3. **下载与展示（ESP32）**  
-   ESP32 定时从服务器拉取 `.bin` → 刷新墨水屏 → 深度休眠直至下次唤醒
-
----
-## 环境准备
-
-### 1）Python
-推荐 Python 3.10+。
-
-建议使用虚拟环境：
+需求：Docker Engine 24+ 與 Compose v2。先準備可寫資料目錄與唯讀照片目錄：
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+cp .env.example .env
+# 編輯 .env 的 INKTIME_PHOTO_PATH；這是部署層必要路徑，不是日常分析參數。
+docker compose up -d --build
+```
+
+開啟 `http://主機IP:8765/`，首次啟動精靈會要求建立至少 12 字元的管理員密碼。正式 HTTPS 反向代理請將 `INKTIME_COOKIE_SECURE=1`。
+
+三個服務使用同一映像檔：
+
+- `inktime-web`：Gunicorn 管理介面與裝置 API。
+- `inktime-worker`：照片掃描、分析、重試與渲染工作。
+- `inktime-scheduler`：租約回收、每日備份與保留策略。
+
+完整 NAS、Volume 權限、唯讀 root filesystem 與更新方式見 [Docker 指南](docs/DOCKER_GUIDE_ZH_TW.md)。
+
+## 首次使用
+
+1. 建立管理員並登入。
+2. 到「模型」新增 OpenAI、OpenAI 相容或本地端點；API Key 加密儲存且只顯示遮罩。
+3. 到「維護」輸入容器內照片路徑（Compose 預設 `/photos`），建立背景掃描工作。
+4. 到「工作」建立兩階段智慧分析，確認照片數、Token、費用範圍與工作預算後啟動。
+5. 到「渲染」安裝涵蓋繁體中文的字型，測試渲染後發布 2bpp 版本。
+6. 到「裝置」新增 ESP32；立即複製只顯示一次的 Token 到裝置 AP 設定頁。
+7. 到「備份」建立並下載第一份備份。
+
+## 不用修改程式碼的日常設定
+
+一般、分析、模型、成本、渲染、裝置、系統、安全與備份設定都在「設定」頁。每次修改會記錄時間、使用者、來源 IP、舊值／新值摘要與是否需重新啟動；Secret 不會寫入歷史。完整欄位、預設值、範圍與風險見 [管理指南](docs/ADMIN_GUIDE_ZH_TW.md)。
+
+## Token 與成本控制
+
+建議預設使用「兩階段智慧分析」：512px 低成本初篩，只有回憶分數達門檻、人物或最愛照片才使用 1600px 高品質模型。相同 SHA-256 繼承既有結果；短文案與所有分數在同一階段圖片請求輸出。管理介面提供每日、每月、單工作與單張照片停止值。詳見 [Token 成本指南](docs/TOKEN_COST_GUIDE_ZH_TW.md)。
+
+## ESP32 配對與可靠性
+
+新版韌體不再把金鑰放在 URL。裝置先以 Bearer Token 取得 Manifest，隨機選檔後驗證尺寸與 SHA-256，成功才解包到 framebuffer；所有檔案失敗時保留舊畫面。韌體需安裝 `GxEPD2` 與 `ArduinoJson`。詳見 [ESP32 指南](docs/ESP32_GUIDE_ZH_TW.md)。
+
+## 原生安裝與相容 CLI
+
+需求為 Python 3.10+（正式映像使用 Python 3.12）：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
+python server.py                 # 僅本機開發
+python -m inktime.app.workers.runner
 ```
 
-### 2）安装 exiftool（可选）
-InkTime 可以在不装 exiftool 的情况下运行，但不一定能完整地获取 EXIF 中的 GPS 信息。
+正式環境不可使用 Flask Development Server；請使用 Docker 或 `gunicorn server:app`。舊 `analyze_photos.py` 命令仍可使用，但已改為建立新版持久化 Job；原單檔實作保存在 `legacy_analyze_photos.py` 供遷移比較，不建議執行。
 
-建议使用 exiftool 获取 GPS 信息：  
+## 安全注意事項
 
-macOS(Homebrew): ```brew install exiftool```  
-Linux: ```sudo apt-get install -y libimage-exiftool-perl```
+- 不要 Commit `.env`、`config.py`、資料庫、Session Key、API Key 或裝置 Token。
+- 公網部署必須使用 HTTPS、Secure Cookie、反向代理限流與 NAS 最小權限。
+- 舊 `/static/inktime/<key>/...` API 預設關閉；只有隔離網路短期遷移才可明確開啟。
+- viewer 只能查看，不能修改設定、建立／控制工作、管理 Token、發布或備份。
 
-### 3) 配置 config.py
-```
-cp config-example.py config.py  
-vi config.py
-```
-必须配置以下字段：  
-照片库路径 ```IMAGE_DIR```  
-VLM 模型接口 ```API_CHANNELS```  
-InkTime 使用 OpenAI 接口（LM Studio / 其它兼容服务均可）。
+詳見 [安全指南](docs/SECURITY_GUIDE_ZH_TW.md)與[錯誤碼](docs/ERROR_CODES_ZH_TW.md)。
 
-为防止照片隐私泄露，建议修改 ```DOWNLOAD_KEY```，为 ESP32 下载路径加一个随机前缀作为密钥。   
-同时，请同步修改 ```esp32/ink-display-7C-photo/ink-display-7C-photo.ino``` 固件中的 ```DAILY_PHOTO_PATH_PREFIX``` 字段。  
-注意，这不是“加密”，只是一个简单的验证路径口令。公网部署建议加 HTTPS/反代鉴权，或只允许内网访问。
+## 更新、遷移與回滾
 
-## 分析照片
-分析照片前，请先确保：
-- LM Studio（或你的云端 VLM 服务）已启动
-- config.py 已正确配置
+更新前先從介面建立備份，再拉取映像並執行 `docker compose up -d --build`。Migration 使用版本、交易、升級前備份與 `quick_check`；任何失敗會停止啟動。回滾時停止三個服務、驗證備份、恢復舊資料庫與映像。詳細步驟見 [遷移指南](docs/MIGRATION_GUIDE_ZH_TW.md)與[備份還原](docs/BACKUP_RESTORE_ZH_TW.md)。
 
-执行：
+## 常見問題
 
-```python3 analyze_photos.py```
+- 沒有照片：到「維護」確認容器路徑是 `/photos` 且 Volume 可讀。
+- 工作不動：到「診斷」確認 Worker 與 Queue，再看「錯誤中心」。
+- 模型結果無效：確認模型支援 JSON Schema；系統只修復一次，避免無限成本。
+- 繁中變方框：到「渲染」上傳 Noto Sans/Serif CJK TC 等涵蓋所需字元的字型。
+- 裝置 401：Token 已撤銷、輸入錯誤或裝置被停用；重新產生後需更新裝置。
 
-视觉大模型会读取并理解相册目录中的所有文件，为每张照片生成：
+更多處理方式見 [疑難排解](docs/TROUBLESHOOTING_ZH_TW.md)。效能證據見 [100,000 筆報告](docs/PERFORMANCE_REPORT.md)，最終完成邊界見 [實作報告](docs/FINAL_IMPLEMENTATION_REPORT_ZH_TW.md)。
 
-- 画面描述
-- 照片类型
-- 值得回忆度 / 画面美观度评分
-- 一句话文案
+## 授權
 
-图片数据会保存在 ```photos.db``` 中（SQLite 数据库）。
-
-请自行修改```analyze_photos.py```中的提示词，以调整模型的评价标准和文案风格。
-
-程序可以断点续跑，已处理过的照片信息不会重复分析。你可以分几天分析完你的整个相册。
-
-*请根据你拥有的算力选择合适的模型，作者使用的 qwen3-vl-30b 已经能取得相当不错的文案。*
-
-常用参数：
-
-```bash
-python3 analyze_photos.py -j 4
-python3 analyze_photos.py --debug
-python3 analyze_photos.py --cache
-```
-
-- ```-j```, ```--concurrency```：并发处理线程数，默认 `1`。本地模型或多渠道接口吞吐足够时可适当调大。
-- ```--debug```：请求失败时打印请求体和响应体，便于排查接口兼容性或返回格式问题。
-- ```--cache```：使用上次缓存过的相册文件列表，可防止每次跑模型都重复扫描相册目录。仅在相册首次全量分析时打开，勿在生产环境中使用，否则相册新增照片不会被发现，已删除的照片也不会从数据库中清除。
-
-
-## 为 ESP32 渲染「历史上的今天」照片
-执行：
-
-```python3 render_daily_photo.py```
-
-## 启动 ESP32 下载服务器和 WebUI
-执行：
-
-```python3 server.py```
-
-#### WebUI（如果开启）：
-Server 将提供一个简明的可视化前端，用于查看已处理照片的描述、文案，并预览模拟墨水屏渲染效果。
-
-在浏览器中访问：
-
-```http://127.0.0.1:8765/review```
-
-程序跑通后，建议在 ```config.py``` 中关闭 WebUI，仅保留 ESP32 下载接口。
-
-## 服务器部署与定时任务示例（可选）
-
-创建 systemd 服务：
-
-```sudo vi /etc/systemd/system/inktime-server.service```
-
-示例（请自行修改项目路径）：
-
-```
-[Unit]
-Description=InkTime Server
-After=network.target
-
-[Service]
-Type=simple
-# 改成你的项目路径
-WorkingDirectory=/path/to/InkTime
-ExecStart=/path/to/InkTime/venv/bin/python server.py
-Restart=always
-RestartSec=3
-User=inktime
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```
-sudo systemctl daemon-reload
-sudo systemctl enable inktime-server
-sudo systemctl start inktime-server
-```
-
-使用 crontab 每天凌晨自动选片、渲染：
-
-```
-chmod +x scripts/daily_render.sh
-sudo -u inktime crontab -e
-0 5 * * * /path/to/InkTime/scripts/daily_render.sh
-```
-
-在 ```logs/render.log``` 可查看日志。
-
----
-
-# ESP32 墨水屏硬件部分
-
-## 硬件与引脚
-#### 主控
-本项目使用乐鑫 ESP32-S3-N8R8 模块。  
-当然，你也可以使用任何成品 ESP32 开发板进行制作。  
-如使用其它开发板或模块，请注意选择带 PSRAM 的型号（需至少 384K PSRAM）。  
-#### 屏幕
-本项目使用 7.3 寸四色墨水屏，型号为 EL073TS3（49-pin）。使用 GxEPD2 库驱动（GxEPD2_730c_GDEY073D46）。  
-其它尺寸、型号请自行参照 GxEPD2 库中的硬件支持列表修改构造函数。
-#### 墨水屏转接板
-本项目使用 B 站「记得带马扎」制作的七色 EPD 墨水屏转接板（49-pin）。  
-但市面上的大部分 24-pin 墨水屏搭配 SPI 转接板亦可兼容。
-
-#### 引脚定义
-墨水屏使用 SPI 通信，本项目默认引脚为：
-- `PIN_EPD_BUSY = 14`
-- `PIN_EPD_RST  = 13`
-- `PIN_EPD_DC   = 12`
-- `PIN_EPD_CS   = 11`
-- `PIN_EPD_SCLK = 10`
-- `PIN_EPD_DIN  = 9`
-
-### 主板焊接
-原理图、BOM清单、制板文件均位于```esp32/pcb```文件夹中。  
-原理图中的 H1 - H6 为测试焊盘引出，无需焊接真实器件：
-- H1: UART 串口
-- H2: USB
-- H3: BOOT引脚，烧录固件时需将改引脚短接到 GND 后上电
-- H4: 焊接至 EPD 墨水屏转接板
-- H5: 3.7V 电池焊盘
-- H6: 5V 输入测试焊盘
-
-建议使用 UART 串口烧录固件。R2、R3、C5、C6 供 USB 使用，如无需要，可留空不焊。
-
-SW1：RESET 键，按下后会重启设备，并从服务器拉取、显示图片一次。RESET 键可将设备从长休眠状态中唤醒。  
-SW2：WiFi 重置键，按住 SW2 再按下 SW1，ESP32 重启后会清空 NVS，以重新配置 WiFi 连接。  
-SW3 / SW4: 备用 GPIO，以防未来需要添加的功能。如无需要，可留空不焊。
-
-完整 PCB 板示例：
-
-<p align="left">
-  <img src="esp32/pcb/pcb.jpeg" width="80%">
-</p>
-
-## 编译与烧录
-
-建议使用 Arduino IDE。
-
-1. 安装 ESP32 Arduino Core。
-2. 选择开发板：ESP32-S3（必须开启 PSRAM）。
-3. 安装依赖库：
-   - `GxEPD2`
-4. 打开并编译/烧录 `esp32/ink-display-7C-photo/ink-display-7C-photo.ino`。
-
-### 自定义字体（可选）
-如需使用自定义中文字体，可放入 ```resource/fonts/``` 中，并在 ```config.py``` 中声明。
-
-## 首次配置
-
-设备启动时，会尝试从 NVS 读取已保存的 Wi-Fi 配置；若未配置或 Wi-Fi 连接失败，会自动进入 AP 配置模式：
-
-- 设备会开启 AP 热点：`InkTime-xxxx`
-- 默认密码：`12345678`
-- 连接 AP ，用浏览器访问配置页面：`http://192.168.4.1/`
-- 配置 Wi-Fi、服务器地址、定时更新时间并保存，设备会自动重启并进入正常工作流程。
-
-## 刷新与休眠
-
-- 设备每天会在配置的更新时间，从服务器拉取一次当日生成的图片，并刷新墨水屏。
-- 成功刷新后，会进入 Deep Sleep，直到下一次被唤醒。
-- 若下载超时（默认 60s），也会进入长休眠，避免异常耗电。
-- 在任意时候，按下 RESET 键，会强制重启并马上拉取、刷新一次图片。
-- 长休眠待机电流 ＜ 1mA，如使用 2 节 18650 电池，5000mAh 约可实现半年续航。
-
-## 相关项目
-- ESP32 固件依赖 GxEPD2 © ZinggJM（GPL-3.0）：https://github.com/ZinggJM/GxEPD2  
-  如对外分发编译后的固件，请同时遵守 GPL-3.0。
-
-
-- 项目中的离线中文城市名索引，基于 GeoNames 数据制作：  
-GeoNames © GeoNames contributors, CC BY 4.0  
-https://www.geonames.org/
-
-## ⭐ Star History
-
-<p align="center">
-  <a href="https://star-history.com/#dai-hongtao/InkTime&Timeline">
-    <img src="https://api.star-history.com/svg?repos=dai-hongtao/InkTime&type=Timeline" width="700"/>
-  </a>
-</p>
+本專案依原始儲存庫授權條款發布；ESP32 使用的第三方函式庫另依其授權。

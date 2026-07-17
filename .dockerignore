@@ -1,0 +1,14 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+*.db
+data/backups
+data/cache
+data/releases
+logs
+output
+test
+.DS_Store
+.env

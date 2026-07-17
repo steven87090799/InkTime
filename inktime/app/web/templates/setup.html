@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}首次設定｜InkTime{% endblock %}
+{% block content %}
+<section class="auth-card">
+  <p class="eyebrow">首次啟動</p><h1>建立管理員</h1>
+  <p>此帳號可管理照片、模型、成本與裝置。密碼只會以安全雜湊儲存。</p>
+  <form method="post" class="form-stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>管理員帳號<input name="username" required autocomplete="username"></label>
+    <label>密碼（至少 12 個字元）<input name="password" type="password" minlength="12" required autocomplete="new-password"></label>
+    <label>再次輸入密碼<input name="password_confirmation" type="password" minlength="12" required autocomplete="new-password"></label>
+    <button class="primary">建立並進入 InkTime</button>
+  </form>
+</section>
+{% endblock %}

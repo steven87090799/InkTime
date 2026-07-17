@@ -1,0 +1,66 @@
+name: inktime
+
+x-common: &common
+  build:
+    context: .
+    args:
+      INKTIME_GIT_REVISION: ${INKTIME_GIT_REVISION:-unknown}
+      INKTIME_BUILD_TIME: ${INKTIME_BUILD_TIME:-unknown}
+  image: inktime:${INKTIME_IMAGE_TAG:-local}
+  restart: unless-stopped
+  environment:
+    TZ: ${TZ:-Asia/Taipei}
+    INKTIME_COOKIE_SECURE: ${INKTIME_COOKIE_SECURE:-0}
+    INKTIME_LOG_FORMAT: ${INKTIME_LOG_FORMAT:-json}
+  volumes:
+    - ${INKTIME_DATA_PATH:-./data}:/data
+    - ${INKTIME_PHOTO_PATH:-./test}:/photos:ro
+  read_only: true
+  tmpfs:
+    - /tmp:size=256m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "5"
+
+services:
+  inktime-web:
+    <<: *common
+    ports:
+      - "${INKTIME_PORT:-8765}:8765"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+
+  inktime-worker:
+    <<: *common
+    command: ["python", "-m", "inktime.app.workers.runner"]
+    healthcheck:
+      disable: true
+    depends_on:
+      inktime-web:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 2G
+
+  inktime-scheduler:
+    <<: *common
+    command: ["python", "-m", "inktime.app.workers.scheduler"]
+    healthcheck:
+      disable: true
+    depends_on:
+      inktime-web:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M

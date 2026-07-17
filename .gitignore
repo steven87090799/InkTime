@@ -6,6 +6,7 @@ __pycache__/
 
 # Virtual environment
 venv/
+.venv/
 
 # IDE
 .idea/
@@ -18,6 +19,7 @@ resources/fonts/
 
 # Sensitive config
 config.py
+data/*.key
 
 # Outputs
 output/
@@ -28,6 +30,7 @@ filelist.txt
 *.db
 
 # Logs
+logs/
 
 # Others
 test/

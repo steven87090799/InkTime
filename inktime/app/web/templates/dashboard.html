@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}儀表板｜InkTime{% endblock %}
+{% block content %}
+<div class="page-head"><div><p class="eyebrow">系統總覽</p><h1>儀表板</h1></div><span class="status ok">系統正常</span></div>
+<section class="metrics">
+  <article><span>照片總數</span><strong>{{ counts.photos }}</strong></article>
+  <article><span>已分析</span><strong>{{ counts.analyzed }}</strong></article>
+  <article><span>分析失敗</span><strong>{{ counts.failed }}</strong></article>
+  <article><span>重複照片</span><strong>{{ counts.duplicates }}</strong></article>
+  <article><span>執行中工作</span><strong>{{ counts.running_jobs }}</strong></article>
+  <article><span>今日 Token</span><strong>{{ counts.today_tokens }}</strong></article>
+  <article><span>本月成本</span><strong>US$ {{ '%.4f'|format(counts.month_cost) }}</strong></article>
+</section>
+<section class="panel"><div class="panel-head"><h2>最近錯誤</h2><a href="/errors">查看錯誤中心</a></div>
+  {% if recent_errors %}<div class="table-wrap"><table><thead><tr><th>錯誤碼</th><th>內容</th><th>次數</th><th>最後發生</th></tr></thead><tbody>
+  {% for error in recent_errors %}<tr><td><code>{{ error.error_code }}</code></td><td>{{ error.message }}</td><td>{{ error.occurrences }}</td><td>{{ error.last_seen_at }}</td></tr>{% endfor %}
+  </tbody></table></div>{% else %}<p class="empty">目前沒有未解決錯誤。</p>{% endif %}
+</section>
+{% endblock %}

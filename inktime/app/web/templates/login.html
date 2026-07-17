@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}登入｜InkTime{% endblock %}
+{% block content %}
+<section class="auth-card">
+  <p class="eyebrow">管理介面</p><h1>登入 InkTime</h1>
+  <form method="post" class="form-stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>帳號<input name="username" required autocomplete="username" autofocus></label>
+    <label>密碼<input name="password" type="password" required autocomplete="current-password"></label>
+    <button class="primary">登入</button>
+  </form>
+</section>
+{% endblock %}

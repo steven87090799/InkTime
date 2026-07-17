@@ -1,0 +1,65 @@
+name: InkTime CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  python-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check inktime tests scripts server.py analyze_photos.py
+      - run: mypy inktime
+      - run: pytest --cov=inktime --cov-report=term-missing tests/unit tests/security tests/integration
+      - run: pytest tests/unit/test_migrations.py
+      - run: pip-audit -r requirements.txt
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docker-health:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: mkdir -p .ci-data .ci-photos && chmod 777 .ci-data
+      - run: INKTIME_DATA_PATH=.ci-data INKTIME_PHOTO_PATH=.ci-photos docker compose up -d --build inktime-web
+      - run: timeout 120 sh -c 'until curl -fsS http://127.0.0.1:8765/health/ready; do sleep 2; done'
+      - if: always()
+        run: docker compose logs --no-color && docker compose down --volumes
+
+  playwright:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements.txt pytest playwright
+      - run: playwright install --with-deps chromium
+      - run: mkdir -p .ci-e2e && INKTIME_DATA_DIR=.ci-e2e INKTIME_DATABASE=.ci-e2e/inktime.db gunicorn --bind 127.0.0.1:8765 server:app &
+      - run: timeout 60 sh -c 'until curl -fsS http://127.0.0.1:8765/health/live; do sleep 1; done'
+      - run: INKTIME_E2E_URL=http://127.0.0.1:8765 pytest tests/e2e
+
+  esp32-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - run: arduino-cli config init
+      - run: arduino-cli core update-index && arduino-cli core install esp32:esp32@3.3.10
+      - run: arduino-cli lib install GxEPD2@1.6.9 ArduinoJson@7.4.3
+      - run: arduino-cli compile --fqbn esp32:esp32:esp32s3 esp32/ink-display-7C-photo

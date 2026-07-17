@@ -1,0 +1,181 @@
+from __future__ import annotations
+
+from datetime import timedelta
+import fcntl
+from pathlib import Path
+import os
+import secrets
+
+from flask import Flask, g, redirect, request, session, url_for
+from jinja2 import BaseLoader, ChoiceLoader, FileSystemLoader
+from werkzeug.exceptions import HTTPException
+
+from inktime import __version__
+from inktime.app.api import auth, dashboard, devices, health, jobs, operations, photos, rendering, settings
+from inktime.app.db import Database, migrate
+from inktime.app.repositories.auth import AuthRepository
+from inktime.app.repositories.devices import DeviceRepository
+from inktime.app.repositories.jobs import JobRepository
+from inktime.app.repositories.photos import PhotoRepository
+from inktime.app.repositories.providers import ProviderRepository
+from inktime.app.repositories.settings import SecretStore, SettingsRepository
+from inktime.app.repositories.usage import UsageRepository
+from inktime.app.services.jobs import JobService
+from inktime.app.services.backups import BackupService
+from inktime.app.services.diagnostics import DiagnosticsService
+from inktime.app.domain.photos import ThumbnailCache
+from inktime.app.domain.rendering import AtomicReleasePublisher, FontManager
+from inktime.app.services.rendering import RenderService
+from inktime.app.services.analysis import PhotoAnalysisService
+from inktime.app.services.budgets import BudgetService
+from inktime.app.services.providers import ProviderService
+from inktime.app.core.logging import configure_logging
+from inktime.app.web.access import csrf_token, verify_csrf
+
+
+def _persistent_secret(path: Path) -> str:
+    configured = os.environ.get("INKTIME_SECRET_KEY", "").strip()
+    if configured:
+        return configured
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    with lock_path.open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if path.exists():
+            value = path.read_text(encoding="utf-8").strip()
+            if value:
+                return value
+        value = secrets.token_urlsafe(64)
+        path.write_text(value, encoding="utf-8")
+        path.chmod(0o600)
+        return value
+
+
+def initialize_platform(
+    app: Flask,
+    *,
+    database_path: Path,
+    data_dir: Path,
+    release_dir: Path,
+    testing: bool = False,
+) -> Flask:
+    configure_logging()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    release_dir.mkdir(parents=True, exist_ok=True)
+    database = Database(database_path)
+    migrate(database, None if testing else data_dir / "backups")
+    secret = "test-secret-not-for-production" if testing else _persistent_secret(data_dir / "session.key")
+
+    app.secret_key = secret
+    app.config.update(
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Strict",
+        SESSION_COOKIE_SECURE=os.environ.get("INKTIME_COOKIE_SECURE", "0") == "1",
+        PERMANENT_SESSION_LIFETIME=timedelta(minutes=30),
+        INKTIME_RELEASE_DIR=release_dir.resolve(),
+        INKTIME_VERSION=__version__,
+        TESTING=testing,
+    )
+    app.extensions["inktime_database"] = database
+    app.extensions["inktime_auth_repository"] = AuthRepository(database)
+    app.extensions["inktime_device_repository"] = DeviceRepository(database, secret)
+    app.extensions["inktime_job_repository"] = JobRepository(database)
+    app.extensions["inktime_job_service"] = JobService(app.extensions["inktime_job_repository"])
+    settings_repository = SettingsRepository(database)
+    settings_repository.ensure_defaults()
+    secret_store = SecretStore(database, secret)
+    app.extensions["inktime_settings_repository"] = settings_repository
+    app.extensions["inktime_secret_store"] = secret_store
+    app.extensions["inktime_provider_repository"] = ProviderRepository(database, secret_store)
+    app.extensions["inktime_photo_repository"] = PhotoRepository(database)
+    app.extensions["inktime_usage_repository"] = UsageRepository(database)
+    app.extensions["inktime_thumbnail_cache"] = ThumbnailCache(data_dir / "cache" / "thumbnails")
+    budget_service = BudgetService(database, settings_repository)
+    app.extensions["inktime_budget_service"] = budget_service
+    app.extensions["inktime_provider_service"] = ProviderService(
+        app.extensions["inktime_provider_repository"]
+    )
+    app.extensions["inktime_analysis_service"] = PhotoAnalysisService(
+        app.extensions["inktime_photo_repository"],
+        app.extensions["inktime_usage_repository"],
+        app.extensions["inktime_thumbnail_cache"],
+        budget_service,
+    )
+    app.extensions["inktime_backup_service"] = BackupService(database, data_dir / "backups")
+    app.extensions["inktime_diagnostics_service"] = DiagnosticsService(
+        database, data_dir, data_dir / "cache" / "thumbnails"
+    )
+    font_manager = FontManager(data_dir / "fonts")
+    release_publisher = AtomicReleasePublisher(release_dir)
+    app.extensions["inktime_font_manager"] = font_manager
+    app.extensions["inktime_release_publisher"] = release_publisher
+    app.extensions["inktime_render_service"] = RenderService(
+        database,
+        app.extensions["inktime_photo_repository"],
+        settings_repository,
+        font_manager,
+        release_publisher,
+    )
+
+    web_root = Path(__file__).resolve().parent / "web"
+    loaders: list[BaseLoader] = [FileSystemLoader(str(web_root / "templates"))]
+    if app.jinja_loader is not None:
+        loaders.insert(0, app.jinja_loader)
+    app.jinja_loader = ChoiceLoader(loaders)
+    app.static_folder = str(web_root / "static")
+
+    app.register_blueprint(auth.bp)
+    app.register_blueprint(dashboard.bp)
+    app.register_blueprint(devices.bp)
+    app.register_blueprint(health.bp)
+    app.register_blueprint(jobs.bp)
+    app.register_blueprint(photos.bp)
+    app.register_blueprint(settings.bp)
+    app.register_blueprint(operations.bp)
+    app.register_blueprint(rendering.bp)
+    app.jinja_env.globals["csrf_token"] = csrf_token
+
+    public_endpoints = {
+        "auth.setup",
+        "auth.login",
+        "health.live",
+        "health.ready",
+        "devices.latest_release",
+        "devices.release_file",
+        "static",
+    }
+
+    @app.before_request
+    def enforce_access():
+        endpoint = request.endpoint or ""
+        repository: AuthRepository = app.extensions["inktime_auth_repository"]
+        user_id = session.get("user_id")
+        g.user = repository.find_by_id(str(user_id)) if user_id else None
+
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"} and endpoint not in {
+            "devices.latest_release",
+            "devices.release_file",
+        }:
+            verify_csrf()
+
+        if endpoint in public_endpoints:
+            return None
+        if repository.count_users() == 0:
+            return redirect(url_for("auth.setup"))
+        if g.user is None:
+            if request.path.startswith("/api/") or request.path.startswith("/health/detail"):
+                return {"error_code": "AUTH-003", "message": "請先登入"}, 401
+            return redirect(url_for("auth.login", next=request.full_path))
+        return None
+
+    @app.errorhandler(HTTPException)
+    def stable_api_error(exc: HTTPException):
+        if not request.path.startswith("/api/"):
+            return exc
+        description = str(exc.description)
+        first, separator, remainder = description.partition(" ")
+        error_code = first if "-" in first else "HTTP-{:03d}".format(exc.code or 500)
+        message = remainder if separator else description
+        return {"error_code": error_code, "message": message}, exc.code or 500
+
+    return app
