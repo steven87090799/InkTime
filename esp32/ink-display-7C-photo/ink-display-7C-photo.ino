@@ -13,9 +13,11 @@
 #include "esp_wifi.h"
 #include "esp_bt.h"
 #include "mbedtls/sha256.h"
+#include "mbedtls/version.h"
 
 #include "driver/gpio.h"
 #include "driver/rtc_io.h"
+#include "soc/soc_caps.h"
 
 // =======================
 //  调试开关（需要串口时改成 1）
@@ -108,6 +110,14 @@ const uint8_t DEFAULT_HOUR    = 8;
 
 Config g_cfg;
 uint8_t* framebuffer = nullptr;
+
+static int calculateSha256(const unsigned char* input, size_t length, unsigned char output[32]) {
+#if MBEDTLS_VERSION_MAJOR >= 3
+  return mbedtls_sha256(input, length, output, 0);
+#else
+  return mbedtls_sha256_ret(input, length, output, 0);
+#endif
+}
 
 static void releaseAllGpioHoldsAtBoot() {
   gpio_deep_sleep_hold_dis();
@@ -415,9 +425,15 @@ void handleSave() {
 //  Deep Sleep 前
 // =======================
 void prepareDeepSleepDomains() {
+#if defined(SOC_PM_SUPPORT_RTC_PERIPH_PD) && SOC_PM_SUPPORT_RTC_PERIPH_PD
   esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH,    ESP_PD_OPTION_OFF);
+#endif
+#if defined(SOC_PM_SUPPORT_RTC_SLOW_MEM_PD) && SOC_PM_SUPPORT_RTC_SLOW_MEM_PD
   esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_SLOW_MEM,  ESP_PD_OPTION_OFF);
+#endif
+#if defined(SOC_PM_SUPPORT_RTC_FAST_MEM_PD) && SOC_PM_SUPPORT_RTC_FAST_MEM_PD
   esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_FAST_MEM,  ESP_PD_OPTION_OFF);
+#endif
 }
 
 // =======================
@@ -716,7 +732,7 @@ bool downloadDailyPhotoBin(const Config &cfg) {
     if (total != packedSize) continue;
 
     unsigned char digest[32];
-    if (mbedtls_sha256_ret(packed, packedSize, digest, 0) != 0) continue;
+    if (calculateSha256(packed, packedSize, digest) != 0) continue;
     char actualSha[65];
     for (int i = 0; i < 32; ++i) sprintf(actualSha + i * 2, "%02x", digest[i]);
     actualSha[64] = '\0';

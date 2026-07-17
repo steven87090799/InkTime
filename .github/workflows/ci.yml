@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   python-quality:
@@ -59,6 +60,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: arduino/setup-arduino-cli@v2
       - run: arduino-cli config init
-      - run: arduino-cli core update-index && arduino-cli core install esp32:esp32
-      - run: arduino-cli lib install GxEPD2 ArduinoJson
+      - run: arduino-cli core update-index && arduino-cli core install esp32:esp32@3.3.10
+      - run: arduino-cli lib install GxEPD2@1.6.9 ArduinoJson@7.4.3
       - run: arduino-cli compile --fqbn esp32:esp32:esp32s3 esp32/ink-display-7C-photo
