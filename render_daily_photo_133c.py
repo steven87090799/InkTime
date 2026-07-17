@@ -17,7 +17,13 @@ import json
 import datetime as dt
 from typing import List, Dict, Any, Tuple, Optional
 from PIL import Image, ImageDraw, ImageFont, ImageOps
-import config as cfg
+try:
+    import config as cfg
+except ModuleNotFoundError:
+    class _DefaultConfig:
+        pass
+
+    cfg = _DefaultConfig()
 import shutil
 
 

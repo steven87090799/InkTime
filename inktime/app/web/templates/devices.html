@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}裝置管理｜InkTime{% endblock %}
+{% block content %}
+<div class="page-head"><div><p class="eyebrow">ESP32</p><h1>裝置管理</h1><p>每台裝置使用獨立 Bearer Token；完整 Token 只會顯示一次。</p></div>{% if g.user.role == 'administrator' %}<button class="primary" id="add-device">新增裝置</button>{% endif %}</div>
+<section class="panel"><div class="table-wrap"><table><thead><tr><th>名稱</th><th>狀態</th><th>最後連線</th><th>IP</th><th>成功／失敗</th><th>操作</th></tr></thead><tbody>
+{% for device in devices %}<tr><td><strong>{{ device.name }}</strong><small>{{ device.id }}</small></td><td>{{ '啟用' if device.enabled else '停用' }}</td><td>{{ device.last_seen_at or '尚未連線' }}</td><td>{{ device.last_ip or '—' }}</td><td>{{ device.download_success_count }}／{{ device.download_failure_count }}</td><td>{% if g.user.role == 'administrator' %}<button class="secondary regenerate" data-id="{{ device.id }}">重新產生 Token</button>{% else %}僅供檢視{% endif %}</td></tr>{% else %}<tr><td colspan="6" class="empty">尚未新增裝置。</td></tr>{% endfor %}
+</tbody></table></div></section>
+<dialog id="token-dialog"><h2>裝置 Token</h2><p class="warning">只顯示這一次。關閉前請安全地複製到裝置。</p><pre id="device-token"></pre><button onclick="this.closest('dialog').close()">我已儲存</button></dialog>
+{% endblock %}
+{% block scripts %}{% if g.user.role == 'administrator' %}<script>
+const dialog = document.getElementById('token-dialog'); const output = document.getElementById('device-token');
+function reveal(data) { output.textContent = data.token; dialog.showModal(); }
+document.getElementById('add-device').onclick = async () => { const name = prompt('請輸入裝置名稱'); if (!name) return; const response = await window.inktimeFetch('/api/v1/devices', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})}); reveal(await response.json()); };
+document.querySelectorAll('.regenerate').forEach(button => button.onclick = async () => { if (!confirm('舊 Token 將立即失效，確定繼續？')) return; const response = await window.inktimeFetch(`/api/v1/devices/${button.dataset.id}/token`, {method:'POST'}); reveal(await response.json()); });
+</script>{% endif %}{% endblock %}

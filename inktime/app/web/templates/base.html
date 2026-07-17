@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
+  <title>{% block title %}InkTime{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='platform.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/dashboard">InkTime <span>回憶管理平台</span></a>
+    {% if g.user %}
+      <nav aria-label="主要導覽">
+        <a href="/dashboard">儀表板</a><a href="/review">照片</a><a href="/devices">裝置</a>
+        <a href="/account/password">帳號</a>
+        <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="link-button">登出</button></form>
+      </nav>
+    {% endif %}
+  </header>
+  <main class="shell">
+    {% for category, message in get_flashed_messages(with_categories=true) %}
+      <div class="notice {{ category }}" role="alert">{{ message }}</div>
+    {% endfor %}
+    {% block content %}{% endblock %}
+  </main>
+  <script>
+    window.inktimeFetch = (url, options = {}) => {
+      options.headers = Object.assign({'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]').content}, options.headers || {});
+      return fetch(url, options);
+    };
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -19,6 +19,7 @@ resources/fonts/
 
 # Sensitive config
 config.py
+data/*.key
 
 # Outputs
 output/
