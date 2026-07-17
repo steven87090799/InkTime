@@ -25,6 +25,10 @@ from inktime.app.services.diagnostics import DiagnosticsService
 from inktime.app.domain.photos import ThumbnailCache
 from inktime.app.domain.rendering import AtomicReleasePublisher, FontManager
 from inktime.app.services.rendering import RenderService
+from inktime.app.services.analysis import PhotoAnalysisService
+from inktime.app.services.budgets import BudgetService
+from inktime.app.services.providers import ProviderService
+from inktime.app.core.logging import configure_logging
 from inktime.app.web.access import csrf_token, verify_csrf
 
 
@@ -49,6 +53,7 @@ def initialize_platform(
     release_dir: Path,
     testing: bool = False,
 ) -> Flask:
+    configure_logging()
     data_dir.mkdir(parents=True, exist_ok=True)
     release_dir.mkdir(parents=True, exist_ok=True)
     database = Database(database_path)
@@ -79,6 +84,13 @@ def initialize_platform(
     app.extensions["inktime_photo_repository"] = PhotoRepository(database)
     app.extensions["inktime_usage_repository"] = UsageRepository(database)
     app.extensions["inktime_thumbnail_cache"] = ThumbnailCache(data_dir / "cache" / "thumbnails")
+    budget_service = BudgetService(database, settings_repository)
+    app.extensions["inktime_budget_service"] = budget_service
+    app.extensions["inktime_provider_service"] = ProviderService(app.extensions["inktime_provider_repository"])
+    app.extensions["inktime_analysis_service"] = PhotoAnalysisService(
+        app.extensions["inktime_photo_repository"], app.extensions["inktime_usage_repository"],
+        app.extensions["inktime_thumbnail_cache"], budget_service,
+    )
     app.extensions["inktime_backup_service"] = BackupService(database, data_dir / "backups")
     app.extensions["inktime_diagnostics_service"] = DiagnosticsService(database, data_dir, data_dir / "cache" / "thumbnails")
     font_manager = FontManager(data_dir / "fonts")

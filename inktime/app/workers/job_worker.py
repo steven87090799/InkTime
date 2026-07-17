@@ -45,7 +45,7 @@ class BoundedJobWorker:
                     break
 
                 budget = job["budget_limit"]
-                if budget is not None and float(job["spent"]) >= float(budget):
+                if budget is not None and float(budget) > 0 and float(job["spent"]) >= float(budget):
                     self.repository.transition(job_id, {"running", "retrying"}, "budget_exceeded", "budget_exceeded")
                     break
 

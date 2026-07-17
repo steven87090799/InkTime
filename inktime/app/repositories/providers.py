@@ -62,3 +62,17 @@ class ProviderRepository:
                  int(payload.get("cooldown_seconds", 300)), now, now),
             )
         return provider_id
+
+    def pricing(self, provider_id: str) -> dict[str, dict[str, float]]:
+        with self.database.session() as connection:
+            rows = connection.execute(
+                "SELECT * FROM model_pricing WHERE provider_id=? AND enabled=1", (provider_id,)
+            ).fetchall()
+        return {
+            row["model"]: {
+                "input_per_million": row["input_per_million"],
+                "cached_input_per_million": row["cached_input_per_million"],
+                "output_per_million": row["output_per_million"],
+            }
+            for row in rows
+        }

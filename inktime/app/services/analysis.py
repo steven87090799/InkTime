@@ -11,13 +11,15 @@ from inktime.app.domain.photos import ThumbnailCache
 from inktime.app.providers.base import ProviderResponse, VisionProvider
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.usage import UsageRepository
+from inktime.app.services.budgets import BudgetService
 
 
 class PhotoAnalysisService:
-    def __init__(self, photos: PhotoRepository, usage: UsageRepository, thumbnails: ThumbnailCache) -> None:
+    def __init__(self, photos: PhotoRepository, usage: UsageRepository, thumbnails: ThumbnailCache, budgets: BudgetService | None = None) -> None:
         self.photos = photos
         self.usage = usage
         self.thumbnails = thumbnails
+        self.budgets = budgets
 
     @staticmethod
     def _local_result(photo) -> dict:
@@ -50,6 +52,8 @@ class PhotoAnalysisService:
         return cost
 
     def _model_call(self, *, provider: VisionProvider, image: Path, model: str, detail: str, stage: str, job_id: str | None, photo_id: str) -> tuple[dict, str, float]:
+        if self.budgets:
+            self.budgets.assert_request_allowed(job_id, photo_id)
         started_at = datetime.now(timezone.utc).isoformat()
         started_perf = time.perf_counter()
         response = provider.analyze(image_path=image, model=model, detail=detail, stage=stage)
