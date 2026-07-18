@@ -19,6 +19,7 @@ resources/fonts/
 
 # Sensitive config
 config.py
+.env
 data/*.key
 
 # Outputs
@@ -38,6 +39,9 @@ scripts/performance_100k 2.py
 
 # Logs
 logs/
+
+# Runtime data
+data/backups/
 
 # Others
 test/
