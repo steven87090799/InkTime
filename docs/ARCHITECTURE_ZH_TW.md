@@ -79,7 +79,7 @@ flowchart LR
     STAGE2 --> SAVE
     LOCAL_SCORE --> SAVE
     INHERIT --> SAVE
-    SAVE --> PICK["回憶分通過門檻<br/>依綜合分排序"] --> RELEASE["480×800 四色 2bpp Release"]
+    SAVE --> PICK["回憶分通過門檻<br/>依綜合分排序"] --> RELEASE["480×800 四色／六色／七色 Release<br/>Profile + 抖動 + SHA-256"]
     RELEASE --> DEVICE["ESP32 驗證 SHA-256 後顯示"]
 ```
 

@@ -1,1 +1,48 @@
-{% extends "base.html" %}{% block title %}電子紙渲染｜InkTime{% endblock %}{% block content %}<div class="page-head"><div><p class="eyebrow">版本化發布</p><h1>電子紙渲染</h1><p>正式發布使用 480×800 四色 2bpp、SHA-256 與原子更新；失敗不會改動 latest。</p></div>{% if g.user.role=='administrator' %}<button class="primary" id="publish">發布目前精選</button>{% endif %}</div><section class="metrics"><article><span>輸出格式</span><strong>2bpp</strong></article><article><span>單張大小</span><strong>96,000 bytes</strong></article><article><span>顯示尺寸</span><strong>480 × 800</strong></article></section><section class="panel"><div class="panel-head"><h2>繁體中文字型</h2>{% if g.user.role=='administrator' %}<form id="font-form"><input type="file" name="font" accept=".ttf,.otf,.ttc" required><button>上傳並設為目前字型</button></form>{% endif %}</div>{% for font in fonts %}<p>{{ font.name }}</p>{% else %}<p class="warning">尚未安裝字型。含短文案的正式渲染會明確失敗，不會靜默退回不支援繁體中文的預設字型。</p>{% endfor %}</section><section class="panel"><h2>發布歷史</h2><div class="table-wrap"><table><thead><tr><th>版本</th><th>建立時間</th><th>格式</th><th>檔案</th><th>操作</th></tr></thead><tbody>{% for release in releases %}<tr><td><code>{{ release.release_id }}</code></td><td>{{ release.created_at }}</td><td>{{ release.width }}×{{ release.height }} {{ release.pixel_format }}</td><td>{{ release.files|length }}</td><td>{% if g.user.role=='administrator' %}<button class="secondary rollback" data-id="{{ release.release_id }}">回滾到此版本</button>{% endif %}</td></tr>{% else %}<tr><td colspan="5" class="empty">尚未發布版本。</td></tr>{% endfor %}</tbody></table></div></section>{% endblock %}{% block scripts %}{% if g.user.role=='administrator' %}<script>document.getElementById('publish').onclick=async()=>{if(!confirm('將發布通過最低回憶分門檻、且綜合排序分最高的照片，確定？'))return;const r=await window.inktimeFetch('/api/v1/releases',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"photo_ids":[]}'}),d=await r.json();if(r.ok)location.href=d.detail_url;else alert(d.message||'發布失敗');};document.querySelectorAll('.rollback').forEach(b=>b.onclick=async()=>{if(!confirm('確定回滾 latest 指標？'))return;const r=await window.inktimeFetch(`/api/v1/releases/${b.dataset.id}/rollback`,{method:'POST'});if(r.ok)location.reload();});document.getElementById('font-form').onsubmit=async e=>{e.preventDefault();const r=await window.inktimeFetch('/api/v1/fonts',{method:'POST',body:new FormData(e.target)});if(r.ok)location.reload();else alert((await r.json()).message||'字型上傳失敗');};</script>{% endif %}{% endblock %}
+{% extends "base.html" %}
+{% block title %}電子紙渲染｜InkTime{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">版本化多色發布</p>
+    <h1>電子紙渲染</h1>
+    <p>固定輸出 480×800，依面板 Profile 產生四色 2bpp 或六／七色 indexed4；每張檔案都有 SHA-256，失敗不會改動該 Profile 的 latest 指標。</p>
+  </div>
+  <div><a class="secondary" href="/simulator">開啟電子紙模擬器</a>{% if g.user.role=='administrator' %} <button class="primary" id="publish">發布目前 Profile</button> <button class="secondary" id="publish-all">發布全部 Profile</button>{% endif %}</div>
+</div>
+
+{% set active = profiles|selectattr('key','equalto',current_profile)|first %}
+<section class="metrics">
+  <article><span>目前 Profile</span><strong>{{ active.label if active else current_profile }}</strong></article>
+  <article><span>輸出格式</span><strong>{{ active.pixel_format if active else '未知' }}</strong></article>
+  <article><span>單張大小</span><strong>{{ '{:,}'.format(active.bytes_per_image) if active else '—' }} bytes</strong></article>
+  <article><span>抖動／色差</span><strong>{{ current_dither }}／{{ color_distance }}</strong><small>強度 {{ dither_strength }}</small></article>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>顯示 Profile</h2><a href="/settings">調整渲染預設值</a></div>
+  <div class="table-wrap"><table><thead><tr><th>Profile</th><th>格式</th><th>色盤</th><th>單張大小</th></tr></thead><tbody>
+    {% for profile in profiles %}<tr><td><strong>{{ profile.label }}</strong><small><code>{{ profile.key }}</code></small></td><td>{{ profile.pixel_format }}</td><td>{% for color in profile.colors %}<span title="{{ color.name }}" style="display:inline-block;width:1.2rem;height:1.2rem;border:1px solid #777;background:rgb({{ color.rgb|join(',') }})"></span>{% endfor %}</td><td>{{ '{:,}'.format(profile.bytes_per_image) }} bytes</td></tr>{% endfor %}
+  </tbody></table></div>
+  <p class="notice">Floyd–Steinberg 與 Atkinson 為誤差擴散，照片通常較自然；Bayer 4×4／8×8 為有序抖動，速度快、結果穩定；none 適合圖示與已經使用面板色盤的素材。發布時才運算，不增加平常待機耗用。</p>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>繁體中文字型</h2>{% if g.user.role=='administrator' %}<form id="font-form"><input type="file" name="font" accept=".ttf,.otf,.ttc" required><button>上傳並設為目前字型</button></form>{% endif %}</div>
+  {% for font in fonts %}<p>{{ font.name }}</p>{% else %}<p class="warning">尚未安裝字型。含短文案的正式渲染會明確失敗，不會靜默退回不支援繁體中文的預設字型。</p>{% endfor %}
+</section>
+
+<section class="panel">
+  <h2>發布歷史</h2>
+  <div class="table-wrap"><table><thead><tr><th>版本</th><th>建立時間</th><th>Profile／格式</th><th>檔案</th><th>操作</th></tr></thead><tbody>
+    {% for release in releases %}<tr><td><code>{{ release.release_id }}</code></td><td>{{ release.created_at }}</td><td>{{ release.render_profile|default('safe_4c') }}<small>{{ release.width }}×{{ release.height }} {{ release.pixel_format }}／{{ release.dither|default('none') }}</small></td><td>{{ release.files|length }}{% if release.files %}／<a href="/rendering/releases/{{ release.release_id }}/{{ release.files[0].preview }}" target="_blank">實際色盤預覽</a>{% endif %}</td><td>{% if g.user.role=='administrator' %}<button class="secondary rollback" data-id="{{ release.release_id }}">回滾此 Profile</button>{% endif %}</td></tr>
+    {% else %}<tr><td colspan="5" class="empty">尚未發布版本。</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% endblock %}
+{% block scripts %}{% if g.user.role=='administrator' %}<script>
+async function publishProfiles(profileKeys){if(!confirm('將發布通過最低回憶分門檻、且綜合排序分最高的照片，確定？'))return;const body={photo_ids:[]};if(profileKeys)body.profile_keys=profileKeys;const r=await window.inktimeFetch('/api/v1/releases',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),d=await r.json();if(r.ok)location.href=d.detail_url;else alert(d.message||'發布失敗');}
+document.getElementById('publish').onclick=()=>publishProfiles(['{{ current_profile }}']);
+document.getElementById('publish-all').onclick=()=>publishProfiles({{ profiles|map(attribute='key')|list|tojson }});
+document.querySelectorAll('.rollback').forEach(b=>b.onclick=async()=>{if(!confirm('確定回滾這個 Profile 的 latest 指標？'))return;const r=await window.inktimeFetch(`/api/v1/releases/${b.dataset.id}/rollback`,{method:'POST'});if(r.ok)location.reload();});
+document.getElementById('font-form').onsubmit=async e=>{e.preventDefault();const r=await window.inktimeFetch('/api/v1/fonts',{method:'POST',body:new FormData(e.target)});if(r.ok)location.reload();else alert((await r.json()).message||'字型上傳失敗');};
+</script>{% endif %}{% endblock %}

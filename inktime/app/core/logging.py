@@ -26,6 +26,8 @@ STANDARD_FIELDS = {
     "details": {},
 }
 
+_ACTIVE_CONFIGURATION: tuple[str, str] | None = None
+
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -57,14 +59,40 @@ class HumanFormatter(logging.Formatter):
         return f"{prefix}{f' [{error_code}]' if error_code else ''} {record.getMessage()}"
 
 
-def configure_logging(format_name: str | None = None, level: str | None = None) -> None:
+def configure_logging(
+    format_name: str | None = None,
+    level: str | None = None,
+    *,
+    settings_repository: Any | None = None,
+    force: bool = False,
+) -> tuple[str, str]:
+    """設定單一 stdout handler；資料庫設定在啟動後優先於 bootstrap 環境變數。"""
+
+    global _ACTIVE_CONFIGURATION
+    repository_format = settings_repository.get("system.log_format", None) if settings_repository else None
+    repository_level = settings_repository.get("system.log_level", None) if settings_repository else None
+    selected = str(
+        format_name or repository_format or os.environ.get("INKTIME_LOG_FORMAT") or "human"
+    ).lower()
+    selected_level = str(
+        level or repository_level or os.environ.get("INKTIME_LOG_LEVEL") or "INFO"
+    ).upper()
+    if selected not in {"human", "json"}:
+        selected = "human"
+    if selected_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+        selected_level = "INFO"
+    configuration = (selected, selected_level)
+    if not force and _ACTIVE_CONFIGURATION == configuration:
+        return configuration
+
     handler = logging.StreamHandler(sys.stdout)
-    selected = (format_name or os.environ.get("INKTIME_LOG_FORMAT") or "human").lower()
     handler.setFormatter(JsonFormatter() if selected == "json" else HumanFormatter())
     root = logging.getLogger()
     root.handlers.clear()
     root.addHandler(handler)
-    root.setLevel((level or os.environ.get("INKTIME_LOG_LEVEL") or "INFO").upper())
+    root.setLevel(selected_level)
+    _ACTIVE_CONFIGURATION = configuration
+    return configuration
 
 
 def log_event(logger: logging.Logger, level: int, message: str, **fields: Any) -> None:

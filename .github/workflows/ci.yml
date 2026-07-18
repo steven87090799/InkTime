@@ -63,3 +63,4 @@ jobs:
       - run: arduino-cli core update-index && arduino-cli core install esp32:esp32@3.3.10
       - run: arduino-cli lib install GxEPD2@1.6.9 ArduinoJson@7.4.3
       - run: arduino-cli compile --fqbn esp32:esp32:esp32s3 esp32/ink-display-7C-photo
+      - run: arduino-cli compile --fqbn esp32:esp32:esp32s3 --build-property "compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1" esp32/ink-display-7C-photo

@@ -5,6 +5,8 @@ import base64
 from hashlib import sha256
 import json
 from typing import Any
+from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -31,6 +33,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": "string",
         "description": "新工作的預設分析策略",
         "risk": "高品質策略成本較高",
+        "choices": ["local", "low_cost", "smart_two_stage", "high_quality"],
         "restart": False,
     },
     "analysis.stage_two_threshold": {
@@ -114,13 +117,63 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "analysis.concurrency": {
         "category": "分析設定",
-        "default": 2,
+        "default": 1,
         "type": "integer",
         "description": "Worker 最大並行數",
-        "risk": "過高可能觸發 Rate Limit 或耗盡記憶體",
+        "risk": "Intel N100 建議 1；過高可能觸發 Rate Limit 或造成圖片解碼記憶體尖峰",
         "min": 1,
-        "max": 32,
-        "restart": True,
+        "max": 8,
+        "restart": False,
+    },
+    "worker.queue_multiplier": {
+        "category": "效能與待機",
+        "default": 1,
+        "type": "integer",
+        "description": "每個並行槽預先排入記憶體的工作數",
+        "risk": "數值越高吞吐可能略增，但同時保留更多圖片與 Future",
+        "min": 1,
+        "max": 4,
+        "restart": False,
+    },
+    "worker.poll_seconds": {
+        "category": "效能與待機",
+        "default": 15,
+        "type": "number",
+        "description": "沒有工作時 Worker 檢查新工作的秒數",
+        "risk": "數值越小反應越快，但會增加待機喚醒與 SQLite 讀取",
+        "min": 1,
+        "max": 300,
+        "restart": False,
+    },
+    "worker.progress_items": {
+        "category": "效能與待機",
+        "default": 50,
+        "type": "integer",
+        "description": "每完成多少項目輸出一次彙總進度 Log",
+        "risk": "設為太小會產生大量 Docker Log；不會逐張輸出",
+        "min": 5,
+        "max": 10000,
+        "restart": False,
+    },
+    "worker.progress_seconds": {
+        "category": "效能與待機",
+        "default": 300,
+        "type": "integer",
+        "description": "工作進行時兩次彙總進度 Log 的最長秒數",
+        "risk": "設為太小會增加 Log 量",
+        "min": 30,
+        "max": 3600,
+        "restart": False,
+    },
+    "scheduler.poll_seconds": {
+        "category": "效能與待機",
+        "default": 60,
+        "type": "integer",
+        "description": "Scheduler 檢查備份與逾期租約的秒數",
+        "risk": "數值越小會增加待機喚醒；不建議低於 30 秒",
+        "min": 30,
+        "max": 3600,
+        "restart": False,
     },
     "analysis.max_retries": {
         "category": "分析設定",
@@ -246,6 +299,43 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "risk": "缺少 CJK 字元時禁止正式發布",
         "restart": False,
     },
+    "render.profile": {
+        "category": "渲染設定",
+        "default": "safe_4c",
+        "type": "string",
+        "description": "正式發布使用的電子紙面板色彩 Profile",
+        "risk": "必須與裝置頁設定的面板型號一致；不一致時韌體會拒絕更新",
+        "choices": ["safe_4c", "gdep073e01_6c", "gdey073d46_7c"],
+        "restart": False,
+    },
+    "render.dither": {
+        "category": "渲染設定",
+        "default": "floyd_steinberg",
+        "type": "string",
+        "description": "有限色電子紙的抖動算法；Floyd–Steinberg 適合照片，Bayer 較快且規則",
+        "risk": "誤差擴散畫質較自然但發布 CPU 時間較長；不影響待機資源",
+        "choices": ["none", "floyd_steinberg", "atkinson", "bayer4", "bayer8"],
+        "restart": False,
+    },
+    "render.dither_strength": {
+        "category": "渲染設定",
+        "default": 1.0,
+        "type": "number",
+        "description": "抖動誤差或閾值強度；0 為關閉、1 為標準",
+        "risk": "過高會增加顆粒與色點",
+        "min": 0,
+        "max": 2,
+        "restart": False,
+    },
+    "render.color_distance": {
+        "category": "渲染設定",
+        "default": "oklab",
+        "type": "string",
+        "description": "色盤映射距離；OKLab 較符合人眼感知，RGB 較接近舊版",
+        "risk": "切換後同一張照片的色彩分布會不同",
+        "choices": ["oklab", "rgb"],
+        "restart": False,
+    },
     "device.legacy_api_enabled": {
         "category": "裝置設定",
         "default": False,
@@ -254,13 +344,150 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "risk": "不安全；Token 可能進入 URL 與 Log",
         "restart": True,
     },
+    "device.default_timezone": {
+        "category": "裝置設定",
+        "default": "Asia/Taipei",
+        "type": "string",
+        "description": "新增 ESP32 裝置時套用的 IANA 時區",
+        "risk": "錯誤時區會使每日喚醒時間偏移",
+        "restart": False,
+    },
+    "device.default_schedule": {
+        "category": "裝置設定",
+        "default": "08:00",
+        "type": "string",
+        "description": "新增 ESP32 裝置時套用的每日刷新時間（HH:MM）",
+        "risk": "刷新時電子紙與 Wi-Fi 會短暫提高耗電",
+        "pattern": "time_hhmm",
+        "restart": False,
+    },
+    "device.default_rotation": {
+        "category": "裝置設定",
+        "default": 0,
+        "type": "integer",
+        "description": "新增 7.3 吋裝置時套用的畫面方向",
+        "risk": "目前正式韌體只支援 0° 與 180°",
+        "choices": [0, 180],
+        "restart": False,
+    },
+    "device.default_panel_profile": {
+        "category": "裝置設定",
+        "default": "safe_4c",
+        "type": "string",
+        "description": "新增 ESP32 裝置時套用的面板 Profile",
+        "risk": "請依實際面板型號選擇；選錯會由韌體安全拒絕",
+        "choices": ["safe_4c", "gdep073e01_6c", "gdey073d46_7c"],
+        "restart": False,
+    },
+    "notification.device_offline_enabled": {
+        "category": "裝置通知",
+        "default": True,
+        "type": "boolean",
+        "description": "裝置超過門檻未連線時建立站內通知",
+        "risk": "若裝置刷新週期長於離線門檻會誤報",
+        "restart": False,
+    },
+    "notification.device_offline_hours": {
+        "category": "裝置通知",
+        "default": 30,
+        "type": "number",
+        "description": "距離最後連線多久後判定離線（小時）",
+        "risk": "每日喚醒裝置建議至少 26–30 小時",
+        "min": 1,
+        "max": 720,
+        "restart": False,
+    },
+    "notification.device_recovery_enabled": {
+        "category": "裝置通知",
+        "default": True,
+        "type": "boolean",
+        "description": "曾離線的裝置重新回報後建立恢復通知",
+        "risk": "停用後仍會清除離線狀態，但不建立恢復訊息",
+        "restart": False,
+    },
+    "notification.device_offline_repeat_enabled": {
+        "category": "裝置通知",
+        "default": False,
+        "type": "boolean",
+        "description": "離線期間是否依冷卻時間重複提醒",
+        "risk": "啟用可能增加外部 Webhook 通知量",
+        "restart": False,
+    },
+    "notification.device_offline_cooldown_hours": {
+        "category": "裝置通知",
+        "default": 24,
+        "type": "number",
+        "description": "同一裝置重複離線提醒的最短間隔（小時）",
+        "risk": "過短會造成通知轟炸",
+        "min": 1,
+        "max": 720,
+        "restart": False,
+    },
+    "notification.scan_seconds": {
+        "category": "裝置通知",
+        "default": 300,
+        "type": "integer",
+        "description": "Scheduler 掃描裝置離線與恢復狀態的秒數",
+        "risk": "過短會增加待機 SQLite 讀取",
+        "min": 60,
+        "max": 3600,
+        "restart": False,
+    },
+    "notification.webhook_enabled": {
+        "category": "裝置通知",
+        "default": False,
+        "type": "boolean",
+        "description": "將新通知以 JSON POST 到外部 Webhook",
+        "risk": "Webhook 端點會收到裝置名稱與狀態；Token 另以加密欄位保存",
+        "restart": False,
+    },
+    "notification.webhook_url": {
+        "category": "裝置通知",
+        "default": "",
+        "type": "string",
+        "description": "接收通知的完整 http:// 或 https:// URL",
+        "risk": "管理員可設定內網端點；請只使用可信服務",
+        "pattern": "optional_http_url",
+        "max_length": 2048,
+        "restart": False,
+    },
+    "notification.webhook_timeout_seconds": {
+        "category": "裝置通知",
+        "default": 10,
+        "type": "integer",
+        "description": "Webhook 單次連線與回應逾時秒數",
+        "risk": "過長會延後 Scheduler 的其他低頻工作",
+        "min": 2,
+        "max": 30,
+        "restart": False,
+    },
+    "system.log_level": {
+        "category": "Log 與診斷",
+        "default": "INFO",
+        "type": "string",
+        "description": "應用程式最低 Log 層級；建議正式環境使用 INFO 或 WARNING",
+        "risk": "DEBUG 可能包含大量技術細節並增加磁碟寫入",
+        "choices": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        "restart": False,
+    },
     "system.log_format": {
-        "category": "系統設定",
-        "default": "human",
+        "category": "Log 與診斷",
+        "default": "json",
         "type": "string",
         "description": "Console Log 格式（human/json）",
         "risk": "JSON 適合集中式 Log",
-        "restart": True,
+        "choices": ["human", "json"],
+        "restart": False,
+    },
+    "system.diagnostics_cache_seconds": {
+        "category": "Log 與診斷",
+        "default": 300,
+        "type": "integer",
+        "description": "診斷頁重算縮圖目錄大小前的快取秒數",
+        "risk": "數值太小會在大型快取目錄產生頻繁磁碟掃描",
+        "min": 30,
+        "max": 86400,
+        "restart": False,
     },
     "security.session_minutes": {
         "category": "安全設定",
@@ -270,7 +497,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "risk": "過長會增加共用裝置風險",
         "min": 5,
         "max": 1440,
-        "restart": True,
+        "restart": False,
     },
     "backup.schedule_enabled": {
         "category": "備份設定",
@@ -324,6 +551,18 @@ class SettingsRepository:
                     for key, definition in SETTING_DEFINITIONS.items()
                 ],
             )
+            connection.executemany(
+                "UPDATE settings SET category=?,value_type=?,requires_restart=? WHERE key=?",
+                [
+                    (
+                        definition["category"],
+                        definition["type"],
+                        int(definition.get("restart", False)),
+                        key,
+                    )
+                    for key, definition in SETTING_DEFINITIONS.items()
+                ],
+            )
 
     def all(self):
         with self.database.session() as connection:
@@ -338,6 +577,13 @@ class SettingsRepository:
         with self.database.session() as connection:
             row = connection.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()
         return json.loads(row["value_json"]) if row else default
+
+    def history(self, limit: int = 100):
+        with self.database.session() as connection:
+            return connection.execute(
+                "SELECT * FROM setting_history ORDER BY id DESC LIMIT ?",
+                (max(1, min(int(limit), 500)),),
+            ).fetchall()
 
     def update(self, key: str, value, *, changed_by: str, source_ip: str) -> None:
         definition = SETTING_DEFINITIONS.get(key)
@@ -356,6 +602,34 @@ class SettingsRepository:
                 raise ValueError(f"{key} 內容不可少於 {definition['min_length']} 個字元")
             if "max_length" in definition and len(value) > definition["max_length"]:
                 raise ValueError(f"{key} 內容不可超過 {definition['max_length']} 個字元")
+        if "choices" in definition and value not in definition["choices"]:
+            choices = "、".join(str(item) for item in definition["choices"])
+            raise ValueError(f"{key} 只允許：{choices}")
+        if definition.get("pattern") == "time_hhmm":
+            parts = str(value).split(":")
+            if (
+                len(parts) != 2
+                or not all(part.isdigit() for part in parts)
+                or not 0 <= int(parts[0]) <= 23
+                or not 0 <= int(parts[1]) <= 59
+                or len(parts[0]) != 2
+                or len(parts[1]) != 2
+            ):
+                raise ValueError(f"{key} 必須使用 00:00 到 23:59 格式")
+        if definition.get("pattern") == "optional_http_url" and value:
+            parsed = urlparse(str(value))
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.netloc
+                or parsed.username is not None
+                or parsed.password is not None
+            ):
+                raise ValueError(f"{key} 必須是無帳密的完整 http:// 或 https:// URL")
+        if key in {"general.timezone", "device.default_timezone"}:
+            try:
+                ZoneInfo(str(value))
+            except ZoneInfoNotFoundError as exc:
+                raise ValueError(f"{key} 不是有效的 IANA 時區") from exc
         if (
             "min" in definition
             and value < definition["min"]

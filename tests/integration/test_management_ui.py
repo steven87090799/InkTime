@@ -18,6 +18,7 @@ def test_primary_management_pages_render(client, app):
         "/providers",
         "/scoring",
         "/costs",
+        "/simulator",
         "/rendering",
         "/devices",
         "/maintenance",
@@ -94,6 +95,61 @@ def test_scoring_test_upload_is_normalized_and_not_persisted(client, app, monkey
     assert response.status_code == 200
     assert response.json["ranking_score"] == 88
     assert observed["exists_during_analysis"] is True
+
+
+def test_epaper_simulator_works_without_photo_database_or_model(client, app):
+    create_admin(app)
+    login(client)
+    assert app.extensions["inktime_provider_repository"].list() == []
+    image = BytesIO()
+    Image.new("RGB", (32, 48), (42, 110, 180)).save(image, "PNG")
+    image.seek(0)
+
+    response = client.post(
+        "/api/v1/rendering/simulate",
+        data={
+            "photo": (image, "standalone.png"),
+            "profile": "safe_4c",
+            "dither": "none",
+            "fit": "contain",
+            "strength": "0",
+            "color_distance": "oklab",
+        },
+        headers={"X-CSRF-Token": csrf(client)},
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 200
+    assert response.mimetype == "image/png"
+    assert response.headers["X-InkTime-Model"] == "disabled"
+    assert response.headers["X-InkTime-Canvas"] == "480x800"
+    assert response.headers["X-InkTime-Payload-Bytes"] == "96000"
+    rendered = Image.open(BytesIO(response.data))
+    assert rendered.size == (480, 800)
+    assert set(rendered.getdata()).issubset(
+        {(0, 0, 0), (255, 255, 255), (220, 30, 30), (245, 190, 25)}
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM releases").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 0
+
+
+def test_epaper_simulator_rejects_unknown_profile(client, app):
+    create_admin(app)
+    login(client)
+    image = BytesIO()
+    Image.new("RGB", (8, 8), "white").save(image, "PNG")
+    image.seek(0)
+    response = client.post(
+        "/api/v1/rendering/simulate",
+        data={"photo": (image, "sample.png"), "profile": "not-a-panel"},
+        headers={"X-CSRF-Token": csrf(client)},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 400
+    assert response.json["error_code"] == "RENDER-004"
 
 
 def test_backup_is_integrity_checked_and_downloadable(client, app):

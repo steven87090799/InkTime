@@ -15,8 +15,8 @@ SENSITIVE_KEY = re.compile(r"(api[_-]?key|token|password|secret|authorization|co
 
 
 def hash_password(password: str) -> str:
-    if len(password) < 12:
-        raise ValueError("密碼至少需要 12 個字元")
+    if not password:
+        raise ValueError("密碼不可空白")
     method = "scrypt" if hasattr(hashlib, "scrypt") else "pbkdf2:sha256:600000"
     return generate_password_hash(password, method=method)
 

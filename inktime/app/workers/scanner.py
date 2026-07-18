@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Iterator
+import time
+from typing import Callable, Iterator
 
 from inktime.app.domain.photos import PhotoPreprocessor, ThumbnailCache
 from inktime.app.repositories.photos import PhotoRepository
@@ -29,12 +30,23 @@ class PhotoScanner:
         self.preprocessor = preprocessor
         self.thumbnails = thumbnails
 
-    def scan(self, name: str, root: Path, *, build_thumbnails: bool = True, limit: int | None = None) -> dict:
+    def scan(
+        self,
+        name: str,
+        root: Path,
+        *,
+        build_thumbnails: bool = True,
+        limit: int | None = None,
+        progress_callback: Callable[[dict], None] | None = None,
+        progress_interval_items: int = 50,
+        progress_interval_seconds: int = 300,
+    ) -> dict:
         root = root.expanduser().resolve()
         if not root.is_dir():
             raise FileNotFoundError("SCAN-001 照片資料夾不存在或無法讀取")
         library_id = self.repository.ensure_library(name, root)
         processed = inherited = failed = 0
+        last_progress_at = time.monotonic()
         for path in iter_images(root):
             if limit is not None and processed + failed >= limit:
                 break
@@ -49,4 +61,14 @@ class PhotoScanner:
                 processed += 1
             except Exception:
                 failed += 1
+            total = processed + failed
+            now = time.monotonic()
+            if progress_callback and (
+                total % max(1, progress_interval_items) == 0
+                or now - last_progress_at >= max(1, progress_interval_seconds)
+            ):
+                progress_callback(
+                    {"processed": processed, "inherited": inherited, "failed": failed}
+                )
+                last_progress_at = now
         return {"library_id": library_id, "processed": processed, "inherited": inherited, "failed": failed}

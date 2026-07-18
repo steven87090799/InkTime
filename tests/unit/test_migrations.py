@@ -11,7 +11,7 @@ from inktime.app.db.migrations import Migration, MIGRATIONS
 
 def test_fresh_database_is_migrated(tmp_path):
     database = Database(tmp_path / "inktime.db")
-    assert migrate(database) == [1, 2, 3, 4, 5]
+    assert migrate(database) == [1, 2, 3, 4, 5, 6, 7]
     assert database.integrity_check() == "ok"
     with database.session() as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -39,6 +39,8 @@ def test_existing_photo_scores_table_is_preserved(tmp_path):
     with database.session() as migrated:
         assert migrated.execute("SELECT caption FROM photo_scores").fetchone()[0] == "回憶"
     assert len(list((tmp_path / "backups").glob("*.sqlite3"))) == 1
+    assert migrate(database, tmp_path / "backups") == []
+    assert len(list((tmp_path / "backups").glob("*.sqlite3"))) == 1
 
 
 def test_failed_migration_rolls_back(monkeypatch, tmp_path):
@@ -64,5 +66,5 @@ def test_concurrent_migrations_are_serialized(tmp_path):
     database = Database(tmp_path / "inktime.db")
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _index: migrate(database), range(2)))
-    assert sorted(results, key=len) == [[], [1, 2, 3, 4, 5]]
+    assert sorted(results, key=len) == [[], [1, 2, 3, 4, 5, 6, 7]]
     assert database.integrity_check() == "ok"

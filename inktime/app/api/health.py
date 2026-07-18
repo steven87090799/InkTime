@@ -34,7 +34,7 @@ def ready():
     checks = {
         "database": database.integrity_check() == "ok",
         "release_directory": os.access(current_app.config["INKTIME_RELEASE_DIR"], os.R_OK | os.W_OK),
-        "migrations": int(migrations or 0) >= 4,
+        "migrations": int(migrations or 0) >= 6,
         "worker": int(stalled) == 0,
         "settings": current_app.extensions["inktime_settings_repository"].get("general.timezone") is not None,
     }

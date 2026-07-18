@@ -20,9 +20,12 @@
 #include "soc/soc_caps.h"
 
 // =======================
-//  调试开关（需要串口时改成 1）
+//  正式版預設不輸出逐步序列 Log；需要除錯時以 -DINKTIME_DEBUG_LOG=1 編譯。
 // =======================
-#define DEBUG_LOG 1
+#ifndef INKTIME_DEBUG_LOG
+#define INKTIME_DEBUG_LOG 0
+#endif
+#define DEBUG_LOG INKTIME_DEBUG_LOG
 
 HardwareSerial DebugSerial(0);
 
@@ -69,12 +72,25 @@ static const int FB_HEIGHT  = 800;
 #define PIN_EPD_SCLK 10
 #define PIN_EPD_DIN  9
 
-// 如果换用其它屏幕，请自行修改此处
+// 現有 PCB 預設為已停產的 GDEY073D46；新採購 GDEP073E01 時以
+// -DINKTIME_PANEL_GDEP073E01=1 編譯；前者為 7 色、後者為 6 色，皆為 800x480。
+#ifndef INKTIME_PANEL_GDEP073E01
+#define INKTIME_PANEL_GDEP073E01 0
+#endif
+
+#if INKTIME_PANEL_GDEP073E01
+#define INKTIME_PANEL_CLASS GxEPD2_730c_GDEP073E01
+#define INKTIME_PANEL_PROFILE "gdep073e01_6c"
+#else
+#define INKTIME_PANEL_CLASS GxEPD2_730c_GDEY073D46
+#define INKTIME_PANEL_PROFILE "gdey073d46_7c"
+#endif
+
 GxEPD2_7C<
-  GxEPD2_730c_GDEY073D46,
-  GxEPD2_730c_GDEY073D46::HEIGHT / 4
+  INKTIME_PANEL_CLASS,
+  INKTIME_PANEL_CLASS::HEIGHT / 4
 > display(
-  GxEPD2_730c_GDEY073D46(
+  INKTIME_PANEL_CLASS(
     PIN_EPD_CS,
     PIN_EPD_DC,
     PIN_EPD_RST,
@@ -86,6 +102,8 @@ GxEPD2_7C<
 //  舊版 URL 金鑰 API 已停用；新版透過每台裝置獨立 Bearer Token 取得 Manifest。
 // =======================
 #define DEVICE_MANIFEST_PATH "/api/device/v1/releases/latest"
+#define DEVICE_STATUS_PATH   "/api/device/v1/status"
+#define INKTIME_FIRMWARE_VERSION "2.2.0"
 
 // =======================
 //  配置存储 / WiFi / WebServer
@@ -98,18 +116,28 @@ struct Config {
   String  wifi_pass;
   String  backend_hostport;
   String  device_token;
-  int32_t tz_offset_hours;
+  int32_t tz_offset_minutes;
   uint8_t refresh_hour;
+  uint8_t refresh_minute;
   bool    rotate180;
+  uint32_t config_version;
   bool    valid;
 };
 
 const char*  DEFAULT_HOSTPORT = "";
-const int32_t DEFAULT_TZ      = 8;
+const int32_t DEFAULT_TZ_MINUTES = 8 * 60;
 const uint8_t DEFAULT_HOUR    = 8;
+const uint8_t DEFAULT_MINUTE  = 0;
 
 Config g_cfg;
-uint8_t* framebuffer = nullptr;
+uint8_t* frameData = nullptr;
+size_t frameDataSize = 0;
+bool frameIndexed4 = false;
+bool serverConfigChanged = false;
+String currentReleaseId;
+String currentRenderProfile;
+String lastDeviceErrorCode;
+String lastDeviceErrorMessage;
 
 static int calculateSha256(const unsigned char* input, size_t length, unsigned char output[32]) {
 #if MBEDTLS_VERSION_MAJOR >= 3
@@ -176,7 +204,7 @@ static uint32_t minutesToNextRefreshFromLastEpoch(const Config &cfg) {
   localtime_r(&lastEpoch, &t);
 
   int curMinOfDay = t.tm_hour * 60 + t.tm_min;
-  int targetMin   = (int)cfg.refresh_hour * 60;
+  int targetMin   = (int)cfg.refresh_hour * 60 + (int)cfg.refresh_minute;
   int deltaMin;
 
   if (curMinOfDay < targetMin) deltaMin = targetMin - curMinOfDay;
@@ -196,9 +224,11 @@ void loadConfig(Config &cfg) {
   cfg.wifi_pass        = prefs.getString("pass", "");
   cfg.backend_hostport = prefs.getString("hostport", DEFAULT_HOSTPORT);
   cfg.device_token     = prefs.getString("devtoken", "");
-  cfg.tz_offset_hours  = prefs.getInt("tz", DEFAULT_TZ);
+  cfg.tz_offset_minutes = prefs.getInt("tzmin", prefs.getInt("tz", 8) * 60);
   cfg.refresh_hour     = (uint8_t)prefs.getUChar("hour", DEFAULT_HOUR);
+  cfg.refresh_minute   = (uint8_t)prefs.getUChar("minute", DEFAULT_MINUTE);
   cfg.rotate180        = prefs.getBool("rot180", false);
+  cfg.config_version   = prefs.getULong("cfgver", 0);
   prefs.end();
 
   cfg.valid = (cfg.wifi_ssid.length() > 0);
@@ -207,8 +237,9 @@ void loadConfig(Config &cfg) {
   DBG_PRINTLN("---- loadConfig ----");
   DBG_PRINT("[CFG] ssid="); DBG_PRINTLN(cfg.wifi_ssid);
   DBG_PRINT("[CFG] hostport="); DBG_PRINTLN(cfg.backend_hostport);
-  DBG_PRINT("[CFG] tz_offset_hours="); DBG_PRINTLN(cfg.tz_offset_hours);
+  DBG_PRINT("[CFG] tz_offset_minutes="); DBG_PRINTLN(cfg.tz_offset_minutes);
   DBG_PRINT("[CFG] refresh_hour="); DBG_PRINTLN((int)cfg.refresh_hour);
+  DBG_PRINT("[CFG] refresh_minute="); DBG_PRINTLN((int)cfg.refresh_minute);
   DBG_PRINT("[CFG] rotate180="); DBG_PRINTLN(cfg.rotate180 ? "true" : "false");
   DBG_PRINT("[CFG] valid="); DBG_PRINTLN(cfg.valid ? "true" : "false");
 #endif
@@ -220,9 +251,11 @@ void saveConfig(const Config &cfg) {
   prefs.putString("pass", cfg.wifi_pass);
   prefs.putString("hostport", cfg.backend_hostport);
   prefs.putString("devtoken", cfg.device_token);
-  prefs.putInt("tz", cfg.tz_offset_hours);
+  prefs.putInt("tzmin", cfg.tz_offset_minutes);
   prefs.putUChar("hour", cfg.refresh_hour);
+  prefs.putUChar("minute", cfg.refresh_minute);
   prefs.putBool("rot180", cfg.rotate180);
+  prefs.putULong("cfgver", cfg.config_version);
   prefs.end();
 
 #if DEBUG_LOG
@@ -277,10 +310,12 @@ String buildConfigPage() {
 
   String curSsid = g_cfg.wifi_ssid;
   String host    = htmlEscape(g_cfg.backend_hostport);
-  int32_t tz     = g_cfg.tz_offset_hours;
-  if (tz < -12 || tz > 14) tz = DEFAULT_TZ;
+  int32_t tz     = g_cfg.tz_offset_minutes / 60;
+  if (tz < -12 || tz > 14) tz = DEFAULT_TZ_MINUTES / 60;
   uint8_t hour   = g_cfg.refresh_hour;
   if (hour > 23) hour = DEFAULT_HOUR;
+  uint8_t minute = g_cfg.refresh_minute;
+  if (minute > 59) minute = DEFAULT_MINUTE;
   bool rot180    = g_cfg.rotate180;
 
   String html;
@@ -288,13 +323,13 @@ String buildConfigPage() {
 
   html += F("<!DOCTYPE html><html><head><meta charset='utf-8'>");
   html += F("<meta name='viewport' content='width=device-width,initial-scale=1'>");
-  html += F("<title>InkTime 设置</title></head><body>");
-  html += F("<h2>InkTime 设置</h2>");
+  html += F("<title>InkTime 設定</title></head><body>");
+  html += F("<h2>InkTime 首次配對</h2>");
   html += F("<form method='POST' action='/save'>");
 
   html += F("WiFi SSID:<br>");
   html += F("<select id='ssid_select' style='width: 288px;' onchange=\"document.getElementById('ssid_input').value=this.value;\">");
-  html += F("<option value=''>（手动输入或选择）</option>");
+  html += F("<option value=''>（手動輸入或選擇）</option>");
   if (n > 0) {
     for (int i = 0; i < n; ++i) {
       String s = WiFi.SSID(i);
@@ -314,16 +349,16 @@ String buildConfigPage() {
   html += htmlEscape(curSsid);
   html += F("'><br><br>");
 
-  html += F("密码:<br><input name='pass' type='password' style='width: 280px;'><br><br>");
+  html += F("密碼:<br><input name='pass' type='password' style='width: 280px;'><br><br>");
 
-  html += F("服务器 (host:port):<br><input name='hostport' size='40' value='");
+  html += F("InkTime 伺服器 (http://host:port):<br><input name='hostport' size='40' value='");
   html += host;
   html += F("'><br><br>");
 
   html += F("裝置 Token（留空會保留現有 Token）：<br><input name='device_token' type='password' size='48' autocomplete='off'><br>");
   html += F("<small>請從 InkTime 裝置管理頁配對；Token 不會顯示在網址或序列埠。</small><br><br>");
 
-  html += F("每日刷新时间（0-23 点整）：<br><select name='hour'>");
+  html += F("備援刷新時間（連上伺服器後改由 Web 設定）：<br><select name='hour'>");
   for (int h = 0; h < 24; ++h) {
     html += "<option value='";
     html += String(h);
@@ -331,11 +366,22 @@ String buildConfigPage() {
     if (h == hour) html += " selected";
     html += ">";
     html += String(h);
-    html += F(" 点</option>");
+    html += F(" 時</option>");
+  }
+  html += F("</select><select name='minute'>");
+  for (int m = 0; m < 60; m += 5) {
+    html += "<option value='";
+    html += String(m);
+    html += "'";
+    if (m == minute) html += " selected";
+    html += ">";
+    if (m < 10) html += "0";
+    html += String(m);
+    html += F(" 分</option>");
   }
   html += F("</select><br><br>");
 
-  html += F("时区:<br><select name='tz'>");
+  html += F("備援 UTC 時區偏移:<br><select name='tz'>");
   for (int t = -12; t <= 14; ++t) {
     html += "<option value='";
     html += String(t);
@@ -350,13 +396,13 @@ String buildConfigPage() {
 
   html += F("<label><input type='checkbox' name='rot180' value='1'");
   if (rot180) html += F(" checked");
-  html += F("> 画面旋转 180°</label><br><br>");
+  html += F("> 畫面旋轉 180°</label><br><br>");
 
   if (n <= 0) {
-    html += F("<p style='color:#c00'>未扫描到 WiFi，可直接在上方输入框手动填写 SSID。</p>");
+    html += F("<p style='color:#c00'>未掃描到 Wi-Fi，可直接在上方輸入框手動填寫 SSID。</p>");
   }
 
-  html += F("<input type='submit' value='保存并重启'>");
+  html += F("<input type='submit' value='儲存並重新啟動'>");
   html += F("</form></body></html>");
 
   return html;
@@ -381,6 +427,7 @@ void handleSave() {
   String host     = server.arg("hostport");
   String deviceToken = server.arg("device_token");
   String hourStr  = server.arg("hour");
+  String minuteStr = server.arg("minute");
   String tzStr    = server.arg("tz");
   bool rot180Req  = (server.arg("rot180") == "1");
 
@@ -399,12 +446,16 @@ void handleSave() {
   int32_t tz = tzStr.toInt();
   if (tz < -12) tz = -12;
   if (tz > 14)  tz = 14;
-  newCfg.tz_offset_hours = tz;
+  newCfg.tz_offset_minutes = tz * 60;
 
   int hour = hourStr.toInt();
   if (hour < 0)  hour = 0;
   if (hour > 23) hour = 23;
   newCfg.refresh_hour = (uint8_t)hour;
+  int minute = minuteStr.toInt();
+  if (minute < 0) minute = 0;
+  if (minute > 59) minute = 59;
+  newCfg.refresh_minute = (uint8_t)minute;
 
   newCfg.rotate180 = rot180Req;
   newCfg.valid     = (newCfg.wifi_ssid.length() > 0);
@@ -414,7 +465,7 @@ void handleSave() {
   server.send(
     200,
     "text/html; charset=utf-8",
-    F("<html><body><h3>保存成功，设备即将重启...</h3></body></html>")
+    F("<html><body><h3>儲存成功，裝置即將重新啟動...</h3></body></html>")
   );
 
   delay(800);
@@ -477,9 +528,10 @@ void goDeepSleepMinutes(uint32_t minutes) {
 
   uint64_t us = (uint64_t)minutes * 60ULL * 1000000ULL;
 
-  if (framebuffer) {
-    heap_caps_free(framebuffer);
-    framebuffer = nullptr;
+  if (frameData) {
+    heap_caps_free(frameData);
+    frameData = nullptr;
+    frameDataSize = 0;
   }
 
   powerDownEPD();
@@ -513,10 +565,14 @@ void startConfigPortal() {
 
   wifiHardResetForPortal();
 
-  String apSsid     = "InkTime-" + String((uint32_t)ESP.getEfuseMac(), HEX).substring(4);
-  const char* apPwd = "12345678";
+  String chipHex = String((uint32_t)ESP.getEfuseMac(), HEX);
+  chipHex.toUpperCase();
+  while (chipHex.length() < 8) chipHex = "0" + chipHex;
+  String shortId = chipHex.substring(chipHex.length() - 6);
+  String apSsid = "InkTime-" + shortId;
+  String apPassword = "InkTime" + shortId;
 
-  bool apOk = WiFi.softAP(apSsid.c_str(), apPwd);
+  bool apOk = WiFi.softAP(apSsid.c_str(), apPassword.c_str());
 
 #if DEBUG_LOG
   DBG_PRINT("[CFG] softAP result = "); DBG_PRINTLN(apOk ? "OK" : "FAIL");
@@ -599,7 +655,7 @@ bool syncTime(const Config &cfg, struct tm &outLocal) {
 #if DEBUG_LOG
   DBG_PRINTLN("[TIME] syncTime start");
 #endif
-  long offsetSec = (long)cfg.tz_offset_hours * 3600;
+  long offsetSec = (long)cfg.tz_offset_minutes * 60;
   configTime(offsetSec, 0, "pool.ntp.org", "time.nist.gov", "ntp.aliyun.com");
 
   for (int i = 0; i < 30; ++i) {
@@ -624,36 +680,17 @@ bool syncTime(const Config &cfg, struct tm &outLocal) {
 // =======================
 //  下载每日相册 BIN
 // =======================
-bool downloadDailyPhotoBin(const Config &cfg) {
-  const size_t unpackedSize = (size_t)FB_WIDTH * FB_HEIGHT; // 384000 bytes
-  const size_t packedSize = unpackedSize / 4;                // 2bpp = 96000 bytes
-
-  if (!framebuffer) {
-#if DEBUG_LOG
-    DBG_PRINT("[FB] malloc framebuffer size="); DBG_PRINTLN((int)unpackedSize);
-#endif
-    framebuffer = (uint8_t*)heap_caps_malloc(
-      unpackedSize,
-      MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM
-    );
-    if (!framebuffer) {
-#if DEBUG_LOG
-      DBG_PRINTLN("[FB] malloc PSRAM failed, try internal RAM");
-#endif
-      framebuffer = (uint8_t*)heap_caps_malloc(unpackedSize, MALLOC_CAP_8BIT);
-    }
-  }
-  if (!framebuffer) {
-#if DEBUG_LOG
-    DBG_PRINTLN("[FB] framebuffer malloc FAILED");
-#endif
-    return false;
-  }
+bool downloadDailyPhotoBin(Config &cfg) {
+  lastDeviceErrorCode = "";
+  lastDeviceErrorMessage = "";
+  const size_t pixelCount = (size_t)FB_WIDTH * FB_HEIGHT;
 
   if (cfg.backend_hostport.length() == 0 || cfg.device_token.length() == 0) {
 #if DEBUG_LOG
     DBG_PRINTLN("[HTTP] 伺服器或裝置 Token 尚未設定，跳過下載");
 #endif
+    lastDeviceErrorCode = "DEVICE-CONFIG";
+    lastDeviceErrorMessage = "伺服器或裝置 Token 尚未設定";
     return false;
   }
 
@@ -668,6 +705,8 @@ bool downloadDailyPhotoBin(const Config &cfg) {
 #endif
 
   HTTPClient manifestHttp;
+  manifestHttp.setConnectTimeout(10000);
+  manifestHttp.setTimeout(30000);
   manifestHttp.begin(manifestUrl);
   manifestHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
   int manifestCode = manifestHttp.GET();
@@ -676,28 +715,91 @@ bool downloadDailyPhotoBin(const Config &cfg) {
     DBG_PRINT("[HTTP] Manifest code="); DBG_PRINTLN(manifestCode);
 #endif
     manifestHttp.end();
+    lastDeviceErrorCode = "DEVICE-MANIFEST-HTTP";
+    lastDeviceErrorMessage = "Manifest HTTP " + String(manifestCode);
     return false;
   }
 
   DynamicJsonDocument manifest(12288);
   DeserializationError jsonError = deserializeJson(manifest, manifestHttp.getStream());
   manifestHttp.end();
-  if (jsonError || manifest["schema_version"].as<int>() != 1 || String((const char*)manifest["pixel_format"]) != "2bpp") {
+  int schemaVersion = manifest["schema_version"] | 0;
+  String pixelFormat = manifest["pixel_format"] | "";
+  if (jsonError || (schemaVersion != 1 && schemaVersion != 2)
+      || (pixelFormat != "2bpp" && pixelFormat != "indexed4")) {
 #if DEBUG_LOG
     DBG_PRINTLN("[HTTP] Manifest 格式或版本不相容");
 #endif
+    lastDeviceErrorCode = "DEVICE-MANIFEST";
+    lastDeviceErrorMessage = "Manifest 格式或版本不相容";
     return false;
+  }
+
+  // 伺服器端裝置頁是排程、時區與旋轉的正式來源；AP 值只在首次離線時備援。
+  JsonObject remoteConfig = manifest["device_config"].as<JsonObject>();
+  if (!remoteConfig.isNull()
+      && (remoteConfig["schema_version"].as<int>() == 1
+          || remoteConfig["schema_version"].as<int>() == 2)) {
+    int offsetMinutes = remoteConfig["utc_offset_minutes"] | cfg.tz_offset_minutes;
+    String schedule = remoteConfig["schedule"] | "";
+    int separator = schedule.indexOf(':');
+    int remoteHour = separator > 0 ? schedule.substring(0, separator).toInt() : -1;
+    int remoteMinute = separator > 0 ? schedule.substring(separator + 1).toInt() : -1;
+    int rotation = remoteConfig["rotation"] | (cfg.rotate180 ? 180 : 0);
+    uint32_t desiredConfigVersion = remoteConfig["config_version"] | cfg.config_version;
+    String desiredPanelProfile = remoteConfig["panel_profile"] | "safe_4c";
+    bool compatiblePanel = desiredPanelProfile == "safe_4c"
+      || desiredPanelProfile == String(INKTIME_PANEL_PROFILE);
+    bool validRemote = offsetMinutes >= -12 * 60 && offsetMinutes <= 14 * 60
+      && remoteHour >= 0 && remoteHour <= 23 && remoteMinute >= 0 && remoteMinute <= 59
+      && (rotation == 0 || rotation == 180) && compatiblePanel
+      && desiredConfigVersion >= cfg.config_version;
+    if (!validRemote) {
+      lastDeviceErrorCode = "DEVICE-CONFIG-PROFILE";
+      lastDeviceErrorMessage = "遠端設定版本或面板 Profile 與韌體不相容";
+      return false;
+    }
+    if (
+        cfg.tz_offset_minutes != offsetMinutes || cfg.refresh_hour != remoteHour
+        || cfg.refresh_minute != remoteMinute || cfg.rotate180 != (rotation == 180)
+        || cfg.config_version != desiredConfigVersion) {
+      cfg.tz_offset_minutes = offsetMinutes;
+      cfg.refresh_hour = (uint8_t)remoteHour;
+      cfg.refresh_minute = (uint8_t)remoteMinute;
+      cfg.rotate180 = rotation == 180;
+      cfg.config_version = desiredConfigVersion;
+      saveConfig(cfg);
+      serverConfigChanged = true;
+#if DEBUG_LOG
+      DBG_PRINTLN("[CFG] 已套用伺服器端裝置設定");
+#endif
+    }
   }
 
   int width = manifest["width"] | 0;
   int height = manifest["height"] | 0;
   JsonArray files = manifest["files"].as<JsonArray>();
   const char* downloadBaseRaw = manifest["download_base_url"] | "";
-  if (width != FB_WIDTH || height != FB_HEIGHT || files.size() == 0 || strlen(downloadBaseRaw) == 0) return false;
+  String renderProfile = manifest["render_profile"] | "safe_4c";
+  bool compatibleRenderProfile = renderProfile == "safe_4c"
+    || renderProfile == String(INKTIME_PANEL_PROFILE);
+  if (width != FB_WIDTH || height != FB_HEIGHT || files.size() == 0
+      || strlen(downloadBaseRaw) == 0 || !compatibleRenderProfile) {
+    lastDeviceErrorCode = "DEVICE-DISPLAY-MISMATCH";
+    lastDeviceErrorMessage = "發布尺寸、Profile、檔案或下載路徑不相容";
+    return false;
+  }
+
+  bool indexed4 = pixelFormat == "indexed4";
+  size_t packedSize = pixelCount / (indexed4 ? 2 : 4);
 
   uint8_t* packed = (uint8_t*)heap_caps_malloc(packedSize, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
   if (!packed) packed = (uint8_t*)heap_caps_malloc(packedSize, MALLOC_CAP_8BIT);
-  if (!packed) return false;
+  if (!packed) {
+    lastDeviceErrorCode = "DEVICE-MEMORY";
+    lastDeviceErrorMessage = "無法配置下載緩衝區";
+    return false;
+  }
 
   // 隨機起點；若某張下載或校驗失敗，依序嘗試 Manifest 中其他照片。
   size_t startIndex = (size_t)random(0, files.size());
@@ -710,6 +812,8 @@ bool downloadDailyPhotoBin(const Config &cfg) {
 
     String fileUrl = base + String(downloadBaseRaw) + fileName;
     HTTPClient fileHttp;
+    fileHttp.setConnectTimeout(10000);
+    fileHttp.setTimeout(60000);
     fileHttp.begin(fileUrl);
     fileHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
     int code = fileHttp.GET();
@@ -738,17 +842,54 @@ bool downloadDailyPhotoBin(const Config &cfg) {
     actualSha[64] = '\0';
     if (!expectedSha.equalsIgnoreCase(String(actualSha))) continue;
 
-    // 完整下載與 SHA-256 都通過後才更新 framebuffer；失敗會保留舊畫面。
-    for (size_t pixel = 0; pixel < unpackedSize; ++pixel) {
-      uint8_t byteValue = packed[pixel / 4];
-      framebuffer[pixel] = (byteValue >> (6 - (pixel % 4) * 2)) & 0x03;
-    }
-    heap_caps_free(packed);
+    // 完整下載與 SHA-256 都通過後才替換資料；維持壓縮索引可把 PSRAM
+    // 從舊版 384000+96000 bytes 降為四色 96000 或六／七色 192000 bytes。
+    if (frameData) heap_caps_free(frameData);
+    frameData = packed;
+    frameDataSize = packedSize;
+    frameIndexed4 = indexed4;
+    currentReleaseId = manifest["release_id"] | "";
+    currentRenderProfile = renderProfile;
     return true;
   }
 
   heap_caps_free(packed);
+  lastDeviceErrorCode = "DEVICE-DOWNLOAD";
+  lastDeviceErrorMessage = "所有發布檔案下載或 SHA-256 校驗失敗";
   return false;
+}
+
+void reportDeviceStatus(const Config &cfg, bool displayUpdated) {
+  if (WiFi.status() != WL_CONNECTED || cfg.backend_hostport.length() == 0 || cfg.device_token.length() == 0) return;
+  String base = cfg.backend_hostport;
+  base.trim();
+  if (!base.startsWith("http://") && !base.startsWith("https://")) base = "http://" + base;
+  while (base.endsWith("/")) base.remove(base.length() - 1);
+
+  DynamicJsonDocument payload(1152);
+  payload["firmware_version"] = INKTIME_FIRMWARE_VERSION;
+  payload["wifi_rssi"] = WiFi.RSSI();
+  payload["free_heap_bytes"] = ESP.getFreeHeap();
+  payload["free_psram_bytes"] = ESP.getFreePsram();
+  payload["wake_reason"] = String((int)esp_sleep_get_wakeup_cause());
+  payload["display_updated"] = displayUpdated;
+  payload["applied_config_version"] = cfg.config_version;
+  payload["panel_profile"] = INKTIME_PANEL_PROFILE;
+  payload["render_profile"] = currentRenderProfile;
+  payload["release_id"] = currentReleaseId;
+  payload["error_code"] = lastDeviceErrorCode;
+  payload["error_message"] = lastDeviceErrorMessage;
+  String body;
+  serializeJson(payload, body);
+
+  HTTPClient statusHttp;
+  statusHttp.setConnectTimeout(10000);
+  statusHttp.setTimeout(15000);
+  statusHttp.begin(base + String(DEVICE_STATUS_PATH));
+  statusHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
+  statusHttp.addHeader("Content-Type", "application/json");
+  statusHttp.POST(body);
+  statusHttp.end();
 }
 
 // =======================
@@ -767,7 +908,7 @@ void initDisplay(const Config &cfg) {
   else              display.setRotation(1);
 }
 
-void drawFromFramebuffer(const Config &cfg) {
+void drawFromFrameData(const Config &cfg) {
   (void)cfg;
 
   display.setFullWindow();
@@ -783,14 +924,31 @@ void drawFromFramebuffer(const Config &cfg) {
   do {
     for (int y = 0; y < FB_HEIGHT && y < h; ++y) {
       for (int x = 0; x < FB_WIDTH && x < w; ++x) {
-        uint8_t c = framebuffer[y * FB_WIDTH + x];
+        size_t pixel = (size_t)y * FB_WIDTH + x;
+        uint8_t packed = frameData[pixel / (frameIndexed4 ? 2 : 4)];
+        uint8_t c = frameIndexed4
+          ? ((pixel % 2 == 0) ? (packed >> 4) : (packed & 0x0F))
+          : ((packed >> (6 - (pixel % 4) * 2)) & 0x03);
         uint16_t col;
-        switch (c) {
-          case 0: col = GxEPD_BLACK;  break;
-          case 1: col = GxEPD_WHITE;  break;
-          case 2: col = GxEPD_RED;    break;
-          case 3: col = GxEPD_YELLOW; break;
-          default: col = GxEPD_WHITE; break;
+        if (frameIndexed4) {
+          switch (c) {
+            case 0: col = GxEPD_BLACK;  break;
+            case 1: col = GxEPD_WHITE;  break;
+            case 2: col = GxEPD_GREEN;  break;
+            case 3: col = GxEPD_BLUE;   break;
+            case 4: col = GxEPD_RED;    break;
+            case 5: col = GxEPD_YELLOW; break;
+            case 6: col = GxEPD_ORANGE; break;
+            default: col = GxEPD_WHITE; break;
+          }
+        } else {
+          switch (c) {
+            case 0: col = GxEPD_BLACK;  break;
+            case 1: col = GxEPD_WHITE;  break;
+            case 2: col = GxEPD_RED;    break;
+            case 3: col = GxEPD_YELLOW; break;
+            default: col = GxEPD_WHITE; break;
+          }
         }
         display.drawPixel(x, y, col);
       }
@@ -810,7 +968,7 @@ void sleepUntilNextSchedule(const Config &cfg, bool hasTime, const struct tm &no
   }
 
   int curMinOfDay = now.tm_hour * 60 + now.tm_min;
-  int targetMin   = (int)cfg.refresh_hour * 60;
+  int targetMin   = (int)cfg.refresh_hour * 60 + (int)cfg.refresh_minute;
   int delta;
 
   if (curMinOfDay < targetMin) delta = targetMin - curMinOfDay;
@@ -882,14 +1040,16 @@ void setup() {
   bool hasTime = syncTime(g_cfg, timeinfo);
 
   bool ok = downloadDailyPhotoBin(g_cfg);
+  if (serverConfigChanged) hasTime = syncTime(g_cfg, timeinfo);
   if (ok) {
     initDisplay(g_cfg);
-    drawFromFramebuffer(g_cfg);
+    drawFromFrameData(g_cfg);
   } else {
 #if DEBUG_LOG
     DBG_PRINTLN("[BOOT] downloadDailyPhotoBin FAILED");
 #endif
   }
+  reportDeviceStatus(g_cfg, ok);
 
   if (!hasTime) {
     struct tm tmp;

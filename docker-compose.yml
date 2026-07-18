@@ -3,17 +3,12 @@ name: inktime
 # 三個服務共用同一套映像、環境變數、資料掛載與安全設定。
 # YAML anchor 只減少重複內容，不會另外建立名為 common 的容器。
 x-common: &common
-  build:
-    # 以目前專案目錄內的 Dockerfile 建置映像。
-    context: .
-    args:
-      # 顯示在診斷頁的版本資訊；未提供時使用 unknown。
-      INKTIME_GIT_REVISION: ${INKTIME_GIT_REVISION:-unknown}
-      INKTIME_BUILD_TIME: ${INKTIME_BUILD_TIME:-unknown}
   # 本機預設使用 inktime:local；正式部署可由 .env 指定固定 Tag。
   image: inktime:${INKTIME_IMAGE_TAG:-local}
   # 異常退出或主機重開後自動恢復，手動停止時不強制重啟。
   restart: unless-stopped
+  init: true
+  stop_grace_period: 45s
   environment:
     # 所有排程、歷史今日與 Log 時間使用的時區。
     TZ: ${TZ:-Asia/Taipei}
@@ -21,6 +16,10 @@ x-common: &common
     INKTIME_COOKIE_SECURE: ${INKTIME_COOKIE_SECURE:-0}
     # 容器預設輸出 JSON Log，方便 NAS 或集中式 Log 系統收集。
     INKTIME_LOG_FORMAT: ${INKTIME_LOG_FORMAT:-json}
+    # 應用 Log 啟動預設；服務啟動後可在 Web 設定頁動態調整。
+    INKTIME_LOG_LEVEL: ${INKTIME_LOG_LEVEL:-INFO}
+    # Gunicorn HTTP access log 預設關閉，避免健康檢查與裝置輪詢寫滿 Log。
+    INKTIME_ACCESS_LOG: ${INKTIME_ACCESS_LOG:-0}
   volumes:
     # 可寫資料：SQLite、Session Key、縮圖、字型、備份與發布版本。
     - ${INKTIME_DATA_PATH:-./data}:/data
@@ -37,55 +36,65 @@ x-common: &common
     # 限制單一 Log 檔大小與保留數量，避免填滿 NAS 磁碟。
     driver: json-file
     options:
-      max-size: 10m
-      max-file: "5"
+      max-size: ${INKTIME_LOG_MAX_SIZE:-5m}
+      max-file: ${INKTIME_LOG_MAX_FILES:-3}
 
 services:
   # Web 管理介面、健康檢查與 ESP32 下載 API；不執行長時間照片分析。
   inktime-web:
     <<: *common
+    # 只建置一次；Worker 與 Scheduler 直接重用完全相同的映像。
+    build:
+      context: .
+      args:
+        # 顯示在診斷頁的版本資訊；未提供時使用 unknown。
+        INKTIME_GIT_REVISION: ${INKTIME_GIT_REVISION:-unknown}
+        INKTIME_BUILD_TIME: ${INKTIME_BUILD_TIME:-unknown}
     ports:
       # 左側是主機對外 Port，右側 8765 是容器內 Gunicorn Port。
       - "${INKTIME_PORT:-8765}:8765"
-    deploy:
-      resources:
-        limits:
-          # 防止大量請求吃滿整台 NAS；Compose 支援時套用此上限。
-          cpus: "2.0"
-          memory: 1G
+    cpus: ${INKTIME_WEB_CPUS:-0.75}
+    mem_limit: ${INKTIME_WEB_MEMORY:-384m}
+    pids_limit: ${INKTIME_WEB_PIDS:-128}
+    tmpfs:
+      - /tmp:size=128m,mode=1777
 
   # 背景 Worker：照片掃描、預處理、模型分析、重試與渲染工作。
   inktime-worker:
     <<: *common
     command: ["python", "-m", "inktime.app.workers.runner"]
-    # Worker 沒有 HTTP Port，因此停用映像內的 Web healthcheck。
     healthcheck:
-      disable: true
+      test: ["CMD", "python", "scripts/container_health.py", "worker"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
     depends_on:
       # 等 Web 完成 Migration 且健康後才開始領取工作。
       inktime-web:
         condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          # 圖片解碼與模型工作需要較多 CPU／記憶體。
-          cpus: "4.0"
-          memory: 2G
+    cpus: ${INKTIME_WORKER_CPUS:-2.0}
+    mem_limit: ${INKTIME_WORKER_MEMORY:-1g}
+    pids_limit: ${INKTIME_WORKER_PIDS:-192}
+    tmpfs:
+      - /tmp:size=256m,mode=1777
 
   # Scheduler：週期性工作、逾期租約回收、自動備份與保留策略。
   inktime-scheduler:
     <<: *common
     command: ["python", "-m", "inktime.app.workers.scheduler"]
-    # Scheduler 同樣沒有 HTTP Port。
     healthcheck:
-      disable: true
+      test: ["CMD", "python", "scripts/container_health.py", "scheduler"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
     depends_on:
       # Migration 完成前不可執行排程或修改資料庫。
       inktime-web:
         condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          # Scheduler 只做輕量輪詢，不需要與 Worker 相同資源。
-          cpus: "0.5"
-          memory: 256M
+    cpus: ${INKTIME_SCHEDULER_CPUS:-0.25}
+    mem_limit: ${INKTIME_SCHEDULER_MEMORY:-192m}
+    pids_limit: ${INKTIME_SCHEDULER_PIDS:-64}
+    tmpfs:
+      - /tmp:size=64m,mode=1777

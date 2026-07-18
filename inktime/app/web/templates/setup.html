@@ -7,8 +7,8 @@
   <form method="post" class="form-stack">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <label>管理員帳號<input name="username" required autocomplete="username"></label>
-    <label>密碼（至少 12 個字元）<input name="password" type="password" minlength="12" required autocomplete="new-password"></label>
-    <label>再次輸入密碼<input name="password_confirmation" type="password" minlength="12" required autocomplete="new-password"></label>
+    <label>密碼<input name="password" type="password" required autocomplete="new-password"></label>
+    <label>再次輸入密碼<input name="password_confirmation" type="password" required autocomplete="new-password"></label>
     <button class="primary">建立並進入 InkTime</button>
   </form>
 </section>

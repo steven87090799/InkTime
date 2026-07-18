@@ -1,0 +1,272 @@
+{% extends "base.html" %}
+{% block title %}電子紙模擬器｜InkTime{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='simulator.css') }}">{% endblock %}
+{% block content %}
+<div class="page-head simulator-head">
+  <div>
+    <p class="eyebrow">無硬體／無模型測試台</p>
+    <h1>電子紙模擬器</h1>
+    <p>用瀏覽器照片直接檢查 480×800 最終色盤、裁切與抖動效果。測試內容不會儲存、不會建立分析工作，也不會呼叫模型。</p>
+  </div>
+  <span class="offline-badge"><span aria-hidden="true"></span>模型已停用</span>
+</div>
+
+<section class="simulator-layout">
+  <aside class="panel simulator-controls" aria-label="模擬器控制項">
+    <div class="panel-head"><h2>輸入與顯示設定</h2><button class="secondary compact" type="button" id="sample-button">載入內建測試圖</button></div>
+    <form id="simulator-form">
+      <label class="drop-zone" id="drop-zone">
+        <span class="drop-icon" aria-hidden="true">＋</span>
+        <strong>選擇或拖放一張照片</strong>
+        <small>JPG、PNG、WebP，最多 25 MiB；只在這次請求中處理</small>
+        <input id="photo-input" type="file" accept="image/jpeg,image/png,image/webp">
+      </label>
+
+      <div class="simulator-fields">
+        <label><span>面板色盤</span><select id="profile" name="profile">
+          {% for profile in profiles %}<option value="{{ profile.key }}" {% if profile.key==current_profile %}selected{% endif %}>{{ profile.label }}</option>{% endfor %}
+        </select></label>
+        <label><span>抖動算法</span><select id="dither" name="dither">
+          {% for value, label in [('floyd_steinberg','Floyd–Steinberg（照片建議）'),('atkinson','Atkinson（較柔和）'),('bayer4','Bayer 4×4（規律顆粒）'),('bayer8','Bayer 8×8（細緻顆粒）'),('none','不抖動')] %}<option value="{{ value }}" {% if value==current_dither %}selected{% endif %}>{{ label }}</option>{% endfor %}
+        </select></label>
+        <label><span>縮放方式</span><select id="fit" name="fit"><option value="cover">填滿並裁切</option><option value="contain">完整顯示（可能留白）</option></select></label>
+        <label class="range-field"><span>抖動強度 <output id="strength-output">{{ '%.1f'|format(dither_strength) }}</output></span><input id="strength" name="strength" type="range" min="0" max="2" step="0.1" value="{{ dither_strength }}"></label>
+        <label class="field-wide"><span>手動短文案（選填）</span><input id="caption" type="text" maxlength="60" placeholder="不透過模型，直接輸入要預覽的文字"><small>文案先由瀏覽器排版，再送進同一套電子紙色盤轉換；不會寫入照片資料庫。</small></label>
+      </div>
+      <input type="hidden" id="color-distance" name="color_distance" value="{{ color_distance }}">
+      <button class="primary simulate-button" id="simulate-button" type="submit" disabled><span aria-hidden="true">◉</span> 產生電子紙預覽</button>
+      <p class="simulator-status" id="simulator-status" role="status" aria-live="polite">請先選擇照片，或載入內建測試圖。</p>
+    </form>
+  </aside>
+
+  <section class="simulator-workbench" aria-label="預覽工作區">
+    <div class="preview-toolbar">
+      <div><span class="preview-kicker">實機輸出比例</span><strong>480 × 800 px</strong></div>
+      <div id="palette-swatches" class="palette-swatches" aria-label="目前面板色盤"></div>
+    </div>
+    <div class="preview-grid">
+      <article class="preview-column">
+        <div class="preview-title"><h2>排版原稿</h2><span>瀏覽器合成</span></div>
+        <div class="simulator-device source-device">
+          <div class="device-bezel"><canvas id="source-canvas" width="480" height="800" aria-label="原始排版預覽"></canvas></div>
+        </div>
+      </article>
+      <article class="preview-column">
+        <div class="preview-title"><h2>電子紙效果</h2><span id="result-label">等待模擬</span></div>
+        <div class="simulator-device eink-device" id="eink-device">
+          <div class="device-bezel">
+            <div class="refresh-sweep" aria-hidden="true"></div>
+            <div class="empty-screen" id="empty-screen"><span>INK</span><small>TIME</small></div>
+            <img id="result-image" alt="電子紙色盤模擬結果" hidden>
+          </div>
+          <div class="device-led" aria-hidden="true"></div>
+        </div>
+      </article>
+    </div>
+    <div class="simulator-meta" id="simulator-meta" hidden>
+      <div><span>來源</span><strong id="meta-source">—</strong></div>
+      <div><span>實機資料量</span><strong id="meta-bytes">—</strong></div>
+      <div><span>轉換時間</span><strong id="meta-time">—</strong></div>
+      <a class="secondary" id="download-result" download="inktime-epaper-preview.png">下載 PNG 預覽</a>
+    </div>
+  </section>
+</section>
+
+<section class="panel simulator-notes">
+  <div><span class="note-number">01</span><p><strong>目前完全不需要模型</strong>照片只送到本機 InkTime 的色盤轉換 API，回應標頭會明確標示 <code>Model: disabled</code>。</p></div>
+  <div><span class="note-number">02</span><p><strong>預覽採真實輸出色</strong>PNG 使用目前發布流程的 Profile、色差與抖動程式，CSS 紙張紋理只影響外框觀感，不會改寫下載檔。</p></div>
+  <div><span class="note-number">03</span><p><strong>未來接入模型不必重做模擬器</strong>模型負責評分、文案與選片；最後仍送進相同渲染流程。詳見 <a href="/providers">模型設定</a>與<a href="/rendering">正式渲染</a>。</p></div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+(() => {
+  const profiles = {{ profiles|tojson }};
+  const profileMap = Object.fromEntries(profiles.map(profile => [profile.key, profile]));
+  const form = document.getElementById('simulator-form');
+  const photoInput = document.getElementById('photo-input');
+  const dropZone = document.getElementById('drop-zone');
+  const sampleButton = document.getElementById('sample-button');
+  const simulateButton = document.getElementById('simulate-button');
+  const status = document.getElementById('simulator-status');
+  const canvas = document.getElementById('source-canvas');
+  const context = canvas.getContext('2d', {alpha: false});
+  const profileSelect = document.getElementById('profile');
+  const ditherSelect = document.getElementById('dither');
+  const fitSelect = document.getElementById('fit');
+  const strength = document.getElementById('strength');
+  const strengthOutput = document.getElementById('strength-output');
+  const caption = document.getElementById('caption');
+  const resultImage = document.getElementById('result-image');
+  const emptyScreen = document.getElementById('empty-screen');
+  const einkDevice = document.getElementById('eink-device');
+  const resultLabel = document.getElementById('result-label');
+  const meta = document.getElementById('simulator-meta');
+  const download = document.getElementById('download-result');
+  let sourceImage = null;
+  let resultUrl = null;
+  let renderSequence = 0;
+
+  function setStatus(message, type = '') {
+    status.textContent = message;
+    status.className = `simulator-status ${type}`.trim();
+  }
+
+  function updatePalette() {
+    const profile = profileMap[profileSelect.value];
+    const holder = document.getElementById('palette-swatches');
+    holder.replaceChildren(...profile.colors.map(color => {
+      const swatch = document.createElement('span');
+      swatch.title = color.name;
+      swatch.style.backgroundColor = `rgb(${color.rgb.join(',')})`;
+      return swatch;
+    }));
+  }
+
+  function drawComposition() {
+    context.fillStyle = '#fff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    if (!sourceImage) return;
+    const text = caption.value.trim();
+    const imageHeight = text ? 700 : 800;
+    const scale = fitSelect.value === 'contain'
+      ? Math.min(canvas.width / sourceImage.width, imageHeight / sourceImage.height)
+      : Math.max(canvas.width / sourceImage.width, imageHeight / sourceImage.height);
+    const width = sourceImage.width * scale;
+    const height = sourceImage.height * scale;
+    context.drawImage(sourceImage, (canvas.width - width) / 2, (imageHeight - height) / 2, width, height);
+    if (text) {
+      context.fillStyle = '#fff';
+      context.fillRect(0, 700, 480, 100);
+      context.fillStyle = '#111';
+      context.font = '24px "Noto Sans TC", "PingFang TC", sans-serif';
+      context.textBaseline = 'alphabetic';
+      context.fillText(text, 20, 732, 440);
+    }
+  }
+
+  function loadBrowserImage(file) {
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      const url = URL.createObjectURL(file);
+      image.onload = () => { URL.revokeObjectURL(url); resolve(image); };
+      image.onerror = () => { URL.revokeObjectURL(url); reject(new Error('瀏覽器無法讀取這個影像格式')); };
+      image.src = url;
+    });
+  }
+
+  async function useFile(file) {
+    if (!file) return;
+    if (file.size > 25 * 1024 * 1024) {
+      setStatus('照片超過 25 MiB，請先縮小檔案。', 'error');
+      return;
+    }
+    try {
+      sourceImage = await loadBrowserImage(file);
+      drawComposition();
+      simulateButton.disabled = false;
+      setStatus(`已載入 ${file.name}，可以開始模擬。`, 'ready');
+    } catch (error) {
+      sourceImage = null;
+      simulateButton.disabled = true;
+      setStatus(`${error.message}；HEIC 可先轉成 JPG 後測試。`, 'error');
+    }
+  }
+
+  async function loadSample() {
+    const sample = document.createElement('canvas');
+    sample.width = 1200;
+    sample.height = 1600;
+    const sampleContext = sample.getContext('2d');
+    const sky = sampleContext.createLinearGradient(0, 0, 0, 1600);
+    sky.addColorStop(0, '#3c79a8');
+    sky.addColorStop(.52, '#f2be58');
+    sky.addColorStop(1, '#d84c37');
+    sampleContext.fillStyle = sky;
+    sampleContext.fillRect(0, 0, 1200, 1600);
+    sampleContext.fillStyle = '#f7e779';
+    sampleContext.beginPath();
+    sampleContext.arc(900, 380, 170, 0, Math.PI * 2);
+    sampleContext.fill();
+    sampleContext.fillStyle = '#1d5c48';
+    sampleContext.beginPath();
+    sampleContext.moveTo(0, 1180);
+    sampleContext.lineTo(360, 680);
+    sampleContext.lineTo(700, 1160);
+    sampleContext.lineTo(980, 820);
+    sampleContext.lineTo(1200, 1190);
+    sampleContext.lineTo(1200, 1600);
+    sampleContext.lineTo(0, 1600);
+    sampleContext.fill();
+    sampleContext.fillStyle = '#17352d';
+    sampleContext.fillRect(0, 1260, 1200, 340);
+    sampleContext.fillStyle = '#fff';
+    sampleContext.font = '700 84px sans-serif';
+    sampleContext.fillText('INKTIME', 78, 1450);
+    sourceImage = await createImageBitmap(sample);
+    drawComposition();
+    simulateButton.disabled = false;
+    setStatus('內建測試圖已載入；這個流程沒有使用任何模型。', 'ready');
+  }
+
+  function canvasBlob() {
+    return new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('無法建立預覽影像')), 'image/png'));
+  }
+
+  async function simulate(event) {
+    event.preventDefault();
+    if (!sourceImage) return;
+    const sequence = ++renderSequence;
+    drawComposition();
+    simulateButton.disabled = true;
+    einkDevice.classList.add('is-refreshing');
+    setStatus('正在套用實際電子紙色盤與抖動算法…');
+    const data = new FormData();
+    data.set('photo', await canvasBlob(), 'inktime-simulator.png');
+    data.set('profile', profileSelect.value);
+    data.set('dither', ditherSelect.value);
+    data.set('fit', 'cover');
+    data.set('strength', strength.value);
+    data.set('color_distance', document.getElementById('color-distance').value);
+    try {
+      const response = await window.inktimeFetch('/api/v1/rendering/simulate', {method: 'POST', body: data});
+      if (!response.ok) {
+        const problem = await response.json().catch(() => ({}));
+        throw new Error(problem.message || '模擬失敗');
+      }
+      const blob = await response.blob();
+      if (sequence !== renderSequence) return;
+      if (resultUrl) URL.revokeObjectURL(resultUrl);
+      resultUrl = URL.createObjectURL(blob);
+      resultImage.src = resultUrl;
+      resultImage.hidden = false;
+      emptyScreen.hidden = true;
+      download.href = resultUrl;
+      meta.hidden = false;
+      document.getElementById('meta-source').textContent = response.headers.get('X-InkTime-Source') || '480×800';
+      document.getElementById('meta-bytes').textContent = `${Number(response.headers.get('X-InkTime-Payload-Bytes') || 0).toLocaleString()} bytes`;
+      document.getElementById('meta-time').textContent = `${response.headers.get('X-InkTime-Render-Ms') || '—'} ms`;
+      resultLabel.textContent = profileMap[profileSelect.value].pixel_format;
+      setStatus('模擬完成。下載的 PNG 是未套用外框紋理的實際色盤結果。', 'success');
+    } catch (error) {
+      setStatus(error.message || '模擬失敗', 'error');
+    } finally {
+      if (sequence === renderSequence) simulateButton.disabled = false;
+      window.setTimeout(() => einkDevice.classList.remove('is-refreshing'), 480);
+    }
+  }
+
+  photoInput.addEventListener('change', () => useFile(photoInput.files[0]));
+  sampleButton.addEventListener('click', loadSample);
+  form.addEventListener('submit', simulate);
+  strength.addEventListener('input', () => { strengthOutput.value = Number(strength.value).toFixed(1); });
+  [fitSelect, caption].forEach(control => control.addEventListener('input', drawComposition));
+  profileSelect.addEventListener('change', updatePalette);
+  ['dragenter', 'dragover'].forEach(type => dropZone.addEventListener(type, event => { event.preventDefault(); dropZone.classList.add('is-dragging'); }));
+  ['dragleave', 'drop'].forEach(type => dropZone.addEventListener(type, event => { event.preventDefault(); dropZone.classList.remove('is-dragging'); }));
+  dropZone.addEventListener('drop', event => useFile(event.dataTransfer.files[0]));
+  updatePalette();
+  drawComposition();
+})();
+</script>
+{% endblock %}

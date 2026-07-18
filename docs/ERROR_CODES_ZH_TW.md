@@ -25,8 +25,13 @@
 | `JOB-002` | Worker 租約逾時 | 系統會安全地回收項目並重試 |
 | `RENDER-001` | 渲染失敗 | 檢查來源照片、字型、版型與輸出權限 |
 | `RENDER-002` | 發布校驗失敗 | 不會更新 latest；舊版本仍可使用 |
+| `RENDER-003` | 顯示 Profile 不支援 | 從 Web 選擇內建四色／GDEP 六色／GDEY 七色 Profile |
+| `RENDER-004` | 抖動、色差或強度不合法 | 檢查 Web 渲染設定範圍 |
 | `DEVICE-001` | 裝置驗證失敗 | 確認 Bearer Token、裝置啟用狀態或重新配對 |
 | `DEVICE-002` | 發布檔案校驗失敗 | 裝置應保留舊畫面並回報失敗 |
+| `DEVICE-CONFIG-PROFILE` | 設定版本倒退或面板 Profile 不相容 | 核對面板、韌體 compile flag 與 Web 裝置設定 |
+| `DEVICE-OFFLINE` | 裝置超過門檻未連線 | 檢查電源、Wi-Fi、Token、刷新週期與 N100 可達性 |
+| `NOTIFY-WEBHOOK` | Webhook 暫時或永久失敗 | 查看裝置頁嘗試次數、HTTP 狀態與端點 Log |
 | `BACKUP-001` | 備份建立或驗證失敗 | 檢查空間、權限與資料庫完整性 |
 
 API 錯誤回應至少包含 `error_code` 與繁體中文 `message`；內部例外堆疊只寫入受保護的記錄，不傳送給 viewer 或裝置。

@@ -409,6 +409,68 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_photo_analysis_ranking ON photo_analysis(ranking_score DESC)",
         ),
     ),
+    Migration(
+        6,
+        "加入 ESP32 遠端設定與低頻狀態回報",
+        (
+            "ALTER TABLE devices ADD COLUMN free_heap_bytes INTEGER",
+            "ALTER TABLE devices ADD COLUMN free_psram_bytes INTEGER",
+            "ALTER TABLE devices ADD COLUMN last_error_code TEXT",
+            "ALTER TABLE devices ADD COLUMN last_error_message TEXT",
+            "ALTER TABLE devices ADD COLUMN last_status_at TEXT",
+            "ALTER TABLE devices ADD COLUMN wake_reason TEXT",
+            "UPDATE devices SET schedule='08:00' WHERE schedule='daily' OR schedule=''",
+            """
+            CREATE TABLE IF NOT EXISTS device_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                level TEXT NOT NULL CHECK(level IN ('info','warning','error')),
+                event TEXT NOT NULL,
+                error_code TEXT,
+                message TEXT NOT NULL,
+                details_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_device_events_device_time ON device_events(device_id,created_at DESC)",
+        ),
+    ),
+    Migration(
+        7,
+        "加入全彩 Profile、裝置設定 ACK 與離線通知",
+        (
+            "ALTER TABLE devices ADD COLUMN panel_profile TEXT NOT NULL DEFAULT 'safe_4c'",
+            "ALTER TABLE devices ADD COLUMN config_version INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE devices ADD COLUMN acked_config_version INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE devices ADD COLUMN config_ack_at TEXT",
+            "ALTER TABLE devices ADD COLUMN offline_alert_active INTEGER NOT NULL DEFAULT 0 CHECK(offline_alert_active IN (0,1))",
+            "ALTER TABLE devices ADD COLUMN last_offline_alert_at TEXT",
+            "ALTER TABLE devices ADD COLUMN last_recovery_alert_at TEXT",
+            "ALTER TABLE releases ADD COLUMN render_profile TEXT NOT NULL DEFAULT 'safe_4c'",
+            "CREATE INDEX IF NOT EXISTS idx_releases_profile_created ON releases(render_profile,created_at DESC)",
+            """
+            CREATE TABLE IF NOT EXISTS device_notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id TEXT REFERENCES devices(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL CHECK(kind IN ('offline','offline_reminder','recovery','test')),
+                level TEXT NOT NULL CHECK(level IN ('info','warning','error')),
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                details_json TEXT NOT NULL DEFAULT '{}',
+                webhook_status TEXT NOT NULL DEFAULT 'disabled'
+                    CHECK(webhook_status IN ('disabled','pending','retrying','delivered','failed')),
+                webhook_attempts INTEGER NOT NULL DEFAULT 0,
+                webhook_next_attempt_at TEXT,
+                webhook_delivered_at TEXT,
+                webhook_last_error TEXT,
+                created_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_device_notifications_created ON device_notifications(created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_device_notifications_delivery ON device_notifications(webhook_status,webhook_next_attempt_at,id)",
+            "UPDATE feature_flags SET enabled=1,description='裝置離線／恢復站內通知與可選 Webhook 已啟用' WHERE key='notifications'",
+        ),
+    ),
 )
 
 
@@ -437,11 +499,25 @@ def backup_database(database: Database, backup_dir: Path) -> Path | None:
 
 def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
     """依版本套用 Migration；任何失敗都會回滾當次版本並停止。"""
+    had_database = database.path.exists() and database.path.stat().st_size > 0
     database.path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = Path(f"{database.path}.migration.lock")
     with lock_path.open("a", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        if backup_dir is not None:
+        with database.session() as connection:
+            migration_table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+            ).fetchone()
+            applied_versions = (
+                {int(row[0]) for row in connection.execute("SELECT version FROM schema_migrations")}
+                if migration_table
+                else set()
+            )
+        has_pending_migrations = any(
+            migration.version not in applied_versions for migration in MIGRATIONS
+        )
+        # 只有真的要升級既有資料庫才建立備份；三個容器每次重啟不再各複製一次。
+        if backup_dir is not None and had_database and has_pending_migrations:
             backup_database(database, backup_dir)
 
         applied: list[int] = []

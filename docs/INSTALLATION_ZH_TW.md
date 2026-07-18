@@ -4,7 +4,7 @@
 
 - Docker Engine 24+／Compose v2（建議）；或 Python 3.10+、Linux／macOS。
 - SQLite 資料目錄需可寫；照片目錄建議唯讀掛載。
-- 正式環境建議至少 2 CPU、2 GiB 記憶體；大量圖片預處理建議 4 CPU、4 GiB。
+- Intel N100 4C/4T 可正式部署；主機至少 4 GiB RAM，建議 8 GiB。N100 預設 Worker 並行 1、Web 1 worker × 2 threads。
 
 ## Docker
 
@@ -26,11 +26,11 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 python scripts/migrate.py --database data/inktime.db
-gunicorn --bind 0.0.0.0:8765 --workers 2 --threads 4 server:app
+gunicorn --config gunicorn.conf.py server:app
 ```
 
 另開程序執行 `python -m inktime.app.workers.runner` 與 `python -m inktime.app.workers.scheduler`。只有本機開發可執行 `python server.py`。
 
 ## 首次啟動
 
-瀏覽 `/setup` 建立 administrator。密碼至少 12 字元。反向代理終止 TLS 時設定 `INKTIME_COOKIE_SECURE=1`，並限制 Proxy 傳入可信任的來源 IP 標頭。安裝後立即建立備份並測試下載。
+瀏覽 `/setup` 建立 administrator。密碼不可空白且不限制長度；正式環境仍建議使用密碼管理器產生的長密碼。反向代理終止 TLS 時設定 `INKTIME_COOKIE_SECURE=1`，並限制 Proxy 傳入可信任的來源 IP 標頭。安裝後立即建立備份並測試下載。
