@@ -110,14 +110,14 @@ docker compose up -d --build
 
 ## 照片評分與模型調整在哪裡
 
-管理介面的「設定」頁目前可調整：
+管理介面的「設定」與「評分」頁可調整：
 
 - `model.low_model`、`model.high_model`：第一、第二階段使用哪個模型。
-- `analysis.scoring_rules`：哪些照片應提高或降低回憶、美觀、技術品質與情緒分。
+- 「評分」頁：照片高低分規則、四項綜合排序權重、最愛加分、版本歷史與單張測試台。
 - `analysis.stage_two_threshold`：第一階段的回憶分達到多少才升級到高品質分析；人物或最愛照片也會升級。
 - `render.memory_threshold`：電子紙歷史今日選片的最低回憶分門檻。
 
-四項分數 `memory_score`、`beauty_score`、`technical_quality_score`、`emotion_score` 是模型依管理介面的評分規則各自輸出的 0–100 分，目前**沒有加權總分或權重滑桿**。預設規則位於 `inktime/app/domain/analysis/scoring.py`，固定輸出約束位於 `inktime/app/providers/openai_compatible.py`，欄位與範圍位於 `inktime/app/domain/analysis/schema.py`；僅本地分析的固定公式位於 `inktime/app/services/analysis.py`。完整資料流與現況邊界請見 [專案架構與評分流程](docs/ARCHITECTURE_ZH_TW.md)。
+四項模型原始分數 `memory_score`、`beauty_score`、`technical_quality_score`、`emotion_score` 永遠保留；系統另以版本化權重計算 `ranking_score`，預設為回憶 50%、美觀 20%、技術 10%、情緒 20%，最愛照片再加 5 分（最高 100）。新規則只影響之後的分析；每筆分析會記住使用的規則版本。測試台照片只在暫存目錄停留，但模型 Token 與費用仍會記入成本頁。完整資料流見 [專案架構與評分流程](docs/ARCHITECTURE_ZH_TW.md)。
 
 ## Token 與成本控制
 

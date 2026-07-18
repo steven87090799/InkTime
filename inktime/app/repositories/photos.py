@@ -6,6 +6,11 @@ from pathlib import Path
 from uuid import uuid4
 
 from inktime.app.db import Database
+from inktime.app.domain.analysis.scoring import (
+    DEFAULT_FAVORITE_BONUS,
+    DEFAULT_RANKING_WEIGHTS,
+    calculate_ranking_score,
+)
 from inktime.app.domain.photos.preprocessing import LocalPhotoFeatures
 
 
@@ -139,6 +144,7 @@ class PhotoRepository:
             "should_keep": bool(row["should_keep"]),
             "sensitive": bool(row["sensitive"]),
             "reason": row["reason"],
+            "ranking_score": row["ranking_score"],
         }
         self.save_analysis(
             photo_id,
@@ -149,6 +155,8 @@ class PhotoRepository:
             result,
             row["raw_json"],
             "inherited",
+            ranking_score=row["ranking_score"],
+            scoring_version_id=row["scoring_version_id"],
         )
         return result
 
@@ -195,6 +203,53 @@ class PhotoRepository:
                     connection.execute(
                         "UPDATE photo_analysis SET types_json=?,side_caption=? WHERE id=?",
                         (json.dumps(types, ensure_ascii=False), side_caption, latest["id"]),
+                    )
+                    analysis = connection.execute(
+                        """
+                        SELECT a.memory_score,a.beauty_score,a.technical_quality_score,
+                               a.emotion_score,v.memory_weight,v.beauty_weight,
+                               v.technical_weight,v.emotion_weight,v.favorite_bonus
+                        FROM photo_analysis a
+                        LEFT JOIN scoring_rule_versions v ON v.id=a.scoring_version_id
+                        WHERE a.id=?
+                        """,
+                        (latest["id"],),
+                    ).fetchone()
+                    weights = {
+                        "memory": float(
+                            analysis["memory_weight"]
+                            if analysis["memory_weight"] is not None
+                            else DEFAULT_RANKING_WEIGHTS["memory"]
+                        ),
+                        "beauty": float(
+                            analysis["beauty_weight"]
+                            if analysis["beauty_weight"] is not None
+                            else DEFAULT_RANKING_WEIGHTS["beauty"]
+                        ),
+                        "technical_quality": float(
+                            analysis["technical_weight"]
+                            if analysis["technical_weight"] is not None
+                            else DEFAULT_RANKING_WEIGHTS["technical_quality"]
+                        ),
+                        "emotion": float(
+                            analysis["emotion_weight"]
+                            if analysis["emotion_weight"] is not None
+                            else DEFAULT_RANKING_WEIGHTS["emotion"]
+                        ),
+                    }
+                    ranking_score = calculate_ranking_score(
+                        analysis,
+                        weights,
+                        favorite=favorite,
+                        favorite_bonus=float(
+                            analysis["favorite_bonus"]
+                            if analysis["favorite_bonus"] is not None
+                            else DEFAULT_FAVORITE_BONUS
+                        ),
+                    )
+                    connection.execute(
+                        "UPDATE photo_analysis SET ranking_score=? WHERE id=?",
+                        (ranking_score, latest["id"]),
                     )
                 connection.execute(
                     "INSERT INTO photo_events(photo_id,event,changes_json,changed_by,created_at) VALUES (?,'manual_update',?,?,?)",
@@ -247,7 +302,7 @@ class PhotoRepository:
             )
             rows = connection.execute(
                 f"""
-                SELECT p.*,l.name AS library_name,a.caption,a.types_json,a.memory_score,a.beauty_score,a.side_caption,
+                SELECT p.*,l.name AS library_name,a.caption,a.types_json,a.memory_score,a.beauty_score,a.ranking_score,a.side_caption,
                        a.provider,a.model,a.raw_json,a.created_at AS analyzed_at,
                        (SELECT COALESCE(SUM(input_tokens+output_tokens),0) FROM api_usage u WHERE u.photo_id=p.id) AS tokens,
                        (SELECT COALESCE(SUM(COALESCE(actual_cost,estimated_cost)),0) FROM api_usage u WHERE u.photo_id=p.id) AS cost
@@ -269,6 +324,9 @@ class PhotoRepository:
         result: dict,
         raw_json: str,
         analysis_source: str = "direct",
+        *,
+        ranking_score: float | None = None,
+        scoring_version_id: str | None = None,
     ) -> None:
         import json
 
@@ -280,8 +338,8 @@ class PhotoRepository:
                     """
                     INSERT INTO photo_analysis(photo_id,job_id,schema_version,stage,provider,model,caption,types_json,
                         memory_score,beauty_score,technical_quality_score,emotion_score,side_caption,should_keep,
-                        sensitive,reason,raw_json,analysis_source,created_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        sensitive,reason,raw_json,analysis_source,ranking_score,scoring_version_id,created_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         photo_id,
@@ -302,6 +360,8 @@ class PhotoRepository:
                         result["reason"],
                         raw_json,
                         analysis_source,
+                        ranking_score,
+                        scoring_version_id,
                         now,
                     ),
                 )

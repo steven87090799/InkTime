@@ -23,6 +23,7 @@ def test_first_setup_login_and_primary_console_pages():
             ("照片", "/photos"),
             ("工作", "/jobs"),
             ("模型", "/providers"),
+            ("評分", "/scoring"),
             ("成本", "/costs"),
             ("渲染", "/rendering"),
             ("裝置", "/devices"),

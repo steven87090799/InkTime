@@ -11,13 +11,25 @@ from jinja2 import BaseLoader, ChoiceLoader, FileSystemLoader
 from werkzeug.exceptions import HTTPException
 
 from inktime import __version__
-from inktime.app.api import auth, dashboard, devices, health, jobs, operations, photos, rendering, settings
+from inktime.app.api import (
+    auth,
+    dashboard,
+    devices,
+    health,
+    jobs,
+    operations,
+    photos,
+    rendering,
+    scoring,
+    settings,
+)
 from inktime.app.db import Database, migrate
 from inktime.app.repositories.auth import AuthRepository
 from inktime.app.repositories.devices import DeviceRepository
 from inktime.app.repositories.jobs import JobRepository
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.providers import ProviderRepository
+from inktime.app.repositories.scoring import ScoringProfileRepository
 from inktime.app.repositories.settings import SecretStore, SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.jobs import JobService
@@ -29,6 +41,7 @@ from inktime.app.services.rendering import RenderService
 from inktime.app.services.analysis import PhotoAnalysisService
 from inktime.app.services.budgets import BudgetService
 from inktime.app.services.providers import ProviderService
+from inktime.app.services.scoring_lab import ScoringLabService
 from inktime.app.core.logging import configure_logging
 from inktime.app.web.access import csrf_token, verify_csrf
 
@@ -85,6 +98,9 @@ def initialize_platform(
     settings_repository.ensure_defaults()
     secret_store = SecretStore(database, secret)
     app.extensions["inktime_settings_repository"] = settings_repository
+    scoring_repository = ScoringProfileRepository(database, settings_repository)
+    scoring_repository.ensure_initial()
+    app.extensions["inktime_scoring_repository"] = scoring_repository
     app.extensions["inktime_secret_store"] = secret_store
     app.extensions["inktime_provider_repository"] = ProviderRepository(database, secret_store)
     app.extensions["inktime_photo_repository"] = PhotoRepository(database)
@@ -99,6 +115,13 @@ def initialize_platform(
         app.extensions["inktime_photo_repository"],
         app.extensions["inktime_usage_repository"],
         app.extensions["inktime_thumbnail_cache"],
+        budget_service,
+    )
+    app.extensions["inktime_scoring_lab_service"] = ScoringLabService(
+        app.extensions["inktime_provider_service"],
+        scoring_repository,
+        settings_repository,
+        app.extensions["inktime_usage_repository"],
         budget_service,
     )
     app.extensions["inktime_backup_service"] = BackupService(database, data_dir / "backups")
@@ -131,6 +154,7 @@ def initialize_platform(
     app.register_blueprint(jobs.bp)
     app.register_blueprint(photos.bp)
     app.register_blueprint(settings.bp)
+    app.register_blueprint(scoring.bp)
     app.register_blueprint(operations.bp)
     app.register_blueprint(rendering.bp)
     app.jinja_env.globals["csrf_token"] = csrf_token

@@ -40,7 +40,13 @@ def photo_detail(photo_id: str):
         abort(404)
     with current_app.extensions["inktime_database"].session() as connection:
         analyses = connection.execute(
-            "SELECT * FROM photo_analysis WHERE photo_id=? ORDER BY created_at DESC", (photo_id,)
+            """
+            SELECT a.*,v.name AS scoring_version_name
+            FROM photo_analysis a
+            LEFT JOIN scoring_rule_versions v ON v.id=a.scoring_version_id
+            WHERE a.photo_id=? ORDER BY a.created_at DESC
+            """,
+            (photo_id,),
         ).fetchall()
         usage = connection.execute(
             "SELECT * FROM api_usage WHERE photo_id=? ORDER BY started_at DESC", (photo_id,)

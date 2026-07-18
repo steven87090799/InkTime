@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}評分控制中心｜InkTime{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">可版本化的照片排序</p>
+    <h1>評分控制中心</h1>
+    <p>調整模型判斷規則與綜合排序權重；原始四項模型分數永遠保留。</p>
+  </div>
+</div>
+
+<section class="metrics">
+  <article><span>目前版本</span><strong>{{ current_profile.name }}</strong></article>
+  <article><span>版本數</span><strong>{{ versions|length }}</strong></article>
+  <article><span>啟用 Provider</span><strong>{{ provider_count }}</strong></article>
+  <article><span>最愛加分</span><strong>+{{ current_profile.favorite_bonus }}</strong></article>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><div><h2>規則與綜合權重</h2><p>四項權重合計必須是 100%。儲存會建立新版本，不會覆蓋歷史。</p></div><strong id="weight-total" class="weight-total">100%</strong></div>
+  {% if g.user.role == 'administrator' %}
+  <form id="scoring-profile-form" class="scoring-form">
+    <label class="profile-name">版本名稱<input name="name" maxlength="80" value="{{ current_profile.name }} 的調整" required></label>
+    <div class="weight-grid">
+      <label>回憶價值 <output data-output="memory_weight">{{ current_profile.memory_weight }}%</output><input type="range" name="memory_weight" min="0" max="100" step="1" value="{{ current_profile.memory_weight }}"></label>
+      <label>美觀 <output data-output="beauty_weight">{{ current_profile.beauty_weight }}%</output><input type="range" name="beauty_weight" min="0" max="100" step="1" value="{{ current_profile.beauty_weight }}"></label>
+      <label>技術品質 <output data-output="technical_weight">{{ current_profile.technical_weight }}%</output><input type="range" name="technical_weight" min="0" max="100" step="1" value="{{ current_profile.technical_weight }}"></label>
+      <label>情緒與故事 <output data-output="emotion_weight">{{ current_profile.emotion_weight }}%</output><input type="range" name="emotion_weight" min="0" max="100" step="1" value="{{ current_profile.emotion_weight }}"></label>
+      <label>最愛照片額外加分 <output data-output="favorite_bonus">+{{ current_profile.favorite_bonus }}</output><input type="range" name="favorite_bonus" min="0" max="30" step="1" value="{{ current_profile.favorite_bonus }}"></label>
+    </div>
+    <label class="rules-editor">照片高低分規則<textarea name="rules" rows="28" minlength="100" maxlength="12000" required>{{ current_profile.rules }}</textarea></label>
+    <button class="primary" type="submit">儲存為新版本</button>
+  </form>
+  {% else %}
+  <pre>{{ current_profile.rules }}</pre>
+  {% endif %}
+</section>
+
+<section class="panel scoring-lab">
+  <div class="panel-head"><div><h2>單張照片測試台</h2><p>照片只存於暫存目錄，測試完成即刪除；模型請求仍會產生 Token 與費用。</p></div></div>
+  {% if g.user.role == 'administrator' %}
+  <form id="scoring-test-form" class="test-upload">
+    <input type="file" name="photo" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" required>
+    <button class="secondary" type="submit" {% if provider_count == 0 %}disabled title="請先設定 Provider"{% endif %}>使用目前規則測試</button>
+  </form>
+  <div id="scoring-test-status" class="test-status" aria-live="polite"></div>
+  <div id="scoring-test-result" class="test-result" hidden></div>
+  {% else %}<p>只有管理員可以送出付費模型測試。</p>{% endif %}
+</section>
+
+<section class="panel">
+  <h2>規則版本歷史</h2>
+  <div class="table-wrap"><table><thead><tr><th>版本</th><th>權重（回憶／美觀／技術／情緒）</th><th>最愛</th><th>建立時間</th><th>操作</th></tr></thead><tbody>
+  {% for version in versions %}
+    <tr><td><strong>{{ version.name }}</strong>{% if version.is_active %}<small>目前使用中</small>{% endif %}</td><td>{{ version.memory_weight }}／{{ version.beauty_weight }}／{{ version.technical_weight }}／{{ version.emotion_weight }}</td><td>+{{ version.favorite_bonus }}</td><td>{{ version.created_at }}</td><td>{% if g.user.role == 'administrator' and not version.is_active %}<button class="secondary restore-profile" data-id="{{ version.id }}">還原此版本</button>{% else %}—{% endif %}</td></tr>
+  {% endfor %}
+  </tbody></table></div>
+</section>
+{% endblock %}
+
+{% block scripts %}{% if g.user.role == 'administrator' %}
+<script>
+(() => {
+  const profileForm = document.getElementById('scoring-profile-form');
+  const weightNames = ['memory_weight', 'beauty_weight', 'technical_weight', 'emotion_weight'];
+  const total = document.getElementById('weight-total');
+  const updateWeights = () => {
+    let sum = 0;
+    profileForm.querySelectorAll('input[type="range"]').forEach(input => {
+      const output = profileForm.querySelector(`[data-output="${input.name}"]`);
+      output.textContent = input.name === 'favorite_bonus' ? `+${input.value}` : `${input.value}%`;
+      if (weightNames.includes(input.name)) sum += Number(input.value);
+    });
+    total.textContent = `${sum}%`;
+    total.classList.toggle('invalid', sum !== 100);
+    return sum;
+  };
+  profileForm.querySelectorAll('input[type="range"]').forEach(input => input.addEventListener('input', updateWeights));
+  updateWeights();
+
+  profileForm.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (updateWeights() !== 100) return alert('四項權重合計必須等於 100%');
+    const form = new FormData(profileForm);
+    const body = Object.fromEntries(form.entries());
+    const response = await window.inktimeFetch('/api/v1/scoring/profiles', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    });
+    const data = await response.json();
+    if (!response.ok) return alert(data.message || '儲存失敗');
+    location.reload();
+  });
+
+  document.querySelectorAll('.restore-profile').forEach(button => button.addEventListener('click', async () => {
+    if (!confirm('將以此歷史版本建立新的目前版本，確定？')) return;
+    const response = await window.inktimeFetch(`/api/v1/scoring/profiles/${button.dataset.id}/restore`, {method: 'POST'});
+    const data = await response.json();
+    if (!response.ok) return alert(data.message || '還原失敗');
+    location.reload();
+  }));
+
+  const testForm = document.getElementById('scoring-test-form');
+  testForm.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (!confirm('這會呼叫目前高品質模型並產生費用，確定測試？')) return;
+    const status = document.getElementById('scoring-test-status');
+    const result = document.getElementById('scoring-test-result');
+    status.textContent = '模型分析中，請稍候…';
+    result.hidden = true;
+    const response = await window.inktimeFetch('/api/v1/scoring/test', {method: 'POST', body: new FormData(testForm)});
+    const data = await response.json();
+    if (!response.ok) { status.textContent = data.message || '測試失敗'; return; }
+    status.textContent = '測試完成；上傳暫存檔已刪除。';
+    const analysis = data.analysis;
+    const element = (tag, text, className = '') => {
+      const node = document.createElement(tag);
+      node.textContent = text;
+      if (className) node.className = className;
+      return node;
+    };
+    const cards = element('div', '', 'score-cards');
+    [['綜合排序', data.ranking_score], ['回憶', analysis.memory_score], ['美觀', analysis.beauty_score], ['技術', analysis.technical_quality_score], ['情緒', analysis.emotion_score]].forEach(([label, value]) => {
+      const card = document.createElement('article');
+      card.append(element('span', label), element('strong', String(value)));
+      cards.append(card);
+    });
+    result.replaceChildren(
+      cards,
+      element('h3', analysis.caption),
+      element('p', analysis.reason),
+      element('p', `類型：${analysis.types.join('、')}`),
+      element('small', `${data.profile.name} · ${data.usage.provider}/${data.usage.model} · ${data.usage.input_tokens + data.usage.output_tokens} Token · US$ ${Number(data.usage.cost).toFixed(6)} · ${data.usage.latency_ms} ms`)
+    );
+    result.hidden = false;
+  });
+})();
+</script>
+{% endif %}{% endblock %}

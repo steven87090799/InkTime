@@ -53,6 +53,7 @@ flowchart TB
 | 登入、權限、CSRF | `inktime/app/api/auth.py`、`web/access.py` | `repositories/auth.py`、`core/security.py` |
 | 照片掃描與本地特徵 | `workers/scanner.py` | `domain/photos/preprocessing.py`、`repositories/photos.py` |
 | 模型分析與兩階段判斷 | `services/analysis.py` | `providers/openai_compatible.py`、`domain/analysis/schema.py` |
+| 評分規則、權重、測試與還原 | `api/scoring.py`、`services/scoring_lab.py` | `repositories/scoring.py`、`domain/analysis/scoring.py` |
 | 背景工作、暫停與恢復 | `workers/runner.py`、`workers/job_worker.py` | `repositories/jobs.py` |
 | 模型路由、限流與熔斷 | `providers/router.py` | `services/providers.py`、`repositories/providers.py` |
 | Token、成本與停止線 | `services/budgets.py` | `repositories/usage.py`、`repositories/settings.py` |
@@ -74,11 +75,11 @@ flowchart LR
     STRATEGY -->|"high_quality"| STAGE2["1600px 高品質模型"]
     STAGE1 --> GATE{"回憶分達門檻<br/>或人物／最愛？"}
     GATE -->|"是"| STAGE2
-    GATE -->|"否"| SAVE["保存四項分數與描述"]
+    GATE -->|"否"| SAVE["保存四項原始分數、綜合分與規則版本"]
     STAGE2 --> SAVE
     LOCAL_SCORE --> SAVE
     INHERIT --> SAVE
-    SAVE --> PICK["依回憶分選片"] --> RELEASE["480×800 四色 2bpp Release"]
+    SAVE --> PICK["回憶分通過門檻<br/>依綜合分排序"] --> RELEASE["480×800 四色 2bpp Release"]
     RELEASE --> DEVICE["ESP32 驗證 SHA-256 後顯示"]
 ```
 
@@ -93,17 +94,17 @@ flowchart LR
 | `technical_quality_score` | 清晰、曝光、構圖等技術品質 | 視覺模型依固定 Prompt 判斷 |
 | `emotion_score` | 情緒與故事性 | 視覺模型依固定 Prompt 判斷 |
 
-目前沒有把四項分數乘上百分比後合成總分的邏輯，也沒有管理介面權重滑桿。`memory_score` 不是加權總分；它是模型直接輸出的回憶分。不要把 `analysis.stage_two_threshold` 或 `render.memory_threshold` 誤認為權重，兩者都是門檻。
+`memory_score` 不是加權總分；它是模型直接輸出的回憶分。系統另外保存 `ranking_score`：預設以回憶 50%、美觀 20%、技術品質 10%、情緒 20% 計算，最愛照片再加 5 分並限制在 0–100。管理員可在「評分」頁調整權重；四項必須合計 100%。`analysis.stage_two_threshold` 與 `render.memory_threshold` 仍是門檻，不是權重。
 
 ### 不改程式碼可以調整的項目
 
-登入管理平台後開啟「設定」：
+登入管理平台後，「設定」與「評分」各自負責：
 
 | 設定鍵 | 用途 | 預設值 |
 |---|---|---:|
 | `model.low_model` | 第一階段低成本模型 | `gpt-4o-mini` |
 | `model.high_model` | 第二階段高品質模型 | `gpt-4o` |
-| `analysis.scoring_rules` | 可從網頁編輯的照片高低分準則 | 內建完整舊版規則 |
+| 「評分」控制中心 | 規則、權重、最愛加分、版本歷史與單張測試 | 內建完整舊版規則 |
 | `analysis.stage_two_threshold` | 第一階段回憶分達此值才升級；人物／最愛例外 | 65 |
 | `render.memory_threshold` | 電子紙候選照片最低回憶分 | 70 |
 
@@ -111,7 +112,9 @@ flowchart LR
 
 ### 要改評分規則時看哪裡
 
-- 可編輯評分規則：管理介面「設定」頁的 `analysis.scoring_rules`。
+- 可編輯評分規則與綜合權重：管理介面「評分」頁；儲存時建立不可覆寫的歷史版本。
+- 單張測試：`api/scoring.py` 暫存與刪除上傳檔，`services/scoring_lab.py` 呼叫目前高品質模型並記錄用量。
+- 版本保存與還原：`repositories/scoring.py` 與 SQLite `scoring_rule_versions`。
 - 評分規則版本化預設：`inktime/app/domain/analysis/scoring.py` 的 `DEFAULT_SCORING_RULES`。
 - 不可由網頁覆寫的 JSON／語言／防虛構指令：`inktime/app/providers/openai_compatible.py` 的 `SYSTEM_PROMPT`。
 - 分數欄位、型別與 0–100 範圍：`inktime/app/domain/analysis/schema.py`。
@@ -121,7 +124,7 @@ flowchart LR
 - 電子紙自動選片排序：`inktime/app/services/rendering.py`。
 - 舊版原始回憶分／美觀分細則仍保留在 `legacy_analyze_photos.py`；其有效規則已整理為新版預設。
 
-若要新增真正的可調權重，應另外定義「綜合排序分數」，保留四個模型原始分數，再以版本化設定計算並保存綜合分；不應覆寫 `memory_score`，否則舊分析結果會失去可比較性。
+新規則只套用到之後的分析；既有照片保留當時的 `ranking_score` 與 `scoring_version_id`，不會在滑桿變動時悄悄改分。若要回溯比較，應另開重新分析工作。
 
 ## 設定與資料流
 
@@ -129,9 +132,10 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    SETTINGS_UI["設定頁<br/>包含照片評分規則"] --> SETTINGS_API["POST /api/v1/settings"]
-    SETTINGS_API --> VALIDATE["SettingsRepository 驗證"]
+    SETTINGS_UI["評分控制中心<br/>規則、權重、版本"] --> SETTINGS_API["POST /api/v1/scoring/profiles"]
+    SETTINGS_API --> VALIDATE["ScoringProfileRepository 驗證與交易"]
     VALIDATE --> SETTINGS_DB[("settings")]
+    VALIDATE --> VERSIONS[("scoring_rule_versions")]
     VALIDATE --> HISTORY[("setting_history")]
     WORKER["Worker 啟動工作"] --> SETTINGS_DB
     WORKER --> ANALYSIS["PhotoAnalysisService"]
