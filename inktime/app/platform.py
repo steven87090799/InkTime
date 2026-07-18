@@ -93,7 +93,7 @@ def initialize_platform(
     budget_service = BudgetService(database, settings_repository)
     app.extensions["inktime_budget_service"] = budget_service
     app.extensions["inktime_provider_service"] = ProviderService(
-        app.extensions["inktime_provider_repository"]
+        app.extensions["inktime_provider_repository"], settings_repository
     )
     app.extensions["inktime_analysis_service"] = PhotoAnalysisService(
         app.extensions["inktime_photo_repository"],

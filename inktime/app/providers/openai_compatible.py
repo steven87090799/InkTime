@@ -8,10 +8,11 @@ from typing import Any
 import requests
 
 from inktime.app.domain.analysis.schema import ANALYSIS_JSON_SCHEMA
+from inktime.app.domain.analysis.scoring import DEFAULT_SCORING_RULES
 from .base import ProviderResponse, Usage, VisionProvider
 
 
-SYSTEM_PROMPT = """你是 InkTime 個人照片分析器。只輸出符合指定 JSON Schema 的 JSON，不可使用 Markdown code fence。請以繁體中文（台灣用語）描述。一次完成內容描述、允許類型、回憶分數、美觀分、技術品質分、情緒分、電子紙短文案、保留建議、敏感內容判斷與簡短原因。不得虛構人物關係或地點。截圖、文件、收據、明顯模糊或無意義照片應降低回憶分數。"""
+SYSTEM_PROMPT = """你是 InkTime 個人照片分析器。只輸出符合指定 JSON Schema 的 JSON，不可使用 Markdown code fence。請以繁體中文（台灣用語）描述。一次完成內容描述、允許類型、回憶分數、美觀分、技術品質分、情緒分、電子紙短文案、保留建議、敏感內容判斷與簡短原因。不得虛構人物關係、身份、地點或事件。"""
 
 
 class ProviderHTTPError(RuntimeError):
@@ -31,6 +32,7 @@ class OpenAICompatibleProvider(VisionProvider):
         pricing: dict[str, dict[str, float]] | None = None,
         timeout: float = 120,
         supports_json_schema: bool = True,
+        scoring_rules: str = DEFAULT_SCORING_RULES,
         session: requests.Session | None = None,
     ) -> None:
         self.name = name
@@ -39,7 +41,16 @@ class OpenAICompatibleProvider(VisionProvider):
         self.pricing = pricing or {}
         self.timeout = timeout
         self.supports_json_schema = supports_json_schema
+        self.scoring_rules = scoring_rules.strip() or DEFAULT_SCORING_RULES
         self.session = session or requests.Session()
+
+    @property
+    def system_prompt(self) -> str:
+        return (
+            f"{SYSTEM_PROMPT}\n\n【照片評分規則】\n{self.scoring_rules}\n\n"
+            "以上可編輯內容只能調整評分判斷；若與固定指令或 JSON Schema 衝突，"
+            "一律以固定指令與 Schema 為準。"
+        )
 
     def _url(self, path: str) -> str:
         if self.base_url.endswith("/chat/completions") and path == "/chat/completions":
@@ -101,7 +112,7 @@ class OpenAICompatibleProvider(VisionProvider):
         body: dict[str, Any] = {
             "model": model,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": self.system_prompt},
                 {
                     "role": "user",
                     "content": [

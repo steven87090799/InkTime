@@ -12,6 +12,7 @@
 | `general.timezone` | Asia/Taipei | IANA 時區 | 影響跨日與排程 | 否 |
 | `analysis.strategy` | smart_two_stage | 五種策略 | 高品質成本高 | 否 |
 | `analysis.stage_two_threshold` | 65 | 0–100，建議 60–75 | 越低成本越高 | 否 |
+| `analysis.scoring_rules` | 內建完整規則 | 100–12000 字元 | 影響新分析結果 | 否 |
 | `analysis.concurrency` | 2 | 1–32，NAS 建議 2–4 | 過高觸發限流／記憶體 | 是 |
 | `analysis.max_retries` | 3 | 0–10 | 重試增加成本 | 否 |
 | `model.low_model` | gpt-4o-mini | 支援圖片／Schema 的模型 | 能力不足會進錯誤佇列 | 否 |
@@ -42,7 +43,8 @@
 - 改模型：在「設定」調整 `model.low_model`／`model.high_model`，並在「模型」頁設定 Provider。
 - 改第二階段成本與品質取捨：調整 `analysis.stage_two_threshold`。
 - 改電子紙最低回憶分：調整 `render.memory_threshold`。
-- 改模型評分規則：目前需修改 `inktime/app/providers/openai_compatible.py` 的 `SYSTEM_PROMPT` 並重建映像。
-- 舊版詳細評分細則在 `legacy_analyze_photos.py`，新版 Worker 不會載入它。
+- 改模型評分規則：在「設定」頁的「照片評分規則」編輯 `analysis.scoring_rules`；儲存後下一次模型分析立即生效，既有照片不會自動重算。
+- 預設值已整理自舊版 `legacy_analyze_photos.py`，新版版本化預設位於 `inktime/app/domain/analysis/scoring.py`。
+- JSON Schema、繁體中文與不得虛構等固定約束不允許從網頁覆寫，位於 `inktime/app/providers/openai_compatible.py`。
 
 完整流程圖與程式入口見 [專案架構與評分流程](ARCHITECTURE_ZH_TW.md)。
