@@ -37,5 +37,5 @@ def test_first_setup_login_and_primary_console_pages():
         page.goto(base + "/settings")
         page.locator('[name="analysis.concurrency"]').fill("3")
         page.on("dialog", lambda dialog: dialog.accept())
-        page.get_by_role("button", name="儲存設定").click()
+        page.get_by_role("button", name="儲存全部設定").click()
         browser.close()
