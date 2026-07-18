@@ -223,6 +223,23 @@ def report_status():
         except (TypeError, ValueError):
             abort(400, description=f"DEVICE-004 {key} 必須是整數")
 
+    def optional_float(key: str, minimum: float, maximum: float) -> float | None:
+        value = payload.get(key)
+        if value is None:
+            return None
+        try:
+            return max(minimum, min(float(value), maximum))
+        except (TypeError, ValueError):
+            abort(400, description=f"DEVICE-004 {key} 必須是數字")
+
+    def optional_bool(key: str) -> bool | None:
+        value = payload.get(key)
+        if value is None:
+            return None
+        if not isinstance(value, bool):
+            abort(400, description=f"DEVICE-004 {key} 必須是布林值")
+        return value
+
     battery = payload.get("battery_percent")
     try:
         battery_percent = max(0.0, min(float(battery), 100.0)) if battery is not None else None
@@ -247,6 +264,24 @@ def report_status():
             "render_profile": str(payload.get("render_profile", ""))[:100],
             "reported_panel_profile": str(payload.get("panel_profile", ""))[:100],
             "applied_config_version": payload.get("applied_config_version"),
+            "board_profile": str(payload.get("board_profile", ""))[:100],
+            "flash_bytes": optional_int("flash_bytes", 0, 2_147_483_647),
+            "psram_bytes": optional_int("psram_bytes", 0, 2_147_483_647),
+            "flash_ready": optional_bool("flash_ready"),
+            "psram_ready": optional_bool("psram_ready"),
+            "sd_card": optional_bool("sd_card"),
+            "rtc": optional_bool("rtc"),
+            "cache_status": str(payload.get("cache_status", ""))[:32],
+            "pmic_type": str(payload.get("pmic_type", ""))[:32],
+            "usb_power": optional_bool("usb_power"),
+            "battery_voltage": optional_float("battery_voltage", 0.0, 10.0),
+            "battery_percent_estimated": optional_bool("battery_percent_estimated"),
+            "temperature_c": optional_float("temperature_c", -100.0, 150.0),
+            "humidity_percent": optional_float("humidity_percent", 0.0, 100.0),
+            "last_refresh_duration_ms": optional_int(
+                "last_refresh_duration_ms", 0, 600_000
+            ),
+            "button_wakeup": optional_bool("button_wakeup"),
         },
     )
     log_event(

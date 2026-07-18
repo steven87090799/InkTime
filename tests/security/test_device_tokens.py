@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from tests.conftest import create_admin, csrf, login
 
 
@@ -133,6 +135,20 @@ def test_device_status_is_recorded_without_exposing_token(client, app):
             "wifi_rssi": -61,
             "free_heap_bytes": 182000,
             "free_psram_bytes": 7100000,
+            "board_profile": "waveshare-esp32-s3-photopainter",
+            "flash_bytes": 16777216,
+            "psram_bytes": 8388608,
+            "flash_ready": True,
+            "psram_ready": True,
+            "sd_card": True,
+            "rtc": True,
+            "cache_status": "hit",
+            "pmic_type": "axp2101",
+            "usb_power": True,
+            "battery_voltage": 4.08,
+            "temperature_c": 25.5,
+            "humidity_percent": 61.0,
+            "last_refresh_duration_ms": 25000,
             "wake_reason": "4",
             "display_updated": False,
             "error_code": "DEVICE-DOWNLOAD",
@@ -146,7 +162,13 @@ def test_device_status_is_recorded_without_exposing_token(client, app):
     assert device["firmware_version"] == "2.1.0"
     assert device["wifi_rssi"] == -61
     assert device["last_error_code"] == "DEVICE-DOWNLOAD"
-    assert repository.list_events()[0]["level"] == "error"
+    event = repository.list_events()[0]
+    assert event["level"] == "error"
+    details = json.loads(event["details_json"])
+    assert details["board_profile"] == "waveshare-esp32-s3-photopainter"
+    assert details["pmic_type"] == "axp2101"
+    assert details["cache_status"] == "hit"
+    assert details["last_refresh_duration_ms"] == 25000
 
 
 def test_device_status_rejects_malformed_numeric_telemetry(client, app):
