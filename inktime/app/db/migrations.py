@@ -382,6 +382,33 @@ MIGRATIONS = (
             "INSERT OR IGNORE INTO feature_flags(key,enabled,description,updated_at) VALUES ('object_storage',0,'S3 相容物件儲存（尚未啟用）',datetime('now'))",
         ),
     ),
+    Migration(
+        5,
+        "加入評分規則版本與綜合排序分",
+        (
+            """
+            CREATE TABLE IF NOT EXISTS scoring_rule_versions (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                rules TEXT NOT NULL,
+                memory_weight REAL NOT NULL CHECK(memory_weight BETWEEN 0 AND 100),
+                beauty_weight REAL NOT NULL CHECK(beauty_weight BETWEEN 0 AND 100),
+                technical_weight REAL NOT NULL CHECK(technical_weight BETWEEN 0 AND 100),
+                emotion_weight REAL NOT NULL CHECK(emotion_weight BETWEEN 0 AND 100),
+                favorite_bonus REAL NOT NULL CHECK(favorite_bonus BETWEEN 0 AND 100),
+                is_active INTEGER NOT NULL DEFAULT 0 CHECK(is_active IN (0,1)),
+                created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL,
+                CHECK(abs(memory_weight + beauty_weight + technical_weight + emotion_weight - 100.0) < 0.001)
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_scoring_rule_active ON scoring_rule_versions(is_active) WHERE is_active=1",
+            "CREATE INDEX IF NOT EXISTS idx_scoring_rule_created ON scoring_rule_versions(created_at DESC)",
+            "ALTER TABLE photo_analysis ADD COLUMN ranking_score REAL CHECK(ranking_score IS NULL OR ranking_score BETWEEN 0 AND 100)",
+            "ALTER TABLE photo_analysis ADD COLUMN scoring_version_id TEXT REFERENCES scoring_rule_versions(id) ON DELETE SET NULL",
+            "CREATE INDEX IF NOT EXISTS idx_photo_analysis_ranking ON photo_analysis(ranking_score DESC)",
+        ),
+    ),
 )
 
 

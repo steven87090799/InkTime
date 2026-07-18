@@ -1,5 +1,47 @@
 from __future__ import annotations
 
+from typing import Mapping
+
+
+DEFAULT_RANKING_WEIGHTS = {
+    "memory": 50.0,
+    "beauty": 20.0,
+    "technical_quality": 10.0,
+    "emotion": 20.0,
+}
+DEFAULT_FAVORITE_BONUS = 5.0
+
+
+def validate_ranking_weights(weights: Mapping[str, float]) -> dict[str, float]:
+    required = set(DEFAULT_RANKING_WEIGHTS)
+    if set(weights) != required:
+        raise ValueError("綜合評分權重欄位不完整")
+    normalized = {key: float(value) for key, value in weights.items()}
+    if any(value < 0 or value > 100 for value in normalized.values()):
+        raise ValueError("每項權重必須介於 0 到 100")
+    if abs(sum(normalized.values()) - 100.0) > 0.001:
+        raise ValueError("四項權重合計必須等於 100%")
+    return normalized
+
+
+def calculate_ranking_score(
+    analysis: Mapping[str, float | int],
+    weights: Mapping[str, float],
+    *,
+    favorite: bool = False,
+    favorite_bonus: float = DEFAULT_FAVORITE_BONUS,
+) -> float:
+    values = validate_ranking_weights(weights)
+    score = (
+        float(analysis["memory_score"]) * values["memory"]
+        + float(analysis["beauty_score"]) * values["beauty"]
+        + float(analysis["technical_quality_score"]) * values["technical_quality"]
+        + float(analysis["emotion_score"]) * values["emotion"]
+    ) / 100.0
+    if favorite:
+        score += max(0.0, min(100.0, float(favorite_bonus)))
+    return round(max(0.0, min(100.0, score)), 2)
+
 
 DEFAULT_SCORING_RULES = """【回憶分 memory_score】
 先判斷照片所屬區間，再依加分與扣分條件微調，分數範圍為 0～100：

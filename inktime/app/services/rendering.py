@@ -93,7 +93,7 @@ class RenderService:
                         SELECT id FROM photo_analysis WHERE photo_id=p.id ORDER BY created_at DESC LIMIT 1
                     )
                     WHERE p.status='analyzed' AND a.memory_score>=?
-                    ORDER BY a.memory_score DESC LIMIT ?
+                    ORDER BY COALESCE(a.ranking_score,a.memory_score) DESC LIMIT ?
                     """,
                     (memory_threshold, limit),
                 ).fetchall()

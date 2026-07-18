@@ -13,6 +13,8 @@
 | `analysis.strategy` | smart_two_stage | 五種策略 | 高品質成本高 | 否 |
 | `analysis.stage_two_threshold` | 65 | 0–100，建議 60–75 | 越低成本越高 | 否 |
 | `analysis.scoring_rules` | 內建完整規則 | 100–12000 字元 | 影響新分析結果 | 否 |
+| 綜合排序權重 | 50／20／10／20 | 四項合計 100% | 影響新分析與自動選片順序 | 否 |
+| 最愛照片加分 | 5 | 0–30 | 只加入綜合排序分 | 否 |
 | `analysis.concurrency` | 2 | 1–32，NAS 建議 2–4 | 過高觸發限流／記憶體 | 是 |
 | `analysis.max_retries` | 3 | 0–10 | 重試增加成本 | 否 |
 | `model.low_model` | gpt-4o-mini | 支援圖片／Schema 的模型 | 能力不足會進錯誤佇列 | 否 |
@@ -38,12 +40,14 @@
 
 ## 照片評分與門檻
 
-模型會直接輸出回憶、美觀、技術品質與情緒四個 0–100 分；目前沒有四項加權總分，也沒有權重滑桿。`analysis.stage_two_threshold` 只決定是否進入第二階段，`render.memory_threshold` 只決定電子紙候選門檻，兩者都不是模型權重。
+模型會直接輸出回憶、美觀、技術品質與情緒四個 0–100 原始分數。系統另用「評分」頁的四項權重算出 `ranking_score`，並在最愛照片上加入設定的額外分數；原始四項分數不會被覆寫。`analysis.stage_two_threshold` 仍只決定是否進入第二階段，`render.memory_threshold` 仍是電子紙候選的最低回憶分門檻。
 
 - 改模型：在「設定」調整 `model.low_model`／`model.high_model`，並在「模型」頁設定 Provider。
 - 改第二階段成本與品質取捨：調整 `analysis.stage_two_threshold`。
 - 改電子紙最低回憶分：調整 `render.memory_threshold`。
-- 改模型評分規則：在「設定」頁的「照片評分規則」編輯 `analysis.scoring_rules`；儲存後下一次模型分析立即生效，既有照片不會自動重算。
+- 改模型評分規則或綜合權重：到「評分」頁儲存為新版本；下一次分析立即生效，既有照片不會自動重算。
+- 測試照片：在「評分」頁選一張照片並確認付費請求；暫存檔會在請求結束後刪除，Token、費用與延遲仍寫入成本紀錄。
+- 還原：版本歷史的「還原此版本」會建立一個新的目前版本，不會刪除或覆寫任何歷史。
 - 預設值已整理自舊版 `legacy_analyze_photos.py`，新版版本化預設位於 `inktime/app/domain/analysis/scoring.py`。
 - JSON Schema、繁體中文與不得虛構等固定約束不允許從網頁覆寫，位於 `inktime/app/providers/openai_compatible.py`。
 

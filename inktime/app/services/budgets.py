@@ -37,7 +37,7 @@ class BudgetService:
             "job_limit": float(job["budget_limit"]) if job and job["budget_limit"] is not None else None,
         }
 
-    def assert_request_allowed(self, job_id: str | None, photo_id: str) -> None:
+    def assert_request_allowed(self, job_id: str | None, photo_id: str | None) -> None:
         usage = self.snapshot(job_id, photo_id)
         checks = (
             (usage["daily"], float(self.settings.get("budget.daily_stop", 10)), "每日 API 預算已達停止值"),

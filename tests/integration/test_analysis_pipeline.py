@@ -9,6 +9,7 @@ from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.analysis import PhotoAnalysisService
 from inktime.app.workers.scanner import PhotoScanner
+from tests.conftest import create_admin
 from tests.unit.test_analysis_schema import valid_result
 
 
@@ -77,6 +78,44 @@ def test_single_model_call_returns_all_fields_and_usage(app, tmp_path):
     with app.extensions["inktime_database"].session() as connection:
         usage = connection.execute("SELECT input_tokens,output_tokens FROM api_usage").fetchone()
     assert tuple(usage) == (1000, 100)
+
+
+def test_favorite_change_recalculates_latest_ranking_with_original_version(app, tmp_path):
+    user_id = create_admin(app)
+    _, ids, service = prepare(app, tmp_path)
+    profile = app.extensions["inktime_scoring_repository"].current()
+    provider = MockProvider([valid_result()])
+    service.analyze_photo(
+        photo_id=ids[0],
+        job_id=None,
+        provider=provider,
+        strategy="high_quality",
+        high_model="mock",
+        scoring_version_id=str(profile["id"]),
+    )
+    repository = app.extensions["inktime_photo_repository"]
+    with app.extensions["inktime_database"].session() as connection:
+        before = connection.execute(
+            "SELECT ranking_score,scoring_version_id FROM photo_analysis WHERE photo_id=?",
+            (ids[0],),
+        ).fetchone()
+
+    repository.update_manual(
+        ids[0],
+        favorite=True,
+        captured_at=None,
+        types=["人物"],
+        side_caption="值得收藏的一天",
+        changed_by=user_id,
+    )
+
+    with app.extensions["inktime_database"].session() as connection:
+        after = connection.execute(
+            "SELECT ranking_score,scoring_version_id FROM photo_analysis WHERE photo_id=?",
+            (ids[0],),
+        ).fetchone()
+    assert after["ranking_score"] == before["ranking_score"] + profile["favorite_bonus"]
+    assert after["scoring_version_id"] == before["scoring_version_id"]
 
 
 def test_invalid_json_is_repaired_only_once_without_second_image_call(app, tmp_path):

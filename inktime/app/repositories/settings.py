@@ -9,7 +9,11 @@ from typing import Any
 from cryptography.fernet import Fernet, InvalidToken
 
 from inktime.app.db import Database
-from inktime.app.domain.analysis.scoring import DEFAULT_SCORING_RULES
+from inktime.app.domain.analysis.scoring import (
+    DEFAULT_FAVORITE_BONUS,
+    DEFAULT_RANKING_WEIGHTS,
+    DEFAULT_SCORING_RULES,
+)
 
 
 SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
@@ -51,6 +55,62 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "min_length": 100,
         "max_length": 12000,
         "full_width": True,
+        "control_center": True,
+    },
+    "analysis.ranking_memory_weight": {
+        "category": "評分控制中心",
+        "default": DEFAULT_RANKING_WEIGHTS["memory"],
+        "type": "number",
+        "description": "綜合排序分的回憶分權重",
+        "risk": "四項權重合計必須為 100%",
+        "min": 0,
+        "max": 100,
+        "restart": False,
+        "control_center": True,
+    },
+    "analysis.ranking_beauty_weight": {
+        "category": "評分控制中心",
+        "default": DEFAULT_RANKING_WEIGHTS["beauty"],
+        "type": "number",
+        "description": "綜合排序分的美觀分權重",
+        "risk": "四項權重合計必須為 100%",
+        "min": 0,
+        "max": 100,
+        "restart": False,
+        "control_center": True,
+    },
+    "analysis.ranking_technical_weight": {
+        "category": "評分控制中心",
+        "default": DEFAULT_RANKING_WEIGHTS["technical_quality"],
+        "type": "number",
+        "description": "綜合排序分的技術品質權重",
+        "risk": "四項權重合計必須為 100%",
+        "min": 0,
+        "max": 100,
+        "restart": False,
+        "control_center": True,
+    },
+    "analysis.ranking_emotion_weight": {
+        "category": "評分控制中心",
+        "default": DEFAULT_RANKING_WEIGHTS["emotion"],
+        "type": "number",
+        "description": "綜合排序分的情緒分權重",
+        "risk": "四項權重合計必須為 100%",
+        "min": 0,
+        "max": 100,
+        "restart": False,
+        "control_center": True,
+    },
+    "analysis.ranking_favorite_bonus": {
+        "category": "評分控制中心",
+        "default": DEFAULT_FAVORITE_BONUS,
+        "type": "number",
+        "description": "最愛照片加入綜合排序分的額外分數",
+        "risk": "過高可能讓低品質最愛照片排在最前面",
+        "min": 0,
+        "max": 30,
+        "restart": False,
+        "control_center": True,
     },
     "analysis.concurrency": {
         "category": "分析設定",

@@ -3,6 +3,7 @@ from __future__ import annotations
 from flask import Blueprint, abort, current_app, g, render_template, request
 
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
+from inktime.app.repositories.settings import SETTING_DEFINITIONS
 from inktime.app.web.access import administrator_required, login_required
 
 
@@ -12,7 +13,11 @@ bp = Blueprint("settings", __name__)
 @bp.get("/settings")
 @login_required
 def settings_page():
-    rows = current_app.extensions["inktime_settings_repository"].all()
+    rows = [
+        row
+        for row in current_app.extensions["inktime_settings_repository"].all()
+        if not row["definition"].get("control_center")
+    ]
     categories = {}
     for row in rows:
         categories.setdefault(row["category"], []).append(row)
@@ -27,6 +32,8 @@ def update_settings():
     payload = request.get_json(silent=True) or {}
     repository = current_app.extensions["inktime_settings_repository"]
     for key, value in payload.items():
+        if SETTING_DEFINITIONS.get(str(key), {}).get("control_center"):
+            abort(400, description=f"SET-001 請從評分控制中心修改：{key}")
         try:
             repository.update(
                 str(key), value, changed_by=g.user["id"], source_ip=request.remote_addr or "unknown"

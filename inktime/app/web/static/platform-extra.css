@@ -4,6 +4,24 @@
 .settings-grid input, .settings-grid select, .settings-grid textarea, .filterbar input, .filterbar select, .form-stack select { width: 100%; padding: 10px; border: 1px solid var(--field-line); border-radius: 8px; background: var(--field); color: var(--ink); font: inherit; }
 .settings-grid textarea { min-height: 440px; resize: vertical; line-height: 1.6; }
 .settings-grid .setting-full-width { grid-column: 1 / -1; }
+.scoring-form { display: grid; gap: 20px; margin-top: 22px; }
+.scoring-form input[type="text"], .scoring-form textarea, .profile-name input { width: 100%; margin-top: 7px; padding: 11px; border: 1px solid var(--field-line); border-radius: 9px; background: var(--field); color: var(--ink); font: inherit; }
+.rules-editor textarea { min-height: 520px; resize: vertical; line-height: 1.65; }
+.weight-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 16px; }
+.weight-grid label { padding: 15px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); font-weight: 700; }
+.weight-grid output { float: right; color: var(--accent); }
+.weight-grid input { display: block; width: 100%; margin-top: 16px; accent-color: var(--accent); }
+.weight-total { padding: 8px 13px; border-radius: 999px; background: var(--accent2); color: var(--accent); }
+.weight-total.invalid { background: var(--danger-bg); color: var(--danger); }
+.test-upload { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 18px; align-items: center; }
+.test-upload input { flex: 1 1 280px; padding: 10px; border: 1px solid var(--field-line); border-radius: 9px; background: var(--field); color: var(--ink); }
+.test-status { margin-top: 15px; color: var(--muted); }
+.test-result { margin-top: 18px; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); }
+.score-cards { display: grid; grid-template-columns: repeat(5, minmax(90px, 1fr)); gap: 10px; }
+.score-cards article { padding: 13px; border-radius: 10px; background: var(--card); border: 1px solid var(--line); }
+.score-cards span, .score-cards strong { display: block; }
+.score-cards span { color: var(--muted); font-size: 12px; }
+.score-cards strong { font-size: 24px; margin-top: 4px; }
 .filterbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 20px; }
 .filterbar button { padding: 10px 16px; }
 .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 16px; }
@@ -24,4 +42,5 @@ pre { white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow
   .detail-grid { grid-template-columns: 1fr; }
   .photo-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .photo-card img { height: 150px; }
+  .score-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

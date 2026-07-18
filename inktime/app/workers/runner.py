@@ -35,10 +35,19 @@ class WorkerRunner:
             if self.stop.is_set() or job["status"] not in {"running", "retrying"}:
                 continue
             settings = json.loads(job["settings_json"])
+            scoring_profile = self.app.extensions["inktime_scoring_repository"].current()
             provider = self.app.extensions["inktime_provider_service"].build_router()
             analysis = self.app.extensions["inktime_analysis_service"]
 
-            def processor(item, *, job=job, settings=settings, provider=provider, analysis=analysis):
+            def processor(
+                item,
+                *,
+                job=job,
+                settings=settings,
+                provider=provider,
+                analysis=analysis,
+                scoring_profile=scoring_profile,
+            ):
                 if job["kind"] == "scan":
                     scanner = PhotoScanner(
                         self.app.extensions["inktime_photo_repository"],
@@ -78,6 +87,14 @@ class WorkerRunner:
                             ),
                         )
                     ),
+                    ranking_weights={
+                        "memory": float(scoring_profile["memory_weight"]),
+                        "beauty": float(scoring_profile["beauty_weight"]),
+                        "technical_quality": float(scoring_profile["technical_weight"]),
+                        "emotion": float(scoring_profile["emotion_weight"]),
+                    },
+                    favorite_bonus=float(scoring_profile["favorite_bonus"]),
+                    scoring_version_id=str(scoring_profile["id"]),
                 )
 
             self.current = BoundedJobWorker(

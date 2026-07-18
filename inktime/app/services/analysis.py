@@ -7,6 +7,11 @@ import time
 
 from inktime.app.core.paths import safe_join
 from inktime.app.domain.analysis import AnalysisValidationError, validate_analysis_result
+from inktime.app.domain.analysis.scoring import (
+    DEFAULT_FAVORITE_BONUS,
+    DEFAULT_RANKING_WEIGHTS,
+    calculate_ranking_score,
+)
 from inktime.app.domain.photos import ThumbnailCache
 from inktime.app.providers.base import ProviderResponse, VisionProvider
 from inktime.app.repositories.photos import PhotoRepository
@@ -140,6 +145,9 @@ class PhotoAnalysisService:
         high_model: str = "high-quality-vision",
         stage_two_threshold: float = 65,
         favorite_override: bool = True,
+        ranking_weights: dict[str, float] | None = None,
+        favorite_bonus: float = DEFAULT_FAVORITE_BONUS,
+        scoring_version_id: str | None = None,
     ) -> dict:
         photo = self.photos.get_with_path(photo_id)
         if photo is None:
@@ -153,7 +161,23 @@ class PhotoAnalysisService:
         if strategy == "local":
             result = validate_analysis_result(self._local_result(photo))
             raw = json.dumps(result, ensure_ascii=False)
-            self.photos.save_analysis(photo_id, job_id, "local", "local", "local", result, raw)
+            result["ranking_score"] = calculate_ranking_score(
+                result,
+                ranking_weights or DEFAULT_RANKING_WEIGHTS,
+                favorite=bool(photo["favorite"]),
+                favorite_bonus=favorite_bonus,
+            )
+            self.photos.save_analysis(
+                photo_id,
+                job_id,
+                "local",
+                "local",
+                "local",
+                result,
+                raw,
+                ranking_score=result["ranking_score"],
+                scoring_version_id=scoring_version_id,
+            )
             return {"analysis": result, "stage": "local", "_actual_cost": 0}
         if provider is None:
             raise ValueError("VLM-008 尚未設定可用 Provider")
@@ -180,7 +204,23 @@ class PhotoAnalysisService:
                 or (favorite_override and bool(photo["favorite"]))
             )
             if not requires_second:
-                self.photos.save_analysis(photo_id, job_id, "stage_one", provider.name, low_model, low, raw)
+                low["ranking_score"] = calculate_ranking_score(
+                    low,
+                    ranking_weights or DEFAULT_RANKING_WEIGHTS,
+                    favorite=bool(photo["favorite"]),
+                    favorite_bonus=favorite_bonus,
+                )
+                self.photos.save_analysis(
+                    photo_id,
+                    job_id,
+                    "stage_one",
+                    provider.name,
+                    low_model,
+                    low,
+                    raw,
+                    ranking_score=low["ranking_score"],
+                    scoring_version_id=scoring_version_id,
+                )
                 return {"analysis": low, "stage": "stage_one", "_actual_cost": total_cost}
 
         high_image = self.thumbnails.get_or_create(source, sha, 1600)
@@ -194,6 +234,12 @@ class PhotoAnalysisService:
             photo_id=photo_id,
         )
         total_cost += cost
+        high["ranking_score"] = calculate_ranking_score(
+            high,
+            ranking_weights or DEFAULT_RANKING_WEIGHTS,
+            favorite=bool(photo["favorite"]),
+            favorite_bonus=favorite_bonus,
+        )
         self.photos.save_analysis(
             photo_id,
             job_id,
@@ -202,6 +248,8 @@ class PhotoAnalysisService:
             high_model,
             high,
             raw,
+            ranking_score=high["ranking_score"],
+            scoring_version_id=scoring_version_id,
         )
         return {
             "analysis": high,
