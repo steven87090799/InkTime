@@ -20,11 +20,24 @@ from inktime.app.db import Database
 
 
 class DiagnosticsService:
-    def __init__(self, database: Database, data_dir: Path, thumbnail_dir: Path) -> None:
+    def __init__(
+        self,
+        database: Database,
+        data_dir: Path,
+        thumbnail_dir: Path,
+        *,
+        settings_repository=None,
+    ) -> None:
         self.database = database
         self.data_dir = data_dir.resolve()
         self.thumbnail_dir = thumbnail_dir.resolve()
+        self.settings_repository = settings_repository
         self.started_at = time.time()
+        self.process = psutil.Process()
+        self.process.cpu_percent(interval=None)
+        psutil.cpu_percent(interval=None)
+        self._cache_bytes_value = 0
+        self._cache_bytes_at = 0.0
 
     @staticmethod
     def _directory_size(root: Path) -> int:
@@ -32,10 +45,47 @@ class DiagnosticsService:
             return 0
         return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
 
+    @staticmethod
+    def _read_text(path: str) -> str | None:
+        try:
+            return Path(path).read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+
+    @classmethod
+    def _cgroup_snapshot(cls) -> dict:
+        memory_current = cls._read_text("/sys/fs/cgroup/memory.current")
+        memory_max = cls._read_text("/sys/fs/cgroup/memory.max")
+        cpu_max = cls._read_text("/sys/fs/cgroup/cpu.max")
+
+        def number(value: str | None) -> int | None:
+            return int(value) if value and value.isdigit() else None
+
+        return {
+            "memory_current": number(memory_current),
+            "memory_max": number(memory_max),
+            "cpu_max": cpu_max,
+        }
+
+    def _cached_directory_size(self) -> tuple[int, bool]:
+        ttl = (
+            int(self.settings_repository.get("system.diagnostics_cache_seconds", 300))
+            if self.settings_repository
+            else 300
+        )
+        now = time.monotonic()
+        refreshed = self._cache_bytes_at == 0 or now - self._cache_bytes_at >= max(30, ttl)
+        if refreshed:
+            self._cache_bytes_value = self._directory_size(self.thumbnail_dir)
+            self._cache_bytes_at = now
+        return self._cache_bytes_value, not refreshed
+
     def snapshot(self) -> dict:
         memory = psutil.virtual_memory()
         swap = psutil.swap_memory()
         disk = psutil.disk_usage(self.data_dir)
+        process_memory = self.process.memory_info()
+        cache_bytes, cache_cached = self._cached_directory_size()
         wal = Path(str(self.database.path) + "-wal")
         with self.database.session() as connection:
             queue = connection.execute(
@@ -62,16 +112,26 @@ class DiagnosticsService:
                 revision = "unknown"
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "cpu_percent": psutil.cpu_percent(interval=0.05),
+            "cpu_percent": psutil.cpu_percent(interval=None),
+            "load_average": list(os.getloadavg()) if hasattr(os, "getloadavg") else [],
             "memory": {"used": memory.used, "total": memory.total, "percent": memory.percent},
             "swap": {"used": swap.used, "total": swap.total, "percent": swap.percent},
+            "process": {
+                "rss": process_memory.rss,
+                "vms": process_memory.vms,
+                "cpu_percent": self.process.cpu_percent(interval=None),
+                "threads": self.process.num_threads(),
+                "open_files": len(self.process.open_files()),
+            },
+            "cgroup": self._cgroup_snapshot(),
             "disk": {"used": disk.used, "total": disk.total, "free": disk.free, "percent": disk.percent},
             "database": {
                 "bytes": self.database.path.stat().st_size if self.database.path.exists() else 0,
                 "wal_bytes": wal.stat().st_size if wal.exists() else 0,
                 "integrity": self.database.integrity_check(),
             },
-            "cache_bytes": self._directory_size(self.thumbnail_dir),
+            "cache_bytes": cache_bytes,
+            "cache_size_cached": cache_cached,
             "libraries": {
                 "configured": len(libraries),
                 "readable": sum(Path(row["root_path"]).is_dir() for row in libraries),
@@ -99,6 +159,23 @@ class DiagnosticsService:
             "git_revision": revision,
             "build_time": os.environ.get("INKTIME_BUILD_TIME", "unknown"),
             "uptime_seconds": int(time.time() - self.started_at),
+            "runtime_profile": {
+                "analysis_concurrency": int(
+                    self.settings_repository.get("analysis.concurrency", 1)
+                    if self.settings_repository
+                    else 1
+                ),
+                "queue_multiplier": int(
+                    self.settings_repository.get("worker.queue_multiplier", 1)
+                    if self.settings_repository
+                    else 1
+                ),
+                "worker_poll_seconds": float(
+                    self.settings_repository.get("worker.poll_seconds", 15)
+                    if self.settings_repository
+                    else 15
+                ),
+            },
         }
 
     def bundle(self) -> BytesIO:

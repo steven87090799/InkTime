@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 import threading
+import time
 from typing import Callable
 from uuid import uuid4
 
@@ -9,6 +10,8 @@ from inktime.app.repositories.jobs import JobRepository
 
 
 Processor = Callable[[dict], dict]
+ProgressCallback = Callable[[int], None]
+ErrorCallback = Callable[[str, str, Exception, int], None]
 
 
 class BoundedJobWorker:
@@ -22,15 +25,26 @@ class BoundedJobWorker:
         concurrency: int = 2,
         queue_multiplier: int = 2,
         max_attempts: int = 3,
+        progress_interval_items: int = 50,
+        progress_interval_seconds: int = 300,
+        progress_callback: ProgressCallback | None = None,
+        error_callback: ErrorCallback | None = None,
     ) -> None:
         self.repository = repository
         self.processor = processor
         self.concurrency = max(1, concurrency)
         self.queue_size = self.concurrency * max(1, queue_multiplier)
         self.max_attempts = max_attempts
+        self.progress_interval_items = max(1, progress_interval_items)
+        self.progress_interval_seconds = max(1, progress_interval_seconds)
+        self.progress_callback = progress_callback
+        self.error_callback = error_callback
         self.worker_id = str(uuid4())
         self.stop_event = threading.Event()
         self.max_observed_futures = 0
+        self.processed_items = 0
+        self.failure_count = 0
+        self._last_progress_at = time.monotonic()
 
     def request_stop(self) -> None:
         self.stop_event.set()
@@ -41,6 +55,7 @@ class BoundedJobWorker:
         return str(item["id"]), result, cost
 
     def _record_failure(self, job_id: str, item_id: str, exc: Exception) -> None:
+        self.failure_count += 1
         code = str(getattr(exc, "code", "JOB-003"))
         if code.startswith("BUDGET-"):
             self.repository.defer_item(item_id)
@@ -50,8 +65,23 @@ class BoundedJobWorker:
                 "budget_exceeded",
                 "budget_exceeded",
             )
+            if self.error_callback:
+                self.error_callback(job_id, item_id, exc, self.failure_count)
             return
         self.repository.fail_item(job_id, item_id, code, str(exc), max_attempts=self.max_attempts)
+        if self.error_callback and (
+            self.failure_count <= 3 or self.failure_count % self.progress_interval_items == 0
+        ):
+            self.error_callback(job_id, item_id, exc, self.failure_count)
+
+    def _record_processed(self) -> None:
+        self.processed_items += 1
+        now = time.monotonic()
+        should_report = self.processed_items % self.progress_interval_items == 0
+        should_report = should_report or now - self._last_progress_at >= self.progress_interval_seconds
+        if should_report and self.progress_callback:
+            self.progress_callback(self.processed_items)
+            self._last_progress_at = now
 
     def run_job(self, job_id: str) -> None:
         futures: dict[Future, str] = {}
@@ -92,7 +122,10 @@ class BoundedJobWorker:
                     # 可能正在等待指數退避；單次執行先交還 Scheduler。
                     break
 
-                done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                done, _ = wait(futures, timeout=30, return_when=FIRST_COMPLETED)
+                if not done:
+                    self.repository.renew_leases(job_id, self.worker_id)
+                    continue
                 for future in done:
                     item_id = futures.pop(future)
                     try:
@@ -101,6 +134,7 @@ class BoundedJobWorker:
                         self._record_failure(job_id, item_id, exc)
                     else:
                         self.repository.complete_item(job_id, completed_id, result, cost)
+                    self._record_processed()
 
             # 優雅停止：已送出的工作完成並記錄；不再 claim 新項目。
             for future in list(futures):
@@ -111,6 +145,7 @@ class BoundedJobWorker:
                     self._record_failure(job_id, item_id, exc)
                 else:
                     self.repository.complete_item(job_id, completed_id, result, cost)
+                self._record_processed()
             job = self.repository.get(job_id)
             if job is not None and job["status"] == "pausing":
                 self.repository.acknowledge_pause(job_id)

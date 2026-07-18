@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+from datetime import timedelta
+import os
+from pathlib import Path
+from urllib.parse import urlparse
+
 from flask import Blueprint, abort, current_app, g, render_template, request
 
+from inktime.app.core.logging import configure_logging
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
 from inktime.app.repositories.settings import SETTING_DEFINITIONS
 from inktime.app.web.access import administrator_required, login_required
@@ -23,7 +29,23 @@ def settings_page():
         categories.setdefault(row["category"], []).append(row)
     with current_app.extensions["inktime_database"].session() as connection:
         feature_flags = connection.execute("SELECT * FROM feature_flags ORDER BY key").fetchall()
-    return render_template("settings.html", categories=categories, feature_flags=feature_flags)
+    return render_template(
+        "settings.html",
+        categories=categories,
+        feature_flags=feature_flags,
+        history=current_app.extensions["inktime_settings_repository"].history(100),
+        deployment={
+            "docker": Path("/.dockerenv").exists(),
+            "port": os.environ.get("INKTIME_PORT", "8765"),
+            "data_dir": os.environ.get("INKTIME_DATA_DIR", "data"),
+            "photo_dir": os.environ.get("INKTIME_PHOTO_DIR", "未設定"),
+            "access_log": os.environ.get("INKTIME_ACCESS_LOG", "0") == "1",
+            "revision": os.environ.get("INKTIME_GIT_REVISION", "unknown"),
+        },
+        webhook_token_configured=current_app.extensions[
+            "inktime_notification_service"
+        ].token_configured(),
+    )
 
 
 @bp.post("/api/v1/settings")
@@ -42,6 +64,10 @@ def update_settings():
             abort(400, description=f"SET-001 未知設定：{key}")
         except ValueError as exc:
             abort(400, description=f"SET-002 {exc}")
+    configure_logging(settings_repository=repository)
+    current_app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(
+        minutes=int(repository.get("security.session_minutes", 30))
+    )
     return {"status": "ok", "updated": len(payload)}
 
 
@@ -59,6 +85,25 @@ def save_provider():
     payload = request.get_json(silent=True) or {}
     if not payload.get("base_url") or not payload.get("name"):
         abort(400, description="SET-003 Provider 名稱與 URL 不可空白")
+    parsed = urlparse(str(payload["base_url"]))
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        abort(400, description="SET-003 Provider URL 必須是完整的 http:// 或 https:// 位址")
+    try:
+        bounded = {
+            "priority": (int(payload.get("priority", 100)), 1, 10000),
+            "max_concurrency": (int(payload.get("max_concurrency", 2)), 1, 32),
+            "timeout_seconds": (int(payload.get("timeout_seconds", 120)), 5, 600),
+            "cooldown_seconds": (int(payload.get("cooldown_seconds", 300)), 1, 86400),
+        }
+        for field, (value, minimum, maximum) in bounded.items():
+            if not minimum <= value <= maximum:
+                abort(400, description=f"SET-003 {field} 超出 {minimum}–{maximum}")
+            payload[field] = value
+        for field in ("rate_limit_rpm", "token_limit_tpm"):
+            value = payload.get(field)
+            payload[field] = None if value in {None, ""} else max(1, int(value))
+    except (TypeError, ValueError):
+        abort(400, description="SET-003 Provider 數值欄位格式錯誤")
     provider_id = current_app.extensions["inktime_provider_repository"].save(payload, g.user["id"])
     return {"id": provider_id}, 201
 

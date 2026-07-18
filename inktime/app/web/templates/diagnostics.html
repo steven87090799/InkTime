@@ -1,1 +1,36 @@
-{% extends "base.html" %}{% block title %}系統診斷｜InkTime{% endblock %}{% block content %}<div class="page-head"><div><p class="eyebrow">可觀測性</p><h1>系統診斷</h1><p>即時查看主機、資料庫、快取、Worker 與佇列狀態。</p></div>{% if g.user.role=='administrator' %}<a class="primary" href="/api/v1/diagnostics/bundle">下載已遮蔽診斷包</a>{% endif %}</div><section class="metrics"><article><span>CPU</span><strong>{{ diagnostics.cpu_percent }}%</strong></article><article><span>記憶體</span><strong>{{ diagnostics.memory.percent }}%</strong></article><article><span>Swap</span><strong>{{ diagnostics.swap.percent }}%</strong></article><article><span>磁碟</span><strong>{{ diagnostics.disk.percent }}%</strong></article><article><span>Job Queue</span><strong>{{ diagnostics.queue_length }}</strong></article><article><span>Worker</span><strong>{{ diagnostics.worker_count }}</strong></article></section><section class="panel"><div class="table-wrap"><table><tbody><tr><th>資料庫</th><td>{{ diagnostics.database.bytes }} bytes；WAL {{ diagnostics.database.wal_bytes }} bytes；完整性 {{ diagnostics.database.integrity }}</td></tr><tr><th>縮圖快取</th><td>{{ diagnostics.cache_bytes }} bytes</td></tr><tr><th>照片資料夾</th><td>{{ diagnostics.libraries.readable }}／{{ diagnostics.libraries.configured }} 可讀</td></tr><tr><th>Provider</th><td>{{ diagnostics.providers_enabled }} 個已啟用（連線測試請到模型頁）</td></tr><tr><th>字型／發布</th><td>{{ diagnostics.fonts }} 個字型；latest {{ '存在' if diagnostics.release_latest else '尚未發布' }}</td></tr><tr><th>最後備份</th><td>{{ diagnostics.last_backup or '尚未備份' }}</td></tr><tr><th>Docker</th><td>{{ '是；唯讀 Root 狀態由部署驗收確認' if diagnostics.docker else '否' }}</td></tr><tr><th>Python</th><td>{{ diagnostics.python_version }}</td></tr><tr><th>應用程式</th><td>{{ diagnostics.application_version }}／Git {{ diagnostics.git_revision }}／Build {{ diagnostics.build_time }}</td></tr><tr><th>系統</th><td>{{ diagnostics.platform }}</td></tr><tr><th>啟動秒數</th><td>{{ diagnostics.uptime_seconds }}</td></tr></tbody></table></div></section><section class="panel"><a href="/health/detail">管理員詳細健康檢查</a> · <a href="/backups">備份與還原</a> · <a href="/errors">錯誤中心</a></section>{% endblock %}
+{% extends "base.html" %}
+{% block title %}系統診斷｜InkTime{% endblock %}
+{% block content %}
+<div class="page-head"><div><p class="eyebrow">可觀測性</p><h1>系統診斷</h1><p>分開顯示主機、目前 Web 程序與 Docker cgroup，避免把整台主機記憶體誤判成 InkTime 用量。</p></div>{% if g.user.role=='administrator' %}<a class="primary" href="/api/v1/diagnostics/bundle">下載已遮蔽診斷包</a>{% endif %}</div>
+<section class="metrics">
+  <article><span>主機 CPU</span><strong>{{ diagnostics.cpu_percent }}%</strong></article>
+  <article><span>Web 程序 CPU</span><strong>{{ diagnostics.process.cpu_percent }}%</strong></article>
+  <article><span>Web RSS</span><strong>{{ '%.1f'|format(diagnostics.process.rss / 1048576) }} MiB</strong></article>
+  <article><span>主機記憶體</span><strong>{{ diagnostics.memory.percent }}%</strong></article>
+  <article><span>Swap</span><strong>{{ diagnostics.swap.percent }}%</strong></article>
+  <article><span>磁碟</span><strong>{{ diagnostics.disk.percent }}%</strong></article>
+  <article><span>Job Queue</span><strong>{{ diagnostics.queue_length }}</strong></article>
+  <article><span>Worker</span><strong>{{ diagnostics.worker_count }}</strong></article>
+</section>
+<section class="panel"><h2>N100 低資源設定</h2><div class="table-wrap"><table><tbody>
+  <tr><th>分析並行／預取倍數</th><td>{{ diagnostics.runtime_profile.analysis_concurrency }}／{{ diagnostics.runtime_profile.queue_multiplier }}</td></tr>
+  <tr><th>Worker 待機輪詢</th><td>{{ diagnostics.runtime_profile.worker_poll_seconds }} 秒</td></tr>
+  <tr><th>程序執行緒／開啟檔案</th><td>{{ diagnostics.process.threads }}／{{ diagnostics.process.open_files }}</td></tr>
+  <tr><th>Docker 記憶體目前／上限</th><td>{% if diagnostics.cgroup.memory_current is not none %}{{ '%.1f'|format(diagnostics.cgroup.memory_current / 1048576) }} MiB{% else %}無 cgroup v2 資料{% endif %}／{% if diagnostics.cgroup.memory_max is not none %}{{ '%.1f'|format(diagnostics.cgroup.memory_max / 1048576) }} MiB{% else %}未限制或無資料{% endif %}</td></tr>
+  <tr><th>Docker CPU quota</th><td>{{ diagnostics.cgroup.cpu_max or '無 cgroup v2 資料' }}</td></tr>
+</tbody></table></div></section>
+<section class="panel"><div class="table-wrap"><table><tbody>
+  <tr><th>資料庫</th><td>{{ diagnostics.database.bytes }} bytes；WAL {{ diagnostics.database.wal_bytes }} bytes；完整性 {{ diagnostics.database.integrity }}</td></tr>
+  <tr><th>縮圖快取</th><td>{{ diagnostics.cache_bytes }} bytes{% if diagnostics.cache_size_cached %}（使用快取值）{% endif %}</td></tr>
+  <tr><th>照片資料夾</th><td>{{ diagnostics.libraries.readable }}／{{ diagnostics.libraries.configured }} 可讀</td></tr>
+  <tr><th>Provider</th><td>{{ diagnostics.providers_enabled }} 個已啟用（連線測試請到模型頁）</td></tr>
+  <tr><th>字型／發布</th><td>{{ diagnostics.fonts }} 個字型；latest {{ '存在' if diagnostics.release_latest else '尚未發布' }}</td></tr>
+  <tr><th>最後備份</th><td>{{ diagnostics.last_backup or '尚未備份' }}</td></tr>
+  <tr><th>Docker</th><td>{{ '是；唯讀 Root 狀態由部署驗收確認' if diagnostics.docker else '否' }}</td></tr>
+  <tr><th>Python</th><td>{{ diagnostics.python_version }}</td></tr>
+  <tr><th>應用程式</th><td>{{ diagnostics.application_version }}／Git {{ diagnostics.git_revision }}／Build {{ diagnostics.build_time }}</td></tr>
+  <tr><th>系統</th><td>{{ diagnostics.platform }}</td></tr>
+  <tr><th>啟動秒數</th><td>{{ diagnostics.uptime_seconds }}</td></tr>
+</tbody></table></div></section>
+<section class="panel"><a href="/health/detail">管理員詳細健康檢查</a> · <a href="/backups">備份與還原</a> · <a href="/errors">錯誤中心</a> · <a href="/settings">調整資源與 Log 層級</a></section>
+{% endblock %}

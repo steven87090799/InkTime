@@ -15,7 +15,7 @@ def test_first_setup_login_and_primary_console_pages():
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.goto(base + "/setup")
         page.get_by_label("管理員帳號").fill("e2e-admin")
-        page.get_by_label("密碼（至少 12 個字元）").fill("e2e-password-long")
+        page.get_by_label("密碼", exact=True).fill("e2e-password-long")
         page.get_by_label("再次輸入密碼").fill("e2e-password-long")
         page.get_by_role("button", name="建立並進入 InkTime").click()
         page.wait_for_url("**/dashboard")
@@ -25,6 +25,7 @@ def test_first_setup_login_and_primary_console_pages():
             ("模型", "/providers"),
             ("評分", "/scoring"),
             ("成本", "/costs"),
+            ("模擬器", "/simulator"),
             ("渲染", "/rendering"),
             ("裝置", "/devices"),
             ("維護", "/maintenance"),
@@ -36,5 +37,5 @@ def test_first_setup_login_and_primary_console_pages():
         page.goto(base + "/settings")
         page.locator('[name="analysis.concurrency"]').fill("3")
         page.on("dialog", lambda dialog: dialog.accept())
-        page.get_by_role("button", name="儲存設定").click()
+        page.get_by_role("button", name="儲存全部設定").click()
         browser.close()

@@ -243,6 +243,22 @@ class JobRepository:
                 connection.execute("ROLLBACK")
                 raise
 
+    def renew_leases(self, job_id: str, worker_id: str, lease_seconds: int = 300) -> int:
+        """延長目前 Worker 的租約，避免長時間掃描或模型呼叫被誤判為失聯。"""
+
+        now = utc_now()
+        lease_until = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
+        with self.database.session() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE job_items SET lease_until=?
+                WHERE job_id=? AND worker_id=? AND status='running'
+                """,
+                (lease_until, job_id, worker_id),
+            )
+            connection.execute("UPDATE jobs SET heartbeat_at=? WHERE id=?", (now, job_id))
+        return int(cursor.rowcount)
+
     def complete_item(self, job_id: str, item_id: str, result: dict, actual_cost: float = 0) -> None:
         now = utc_now()
         with self.database.session() as connection:

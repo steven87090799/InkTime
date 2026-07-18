@@ -10,6 +10,8 @@ import shutil
 
 from PIL import Image
 
+from .palette import encode_image, get_display_profile
+
 
 FOUR_COLORS = ((0, 0, 0), (255, 255, 255), (220, 30, 30), (245, 190, 25))
 
@@ -24,12 +26,13 @@ def _nearest_color(pixel) -> int:
 
 
 def pack_four_color_2bpp(image: Image.Image) -> bytes:
-    rgb = image.convert("RGB")
-    output = bytearray((rgb.width * rgb.height + 3) // 4)
-    for index, pixel in enumerate(rgb.getdata()):
-        color = _nearest_color(pixel)
-        output[index // 4] |= color << (6 - (index % 4) * 2)
-    return bytes(output)
+    return encode_image(
+        image,
+        profile_key="safe_4c",
+        dither="none",
+        color_distance="rgb",
+        strength=0,
+    ).payload
 
 
 class AtomicReleasePublisher:
@@ -41,7 +44,10 @@ class AtomicReleasePublisher:
         self,
         images: list[tuple[str, Image.Image]],
         *,
-        display_type: str = "7.3-inch-four-color",
+        profile_key: str = "safe_4c",
+        dither: str = "floyd_steinberg",
+        color_distance: str = "oklab",
+        dither_strength: float = 1.0,
         width: int = 480,
         height: int = 800,
     ) -> dict:
@@ -51,20 +57,28 @@ class AtomicReleasePublisher:
         temporary = self.root / f".{release_id}.tmp"
         final = self.root / release_id
         temporary.mkdir(mode=0o750)
+        profile = get_display_profile(profile_key)
         files = []
         try:
             for index, (photo_id, source) in enumerate(images, 1):
                 rendered = source.convert("RGB")
                 if rendered.size != (width, height):
                     raise ValueError(f"RENDER-002 圖片尺寸必須是 {width}×{height}")
-                payload = pack_four_color_2bpp(rendered)
-                expected = width * height // 4
+                encoded = encode_image(
+                    rendered,
+                    profile_key=profile_key,
+                    dither=dither,
+                    color_distance=color_distance,
+                    strength=dither_strength,
+                )
+                payload = encoded.payload
+                expected = width * height // (4 if profile.pixel_format == "2bpp" else 2)
                 if len(payload) != expected:
-                    raise ValueError("RENDER-002 2bpp 檔案大小驗證失敗")
+                    raise ValueError("RENDER-002 索引影像檔案大小驗證失敗")
                 filename = f"photo_{index}.bin"
                 preview = f"preview_{index}.png"
                 (temporary / filename).write_bytes(payload)
-                rendered.save(temporary / preview, "PNG")
+                encoded.preview.save(temporary / preview, "PNG")
                 files.append(
                     {
                         "name": filename,
@@ -75,13 +89,22 @@ class AtomicReleasePublisher:
                     }
                 )
             manifest = {
-                "schema_version": 1,
+                "schema_version": 1 if profile.pixel_format == "2bpp" else 2,
                 "release_id": release_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),
-                "display_type": display_type,
+                "display_type": profile.display_type,
+                "render_profile": profile.key,
                 "width": width,
                 "height": height,
-                "pixel_format": "2bpp",
+                "pixel_format": profile.pixel_format,
+                "orientation": "portrait",
+                "dither": dither,
+                "dither_strength": float(dither_strength),
+                "color_distance": color_distance,
+                "palette": [
+                    {"code": color.code, "name": color.name, "rgb": list(color.rgb)}
+                    for color in profile.colors
+                ],
                 "files": files,
             }
             manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
@@ -93,6 +116,9 @@ class AtomicReleasePublisher:
             pointer_tmp = self.root / ".latest.tmp"
             pointer_tmp.write_text(release_id, encoding="utf-8")
             pointer_tmp.replace(self.root / "latest")
+            profile_pointer_tmp = self.root / f".latest.{profile.key}.tmp"
+            profile_pointer_tmp.write_text(release_id, encoding="utf-8")
+            profile_pointer_tmp.replace(self.root / f"latest.{profile.key}")
             return manifest
         except Exception:
             if temporary.exists():
@@ -115,3 +141,9 @@ class AtomicReleasePublisher:
         temporary = self.root / ".latest.tmp"
         temporary.write_text(release_id, encoding="utf-8")
         temporary.replace(self.root / "latest")
+        manifest = json.loads(target.read_text(encoding="utf-8"))
+        profile_key = str(manifest.get("render_profile", "safe_4c"))
+        get_display_profile(profile_key)
+        profile_temporary = self.root / f".latest.{profile_key}.tmp"
+        profile_temporary.write_text(release_id, encoding="utf-8")
+        profile_temporary.replace(self.root / f"latest.{profile_key}")

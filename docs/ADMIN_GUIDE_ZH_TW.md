@@ -15,7 +15,12 @@
 | `analysis.scoring_rules` | 內建完整規則 | 100–12000 字元 | 影響新分析結果 | 否 |
 | 綜合排序權重 | 50／20／10／20 | 四項合計 100% | 影響新分析與自動選片順序 | 否 |
 | 最愛照片加分 | 5 | 0–30 | 只加入綜合排序分 | 否 |
-| `analysis.concurrency` | 2 | 1–32，NAS 建議 2–4 | 過高觸發限流／記憶體 | 是 |
+| `analysis.concurrency` | 1 | 1–8，Intel N100 建議 1；確認 RSS 後最多先試 2 | 過高觸發限流／圖片記憶體尖峰 | 否 |
+| `worker.queue_multiplier` | 1 | 1–4，N100 建議 1 | 增加記憶體中 Future | 否 |
+| `worker.poll_seconds` | 15 | 1–300；低待機可設 30–60 | 越小待機喚醒越多 | 否 |
+| `worker.progress_items` | 50 | 5–10,000 | 越小 Docker Log 越多 | 否 |
+| `worker.progress_seconds` | 300 | 30–3,600 | 越小 Docker Log 越多 | 否 |
+| `scheduler.poll_seconds` | 60 | 30–3,600 | 越小 SQLite／CPU 喚醒越多 | 否 |
 | `analysis.max_retries` | 3 | 0–10 | 重試增加成本 | 否 |
 | `model.low_model` | gpt-4o-mini | 支援圖片／Schema 的模型 | 能力不足會進錯誤佇列 | 否 |
 | `model.high_model` | gpt-4o | 同上 | 先設定價格 | 否 |
@@ -29,14 +34,35 @@
 | `render.memory_threshold` | 70 | 0–100 | 過高可能無候選 | 否 |
 | `render.quantity` | 5 | 1–50 | 增加下載量 | 否 |
 | `render.font_path` | 空 | 有效 TTF/OTF/TTC | 缺字會停止發布 | 否 |
+| `render.profile` | safe_4c | 四色／GDEP 六色／GDEY 七色 | 必須與裝置面板相符 | 否 |
+| `render.dither` | floyd_steinberg | none／Floyd／Atkinson／Bayer 4／8 | 誤差擴散發布 CPU 較高 | 否 |
+| `render.dither_strength` | 1 | 0–2 | 過高會增加色點 | 否 |
+| `render.color_distance` | oklab | oklab／rgb | 切換會改變色彩映射 | 否 |
 | `device.legacy_api_enabled` | false | 僅遷移期 | URL 金鑰不安全 | 是 |
-| `system.log_format` | human | human/json | 集中 Log 建議 json | 是 |
-| `security.session_minutes` | 30 | 5–1440 | 過長增加共用裝置風險 | 是 |
+| `device.default_timezone` | Asia/Taipei | IANA 時區 | 影響新增裝置排程 | 否 |
+| `device.default_schedule` | 08:00 | 00:00–23:59 | 影響新增裝置刷新時間 | 否 |
+| `device.default_rotation` | 0 | 0／180 | 目前 7.3 吋正式韌體限制 | 否 |
+| `device.default_panel_profile` | safe_4c | 四色／GDEP 六色／GDEY 七色 | 型號錯誤會由韌體拒絕 | 否 |
+| 離線／恢復通知 | 30 小時／啟用 | 1–720 小時；掃描預設 300 秒 | 需大於裝置刷新週期 | 否 |
+| 離線重複提醒 | 停用／冷卻 24 小時 | 1–720 小時 | 過短會造成通知轟炸 | 否 |
+| Webhook | 停用 | 完整 HTTP(S) URL、2–30 秒逾時 | 只連可信端點；Token 加密保存 | 否 |
+| `system.log_level` | INFO | DEBUG／INFO／WARNING／ERROR／CRITICAL | DEBUG 增加磁碟寫入 | 否 |
+| `system.log_format` | json | human/json | 集中 Log 建議 json | 否 |
+| `system.diagnostics_cache_seconds` | 300 | 30–86,400 | 太小會反覆掃大型縮圖目錄 | 否 |
+| `security.session_minutes` | 30 | 5–1440 | 過長增加共用裝置風險 | 否 |
 | `backup.schedule_enabled` | true | true/false | 關閉後需手動備份 | 否 |
 | `backup.hour` | 3 | 0–23 | 避開大量分析 | 否 |
 | `backup.retention` | 14 | 1–365 | 過低縮短回復期 | 否 |
 
-所有修改寫入 `setting_history`；Secret 永不寫入摘要。修改需重啟欄位後，使用 `docker compose restart`。
+所有修改寫入 `setting_history`，最近 100 筆直接顯示在設定頁；Secret 永不寫入摘要。Web、Worker、排程、Log 與 Session 的新設定均動態生效。只有舊版裝置 API 這類啟動時安全邊界仍需重啟。
+
+## Web 與部署設定的邊界
+
+不需要修改 Python。分析、排程、模型、成本、渲染、裝置、Log 層級、Session 與備份都由 Web 控制。宿主機 Volume、Port、映像 Tag、HTTPS Secure Cookie、Docker CPU／RAM／PID 上限與 logging driver 必須在容器啟動前由 `.env`／Compose 決定；容器內程式不應取得 Docker socket 去改寫宿主機。設定頁會只讀顯示目前部署資訊。
+
+## ESP32 遠端設定
+
+首次 AP 配對只填 Wi-Fi、InkTime URL 與一次性 Token。之後從「裝置」編輯每台 ESP32 的名稱、啟停、面板 Profile、IANA 時區、每日 `HH:MM` 與 0°／180°；下一次取得 Manifest 自動套用。裝置頁以期望版本／ACK 區分「已儲存」與「裝置已生效」，並顯示離線狀態、通知、firmware、RSSI、free heap／PSRAM、下載計數與最後錯誤。完整協定、抖動與通知見[裝置可靠性與六／七色渲染指南](DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。
 
 ## 照片評分與門檻
 

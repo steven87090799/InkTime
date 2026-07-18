@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from datetime import timedelta
 import fcntl
+import logging
 from pathlib import Path
 import os
 import secrets
 
-from flask import Flask, g, redirect, request, session, url_for
+from flask import Flask, flash, g, redirect, request, session, url_for
 from jinja2 import BaseLoader, ChoiceLoader, FileSystemLoader
 from werkzeug.exceptions import HTTPException
 
@@ -17,6 +18,7 @@ from inktime.app.api import (
     devices,
     health,
     jobs,
+    notifications,
     operations,
     photos,
     rendering,
@@ -42,8 +44,12 @@ from inktime.app.services.analysis import PhotoAnalysisService
 from inktime.app.services.budgets import BudgetService
 from inktime.app.services.providers import ProviderService
 from inktime.app.services.scoring_lab import ScoringLabService
-from inktime.app.core.logging import configure_logging
+from inktime.app.services.notifications import DeviceNotificationService
+from inktime.app.core.logging import configure_logging, log_event
 from inktime.app.web.access import csrf_token, verify_csrf
+
+
+LOGGER = logging.getLogger("platform")
 
 
 def _persistent_secret(path: Path) -> str:
@@ -96,12 +102,19 @@ def initialize_platform(
     app.extensions["inktime_job_service"] = JobService(app.extensions["inktime_job_repository"])
     settings_repository = SettingsRepository(database)
     settings_repository.ensure_defaults()
+    configure_logging(settings_repository=settings_repository)
+    app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(
+        minutes=int(settings_repository.get("security.session_minutes", 30))
+    )
     secret_store = SecretStore(database, secret)
     app.extensions["inktime_settings_repository"] = settings_repository
     scoring_repository = ScoringProfileRepository(database, settings_repository)
     scoring_repository.ensure_initial()
     app.extensions["inktime_scoring_repository"] = scoring_repository
     app.extensions["inktime_secret_store"] = secret_store
+    app.extensions["inktime_notification_service"] = DeviceNotificationService(
+        database, settings_repository, secret_store
+    )
     app.extensions["inktime_provider_repository"] = ProviderRepository(database, secret_store)
     app.extensions["inktime_photo_repository"] = PhotoRepository(database)
     app.extensions["inktime_usage_repository"] = UsageRepository(database)
@@ -126,7 +139,10 @@ def initialize_platform(
     )
     app.extensions["inktime_backup_service"] = BackupService(database, data_dir / "backups")
     app.extensions["inktime_diagnostics_service"] = DiagnosticsService(
-        database, data_dir, data_dir / "cache" / "thumbnails"
+        database,
+        data_dir,
+        data_dir / "cache" / "thumbnails",
+        settings_repository=settings_repository,
     )
     font_manager = FontManager(data_dir / "fonts")
     release_publisher = AtomicReleasePublisher(release_dir)
@@ -152,6 +168,7 @@ def initialize_platform(
     app.register_blueprint(devices.bp)
     app.register_blueprint(health.bp)
     app.register_blueprint(jobs.bp)
+    app.register_blueprint(notifications.bp)
     app.register_blueprint(photos.bp)
     app.register_blueprint(settings.bp)
     app.register_blueprint(scoring.bp)
@@ -166,6 +183,7 @@ def initialize_platform(
         "health.ready",
         "devices.latest_release",
         "devices.release_file",
+        "devices.report_status",
         "static",
     }
 
@@ -179,6 +197,7 @@ def initialize_platform(
         if request.method in {"POST", "PUT", "PATCH", "DELETE"} and endpoint not in {
             "devices.latest_release",
             "devices.release_file",
+            "devices.report_status",
         }:
             verify_csrf()
 
@@ -194,6 +213,14 @@ def initialize_platform(
 
     @app.errorhandler(HTTPException)
     def stable_api_error(exc: HTTPException):
+        if (
+            exc.code == 403
+            and str(exc.description).startswith("AUTH-002")
+            and request.path in {"/setup", "/login"}
+        ):
+            session.pop("csrf_token", None)
+            flash("安全驗證已更新，請重新送出表單。", "error")
+            return redirect(request.path, code=303)
         if not request.path.startswith("/api/"):
             return exc
         description = str(exc.description)
@@ -202,4 +229,11 @@ def initialize_platform(
         message = remainder if separator else description
         return {"error_code": error_code, "message": message}, exc.code or 500
 
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "InkTime 平台已完成初始化",
+        event="platform_ready",
+        details={"version": __version__, "testing": testing},
+    )
     return app

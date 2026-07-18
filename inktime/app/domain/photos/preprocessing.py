@@ -11,6 +11,12 @@ from typing import Any
 from PIL import ExifTags, Image, ImageOps, ImageStat
 
 
+_DCT_COS = tuple(
+    tuple(math.cos((2 * position + 1) * frequency * math.pi / 64) for position in range(32))
+    for frequency in range(8)
+)
+
+
 @dataclass(frozen=True)
 class LocalPhotoFeatures:
     sha256: str
@@ -52,14 +58,19 @@ def _phash(image: Image.Image) -> str:
     sample = image.convert("L").resize((32, 32), Image.Resampling.LANCZOS)
     pixels = [float(value) for value in sample.getdata()]  # type: ignore[attr-defined]
     coefficients: list[float] = []
+    # 以可分離 DCT 取代每個係數重算 32×32 次三角函數；結果等價但 CPU 工作量更低。
+    x_projection = [
+        [
+            sum(pixels[y * 32 + x] * _DCT_COS[u][x] for x in range(32))
+            for y in range(32)
+        ]
+        for u in range(8)
+    ]
     for u in range(8):
         for v in range(8):
-            total = 0.0
-            for x in range(32):
-                cx = math.cos((2 * x + 1) * u * math.pi / 64)
-                for y in range(32):
-                    total += pixels[y * 32 + x] * cx * math.cos((2 * y + 1) * v * math.pi / 64)
-            coefficients.append(total)
+            coefficients.append(
+                sum(x_projection[u][y] * _DCT_COS[v][y] for y in range(32))
+            )
     median = sorted(coefficients[1:])[len(coefficients[1:]) // 2]
     return _bits_to_hex([value > median for value in coefficients])
 
@@ -71,14 +82,23 @@ def _blur_variance(image: Image.Image) -> float:
     if width < 3 or height < 3:
         return 0.0
     pixels: Any = sample.load()
-    values = []
+    count = 0
+    mean = 0.0
+    squared_delta = 0.0
     for y in range(1, height - 1):
         for x in range(1, width - 1):
-            values.append(
-                4 * pixels[x, y] - pixels[x - 1, y] - pixels[x + 1, y] - pixels[x, y - 1] - pixels[x, y + 1]
+            value = (
+                4 * pixels[x, y]
+                - pixels[x - 1, y]
+                - pixels[x + 1, y]
+                - pixels[x, y - 1]
+                - pixels[x, y + 1]
             )
-    mean = sum(values) / len(values)
-    return sum((value - mean) ** 2 for value in values) / len(values)
+            count += 1
+            delta = value - mean
+            mean += delta / count
+            squared_delta += delta * (value - mean)
+    return squared_delta / count if count else 0.0
 
 
 def _rational(value: Any) -> float:
@@ -103,6 +123,7 @@ class PhotoPreprocessor:
                 digest.update(chunk)
         with Image.open(path) as opened:
             original_format = opened.format or path.suffix.lstrip(".").upper()
+            original_width, original_height = opened.size
             exif = opened.getexif()
             exif_named = {
                 ExifTags.TAGS.get(key, str(key)): value for key, value in exif.items() if key != 34853
@@ -118,11 +139,19 @@ class PhotoPreprocessor:
                     captured_at = datetime.strptime(str(captured), "%Y:%m:%d %H:%M:%S").isoformat()
                 except ValueError:
                     captured_at = None
+            orientation = int(exif.get(274, 1) or 1)
+            width, height = (
+                (original_height, original_width)
+                if orientation in {5, 6, 7, 8}
+                else (original_width, original_height)
+            )
+            # 所有品質特徵只需要小樣本。先要求 JPEG decoder 降採樣，再限制到 512px，
+            # 避免 24MP／48MP 原始圖在每個並行槽展開成數十至數百 MiB。
+            opened.draft("RGB", (512, 512))
+            opened.thumbnail((512, 512), Image.Resampling.LANCZOS)
             image = ImageOps.exif_transpose(opened).convert("RGB")
-            width, height = image.size
             grayscale = image.convert("L")
-            sample = grayscale.copy()
-            sample.thumbnail((512, 512))
+            sample = grayscale
             stat = ImageStat.Stat(sample)
             histogram = sample.histogram()
             total_pixels = max(1, sample.width * sample.height)

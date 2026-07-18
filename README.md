@@ -1,6 +1,6 @@
 # InkTime｜照片分析與電子紙回憶管理平台
 
-[English legacy README](README.en.md) · [快速開始](docs/QUICK_START_ZH_TW.md) · [專案架構與評分流程](docs/ARCHITECTURE_ZH_TW.md) · [使用指南](docs/USER_GUIDE_ZH_TW.md) · [管理指南](docs/ADMIN_GUIDE_ZH_TW.md)
+[English legacy README](README.en.md) · [快速開始](docs/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/DOCKER_GUIDE_ZH_TW.md) · [ESP32／電子紙指南](docs/ESP32_GUIDE_ZH_TW.md) · [資源與低功耗](docs/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/LOGGING_GUIDE_ZH_TW.md) · [本次實作與功能路線圖](docs/N100_IMPLEMENTATION_REPORT_ZH_TW.md)
 
 InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複與低價值照片，再以可控預算的視覺模型產生繁體中文描述、分類、分數與電子紙短文案。所有工作、模型、成本、裝置、渲染、備份與診斷都能由登入後的 Web 管理介面操作。
 
@@ -14,8 +14,10 @@ InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複
 - 低成本第一階段與高品質第二階段；支援 OpenAI 即時、OpenAI 相容端點與本地相容端點；OpenAI Batch 已完成提交／查詢／取消 Provider 介面，但尚未接入背景工作的完整生命週期。
 - 持久化 Job、逐張狀態、有界佇列、暫停、續跑、取消、失敗重跑、重啟恢復與成本停止線。
 - administrator／viewer、Session、CSRF、登入限制與每台 ESP32 獨立 Bearer Token。
-- 480×800 四色 2bpp 版本化發布，單張 96,000 bytes；Manifest、SHA-256、原子發布與回滾。
-- 繁體中文管理介面、結構化 Log、錯誤中心、CPU／記憶體／SQLite／Worker 診斷與已遮蔽診斷包。
+- 480×800 四色 2bpp 與完整六／七色 indexed4 版本化發布；OKLab／RGB 色差、五種抖動、Profile 獨立 latest、SHA-256 與回滾。
+- 裝置設定版本 ACK、離線／恢復站內通知、去重／冷卻與三次持久化 Webhook 重試。
+- 繁體中文管理介面、動態 Log 層級、節流進度、錯誤中心、程序／cgroup／SQLite／Worker 診斷與已遮蔽診斷包。
+- Intel N100 低資源預設：單 Web worker、圖片特徵最大 512px 樣本、有界 Future、15 秒閒置輪詢與容器 CPU／RAM／PID 上限。
 
 ## 架構
 
@@ -35,7 +37,7 @@ flowchart TB
     subgraph application["inktime/app 分層"]
         API["api + web<br/>HTTP／登入／權限／CSRF"]
         SVC["services<br/>商業規則與流程編排"]
-        DOMAIN["domain<br/>圖片分析／2bpp 渲染"]
+        DOMAIN["domain<br/>圖片分析／多色量化與抖動"]
         REPO["repositories<br/>SQL 與持久化"]
         PROVIDER["providers<br/>外部視覺模型 API"]
     end
@@ -68,7 +70,7 @@ flowchart TB
 | `inktime/app/services/` | 分析、成本、渲染、備份等流程 |
 | `inktime/app/repositories/` | SQLite 查詢、設定與資料存取 |
 | `inktime/app/providers/` | OpenAI／相容模型呼叫、重試與用量 |
-| `inktime/app/domain/` | 不依賴 Flask 的圖片、Schema、日期與 2bpp 邏輯 |
+| `inktime/app/domain/` | 不依賴 Flask 的圖片、Schema、日期與多色量化／抖動邏輯 |
 | `inktime/app/workers/` | 背景 Worker、Scheduler 與掃描器 |
 | `inktime/app/web/` | 繁中管理介面的模板與 CSS |
 | `esp32/` | 電子紙裝置韌體 |
@@ -84,7 +86,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-開啟 `http://主機IP:8765/`，首次啟動精靈會要求建立至少 12 字元的管理員密碼。正式 HTTPS 反向代理請將 `INKTIME_COOKIE_SECURE=1`。
+開啟 `http://主機IP:8765/`，首次啟動精靈會要求建立非空白的管理員密碼；系統不限制長度，但正式環境仍建議使用密碼管理器產生的長密碼。正式 HTTPS 反向代理請將 `INKTIME_COOKIE_SECURE=1`。
 
 三個服務使用同一映像檔：
 
@@ -92,21 +94,22 @@ docker compose up -d --build
 - `inktime-worker`：照片掃描、分析、重試與渲染工作。
 - `inktime-scheduler`：租約回收、每日備份與保留策略。
 
-完整 NAS、Volume 權限、唯讀 root filesystem 與更新方式見 [Docker 指南](docs/DOCKER_GUIDE_ZH_TW.md)。
+完整 N100 資源上限、Volume 權限、健康檢查、HTTPS、更新與回滾見 [Docker 部署規格](docs/DOCKER_GUIDE_ZH_TW.md)。
 
 ## 首次使用
 
 1. 建立管理員並登入。
-2. 到「模型」新增 OpenAI、OpenAI 相容或本地端點；API Key 加密儲存且只顯示遮罩。
-3. 到「維護」輸入容器內照片路徑（Compose 預設 `/photos`），建立背景掃描工作。
-4. 到「工作」建立兩階段智慧分析，確認照片數、Token、費用範圍與工作預算後啟動。
-5. 到「渲染」安裝涵蓋繁體中文的字型，測試渲染後發布 2bpp 版本。
-6. 到「裝置」新增 ESP32；立即複製只顯示一次的 Token 到裝置 AP 設定頁。
-7. 到「備份」建立並下載第一份備份。
+2. 尚未準備模型或電子紙時，可先到「模擬器」用本機照片驗證 480×800 排版與四色／六色／七色輸出；這個流程不會呼叫模型。
+3. 要啟用智慧選片時，到「模型」新增 OpenAI、OpenAI 相容或本地端點；API Key 加密儲存且只顯示遮罩。
+4. 到「維護」輸入容器內照片路徑（Compose 預設 `/photos`），建立背景掃描工作。
+5. 到「工作」建立兩階段智慧分析，確認照片數、Token、費用範圍與工作預算後啟動。
+6. 到「渲染」安裝涵蓋繁體中文的字型，測試渲染後發布 2bpp 版本。
+7. 到「裝置」新增 ESP32；立即複製只顯示一次的 Token 到裝置 AP 設定頁。
+8. 到「備份」建立並下載第一份備份。
 
 ## 不用修改程式碼的日常設定
 
-一般、分析、模型、成本、渲染、裝置、系統、安全與備份設定都在「設定」頁。每次修改會記錄時間、使用者、來源 IP、舊值／新值摘要與是否需重新啟動；Secret 不會寫入歷史。完整欄位、預設值、範圍與風險見 [管理指南](docs/ADMIN_GUIDE_ZH_TW.md)。
+一般、分析、Worker 待機、模型、成本、渲染、裝置、Log 層級、安全與備份設定都在「設定」頁。每次修改會記錄時間、使用者、來源 IP、舊值／新值摘要與生效方式；Secret 不會寫入歷史。只有 Volume、Port、映像、HTTPS 與 Docker cgroup／Log 輪替屬於一次性部署邊界。完整欄位、預設值、範圍與風險見 [管理指南](docs/ADMIN_GUIDE_ZH_TW.md)。
 
 ## 照片評分與模型調整在哪裡
 
@@ -125,7 +128,7 @@ docker compose up -d --build
 
 ## ESP32 配對與可靠性
 
-新版韌體不再把金鑰放在 URL。裝置先以 Bearer Token 取得 Manifest，隨機選檔後驗證尺寸與 SHA-256，成功才解包到 framebuffer；所有檔案失敗時保留舊畫面。韌體需安裝 `GxEPD2` 與 `ArduinoJson`。詳見 [ESP32 指南](docs/ESP32_GUIDE_ZH_TW.md)。
+新版韌體不再把金鑰放在 URL。裝置先以 Bearer Token 取得專屬面板 Profile 的 Manifest，套用 Web 管理且帶版本的面板／時區／每日排程／旋轉，驗證尺寸與 SHA-256，成功才刷新；之後回報設定 ACK、firmware、RSSI、Heap／PSRAM 與最後錯誤。Scheduler 以低頻掃描建立離線／恢復通知，可選去重 Webhook。既有 EOL GDEY073D46 與新 GDEP073E01 有不同 compile profile；完整設定見[裝置可靠性與六／七色渲染指南](docs/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。
 
 ## 原生安裝與相容 CLI
 

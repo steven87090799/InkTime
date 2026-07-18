@@ -25,7 +25,7 @@
 | Provider | OpenAI 相容即時 API、優先順序、RPM／TPM、並行、Retry-After、熔斷與故障轉移；Batch 提交／查詢／取消原語 | `providers/`、`services/providers.py`、`tests/unit/test_provider_router.py`、`test_provider_batch.py` |
 | 設定與 Secret | settings／history／secrets、範圍驗證、重啟標記、Fernet 加密、遮罩、舊 config 匯入 | `repositories/settings.py`、`scripts/import_legacy_config.py`、`test_legacy_config_import.py` |
 | 繁體中文 UI | 儀表板、照片與人工修正、工作、Provider、成本、渲染、裝置、設定、錯誤、診斷、備份、維護 | `inktime/app/web/templates/`、`tests/integration/test_management_ui.py` |
-| 發布與 ESP32 | 480×800 四色 2bpp、96,000 bytes、Manifest、SHA-256、原子 latest、回滾、韌體失敗保留舊畫面 | `domain/rendering/release.py`、`esp32/ink-display-7C-photo/`、`tests/unit/test_releases.py` |
+| 發布與 ESP32 | 四色 2bpp／六七色 indexed4、五種抖動、Profile latest、SHA-256、設定 ACK、離線／恢復通知與 Webhook | `domain/rendering/`、`services/notifications.py`、`esp32/ink-display-7C-photo/`、`test_palette.py` |
 | 日期與字型 | 動態時區日期、閏年／2 月 29 日測試、CJK 字元覆蓋檢查、缺字明確失敗 | `domain/rendering/dates.py`、`fonts.py`、`tests/unit/test_dates.py`、`test_fonts.py` |
 | 可觀測性 | human／JSON Log、穩定錯誤碼、聚合錯誤中心、live／ready／detail、已遮蔽診斷包 | `core/logging.py`、`api/health.py`、`services/diagnostics.py`、`ERROR_CODES_ZH_TW.md` |
 | 部署 | Gunicorn、web／worker／scheduler、非 root、唯讀 Root、tmpfs、Healthcheck、Log Rotation、資源限制 | `Dockerfile`、`docker-compose.yml`、`DOCKER_GUIDE_ZH_TW.md` |
@@ -55,6 +55,9 @@ Gunicorn + Flask API ── Service ── Repository ── SQLite WAL
 - v2：結構化照片分析結果與必要索引。
 - v3：本地影像特徵、Provider 與模型價格。
 - v4：照片人工修正歷史與預設關閉的未來功能旗標。
+- v5：版本化評分規則、綜合排序分與分析採用的規則版本。
+- v6：ESP32 遠端設定、Heap／PSRAM／錯誤 Telemetry 與裝置事件。
+- v7：完整六／七色 Profile、每台裝置設定版本／ACK、離線狀態與持久化通知／Webhook delivery。
 - 每次連線啟用 WAL、foreign key、busy timeout 與 `synchronous=NORMAL`。
 - Migration 逐版使用 `BEGIN IMMEDIATE`；跨程序檔案鎖避免多 Gunicorn Worker 首次啟動競爭。
 - 舊資料庫升級前以 SQLite backup API 建立一致備份並執行 `quick_check`；失敗立即停止啟動。
@@ -69,7 +72,7 @@ Gunicorn + Flask API ── Service ── Repository ── SQLite WAL
 - `/api/v1/photos/<id>` 人工修正與 `/api/v1/photos/<id>/image`
 - `/api/v1/providers`、Provider 測試、`/api/v1/settings`
 - `/api/v1/releases`、rollback、font upload
-- `/api/v1/devices`、Token 重生、裝置更新／停用
+- `/api/v1/devices`、Token 重生、裝置更新／停用、Manifest 遠端設定與低頻狀態回報
 - `/api/device/v1/releases/latest` 與版本化檔案下載
 - `/api/v1/backups`、診斷包、錯誤解決與維護掃描
 - `/health/live`、`/health/ready`、`/health/detail`
@@ -79,7 +82,8 @@ Gunicorn + Flask API ── Service ── Repository ── SQLite WAL
 ## ESP32 韌體變更
 
 - AP 設定頁儲存伺服器與一次性裝置 Token，不把完整 Token印到序列埠。
-- 先取得 Manifest，再驗證 schema、尺寸、2bpp、檔案大小與 SHA-256。
+- 先取得 Profile 專屬 Manifest，再驗證 schema、尺寸、2bpp／indexed4、面板、檔案大小與 SHA-256。
+- 六／七色 payload 維持 192,000-byte 壓縮索引；設定驗證後寫入 NVS 並回報版本 ACK。
 - 隨機檔案失敗會嘗試其他檔案；全部失敗時不刷新 framebuffer，保留正常舊畫面。
 - CI 已加入 ESP32-S3、GxEPD2 與 ArduinoJson 編譯步驟；本機未另裝 Arduino CLI，因此本輪沒有本機實板／編譯結果。
 
@@ -181,19 +185,19 @@ curl --fail http://127.0.0.1:8765/health/ready
 1. Batch Provider 原語已完成，但背景 Job 的自動切批、poll、結果匯入、取消與重啟恢復尚未串成端到端流程；目前正式分析工作使用即時 API。
 2. 照片頁已有搜尋、狀態／類型／分數／重複篩選與人工修正，但尚缺完整的年份／月份／模型／錯誤複合篩選、網格清單切換及批次排除／刪除分析結果。
 3. 工作建立頁是可用的精簡精靈，尚缺資料夾／日期／相簿／隨機抽樣等完整選片步驟、複製工作設定與 Batch 模式 UI。
-4. 渲染已支援字型、預覽 API、2bpp 正式發布與回滾，但旋轉、抖色演算法、裁切、文字位置與自訂版型尚未全部做成 UI 控制。
+4. 渲染已支援字型、實際色盤預覽、四色／六色／七色、五種抖動與 Profile 回滾；裁切、文字位置與自訂版型尚未做成拖拉式 UI。
 5. 備份可由 UI 建立、下載、驗證並排程；基於 SQLite 線上替換風險，還原仍依文件在服務停止狀態執行，尚未做成 UI 一鍵還原。
-6. 裝置可建立、重生 Token 與停用；指定圖片發布、測試圖、完整排程／旋轉編輯與裝置事件頁尚未完成。
+6. 裝置可建立、重生 Token、停用，並從 Web 編輯面板、時區、每日排程與 0°／180°；設定版本 ACK、離線／恢復通知、Firmware／RSSI／Heap／PSRAM／錯誤 Telemetry 已完成。指定圖片播放清單與簽章 OTA 尚未完成。
 7. 診斷頁顯示 Provider 啟用數並提供逐一測試，但尚未建立所有 Provider 的定時主動健康探測與歷史圖表。
 8. 儀表板目前提供核心指標與最近錯誤，尚未完成任務要求的全部趨勢圖表。
 9. 部分 dashboard／operations Route 仍直接執行唯讀聚合 SQL，尚未完全達到「所有 Route 不直接 SQL」的最終分層目標。
-10. Webhook、Email、Telegram／LINE、S3、PostgreSQL、遠端／GPU Worker、人臉群組等只建立明確停用的 Feature Flags，沒有空殼 UI，也不宣稱已可用。
+10. 裝置通知 Webhook 已可用；Email、Telegram／LINE、S3、PostgreSQL、遠端／GPU Worker、人臉群組仍未實作，也不宣稱可用。
 11. E2E 檔案涵蓋首次設定、登入、主要頁面與設定修改；原任務列出的工作控制、Provider 測試、渲染、裝置與備份完整瀏覽器流程尚未全部自動化。
 12. Pillow 12.3 對 `getdata()` 發出 2027 年才移除的棄用警告；目前功能正確，後續應改用 `get_flattened_data()` 並保留相容測試。
 
 ## 未來建議
 
-優先順序建議為：先完成 Batch Job 生命週期與完整 Playwright／ESP32 CI 實跑，再補齊照片批次操作與進階渲染 UI；之後將 dashboard／operations SQL 移入 Repository，並在需要多主機 Worker 前導入 PostgreSQL。SQLite 單主機部署應維持單一可靠本機 Volume，不要放在無鎖定保證的網路檔案系統。
+下一優先是簽章 OTA／金絲雀回滾與每台裝置播放清單，再補齊照片批次操作、拖拉式版面與 Batch Job 生命週期；之後將 dashboard／operations SQL 移入 Repository，並只在需要多主機 Worker 時評估 PostgreSQL。SQLite 單主機部署應維持單一可靠本機 Volume，不要放在無鎖定保證的網路檔案系統。完整優先清單與 N100 實測見 `N100_IMPLEMENTATION_REPORT_ZH_TW.md`。
 
 ## Commit 清單
 
