@@ -7,7 +7,7 @@ That subtree is distributed under the MIT License:
 
 > MIT License
 >
-> Copyright (c) 2025 Shenzhen Xinzhi Future Technology Co., Ltd.  
+> Copyright (c) 2025 Shenzhen Xinzhi Future Technology Co., Ltd.<br>
 > Copyright (c) 2025 Project Contributors
 >
 > Permission is hereby granted, free of charge, to any person obtaining a copy
