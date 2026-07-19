@@ -11,7 +11,7 @@
   <td>{{ device.last_status_at or device.last_seen_at or '尚未連線' }}<small>{{ device.last_ip or '—' }}／{{ device.wake_reason or '未回報喚醒原因' }}</small></td>
   <td>RSSI {{ device.wifi_rssi if device.wifi_rssi is not none else '—' }} dBm<small>Heap {{ device.free_heap_bytes if device.free_heap_bytes is not none else '—' }}／PSRAM {{ device.free_psram_bytes if device.free_psram_bytes is not none else '—' }}</small></td>
   <td>{{ device.download_success_count }} 成功／{{ device.download_failure_count }} 失敗<small>{{ device.last_release_id or '尚未下載' }}</small></td>
-  <td>{% if g.user.role == 'administrator' %}<button class="secondary edit-device" data-id="{{ device.id }}" data-name="{{ device.name }}" data-enabled="{{ 1 if device.enabled else 0 }}" data-timezone="{{ device.timezone }}" data-schedule="{{ device.schedule }}" data-rotation="{{ device.rotation }}" data-panel-profile="{{ device.panel_profile }}">編輯</button> <button class="secondary regenerate" data-id="{{ device.id }}">重生 Token</button>{% else %}僅供檢視{% endif %}</td>
+  <td><a href="/energy?device_id={{ device.id|urlencode }}">能源</a>{% if g.user.role == 'administrator' %}／<button class="secondary edit-device" data-id="{{ device.id }}" data-name="{{ device.name }}" data-enabled="{{ 1 if device.enabled else 0 }}" data-timezone="{{ device.timezone }}" data-schedule="{{ device.schedule }}" data-rotation="{{ device.rotation }}" data-panel-profile="{{ device.panel_profile }}">編輯</button> <button class="secondary regenerate" data-id="{{ device.id }}">重生 Token</button>{% endif %}</td>
 </tr>{% else %}<tr><td colspan="7" class="empty">尚未新增裝置。</td></tr>{% endfor %}
 </tbody></table></div></section>
 

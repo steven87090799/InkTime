@@ -146,9 +146,12 @@ def test_device_status_is_recorded_without_exposing_token(client, app):
             "pmic_type": "axp2101",
             "usb_power": True,
             "battery_voltage": 4.08,
+            "battery_percent": 82,
+            "battery_percent_estimated": True,
             "temperature_c": 25.5,
             "humidity_percent": 61.0,
             "last_refresh_duration_ms": 25000,
+            "wake_duration_ms": 61000,
             "wake_reason": "4",
             "display_updated": False,
             "error_code": "DEVICE-DOWNLOAD",
@@ -169,6 +172,14 @@ def test_device_status_is_recorded_without_exposing_token(client, app):
     assert details["pmic_type"] == "axp2101"
     assert details["cache_status"] == "hit"
     assert details["last_refresh_duration_ms"] == 25000
+    with app.extensions["inktime_database"].session() as connection:
+        sample = connection.execute(
+            "SELECT * FROM device_power_samples WHERE device_id=?", (device_id,)
+        ).fetchone()
+    assert sample["battery_percent"] == 82
+    assert sample["battery_percent_estimated"] == 1
+    assert sample["refresh_duration_ms"] == 25000
+    assert sample["wake_duration_ms"] == 61000
 
 
 def test_device_status_rejects_malformed_numeric_telemetry(client, app):

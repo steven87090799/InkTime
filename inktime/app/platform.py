@@ -45,6 +45,7 @@ from inktime.app.services.budgets import BudgetService
 from inktime.app.services.providers import ProviderService
 from inktime.app.services.scoring_lab import ScoringLabService
 from inktime.app.services.notifications import DeviceNotificationService
+from inktime.app.services.device_energy import DeviceEnergyService
 from inktime.app.core.logging import configure_logging, log_event
 from inktime.app.web.access import csrf_token, verify_csrf
 
@@ -98,6 +99,9 @@ def initialize_platform(
     app.extensions["inktime_database"] = database
     app.extensions["inktime_auth_repository"] = AuthRepository(database)
     app.extensions["inktime_device_repository"] = DeviceRepository(database, secret)
+    app.extensions["inktime_device_energy_service"] = DeviceEnergyService(
+        app.extensions["inktime_device_repository"]
+    )
     app.extensions["inktime_job_repository"] = JobRepository(database)
     app.extensions["inktime_job_service"] = JobService(app.extensions["inktime_job_repository"])
     settings_repository = SettingsRepository(database)

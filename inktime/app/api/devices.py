@@ -96,6 +96,126 @@ def devices_page():
     )
 
 
+def _energy_days() -> int:
+    try:
+        days = int(request.args.get("days", 30))
+    except (TypeError, ValueError):
+        days = 30
+    return days if days in {7, 30, 90, 365} else 30
+
+
+@bp.get("/energy")
+@login_required
+def energy_page():
+    devices = list(_repository().list())
+    selected_id = str(request.args.get("device_id", "")).strip()
+    if not selected_id and devices:
+        selected_id = str(devices[0]["id"])
+    energy = None
+    if selected_id:
+        try:
+            energy = current_app.extensions["inktime_device_energy_service"].dashboard(
+                selected_id, days=_energy_days()
+            )
+        except KeyError:
+            abort(404, description="找不到能源儀表板指定的裝置")
+    return render_template(
+        "device_energy.html",
+        devices=devices,
+        selected_device_id=selected_id,
+        energy=energy,
+        selected_days=_energy_days(),
+    )
+
+
+@bp.get("/api/v1/devices/<device_id>/energy")
+@login_required
+def device_energy(device_id: str):
+    try:
+        return current_app.extensions["inktime_device_energy_service"].dashboard(
+            device_id, days=_energy_days()
+        )
+    except KeyError:
+        abort(404)
+
+
+@bp.patch("/api/v1/devices/<device_id>/energy-profile")
+@administrator_required
+def update_energy_profile(device_id: str):
+    repository = _repository()
+    device = repository.get(device_id)
+    if device is None:
+        abort(404)
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        abort(400, description="DEVICE-005 能源參數必須是 JSON 物件")
+
+    def bounded_number(
+        key: str, minimum: float, maximum: float, *, nullable: bool, default
+    ) -> float | None:
+        value = payload.get(key, default)
+        if value is None or value == "":
+            if nullable:
+                return None
+            abort(400, description=f"DEVICE-005 {key} 不可空白")
+        if isinstance(value, bool):
+            abort(400, description=f"DEVICE-005 {key} 必須是數字")
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            abort(400, description=f"DEVICE-005 {key} 必須是數字")
+        if not minimum <= parsed <= maximum:
+            abort(400, description=f"DEVICE-005 {key} 超出 {minimum:g}–{maximum:g}")
+        return parsed
+
+    refreshes_per_day = bounded_number(
+        "refreshes_per_day",
+        0.01,
+        96,
+        nullable=False,
+        default=device["refreshes_per_day"],
+    )
+    battery_reserve_percent = bounded_number(
+        "battery_reserve_percent",
+        0,
+        50,
+        nullable=False,
+        default=device["battery_reserve_percent"],
+    )
+    if refreshes_per_day is None or battery_reserve_percent is None:
+        abort(400, description="DEVICE-005 續航估算參數不可空白")
+    try:
+        repository.update_energy_profile(
+            device_id,
+            battery_capacity_mah=bounded_number(
+                "battery_capacity_mah",
+                10,
+                100_000,
+                nullable=True,
+                default=device["battery_capacity_mah"],
+            ),
+            standby_current_ma=bounded_number(
+                "standby_current_ma",
+                0.001,
+                10_000,
+                nullable=True,
+                default=device["standby_current_ma"],
+            ),
+            active_current_ma=bounded_number(
+                "active_current_ma",
+                0.001,
+                10_000,
+                nullable=True,
+                default=device["active_current_ma"],
+            ),
+            refreshes_per_day=refreshes_per_day,
+            battery_reserve_percent=battery_reserve_percent,
+        )
+    except KeyError:
+        abort(404)
+    return {"status": "ok"}
+
+
 @bp.post("/api/v1/devices")
 @administrator_required
 def create_device():
@@ -281,6 +401,7 @@ def report_status():
             "last_refresh_duration_ms": optional_int(
                 "last_refresh_duration_ms", 0, 600_000
             ),
+            "wake_duration_ms": optional_int("wake_duration_ms", 0, 86_400_000),
             "button_wakeup": optional_bool("button_wakeup"),
         },
     )

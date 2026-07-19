@@ -78,6 +78,22 @@ def test_viewer_cannot_create_device(client, app):
     assert response.status_code == 403
 
 
+def test_viewer_cannot_update_device_energy_profile(client, app):
+    device_id, _token = app.extensions["inktime_device_repository"].create("客廳")
+    app.extensions["inktime_auth_repository"].create_user(
+        "energy-viewer", "very-safe-viewer-password", "viewer"
+    )
+    login(client, "energy-viewer", "very-safe-viewer-password")
+
+    response = client.patch(
+        f"/api/v1/devices/{device_id}/energy-profile",
+        json={"standby_current_ma": 0.12},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+
+    assert response.status_code == 403
+
+
 def test_login_failures_temporarily_block_ip(client, app):
     create_admin(app)
     client.get("/login")

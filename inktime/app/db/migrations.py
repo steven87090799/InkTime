@@ -471,6 +471,37 @@ MIGRATIONS = (
             "UPDATE feature_flags SET enabled=1,description='裝置離線／恢復站內通知與可選 Webhook 已啟用' WHERE key='notifications'",
         ),
     ),
+    Migration(
+        8,
+        "加入裝置能源曲線與續航估算設定",
+        (
+            "ALTER TABLE devices ADD COLUMN battery_capacity_mah REAL CHECK(battery_capacity_mah IS NULL OR battery_capacity_mah BETWEEN 10 AND 100000)",
+            "ALTER TABLE devices ADD COLUMN standby_current_ma REAL CHECK(standby_current_ma IS NULL OR standby_current_ma BETWEEN 0.001 AND 10000)",
+            "ALTER TABLE devices ADD COLUMN active_current_ma REAL CHECK(active_current_ma IS NULL OR active_current_ma BETWEEN 0.001 AND 10000)",
+            "ALTER TABLE devices ADD COLUMN refreshes_per_day REAL NOT NULL DEFAULT 1 CHECK(refreshes_per_day BETWEEN 0.01 AND 96)",
+            "ALTER TABLE devices ADD COLUMN battery_reserve_percent REAL NOT NULL DEFAULT 10 CHECK(battery_reserve_percent BETWEEN 0 AND 50)",
+            "ALTER TABLE devices ADD COLUMN energy_profile_updated_at TEXT",
+            """
+            CREATE TABLE IF NOT EXISTS device_power_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                battery_voltage REAL CHECK(battery_voltage IS NULL OR battery_voltage BETWEEN 0 AND 10),
+                battery_percent REAL CHECK(battery_percent IS NULL OR battery_percent BETWEEN 0 AND 100),
+                battery_percent_estimated INTEGER CHECK(battery_percent_estimated IS NULL OR battery_percent_estimated IN (0,1)),
+                usb_power INTEGER CHECK(usb_power IS NULL OR usb_power IN (0,1)),
+                refresh_duration_ms INTEGER CHECK(refresh_duration_ms IS NULL OR refresh_duration_ms BETWEEN 0 AND 600000),
+                wake_duration_ms INTEGER CHECK(wake_duration_ms IS NULL OR wake_duration_ms BETWEEN 0 AND 86400000),
+                display_updated INTEGER NOT NULL DEFAULT 0 CHECK(display_updated IN (0,1)),
+                temperature_c REAL CHECK(temperature_c IS NULL OR temperature_c BETWEEN -100 AND 150),
+                wifi_rssi INTEGER CHECK(wifi_rssi IS NULL OR wifi_rssi BETWEEN -127 AND 0),
+                wake_reason TEXT,
+                recorded_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_device_power_samples_device_time ON device_power_samples(device_id,recorded_at DESC,id DESC)",
+            "INSERT OR IGNORE INTO feature_flags(key,enabled,description,updated_at) VALUES ('device_energy',1,'裝置電池曲線、刷新耗時與續航估算儀表板已啟用',datetime('now'))",
+        ),
+    ),
 )
 
 

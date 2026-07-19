@@ -1,0 +1,129 @@
+.energy-page-head > a {
+  padding: 9px 13px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--accent);
+  text-decoration: none;
+  background: var(--card);
+}
+
+.energy-toolbar {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.energy-toolbar form { display: flex; align-items: end; gap: 10px; }
+.energy-toolbar label { color: var(--muted); font-size: 12px; font-weight: 700; }
+.energy-toolbar select {
+  display: block;
+  min-width: 240px;
+  margin-top: 5px;
+  padding: 10px 36px 10px 11px;
+  border: 1px solid var(--field-line);
+  border-radius: 9px;
+  background: var(--field);
+  color: var(--ink);
+  font: inherit;
+}
+
+.range-tabs { display: flex; gap: 7px; flex-wrap: wrap; }
+.range-tabs a {
+  padding: 8px 11px;
+  border-radius: 999px;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 700;
+}
+.range-tabs a[aria-current="page"] { color: var(--accent); background: var(--accent2); }
+
+.energy-metrics small { display: block; margin-top: 8px; color: var(--muted); font-size: 12px; }
+.estimate-card { border-color: color-mix(in srgb, var(--accent) 38%, var(--line)) !important; }
+
+.energy-warnings {
+  display: grid;
+  gap: 8px;
+  margin: 18px 0;
+}
+.energy-warnings p {
+  margin: 0;
+  padding: 10px 13px;
+  border-left: 3px solid #d39820;
+  border-radius: 8px;
+  background: color-mix(in srgb, #e4a832 12%, var(--card));
+  color: var(--ink);
+}
+
+.energy-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+.energy-chart-grid .panel { margin: 0; }
+.chart-panel-wide { grid-column: 1 / -1; }
+.chart-panel .panel-head span { color: var(--muted); font-size: 12px; }
+.energy-chart { width: 100%; min-height: 220px; margin-top: 18px; overflow: visible; }
+.chart-grid-line { stroke: var(--line); stroke-width: 1; }
+.chart-line { fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.voltage-chart .chart-line { stroke: #2f78c4; }
+.refresh-chart .chart-line { stroke: #ba642e; }
+.chart-dot { fill: var(--card); stroke: var(--accent); stroke-width: 2; }
+.voltage-chart .chart-dot { stroke: #2f78c4; }
+.refresh-chart .chart-dot { stroke: #ba642e; }
+.chart-axis, .chart-empty { fill: var(--muted); font-size: 11px; }
+.chart-empty { font-size: 14px; }
+
+.estimate-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 20px;
+}
+.estimate-grid article {
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--paper);
+}
+.estimate-grid h3 { margin: 2px 0 12px; }
+.estimate-grid strong { font-size: 25px; }
+.estimate-grid article > p:last-child { margin-bottom: 0; color: var(--muted); }
+
+.energy-profile-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 15px;
+  align-items: end;
+  margin-top: 20px;
+}
+.energy-profile-form label > span { display: block; font-weight: 750; }
+.energy-profile-form small { display: block; min-height: 38px; color: var(--muted); }
+.energy-profile-form input {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--field-line);
+  border-radius: 8px;
+  background: var(--field);
+  color: var(--ink);
+  font: inherit;
+}
+.energy-profile-form button { min-height: 43px; }
+.empty-state { text-align: center; padding: 50px 24px; }
+.empty-state p { color: var(--muted); margin-bottom: 24px; }
+.empty-state .primary { display: inline-block; text-decoration: none; }
+
+@media (max-width: 800px) {
+  .energy-toolbar { align-items: stretch; flex-direction: column; }
+  .energy-toolbar form { align-items: stretch; }
+  .energy-toolbar label { flex: 1; }
+  .energy-toolbar select { min-width: 0; width: 100%; }
+  .energy-chart-grid, .estimate-grid { grid-template-columns: 1fr; }
+  .chart-panel-wide { grid-column: auto; }
+  .energy-chart { min-height: 185px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .energy-chart * { transition: none; }
+}

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from uuid import uuid4
 
@@ -23,10 +23,16 @@ class DeviceRepository:
                        download_success_count, download_failure_count, wifi_rssi, battery_percent,
                        free_heap_bytes, free_psram_bytes, last_error_code, last_error_message,
                        last_status_at, wake_reason, offline_alert_active,
-                       last_offline_alert_at, last_recovery_alert_at
+                       last_offline_alert_at, last_recovery_alert_at,
+                       battery_capacity_mah, standby_current_ma, active_current_ma,
+                       refreshes_per_day, battery_reserve_percent, energy_profile_updated_at
                 FROM devices ORDER BY name
                 """
             ).fetchall()
+
+    def get(self, device_id: str):
+        with self.database.session() as connection:
+            return connection.execute("SELECT * FROM devices WHERE id=?", (device_id,)).fetchone()
 
     def create(
         self,
@@ -177,8 +183,10 @@ class DeviceRepository:
         details: dict | None = None,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
         level = "error" if error_code else "info"
         message = error_message[:500] if error_message else "裝置狀態正常"
+        details = details or {}
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -229,14 +237,123 @@ class DeviceRepository:
                         "status_report",
                         error_code[:64] or None,
                         message,
-                        json.dumps(details or {}, ensure_ascii=False),
+                        json.dumps(details, ensure_ascii=False),
                         now,
                     ),
+                )
+                energy_values = (
+                    details.get("battery_voltage"),
+                    battery_percent,
+                    details.get("usb_power"),
+                    details.get("last_refresh_duration_ms"),
+                    details.get("wake_duration_ms"),
+                )
+                if any(value is not None for value in energy_values):
+                    estimated = details.get("battery_percent_estimated")
+                    usb_power = details.get("usb_power")
+                    connection.execute(
+                        """
+                        INSERT INTO device_power_samples(
+                            device_id,battery_voltage,battery_percent,battery_percent_estimated,
+                            usb_power,refresh_duration_ms,wake_duration_ms,display_updated,
+                            temperature_c,wifi_rssi,wake_reason,recorded_at
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            device_id,
+                            details.get("battery_voltage"),
+                            battery_percent,
+                            None if estimated is None else int(bool(estimated)),
+                            None if usb_power is None else int(bool(usb_power)),
+                            details.get("last_refresh_duration_ms"),
+                            details.get("wake_duration_ms"),
+                            int(bool(details.get("display_updated", False))),
+                            details.get("temperature_c"),
+                            wifi_rssi,
+                            wake_reason[:64] or None,
+                            now,
+                        ),
+                    )
+                    connection.execute(
+                        "DELETE FROM device_power_samples WHERE device_id=? AND recorded_at<?",
+                        (device_id, cutoff),
+                    )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    def update_energy_profile(
+        self,
+        device_id: str,
+        *,
+        battery_capacity_mah: float | None,
+        standby_current_ma: float | None,
+        active_current_ma: float | None,
+        refreshes_per_day: float,
+        battery_reserve_percent: float,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        details = {
+            "battery_capacity_mah": battery_capacity_mah,
+            "standby_current_ma": standby_current_ma,
+            "active_current_ma": active_current_ma,
+            "refreshes_per_day": refreshes_per_day,
+            "battery_reserve_percent": battery_reserve_percent,
+        }
+        with self.database.session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = connection.execute(
+                    """
+                    UPDATE devices SET battery_capacity_mah=?,standby_current_ma=?,
+                        active_current_ma=?,refreshes_per_day=?,battery_reserve_percent=?,
+                        energy_profile_updated_at=?,updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        battery_capacity_mah,
+                        standby_current_ma,
+                        active_current_ma,
+                        refreshes_per_day,
+                        battery_reserve_percent,
+                        now,
+                        now,
+                        device_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise KeyError(device_id)
+                connection.execute(
+                    """
+                    INSERT INTO device_events(device_id,level,event,message,details_json,created_at)
+                    VALUES (?,'info','energy_profile_updated','能源估算參數已更新',?,?)
+                    """,
+                    (device_id, json.dumps(details, ensure_ascii=False), now),
                 )
                 connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+
+    def list_energy_samples(self, device_id: str, *, days: int = 30, limit: int = 5000):
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, min(days, 3650)))).isoformat()
+        bounded_limit = max(1, min(int(limit), 10_000))
+        with self.database.session() as connection:
+            return connection.execute(
+                """
+                SELECT * FROM (
+                    SELECT id,device_id,battery_voltage,battery_percent,
+                           battery_percent_estimated,usb_power,refresh_duration_ms,
+                           wake_duration_ms,display_updated,temperature_c,wifi_rssi,
+                           wake_reason,recorded_at
+                    FROM device_power_samples
+                    WHERE device_id=? AND recorded_at>=?
+                    ORDER BY recorded_at DESC,id DESC LIMIT ?
+                ) ORDER BY recorded_at,id
+                """,
+                (device_id, cutoff, bounded_limit),
+            ).fetchall()
 
     def list_events(self, limit: int = 100):
         with self.database.session() as connection:

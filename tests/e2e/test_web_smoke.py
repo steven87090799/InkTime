@@ -28,6 +28,7 @@ def test_first_setup_login_and_primary_console_pages():
             ("模擬器", "/simulator"),
             ("渲染", "/rendering"),
             ("裝置", "/devices"),
+            ("能源", "/energy"),
             ("維護", "/maintenance"),
             ("診斷", "/diagnostics"),
             ("設定", "/settings"),

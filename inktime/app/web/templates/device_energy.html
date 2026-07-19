@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}裝置能源｜InkTime{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='device-energy.css') }}">{% endblock %}
+{% block content %}
+<div class="page-head energy-page-head">
+  <div>
+    <p class="eyebrow">Battery intelligence</p>
+    <h1>裝置能源儀表板</h1>
+    <p>追蹤電池曲線與刷新耗時，並把實際放電趨勢和人工量測模型分開呈現。</p>
+  </div>
+  <a href="/devices">返回裝置管理</a>
+</div>
+
+{% if devices %}
+<section class="panel energy-toolbar" aria-label="能源儀表板篩選">
+  <form method="get">
+    <label>裝置
+      <select name="device_id" id="energy-device-select">
+        {% for item in devices %}<option value="{{ item.id }}" {% if item.id == selected_device_id %}selected{% endif %}>{{ item.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <input type="hidden" name="days" value="{{ selected_days }}">
+    <button class="secondary">切換</button>
+  </form>
+  <nav class="range-tabs" aria-label="曲線期間">
+    {% for days in (7, 30, 90, 365) %}<a href="/energy?device_id={{ selected_device_id|urlencode }}&days={{ days }}" {% if selected_days == days %}aria-current="page"{% endif %}>{{ days }} 天</a>{% endfor %}
+  </nav>
+</section>
+
+{% if energy %}
+{% set summary = energy.summary %}
+{% set device = energy.device %}
+{% set latest = summary.latest %}
+<section class="metrics energy-metrics" aria-label="能源摘要">
+  <article>
+    <span>目前電量</span>
+    <strong>{% if latest and latest.battery_percent is not none %}{{ '%.1f'|format(latest.battery_percent) }}%{% else %}資料不足{% endif %}</strong>
+    <small>{% if latest and latest.battery_voltage is not none %}{{ '%.3f'|format(latest.battery_voltage) }} V{% else %}尚無電壓{% endif %}{% if latest and latest.battery_percent_estimated %}／估算值{% endif %}</small>
+  </article>
+  <article>
+    <span>平均刷新耗時</span>
+    <strong>{% if summary.refresh.average_seconds is not none %}{{ '%.1f'|format(summary.refresh.average_seconds) }} 秒{% else %}資料不足{% endif %}</strong>
+    <small>{% if summary.refresh.p95_seconds is not none %}P95 {{ '%.1f'|format(summary.refresh.p95_seconds) }} 秒／{{ summary.refresh.count }} 次{% else %}等待新版韌體回報{% endif %}</small>
+  </article>
+  <article>
+    <span>待機電流</span>
+    <strong>{% if device.standby_current_ma is not none %}{{ '%.3f'|format(device.standby_current_ma) }} mA{% else %}待量測{% endif %}</strong>
+    <small>外接功率計實測後由管理員填入</small>
+  </article>
+  <article class="estimate-card">
+    <span>預估剩餘續航</span>
+    <strong>{% if summary.preferred and summary.preferred.remaining_days is not none %}{{ '%.1f'|format(summary.preferred.remaining_days) }} 天{% else %}資料不足{% endif %}</strong>
+    <small>{% if summary.preferred %}{{ '放電趨勢' if summary.preferred.method == 'empirical' else '容量／電流模型' }}；保留 {{ '%.0f'|format(device.battery_reserve_percent) }}%{% else %}需補齊量測或累積放電樣本{% endif %}</small>
+  </article>
+</section>
+
+{% if summary.warnings %}<section class="energy-warnings" aria-label="資料品質提醒">{% for warning in summary.warnings %}<p>{{ warning }}</p>{% endfor %}</section>{% endif %}
+
+<section class="energy-chart-grid">
+  <article class="panel chart-panel">
+    <div class="panel-head"><h2>電池百分比曲線</h2><span>{{ summary.battery_sample_count }} 筆</span></div>
+    <svg id="battery-percent-chart" class="energy-chart battery-chart" role="img" aria-label="電池百分比隨時間變化"></svg>
+  </article>
+  <article class="panel chart-panel">
+    <div class="panel-head"><h2>電池電壓曲線</h2><span>伏特</span></div>
+    <svg id="battery-voltage-chart" class="energy-chart voltage-chart" role="img" aria-label="電池電壓隨時間變化"></svg>
+  </article>
+  <article class="panel chart-panel chart-panel-wide">
+    <div class="panel-head"><h2>刷新耗時</h2><span>秒</span></div>
+    <svg id="refresh-duration-chart" class="energy-chart refresh-chart" role="img" aria-label="每次電子紙刷新耗時"></svg>
+  </article>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>續航估算交叉檢查</h2><span class="status {{ 'ok' if summary.preferred else '' }}">{{ '可估算' if summary.preferred else '待補資料' }}</span></div>
+  <div class="estimate-grid">
+    <article>
+      <p class="eyebrow">Observed trend</p><h3>實際放電趨勢</h3>
+      {% if summary.empirical %}
+      <strong>{{ '%.2f'|format(summary.empirical.daily_percent_drop) }}%／日</strong>
+      <p>剩餘約 {{ '%.1f'|format(summary.empirical.remaining_days) }} 天；觀察 {{ '%.1f'|format(summary.empirical.observed_days) }} 天、{{ summary.empirical.intervals }} 個有效區間，信心 {{ {'low':'低','medium':'中','high':'高'}[summary.empirical.confidence] }}。</p>
+      {% else %}<strong>尚無可靠斜率</strong><p>至少需要兩筆相隔六小時、明確為電池模式且電量下降的樣本。</p>{% endif %}
+    </article>
+    <article>
+      <p class="eyebrow">Measured model</p><h3>容量／電流模型</h3>
+      {% if summary.modeled %}
+      <strong>{{ '%.2f'|format(summary.modeled.daily_mah) }} mAh／日</strong>
+      <p>滿電可用區間約 {{ '%.1f'|format(summary.modeled.full_days) }} 天；採用{{ '完整喚醒週期' if summary.modeled.duration_source == 'wake_cycle' else '刷新耗時替代值' }} {{ '%.1f'|format(summary.modeled.active_seconds) }} 秒。</p>
+      {% else %}<strong>參數未完成</strong><p>{{ summary.missing_model_inputs|join('、') if summary.missing_model_inputs else '目前資料無法建立合理模型' }}。</p>{% endif %}
+    </article>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>能源模型參數</h2><span>最後更新 {{ device.energy_profile_updated_at or '尚未設定' }}</span></div>
+  <p>這些值必須來自電池規格或整板量測。待機電流請量測完成 deep sleep 後的整板電流；喚醒週期平均電流應包含 Wi-Fi、下載、刷新與關機流程。</p>
+  {% if g.user.role == 'administrator' %}
+  <form id="energy-profile-form" class="energy-profile-form">
+    <label><span>電池容量</span><small>mAh；留空代表未知</small><input name="battery_capacity_mah" type="number" min="10" max="100000" step="1" value="{{ device.battery_capacity_mah if device.battery_capacity_mah is not none else '' }}"></label>
+    <label><span>待機電流</span><small>mA；整板 deep sleep 實測</small><input name="standby_current_ma" type="number" min="0.001" max="10000" step="0.001" value="{{ device.standby_current_ma if device.standby_current_ma is not none else '' }}"></label>
+    <label><span>喚醒平均電流</span><small>mA；完整喚醒週期平均</small><input name="active_current_ma" type="number" min="0.001" max="10000" step="0.001" value="{{ device.active_current_ma if device.active_current_ma is not none else '' }}"></label>
+    <label><span>每日刷新次數</span><small>排程與預期人工刷新合計</small><input name="refreshes_per_day" type="number" min="0.01" max="96" step="0.01" required value="{{ device.refreshes_per_day }}"></label>
+    <label><span>安全保留電量</span><small>低於此百分比視為不可用</small><input name="battery_reserve_percent" type="number" min="0" max="50" step="1" required value="{{ device.battery_reserve_percent }}"></label>
+    <button class="primary">儲存並重算</button>
+  </form>
+  {% else %}
+  <dl><dt>電池容量</dt><dd>{{ device.battery_capacity_mah or '未設定' }} mAh</dd><dt>待機電流</dt><dd>{{ device.standby_current_ma or '未設定' }} mA</dd><dt>喚醒平均電流</dt><dd>{{ device.active_current_ma or '未設定' }} mA</dd><dt>每日刷新</dt><dd>{{ device.refreshes_per_day }} 次</dd><dt>安全保留</dt><dd>{{ device.battery_reserve_percent }}%</dd></dl>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>最近能源樣本</h2><span>曲線保留 400 天</span></div>
+  <div class="table-wrap"><table><thead><tr><th>時間</th><th>電池</th><th>電壓</th><th>電源</th><th>刷新</th><th>喚醒週期</th></tr></thead><tbody>
+    {% for sample in energy.recent_samples %}<tr><td>{{ sample.recorded_at }}</td><td>{% if sample.battery_percent is not none %}{{ '%.1f'|format(sample.battery_percent) }}%{% if sample.battery_percent_estimated %}（估）{% endif %}{% else %}—{% endif %}</td><td>{% if sample.battery_voltage is not none %}{{ '%.3f'|format(sample.battery_voltage) }} V{% else %}—{% endif %}</td><td>{% if sample.usb_power is none %}未知{% elif sample.usb_power %}USB{% else %}電池{% endif %}</td><td>{% if sample.refresh_duration_ms %}{{ '%.1f'|format(sample.refresh_duration_ms / 1000) }} 秒{% else %}—{% endif %}</td><td>{% if sample.wake_duration_ms %}{{ '%.1f'|format(sample.wake_duration_ms / 1000) }} 秒{% else %}—{% endif %}</td></tr>
+    {% else %}<tr><td colspan="6" class="empty">尚無能源樣本。</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% endif %}
+{% else %}
+<section class="panel empty-state"><h2>尚未建立裝置</h2><p>先到裝置管理新增 ESP32，再由新版韌體回報能源遙測。</p><a class="primary" href="/devices">前往裝置管理</a></section>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}{% if energy %}<script>
+const energySamples={{ energy.chart_samples|tojson }};
+const svgNamespace='http://www.w3.org/2000/svg';
+function svgNode(name,attributes={},content=''){
+  const node=document.createElementNS(svgNamespace,name);
+  Object.entries(attributes).forEach(([key,value])=>node.setAttribute(key,String(value)));
+  if(content)node.textContent=content;
+  return node;
+}
+function drawEnergyChart(id,key,{minimum=null,maximum=null,unit='' }={}){
+  const svg=document.getElementById(id), values=energySamples
+    .map(sample=>sample[key]===null||sample[key]===undefined?null:{time:Date.parse(sample.recorded_at),value:Number(sample[key])})
+    .filter(point=>point&&Number.isFinite(point.time)&&Number.isFinite(point.value));
+  svg.replaceChildren();
+  svg.setAttribute('viewBox','0 0 760 230');
+  if(values.length<2){svg.append(svgNode('text',{x:380,y:115,'text-anchor':'middle',class:'chart-empty'},'至少需要兩筆資料'));return;}
+  const width=760,height=230,pad={left:54,right:18,top:18,bottom:36};
+  const minTime=Math.min(...values.map(point=>point.time)),maxTime=Math.max(...values.map(point=>point.time)),timeSpan=Math.max(1,maxTime-minTime);
+  const rawMin=Math.min(...values.map(point=>point.value)),rawMax=Math.max(...values.map(point=>point.value));
+  const rawSpan=Math.max(1e-6,rawMax-rawMin),margin=rawSpan*.08;
+  let minValue=minimum===null?rawMin-margin:minimum;
+  let maxValue=maximum===null?rawMax+margin:maximum;
+  if(minValue===maxValue){minValue-=1;maxValue+=1;}
+  const x=value=>pad.left+(value-minTime)/timeSpan*(width-pad.left-pad.right);
+  const y=value=>pad.top+(maxValue-value)/(maxValue-minValue)*(height-pad.top-pad.bottom);
+  for(let index=0;index<=4;index+=1){const gy=pad.top+index*(height-pad.top-pad.bottom)/4;svg.append(svgNode('line',{x1:pad.left,y1:gy,x2:width-pad.right,y2:gy,class:'chart-grid-line'}));}
+  const points=values.map(point=>`${x(point.time).toFixed(1)},${y(point.value).toFixed(1)}`).join(' ');
+  svg.append(svgNode('polyline',{points,class:'chart-line'}));
+  svg.append(svgNode('text',{x:pad.left-8,y:pad.top+5,'text-anchor':'end',class:'chart-axis'},`${maxValue.toFixed(1)}${unit}`));
+  svg.append(svgNode('text',{x:pad.left-8,y:height-pad.bottom,'text-anchor':'end',class:'chart-axis'},`${minValue.toFixed(1)}${unit}`));
+  const dateFormat=new Intl.DateTimeFormat('zh-TW',{month:'numeric',day:'numeric'});
+  svg.append(svgNode('text',{x:pad.left,y:height-10,class:'chart-axis'},dateFormat.format(minTime)));
+  svg.append(svgNode('text',{x:width-pad.right,y:height-10,'text-anchor':'end',class:'chart-axis'},dateFormat.format(maxTime)));
+  if(values.length<=90)values.forEach(point=>{const dot=svgNode('circle',{cx:x(point.time),cy:y(point.value),r:3,class:'chart-dot'});dot.append(svgNode('title',{},`${new Date(point.time).toLocaleString('zh-TW')}：${point.value.toFixed(2)}${unit}`));svg.append(dot);});
+}
+drawEnergyChart('battery-percent-chart','battery_percent',{minimum:0,maximum:100,unit:'%'});
+drawEnergyChart('battery-voltage-chart','battery_voltage',{unit:' V'});
+drawEnergyChart('refresh-duration-chart','refresh_seconds',{minimum:0,unit:' 秒'});
+document.getElementById('energy-device-select').addEventListener('change',event=>event.target.form.submit());
+{% if g.user.role == 'administrator' %}document.getElementById('energy-profile-form').addEventListener('submit',async event=>{
+  event.preventDefault();
+  const body={};
+  new FormData(event.target).forEach((value,key)=>body[key]=value===''?null:Number(value));
+  const response=await window.inktimeFetch('/api/v1/devices/{{ energy.device.id }}/energy-profile',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const data=await response.json();
+  alert(response.ok?'能源參數已儲存並重新計算':data.message||'儲存失敗');
+  if(response.ok)location.reload();
+});{% endif %}
+</script>{% endif %}{% endblock %}

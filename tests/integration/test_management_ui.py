@@ -21,6 +21,7 @@ def test_primary_management_pages_render(client, app):
         "/simulator",
         "/rendering",
         "/devices",
+        "/energy",
         "/maintenance",
         "/settings",
         "/diagnostics",
@@ -30,6 +31,63 @@ def test_primary_management_pages_render(client, app):
         response = client.get(path)
         assert response.status_code == 200, path
         assert "zh-Hant-TW" in response.get_data(as_text=True)
+
+
+def test_device_energy_dashboard_uses_telemetry_and_audited_measurements(client, app):
+    create_admin(app)
+    login(client)
+    repository = app.extensions["inktime_device_repository"]
+    device_id, token = repository.create("客廳 PhotoPainter", panel_profile="gdep073e01_6c")
+    status = client.post(
+        "/api/device/v1/status",
+        json={
+            "firmware_version": "2.4.0",
+            "battery_percent": 82,
+            "battery_percent_estimated": True,
+            "battery_voltage": 4.08,
+            "usb_power": False,
+            "display_updated": True,
+            "last_refresh_duration_ms": 25_000,
+            "wake_duration_ms": 61_000,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert status.status_code == 200
+
+    profile = client.patch(
+        f"/api/v1/devices/{device_id}/energy-profile",
+        json={
+            "battery_capacity_mah": 5000,
+            "standby_current_ma": 0.12,
+            "active_current_ma": 210,
+            "refreshes_per_day": 1,
+            "battery_reserve_percent": 10,
+        },
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert profile.status_code == 200
+
+    invalid_profile = client.patch(
+        f"/api/v1/devices/{device_id}/energy-profile",
+        json={"standby_current_ma": -0.1},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert invalid_profile.status_code == 400
+
+    page = client.get(f"/energy?device_id={device_id}&days=30")
+    body = page.get_data(as_text=True)
+    assert page.status_code == 200
+    assert "裝置能源儀表板" in body
+    assert "82.0%" in body
+    assert "25.0 秒" in body
+    assert "0.120 mA" in body
+    assert "容量／電流模型" in body
+
+    api = client.get(f"/api/v1/devices/{device_id}/energy?days=30")
+    assert api.status_code == 200
+    assert api.json["summary"]["modeled"]["duration_source"] == "wake_cycle"
+    assert api.json["summary"]["sample_count"] == 1
+    assert "token_hash" not in api.json["device"]
 
 
 def test_theme_toggle_is_available_before_and_after_login(client, app):
