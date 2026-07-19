@@ -69,7 +69,7 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3 \
 
 Board 選 ESP32-S3，啟用 OPI PSRAM。正式版 `INKTIME_DEBUG_LOG=0`；短期硬體除錯才加入 `-DINKTIME_DEBUG_LOG=1`。序列 Log 不輸出 Token，但正式環境仍不應長期開啟。PhotoPainter 必須使用 16 MiB Flash／OPI PSRAM 與中央 `DEVICE_PROFILE`，完整命令見上方專用指南。
 
-2026-07-19 以 Arduino CLI 1.5.1、ESP32 core 3.3.10、GxEPD2 1.6.9、ArduinoJson 7.4.3 實際編譯 2.3.0：GDEY Profile 使用 1,212,877 bytes、GDEP Profile 使用 1,212,965 bytes，兩者都是預設 1,310,720-byte app partition 的 92%；全域變數分別為 96,556／96,564 bytes（29%）。這表示目前可燒錄，但 Release Flash headroom 只有約 7.5%，Debug 更達 98%；新增 OTA、TLS certificate 或大型 Web UI 前必須重新檢查 partition、實際板上 Flash 與 OTA 雙分區，不能只看模組標示的總 Flash。編譯器顯示約 231 KB 可用動態記憶體不包含執行期碎片與 TLS buffer；下載索引改放 PSRAM，板上仍必須啟用並檢查 PSRAM。PhotoPainter 的完整矩陣與實機邊界見專用指南。
+2026-07-19 以 Arduino CLI 1.5.1、ESP32 core 3.3.10、GxEPD2 1.6.9、ArduinoJson 7.4.3 實際編譯 2.4.0：GDEY Profile 使用 1,213,069 bytes、GDEP Profile 使用 1,213,141 bytes，兩者都是預設 1,310,720-byte app partition 的 92%；全域變數均為 96,564 bytes（29%）。這表示目前可燒錄，但 Release Flash headroom 只有約 7.5%，Debug 更達 98%；新增 OTA、TLS certificate 或大型 Web UI 前必須重新檢查 partition、實際板上 Flash 與 OTA 雙分區，不能只看模組標示的總 Flash。編譯器顯示約 231 KB 可用動態記憶體不包含執行期碎片與 TLS buffer；下載索引改放 PSRAM，板上仍必須啟用並檢查 PSRAM。PhotoPainter 的完整矩陣與實機邊界見專用指南。
 
 上傳前先用原廠 sample／GxEPD2 Example 驗證「面板型號＋adapter＋供電＋引腳」能完整刷新，再燒 InkTime 韌體。不同面板 driver class 不可混用。
 

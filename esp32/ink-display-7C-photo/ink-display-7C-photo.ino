@@ -85,7 +85,7 @@ GxEPD2_7C<
 // =======================
 #define DEVICE_MANIFEST_PATH "/api/device/v1/releases/latest"
 #define DEVICE_STATUS_PATH   "/api/device/v1/status"
-#define INKTIME_FIRMWARE_VERSION "2.3.0"
+#define INKTIME_FIRMWARE_VERSION "2.4.0"
 
 // No trusted CA provisioning exists yet. HTTPS is rejected by default instead
 // of silently downgrading certificate verification. Isolated LAN HTTP remains
@@ -128,6 +128,7 @@ String currentReleaseId;
 String currentRenderProfile;
 String lastDeviceErrorCode;
 String lastDeviceErrorMessage;
+uint32_t lastRefreshDurationMs = 0;
 
 static int calculateSha256(const unsigned char* input, size_t length, unsigned char output[32]) {
 #if MBEDTLS_VERSION_MAJOR >= 3
@@ -1103,9 +1104,10 @@ void reportDeviceStatus(const Config &cfg, bool displayUpdated) {
     payload["temperature_c"] = photoPainter.temperatureC();
     payload["humidity_percent"] = photoPainter.humidityPercent();
   }
-  payload["last_refresh_duration_ms"] = photoPainter.lastRefreshDurationMs();
   payload["button_wakeup"] = photoPainter.wokeFromUserButton();
 #endif
+  payload["last_refresh_duration_ms"] = lastRefreshDurationMs;
+  payload["wake_duration_ms"] = millis();
   String body;
   serializeJson(payload, body);
 
@@ -1149,9 +1151,12 @@ bool drawFromFrameData(const Config &cfg) {
 
 #if INKTIME_PHOTOPAINTER_ENABLED
   if (!frameNativePalette || frameDataSize != inktime::kPhotoPainterFrameBytes) return false;
-  return photoPainter.displayFrame(frameData, frameDataSize);
+  const bool updated = photoPainter.displayFrame(frameData, frameDataSize);
+  lastRefreshDurationMs = photoPainter.lastRefreshDurationMs();
+  return updated;
 #else
 
+  const uint32_t refreshStarted = millis();
   display.setFullWindow();
   int w = display.width();   // 480
   int h = display.height();  // 800
@@ -1196,6 +1201,7 @@ bool drawFromFrameData(const Config &cfg) {
     }
   } while (display.nextPage());
 
+  lastRefreshDurationMs = millis() - refreshStarted;
   display.hibernate();
   return true;
 #endif
