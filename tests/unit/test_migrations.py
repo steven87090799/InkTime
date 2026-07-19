@@ -11,7 +11,7 @@ from inktime.app.db.migrations import Migration, MIGRATIONS
 
 def test_fresh_database_is_migrated(tmp_path):
     database = Database(tmp_path / "inktime.db")
-    assert migrate(database) == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert migrate(database) == [1, 2, 3, 4, 5, 6, 7, 8, 9]
     assert database.integrity_check() == "ok"
     with database.session() as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -67,5 +67,24 @@ def test_concurrent_migrations_are_serialized(tmp_path):
     database = Database(tmp_path / "inktime.db")
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _index: migrate(database), range(2)))
-    assert sorted(results, key=len) == [[], [1, 2, 3, 4, 5, 6, 7, 8]]
+    assert sorted(results, key=len) == [[], [1, 2, 3, 4, 5, 6, 7, 8, 9]]
     assert database.integrity_check() == "ok"
+
+
+def test_existing_empty_font_setting_moves_to_builtin_iansui(monkeypatch, tmp_path):
+    database = Database(tmp_path / "inktime.db")
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:-1])
+    assert migrate(database) == [1, 2, 3, 4, 5, 6, 7, 8]
+    with database.session() as connection:
+        connection.execute(
+            "INSERT INTO settings(key,category,value_json,value_type,requires_restart,updated_at) "
+            "VALUES ('render.font_path','渲染設定','\"\"','string',0,datetime('now'))"
+        )
+
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
+    assert migrate(database) == [9]
+    with database.session() as connection:
+        value = connection.execute(
+            "SELECT value_json FROM settings WHERE key='render.font_path'"
+        ).fetchone()[0]
+    assert value == '"builtin:iansui"'

@@ -17,6 +17,11 @@ import psutil
 from inktime import __version__
 from inktime.app.core.security import redact
 from inktime.app.db import Database
+from inktime.app.domain.rendering.fonts import (
+    BUILTIN_FONTS,
+    DEFAULT_FONT_ASSET_ROOT,
+    SUPPORTED_FONT_SUFFIXES,
+)
 
 
 class DiagnosticsService:
@@ -137,7 +142,13 @@ class DiagnosticsService:
                 "readable": sum(Path(row["root_path"]).is_dir() for row in libraries),
             },
             "providers_enabled": int(providers),
-            "fonts": len(list((self.data_dir / "fonts").glob("*"))),
+            "fonts": sum(
+                (DEFAULT_FONT_ASSET_ROOT / font.filename).is_file() for font in BUILTIN_FONTS
+            )
+            + sum(
+                path.is_file() and path.suffix.lower() in SUPPORTED_FONT_SUFFIXES
+                for path in (self.data_dir / "fonts").glob("*")
+            ),
             "release_latest": (self.data_dir / "releases" / "latest").exists(),
             "last_backup": next(
                 (

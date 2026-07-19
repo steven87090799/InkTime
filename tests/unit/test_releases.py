@@ -7,6 +7,7 @@ from pathlib import Path
 from PIL import Image
 import pytest
 
+from inktime.app.domain.rendering.fonts import FontCoverageError
 from inktime.app.domain.rendering.release import AtomicReleasePublisher, pack_four_color_2bpp
 
 
@@ -82,3 +83,50 @@ def test_automatic_release_candidates_respect_configured_memory_threshold(app, t
         "render.memory_threshold", 75, changed_by="tester", source_ip="127.0.0.1"
     )
     assert render_service.select_candidates() == ["photo-80"]
+
+
+def test_formal_caption_uses_builtin_traditional_font_without_fallback(app, tmp_path):
+    photo_root = tmp_path / "caption-photos"
+    photo_root.mkdir()
+    Image.new("RGB", (80, 120), "#9db7cf").save(photo_root / "memory.jpg")
+    photos = app.extensions["inktime_photo_repository"]
+    library_id = photos.ensure_library("短文案測試", photo_root)
+    now = "2026-07-19T00:00:00+00:00"
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "INSERT INTO photos(id,library_id,relative_path,status,created_at,updated_at) "
+            "VALUES (?,?,?,'analyzed',?,?)",
+            ("caption-photo", library_id, "memory.jpg", now, now),
+        )
+    photos.save_analysis(
+        "caption-photo",
+        None,
+        "test",
+        "local",
+        "test",
+        {
+            "schema_version": "1.0",
+            "caption": "回憶",
+            "types": ["日常"],
+            "memory_score": 80,
+            "beauty_score": 70,
+            "technical_quality_score": 70,
+            "emotion_score": 80,
+            "side_caption": "把今天的風景，寫進明日的回憶。",
+            "should_keep": True,
+            "sensitive": False,
+            "reason": "測試內建繁中字型",
+        },
+        "{}",
+    )
+
+    render_service = app.extensions["inktime_render_service"]
+    rendered = render_service.render_photo("caption-photo")
+    assert rendered.size == (480, 800)
+    assert app.extensions["inktime_settings_repository"].get("render.font_path") == "builtin:iansui"
+
+    app.extensions["inktime_settings_repository"].update(
+        "render.font_path", "", changed_by="tester", source_ip="127.0.0.1"
+    )
+    with pytest.raises(FontCoverageError, match="尚未設定"):
+        render_service.render_photo("caption-photo")

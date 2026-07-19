@@ -293,10 +293,10 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "render.font_path": {
         "category": "渲染設定",
-        "default": "",
+        "default": "builtin:iansui",
         "type": "string",
-        "description": "繁體中文字型路徑",
-        "risk": "缺少 CJK 字元時禁止正式發布",
+        "description": "繁體中文字型；可選內建手寫／文青風格或管理員上傳字型",
+        "risk": "正式渲染會逐段檢查字元，缺字時禁止發布且不使用預設字型替代",
         "restart": False,
     },
     "render.profile": {

@@ -259,7 +259,7 @@ Arduino IDE is recommended.
 
 ### Custom Fonts (optional)
 
-To use a custom Chinese font, place it in ```resource/fonts/``` and declare it in ```config.py```.
+InkTime includes two offline Traditional Chinese choices in the Rendering page: Iansui for a handwriting style and LXGW WenKai TC for a literary style. Administrators can preview and switch between them, or upload a TTF/OTF/TTC file up to 64 MiB. Formal rendering checks every caption character and fails explicitly instead of silently falling back to Pillow's default font.
 
 ## First-Time Configuration
 

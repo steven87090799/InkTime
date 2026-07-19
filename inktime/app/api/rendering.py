@@ -6,11 +6,19 @@ import tempfile
 import time
 
 from flask import Blueprint, abort, current_app, g, render_template, request, send_file
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageDraw, ImageFont, ImageOps, UnidentifiedImageError
 
 from inktime.app.web.access import administrator_required, login_required
 from inktime.app.core.paths import UnsafePathError, safe_join
-from inktime.app.domain.rendering import DISPLAY_PROFILES, DITHER_ALGORITHMS, encode_image, profile_summaries
+from inktime.app.domain.rendering import (
+    DISPLAY_PROFILES,
+    DITHER_ALGORITHMS,
+    FONT_COMPATIBILITY_TEXT,
+    FONT_PREVIEW_TEXT,
+    FontCoverageError,
+    encode_image,
+    profile_summaries,
+)
 
 
 bp = Blueprint("rendering", __name__)
@@ -18,6 +26,7 @@ SIMULATOR_CANVAS_SIZE = (480, 800)
 SIMULATOR_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
 MAX_SIMULATOR_PHOTO_BYTES = 25 * 1024 * 1024
 MAX_SIMULATOR_PHOTO_PIXELS = 40_000_000
+MAX_FONT_BYTES = 64 * 1024 * 1024
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
@@ -25,10 +34,13 @@ UPLOAD_CHUNK_BYTES = 1024 * 1024
 @login_required
 def rendering_page():
     settings = current_app.extensions["inktime_settings_repository"]
+    current_font_reference = str(settings.get("render.font_path", ""))
+    fonts = current_app.extensions["inktime_font_manager"].options(current_font_reference)
     return render_template(
         "rendering.html",
         releases=current_app.extensions["inktime_release_publisher"].list(),
-        fonts=current_app.extensions["inktime_font_manager"].scan(),
+        fonts=fonts,
+        current_font=next((font for font in fonts if font.active), None),
         profiles=profile_summaries(),
         current_profile=str(settings.get("render.profile", "safe_4c")),
         current_dither=str(settings.get("render.dither", "floyd_steinberg")),
@@ -211,26 +223,89 @@ def rollback_release(release_id: str):
     return {"status": "ok"}
 
 
+@bp.get("/api/v1/fonts/preview")
+@login_required
+def preview_font():
+    reference = str(request.args.get("reference", ""))
+    manager = current_app.extensions["inktime_font_manager"]
+    try:
+        font_path = manager.validate_reference(reference, FONT_PREVIEW_TEXT)
+        font = ImageFont.truetype(str(font_path), 38)
+    except (OSError, ValueError) as exc:
+        abort(422, description=f"IMG-002 {exc}")
+
+    canvas = Image.new("RGB", (760, 116), "#f7f4eb")
+    draw = ImageDraw.Draw(canvas)
+    draw.rounded_rectangle((1, 1, 758, 114), radius=12, outline="#d8d1c2", width=2)
+    draw.text((28, 28), FONT_PREVIEW_TEXT, font=font, fill="#1c241f")
+    output = BytesIO()
+    canvas.save(output, "PNG", optimize=True)
+    output.seek(0)
+    response = send_file(output, mimetype="image/png", max_age=3600)
+    response.headers["Cache-Control"] = "private, max-age=3600"
+    return response
+
+
+def _set_current_font(reference: str) -> None:
+    current_app.extensions["inktime_settings_repository"].update(
+        "render.font_path",
+        reference,
+        changed_by=g.user["id"],
+        source_ip=request.remote_addr or "unknown",
+    )
+
+
+@bp.post("/api/v1/fonts/select")
+@administrator_required
+def select_font():
+    payload = request.get_json(silent=True) or {}
+    reference = str(payload.get("reference", "")).strip()
+    manager = current_app.extensions["inktime_font_manager"]
+    try:
+        font_path = manager.validate_reference(reference, FONT_COMPATIBILITY_TEXT)
+    except FontCoverageError as exc:
+        abort(422, description=f"{exc.code} {exc}")
+    except (OSError, ValueError) as exc:
+        abort(400, description=f"IMG-002 {exc}")
+    _set_current_font(reference)
+    return {"reference": reference, "name": font_path.name, "status": "active"}
+
+
 @bp.post("/api/v1/fonts")
 @administrator_required
 def upload_font():
     uploaded = request.files.get("font")
     if uploaded is None or not uploaded.filename:
         abort(400, description="IMG-002 請選擇字型檔案")
-    suffix = Path(uploaded.filename).suffix.lower()
+    filename = str(uploaded.filename).replace("\\", "/").rsplit("/", 1)[-1]
+    suffix = Path(filename).suffix.lower()
     if suffix not in {".ttf", ".otf", ".ttc"}:
         abort(400, description="IMG-002 只支援 TTF、OTF 或 TTC")
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temporary:
-        uploaded.save(temporary)
-        temporary_path = Path(temporary.name)
+    temporary_path: Path | None = None
     try:
-        destination = current_app.extensions["inktime_font_manager"].install(temporary_path)
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temporary:
+            temporary_path = Path(temporary.name)
+            size = 0
+            while chunk := uploaded.stream.read(UPLOAD_CHUNK_BYTES):
+                size += len(chunk)
+                if size > MAX_FONT_BYTES:
+                    abort(413, description="IMG-002 字型檔案不可超過 64 MiB")
+                temporary.write(chunk)
+        if size == 0:
+            abort(400, description="IMG-002 字型檔案不可為空")
+        manager = current_app.extensions["inktime_font_manager"]
+        destination = manager.install(
+            temporary_path,
+            filename=filename,
+            required_text=FONT_COMPATIBILITY_TEXT,
+        )
+    except FontCoverageError as exc:
+        abort(422, description=f"{exc.code} {exc}")
+    except (OSError, ValueError) as exc:
+        abort(422, description=f"IMG-002 {exc}")
     finally:
-        temporary_path.unlink(missing_ok=True)
-    current_app.extensions["inktime_settings_repository"].update(
-        "render.font_path",
-        str(destination),
-        changed_by=g.user["id"],
-        source_ip=request.remote_addr or "unknown",
-    )
-    return {"name": destination.name}, 201
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    reference = manager.reference_for_upload(destination)
+    _set_current_font(reference)
+    return {"name": destination.name, "reference": reference, "status": "active"}, 201

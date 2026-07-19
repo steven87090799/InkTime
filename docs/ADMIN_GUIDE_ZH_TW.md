@@ -33,7 +33,7 @@
 | `budget.max_tokens` | 8000 | 256–1,000,000 | 需符合模型能力 | 否 |
 | `render.memory_threshold` | 70 | 0–100 | 過高可能無候選 | 否 |
 | `render.quantity` | 5 | 1–50 | 增加下載量 | 否 |
-| `render.font_path` | 空 | 有效 TTF/OTF/TTC | 缺字會停止發布 | 否 |
+| `render.font_path` | 內建芫荽 | 內建手寫／文青風格或已上傳 TTF／OTF／TTC | 缺字會停止發布，不會 fallback | 否 |
 | `render.profile` | safe_4c | 四色／GDEP 六色／GDEY 七色 | 必須與裝置面板相符 | 否 |
 | `render.dither` | floyd_steinberg | none／Floyd／Atkinson／Bayer 4／8 | 誤差擴散發布 CPU 較高 | 否 |
 | `render.dither_strength` | 1 | 0–2 | 過高會增加色點 | 否 |
@@ -59,6 +59,17 @@
 ## Web 與部署設定的邊界
 
 不需要修改 Python。分析、排程、模型、成本、渲染、裝置、Log 層級、Session 與備份都由 Web 控制。宿主機 Volume、Port、映像 Tag、HTTPS Secure Cookie、Docker CPU／RAM／PID 上限與 logging driver 必須在容器啟動前由 `.env`／Compose 決定；容器內程式不應取得 Docker socket 去改寫宿主機。設定頁會只讀顯示目前部署資訊。
+
+## 繁體中文字型
+
+「渲染」頁離線內建兩套 SIL OFL 1.1 字型，不需要主機預先安裝，也不需要在執行時連外下載：
+
+- 芫荽 Iansui v1.020：手寫風格，採臺灣教育部標準字形取向，預設啟用。
+- 霞鶩文楷 TC v1.522：文青風格，帶楷體筆意與書卷感。
+
+頁面顯示由伺服器實際載入 TTF 後產生的預覽圖，不是瀏覽器近似 fallback。管理員可一鍵切換；viewer 只能查看。自訂上傳支援 TTF／OTF／TTC、上限 64 MiB，會先解析檔案並檢查基本繁中字元，再以原子替換寫入 `/data/fonts`，失敗不會覆寫同名可用字型。
+
+這項安裝檢查不取代正式渲染檢查。每段短文案仍會逐字比對目前字型的 cmap；缺少任一非空白字元就回報 `IMG-002` 並停止該次發布，不會載入 Pillow 預設字型。兩套內建字型的來源、固定 SHA-256 與授權全文位於 `inktime/app/domain/rendering/font_assets/`。
 
 ## ESP32 遠端設定
 

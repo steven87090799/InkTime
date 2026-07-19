@@ -6,7 +6,7 @@
 4. 到「維護」以 `/photos` 建立掃描工作；到「工作」觀察完成狀態。
 5. 建立「兩階段智慧分析」，先用 10～100 張與小額預算驗證。
 6. 到「成本」核對 usage；再逐步增加照片數與並行數。
-7. 到「渲染」上傳繁中字型並發布；到「裝置」配對 ESP32 Token。
+7. 到「渲染」預覽並選擇內建手寫／文青繁中字型後發布；到「裝置」配對 ESP32 Token。
 8. 到「備份」建立第一份備份；到「診斷」下載遮蔽後診斷包。
 
 Intel N100 請先維持 `analysis.concurrency=1`、`worker.queue_multiplier=1`；確認 100 張真實照片的 Worker 峰值 RSS 後再考慮並行 2。部署、Log 與 ESP32 細節分別見 [Docker 部署規格](DOCKER_GUIDE_ZH_TW.md)、[Log 指南](LOGGING_GUIDE_ZH_TW.md)與[ESP32 指南](ESP32_GUIDE_ZH_TW.md)。
