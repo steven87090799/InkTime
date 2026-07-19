@@ -1,6 +1,6 @@
 # InkTime｜照片分析與電子紙回憶管理平台
 
-[English legacy README](README.en.md) · [快速開始](docs/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/DOCKER_GUIDE_ZH_TW.md) · [ESP32／電子紙指南](docs/ESP32_GUIDE_ZH_TW.md) · [資源與低功耗](docs/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/LOGGING_GUIDE_ZH_TW.md) · [本次實作與功能路線圖](docs/N100_IMPLEMENTATION_REPORT_ZH_TW.md)
+[English legacy README](README.en.md) · [快速開始](docs/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/DOCKER_GUIDE_ZH_TW.md) · [ESP32／電子紙指南](docs/ESP32_GUIDE_ZH_TW.md) · [Waveshare PhotoPainter](docs/WAVESHARE_PHOTOPAINTER_ZH_TW.md) · [資源與低功耗](docs/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/LOGGING_GUIDE_ZH_TW.md) · [本次實作與功能路線圖](docs/N100_IMPLEMENTATION_REPORT_ZH_TW.md)
 
 InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複與低價值照片，再以可控預算的視覺模型產生繁體中文描述、分類、分數與電子紙短文案。所有工作、模型、成本、裝置、渲染、備份與診斷都能由登入後的 Web 管理介面操作。
 

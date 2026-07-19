@@ -62,5 +62,19 @@ jobs:
       - run: arduino-cli config init
       - run: arduino-cli core update-index && arduino-cli core install esp32:esp32@3.3.10
       - run: arduino-cli lib install GxEPD2@1.6.9 ArduinoJson@7.4.3
-      - run: arduino-cli compile --fqbn esp32:esp32:esp32s3 esp32/ink-display-7C-photo
-      - run: arduino-cli compile --fqbn esp32:esp32:esp32s3 --build-property "compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1" esp32/ink-display-7C-photo
+      - name: Test profile, palette, rotation and cache primitives
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -Iesp32/ink-display-7C-photo tests/firmware/test_photopainter_core.cpp -o /tmp/inktime-core-default
+          /tmp/inktime-core-default
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -Iesp32/ink-display-7C-photo tests/firmware/test_photopainter_core.cpp -o /tmp/inktime-core-photopainter
+          /tmp/inktime-core-photopainter
+      - name: Existing default GDEY release
+        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-path /tmp/build-existing-release esp32/ink-display-7C-photo
+      - name: Existing default PCB with GDEP release
+        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-property 'compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1' --build-path /tmp/build-existing-gdep-release esp32/ink-display-7C-photo
+      - name: Waveshare PhotoPainter release
+        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER' --build-path /tmp/build-photopainter-release esp32/ink-display-7C-photo
+      - name: Existing default debug
+        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3:DebugLevel=debug' --build-property 'compiler.cpp.extra_flags=-DINKTIME_DEBUG_LOG=1' --build-path /tmp/build-existing-debug esp32/ink-display-7C-photo
+      - name: Waveshare PhotoPainter debug
+        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc,DebugLevel=debug' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -DINKTIME_DEBUG_LOG=1' --build-path /tmp/build-photopainter-debug esp32/ink-display-7C-photo

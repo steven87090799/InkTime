@@ -11,7 +11,7 @@ from inktime.app.db.migrations import Migration, MIGRATIONS
 
 def test_fresh_database_is_migrated(tmp_path):
     database = Database(tmp_path / "inktime.db")
-    assert migrate(database) == [1, 2, 3, 4, 5, 6, 7]
+    assert migrate(database) == [1, 2, 3, 4, 5, 6, 7, 8]
     assert database.integrity_check() == "ok"
     with database.session() as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -22,6 +22,7 @@ def test_fresh_database_is_migrated(tmp_path):
         "api_usage",
         "users",
         "devices",
+        "device_power_samples",
         "scoring_rule_versions",
     } <= tables
 
@@ -66,5 +67,5 @@ def test_concurrent_migrations_are_serialized(tmp_path):
     database = Database(tmp_path / "inktime.db")
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _index: migrate(database), range(2)))
-    assert sorted(results, key=len) == [[], [1, 2, 3, 4, 5, 6, 7]]
+    assert sorted(results, key=len) == [[], [1, 2, 3, 4, 5, 6, 7, 8]]
     assert database.integrity_check() == "ok"

@@ -6,6 +6,7 @@
 |---|---|---|---|
 | ESP32-S3＋GDEY073D46 7.3 吋 | 已支援；面板原廠標示 EOL | 預設編譯 | 七色 indexed4、192,000 bytes；亦相容四色 2bpp |
 | ESP32-S3＋GDEP073E01 7.3 吋 Spectra 6 | 新採購建議；已加入 GxEPD2 編譯選項 | `INKTIME_PANEL_GDEP073E01=1` | 六色 indexed4、192,000 bytes；亦相容四色 2bpp |
+| Waveshare ESP32-S3-PhotoPainter＋7.3 吋 E6 | 軟體 adapter 已加入；尚待實機驗證 | `DEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER` | 既有 480×800 wire payload 轉面板原生 800×480 六色 4bpp |
 | `esp32/ink-display-133C-photo` 13.3 吋 | 舊實驗韌體，不是正式安全路徑 | 不建議部署 | 舊 1200×1600 split 4bpp，與新版 Manifest 不相容 |
 
 GDEY073D46 原廠資料為 800×480、7 色、3.3 V、50-pin FPC、SPI、15–35°C、全刷約 32 秒，且頁面已標示 EOL。[Good Display GDEY073D46](https://www.good-display.com/product/442.html)
@@ -13,6 +14,9 @@ GDEY073D46 原廠資料為 800×480、7 色、3.3 V、50-pin FPC、SPI、15–35
 未來新採購建議 GDEP073E01＋DESPI-C73 或原廠 ESP32E6-E01。GDEP073E01 為 800×480、6 色 Spectra 6、3.3 V、50-pin SPI、0–50°C、全刷約 15–22 秒；韌體已可選用 GxEPD2 的 `GxEPD2_730c_GDEP073E01` 類別。[Good Display GDEP073E01](https://www.good-display.com/product/533.html) [DESPI-C73 adapter](https://www.good-display.com/product/522.html) [GxEPD2 支援清單](https://github.com/ZinggJM/GxEPD2)
 
 伺服器、Manifest schema v2 與韌體 2.2.0 已共同支援完整六／七色；色盤、五種抖動、混合面板發布、設定 ACK 與離線通知詳見[裝置可靠性與六／七色渲染指南](DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。
+
+Waveshare 整合的中央 Profile、SD／PMIC／RTC／SHTC3、安全 BUSY timeout、授權與
+20 項實機清單見 [PhotoPainter 支援與實機驗收](WAVESHARE_PHOTOPAINTER_ZH_TW.md)。
 
 ## 2. 建議硬體清單
 
@@ -63,9 +67,9 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3 \
   esp32/ink-display-7C-photo
 ```
 
-Board 選 ESP32-S3，啟用 PSRAM。正式版 `INKTIME_DEBUG_LOG=0`；短期硬體除錯才加入 `-DINKTIME_DEBUG_LOG=1`。序列 Log 不輸出 Token，但正式環境仍不應長期開啟。
+Board 選 ESP32-S3，啟用 OPI PSRAM。正式版 `INKTIME_DEBUG_LOG=0`；短期硬體除錯才加入 `-DINKTIME_DEBUG_LOG=1`。序列 Log 不輸出 Token，但正式環境仍不應長期開啟。PhotoPainter 必須使用 16 MiB Flash／OPI PSRAM 與中央 `DEVICE_PROFILE`，完整命令見上方專用指南。
 
-2026-07-18 以 Arduino CLI 1.5.1、ESP32 core 3.3.10、GxEPD2 1.6.9、ArduinoJson 7.4.3 實際編譯 2.2.0：GDEY Profile 使用 1,211,257 bytes、GDEP Profile 使用 1,211,329 bytes，兩者都是預設 1,310,720-byte app partition 的 92%；全域變數分別為 96,556／96,564 bytes（29%）。這表示目前可燒錄，但 Flash headroom 只有約 7.6%，新增 OTA、TLS certificate 或大型 Web UI 前必須重新檢查 partition、實際板上 Flash 與 OTA 雙分區，不能只看模組標示的總 Flash。編譯器顯示約 231 KB 可用動態記憶體不包含執行期碎片與 TLS buffer；下載索引改放 PSRAM，板上仍必須啟用並檢查 PSRAM。
+2026-07-19 以 Arduino CLI 1.5.1、ESP32 core 3.3.10、GxEPD2 1.6.9、ArduinoJson 7.4.3 實際編譯 2.4.0：GDEY Profile 使用 1,213,069 bytes、GDEP Profile 使用 1,213,141 bytes，兩者都是預設 1,310,720-byte app partition 的 92%；全域變數均為 96,564 bytes（29%）。這表示目前可燒錄，但 Release Flash headroom 只有約 7.5%，Debug 更達 98%；新增 OTA、TLS certificate 或大型 Web UI 前必須重新檢查 partition、實際板上 Flash 與 OTA 雙分區，不能只看模組標示的總 Flash。編譯器顯示約 231 KB 可用動態記憶體不包含執行期碎片與 TLS buffer；下載索引改放 PSRAM，板上仍必須啟用並檢查 PSRAM。PhotoPainter 的完整矩陣與實機邊界見專用指南。
 
 上傳前先用原廠 sample／GxEPD2 Example 驗證「面板型號＋adapter＋供電＋引腳」能完整刷新，再燒 InkTime 韌體。不同面板 driver class 不可混用。
 
