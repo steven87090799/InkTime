@@ -130,3 +130,49 @@ def test_formal_caption_uses_builtin_traditional_font_without_fallback(app, tmp_
     )
     with pytest.raises(FontCoverageError, match="尚未設定"):
         render_service.render_photo("caption-photo")
+
+
+def test_formal_render_shows_nearest_city_when_photo_has_gps(app, tmp_path):
+    photo_root = tmp_path / "location-photos"
+    photo_root.mkdir()
+    Image.new("RGB", (80, 120), "#5f86a6").save(photo_root / "taipei.jpg")
+    photos = app.extensions["inktime_photo_repository"]
+    library_id = photos.ensure_library("地點測試", photo_root)
+    now = "2026-07-20T00:00:00+00:00"
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "INSERT INTO photos(id,library_id,relative_path,status,gps_lat,gps_lon,created_at,updated_at) "
+            "VALUES (?,?,?,'analyzed',?,?,?,?)",
+            ("location-photo", library_id, "taipei.jpg", 25.05306, 121.52639, now, now),
+        )
+    photos.save_analysis(
+        "location-photo",
+        None,
+        "test",
+        "local",
+        "test",
+        {
+            "schema_version": 1,
+            "caption": "臺北回憶",
+            "types": ["旅行"],
+            "memory_score": 80,
+            "beauty_score": 70,
+            "technical_quality_score": 70,
+            "emotion_score": 80,
+            "side_caption": "",
+            "should_keep": True,
+            "sensitive": False,
+            "reason": "測試地點顯示",
+        },
+        "{}",
+    )
+    render_service = app.extensions["inktime_render_service"]
+    photo = photos.get_with_path("location-photo")
+
+    assert render_service.location_name(photo) == "臺北市"
+    with_location = render_service.render_photo("location-photo")
+    app.extensions["inktime_settings_repository"].update(
+        "render.show_location", False, changed_by="tester", source_ip="127.0.0.1"
+    )
+    without_location = render_service.render_photo("location-photo")
+    assert with_location.tobytes() != without_location.tobytes()

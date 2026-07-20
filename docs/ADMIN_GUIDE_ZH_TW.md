@@ -12,6 +12,8 @@
 | `general.timezone` | Asia/Taipei | IANA 時區 | 影響跨日與排程 | 否 |
 | `analysis.strategy` | smart_two_stage | 五種策略 | 高品質成本高 | 否 |
 | `analysis.stage_two_threshold` | 65 | 0–100，建議 60–75 | 越低成本越高 | 否 |
+| 本機預篩選 | 啟用 | 截圖／明顯低品質可分別停用 | 排除項目 0 Token；不刪原檔 | 否 |
+| `analysis.prefilter_sensitivity` | conservative | conservative／balanced／aggressive | 越積極越省 Token，也越可能誤排除 | 否 |
 | `analysis.scoring_rules` | 內建完整規則 | 100–12000 字元 | 影響新分析結果 | 否 |
 | 綜合排序權重 | 50／20／10／20 | 四項合計 100% | 影響新分析與自動選片順序 | 否 |
 | 最愛照片加分 | 5 | 0–30 | 只加入綜合排序分 | 否 |
@@ -34,6 +36,8 @@
 | `render.memory_threshold` | 70 | 0–100 | 過高可能無候選 | 否 |
 | `render.quantity` | 5 | 1–50 | 增加下載量 | 否 |
 | `render.font_path` | 內建芫荽 | 內建手寫／文青風格或已上傳 TTF／OTF／TTC | 缺字會停止發布，不會 fallback | 否 |
+| `render.show_location` | true | true／false | 只顯示最近城市，不顯示座標 | 否 |
+| `render.location_max_distance_km` | 80 | 1–500 公里 | 過大可能顯示不準確的鄰近城市 | 否 |
 | `render.profile` | safe_4c | 四色／GDEP 六色／GDEY 七色 | 必須與裝置面板相符 | 否 |
 | `render.dither` | floyd_steinberg | none／Floyd／Atkinson／Bayer 4／8 | 誤差擴散發布 CPU 較高 | 否 |
 | `render.dither_strength` | 1 | 0–2 | 過高會增加色點 | 否 |
@@ -70,6 +74,14 @@
 頁面顯示由伺服器實際載入 TTF 後產生的預覽圖，不是瀏覽器近似 fallback。管理員可一鍵切換；viewer 只能查看。自訂上傳支援 TTF／OTF／TTC、上限 64 MiB，會先解析檔案並檢查基本繁中字元，再以原子替換寫入 `/data/fonts`，失敗不會覆寫同名可用字型。
 
 這項安裝檢查不取代正式渲染檢查。每段短文案仍會逐字比對目前字型的 cmap；缺少任一非空白字元就回報 `IMG-002` 並停止該次發布，不會載入 Pillow 預設字型。兩套內建字型的來源、固定 SHA-256 與授權全文位於 `inktime/app/domain/rendering/font_assets/`。
+
+照片含 GPS 時，正式渲染預設會在短文案下方加入「地點｜最近城市」。城市由 `data/world_cities_zh.csv` 離線比對，精確經緯度不會印在畫面；超過 `render.location_max_distance_km` 找不到可信城市時就不顯示。可用 `render.show_location` 完全停用。
+
+## 本機預篩選與 ExifTool 邊界
+
+照片掃描只建立 JPG、PNG、WebP、HEIC／HEIF、TIFF、BMP 等靜態照片；MOV、MP4、M4V、MKV、WebM 與 GIF 動畫會計入 `excluded_videos` 後停止，不會建立模型工作。雲端分析前再依本機檔名、尺寸、格式、相機 EXIF、模糊、對比、曝光與解析度判斷：截圖達門檻即可排除；一般照片必須同時出現至少兩項明顯缺陷才排除。人工標記為最愛的照片永遠略過此預篩選。
+
+ExifTool 能提供 MIME、相機、軟體、拍攝時間與 GPS 等中繼資料，但不能可靠判斷構圖、人物表情或「好不好看」。目前正式流程直接用 Pillow 讀取 EXIF／GPS，不要求容器安裝 ExifTool；畫質則以本機縮圖特徵判斷。這可避免每張照片額外啟動外部程序，也不會把照片或座標傳到第三方服務。
 
 ## ESP32 遠端設定
 

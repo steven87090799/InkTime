@@ -50,6 +50,7 @@ def rendering_page():
         current_dither=str(settings.get("render.dither", "floyd_steinberg")),
         dither_strength=float(settings.get("render.dither_strength", 1.0)),
         color_distance=str(settings.get("render.color_distance", "oklab")),
+        show_location=bool(settings.get("render.show_location", True)),
     )
 
 

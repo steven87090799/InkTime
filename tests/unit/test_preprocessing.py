@@ -26,3 +26,12 @@ def test_local_features_and_content_addressed_thumbnails(tmp_path):
         assert thumbnail.size == (512, 341)
     assert cache.size_bytes() > 0
     assert cache.clear() == 1
+
+
+def test_screenshot_filename_is_detected_without_exiftool(tmp_path):
+    source = tmp_path / "螢幕快照 2026-07-20.png"
+    Image.new("RGB", (900, 600), "white").save(source)
+
+    features = PhotoPreprocessor().analyze(source)
+
+    assert features.screenshot_likelihood >= 0.8

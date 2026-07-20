@@ -38,6 +38,15 @@ def photo_detail(photo_id: str):
     photo = _repository().get_with_path(photo_id)
     if photo is None:
         abort(404)
+    location_name = current_app.extensions["inktime_location_resolver"].resolve(
+        photo["gps_lat"],
+        photo["gps_lon"],
+        max_distance_km=float(
+            current_app.extensions["inktime_settings_repository"].get(
+                "render.location_max_distance_km", 80
+            )
+        ),
+    )
     with current_app.extensions["inktime_database"].session() as connection:
         analyses = connection.execute(
             """
@@ -65,6 +74,7 @@ def photo_detail(photo_id: str):
         errors=errors,
         events=events,
         allowed_types=sorted(ALLOWED_TYPES),
+        location_name=location_name,
     )
 
 

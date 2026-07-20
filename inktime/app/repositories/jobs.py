@@ -22,7 +22,7 @@ class JobRepository:
         self.database = database
 
     def iter_photo_ids(
-        self, *, statuses: tuple[str, ...] = ("discovered",), limit: int | None = None
+        self, *, statuses: tuple[str, ...] = ("preprocessed",), limit: int | None = None
     ) -> Iterator[str]:
         placeholders = ",".join("?" for _ in statuses)
         last_id = ""
@@ -271,13 +271,14 @@ class JobRepository:
                         (now, item_id),
                     )
                 else:
+                    stage = str(result.get("stage") or "completed")[:64]
                     cursor = connection.execute(
                         """
                         UPDATE job_items SET status='completed', completed_at=?, result_json=?,
-                                             lease_until=NULL, estimated_cost=?
+                                             lease_until=NULL, estimated_cost=?, stage=?
                         WHERE id=? AND status='running'
                         """,
-                        (now, json.dumps(result, ensure_ascii=False), actual_cost, item_id),
+                        (now, json.dumps(result, ensure_ascii=False), actual_cost, stage, item_id),
                     )
                     if cursor.rowcount:
                         connection.execute(

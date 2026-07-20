@@ -37,7 +37,7 @@ from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.jobs import JobService
 from inktime.app.services.backups import BackupService
 from inktime.app.services.diagnostics import DiagnosticsService
-from inktime.app.domain.photos import ThumbnailCache
+from inktime.app.domain.photos import LocationResolver, ThumbnailCache
 from inktime.app.domain.rendering import AtomicReleasePublisher, FontManager
 from inktime.app.services.rendering import RenderService
 from inktime.app.services.analysis import PhotoAnalysisService
@@ -135,6 +135,7 @@ def initialize_platform(
         app.extensions["inktime_usage_repository"],
         app.extensions["inktime_thumbnail_cache"],
         budget_service,
+        settings_repository,
     )
     app.extensions["inktime_scoring_lab_service"] = ScoringLabService(
         app.extensions["inktime_provider_service"],
@@ -151,8 +152,10 @@ def initialize_platform(
         settings_repository=settings_repository,
     )
     font_manager = FontManager(data_dir / "fonts")
+    location_resolver = LocationResolver(Path(__file__).resolve().parents[2] / "data" / "world_cities_zh.csv")
     release_publisher = AtomicReleasePublisher(release_dir)
     app.extensions["inktime_font_manager"] = font_manager
+    app.extensions["inktime_location_resolver"] = location_resolver
     app.extensions["inktime_release_publisher"] = release_publisher
     app.extensions["inktime_render_service"] = RenderService(
         database,
@@ -160,6 +163,7 @@ def initialize_platform(
         settings_repository,
         font_manager,
         release_publisher,
+        location_resolver,
     )
 
     web_root = Path(__file__).resolve().parent / "web"

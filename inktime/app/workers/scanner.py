@@ -10,16 +10,39 @@ from inktime.app.repositories.photos import PhotoRepository
 
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".tif", ".tiff", ".bmp"}
+VIDEO_EXTENSIONS = {
+    ".3gp",
+    ".avi",
+    ".gif",
+    ".m2ts",
+    ".m4v",
+    ".mkv",
+    ".mov",
+    ".mp4",
+    ".mts",
+    ".webm",
+    ".wmv",
+}
 
 
-def iter_images(root: Path) -> Iterator[Path]:
-    """以 generator 掃描，不建立完整 100,000 筆路徑清單。"""
+def iter_media(root: Path) -> Iterator[tuple[Path, str]]:
+    """只回傳可能進入照片流程的圖片，以及需明確計數的影片／動畫。"""
     for directory, dirnames, filenames in os.walk(root):
         dirnames[:] = [name for name in dirnames if not name.startswith(".")]
         for filename in filenames:
             path = Path(directory) / filename
-            if path.suffix.lower() in SUPPORTED_EXTENSIONS:
-                yield path
+            suffix = path.suffix.lower()
+            if suffix in SUPPORTED_EXTENSIONS:
+                yield path, "image"
+            elif suffix in VIDEO_EXTENSIONS:
+                yield path, "video"
+
+
+def iter_images(root: Path) -> Iterator[Path]:
+    """以 generator 掃描，不建立完整 100,000 筆路徑清單。"""
+    for path, media_type in iter_media(root):
+        if media_type == "image":
+            yield path
 
 
 class PhotoScanner:
@@ -45,10 +68,13 @@ class PhotoScanner:
         if not root.is_dir():
             raise FileNotFoundError("SCAN-001 照片資料夾不存在或無法讀取")
         library_id = self.repository.ensure_library(name, root)
-        checked = processed = skipped = new = changed = inherited = failed = 0
+        checked = processed = skipped = new = changed = inherited = failed = excluded_videos = 0
         last_progress_at = time.monotonic()
         with self.repository.signature_lookup(library_id) as signatures:
-            for path in iter_images(root):
+            for path, media_type in iter_media(root):
+                if media_type == "video":
+                    excluded_videos += 1
+                    continue
                 if limit is not None and processed + failed >= limit:
                     break
                 checked += 1
@@ -90,6 +116,7 @@ class PhotoScanner:
                             "changed": changed,
                             "inherited": inherited,
                             "failed": failed,
+                            "excluded_videos": excluded_videos,
                         }
                     )
                     last_progress_at = now
@@ -102,4 +129,5 @@ class PhotoScanner:
             "changed": changed,
             "inherited": inherited,
             "failed": failed,
+            "excluded_videos": excluded_videos,
         }

@@ -7,6 +7,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from inktime.app.core.paths import safe_join
 from inktime.app.db import Database
+from inktime.app.domain.photos import LocationResolver
 from inktime.app.domain.rendering import AtomicReleasePublisher, DISPLAY_PROFILES, FontManager
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.settings import SettingsRepository
@@ -20,12 +21,33 @@ class RenderService:
         settings: SettingsRepository,
         fonts: FontManager,
         publisher: AtomicReleasePublisher,
+        locations: LocationResolver | None = None,
     ) -> None:
         self.database = database
         self.photos = photos
         self.settings = settings
         self.fonts = fonts
         self.publisher = publisher
+        self.locations = locations
+
+    def location_name(self, photo) -> str:
+        if self.locations is None or not bool(self.settings.get("render.show_location", True)):
+            return ""
+        return self.locations.resolve(
+            photo["gps_lat"],
+            photo["gps_lon"],
+            max_distance_km=float(self.settings.get("render.location_max_distance_km", 80)),
+        )
+
+    @staticmethod
+    def _fit_line(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, width: int) -> str:
+        if draw.textlength(text, font=font) <= width:
+            return text
+        suffix = "..."
+        fitted = text
+        while fitted and draw.textlength(fitted + suffix, font=font) > width:
+            fitted = fitted[:-1]
+        return fitted.rstrip() + suffix
 
     def render_photo(self, photo_id: str, width: int = 480, height: int = 800) -> Image.Image:
         photo = self.photos.get_with_path(photo_id)
@@ -37,20 +59,41 @@ class RenderService:
                 (photo_id,),
             ).fetchone()
         caption = str(analysis["side_caption"] if analysis else "").strip()
+        location = self.location_name(photo)
+        location_line = f"地點｜{location}" if location else ""
+        text_height = 126 if caption and location_line else 92 if caption or location_line else 0
+        font_path = None
+        caption_font = location_font = None
+        if text_height:
+            font_setting = str(self.settings.get("render.font_path", ""))
+            font_path = self.fonts.resolve(font_setting)
+            self.fonts.validate(font_path, "\n".join(value for value in (caption, location_line) if value))
+            caption_font = ImageFont.truetype(str(font_path), 24)
+            location_font = ImageFont.truetype(str(font_path), 18)
         path = safe_join(Path(photo["root_path"]), photo["relative_path"])
         with Image.open(path) as opened:
             source = ImageOps.exif_transpose(opened).convert("RGB")
             canvas = Image.new("RGB", (width, height), "white")
-            text_height = 100 if caption else 0
             fitted = ImageOps.fit(source, (width, height - text_height), method=Image.Resampling.LANCZOS)
             canvas.paste(fitted, (0, 0))
-        if caption:
-            font_setting = str(self.settings.get("render.font_path", ""))
-            font_path = self.fonts.resolve(font_setting)
-            self.fonts.validate(font_path, caption)
-            font = ImageFont.truetype(str(font_path), 24)
+        if text_height and caption_font is not None and location_font is not None:
             draw = ImageDraw.Draw(canvas)
-            draw.text((20, height - 68), caption, font=font, fill="black")
+            draw.line((20, height - text_height, width - 20, height - text_height), fill="#d4d0c8", width=1)
+            if caption:
+                draw.text(
+                    (20, height - text_height + 18),
+                    self._fit_line(draw, caption, caption_font, width - 40),
+                    font=caption_font,
+                    fill="black",
+                )
+            if location_line:
+                location_y = height - 38 if caption else height - 58
+                draw.text(
+                    (20, location_y),
+                    self._fit_line(draw, location_line, location_font, width - 40),
+                    font=location_font,
+                    fill="#454545",
+                )
         return canvas
 
     def publish(

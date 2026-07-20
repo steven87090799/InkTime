@@ -31,7 +31,7 @@
   <div class="panel-head font-panel-head">
     <div>
       <h2>繁體中文字型</h2>
-      <p>內建手寫與文青兩種臺灣繁中風格；目前使用：<strong>{{ current_font.display_name if current_font else '未選取清單內字型' }}</strong></p>
+      <p>內建手寫與文青兩種臺灣繁中風格；目前使用：<strong>{{ current_font.display_name if current_font else '未選取清單內字型' }}</strong>；GPS 地點：<strong>{{ '顯示最近城市' if show_location else '已隱藏' }}</strong></p>
     </div>
     <span class="status {{ 'ok' if current_font and current_font.compatible else '' }}">{{ '字元檢查通過' if current_font and current_font.compatible else '請檢查目前設定' }}</span>
   </div>
@@ -61,7 +61,7 @@
       <p class="warning">尚未安裝字型。含短文案的正式渲染會明確失敗，不會靜默退回不支援繁體中文的預設字型。</p>
     {% endfor %}
   </div>
-  <p class="font-contract">正式渲染仍會依每段短文案逐字檢查；任一字元缺漏就停止該次發布，不會靜默改用不支援繁體中文的預設字型。</p>
+  <p class="font-contract">正式渲染仍會依每段短文案與地點逐字檢查；任一字元缺漏就停止該次發布，不會靜默改用不支援繁體中文的預設字型。地點只使用照片 GPS 對照離線城市索引，不顯示精確座標；可在<a href="/settings">系統設定</a>停用。</p>
   {% if g.user.role=='administrator' %}
     <details class="font-upload">
       <summary>上傳其他繁體中文字型</summary>
