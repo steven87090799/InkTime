@@ -180,6 +180,8 @@ def test_device_status_is_recorded_without_exposing_token(client, app):
     assert sample["battery_percent_estimated"] == 1
     assert sample["refresh_duration_ms"] == 25000
     assert sample["wake_duration_ms"] == 61000
+    assert sample["temperature_c"] == 25.5
+    assert sample["humidity_percent"] == 61.0
 
 
 def test_device_status_rejects_malformed_numeric_telemetry(client, app):

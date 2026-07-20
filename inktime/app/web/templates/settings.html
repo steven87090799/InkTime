@@ -33,7 +33,7 @@
         {% if row.value_type == 'boolean' %}
         <select name="{{ row.key }}"><option value="true" {% if row.value %}selected{% endif %}>啟用</option><option value="false" {% if not row.value %}selected{% endif %}>停用</option></select>
         {% elif row.definition.choices %}
-        <select name="{{ row.key }}">{% for choice in row.definition.choices %}<option value="{{ choice }}" {% if choice|string == row.value|string %}selected{% endif %}>{{ choice }}</option>{% endfor %}</select>
+        <select name="{{ row.key }}">{% for choice in row.definition.choices %}<option value="{{ choice }}" {% if choice|string == row.value|string %}selected{% endif %}>{{ row.definition.choice_labels.get(choice, choice) if row.definition.choice_labels else choice }}</option>{% endfor %}</select>
         {% elif row.definition.multiline %}
         <textarea name="{{ row.key }}" rows="{{ row.definition.rows|default(12) }}" maxlength="{{ row.definition.max_length|default(12000) }}">{{ row.value }}</textarea>
         {% else %}

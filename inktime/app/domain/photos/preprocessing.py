@@ -10,6 +10,17 @@ from typing import Any
 
 from PIL import ExifTags, Image, ImageOps, ImageStat
 
+from inktime.app.domain.rendering.composition import (
+    analyze_crop_focus,
+)
+
+try:
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+except ImportError:  # pragma: no cover - requirements 正式環境會安裝，保留最小匯入能力。
+    pass
+
 
 _DCT_COS = tuple(
     tuple(math.cos((2 * position + 1) * frequency * math.pi / 64) for position in range(32))
@@ -35,6 +46,20 @@ class LocalPhotoFeatures:
     overexposed_ratio: float
     underexposed_ratio: float
     screenshot_likelihood: float
+    crop_focus_x: float
+    crop_focus_y: float
+    crop_subject_left: float
+    crop_subject_top: float
+    crop_subject_right: float
+    crop_subject_bottom: float
+    crop_method: str
+    crop_face_count: int
+    e6_score: float | None
+    e6_contrast_score: float | None
+    e6_subject_score: float | None
+    e6_skin_score: float | None
+    e6_text_score: float | None
+    e6_skin_pixels: int
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -128,6 +153,12 @@ class PhotoPreprocessor:
             exif_named = {
                 ExifTags.TAGS.get(key, str(key)): value for key, value in exif.items() if key != 34853
             }
+            try:
+                exif_detail = exif.get_ifd(34665)
+            except (AttributeError, KeyError, TypeError):
+                exif_detail = {}
+            for key, value in exif_detail.items():
+                exif_named.setdefault(ExifTags.TAGS.get(key, str(key)), value)
             gps_raw = exif.get_ifd(34853) if exif and 34853 in exif else {}
             gps = {ExifTags.GPSTAGS.get(key, str(key)): value for key, value in gps_raw.items()}
             lat = _gps_coordinate(gps.get("GPSLatitude"), gps.get("GPSLatitudeRef"))
@@ -151,19 +182,52 @@ class PhotoPreprocessor:
             opened.thumbnail((512, 512), Image.Resampling.LANCZOS)
             image = ImageOps.exif_transpose(opened).convert("RGB")
             grayscale = image.convert("L")
+            crop = analyze_crop_focus(image)
             sample = grayscale
             stat = ImageStat.Stat(sample)
             histogram = sample.histogram()
             total_pixels = max(1, sample.width * sample.height)
-            common_ratios = {(1170, 2532), (1080, 1920), (1242, 2688), (1440, 2560), (1080, 2340)}
-            exact_screen_ratio = (
-                any(abs(width / height - w / h) < 0.006 for w, h in common_ratios) if height else False
+            common_screen_sizes = {
+                (750, 1334),
+                (828, 1792),
+                (1080, 1920),
+                (1080, 2340),
+                (1125, 2436),
+                (1170, 2532),
+                (1179, 2556),
+                (1242, 2688),
+                (1284, 2778),
+                (1290, 2796),
+                (1440, 2560),
+                (1920, 1080),
+                (2048, 2732),
+            }
+            normalized_size = (min(width, height), max(width, height))
+            normalized_screen_sizes = {
+                (min(screen_width, screen_height), max(screen_width, screen_height))
+                for screen_width, screen_height in common_screen_sizes
+            }
+            exact_screen_size = normalized_size in normalized_screen_sizes
+            ratio = min(width, height) / max(width, height) if width and height else 0
+            screen_ratios = {
+                min(screen_width, screen_height) / max(screen_width, screen_height)
+                for screen_width, screen_height in common_screen_sizes
+            }
+            screen_ratio = any(abs(ratio - candidate) < 0.004 for candidate in screen_ratios)
+            filename = path.name.casefold()
+            software = str(exif_named.get("Software", "")).casefold()
+            filename_match = any(
+                marker in filename for marker in ("screenshot", "screen shot", "截圖", "螢幕快照")
             )
+            software_match = any(marker in software for marker in ("screenshot", "screen capture"))
             screenshot_likelihood = min(
                 1.0,
-                (0.65 if exact_screen_ratio else 0)
-                + (0.2 if not exif_named.get("Make") else 0)
-                + (0.15 if path.name.lower().startswith(("screenshot", "截圖")) else 0),
+                (0.85 if filename_match else 0)
+                + (0.75 if software_match else 0)
+                + (0.65 if exact_screen_size else 0)
+                + (0.3 if screen_ratio and not exact_screen_size else 0)
+                + (0.25 if not exif_named.get("Make") else 0)
+                + (0.15 if original_format.upper() == "PNG" else 0),
             )
             serializable_exif = {key: str(value) for key, value in exif_named.items()}
             if lat is not None and lon is not None:
@@ -185,4 +249,18 @@ class PhotoPreprocessor:
                 overexposed_ratio=sum(histogram[245:]) / total_pixels,
                 underexposed_ratio=sum(histogram[:11]) / total_pixels,
                 screenshot_likelihood=screenshot_likelihood,
+                crop_focus_x=crop.focus_x,
+                crop_focus_y=crop.focus_y,
+                crop_subject_left=crop.subject_left,
+                crop_subject_top=crop.subject_top,
+                crop_subject_right=crop.subject_right,
+                crop_subject_bottom=crop.subject_bottom,
+                crop_method=crop.method,
+                crop_face_count=crop.face_count,
+                e6_score=None,
+                e6_contrast_score=None,
+                e6_subject_score=None,
+                e6_skin_score=None,
+                e6_text_score=None,
+                e6_skin_pixels=0,
             )

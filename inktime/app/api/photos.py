@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import math
 from pathlib import Path
+from urllib.parse import urlencode
 
 from flask import Blueprint, abort, current_app, g, render_template, request, send_file
 
@@ -10,6 +13,7 @@ from inktime.app.web.access import administrator_required, login_required
 
 
 bp = Blueprint("photos", __name__)
+PHOTO_PAGE_SIZE = 200
 
 
 def _repository():
@@ -20,16 +24,61 @@ def _repository():
 @login_required
 def photos_page():
     page = max(1, request.args.get("page", 1, type=int))
+    offset = (page - 1) * PHOTO_PAGE_SIZE
     rows, total = _repository().search(
         query=request.args.get("q", "").strip(),
         status=request.args.get("status", "").strip(),
         photo_type=request.args.get("type", "").strip(),
         minimum_score=request.args.get("score", type=float),
         duplicate_only=request.args.get("duplicates") == "1",
-        limit=60,
-        offset=(page - 1) * 60,
+        limit=PHOTO_PAGE_SIZE,
+        offset=offset,
     )
-    return render_template("photos.html", photos=rows, total=total, page=page)
+    e6_weight = float(
+        current_app.extensions["inktime_settings_repository"].get("render.e6_weight", 20)
+    ) / 100.0
+    photos = []
+    for stored_row in rows:
+        photo = dict(stored_row)
+        ranking_score = photo.get("ranking_score")
+        e6_score = photo.get("e6_score")
+        if ranking_score is not None and e6_score is not None:
+            photo["total_score"] = round(
+                float(ranking_score) * (1.0 - e6_weight) + float(e6_score) * e6_weight,
+                1,
+            )
+            photo["total_score_source"] = "模型＋E6"
+        elif ranking_score is not None:
+            photo["total_score"] = round(float(ranking_score), 1)
+            photo["total_score_source"] = "模型"
+        elif e6_score is not None:
+            photo["total_score"] = round(float(e6_score), 1)
+            photo["total_score_source"] = "E6 暫估"
+        else:
+            photo["total_score"] = None
+            photo["total_score_source"] = "尚未評分"
+        photos.append(photo)
+
+    total_pages = max(1, math.ceil(total / PHOTO_PAGE_SIZE))
+    filter_args = request.args.to_dict(flat=True)
+    filter_args.pop("page", None)
+
+    def page_url(target_page: int) -> str:
+        return f"?{urlencode({**filter_args, 'page': target_page})}"
+
+    return render_template(
+        "photos.html",
+        photos=photos,
+        total=total,
+        page=page,
+        page_size=PHOTO_PAGE_SIZE,
+        total_pages=total_pages,
+        range_start=offset + 1 if photos else 0,
+        range_end=offset + len(photos),
+        previous_url=page_url(page - 1) if page > 1 else None,
+        next_url=page_url(page + 1) if page < total_pages else None,
+        filter_args=filter_args,
+    )
 
 
 @bp.get("/photos/<photo_id>")
@@ -38,8 +87,22 @@ def photo_detail(photo_id: str):
     photo = _repository().get_with_path(photo_id)
     if photo is None:
         abort(404)
+    try:
+        photo = current_app.extensions["inktime_render_service"].ensure_photo_features(photo_id)
+    except (OSError, ValueError):
+        # 原檔暫時離線時仍允許查看既有中繼資料與模型結果。
+        pass
+    location_name = current_app.extensions["inktime_location_resolver"].resolve(
+        photo["gps_lat"],
+        photo["gps_lon"],
+        max_distance_km=float(
+            current_app.extensions["inktime_settings_repository"].get(
+                "render.location_max_distance_km", 80
+            )
+        ),
+    )
     with current_app.extensions["inktime_database"].session() as connection:
-        analyses = connection.execute(
+        analysis_rows = connection.execute(
             """
             SELECT a.*,v.name AS scoring_version_name
             FROM photo_analysis a
@@ -57,6 +120,18 @@ def photo_detail(photo_id: str):
         events = connection.execute(
             "SELECT * FROM photo_events WHERE photo_id=? ORDER BY created_at DESC LIMIT 100", (photo_id,)
         ).fetchall()
+    analyses = []
+    for row in analysis_rows:
+        analysis = dict(row)
+        try:
+            analysis["types"] = json.loads(str(analysis.get("types_json") or "[]"))
+        except json.JSONDecodeError:
+            analysis["types"] = []
+        analysis["origin_label"] = (
+            "本機判斷" if analysis.get("provider") == "local" else "模型判斷"
+        )
+        analyses.append(analysis)
+    prefilter = current_app.extensions["inktime_analysis_service"].prefilter_snapshot(photo)
     return render_template(
         "photo_detail.html",
         photo=photo,
@@ -65,6 +140,8 @@ def photo_detail(photo_id: str):
         errors=errors,
         events=events,
         allowed_types=sorted(ALLOWED_TYPES),
+        location_name=location_name,
+        prefilter=prefilter,
     )
 
 
@@ -91,6 +168,29 @@ def update_photo(photo_id: str):
     except KeyError:
         abort(404)
     return {"status": "ok"}
+
+
+@bp.patch("/api/v1/photos/<photo_id>/crop")
+@administrator_required
+def update_photo_crop(photo_id: str):
+    payload = request.get_json(silent=True) or {}
+    mode = str(payload.get("mode", "manual"))
+    if mode not in {"auto", "manual"}:
+        abort(400, description="RENDER-005 裁切模式不合法")
+    try:
+        if mode == "auto":
+            _repository().update_crop(photo_id, manual_x=None, manual_y=None)
+        else:
+            _repository().update_crop(
+                photo_id,
+                manual_x=float(payload.get("x")),
+                manual_y=float(payload.get("y")),
+            )
+    except (TypeError, ValueError) as exc:
+        abort(400, description=f"RENDER-005 {exc}")
+    except KeyError:
+        abort(404)
+    return {"status": "ok", "mode": mode}
 
 
 @bp.get("/api/v1/photos/<photo_id>/image")

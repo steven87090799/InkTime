@@ -10,7 +10,7 @@
 <label>照片數量（最多 100,000）<input name="limit" type="number" min="1" max="100000" value="100"></label>
 <label>分析策略<select name="strategy"><option value="smart_two_stage">兩階段智慧分析</option><option value="local">僅本地分析</option><option value="low_cost">單階段低成本</option><option value="high_quality">單階段高品質</option></select></label>
 <label>單一工作預算上限（美元）<input name="budget" type="number" min="0" step="0.01" value="10"></label>
-<div id="estimate" class="notice"></div><button class="primary">確認建立</button><button type="button" onclick="this.closest('dialog').close()">取消</button></div></form></dialog>
+<div id="estimate" class="notice"></div><p class="notice">模型策略會先套用「本機預篩選」設定；被判定為截圖或同時具有多項明顯品質缺陷的照片會留下 0 Token 排除紀錄。影片與動畫在照片掃描階段就不會加入分析工作，人工標記的最愛照片則略過預篩選。</p><button class="primary">確認建立</button><button type="button" onclick="this.closest('dialog').close()">取消</button></div></form></dialog>
 {% endblock %}
 {% block scripts %}{% if g.user.role == 'administrator' %}<script>
 const wizard=document.getElementById('job-wizard'),form=document.getElementById('job-form'),estimate=document.getElementById('estimate');

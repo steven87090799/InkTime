@@ -80,6 +80,18 @@ def test_worker_never_submits_all_items_at_once(app):
     assert job["completed_items"] == 250
 
 
+def test_completed_item_records_actual_processing_stage(app):
+    service, repository, job_id = create_job(app, 1)
+    service.start(job_id)
+    BoundedJobWorker(repository, lambda item: {"stage": "prefilter", "saved_tokens": True}).run_job(
+        job_id
+    )
+
+    item = repository.list_items(job_id)[0]
+    assert item["status"] == "completed"
+    assert item["stage"] == "prefilter"
+
+
 def test_stale_running_items_are_recovered_after_restart(app):
     service, repository, job_id = create_job(app, 1)
     service.start(job_id)

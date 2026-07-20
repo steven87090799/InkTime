@@ -37,7 +37,7 @@ from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.jobs import JobService
 from inktime.app.services.backups import BackupService
 from inktime.app.services.diagnostics import DiagnosticsService
-from inktime.app.domain.photos import ThumbnailCache
+from inktime.app.domain.photos import LocationResolver, ThumbnailCache
 from inktime.app.domain.rendering import AtomicReleasePublisher, FontManager
 from inktime.app.services.rendering import RenderService
 from inktime.app.services.analysis import PhotoAnalysisService
@@ -46,6 +46,7 @@ from inktime.app.services.providers import ProviderService
 from inktime.app.services.scoring_lab import ScoringLabService
 from inktime.app.services.notifications import DeviceNotificationService
 from inktime.app.services.device_energy import DeviceEnergyService
+from inktime.app.services.weather import WeatherService
 from inktime.app.core.logging import configure_logging, log_event
 from inktime.app.web.access import csrf_token, verify_csrf
 
@@ -135,6 +136,7 @@ def initialize_platform(
         app.extensions["inktime_usage_repository"],
         app.extensions["inktime_thumbnail_cache"],
         budget_service,
+        settings_repository,
     )
     app.extensions["inktime_scoring_lab_service"] = ScoringLabService(
         app.extensions["inktime_provider_service"],
@@ -151,15 +153,21 @@ def initialize_platform(
         settings_repository=settings_repository,
     )
     font_manager = FontManager(data_dir / "fonts")
+    location_resolver = LocationResolver(Path(__file__).resolve().parents[2] / "data" / "world_cities_zh.csv")
     release_publisher = AtomicReleasePublisher(release_dir)
     app.extensions["inktime_font_manager"] = font_manager
+    app.extensions["inktime_location_resolver"] = location_resolver
     app.extensions["inktime_release_publisher"] = release_publisher
+    weather_service = WeatherService(settings_repository)
+    app.extensions["inktime_weather_service"] = weather_service
     app.extensions["inktime_render_service"] = RenderService(
         database,
         app.extensions["inktime_photo_repository"],
         settings_repository,
         font_manager,
         release_publisher,
+        location_resolver,
+        weather_service,
     )
 
     web_root = Path(__file__).resolve().parent / "web"

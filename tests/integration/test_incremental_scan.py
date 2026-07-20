@@ -48,6 +48,7 @@ def test_unchanged_photo_skips_features_and_changed_content_invalidates_analysis
         "changed": 0,
         "inherited": 0,
         "failed": 0,
+        "excluded_videos": 0,
     }
     with app.extensions["inktime_database"].session() as connection:
         photo = connection.execute("SELECT id,sha256 FROM photos").fetchone()
@@ -131,3 +132,37 @@ def test_new_path_is_processed_even_when_size_and_modified_time_match(app, tmp_p
         photo = connection.execute("SELECT id,relative_path FROM photos").fetchone()
     assert photo["id"] == photo_id
     assert photo["relative_path"] == "renamed.png"
+
+
+def test_scan_counts_videos_without_creating_photo_records(app, tmp_path):
+    root = tmp_path / "mixed-media"
+    root.mkdir()
+    Image.new("RGB", (64, 64), "teal").save(root / "memory.jpg")
+    (root / "live-photo.mov").write_bytes(b"not-decoded-because-video-is-excluded")
+    scanner, _ = make_scanner(app, tmp_path)
+
+    result = scanner.scan("混合媒體", root, build_thumbnails=False)
+
+    assert result["checked"] == 1
+    assert result["processed"] == 1
+    assert result["excluded_videos"] == 1
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 1
+
+
+def test_new_analysis_job_selects_preprocessed_scan_results(app, tmp_path):
+    root = tmp_path / "ready-for-analysis"
+    root.mkdir()
+    Image.new("RGB", (64, 64), "purple").save(root / "new.jpg")
+    scanner, _ = make_scanner(app, tmp_path)
+    scanner.scan("待分析", root, build_thumbnails=False)
+
+    job_id = app.extensions["inktime_job_service"].create_analysis_job(
+        name="新照片分析",
+        strategy="local",
+        settings={},
+        created_by="tester",
+        budget_limit=None,
+    )
+
+    assert app.extensions["inktime_job_repository"].get(job_id)["total_items"] == 1

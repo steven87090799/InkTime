@@ -157,3 +157,60 @@ def test_identical_photo_inherits_without_model_call(app, tmp_path):
     )
     assert result["stage"] == "inherited"
     assert second.analyze_calls == 0
+
+
+def test_cloud_strategy_prefilters_screenshot_without_token_usage(app, tmp_path):
+    root = tmp_path / "screenshots"
+    root.mkdir()
+    Image.new("RGB", (900, 600), "white").save(root / "螢幕快照.png")
+    photos = app.extensions["inktime_photo_repository"]
+    PhotoScanner(
+        photos,
+        PhotoPreprocessor(),
+        app.extensions["inktime_thumbnail_cache"],
+    ).scan("截圖", root, build_thumbnails=False)
+    with app.extensions["inktime_database"].session() as connection:
+        photo_id = str(connection.execute("SELECT id FROM photos").fetchone()[0])
+    provider = MockProvider([])
+    photo = photos.get_with_path(photo_id)
+    snapshot = app.extensions["inktime_analysis_service"].prefilter_snapshot(photo)
+
+    result = app.extensions["inktime_analysis_service"].analyze_photo(
+        photo_id=photo_id,
+        job_id=None,
+        provider=provider,
+        strategy="smart_two_stage",
+    )
+
+    assert result["stage"] == "prefilter"
+    assert result["analysis"]["should_keep"] is False
+    assert snapshot["decision"] == "excluded_screenshot"
+    assert snapshot["checks"][0]["label"] == "截圖機率"
+    assert snapshot["checks"][0]["hit"] is True
+    assert provider.analyze_calls == 0
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 0
+
+
+def test_prefilter_snapshot_requires_two_quality_defects(app, tmp_path):
+    root = tmp_path / "quality"
+    root.mkdir()
+    Image.new("RGB", (900, 600), "gray").save(root / "plain.jpg")
+    photos = app.extensions["inktime_photo_repository"]
+    PhotoScanner(
+        photos,
+        PhotoPreprocessor(),
+        app.extensions["inktime_thumbnail_cache"],
+    ).scan("品質", root, build_thumbnails=False)
+    with app.extensions["inktime_database"].session() as connection:
+        photo_id = str(connection.execute("SELECT id FROM photos").fetchone()[0])
+
+    snapshot = app.extensions["inktime_analysis_service"].prefilter_snapshot(
+        photos.get_with_path(photo_id)
+    )
+
+    assert snapshot["decision"] == "excluded_low_quality"
+    assert snapshot["required_defects"] == 2
+    assert snapshot["defect_count"] >= 2
+    assert "嚴重模糊或失焦" in snapshot["matched_defects"]
+    assert "對比過低" in snapshot["matched_defects"]

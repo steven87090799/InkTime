@@ -26,6 +26,11 @@
         <div><p>LIVE FRAME</p><h2 id="display-title">{{ profile.label }}</h2></div>
         <span id="frame-position">尚未收到畫面</span>
       </div>
+      <div class="frame-controls" aria-label="照片切換控制">
+        <button type="button" id="previous-frame" disabled aria-label="顯示上一張照片">← 上一張</button>
+        <span id="frame-control-status" role="status" aria-live="polite">等待 Release</span>
+        <button type="button" id="next-frame" disabled aria-label="顯示下一張照片">下一張 →</button>
+      </div>
       <div class="display-device" id="display-device">
         <div class="device-sensor" aria-hidden="true"></div>
         <div class="display-surface">
@@ -49,6 +54,7 @@
           <dt>檔案</dt><dd id="meta-file">—</dd>
           <dt>Profile</dt><dd id="meta-profile">{{ profile.key }}</dd>
           <dt>格式</dt><dd id="meta-format">{{ profile.pixel_format }}</dd>
+          <dt>抖動算法</dt><dd id="meta-dither">—</dd>
           <dt>發布時間</dt><dd id="meta-created">—</dd>
           <dt>接收時間</dt><dd id="meta-received">—</dd>
           <dt>SHA-256</dt><dd><code id="meta-sha">—</code></dd>

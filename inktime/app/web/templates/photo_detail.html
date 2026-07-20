@@ -1,13 +1,120 @@
 {% extends "base.html" %}
 {% block title %}照片詳細資訊｜InkTime{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">照片詳細資訊</p><h1>{{ photo.relative_path }}</h1><p>{{ photo.library_id }} · {{ photo.status }}</p></div><a href="/photos">返回照片庫</a></div>
+<div class="page-head">
+  <div>
+    <p class="eyebrow">照片詳細資訊</p>
+    <h1>{{ photo.relative_path }}</h1>
+    <p>{{ photo.library_id }} · {{ photo.status }}</p>
+  </div>
+  <a href="/photos">返回照片庫</a>
+</div>
+
 {% if g.user.role == 'administrator' %}
-<section class="panel"><h2>人工修正</h2><p>人工值會保留在照片歷史；不會改寫原始模型 JSON。</p><form id="photo-edit" class="form-stack"><label><input type="checkbox" name="favorite" {% if photo.favorite %}checked{% endif %}> 標記為最愛</label><label>拍攝時間<input name="captured_at" value="{{ photo.captured_at or '' }}" placeholder="YYYY-MM-DDTHH:MM:SS"></label><label>電子紙短文案<input name="side_caption" maxlength="120" value="{{ analyses[0].side_caption if analyses else '' }}"></label><fieldset><legend>分類</legend>{% for type in allowed_types %}<label><input type="checkbox" name="types" value="{{ type }}" {% if analyses and type in analyses[0].types_json %}checked{% endif %}> {{ type }}</label>{% endfor %}</fieldset><button class="primary">儲存人工修正</button></form></section>
+<section class="panel">
+  <h2>人工修正</h2>
+  <p>人工值會保留在照片歷史；不會改寫原始模型 JSON。</p>
+  <form id="photo-edit" class="form-stack">
+    <label><input type="checkbox" name="favorite" {% if photo.favorite %}checked{% endif %}> 標記為最愛</label>
+    <label>拍攝時間<input name="captured_at" value="{{ photo.captured_at or '' }}" placeholder="YYYY-MM-DDTHH:MM:SS"></label>
+    <label>電子紙短文案<input name="side_caption" maxlength="120" value="{{ analyses[0].side_caption if analyses else '' }}"></label>
+    <fieldset>
+      <legend>分類</legend>
+      {% for type in allowed_types %}<label><input type="checkbox" name="types" value="{{ type }}" {% if analyses and type in analyses[0].types_json %}checked{% endif %}> {{ type }}</label>{% endfor %}
+    </fieldset>
+    <button class="primary">儲存人工修正</button>
+  </form>
+</section>
 {% endif %}
+
 <div class="detail-grid">
-<section class="panel"><img class="detail-photo" src="/api/v1/photos/{{ photo.id }}/image"><h2>檔案與本地特徵</h2><dl><dt>SHA-256</dt><dd><code>{{ photo.sha256 }}</code></dd><dt>感知雜湊</dt><dd>{{ photo.perceptual_hash }}</dd><dt>尺寸</dt><dd>{{ photo.width }} × {{ photo.height }} {{ photo.format }}</dd><dt>亮度／對比</dt><dd>{{ photo.brightness }}／{{ photo.contrast }}</dd><dt>模糊分數</dt><dd>{{ photo.blur_score }}</dd><dt>EXIF</dt><dd><pre>{{ photo.exif_json }}</pre></dd></dl></section>
-<section><div class="panel"><h2>分析結果</h2>{% for a in analyses %}<article><strong>{{ a.stage }} · {{ a.provider }} / {{ a.model }}</strong><p>{{ a.caption }}</p><p><strong>綜合排序 {{ a.ranking_score or '—' }}</strong>｜回憶 {{ a.memory_score }}｜美觀 {{ a.beauty_score }}｜技術 {{ a.technical_quality_score }}｜情緒 {{ a.emotion_score }}</p><small>評分版本：{{ a.scoring_version_name or '舊版／未記錄' }}</small><blockquote>{{ a.side_caption }}</blockquote><details><summary>原始模型 JSON</summary><pre>{{ a.raw_json }}</pre></details></article>{% else %}<p class="empty">尚未分析。</p>{% endfor %}</div><div class="panel"><h2>Token 與成本</h2>{% for u in usage %}<p>{{ u.request_type }} · {{ u.model }} · {{ u.input_tokens + u.output_tokens }} Token · US$ {{ u.actual_cost or u.estimated_cost }}</p>{% else %}<p class="empty">沒有 API 使用量。</p>{% endfor %}</div><div class="panel"><h2>錯誤記錄</h2>{% for e in errors %}<p><code>{{ e.error_code }}</code> {{ e.message }}</p>{% else %}<p class="empty">沒有錯誤。</p>{% endfor %}</div><div class="panel"><h2>處理歷史</h2>{% for event in events %}<p>{{ event.created_at }} · {{ event.event }}<br><code>{{ event.changes_json }}</code></p>{% else %}<p class="empty">尚無人工修改。</p>{% endfor %}</div></section>
+  <section>
+    <div class="panel">
+      <img class="detail-photo" src="/api/v1/photos/{{ photo.id }}/image" alt="{{ photo.relative_path }}">
+      <h2>檔案與本地特徵</h2>
+      <dl>
+        <dt>SHA-256</dt><dd><code>{{ photo.sha256 }}</code></dd>
+        <dt>感知雜湊</dt><dd>{{ photo.perceptual_hash }}</dd>
+        <dt>尺寸</dt><dd>{{ photo.width }} × {{ photo.height }} {{ photo.format }}</dd>
+        <dt>亮度</dt><dd>{{ '%.2f'|format(photo.brightness) if photo.brightness is not none else '無資料' }}</dd>
+        <dt>對比</dt><dd>{{ '%.2f'|format(photo.contrast) if photo.contrast is not none else '無資料' }}</dd>
+        <dt>模糊分數</dt><dd>{{ '%.2f'|format(photo.blur_score) if photo.blur_score is not none else '無資料' }}（越低越模糊）</dd>
+        <dt>過曝占比</dt><dd>{{ '%.2f%%'|format(photo.overexposed_ratio * 100) if photo.overexposed_ratio is not none else '無資料' }}</dd>
+        <dt>欠曝占比</dt><dd>{{ '%.2f%%'|format(photo.underexposed_ratio * 100) if photo.underexposed_ratio is not none else '無資料' }}</dd>
+        <dt>截圖機率</dt><dd>{{ '%.2f'|format(photo.screenshot_likelihood) if photo.screenshot_likelihood is not none else '無資料' }}</dd>
+        <dt>E6 適合度</dt><dd>{{ '%.1f'|format(photo.e6_score) if photo.e6_score is not none else '原始照片目前無法讀取' }}</dd>
+        <dt>E6 對比／主體</dt><dd>{{ ('%.1f / %.1f'|format(photo.e6_contrast_score, photo.e6_subject_score)) if photo.e6_contrast_score is not none and photo.e6_subject_score is not none else '無資料' }}</dd>
+        <dt>E6 膚色／細節</dt><dd>{{ ('%.1f / %.1f'|format(photo.e6_skin_score, photo.e6_text_score)) if photo.e6_skin_score is not none and photo.e6_text_score is not none else '無資料' }}</dd>
+        <dt>智慧裁切</dt><dd>{{ photo.crop_method or '尚未計算' }}；人臉 {{ photo.crop_face_count or 0 }} 張；焦點 {{ '%.0f%% / %.0f%%'|format((photo.crop_manual_x if photo.crop_manual_x is not none else photo.crop_focus_x or 0.5) * 100, (photo.crop_manual_y if photo.crop_manual_y is not none else photo.crop_focus_y or 0.5) * 100) }}</dd>
+        <dt>拍攝時間</dt><dd>{{ photo.captured_at or '無資料' }}</dd>
+        <dt>地點</dt><dd>{{ location_name or ('有 GPS，但附近找不到城市' if photo.gps_lat is not none and photo.gps_lon is not none else '照片沒有 GPS') }}</dd>
+      </dl>
+      <p><a href="/rendering">到渲染頁調整裁切並預覽所有相框版型</a></p>
+      <details><summary>完整 EXIF</summary><pre>{{ photo.exif_json }}</pre></details>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h2>本機預篩選判斷</h2>
+        <span class="status {{ 'warning' if prefilter.excluded else 'ok' }}">{{ prefilter.summary }}</span>
+      </div>
+      <p class="prefilter-summary">模式：<strong>{{ prefilter.sensitivity }}</strong>；一般品質缺陷需命中 {{ prefilter.required_defects }} 項才排除。目前命中 {{ prefilter.defect_count }} 項。{% if prefilter.favorite_bypass %}此照片因標記為最愛而略過排除。{% endif %}</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>判斷項目</th><th>實際數值</th><th>目前門檻</th><th>結果</th></tr></thead>
+          <tbody>
+            {% for check in prefilter.checks %}
+            <tr>
+              <td>{{ check.label }}</td>
+              <td><strong>{{ check.value }}</strong></td>
+              <td>{{ check.threshold }}</td>
+              <td class="{{ 'check-hit' if check.hit and check.enabled and prefilter.enabled else '' }}">
+                {% if not prefilter.enabled %}預篩選停用{% elif not check.enabled %}此規則停用{% elif check.hit %}命中{% else %}未命中{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <p><a href="/settings">調整預篩選模式與開關</a></p>
+    </div>
+  </section>
+
+  <section>
+    <div class="panel">
+      <h2>模型與分析結果</h2>
+      {% for a in analyses %}
+      <article class="analysis-card">
+        <div class="panel-head">
+          <strong>{{ a.origin_label }} · {{ a.stage }}</strong>
+          <span class="status {{ 'ok' if a.should_keep else 'warning' }}">{{ '建議保留' if a.should_keep else '建議排除' }}</span>
+        </div>
+        <p class="analysis-meta">{{ a.provider or '未知 Provider' }} / {{ a.model or '未知模型' }} · {{ a.created_at }}</p>
+        <dl>
+          <dt>照片分類</dt><dd>{{ a.types|join('、') if a.types else '未分類' }}</dd>
+          <dt>綜合排序</dt><dd>{{ a.ranking_score if a.ranking_score is not none else '—' }}</dd>
+          <dt>四項分數</dt><dd>回憶 {{ a.memory_score }}｜美觀 {{ a.beauty_score }}｜技術 {{ a.technical_quality_score }}｜情緒 {{ a.emotion_score }}</dd>
+          <dt>判斷理由</dt><dd>{{ a.reason }}</dd>
+          <dt>評分版本</dt><dd>{{ a.scoring_version_name or '舊版／未記錄' }}</dd>
+        </dl>
+        <h3>{{ a.origin_label }}文字結果</h3>
+        <p class="analysis-copy">{{ a.caption }}</p>
+        <h3>產生的一句話（電子紙短文案）</h3>
+        <blockquote class="generated-caption">{{ a.side_caption or '這次分析沒有產生電子紙短文案。' }}</blockquote>
+        <details><summary>原始分析 JSON</summary><pre>{{ a.raw_json }}</pre></details>
+      </article>
+      {% else %}
+      <p class="empty">尚未分析；目前只有本機特徵，還沒有模型文字與電子紙短句。</p>
+      {% endfor %}
+    </div>
+
+    <div class="panel">
+      <h2>Token 與成本</h2>
+      {% for u in usage %}<p>{{ u.request_type }} · {{ u.model }} · {{ u.input_tokens + u.output_tokens }} Token · US$ {{ u.actual_cost or u.estimated_cost }}</p>{% else %}<p class="empty">沒有 API 使用量；若被本機預篩選排除，這裡會維持 0 Token。</p>{% endfor %}
+    </div>
+    <div class="panel"><h2>錯誤記錄</h2>{% for e in errors %}<p><code>{{ e.error_code }}</code> {{ e.message }}</p>{% else %}<p class="empty">沒有錯誤。</p>{% endfor %}</div>
+    <div class="panel"><h2>處理歷史</h2>{% for event in events %}<p>{{ event.created_at }} · {{ event.event }}<br><code>{{ event.changes_json }}</code></p>{% else %}<p class="empty">尚無人工修改。</p>{% endfor %}</div>
+  </section>
 </div>
 {% endblock %}
 {% block scripts %}{% if g.user.role == 'administrator' %}<script>document.getElementById('photo-edit').onsubmit=async event=>{event.preventDefault();const form=new FormData(event.target);const response=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({favorite:form.has('favorite'),captured_at:form.get('captured_at'),side_caption:form.get('side_caption'),types:form.getAll('types')})});if(response.ok)location.reload();else alert((await response.json()).message||'更新失敗');};</script>{% endif %}{% endblock %}

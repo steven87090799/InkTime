@@ -1,4 +1,11 @@
 from .dates import current_local_date, day_of_year_to_month_day, month_day_to_day_of_year
+from .composition import (
+    CropAnalysis,
+    E6Suitability,
+    analyze_crop_focus,
+    evaluate_e6_suitability,
+    fit_with_focus,
+)
 from .fonts import (
     BUILTIN_FONTS,
     DEFAULT_FONT_REFERENCE,
@@ -22,6 +29,11 @@ __all__ = [
     "current_local_date",
     "day_of_year_to_month_day",
     "month_day_to_day_of_year",
+    "CropAnalysis",
+    "E6Suitability",
+    "analyze_crop_focus",
+    "evaluate_e6_suitability",
+    "fit_with_focus",
     "BUILTIN_FONTS",
     "DEFAULT_FONT_REFERENCE",
     "FONT_COMPATIBILITY_TEXT",

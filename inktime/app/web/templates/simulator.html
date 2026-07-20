@@ -27,7 +27,7 @@
           {% for profile in profiles %}<option value="{{ profile.key }}" {% if profile.key==current_profile %}selected{% endif %}>{{ profile.label }}</option>{% endfor %}
         </select></label>
         <label><span>抖動算法</span><select id="dither" name="dither">
-          {% for value, label in [('floyd_steinberg','Floyd–Steinberg（照片建議）'),('atkinson','Atkinson（較柔和）'),('bayer4','Bayer 4×4（規律顆粒）'),('bayer8','Bayer 8×8（細緻顆粒）'),('none','不抖動')] %}<option value="{{ value }}" {% if value==current_dither %}selected{% endif %}>{{ label }}</option>{% endfor %}
+          {% for value, label in [('photo_smooth','照片平滑（減少色塊／雜點）'),('gooddisplay','Good Display 原廠相容'),('floyd_steinberg','Floyd–Steinberg（InkTime）'),('atkinson','Atkinson（較柔和）'),('bayer4','Bayer 4×4（規律顆粒）'),('bayer8','Bayer 8×8（細緻顆粒）'),('none','不抖動')] %}<option value="{{ value }}" {% if value==current_dither %}selected{% endif %}>{{ label }}</option>{% endfor %}
         </select></label>
         <label><span>縮放方式</span><select id="fit" name="fit"><option value="cover">填滿並裁切</option><option value="contain">完整顯示（可能留白）</option></select></label>
         <label class="range-field"><span>抖動強度 <output id="strength-output">{{ '%.1f'|format(dither_strength) }}</output></span><input id="strength" name="strength" type="range" min="0" max="2" step="0.1" value="{{ dither_strength }}"></label>
@@ -114,13 +114,22 @@
 
   function updatePalette() {
     const profile = profileMap[profileSelect.value];
+    const usesGoodDisplayPalette = profile.key === 'gdep073e01_6c' && ['gooddisplay', 'photo_smooth'].includes(ditherSelect.value);
+    const colors = usesGoodDisplayPalette ? profile.gooddisplay_colors : profile.colors;
     const holder = document.getElementById('palette-swatches');
-    holder.replaceChildren(...profile.colors.map(color => {
+    holder.replaceChildren(...colors.map(color => {
       const swatch = document.createElement('span');
       swatch.title = color.name;
       swatch.style.backgroundColor = `rgb(${color.rgb.join(',')})`;
       return swatch;
     }));
+  }
+
+  function updateDitherControls() {
+    const fixedStrength = ['gooddisplay', 'photo_smooth'].includes(ditherSelect.value);
+    strength.disabled = fixedStrength;
+    strengthOutput.value = fixedStrength ? '固定' : Number(strength.value).toFixed(1);
+    updatePalette();
   }
 
   function drawComposition() {
@@ -262,10 +271,11 @@
   strength.addEventListener('input', () => { strengthOutput.value = Number(strength.value).toFixed(1); });
   [fitSelect, caption].forEach(control => control.addEventListener('input', drawComposition));
   profileSelect.addEventListener('change', updatePalette);
+  ditherSelect.addEventListener('change', updateDitherControls);
   ['dragenter', 'dragover'].forEach(type => dropZone.addEventListener(type, event => { event.preventDefault(); dropZone.classList.add('is-dragging'); }));
   ['dragleave', 'drop'].forEach(type => dropZone.addEventListener(type, event => { event.preventDefault(); dropZone.classList.remove('is-dragging'); }));
   dropZone.addEventListener('drop', event => useFile(event.dataTransfer.files[0]));
-  updatePalette();
+  updateDitherControls();
   drawComposition();
 })();
 </script>

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from io import BytesIO
+from pathlib import Path
 
 from PIL import Image
 
 from tests.conftest import create_admin, csrf, login
 from tests.integration.test_jobs import add_photos
+from tests.unit.test_analysis_schema import valid_result
 
 
 def test_primary_management_pages_render(client, app):
@@ -32,6 +34,13 @@ def test_primary_management_pages_render(client, app):
         response = client.get(path)
         assert response.status_code == 200, path
         assert "zh-Hant-TW" in response.get_data(as_text=True)
+
+    simulator = client.get("/simulator").get_data(as_text=True)
+    assert "Good Display 原廠相容" in simulator
+    assert "照片平滑（減少色塊／雜點）" in simulator
+    settings = client.get("/settings").get_data(as_text=True)
+    assert "Good Display 原廠相容" in settings
+    assert "照片平滑（減少色塊／雜點）" in settings
 
 
 def test_device_energy_dashboard_uses_telemetry_and_audited_measurements(client, app):
@@ -215,7 +224,10 @@ def test_virtual_display_receives_and_verifies_formal_release_payload(client, ap
     create_admin(app)
     login(client)
     manifest = app.extensions["inktime_release_publisher"].publish(
-        [("virtual-photo", Image.new("RGB", (480, 800), "gold"))],
+        [
+            ("virtual-photo-1", Image.new("RGB", (480, 800), "gold")),
+            ("virtual-photo-2", Image.new("RGB", (480, 800), "navy")),
+        ],
         profile_key="safe_4c",
         dither="none",
         color_distance="rgb",
@@ -227,6 +239,9 @@ def test_virtual_display_receives_and_verifies_formal_release_payload(client, ap
     assert page.status_code == 200
     assert "RECEIVE ONLY" in body
     assert "不觸發發布" in body
+    assert 'id="previous-frame"' in body
+    assert 'id="next-frame"' in body
+    assert "抖動算法" in body
     assert 'type="file"' not in body
 
     response = client.get("/api/v1/virtual-display/manifest?profile=safe_4c")
@@ -234,12 +249,17 @@ def test_virtual_display_receives_and_verifies_formal_release_payload(client, ap
     assert response.headers["X-InkTime-Receiver"] == "virtual-display"
     assert response.json["release_id"] == manifest["release_id"]
     assert response.json["receiver"]["mode"] == "read_only"
+    assert len(response.json["files"]) == 2
     file_entry = response.json["files"][0]
     payload = client.get(response.json["download_base_url"] + file_entry["name"])
     assert payload.status_code == 200
     assert payload.mimetype == "application/octet-stream"
     assert len(payload.data) == 96_000
     assert payload.headers["X-InkTime-Payload-SHA256"] == file_entry["sha256"]
+    second_entry = response.json["files"][1]
+    second_payload = client.get(response.json["download_base_url"] + second_entry["name"])
+    assert second_payload.status_code == 200
+    assert second_payload.headers["X-InkTime-Payload-SHA256"] == second_entry["sha256"]
 
     missing = client.get(
         f"/api/v1/virtual-display/releases/{manifest['release_id']}/files/manifest.json"
@@ -338,3 +358,173 @@ def test_photo_manual_edit_is_audited(client, app):
         event = connection.execute("SELECT event FROM photo_events WHERE photo_id=?", (photo_id,)).fetchone()
     assert tuple(photo) == (1, "2026-07-17T10:00:00")
     assert event["event"] == "manual_update"
+
+
+def test_photo_console_shows_prefilter_metrics_model_text_and_generated_caption(client, app):
+    create_admin(app)
+    login(client)
+    photo_id = add_photos(app, 1)[0]
+    result = valid_result()
+    app.extensions["inktime_photo_repository"].save_analysis(
+        photo_id,
+        None,
+        "stage_one",
+        "測試 Provider",
+        "vision-model",
+        result,
+        '{"caption":"家人在公園散步。"}',
+    )
+
+    detail = client.get(f"/photos/{photo_id}")
+    body = detail.get_data(as_text=True)
+    assert detail.status_code == 200
+    assert "本機預篩選判斷" in body
+    assert "目前門檻" in body
+    assert "模糊分數" in body
+    assert "過曝占比" in body
+    assert "模型判斷文字結果" in body
+    assert "家人在公園散步。" in body
+    assert "產生的一句話（電子紙短文案）" in body
+    assert "風把這一天留得很輕。" in body
+    assert "測試 Provider / vision-model" in body
+
+    listing = client.get("/photos").get_data(as_text=True)
+    assert "家人在公園散步。" in listing
+    assert "風把這一天留得很輕。" in listing
+
+
+def test_photo_cards_show_total_score_and_e6_estimate(client, app):
+    create_admin(app)
+    login(client)
+    analyzed_id, estimated_id = add_photos(app, 2)
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE photos SET e6_score=100 WHERE id=?", (analyzed_id,))
+        connection.execute("UPDATE photos SET e6_score=91.9 WHERE id=?", (estimated_id,))
+    app.extensions["inktime_photo_repository"].save_analysis(
+        analyzed_id,
+        None,
+        "stage_one",
+        "測試 Provider",
+        "vision-model",
+        valid_result(),
+        "{}",
+        ranking_score=80,
+    )
+
+    body = client.get("/photos").get_data(as_text=True)
+
+    assert "總分 84.0（模型＋E6）" in body
+    assert "總分 91.9（E6 暫估）" in body
+
+
+def test_photo_library_loads_200_per_page_and_keeps_filters(client, app):
+    create_admin(app)
+    login(client)
+    photo_ids = add_photos(app, 201)
+    with app.extensions["inktime_database"].session() as connection:
+        connection.executemany(
+            "UPDATE photos SET status='analyzed' WHERE id=?",
+            [(photo_id,) for photo_id in photo_ids],
+        )
+
+    first = client.get("/photos?status=analyzed")
+    first_body = first.get_data(as_text=True)
+    assert first.status_code == 200
+    assert first_body.count('class="photo-card"') == 200
+    assert "目前顯示第 1–200 張" in first_body
+    assert "第 1 / 2 頁" in first_body
+    assert "status=analyzed&amp;page=2" in first_body
+    assert '<option value="analyzed" selected>' in first_body
+
+    second = client.get("/photos?status=analyzed&page=2")
+    second_body = second.get_data(as_text=True)
+    assert second.status_code == 200
+    assert second_body.count('class="photo-card"') == 1
+    assert "目前顯示第 201–201 張" in second_body
+    assert "第 2 / 2 頁" in second_body
+
+
+def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(client, app):
+    create_admin(app)
+    login(client)
+    photo_id = add_photos(app, 1)[0]
+    result = valid_result()
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            """
+            UPDATE photos SET status='analyzed',captured_at='2020-07-20T10:00:00',
+                e6_score=82,e6_contrast_score=84,e6_subject_score=80,e6_skin_score=78,
+                e6_text_score=86,crop_focus_x=.72,crop_focus_y=.38,crop_method='saliency'
+            WHERE id=?
+            """,
+            (photo_id,),
+        )
+    app.extensions["inktime_photo_repository"].save_analysis(
+        photo_id,
+        None,
+        "stage_one",
+        "測試 Provider",
+        "vision-model",
+        result,
+        "{}",
+        ranking_score=88,
+    )
+
+    page = client.get("/rendering")
+    body = page.get_data(as_text=True)
+    assert page.status_code == 200
+    assert "智慧裁切與版型預覽" in body
+    assert "月曆相框" in body
+    assert "天氣＋室內溫溼度" in body
+    assert "E6 總分" in body
+    assert "歷年今日優先" in body
+
+    response = client.patch(
+        f"/api/v1/photos/{photo_id}/crop",
+        json={"mode": "manual", "x": 0.2, "y": 0.8},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert response.status_code == 200
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute(
+            "SELECT crop_manual_x,crop_manual_y FROM photos WHERE id=?", (photo_id,)
+        ).fetchone()
+    assert tuple(row) == (0.2, 0.8)
+
+
+def test_photo_detail_backfills_local_e6_and_crop_without_model(client, app, tmp_path):
+    create_admin(app)
+    login(client)
+    root = tmp_path / "legacy-photo"
+    root.mkdir()
+    Image.new("RGB", (900, 600), "#587d98").save(root / "memory.jpg")
+    repository = app.extensions["inktime_photo_repository"]
+    library_id = repository.ensure_library("舊照片", Path(root))
+    now = "2026-07-20T00:00:00+00:00"
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            """
+            INSERT INTO photos(id,library_id,relative_path,status,created_at,updated_at)
+            VALUES ('legacy-photo',?,?,'analyzed',?,?)
+            """,
+            (library_id, "memory.jpg", now, now),
+        )
+    repository.save_analysis(
+        "legacy-photo", None, "stage_one", "test", "vision", valid_result(), "{}"
+    )
+
+    page = client.get("/photos/legacy-photo")
+
+    assert page.status_code == 200
+    body = page.get_data(as_text=True)
+    assert "E6 適合度" in body
+    assert "原始照片目前無法讀取" not in body
+    with app.extensions["inktime_database"].session() as connection:
+        photo = connection.execute(
+            "SELECT e6_score,crop_focus_x,crop_method FROM photos WHERE id='legacy-photo'"
+        ).fetchone()
+        usage_count = connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0]
+    assert photo["e6_score"] is not None
+    assert photo["crop_focus_x"] is not None
+    assert photo["crop_method"] in {"faces", "saliency"}
+    assert usage_count == 0

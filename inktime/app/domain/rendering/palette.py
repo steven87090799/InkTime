@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, cast
 
-from PIL import Image
+from PIL import Image, ImageFilter
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,7 @@ class DisplayProfile:
 class EncodedImage:
     payload: bytes
     preview: Image.Image
+    palette: tuple[PaletteColor, ...]
 
 
 DISPLAY_PROFILES: dict[str, DisplayProfile] = {
@@ -78,8 +79,35 @@ DISPLAY_PROFILES: dict[str, DisplayProfile] = {
     ),
 }
 
-DITHER_ALGORITHMS = ("none", "floyd_steinberg", "atkinson", "bayer4", "bayer8")
+DITHER_ALGORITHMS = (
+    "none",
+    "floyd_steinberg",
+    "gooddisplay",
+    "photo_smooth",
+    "atkinson",
+    "bayer4",
+    "bayer8",
+)
 COLOR_DISTANCES = ("oklab", "rgb")
+
+_GOODDISPLAY_GDEP073E01_PALETTE = (
+    (0, 0, 0),
+    (255, 255, 255),
+    (255, 255, 0),
+    (255, 0, 0),
+    (0, 0, 0),
+    (0, 0, 255),
+    (0, 255, 0),
+)
+_GOODDISPLAY_GDEP073E01_TO_PROFILE = (0, 1, 5, 4, 0, 3, 2)
+_GOODDISPLAY_RGB_BY_NAME = {
+    "black": (0, 0, 0),
+    "white": (255, 255, 255),
+    "green": (0, 255, 0),
+    "blue": (0, 0, 255),
+    "red": (255, 0, 0),
+    "yellow": (255, 255, 0),
+}
 
 
 def get_display_profile(key: str) -> DisplayProfile:
@@ -101,9 +129,22 @@ def profile_summaries() -> list[dict]:
                 {"code": color.code, "name": color.name, "rgb": list(color.rgb)}
                 for color in profile.colors
             ],
+            "gooddisplay_colors": [
+                {"code": color.code, "name": color.name, "rgb": list(color.rgb)}
+                for color in _gooddisplay_colors(profile)
+            ],
         }
         for profile in DISPLAY_PROFILES.values()
     ]
+
+
+def _gooddisplay_colors(profile: DisplayProfile) -> tuple[PaletteColor, ...]:
+    if profile.key != "gdep073e01_6c":
+        return profile.colors
+    return tuple(
+        PaletteColor(color.code, color.name, _GOODDISPLAY_RGB_BY_NAME[color.name])
+        for color in profile.colors
+    )
 
 
 def _linear_channel(value: float) -> float:
@@ -124,19 +165,18 @@ def _oklab(rgb: tuple[int, int, int]) -> tuple[float, float, float]:
     )
 
 
-@lru_cache(maxsize=8)
-def _palette_lookup(profile_key: str, distance: str) -> bytes:
-    profile = get_display_profile(profile_key)
+@lru_cache(maxsize=16)
+def _palette_lookup(colors: tuple[PaletteColor, ...], distance: str) -> bytes:
     if distance not in COLOR_DISTANCES:
         raise ValueError(f"RENDER-004 不支援的色差模式：{distance}")
-    palette_points = [_oklab(color.rgb) for color in profile.colors]
+    palette_points = [_oklab(color.rgb) for color in colors]
     lookup = bytearray(32 * 32 * 32)
     for red5 in range(32):
         for green5 in range(32):
             for blue5 in range(32):
                 rgb = (red5 * 8 + 4, green5 * 8 + 4, blue5 * 8 + 4)
                 point = _oklab(rgb) if distance == "oklab" else rgb
-                candidates = palette_points if distance == "oklab" else [color.rgb for color in profile.colors]
+                candidates = palette_points if distance == "oklab" else [color.rgb for color in colors]
                 nearest = min(
                     range(len(candidates)),
                     key=lambda index: sum(
@@ -146,6 +186,33 @@ def _palette_lookup(profile_key: str, distance: str) -> bytes:
                 )
                 lookup[(red5 << 10) | (green5 << 5) | blue5] = nearest
     return bytes(lookup)
+
+
+def _pillow_palette(colors: tuple[tuple[int, int, int], ...]) -> Image.Image:
+    palette = Image.new("P", (1, 1))
+    flattened = tuple(channel for color in colors for channel in color)
+    palette.putpalette(flattened + (0, 0, 0) * (256 - len(colors)))
+    return palette
+
+
+def _quantize_gooddisplay(
+    rgb: Image.Image,
+    profile: DisplayProfile,
+) -> tuple[bytearray, Image.Image, tuple[PaletteColor, ...]]:
+    palette_rgb: tuple[tuple[int, int, int], ...]
+    index_mapping: tuple[int, ...]
+    if profile.key == "gdep073e01_6c":
+        palette_rgb = _GOODDISPLAY_GDEP073E01_PALETTE
+        index_mapping = _GOODDISPLAY_GDEP073E01_TO_PROFILE
+    else:
+        palette_rgb = tuple(color.rgb for color in profile.colors)
+        index_mapping = tuple(range(len(profile.colors)))
+    quantized = rgb.quantize(
+        palette=_pillow_palette(palette_rgb),
+        dither=Image.Dither.FLOYDSTEINBERG,
+    )
+    indexes = bytearray(index_mapping[index] for index in quantized.tobytes())
+    return indexes, quantized.convert("RGB"), _gooddisplay_colors(profile)
 
 
 def _clamp_channel(value: float) -> int:
@@ -275,11 +342,33 @@ def encode_image(
     if not 0.0 <= float(strength) <= 2.0:
         raise ValueError("RENDER-004 抖動強度必須介於 0 到 2")
     rgb = image.convert("RGB")
-    lookup = _palette_lookup(profile_key, color_distance)
-    if dither in {"floyd_steinberg", "atkinson"} and strength > 0:
-        indexes, preview = _quantize_diffusion(rgb, profile, lookup, dither, float(strength))
+    preview_palette = profile.colors
+    if dither == "gooddisplay":
+        indexes, preview, preview_palette = _quantize_gooddisplay(rgb, profile)
+    elif dither == "photo_smooth":
+        smoothed = rgb.filter(ImageFilter.MedianFilter(size=3))
+        indexes, preview, preview_palette = _quantize_gooddisplay(smoothed, profile)
     else:
-        indexes, preview = _quantize_ordered(rgb, profile, lookup, dither, float(strength))
+        working_profile = profile
+        working_dither = dither
+        working_distance = color_distance
+        lookup = _palette_lookup(working_profile.colors, working_distance)
+        if working_dither in {"floyd_steinberg", "atkinson"} and strength > 0:
+            indexes, preview = _quantize_diffusion(
+                rgb,
+                working_profile,
+                lookup,
+                working_dither,
+                float(strength),
+            )
+        else:
+            indexes, preview = _quantize_ordered(
+                rgb,
+                working_profile,
+                lookup,
+                working_dither,
+                float(strength),
+            )
 
     if profile.pixel_format == "2bpp":
         payload = bytearray((len(indexes) + 3) // 4)
@@ -289,4 +378,4 @@ def encode_image(
         payload = bytearray((len(indexes) + 1) // 2)
         for index, palette_index in enumerate(indexes):
             payload[index // 2] |= profile.colors[palette_index].code << (4 if index % 2 == 0 else 0)
-    return EncodedImage(bytes(payload), preview)
+    return EncodedImage(bytes(payload), preview, preview_palette)
