@@ -20,6 +20,10 @@ from inktime.app.domain.rendering import (
     evaluate_e6_suitability,
     fit_with_focus,
 )
+from inktime.app.domain.analysis.scoring import (
+    calculate_distinguishing_score,
+    prepare_score_distribution,
+)
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.services.weather import WeatherService
@@ -91,6 +95,7 @@ class RenderService:
             "hero": ImageFont.truetype(str(font_path), 44),
             "large": ImageFont.truetype(str(font_path), 32),
             "body": ImageFont.truetype(str(font_path), 24),
+            "meta": ImageFont.truetype(str(font_path), 20),
             "small": ImageFont.truetype(str(font_path), 18),
             "tiny": ImageFont.truetype(str(font_path), 15),
         }
@@ -260,7 +265,8 @@ class RenderService:
             if indoor:
                 text_parts.extend([str(indoor.get("device_name", "")), "室內溫度濕度"])
             fonts = self._fonts("\n".join(part for part in text_parts if part))
-            canvas = Image.new("RGB", (width, height), "#f7f2e8")
+            # 資訊區使用真正的面板白色，避免米白經抖動後變成彩色雜點。
+            canvas = Image.new("RGB", (width, height), "white")
             draw = ImageDraw.Draw(canvas)
 
             if layout_key == "postcard":
@@ -274,13 +280,15 @@ class RenderService:
                 return canvas
 
             if layout_key == "photo_info":
-                fitted = self._fit_photo(source, photo, (width, 650), crop_x, crop_y)
+                # 將資訊帶由 150px 縮為 96px，保留更多照片，同時讓文字使用純黑實色。
+                fitted = self._fit_photo(source, photo, (width, 704), crop_x, crop_y)
                 canvas.paste(fitted, (0, 0))
-                draw.line((20, 665, width - 20, 665), fill="#c9c1b2", width=2)
+                draw.rectangle((0, 704, width, height), fill="white")
+                draw.line((20, 708, width - 20, 708), fill="black", width=2)
                 if caption:
-                    draw.text((22, 682), self._fit_line(draw, caption, fonts["body"], width - 44), font=fonts["body"], fill="#17221c")
+                    draw.text((22, 716), self._fit_line(draw, caption, fonts["body"], width - 44), font=fonts["body"], fill="black")
                 meta = "・".join(value for value in (date_label, location) if value)
-                draw.text((22, 755), self._fit_line(draw, meta, fonts["small"], width - 44), font=fonts["small"], fill="#4e5a52")
+                draw.text((22, 768), self._fit_line(draw, meta, fonts["meta"], width - 44), font=fonts["meta"], fill="black")
                 return canvas
 
             if layout_key == "calendar":
@@ -443,10 +451,19 @@ class RenderService:
                 "crop_face_count",
             ):
                 row[key] = refreshed[key]
+        score_distribution = prepare_score_distribution(self.photos.score_population())
         for row in result:
-            ranking = float(row.get("ranking_score") or 0)
-            e6 = float(row.get("e6_score") if row.get("e6_score") is not None else 50)
-            row["combined_score"] = round(ranking * (1.0 - weight) + e6 * weight, 2)
+            stored_ranking = row.get("ranking_score")
+            ranking = float(stored_ranking) if isinstance(stored_ranking, (int, float, str)) else 0.0
+            distinguishing, percentile = calculate_distinguishing_score(
+                ranking, score_distribution
+            )
+            stored_e6 = row.get("e6_score")
+            e6 = float(stored_e6) if isinstance(stored_e6, (int, float, str)) else 50.0
+            row["raw_ranking_score"] = ranking
+            row["ranking_percentile"] = percentile
+            row["distinguishing_score"] = distinguishing
+            row["combined_score"] = round(distinguishing * (1.0 - weight) + e6 * weight, 2)
         return sorted(result, key=lambda row: (-float(row["combined_score"]), str(row["id"])))
 
     def select_candidates_details(

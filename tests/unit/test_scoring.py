@@ -4,7 +4,11 @@ import pytest
 from PIL import Image
 
 from inktime.app.domain.analysis.scoring import (
+    calculate_distinguishing_score,
+    calculate_library_percentile,
     calculate_ranking_score,
+    prepare_score_distribution,
+    score_band,
     validate_ranking_weights,
 )
 from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
@@ -34,6 +38,33 @@ def test_ranking_score_preserves_components_and_applies_favorite_bonus():
 def test_ranking_weights_must_total_one_hundred():
     with pytest.raises(ValueError, match="100%"):
         validate_ranking_weights({**WEIGHTS, "memory": 49})
+
+
+def test_library_percentile_spreads_narrow_scores_without_changing_order():
+    population = [70, 71, 72, 73, 74]
+
+    low, low_percentile = calculate_distinguishing_score(70, population)
+    middle, middle_percentile = calculate_distinguishing_score(72, population)
+    high, high_percentile = calculate_distinguishing_score(74, population)
+
+    assert (low_percentile, middle_percentile, high_percentile) == (0.0, 50.0, 100.0)
+    assert low < middle < high
+    assert high - low > 40
+    assert score_band(high_percentile, high) == "精選"
+
+
+def test_library_percentile_uses_average_rank_for_ties_and_falls_back_for_small_samples():
+    assert calculate_library_percentile(70, [70, 70, 80, 90, 100]) == 12.5
+    assert calculate_library_percentile(0, [70, 70, 80, 90, 100]) == 0.0
+    assert calculate_library_percentile(110, [70, 70, 80, 90, 100]) == 100.0
+    assert calculate_distinguishing_score(82, [80, 81, 82, 83]) == (82.0, None)
+
+
+def test_prepared_distribution_can_be_reused_for_large_photo_lists():
+    distribution = prepare_score_distribution([74, 70, 73, 71, 72])
+
+    assert distribution.values == (70.0, 71.0, 72.0, 73.0, 74.0)
+    assert calculate_library_percentile(72, distribution) == 50.0
 
 
 def test_scoring_profile_create_and_restore_are_versioned(app):

@@ -32,6 +32,7 @@ def settings_page():
     return render_template(
         "settings.html",
         categories=categories,
+        settings_count=len(rows),
         feature_flags=feature_flags,
         history=current_app.extensions["inktime_settings_repository"].history(100),
         deployment={

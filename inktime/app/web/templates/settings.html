@@ -1,80 +1,146 @@
 {% extends "base.html" %}
-{% block title %}系統設定｜InkTime{% endblock %}
+{% block title %}所有開關與設定｜InkTime{% endblock %}
 {% block content %}
-<div class="page-head">
-  <div>
-    <p class="eyebrow">Web 控制中心</p>
-    <h1>系統設定</h1>
-    <p>日常執行參數都在這裡調整並留下稽核紀錄，不需要修改 Python 程式。Docker 掛載與資源上限屬於部署邊界，只在首次部署或換硬體時修改。</p>
-  </div>
+<div class="page-head settings-head">
+  <div><p class="eyebrow">依用途整理的控制中心</p><h1>所有開關與設定</h1><p>先搜尋想做的事，再修改對應開關。模型連線、評分版本、裝置本身與版型預覽各有專用頁面，這裡只保留日常執行參數。</p></div>
+  <a class="secondary" href="/dashboard#feature-map-title">查看功能地圖</a>
 </div>
 
-<section class="panel">
-  <div class="panel-head"><h2>目前部署資訊</h2><a href="/diagnostics">查看即時資源</a></div>
-  <div class="table-wrap"><table><tbody>
-    <tr><th>執行方式</th><td>{{ 'Docker 容器' if deployment.docker else '原生程序' }}</td></tr>
-    <tr><th>Web Port</th><td>{{ deployment.port }}</td></tr>
-    <tr><th>資料／照片路徑</th><td><code>{{ deployment.data_dir }}</code>／<code>{{ deployment.photo_dir }}</code></td></tr>
-    <tr><th>HTTP Access Log</th><td>{{ '啟用' if deployment.access_log else '停用（低寫入預設）' }}</td></tr>
-    <tr><th>版本</th><td><code>{{ deployment.revision }}</code></td></tr>
-  </tbody></table></div>
-  <p class="notice">主機路徑、Port、容器 CPU／記憶體上限與 Docker Log 輪替必須在容器啟動前決定，無法由容器內程式安全地改寫；其餘 Worker、排程、分析、裝置、Log 層級與備份設定可直接在下方變更。</p>
+<section class="settings-finder panel">
+  <div class="settings-search">
+    <label for="settings-search">你想調整什麼？</label>
+    <input id="settings-search" type="search" placeholder="例如：日期、地點、預篩選、備份、通知、Token…" autocomplete="off">
+    <small id="settings-result-count">顯示全部 {{ settings_count }} 項設定</small>
+  </div>
+  <nav class="category-chips" aria-label="設定分類">
+    <button type="button" class="active" data-category-filter="all">全部</button>
+    {% for category, rows in categories.items() %}<button type="button" data-category-filter="settings-category-{{ loop.index }}">{{ category }} <span>{{ rows|length }}</span></button>{% endfor %}
+  </nav>
+  <p class="settings-route-note">找不到想要的功能？模型連線在<a href="/providers">模型服務</a>、評分權重在<a href="/scoring">評分規則</a>、相框即時預覽在<a href="/rendering">畫面與發布</a>、單台硬體在<a href="/devices">裝置管理</a>。</p>
 </section>
 
 <form id="settings-form">
   {% for category, rows in categories.items() %}
-  <section class="panel">
-    <h2>{{ category }}</h2>
-    <div class="settings-grid">
+  <section class="panel settings-category" id="settings-category-{{ loop.index }}" data-settings-category>
+    <div class="settings-category-head">
+      <div><p class="settings-category-number">{{ '%02d'|format(loop.index) }}</p><h2>{{ category }}</h2><span>{{ rows|length }} 項</span></div>
+      <button type="button" class="section-collapse" aria-expanded="true">收合</button>
+    </div>
+    <div class="settings-grid settings-category-body">
       {% for row in rows %}
-      <label{% if row.definition.full_width %} class="setting-full-width"{% endif %}>
-        <span>{{ row.key }}</span>
-        <small>{{ row.definition.description }}。風險：{{ row.definition.risk }}{% if row.requires_restart %}；下次重新啟動生效{% else %}；動態生效{% endif %}</small>
+      <article class="setting-card{% if row.value_type == 'boolean' %} setting-switch-card{% endif %}{% if row.definition.full_width %} setting-full-width{% endif %}" data-setting-search="{{ category }} {{ row.key }} {{ row.definition.description }} {{ row.definition.risk }}">
+        <span class="setting-copy">
+          <strong>{{ row.definition.description }}</strong>
+          <code>{{ row.key }}</code>
+          <small>{{ row.definition.risk }}{% if row.requires_restart %}；重新啟動後生效{% else %}；儲存後立即生效{% endif %}</small>
+        </span>
         {% if row.value_type == 'boolean' %}
-        <select name="{{ row.key }}"><option value="true" {% if row.value %}selected{% endif %}>啟用</option><option value="false" {% if not row.value %}selected{% endif %}>停用</option></select>
+        <span class="switch-control"><input name="{{ row.key }}" type="checkbox" role="switch" aria-label="{{ row.definition.description }}" {% if row.value %}checked{% endif %} {% if g.user.role != 'administrator' %}disabled{% endif %}><em>{{ '已啟用' if row.value else '已停用' }}</em></span>
         {% elif row.definition.choices %}
-        <select name="{{ row.key }}">{% for choice in row.definition.choices %}<option value="{{ choice }}" {% if choice|string == row.value|string %}selected{% endif %}>{{ row.definition.choice_labels.get(choice, choice) if row.definition.choice_labels else choice }}</option>{% endfor %}</select>
+        <select name="{{ row.key }}" aria-label="{{ row.definition.description }}" {% if g.user.role != 'administrator' %}disabled{% endif %}>{% for choice in row.definition.choices %}<option value="{{ choice }}" {% if choice|string == row.value|string %}selected{% endif %}>{{ row.definition.choice_labels.get(choice, choice) if row.definition.choice_labels else choice }}</option>{% endfor %}</select>
         {% elif row.definition.multiline %}
-        <textarea name="{{ row.key }}" rows="{{ row.definition.rows|default(12) }}" maxlength="{{ row.definition.max_length|default(12000) }}">{{ row.value }}</textarea>
+        <textarea name="{{ row.key }}" aria-label="{{ row.definition.description }}" rows="{{ row.definition.rows|default(12) }}" maxlength="{{ row.definition.max_length|default(12000) }}" {% if g.user.role != 'administrator' %}disabled{% endif %}>{{ row.value }}</textarea>
         {% else %}
-        <input name="{{ row.key }}" value="{{ row.value }}" type="{{ 'number' if row.value_type in ('number','integer') else 'text' }}" {% if row.value_type == 'number' %}step="any"{% endif %} {% if row.definition.min is defined %}min="{{ row.definition.min }}"{% endif %} {% if row.definition.max is defined %}max="{{ row.definition.max }}"{% endif %}>
+        <input name="{{ row.key }}" aria-label="{{ row.definition.description }}" value="{{ row.value }}" type="{{ 'number' if row.value_type in ('number','integer') else 'text' }}" {% if row.value_type == 'number' %}step="any"{% endif %} {% if row.definition.min is defined %}min="{{ row.definition.min }}"{% endif %} {% if row.definition.max is defined %}max="{{ row.definition.max }}"{% endif %} {% if g.user.role != 'administrator' %}disabled{% endif %}>
         {% endif %}
-      </label>
+      </article>
       {% endfor %}
     </div>
   </section>
   {% endfor %}
-  {% if g.user.role == 'administrator' %}<button class="primary">儲存全部設定</button>{% endif %}
+  <p class="settings-no-results" id="settings-no-results" hidden>找不到符合的設定。可以換一個較短的詞，或使用左側功能選單前往專用頁面。</p>
+  {% if g.user.role == 'administrator' %}<div class="settings-savebar" id="settings-savebar"><span><strong id="settings-dirty-count">尚未修改</strong><small>儲存前可繼續調整其他分類</small></span><button class="primary">儲存設定</button></div>{% endif %}
 </form>
 
 <section class="panel">
-  <div class="panel-head"><h2>Webhook 認證 Token</h2><span class="status {{ 'ok' if webhook_token_configured else 'muted' }}">{{ '已加密設定' if webhook_token_configured else '未設定' }}</span></div>
-  <p>若接收端需要 Bearer Token，請在此設定；Token 使用平台主密鑰加密保存，不會顯示在一般設定、稽核值或 Docker Log。</p>
-  {% if g.user.role == 'administrator' %}
-  <form id="webhook-secret-form" class="inline-form"><input name="token" type="password" autocomplete="new-password" placeholder="輸入新 Token（不會回顯）" maxlength="4096"><button>儲存 Token</button><button type="button" class="secondary" id="clear-webhook-token">清除</button><button type="button" class="secondary" id="test-webhook">傳送測試通知</button></form>
-  {% endif %}
+  <div class="panel-head"><div><h2>Webhook 認證 Token</h2><p>只在啟用裝置 Webhook 通知時需要。</p></div><span class="status {{ 'ok' if webhook_token_configured else 'muted' }}">{{ '已加密設定' if webhook_token_configured else '未設定' }}</span></div>
+  <p>Token 使用平台主密鑰加密保存，不會顯示在一般設定、稽核值或 Docker Log。</p>
+  {% if g.user.role == 'administrator' %}<form id="webhook-secret-form" class="inline-form"><input name="token" type="password" autocomplete="new-password" placeholder="輸入新 Token（不會回顯）" maxlength="4096"><button>儲存 Token</button><button type="button" class="secondary" id="clear-webhook-token">清除</button><button type="button" class="secondary" id="test-webhook">傳送測試通知</button></form>{% endif %}
 </section>
 
-<section class="panel">
-  <h2>最近設定稽核</h2>
-  <div class="table-wrap"><table><thead><tr><th>時間</th><th>設定</th><th>操作者</th><th>來源</th><th>生效方式</th></tr></thead><tbody>
-    {% for entry in history %}<tr><td>{{ entry.changed_at }}</td><td><code>{{ entry.key }}</code></td><td>{{ entry.changed_by or 'system' }}</td><td>{{ entry.source_ip }}</td><td>{{ '重新啟動' if entry.requires_restart else '動態' }}</td></tr>{% else %}<tr><td colspan="5" class="empty">尚未修改設定。</td></tr>{% endfor %}
-  </tbody></table></div>
-</section>
-
-<section class="panel"><h2>功能旗標狀態</h2><p>啟用項目是已實作能力；停用項目僅預留方向，不得視為可用功能。</p><div class="table-wrap"><table><thead><tr><th>旗標</th><th>狀態</th><th>說明</th></tr></thead><tbody>{% for flag in feature_flags %}<tr><td><code>{{ flag.key }}</code></td><td>{{ '啟用' if flag.enabled else '停用' }}</td><td>{{ flag.description }}</td></tr>{% endfor %}</tbody></table></div></section>
+<details class="panel settings-advanced">
+  <summary><span><strong>部署資訊、稽核與功能旗標</strong><small>日常不需調整；排查部署問題時再展開。</small></span></summary>
+  <div class="advanced-content">
+    <h2>目前部署資訊</h2>
+    <div class="table-wrap"><table><tbody><tr><th>執行方式</th><td>{{ 'Docker 容器' if deployment.docker else '原生程序' }}</td></tr><tr><th>Web Port</th><td>{{ deployment.port }}</td></tr><tr><th>資料／照片路徑</th><td><code>{{ deployment.data_dir }}</code>／<code>{{ deployment.photo_dir }}</code></td></tr><tr><th>HTTP Access Log</th><td>{{ '啟用' if deployment.access_log else '停用（低寫入預設）' }}</td></tr><tr><th>版本</th><td><code>{{ deployment.revision }}</code></td></tr></tbody></table></div>
+    <p class="notice">主機路徑、Port、容器 CPU／記憶體上限與 Docker Log 輪替必須在容器啟動前決定，無法由容器內安全改寫。</p>
+    <h2>最近設定稽核</h2>
+    <div class="table-wrap"><table><thead><tr><th>時間</th><th>設定</th><th>操作者</th><th>來源</th><th>生效方式</th></tr></thead><tbody>{% for entry in history %}<tr><td>{{ entry.changed_at }}</td><td><code>{{ entry.key }}</code></td><td>{{ entry.changed_by or 'system' }}</td><td>{{ entry.source_ip }}</td><td>{{ '重新啟動' if entry.requires_restart else '動態' }}</td></tr>{% else %}<tr><td colspan="5" class="empty">尚未修改設定。</td></tr>{% endfor %}</tbody></table></div>
+    <h2>功能旗標狀態</h2>
+    <div class="table-wrap"><table><thead><tr><th>旗標</th><th>狀態</th><th>說明</th></tr></thead><tbody>{% for flag in feature_flags %}<tr><td><code>{{ flag.key }}</code></td><td>{{ '啟用' if flag.enabled else '停用' }}</td><td>{{ flag.description }}</td></tr>{% endfor %}</tbody></table></div>
+  </div>
+</details>
 {% endblock %}
-{% block scripts %}{% if g.user.role == 'administrator' %}<script>
-document.getElementById('settings-form').onsubmit=async event=>{
-  event.preventDefault();
-  const body={};
-  new FormData(event.target).forEach((value,key)=>body[key]=value);
-  const response=await window.inktimeFetch('/api/v1/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  const data=await response.json();
-  alert(response.ok?'設定已儲存並套用':data.message||'儲存失敗');
-  if(response.ok)location.reload();
-};
-document.getElementById('webhook-secret-form').onsubmit=async event=>{event.preventDefault();const token=new FormData(event.target).get('token');const response=await window.inktimeFetch('/api/v1/notifications/webhook-secret',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});const data=await response.json();alert(response.ok?'Token 已加密儲存':data.message||'儲存失敗');if(response.ok)location.reload();};
-document.getElementById('clear-webhook-token').onclick=async()=>{if(!confirm('確定清除 Webhook Token？'))return;const response=await window.inktimeFetch('/api/v1/notifications/webhook-secret',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"clear":true}'});if(response.ok)location.reload();};
-document.getElementById('test-webhook').onclick=async()=>{const response=await window.inktimeFetch('/api/v1/notifications/test',{method:'POST'}),data=await response.json();alert(response.ok?`測試通知狀態：${data.webhook_status}`:data.message||'測試失敗');};
-</script>{% endif %}{% endblock %}
+{% block scripts %}
+<script>
+(() => {
+  const search = document.getElementById('settings-search');
+  const cards = [...document.querySelectorAll('[data-setting-search]')];
+  const categories = [...document.querySelectorAll('[data-settings-category]')];
+  const chips = [...document.querySelectorAll('[data-category-filter]')];
+  let activeCategory = 'all';
+
+  function applyFilters() {
+    const query = search.value.trim().toLocaleLowerCase('zh-Hant-TW');
+    let visible = 0;
+    categories.forEach(category => {
+      let categoryVisible = 0;
+      category.querySelectorAll('[data-setting-search]').forEach(card => {
+        const matchText = !query || card.dataset.settingSearch.toLocaleLowerCase('zh-Hant-TW').includes(query);
+        const matchCategory = activeCategory === 'all' || category.id === activeCategory;
+        const match = matchText && matchCategory;
+        card.hidden = !match;
+        if (match) { categoryVisible += 1; visible += 1; }
+      });
+      category.hidden = categoryVisible === 0;
+    });
+    document.getElementById('settings-no-results').hidden = visible !== 0;
+    document.getElementById('settings-result-count').textContent = `找到 ${visible} 項設定`;
+  }
+
+  search.addEventListener('input', applyFilters);
+  chips.forEach(chip => chip.addEventListener('click', () => {
+    activeCategory = chip.dataset.categoryFilter;
+    chips.forEach(item => item.classList.toggle('active', item === chip));
+    applyFilters();
+  }));
+  document.querySelectorAll('.section-collapse').forEach(button => button.addEventListener('click', () => {
+    const body = button.closest('.settings-category').querySelector('.settings-category-body');
+    const expanded = button.getAttribute('aria-expanded') === 'true';
+    button.setAttribute('aria-expanded', String(!expanded));
+    button.textContent = expanded ? '展開' : '收合';
+    body.hidden = expanded;
+  }));
+  document.querySelectorAll('.switch-control input').forEach(input => input.addEventListener('change', () => {
+    input.closest('.switch-control').querySelector('em').textContent = input.checked ? '已啟用' : '已停用';
+  }));
+
+  const form = document.getElementById('settings-form');
+  {% if g.user.role == 'administrator' %}
+  const changed = new Set();
+  form.querySelectorAll('[name]').forEach(control => control.addEventListener('change', () => {
+    changed.add(control.name);
+    document.getElementById('settings-dirty-count').textContent = `已修改 ${changed.size} 項`;
+    document.getElementById('settings-savebar').classList.add('dirty');
+  }));
+  form.onsubmit = async event => {
+    event.preventDefault();
+    const body = {};
+    form.querySelectorAll('[name]').forEach(control => {
+      body[control.name] = control.type === 'checkbox' ? control.checked : control.value;
+    });
+    const button = form.querySelector('.settings-savebar button');
+    button.disabled = true;
+    button.textContent = '儲存中…';
+    const response = await window.inktimeFetch('/api/v1/settings', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    const data = await response.json();
+    if (response.ok) location.reload();
+    else { button.disabled = false; button.textContent = '儲存設定'; alert(data.message || '儲存失敗'); }
+  };
+  document.getElementById('webhook-secret-form').onsubmit=async event=>{event.preventDefault();const token=new FormData(event.target).get('token');const response=await window.inktimeFetch('/api/v1/notifications/webhook-secret',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});const data=await response.json();alert(response.ok?'Token 已加密儲存':data.message||'儲存失敗');if(response.ok)location.reload();};
+  document.getElementById('clear-webhook-token').onclick=async()=>{if(!confirm('確定清除 Webhook Token？'))return;const response=await window.inktimeFetch('/api/v1/notifications/webhook-secret',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"clear":true}'});if(response.ok)location.reload();};
+  document.getElementById('test-webhook').onclick=async()=>{const response=await window.inktimeFetch('/api/v1/notifications/test',{method:'POST'}),data=await response.json();alert(response.ok?`測試通知狀態：${data.webhook_status}`:data.message||'測試失敗');};
+  {% endif %}
+})();
+</script>
+{% endblock %}

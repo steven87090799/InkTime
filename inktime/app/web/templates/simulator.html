@@ -29,9 +29,12 @@
         <label><span>抖動算法</span><select id="dither" name="dither">
           {% for value, label in [('photo_smooth','照片平滑（減少色塊／雜點）'),('gooddisplay','Good Display 原廠相容'),('floyd_steinberg','Floyd–Steinberg（InkTime）'),('atkinson','Atkinson（較柔和）'),('bayer4','Bayer 4×4（規律顆粒）'),('bayer8','Bayer 8×8（細緻顆粒）'),('none','不抖動')] %}<option value="{{ value }}" {% if value==current_dither %}selected{% endif %}>{{ label }}</option>{% endfor %}
         </select></label>
-        <label><span>縮放方式</span><select id="fit" name="fit"><option value="cover">填滿並裁切</option><option value="contain">完整顯示（可能留白）</option></select></label>
+        <label><span>縮放方式</span><select id="fit" name="fit"><option value="cover">填滿並裁切</option><option value="contain">完整顯示（照片周圍可能留白）</option></select></label>
         <label class="range-field"><span>抖動強度 <output id="strength-output">{{ '%.1f'|format(dither_strength) }}</output></span><input id="strength" name="strength" type="range" min="0" max="2" step="0.1" value="{{ dither_strength }}"></label>
-        <label class="field-wide"><span>手動短文案（選填）</span><input id="caption" type="text" maxlength="60" placeholder="不透過模型，直接輸入要預覽的文字"><small>文案先由瀏覽器排版，再送進同一套電子紙色盤轉換；不會寫入照片資料庫。</small></label>
+        <label class="field-wide"><span>手動短文案（選填）</span><input id="caption" type="text" maxlength="60" placeholder="不透過模型，直接輸入要預覽的文字"></label>
+        <label><span>拍攝日期（選填）</span><input id="capture-date" type="date"></label>
+        <label><span>地點（選填）</span><input id="location" type="text" maxlength="30" placeholder="例如：臺北市"></label>
+        <p class="field-wide simulator-info-hint">沒有填文案、日期或地點時，照片會使用完整 480×800；有內容時才加入 96px 純白資訊帶，不會使用米白或紙張雜色。</p>
       </div>
       <input type="hidden" id="color-distance" name="color_distance" value="{{ color_distance }}">
       <button class="primary simulate-button" id="simulate-button" type="submit" disabled><span aria-hidden="true">◉</span> 產生電子紙預覽</button>
@@ -97,6 +100,8 @@
   const strength = document.getElementById('strength');
   const strengthOutput = document.getElementById('strength-output');
   const caption = document.getElementById('caption');
+  const captureDate = document.getElementById('capture-date');
+  const locationInput = document.getElementById('location');
   const resultImage = document.getElementById('result-image');
   const emptyScreen = document.getElementById('empty-screen');
   const einkDevice = document.getElementById('eink-device');
@@ -137,20 +142,28 @@
     context.fillRect(0, 0, canvas.width, canvas.height);
     if (!sourceImage) return;
     const text = caption.value.trim();
-    const imageHeight = text ? 700 : 800;
+    const dateValue = captureDate.value;
+    const dateText = dateValue ? `${Number(dateValue.slice(0, 4))}年${Number(dateValue.slice(5, 7))}月${Number(dateValue.slice(8, 10))}日` : '';
+    const locationText = locationInput.value.trim();
+    const metaText = [dateText, locationText].filter(Boolean).join('・');
+    const hasInfo = Boolean(text || metaText);
+    const imageHeight = hasInfo ? 704 : 800;
     const scale = fitSelect.value === 'contain'
       ? Math.min(canvas.width / sourceImage.width, imageHeight / sourceImage.height)
       : Math.max(canvas.width / sourceImage.width, imageHeight / sourceImage.height);
     const width = sourceImage.width * scale;
     const height = sourceImage.height * scale;
     context.drawImage(sourceImage, (canvas.width - width) / 2, (imageHeight - height) / 2, width, height);
-    if (text) {
+    if (hasInfo) {
       context.fillStyle = '#fff';
-      context.fillRect(0, 700, 480, 100);
+      context.fillRect(0, 704, 480, 96);
       context.fillStyle = '#111';
-      context.font = '24px "Noto Sans TC", "PingFang TC", sans-serif';
+      context.fillRect(20, 708, 440, 2);
+      context.font = '700 23px "Noto Sans TC", "PingFang TC", sans-serif';
       context.textBaseline = 'alphabetic';
-      context.fillText(text, 20, 732, 440);
+      if (text) context.fillText(text, 20, 741, 440);
+      context.font = '700 19px "Noto Sans TC", "PingFang TC", sans-serif';
+      if (metaText) context.fillText(metaText, 20, 779, 440);
     }
   }
 
@@ -269,7 +282,7 @@
   sampleButton.addEventListener('click', loadSample);
   form.addEventListener('submit', simulate);
   strength.addEventListener('input', () => { strengthOutput.value = Number(strength.value).toFixed(1); });
-  [fitSelect, caption].forEach(control => control.addEventListener('input', drawComposition));
+  [fitSelect, caption, captureDate, locationInput].forEach(control => control.addEventListener('input', drawComposition));
   profileSelect.addEventListener('change', updatePalette);
   ditherSelect.addEventListener('change', updateDitherControls);
   ['dragenter', 'dragover'].forEach(type => dropZone.addEventListener(type, event => { event.preventDefault(); dropZone.classList.add('is-dragging'); }));

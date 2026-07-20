@@ -5,7 +5,7 @@
   <div>
     <p class="eyebrow">可版本化的照片排序</p>
     <h1>評分控制中心</h1>
-    <p>調整模型判斷規則與綜合排序權重；原始四項模型分數永遠保留。</p>
+    <p>用清楚的評分錨點拉開模型原始分，再依照片庫相對分布產生鑑別分；原始四項模型分數永遠保留。</p>
   </div>
 </div>
 
@@ -13,11 +13,24 @@
   <article><span>目前版本</span><strong>{{ current_profile.name }}</strong></article>
   <article><span>版本數</span><strong>{{ versions|length }}</strong></article>
   <article><span>啟用 Provider</span><strong>{{ provider_count }}</strong></article>
-  <article><span>最愛加分</span><strong>+{{ current_profile.favorite_bonus }}</strong></article>
+  <article><span>已有評分照片</span><strong>{{ distribution.count }}</strong></article>
+  <article><span>原始分中位數</span><strong>{{ distribution.median if distribution.median is not none else '—' }}</strong></article>
+  <article><span>原始分範圍</span><strong>{{ distribution.spread if distribution.spread is not none else '—' }}</strong></article>
+</section>
+
+<section class="panel calibration-panel">
+  <div class="panel-head"><div><h2>照片庫相對鑑別分</h2><p>解決模型常把照片集中打在相近區間、肉眼難以比較的問題。</p></div><span class="status {{ 'ok' if distribution.calibration_ready else 'muted' }}">{{ '校準已啟用' if distribution.calibration_ready else '等待更多照片' }}</span></div>
+  <div class="calibration-explainer">
+    <article><strong>1. 保留原始分</strong><p>回憶、美觀、技術、情緒與綜合排序都不覆寫，仍可追溯模型判斷。</p></article>
+    <article><strong>2. 比較整個照片庫</strong><p>至少 5 張且有 3 種分數後，以同分平均名次計算相對百分位。</p></article>
+    <article><strong>3. 顯示更有差異</strong><p>鑑別分以 35% 原始分＋65% 相對百分位呈現，排序方向不變。</p></article>
+  </div>
+  <p class="calibration-range">目前原始綜合分：{{ distribution.minimum if distribution.minimum is not none else '—' }}～{{ distribution.maximum if distribution.maximum is not none else '—' }}。照片庫、照片詳情與單張測試會同時標示原始分、鑑別分及「精選／推薦／一般／較弱」。</p>
+  <details class="scoring-research"><summary>為什麼採用這個方向？</summary><p>GitHub 上的 NIMA 將美感與技術品質分開，Siamese NIMA 用相對配對強化細微排序；Facet 也採多維品質與照片剔除。InkTime 保留現有輕量部署，不強制下載大型 PyTorch／TensorFlow 模型，先採同樣的「多維＋相對排序」原則。</p><p><a href="https://github.com/idealo/image-quality-assessment" target="_blank" rel="noopener noreferrer">NIMA 實作</a> · <a href="https://github.com/ryanfwy/image-quality" target="_blank" rel="noopener noreferrer">Siamese NIMA</a> · <a href="https://github.com/ncoevoet/facet" target="_blank" rel="noopener noreferrer">Facet</a></p></details>
 </section>
 
 <section class="panel">
-  <div class="panel-head"><div><h2>規則與綜合權重</h2><p>四項權重合計必須是 100%。儲存會建立新版本，不會覆蓋歷史。</p></div><strong id="weight-total" class="weight-total">100%</strong></div>
+  <div class="panel-head"><div><h2>規則與綜合權重</h2><p>四項權重合計必須是 100%。儲存會建立新版本，不會覆蓋歷史。</p></div><div class="scoring-panel-actions">{% if g.user.role == 'administrator' %}<button class="secondary" type="button" id="distinctive-preset">套用高鑑別度範本</button>{% endif %}<strong id="weight-total" class="weight-total">100%</strong></div></div>
   {% if g.user.role == 'administrator' %}
   <form id="scoring-profile-form" class="scoring-form">
     <label class="profile-name">版本名稱<input name="name" maxlength="80" value="{{ current_profile.name }} 的調整" required></label>
@@ -28,7 +41,7 @@
       <label>情緒與故事 <output data-output="emotion_weight">{{ current_profile.emotion_weight }}%</output><input type="range" name="emotion_weight" min="0" max="100" step="1" value="{{ current_profile.emotion_weight }}"></label>
       <label>最愛照片額外加分 <output data-output="favorite_bonus">+{{ current_profile.favorite_bonus }}</output><input type="range" name="favorite_bonus" min="0" max="30" step="1" value="{{ current_profile.favorite_bonus }}"></label>
     </div>
-    <label class="rules-editor">照片高低分規則<textarea name="rules" rows="28" minlength="100" maxlength="12000" required>{{ current_profile.rules }}</textarea></label>
+    <label class="rules-editor">照片高低分規則<small>高鑑別度範本會要求模型使用完整 0～100 範圍，避免不確定時一律給 75～80 分。</small><textarea name="rules" rows="28" minlength="100" maxlength="12000" required>{{ current_profile.rules }}</textarea></label>
     <button class="primary" type="submit">儲存為新版本</button>
   </form>
   {% else %}
@@ -119,19 +132,26 @@
       return node;
     };
     const cards = element('div', '', 'score-cards');
-    [['綜合排序', data.ranking_score], ['回憶', analysis.memory_score], ['美觀', analysis.beauty_score], ['技術', analysis.technical_quality_score], ['情緒', analysis.emotion_score]].forEach(([label, value]) => {
+    [['鑑別分', data.distinguishing_score], ['原始綜合', data.ranking_score], ['回憶', analysis.memory_score], ['美觀', analysis.beauty_score], ['技術', analysis.technical_quality_score], ['情緒', analysis.emotion_score]].forEach(([label, value]) => {
       const card = document.createElement('article');
       card.append(element('span', label), element('strong', String(value)));
       cards.append(card);
     });
     result.replaceChildren(
       cards,
-      element('h3', analysis.caption),
+      element('h3', `${data.score_band}｜${analysis.caption}`),
       element('p', analysis.reason),
       element('p', `類型：${analysis.types.join('、')}`),
       element('small', `${data.profile.name} · ${data.usage.provider}/${data.usage.model} · ${data.usage.input_tokens + data.usage.output_tokens} Token · US$ ${Number(data.usage.cost).toFixed(6)} · ${data.usage.latency_ms} ms`)
     );
     result.hidden = false;
+  });
+
+  document.getElementById('distinctive-preset').addEventListener('click', () => {
+    if (!confirm('會將編輯器內容換成高鑑別度範本；尚未儲存的文字會被取代，確定？')) return;
+    profileForm.elements.rules.value = {{ recommended_rules|tojson }};
+    profileForm.elements.name.value = '高鑑別度評分規則';
+    profileForm.elements.rules.focus();
   });
 })();
 </script>

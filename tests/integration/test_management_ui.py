@@ -413,8 +413,8 @@ def test_photo_cards_show_total_score_and_e6_estimate(client, app):
 
     body = client.get("/photos").get_data(as_text=True)
 
-    assert "總分 84.0（模型＋E6）" in body
-    assert "總分 91.9（E6 暫估）" in body
+    assert "選片分 84.0（模型＋E6）" in body
+    assert "選片分 91.9（E6 暫估）" in body
 
 
 def test_photo_library_loads_200_per_page_and_keeps_filters(client, app):

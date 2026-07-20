@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 from pathlib import Path
+from statistics import median
 import tempfile
 
 from flask import Blueprint, abort, current_app, g, render_template, request
 from PIL import UnidentifiedImageError
 
 from inktime.app.domain.analysis import AnalysisValidationError
+from inktime.app.domain.analysis.scoring import (
+    DISTINCTIVE_SCORING_RULES,
+    calculate_distinguishing_score,
+    prepare_score_distribution,
+    score_band,
+)
 from inktime.app.providers.openai_compatible import ProviderHTTPError
 from inktime.app.services.budgets import BudgetExceeded
 from inktime.app.web.access import administrator_required, login_required
@@ -22,6 +29,15 @@ UPLOAD_CHUNK_BYTES = 1024 * 1024
 @login_required
 def scoring_page():
     repository = current_app.extensions["inktime_scoring_repository"]
+    population = current_app.extensions["inktime_photo_repository"].score_population()
+    distribution = {
+        "count": len(population),
+        "minimum": round(min(population), 1) if population else None,
+        "maximum": round(max(population), 1) if population else None,
+        "median": round(median(population), 1) if population else None,
+        "spread": round(max(population) - min(population), 1) if population else None,
+        "calibration_ready": len(population) >= 5 and len(set(population)) >= 3,
+    }
     return render_template(
         "scoring.html",
         current_profile=repository.current(),
@@ -31,6 +47,8 @@ def scoring_page():
             for provider in current_app.extensions["inktime_provider_repository"].list()
             if provider["enabled"]
         ),
+        distribution=distribution,
+        recommended_rules=DISTINCTIVE_SCORING_RULES,
     )
 
 
@@ -111,4 +129,14 @@ def test_scoring():
                     description if "-" in description[:12] else f"VLM-008 {description}"
                 ),
             )
+    raw_score = float(result["ranking_score"])
+    calibrated, percentile = calculate_distinguishing_score(
+        raw_score,
+        prepare_score_distribution(
+            current_app.extensions["inktime_photo_repository"].score_population()
+        ),
+    )
+    result["distinguishing_score"] = calibrated
+    result["ranking_percentile"] = percentile
+    result["score_band"] = score_band(percentile, calibrated)
     return result

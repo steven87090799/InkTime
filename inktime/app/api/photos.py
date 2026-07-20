@@ -9,6 +9,11 @@ from flask import Blueprint, abort, current_app, g, render_template, request, se
 
 from inktime.app.core.paths import safe_join
 from inktime.app.domain.analysis.schema import ALLOWED_TYPES
+from inktime.app.domain.analysis.scoring import (
+    calculate_distinguishing_score,
+    prepare_score_distribution,
+    score_band,
+)
 from inktime.app.web.access import administrator_required, login_required
 
 
@@ -37,20 +42,30 @@ def photos_page():
     e6_weight = float(
         current_app.extensions["inktime_settings_repository"].get("render.e6_weight", 20)
     ) / 100.0
+    score_distribution = prepare_score_distribution(_repository().score_population())
     photos = []
     for stored_row in rows:
         photo = dict(stored_row)
         ranking_score = photo.get("ranking_score")
         e6_score = photo.get("e6_score")
+        calibrated_score = None
+        percentile = None
+        if ranking_score is not None:
+            calibrated_score, percentile = calculate_distinguishing_score(
+                float(ranking_score), score_distribution
+            )
+            photo["raw_ranking_score"] = round(float(ranking_score), 1)
+            photo["ranking_percentile"] = percentile
+            photo["score_band"] = score_band(percentile, calibrated_score)
         if ranking_score is not None and e6_score is not None:
             photo["total_score"] = round(
-                float(ranking_score) * (1.0 - e6_weight) + float(e6_score) * e6_weight,
+                float(calibrated_score) * (1.0 - e6_weight) + float(e6_score) * e6_weight,
                 1,
             )
-            photo["total_score_source"] = "模型＋E6"
+            photo["total_score_source"] = "相對校準＋E6" if percentile is not None else "模型＋E6"
         elif ranking_score is not None:
-            photo["total_score"] = round(float(ranking_score), 1)
-            photo["total_score_source"] = "模型"
+            photo["total_score"] = calibrated_score
+            photo["total_score_source"] = "相對校準" if percentile is not None else "模型"
         elif e6_score is not None:
             photo["total_score"] = round(float(e6_score), 1)
             photo["total_score_source"] = "E6 暫估"
@@ -121,6 +136,7 @@ def photo_detail(photo_id: str):
             "SELECT * FROM photo_events WHERE photo_id=? ORDER BY created_at DESC LIMIT 100", (photo_id,)
         ).fetchall()
     analyses = []
+    score_distribution = prepare_score_distribution(_repository().score_population())
     for row in analysis_rows:
         analysis = dict(row)
         try:
@@ -130,6 +146,13 @@ def photo_detail(photo_id: str):
         analysis["origin_label"] = (
             "本機判斷" if analysis.get("provider") == "local" else "模型判斷"
         )
+        if analysis.get("ranking_score") is not None:
+            calibrated, percentile = calculate_distinguishing_score(
+                float(analysis["ranking_score"]), score_distribution
+            )
+            analysis["distinguishing_score"] = calibrated
+            analysis["ranking_percentile"] = percentile
+            analysis["score_band"] = score_band(percentile, calibrated)
         analyses.append(analysis)
     prefilter = current_app.extensions["inktime_analysis_service"].prefilter_snapshot(photo)
     return render_template(
@@ -181,10 +204,14 @@ def update_photo_crop(photo_id: str):
         if mode == "auto":
             _repository().update_crop(photo_id, manual_x=None, manual_y=None)
         else:
+            manual_x = payload.get("x")
+            manual_y = payload.get("y")
+            if manual_x is None or manual_y is None:
+                raise ValueError("手動裁切必須提供 X 與 Y")
             _repository().update_crop(
                 photo_id,
-                manual_x=float(payload.get("x")),
-                manual_y=float(payload.get("y")),
+                manual_x=float(manual_x),
+                manual_y=float(manual_y),
             )
     except (TypeError, ValueError) as exc:
         abort(400, description=f"RENDER-005 {exc}")

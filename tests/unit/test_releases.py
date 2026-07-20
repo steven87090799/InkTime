@@ -9,6 +9,7 @@ from PIL import Image
 import pytest
 
 from inktime.app.domain.rendering.fonts import FontCoverageError
+from inktime.app.domain.rendering.palette import encode_image
 from inktime.app.domain.rendering.release import AtomicReleasePublisher, pack_four_color_2bpp
 
 
@@ -196,6 +197,18 @@ def test_all_photo_frame_layouts_render_at_panel_size(app, tmp_path):
     for layout in ("full", "postcard", "photo_info", "calendar", "weather_sensor"):
         rendered = service.render_photo("layout-photo", layout=layout)
         assert rendered.size == (480, 800), layout
+
+    info = service.render_photo("layout-photo", layout="photo_info")
+    assert info.getpixel((479, 799)) == (255, 255, 255)
+    assert info.getpixel((479, 720)) == (255, 255, 255)
+    quantized = encode_image(
+        info,
+        profile_key="gdep073e01_6c",
+        dither="floyd_steinberg",
+        color_distance="oklab",
+        strength=1,
+    ).preview
+    assert quantized.getpixel((479, 799)) == (255, 255, 255)
 
 
 def test_formal_caption_uses_builtin_traditional_font_without_fallback(app, tmp_path):
