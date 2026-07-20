@@ -128,6 +128,36 @@ class WorkerRunner:
                             profile_keys=[str(value) for value in settings["profile_keys"]],
                         )
                     return self.app.extensions["inktime_render_service"].publish(*arguments)
+                if job["kind"] == "virtual_display":
+                    root = Path(settings["root_path"]).expanduser().resolve()
+                    scanner = PhotoScanner(
+                        self.app.extensions["inktime_photo_repository"],
+                        PhotoPreprocessor(),
+                        self.app.extensions["inktime_thumbnail_cache"],
+                    )
+                    scan = scanner.scan(
+                        settings.get("library_name", "電子紙模擬照片"),
+                        root,
+                        build_thumbnails=False,
+                        progress_callback=log_scan_progress,
+                        progress_interval_items=progress_items,
+                        progress_interval_seconds=progress_seconds,
+                    )
+                    photo_ids = self.app.extensions[
+                        "inktime_photo_repository"
+                    ].list_existing_photo_ids(
+                        str(scan["library_id"]),
+                        root,
+                        limit=int(settings.get("quantity", 5)),
+                    )
+                    if not photo_ids:
+                        raise ValueError("IMG-002 模擬照片資料夾內沒有可用圖片")
+                    release = self.app.extensions["inktime_render_service"].publish(
+                        photo_ids,
+                        str(job["created_by"] or "system"),
+                        profile_keys=[str(settings["profile_key"])],
+                    )
+                    return {"scan": scan, "release": release}
                 if job["kind"] == "backup":
                     path = self.app.extensions["inktime_backup_service"].create()
                     return {"backup": path.name}

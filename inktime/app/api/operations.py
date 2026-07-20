@@ -80,7 +80,10 @@ def download_backup(name: str):
 @bp.get("/maintenance")
 @login_required
 def maintenance_page():
-    return render_template("maintenance.html")
+    return render_template(
+        "maintenance.html",
+        photo_dir=current_app.config["INKTIME_PHOTO_DIR"],
+    )
 
 
 @bp.post("/api/v1/maintenance/scan")
@@ -103,3 +106,28 @@ def enqueue_scan():
     )
     current_app.extensions["inktime_job_service"].start(job_id)
     return {"id": job_id, "detail_url": f"/jobs/{job_id}"}, 202
+
+
+@bp.post("/api/v1/maintenance/virtual-display")
+@administrator_required
+def enqueue_virtual_display():
+    """掃描固定投放資料夾並發布正式裝置也能接收的 Release。"""
+    settings = current_app.extensions["inktime_settings_repository"]
+    repository = current_app.extensions["inktime_job_repository"]
+    job_id = repository.create_maintenance(
+        kind="virtual_display",
+        name="虛擬墨水屏：掃描並發布",
+        settings={
+            "root_path": str(current_app.config["INKTIME_PHOTO_DIR"]),
+            "library_name": "電子紙模擬照片",
+            "profile_key": str(settings.get("render.profile", "safe_4c")),
+            "quantity": max(1, min(int(settings.get("render.quantity", 5)), 50)),
+        },
+        created_by=g.user["id"],
+    )
+    current_app.extensions["inktime_job_service"].start(job_id)
+    return {
+        "id": job_id,
+        "detail_url": f"/jobs/{job_id}",
+        "receiver_url": "/virtual-display",
+    }, 202

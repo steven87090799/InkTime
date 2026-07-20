@@ -9,6 +9,7 @@ import sqlite3
 from typing import Iterator
 from uuid import uuid4
 
+from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.db import Database
 from inktime.app.domain.analysis.scoring import (
     DEFAULT_FAVORITE_BONUS,
@@ -308,6 +309,38 @@ class PhotoRepository:
                 """,
                 (photo_id,),
             ).fetchone()
+
+    def list_existing_photo_ids(
+        self, library_id: str, root: Path, *, limit: int
+    ) -> list[str]:
+        """依檔案修改時間挑選仍存在於指定照片庫內的照片。"""
+        bounded_limit = max(1, min(int(limit), 100))
+        root = root.expanduser().resolve()
+        selected: list[str] = []
+        offset = 0
+        while len(selected) < bounded_limit:
+            with self.database.session() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT id,relative_path FROM photos
+                    WHERE library_id=?
+                    ORDER BY modified_time DESC,id DESC LIMIT 100 OFFSET ?
+                    """,
+                    (library_id, offset),
+                ).fetchall()
+            if not rows:
+                break
+            for row in rows:
+                try:
+                    path = safe_join(root, str(row["relative_path"]))
+                except UnsafePathError:
+                    continue
+                if path.is_file():
+                    selected.append(str(row["id"]))
+                    if len(selected) >= bounded_limit:
+                        break
+            offset += len(rows)
+        return selected
 
     def update_manual(
         self,

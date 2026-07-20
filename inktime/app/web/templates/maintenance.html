@@ -1,1 +1,44 @@
-{% extends "base.html" %}{% block title %}系統維護｜InkTime{% endblock %}{% block content %}<div class="page-head"><div><p class="eyebrow">背景維護</p><h1>照片掃描與維護</h1><p>掃描會建立可追蹤的背景工作；相同路徑、檔案大小與修改時間的照片會自動跳過，只有新增或變更的照片才重算 SHA-256 與影像特徵。</p></div></div><section class="panel narrow"><h2>增量掃描照片資料夾</h2><form id="scan-form" class="form-stack"><label>照片庫名稱<input name="library_name" value="主要照片庫"></label><label>主機或容器內路徑<input name="root_path" placeholder="/photos" required></label><label><input type="checkbox" name="build_thumbnails" checked> 為新增或變更照片建立 512px 本地縮圖</label><button class="primary">建立增量掃描工作</button></form></section><section class="panel"><h2>其他維護</h2><p><a href="/backups">立即備份與下載</a> · <a href="/photos">清理縮圖快取</a> · <a href="/diagnostics">資料庫完整性與系統狀態</a></p></section>{% endblock %}{% block scripts %}<script>document.getElementById('scan-form').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target);const body={library_name:f.get('library_name'),root_path:f.get('root_path'),build_thumbnails:f.has('build_thumbnails')};const r=await window.inktimeFetch('/api/v1/maintenance/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),d=await r.json();if(r.ok)location.href=d.detail_url;else alert(d.message||'建立失敗');};</script>{% endblock %}
+{% extends "base.html" %}
+{% block title %}系統維護｜InkTime{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="eyebrow">背景維護</p>
+    <h1>照片掃描與維護</h1>
+    <p>掃描會建立可追蹤的背景工作；相同路徑、檔案大小與修改時間的照片會自動跳過，只有新增或變更的照片才重算。</p>
+  </div>
+</div>
+
+<section class="panel narrow">
+  <h2>虛擬墨水屏快速測試</h2>
+  <p>將 JPG、PNG、WebP 或 HEIC 等照片放入投放資料夾，再按一次按鈕。系統只做本機掃描、480×800 排版與正式色盤發布，不呼叫模型。</p>
+  <dl>
+    <dt>目前照片路徑</dt><dd><code>{{ photo_dir }}</code></dd>
+    <dt>接收端</dt><dd><a href="/virtual-display" target="_blank" rel="noopener">另開唯讀虛擬墨水屏</a></dd>
+  </dl>
+  {% if g.user.role == 'administrator' %}<button class="primary" id="publish-virtual">掃描並送到虛擬墨水屏</button>{% endif %}
+  <p class="test-status" id="virtual-status" role="status" aria-live="polite"></p>
+</section>
+
+<section class="panel narrow">
+  <h2>增量掃描其他照片資料夾</h2>
+  <form id="scan-form" class="form-stack">
+    <label>照片庫名稱<input name="library_name" value="主要照片庫"></label>
+    <label>主機或容器內路徑<input name="root_path" value="{{ photo_dir }}" required></label>
+    <label><input type="checkbox" name="build_thumbnails" checked> 為新增或變更照片建立 512px 本地縮圖</label>
+    <button class="primary">建立增量掃描工作</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>其他維護</h2>
+  <p><a href="/backups">立即備份與下載</a> · <a href="/photos">清理縮圖快取</a> · <a href="/diagnostics">資料庫完整性與系統狀態</a></p>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+document.getElementById('scan-form').onsubmit=async event=>{event.preventDefault();const form=new FormData(event.target);const body={library_name:form.get('library_name'),root_path:form.get('root_path'),build_thumbnails:form.has('build_thumbnails')};const response=await window.inktimeFetch('/api/v1/maintenance/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),data=await response.json();if(response.ok)location.href=data.detail_url;else alert(data.message||'建立失敗');};
+const virtualButton=document.getElementById('publish-virtual');
+if(virtualButton)virtualButton.onclick=async()=>{const status=document.getElementById('virtual-status');virtualButton.disabled=true;status.textContent='正在建立掃描與發布工作…';const response=await window.inktimeFetch('/api/v1/maintenance/virtual-display',{method:'POST'}),data=await response.json();if(response.ok){status.innerHTML=`工作已建立。<a href="${data.detail_url}">查看進度</a>；完成後虛擬墨水屏會自動收到畫面。`;}else{virtualButton.disabled=false;status.textContent=data.message||'建立失敗';}};
+</script>
+{% endblock %}

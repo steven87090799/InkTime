@@ -8,7 +8,7 @@
     <h1>電子紙渲染</h1>
     <p>固定輸出 480×800，依面板 Profile 產生四色 2bpp 或六／七色 indexed4；每張檔案都有 SHA-256，失敗不會改動該 Profile 的 latest 指標。</p>
   </div>
-  <div><a class="secondary" href="/simulator">開啟電子紙模擬器</a>{% if g.user.role=='administrator' %} <button class="primary" id="publish">發布目前 Profile</button> <button class="secondary" id="publish-all">發布全部 Profile</button>{% endif %}</div>
+  <div><a class="secondary" href="/simulator">開啟手動模擬器</a> <a class="secondary" href="/virtual-display" target="_blank" rel="noopener">開啟虛擬墨水屏</a>{% if g.user.role=='administrator' %} <button class="primary" id="publish">發布目前 Profile</button> <button class="secondary" id="publish-all">發布全部 Profile</button>{% endif %}</div>
 </div>
 
 {% set active = profiles|selectattr('key','equalto',current_profile)|first %}

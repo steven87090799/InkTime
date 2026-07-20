@@ -24,7 +24,7 @@ x-common: &common
     # 可寫資料：SQLite、Session Key、縮圖、字型、備份與發布版本。
     - ${INKTIME_DATA_PATH:-./data}:/data
     # 原始照片只讀掛載；容器內一律從 /photos 存取，避免誤刪 NAS 照片。
-    - ${INKTIME_PHOTO_PATH:-./test}:/photos:ro
+    - ${INKTIME_PHOTO_PATH:-./simulation_photos}:/photos:ro
   # 容器 Root filesystem 唯讀；需要的暫存空間另外掛在 /tmp。
   read_only: true
   tmpfs:

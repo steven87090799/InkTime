@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>虛擬墨水屏｜InkTime</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='virtual-display.css') }}">
+</head>
+<body>
+  <header class="receiver-header">
+    <div>
+      <p class="receiver-kicker">INKTIME VIRTUAL RECEIVER</p>
+      <h1>虛擬墨水屏</h1>
+      <p class="receiver-description">唯讀接收正式 Release 的 Manifest 與原始 BIN，不上傳、不修改，也不觸發發布。</p>
+    </div>
+    <div class="receiver-header-actions">
+      <span class="connection-state waiting" id="connection-state"><i></i><span>等待發布</span></span>
+      <a href="/rendering">返回管理介面</a>
+    </div>
+  </header>
+
+  <main class="receiver-layout">
+    <section class="display-stage" aria-labelledby="display-title">
+      <div class="stage-heading">
+        <div><p>LIVE FRAME</p><h2 id="display-title">{{ profile.label }}</h2></div>
+        <span id="frame-position">尚未收到畫面</span>
+      </div>
+      <div class="display-device" id="display-device">
+        <div class="device-sensor" aria-hidden="true"></div>
+        <div class="display-surface">
+          <canvas id="display-canvas" width="480" height="800" aria-label="虛擬電子墨水屏接收畫面"></canvas>
+          <div class="display-placeholder" id="display-placeholder">
+            <span class="placeholder-mark" aria-hidden="true">◫</span>
+            <strong>等待第一個 Release</strong>
+            <small>投放照片後，從維護頁執行「掃描並送到虛擬墨水屏」。</small>
+          </div>
+          <div class="refresh-overlay" aria-hidden="true"></div>
+        </div>
+        <div class="device-footer"><span>480 × 800</span><i aria-hidden="true"></i><span>RECEIVE ONLY</span></div>
+      </div>
+    </section>
+
+    <section class="receiver-console" aria-label="接收統計與除錯資訊">
+      <div class="console-card current-frame">
+        <div class="card-title"><div><p>LAST RECEIPT</p><h2>目前接收內容</h2></div><span id="verification-badge">尚未驗證</span></div>
+        <dl>
+          <dt>Release</dt><dd id="meta-release">—</dd>
+          <dt>檔案</dt><dd id="meta-file">—</dd>
+          <dt>Profile</dt><dd id="meta-profile">{{ profile.key }}</dd>
+          <dt>格式</dt><dd id="meta-format">{{ profile.pixel_format }}</dd>
+          <dt>發布時間</dt><dd id="meta-created">—</dd>
+          <dt>接收時間</dt><dd id="meta-received">—</dd>
+          <dt>SHA-256</dt><dd><code id="meta-sha">—</code></dd>
+        </dl>
+      </div>
+
+      <div class="stats-grid" aria-label="接收統計">
+        <article><span>執行時間</span><strong id="stat-uptime">00:00:00</strong></article>
+        <article><span>Manifest 輪詢</span><strong id="stat-polls">0</strong></article>
+        <article><span>收到 Release</span><strong id="stat-releases">0</strong></article>
+        <article><span>成功畫面</span><strong id="stat-frames">0</strong></article>
+        <article><span>累計資料量</span><strong id="stat-bytes">0 B</strong></article>
+        <article><span>SHA 驗證</span><strong id="stat-verifications">0</strong></article>
+        <article><span>最後延遲</span><strong id="stat-latency">—</strong></article>
+        <article><span>錯誤</span><strong id="stat-errors">0</strong></article>
+      </div>
+
+      <div class="console-card palette-card">
+        <div class="card-title"><div><p>PALETTE TELEMETRY</p><h2>畫面色彩分布</h2></div><span id="palette-total">0 px</span></div>
+        <div class="palette-distribution" id="palette-distribution"><p class="empty-console">收到畫面後顯示每個面板色的像素比例。</p></div>
+      </div>
+
+      <div class="console-card debug-card">
+        <div class="card-title"><div><p>DEBUG STREAM</p><h2>接收除錯紀錄</h2></div><span>最多保留 80 筆</span></div>
+        <ol class="debug-stream" id="debug-stream" aria-live="polite"></ol>
+      </div>
+    </section>
+  </main>
+
+  <script id="receiver-config" type="application/json">{{ {
+    "manifestUrl": manifest_url,
+    "pollSeconds": poll_seconds,
+    "profile": {
+      "key": profile.key,
+      "label": profile.label,
+      "pixelFormat": profile.pixel_format
+    }
+  }|tojson }}</script>
+  <script src="{{ url_for('static', filename='virtual-display.js') }}"></script>
+</body>
+</html>

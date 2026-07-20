@@ -109,7 +109,7 @@ class JobRepository:
             return connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
 
     def create_maintenance(self, *, kind: str, name: str, settings: dict, created_by: str | None) -> str:
-        if kind not in {"scan", "backup", "render", "cleanup"}:
+        if kind not in {"scan", "backup", "render", "cleanup", "virtual_display"}:
             raise ValueError("不支援的維護工作")
         job_id = str(uuid4())
         item_id = str(uuid4())

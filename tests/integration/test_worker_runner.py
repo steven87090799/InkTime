@@ -76,3 +76,32 @@ def test_release_requested_by_ui_runs_as_background_job(client, app, monkeypatch
     WorkerRunner(app).run_once()
     assert app.extensions["inktime_job_repository"].get(job_id)["status"] == "completed"
     assert published and published[0][0] == []
+
+
+def test_virtual_display_inbox_scans_and_publishes_without_provider(client, app, tmp_path):
+    from tests.conftest import create_admin, csrf, login
+
+    root = tmp_path / "simulation-photos"
+    root.mkdir()
+    Image.new("RGB", (160, 240), "purple").save(root / "receiver-test.png")
+    app.config["INKTIME_PHOTO_DIR"] = root
+    create_admin(app)
+    login(client)
+
+    response = client.post(
+        "/api/v1/maintenance/virtual-display",
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+
+    assert response.status_code == 202
+    assert response.json["receiver_url"] == "/virtual-display"
+    job_id = response.json["id"]
+    assert WorkerRunner(app).run_once() == 1
+    job = app.extensions["inktime_job_repository"].get(job_id)
+    assert job["status"] == "completed"
+    manifest = client.get("/api/v1/virtual-display/manifest?profile=safe_4c")
+    assert manifest.status_code == 200
+    assert manifest.json["files"][0]["source_photo_id"]
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 0

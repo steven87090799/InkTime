@@ -24,6 +24,8 @@ data/*.key
 
 # Outputs
 output/
+simulation_photos/*
+!simulation_photos/README.md
 
 # Database
 filelist.txt

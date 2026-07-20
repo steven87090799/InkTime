@@ -19,6 +19,7 @@ def test_primary_management_pages_render(client, app):
         "/scoring",
         "/costs",
         "/simulator",
+        "/virtual-display",
         "/rendering",
         "/devices",
         "/energy",
@@ -208,6 +209,42 @@ def test_epaper_simulator_rejects_unknown_profile(client, app):
     )
     assert response.status_code == 400
     assert response.json["error_code"] == "RENDER-004"
+
+
+def test_virtual_display_receives_and_verifies_formal_release_payload(client, app):
+    create_admin(app)
+    login(client)
+    manifest = app.extensions["inktime_release_publisher"].publish(
+        [("virtual-photo", Image.new("RGB", (480, 800), "gold"))],
+        profile_key="safe_4c",
+        dither="none",
+        color_distance="rgb",
+        dither_strength=0,
+    )
+
+    page = client.get("/virtual-display")
+    body = page.get_data(as_text=True)
+    assert page.status_code == 200
+    assert "RECEIVE ONLY" in body
+    assert "不觸發發布" in body
+    assert 'type="file"' not in body
+
+    response = client.get("/api/v1/virtual-display/manifest?profile=safe_4c")
+    assert response.status_code == 200
+    assert response.headers["X-InkTime-Receiver"] == "virtual-display"
+    assert response.json["release_id"] == manifest["release_id"]
+    assert response.json["receiver"]["mode"] == "read_only"
+    file_entry = response.json["files"][0]
+    payload = client.get(response.json["download_base_url"] + file_entry["name"])
+    assert payload.status_code == 200
+    assert payload.mimetype == "application/octet-stream"
+    assert len(payload.data) == 96_000
+    assert payload.headers["X-InkTime-Payload-SHA256"] == file_entry["sha256"]
+
+    missing = client.get(
+        f"/api/v1/virtual-display/releases/{manifest['release_id']}/files/manifest.json"
+    )
+    assert missing.status_code == 404
 
 
 def test_builtin_traditional_chinese_fonts_preview_and_switch(client, app):

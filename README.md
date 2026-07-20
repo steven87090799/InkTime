@@ -82,7 +82,7 @@ flowchart TB
 
 ```bash
 cp .env.example .env
-# 編輯 .env 的 INKTIME_PHOTO_PATH；這是部署層必要路徑，不是日常分析參數。
+# 預設已使用 ./simulation_photos；可再把 INKTIME_PHOTO_PATH 改成正式相簿路徑。
 docker compose up -d --build
 ```
 
@@ -99,7 +99,7 @@ docker compose up -d --build
 ## 首次使用
 
 1. 建立管理員並登入。
-2. 尚未準備模型或電子紙時，可先到「模擬器」用本機照片驗證 480×800 排版與四色／六色／七色輸出；這個流程不會呼叫模型。
+2. 尚未準備模型或電子紙時，可將照片放進 `simulation_photos/`，到「維護」按「掃描並送到虛擬墨水屏」，再用獨立的 `/virtual-display` 接收正式 Manifest 與 BIN；這個流程不會呼叫模型。
 3. 要啟用智慧選片時，到「模型」新增 OpenAI、OpenAI 相容或本地端點；API Key 加密儲存且只顯示遮罩。
 4. 到「維護」輸入容器內照片路徑（Compose 預設 `/photos`），建立背景掃描工作。
 5. 到「工作」建立兩階段智慧分析，確認照片數、Token、費用範圍與工作預算後啟動。
