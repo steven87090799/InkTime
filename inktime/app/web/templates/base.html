@@ -1,11 +1,3 @@
-{% macro nav_item(href, icon, label, hint, match=None) -%}
-  {% set route = match or href %}
-  {% set active = request.path == route or (route != '/dashboard' and request.path.startswith(route ~ '/')) %}
-  <a class="nav-item{% if active %} active{% endif %}" href="{{ href }}"{% if active %} aria-current="page"{% endif %} data-nav-search="{{ label }} {{ hint }}">
-    <span class="nav-icon" aria-hidden="true">{{ icon }}</span>
-    <span><strong>{{ label }}</strong><small>{{ hint }}</small></span>
-  </a>
-{%- endmacro %}
 <!doctype html>
 <html lang="zh-Hant-TW">
 <head>
@@ -16,81 +8,45 @@
   <script>
     (() => {
       let savedTheme = null;
-      try { savedTheme = localStorage.getItem('inktime-theme'); } catch (_error) {}
+      try {
+        savedTheme = localStorage.getItem('inktime-theme');
+      } catch (_error) {
+        // Storage may be unavailable in privacy-restricted browser contexts.
+      }
       const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
       document.documentElement.dataset.theme =
-        savedTheme === 'dark' || savedTheme === 'light' ? savedTheme : (prefersDark ? 'dark' : 'light');
+        savedTheme === 'dark' || savedTheme === 'light'
+          ? savedTheme
+          : (prefersDark ? 'dark' : 'light');
     })();
   </script>
   <link rel="stylesheet" href="{{ url_for('static', filename='platform.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='platform-extra.css') }}">
   {% block head %}{% endblock %}
 </head>
-<body class="{% if g.user %}app-authenticated{% endif %}">
+<body>
   <header class="topbar">
-    <div class="topbar-start">
-      {% if g.user %}<button class="nav-toggle" id="nav-toggle" type="button" aria-label="開啟功能選單" aria-controls="app-sidebar" aria-expanded="false"><span></span><span></span><span></span></button>{% endif %}
-      <a class="brand" href="/dashboard"><span class="brand-mark" aria-hidden="true">I</span><span class="brand-copy">InkTime<small>回憶墨水屏</small></span></a>
-    </div>
+    <a class="brand" href="/dashboard">InkTime <span>回憶管理平台</span></a>
     <div class="top-actions">
-      {% if g.user %}<a class="top-shortcut" href="/photos">搜尋照片</a><a class="top-shortcut" href="/rendering">預覽畫面</a>{% endif %}
-      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="切換為深色模式" aria-pressed="false"><span class="theme-icon" aria-hidden="true">◐</span><span class="theme-label">深色模式</span></button>
+      {% if g.user %}
+        <nav aria-label="主要導覽">
+          <a href="/dashboard">儀表板</a><a href="/photos">照片</a><a href="/jobs">工作</a><a href="/providers">模型</a><a href="/scoring">評分</a><a href="/costs">成本</a><a href="/simulator">模擬器</a><a href="/virtual-display">虛擬屏</a><a href="/rendering">渲染</a><a href="/devices">裝置</a><a href="/energy">能源</a>
+          <a href="/maintenance">維護</a><a href="/diagnostics">診斷</a><a href="/errors">錯誤</a><a href="/backups">備份</a><a href="/settings">設定</a><a href="/account/password">帳號</a>
+          <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="link-button">登出</button></form>
+        </nav>
+      {% endif %}
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="切換為深色模式" aria-pressed="false">
+        <span class="theme-icon" aria-hidden="true">◐</span>
+        <span class="theme-label">深色模式</span>
+      </button>
     </div>
   </header>
-
-  <div class="app-layout{% if not g.user %} guest-layout{% endif %}">
-    {% if g.user %}
-    <button class="nav-backdrop" id="nav-backdrop" type="button" aria-label="關閉功能選單" hidden></button>
-    <aside class="app-sidebar" id="app-sidebar" aria-label="控制台功能">
-      <div class="nav-search-wrap">
-        <label for="nav-search">找功能</label>
-        <input id="nav-search" type="search" placeholder="輸入照片、裝置、備份…" autocomplete="off">
-      </div>
-      <nav class="side-nav" aria-label="功能分類">
-        <section class="nav-group" data-nav-group>
-          <h2>首頁</h2>
-          {{ nav_item('/dashboard', '⌂', '系統總覽', '狀態、用量與快速入口') }}
-        </section>
-        <section class="nav-group" data-nav-group>
-          <h2>照片與評選</h2>
-          {{ nav_item('/photos', '▧', '照片庫', '搜尋、篩選與人工修正') }}
-          {{ nav_item('/jobs', '↻', '分析工作', '建立、暫停與重跑工作') }}
-          {{ nav_item('/scoring', '★', '評分規則', '權重、鑑別度與版本') }}
-          {{ nav_item('/providers', '◇', '模型服務', 'Provider、模型與連線') }}
-          {{ nav_item('/costs', '$', '用量與成本', 'Token、預算與帳務') }}
-        </section>
-        <section class="nav-group" data-nav-group>
-          <h2>墨水屏輸出</h2>
-          {{ nav_item('/rendering', '▣', '畫面與發布', '版型、裁切、字型與發布') }}
-          {{ nav_item('/simulator', '◫', '快速模擬器', '不上模型測試色盤效果') }}
-          {{ nav_item('/virtual-display', '▤', '虛擬墨水屏', '接收正式發布畫面') }}
-        </section>
-        <section class="nav-group" data-nav-group>
-          <h2>裝置與能源</h2>
-          {{ nav_item('/devices', '⌁', '裝置管理', 'ESP32、Token 與連線事件') }}
-          {{ nav_item('/energy', 'ϟ', '能源儀表板', '電池、刷新耗時與估算') }}
-        </section>
-        <section class="nav-group" data-nav-group>
-          <h2>系統管理</h2>
-          {{ nav_item('/settings', '⚙', '所有開關與設定', '依用途搜尋日常設定') }}
-          {{ nav_item('/maintenance', '⌕', '照片庫與維護', '掃描、排程與發布測試') }}
-          {{ nav_item('/diagnostics', '⊙', '系統診斷', '資源、健康與診斷包') }}
-          {{ nav_item('/errors', '!', '錯誤中心', '集中查看與處理問題') }}
-          {{ nav_item('/backups', '⇩', '備份與還原', '建立、下載與保留備份') }}
-          {{ nav_item('/account/password', '♙', '帳號安全', '變更登入密碼', '/account') }}
-        </section>
-        <p class="nav-empty" id="nav-empty" hidden>找不到符合的功能。</p>
-      </nav>
-      <form class="sidebar-logout" method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><span><strong>{{ g.user.username }}</strong><small>{{ '管理員' if g.user.role == 'administrator' else '檢視者' }}</small></span><button class="link-button">登出</button></form>
-    </aside>
-    {% endif %}
-
-    <main class="shell" id="main-content">
-      {% for category, message in get_flashed_messages(with_categories=true) %}<div class="notice {{ category }}" role="alert">{{ message }}</div>{% endfor %}
-      {% block content %}{% endblock %}
-    </main>
-  </div>
-
+  <main class="shell">
+    {% for category, message in get_flashed_messages(with_categories=true) %}
+      <div class="notice {{ category }}" role="alert">{{ message }}</div>
+    {% endfor %}
+    {% block content %}{% endblock %}
+  </main>
   <script>
     window.inktimeFetch = (url, options = {}) => {
       options.headers = Object.assign({'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]').content}, options.headers || {});
@@ -99,49 +55,26 @@
 
     (() => {
       const toggle = document.getElementById('theme-toggle');
-      if (toggle) {
-        const applyTheme = (theme, persist = false) => {
-          const isDark = theme === 'dark';
-          document.documentElement.dataset.theme = isDark ? 'dark' : 'light';
-          toggle.setAttribute('aria-pressed', String(isDark));
-          toggle.setAttribute('aria-label', isDark ? '切換為淺色模式' : '切換為深色模式');
-          toggle.querySelector('.theme-label').textContent = isDark ? '淺色模式' : '深色模式';
-          if (persist) try { localStorage.setItem('inktime-theme', isDark ? 'dark' : 'light'); } catch (_error) {}
-        };
-        applyTheme(document.documentElement.dataset.theme);
-        toggle.addEventListener('click', () => applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark', true));
-      }
+      if (!toggle) return;
 
-      const navToggle = document.getElementById('nav-toggle');
-      const sidebar = document.getElementById('app-sidebar');
-      const backdrop = document.getElementById('nav-backdrop');
-      const setNav = open => {
-        if (!sidebar || !navToggle || !backdrop) return;
-        sidebar.classList.toggle('open', open);
-        backdrop.hidden = !open;
-        navToggle.setAttribute('aria-expanded', String(open));
-        navToggle.setAttribute('aria-label', open ? '關閉功能選單' : '開啟功能選單');
+      const applyTheme = (theme, persist = false) => {
+        const isDark = theme === 'dark';
+        document.documentElement.dataset.theme = isDark ? 'dark' : 'light';
+        toggle.setAttribute('aria-pressed', String(isDark));
+        toggle.setAttribute('aria-label', isDark ? '切換為淺色模式' : '切換為深色模式');
+        toggle.querySelector('.theme-label').textContent = isDark ? '淺色模式' : '深色模式';
+        if (persist) {
+          try {
+            localStorage.setItem('inktime-theme', isDark ? 'dark' : 'light');
+          } catch (_error) {
+            // The selected theme still applies for the current page.
+          }
+        }
       };
-      navToggle?.addEventListener('click', () => setNav(!sidebar.classList.contains('open')));
-      backdrop?.addEventListener('click', () => setNav(false));
-      document.addEventListener('keydown', event => { if (event.key === 'Escape') setNav(false); });
-      sidebar?.querySelectorAll('a').forEach(link => link.addEventListener('click', () => setNav(false)));
 
-      const navSearch = document.getElementById('nav-search');
-      navSearch?.addEventListener('input', () => {
-        const query = navSearch.value.trim().toLocaleLowerCase('zh-Hant-TW');
-        let visible = 0;
-        document.querySelectorAll('[data-nav-group]').forEach(group => {
-          let groupVisible = 0;
-          group.querySelectorAll('[data-nav-search]').forEach(item => {
-            const match = !query || item.dataset.navSearch.toLocaleLowerCase('zh-Hant-TW').includes(query);
-            item.hidden = !match;
-            if (match) groupVisible += 1;
-          });
-          group.hidden = groupVisible === 0;
-          visible += groupVisible;
-        });
-        document.getElementById('nav-empty').hidden = visible !== 0;
+      applyTheme(document.documentElement.dataset.theme);
+      toggle.addEventListener('click', () => {
+        applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark', true);
       });
     })();
   </script>

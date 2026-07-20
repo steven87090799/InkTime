@@ -1,19 +1,8 @@
 {% extends "base.html" %}
-{% block title %}系統總覽｜InkTime{% endblock %}
+{% block title %}儀表板｜InkTime{% endblock %}
 {% block content %}
-<div class="page-head dashboard-head">
-  <div><p class="eyebrow">今天想做什麼？</p><h1>系統總覽</h1><p>從照片匯入、評選到墨水屏發布，依工作順序找到下一步；完整設定仍集中在「所有開關與設定」。</p></div>
-  <span class="status ok">系統正常</span>
-</div>
-
-<section class="quick-actions" aria-label="常用動作">
-  <a href="/maintenance"><span aria-hidden="true">＋</span><strong>加入照片庫</strong><small>掃描新資料夾</small></a>
-  <a href="/jobs"><span aria-hidden="true">↻</span><strong>開始分析</strong><small>建立或查看工作</small></a>
-  <a href="/photos"><span aria-hidden="true">★</span><strong>挑選照片</strong><small>搜尋與比較分數</small></a>
-  <a href="/rendering"><span aria-hidden="true">▣</span><strong>預覽並發布</strong><small>裁切、版型與裝置</small></a>
-</section>
-
-<section class="metrics compact-metrics">
+<div class="page-head"><div><p class="eyebrow">系統總覽</p><h1>儀表板</h1></div><span class="status ok">系統正常</span></div>
+<section class="metrics">
   <article><span>照片總數</span><strong>{{ counts.photos }}</strong></article>
   <article><span>已分析</span><strong>{{ counts.analyzed }}</strong></article>
   <article><span>分析失敗</span><strong>{{ counts.failed }}</strong></article>
@@ -22,28 +11,17 @@
   <article><span>今日 Token</span><strong>{{ counts.today_tokens }}</strong></article>
   <article><span>本月成本</span><strong>US$ {{ '%.4f'|format(counts.month_cost) }}</strong></article>
 </section>
-
-<section class="panel journey-panel">
-  <div class="panel-head"><div><h2>從照片到墨水屏</h2><p>每一階段只顯示該做的事；細部選項放在對應頁面。</p></div></div>
-  <div class="journey-grid">
-    <article><span>1</span><div><h3>匯入與整理</h3><p>掃描照片庫、確認重複照片與本機品質特徵。</p><a href="/maintenance">掃描照片</a><a href="/photos">瀏覽照片庫</a></div></article>
-    <article><span>2</span><div><h3>分析與評分</h3><p>設定模型、建立工作，再用高鑑別度排序挑出值得顯示的照片。</p><a href="/providers">設定模型</a><a href="/jobs">分析工作</a><a href="/scoring">評分規則</a></div></article>
-    <article><span>3</span><div><h3>排版與模擬</h3><p>調整相框版型、裁切、字型與色盤；不上模型也能快速模擬。</p><a href="/rendering">畫面與發布</a><a href="/simulator">快速模擬器</a></div></article>
-    <article><span>4</span><div><h3>接收與維運</h3><p>管理 ESP32、查看虛擬墨水屏、能源與系統健康。</p><a href="/devices">裝置管理</a><a href="/virtual-display">虛擬墨水屏</a><a href="/diagnostics">系統診斷</a></div></article>
-  </div>
+<section class="panel"><div class="panel-head"><h2>功能分類</h2><a href="/settings">所有設定</a></div>
+  <div class="table-wrap"><table><thead><tr><th>分類</th><th>放置的功能</th></tr></thead><tbody>
+    <tr><th>照片與分析</th><td class="category-link-list"><a href="/photos">照片庫</a><a href="/jobs">分析工作</a><a href="/providers">模型服務</a><a href="/scoring">評分規則</a><a href="/costs">成本</a></td></tr>
+    <tr><th>墨水屏輸出</th><td class="category-link-list"><a href="/simulator">模擬器</a><a href="/virtual-display">虛擬屏</a><a href="/rendering">渲染與發布</a></td></tr>
+    <tr><th>裝置與能源</th><td class="category-link-list"><a href="/devices">裝置</a><a href="/energy">能源</a></td></tr>
+    <tr><th>系統管理</th><td class="category-link-list"><a href="/maintenance">維護</a><a href="/diagnostics">診斷</a><a href="/errors">錯誤</a><a href="/backups">備份</a><a href="/settings">設定</a><a href="/account/password">帳號</a></td></tr>
+  </tbody></table></div>
 </section>
-
-<section class="feature-map" aria-labelledby="feature-map-title">
-  <div class="section-heading"><div><p class="eyebrow">功能地圖</p><h2 id="feature-map-title">每個功能都放在固定位置</h2></div><a href="/settings">搜尋所有開關</a></div>
-  <div class="feature-map-grid">
-    <article><h3>照片與評選</h3><p>照片內容、模型分析與排序相關功能。</p><nav><a href="/photos">照片庫與人工修正</a><a href="/jobs">背景工作</a><a href="/scoring">評分規則與鑑別度</a><a href="/providers">Provider 與模型</a><a href="/costs">Token 與成本</a></nav></article>
-    <article><h3>墨水屏輸出</h3><p>實際會出現在相框上的畫面與發布流程。</p><nav><a href="/rendering">版型、裁切、字型與發布</a><a href="/simulator">獨立色盤模擬</a><a href="/virtual-display">正式畫面接收端</a></nav></article>
-    <article><h3>裝置與能源</h3><p>硬體連線、通知與電池使用情況。</p><nav><a href="/devices">裝置、Token 與事件</a><a href="/energy">電池曲線與續航估算</a></nav></article>
-    <article><h3>系統管理</h3><p>日常開關、資料安全與問題排查。</p><nav><a href="/settings">所有開關與設定</a><a href="/maintenance">照片庫與維護</a><a href="/diagnostics">系統診斷</a><a href="/errors">錯誤中心</a><a href="/backups">備份與還原</a></nav></article>
-  </div>
-</section>
-
-<section class="panel"><div class="panel-head"><div><h2>最近錯誤</h2><p>沒有問題時不需要處理；發生錯誤再從這裡追查。</p></div><a href="/errors">查看錯誤中心</a></div>
-  {% if recent_errors %}<div class="table-wrap"><table><thead><tr><th>錯誤碼</th><th>內容</th><th>次數</th><th>最後發生</th></tr></thead><tbody>{% for error in recent_errors %}<tr><td><code>{{ error.error_code }}</code></td><td>{{ error.message }}</td><td>{{ error.occurrences }}</td><td>{{ error.last_seen_at }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="empty">目前沒有未解決錯誤。</p>{% endif %}
+<section class="panel"><div class="panel-head"><h2>最近錯誤</h2><a href="/errors">查看錯誤中心</a></div>
+  {% if recent_errors %}<div class="table-wrap"><table><thead><tr><th>錯誤碼</th><th>內容</th><th>次數</th><th>最後發生</th></tr></thead><tbody>
+  {% for error in recent_errors %}<tr><td><code>{{ error.error_code }}</code></td><td>{{ error.message }}</td><td>{{ error.occurrences }}</td><td>{{ error.last_seen_at }}</td></tr>{% endfor %}
+  </tbody></table></div>{% else %}<p class="empty">目前沒有未解決錯誤。</p>{% endif %}
 </section>
 {% endblock %}
