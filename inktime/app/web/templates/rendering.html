@@ -24,7 +24,7 @@
   <div class="table-wrap"><table><thead><tr><th>Profile</th><th>格式</th><th>色盤</th><th>單張大小</th></tr></thead><tbody>
     {% for profile in profiles %}<tr><td><strong>{{ profile.label }}</strong><small><code>{{ profile.key }}</code></small></td><td>{{ profile.pixel_format }}</td><td>{% for color in profile.colors %}<span title="{{ color.name }}" style="display:inline-block;width:1.2rem;height:1.2rem;border:1px solid #777;background:rgb({{ color.rgb|join(',') }})"></span>{% endfor %}</td><td>{{ '{:,}'.format(profile.bytes_per_image) }} bytes</td></tr>{% endfor %}
   </tbody></table></div>
-  <p class="notice">Floyd–Steinberg 與 Atkinson 為誤差擴散，照片通常較自然；Bayer 4×4／8×8 為有序抖動，速度快、結果穩定；none 適合圖示與已經使用面板色盤的素材。發布時才運算，不增加平常待機耗用。</p>
+  <p class="notice">照片平滑模式先以 3×3 中值濾波減少色塊與雜點，再套用原廠固定色盤 Floyd–Steinberg；Good Display 模式則逐像素重現原廠轉換。Atkinson 較柔和，Bayer 4×4／8×8 速度快且規律，none 適合已使用面板色盤的素材。發布時才運算，不增加平常待機耗用。</p>
 </section>
 
 <section class="panel composition-studio">

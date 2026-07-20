@@ -35,6 +35,13 @@ def test_primary_management_pages_render(client, app):
         assert response.status_code == 200, path
         assert "zh-Hant-TW" in response.get_data(as_text=True)
 
+    simulator = client.get("/simulator").get_data(as_text=True)
+    assert "Good Display 原廠相容" in simulator
+    assert "照片平滑（減少色塊／雜點）" in simulator
+    settings = client.get("/settings").get_data(as_text=True)
+    assert "Good Display 原廠相容" in settings
+    assert "照片平滑（減少色塊／雜點）" in settings
+
 
 def test_device_energy_dashboard_uses_telemetry_and_audited_measurements(client, app):
     create_admin(app)

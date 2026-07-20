@@ -47,7 +47,7 @@
 | `render.show_location` | true | true／false | 只顯示最近城市，不顯示座標 | 否 |
 | `render.location_max_distance_km` | 80 | 1–500 公里 | 過大可能顯示不準確的鄰近城市 | 否 |
 | `render.profile` | safe_4c | 四色／GDEP 六色／GDEY 七色 | 必須與裝置面板相符 | 否 |
-| `render.dither` | floyd_steinberg | none／Floyd／Atkinson／Bayer 4／8 | 誤差擴散發布 CPU 較高 | 否 |
+| `render.dither` | floyd_steinberg | 原廠相容／照片平滑／Floyd／Atkinson／Bayer／none | 照片平滑可能柔化極細線；兩種新模式強度固定 | 否 |
 | `render.dither_strength` | 1 | 0–2 | 過高會增加色點 | 否 |
 | `render.color_distance` | oklab | oklab／rgb | 切換會改變色彩映射 | 否 |
 | `render.weather_enabled` | false | 啟用前先填正確經緯度 | 需連外；失敗不阻擋照片發布 | 否 |

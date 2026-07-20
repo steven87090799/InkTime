@@ -36,6 +36,30 @@ def test_atomic_release_manifest_and_rollback(tmp_path):
     assert second["release_id"] != first["release_id"]
 
 
+def test_gooddisplay_release_records_effective_vendor_palette(tmp_path):
+    publisher = AtomicReleasePublisher(tmp_path / "releases")
+    manifest = publisher.publish(
+        [("photo-1", Image.new("RGB", (480, 800), (60, 120, 210)))],
+        profile_key="gdep073e01_6c",
+        dither="gooddisplay",
+        color_distance="oklab",
+        dither_strength=0.4,
+    )
+
+    assert manifest["dither"] == "gooddisplay"
+    assert manifest["dither_strength"] == 1.0
+    assert manifest["color_distance"] == "rgb"
+    assert [tuple(color["rgb"]) for color in manifest["palette"]] == [
+        (0, 0, 0),
+        (255, 255, 255),
+        (0, 255, 0),
+        (0, 0, 255),
+        (255, 0, 0),
+        (255, 255, 0),
+    ]
+    assert manifest["files"][0]["size"] == 192_000
+
+
 def test_failed_release_does_not_replace_latest(tmp_path):
     publisher = AtomicReleasePublisher(tmp_path / "releases")
     first = publisher.publish([("photo-1", Image.new("RGB", (480, 800), "white"))])

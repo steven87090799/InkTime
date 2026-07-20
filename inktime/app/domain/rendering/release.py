@@ -58,7 +58,14 @@ class AtomicReleasePublisher:
         final = self.root / release_id
         temporary.mkdir(mode=0o750)
         profile = get_display_profile(profile_key)
+        effective_strength = (
+            1.0 if dither in {"gooddisplay", "photo_smooth"} else float(dither_strength)
+        )
+        effective_color_distance = (
+            "rgb" if dither in {"gooddisplay", "photo_smooth"} else color_distance
+        )
         files = []
+        output_palette = profile.colors
         try:
             for index, (photo_id, source) in enumerate(images, 1):
                 rendered = source.convert("RGB")
@@ -68,10 +75,11 @@ class AtomicReleasePublisher:
                     rendered,
                     profile_key=profile_key,
                     dither=dither,
-                    color_distance=color_distance,
-                    strength=dither_strength,
+                    color_distance=effective_color_distance,
+                    strength=effective_strength,
                 )
                 payload = encoded.payload
+                output_palette = encoded.palette
                 expected = width * height // (4 if profile.pixel_format == "2bpp" else 2)
                 if len(payload) != expected:
                     raise ValueError("RENDER-002 索引影像檔案大小驗證失敗")
@@ -99,11 +107,11 @@ class AtomicReleasePublisher:
                 "pixel_format": profile.pixel_format,
                 "orientation": "portrait",
                 "dither": dither,
-                "dither_strength": float(dither_strength),
-                "color_distance": color_distance,
+                "dither_strength": effective_strength,
+                "color_distance": effective_color_distance,
                 "palette": [
                     {"code": color.code, "name": color.name, "rgb": list(color.rgb)}
-                    for color in profile.colors
+                    for color in output_palette
                 ],
                 "files": files,
             }
