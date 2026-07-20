@@ -37,6 +37,13 @@ dl { display: grid; grid-template-columns: 120px 1fr; gap: 8px; }
 dt { color: var(--muted); }
 dd { margin: 0; min-width: 0; word-break: break-all; }
 pre { white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow: auto; }
+.prefilter-summary, .analysis-meta { color: var(--muted); }
+.check-hit { color: var(--danger); font-weight: 750; }
+.analysis-card { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line); }
+.analysis-card:first-of-type { margin-top: 14px; }
+.analysis-card h3 { margin: 18px 0 7px; font-size: 14px; color: var(--muted); }
+.analysis-copy { line-height: 1.7; }
+.generated-caption { margin: 8px 0 16px; padding: 14px 16px; border-left: 4px solid var(--accent); background: var(--paper); font-size: 17px; line-height: 1.65; }
 
 @media (max-width: 800px) {
   .detail-grid { grid-template-columns: 1fr; }

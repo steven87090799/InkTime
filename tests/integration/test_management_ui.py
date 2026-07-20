@@ -6,6 +6,7 @@ from PIL import Image
 
 from tests.conftest import create_admin, csrf, login
 from tests.integration.test_jobs import add_photos
+from tests.unit.test_analysis_schema import valid_result
 
 
 def test_primary_management_pages_render(client, app):
@@ -338,3 +339,36 @@ def test_photo_manual_edit_is_audited(client, app):
         event = connection.execute("SELECT event FROM photo_events WHERE photo_id=?", (photo_id,)).fetchone()
     assert tuple(photo) == (1, "2026-07-17T10:00:00")
     assert event["event"] == "manual_update"
+
+
+def test_photo_console_shows_prefilter_metrics_model_text_and_generated_caption(client, app):
+    create_admin(app)
+    login(client)
+    photo_id = add_photos(app, 1)[0]
+    result = valid_result()
+    app.extensions["inktime_photo_repository"].save_analysis(
+        photo_id,
+        None,
+        "stage_one",
+        "測試 Provider",
+        "vision-model",
+        result,
+        '{"caption":"家人在公園散步。"}',
+    )
+
+    detail = client.get(f"/photos/{photo_id}")
+    body = detail.get_data(as_text=True)
+    assert detail.status_code == 200
+    assert "本機預篩選判斷" in body
+    assert "目前門檻" in body
+    assert "模糊分數" in body
+    assert "過曝占比" in body
+    assert "模型判斷文字結果" in body
+    assert "家人在公園散步。" in body
+    assert "產生的一句話（電子紙短文案）" in body
+    assert "風把這一天留得很輕。" in body
+    assert "測試 Provider / vision-model" in body
+
+    listing = client.get("/photos").get_data(as_text=True)
+    assert "家人在公園散步。" in listing
+    assert "風把這一天留得很輕。" in listing

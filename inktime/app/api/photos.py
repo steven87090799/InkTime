@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from flask import Blueprint, abort, current_app, g, render_template, request, send_file
@@ -48,7 +49,7 @@ def photo_detail(photo_id: str):
         ),
     )
     with current_app.extensions["inktime_database"].session() as connection:
-        analyses = connection.execute(
+        analysis_rows = connection.execute(
             """
             SELECT a.*,v.name AS scoring_version_name
             FROM photo_analysis a
@@ -66,6 +67,18 @@ def photo_detail(photo_id: str):
         events = connection.execute(
             "SELECT * FROM photo_events WHERE photo_id=? ORDER BY created_at DESC LIMIT 100", (photo_id,)
         ).fetchall()
+    analyses = []
+    for row in analysis_rows:
+        analysis = dict(row)
+        try:
+            analysis["types"] = json.loads(str(analysis.get("types_json") or "[]"))
+        except json.JSONDecodeError:
+            analysis["types"] = []
+        analysis["origin_label"] = (
+            "本機判斷" if analysis.get("provider") == "local" else "模型判斷"
+        )
+        analyses.append(analysis)
+    prefilter = current_app.extensions["inktime_analysis_service"].prefilter_snapshot(photo)
     return render_template(
         "photo_detail.html",
         photo=photo,
@@ -75,6 +88,7 @@ def photo_detail(photo_id: str):
         events=events,
         allowed_types=sorted(ALLOWED_TYPES),
         location_name=location_name,
+        prefilter=prefilter,
     )
 
 

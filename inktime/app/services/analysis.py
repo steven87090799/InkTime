@@ -91,51 +91,142 @@ class PhotoAnalysisService:
             2,
         )
 
-    def _prefilter_result(self, photo) -> dict | None:
-        if self.settings is None or not bool(self.settings.get("analysis.prefilter_enabled", True)):
-            return None
-        # 人工標記最愛是比本機啟發式更強的訊號，不自動攔截。
-        if bool(photo["favorite"]):
-            return None
-        sensitivity = str(self.settings.get("analysis.prefilter_sensitivity", "conservative"))
-        profile = PREFILTER_PROFILES.get(sensitivity, PREFILTER_PROFILES["conservative"])
-        screenshot = (
-            bool(self.settings.get("analysis.prefilter_screenshots", True))
-            and float(photo["screenshot_likelihood"] or 0) >= profile["screenshot"]
+    def prefilter_snapshot(self, photo) -> dict:
+        enabled = self.settings is not None and bool(
+            self.settings.get("analysis.prefilter_enabled", True)
         )
+        sensitivity = (
+            str(self.settings.get("analysis.prefilter_sensitivity", "conservative"))
+            if self.settings is not None
+            else "conservative"
+        )
+        profile = PREFILTER_PROFILES.get(sensitivity, PREFILTER_PROFILES["conservative"])
+        screenshot_enabled = self.settings is not None and bool(
+            self.settings.get("analysis.prefilter_screenshots", True)
+        )
+        low_quality_enabled = self.settings is not None and bool(
+            self.settings.get("analysis.prefilter_low_quality", True)
+        )
+        favorite_bypass = bool(photo["favorite"])
+        screenshot_score = float(photo["screenshot_likelihood"] or 0)
+        blur = float(photo["blur_score"]) if photo["blur_score"] is not None else None
+        contrast = float(photo["contrast"]) if photo["contrast"] is not None else None
+        overexposed = (
+            float(photo["overexposed_ratio"]) if photo["overexposed_ratio"] is not None else None
+        )
+        underexposed = (
+            float(photo["underexposed_ratio"])
+            if photo["underexposed_ratio"] is not None
+            else None
+        )
+        short_edge = (
+            min(int(photo["width"]), int(photo["height"]))
+            if photo["width"] is not None and photo["height"] is not None
+            else None
+        )
+        checks = [
+            {
+                "key": "screenshot",
+                "label": "截圖機率",
+                "value": f"{screenshot_score:.2f}",
+                "threshold": f"≥ {profile['screenshot']:.2f}",
+                "hit": screenshot_score >= profile["screenshot"],
+                "enabled": screenshot_enabled,
+            },
+            {
+                "key": "blur",
+                "label": "嚴重模糊或失焦",
+                "value": f"{blur:.2f}" if blur is not None else "無資料",
+                "threshold": f"< {profile['blur']:.0f}",
+                "hit": blur is not None and blur < profile["blur"],
+                "enabled": low_quality_enabled,
+            },
+            {
+                "key": "contrast",
+                "label": "對比過低",
+                "value": f"{contrast:.2f}" if contrast is not None else "無資料",
+                "threshold": f"< {profile['contrast']:.0f}",
+                "hit": contrast is not None and contrast < profile["contrast"],
+                "enabled": low_quality_enabled,
+            },
+            {
+                "key": "overexposed",
+                "label": "大面積過曝",
+                "value": f"{overexposed * 100:.2f}%" if overexposed is not None else "無資料",
+                "threshold": f"≥ {profile['exposure'] * 100:.0f}%",
+                "hit": overexposed is not None and overexposed >= profile["exposure"],
+                "enabled": low_quality_enabled,
+            },
+            {
+                "key": "underexposed",
+                "label": "大面積欠曝",
+                "value": f"{underexposed * 100:.2f}%" if underexposed is not None else "無資料",
+                "threshold": f"≥ {profile['exposure'] * 100:.0f}%",
+                "hit": underexposed is not None and underexposed >= profile["exposure"],
+                "enabled": low_quality_enabled,
+            },
+            {
+                "key": "resolution",
+                "label": "解析度過低（短邊）",
+                "value": f"{short_edge} px" if short_edge is not None else "無資料",
+                "threshold": f"< {profile['short_edge']} px",
+                "hit": short_edge is not None and short_edge < profile["short_edge"],
+                "enabled": low_quality_enabled,
+            },
+        ]
+        defect_checks = checks[1:]
+        matched_defects = [check["label"] for check in defect_checks if check["hit"]]
+        screenshot = enabled and screenshot_enabled and checks[0]["hit"] and not favorite_bypass
+        low_quality = (
+            enabled
+            and low_quality_enabled
+            and len(matched_defects) >= 2
+            and not favorite_bypass
+        )
+        if not enabled:
+            decision = "disabled"
+            summary = "本機預篩選已停用"
+        elif favorite_bypass:
+            decision = "favorite_bypass"
+            summary = "最愛照片略過本機預篩選"
+        elif screenshot:
+            decision = "excluded_screenshot"
+            summary = "已排除：截圖機率達門檻，不會呼叫模型"
+        elif low_quality:
+            decision = "excluded_low_quality"
+            summary = f"已排除：命中 {len(matched_defects)} 項品質缺陷，不會呼叫模型"
+        else:
+            decision = "passed"
+            summary = f"通過本機預篩選：命中 {len(matched_defects)} 項品質缺陷"
+        return {
+            "enabled": enabled,
+            "sensitivity": sensitivity,
+            "screenshot_enabled": screenshot_enabled,
+            "low_quality_enabled": low_quality_enabled,
+            "favorite_bypass": favorite_bypass,
+            "checks": checks,
+            "matched_defects": matched_defects,
+            "defect_count": len(matched_defects),
+            "required_defects": 2,
+            "decision": decision,
+            "summary": summary,
+            "excluded": screenshot or low_quality,
+        }
 
-        defects: list[str] = []
-        if photo["blur_score"] is not None and float(photo["blur_score"]) < profile["blur"]:
-            defects.append("嚴重模糊或失焦")
-        if photo["contrast"] is not None and float(photo["contrast"]) < profile["contrast"]:
-            defects.append("對比過低")
-        if photo["overexposed_ratio"] is not None and float(photo["overexposed_ratio"]) >= profile[
-            "exposure"
-        ]:
-            defects.append("大面積過曝")
-        if photo["underexposed_ratio"] is not None and float(photo["underexposed_ratio"]) >= profile[
-            "exposure"
-        ]:
-            defects.append("大面積欠曝")
-        if (
-            photo["width"] is not None
-            and photo["height"] is not None
-            and min(int(photo["width"]), int(photo["height"])) < profile["short_edge"]
-        ):
-            defects.append("解析度過低")
-        low_quality = bool(self.settings.get("analysis.prefilter_low_quality", True)) and len(defects) >= 2
-        if not screenshot and not low_quality:
+    def _prefilter_result(self, photo) -> dict | None:
+        evaluation = self.prefilter_snapshot(photo)
+        if not evaluation["excluded"]:
             return None
 
         quality = self._local_quality(photo)
-        if screenshot:
+        if evaluation["decision"] == "excluded_screenshot":
             label = "截圖"
             reasons = ["本機截圖特徵達排除門檻"]
             memory_score = 5.0
             types = ["截圖"]
         else:
             label = "明顯低品質照片"
-            reasons = defects
+            reasons = evaluation["matched_defects"]
             memory_score = 15.0
             types = ["其他"]
         return {
