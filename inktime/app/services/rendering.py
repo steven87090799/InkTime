@@ -30,12 +30,16 @@ from inktime.app.services.weather import WeatherService
 
 
 LAYOUTS = {
-    "full": "全版照片",
+    "full": "單張照片",
     "postcard": "明信片",
     "photo_info": "照片＋日期地點",
+    "photo_pair": "雙照片拼版",
     "calendar": "月曆相框",
     "weather_sensor": "天氣＋室內溫溼度",
 }
+FRAME_ORIENTATIONS = {"portrait": "直向", "landscape": "橫向"}
+FIT_MODES = {"contain": "完整顯示（建議）", "cover": "填滿並裁切"}
+PORTRAIT_ONLY_LAYOUTS = {"calendar", "weather_sensor"}
 
 
 class RenderService:
@@ -119,7 +123,16 @@ class RenderService:
         size: tuple[int, int],
         crop_x: float | None,
         crop_y: float | None,
+        fit_mode: str = "cover",
     ) -> Image.Image:
+        if fit_mode == "contain":
+            contained = ImageOps.contain(source, size, Image.Resampling.LANCZOS)
+            canvas = Image.new("RGB", size, "white")
+            canvas.paste(
+                contained,
+                ((size[0] - contained.width) // 2, (size[1] - contained.height) // 2),
+            )
+            return canvas
         manual = crop_x is not None or photo["crop_manual_x"] is not None
         focus_x = float(
             crop_x
@@ -146,6 +159,13 @@ class RenderService:
             focus_y=focus_y,
             subject_box=None if manual else self._subject_box(photo),
         )
+
+    @staticmethod
+    def _physical_frame(canvas: Image.Image, orientation: str) -> Image.Image:
+        """橫向先以 800×480 排版，再順時針旋轉成韌體固定的 480×800。"""
+        if orientation == "landscape":
+            return canvas.transpose(Image.Transpose.ROTATE_270)
+        return canvas
 
     def _ensure_render_features(self, photo, path: Path):
         """延遲補算舊照片的本機構圖資料；不呼叫模型，也不改動原始檔。"""
@@ -234,6 +254,9 @@ class RenderService:
         layout: str | None = None,
         crop_x: float | None = None,
         crop_y: float | None = None,
+        secondary_photo_id: str | None = None,
+        orientation: str | None = None,
+        fit_mode: str | None = None,
     ) -> Image.Image:
         photo = self.ensure_photo_features(photo_id)
         path = safe_join(Path(photo["root_path"]), photo["relative_path"])
@@ -250,58 +273,173 @@ class RenderService:
         layout_key = layout or str(self.settings.get("render.layout", "photo_info"))
         if layout_key not in LAYOUTS:
             raise ValueError("RENDER-005 不支援的相框版型")
+        orientation_key = orientation or str(
+            self.settings.get("render.frame_orientation", "portrait")
+        )
+        if orientation_key not in FRAME_ORIENTATIONS:
+            raise ValueError("RENDER-005 不支援的相框方向")
+        fit_mode_key = fit_mode or str(self.settings.get("render.fit_mode", "contain"))
+        if fit_mode_key not in FIT_MODES:
+            raise ValueError("RENDER-005 不支援的照片縮放方式")
+        effective_orientation = (
+            "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
+        )
+        frame_width, frame_height = (
+            (height, width) if effective_orientation == "landscape" else (width, height)
+        )
+
+        def finish(canvas: Image.Image) -> Image.Image:
+            return self._physical_frame(canvas, effective_orientation)
+
         with Image.open(path) as opened:
             source = ImageOps.exif_transpose(opened).convert("RGB")
             if layout_key == "full":
-                return self._fit_photo(source, photo, (width, height), crop_x, crop_y)
+                return finish(
+                    self._fit_photo(
+                        source,
+                        photo,
+                        (frame_width, frame_height),
+                        crop_x,
+                        crop_y,
+                        fit_mode_key,
+                    )
+                )
 
             today = self._today()
             weather = self.weather.current() if self.weather and layout_key == "weather_sensor" else None
             indoor = self._latest_indoor() if layout_key == "weather_sensor" else None
             weather_location = str(self.settings.get("render.weather_location_name", "所在地"))
             text_parts = [caption, location, date_label, f"{today.month}月{today.day}日", "星期一二三四五六日"]
+            if layout_key == "photo_pair":
+                text_parts.append("請選擇第二張照片")
             if weather:
                 text_parts.extend([str(weather.get("condition", "")), weather_location, "室外室內最高最低溫溼度"])
             if indoor:
                 text_parts.extend([str(indoor.get("device_name", "")), "室內溫度濕度"])
             fonts = self._fonts("\n".join(part for part in text_parts if part))
             # 資訊區使用真正的面板白色，避免米白經抖動後變成彩色雜點。
-            canvas = Image.new("RGB", (width, height), "white")
+            canvas = Image.new("RGB", (frame_width, frame_height), "white")
             draw = ImageDraw.Draw(canvas)
 
+            if layout_key == "photo_pair":
+                gutter = 8
+                if effective_orientation == "landscape":
+                    first_size = ((frame_width - gutter) // 2, frame_height)
+                    second_position = (first_size[0] + gutter, 0)
+                else:
+                    first_size = (frame_width, (frame_height - gutter) // 2)
+                    second_position = (0, first_size[1] + gutter)
+                first = self._fit_photo(
+                    source, photo, first_size, crop_x, crop_y, fit_mode_key
+                )
+                canvas.paste(first, (0, 0))
+                if secondary_photo_id:
+                    second_photo = self.ensure_photo_features(secondary_photo_id)
+                    second_path = safe_join(
+                        Path(second_photo["root_path"]), second_photo["relative_path"]
+                    )
+                    with Image.open(second_path) as second_opened:
+                        second_source = ImageOps.exif_transpose(second_opened).convert("RGB")
+                        second = self._fit_photo(
+                            second_source,
+                            second_photo,
+                            first_size,
+                            None,
+                            None,
+                            fit_mode_key,
+                        )
+                    canvas.paste(second, second_position)
+                else:
+                    placeholder = "請選擇第二張照片"
+                    text_width = draw.textlength(placeholder, font=fonts["body"])
+                    draw.text(
+                        (
+                            second_position[0] + max(18, (first_size[0] - text_width) / 2),
+                            second_position[1] + first_size[1] / 2 - 14,
+                        ),
+                        placeholder,
+                        font=fonts["body"],
+                        fill="black",
+                    )
+                return finish(canvas)
+
             if layout_key == "postcard":
-                fitted = self._fit_photo(source, photo, (432, 570), crop_x, crop_y)
+                footer_height = 122 if effective_orientation == "landscape" else 142
+                photo_size = (frame_width - 48, frame_height - footer_height - 24)
+                fitted = self._fit_photo(
+                    source, photo, photo_size, crop_x, crop_y, fit_mode_key
+                )
                 canvas.paste(fitted, (24, 24))
-                draw.rectangle((23, 23, 456, 595), outline="#b9afa0", width=2)
+                draw.rectangle(
+                    (23, 23, frame_width - 24, frame_height - footer_height + 1),
+                    outline="#b9afa0",
+                    width=2,
+                )
                 if caption:
-                    draw.text((28, 625), self._fit_line(draw, caption, fonts["body"], 424), font=fonts["body"], fill="#1b241f")
+                    draw.text(
+                        (28, frame_height - footer_height + 16),
+                        self._fit_line(draw, caption, fonts["body"], frame_width - 56),
+                        font=fonts["body"],
+                        fill="#1b241f",
+                    )
                 meta = "・".join(value for value in (date_label, location) if value)
-                draw.text((28, 744), self._fit_line(draw, meta, fonts["small"], 424), font=fonts["small"], fill="#59605a")
-                return canvas
+                draw.text(
+                    (28, frame_height - 42),
+                    self._fit_line(draw, meta, fonts["small"], frame_width - 56),
+                    font=fonts["small"],
+                    fill="#59605a",
+                )
+                return finish(canvas)
 
             if layout_key == "photo_info":
-                # 將資訊帶由 150px 縮為 96px，保留更多照片，同時讓文字使用純黑實色。
-                fitted = self._fit_photo(source, photo, (width, 704), crop_x, crop_y)
+                info_height = 76 if effective_orientation == "landscape" else 96
+                photo_height = frame_height - info_height
+                fitted = self._fit_photo(
+                    source,
+                    photo,
+                    (frame_width, photo_height),
+                    crop_x,
+                    crop_y,
+                    fit_mode_key,
+                )
                 canvas.paste(fitted, (0, 0))
-                draw.rectangle((0, 704, width, height), fill="white")
-                draw.line((20, 708, width - 20, 708), fill="black", width=2)
+                draw.rectangle((0, photo_height, frame_width, frame_height), fill="white")
+                draw.line(
+                    (20, photo_height + 4, frame_width - 20, photo_height + 4),
+                    fill="black",
+                    width=2,
+                )
                 if caption:
-                    draw.text((22, 716), self._fit_line(draw, caption, fonts["body"], width - 44), font=fonts["body"], fill="black")
+                    draw.text(
+                        (22, photo_height + 12),
+                        self._fit_line(draw, caption, fonts["body"], frame_width - 44),
+                        font=fonts["body"],
+                        fill="black",
+                    )
                 meta = "・".join(value for value in (date_label, location) if value)
-                draw.text((22, 768), self._fit_line(draw, meta, fonts["meta"], width - 44), font=fonts["meta"], fill="black")
-                return canvas
+                draw.text(
+                    (22, frame_height - 32),
+                    self._fit_line(draw, meta, fonts["meta"], frame_width - 44),
+                    font=fonts["meta"],
+                    fill="black",
+                )
+                return finish(canvas)
 
             if layout_key == "calendar":
                 draw.text((24, 16), f"{today.year}年 {today.month}月", font=fonts["large"], fill="#17221c")
                 draw.text((372, 25), f"{today.day}日", font=fonts["body"], fill="#d13b2f")
                 self._calendar(canvas, fonts, today)
-                fitted = self._fit_photo(source, photo, (440, 420), crop_x, crop_y)
+                fitted = self._fit_photo(
+                    source, photo, (440, 420), crop_x, crop_y, fit_mode_key
+                )
                 canvas.paste(fitted, (20, 312))
                 meta = "・".join(value for value in (caption, date_label, location) if value)
                 draw.text((22, 754), self._fit_line(draw, meta, fonts["small"], width - 44), font=fonts["small"], fill="#354039")
-                return canvas
+                return finish(canvas)
 
-            fitted = self._fit_photo(source, photo, (width, 505), crop_x, crop_y)
+            fitted = self._fit_photo(
+                source, photo, (width, 505), crop_x, crop_y, fit_mode_key
+            )
             canvas.paste(fitted, (0, 0))
             draw.line((20, 520, width - 20, 520), fill="#c9c1b2", width=2)
             if weather and weather.get("available"):
@@ -329,7 +467,7 @@ class RenderService:
             draw.text((24, 640), self._fit_line(draw, indoor_text, fonts["body"], width - 48), font=fonts["body"], fill="#1f4f70")
             meta = "・".join(value for value in (date_label, location, caption) if value)
             draw.text((24, 746), self._fit_line(draw, meta, fonts["small"], width - 48), font=fonts["small"], fill="#4e5a52")
-            return canvas
+            return finish(canvas)
 
     def publish(
         self,
@@ -338,10 +476,33 @@ class RenderService:
         profile_keys: list[str] | None = None,
     ) -> dict:
         quantity = int(self.settings.get("render.quantity", 5))
-        selected = photo_ids[:quantity]
+        layout_key = str(self.settings.get("render.layout", "photo_info"))
+        source_limit = quantity * 2 if layout_key == "photo_pair" else quantity
+        selected = photo_ids[:source_limit]
         if not selected:
-            selected = self.select_candidates(quantity)
-        images = [(photo_id, self.render_photo(photo_id)) for photo_id in selected]
+            selected = self.select_candidates(source_limit)
+        if layout_key == "photo_pair":
+            images = []
+            for index in range(0, len(selected), 2):
+                primary_id = selected[index]
+                secondary_id = selected[index + 1] if index + 1 < len(selected) else None
+                if secondary_id is None:
+                    images.append(
+                        (primary_id, self.render_photo(primary_id, layout="photo_info"))
+                    )
+                else:
+                    images.append(
+                        (
+                            f"{primary_id}+{secondary_id}",
+                            self.render_photo(
+                                primary_id,
+                                layout="photo_pair",
+                                secondary_photo_id=secondary_id,
+                            ),
+                        )
+                    )
+        else:
+            images = [(photo_id, self.render_photo(photo_id)) for photo_id in selected]
         selected_profiles = profile_keys or [str(self.settings.get("render.profile", "safe_4c"))]
         selected_profiles = list(dict.fromkeys(selected_profiles))
         if not selected_profiles or any(key not in DISPLAY_PROFILES for key in selected_profiles):
@@ -349,6 +510,14 @@ class RenderService:
         dither = str(self.settings.get("render.dither", "floyd_steinberg"))
         color_distance = str(self.settings.get("render.color_distance", "oklab"))
         dither_strength = float(self.settings.get("render.dither_strength", 1.0))
+        requested_orientation = str(
+            self.settings.get("render.frame_orientation", "portrait")
+        )
+        release_orientation = (
+            "portrait"
+            if layout_key in PORTRAIT_ONLY_LAYOUTS
+            else requested_orientation
+        )
         manifests = []
         for profile_key in selected_profiles:
             manifest = self.publisher.publish(
@@ -357,6 +526,7 @@ class RenderService:
                 dither=dither,
                 color_distance=color_distance,
                 dither_strength=dither_strength,
+                orientation=release_orientation,
             )
             manifests.append(manifest)
             with self.database.session() as connection:

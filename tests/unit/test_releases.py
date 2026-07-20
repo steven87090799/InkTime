@@ -31,7 +31,11 @@ def test_atomic_release_manifest_and_rollback(tmp_path):
     assert manifest["files"][0]["sha256"] == sha256(payload).hexdigest()
     assert (tmp_path / "releases" / "latest").read_text() == first["release_id"]
 
-    second = publisher.publish([("photo-2", Image.new("RGB", (480, 800), "black"))])
+    second = publisher.publish(
+        [("photo-2", Image.new("RGB", (480, 800), "black"))],
+        orientation="landscape",
+    )
+    assert second["orientation"] == "landscape"
     publisher.rollback(first["release_id"])
     assert (tmp_path / "releases" / "latest").read_text() == first["release_id"]
     assert second["release_id"] != first["release_id"]
@@ -159,18 +163,36 @@ def test_all_photo_frame_layouts_render_at_panel_size(app, tmp_path):
     root = tmp_path / "layouts"
     root.mkdir()
     Image.new("RGB", (900, 600), "#527f99").save(root / "frame.jpg")
+    Image.new("RGB", (600, 900), "#a45b42").save(root / "frame-2.jpg")
     photos = app.extensions["inktime_photo_repository"]
     library_id = photos.ensure_library("版型", root)
     now = "2026-07-20T00:00:00+00:00"
     with app.extensions["inktime_database"].session() as connection:
-        connection.execute(
+        connection.executemany(
             """
             INSERT INTO photos(
                 id,library_id,relative_path,status,captured_at,crop_focus_x,crop_focus_y,
                 crop_method,created_at,updated_at
             ) VALUES (?,?,?,'analyzed',?,0.75,0.4,'saliency',?,?)
             """,
-            ("layout-photo", library_id, "frame.jpg", "2020-07-20T12:00:00", now, now),
+            [
+                (
+                    "layout-photo",
+                    library_id,
+                    "frame.jpg",
+                    "2020-07-20T12:00:00",
+                    now,
+                    now,
+                ),
+                (
+                    "layout-photo-2",
+                    library_id,
+                    "frame-2.jpg",
+                    "2021-07-20T12:00:00",
+                    now,
+                    now,
+                ),
+            ],
         )
     photos.save_analysis(
         "layout-photo",
@@ -193,10 +215,61 @@ def test_all_photo_frame_layouts_render_at_panel_size(app, tmp_path):
         },
         "{}",
     )
+    photos.save_analysis(
+        "layout-photo-2",
+        None,
+        "test",
+        "local",
+        "test",
+        {
+            "schema_version": 1,
+            "caption": "第二張回憶",
+            "types": ["日常"],
+            "memory_score": 82,
+            "beauty_score": 78,
+            "technical_quality_score": 79,
+            "emotion_score": 84,
+            "side_caption": "一起填滿相框。",
+            "should_keep": True,
+            "sensitive": False,
+            "reason": "雙照片版型測試",
+        },
+        "{}",
+    )
     service = app.extensions["inktime_render_service"]
-    for layout in ("full", "postcard", "photo_info", "calendar", "weather_sensor"):
-        rendered = service.render_photo("layout-photo", layout=layout)
+    for layout in (
+        "full",
+        "postcard",
+        "photo_info",
+        "photo_pair",
+        "calendar",
+        "weather_sensor",
+    ):
+        rendered = service.render_photo(
+            "layout-photo",
+            layout=layout,
+            secondary_photo_id="layout-photo-2" if layout == "photo_pair" else None,
+        )
         assert rendered.size == (480, 800), layout
+
+    landscape = service.render_photo(
+        "layout-photo",
+        layout="full",
+        orientation="landscape",
+        fit_mode="contain",
+    ).transpose(Image.Transpose.ROTATE_90)
+    assert landscape.size == (800, 480)
+    assert landscape.getpixel((0, 0)) == (255, 255, 255)
+
+    pair = service.render_photo(
+        "layout-photo",
+        layout="photo_pair",
+        secondary_photo_id="layout-photo-2",
+        orientation="landscape",
+        fit_mode="cover",
+    ).transpose(Image.Transpose.ROTATE_90)
+    assert pair.size == (800, 480)
+    assert pair.getpixel((198, 240)) != pair.getpixel((602, 240))
 
     info = service.render_photo("layout-photo", layout="photo_info")
     assert info.getpixel((479, 799)) == (255, 255, 255)

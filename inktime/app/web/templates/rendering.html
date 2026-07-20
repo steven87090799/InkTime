@@ -6,7 +6,7 @@
   <div>
     <p class="eyebrow">版本化多色發布</p>
     <h1>電子紙渲染</h1>
-    <p>固定輸出 480×800，依面板 Profile 產生四色 2bpp 或六／七色 indexed4；每張檔案都有 SHA-256，失敗不會改動該 Profile 的 latest 指標。</p>
+    <p>可選直向或橫向排版；傳給面板的資料仍固定為 480×800，依 Profile 產生四色 2bpp 或六／七色 indexed4。</p>
   </div>
   <div><a class="secondary" href="/simulator">開啟手動模擬器</a> <a class="secondary" href="/virtual-display" target="_blank" rel="noopener">開啟虛擬墨水屏</a>{% if g.user.role=='administrator' %} <button class="primary" id="publish">發布目前 Profile</button> <button class="secondary" id="publish-all">發布全部 Profile</button>{% endif %}</div>
 </div>
@@ -17,6 +17,33 @@
   <article><span>輸出格式</span><strong>{{ active.pixel_format if active else '未知' }}</strong></article>
   <article><span>單張大小</span><strong>{{ '{:,}'.format(active.bytes_per_image) if active else '—' }} bytes</strong></article>
   <article><span>抖動／色差</span><strong>{{ current_dither }}／{{ color_distance }}</strong><small>強度 {{ dither_strength }}</small></article>
+</section>
+
+<section class="panel frame-layout-panel">
+  <div class="panel-head"><div><h2>相框方向與空間利用</h2><p>預設完整顯示、不裁掉照片；留白可放日期地點，或改成兩張照片拼版。</p></div><span class="status ok">即時模擬</span></div>
+  <div class="frame-layout-grid">
+    <div class="frame-layout-controls">
+      <label>相框擺放方向
+        <select id="frame-orientation">{% for key,label in frame_orientations.items() %}<option value="{{ key }}" {% if key == current_orientation %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+      </label>
+      <label>版面用途
+        <select id="composition-layout">{% for key,label in layouts.items() %}<option value="{{ key }}" {% if key == current_layout %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+      </label>
+      <label>照片顯示方式
+        <select id="frame-fit-mode">{% for key,label in fit_modes.items() %}<option value="{{ key }}" {% if key == current_fit_mode %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+      </label>
+      <p class="notice" id="frame-layout-note"></p>
+      {% if g.user.role=='administrator' %}<button type="button" class="primary" id="save-frame-layout">儲存相框設定</button>{% endif %}
+    </div>
+    <div class="frame-demo-wrap">
+      <div class="frame-demo" id="frame-demo" data-orientation="{{ 'portrait' if current_layout in ('calendar','weather_sensor') else current_orientation }}" data-layout="{{ current_layout }}" data-fit="{{ current_fit_mode }}" aria-label="相框版面模擬圖">
+        <div class="frame-demo-photo frame-demo-primary"><span>照片 1</span></div>
+        <div class="frame-demo-photo frame-demo-secondary"><span>照片 2</span></div>
+        <div class="frame-demo-info"><strong>回憶短句</strong><span>2026年7月21日・臺北市</span></div>
+      </div>
+      <small>此圖顯示版面比例；下方可用實際候選照片查看六色色盤結果。</small>
+    </div>
+  </div>
 </section>
 
 <section class="panel">
@@ -55,13 +82,15 @@
           {% endfor %}
         </select>
       </label>
-      <label>相框版型
-        <select id="composition-layout">{% for key,label in layouts.items() %}<option value="{{ key }}" {% if key == current_layout %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+      <label id="secondary-photo-field" hidden>第二張照片
+        <select id="composition-secondary-photo">
+          {% for photo in candidate_photos %}<option value="{{ photo.id }}">{{ photo.captured_at or '日期未知' }}｜{{ photo.relative_path }}</option>{% endfor %}
+        </select>
       </label>
       <label>水平裁切焦點 <output id="crop-x-value">50%</output><input id="crop-x" type="range" min="0" max="100" value="50"></label>
       <label>垂直裁切焦點 <output id="crop-y-value">50%</output><input id="crop-y" type="range" min="0" max="100" value="50"></label>
       <div class="composition-actions">
-        {% if g.user.role=='administrator' %}<button type="button" class="primary" id="save-crop">儲存此照片裁切</button><button type="button" class="secondary" id="auto-crop">恢復人臉／主體自動裁切</button><button type="button" class="secondary" id="save-layout">設為預設版型</button>{% endif %}
+        {% if g.user.role=='administrator' %}<button type="button" class="primary" id="save-crop">儲存此照片裁切</button><button type="button" class="secondary" id="auto-crop">恢復人臉／主體自動裁切</button>{% endif %}
       </div>
       <p id="crop-method" class="notice"></p>
       <div class="e6-score-grid">
@@ -72,7 +101,7 @@
         <article><span>細節／文字</span><strong id="e6-text">—</strong></article>
       </div>
     </div>
-    <div class="composition-preview-shell"><img id="composition-preview" alt="六色電子紙版型預覽" width="480" height="800"></div>
+    <div class="composition-preview-shell" id="composition-preview-shell"><img id="composition-preview" alt="六色電子紙版型預覽" width="480" height="800"></div>
   </div>
   {% else %}<p class="empty">目前沒有符合回憶門檻的已分析照片；可調低門檻或先完成照片分析。</p>{% endif %}
 </section>
@@ -142,14 +171,17 @@ document.querySelectorAll('.rollback').forEach(b=>b.onclick=async()=>{if(!confir
 const fontStatus=document.getElementById('font-action-status');
 document.querySelectorAll('.select-font').forEach(button=>button.onclick=async()=>{button.disabled=true;fontStatus.textContent='正在切換字型…';const response=await window.inktimeFetch('/api/v1/fonts/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reference:button.dataset.reference})});const data=await response.json();if(response.ok)location.reload();else{button.disabled=false;fontStatus.textContent=data.message||'字型切換失敗';}});
 document.getElementById('font-form').onsubmit=async event=>{event.preventDefault();const button=event.target.querySelector('button');button.disabled=true;fontStatus.textContent='正在驗證並安裝字型…';const response=await window.inktimeFetch('/api/v1/fonts',{method:'POST',body:new FormData(event.target)});const data=await response.json();if(response.ok)location.reload();else{button.disabled=false;fontStatus.textContent=data.message||'字型上傳失敗';}};
-const compositionPhoto=document.getElementById('composition-photo');
+const compositionLayout=document.getElementById('composition-layout'),frameOrientation=document.getElementById('frame-orientation'),frameFitMode=document.getElementById('frame-fit-mode'),frameDemo=document.getElementById('frame-demo'),frameNote=document.getElementById('frame-layout-note'),compositionPhoto=document.getElementById('composition-photo'),secondaryPhoto=document.getElementById('composition-secondary-photo'),secondaryField=document.getElementById('secondary-photo-field'),previewShell=document.getElementById('composition-preview-shell');
+function refreshFrameDemo(){const layout=compositionLayout.value,portraitOnly=['calendar','weather_sensor'].includes(layout),orientation=portraitOnly?'portrait':frameOrientation.value,pair=layout==='photo_pair',info=['photo_info','postcard','calendar','weather_sensor'].includes(layout);frameDemo.dataset.orientation=orientation;frameDemo.dataset.layout=layout;frameDemo.dataset.fit=frameFitMode.value;if(secondaryField)secondaryField.hidden=!pair;if(previewShell)previewShell.classList.toggle('landscape',orientation==='landscape');frameNote.textContent=portraitOnly?'此版型資訊較多，固定採直向；其他照片版型仍使用你選擇的方向。':pair?(orientation==='landscape'?'橫向會將兩張直幅照片左右並排。':'直向會將兩張橫幅照片上下排列。'):(frameFitMode.value==='contain'?(info?'照片完整顯示，保留區域用來呈現短句、日期與地點。':'照片完整顯示，剩餘區域保持純白。'):'照片會填滿畫面，必要時依焦點裁切邊緣。');}
+let refreshComposition=()=>refreshFrameDemo();
+compositionLayout.onchange=()=>refreshComposition();frameOrientation.onchange=()=>refreshComposition();frameFitMode.onchange=()=>refreshComposition();refreshFrameDemo();
+document.getElementById('save-frame-layout').onclick=async()=>{const response=await window.inktimeFetch('/api/v1/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({'render.layout':compositionLayout.value,'render.frame_orientation':frameOrientation.value,'render.fit_mode':frameFitMode.value})});alert(response.ok?'相框方向與版面設定已儲存':(await response.json()).message||'儲存失敗');};
 if(compositionPhoto){
-  const compositionLayout=document.getElementById('composition-layout'),cropX=document.getElementById('crop-x'),cropY=document.getElementById('crop-y'),preview=document.getElementById('composition-preview');
+  const preview=document.getElementById('composition-preview'),cropX=document.getElementById('crop-x'),cropY=document.getElementById('crop-y');
   function score(value){return value===''?'—':Number(value).toFixed(1)}
-  function refreshComposition(resetFocus=false){const option=compositionPhoto.selectedOptions[0];if(resetFocus){cropX.value=Math.round(Number(option.dataset.focusX||.5)*100);cropY.value=Math.round(Number(option.dataset.focusY||.5)*100);}document.getElementById('crop-x-value').textContent=`${cropX.value}%`;document.getElementById('crop-y-value').textContent=`${cropY.value}%`;document.getElementById('e6-total').textContent=score(option.dataset.e6);document.getElementById('e6-contrast').textContent=score(option.dataset.contrast);document.getElementById('e6-subject').textContent=score(option.dataset.subject);document.getElementById('e6-skin').textContent=score(option.dataset.skin);document.getElementById('e6-text').textContent=score(option.dataset.text);document.getElementById('crop-method').textContent=`自動偵測：${option.dataset.cropMethod}；人臉 ${option.dataset.faces} 張。拖曳後可儲存成此照片的手動焦點。`;const params=new URLSearchParams({quantized:'1',profile:'gdep073e01_6c',layout:compositionLayout.value,crop_x:(Number(cropX.value)/100).toFixed(2),crop_y:(Number(cropY.value)/100).toFixed(2),t:Date.now()});preview.src=`/api/v1/rendering/preview/${compositionPhoto.value}?${params}`;}
-  compositionPhoto.onchange=()=>refreshComposition(true);compositionLayout.onchange=()=>refreshComposition();cropX.oninput=()=>refreshComposition();cropY.oninput=()=>refreshComposition();refreshComposition(true);
+  refreshComposition=function(resetFocus=false){const option=compositionPhoto.selectedOptions[0];if(resetFocus){cropX.value=Math.round(Number(option.dataset.focusX||.5)*100);cropY.value=Math.round(Number(option.dataset.focusY||.5)*100);}if(secondaryPhoto.value===compositionPhoto.value&&secondaryPhoto.options.length>1)secondaryPhoto.selectedIndex=(compositionPhoto.selectedIndex+1)%secondaryPhoto.options.length;document.getElementById('crop-x-value').textContent=`${cropX.value}%`;document.getElementById('crop-y-value').textContent=`${cropY.value}%`;document.getElementById('e6-total').textContent=score(option.dataset.e6);document.getElementById('e6-contrast').textContent=score(option.dataset.contrast);document.getElementById('e6-subject').textContent=score(option.dataset.subject);document.getElementById('e6-skin').textContent=score(option.dataset.skin);document.getElementById('e6-text').textContent=score(option.dataset.text);document.getElementById('crop-method').textContent=`自動偵測：${option.dataset.cropMethod}；人臉 ${option.dataset.faces} 張。拖曳後可儲存成此照片的手動焦點。`;refreshFrameDemo();const params=new URLSearchParams({quantized:'1',profile:'gdep073e01_6c',layout:compositionLayout.value,orientation:frameOrientation.value,fit_mode:frameFitMode.value,secondary_id:secondaryPhoto.value,crop_x:(Number(cropX.value)/100).toFixed(2),crop_y:(Number(cropY.value)/100).toFixed(2),t:Date.now()});preview.src=`/api/v1/rendering/preview/${compositionPhoto.value}?${params}`;};
+  compositionPhoto.onchange=()=>refreshComposition(true);secondaryPhoto.onchange=()=>refreshComposition();cropX.oninput=()=>refreshComposition();cropY.oninput=()=>refreshComposition();refreshComposition(true);
   document.getElementById('save-crop').onclick=async()=>{const response=await window.inktimeFetch(`/api/v1/photos/${compositionPhoto.value}/crop`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'manual',x:Number(cropX.value)/100,y:Number(cropY.value)/100})});alert(response.ok?'已儲存此照片的裁切焦點':(await response.json()).message||'儲存失敗');};
   document.getElementById('auto-crop').onclick=async()=>{const option=compositionPhoto.selectedOptions[0],response=await window.inktimeFetch(`/api/v1/photos/${compositionPhoto.value}/crop`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'auto'})});if(response.ok){cropX.value=Math.round(Number(option.dataset.autoX||.5)*100);cropY.value=Math.round(Number(option.dataset.autoY||.5)*100);refreshComposition();}else alert((await response.json()).message||'恢復失敗');};
-  document.getElementById('save-layout').onclick=async()=>{const response=await window.inktimeFetch('/api/v1/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({'render.layout':compositionLayout.value})});alert(response.ok?'已設為正式發布的預設版型':(await response.json()).message||'儲存失敗');};
 }
 </script>{% endif %}{% endblock %}

@@ -29,10 +29,12 @@
     <a class="brand" href="/dashboard">InkTime <span>回憶管理平台</span></a>
     <div class="top-actions">
       {% if g.user %}
-        <nav aria-label="主要導覽">
-          <a href="/dashboard">儀表板</a><a href="/photos">照片</a><a href="/jobs">工作</a><a href="/providers">模型</a><a href="/scoring">評分</a><a href="/costs">成本</a><a href="/simulator">模擬器</a><a href="/virtual-display">虛擬屏</a><a href="/rendering">渲染</a><a href="/devices">裝置</a><a href="/energy">能源</a>
-          <a href="/maintenance">維護</a><a href="/diagnostics">診斷</a><a href="/errors">錯誤</a><a href="/backups">備份</a><a href="/settings">設定</a><a href="/account/password">帳號</a>
-          <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="link-button">登出</button></form>
+        <nav class="primary-nav" aria-label="主要導覽">
+          <a class="nav-dashboard{% if request.path == '/dashboard' %} active{% endif %}" href="/dashboard">總覽</a>
+          <details class="nav-menu{% if request.path.startswith(('/photos','/jobs','/providers','/scoring','/costs')) %} active{% endif %}"><summary>照片管理</summary><div class="nav-popover"><a href="/photos">照片庫<small>搜尋、篩選與人工修正</small></a><a href="/jobs">分析工作<small>建立、暫停與重跑</small></a><a href="/providers">模型服務<small>Provider 與模型連線</small></a><a href="/scoring">評分規則<small>權重、鑑別度與版本</small></a><a href="/costs">用量與成本<small>Token、預算與帳務</small></a></div></details>
+          <details class="nav-menu{% if request.path.startswith(('/simulator','/virtual-display','/rendering')) %} active{% endif %}"><summary>墨水屏</summary><div class="nav-popover"><a href="/rendering">相框與發布<small>方向、版面、裁切與字型</small></a><a href="/simulator">快速模擬器<small>不上模型測試色盤</small></a><a href="/virtual-display">虛擬墨水屏<small>接收正式發布畫面</small></a></div></details>
+          <details class="nav-menu{% if request.path.startswith(('/devices','/energy')) %} active{% endif %}"><summary>裝置</summary><div class="nav-popover"><a href="/devices">裝置管理<small>ESP32、Token 與排程</small></a><a href="/energy">能源儀表板<small>電池、刷新與續航</small></a></div></details>
+          <details class="nav-menu{% if request.path.startswith(('/maintenance','/diagnostics','/errors','/backups','/settings','/account')) %} active{% endif %}"><summary>系統</summary><div class="nav-popover nav-popover-right"><a href="/settings">系統設定<small>依分類調整所有開關</small></a><a href="/maintenance">照片庫與維護<small>掃描、排程與發布測試</small></a><a href="/diagnostics">系統診斷<small>資源、健康與診斷包</small></a><a href="/errors">錯誤中心<small>集中查看與處理問題</small></a><a href="/backups">備份與還原<small>建立、下載與保留備份</small></a><a href="/account/password">帳號安全<small>變更登入密碼</small></a><form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="link-button">登出 {{ g.user.username }}</button></form></div></details>
         </nav>
       {% endif %}
       <button class="theme-toggle" id="theme-toggle" type="button" aria-label="切換為深色模式" aria-pressed="false">
@@ -75,6 +77,19 @@
       applyTheme(document.documentElement.dataset.theme);
       toggle.addEventListener('click', () => {
         applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark', true);
+      });
+    })();
+
+    (() => {
+      const menus = [...document.querySelectorAll('.nav-menu')];
+      menus.forEach(menu => menu.addEventListener('toggle', () => {
+        if (menu.open) menus.forEach(other => { if (other !== menu) other.open = false; });
+      }));
+      document.addEventListener('click', event => {
+        if (!event.target.closest('.nav-menu')) menus.forEach(menu => { menu.open = false; });
+      });
+      document.addEventListener('keydown', event => {
+        if (event.key === 'Escape') menus.forEach(menu => { menu.open = false; });
       });
     })();
   </script>

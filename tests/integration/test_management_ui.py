@@ -444,12 +444,22 @@ def test_photo_library_loads_200_per_page_and_keeps_filters(client, app):
     assert "第 2 / 2 頁" in second_body
 
 
-def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(client, app):
+def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(
+    client, app, tmp_path
+):
     create_admin(app)
     login(client)
     photo_id = add_photos(app, 1)[0]
+    photo_root = tmp_path / "rendering-preview"
+    photo_root.mkdir()
+    Image.new("RGB", (900, 600), "#527f99").save(photo_root / "0.jpg")
     result = valid_result()
     with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE libraries SET root_path=? "
+            "WHERE id=(SELECT library_id FROM photos WHERE id=?)",
+            (str(photo_root), photo_id),
+        )
         connection.execute(
             """
             UPDATE photos SET status='analyzed',captured_at='2020-07-20T10:00:00',
@@ -474,10 +484,26 @@ def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(client, ap
     body = page.get_data(as_text=True)
     assert page.status_code == 200
     assert "智慧裁切與版型預覽" in body
+    assert "相框方向與空間利用" in body
+    assert "完整顯示（建議）" in body
+    assert "雙照片拼版" in body
     assert "月曆相框" in body
     assert "天氣＋室內溫溼度" in body
     assert "E6 總分" in body
     assert "歷年今日優先" in body
+
+    landscape = client.get(
+        f"/api/v1/rendering/preview/{photo_id}"
+        "?layout=photo_info&orientation=landscape&fit_mode=contain"
+    )
+    assert landscape.status_code == 200
+    assert landscape.headers["X-InkTime-Orientation"] == "landscape"
+    assert Image.open(BytesIO(landscape.data)).size == (800, 480)
+
+    invalid_orientation = client.get(
+        f"/api/v1/rendering/preview/{photo_id}?orientation=diagonal"
+    )
+    assert invalid_orientation.status_code == 400
 
     response = client.patch(
         f"/api/v1/photos/{photo_id}/crop",
