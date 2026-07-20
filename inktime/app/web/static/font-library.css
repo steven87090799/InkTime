@@ -1,0 +1,62 @@
+.font-panel-head { align-items: flex-start; gap: 18px; }
+.font-panel-head p { margin: 7px 0 0; color: var(--muted); }
+.font-panel-head .status { white-space: nowrap; }
+
+.font-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+  gap: 16px;
+  margin-top: 22px;
+}
+
+.font-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--paper);
+}
+
+.font-card.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.font-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.font-card h3 { margin: 3px 0 0; font-size: 20px; }
+.font-style { color: var(--muted); font-size: 12px; font-weight: 750; letter-spacing: .08em; }
+.font-active { flex: 0 0 auto; padding: 5px 9px; border-radius: 999px; background: var(--accent2); color: var(--accent); font-size: 12px; font-weight: 750; }
+.font-card > p { flex: 1 1 auto; margin: 14px 0; color: var(--muted); }
+
+.font-preview {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-top: 15px;
+  border-radius: 10px;
+  background: #f7f4eb;
+}
+
+.font-preview-error { margin-top: 15px; padding: 18px; border-radius: 10px; background: var(--danger-bg); color: var(--danger); }
+.font-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; color: var(--muted); font-size: 12px; }
+.font-meta span { overflow-wrap: anywhere; }
+.font-card button { align-self: flex-start; margin-top: 16px; }
+.font-card button:disabled { cursor: default; opacity: .72; }
+
+.font-contract { margin: 18px 0 0; padding: 12px 15px; border-left: 4px solid var(--accent); background: var(--paper); color: var(--muted); }
+.font-upload { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 16px; }
+.font-upload summary { cursor: pointer; font-weight: 750; }
+.font-upload form { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin-top: 14px; }
+.font-upload label { flex: 1 0 100%; color: var(--muted); font-size: 13px; }
+.font-upload input { flex: 1 1 300px; min-width: 0; padding: 9px; border: 1px solid var(--field-line); border-radius: 9px; background: var(--field); color: var(--ink); }
+.font-upload small { display: block; margin-top: 10px; color: var(--muted); }
+.font-action-status { min-height: 1.5em; margin: 10px 0 0; color: var(--accent); }
+
+@media (max-width: 720px) {
+  .font-panel-head { display: block; }
+  .font-panel-head .status { display: inline-block; margin-top: 12px; }
+  .font-grid { grid-template-columns: 1fr; }
+  .font-upload button { width: 100%; }
+}

@@ -46,7 +46,7 @@ class RenderService:
             canvas.paste(fitted, (0, 0))
         if caption:
             font_setting = str(self.settings.get("render.font_path", ""))
-            font_path = Path(font_setting).expanduser()
+            font_path = self.fonts.resolve(font_setting)
             self.fonts.validate(font_path, caption)
             font = ImageFont.truetype(str(font_path), 24)
             draw = ImageDraw.Draw(canvas)

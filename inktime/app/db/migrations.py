@@ -502,6 +502,14 @@ MIGRATIONS = (
             "INSERT OR IGNORE INTO feature_flags(key,enabled,description,updated_at) VALUES ('device_energy',1,'裝置電池曲線、刷新耗時與續航估算儀表板已啟用',datetime('now'))",
         ),
     ),
+    Migration(
+        9,
+        "啟用內建繁體中文手寫字型",
+        (
+            "UPDATE settings SET value_json='\"builtin:iansui\"',updated_at=datetime('now') "
+            "WHERE key='render.font_path' AND value_json='\"\"'",
+        ),
+    ),
 )
 
 

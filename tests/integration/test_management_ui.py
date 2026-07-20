@@ -210,6 +210,53 @@ def test_epaper_simulator_rejects_unknown_profile(client, app):
     assert response.json["error_code"] == "RENDER-004"
 
 
+def test_builtin_traditional_chinese_fonts_preview_and_switch(client, app):
+    create_admin(app)
+    login(client)
+    settings = app.extensions["inktime_settings_repository"]
+    assert settings.get("render.font_path") == "builtin:iansui"
+
+    page = client.get("/rendering")
+    body = page.get_data(as_text=True)
+    assert page.status_code == 200
+    assert "芫荽 Iansui" in body
+    assert "霞鶩文楷 TC" in body
+    assert "手寫風格" in body
+    assert "文青風格" in body
+    assert "不會靜默改用" in body
+    assert "2 個字型" in client.get("/diagnostics").get_data(as_text=True)
+
+    preview = client.get("/api/v1/fonts/preview?reference=builtin%3Aiansui")
+    assert preview.status_code == 200
+    assert preview.mimetype == "image/png"
+    assert Image.open(BytesIO(preview.data)).size == (760, 116)
+
+    switched = client.post(
+        "/api/v1/fonts/select",
+        json={"reference": "builtin:lxgw-wenkai-tc"},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert switched.status_code == 200
+    assert switched.json["status"] == "active"
+    assert settings.get("render.font_path") == "builtin:lxgw-wenkai-tc"
+
+
+def test_invalid_uploaded_font_never_replaces_current_font(client, app):
+    create_admin(app)
+    login(client)
+    response = client.post(
+        "/api/v1/fonts",
+        data={"font": (BytesIO(b"not a real font"), "broken.ttf")},
+        headers={"X-CSRF-Token": csrf(client)},
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 422
+    assert response.json["error_code"] == "IMG-002"
+    assert app.extensions["inktime_settings_repository"].get("render.font_path") == "builtin:iansui"
+    assert not (app.extensions["inktime_font_manager"].root / "broken.ttf").exists()
+
+
 def test_backup_is_integrity_checked_and_downloadable(client, app):
     create_admin(app)
     login(client)
