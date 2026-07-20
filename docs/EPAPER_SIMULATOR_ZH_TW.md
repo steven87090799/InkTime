@@ -1,5 +1,17 @@
 # 電子紙模擬器與模型接入指南
 
+## 虛擬墨水屏接收端
+
+`/virtual-display` 是獨立、唯讀的裝置接收頁。它不提供照片上傳、內容編輯或發布操作，而是每 5 秒接收目前 Profile 的正式 Manifest，再下載 Manifest 指定的同一份 `.bin`。接收端會驗證檔案大小與 SHA-256，依 `2bpp`／`indexed4` 和 Manifest 色盤解碼成 480×800 畫面，並顯示輪詢次數、Release 數、資料量、延遲、色彩分布與 Debug 紀錄。
+
+本機快速流程：
+
+1. 把照片放入專案的 `simulation_photos/`（Docker 容器內固定為 `/photos`）。
+2. 到「維護」按「掃描並送到虛擬墨水屏」。這個背景工作只做增量掃描與正式色盤發布，不呼叫 Provider。
+3. 另開 `/virtual-display`。工作完成後，接收頁會自動顯示新 Release；不需在接收頁執行任何操作。
+
+這條路徑產生的 Release 也符合 ESP32 的正式 Manifest／BIN 契約，因此虛擬頁顯示的不是 CSS 濾鏡或另外產生的近似圖。
+
 ## 先不接模型也能測什麼
 
 登入 InkTime 後開啟「模擬器」或 `/simulator`，可直接上傳 JPG、PNG、WebP，或載入內建測試圖。模擬器會：

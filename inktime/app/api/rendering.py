@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from hashlib import sha256
 from io import BytesIO
+import json
 from pathlib import Path
 import tempfile
 import time
 
-from flask import Blueprint, abort, current_app, g, render_template, request, send_file
+from flask import Blueprint, abort, current_app, g, jsonify, render_template, request, send_file
 from PIL import Image, ImageDraw, ImageFont, ImageOps, UnidentifiedImageError
 
 from inktime.app.web.access import administrator_required, login_required
@@ -28,6 +31,7 @@ MAX_SIMULATOR_PHOTO_BYTES = 25 * 1024 * 1024
 MAX_SIMULATOR_PHOTO_PIXELS = 40_000_000
 MAX_FONT_BYTES = 64 * 1024 * 1024
 UPLOAD_CHUNK_BYTES = 1024 * 1024
+VIRTUAL_DISPLAY_POLL_SECONDS = 5
 
 
 @bp.get("/rendering")
@@ -61,6 +65,113 @@ def simulator_page():
         dither_strength=float(settings.get("render.dither_strength", 1.0)),
         color_distance=str(settings.get("render.color_distance", "oklab")),
     )
+
+
+def _virtual_display_profile() -> str:
+    settings = current_app.extensions["inktime_settings_repository"]
+    profile_key = str(request.args.get("profile", settings.get("render.profile", "safe_4c")))
+    if profile_key not in DISPLAY_PROFILES:
+        abort(400, description="RENDER-003 不支援的虛擬墨水屏 Profile")
+    return profile_key
+
+
+def _latest_virtual_manifest(profile_key: str) -> dict:
+    release_root = current_app.config["INKTIME_RELEASE_DIR"]
+    latest_pointer = release_root / f"latest.{profile_key}"
+    if not latest_pointer.exists() and profile_key == "safe_4c":
+        latest_pointer = release_root / "latest"
+    if not latest_pointer.is_file():
+        abort(404, description="目前沒有可接收的電子紙發布版本")
+    release_id = latest_pointer.read_text(encoding="utf-8").strip()
+    try:
+        manifest_path = safe_join(release_root, f"{release_id}/manifest.json")
+    except UnsafePathError:
+        abort(500, description="DEVICE-002 發布指標不合法")
+    if not manifest_path.is_file():
+        abort(404, description="找不到虛擬墨水屏發布 Manifest")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        abort(500, description="DEVICE-002 發布 Manifest 無法讀取")
+    if (
+        manifest.get("release_id") != release_id
+        or manifest.get("render_profile", "safe_4c") != profile_key
+        or not isinstance(manifest.get("files"), list)
+        or not manifest["files"]
+    ):
+        abort(500, description="DEVICE-002 發布 Manifest 與接收 Profile 不一致")
+    return manifest
+
+
+@bp.get("/virtual-display")
+@login_required
+def virtual_display_page():
+    profile_key = _virtual_display_profile()
+    profile = DISPLAY_PROFILES[profile_key]
+    return render_template(
+        "virtual_display.html",
+        profile=profile,
+        manifest_url=f"/api/v1/virtual-display/manifest?profile={profile_key}",
+        poll_seconds=VIRTUAL_DISPLAY_POLL_SECONDS,
+    )
+
+
+@bp.get("/api/v1/virtual-display/manifest")
+@login_required
+def virtual_display_manifest():
+    profile_key = _virtual_display_profile()
+    manifest = _latest_virtual_manifest(profile_key)
+    release_id = str(manifest["release_id"])
+    manifest["download_base_url"] = (
+        f"/api/v1/virtual-display/releases/{release_id}/files/"
+    )
+    manifest["receiver"] = {
+        "mode": "read_only",
+        "server_time": datetime.now(timezone.utc).isoformat(),
+        "poll_seconds": VIRTUAL_DISPLAY_POLL_SECONDS,
+    }
+    response = jsonify(manifest)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-InkTime-Receiver"] = "virtual-display"
+    return response
+
+
+@bp.get("/api/v1/virtual-display/releases/<release_id>/files/<path:filename>")
+@login_required
+def virtual_display_file(release_id: str, filename: str):
+    release_root = current_app.config["INKTIME_RELEASE_DIR"]
+    try:
+        manifest_path = safe_join(release_root, f"{release_id}/manifest.json")
+        payload_path = safe_join(release_root, f"{release_id}/{filename}")
+    except UnsafePathError:
+        abort(400, description="PATH-001 路徑超出允許範圍")
+    if not manifest_path.is_file() or not payload_path.is_file() or payload_path == manifest_path:
+        abort(404)
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        abort(500, description="DEVICE-002 發布 Manifest 無法讀取")
+    file_entry = next(
+        (
+            item
+            for item in manifest.get("files", [])
+            if isinstance(item, dict) and item.get("name") == filename
+        ),
+        None,
+    )
+    if file_entry is None:
+        abort(404, description="發布 Manifest 未列出此檔案")
+    payload = payload_path.read_bytes()
+    actual_sha256 = sha256(payload).hexdigest()
+    if len(payload) != int(file_entry.get("size", -1)) or actual_sha256 != str(
+        file_entry.get("sha256", "")
+    ).lower():
+        abort(409, description="DEVICE-002 電子紙 Payload 大小或 SHA-256 驗證失敗")
+    response = send_file(payload_path, mimetype="application/octet-stream", max_age=0)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-InkTime-Payload-SHA256"] = actual_sha256
+    response.headers["X-InkTime-Payload-Bytes"] = str(len(payload))
+    return response
 
 
 @bp.post("/api/v1/rendering/simulate")

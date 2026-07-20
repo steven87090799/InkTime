@@ -65,7 +65,7 @@ curl -fsS http://127.0.0.1:8765/health/ready
 |---|---|---|
 | `INKTIME_PORT` | `8765` | 主機對外 Port |
 | `INKTIME_DATA_PATH` | `./data` | SQLite、快取、字型、備份、發布；可寫 |
-| `INKTIME_PHOTO_PATH` | `./test` | 原始照片；容器內固定 `/photos` 且唯讀 |
+| `INKTIME_PHOTO_PATH` | `./simulation_photos` | 原始照片；容器內固定 `/photos` 且唯讀。無實體面板時可直接使用專案內投放區 |
 | `INKTIME_COOKIE_SECURE` | `0` | HTTPS 反向代理完成後設 `1` |
 | `INKTIME_ACCESS_LOG` | `0` | 是否逐一輸出 HTTP request；正式環境維持關閉 |
 | `INKTIME_LOG_LEVEL` | `INFO` | 資料庫尚未初始化前的 bootstrap 層級；之後從 Web 控制 |

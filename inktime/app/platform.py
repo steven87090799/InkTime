@@ -77,6 +77,7 @@ def initialize_platform(
     database_path: Path,
     data_dir: Path,
     release_dir: Path,
+    photo_dir: Path | None = None,
     testing: bool = False,
 ) -> Flask:
     configure_logging()
@@ -93,6 +94,7 @@ def initialize_platform(
         SESSION_COOKIE_SECURE=os.environ.get("INKTIME_COOKIE_SECURE", "0") == "1",
         PERMANENT_SESSION_LIFETIME=timedelta(minutes=30),
         INKTIME_RELEASE_DIR=release_dir.resolve(),
+        INKTIME_PHOTO_DIR=(photo_dir or data_dir.parent / "simulation_photos").resolve(),
         INKTIME_VERSION=__version__,
         TESTING=testing,
     )
