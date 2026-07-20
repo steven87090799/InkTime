@@ -93,7 +93,7 @@ def enqueue_scan():
     repository = current_app.extensions["inktime_job_repository"]
     job_id = repository.create_maintenance(
         kind="scan",
-        name=str(payload.get("name", "照片資料庫掃描")),
+        name=str(payload.get("name", "增量照片資料庫掃描")),
         settings={
             "root_path": root_path,
             "library_name": str(payload.get("library_name", "主要照片庫")),

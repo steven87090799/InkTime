@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import sqlite3
+from typing import Iterator
 from uuid import uuid4
 
 from inktime.app.db import Database
@@ -12,6 +16,40 @@ from inktime.app.domain.analysis.scoring import (
     calculate_ranking_score,
 )
 from inktime.app.domain.photos.preprocessing import LocalPhotoFeatures
+
+
+@dataclass(frozen=True)
+class StoredPhotoSignature:
+    file_size: int | None
+    modified_time: float | None
+    sha256: str | None
+
+    def matches(self, *, file_size: int, modified_time: float) -> bool:
+        return bool(self.sha256) and self.file_size == file_size and self.modified_time == modified_time
+
+
+class PhotoSignatureLookup:
+    """掃描期間重用唯讀連線，避免為每張照片重開 SQLite。"""
+
+    def __init__(self, connection: sqlite3.Connection, library_id: str) -> None:
+        self.connection = connection
+        self.library_id = library_id
+
+    def get(self, relative_path: str) -> StoredPhotoSignature | None:
+        row = self.connection.execute(
+            """
+            SELECT file_size,modified_time,sha256
+            FROM photos WHERE library_id=? AND relative_path=?
+            """,
+            (self.library_id, relative_path),
+        ).fetchone()
+        if row is None:
+            return None
+        return StoredPhotoSignature(
+            file_size=row["file_size"],
+            modified_time=row["modified_time"],
+            sha256=row["sha256"],
+        )
 
 
 class PhotoRepository:
@@ -32,6 +70,11 @@ class PhotoRepository:
             )
             return library_id
 
+    @contextmanager
+    def signature_lookup(self, library_id: str) -> Iterator[PhotoSignatureLookup]:
+        with self.database.session() as connection:
+            yield PhotoSignatureLookup(connection, library_id)
+
     def upsert_preprocessed(
         self, library_id: str, relative_path: str, source: Path, features: LocalPhotoFeatures
     ) -> tuple[str, bool]:
@@ -41,20 +84,117 @@ class PhotoRepository:
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                existing = connection.execute(
+                path_existing = connection.execute(
+                    """
+                    SELECT id,sha256,status,analysis_source,duplicate_group_id
+                    FROM photos
+                    WHERE library_id=? AND relative_path=?
+                    """,
+                    (library_id, relative_path),
+                ).fetchone()
+                same_content = connection.execute(
                     """
                     SELECT p.id,p.relative_path,p.duplicate_group_id,l.root_path
                     FROM photos p JOIN libraries l ON l.id=p.library_id
-                    WHERE p.library_id=? AND p.sha256=? ORDER BY p.created_at LIMIT 1
+                    WHERE p.library_id=? AND p.sha256=? AND p.id<>COALESCE(?, '')
+                    ORDER BY p.created_at LIMIT 1
                     """,
-                    (library_id, features.sha256),
+                    (library_id, features.sha256, path_existing["id"] if path_existing else None),
                 ).fetchone()
-                inherited = existing is not None and existing["relative_path"] != relative_path
+                inherited = same_content is not None
+
+                if path_existing is not None:
+                    photo_id = str(path_existing["id"])
+                    content_changed = path_existing["sha256"] != features.sha256
+                    next_status = (
+                        "analyzed"
+                        if not content_changed and path_existing["status"] == "analyzed"
+                        else "preprocessed"
+                    )
+                    next_analysis_source = (
+                        path_existing["analysis_source"]
+                        if not content_changed
+                        else "inherited" if same_content else "direct"
+                    )
+                    duplicate = same_content or connection.execute(
+                        """
+                        SELECT id,duplicate_group_id FROM photos
+                        WHERE perceptual_hash=? AND id<>? LIMIT 1
+                        """,
+                        (features.perceptual_hash, photo_id),
+                    ).fetchone()
+                    if duplicate:
+                        duplicate_group = (
+                            duplicate["duplicate_group_id"]
+                            or (path_existing["duplicate_group_id"] if not content_changed else None)
+                            or str(uuid4())
+                        )
+                        if not duplicate["duplicate_group_id"]:
+                            connection.execute(
+                                "UPDATE photos SET duplicate_group_id=? WHERE id=?",
+                                (duplicate_group, duplicate["id"]),
+                            )
+                    else:
+                        duplicate_group = (
+                            None if content_changed else path_existing["duplicate_group_id"]
+                        )
+                    connection.execute(
+                        """
+                        UPDATE photos SET
+                            file_size=?,modified_time=?,sha256=?,perceptual_hash=?,difference_hash=?,
+                            width=?,height=?,format=?,status=?,duplicate_group_id=?,
+                            analysis_source=?,updated_at=?,exif_json=?,captured_at=?,gps_lat=?,gps_lon=?,
+                            brightness=?,contrast=?,blur_score=?,overexposed_ratio=?,underexposed_ratio=?,
+                            screenshot_likelihood=?
+                        WHERE id=?
+                        """,
+                        (
+                            stat.st_size,
+                            stat.st_mtime,
+                            features.sha256,
+                            features.perceptual_hash,
+                            features.difference_hash,
+                            features.width,
+                            features.height,
+                            features.format,
+                            next_status,
+                            duplicate_group,
+                            next_analysis_source,
+                            now,
+                            values["exif_json"],
+                            values["captured_at"],
+                            values["gps_lat"],
+                            values["gps_lon"],
+                            values["brightness"],
+                            values["contrast"],
+                            values["blur_score"],
+                            values["overexposed_ratio"],
+                            values["underexposed_ratio"],
+                            values["screenshot_likelihood"],
+                            photo_id,
+                        ),
+                    )
+                    if content_changed:
+                        connection.execute("DELETE FROM photo_analysis WHERE photo_id=?", (photo_id,))
+                        old_group = path_existing["duplicate_group_id"]
+                        if old_group and old_group != duplicate_group:
+                            remaining = connection.execute(
+                                "SELECT COUNT(*) FROM photos WHERE duplicate_group_id=?", (old_group,)
+                            ).fetchone()[0]
+                            if remaining <= 1:
+                                connection.execute(
+                                    "UPDATE photos SET duplicate_group_id=NULL WHERE duplicate_group_id=?",
+                                    (old_group,),
+                                )
+                    connection.execute("COMMIT")
+                    return photo_id, inherited
+
                 old_path_exists = bool(
-                    existing and (Path(existing["root_path"]) / str(existing["relative_path"])).is_file()
+                    same_content
+                    and (Path(same_content["root_path"]) / str(same_content["relative_path"])).is_file()
                 )
-                if existing and (existing["relative_path"] == relative_path or not old_path_exists):
-                    photo_id = str(existing["id"])
+                if same_content and not old_path_exists:
+                    photo_id = str(same_content["id"])
                     connection.execute(
                         "UPDATE photos SET relative_path=?,file_size=?,modified_time=?,updated_at=? WHERE id=?",
                         (relative_path, stat.st_size, stat.st_mtime, now, photo_id),
@@ -62,7 +202,7 @@ class PhotoRepository:
                 else:
                     photo_id = str(uuid4())
                     duplicate = (
-                        existing
+                        same_content
                         or connection.execute(
                             "SELECT id,duplicate_group_id FROM photos WHERE perceptual_hash=? LIMIT 1",
                             (features.perceptual_hash,),
@@ -96,7 +236,7 @@ class PhotoRepository:
                             features.height,
                             features.format,
                             duplicate_group,
-                            "inherited" if existing else "direct",
+                            "inherited" if same_content else "direct",
                             now,
                             now,
                             values["exif_json"],
