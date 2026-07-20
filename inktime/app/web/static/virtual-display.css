@@ -111,6 +111,31 @@ body {
 .stage-heading > span,
 .card-title > span { color: var(--muted); font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
 
+.frame-controls {
+  display: grid;
+  grid-template-columns: minmax(108px, auto) 1fr minmax(108px, auto);
+  align-items: center;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.frame-controls button {
+  min-height: 42px;
+  padding: 9px 15px;
+  border: 1px solid #3f6850;
+  border-radius: 12px;
+  background: var(--mint-dark);
+  color: var(--mint);
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.frame-controls button:hover:not(:disabled) { border-color: var(--mint); background: #205535; }
+.frame-controls button:focus-visible { outline: 3px solid color-mix(in srgb, var(--mint) 45%, transparent); outline-offset: 2px; }
+.frame-controls button:disabled { cursor: not-allowed; opacity: .38; }
+.frame-controls span { color: var(--muted); text-align: center; font-size: 12px; }
+
 .display-device {
   width: min(100%, 440px);
   margin: 24px auto 0;
@@ -237,4 +262,6 @@ body {
   .current-frame dl { grid-template-columns: 82px minmax(0, 1fr); }
   .palette-row { grid-template-columns: 74px minmax(70px, 1fr) 60px; gap: 8px; }
   .debug-stream li { grid-template-columns: 62px 50px minmax(0, 1fr); gap: 7px; }
+  .frame-controls { grid-template-columns: 1fr 1fr; }
+  .frame-controls span { grid-column: 1 / -1; grid-row: 1; }
 }

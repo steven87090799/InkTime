@@ -2,7 +2,7 @@
 
 ## 虛擬墨水屏接收端
 
-`/virtual-display` 是獨立、唯讀的裝置接收頁。它不提供照片上傳、內容編輯或發布操作，而是每 5 秒接收目前 Profile 的正式 Manifest，再下載 Manifest 指定的同一份 `.bin`。接收端會驗證檔案大小與 SHA-256，依 `2bpp`／`indexed4` 和 Manifest 色盤解碼成 480×800 畫面，並顯示輪詢次數、Release 數、資料量、延遲、色彩分布與 Debug 紀錄。
+`/virtual-display` 是獨立、唯讀的裝置接收頁。它不提供照片上傳、內容編輯或發布操作，而是每 5 秒接收目前 Profile 的正式 Manifest，再下載 Manifest 指定的 `.bin`。接收端會驗證檔案大小與 SHA-256，依 `2bpp`／`indexed4` 和 Manifest 色盤解碼成 480×800 畫面，並顯示輪詢次數、Release 數、資料量、延遲、色彩分布、實際抖動算法與 Debug 紀錄。同一個 Release 有多張照片時，可用「上一張／下一張」或鍵盤左右方向鍵立即切換；輪詢不會跳回第 1 張，新 Release 才會從第 1 張開始。
 
 本機快速流程：
 

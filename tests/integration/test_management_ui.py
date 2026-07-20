@@ -224,7 +224,10 @@ def test_virtual_display_receives_and_verifies_formal_release_payload(client, ap
     create_admin(app)
     login(client)
     manifest = app.extensions["inktime_release_publisher"].publish(
-        [("virtual-photo", Image.new("RGB", (480, 800), "gold"))],
+        [
+            ("virtual-photo-1", Image.new("RGB", (480, 800), "gold")),
+            ("virtual-photo-2", Image.new("RGB", (480, 800), "navy")),
+        ],
         profile_key="safe_4c",
         dither="none",
         color_distance="rgb",
@@ -236,6 +239,9 @@ def test_virtual_display_receives_and_verifies_formal_release_payload(client, ap
     assert page.status_code == 200
     assert "RECEIVE ONLY" in body
     assert "不觸發發布" in body
+    assert 'id="previous-frame"' in body
+    assert 'id="next-frame"' in body
+    assert "抖動算法" in body
     assert 'type="file"' not in body
 
     response = client.get("/api/v1/virtual-display/manifest?profile=safe_4c")
@@ -243,12 +249,17 @@ def test_virtual_display_receives_and_verifies_formal_release_payload(client, ap
     assert response.headers["X-InkTime-Receiver"] == "virtual-display"
     assert response.json["release_id"] == manifest["release_id"]
     assert response.json["receiver"]["mode"] == "read_only"
+    assert len(response.json["files"]) == 2
     file_entry = response.json["files"][0]
     payload = client.get(response.json["download_base_url"] + file_entry["name"])
     assert payload.status_code == 200
     assert payload.mimetype == "application/octet-stream"
     assert len(payload.data) == 96_000
     assert payload.headers["X-InkTime-Payload-SHA256"] == file_entry["sha256"]
+    second_entry = response.json["files"][1]
+    second_payload = client.get(response.json["download_base_url"] + second_entry["name"])
+    assert second_payload.status_code == 200
+    assert second_payload.headers["X-InkTime-Payload-SHA256"] == second_entry["sha256"]
 
     missing = client.get(
         f"/api/v1/virtual-display/releases/{manifest['release_id']}/files/manifest.json"
@@ -380,6 +391,57 @@ def test_photo_console_shows_prefilter_metrics_model_text_and_generated_caption(
     listing = client.get("/photos").get_data(as_text=True)
     assert "家人在公園散步。" in listing
     assert "風把這一天留得很輕。" in listing
+
+
+def test_photo_cards_show_total_score_and_e6_estimate(client, app):
+    create_admin(app)
+    login(client)
+    analyzed_id, estimated_id = add_photos(app, 2)
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE photos SET e6_score=100 WHERE id=?", (analyzed_id,))
+        connection.execute("UPDATE photos SET e6_score=91.9 WHERE id=?", (estimated_id,))
+    app.extensions["inktime_photo_repository"].save_analysis(
+        analyzed_id,
+        None,
+        "stage_one",
+        "測試 Provider",
+        "vision-model",
+        valid_result(),
+        "{}",
+        ranking_score=80,
+    )
+
+    body = client.get("/photos").get_data(as_text=True)
+
+    assert "總分 84.0（模型＋E6）" in body
+    assert "總分 91.9（E6 暫估）" in body
+
+
+def test_photo_library_loads_200_per_page_and_keeps_filters(client, app):
+    create_admin(app)
+    login(client)
+    photo_ids = add_photos(app, 201)
+    with app.extensions["inktime_database"].session() as connection:
+        connection.executemany(
+            "UPDATE photos SET status='analyzed' WHERE id=?",
+            [(photo_id,) for photo_id in photo_ids],
+        )
+
+    first = client.get("/photos?status=analyzed")
+    first_body = first.get_data(as_text=True)
+    assert first.status_code == 200
+    assert first_body.count('class="photo-card"') == 200
+    assert "目前顯示第 1–200 張" in first_body
+    assert "第 1 / 2 頁" in first_body
+    assert "status=analyzed&amp;page=2" in first_body
+    assert '<option value="analyzed" selected>' in first_body
+
+    second = client.get("/photos?status=analyzed&page=2")
+    second_body = second.get_data(as_text=True)
+    assert second.status_code == 200
+    assert second_body.count('class="photo-card"') == 1
+    assert "目前顯示第 201–201 張" in second_body
+    assert "第 2 / 2 頁" in second_body
 
 
 def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(client, app):

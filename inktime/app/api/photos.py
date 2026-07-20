@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
+from urllib.parse import urlencode
 
 from flask import Blueprint, abort, current_app, g, render_template, request, send_file
 
@@ -11,6 +13,7 @@ from inktime.app.web.access import administrator_required, login_required
 
 
 bp = Blueprint("photos", __name__)
+PHOTO_PAGE_SIZE = 200
 
 
 def _repository():
@@ -21,16 +24,61 @@ def _repository():
 @login_required
 def photos_page():
     page = max(1, request.args.get("page", 1, type=int))
+    offset = (page - 1) * PHOTO_PAGE_SIZE
     rows, total = _repository().search(
         query=request.args.get("q", "").strip(),
         status=request.args.get("status", "").strip(),
         photo_type=request.args.get("type", "").strip(),
         minimum_score=request.args.get("score", type=float),
         duplicate_only=request.args.get("duplicates") == "1",
-        limit=60,
-        offset=(page - 1) * 60,
+        limit=PHOTO_PAGE_SIZE,
+        offset=offset,
     )
-    return render_template("photos.html", photos=rows, total=total, page=page)
+    e6_weight = float(
+        current_app.extensions["inktime_settings_repository"].get("render.e6_weight", 20)
+    ) / 100.0
+    photos = []
+    for stored_row in rows:
+        photo = dict(stored_row)
+        ranking_score = photo.get("ranking_score")
+        e6_score = photo.get("e6_score")
+        if ranking_score is not None and e6_score is not None:
+            photo["total_score"] = round(
+                float(ranking_score) * (1.0 - e6_weight) + float(e6_score) * e6_weight,
+                1,
+            )
+            photo["total_score_source"] = "模型＋E6"
+        elif ranking_score is not None:
+            photo["total_score"] = round(float(ranking_score), 1)
+            photo["total_score_source"] = "模型"
+        elif e6_score is not None:
+            photo["total_score"] = round(float(e6_score), 1)
+            photo["total_score_source"] = "E6 暫估"
+        else:
+            photo["total_score"] = None
+            photo["total_score_source"] = "尚未評分"
+        photos.append(photo)
+
+    total_pages = max(1, math.ceil(total / PHOTO_PAGE_SIZE))
+    filter_args = request.args.to_dict(flat=True)
+    filter_args.pop("page", None)
+
+    def page_url(target_page: int) -> str:
+        return f"?{urlencode({**filter_args, 'page': target_page})}"
+
+    return render_template(
+        "photos.html",
+        photos=photos,
+        total=total,
+        page=page,
+        page_size=PHOTO_PAGE_SIZE,
+        total_pages=total_pages,
+        range_start=offset + 1 if photos else 0,
+        range_end=offset + len(photos),
+        previous_url=page_url(page - 1) if page > 1 else None,
+        next_url=page_url(page + 1) if page < total_pages else None,
+        filter_args=filter_args,
+    )
 
 
 @bp.get("/photos/<photo_id>")

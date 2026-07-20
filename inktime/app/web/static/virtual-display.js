@@ -14,6 +14,9 @@
     lastFrameKey: '',
     lastReleaseId: '',
     lastLogKey: '',
+    manifest: null,
+    frameIndex: 0,
+    switching: false,
   };
 
   const elements = {
@@ -22,6 +25,9 @@
     canvas: document.getElementById('display-canvas'),
     placeholder: document.getElementById('display-placeholder'),
     framePosition: document.getElementById('frame-position'),
+    frameControlStatus: document.getElementById('frame-control-status'),
+    previousFrame: document.getElementById('previous-frame'),
+    nextFrame: document.getElementById('next-frame'),
     verification: document.getElementById('verification-badge'),
     palette: document.getElementById('palette-distribution'),
     paletteTotal: document.getElementById('palette-total'),
@@ -31,6 +37,7 @@
       file: document.getElementById('meta-file'),
       profile: document.getElementById('meta-profile'),
       format: document.getElementById('meta-format'),
+      dither: document.getElementById('meta-dither'),
       created: document.getElementById('meta-created'),
       received: document.getElementById('meta-received'),
       sha: document.getElementById('meta-sha'),
@@ -55,6 +62,15 @@
     year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
   });
+  const ditherLabels = {
+    gooddisplay: 'Good Display 原廠相容',
+    photo_smooth: '照片平滑',
+    floyd_steinberg: 'Floyd–Steinberg（InkTime）',
+    atkinson: 'Atkinson',
+    bayer4: 'Bayer 4×4',
+    bayer8: 'Bayer 8×8',
+    none: '不抖動',
+  };
 
   function formatBytes(bytes) {
     if (bytes < 1024) return `${bytes} B`;
@@ -200,17 +216,87 @@
     elements.paletteTotal.textContent = `${numberFormatter.format(pixelCount)} px`;
   }
 
-  function updateReceipt(manifest, file, verification) {
+  function updateNavigation() {
+    const total = Array.isArray(state.manifest?.files) ? state.manifest.files.length : 0;
+    const canNavigate = total > 1 && !state.switching;
+    elements.previousFrame.disabled = !canNavigate;
+    elements.nextFrame.disabled = !canNavigate;
+    elements.frameControlStatus.textContent = total
+      ? `第 ${state.frameIndex + 1} / ${total} 張`
+      : '等待 Release';
+  }
+
+  function updateReceipt(manifest, file, verification, frameIndex) {
     elements.meta.release.textContent = manifest.release_id;
     elements.meta.file.textContent = file.name;
     elements.meta.profile.textContent = manifest.render_profile;
     elements.meta.format.textContent = `${manifest.width}×${manifest.height} ${manifest.pixel_format}`;
+    elements.meta.dither.textContent = ditherLabels[manifest.dither] || manifest.dither || '未標示';
     elements.meta.created.textContent = dateFormatter.format(new Date(manifest.created_at));
     elements.meta.received.textContent = dateFormatter.format(new Date());
     elements.meta.sha.textContent = verification.actual;
     elements.verification.textContent = `${verification.method} 已通過`;
     elements.verification.classList.add('verified');
-    elements.framePosition.textContent = `第 1 / ${manifest.files.length} 張 · ${formatBytes(file.size)}`;
+    elements.framePosition.textContent = `第 ${frameIndex + 1} / ${manifest.files.length} 張 · ${formatBytes(file.size)}`;
+  }
+
+  async function displayFrame(manifest, requestedIndex, {newRelease = false} = {}) {
+    const files = Array.isArray(manifest.files) ? manifest.files : [];
+    if (!files.length) throw new Error('Manifest 沒有可接收的檔案');
+    if (state.switching) return;
+    const frameIndex = ((requestedIndex % files.length) + files.length) % files.length;
+    const file = files[frameIndex];
+    if (!file || !file.name || !file.sha256) throw new Error('Manifest 畫面檔案不完整');
+    state.switching = true;
+    state.manifest = manifest;
+    state.frameIndex = frameIndex;
+    updateNavigation();
+    setConnection('receiving', '接收中');
+    elements.device.classList.add('refreshing');
+    debug('info', `準備下載第 ${frameIndex + 1} 張：${file.name}。`);
+    try {
+      const fileUrl = new URL(`${manifest.download_base_url}${encodeURIComponent(file.name)}`, location.origin);
+      const payloadResponse = await fetch(fileUrl, {credentials: 'same-origin', cache: 'no-store'});
+      if (!payloadResponse.ok) throw new Error(await responseMessage(payloadResponse));
+      const buffer = await payloadResponse.arrayBuffer();
+      if (buffer.byteLength !== Number(file.size)) {
+        throw new Error(`下載大小不符：${buffer.byteLength} / ${file.size} bytes`);
+      }
+      const verification = await verifyPayload(
+        buffer,
+        file.sha256,
+        payloadResponse.headers.get('X-InkTime-Payload-SHA256'),
+      );
+      const decoded = decodeFrame(buffer, manifest);
+      renderPalette(decoded);
+      updateReceipt(manifest, file, verification, frameIndex);
+      if (newRelease) state.releases += 1;
+      state.lastReleaseId = manifest.release_id;
+      state.lastFrameKey = `${manifest.release_id}:${file.name}:${file.sha256}`;
+      state.frames += 1;
+      state.bytes += buffer.byteLength;
+      state.verifications += 1;
+      elements.placeholder.hidden = true;
+      setConnection('synced', '已同步');
+      updateStats();
+      debug('info', `第 ${frameIndex + 1} 張 BIN、SHA-256 與 ${manifest.pixel_format} 解碼完成。`);
+    } finally {
+      state.switching = false;
+      updateNavigation();
+      window.setTimeout(() => elements.device.classList.remove('refreshing'), 760);
+    }
+  }
+
+  async function moveFrame(offset) {
+    if (!state.manifest || state.switching || state.manifest.files.length < 2) return;
+    try {
+      await displayFrame(state.manifest, state.frameIndex + offset);
+    } catch (error) {
+      state.errors += 1;
+      setConnection('error', '切換失敗');
+      updateStats();
+      debug('error', error instanceof Error ? error.message : String(error));
+    }
   }
 
   async function receive() {
@@ -230,58 +316,34 @@
       }
       if (!manifestResponse.ok) throw new Error(await responseMessage(manifestResponse));
       const manifest = await manifestResponse.json();
-      const file = Array.isArray(manifest.files) ? manifest.files[0] : null;
-      if (!file || !file.name || !file.sha256) throw new Error('Manifest 沒有可接收的檔案');
-      const frameKey = `${manifest.release_id}:${file.name}:${file.sha256}`;
-      if (frameKey === state.lastFrameKey) {
+      if (manifest.release_id === state.lastReleaseId) {
         setConnection('synced', '已同步');
         elements.stats.latency.textContent = `${Math.round(performance.now() - pollStarted)} ms`;
         debug('info', `Release ${manifest.release_id} 沒有變更。`, `unchanged:${manifest.release_id}`);
         return;
       }
-
-      setConnection('receiving', '接收中');
-      elements.device.classList.add('refreshing');
-      debug('info', `收到 Manifest ${manifest.release_id}，準備下載 ${file.name}。`);
-      const fileUrl = new URL(`${manifest.download_base_url}${encodeURIComponent(file.name)}`, location.origin);
-      const payloadResponse = await fetch(fileUrl, {credentials: 'same-origin', cache: 'no-store'});
-      if (!payloadResponse.ok) throw new Error(await responseMessage(payloadResponse));
-      const buffer = await payloadResponse.arrayBuffer();
-      if (buffer.byteLength !== Number(file.size)) {
-        throw new Error(`下載大小不符：${buffer.byteLength} / ${file.size} bytes`);
-      }
-      const verification = await verifyPayload(
-        buffer,
-        file.sha256,
-        payloadResponse.headers.get('X-InkTime-Payload-SHA256'),
-      );
-      const decoded = decodeFrame(buffer, manifest);
-      renderPalette(decoded);
-      updateReceipt(manifest, file, verification);
-
-      if (manifest.release_id !== state.lastReleaseId) state.releases += 1;
-      state.lastReleaseId = manifest.release_id;
-      state.lastFrameKey = frameKey;
-      state.frames += 1;
-      state.bytes += buffer.byteLength;
-      state.verifications += 1;
+      debug('info', `收到新 Manifest ${manifest.release_id}，從第 1 張開始顯示。`);
+      await displayFrame(manifest, 0, {newRelease: true});
       elements.stats.latency.textContent = `${Math.round(performance.now() - pollStarted)} ms`;
-      elements.placeholder.hidden = true;
-      setConnection('synced', '已同步');
-      updateStats();
-      debug('info', `BIN 接收、SHA-256 驗證與 ${manifest.pixel_format} 解碼完成。`);
     } catch (error) {
       state.errors += 1;
       setConnection('error', '接收錯誤');
       updateStats();
       debug('error', error instanceof Error ? error.message : String(error));
     } finally {
-      window.setTimeout(() => elements.device.classList.remove('refreshing'), 760);
       window.setTimeout(receive, pollMilliseconds);
     }
   }
 
+  elements.previousFrame.addEventListener('click', () => moveFrame(-1));
+  elements.nextFrame.addEventListener('click', () => moveFrame(1));
+  document.addEventListener('keydown', event => {
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || event.target instanceof HTMLTextAreaElement) return;
+    if (event.key === 'ArrowLeft') moveFrame(-1);
+    if (event.key === 'ArrowRight') moveFrame(1);
+  });
   debug('info', `唯讀接收器已啟動；Profile=${config.profile.key}，每 ${config.pollSeconds} 秒輪詢。`);
+  updateNavigation();
   updateStats();
   window.setInterval(updateStats, 1000);
   receive();

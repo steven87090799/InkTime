@@ -535,7 +535,7 @@ class PhotoRepository:
         photo_type: str = "",
         minimum_score: float | None = None,
         duplicate_only: bool = False,
-        limit: int = 60,
+        limit: int = 200,
         offset: int = 0,
     ):
         clauses = ["1=1"]
