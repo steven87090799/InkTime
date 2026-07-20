@@ -39,6 +39,11 @@ def photo_detail(photo_id: str):
     photo = _repository().get_with_path(photo_id)
     if photo is None:
         abort(404)
+    try:
+        photo = current_app.extensions["inktime_render_service"].ensure_photo_features(photo_id)
+    except (OSError, ValueError):
+        # 原檔暫時離線時仍允許查看既有中繼資料與模型結果。
+        pass
     location_name = current_app.extensions["inktime_location_resolver"].resolve(
         photo["gps_lat"],
         photo["gps_lon"],
@@ -115,6 +120,29 @@ def update_photo(photo_id: str):
     except KeyError:
         abort(404)
     return {"status": "ok"}
+
+
+@bp.patch("/api/v1/photos/<photo_id>/crop")
+@administrator_required
+def update_photo_crop(photo_id: str):
+    payload = request.get_json(silent=True) or {}
+    mode = str(payload.get("mode", "manual"))
+    if mode not in {"auto", "manual"}:
+        abort(400, description="RENDER-005 裁切模式不合法")
+    try:
+        if mode == "auto":
+            _repository().update_crop(photo_id, manual_x=None, manual_y=None)
+        else:
+            _repository().update_crop(
+                photo_id,
+                manual_x=float(payload.get("x")),
+                manual_y=float(payload.get("y")),
+            )
+    except (TypeError, ValueError) as exc:
+        abort(400, description=f"RENDER-005 {exc}")
+    except KeyError:
+        abort(404)
+    return {"status": "ok", "mode": mode}
 
 
 @bp.get("/api/v1/photos/<photo_id>/image")

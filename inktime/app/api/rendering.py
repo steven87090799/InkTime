@@ -22,6 +22,7 @@ from inktime.app.domain.rendering import (
     encode_image,
     profile_summaries,
 )
+from inktime.app.services.rendering import LAYOUTS
 
 
 bp = Blueprint("rendering", __name__)
@@ -38,6 +39,7 @@ VIRTUAL_DISPLAY_POLL_SECONDS = 5
 @login_required
 def rendering_page():
     settings = current_app.extensions["inktime_settings_repository"]
+    render_service = current_app.extensions["inktime_render_service"]
     current_font_reference = str(settings.get("render.font_path", ""))
     fonts = current_app.extensions["inktime_font_manager"].options(current_font_reference)
     return render_template(
@@ -51,6 +53,10 @@ def rendering_page():
         dither_strength=float(settings.get("render.dither_strength", 1.0)),
         color_distance=str(settings.get("render.color_distance", "oklab")),
         show_location=bool(settings.get("render.show_location", True)),
+        layouts=LAYOUTS,
+        current_layout=str(settings.get("render.layout", "photo_info")),
+        selection_mode=str(settings.get("render.selection_mode", "history_today")),
+        candidate_photos=render_service.select_candidates_details(12),
     )
 
 
@@ -267,8 +273,19 @@ def simulate():
 @bp.get("/api/v1/rendering/preview/<photo_id>")
 @login_required
 def preview(photo_id: str):
+    layout = str(request.args.get("layout", "")).strip() or None
+    if layout is not None and layout not in LAYOUTS:
+        abort(400, description="RENDER-005 不支援的相框版型")
+    crop_x = request.args.get("crop_x", type=float)
+    crop_y = request.args.get("crop_y", type=float)
+    if (crop_x is None) != (crop_y is None) or any(
+        value is not None and not 0 <= value <= 1 for value in (crop_x, crop_y)
+    ):
+        abort(400, description="RENDER-005 裁切位置必須同時提供且介於 0 到 1")
     try:
-        image = current_app.extensions["inktime_render_service"].render_photo(photo_id)
+        image = current_app.extensions["inktime_render_service"].render_photo(
+            photo_id, layout=layout, crop_x=crop_x, crop_y=crop_y
+        )
     except KeyError:
         abort(404)
     if request.args.get("quantized") == "1":
@@ -287,7 +304,12 @@ def preview(photo_id: str):
     output = BytesIO()
     image.save(output, "PNG")
     output.seek(0)
-    return send_file(output, mimetype="image/png")
+    response = send_file(output, mimetype="image/png", max_age=0)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-InkTime-Layout"] = layout or str(
+        current_app.extensions["inktime_settings_repository"].get("render.layout", "photo_info")
+    )
+    return response
 
 
 @bp.post("/api/v1/releases")

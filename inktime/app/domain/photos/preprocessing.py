@@ -10,6 +10,10 @@ from typing import Any
 
 from PIL import ExifTags, Image, ImageOps, ImageStat
 
+from inktime.app.domain.rendering.composition import (
+    analyze_crop_focus,
+)
+
 try:
     from pillow_heif import register_heif_opener
 
@@ -42,6 +46,20 @@ class LocalPhotoFeatures:
     overexposed_ratio: float
     underexposed_ratio: float
     screenshot_likelihood: float
+    crop_focus_x: float
+    crop_focus_y: float
+    crop_subject_left: float
+    crop_subject_top: float
+    crop_subject_right: float
+    crop_subject_bottom: float
+    crop_method: str
+    crop_face_count: int
+    e6_score: float | None
+    e6_contrast_score: float | None
+    e6_subject_score: float | None
+    e6_skin_score: float | None
+    e6_text_score: float | None
+    e6_skin_pixels: int
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -164,6 +182,7 @@ class PhotoPreprocessor:
             opened.thumbnail((512, 512), Image.Resampling.LANCZOS)
             image = ImageOps.exif_transpose(opened).convert("RGB")
             grayscale = image.convert("L")
+            crop = analyze_crop_focus(image)
             sample = grayscale
             stat = ImageStat.Stat(sample)
             histogram = sample.histogram()
@@ -230,4 +249,18 @@ class PhotoPreprocessor:
                 overexposed_ratio=sum(histogram[245:]) / total_pixels,
                 underexposed_ratio=sum(histogram[:11]) / total_pixels,
                 screenshot_likelihood=screenshot_likelihood,
+                crop_focus_x=crop.focus_x,
+                crop_focus_y=crop.focus_y,
+                crop_subject_left=crop.subject_left,
+                crop_subject_top=crop.subject_top,
+                crop_subject_right=crop.subject_right,
+                crop_subject_bottom=crop.subject_bottom,
+                crop_method=crop.method,
+                crop_face_count=crop.face_count,
+                e6_score=None,
+                e6_contrast_score=None,
+                e6_subject_score=None,
+                e6_skin_score=None,
+                e6_text_score=None,
+                e6_skin_pixels=0,
             )

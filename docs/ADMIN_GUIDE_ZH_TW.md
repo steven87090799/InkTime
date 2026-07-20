@@ -14,6 +14,8 @@
 | `analysis.stage_two_threshold` | 65 | 0–100，建議 60–75 | 越低成本越高 | 否 |
 | 本機預篩選 | 啟用 | 截圖／明顯低品質可分別停用 | 排除項目 0 Token；不刪原檔 | 否 |
 | `analysis.prefilter_sensitivity` | conservative | conservative／balanced／aggressive | 越積極越省 Token，也越可能誤排除 | 否 |
+| `analysis.e6_prefilter_enabled` | true | true／false | 關閉後不會因六色量化失真而省下模型請求 | 否 |
+| `analysis.e6_min_score` | 25 | 0–100，建議 20–35 | 越高越省 Token，但可能排除原圖好看、六色表現較弱的照片 | 否 |
 | `analysis.scoring_rules` | 內建完整規則 | 100–12000 字元 | 影響新分析結果 | 否 |
 | 綜合排序權重 | 50／20／10／20 | 四項合計 100% | 影響新分析與自動選片順序 | 否 |
 | 最愛照片加分 | 5 | 0–30 | 只加入綜合排序分 | 否 |
@@ -35,6 +37,12 @@
 | `budget.max_tokens` | 8000 | 256–1,000,000 | 需符合模型能力 | 否 |
 | `render.memory_threshold` | 70 | 0–100 | 過高可能無候選 | 否 |
 | `render.quantity` | 5 | 1–50 | 增加下載量 | 否 |
+| `render.selection_mode` | history_today | history_today／top_ranked | 歷年今日會依系統時區與 EXIF 拍攝日選片 | 否 |
+| `render.history_today_window_days` | 7 | 0–31 | 0 只接受完全相同月日 | 否 |
+| `render.history_today_fallback` | nearby_then_ranked | nearby_then_ranked／nearby_only／ranked／none | 限制越嚴格越可能沒有足量候選 | 否 |
+| `render.e6_weight` | 20 | 0–60% | 過高會讓面板顯示效果凌駕回憶分 | 否 |
+| `render.layout` | photo_info | full／postcard／photo_info／calendar／weather_sensor | 日曆與天氣版型的照片區較小 | 否 |
+| `render.show_capture_date` | true | true／false | EXIF 日期錯誤時也會跟著顯示 | 否 |
 | `render.font_path` | 內建芫荽 | 內建手寫／文青風格或已上傳 TTF／OTF／TTC | 缺字會停止發布，不會 fallback | 否 |
 | `render.show_location` | true | true／false | 只顯示最近城市，不顯示座標 | 否 |
 | `render.location_max_distance_km` | 80 | 1–500 公里 | 過大可能顯示不準確的鄰近城市 | 否 |
@@ -42,6 +50,9 @@
 | `render.dither` | floyd_steinberg | none／Floyd／Atkinson／Bayer 4／8 | 誤差擴散發布 CPU 較高 | 否 |
 | `render.dither_strength` | 1 | 0–2 | 過高會增加色點 | 否 |
 | `render.color_distance` | oklab | oklab／rgb | 切換會改變色彩映射 | 否 |
+| `render.weather_enabled` | false | 啟用前先填正確經緯度 | 需連外；失敗不阻擋照片發布 | 否 |
+| 天氣經緯度／顯示名稱 | 臺北市中心／所在地 | 緯度 -90–90、經度 -180–180 | 預設座標只是範例，啟用前必須修改 | 否 |
+| `render.sensor_device_id` | 空白 | PhotoPainter 裝置 ID；空白取最近回報 | 多裝置時可能抓到別的房間 | 否 |
 | `device.legacy_api_enabled` | false | 僅遷移期 | URL 金鑰不安全 | 是 |
 | `device.default_timezone` | Asia/Taipei | IANA 時區 | 影響新增裝置排程 | 否 |
 | `device.default_schedule` | 08:00 | 00:00–23:59 | 影響新增裝置刷新時間 | 否 |
@@ -76,6 +87,18 @@
 這項安裝檢查不取代正式渲染檢查。每段短文案仍會逐字比對目前字型的 cmap；缺少任一非空白字元就回報 `IMG-002` 並停止該次發布，不會載入 Pillow 預設字型。兩套內建字型的來源、固定 SHA-256 與授權全文位於 `inktime/app/domain/rendering/font_assets/`。
 
 照片含 GPS 時，正式渲染預設會在短文案下方加入「地點｜最近城市」。城市由 `data/world_cities_zh.csv` 離線比對，精確經緯度不會印在畫面；超過 `render.location_max_distance_km` 找不到可信城市時就不顯示。可用 `render.show_location` 完全停用。
+
+## 智慧裁切、E6 適合度與相框版型
+
+「渲染」頁提供即時六色預覽。智慧裁切先用本機 OpenCV 尋找正面人臉；沒有可信人臉時，改以邊緣、色彩與中央先驗估計主體。裁切會盡量保留偵測到的主體範圍，管理員也可用水平／垂直滑桿覆寫焦點並儲存，或恢復自動模式。這些操作只儲存 0–1 的相對位置，不修改原始照片。
+
+E6 適合度會在任何模型請求前，以正式 `gdep073e01_6c` 色盤、OKLab 色差與 Bayer 抖動建立 112 px 本機樣本，量測量化後對比保留、主體細節、膚色偏差與強邊緣／文字可讀性。總分低於 `analysis.e6_min_score` 時可直接排除，因此不新增 Token；最愛照片仍會略過排除。舊照片第一次進入候選或渲染時會自動補算，仍不呼叫模型。
+
+五種版型為全版照片、明信片、照片＋日期地點、月曆相框、天氣＋室內溫溼度。預覽可暫時切換版型，按「設為預設版型」才會改正式發布設定。天氣資料為選用功能，從 Open-Meteo 取得目前天氣、溼度與當日高低溫並快取 30 分鐘；外部服務失敗時照片仍正常發布。室內資料來自 PhotoPainter 裝置狀態回報；沒有感測值時畫面會明確顯示尚無回報。
+
+## 歷年今日選片
+
+預設 `history_today` 不是單純挑最高分：依 `general.timezone` 的今天，先找「月、日相同且年份早於今年」的照片；不足時在預設前後 7 日內依日期距離補足，再依綜合排序回退。可把回退改成只接受鄰近日、直接採排名或完全不補圖，也可切換 `top_ranked`。手動指定照片發布時永遠採管理員選擇，不受自動選片規則限制。
 
 ## 本機預篩選與 ExifTool 邊界
 

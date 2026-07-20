@@ -247,6 +247,8 @@ class DeviceRepository:
                     details.get("usb_power"),
                     details.get("last_refresh_duration_ms"),
                     details.get("wake_duration_ms"),
+                    details.get("temperature_c"),
+                    details.get("humidity_percent"),
                 )
                 if any(value is not None for value in energy_values):
                     estimated = details.get("battery_percent_estimated")
@@ -256,8 +258,8 @@ class DeviceRepository:
                         INSERT INTO device_power_samples(
                             device_id,battery_voltage,battery_percent,battery_percent_estimated,
                             usb_power,refresh_duration_ms,wake_duration_ms,display_updated,
-                            temperature_c,wifi_rssi,wake_reason,recorded_at
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                            temperature_c,humidity_percent,wifi_rssi,wake_reason,recorded_at
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         (
                             device_id,
@@ -269,6 +271,7 @@ class DeviceRepository:
                             details.get("wake_duration_ms"),
                             int(bool(details.get("display_updated", False))),
                             details.get("temperature_c"),
+                            details.get("humidity_percent"),
                             wifi_rssi,
                             wake_reason[:64] or None,
                             now,
@@ -345,7 +348,7 @@ class DeviceRepository:
                 SELECT * FROM (
                     SELECT id,device_id,battery_voltage,battery_percent,
                            battery_percent_estimated,usb_power,refresh_duration_ms,
-                           wake_duration_ms,display_updated,temperature_c,wifi_rssi,
+                           wake_duration_ms,display_updated,temperature_c,humidity_percent,wifi_rssi,
                            wake_reason,recorded_at
                     FROM device_power_samples
                     WHERE device_id=? AND recorded_at>=?

@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import time
 
+from PIL import Image, ImageOps
+
 from inktime.app.core.paths import safe_join
 from inktime.app.domain.analysis import AnalysisValidationError, validate_analysis_result
 from inktime.app.domain.analysis.scoring import (
@@ -13,6 +15,7 @@ from inktime.app.domain.analysis.scoring import (
     calculate_ranking_score,
 )
 from inktime.app.domain.photos import ThumbnailCache
+from inktime.app.domain.rendering import evaluate_e6_suitability
 from inktime.app.providers.base import ProviderResponse, VisionProvider
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.settings import SettingsRepository
@@ -107,6 +110,12 @@ class PhotoAnalysisService:
         low_quality_enabled = self.settings is not None and bool(
             self.settings.get("analysis.prefilter_low_quality", True)
         )
+        e6_enabled = self.settings is not None and bool(
+            self.settings.get("analysis.e6_prefilter_enabled", True)
+        )
+        e6_threshold = float(
+            self.settings.get("analysis.e6_min_score", 25) if self.settings is not None else 25
+        )
         favorite_bypass = bool(photo["favorite"])
         screenshot_score = float(photo["screenshot_likelihood"] or 0)
         blur = float(photo["blur_score"]) if photo["blur_score"] is not None else None
@@ -124,6 +133,7 @@ class PhotoAnalysisService:
             if photo["width"] is not None and photo["height"] is not None
             else None
         )
+        e6_score = float(photo["e6_score"]) if photo["e6_score"] is not None else None
         checks = [
             {
                 "key": "screenshot",
@@ -173,8 +183,16 @@ class PhotoAnalysisService:
                 "hit": short_edge is not None and short_edge < profile["short_edge"],
                 "enabled": low_quality_enabled,
             },
+            {
+                "key": "e6_suitability",
+                "label": "E6 六色適合度過低",
+                "value": f"{e6_score:.2f}" if e6_score is not None else "尚未計算",
+                "threshold": f"< {e6_threshold:.0f}",
+                "hit": e6_score is not None and e6_score < e6_threshold,
+                "enabled": e6_enabled,
+            },
         ]
-        defect_checks = checks[1:]
+        defect_checks = checks[1:-1]
         matched_defects = [check["label"] for check in defect_checks if check["hit"]]
         screenshot = enabled and screenshot_enabled and checks[0]["hit"] and not favorite_bypass
         low_quality = (
@@ -183,6 +201,7 @@ class PhotoAnalysisService:
             and len(matched_defects) >= 2
             and not favorite_bypass
         )
+        e6_unsuitable = enabled and e6_enabled and checks[-1]["hit"] and not favorite_bypass
         if not enabled:
             decision = "disabled"
             summary = "本機預篩選已停用"
@@ -195,6 +214,9 @@ class PhotoAnalysisService:
         elif low_quality:
             decision = "excluded_low_quality"
             summary = f"已排除：命中 {len(matched_defects)} 項品質缺陷，不會呼叫模型"
+        elif e6_unsuitable:
+            decision = "excluded_e6"
+            summary = "已排除：E6 六色量化後適合度過低，不會呼叫模型"
         else:
             decision = "passed"
             summary = f"通過本機預篩選：命中 {len(matched_defects)} 項品質缺陷"
@@ -203,6 +225,8 @@ class PhotoAnalysisService:
             "sensitivity": sensitivity,
             "screenshot_enabled": screenshot_enabled,
             "low_quality_enabled": low_quality_enabled,
+            "e6_enabled": e6_enabled,
+            "e6_threshold": e6_threshold,
             "favorite_bypass": favorite_bypass,
             "checks": checks,
             "matched_defects": matched_defects,
@@ -210,7 +234,7 @@ class PhotoAnalysisService:
             "required_defects": 2,
             "decision": decision,
             "summary": summary,
-            "excluded": screenshot or low_quality,
+            "excluded": screenshot or low_quality or e6_unsuitable,
         }
 
     def _prefilter_result(self, photo) -> dict | None:
@@ -224,6 +248,11 @@ class PhotoAnalysisService:
             reasons = ["本機截圖特徵達排除門檻"]
             memory_score = 5.0
             types = ["截圖"]
+        elif evaluation["decision"] == "excluded_e6":
+            label = "不適合 E6 六色顯示的照片"
+            reasons = ["六色量化後對比、主體、膚色或細節保留不足"]
+            memory_score = 20.0
+            types = ["其他"]
         else:
             label = "明顯低品質照片"
             reasons = evaluation["matched_defects"]
@@ -242,6 +271,16 @@ class PhotoAnalysisService:
             "sensitive": False,
             "reason": "、".join(reasons),
         }
+
+    def _ensure_e6_suitability(self, photo_id: str, photo, source: Path):
+        if photo["e6_score"] is not None:
+            return photo
+        with Image.open(source) as opened:
+            opened.draft("RGB", (256, 256))
+            opened.thumbnail((256, 256), Image.Resampling.LANCZOS)
+            metrics = evaluate_e6_suitability(ImageOps.exif_transpose(opened).convert("RGB"))
+        self.photos.update_e6_suitability(photo_id, metrics)
+        return self.photos.get_with_path(photo_id)
 
     def _record(
         self,
@@ -348,6 +387,7 @@ class PhotoAnalysisService:
         source = safe_join(Path(photo["root_path"]), str(photo["relative_path"]))
         if not source.is_file():
             raise FileNotFoundError("SCAN-001 找不到照片檔案")
+        photo = self._ensure_e6_suitability(photo_id, photo, source)
         inherited = self.photos.inherit_existing_analysis(photo_id, job_id)
         if inherited is not None:
             return {"analysis": inherited, "stage": "inherited", "_actual_cost": 0}

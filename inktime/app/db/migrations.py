@@ -510,6 +510,32 @@ MIGRATIONS = (
             "WHERE key='render.font_path' AND value_json='\"\"'",
         ),
     ),
+    Migration(
+        10,
+        "加入智慧裁切、E6 適合度與室內濕度",
+        (
+            "ALTER TABLE photos ADD COLUMN crop_focus_x REAL CHECK(crop_focus_x IS NULL OR crop_focus_x BETWEEN 0 AND 1)",
+            "ALTER TABLE photos ADD COLUMN crop_focus_y REAL CHECK(crop_focus_y IS NULL OR crop_focus_y BETWEEN 0 AND 1)",
+            "ALTER TABLE photos ADD COLUMN crop_subject_left REAL CHECK(crop_subject_left IS NULL OR crop_subject_left BETWEEN 0 AND 1)",
+            "ALTER TABLE photos ADD COLUMN crop_subject_top REAL CHECK(crop_subject_top IS NULL OR crop_subject_top BETWEEN 0 AND 1)",
+            "ALTER TABLE photos ADD COLUMN crop_subject_right REAL CHECK(crop_subject_right IS NULL OR crop_subject_right BETWEEN 0 AND 1)",
+            "ALTER TABLE photos ADD COLUMN crop_subject_bottom REAL CHECK(crop_subject_bottom IS NULL OR crop_subject_bottom BETWEEN 0 AND 1)",
+            "ALTER TABLE photos ADD COLUMN crop_method TEXT",
+            "ALTER TABLE photos ADD COLUMN crop_face_count INTEGER NOT NULL DEFAULT 0 CHECK(crop_face_count >= 0)",
+            "ALTER TABLE photos ADD COLUMN crop_manual_x REAL CHECK(crop_manual_x IS NULL OR crop_manual_x BETWEEN 0 AND 1)",
+            "ALTER TABLE photos ADD COLUMN crop_manual_y REAL CHECK(crop_manual_y IS NULL OR crop_manual_y BETWEEN 0 AND 1)",
+            "ALTER TABLE photos ADD COLUMN e6_score REAL CHECK(e6_score IS NULL OR e6_score BETWEEN 0 AND 100)",
+            "ALTER TABLE photos ADD COLUMN e6_contrast_score REAL CHECK(e6_contrast_score IS NULL OR e6_contrast_score BETWEEN 0 AND 100)",
+            "ALTER TABLE photos ADD COLUMN e6_subject_score REAL CHECK(e6_subject_score IS NULL OR e6_subject_score BETWEEN 0 AND 100)",
+            "ALTER TABLE photos ADD COLUMN e6_skin_score REAL CHECK(e6_skin_score IS NULL OR e6_skin_score BETWEEN 0 AND 100)",
+            "ALTER TABLE photos ADD COLUMN e6_text_score REAL CHECK(e6_text_score IS NULL OR e6_text_score BETWEEN 0 AND 100)",
+            "ALTER TABLE photos ADD COLUMN e6_skin_pixels INTEGER NOT NULL DEFAULT 0 CHECK(e6_skin_pixels >= 0)",
+            "ALTER TABLE device_power_samples ADD COLUMN humidity_percent REAL CHECK(humidity_percent IS NULL OR humidity_percent BETWEEN 0 AND 100)",
+            "CREATE INDEX IF NOT EXISTS idx_photos_history_day ON photos(substr(captured_at,6,5),captured_at)",
+            "CREATE INDEX IF NOT EXISTS idx_photos_e6_score ON photos(e6_score DESC)",
+            "INSERT OR IGNORE INTO feature_flags(key,enabled,description,updated_at) VALUES ('smart_composition',1,'智慧裁切、六色適合度與相框版型已啟用',datetime('now'))",
+        ),
+    ),
 )
 
 

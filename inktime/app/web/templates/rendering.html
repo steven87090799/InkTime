@@ -27,6 +27,56 @@
   <p class="notice">Floyd–Steinberg 與 Atkinson 為誤差擴散，照片通常較自然；Bayer 4×4／8×8 為有序抖動，速度快、結果穩定；none 適合圖示與已經使用面板色盤的素材。發布時才運算，不增加平常待機耗用。</p>
 </section>
 
+<section class="panel composition-studio">
+  <div class="panel-head">
+    <div><h2>智慧裁切與版型預覽</h2><p>預覽使用 PhotoPainter E6 六色色盤；移動焦點不會修改原始照片。</p></div>
+    <span class="status ok">{{ '歷年今日優先' if selection_mode == 'history_today' else '高分優先' }}</span>
+  </div>
+  {% if candidate_photos %}
+  <div class="composition-grid">
+    <div class="composition-controls">
+      <label>候選照片
+        <select id="composition-photo">
+          {% for photo in candidate_photos %}
+          <option value="{{ photo.id }}"
+            data-focus-x="{{ photo.crop_manual_x if photo.crop_manual_x is not none else photo.crop_focus_x|default(0.5, true) }}"
+            data-focus-y="{{ photo.crop_manual_y if photo.crop_manual_y is not none else photo.crop_focus_y|default(0.5, true) }}"
+            data-auto-x="{{ photo.crop_focus_x|default(0.5, true) }}"
+            data-auto-y="{{ photo.crop_focus_y|default(0.5, true) }}"
+            data-e6="{{ photo.e6_score if photo.e6_score is not none else '' }}"
+            data-contrast="{{ photo.e6_contrast_score if photo.e6_contrast_score is not none else '' }}"
+            data-subject="{{ photo.e6_subject_score if photo.e6_subject_score is not none else '' }}"
+            data-skin="{{ photo.e6_skin_score if photo.e6_skin_score is not none else '' }}"
+            data-text="{{ photo.e6_text_score if photo.e6_text_score is not none else '' }}"
+            data-crop-method="{{ photo.crop_method or 'center' }}"
+            data-faces="{{ photo.crop_face_count or 0 }}">
+            {{ photo.captured_at or '日期未知' }}｜{{ '歷年同日' if photo.match_type == 'exact_day' else ('前後 ' ~ photo.day_distance ~ ' 日' if photo.match_type == 'nearby_day' else '高分補位') }}｜{{ photo.relative_path }}
+          </option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>相框版型
+        <select id="composition-layout">{% for key,label in layouts.items() %}<option value="{{ key }}" {% if key == current_layout %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+      </label>
+      <label>水平裁切焦點 <output id="crop-x-value">50%</output><input id="crop-x" type="range" min="0" max="100" value="50"></label>
+      <label>垂直裁切焦點 <output id="crop-y-value">50%</output><input id="crop-y" type="range" min="0" max="100" value="50"></label>
+      <div class="composition-actions">
+        {% if g.user.role=='administrator' %}<button type="button" class="primary" id="save-crop">儲存此照片裁切</button><button type="button" class="secondary" id="auto-crop">恢復人臉／主體自動裁切</button><button type="button" class="secondary" id="save-layout">設為預設版型</button>{% endif %}
+      </div>
+      <p id="crop-method" class="notice"></p>
+      <div class="e6-score-grid">
+        <article><span>E6 總分</span><strong id="e6-total">—</strong></article>
+        <article><span>量化對比</span><strong id="e6-contrast">—</strong></article>
+        <article><span>主體辨識</span><strong id="e6-subject">—</strong></article>
+        <article><span>膚色保留</span><strong id="e6-skin">—</strong></article>
+        <article><span>細節／文字</span><strong id="e6-text">—</strong></article>
+      </div>
+    </div>
+    <div class="composition-preview-shell"><img id="composition-preview" alt="六色電子紙版型預覽" width="480" height="800"></div>
+  </div>
+  {% else %}<p class="empty">目前沒有符合回憶門檻的已分析照片；可調低門檻或先完成照片分析。</p>{% endif %}
+</section>
+
 <section class="panel">
   <div class="panel-head font-panel-head">
     <div>
@@ -92,4 +142,14 @@ document.querySelectorAll('.rollback').forEach(b=>b.onclick=async()=>{if(!confir
 const fontStatus=document.getElementById('font-action-status');
 document.querySelectorAll('.select-font').forEach(button=>button.onclick=async()=>{button.disabled=true;fontStatus.textContent='正在切換字型…';const response=await window.inktimeFetch('/api/v1/fonts/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({reference:button.dataset.reference})});const data=await response.json();if(response.ok)location.reload();else{button.disabled=false;fontStatus.textContent=data.message||'字型切換失敗';}});
 document.getElementById('font-form').onsubmit=async event=>{event.preventDefault();const button=event.target.querySelector('button');button.disabled=true;fontStatus.textContent='正在驗證並安裝字型…';const response=await window.inktimeFetch('/api/v1/fonts',{method:'POST',body:new FormData(event.target)});const data=await response.json();if(response.ok)location.reload();else{button.disabled=false;fontStatus.textContent=data.message||'字型上傳失敗';}};
+const compositionPhoto=document.getElementById('composition-photo');
+if(compositionPhoto){
+  const compositionLayout=document.getElementById('composition-layout'),cropX=document.getElementById('crop-x'),cropY=document.getElementById('crop-y'),preview=document.getElementById('composition-preview');
+  function score(value){return value===''?'—':Number(value).toFixed(1)}
+  function refreshComposition(resetFocus=false){const option=compositionPhoto.selectedOptions[0];if(resetFocus){cropX.value=Math.round(Number(option.dataset.focusX||.5)*100);cropY.value=Math.round(Number(option.dataset.focusY||.5)*100);}document.getElementById('crop-x-value').textContent=`${cropX.value}%`;document.getElementById('crop-y-value').textContent=`${cropY.value}%`;document.getElementById('e6-total').textContent=score(option.dataset.e6);document.getElementById('e6-contrast').textContent=score(option.dataset.contrast);document.getElementById('e6-subject').textContent=score(option.dataset.subject);document.getElementById('e6-skin').textContent=score(option.dataset.skin);document.getElementById('e6-text').textContent=score(option.dataset.text);document.getElementById('crop-method').textContent=`自動偵測：${option.dataset.cropMethod}；人臉 ${option.dataset.faces} 張。拖曳後可儲存成此照片的手動焦點。`;const params=new URLSearchParams({quantized:'1',profile:'gdep073e01_6c',layout:compositionLayout.value,crop_x:(Number(cropX.value)/100).toFixed(2),crop_y:(Number(cropY.value)/100).toFixed(2),t:Date.now()});preview.src=`/api/v1/rendering/preview/${compositionPhoto.value}?${params}`;}
+  compositionPhoto.onchange=()=>refreshComposition(true);compositionLayout.onchange=()=>refreshComposition();cropX.oninput=()=>refreshComposition();cropY.oninput=()=>refreshComposition();refreshComposition(true);
+  document.getElementById('save-crop').onclick=async()=>{const response=await window.inktimeFetch(`/api/v1/photos/${compositionPhoto.value}/crop`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'manual',x:Number(cropX.value)/100,y:Number(cropY.value)/100})});alert(response.ok?'已儲存此照片的裁切焦點':(await response.json()).message||'儲存失敗');};
+  document.getElementById('auto-crop').onclick=async()=>{const option=compositionPhoto.selectedOptions[0],response=await window.inktimeFetch(`/api/v1/photos/${compositionPhoto.value}/crop`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'auto'})});if(response.ok){cropX.value=Math.round(Number(option.dataset.autoX||.5)*100);cropY.value=Math.round(Number(option.dataset.autoY||.5)*100);refreshComposition();}else alert((await response.json()).message||'恢復失敗');};
+  document.getElementById('save-layout').onclick=async()=>{const response=await window.inktimeFetch('/api/v1/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({'render.layout':compositionLayout.value})});alert(response.ok?'已設為正式發布的預設版型':(await response.json()).message||'儲存失敗');};
+}
 </script>{% endif %}{% endblock %}

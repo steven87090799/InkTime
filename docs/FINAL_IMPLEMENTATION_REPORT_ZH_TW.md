@@ -185,7 +185,7 @@ curl --fail http://127.0.0.1:8765/health/ready
 1. Batch Provider 原語已完成，但背景 Job 的自動切批、poll、結果匯入、取消與重啟恢復尚未串成端到端流程；目前正式分析工作使用即時 API。
 2. 照片頁已有搜尋、狀態／類型／分數／重複篩選與人工修正，但尚缺完整的年份／月份／模型／錯誤複合篩選、網格清單切換及批次排除／刪除分析結果。
 3. 工作建立頁是可用的精簡精靈，尚缺資料夾／日期／相簿／隨機抽樣等完整選片步驟、複製工作設定與 Batch 模式 UI。
-4. 渲染已支援字型、實際色盤預覽、四色／六色／七色、五種抖動與 Profile 回滾；裁切、文字位置與自訂版型尚未做成拖拉式 UI。
+4. 渲染已支援人臉／主體智慧裁切、Web 焦點調整、E6 適合度、五種固定相框版型、字型、實際色盤預覽、四色／六色／七色、五種抖動與 Profile 回滾；任意元件拖拉、縮放的自由版型編輯器尚未實作。
 5. 備份可由 UI 建立、下載、驗證並排程；基於 SQLite 線上替換風險，還原仍依文件在服務停止狀態執行，尚未做成 UI 一鍵還原。
 6. 裝置可建立、重生 Token、停用，並從 Web 編輯面板、時區、每日排程與 0°／180°；設定版本 ACK、離線／恢復通知、Firmware／RSSI／Heap／PSRAM／錯誤 Telemetry 已完成。指定圖片播放清單與簽章 OTA 尚未完成。
 7. 診斷頁顯示 Provider 啟用數並提供逐一測試，但尚未建立所有 Provider 的定時主動健康探測與歷史圖表。
@@ -197,7 +197,7 @@ curl --fail http://127.0.0.1:8765/health/ready
 
 ## 未來建議
 
-下一優先是簽章 OTA／金絲雀回滾與每台裝置播放清單，再補齊照片批次操作、拖拉式版面與 Batch Job 生命週期；之後將 dashboard／operations SQL 移入 Repository，並只在需要多主機 Worker 時評估 PostgreSQL。SQLite 單主機部署應維持單一可靠本機 Volume，不要放在無鎖定保證的網路檔案系統。完整優先清單與 N100 實測見 `N100_IMPLEMENTATION_REPORT_ZH_TW.md`。
+下一優先是簽章 OTA／金絲雀回滾與每台裝置播放清單，再補齊照片批次操作、自由拖拉版面與 Batch Job 生命週期；之後將 dashboard／operations SQL 移入 Repository，並只在需要多主機 Worker 時評估 PostgreSQL。SQLite 單主機部署應維持單一可靠本機 Volume，不要放在無鎖定保證的網路檔案系統。完整優先清單與 N100 實測見 `N100_IMPLEMENTATION_REPORT_ZH_TW.md`。
 
 ## Commit 清單
 

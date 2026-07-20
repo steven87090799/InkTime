@@ -82,6 +82,35 @@ class PhotoRepository:
         now = datetime.now(timezone.utc).isoformat()
         stat = source.stat()
         values = features.as_dict()
+
+        def update_render_features(connection, photo_id: str) -> None:
+            connection.execute(
+                """
+                UPDATE photos SET
+                    crop_focus_x=?,crop_focus_y=?,crop_subject_left=?,crop_subject_top=?,
+                    crop_subject_right=?,crop_subject_bottom=?,crop_method=?,crop_face_count=?,
+                    e6_score=?,e6_contrast_score=?,e6_subject_score=?,e6_skin_score=?,
+                    e6_text_score=?,e6_skin_pixels=?
+                WHERE id=?
+                """,
+                (
+                    values["crop_focus_x"],
+                    values["crop_focus_y"],
+                    values["crop_subject_left"],
+                    values["crop_subject_top"],
+                    values["crop_subject_right"],
+                    values["crop_subject_bottom"],
+                    values["crop_method"],
+                    values["crop_face_count"],
+                    values["e6_score"],
+                    values["e6_contrast_score"],
+                    values["e6_subject_score"],
+                    values["e6_skin_score"],
+                    values["e6_text_score"],
+                    values["e6_skin_pixels"],
+                    photo_id,
+                ),
+            )
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -187,6 +216,7 @@ class PhotoRepository:
                                     "UPDATE photos SET duplicate_group_id=NULL WHERE duplicate_group_id=?",
                                     (old_group,),
                                 )
+                    update_render_features(connection, photo_id)
                     connection.execute("COMMIT")
                     return photo_id, inherited
 
@@ -252,6 +282,7 @@ class PhotoRepository:
                             values["screenshot_likelihood"],
                         ),
                     )
+                update_render_features(connection, photo_id)
                 connection.execute("COMMIT")
                 return photo_id, inherited
             except Exception:
@@ -432,6 +463,69 @@ class PhotoRepository:
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+
+    def update_crop(self, photo_id: str, *, manual_x: float | None, manual_y: float | None) -> None:
+        if (manual_x is None) != (manual_y is None):
+            raise ValueError("裁切 X 與 Y 必須同時設定或同時清除")
+        if manual_x is not None and not (0.0 <= manual_x <= 1.0 and 0.0 <= manual_y <= 1.0):
+            raise ValueError("裁切位置必須介於 0 到 1")
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.session() as connection:
+            cursor = connection.execute(
+                "UPDATE photos SET crop_manual_x=?,crop_manual_y=?,updated_at=? WHERE id=?",
+                (manual_x, manual_y, now, photo_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(photo_id)
+
+    def update_crop_analysis(self, photo_id: str, analysis) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.session() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE photos SET crop_focus_x=?,crop_focus_y=?,crop_subject_left=?,
+                    crop_subject_top=?,crop_subject_right=?,crop_subject_bottom=?,
+                    crop_method=?,crop_face_count=?,updated_at=?
+                WHERE id=?
+                """,
+                (
+                    analysis.focus_x,
+                    analysis.focus_y,
+                    analysis.subject_left,
+                    analysis.subject_top,
+                    analysis.subject_right,
+                    analysis.subject_bottom,
+                    analysis.method,
+                    analysis.face_count,
+                    now,
+                    photo_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(photo_id)
+
+    def update_e6_suitability(self, photo_id: str, metrics) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.session() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE photos SET e6_score=?,e6_contrast_score=?,e6_subject_score=?,
+                    e6_skin_score=?,e6_text_score=?,e6_skin_pixels=?,updated_at=?
+                WHERE id=?
+                """,
+                (
+                    metrics.score,
+                    metrics.contrast_score,
+                    metrics.subject_score,
+                    metrics.skin_score,
+                    metrics.text_score,
+                    metrics.skin_pixels,
+                    now,
+                    photo_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(photo_id)
 
     def search(
         self,

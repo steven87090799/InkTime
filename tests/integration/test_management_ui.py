@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+from pathlib import Path
 
 from PIL import Image
 
@@ -372,3 +373,89 @@ def test_photo_console_shows_prefilter_metrics_model_text_and_generated_caption(
     listing = client.get("/photos").get_data(as_text=True)
     assert "家人在公園散步。" in listing
     assert "風把這一天留得很輕。" in listing
+
+
+def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(client, app):
+    create_admin(app)
+    login(client)
+    photo_id = add_photos(app, 1)[0]
+    result = valid_result()
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            """
+            UPDATE photos SET status='analyzed',captured_at='2020-07-20T10:00:00',
+                e6_score=82,e6_contrast_score=84,e6_subject_score=80,e6_skin_score=78,
+                e6_text_score=86,crop_focus_x=.72,crop_focus_y=.38,crop_method='saliency'
+            WHERE id=?
+            """,
+            (photo_id,),
+        )
+    app.extensions["inktime_photo_repository"].save_analysis(
+        photo_id,
+        None,
+        "stage_one",
+        "測試 Provider",
+        "vision-model",
+        result,
+        "{}",
+        ranking_score=88,
+    )
+
+    page = client.get("/rendering")
+    body = page.get_data(as_text=True)
+    assert page.status_code == 200
+    assert "智慧裁切與版型預覽" in body
+    assert "月曆相框" in body
+    assert "天氣＋室內溫溼度" in body
+    assert "E6 總分" in body
+    assert "歷年今日優先" in body
+
+    response = client.patch(
+        f"/api/v1/photos/{photo_id}/crop",
+        json={"mode": "manual", "x": 0.2, "y": 0.8},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert response.status_code == 200
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute(
+            "SELECT crop_manual_x,crop_manual_y FROM photos WHERE id=?", (photo_id,)
+        ).fetchone()
+    assert tuple(row) == (0.2, 0.8)
+
+
+def test_photo_detail_backfills_local_e6_and_crop_without_model(client, app, tmp_path):
+    create_admin(app)
+    login(client)
+    root = tmp_path / "legacy-photo"
+    root.mkdir()
+    Image.new("RGB", (900, 600), "#587d98").save(root / "memory.jpg")
+    repository = app.extensions["inktime_photo_repository"]
+    library_id = repository.ensure_library("舊照片", Path(root))
+    now = "2026-07-20T00:00:00+00:00"
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            """
+            INSERT INTO photos(id,library_id,relative_path,status,created_at,updated_at)
+            VALUES ('legacy-photo',?,?,'analyzed',?,?)
+            """,
+            (library_id, "memory.jpg", now, now),
+        )
+    repository.save_analysis(
+        "legacy-photo", None, "stage_one", "test", "vision", valid_result(), "{}"
+    )
+
+    page = client.get("/photos/legacy-photo")
+
+    assert page.status_code == 200
+    body = page.get_data(as_text=True)
+    assert "E6 適合度" in body
+    assert "原始照片目前無法讀取" not in body
+    with app.extensions["inktime_database"].session() as connection:
+        photo = connection.execute(
+            "SELECT e6_score,crop_focus_x,crop_method FROM photos WHERE id='legacy-photo'"
+        ).fetchone()
+        usage_count = connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0]
+    assert photo["e6_score"] is not None
+    assert photo["crop_focus_x"] is not None
+    assert photo["crop_method"] in {"faces", "saliency"}
+    assert usage_count == 0
