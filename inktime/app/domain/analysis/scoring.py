@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from typing import Mapping
+from bisect import bisect_left, bisect_right
+from dataclasses import dataclass
+import math
+from typing import Iterable, Mapping
 
 
 DEFAULT_RANKING_WEIGHTS = {
@@ -10,6 +13,66 @@ DEFAULT_RANKING_WEIGHTS = {
     "emotion": 20.0,
 }
 DEFAULT_FAVORITE_BONUS = 5.0
+
+
+@dataclass(frozen=True)
+class ScoreDistribution:
+    """可在同一次請求內重複使用的排序分分布，避免逐張重排大型照片庫。"""
+
+    values: tuple[float, ...]
+    unique_count: int
+
+
+def prepare_score_distribution(population: Iterable[float]) -> ScoreDistribution:
+    finite_values: list[float] = []
+    for value in population:
+        numeric_value = float(value)
+        if math.isfinite(numeric_value):
+            finite_values.append(numeric_value)
+    values = tuple(sorted(finite_values))
+    return ScoreDistribution(values=values, unique_count=len(set(values)))
+
+
+def calculate_library_percentile(
+    score: float, population: Iterable[float] | ScoreDistribution
+) -> float | None:
+    """將原始排序分轉成照片庫內的相對位置；同分使用平均名次。"""
+    distribution = (
+        population
+        if isinstance(population, ScoreDistribution)
+        else prepare_score_distribution(population)
+    )
+    values = distribution.values
+    if len(values) < 5 or distribution.unique_count < 3:
+        return None
+    value = float(score)
+    left = bisect_left(values, value)
+    right = bisect_right(values, value)
+    average_index = float(left) if left == right else (left + right - 1) / 2.0
+    percentile = average_index / (len(values) - 1) * 100.0
+    return round(max(0.0, min(100.0, percentile)), 1)
+
+
+def calculate_distinguishing_score(
+    score: float, population: Iterable[float] | ScoreDistribution
+) -> tuple[float, float | None]:
+    """保留原始順序，同時拉開過度集中的模型分數。"""
+    raw = max(0.0, min(100.0, float(score)))
+    percentile = calculate_library_percentile(raw, population)
+    if percentile is None:
+        return round(raw, 1), None
+    return round(raw * 0.35 + percentile * 0.65, 1), percentile
+
+
+def score_band(percentile: float | None, score: float) -> str:
+    marker = float(score) if percentile is None else percentile
+    if marker >= 90:
+        return "精選"
+    if marker >= 75:
+        return "推薦"
+    if marker >= 40:
+        return "一般"
+    return "較弱"
 
 
 def validate_ranking_weights(weights: Mapping[str, float]) -> dict[str, float]:
@@ -43,12 +106,19 @@ def calculate_ranking_score(
     return round(max(0.0, min(100.0, score)), 2)
 
 
-DEFAULT_SCORING_RULES = """【回憶分 memory_score】
-先判斷照片所屬區間，再依加分與扣分條件微調，分數範圍為 0～100：
-- 垃圾、隨手拍或無意義記錄：40 分以下；常見為 0～25 分，勉強可辨識但沒有故事也不可超過 39 分。
-- 稍有回憶價值：以 65 分為中心，通常落在 58～70 分。
-- 不錯的回憶價值：以 75 分為中心，通常落在 69～82 分。
-- 特別精彩、強烈值得珍藏：以 85 分為中心，通常落在 79～96 分。
+DISTINCTIVE_SCORING_RULES = """【共通評分方法】
+不要把普通照片全部放在 70～85 分。每一項都先從 50 分的「可用但普通」開始，只依畫面中能確認的證據加減分，並使用完整的 0～100 範圍：
+- 0～19：幾乎不可用、嚴重失敗或完全沒有保留價值。
+- 20～39：明顯較差，缺陷或低價值證據很多。
+- 40～54：低於一般，勉強可用但沒有突出優點。
+- 55～69：一般到不錯，有明確優點但仍常見。
+- 70～82：明顯優秀，能具體指出兩項以上強項。
+- 83～92：非常突出、少見且值得優先保留。
+- 93～100：極少數代表作；沒有壓倒性證據不可使用。
+相鄰照片若品質不同，分數至少拉開 5 分；不要因為不確定就一律給 75～80 分。
+
+【回憶分 memory_score】
+只評估值得回看與保留的程度，題材普通且沒有事件、互動或稀缺性時應落在 40～60 分，而不是自動給高分。
 
 以下條件可疊加提高回憶分：
 - 人物與關係：清楚且占比足夠的人臉、人物互動或合照，大幅提高評分。
@@ -71,4 +141,10 @@ DEFAULT_SCORING_RULES = """【回憶分 memory_score】
 依對焦、曝光、動態模糊、雜訊、解析度與可用構圖評分，不因題材具有回憶價值而提高。
 
 【情緒分 emotion_score】
-依可觀察到的表情、互動、故事性與氛圍強度評分；不得臆測人物關係、身份、地點或未出現在畫面中的事件。"""
+依可觀察到的表情、互動、故事性與氛圍強度評分；不得臆測人物關係、身份、地點或未出現在畫面中的事件。
+
+【輸出前自我校準】
+輸出前重新檢查四項分數：若四項全落在 70～85，必須逐項找出具體證據；證據不足的項目回到 40～60。美觀、技術、情緒與回憶是獨立維度，不得只因題材討喜就全部給高分。"""
+
+
+DEFAULT_SCORING_RULES = DISTINCTIVE_SCORING_RULES

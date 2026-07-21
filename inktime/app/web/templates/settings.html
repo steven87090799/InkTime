@@ -10,6 +10,14 @@
 </div>
 
 <section class="panel">
+  <div class="panel-head"><h2>設定分類</h2><span>共 {{ categories|length }} 類</span></div>
+  <p>每個項目仍使用原本的表單，只將它放在對應分類；可直接跳到需要調整的區塊。</p>
+  <nav class="settings-category-links" aria-label="設定分類">
+    {% for category, rows in categories.items() %}<a class="secondary" href="#settings-category-{{ loop.index }}">{{ category }}（{{ rows|length }}）</a>{% endfor %}
+  </nav>
+</section>
+
+<section class="panel">
   <div class="panel-head"><h2>目前部署資訊</h2><a href="/diagnostics">查看即時資源</a></div>
   <div class="table-wrap"><table><tbody>
     <tr><th>執行方式</th><td>{{ 'Docker 容器' if deployment.docker else '原生程序' }}</td></tr>
@@ -23,7 +31,7 @@
 
 <form id="settings-form">
   {% for category, rows in categories.items() %}
-  <section class="panel">
+  <section class="panel" id="settings-category-{{ loop.index }}">
     <h2>{{ category }}</h2>
     <div class="settings-grid">
       {% for row in rows %}

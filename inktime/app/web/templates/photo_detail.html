@@ -92,7 +92,8 @@
         <p class="analysis-meta">{{ a.provider or '未知 Provider' }} / {{ a.model or '未知模型' }} · {{ a.created_at }}</p>
         <dl>
           <dt>照片分類</dt><dd>{{ a.types|join('、') if a.types else '未分類' }}</dd>
-          <dt>綜合排序</dt><dd>{{ a.ranking_score if a.ranking_score is not none else '—' }}</dd>
+          <dt>照片庫鑑別分</dt><dd>{% if a.distinguishing_score is defined %}<strong>{{ a.distinguishing_score }}（{{ a.score_band }}）</strong>{% if a.ranking_percentile is not none %} · 優於約 {{ '%.0f'|format(a.ranking_percentile) }}% 已評分照片{% else %} · 照片不足，暫用原始分{% endif %}{% else %}—{% endif %}</dd>
+          <dt>原始綜合排序</dt><dd>{{ a.ranking_score if a.ranking_score is not none else '—' }}</dd>
           <dt>四項分數</dt><dd>回憶 {{ a.memory_score }}｜美觀 {{ a.beauty_score }}｜技術 {{ a.technical_quality_score }}｜情緒 {{ a.emotion_score }}</dd>
           <dt>判斷理由</dt><dd>{{ a.reason }}</dd>
           <dt>評分版本</dt><dd>{{ a.scoring_version_name or '舊版／未記錄' }}</dd>

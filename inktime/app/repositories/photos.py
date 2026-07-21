@@ -467,7 +467,9 @@ class PhotoRepository:
     def update_crop(self, photo_id: str, *, manual_x: float | None, manual_y: float | None) -> None:
         if (manual_x is None) != (manual_y is None):
             raise ValueError("裁切 X 與 Y 必須同時設定或同時清除")
-        if manual_x is not None and not (0.0 <= manual_x <= 1.0 and 0.0 <= manual_y <= 1.0):
+        if manual_x is not None and manual_y is not None and not (
+            0.0 <= manual_x <= 1.0 and 0.0 <= manual_y <= 1.0
+        ):
             raise ValueError("裁切位置必須介於 0 到 1")
         now = datetime.now(timezone.utc).isoformat()
         with self.database.session() as connection:
@@ -580,6 +582,23 @@ class PhotoRepository:
                 (*parameters, limit, offset),
             ).fetchall()
         return rows, total
+
+    def score_population(self) -> list[float]:
+        """回傳每張照片最新一次有效排序分，供相對鑑別校準使用。"""
+        with self.database.session() as connection:
+            rows = connection.execute(
+                """
+                SELECT a.ranking_score
+                FROM photo_analysis a
+                WHERE a.ranking_score IS NOT NULL
+                  AND a.id=(
+                    SELECT latest.id FROM photo_analysis latest
+                    WHERE latest.photo_id=a.photo_id
+                    ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1
+                  )
+                """
+            ).fetchall()
+        return [float(row["ranking_score"]) for row in rows]
 
     def save_analysis(
         self,

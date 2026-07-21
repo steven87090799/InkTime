@@ -50,9 +50,12 @@ class AtomicReleasePublisher:
         dither_strength: float = 1.0,
         width: int = 480,
         height: int = 800,
+        orientation: str = "portrait",
     ) -> dict:
         if not images:
             raise ValueError("RENDER-001 至少需要一張圖片")
+        if orientation not in {"portrait", "landscape"}:
+            raise ValueError("RENDER-005 不支援的相框方向")
         release_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(3)
         temporary = self.root / f".{release_id}.tmp"
         final = self.root / release_id
@@ -105,7 +108,7 @@ class AtomicReleasePublisher:
                 "width": width,
                 "height": height,
                 "pixel_format": profile.pixel_format,
-                "orientation": "portrait",
+                "orientation": orientation,
                 "dither": dither,
                 "dither_strength": effective_strength,
                 "color_distance": effective_color_distance,

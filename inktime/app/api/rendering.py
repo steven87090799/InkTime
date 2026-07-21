@@ -22,7 +22,12 @@ from inktime.app.domain.rendering import (
     encode_image,
     profile_summaries,
 )
-from inktime.app.services.rendering import LAYOUTS
+from inktime.app.services.rendering import (
+    FIT_MODES,
+    FRAME_ORIENTATIONS,
+    LAYOUTS,
+    PORTRAIT_ONLY_LAYOUTS,
+)
 
 
 bp = Blueprint("rendering", __name__)
@@ -55,6 +60,10 @@ def rendering_page():
         show_location=bool(settings.get("render.show_location", True)),
         layouts=LAYOUTS,
         current_layout=str(settings.get("render.layout", "photo_info")),
+        frame_orientations=FRAME_ORIENTATIONS,
+        current_orientation=str(settings.get("render.frame_orientation", "portrait")),
+        fit_modes=FIT_MODES,
+        current_fit_mode=str(settings.get("render.fit_mode", "contain")),
         selection_mode=str(settings.get("render.selection_mode", "history_today")),
         candidate_photos=render_service.select_candidates_details(12),
     )
@@ -278,13 +287,26 @@ def preview(photo_id: str):
         abort(400, description="RENDER-005 不支援的相框版型")
     crop_x = request.args.get("crop_x", type=float)
     crop_y = request.args.get("crop_y", type=float)
+    secondary_photo_id = str(request.args.get("secondary_id", "")).strip() or None
+    orientation = str(request.args.get("orientation", "")).strip() or None
+    fit_mode = str(request.args.get("fit_mode", "")).strip() or None
+    if orientation is not None and orientation not in FRAME_ORIENTATIONS:
+        abort(400, description="RENDER-005 不支援的相框方向")
+    if fit_mode is not None and fit_mode not in FIT_MODES:
+        abort(400, description="RENDER-005 不支援的照片縮放方式")
     if (crop_x is None) != (crop_y is None) or any(
         value is not None and not 0 <= value <= 1 for value in (crop_x, crop_y)
     ):
         abort(400, description="RENDER-005 裁切位置必須同時提供且介於 0 到 1")
     try:
         image = current_app.extensions["inktime_render_service"].render_photo(
-            photo_id, layout=layout, crop_x=crop_x, crop_y=crop_y
+            photo_id,
+            layout=layout,
+            crop_x=crop_x,
+            crop_y=crop_y,
+            secondary_photo_id=secondary_photo_id,
+            orientation=orientation,
+            fit_mode=fit_mode,
         )
     except KeyError:
         abort(404)
@@ -301,14 +323,25 @@ def preview(photo_id: str):
             color_distance=str(settings.get("render.color_distance", "oklab")),
             strength=float(settings.get("render.dither_strength", 1.0)),
         ).preview
+    settings = current_app.extensions["inktime_settings_repository"]
+    layout_key = layout or str(settings.get("render.layout", "photo_info"))
+    orientation_key = orientation or str(
+        settings.get("render.frame_orientation", "portrait")
+    )
+    effective_orientation = (
+        "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
+    )
+    if effective_orientation == "landscape":
+        image = image.transpose(Image.Transpose.ROTATE_90)
     output = BytesIO()
     image.save(output, "PNG")
     output.seek(0)
     response = send_file(output, mimetype="image/png", max_age=0)
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-InkTime-Layout"] = layout or str(
-        current_app.extensions["inktime_settings_repository"].get("render.layout", "photo_info")
+        settings.get("render.layout", "photo_info")
     )
+    response.headers["X-InkTime-Orientation"] = effective_orientation
     return response
 
 
