@@ -803,7 +803,7 @@ class RenderService:
         filters: dict[str, Any] = {}
         for key in ("start_year", "end_year", "exclude_recent_days"):
             value = payload.get(key)
-            if value in (None, ""):
+            if value is None or value == "":
                 continue
             try:
                 parsed = int(value)
