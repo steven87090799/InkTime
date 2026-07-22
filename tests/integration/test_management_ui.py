@@ -36,8 +36,8 @@ def test_primary_management_pages_render(client, app):
         assert "zh-Hant-TW" in response.get_data(as_text=True)
 
     simulator = client.get("/simulator").get_data(as_text=True)
-    assert "Good Display 原廠相容" in simulator
-    assert "照片平滑（減少色塊／雜點）" in simulator
+    for expected_control in ("舊微雪算法", "新算法", "A/B 預覽", "傳送到墨水屏測試"):
+        assert expected_control in simulator
     settings = client.get("/settings").get_data(as_text=True)
     assert "Good Display 原廠相容" in settings
     assert "照片平滑（減少色塊／雜點）" in settings

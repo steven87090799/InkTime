@@ -66,16 +66,17 @@ class WeatherService:
             if self._cached_location == location and now < self._cached_until:
                 return dict(self._cached or {})
         try:
+            params: dict[str, str | int | float] = {
+                "latitude": latitude,
+                "longitude": longitude,
+                "timezone": timezone_name,
+                "forecast_days": 1,
+                "current": "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code",
+                "daily": "temperature_2m_max,temperature_2m_min,weather_code",
+            }
             response = self.session.get(
                 self.endpoint,
-                params={
-                    "latitude": latitude,
-                    "longitude": longitude,
-                    "timezone": timezone_name,
-                    "forecast_days": 1,
-                    "current": "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code",
-                    "daily": "temperature_2m_max,temperature_2m_min,weather_code",
-                },
+                params=params,
                 timeout=5,
                 headers={"User-Agent": "InkTime/2.4 weather-frame"},
             )

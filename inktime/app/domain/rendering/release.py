@@ -8,6 +8,7 @@ from pathlib import Path
 import secrets
 import shutil
 import re
+from typing import Any
 
 from PIL import Image
 
@@ -113,7 +114,7 @@ class AtomicReleasePublisher:
                         "preview": preview,
                     }
                 )
-            manifest = {
+            manifest: dict[str, Any] = {
                 "schema_version": 1 if profile.pixel_format == "2bpp" else 2,
                 "release_id": release_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),
