@@ -1,295 +1,233 @@
 {% extends "base.html" %}
-{% block title %}電子紙模擬器｜InkTime{% endblock %}
+{% block title %}六色 A/B 渲染測試｜InkTime{% endblock %}
 {% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='simulator.css') }}">{% endblock %}
 {% block content %}
 <div class="page-head simulator-head">
   <div>
-    <p class="eyebrow">無硬體／無模型測試台</p>
-    <h1>電子紙模擬器</h1>
-    <p>用瀏覽器照片直接檢查 480×800 最終色盤、裁切與抖動效果。測試內容不會儲存、不會建立分析工作，也不會呼叫模型。</p>
+    <p class="eyebrow">Server Renderer／無模型</p>
+    <h1>六色 Renderer A/B 測試</h1>
+    <p>比較原圖、舊微雪算法與新照片流程。正式測試 Release 一律由 Server 重新讀取原始照片渲染，不會發布 Browser Canvas。</p>
   </div>
   <span class="offline-badge"><span aria-hidden="true"></span>模型已停用</span>
 </div>
 
 <section class="simulator-layout">
-  <aside class="panel simulator-controls" aria-label="模擬器控制項">
-    <div class="panel-head"><h2>輸入與顯示設定</h2><button class="secondary compact" type="button" id="sample-button">載入內建測試圖</button></div>
-    <form id="simulator-form">
+  <aside class="panel simulator-controls" aria-label="六色渲染控制項">
+    <div class="panel-head"><h2>照片與 Preset</h2><button class="secondary compact" type="button" id="legacy-button">切回舊算法</button></div>
+    <form id="renderer-form">
       <label class="drop-zone" id="drop-zone">
         <span class="drop-icon" aria-hidden="true">＋</span>
-        <strong>選擇或拖放一張照片</strong>
-        <small>JPG、PNG、WebP，最多 25 MiB；只在這次請求中處理</small>
-        <input id="photo-input" type="file" accept="image/jpeg,image/png,image/webp">
+        <strong>選擇或拖放原始照片</strong>
+        <small>JPG、PNG、WebP、HEIC，最多 25 MiB；測試傳送會重新上傳此檔</small>
+        <input id="photo-input" name="photo" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif">
       </label>
 
       <div class="simulator-fields">
-        <label><span>面板色盤</span><select id="profile" name="profile">
+        <label><span>面板 Profile</span><select id="profile" name="profile">
           {% for profile in profiles %}<option value="{{ profile.key }}" {% if profile.key==current_profile %}selected{% endif %}>{{ profile.label }}</option>{% endfor %}
         </select></label>
-        <label><span>抖動算法</span><select id="dither" name="dither">
-          {% for value, label in [('photo_smooth','照片平滑（減少色塊／雜點）'),('gooddisplay','Good Display 原廠相容'),('floyd_steinberg','Floyd–Steinberg（InkTime）'),('atkinson','Atkinson（較柔和）'),('bayer4','Bayer 4×4（規律顆粒）'),('bayer8','Bayer 8×8（細緻顆粒）'),('none','不抖動')] %}<option value="{{ value }}" {% if value==current_dither %}selected{% endif %}>{{ label }}</option>{% endfor %}
+        <label><span>Preset</span><select id="preset" name="preset">
+          {% for key, preset in photo_presets.items() %}<option value="{{ key }}">{{ preset.label }}</option>{% endfor %}
+          {% for key, preset in custom_photo_presets.items() %}<option value="{{ key }}">{{ preset.label }}（自訂）</option>{% endfor %}
         </select></label>
-        <label><span>縮放方式</span><select id="fit" name="fit"><option value="cover">填滿並裁切</option><option value="contain">完整顯示（照片周圍可能留白）</option></select></label>
-        <label class="range-field"><span>抖動強度 <output id="strength-output">{{ '%.1f'|format(dither_strength) }}</output></span><input id="strength" name="strength" type="range" min="0" max="2" step="0.1" value="{{ dither_strength }}"></label>
-        <label class="field-wide"><span>手動短文案（選填）</span><input id="caption" type="text" maxlength="60" placeholder="不透過模型，直接輸入要預覽的文字"></label>
-        <label><span>拍攝日期（選填）</span><input id="capture-date" type="date"></label>
-        <label><span>地點（選填）</span><input id="location" type="text" maxlength="30" placeholder="例如：臺北市"></label>
-        <p class="field-wide simulator-info-hint">沒有填文案、日期或地點時，照片會使用完整 480×800；有內容時才加入 96px 純白資訊帶，不會使用米白或紙張雜色。</p>
+        <label><span>縮放</span><select id="fit"><option value="cover">填滿裁切</option><option value="contain">完整留白</option></select></label>
+        <label><span>抖動算法</span><select id="dither">
+          <option value="serpentine_floyd_steinberg">蛇形 Floyd–Steinberg</option>
+          <option value="nearest">Nearest Color</option>
+          <option value="bayer_ordered">Bayer Ordered</option>
+          <option value="atkinson">Atkinson</option>
+          <option value="gooddisplay">舊微雪算法</option>
+        </select></label>
+        <label class="range-field"><span>Error strength <output id="error-output">0.85</output></span><input id="error-strength" type="range" min="0" max="2" step="0.05" value="0.85"></label>
+        <label><span>色彩距離</span><select id="color-distance"><option value="oklab">OKLab／感知色差</option><option value="rgb">RGB（相容）</option></select></label>
       </div>
-      <input type="hidden" id="color-distance" name="color_distance" value="{{ color_distance }}">
-      <button class="primary simulate-button" id="simulate-button" type="submit" disabled><span aria-hidden="true">◉</span> 產生電子紙預覽</button>
-      <p class="simulator-status" id="simulator-status" role="status" aria-live="polite">請先選擇照片，或載入內建測試圖。</p>
+
+      <details class="pipeline-details" open>
+        <summary>渲染步驟與基本強度</summary>
+        <div class="pipeline-grid">
+          <label class="toggle-row"><input id="exif-orientation" type="checkbox" checked><span>EXIF 方向</span></label>
+          <label class="toggle-row"><input id="high-quality-resize" type="checkbox" checked><span>高品質縮放</span></label>
+          <label class="toggle-row"><input id="linear-light" type="checkbox" checked><span>Linear-light</span></label>
+          <label class="toggle-row"><input id="protect-text" type="checkbox"><span>已有文字區域（底部資訊帶）</span></label>
+          {% for key, label, value in [('denoise','輕量降噪',0.35),('tone','Tone Mapping',0.35),('contrast','局部對比',0.30),('sharpen','亮度通道銳化',0.35)] %}
+          <label class="step-row"><span><input id="{{ key }}-enabled" type="checkbox" checked> {{ label }}</span><input id="{{ key }}-strength" type="range" min="0" max="1" step="0.05" value="{{ value }}"><output id="{{ key }}-output">{{ value }}</output></label>
+          {% endfor %}
+        </div>
+      </details>
+
+      <details class="pipeline-details">
+        <summary>Palette：理論 RGB／自訂 RGB／自訂 Lab</summary>
+        <div class="palette-editor">
+          <label><span>模式</span><select id="palette-mode"><option value="default">微雪預設／理論 RGB</option><option value="custom_rgb">自訂 RGB</option><option value="custom_lab">自訂 Lab</option></select></label>
+          <label><span>Palette version</span><input id="palette-version" value="custom-1" maxlength="80"></label>
+          <textarea id="palette-values" rows="8" spellcheck="false" placeholder="按「複製目前預設」產生可編輯數值"></textarea>
+          <div class="button-row"><button class="secondary compact" id="copy-palette" type="button">複製目前預設</button><button class="secondary compact" id="reset-palette" type="button">恢復預設</button></div>
+          <p id="palette-meta" class="simulator-info-hint"></p>
+        </div>
+      </details>
+
+      <div class="button-row primary-actions">
+        <button class="primary simulate-button" id="compare-button" type="submit" disabled>產生 A/B 預覽</button>
+        {% if g.user.role=='administrator' %}<button class="secondary" id="save-preset" type="button" disabled>儲存自訂 Preset</button>{% endif %}
+      </div>
+      <p class="simulator-status" id="simulator-status" role="status" aria-live="polite">請先選擇原始照片。</p>
     </form>
   </aside>
 
-  <section class="simulator-workbench" aria-label="預覽工作區">
+  <section class="simulator-workbench" aria-label="A/B 預覽工作區">
     <div class="preview-toolbar">
-      <div><span class="preview-kicker">實機輸出比例</span><strong>480 × 800 px</strong></div>
+      <div><span class="preview-kicker">局部放大</span><strong><output id="zoom-output">1.0</output>×</strong></div>
+      <input id="zoom" type="range" min="1" max="4" step="0.25" value="1" aria-label="局部放大倍率">
       <div id="palette-swatches" class="palette-swatches" aria-label="目前面板色盤"></div>
     </div>
-    <div class="preview-grid">
+    <p class="zoom-hint">點選任一預覽可移動放大中心。</p>
+    <div class="preview-grid preview-grid-ab">
+      {% for key, title, subtitle in [('original','原圖','Server 高品質縮放'),('legacy','舊微雪算法','相容路徑'),('new','新算法','Linear-light／感知色差')] %}
       <article class="preview-column">
-        <div class="preview-title"><h2>排版原稿</h2><span>瀏覽器合成</span></div>
-        <div class="simulator-device source-device">
-          <div class="device-bezel"><canvas id="source-canvas" width="480" height="800" aria-label="原始排版預覽"></canvas></div>
-        </div>
+        <div class="preview-title"><h2>{{ title }}</h2><span>{{ subtitle }}</span></div>
+        <div class="simulator-device {% if key=='original' %}source-device{% endif %}"><div class="device-bezel zoom-frame"><div class="empty-screen" id="{{ key }}-empty"><span>INK</span><small>TIME</small></div><img id="{{ key }}-image" alt="{{ title }}預覽" hidden></div></div>
       </article>
-      <article class="preview-column">
-        <div class="preview-title"><h2>電子紙效果</h2><span id="result-label">等待模擬</span></div>
-        <div class="simulator-device eink-device" id="eink-device">
-          <div class="device-bezel">
-            <div class="refresh-sweep" aria-hidden="true"></div>
-            <div class="empty-screen" id="empty-screen"><span>INK</span><small>TIME</small></div>
-            <img id="result-image" alt="電子紙色盤模擬結果" hidden>
-          </div>
-          <div class="device-led" aria-hidden="true"></div>
-        </div>
-      </article>
+      {% endfor %}
     </div>
+
     <div class="simulator-meta" id="simulator-meta" hidden>
       <div><span>來源</span><strong id="meta-source">—</strong></div>
       <div><span>實機資料量</span><strong id="meta-bytes">—</strong></div>
-      <div><span>轉換時間</span><strong id="meta-time">—</strong></div>
-      <a class="secondary" id="download-result" download="inktime-epaper-preview.png">下載 PNG 預覽</a>
+      <div><span>新／舊渲染時間</span><strong id="meta-time">—</strong></div>
+      <div><span>Preset／抖動</span><strong id="meta-renderer">—</strong></div>
+      <a class="secondary" id="download-result" download="inktime-six-color-preview.png">下載新算法預覽</a>
     </div>
-  </section>
-</section>
+    <div class="palette-statistics" id="palette-statistics" hidden>
+      <h2>Palette 使用比例與每色像素數</h2>
+      <table><thead><tr><th>顏色</th><th>像素</th><th>比例</th></tr></thead><tbody id="palette-stat-body"></tbody></table>
+    </div>
 
-<section class="panel simulator-notes">
-  <div><span class="note-number">01</span><p><strong>目前完全不需要模型</strong>照片只送到本機 InkTime 的色盤轉換 API，回應標頭會明確標示 <code>Model: disabled</code>。</p></div>
-  <div><span class="note-number">02</span><p><strong>預覽採真實輸出色</strong>PNG 使用目前發布流程的 Profile、色差與抖動程式，CSS 紙張紋理只影響外框觀感，不會改寫下載檔。</p></div>
-  <div><span class="note-number">03</span><p><strong>未來接入模型不必重做模擬器</strong>模型負責評分、文案與選片；最後仍送進相同渲染流程。詳見 <a href="/providers">模型設定</a>與<a href="/rendering">正式渲染</a>。</p></div>
+    {% if g.user.role=='administrator' %}
+    <section class="test-release-panel">
+      <div class="panel-head"><div><h2>傳送到墨水屏測試</h2><p>建立獨立測試 Release；預設不覆寫正式排程。</p></div></div>
+      <div class="test-release-grid">
+        <label><span>裝置</span><select id="test-device"><option value="">選擇裝置</option>{% for device in devices %}<option value="{{ device.id }}" data-profile="{{ device.panel_profile }}" {% if not device.enabled %}disabled{% endif %}>{{ device.name }}／{{ device.panel_profile }}{% if not device.enabled %}（停用）{% endif %}</option>{% endfor %}</select></label>
+        <label><span>傳送時機</span><select id="test-delivery"><option value="next_wake">等待下一次喚醒</option><option value="immediate">立即顯示（下次輪詢）</option></select></label>
+        <label class="toggle-row"><input id="one-time" type="checkbox" checked><span>只傳送一次</span></label>
+        <label class="toggle-row"><input id="restore-formal" type="checkbox" checked><span>測試後恢復正式排程</span></label>
+        <label class="toggle-row"><input id="save-and-send" type="checkbox"><span>儲存自訂 Preset 並傳送</span></label>
+        <button class="primary" id="send-test" type="button" disabled>傳送到墨水屏測試</button>
+      </div>
+    </section>
+    {% endif %}
+  </section>
 </section>
 {% endblock %}
 {% block scripts %}
 <script>
 (() => {
   const profiles = {{ profiles|tojson }};
-  const profileMap = Object.fromEntries(profiles.map(profile => [profile.key, profile]));
-  const form = document.getElementById('simulator-form');
-  const photoInput = document.getElementById('photo-input');
-  const dropZone = document.getElementById('drop-zone');
-  const sampleButton = document.getElementById('sample-button');
-  const simulateButton = document.getElementById('simulate-button');
+  const builtins = {{ photo_presets|tojson }};
+  const customPresets = {{ custom_photo_presets|tojson }};
+  const profileMap = Object.fromEntries(profiles.map(item => [item.key, item]));
+  const form = document.getElementById('renderer-form');
+  const photo = document.getElementById('photo-input');
   const status = document.getElementById('simulator-status');
-  const canvas = document.getElementById('source-canvas');
-  const context = canvas.getContext('2d', {alpha: false});
-  const profileSelect = document.getElementById('profile');
-  const ditherSelect = document.getElementById('dither');
-  const fitSelect = document.getElementById('fit');
-  const strength = document.getElementById('strength');
-  const strengthOutput = document.getElementById('strength-output');
-  const caption = document.getElementById('caption');
-  const captureDate = document.getElementById('capture-date');
-  const locationInput = document.getElementById('location');
-  const resultImage = document.getElementById('result-image');
-  const emptyScreen = document.getElementById('empty-screen');
-  const einkDevice = document.getElementById('eink-device');
-  const resultLabel = document.getElementById('result-label');
-  const meta = document.getElementById('simulator-meta');
-  const download = document.getElementById('download-result');
-  let sourceImage = null;
-  let resultUrl = null;
-  let renderSequence = 0;
+  const compareButton = document.getElementById('compare-button');
+  const profile = document.getElementById('profile');
+  const preset = document.getElementById('preset');
+  const dither = document.getElementById('dither');
+  const errorStrength = document.getElementById('error-strength');
+  const paletteMode = document.getElementById('palette-mode');
+  const paletteValues = document.getElementById('palette-values');
+  const zoom = document.getElementById('zoom');
+  let lastResult = null;
 
-  function setStatus(message, type = '') {
-    status.textContent = message;
-    status.className = `simulator-status ${type}`.trim();
-  }
-
-  function updatePalette() {
-    const profile = profileMap[profileSelect.value];
-    const usesGoodDisplayPalette = profile.key === 'gdep073e01_6c' && ['gooddisplay', 'photo_smooth'].includes(ditherSelect.value);
-    const colors = usesGoodDisplayPalette ? profile.gooddisplay_colors : profile.colors;
-    const holder = document.getElementById('palette-swatches');
-    holder.replaceChildren(...colors.map(color => {
-      const swatch = document.createElement('span');
-      swatch.title = color.name;
-      swatch.style.backgroundColor = `rgb(${color.rgb.join(',')})`;
-      return swatch;
-    }));
-  }
-
-  function updateDitherControls() {
-    const fixedStrength = ['gooddisplay', 'photo_smooth'].includes(ditherSelect.value);
-    strength.disabled = fixedStrength;
-    strengthOutput.value = fixedStrength ? '固定' : Number(strength.value).toFixed(1);
-    updatePalette();
-  }
-
-  function drawComposition() {
-    context.fillStyle = '#fff';
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    if (!sourceImage) return;
-    const text = caption.value.trim();
-    const dateValue = captureDate.value;
-    const dateText = dateValue ? `${Number(dateValue.slice(0, 4))}年${Number(dateValue.slice(5, 7))}月${Number(dateValue.slice(8, 10))}日` : '';
-    const locationText = locationInput.value.trim();
-    const metaText = [dateText, locationText].filter(Boolean).join('・');
-    const hasInfo = Boolean(text || metaText);
-    const imageHeight = hasInfo ? 704 : 800;
-    const scale = fitSelect.value === 'contain'
-      ? Math.min(canvas.width / sourceImage.width, imageHeight / sourceImage.height)
-      : Math.max(canvas.width / sourceImage.width, imageHeight / sourceImage.height);
-    const width = sourceImage.width * scale;
-    const height = sourceImage.height * scale;
-    context.drawImage(sourceImage, (canvas.width - width) / 2, (imageHeight - height) / 2, width, height);
-    if (hasInfo) {
-      context.fillStyle = '#fff';
-      context.fillRect(0, 704, 480, 96);
-      context.fillStyle = '#111';
-      context.fillRect(20, 708, 440, 2);
-      context.font = '700 23px "Noto Sans TC", "PingFang TC", sans-serif';
-      context.textBaseline = 'alphabetic';
-      if (text) context.fillText(text, 20, 741, 440);
-      context.font = '700 19px "Noto Sans TC", "PingFang TC", sans-serif';
-      if (metaText) context.fillText(metaText, 20, 779, 440);
+  function setStatus(message, type='') { status.textContent = message; status.className = `simulator-status ${type}`.trim(); }
+  function setRangeOutput(id) { document.getElementById(`${id}-output`).value = Number(document.getElementById(`${id}-strength`).value).toFixed(2); }
+  function applyPreset() {
+    const selected = customPresets[preset.value];
+    const source = selected ? builtins[selected.source_preset] : builtins[preset.value];
+    const values = {...source, ...(selected ? selected.options : {})};
+    dither.value = values.dither || 'serpentine_floyd_steinberg';
+    errorStrength.value = values.error_strength ?? .85;
+    document.getElementById('error-output').value = Number(errorStrength.value).toFixed(2);
+    document.getElementById('color-distance').value = values.color_distance || 'oklab';
+    ['exif_orientation','high_quality_resize','linear_light'].forEach(key => document.getElementById(key.replaceAll('_','-')).checked = values[key] !== false);
+    document.getElementById('protect-text').checked = Boolean(values.protect_text);
+    for (const [key, optionKey] of [['denoise','denoise_strength'],['tone','tone_strength'],['contrast','contrast_strength'],['sharpen','sharpen_strength']]) {
+      document.getElementById(`${key}-enabled`).checked = values[key === 'tone' ? 'tone_mapping' : key === 'contrast' ? 'local_contrast' : key] !== false;
+      document.getElementById(`${key}-strength`).value = values[optionKey] ?? 0;
+      setRangeOutput(key);
     }
+    if (selected?.palette) { paletteMode.value = selected.palette.mode || 'default'; paletteValues.value = JSON.stringify(selected.palette[paletteMode.value === 'custom_lab' ? 'lab' : 'rgb'] || {}, null, 2); }
   }
-
-  function loadBrowserImage(file) {
-    return new Promise((resolve, reject) => {
-      const image = new Image();
-      const url = URL.createObjectURL(file);
-      image.onload = () => { URL.revokeObjectURL(url); resolve(image); };
-      image.onerror = () => { URL.revokeObjectURL(url); reject(new Error('瀏覽器無法讀取這個影像格式')); };
-      image.src = url;
-    });
+  function options() { return {
+    exif_orientation: document.getElementById('exif-orientation').checked,
+    high_quality_resize: document.getElementById('high-quality-resize').checked,
+    denoise: document.getElementById('denoise-enabled').checked,
+    denoise_strength: Number(document.getElementById('denoise-strength').value),
+    tone_mapping: document.getElementById('tone-enabled').checked,
+    tone_strength: Number(document.getElementById('tone-strength').value),
+    local_contrast: document.getElementById('contrast-enabled').checked,
+    contrast_strength: Number(document.getElementById('contrast-strength').value),
+    sharpen: document.getElementById('sharpen-enabled').checked,
+    sharpen_strength: Number(document.getElementById('sharpen-strength').value),
+    linear_light: document.getElementById('linear-light').checked,
+    protect_text: document.getElementById('protect-text').checked,
+    dither: dither.value,
+    error_strength: Number(errorStrength.value),
+    color_distance: document.getElementById('color-distance').value
+  }; }
+  function palette() {
+    if (paletteMode.value === 'default') return {mode:'default'};
+    let values; try { values = JSON.parse(paletteValues.value || '{}'); } catch { throw new Error('Palette JSON 格式不合法'); }
+    return {mode:paletteMode.value, palette_version:document.getElementById('palette-version').value, [paletteMode.value === 'custom_lab' ? 'lab' : 'rgb']:values};
   }
-
-  async function useFile(file) {
-    if (!file) return;
-    if (file.size > 25 * 1024 * 1024) {
-      setStatus('照片超過 25 MiB，請先縮小檔案。', 'error');
-      return;
-    }
-    try {
-      sourceImage = await loadBrowserImage(file);
-      drawComposition();
-      simulateButton.disabled = false;
-      setStatus(`已載入 ${file.name}，可以開始模擬。`, 'ready');
-    } catch (error) {
-      sourceImage = null;
-      simulateButton.disabled = true;
-      setStatus(`${error.message}；HEIC 可先轉成 JPG 後測試。`, 'error');
-    }
-  }
-
-  async function loadSample() {
-    const sample = document.createElement('canvas');
-    sample.width = 1200;
-    sample.height = 1600;
-    const sampleContext = sample.getContext('2d');
-    const sky = sampleContext.createLinearGradient(0, 0, 0, 1600);
-    sky.addColorStop(0, '#3c79a8');
-    sky.addColorStop(.52, '#f2be58');
-    sky.addColorStop(1, '#d84c37');
-    sampleContext.fillStyle = sky;
-    sampleContext.fillRect(0, 0, 1200, 1600);
-    sampleContext.fillStyle = '#f7e779';
-    sampleContext.beginPath();
-    sampleContext.arc(900, 380, 170, 0, Math.PI * 2);
-    sampleContext.fill();
-    sampleContext.fillStyle = '#1d5c48';
-    sampleContext.beginPath();
-    sampleContext.moveTo(0, 1180);
-    sampleContext.lineTo(360, 680);
-    sampleContext.lineTo(700, 1160);
-    sampleContext.lineTo(980, 820);
-    sampleContext.lineTo(1200, 1190);
-    sampleContext.lineTo(1200, 1600);
-    sampleContext.lineTo(0, 1600);
-    sampleContext.fill();
-    sampleContext.fillStyle = '#17352d';
-    sampleContext.fillRect(0, 1260, 1200, 340);
-    sampleContext.fillStyle = '#fff';
-    sampleContext.font = '700 84px sans-serif';
-    sampleContext.fillText('INKTIME', 78, 1450);
-    sourceImage = await createImageBitmap(sample);
-    drawComposition();
-    simulateButton.disabled = false;
-    setStatus('內建測試圖已載入；這個流程沒有使用任何模型。', 'ready');
-  }
-
-  function canvasBlob() {
-    return new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('無法建立預覽影像')), 'image/png'));
-  }
-
-  async function simulate(event) {
-    event.preventDefault();
-    if (!sourceImage) return;
-    const sequence = ++renderSequence;
-    drawComposition();
-    simulateButton.disabled = true;
-    einkDevice.classList.add('is-refreshing');
-    setStatus('正在套用實際電子紙色盤與抖動算法…');
+  function formData() {
+    if (!photo.files[0]) throw new Error('請先選擇原始照片');
     const data = new FormData();
-    data.set('photo', await canvasBlob(), 'inktime-simulator.png');
-    data.set('profile', profileSelect.value);
-    data.set('dither', ditherSelect.value);
-    data.set('fit', 'cover');
-    data.set('strength', strength.value);
-    data.set('color_distance', document.getElementById('color-distance').value);
-    try {
-      const response = await window.inktimeFetch('/api/v1/rendering/simulate', {method: 'POST', body: data});
-      if (!response.ok) {
-        const problem = await response.json().catch(() => ({}));
-        throw new Error(problem.message || '模擬失敗');
-      }
-      const blob = await response.blob();
-      if (sequence !== renderSequence) return;
-      if (resultUrl) URL.revokeObjectURL(resultUrl);
-      resultUrl = URL.createObjectURL(blob);
-      resultImage.src = resultUrl;
-      resultImage.hidden = false;
-      emptyScreen.hidden = true;
-      download.href = resultUrl;
-      meta.hidden = false;
-      document.getElementById('meta-source').textContent = response.headers.get('X-InkTime-Source') || '480×800';
-      document.getElementById('meta-bytes').textContent = `${Number(response.headers.get('X-InkTime-Payload-Bytes') || 0).toLocaleString()} bytes`;
-      document.getElementById('meta-time').textContent = `${response.headers.get('X-InkTime-Render-Ms') || '—'} ms`;
-      resultLabel.textContent = profileMap[profileSelect.value].pixel_format;
-      setStatus('模擬完成。下載的 PNG 是未套用外框紋理的實際色盤結果。', 'success');
-    } catch (error) {
-      setStatus(error.message || '模擬失敗', 'error');
-    } finally {
-      if (sequence === renderSequence) simulateButton.disabled = false;
-      window.setTimeout(() => einkDevice.classList.remove('is-refreshing'), 480);
-    }
+    data.set('photo', photo.files[0], photo.files[0].name);
+    data.set('profile', profile.value); data.set('preset', preset.value); data.set('fit', document.getElementById('fit').value);
+    data.set('options', JSON.stringify(options())); data.set('palette', JSON.stringify(palette()));
+    data.set('text_regions', document.getElementById('protect-text').checked ? JSON.stringify([[0,0.86,1,1]]) : '[]');
+    data.set('face_regions', '[]');
+    return data;
   }
-
-  photoInput.addEventListener('change', () => useFile(photoInput.files[0]));
-  sampleButton.addEventListener('click', loadSample);
-  form.addEventListener('submit', simulate);
-  strength.addEventListener('input', () => { strengthOutput.value = Number(strength.value).toFixed(1); });
-  [fitSelect, caption, captureDate, locationInput].forEach(control => control.addEventListener('input', drawComposition));
-  profileSelect.addEventListener('change', updatePalette);
-  ditherSelect.addEventListener('change', updateDitherControls);
-  ['dragenter', 'dragover'].forEach(type => dropZone.addEventListener(type, event => { event.preventDefault(); dropZone.classList.add('is-dragging'); }));
-  ['dragleave', 'drop'].forEach(type => dropZone.addEventListener(type, event => { event.preventDefault(); dropZone.classList.remove('is-dragging'); }));
-  dropZone.addEventListener('drop', event => useFile(event.dataTransfer.files[0]));
-  updateDitherControls();
-  drawComposition();
+  function updatePaletteMeta() {
+    const item = profileMap[profile.value];
+    document.getElementById('palette-meta').textContent = `${item.panel_profile}／${item.palette_version}；內建理論 RGB 保持不變。`;
+    const holder = document.getElementById('palette-swatches'); holder.replaceChildren(...item.colors.map(color => { const swatch=document.createElement('span'); swatch.title=color.name; swatch.style.backgroundColor=`rgb(${color.rgb.join(',')})`; return swatch; }));
+  }
+  function copyPalette() {
+    const item = profileMap[profile.value];
+    const useLab = paletteMode.value === 'custom_lab';
+    const values = Object.fromEntries(item.colors.map(color => [color.name, useLab ? item[`${color.name}_lab`] : color.rgb]));
+    paletteMode.value = useLab ? 'custom_lab' : 'custom_rgb'; paletteValues.value = JSON.stringify(values, null, 2);
+  }
+  async function compare(event) {
+    event.preventDefault(); compareButton.disabled=true; setStatus('Server 正在產生原圖、舊算法與新算法…');
+    try {
+      const response=await window.inktimeFetch('/api/v1/rendering/compare',{method:'POST',body:formData()}); const body=await response.json();
+      if(!response.ok) throw new Error(body.message||'A/B 預覽失敗'); lastResult=body;
+      for(const key of ['original','legacy','new']) { const image=document.getElementById(`${key}-image`); image.src=body[key]; image.hidden=false; document.getElementById(`${key}-empty`).hidden=true; }
+      document.getElementById('simulator-meta').hidden=false; document.getElementById('meta-source').textContent=body.source_size; document.getElementById('meta-bytes').textContent=`${body.payload_bytes.toLocaleString()} bytes`; document.getElementById('meta-time').textContent=`${body.render_ms} / ${body.legacy_render_ms} ms`; document.getElementById('meta-renderer').textContent=`${body.preset}／${body.dither}`; document.getElementById('download-result').href=body.new;
+      const rows=document.getElementById('palette-stat-body'); rows.replaceChildren(...body.palette.map(item=>{const row=document.createElement('tr');const color=document.createElement('td');const swatch=document.createElement('i');swatch.style.backgroundColor=`rgb(${item.rgb.join(',')})`;color.append(swatch,document.createTextNode(item.name));const pixels=document.createElement('td');pixels.textContent=item.pixels.toLocaleString();const ratio=document.createElement('td');ratio.textContent=`${(item.ratio*100).toFixed(2)}%`;row.append(color,pixels,ratio);return row;})); document.getElementById('palette-statistics').hidden=false;
+      document.getElementById('save-preset')?.removeAttribute('disabled'); document.getElementById('send-test')?.removeAttribute('disabled'); setStatus('A/B 預覽完成；下載檔為 Server 新算法結果。','success');
+    } catch(error) { setStatus(error.message||'A/B 預覽失敗','error'); } finally { compareButton.disabled=!photo.files[0]; }
+  }
+  async function savePreset() {
+    const label=window.prompt('自訂 Preset 名稱','六色照片自訂'); if(!label) return;
+    const source=customPresets[preset.value]?.source_preset || preset.value; const response=await window.inktimeFetch('/api/v1/rendering/presets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label,source_preset:source,options:options(),palette:palette()})}); const body=await response.json(); if(!response.ok){setStatus(body.message||'儲存失敗','error');return;} setStatus(`已建立自訂副本：${body.label}`,'success');
+  }
+  async function sendTest() {
+    const select=document.getElementById('test-device'); if(!select.value){setStatus('請選擇測試裝置','error');return;} if(select.selectedOptions[0].dataset.profile!==profile.value){setStatus('裝置 Profile 與目前面板不相容','error');return;}
+    const button=document.getElementById('send-test'); button.disabled=true; setStatus('Server 正式渲染並建立獨立測試 Release…');
+    try { const data=formData(); data.set('device_id',select.value); data.set('delivery',document.getElementById('test-delivery').value); data.set('one_time',document.getElementById('one-time').checked); data.set('restore_formal',document.getElementById('restore-formal').checked); data.set('save_preset',document.getElementById('save-and-send').checked); data.set('preset_label','測試後儲存'); const response=await window.inktimeFetch('/api/v1/rendering/test-release',{method:'POST',body:data}); const body=await response.json(); if(!response.ok)throw new Error(body.message||'測試 Release 建立失敗'); setStatus(`測試 Release ${body.release_id} 已指派；正式排程未覆寫。`,'success'); } catch(error){setStatus(error.message||'測試傳送失敗','error');} finally{button.disabled=!lastResult;}
+  }
+  photo.addEventListener('change',()=>{compareButton.disabled=!photo.files[0];setStatus(photo.files[0]?`已選擇 ${photo.files[0].name}`:'請先選擇原始照片。','ready');});
+  document.getElementById('drop-zone').addEventListener('drop',event=>{event.preventDefault(); if(event.dataTransfer.files[0]){const transfer=new DataTransfer();transfer.items.add(event.dataTransfer.files[0]);photo.files=transfer.files;photo.dispatchEvent(new Event('change'));}}); document.getElementById('drop-zone').addEventListener('dragover',event=>event.preventDefault());
+  form.addEventListener('submit',compare); preset.addEventListener('change',applyPreset); profile.addEventListener('change',updatePaletteMeta); errorStrength.addEventListener('input',()=>document.getElementById('error-output').value=Number(errorStrength.value).toFixed(2));
+  for(const key of ['denoise','tone','contrast','sharpen']) document.getElementById(`${key}-strength`).addEventListener('input',()=>setRangeOutput(key));
+  document.getElementById('legacy-button').addEventListener('click',()=>{dither.value='gooddisplay';document.getElementById('linear-light').checked=false;document.getElementById('color-distance').value='rgb';setStatus('已切回舊微雪算法；重新產生預覽即可比較。','ready');});
+  document.getElementById('copy-palette').addEventListener('click',copyPalette); document.getElementById('reset-palette').addEventListener('click',()=>{paletteMode.value='default';paletteValues.value='';setStatus('已恢復微雪預設 Palette。','ready');}); document.getElementById('save-preset')?.addEventListener('click',savePreset); document.getElementById('send-test')?.addEventListener('click',sendTest);
+  zoom.addEventListener('input',()=>{const value=Number(zoom.value);document.getElementById('zoom-output').value=value.toFixed(1);document.querySelectorAll('.zoom-frame img').forEach(image=>image.style.transform=`scale(${value})`);}); document.querySelectorAll('.zoom-frame').forEach(frame=>frame.addEventListener('click',event=>{const rect=frame.getBoundingClientRect();const origin=`${((event.clientX-rect.left)/rect.width)*100}% ${((event.clientY-rect.top)/rect.height)*100}%`;document.querySelectorAll('.zoom-frame img').forEach(image=>image.style.transformOrigin=origin);}));
+  applyPreset(); updatePaletteMeta();
 })();
 </script>
 {% endblock %}

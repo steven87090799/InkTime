@@ -10,7 +10,7 @@ from flask import Blueprint, abort, current_app, render_template, request
 
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.core.logging import log_event
-from inktime.app.domain.rendering import DISPLAY_PROFILES
+from inktime.app.domain.rendering import DISPLAY_PROFILES, DeviceTestReleaseStore
 from inktime.app.repositories.devices import DeviceRepository
 from inktime.app.web.access import administrator_required, login_required
 
@@ -265,12 +265,16 @@ def latest_release():
     device = _authenticated_device()
     release_root = current_app.config["INKTIME_RELEASE_DIR"]
     profile_key = str(device["panel_profile"] or "safe_4c")
-    latest_pointer = release_root / f"latest.{profile_key}"
-    if not latest_pointer.exists() and profile_key == "safe_4c":
-        latest_pointer = release_root / "latest"
-    if not latest_pointer.exists():
-        abort(404, description="目前沒有可用的發布版本")
-    release_id = latest_pointer.read_text(encoding="utf-8").strip()
+    assignment = DeviceTestReleaseStore(release_root).active(str(device["id"]), profile_key)
+    if assignment is not None:
+        release_id = str(assignment["release_id"])
+    else:
+        latest_pointer = release_root / f"latest.{profile_key}"
+        if not latest_pointer.exists() and profile_key == "safe_4c":
+            latest_pointer = release_root / "latest"
+        if not latest_pointer.exists():
+            abort(404, description="目前沒有可用的發布版本")
+        release_id = latest_pointer.read_text(encoding="utf-8").strip()
     try:
         manifest_path = safe_join(release_root, f"{release_id}/manifest.json")
     except UnsafePathError:
@@ -290,6 +294,12 @@ def latest_release():
         "schedule": str(device["schedule"]),
         "rotation": int(device["rotation"]),
     }
+    if assignment is not None:
+        manifest["test_delivery"] = {
+            "mode": assignment["delivery"],
+            "one_time": bool(assignment["one_time"]),
+            "restore_formal": bool(assignment["restore_formal"]),
+        }
     log_event(
         LOGGER,
         logging.DEBUG,
@@ -319,6 +329,10 @@ def release_file(release_id: str, filename: str):
         _repository().record_download(device["id"], release_id, False)
         abort(404)
     _repository().record_download(device["id"], release_id, True)
+    if filename.endswith(".bin"):
+        DeviceTestReleaseStore(current_app.config["INKTIME_RELEASE_DIR"]).mark_downloaded(
+            str(device["id"]), release_id
+        )
     log_event(
         LOGGER,
         logging.DEBUG,
