@@ -86,6 +86,9 @@ def initialize_platform(
     release_dir.mkdir(parents=True, exist_ok=True)
     database = Database(database_path)
     migrate(database, None if testing else data_dir / "backups")
+    if not testing:
+        # 每個正式程序持有 shared runtime lock；離線還原必須等所有程序停止。
+        app.extensions["inktime_runtime_lock"] = database.acquire_runtime_lock(exclusive=False)
     secret = "test-secret-not-for-production" if testing else _persistent_secret(data_dir / "session.key")
 
     app.secret_key = secret

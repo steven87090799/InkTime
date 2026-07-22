@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import logging
 
-from inktime.app.core.logging import JsonFormatter
+from inktime.app.core.logging import HumanFormatter, JsonFormatter
+from inktime.app.core.security import register_secret
 
 
 def test_structured_log_redacts_secrets():
@@ -31,3 +32,25 @@ def test_structured_log_redacts_secrets():
         "retry_count",
         "details",
     }
+
+
+def test_full_api_key_is_redacted_from_plain_exception_messages():
+    api_key = "vendor-key-0123456789-super-secret"
+    register_secret(api_key)
+    record = logging.LogRecord(
+        "provider",
+        logging.ERROR,
+        "",
+        0,
+        f"upstream rejected Authorization Bearer {api_key}",
+        (),
+        None,
+    )
+
+    human = HumanFormatter().format(record)
+    structured = JsonFormatter().format(record)
+
+    assert api_key not in human
+    assert api_key not in structured
+    assert "[已遮蔽]" in human
+    assert "[已遮蔽]" in structured

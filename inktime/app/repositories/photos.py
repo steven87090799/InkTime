@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-import sqlite3
-from typing import Iterator
+from typing import Iterable, Sequence
 from uuid import uuid4
 
 from inktime.app.core.paths import UnsafePathError, safe_join
@@ -21,36 +19,41 @@ from inktime.app.domain.photos.preprocessing import LocalPhotoFeatures
 
 @dataclass(frozen=True)
 class StoredPhotoSignature:
+    id: str
+    relative_path: str
     file_size: int | None
     modified_time: float | None
     sha256: str | None
+    lifecycle_status: str
+    metadata_status: str
+    local_features_status: str
+    status: str
 
     def matches(self, *, file_size: int, modified_time: float) -> bool:
         return bool(self.sha256) and self.file_size == file_size and self.modified_time == modified_time
 
 
-class PhotoSignatureLookup:
-    """掃描期間重用唯讀連線，避免為每張照片重開 SQLite。"""
+@dataclass(frozen=True)
+class PreparedScanPhoto:
+    relative_path: str
+    source: Path
+    file_size: int
+    modified_time: float
+    features: LocalPhotoFeatures
 
-    def __init__(self, connection: sqlite3.Connection, library_id: str) -> None:
-        self.connection = connection
-        self.library_id = library_id
 
-    def get(self, relative_path: str) -> StoredPhotoSignature | None:
-        row = self.connection.execute(
-            """
-            SELECT file_size,modified_time,sha256
-            FROM photos WHERE library_id=? AND relative_path=?
-            """,
-            (self.library_id, relative_path),
-        ).fetchone()
-        if row is None:
-            return None
-        return StoredPhotoSignature(
-            file_size=row["file_size"],
-            modified_time=row["modified_time"],
-            sha256=row["sha256"],
-        )
+@dataclass(frozen=True)
+class BatchPhotoResult:
+    relative_path: str
+    photo_id: str
+    action: str
+    inherited: bool
+    sha256: str
+
+
+def _chunks(values: Sequence[str], size: int = 400) -> Iterable[Sequence[str]]:
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
 
 
 class PhotoRepository:
@@ -60,7 +63,7 @@ class PhotoRepository:
     def ensure_library(self, name: str, root_path: Path) -> str:
         root = str(root_path.expanduser().resolve())
         now = datetime.now(timezone.utc).isoformat()
-        with self.database.session() as connection:
+        with self.database.transaction() as connection:
             row = connection.execute("SELECT id FROM libraries WHERE root_path=?", (root,)).fetchone()
             if row:
                 return str(row["id"])
@@ -71,223 +74,804 @@ class PhotoRepository:
             )
             return library_id
 
-    @contextmanager
-    def signature_lookup(self, library_id: str) -> Iterator[PhotoSignatureLookup]:
+    def signatures_for_paths(
+        self, library_id: str, relative_paths: Sequence[str]
+    ) -> dict[str, StoredPhotoSignature]:
+        """每個磁碟批次只做固定數量 SQL，不逐張查詢。"""
+
+        rows = []
+        unique_paths = list(dict.fromkeys(relative_paths))
         with self.database.session() as connection:
-            yield PhotoSignatureLookup(connection, library_id)
+            for chunk in _chunks(unique_paths):
+                placeholders = ",".join("?" for _ in chunk)
+                rows.extend(
+                    connection.execute(
+                        f"""
+                        SELECT id,relative_path,file_size,modified_time,sha256,lifecycle_status,
+                               metadata_status,local_features_status,status
+                        FROM photos
+                        WHERE library_id=? AND relative_path IN ({placeholders})
+                        """,  # noqa: S608 -- placeholders are generated; values remain bound
+                        (library_id, *chunk),
+                    ).fetchall()
+                )
+        return {
+            str(row["relative_path"]): StoredPhotoSignature(
+                id=str(row["id"]),
+                relative_path=str(row["relative_path"]),
+                file_size=row["file_size"],
+                modified_time=row["modified_time"],
+                sha256=row["sha256"],
+                lifecycle_status=str(row["lifecycle_status"]),
+                metadata_status=str(row["metadata_status"]),
+                local_features_status=str(row["local_features_status"]),
+                status=str(row["status"]),
+            )
+            for row in rows
+        }
 
-    def upsert_preprocessed(
-        self, library_id: str, relative_path: str, source: Path, features: LocalPhotoFeatures
-    ) -> tuple[str, bool]:
+    def begin_scan(
+        self,
+        library_id: str,
+        root: Path,
+        *,
+        mode: str,
+        trigger_source: str,
+        missing_threshold_ratio: float,
+    ) -> str:
+        scan_id = str(uuid4())
         now = datetime.now(timezone.utc).isoformat()
-        stat = source.stat()
-        values = features.as_dict()
-
-        def update_render_features(connection, photo_id: str) -> None:
+        with self.database.transaction() as connection:
+            previous = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM photos WHERE library_id=? AND lifecycle_status='active'",
+                    (library_id,),
+                ).fetchone()[0]
+            )
             connection.execute(
                 """
+                INSERT INTO scan_runs(
+                    id,library_id,mode,trigger_source,status,root_path,root_accessible,
+                    root_readable,previous_active_count,missing_threshold_ratio,started_at
+                ) VALUES (?,?,?,?,'running',?,1,1,?,?,?)
+                """,
+                (
+                    scan_id,
+                    library_id,
+                    mode,
+                    trigger_source,
+                    str(root),
+                    previous,
+                    min(1.0, max(0.0, float(missing_threshold_ratio))),
+                    now,
+                ),
+            )
+        return scan_id
+
+    def mark_seen_batch(self, scan_id: str, photo_ids: Sequence[str]) -> None:
+        if not photo_ids:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        unique_ids = list(dict.fromkeys(photo_ids))
+        with self.database.transaction() as connection:
+            connection.executemany(
+                """
                 UPDATE photos SET
-                    crop_focus_x=?,crop_focus_y=?,crop_subject_left=?,crop_subject_top=?,
-                    crop_subject_right=?,crop_subject_bottom=?,crop_method=?,crop_face_count=?,
-                    e6_score=?,e6_contrast_score=?,e6_subject_score=?,e6_skin_score=?,
-                    e6_text_score=?,e6_skin_pixels=?
+                    last_seen_scan_id=?,
+                    lifecycle_status=CASE WHEN lifecycle_status='missing' THEN 'active' ELSE lifecycle_status END,
+                    missing_since=CASE WHEN lifecycle_status='missing' THEN NULL ELSE missing_since END,
+                    missing_reason=CASE WHEN lifecycle_status='missing' THEN NULL ELSE missing_reason END,
+                    updated_at=CASE WHEN lifecycle_status='missing' THEN ? ELSE updated_at END
+                WHERE id=?
+                """,
+                [(scan_id, now, photo_id) for photo_id in unique_ids],
+            )
+
+    def mark_processing_failed_batch(
+        self, scan_id: str, failures: Sequence[tuple[str, bool, bool]]
+    ) -> None:
+        """保留既有照片資料，但把本次未完成區段標成 failed 供增量重試。"""
+
+        if not failures:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.transaction() as connection:
+            connection.executemany(
+                """
+                UPDATE photos SET
+                    last_seen_scan_id=?,
+                    lifecycle_status=CASE WHEN lifecycle_status='missing' THEN 'active' ELSE lifecycle_status END,
+                    missing_since=CASE WHEN lifecycle_status='missing' THEN NULL ELSE missing_since END,
+                    missing_reason=CASE WHEN lifecycle_status='missing' THEN NULL ELSE missing_reason END,
+                    metadata_status=CASE WHEN ? THEN 'failed' ELSE metadata_status END,
+                    local_features_status=CASE WHEN ? THEN 'failed' ELSE local_features_status END,
+                    updated_at=?
+                WHERE id=?
+                """,
+                [
+                    (scan_id, int(metadata), int(local), now, photo_id)
+                    for photo_id, metadata, local in failures
+                ],
+            )
+
+    @staticmethod
+    def _path_is_still_present(root: Path, relative_path: str) -> bool:
+        try:
+            return safe_join(root, relative_path).is_file()
+        except UnsafePathError:
+            # 不安全的舊資料不得被當成可自動搬移的來源。
+            return True
+
+    def apply_scan_batch(
+        self,
+        library_id: str,
+        scan_id: str,
+        root: Path,
+        items: Sequence[PreparedScanPhoto],
+    ) -> list[BatchPhotoResult]:
+        """批次查詢、記憶體比對，再於單一交易寫入整批照片與初始狀態。"""
+
+        if not items:
+            return []
+        now = datetime.now(timezone.utc).isoformat()
+        paths = list(dict.fromkeys(item.relative_path for item in items))
+        hashes = list(dict.fromkeys(item.features.sha256 for item in items))
+        phashes = list(
+            dict.fromkeys(
+                item.features.perceptual_hash
+                for item in items
+                if item.features.perceptual_hash is not None
+            )
+        )
+        results: list[BatchPhotoResult] = []
+        with self.database.transaction() as connection:
+            path_rows: list[dict] = []
+            for chunk in _chunks(paths):
+                placeholders = ",".join("?" for _ in chunk)
+                path_rows.extend(
+                    dict(row)
+                    for row in connection.execute(
+                        f"SELECT * FROM photos WHERE library_id=? AND relative_path IN ({placeholders})",  # noqa: S608
+                        (library_id, *chunk),
+                    ).fetchall()
+                )
+            content_rows: list[dict] = []
+            for chunk in _chunks(hashes):
+                placeholders = ",".join("?" for _ in chunk)
+                content_rows.extend(
+                    dict(row)
+                    for row in connection.execute(
+                        f"""
+                        SELECT p.* FROM photos p
+                        WHERE p.library_id=? AND p.sha256 IN ({placeholders})
+                          AND p.lifecycle_status IN ('active','missing')
+                        """,  # noqa: S608
+                        (library_id, *chunk),
+                    ).fetchall()
+                )
+            phash_rows: list[dict] = []
+            for chunk in _chunks(phashes):
+                placeholders = ",".join("?" for _ in chunk)
+                phash_rows.extend(
+                    dict(row)
+                    for row in connection.execute(
+                        f"""
+                        SELECT * FROM photos
+                        WHERE library_id=? AND perceptual_hash IN ({placeholders})
+                          AND lifecycle_status IN ('active','missing')
+                        """,  # noqa: S608
+                        (library_id, *chunk),
+                    ).fetchall()
+                )
+
+            by_path = {str(row["relative_path"]): row for row in path_rows}
+            by_hash: dict[str, list[dict]] = {}
+            by_phash: dict[str, list[dict]] = {}
+            for row in content_rows:
+                by_hash.setdefault(str(row["sha256"]), []).append(row)
+            for row in phash_rows:
+                by_phash.setdefault(str(row["perceptual_hash"]), []).append(row)
+
+            plans: list[dict] = []
+            plans_by_id: dict[str, dict] = {}
+            pending_by_hash: dict[str, list[dict]] = {}
+            pending_by_phash: dict[str, list[dict]] = {}
+            reserved_move_ids: set[str] = set()
+            group_updates: dict[str, str] = {}
+            changed_ids: list[str] = []
+            old_groups: set[str] = set()
+            move_parameters: list[tuple] = []
+
+            def set_group(source: dict, group_id: str) -> None:
+                source_id = str(source["id"])
+                if source_id in plans_by_id:
+                    plans_by_id[source_id]["duplicate_group_id"] = group_id
+                elif not source.get("duplicate_group_id"):
+                    group_updates[source_id] = group_id
+
+            for item in items:
+                features = item.features
+                existing = by_path.get(item.relative_path)
+                exact = [
+                    row
+                    for row in by_hash.get(features.sha256, [])
+                    if existing is None or str(row["id"]) != str(existing["id"])
+                ] + pending_by_hash.get(features.sha256, [])
+
+                if existing is None:
+                    movable = [
+                        row
+                        for row in exact
+                        if str(row["id"]) not in reserved_move_ids
+                        and str(row["id"]) not in plans_by_id
+                        and not self._path_is_still_present(root, str(row["relative_path"]))
+                    ]
+                    if len(movable) == 1:
+                        source = movable[0]
+                        photo_id = str(source["id"])
+                        reserved_move_ids.add(photo_id)
+                        move_parameters.append(
+                            (
+                                item.relative_path,
+                                item.file_size,
+                                item.modified_time,
+                                scan_id,
+                                now,
+                                photo_id,
+                            )
+                        )
+                        results.append(
+                            BatchPhotoResult(
+                                item.relative_path,
+                                photo_id,
+                                "moved",
+                                False,
+                                features.sha256,
+                            )
+                        )
+                        continue
+
+                content_changed = bool(existing and existing.get("sha256") != features.sha256)
+                eligible_exact = [
+                    row for row in exact if str(row["id"]) not in reserved_move_ids
+                ]
+                near = []
+                if features.perceptual_hash is not None:
+                    near = [
+                        row
+                        for row in by_phash.get(features.perceptual_hash, [])
+                        + pending_by_phash.get(features.perceptual_hash, [])
+                        if existing is None or str(row["id"]) != str(existing["id"])
+                    ]
+                duplicate_source = eligible_exact[0] if eligible_exact else (near[0] if near else None)
+                inherited = bool(eligible_exact)
+                if existing is not None:
+                    photo_id = str(existing["id"])
+                    action = (
+                        "restored"
+                        if str(existing["lifecycle_status"]) == "missing"
+                        else "changed"
+                    )
+                    duplicate_group = (
+                        existing.get("duplicate_group_id") if not content_changed else None
+                    )
+                    analysis_source = str(existing.get("analysis_source") or "direct")
+                    status = str(existing["status"])
+                    if content_changed:
+                        status = "preprocessed" if features.local_features_complete else "discovered"
+                        analysis_source = "inherited" if inherited else "direct"
+                        changed_ids.append(photo_id)
+                        if existing.get("duplicate_group_id"):
+                            old_groups.add(str(existing["duplicate_group_id"]))
+                    elif features.local_features_complete and status == "discovered":
+                        status = "preprocessed"
+                else:
+                    photo_id = str(uuid4())
+                    action = "new"
+                    duplicate_group = None
+                    analysis_source = "inherited" if inherited else "direct"
+                    status = "preprocessed" if features.local_features_complete else "discovered"
+
+                if duplicate_source is not None:
+                    duplicate_group = (
+                        duplicate_source.get("duplicate_group_id")
+                        or duplicate_group
+                        or str(uuid4())
+                    )
+                    set_group(duplicate_source, str(duplicate_group))
+
+                plan = {
+                    "kind": "update" if existing is not None else "insert",
+                    "id": photo_id,
+                    "item": item,
+                    "status": status,
+                    "analysis_source": analysis_source,
+                    "duplicate_group_id": duplicate_group,
+                    "content_changed": content_changed,
+                }
+                plans.append(plan)
+                plans_by_id[photo_id] = plan
+                pending = {
+                    "id": photo_id,
+                    "relative_path": item.relative_path,
+                    "duplicate_group_id": duplicate_group,
+                }
+                pending_by_hash.setdefault(features.sha256, []).append(pending)
+                if features.perceptual_hash is not None:
+                    pending_by_phash.setdefault(features.perceptual_hash, []).append(pending)
+                results.append(
+                    BatchPhotoResult(
+                        item.relative_path,
+                        photo_id,
+                        action,
+                        inherited,
+                        features.sha256,
+                    )
+                )
+
+            # 前面出現的同批新照片可能在後面才被判定為 duplicate，回填其 group。
+            for values in pending_by_hash.values():
+                if len(values) < 2:
+                    continue
+                group_id = next(
+                    (
+                        str(plans_by_id[str(value["id"])]["duplicate_group_id"])
+                        for value in values
+                        if plans_by_id[str(value["id"])].get("duplicate_group_id")
+                    ),
+                    str(uuid4()),
+                )
+                for value in values:
+                    plans_by_id[str(value["id"])]["duplicate_group_id"] = group_id
+
+            if group_updates:
+                connection.executemany(
+                    "UPDATE photos SET duplicate_group_id=? WHERE id=?",
+                    [(group_id, photo_id) for photo_id, group_id in group_updates.items()],
+                )
+            if move_parameters:
+                connection.executemany(
+                    """
+                    UPDATE photos SET relative_path=?,file_size=?,modified_time=?,
+                        lifecycle_status='active',missing_since=NULL,missing_reason=NULL,
+                        last_seen_scan_id=?,updated_at=?
+                    WHERE id=?
+                    """,
+                    move_parameters,
+                )
+
+            # 同一路徑換成不同內容時，舊照片的 Metadata／本地特徵已不再可信。
+            # 先在同一交易清空並標為 pending，後續 UPDATE 再寫回本次實際完成的區段。
+            if changed_ids:
+                for chunk in _chunks(changed_ids):
+                    placeholders = ",".join("?" for _ in chunk)
+                    connection.execute(
+                        f"""
+                        UPDATE photos SET
+                            exif_json=NULL,captured_at=NULL,gps_lat=NULL,gps_lon=NULL,
+                            metadata_status='pending',perceptual_hash=NULL,difference_hash=NULL,
+                            brightness=NULL,contrast=NULL,blur_score=NULL,
+                            overexposed_ratio=NULL,underexposed_ratio=NULL,
+                            screenshot_likelihood=NULL,crop_focus_x=NULL,crop_focus_y=NULL,
+                            crop_subject_left=NULL,crop_subject_top=NULL,crop_subject_right=NULL,
+                            crop_subject_bottom=NULL,crop_method=NULL,crop_face_count=0,
+                            crop_manual_x=NULL,crop_manual_y=NULL,local_features_status='pending',
+                            e6_score=NULL,e6_contrast_score=NULL,e6_subject_score=NULL,
+                            e6_skin_score=NULL,e6_text_score=NULL,e6_skin_pixels=0
+                        WHERE id IN ({placeholders})
+                        """,  # noqa: S608 -- placeholders are generated; IDs remain bound
+                        chunk,
+                    )
+                    connection.execute(
+                        f"DELETE FROM photo_analysis WHERE photo_id IN ({placeholders})",  # noqa: S608
+                        chunk,
+                    )
+
+            update_parameters = []
+            insert_parameters = []
+            for plan in plans:
+                item = plan["item"]
+                features = item.features
+                values = features.as_dict()
+                if plan["kind"] == "update":
+                    update_parameters.append(
+                        (
+                            item.file_size,
+                            item.modified_time,
+                            features.sha256,
+                            features.width,
+                            features.height,
+                            features.format,
+                            plan["status"],
+                            plan["duplicate_group_id"],
+                            plan["analysis_source"],
+                            now,
+                            scan_id,
+                            int(features.metadata_complete),
+                            values["exif_json"],
+                            values["captured_at"],
+                            values["gps_lat"],
+                            values["gps_lon"],
+                            int(features.local_features_complete),
+                            values["perceptual_hash"],
+                            values["difference_hash"],
+                            values["brightness"],
+                            values["contrast"],
+                            values["blur_score"],
+                            values["overexposed_ratio"],
+                            values["underexposed_ratio"],
+                            values["screenshot_likelihood"],
+                            values["crop_focus_x"],
+                            values["crop_focus_y"],
+                            values["crop_subject_left"],
+                            values["crop_subject_top"],
+                            values["crop_subject_right"],
+                            values["crop_subject_bottom"],
+                            values["crop_method"],
+                            values["crop_face_count"] or 0,
+                            int(plan["content_changed"]),
+                            plan["id"],
+                        )
+                    )
+                else:
+                    insert_parameters.append(
+                        (
+                            plan["id"],
+                            library_id,
+                            item.relative_path,
+                            item.file_size,
+                            item.modified_time,
+                            features.sha256,
+                            values["perceptual_hash"],
+                            values["difference_hash"],
+                            features.width,
+                            features.height,
+                            features.format,
+                            plan["status"],
+                            plan["duplicate_group_id"],
+                            plan["analysis_source"],
+                            now,
+                            now,
+                            values["exif_json"],
+                            values["captured_at"],
+                            values["gps_lat"],
+                            values["gps_lon"],
+                            values["brightness"],
+                            values["contrast"],
+                            values["blur_score"],
+                            values["overexposed_ratio"],
+                            values["underexposed_ratio"],
+                            values["screenshot_likelihood"],
+                            values["crop_focus_x"],
+                            values["crop_focus_y"],
+                            values["crop_subject_left"],
+                            values["crop_subject_top"],
+                            values["crop_subject_right"],
+                            values["crop_subject_bottom"],
+                            values["crop_method"],
+                            values["crop_face_count"] or 0,
+                            scan_id,
+                            "complete" if features.metadata_complete else "pending",
+                            "complete" if features.local_features_complete else "pending",
+                        )
+                    )
+
+            if update_parameters:
+                connection.executemany(
+                    """
+                    UPDATE photos SET
+                        file_size=?,modified_time=?,sha256=?,width=?,height=?,format=?,status=?,
+                        duplicate_group_id=?,analysis_source=?,updated_at=?,last_seen_scan_id=?,
+                        lifecycle_status=CASE WHEN lifecycle_status='missing' THEN 'active' ELSE lifecycle_status END,
+                        missing_since=CASE WHEN lifecycle_status='missing' THEN NULL ELSE missing_since END,
+                        missing_reason=CASE WHEN lifecycle_status='missing' THEN NULL ELSE missing_reason END,
+                        exif_json=CASE WHEN ? THEN ? ELSE exif_json END,
+                        captured_at=CASE WHEN ? THEN ? ELSE captured_at END,
+                        gps_lat=CASE WHEN ? THEN ? ELSE gps_lat END,
+                        gps_lon=CASE WHEN ? THEN ? ELSE gps_lon END,
+                        metadata_status=CASE WHEN ? THEN 'complete' ELSE metadata_status END,
+                        perceptual_hash=CASE WHEN ? THEN ? ELSE perceptual_hash END,
+                        difference_hash=CASE WHEN ? THEN ? ELSE difference_hash END,
+                        brightness=CASE WHEN ? THEN ? ELSE brightness END,
+                        contrast=CASE WHEN ? THEN ? ELSE contrast END,
+                        blur_score=CASE WHEN ? THEN ? ELSE blur_score END,
+                        overexposed_ratio=CASE WHEN ? THEN ? ELSE overexposed_ratio END,
+                        underexposed_ratio=CASE WHEN ? THEN ? ELSE underexposed_ratio END,
+                        screenshot_likelihood=CASE WHEN ? THEN ? ELSE screenshot_likelihood END,
+                        crop_focus_x=CASE WHEN ? THEN ? ELSE crop_focus_x END,
+                        crop_focus_y=CASE WHEN ? THEN ? ELSE crop_focus_y END,
+                        crop_subject_left=CASE WHEN ? THEN ? ELSE crop_subject_left END,
+                        crop_subject_top=CASE WHEN ? THEN ? ELSE crop_subject_top END,
+                        crop_subject_right=CASE WHEN ? THEN ? ELSE crop_subject_right END,
+                        crop_subject_bottom=CASE WHEN ? THEN ? ELSE crop_subject_bottom END,
+                        crop_method=CASE WHEN ? THEN ? ELSE crop_method END,
+                        crop_face_count=CASE WHEN ? THEN ? ELSE crop_face_count END,
+                        local_features_status=CASE WHEN ? THEN 'complete' ELSE local_features_status END,
+                        e6_score=CASE WHEN ? THEN NULL ELSE e6_score END,
+                        e6_contrast_score=CASE WHEN ? THEN NULL ELSE e6_contrast_score END,
+                        e6_subject_score=CASE WHEN ? THEN NULL ELSE e6_subject_score END,
+                        e6_skin_score=CASE WHEN ? THEN NULL ELSE e6_skin_score END,
+                        e6_text_score=CASE WHEN ? THEN NULL ELSE e6_text_score END,
+                        e6_skin_pixels=CASE WHEN ? THEN 0 ELSE e6_skin_pixels END
+                    WHERE id=?
+                    """,
+                    [
+                        (
+                            *params[:11],
+                            params[11],
+                            params[12],
+                            params[11],
+                            params[13],
+                            params[11],
+                            params[14],
+                            params[11],
+                            params[15],
+                            params[11],
+                            params[16],
+                            params[17],
+                            params[16],
+                            params[18],
+                            params[16],
+                            params[19],
+                            params[16],
+                            params[20],
+                            params[16],
+                            params[21],
+                            params[16],
+                            params[22],
+                            params[16],
+                            params[23],
+                            params[16],
+                            params[24],
+                            params[16],
+                            params[25],
+                            params[16],
+                            params[26],
+                            params[16],
+                            params[27],
+                            params[16],
+                            params[28],
+                            params[16],
+                            params[29],
+                            params[16],
+                            params[30],
+                            params[16],
+                            params[31],
+                            params[16],
+                            params[32],
+                            params[16],
+                            params[33],
+                            params[33],
+                            params[33],
+                            params[33],
+                            params[33],
+                            params[33],
+                            params[34],
+                        )
+                        for params in update_parameters
+                    ],
+                )
+
+            if insert_parameters:
+                connection.executemany(
+                    """
+                    INSERT INTO photos(
+                        id,library_id,relative_path,file_size,modified_time,sha256,
+                        perceptual_hash,difference_hash,width,height,format,status,
+                        duplicate_group_id,analysis_source,created_at,updated_at,exif_json,
+                        captured_at,gps_lat,gps_lon,brightness,contrast,blur_score,
+                        overexposed_ratio,underexposed_ratio,screenshot_likelihood,
+                        crop_focus_x,crop_focus_y,crop_subject_left,crop_subject_top,
+                        crop_subject_right,crop_subject_bottom,crop_method,crop_face_count,
+                        lifecycle_status,last_seen_scan_id,metadata_status,local_features_status
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?)
+                    """,
+                    insert_parameters,
+                )
+
+            for chunk in _chunks(sorted(old_groups)):
+                placeholders = ",".join("?" for _ in chunk)
+                connection.execute(
+                    f"""
+                    UPDATE photos SET duplicate_group_id=NULL
+                    WHERE duplicate_group_id IN ({placeholders})
+                      AND (SELECT COUNT(*) FROM photos other
+                           WHERE other.duplicate_group_id=photos.duplicate_group_id) < 2
+                    """,  # noqa: S608
+                    chunk,
+                )
+        return results
+
+    def record_scan_errors(self, scan_id: str, errors: Sequence[dict]) -> None:
+        if not errors:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.transaction() as connection:
+            connection.executemany(
+                """
+                INSERT INTO scan_errors(
+                    scan_id,photo_id,stage,error_code,exception_type,retryable,masked_path,created_at
+                ) VALUES (?,?,?,?,?,?,?,?)
+                """,
+                [
+                    (
+                        scan_id,
+                        error.get("photo_id"),
+                        str(error["stage"])[:64],
+                        str(error["error_code"])[:64],
+                        str(error["exception_type"])[:128],
+                        int(bool(error["retryable"])),
+                        str(error["masked_path"])[:255],
+                        now,
+                    )
+                    for error in errors
+                ],
+            )
+
+    def finish_scan(
+        self,
+        scan_id: str,
+        *,
+        counts: dict[str, int],
+        full_census: bool,
+        cancelled: bool,
+        major_io_errors: int,
+    ) -> dict:
+        """只在所有安全條件成立時，以單一 set-based 交易標記 Missing。"""
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.transaction() as connection:
+            scan = connection.execute("SELECT * FROM scan_runs WHERE id=?", (scan_id,)).fetchone()
+            if scan is None:
+                raise KeyError(scan_id)
+            candidate_count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM photos
+                    WHERE library_id=? AND lifecycle_status='active'
+                      AND COALESCE(last_seen_scan_id,'')<>?
+                    """,
+                    (scan["library_id"], scan_id),
+                ).fetchone()[0]
+            )
+            baseline = int(scan["previous_active_count"])
+            ratio = candidate_count / baseline if baseline else 0.0
+            safe = bool(
+                scan["root_accessible"]
+                and scan["root_readable"]
+                and full_census
+                and not cancelled
+                and major_io_errors == 0
+            )
+            threshold = float(scan["missing_threshold_ratio"])
+            marked = 0
+            warning_code = None
+            reconciliation = "skipped"
+            status = "completed"
+            if cancelled:
+                status = "cancelled"
+                warning_code = "SCAN-CANCELLED"
+            elif not safe:
+                status = "completed_with_warnings"
+                warning_code = "SCAN-IO-002" if major_io_errors else "SCAN-INCOMPLETE"
+            elif ratio > threshold:
+                status = "completed_with_warnings"
+                warning_code = "SCAN-MISSING-THRESHOLD"
+                reconciliation = "confirmation_required"
+                connection.execute(
+                    """
+                    INSERT INTO scan_missing_candidates(scan_id,photo_id,created_at)
+                    SELECT ?,id,? FROM photos
+                    WHERE library_id=? AND lifecycle_status='active'
+                      AND COALESCE(last_seen_scan_id,'')<>?
+                    """,
+                    (scan_id, now, scan["library_id"], scan_id),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    UPDATE photos SET lifecycle_status='missing',missing_since=?,
+                        missing_reason='not_seen_in_complete_scan',updated_at=?
+                    WHERE library_id=? AND lifecycle_status='active'
+                      AND COALESCE(last_seen_scan_id,'')<>?
+                    """,
+                    (now, now, scan["library_id"], scan_id),
+                )
+                marked = int(cursor.rowcount)
+                reconciliation = "applied"
+            connection.execute(
+                """
+                UPDATE scan_runs SET status=?,full_census=?,cancelled=?,major_io_errors=?,
+                    checked_count=?,processed_count=?,skipped_count=?,new_count=?,changed_count=?,
+                    moved_count=?,restored_count=?,duplicate_count=?,failed_count=?,excluded_video_count=?,
+                    candidate_missing_count=?,missing_marked_count=?,reconciliation_status=?,
+                    warning_code=?,completed_at=?
                 WHERE id=?
                 """,
                 (
-                    values["crop_focus_x"],
-                    values["crop_focus_y"],
-                    values["crop_subject_left"],
-                    values["crop_subject_top"],
-                    values["crop_subject_right"],
-                    values["crop_subject_bottom"],
-                    values["crop_method"],
-                    values["crop_face_count"],
-                    values["e6_score"],
-                    values["e6_contrast_score"],
-                    values["e6_subject_score"],
-                    values["e6_skin_score"],
-                    values["e6_text_score"],
-                    values["e6_skin_pixels"],
-                    photo_id,
+                    status,
+                    int(full_census),
+                    int(cancelled),
+                    major_io_errors,
+                    counts.get("checked", 0),
+                    counts.get("processed", 0),
+                    counts.get("skipped", 0),
+                    counts.get("new", 0),
+                    counts.get("changed", 0),
+                    counts.get("moved", 0),
+                    counts.get("restored", 0),
+                    counts.get("duplicates", 0),
+                    counts.get("failed", 0),
+                    counts.get("excluded_videos", 0),
+                    candidate_count,
+                    marked,
+                    reconciliation,
+                    warning_code,
+                    now,
+                    scan_id,
                 ),
             )
-        with self.database.session() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                path_existing = connection.execute(
-                    """
-                    SELECT id,sha256,status,analysis_source,duplicate_group_id
-                    FROM photos
-                    WHERE library_id=? AND relative_path=?
-                    """,
-                    (library_id, relative_path),
-                ).fetchone()
-                same_content = connection.execute(
-                    """
-                    SELECT p.id,p.relative_path,p.duplicate_group_id,l.root_path
-                    FROM photos p JOIN libraries l ON l.id=p.library_id
-                    WHERE p.library_id=? AND p.sha256=? AND p.id<>COALESCE(?, '')
-                    ORDER BY p.created_at LIMIT 1
-                    """,
-                    (library_id, features.sha256, path_existing["id"] if path_existing else None),
-                ).fetchone()
-                inherited = same_content is not None
+            result = dict(connection.execute("SELECT * FROM scan_runs WHERE id=?", (scan_id,)).fetchone())
+        return result
 
-                if path_existing is not None:
-                    photo_id = str(path_existing["id"])
-                    content_changed = path_existing["sha256"] != features.sha256
-                    next_status = (
-                        "analyzed"
-                        if not content_changed and path_existing["status"] == "analyzed"
-                        else "preprocessed"
-                    )
-                    next_analysis_source = (
-                        path_existing["analysis_source"]
-                        if not content_changed
-                        else "inherited" if same_content else "direct"
-                    )
-                    duplicate = same_content or connection.execute(
-                        """
-                        SELECT id,duplicate_group_id FROM photos
-                        WHERE perceptual_hash=? AND id<>? LIMIT 1
-                        """,
-                        (features.perceptual_hash, photo_id),
-                    ).fetchone()
-                    if duplicate:
-                        duplicate_group = (
-                            duplicate["duplicate_group_id"]
-                            or (path_existing["duplicate_group_id"] if not content_changed else None)
-                            or str(uuid4())
-                        )
-                        if not duplicate["duplicate_group_id"]:
-                            connection.execute(
-                                "UPDATE photos SET duplicate_group_id=? WHERE id=?",
-                                (duplicate_group, duplicate["id"]),
-                            )
-                    else:
-                        duplicate_group = (
-                            None if content_changed else path_existing["duplicate_group_id"]
-                        )
-                    connection.execute(
-                        """
-                        UPDATE photos SET
-                            file_size=?,modified_time=?,sha256=?,perceptual_hash=?,difference_hash=?,
-                            width=?,height=?,format=?,status=?,duplicate_group_id=?,
-                            analysis_source=?,updated_at=?,exif_json=?,captured_at=?,gps_lat=?,gps_lon=?,
-                            brightness=?,contrast=?,blur_score=?,overexposed_ratio=?,underexposed_ratio=?,
-                            screenshot_likelihood=?
-                        WHERE id=?
-                        """,
-                        (
-                            stat.st_size,
-                            stat.st_mtime,
-                            features.sha256,
-                            features.perceptual_hash,
-                            features.difference_hash,
-                            features.width,
-                            features.height,
-                            features.format,
-                            next_status,
-                            duplicate_group,
-                            next_analysis_source,
-                            now,
-                            values["exif_json"],
-                            values["captured_at"],
-                            values["gps_lat"],
-                            values["gps_lon"],
-                            values["brightness"],
-                            values["contrast"],
-                            values["blur_score"],
-                            values["overexposed_ratio"],
-                            values["underexposed_ratio"],
-                            values["screenshot_likelihood"],
-                            photo_id,
-                        ),
-                    )
-                    if content_changed:
-                        connection.execute("DELETE FROM photo_analysis WHERE photo_id=?", (photo_id,))
-                        old_group = path_existing["duplicate_group_id"]
-                        if old_group and old_group != duplicate_group:
-                            remaining = connection.execute(
-                                "SELECT COUNT(*) FROM photos WHERE duplicate_group_id=?", (old_group,)
-                            ).fetchone()[0]
-                            if remaining <= 1:
-                                connection.execute(
-                                    "UPDATE photos SET duplicate_group_id=NULL WHERE duplicate_group_id=?",
-                                    (old_group,),
-                                )
-                    update_render_features(connection, photo_id)
-                    connection.execute("COMMIT")
-                    return photo_id, inherited
-
-                old_path_exists = bool(
-                    same_content
-                    and (Path(same_content["root_path"]) / str(same_content["relative_path"])).is_file()
+    def confirm_missing(self, scan_id: str) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.transaction() as connection:
+            scan = connection.execute("SELECT * FROM scan_runs WHERE id=?", (scan_id,)).fetchone()
+            if scan is None:
+                raise KeyError(scan_id)
+            if scan["reconciliation_status"] != "confirmation_required":
+                raise ValueError("SCAN-MISSING-002 此掃描不在等待 Missing 確認狀態")
+            if not (
+                scan["root_accessible"]
+                and scan["root_readable"]
+                and scan["full_census"]
+                and not scan["cancelled"]
+                and int(scan["major_io_errors"]) == 0
+            ):
+                raise ValueError("SCAN-MISSING-003 掃描安全條件不完整，禁止確認 Missing")
+            newer = connection.execute(
+                """
+                SELECT 1 FROM scan_runs
+                WHERE library_id=?
+                  AND rowid > (SELECT rowid FROM scan_runs WHERE id=?)
+                LIMIT 1
+                """,
+                (scan["library_id"], scan_id),
+            ).fetchone()
+            if newer:
+                raise ValueError("SCAN-MISSING-004 已有較新的掃描，請只確認最新掃描結果")
+            saved_candidates = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM scan_missing_candidates WHERE scan_id=?",
+                    (scan_id,),
+                ).fetchone()[0]
+            )
+            if saved_candidates != int(scan["candidate_missing_count"]):
+                raise ValueError("SCAN-MISSING-003 Missing 候選結果不完整，禁止確認")
+            cursor = connection.execute(
+                """
+                UPDATE photos SET lifecycle_status='missing',missing_since=?,
+                    missing_reason='manually_confirmed_after_scan',updated_at=?
+                WHERE lifecycle_status='active' AND id IN (
+                    SELECT photo_id FROM scan_missing_candidates WHERE scan_id=?
                 )
-                if same_content and not old_path_exists:
-                    photo_id = str(same_content["id"])
-                    connection.execute(
-                        "UPDATE photos SET relative_path=?,file_size=?,modified_time=?,updated_at=? WHERE id=?",
-                        (relative_path, stat.st_size, stat.st_mtime, now, photo_id),
-                    )
-                else:
-                    photo_id = str(uuid4())
-                    duplicate = (
-                        same_content
-                        or connection.execute(
-                            "SELECT id,duplicate_group_id FROM photos WHERE perceptual_hash=? LIMIT 1",
-                            (features.perceptual_hash,),
-                        ).fetchone()
-                    )
-                    duplicate_group = (duplicate["duplicate_group_id"] or str(uuid4())) if duplicate else None
-                    if duplicate and not duplicate["duplicate_group_id"]:
-                        connection.execute(
-                            "UPDATE photos SET duplicate_group_id=? WHERE id=?",
-                            (duplicate_group, duplicate["id"]),
-                        )
-                    connection.execute(
-                        """
-                        INSERT INTO photos(
-                            id,library_id,relative_path,file_size,modified_time,sha256,perceptual_hash,difference_hash,
-                            width,height,format,status,duplicate_group_id,analysis_source,created_at,updated_at,
-                            exif_json,captured_at,gps_lat,gps_lon,brightness,contrast,blur_score,
-                            overexposed_ratio,underexposed_ratio,screenshot_likelihood
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,'preprocessed',?,?, ?,?,?,?,?,?,?,?,?,?,?,?)
-                        """,
-                        (
-                            photo_id,
-                            library_id,
-                            relative_path,
-                            stat.st_size,
-                            stat.st_mtime,
-                            features.sha256,
-                            features.perceptual_hash,
-                            features.difference_hash,
-                            features.width,
-                            features.height,
-                            features.format,
-                            duplicate_group,
-                            "inherited" if same_content else "direct",
-                            now,
-                            now,
-                            values["exif_json"],
-                            values["captured_at"],
-                            values["gps_lat"],
-                            values["gps_lon"],
-                            values["brightness"],
-                            values["contrast"],
-                            values["blur_score"],
-                            values["overexposed_ratio"],
-                            values["underexposed_ratio"],
-                            values["screenshot_likelihood"],
-                        ),
-                    )
-                update_render_features(connection, photo_id)
-                connection.execute("COMMIT")
-                return photo_id, inherited
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
+                """,
+                (now, now, scan_id),
+            )
+            connection.execute(
+                """
+                UPDATE scan_runs SET status='completed',reconciliation_status='confirmed',
+                    missing_marked_count=?,warning_code=NULL
+                WHERE id=?
+                """,
+                (int(cursor.rowcount), scan_id),
+            )
+            return int(cursor.rowcount)
+
+    def get_scan(self, scan_id: str):
+        with self.database.session() as connection:
+            return connection.execute("SELECT * FROM scan_runs WHERE id=?", (scan_id,)).fetchone()
 
     def inherit_existing_analysis(self, photo_id: str, job_id: str | None) -> dict | None:
         with self.database.session() as connection:

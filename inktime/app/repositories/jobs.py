@@ -31,7 +31,7 @@ class JobRepository:
             batch_size = min(500, remaining) if remaining is not None else 500
             with self.database.session() as connection:
                 rows = connection.execute(
-                    f"SELECT id FROM photos WHERE status IN ({placeholders}) AND id>? ORDER BY id LIMIT ?",  # noqa: S608 -- placeholders are generated, values remain bound
+                    f"SELECT id FROM photos WHERE lifecycle_status='active' AND status IN ({placeholders}) AND id>? ORDER BY id LIMIT ?",  # noqa: S608 -- placeholders are generated, values remain bound
                     (*statuses, last_id, batch_size),
                 ).fetchall()
             if not rows:

@@ -16,9 +16,9 @@ class CountingPreprocessor:
         self.delegate = PhotoPreprocessor()
         self.calls: list[str] = []
 
-    def analyze(self, path):
+    def analyze(self, path, **kwargs):
         self.calls.append(path.name)
-        return self.delegate.analyze(path)
+        return self.delegate.analyze(path, **kwargs)
 
 
 def make_scanner(app, tmp_path):
@@ -39,8 +39,19 @@ def test_unchanged_photo_skips_features_and_changed_content_invalidates_analysis
     scanner, preprocessor = make_scanner(app, tmp_path)
 
     first = scanner.scan("家庭相簿", root, build_thumbnails=False)
-    assert first == {
-        "library_id": first["library_id"],
+    assert {
+        key: first[key]
+        for key in (
+            "checked",
+            "processed",
+            "skipped",
+            "new",
+            "changed",
+            "inherited",
+            "failed",
+            "excluded_videos",
+        )
+    } == {
         "checked": 1,
         "processed": 1,
         "skipped": 0,
@@ -69,7 +80,7 @@ def test_unchanged_photo_skips_features_and_changed_content_invalidates_analysis
     assert unchanged["processed"] == 0
     assert unchanged["skipped"] == 1
     assert preprocessor.calls == ["memory.png"]
-    assert (tmp_path / "cache" / f"{photo['sha256']}-512.jpg").is_file()
+    assert not (tmp_path / "cache" / f"{photo['sha256']}-512.jpg").exists()
 
     before_touch = source.stat()
     os.utime(
@@ -124,7 +135,8 @@ def test_new_path_is_processed_even_when_size_and_modified_time_match(app, tmp_p
 
     result = scanner.scan("家庭相簿", root, build_thumbnails=False)
     assert result["checked"] == 1
-    assert result["new"] == 1
+    assert result["new"] == 0
+    assert result["moved"] == 1
     assert result["processed"] == 1
     assert result["skipped"] == 0
     assert preprocessor.calls == ["original.png", "renamed.png"]

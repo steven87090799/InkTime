@@ -7,7 +7,7 @@ import os
 import sys
 from typing import Any
 
-from inktime.app.core.security import redact
+from inktime.app.core.security import redact, redact_text
 
 
 STANDARD_FIELDS = {
@@ -39,7 +39,7 @@ class JsonFormatter(logging.Formatter):
                 "component": getattr(record, "component", record.name),
                 "event": getattr(record, "event", "log"),
                 "error_code": getattr(record, "error_code", ""),
-                "message": record.getMessage(),
+                "message": redact_text(record.getMessage()),
                 "job_id": getattr(record, "job_id", ""),
                 "photo_id": getattr(record, "photo_id", ""),
                 "provider": getattr(record, "provider", ""),
@@ -56,7 +56,7 @@ class HumanFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         error_code = getattr(record, "error_code", "")
         prefix = f"[{record.levelname}] [{record.name}]"
-        return f"{prefix}{f' [{error_code}]' if error_code else ''} {record.getMessage()}"
+        return f"{prefix}{f' [{error_code}]' if error_code else ''} {redact_text(record.getMessage())}"
 
 
 def configure_logging(
