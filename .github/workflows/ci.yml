@@ -11,11 +11,15 @@ permissions:
 jobs:
   python-quality:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v4
         with: {fetch-depth: 0}
       - uses: actions/setup-python@v5
-        with: {python-version: "3.12", cache: pip}
+        with: {python-version: "${{ matrix.python-version }}", cache: pip}
       - run: pip install -r requirements-dev.txt
       - run: ruff check inktime tests scripts server.py analyze_photos.py
       - run: mypy inktime

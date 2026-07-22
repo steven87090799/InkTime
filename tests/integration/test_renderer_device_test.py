@@ -104,5 +104,20 @@ def test_test_release_is_one_time_and_does_not_overwrite_formal_schedule(client,
         assigned["download_base_url"] + assigned["files"][0]["name"], headers=headers
     )
     assert downloaded.status_code == 200
+    downloaded.close()
+    still_assigned = client.get("/api/device/v1/releases/latest", headers=headers).get_json()
+    assert still_assigned["release_id"] == test_release["release_id"]
+    acknowledged = client.post(
+        "/api/device/v1/status",
+        headers=headers,
+        json={
+            "release_id": test_release["release_id"],
+            "payload_sha256_verified": True,
+            "display_updated": True,
+            "render_profile": "gdep073e01_6c",
+            "error_code": "",
+        },
+    )
+    assert acknowledged.status_code == 200
     restored = client.get("/api/device/v1/releases/latest", headers=headers).get_json()
     assert restored["release_id"] == formal["release_id"]

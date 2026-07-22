@@ -91,7 +91,7 @@ def test_virtual_display_inbox_scans_and_publishes_without_provider(client, app,
 
     root = tmp_path / "simulation-photos"
     root.mkdir()
-    Image.new("RGB", (160, 240), "purple").save(root / "receiver-test.png")
+    Image.effect_noise((480, 800), 100).convert("RGB").save(root / "receiver-test.png")
     app.config["INKTIME_PHOTO_DIR"] = root
     create_admin(app)
     login(client)

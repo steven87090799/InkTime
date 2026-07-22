@@ -1,0 +1,20 @@
+name: InkTime Nightly Performance
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "20 18 * * 0"
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-scale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -q tests/performance tests/integration/test_final_review_history.py
+      - run: python scripts/performance_100k.py
