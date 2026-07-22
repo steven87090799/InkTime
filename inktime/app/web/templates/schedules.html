@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}低資源排程｜InkTime{% endblock %}
+{% block content %}
+<div class="page-head"><div><p class="eyebrow">背景工作控制中心</p><h1>低資源排程</h1><p>每項工作各自保存逾時、重試、上次成功／失敗、下次執行與錯誤狀態；其中一項失敗不會重啟整個 Scheduler。</p></div></div>
+<section class="notice"><strong>N100 預設：</strong>重工作並行數為 1，閒置 Worker 使用低頻等待；Queue 依優先級、狀態與建立時間取用，逾期 Lease 會回收。ESP32 下載 Release 不會同步等待這些背景工作。</section>
+{% for task in tasks %}
+<section class="panel schedule-task" data-key="{{ task.key }}"><div class="panel-head"><div><h2>{{ task.name }}</h2><p>{{ labels[task.key] }}</p></div><span class="status {{ 'ok' if task.enabled else 'muted' }}">{{ '啟用' if task.enabled else '停用' }}</span></div>
+  <dl><dt>上次成功</dt><dd>{{ task.last_success or '尚無' }}</dd><dt>上次失敗</dt><dd>{{ task.last_failure or '尚無' }}{% if task.error_status %}<small class="warning">{{ task.error_status }}</small>{% endif %}</dd><dt>下次執行</dt><dd>{{ task.next_run or '停用' }}</dd></dl>
+  {% if g.user.role == 'administrator' %}<form class="form-stack schedule-form">
+    <label>啟用<select name="enabled"><option value="true" {% if task.enabled %}selected{% endif %}>啟用</option><option value="false" {% if not task.enabled %}selected{% endif %}>停用</option></select></label>
+    <label>Cron<input name="cron" value="{{ task.cron }}" required><small>支援五欄的 *、數字、逗號與 */間隔。</small></label>
+    <label>指定星期（0=週一，逗號分隔；留空為每天）<input name="weekdays" value="{{ task.weekdays|join(',') }}"></label>
+    <label>開始時間<input name="start_time" type="time" value="{{ task.start_time }}" required></label>
+    <label>允許執行時段起點<input name="window_start" type="time" value="{{ task.window_start or '' }}"></label>
+    <label>允許執行時段終點<input name="window_end" type="time" value="{{ task.window_end or '' }}"></label>
+    <label>最長執行時間（秒）<input name="timeout_seconds" type="number" min="30" max="86400" value="{{ task.timeout_seconds }}" required></label>
+    <label>失敗重試次數<input name="retry_count" type="number" min="0" max="10" value="{{ task.retry_count }}" required></label>
+    <label>重試間隔（秒）<input name="retry_interval_seconds" type="number" min="30" max="86400" value="{{ task.retry_interval_seconds }}" required></label>
+    <label class="setting-full-width">此工作專屬設定（JSON）<textarea name="config" rows="10">{{ task.config|tojson(indent=2) }}</textarea><small>包含掃描批次／Missing 安全比例、NAS 高負載延後、換圖提前分鐘／顯示時間／裝置／候選年份／退回策略、AI 入口模式，以及快取容量與保留天數。</small></label>
+    <div><button class="primary">儲存此排程</button> <button type="button" class="secondary run-now">立即建立背景工作</button> <span class="test-status" aria-live="polite"></span></div>
+  </form>{% endif %}
+</section>
+{% endfor %}
+<section class="panel"><h2>快取容量：手動清理</h2><p>只會刪除縮圖快取、孤兒檔案或超過保留期／容量的快取；不會刪除原始照片、正式 Release 或裝置目前使用的 Release。</p>{% if g.user.role == 'administrator' %}<form id="cache-form" class="inline-form"><label>容量上限（bytes）<input name="max_bytes" type="number" min="0" value="5368709120"></label><label>保留天數<input name="retention_days" type="number" min="0" value="30"></label><button type="button" id="cache-estimate" class="secondary">預估可釋放容量</button><button>立即清理</button><span id="cache-status" role="status"></span></form>{% endif %}</section>
+{% endblock %}
+{% block scripts %}{% if g.user.role == 'administrator' %}<script>
+const parseWeekdays=value=>value.trim()?value.split(',').map(v=>Number(v.trim())):[];
+document.querySelectorAll('.schedule-task').forEach(panel=>{const form=panel.querySelector('.schedule-form'),status=panel.querySelector('.test-status'),key=panel.dataset.key;const body=()=>({enabled:form.elements.enabled.value==='true',cron:form.elements.cron.value,weekdays:parseWeekdays(form.elements.weekdays.value),start_time:form.elements.start_time.value,window_start:form.elements.window_start.value,window_end:form.elements.window_end.value,timeout_seconds:Number(form.elements.timeout_seconds.value),retry_count:Number(form.elements.retry_count.value),retry_interval_seconds:Number(form.elements.retry_interval_seconds.value),config:JSON.parse(form.elements.config.value)});form.onsubmit=async event=>{event.preventDefault();try{const r=await window.inktimeFetch(`/api/v1/schedules/${key}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body())}),d=await r.json();if(!r.ok)throw Error(d.message||'儲存失敗');location.reload();}catch(error){status.textContent=error.message;}};panel.querySelector('.run-now').onclick=async()=>{const r=await window.inktimeFetch(`/api/v1/schedules/${key}/run`,{method:'POST'}),d=await r.json();status.textContent=r.ok?'已建立背景工作。':(d.message||'建立失敗');};});
+const cacheForm=document.getElementById('cache-form');if(cacheForm){const cacheBody=()=>Object.fromEntries(new FormData(cacheForm));const cacheStatus=document.getElementById('cache-status');document.getElementById('cache-estimate').onclick=async()=>{const r=await window.inktimeFetch('/api/v1/maintenance/cache/estimate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cacheBody())}),d=await r.json();cacheStatus.textContent=r.ok?`預估可釋放 ${d.bytes} bytes／${d.files} 個檔案`:(d.message||'預估失敗');};cacheForm.onsubmit=async event=>{event.preventDefault();const r=await window.inktimeFetch('/api/v1/maintenance/cache/cleanup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cacheBody())}),d=await r.json();cacheStatus.textContent=r.ok?`已釋放 ${d.bytes} bytes／${d.files} 個檔案`:(d.message||'清理失敗');};}
+</script>{% endif %}{% endblock %}

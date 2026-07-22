@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import time
 
 from PIL import Image, ImageOps
 
@@ -62,6 +63,7 @@ class ThumbnailCache:
         with lock_path.open("a+b") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             if destination.is_file() and self._validate(destination, size):
+                os.utime(destination, None)
                 return destination
             if destination.exists():
                 destination.unlink()
@@ -87,6 +89,7 @@ class ThumbnailCache:
                 os.replace(temporary, destination)
                 self._fsync_directory(self.root)
                 temporary = None
+                os.utime(destination, None)
                 return destination
             finally:
                 if temporary is not None:
@@ -102,3 +105,46 @@ class ThumbnailCache:
                 path.unlink()
                 removed += 1
         return removed
+
+    def estimate_cleanup(self, *, max_bytes: int, retention_days: int, active_hashes: set[str]) -> dict:
+        candidates = self._cleanup_candidates(max_bytes, retention_days, active_hashes)
+        return {"files": len(candidates), "bytes": sum(path.stat().st_size for path in candidates if path.exists())}
+
+    def cleanup(self, *, max_bytes: int, retention_days: int, active_hashes: set[str]) -> dict:
+        candidates = self._cleanup_candidates(max_bytes, retention_days, active_hashes)
+        removed = 0
+        released = 0
+        for path in candidates:
+            try:
+                released += path.stat().st_size
+                path.unlink()
+                removed += 1
+            except FileNotFoundError:
+                continue
+        return {"files": removed, "bytes": released}
+
+    def _cleanup_candidates(self, max_bytes: int, retention_days: int, active_hashes: set[str]) -> list[Path]:
+        max_bytes = max(0, int(max_bytes))
+        retention_seconds = max(0, int(retention_days)) * 86400
+        now = time.time()
+        entries: list[tuple[Path, int, float, bool]] = []
+        for path in self.root.glob("*.jpg"):
+            if not path.is_file():
+                continue
+            stem = path.stem.split("-", 1)[0].casefold()
+            stat = path.stat()
+            orphan = not _SHA256.fullmatch(stem) or stem not in active_hashes or not self._validate(path)
+            entries.append((path, stat.st_size, stat.st_atime, orphan))
+        selected: list[Path] = []
+        total = sum(size for _, size, _, _ in entries)
+        for path, size, accessed, orphan in entries:
+            if orphan or (retention_seconds and now - accessed > retention_seconds):
+                selected.append(path)
+                total -= size
+        for path, size, _accessed, _orphan in sorted(entries, key=lambda entry: entry[2]):
+            if total <= max_bytes:
+                break
+            if path not in selected:
+                selected.append(path)
+                total -= size
+        return selected

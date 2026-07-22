@@ -132,3 +132,29 @@ def test_budget_block_returns_item_and_pauses_new_work(app):
     item = repository.list_items(job_id)[0]
     assert item["status"] == "pending"
     assert item["attempts"] == 0
+
+
+def test_keyset_queue_reaches_old_job_after_more_than_one_hundred(app):
+    repository = app.extensions["inktime_job_repository"]
+    service = app.extensions["inktime_job_service"]
+    job_ids = []
+    for index in range(101):
+        job_id = repository.create_maintenance(
+            kind="cleanup", name=f"清理 {index}", settings={}, created_by="tester", priority=6
+        )
+        service.start(job_id)
+        job_ids.append(job_id)
+    runnable = list(repository.iter_runnable())
+    assert len(runnable) == 101
+    assert str(runnable[-1]["id"]) == job_ids[-1]
+
+
+def test_active_dedupe_key_prevents_duplicate_maintenance_work(app):
+    repository = app.extensions["inktime_job_repository"]
+    first = repository.create_maintenance(
+        kind="cleanup", name="快取清理", settings={}, created_by="tester", dedupe_key="scheduled:cache_cleanup"
+    )
+    second = repository.create_maintenance(
+        kind="cleanup", name="快取清理", settings={}, created_by="tester", dedupe_key="scheduled:cache_cleanup"
+    )
+    assert second == first

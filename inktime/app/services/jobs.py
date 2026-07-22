@@ -23,6 +23,8 @@ class JobService:
         budget_limit: float | None,
         limit: int | None = None,
         photo_ids=None,
+        priority: int = 3,
+        dedupe_key: str | None = None,
     ) -> str:
         if strategy not in self.STRATEGIES:
             raise ValueError("不支援的分析策略")
@@ -36,6 +38,8 @@ class JobService:
             photo_ids=selected,
             created_by=created_by,
             budget_limit=budget_limit,
+            priority=priority,
+            dedupe_key=dedupe_key,
         )
 
     def start(self, job_id: str) -> None:

@@ -87,6 +87,95 @@ def maintenance_page():
     )
 
 
+@bp.get("/schedules")
+@login_required
+def schedules_page():
+    tasks = current_app.extensions["inktime_schedule_repository"].list()
+    labels = {
+        "incremental_scan": "沿用既有 Scanner 的增量入口；不重新走訪已完成的分析。",
+        "full_reconcile": "完整掃描仍受 Missing 安全比例與人工確認機制保護。",
+        "display_prepare": "僅建立背景換圖／渲染工作；ESP32 下載不會等待掃描、AI 或渲染。",
+        "ai_schedule": "只安排既有 AI 工作入口，不改變分析內容與 Schema。",
+        "cache_cleanup": "只處理縮圖快取，不會刪除原始照片、正式 Release 或目前使用的 Release。",
+    }
+    return render_template("schedules.html", tasks=tasks, labels=labels)
+
+
+@bp.get("/api/v1/schedules")
+@administrator_required
+def list_schedules():
+    return {"tasks": current_app.extensions["inktime_schedule_repository"].list()}
+
+
+@bp.patch("/api/v1/schedules/<key>")
+@administrator_required
+def update_schedule(key: str):
+    payload = request.get_json(silent=True) or {}
+    try:
+        task = current_app.extensions["inktime_schedule_repository"].update(
+            key, payload, str(current_app.extensions["inktime_settings_repository"].get("general.timezone"))
+        )
+    except KeyError:
+        abort(404)
+    except ValueError as exc:
+        abort(400, description=f"SCHEDULE-002 {exc}")
+    return {"task": task}
+
+
+@bp.post("/api/v1/schedules/<key>/run")
+@administrator_required
+def run_schedule_now(key: str):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    task = current_app.extensions["inktime_schedule_repository"].get(key)
+    if task is None:
+        abort(404)
+    from inktime.app.workers.scheduler import SchedulerRunner
+
+    now = datetime.now(ZoneInfo(str(current_app.extensions["inktime_settings_repository"].get("general.timezone"))))
+    try:
+        SchedulerRunner(current_app)._enqueue_task(task, now, force=True)
+    except Exception as exc:
+        current_app.extensions["inktime_schedule_repository"].record_failure(task, str(exc), now)
+        abort(409, description=f"SCHEDULE-003 {exc}")
+    return {"status": "enqueued"}, 202
+
+
+def _active_thumbnail_hashes() -> set[str]:
+    with current_app.extensions["inktime_database"].session() as connection:
+        return {
+            str(row[0]).casefold()
+            for row in connection.execute(
+                "SELECT DISTINCT sha256 FROM photos WHERE lifecycle_status='active' AND sha256 IS NOT NULL"
+            )
+        }
+
+
+@bp.post("/api/v1/maintenance/cache/estimate")
+@administrator_required
+def estimate_cache_cleanup():
+    payload = request.get_json(silent=True) or {}
+    cache = current_app.extensions["inktime_thumbnail_cache"]
+    return cache.estimate_cleanup(
+        max_bytes=int(payload.get("max_bytes", 5 * 1024 * 1024 * 1024)),
+        retention_days=int(payload.get("retention_days", 30)),
+        active_hashes=_active_thumbnail_hashes(),
+    )
+
+
+@bp.post("/api/v1/maintenance/cache/cleanup")
+@administrator_required
+def cleanup_cache():
+    payload = request.get_json(silent=True) or {}
+    cache = current_app.extensions["inktime_thumbnail_cache"]
+    return cache.cleanup(
+        max_bytes=int(payload.get("max_bytes", 5 * 1024 * 1024 * 1024)),
+        retention_days=int(payload.get("retention_days", 30)),
+        active_hashes=_active_thumbnail_hashes(),
+    )
+
+
 @bp.post("/api/v1/maintenance/scan")
 @administrator_required
 def enqueue_scan():
