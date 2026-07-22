@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from functools import lru_cache
-from typing import Any, cast
+from typing import Any, Mapping, Sequence, cast
 
 from PIL import Image, ImageFilter
 
@@ -219,7 +219,8 @@ def _lab_to_rgb(lab: tuple[float, float, float]) -> tuple[int, int, int]:
     red = 3.2404542 * x - 1.5371385 * y - 0.4985314 * z
     green = -0.9692660 * x + 1.8760108 * y + 0.0415560 * z
     blue = 0.0556434 * x - 0.2040259 * y + 1.0572252 * z
-    return tuple(_clamp_channel(_srgb_channel(value)) for value in (red, green, blue))
+    channels = tuple(_clamp_channel(_srgb_channel(value)) for value in (red, green, blue))
+    return cast(tuple[int, int, int], channels)
 
 
 def _color_lab(profile: DisplayProfile, name: str) -> tuple[float, float, float]:
@@ -230,8 +231,8 @@ def _color_lab(profile: DisplayProfile, name: str) -> tuple[float, float, float]
 def palette_for_profile(
     profile_key: str,
     *,
-    rgb_values: dict[str, list[int] | tuple[int, int, int]] | None = None,
-    lab_values: dict[str, list[float] | tuple[float, float, float]] | None = None,
+    rgb_values: Mapping[str, Sequence[int]] | None = None,
+    lab_values: Mapping[str, Sequence[float]] | None = None,
     palette_version: str = "custom-1",
 ) -> DisplayProfile:
     """Return a request-local profile; built-in theoretical RGB values stay immutable."""
@@ -246,12 +247,18 @@ def palette_for_profile(
             values = tuple(int(value) for value in rgb_values[color.name])
             if len(values) != 3 or any(value < 0 or value > 255 for value in values):
                 raise ValueError(f"RENDER-006 {color.name} RGB 必須為 0 到 255 的三個數值")
-            colors.append(replace(color, rgb=values, lab=_lab(values)))
+            rgb = cast(tuple[int, int, int], values)
+            colors.append(replace(color, rgb=rgb, lab=_lab(rgb)))
         elif lab_values and color.name in lab_values:
-            values = tuple(float(value) for value in lab_values[color.name])
-            if len(values) != 3 or not 0 <= values[0] <= 100 or any(abs(value) > 160 for value in values[1:]):
+            lab_values_tuple = tuple(float(value) for value in lab_values[color.name])
+            if (
+                len(lab_values_tuple) != 3
+                or not 0 <= lab_values_tuple[0] <= 100
+                or any(abs(value) > 160 for value in lab_values_tuple[1:])
+            ):
                 raise ValueError(f"RENDER-006 {color.name} Lab 數值超出範圍")
-            colors.append(replace(color, rgb=_lab_to_rgb(values), lab=values))
+            lab = cast(tuple[float, float, float], lab_values_tuple)
+            colors.append(replace(color, rgb=_lab_to_rgb(lab), lab=lab))
         else:
             colors.append(replace(color, lab=_color_lab(profile, color.name)))
     return replace(profile, colors=tuple(colors), palette_version=palette_version[:80])

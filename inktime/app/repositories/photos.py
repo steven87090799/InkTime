@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 from uuid import uuid4
 
 from inktime.app.core.paths import UnsafePathError, safe_join
@@ -1101,6 +1101,7 @@ class PhotoRepository:
                 if row is None:
                     raise KeyError(photo_id)
                 photo = dict(row)
+                changes: dict[str, Any]
                 if action == "restore":
                     values = (1, "manually_restored", 1, now, photo_id)
                     event = "manual_restore"

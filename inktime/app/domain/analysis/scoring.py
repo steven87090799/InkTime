@@ -137,7 +137,7 @@ def calculate_travel_bonus(
     rare_location: bool = False,
     maximum: float = 8.0,
 ) -> tuple[float, float | None]:
-    if None in {latitude, longitude, home_latitude, home_longitude}:
+    if latitude is None or longitude is None or home_latitude is None or home_longitude is None:
         return 0.0, None
     distance = _distance_km(float(latitude), float(longitude), float(home_latitude), float(home_longitude))
     bonus = 0.0
