@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any
+from typing import Any, cast
 
 
 ALLOWED_TYPES = {
@@ -136,7 +136,7 @@ FULL_ANALYSIS_JSON_SCHEMA = {
         "additionalProperties": False,
         "required": sorted(BASIC_REQUIRED_FIELDS),
         "properties": {
-            **ANALYSIS_JSON_SCHEMA["schema"]["properties"],
+            **cast(dict[str, Any], ANALYSIS_JSON_SCHEMA["schema"])["properties"],
             "details": {
                 "type": "object",
                 "additionalProperties": False,

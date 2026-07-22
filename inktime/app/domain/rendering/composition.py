@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, cast
 
 from PIL import Image, ImageFilter, ImageOps, ImageStat
 
@@ -42,11 +42,11 @@ def _clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
 
 def _opencv_faces(image: Image.Image) -> list[tuple[int, int, int, int]]:
     try:
-        import cv2  # type: ignore[import-not-found]
-        import numpy as np  # type: ignore[import-not-found]
+        import cv2
+        import numpy as np
 
         cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            cast(Any, cv2).data.haarcascades + "haarcascade_frontalface_default.xml"
         )
         if cascade.empty():
             return []
@@ -57,7 +57,7 @@ def _opencv_faces(image: Image.Image) -> list[tuple[int, int, int, int]]:
             minNeighbors=5,
             minSize=(max(24, image.width // 16), max(24, image.height // 16)),
         )
-        return [tuple(int(value) for value in face) for face in detected]
+        return [cast(tuple[int, int, int, int], tuple(int(value) for value in face)) for face in detected]
     except (ImportError, AttributeError, ValueError):
         return []
 
@@ -171,7 +171,8 @@ def fit_with_focus(
                 top = max(top, subject_bottom - crop_height)
         top = max(0.0, min(source.height - crop_height, top))
         box = (0.0, top, crop_width, top + crop_height)
-    return source.crop(tuple(round(value) for value in box)).resize(
+    crop_box = cast(tuple[int, int, int, int], tuple(round(value) for value in box))
+    return source.crop(crop_box).resize(
         size, Image.Resampling.LANCZOS
     )
 
@@ -186,19 +187,21 @@ def _strong_edge_retention(original: Image.Image, preview: Image.Image) -> float
     target = preview.convert("L")
     source_pixels = source.load()
     target_pixels = target.load()
+    assert source_pixels is not None
+    assert target_pixels is not None
     strong = retained = 0
     for y in range(0, source.height - 2, 2):
         for x in range(0, source.width - 2, 2):
             original_delta = max(
-                abs(int(source_pixels[x, y]) - int(source_pixels[x + 2, y])),
-                abs(int(source_pixels[x, y]) - int(source_pixels[x, y + 2])),
+                abs(int(cast(int, source_pixels[x, y])) - int(cast(int, source_pixels[x + 2, y]))),
+                abs(int(cast(int, source_pixels[x, y])) - int(cast(int, source_pixels[x, y + 2]))),
             )
             if original_delta < 55:
                 continue
             strong += 1
             target_delta = max(
-                abs(int(target_pixels[x, y]) - int(target_pixels[x + 2, y])),
-                abs(int(target_pixels[x, y]) - int(target_pixels[x, y + 2])),
+                abs(int(cast(int, target_pixels[x, y])) - int(cast(int, target_pixels[x + 2, y]))),
+                abs(int(cast(int, target_pixels[x, y])) - int(cast(int, target_pixels[x, y + 2]))),
             )
             if target_delta >= 38:
                 retained += 1
@@ -212,15 +215,18 @@ def _skin_fidelity(original: Image.Image, preview: Image.Image) -> tuple[float, 
     source_pixels = source.load()
     target_pixels = target.load()
     skin_pixels = ycbcr.load()
+    assert source_pixels is not None
+    assert target_pixels is not None
+    assert skin_pixels is not None
     count = 0
     error = 0.0
     for y in range(0, source.height, 2):
         for x in range(0, source.width, 2):
-            _luma, cb, cr = skin_pixels[x, y]
+            _luma, cb, cr = cast(tuple[int, int, int], skin_pixels[x, y])
             if 77 <= cb <= 127 and 133 <= cr <= 173:
                 count += 1
-                first = source_pixels[x, y]
-                second = target_pixels[x, y]
+                first = cast(tuple[int, int, int], source_pixels[x, y])
+                second = cast(tuple[int, int, int], target_pixels[x, y])
                 error += sum(abs(int(first[channel]) - int(second[channel])) for channel in range(3)) / 3
     if count < 20:
         return 100.0, count

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from builtins import list as builtin_list
 from datetime import datetime, timedelta
 import json
 from typing import Any
@@ -69,7 +70,7 @@ class ScheduledTaskRepository:
                      next_run.isoformat(), json.dumps(task["config"], ensure_ascii=False), utc_now(), utc_now()),
                 )
 
-    def list(self) -> list[dict[str, Any]]:
+    def list(self) -> builtin_list[dict[str, Any]]:
         with self.database.session() as connection:
             rows = connection.execute("SELECT * FROM scheduled_tasks ORDER BY key").fetchall()
         return [self._row(row) for row in rows]
@@ -107,7 +108,7 @@ class ScheduledTaskRepository:
             )
         return self.get(key) or current
 
-    def due(self, now: datetime) -> list[dict[str, Any]]:
+    def due(self, now: datetime) -> builtin_list[dict[str, Any]]:
         with self.database.session() as connection:
             rows = connection.execute(
                 "SELECT * FROM scheduled_tasks WHERE enabled=1 AND next_run IS NOT NULL AND next_run<=? ORDER BY next_run,key",
@@ -169,7 +170,7 @@ class ScheduledTaskRepository:
         return None if value in {None, ""} else self._clock(str(value))
 
     @staticmethod
-    def _weekdays(value: Any) -> list[int]:
+    def _weekdays(value: Any) -> builtin_list[int]:
         if not isinstance(value, list) or any(not isinstance(day, int) or day < 0 or day > 6 for day in value):
             raise ValueError("星期必須是 0 到 6 的陣列")
         return sorted(set(value))
@@ -195,7 +196,7 @@ class ScheduledTaskRepository:
                 return True
         return False
 
-    def _next_run(self, cron: str, after: datetime, weekdays: list[int]) -> datetime:
+    def _next_run(self, cron: str, after: datetime, weekdays: builtin_list[int]) -> datetime:
         minute, hour, day, month, weekday = cron.split()
         candidate = after.replace(second=0, microsecond=0) + timedelta(minutes=1)
         for _ in range(527041):

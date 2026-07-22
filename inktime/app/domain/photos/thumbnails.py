@@ -63,7 +63,9 @@ class ThumbnailCache:
         with lock_path.open("a+b") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             if destination.is_file() and self._validate(destination, size):
-                os.utime(destination, None)
+                # Cache hits refresh recency for cleanup without rewriting the generated thumbnail.
+                cached_stat = destination.stat()
+                os.utime(destination, ns=(time.time_ns(), cached_stat.st_mtime_ns))
                 return destination
             if destination.exists():
                 destination.unlink()
@@ -132,8 +134,15 @@ class ThumbnailCache:
             if not path.is_file():
                 continue
             stem = path.stem.split("-", 1)[0].casefold()
+            size_text = path.stem.rsplit("-", 1)[-1]
+            size = int(size_text) if size_text.isdigit() else 0
             stat = path.stat()
-            orphan = not _SHA256.fullmatch(stem) or stem not in active_hashes or not self._validate(path)
+            orphan = (
+                not _SHA256.fullmatch(stem)
+                or stem not in active_hashes
+                or size not in self.ALLOWED_SIZES
+                or not self._validate(path, size)
+            )
             entries.append((path, stat.st_size, stat.st_atime, orphan))
         selected: list[Path] = []
         total = sum(size for _, size, _, _ in entries)

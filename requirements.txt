@@ -7,3 +7,6 @@ gunicorn==23.0.0
 psutil==7.0.0
 fonttools==4.60.2
 opencv-python-headless==4.13.0.92
+# NumPy 2.5.x stubs require Python 3.12 syntax, but Mypy checks the supported Python 3.10 target.
+# Re-evaluate when the project target or upstream stubs become compatible.
+numpy<2.5
