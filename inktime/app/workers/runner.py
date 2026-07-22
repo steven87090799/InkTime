@@ -246,6 +246,7 @@ class WorkerRunner:
                     },
                     favorite_bonus=float(scoring_profile["favorite_bonus"]),
                     scoring_version_id=str(scoring_profile["id"]),
+                    force_ai=bool(settings.get("force_ai", False)),
                 )
 
             self.current = BoundedJobWorker(

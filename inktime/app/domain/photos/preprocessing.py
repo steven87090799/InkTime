@@ -36,6 +36,10 @@ class LocalPhotoFeatures:
     width: int
     height: int
     format: str
+    orientation: int
+    camera_make: str | None
+    camera_model: str | None
+    lens_model: str | None
     exif_json: str | None
     captured_at: str | None
     gps_lat: float | None
@@ -196,6 +200,9 @@ class PhotoPreprocessor:
                 except ValueError:
                     captured_at = None
             orientation = int(exif.get(274, 1) or 1)
+            camera_make = str(exif_named.get("Make", "")).strip() or None
+            camera_model = str(exif_named.get("Model", "")).strip() or None
+            lens_model = str(exif_named.get("LensModel", "")).strip() or None
             width, height = (
                 (original_height, original_width)
                 if orientation in {5, 6, 7, 8}
@@ -293,6 +300,10 @@ class PhotoPreprocessor:
                 width=width,
                 height=height,
                 format=original_format,
+                orientation=orientation,
+                camera_make=camera_make,
+                camera_model=camera_model,
+                lens_model=lens_model,
                 exif_json=(
                     json.dumps(serializable_exif, ensure_ascii=False)
                     if serializable_exif is not None

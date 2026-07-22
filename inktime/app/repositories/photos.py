@@ -17,6 +17,92 @@ from inktime.app.domain.analysis.scoring import (
 from inktime.app.domain.photos.preprocessing import LocalPhotoFeatures
 
 
+LOCAL_QUALITY_RULE = "local-quality"
+LOCAL_QUALITY_RULE_VERSION = "local-quality-v3"
+
+
+def _local_candidate_score(features: LocalPhotoFeatures) -> float:
+    """不需要模型的可選片分數；只描述技術可用性，不代替回憶或語意評分。"""
+    blur = max(0.0, float(features.blur_score or 0.0))
+    contrast = max(0.0, min(100.0, float(features.contrast or 0.0)))
+    exposure_penalty = max(
+        float(features.overexposed_ratio or 0.0), float(features.underexposed_ratio or 0.0)
+    )
+    short_edge = min(features.width, features.height)
+    resolution = min(12.0, short_edge / 100.0)
+    return round(max(0.0, min(100.0, blur**0.5 * 3.2 + contrast * 0.8 + resolution - exposure_penalty * 45)), 2)
+
+
+def _automatic_exclusion(relative_path: str, features: LocalPhotoFeatures) -> tuple[str, dict] | None:
+    """回傳可重現的本機排除證據；不得在此處呼叫 Provider。"""
+    filename = Path(relative_path).name.casefold()
+    document_markers = ("receipt", "invoice", "document", "scan", "收據", "發票", "文件")
+    if any(marker in filename for marker in document_markers):
+        return "document_or_receipt", {"measured_value": filename, "threshold": "filename marker"}
+    screenshot = float(features.screenshot_likelihood or 0.0)
+    if screenshot >= 0.65:
+        return "screenshot", {"measured_value": round(screenshot, 3), "threshold": 0.65}
+    short_edge = min(features.width, features.height)
+    if short_edge < 240:
+        return "resolution_too_low", {"measured_value": short_edge, "threshold": 240}
+    blur = float(features.blur_score or 0.0)
+    contrast = float(features.contrast or 0.0)
+    if blur < 8 and contrast < 12 and short_edge < 600:
+        return "blur_too_high", {
+            "measured_value": round(blur, 2),
+            "threshold": 8.0,
+            "secondary_threshold": "short_edge < 600",
+        }
+    overexposed = float(features.overexposed_ratio or 0.0)
+    underexposed = float(features.underexposed_ratio or 0.0)
+    if overexposed >= 0.7:
+        return "overexposed", {"measured_value": round(overexposed, 4), "threshold": 0.7}
+    if underexposed >= 0.7:
+        return "underexposed", {"measured_value": round(underexposed, 4), "threshold": 0.7}
+    return None
+
+
+def _stored_exclusion(photo: dict) -> tuple[str, dict] | None:
+    """讓人工要求重新套用時使用同一規則與相同門檻。"""
+    features = LocalPhotoFeatures(
+        sha256=str(photo.get("sha256") or ""),
+        perceptual_hash=photo.get("perceptual_hash"),
+        difference_hash=photo.get("difference_hash"),
+        width=int(photo.get("width") or 0),
+        height=int(photo.get("height") or 0),
+        format=str(photo.get("format") or ""),
+        orientation=int(photo.get("orientation") or 1),
+        camera_make=photo.get("camera_make"),
+        camera_model=photo.get("camera_model"),
+        lens_model=photo.get("lens_model"),
+        exif_json=photo.get("exif_json"),
+        captured_at=photo.get("captured_at"),
+        gps_lat=photo.get("gps_lat"),
+        gps_lon=photo.get("gps_lon"),
+        brightness=photo.get("brightness"),
+        contrast=photo.get("contrast"),
+        blur_score=photo.get("blur_score"),
+        overexposed_ratio=photo.get("overexposed_ratio"),
+        underexposed_ratio=photo.get("underexposed_ratio"),
+        screenshot_likelihood=photo.get("screenshot_likelihood"),
+        crop_focus_x=None,
+        crop_focus_y=None,
+        crop_subject_left=None,
+        crop_subject_top=None,
+        crop_subject_right=None,
+        crop_subject_bottom=None,
+        crop_method=None,
+        crop_face_count=None,
+        e6_score=None,
+        e6_contrast_score=None,
+        e6_subject_score=None,
+        e6_skin_score=None,
+        e6_text_score=None,
+        e6_skin_pixels=None,
+    )
+    return _automatic_exclusion(str(photo.get("relative_path") or ""), features)
+
+
 @dataclass(frozen=True)
 class StoredPhotoSignature:
     id: str
@@ -384,6 +470,7 @@ class PhotoRepository:
                     "kind": "update" if existing is not None else "insert",
                     "id": photo_id,
                     "item": item,
+                    "existing": existing,
                     "status": status,
                     "analysis_source": analysis_source,
                     "duplicate_group_id": duplicate_group,
@@ -669,6 +756,78 @@ class PhotoRepository:
                     insert_parameters,
                 )
 
+            # 本機品質決策屬於掃描產物，不等待也不觸發大型模型。已人工處理的照片
+            # 只在內容 SHA 改變時才重新套用規則，避免「恢復後立刻又被排除」。
+            quality_updates = []
+            for plan in plans:
+                features = plan["item"].features
+                if not features.local_features_complete:
+                    continue
+                existing = plan["existing"]
+                protected = bool(existing) and not plan["content_changed"] and str(
+                    existing.get("exclusion_status") or ""
+                ) in {"manually_restored", "manually_excluded"}
+                exclusion = None if protected else _automatic_exclusion(plan["item"].relative_path, features)
+                if protected:
+                    eligible = int(existing.get("eligible", 1))
+                    exclusion_status = str(existing.get("exclusion_status") or "eligible")
+                    reason = existing.get("reject_reason")
+                    rule = existing.get("reject_rule")
+                    rule_version = existing.get("reject_rule_version")
+                    details = existing.get("reject_details_json")
+                    rejected_at = existing.get("rejected_at")
+                    manual_override = int(existing.get("manual_override") or 0)
+                elif exclusion is None:
+                    eligible = 1
+                    exclusion_status = "eligible"
+                    reason = rule = rule_version = details = rejected_at = None
+                    manual_override = 0
+                else:
+                    reason, evidence = exclusion
+                    eligible = 0
+                    exclusion_status = "auto_excluded"
+                    rule = LOCAL_QUALITY_RULE
+                    rule_version = LOCAL_QUALITY_RULE_VERSION
+                    details = json.dumps(
+                        {
+                            "reject_reason": reason,
+                            "rule_version": rule_version,
+                            **evidence,
+                        },
+                        ensure_ascii=False,
+                    )
+                    rejected_at = now
+                    manual_override = 0
+                quality_updates.append(
+                    (
+                        _local_candidate_score(features),
+                        LOCAL_QUALITY_RULE_VERSION,
+                        features.orientation,
+                        features.camera_make,
+                        features.camera_model,
+                        features.lens_model,
+                        eligible,
+                        exclusion_status,
+                        reason,
+                        rule,
+                        rule_version,
+                        details,
+                        rejected_at,
+                        manual_override,
+                        plan["id"],
+                    )
+                )
+            if quality_updates:
+                connection.executemany(
+                    """
+                    UPDATE photos SET local_candidate_score=?,feature_version=?,orientation=?,
+                        camera_make=?,camera_model=?,lens_model=?,eligible=?,exclusion_status=?,
+                        reject_reason=?,reject_rule=?,reject_rule_version=?,reject_details_json=?,
+                        rejected_at=?,manual_override=? WHERE id=?
+                    """,
+                    quality_updates,
+                )
+
             for chunk in _chunks(sorted(old_groups)):
                 placeholders = ",".join("?" for _ in chunk)
                 connection.execute(
@@ -924,6 +1083,302 @@ class PhotoRepository:
                 """,
                 (photo_id,),
             ).fetchone()
+
+    def set_exclusion(
+        self,
+        photo_id: str,
+        *,
+        action: str,
+        changed_by: str,
+        reapply_rules: bool = False,
+    ) -> dict:
+        """以可稽核方式處理人工排除／恢復；只在明示時清除恢復覆寫。"""
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone()
+                if row is None:
+                    raise KeyError(photo_id)
+                photo = dict(row)
+                if action == "restore":
+                    values = (1, "manually_restored", 1, now, photo_id)
+                    event = "manual_restore"
+                    changes = {"manual_override": True, "eligible": True}
+                    connection.execute(
+                        "UPDATE photos SET eligible=?,exclusion_status=?,manual_override=?,updated_at=? WHERE id=?",
+                        values,
+                    )
+                elif action == "exclude":
+                    details = json.dumps(
+                        {
+                            "reject_reason": "manual_permanent_exclusion",
+                            "rule_version": "manual-v1",
+                            "measured_value": None,
+                            "threshold": None,
+                        },
+                        ensure_ascii=False,
+                    )
+                    connection.execute(
+                        """
+                        UPDATE photos SET eligible=0,exclusion_status='manually_excluded',
+                            reject_reason='manual_permanent_exclusion',reject_rule='manual',
+                            reject_rule_version='manual-v1',reject_details_json=?,rejected_at=?,
+                            manual_override=0,updated_at=? WHERE id=?
+                        """,
+                        (details, now, now, photo_id),
+                    )
+                    event = "manual_exclude"
+                    changes = {"eligible": False, "reason": "manual_permanent_exclusion"}
+                elif action in {"favorite", "candidate"}:
+                    exclusion_status = "manually_restored" if action == "favorite" else "pending_review"
+                    connection.execute(
+                        """
+                        UPDATE photos SET favorite=?,eligible=1,exclusion_status=?,manual_override=1,
+                            updated_at=? WHERE id=?
+                        """,
+                        (int(action == "favorite"), exclusion_status, now, photo_id),
+                    )
+                    event = "added_to_favorites" if action == "favorite" else "added_to_candidate_pool"
+                    changes = {"eligible": True, "favorite": action == "favorite", "candidate_pool": action == "candidate"}
+                elif action == "reanalyze":
+                    exclusion = _stored_exclusion(photo)
+                    protected = bool(photo.get("manual_override")) and not reapply_rules
+                    if protected:
+                        connection.execute(
+                            "UPDATE photos SET local_candidate_score=?,feature_version=?,updated_at=? WHERE id=?",
+                            (
+                                _local_candidate_score(
+                                    LocalPhotoFeatures(
+                                        sha256=str(photo.get("sha256") or ""), perceptual_hash=None,
+                                        difference_hash=None, width=int(photo.get("width") or 0),
+                                        height=int(photo.get("height") or 0), format=str(photo.get("format") or ""),
+                                        orientation=int(photo.get("orientation") or 1), camera_make=None,
+                                        camera_model=None, lens_model=None, exif_json=None,
+                                        captured_at=None, gps_lat=None, gps_lon=None,
+                                        brightness=photo.get("brightness"), contrast=photo.get("contrast"),
+                                        blur_score=photo.get("blur_score"),
+                                        overexposed_ratio=photo.get("overexposed_ratio"),
+                                        underexposed_ratio=photo.get("underexposed_ratio"),
+                                        screenshot_likelihood=photo.get("screenshot_likelihood"),
+                                        crop_focus_x=None, crop_focus_y=None, crop_subject_left=None,
+                                        crop_subject_top=None, crop_subject_right=None, crop_subject_bottom=None,
+                                        crop_method=None, crop_face_count=None, e6_score=None,
+                                        e6_contrast_score=None, e6_subject_score=None, e6_skin_score=None,
+                                        e6_text_score=None, e6_skin_pixels=None,
+                                    )
+                                ),
+                                LOCAL_QUALITY_RULE_VERSION,
+                                now,
+                                photo_id,
+                            ),
+                        )
+                    elif exclusion is None:
+                        connection.execute(
+                            """
+                            UPDATE photos SET eligible=1,exclusion_status='eligible',reject_reason=NULL,
+                                reject_rule=NULL,reject_rule_version=NULL,reject_details_json=NULL,
+                                rejected_at=NULL,manual_override=0,feature_version=?,updated_at=? WHERE id=?
+                            """,
+                            (LOCAL_QUALITY_RULE_VERSION, now, photo_id),
+                        )
+                    else:
+                        reason, evidence = exclusion
+                        details = json.dumps(
+                            {"reject_reason": reason, "rule_version": LOCAL_QUALITY_RULE_VERSION, **evidence},
+                            ensure_ascii=False,
+                        )
+                        connection.execute(
+                            """
+                            UPDATE photos SET eligible=0,exclusion_status='auto_excluded',reject_reason=?,
+                                reject_rule=?,reject_rule_version=?,reject_details_json=?,rejected_at=?,
+                                manual_override=0,feature_version=?,updated_at=? WHERE id=?
+                            """,
+                            (reason, LOCAL_QUALITY_RULE, LOCAL_QUALITY_RULE_VERSION, details, now, LOCAL_QUALITY_RULE_VERSION, now, photo_id),
+                        )
+                    event = "local_reanalysis"
+                    changes = {"reapply_rules": reapply_rules, "manual_override": not reapply_rules and bool(photo.get("manual_override"))}
+                else:
+                    raise ValueError("不支援的排除操作")
+                connection.execute(
+                    "INSERT INTO photo_events(photo_id,event,changes_json,changed_by,created_at) VALUES (?,?,?,?,?)",
+                    (photo_id, event, json.dumps(changes, ensure_ascii=False), changed_by, now),
+                )
+                result = dict(connection.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone())
+                connection.execute("COMMIT")
+                return result
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    def search_exclusions(
+        self,
+        *,
+        reason: str = "",
+        year: str = "",
+        folder: str = "",
+        kind: str = "",
+        origin: str = "",
+        limit: int = 200,
+    ) -> list:
+        clauses = ["p.exclusion_status != 'eligible'"]
+        parameters: list = []
+        if reason:
+            clauses.append("p.reject_reason=?")
+            parameters.append(reason)
+        if year and year.isdigit() and len(year) == 4:
+            clauses.append("substr(COALESCE(p.captured_at,p.created_at),1,4)=?")
+            parameters.append(year)
+        if folder:
+            clauses.append("p.relative_path LIKE ? ESCAPE '\\'")
+            escaped = folder.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            parameters.append(escaped + "%")
+        if kind == "screenshot":
+            clauses.append("p.reject_reason='screenshot'")
+        elif kind == "document":
+            clauses.append("p.reject_reason='document_or_receipt'")
+        elif kind == "duplicate":
+            clauses.append("p.duplicate_group_id IS NOT NULL")
+        if origin == "manual":
+            clauses.append("p.exclusion_status IN ('manually_excluded','manually_restored')")
+        elif origin == "auto":
+            clauses.append("p.exclusion_status='auto_excluded'")
+        where = " AND ".join(clauses)
+        with self.database.session() as connection:
+            return connection.execute(
+                f"""
+                SELECT p.*,l.name AS library_name,a.provider,a.model,a.created_at AS analyzed_at
+                FROM photos p JOIN libraries l ON l.id=p.library_id
+                LEFT JOIN photo_analysis a ON a.id=(
+                    SELECT id FROM photo_analysis WHERE photo_id=p.id ORDER BY created_at DESC,id DESC LIMIT 1
+                )
+                WHERE {where}
+                ORDER BY p.rejected_at DESC,p.updated_at DESC,p.id DESC LIMIT ?
+                """,
+                (*parameters, max(1, min(int(limit), 500))),
+            ).fetchall()
+
+    def eligible_photo_ids(self, *, limit: int | None = None, include_all_active: bool = False) -> list[str]:
+        where = "p.lifecycle_status='active'"
+        if not include_all_active:
+            where += " AND p.eligible=1"
+        query = f"SELECT p.id FROM photos p WHERE {where} ORDER BY p.local_candidate_score DESC,p.captured_at DESC,p.id"
+        params: tuple = () if limit is None else (max(1, min(int(limit), 100_000)),)
+        if limit is not None:
+            query += " LIMIT ?"
+        with self.database.session() as connection:
+            return [str(row["id"]) for row in connection.execute(query, params).fetchall()]
+
+    def eligible_photo_batches(
+        self, *, group_by: str, limit: int, include_all_active: bool = False
+    ) -> list[tuple[str, list[str]]]:
+        """完整照片庫模式以年份或第一層資料夾拆成可暫停／續跑的既有工作。"""
+        where = "lifecycle_status='active'" if include_all_active else "lifecycle_status='active' AND eligible=1"
+        with self.database.session() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id,relative_path,captured_at,created_at FROM photos WHERE {where}
+                ORDER BY COALESCE(captured_at,created_at),relative_path,id
+                """
+            ).fetchall()
+        groups: dict[str, list[str]] = {}
+        remaining = max(1, min(int(limit), 100_000))
+        for row in rows:
+            if remaining <= 0:
+                break
+            path = str(row["relative_path"] or "")
+            key = (
+                path.split("/", 1)[0] or "根目錄"
+                if group_by == "folder"
+                else str(row["captured_at"] or row["created_at"] or "未知")[:4]
+            )
+            groups.setdefault(key or "未知", []).append(str(row["id"]))
+            remaining -= 1
+        return list(groups.items())
+
+    def is_top_candidate(self, photo_id: str, limit: int) -> bool:
+        return photo_id in set(self.eligible_photo_ids(limit=max(1, min(int(limit), 10_000))))
+
+    def ai_limit_reached(self, *, daily_limit: int, monthly_limit: int) -> bool:
+        with self.database.session() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(DISTINCT CASE WHEN date(started_at)=date('now') THEN photo_id END) AS daily,
+                       COUNT(DISTINCT CASE WHEN strftime('%Y-%m',started_at)=strftime('%Y-%m','now') THEN photo_id END) AS monthly
+                FROM api_usage WHERE provider != 'local' AND photo_id IS NOT NULL
+                """
+            ).fetchone()
+        return int(row["daily"] or 0) >= daily_limit or int(row["monthly"] or 0) >= monthly_limit
+
+    def location_visit_count(self, latitude: float | None, longitude: float | None) -> int:
+        """以約 22 km 的本機格網估計地點稀有度，避免把精確座標送出。"""
+        if latitude is None or longitude is None:
+            return 0
+        delta = 0.2
+        with self.database.session() as connection:
+            return int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM photos WHERE gps_lat BETWEEN ? AND ? AND gps_lon BETWEEN ? AND ?
+                    """,
+                    (float(latitude) - delta, float(latitude) + delta, float(longitude) - delta, float(longitude) + delta),
+                ).fetchone()[0]
+            )
+
+    def get_ai_cache(
+        self, *, content_sha256: str, provider: str, model_name: str, prompt_version: str, schema_version: int, schema_kind: str
+    ) -> dict | None:
+        with self.database.session() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM ai_analysis_cache WHERE content_sha256=? AND provider=? AND model_name=?
+                  AND prompt_version=? AND schema_version=? AND schema_kind=?
+                """,
+                (content_sha256, provider, model_name, prompt_version, schema_version, schema_kind),
+            ).fetchone()
+        if row is None:
+            return None
+        cached = dict(row)
+        try:
+            cached["result"] = json.loads(str(cached["result_json"]))
+        except json.JSONDecodeError:
+            return None
+        return cached
+
+    def put_ai_cache(
+        self,
+        *,
+        content_sha256: str,
+        provider: str,
+        model_name: str,
+        prompt_version: str,
+        schema_version: int,
+        schema_kind: str,
+        result: dict,
+        raw_json: str,
+        input_tokens: int,
+        output_tokens: int,
+        cached_tokens: int,
+        estimated_cost: float,
+        latency_ms: int,
+    ) -> None:
+        with self.database.session() as connection:
+            connection.execute(
+                """
+                INSERT INTO ai_analysis_cache(content_sha256,provider,model_name,prompt_version,schema_version,schema_kind,
+                    result_json,raw_json,input_tokens,output_tokens,cached_tokens,estimated_cost,latency_ms,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(content_sha256,provider,model_name,prompt_version,schema_version,schema_kind)
+                DO UPDATE SET result_json=excluded.result_json,raw_json=excluded.raw_json,input_tokens=excluded.input_tokens,
+                    output_tokens=excluded.output_tokens,cached_tokens=excluded.cached_tokens,estimated_cost=excluded.estimated_cost,
+                    latency_ms=excluded.latency_ms,created_at=excluded.created_at
+                """,
+                (
+                    content_sha256, provider, model_name, prompt_version, schema_version, schema_kind,
+                    json.dumps(result, ensure_ascii=False), raw_json, input_tokens, output_tokens, cached_tokens,
+                    estimated_cost, latency_ms, datetime.now(timezone.utc).isoformat(),
+                ),
+            )
 
     def list_existing_photo_ids(
         self, library_id: str, root: Path, *, limit: int
@@ -1197,6 +1652,13 @@ class PhotoRepository:
         *,
         ranking_score: float | None = None,
         scoring_version_id: str | None = None,
+        schema_kind: str = "basic",
+        local_score: float | None = None,
+        semantic_score: float | None = None,
+        base_ranking_score: float | None = None,
+        final_ranking_score: float | None = None,
+        travel_bonus: float = 0.0,
+        location_rule_version: str | None = None,
     ) -> None:
         import json
 
@@ -1208,8 +1670,10 @@ class PhotoRepository:
                     """
                     INSERT INTO photo_analysis(photo_id,job_id,schema_version,stage,provider,model,caption,types_json,
                         memory_score,beauty_score,technical_quality_score,emotion_score,side_caption,should_keep,
-                        sensitive,reason,raw_json,analysis_source,ranking_score,scoring_version_id,created_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        sensitive,reason,raw_json,analysis_source,ranking_score,scoring_version_id,created_at,
+                        schema_kind,semantic_json,local_score,semantic_score,base_ranking_score,final_ranking_score,
+                        ranking_rule_version,travel_bonus,location_rule_version)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         photo_id,
@@ -1233,6 +1697,22 @@ class PhotoRepository:
                         ranking_score,
                         scoring_version_id,
                         now,
+                        schema_kind,
+                        json.dumps(
+                            {
+                                "source": "local" if provider == "local" else "model",
+                                "confidence": (result.get("details") or {}).get("confidence"),
+                                "values": result.get("details") or {},
+                            },
+                            ensure_ascii=False,
+                        ),
+                        local_score,
+                        semantic_score,
+                        base_ranking_score,
+                        final_ranking_score if final_ranking_score is not None else ranking_score,
+                        "ranking-v2",
+                        travel_bonus,
+                        location_rule_version,
                     ),
                 )
                 connection.execute(
