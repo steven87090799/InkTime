@@ -13,6 +13,9 @@ DEFAULT_RANKING_WEIGHTS = {
     "emotion": 20.0,
 }
 DEFAULT_FAVORITE_BONUS = 5.0
+RANKING_RULE_VERSION = "ranking-v2"
+LOCATION_RULE_VERSION = "travel-v1"
+GRADE_TO_SCORE = {"S": 95.0, "A": 85.0, "B": 70.0, "C": 55.0, "D": 35.0, "E": 15.0}
 
 
 @dataclass(frozen=True)
@@ -104,6 +107,55 @@ def calculate_ranking_score(
     if favorite:
         score += max(0.0, min(100.0, float(favorite_bonus)))
     return round(max(0.0, min(100.0, score)), 2)
+
+
+def grade_to_score(value: str | None, fallback: float) -> float:
+    """模型只能交付等級；數字映射固定在程式，便於版本化與重算。"""
+    return GRADE_TO_SCORE.get(str(value or "").upper(), float(fallback))
+
+
+def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    radius = 6371.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    delta_phi, delta_lon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    value = math.sin(delta_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lon / 2) ** 2
+    return radius * 2 * math.atan2(math.sqrt(value), math.sqrt(max(0.0, 1.0 - value)))
+
+
+def calculate_travel_bonus(
+    *,
+    latitude: float | None,
+    longitude: float | None,
+    home_latitude: float | None,
+    home_longitude: float | None,
+    home_radius_km: float,
+    near_bonus: float,
+    far_bonus: float,
+    foreign_bonus: float,
+    rare_bonus: float,
+    foreign_country: bool = False,
+    rare_location: bool = False,
+    maximum: float = 8.0,
+) -> tuple[float, float | None]:
+    if None in {latitude, longitude, home_latitude, home_longitude}:
+        return 0.0, None
+    distance = _distance_km(float(latitude), float(longitude), float(home_latitude), float(home_longitude))
+    bonus = 0.0
+    if distance > max(0.0, float(home_radius_km)):
+        if distance <= 200:
+            bonus += near_bonus
+        elif distance <= 1000:
+            bonus += far_bonus
+        elif foreign_country:
+            bonus += foreign_bonus
+        else:
+            # 超過 1,000 km 但沒有可信國家資訊時不臆測跨國；保留遠行基本加分。
+            bonus += far_bonus
+    if foreign_country:
+        bonus = max(bonus, foreign_bonus)
+    if rare_location:
+        bonus += rare_bonus
+    return round(max(0.0, min(float(maximum), bonus)), 2), round(distance, 2)
 
 
 DISTINCTIVE_SCORING_RULES = """【共通評分方法】

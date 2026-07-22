@@ -13,6 +13,8 @@ from inktime.app.domain.analysis.scoring import (
     DEFAULT_FAVORITE_BONUS,
     DEFAULT_RANKING_WEIGHTS,
     calculate_ranking_score,
+    calculate_travel_bonus,
+    grade_to_score,
 )
 from inktime.app.domain.photos import ThumbnailCache
 from inktime.app.domain.rendering import evaluate_e6_suitability
@@ -46,6 +48,7 @@ PREFILTER_PROFILES = {
         "short_edge": 480,
     },
 }
+PROMPT_VERSION = "photo-quality-v3"
 
 
 class PhotoAnalysisService:
@@ -117,6 +120,7 @@ class PhotoAnalysisService:
             self.settings.get("analysis.e6_min_score", 25) if self.settings is not None else 25
         )
         favorite_bypass = bool(photo["favorite"])
+        manual_override = bool(photo["manual_override"]) if "manual_override" in photo.keys() else False
         screenshot_score = float(photo["screenshot_likelihood"] or 0)
         blur = float(photo["blur_score"]) if photo["blur_score"] is not None else None
         contrast = float(photo["contrast"]) if photo["contrast"] is not None else None
@@ -194,20 +198,24 @@ class PhotoAnalysisService:
         ]
         defect_checks = checks[1:-1]
         matched_defects = [check["label"] for check in defect_checks if check["hit"]]
-        screenshot = enabled and screenshot_enabled and checks[0]["hit"] and not favorite_bypass
+        screenshot = enabled and screenshot_enabled and checks[0]["hit"] and not favorite_bypass and not manual_override
         low_quality = (
             enabled
             and low_quality_enabled
             and len(matched_defects) >= 2
             and not favorite_bypass
+            and not manual_override
         )
-        e6_unsuitable = enabled and e6_enabled and checks[-1]["hit"] and not favorite_bypass
+        e6_unsuitable = enabled and e6_enabled and checks[-1]["hit"] and not favorite_bypass and not manual_override
         if not enabled:
             decision = "disabled"
             summary = "本機預篩選已停用"
         elif favorite_bypass:
             decision = "favorite_bypass"
             summary = "最愛照片略過本機預篩選"
+        elif manual_override:
+            decision = "manual_override"
+            summary = "人工恢復覆寫生效；內容未改變前不會再次自動排除"
         elif screenshot:
             decision = "excluded_screenshot"
             summary = "已排除：截圖機率達門檻，不會呼叫模型"
@@ -228,6 +236,7 @@ class PhotoAnalysisService:
             "e6_enabled": e6_enabled,
             "e6_threshold": e6_threshold,
             "favorite_bypass": favorite_bypass,
+            "manual_override": manual_override,
             "checks": checks,
             "matched_defects": matched_defects,
             "defect_count": len(matched_defects),
@@ -282,6 +291,121 @@ class PhotoAnalysisService:
         self.photos.update_e6_suitability(photo_id, metrics)
         return self.photos.get_with_path(photo_id)
 
+    def _ai_mode(self) -> str:
+        return str(self.settings.get("analysis.ai_mode", "top_candidates")) if self.settings else "legacy"
+
+    def _allow_ai_for_photo(self, photo_id: str, *, force_ai: bool) -> bool:
+        mode = self._ai_mode()
+        if mode == "off":
+            return False
+        if force_ai:
+            return True
+        if mode == "on_demand":
+            return False
+        if mode == "top_candidates":
+            limit = int(self.settings.get("analysis.ai_top_n", 50)) if self.settings else 50
+            return self.photos.is_top_candidate(photo_id, limit)
+        return mode in {"eligible", "full_library", "legacy"}
+
+    def _photo_limits_reached(self) -> bool:
+        if self.settings is None:
+            return False
+        return self.photos.ai_limit_reached(
+            daily_limit=int(self.settings.get("analysis.ai_daily_photo_limit", 50)),
+            monthly_limit=int(self.settings.get("analysis.ai_monthly_photo_limit", 500)),
+        )
+
+    def _score_result(
+        self,
+        result: dict,
+        photo,
+        *,
+        ranking_weights: dict[str, float],
+        favorite_bonus: float,
+    ) -> dict:
+        details = result.get("details") or {}
+        for target, grade_key in (
+            ("memory_score", "memory_grade"),
+            ("beauty_score", "aesthetic_grade"),
+            ("technical_quality_score", "technical_grade"),
+            ("emotion_score", "emotion_grade"),
+        ):
+            result[target] = grade_to_score(details.get(grade_key), float(result[target]))
+        base = calculate_ranking_score(
+            result,
+            ranking_weights,
+            favorite=bool(photo["favorite"]),
+            favorite_bonus=favorite_bonus,
+        )
+        travel_bonus = 0.0
+        location_rule_version = None
+        if self.settings is not None and bool(self.settings.get("travel_bonus_enabled", True)):
+            country = str(details.get("country_candidate") or "").strip().casefold()
+            foreign = bool(country) and country not in {"tw", "taiwan", "台灣", "臺灣", "中華民國"}
+            visits = self.photos.location_visit_count(photo["gps_lat"], photo["gps_lon"])
+            travel_bonus, _distance = calculate_travel_bonus(
+                latitude=photo["gps_lat"],
+                longitude=photo["gps_lon"],
+                home_latitude=self.settings.get("home_latitude"),
+                home_longitude=self.settings.get("home_longitude"),
+                home_radius_km=float(self.settings.get("home_radius_km", 60)),
+                near_bonus=float(self.settings.get("travel_bonus_near", 2)),
+                far_bonus=float(self.settings.get("travel_bonus_far", 4)),
+                foreign_bonus=float(self.settings.get("foreign_country_bonus", 6)),
+                rare_bonus=float(self.settings.get("rare_location_bonus", 2)),
+                foreign_country=foreign,
+                rare_location=0 < visits <= 3,
+                maximum=float(self.settings.get("max_total_bonus", 8)),
+            )
+            location_rule_version = str(self.settings.get("location_rule_version", "travel-v1"))
+        result["local_score"] = float(photo["local_candidate_score"] or 0.0)
+        result["semantic_score"] = base
+        result["base_ranking_score"] = base
+        result["travel_bonus"] = travel_bonus
+        result["final_ranking_score"] = round(min(100.0, base + travel_bonus), 2)
+        result["ranking_score"] = result["final_ranking_score"]
+        result["location_rule_version"] = location_rule_version
+        return result
+
+    def _save_result(
+        self,
+        *,
+        photo_id: str,
+        job_id: str | None,
+        stage: str,
+        provider: str,
+        model: str,
+        result: dict,
+        raw: str,
+        photo,
+        ranking_weights: dict[str, float],
+        favorite_bonus: float,
+        scoring_version_id: str | None,
+        schema_kind: str,
+    ) -> dict:
+        ranked = self._score_result(
+            result, photo, ranking_weights=ranking_weights, favorite_bonus=favorite_bonus
+        )
+        self.photos.save_analysis(
+            photo_id,
+            job_id,
+            stage,
+            provider,
+            model,
+            ranked,
+            raw,
+            ranking_score=ranked["ranking_score"],
+            scoring_version_id=scoring_version_id,
+            schema_kind=schema_kind,
+            local_score=ranked["local_score"],
+            semantic_score=ranked["semantic_score"],
+            base_ranking_score=ranked["base_ranking_score"],
+            final_ranking_score=ranked["final_ranking_score"],
+            travel_bonus=ranked["travel_bonus"],
+            location_rule_version=ranked["location_rule_version"],
+        )
+        return ranked
+
     def _record(
         self,
         provider: VisionProvider,
@@ -323,7 +447,23 @@ class PhotoAnalysisService:
         stage: str,
         job_id: str | None,
         photo_id: str,
-    ) -> tuple[dict, str, float]:
+        content_sha256: str,
+        schema_kind: str,
+    ) -> tuple[dict, str, float, bool]:
+        cached = self.photos.get_ai_cache(
+            content_sha256=content_sha256,
+            provider=provider.name,
+            model_name=model,
+            prompt_version=PROMPT_VERSION,
+            schema_version=1,
+            schema_kind=schema_kind,
+        )
+        if cached is not None:
+            try:
+                return validate_analysis_result(cached["result"]), str(cached["raw_json"]), 0.0, True
+            except AnalysisValidationError:
+                # 損壞或舊版快取不可阻斷新分析，直接重新取得並覆寫。
+                pass
         if self.budgets:
             self.budgets.assert_request_allowed(job_id, photo_id)
         started_at = datetime.now(timezone.utc).isoformat()
@@ -339,9 +479,12 @@ class PhotoAnalysisService:
         total_cost = self._record(
             provider, model, job_id, photo_id, stage, response, started_at, started_perf
         )
+        total_input_tokens = response.usage.input_tokens
+        total_output_tokens = response.usage.output_tokens
+        total_cached_tokens = response.usage.cached_tokens
         try:
             result = validate_analysis_result(response.content)
-            return result, response.content, total_cost
+            raw = response.content
         except AnalysisValidationError as first_error:
             repair_started_at = datetime.now(timezone.utc).isoformat()
             repair_perf = time.perf_counter()
@@ -364,7 +507,26 @@ class PhotoAnalysisService:
             )
             # 第二次驗證失敗直接拋出；不得無限修復。
             result = validate_analysis_result(repaired.content)
-            return result, repaired.content, total_cost
+            raw = repaired.content
+            total_input_tokens += repaired.usage.input_tokens
+            total_output_tokens += repaired.usage.output_tokens
+            total_cached_tokens += repaired.usage.cached_tokens
+        self.photos.put_ai_cache(
+            content_sha256=content_sha256,
+            provider=provider.name,
+            model_name=model,
+            prompt_version=PROMPT_VERSION,
+            schema_version=int(result["schema_version"]),
+            schema_kind=schema_kind,
+            result=result,
+            raw_json=raw,
+            input_tokens=total_input_tokens,
+            output_tokens=total_output_tokens,
+            cached_tokens=total_cached_tokens,
+            estimated_cost=total_cost,
+            latency_ms=int((time.perf_counter() - started_perf) * 1000),
+        )
+        return result, raw, total_cost, False
 
     def analyze_photo(
         self,
@@ -380,6 +542,7 @@ class PhotoAnalysisService:
         ranking_weights: dict[str, float] | None = None,
         favorite_bonus: float = DEFAULT_FAVORITE_BONUS,
         scoring_version_id: str | None = None,
+        force_ai: bool = False,
     ) -> dict:
         photo = self.photos.get_with_path(photo_id)
         if photo is None:
@@ -388,51 +551,49 @@ class PhotoAnalysisService:
         if not source.is_file():
             raise FileNotFoundError("SCAN-001 找不到照片檔案")
         photo = self._ensure_e6_suitability(photo_id, photo, source)
-        inherited = self.photos.inherit_existing_analysis(photo_id, job_id)
+        weights = ranking_weights or DEFAULT_RANKING_WEIGHTS
+        inherited = self.photos.inherit_existing_analysis(photo_id, job_id) if self.settings is None else None
         if inherited is not None:
             return {"analysis": inherited, "stage": "inherited", "_actual_cost": 0}
         if strategy == "local":
             result = validate_analysis_result(self._local_result(photo))
             raw = json.dumps(result, ensure_ascii=False)
-            result["ranking_score"] = calculate_ranking_score(
-                result,
-                ranking_weights or DEFAULT_RANKING_WEIGHTS,
-                favorite=bool(photo["favorite"]),
-                favorite_bonus=favorite_bonus,
-            )
-            self.photos.save_analysis(
-                photo_id,
-                job_id,
-                "local",
-                "local",
-                "local",
-                result,
-                raw,
-                ranking_score=result["ranking_score"],
-                scoring_version_id=scoring_version_id,
+            result = self._save_result(
+                photo_id=photo_id, job_id=job_id, stage="local", provider="local", model="local",
+                result=result, raw=raw, photo=photo, ranking_weights=weights,
+                favorite_bonus=favorite_bonus, scoring_version_id=scoring_version_id, schema_kind="basic",
             )
             return {"analysis": result, "stage": "local", "_actual_cost": 0}
+
+        if not bool(photo["eligible"]) and not bool(photo["manual_override"]):
+            result = validate_analysis_result(self._prefilter_result(photo) or self._local_result(photo))
+            result["should_keep"] = False
+            raw = json.dumps(result, ensure_ascii=False)
+            result = self._save_result(
+                photo_id=photo_id, job_id=job_id, stage="prefilter", provider="local",
+                model="local-quality-v3", result=result, raw=raw, photo=photo, ranking_weights=weights,
+                favorite_bonus=favorite_bonus, scoring_version_id=scoring_version_id, schema_kind="basic",
+            )
+            return {"analysis": result, "stage": "prefilter", "_actual_cost": 0}
+
+        if not self._allow_ai_for_photo(photo_id, force_ai=force_ai) or self._photo_limits_reached():
+            result = validate_analysis_result(self._local_result(photo))
+            raw = json.dumps(result, ensure_ascii=False)
+            result = self._save_result(
+                photo_id=photo_id, job_id=job_id, stage="local_fallback", provider="local",
+                model="local-quality-v3", result=result, raw=raw, photo=photo, ranking_weights=weights,
+                favorite_bonus=favorite_bonus, scoring_version_id=scoring_version_id, schema_kind="basic",
+            )
+            return {"analysis": result, "stage": "local_fallback", "_actual_cost": 0}
 
         prefiltered = self._prefilter_result(photo)
         if prefiltered is not None:
             result = validate_analysis_result(prefiltered)
             raw = json.dumps(result, ensure_ascii=False)
-            result["ranking_score"] = calculate_ranking_score(
-                result,
-                ranking_weights or DEFAULT_RANKING_WEIGHTS,
-                favorite=False,
-                favorite_bonus=favorite_bonus,
-            )
-            self.photos.save_analysis(
-                photo_id,
-                job_id,
-                "prefilter",
-                "local",
-                "local-prefilter",
-                result,
-                raw,
-                ranking_score=result["ranking_score"],
-                scoring_version_id=scoring_version_id,
+            result = self._save_result(
+                photo_id=photo_id, job_id=job_id, stage="prefilter", provider="local",
+                model="local-prefilter", result=result, raw=raw, photo=photo, ranking_weights=weights,
+                favorite_bonus=favorite_bonus, scoring_version_id=scoring_version_id, schema_kind="basic",
             )
             return {"analysis": result, "stage": "prefilter", "_actual_cost": 0}
         if provider is None:
@@ -444,7 +605,7 @@ class PhotoAnalysisService:
         total_cost = 0.0
         if strategy in {"low_cost", "smart_two_stage"}:
             low_image = self.thumbnails.get_or_create(source, sha, 512)
-            low, raw, cost = self._model_call(
+            low, raw, cost, cache_hit = self._model_call(
                 provider=provider,
                 image=low_image,
                 model=low_model,
@@ -452,6 +613,8 @@ class PhotoAnalysisService:
                 stage="stage_one",
                 job_id=job_id,
                 photo_id=photo_id,
+                content_sha256=sha,
+                schema_kind="basic",
             )
             total_cost += cost
             requires_second = strategy == "smart_two_stage" and (
@@ -460,27 +623,15 @@ class PhotoAnalysisService:
                 or (favorite_override and bool(photo["favorite"]))
             )
             if not requires_second:
-                low["ranking_score"] = calculate_ranking_score(
-                    low,
-                    ranking_weights or DEFAULT_RANKING_WEIGHTS,
-                    favorite=bool(photo["favorite"]),
-                    favorite_bonus=favorite_bonus,
+                low = self._save_result(
+                    photo_id=photo_id, job_id=job_id, stage="stage_one", provider=provider.name,
+                    model=low_model, result=low, raw=raw, photo=photo, ranking_weights=weights,
+                    favorite_bonus=favorite_bonus, scoring_version_id=scoring_version_id, schema_kind="basic",
                 )
-                self.photos.save_analysis(
-                    photo_id,
-                    job_id,
-                    "stage_one",
-                    provider.name,
-                    low_model,
-                    low,
-                    raw,
-                    ranking_score=low["ranking_score"],
-                    scoring_version_id=scoring_version_id,
-                )
-                return {"analysis": low, "stage": "stage_one", "_actual_cost": total_cost}
+                return {"analysis": low, "stage": "cache" if cache_hit else "stage_one", "_actual_cost": total_cost}
 
         high_image = self.thumbnails.get_or_create(source, sha, 1600)
-        high, raw, cost = self._model_call(
+        high, raw, cost, cache_hit = self._model_call(
             provider=provider,
             image=high_image,
             model=high_model,
@@ -488,27 +639,18 @@ class PhotoAnalysisService:
             stage="stage_two" if strategy == "smart_two_stage" else "single_high",
             job_id=job_id,
             photo_id=photo_id,
+            content_sha256=sha,
+            schema_kind="full",
         )
         total_cost += cost
-        high["ranking_score"] = calculate_ranking_score(
-            high,
-            ranking_weights or DEFAULT_RANKING_WEIGHTS,
-            favorite=bool(photo["favorite"]),
-            favorite_bonus=favorite_bonus,
-        )
-        self.photos.save_analysis(
-            photo_id,
-            job_id,
-            "stage_two" if strategy == "smart_two_stage" else "single_high",
-            provider.name,
-            high_model,
-            high,
-            raw,
-            ranking_score=high["ranking_score"],
-            scoring_version_id=scoring_version_id,
+        final_stage = "stage_two" if strategy == "smart_two_stage" else "single_high"
+        high = self._save_result(
+            photo_id=photo_id, job_id=job_id, stage=final_stage, provider=provider.name,
+            model=high_model, result=high, raw=raw, photo=photo, ranking_weights=weights,
+            favorite_bonus=favorite_bonus, scoring_version_id=scoring_version_id, schema_kind="full",
         )
         return {
             "analysis": high,
-            "stage": "stage_two" if strategy == "smart_two_stage" else "single_high",
+            "stage": "cache" if cache_hit else final_stage,
             "_actual_cost": total_cost,
         }
