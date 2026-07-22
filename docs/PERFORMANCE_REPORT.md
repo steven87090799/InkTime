@@ -35,3 +35,11 @@
 - 深頁 OFFSET 仍會隨頁數增加成本；百萬級資料建議改用游標分頁或 PostgreSQL。
 - pHash 與模糊度是 CPU 工作，實際 NAS 掃描速度受磁碟、網路與圖片解碼影響，不可用本報告的中繼資料寫入速度推估。
 - SQLite 適合單主機中小型部署；多遠端 Worker 應切換 PostgreSQL 儲存層。
+
+## 2026-07-22 跨模組補充
+
+- 同月日候選以 500 筆批次走訪，`top_n` 由 SQL 最終分數排序；random／weighted／prefer 模式只保留常數量選中狀態，不再先截 1,000 筆。
+- `tests/integration/test_final_review_history.py` 的 100,000 筆是合成 SQLite 中繼資料，並非 NAS 影像解碼、真實 Renderer 或電池量測。
+- 同日 100,000 筆合成案例於 macOS/Python 3.9 單獨測試的整體牆鐘為 5.59 秒、peak memory footprint 160.47 MiB；此數字包含建立 SQLite fixture，測試內候選選取另以 `< 8 秒` 門檻驗收，不能視為純 SQL latency。
+- `Database.observability()` 現在提供 writer lock 累計/最大等待、busy timeout 次數、WAL bytes 與長交易計數；數值不包含 SQL、Secret 或完整照片路徑。
+- Scanner Peak RAM、目標 NAS WAL 最大值與 writer wait、正式預渲染、靜態 BIN 回應與 Wake 分段仍須在目標 NAS／實體裝置量測；CI runner 數字不得當成 NAS 或續航保證。

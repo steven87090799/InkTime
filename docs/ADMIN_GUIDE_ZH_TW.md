@@ -134,3 +134,9 @@ deep-sleep 待機電流、完整喚醒週期平均電流、每日刷新次數及
 - JSON Schema、繁體中文與不得虛構等固定約束不允許從網頁覆寫，位於 `inktime/app/providers/openai_compatible.py`。
 
 完整流程圖與程式入口見 [專案架構與評分流程](ARCHITECTURE_ZH_TW.md)。
+
+## 排程換圖與不合格照片
+
+`display_prepare` 支援且只支援 `display_times`、`lead_minutes`、`daily_count`、`device_ids`、`candidate_years`、`prefetch_count`、`ai_fallback`、`render_fallback`。未知欄位不會被靜默忽略。`device_ids` 解析為實際啟用裝置的 Profile；`daily_count × prefetch_count` 決定候選數量；年份會直接限制 SQL 候選。
+
+人工排除、自動排除、Missing、deleted、路徑逃逸、原始檔缺失或沒有最新分析的照片均不能正式發布。管理員明確指定這類照片會收到 `RENDER-009`，系統不會換成另一張照片。

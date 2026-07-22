@@ -173,6 +173,16 @@ python -m inktime.app.workers.runner
 
 更多處理方式見 [疑難排解](docs/TROUBLESHOOTING_ZH_TW.md)。效能證據見 [100,000 筆報告](docs/PERFORMANCE_REPORT.md)，最終完成邊界見 [實作報告](docs/FINAL_IMPLEMENTATION_REPORT_ZH_TW.md)。
 
+## 正式發布與裝置安全邊界
+
+- 一般發布、歷史選片與排程共用同一候選資格：已分析、可選、active、最新分析存在，而且原始檔仍位於啟用的 Library Root。
+- Release 先產生 staged 檔案並驗證 Manifest／大小／SHA-256，再以補償式流程切換 Profile pointer、提交 DB 與 `display_history`。啟動時標記漂移，失效 pointer 可回復到同 Profile 最新完整版本，但不自動刪除未知 Release。
+- 裝置仍使用 `Authorization: Bearer`；Bearer Token 不會加密 HTTP。HTTP 只適合隔離 IoT VLAN，跨網路必須使用已驗證 CA 的 HTTPS 或 VPN。
+- 六／七色 Profile 明確宣告不支援 Partial Refresh；相同內容跳過刷新與最小刷新間隔仍須由正式韌體／實體面板完成驗收。
+- 預設備份只有 Metadata DB，不含原始照片或 Release Payload。還原後會進行 Release reconciliation。
+
+詳見[裝置傳輸安全](docs/DEVICE_TRANSPORT_SECURITY_ZH_TW.md)、[安全 OTA 設計](docs/SECURE_OTA_DESIGN_ZH_TW.md)與[最終跨模組稽核](docs/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md)。
+
 ## 授權
 
 本專案依原始儲存庫授權條款發布；ESP32 使用的第三方函式庫另依其授權。內建芫荽與霞鶩文楷 TC 均採 SIL Open Font License 1.1，授權全文與固定版本資訊隨字型資產附上。
