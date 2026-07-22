@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from collections import Counter
+import base64
 from hashlib import sha256
 from io import BytesIO
 import json
 from pathlib import Path
 import tempfile
 import time
+import secrets
 
 from flask import Blueprint, abort, current_app, g, jsonify, render_template, request, send_file
 from PIL import Image, ImageDraw, ImageFont, ImageOps, UnidentifiedImageError
@@ -14,13 +17,17 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps, UnidentifiedImageError
 from inktime.app.web.access import administrator_required, login_required
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.domain.rendering import (
+    BUILTIN_PHOTO_PRESETS,
     DISPLAY_PROFILES,
     DITHER_ALGORITHMS,
+    DeviceTestReleaseStore,
     FONT_COMPATIBILITY_TEXT,
     FONT_PREVIEW_TEXT,
     FontCoverageError,
     encode_image,
+    palette_for_profile,
     profile_summaries,
+    render_photo,
 )
 from inktime.app.services.rendering import (
     FIT_MODES,
@@ -73,6 +80,7 @@ def rendering_page():
 @login_required
 def simulator_page():
     settings = current_app.extensions["inktime_settings_repository"]
+    custom_presets = _custom_photo_presets(settings)
     return render_template(
         "simulator.html",
         profiles=profile_summaries(),
@@ -80,7 +88,115 @@ def simulator_page():
         current_dither=str(settings.get("render.dither", "floyd_steinberg")),
         dither_strength=float(settings.get("render.dither_strength", 1.0)),
         color_distance=str(settings.get("render.color_distance", "oklab")),
+        photo_presets=BUILTIN_PHOTO_PRESETS,
+        custom_photo_presets=custom_presets,
+        devices=[dict(device) for device in current_app.extensions["inktime_device_repository"].list()],
     )
+
+
+def _custom_photo_presets(settings=None) -> dict:
+    repository = settings or current_app.extensions["inktime_settings_repository"]
+    try:
+        value = json.loads(str(repository.get("render.custom_photo_presets", "{}")))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _decode_uploaded_photo():
+    uploaded = request.files.get("photo")
+    if uploaded is None or not uploaded.filename:
+        abort(400, description="IMG-002 請選擇原始照片；Browser Canvas 不可直接發布")
+    suffix = Path(uploaded.filename).suffix.lower()
+    if suffix not in SIMULATOR_IMAGE_SUFFIXES:
+        abort(400, description="IMG-002 照片格式不支援")
+    content = BytesIO()
+    size = 0
+    while chunk := uploaded.stream.read(UPLOAD_CHUNK_BYTES):
+        size += len(chunk)
+        if size > MAX_SIMULATOR_PHOTO_BYTES:
+            abort(413, description="IMG-002 照片不可超過 25 MiB")
+        content.write(chunk)
+    content.seek(0)
+    try:
+        if suffix in {".heic", ".heif"}:
+            from pillow_heif import register_heif_opener
+
+            register_heif_opener()
+        with Image.open(content) as opened:
+            if opened.width * opened.height > MAX_SIMULATOR_PHOTO_PIXELS:
+                abort(413, description="IMG-002 照片像素不可超過 4000 萬")
+            opened.load()
+            source_size = f"{opened.width}x{opened.height}"
+            image = opened.copy()
+    except (UnidentifiedImageError, OSError):
+        abort(400, description="IMG-002 無法解碼照片")
+    return image, source_size
+
+
+def _json_form(name: str, default):
+    raw = request.form.get(name)
+    if raw in {None, ""}:
+        return default
+    try:
+        value = json.loads(str(raw))
+    except json.JSONDecodeError:
+        abort(400, description=f"RENDER-007 {name} 必須是合法 JSON")
+    return value
+
+
+def _renderer_request() -> dict:
+    requested_preset = str(request.form.get("preset", "photo_balanced"))
+    custom = _custom_photo_presets().get(requested_preset)
+    if custom:
+        preset = str(custom.get("source_preset", "photo_balanced"))
+        overrides = dict(custom.get("options", {}))
+        stored_palette = custom.get("palette", {})
+    else:
+        preset = requested_preset
+        overrides = {}
+        stored_palette = {}
+    incoming_options = _json_form("options", {})
+    if not isinstance(incoming_options, dict):
+        abort(400, description="RENDER-007 options 必須是 JSON 物件")
+    overrides.update(incoming_options)
+    palette = _json_form("palette", stored_palette)
+    if not isinstance(palette, dict):
+        abort(400, description="RENDER-006 palette 必須是 JSON 物件")
+    mode = str(palette.get("mode", "default"))
+    if mode not in {"default", "custom_rgb", "custom_lab"}:
+        abort(400, description="RENDER-006 自訂色盤模式不合法")
+    return {
+        "requested_preset": requested_preset,
+        "preset": preset,
+        "overrides": overrides,
+        "palette": palette,
+        "palette_rgb": palette.get("rgb") if mode == "custom_rgb" else None,
+        "palette_lab": palette.get("lab") if mode == "custom_lab" else None,
+        "palette_version": str(palette.get("palette_version", "custom-1")),
+        "text_regions": _json_form("text_regions", []),
+        "face_regions": _json_form("face_regions", []),
+    }
+
+
+def _png_data(image: Image.Image) -> str:
+    output = BytesIO()
+    image.save(output, "PNG", optimize=True)
+    return "data:image/png;base64," + base64.b64encode(output.getvalue()).decode("ascii")
+
+
+def _palette_statistics(image: Image.Image, colors) -> list[dict]:
+    counts = Counter(image.convert("RGB").getdata())
+    total = image.width * image.height
+    return [
+        {
+            "name": color.name,
+            "rgb": list(color.rgb),
+            "pixels": counts[color.rgb],
+            "ratio": round(counts[color.rgb] / total, 6),
+        }
+        for color in colors
+    ]
 
 
 def _virtual_display_profile() -> str:
@@ -277,6 +393,204 @@ def simulate():
     response.headers["X-InkTime-Render-Ms"] = str(int((time.perf_counter() - started) * 1000))
     response.headers["X-InkTime-Model"] = "disabled"
     return response
+
+
+@bp.post("/api/v1/rendering/compare")
+@login_required
+def compare_renderer():
+    image, source_size = _decode_uploaded_photo()
+    profile_key = str(request.form.get("profile", "gdep073e01_6c"))
+    fit = str(request.form.get("fit", "cover"))
+    if profile_key not in DISPLAY_PROFILES:
+        abort(400, description="RENDER-003 A/B 預覽 Profile 不合法")
+    configuration = _renderer_request()
+    try:
+        result = render_photo(
+            image,
+            profile_key=profile_key,
+            preset=configuration["preset"],
+            overrides=configuration["overrides"],
+            fit=fit,
+            palette_rgb=configuration["palette_rgb"],
+            palette_lab=configuration["palette_lab"],
+            palette_version=configuration["palette_version"],
+            text_regions=configuration["text_regions"],
+            face_regions=configuration["face_regions"],
+        )
+        legacy_started = time.perf_counter()
+        legacy = encode_image(
+            result.source,
+            profile_key=profile_key,
+            dither="gooddisplay",
+            color_distance="rgb",
+            strength=1.0,
+        )
+        legacy_ms = int((time.perf_counter() - legacy_started) * 1000)
+    except (TypeError, ValueError) as exc:
+        abort(400, description=str(exc))
+    return {
+        "original": _png_data(result.source),
+        "legacy": _png_data(legacy.preview),
+        "new": _png_data(result.encoded.preview),
+        "source_size": source_size,
+        "payload_bytes": len(result.encoded.payload),
+        "render_ms": result.render_ms,
+        "legacy_render_ms": legacy_ms,
+        "preset": configuration["requested_preset"],
+        "source_preset": result.preset,
+        "dither": result.options["dither"],
+        "color_distance": result.options["color_distance"],
+        "linear_light": bool(result.options.get("linear_light")),
+        "palette": _palette_statistics(result.encoded.preview, result.encoded.palette),
+        "publish_source": "server_original_upload_only",
+        "model": "disabled",
+    }
+
+
+def _persist_custom_preset(payload: dict) -> dict:
+    source_preset = str(payload.get("source_preset", "photo_balanced"))
+    if source_preset not in BUILTIN_PHOTO_PRESETS:
+        raise ValueError("RENDER-007 只能由內建照片 Preset 建立自訂副本")
+    options = payload.get("options", {})
+    palette = payload.get("palette", {})
+    if not isinstance(options, dict) or not isinstance(palette, dict):
+        raise ValueError("RENDER-007 Preset options 與 palette 必須是物件")
+    # Resolve once to validate all supported fields without changing the built-in preset.
+    from inktime.app.domain.rendering.photo_renderer import resolve_photo_options
+
+    resolve_photo_options(source_preset, options)
+    label = str(payload.get("label", "自訂照片 Preset")).strip()[:80]
+    if not label:
+        raise ValueError("RENDER-007 自訂 Preset 名稱不可空白")
+    preset_id = str(payload.get("id", ""))
+    existing = _custom_photo_presets()
+    if preset_id not in existing:
+        preset_id = f"custom-{secrets.token_hex(5)}"
+    existing[preset_id] = {
+        "id": preset_id,
+        "label": label,
+        "source_preset": source_preset,
+        "options": options,
+        "palette": palette,
+    }
+    encoded = json.dumps(existing, ensure_ascii=False, separators=(",", ":"))
+    if len(encoded) > 50_000:
+        raise ValueError("RENDER-007 自訂 Preset 總資料量超過 50000 字元")
+    current_app.extensions["inktime_settings_repository"].update(
+        "render.custom_photo_presets",
+        encoded,
+        changed_by=str(g.user["id"]),
+        source_ip=request.remote_addr or "unknown",
+    )
+    return existing[preset_id]
+
+
+@bp.post("/api/v1/rendering/presets")
+@administrator_required
+def save_photo_preset():
+    payload = request.get_json(silent=True) or {}
+    try:
+        preset = _persist_custom_preset(payload)
+    except (KeyError, TypeError, ValueError) as exc:
+        abort(400, description=str(exc))
+    return preset, 201
+
+
+@bp.post("/api/v1/rendering/test-release")
+@administrator_required
+def publish_test_release():
+    image, source_size = _decode_uploaded_photo()
+    device_id = str(request.form.get("device_id", "")).strip()
+    device = current_app.extensions["inktime_device_repository"].get(device_id)
+    if device is None:
+        abort(404, description="DEVICE-006 找不到測試裝置")
+    device = dict(device)
+    if not bool(device.get("enabled")):
+        abort(409, description="DEVICE-006 已停用的裝置不可傳送測試 Release")
+    profile_key = str(request.form.get("profile", "gdep073e01_6c"))
+    if profile_key != str(device.get("panel_profile")):
+        abort(409, description="DEVICE-006 測試色盤與裝置面板 Profile 不相容")
+    configuration = _renderer_request()
+    fit = str(request.form.get("fit", "cover"))
+    delivery = str(request.form.get("delivery", "next_wake"))
+    if delivery not in {"immediate", "next_wake"}:
+        abort(400, description="DEVICE-006 測試傳送時機不合法")
+    one_time = str(request.form.get("one_time", "true")).lower() in {"1", "true", "yes", "on"}
+    restore_formal = str(request.form.get("restore_formal", "true")).lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    try:
+        result = render_photo(
+            image,
+            profile_key=profile_key,
+            preset=configuration["preset"],
+            overrides=configuration["overrides"],
+            fit=fit,
+            palette_rgb=configuration["palette_rgb"],
+            palette_lab=configuration["palette_lab"],
+            palette_version=configuration["palette_version"],
+            text_regions=configuration["text_regions"],
+            face_regions=configuration["face_regions"],
+        )
+        profile = palette_for_profile(
+            profile_key,
+            rgb_values=configuration["palette_rgb"],
+            lab_values=configuration["palette_lab"],
+            palette_version=configuration["palette_version"],
+        )
+        manifest = current_app.extensions["inktime_release_publisher"].publish(
+            [("device-test-upload", result.processed)],
+            profile_key=profile_key,
+            profile_override=profile,
+            dither=str(result.options["dither"]),
+            color_distance=str(result.options["color_distance"]),
+            dither_strength=float(result.options["error_strength"]),
+            linear_light=bool(result.options.get("linear_light")),
+            protected_mask=result.protected_mask,
+            activate=False,
+            release_kind="device_test",
+            metadata={
+                "preset": configuration["requested_preset"],
+                "source_preset": result.preset,
+                "pipeline": result.options,
+                "source_size": source_size,
+                "server_rendered": True,
+            },
+        )
+        assignment = DeviceTestReleaseStore(current_app.config["INKTIME_RELEASE_DIR"]).assign(
+            device_id,
+            manifest["release_id"],
+            profile_key=profile_key,
+            delivery=delivery,
+            one_time=one_time,
+            restore_formal=restore_formal,
+        )
+        saved_preset = None
+        if str(request.form.get("save_preset", "false")).lower() in {"1", "true", "yes", "on"}:
+            saved_preset = _persist_custom_preset(
+                {
+                    "label": request.form.get("preset_label", "測試後儲存"),
+                    "source_preset": configuration["preset"],
+                    "options": configuration["overrides"],
+                    "palette": configuration["palette"],
+                }
+            )
+    except (KeyError, TypeError, ValueError) as exc:
+        abort(400, description=str(exc))
+    return {
+        "release_id": manifest["release_id"],
+        "release_kind": "device_test",
+        "device_id": device_id,
+        "delivery": assignment["delivery"],
+        "one_time": assignment["one_time"],
+        "restore_formal": assignment["restore_formal"],
+        "formal_schedule_overwritten": False,
+        "server_rendered": True,
+        "saved_preset": saved_preset,
+    }, 201
 
 
 @bp.get("/api/v1/rendering/preview/<photo_id>")
