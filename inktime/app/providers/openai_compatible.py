@@ -7,12 +7,12 @@ from typing import Any
 
 import requests
 
-from inktime.app.domain.analysis.schema import ANALYSIS_JSON_SCHEMA
+from inktime.app.domain.analysis.schema import ANALYSIS_JSON_SCHEMA, json_schema_for_stage
 from inktime.app.domain.analysis.scoring import DEFAULT_SCORING_RULES
 from .base import ProviderResponse, Usage, VisionProvider
 
 
-SYSTEM_PROMPT = """你是 InkTime 個人照片分析器。只輸出符合指定 JSON Schema 的 JSON，不可使用 Markdown code fence。請以繁體中文（台灣用語）描述。一次完成內容描述、允許類型、回憶分數、美觀分、技術品質分、情緒分、電子紙短文案、保留建議、敏感內容判斷與簡短原因。不得虛構人物關係、身份、地點或事件。"""
+SYSTEM_PROMPT = """你是 InkTime 個人照片分析器。只輸出符合指定 JSON Schema 的精簡 JSON，不可使用 Markdown code fence 或長篇敘述。請以繁體中文（台灣用語）描述。未知值使用 null 或 unknown；不得虛構人物關係、身份、地點或事件。完整 Schema 必須在同一次請求完成回憶、美學、技術、情緒、顯示適合度、場景、主體、裁切、電子紙與搜尋資訊；文案、地標與電子紙資訊不得再另行呼叫模型。評分等級使用 S/A/B/C/D/E，程式會換算排序分。"""
 
 
 class ProviderHTTPError(RuntimeError):
@@ -127,7 +127,10 @@ class OpenAICompatibleProvider(VisionProvider):
             "temperature": 0.1,
         }
         if self.supports_json_schema:
-            body["response_format"] = {"type": "json_schema", "json_schema": ANALYSIS_JSON_SCHEMA}
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": json_schema_for_stage(stage),
+            }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
         return self._post_completion(body)
