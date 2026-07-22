@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -1379,6 +1379,54 @@ class PhotoRepository:
                     json.dumps(result, ensure_ascii=False), raw_json, input_tokens, output_tokens, cached_tokens,
                     estimated_cost, latency_ms, datetime.now(timezone.utc).isoformat(),
                 ),
+            )
+
+    def acquire_ai_cache_reservation(
+        self, cache_key: str, owner_id: str, *, lease_seconds: int = 120
+    ) -> bool:
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        lease_until = (now_dt + timedelta(seconds=max(5, lease_seconds))).isoformat()
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                "SELECT owner_id,status,lease_until FROM ai_cache_reservations WHERE cache_key=?",
+                (cache_key,),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    """
+                    INSERT INTO ai_cache_reservations(
+                        cache_key,owner_id,status,lease_until,created_at,updated_at
+                    ) VALUES (?,?,'reserved',?,?,?)
+                    """,
+                    (cache_key, owner_id, lease_until, now, now),
+                )
+                return True
+            takeover = str(row["status"]) == "failed" or str(row["lease_until"]) <= now
+            if not takeover:
+                return str(row["owner_id"]) == owner_id
+            connection.execute(
+                """
+                UPDATE ai_cache_reservations
+                SET owner_id=?,status='reserved',lease_until=?,updated_at=?,last_error=NULL
+                WHERE cache_key=?
+                """,
+                (owner_id, lease_until, now, cache_key),
+            )
+            return True
+
+    def finish_ai_cache_reservation(
+        self, cache_key: str, owner_id: str, *, error: str | None = None
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.session() as connection:
+            connection.execute(
+                """
+                UPDATE ai_cache_reservations
+                SET status=?,updated_at=?,last_error=?
+                WHERE cache_key=? AND owner_id=? AND status='reserved'
+                """,
+                ("failed" if error else "completed", now, error[:500] if error else None, cache_key, owner_id),
             )
 
     def list_existing_photo_ids(

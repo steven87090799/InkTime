@@ -288,7 +288,8 @@ class JobRepository:
                     connection.execute(
                         f"""
                         UPDATE job_items SET status='running', worker_id=?, started_at=?,
-                                             lease_until=?, attempts=attempts+1
+                                             lease_until=?, attempts=attempts+1,
+                                             idempotency_key=COALESCE(idempotency_key,job_id || ':' || id)
                         WHERE id IN ({placeholders})
                         """,
                         (worker_id, now, lease_until, *ids),
@@ -350,6 +351,37 @@ class JobRepository:
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+
+    def record_late_completion(
+        self, job_id: str, item_id: str, result: dict, actual_cost: float = 0
+    ) -> None:
+        """Timeout 後底層 Thread 才結束：只記錄一次診斷，不可轉成正式成功。"""
+        now = utc_now()
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE job_items
+                SET status='failed',completed_at=?,result_json=?,error_code='JOB-004',
+                    lease_until=NULL,completion_state='timed_out_completed',dead_lettered_at=?
+                WHERE id=? AND job_id=? AND status='running'
+                """,
+                (now, json.dumps(result, ensure_ascii=False), now, item_id, job_id),
+            )
+            if cursor.rowcount:
+                connection.execute(
+                    """
+                    UPDATE jobs SET failed_items=failed_items+1,spent=spent+?,heartbeat_at=?
+                    WHERE id=?
+                    """,
+                    (actual_cost, now, job_id),
+                )
+        if cursor.rowcount:
+            self.add_event(
+                job_id,
+                "timed_out_completed",
+                "工作逾時後才結束；結果僅保留診斷，不會重試或重複套用",
+                {"item_id": item_id},
+            )
 
     def defer_item(self, item_id: str) -> None:
         """預算阻擋時歸還租約，不把尚未送出的項目記成分析失敗。"""

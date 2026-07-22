@@ -87,8 +87,10 @@ class BoundedJobWorker:
 
     def run_job(self, job_id: str) -> None:
         futures: dict[Future, tuple[str, float]] = {}
+        timed_out: set[Future] = set()
+        timeout_triggered = False
         with ThreadPoolExecutor(max_workers=self.concurrency, thread_name_prefix="inktime") as executor:
-            while not self.stop_event.is_set():
+            while not self.stop_event.is_set() or futures:
                 job = self.repository.get(job_id)
                 if job is None or job["status"] in {
                     "cancelled",
@@ -111,7 +113,11 @@ class BoundedJobWorker:
                     )
                     break
 
-                if job["status"] in {"running", "retrying"} and len(futures) < self.queue_size:
+                if (
+                    not timeout_triggered
+                    and job["status"] in {"running", "retrying"}
+                    and len(futures) < self.queue_size
+                ):
                     claimed = self.repository.claim(job_id, self.worker_id, self.queue_size - len(futures))
                     for item in claimed:
                         future = executor.submit(self._process, item)
@@ -130,8 +136,11 @@ class BoundedJobWorker:
                     if self.timeout_seconds:
                         expired = [future for future, (_item_id, started) in futures.items() if time.monotonic() - started >= self.timeout_seconds]
                         for future in expired:
-                            item_id, _started = futures.pop(future)
-                            self._record_failure(job_id, item_id, TimeoutError("JOB-004 工作超過排程最長執行時間"))
+                            timed_out.add(future)
+                            timeout_triggered = True
+                            # Thread 無法被安全強制終止；停止 claim、要求 cooperative
+                            # cancellation，並持續追蹤 Future 到真正完成。
+                            self.stop_event.set()
                     continue
                 for future in done:
                     item_id, _started = futures.pop(future)
@@ -140,7 +149,12 @@ class BoundedJobWorker:
                     except Exception as exc:
                         self._record_failure(job_id, item_id, exc)
                     else:
-                        self.repository.complete_item(job_id, completed_id, result, cost)
+                        if future in timed_out:
+                            self.repository.record_late_completion(
+                                job_id, completed_id, result, cost
+                            )
+                        else:
+                            self.repository.complete_item(job_id, completed_id, result, cost)
                     self._record_processed()
 
             # 優雅停止：已送出的工作完成並記錄；不再 claim 新項目。
@@ -151,7 +165,10 @@ class BoundedJobWorker:
                 except Exception as exc:
                     self._record_failure(job_id, item_id, exc)
                 else:
-                    self.repository.complete_item(job_id, completed_id, result, cost)
+                    if future in timed_out:
+                        self.repository.record_late_completion(job_id, completed_id, result, cost)
+                    else:
+                        self.repository.complete_item(job_id, completed_id, result, cost)
                 self._record_processed()
             job = self.repository.get(job_id)
             if job is not None and job["status"] == "pausing":

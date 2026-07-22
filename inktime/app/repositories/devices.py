@@ -8,6 +8,10 @@ from inktime.app.core.security import hash_device_token, issue_device_token
 from inktime.app.db import Database
 
 
+class DeviceRateLimitError(RuntimeError):
+    pass
+
+
 class DeviceRepository:
     def __init__(self, database: Database, pepper: str) -> None:
         self.database = database
@@ -140,8 +144,19 @@ class DeviceRepository:
 
     def authenticate(self, token: str, ip_address: str):
         digest = hash_device_token(token, self.pepper)
-        now = datetime.now(timezone.utc).isoformat()
-        with self.database.session() as connection:
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        cutoff = (now_dt - timedelta(minutes=5)).isoformat()
+        ip_hash = hash_device_token(ip_address[:64], self.pepper)
+        with self.database.transaction() as connection:
+            failures = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM device_auth_failures WHERE ip_hash=? AND attempted_at>=?",
+                    (ip_hash, cutoff),
+                ).fetchone()[0]
+            )
+            if failures >= 20:
+                raise DeviceRateLimitError("DEVICE-007 裝置驗證嘗試過多")
             row = connection.execute(
                 "SELECT * FROM devices WHERE token_hash=? AND enabled=1", (digest,)
             ).fetchone()
@@ -149,6 +164,15 @@ class DeviceRepository:
                 connection.execute(
                     "UPDATE devices SET last_seen_at=?, last_ip=?, updated_at=? WHERE id=?",
                     (now, ip_address[:64], now, row["id"]),
+                )
+                connection.execute("DELETE FROM device_auth_failures WHERE ip_hash=?", (ip_hash,))
+            else:
+                connection.execute(
+                    "INSERT INTO device_auth_failures(ip_hash,attempted_at) VALUES (?,?)",
+                    (ip_hash, now),
+                )
+                connection.execute(
+                    "DELETE FROM device_auth_failures WHERE attempted_at<?", (cutoff,)
                 )
         return row
 
