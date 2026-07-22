@@ -29,6 +29,7 @@ class BoundedJobWorker:
         progress_interval_seconds: int = 300,
         progress_callback: ProgressCallback | None = None,
         error_callback: ErrorCallback | None = None,
+        timeout_seconds: int = 0,
     ) -> None:
         self.repository = repository
         self.processor = processor
@@ -39,6 +40,7 @@ class BoundedJobWorker:
         self.progress_interval_seconds = max(1, progress_interval_seconds)
         self.progress_callback = progress_callback
         self.error_callback = error_callback
+        self.timeout_seconds = max(0, int(timeout_seconds))
         self.worker_id = str(uuid4())
         self.stop_event = threading.Event()
         self.max_observed_futures = 0
@@ -84,7 +86,7 @@ class BoundedJobWorker:
             self._last_progress_at = now
 
     def run_job(self, job_id: str) -> None:
-        futures: dict[Future, str] = {}
+        futures: dict[Future, tuple[str, float]] = {}
         with ThreadPoolExecutor(max_workers=self.concurrency, thread_name_prefix="inktime") as executor:
             while not self.stop_event.is_set():
                 job = self.repository.get(job_id)
@@ -113,7 +115,7 @@ class BoundedJobWorker:
                     claimed = self.repository.claim(job_id, self.worker_id, self.queue_size - len(futures))
                     for item in claimed:
                         future = executor.submit(self._process, item)
-                        futures[future] = str(item["id"])
+                        futures[future] = (str(item["id"]), time.monotonic())
                     self.max_observed_futures = max(self.max_observed_futures, len(futures))
 
                 if not futures:
@@ -122,12 +124,17 @@ class BoundedJobWorker:
                     # 可能正在等待指數退避；單次執行先交還 Scheduler。
                     break
 
-                done, _ = wait(futures, timeout=30, return_when=FIRST_COMPLETED)
+                done, _ = wait(futures, timeout=min(30, self.timeout_seconds or 30), return_when=FIRST_COMPLETED)
                 if not done:
                     self.repository.renew_leases(job_id, self.worker_id)
+                    if self.timeout_seconds:
+                        expired = [future for future, (_item_id, started) in futures.items() if time.monotonic() - started >= self.timeout_seconds]
+                        for future in expired:
+                            item_id, _started = futures.pop(future)
+                            self._record_failure(job_id, item_id, TimeoutError("JOB-004 工作超過排程最長執行時間"))
                     continue
                 for future in done:
-                    item_id = futures.pop(future)
+                    item_id, _started = futures.pop(future)
                     try:
                         completed_id, result, cost = future.result()
                     except Exception as exc:
@@ -138,7 +145,7 @@ class BoundedJobWorker:
 
             # 優雅停止：已送出的工作完成並記錄；不再 claim 新項目。
             for future in list(futures):
-                item_id = futures[future]
+                item_id, _started = futures[future]
                 try:
                     completed_id, result, cost = future.result()
                 except Exception as exc:

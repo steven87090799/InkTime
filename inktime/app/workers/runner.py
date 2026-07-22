@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 import logging
 import signal
@@ -36,7 +37,7 @@ class WorkerRunner:
             recovered = repository.recover_stale()
             self._last_recovery_at = time.monotonic()
         processed_jobs = 0
-        for job in repository.list(limit=100):
+        for job in repository.iter_runnable():
             if self.stop.is_set() or job["status"] not in {"running", "retrying"}:
                 continue
             settings = json.loads(job["settings_json"])
@@ -143,9 +144,11 @@ class WorkerRunner:
                         mode=str(settings.get("mode", "incremental")),
                         trigger_source=str(settings.get("trigger_source", "api")),
                         build_thumbnails=bool(settings.get("build_thumbnails", True)),
-                        disk_batch_size=scanner_disk_batch_size,
+                        disk_batch_size=int(settings.get("disk_batch_size", scanner_disk_batch_size)),
                         write_batch_size=scanner_write_batch_size,
-                        missing_threshold_ratio=scanner_missing_threshold_ratio,
+                        missing_threshold_ratio=float(
+                            settings.get("missing_threshold_percent", scanner_missing_threshold_ratio * 100)
+                        ) / 100,
                         cancel_requested=scan_cancel_requested,
                         progress_callback=log_scan_progress,
                         progress_interval_items=progress_items,
@@ -201,6 +204,20 @@ class WorkerRunner:
                 if job["kind"] == "backup":
                     path = self.app.extensions["inktime_backup_service"].create()
                     return {"backup": path.name}
+                if job["kind"] == "cleanup":
+                    with self.app.extensions["inktime_database"].session() as connection:
+                        hashes = {
+                            str(row[0]).casefold()
+                            for row in connection.execute(
+                                "SELECT DISTINCT sha256 FROM photos WHERE lifecycle_status='active' AND sha256 IS NOT NULL"
+                            )
+                        }
+                    cache = self.app.extensions["inktime_thumbnail_cache"]
+                    return cache.cleanup(
+                        max_bytes=int(settings.get("max_bytes", 5 * 1024 * 1024 * 1024)),
+                        retention_days=int(settings.get("retention_days", 30)),
+                        active_hashes=hashes,
+                    )
                 return analysis.analyze_photo(
                     photo_id=item["photo_id"],
                     job_id=job["id"],
@@ -251,6 +268,7 @@ class WorkerRunner:
                 progress_interval_seconds=progress_seconds,
                 progress_callback=log_progress,
                 error_callback=log_failure,
+                timeout_seconds=int(settings.get("timeout_seconds", 0) or 0),
             )
             log_event(
                 LOGGER,
@@ -263,6 +281,15 @@ class WorkerRunner:
             self.current.run_job(job["id"])
             finished = repository.get(job["id"])
             if finished is not None:
+                scheduled_task = settings.get("scheduled_task")
+                if scheduled_task:
+                    schedules = self.app.extensions["inktime_schedule_repository"]
+                    if str(finished["status"]) == "completed":
+                        schedules.record_success(str(scheduled_task))
+                    elif str(finished["status"]) not in {"running", "retrying"}:
+                        task = schedules.get(str(scheduled_task))
+                        if task:
+                            schedules.record_failure(task, str(finished["status"]), datetime.now().astimezone())
                 level = logging.WARNING if int(finished["failed_items"]) else logging.INFO
                 log_event(
                     LOGGER,
@@ -297,10 +324,22 @@ class WorkerRunner:
                 self.stop.wait(max(1.0, min(wait_seconds, 300.0)))
         log_event(LOGGER, logging.INFO, "背景 Worker 已停止", event="worker_stopped")
 
+    def run_drain(self) -> int:
+        """處理目前可執行的 Queue 後退出，不進入閒置輪詢。"""
+        processed = 0
+        while not self.stop.is_set():
+            count = self.run_once()
+            processed += count
+            if count == 0:
+                return processed
+        return processed
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="InkTime 背景 Worker")
-    parser.add_argument("--once", action="store_true", help="處理目前工作後結束")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--once", action="store_true", help="單次檢查後結束")
+    mode.add_argument("--drain", action="store_true", help="處理目前 Queue 後結束")
     args = parser.parse_args()
     from server import app
 
@@ -310,6 +349,8 @@ def main() -> None:
     with app.app_context():
         if args.once:
             runner.run_once()
+        elif args.drain:
+            runner.run_drain()
         else:
             runner.run_forever()
 

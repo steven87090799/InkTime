@@ -32,6 +32,14 @@ def test_production_runner_completes_local_job_without_provider(app, tmp_path):
     assert job["completed_items"] == 1
 
 
+def test_drain_worker_exits_after_current_queue(app):
+    repository = app.extensions["inktime_job_repository"]
+    job_id = repository.create_maintenance(kind="cleanup", name="快取清理", settings={}, created_by="tester")
+    app.extensions["inktime_job_service"].start(job_id)
+    assert WorkerRunner(app).run_drain() == 1
+    assert repository.get(job_id)["status"] == "completed"
+
+
 def test_scan_requested_by_ui_runs_as_background_job(client, app, tmp_path):
     from tests.conftest import create_admin, csrf, login
 

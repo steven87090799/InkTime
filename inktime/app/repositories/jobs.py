@@ -51,6 +51,8 @@ class JobRepository:
         photo_ids: Iterable[str],
         created_by: str | None,
         budget_limit: float | None = None,
+        priority: int = 3,
+        dedupe_key: str | None = None,
     ) -> str:
         job_id = str(uuid4())
         now = utc_now()
@@ -61,8 +63,8 @@ class JobRepository:
                 connection.execute(
                     """
                     INSERT INTO jobs(id, kind, name, status, strategy, settings_json,
-                                     budget_limit, created_by, created_at)
-                    VALUES (?, 'analysis', ?, 'pending', ?, ?, ?, ?, ?)
+                                     budget_limit, created_by, created_at, priority, dedupe_key)
+                    VALUES (?, 'analysis', ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         job_id,
@@ -72,6 +74,8 @@ class JobRepository:
                         budget_limit,
                         created_by,
                         now,
+                        max(1, min(int(priority), 6)),
+                        dedupe_key,
                     ),
                 )
                 batch: list[tuple] = []
@@ -108,7 +112,16 @@ class JobRepository:
         with self.database.session() as connection:
             return connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
 
-    def create_maintenance(self, *, kind: str, name: str, settings: dict, created_by: str | None) -> str:
+    def create_maintenance(
+        self,
+        *,
+        kind: str,
+        name: str,
+        settings: dict,
+        created_by: str | None,
+        priority: int | None = None,
+        dedupe_key: str | None = None,
+    ) -> str:
         if kind not in {"scan", "backup", "render", "cleanup", "virtual_display"}:
             raise ValueError("不支援的維護工作")
         job_id = str(uuid4())
@@ -117,9 +130,32 @@ class JobRepository:
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                if dedupe_key:
+                    existing = connection.execute(
+                        """
+                        SELECT id FROM jobs WHERE dedupe_key=?
+                        AND status IN ('pending','preparing','running','pausing','retrying')
+                        """,
+                        (dedupe_key,),
+                    ).fetchone()
+                    if existing is not None:
+                        connection.execute("COMMIT")
+                        return str(existing["id"])
                 connection.execute(
-                    "INSERT INTO jobs(id,kind,name,status,strategy,settings_json,total_items,created_by,created_at) VALUES (?,?,?,'pending','local',?,1,?,?)",
-                    (job_id, kind, name, json.dumps(settings, ensure_ascii=False), created_by, now),
+                    """
+                    INSERT INTO jobs(id,kind,name,status,strategy,settings_json,total_items,created_by,created_at,priority,dedupe_key)
+                    VALUES (?,?,?,'pending','local',?,1,?,?,?,?)
+                    """,
+                    (
+                        job_id,
+                        kind,
+                        name,
+                        json.dumps(settings, ensure_ascii=False),
+                        created_by,
+                        now,
+                        max(1, min(int(priority if priority is not None else self._priority_for(kind)), 6)),
+                        dedupe_key,
+                    ),
                 )
                 connection.execute(
                     "INSERT INTO job_items(id,job_id,photo_id,available_at) VALUES (?,?,NULL,?)",
@@ -132,11 +168,36 @@ class JobRepository:
         self.add_event(job_id, "created", f"已建立 {kind} 維護工作")
         return job_id
 
+    @staticmethod
+    def _priority_for(kind: str) -> int:
+        return {"render": 2, "virtual_display": 2, "scan": 4, "cleanup": 6, "backup": 6}.get(kind, 4)
+
     def list(self, limit: int = 100):
         with self.database.session() as connection:
             return connection.execute(
                 "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
             ).fetchall()
+
+    def iter_runnable(self, page_size: int = 100):
+        """以 keyset 走訪所有可執行 Job，避免舊工作被最新 100 筆遮蔽。"""
+        last: tuple[int, str, str] | None = None
+        while True:
+            where = "status IN ('running','retrying')"
+            params: list[object] = []
+            if last is not None:
+                where += " AND (priority>? OR (priority=? AND (created_at>? OR (created_at=? AND id>?))))"
+                params.extend([last[0], last[0], last[1], last[1], last[2]])
+            params.append(max(1, min(page_size, 500)))
+            with self.database.session() as connection:
+                rows = connection.execute(
+                    f"SELECT * FROM jobs WHERE {where} ORDER BY priority ASC,created_at ASC,id ASC LIMIT ?",  # noqa: S608
+                    params,
+                ).fetchall()
+            if not rows:
+                return
+            yield from rows
+            last_row = rows[-1]
+            last = (int(last_row["priority"]), str(last_row["created_at"]), str(last_row["id"]))
 
     def list_items(self, job_id: str, *, limit: int = 100, offset: int = 0):
         with self.database.session() as connection:
@@ -215,9 +276,9 @@ class JobRepository:
                     return []
                 rows = connection.execute(
                     """
-                    SELECT * FROM job_items
-                    WHERE job_id=? AND status='pending' AND available_at<=?
-                    ORDER BY id LIMIT ?
+                SELECT * FROM job_items
+                WHERE job_id=? AND status='pending' AND available_at<=?
+                ORDER BY available_at ASC,id ASC LIMIT ?
                     """,
                     (job_id, now, limit),
                 ).fetchall()
@@ -316,8 +377,11 @@ class JobRepository:
                 terminal = item is None or int(item["attempts"]) >= max_attempts
                 if terminal:
                     connection.execute(
-                        "UPDATE job_items SET status='failed', completed_at=?, error_code=?, lease_until=NULL WHERE id=?",
-                        (now, error_code, item_id),
+                        """
+                        UPDATE job_items SET status='failed', completed_at=?, error_code=?, lease_until=NULL,
+                                             dead_lettered_at=? WHERE id=?
+                        """,
+                        (now, error_code, now, item_id),
                     )
                     connection.execute("UPDATE jobs SET failed_items=failed_items+1 WHERE id=?", (job_id,))
                 else:
@@ -407,7 +471,10 @@ class JobRepository:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 cursor = connection.execute(
-                    "UPDATE job_items SET status='pending', available_at=?, error_code=NULL, completed_at=NULL WHERE job_id=? AND status='failed'",
+                    """
+                    UPDATE job_items SET status='pending', available_at=?, error_code=NULL, completed_at=NULL,
+                                         dead_lettered_at=NULL WHERE job_id=? AND status='failed'
+                    """,
                     (now, job_id),
                 )
                 connection.execute(
