@@ -73,6 +73,7 @@ def rendering_page():
         current_fit_mode=str(settings.get("render.fit_mode", "contain")),
         selection_mode=str(settings.get("render.selection_mode", "history_today")),
         candidate_photos=render_service.select_candidates_details(12),
+        devices=[dict(device) for device in current_app.extensions["inktime_device_repository"].list()],
     )
 
 
@@ -668,6 +669,19 @@ def publish_release():
     if profile_keys and any(value not in DISPLAY_PROFILES for value in profile_keys):
         abort(400, description="RENDER-003 包含不支援的顯示 Profile")
     job_settings = {"photo_ids": [str(value) for value in payload.get("photo_ids", [])]}
+    history = payload.get("history")
+    if history is not None:
+        if not isinstance(history, dict):
+            abort(400, description="HISTORY-001 history 必須是物件")
+        history_date = str(history.get("history_date", ""))
+        try:
+            datetime.strptime(history_date, "%Y-%m-%d")
+        except ValueError:
+            abort(400, description="HISTORY-001 history_date 必須是 YYYY-MM-DD")
+        job_settings["history"] = {
+            "history_date": history_date,
+            "selection_method": str(history.get("selection_method", "manual"))[:80],
+        }
     if profile_keys:
         job_settings["profile_keys"] = profile_keys
     job_id = repository.create_maintenance(
@@ -678,6 +692,80 @@ def publish_release():
     )
     current_app.extensions["inktime_job_service"].start(job_id)
     return {"id": job_id, "detail_url": f"/jobs/{job_id}"}, 202
+
+
+def _history_response(selection: dict) -> dict:
+    if selection.get("status") != "ok":
+        return selection
+    settings = current_app.extensions["inktime_settings_repository"]
+    for candidate in selection["candidates"]:
+        candidate["renderer"] = "server"
+        candidate["render_profile"] = str(settings.get("render.profile", "safe_4c"))
+        candidate["palette_version"] = str(settings.get("render.profile", "safe_4c"))
+        candidate["preset"] = str(settings.get("render.layout", "photo_info"))
+        candidate["dither"] = str(settings.get("render.dither", "floyd_steinberg"))
+        candidate["render_ms"] = None
+    return selection
+
+
+@bp.post("/api/v1/rendering/history/select")
+@administrator_required
+def select_history_day():
+    try:
+        selection = current_app.extensions["inktime_render_service"].select_random_history_day(
+            request.get_json(silent=True) or {}
+        )
+    except ValueError as exc:
+        abort(400, description=str(exc))
+    return _history_response(selection)
+
+
+@bp.post("/api/v1/rendering/history/reroll")
+@administrator_required
+def reroll_history_day():
+    try:
+        selection = current_app.extensions["inktime_render_service"].reroll_history_day(
+            request.get_json(silent=True) or {}
+        )
+    except ValueError as exc:
+        abort(400, description=str(exc))
+    return _history_response(selection)
+
+
+@bp.post("/api/v1/rendering/history/test-release")
+@administrator_required
+def publish_history_test_release():
+    payload = request.get_json(silent=True) or {}
+    photo_id = str(payload.get("photo_id", "")).strip()
+    device_id = str(payload.get("device_id", "")).strip()
+    device = current_app.extensions["inktime_device_repository"].get(device_id)
+    if not photo_id:
+        abort(400, description="HISTORY-001 必須選擇照片")
+    if device is None or not bool(device["enabled"]):
+        abort(404, description="DEVICE-006 找不到可用測試裝置")
+    settings = current_app.extensions["inktime_settings_repository"]
+    profile_key = str(settings.get("render.profile", "safe_4c"))
+    if profile_key != str(device["panel_profile"]):
+        abort(409, description="DEVICE-006 目前渲染 Profile 與裝置面板不相容")
+    try:
+        image = current_app.extensions["inktime_render_service"].render_photo(photo_id)
+        manifest = current_app.extensions["inktime_release_publisher"].publish(
+            [(photo_id, image)], profile_key=profile_key,
+            dither=str(settings.get("render.dither", "floyd_steinberg")),
+            color_distance=str(settings.get("render.color_distance", "oklab")),
+            dither_strength=float(settings.get("render.dither_strength", 1.0)),
+            activate=False, release_kind="device_test",
+            metadata={"server_rendered": True, "source_photo_id": photo_id, "history_selection": True},
+        )
+    except (KeyError, OSError, ValueError) as exc:
+        abort(422, description=f"RENDER-005 {exc}")
+    assignment = DeviceTestReleaseStore(current_app.config["INKTIME_RELEASE_DIR"]).assign(
+        device_id, manifest["release_id"], profile_key=profile_key,
+        delivery=str(payload.get("delivery", "next_wake")), one_time=True,
+        restore_formal=True,
+    )
+    return {"release_id": manifest["release_id"], "release_kind": "device_test", "server_rendered": True,
+            "formal_schedule_overwritten": False, "delivery": assignment["delivery"]}, 201
 
 
 @bp.get("/rendering/releases/<release_id>/<filename>")

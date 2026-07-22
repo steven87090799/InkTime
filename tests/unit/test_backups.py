@@ -43,6 +43,12 @@ def seed(database: Database, *, extra_photo: bool = False) -> None:
         )
         connection.execute(
             """
+            INSERT OR IGNORE INTO display_history(photo_id,history_date,selection_method,release_id,displayed_at)
+            VALUES ('photo','2020-07-22','random_history_day','release',datetime('now'))
+            """
+        )
+        connection.execute(
+            """
             INSERT OR IGNORE INTO jobs(
                 id,kind,name,status,strategy,settings_json,created_at
             ) VALUES ('scheduled-backup','backup','排程備份','pending','local','{}',datetime('now'))
@@ -78,11 +84,12 @@ def test_backup_excludes_secrets_and_restores_analysis_and_photo_state(tmp_path)
     manifest = service.validate(archive)
 
     assert manifest["backup_format_version"] == 2
-    assert manifest["database_schema_version"] == 11
+    assert manifest["database_schema_version"] == 14
     assert manifest["secrets_policy"] == "excluded"
     assert manifest["important_table_counts"]["photos"] == 1
     assert manifest["important_table_counts"]["releases"] == 1
     assert manifest["important_table_counts"]["jobs"] == 1
+    assert manifest["important_table_counts"]["display_history"] == 1
     with zipfile.ZipFile(archive) as bundle:
         backed_up_database = tmp_path / "backed-up.sqlite3"
         backed_up_database.write_bytes(bundle.read("inktime.sqlite3"))
@@ -96,7 +103,7 @@ def test_backup_excludes_secrets_and_restores_analysis_and_photo_state(tmp_path)
     seed(database, extra_photo=True)
     restored = service.restore(archive)
 
-    assert restored["schema_version"] == 11
+    assert restored["schema_version"] == 14
     assert Path(restored["safety_copy"]).is_file()
     with database.session() as connection:
         photo = connection.execute(
@@ -106,6 +113,7 @@ def test_backup_excludes_secrets_and_restores_analysis_and_photo_state(tmp_path)
         assert connection.execute("SELECT caption FROM photo_analysis").fetchone()[0] == "重要分析"
         assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM releases").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM display_history").fetchone()[0] == 1
         assert connection.execute("SELECT status FROM jobs").fetchone()[0] == "pending"
         assert connection.execute("SELECT COUNT(*) FROM secrets").fetchone()[0] == 0
     assert not list(tmp_path.glob(".inktime-restore-*"))

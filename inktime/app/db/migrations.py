@@ -726,6 +726,27 @@ MIGRATIONS = (
             "INSERT OR IGNORE INTO feature_flags(key,enabled,description,updated_at) VALUES ('photo_quality_ai',1,'本地品質、排除管理、結構化 AI 快取與旅行排序已啟用',datetime('now'))",
         ),
     ),
+    Migration(
+        14,
+        "加入歷史今日顯示紀錄與 Prompt 版本",
+        (
+            "ALTER TABLE photo_analysis ADD COLUMN prompt_version TEXT NOT NULL DEFAULT 'photo-quality-v3'",
+            "CREATE INDEX IF NOT EXISTS idx_photos_history_selection ON photos(eligible,lifecycle_status,captured_at,id)",
+            """
+            CREATE TABLE IF NOT EXISTS display_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE RESTRICT,
+                history_date TEXT NOT NULL,
+                selection_method TEXT NOT NULL,
+                release_id TEXT,
+                displayed_at TEXT NOT NULL,
+                metadata_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_display_history_photo ON display_history(photo_id,displayed_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_display_history_date ON display_history(history_date,displayed_at DESC)",
+        ),
+    ),
 )
 
 

@@ -27,6 +27,7 @@ IMPORTANT_TABLES = (
     "scan_missing_candidates",
     "releases",
     "device_events",
+    "display_history",
 )
 
 _COUNT_SQL = {
@@ -39,6 +40,7 @@ _COUNT_SQL = {
     "scan_missing_candidates": "SELECT COUNT(*) FROM scan_missing_candidates",
     "releases": "SELECT COUNT(*) FROM releases",
     "device_events": "SELECT COUNT(*) FROM device_events",
+    "display_history": "SELECT COUNT(*) FROM display_history",
 }
 
 

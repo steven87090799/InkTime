@@ -1659,6 +1659,7 @@ class PhotoRepository:
         final_ranking_score: float | None = None,
         travel_bonus: float = 0.0,
         location_rule_version: str | None = None,
+        prompt_version: str = "photo-quality-v3",
     ) -> None:
         import json
 
@@ -1672,8 +1673,8 @@ class PhotoRepository:
                         memory_score,beauty_score,technical_quality_score,emotion_score,side_caption,should_keep,
                         sensitive,reason,raw_json,analysis_source,ranking_score,scoring_version_id,created_at,
                         schema_kind,semantic_json,local_score,semantic_score,base_ranking_score,final_ranking_score,
-                        ranking_rule_version,travel_bonus,location_rule_version)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        ranking_rule_version,travel_bonus,location_rule_version,prompt_version)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         photo_id,
@@ -1713,6 +1714,7 @@ class PhotoRepository:
                         "ranking-v2",
                         travel_bonus,
                         location_rule_version,
+                        prompt_version,
                     ),
                 )
                 connection.execute(
