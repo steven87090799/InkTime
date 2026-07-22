@@ -638,6 +638,42 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_photos_scan_incomplete ON photos(library_id,metadata_status,local_features_status,id)",
         ),
     ),
+    Migration(
+        12,
+        "加入低資源排程、優先佇列與快取保留",
+        (
+            "ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 4 CHECK(priority BETWEEN 1 AND 6)",
+            "ALTER TABLE jobs ADD COLUMN dedupe_key TEXT",
+            "ALTER TABLE job_items ADD COLUMN dead_lettered_at TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_jobs_runnable_priority ON jobs(status,priority,created_at,id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_dedupe ON jobs(dedupe_key) WHERE dedupe_key IS NOT NULL AND status IN ('pending','preparing','running','pausing','retrying')",
+            "CREATE INDEX IF NOT EXISTS idx_job_items_dead_letter ON job_items(dead_lettered_at) WHERE dead_lettered_at IS NOT NULL",
+            """
+            CREATE TABLE IF NOT EXISTS scheduled_tasks (
+                key TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+                cron TEXT NOT NULL,
+                weekdays_json TEXT NOT NULL DEFAULT '[]',
+                start_time TEXT NOT NULL DEFAULT '00:00',
+                window_start TEXT,
+                window_end TEXT,
+                timeout_seconds INTEGER NOT NULL DEFAULT 3600 CHECK(timeout_seconds BETWEEN 30 AND 86400),
+                retry_count INTEGER NOT NULL DEFAULT 2 CHECK(retry_count BETWEEN 0 AND 10),
+                retry_interval_seconds INTEGER NOT NULL DEFAULT 900 CHECK(retry_interval_seconds BETWEEN 30 AND 86400),
+                last_success TEXT,
+                last_failure TEXT,
+                next_run TEXT,
+                error_status TEXT,
+                config_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_due ON scheduled_tasks(enabled,next_run,key)",
+        ),
+    ),
 )
 
 

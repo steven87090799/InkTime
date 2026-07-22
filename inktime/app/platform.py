@@ -32,6 +32,7 @@ from inktime.app.repositories.jobs import JobRepository
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.providers import ProviderRepository
 from inktime.app.repositories.scoring import ScoringProfileRepository
+from inktime.app.repositories.schedules import ScheduledTaskRepository
 from inktime.app.repositories.settings import SecretStore, SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.jobs import JobService
@@ -112,12 +113,15 @@ def initialize_platform(
     app.extensions["inktime_job_service"] = JobService(app.extensions["inktime_job_repository"])
     settings_repository = SettingsRepository(database)
     settings_repository.ensure_defaults()
+    schedule_repository = ScheduledTaskRepository(database)
+    schedule_repository.ensure_defaults(str(settings_repository.get("general.timezone", "Asia/Taipei")))
     configure_logging(settings_repository=settings_repository)
     app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(
         minutes=int(settings_repository.get("security.session_minutes", 30))
     )
     secret_store = SecretStore(database, secret)
     app.extensions["inktime_settings_repository"] = settings_repository
+    app.extensions["inktime_schedule_repository"] = schedule_repository
     scoring_repository = ScoringProfileRepository(database, settings_repository)
     scoring_repository.ensure_initial()
     app.extensions["inktime_scoring_repository"] = scoring_repository

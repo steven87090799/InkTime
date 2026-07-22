@@ -13,7 +13,7 @@ from inktime.app.db.migrations import Migration, MIGRATIONS
 
 def test_fresh_database_is_migrated(tmp_path):
     database = Database(tmp_path / "inktime.db")
-    assert migrate(database) == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    assert migrate(database) == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     assert database.integrity_check() == "ok"
     with database.session() as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -34,7 +34,7 @@ def test_fresh_database_is_migrated(tmp_path):
         "scan_errors",
         "scan_missing_candidates",
     } <= tables
-    assert tuple(history) == (11, 11)
+    assert tuple(history) == (12, 12)
 
 
 def test_existing_photo_scores_table_is_preserved(tmp_path):
@@ -114,7 +114,7 @@ def test_concurrent_migrations_are_serialized(tmp_path):
     database = Database(tmp_path / "inktime.db")
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _index: migrate(database), range(2)))
-    assert sorted(results, key=len) == [[], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]]
+    assert sorted(results, key=len) == [[], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]]
     assert database.integrity_check() == "ok"
 
 
@@ -199,7 +199,7 @@ def test_unfinished_migration_stops_startup_before_new_schema_writes(tmp_path):
             """
             INSERT INTO migration_history(
                 schema_version,migration_name,migration_started_at,migration_status,backup_path
-            ) VALUES (12,'中斷測試',datetime('now'),'running','/data/backups/pre-migration.sqlite3')
+            ) VALUES (13,'中斷測試',datetime('now'),'running','/data/backups/pre-migration.sqlite3')
             """
         )
 
@@ -207,13 +207,13 @@ def test_unfinished_migration_stops_startup_before_new_schema_writes(tmp_path):
         migrate(database)
     with database.session() as connection:
         assert connection.execute(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version=12"
+                "SELECT COUNT(*) FROM schema_migrations WHERE version=13"
         ).fetchone()[0] == 0
 
 
-def test_v10_photo_state_and_analysis_survive_v11_upgrade(monkeypatch, tmp_path):
+def test_v10_photo_state_and_analysis_survive_scheduler_upgrade(monkeypatch, tmp_path):
     database = Database(tmp_path / "inktime.db")
-    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:-1])
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:-2])
     migrate(database)
     with database.session() as connection:
         connection.execute(
@@ -235,7 +235,7 @@ def test_v10_photo_state_and_analysis_survive_v11_upgrade(monkeypatch, tmp_path)
         )
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [11]
+    assert migrate(database, tmp_path / "backups") == [11, 12]
     with database.session() as connection:
         photo = connection.execute(
             "SELECT favorite,status,lifecycle_status,metadata_status,local_features_status FROM photos WHERE id='photo'"
