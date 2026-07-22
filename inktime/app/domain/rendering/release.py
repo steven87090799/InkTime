@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from builtins import list as builtin_list
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -127,6 +128,12 @@ class AtomicReleasePublisher:
                 "height": height,
                 "pixel_format": profile.pixel_format,
                 "orientation": orientation,
+                "panel_capabilities": {
+                    "supports_partial_refresh": profile.supports_partial_refresh,
+                    "requires_full_refresh": profile.requires_full_refresh,
+                    "supports_hibernate": profile.supports_hibernate,
+                    "minimum_refresh_interval_seconds": profile.minimum_refresh_interval_seconds,
+                },
                 "dither": dither,
                 "dither_strength": effective_strength,
                 "color_distance": effective_color_distance,
@@ -165,6 +172,85 @@ class AtomicReleasePublisher:
             except (OSError, json.JSONDecodeError):
                 continue
         return sorted(releases, key=lambda item: item["created_at"], reverse=True)
+
+    def validate(self, release_id: str) -> dict:
+        release_dir = self.root / release_id
+        manifest_path = release_dir / "manifest.json"
+        if release_dir.parent != self.root or not manifest_path.is_file():
+            raise ValueError("RENDER-010 Release Manifest 不存在")
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("RENDER-010 Release Manifest 無法解析") from exc
+        if str(manifest.get("release_id")) != release_id:
+            raise ValueError("RENDER-010 Release ID 與 Manifest 不一致")
+        get_display_profile(str(manifest.get("render_profile", "")))
+        files = manifest.get("files")
+        if not isinstance(files, list) or not files:
+            raise ValueError("RENDER-010 Release 沒有 Payload")
+        for entry in files:
+            if not isinstance(entry, dict):
+                raise ValueError("RENDER-010 Release 檔案描述不合法")
+            name = str(entry.get("name", ""))
+            path = release_dir / name
+            if not name or path.parent != release_dir or not path.is_file():
+                raise ValueError("RENDER-010 Release Payload 不存在")
+            payload = path.read_bytes()
+            if len(payload) != int(entry.get("size", -1)):
+                raise ValueError("RENDER-010 Release Payload 大小不一致")
+            if sha256(payload).hexdigest() != str(entry.get("sha256", "")):
+                raise ValueError("RENDER-010 Release Payload SHA-256 不一致")
+        return manifest
+
+    def pointer_snapshot(self, profile_keys: builtin_list[str]) -> dict[str, str | None]:
+        names = [f"latest.{key}" for key in dict.fromkeys(profile_keys)] + ["latest"]
+        snapshot: dict[str, str | None] = {}
+        for name in names:
+            path = self.root / name
+            try:
+                snapshot[name] = path.read_text(encoding="utf-8").strip()
+            except FileNotFoundError:
+                snapshot[name] = None
+        return snapshot
+
+    def restore_pointers(self, snapshot: dict[str, str | None]) -> None:
+        for name, release_id in snapshot.items():
+            path = self.root / name
+            if release_id is None:
+                path.unlink(missing_ok=True)
+                continue
+            temporary = self.root / f".{name}.restore.tmp"
+            temporary.write_text(release_id, encoding="utf-8")
+            temporary.replace(path)
+
+    def activate_manifests(self, manifests: builtin_list[dict]) -> None:
+        if not manifests:
+            raise ValueError("RENDER-010 沒有可啟用的 Release")
+        for manifest in manifests:
+            release_id = str(manifest["release_id"])
+            profile_key = str(manifest["render_profile"])
+            self.validate(release_id)
+            temporary = self.root / f".latest.{profile_key}.tmp"
+            temporary.write_text(release_id, encoding="utf-8")
+            temporary.replace(self.root / f"latest.{profile_key}")
+        # 保留舊版只讀取 latest 的相容契約；以第一個 Profile 為正式預設。
+        release_id = str(manifests[0]["release_id"])
+        temporary = self.root / ".latest.tmp"
+        temporary.write_text(release_id, encoding="utf-8")
+        temporary.replace(self.root / "latest")
+
+    def mark_orphan(self, release_id: str, reason: str) -> None:
+        release_dir = self.root / release_id
+        if release_dir.parent != self.root or not release_dir.is_dir():
+            return
+        state = {
+            "status": "orphan",
+            "reason": reason[:500],
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        }
+        temporary = release_dir / ".inktime-state.tmp"
+        temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(release_dir / ".inktime-state.json")
 
     def rollback(self, release_id: str) -> None:
         target = self.root / release_id / "manifest.json"
@@ -218,8 +304,10 @@ class DeviceTestReleaseStore:
             "delivery": delivery,
             "one_time": bool(one_time),
             "restore_formal": bool(restore_formal),
-            "status": "active",
+            "status": "assigned",
             "assigned_at": datetime.now(timezone.utc).isoformat(),
+            "expires_at": datetime.now(timezone.utc).timestamp() + 86400,
+            "retry_count": 0,
         }
         path = self._path(device_id)
         temporary = path.with_suffix(".tmp")
@@ -233,11 +321,29 @@ class DeviceTestReleaseStore:
             assignment = json.loads(path.read_text(encoding="utf-8"))
         except (FileNotFoundError, OSError, json.JSONDecodeError):
             return None
-        if assignment.get("status") != "active" or assignment.get("profile_key") != profile_key:
+        allowed = {
+            "assigned",
+            "manifest_fetched",
+            "payload_downloaded",
+            "payload_verified",
+            "display_confirmed",
+        }
+        if assignment.get("status") not in allowed or assignment.get("profile_key") != profile_key:
+            return None
+        if float(assignment.get("expires_at", 0)) <= datetime.now(timezone.utc).timestamp() or int(
+            assignment.get("retry_count", 0)
+        ) >= 5:
+            assignment["status"] = "expired"
+            assignment["expired_at"] = datetime.now(timezone.utc).isoformat()
+            self._write(path, assignment)
             return None
         manifest_path = self.release_root / str(assignment.get("release_id", "")) / "manifest.json"
         if not manifest_path.is_file() or manifest_path.parent.parent != self.release_root:
             return None
+        if assignment.get("status") == "assigned":
+            assignment["status"] = "manifest_fetched"
+            assignment["manifest_fetched_at"] = datetime.now(timezone.utc).isoformat()
+            self._write(path, assignment)
         return assignment
 
     def mark_downloaded(self, device_id: str, release_id: str) -> None:
@@ -246,11 +352,54 @@ class DeviceTestReleaseStore:
             assignment = json.loads(path.read_text(encoding="utf-8"))
         except (FileNotFoundError, OSError, json.JSONDecodeError):
             return
-        if assignment.get("release_id") != release_id or assignment.get("status") != "active":
+        if assignment.get("release_id") != release_id or assignment.get("status") not in {
+            "manifest_fetched",
+            "payload_downloaded",
+        }:
             return
+        assignment["status"] = "payload_downloaded"
+        assignment["payload_downloaded_at"] = datetime.now(timezone.utc).isoformat()
+        assignment["retry_count"] = int(assignment.get("retry_count", 0)) + 1
+        self._write(path, assignment)
+
+    def confirm_display(
+        self,
+        device_id: str,
+        release_id: str,
+        *,
+        profile_key: str,
+        payload_verified: bool,
+        display_updated: bool,
+        error_code: str,
+    ) -> bool:
+        path = self._path(device_id)
+        try:
+            assignment = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return False
+        if (
+            assignment.get("release_id") != release_id
+            or assignment.get("profile_key") != profile_key
+            or assignment.get("status") not in {"payload_downloaded", "payload_verified"}
+            or not payload_verified
+            or not display_updated
+            or bool(error_code)
+        ):
+            return False
+        assignment["status"] = "payload_verified"
+        assignment["payload_verified_at"] = datetime.now(timezone.utc).isoformat()
+        assignment["status"] = "display_confirmed"
+        assignment["display_confirmed_at"] = datetime.now(timezone.utc).isoformat()
         if assignment.get("one_time") or assignment.get("restore_formal"):
             assignment["status"] = "consumed"
             assignment["consumed_at"] = datetime.now(timezone.utc).isoformat()
-            temporary = path.with_suffix(".tmp")
-            temporary.write_text(json.dumps(assignment, ensure_ascii=False, indent=2), encoding="utf-8")
-            temporary.replace(path)
+        self._write(path, assignment)
+        return True
+
+    @staticmethod
+    def _write(path: Path, assignment: dict) -> None:
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(assignment, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        temporary.replace(path)

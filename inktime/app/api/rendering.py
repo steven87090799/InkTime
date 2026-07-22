@@ -668,7 +668,15 @@ def publish_release():
     profile_keys = [str(value) for value in payload.get("profile_keys", [])]
     if profile_keys and any(value not in DISPLAY_PROFILES for value in profile_keys):
         abort(400, description="RENDER-003 包含不支援的顯示 Profile")
-    job_settings = {"photo_ids": [str(value) for value in payload.get("photo_ids", [])]}
+    requested_photo_ids = [str(value) for value in payload.get("photo_ids", [])]
+    if requested_photo_ids:
+        try:
+            current_app.extensions["inktime_render_candidate_repository"].require(
+                requested_photo_ids
+            )
+        except ValueError as exc:
+            abort(409, description=str(exc))
+    job_settings = {"photo_ids": requested_photo_ids}
     history = payload.get("history")
     if history is not None:
         if not isinstance(history, dict):

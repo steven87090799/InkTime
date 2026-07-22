@@ -30,6 +30,7 @@ from inktime.app.repositories.auth import AuthRepository
 from inktime.app.repositories.devices import DeviceRepository
 from inktime.app.repositories.jobs import JobRepository
 from inktime.app.repositories.photos import PhotoRepository
+from inktime.app.repositories.render_candidates import RenderCandidateRepository
 from inktime.app.repositories.providers import ProviderRepository
 from inktime.app.repositories.scoring import ScoringProfileRepository
 from inktime.app.repositories.schedules import ScheduledTaskRepository
@@ -41,6 +42,8 @@ from inktime.app.services.diagnostics import DiagnosticsService
 from inktime.app.domain.photos import LocationResolver, ThumbnailCache
 from inktime.app.domain.rendering import AtomicReleasePublisher, FontManager
 from inktime.app.services.rendering import RenderService
+from inktime.app.services.release_coordinator import ReleaseCoordinator
+from inktime.app.services.display_prepare import DisplayPreparationService
 from inktime.app.services.analysis import PhotoAnalysisService
 from inktime.app.services.budgets import BudgetService
 from inktime.app.services.providers import ProviderService
@@ -131,6 +134,7 @@ def initialize_platform(
     )
     app.extensions["inktime_provider_repository"] = ProviderRepository(database, secret_store)
     app.extensions["inktime_photo_repository"] = PhotoRepository(database)
+    app.extensions["inktime_render_candidate_repository"] = RenderCandidateRepository(database)
     app.extensions["inktime_usage_repository"] = UsageRepository(database)
     app.extensions["inktime_thumbnail_cache"] = ThumbnailCache(data_dir / "cache" / "thumbnails")
     budget_service = BudgetService(database, settings_repository)
@@ -165,6 +169,8 @@ def initialize_platform(
     app.extensions["inktime_font_manager"] = font_manager
     app.extensions["inktime_location_resolver"] = location_resolver
     app.extensions["inktime_release_publisher"] = release_publisher
+    release_coordinator = ReleaseCoordinator(database, release_publisher)
+    app.extensions["inktime_release_coordinator"] = release_coordinator
     weather_service = WeatherService(settings_repository)
     app.extensions["inktime_weather_service"] = weather_service
     app.extensions["inktime_render_service"] = RenderService(
@@ -173,9 +179,15 @@ def initialize_platform(
         settings_repository,
         font_manager,
         release_publisher,
+        app.extensions["inktime_render_candidate_repository"],
+        release_coordinator,
         location_resolver,
         weather_service,
     )
+    app.extensions["inktime_display_preparation_service"] = DisplayPreparationService(
+        database, app.extensions["inktime_render_service"]
+    )
+    app.extensions["inktime_release_reconciliation"] = release_coordinator.reconcile()
 
     web_root = Path(__file__).resolve().parent / "web"
     loaders: list[BaseLoader] = [FileSystemLoader(str(web_root / "templates"))]

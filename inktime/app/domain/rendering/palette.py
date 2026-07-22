@@ -24,6 +24,10 @@ class DisplayProfile:
     colors: tuple[PaletteColor, ...]
     panel_profile: str = "generic"
     palette_version: str = "1"
+    supports_partial_refresh: bool = False
+    requires_full_refresh: bool = True
+    supports_hibernate: bool = True
+    minimum_refresh_interval_seconds: int = 300
 
     @property
     def bytes_per_image(self) -> int:
@@ -139,6 +143,10 @@ def profile_summaries() -> list[dict]:
             "bytes_per_image": profile.bytes_per_image,
             "panel_profile": profile.panel_profile,
             "palette_version": profile.palette_version,
+            "supports_partial_refresh": profile.supports_partial_refresh,
+            "requires_full_refresh": profile.requires_full_refresh,
+            "supports_hibernate": profile.supports_hibernate,
+            "minimum_refresh_interval_seconds": profile.minimum_refresh_interval_seconds,
             "colors": [
                 {"code": color.code, "name": color.name, "rgb": list(color.rgb)}
                 for color in profile.colors

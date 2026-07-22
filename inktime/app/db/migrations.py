@@ -747,6 +747,39 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_display_history_date ON display_history(history_date,displayed_at DESC)",
         ),
     ),
+    Migration(
+        15,
+        "加入正式發布恢復、AI 單飛租約與副作用冪等鍵",
+        (
+            "ALTER TABLE releases ADD COLUMN failure_reason TEXT",
+            "ALTER TABLE releases ADD COLUMN verified_at TEXT",
+            "ALTER TABLE releases ADD COLUMN reconciliation_status TEXT NOT NULL DEFAULT 'ok'",
+            "ALTER TABLE job_items ADD COLUMN idempotency_key TEXT",
+            "ALTER TABLE job_items ADD COLUMN completion_state TEXT NOT NULL DEFAULT 'on_time'",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_job_items_idempotency ON job_items(idempotency_key) WHERE idempotency_key IS NOT NULL",
+            "CREATE INDEX IF NOT EXISTS idx_releases_status_created ON releases(status,created_at,id)",
+            """
+            CREATE TABLE IF NOT EXISTS ai_cache_reservations (
+                cache_key TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('reserved','completed','failed')),
+                lease_until TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_error TEXT
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_ai_cache_reservation_lease ON ai_cache_reservations(status,lease_until)",
+            """
+            CREATE TABLE IF NOT EXISTS device_auth_failures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip_hash TEXT NOT NULL,
+                attempted_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_device_auth_failures_ip_time ON device_auth_failures(ip_hash,attempted_at)",
+        ),
+    ),
 )
 
 

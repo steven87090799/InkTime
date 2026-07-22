@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from inktime.app.repositories.jobs import utc_now
 from inktime.app.db import Database
+from inktime.app.services.display_prepare import DisplayPrepareConfig
 
 
 TASK_DEFAULTS: dict[str, dict[str, Any]] = {
@@ -91,6 +92,11 @@ class ScheduledTaskRepository:
         window_end = self._optional_clock(payload.get("window_end", current["window_end"]))
         enabled = bool(payload.get("enabled", current["enabled"]))
         config = current["config"] | dict(payload.get("config") or {})
+        if current["kind"] == "render":
+            config = dict(DisplayPrepareConfig.from_mapping(config).__dict__)
+            config["display_times"] = list(config["display_times"])
+            config["device_ids"] = list(config["device_ids"])
+            config["candidate_years"] = list(config["candidate_years"])
         now = datetime.now(ZoneInfo(timezone))
         next_run = self._next_run(cron, now, weekdays).isoformat() if enabled else None
         values = (
