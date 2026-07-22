@@ -7,10 +7,11 @@ import os
 from pathlib import Path
 import secrets
 import shutil
+import re
 
 from PIL import Image
 
-from .palette import encode_image, get_display_profile
+from .palette import DisplayProfile, encode_image, get_display_profile
 
 
 FOUR_COLORS = ((0, 0, 0), (255, 255, 255), (220, 30, 30), (245, 190, 25))
@@ -51,6 +52,12 @@ class AtomicReleasePublisher:
         width: int = 480,
         height: int = 800,
         orientation: str = "portrait",
+        profile_override: DisplayProfile | None = None,
+        linear_light: bool = False,
+        protected_mask: Image.Image | None = None,
+        activate: bool = True,
+        release_kind: str = "formal",
+        metadata: dict | None = None,
     ) -> dict:
         if not images:
             raise ValueError("RENDER-001 至少需要一張圖片")
@@ -60,7 +67,11 @@ class AtomicReleasePublisher:
         temporary = self.root / f".{release_id}.tmp"
         final = self.root / release_id
         temporary.mkdir(mode=0o750)
-        profile = get_display_profile(profile_key)
+        profile = profile_override or get_display_profile(profile_key)
+        if profile.key != profile_key:
+            raise ValueError("RENDER-006 自訂色盤與面板 Profile 不一致")
+        if release_kind not in {"formal", "device_test"}:
+            raise ValueError("RENDER-008 Release 類型不合法")
         effective_strength = (
             1.0 if dither in {"gooddisplay", "photo_smooth"} else float(dither_strength)
         )
@@ -80,6 +91,9 @@ class AtomicReleasePublisher:
                     dither=dither,
                     color_distance=effective_color_distance,
                     strength=effective_strength,
+                    linear_light=linear_light,
+                    protected_mask=protected_mask,
+                    profile=profile,
                 )
                 payload = encoded.payload
                 output_palette = encoded.palette
@@ -105,6 +119,9 @@ class AtomicReleasePublisher:
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "display_type": profile.display_type,
                 "render_profile": profile.key,
+                "panel_profile": profile.panel_profile,
+                "palette_version": profile.palette_version,
+                "release_kind": release_kind,
                 "width": width,
                 "height": height,
                 "pixel_format": profile.pixel_format,
@@ -118,18 +135,21 @@ class AtomicReleasePublisher:
                 ],
                 "files": files,
             }
+            if metadata:
+                manifest["render_options"] = metadata
             manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
             (temporary / "manifest.json").write_bytes(manifest_bytes)
             for path in temporary.iterdir():
                 with path.open("rb") as stream:
                     os.fsync(stream.fileno())
             temporary.replace(final)
-            pointer_tmp = self.root / ".latest.tmp"
-            pointer_tmp.write_text(release_id, encoding="utf-8")
-            pointer_tmp.replace(self.root / "latest")
-            profile_pointer_tmp = self.root / f".latest.{profile.key}.tmp"
-            profile_pointer_tmp.write_text(release_id, encoding="utf-8")
-            profile_pointer_tmp.replace(self.root / f"latest.{profile.key}")
+            if activate:
+                pointer_tmp = self.root / ".latest.tmp"
+                pointer_tmp.write_text(release_id, encoding="utf-8")
+                pointer_tmp.replace(self.root / "latest")
+                profile_pointer_tmp = self.root / f".latest.{profile.key}.tmp"
+                profile_pointer_tmp.write_text(release_id, encoding="utf-8")
+                profile_pointer_tmp.replace(self.root / f"latest.{profile.key}")
             return manifest
         except Exception:
             if temporary.exists():
@@ -158,3 +178,78 @@ class AtomicReleasePublisher:
         profile_temporary = self.root / f".latest.{profile_key}.tmp"
         profile_temporary.write_text(release_id, encoding="utf-8")
         profile_temporary.replace(self.root / f"latest.{profile_key}")
+
+
+class DeviceTestReleaseStore:
+    """One request-local test release assignment per device, outside formal pointers."""
+
+    _DEVICE_ID = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
+
+    def __init__(self, release_root: Path) -> None:
+        self.release_root = release_root.resolve()
+        self.root = self.release_root / ".device-tests"
+        self.root.mkdir(mode=0o750, parents=True, exist_ok=True)
+
+    def _path(self, device_id: str) -> Path:
+        if not self._DEVICE_ID.fullmatch(device_id):
+            raise ValueError("DEVICE-006 裝置識別碼不合法")
+        return self.root / f"{device_id}.json"
+
+    def assign(
+        self,
+        device_id: str,
+        release_id: str,
+        *,
+        profile_key: str,
+        delivery: str,
+        one_time: bool,
+        restore_formal: bool,
+    ) -> dict:
+        if delivery not in {"immediate", "next_wake"}:
+            raise ValueError("DEVICE-006 測試傳送時機不合法")
+        manifest_path = self.release_root / release_id / "manifest.json"
+        if not manifest_path.is_file() or manifest_path.parent.parent != self.release_root:
+            raise ValueError("DEVICE-006 測試 Release 不存在")
+        assignment = {
+            "device_id": device_id,
+            "release_id": release_id,
+            "profile_key": profile_key,
+            "delivery": delivery,
+            "one_time": bool(one_time),
+            "restore_formal": bool(restore_formal),
+            "status": "active",
+            "assigned_at": datetime.now(timezone.utc).isoformat(),
+        }
+        path = self._path(device_id)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(assignment, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(path)
+        return assignment
+
+    def active(self, device_id: str, profile_key: str) -> dict | None:
+        path = self._path(device_id)
+        try:
+            assignment = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return None
+        if assignment.get("status") != "active" or assignment.get("profile_key") != profile_key:
+            return None
+        manifest_path = self.release_root / str(assignment.get("release_id", "")) / "manifest.json"
+        if not manifest_path.is_file() or manifest_path.parent.parent != self.release_root:
+            return None
+        return assignment
+
+    def mark_downloaded(self, device_id: str, release_id: str) -> None:
+        path = self._path(device_id)
+        try:
+            assignment = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return
+        if assignment.get("release_id") != release_id or assignment.get("status") != "active":
+            return
+        if assignment.get("one_time") or assignment.get("restore_formal"):
+            assignment["status"] = "consumed"
+            assignment["consumed_at"] = datetime.now(timezone.utc).isoformat()
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(assignment, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(path)

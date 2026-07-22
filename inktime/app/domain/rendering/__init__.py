@@ -21,9 +21,11 @@ from .palette import (
     DITHER_ALGORITHMS,
     encode_image,
     get_display_profile,
+    palette_for_profile,
     profile_summaries,
 )
-from .release import AtomicReleasePublisher, pack_four_color_2bpp
+from .photo_renderer import BUILTIN_PHOTO_PRESETS, PhotoRenderResult, render_photo
+from .release import AtomicReleasePublisher, DeviceTestReleaseStore, pack_four_color_2bpp
 
 __all__ = [
     "current_local_date",
@@ -46,7 +48,12 @@ __all__ = [
     "DITHER_ALGORITHMS",
     "encode_image",
     "get_display_profile",
+    "palette_for_profile",
     "profile_summaries",
+    "BUILTIN_PHOTO_PRESETS",
+    "PhotoRenderResult",
+    "render_photo",
     "AtomicReleasePublisher",
+    "DeviceTestReleaseStore",
     "pack_four_color_2bpp",
 ]
