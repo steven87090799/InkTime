@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from cryptography.fernet import Fernet, InvalidToken
 
 from inktime.app.db import Database
+from inktime.app.core.security import register_secret
 from inktime.app.domain.analysis.scoring import (
     DEFAULT_FAVORITE_BONUS,
     DEFAULT_RANKING_WEIGHTS,
@@ -214,6 +215,36 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "risk": "設為太小會增加 Log 量",
         "min": 30,
         "max": 3600,
+        "restart": False,
+    },
+    "scanner.disk_batch_size": {
+        "category": "效能與待機",
+        "default": 1000,
+        "type": "integer",
+        "description": "照片掃描每批從磁碟送入比對的路徑數",
+        "risk": "N100／16 GB 建議 1,000；提高會增加單批記憶體，降低會增加 SQL 次數",
+        "min": 100,
+        "max": 10000,
+        "restart": False,
+    },
+    "scanner.write_batch_size": {
+        "category": "效能與待機",
+        "default": 500,
+        "type": "integer",
+        "description": "Scanner 單一 SQLite 批次交易的照片數",
+        "risk": "建議 500；提高會延長單次 writer 鎖時間",
+        "min": 100,
+        "max": 2000,
+        "restart": False,
+    },
+    "scanner.missing_threshold_percent": {
+        "category": "效能與待機",
+        "default": 10,
+        "type": "number",
+        "description": "單次完整掃描可自動標記 Missing 的最大照片比例（%）",
+        "risk": "超過此比例會停止更新並要求管理員確認；不建議高於 10%",
+        "min": 0,
+        "max": 100,
         "restart": False,
     },
     "scheduler.poll_seconds": {
@@ -899,6 +930,7 @@ class SecretStore:
 
     def set(self, key: str, value: str, updated_by: str) -> None:
         now = datetime.now(timezone.utc).isoformat()
+        register_secret(value)
         encrypted = self.cipher.encrypt(value.encode("utf-8"))
         with self.database.session() as connection:
             connection.execute(
@@ -915,7 +947,9 @@ class SecretStore:
         if row is None:
             return None
         try:
-            return self.cipher.decrypt(bytes(row["encrypted_value"])).decode("utf-8")
+            value = self.cipher.decrypt(bytes(row["encrypted_value"])).decode("utf-8")
+            register_secret(value)
+            return value
         except InvalidToken as exc:
             raise RuntimeError("SEC-001 無法解密敏感設定；請確認主密鑰") from exc
 

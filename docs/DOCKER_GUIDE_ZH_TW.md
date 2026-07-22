@@ -128,7 +128,7 @@ docker compose ps
 curl -fsS http://127.0.0.1:8765/health/ready
 ```
 
-只有存在新 Migration 時才建立升級前 SQLite 備份；普通三服務重啟不再各複製一份資料庫。回滾需停止三服務、還原已驗證的資料庫與舊映像，不能在線上替換使用中的 SQLite。
+只有存在新 Migration 時才建立升級前 SQLite 備份；普通三服務重啟不再各複製一份資料庫。回滾需停止三服務，依[備份還原指南](BACKUP_RESTORE_ZH_TW.md)執行 `scripts/restore_backup.py --yes`；工具會驗證 Schema／SHA-256／integrity／重要表筆數並保留還原前安全副本，不能在線上替換使用中的 SQLite。
 
 ## 9. 驗收清單
 

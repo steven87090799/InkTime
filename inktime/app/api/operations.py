@@ -4,6 +4,7 @@ from flask import Blueprint, abort, current_app, g, render_template, request, se
 
 from inktime.app.core.paths import safe_join
 from inktime.app.web.access import administrator_required, login_required
+from inktime.app.workers.scanner import SCAN_MODES
 
 
 bp = Blueprint("operations", __name__)
@@ -93,6 +94,9 @@ def enqueue_scan():
     root_path = str(payload.get("root_path", "")).strip()
     if not root_path:
         abort(400, description="SCAN-001 請輸入照片資料夾路徑")
+    mode = str(payload.get("mode", "incremental"))
+    if mode not in SCAN_MODES:
+        abort(400, description="SCAN-003 不支援的掃描模式")
     repository = current_app.extensions["inktime_job_repository"]
     job_id = repository.create_maintenance(
         kind="scan",
@@ -101,11 +105,43 @@ def enqueue_scan():
             "root_path": root_path,
             "library_name": str(payload.get("library_name", "主要照片庫")),
             "build_thumbnails": bool(payload.get("build_thumbnails", True)),
+            "mode": mode,
+            "trigger_source": "api",
         },
         created_by=g.user["id"],
     )
     current_app.extensions["inktime_job_service"].start(job_id)
     return {"id": job_id, "detail_url": f"/jobs/{job_id}"}, 202
+
+
+@bp.get("/api/v1/scans/<scan_id>")
+@login_required
+def scan_detail(scan_id: str):
+    repository = current_app.extensions["inktime_photo_repository"]
+    scan = repository.get_scan(scan_id)
+    if scan is None:
+        abort(404)
+    with current_app.extensions["inktime_database"].session() as connection:
+        errors = connection.execute(
+            """
+            SELECT id,scan_id,photo_id,stage,error_code,exception_type,retryable,masked_path,created_at
+            FROM scan_errors WHERE scan_id=? ORDER BY id LIMIT 500
+            """,
+            (scan_id,),
+        ).fetchall()
+    return {"scan": dict(scan), "errors": [dict(error) for error in errors]}
+
+
+@bp.post("/api/v1/scans/<scan_id>/confirm-missing")
+@administrator_required
+def confirm_scan_missing(scan_id: str):
+    try:
+        marked = current_app.extensions["inktime_photo_repository"].confirm_missing(scan_id)
+    except KeyError:
+        abort(404)
+    except ValueError as exc:
+        abort(409, description=str(exc))
+    return {"scan_id": scan_id, "missing_marked": marked, "status": "confirmed"}
 
 
 @bp.post("/api/v1/maintenance/virtual-display")

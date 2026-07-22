@@ -11,7 +11,14 @@
 | `PATH-001` | 路徑超出允許範圍 | 檢查相片庫、輸出目錄與請求路徑 |
 | `DB-001` | 資料庫連線失敗 | 檢查 Volume 權限、磁碟與 SQLite Lock |
 | `DB-002` | Migration 失敗 | 停止服務，保留備份並查看 Migration 原始錯誤 |
+| `MIGRATION-002` | 偵測到未完成 Migration | 禁止啟動 Worker；停止三服務並由訊息指定的 pre-migration 備份離線還原 |
+| `MIGRATION-003` | 資料庫 Schema 高於程式版本 | 切回相容映像或升級程式；不可用舊程式降級寫入 |
+| `MIGRATION-004` | Schema 已提交但 Migration 歷史收尾失敗 | 保持服務停止並由升級前備份回復；不可把此狀態誤當成已 rollback |
 | `SCAN-001` | 無法讀取照片 | 檢查 NAS 掛載、檔案權限或檔案是否仍存在 |
+| `SCAN-IO-002` | 完整走訪或批次資料庫寫入有重大錯誤 | 不執行 Missing reconciliation；修復掛載／磁碟後重掃 |
+| `SCAN-MISSING-THRESHOLD` | 預計 Missing 超過安全比例 | 保留掃描結果且不更新照片；確認掛載與數量後由管理員人工確認 |
+| `SCAN-MISSING-004` | 欲確認的 Missing 結果已有較新掃描 | 只確認同一照片庫最新一次等待確認的掃描，避免舊候選覆寫新狀態 |
+| `THUMB-001` | 單張縮圖建立失敗 | 原照片與掃描繼續保留；修復圖片／權限後重試 |
 | `IMG-001` | 圖片解碼失敗 | 檢查格式與檔案完整性 |
 | `IMG-002` | 字型缺失、損壞、格式不合法或缺少短文案字元 | 到「渲染」選取內建繁中字型，或上傳涵蓋所需字元的 TTF／OTF／TTC |
 | `VLM-001` | Provider API 逾時 | 檢查端點、調高逾時或等待重試 |
@@ -33,5 +40,8 @@
 | `DEVICE-OFFLINE` | 裝置超過門檻未連線 | 檢查電源、Wi-Fi、Token、刷新週期與 N100 可達性 |
 | `NOTIFY-WEBHOOK` | Webhook 暫時或永久失敗 | 查看裝置頁嘗試次數、HTTP 狀態與端點 Log |
 | `BACKUP-001` | 備份建立或驗證失敗 | 檢查空間、權限與資料庫完整性 |
+| `BACKUP-002`／`BACKUP-003` | 備份格式或 SHA-256 損壞 | 不會覆蓋現有資料庫；改用另一份已驗證備份 |
+| `RESTORE-001` | 仍有 InkTime 程序持有資料庫 | 停止 Web、Worker、Scheduler 後再執行離線還原 |
+| `RESTORE-002`～`RESTORE-006` | 還原內容、Schema 或驗收失敗 | 工具會自動保持／回復原資料庫；保留安全副本並查看明確錯誤 |
 
 API 錯誤回應至少包含 `error_code` 與繁體中文 `message`；內部例外堆疊只寫入受保護的記錄，不傳送給 viewer 或裝置。

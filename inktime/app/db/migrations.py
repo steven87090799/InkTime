@@ -536,6 +536,108 @@ MIGRATIONS = (
             "INSERT OR IGNORE INTO feature_flags(key,enabled,description,updated_at) VALUES ('smart_composition',1,'智慧裁切、六色適合度與相框版型已啟用',datetime('now'))",
         ),
     ),
+    Migration(
+        11,
+        "加入安全掃描生命週期、錯誤與 Migration 歷史",
+        (
+            """
+            CREATE TABLE IF NOT EXISTS migration_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                schema_version INTEGER NOT NULL,
+                migration_name TEXT NOT NULL,
+                migration_started_at TEXT NOT NULL,
+                migration_completed_at TEXT,
+                migration_status TEXT NOT NULL
+                    CHECK(migration_status IN ('running','completed','rolled_back')),
+                backup_path TEXT,
+                error_message TEXT
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_migration_history_status ON migration_history(migration_status,id DESC)",
+            """
+            INSERT INTO migration_history(
+                schema_version,migration_name,migration_started_at,migration_completed_at,
+                migration_status
+            )
+            SELECT sm.version,sm.name,sm.applied_at,sm.applied_at,'completed'
+            FROM schema_migrations sm
+            WHERE sm.version < 11 AND NOT EXISTS (
+                SELECT 1 FROM migration_history mh WHERE mh.schema_version=sm.version
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS scan_runs (
+                id TEXT PRIMARY KEY,
+                library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE RESTRICT,
+                mode TEXT NOT NULL
+                    CHECK(mode IN ('incremental','full','metadata-only','local-features-only','manual')),
+                trigger_source TEXT NOT NULL DEFAULT 'manual'
+                    CHECK(trigger_source IN ('manual','api','scheduler','virtual-display','test')),
+                status TEXT NOT NULL
+                    CHECK(status IN ('running','completed','completed_with_warnings','cancelled','failed')),
+                root_path TEXT NOT NULL,
+                root_accessible INTEGER NOT NULL DEFAULT 0 CHECK(root_accessible IN (0,1)),
+                root_readable INTEGER NOT NULL DEFAULT 0 CHECK(root_readable IN (0,1)),
+                full_census INTEGER NOT NULL DEFAULT 0 CHECK(full_census IN (0,1)),
+                cancelled INTEGER NOT NULL DEFAULT 0 CHECK(cancelled IN (0,1)),
+                major_io_errors INTEGER NOT NULL DEFAULT 0,
+                checked_count INTEGER NOT NULL DEFAULT 0,
+                processed_count INTEGER NOT NULL DEFAULT 0,
+                skipped_count INTEGER NOT NULL DEFAULT 0,
+                new_count INTEGER NOT NULL DEFAULT 0,
+                changed_count INTEGER NOT NULL DEFAULT 0,
+                moved_count INTEGER NOT NULL DEFAULT 0,
+                restored_count INTEGER NOT NULL DEFAULT 0,
+                duplicate_count INTEGER NOT NULL DEFAULT 0,
+                failed_count INTEGER NOT NULL DEFAULT 0,
+                excluded_video_count INTEGER NOT NULL DEFAULT 0,
+                previous_active_count INTEGER NOT NULL DEFAULT 0,
+                candidate_missing_count INTEGER NOT NULL DEFAULT 0,
+                missing_marked_count INTEGER NOT NULL DEFAULT 0,
+                missing_threshold_ratio REAL NOT NULL DEFAULT 0.10
+                    CHECK(missing_threshold_ratio BETWEEN 0 AND 1),
+                reconciliation_status TEXT NOT NULL DEFAULT 'not_run'
+                    CHECK(reconciliation_status IN ('not_run','applied','skipped','confirmation_required','confirmed')),
+                warning_code TEXT,
+                started_at TEXT NOT NULL,
+                completed_at TEXT
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_scan_runs_library_started ON scan_runs(library_id,started_at DESC)",
+            """
+            CREATE TABLE IF NOT EXISTS scan_errors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_id TEXT NOT NULL REFERENCES scan_runs(id) ON DELETE CASCADE,
+                photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,
+                stage TEXT NOT NULL,
+                error_code TEXT NOT NULL,
+                exception_type TEXT NOT NULL,
+                retryable INTEGER NOT NULL CHECK(retryable IN (0,1)),
+                masked_path TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_scan_errors_scan ON scan_errors(scan_id,id)",
+            """
+            CREATE TABLE IF NOT EXISTS scan_missing_candidates (
+                scan_id TEXT NOT NULL REFERENCES scan_runs(id) ON DELETE CASCADE,
+                photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(scan_id,photo_id)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_scan_missing_candidates_photo ON scan_missing_candidates(photo_id,scan_id)",
+            "ALTER TABLE photos ADD COLUMN lifecycle_status TEXT NOT NULL DEFAULT 'active' CHECK(lifecycle_status IN ('active','missing','excluded','archived','deleted'))",
+            "ALTER TABLE photos ADD COLUMN missing_since TEXT",
+            "ALTER TABLE photos ADD COLUMN missing_reason TEXT",
+            "ALTER TABLE photos ADD COLUMN last_seen_scan_id TEXT REFERENCES scan_runs(id) ON DELETE SET NULL",
+            "ALTER TABLE photos ADD COLUMN metadata_status TEXT NOT NULL DEFAULT 'pending' CHECK(metadata_status IN ('pending','complete','failed'))",
+            "ALTER TABLE photos ADD COLUMN local_features_status TEXT NOT NULL DEFAULT 'pending' CHECK(local_features_status IN ('pending','complete','failed'))",
+            "UPDATE photos SET metadata_status=CASE WHEN sha256 IS NOT NULL THEN 'complete' ELSE 'pending' END, local_features_status=CASE WHEN sha256 IS NOT NULL THEN 'complete' ELSE 'pending' END",
+            "CREATE INDEX IF NOT EXISTS idx_photos_lifecycle_seen ON photos(library_id,lifecycle_status,last_seen_scan_id,id)",
+            "CREATE INDEX IF NOT EXISTS idx_photos_scan_incomplete ON photos(library_id,metadata_status,local_features_status,id)",
+        ),
+    ),
 )
 
 
@@ -548,13 +650,13 @@ def backup_database(database: Database, backup_dir: Path) -> Path | None:
     if not database.path.exists() or database.path.stat().st_size == 0:
         return None
     backup_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     destination = backup_dir / f"{database.path.stem}-pre-migration-{stamp}.sqlite3"
     source = sqlite3.connect(database.path)
     target = sqlite3.connect(destination)
     try:
         source.backup(target)
-        if target.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+        if target.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise MigrationError("升級前備份完整性檢查失敗")
     finally:
         target.close()
@@ -562,53 +664,204 @@ def backup_database(database: Database, backup_dir: Path) -> Path | None:
     return destination
 
 
+def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
+    return bool(
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone()
+    )
+
+
+def _applied_versions(database: Database) -> set[int]:
+    with database.session() as connection:
+        if not _table_exists(connection, "schema_migrations"):
+            return set()
+        return {int(row[0]) for row in connection.execute("SELECT version FROM schema_migrations")}
+
+
+def _assert_no_unfinished_migration(database: Database) -> None:
+    with database.session() as connection:
+        if not _table_exists(connection, "migration_history"):
+            return
+        unfinished = connection.execute(
+            """
+            SELECT schema_version,migration_name,backup_path
+            FROM migration_history
+            WHERE migration_status='running'
+            ORDER BY id DESC LIMIT 1
+            """
+        ).fetchone()
+    if unfinished is None:
+        return
+    recovery = str(unfinished["backup_path"] or "最近一次 pre-migration SQLite 備份")
+    raise MigrationError(
+        "MIGRATION-002 偵測到未完成 Migration "
+        f"{unfinished['schema_version']}（{unfinished['migration_name']}）；平台已停止啟動，"
+        f"不得繼續寫入。請停止所有 InkTime 程序後由 {recovery} 還原。"
+    )
+
+
+def _start_history(
+    database: Database,
+    migration: Migration,
+    backup_path: Path | None,
+    *,
+    started_at: str,
+) -> int | None:
+    with database.session() as connection:
+        if not _table_exists(connection, "migration_history"):
+            return None
+        cursor = connection.execute(
+            """
+            INSERT INTO migration_history(
+                schema_version,migration_name,migration_started_at,migration_status,backup_path
+            ) VALUES (?,?,?,'running',?)
+            """,
+            (
+                migration.version,
+                migration.name,
+                started_at,
+                str(backup_path) if backup_path else None,
+            ),
+        )
+        return int(cursor.lastrowid) if cursor.lastrowid is not None else None
+
+
+def _finish_history(
+    database: Database,
+    migration: Migration,
+    history_id: int | None,
+    *,
+    started_at: str,
+    status: str,
+    backup_path: Path | None,
+    error: str | None = None,
+) -> None:
+    with database.session() as connection:
+        if not _table_exists(connection, "migration_history"):
+            return
+        if history_id is None:
+            connection.execute(
+                """
+                INSERT INTO migration_history(
+                    schema_version,migration_name,migration_started_at,migration_completed_at,
+                    migration_status,backup_path,error_message
+                ) VALUES (?,?,?,?,?,?,?)
+                """,
+                (
+                    migration.version,
+                    migration.name,
+                    started_at,
+                    _utc_now(),
+                    status,
+                    str(backup_path) if backup_path else None,
+                    error[:1000] if error else None,
+                ),
+            )
+            return
+        connection.execute(
+            """
+            UPDATE migration_history
+            SET migration_completed_at=?,migration_status=?,error_message=?
+            WHERE id=?
+            """,
+            (_utc_now(), status, error[:1000] if error else None, history_id),
+        )
+
+
 def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
-    """依版本套用 Migration；任何失敗都會回滾當次版本並停止。"""
+    """依版本安全升級；schema、版本列與完整性檢查位於同一交易。"""
     had_database = database.path.exists() and database.path.stat().st_size > 0
     database.path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = Path(f"{database.path}.migration.lock")
     with lock_path.open("a", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        with database.session() as connection:
-            migration_table = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
-            ).fetchone()
-            applied_versions = (
-                {int(row[0]) for row in connection.execute("SELECT version FROM schema_migrations")}
-                if migration_table
-                else set()
+        _assert_no_unfinished_migration(database)
+        applied_versions = _applied_versions(database)
+        known_versions = {migration.version for migration in MIGRATIONS}
+        unknown_versions = applied_versions - known_versions
+        if unknown_versions:
+            newest = max(unknown_versions)
+            raise MigrationError(
+                f"MIGRATION-003 資料庫 Schema Version {newest} 高於本程式可支援版本；停止啟動以避免降級寫入"
             )
         has_pending_migrations = any(
             migration.version not in applied_versions for migration in MIGRATIONS
         )
         # 只有真的要升級既有資料庫才建立備份；三個容器每次重啟不再各複製一次。
+        backup_path = None
         if backup_dir is not None and had_database and has_pending_migrations:
-            backup_database(database, backup_dir)
+            backup_path = backup_database(database, backup_dir)
 
         applied: list[int] = []
-        with database.session() as connection:
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
+        for migration in MIGRATIONS:
+            if migration.version in applied_versions:
+                continue
+            started_at = _utc_now()
+            history_id = _start_history(
+                database, migration, backup_path, started_at=started_at
             )
-            for migration in MIGRATIONS:
-                try:
-                    connection.execute("BEGIN IMMEDIATE")
-                    already_applied = connection.execute(
-                        "SELECT 1 FROM schema_migrations WHERE version=?", (migration.version,)
-                    ).fetchone()
-                    if already_applied:
-                        connection.execute("COMMIT")
-                        continue
+            history_completed_in_transaction = False
+            try:
+                with database.transaction() as connection:
                     for statement in migration.statements:
                         connection.execute(statement)
                     connection.execute(
                         "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
                         (migration.version, migration.name, _utc_now()),
                     )
-                    connection.execute("COMMIT")
-                    applied.append(migration.version)
+                    if history_id is None and _table_exists(
+                        connection, "migration_history"
+                    ):
+                        connection.execute(
+                            """
+                            INSERT INTO migration_history(
+                                schema_version,migration_name,migration_started_at,
+                                migration_completed_at,migration_status,backup_path
+                            ) VALUES (?,?,?,?,'completed',?)
+                            """,
+                            (
+                                migration.version,
+                                migration.name,
+                                started_at,
+                                _utc_now(),
+                                str(backup_path) if backup_path else None,
+                            ),
+                        )
+                        history_completed_in_transaction = True
+                    integrity = connection.execute("PRAGMA integrity_check").fetchone()
+                    if integrity is None or str(integrity[0]) != "ok":
+                        raise MigrationError(
+                            f"Migration {migration.version} 完整性檢查失敗：{integrity[0] if integrity else 'unknown'}"
+                        )
+            except Exception as exc:
+                _finish_history(
+                    database,
+                    migration,
+                    history_id,
+                    started_at=started_at,
+                    status="rolled_back",
+                    backup_path=backup_path,
+                    error=str(exc),
+                )
+                raise MigrationError(
+                    f"Migration {migration.version}（{migration.name}）失敗；Schema 已完整 Rollback"
+                ) from exc
+            if not history_completed_in_transaction:
+                try:
+                    _finish_history(
+                        database,
+                        migration,
+                        history_id,
+                        started_at=started_at,
+                        status="completed",
+                        backup_path=backup_path,
+                    )
                 except Exception as exc:
-                    if connection.in_transaction:
-                        connection.execute("ROLLBACK")
-                    raise MigrationError(f"Migration {migration.version}（{migration.name}）失敗") from exc
+                    raise MigrationError(
+                        "MIGRATION-004 Schema 已提交但 Migration 歷史無法完成；"
+                        "平台必須停止，請由升級前備份回復，不得繼續寫入"
+                    ) from exc
+            applied.append(migration.version)
+            applied_versions.add(migration.version)
         return applied

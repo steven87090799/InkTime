@@ -46,6 +46,15 @@ class WorkerRunner:
             runtime_settings = self.app.extensions["inktime_settings_repository"]
             progress_items = int(runtime_settings.get("worker.progress_items", 50))
             progress_seconds = int(runtime_settings.get("worker.progress_seconds", 300))
+            scanner_disk_batch_size = int(
+                runtime_settings.get("scanner.disk_batch_size", 1000)
+            )
+            scanner_write_batch_size = int(
+                runtime_settings.get("scanner.write_batch_size", 500)
+            )
+            scanner_missing_threshold_ratio = (
+                float(runtime_settings.get("scanner.missing_threshold_percent", 10)) / 100
+            )
 
             def log_progress(_processed_since_start: int, *, job_id=str(job["id"])) -> None:
                 current = repository.get(job_id)
@@ -92,6 +101,22 @@ class WorkerRunner:
                     details=scan,
                 )
 
+            last_cancel_check = 0.0
+            cancellation_cached = False
+
+            def scan_cancel_requested(*, job_id=str(job["id"])) -> bool:
+                nonlocal last_cancel_check, cancellation_cached
+                if self.stop.is_set() or (self.current is not None and self.current.stop_event.is_set()):
+                    return True
+                now = time.monotonic()
+                if now - last_cancel_check >= 1.0:
+                    current_job = repository.get(job_id)
+                    cancellation_cached = bool(
+                        current_job is None or current_job["status"] == "cancelled"
+                    )
+                    last_cancel_check = now
+                return cancellation_cached
+
             def processor(
                 item,
                 *,
@@ -102,6 +127,9 @@ class WorkerRunner:
                 scoring_profile=scoring_profile,
                 progress_items=progress_items,
                 progress_seconds=progress_seconds,
+                scanner_disk_batch_size=scanner_disk_batch_size,
+                scanner_write_batch_size=scanner_write_batch_size,
+                scanner_missing_threshold_ratio=scanner_missing_threshold_ratio,
             ):
                 if job["kind"] == "scan":
                     scanner = PhotoScanner(
@@ -112,7 +140,13 @@ class WorkerRunner:
                     return scanner.scan(
                         settings.get("library_name", "主要照片庫"),
                         Path(settings["root_path"]),
+                        mode=str(settings.get("mode", "incremental")),
+                        trigger_source=str(settings.get("trigger_source", "api")),
                         build_thumbnails=bool(settings.get("build_thumbnails", True)),
+                        disk_batch_size=scanner_disk_batch_size,
+                        write_batch_size=scanner_write_batch_size,
+                        missing_threshold_ratio=scanner_missing_threshold_ratio,
+                        cancel_requested=scan_cancel_requested,
                         progress_callback=log_scan_progress,
                         progress_interval_items=progress_items,
                         progress_interval_seconds=progress_seconds,
@@ -138,7 +172,13 @@ class WorkerRunner:
                     scan = scanner.scan(
                         settings.get("library_name", "電子紙模擬照片"),
                         root,
+                        mode="incremental",
+                        trigger_source="virtual-display",
                         build_thumbnails=False,
+                        disk_batch_size=scanner_disk_batch_size,
+                        write_batch_size=scanner_write_batch_size,
+                        missing_threshold_ratio=scanner_missing_threshold_ratio,
+                        cancel_requested=scan_cancel_requested,
                         progress_callback=log_scan_progress,
                         progress_interval_items=progress_items,
                         progress_interval_seconds=progress_seconds,

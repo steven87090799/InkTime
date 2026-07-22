@@ -19,7 +19,7 @@ def main() -> None:
     args = parser.parse_args()
     database = Database(Path(args.database))
     versions = migrate(database, Path(args.backup_dir))
-    print(f"資料庫完整性：{database.integrity_check()}")
+    print(f"資料庫完整性：{database.integrity_check(full=True)}")
     print("已套用版本：" + (", ".join(map(str, versions)) if versions else "無"))
 
 

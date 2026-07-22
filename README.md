@@ -155,7 +155,7 @@ python -m inktime.app.workers.runner
 
 ## 更新、遷移與回滾
 
-更新前先從介面建立備份，再拉取映像並執行 `docker compose up -d --build`。Migration 使用版本、交易、升級前備份與 `quick_check`；任何失敗會停止啟動。回滾時停止三個服務、驗證備份、恢復舊資料庫與映像。詳細步驟見 [遷移指南](docs/MIGRATION_GUIDE_ZH_TW.md)與[備份還原](docs/BACKUP_RESTORE_ZH_TW.md)。
+更新前先從介面建立備份，再拉取映像並執行 `docker compose up -d --build`。Migration 使用版本、狀態歷史、單一交易、升級前備份與完整 `integrity_check`；任何失敗或未完成狀態都會停止啟動。回滾時停止三個服務，使用離線還原工具驗證並原子恢復舊資料庫與映像。詳細步驟見 [遷移指南](docs/MIGRATION_GUIDE_ZH_TW.md)與[備份還原](docs/BACKUP_RESTORE_ZH_TW.md)。
 
 ## 常見問題
 
