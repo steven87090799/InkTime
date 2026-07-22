@@ -1,9 +1,11 @@
+# ruff: noqa: S608  # SQL fragments below are built only from server-controlled predicates.
 from __future__ import annotations
 
 import calendar
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
+import random
 from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -691,6 +693,203 @@ class RenderService:
 
     def select_candidates(self, quantity: int | None = None) -> list[str]:
         return [str(row["id"]) for row in self.select_candidates_details(quantity)]
+
+    @staticmethod
+    def _history_type_filter(value: str) -> str | None:
+        return {
+            "person": "人物",
+            "travel": "旅行",
+            "landscape": "風景",
+        }.get(value)
+
+    def _history_where(self, filters: dict[str, Any], *, month_day: str | None = None) -> tuple[str, list[Any]]:
+        clauses = [
+            "p.eligible=1",
+            "p.lifecycle_status='active'",
+            "p.captured_at IS NOT NULL",
+        ]
+        params: list[Any] = []
+        start_year = filters.get("start_year")
+        end_year = filters.get("end_year")
+        if isinstance(start_year, int):
+            clauses.append("CAST(substr(p.captured_at,1,4) AS INTEGER)>=?")
+            params.append(start_year)
+        if isinstance(end_year, int):
+            clauses.append("CAST(substr(p.captured_at,1,4) AS INTEGER)<=?")
+            params.append(end_year)
+        if month_day:
+            clauses.append("substr(p.captured_at,6,5)=?")
+            params.append(month_day)
+        type_name = self._history_type_filter(str(filters.get("type", "")))
+        if type_name:
+            clauses.append("EXISTS (SELECT 1 FROM json_each(COALESCE(a.types_json,'[]')) WHERE value=?)")
+            params.append(type_name)
+        for key, json_path in (("city", "$.values.city_candidate"), ("country", "$.values.country_candidate")):
+            value = str(filters.get(key, "")).strip()
+            if value:
+                clauses.append("lower(COALESCE(json_extract(a.semantic_json, ?),''))=lower(?)")
+                params.extend((json_path, value))
+        recent_days = filters.get("exclude_recent_days")
+        if isinstance(recent_days, int) and recent_days > 0:
+            clauses.append("NOT EXISTS (SELECT 1 FROM display_history dh WHERE dh.photo_id=p.id AND dh.displayed_at>=datetime('now', ?))")
+            params.append(f"-{recent_days} days")
+        if bool(filters.get("unseen_only")):
+            clauses.append("NOT EXISTS (SELECT 1 FROM display_history dh WHERE dh.photo_id=p.id)")
+        return " AND ".join(clauses), params
+
+    def _history_rows(self, filters: dict[str, Any], *, month_day: str | None = None) -> list[dict[str, Any]]:
+        """Fetch a bounded, indexed candidate set; never decode image contents here."""
+        where, params = self._history_where(filters, month_day=month_day)
+        with self.database.session() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT p.id,p.relative_path,p.captured_at,p.local_candidate_score,p.exclusion_status,
+                       p.manual_override,l.root_path,p.e6_score,
+                       a.provider,a.model,a.prompt_version,a.schema_version,a.ranking_rule_version,
+                       a.memory_score,a.beauty_score,a.technical_quality_score,a.final_ranking_score,
+                       a.ranking_score,a.travel_bonus,a.location_rule_version,a.types_json,a.semantic_json,
+                       COALESCE(a.final_ranking_score,a.ranking_score,a.memory_score,p.local_candidate_score,0) AS final_score
+                FROM photos p
+                JOIN libraries l ON l.id=p.library_id
+                LEFT JOIN photo_analysis a ON a.id=(
+                    SELECT latest.id FROM photo_analysis latest
+                    WHERE latest.photo_id=p.id ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1
+                )
+                WHERE {where}
+                ORDER BY p.captured_at,p.id
+                LIMIT 1000
+                """,
+                params,
+            ).fetchall()
+        usable: list[dict[str, Any]] = []
+        for stored in rows:
+            row = dict(stored)
+            try:
+                available = safe_join(Path(str(row["root_path"])), str(row["relative_path"])).is_file()
+            except (OSError, ValueError):
+                available = False
+            if available:
+                row["available"] = True
+                try:
+                    details = json.loads(str(row.get("semantic_json") or "{}"))
+                except json.JSONDecodeError:
+                    details = {}
+                values = details.get("values", {}) if isinstance(details, dict) else {}
+                row["city"] = values.get("city_candidate")
+                row["country"] = values.get("country_candidate")
+                row["types"] = json.loads(str(row.get("types_json") or "[]"))
+                usable.append(row)
+        return usable
+
+    def _history_dates(self, filters: dict[str, Any]) -> list[str]:
+        """Return dates only, so a 100,000-row library is never materialized for a random pick."""
+        where, params = self._history_where(filters)
+        needs_analysis = bool(filters.get("type") or filters.get("city") or filters.get("country"))
+        analysis_join = "" if not needs_analysis else (
+            "LEFT JOIN photo_analysis a ON a.id=(SELECT latest.id FROM photo_analysis latest "
+            "WHERE latest.photo_id=p.id ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1)"
+        )
+        with self.database.session() as connection:
+            rows = connection.execute(
+                f"SELECT DISTINCT substr(p.captured_at,1,10) AS history_date FROM photos p "  # noqa: S608 - clauses are fixed local SQL fragments
+                f"{analysis_join} "
+                f"WHERE {where} ORDER BY history_date",
+                params,
+            ).fetchall()
+        return [str(row["history_date"]) for row in rows]
+
+    @staticmethod
+    def _validated_history_filters(payload: dict[str, Any]) -> dict[str, Any]:
+        filters: dict[str, Any] = {}
+        for key in ("start_year", "end_year", "exclude_recent_days"):
+            value = payload.get(key)
+            if value is None or value == "":
+                continue
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"HISTORY-001 {key} 必須是整數") from exc
+            if key == "exclude_recent_days":
+                if not 0 <= parsed <= 3650:
+                    raise ValueError("HISTORY-001 排除近期天數必須介於 0 到 3650")
+            elif not 1900 <= parsed <= 2200:
+                raise ValueError("HISTORY-001 年份必須介於 1900 到 2200")
+            filters[key] = parsed
+        if filters.get("start_year", 1900) > filters.get("end_year", 2200):
+            raise ValueError("HISTORY-001 起始年份不得晚於結束年份")
+        type_name = str(payload.get("type", "")).strip()
+        if type_name and type_name not in {"person", "travel", "landscape"}:
+            raise ValueError("HISTORY-001 照片類型不合法")
+        filters["type"] = type_name
+        filters["city"] = str(payload.get("city", "")).strip()[:80]
+        filters["country"] = str(payload.get("country", "")).strip()[:80]
+        filters["unseen_only"] = bool(payload.get("unseen_only", False))
+        return filters
+
+    def select_random_history_day(self, payload: dict[str, Any], *, rng: random.Random | None = None) -> dict[str, Any]:
+        filters = self._validated_history_filters(payload)
+        dates = self._history_dates(filters)
+        if not dates:
+            return {"status": "empty", "message": "找不到符合所有篩選條件且目前檔案可用的歷史照片；未放寬任何條件。", "filters": filters}
+        picker = rng or random.SystemRandom()
+        remaining = list(dates)
+        while remaining:
+            chosen_date = picker.choice(remaining)
+            candidates = self._history_rows(filters, month_day=chosen_date[5:10])
+            candidates = [row for row in candidates if str(row["captured_at"])[:10] == chosen_date]
+            if candidates:
+                candidates.sort(key=lambda row: (-float(row["final_score"]), str(row["id"])))
+                return self._history_selection(chosen_date, candidates, "random_history_day", filters)
+            remaining.remove(chosen_date)
+        return {"status": "empty", "message": "找不到符合所有篩選條件且目前檔案可用的歷史照片；未放寬任何條件。", "filters": filters}
+
+    def reroll_history_day(self, payload: dict[str, Any], *, rng: random.Random | None = None) -> dict[str, Any]:
+        month_day = str(payload.get("month_day", "")).strip()
+        try:
+            datetime.strptime(month_day, "%m-%d")
+        except ValueError as exc:
+            raise ValueError("HISTORY-001 month_day 必須是 MM-DD") from exc
+        filters = self._validated_history_filters(payload)
+        current_id = str(payload.get("current_photo_id", "")).strip()
+        rows = [row for row in self._history_rows(filters, month_day=month_day) if str(row["id"]) != current_id]
+        if not rows:
+            return {"status": "empty", "message": "此月日沒有其他符合條件的可用照片，沒有重試或改選其他日期。", "filters": filters, "month_day": month_day}
+        mode = str(payload.get("mode", "random"))
+        if mode not in {"random", "weighted", "top_n", "prefer_unseen", "prefer_travel", "prefer_person"}:
+            raise ValueError("HISTORY-001 同日重抽模式不合法")
+        if mode == "top_n":
+            limit = max(1, min(int(payload.get("top_n", 10)), 100))
+            pool = sorted(rows, key=lambda row: (-float(row["final_score"]), str(row["id"])))[:limit]
+            selected = (rng or random.SystemRandom()).choice(pool)
+        elif mode == "weighted":
+            weights = [max(0.1, float(row["final_score"])) for row in rows]
+            selected = (rng or random.SystemRandom()).choices(rows, weights=weights, k=1)[0]
+        elif mode in {"prefer_travel", "prefer_person"}:
+            wanted = "旅行" if mode == "prefer_travel" else "人物"
+            preferred = [row for row in rows if wanted in row.get("types", [])]
+            selected = (rng or random.SystemRandom()).choice(preferred or rows)
+        else:
+            selected = (rng or random.SystemRandom()).choice(rows)
+        return self._history_selection(str(selected["captured_at"])[:10], [selected], f"same_day_{mode}", filters)
+
+    def _history_selection(self, history_date: str, candidates: list[dict[str, Any]], method: str, filters: dict[str, Any]) -> dict[str, Any]:
+        for candidate in candidates:
+            candidate["candidate_count"] = len(candidates)
+            candidate["selection_method"] = method
+            candidate["history_date"] = history_date
+            candidate["month_day"] = history_date[5:10]
+            candidate["final_score"] = round(float(candidate["final_score"]), 2)
+        return {"status": "ok", "history_date": history_date, "month_day": history_date[5:10], "candidate_count": len(candidates), "selection_method": method, "filters": filters, "candidates": candidates}
+
+    def record_display(self, photo_ids: list[str], *, selection_method: str, history_date: str, release_id: str | None = None) -> None:
+        if not photo_ids:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.session() as connection:
+            connection.executemany(
+                "INSERT INTO display_history(photo_id,history_date,selection_method,release_id,displayed_at,metadata_json) VALUES (?,?,?,?,?,?)",
+                [(photo_id, history_date, selection_method, release_id, now, "{}") for photo_id in photo_ids],
+            )
 
     def rollback(self, release_id: str) -> None:
         with self.database.session() as connection:

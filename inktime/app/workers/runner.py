@@ -160,11 +160,22 @@ class WorkerRunner:
                         str(job["created_by"] or "system"),
                     )
                     if "profile_keys" in settings:
-                        return self.app.extensions["inktime_render_service"].publish(
+                        release = self.app.extensions["inktime_render_service"].publish(
                             *arguments,
                             profile_keys=[str(value) for value in settings["profile_keys"]],
                         )
-                    return self.app.extensions["inktime_render_service"].publish(*arguments)
+                    else:
+                        release = self.app.extensions["inktime_render_service"].publish(*arguments)
+                    history = settings.get("history")
+                    if isinstance(history, dict) and arguments[0]:
+                        release_id = str(release.get("release_id", ""))
+                        self.app.extensions["inktime_render_service"].record_display(
+                            arguments[0],
+                            history_date=str(history.get("history_date")),
+                            selection_method=str(history.get("selection_method", "manual")),
+                            release_id=release_id or None,
+                        )
+                    return release
                 if job["kind"] == "virtual_display":
                     root = Path(settings["root_path"]).expanduser().resolve()
                     scanner = PhotoScanner(

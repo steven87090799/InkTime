@@ -4,7 +4,7 @@
 
 Web「備份與還原」建立的 ZIP 使用 SQLite online backup API 取得一致快照，並包含：
 
-- `inktime.sqlite3`：照片狀態、分析結果、最愛／標籤相關資料、工作與排程狀態、顯示／發布歷史的資料庫紀錄及一般設定。
+- `inktime.sqlite3`：照片狀態、分析結果、最愛／標籤相關資料、工作與排程狀態、歷史今日顯示紀錄、發布紀錄及一般設定。
 - `settings.json`：可讀的一般設定匯出，不含 Secret。
 - `manifest.json`：備份格式、應用程式版本、Database Schema Version、每個檔案 SHA-256／大小及重要資料表筆數。
 
@@ -50,6 +50,8 @@ curl -fsS http://127.0.0.1:${INKTIME_PORT:-8765}/health/ready
 ```
 
 再登入 Web 確認照片總數、最近分析結果、工作／排程狀態與發布歷史，並重新輸入 Provider API Key、Webhook Token。確認完成前不要刪除 `inktime-pre-restore-*.sqlite3`。
+
+歷史今日的「只看未顯示過」與「排除近期顯示」使用 SQLite 中的 `display_history`；因此還原成功後會連同選片紀錄一起復原。只有正式 Release 成功建立才會寫入該紀錄，失敗的 Renderer／背景工作不會消耗未顯示候選。
 
 ## Migration 回滾
 
