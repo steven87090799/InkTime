@@ -22,6 +22,7 @@ class ReleaseCoordinator:
         created_by: str,
         photo_ids: list[str],
         history: dict[str, str] | None = None,
+        device_assignments: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         if not manifests:
             raise ValueError("RENDER-010 沒有可發布的 Release")
@@ -59,12 +60,23 @@ class ReleaseCoordinator:
             [str(item["render_profile"]) for item in verified]
         )
         try:
-            self.publisher.activate_manifests(verified)
+            if not device_assignments:
+                self.publisher.activate_manifests(verified)
             with self.database.transaction() as connection:
                 for manifest in verified:
                     connection.execute(
                         "UPDATE releases SET status='published',published_at=?,failure_reason=NULL WHERE id=?",
                         (now, manifest["release_id"]),
+                    )
+                if device_assignments:
+                    connection.executemany(
+                        """
+                        INSERT INTO device_render_releases(device_id,release_id,assigned_at)
+                        VALUES (?,?,?)
+                        ON CONFLICT(device_id) DO UPDATE SET
+                            release_id=excluded.release_id,assigned_at=excluded.assigned_at
+                        """,
+                        [(device_id, release_id, now) for device_id, release_id in device_assignments.items()],
                     )
                 if history and photo_ids:
                     history_date = str(history.get("history_date") or now[:10])
@@ -94,7 +106,8 @@ class ReleaseCoordinator:
                         rows,
                     )
         except Exception as exc:
-            self.publisher.restore_pointers(snapshot)
+            if not device_assignments:
+                self.publisher.restore_pointers(snapshot)
             with self.database.transaction() as connection:
                 connection.executemany(
                     "UPDATE releases SET status='staged_failed',failure_reason=? WHERE id=?",

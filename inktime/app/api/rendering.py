@@ -668,6 +668,9 @@ def publish_release():
     profile_keys = [str(value) for value in payload.get("profile_keys", [])]
     if profile_keys and any(value not in DISPLAY_PROFILES for value in profile_keys):
         abort(400, description="RENDER-003 包含不支援的顯示 Profile")
+    device_ids = [str(value).strip() for value in payload.get("device_ids", []) if str(value).strip()]
+    if device_ids and profile_keys:
+        abort(400, description="RENDER-003 裝置專屬發布不可同時指定 Profile")
     requested_photo_ids = [str(value) for value in payload.get("photo_ids", [])]
     if requested_photo_ids:
         try:
@@ -692,6 +695,8 @@ def publish_release():
         }
     if profile_keys:
         job_settings["profile_keys"] = profile_keys
+    if device_ids:
+        job_settings["device_ids"] = device_ids
     job_id = repository.create_maintenance(
         kind="render",
         name="電子紙正式發布",

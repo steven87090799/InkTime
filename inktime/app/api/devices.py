@@ -11,6 +11,7 @@ from flask import Blueprint, abort, current_app, render_template, request
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.core.logging import log_event
 from inktime.app.domain.rendering import DISPLAY_PROFILES, DeviceTestReleaseStore
+from inktime.app.services.rendering import FIT_MODES, FRAME_ORIENTATIONS, LAYOUTS
 from inktime.app.repositories.devices import DeviceRateLimitError, DeviceRepository
 from inktime.app.web.access import administrator_required, login_required
 
@@ -70,6 +71,18 @@ def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
     )
     if panel_profile not in DISPLAY_PROFILES:
         abort(400, description="DEVICE-003 不支援的電子紙面板 Profile")
+    frame_orientation = payload.get("frame_orientation", defaults.get("frame_orientation"))
+    frame_orientation = str(frame_orientation).strip() if frame_orientation else None
+    if frame_orientation is not None and frame_orientation not in FRAME_ORIENTATIONS:
+        abort(400, description="DEVICE-003 不支援的相框方向")
+    layout_mode = payload.get("layout_mode", defaults.get("layout_mode"))
+    layout_mode = str(layout_mode).strip() if layout_mode else None
+    if layout_mode is not None and layout_mode not in LAYOUTS:
+        abort(400, description="DEVICE-003 不支援的相框版型")
+    fit_mode = payload.get("fit_mode", defaults.get("fit_mode"))
+    fit_mode = str(fit_mode).strip() if fit_mode else None
+    if fit_mode is not None and fit_mode not in FIT_MODES:
+        abort(400, description="DEVICE-003 不支援的照片縮放方式")
     return {
         "name": name,
         "enabled": enabled,
@@ -77,6 +90,9 @@ def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
         "schedule": schedule,
         "rotation": rotation,
         "panel_profile": panel_profile,
+        "frame_orientation": frame_orientation,
+        "layout_mode": layout_mode,
+        "fit_mode": fit_mode,
     }
 
 
@@ -95,6 +111,9 @@ def devices_page():
             "schedule": str(settings.get("device.default_schedule", "08:00")),
             "rotation": int(settings.get("device.default_rotation", 0)),
             "panel_profile": str(settings.get("device.default_panel_profile", "safe_4c")),
+            "frame_orientation": None,
+            "layout_mode": None,
+            "fit_mode": None,
         },
     )
 
@@ -272,12 +291,20 @@ def latest_release():
     if assignment is not None:
         release_id = str(assignment["release_id"])
     else:
-        latest_pointer = release_root / f"latest.{profile_key}"
-        if not latest_pointer.exists() and profile_key == "safe_4c":
-            latest_pointer = release_root / "latest"
-        if not latest_pointer.exists():
-            abort(404, description="目前沒有可用的發布版本")
-        release_id = latest_pointer.read_text(encoding="utf-8").strip()
+        with current_app.extensions["inktime_database"].session() as connection:
+            assigned = connection.execute(
+                "SELECT release_id FROM device_render_releases WHERE device_id=?",
+                (str(device["id"]),),
+            ).fetchone()
+        if assigned is not None:
+            release_id = str(assigned["release_id"])
+        else:
+            latest_pointer = release_root / f"latest.{profile_key}"
+            if not latest_pointer.exists() and profile_key == "safe_4c":
+                latest_pointer = release_root / "latest"
+            if not latest_pointer.exists():
+                abort(404, description="目前沒有可用的發布版本")
+            release_id = latest_pointer.read_text(encoding="utf-8").strip()
     try:
         manifest_path = safe_join(release_root, f"{release_id}/manifest.json")
     except UnsafePathError:

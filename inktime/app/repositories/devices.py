@@ -8,6 +8,9 @@ from inktime.app.core.security import hash_device_token, issue_device_token
 from inktime.app.db import Database
 
 
+_UNSET = object()
+
+
 class DeviceRateLimitError(RuntimeError):
     pass
 
@@ -29,7 +32,8 @@ class DeviceRepository:
                        last_status_at, wake_reason, offline_alert_active,
                        last_offline_alert_at, last_recovery_alert_at,
                        battery_capacity_mah, standby_current_ma, active_current_ma,
-                       refreshes_per_day, battery_reserve_percent, energy_profile_updated_at
+                       refreshes_per_day, battery_reserve_percent, energy_profile_updated_at,
+                       frame_orientation, layout_mode, fit_mode
                 FROM devices ORDER BY name
                 """
             ).fetchall()
@@ -47,6 +51,9 @@ class DeviceRepository:
         schedule: str = "08:00",
         rotation: int = 0,
         panel_profile: str = "safe_4c",
+        frame_orientation: str | None = None,
+        layout_mode: str | None = None,
+        fit_mode: str | None = None,
     ) -> tuple[str, str]:
         device_id = str(uuid4())
         token = issue_device_token()
@@ -56,9 +63,9 @@ class DeviceRepository:
                 """
                 INSERT INTO devices(
                     id, name, token_hash, enabled, timezone, schedule, rotation, panel_profile,
-                    created_at, updated_at
+                    frame_orientation, layout_mode, fit_mode, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     device_id,
@@ -69,6 +76,9 @@ class DeviceRepository:
                     schedule,
                     rotation,
                     panel_profile,
+                    frame_orientation,
+                    layout_mode,
+                    fit_mode,
                     now,
                     now,
                 ),
@@ -97,17 +107,23 @@ class DeviceRepository:
         schedule: str,
         rotation: int,
         panel_profile: str,
+        frame_orientation: str | None | object = _UNSET,
+        layout_mode: str | None | object = _UNSET,
+        fit_mode: str | None | object = _UNSET,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 current = connection.execute(
-                    "SELECT timezone,schedule,rotation,panel_profile FROM devices WHERE id=?",
+                    "SELECT timezone,schedule,rotation,panel_profile,frame_orientation,layout_mode,fit_mode FROM devices WHERE id=?",
                     (device_id,),
                 ).fetchone()
                 if current is None:
                     raise KeyError(device_id)
+                selected_orientation = current["frame_orientation"] if frame_orientation is _UNSET else frame_orientation
+                selected_layout = current["layout_mode"] if layout_mode is _UNSET else layout_mode
+                selected_fit = current["fit_mode"] if fit_mode is _UNSET else fit_mode
                 remote_changed = any(
                     (
                         str(current["timezone"]) != timezone_name,
@@ -120,7 +136,7 @@ class DeviceRepository:
                     """
                     UPDATE devices
                     SET name=?,enabled=?,timezone=?,schedule=?,rotation=?,panel_profile=?,
-                        config_version=config_version+?,updated_at=?
+                        frame_orientation=?,layout_mode=?,fit_mode=?,config_version=config_version+?,updated_at=?
                     WHERE id=?
                     """,
                     (
@@ -130,6 +146,9 @@ class DeviceRepository:
                         schedule[:100],
                         rotation,
                         panel_profile,
+                        selected_orientation,
+                        selected_layout,
+                        selected_fit,
                         int(remote_changed),
                         now,
                         device_id,

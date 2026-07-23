@@ -166,8 +166,12 @@ class WorkerRunner:
                         str(job["created_by"] or "system"),
                     )
                     history = settings.get("history")
-                    if "profile_keys" in settings:
-                        kwargs = {"profile_keys": [str(value) for value in settings["profile_keys"]]}
+                    if "profile_keys" in settings or "device_ids" in settings:
+                        kwargs = {}
+                        if "profile_keys" in settings:
+                            kwargs["profile_keys"] = [str(value) for value in settings["profile_keys"]]
+                        if "device_ids" in settings:
+                            kwargs["device_ids"] = [str(value) for value in settings["device_ids"]]
                         if isinstance(history, dict):
                             kwargs["history"] = history
                         release = self.app.extensions["inktime_render_service"].publish(*arguments, **kwargs)

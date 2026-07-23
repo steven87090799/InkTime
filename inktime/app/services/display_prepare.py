@@ -152,15 +152,17 @@ class DisplayPreparationService:
         photo_ids = [str(row["id"]) for row in candidates]
         target = self.render_service._today()
         try:
-            result = self.render_service.publish(
-                photo_ids,
-                created_by,
-                profile_keys=self._profiles(config),
-                history={
+            publish_kwargs: dict[str, Any] = {
+                "history": {
                     "history_date": target.isoformat(),
                     "selection_method": "scheduled_display_prepare",
-                },
-            )
+                }
+            }
+            if config.device_ids:
+                publish_kwargs["device_ids"] = list(config.device_ids)
+            else:
+                publish_kwargs["profile_keys"] = self._profiles(config)
+            result = self.render_service.publish(photo_ids, created_by, **publish_kwargs)
         except Exception as exc:
             if config.render_fallback == "keep_current":
                 raise ValueError(

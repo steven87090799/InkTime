@@ -26,6 +26,7 @@ from .palette import (
 )
 from .photo_renderer import BUILTIN_PHOTO_PRESETS, PhotoRenderResult, render_photo
 from .release import AtomicReleasePublisher, DeviceTestReleaseStore, pack_four_color_2bpp
+from .adaptive_layout import photo_orientation, select_pair_candidate
 
 __all__ = [
     "current_local_date",
@@ -56,4 +57,6 @@ __all__ = [
     "AtomicReleasePublisher",
     "DeviceTestReleaseStore",
     "pack_four_color_2bpp",
+    "photo_orientation",
+    "select_pair_candidate",
 ]

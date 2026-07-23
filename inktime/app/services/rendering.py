@@ -22,6 +22,10 @@ from inktime.app.domain.rendering import (
     evaluate_e6_suitability,
     fit_with_focus,
 )
+from inktime.app.domain.rendering.adaptive_layout import (
+    photo_orientation,
+    select_pair_candidate,
+)
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.render_candidates import RenderCandidateRepository
 from inktime.app.repositories.settings import SettingsRepository
@@ -34,6 +38,7 @@ LAYOUTS = {
     "postcard": "明信片",
     "photo_info": "照片＋日期地點",
     "photo_pair": "雙照片拼版",
+    "adaptive_memory": "智慧自適應回憶",
     "calendar": "月曆相框",
     "weather_sensor": "天氣＋室內溫溼度",
 }
@@ -164,6 +169,89 @@ class RenderService:
             subject_box=None if manual else self._subject_box(photo),
         )
 
+    def _caption(self, photo_id: str) -> str:
+        with self.database.session() as connection:
+            row = connection.execute(
+                "SELECT side_caption FROM photo_analysis WHERE photo_id=? ORDER BY created_at DESC,id DESC LIMIT 1",
+                (photo_id,),
+            ).fetchone()
+        return str(row["side_caption"] if row else "").strip()
+
+    def _adaptive_pair_candidates(self, primary: dict[str, Any]) -> list[dict[str, Any]]:
+        """Use only existing analyzed/eligible rows; this is intentionally model-free."""
+        with self.database.session() as connection:
+            primary_analysis = connection.execute(
+                "SELECT types_json,semantic_json FROM photo_analysis WHERE photo_id=? ORDER BY created_at DESC,id DESC LIMIT 1",
+                (str(primary["id"]),),
+            ).fetchone()
+            rows = connection.execute(
+                f"""
+                SELECT p.*,l.root_path,a.types_json,a.semantic_json,
+                       EXISTS(SELECT 1 FROM display_history dh WHERE dh.photo_id=p.id) ever_displayed,
+                       EXISTS(SELECT 1 FROM display_history dh WHERE dh.photo_id=p.id
+                              AND dh.displayed_at>=datetime('now','-14 days')) recently_displayed
+                FROM photos p JOIN libraries l ON l.id=p.library_id
+                JOIN photo_analysis a ON a.id=(
+                    SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id
+                    ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1
+                )
+                WHERE {RenderCandidateRepository.SQL_PREDICATE} AND p.id<>?
+                ORDER BY CASE WHEN substr(p.captured_at,1,10)=substr(?,1,10) THEN 0 ELSE 1 END,
+                         p.captured_at DESC,p.id DESC LIMIT 300
+                """,
+                (str(primary["id"]), str(primary.get("captured_at") or "")),
+            ).fetchall()
+        if primary_analysis is not None:
+            try:
+                semantic = json.loads(str(primary_analysis["semantic_json"] or "{}"))
+                values = semantic.get("values", {}) if isinstance(semantic, dict) else {}
+                primary["city"] = values.get("city_candidate")
+                primary["types"] = json.loads(str(primary_analysis["types_json"] or "[]"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+        candidates: list[dict[str, Any]] = []
+        for stored in rows:
+            row = dict(stored)
+            if not self.candidates.available(row):
+                continue
+            try:
+                semantic = json.loads(str(row.get("semantic_json") or "{}"))
+                values = semantic.get("values", {}) if isinstance(semantic, dict) else {}
+                row["city"] = values.get("city_candidate")
+                row["types"] = json.loads(str(row.get("types_json") or "[]"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                row["city"], row["types"] = None, []
+            candidates.append(row)
+        return candidates
+
+    def _adaptive_footer(
+        self,
+        draw: ImageDraw.ImageDraw,
+        fonts: dict[str, ImageFont.FreeTypeFont],
+        *,
+        frame_width: int,
+        frame_height: int,
+        footer_height: int,
+        primary,
+        secondary=None,
+        caption: str,
+    ) -> None:
+        photo_height = frame_height - footer_height
+        draw.rectangle((0, photo_height, frame_width, frame_height), fill="white")
+        draw.line((20, photo_height + 4, frame_width - 20, photo_height + 4), fill="black", width=2)
+        text = caption or "這一天留下了兩個值得記住的片段。"
+        draw.text((22, photo_height + 12), self._fit_line(draw, text, fonts["body"], frame_width - 44), font=fonts["body"], fill="black")
+        primary_date = self._captured_date(primary["captured_at"])
+        second_date = self._captured_date(secondary["captured_at"]) if secondary is not None else None
+        dates = [self._date_label(primary_date)] if bool(self.settings.get("render.show_capture_date", True)) else []
+        if second_date and second_date != primary_date:
+            dates.append(self._date_label(second_date))
+        first_location = self.location_name(primary)
+        second_location = self.location_name(secondary) if secondary is not None else ""
+        location = first_location if first_location == second_location else ""
+        meta = "・".join(dates + ([location] if location else []))
+        draw.text((22, frame_height - 32), self._fit_line(draw, meta, fonts["meta"], frame_width - 44), font=fonts["meta"], fill="black")
+
     @staticmethod
     def _physical_frame(canvas: Image.Image, orientation: str) -> Image.Image:
         """橫向先以 800×480 排版，再順時針旋轉成韌體固定的 480×800。"""
@@ -261,28 +349,24 @@ class RenderService:
         secondary_photo_id: str | None = None,
         orientation: str | None = None,
         fit_mode: str | None = None,
+        device_config: dict[str, Any] | None = None,
     ) -> Image.Image:
         photo = self.ensure_photo_features(photo_id)
         path = safe_join(Path(photo["root_path"]), photo["relative_path"])
-        with self.database.session() as connection:
-            analysis = connection.execute(
-                "SELECT side_caption FROM photo_analysis WHERE photo_id=? ORDER BY created_at DESC LIMIT 1",
-                (photo_id,),
-            ).fetchone()
-        caption = str(analysis["side_caption"] if analysis else "").strip()
+        caption = self._caption(photo_id)
         location = self.location_name(photo)
         captured = self._captured_date(photo["captured_at"])
         show_date = bool(self.settings.get("render.show_capture_date", True))
         date_label = self._date_label(captured) if show_date else ""
-        layout_key = layout or str(self.settings.get("render.layout", "photo_info"))
+        device_config = device_config or {}
+        layout_key = layout or str(device_config.get("layout_mode") or self.settings.get("render.layout", "photo_info"))
         if layout_key not in LAYOUTS:
             raise ValueError("RENDER-005 不支援的相框版型")
-        orientation_key = orientation or str(
-            self.settings.get("render.frame_orientation", "portrait")
-        )
+        adaptive_requested = layout_key == "adaptive_memory"
+        orientation_key = orientation or str(device_config.get("frame_orientation") or self.settings.get("render.frame_orientation", "portrait"))
         if orientation_key not in FRAME_ORIENTATIONS:
             raise ValueError("RENDER-005 不支援的相框方向")
-        fit_mode_key = fit_mode or str(self.settings.get("render.fit_mode", "contain"))
+        fit_mode_key = fit_mode or str(device_config.get("fit_mode") or self.settings.get("render.fit_mode", "contain"))
         if fit_mode_key not in FIT_MODES:
             raise ValueError("RENDER-005 不支援的照片縮放方式")
         effective_orientation = (
@@ -297,6 +381,42 @@ class RenderService:
 
         with Image.open(path) as opened:
             source = ImageOps.exif_transpose(opened).convert("RGB")
+            if layout_key == "adaptive_memory":
+                footer_height = 76 if effective_orientation == "landscape" else 96
+                source_orientation = photo_orientation(source.size)
+                if source_orientation in {"square", effective_orientation}:
+                    layout_key = "photo_info"
+                    fit_mode_key = "contain"
+                else:
+                    primary = dict(photo)
+                    primary.update({"id": photo_id, "city": "", "types": []})
+                    second_row = select_pair_candidate(
+                        primary, self._adaptive_pair_candidates(primary), frame_orientation=effective_orientation
+                    )
+                    if second_row is None:
+                        layout_key = "photo_info"
+                        fit_mode_key = "contain"
+                    else:
+                        text_parts = [caption or "這一天留下了兩個值得記住的片段。", self.location_name(photo)]
+                        fonts = self._fonts("\n".join(part for part in text_parts if part))
+                        canvas = Image.new("RGB", (frame_width, frame_height), "white")
+                        gutter = 8
+                        if effective_orientation == "landscape":
+                            slot_size = ((frame_width - gutter) // 2, frame_height - footer_height)
+                            second_position = (slot_size[0] + gutter, 0)
+                        else:
+                            slot_size = (frame_width, (frame_height - footer_height - gutter) // 2)
+                            second_position = (0, slot_size[1] + gutter)
+                        canvas.paste(self._fit_photo(source, photo, slot_size, None, None, "contain"), (0, 0))
+                        second_path = safe_join(Path(second_row["root_path"]), second_row["relative_path"])
+                        with Image.open(second_path) as second_opened:
+                            second_source = ImageOps.exif_transpose(second_opened).convert("RGB")
+                            canvas.paste(self._fit_photo(second_source, second_row, slot_size, None, None, "contain"), second_position)
+                        self._adaptive_footer(
+                            ImageDraw.Draw(canvas), fonts, frame_width=frame_width, frame_height=frame_height,
+                            footer_height=footer_height, primary=photo, secondary=second_row, caption=caption,
+                        )
+                        return finish(canvas)
             if layout_key == "full":
                 return finish(
                     self._fit_photo(
@@ -314,6 +434,8 @@ class RenderService:
             indoor = self._latest_indoor() if layout_key == "weather_sensor" else None
             weather_location = str(self.settings.get("render.weather_location_name", "所在地"))
             text_parts = [caption, location, date_label, f"{today.month}月{today.day}日", "星期一二三四五六日"]
+            if adaptive_requested:
+                text_parts.extend(["這一天留下了一個值得記住的片段。", "這一天留下了兩個值得記住的片段。"])
             if layout_key == "photo_pair":
                 text_parts.append("請選擇第二張照片")
             if weather:
@@ -413,10 +535,13 @@ class RenderService:
                     fill="black",
                     width=2,
                 )
-                if caption:
+                footer_caption = caption or (
+                    "這一天留下了一個值得記住的片段。" if adaptive_requested else ""
+                )
+                if footer_caption:
                     draw.text(
                         (22, photo_height + 12),
-                        self._fit_line(draw, caption, fonts["body"], frame_width - 44),
+                        self._fit_line(draw, footer_caption, fonts["body"], frame_width - 44),
                         font=fonts["body"],
                         fill="black",
                     )
@@ -479,6 +604,7 @@ class RenderService:
         created_by: str,
         profile_keys: list[str] | None = None,
         history: dict[str, str] | None = None,
+        device_ids: list[str] | None = None,
     ) -> dict:
         quantity = int(self.settings.get("render.quantity", 5))
         layout_key = str(self.settings.get("render.layout", "photo_info"))
@@ -489,6 +615,49 @@ class RenderService:
         else:
             # 明確指定不合格照片必須穩定失敗；不得靜默改選其他照片。
             selected = [str(row["id"]) for row in self.candidates.require(selected)]
+        if device_ids:
+            unique_device_ids = list(dict.fromkeys(str(value) for value in device_ids if str(value)))
+            placeholders = ",".join("?" for _ in unique_device_ids)
+            with self.database.session() as connection:
+                devices = connection.execute(
+                    f"SELECT * FROM devices WHERE enabled=1 AND id IN ({placeholders})",  # noqa: S608
+                    unique_device_ids,
+                ).fetchall()
+            by_id = {str(row["id"]): dict(row) for row in devices}
+            missing = [device_id for device_id in unique_device_ids if device_id not in by_id]
+            if missing:
+                raise ValueError("DISPLAY-004 指定裝置不存在或已停用")
+            manifests = []
+            assignments: dict[str, str] = {}
+            for device_id in unique_device_ids:
+                device = by_id[device_id]
+                profile_key = str(device["panel_profile"])
+                if profile_key not in DISPLAY_PROFILES:
+                    raise ValueError("RENDER-003 發布包含不支援的顯示 Profile")
+                images = [
+                    (
+                        photo_id,
+                        self.render_photo(photo_id, device_config=device),
+                    )
+                    for photo_id in selected[:quantity]
+                ]
+                manifest = self.publisher.publish(
+                    images,
+                    profile_key=profile_key,
+                    dither=str(self.settings.get("render.dither", "floyd_steinberg")),
+                    color_distance=str(self.settings.get("render.color_distance", "oklab")),
+                    dither_strength=float(self.settings.get("render.dither_strength", 1.0)),
+                    orientation=str(device.get("frame_orientation") or self.settings.get("render.frame_orientation", "portrait")),
+                    activate=False,
+                    metadata={"device_id": device_id, "layout_mode": device.get("layout_mode") or layout_key},
+                )
+                manifests.append(manifest)
+                assignments[device_id] = str(manifest["release_id"])
+            published = self.release_coordinator.publish(
+                manifests, created_by=created_by, photo_ids=selected[:quantity], history=history,
+                device_assignments=assignments,
+            )
+            return {"releases": published, "device_releases": assignments}
         if layout_key == "photo_pair":
             images = []
             for index in range(0, len(selected), 2):
