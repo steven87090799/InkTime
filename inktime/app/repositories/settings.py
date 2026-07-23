@@ -580,16 +580,6 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         },
         "restart": False,
     },
-    "render.adaptive_min_retained_ratio": {
-        "category": "渲染設定",
-        "default": 0.78,
-        "type": "number",
-        "description": "智慧相框單張 cover 的最低原始畫面保留率",
-        "risk": "過高會較常改為雙圖或完整顯示",
-        "min": 0.5,
-        "max": 1.0,
-        "restart": False,
-    },
     "render.frame_orientation": {
         "category": "渲染設定",
         "default": "portrait",

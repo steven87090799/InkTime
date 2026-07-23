@@ -32,7 +32,21 @@ def _logical_landscape(image: Image.Image) -> Image.Image:
     return image.transpose(Image.Transpose.ROTATE_90)
 
 
-def test_adaptive_landscape_pair_keeps_footer_and_uses_existing_candidate(app, tmp_path):
+def test_adaptive_landscape_single_contains_matching_photo_and_keeps_footer(app, tmp_path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    _analyzed_photo(app, root, "primary", (1600, 900), "2024-07-01T10:00:00+00:00")
+    image = app.extensions["inktime_render_service"].render_photo(
+        "primary", layout="adaptive_memory", orientation="landscape"
+    )
+    logical = _logical_landscape(image)
+    assert logical.size == (800, 480)
+    assert logical.getpixel((10, 200)) == (255, 255, 255)
+    assert logical.getpixel((400, 200)) != (255, 255, 255)
+    assert logical.getpixel((10, 470)) == (255, 255, 255)
+
+
+def test_adaptive_landscape_pair_contains_portraits_with_footer(app, tmp_path):
     root = tmp_path / "photos"
     root.mkdir()
     _analyzed_photo(app, root, "primary", (900, 1600), "2024-07-01T10:00:00+00:00")
@@ -40,25 +54,52 @@ def test_adaptive_landscape_pair_keeps_footer_and_uses_existing_candidate(app, t
     image = app.extensions["inktime_render_service"].render_photo(
         "primary", layout="adaptive_memory", orientation="landscape"
     )
-    assert image.size == (480, 800)
     logical = _logical_landscape(image)
-    assert logical.size == (800, 480)
-    assert logical.getpixel((10, 470)) == (255, 255, 255)
-    assert logical.getpixel((10, 200)) != (255, 255, 255)
-    assert logical.getpixel((790, 200)) != (255, 255, 255)
+    assert logical.getpixel((10, 100)) == (255, 255, 255)
+    assert logical.getpixel((200, 200)) != (255, 255, 255)
+    assert logical.getpixel((600, 200)) != (255, 255, 255)
+    assert logical.getpixel((400, 470)) == (255, 255, 255)
 
 
-def test_adaptive_falls_back_to_contain_without_placeholder(app, tmp_path):
+def test_adaptive_portrait_single_contains_matching_photo_and_keeps_footer(app, tmp_path):
     root = tmp_path / "photos"
     root.mkdir()
     _analyzed_photo(app, root, "primary", (900, 1600), "2024-07-01T10:00:00+00:00")
     image = app.extensions["inktime_render_service"].render_photo(
-        "primary", layout="adaptive_memory", orientation="landscape"
+        "primary", layout="adaptive_memory", orientation="portrait"
     )
-    logical = _logical_landscape(image)
-    assert logical.getpixel((10, 100)) == (255, 255, 255)
-    assert logical.getpixel((400, 470)) == (255, 255, 255)
-    assert logical.size == (800, 480)
+    assert image.getpixel((10, 300)) == (255, 255, 255)
+    assert image.getpixel((240, 300)) != (255, 255, 255)
+    assert image.getpixel((240, 780)) == (255, 255, 255)
+
+
+def test_adaptive_portrait_pair_contains_landscapes_with_footer(app, tmp_path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    _analyzed_photo(app, root, "primary", (1600, 900), "2024-07-01T10:00:00+00:00")
+    _analyzed_photo(app, root, "secondary", (1600, 900), "2024-07-01T10:30:00+00:00")
+    image = app.extensions["inktime_render_service"].render_photo(
+        "primary", layout="adaptive_memory", orientation="portrait"
+    )
+    assert image.getpixel((240, 10)) == (255, 255, 255)
+    assert image.getpixel((240, 175)) != (255, 255, 255)
+    assert image.getpixel((240, 530)) != (255, 255, 255)
+    assert image.getpixel((240, 780)) == (255, 255, 255)
+
+
+def test_adaptive_square_and_missing_pair_fall_back_to_single_contain(app, tmp_path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    _analyzed_photo(app, root, "square", (1000, 1000), "2024-07-01T10:00:00+00:00")
+    _analyzed_photo(app, root, "portrait", (900, 1600), "2024-07-02T10:00:00+00:00")
+    square = app.extensions["inktime_render_service"].render_photo(
+        "square", layout="adaptive_memory", orientation="landscape"
+    )
+    fallback = app.extensions["inktime_render_service"].render_photo(
+        "portrait", layout="adaptive_memory", orientation="landscape"
+    )
+    assert _logical_landscape(square).getpixel((10, 100)) == (255, 255, 255)
+    assert _logical_landscape(fallback).getpixel((10, 100)) == (255, 255, 255)
 
 
 def test_device_releases_keep_profile_manifest_and_independent_layouts(app, tmp_path):

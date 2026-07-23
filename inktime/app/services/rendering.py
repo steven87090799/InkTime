@@ -23,8 +23,7 @@ from inktime.app.domain.rendering import (
     fit_with_focus,
 )
 from inktime.app.domain.rendering.adaptive_layout import (
-    ADAPTIVE_RETAINED_RATIO,
-    decide_adaptive_layout,
+    photo_orientation,
     select_pair_candidate,
 )
 from inktime.app.repositories.photos import PhotoRepository
@@ -168,13 +167,6 @@ class RenderService:
             focus_x=focus_x,
             focus_y=focus_y,
             subject_box=None if manual else self._subject_box(photo),
-        )
-
-    @staticmethod
-    def _focus(photo, crop_x: float | None, crop_y: float | None) -> tuple[float, float]:
-        return (
-            float(crop_x if crop_x is not None else photo["crop_manual_x"] if photo["crop_manual_x"] is not None else photo["crop_focus_x"] if photo["crop_focus_x"] is not None else 0.5),
-            float(crop_y if crop_y is not None else photo["crop_manual_y"] if photo["crop_manual_y"] is not None else photo["crop_focus_y"] if photo["crop_focus_y"] is not None else 0.5),
         )
 
     def _caption(self, photo_id: str) -> str:
@@ -391,20 +383,10 @@ class RenderService:
             source = ImageOps.exif_transpose(opened).convert("RGB")
             if layout_key == "adaptive_memory":
                 footer_height = 76 if effective_orientation == "landscape" else 96
-                photo_size = (frame_width, frame_height - footer_height)
-                focus_x, focus_y = self._focus(photo, crop_x, crop_y)
-                threshold = float(self.settings.get("render.adaptive_min_retained_ratio", ADAPTIVE_RETAINED_RATIO))
-                decision = decide_adaptive_layout(
-                    source.size,
-                    photo_size,
-                    subject_box=self._subject_box(photo),
-                    focus_x=focus_x,
-                    focus_y=focus_y,
-                    minimum_retained_ratio=threshold,
-                )
-                if decision.mode == "single":
+                source_orientation = photo_orientation(source.size)
+                if source_orientation in {"square", effective_orientation}:
                     layout_key = "photo_info"
-                    fit_mode_key = "cover"
+                    fit_mode_key = "contain"
                 else:
                     primary = dict(photo)
                     primary.update({"id": photo_id, "city": "", "types": []})
@@ -425,11 +407,11 @@ class RenderService:
                         else:
                             slot_size = (frame_width, (frame_height - footer_height - gutter) // 2)
                             second_position = (0, slot_size[1] + gutter)
-                        canvas.paste(self._fit_photo(source, photo, slot_size, crop_x, crop_y, "cover"), (0, 0))
+                        canvas.paste(self._fit_photo(source, photo, slot_size, None, None, "contain"), (0, 0))
                         second_path = safe_join(Path(second_row["root_path"]), second_row["relative_path"])
                         with Image.open(second_path) as second_opened:
                             second_source = ImageOps.exif_transpose(second_opened).convert("RGB")
-                            canvas.paste(self._fit_photo(second_source, second_row, slot_size, None, None, "cover"), second_position)
+                            canvas.paste(self._fit_photo(second_source, second_row, slot_size, None, None, "contain"), second_position)
                         self._adaptive_footer(
                             ImageDraw.Draw(canvas), fonts, frame_width=frame_width, frame_height=frame_height,
                             footer_height=footer_height, primary=photo, secondary=second_row, caption=caption,

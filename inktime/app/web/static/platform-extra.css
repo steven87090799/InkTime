@@ -80,10 +80,6 @@ pre { white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow
 .frame-demo[data-layout="adaptive_memory"] .frame-demo-primary { inset: 0 0 24%; }
 .frame-demo[data-layout="adaptive_memory"] .frame-demo-secondary { display: none; }
 .frame-demo[data-layout="adaptive_memory"] .frame-demo-info { display: grid; }
-.frame-demo[data-layout="adaptive_memory"][data-fit="cover"] .frame-demo-primary { inset: 0 calc(50% + 3px) 24% 0; }
-.frame-demo[data-layout="adaptive_memory"][data-fit="cover"] .frame-demo-secondary { inset: 0 0 24% calc(50% + 3px); display: grid; }
-.frame-demo[data-layout="adaptive_memory"][data-orientation="portrait"][data-fit="cover"] .frame-demo-primary { inset: 0 0 calc(24% + 38%); }
-.frame-demo[data-layout="adaptive_memory"][data-orientation="portrait"][data-fit="cover"] .frame-demo-secondary { inset: calc(38% + 3px) 0 24%; display: grid; }
 .frame-demo[data-layout="calendar"] .frame-demo-primary { inset: 37% 5% 9%; }
 .frame-demo[data-layout="calendar"] .frame-demo-info, .frame-demo[data-layout="weather_sensor"] .frame-demo-info { top: 0; bottom: auto; height: 32%; display: grid; border-top: 0; border-bottom: 2px solid #111; }
 .frame-demo[data-layout="weather_sensor"] .frame-demo-primary { inset: 0 0 38%; }

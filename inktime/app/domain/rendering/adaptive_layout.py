@@ -1,88 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime
 from math import radians, cos, sin, asin, sqrt
 from typing import Any
 
 
-ADAPTIVE_RETAINED_RATIO = 0.78
-SUBJECT_RETAINED_RATIO = 0.90
-
-
-@dataclass(frozen=True)
-class AdaptiveDecision:
-    mode: str
-    retained_ratio: float
-    subject_retained_ratio: float
-
-
-def retained_ratio(source_size: tuple[int, int], target_size: tuple[int, int]) -> float:
-    """Original image area retained by a cover crop (after EXIF rotation)."""
-    source_width, source_height = source_size
-    target_width, target_height = target_size
-    if min(source_width, source_height, target_width, target_height) <= 0:
-        raise ValueError("圖片尺寸必須大於 0")
-    source_aspect = source_width / source_height
-    target_aspect = target_width / target_height
-    return min(source_aspect / target_aspect, target_aspect / source_aspect, 1.0)
-
-
-def _clamp(value: float) -> float:
-    return max(0.0, min(1.0, value))
-
-
-def subject_retained_ratio(
-    source_size: tuple[int, int],
-    target_size: tuple[int, int],
-    subject_box: tuple[float, float, float, float] | None,
-    *,
-    focus_x: float = 0.5,
-    focus_y: float = 0.5,
-) -> float:
-    """How much of the stored face/subject rectangle survives a focus-aware cover crop."""
-    if subject_box is None:
-        return 1.0
-    left, top, right, bottom = (_clamp(float(value)) for value in subject_box)
-    if right <= left or bottom <= top:
-        return 1.0
-    source_width, source_height = source_size
-    target_width, target_height = target_size
-    source_aspect = source_width / source_height
-    target_aspect = target_width / target_height
-    if source_aspect > target_aspect:
-        crop_width = target_aspect / source_aspect
-        crop_left = max(0.0, min(1.0 - crop_width, _clamp(focus_x) - crop_width / 2))
-        crop = (crop_left, 0.0, crop_left + crop_width, 1.0)
-    else:
-        crop_height = source_aspect / target_aspect
-        crop_top = max(0.0, min(1.0 - crop_height, _clamp(focus_y) - crop_height / 2))
-        crop = (0.0, crop_top, 1.0, crop_top + crop_height)
-    overlap_width = max(0.0, min(right, crop[2]) - max(left, crop[0]))
-    overlap_height = max(0.0, min(bottom, crop[3]) - max(top, crop[1]))
-    return overlap_width * overlap_height / ((right - left) * (bottom - top))
-
-
-def decide_adaptive_layout(
-    source_size: tuple[int, int],
-    photo_area: tuple[int, int],
-    *,
-    subject_box: tuple[float, float, float, float] | None = None,
-    focus_x: float = 0.5,
-    focus_y: float = 0.5,
-    minimum_retained_ratio: float = ADAPTIVE_RETAINED_RATIO,
-) -> AdaptiveDecision:
-    kept = retained_ratio(source_size, photo_area)
-    subject_kept = subject_retained_ratio(
-        source_size, photo_area, subject_box, focus_x=focus_x, focus_y=focus_y
-    )
-    if kept >= minimum_retained_ratio and subject_kept >= SUBJECT_RETAINED_RATIO:
-        return AdaptiveDecision("single", kept, subject_kept)
-    return AdaptiveDecision("pair", kept, subject_kept)
-
-
 def dimensions_after_exif(width: int, height: int, orientation: int | None) -> tuple[int, int]:
     return (height, width) if orientation in {5, 6, 7, 8} else (width, height)
+
+
+def photo_orientation(size: tuple[int, int]) -> str:
+    width, height = size
+    if width <= 0 or height <= 0:
+        raise ValueError("圖片尺寸必須大於 0")
+    aspect_ratio = width / height
+    if 0.9 <= aspect_ratio <= 1.1:
+        return "square"
+    return "landscape" if aspect_ratio > 1 else "portrait"
 
 
 def pair_orientation(frame_orientation: str) -> str:
@@ -90,8 +24,7 @@ def pair_orientation(frame_orientation: str) -> str:
 
 
 def orientation_matches(size: tuple[int, int], desired: str) -> bool:
-    width, height = size
-    return width <= height if desired == "portrait" else width >= height
+    return photo_orientation(size) == desired
 
 
 def _distance_km(first: dict[str, Any], second: dict[str, Any]) -> float | None:
