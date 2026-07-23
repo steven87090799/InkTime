@@ -25,12 +25,15 @@ def test_setting_change_is_audited_without_manual_file_edit(client, app):
     response = client.post(
         "/api/v1/settings",
         json={"analysis.concurrency": 4, "general.timezone": "Asia/Taipei"},
-        headers={"X-CSRF-Token": csrf(client)},
+        headers={
+            "X-CSRF-Token": csrf(client),
+            "X-InkTime-Confirm-Risk": "true",
+        },
     )
     assert response.status_code == 200
     with app.extensions["inktime_database"].session() as connection:
         history = connection.execute("SELECT key,source_ip FROM setting_history ORDER BY id").fetchall()
-    assert [row["key"] for row in history] == ["analysis.concurrency", "general.timezone"]
+    assert [row["key"] for row in history] == ["analysis.concurrency"]
     assert history[0]["source_ip"] == "127.0.0.1"
 
 

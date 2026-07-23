@@ -126,7 +126,26 @@ class ScoringProfileRepository:
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                for key, value in setting_values.items():
+                before = self.settings._values_from_connection(connection)
+                after = before | setting_values
+                self.settings._validate_all(after)
+                changed_settings = {
+                    key: value
+                    for key, value in setting_values.items()
+                    if before.get(key) != value
+                }
+                if changed_settings:
+                    self.settings._create_snapshot(
+                        connection,
+                        before=before,
+                        after=after,
+                        changed=changed_settings,
+                        actor_id=created_by,
+                        source_ip=source_ip,
+                        reason=f"評分控制中心：{clean_name}",
+                        rollback_source_snapshot_id=None,
+                    )
+                for key, value in changed_settings.items():
                     previous = connection.execute(
                         "SELECT value_json FROM settings WHERE key=?", (key,)
                     ).fetchone()

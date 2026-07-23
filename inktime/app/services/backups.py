@@ -28,6 +28,8 @@ IMPORTANT_TABLES = (
     "releases",
     "device_events",
     "display_history",
+    "settings_snapshots",
+    "settings_snapshot_items",
 )
 
 _COUNT_SQL = {
@@ -41,6 +43,8 @@ _COUNT_SQL = {
     "releases": "SELECT COUNT(*) FROM releases",
     "device_events": "SELECT COUNT(*) FROM device_events",
     "display_history": "SELECT COUNT(*) FROM display_history",
+    "settings_snapshots": "SELECT COUNT(*) FROM settings_snapshots",
+    "settings_snapshot_items": "SELECT COUNT(*) FROM settings_snapshot_items",
 }
 
 
@@ -170,6 +174,7 @@ class BackupService:
                     "照片分析結果",
                     "照片與排程狀態",
                     "顯示與發布歷史資料庫紀錄",
+                    "版本化設定 Snapshot 與 Diff",
                 ],
                 "excludes": [
                     "原始照片",

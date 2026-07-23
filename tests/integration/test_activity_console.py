@@ -63,7 +63,10 @@ def test_caption_and_observability_settings_coexist_and_caption_events_are_redac
             "observability.debug_enabled": True,
             "observability.activity_poll_seconds": 6,
         },
-        headers={"X-CSRF-Token": csrf(client)},
+        headers={
+            "X-CSRF-Token": csrf(client),
+            "X-InkTime-Confirm-Risk": "true",
+        },
     )
     assert response.status_code == 200
     assert settings.get("analysis.caption_min_chars") == 121
