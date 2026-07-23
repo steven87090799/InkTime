@@ -4,6 +4,8 @@
 
 InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複與低價值照片，再以可控預算的視覺模型產生繁體中文描述、分類、分數與電子紙短文案。所有工作、模型、成本、裝置、渲染、備份與診斷都能由登入後的 Web 管理介面操作。
 
+決策追蹤、回饋閉環、Shadow Mode、離線內容 Queue、資料保留與 Canary 發布皆為可選功能，預設不會改變既有配對裝置、正式 Release 或選片。啟用與故障處理請見 [實作計畫](docs/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md)、[決策追蹤](docs/DECISION_TRACE_ZH_TW.md)、[Shadow Mode](docs/SHADOW_MODE_ZH_TW.md)、[離線 Queue](docs/OFFLINE_QUEUE_ZH_TW.md)、[資料保留](docs/DATA_RETENTION_ZH_TW.md)、[Canary](docs/CANARY_ROLLOUT_ZH_TW.md)。
+
 ![InkTime 繁體中文儀表板](docs/images/dashboard.png)
 
 ## 主要能力
