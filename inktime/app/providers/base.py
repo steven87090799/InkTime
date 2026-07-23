@@ -37,6 +37,7 @@ class VisionProvider(ABC):
         detail: str,
         stage: str,
         max_tokens: int | None = None,
+        caption_controls: dict | None = None,
     ) -> ProviderResponse:
         raise NotImplementedError
 
@@ -48,6 +49,8 @@ class VisionProvider(ABC):
         validation_error: str,
         model: str,
         max_tokens: int | None = None,
+        stage: str = "single_high",
+        caption_controls: dict | None = None,
     ) -> ProviderResponse:
         """只傳文字修復 JSON，不得再次上傳圖片。"""
         raise NotImplementedError

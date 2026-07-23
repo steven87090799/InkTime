@@ -46,6 +46,107 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "choices": ["local", "low_cost", "smart_two_stage", "high_quality"],
         "restart": False,
     },
+    "analysis.advanced_caption_enabled": {
+        "category": "照片描述與相框文案",
+        "default": False,
+        "type": "boolean",
+        "description": "進階照片描述與相框文案；預設關閉，關閉時完全使用既有 Prompt、Schema 與快取行為",
+        "risk": "啟用後的新分析會使用文案設定產生不同快取；不會改寫舊分析",
+        "restart": False,
+    },
+    "analysis.caption_variants_enabled": {
+        "category": "照片描述與相框文案",
+        "default": False,
+        "type": "boolean",
+        "description": "同一次高品質圖片分析產生五種相框候選；需先啟用進階文案功能",
+        "risk": "候選只保存在既有 semantic_json，切換顯示風格不會再次上傳圖片或呼叫模型",
+        "restart": False,
+    },
+    "analysis.caption_min_chars": {
+        "category": "照片描述與相框文案", "default": 120, "type": "integer",
+        "description": "詳細照片描述最少字元數", "risk": "必須與目標、上限保持 min ≤ target ≤ max",
+        "min": 0, "max": 1000, "restart": False,
+    },
+    "analysis.caption_target_chars": {
+        "category": "照片描述與相框文案", "default": 160, "type": "integer",
+        "description": "詳細照片描述的大致目標字元數，不要求模型精確湊字數", "risk": "必須與最少、上限保持 min ≤ target ≤ max",
+        "min": 0, "max": 1000, "restart": False,
+    },
+    "analysis.caption_max_chars": {
+        "category": "照片描述與相框文案", "default": 220, "type": "integer",
+        "description": "詳細照片描述最多字元數", "risk": "必須與最少、目標保持 min ≤ target ≤ max",
+        "min": 0, "max": 1000, "restart": False,
+    },
+    "analysis.side_caption_min_chars": {
+        "category": "照片描述與相框文案", "default": 10, "type": "integer",
+        "description": "相框一句話最少字元數", "risk": "必須與目標、上限保持 min ≤ target ≤ max",
+        "min": 0, "max": 120, "restart": False,
+    },
+    "analysis.side_caption_target_chars": {
+        "category": "照片描述與相框文案", "default": 22, "type": "integer",
+        "description": "相框一句話的大致目標字元數", "risk": "必須與最少、上限保持 min ≤ target ≤ max",
+        "min": 0, "max": 120, "restart": False,
+    },
+    "analysis.side_caption_max_chars": {
+        "category": "照片描述與相框文案", "default": 42, "type": "integer",
+        "description": "相框一句話最多字元數", "risk": "必須與最少、目標保持 min ≤ target ≤ max",
+        "min": 0, "max": 120, "restart": False,
+    },
+    "analysis.copy_default_style": {
+        "category": "照片描述與相框文案", "default": "natural", "type": "string",
+        "description": "相框預設顯示的已儲存候選風格", "risk": "只切換既有候選，不會重新分析圖片",
+        "choices": ["natural", "warm", "literary", "humorous", "minimal"], "restart": False,
+    },
+    "analysis.copy_humor_level": {
+        "category": "照片描述與相框文案", "default": 1, "type": "integer",
+        "description": "相框文案幽默程度（0 為不刻意幽默）", "risk": "過高可能降低正式場合的適用性",
+        "min": 0, "max": 5, "restart": False,
+    },
+    "analysis.copy_poetic_level": {
+        "category": "照片描述與相框文案", "default": 1, "type": "integer",
+        "description": "相框文案詩意程度（0 為最直白）", "risk": "過高可能讓文案較含蓄",
+        "min": 0, "max": 5, "restart": False,
+    },
+    "analysis.copy_avoid_cliche": {
+        "category": "照片描述與相框文案", "default": True, "type": "boolean",
+        "description": "避免雞湯、濫情、空泛與模板句", "risk": "會限制模型可使用的常見文案語氣", "restart": False,
+    },
+    "analysis.copy_avoid_direct_description": {
+        "category": "照片描述與相框文案", "default": True, "type": "boolean",
+        "description": "相框一句話避免只是直接重述照片內容", "risk": "仍以照片可確認內容為界，不可虛構故事", "restart": False,
+    },
+    "analysis.copy_forbid_exclamation": {
+        "category": "照片描述與相框文案", "default": True, "type": "boolean",
+        "description": "相框一句話不使用驚嘆號", "risk": "降低強烈語氣", "restart": False,
+    },
+    "analysis.copy_forbid_like_phrase": {
+        "category": "照片描述與相框文案", "default": True, "type": "boolean",
+        "description": "避免使用像是、彷彿、彷佛等比喻起手式", "risk": "限制部分文學修辭", "restart": False,
+    },
+    "analysis.copy_max_commas": {
+        "category": "照片描述與相框文案", "default": 2, "type": "integer",
+        "description": "相框一句話最多逗號數", "risk": "過低會讓長句較不易閱讀",
+        "min": 0, "max": 10, "restart": False,
+    },
+    "analysis.copy_avoid_abstract_ending": {
+        "category": "照片描述與相框文案", "default": True, "type": "boolean",
+        "description": "避免以空泛人生結論收尾", "risk": "限制總結式文案", "restart": False,
+    },
+    "analysis.copy_banned_words": {
+        "category": "照片描述與相框文案", "default": "世界\n時光\n歲月\n治癒\n剛剛好\n悄悄\n慢慢\n值得珍藏\n美好瞬間\n時光定格\n歲月靜好\n生活中的小確幸\n一切都是最好的安排", "type": "string",
+        "description": "每行一個禁止詞；只在進階文案啟用時套用", "risk": "過多禁止詞可能使文案選詞受限",
+        "multiline": True, "rows": 8, "max_length": 4000, "restart": False,
+    },
+    "analysis.copy_banned_patterns": {
+        "category": "照片描述與相框文案", "default": "", "type": "string",
+        "description": "每行一個禁止句型；只在進階文案啟用時套用", "risk": "請使用可理解的文字片段，非正規表示式",
+        "multiline": True, "rows": 5, "max_length": 4000, "restart": False,
+    },
+    "analysis.copy_custom_rules": {
+        "category": "照片描述與相框文案", "default": "", "type": "string",
+        "description": "額外文案規則；只在進階文案啟用時傳給模型", "risk": "不可要求模型猜測人物關係、地點或事件",
+        "multiline": True, "rows": 6, "max_length": 8000, "restart": False,
+    },
     "analysis.ai_mode": {
         "category": "AI 模式",
         "default": "top_candidates",
@@ -514,6 +615,24 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "min": 0,
         "max": 100,
         "restart": False,
+    },
+    "render.caption_wrap_enabled": {
+        "category": "照片描述與相框文案",
+        "default": False,
+        "type": "boolean",
+        "description": "相框文案依實際字型像素寬度換行；預設關閉並維持既有單行截斷",
+        "risk": "啟用後最多兩行，必要時縮小字型；完整原文不會被修改",
+        "restart": False,
+    },
+    "render.caption_max_lines": {
+        "category": "照片描述與相框文案", "default": 2, "type": "integer",
+        "description": "相框文案開啟換行時的最大行數", "risk": "Footer 空間不足時仍會縮小或截斷",
+        "min": 1, "max": 2, "restart": False,
+    },
+    "render.caption_min_font_size": {
+        "category": "照片描述與相框文案", "default": 17, "type": "integer",
+        "description": "相框文案開啟換行時可縮小到的最小字型大小", "risk": "字型過小會影響電子紙可讀性",
+        "min": 10, "max": 24, "restart": False,
     },
     "render.quantity": {
         "category": "渲染設定",
@@ -1005,7 +1124,41 @@ class SettingsRepository:
                 (max(1, min(int(limit), 500)),),
             ).fetchall()
 
-    def update(self, key: str, value, *, changed_by: str, source_ip: str) -> None:
+    @staticmethod
+    def _validate_caption_ranges(values: dict[str, Any]) -> None:
+        for prefix, maximum in (("analysis.caption", 1000), ("analysis.side_caption", 120)):
+            minimum = int(values[f"{prefix}_min_chars"])
+            target = int(values[f"{prefix}_target_chars"])
+            upper = int(values[f"{prefix}_max_chars"])
+            if not 0 <= minimum <= target <= upper <= maximum:
+                raise ValueError(f"{prefix} 長度必須符合 0 ≤ min ≤ target ≤ max ≤ {maximum}")
+
+    def _caption_range_values(self, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+        keys = (
+            "analysis.caption_min_chars", "analysis.caption_target_chars", "analysis.caption_max_chars",
+            "analysis.side_caption_min_chars", "analysis.side_caption_target_chars", "analysis.side_caption_max_chars",
+        )
+        with self.database.session() as connection:
+            rows = connection.execute(
+                "SELECT key,value_json FROM settings WHERE key IN (?,?,?,?,?,?)", keys
+            ).fetchall()
+        values = {row["key"]: json.loads(row["value_json"]) for row in rows}
+        values.update(overrides or {})
+        return values
+
+    def validate_caption_updates(self, updates: dict[str, Any]) -> None:
+        relevant = {
+            key: int(value)
+            for key, value in updates.items()
+            if key in {
+                "analysis.caption_min_chars", "analysis.caption_target_chars", "analysis.caption_max_chars",
+                "analysis.side_caption_min_chars", "analysis.side_caption_target_chars", "analysis.side_caption_max_chars",
+            }
+        }
+        if relevant:
+            self._validate_caption_ranges(self._caption_range_values(relevant))
+
+    def update(self, key: str, value, *, changed_by: str, source_ip: str, _caption_ranges_checked: bool = False) -> None:
         definition = SETTING_DEFINITIONS.get(key)
         if definition is None:
             raise KeyError(key)
@@ -1057,6 +1210,8 @@ class SettingsRepository:
             and value > definition["max"]
         ):
             raise ValueError(f"{key} 超出合法範圍")
+        if not _caption_ranges_checked:
+            self.validate_caption_updates({key: value})
         now = datetime.now(timezone.utc).isoformat()
         encoded = json.dumps(value, ensure_ascii=False)
         with self.database.session() as connection:

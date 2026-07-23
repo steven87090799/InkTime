@@ -53,12 +53,17 @@ def settings_page():
 def update_settings():
     payload = request.get_json(silent=True) or {}
     repository = current_app.extensions["inktime_settings_repository"]
+    try:
+        repository.validate_caption_updates(payload)
+    except (TypeError, ValueError) as exc:
+        abort(400, description=f"SET-002 {exc}")
     for key, value in payload.items():
         if SETTING_DEFINITIONS.get(str(key), {}).get("control_center"):
             abort(400, description=f"SET-001 請從評分控制中心修改：{key}")
         try:
             repository.update(
-                str(key), value, changed_by=g.user["id"], source_ip=request.remote_addr or "unknown"
+                str(key), value, changed_by=g.user["id"], source_ip=request.remote_addr or "unknown",
+                _caption_ranges_checked=True,
             )
         except KeyError:
             abort(400, description=f"SET-001 未知設定：{key}")
