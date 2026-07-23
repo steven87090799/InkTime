@@ -51,6 +51,7 @@ from inktime.app.services.scoring_lab import ScoringLabService
 from inktime.app.services.notifications import DeviceNotificationService
 from inktime.app.services.device_energy import DeviceEnergyService
 from inktime.app.services.weather import WeatherService
+from inktime.app.services.observability import ObservabilityService
 from inktime.app.core.logging import configure_logging, log_event
 from inktime.app.web.access import csrf_token, verify_csrf
 
@@ -163,9 +164,11 @@ def initialize_platform(
         data_dir / "cache" / "thumbnails",
         settings_repository=settings_repository,
     )
+    app.extensions["inktime_observability_service"] = ObservabilityService(database, settings_repository, app.extensions["inktime_diagnostics_service"])
     font_manager = FontManager(data_dir / "fonts")
     location_resolver = LocationResolver(Path(__file__).resolve().parents[2] / "data" / "world_cities_zh.csv")
     release_publisher = AtomicReleasePublisher(release_dir)
+    app.extensions["inktime_observability_service"].publisher = release_publisher
     app.extensions["inktime_font_manager"] = font_manager
     app.extensions["inktime_location_resolver"] = location_resolver
     app.extensions["inktime_release_publisher"] = release_publisher
@@ -208,6 +211,15 @@ def initialize_platform(
     app.register_blueprint(operations.bp)
     app.register_blueprint(rendering.bp)
     app.jinja_env.globals["csrf_token"] = csrf_token
+
+    @app.context_processor
+    def critical_alerts():
+        try:
+            with database.session() as connection:
+                rows = connection.execute("SELECT component,error_code,message,last_seen_at FROM job_errors WHERE resolved_at IS NULL AND lower(severity)='critical' ORDER BY last_seen_at DESC LIMIT 3").fetchall()
+        except Exception:
+            rows = []
+        return {"critical_alerts": rows}
 
     public_endpoints = {
         "auth.setup",

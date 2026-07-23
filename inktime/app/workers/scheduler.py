@@ -27,6 +27,9 @@ class SchedulerRunner:
 
     def tick(self) -> None:
         settings = self.app.extensions["inktime_settings_repository"]
+        observability = self.app.extensions["inktime_observability_service"]
+        observability.heartbeat("scheduler")
+        observability.tick()
         self.app.extensions["inktime_job_repository"].recover_stale()
         notification_service = self.app.extensions["inktime_notification_service"]
         scan_seconds = int(settings.get("notification.scan_seconds", 300))

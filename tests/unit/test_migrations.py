@@ -13,7 +13,7 @@ from inktime.app.db.migrations import Migration, MIGRATIONS
 
 def test_fresh_database_is_migrated(tmp_path):
     database = Database(tmp_path / "inktime.db")
-    assert migrate(database) == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    assert migrate(database) == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     assert database.integrity_check() == "ok"
     with database.session() as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -35,7 +35,7 @@ def test_fresh_database_is_migrated(tmp_path):
         "scan_missing_candidates",
         "ai_analysis_cache",
     } <= tables
-    assert tuple(history) == (16, 16)
+    assert tuple(history) == (17, 17)
 
 
 def test_existing_photo_scores_table_is_preserved(tmp_path):
@@ -115,7 +115,7 @@ def test_concurrent_migrations_are_serialized(tmp_path):
     database = Database(tmp_path / "inktime.db")
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _index: migrate(database), range(2)))
-    assert sorted(results, key=len) == [[], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]]
+    assert sorted(results, key=len) == [[], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]]
     assert database.integrity_check() == "ok"
 
 
@@ -214,7 +214,7 @@ def test_unfinished_migration_stops_startup_before_new_schema_writes(tmp_path):
 
 def test_v10_photo_state_and_analysis_survive_scheduler_upgrade(monkeypatch, tmp_path):
     database = Database(tmp_path / "inktime.db")
-    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:-6])
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:-7])
     migrate(database)
     with database.session() as connection:
         connection.execute(
@@ -236,7 +236,7 @@ def test_v10_photo_state_and_analysis_survive_scheduler_upgrade(monkeypatch, tmp
         )
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [11, 12, 13, 14, 15, 16]
+    assert migrate(database, tmp_path / "backups") == [11, 12, 13, 14, 15, 16, 17]
     with database.session() as connection:
         photo = connection.execute(
             "SELECT favorite,status,lifecycle_status,metadata_status,local_features_status FROM photos WHERE id='photo'"

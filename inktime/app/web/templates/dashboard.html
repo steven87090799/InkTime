@@ -1,22 +1,23 @@
 {% extends "base.html" %}
 {% block title %}儀表板｜InkTime{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">系統總覽</p><h1>儀表板</h1></div><span class="status ok">系統正常</span></div>
+<div class="page-head"><div><p class="eyebrow">系統總覽</p><h1>儀表板</h1></div><span class="status {{ 'error' if system_status == '嚴重故障' else 'warn' if system_status != '正常' else 'ok' }}">{{ system_status }}</span></div>
 <section class="metrics">
   <article><span>照片總數</span><strong>{{ counts.photos }}</strong></article>
   <article><span>已分析</span><strong>{{ counts.analyzed }}</strong></article>
   <article><span>分析失敗</span><strong>{{ counts.failed }}</strong></article>
   <article><span>重複照片</span><strong>{{ counts.duplicates }}</strong></article>
-  <article><span>執行中工作</span><strong>{{ counts.running_jobs }}</strong></article>
+  <article><span>執行中工作</span><strong>{{ counts.running_jobs }}</strong><a href="/activity">查看即時監控</a></article>
   <article><span>今日 Token</span><strong>{{ counts.today_tokens }}</strong></article>
   <article><span>本月成本</span><strong>US$ {{ '%.4f'|format(counts.month_cost) }}</strong></article>
+  <article><span>未解決警告／錯誤／嚴重</span><strong>{{ issues.get('warning', 0) }}/{{ issues.get('error', 0) }}/{{ issues.get('critical', 0) }}</strong></article>
 </section>
 <section class="panel"><div class="panel-head"><h2>功能分類</h2><a href="/settings">所有設定</a></div>
   <div class="table-wrap"><table><thead><tr><th>分類</th><th>放置的功能</th></tr></thead><tbody>
     <tr><th>照片與分析</th><td class="category-link-list"><a href="/photos">照片庫</a><a href="/jobs">分析工作</a><a href="/providers">模型服務</a><a href="/scoring">評分規則</a><a href="/costs">成本</a></td></tr>
     <tr><th>墨水屏輸出</th><td class="category-link-list"><a href="/simulator">模擬器</a><a href="/virtual-display">虛擬屏</a><a href="/rendering">渲染與發布</a></td></tr>
     <tr><th>裝置與能源</th><td class="category-link-list"><a href="/devices">裝置</a><a href="/energy">能源</a></td></tr>
-    <tr><th>系統管理</th><td class="category-link-list"><a href="/maintenance">維護</a><a href="/diagnostics">診斷</a><a href="/errors">錯誤</a><a href="/backups">備份</a><a href="/settings">設定</a><a href="/account/password">帳號</a></td></tr>
+    <tr><th>系統管理</th><td class="category-link-list"><a href="/activity">執行監控</a><a href="/maintenance">維護</a><a href="/diagnostics">診斷</a><a href="/errors">錯誤</a><a href="/backups">備份</a><a href="/settings">設定</a><a href="/account/password">帳號</a></td></tr>
   </tbody></table></div>
 </section>
 <section class="panel"><div class="panel-head"><h2>最近錯誤</h2><a href="/errors">查看錯誤中心</a></div>

@@ -35,4 +35,7 @@ def dashboard():
         recent_errors = connection.execute(
             "SELECT error_code, message, last_seen_at, occurrences FROM job_errors WHERE resolved_at IS NULL ORDER BY last_seen_at DESC LIMIT 5"
         ).fetchall()
-    return render_template("dashboard.html", counts=counts, recent_errors=recent_errors)
+        severities = connection.execute("SELECT lower(severity) severity,COUNT(*) count FROM job_errors WHERE resolved_at IS NULL GROUP BY lower(severity)").fetchall()
+    issues = {str(row["severity"]): int(row["count"]) for row in severities}
+    status = "嚴重故障" if issues.get("critical") else "部分失敗" if issues.get("error") else "有警告" if issues.get("warning") else "正常"
+    return render_template("dashboard.html", counts=counts, recent_errors=recent_errors, issues=issues, system_status=status)
