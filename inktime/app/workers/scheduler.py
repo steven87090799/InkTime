@@ -21,6 +21,7 @@ class SchedulerRunner:
         self.stop = threading.Event()
         self.last_backup_date: str | None = None
         self.last_notification_scan_at = 0.0
+        self.last_resilience_maintenance_at = 0.0
 
     def request_stop(self, *_args) -> None:
         self.stop.set()
@@ -36,6 +37,14 @@ class SchedulerRunner:
         # Webhook 的第一、第二次重試分別在 60、300 秒後到期；每次 Scheduler
         # tick 只做一次有索引的 pending 查詢，沒有待送通知時不產生網路或 Log。
         notification_service.deliver_pending()
+        if time.monotonic() - self.last_resilience_maintenance_at >= 300:
+            # Scheduler 與 Web 分離；失敗僅記錄，不能阻塞既有正式發布工作。
+            try:
+                self.app.extensions["inktime_resilience_repository"].expire_operational_data()
+                self.app.extensions["inktime_render_service"].run_shadow_selection()
+            except Exception as exc:
+                log_event(LOGGER, logging.ERROR, "決策韌性維護失敗；正式流程不受影響", event="resilience_maintenance_failed", error_code="SHADOW-001", details={"error_type": type(exc).__name__})
+            self.last_resilience_maintenance_at = time.monotonic()
         zone = ZoneInfo(str(settings.get("general.timezone", "Asia/Taipei")))
         now = datetime.now(zone)
         schedule_repository = self.app.extensions["inktime_schedule_repository"]

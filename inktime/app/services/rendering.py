@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import calendar
+from hashlib import sha256
 from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -59,6 +60,7 @@ class RenderService:
         release_coordinator: ReleaseCoordinator,
         locations: LocationResolver | None = None,
         weather: WeatherService | None = None,
+        resilience=None,
     ) -> None:
         self.database = database
         self.photos = photos
@@ -69,6 +71,7 @@ class RenderService:
         self.release_coordinator = release_coordinator
         self.locations = locations
         self.weather = weather
+        self.resilience = resilience
 
     def location_name(self, photo) -> str:
         if self.locations is None or not bool(self.settings.get("render.show_location", True)):
@@ -606,12 +609,15 @@ class RenderService:
         history: dict[str, str] | None = None,
         device_ids: list[str] | None = None,
     ) -> dict:
+        started_at = datetime.now(timezone.utc)
         quantity = int(self.settings.get("render.quantity", 5))
         layout_key = str(self.settings.get("render.layout", "photo_info"))
         source_limit = quantity * 2 if layout_key == "photo_pair" else quantity
         selected = photo_ids[:source_limit]
+        candidate_details: list[dict[str, Any]] = []
         if not selected:
-            selected = self.select_candidates(source_limit)
+            candidate_details = self.select_candidates_details(source_limit)
+            selected = [str(row["id"]) for row in candidate_details]
         else:
             # 明確指定不合格照片必須穩定失敗；不得靜默改選其他照片。
             selected = [str(row["id"]) for row in self.candidates.require(selected)]
@@ -657,7 +663,9 @@ class RenderService:
                 manifests, created_by=created_by, photo_ids=selected[:quantity], history=history,
                 device_assignments=assignments,
             )
-            return {"releases": published, "device_releases": assignments}
+            result = {"releases": published, "device_releases": assignments}
+            self._record_production_trace(selected, result, layout_key, started_at, device_ids=unique_device_ids, candidate_details=candidate_details)
+            return result
         if layout_key == "photo_pair":
             images = []
             for index in range(0, len(selected), 2):
@@ -713,7 +721,60 @@ class RenderService:
             photo_ids=selected,
             history=history,
         )
-        return published[0] if len(published) == 1 else {"releases": published}
+        result = published[0] if len(published) == 1 else {"releases": published}
+        self._record_production_trace(selected, result, layout_key, started_at, candidate_details=candidate_details)
+        return result
+
+    def _record_production_trace(self, selected: list[str], result: dict, layout: str, started_at: datetime, *, device_ids: list[str] | None = None, candidate_details: list[dict[str, Any]] | None = None) -> None:
+        """追蹤失敗不能回滾既有正式 Release；只保存有界且不含檔案路徑的摘要。"""
+        if self.resilience is None or not selected:
+            return
+        try:
+            configuration = {key: self.settings.get(key) for key in ("render.layout", "render.fit_mode", "render.selection_mode", "render.profile", "render.dither")}
+            version = self.resilience.algorithm_version(name="render-selection", version="selection-v1", configuration=configuration, renderer="renderer-v1", layout="adaptive-layout-v1", pairing="pairing-v1", scoring="scoring-v1")
+            release_id = str(result.get("release_id") or next(iter(result.get("device_releases", {}).values()), "")) or None
+            candidates = []
+            for row in (candidate_details or []):
+                score = float(row.get("final_score") or row.get("combined_score") or 0)
+                candidates.append({"photo_id": str(row["id"]), "selected": str(row["id"]) in selected, "base_score": float(row.get("ranking_score") or 0), "adjusted_score": score, "score_components": {"model_score": float(row.get("ranking_score") or 0), "quality_score": float(row.get("local_candidate_score") or 0), "user_preference_adjustment": float(row.get("user_preference_adjustment") or 0), "novelty_adjustment": 0.0, "diversity_adjustment": 0.0, "contextual_adjustment": 0.0, "final_score": score}})
+            if not candidates:
+                candidates = [{"photo_id": photo_id, "selected": True, "adjusted_score": 0.0, "score_components": {"model_score": 0.0, "quality_score": 0.0, "user_preference_adjustment": 0.0, "novelty_adjustment": 0.0, "diversity_adjustment": 0.0, "contextual_adjustment": 0.0, "final_score": 0.0}} for photo_id in selected[:50]]
+            trace_id = self.resilience.create_trace(execution_mode="production", algorithm_version_id=version, primary_photo_id=selected[0], secondary_photo_id=selected[1] if layout == "photo_pair" and len(selected) > 1 else None, device_id=(device_ids or [None])[0], layout_mode=layout, fit_mode=str(self.settings.get("render.fit_mode", "contain")), candidates=candidates, candidate_count=len(candidate_details or selected), eligible_count=len(candidate_details or selected), reasons=["SELECTED_BY_RENDER_PIPELINE"], context={"source": "render_service"}, duration_ms=int((datetime.now(timezone.utc)-started_at).total_seconds()*1000), release_id=release_id)
+            result["selection_trace_id"] = trace_id
+        except Exception:
+            return
+
+    def run_shadow_selection(self) -> dict[str, int]:
+        """在 Scheduler 背景執行；只寫 shadow Trace，絕不渲染或指派正式 Release。"""
+        if self.resilience is None:
+            return {"created": 0, "skipped": 0}
+        config = self.resilience.shadow_config()
+        if not config["enabled"]:
+            return {"created": 0, "skipped": 0}
+        with self.database.session() as connection:
+            if config["device_ids"]:
+                placeholders = ",".join("?" for _ in config["device_ids"])
+                devices = connection.execute(f"SELECT id FROM devices WHERE enabled=1 AND id IN ({placeholders})", config["device_ids"]).fetchall()  # noqa: S608
+            else:
+                devices = connection.execute("SELECT id FROM devices WHERE enabled=1 ORDER BY id").fetchall()
+            today_count = int(connection.execute("SELECT COUNT(*) FROM selection_decision_traces WHERE execution_mode='shadow' AND substr(created_at,1,10)=?", (self._today().isoformat(),)).fetchone()[0])
+        created = skipped = 0
+        for device in devices:
+            if today_count + created >= int(config["daily_max_runs"]):
+                skipped += 1; continue
+            device_id = str(device["id"])
+            bucket = int(sha256(f"{self._today().isoformat()}:{device_id}:{config.get('algorithm_version_id') or 'default'}".encode()).hexdigest()[:8], 16) % 100
+            if bucket >= int(config["sample_percent"]):
+                skipped += 1; continue
+            candidates = self.select_candidates_details(min(10, int(self.settings.get("render.quantity", 5))))
+            if not candidates:
+                skipped += 1; continue
+            primary = str(candidates[0]["id"])
+            packed = [{"photo_id": str(row["id"]), "selected": index == 0, "base_score": row.get("ranking_score"), "adjusted_score": row.get("final_score", row.get("combined_score")), "score_components": {"model_score": float(row.get("ranking_score") or 0), "quality_score": float(row.get("local_candidate_score") or 0), "user_preference_adjustment": float(row.get("user_preference_adjustment") or 0), "novelty_adjustment": 0.0, "diversity_adjustment": 0.0, "contextual_adjustment": 0.0, "final_score": float(row.get("final_score", row.get("combined_score", 0)) or 0)}} for index,row in enumerate(candidates)]
+            version = config.get("algorithm_version_id") or self.resilience.algorithm_version(name="shadow-selection", version="shadow-v1", configuration={"selection_mode": self.settings.get("render.selection_mode")}, renderer="renderer-v1", layout="adaptive-layout-v1", pairing="pairing-v1", scoring="scoring-v1")
+            self.resilience.create_trace(execution_mode="shadow", algorithm_version_id=str(version), primary_photo_id=primary, device_id=device_id, layout_mode=str(self.settings.get("render.layout", "photo_info")), fit_mode=str(self.settings.get("render.fit_mode", "contain")), candidates=packed, candidate_count=len(candidates), eligible_count=len(candidates), reasons=["SHADOW_SAMPLED_DETERMINISTICALLY"], context={"preview_requested": bool(config["generate_preview"]), "sampling_bucket": bucket})
+            created += 1
+        return {"created": created, "skipped": skipped}
 
     def _candidate_query(
         self,
@@ -816,6 +877,13 @@ class RenderService:
             row["ranking_percentile"] = None
             row["distinguishing_score"] = ranking
             row["combined_score"] = round(float(row["combined_score"]), 2)
+        if self.resilience is not None:
+            adjustments = self.resilience.preference_adjustments(str(row["id"]) for row in result)
+            for row in result:
+                adjustment = float(adjustments.get(str(row["id"]), 0.0))
+                row["user_preference_adjustment"] = adjustment
+                row["final_score"] = round(float(row["combined_score"]) + adjustment, 2)
+            result.sort(key=lambda row: (-float(row.get("final_score", 0)), str(row["id"])))
         return result
 
     def select_candidates_details(

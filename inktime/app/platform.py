@@ -21,6 +21,7 @@ from inktime.app.api import (
     notifications,
     operations,
     photos,
+    resilience,
     rendering,
     scoring,
     settings,
@@ -31,6 +32,7 @@ from inktime.app.repositories.devices import DeviceRepository
 from inktime.app.repositories.jobs import JobRepository
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.render_candidates import RenderCandidateRepository
+from inktime.app.repositories.resilience import ResilienceRepository
 from inktime.app.repositories.providers import ProviderRepository
 from inktime.app.repositories.scoring import ScoringProfileRepository
 from inktime.app.repositories.schedules import ScheduledTaskRepository
@@ -136,6 +138,7 @@ def initialize_platform(
     app.extensions["inktime_photo_repository"] = PhotoRepository(database)
     app.extensions["inktime_render_candidate_repository"] = RenderCandidateRepository(database)
     app.extensions["inktime_usage_repository"] = UsageRepository(database)
+    app.extensions["inktime_resilience_repository"] = ResilienceRepository(database)
     app.extensions["inktime_thumbnail_cache"] = ThumbnailCache(data_dir / "cache" / "thumbnails")
     budget_service = BudgetService(database, settings_repository)
     app.extensions["inktime_budget_service"] = budget_service
@@ -183,6 +186,7 @@ def initialize_platform(
         release_coordinator,
         location_resolver,
         weather_service,
+        app.extensions["inktime_resilience_repository"],
     )
     app.extensions["inktime_display_preparation_service"] = DisplayPreparationService(
         database, app.extensions["inktime_render_service"]
@@ -207,6 +211,7 @@ def initialize_platform(
     app.register_blueprint(scoring.bp)
     app.register_blueprint(operations.bp)
     app.register_blueprint(rendering.bp)
+    app.register_blueprint(resilience.bp)
     app.jinja_env.globals["csrf_token"] = csrf_token
 
     public_endpoints = {
@@ -217,6 +222,9 @@ def initialize_platform(
         "devices.latest_release",
         "devices.release_file",
         "devices.report_status",
+        "resilience.device_queue_manifest",
+        "resilience.device_queue_ack",
+        "resilience.queue_item_file",
         "static",
     }
 
@@ -231,6 +239,7 @@ def initialize_platform(
             "devices.latest_release",
             "devices.release_file",
             "devices.report_status",
+            "resilience.device_queue_ack",
         }:
             verify_csrf()
 
