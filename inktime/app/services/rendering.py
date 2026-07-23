@@ -172,10 +172,52 @@ class RenderService:
     def _caption(self, photo_id: str) -> str:
         with self.database.session() as connection:
             row = connection.execute(
-                "SELECT side_caption FROM photo_analysis WHERE photo_id=? ORDER BY created_at DESC,id DESC LIMIT 1",
+                "SELECT side_caption,semantic_json FROM photo_analysis WHERE photo_id=? ORDER BY created_at DESC,id DESC LIMIT 1",
                 (photo_id,),
             ).fetchone()
-        return str(row["side_caption"] if row else "").strip()
+        if row is None:
+            return ""
+        side_caption = str(row["side_caption"] or "").strip()
+        if not (bool(self.settings.get("analysis.advanced_caption_enabled", False)) and bool(self.settings.get("analysis.caption_variants_enabled", False))):
+            return side_caption
+        try:
+            variants = (json.loads(str(row["semantic_json"] or "{}")).get("values") or {}).get("caption_variants") or {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            variants = {}
+        style = str(self.settings.get("analysis.copy_default_style", "natural"))
+        return str(variants.get(style) or variants.get("natural") or side_caption or "畫面把此刻收好了。").strip()
+
+    def _draw_footer_caption(self, draw, text: str, *, x: int, top: int, bottom: int, width: int, fill: str = "black") -> None:
+        font_path = self.fonts.resolve(str(self.settings.get("render.font_path", "")))
+        body = ImageFont.truetype(str(font_path), 24)
+        if not bool(self.settings.get("render.caption_wrap_enabled", False)):
+            draw.text((x, top), self._fit_line(draw, text, body, width), font=body, fill=fill)
+            return
+        maximum = min(2, int(self.settings.get("render.caption_max_lines", 2)))
+        minimum = int(self.settings.get("render.caption_min_font_size", 17))
+        for size in range(24, minimum - 1, -1):
+            font = ImageFont.truetype(str(font_path), size)
+            line_height = draw.textbbox((0, 0), "國", font=font)[3] + 2
+            if line_height * maximum > bottom - top:
+                continue
+            lines: list[str] = []
+            remaining = text.strip()
+            while remaining and len(lines) < maximum:
+                line = ""
+                for char in remaining:
+                    if draw.textlength(line + char, font=font) > width:
+                        break
+                    line += char
+                if not line:
+                    break
+                lines.append(line)
+                remaining = remaining[len(line):]
+            if remaining and lines:
+                lines[-1] = self._fit_line(draw, lines[-1] + remaining, font, width)
+            if lines:
+                draw.multiline_text((x, top), "\n".join(lines), font=font, fill=fill, spacing=2)
+                return
+        draw.text((x, top), self._fit_line(draw, text, body, width), font=body, fill=fill)
 
     def _adaptive_pair_candidates(self, primary: dict[str, Any]) -> list[dict[str, Any]]:
         """Use only existing analyzed/eligible rows; this is intentionally model-free."""
@@ -240,7 +282,7 @@ class RenderService:
         draw.rectangle((0, photo_height, frame_width, frame_height), fill="white")
         draw.line((20, photo_height + 4, frame_width - 20, photo_height + 4), fill="black", width=2)
         text = caption or "這一天留下了兩個值得記住的片段。"
-        draw.text((22, photo_height + 12), self._fit_line(draw, text, fonts["body"], frame_width - 44), font=fonts["body"], fill="black")
+        self._draw_footer_caption(draw, text, x=22, top=photo_height + 12, bottom=frame_height - 38, width=frame_width - 44)
         primary_date = self._captured_date(primary["captured_at"])
         second_date = self._captured_date(secondary["captured_at"]) if secondary is not None else None
         dates = [self._date_label(primary_date)] if bool(self.settings.get("render.show_capture_date", True)) else []
@@ -502,12 +544,7 @@ class RenderService:
                     width=2,
                 )
                 if caption:
-                    draw.text(
-                        (28, frame_height - footer_height + 16),
-                        self._fit_line(draw, caption, fonts["body"], frame_width - 56),
-                        font=fonts["body"],
-                        fill="#1b241f",
-                    )
+                    self._draw_footer_caption(draw, caption, x=28, top=frame_height - footer_height + 16, bottom=frame_height - 48, width=frame_width - 56, fill="#1b241f")
                 meta = "・".join(value for value in (date_label, location) if value)
                 draw.text(
                     (28, frame_height - 42),
@@ -539,12 +576,7 @@ class RenderService:
                     "這一天留下了一個值得記住的片段。" if adaptive_requested else ""
                 )
                 if footer_caption:
-                    draw.text(
-                        (22, photo_height + 12),
-                        self._fit_line(draw, footer_caption, fonts["body"], frame_width - 44),
-                        font=fonts["body"],
-                        fill="black",
-                    )
+                    self._draw_footer_caption(draw, footer_caption, x=22, top=photo_height + 12, bottom=frame_height - 38, width=frame_width - 44)
                 meta = "・".join(value for value in (date_label, location) if value)
                 draw.text(
                     (22, frame_height - 32),

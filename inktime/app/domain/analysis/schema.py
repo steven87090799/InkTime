@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from copy import deepcopy
 from typing import Any, cast
 
 
@@ -127,6 +128,7 @@ _DETAIL_PROPERTIES = {
     "short_copy": _detail_property({"type": "string", "maxLength": 120}),
     "confidence": _detail_property({"type": "number", "minimum": 0, "maximum": 1}),
 }
+CAPTION_VARIANT_STYLES = ("natural", "warm", "literary", "humorous", "minimal")
 
 FULL_ANALYSIS_JSON_SCHEMA = {
     "name": "inktime_full_photo_analysis",
@@ -147,9 +149,36 @@ FULL_ANALYSIS_JSON_SCHEMA = {
 }
 
 
-def json_schema_for_stage(stage: str) -> dict:
+def json_schema_for_stage(stage: str, *, caption_controls: dict[str, Any] | None = None) -> dict:
     """完整分析只在高細節單次請求使用；其餘採用成本較低的基本 Schema。"""
-    return FULL_ANALYSIS_JSON_SCHEMA if stage in {"single_high", "stage_two", "full"} else ANALYSIS_JSON_SCHEMA
+    full_stage = stage in {"single_high", "stage_two", "full"}
+    if not caption_controls:
+        return FULL_ANALYSIS_JSON_SCHEMA if full_stage else ANALYSIS_JSON_SCHEMA
+    schema = deepcopy(FULL_ANALYSIS_JSON_SCHEMA if full_stage else ANALYSIS_JSON_SCHEMA)
+    properties = cast(dict[str, Any], cast(dict[str, Any], schema["schema"])["properties"])
+    properties["caption"].update(
+        minLength=int(caption_controls["caption_min_chars"]),
+        maxLength=int(caption_controls["caption_max_chars"]),
+    )
+    properties["side_caption"].update(
+        minLength=int(caption_controls["side_caption_min_chars"]),
+        maxLength=int(caption_controls["side_caption_max_chars"]),
+    )
+    if full_stage and bool(caption_controls.get("caption_variants_enabled")):
+        properties["details"]["properties"]["caption_variants"] = {
+            "type": "object",
+            "additionalProperties": False,
+            # 個別候選容許省略，避免一個風格缺失使整份分析無法使用。
+            "properties": {
+                style: {
+                    "type": "string",
+                    "minLength": int(caption_controls["side_caption_min_chars"]),
+                    "maxLength": int(caption_controls["side_caption_max_chars"]),
+                }
+                for style in CAPTION_VARIANT_STYLES
+            },
+        }
+    return schema
 
 
 def _score(value: Any, field: str) -> float:
@@ -203,9 +232,16 @@ def validate_analysis_result(raw: str | dict) -> dict:
     value["reason"] = value["reason"].strip()
     details = value.get("details")
     if details is not None:
-        if not isinstance(details, dict) or not set(details) <= set(_DETAIL_PROPERTIES):
+        if not isinstance(details, dict) or not set(details) <= (set(_DETAIL_PROPERTIES) | {"caption_variants"}):
             raise AnalysisValidationError("details 欄位不合法")
         for field, detail in details.items():
+            if field == "caption_variants":
+                if not isinstance(detail, dict) or not set(detail) <= set(CAPTION_VARIANT_STYLES):
+                    raise AnalysisValidationError("caption_variants 欄位不合法")
+                if any(not isinstance(value, str) or not value.strip() for value in detail.values()):
+                    raise AnalysisValidationError("caption_variants 必須是非空白文字")
+                details[field] = {style: value.strip() for style, value in detail.items()}
+                continue
             if isinstance(detail, str):
                 details[field] = detail.strip()
     return value

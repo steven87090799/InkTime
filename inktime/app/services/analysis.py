@@ -68,6 +68,51 @@ class PhotoAnalysisService:
         self.budgets = budgets
         self.settings = settings or (budgets.settings if budgets else None)
 
+    def _caption_controls(self) -> dict | None:
+        if self.settings is None or not bool(self.settings.get("analysis.advanced_caption_enabled", False)):
+            return None
+        settings = self.settings
+        def lines(key: str) -> list[str]:
+            return [line.strip() for line in str(settings.get(key, "")).splitlines() if line.strip()]
+        return {
+            "caption_min_chars": int(settings.get("analysis.caption_min_chars", 120)),
+            "caption_target_chars": int(self.settings.get("analysis.caption_target_chars", 160)),
+            "caption_max_chars": int(self.settings.get("analysis.caption_max_chars", 220)),
+            "side_caption_min_chars": int(self.settings.get("analysis.side_caption_min_chars", 10)),
+            "side_caption_target_chars": int(self.settings.get("analysis.side_caption_target_chars", 22)),
+            "side_caption_max_chars": int(self.settings.get("analysis.side_caption_max_chars", 42)),
+            "copy_default_style": str(self.settings.get("analysis.copy_default_style", "natural")),
+            "copy_humor_level": int(self.settings.get("analysis.copy_humor_level", 1)),
+            "copy_poetic_level": int(self.settings.get("analysis.copy_poetic_level", 1)),
+            "copy_avoid_cliche": bool(self.settings.get("analysis.copy_avoid_cliche", True)),
+            "copy_avoid_direct_description": bool(self.settings.get("analysis.copy_avoid_direct_description", True)),
+            "copy_forbid_exclamation": bool(self.settings.get("analysis.copy_forbid_exclamation", True)),
+            "copy_forbid_like_phrase": bool(self.settings.get("analysis.copy_forbid_like_phrase", True)),
+            "copy_max_commas": int(self.settings.get("analysis.copy_max_commas", 2)),
+            "copy_avoid_abstract_ending": bool(self.settings.get("analysis.copy_avoid_abstract_ending", True)),
+            "copy_banned_words": lines("analysis.copy_banned_words"),
+            "copy_banned_patterns": lines("analysis.copy_banned_patterns"),
+            "copy_custom_rules": str(self.settings.get("analysis.copy_custom_rules", "")),
+            "caption_variants_enabled": bool(self.settings.get("analysis.caption_variants_enabled", False)),
+        }
+
+    @staticmethod
+    def _prompt_version(caption_controls: dict | None) -> str:
+        if not caption_controls:
+            return PROMPT_VERSION
+        fingerprint = hashlib.sha256(json.dumps(caption_controls, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
+        return f"{PROMPT_VERSION}-caption-{fingerprint}"
+
+    @staticmethod
+    def _apply_caption_variant(result: dict, caption_controls: dict | None) -> dict:
+        if not caption_controls or not caption_controls["caption_variants_enabled"]:
+            return result
+        variants = (result.get("details") or {}).get("caption_variants") or {}
+        style = str(caption_controls["copy_default_style"])
+        selected = variants.get(style) or variants.get("natural") or result.get("side_caption") or "畫面把此刻收好了。"
+        result["side_caption"] = str(selected).strip()
+        return result
+
     @staticmethod
     def _local_result(photo) -> dict:
         quality = max(0.0, min(100.0, float(photo["blur_score"] or 0) ** 0.5 * 4))
@@ -384,6 +429,7 @@ class PhotoAnalysisService:
         favorite_bonus: float,
         scoring_version_id: str | None,
         schema_kind: str,
+        prompt_version: str = PROMPT_VERSION,
     ) -> dict:
         ranked = self._score_result(
             result, photo, ranking_weights=ranking_weights, favorite_bonus=favorite_bonus
@@ -405,6 +451,7 @@ class PhotoAnalysisService:
             final_ranking_score=ranked["final_ranking_score"],
             travel_bonus=ranked["travel_bonus"],
             location_rule_version=ranked["location_rule_version"],
+            prompt_version=prompt_version,
         )
         return ranked
 
@@ -451,12 +498,14 @@ class PhotoAnalysisService:
         photo_id: str,
         content_sha256: str,
         schema_kind: str,
+        caption_controls: dict | None,
+        prompt_version: str,
     ) -> tuple[dict, str, float, bool]:
         cached = self.photos.get_ai_cache(
             content_sha256=content_sha256,
             provider=provider.name,
             model_name=model,
-            prompt_version=PROMPT_VERSION,
+            prompt_version=prompt_version,
             schema_version=1,
             schema_kind=schema_kind,
         )
@@ -468,7 +517,7 @@ class PhotoAnalysisService:
                 pass
         cache_key = hashlib.sha256(
             json.dumps(
-                [content_sha256, provider.name, model, PROMPT_VERSION, 1, schema_kind],
+                [content_sha256, provider.name, model, prompt_version, 1, schema_kind],
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
@@ -482,7 +531,7 @@ class PhotoAnalysisService:
                 content_sha256=content_sha256,
                 provider=provider.name,
                 model_name=model,
-                prompt_version=PROMPT_VERSION,
+                prompt_version=prompt_version,
                 schema_version=1,
                 schema_kind=schema_kind,
             )
@@ -499,6 +548,8 @@ class PhotoAnalysisService:
                 photo_id=photo_id,
                 content_sha256=content_sha256,
                 schema_kind=schema_kind,
+                caption_controls=caption_controls,
+                prompt_version=prompt_version,
             )
         except Exception as exc:
             self.photos.finish_ai_cache_reservation(cache_key, owner_id, error=str(exc))
@@ -518,6 +569,8 @@ class PhotoAnalysisService:
         photo_id: str,
         content_sha256: str,
         schema_kind: str,
+        caption_controls: dict | None,
+        prompt_version: str,
     ) -> tuple[dict, str, float]:
         if self.budgets:
             self.budgets.assert_request_allowed(job_id, photo_id)
@@ -530,6 +583,7 @@ class PhotoAnalysisService:
             detail=detail,
             stage=stage,
             max_tokens=max_tokens,
+            caption_controls=caption_controls,
         )
         total_cost = self._record(
             provider, model, job_id, photo_id, stage, response, started_at, started_perf
@@ -538,7 +592,7 @@ class PhotoAnalysisService:
         total_output_tokens = response.usage.output_tokens
         total_cached_tokens = response.usage.cached_tokens
         try:
-            result = validate_analysis_result(response.content)
+            result = self._apply_caption_variant(validate_analysis_result(response.content), caption_controls)
             raw = response.content
         except AnalysisValidationError as first_error:
             repair_started_at = datetime.now(timezone.utc).isoformat()
@@ -548,6 +602,8 @@ class PhotoAnalysisService:
                 validation_error=str(first_error),
                 model=model,
                 max_tokens=max_tokens,
+                stage=stage,
+                caption_controls=caption_controls,
             )
             total_cost += self._record(
                 provider,
@@ -561,7 +617,7 @@ class PhotoAnalysisService:
                 retry_count=1,
             )
             # 第二次驗證失敗直接拋出；不得無限修復。
-            result = validate_analysis_result(repaired.content)
+            result = self._apply_caption_variant(validate_analysis_result(repaired.content), caption_controls)
             raw = repaired.content
             total_input_tokens += repaired.usage.input_tokens
             total_output_tokens += repaired.usage.output_tokens
@@ -570,7 +626,7 @@ class PhotoAnalysisService:
             content_sha256=content_sha256,
             provider=provider.name,
             model_name=model,
-            prompt_version=PROMPT_VERSION,
+            prompt_version=prompt_version,
             schema_version=int(result["schema_version"]),
             schema_kind=schema_kind,
             result=result,
@@ -606,6 +662,8 @@ class PhotoAnalysisService:
         if not source.is_file():
             raise FileNotFoundError("SCAN-001 找不到照片檔案")
         photo = self._ensure_e6_suitability(photo_id, photo, source)
+        caption_controls = self._caption_controls()
+        prompt_version = self._prompt_version(caption_controls)
         weights = ranking_weights or DEFAULT_RANKING_WEIGHTS
         inherited = self.photos.inherit_existing_analysis(photo_id, job_id) if self.settings is None else None
         if inherited is not None:
@@ -670,6 +728,8 @@ class PhotoAnalysisService:
                 photo_id=photo_id,
                 content_sha256=sha,
                 schema_kind="basic",
+                caption_controls=caption_controls,
+                prompt_version=prompt_version,
             )
             total_cost += cost
             requires_second = strategy == "smart_two_stage" and (
@@ -682,6 +742,7 @@ class PhotoAnalysisService:
                     photo_id=photo_id, job_id=job_id, stage="stage_one", provider=provider.name,
                     model=low_model, result=low, raw=raw, photo=photo, ranking_weights=weights,
                     favorite_bonus=favorite_bonus, scoring_version_id=scoring_version_id, schema_kind="basic",
+                    prompt_version=prompt_version,
                 )
                 return {"analysis": low, "stage": "cache" if cache_hit else "stage_one", "_actual_cost": total_cost}
 
@@ -696,6 +757,8 @@ class PhotoAnalysisService:
             photo_id=photo_id,
             content_sha256=sha,
             schema_kind="full",
+            caption_controls=caption_controls,
+            prompt_version=prompt_version,
         )
         total_cost += cost
         final_stage = "stage_two" if strategy == "smart_two_stage" else "single_high"
@@ -703,6 +766,7 @@ class PhotoAnalysisService:
             photo_id=photo_id, job_id=job_id, stage=final_stage, provider=provider.name,
             model=high_model, result=high, raw=raw, photo=photo, ranking_weights=weights,
             favorite_bonus=favorite_bonus, scoring_version_id=scoring_version_id, schema_kind="full",
+            prompt_version=prompt_version,
         )
         return {
             "analysis": high,
