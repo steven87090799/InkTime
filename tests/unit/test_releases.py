@@ -75,7 +75,11 @@ def test_failed_release_does_not_replace_latest(tmp_path):
 
 def test_automatic_release_candidates_respect_configured_memory_threshold(app, tmp_path):
     photos = app.extensions["inktime_photo_repository"]
-    library_id = photos.ensure_library("測試照片", Path(tmp_path / "photos"))
+    root = Path(tmp_path / "photos")
+    root.mkdir()
+    for filename in ("80.jpg", "70.jpg", "60.jpg"):
+        Image.new("RGB", (32, 32), "white").save(root / filename)
+    library_id = photos.ensure_library("測試照片", root)
     now = "2026-07-17T00:00:00+00:00"
     with app.extensions["inktime_database"].session() as connection:
         connection.executemany(
@@ -126,6 +130,8 @@ def test_history_today_is_selected_before_higher_ranked_fallback(app, tmp_path):
         ("nearby-old", "nearby.jpg", "2020-07-18T10:00:00", 96),
         ("exact-current", "current.jpg", "2026-07-20T10:00:00", 99),
     ]
+    for _photo_id, filename, _captured, _score in entries:
+        Image.new("RGB", (32, 32), "white").save(root / filename)
     with app.extensions["inktime_database"].session() as connection:
         connection.executemany(
             """

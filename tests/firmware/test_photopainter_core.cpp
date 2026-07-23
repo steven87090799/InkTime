@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "photopainter_core.h"
+#include "power_policy.h"
 
 using namespace inktime;
 
@@ -84,6 +85,20 @@ int main() {
   assert(validateCache(
     header, sourceHash, DisplayRotation::Rotate0,
     nativeFrame.data(), nativeFrame.size()) == CacheValidation::BadRotation);
+
+  const NetworkBudget batteryBudget = networkBudget(false);
+  const NetworkBudget usbBudget = networkBudget(true);
+  assert(batteryBudget.totalConnectMs < usbBudget.totalConnectMs);
+  assert(nextConnectAction(true, false, false, 0, false) == ConnectAction::Fast);
+  assert(nextConnectAction(true, true, false, 4000, false) == ConnectAction::Fallback);
+  assert(nextConnectAction(true, true, true, 12000, false) == ConnectAction::Sleep);
+  assert(!kSpectraCapabilities.supportsPartialRefresh);
+  assert(kSpectraCapabilities.requiresFullRefresh);
+  assert(!shouldRefresh(false, true, 999999));
+  assert(shouldRefresh(true, true, 0));
+  const uint8_t oldBssid[6] = {1, 2, 3, 4, 5, 6};
+  const uint8_t sameBssid[6] = {1, 2, 3, 4, 5, 6};
+  assert(!connectionHintChanged(true, 6, 6, oldBssid, sameBssid));
 
   return 0;
 }

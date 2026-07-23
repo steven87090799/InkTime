@@ -40,6 +40,7 @@ class OpenAICompatibleProvider(VisionProvider):
         self.api_key = api_key
         self.pricing = pricing or {}
         self.timeout = timeout
+        self.request_timeout = (min(10.0, timeout), timeout)
         self.supports_json_schema = supports_json_schema
         self.scoring_rules = scoring_rules.strip() or DEFAULT_SCORING_RULES
         self.session = session or requests.Session()
@@ -76,7 +77,7 @@ class OpenAICompatibleProvider(VisionProvider):
     def _post_completion(self, body: dict) -> ProviderResponse:
         try:
             response = self.session.post(
-                self._url("/chat/completions"), headers=self._headers(), json=body, timeout=self.timeout
+                self._url("/chat/completions"), headers=self._headers(), json=body, timeout=self.request_timeout
             )
         except requests.Timeout as exc:
             raise ProviderHTTPError("Provider API 逾時", "VLM-001") from exc
@@ -193,7 +194,7 @@ class OpenAICompatibleProvider(VisionProvider):
             headers=upload_headers,
             data={"purpose": "batch"},
             files={"file": ("inktime-batch.jsonl", content, "application/jsonl")},
-            timeout=self.timeout,
+            timeout=self.request_timeout,
         )
         if upload.status_code >= 400:
             raise ProviderHTTPError(f"Batch 檔案上傳失敗 HTTP {upload.status_code}", "VLM-007")
@@ -206,7 +207,7 @@ class OpenAICompatibleProvider(VisionProvider):
                 "endpoint": "/v1/chat/completions",
                 "completion_window": completion_window,
             },
-            timeout=self.timeout,
+            timeout=self.request_timeout,
         )
         if response.status_code >= 400:
             raise ProviderHTTPError(f"Batch 建立失敗 HTTP {response.status_code}", "VLM-007")
@@ -214,7 +215,7 @@ class OpenAICompatibleProvider(VisionProvider):
 
     def poll_batch(self, batch_id: str) -> dict:
         response = self.session.get(
-            self._url(f"/batches/{batch_id}"), headers=self._headers(), timeout=self.timeout
+            self._url(f"/batches/{batch_id}"), headers=self._headers(), timeout=self.request_timeout
         )
         if response.status_code >= 400:
             raise ProviderHTTPError(f"Batch 查詢失敗 HTTP {response.status_code}", "VLM-007")
@@ -222,7 +223,7 @@ class OpenAICompatibleProvider(VisionProvider):
 
     def cancel_batch(self, batch_id: str) -> dict:
         response = self.session.post(
-            self._url(f"/batches/{batch_id}/cancel"), headers=self._headers(), timeout=self.timeout
+            self._url(f"/batches/{batch_id}/cancel"), headers=self._headers(), timeout=self.request_timeout
         )
         if response.status_code >= 400:
             raise ProviderHTTPError(f"Batch 取消失敗 HTTP {response.status_code}", "VLM-007")
@@ -241,7 +242,7 @@ class OpenAICompatibleProvider(VisionProvider):
     def validate_config(self) -> tuple[bool, str]:
         try:
             response = self.session.get(
-                self._url("/models"), headers=self._headers(), timeout=min(self.timeout, 15)
+                self._url("/models"), headers=self._headers(), timeout=(min(10.0, self.timeout), min(self.timeout, 15))
             )
         except requests.RequestException as exc:
             return False, f"無法連線：{exc.__class__.__name__}"

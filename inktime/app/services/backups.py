@@ -158,6 +158,12 @@ class BackupService:
                 "database_schema_version": self._schema_version(temporary_db),
                 "created_at": _utc_now(),
                 "secrets_policy": "included" if include_secrets else "excluded",
+                "backup_scope": {
+                    "metadata_database": True,
+                    "release_payloads": False,
+                    "original_photos": False,
+                    "restore_requires_release_reconciliation": True,
+                },
                 "includes": [
                     "SQLite 資料庫",
                     "一般設定",

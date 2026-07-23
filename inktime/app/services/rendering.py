@@ -22,13 +22,11 @@ from inktime.app.domain.rendering import (
     evaluate_e6_suitability,
     fit_with_focus,
 )
-from inktime.app.domain.analysis.scoring import (
-    calculate_distinguishing_score,
-    prepare_score_distribution,
-)
 from inktime.app.repositories.photos import PhotoRepository
+from inktime.app.repositories.render_candidates import RenderCandidateRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.services.weather import WeatherService
+from inktime.app.services.release_coordinator import ReleaseCoordinator
 
 
 LAYOUTS = {
@@ -52,6 +50,8 @@ class RenderService:
         settings: SettingsRepository,
         fonts: FontManager,
         publisher: AtomicReleasePublisher,
+        candidates: RenderCandidateRepository,
+        release_coordinator: ReleaseCoordinator,
         locations: LocationResolver | None = None,
         weather: WeatherService | None = None,
     ) -> None:
@@ -60,6 +60,8 @@ class RenderService:
         self.settings = settings
         self.fonts = fonts
         self.publisher = publisher
+        self.candidates = candidates
+        self.release_coordinator = release_coordinator
         self.locations = locations
         self.weather = weather
 
@@ -476,6 +478,7 @@ class RenderService:
         photo_ids: list[str],
         created_by: str,
         profile_keys: list[str] | None = None,
+        history: dict[str, str] | None = None,
     ) -> dict:
         quantity = int(self.settings.get("render.quantity", 5))
         layout_key = str(self.settings.get("render.layout", "photo_info"))
@@ -483,6 +486,9 @@ class RenderService:
         selected = photo_ids[:source_limit]
         if not selected:
             selected = self.select_candidates(source_limit)
+        else:
+            # 明確指定不合格照片必須穩定失敗；不得靜默改選其他照片。
+            selected = [str(row["id"]) for row in self.candidates.require(selected)]
         if layout_key == "photo_pair":
             images = []
             for index in range(0, len(selected), 2):
@@ -529,30 +535,16 @@ class RenderService:
                 color_distance=color_distance,
                 dither_strength=dither_strength,
                 orientation=release_orientation,
+                activate=False,
             )
             manifests.append(manifest)
-            with self.database.session() as connection:
-                connection.execute(
-                    """
-                    INSERT INTO releases(
-                        id,display_type,width,height,pixel_format,manifest_json,status,created_at,
-                        published_at,created_by,render_profile
-                    ) VALUES (?,?,?,?,?,?,'published',?,?,?,?)
-                    """,
-                    (
-                        manifest["release_id"],
-                        manifest["display_type"],
-                        manifest["width"],
-                        manifest["height"],
-                        manifest["pixel_format"],
-                        json.dumps(manifest, ensure_ascii=False),
-                        manifest["created_at"],
-                        manifest["created_at"],
-                        created_by,
-                        profile_key,
-                    ),
-                )
-        return manifests[0] if len(manifests) == 1 else {"releases": manifests}
+        published = self.release_coordinator.publish(
+            manifests,
+            created_by=created_by,
+            photo_ids=selected,
+            history=history,
+        )
+        return published[0] if len(published) == 1 else {"releases": published}
 
     def _candidate_query(
         self,
@@ -561,39 +553,64 @@ class RenderService:
         month_days: list[str] | None,
         older_only: bool,
         limit: int,
+        candidate_years: list[int] | None = None,
     ) -> list[dict[str, Any]]:
         memory_threshold = float(self.settings.get("render.memory_threshold", 70))
-        with self.database.session() as connection:
-            rows = connection.execute(
-                    """
+        weight = float(self.settings.get("render.e6_weight", 20)) / 100.0
+        result: list[dict[str, Any]] = []
+        offset = 0
+        # 檔案存在性無法安全地交給 SQLite；用固定批次掃描 SQL 已排序結果，
+        # 每次只保留真正可用的候選，避免把大型照片庫 materialize 成 Dict。
+        while len(result) < max(limit, 1):
+            with self.database.session() as connection:
+                rows = connection.execute(
+                    f"""
                     SELECT p.id,p.relative_path,p.captured_at,p.e6_score,p.e6_contrast_score,
                            p.e6_subject_score,p.e6_skin_score,p.e6_text_score,
                            p.crop_focus_x,p.crop_focus_y,p.crop_manual_x,p.crop_manual_y,
-                           p.crop_method,p.crop_face_count,
-                           COALESCE(a.ranking_score,a.memory_score) ranking_score,a.memory_score
+                           p.crop_method,p.crop_face_count,l.root_path,
+                           COALESCE(a.final_ranking_score,a.ranking_score,a.memory_score,0) ranking_score,
+                           a.memory_score,
+                           (COALESCE(a.final_ranking_score,a.ranking_score,a.memory_score,0) * ?
+                            + COALESCE(p.e6_score,50) * ?) combined_score
                     FROM photos p
+                    JOIN libraries l ON l.id=p.library_id
                     JOIN photo_analysis a ON a.id=(
-                        SELECT id FROM photo_analysis WHERE photo_id=p.id ORDER BY created_at DESC LIMIT 1
+                        SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id
+                        ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1
                     )
-                    WHERE p.status='analyzed' AND a.memory_score>=?
+                    WHERE {RenderCandidateRepository.SQL_PREDICATE}
+                      AND a.memory_score>=?
                       AND (?=0 OR substr(p.captured_at,6,5) IN (SELECT value FROM json_each(?)))
                       AND (?=0 OR (
                           p.captured_at IS NOT NULL
                           AND CAST(substr(p.captured_at,1,4) AS INTEGER) < ?
                       ))
-                    ORDER BY COALESCE(a.ranking_score,a.memory_score) DESC LIMIT ?
-                    """,
+                      AND (?=0 OR CAST(substr(p.captured_at,1,4) AS INTEGER)
+                          IN (SELECT value FROM json_each(?)))
+                    ORDER BY combined_score DESC,p.id LIMIT 250 OFFSET ?
+                    """,  # noqa: S608 -- eligibility predicate is a fixed class constant
                     (
+                        1.0 - weight,
+                        weight,
                         memory_threshold,
                         int(month_days is not None),
                         json.dumps(month_days or []),
                         int(older_only),
                         target.year,
-                        max(limit, 1),
+                        int(bool(candidate_years)),
+                        json.dumps(candidate_years or []),
+                        offset,
                     ),
                 ).fetchall()
-        weight = float(self.settings.get("render.e6_weight", 20)) / 100.0
-        result = [dict(row) for row in rows]
+            if not rows:
+                break
+            for stored in rows:
+                if self.candidates.available(stored):
+                    result.append(dict(stored))
+                    if len(result) >= max(limit, 1):
+                        break
+            offset += len(rows)
         # 舊資料庫沒有構圖／E6 欄位值；只替最前面的候選照片做一次本機補算，
         # 避免為整個大型照片庫增加啟動延遲，也完全不會呼叫視覺模型。
         for row in result[: min(40, len(result))]:
@@ -623,30 +640,28 @@ class RenderService:
                 "crop_face_count",
             ):
                 row[key] = refreshed[key]
-        score_distribution = prepare_score_distribution(self.photos.score_population())
         for row in result:
             stored_ranking = row.get("ranking_score")
             ranking = float(stored_ranking) if isinstance(stored_ranking, (int, float, str)) else 0.0
-            distinguishing, percentile = calculate_distinguishing_score(
-                ranking, score_distribution
-            )
-            stored_e6 = row.get("e6_score")
-            e6 = float(stored_e6) if isinstance(stored_e6, (int, float, str)) else 50.0
             row["raw_ranking_score"] = ranking
-            row["ranking_percentile"] = percentile
-            row["distinguishing_score"] = distinguishing
-            row["combined_score"] = round(distinguishing * (1.0 - weight) + e6 * weight, 2)
-        return sorted(result, key=lambda row: (-float(row["combined_score"]), str(row["id"])))
+            row["ranking_percentile"] = None
+            row["distinguishing_score"] = ranking
+            row["combined_score"] = round(float(row["combined_score"]), 2)
+        return result
 
     def select_candidates_details(
-        self, quantity: int | None = None, *, target_date: date | None = None
+        self,
+        quantity: int | None = None,
+        *,
+        target_date: date | None = None,
+        candidate_years: list[int] | None = None,
     ) -> list[dict[str, Any]]:
         limit = quantity if quantity is not None else int(self.settings.get("render.quantity", 5))
         limit = max(1, min(int(limit), 50))
         target = target_date or self._today()
         mode = str(self.settings.get("render.selection_mode", "history_today"))
         if mode == "top_ranked":
-            rows = self._candidate_query(target=target, month_days=None, older_only=False, limit=500)
+            rows = self._candidate_query(target=target, month_days=None, older_only=False, limit=500, candidate_years=candidate_years)
             for row in rows:
                 row["match_type"] = "top_ranked"
                 row["day_distance"] = None
@@ -667,7 +682,7 @@ class RenderService:
 
         month_day = target.strftime("%m-%d")
         exact = self._candidate_query(
-            target=target, month_days=[month_day], older_only=True, limit=max(100, limit * 10)
+            target=target, month_days=[month_day], older_only=True, limit=max(100, limit * 10), candidate_years=candidate_years
         )
         append(exact, "exact_day")
         fallback = str(self.settings.get("render.history_today_fallback", "nearby_then_ranked"))
@@ -683,11 +698,12 @@ class RenderService:
                 month_days=list(distances),
                 older_only=True,
                 limit=max(300, limit * 30),
+                candidate_years=candidate_years,
             )
             nearby.sort(key=lambda row: (distances.get(str(row["captured_at"])[5:10], 999), -float(row["combined_score"])))
             append(nearby, "nearby_day", distances)
         if len(selected) < limit and fallback in {"nearby_then_ranked", "ranked"}:
-            ranked = self._candidate_query(target=target, month_days=None, older_only=False, limit=500)
+            ranked = self._candidate_query(target=target, month_days=None, older_only=False, limit=500, candidate_years=candidate_years)
             append(ranked, "ranked_fallback")
         return selected
 
@@ -704,8 +720,7 @@ class RenderService:
 
     def _history_where(self, filters: dict[str, Any], *, month_day: str | None = None) -> tuple[str, list[Any]]:
         clauses = [
-            "p.eligible=1",
-            "p.lifecycle_status='active'",
+            RenderCandidateRepository.SQL_PREDICATE,
             "p.captured_at IS NOT NULL",
         ]
         params: list[Any] = []
@@ -737,9 +752,27 @@ class RenderService:
             clauses.append("NOT EXISTS (SELECT 1 FROM display_history dh WHERE dh.photo_id=p.id)")
         return " AND ".join(clauses), params
 
-    def _history_rows(self, filters: dict[str, Any], *, month_day: str | None = None) -> list[dict[str, Any]]:
+    def _history_rows(
+        self,
+        filters: dict[str, Any],
+        *,
+        month_day: str | None = None,
+        history_date: str | None = None,
+        limit: int = 500,
+        offset: int = 0,
+        order_by: str = "p.captured_at,p.id",
+    ) -> list[dict[str, Any]]:
         """Fetch a bounded, indexed candidate set; never decode image contents here."""
         where, params = self._history_where(filters, month_day=month_day)
+        if history_date:
+            where += " AND substr(p.captured_at,1,10)=?"
+            params.append(history_date)
+        allowed_orders = {
+            "p.captured_at,p.id",
+            "final_score DESC,p.id",
+        }
+        if order_by not in allowed_orders:
+            raise ValueError("HISTORY-001 候選排序不合法")
         with self.database.session() as connection:
             rows = connection.execute(
                 f"""
@@ -751,23 +784,20 @@ class RenderService:
                        COALESCE(a.final_ranking_score,a.ranking_score,a.memory_score,p.local_candidate_score,0) AS final_score
                 FROM photos p
                 JOIN libraries l ON l.id=p.library_id
-                LEFT JOIN photo_analysis a ON a.id=(
+                JOIN photo_analysis a ON a.id=(
                     SELECT latest.id FROM photo_analysis latest
                     WHERE latest.photo_id=p.id ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1
                 )
                 WHERE {where}
-                ORDER BY p.captured_at,p.id
-                LIMIT 1000
+                ORDER BY {order_by}
+                LIMIT ? OFFSET ?
                 """,
-                params,
+                (*params, max(1, min(limit, 500)), max(0, offset)),
             ).fetchall()
         usable: list[dict[str, Any]] = []
         for stored in rows:
             row = dict(stored)
-            try:
-                available = safe_join(Path(str(row["root_path"])), str(row["relative_path"])).is_file()
-            except (OSError, ValueError):
-                available = False
+            available = self.candidates.available(row)
             if available:
                 row["available"] = True
                 try:
@@ -781,12 +811,52 @@ class RenderService:
                 usable.append(row)
         return usable
 
+    def _iter_history_rows(
+        self,
+        filters: dict[str, Any],
+        *,
+        month_day: str | None = None,
+        history_date: str | None = None,
+        order_by: str = "p.captured_at,p.id",
+    ):
+        offset = 0
+        while True:
+            batch = self._history_rows(
+                filters,
+                month_day=month_day,
+                history_date=history_date,
+                limit=500,
+                offset=offset,
+                order_by=order_by,
+            )
+            # Offset 必須依 DB batch 前進；若可用列少於 500，可能只是檔案缺失。
+            with self.database.session() as connection:
+                where, params = self._history_where(filters, month_day=month_day)
+                if history_date:
+                    where += " AND substr(p.captured_at,1,10)=?"
+                    params.append(history_date)
+                raw_order = (
+                    "COALESCE(a.final_ranking_score,a.ranking_score,a.memory_score,p.local_candidate_score,0) DESC,p.id"
+                    if order_by == "final_score DESC,p.id"
+                    else order_by
+                )
+                raw_batch = connection.execute(
+                        f"SELECT p.id FROM photos p JOIN libraries l ON l.id=p.library_id "
+                        f"JOIN photo_analysis a ON a.id=(SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1) "
+                        f"WHERE {where} ORDER BY {raw_order} LIMIT 500 OFFSET ?",  # noqa: S608 -- fixed predicates and validated order
+                        (*params, offset),
+                    ).fetchall()
+            yield from batch
+            if len(raw_batch) < 500:
+                break
+            offset += 500
+
     def _history_dates(self, filters: dict[str, Any]) -> list[str]:
         """Return dates only, so a 100,000-row library is never materialized for a random pick."""
         where, params = self._history_where(filters)
-        needs_analysis = bool(filters.get("type") or filters.get("city") or filters.get("country"))
-        analysis_join = "" if not needs_analysis else (
-            "LEFT JOIN photo_analysis a ON a.id=(SELECT latest.id FROM photo_analysis latest "
+        analysis_join = (
+            "JOIN libraries l ON l.id=p.library_id "
+            "JOIN photo_analysis a ON a.id=(SELECT latest.id FROM photo_analysis latest "
             "WHERE latest.photo_id=p.id ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1)"
         )
         with self.database.session() as connection:
@@ -835,8 +905,11 @@ class RenderService:
         remaining = list(dates)
         while remaining:
             chosen_date = picker.choice(remaining)
-            candidates = self._history_rows(filters, month_day=chosen_date[5:10])
-            candidates = [row for row in candidates if str(row["captured_at"])[:10] == chosen_date]
+            candidates = list(
+                self._iter_history_rows(
+                    filters, month_day=chosen_date[5:10], history_date=chosen_date
+                )
+            )
             if candidates:
                 candidates.sort(key=lambda row: (-float(row["final_score"]), str(row["id"])))
                 return self._history_selection(chosen_date, candidates, "random_history_day", filters)
@@ -851,26 +924,65 @@ class RenderService:
             raise ValueError("HISTORY-001 month_day 必須是 MM-DD") from exc
         filters = self._validated_history_filters(payload)
         current_id = str(payload.get("current_photo_id", "")).strip()
-        rows = [row for row in self._history_rows(filters, month_day=month_day) if str(row["id"]) != current_id]
-        if not rows:
-            return {"status": "empty", "message": "此月日沒有其他符合條件的可用照片，沒有重試或改選其他日期。", "filters": filters, "month_day": month_day}
+        rows = (
+            row
+            for row in self._iter_history_rows(
+                filters,
+                month_day=month_day,
+                order_by="final_score DESC,p.id" if str(payload.get("mode")) == "top_n" else "p.captured_at,p.id",
+            )
+            if str(row["id"]) != current_id
+        )
         mode = str(payload.get("mode", "random"))
         if mode not in {"random", "weighted", "top_n", "prefer_unseen", "prefer_travel", "prefer_person"}:
             raise ValueError("HISTORY-001 同日重抽模式不合法")
-        if mode == "top_n":
-            limit = max(1, min(int(payload.get("top_n", 10)), 100))
-            pool = sorted(rows, key=lambda row: (-float(row["final_score"]), str(row["id"])))[:limit]
-            selected = (rng or random.SystemRandom()).choice(pool)
-        elif mode == "weighted":
-            weights = [max(0.1, float(row["final_score"])) for row in rows]
-            selected = (rng or random.SystemRandom()).choices(rows, weights=weights, k=1)[0]
-        elif mode in {"prefer_travel", "prefer_person"}:
-            wanted = "旅行" if mode == "prefer_travel" else "人物"
-            preferred = [row for row in rows if wanted in row.get("types", [])]
-            selected = (rng or random.SystemRandom()).choice(preferred or rows)
-        else:
-            selected = (rng or random.SystemRandom()).choice(rows)
+        picker = rng or random.SystemRandom()
+        selected = None
+        seen = 0
+        preferred_seen = 0
+        weighted_total = 0.0
+        top_limit = max(1, min(int(payload.get("top_n", 10)), 100))
+        fallback = None
+
+        def reservoir(current, candidate, count: int):
+            return candidate if current is None or picker.choice(range(count)) == 0 else current
+
+        for row in rows:
+            seen += 1
+            fallback = reservoir(fallback, row, seen)
+            if mode == "top_n":
+                if seen > top_limit:
+                    break
+                selected = reservoir(selected, row, seen)
+            elif mode == "weighted":
+                weight = max(0.1, float(row["final_score"]))
+                weighted_total += weight
+                random_value = getattr(picker, "random", random.SystemRandom().random)()
+                if selected is None or random_value < weight / weighted_total:
+                    selected = row
+            elif mode in {"prefer_travel", "prefer_person"}:
+                wanted = "旅行" if mode == "prefer_travel" else "人物"
+                if wanted in row.get("types", []):
+                    preferred_seen += 1
+                    selected = reservoir(selected, row, preferred_seen)
+            elif mode == "prefer_unseen":
+                if not self._was_displayed(str(row["id"])):
+                    preferred_seen += 1
+                    selected = reservoir(selected, row, preferred_seen)
+            else:
+                selected = reservoir(selected, row, seen)
+        selected = selected or fallback
+        if selected is None:
+            return {"status": "empty", "message": "此月日沒有其他符合條件的可用照片，沒有重試或改選其他日期。", "filters": filters, "month_day": month_day}
         return self._history_selection(str(selected["captured_at"])[:10], [selected], f"same_day_{mode}", filters)
+
+    def _was_displayed(self, photo_id: str) -> bool:
+        with self.database.session() as connection:
+            return bool(
+                connection.execute(
+                    "SELECT 1 FROM display_history WHERE photo_id=? LIMIT 1", (photo_id,)
+                ).fetchone()
+            )
 
     def _history_selection(self, history_date: str, candidates: list[dict[str, Any]], method: str, filters: dict[str, Any]) -> dict[str, Any]:
         for candidate in candidates:

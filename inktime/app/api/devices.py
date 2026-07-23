@@ -11,7 +11,7 @@ from flask import Blueprint, abort, current_app, render_template, request
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.core.logging import log_event
 from inktime.app.domain.rendering import DISPLAY_PROFILES, DeviceTestReleaseStore
-from inktime.app.repositories.devices import DeviceRepository
+from inktime.app.repositories.devices import DeviceRateLimitError, DeviceRepository
 from inktime.app.web.access import administrator_required, login_required
 
 
@@ -32,7 +32,10 @@ def _bearer_token() -> str:
 
 
 def _authenticated_device():
-    device = _repository().authenticate(_bearer_token(), request.remote_addr or "unknown")
+    try:
+        device = _repository().authenticate(_bearer_token(), request.remote_addr or "unknown")
+    except DeviceRateLimitError:
+        abort(429, description="DEVICE-007 裝置驗證嘗試過多，請稍後再試")
     if device is None:
         abort(401, description="DEVICE-001 裝置驗證失敗")
     return device
@@ -282,6 +285,8 @@ def latest_release():
     if not manifest_path.is_file():
         abort(404, description="找不到發布 Manifest")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if str(manifest.get("render_profile")) != profile_key:
+        abort(409, description="DEVICE-008 Release Profile 與裝置不相容")
     manifest["download_base_url"] = f"/api/device/v1/releases/{release_id}/files/"
     zone = ZoneInfo(str(device["timezone"]))
     offset = datetime.now(zone).utcoffset()
@@ -320,19 +325,44 @@ def release_file(release_id: str, filename: str):
     device = _authenticated_device()
     from flask import send_file
 
+    release_root = current_app.config["INKTIME_RELEASE_DIR"]
     try:
-        path = safe_join(current_app.config["INKTIME_RELEASE_DIR"], f"{release_id}/{filename}")
+        path = safe_join(release_root, f"{release_id}/{filename}")
     except UnsafePathError:
         _repository().record_download(device["id"], release_id, False)
         abort(400, description="PATH-001 路徑超出允許範圍")
-    if not path.is_file() or path.name == "manifest.json":
+    manifest_path = release_root / release_id / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        _repository().record_download(device["id"], release_id, False)
+        abort(404, description="DEVICE-002 Release Manifest 不存在")
+    if str(manifest.get("render_profile")) != str(device["panel_profile"]):
+        _repository().record_download(device["id"], release_id, False)
+        abort(403, description="DEVICE-008 Release Profile 與裝置不相容")
+    entry = next(
+        (
+            item
+            for item in manifest.get("files", [])
+            if isinstance(item, dict) and str(item.get("name")) == filename
+        ),
+        None,
+    )
+    if not path.is_file() or path.name == "manifest.json" or entry is None:
         _repository().record_download(device["id"], release_id, False)
         abort(404)
+    from hashlib import sha256
+
+    payload = path.read_bytes()
+    if len(payload) != int(entry.get("size", -1)) or sha256(payload).hexdigest() != str(
+        entry.get("sha256", "")
+    ):
+        _repository().record_download(device["id"], release_id, False)
+        abort(409, description="DEVICE-009 Release Payload 完整性驗證失敗")
     _repository().record_download(device["id"], release_id, True)
     if filename.endswith(".bin"):
-        DeviceTestReleaseStore(current_app.config["INKTIME_RELEASE_DIR"]).mark_downloaded(
-            str(device["id"]), release_id
-        )
+        # 只前進到 payload_downloaded；不會在 HTTP 傳輸階段 consumed。
+        DeviceTestReleaseStore(release_root).mark_downloaded(str(device["id"]), release_id)
     log_event(
         LOGGER,
         logging.DEBUG,
@@ -418,6 +448,14 @@ def report_status():
             "wake_duration_ms": optional_int("wake_duration_ms", 0, 86_400_000),
             "button_wakeup": optional_bool("button_wakeup"),
         },
+    )
+    DeviceTestReleaseStore(current_app.config["INKTIME_RELEASE_DIR"]).confirm_display(
+        str(device["id"]),
+        str(payload.get("release_id", ""))[:100],
+        profile_key=str(device["panel_profile"]),
+        payload_verified=bool(payload.get("payload_sha256_verified", False)),
+        display_updated=bool(payload.get("display_updated", False)),
+        error_code=error_code,
     )
     log_event(
         LOGGER,

@@ -79,6 +79,13 @@ def test_history_selection_synthetic_rows_is_bounded_sqlite_work(app, tmp_path, 
             rows,
         )
         connection.commit()
+    photos.save_analysis(
+        "selected", None, "local", "local", "synthetic",
+        {"schema_version": 1, "caption": "測試", "types": ["其他"], "memory_score": 75,
+         "beauty_score": 75, "technical_quality_score": 75, "emotion_score": 75,
+         "side_caption": "", "should_keep": True, "sensitive": False, "reason": "測試"}, "{}",
+        ranking_score=75, final_ranking_score=75,
+    )
     statements: list[str] = []
     with database.session() as connection:
         connection.set_trace_callback(statements.append)

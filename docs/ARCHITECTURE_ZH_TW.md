@@ -148,3 +148,11 @@ flowchart LR
 3. `inktime/app/platform.py`：應用程式如何組裝 Repository、Service 與 Blueprint。
 4. 依上方模組地圖進入目標功能。
 5. `docs/FINAL_IMPLEMENTATION_REPORT_ZH_TW.md`：完成證據與已知限制。
+
+## 正式候選與 Release Coordinator
+
+`RenderCandidateRepository` 是一般發布、歷史選片與排程換圖的單一資格來源；API 在明確指定照片時先驗證並以 `RENDER-009` 拒絕，不會靜默 fallback。`DisplayPrepareConfig` 是 Scheduler／Worker／Render 共用 DTO，未知欄位會失敗。
+
+`ReleaseCoordinator` 將檔案系統與 SQLite 組成可補償的兩階段流程：Renderer 以 `activate=False` 建立 staged Release，驗證 Manifest／Payload，DB 寫 staged，切換所有 Profile pointer，最後在同一 DB transaction 寫 published 與 `display_history`。pointer 或 DB 最終提交失敗時回復舊 pointer 並標記 `staged_failed`；啟動 reconciliation 會標記 `payload_missing`／orphan，並將失效 pointer 回復到同 Profile 最新的完整 published Release，但不刪除未知檔案。
+
+共用 `Database` 另提供不含 SQL、Secret 或照片路徑的 writer lock wait、busy timeout count、WAL bytes 與長交易指標；一般 Web、Worker 與 Scheduler Runtime 不得繞過此連線層。

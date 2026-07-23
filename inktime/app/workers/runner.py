@@ -155,26 +155,27 @@ class WorkerRunner:
                         progress_interval_seconds=progress_seconds,
                     )
                 if job["kind"] == "render":
+                    display_prepare = settings.get("display_prepare")
+                    if display_prepare is not None:
+                        return self.app.extensions["inktime_display_preparation_service"].prepare(
+                            display_prepare,
+                            created_by=str(job["created_by"] or "system"),
+                        )
                     arguments = (
                         [str(value) for value in settings.get("photo_ids", [])],
                         str(job["created_by"] or "system"),
                     )
-                    if "profile_keys" in settings:
-                        release = self.app.extensions["inktime_render_service"].publish(
-                            *arguments,
-                            profile_keys=[str(value) for value in settings["profile_keys"]],
-                        )
-                    else:
-                        release = self.app.extensions["inktime_render_service"].publish(*arguments)
                     history = settings.get("history")
-                    if isinstance(history, dict) and arguments[0]:
-                        release_id = str(release.get("release_id", ""))
-                        self.app.extensions["inktime_render_service"].record_display(
-                            arguments[0],
-                            history_date=str(history.get("history_date")),
-                            selection_method=str(history.get("selection_method", "manual")),
-                            release_id=release_id or None,
-                        )
+                    if "profile_keys" in settings:
+                        kwargs = {"profile_keys": [str(value) for value in settings["profile_keys"]]}
+                        if isinstance(history, dict):
+                            kwargs["history"] = history
+                        release = self.app.extensions["inktime_render_service"].publish(*arguments, **kwargs)
+                    else:
+                        if isinstance(history, dict):
+                            release = self.app.extensions["inktime_render_service"].publish(*arguments, history=history)
+                        else:
+                            release = self.app.extensions["inktime_render_service"].publish(*arguments)
                     return release
                 if job["kind"] == "virtual_display":
                     root = Path(settings["root_path"]).expanduser().resolve()
@@ -206,6 +207,22 @@ class WorkerRunner:
                     )
                     if not photo_ids:
                         raise ValueError("IMG-002 模擬照片資料夾內沒有可用圖片")
+                    candidate_repository = self.app.extensions["inktime_render_candidate_repository"]
+                    photo_repository = self.app.extensions["inktime_photo_repository"]
+                    for photo_id in photo_ids:
+                        if candidate_repository.get(photo_id) is not None:
+                            continue
+                        photo_repository.save_analysis(
+                            photo_id, str(job["id"]), "local", "local", "virtual-display-local",
+                            {
+                                "schema_version": 1, "caption": "本機電子紙收件匣照片",
+                                "types": ["其他"], "memory_score": 50, "beauty_score": 50,
+                                "technical_quality_score": 50, "emotion_score": 50,
+                                "side_caption": "", "should_keep": True, "sensitive": False,
+                                "reason": "本機無模型發布",
+                            },
+                            "{}", ranking_score=50, final_ranking_score=50,
+                        )
                     release = self.app.extensions["inktime_render_service"].publish(
                         photo_ids,
                         str(job["created_by"] or "system"),

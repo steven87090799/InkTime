@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import fcntl
+import logging
 from pathlib import Path
 import re
 import sqlite3
 import threading
 import time
 from typing import IO, Iterator
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 _WRITE_STATEMENT = re.compile(
@@ -33,10 +37,18 @@ class ManagedConnection(sqlite3.Connection):
     _writer_timeout_seconds: float = 10.0
     _writer_lock_file: IO[bytes] | None = None
 
-    def configure_writer_lock(self, path: Path, timeout_seconds: float) -> None:
+    def configure_writer_lock(
+        self,
+        path: Path,
+        timeout_seconds: float,
+        metrics: dict[str, float | int],
+        metrics_lock: threading.Lock,
+    ) -> None:
         self._writer_lock_path = path
         self._writer_timeout_seconds = timeout_seconds
         self._writer_guard = threading.RLock()
+        self._writer_metrics = metrics
+        self._writer_metrics_lock = metrics_lock
 
     @staticmethod
     def _requires_writer(sql: str) -> bool:
@@ -51,15 +63,25 @@ class ManagedConnection(sqlite3.Connection):
             return
         self._writer_lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock = self._writer_lock_path.open("a+b")
+        started = time.monotonic()
         deadline = time.monotonic() + self._writer_timeout_seconds
         while True:
             try:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 self._writer_lock_file = lock
+                waited_ms = (time.monotonic() - started) * 1000
+                with self._writer_metrics_lock:
+                    self._writer_metrics["writer_lock_acquisitions"] += 1
+                    self._writer_metrics["writer_lock_wait_ms"] += waited_ms
+                    self._writer_metrics["writer_lock_wait_max_ms"] = max(
+                        float(self._writer_metrics["writer_lock_wait_max_ms"]), waited_ms
+                    )
                 return
             except BlockingIOError as exc:
                 if time.monotonic() >= deadline:
                     lock.close()
+                    with self._writer_metrics_lock:
+                        self._writer_metrics["busy_timeout_count"] += 1
                     raise sqlite3.OperationalError("database writer lock timeout") from exc
                 time.sleep(0.01)
 
@@ -131,6 +153,15 @@ class Database:
         self.busy_timeout_ms = busy_timeout_ms
         self.writer_lock_path = Path(f"{self.path}.writer.lock")
         self.runtime_lock_path = Path(f"{self.path}.runtime.lock")
+        self._metrics: dict[str, float | int] = {
+            "writer_lock_acquisitions": 0,
+            "writer_lock_wait_ms": 0.0,
+            "writer_lock_wait_max_ms": 0.0,
+            "busy_timeout_count": 0,
+            "long_transaction_count": 0,
+            "long_transaction_max_ms": 0.0,
+        }
+        self._metrics_lock = threading.Lock()
 
     def connect(self) -> ManagedConnection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -142,7 +173,10 @@ class Database:
             factory=ManagedConnection,
         )
         connection.configure_writer_lock(
-            self.writer_lock_path, self.busy_timeout_ms / 1000
+            self.writer_lock_path,
+            self.busy_timeout_ms / 1000,
+            self._metrics,
+            self._metrics_lock,
         )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
@@ -164,6 +198,7 @@ class Database:
         """所有多步驟寫入共用的 rollback-safe 交易入口。"""
 
         with self.session() as connection:
+            started = time.monotonic()
             connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
             try:
                 yield connection
@@ -173,6 +208,27 @@ class Database:
                 raise
             else:
                 connection.execute("COMMIT")
+            finally:
+                duration_ms = (time.monotonic() - started) * 1000
+                if duration_ms >= 5_000:
+                    with self._metrics_lock:
+                        self._metrics["long_transaction_count"] += 1
+                        self._metrics["long_transaction_max_ms"] = max(
+                            float(self._metrics["long_transaction_max_ms"]), duration_ms
+                        )
+                    LOGGER.warning("SQLite long transaction duration_ms=%.1f", duration_ms)
+
+    def observability(self) -> dict[str, float | int]:
+        """回傳不含 SQL、Secret 或照片路徑的 SQLite 執行指標。"""
+
+        with self._metrics_lock:
+            snapshot = dict(self._metrics)
+        wal_path = Path(f"{self.path}-wal")
+        try:
+            snapshot["wal_size_bytes"] = wal_path.stat().st_size
+        except OSError:
+            snapshot["wal_size_bytes"] = 0
+        return snapshot
 
     def acquire_runtime_lock(self, *, exclusive: bool, blocking: bool = True) -> IO[bytes]:
         """正式程序持有 shared lock；離線還原必須取得 exclusive lock。"""

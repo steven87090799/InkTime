@@ -124,6 +124,7 @@ size_t frameDataSize = 0;
 bool frameIndexed4 = false;
 bool frameNativePalette = false;
 bool serverConfigChanged = false;
+bool currentPayloadShaVerified = false;
 String currentReleaseId;
 String currentRenderProfile;
 String lastDeviceErrorCode;
@@ -309,7 +310,7 @@ static void wifiHardResetForPortal() {
   DBG_PRINTLN("[WIFI] wifiHardResetForPortal()");
 #endif
   WiFi.scanDelete();
-  WiFi.disconnect(true, true);
+  WiFi.disconnect(false, false);
   WiFi.mode(WIFI_OFF);
   delay(200);
 
@@ -585,7 +586,7 @@ void goDeepSleepMinutes(uint32_t minutes) {
 
   powerDownEPD();
 
-  WiFi.disconnect(true, true);
+  WiFi.disconnect(false, false);
   WiFi.mode(WIFI_OFF);
   esp_wifi_stop();
 
@@ -703,7 +704,7 @@ bool runUsbServiceMode() {
 // =======================
 //  WiFi 连接
 // =======================
-bool connectWiFi(const Config &cfg, uint32_t timeout_ms = 15000) {
+bool connectWiFi(const Config &cfg, uint32_t timeout_ms = 12000) {
 #if DEBUG_LOG
   DBG_PRINTLN("[WIFI] connectWiFi()");
   DBG_PRINT("[WIFI] target ssid="); DBG_PRINTLN(cfg.wifi_ssid);
@@ -711,7 +712,7 @@ bool connectWiFi(const Config &cfg, uint32_t timeout_ms = 15000) {
 
   if (cfg.wifi_ssid.isEmpty()) return false;
 
-  WiFi.disconnect(true, true);
+  WiFi.disconnect(false, false);
   WiFi.mode(WIFI_STA);
 
   WiFi.setSleep(true);
@@ -972,6 +973,7 @@ bool downloadDailyPhotoBin(Config &cfg) {
       frameNativePalette = true;
       currentReleaseId = manifest["release_id"] | "";
       currentRenderProfile = renderProfile;
+      currentPayloadShaVerified = true;
       saveLastPhotoIndex(fileIndex);
       return true;
     }
@@ -1016,6 +1018,7 @@ bool downloadDailyPhotoBin(Config &cfg) {
     for (int i = 0; i < 32; ++i) sprintf(actualSha + i * 2, "%02x", digest[i]);
     actualSha[64] = '\0';
     if (!expectedSha.equalsIgnoreCase(String(actualSha))) continue;
+    currentPayloadShaVerified = true;
 
     // 完整下載與 SHA-256 都通過後才替換資料。
     if (frameData) heap_caps_free(frameData);
@@ -1077,6 +1080,7 @@ void reportDeviceStatus(const Config &cfg, bool displayUpdated) {
   payload["free_psram_bytes"] = ESP.getFreePsram();
   payload["wake_reason"] = String((int)esp_sleep_get_wakeup_cause());
   payload["display_updated"] = displayUpdated;
+  payload["payload_sha256_verified"] = currentPayloadShaVerified;
   payload["applied_config_version"] = cfg.config_version;
   payload["panel_profile"] = INKTIME_PANEL_PROFILE;
   payload["render_profile"] = currentRenderProfile;

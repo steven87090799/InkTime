@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import time
+from uuid import uuid4
 
 from PIL import Image, ImageOps
 
@@ -464,6 +466,59 @@ class PhotoAnalysisService:
             except AnalysisValidationError:
                 # 損壞或舊版快取不可阻斷新分析，直接重新取得並覆寫。
                 pass
+        cache_key = hashlib.sha256(
+            json.dumps(
+                [content_sha256, provider.name, model, PROMPT_VERSION, 1, schema_kind],
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        owner_id = str(uuid4())
+        deadline = time.monotonic() + 120
+        while not self.photos.acquire_ai_cache_reservation(cache_key, owner_id):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("AI-CACHE-001 等待相同分析結果逾時")
+            time.sleep(0.05)
+            cached = self.photos.get_ai_cache(
+                content_sha256=content_sha256,
+                provider=provider.name,
+                model_name=model,
+                prompt_version=PROMPT_VERSION,
+                schema_version=1,
+                schema_kind=schema_kind,
+            )
+            if cached is not None:
+                return validate_analysis_result(cached["result"]), str(cached["raw_json"]), 0.0, True
+        try:
+            result, raw, cost = self._perform_uncached_model_call(
+                provider=provider,
+                image=image,
+                model=model,
+                detail=detail,
+                stage=stage,
+                job_id=job_id,
+                photo_id=photo_id,
+                content_sha256=content_sha256,
+                schema_kind=schema_kind,
+            )
+        except Exception as exc:
+            self.photos.finish_ai_cache_reservation(cache_key, owner_id, error=str(exc))
+            raise
+        self.photos.finish_ai_cache_reservation(cache_key, owner_id)
+        return result, raw, cost, False
+
+    def _perform_uncached_model_call(
+        self,
+        *,
+        provider: VisionProvider,
+        image: Path,
+        model: str,
+        detail: str,
+        stage: str,
+        job_id: str | None,
+        photo_id: str,
+        content_sha256: str,
+        schema_kind: str,
+    ) -> tuple[dict, str, float]:
         if self.budgets:
             self.budgets.assert_request_allowed(job_id, photo_id)
         started_at = datetime.now(timezone.utc).isoformat()
@@ -526,7 +581,7 @@ class PhotoAnalysisService:
             estimated_cost=total_cost,
             latency_ms=int((time.perf_counter() - started_perf) * 1000),
         )
-        return result, raw, total_cost, False
+        return result, raw, total_cost
 
     def analyze_photo(
         self,
