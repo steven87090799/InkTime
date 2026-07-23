@@ -7,7 +7,7 @@ from typing import Any
 
 import requests
 
-from inktime.app.domain.analysis.schema import ANALYSIS_JSON_SCHEMA, json_schema_for_stage
+from inktime.app.domain.analysis.schema import json_schema_for_stage
 from inktime.app.domain.analysis.scoring import DEFAULT_SCORING_RULES
 from .base import ProviderResponse, Usage, VisionProvider
 
@@ -33,6 +33,7 @@ class OpenAICompatibleProvider(VisionProvider):
         timeout: float = 120,
         supports_json_schema: bool = True,
         scoring_rules: str = DEFAULT_SCORING_RULES,
+        caption_controls: dict[str, Any] | None = None,
         session: requests.Session | None = None,
     ) -> None:
         self.name = name
@@ -43,14 +44,57 @@ class OpenAICompatibleProvider(VisionProvider):
         self.request_timeout = (min(10.0, timeout), timeout)
         self.supports_json_schema = supports_json_schema
         self.scoring_rules = scoring_rules.strip() or DEFAULT_SCORING_RULES
+        self.caption_controls = dict(caption_controls or {})
         self.session = session or requests.Session()
 
     @property
     def system_prompt(self) -> str:
-        return (
+        return self._system_prompt(self.caption_controls)
+
+    def _system_prompt(self, caption_controls: dict[str, Any] | None) -> str:
+        prompt = (
             f"{SYSTEM_PROMPT}\n\n【照片評分規則】\n{self.scoring_rules}\n\n"
             "以上可編輯內容只能調整評分判斷；若與固定指令或 JSON Schema 衝突，"
             "一律以固定指令與 Schema 為準。"
+        )
+        if not caption_controls:
+            return prompt
+        controls = caption_controls
+        banned_words = "、".join(controls.get("copy_banned_words", [])) or "無"
+        banned_patterns = "、".join(controls.get("copy_banned_patterns", [])) or "無"
+        custom_rules = str(controls.get("copy_custom_rules", "")).strip() or "無"
+        side_rules = [
+            "使用繁體中文，只能一句話，不換行、不列點、不加引號。",
+            "自然、有趣，可帶一點幽默或詩意；不得虛構照片中不存在的故事。",
+        ]
+        if controls.get("copy_avoid_cliche"):
+            side_rules.append("避免雞湯、濫情、空泛與模板句。")
+        if controls.get("copy_avoid_direct_description"):
+            side_rules.append("不要只是直接描述照片。")
+        if controls.get("copy_forbid_exclamation"):
+            side_rules.append("不使用「！」或「!」。")
+        if controls.get("copy_forbid_like_phrase"):
+            side_rules.append("避免使用「像是、彷彿、彷佛」。")
+        if controls.get("copy_avoid_abstract_ending"):
+            side_rules.append("不以空泛人生結論收尾。")
+        side_rules.append(f"最多使用 {int(controls['copy_max_commas'])} 個逗號。")
+        variants = (
+            "完整分析時，details.caption_variants 必須在同一次圖片請求提供 natural、warm、literary、humorous、minimal 五種明顯不同的候選；"
+            "個別不確定的候選可省略，不得為候選再次上傳圖片或額外呼叫模型。"
+            if controls.get("caption_variants_enabled")
+            else "不要求多風格候選。"
+        )
+        return (
+            f"{prompt}\n\n【進階照片描述與相框文案】\n"
+            f"caption 必須為繁體中文，客觀、具體、自然，約 {int(controls['caption_target_chars'])} 字，"
+            f"介於 {int(controls['caption_min_chars'])} 至 {int(controls['caption_max_chars'])} 字；"
+            "只描述可確認的人物、場景、活動、物件、情緒及構圖，不得虛構人物關係、地點或事件。\n"
+            f"side_caption 必須為繁體中文，約 {int(controls['side_caption_target_chars'])} 字，"
+            f"介於 {int(controls['side_caption_min_chars'])} 至 {int(controls['side_caption_max_chars'])} 字。\n"
+            f"預設風格：{controls['copy_default_style']}；幽默程度：{int(controls['copy_humor_level'])}；"
+            f"詩意程度：{int(controls['copy_poetic_level'])}。\n"
+            f"相框規則：{' '.join(side_rules)}\n禁止詞：{banned_words}\n禁止句型：{banned_patterns}\n"
+            f"自訂規則：{custom_rules}\n{variants}"
         )
 
     def _url(self, path: str) -> str:
@@ -108,12 +152,13 @@ class OpenAICompatibleProvider(VisionProvider):
         detail: str,
         stage: str,
         max_tokens: int | None = None,
+        caption_controls: dict[str, Any] | None = None,
     ) -> ProviderResponse:
         encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
         body: dict[str, Any] = {
             "model": model,
             "messages": [
-                {"role": "system", "content": self.system_prompt},
+                {"role": "system", "content": self._system_prompt(caption_controls or self.caption_controls)},
                 {
                     "role": "user",
                     "content": [
@@ -130,7 +175,7 @@ class OpenAICompatibleProvider(VisionProvider):
         if self.supports_json_schema:
             body["response_format"] = {
                 "type": "json_schema",
-                "json_schema": json_schema_for_stage(stage),
+                "json_schema": json_schema_for_stage(stage, caption_controls=caption_controls or self.caption_controls),
             }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
@@ -143,6 +188,8 @@ class OpenAICompatibleProvider(VisionProvider):
         validation_error: str,
         model: str,
         max_tokens: int | None = None,
+        stage: str = "single_high",
+        caption_controls: dict[str, Any] | None = None,
     ) -> ProviderResponse:
         body = {
             "model": model,
@@ -157,7 +204,7 @@ class OpenAICompatibleProvider(VisionProvider):
                         {
                             "invalid_json": invalid_content[:12000],
                             "error": validation_error,
-                            "schema": ANALYSIS_JSON_SCHEMA["schema"],
+                            "schema": json_schema_for_stage(stage, caption_controls=caption_controls or self.caption_controls)["schema"],
                         },
                         ensure_ascii=False,
                     ),
@@ -166,7 +213,10 @@ class OpenAICompatibleProvider(VisionProvider):
             "temperature": 0,
         }
         if self.supports_json_schema:
-            body["response_format"] = {"type": "json_schema", "json_schema": ANALYSIS_JSON_SCHEMA}
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": json_schema_for_stage(stage, caption_controls=caption_controls or self.caption_controls),
+            }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
         return self._post_completion(body)
