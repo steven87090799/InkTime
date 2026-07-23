@@ -143,12 +143,20 @@ def initialize_platform(
     app.extensions["inktime_provider_service"] = ProviderService(
         app.extensions["inktime_provider_repository"], settings_repository
     )
+    app.extensions["inktime_backup_service"] = BackupService(database, data_dir / "backups")
+    app.extensions["inktime_diagnostics_service"] = DiagnosticsService(
+        database, data_dir, data_dir / "cache" / "thumbnails", settings_repository=settings_repository,
+    )
+    app.extensions["inktime_observability_service"] = ObservabilityService(
+        database, settings_repository, app.extensions["inktime_diagnostics_service"]
+    )
     app.extensions["inktime_analysis_service"] = PhotoAnalysisService(
         app.extensions["inktime_photo_repository"],
         app.extensions["inktime_usage_repository"],
         app.extensions["inktime_thumbnail_cache"],
         budget_service,
         settings_repository,
+        app.extensions["inktime_observability_service"],
     )
     app.extensions["inktime_scoring_lab_service"] = ScoringLabService(
         app.extensions["inktime_provider_service"],
@@ -157,14 +165,6 @@ def initialize_platform(
         app.extensions["inktime_usage_repository"],
         budget_service,
     )
-    app.extensions["inktime_backup_service"] = BackupService(database, data_dir / "backups")
-    app.extensions["inktime_diagnostics_service"] = DiagnosticsService(
-        database,
-        data_dir,
-        data_dir / "cache" / "thumbnails",
-        settings_repository=settings_repository,
-    )
-    app.extensions["inktime_observability_service"] = ObservabilityService(database, settings_repository, app.extensions["inktime_diagnostics_service"])
     font_manager = FontManager(data_dir / "fonts")
     location_resolver = LocationResolver(Path(__file__).resolve().parents[2] / "data" / "world_cities_zh.csv")
     release_publisher = AtomicReleasePublisher(release_dir)
@@ -186,6 +186,7 @@ def initialize_platform(
         release_coordinator,
         location_resolver,
         weather_service,
+        app.extensions["inktime_observability_service"],
     )
     app.extensions["inktime_display_preparation_service"] = DisplayPreparationService(
         database, app.extensions["inktime_render_service"]

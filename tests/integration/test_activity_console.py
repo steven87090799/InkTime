@@ -47,3 +47,36 @@ def test_activity_access_is_read_only_for_viewer(client, app):
     assert client.get("/api/v1/activity/download").status_code == 403
     response = client.post("/api/v1/settings", json={"observability.debug_enabled": True}, headers={"X-CSRF-Token": csrf(client)})
     assert response.status_code == 403
+
+
+def test_caption_and_observability_settings_coexist_and_caption_events_are_redacted(client, app):
+    create_admin(app)
+    login(client)
+    settings = app.extensions["inktime_settings_repository"]
+    analysis = app.extensions["inktime_analysis_service"]
+    before = analysis._prompt_version(analysis._caption_controls())
+    response = client.post(
+        "/api/v1/settings",
+        json={
+            "analysis.caption_min_chars": 121,
+            "analysis.advanced_caption_enabled": True,
+            "observability.debug_enabled": True,
+            "observability.activity_poll_seconds": 6,
+        },
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert response.status_code == 200
+    assert settings.get("analysis.caption_min_chars") == 121
+    assert settings.get("observability.activity_poll_seconds") == 6
+    assert analysis._prompt_version(analysis._caption_controls()) != before
+    fingerprint = analysis._prompt_version(analysis._caption_controls())
+    settings.update("observability.activity_poll_seconds", 7, changed_by="test", source_ip="test")
+    assert analysis._prompt_version(analysis._caption_controls()) == fingerprint
+    app.extensions["inktime_observability_service"].record(
+        "DEBUG", "analysis", "caption_cache_hit", "Prompt Bearer secret-token",
+        photo_id="photo", trace_id=fingerprint, api_key="not-for-activity",
+    )
+    body = client.get("/api/v1/activity?photo_id=photo").get_data(as_text=True)
+    assert "secret-token" not in body and "not-for-activity" not in body
+    page = client.get("/settings").get_data(as_text=True)
+    assert "照片描述與相框文案" in page and "系統監控與除錯" in page
