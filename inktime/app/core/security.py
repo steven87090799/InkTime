@@ -12,10 +12,16 @@ from typing import Any
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
-SENSITIVE_KEY = re.compile(r"(api[_-]?key|token|password|secret|authorization|cookie|session)", re.IGNORECASE)
+SENSITIVE_KEY = re.compile(
+    r"^(?:api[_-]?key|token|password|secret|authorization|cookie|session|bearer|device[_-]?(?:credential|token))$",
+    re.IGNORECASE,
+)
 SENSITIVE_TEXT = re.compile(
     r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]{8,}|\b(?:sk-|itd_)[A-Za-z0-9._~-]{8,}|\b(?:api[_-]?key|token|authorization)=([^\s&]+)"
 )
+PRIVATE_PATH = re.compile(r"(?:/Users/[^\s]+|/home/[^\s]+|/photos/[^\s]+)")
+GPS = re.compile(r"(?<!\d)(?:-?\d{1,2}\.\d{4,})\s*[,，]\s*(?:-?\d{1,3}\.\d{4,})(?!\d)")
+BASE64 = re.compile(r"(?:data:image/[^;]+;base64,|[A-Za-z0-9+/]{256,}={0,2})")
 _REGISTERED_SECRETS: set[str] = set()
 _SECRET_LOCK = threading.RLock()
 
@@ -37,10 +43,11 @@ def redact_text(value: str) -> str:
         registered = sorted(_REGISTERED_SECRETS, key=len, reverse=True)
     for secret in registered:
         result = result.replace(secret, "[已遮蔽]")
-    return SENSITIVE_TEXT.sub(
+    result = SENSITIVE_TEXT.sub(
         lambda match: f"{match.group(1)}[已遮蔽]" if match.group(1) else "[已遮蔽]",
         result,
     )
+    return BASE64.sub("[已遮蔽圖片資料]", GPS.sub("[已遮蔽 GPS]", PRIVATE_PATH.sub("[已遮蔽路徑]", result)))
 
 
 def hash_password(password: str) -> str:

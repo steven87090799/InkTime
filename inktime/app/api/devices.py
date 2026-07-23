@@ -451,6 +451,7 @@ def report_status():
         applied_config_version=optional_int("applied_config_version", 0, 2_147_483_647),
         details={
             "display_updated": bool(payload.get("display_updated", False)),
+            "payload_sha256_verified": bool(payload.get("payload_sha256_verified", False)),
             "release_id": str(payload.get("release_id", ""))[:100],
             "render_profile": str(payload.get("render_profile", ""))[:100],
             "reported_panel_profile": str(payload.get("panel_profile", ""))[:100],

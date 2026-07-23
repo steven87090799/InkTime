@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ job.name }}｜InkTime{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">工作詳細資訊</p><h1>{{ job.name }}</h1><p><code>{{ job.id }}</code></p></div><span class="status">{{ job.status }}</span></div>
+<div class="page-head"><div><p class="eyebrow">工作詳細資訊</p><h1>{{ job.name }}</h1><p><code>{{ job.id }}</code> · <a href="/activity?job_id={{ job.id }}">查看此工作事件</a></p></div><span class="status">{{ job.status }}</span></div>
 <section class="metrics"><article><span>總照片</span><strong>{{ job.total_items }}</strong></article><article><span>已完成</span><strong>{{ job.completed_items }}</strong></article><article><span>失敗</span><strong>{{ job.failed_items }}</strong></article><article><span>已用成本</span><strong>US$ {{ '%.4f'|format(job.spent) }}</strong></article></section>
 {% if g.user.role == 'administrator' %}<section class="panel actions"><button data-action="start">啟動</button><button data-action="pause">暫停</button><button data-action="resume">繼續</button><button data-action="cancel">取消</button><button data-action="retry-failed">重跑失敗項目</button><a href="/api/v1/jobs/{{ job.id }}/export">匯出結果</a></section>{% endif %}
 <section class="panel"><h2>照片處理狀態</h2><div class="table-wrap"><table><thead><tr><th>照片 ID</th><th>狀態</th><th>階段</th><th>嘗試</th><th>錯誤碼</th></tr></thead><tbody>{% for item in items %}<tr><td><code>{{ item.photo_id }}</code></td><td>{{ item.status }}</td><td>{{ item.stage }}</td><td>{{ item.attempts }}</td><td>{{ item.error_code or '—' }}</td></tr>{% else %}<tr><td colspan="5" class="empty">此工作沒有照片。</td></tr>{% endfor %}</tbody></table></div></section>

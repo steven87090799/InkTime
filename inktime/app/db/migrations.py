@@ -797,6 +797,15 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_device_render_releases_release ON device_render_releases(release_id)",
         ),
     ),
+    Migration(17, "加入有界系統監控事件", (
+        "CREATE TABLE IF NOT EXISTS activity_events (id INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT NOT NULL DEFAULT 'activity',source_id TEXT,severity TEXT NOT NULL,component TEXT NOT NULL,event TEXT NOT NULL,message TEXT NOT NULL,job_id TEXT,photo_id TEXT,device_id TEXT,stage TEXT,progress_done INTEGER,progress_total INTEGER,error_code TEXT,trace_id TEXT,details_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL)",
+        "CREATE INDEX IF NOT EXISTS idx_activity_events_id ON activity_events(id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_activity_events_filter ON activity_events(severity,component,id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_activity_events_severity_id ON activity_events(severity,id DESC)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_activity_events_source ON activity_events(source,source_id) WHERE source_id IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_activity_events_time ON activity_events(created_at DESC,id DESC)",
+        "CREATE TABLE IF NOT EXISTS observability_state (key TEXT PRIMARY KEY,value_json TEXT NOT NULL,updated_at TEXT NOT NULL)",
+    )),
 )
 
 

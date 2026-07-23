@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from flask import Blueprint, abort, current_app, g, render_template, request, send_file
+from inktime.app.core.security import redact
 
 from inktime.app.core.paths import safe_join
 from inktime.app.web.access import administrator_required, login_required
@@ -8,6 +9,96 @@ from inktime.app.workers.scanner import SCAN_MODES
 
 
 bp = Blueprint("operations", __name__)
+
+
+def _activity_filters():
+    return {
+        "severity": request.args.get("severity", "").upper(),
+        "component": request.args.get("component", "")[:80],
+        "job_id": request.args.get("job_id", "")[:64],
+        "photo_id": request.args.get("photo_id", "")[:64],
+        "device_id": request.args.get("device_id", "")[:64],
+        "query": request.args.get("query", "").strip()[:160],
+    }
+
+
+def _matches_activity(row: dict, filters: dict) -> bool:
+    if filters["severity"] in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"} and row["severity"] != filters["severity"]:
+        return False
+    for key in ("component", "job_id", "photo_id", "device_id"):
+        if filters[key] and str(row.get(key) or "") != filters[key]:
+            return False
+    needle = filters["query"].casefold()
+    return not needle or needle in " ".join(str(row.get(key) or "") for key in ("message", "event", "error_code")).casefold()
+
+
+def _timeline_rows(connection, filters: dict, after: int) -> list[dict]:
+    """Read each existing source in a small window; old rows are never copied wholesale."""
+    activity_after = "WHERE id>?" if after else ""
+    activity_values = (after,) if after else ()
+    rows: list[dict] = []
+    for row in connection.execute(
+        f"SELECT id,source,source_id,severity,component,event,message,job_id,photo_id,device_id,stage,progress_done,progress_total,error_code,trace_id,details_json,created_at FROM activity_events {activity_after} ORDER BY id DESC LIMIT 200", activity_values  # noqa: S608
+    ).fetchall():
+        item = dict(row)
+        item.update(
+            {
+                "source": item.get("source") or "activity_events",
+                "source_id": str(item.get("source_id") or item["id"]),
+                "occurred_at": item["created_at"],
+            }
+        )
+        rows.append(item)
+    if after:
+        return [redact(item) for item in rows if _matches_activity(item, filters)][:200]
+    for row in connection.execute("SELECT id,job_id,event,message,details_json,created_at FROM job_events ORDER BY id DESC LIMIT 200").fetchall():
+        rows.append({"id": f"job:{row['id']}", "source": "job_events", "source_id": str(row["id"]), "severity": "INFO", "component": "job", "event": row["event"], "message": row["message"], "job_id": row["job_id"], "photo_id": None, "device_id": None, "stage": None, "progress_done": None, "progress_total": None, "error_code": None, "trace_id": None, "details_json": row["details_json"], "created_at": row["created_at"], "occurred_at": row["created_at"]})
+    for row in connection.execute("SELECT id,device_id,level,event,error_code,message,details_json,created_at FROM device_events ORDER BY id DESC LIMIT 200").fetchall():
+        level = str(row["level"]).upper()
+        rows.append({"id": f"device:{row['id']}", "source": "device_events", "source_id": str(row["id"]), "severity": {"INFO": "INFO", "WARNING": "WARNING", "ERROR": "ERROR", "CRITICAL": "CRITICAL"}.get(level, "INFO"), "component": "device", "event": row["event"], "message": row["message"], "job_id": None, "photo_id": None, "device_id": row["device_id"], "stage": None, "progress_done": None, "progress_total": None, "error_code": row["error_code"], "trace_id": None, "details_json": row["details_json"], "created_at": row["created_at"], "occurred_at": row["created_at"]})
+    for row in connection.execute("SELECT id,job_id,photo_id,component,error_code,severity,message,occurrences,first_seen_at,last_seen_at,resolved_at,resolution_note FROM job_errors ORDER BY last_seen_at DESC,id DESC LIMIT 200").fetchall():
+        rows.append({"id": f"error:{row['id']}", "source": "job_errors", "source_id": str(row["id"]), "severity": str(row["severity"]).upper(), "component": row["component"], "event": "error_resolved" if row["resolved_at"] else "error", "message": row["message"], "job_id": row["job_id"], "photo_id": row["photo_id"], "device_id": None, "stage": None, "progress_done": None, "progress_total": None, "error_code": row["error_code"], "trace_id": None, "details_json": {"occurrences": row["occurrences"], "first_seen_at": row["first_seen_at"], "resolved_at": row["resolved_at"], "resolution_note": row["resolution_note"]}, "created_at": row["last_seen_at"], "occurred_at": row["last_seen_at"]})
+    unique = {(item["source"], item["source_id"]): item for item in rows}
+    ordered = sorted(unique.values(), key=lambda item: (str(item["occurred_at"]), str(item["source"]), str(item["source_id"])), reverse=True)
+    return [redact(item) for item in ordered if _matches_activity(item, filters)][:200]
+
+
+@bp.get("/activity")
+@login_required
+def activity_page():
+    return render_template("activity.html", settings=current_app.extensions["inktime_settings_repository"])
+
+
+@bp.get("/api/v1/activity")
+@login_required
+def activity_feed():
+    try:
+        after = max(0, int(request.args.get("after", 0) or 0))
+    except ValueError:
+        abort(400, description="ACTIVITY-001 cursor 格式錯誤")
+    filters = _activity_filters()
+    with current_app.extensions["inktime_database"].session() as connection:
+        events = _timeline_rows(connection, filters, after)
+        summary = connection.execute("SELECT COUNT(*) running_jobs FROM jobs WHERE status IN ('running','retrying','pausing')").fetchone()
+        queue = connection.execute("SELECT COUNT(*) FROM job_items WHERE status IN ('pending','running')").fetchone()[0]
+        issues = connection.execute("SELECT upper(severity) severity,COUNT(*) count FROM job_errors WHERE resolved_at IS NULL GROUP BY upper(severity)").fetchall()
+    levels = {row["severity"]: int(row["count"]) for row in issues}
+    status = "嚴重故障" if levels.get("CRITICAL") else "部分失敗" if levels.get("ERROR") else "有警告" if levels.get("WARNING") else "正常"
+    return {"events": events, "summary": {"status": status, "running_jobs": int(summary["running_jobs"]), "queue": int(queue), "issues": levels}}
+
+
+@bp.get("/api/v1/activity/download")
+@administrator_required
+def activity_download():
+    import json
+
+    with current_app.extensions["inktime_database"].session() as connection:
+        rows = _timeline_rows(connection, _activity_filters(), 0)
+    return current_app.response_class(
+        json.dumps(rows, ensure_ascii=False),
+        mimetype="application/json",
+        headers={"Content-Disposition": "attachment; filename=inktime-activity.json"},
+    )
 
 
 @bp.get("/diagnostics")
@@ -133,7 +224,9 @@ def run_schedule_now(key: str):
         abort(404)
     from inktime.app.workers.scheduler import SchedulerRunner
 
-    now = datetime.now(ZoneInfo(str(current_app.extensions["inktime_settings_repository"].get("general.timezone"))))
+    now = datetime.now(
+        ZoneInfo(str(current_app.extensions["inktime_settings_repository"].get("general.timezone")))
+    )
     try:
         SchedulerRunner(current_app)._enqueue_task(task, now, force=True)
     except Exception as exc:

@@ -59,6 +59,7 @@ class RenderService:
         release_coordinator: ReleaseCoordinator,
         locations: LocationResolver | None = None,
         weather: WeatherService | None = None,
+        observability=None,
     ) -> None:
         self.database = database
         self.photos = photos
@@ -69,6 +70,11 @@ class RenderService:
         self.release_coordinator = release_coordinator
         self.locations = locations
         self.weather = weather
+        self.observability = observability
+
+    def _activity(self, event: str, message: str, **fields) -> None:
+        if self.observability is not None:
+            self.observability.record("DEBUG", "renderer", event, message, **fields)
 
     def location_name(self, photo) -> str:
         if self.locations is None or not bool(self.settings.get("render.show_location", True)):
@@ -185,12 +191,15 @@ class RenderService:
         except (TypeError, ValueError, json.JSONDecodeError):
             variants = {}
         style = str(self.settings.get("analysis.copy_default_style", "natural"))
-        return str(variants.get(style) or variants.get("natural") or side_caption or "畫面把此刻收好了。").strip()
+        selected = str(variants.get(style) or variants.get("natural") or side_caption or "畫面把此刻收好了。").strip()
+        self._activity("caption_style_selected", "Renderer 已選擇 Caption 候選風格", photo_id=photo_id, style=style)
+        return selected
 
     def _draw_footer_caption(self, draw, text: str, *, x: int, top: int, bottom: int, width: int, fill: str = "black") -> None:
         font_path = self.fonts.resolve(str(self.settings.get("render.font_path", "")))
         body = ImageFont.truetype(str(font_path), 24)
         if not bool(self.settings.get("render.caption_wrap_enabled", False)):
+            self._activity("caption_footer_single_line", "Footer Caption 維持單行截斷", wrap_enabled=False)
             draw.text((x, top), self._fit_line(draw, text, body, width), font=body, fill=fill)
             return
         maximum = min(2, int(self.settings.get("render.caption_max_lines", 2)))
@@ -215,6 +224,7 @@ class RenderService:
             if remaining and lines:
                 lines[-1] = self._fit_line(draw, lines[-1] + remaining, font, width)
             if lines:
+                self._activity("caption_footer_wrapped", "Footer Caption 已套用多行換行", wrap_enabled=True, lines=len(lines), font_size=size)
                 draw.multiline_text((x, top), "\n".join(lines), font=font, fill=fill, spacing=2)
                 return
         draw.text((x, top), self._fit_line(draw, text, body, width), font=body, fill=fill)

@@ -101,6 +101,13 @@ pre { white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow
 .settings-category-links { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 16px; }
 .settings-category-links a { text-decoration: none; }
 [id^="settings-category-"] { scroll-margin-top: 130px; }
+.activity-timeline { display: grid; gap: 10px; }
+.activity-event { display: grid; grid-template-columns: minmax(82px, max-content) minmax(0, 1fr); gap: 12px; padding: 13px; border: 1px solid var(--line); border-radius: 10px; overflow-wrap: anywhere; }
+.activity-event p { margin: 6px 0; }
+.activity-event small, .activity-event pre { overflow-wrap: anywhere; white-space: pre-wrap; }
+.activity-marker { font-weight: 800; font-size: .78rem; }
+.severity-warning .activity-marker { color: #9a6a00; }.severity-error .activity-marker, .severity-critical .activity-marker { color: var(--danger); }
+@media (max-width: 620px) { .activity-event { grid-template-columns: 1fr; } .activity-toolbar .inline-form { flex-wrap: wrap; } }
 .category-link-list a { display: inline-block; margin: 3px 16px 3px 0; }
 .calibration-explainer { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 18px; }
 .calibration-explainer article { padding: 15px; border-radius: 12px; background: var(--paper); }

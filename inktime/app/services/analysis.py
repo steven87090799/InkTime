@@ -61,12 +61,18 @@ class PhotoAnalysisService:
         thumbnails: ThumbnailCache,
         budgets: BudgetService | None = None,
         settings: SettingsRepository | None = None,
+        observability=None,
     ) -> None:
         self.photos = photos
         self.usage = usage
         self.thumbnails = thumbnails
         self.budgets = budgets
         self.settings = settings or (budgets.settings if budgets else None)
+        self.observability = observability
+
+    def _activity(self, severity: str, event: str, message: str, **fields) -> None:
+        if self.observability is not None:
+            self.observability.record(severity, "analysis", event, message, **fields)
 
     def _caption_controls(self) -> dict | None:
         if self.settings is None or not bool(self.settings.get("analysis.advanced_caption_enabled", False)):
@@ -453,6 +459,7 @@ class PhotoAnalysisService:
             location_rule_version=ranked["location_rule_version"],
             prompt_version=prompt_version,
         )
+        self._activity("DEBUG", "caption_analysis_completed", "Caption 分析完成", job_id=job_id, photo_id=photo_id, stage=stage, trace_id=prompt_version)
         return ranked
 
     def _record(
@@ -511,6 +518,7 @@ class PhotoAnalysisService:
         )
         if cached is not None:
             try:
+                self._activity("DEBUG", "caption_cache_hit", "Caption AI Cache 命中", job_id=job_id, photo_id=photo_id, stage=stage, trace_id=prompt_version)
                 return validate_analysis_result(cached["result"]), str(cached["raw_json"]), 0.0, True
             except AnalysisValidationError:
                 # 損壞或舊版快取不可阻斷新分析，直接重新取得並覆寫。
@@ -521,6 +529,7 @@ class PhotoAnalysisService:
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
+        self._activity("DEBUG", "caption_cache_miss", "Caption AI Cache 未命中", job_id=job_id, photo_id=photo_id, stage=stage, trace_id=prompt_version)
         owner_id = str(uuid4())
         deadline = time.monotonic() + 120
         while not self.photos.acquire_ai_cache_reservation(cache_key, owner_id):
@@ -536,6 +545,7 @@ class PhotoAnalysisService:
                 schema_kind=schema_kind,
             )
             if cached is not None:
+                self._activity("DEBUG", "caption_cache_hit", "等待中的 Caption AI Cache 已完成", job_id=job_id, photo_id=photo_id, stage=stage, trace_id=prompt_version)
                 return validate_analysis_result(cached["result"]), str(cached["raw_json"]), 0.0, True
         try:
             result, raw, cost = self._perform_uncached_model_call(
@@ -577,14 +587,15 @@ class PhotoAnalysisService:
         started_at = datetime.now(timezone.utc).isoformat()
         started_perf = time.perf_counter()
         max_tokens = int(self.budgets.settings.get("budget.max_tokens", 8000)) if self.budgets else None
-        response = provider.analyze(
-            image_path=image,
-            model=model,
-            detail=detail,
-            stage=stage,
-            max_tokens=max_tokens,
-            caption_controls=caption_controls,
-        )
+        self._activity("DEBUG", "provider_request_started", "Caption Provider 請求開始", job_id=job_id, photo_id=photo_id, stage=stage, trace_id=prompt_version, provider=provider.name, model=model)
+        try:
+            response = provider.analyze(image_path=image, model=model, detail=detail, stage=stage, max_tokens=max_tokens, caption_controls=caption_controls)
+        except TimeoutError:
+            self._activity("WARNING", "provider_timeout", "Caption Provider 請求逾時", job_id=job_id, photo_id=photo_id, stage=stage, error_code="AI-PROVIDER-TIMEOUT")
+            raise
+        except Exception:
+            self._activity("ERROR", "provider_request_failed", "Caption Provider 請求失敗", job_id=job_id, photo_id=photo_id, stage=stage, error_code="AI-PROVIDER-UNAVAILABLE")
+            raise
         total_cost = self._record(
             provider, model, job_id, photo_id, stage, response, started_at, started_perf
         )
@@ -594,7 +605,10 @@ class PhotoAnalysisService:
         try:
             result = self._apply_caption_variant(validate_analysis_result(response.content), caption_controls)
             raw = response.content
+            if caption_controls and caption_controls["caption_variants_enabled"]:
+                self._activity("DEBUG", "caption_variants_generated", "Caption 多風格候選已由單次圖片請求產生", job_id=job_id, photo_id=photo_id, stage=stage, trace_id=prompt_version)
         except AnalysisValidationError as first_error:
+            self._activity("DEBUG", "provider_json_retry", "Caption Provider JSON 修復重試", job_id=job_id, photo_id=photo_id, stage=stage, trace_id=prompt_version)
             repair_started_at = datetime.now(timezone.utc).isoformat()
             repair_perf = time.perf_counter()
             repaired = provider.repair_json(
@@ -664,6 +678,7 @@ class PhotoAnalysisService:
         photo = self._ensure_e6_suitability(photo_id, photo, source)
         caption_controls = self._caption_controls()
         prompt_version = self._prompt_version(caption_controls)
+        self._activity("DEBUG", "caption_analysis_started", "Caption 分析開始", job_id=job_id, photo_id=photo_id, stage=strategy, trace_id=prompt_version, advanced_caption=bool(caption_controls))
         weights = ranking_weights or DEFAULT_RANKING_WEIGHTS
         inherited = self.photos.inherit_existing_analysis(photo_id, job_id) if self.settings is None else None
         if inherited is not None:
