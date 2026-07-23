@@ -18,6 +18,7 @@ from inktime.app.api import (
     notifications,
     operations,
     photos,
+    resilience,
     rendering,
     scoring,
     settings,
@@ -82,6 +83,7 @@ def configure_web_application(
         scoring.bp,
         operations.bp,
         rendering.bp,
+        resilience.bp,
     ):
         app.register_blueprint(blueprint)
     app.jinja_env.globals["csrf_token"] = csrf_token
@@ -112,12 +114,16 @@ def configure_web_application(
         "devices.latest_release",
         "devices.release_file",
         "devices.report_status",
+        "resilience.device_queue_manifest",
+        "resilience.device_queue_ack",
+        "resilience.queue_item_file",
         "static",
     }
     device_endpoints = {
         "devices.latest_release",
         "devices.release_file",
         "devices.report_status",
+        "resilience.device_queue_ack",
     }
 
     @app.before_request

@@ -17,6 +17,7 @@ from inktime.app.repositories.jobs import JobRepository
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.providers import ProviderRepository
 from inktime.app.repositories.render_candidates import RenderCandidateRepository
+from inktime.app.repositories.resilience import ResilienceRepository
 from inktime.app.repositories.schedules import ScheduledTaskRepository
 from inktime.app.repositories.scoring import ScoringProfileRepository
 from inktime.app.repositories.settings import SecretStore, SettingsRepository
@@ -175,6 +176,7 @@ def bootstrap_services(
     release_publisher = AtomicReleasePublisher(config.release_dir)
     observability_service.publisher = release_publisher
     render_candidate_repository = RenderCandidateRepository(database)
+    resilience_repository = ResilienceRepository(database)
     render_cache = BoundedRenderCache(config.cache_dir / "renderer")
     render_workload_service = RenderWorkloadService(
         config.cache_dir / "render-workloads",
@@ -222,6 +224,7 @@ def bootstrap_services(
             "inktime_location_resolver": location_resolver,
             "inktime_release_publisher": release_publisher,
             "inktime_render_candidate_repository": render_candidate_repository,
+            "inktime_resilience_repository": resilience_repository,
             "inktime_render_cache": render_cache,
             "inktime_render_workload_service": render_workload_service,
             "inktime_release_coordinator": release_coordinator,
