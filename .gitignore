@@ -44,6 +44,8 @@ logs/
 
 # Runtime data
 data/backups/
+data/cache/
+data/releases/
 
 # Others
 test/
