@@ -797,6 +797,207 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_device_render_releases_release ON device_render_releases(release_id)",
         ),
     ),
+    Migration(
+        17,
+        "加入決策追蹤、回饋、離線佇列、保留與 Canary 發布",
+        (
+            """
+            CREATE TABLE IF NOT EXISTS algorithm_versions (
+                id TEXT PRIMARY KEY, algorithm_name TEXT NOT NULL, algorithm_version TEXT NOT NULL,
+                configuration_hash TEXT NOT NULL, configuration_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                renderer_version TEXT NOT NULL, layout_strategy_version TEXT NOT NULL,
+                pairing_strategy_version TEXT NOT NULL, scoring_strategy_version TEXT NOT NULL,
+                created_at TEXT NOT NULL, UNIQUE(algorithm_name,algorithm_version,configuration_hash)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS selection_decision_traces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, trace_id TEXT NOT NULL UNIQUE,
+                device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,
+                execution_mode TEXT NOT NULL CHECK(execution_mode IN ('production','shadow','manual_preview','test')),
+                algorithm_version_id TEXT REFERENCES algorithm_versions(id) ON DELETE SET NULL,
+                render_job_id TEXT, release_id TEXT REFERENCES releases(id) ON DELETE SET NULL,
+                primary_photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,
+                secondary_photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,
+                layout_mode TEXT, fit_mode TEXT, candidate_count INTEGER NOT NULL DEFAULT 0,
+                eligible_count INTEGER NOT NULL DEFAULT 0, selected_score REAL,
+                decision_reasons_json TEXT NOT NULL DEFAULT '[]', rejection_summary_json TEXT NOT NULL DEFAULT '{}',
+                context_snapshot_json TEXT NOT NULL DEFAULT '{}', duration_ms INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_decision_traces_device_created ON selection_decision_traces(device_id,created_at DESC,id DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_decision_traces_mode_created ON selection_decision_traces(execution_mode,created_at DESC,id DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_decision_traces_release ON selection_decision_traces(release_id)",
+            """
+            CREATE TABLE IF NOT EXISTS selection_decision_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, trace_id TEXT NOT NULL REFERENCES selection_decision_traces(trace_id) ON DELETE CASCADE,
+                photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL, rank INTEGER NOT NULL,
+                base_score REAL, adjusted_score REAL, selected INTEGER NOT NULL DEFAULT 0 CHECK(selected IN (0,1)),
+                rejection_code TEXT, score_components_json TEXT NOT NULL DEFAULT '{}',
+                UNIQUE(trace_id,rank), UNIQUE(trace_id,photo_id)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_decision_candidates_trace_rank ON selection_decision_candidates(trace_id,rank)",
+            """
+            CREATE TABLE IF NOT EXISTS photo_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+                device_id TEXT REFERENCES devices(id) ON DELETE SET NULL, photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                decision_trace_id TEXT REFERENCES selection_decision_traces(trace_id) ON DELETE SET NULL,
+                feedback_type TEXT NOT NULL, value REAL NOT NULL DEFAULT 1, expires_at TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(user_id,device_id,photo_id,feedback_type)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_photo_feedback_photo_type ON photo_feedback(photo_id,feedback_type)",
+            "CREATE INDEX IF NOT EXISTS idx_photo_feedback_user_photo ON photo_feedback(user_id,photo_id)",
+            "CREATE INDEX IF NOT EXISTS idx_photo_feedback_expiry ON photo_feedback(expires_at) WHERE expires_at IS NOT NULL",
+            """
+            CREATE TABLE IF NOT EXISTS photo_pair_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+                device_id TEXT REFERENCES devices(id) ON DELETE SET NULL, photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                secondary_photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                decision_trace_id TEXT REFERENCES selection_decision_traces(trace_id) ON DELETE SET NULL,
+                feedback_type TEXT NOT NULL, value REAL NOT NULL DEFAULT 1, expires_at TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(user_id,device_id,photo_id,secondary_photo_id,feedback_type)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS layout_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+                device_id TEXT REFERENCES devices(id) ON DELETE SET NULL, photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,
+                secondary_photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,
+                decision_trace_id TEXT REFERENCES selection_decision_traces(trace_id) ON DELETE SET NULL,
+                feedback_type TEXT NOT NULL, value REAL NOT NULL DEFAULT 1, expires_at TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(user_id,device_id,decision_trace_id,feedback_type)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS caption_feedback (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+                device_id TEXT REFERENCES devices(id) ON DELETE SET NULL, photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,
+                decision_trace_id TEXT REFERENCES selection_decision_traces(trace_id) ON DELETE SET NULL,
+                feedback_type TEXT NOT NULL, value REAL NOT NULL DEFAULT 1, expires_at TEXT,
+                metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(user_id,device_id,decision_trace_id,feedback_type)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS shadow_config (
+                id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL DEFAULT 0, algorithm_version_id TEXT REFERENCES algorithm_versions(id),
+                device_ids_json TEXT NOT NULL DEFAULT '[]', sample_percent INTEGER NOT NULL DEFAULT 10 CHECK(sample_percent IN (10,25,50,100)),
+                daily_max_runs INTEGER NOT NULL DEFAULT 10 CHECK(daily_max_runs BETWEEN 1 AND 1000),
+                generate_preview INTEGER NOT NULL DEFAULT 1, preview_retention_days INTEGER NOT NULL DEFAULT 30 CHECK(preview_retention_days BETWEEN 1 AND 365),
+                updated_by TEXT REFERENCES users(id) ON DELETE SET NULL, updated_at TEXT NOT NULL
+            )
+            """,
+            "INSERT OR IGNORE INTO shadow_config(id,updated_at) VALUES (1,datetime('now'))",
+            """
+            CREATE TABLE IF NOT EXISTS device_content_queues (
+                device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE, depth INTEGER NOT NULL DEFAULT 3 CHECK(depth BETWEEN 1 AND 14),
+                queue_version INTEGER NOT NULL DEFAULT 0, current_release_id TEXT REFERENCES releases(id) ON DELETE SET NULL,
+                next_queued_release_id TEXT REFERENCES releases(id) ON DELETE SET NULL,
+                last_known_good_release_id TEXT REFERENCES releases(id) ON DELETE SET NULL,
+                emergency_fallback_release_id TEXT REFERENCES releases(id) ON DELETE SET NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS device_content_queue_items (
+                id TEXT PRIMARY KEY, device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE RESTRICT, position INTEGER NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 100, display_after TEXT, expires_at TEXT,
+                status TEXT NOT NULL CHECK(status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED','DISPLAYED','FAILED','EXPIRED','CANCELLED')),
+                downloaded_at TEXT, displayed_at TEXT, retry_count INTEGER NOT NULL DEFAULT 0, last_error_code TEXT,
+                idempotency_key TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(device_id,release_id), UNIQUE(device_id,position), UNIQUE(device_id,idempotency_key)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_queue_items_device_status_position ON device_content_queue_items(device_id,status,position)",
+            "CREATE INDEX IF NOT EXISTS idx_queue_items_release ON device_content_queue_items(release_id)",
+            "CREATE INDEX IF NOT EXISTS idx_queue_items_expiry ON device_content_queue_items(expires_at) WHERE expires_at IS NOT NULL",
+            """
+            CREATE TABLE IF NOT EXISTS device_content_queue_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, queue_item_id TEXT NOT NULL REFERENCES device_content_queue_items(id) ON DELETE CASCADE,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE, event_type TEXT NOT NULL,
+                idempotency_key TEXT, payload_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL,
+                UNIQUE(queue_item_id,event_type,idempotency_key)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_queue_events_created ON device_content_queue_events(created_at DESC,id DESC)",
+            """
+            CREATE TABLE IF NOT EXISTS data_retention_policies (
+                data_type TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1, retention_days INTEGER NOT NULL,
+                maximum_items INTEGER, maximum_bytes INTEGER, minimum_items_to_keep INTEGER NOT NULL DEFAULT 0,
+                cleanup_batch_size INTEGER NOT NULL DEFAULT 200 CHECK(cleanup_batch_size BETWEEN 1 AND 1000),
+                dry_run INTEGER NOT NULL DEFAULT 1, last_run_at TEXT, updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS data_cleanup_runs (
+                id TEXT PRIMARY KEY, started_at TEXT NOT NULL, completed_at TEXT, dry_run INTEGER NOT NULL,
+                status TEXT NOT NULL, summary_json TEXT NOT NULL DEFAULT '{}', error_code TEXT
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_cleanup_runs_created ON data_cleanup_runs(started_at DESC)",
+            """
+            CREATE TABLE IF NOT EXISTS data_cleanup_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, cleanup_run_id TEXT NOT NULL REFERENCES data_cleanup_runs(id) ON DELETE CASCADE,
+                data_type TEXT NOT NULL, reference_id TEXT NOT NULL, action TEXT NOT NULL, bytes_freed INTEGER NOT NULL DEFAULT 0,
+                result TEXT NOT NULL, created_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS rollout_campaigns (
+                id TEXT PRIMARY KEY, release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE RESTRICT,
+                name TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('DRAFT','VALIDATING','CANARY','OBSERVING','EXPANDING','PAUSED','COMPLETED','ROLLING_BACK','ROLLED_BACK','FAILED','CANCELLED')),
+                previous_release_id TEXT REFERENCES releases(id) ON DELETE SET NULL, config_json TEXT NOT NULL DEFAULT '{}',
+                created_by TEXT REFERENCES users(id) ON DELETE SET NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, rollback_reason TEXT
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS rollout_stages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, rollout_id TEXT NOT NULL REFERENCES rollout_campaigns(id) ON DELETE CASCADE,
+                stage_number INTEGER NOT NULL, target_percent INTEGER NOT NULL CHECK(target_percent BETWEEN 1 AND 100),
+                minimum_observation_minutes INTEGER NOT NULL DEFAULT 30, minimum_successful_devices INTEGER NOT NULL DEFAULT 1,
+                maximum_failure_rate REAL NOT NULL DEFAULT 0.1, maximum_timeout_rate REAL NOT NULL DEFAULT 0.1,
+                minimum_ack_rate REAL NOT NULL DEFAULT 0.9, manual_approval_required INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending', started_at TEXT, completed_at TEXT, UNIQUE(rollout_id,stage_number)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS rollout_targets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, rollout_id TEXT NOT NULL REFERENCES rollout_campaigns(id) ON DELETE CASCADE,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE, status TEXT NOT NULL DEFAULT 'pending',
+                queue_item_id TEXT REFERENCES device_content_queue_items(id) ON DELETE SET NULL, last_error_code TEXT, updated_at TEXT NOT NULL,
+                UNIQUE(rollout_id,device_id)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_rollout_targets_status ON rollout_targets(rollout_id,status)",
+            """
+            CREATE TABLE IF NOT EXISTS rollout_health_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, rollout_id TEXT NOT NULL REFERENCES rollout_campaigns(id) ON DELETE CASCADE,
+                device_id TEXT REFERENCES devices(id) ON DELETE SET NULL, event_type TEXT NOT NULL, severity TEXT NOT NULL,
+                error_code TEXT, details_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_rollout_health_device_created ON rollout_health_events(rollout_id,device_id,created_at DESC)",
+            """
+            CREATE TABLE IF NOT EXISTS rollout_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, rollout_id TEXT NOT NULL REFERENCES rollout_campaigns(id) ON DELETE CASCADE,
+                actor_id TEXT REFERENCES users(id) ON DELETE SET NULL, action TEXT NOT NULL, reason TEXT, details_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
+            )
+            """,
+            "INSERT OR IGNORE INTO data_retention_policies(data_type,retention_days,minimum_items_to_keep,updated_at) VALUES ('decision_trace',180,0,datetime('now'))",
+            "INSERT OR IGNORE INTO data_retention_policies(data_type,retention_days,minimum_items_to_keep,updated_at) VALUES ('decision_candidate',60,0,datetime('now'))",
+            "INSERT OR IGNORE INTO data_retention_policies(data_type,retention_days,minimum_items_to_keep,updated_at) VALUES ('shadow_preview',30,0,datetime('now'))",
+            "INSERT OR IGNORE INTO data_retention_policies(data_type,retention_days,minimum_items_to_keep,updated_at) VALUES ('device_event',180,0,datetime('now'))",
+            "INSERT OR IGNORE INTO data_retention_policies(data_type,retention_days,minimum_items_to_keep,updated_at) VALUES ('queue_event',90,0,datetime('now'))",
+            "INSERT OR IGNORE INTO data_retention_policies(data_type,retention_days,minimum_items_to_keep,updated_at) VALUES ('job_log',30,0,datetime('now'))",
+        ),
+    ),
 )
 
 
