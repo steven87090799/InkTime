@@ -306,7 +306,10 @@ class ObservabilityService:
             c.execute("DELETE FROM job_errors WHERE resolved_at IS NOT NULL AND last_seen_at<?", (cutoff,))
             count = int(c.execute("SELECT COUNT(*) FROM activity_events").fetchone()[0])
             if count > max_rows:
-                c.execute("DELETE FROM activity_events WHERE id IN (SELECT id FROM activity_events WHERE severity IN ('DEBUG','INFO') ORDER BY id LIMIT ?)", (min(self._BATCH_SIZE, count - max_rows),))
+                budget = min(self._BATCH_SIZE, count - max_rows)
+                deleted = c.execute("DELETE FROM activity_events WHERE id IN (SELECT id FROM activity_events WHERE severity='DEBUG' ORDER BY id LIMIT ?)", (budget,)).rowcount
+                if deleted < budget:
+                    c.execute("DELETE FROM activity_events WHERE id IN (SELECT id FROM activity_events WHERE severity='INFO' ORDER BY id LIMIT ?)", (budget - deleted,))
                 remaining = int(c.execute("SELECT COUNT(*) FROM activity_events").fetchone()[0])
                 capacity_blocked = remaining > max_rows
             c.execute("INSERT INTO observability_state(key,value_json,updated_at) VALUES ('cleanup','{}',?) ON CONFLICT(key) DO UPDATE SET updated_at=excluded.updated_at", (now.isoformat(),))
