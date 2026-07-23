@@ -780,6 +780,23 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_device_auth_failures_ip_time ON device_auth_failures(ip_hash,attempted_at)",
         ),
     ),
+    Migration(
+        16,
+        "加入每台裝置的智慧相框版型與發布指派",
+        (
+            "ALTER TABLE devices ADD COLUMN frame_orientation TEXT CHECK(frame_orientation IN ('portrait','landscape') OR frame_orientation IS NULL)",
+            "ALTER TABLE devices ADD COLUMN layout_mode TEXT CHECK(layout_mode IN ('adaptive_memory','full','postcard','photo_info','photo_pair','calendar','weather_sensor') OR layout_mode IS NULL)",
+            "ALTER TABLE devices ADD COLUMN fit_mode TEXT CHECK(fit_mode IN ('contain','cover') OR fit_mode IS NULL)",
+            """
+            CREATE TABLE IF NOT EXISTS device_render_releases (
+                device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+                release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE RESTRICT,
+                assigned_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_device_render_releases_release ON device_render_releases(release_id)",
+        ),
+    ),
 )
 
 
