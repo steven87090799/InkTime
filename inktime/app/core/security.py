@@ -12,7 +12,10 @@ from typing import Any
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
-SENSITIVE_KEY = re.compile(r"^(?:api[_-]?key|token|password|secret|authorization|cookie|session|bearer|device[_-]?credential)$", re.IGNORECASE)
+SENSITIVE_KEY = re.compile(
+    r"^(?:api[_-]?key|token|password|secret|authorization|cookie|session|bearer|device[_-]?(?:credential|token))$",
+    re.IGNORECASE,
+)
 SENSITIVE_TEXT = re.compile(
     r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]{8,}|\b(?:sk-|itd_)[A-Za-z0-9._~-]{8,}|\b(?:api[_-]?key|token|authorization)=([^\s&]+)"
 )
