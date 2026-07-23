@@ -243,17 +243,31 @@ class RenderService:
         draw.rectangle((0, photo_height, frame_width, frame_height), fill="white")
         draw.line((20, photo_height + 4, frame_width - 20, photo_height + 4), fill="black", width=2)
         text = caption or "這一天留下了兩個值得記住的片段。"
-        draw.text((22, photo_height + 12), self._fit_line(draw, text, fonts["body"], frame_width - 44), font=fonts["body"], fill="black")
+        draw.text(
+            (22, photo_height + 12),
+            self._fit_line(draw, text, fonts["body"], frame_width - 44),
+            font=fonts["body"],
+            fill="black",
+        )
         primary_date = self._captured_date(primary["captured_at"])
         second_date = self._captured_date(secondary["captured_at"]) if secondary is not None else None
-        dates = [self._date_label(primary_date)] if bool(self.settings.get("render.show_capture_date", True)) else []
+        dates = (
+            [self._date_label(primary_date)]
+            if bool(self.settings.get("render.show_capture_date", True))
+            else []
+        )
         if second_date and second_date != primary_date:
             dates.append(self._date_label(second_date))
         first_location = self.location_name(primary)
         second_location = self.location_name(secondary) if secondary is not None else ""
         location = first_location if first_location == second_location else ""
         meta = "・".join(dates + ([location] if location else []))
-        draw.text((22, frame_height - 32), self._fit_line(draw, meta, fonts["meta"], frame_width - 44), font=fonts["meta"], fill="black")
+        draw.text(
+            (22, frame_height - 32),
+            self._fit_line(draw, meta, fonts["meta"], frame_width - 44),
+            font=fonts["meta"],
+            fill="black",
+        )
 
     @staticmethod
     def _physical_frame(canvas: Image.Image, orientation: str) -> Image.Image:
@@ -275,9 +289,7 @@ class RenderService:
             if needs_crop:
                 self.photos.update_crop_analysis(str(photo["id"]), analyze_crop_focus(sample))
             if needs_e6:
-                self.photos.update_e6_suitability(
-                    str(photo["id"]), evaluate_e6_suitability(sample)
-                )
+                self.photos.update_e6_suitability(str(photo["id"]), evaluate_e6_suitability(sample))
         return self.photos.get_with_path(str(photo["id"])) or photo
 
     def ensure_photo_features(self, photo_id: str):
@@ -362,19 +374,24 @@ class RenderService:
         show_date = bool(self.settings.get("render.show_capture_date", True))
         date_label = self._date_label(captured) if show_date else ""
         device_config = device_config or {}
-        layout_key = layout or str(device_config.get("layout_mode") or self.settings.get("render.layout", "photo_info"))
+        layout_key = layout or str(
+            device_config.get("layout_mode") or self.settings.get("render.layout", "photo_info")
+        )
         if layout_key not in LAYOUTS:
             raise ValueError("RENDER-005 不支援的相框版型")
         adaptive_requested = layout_key == "adaptive_memory"
-        orientation_key = orientation or str(device_config.get("frame_orientation") or self.settings.get("render.frame_orientation", "portrait"))
+        orientation_key = orientation or str(
+            device_config.get("frame_orientation")
+            or self.settings.get("render.frame_orientation", "portrait")
+        )
         if orientation_key not in FRAME_ORIENTATIONS:
             raise ValueError("RENDER-005 不支援的相框方向")
-        fit_mode_key = fit_mode or str(device_config.get("fit_mode") or self.settings.get("render.fit_mode", "contain"))
+        fit_mode_key = fit_mode or str(
+            device_config.get("fit_mode") or self.settings.get("render.fit_mode", "contain")
+        )
         if fit_mode_key not in FIT_MODES:
             raise ValueError("RENDER-005 不支援的照片縮放方式")
-        effective_orientation = (
-            "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
-        )
+        effective_orientation = "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
         frame_width, frame_height = (
             (height, width) if effective_orientation == "landscape" else (width, height)
         )
@@ -394,13 +411,18 @@ class RenderService:
                     primary = dict(photo)
                     primary.update({"id": photo_id, "city": "", "types": []})
                     second_row = select_pair_candidate(
-                        primary, self._adaptive_pair_candidates(primary), frame_orientation=effective_orientation
+                        primary,
+                        self._adaptive_pair_candidates(primary),
+                        frame_orientation=effective_orientation,
                     )
                     if second_row is None:
                         layout_key = "photo_info"
                         fit_mode_key = "contain"
                     else:
-                        text_parts = [caption or "這一天留下了兩個值得記住的片段。", self.location_name(photo)]
+                        text_parts = [
+                            caption or "這一天留下了兩個值得記住的片段。",
+                            self.location_name(photo),
+                        ]
                         fonts = self._fonts("\n".join(part for part in text_parts if part))
                         canvas = Image.new("RGB", (frame_width, frame_height), "white")
                         gutter = 8
@@ -414,10 +436,19 @@ class RenderService:
                         second_path = safe_join(Path(second_row["root_path"]), second_row["relative_path"])
                         with Image.open(second_path) as second_opened:
                             second_source = ImageOps.exif_transpose(second_opened).convert("RGB")
-                            canvas.paste(self._fit_photo(second_source, second_row, slot_size, None, None, "contain"), second_position)
+                            canvas.paste(
+                                self._fit_photo(second_source, second_row, slot_size, None, None, "contain"),
+                                second_position,
+                            )
                         self._adaptive_footer(
-                            ImageDraw.Draw(canvas), fonts, frame_width=frame_width, frame_height=frame_height,
-                            footer_height=footer_height, primary=photo, secondary=second_row, caption=caption,
+                            ImageDraw.Draw(canvas),
+                            fonts,
+                            frame_width=frame_width,
+                            frame_height=frame_height,
+                            footer_height=footer_height,
+                            primary=photo,
+                            secondary=second_row,
+                            caption=caption,
                         )
                         return finish(canvas)
             if layout_key == "full":
@@ -436,13 +467,21 @@ class RenderService:
             weather = self.weather.current() if self.weather and layout_key == "weather_sensor" else None
             indoor = self._latest_indoor() if layout_key == "weather_sensor" else None
             weather_location = str(self.settings.get("render.weather_location_name", "所在地"))
-            text_parts = [caption, location, date_label, f"{today.month}月{today.day}日", "星期一二三四五六日"]
+            text_parts = [
+                caption,
+                location,
+                date_label,
+                f"{today.month}月{today.day}日",
+                "星期一二三四五六日",
+            ]
             if adaptive_requested:
                 text_parts.extend(["這一天留下了一個值得記住的片段。", "這一天留下了兩個值得記住的片段。"])
             if layout_key == "photo_pair":
                 text_parts.append("請選擇第二張照片")
             if weather:
-                text_parts.extend([str(weather.get("condition", "")), weather_location, "室外室內最高最低溫溼度"])
+                text_parts.extend(
+                    [str(weather.get("condition", "")), weather_location, "室外室內最高最低溫溼度"]
+                )
             if indoor:
                 text_parts.extend([str(indoor.get("device_name", "")), "室內溫度濕度"])
             fonts = self._fonts("\n".join(part for part in text_parts if part))
@@ -458,15 +497,11 @@ class RenderService:
                 else:
                     first_size = (frame_width, (frame_height - gutter) // 2)
                     second_position = (0, first_size[1] + gutter)
-                first = self._fit_photo(
-                    source, photo, first_size, crop_x, crop_y, fit_mode_key
-                )
+                first = self._fit_photo(source, photo, first_size, crop_x, crop_y, fit_mode_key)
                 canvas.paste(first, (0, 0))
                 if secondary_photo_id:
                     second_photo = self.ensure_photo_features(secondary_photo_id)
-                    second_path = safe_join(
-                        Path(second_photo["root_path"]), second_photo["relative_path"]
-                    )
+                    second_path = safe_join(Path(second_photo["root_path"]), second_photo["relative_path"])
                     with Image.open(second_path) as second_opened:
                         second_source = ImageOps.exif_transpose(second_opened).convert("RGB")
                         second = self._fit_photo(
@@ -495,9 +530,7 @@ class RenderService:
             if layout_key == "postcard":
                 footer_height = 122 if effective_orientation == "landscape" else 142
                 photo_size = (frame_width - 48, frame_height - footer_height - 24)
-                fitted = self._fit_photo(
-                    source, photo, photo_size, crop_x, crop_y, fit_mode_key
-                )
+                fitted = self._fit_photo(source, photo, photo_size, crop_x, crop_y, fit_mode_key)
                 canvas.paste(fitted, (24, 24))
                 draw.rectangle(
                     (23, 23, frame_width - 24, frame_height - footer_height + 1),
@@ -538,9 +571,7 @@ class RenderService:
                     fill="black",
                     width=2,
                 )
-                footer_caption = caption or (
-                    "這一天留下了一個值得記住的片段。" if adaptive_requested else ""
-                )
+                footer_caption = caption or ("這一天留下了一個值得記住的片段。" if adaptive_requested else "")
                 if footer_caption:
                     draw.text(
                         (22, photo_height + 12),
@@ -561,17 +592,18 @@ class RenderService:
                 draw.text((24, 16), f"{today.year}年 {today.month}月", font=fonts["large"], fill="#17221c")
                 draw.text((372, 25), f"{today.day}日", font=fonts["body"], fill="#d13b2f")
                 self._calendar(canvas, fonts, today)
-                fitted = self._fit_photo(
-                    source, photo, (440, 420), crop_x, crop_y, fit_mode_key
-                )
+                fitted = self._fit_photo(source, photo, (440, 420), crop_x, crop_y, fit_mode_key)
                 canvas.paste(fitted, (20, 312))
                 meta = "・".join(value for value in (caption, date_label, location) if value)
-                draw.text((22, 754), self._fit_line(draw, meta, fonts["small"], width - 44), font=fonts["small"], fill="#354039")
+                draw.text(
+                    (22, 754),
+                    self._fit_line(draw, meta, fonts["small"], width - 44),
+                    font=fonts["small"],
+                    fill="#354039",
+                )
                 return finish(canvas)
 
-            fitted = self._fit_photo(
-                source, photo, (width, 505), crop_x, crop_y, fit_mode_key
-            )
+            fitted = self._fit_photo(source, photo, (width, 505), crop_x, crop_y, fit_mode_key)
             canvas.paste(fitted, (0, 0))
             draw.line((20, 520, width - 20, 520), fill="#c9c1b2", width=2)
             if weather and weather.get("available"):
@@ -583,7 +615,12 @@ class RenderService:
             else:
                 outside = "天氣功能尚未啟用"
                 range_text = "請至 Web 設定天氣位置"
-            draw.text((22, 542), self._fit_line(draw, outside, fonts["large"], width - 44), font=fonts["large"], fill="#17221c")
+            draw.text(
+                (22, 542),
+                self._fit_line(draw, outside, fonts["large"], width - 44),
+                font=fonts["large"],
+                fill="#17221c",
+            )
             draw.text((24, 596), range_text, font=fonts["small"], fill="#4e5a52")
             if indoor:
                 temperature = indoor.get("temperature_c")
@@ -596,9 +633,19 @@ class RenderService:
                 indoor_text = f"室內｜{indoor['device_name']}  " + "  ".join(values)
             else:
                 indoor_text = "室內｜尚無 PhotoPainter 溫溼度回報"
-            draw.text((24, 640), self._fit_line(draw, indoor_text, fonts["body"], width - 48), font=fonts["body"], fill="#1f4f70")
+            draw.text(
+                (24, 640),
+                self._fit_line(draw, indoor_text, fonts["body"], width - 48),
+                font=fonts["body"],
+                fill="#1f4f70",
+            )
             meta = "・".join(value for value in (date_label, location, caption) if value)
-            draw.text((24, 746), self._fit_line(draw, meta, fonts["small"], width - 48), font=fonts["small"], fill="#4e5a52")
+            draw.text(
+                (24, 746),
+                self._fit_line(draw, meta, fonts["small"], width - 48),
+                font=fonts["small"],
+                fill="#4e5a52",
+            )
             return finish(canvas)
 
     def publish(
@@ -653,18 +700,31 @@ class RenderService:
                     dither=str(self.settings.get("render.dither", "floyd_steinberg")),
                     color_distance=str(self.settings.get("render.color_distance", "oklab")),
                     dither_strength=float(self.settings.get("render.dither_strength", 1.0)),
-                    orientation=str(device.get("frame_orientation") or self.settings.get("render.frame_orientation", "portrait")),
+                    orientation=str(
+                        device.get("frame_orientation")
+                        or self.settings.get("render.frame_orientation", "portrait")
+                    ),
                     activate=False,
                     metadata={"device_id": device_id, "layout_mode": device.get("layout_mode") or layout_key},
                 )
                 manifests.append(manifest)
                 assignments[device_id] = str(manifest["release_id"])
             published = self.release_coordinator.publish(
-                manifests, created_by=created_by, photo_ids=selected[:quantity], history=history,
+                manifests,
+                created_by=created_by,
+                photo_ids=selected[:quantity],
+                history=history,
                 device_assignments=assignments,
             )
             result = {"releases": published, "device_releases": assignments}
-            self._record_production_trace(selected, result, layout_key, started_at, device_ids=unique_device_ids, candidate_details=candidate_details)
+            self._record_production_trace(
+                selected,
+                result,
+                layout_key,
+                started_at,
+                device_ids=unique_device_ids,
+                candidate_details=candidate_details,
+            )
             return result
         if layout_key == "photo_pair":
             images = []
@@ -672,9 +732,7 @@ class RenderService:
                 primary_id = selected[index]
                 secondary_id = selected[index + 1] if index + 1 < len(selected) else None
                 if secondary_id is None:
-                    images.append(
-                        (primary_id, self.render_photo(primary_id, layout="photo_info"))
-                    )
+                    images.append((primary_id, self.render_photo(primary_id, layout="photo_info")))
                 else:
                     images.append(
                         (
@@ -695,14 +753,8 @@ class RenderService:
         dither = str(self.settings.get("render.dither", "floyd_steinberg"))
         color_distance = str(self.settings.get("render.color_distance", "oklab"))
         dither_strength = float(self.settings.get("render.dither_strength", 1.0))
-        requested_orientation = str(
-            self.settings.get("render.frame_orientation", "portrait")
-        )
-        release_orientation = (
-            "portrait"
-            if layout_key in PORTRAIT_ONLY_LAYOUTS
-            else requested_orientation
-        )
+        requested_orientation = str(self.settings.get("render.frame_orientation", "portrait"))
+        release_orientation = "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else requested_orientation
         manifests = []
         for profile_key in selected_profiles:
             manifest = self.publisher.publish(
@@ -722,24 +774,102 @@ class RenderService:
             history=history,
         )
         result = published[0] if len(published) == 1 else {"releases": published}
-        self._record_production_trace(selected, result, layout_key, started_at, candidate_details=candidate_details)
+        self._record_production_trace(
+            selected, result, layout_key, started_at, candidate_details=candidate_details
+        )
         return result
 
-    def _record_production_trace(self, selected: list[str], result: dict, layout: str, started_at: datetime, *, device_ids: list[str] | None = None, candidate_details: list[dict[str, Any]] | None = None) -> None:
+    def _record_production_trace(
+        self,
+        selected: list[str],
+        result: dict,
+        layout: str,
+        started_at: datetime,
+        *,
+        device_ids: list[str] | None = None,
+        candidate_details: list[dict[str, Any]] | None = None,
+    ) -> None:
         """追蹤失敗不能回滾既有正式 Release；只保存有界且不含檔案路徑的摘要。"""
         if self.resilience is None or not selected:
             return
         try:
-            configuration = {key: self.settings.get(key) for key in ("render.layout", "render.fit_mode", "render.selection_mode", "render.profile", "render.dither")}
-            version = self.resilience.algorithm_version(name="render-selection", version="selection-v1", configuration=configuration, renderer="renderer-v1", layout="adaptive-layout-v1", pairing="pairing-v1", scoring="scoring-v1")
-            release_id = str(result.get("release_id") or next(iter(result.get("device_releases", {}).values()), "")) or None
+            configuration = {
+                key: self.settings.get(key)
+                for key in (
+                    "render.layout",
+                    "render.fit_mode",
+                    "render.selection_mode",
+                    "render.profile",
+                    "render.dither",
+                )
+            }
+            version = self.resilience.algorithm_version(
+                name="render-selection",
+                version="selection-v1",
+                configuration=configuration,
+                renderer="renderer-v1",
+                layout="adaptive-layout-v1",
+                pairing="pairing-v1",
+                scoring="scoring-v1",
+            )
+            release_id = (
+                str(result.get("release_id") or next(iter(result.get("device_releases", {}).values()), ""))
+                or None
+            )
             candidates = []
-            for row in (candidate_details or []):
+            for row in candidate_details or []:
                 score = float(row.get("final_score") or row.get("combined_score") or 0)
-                candidates.append({"photo_id": str(row["id"]), "selected": str(row["id"]) in selected, "base_score": float(row.get("ranking_score") or 0), "adjusted_score": score, "score_components": {"model_score": float(row.get("ranking_score") or 0), "quality_score": float(row.get("local_candidate_score") or 0), "user_preference_adjustment": float(row.get("user_preference_adjustment") or 0), "novelty_adjustment": 0.0, "diversity_adjustment": 0.0, "contextual_adjustment": 0.0, "final_score": score}})
+                candidates.append(
+                    {
+                        "photo_id": str(row["id"]),
+                        "selected": str(row["id"]) in selected,
+                        "base_score": float(row.get("ranking_score") or 0),
+                        "adjusted_score": score,
+                        "score_components": {
+                            "model_score": float(row.get("ranking_score") or 0),
+                            "quality_score": float(row.get("local_candidate_score") or 0),
+                            "user_preference_adjustment": float(row.get("user_preference_adjustment") or 0),
+                            "novelty_adjustment": 0.0,
+                            "diversity_adjustment": 0.0,
+                            "contextual_adjustment": 0.0,
+                            "final_score": score,
+                        },
+                    }
+                )
             if not candidates:
-                candidates = [{"photo_id": photo_id, "selected": True, "adjusted_score": 0.0, "score_components": {"model_score": 0.0, "quality_score": 0.0, "user_preference_adjustment": 0.0, "novelty_adjustment": 0.0, "diversity_adjustment": 0.0, "contextual_adjustment": 0.0, "final_score": 0.0}} for photo_id in selected[:50]]
-            trace_id = self.resilience.create_trace(execution_mode="production", algorithm_version_id=version, primary_photo_id=selected[0], secondary_photo_id=selected[1] if layout == "photo_pair" and len(selected) > 1 else None, device_id=(device_ids or [None])[0], layout_mode=layout, fit_mode=str(self.settings.get("render.fit_mode", "contain")), candidates=candidates, candidate_count=len(candidate_details or selected), eligible_count=len(candidate_details or selected), reasons=["SELECTED_BY_RENDER_PIPELINE"], context={"source": "render_service"}, duration_ms=int((datetime.now(timezone.utc)-started_at).total_seconds()*1000), release_id=release_id)
+                candidates = [
+                    {
+                        "photo_id": photo_id,
+                        "selected": True,
+                        "adjusted_score": 0.0,
+                        "score_components": {
+                            "model_score": 0.0,
+                            "quality_score": 0.0,
+                            "user_preference_adjustment": 0.0,
+                            "novelty_adjustment": 0.0,
+                            "diversity_adjustment": 0.0,
+                            "contextual_adjustment": 0.0,
+                            "final_score": 0.0,
+                        },
+                    }
+                    for photo_id in selected[:50]
+                ]
+            trace_id = self.resilience.create_trace(
+                execution_mode="production",
+                algorithm_version_id=version,
+                primary_photo_id=selected[0],
+                secondary_photo_id=selected[1] if layout == "photo_pair" and len(selected) > 1 else None,
+                device_id=device_ids[0] if device_ids else None,
+                layout_mode=layout,
+                fit_mode=str(self.settings.get("render.fit_mode", "contain")),
+                candidates=candidates,
+                candidate_count=len(candidate_details or selected),
+                eligible_count=len(candidate_details or selected),
+                reasons=["SELECTED_BY_RENDER_PIPELINE"],
+                context={"source": "render_service"},
+                duration_ms=int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000),
+                release_id=release_id,
+            )
             result["selection_trace_id"] = trace_id
         except Exception:
             return
@@ -754,25 +884,80 @@ class RenderService:
         with self.database.session() as connection:
             if config["device_ids"]:
                 placeholders = ",".join("?" for _ in config["device_ids"])
-                devices = connection.execute(f"SELECT id FROM devices WHERE enabled=1 AND id IN ({placeholders})", config["device_ids"]).fetchall()  # noqa: S608
+                devices = connection.execute(
+                    f"SELECT id FROM devices WHERE enabled=1 AND id IN ({placeholders})", config["device_ids"]
+                ).fetchall()  # noqa: S608
             else:
                 devices = connection.execute("SELECT id FROM devices WHERE enabled=1 ORDER BY id").fetchall()
-            today_count = int(connection.execute("SELECT COUNT(*) FROM selection_decision_traces WHERE execution_mode='shadow' AND substr(created_at,1,10)=?", (self._today().isoformat(),)).fetchone()[0])
+            today_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM selection_decision_traces WHERE execution_mode='shadow' AND substr(created_at,1,10)=?",
+                    (self._today().isoformat(),),
+                ).fetchone()[0]
+            )
         created = skipped = 0
         for device in devices:
             if today_count + created >= int(config["daily_max_runs"]):
-                skipped += 1; continue
+                skipped += 1
+                continue
             device_id = str(device["id"])
-            bucket = int(sha256(f"{self._today().isoformat()}:{device_id}:{config.get('algorithm_version_id') or 'default'}".encode()).hexdigest()[:8], 16) % 100
+            bucket = (
+                int(
+                    sha256(
+                        f"{self._today().isoformat()}:{device_id}:{config.get('algorithm_version_id') or 'default'}".encode()
+                    ).hexdigest()[:8],
+                    16,
+                )
+                % 100
+            )
             if bucket >= int(config["sample_percent"]):
-                skipped += 1; continue
+                skipped += 1
+                continue
             candidates = self.select_candidates_details(min(10, int(self.settings.get("render.quantity", 5))))
             if not candidates:
-                skipped += 1; continue
+                skipped += 1
+                continue
             primary = str(candidates[0]["id"])
-            packed = [{"photo_id": str(row["id"]), "selected": index == 0, "base_score": row.get("ranking_score"), "adjusted_score": row.get("final_score", row.get("combined_score")), "score_components": {"model_score": float(row.get("ranking_score") or 0), "quality_score": float(row.get("local_candidate_score") or 0), "user_preference_adjustment": float(row.get("user_preference_adjustment") or 0), "novelty_adjustment": 0.0, "diversity_adjustment": 0.0, "contextual_adjustment": 0.0, "final_score": float(row.get("final_score", row.get("combined_score", 0)) or 0)}} for index,row in enumerate(candidates)]
-            version = config.get("algorithm_version_id") or self.resilience.algorithm_version(name="shadow-selection", version="shadow-v1", configuration={"selection_mode": self.settings.get("render.selection_mode")}, renderer="renderer-v1", layout="adaptive-layout-v1", pairing="pairing-v1", scoring="scoring-v1")
-            self.resilience.create_trace(execution_mode="shadow", algorithm_version_id=str(version), primary_photo_id=primary, device_id=device_id, layout_mode=str(self.settings.get("render.layout", "photo_info")), fit_mode=str(self.settings.get("render.fit_mode", "contain")), candidates=packed, candidate_count=len(candidates), eligible_count=len(candidates), reasons=["SHADOW_SAMPLED_DETERMINISTICALLY"], context={"preview_requested": bool(config["generate_preview"]), "sampling_bucket": bucket})
+            packed = [
+                {
+                    "photo_id": str(row["id"]),
+                    "selected": index == 0,
+                    "base_score": row.get("ranking_score"),
+                    "adjusted_score": row.get("final_score", row.get("combined_score")),
+                    "score_components": {
+                        "model_score": float(row.get("ranking_score") or 0),
+                        "quality_score": float(row.get("local_candidate_score") or 0),
+                        "user_preference_adjustment": float(row.get("user_preference_adjustment") or 0),
+                        "novelty_adjustment": 0.0,
+                        "diversity_adjustment": 0.0,
+                        "contextual_adjustment": 0.0,
+                        "final_score": float(row.get("final_score", row.get("combined_score", 0)) or 0),
+                    },
+                }
+                for index, row in enumerate(candidates)
+            ]
+            version = config.get("algorithm_version_id") or self.resilience.algorithm_version(
+                name="shadow-selection",
+                version="shadow-v1",
+                configuration={"selection_mode": self.settings.get("render.selection_mode")},
+                renderer="renderer-v1",
+                layout="adaptive-layout-v1",
+                pairing="pairing-v1",
+                scoring="scoring-v1",
+            )
+            self.resilience.create_trace(
+                execution_mode="shadow",
+                algorithm_version_id=str(version),
+                primary_photo_id=primary,
+                device_id=device_id,
+                layout_mode=str(self.settings.get("render.layout", "photo_info")),
+                fit_mode=str(self.settings.get("render.fit_mode", "contain")),
+                candidates=packed,
+                candidate_count=len(candidates),
+                eligible_count=len(candidates),
+                reasons=["SHADOW_SAMPLED_DETERMINISTICALLY"],
+                context={"preview_requested": bool(config["generate_preview"]), "sampling_bucket": bucket},
+            )
             created += 1
         return {"created": created, "skipped": skipped}
 
@@ -898,7 +1083,9 @@ class RenderService:
         target = target_date or self._today()
         mode = str(self.settings.get("render.selection_mode", "history_today"))
         if mode == "top_ranked":
-            rows = self._candidate_query(target=target, month_days=None, older_only=False, limit=500, candidate_years=candidate_years)
+            rows = self._candidate_query(
+                target=target, month_days=None, older_only=False, limit=500, candidate_years=candidate_years
+            )
             for row in rows:
                 row["match_type"] = "top_ranked"
                 row["day_distance"] = None
@@ -919,7 +1106,11 @@ class RenderService:
 
         month_day = target.strftime("%m-%d")
         exact = self._candidate_query(
-            target=target, month_days=[month_day], older_only=True, limit=max(100, limit * 10), candidate_years=candidate_years
+            target=target,
+            month_days=[month_day],
+            older_only=True,
+            limit=max(100, limit * 10),
+            candidate_years=candidate_years,
         )
         append(exact, "exact_day")
         fallback = str(self.settings.get("render.history_today_fallback", "nearby_then_ranked"))
@@ -937,10 +1128,17 @@ class RenderService:
                 limit=max(300, limit * 30),
                 candidate_years=candidate_years,
             )
-            nearby.sort(key=lambda row: (distances.get(str(row["captured_at"])[5:10], 999), -float(row["combined_score"])))
+            nearby.sort(
+                key=lambda row: (
+                    distances.get(str(row["captured_at"])[5:10], 999),
+                    -float(row["combined_score"]),
+                )
+            )
             append(nearby, "nearby_day", distances)
         if len(selected) < limit and fallback in {"nearby_then_ranked", "ranked"}:
-            ranked = self._candidate_query(target=target, month_days=None, older_only=False, limit=500, candidate_years=candidate_years)
+            ranked = self._candidate_query(
+                target=target, month_days=None, older_only=False, limit=500, candidate_years=candidate_years
+            )
             append(ranked, "ranked_fallback")
         return selected
 
@@ -955,7 +1153,9 @@ class RenderService:
             "landscape": "風景",
         }.get(value)
 
-    def _history_where(self, filters: dict[str, Any], *, month_day: str | None = None) -> tuple[str, list[Any]]:
+    def _history_where(
+        self, filters: dict[str, Any], *, month_day: str | None = None
+    ) -> tuple[str, list[Any]]:
         clauses = [
             RenderCandidateRepository.SQL_PREDICATE,
             "p.captured_at IS NOT NULL",
@@ -976,14 +1176,19 @@ class RenderService:
         if type_name:
             clauses.append("EXISTS (SELECT 1 FROM json_each(COALESCE(a.types_json,'[]')) WHERE value=?)")
             params.append(type_name)
-        for key, json_path in (("city", "$.values.city_candidate"), ("country", "$.values.country_candidate")):
+        for key, json_path in (
+            ("city", "$.values.city_candidate"),
+            ("country", "$.values.country_candidate"),
+        ):
             value = str(filters.get(key, "")).strip()
             if value:
                 clauses.append("lower(COALESCE(json_extract(a.semantic_json, ?),''))=lower(?)")
                 params.extend((json_path, value))
         recent_days = filters.get("exclude_recent_days")
         if isinstance(recent_days, int) and recent_days > 0:
-            clauses.append("NOT EXISTS (SELECT 1 FROM display_history dh WHERE dh.photo_id=p.id AND dh.displayed_at>=datetime('now', ?))")
+            clauses.append(
+                "NOT EXISTS (SELECT 1 FROM display_history dh WHERE dh.photo_id=p.id AND dh.displayed_at>=datetime('now', ?))"
+            )
             params.append(f"-{recent_days} days")
         if bool(filters.get("unseen_only")):
             clauses.append("NOT EXISTS (SELECT 1 FROM display_history dh WHERE dh.photo_id=p.id)")
@@ -1078,11 +1283,11 @@ class RenderService:
                     else order_by
                 )
                 raw_batch = connection.execute(
-                        f"SELECT p.id FROM photos p JOIN libraries l ON l.id=p.library_id "
-                        f"JOIN photo_analysis a ON a.id=(SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1) "
-                        f"WHERE {where} ORDER BY {raw_order} LIMIT 500 OFFSET ?",  # noqa: S608 -- fixed predicates and validated order
-                        (*params, offset),
-                    ).fetchall()
+                    f"SELECT p.id FROM photos p JOIN libraries l ON l.id=p.library_id "
+                    f"JOIN photo_analysis a ON a.id=(SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1) "
+                    f"WHERE {where} ORDER BY {raw_order} LIMIT 500 OFFSET ?",  # noqa: S608 -- fixed predicates and validated order
+                    (*params, offset),
+                ).fetchall()
             yield from batch
             if len(raw_batch) < 500:
                 break
@@ -1133,27 +1338,37 @@ class RenderService:
         filters["unseen_only"] = bool(payload.get("unseen_only", False))
         return filters
 
-    def select_random_history_day(self, payload: dict[str, Any], *, rng: random.Random | None = None) -> dict[str, Any]:
+    def select_random_history_day(
+        self, payload: dict[str, Any], *, rng: random.Random | None = None
+    ) -> dict[str, Any]:
         filters = self._validated_history_filters(payload)
         dates = self._history_dates(filters)
         if not dates:
-            return {"status": "empty", "message": "找不到符合所有篩選條件且目前檔案可用的歷史照片；未放寬任何條件。", "filters": filters}
+            return {
+                "status": "empty",
+                "message": "找不到符合所有篩選條件且目前檔案可用的歷史照片；未放寬任何條件。",
+                "filters": filters,
+            }
         picker = rng or random.SystemRandom()
         remaining = list(dates)
         while remaining:
             chosen_date = picker.choice(remaining)
             candidates = list(
-                self._iter_history_rows(
-                    filters, month_day=chosen_date[5:10], history_date=chosen_date
-                )
+                self._iter_history_rows(filters, month_day=chosen_date[5:10], history_date=chosen_date)
             )
             if candidates:
                 candidates.sort(key=lambda row: (-float(row["final_score"]), str(row["id"])))
                 return self._history_selection(chosen_date, candidates, "random_history_day", filters)
             remaining.remove(chosen_date)
-        return {"status": "empty", "message": "找不到符合所有篩選條件且目前檔案可用的歷史照片；未放寬任何條件。", "filters": filters}
+        return {
+            "status": "empty",
+            "message": "找不到符合所有篩選條件且目前檔案可用的歷史照片；未放寬任何條件。",
+            "filters": filters,
+        }
 
-    def reroll_history_day(self, payload: dict[str, Any], *, rng: random.Random | None = None) -> dict[str, Any]:
+    def reroll_history_day(
+        self, payload: dict[str, Any], *, rng: random.Random | None = None
+    ) -> dict[str, Any]:
         month_day = str(payload.get("month_day", "")).strip()
         try:
             datetime.strptime(month_day, "%m-%d")
@@ -1166,7 +1381,9 @@ class RenderService:
             for row in self._iter_history_rows(
                 filters,
                 month_day=month_day,
-                order_by="final_score DESC,p.id" if str(payload.get("mode")) == "top_n" else "p.captured_at,p.id",
+                order_by="final_score DESC,p.id"
+                if str(payload.get("mode")) == "top_n"
+                else "p.captured_at,p.id",
             )
             if str(row["id"]) != current_id
         )
@@ -1210,8 +1427,15 @@ class RenderService:
                 selected = reservoir(selected, row, seen)
         selected = selected or fallback
         if selected is None:
-            return {"status": "empty", "message": "此月日沒有其他符合條件的可用照片，沒有重試或改選其他日期。", "filters": filters, "month_day": month_day}
-        return self._history_selection(str(selected["captured_at"])[:10], [selected], f"same_day_{mode}", filters)
+            return {
+                "status": "empty",
+                "message": "此月日沒有其他符合條件的可用照片，沒有重試或改選其他日期。",
+                "filters": filters,
+                "month_day": month_day,
+            }
+        return self._history_selection(
+            str(selected["captured_at"])[:10], [selected], f"same_day_{mode}", filters
+        )
 
     def _was_displayed(self, photo_id: str) -> bool:
         with self.database.session() as connection:
@@ -1221,16 +1445,28 @@ class RenderService:
                 ).fetchone()
             )
 
-    def _history_selection(self, history_date: str, candidates: list[dict[str, Any]], method: str, filters: dict[str, Any]) -> dict[str, Any]:
+    def _history_selection(
+        self, history_date: str, candidates: list[dict[str, Any]], method: str, filters: dict[str, Any]
+    ) -> dict[str, Any]:
         for candidate in candidates:
             candidate["candidate_count"] = len(candidates)
             candidate["selection_method"] = method
             candidate["history_date"] = history_date
             candidate["month_day"] = history_date[5:10]
             candidate["final_score"] = round(float(candidate["final_score"]), 2)
-        return {"status": "ok", "history_date": history_date, "month_day": history_date[5:10], "candidate_count": len(candidates), "selection_method": method, "filters": filters, "candidates": candidates}
+        return {
+            "status": "ok",
+            "history_date": history_date,
+            "month_day": history_date[5:10],
+            "candidate_count": len(candidates),
+            "selection_method": method,
+            "filters": filters,
+            "candidates": candidates,
+        }
 
-    def record_display(self, photo_ids: list[str], *, selection_method: str, history_date: str, release_id: str | None = None) -> None:
+    def record_display(
+        self, photo_ids: list[str], *, selection_method: str, history_date: str, release_id: str | None = None
+    ) -> None:
         if not photo_ids:
             return
         now = datetime.now(timezone.utc).isoformat()
