@@ -806,6 +806,39 @@ MIGRATIONS = (
         "CREATE INDEX IF NOT EXISTS idx_activity_events_time ON activity_events(created_at DESC,id DESC)",
         "CREATE TABLE IF NOT EXISTS observability_state (key TEXT PRIMARY KEY,value_json TEXT NOT NULL,updated_at TEXT NOT NULL)",
     )),
+    Migration(18, "加入版本化設定快照與安全回復", (
+        """
+        CREATE TABLE IF NOT EXISTS settings_snapshots (
+            id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            actor_id TEXT,
+            source_ip TEXT NOT NULL,
+            reason TEXT,
+            before_json TEXT NOT NULL,
+            after_json TEXT NOT NULL,
+            changed_keys_json TEXT NOT NULL,
+            schema_version INTEGER NOT NULL,
+            application_version TEXT NOT NULL,
+            rollback_source_snapshot_id TEXT
+                REFERENCES settings_snapshots(id) ON DELETE RESTRICT
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS settings_snapshot_items (
+            snapshot_id TEXT NOT NULL
+                REFERENCES settings_snapshots(id) ON DELETE CASCADE,
+            key TEXT NOT NULL,
+            old_value_json TEXT NOT NULL,
+            new_value_json TEXT NOT NULL,
+            restored_default INTEGER NOT NULL DEFAULT 0
+                CHECK(restored_default IN (0,1)),
+            PRIMARY KEY(snapshot_id,key)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_settings_snapshots_created ON settings_snapshots(created_at DESC,id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_settings_snapshot_items_key ON settings_snapshot_items(key,snapshot_id)",
+        "CREATE INDEX IF NOT EXISTS idx_settings_snapshots_rollback_source ON settings_snapshots(rollback_source_snapshot_id)",
+    )),
 )
 
 

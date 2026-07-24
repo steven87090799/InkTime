@@ -97,7 +97,11 @@ def test_scoring_profile_create_and_restore_are_versioned(app):
         history_count = connection.execute(
             "SELECT COUNT(*) FROM setting_history WHERE changed_by=?", (user_id,)
         ).fetchone()[0]
-    assert history_count == 6
+        snapshot_count = connection.execute(
+            "SELECT COUNT(*) FROM settings_snapshots WHERE actor_id=?", (user_id,)
+        ).fetchone()[0]
+    assert history_count == 4
+    assert snapshot_count == 1
 
     restored = repository.restore(
         str(initial["id"]), created_by=user_id, source_ip="127.0.0.1"
@@ -106,6 +110,10 @@ def test_scoring_profile_create_and_restore_are_versioned(app):
     assert restored["name"].startswith("還原：")
     assert restored["memory_weight"] == initial["memory_weight"]
     assert len(repository.list()) == 3
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM settings_snapshots WHERE actor_id=?", (user_id,)
+        ).fetchone()[0] == 2
 
 
 class LabProvider(VisionProvider):

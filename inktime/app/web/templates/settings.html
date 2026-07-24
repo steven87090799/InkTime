@@ -1,88 +1,431 @@
 {% extends "base.html" %}
-{% block title %}系統設定｜InkTime{% endblock %}
+{% block title %}設定控制中心｜InkTime{% endblock %}
 {% block content %}
-<div class="page-head">
+<div class="page-head settings-page-head">
   <div>
     <p class="eyebrow">Web 控制中心</p>
-    <h1>系統設定</h1>
-    <p>日常執行參數都在這裡調整並留下稽核紀錄，不需要修改 Python 程式。Docker 掛載與資源上限屬於部署邊界，只在首次部署或換硬體時修改。</p>
+    <h1>設定控制中心</h1>
+    <p>以繁體中文名稱、安全範圍與影響說明調整日常設定。硬體協議、部署密鑰、Docker 邊界與 Migration 版本不會開放修改。</p>
+  </div>
+  <div class="settings-head-actions">
+    {% if g.user.role == 'administrator' %}
+    <a class="secondary" href="/api/v1/settings/export">匯出安全設定</a>
+    <button class="secondary" type="button" id="open-import">匯入設定</button>
+    {% endif %}
   </div>
 </div>
 
-<section class="panel">
-  <div class="panel-head"><h2>設定分類</h2><span>共 {{ categories|length }} 類</span></div>
-  <p>每個項目仍使用原本的表單，只將它放在對應分類；可直接跳到需要調整的區塊。</p>
-  <nav class="settings-category-links" aria-label="設定分類">
-    {% for category, rows in categories.items() %}<a class="secondary" href="#settings-category-{{ loop.index }}">{{ category }}（{{ rows|length }}）</a>{% endfor %}
-  </nav>
+<section class="panel settings-deployment">
+  <div class="panel-head"><h2>部署邊界（唯讀）</h2><a href="/diagnostics">查看即時資源</a></div>
+  <div class="settings-readonly-grid">
+    <article><small>執行方式</small><strong>{{ 'Docker 容器' if deployment.docker else '原生程序' }}</strong></article>
+    <article><small>Web Port</small><strong>{{ deployment.port }}</strong></article>
+    <article><small>資料檔案系統</small><strong>{{ deployment.data_dir }}</strong></article>
+    <article><small>照片掛載</small><strong>{{ deployment.photo_dir }}</strong></article>
+    <article><small>版本</small><strong>{{ deployment.revision }}</strong></article>
+  </div>
+  <p class="notice">上述項目只能在部署層修改。這裡顯示的是執行邊界，不代表 InkTime 的 <code>/data</code> 目錄占用等於整個檔案系統使用率。</p>
+</section>
+
+<section class="panel settings-toolbar" aria-label="設定搜尋與篩選">
+  <div class="panel-head"><h2>尋找設定</h2><span>共 {{ setting_count }} 項</span></div>
+  <div class="settings-filter-grid">
+    <label>搜尋
+      <input id="settings-search" type="search" placeholder="輸入中文名稱、說明或技術 Key" autocomplete="off">
+    </label>
+    <label>分類
+      <select id="settings-category-filter"><option value="">全部分類</option>{% for category in categories %}<option value="{{ category }}">{{ category }}</option>{% endfor %}</select>
+    </label>
+    <label>風險
+      <select id="settings-risk-filter"><option value="">全部風險</option><option value="low">低風險</option><option value="medium">中風險</option><option value="high">高風險</option></select>
+    </label>
+    <label>生效方式
+      <select id="settings-scope-filter"><option value="">全部方式</option><option value="dynamic">立即動態生效</option><option value="next_job">下次工作生效</option><option value="next_render">下次渲染生效</option><option value="future_device_only">只影響之後新增的裝置</option><option value="restart">重新啟動生效</option><option value="not_wired">尚未接上 Runtime</option></select>
+    </label>
+    <fieldset class="settings-mode-toggle">
+      <legend>顯示模式</legend>
+      <label><input type="radio" name="settings-mode" value="basic" checked> 基本</label>
+      <label><input type="radio" name="settings-mode" value="advanced"> 進階</label>
+    </fieldset>
+  </div>
 </section>
 
 <section class="panel">
-  <div class="panel-head"><h2>目前部署資訊</h2><a href="/diagnostics">查看即時資源</a></div>
-  <div class="table-wrap"><table><tbody>
-    <tr><th>執行方式</th><td>{{ 'Docker 容器' if deployment.docker else '原生程序' }}</td></tr>
-    <tr><th>Web Port</th><td>{{ deployment.port }}</td></tr>
-    <tr><th>資料／照片路徑</th><td><code>{{ deployment.data_dir }}</code>／<code>{{ deployment.photo_dir }}</code></td></tr>
-    <tr><th>HTTP Access Log</th><td>{{ '啟用' if deployment.access_log else '停用（低寫入預設）' }}</td></tr>
-    <tr><th>版本</th><td><code>{{ deployment.revision }}</code></td></tr>
-  </tbody></table></div>
-  <p class="notice">主機路徑、Port、容器 CPU／記憶體上限與 Docker Log 輪替必須在容器啟動前決定，無法由容器內程式安全地改寫；其餘 Worker、排程、分析、裝置、Log 層級與備份設定可直接在下方變更。</p>
+  <div class="panel-head"><h2>設定來源層級</h2><span>由左至右覆寫；只顯示已支援能力</span></div>
+  <div class="settings-source-flow" role="list">
+    <article role="listitem"><strong>程式安全預設</strong><small>已支援</small></article>
+    <article role="listitem"><strong>系統設定</strong><small>已支援，本頁管理</small></article>
+    <article role="listitem"><strong>裝置群組設定</strong><small>尚未支援</small></article>
+    <article role="listitem"><strong>單一裝置設定</strong><small>既有 Device Override，由裝置頁管理</small></article>
+    <article role="listitem"><strong>單次 Job／Preview</strong><small>既有工作與預覽 Override，不回寫系統設定</small></article>
+  </div>
+  <p class="notice">安全、資料庫、認證與部署設定只允許系統或部署層級，不能由裝置覆寫。</p>
 </section>
 
-<form id="settings-form">
+<div id="settings-validation-summary" class="notice error settings-validation-summary" role="alert" tabindex="-1" hidden></div>
+<div id="settings-empty" class="panel settings-empty" hidden><h2>找不到符合的設定</h2><p>請縮短關鍵字，或清除分類、風險與生效方式篩選。</p></div>
+
+<form id="settings-form" data-can-edit="{{ 'true' if g.user.role == 'administrator' else 'false' }}">
   {% for category, rows in categories.items() %}
-  <section class="panel" id="settings-category-{{ loop.index }}">
-    <h2>{{ category }}</h2>
-    <div class="settings-grid">
+  <section class="panel settings-category" data-category="{{ category }}">
+    <div class="panel-head">
+      <div><p class="eyebrow">功能分類</p><h2>{{ category }}</h2></div>
+      {% if g.user.role == 'administrator' %}<button class="secondary reset-category" type="button" data-category="{{ category }}">此分類可寫設定恢復預設</button>{% endif %}
+    </div>
+    <div class="governed-settings-grid">
       {% for row in rows %}
-      <label{% if row.definition.full_width %} class="setting-full-width"{% endif %}>
-        <span>{{ row.key }}</span>
-        <small>{{ row.definition.description }}。風險：{{ row.definition.risk }}{% if row.requires_restart %}；下次重新啟動生效{% else %}；動態生效{% endif %}</small>
-        {% if row.value_type == 'boolean' %}
-        <select name="{{ row.key }}"><option value="true" {% if row.value %}selected{% endif %}>啟用</option><option value="false" {% if not row.value %}selected{% endif %}>停用</option></select>
-        {% elif row.definition.choices %}
-        <select name="{{ row.key }}">{% for choice in row.definition.choices %}<option value="{{ choice }}" {% if choice|string == row.value|string %}selected{% endif %}>{{ row.definition.choice_labels.get(choice, choice) if row.definition.choice_labels else choice }}</option>{% endfor %}</select>
-        {% elif row.definition.multiline %}
-        <textarea name="{{ row.key }}" rows="{{ row.definition.rows|default(12) }}" maxlength="{{ row.definition.max_length|default(12000) }}">{{ row.value }}</textarea>
-        {% else %}
-        <input name="{{ row.key }}" value="{{ row.value }}" type="{{ 'number' if row.value_type in ('number','integer') else 'text' }}" {% if row.value_type == 'number' %}step="any"{% endif %} {% if row.definition.min is defined %}min="{{ row.definition.min }}"{% endif %} {% if row.definition.max is defined %}max="{{ row.definition.max }}"{% endif %}>
-        {% endif %}
-      </label>
+      <article class="setting-card"
+        data-key="{{ row.key }}"
+        data-label="{{ row.definition.label_zh_tw }}"
+        data-description="{{ row.definition.description }}"
+        data-category="{{ row.category }}"
+        data-risk="{{ row.definition.risk }}"
+        data-scope="{{ row.definition.effective_scope }}"
+        data-writable="{{ 'true' if row.definition.runtime_wired and g.user.role == 'administrator' else 'false' }}"
+        data-advanced="{{ 'true' if row.definition.advanced else 'false' }}"
+        data-default="{{ row.definition.default|tojson|forceescape }}"
+        data-dependencies="{{ row.definition.dependencies|tojson|forceescape }}">
+        <div class="setting-card-head">
+          <div>
+            <h3>{{ row.definition.label_zh_tw }}</h3>
+            <p>{{ row.definition.description }}</p>
+          </div>
+          <span class="setting-dirty-badge" hidden>已修改</span>
+        </div>
+        <div class="setting-badges" aria-label="設定狀態">
+          <span class="status risk-{{ row.definition.risk }}">{{ {'low':'低風險','medium':'中風險','high':'高風險'}[row.definition.risk] }}</span>
+          <span class="status scope-{{ row.definition.effective_scope }}">{{ {'dynamic':'立即生效','next_job':'下次工作','next_render':'下次渲染','future_device_only':'只影響之後新增的裝置','restart':'需重新啟動','not_wired':'尚未支援'}[row.definition.effective_scope] }}</span>
+          {% if not row.definition.runtime_wired %}<span class="status warning">尚未接上 Runtime</span>{% endif %}
+        </div>
+        <div class="setting-control">
+          {% if row.definition.visibility == 'sensitive' and g.user.role != 'administrator' %}
+          <input name="{{ row.key }}" value="{{ row.value.status }}" type="text" disabled aria-label="{{ row.definition.label_zh_tw }}狀態">
+          {% elif row.value_type == 'boolean' %}
+          <select name="{{ row.key }}" {% if g.user.role != 'administrator' or not row.definition.runtime_wired %}disabled{% endif %}><option value="true" {% if row.value %}selected{% endif %}>啟用</option><option value="false" {% if not row.value %}selected{% endif %}>停用</option></select>
+          {% elif row.definition.choices %}
+          <select name="{{ row.key }}" {% if g.user.role != 'administrator' or not row.definition.runtime_wired %}disabled{% endif %}>{% for choice in row.definition.choices %}<option value="{{ choice }}" {% if choice|string == row.value|string %}selected{% endif %}>{{ row.definition.choice_labels.get(choice, choice) if row.definition.choice_labels else choice }}</option>{% endfor %}</select>
+          {% elif row.definition.multiline %}
+          <textarea name="{{ row.key }}" rows="{{ row.definition.rows|default(6) }}" maxlength="{{ row.definition.max_length|default(12000) }}" {% if g.user.role != 'administrator' or not row.definition.runtime_wired %}disabled{% endif %}>{{ row.value }}</textarea>
+          {% else %}
+          <input name="{{ row.key }}" value="{{ row.value }}" type="{{ 'number' if row.value_type in ('number','integer') else 'text' }}" {% if row.value_type == 'number' %}step="any"{% endif %} {% if row.definition.min is defined %}min="{{ row.definition.min }}"{% endif %} {% if row.definition.max is defined %}max="{{ row.definition.max }}"{% endif %} {% if g.user.role != 'administrator' or not row.definition.runtime_wired %}disabled{% endif %}>
+          {% endif %}
+        </div>
+        <dl class="setting-values">
+          {% if row.definition.visibility == 'sensitive' and g.user.role != 'administrator' %}
+          <div><dt>程式預設值</dt><dd><code>{{ row.definition.default.status }}</code></dd></div>
+          <div><dt>系統儲存值</dt><dd><code>{{ row.stored_value.status if row.stored_value is not none else '未另行儲存' }}</code></dd></div>
+          <div><dt>最終生效值</dt><dd><code>{{ row.effective_value.status }}</code></dd></div>
+          <div><dt>來源</dt><dd>{{ '系統設定' if row.effective_source == 'System' else '程式安全預設' }}</dd></div>
+          {% else %}
+          <div><dt>程式預設值</dt><dd><code>{{ row.definition.default }}</code></dd></div>
+          <div><dt>系統儲存值</dt><dd><code>{{ row.stored_value if row.stored_value is not none else '未另行儲存' }}</code></dd></div>
+          {% if row.definition.runtime_wired %}
+          <div><dt>最終生效值</dt><dd><code>{{ row.effective_value }}</code></dd></div>
+          <div><dt>來源</dt><dd>{{ '系統設定' if row.effective_source == 'System' else '程式安全預設' }}</dd></div>
+          {% else %}
+          <div><dt>Runtime 狀態</dt><dd><strong>已儲存但尚未生效／尚未支援</strong></dd></div>
+          <div><dt>來源</dt><dd>僅保存既有值，不宣稱為最終生效值</dd></div>
+          {% endif %}
+          {% endif %}
+        </dl>
+        <p class="setting-risk-copy"><strong>調整風險：</strong>{{ row.definition.risk_description }}</p>
+        <details class="setting-advanced-info">
+          <summary>進階資訊</summary>
+          <dl>
+            <div><dt>技術 Key</dt><dd><code>{{ row.key }}</code></dd></div>
+            <div><dt>型別／範圍</dt><dd>{{ row.definition.type }}{% if row.definition.min is defined or row.definition.max is defined %}（{{ row.definition.min|default('—') }}～{{ row.definition.max|default('—') }}）{% endif %}</dd></div>
+            <div><dt>Cache／資料影響</dt><dd>{{ '改變 AI Cache Fingerprint' if row.definition.cache_impact else '不影響 AI Cache' }}；{{ '需要評估重分析' if row.definition.reanalysis_impact else '不需重分析' }}；{{ '需要重新渲染' if row.definition.rerender_impact else '不需重新渲染' }}</dd></div>
+            <div><dt>裝置覆寫</dt><dd>{{ '既有裝置／預覽流程可覆寫' if row.definition.device_override_allowed else '僅系統層級' }}</dd></div>
+            {% if row.definition.effective_note %}<div><dt>生效說明</dt><dd>{{ row.definition.effective_note }}</dd></div>{% endif %}
+          </dl>
+        </details>
+        {% if g.user.role == 'administrator' and row.definition.runtime_wired %}<button type="button" class="secondary reset-setting">恢復此項預設</button>{% endif %}
+      </article>
       {% endfor %}
     </div>
   </section>
   {% endfor %}
-  {% if g.user.role == 'administrator' %}<button class="primary">儲存全部設定</button>{% endif %}
+
+  {% if g.user.role == 'administrator' %}
+  <div class="settings-save-bar" aria-live="polite">
+    <span><strong id="dirty-count">0</strong> 項未儲存變更</span>
+    <label class="settings-reason">變更原因（選填）<input id="change-reason" maxlength="500" placeholder="例如：降低每日 AI 預算"></label>
+    <button class="secondary" type="button" id="discard-settings" disabled>放棄變更</button>
+    <button class="secondary" type="button" id="preview-settings" disabled>預覽影響</button>
+    <button class="primary" type="submit" id="save-settings" disabled>儲存變更</button>
+  </div>
+  {% endif %}
 </form>
 
 <section class="panel">
+  <div class="panel-head"><h2>設定 Snapshot 歷史</h2><span>修改前自動建立，最多保留安全固定上限</span></div>
+  <div class="table-wrap"><table><thead><tr><th>時間</th><th>操作者</th><th>變更數</th><th>原因</th><th>動作</th></tr></thead><tbody>
+    {% for snapshot in snapshots %}
+    <tr><td>{{ snapshot.created_at }}</td><td>{{ snapshot.actor_id or 'system' }}</td><td>{{ snapshot.changed_keys_count }}</td><td>{{ snapshot.reason or '未填寫' }}</td><td><button type="button" class="secondary view-snapshot" data-id="{{ snapshot.id }}">查看 Diff</button></td></tr>
+    {% else %}<tr><td colspan="5" class="empty">尚未建立設定 Snapshot。</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>最近設定稽核</h2><span>技術 Key 僅在稽核中顯示</span></div>
+  <div class="table-wrap"><table><thead><tr><th>時間</th><th>設定 Key</th><th>操作者</th><th>來源</th><th>生效方式</th></tr></thead><tbody>
+    {% for entry in history %}<tr><td>{{ entry.changed_at }}</td><td><code>{{ entry.key }}</code></td><td>{{ entry.changed_by or 'system' }}</td><td>{{ entry.source_ip }}</td><td>{{ '重新啟動' if entry.requires_restart else '動態／下次工作' }}</td></tr>{% else %}<tr><td colspan="5" class="empty">尚未修改設定。</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+
+<section class="panel">
   <div class="panel-head"><h2>Webhook 認證 Token</h2><span class="status {{ 'ok' if webhook_token_configured else 'muted' }}">{{ '已加密設定' if webhook_token_configured else '未設定' }}</span></div>
-  <p>若接收端需要 Bearer Token，請在此設定；Token 使用平台主密鑰加密保存，不會顯示在一般設定、稽核值或 Docker Log。</p>
+  <p>Token 留在獨立 Secret Store，不會進入 Snapshot、Diff、匯出檔、Activity 或一般設定 JSON。</p>
   {% if g.user.role == 'administrator' %}
   <form id="webhook-secret-form" class="inline-form"><input name="token" type="password" autocomplete="new-password" placeholder="輸入新 Token（不會回顯）" maxlength="4096"><button>儲存 Token</button><button type="button" class="secondary" id="clear-webhook-token">清除</button><button type="button" class="secondary" id="test-webhook">傳送測試通知</button></form>
   {% endif %}
 </section>
 
-<section class="panel">
-  <h2>最近設定稽核</h2>
-  <div class="table-wrap"><table><thead><tr><th>時間</th><th>設定</th><th>操作者</th><th>來源</th><th>生效方式</th></tr></thead><tbody>
-    {% for entry in history %}<tr><td>{{ entry.changed_at }}</td><td><code>{{ entry.key }}</code></td><td>{{ entry.changed_by or 'system' }}</td><td>{{ entry.source_ip }}</td><td>{{ '重新啟動' if entry.requires_restart else '動態' }}</td></tr>{% else %}<tr><td colspan="5" class="empty">尚未修改設定。</td></tr>{% endfor %}
-  </tbody></table></div>
-</section>
+<section class="panel"><h2>功能旗標狀態</h2><p>停用項目只是 Roadmap，不得視為已可使用。</p><div class="table-wrap"><table><thead><tr><th>旗標</th><th>狀態</th><th>說明</th></tr></thead><tbody>{% for flag in feature_flags %}<tr><td><code>{{ flag.key }}</code></td><td>{{ '啟用' if flag.enabled else '停用／尚未支援' }}</td><td>{{ flag.description }}</td></tr>{% endfor %}</tbody></table></div></section>
 
-<section class="panel"><h2>功能旗標狀態</h2><p>啟用項目是已實作能力；停用項目僅預留方向，不得視為可用功能。</p><div class="table-wrap"><table><thead><tr><th>旗標</th><th>狀態</th><th>說明</th></tr></thead><tbody>{% for flag in feature_flags %}<tr><td><code>{{ flag.key }}</code></td><td>{{ '啟用' if flag.enabled else '停用' }}</td><td>{{ flag.description }}</td></tr>{% endfor %}</tbody></table></div></section>
+<dialog id="settings-preview-dialog" class="settings-dialog">
+  <form method="dialog"><button class="dialog-close" aria-label="關閉">×</button></form>
+  <h2>修改影響預覽</h2><div id="settings-preview-body"></div>
+  <div class="dialog-actions"><button type="button" class="primary" id="preview-save">確認並儲存</button></div>
+</dialog>
+<dialog id="snapshot-dialog" class="settings-dialog">
+  <form method="dialog"><button class="dialog-close" aria-label="關閉">×</button></form>
+  <h2>Snapshot Diff</h2><div id="snapshot-body"></div>
+  {% if g.user.role == 'administrator' %}<div class="dialog-actions"><button type="button" class="secondary" id="rollback-preview">預覽安全 Rollback</button><button type="button" class="primary" id="rollback-apply" hidden>確認 Rollback</button></div>{% endif %}
+</dialog>
+{% if g.user.role == 'administrator' %}
+<dialog id="import-dialog" class="settings-dialog">
+  <form method="dialog"><button class="dialog-close" aria-label="關閉">×</button></form>
+  <h2>安全匯入設定</h2>
+  <p>先驗證格式、版本、白名單與跨欄位規則，再顯示 Diff；預覽不會修改資料庫。</p>
+  <input id="settings-import-file" type="file" accept="application/json,.json">
+  <div id="import-preview-body"></div>
+  <div class="dialog-actions"><button type="button" class="primary" id="import-apply" disabled>確認套用匯入</button></div>
+</dialog>
+{% endif %}
 {% endblock %}
-{% block scripts %}{% if g.user.role == 'administrator' %}<script>
-document.getElementById('settings-form').onsubmit=async event=>{
-  event.preventDefault();
-  const body={};
-  new FormData(event.target).forEach((value,key)=>body[key]=value);
-  const response=await window.inktimeFetch('/api/v1/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  const data=await response.json();
-  alert(response.ok?'設定已儲存並套用':data.message||'儲存失敗');
-  if(response.ok)location.reload();
-};
-document.getElementById('webhook-secret-form').onsubmit=async event=>{event.preventDefault();const token=new FormData(event.target).get('token');const response=await window.inktimeFetch('/api/v1/notifications/webhook-secret',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});const data=await response.json();alert(response.ok?'Token 已加密儲存':data.message||'儲存失敗');if(response.ok)location.reload();};
-document.getElementById('clear-webhook-token').onclick=async()=>{if(!confirm('確定清除 Webhook Token？'))return;const response=await window.inktimeFetch('/api/v1/notifications/webhook-secret',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"clear":true}'});if(response.ok)location.reload();};
-document.getElementById('test-webhook').onclick=async()=>{const response=await window.inktimeFetch('/api/v1/notifications/test',{method:'POST'}),data=await response.json();alert(response.ok?`測試通知狀態：${data.webhook_status}`:data.message||'測試失敗');};
-</script>{% endif %}{% endblock %}
+
+{% block scripts %}
+<script>
+(() => {
+  const form = document.getElementById('settings-form');
+  const canEdit = form.dataset.canEdit === 'true';
+  const cards = [...document.querySelectorAll('.setting-card')];
+  const controls = new Map(cards.map(card => [card.dataset.key, card.querySelector('[name]')]));
+  const baseline = new Map();
+  const dirty = new Map();
+  const typeOf = key => controls.get(key)?.type === 'number' ? 'number' : (controls.get(key)?.tagName === 'SELECT' && ['true','false'].includes(controls.get(key).value) ? 'boolean' : 'string');
+  const read = key => {
+    const control = controls.get(key);
+    if (!control) return undefined;
+    if (typeOf(key) === 'boolean') return control.value === 'true';
+    if (typeOf(key) === 'number') return control.value === '' ? '' : Number(control.value);
+    return control.value;
+  };
+  const equal = (a,b) => JSON.stringify(a) === JSON.stringify(b);
+  controls.forEach((_control,key) => baseline.set(key, read(key)));
+
+  const refreshDirty = () => {
+    dirty.clear();
+    cards.forEach(card => {
+      const key = card.dataset.key, value = read(key), changed = !equal(value, baseline.get(key));
+      card.querySelector('.setting-dirty-badge').hidden = !changed;
+      card.classList.toggle('is-dirty', changed);
+      if (changed) dirty.set(key, value);
+    });
+    if (!canEdit) return;
+    document.getElementById('dirty-count').textContent = dirty.size;
+    ['save-settings','preview-settings','discard-settings'].forEach(id => document.getElementById(id).disabled = dirty.size === 0);
+  };
+
+  const applyConditions = () => {
+    cards.forEach(card => {
+      const dependencies = JSON.parse(card.dataset.dependencies || '[]');
+      const active = dependencies.every(rule => {
+        const value = read(rule.key);
+        return Object.prototype.hasOwnProperty.call(rule,'equals') ? equal(value, rule.equals) : !equal(value, rule.not_equals);
+      });
+      card.classList.toggle('dependency-hidden', !active);
+      const control = card.querySelector('[name]');
+      if (control && canEdit) control.disabled = !active || card.dataset.writable !== 'true';
+    });
+  };
+
+  const applyFilters = () => {
+    const query = document.getElementById('settings-search').value.trim().toLocaleLowerCase('zh-Hant-TW');
+    const category = document.getElementById('settings-category-filter').value;
+    const risk = document.getElementById('settings-risk-filter').value;
+    const scope = document.getElementById('settings-scope-filter').value;
+    const mode = document.querySelector('[name="settings-mode"]:checked').value;
+    let visibleCount = 0;
+    cards.forEach(card => {
+      const haystack = `${card.dataset.label} ${card.dataset.description} ${card.dataset.key}`.toLocaleLowerCase('zh-Hant-TW');
+      const visible = (!query || haystack.includes(query)) && (!category || card.dataset.category === category) &&
+        (!risk || card.dataset.risk === risk) && (!scope || card.dataset.scope === scope) &&
+        (mode === 'advanced' || card.dataset.advanced !== 'true');
+      card.classList.toggle('filter-hidden', !visible);
+      if (visible && !card.classList.contains('dependency-hidden')) visibleCount += 1;
+    });
+    document.querySelectorAll('.settings-category').forEach(section => {
+      section.hidden = ![...section.querySelectorAll('.setting-card')].some(card => !card.classList.contains('filter-hidden') && !card.classList.contains('dependency-hidden'));
+    });
+    document.getElementById('settings-empty').hidden = visibleCount !== 0;
+  };
+
+  const refresh = () => { applyConditions(); refreshDirty(); applyFilters(); };
+  controls.forEach(control => control?.addEventListener('input', refresh));
+  ['settings-search','settings-category-filter','settings-risk-filter','settings-scope-filter'].forEach(id => document.getElementById(id).addEventListener('input', applyFilters));
+  document.querySelectorAll('[name="settings-mode"]').forEach(input => input.addEventListener('change', applyFilters));
+
+  const setControl = (key,value) => {
+    const control = controls.get(key);
+    if (!control) return;
+    control.value = typeof value === 'boolean' ? String(value) : value;
+  };
+  document.querySelectorAll('.reset-setting').forEach(button => button.addEventListener('click', () => {
+    const card = button.closest('.setting-card');
+    setControl(card.dataset.key, JSON.parse(card.dataset.default));
+    refresh();
+  }));
+  document.querySelectorAll('.reset-category').forEach(button => button.addEventListener('click', () => {
+    cards.filter(card => card.dataset.category === button.dataset.category && card.dataset.writable === 'true').forEach(card => setControl(card.dataset.key, JSON.parse(card.dataset.default)));
+    refresh();
+  }));
+  if (canEdit) document.getElementById('discard-settings').addEventListener('click', () => {
+    baseline.forEach((value,key) => setControl(key,value));
+    refresh();
+  });
+
+  const request = async (url, options={}) => {
+    const response = await window.inktimeFetch(url, options);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.message || '操作失敗');
+    return data;
+  };
+  const esc = value => String(value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]));
+  const valueText = value => esc(typeof value === 'object' ? JSON.stringify(value) : value);
+  const scopeText = scope => ({dynamic:'立即生效',next_job:'下次工作生效',next_render:'下次渲染生效',future_device_only:'只影響之後新增的裝置',restart:'需重新啟動',not_wired:'尚未支援'}[scope] || '未知生效範圍');
+  const validation = message => {
+    const box = document.getElementById('settings-validation-summary');
+    box.textContent = message; box.hidden = !message;
+    if (message) box.focus();
+  };
+  const impactHtml = data => `
+    ${data.validation_errors?.length ? `<div class="notice error"><strong>驗證失敗</strong><ul>${data.validation_errors.map(item=>`<li>${esc(item)}</li>`).join('')}</ul></div>` : ''}
+    ${data.confirmation_reasons?.length ? `<div class="notice warning"><strong>需要二次確認</strong><ul>${data.confirmation_reasons.map(item=>`<li>${esc(item)}</li>`).join('')}</ul></div>` : ''}
+    <dl class="impact-grid">
+      <div><dt>變更項目</dt><dd>${data.changed_keys?.length || 0}</dd></div>
+      <div><dt>重新啟動</dt><dd>${data.restart_required ? '需要' : '不需要'}</dd></div>
+      <div><dt>AI Cache</dt><dd>${data.cache_fingerprint_changed ? '會改變' : '不影響'}</dd></div>
+      <div><dt>重分析</dt><dd>${data.reanalysis_required ? '需另行評估／啟動' : '不需要'}</dd></div>
+      <div><dt>重新渲染</dt><dd>${data.rerender_required ? '需另行執行' : '不需要'}</dd></div>
+      <div><dt>AI 成本</dt><dd>${esc(data.estimated_cost_label || '無法估算')}</dd></div>
+    </dl>
+    ${data.warnings?.length ? `<h3>提醒</h3><ul>${data.warnings.map(item=>`<li>${esc(item)}</li>`).join('')}</ul>` : ''}
+    ${data.release_notice ? `<p class="notice warning">${esc(data.release_notice)}</p>` : ''}
+    <details><summary>技術變更 Key</summary><pre>${esc(JSON.stringify(data.changed_keys || [],null,2))}</pre></details>`;
+  const preview = async () => {
+    const data = await request('/api/v1/settings/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(dirty))});
+    document.getElementById('settings-preview-body').innerHTML = impactHtml(data);
+    document.getElementById('preview-save').disabled = !data.valid;
+    document.getElementById('settings-preview-dialog').showModal();
+    return data;
+  };
+  if (canEdit) document.getElementById('preview-settings').addEventListener('click', () => preview().catch(error => validation(error.message)));
+
+  const save = async confirmRisk => {
+    if (!dirty.size) return;
+    validation('');
+    const data = await request('/api/v1/settings',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','X-InkTime-Change-Reason':document.getElementById('change-reason').value,'X-InkTime-Confirm-Risk':confirmRisk?'true':'false'},
+      body:JSON.stringify(Object.fromEntries(dirty))
+    });
+    dirty.forEach((_value,key) => baseline.set(key,read(key)));
+    document.getElementById('change-reason').value = '';
+    refresh();
+    if (document.getElementById('settings-preview-dialog').open) document.getElementById('settings-preview-dialog').close();
+    location.reload();
+    return data;
+  };
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    try {
+      const data = await request('/api/v1/settings/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(dirty))});
+      if (!data.valid || data.requires_confirmation) {
+        document.getElementById('settings-preview-body').innerHTML = impactHtml(data);
+        document.getElementById('preview-save').disabled = !data.valid;
+        document.getElementById('settings-preview-dialog').showModal();
+        return;
+      }
+      await save(false);
+    } catch(error) { validation(error.message); }
+  });
+  if (canEdit) document.getElementById('preview-save').addEventListener('click', () => save(true).catch(error => validation(error.message)));
+  addEventListener('beforeunload', event => { if (dirty.size) { event.preventDefault(); event.returnValue = ''; } });
+
+  let selectedSnapshot = null;
+  const snapshotDialog = document.getElementById('snapshot-dialog');
+  document.querySelectorAll('.view-snapshot').forEach(button => button.addEventListener('click', async () => {
+    try {
+      selectedSnapshot = button.dataset.id;
+      const data = await request(`/api/v1/settings/snapshots/${selectedSnapshot}`);
+      document.getElementById('snapshot-body').innerHTML = `<p>${esc(data.created_at)}；${data.items.length} 項變更</p>${impactHtml(data.impact)}<div class="table-wrap"><table><thead><tr><th>設定</th><th>舊值</th><th>新值</th><th>治理影響</th></tr></thead><tbody>${data.items.map(item=>`<tr><td>${esc(item.metadata.label_zh_tw)}<small><code>${esc(item.key)}</code></small></td><td><code>${valueText(item.old_value)}</code></td><td><code>${valueText(item.new_value)}</code>${item.restored_default?'<small>恢復程式預設</small>':''}</td><td><small>${esc(scopeText(item.metadata.effective_scope))}<br>${item.metadata.cache_impact?'改變 Cache Fingerprint':'不影響 Cache'}<br>${item.metadata.reanalysis_impact?'需評估重分析':'不需重分析'}／${item.metadata.rerender_impact?'需重新渲染':'不需重新渲染'}</small></td></tr>`).join('')}</tbody></table></div>`;
+      if (canEdit) document.getElementById('rollback-apply').hidden = true;
+      snapshotDialog.showModal();
+    } catch(error) { validation(error.message); }
+  }));
+  if (canEdit) {
+    document.getElementById('rollback-preview').addEventListener('click', async () => {
+      try {
+        const data = await request(`/api/v1/settings/snapshots/${selectedSnapshot}/rollback-preview`,{method:'POST'});
+        const diffRows = data.diff.map(item=>`<tr><td>${esc(item.label_zh_tw)}<small><code>${esc(item.key)}</code></small></td><td><code>${valueText(item.current_value)}</code></td><td><code>${valueText(item.target_value)}</code></td><td>${item.changed_since_snapshot?'會覆蓋 Snapshot 建立後的其他變更':'目前仍是該 Snapshot 套用後的值'}</td></tr>`).join('');
+        document.getElementById('snapshot-body').insertAdjacentHTML('beforeend',`<h3>Rollback 實際 Diff</h3><p>${esc(data.rollback_notice)}</p><p><strong>回復範圍：</strong>只回復該 Snapshot 的 changed_keys，不碰觸無關設定。</p>${data.overwrites_changes_after_snapshot?'<p class="notice warning">此 Rollback 會覆蓋 Snapshot 建立後的其他變更，請逐項確認。</p>':'<p class="notice">沒有偵測到會被覆蓋的 Snapshot 後續變更。</p>'}<div class="table-wrap"><table><thead><tr><th>設定</th><th>目前值</th><th>目標值</th><th>Snapshot 後變更</th></tr></thead><tbody>${diffRows||'<tr><td colspan="4">沒有可自動回復的值。</td></tr>'}</tbody></table></div>${impactHtml(data.impact)}${data.unknown_keys.length?`<p class="notice warning">已移除設定將安全跳過：${data.unknown_keys.map(esc).join('、')}</p>`:''}${data.unsupported_keys?.length?`<p class="notice warning">唯讀或尚未接上 Runtime，已跳過：${data.unsupported_keys.map(esc).join('、')}</p>`:''}${data.sensitive_unrestorable_keys?.length?`<p class="notice error"><strong>敏感設定無法自動 Rollback：</strong>${data.sensitive_unrestorable_keys.map(esc).join('、')}。Snapshot 未保存其值，請由管理員人工重新設定。</p>`:''}`);
+        document.getElementById('rollback-apply').hidden = !data.changed_keys.length;
+      } catch(error) { validation(error.message); }
+    });
+    document.getElementById('rollback-apply').addEventListener('click', async () => {
+      if (!confirm('Rollback 會重新驗證並建立新的 Snapshot，確定繼續？')) return;
+      try {
+        await request(`/api/v1/settings/snapshots/${selectedSnapshot}/rollback`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{"confirm":true}'});
+        location.reload();
+      } catch(error) { validation(error.message); }
+    });
+  }
+
+  if (canEdit) {
+    let importDocument = null;
+    const importDialog = document.getElementById('import-dialog');
+    document.getElementById('open-import').addEventListener('click', () => importDialog.showModal());
+    document.getElementById('settings-import-file').addEventListener('change', async event => {
+      const file = event.target.files[0];
+      if (!file) return;
+      try {
+        importDocument = JSON.parse(await file.text());
+        const data = await request('/api/v1/settings/import-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(importDocument)});
+        document.getElementById('import-preview-body').innerHTML = `${impactHtml(data.impact)}<p>未知 Key（跳過）：${data.unknown_keys.map(esc).join('、') || '無'}</p><p>禁止匯入：${data.blocked_keys.map(key=>`${esc(key)}（${esc(data.blocked_reasons[key])}）`).join('、') || '無'}</p>`;
+        document.getElementById('import-apply').disabled = !Object.keys(data.changes).length;
+      } catch(error) {
+        document.getElementById('import-preview-body').textContent = error.message;
+        document.getElementById('import-apply').disabled = true;
+      }
+    });
+    document.getElementById('import-apply').addEventListener('click', async () => {
+      if (!confirm('確定套用已預覽的安全設定？')) return;
+      try {
+        await request('/api/v1/settings/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:true,document:importDocument})});
+        location.reload();
+      } catch(error) { validation(error.message); }
+    });
+  }
+
+  const secretForm = document.getElementById('webhook-secret-form');
+  if (secretForm) {
+    secretForm.addEventListener('submit',async event=>{event.preventDefault();try{const token=new FormData(event.target).get('token');await request('/api/v1/notifications/webhook-secret',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});location.reload();}catch(error){validation(error.message);}});
+    document.getElementById('clear-webhook-token').addEventListener('click',async()=>{if(!confirm('確定清除 Webhook Token？'))return;try{await request('/api/v1/notifications/webhook-secret',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"clear":true}'});location.reload();}catch(error){validation(error.message);}});
+    document.getElementById('test-webhook').addEventListener('click',async()=>{try{const data=await request('/api/v1/notifications/test',{method:'POST'});alert(`測試通知狀態：${data.webhook_status}`);}catch(error){validation(error.message);}});
+  }
+  refresh();
+})();
+</script>
+{% endblock %}

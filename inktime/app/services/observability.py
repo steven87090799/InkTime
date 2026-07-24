@@ -78,9 +78,14 @@ class ObservabilityService:
             row = c.execute("SELECT updated_at FROM settings WHERE key='observability.debug_enabled'").fetchone()
             changed = self._parse(row[0]) if row else None
             if self.settings.get("observability.debug_enabled", False) and changed and now - changed >= expiry:
-                c.execute("UPDATE settings SET value_json='false',updated_at=? WHERE key='observability.debug_enabled'", (now.isoformat(),))
                 disabled = True
         if disabled:
+            self.settings.update_many(
+                {"observability.debug_enabled": False},
+                changed_by="system",
+                source_ip="local",
+                reason="Debug 到期自動關閉",
+            )
             self.record("INFO", "observability", "debug_auto_disabled", "Debug 已依期限自動關閉")
 
     def _check_jobs(self, now: datetime) -> None:
