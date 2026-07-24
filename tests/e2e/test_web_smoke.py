@@ -36,7 +36,12 @@ def test_first_setup_login_and_primary_console_pages():
             page.goto(base + path)
             assert page.locator("html").get_attribute("lang") == "zh-Hant-TW", label
         page.goto(base + "/settings")
+        page.get_by_role("radio", name="進階").check()
+        page.get_by_placeholder("輸入中文名稱、說明或技術 Key").fill("AI 分析並行")
         page.locator('[name="analysis.concurrency"]').fill("3")
-        page.on("dialog", lambda dialog: dialog.accept())
-        page.get_by_role("button", name="儲存全部設定").click()
+        page.get_by_role("button", name="預覽影響").click()
+        page.get_by_role("dialog").get_by_role("button", name="確認並儲存").click()
+        page.wait_for_load_state("networkidle")
+        page.get_by_role("radio", name="進階").check()
+        assert page.locator('[name="analysis.concurrency"]').input_value() == "3"
         browser.close()

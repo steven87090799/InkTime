@@ -4,12 +4,16 @@ from datetime import datetime, timezone
 import base64
 from hashlib import sha256
 import json
+import math
+import re
 from typing import Any
 from urllib.parse import urlparse
+from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from inktime import __version__
 from inktime.app.db import Database
 from inktime.app.core.security import register_secret
 from inktime.app.domain.analysis.scoring import (
@@ -1069,6 +1073,248 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
 }
 
 
+SETTINGS_SCHEMA_VERSION = 1
+SETTINGS_SNAPSHOT_LIMIT = 100
+RANKING_WEIGHT_KEYS = (
+    "analysis.ranking_memory_weight",
+    "analysis.ranking_beauty_weight",
+    "analysis.ranking_technical_weight",
+    "analysis.ranking_emotion_weight",
+)
+PRIVATE_LOCATION_KEYS = {
+    "home_latitude",
+    "home_longitude",
+    "render.weather_latitude",
+    "render.weather_longitude",
+}
+SENSITIVE_STATUS_KEYS = PRIVATE_LOCATION_KEYS | {
+    "render.font_path",
+    "notification.webhook_url",
+}
+RUNTIME_UNWIRED_KEYS = {
+    "observability.debug_level",
+    "observability.debug_components",
+    "observability.activity_poll_seconds",
+    "budget.daily_warning",
+    "budget.monthly_warning",
+    "budget.job_default",
+    "device.legacy_api_enabled",
+}
+DEVICE_OVERRIDE_KEYS = {
+    "render.layout",
+    "render.frame_orientation",
+    "render.fit_mode",
+    "render.profile",
+    "device.default_timezone",
+    "device.default_schedule",
+    "device.default_rotation",
+    "device.default_panel_profile",
+}
+_BASIC_KEYS = {
+    "general.timezone",
+    "analysis.strategy",
+    "analysis.advanced_caption_enabled",
+    "analysis.caption_variants_enabled",
+    "analysis.ai_mode",
+    "analysis.ai_top_n",
+    "analysis.ai_daily_photo_limit",
+    "analysis.ai_monthly_photo_limit",
+    "analysis.prefilter_enabled",
+    "analysis.prefilter_sensitivity",
+    "render.layout",
+    "render.frame_orientation",
+    "render.fit_mode",
+    "render.caption_wrap_enabled",
+    "render.show_capture_date",
+    "render.show_location",
+    "render.profile",
+    "render.dither",
+    "device.default_schedule",
+    "notification.device_offline_enabled",
+    "backup.schedule_enabled",
+    "backup.retention",
+}
+_HIGH_RISK_KEYS = {
+    "analysis.ai_mode",
+    "analysis.ai_daily_photo_limit",
+    "analysis.ai_monthly_photo_limit",
+    "analysis.concurrency",
+    "analysis.max_retries",
+    "model.low_model",
+    "model.high_model",
+    "budget.daily_warning",
+    "budget.daily_stop",
+    "budget.monthly_warning",
+    "budget.monthly_stop",
+    "budget.job_default",
+    "budget.photo_max",
+    "budget.max_tokens",
+    "security.session_minutes",
+    "notification.webhook_url",
+    "render.font_path",
+    "device.legacy_api_enabled",
+} | PRIVATE_LOCATION_KEYS
+_LABEL_OVERRIDES = {
+    "general.timezone": "系統時區",
+    "analysis.strategy": "新工作分析策略",
+    "analysis.ai_mode": "AI 分析模式",
+    "analysis.ai_top_n": "AI 候選照片上限",
+    "analysis.ai_daily_photo_limit": "每日 AI 分析照片上限",
+    "analysis.ai_monthly_photo_limit": "每月 AI 分析照片上限",
+    "analysis.advanced_caption_enabled": "進階照片描述與相框文案",
+    "analysis.caption_variants_enabled": "相框文案候選版本",
+    "analysis.caption_min_chars": "詳細描述最少字數",
+    "analysis.caption_target_chars": "詳細描述目標字數",
+    "analysis.caption_max_chars": "詳細描述最多字數",
+    "analysis.side_caption_min_chars": "相框短文最少字數",
+    "analysis.side_caption_target_chars": "相框短文目標字數",
+    "analysis.side_caption_max_chars": "相框短文最多字數",
+    "render.caption_wrap_enabled": "Footer 多行文案",
+    "render.caption_max_lines": "Footer 最多行數",
+    "render.caption_min_font_size": "Footer 最小字體",
+    "observability.debug_enabled": "暫時啟用 Debug 記錄",
+    "observability.activity_retention_days": "重要 Activity 保留天數",
+    "observability.activity_max_rows": "Activity 最大列數",
+    "observability.stuck_job_minutes": "工作卡住判定時間",
+    "analysis.concurrency": "AI 分析並行數",
+    "analysis.max_retries": "AI 分析重試次數",
+    "render.layout": "相框版型",
+    "render.frame_orientation": "相框方向",
+    "render.fit_mode": "照片填入方式",
+    "render.profile": "電子紙顯示 Profile",
+    "render.dither": "抖色演算法",
+    "render.dither_strength": "抖色強度",
+    "render.color_distance": "色差計算方式",
+    "security.session_minutes": "登入工作階段時間",
+}
+
+
+def _risk_level(description: str, key: str) -> str:
+    if key in _HIGH_RISK_KEYS:
+        return "high"
+    text = f"{key} {description}"
+    if any(
+        marker in text
+        for marker in (
+            "敏感",
+            "完整照片庫",
+            "密鑰",
+            "Token",
+            "並行",
+            "重試",
+            "刪除",
+            "安全",
+            "成本",
+            "預算",
+            "legacy",
+        )
+    ):
+        return "high"
+    if any(
+        marker in text
+        for marker in ("模型", "分析", "保留", "快取", "通知", "渲染", "排程", "裝置")
+    ):
+        return "medium"
+    return "low"
+
+
+def _effective_scope(key: str, definition: dict[str, Any]) -> str:
+    if key in RUNTIME_UNWIRED_KEYS:
+        return "not_wired"
+    if definition.get("restart"):
+        return "restart"
+    if key.startswith(("analysis.", "model.", "budget.", "scanner.", "worker.", "scheduler.")):
+        return "next_job"
+    if key.startswith("render."):
+        return "next_render"
+    if key.startswith("device.default_"):
+        return "future_device_only"
+    return "dynamic"
+
+
+def _metadata_dependencies(key: str) -> list[dict[str, Any]]:
+    if key == "analysis.caption_variants_enabled":
+        return [{"key": "analysis.advanced_caption_enabled", "equals": True}]
+    if key.startswith("analysis.copy_") or key.startswith("analysis.caption_") or key.startswith(
+        "analysis.side_caption_"
+    ):
+        return [{"key": "analysis.advanced_caption_enabled", "equals": True}]
+    if key in {"render.caption_max_lines", "render.caption_min_font_size"}:
+        return [{"key": "render.caption_wrap_enabled", "equals": True}]
+    if key.startswith(("model.", "budget.")) or key in {
+        "analysis.ai_top_n",
+        "analysis.ai_daily_photo_limit",
+        "analysis.ai_monthly_photo_limit",
+        "analysis.stage_two_threshold",
+        "analysis.max_retries",
+        "analysis.concurrency",
+    }:
+        return [{"key": "analysis.ai_mode", "not_equals": "off"}]
+    return []
+
+
+def _validation_group(key: str) -> str | None:
+    if key.startswith(("analysis.caption_", "analysis.side_caption_")):
+        return "caption_ranges"
+    if key in RANKING_WEIGHT_KEYS:
+        return "ranking_weights"
+    if key.startswith("budget."):
+        return "budget_limits"
+    if key.startswith("observability."):
+        return "activity_retention"
+    return None
+
+
+def _govern_definition(key: str, definition: dict[str, Any]) -> None:
+    risk_description = str(definition.get("risk", "依安全範圍調整"))
+    risk = _risk_level(risk_description, key)
+    cache_impact = key.startswith(("analysis.caption_", "analysis.copy_", "model.")) or key in {
+        "analysis.advanced_caption_enabled",
+        "analysis.caption_variants_enabled",
+    }
+    definition.update(
+        {
+            "label_zh_tw": _LABEL_OVERRIDES.get(
+                key, str(definition.get("description", key)).split("；", 1)[0]
+            ),
+            "risk": risk,
+            "risk_description": risk_description,
+            "safe_fallback": definition["default"],
+            "visibility": "sensitive" if key in SENSITIVE_STATUS_KEYS else "public",
+            "advanced": key not in _BASIC_KEYS or risk == "high",
+            "secret": False,
+            "restart_required": bool(definition.get("restart", False)),
+            "effective_scope": _effective_scope(key, definition),
+            "cache_impact": cache_impact,
+            "reanalysis_impact": cache_impact or key.startswith(
+                ("analysis.prefilter_", "analysis.e6_", "analysis.scoring_")
+            ),
+            "rerender_impact": key.startswith("render."),
+            "device_override_allowed": key in DEVICE_OVERRIDE_KEYS,
+            "dependencies": _metadata_dependencies(key),
+            "conflicts": [],
+            "validation_group": _validation_group(key),
+            "runtime_wired": key not in RUNTIME_UNWIRED_KEYS,
+            "snapshot_allowed": key not in SENSITIVE_STATUS_KEYS,
+            "export_allowed": key not in SENSITIVE_STATUS_KEYS,
+            "existing_release_unchanged": key.startswith("render."),
+            "effective_note": (
+                "只影響下一次渲染；既有 Release 不會改變，必須建立新 Release"
+                if key.startswith("render.")
+                else "只套用到之後新增的裝置"
+                if key.startswith("device.default_")
+                else "已儲存但尚未生效"
+                if key in RUNTIME_UNWIRED_KEYS
+                else None
+            ),
+        }
+    )
+
+
+for _setting_key, _setting_definition in SETTING_DEFINITIONS.items():
+    _govern_definition(_setting_key, _setting_definition)
+
+
 class SettingsRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -1082,7 +1328,9 @@ class SettingsRepository:
                     (
                         key,
                         definition["category"],
-                        json.dumps(definition["default"], ensure_ascii=False),
+                        json.dumps(
+                            definition["default"], ensure_ascii=False, allow_nan=False
+                        ),
                         definition["type"],
                         int(definition.get("restart", False)),
                         now,
@@ -1103,74 +1351,282 @@ class SettingsRepository:
                 ],
             )
 
-    def all(self):
+    def all(self, *, redact_sensitive: bool = False):
         with self.database.session() as connection:
             rows = connection.execute("SELECT * FROM settings ORDER BY category,key").fetchall()
-        return [
-            dict(row)
-            | {"value": json.loads(row["value_json"]), "definition": SETTING_DEFINITIONS.get(row["key"], {})}
-            for row in rows
-        ]
+        result = []
+        for row in rows:
+            definition = SETTING_DEFINITIONS.get(row["key"], {})
+            public_definition = (
+                self.public_metadata(str(row["key"]))
+                if redact_sensitive and row["key"] in SENSITIVE_STATUS_KEYS
+                else definition
+            )
+            value = json.loads(row["value_json"])
+            source = "System" if row["updated_by"] else "Default"
+            public_value = (
+                self._status_value(value)
+                if redact_sensitive and row["key"] in SENSITIVE_STATUS_KEYS
+                else value
+            )
+            runtime_wired = bool(definition.get("runtime_wired", True))
+            result.append(
+                dict(row)
+                | {
+                    "value_json": (
+                        json.dumps(
+                            public_value,
+                            ensure_ascii=False,
+                            allow_nan=False,
+                        )
+                        if redact_sensitive and row["key"] in SENSITIVE_STATUS_KEYS
+                        else row["value_json"]
+                    ),
+                    "value": public_value,
+                    "stored_value": public_value if source == "System" else None,
+                    "effective_value": public_value if runtime_wired else None,
+                    "effective_source": source if runtime_wired else "NotWired",
+                    "definition": public_definition,
+                }
+            )
+        return result
 
     def get(self, key: str, default=None):
         with self.database.session() as connection:
             row = connection.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()
         return json.loads(row["value_json"]) if row else default
 
-    def history(self, limit: int = 100):
+    def history(self, limit: int = 100, *, redact_source_ip: bool = False):
         with self.database.session() as connection:
-            return connection.execute(
+            rows = connection.execute(
                 "SELECT * FROM setting_history ORDER BY id DESC LIMIT ?",
                 (max(1, min(int(limit), 500)),),
             ).fetchall()
+        if not redact_source_ip:
+            return rows
+        return [dict(row) | {"source_ip": "已遮蔽"} for row in rows]
 
-    @staticmethod
-    def _validate_caption_ranges(values: dict[str, Any]) -> None:
-        for prefix, maximum in (("analysis.caption", 1000), ("analysis.side_caption", 120)):
-            minimum = int(values[f"{prefix}_min_chars"])
-            target = int(values[f"{prefix}_target_chars"])
-            upper = int(values[f"{prefix}_max_chars"])
-            if not 0 <= minimum <= target <= upper <= maximum:
-                raise ValueError(f"{prefix} 長度必須符合 0 ≤ min ≤ target ≤ max ≤ {maximum}")
-
-    def _caption_range_values(self, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
-        keys = (
-            "analysis.caption_min_chars", "analysis.caption_target_chars", "analysis.caption_max_chars",
-            "analysis.side_caption_min_chars", "analysis.side_caption_target_chars", "analysis.side_caption_max_chars",
-        )
+    def snapshots(self, limit: int = 50):
         with self.database.session() as connection:
             rows = connection.execute(
-                "SELECT key,value_json FROM settings WHERE key IN (?,?,?,?,?,?)", keys
+                    """
+                    SELECT id,created_at,actor_id,reason,changed_keys_json,
+                           schema_version,application_version,rollback_source_snapshot_id
+                    FROM settings_snapshots ORDER BY created_at DESC,id DESC LIMIT ?
+                    """,
+                    (max(1, min(int(limit), 200)),),
+                ).fetchall()
+        return [
+            dict(row)
+            | {"changed_keys_count": len(json.loads(row["changed_keys_json"]))}
+            for row in rows
+        ]
+
+    def _snapshot_record(self, snapshot_id: str) -> dict[str, Any]:
+        with self.database.session() as connection:
+            row = connection.execute(
+                "SELECT * FROM settings_snapshots WHERE id=?", (snapshot_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(snapshot_id)
+            items = connection.execute(
+                """
+                SELECT key,old_value_json,new_value_json,restored_default
+                FROM settings_snapshot_items WHERE snapshot_id=? ORDER BY key
+                """,
+                (snapshot_id,),
             ).fetchall()
-        values = {row["key"]: json.loads(row["value_json"]) for row in rows}
-        values.update(overrides or {})
-        return values
-
-    def validate_caption_updates(self, updates: dict[str, Any]) -> None:
-        relevant = {
-            key: int(value)
-            for key, value in updates.items()
-            if key in {
-                "analysis.caption_min_chars", "analysis.caption_target_chars", "analysis.caption_max_chars",
-                "analysis.side_caption_min_chars", "analysis.side_caption_target_chars", "analysis.side_caption_max_chars",
+        result = dict(row)
+        result["changed_keys"] = json.loads(result.pop("changed_keys_json"))
+        result["before"] = json.loads(result.pop("before_json"))
+        result["after"] = json.loads(result.pop("after_json"))
+        result["items"] = [
+            {
+                "key": item["key"],
+                "old_value": json.loads(item["old_value_json"]),
+                "new_value": json.loads(item["new_value_json"]),
+                "restored_default": bool(item["restored_default"]),
             }
-        }
-        if relevant:
-            self._validate_caption_ranges(self._caption_range_values(relevant))
+            for item in items
+        ]
+        item_keys = {str(item["key"]) for item in result["items"]}
+        result["items"].extend(
+            {
+                "key": key,
+                "old_value": result["before"].get(key),
+                "new_value": result["after"].get(key),
+                "restored_default": False,
+            }
+            for key in result["changed_keys"]
+            if key not in item_keys
+        )
+        result["items"].sort(key=lambda item: str(item["key"]))
+        return result
 
-    def update(self, key: str, value, *, changed_by: str, source_ip: str, _caption_ranges_checked: bool = False) -> None:
+    def snapshot(self, snapshot_id: str) -> dict[str, Any]:
+        result = self._snapshot_record(snapshot_id)
+        result.pop("source_ip", None)
+        result["before"] = {
+            key: value
+            for key, value in result["before"].items()
+            if key in SETTING_DEFINITIONS and key not in SENSITIVE_STATUS_KEYS
+        }
+        result["after"] = {
+            key: value
+            for key, value in result["after"].items()
+            if key in SETTING_DEFINITIONS and key not in SENSITIVE_STATUS_KEYS
+        }
+        result["items"] = [
+            {
+                **item,
+                "old_value": self._public_snapshot_value(
+                    str(item["key"]), item["old_value"]
+                ),
+                "new_value": self._public_snapshot_value(
+                    str(item["key"]), item["new_value"], changed=True
+                ),
+                "metadata": self.public_metadata(str(item["key"])),
+            }
+            for item in result["items"]
+        ]
+        return result
+
+    @staticmethod
+    def public_metadata(key: str) -> dict[str, Any]:
+        definition = SETTING_DEFINITIONS.get(key)
+        if definition is None:
+            return {
+                "key": key,
+                "label_zh_tw": "已移除設定",
+                "category": "已移除設定",
+                "description": "此設定已從目前版本移除，僅保留歷史紀錄",
+                "risk": "high",
+                "risk_description": "Rollback 會安全跳過此設定",
+                "type": "removed",
+                "default": None,
+                "min": None,
+                "max": None,
+                "choices": None,
+                "choice_labels": None,
+                "safe_fallback": None,
+                "visibility": "removed",
+                "advanced": True,
+                "secret": False,
+                "restart_required": False,
+                "effective_scope": "not_wired",
+                "cache_impact": False,
+                "reanalysis_impact": False,
+                "rerender_impact": False,
+                "device_override_allowed": False,
+                "dependencies": [],
+                "conflicts": [],
+                "validation_group": None,
+                "runtime_wired": False,
+                "existing_release_unchanged": True,
+                "effective_note": "已移除設定；Rollback 會安全跳過",
+                "removed": True,
+            }
+        fields = (
+            "label_zh_tw",
+            "category",
+            "description",
+            "risk",
+            "risk_description",
+            "type",
+            "default",
+            "min",
+            "max",
+            "choices",
+            "choice_labels",
+            "safe_fallback",
+            "visibility",
+            "advanced",
+            "secret",
+            "restart_required",
+            "effective_scope",
+            "cache_impact",
+            "reanalysis_impact",
+            "rerender_impact",
+            "device_override_allowed",
+            "dependencies",
+            "conflicts",
+            "validation_group",
+            "runtime_wired",
+            "existing_release_unchanged",
+            "effective_note",
+        )
+        metadata = {"key": key} | {field: definition.get(field) for field in fields}
+        if key in SENSITIVE_STATUS_KEYS:
+            metadata["default"] = SettingsRepository._status_value(
+                definition.get("default")
+            )
+            metadata["safe_fallback"] = metadata["default"]
+        return metadata
+
+    @staticmethod
+    def _status_value(value: Any, *, changed: bool = False) -> dict[str, str]:
+        configured = value is not None and value != ""
+        if changed:
+            return {"status": "已變更" if configured else "已清除"}
+        return {"status": "已設定" if configured else "未設定"}
+
+    @staticmethod
+    def _public_snapshot_value(
+        key: str, value: Any, *, changed: bool = False
+    ) -> Any:
+        if key not in SETTING_DEFINITIONS:
+            return {"status": "已移除設定"}
+        if key in SENSITIVE_STATUS_KEYS:
+            if (
+                isinstance(value, dict)
+                and value.get("status")
+                in {"未設定", "已設定", "已變更", "已清除"}
+            ):
+                return {"status": str(value["status"])}
+            return SettingsRepository._status_value(value, changed=changed)
+        return value
+
+    @staticmethod
+    def _coerce(key: str, value: Any) -> Any:
         definition = SETTING_DEFINITIONS.get(key)
         if definition is None:
             raise KeyError(key)
         value_type = definition["type"]
         if value_type == "integer":
-            value = int(value)
+            if isinstance(value, bool):
+                raise ValueError(f"{key} 必須是整數")
+            if isinstance(value, int):
+                pass
+            elif isinstance(value, float):
+                if not math.isfinite(value) or not value.is_integer():
+                    raise ValueError(f"{key} 必須是整數")
+                value = int(value)
+            elif isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
+                value = int(value.strip())
+            else:
+                raise ValueError(f"{key} 必須是整數")
         elif value_type == "number":
-            value = float(value)
+            if isinstance(value, bool):
+                raise ValueError(f"{key} 必須是數字")
+            try:
+                value = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{key} 必須是數字") from exc
+            if not math.isfinite(value):
+                raise ValueError(f"{key} 必須是有限數字")
         elif value_type == "boolean":
-            value = value is True or str(value).lower() in {"1", "true", "on", "yes"}
-        else:
-            value = str(value)
+            if isinstance(value, bool):
+                pass
+            elif isinstance(value, str) and value.lower() in {"1", "true", "on", "yes"}:
+                value = True
+            elif isinstance(value, str) and value.lower() in {"0", "false", "off", "no"}:
+                value = False
+            else:
+                raise ValueError(f"{key} 必須是布林值")
+        elif not isinstance(value, str):
+            raise ValueError(f"{key} 必須是文字")
+
+        if isinstance(value, str):
             if "min_length" in definition and len(value.strip()) < definition["min_length"]:
                 raise ValueError(f"{key} 內容不可少於 {definition['min_length']} 個字元")
             if "max_length" in definition and len(value) > definition["max_length"]:
@@ -1210,40 +1666,396 @@ class SettingsRepository:
             and value > definition["max"]
         ):
             raise ValueError(f"{key} 超出合法範圍")
-        if not _caption_ranges_checked:
-            self.validate_caption_updates({key: value})
-        now = datetime.now(timezone.utc).isoformat()
-        encoded = json.dumps(value, ensure_ascii=False)
+        return value
+
+    @staticmethod
+    def _validate_all(values: dict[str, Any]) -> None:
+        SettingsRepository._validate_caption_ranges(values)
+        total = sum(float(values[key]) for key in RANKING_WEIGHT_KEYS)
+        if abs(total - 100.0) > 0.001:
+            raise ValueError("四項排序權重合計必須為 100%")
+        if float(values["budget.daily_warning"]) > float(values["budget.daily_stop"]):
+            raise ValueError("每日預算警告值不可高於停止值")
+        if float(values["budget.monthly_warning"]) > float(values["budget.monthly_stop"]):
+            raise ValueError("每月預算警告值不可高於停止值")
+        if int(values["observability.activity_retention_days"]) < 7:
+            raise ValueError("重要 Activity 至少保留 7 天，以保護錯誤追蹤與安全回復")
+        if int(values["observability.activity_max_rows"]) < 1000:
+            raise ValueError("Activity 最大列數不得低於 1000")
+
+    @staticmethod
+    def _values_from_connection(connection) -> dict[str, Any]:
+        rows = connection.execute("SELECT key,value_json FROM settings").fetchall()
+        values = {
+            key: definition["default"] for key, definition in SETTING_DEFINITIONS.items()
+        }
+        values.update({str(row["key"]): json.loads(row["value_json"]) for row in rows})
+        return values
+
+    def prepare_updates(
+        self, updates: dict[str, Any], *, reject_control_center: bool = False
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        if not isinstance(updates, dict):
+            raise ValueError("設定更新必須是 JSON 物件")
+        normalized: dict[str, Any] = {}
+        for raw_key, value in updates.items():
+            key = str(raw_key)
+            definition = SETTING_DEFINITIONS.get(key)
+            if definition is None:
+                raise KeyError(key)
+            if reject_control_center and definition.get("control_center"):
+                raise PermissionError(key)
+            if not definition.get("runtime_wired", True):
+                raise PermissionError(f"{key} 尚未接上 Runtime，僅供唯讀")
+            normalized[key] = self._coerce(key, value)
         with self.database.session() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                previous = connection.execute(
-                    "SELECT value_json FROM settings WHERE key=?", (key,)
-                ).fetchone()
-                old_summary = previous["value_json"] if previous else "未設定"
+            current = self._values_from_connection(connection)
+        merged = current | normalized
+        self._validate_all(merged)
+        changed = {key: value for key, value in normalized.items() if current.get(key) != value}
+        return changed, current, merged
+
+    @staticmethod
+    def _validate_caption_ranges(values: dict[str, Any]) -> None:
+        for prefix, maximum in (("analysis.caption", 1000), ("analysis.side_caption", 120)):
+            minimum = int(values[f"{prefix}_min_chars"])
+            target = int(values[f"{prefix}_target_chars"])
+            upper = int(values[f"{prefix}_max_chars"])
+            if not 0 <= minimum <= target <= upper <= maximum:
+                raise ValueError(f"{prefix} 長度必須符合 0 ≤ min ≤ target ≤ max ≤ {maximum}")
+
+    def _caption_range_values(self, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+        keys = (
+            "analysis.caption_min_chars", "analysis.caption_target_chars", "analysis.caption_max_chars",
+            "analysis.side_caption_min_chars", "analysis.side_caption_target_chars", "analysis.side_caption_max_chars",
+        )
+        with self.database.session() as connection:
+            rows = connection.execute(
+                "SELECT key,value_json FROM settings WHERE key IN (?,?,?,?,?,?)", keys
+            ).fetchall()
+        values = {row["key"]: json.loads(row["value_json"]) for row in rows}
+        values.update(overrides or {})
+        return values
+
+    def validate_caption_updates(self, updates: dict[str, Any]) -> None:
+        self.prepare_updates(updates)
+
+    @staticmethod
+    def _snapshot_value(key: str, value: Any, *, changed: bool = False) -> Any:
+        if not SETTING_DEFINITIONS[key].get("snapshot_allowed", True):
+            return SettingsRepository._status_value(value, changed=changed)
+        return value
+
+    def _create_snapshot(
+        self,
+        connection,
+        *,
+        before: dict[str, Any],
+        after: dict[str, Any],
+        changed: dict[str, Any],
+        actor_id: str,
+        source_ip: str,
+        reason: str | None,
+        rollback_source_snapshot_id: str | None,
+    ) -> str:
+        snapshot_id = str(uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        safe_before = {
+            key: value
+            for key, value in before.items()
+            if SETTING_DEFINITIONS[key].get("snapshot_allowed", True)
+        }
+        safe_after = {
+            key: value
+            for key, value in after.items()
+            if SETTING_DEFINITIONS[key].get("snapshot_allowed", True)
+        }
+        changed_keys = sorted(changed)
+        connection.execute(
+            """
+            INSERT INTO settings_snapshots(
+                id,created_at,actor_id,source_ip,reason,before_json,after_json,changed_keys_json,
+                schema_version,application_version,rollback_source_snapshot_id
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                snapshot_id,
+                now,
+                actor_id,
+                source_ip[:64],
+                (reason or "").strip()[:500] or None,
+                json.dumps(
+                    safe_before,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    allow_nan=False,
+                ),
+                json.dumps(
+                    safe_after,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    allow_nan=False,
+                ),
+                json.dumps(changed_keys, ensure_ascii=False, allow_nan=False),
+                SETTINGS_SCHEMA_VERSION,
+                __version__,
+                rollback_source_snapshot_id,
+            ),
+        )
+        connection.executemany(
+            """
+            INSERT INTO settings_snapshot_items(
+                snapshot_id,key,old_value_json,new_value_json,restored_default
+            ) VALUES (?,?,?,?,?)
+            """,
+            [
+                (
+                    snapshot_id,
+                    key,
+                    json.dumps(
+                        self._snapshot_value(key, before[key]),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    ),
+                    json.dumps(
+                        self._snapshot_value(key, after[key], changed=True),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    ),
+                    int(after[key] == SETTING_DEFINITIONS[key]["default"]),
+                )
+                for key in changed_keys
+            ],
+        )
+        snapshot_rows = connection.execute(
+            """
+            SELECT id,rollback_source_snapshot_id
+            FROM settings_snapshots ORDER BY created_at DESC,id DESC
+            """
+        ).fetchall()
+        if len(snapshot_rows) > SETTINGS_SNAPSHOT_LIMIT:
+            latest_rollback = next(
+                (
+                    row
+                    for row in snapshot_rows
+                    if row["rollback_source_snapshot_id"] is not None
+                ),
+                None,
+            )
+            protected = set()
+            if latest_rollback is not None:
+                protected.update(
+                    {
+                        str(latest_rollback["id"]),
+                        str(latest_rollback["rollback_source_snapshot_id"]),
+                    }
+                )
+            keep = set(protected)
+            for row in snapshot_rows:
+                if len(keep) >= SETTINGS_SNAPSHOT_LIMIT:
+                    break
+                keep.add(str(row["id"]))
+            removable = [
+                str(row["id"]) for row in snapshot_rows if str(row["id"]) not in keep
+            ]
+            connection.executemany(
+                """
+                UPDATE settings_snapshots SET rollback_source_snapshot_id=NULL
+                WHERE rollback_source_snapshot_id=?
+                """,
+                [(snapshot_id,) for snapshot_id in removable],
+            )
+            connection.executemany(
+                "DELETE FROM settings_snapshots WHERE id=?",
+                [(snapshot_id,) for snapshot_id in removable],
+            )
+        return snapshot_id
+
+    def update_many(
+        self,
+        updates: dict[str, Any],
+        *,
+        changed_by: str,
+        source_ip: str,
+        reason: str | None = None,
+        rollback_source_snapshot_id: str | None = None,
+        reject_control_center: bool = False,
+    ) -> dict[str, Any]:
+        changed, _current, _merged = self.prepare_updates(
+            updates, reject_control_center=reject_control_center
+        )
+        if not changed:
+            return {"updated": 0, "changed_keys": [], "snapshot_id": None}
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.transaction() as connection:
+            before = self._values_from_connection(connection)
+            normalized = {key: self._coerce(key, value) for key, value in changed.items()}
+            after = before | normalized
+            self._validate_all(after)
+            actual = {
+                key: value for key, value in normalized.items() if before.get(key) != value
+            }
+            if not actual:
+                return {"updated": 0, "changed_keys": [], "snapshot_id": None}
+            snapshot_id = self._create_snapshot(
+                connection,
+                before=before,
+                after=after,
+                changed=actual,
+                actor_id=changed_by,
+                source_ip=source_ip,
+                reason=reason,
+                rollback_source_snapshot_id=rollback_source_snapshot_id,
+            )
+            for key, value in actual.items():
+                definition = SETTING_DEFINITIONS[key]
+                encoded = json.dumps(value, ensure_ascii=False, allow_nan=False)
+                previous_summary = json.dumps(
+                    self._snapshot_value(key, before[key]),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                new_summary = json.dumps(
+                    self._snapshot_value(key, value, changed=True),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
                 connection.execute(
                     "UPDATE settings SET value_json=?,updated_by=?,updated_at=? WHERE key=?",
-                    (encoded, changed_by, now, key),
+                    (
+                        encoded,
+                        None if value == definition["default"] else changed_by,
+                        now,
+                        key,
+                    ),
                 )
                 connection.execute(
                     """
-                    INSERT INTO setting_history(key,changed_at,changed_by,old_value_summary,new_value_summary,source_ip,requires_restart)
-                    VALUES (?,?,?,?,?,?,?)
+                    INSERT INTO setting_history(
+                        key,changed_at,changed_by,old_value_summary,new_value_summary,source_ip,
+                        requires_restart
+                    ) VALUES (?,?,?,?,?,?,?)
                     """,
                     (
                         key,
                         now,
                         changed_by,
-                        old_summary[:500],
-                        encoded[:500],
+                        previous_summary[:500],
+                        new_summary[:500],
                         source_ip[:64],
-                        int(definition.get("restart", False)),
+                        int(definition.get("restart_required", False)),
                     ),
                 )
-                connection.execute("COMMIT")
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
+        return {
+            "updated": len(actual),
+            "changed_keys": sorted(actual),
+            "snapshot_id": snapshot_id,
+        }
+
+    def rollback_preview(self, snapshot_id: str) -> dict[str, Any]:
+        target = self._snapshot_record(snapshot_id)
+        target_values = target["before"]
+        target_after = target["after"]
+        snapshot_changed_keys = list(dict.fromkeys(map(str, target["changed_keys"])))
+        recorded_keys = (
+            set(snapshot_changed_keys)
+            | set(map(str, target_values))
+            | set(map(str, target_after))
+            | {str(item["key"]) for item in target["items"]}
+        )
+        with self.database.session() as connection:
+            current = self._values_from_connection(connection)
+        unknown_keys = sorted(
+            key for key in recorded_keys if key not in SETTING_DEFINITIONS
+        )
+        sensitive_unrestorable_keys = sorted(
+            key
+            for key in snapshot_changed_keys
+            if key in SETTING_DEFINITIONS
+            and not SETTING_DEFINITIONS[key].get("snapshot_allowed", True)
+        )
+        unsupported_keys = sorted(
+            key
+            for key in snapshot_changed_keys
+            if key in SETTING_DEFINITIONS
+            and (
+                SETTING_DEFINITIONS[key].get("control_center")
+                or not SETTING_DEFINITIONS[key].get("runtime_wired", True)
+            )
+        )
+        updates = {
+            key: value
+            for key, value in target_values.items()
+            if key in snapshot_changed_keys
+            and key in SETTING_DEFINITIONS
+            and key not in unsupported_keys
+            and key not in sensitive_unrestorable_keys
+            and current.get(key) != value
+        }
+        changed, _before, merged = self.prepare_updates(updates)
+        diff = [
+            {
+                "key": key,
+                "label_zh_tw": SETTING_DEFINITIONS[key]["label_zh_tw"],
+                "current_value": current[key],
+                "target_value": changed[key],
+                "changed_since_snapshot": (
+                    key in target_after and current[key] != target_after[key]
+                ),
+            }
+            for key in sorted(changed)
+        ]
+        overwrites_later_changes = any(
+            item["changed_since_snapshot"] for item in diff
+        )
+        return {
+            "snapshot_id": snapshot_id,
+            "changed_keys": sorted(changed),
+            "unknown_keys": unknown_keys,
+            "unsupported_keys": unsupported_keys,
+            "sensitive_unrestorable_keys": sensitive_unrestorable_keys,
+            "updates": changed,
+            "diff": diff,
+            "rollback_scope": "snapshot_changed_keys_only",
+            "overwrites_changes_after_snapshot": overwrites_later_changes,
+            "rollback_notice": (
+                "只回復此 Snapshot 的 changed_keys。標示為 Snapshot 後又變更的項目，"
+                "若繼續 Rollback，會以目標值覆蓋目前值。"
+            ),
+            "valid": True,
+            "effective_values": {key: merged[key] for key in changed},
+        }
+
+    def rollback(
+        self,
+        snapshot_id: str,
+        *,
+        changed_by: str,
+        source_ip: str,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        preview = self.rollback_preview(snapshot_id)
+        return self.update_many(
+            preview["updates"],
+            changed_by=changed_by,
+            source_ip=source_ip,
+            reason=reason or f"Rollback 至 Snapshot {snapshot_id}",
+            rollback_source_snapshot_id=snapshot_id,
+        )
+
+    def update(
+        self,
+        key: str,
+        value,
+        *,
+        changed_by: str,
+        source_ip: str,
+        _caption_ranges_checked: bool = False,
+    ) -> None:
+        del _caption_ranges_checked
+        self.update_many(
+            {key: value}, changed_by=changed_by, source_ip=source_ip
+        )
 
 
 class SecretStore:

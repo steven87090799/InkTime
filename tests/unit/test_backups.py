@@ -61,6 +61,25 @@ def seed(database: Database, *, extra_photo: bool = False) -> None:
             ) VALUES ('backup.retention','備份','14','integer',0,datetime('now'))
             """
         )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO settings_snapshots(
+                id,created_at,actor_id,source_ip,reason,before_json,after_json,
+                changed_keys_json,schema_version,application_version
+            ) VALUES (
+                'settings-snapshot',datetime('now'),'admin','127.0.0.1','備份測試',
+                '{"backup.retention":14}','{"backup.retention":21}',
+                '["backup.retention"]',1,'test'
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO settings_snapshot_items(
+                snapshot_id,key,old_value_json,new_value_json,restored_default
+            ) VALUES ('settings-snapshot','backup.retention','14','21',0)
+            """
+        )
         if extra_photo:
             connection.execute(
                 """
@@ -84,18 +103,22 @@ def test_backup_excludes_secrets_and_restores_analysis_and_photo_state(tmp_path)
     manifest = service.validate(archive)
 
     assert manifest["backup_format_version"] == 2
-    assert manifest["database_schema_version"] == 17
+    assert manifest["database_schema_version"] == 18
     assert manifest["secrets_policy"] == "excluded"
     assert manifest["important_table_counts"]["photos"] == 1
     assert manifest["important_table_counts"]["releases"] == 1
     assert manifest["important_table_counts"]["jobs"] == 1
     assert manifest["important_table_counts"]["display_history"] == 1
+    assert manifest["important_table_counts"]["settings_snapshots"] == 1
+    assert manifest["important_table_counts"]["settings_snapshot_items"] == 1
     with zipfile.ZipFile(archive) as bundle:
         backed_up_database = tmp_path / "backed-up.sqlite3"
         backed_up_database.write_bytes(bundle.read("inktime.sqlite3"))
         settings = json.loads(bundle.read("settings.json"))
     with Database(backed_up_database).session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM secrets").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM settings_snapshots").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM settings_snapshot_items").fetchone()[0] == 1
     assert settings["secrets_included"] is False
     assert settings["settings"][0]["key"] == "backup.retention"
     assert b"full-api-key-must-not-be-backed-up" not in backed_up_database.read_bytes()
@@ -103,7 +126,7 @@ def test_backup_excludes_secrets_and_restores_analysis_and_photo_state(tmp_path)
     seed(database, extra_photo=True)
     restored = service.restore(archive)
 
-    assert restored["schema_version"] == 17
+    assert restored["schema_version"] == 18
     assert Path(restored["safety_copy"]).is_file()
     with database.session() as connection:
         photo = connection.execute(
