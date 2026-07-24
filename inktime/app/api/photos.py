@@ -15,6 +15,7 @@ from inktime.app.domain.analysis.scoring import (
     score_band,
 )
 from inktime.app.web.access import administrator_required, login_required
+from inktime.app.domain.photos.orientation import resolve_effective_orientation
 
 
 bp = Blueprint("photos", __name__)
@@ -334,6 +335,35 @@ def update_photo(photo_id: str):
     except KeyError:
         abort(404)
     return {"status": "ok"}
+
+
+@bp.get("/api/v1/photos/<photo_id>/orientation")
+@login_required
+def photo_orientation_status(photo_id: str):
+    photo = _repository().get_with_path(photo_id)
+    if photo is None:
+        abort(404)
+    return resolve_effective_orientation(
+        exif_orientation=photo["exif_orientation_original"] if "exif_orientation_original" in photo.keys() else photo["orientation"],
+        manual_rotation_cw=photo["manual_orientation_rotation_cw"] if "manual_orientation_rotation_cw" in photo.keys() else None,
+        ai_rotation_cw=photo["visual_orientation_rotation_cw"] if "visual_orientation_rotation_cw" in photo.keys() else None,
+        ai_confidence=photo["visual_orientation_confidence"] if "visual_orientation_confidence" in photo.keys() else None,
+        ai_ambiguous=bool(photo["visual_orientation_ambiguous"]) if "visual_orientation_ambiguous" in photo.keys() else True,
+    ).as_dict()
+
+
+@bp.put("/api/v1/photos/<photo_id>/orientation")
+@administrator_required
+def update_photo_orientation(photo_id: str):
+    payload = request.get_json(silent=True) or {}
+    rotation = payload.get("rotation_cw")
+    try:
+        _repository().set_manual_orientation(photo_id, rotation, str(g.user["id"]))
+    except KeyError:
+        abort(404)
+    except ValueError as exc:
+        abort(400, description=f"IMG-004 {exc}")
+    return photo_orientation_status(photo_id)
 
 
 @bp.patch("/api/v1/photos/<photo_id>/crop")

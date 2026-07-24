@@ -22,6 +22,7 @@ from inktime.app.domain.rendering import (
     evaluate_e6_suitability,
     fit_with_focus,
 )
+from inktime.app.domain.photos.orientation import resolve_effective_orientation
 from inktime.app.domain.rendering.adaptive_layout import (
     photo_orientation,
     select_pair_candidate,
@@ -433,6 +434,15 @@ class RenderService:
 
         with Image.open(path) as opened:
             source = ImageOps.exif_transpose(opened).convert("RGB")
+            orientation_info = resolve_effective_orientation(
+                exif_orientation=photo["exif_orientation_original"] if "exif_orientation_original" in photo.keys() else photo.get("orientation"),
+                manual_rotation_cw=photo["manual_orientation_rotation_cw"] if "manual_orientation_rotation_cw" in photo.keys() else None,
+                ai_rotation_cw=photo["visual_orientation_rotation_cw"] if "visual_orientation_rotation_cw" in photo.keys() else None,
+                ai_confidence=photo["visual_orientation_confidence"] if "visual_orientation_confidence" in photo.keys() else None,
+                ai_ambiguous=bool(photo["visual_orientation_ambiguous"]) if "visual_orientation_ambiguous" in photo.keys() else True,
+            )
+            if orientation_info.rotation_degrees:
+                source = source.rotate(-orientation_info.rotation_degrees, expand=True)
             if layout_key == "adaptive_memory":
                 footer_height = 76 if effective_orientation == "landscape" else 96
                 source_orientation = photo_orientation(source.size)

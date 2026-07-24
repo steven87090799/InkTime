@@ -1769,7 +1769,21 @@ class PhotoRepository:
                 connection.execute(
                     "UPDATE photos SET status='analyzed',updated_at=? WHERE id=?", (now, photo_id)
                 )
+                visual = result.get("visual_orientation") or {}
+                connection.execute("UPDATE photos SET exif_orientation_original=COALESCE(exif_orientation_original,orientation),visual_orientation_rotation_cw=?,visual_orientation_confidence=?,visual_orientation_ambiguous=?,visual_orientation_evidence_json=?,updated_at=? WHERE id=?", (visual.get("rotation_cw"), visual.get("confidence"), int(bool(visual.get("ambiguous", True))), json.dumps(visual.get("evidence", []), ensure_ascii=False), now, photo_id))
                 connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+
+    def set_manual_orientation(self, photo_id: str, rotation_cw: int | None, changed_by: str) -> dict:
+        if rotation_cw not in {0, 90, 180, 270, None}:
+            raise ValueError("旋轉角度不合法")
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.transaction() as connection:
+            row = connection.execute("SELECT id FROM photos WHERE id=?", (photo_id,)).fetchone()
+            if row is None:
+                raise KeyError(photo_id)
+            connection.execute("UPDATE photos SET manual_orientation_rotation_cw=?,manual_orientation_updated_at=?,manual_orientation_updated_by=?,updated_at=? WHERE id=?", (rotation_cw, now if rotation_cw is not None else None, changed_by if rotation_cw is not None else None, now, photo_id))
+            connection.execute("INSERT INTO photo_events(photo_id,event,changes_json,changed_by,created_at) VALUES (?,'manual_orientation',?,?,?)", (photo_id, json.dumps({"rotation_cw": rotation_cw}, ensure_ascii=False), changed_by, now))
+        return {"rotation_cw": rotation_cw}

@@ -839,6 +839,18 @@ MIGRATIONS = (
         "CREATE INDEX IF NOT EXISTS idx_settings_snapshot_items_key ON settings_snapshot_items(key,snapshot_id)",
         "CREATE INDEX IF NOT EXISTS idx_settings_snapshots_rollback_source ON settings_snapshots(rollback_source_snapshot_id)",
     )),
+    Migration(19, "加入照片視覺方向校正與人工設定", (
+        "ALTER TABLE photos ADD COLUMN exif_orientation_original INTEGER",
+        "ALTER TABLE photos ADD COLUMN visual_orientation_rotation_cw INTEGER CHECK(visual_orientation_rotation_cw IN (0,90,180,270) OR visual_orientation_rotation_cw IS NULL)",
+        "ALTER TABLE photos ADD COLUMN visual_orientation_confidence REAL CHECK(visual_orientation_confidence IS NULL OR visual_orientation_confidence BETWEEN 0 AND 1)",
+        "ALTER TABLE photos ADD COLUMN visual_orientation_ambiguous INTEGER NOT NULL DEFAULT 1 CHECK(visual_orientation_ambiguous IN (0,1))",
+        "ALTER TABLE photos ADD COLUMN visual_orientation_evidence_json TEXT",
+        "ALTER TABLE photos ADD COLUMN manual_orientation_rotation_cw INTEGER CHECK(manual_orientation_rotation_cw IN (0,90,180,270) OR manual_orientation_rotation_cw IS NULL)",
+        "ALTER TABLE photos ADD COLUMN manual_orientation_updated_at TEXT",
+        "ALTER TABLE photos ADD COLUMN manual_orientation_updated_by TEXT",
+        "UPDATE photos SET exif_orientation_original=orientation WHERE exif_orientation_original IS NULL",
+        "CREATE INDEX IF NOT EXISTS idx_photos_visual_orientation ON photos(manual_orientation_rotation_cw,visual_orientation_rotation_cw)",
+    )),
 )
 
 

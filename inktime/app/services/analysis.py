@@ -50,7 +50,7 @@ PREFILTER_PROFILES = {
         "short_edge": 480,
     },
 }
-PROMPT_VERSION = "photo-quality-v3"
+PROMPT_VERSION = "photo-quality-v4-visual-orientation"
 
 
 class PhotoAnalysisService:
@@ -135,6 +135,7 @@ class PhotoAnalysisService:
             "should_keep": not screenshot,
             "sensitive": False,
             "reason": "依本地清晰度、曝光與截圖特徵判定",
+            "visual_orientation": {"rotation_cw": None, "confidence": 0.0, "ambiguous": True, "evidence": ["insufficient_visual_cues"]},
         }
 
     @staticmethod
