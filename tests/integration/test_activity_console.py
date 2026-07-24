@@ -61,7 +61,6 @@ def test_caption_and_observability_settings_coexist_and_caption_events_are_redac
             "analysis.caption_min_chars": 121,
             "analysis.advanced_caption_enabled": True,
             "observability.debug_enabled": True,
-            "observability.activity_poll_seconds": 6,
         },
         headers={
             "X-CSRF-Token": csrf(client),
@@ -70,10 +69,9 @@ def test_caption_and_observability_settings_coexist_and_caption_events_are_redac
     )
     assert response.status_code == 200
     assert settings.get("analysis.caption_min_chars") == 121
-    assert settings.get("observability.activity_poll_seconds") == 6
     assert analysis._prompt_version(analysis._caption_controls()) != before
     fingerprint = analysis._prompt_version(analysis._caption_controls())
-    settings.update("observability.activity_poll_seconds", 7, changed_by="test", source_ip="test")
+    settings.update("observability.stuck_job_minutes", 6, changed_by="test", source_ip="test")
     assert analysis._prompt_version(analysis._caption_controls()) == fingerprint
     app.extensions["inktime_observability_service"].record(
         "DEBUG", "analysis", "caption_cache_hit", "Prompt Bearer secret-token",

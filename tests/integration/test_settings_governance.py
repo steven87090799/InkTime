@@ -5,7 +5,10 @@ import sqlite3
 
 import pytest
 
-from inktime.app.repositories.settings import SETTING_DEFINITIONS
+from inktime.app.repositories.settings import (
+    DEVICE_OVERRIDE_KEYS,
+    SETTING_DEFINITIONS,
+)
 from tests.conftest import create_admin, csrf, login
 
 
@@ -198,6 +201,94 @@ def test_private_locations_are_redacted_from_snapshot_and_export(client, app):
     assert "render.font_path" not in document["settings"]
     assert "/Users/example/private-font.ttf" not in exported.get_data(as_text=True)
     assert "webhook.bearer_token" not in exported.get_data(as_text=True)
+    assert exported.headers["Cache-Control"] == "no-store"
+
+
+def test_viewer_html_and_snapshot_apis_never_receive_sensitive_values(client, app):
+    create_admin(app)
+    login(client)
+    exact_latitude = 24.987654
+    exact_font_path = "/Users/example/private-font-unique.ttf"
+    exact_webhook = "https://hooks.example.test/private/path?token=unique-token"
+    changed = _post(
+        client,
+        "/api/v1/settings",
+        {
+            "home_latitude": exact_latitude,
+            "render.font_path": exact_font_path,
+            "notification.webhook_url": exact_webhook,
+        },
+        confirm=True,
+    )
+    assert changed.status_code == 200
+    snapshot_id = changed.json["snapshot_id"]
+
+    app.extensions["inktime_auth_repository"].create_user(
+        "viewer-sensitive", "viewer-password-long", "viewer"
+    )
+    login(client, "viewer-sensitive", "viewer-password-long")
+    settings_html = client.get("/settings").get_data(as_text=True)
+    snapshot_body = client.get(
+        f"/api/v1/settings/snapshots/{snapshot_id}"
+    ).get_data(as_text=True)
+    snapshot_list = client.get("/api/v1/settings/snapshots").get_data(as_text=True)
+    metadata = client.get("/api/v1/settings/metadata").get_data(as_text=True)
+
+    for secret in (
+        str(exact_latitude),
+        exact_font_path,
+        exact_webhook,
+        "unique-token",
+        "127.0.0.1",
+    ):
+        assert secret not in settings_html
+        assert secret not in snapshot_body
+        assert secret not in snapshot_list
+    assert str(exact_latitude) not in metadata
+    assert exact_font_path not in metadata
+    assert "source_ip" not in snapshot_body
+    assert "source_ip" not in snapshot_list
+    assert "已設定" in settings_html
+
+
+def test_webhook_url_path_query_and_token_never_enter_snapshot_or_export(client, app):
+    create_admin(app)
+    login(client)
+    webhook = "https://hooks.example.test/private/path?token=do-not-store"
+    changed = _post(
+        client,
+        "/api/v1/settings",
+        {"notification.webhook_url": webhook},
+        confirm=True,
+    )
+    assert changed.status_code == 200
+    snapshot_id = changed.json["snapshot_id"]
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute(
+            """
+            SELECT before_json,after_json FROM settings_snapshots WHERE id=?
+            """,
+            (snapshot_id,),
+        ).fetchone()
+        item = connection.execute(
+            """
+            SELECT old_value_json,new_value_json
+            FROM settings_snapshot_items WHERE snapshot_id=? AND key=?
+            """,
+            (snapshot_id, "notification.webhook_url"),
+        ).fetchone()
+    persisted_snapshot = " ".join(
+        (row["before_json"], row["after_json"], item["old_value_json"], item["new_value_json"])
+    )
+    assert "/private/path" not in persisted_snapshot
+    assert "do-not-store" not in persisted_snapshot
+    exported = client.get("/api/v1/settings/export")
+    assert exported.headers["Cache-Control"] == "no-store"
+    assert "/private/path" not in exported.get_data(as_text=True)
+    assert "do-not-store" not in exported.get_data(as_text=True)
+    assert json.loads(exported.get_data(as_text=True))["sensitive_status"][
+        "notification.webhook_url"
+    ] == {"configured": True}
 
 
 def test_rollback_preview_and_apply_create_new_snapshot(client, app):
@@ -236,6 +327,137 @@ def test_rollback_preview_and_apply_create_new_snapshot(client, app):
     assert snapshots[0]["rollback_source_snapshot_id"] == source_snapshot
 
 
+def test_rollback_preview_is_exact_changed_keys_diff_and_marks_later_overwrite(client, app):
+    create_admin(app)
+    login(client)
+    source = _post(
+        client,
+        "/api/v1/settings",
+        {"analysis.concurrency": 2},
+        confirm=True,
+    ).json["snapshot_id"]
+    assert _post(
+        client,
+        "/api/v1/settings",
+        {"general.timezone": "UTC"},
+    ).status_code == 200
+    assert _post(
+        client,
+        "/api/v1/settings",
+        {"analysis.concurrency": 3},
+        confirm=True,
+    ).status_code == 200
+
+    preview = _post(
+        client,
+        f"/api/v1/settings/snapshots/{source}/rollback-preview",
+        {},
+    )
+    assert preview.status_code == 200
+    assert preview.json["rollback_scope"] == "snapshot_changed_keys_only"
+    assert preview.json["updates"] == {"analysis.concurrency": 1}
+    assert preview.json["diff"] == [
+        {
+            "key": "analysis.concurrency",
+            "label_zh_tw": "AI 分析並行數",
+            "current_value": 3,
+            "target_value": 1,
+            "changed_since_snapshot": True,
+        }
+    ]
+    assert preview.json["overwrites_changes_after_snapshot"] is True
+    assert "general.timezone" not in preview.json["updates"]
+
+
+def test_removed_legacy_snapshot_key_is_serialized_and_skipped_safely(client, app):
+    create_admin(app)
+    login(client)
+    snapshot_id = "legacy-removed-setting"
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            """
+            INSERT INTO settings_snapshots(
+                id,created_at,actor_id,source_ip,reason,before_json,after_json,
+                changed_keys_json,schema_version,application_version
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                snapshot_id,
+                "2026-07-24T00:00:00+00:00",
+                "legacy-admin",
+                "192.0.2.55",
+                "legacy",
+                '{"removed.private_key":"old-value"}',
+                '{"removed.private_key":"new-value"}',
+                '["removed.private_key"]',
+                0,
+                "legacy",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO settings_snapshot_items(
+                snapshot_id,key,old_value_json,new_value_json,restored_default
+            ) VALUES (?,?,?,?,0)
+            """,
+            (
+                snapshot_id,
+                "removed.private_key",
+                '"old-value"',
+                '"new-value"',
+            ),
+        )
+
+    detail = client.get(f"/api/v1/settings/snapshots/{snapshot_id}")
+    assert detail.status_code == 200
+    assert detail.json["items"][0]["metadata"]["label_zh_tw"] == "已移除設定"
+    assert detail.json["items"][0]["metadata"]["removed"] is True
+    assert detail.json["items"][0]["old_value"] == {"status": "已移除設定"}
+    assert "old-value" not in detail.get_data(as_text=True)
+
+    preview = _post(
+        client,
+        f"/api/v1/settings/snapshots/{snapshot_id}/rollback-preview",
+        {},
+    )
+    assert preview.status_code == 200
+    assert preview.json["unknown_keys"] == ["removed.private_key"]
+    assert preview.json["updates"] == {}
+    applied = _post(
+        client,
+        f"/api/v1/settings/snapshots/{snapshot_id}/rollback",
+        {"confirm": True},
+    )
+    assert applied.status_code == 200
+    assert applied.json["updated"] == 0
+
+
+def test_sensitive_snapshot_keys_require_manual_rollback(client, app):
+    create_admin(app)
+    login(client)
+    source = _post(
+        client,
+        "/api/v1/settings",
+        {
+            "home_latitude": 23.456789,
+            "notification.webhook_url": "https://example.test/hook?token=manual",
+        },
+        confirm=True,
+    ).json["snapshot_id"]
+    preview = _post(
+        client,
+        f"/api/v1/settings/snapshots/{source}/rollback-preview",
+        {},
+    )
+    assert preview.status_code == 200
+    assert preview.json["sensitive_unrestorable_keys"] == [
+        "home_latitude",
+        "notification.webhook_url",
+    ]
+    assert preview.json["updates"] == {}
+    assert preview.json["changed_keys"] == []
+
+
 def test_import_preview_has_no_side_effect_and_apply_skips_unknown_keys(client, app):
     create_admin(app)
     login(client)
@@ -265,6 +487,87 @@ def test_import_preview_has_no_side_effect_and_apply_skips_unknown_keys(client, 
     )
     assert applied.status_code == 200
     assert app.extensions["inktime_settings_repository"].get("analysis.concurrency") == 3
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_numbers_are_rejected(client, app, invalid):
+    create_admin(app)
+    login(client)
+    response = _post(
+        client,
+        "/api/v1/settings",
+        {"analysis.stage_two_threshold": invalid},
+        confirm=True,
+    )
+    assert response.status_code == 400
+    assert "有限數字" in response.json["message"]
+
+
+def test_fractional_integer_is_rejected_without_truncation(client, app):
+    create_admin(app)
+    login(client)
+    response = _post(
+        client,
+        "/api/v1/settings",
+        {"analysis.concurrency": 1.9},
+        confirm=True,
+    )
+    assert response.status_code == 400
+    assert app.extensions["inktime_settings_repository"].get("analysis.concurrency") == 1
+
+
+def test_runtime_unwired_setting_is_read_only_for_api_import_and_ui(client, app):
+    create_admin(app)
+    login(client)
+    direct = _post(
+        client,
+        "/api/v1/settings",
+        {"observability.debug_level": "detailed"},
+        confirm=True,
+    )
+    assert direct.status_code == 400
+    assert "僅供唯讀" in direct.json["message"]
+
+    document = {
+        "format": "inktime-settings",
+        "version": 1,
+        "settings": {"observability.debug_level": "detailed"},
+    }
+    preview = _post(client, "/api/v1/settings/import-preview", document)
+    assert preview.status_code == 200
+    assert preview.json["changes"] == {}
+    assert preview.json["blocked_keys"] == ["observability.debug_level"]
+    assert "尚未接上 Runtime" in preview.json["blocked_reasons"][
+        "observability.debug_level"
+    ]
+
+    body = client.get("/settings").get_data(as_text=True)
+    assert 'data-key="observability.debug_level"' in body
+    assert 'data-scope="not_wired"' in body
+    assert "已儲存但尚未生效／尚未支援" in body
+    assert 'name="observability.debug_level" disabled' in body
+
+
+def test_device_override_and_effective_scope_metadata_use_actual_whitelists():
+    allowed = {
+        key
+        for key, definition in SETTING_DEFINITIONS.items()
+        if definition["device_override_allowed"]
+    }
+    assert allowed == DEVICE_OVERRIDE_KEYS
+    assert SETTING_DEFINITIONS["render.layout"]["device_override_allowed"] is True
+    assert SETTING_DEFINITIONS["render.dither"]["device_override_allowed"] is False
+    assert SETTING_DEFINITIONS["render.layout"]["effective_scope"] == "next_render"
+    assert (
+        SETTING_DEFINITIONS["device.default_schedule"]["effective_scope"]
+        == "future_device_only"
+    )
+    assert (
+        SETTING_DEFINITIONS["observability.debug_level"]["effective_scope"]
+        == "not_wired"
+    )
+    assert SETTING_DEFINITIONS["render.layout"]["existing_release_unchanged"] is True
+    assert "建立新 Release" in SETTING_DEFINITIONS["render.layout"]["effective_note"]
 
 
 def test_snapshot_retention_is_bounded_and_keeps_latest_rollback_source(app):
@@ -331,6 +634,10 @@ def test_ui_contains_dirty_search_filter_snapshot_and_accessibility_contracts(cl
         'id="snapshot-dialog"',
         'id="import-dialog"',
         'role="alert"',
+        "Rollback 實際 Diff",
+        "敏感設定無法自動 Rollback",
+        "只回復該 Snapshot 的 changed_keys",
+        "既有 Release 不會改變",
     ):
         assert marker in body
     assert "完整裝置群組覆寫" not in body

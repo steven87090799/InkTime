@@ -26,9 +26,12 @@ bp = Blueprint("settings", __name__)
 @bp.get("/settings")
 @login_required
 def settings_page():
+    is_administrator = g.user["role"] == "administrator"
     rows = [
         row
-        for row in current_app.extensions["inktime_settings_repository"].all()
+        for row in current_app.extensions["inktime_settings_repository"].all(
+            redact_sensitive=not is_administrator
+        )
         if row["definition"] and not row["definition"].get("control_center")
     ]
     categories = {}
@@ -41,7 +44,9 @@ def settings_page():
         categories=categories,
         setting_count=len(rows),
         feature_flags=feature_flags,
-        history=current_app.extensions["inktime_settings_repository"].history(100),
+        history=current_app.extensions["inktime_settings_repository"].history(
+            100, redact_source_ip=not is_administrator
+        ),
         snapshots=current_app.extensions["inktime_settings_repository"].snapshots(30),
         deployment={
             "docker": Path("/.dockerenv").exists(),
@@ -84,7 +89,7 @@ def update_settings():
             reject_control_center=True,
         )
     except PermissionError as exc:
-        abort(400, description=f"SET-001 請從評分控制中心修改：{exc}")
+        abort(400, description=f"SET-001 {_permission_error_message(exc)}")
     except KeyError as exc:
         abort(400, description=f"SET-001 未知設定：{exc.args[0]}")
     except (TypeError, ValueError) as exc:
@@ -115,22 +120,23 @@ def _bounded_counts() -> dict[str, int]:
 
 
 def _impact(changed: dict[str, object]) -> dict[str, object]:
-    definitions = [SETTING_DEFINITIONS[key] for key in changed]
-    changed_keys = sorted(changed)
+    known = {key: value for key, value in changed.items() if key in SETTING_DEFINITIONS}
+    definitions = [SETTING_DEFINITIONS[key] for key in known]
+    changed_keys = sorted(known)
     cache_changed = any(bool(definition["cache_impact"]) for definition in definitions)
     reanalysis = any(bool(definition["reanalysis_impact"]) for definition in definitions)
     rerender = any(bool(definition["rerender_impact"]) for definition in definitions)
-    ranking_only = bool(changed) and set(changed).issubset(set(RANKING_WEIGHT_KEYS))
+    ranking_only = bool(known) and set(known).issubset(set(RANKING_WEIGHT_KEYS))
     counts = _bounded_counts()
     warnings = [
         f"{SETTING_DEFINITIONS[key]['label_zh_tw']}目前尚未接上 runtime 動態讀取"
-        for key in changed
+        for key in known
         if not SETTING_DEFINITIONS[key]["runtime_wired"]
     ]
-    if "analysis.ai_mode" in changed and changed["analysis.ai_mode"] == "full_library":
+    if "analysis.ai_mode" in known and known["analysis.ai_mode"] == "full_library":
         warnings.append("完整照片庫 AI 分析屬高風險變更；套用前需再次確認")
     if any(
-        key in changed
+        key in known
         for key in (
             "budget.daily_stop",
             "budget.monthly_stop",
@@ -163,7 +169,22 @@ def _impact(changed: dict[str, object]) -> dict[str, object]:
             "裝置群組覆寫",
             "可靠 Provider 成本估算",
         ],
+        "existing_releases_unchanged": any(
+            bool(definition["rerender_impact"]) for definition in definitions
+        ),
+        "release_notice": (
+            "既有 Release 不會因設定修改而改變；必須建立新 Release 才會套用新渲染設定"
+            if rerender
+            else None
+        ),
     }
+
+
+def _permission_error_message(exc: PermissionError) -> str:
+    key = str(exc)
+    if "尚未接上 Runtime" in key:
+        return key
+    return f"請從評分控制中心修改：{key}"
 
 
 def _confirmation_reasons(
@@ -219,7 +240,7 @@ def preview_settings():
         )
     except PermissionError as exc:
         return _impact({}) | {
-            "validation_errors": [f"請從評分控制中心修改：{exc}"],
+            "validation_errors": [_permission_error_message(exc)],
             "valid": False,
         }
     except KeyError as exc:
@@ -267,7 +288,9 @@ def setting_snapshot(snapshot_id: str):
     except KeyError:
         abort(404, description="SET-004 找不到設定 Snapshot")
     changed_values = {
-        str(item["key"]): item["new_value"] for item in snapshot["items"]
+        str(item["key"]): item["new_value"]
+        for item in snapshot["items"]
+        if str(item["key"]) in SETTING_DEFINITIONS
     }
     return snapshot | {"impact": _impact(changed_values)}
 
@@ -336,18 +359,29 @@ def _export_document() -> dict[str, object]:
 @administrator_required
 def export_settings():
     response = make_response(
-        json.dumps(_export_document(), ensure_ascii=False, indent=2, sort_keys=True)
+        json.dumps(
+            _export_document(),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
     )
     response.headers["Content-Type"] = "application/json; charset=utf-8"
     response.headers[
         "Content-Disposition"
     ] = "attachment; filename=inktime-settings.json"
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 
 def _protected_import_reason(key: str) -> str | None:
     if key in SENSITIVE_STATUS_KEYS:
-        return "敏感位置或私人路徑只能在本機個別設定，不接受一般匯入"
+        return "敏感位置、私人路徑或 Webhook URI 只能在本機個別設定，不接受一般匯入"
+    if key in SETTING_DEFINITIONS and not SETTING_DEFINITIONS[key].get(
+        "runtime_wired", True
+    ):
+        return "尚未接上 Runtime，僅供唯讀"
     if key in SETTING_DEFINITIONS and (
         SETTING_DEFINITIONS[key].get("control_center")
         or SETTING_DEFINITIONS[key].get("secret")

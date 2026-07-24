@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 import base64
 from hashlib import sha256
 import json
+import math
+import re
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -1085,7 +1087,10 @@ PRIVATE_LOCATION_KEYS = {
     "render.weather_latitude",
     "render.weather_longitude",
 }
-SENSITIVE_STATUS_KEYS = PRIVATE_LOCATION_KEYS | {"render.font_path"}
+SENSITIVE_STATUS_KEYS = PRIVATE_LOCATION_KEYS | {
+    "render.font_path",
+    "notification.webhook_url",
+}
 RUNTIME_UNWIRED_KEYS = {
     "observability.debug_level",
     "observability.debug_components",
@@ -1094,6 +1099,16 @@ RUNTIME_UNWIRED_KEYS = {
     "budget.monthly_warning",
     "budget.job_default",
     "device.legacy_api_enabled",
+}
+DEVICE_OVERRIDE_KEYS = {
+    "render.layout",
+    "render.frame_orientation",
+    "render.fit_mode",
+    "render.profile",
+    "device.default_timezone",
+    "device.default_schedule",
+    "device.default_rotation",
+    "device.default_panel_profile",
 }
 _BASIC_KEYS = {
     "general.timezone",
@@ -1204,10 +1219,16 @@ def _risk_level(description: str, key: str) -> str:
 
 
 def _effective_scope(key: str, definition: dict[str, Any]) -> str:
+    if key in RUNTIME_UNWIRED_KEYS:
+        return "not_wired"
     if definition.get("restart"):
         return "restart"
     if key.startswith(("analysis.", "model.", "budget.", "scanner.", "worker.", "scheduler.")):
         return "next_job"
+    if key.startswith("render."):
+        return "next_render"
+    if key.startswith("device.default_"):
+        return "future_device_only"
     return "dynamic"
 
 
@@ -1269,15 +1290,23 @@ def _govern_definition(key: str, definition: dict[str, Any]) -> None:
                 ("analysis.prefilter_", "analysis.e6_", "analysis.scoring_")
             ),
             "rerender_impact": key.startswith("render."),
-            "device_override_allowed": key.startswith("render.") or key.startswith(
-                "device.default_"
-            ),
+            "device_override_allowed": key in DEVICE_OVERRIDE_KEYS,
             "dependencies": _metadata_dependencies(key),
             "conflicts": [],
             "validation_group": _validation_group(key),
             "runtime_wired": key not in RUNTIME_UNWIRED_KEYS,
             "snapshot_allowed": key not in SENSITIVE_STATUS_KEYS,
             "export_allowed": key not in SENSITIVE_STATUS_KEYS,
+            "existing_release_unchanged": key.startswith("render."),
+            "effective_note": (
+                "只影響下一次渲染；既有 Release 不會改變，必須建立新 Release"
+                if key.startswith("render.")
+                else "只套用到之後新增的裝置"
+                if key.startswith("device.default_")
+                else "已儲存但尚未生效"
+                if key in RUNTIME_UNWIRED_KEYS
+                else None
+            ),
         }
     )
 
@@ -1299,7 +1328,9 @@ class SettingsRepository:
                     (
                         key,
                         definition["category"],
-                        json.dumps(definition["default"], ensure_ascii=False),
+                        json.dumps(
+                            definition["default"], ensure_ascii=False, allow_nan=False
+                        ),
                         definition["type"],
                         int(definition.get("restart", False)),
                         now,
@@ -1320,22 +1351,42 @@ class SettingsRepository:
                 ],
             )
 
-    def all(self):
+    def all(self, *, redact_sensitive: bool = False):
         with self.database.session() as connection:
             rows = connection.execute("SELECT * FROM settings ORDER BY category,key").fetchall()
         result = []
         for row in rows:
             definition = SETTING_DEFINITIONS.get(row["key"], {})
+            public_definition = (
+                self.public_metadata(str(row["key"]))
+                if redact_sensitive and row["key"] in SENSITIVE_STATUS_KEYS
+                else definition
+            )
             value = json.loads(row["value_json"])
             source = "System" if row["updated_by"] else "Default"
+            public_value = (
+                self._status_value(value)
+                if redact_sensitive and row["key"] in SENSITIVE_STATUS_KEYS
+                else value
+            )
+            runtime_wired = bool(definition.get("runtime_wired", True))
             result.append(
                 dict(row)
                 | {
-                    "value": value,
-                    "stored_value": value if source == "System" else None,
-                    "effective_value": value,
-                    "effective_source": source,
-                    "definition": definition,
+                    "value_json": (
+                        json.dumps(
+                            public_value,
+                            ensure_ascii=False,
+                            allow_nan=False,
+                        )
+                        if redact_sensitive and row["key"] in SENSITIVE_STATUS_KEYS
+                        else row["value_json"]
+                    ),
+                    "value": public_value,
+                    "stored_value": public_value if source == "System" else None,
+                    "effective_value": public_value if runtime_wired else None,
+                    "effective_source": source if runtime_wired else "NotWired",
+                    "definition": public_definition,
                 }
             )
         return result
@@ -1345,18 +1396,21 @@ class SettingsRepository:
             row = connection.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()
         return json.loads(row["value_json"]) if row else default
 
-    def history(self, limit: int = 100):
+    def history(self, limit: int = 100, *, redact_source_ip: bool = False):
         with self.database.session() as connection:
-            return connection.execute(
+            rows = connection.execute(
                 "SELECT * FROM setting_history ORDER BY id DESC LIMIT ?",
                 (max(1, min(int(limit), 500)),),
             ).fetchall()
+        if not redact_source_ip:
+            return rows
+        return [dict(row) | {"source_ip": "已遮蔽"} for row in rows]
 
     def snapshots(self, limit: int = 50):
         with self.database.session() as connection:
             rows = connection.execute(
                     """
-                    SELECT id,created_at,actor_id,source_ip,reason,changed_keys_json,
+                    SELECT id,created_at,actor_id,reason,changed_keys_json,
                            schema_version,application_version,rollback_source_snapshot_id
                     FROM settings_snapshots ORDER BY created_at DESC,id DESC LIMIT ?
                     """,
@@ -1368,7 +1422,7 @@ class SettingsRepository:
             for row in rows
         ]
 
-    def snapshot(self, snapshot_id: str) -> dict[str, Any]:
+    def _snapshot_record(self, snapshot_id: str) -> dict[str, Any]:
         with self.database.session() as connection:
             row = connection.execute(
                 "SELECT * FROM settings_snapshots WHERE id=?", (snapshot_id,)
@@ -1392,15 +1446,86 @@ class SettingsRepository:
                 "old_value": json.loads(item["old_value_json"]),
                 "new_value": json.loads(item["new_value_json"]),
                 "restored_default": bool(item["restored_default"]),
-                "metadata": self.public_metadata(str(item["key"])),
             }
             for item in items
+        ]
+        item_keys = {str(item["key"]) for item in result["items"]}
+        result["items"].extend(
+            {
+                "key": key,
+                "old_value": result["before"].get(key),
+                "new_value": result["after"].get(key),
+                "restored_default": False,
+            }
+            for key in result["changed_keys"]
+            if key not in item_keys
+        )
+        result["items"].sort(key=lambda item: str(item["key"]))
+        return result
+
+    def snapshot(self, snapshot_id: str) -> dict[str, Any]:
+        result = self._snapshot_record(snapshot_id)
+        result.pop("source_ip", None)
+        result["before"] = {
+            key: value
+            for key, value in result["before"].items()
+            if key in SETTING_DEFINITIONS and key not in SENSITIVE_STATUS_KEYS
+        }
+        result["after"] = {
+            key: value
+            for key, value in result["after"].items()
+            if key in SETTING_DEFINITIONS and key not in SENSITIVE_STATUS_KEYS
+        }
+        result["items"] = [
+            {
+                **item,
+                "old_value": self._public_snapshot_value(
+                    str(item["key"]), item["old_value"]
+                ),
+                "new_value": self._public_snapshot_value(
+                    str(item["key"]), item["new_value"], changed=True
+                ),
+                "metadata": self.public_metadata(str(item["key"])),
+            }
+            for item in result["items"]
         ]
         return result
 
     @staticmethod
     def public_metadata(key: str) -> dict[str, Any]:
-        definition = SETTING_DEFINITIONS[key]
+        definition = SETTING_DEFINITIONS.get(key)
+        if definition is None:
+            return {
+                "key": key,
+                "label_zh_tw": "已移除設定",
+                "category": "已移除設定",
+                "description": "此設定已從目前版本移除，僅保留歷史紀錄",
+                "risk": "high",
+                "risk_description": "Rollback 會安全跳過此設定",
+                "type": "removed",
+                "default": None,
+                "min": None,
+                "max": None,
+                "choices": None,
+                "choice_labels": None,
+                "safe_fallback": None,
+                "visibility": "removed",
+                "advanced": True,
+                "secret": False,
+                "restart_required": False,
+                "effective_scope": "not_wired",
+                "cache_impact": False,
+                "reanalysis_impact": False,
+                "rerender_impact": False,
+                "device_override_allowed": False,
+                "dependencies": [],
+                "conflicts": [],
+                "validation_group": None,
+                "runtime_wired": False,
+                "existing_release_unchanged": True,
+                "effective_note": "已移除設定；Rollback 會安全跳過",
+                "removed": True,
+            }
         fields = (
             "label_zh_tw",
             "category",
@@ -1427,8 +1552,39 @@ class SettingsRepository:
             "conflicts",
             "validation_group",
             "runtime_wired",
+            "existing_release_unchanged",
+            "effective_note",
         )
-        return {"key": key} | {field: definition.get(field) for field in fields}
+        metadata = {"key": key} | {field: definition.get(field) for field in fields}
+        if key in SENSITIVE_STATUS_KEYS:
+            metadata["default"] = SettingsRepository._status_value(
+                definition.get("default")
+            )
+            metadata["safe_fallback"] = metadata["default"]
+        return metadata
+
+    @staticmethod
+    def _status_value(value: Any, *, changed: bool = False) -> dict[str, str]:
+        configured = value is not None and value != ""
+        if changed:
+            return {"status": "已變更" if configured else "已清除"}
+        return {"status": "已設定" if configured else "未設定"}
+
+    @staticmethod
+    def _public_snapshot_value(
+        key: str, value: Any, *, changed: bool = False
+    ) -> Any:
+        if key not in SETTING_DEFINITIONS:
+            return {"status": "已移除設定"}
+        if key in SENSITIVE_STATUS_KEYS:
+            if (
+                isinstance(value, dict)
+                and value.get("status")
+                in {"未設定", "已設定", "已變更", "已清除"}
+            ):
+                return {"status": str(value["status"])}
+            return SettingsRepository._status_value(value, changed=changed)
+        return value
 
     @staticmethod
     def _coerce(key: str, value: Any) -> Any:
@@ -1439,11 +1595,25 @@ class SettingsRepository:
         if value_type == "integer":
             if isinstance(value, bool):
                 raise ValueError(f"{key} 必須是整數")
-            value = int(value)
+            if isinstance(value, int):
+                pass
+            elif isinstance(value, float):
+                if not math.isfinite(value) or not value.is_integer():
+                    raise ValueError(f"{key} 必須是整數")
+                value = int(value)
+            elif isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
+                value = int(value.strip())
+            else:
+                raise ValueError(f"{key} 必須是整數")
         elif value_type == "number":
             if isinstance(value, bool):
                 raise ValueError(f"{key} 必須是數字")
-            value = float(value)
+            try:
+                value = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{key} 必須是數字") from exc
+            if not math.isfinite(value):
+                raise ValueError(f"{key} 必須是有限數字")
         elif value_type == "boolean":
             if isinstance(value, bool):
                 pass
@@ -1535,6 +1705,8 @@ class SettingsRepository:
                 raise KeyError(key)
             if reject_control_center and definition.get("control_center"):
                 raise PermissionError(key)
+            if not definition.get("runtime_wired", True):
+                raise PermissionError(f"{key} 尚未接上 Runtime，僅供唯讀")
             normalized[key] = self._coerce(key, value)
         with self.database.session() as connection:
             current = self._values_from_connection(connection)
@@ -1571,10 +1743,7 @@ class SettingsRepository:
     @staticmethod
     def _snapshot_value(key: str, value: Any, *, changed: bool = False) -> Any:
         if not SETTING_DEFINITIONS[key].get("snapshot_allowed", True):
-            configured = value not in {None, ""}
-            if changed:
-                return {"status": "已變更" if configured else "已清除"}
-            return {"status": "已設定" if configured else "未設定"}
+            return SettingsRepository._status_value(value, changed=changed)
         return value
 
     def _create_snapshot(
@@ -1615,9 +1784,19 @@ class SettingsRepository:
                 actor_id,
                 source_ip[:64],
                 (reason or "").strip()[:500] or None,
-                json.dumps(safe_before, ensure_ascii=False, sort_keys=True),
-                json.dumps(safe_after, ensure_ascii=False, sort_keys=True),
-                json.dumps(changed_keys, ensure_ascii=False),
+                json.dumps(
+                    safe_before,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    allow_nan=False,
+                ),
+                json.dumps(
+                    safe_after,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    allow_nan=False,
+                ),
+                json.dumps(changed_keys, ensure_ascii=False, allow_nan=False),
                 SETTINGS_SCHEMA_VERSION,
                 __version__,
                 rollback_source_snapshot_id,
@@ -1634,10 +1813,14 @@ class SettingsRepository:
                     snapshot_id,
                     key,
                     json.dumps(
-                        self._snapshot_value(key, before[key]), ensure_ascii=False
+                        self._snapshot_value(key, before[key]),
+                        ensure_ascii=False,
+                        allow_nan=False,
                     ),
                     json.dumps(
-                        self._snapshot_value(key, after[key], changed=True), ensure_ascii=False
+                        self._snapshot_value(key, after[key], changed=True),
+                        ensure_ascii=False,
+                        allow_nan=False,
                     ),
                     int(after[key] == SETTING_DEFINITIONS[key]["default"]),
                 )
@@ -1726,12 +1909,16 @@ class SettingsRepository:
             )
             for key, value in actual.items():
                 definition = SETTING_DEFINITIONS[key]
-                encoded = json.dumps(value, ensure_ascii=False)
+                encoded = json.dumps(value, ensure_ascii=False, allow_nan=False)
                 previous_summary = json.dumps(
-                    self._snapshot_value(key, before[key]), ensure_ascii=False
+                    self._snapshot_value(key, before[key]),
+                    ensure_ascii=False,
+                    allow_nan=False,
                 )
                 new_summary = json.dumps(
-                    self._snapshot_value(key, value, changed=True), ensure_ascii=False
+                    self._snapshot_value(key, value, changed=True),
+                    ensure_ascii=False,
+                    allow_nan=False,
                 )
                 connection.execute(
                     "UPDATE settings SET value_json=?,updated_by=?,updated_at=? WHERE key=?",
@@ -1766,30 +1953,75 @@ class SettingsRepository:
         }
 
     def rollback_preview(self, snapshot_id: str) -> dict[str, Any]:
-        target = self.snapshot(snapshot_id)
+        target = self._snapshot_record(snapshot_id)
         target_values = target["before"]
+        target_after = target["after"]
+        snapshot_changed_keys = list(dict.fromkeys(map(str, target["changed_keys"])))
+        recorded_keys = (
+            set(snapshot_changed_keys)
+            | set(map(str, target_values))
+            | set(map(str, target_after))
+            | {str(item["key"]) for item in target["items"]}
+        )
         with self.database.session() as connection:
             current = self._values_from_connection(connection)
-        unknown_keys = sorted(set(target_values) - set(SETTING_DEFINITIONS))
+        unknown_keys = sorted(
+            key for key in recorded_keys if key not in SETTING_DEFINITIONS
+        )
+        sensitive_unrestorable_keys = sorted(
+            key
+            for key in snapshot_changed_keys
+            if key in SETTING_DEFINITIONS
+            and not SETTING_DEFINITIONS[key].get("snapshot_allowed", True)
+        )
         unsupported_keys = sorted(
             key
-            for key in target_values
-            if SETTING_DEFINITIONS.get(key, {}).get("control_center")
+            for key in snapshot_changed_keys
+            if key in SETTING_DEFINITIONS
+            and (
+                SETTING_DEFINITIONS[key].get("control_center")
+                or not SETTING_DEFINITIONS[key].get("runtime_wired", True)
+            )
         )
         updates = {
             key: value
             for key, value in target_values.items()
-            if key in SETTING_DEFINITIONS
+            if key in snapshot_changed_keys
+            and key in SETTING_DEFINITIONS
             and key not in unsupported_keys
+            and key not in sensitive_unrestorable_keys
             and current.get(key) != value
         }
         changed, _before, merged = self.prepare_updates(updates)
+        diff = [
+            {
+                "key": key,
+                "label_zh_tw": SETTING_DEFINITIONS[key]["label_zh_tw"],
+                "current_value": current[key],
+                "target_value": changed[key],
+                "changed_since_snapshot": (
+                    key in target_after and current[key] != target_after[key]
+                ),
+            }
+            for key in sorted(changed)
+        ]
+        overwrites_later_changes = any(
+            item["changed_since_snapshot"] for item in diff
+        )
         return {
             "snapshot_id": snapshot_id,
             "changed_keys": sorted(changed),
             "unknown_keys": unknown_keys,
             "unsupported_keys": unsupported_keys,
+            "sensitive_unrestorable_keys": sensitive_unrestorable_keys,
             "updates": changed,
+            "diff": diff,
+            "rollback_scope": "snapshot_changed_keys_only",
+            "overwrites_changes_after_snapshot": overwrites_later_changes,
+            "rollback_notice": (
+                "只回復此 Snapshot 的 changed_keys。標示為 Snapshot 後又變更的項目，"
+                "若繼續 Rollback，會以目標值覆蓋目前值。"
+            ),
             "valid": True,
             "effective_values": {key: merged[key] for key in changed},
         }

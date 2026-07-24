@@ -40,7 +40,7 @@
       <select id="settings-risk-filter"><option value="">全部風險</option><option value="low">低風險</option><option value="medium">中風險</option><option value="high">高風險</option></select>
     </label>
     <label>生效方式
-      <select id="settings-scope-filter"><option value="">全部方式</option><option value="dynamic">立即動態生效</option><option value="next_job">下次工作生效</option><option value="restart">重新啟動生效</option></select>
+      <select id="settings-scope-filter"><option value="">全部方式</option><option value="dynamic">立即動態生效</option><option value="next_job">下次工作生效</option><option value="next_render">下次渲染生效</option><option value="future_device_only">只影響之後新增的裝置</option><option value="restart">重新啟動生效</option><option value="not_wired">尚未接上 Runtime</option></select>
     </label>
     <fieldset class="settings-mode-toggle">
       <legend>顯示模式</legend>
@@ -70,7 +70,7 @@
   <section class="panel settings-category" data-category="{{ category }}">
     <div class="panel-head">
       <div><p class="eyebrow">功能分類</p><h2>{{ category }}</h2></div>
-      {% if g.user.role == 'administrator' %}<button class="secondary reset-category" type="button" data-category="{{ category }}">此分類恢復預設</button>{% endif %}
+      {% if g.user.role == 'administrator' %}<button class="secondary reset-category" type="button" data-category="{{ category }}">此分類可寫設定恢復預設</button>{% endif %}
     </div>
     <div class="governed-settings-grid">
       {% for row in rows %}
@@ -81,6 +81,7 @@
         data-category="{{ row.category }}"
         data-risk="{{ row.definition.risk }}"
         data-scope="{{ row.definition.effective_scope }}"
+        data-writable="{{ 'true' if row.definition.runtime_wired and g.user.role == 'administrator' else 'false' }}"
         data-advanced="{{ 'true' if row.definition.advanced else 'false' }}"
         data-default="{{ row.definition.default|tojson|forceescape }}"
         data-dependencies="{{ row.definition.dependencies|tojson|forceescape }}">
@@ -93,25 +94,39 @@
         </div>
         <div class="setting-badges" aria-label="設定狀態">
           <span class="status risk-{{ row.definition.risk }}">{{ {'low':'低風險','medium':'中風險','high':'高風險'}[row.definition.risk] }}</span>
-          <span class="status scope-{{ row.definition.effective_scope }}">{{ {'dynamic':'立即生效','next_job':'下次工作','restart':'需重新啟動'}[row.definition.effective_scope] }}</span>
+          <span class="status scope-{{ row.definition.effective_scope }}">{{ {'dynamic':'立即生效','next_job':'下次工作','next_render':'下次渲染','future_device_only':'只影響之後新增的裝置','restart':'需重新啟動','not_wired':'尚未支援'}[row.definition.effective_scope] }}</span>
           {% if not row.definition.runtime_wired %}<span class="status warning">尚未接上 Runtime</span>{% endif %}
         </div>
         <div class="setting-control">
-          {% if row.value_type == 'boolean' %}
-          <select name="{{ row.key }}" {% if g.user.role != 'administrator' %}disabled{% endif %}><option value="true" {% if row.value %}selected{% endif %}>啟用</option><option value="false" {% if not row.value %}selected{% endif %}>停用</option></select>
+          {% if row.definition.visibility == 'sensitive' and g.user.role != 'administrator' %}
+          <input name="{{ row.key }}" value="{{ row.value.status }}" type="text" disabled aria-label="{{ row.definition.label_zh_tw }}狀態">
+          {% elif row.value_type == 'boolean' %}
+          <select name="{{ row.key }}" {% if g.user.role != 'administrator' or not row.definition.runtime_wired %}disabled{% endif %}><option value="true" {% if row.value %}selected{% endif %}>啟用</option><option value="false" {% if not row.value %}selected{% endif %}>停用</option></select>
           {% elif row.definition.choices %}
-          <select name="{{ row.key }}" {% if g.user.role != 'administrator' %}disabled{% endif %}>{% for choice in row.definition.choices %}<option value="{{ choice }}" {% if choice|string == row.value|string %}selected{% endif %}>{{ row.definition.choice_labels.get(choice, choice) if row.definition.choice_labels else choice }}</option>{% endfor %}</select>
+          <select name="{{ row.key }}" {% if g.user.role != 'administrator' or not row.definition.runtime_wired %}disabled{% endif %}>{% for choice in row.definition.choices %}<option value="{{ choice }}" {% if choice|string == row.value|string %}selected{% endif %}>{{ row.definition.choice_labels.get(choice, choice) if row.definition.choice_labels else choice }}</option>{% endfor %}</select>
           {% elif row.definition.multiline %}
-          <textarea name="{{ row.key }}" rows="{{ row.definition.rows|default(6) }}" maxlength="{{ row.definition.max_length|default(12000) }}" {% if g.user.role != 'administrator' %}disabled{% endif %}>{{ row.value }}</textarea>
+          <textarea name="{{ row.key }}" rows="{{ row.definition.rows|default(6) }}" maxlength="{{ row.definition.max_length|default(12000) }}" {% if g.user.role != 'administrator' or not row.definition.runtime_wired %}disabled{% endif %}>{{ row.value }}</textarea>
           {% else %}
-          <input name="{{ row.key }}" value="{{ row.value }}" type="{{ 'number' if row.value_type in ('number','integer') else 'text' }}" {% if row.value_type == 'number' %}step="any"{% endif %} {% if row.definition.min is defined %}min="{{ row.definition.min }}"{% endif %} {% if row.definition.max is defined %}max="{{ row.definition.max }}"{% endif %} {% if g.user.role != 'administrator' %}disabled{% endif %}>
+          <input name="{{ row.key }}" value="{{ row.value }}" type="{{ 'number' if row.value_type in ('number','integer') else 'text' }}" {% if row.value_type == 'number' %}step="any"{% endif %} {% if row.definition.min is defined %}min="{{ row.definition.min }}"{% endif %} {% if row.definition.max is defined %}max="{{ row.definition.max }}"{% endif %} {% if g.user.role != 'administrator' or not row.definition.runtime_wired %}disabled{% endif %}>
           {% endif %}
         </div>
         <dl class="setting-values">
+          {% if row.definition.visibility == 'sensitive' and g.user.role != 'administrator' %}
+          <div><dt>程式預設值</dt><dd><code>{{ row.definition.default.status }}</code></dd></div>
+          <div><dt>系統儲存值</dt><dd><code>{{ row.stored_value.status if row.stored_value is not none else '未另行儲存' }}</code></dd></div>
+          <div><dt>最終生效值</dt><dd><code>{{ row.effective_value.status }}</code></dd></div>
+          <div><dt>來源</dt><dd>{{ '系統設定' if row.effective_source == 'System' else '程式安全預設' }}</dd></div>
+          {% else %}
           <div><dt>程式預設值</dt><dd><code>{{ row.definition.default }}</code></dd></div>
           <div><dt>系統儲存值</dt><dd><code>{{ row.stored_value if row.stored_value is not none else '未另行儲存' }}</code></dd></div>
+          {% if row.definition.runtime_wired %}
           <div><dt>最終生效值</dt><dd><code>{{ row.effective_value }}</code></dd></div>
           <div><dt>來源</dt><dd>{{ '系統設定' if row.effective_source == 'System' else '程式安全預設' }}</dd></div>
+          {% else %}
+          <div><dt>Runtime 狀態</dt><dd><strong>已儲存但尚未生效／尚未支援</strong></dd></div>
+          <div><dt>來源</dt><dd>僅保存既有值，不宣稱為最終生效值</dd></div>
+          {% endif %}
+          {% endif %}
         </dl>
         <p class="setting-risk-copy"><strong>調整風險：</strong>{{ row.definition.risk_description }}</p>
         <details class="setting-advanced-info">
@@ -121,9 +136,10 @@
             <div><dt>型別／範圍</dt><dd>{{ row.definition.type }}{% if row.definition.min is defined or row.definition.max is defined %}（{{ row.definition.min|default('—') }}～{{ row.definition.max|default('—') }}）{% endif %}</dd></div>
             <div><dt>Cache／資料影響</dt><dd>{{ '改變 AI Cache Fingerprint' if row.definition.cache_impact else '不影響 AI Cache' }}；{{ '需要評估重分析' if row.definition.reanalysis_impact else '不需重分析' }}；{{ '需要重新渲染' if row.definition.rerender_impact else '不需重新渲染' }}</dd></div>
             <div><dt>裝置覆寫</dt><dd>{{ '既有裝置／預覽流程可覆寫' if row.definition.device_override_allowed else '僅系統層級' }}</dd></div>
+            {% if row.definition.effective_note %}<div><dt>生效說明</dt><dd>{{ row.definition.effective_note }}</dd></div>{% endif %}
           </dl>
         </details>
-        {% if g.user.role == 'administrator' %}<button type="button" class="secondary reset-setting">恢復此項預設</button>{% endif %}
+        {% if g.user.role == 'administrator' and row.definition.runtime_wired %}<button type="button" class="secondary reset-setting">恢復此項預設</button>{% endif %}
       </article>
       {% endfor %}
     </div>
@@ -231,7 +247,7 @@
       });
       card.classList.toggle('dependency-hidden', !active);
       const control = card.querySelector('[name]');
-      if (control && canEdit) control.disabled = !active;
+      if (control && canEdit) control.disabled = !active || card.dataset.writable !== 'true';
     });
   };
 
@@ -272,7 +288,7 @@
     refresh();
   }));
   document.querySelectorAll('.reset-category').forEach(button => button.addEventListener('click', () => {
-    cards.filter(card => card.dataset.category === button.dataset.category).forEach(card => setControl(card.dataset.key, JSON.parse(card.dataset.default)));
+    cards.filter(card => card.dataset.category === button.dataset.category && card.dataset.writable === 'true').forEach(card => setControl(card.dataset.key, JSON.parse(card.dataset.default)));
     refresh();
   }));
   if (canEdit) document.getElementById('discard-settings').addEventListener('click', () => {
@@ -288,6 +304,7 @@
   };
   const esc = value => String(value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]));
   const valueText = value => esc(typeof value === 'object' ? JSON.stringify(value) : value);
+  const scopeText = scope => ({dynamic:'立即生效',next_job:'下次工作生效',next_render:'下次渲染生效',future_device_only:'只影響之後新增的裝置',restart:'需重新啟動',not_wired:'尚未支援'}[scope] || '未知生效範圍');
   const validation = message => {
     const box = document.getElementById('settings-validation-summary');
     box.textContent = message; box.hidden = !message;
@@ -305,6 +322,7 @@
       <div><dt>AI 成本</dt><dd>${esc(data.estimated_cost_label || '無法估算')}</dd></div>
     </dl>
     ${data.warnings?.length ? `<h3>提醒</h3><ul>${data.warnings.map(item=>`<li>${esc(item)}</li>`).join('')}</ul>` : ''}
+    ${data.release_notice ? `<p class="notice warning">${esc(data.release_notice)}</p>` : ''}
     <details><summary>技術變更 Key</summary><pre>${esc(JSON.stringify(data.changed_keys || [],null,2))}</pre></details>`;
   const preview = async () => {
     const data = await request('/api/v1/settings/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(dirty))});
@@ -352,7 +370,7 @@
     try {
       selectedSnapshot = button.dataset.id;
       const data = await request(`/api/v1/settings/snapshots/${selectedSnapshot}`);
-      document.getElementById('snapshot-body').innerHTML = `<p>${esc(data.created_at)}；${data.items.length} 項變更</p>${impactHtml(data.impact)}<div class="table-wrap"><table><thead><tr><th>設定</th><th>舊值</th><th>新值</th><th>治理影響</th></tr></thead><tbody>${data.items.map(item=>`<tr><td>${esc(item.metadata.label_zh_tw)}<small><code>${esc(item.key)}</code></small></td><td><code>${valueText(item.old_value)}</code></td><td><code>${valueText(item.new_value)}</code>${item.restored_default?'<small>恢復程式預設</small>':''}</td><td><small>${item.metadata.restart_required?'需重新啟動':(item.metadata.effective_scope==='next_job'?'下次工作生效':'立即生效')}<br>${item.metadata.cache_impact?'改變 Cache Fingerprint':'不影響 Cache'}<br>${item.metadata.reanalysis_impact?'需評估重分析':'不需重分析'}／${item.metadata.rerender_impact?'需重新渲染':'不需重新渲染'}</small></td></tr>`).join('')}</tbody></table></div>`;
+      document.getElementById('snapshot-body').innerHTML = `<p>${esc(data.created_at)}；${data.items.length} 項變更</p>${impactHtml(data.impact)}<div class="table-wrap"><table><thead><tr><th>設定</th><th>舊值</th><th>新值</th><th>治理影響</th></tr></thead><tbody>${data.items.map(item=>`<tr><td>${esc(item.metadata.label_zh_tw)}<small><code>${esc(item.key)}</code></small></td><td><code>${valueText(item.old_value)}</code></td><td><code>${valueText(item.new_value)}</code>${item.restored_default?'<small>恢復程式預設</small>':''}</td><td><small>${esc(scopeText(item.metadata.effective_scope))}<br>${item.metadata.cache_impact?'改變 Cache Fingerprint':'不影響 Cache'}<br>${item.metadata.reanalysis_impact?'需評估重分析':'不需重分析'}／${item.metadata.rerender_impact?'需重新渲染':'不需重新渲染'}</small></td></tr>`).join('')}</tbody></table></div>`;
       if (canEdit) document.getElementById('rollback-apply').hidden = true;
       snapshotDialog.showModal();
     } catch(error) { validation(error.message); }
@@ -361,7 +379,8 @@
     document.getElementById('rollback-preview').addEventListener('click', async () => {
       try {
         const data = await request(`/api/v1/settings/snapshots/${selectedSnapshot}/rollback-preview`,{method:'POST'});
-        document.getElementById('snapshot-body').insertAdjacentHTML('beforeend',`<h3>Rollback 影響</h3>${impactHtml(data.impact)}${data.unknown_keys.length?`<p>已移除 Key 將安全跳過：${data.unknown_keys.map(esc).join('、')}</p>`:''}${data.unsupported_keys?.length?`<p>需由專屬控制中心還原，已跳過：${data.unsupported_keys.map(esc).join('、')}</p>`:''}`);
+        const diffRows = data.diff.map(item=>`<tr><td>${esc(item.label_zh_tw)}<small><code>${esc(item.key)}</code></small></td><td><code>${valueText(item.current_value)}</code></td><td><code>${valueText(item.target_value)}</code></td><td>${item.changed_since_snapshot?'會覆蓋 Snapshot 建立後的其他變更':'目前仍是該 Snapshot 套用後的值'}</td></tr>`).join('');
+        document.getElementById('snapshot-body').insertAdjacentHTML('beforeend',`<h3>Rollback 實際 Diff</h3><p>${esc(data.rollback_notice)}</p><p><strong>回復範圍：</strong>只回復該 Snapshot 的 changed_keys，不碰觸無關設定。</p>${data.overwrites_changes_after_snapshot?'<p class="notice warning">此 Rollback 會覆蓋 Snapshot 建立後的其他變更，請逐項確認。</p>':'<p class="notice">沒有偵測到會被覆蓋的 Snapshot 後續變更。</p>'}<div class="table-wrap"><table><thead><tr><th>設定</th><th>目前值</th><th>目標值</th><th>Snapshot 後變更</th></tr></thead><tbody>${diffRows||'<tr><td colspan="4">沒有可自動回復的值。</td></tr>'}</tbody></table></div>${impactHtml(data.impact)}${data.unknown_keys.length?`<p class="notice warning">已移除設定將安全跳過：${data.unknown_keys.map(esc).join('、')}</p>`:''}${data.unsupported_keys?.length?`<p class="notice warning">唯讀或尚未接上 Runtime，已跳過：${data.unsupported_keys.map(esc).join('、')}</p>`:''}${data.sensitive_unrestorable_keys?.length?`<p class="notice error"><strong>敏感設定無法自動 Rollback：</strong>${data.sensitive_unrestorable_keys.map(esc).join('、')}。Snapshot 未保存其值，請由管理員人工重新設定。</p>`:''}`);
         document.getElementById('rollback-apply').hidden = !data.changed_keys.length;
       } catch(error) { validation(error.message); }
     });

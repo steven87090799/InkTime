@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from tests.conftest import create_admin, csrf, login
 
 
@@ -44,3 +46,30 @@ def test_viewer_cannot_change_settings(client, app):
         "/api/v1/settings", json={"analysis.concurrency": 8}, headers={"X-CSRF-Token": csrf(client)}
     )
     assert response.status_code == 403
+
+
+def test_webhook_uri_is_status_only_in_snapshot_and_export(client, app):
+    create_admin(app)
+    login(client)
+    webhook = "https://hooks.example.test/private/path?token=security-secret"
+    response = client.post(
+        "/api/v1/settings",
+        json={"notification.webhook_url": webhook},
+        headers={
+            "X-CSRF-Token": csrf(client),
+            "X-InkTime-Confirm-Risk": "true",
+        },
+    )
+    assert response.status_code == 200
+    snapshot_id = response.json["snapshot_id"]
+    snapshot = client.get(f"/api/v1/settings/snapshots/{snapshot_id}")
+    assert snapshot.status_code == 200
+    assert webhook not in snapshot.get_data(as_text=True)
+    assert snapshot.json["items"][0]["new_value"] == {"status": "已變更"}
+
+    exported = client.get("/api/v1/settings/export")
+    assert exported.headers["Cache-Control"] == "no-store"
+    assert webhook not in exported.get_data(as_text=True)
+    assert json.loads(exported.get_data(as_text=True))["sensitive_status"][
+        "notification.webhook_url"
+    ] == {"configured": True}
