@@ -1,0 +1,1987 @@
+<!DOCTYPE html>
+<html lang="zh-TW" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>InkTime 墨水屏電子相框系統 - 終極操作手冊與開發者指南</title>
+
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+
+    <!-- Highlight.js VS Code Dark Style -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+    
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+
+    <style>
+        :root {
+            /* Warm Charcoal Dark Theme - Soft on eyes */
+            --bg-body: #0d1117;
+            --bg-sidebar: #161b22;
+            --bg-card: #161b22;
+            --bg-card-hover: #1c2128;
+            --bg-code: #0d1117;
+            --bg-header: rgba(22, 27, 34, 0.9);
+            
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --text-muted: #6e7681;
+            
+            --accent-blue: #58a6ff;
+            --accent-indigo: #79c0ff;
+            --accent-emerald: #3fb950;
+            --accent-amber: #d29922;
+            --accent-rose: #f85149;
+            --accent-purple: #bc8cff;
+            
+            --border-subtle: #30363d;
+            --border-hover: #58a6ff;
+            --sidebar-width: 330px;
+        }
+
+        html.light {
+            /* Crisp Clean Soft Light Theme */
+            --bg-body: #f6f8fa;
+            --bg-sidebar: #ffffff;
+            --bg-card: #ffffff;
+            --bg-card-hover: #f3f4f6;
+            --bg-code: #f6f8fa;
+            --bg-header: rgba(255, 255, 255, 0.9);
+            
+            --text-primary: #1f2328;
+            --text-secondary: #57606a;
+            --text-muted: #8c959f;
+            
+            --accent-blue: #0969da;
+            --accent-indigo: #218bff;
+            --accent-emerald: #1a7f37;
+            --accent-amber: #9a6700;
+            --accent-rose: #cf222e;
+            --accent-purple: #8250df;
+            
+            --border-subtle: #d0d7de;
+            --border-hover: #0969da;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', 'Noto Sans TC', -apple-system, BlinkMacSystemFont, sans-serif;
+            background-color: var(--bg-body);
+            color: var(--text-primary);
+            line-height: 1.8;
+            display: flex;
+            min-height: 100vh;
+            transition: background-color 0.25s, color 0.25s;
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: var(--bg-body);
+        }
+        ::-webkit-scrollbar-thumb {
+            background: var(--border-subtle);
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--accent-blue);
+        }
+
+        /* Sidebar Navigation */
+        aside.sidebar {
+            width: var(--sidebar-width);
+            height: 100vh;
+            background-color: var(--bg-sidebar);
+            border-right: 1px solid var(--border-subtle);
+            position: fixed;
+            top: 0;
+            left: 0;
+            display: flex;
+            flex-direction: column;
+            z-index: 100;
+            transition: transform 0.3s ease;
+        }
+
+        .sidebar-header {
+            padding: 20px 22px;
+            border-bottom: 1px solid var(--border-subtle);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .sidebar-header i {
+            font-size: 22px;
+            color: var(--accent-blue);
+        }
+
+        .sidebar-header h2 {
+            font-size: 17px;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .search-box {
+            padding: 14px 18px 10px;
+        }
+
+        .search-input-wrapper {
+            position: relative;
+        }
+
+        .search-input-wrapper i {
+            position: absolute;
+            left: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-muted);
+            font-size: 13px;
+        }
+
+        .search-input {
+            width: 100%;
+            padding: 9px 12px 9px 36px;
+            background: var(--bg-body);
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-size: 13px;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .search-input:focus {
+            border-color: var(--accent-blue);
+            box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.15);
+        }
+
+        .toc-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px 14px 40px;
+        }
+
+        .toc-list {
+            list-style: none;
+        }
+
+        .toc-group {
+            margin-bottom: 6px;
+        }
+
+        .toc-h2-link {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 10px;
+            color: var(--text-primary);
+            text-decoration: none;
+            font-size: 13.5px;
+            font-weight: 600;
+            border-radius: 6px;
+            transition: all 0.15s ease;
+            line-height: 1.4;
+        }
+
+        .toc-h2-link:hover {
+            color: var(--accent-blue);
+            background: rgba(88, 166, 255, 0.1);
+        }
+
+        .toc-h2-link.active {
+            color: var(--accent-blue);
+            background: rgba(88, 166, 255, 0.15);
+        }
+
+        .toc-folder {
+            font-size: 12px;
+            color: var(--accent-blue);
+        }
+
+        .toc-sub-tree {
+            list-style: none;
+            padding-left: 20px;
+            margin-top: 2px;
+            border-left: 1px solid var(--border-subtle);
+            margin-left: 14px;
+        }
+
+        .toc-h3-link {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 10px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 12.5px;
+            border-radius: 6px;
+            transition: all 0.15s ease;
+            line-height: 1.4;
+        }
+
+        .toc-h3-link:hover {
+            color: var(--accent-blue);
+            background: rgba(88, 166, 255, 0.08);
+        }
+
+        .toc-bullet {
+            font-size: 9px;
+            color: var(--text-muted);
+        }
+
+        /* Top Header Navbar & Quick Jump Bar */
+        header.top-nav {
+            position: fixed;
+            top: 0;
+            right: 0;
+            left: var(--sidebar-width);
+            height: 60px;
+            background: var(--bg-header);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border-subtle);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 28px;
+            z-index: 90;
+            transition: left 0.3s;
+        }
+
+        .top-left-group {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            overflow-x: auto;
+            padding-right: 15px;
+        }
+
+        .quick-chips-bar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .quick-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 5px 12px;
+            background: var(--bg-body);
+            border: 1px solid var(--border-subtle);
+            border-radius: 20px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 12px;
+            font-weight: 500;
+            white-space: nowrap;
+            transition: all 0.2s ease;
+        }
+
+        .quick-chip:hover {
+            color: var(--accent-blue);
+            border-color: var(--accent-blue);
+            background: rgba(88, 166, 255, 0.1);
+        }
+
+        .nav-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .btn-icon {
+            background: var(--bg-body);
+            border: 1px solid var(--border-subtle);
+            color: var(--text-secondary);
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            font-size: 14px;
+        }
+
+        .btn-icon:hover {
+            color: var(--accent-blue);
+            border-color: var(--accent-blue);
+        }
+
+        /* Main Reading Content Container */
+        main.main-content {
+            margin-left: var(--sidebar-width);
+            margin-top: 60px;
+            flex: 1;
+            padding: 45px 65px 120px;
+            max-width: 1100px;
+        }
+
+        /* Typography & Headings */
+        article.markdown-body {
+            font-size: 15px;
+        }
+
+        .doc-h1 {
+            font-size: 30px;
+            font-weight: 800;
+            color: var(--text-primary);
+            margin-bottom: 24px;
+            padding-bottom: 16px;
+            border-bottom: 2px solid var(--border-subtle);
+            letter-spacing: -0.02em;
+        }
+
+        .doc-h2 {
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--accent-blue);
+            margin-top: 50px;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--border-subtle);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            scroll-margin-top: 80px;
+        }
+
+        .h2-anchor-icon {
+            color: var(--accent-purple);
+            font-weight: 400;
+            font-size: 18px;
+        }
+
+        .doc-h3 {
+            font-size: 17px;
+            font-weight: 600;
+            color: var(--accent-purple);
+            margin-top: 32px;
+            margin-bottom: 14px;
+            scroll-margin-top: 80px;
+        }
+
+        .doc-h4 {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-top: 24px;
+            margin-bottom: 10px;
+        }
+
+        .doc-p {
+            margin-bottom: 16px;
+            color: var(--text-secondary);
+            font-size: 15px;
+        }
+
+        .doc-list {
+            margin-bottom: 20px;
+            padding-left: 24px;
+            color: var(--text-secondary);
+        }
+
+        .doc-list li {
+            margin-bottom: 6px;
+        }
+
+        .doc-link {
+            color: var(--accent-blue);
+            text-decoration: none;
+            border-bottom: 1px dashed var(--accent-blue);
+            transition: border-bottom-style 0.2s;
+        }
+
+        .doc-link:hover {
+            border-bottom-style: solid;
+        }
+
+        .doc-divider {
+            border: none;
+            border-top: 1px solid var(--border-subtle);
+            margin: 36px 0;
+        }
+
+        /* GitHub Alert Cards (Soft & Eye-friendly) */
+        .alert-box {
+            padding: 16px 20px;
+            border-radius: 10px;
+            margin: 24px 0;
+            border-left: 4px solid;
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-left-width: 4px;
+        }
+
+        .alert-box.note {
+            border-left-color: var(--accent-blue);
+            background: rgba(88, 166, 255, 0.05);
+        }
+        .alert-box.note .alert-title { color: var(--accent-blue); }
+
+        .alert-box.important {
+            border-left-color: var(--accent-purple);
+            background: rgba(188, 140, 255, 0.05);
+        }
+        .alert-box.important .alert-title { color: var(--accent-purple); }
+
+        .alert-box.tip {
+            border-left-color: var(--accent-emerald);
+            background: rgba(63, 185, 80, 0.05);
+        }
+        .alert-box.tip .alert-title { color: var(--accent-emerald); }
+
+        .alert-box.warning {
+            border-left-color: var(--accent-amber);
+            background: rgba(210, 153, 34, 0.05);
+        }
+        .alert-box.warning .alert-title { color: var(--accent-amber); }
+
+        .alert-box.caution {
+            border-left-color: var(--accent-rose);
+            background: rgba(248, 81, 73, 0.05);
+        }
+        .alert-box.caution .alert-title { color: var(--accent-rose); }
+
+        .alert-title {
+            font-weight: 700;
+            font-size: 13.5px;
+            margin-bottom: 6px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            letter-spacing: 0.04em;
+        }
+
+        .alert-body {
+            color: var(--text-secondary);
+            font-size: 14.5px;
+        }
+
+        /* Table Card Styling */
+        .table-wrapper {
+            overflow-x: auto;
+            margin: 24px 0;
+            border-radius: 10px;
+            border: 1px solid var(--border-subtle);
+            background: var(--bg-card);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+
+        th {
+            background: var(--bg-sidebar);
+            color: var(--text-primary);
+            font-weight: 600;
+            text-align: left;
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+
+        td {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border-subtle);
+            color: var(--text-secondary);
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        tr.even td {
+            background: rgba(255, 255, 255, 0.015);
+        }
+
+        tr:hover td {
+            background: rgba(88, 166, 255, 0.06);
+        }
+
+        /* Code Block Box */
+        .code-wrapper {
+            margin: 24px 0;
+            border-radius: 10px;
+            overflow: hidden;
+            border: 1px solid var(--border-subtle);
+            background: var(--bg-code);
+        }
+
+        .code-header {
+            background: var(--bg-sidebar);
+            padding: 8px 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-subtle);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        .code-lang-tag {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--accent-blue);
+            font-weight: 500;
+        }
+
+        .copy-btn {
+            background: transparent;
+            border: 1px solid var(--border-subtle);
+            color: var(--text-secondary);
+            font-size: 12px;
+            padding: 4px 10px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .copy-btn:hover {
+            color: var(--accent-blue);
+            border-color: var(--accent-blue);
+            background: rgba(88, 166, 255, 0.1);
+        }
+
+        pre {
+            margin: 0;
+            padding: 18px 20px;
+            overflow-x: auto;
+        }
+
+        code {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13.5px;
+        }
+
+        :not(pre) > code {
+            background: rgba(88, 166, 255, 0.1);
+            color: var(--accent-blue);
+            padding: 2px 7px;
+            border-radius: 5px;
+            font-size: 13px;
+        }
+
+        /* Mermaid Block */
+        .mermaid-box {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 10px;
+            padding: 24px;
+            margin: 24px 0;
+            display: flex;
+            justify-content: center;
+            overflow-x: auto;
+        }
+
+        /* Floating Action Button */
+        .back-to-top {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            background: var(--accent-blue);
+            color: #fff;
+            border: none;
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.3s;
+            z-index: 99;
+            font-size: 16px;
+        }
+
+        .back-to-top.show {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .back-to-top:hover {
+            transform: translateY(-3px);
+            background: var(--accent-indigo);
+        }
+
+        @media (max-width: 1024px) {
+            aside.sidebar {
+                transform: translateX(-100%);
+            }
+            aside.sidebar.open {
+                transform: translateX(0);
+            }
+            header.top-nav {
+                left: 0;
+            }
+            main.main-content {
+                margin-left: 0;
+                padding: 30px 20px;
+            }
+            .mobile-menu-btn {
+                display: flex !important;
+            }
+        }
+
+        .mobile-menu-btn {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <i class="fa-solid fa-book-open"></i>
+            <h2>InkTime 手冊目錄</h2>
+        </div>
+
+        <div class="search-box">
+            <div class="search-input-wrapper">
+                <i class="fa-solid fa-magnifying-glass"></i>
+                <input type="text" id="searchInput" class="search-input" placeholder="快速搜尋關鍵字與章節...">
+            </div>
+        </div>
+
+        <nav class="toc-container">
+            <ul class="toc-list" id="tocList">
+                <li class="toc-group">
+        <a href="#toc" class="toc-h2-link">
+            <i class="fa-solid fa-folder-open toc-folder"></i>
+            <span>摘要目錄</span>
+        </a>
+</li>
+<li class="toc-group">
+        <a href="#sec-1" class="toc-h2-link">
+            <i class="fa-solid fa-folder-open toc-folder"></i>
+            <span>一、 系統架構與設計哲學</span>
+        </a>
+</li>
+<li class="toc-group">
+        <a href="#sec-2" class="toc-h2-link">
+            <i class="fa-solid fa-folder-open toc-folder"></i>
+            <span>二、 硬體選型、電路設計與面板選擇</span>
+        </a>
+<ul class="toc-sub-tree">
+<li>
+                <a href="#sec-2-1" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>2.1 三大彩色電子紙面板規格與光學特性</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-2-2" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>2.2 完整 GPIO 引腳映射與 SPI 時脈規範</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-2-3" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>2.3 電池功耗模型與 ADC 分壓量測電路</span>
+                </a>
+            </li>
+</ul>
+</li>
+<li class="toc-group">
+        <a href="#sec-3" class="toc-h2-link">
+            <i class="fa-solid fa-folder-open toc-folder"></i>
+            <span>三、 ESP32 / ESP32-S3 韌體開發與刷機指南</span>
+        </a>
+<ul class="toc-sub-tree">
+<li>
+                <a href="#sec-3-1" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>3.1 PlatformIO 與 Arduino IDE 環境配置</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-3-2" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>3.2 韌體原始碼邏輯與驅動初始化序列</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-3-3" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>3.3 燒錄、Wi-Fi 配網與 Token 註冊流程</span>
+                </a>
+            </li>
+</ul>
+</li>
+<li class="toc-group">
+        <a href="#sec-4" class="toc-h2-link">
+            <i class="fa-solid fa-folder-open toc-folder"></i>
+            <span>四、 AI 大語言模型連接與組態指南</span>
+        </a>
+<ul class="toc-sub-tree">
+<li>
+                <a href="#sec-4-1" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>4.1 OpenAI 官方 Vision API 連接 (GPT-4o / GPT-4o-mini)</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-4-2" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>4.2 本機 LMStudio 視覺大模型連接 (Qwen2.5-VL / Qwen3-VL)</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-4-3" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>4.3 Ollama 本機模型相容介面連接 (LLaVA / Qwen-VL)</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-4-4" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>4.4 Azure OpenAI 與自訂相容 Vision 端點</span>
+                </a>
+            </li>
+</ul>
+</li>
+<li class="toc-group">
+        <a href="#sec-5" class="toc-h2-link">
+            <i class="fa-solid fa-folder-open toc-folder"></i>
+            <span>五、 Web 控制台全頁面、按鈕與 API 介面深度解析</span>
+        </a>
+<ul class="toc-sub-tree">
+<li>
+                <a href="#sec-5-1" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>5.1 儀表板 (Dashboard)</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-5-2" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>5.2 照片庫與照片詳情 (Photos &amp; Photo Detail)</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-5-3" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>5.3 預篩選排除清單 (Excluded Photos)</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-5-4" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>5.4 照片分析與 AI 工作佇列 (Photo Analysis &amp; Jobs)</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-5-5" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>5.5 AI 提供者與成本控制 (Providers &amp; Budgets)</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-5-6" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>5.6 評分控制中心 (Scoring Lab)</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-5-7" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>5.7 渲染設定與 A/B 模擬器 (Rendering &amp; Simulator)</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-5-8" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>5.8 虛擬電子紙與畫面發布 (Virtual Display &amp; Release Publisher)</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-5-9" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>5.9 裝置管理與能量分析 (Devices &amp; Energy)</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-5-10" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>5.10 排程工作管理 (Schedules)</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-5-11" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>5.11 系統維護與決策韌性 (Maintenance &amp; Resilience)</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-5-12" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>5.12 熱備份與系統診斷 (Backups &amp; Diagnostics)</span>
+                </a>
+            </li>
+</ul>
+</li>
+<li class="toc-group">
+        <a href="#sec-6" class="toc-h2-link">
+            <i class="fa-solid fa-folder-open toc-folder"></i>
+            <span>六、 DEBUG 模式、除錯診斷工具與測試清單</span>
+        </a>
+<ul class="toc-sub-tree">
+<li>
+                <a href="#sec-6-1" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>6.1 伺服器端 DEBUG 日誌模式切換</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-6-2" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>6.2 ESP32 Serial 串口監控與除錯訊息</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-6-3" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>6.3 系統日常維護與健康檢查 5 步清單</span>
+                </a>
+            </li>
+</ul>
+</li>
+<li class="toc-group">
+        <a href="#sec-7" class="toc-h2-link">
+            <i class="fa-solid fa-folder-open toc-folder"></i>
+            <span>七、 4 大核心 JSON 資料格式與逐行註解範例集</span>
+        </a>
+<ul class="toc-sub-tree">
+<li>
+                <a href="#sec-7-1" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>7.1 EXIF 照片元資料 JSON 格式 (`photo_scores.exif_json`)</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-7-2" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>7.2 送往 Vision LLM 之 Request Input Payload JSON</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-7-3" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>7.3 Vision LLM 回傳之 Response JSON (`ANALYSIS_JSON_SCHEMA`)</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-7-4" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>7.4 ESP32 設備回報狀態 JSON (`report_status`)</span>
+                </a>
+            </li>
+</ul>
+</li>
+<li class="toc-group">
+        <a href="#sec-8" class="toc-h2-link">
+            <i class="fa-solid fa-folder-open toc-folder"></i>
+            <span>八、 7 大畫布版型幾何佈局與渲染引擎細節</span>
+        </a>
+</li>
+<li class="toc-group">
+        <a href="#sec-9" class="toc-h2-link">
+            <i class="fa-solid fa-folder-open toc-folder"></i>
+            <span>九、 10 種 Dithering 抖動演算法與色彩空間演算法數學原理</span>
+        </a>
+<ul class="toc-sub-tree">
+<li>
+                <a href="#9-1-抖動演算法數學矩陣" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>9.1 抖動演算法數學矩陣</span>
+                </a>
+            </li>
+<li>
+                <a href="#9-2-色彩距離空間-oklab-vs-srgb" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>9.2 色彩距離空間：OKLab vs sRGB</span>
+                </a>
+            </li>
+</ul>
+</li>
+<li class="toc-group">
+        <a href="#sec-10" class="toc-h2-link">
+            <i class="fa-solid fa-folder-open toc-folder"></i>
+            <span>十、 SQLite 資料庫 13 張 Table 完全 Schema 規格</span>
+        </a>
+</li>
+<li class="toc-group">
+        <a href="#sec-11" class="toc-h2-link">
+            <i class="fa-solid fa-folder-open toc-folder"></i>
+            <span>十一、 RESTful API 端點與 Error Code 錯誤碼完全對照表</span>
+        </a>
+<ul class="toc-sub-tree">
+<li>
+                <a href="#11-1-主要-rest-api-端點總覽" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>11.1 主要 REST API 端點總覽</span>
+                </a>
+            </li>
+<li>
+                <a href="#11-2-系統標準-error-code-錯誤碼全覽表" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>11.2 系統標準 Error Code 錯誤碼全覽表</span>
+                </a>
+            </li>
+</ul>
+</li>
+<li class="toc-group">
+        <a href="#sec-12" class="toc-h2-link">
+            <i class="fa-solid fa-folder-open toc-folder"></i>
+            <span>十二、 Docker 部署、環境變數與生產環境配置</span>
+        </a>
+<ul class="toc-sub-tree">
+<li>
+                <a href="#sec-12-1" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>12.1 `docker-compose.yml` 逐行中文註解配置檔</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-12-2" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>12.2 全系統環境變數逐行詳細解析</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-12-3" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>12.3 初次設定「必須設定」的 5 大項目清單</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-12-4" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>12.4 進階「設定後會更好」的 8 大系統優化清單</span>
+                </a>
+            </li>
+</ul>
+</li>
+<li class="toc-group">
+        <a href="#sec-13" class="toc-h2-link">
+            <i class="fa-solid fa-folder-open toc-folder"></i>
+            <span>十三、 系統設定參數 100% 完全對照表</span>
+        </a>
+</li>
+<li class="toc-group">
+        <a href="#sec-14" class="toc-h2-link">
+            <i class="fa-solid fa-folder-open toc-folder"></i>
+            <span>十四、 全情境故障排除與問題診斷指南</span>
+        </a>
+<ul class="toc-sub-tree">
+<li>
+                <a href="#sec-14-1" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>14.1 網路連線與 ESP32 硬體故障排除</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-14-2" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>14.2 照片庫、磁碟與 NAS 掛載故障排除</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-14-3" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>14.3 AI 模型分析與 Token 成本故障排除</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-14-4" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>14.4 影像渲染與墨水屏顯示畫質故障排除</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-14-5" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>14.5 資料庫與鎖定競爭故障排除</span>
+                </a>
+            </li>
+</ul>
+</li>
+            </ul>
+        </nav>
+    </aside>
+
+    <!-- Top Navigation Bar -->
+    <header class="top-nav">
+        <div class="top-left-group">
+            <button class="btn-icon mobile-menu-btn" id="menuToggle">
+                <i class="fa-solid fa-bars"></i>
+            </button>
+            <div class="quick-chips-bar">
+                <a href="#sec-1" class="quick-chip"><i class="fa-solid fa-bookmark"></i> 系統架構</a>
+<a href="#sec-2" class="quick-chip"><i class="fa-solid fa-bookmark"></i> 硬體選型、電路設計</a>
+<a href="#sec-3" class="quick-chip"><i class="fa-solid fa-bookmark"></i> ESP32 / ESP32-S3 韌體開發</a>
+<a href="#sec-4" class="quick-chip"><i class="fa-solid fa-bookmark"></i> AI 大語言模型連接</a>
+<a href="#sec-5" class="quick-chip"><i class="fa-solid fa-bookmark"></i> Web 控制台全頁面、按鈕</a>
+<a href="#sec-7" class="quick-chip"><i class="fa-solid fa-bookmark"></i> 4 大核心 JSON 資料格式</a>
+<a href="#sec-11" class="quick-chip"><i class="fa-solid fa-bookmark"></i> RESTful API 端點</a>
+<a href="#sec-12" class="quick-chip"><i class="fa-solid fa-bookmark"></i> Docker 部署、環境變數</a>
+            </div>
+        </div>
+
+        <div class="nav-controls">
+            <button class="btn-icon" id="themeToggle" title="切換深色/淺色主題模式">
+                <i class="fa-solid fa-moon"></i>
+            </button>
+            <button class="btn-icon" onclick="window.print()" title="列印 / 匯出 PDF 檔案">
+                <i class="fa-solid fa-print"></i>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+        <article class="markdown-body" id="content">
+            <h1 id="inktime-墨水屏電子相框系統-終極百科全書級操作手冊與開發者指南" class="doc-h1">InkTime 墨水屏電子相框系統 終極百科全書級操作手冊與開發者指南</h1>
+<hr class="doc-divider">
+<h2 id="toc" class="doc-h2"><span class="h2-anchor-icon">#</span> 摘要目錄</h2>
+<ul class="doc-list"><li><a href="#sec-1" class="doc-link">一、 系統架構與設計哲學</a></li><li><a href="#sec-2" class="doc-link">二、 硬體選型、電路設計與面板選擇</a></li><li><a href="#sec-2-1" class="doc-link">2.1 三大彩色電子紙面板規格與光學特性</a></li><li><a href="#sec-2-2" class="doc-link">2.2 完整 GPIO 引腳映射與 SPI 時脈規範</a></li><li><a href="#sec-2-3" class="doc-link">2.3 電池功耗模型與 ADC 分壓量測電路</a></li><li><a href="#sec-3" class="doc-link">三、 ESP32 / ESP32-S3 韌體開發與刷機指南</a></li><li><a href="#sec-3-1" class="doc-link">3.1 PlatformIO 與 Arduino IDE 環境配置</a></li><li><a href="#sec-3-2" class="doc-link">3.2 韌體原始碼邏輯與驅動初始化序列</a></li><li><a href="#sec-3-3" class="doc-link">3.3 燒錄、Wi-Fi 配網與 Token 註冊流程</a></li><li><a href="#sec-4" class="doc-link">四、 AI 大語言模型連接與組態指南</a></li><li><a href="#sec-4-1" class="doc-link">4.1 OpenAI 官方 Vision API 連接 (GPT-4o / GPT-4o-mini)</a></li><li><a href="#sec-4-2" class="doc-link">4.2 本機 LMStudio 視覺大模型連接 (Qwen2.5-VL / Qwen3-VL)</a></li><li><a href="#sec-4-3" class="doc-link">4.3 Ollama 本機模型相容介面連接 (LLaVA / Qwen-VL)</a></li><li><a href="#sec-4-4" class="doc-link">4.4 Azure OpenAI 與自訂相容 Vision 端點</a></li><li><a href="#sec-5" class="doc-link">五、 Web 控制台全頁面、按鈕與 API 介面深度解析</a></li><li><a href="#sec-5-1" class="doc-link">5.1 儀表板 (Dashboard)</a></li><li><a href="#sec-5-2" class="doc-link">5.2 照片庫與照片詳情 (Photos & Photo Detail)</a></li><li><a href="#sec-5-3" class="doc-link">5.3 預篩選排除清單 (Excluded Photos)</a></li><li><a href="#sec-5-4" class="doc-link">5.4 照片分析與 AI 工作佇列 (Photo Analysis & Jobs)</a></li><li><a href="#sec-5-5" class="doc-link">5.5 AI 提供者與成本控制 (Providers & Budgets)</a></li><li><a href="#sec-5-6" class="doc-link">5.6 評分控制中心 (Scoring Lab)</a></li><li><a href="#sec-5-7" class="doc-link">5.7 渲染設定與 A/B 模擬器 (Rendering & Simulator)</a></li><li><a href="#sec-5-8" class="doc-link">5.8 虛擬電子紙與畫面發布 (Virtual Display & Release Publisher)</a></li><li><a href="#sec-5-9" class="doc-link">5.9 裝置管理與能量分析 (Devices & Energy)</a></li><li><a href="#sec-5-10" class="doc-link">5.10 排程工作管理 (Schedules)</a></li><li><a href="#sec-5-11" class="doc-link">5.11 系統維護與決策韌性 (Maintenance & Resilience)</a></li><li><a href="#sec-5-12" class="doc-link">5.12 熱備份與系統診斷 (Backups & Diagnostics)</a></li><li><a href="#sec-6" class="doc-link">六、 DEBUG 模式、除錯診斷工具與測試清單</a></li><li><a href="#sec-6-1" class="doc-link">6.1 伺服器端 DEBUG 日誌模式切換</a></li><li><a href="#sec-6-2" class="doc-link">6.2 ESP32 Serial 串口監控與除錯訊息</a></li><li><a href="#sec-6-3" class="doc-link">6.3 系統日常維護與健康檢查 5 步清單</a></li><li><a href="#sec-7" class="doc-link">七、 4 大核心 JSON 資料格式與逐行註解範例集</a></li><li><a href="#sec-7-1" class="doc-link">7.1 EXIF 照片元資料 JSON 格式 (<code>photo_scores.exif_json</code>)</a></li><li><a href="#sec-7-2" class="doc-link">7.2 送往 Vision LLM 之 Request Input Payload JSON</a></li><li><a href="#sec-7-3" class="doc-link">7.3 Vision LLM 回傳之 Response JSON (<code>ANALYSIS_JSON_SCHEMA</code>)</a></li><li><a href="#sec-7-4" class="doc-link">7.4 ESP32 設備回報狀態 JSON (<code>report_status</code>)</a></li><li><a href="#sec-8" class="doc-link">八、 7 大畫布版型幾何佈局與渲染引擎細節</a></li><li><a href="#sec-9" class="doc-link">九、 10 種 Dithering 抖動演算法與色彩空間演算法數學原理</a></li><li><a href="#sec-10" class="doc-link">十、 SQLite 資料庫 13 張 Table 完全 Schema 規格</a></li><li><a href="#sec-11" class="doc-link">十一、 RESTful API 端點與 Error Code 錯誤碼完全對照表</a></li><li><a href="#sec-12" class="doc-link">十二、 Docker 部署、環境變數與生產環境配置</a></li><li><a href="#sec-12-1" class="doc-link">12.1 <code>docker-compose.yml</code> 逐行中文註解配置檔</a></li><li><a href="#sec-12-2" class="doc-link">12.2 全系統環境變數逐行詳細解析</a></li><li><a href="#sec-12-3" class="doc-link">12.3 初次設定「必須設定」的 5 大項目清單</a></li><li><a href="#sec-12-4" class="doc-link">12.4 進階「設定後會更好」的 8 大系統優化清單</a></li><li><a href="#sec-13" class="doc-link">十三、 系統設定參數 100% 完全對照表</a></li><li><a href="#sec-14" class="doc-link">十四、 全情境故障排除與問題診斷指南</a></li><li><a href="#sec-14-1" class="doc-link">14.1 網路連線與 ESP32 硬體故障排除</a></li><li><a href="#sec-14-2" class="doc-link">14.2 照片庫、磁碟與 NAS 掛載故障排除</a></li><li><a href="#sec-14-3" class="doc-link">14.3 AI 模型分析與 Token 成本故障排除</a></li><li><a href="#sec-14-4" class="doc-link">14.4 影像渲染與墨水屏顯示畫質故障排除</a></li><li><a href="#sec-14-5" class="doc-link">14.5 資料庫與鎖定競爭故障排除</a></li></ul>
+<hr class="doc-divider">
+<h2 id="sec-1" class="doc-h2"><span class="h2-anchor-icon">#</span> 一、 系統架構與設計哲學</h2>
+<p class="doc-p">InkTime 採用 Clean Architecture（潔淨架構）設計，將領域邏輯 (Domain)、資料庫與儲存庫 (Repositories)、業務服務 (Services) 以及 Web API/介面 (API & Web) 嚴格解耦：</p>
+<div class="mermaid-box"><pre class="mermaid">flowchart TD
+    subgraph Client ["硬體終端層 (Hardware Device)"]
+        ESP32["ESP32 / ESP32-S3 電子相框"]
+    end
+
+    subgraph Entrypoints ["系統入口與背景任務層"]
+        WebAPI["Flask Web &amp; REST API Server"]
+        Worker["BoundedJobWorker (背景任務)"]
+        Scheduler["SchedulerRunner (定時排程器)"]
+    end
+
+    subgraph Services ["業務邏輯層 (Services Layer)"]
+        RenderSvc["RenderService (發布協調)"]
+        AnalysisSvc["PhotoAnalysisService (相片分析)"]
+        ProviderSvc["ProviderService (模型管理)"]
+        WeatherSvc["WeatherService (天氣整合)"]
+    end
+
+    subgraph Domain ["核心領域演算法層 (Domain Layer)"]
+        PhotoRenderer["PhotoRenderer (影像處理)"]
+        Palette["Palette &amp; Dithering (抖動與色盤)"]
+        AdaptiveLayout["AdaptiveLayout (版型佈局)"]
+    end
+
+    subgraph Repositories ["資料與儲存層 (Repositories &amp; DB)"]
+        ManagedConn["ManagedConnection (跨程序寫入鎖)"]
+        SQLiteDB[("SQLite 資料庫 (photos.db)")]
+    end
+
+    ESP32 --&gt;|HTTP GET /devices/latest_release| WebAPI
+    WebAPI --&gt; RenderSvc
+    Worker --&gt; AnalysisSvc
+    Scheduler --&gt; RenderSvc
+
+    RenderSvc --&gt; PhotoRenderer
+    RenderSvc --&gt; Palette
+    RenderSvc --&gt; AdaptiveLayout
+    AnalysisSvc --&gt; ProviderSvc
+
+    Services --&gt; ManagedConn
+    ManagedConn --&gt;|fcntl.flock 鎖定| SQLiteDB</pre></div>
+<hr class="doc-divider">
+<h2 id="sec-2" class="doc-h2"><span class="h2-anchor-icon">#</span> 二、 硬體選型、電路設計與面板選擇</h2>
+<h3 id="sec-2-1" class="doc-h3">2.1 三大彩色電子紙面板規格與光學特性</h3>
+<p class="doc-p">InkTime 面板驅動層抽象支援以下三類面板 Profile：</p>
+<h4 id="1-safe_4c-通用-7-3-吋四色面板" class="doc-h4">1. <code>safe_4c</code> (通用 7.3 吋四色面板)</h4>
+<ul class="doc-list"><li><strong>支援色彩</strong>：Black (<code>#000000</code>), White (<code>#FFFFFF</code>), Red (<code>#DC1E1E</code>), Yellow (<code>#F5BE19</code>)</li><li><strong>像素格式</strong>：<code>2bpp</code>（1 Byte 存放 4 個像素；像素高位到低位打包）</li><li><strong>單張圖片大小</strong>：$480 \times 800 \times 2 / 8 = 96,000\text{ Bytes}$ ($93.75\text{ KB}$)</li><li><strong>物理特性</strong>：高對比度，黑白極為純淨，適用於明信片、月曆與高對比文字圖示版型。</li></ul>
+<h4 id="2-gdep073e01_6c-gooddisplay-gdep073e01-spectra-6-六色面板" class="doc-h4">2. <code>gdep073e01_6c</code> (GoodDisplay GDEP073E01 Spectra 6 六色面板)</h4>
+<ul class="doc-list"><li><strong>支援色彩</strong>：Black (<code>#000000</code>), White (<code>#FFFFFF</code>), Green (<code>#199B46</code>), Blue (<code>#1E55AA</code>), Red (<code>#D22323</code>), Yellow (<code>#F0C319</code>)</li><li><strong>像素格式</strong>：<code>indexed4</code>（4 bits/pixel；1 Byte 存放 2 個像素）</li><li><strong>單張圖片大小</strong>：$480 \times 800 \times 4 / 8 = 192,000\text{ Bytes}$ ($187.5\text{ KB}$)</li><li><strong>物理特性</strong>：Spectra 6 微膠囊技術，色彩飽和度高，<strong>為人像與風景照片之首選面板</strong>。</li></ul>
+<h4 id="3-gdey073d46_7c-gooddisplay-gdey073d46-acep-7-色面板" class="doc-h4">3. <code>gdey073d46_7c</code> (GoodDisplay GDEY073D46 ACeP 7 色面板)</h4>
+<ul class="doc-list"><li><strong>支援色彩</strong>：Black, White, Green, Blue, Red, Yellow, Orange (<code>#F06E14</code>)</li><li><strong>像素格式</strong>：<code>indexed4</code> ($192,000\text{ Bytes}$)</li><li><strong>物理特性</strong>：增加了橙色（Orange）粒子，風景落日與膚色過渡更為平滑。</li></ul>
+<hr class="doc-divider">
+<h3 id="sec-2-2" class="doc-h3">2.2 完整 GPIO 引腳映射與 SPI 時脈規範</h3>
+<h4 id="a-標準-esp32-existing-default-板型" class="doc-h4">(A) 標準 ESP32 (Existing Default 板型)</h4>
+<div class="mermaid-box"><pre class="mermaid">flowchart LR
+    subgraph MCU ["ESP32 Dev Module"]
+        GPIO11["GPIO 11 (CS)"]
+        GPIO10["GPIO 10 (SCK)"]
+        GPIO9["GPIO 9 (MOSI)"]
+        GPIO12["GPIO 12 (DC)"]
+        GPIO13["GPIO 13 (RST)"]
+        GPIO14["GPIO 14 (BUSY)"]
+    end
+
+    subgraph EPD ["E-Paper Driver Board"]
+        CS["CS Pin"]
+        SCK["SCK Pin"]
+        MOSI["MOSI Pin"]
+        DC["DC Pin"]
+        RST["RST Pin"]
+        BUSY["BUSY Pin"]
+    end
+
+    GPIO11 --&gt; CS
+    GPIO10 --&gt; SCK
+    GPIO9 --&gt; MOSI
+    GPIO12 --&gt; DC
+    GPIO13 --&gt; RST
+    BUSY --&gt; GPIO14</pre></div>
+<ul class="doc-list"><li><strong>SPI 傳輸頻率</strong>：預設 $4.0\text{ MHz}$（受限於面板驅動 IC 之最大訊號邊緣上升時間）。</li><li><strong>BUSY 引腳觸發</strong>：Active Low (平時高電位，刷新時下拉為低電位)。</li></ul>
+<h4 id="b-waveshare-esp32-s3-photopainter-專用板型" class="doc-h4">(B) Waveshare ESP32-S3 PhotoPainter 專用板型</h4>
+<ul class="doc-list"><li><strong>Display SPI</strong>：<code>CS: GPIO 9</code>, <code>SCK: GPIO 10</code>, <code>MOSI: GPIO 11</code>, <code>DC: GPIO 8</code>, <code>RST: GPIO 12</code>, <code>BUSY: GPIO 13</code></li><li><strong>SD Card SPI</strong> (獨立第二匯流排)：<code>CS: GPIO 38</code>, <code>SCK: GPIO 39</code>, <code>MISO: GPIO 40</code>, <code>MOSI: GPIO 41</code> (時脈 $20\text{ MHz}$)</li><li><strong>I2C Bus</strong>：<code>SDA: GPIO 47</code>, <code>SCL: GPIO 48</code> (連接 SHTC3 溫溼度晶片與 PCF8563 RTC)</li><li><strong>Power Button</strong>：<code>GPIO 5</code>；<strong>User Key</strong>：<code>GPIO 4</code>；<strong>Status LED</strong>：<code>GPIO 2</code></li></ul>
+<hr class="doc-divider">
+<h3 id="sec-2-3" class="doc-h3">2.3 電池功耗模型與 ADC 分壓量測電路</h3>
+<h4 id="電池量測電路-resistor-divider" class="doc-h4">電池量測電路 (Resistor Divider)</h4>
+<p class="doc-p">ESP32 ADC1 (GPIO 34 / GPIO 1) 透過兩個 $100\text{ k}\Omega$ 精密金屬膜電阻對 3.7V 鋰電池分壓：</p>
+<p class="doc-p">$$V_{\text{ADC}} = V_{\text{BAT}} \times \frac{100\text{k}}{100\text{k} + 100\text{k}} = \frac{V_{\text{BAT}}}{2}$$</p>
+<p class="doc-p">電壓計算公式：</p>
+<div class="code-wrapper">
+                    <div class="code-header">
+                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> CPP</span>
+                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
+                    </div>
+                    <pre><code class="language-cpp">uint32_t raw_adc = analogRead(BATTERY_ADC_PIN);
+float voltage_mv = (float)raw_adc * (3300.0f / 4095.0f) * 2.0f * ADC_CALIBRATION_FACTOR;</code></pre>
+                </div>
+<h4 id="工作功耗統計模型" class="doc-h4">工作功耗統計模型：</h4>
+<ul class="doc-list"><li><strong>Deep Sleep 待機電流</strong>：$\approx 10 \sim 15\,\mu\text{A}$</li><li><strong>Wi-Fi 連線與 HTTP 下載</strong>：$120 \sim 240\,\text{mA}$ (持續 $2 \sim 4$ 秒)</li><li><strong>墨水屏 SPI 刷新寫入</strong>：$40 \sim 80\,\text{mA}$ (持續 $15 \sim 25$ 秒)</li><li><strong>單次刷新總能耗</strong>：$\approx 2.5\,\text{mAh}$。若搭配 $3000\,\text{mAh}$ 鋰電池且每日刷新 1 次，理論續航可達 <strong>8 ~ 12 個月</strong>。</li></ul>
+<hr class="doc-divider">
+<h2 id="sec-3" class="doc-h2"><span class="h2-anchor-icon">#</span> 三、 ESP32 / ESP32-S3 韌體開發與刷機指南</h2>
+<h3 id="sec-3-1" class="doc-h3">3.1 PlatformIO 與 Arduino IDE 環境配置</h3>
+<h4 id="platformio-專案配置範例-platformio-ini" class="doc-h4">PlatformIO 專案配置範例 (<code>platformio.ini</code>)：</h4>
+<div class="code-wrapper">
+                    <div class="code-header">
+                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> INI</span>
+                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
+                    </div>
+                    <pre><code class="language-ini">[env:esp32s3_photopainter]
+platform = espressif32 @ 6.5.0
+board = esp32-s3-devkitc-1
+framework = arduino
+board_build.mcu = esp32s3
+board_build.f_cpu = 240000000L
+board_build.f_flash = 80000000L
+board_build.flash_mode = qio
+board_build.arduino.memory_type = qio_opi
+board_upload.flash_size = 16MB
+board_build.partitions = default_16MB.csv
+
+build_flags =
+    -D DEVICE_PROFILE=2
+    -D INKTIME_PANEL_GDEP073E01=1
+    -D BOARD_HAS_PSRAM
+    -D CONFIG_SPIRAM_MODE_OCT=1
+    -D ARDUINO_USB_CDC_ON_BOOT=1
+
+lib_deps =
+    bblanchon/ArduinoJson @ ^6.21.3
+    zinonthefly/GxEPD2 @ ^1.5.2</code></pre>
+                </div>
+<hr class="doc-divider">
+<h3 id="sec-3-2" class="doc-h3">3.2 韌體原始碼邏輯與驅動初始化序列</h3>
+<p class="doc-p"><code>ink-display-7C-photo.ino</code> 執行流程圖：</p>
+<div class="mermaid-box"><pre class="mermaid">flowchart TD
+    Boot["系統開機 (Boot)"] --&gt; InitHW["初始化硬體 (Pins / SPI / ADC)"]
+    InitHW --&gt; ConnWiFi{"連接 Wi-Fi"}
+    ConnWiFi --&gt;|失敗| LaunchAP["開啟 AP 配網熱點 (180 秒)"]
+    ConnWiFi --&gt;|成功| Fetch["發送 HTTP GET /devices/latest_release"]
+    LaunchAP --&gt; ConnWiFi
+    Fetch --&gt; Stream["流式讀取 Payload 寫入 EPD SPI"]
+    Stream --&gt; Refresh["面板驅動發射與粒子排列 (0x12)"]
+    Refresh --&gt; Sleep["進入 Deep Sleep 休眠"]</pre></div>
+<h4 id="e-paper-驅動核心指令-command-sequences" class="doc-h4">E-Paper 驅動核心指令 (Command Sequences)</h4>
+<ul class="doc-list"><li><code>0x01</code> (POWER SETTING)：設定內部 VCOM、VGH、VGL 驅動電壓。</li><li><code>0x06</code> (BOOSTER SOFT START)：設定電荷泵軟啟動參數。</li><li><code>0x04</code> (POWER ON)：啟動高壓發射。</li><li><code>0x12</code> (DISPLAY REFRESH)：觸發物理粒子排列與色彩塗佈（阻塞直到 BUSY 腳位拉高）。</li><li><code>0x02</code> (POWER OFF)：切斷高壓驅動。</li><li><code>0x07</code> (DEEP SLEEP)：使面板進入 $1\,\mu\text{A}$ 休眠狀態。</li></ul>
+<hr class="doc-divider">
+<h3 id="sec-3-3" class="doc-h3">3.3 燒錄、Wi-Fi 配網與 Token 註冊流程</h3>
+<ul class="doc-list"><li><strong>燒錄韌體</strong>：</li></ul>
+<p class="doc-p">使用 <code>esptool.py</code> 燒錄編譯產出的 <code>.bin</code>：</p>
+<div class="code-wrapper">
+                    <div class="code-header">
+                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> BASH</span>
+                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
+                    </div>
+                    <pre><code class="language-bash">   esptool.py --chip esp32s3 --port /dev/ttyACM0 --baud 921600 \
+     write_flash -z \
+     0x0000 bootloader.bin \
+     0x8000 partitions.bin \
+     0x10000 ink-display-7C-photo.bin</code></pre>
+                </div>
+<ul class="doc-list"><li><strong>連線熱點配網</strong>：</li><li>ESP32 首次啟動會廣播 Wi-Fi 熱點：<code>InkTime-Setup-XXXXXX</code>。</li><li>使用手機連線後，瀏覽器登入 <code>http://192.168.4.1</code>。</li><li>輸入家中的 Wi-Fi SSID 與密碼。</li><li>輸入 InkTime 伺服器網址（例如 <code>http://192.168.1.100:8765</code>）。</li><li>輸入從 InkTime 裝置頁面建立的 <code>Device Secret Token</code>。</li><li><strong>完成綁定</strong>：點擊儲存，ESP32 重新開機並發送首次狀態回報。</li></ul>
+<hr class="doc-divider">
+<h2 id="sec-4" class="doc-h2"><span class="h2-anchor-icon">#</span> 四、 AI 大語言模型連接與組態指南</h2>
+<h3 id="sec-4-1" class="doc-h3">4.1 OpenAI 官方 Vision API 連接 (GPT-4o / GPT-4o-mini)</h3>
+<p class="doc-p">進入 Web 控制台 <code>AI 提供者</code> (<code>/providers</code>) 點擊 <code>[新增 Provider]</code>，設定如下：</p>
+<ul class="doc-list"><li><strong>名稱 (Name)</strong>：<code>OpenAI-Official</code></li><li><strong>Base URL</strong>：<code>https://api.openai.com/v1</code></li><li><strong>API Key</strong>：輸入 OpenAI 專用 <code>sk-proj-...</code> 金鑰（儲存時將自動經 Fernet 密碼學加密）</li><li><strong>模型名稱 (Model Name)</strong>：</li><li>低成本第一階段模型：<code>gpt-4o-mini</code></li><li>高品質第二階段模型：<code>gpt-4o</code></li><li><strong>Token 價格設定</strong>：</li><li><code>gpt-4o-mini</code>：Input <code>$0.00015</code> / 1k tokens, Output <code>$0.0006</code> / 1k tokens</li><li><code>gpt-4o</code>：Input <code>$0.0025</code> / 1k tokens, Output <code>$0.01</code> / 1k tokens</li></ul>
+<hr class="doc-divider">
+<h3 id="sec-4-2" class="doc-h3">4.2 本機 LMStudio 視覺大模型連接 (Qwen2.5-VL / Qwen3-VL)</h3>
+<p class="doc-p">若不想使用雲端付費 API，可透過 LMStudio 本機執行開源視覺大模型：</p>
+<ul class="doc-list"><li>開啟 LMStudio 下載並載入 Vision 模型（如 <code>qwen2.5-vl-7b-instruct</code> 或 <code>qwen3-vl-8b</code>）。</li><li>在 LMStudio 開啟 <code>Local Inference Server</code>，埠號預設為 <code>1234</code>。</li><li>在 InkTime 控制台新增 Provider：</li><li><strong>名稱</strong>：<code>LMStudio-Local</code></li><li><strong>Base URL</strong>：<code>http://127.0.0.1:1234/v1</code> (若為 Docker 請設主機 IP，如 <code>http://172.17.0.1:1234/v1</code>)</li><li><strong>API Key</strong>：<code>lm-studio</code> (填寫任意非空字串)</li><li><strong>模型名稱</strong>：<code>qwen2.5-vl-7b-instruct</code></li><li><strong>Token 價格</strong>：Input <code>$0.00</code> / Output <code>$0.00</code></li></ul>
+<hr class="doc-divider">
+<h3 id="sec-4-3" class="doc-h3">4.3 Ollama 本機模型相容介面連接 (LLaVA / Qwen-VL)</h3>
+<p class="doc-p">若使用 Ollama 進行本機推論：</p>
+<ul class="doc-list"><li>啟動 Ollama 服務：<code>ollama run qwen2-vl</code></li><li>Ollama 提供標準 OpenAI 相容介面 <code>/v1</code>：</li><li><strong>Base URL</strong>：<code>http://127.0.0.1:11434/v1</code></li><li><strong>API Key</strong>：<code>ollama</code></li><li><strong>模型名稱</strong>：<code>qwen2-vl</code></li></ul>
+<hr class="doc-divider">
+<h3 id="sec-4-4" class="doc-h3">4.4 Azure OpenAI 與自訂相容 Vision 端點</h3>
+<p class="doc-p">對接 Azure OpenAI 或自設的 vLLM / SGLang Vision 集群：</p>
+<ul class="doc-list"><li><strong>Base URL</strong>：<code>https://<YOUR_AZURE_RESOURCE>.openai.azure.com/openai/deployments/<DEPLOYMENT_NAME></code></li><li><strong>HTTP Header 相容</strong>：系統支援在 Provider 設定中指定特有的 API Version Query Parameter（如 <code>?api-version=2024-02-01</code>）。</li></ul>
+<hr class="doc-divider">
+<h2 id="sec-5" class="doc-h2"><span class="h2-anchor-icon">#</span> 五、 Web 控制台全頁面、按鈕與 API 介面深度解析</h2>
+<h3 id="sec-5-1" class="doc-h3">5.1 儀表板 (Dashboard)</h3>
+<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/</code> (GET)</li><li><strong>畫面指標</strong>：</li><li><strong>照片總數卡片</strong>：顯示目前庫存照片數、Missing 丟失數與偏遠路徑照片數。</li><li><strong>最新發布畫面預覽</strong>：顯示正發布給 ESP32 的 480x800 圖像縮圖。</li><li><strong>近期背景 Job 狀態</strong>：顯示正在進行中的 Task 數量與進度條。</li><li><strong>頁面控制按鈕</strong>：</li><li><code>[立即觸發照片分析]</code>：發送 POST 至 <code>/api/v1/jobs/analysis</code> 建立緊急分析任務。</li><li><code>[手動發布新畫面]</code>：發送 POST 至 <code>/api/v1/rendering/publish-now</code> 靜態選取最高分/歷史今日照片並渲染最新畫面集。</li></ul>
+<hr class="doc-divider">
+<h3 id="sec-5-2" class="doc-h3">5.2 照片庫與照片詳情 (Photos & Photo Detail)</h3>
+<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/photos</code> (GET) 與 <code>/photos/{photo_id}</code> (GET)</li><li><strong>畫面指標與列表</strong>：</li><li>照片縮圖牆（支援無限捲動與分頁）。</li><li>每張照片顯示本機預篩選狀態、最愛狀態、EXIF 日期與 AI 綜合評分。</li><li><strong>頁面控制按鈕</strong>：</li><li><code>[標記/取消最愛 (Heart)]</code>：呼叫 <code>PATCH /api/v1/photos/{id}</code> 修改 <code>is_favorite</code> 屬性。最愛照片會享有 +10 分加分並略過本機預篩選。</li><li><code>[手動變更拍攝日期]</code>：彈出 Modal 輸入 <code>YYYY-MM-DD HH:MM:SS</code>，修正遺失的 EXIF 日期。</li><li><code>[強制重新評分]</code>：呼叫 <code>POST /api/v1/photos/{id}/reanalyze</code> 清除分數並送入佇列。</li></ul>
+<hr class="doc-divider">
+<h3 id="sec-5-3" class="doc-h3">5.3 預篩選排除清單 (Excluded Photos)</h3>
+<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/photos/excluded</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>分類顯示因「截圖標籤」、「品質瑕疵（模糊/過曝）」與「E6 面板嚴重失真」被本機過濾的照片。</li><li><strong>頁面控制按鈕</strong>：</li><li><code>[還原照片]</code>：呼叫 <code>POST /api/v1/photos/{id}/restore</code>，允許其重新參加分析與發布。</li><li><code>[批次忽略標籤]</code>：永久跳過該照片的預篩選。</li></ul>
+<hr class="doc-divider">
+<h3 id="sec-5-4" class="doc-h3">5.4 照片分析與 AI 工作佇列 (Photo Analysis & Jobs)</h3>
+<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/jobs</code> (GET) 與 <code>/jobs/{job_id}</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>任務佇列狀態（<code>pending</code>, <code>running</code>, <code>pausing</code>, <code>paused</code>, <code>completed</code>, <code>failed</code>, <code>budget_exceeded</code>）。</li><li>實時 Token 消耗量、處理速度（照片/分鐘）與預估剩餘時間。</li><li><strong>頁面控制按鈕</strong>：</li><li><code>[建立新工作]</code>：彈出對話框設定分析模式（<code>smart_two_stage</code> / <code>low_cost</code> / <code>high_quality</code>）、預算上限 ($USD) 與並行數量。</li><li><code>[暫停 (Pause)]</code>：發送 <code>POST /api/v1/jobs/{id}/pause</code>。</li><li><code>[恢復 (Resume)]</code>：發送 <code>POST /api/v1/jobs/{id}/resume</code>。</li><li><code>[重試失敗項目]</code>：發送 <code>POST /api/v1/jobs/{id}/retry-failed</code>。</li></ul>
+<hr class="doc-divider">
+<h3 id="sec-5-5" class="doc-h3">5.5 AI 提供者與成本控制 (Providers & Budgets)</h3>
+<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/providers</code> (GET) 與 <code>/costs</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>當月與每日 Token 累積費用折線圖與模型費用比例圓餅圖。</li><li><strong>頁面控制按鈕與設定</strong>：</li><li><code>[新增 Provider]</code>：輸入 Name, Base URL, API Key（Fernet 加密）、Model Name (如 <code>gpt-4o-mini</code>, <code>qwen-vl-max</code>) 與 Prompt 單價。</li><li><code>[測試 Provider 連線]</code>：發送測試圖片 Payload 驗證 JSON Schema 解析。</li><li><code>[成本門檻欄位]</code>：</li><li><code>budget.daily_warning</code> ($USD)：每日警告門檻。</li><li><code>budget.daily_stop</code> ($USD)：每日熔斷停止門檻。</li></ul>
+<hr class="doc-divider">
+<h3 id="sec-5-6" class="doc-h3">5.6 評分控制中心 (Scoring Lab)</h3>
+<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/scoring</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>實時預覽照片綜合排序分數（Final Composite Score）公式：</li></ul>
+<p class="doc-p">$$\text{Score} = w_m \cdot S_m + w_b \cdot S_b + w_t \cdot S_t + w_e \cdot S_e + \text{Bonus}_{\text{fav}} + \text{Bonus}_{\text{travel}}$$</p>
+<ul class="doc-list"><li><strong>控制按鈕與滑桿</strong>：</li><li><strong>四項權重滑桿</strong>：<code>Memory</code> ($w_m$), <code>Beauty</code> ($w_b$), <code>Technical</code> ($w_t$), <code>Emotion</code> ($w_e$)，實時限制總和為 100%。</li><li><strong>最愛加分 (Favorite Bonus)</strong>：設定最愛照片獲得的額外加分 (0 ~ 30 分)。</li><li><strong>旅行加分 (Travel Bonus)</strong>：設定離家距離 60-200km、>200km 及跨國旅行的加分權重。</li></ul>
+<hr class="doc-divider">
+<h3 id="sec-5-7" class="doc-h3">5.7 渲染設定與 A/B 模擬器 (Rendering & Simulator)</h3>
+<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/rendering</code> (GET) 與 <code>/simulator</code> (GET)</li><li><strong>畫面指標與模擬器</strong>：</li><li><strong>A/B 畫面對照區</strong>：左側與右側可選擇不同 Preset、版型與 Dither 演算法，實時比對渲染效果。</li><li><strong>頁面控制按鈕與下拉選單</strong>：</li><li><strong>版型選擇 (Layout)</strong>：<code>full</code>, <code>postcard</code>, <code>photo_info</code>, <code>photo_pair</code>, <code>adaptive_memory</code>, <code>calendar</code>, <code>weather_sensor</code>。</li><li><strong>抖動模式 (Dither)</strong>：<code>floyd_steinberg</code>, <code>gooddisplay</code>, <code>photo_smooth</code>, <code>atkinson</code>, <code>bayer4</code>, <code>bayer8</code>, <code>serpentine_floyd_steinberg</code> 等 10 種。</li><li><code>[儲存為預設發布設定]</code>：將當前參數寫入 <code>render.layout</code> 與 <code>render.dither</code>。</li></ul>
+<hr class="doc-divider">
+<h3 id="sec-5-8" class="doc-h3">5.8 虛擬電子紙與畫面發布 (Virtual Display & Release Publisher)</h3>
+<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/virtual-display</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>Canvas 擬真渲染器，呈現電子紙微膠囊物理粒子邊緣與反光質感。</li><li><strong>頁面控制按鈕</strong>：</li><li><code>[模擬實體刷新 (Simulate Refresh)]</code>：觸發網頁端 15 秒物理 Flash 閃爍動畫（黑->白->紅->黃->綠->藍）。</li><li><code>[下載 .bin Payload]</code>：導出 192,000 Bytes 原始二進位檔。</li><li><code>[下載 .h Header]</code>：導出包含 <code>const unsigned char gImage_photo[]</code> 之 C 語言頭文件。</li></ul>
+<hr class="doc-divider">
+<h3 id="sec-5-9" class="doc-h3">5.9 裝置管理與能量分析 (Devices & Energy)</h3>
+<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/devices</code> (GET) 與 <code>/devices/energy</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>列表顯示所有已綁定之 ESP32 設備、MAC 位址、韌體版本、最後心跳時間、電池電量 (mV) 與 Wi-Fi RSSI。</li><li><strong>頁面控制按鈕</strong>：</li><li><code>[新增裝置]</code>：設定 Device Name, Display Profile (<code>safe_4c</code> / <code>gdep073e01_6c</code>), Rotation (<code>0°</code> / <code>180°</code>)。</li><li><code>[生成/重置 API Key]</code>：顯示一次性 Bearer Token。</li><li><code>[電量圖表]</code>：檢視過去 30 天電量下降曲線與預估剩餘壽命。</li></ul>
+<hr class="doc-divider">
+<h3 id="sec-5-10" class="doc-h3">5.10 排程工作管理 (Schedules)</h3>
+<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/schedules</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>顯示 4 大核心系統排程（照片庫掃描、每日自動照片發布、AI 批次分析、系統資料庫備份）之下一執行時間。</li><li><strong>頁面控制按鈕</strong>：</li><li><code>[編輯 Cron 視窗]</code>：設定每日觸發時間 <code>HH:MM</code> 與允許視窗 <code>window_start</code> / <code>window_end</code>。</li><li><code>[高負載延後開關]</code>：當 <code>delay_high_load=true</code> 時，若主機 Load Average > 85% 自動延後 15 分鐘。</li></ul>
+<hr class="doc-divider">
+<h3 id="sec-5-11" class="doc-h3">5.11 系統維護與決策韌性 (Maintenance & Resilience)</h3>
+<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/maintenance</code> (GET) 與 <code>/resilience</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>顯示離線佇列 (Device Queue Manifest) 與影子選片 (Shadow Selection) 偏差統計。</li><li><strong>頁面控制按鈕</strong>：</li><li><code>[清理過期離線佇列]</code>：清除已超時未存取的發布快取。</li><li><code>[執行影子演算法比對]</code>：對比當前選片邏輯與基準演算法之決策重疊率 (Jaccard Index)。</li></ul>
+<hr class="doc-divider">
+<h3 id="sec-5-12" class="doc-h3">5.12 熱備份與系統診斷 (Backups & Diagnostics)</h3>
+<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/backups</code> (GET) 與 <code>/diagnostics</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>顯示即時 CPU, Memory, Disk Space, SQLite WAL 檔案大小與長交易統計。</li><li><strong>頁面控制按鈕</strong>：</li><li><code>[建立熱備份]</code>：呼叫 <code>BackupService.create()</code> 在線上發送 <code>VACUUM INTO</code> 備份。</li><li><code>[一鍵離線還原]</code>：取得 Exclusive Runtime Lock 並還原 SQLite 資料庫。</li><li><code>[執行完整性檢查 (Integrity Check)]</code>：發送 <code>PRAGMA integrity_check</code> 至 SQLite。</li></ul>
+<hr class="doc-divider">
+<h2 id="sec-6" class="doc-h2"><span class="h2-anchor-icon">#</span> 六、 DEBUG 模式、除錯診斷工具與測試清單</h2>
+<h3 id="sec-6-1" class="doc-h3">6.1 伺服器端 DEBUG 日誌模式切換</h3>
+<p class="doc-p">若要追蹤詳細的分析請求與交易流程，可將系統日誌層級切換為 <code>DEBUG</code>：</p>
+<ul class="doc-list"><li><strong>環境變數切換</strong>：</li></ul>
+<p class="doc-p">在 <code>.env</code> 或 Docker 中設定：<code>INKTIME_LOG_LEVEL=DEBUG</code></p>
+<ul class="doc-list"><li><strong>網頁控制台動態切換</strong>：</li></ul>
+<p class="doc-p">進入 <code>/settings</code> 頁面，找到 <code>log.level</code> 組態，切換為 <code>DEBUG</code> 並點擊儲存（動態生效，無需重啟）。</p>
+<ul class="doc-list"><li><strong>Log 輸出追蹤</strong>：</li></ul>
+<p class="doc-p">所有日誌均為 JSON Structured Log 格式，範例：</p>
+<div class="code-wrapper">
+                    <div class="code-header">
+                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> JSON</span>
+                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
+                    </div>
+                    <pre><code class="language-json">   {
+     "timestamp": "2026-07-24T15:30:00Z",
+     "logger": "platform",
+     "level": "DEBUG",
+     "event": "vlm_request_sent",
+     "details": {"photo": "/photos/vacation.jpg", "provider": "OpenAI-Official", "tokens": 420}
+   }</code></pre>
+                </div>
+<hr class="doc-divider">
+<h3 id="sec-6-2" class="doc-h3">6.2 ESP32 Serial 串口監控與除錯訊息</h3>
+<p class="doc-p">將 ESP32 透過 USB 連接至電腦，開啟 Serial Monitor (Baud Rate: <code>115200</code> 或 <code>921600</code>)：</p>
+<h4 id="正常傳輸-log-範例" class="doc-h4">正常傳輸 Log 範例：</h4>
+<div class="code-wrapper">
+                    <div class="code-header">
+                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> TEXT</span>
+                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
+                    </div>
+                    <pre><code class="language-text">[INFO] [InkTime] Board: waveshare-esp32-s3-photopainter
+[INFO] [InkTime] Free Heap: 184320 bytes, PSRAM: 8388608 bytes
+[INFO] [InkTime] Connecting to Wi-Fi SSID: Home-WiFi... Connected! IP: 192.168.1.105
+[INFO] [InkTime] Sending GET http://192.168.1.100:8765/devices/latest_release ...
+[INFO] [InkTime] HTTP Response 200, Content-Length: 192000 bytes
+[INFO] [InkTime] Streaming bytes to EPD via SPI ... 100%
+[INFO] [InkTime] E-Paper Refresh Triggered (Command 0x12) ... BUSY high (Done 18.2s)
+[INFO] [InkTime] Battery: 4150 mV, RSSI: -58 dBm
+[INFO] [InkTime] Entering Deep Sleep for 86400 seconds.</code></pre>
+                </div>
+<h4 id="常見除錯代碼對照" class="doc-h4">常見除錯代碼對照：</h4>
+<ul class="doc-list"><li><code>[ERROR] HTTP 401</code>: Token 填寫錯誤或已失效，請至 Web 裝置頁重新生成 Token。</li><li><code>[ERROR] HTTP 404</code>: 伺服器尚未產生任何 Release 發布集，請於 Web 點擊「手動發布新畫面」。</li><li><code>[ERROR] Heap Allocation Failed</code>: ESP32 SRAM 不足，請檢查是否啟動了 PSRAM (OPI Mode)。</li></ul>
+<hr class="doc-divider">
+<h3 id="sec-6-3" class="doc-h3">6.3 系統日常維護與健康檢查 5 步清單</h3>
+<p class="doc-p">當系統遇到問題時，請依序執行以下 5 步基本檢查：</p>
+<div class="mermaid-box"><pre class="mermaid">flowchart LR
+    Step1["Step 1: NAS/磁碟掛載"] --&gt; Step2["Step 2: DB 完整性檢查"]
+    Step2 --&gt; Step3["Step 3: Provider API 連線"]
+    Step3 --&gt; Step4["Step 4: ESP32 端點測試"]
+    Step4 --&gt; Step5["Step 5: 系統診斷 Console"]</pre></div>
+<ul class="doc-list"><li><strong>Step 1: 照片磁碟存取檢查</strong>：</li></ul>
+<p class="doc-p">進入 <code>/diagnostics</code> 檢查照片目錄是否仍可正常讀取，無權限拒絕或 NAS 掉盤現象。</p>
+<ul class="doc-list"><li><strong>Step 2: SQLite 資料庫 Integrity Check</strong>：</li></ul>
+<p class="doc-p">在 <code>/diagnostics</code> 點擊 <code>[執行完整性檢查]</code>，確保回傳 <code>ok</code>（若回傳 corrupt 需從備份檔還原）。</p>
+<ul class="doc-list"><li><strong>Step 3: AI Provider 連線測試</strong>：</li></ul>
+<p class="doc-p">在 <code>/providers</code> 頁面點擊 <code>[測試 Provider 連線]</code>，確認 Token 餘額與 Key 是否正常。</p>
+<ul class="doc-list"><li><strong>Step 4: ESP32 端點 Response 測試</strong>：</li></ul>
+<p class="doc-p">在瀏覽器存取 <code>http://<SERVER_IP>:8765/health/ready</code>，確保回傳 <code>{"status": "ready"}</code>。</p>
+<ul class="doc-list"><li><strong>Step 5: 檢視系統資源上限</strong>：</li></ul>
+<p class="doc-p">檢查 <code>/diagnostics</code> 頁面上的 CPU, RAM 與 WAL File Size。若 WAL 檔大於 100MB，建議重啟以觸發 Checkpoint。</p>
+<hr class="doc-divider">
+<h2 id="sec-7" class="doc-h2"><span class="h2-anchor-icon">#</span> 七、 4 大核心 JSON 資料格式與逐行註解範例集</h2>
+<h3 id="sec-7-1" class="doc-h3">7.1 EXIF 照片元資料 JSON 格式 (<code>photo_scores.exif_json</code>)</h3>
+<p class="doc-p">照片經過掃描解析後，儲存在 SQLite <code>photo_scores.exif_json</code> 欄位中的完整 JSON 實例（包含逐行詳細註解）：</p>
+<div class="code-wrapper">
+                    <div class="code-header">
+                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> JSON5</span>
+                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
+                    </div>
+                    <pre><code class="language-json5">{
+  "datetime": "2024:07:24 14:30:00", // 相機 EXIF 原始拍攝時間 (格式: YYYY:MM:DD HH:MM:SS)
+  "make": "Sony",                    // 相機製造商 / 手機品牌 (例如 Sony, Apple, Canon)
+  "model": "ILCE-7RM4",              // 相機具體型號 (例如 A7R4, iPhone 15 Pro)
+  "lens": "FE 24-70mm F2.8 GM",      // 鏡頭型號資訊
+  "focal_length": 35.0,              // 拍攝焦距 (單位: mm 毫米)
+  "aperture": 2.8,                   // 光圈數值 (F-number，例如 f/2.8)
+  "exposure_time": "1/500",          // 快門速度 (單位: 秒)
+  "iso": 100,                        // 感光度 ISO 數值
+  "orientation": 1,                  // 相機旋轉方向標記 (1=正常直立, 3=倒置180°, 6=順時針90°, 8=逆時針90°)
+  "width": 9504,                     // 原始照片像素寬度 (Pixels)
+  "height": 6336,                    // 原始照片像素高度 (Pixels)
+  "gps": {                           // 定位與 GPS 地理座標資訊區塊
+    "latitude": 25.033968,           // 拍攝緯度 (Latitude，正數為北緯)
+    "longitude": 121.564468,         // 拍攝經度 (Longitude，正數為東經)
+    "altitude": 15.2,                // 海拔高度 (單位: 公尺 m)
+    "city": "Taipei",                // 離線地理資料庫對照出的最近城市名稱
+    "country": "Taiwan"              // 離線地理資料庫對照出的國家名稱
+  }
+}</code></pre>
+                </div>
+<hr class="doc-divider">
+<h3 id="sec-7-2" class="doc-h3">7.2 送往 Vision LLM 之 Request Input Payload JSON</h3>
+<p class="doc-p">背景 Worker 透過 HTTP 發送給 OpenAI / LMStudio 大模型時的完整 Request Payload JSON（包含逐行詳細註解）：</p>
+<div class="code-wrapper">
+                    <div class="code-header">
+                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> JSON5</span>
+                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
+                    </div>
+                    <pre><code class="language-json5">{
+  "model": "gpt-4o-mini",              // 指定使用的 Vision LLM 大模型名稱 (例如 gpt-4o-mini 或 qwen2.5-vl-7b-instruct)
+  "temperature": 0.2,                  // 生成隨機性溫度 (0.2 代表高度確定性，減少模型妄想)
+  "max_tokens": 1000,                  // 模型最大回傳 Token 數量上限
+  "response_format": {                 // 強制模型輸出格式區塊
+    "type": "json_object"              // 要求模型嚴格回傳可解析的 JSON 物件 (Structured Output)
+  },
+  "messages": [                        // 對話訊息陣列 (包含 System 提示詞與 User 圖片資料)
+    {
+      "role": "system",                // 系統角色設定 (賦予 AI 評審員人格)
+      "content": "You are a professional photo memory &amp; aesthetics reviewer. Response MUST follow the strict JSON schema." // System Prompt 提示詞指引說明
+    },
+    {
+      "role": "user",                  // 使用者角色請求
+      "content": [                     // 混合內容陣列 (包含文字說明與 Base64 縮圖)
+        {
+          "type": "text",              // 內容類型: 純文字
+          "text": "Analyze this photo for an e-paper photo frame display." // 要求模型分析這張相片的指令
+        },
+        {
+          "type": "image_url",         // 內容類型: 圖片 Data URI
+          "image_url": {               // 圖片網址/資料物件
+            "url": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBD..." // 經過本機縮放至 512px 並編碼的 JPEG Base64 字串
+          }
+        }
+      ]
+    }
+  ]
+}</code></pre>
+                </div>
+<hr class="doc-divider">
+<h3 id="sec-7-3" class="doc-h3">7.3 Vision LLM 回傳之 Response JSON (<code>ANALYSIS_JSON_SCHEMA</code>)</h3>
+<p class="doc-p">AI 模型回應並通過本機 Schema 校驗（<code>validate_analysis_result</code>）後的標準分析 JSON 實例（包含逐行詳細註解）：</p>
+<div class="code-wrapper">
+                    <div class="code-header">
+                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> JSON5</span>
+                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
+                    </div>
+                    <pre><code class="language-json5">{
+  "schema_version": 1,                 // Schema 版本號 (固定為 1)
+  "caption": "家族暑假於花蓮海岸線旅行，陽光照射在波光粼粼的大海與笑容滿面的孩童臉龐上。", // AI 對照片內容的詳細自然語言描述 (1000字內)
+  "types": ["家庭", "旅行", "人物", "風景"], // 照片分類標籤陣列 (必選 1 個以上允許的標籤)
+  "memory_score": 88.5,               // 回憶價值分數 (0-100分，越高代表回憶價值越高)
+  "beauty_score": 92.0,               // 美學與構圖分數 (0-100分，評估光影與色彩)
+  "technical_quality_score": 85.0,     // 技術品質分數 (0-100分，評估對焦、清晰度與雜訊)
+  "emotion_score": 95.0,               // 情感共鳴分數 (0-100分，評估人物表情與氛圍感)
+  "side_caption": "夏日花蓮海角 ‧ 2024",  // 印在墨水屏相框畫面的手寫風短文案 (120字內)
+  "should_keep": true,                 // 是否值得保留在相框展示 (true=保留, false=不展示)
+  "sensitive": false,                  // 是否包含敏感或私密內容 (true=敏感不公開)
+  "reason": "表情自然生動，色彩層次豐富，構圖平衡且具有高度的家庭回憶價值。", // AI 給予此評分的具體原因說明 (240字內)
+  "details": {                         // 第二階段詳細分析延伸屬性區塊 (完整 Schema 包含)
+    "memory_grade": "S",               // 回憶等級 (S/A/B/C/D/E)
+    "aesthetic_grade": "S",            // 美學等級 (S/A/B/C/D/E)
+    "technical_grade": "A",            // 技術等級 (S/A/B/C/D/E)
+    "emotion_grade": "S",              // 情感等級 (S/A/B/C/D/E)
+    "display_suitability_grade": "S",   // 電子紙顯示適合度等級 (S/A/B/C/D/E)
+    "scene": "Ocean Beach",            // 照片場景名稱 (如海灘、公園、客廳)
+    "setting": "outdoor",              // 室內外環境 (outdoor=戶外, indoor=室內)
+    "time_of_day": "day",              // 拍攝時間段 (day=白天, night=夜晚)
+    "weather": "sunny",                // 天氣狀況 (sunny=晴天, rainy=雨天)
+    "people_count": 3,                 // 照片中出現的人數統計
+    "primary_subject": "Family members laughing at the beach", // 主要主角事物描述
+    "crop_safe": "safe",               // 裁切安全度 (safe=安全不切頭, risk=裁切有風險)
+    "face_crop_risk": "low",           // 人臉裁切風險 (low=低風險, high=高風險)
+    "epaper_suitability": "high_contrast_vivid", // 電子紙適合度特徵描述
+    "recommended_preset": "portrait_clear"       // 系統推薦採用的渲染 Preset 設定
+  }
+}</code></pre>
+                </div>
+<hr class="doc-divider">
+<h3 id="sec-7-4" class="doc-h3">7.4 ESP32 設備回報狀態 JSON (<code>report_status</code>)</h3>
+<p class="doc-p">ESP32 每次刷屏或定時喚醒時，發送至伺服器 <code>POST /devices/report_status</code> 的 JSON 實例（包含逐行詳細註解）：</p>
+<div class="code-wrapper">
+                    <div class="code-header">
+                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> JSON5</span>
+                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
+                    </div>
+                    <pre><code class="language-json5">{
+  "device_id": "dev_esp32s3_photopainter_01", // 發送回報的 ESP32 裝置唯一識別碼 ID
+  "battery_mv": 4120,                        // 電池目前電量 (單位: mV 毫伏特，4120mV = 4.12V 滿電)
+  "wifi_rssi": -62,                          // Wi-Fi 訊號接收強度 (單位: dBm，越高越好，-62 為良好)
+  "firmware_version": "v2.4.1",              // ESP32 硬體目前運行的韌體版本號
+  "status_msg": "Display updated successfully", // 硬體刷屏狀態訊息 (如 Update OK 或 WiFi Error)
+  "uptime_seconds": 12,                      // ESP32 本次開機後已運行的時間 (單位: 秒)
+  "free_heap_bytes": 184320                  // ESP32 內部目前剩餘的可用動態記憶體 (單位: Bytes)
+}</code></pre>
+                </div>
+<hr class="doc-divider">
+<h2 id="sec-8" class="doc-h2"><span class="h2-anchor-icon">#</span> 八、 7 大畫布版型幾何佈局與渲染引擎細節</h2>
+<p class="doc-p">所有版型解析度統一為 $480 \times 800$ 像素（直向）或 $800 \times 480$ 像素（橫向）：</p>
+<div class="code-wrapper">
+                    <div class="code-header">
+                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> TEXT</span>
+                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
+                    </div>
+                    <pre><code class="language-">(A) full                 (B) photo_info           (C) photo_pair
+┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
+│                  │     │                  │     │   Top Photo      │
+│   Full Screen    │     │   Photo Area     │     │   (480x390)      │
+│   Photo          │     │   (480x700)      │     ├──────────────────┤
+│   (480x800)      │     │                  │     │   Bottom Photo   │
+│                  │     ├──────────────────┤     │   (480x390)      │
+│                  │     │ Info Bar (100px) │     │                  │
+└──────────────────┘     └──────────────────┘     └──────────────────┘
+
+(D) calendar             (E) weather_sensor       (F) postcard
+┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
+│   Photo Area     │     │   Photo Area     │     │ ┌──────────────┐ │
+│   (480x500)      │     │   (480x520)      │     │ │ Photo Border │ │
+├──────────────────┤     ├──────────────────┤     │ │ (440x600)    │ │
+│ Calendar Grid    │     │ Weather &amp; Temp   │     │ └──────────────┘ │
+│ (300px)          │     │ Info (280px)     │     │ Postcard Caption │
+└──────────────────┘     └──────────────────┘     └──────────────────┘</code></pre>
+                </div>
+<ul class="doc-list"><li><strong><code>full</code> (單張全螢幕照片)</strong>：</li><li>幾何尺寸：$480 \times 800$，無邊框、無文字覆蓋。適用於極簡相框展演。</li><li><strong><code>postcard</code> (明信片風格)</strong>：</li><li>幾何尺寸：外框 $480 \times 800$，內留白邊框 $20\text{px}$；相片區域 $440 \times 620$；底部 $160\text{px}$ 留白手寫風格文案與印章。</li><li><strong><code>photo_info</code> (單張照片＋底部資訊列 - 預設推薦)</strong>：</li><li>相片區域：$480 \times 700$；底部資訊列：$480 \times 100$。</li><li>資訊列內容：拍攝日期（左）、離線城市名稱（右）、AI 手寫風格短文案（中）。</li><li><strong><code>photo_pair</code> (雙照片上下拼版)</strong>：</li><li>上半部照片：$480 \times 390$；下半部照片：$480 \times 390$；中間留白分隔線 $20\text{px}$。</li><li>選片邏輯：自動搭配同一年、同一景點或風格互補的兩張相片。</li><li><strong><code>adaptive_memory</code> (智慧自適應回憶版型)</strong>：</li><li>自動檢測照片比例。直向照片自動切換為 <code>photo_info</code>，橫向照片自動切換為上下帶羽化模糊背景之版型。</li><li><strong><code>calendar</code> (月曆相框 - 直向)</strong>：</li><li>上半部照片：$480 \times 500$；下半部月曆格線：$480 \times 300$。包含當月完整日期網頁與拍攝日星號標示。</li><li><strong><code>weather_sensor</code> (天氣與室內感測器版型)</strong>：</li><li>上半部照片：$480 \times 520$；下半部氣象資訊列：$480 \times 280$。包含 Open-Meteo 天氣圖示、室外高低溫，以及 SHTC3 室內溫溼度儀表。</li></ul>
+<hr class="doc-divider">
+<h2 id="sec-9" class="doc-h2"><span class="h2-anchor-icon">#</span> 九、 10 種 Dithering 抖動演算法與色彩空間演算法數學原理</h2>
+<h3 id="9-1-抖動演算法數學矩陣" class="doc-h3">9.1 抖動演算法數學矩陣</h3>
+<h4 id="1-floyd-steinberg-誤差擴散算法-floyd_steinberg" class="doc-h4">1. Floyd–Steinberg 誤差擴散算法 (<code>floyd_steinberg</code>)</h4>
+<p class="doc-p">將當前像素量化產生的色差 $\Delta E = P_{\text{adjusted}} - P_{\text{palette}}$ 依以下比例分配給相鄰 4 個像素：</p>
+<p class="doc-p">$$\begin{bmatrix}</p>
+<p class="doc-p">& \bullet & \frac{7}{16} \\</p>
+<p class="doc-p">\frac{3}{16} & \frac{5}{16} & \frac{1}{16}</p>
+<p class="doc-p">\end{bmatrix}$$</p>
+<h4 id="2-atkinson-抖動算法-atkinson" class="doc-h4">2. Atkinson 抖動算法 (<code>atkinson</code>)</h4>
+<p class="doc-p">將色差 $\Delta E$ 的 $\frac{3}{4}$ 均勻擴散給 6 個相鄰像素（每處佔 $\frac{1}{8}$），保留更多純白與純黑區域：</p>
+<p class="doc-p">$$\begin{bmatrix}</p>
+<p class="doc-p">& \bullet & \frac{1}{8} & \frac{1}{8} \\</p>
+<p class="doc-p">\frac{1}{8} & \frac{1}{8} & \frac{1}{8} & \\</p>
+<p class="doc-p">& \frac{1}{8} & &</p>
+<p class="doc-p">\end{bmatrix}$$</p>
+<h4 id="3-bayer-4x4-與-8x8-有序抖動-bayer4-bayer8" class="doc-h4">3. Bayer 4x4 與 8x8 有序抖動 (<code>bayer4</code> / <code>bayer8</code>)</h4>
+<p class="doc-p">利用預設閥值矩陣 $M$ 對像素加入空間干擾頻率：</p>
+<p class="doc-p">$$M_4 = \frac{1}{16} \begin{bmatrix}</p>
+<p class="doc-p">0 & 8 & 2 & 10 \\</p>
+<p class="doc-p">12 & 4 & 14 & 6 \\</p>
+<p class="doc-p">3 & 11 & 1 & 9 \\</p>
+<p class="doc-p">15 & 7 & 13 & 5</p>
+<p class="doc-p">\end{bmatrix} - 0.5$$</p>
+<h4 id="4-蛇形-floyd-steinberg-抖動-serpentine_floyd_steinberg" class="doc-h4">4. 蛇形 Floyd–Steinberg 抖動 (<code>serpentine_floyd_steinberg</code>)</h4>
+<p class="doc-p">奇數行由左至右掃描，偶數行由右至左掃描，消除傳統誤差擴散的單向水波紋（Swarms/Worm artifacts）。</p>
+<hr class="doc-divider">
+<h3 id="9-2-色彩距離空間-oklab-vs-srgb" class="doc-h3">9.2 色彩距離空間：OKLab vs sRGB</h3>
+<h4 id="srgb-歐幾里得距離-rgb-distance" class="doc-h4">sRGB 歐幾里得距離 (RGB Distance)</h4>
+<p class="doc-p">$$d_{\text{RGB}} = \sqrt{(R_1 - R_2)^2 + (G_1 - G_2)^2 + (B_1 - B_2)^2}$$</p>
+<ul class="doc-list"><li><strong>缺點</strong>：忽略人眼對綠色波長敏感度遠高於藍色的非線性光學特性。</li></ul>
+<h4 id="oklab-感知均勻色彩空間-oklab-distance" class="doc-h4">OKLab 感知均勻色彩空間 (OKLab Distance)</h4>
+<p class="doc-p">先將 sRGB 轉換為線性 Lightness ($L$), $a$ (紅綠軸), $b$ (黃藍軸)：</p>
+<p class="doc-p">$$\begin{aligned}</p>
+<p class="doc-p">L &= 0.210454 L' + 0.793618 M' - 0.004072 S' \\</p>
+<p class="doc-p">a &= 1.977998 L' - 2.428592 M' + 0.450594 S' \\</p>
+<p class="doc-p">b &= 0.025904 L' + 0.782772 M' - 0.808676 S'</p>
+<p class="doc-p">\end{aligned}$$</p>
+<p class="doc-p">在 OKLab 空間計算 Euclidean 距離：</p>
+<p class="doc-p">$$d_{\text{OKLab}} = \sqrt{\Delta L^2 + \Delta a^2 + \Delta b^2}$$</p>
+<ul class="doc-list"><li><strong>優勢</strong>：在墨水屏有限的 4 色 / 6 色面板上，相片人像膚色過渡更加自然，不會出現突兀的色彩塊斑。</li></ul>
+<hr class="doc-divider">
+<h2 id="sec-10" class="doc-h2"><span class="h2-anchor-icon">#</span> 十、 SQLite 資料庫 13 張 Table 完全 Schema 規格</h2>
+<div class="code-wrapper">
+                    <div class="code-header">
+                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> SQL</span>
+                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
+                    </div>
+                    <pre><code class="language-sql">-- 1. 使用者表
+CREATE TABLE users (
+    id TEXT PRIMARY KEY,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 2. 照片分析與評分表
+CREATE TABLE photo_scores (
+    path TEXT PRIMARY KEY,
+    exif_json TEXT,
+    side_caption TEXT,
+    memory_score REAL,
+    beauty_score REAL,
+    technical_score REAL,
+    emotion_score REAL,
+    composite_score REAL,
+    reason TEXT,
+    width INTEGER,
+    height INTEGER,
+    orientation INTEGER,
+    exif_gps_lat REAL,
+    exif_gps_lon REAL,
+    exif_city TEXT,
+    is_favorite INTEGER DEFAULT 0,
+    is_excluded INTEGER DEFAULT 0,
+    excluded_reason TEXT,
+    e6_suitability_score REAL,
+    used_at TIMESTAMP
+);
+
+-- 3. 發布紀錄表
+CREATE TABLE render_releases (
+    id TEXT PRIMARY KEY,
+    release_dir TEXT NOT NULL,
+    photo_paths_json TEXT NOT NULL,
+    profile_key TEXT NOT NULL,
+    layout_name TEXT NOT NULL,
+    dither_algorithm TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 4. 裝置管理表
+CREATE TABLE devices (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    secret_hash TEXT NOT NULL,
+    display_profile TEXT NOT NULL,
+    rotation INTEGER DEFAULT 0,
+    timezone TEXT DEFAULT 'Asia/Taipei',
+    refresh_schedule TEXT DEFAULT '08:00',
+    last_seen_at TIMESTAMP,
+    battery_mv INTEGER,
+    wifi_rssi INTEGER,
+    firmware_version TEXT
+);
+
+-- 5. 裝置狀態日誌表
+CREATE TABLE device_status_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    battery_mv INTEGER,
+    wifi_rssi INTEGER,
+    status_msg TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE
+);
+
+-- 6. 分析工作表
+CREATE TABLE jobs (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+    strategy TEXT,
+    budget_limit REAL,
+    spent REAL DEFAULT 0.0,
+    priority INTEGER DEFAULT 3,
+    created_by TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 7. 工作子項目表
+CREATE TABLE job_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL,
+    photo_path TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER DEFAULT 0,
+    error_code TEXT,
+    error_msg TEXT,
+    actual_cost REAL DEFAULT 0.0,
+    FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+);
+
+-- 8. 排程工作表
+CREATE TABLE scheduled_tasks (
+    key TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    cron_expression TEXT,
+    next_run TIMESTAMP,
+    config_json TEXT NOT NULL,
+    enabled INTEGER DEFAULT 1
+);
+
+-- 9. AI 提供者表
+CREATE TABLE ai_providers (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    base_url TEXT NOT NULL,
+    api_key_encrypted TEXT NOT NULL,
+    model_name TEXT NOT NULL,
+    cost_per_input_token REAL DEFAULT 0.0,
+    cost_per_output_token REAL DEFAULT 0.0,
+    enabled INTEGER DEFAULT 1
+);
+
+-- 10. API 使用量計費表
+CREATE TABLE usage_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_id TEXT NOT NULL,
+    photo_path TEXT,
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER,
+    cost_usd REAL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 11. 決策韌性與事件表
+CREATE TABLE resilience_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    details_json TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 12. 系統設定與稽核表
+CREATE TABLE settings_audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL,
+    old_value TEXT,
+    new_value TEXT,
+    changed_by TEXT,
+    source_ip TEXT,
+    changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 13. 資料庫 Migration 追蹤表
+CREATE TABLE schema_migrations (
+    version INTEGER PRIMARY KEY,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);</code></pre>
+                </div>
+<hr class="doc-divider">
+<h2 id="sec-11" class="doc-h2"><span class="h2-anchor-icon">#</span> 十一、 RESTful API 端點與 Error Code 錯誤碼完全對照表</h2>
+<h3 id="11-1-主要-rest-api-端點總覽" class="doc-h3">11.1 主要 REST API 端點總覽</h3>
+<div class="table-wrapper"><table><thead><tr><th>HTTP Method</th><th>API 端點 (URL Path)</th><th>功能說明</th><th>必填參數 / Payload 範例</th></tr></thead><tbody><tr class="even"><td><code>POST</code></td><td><code>/api/v1/auth/login</code></td><td>管理員登入</td><td><code>{"username": "admin", "password": "..."}</code></td></tr><tr class="odd"><td><code>GET</code></td><td><code>/api/v1/photos</code></td><td>查詢照片列表 (分頁)</td><td><code>?page=1&limit=50&sort=memory</code></td></tr><tr class="even"><td><code>PATCH</code></td><td><code>/api/v1/photos/{id}</code></td><td>更新照片標籤/最愛</td><td><code>{"is_favorite": true, "date": "2024-01-01"}</code></td></tr><tr class="odd"><td><code>POST</code></td><td><code>/api/v1/jobs/analysis</code></td><td>建立新分析工作</td><td><code>{"strategy": "smart_two_stage", "budget": 10.0}</code></td></tr><tr class="even"><td><code>POST</code></td><td><code>/api/v1/jobs/{id}/pause</code></td><td>暫停指定工作</td><td>無</td></tr><tr class="odd"><td><code>POST</code></td><td><code>/api/v1/jobs/{id}/resume</code></td><td>恢復指定工作</td><td>無</td></tr><tr class="even"><td><code>POST</code></td><td><code>/api/v1/rendering/publish-now</code></td><td>綜合選片並發布</td><td><code>{"layout": "photo_info", "dither": "floyd_steinberg"}</code></td></tr><tr class="odd"><td><code>GET</code></td><td><code>/api/v1/devices</code></td><td>取得所有 ESP32 裝置</td><td>無</td></tr><tr class="even"><td><code>POST</code></td><td><code>/api/v1/devices</code></td><td>註冊新 ESP32 裝置</td><td><code>{"name": "LivingRoom", "profile": "gdep073e01_6c"}</code></td></tr><tr class="odd"><td><code>GET</code></td><td><code>/devices/latest_release</code></td><td>ESP32 下載最新 release</td><td><code>Header: Authorization: Bearer <Token></code></td></tr><tr class="even"><td><code>POST</code></td><td><code>/devices/report_status</code></td><td>ESP32 上報狀態與電量</td><td><code>{"battery_mv": 4120, "wifi_rssi": -65}</code></td></tr><tr class="odd"><td><code>POST</code></td><td><code>/api/v1/settings</code></td><td>批次更新系統設定</td><td><code>{"analysis.concurrency": 2, "render.layout": "full"}</code></td></tr><tr class="even"><td><code>POST</code></td><td><code>/api/v1/backups/create</code></td><td>建立 SQLite 線上熱備份</td><td>無</td></tr></tbody></table></div>
+<hr class="doc-divider">
+<h3 id="11-2-系統標準-error-code-錯誤碼全覽表" class="doc-h3">11.2 系統標準 Error Code 錯誤碼全覽表</h3>
+<div class="table-wrapper"><table><thead><tr><th>錯誤碼 (Error Code)</th><th>HTTP Status</th><th>歸屬模組</th><th>錯誤成因與描述</th><th>建議處置方式</th></tr></thead><tbody><tr class="even"><td><code>AUTH-001</code></td><td>401</td><td>身份驗證</td><td>帳號或密碼錯誤</td><td>檢查登入憑證</td></tr><tr class="odd"><td><code>AUTH-002</code></td><td>403</td><td>身份驗證</td><td>CSRF Token 驗證失敗或 Session 超時</td><td>重新整理網頁並重新登入</td></tr><tr class="even"><td><code>AUTH-003</code></td><td>401</td><td>身份驗證</td><td>未登入或 API Bearer Token 無效</td><td>於 Header 補上 Valid Token</td></tr><tr class="odd"><td><code>RENDER-003</code></td><td>400</td><td>渲染引擎</td><td>不支援的顯示 Profile Key</td><td>檢查 <code>render.profile</code> 設定</td></tr><tr class="even"><td><code>RENDER-004</code></td><td>400</td><td>渲染引擎</td><td>不支援的色差計算模式</td><td>選擇 <code>oklab</code> 或 <code>rgb</code></td></tr><tr class="odd"><td><code>RENDER-006</code></td><td>400</td><td>渲染引擎</td><td>自訂色盤 RGB/Lab 數值超出範圍</td><td>檢查自訂色盤 0~255 範圍</td></tr><tr class="even"><td><code>RENDER-007</code></td><td>400</td><td>渲染引擎</td><td>找不到 Preset 或強度超出 0~2 範圍</td><td>修正 Preset 強度參數</td></tr><tr class="odd"><td><code>JOB-002</code></td><td>404</td><td>任務佇列</td><td>指定的 Job ID 不存在</td><td>確認 Job ID 是否正確</td></tr><tr class="even"><td><code>JOB-003</code></td><td>500</td><td>任務佇列</td><td>Worker 執行任務過程拋出未預期例外</td><td>檢視 Task Log 堆疊訊息</td></tr><tr class="odd"><td><code>BUDGET-001</code></td><td>429</td><td>成本熔斷</td><td>達到每日/每月成本停止上限 ($USD)</td><td>提高停止上限或等待次日重置</td></tr><tr class="even"><td><code>RESTORE-001</code></td><td>409</td><td>資料庫還原</td><td>有其他程序正持有 Exclusive Lock</td><td>停止 Web/Worker 後再還原</td></tr><tr class="odd"><td><code>THUMB-002</code></td><td>400</td><td>縮圖快取</td><td>縮圖內容 Hash 格式不是 SHA-256</td><td>提供標準 64 字元 SHA256</td></tr><tr class="even"><td><code>THUMB-004</code></td><td>500</td><td>縮圖快取</td><td>原始照片在建立縮圖期間被修改或刪除</td><td>確認照片檔案完整性</td></tr></tbody></table></div>
+<hr class="doc-divider">
+<h2 id="sec-12" class="doc-h2"><span class="h2-anchor-icon">#</span> 十二、 Docker 部署、環境變數與生產環境配置</h2>
+<h3 id="sec-12-1" class="doc-h3">12.1 <code>docker-compose.yml</code> 逐行中文註解配置檔</h3>
+<p class="doc-p"><code>docker-compose.yml</code> 包含 3 個核心容器服務：Web 介面 (web)、背景 Worker (worker) 與排程計時器 (scheduler)，以下為完整逐行註解檔：</p>
+<div class="code-wrapper">
+                    <div class="code-header">
+                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> YAML</span>
+                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
+                    </div>
+                    <pre><code class="language-yaml">version: '3.8' # Docker Compose 設定檔規格版本
+
+services:
+  # 1. Web 服務容器 (負責提供 Web 控制台介面與 ESP32 下載 API)
+  inktime-web:
+    image: inktime:latest # 使用的 Docker 鏡像名稱與 Tag
+    container_name: inktime-web # 運行中的容器固定名稱
+    restart: unless-stopped # 重啟策略：除非手動停止，否則遭遇 Crash 或開機時自動重啟
+    ports:
+      - "8765:8765" # 埠號映射：將主機的 8765 埠對映到容器內部的 8765 埠
+    environment:
+      - INKTIME_HOST=0.0.0.0 # 監聽網卡位址 (0.0.0.0 代表允許所有外網/局域網 IP 連線)
+      - INKTIME_PORT=8765 # Web 服務執行的 Port 號
+      - INKTIME_DATA_DIR=/app/data # 容器內部的資料與快取根目錄絕對路徑
+      - INKTIME_PHOTO_DIR=/photos # 容器內部的照片庫掃描根目錄絕對路徑
+      - INKTIME_DATABASE=/app/data/photos.db # 容器內部的 SQLite 資料庫檔案路徑
+      - INKTIME_SECRET_KEY=change-this-to-a-very-long-random-secret-key # Session 與 API Key 加密主金鑰 (生產環境請替換為長隨機字串)
+      - INKTIME_COOKIE_SECURE=0 # Cookie 安全傳輸標記 (純 HTTP 設 0，HTTPS 反向代理下請設 1)
+    volumes:
+      - ./data:/app/data # 磁碟區掛載：將主機當前目錄下的 ./data 掛載至容器 /app/data (持久化資料庫與快取)
+      - /Volume1/PhotoArchive:/photos:ro # 磁碟區掛載：將主機/NAS的照片目錄掛載至容器 /photos (只讀權限 :ro，保護原始照片)
+    healthcheck: # 容器健康檢查機制
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health/live"] # 健康檢查命令
+      interval: 30s # 每 30 秒執行一次健康檢查
+      timeout: 5s # 檢查請求超時時間 5 秒
+      retries: 3 # 連續失敗 3 次標記容器為 unhealth
+
+  # 2. 背景 Worker 服務容器 (負責執行照片庫掃描與 Vision LLM 大模型分析)
+  inktime-worker:
+    image: inktime:latest # 採用與 Web 相同的基礎鏡像
+    container_name: inktime-worker # 容器固定名稱
+    restart: unless-stopped # 保持重啟策略
+    command: ["python", "-m", "inktime.app.workers.runner"] # 容器啟動命令：執行 Worker 背景處理程式
+    environment:
+      - INKTIME_DATA_DIR=/app/data # 共用相同的資料路徑
+      - INKTIME_PHOTO_DIR=/photos # 共用照片庫目錄
+      - INKTIME_DATABASE=/app/data/photos.db # 共用 SQLite 資料庫
+    volumes:
+      - ./data:/app/data # 掛載相同的資料磁碟區
+      - /Volume1/PhotoArchive:/photos:ro # 掛載相同的相片唯讀磁碟區
+
+  # 3. 排程計時器服務容器 (負責每日定時照片選片發布、備份與通知)
+  inktime-scheduler:
+    image: inktime:latest # 採用相同的基礎鏡像
+    container_name: inktime-scheduler # 容器固定名稱
+    restart: unless-stopped # 保持重啟策略
+    command: ["python", "-m", "inktime.app.workers.scheduler"] # 容器啟動命令：執行 Cron 定時排程程式
+    environment:
+      - INKTIME_DATA_DIR=/app/data # 共用資料目錄
+      - INKTIME_DATABASE=/app/data/photos.db # 共用 SQLite 資料庫
+    volumes:
+      - ./data:/app/data # 掛載資料磁碟區</code></pre>
+                </div>
+<hr class="doc-divider">
+<h3 id="sec-12-2" class="doc-h3">12.2 全系統環境變數逐行詳細解析</h3>
+<p class="doc-p">以下為 InkTime 支援的所有環境變數及其用途與設定範例：</p>
+<div class="code-wrapper">
+                    <div class="code-header">
+                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> BASH</span>
+                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
+                    </div>
+                    <pre><code class="language-bash"># Web 伺服器監聽位址 (本機測試設 127.0.0.1，Docker/生產環境設 0.0.0.0)
+INKTIME_HOST=0.0.0.0
+
+# Web 伺服器 HTTP 連接埠 (預設 8765)
+INKTIME_PORT=8765
+
+# 資料與快取主目錄 (包含 SQLite DB、縮圖快取、字型檔與 Release 產出物)
+INKTIME_DATA_DIR=/app/data
+
+# 原始照片庫掃描目錄 (指定 NAS 相片路徑，建議以唯讀模式掛載)
+INKTIME_PHOTO_DIR=/Volume1/PhotoArchive
+
+# SQLite 資料庫檔案完整絕對路徑 (預設為 INKTIME_DATA_DIR/photos.db)
+INKTIME_DATABASE=/app/data/photos.db
+
+# 預渲染 .bin 與 .h 檔案之輸出目錄
+INKTIME_RELEASE_DIR=/app/data/releases
+
+# 平台密碼學與 Session 主金鑰 (預設會自動生成並寫入 session.key；生產環境建議自行設定 64 字元字串)
+INKTIME_SECRET_KEY=eb98f21a48c...
+
+# Session Cookie 安全標記 (0 = 允許 HTTP 連線；1 = 強制 HTTPS 傳輸)
+INKTIME_COOKIE_SECURE=0
+
+# 系統 Structured Log 日誌輸出層級 (INFO / DEBUG / WARNING / ERROR)
+INKTIME_LOG_LEVEL=INFO</code></pre>
+                </div>
+<hr class="doc-divider">
+<h3 id="sec-12-3" class="doc-h3">12.3 初次設定「必須設定」的 5 大項目清單</h3>
+<p class="doc-p">一開始部署完系統並首次登入 Web 控制台時，<strong>一般使用者必須完成設定的 5 個核心項目</strong>：</p>
+<div class="mermaid-box"><pre class="mermaid">flowchart TD
+    Step1["1. 時區與語言設定 (general.timezone)"] --&gt; Step2["2. 照片庫目錄掛載 (INKTIME_PHOTO_DIR)"]
+    Step2 --&gt; Step3["3. 配置 AI 模型 Key (/providers)"]
+    Step3 --&gt; Step4["4. 住家 GPS 座標 (home_latitude/longitude)"]
+    Step4 --&gt; Step5["5. 註冊 ESP32 裝置與 Token (/devices)"]</pre></div>
+<ul class="doc-list"><li><strong>時區設定 (<code>general.timezone</code>)</strong>：</li><li>進入 <code>/settings</code> 頁面，將時區修改為 <code>Asia/Taipei</code>（或所在地的 IANA 時區）。若未設定，歷史上的今天選片與定時排程會出現跨日時差偏移。</li><li><strong>照片庫目錄掛載 (<code>INKTIME_PHOTO_DIR</code>)</strong>：</li><li>確認 Docker 或 <code>.env</code> 中的 <code>INKTIME_PHOTO_DIR</code> 正確指向本機或 NAS 的相片資料夾（如 <code>/Volume1/PhotoArchive</code>）。進入 <code>/schedules</code> 點擊照片庫掃描以寫入最初相片索引。</li><li><strong>新增 AI 模型提供者 API Key (<code>/providers</code>)</strong>：</li><li>進入 <code>/providers</code> 頁面，點擊 <code>[新增 Provider]</code>。填入 OpenAI API Key (<code>sk-...</code>) 或本機 LMStudio 網址 (<code>http://127.0.0.1:1234/v1</code>)，確保系統具備分析評分能力。</li><li><strong>設定住家 GPS 座標 (<code>home_latitude</code> / <code>home_longitude</code>)</strong>：</li><li>進入 <code>/settings</code> 頁面，設定住家的經緯度（如台北市中心 <code>25.033</code>, <code>121.5654</code>）。此座標僅在伺服器本機用於計算相片離家距離並給予旅行加分，<strong>絕不會傳送給外部 AI 大模型</strong>。</li><li><strong>新增 ESP32 裝置並取得 Token (<code>/devices</code>)</strong>：</li><li>進入 <code>/devices</code> 頁面，點擊 <code>[新增裝置]</code>，設定面板型號（如 <code>gdep073e01_6c</code>）。複製生成的一次性 Device Token，輸入至 ESP32 配網介面完成硬體綁定。</li></ul>
+<hr class="doc-divider">
+<h3 id="sec-12-4" class="doc-h3">12.4 進階「設定後會更好」的 8 大系統優化清單</h3>
+<p class="doc-p">當系統基礎運作正常後，完成以下 <strong>8 項進階優化設定</strong>，將能獲得最佳的顯示畫質、極速下載與 100% 穩定度：</p>
+<ul class="doc-list"><li><strong>開啟背景預先渲染機制 (Pre-rendering Queue)</strong>：</li><li>在 <code>/schedules</code> 開啟「每日自動發布排程」。系統會在半夜提前將未來 1~3 天的照片渲染成 <code>.bin</code> 檔案。ESP32 喚醒時可從現場 5 秒渲染降至 <strong>0.2 秒極速下載</strong>，電池續航提升 5 倍以上。</li><li><strong>開啟 Open-Meteo 天氣與氣象版型 (<code>render.weather_enabled=true</code>)</strong>：</li><li>在 <code>/settings</code> 將 <code>render.weather_enabled</code> 設定為 <code>true</code>，並設定當地的緯度 (<code>render.weather_latitude</code>) 與經度 (<code>render.weather_longitude</code>)。版型切換為 <code>weather_sensor</code> 後，電子紙相框將實時呈現當日高低溫與氣象圖示。</li><li><strong>啟用兩階段智能分析策略 (<code>smart_two_stage</code>)</strong>：</li><li>在 <code>/settings</code> 將 <code>analysis.strategy</code> 設定為 <code>smart_two_stage</code>。先以低成本模型 (<code>gpt-4o-mini</code>) 進行快速預篩選，只有超過 65 分的優秀相片才會進入高品質模型 (<code>gpt-4o</code>)，<strong>節省高達 80% 的 AI API 費用</strong>。</li><li><strong>開啟 E6 六色適合度過濾 (<code>analysis.e6_prefilter_enabled=true</code>)</strong>：</li><li>在 <code>/settings</code> 開啟 <code>analysis.e6_prefilter_enabled</code>。系統會在送往 AI 之前先模擬六色墨水屏量化，自動過濾掉那些在電子紙上會產生嚴重色塊失真的相片。</li><li><strong>設定定時熱備份與留存天數 (<code>backup.retention=14</code>)</strong>：</li><li>在 <code>/settings</code> 確保 <code>backup.schedule_enabled=true</code> 且留存天數為 <code>14</code> 天。系統將在每天凌晨 03:00 自動執行 SQLite WAL 線上熱備份，保護寶貴的照片分析資料。</li><li><strong>開啟高負載自動延後關關 (<code>delay_high_load=true</code>)</strong>：</li><li>在 <code>/schedules</code> 中開啟高負載保護。當主機或 NAS CPU 負載超過 85% 時，排程會自動延後 15 分鐘，避免與 NAS 備份或媒體轉檔搶奪 CPU 資源。</li><li><strong>開啟 HTTPS Cookie 安全保護 (<code>INKTIME_COOKIE_SECURE=1</code>)</strong>：</li><li>若通過 Synology Reverse Proxy, Nginx 或 Cloudflare 提供 HTTPS 外網連線，在 <code>/settings</code> 或 <code>.env</code> 設定 <code>INKTIME_COOKIE_SECURE=1</code>，確保 Session Cookie 具備 Strict & Secure 屬性，防範 Cookie 竊取。</li><li><strong>設定 Webhook 通知與退避重試 (<code>/notifications</code>)</strong>：</li><li>進入 <code>/settings</code> 輸入 Webhook Secret Token，設定當 ESP32 電量低於 3.6V 或發布完成時發送通知至 Home Assistant、Telegram 或 Discord Bot。</li></ul>
+<hr class="doc-divider">
+<h2 id="sec-13" class="doc-h2"><span class="h2-anchor-icon">#</span> 十三、 系統設定參數 100% 完全對照表</h2>
+<p class="doc-p">本章節完整收錄 InkTime 的 <strong>所有 48 項系統組態設定</strong>，逐一列出對應鍵名、預設值、數據型態、選擇範圍、控制功能與風險提示：</p>
+<div class="table-wrapper"><table><thead><tr><th>設定鍵名 (<code>Setting Key</code>)</th><th>分類</th><th>預設值</th><th>可選項目 / 範圍</th><th>控制功能與影響</th><th>風險與注意事項</th></tr></thead><tbody><tr class="even"><td><code>general.timezone</code></td><td>一般設定</td><td><code>Asia/Taipei</code></td><td>IANA 時區字串</td><td>歷史上的今天與排程時間計算</td><td>錯誤時區會造成跨日選片偏移</td></tr><tr class="odd"><td><code>analysis.strategy</code></td><td>分析設定</td><td><code>smart_two_stage</code></td><td><code>local</code>, <code>low_cost</code>, <code>smart_two_stage</code>, <code>high_quality</code></td><td>新工作的預設分析策略</td><td>高品質策略會增加 AI API 成本</td></tr><tr class="even"><td><code>analysis.ai_mode</code></td><td>AI 模式</td><td><code>top_candidates</code></td><td><code>off</code>, <code>top_candidates</code>, <code>eligible</code>, <code>full_library</code>, <code>on_demand</code></td><td>決定哪些照片允許送往 AI 大模型分析</td><td><code>full_library</code> 會對完整相簿呼叫 AI，成本較高</td></tr><tr class="odd"><td><code>analysis.ai_top_n</code></td><td>AI 模式</td><td><code>50</code></td><td>1 ~ 10,000</td><td>「前 N 張候選」模式下，每次允許進 AI 的最高本機候選數</td><td>提高數值會增加 Token 消耗</td></tr><tr class="even"><td><code>analysis.ai_daily_photo_limit</code></td><td>AI 模式</td><td><code>50</code></td><td>1 ~ 100,000</td><td>每日可實際送往 AI 的不同照片上限</td><td>達到上限時退回本機選片</td></tr><tr class="odd"><td><code>analysis.ai_monthly_photo_limit</code></td><td>AI 模式</td><td><code>500</code></td><td>1 ~ 1,000,000</td><td>每月可實際送往 AI 的不同照片上限</td><td>達到上限時暫停模型呼叫</td></tr><tr class="even"><td><code>travel_bonus_enabled</code></td><td>旅行加權</td><td><code>true</code></td><td><code>true</code>, <code>false</code></td><td>啟用依 GPS 與地點稀有度的獨立旅行排序加分</td><td>缺少 GPS 時加分為 0</td></tr><tr class="odd"><td><code>home_latitude</code></td><td>旅行加權</td><td><code>25.033</code></td><td>-90 ~ 90</td><td>住家緯度（僅本機計算距離，不傳送給模型）</td><td>敏感位置資訊，僅限管理員修改</td></tr><tr class="even"><td><code>home_longitude</code></td><td>旅行加權</td><td><code>121.5654</code></td><td>-180 ~ 180</td><td>住家經度（僅本機計算距離，不傳送給模型）</td><td>敏感位置資訊，僅限管理員修改</td></tr><tr class="odd"><td><code>home_radius_km</code></td><td>旅行加權</td><td><code>60.0</code></td><td>0 ~ 1,000</td><td>住家半徑（公里），在此範圍內不給予旅行加分</td><td>設太小會放大日常外出加分</td></tr><tr class="even"><td><code>travel_bonus_near</code></td><td>旅行加權</td><td><code>2.0</code></td><td>0 ~ 20</td><td>離家 60 至 200 km 的旅行加分</td><td>僅影響排序，不改模型原始評分</td></tr><tr class="odd"><td><code>travel_bonus_far</code></td><td>旅行加權</td><td><code>4.0</code></td><td>0 ~ 20</td><td>離家 200 至 1,000 km 的旅行加分</td><td>僅影響排序，不改模型原始評分</td></tr><tr class="even"><td><code>foreign_country_bonus</code></td><td>旅行加權</td><td><code>6.0</code></td><td>0 ~ 20</td><td>可信國家候選顯示跨國時的旅行加分</td><td>未知國家不加分</td></tr><tr class="odd"><td><code>rare_location_bonus</code></td><td>旅行加權</td><td><code>2.0</code></td><td>0 ~ 20</td><td>同一 GPS 地點在相簿中罕見時的加分</td><td>GPS 漂移會降低判斷可靠度</td></tr><tr class="even"><td><code>max_total_bonus</code></td><td>旅行加權</td><td><code>8.0</code></td><td>0 ~ 40</td><td>旅行與罕見地點加分的總合上限</td><td>過高會壓過模型的語意評分</td></tr><tr class="odd"><td><code>location_rule_version</code></td><td>旅行加權</td><td><code>travel-v1</code></td><td>字串 (最長 80)</td><td>旅行加分規則版本標籤</td><td>修改名稱不會自動重算既有照片</td></tr><tr class="even"><td><code>analysis.stage_two_threshold</code></td><td>分析設定</td><td><code>65</code></td><td>0 ~ 100</td><td>兩階段分析中，進入第二階段高品質模型的回憶門檻分</td><td>數值越低，模型成本越高</td></tr><tr class="odd"><td><code>analysis.prefilter_enabled</code></td><td>本機預篩選</td><td><code>true</code></td><td><code>true</code>, <code>false</code></td><td>呼叫模型前先用本機特徵排除截圖與低品質照片</td><td>最愛照片會自動略過預篩選</td></tr><tr class="even"><td><code>analysis.prefilter_screenshots</code></td><td>本機預篩選</td><td><code>true</code></td><td><code>true</code>, <code>false</code></td><td>依檔名、尺寸與 EXIF 判定並排除截圖</td><td>手機螢幕尺寸裁切照可能被誤判</td></tr><tr class="odd"><td><code>analysis.prefilter_low_quality</code></td><td>本機預篩選</td><td><code>true</code></td><td><code>true</code>, <code>false</code></td><td>同時出現模糊/過曝/欠曝等兩項瑕疵時排除</td><td>僅判斷技術缺陷，無法判斷構圖</td></tr><tr class="even"><td><code>analysis.prefilter_sensitivity</code></td><td>本機預篩選</td><td><code>conservative</code></td><td><code>conservative</code>, <code>balanced</code>, <code>aggressive</code></td><td>預篩選敏感度</td><td>越積極節省更多 Token，但誤排率較高</td></tr><tr class="odd"><td><code>analysis.e6_prefilter_enabled</code></td><td>本機預篩選</td><td><code>true</code></td><td><code>true</code>, <code>false</code></td><td>模擬 E6 六色量化，排除在電子紙上嚴重失真的照片</td><td>僅代表電子紙適合度，不代表原圖不好看</td></tr><tr class="even"><td><code>analysis.e6_min_score</code></td><td>本機預篩選</td><td><code>25</code></td><td>0 ~ 100</td><td>E6 六色適合度門檻分</td><td>建議 20-35，過高會排除細膩照片</td></tr><tr class="odd"><td><code>analysis.scoring_rules</code></td><td>照片評分規則</td><td>Prompt 範本</td><td>文字區塊 (多行)</td><td>傳送給 Vision LLM 的評分提示詞 Prompt 指引</td><td>修改後僅影響新分析照片</td></tr><tr class="even"><td><code>analysis.ranking_memory_weight</code></td><td>評分控制中心</td><td><code>40</code></td><td>0 ~ 100</td><td>綜合排序分的回憶分權重 (%)</td><td>四項權重合計須為 100%</td></tr><tr class="odd"><td><code>analysis.ranking_beauty_weight</code></td><td>評分控制中心</td><td><code>30</code></td><td>0 ~ 100</td><td>綜合排序分的美觀分權重 (%)</td><td>四項權重合計須為 100%</td></tr><tr class="even"><td><code>analysis.ranking_technical_weight</code></td><td>評分控制中心</td><td><code>15</code></td><td>0 ~ 100</td><td>綜合排序分的技術品質權重 (%)</td><td>四項權重合計須為 100%</td></tr><tr class="odd"><td><code>analysis.ranking_emotion_weight</code></td><td>評分控制中心</td><td><code>15</code></td><td>0 ~ 100</td><td>綜合排序分的情緒分權重 (%)</td><td>四項權重合計須為 100%</td></tr><tr class="even"><td><code>analysis.ranking_favorite_bonus</code></td><td>評分控制中心</td><td><code>10.0</code></td><td>0 ~ 30</td><td>最愛照片加入綜合排序分的額外分數</td><td>過高可能使低品質最愛照片排最前</td></tr><tr class="odd"><td><code>analysis.concurrency</code></td><td>分析設定</td><td><code>1</code></td><td>1 ~ 8</td><td>背景 Worker 最大並行數</td><td>過高可能觸發 API Rate Limit</td></tr><tr class="even"><td><code>worker.queue_multiplier</code></td><td>效能與待機</td><td><code>1</code></td><td>1 ~ 4</td><td>每個並行槽預先排入記憶體的工作數</td><td>提高增加吞吐，但佔用更多記憶體</td></tr><tr class="odd"><td><code>worker.poll_seconds</code></td><td>效能與待機</td><td><code>15</code></td><td>1 ~ 300</td><td>無工作時 Worker 檢查新工作的秒數</td><td>數值越小反應越快，但增加 DB 讀取</td></tr><tr class="even"><td><code>worker.progress_items</code></td><td>效能與待機</td><td><code>50</code></td><td>5 ~ 10,000</td><td>每完成多少項目輸出一次彙總 Log</td><td>太小會產生大量 Log</td></tr><tr class="odd"><td><code>worker.progress_seconds</code></td><td>效能與待機</td><td><code>300</code></td><td>30 ~ 3,600</td><td>兩次進度 Log 的最長秒數</td><td>太小會增加 Log 量</td></tr><tr class="even"><td><code>scanner.disk_batch_size</code></td><td>效能與待機</td><td><code>1000</code></td><td>100 ~ 10,000</td><td>照片掃描每批從磁碟讀取的路徑數</td><td>提高增加記憶體，降低增加 SQL 次數</td></tr><tr class="odd"><td><code>scanner.write_batch_size</code></td><td>效能與待機</td><td><code>500</code></td><td>100 ~ 2,000</td><td>掃描器單一 SQLite 批次交易的照片數</td><td>提高會延長寫入鎖定時間</td></tr><tr class="even"><td><code>scanner.missing_threshold_percent</code></td><td>效能與待機</td><td><code>10</code></td><td>0 ~ 100</td><td>單次掃描可自動標記 Missing 的最大照片比例</td><td>超過比例會停止並要求管理員確認</td></tr><tr class="odd"><td><code>scheduler.poll_seconds</code></td><td>效能與待機</td><td><code>60</code></td><td>30 ~ 3,600</td><td>Scheduler 檢查備份與逾期租約的秒數</td><td>不建議低於 30 秒</td></tr><tr class="even"><td><code>analysis.max_retries</code></td><td>分析設定</td><td><code>3</code></td><td>0 ~ 10</td><td>單一照片項目 API 失敗時的最大重試次數</td><td>重試會增加成本</td></tr><tr class="odd"><td><code>model.low_model</code></td><td>模型設定</td><td><code>gpt-4o-mini</code></td><td>模型名稱字串</td><td>第一階段低成本模型</td><td>必須支援圖片與 JSON Schema</td></tr><tr class="even"><td><code>model.high_model</code></td><td>模型設定</td><td><code>gpt-4o</code></td><td>模型名稱字串</td><td>第二階段高品質模型</td><td>請確認 Provider 價格</td></tr><tr class="odd"><td><code>budget.daily_warning</code></td><td>成本設定</td><td><code>5.0</code></td><td>0 ~ 100,000</td><td>每日成本警告門檻（美元）</td><td>僅警告，不停止</td></tr><tr class="even"><td><code>budget.daily_stop</code></td><td>成本設定</td><td><code>10.0</code></td><td>0 ~ 100,000</td><td>每日成本熔斷停止門檻（美元）</td><td>達到後暫停新模型呼叫</td></tr><tr class="odd"><td><code>budget.monthly_warning</code></td><td>成本設定</td><td><code>50.0</code></td><td>0 ~ 1,000,000</td><td>每月成本警告門檻（美元）</td><td>僅警告，不停止</td></tr><tr class="even"><td><code>budget.monthly_stop</code></td><td>成本設定</td><td><code>100.0</code></td><td>0 ~ 1,000,000</td><td>每月成本熔斷停止門檻（美元）</td><td>達到後暫停新模型呼叫</td></tr><tr class="odd"><td><code>budget.job_default</code></td><td>成本設定</td><td><code>10.0</code></td><td>0 ~ 100,000</td><td>單一工作的預設預算上限（美元）</td><td>達到後工作自動暫停</td></tr><tr class="even"><td><code>budget.photo_max</code></td><td>成本設定</td><td><code>0.25</code></td><td>0 ~ 1,000</td><td>單張照片成本上限（美元）</td><td>過低可能使高品質分析無法執行</td></tr><tr class="odd"><td><code>budget.max_tokens</code></td><td>成本設定</td><td><code>8000</code></td><td>256 ~ 1,000,000</td><td>單次請求最大 Token 估算上限</td><td>需與 Provider 模型能力相容</td></tr><tr class="even"><td><code>render.memory_threshold</code></td><td>渲染設定</td><td><code>70</code></td><td>0 ~ 100</td><td>歷史上的今天自動選片最低回憶分數</td><td>過高可能找不到符合照片</td></tr><tr class="odd"><td><code>render.quantity</code></td><td>渲染設定</td><td><code>5</code></td><td>1 ~ 50</td><td>每次發布集包含的畫面總數</td><td>增加會增加 ESP32 下載量</td></tr><tr class="even"><td><code>render.selection_mode</code></td><td>渲染設定</td><td><code>history_today</code></td><td><code>history_today</code>, <code>top_ranked</code></td><td>發布選片模式 (歷年同日 vs 最高分)</td><td>照片無日期時會依退回規則補足</td></tr><tr class="odd"><td><code>render.history_today_window_days</code></td><td>渲染設定</td><td><code>7</code></td><td>0 ~ 31</td><td>歷年同日不足時，向前/後尋找的寬限天數</td><td>設 0 僅接受完全同月同日</td></tr><tr class="even"><td><code>render.history_today_fallback</code></td><td>渲染設定</td><td><code>nearby_then_ranked</code></td><td><code>nearby_only</code>, <code>ranked</code>, <code>none</code></td><td>歷年同日數量不足時的退回補圖規則</td><td><code>none</code> 可能產生空發布集</td></tr><tr class="odd"><td><code>render.e6_weight</code></td><td>渲染設定</td><td><code>20</code></td><td>0 ~ 60</td><td>選片時 E6 六色適合度占最終排序的百分比</td><td>過高會忽視回憶與情緒分數</td></tr><tr class="even"><td><code>render.layout</code></td><td>渲染設定</td><td><code>photo_info</code></td><td><code>full</code>, <code>postcard</code>, <code>photo_info</code>, <code>photo_pair</code>, <code>adaptive_memory</code>, <code>calendar</code>, <code>weather_sensor</code></td><td>正式發布使用的相框版型</td><td>日曆與天氣版型會縮小照片區域</td></tr><tr class="odd"><td><code>render.frame_orientation</code></td><td>渲染設定</td><td><code>portrait</code></td><td><code>portrait</code>, <code>landscape</code></td><td>相框實際擺放方向 (直向 vs 橫向)</td><td>日曆/天氣版型固定直向</td></tr><tr class="even"><td><code>render.fit_mode</code></td><td>渲染設定</td><td><code>contain</code></td><td><code>contain</code>, <code>cover</code></td><td>照片縮放適應方式</td><td><code>contain</code> 完整顯示，<code>cover</code> 填滿裁切</td></tr><tr class="odd"><td><code>render.show_capture_date</code></td><td>渲染設定</td><td><code>true</code></td><td><code>true</code>, <code>false</code></td><td>是否在版型中顯示拍攝日期</td><td>日期錯誤可於照片詳情人工修正</td></tr><tr class="even"><td><code>render.weather_enabled</code></td><td>相框天氣</td><td><code>false</code></td><td><code>true</code>, <code>false</code></td><td>開啟從 Open-Meteo 取得所在地天氣</td><td>需伺服器可連外網</td></tr><tr class="odd"><td><code>render.weather_latitude</code></td><td>相框天氣</td><td><code>25.033</code></td><td>-90 ~ 90</td><td>天氣查詢緯度</td><td>需手動修改為實際居住地</td></tr><tr class="even"><td><code>render.weather_longitude</code></td><td>相框天氣</td><td><code>121.5654</code></td><td>-180 ~ 180</td><td>天氣查詢經度</td><td>需手動修改為實際居住地</td></tr><tr class="odd"><td><code>render.weather_location_name</code></td><td>相框天氣</td><td><code>所在地</code></td><td>文字字串</td><td>版型上顯示的天氣地點名稱</td><td>僅影響標示，不改經緯度</td></tr><tr class="even"><td><code>render.sensor_device_id</code></td><td>相框天氣</td><td><code>""</code></td><td>裝置 ID 字串</td><td>指定室內溫溼度採用的感測裝置</td><td>留空時採用最新回報的裝置</td></tr><tr class="odd"><td><code>render.font_path</code></td><td>渲染設定</td><td><code>builtin:iansui</code></td><td>字型名稱或路徑</td><td>繁體中文字型 (內建手寫/文青體)</td><td>缺字時禁止發布，不以預設字取代</td></tr><tr class="even"><td><code>render.show_location</code></td><td>渲染設定</td><td><code>true</code></td><td><code>true</code>, <code>false</code></td><td>照片含 GPS 時顯示最近城市名稱</td><td>僅顯示粗略地名，不顯示座標</td></tr><tr class="odd"><td><code>render.location_max_distance_km</code></td><td>渲染設定</td><td><code>80</code></td><td>1 ~ 500</td><td>GPS 距離最近城市在此公里數內才顯示</td><td>過大會顯示較不準確的鄰近城市</td></tr><tr class="even"><td><code>render.profile</code></td><td>渲染設定</td><td><code>safe_4c</code></td><td><code>safe_4c</code>, <code>gdep073e01_6c</code>, <code>gdey073d46_7c</code></td><td>發布使用的電子紙面板色彩 Profile</td><td>必須與 ESP32 實際面板型號一致</td></tr><tr class="odd"><td><code>render.dither</code></td><td>渲染設定</td><td><code>floyd_steinberg</code></td><td>10 種 Dither 演算法</td><td>有限色電子紙的抖動演算模式</td><td>切換後色彩與點陣分布不同</td></tr><tr class="even"><td><code>render.dither_strength</code></td><td>渲染設定</td><td><code>1.0</code></td><td>0 ~ 2.0</td><td>抖動誤差/閾值強度</td><td>過高會增加畫面顆粒雜點</td></tr><tr class="odd"><td><code>render.color_distance</code></td><td>渲染設定</td><td><code>oklab</code></td><td><code>oklab</code>, <code>rgb</code></td><td>色盤映射距離計算空間</td><td>OKLab 較符合人眼感知色彩</td></tr><tr class="even"><td><code>device.legacy_api_enabled</code></td><td>裝置設定</td><td><code>false</code></td><td><code>true</code>, <code>false</code></td><td>允許舊版 URL 金鑰下載模式</td><td>停用更安全 (修改需重啟)</td></tr><tr class="odd"><td><code>device.default_timezone</code></td><td>裝置設定</td><td><code>Asia/Taipei</code></td><td>IANA 時區</td><td>新增 ESP32 裝置時預設套用的時區</td><td>錯誤時區使每日喚醒時間偏移</td></tr><tr class="even"><td><code>device.default_schedule</code></td><td>裝置設定</td><td><code>08:00</code></td><td><code>HH:MM</code> 格式</td><td>新增 ESP32 裝置時預設套用的刷新時間</td><td>刷新時會短暫提高耗電</td></tr><tr class="odd"><td><code>device.default_rotation</code></td><td>裝置設定</td><td><code>0</code></td><td><code>0</code>, <code>180</code></td><td>新增 7.3 吋裝置時套用的畫面旋轉角度</td><td>韌體目前支援 0° 與 180°</td></tr></tbody></table></div>
+<hr class="doc-divider">
+<h2 id="sec-14" class="doc-h2"><span class="h2-anchor-icon">#</span> 十四、 全情境故障排除與問題診斷指南</h2>
+<h3 id="sec-14-1" class="doc-h3">14.1 網路連線與 ESP32 硬體故障排除</h3>
+<h4 id="現象-1-esp32-畫面顯示-http-401-unauthorized-或無法成功下載-release" class="doc-h4">現象 1：ESP32 畫面顯示 <code>HTTP 401 Unauthorized</code> 或無法成功下載 Release</h4>
+<ul class="doc-list"><li><strong>可能原因</strong>：</li><li>ESP32 韌體中設定的 <code>Device Secret Token</code> 與 Web 控制台「裝置管理」生成的 Token 不符。</li><li>HTTP 請求 Header 未帶入 <code>Authorization: Bearer <Token></code>。</li><li>使用了舊版 URL query 金鑰（如 <code>/bin?key=...</code>），但伺服器 <code>device.legacy_api_enabled</code> 設定為 <code>false</code>。</li><li><strong>排除步驟與診斷</strong>：</li><li>進入 Web 控制台 <code>/devices</code>，選擇對應裝置點擊 <code>[重置 API Key]</code>。</li><li>開啟 ESP32 AP 配網熱點或重新燒錄韌體，將新 Token 輸入至 ESP32。</li><li>若必須使用舊版 URL 金鑰，至 <code>/settings</code> 頁面將 <code>device.legacy_api_enabled</code> 切換為 <code>true</code> 並重啟 Web 伺服器。</li></ul>
+<h4 id="現象-2-esp32-下載時回傳-http-404-not-found" class="doc-h4">現象 2：ESP32 下載時回傳 <code>HTTP 404 Not Found</code></h4>
+<ul class="doc-list"><li><strong>可能原因</strong>：</li><li>伺服器資料庫 <code>render_releases</code> 中尚未產生任何發布集。</li><li>ESP32 裝置設定的面板 Profile（如 <code>safe_4c</code>）與伺服器目前渲染發布的 Profile（如 <code>gdep073e01_6c</code>）不一致。</li><li><strong>排除步驟與診斷</strong>：</li><li>進入 Web 控制台 <code>/</code> (儀表板) 點擊 <code>[手動發布新畫面]</code>，強制生成一組最新發布集。</li><li>進入 <code>/devices</code> 檢查 ESP32 裝置的 Profile 設定，並至 <code>/settings</code> 確保 <code>render.profile</code> 設定兩者完全一致。</li></ul>
+<h4 id="現象-3-esp32-開機後不斷自動重啟-serial-輸出-heap-allocation-failed" class="doc-h4">現象 3：ESP32 開機後不斷自動重啟，Serial 輸出 <code>Heap Allocation Failed</code></h4>
+<ul class="doc-list"><li><strong>可能原因</strong>：</li><li>編譯韌體時未啟用 <code>PSRAM</code>，導致 ESP32 SRAM 空間不足以容納 192KB 的圖片 Buffer。</li><li>韌體中將 HTTP Client 設定為一次性將整份檔案 <code>getString()</code> 載入記憶體。</li><li><strong>排除步驟與診斷</strong>：</li><li>檢查 Arduino IDE 工具選單或 <code>platformio.ini</code>，確保選擇了 <code>OPI PSRAM</code> 與 <code>16MB Flash</code>。</li><li>確認韌體使用流式（Streaming/Chunked）讀取，分批透過 SPI 將 Payload 寫入墨水屏驅動 IC。</li></ul>
+<h4 id="現象-4-esp32-鋰電池續航不到-1-週即告耗盡" class="doc-h4">現象 4：ESP32 鋰電池續航不到 1 週即告耗盡</h4>
+<ul class="doc-list"><li><strong>可能原因</strong>：</li><li>伺服器現場渲染速度過慢（> 5 秒），導致 ESP32 WiFi 保持全功率發射時間過長。</li><li>ESP32 刷屏完畢後未正確呼叫 <code>esp_deep_sleep_start()</code> 進入休眠。</li><li><strong>排除步驟與診斷</strong>：</li><li>檢查背景 Scheduler 的 Pre-rendering 預先編譯功能是否正常，確保 ESP32 可在 0.2 秒內完成 HTTP 下載。</li><li>連接 Serial Monitor，確認刷屏結束後有印出 <code>Entering Deep Sleep for X seconds</code> 訊息。</li></ul>
+<hr class="doc-divider">
+<h3 id="sec-14-2" class="doc-h3">14.2 照片庫、磁碟與 NAS 掛載故障排除</h3>
+<h4 id="現象-1-相片庫顯示-missing-照片數暴增-或掃描器停止並警示-超過-missing-門檻" class="doc-h4">現象 1：相片庫顯示 Missing 照片數暴增，或掃描器停止並警示「超過 Missing 門檻」</h4>
+<ul class="doc-list"><li><strong>可能原因</strong>：</li><li>NAS 網路硬碟 (SMB / AFP) 掉盤或網路連線中斷，導致 <code>INKTIME_PHOTO_DIR</code> 變成空目錄。</li><li>相片磁碟資料夾存取權限變更（例如 Docker 容器內無權限讀取 <code>/photos</code>）。</li><li><strong>排除步驟與診斷</strong>：</li><li>進入 <code>/diagnostics</code> 檢查照片路徑存取狀態，重新掛載 NAS 磁碟。</li><li>在 <code>/settings</code> 檢查 <code>scanner.missing_threshold_percent</code> 預設 10% 安全門檻；確定磁碟掛載正常後，於 <code>/schedules</code> 手動觸發照片庫掃描。</li></ul>
+<h4 id="現象-2-歷史上的今天永遠找不到照片-或特定格式的照片被忽視" class="doc-h4">現象 2：歷史上的今天永遠找不到照片，或特定格式的照片被忽視</h4>
+<ul class="doc-list"><li><strong>可能原因</strong>：</li><li>照片的 EXIF 日期格式非標準 <code>YYYY:MM:DD</code>（如使用 ISO 8601 或斜線 <code>YYYY/MM/DD</code>），造成日期解析傳回空字串。</li><li>照片被本機預篩選（截圖識別/低品質瑕疵/E6 面板失真）自動排除。</li><li><strong>排除步驟與診斷</strong>：</li><li>點擊該照片詳情頁 <code>/photos/{photo_id}</code>，檢視 EXIF 欄位並點擊 <code>[手動變更拍攝日期]</code>。</li><li>進入 <code>/photos/excluded</code> 檢查排除列表，點擊 <code>[還原照片]</code> 移除排除標記。</li></ul>
+<hr class="doc-divider">
+<h3 id="sec-14-3" class="doc-h3">14.3 AI 模型分析與 Token 成本故障排除</h3>
+<h4 id="現象-1-背景分析工作狀態顯示-budget_exceeded-並自動暫停" class="doc-h4">現象 1：背景分析工作狀態顯示 <code>budget_exceeded</code> 並自動暫停</h4>
+<ul class="doc-list"><li><strong>可能原因</strong>：</li><li>當日或當月累積消耗的 Token 費用達到了 <code>budget.daily_stop</code> 或 <code>budget.monthly_stop</code> 熔斷門檻。</li><li>單一 Job 設定的預算上限（<code>budget.job_default</code>）已用盡。</li><li><strong>排除步驟與診斷</strong>：</li><li>進入 <code>/costs</code> 檢視實時 Token 計費圖表。</li><li>進入 <code>/settings</code> 適度調高 <code>budget.daily_stop</code> 與 <code>budget.monthly_stop</code> 數值。</li><li>進入 <code>/jobs</code> 點擊 <code>[恢復 (Resume)]</code> 繼續執行工作。</li></ul>
+<h4 id="現象-2-ai-分析日誌頻繁出現-vlm-003-模型回傳無效-json-或-vlm-004-欄位不符合-schema" class="doc-h4">現象 2：AI 分析日誌頻繁出現 <code>VLM-003: 模型回傳無效 JSON</code> 或 <code>VLM-004: 欄位不符合 Schema</code></h4>
+<ul class="doc-list"><li><strong>可能原因</strong>：</li><li>本機小模型（如 LMStudio / Ollama 執行的模型）未完美支援 Structured Outputs，輸出了 Markdown 包裹語法 (<code> </code>`<code>json </code>)。</li><li>模型回傳時遺漏了必填欄位（例如缺少 <code>side_caption</code> 或 <code>reason</code>）。</li><li><strong>排除步驟與診斷</strong>：</li><li>更換支援 JSON Mode / Schema 的 Vision 大模型（例如 <code>qwen2.5-vl-7b-instruct</code> 或 <code>gpt-4o-mini</code>）。</li><li>在 <code>/settings</code> 的 <code>analysis.scoring_rules</code> 提示詞中加強規範：「回應必須為單一 JSON 物件，嚴禁包含 Markdown 代碼塊標記」。</li></ul>
+<h4 id="現象-3-呼叫大模型頻繁跳出-http-429-too-many-requests" class="doc-h4">現象 3：呼叫大模型頻繁跳出 <code>HTTP 429 Too Many Requests</code></h4>
+<ul class="doc-list"><li><strong>可能原因</strong>：</li><li><code>analysis.concurrency</code> 設定過大，背景 Worker 同時向 LLM Provider 發送過多請求，觸發 API Rate Limit。</li><li><strong>排除步驟與診斷</strong>：</li><li>進入 <code>/settings</code> 將 <code>analysis.concurrency</code> 由 4 降低為 <code>1</code> 或 <code>2</code>。</li></ul>
+<hr class="doc-divider">
+<h3 id="sec-14-4" class="doc-h3">14.4 影像渲染與墨水屏顯示畫質故障排除</h3>
+<h4 id="現象-1-實體墨水屏畫面人像膚色發黃-顆粒雜點極多或紅黃色塊突兀" class="doc-h4">現象 1：實體墨水屏畫面人像膚色發黃、顆粒雜點極多或紅黃色塊突兀</h4>
+<ul class="doc-list"><li><strong>可能原因</strong>：</li><li>Dithering 演算法之誤差強度設定過高（<code>render.dither_strength</code> > 1.2）。</li><li>色彩映射空間選擇了 <code>rgb</code> 歐幾里得距離而非符合人眼感知的 <code>oklab</code>。</li><li><strong>排除步驟與診斷</strong>：</li><li>進入 <code>/rendering</code> 將 Dither 模式切換為 <code>photo_smooth</code>（照片平滑）或 <code>floyd_steinberg</code>。</li><li>將 <code>render.color_distance</code> 切換為 <code>oklab</code>，並於 <code>/simulator</code> 進行 A/B 比對確認效果。</li></ul>
+<h4 id="現象-2-墨水屏畫面出現嚴重舊圖殘影-ghosting-或顏色發灰" class="doc-h4">現象 2：墨水屏畫面出現嚴重舊圖殘影 (Ghosting) 或顏色發灰</h4>
+<ul class="doc-list"><li><strong>可能原因</strong>：</li><li>相框放置環境溫度過低（< 15°C），導致墨水微膠囊粒子黏滯度上升。</li><li>伺服器 <code>render.profile</code> 選錯（例如實際使用 <code>gdep073e01_6c</code> 面板，設定卻選為 <code>safe_4c</code>）。</li><li><strong>排除步驟與診斷</strong>：</li><li>進入 <code>/devices</code> 確保每個 ESP32 綁定的 Profile 與實體面板型號一致。</li><li>將電子相框移至常溫（20~25°C）環境，或於 Web 端點擊 <code>[模擬實體刷新]</code> 發送清屏指令。</li></ul>
+<h4 id="現象-3-渲染正式發布時提示-缺字-發布已終止" class="doc-h4">現象 3：渲染正式發布時提示「缺字，發布已終止」</h4>
+<ul class="doc-list"><li><strong>可能原因</strong>：</li><li>照片的短文案（<code>side_caption</code>）中包含目前中文字型檔（<code>render.font_path</code>）不支援的特殊生僻字或 Emoji。</li><li><strong>排除步驟與診斷</strong>：</li><li>InkTime 渲染引擎為確保畫面品質，<strong>禁止缺字回退為預設字型</strong>。</li><li>於照片詳情頁 <code>/photos/{photo_id}</code> 修改短文案去除生僻字，或於 <code>/settings</code> 上傳支援完整 Unicode 範圍的繁體中文字型（如思源黑體）。</li></ul>
+<hr class="doc-divider">
+<h3 id="sec-14-5" class="doc-h3">14.5 資料庫與鎖定競爭故障排除</h3>
+<h4 id="現象-1-系統日誌出現-sqlite3-operationalerror-database-is-locked" class="doc-h4">現象 1：系統日誌出現 <code>sqlite3.OperationalError: database is locked</code></h4>
+<ul class="doc-list"><li><strong>可能原因</strong>：</li><li>有背景 Worker 或掃描器正執行長時間的 SQLite 寫入交易。</li><li>Gunicorn 部署了多個 Process，在無跨程序寫入鎖的情況下競爭寫入資料庫。</li><li><strong>排除步驟與診斷</strong>：</li><li>確定系統均使用 <code>ManagedConnection</code> 進行連線。</li><li>在 <code>/settings</code> 將 <code>scanner.write_batch_size</code> 由 1000 降低為 <code>500</code>，縮短單次 <code>fcntl.flock</code> 鎖定時間。</li></ul>
+<h4 id="現象-2-熱備份還原失敗-提示-restore-001-inktime-web-worker-或-scheduler-尚未停止" class="doc-h4">現象 2：熱備份還原失敗，提示 <code>RESTORE-001: InkTime Web、Worker 或 Scheduler 尚未停止</code></h4>
+        </article>
+    </main>
+
+    <!-- Back to top button -->
+    <button class="back-to-top" id="backToTop" title="回到頂部">
+        <i class="fa-solid fa-arrow-up"></i>
+    </button>
+
+    <!-- JS Libraries -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/yaml.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // Highlight Code
+            document.querySelectorAll('pre code').forEach((el) => {
+                hljs.highlightElement(el);
+            });
+
+            // Mermaid render
+            try {
+                mermaid.initialize({
+                    startOnLoad: true,
+                    theme: 'dark',
+                    fontFamily: 'Inter, sans-serif'
+                });
+            } catch (e) {
+                console.log('Mermaid init fallback');
+            }
+        });
+
+        // Copy Code Function
+        function copyCode(btn) {
+            const code = btn.parentElement.nextElementSibling.querySelector('code').innerText;
+            navigator.clipboard.writeText(code).then(() => {
+                btn.innerHTML = '<i class="fa-solid fa-check" style="color: var(--accent-emerald);"></i> 已複製!';
+                setTimeout(() => {
+                    btn.innerHTML = '<i class="fa-regular fa-copy"></i> 複製內容';
+                }, 2000);
+            });
+        }
+
+        // Theme Toggle (Dark/Light)
+        const themeBtn = document.getElementById('themeToggle');
+        themeBtn.addEventListener('click', () => {
+            const html = document.documentElement;
+            if (html.classList.contains('dark')) {
+                html.classList.remove('dark');
+                html.classList.add('light');
+                themeBtn.innerHTML = '<i class="fa-solid fa-sun"></i>';
+            } else {
+                html.classList.remove('light');
+                html.classList.add('dark');
+                themeBtn.innerHTML = '<i class="fa-solid fa-moon"></i>';
+            }
+        });
+
+        // Mobile Menu Toggle
+        const menuToggle = document.getElementById('menuToggle');
+        const sidebar = document.getElementById('sidebar');
+        menuToggle.addEventListener('click', () => {
+            sidebar.classList.toggle('open');
+        });
+
+        // Back to top button visibility
+        const backToTop = document.getElementById('backToTop');
+        window.addEventListener('scroll', () => {
+            if (window.scrollY > 300) {
+                backToTop.classList.add('show');
+            } else {
+                backToTop.classList.remove('show');
+            }
+            
+            // Auto Active Sidebar Section Link on Scroll
+            const headings = document.querySelectorAll('.doc-h2, .doc-h3');
+            let currentActiveId = '';
+            headings.forEach(h => {
+                const rect = h.getBoundingClientRect();
+                if (rect.top <= 120) {
+                    currentActiveId = h.id;
+                }
+            });
+            
+            if (currentActiveId) {
+                document.querySelectorAll('.toc-h2-link, .toc-h3-link').forEach(link => {
+                    if (link.getAttribute('href') === '#' + currentActiveId) {
+                        link.classList.add('active');
+                    } else {
+                        link.classList.remove('active');
+                    }
+                });
+            }
+        });
+
+        backToTop.addEventListener('click', () => {
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        });
+
+        // Search Filter Logic
+        const searchInput = document.getElementById('searchInput');
+        searchInput.addEventListener('input', (e) => {
+            const query = e.target.value.toLowerCase().trim();
+            const tocGroups = document.querySelectorAll('.toc-group');
+
+            tocGroups.forEach(group => {
+                const text = group.innerText.toLowerCase();
+                if (text.includes(query)) {
+                    group.style.display = 'block';
+                } else {
+                    group.style.display = 'none';
+                }
+            });
+        });
+    </script>
+</body>
+</html>
