@@ -244,8 +244,10 @@ def validate_analysis_result(raw: str | dict) -> dict:
         raise AnalysisValidationError("visual_orientation.rotation_cw 不合法")
     if isinstance(orientation["confidence"], bool) or not isinstance(orientation["confidence"], (int, float)) or not 0 <= float(orientation["confidence"]) <= 1:
         raise AnalysisValidationError("visual_orientation.confidence 不合法")
-    if not isinstance(orientation["ambiguous"], bool) or not isinstance(orientation["evidence"], list) or not orientation["evidence"] or any(item not in ORIENTATION_EVIDENCE for item in orientation["evidence"]):
+    if not isinstance(orientation["ambiguous"], bool) or not isinstance(orientation["evidence"], list) or not orientation["evidence"] or len(orientation["evidence"]) != len(set(orientation["evidence"])) or any(item not in ORIENTATION_EVIDENCE for item in orientation["evidence"]):
         raise AnalysisValidationError("visual_orientation evidence 不合法")
+    if "insufficient_visual_cues" in orientation["evidence"] and orientation["evidence"] != ["insufficient_visual_cues"]:
+        raise AnalysisValidationError("insufficient_visual_cues 不可與其他證據混用")
     if orientation["rotation_cw"] is None and (not orientation["ambiguous"] or orientation["evidence"] != ["insufficient_visual_cues"]):
         raise AnalysisValidationError("方向不明必須標示 insufficient_visual_cues")
     orientation["confidence"] = float(orientation["confidence"])
