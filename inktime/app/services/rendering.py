@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import calendar
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 import random
@@ -32,6 +33,7 @@ from inktime.app.repositories.render_candidates import RenderCandidateRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.services.weather import WeatherService
 from inktime.app.services.release_coordinator import ReleaseCoordinator
+from inktime.app.services.render_cache import RENDERER_VERSION
 
 
 LAYOUTS = {
@@ -76,6 +78,59 @@ class RenderService:
     def _activity(self, event: str, message: str, **fields) -> None:
         if self.observability is not None:
             self.observability.record("DEBUG", "renderer", event, message, **fields)
+
+    def preview_fingerprint(
+        self,
+        photo_id: str,
+        *,
+        layout: str | None = None,
+        crop_x: float | None = None,
+        crop_y: float | None = None,
+        secondary_photo_id: str | None = None,
+        orientation: str | None = None,
+        fit_mode: str | None = None,
+        profile: str | None = None,
+        dither: str | None = None,
+    ) -> dict[str, Any]:
+        photo = self.photos.get_with_path(photo_id)
+        if photo is None:
+            raise KeyError(photo_id)
+        secondary = (
+            self.photos.get_with_path(secondary_photo_id) if secondary_photo_id else None
+        )
+        effective = self._orientation_for(photo)
+        layout_key = layout or str(self.settings.get("render.layout", "photo_info"))
+        frame_orientation = orientation or str(
+            self.settings.get("render.frame_orientation", "portrait")
+        )
+        effective_frame = (
+            "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else frame_orientation
+        )
+        profile_key = profile or str(self.settings.get("render.profile", "safe_4c"))
+        font_reference = str(self.settings.get("render.font_path", ""))
+        return {
+            "photo_sha": str(photo["sha256"] or ""),
+            "effective_orientation": effective.rotation_degrees,
+            "orientation_source": effective.source,
+            "manual_orientation_updated_at": photo["manual_orientation_updated_at"],
+            "crop": [
+                crop_x if crop_x is not None else photo["crop_manual_x"],
+                crop_y if crop_y is not None else photo["crop_manual_y"],
+            ],
+            "fit": fit_mode or str(self.settings.get("render.fit_mode", "contain")),
+            "layout": layout_key,
+            "frame_orientation": effective_frame,
+            "secondary_photo_sha": str(secondary["sha256"] or "") if secondary else None,
+            "profile": profile_key,
+            "panel_profile": profile_key,
+            "palette": profile_key,
+            "dither": dither or str(self.settings.get("render.dither", "floyd_steinberg")),
+            "strength": float(self.settings.get("render.dither_strength", 1.0)),
+            "preset": layout_key,
+            "renderer_version": RENDERER_VERSION,
+            "font_version": hashlib.sha256(font_reference.encode("utf-8")).hexdigest(),
+            "output_dimensions": [480, 800],
+        }
 
     def location_name(self, photo) -> str:
         if self.locations is None or not bool(self.settings.get("render.show_location", True)):

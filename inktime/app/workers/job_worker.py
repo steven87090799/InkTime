@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass
+import multiprocessing
 import threading
 import time
-from typing import Callable
+from typing import Any, Callable
 from uuid import uuid4
 
 from inktime.app.repositories.jobs import JobRepository
@@ -12,10 +14,42 @@ from inktime.app.repositories.jobs import JobRepository
 Processor = Callable[[dict], dict]
 ProgressCallback = Callable[[int], None]
 ErrorCallback = Callable[[str, str, Exception, int], None]
+ResultCallback = Callable[[dict], None]
+
+
+class JobHardTimeoutError(TimeoutError):
+    code = "JOB-004"
+
+
+class JobChildError(RuntimeError):
+    code = "JOB-003"
+
+
+def _process_item(processor: Processor, item: dict, sender) -> None:
+    """Child entrypoint: compute only and return data to the parent over a pipe."""
+
+    try:
+        result = processor(item)
+        cost = float(result.pop("_actual_cost", 0) or 0)
+        sender.send(("ok", str(item["id"]), result, cost))
+    except BaseException as exc:  # child must always report a bounded diagnostic
+        sender.send(("error", type(exc).__name__))
+    finally:
+        sender.close()
+
+
+@dataclass
+class _ChildTask:
+    item_id: str
+    process: Any
+    receiver: Any
+    started_at: float
 
 
 class BoundedJobWorker:
     """只維持固定數量 Future；照片總數不會放大 Worker 記憶體。"""
+
+    MAX_CHILD_PROCESSES = 4
 
     def __init__(
         self,
@@ -29,23 +63,36 @@ class BoundedJobWorker:
         progress_interval_seconds: int = 300,
         progress_callback: ProgressCallback | None = None,
         error_callback: ErrorCallback | None = None,
-        timeout_seconds: int = 0,
+        result_callback: ResultCallback | None = None,
+        timeout_seconds: float = 0,
+        hard_timeout: bool = False,
+        terminate_grace_seconds: float = 0.5,
     ) -> None:
+        requested_hard_timeout = bool(hard_timeout and float(timeout_seconds) > 0)
         self.repository = repository
         self.processor = processor
         self.concurrency = max(1, concurrency)
+        if requested_hard_timeout:
+            self.concurrency = min(self.concurrency, self.MAX_CHILD_PROCESSES)
         self.queue_size = self.concurrency * max(1, queue_multiplier)
         self.max_attempts = max_attempts
         self.progress_interval_items = max(1, progress_interval_items)
         self.progress_interval_seconds = max(1, progress_interval_seconds)
         self.progress_callback = progress_callback
         self.error_callback = error_callback
-        self.timeout_seconds = max(0, int(timeout_seconds))
+        self.result_callback = result_callback
+        self.timeout_seconds = max(0.0, float(timeout_seconds))
+        self.hard_timeout = requested_hard_timeout
+        self.terminate_grace_seconds = max(0.05, float(terminate_grace_seconds))
         self.worker_id = str(uuid4())
         self.stop_event = threading.Event()
         self.max_observed_futures = 0
         self.processed_items = 0
         self.failure_count = 0
+        self.child_active = 0
+        self.child_timeouts = 0
+        self.child_terminated = 0
+        self.child_active_max = 0
         self._last_progress_at = time.monotonic()
 
     def request_stop(self) -> None:
@@ -85,7 +132,143 @@ class BoundedJobWorker:
             self.progress_callback(self.processed_items)
             self._last_progress_at = now
 
+    def child_observability(self) -> dict[str, int]:
+        return {
+            "active": self.child_active,
+            "active_max": self.child_active_max,
+            "timeouts": self.child_timeouts,
+            "terminated": self.child_terminated,
+        }
+
+    def _stop_child(self, task: _ChildTask) -> None:
+        process = task.process
+        if process.is_alive():
+            process.terminate()
+            self.child_terminated += 1
+        process.join(self.terminate_grace_seconds)
+        if process.is_alive():
+            process.kill()
+            process.join(self.terminate_grace_seconds)
+        else:
+            # A second join reaps the process deterministically on all platforms.
+            process.join(0)
+        task.receiver.close()
+        self.child_active = max(0, self.child_active - 1)
+
+    def _run_process_job(self, job_id: str) -> None:
+        """Run explicitly safe/picklable computation behind killable processes.
+
+        The child never receives the repository. Only the parent claims, renews,
+        retries and persists the returned result. Callers must opt in only for an
+        external call or pure computation that has no database side effects.
+        """
+
+        try:
+            context = multiprocessing.get_context("fork")
+        except ValueError:
+            # Platforms without fork retain the existing cooperative boundary;
+            # pretending a spawned closure is killable would be unsafe.
+            self.hard_timeout = False
+            self.run_job(job_id)
+            return
+
+        tasks: dict[str, _ChildTask] = {}
+        last_lease_renewal = time.monotonic()
+        try:
+            while not self.stop_event.is_set() or tasks:
+                job = self.repository.get(job_id)
+                if job is None or job["status"] not in {"running", "retrying", "pausing"}:
+                    break
+                if not self.stop_event.is_set() and job["status"] in {"running", "retrying"}:
+                    claimed = self.repository.claim(
+                        job_id, self.worker_id, self.concurrency - len(tasks)
+                    )
+                    for row in claimed:
+                        item = dict(row)
+                        receiver, sender = context.Pipe(duplex=False)
+                        process = context.Process(
+                            target=_process_item,
+                            args=(self.processor, item, sender),
+                            name="inktime-bounded-child",
+                        )
+                        process.start()
+                        sender.close()
+                        item_id = str(item["id"])
+                        tasks[item_id] = _ChildTask(
+                            item_id, process, receiver, time.monotonic()
+                        )
+                        self.child_active += 1
+                        self.child_active_max = max(self.child_active_max, self.child_active)
+                    self.max_observed_futures = max(self.max_observed_futures, len(tasks))
+
+                progressed = False
+                now = time.monotonic()
+                for item_id, task in list(tasks.items()):
+                    if task.receiver.poll():
+                        try:
+                            message = task.receiver.recv()
+                        except EOFError:
+                            message = ("error", "ChildExited")
+                        task.process.join(self.terminate_grace_seconds)
+                        if task.process.is_alive():
+                            self._stop_child(task)
+                        else:
+                            task.process.join(0)
+                            task.receiver.close()
+                            self.child_active = max(0, self.child_active - 1)
+                        tasks.pop(item_id, None)
+                        if message[0] == "ok":
+                            _state, completed_id, result, cost = message
+                            if self.result_callback:
+                                self.result_callback(result)
+                            self.repository.complete_item(
+                                job_id, str(completed_id), dict(result), float(cost)
+                            )
+                        else:
+                            self._record_failure(
+                                job_id, item_id, JobChildError(str(message[1]))
+                            )
+                        self._record_processed()
+                        progressed = True
+                        continue
+                    if now - task.started_at >= self.timeout_seconds:
+                        self.child_timeouts += 1
+                        self._stop_child(task)
+                        tasks.pop(item_id, None)
+                        self._record_failure(
+                            job_id, item_id, JobHardTimeoutError("child process timeout")
+                        )
+                        self._record_processed()
+                        progressed = True
+
+                if now - last_lease_renewal >= min(30.0, self.timeout_seconds / 2):
+                    self.repository.renew_leases(job_id, self.worker_id)
+                    last_lease_renewal = now
+                if not tasks:
+                    if self.repository.finalize_if_done(job_id):
+                        break
+                    if not progressed:
+                        # Retry backoff is persisted; return control to Scheduler.
+                        break
+                if not progressed:
+                    self.stop_event.wait(0.02)
+        finally:
+            # Shutdown and every exceptional path terminate, join and reap all
+            # children. Their late pipe results are deliberately never consumed.
+            for item_id, task in list(tasks.items()):
+                self._stop_child(task)
+                self._record_failure(
+                    job_id, item_id, JobChildError("worker shutdown")
+                )
+            job = self.repository.get(job_id)
+            if job is not None and job["status"] == "pausing":
+                self.repository.acknowledge_pause(job_id)
+            self.repository.finalize_if_done(job_id)
+
     def run_job(self, job_id: str) -> None:
+        if self.hard_timeout:
+            self._run_process_job(job_id)
+            return
         futures: dict[Future, tuple[str, float]] = {}
         timed_out: set[Future] = set()
         timeout_triggered = False
@@ -154,6 +337,8 @@ class BoundedJobWorker:
                                 job_id, completed_id, result, cost
                             )
                         else:
+                            if self.result_callback:
+                                self.result_callback(result)
                             self.repository.complete_item(job_id, completed_id, result, cost)
                     self._record_processed()
 
@@ -168,6 +353,8 @@ class BoundedJobWorker:
                     if future in timed_out:
                         self.repository.record_late_completion(job_id, completed_id, result, cost)
                     else:
+                        if self.result_callback:
+                            self.result_callback(result)
                         self.repository.complete_item(job_id, completed_id, result, cost)
                 self._record_processed()
             job = self.repository.get(job_id)

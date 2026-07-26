@@ -56,4 +56,22 @@ def detail():
         "database_integrity": database.integrity_check(),
         "database_bytes": database.path.stat().st_size if database.path.exists() else 0,
         "version": current_app.config.get("INKTIME_VERSION"),
+        "runtime_metrics": {
+            "sqlite_writer_wait": database.observability(),
+            "weather": current_app.extensions[
+                "inktime_weather_service"
+            ].observability(),
+            "renderer_cache": current_app.extensions[
+                "inktime_render_cache"
+            ].observability(),
+            "renderer_workloads": current_app.extensions[
+                "inktime_render_workload_service"
+            ].observability(),
+            "webhook": current_app.extensions[
+                "inktime_notification_service"
+            ].observability(),
+            "worker_child": current_app.extensions[
+                "inktime_process_boundary"
+            ].observability(),
+        },
     }

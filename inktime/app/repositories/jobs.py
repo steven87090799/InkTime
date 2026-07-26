@@ -122,7 +122,15 @@ class JobRepository:
         priority: int | None = None,
         dedupe_key: str | None = None,
     ) -> str:
-        if kind not in {"scan", "backup", "render", "cleanup", "virtual_display"}:
+        if kind not in {
+            "scan",
+            "backup",
+            "render",
+            "render_preview",
+            "cleanup",
+            "virtual_display",
+            "webhook",
+        }:
             raise ValueError("不支援的維護工作")
         job_id = str(uuid4())
         item_id = str(uuid4())
@@ -170,7 +178,28 @@ class JobRepository:
 
     @staticmethod
     def _priority_for(kind: str) -> int:
-        return {"render": 2, "virtual_display": 2, "scan": 4, "cleanup": 6, "backup": 6}.get(kind, 4)
+        return {
+            "render": 2,
+            "virtual_display": 2,
+            "scan": 4,
+            "webhook": 5,
+            "render_preview": 6,
+            "cleanup": 6,
+            "backup": 6,
+        }.get(kind, 4)
+
+    def active_count(self, kind: str, *, created_by: str | None = None) -> int:
+        where = "kind=? AND status IN ('pending','preparing','running','pausing','retrying')"
+        parameters: list[object] = [kind]
+        if created_by is not None:
+            where += " AND created_by=?"
+            parameters.append(created_by)
+        with self.database.session() as connection:
+            row = connection.execute(
+                f"SELECT COUNT(*) FROM jobs WHERE {where}",  # noqa: S608
+                parameters,
+            ).fetchone()
+        return int(row[0]) if row else 0
 
     def list(self, limit: int = 100):
         with self.database.session() as connection:

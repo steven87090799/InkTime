@@ -77,6 +77,35 @@ def control_job(job_id: str, action: str):
     return {"status": "ok", "affected": result if isinstance(result, int) else None}
 
 
+@bp.get("/api/v1/jobs/<job_id>")
+@login_required
+def job_status(job_id: str):
+    job = _repository().get(job_id)
+    if job is None:
+        abort(404)
+    items = _repository().list_items(job_id, limit=1)
+    result = None
+    error_code = None
+    if items:
+        error_code = items[0]["error_code"]
+        if items[0]["result_json"]:
+            try:
+                result = json.loads(str(items[0]["result_json"]))
+            except json.JSONDecodeError:
+                result = None
+    response = {
+        "id": str(job["id"]),
+        "kind": str(job["kind"]),
+        "status": str(job["status"]),
+        "completed_items": int(job["completed_items"]),
+        "failed_items": int(job["failed_items"]),
+        "total_items": int(job["total_items"]),
+        "result": result,
+        "error_code": error_code,
+    }
+    return response
+
+
 @bp.post("/api/v1/jobs/estimate")
 @administrator_required
 def estimate_job():

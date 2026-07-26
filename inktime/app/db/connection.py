@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import fcntl
 import logging
 from pathlib import Path
+import random
 import re
 import sqlite3
 import threading
@@ -14,11 +15,41 @@ from typing import IO, Iterator
 LOGGER = logging.getLogger(__name__)
 
 
-_WRITE_STATEMENT = re.compile(
-    r"^\s*(?:BEGIN|COMMIT|ROLLBACK|INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP|VACUUM|REINDEX|ANALYZE|ATTACH|DETACH)\b",
-    re.IGNORECASE,
-)
+_LEADING_COMMENTS = re.compile(r"\A(?:\s+|--[^\n]*(?:\n|\Z)|/\*.*?\*/)*", re.DOTALL)
+_WRITE_KEYWORDS = {
+    "ALTER",
+    "ANALYZE",
+    "ATTACH",
+    "BEGIN",
+    "COMMIT",
+    "CREATE",
+    "DELETE",
+    "DETACH",
+    "DROP",
+    "INSERT",
+    "REINDEX",
+    "RELEASE",
+    "REPLACE",
+    "ROLLBACK",
+    "SAVEPOINT",
+    "UPDATE",
+    "VACUUM",
+}
+_READ_KEYWORDS = {"EXPLAIN", "SELECT", "VALUES"}
 _WITH_WRITE = re.compile(r"\b(?:INSERT|UPDATE|DELETE|REPLACE)\b", re.IGNORECASE)
+_READ_PRAGMA_ARGUMENTS = {
+    "foreign_key_list",
+    "index_info",
+    "index_list",
+    "index_xinfo",
+    "table_info",
+    "table_xinfo",
+}
+_ACTION_PRAGMAS = {"incremental_vacuum", "optimize", "shrink_memory", "wal_checkpoint"}
+_MASK_SQL = re.compile(
+    r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|--[^\n]*(?:\n|\Z)|/\*.*?\*/",
+    re.DOTALL,
+)
 
 
 class RuntimeLockError(RuntimeError):
@@ -52,9 +83,58 @@ class ManagedConnection(sqlite3.Connection):
 
     @staticmethod
     def _requires_writer(sql: str) -> bool:
-        if _WRITE_STATEMENT.search(sql):
-            return True
-        return sql.lstrip().upper().startswith("WITH") and bool(_WITH_WRITE.search(sql))
+        """Fail closed for unknown statements while keeping known reads lock-free.
+
+        Legacy callers use ``session()`` directly, so this boundary must handle
+        comments, CTE writes and multi-statement scripts without relying on each
+        repository remembering to opt in.
+        """
+
+        statements: list[str] = []
+        pending = ""
+        for character in sql:
+            pending += character
+            if character == ";" and sqlite3.complete_statement(pending):
+                statements.append(pending)
+                pending = ""
+        if pending.strip():
+            statements.append(pending)
+        for raw in statements or [sql]:
+            statement = _LEADING_COMMENTS.sub("", raw).lstrip()
+            if not statement:
+                continue
+            keyword_match = re.match(r"([A-Z]+)", statement, re.IGNORECASE)
+            if keyword_match is None:
+                return True
+            keyword = keyword_match.group(1).upper()
+            if keyword in _WRITE_KEYWORDS:
+                return True
+            if keyword == "WITH":
+                # A read-only CTE ends in SELECT/VALUES. Any DML token makes it
+                # a writer; malformed or unknown CTEs fail closed.
+                masked = _MASK_SQL.sub(" ", statement)
+                if _WITH_WRITE.search(masked):
+                    return True
+                if re.search(r"\b(?:SELECT|VALUES)\b", statement, re.IGNORECASE):
+                    continue
+                return True
+            if keyword == "PRAGMA":
+                pragma = re.match(
+                    r"PRAGMA\s+(?:(?:\w+)\.)?(\w+)\s*(.*)\Z",
+                    statement,
+                    re.IGNORECASE | re.DOTALL,
+                )
+                if pragma is None:
+                    return True
+                name, suffix = pragma.group(1).lower(), pragma.group(2).strip()
+                if "=" in suffix or name in _ACTION_PRAGMAS:
+                    return True
+                if suffix.startswith("(") and name not in _READ_PRAGMA_ARGUMENTS:
+                    return True
+                continue
+            if keyword not in _READ_KEYWORDS:
+                return True
+        return False
 
     def _acquire_writer(self) -> None:
         if self._writer_lock_file is not None:
@@ -65,6 +145,7 @@ class ManagedConnection(sqlite3.Connection):
         lock = self._writer_lock_path.open("a+b")
         started = time.monotonic()
         deadline = time.monotonic() + self._writer_timeout_seconds
+        attempt = 0
         while True:
             try:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -78,12 +159,27 @@ class ManagedConnection(sqlite3.Connection):
                     )
                 return
             except BlockingIOError as exc:
-                if time.monotonic() >= deadline:
+                now = time.monotonic()
+                if now >= deadline:
                     lock.close()
                     with self._writer_metrics_lock:
                         self._writer_metrics["busy_timeout_count"] += 1
                     raise sqlite3.OperationalError("database writer lock timeout") from exc
-                time.sleep(0.01)
+                maximum = min(0.250, 0.005 * (2**min(attempt, 8)), deadline - now)
+                wait_seconds = random.uniform(0.0, maximum)  # noqa: S311 - contention jitter
+                with self._writer_metrics_lock:
+                    self._writer_metrics["writer_lock_wait_count"] += 1
+                    self._writer_metrics["writer_lock_backoff_ms"] += wait_seconds * 1000
+                    bucket = (
+                        "le_10ms"
+                        if wait_seconds <= 0.010
+                        else "le_50ms"
+                        if wait_seconds <= 0.050
+                        else "le_250ms"
+                    )
+                    self._writer_metrics[f"writer_lock_wait_{bucket}"] += 1
+                time.sleep(wait_seconds)
+                attempt += 1
 
     def _release_writer(self) -> None:
         lock = self._writer_lock_file
@@ -155,8 +251,13 @@ class Database:
         self.runtime_lock_path = Path(f"{self.path}.runtime.lock")
         self._metrics: dict[str, float | int] = {
             "writer_lock_acquisitions": 0,
+            "writer_lock_wait_count": 0,
             "writer_lock_wait_ms": 0.0,
             "writer_lock_wait_max_ms": 0.0,
+            "writer_lock_backoff_ms": 0.0,
+            "writer_lock_wait_le_10ms": 0,
+            "writer_lock_wait_le_50ms": 0,
+            "writer_lock_wait_le_250ms": 0,
             "busy_timeout_count": 0,
             "long_transaction_count": 0,
             "long_transaction_max_ms": 0.0,
@@ -172,17 +273,20 @@ class Database:
             check_same_thread=False,
             factory=ManagedConnection,
         )
+        connection.row_factory = sqlite3.Row
+        # Bootstrap connection-local PRAGMAs before enabling the legacy writer
+        # detector. Runtime PRAGMA writes still pass through the guard, while a
+        # connection opened inside an existing transaction cannot self-deadlock.
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA synchronous = NORMAL")
         connection.configure_writer_lock(
             self.writer_lock_path,
             self.busy_timeout_ms / 1000,
             self._metrics,
             self._metrics_lock,
         )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA synchronous = NORMAL")
         return connection
 
     @contextmanager
@@ -194,7 +298,9 @@ class Database:
             connection.close()
 
     @contextmanager
-    def transaction(self, *, immediate: bool = True) -> Iterator[sqlite3.Connection]:
+    def transaction(
+        self, *, immediate: bool = True, operation: str = "repository_write"
+    ) -> Iterator[sqlite3.Connection]:
         """所有多步驟寫入共用的 rollback-safe 交易入口。"""
 
         with self.session() as connection:
@@ -216,7 +322,16 @@ class Database:
                         self._metrics["long_transaction_max_ms"] = max(
                             float(self._metrics["long_transaction_max_ms"]), duration_ms
                         )
-                    LOGGER.warning("SQLite long transaction duration_ms=%.1f", duration_ms)
+                    category = (
+                        operation
+                        if re.fullmatch(r"[a-z0-9_.-]{1,64}", operation)
+                        else "repository_write"
+                    )
+                    LOGGER.warning(
+                        "SQLite long transaction operation=%s duration_ms=%.1f",
+                        category,
+                        duration_ms,
+                    )
 
     def observability(self) -> dict[str, float | int]:
         """回傳不含 SQL、Secret 或照片路徑的 SQLite 執行指標。"""

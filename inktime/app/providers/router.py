@@ -97,11 +97,54 @@ class FailoverVisionProvider(VisionProvider):
     def analyze(self, **kwargs) -> ProviderResponse:
         return self._execute("analyze", **kwargs)
 
+    def analyze_isolated(self, boundary, **kwargs) -> ProviderResponse:
+        """Keep routing/rate-limit state in the parent; isolate only SDK HTTP."""
+
+        last_error: Exception | None = None
+        for channel in self.channels:
+            if not self._available(channel) or not channel.semaphore.acquire(blocking=False):
+                continue
+            try:
+                response = boundary.call(
+                    channel.provider.analyze,
+                    timeout_seconds=float(getattr(channel.provider, "timeout", 120)),
+                    kwargs=kwargs,
+                )
+            except Exception as exc:
+                last_error = exc
+                with self._lock:
+                    channel.failures += 1
+                    if channel.failures >= self.failure_threshold:
+                        channel.circuit_until = time.monotonic() + channel.cooldown_seconds
+                continue
+            finally:
+                channel.semaphore.release()
+            with self._lock:
+                channel.failures = 0
+                used_tokens = response.usage.input_tokens + response.usage.output_tokens
+                if used_tokens:
+                    channel.token_events.append((time.monotonic(), used_tokens))
+            self._local.channel = channel
+            return response
+        if last_error:
+            raise last_error
+        raise ProviderHTTPError("所有 Provider 暫時不可用或已達 Rate Limit", "VLM-005")
+
     def repair_json(self, **kwargs) -> ProviderResponse:
         channel = getattr(self._local, "channel", None)
         if channel is None:
             return self._execute("repair_json", **kwargs)
         return channel.provider.repair_json(**kwargs)
+
+    def repair_json_isolated(self, boundary, **kwargs) -> ProviderResponse:
+        channel = getattr(self._local, "channel", None)
+        if channel is None:
+            return self._execute("repair_json", **kwargs)
+        return boundary.call(
+            channel.provider.repair_json,
+            timeout_seconds=float(getattr(channel.provider, "timeout", 120)),
+            kwargs=kwargs,
+        )
 
     def submit_batch(self, requests, completion_window="24h") -> str:
         last_error: Exception | None = None

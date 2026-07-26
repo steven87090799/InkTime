@@ -72,6 +72,7 @@ class PhotoAnalysisService:
         budgets: BudgetService | None = None,
         settings: SettingsRepository | None = None,
         observability=None,
+        process_boundary=None,
     ) -> None:
         self.photos = photos
         self.usage = usage
@@ -79,6 +80,7 @@ class PhotoAnalysisService:
         self.budgets = budgets
         self.settings = settings or (budgets.settings if budgets else None)
         self.observability = observability
+        self.process_boundary = process_boundary
 
     def _activity(self, severity: str, event: str, message: str, **fields) -> None:
         if self.observability is not None:
@@ -601,7 +603,31 @@ class PhotoAnalysisService:
         max_tokens = int(self.budgets.settings.get("budget.max_tokens", 8000)) if self.budgets else None
         self._activity("DEBUG", "provider_request_started", "Caption Provider 請求開始", job_id=job_id, photo_id=photo_id, stage=stage, trace_id=prompt_version, provider=provider.name, model=model)
         try:
-            response = provider.analyze(image_path=image, model=model, detail=detail, stage=stage, max_tokens=max_tokens, caption_controls=caption_controls)
+            call = {
+                "image_path": image,
+                "model": model,
+                "detail": detail,
+                "stage": stage,
+                "max_tokens": max_tokens,
+                "caption_controls": caption_controls,
+            }
+            if self.process_boundary is not None and hasattr(provider, "analyze_isolated"):
+                response = provider.analyze_isolated(self.process_boundary, **call)
+            elif self.process_boundary is not None:
+                response = self.process_boundary.call(
+                    provider.analyze,
+                    timeout_seconds=float(getattr(provider, "timeout", 120)),
+                    kwargs=call,
+                )
+            else:
+                response = provider.analyze(
+                    image_path=image,
+                    model=model,
+                    detail=detail,
+                    stage=stage,
+                    max_tokens=max_tokens,
+                    caption_controls=caption_controls,
+                )
         except TimeoutError:
             self._activity("WARNING", "provider_timeout", "Caption Provider 請求逾時", job_id=job_id, photo_id=photo_id, stage=stage, error_code="AI-PROVIDER-TIMEOUT")
             raise
@@ -623,14 +649,24 @@ class PhotoAnalysisService:
             self._activity("DEBUG", "provider_json_retry", "Caption Provider JSON 修復重試", job_id=job_id, photo_id=photo_id, stage=stage, trace_id=prompt_version)
             repair_started_at = datetime.now(timezone.utc).isoformat()
             repair_perf = time.perf_counter()
-            repaired = provider.repair_json(
-                invalid_content=response.content,
-                validation_error=str(first_error),
-                model=model,
-                max_tokens=max_tokens,
-                stage=stage,
-                caption_controls=caption_controls,
-            )
+            repair_call = {
+                "invalid_content": response.content,
+                "validation_error": str(first_error),
+                "model": model,
+                "max_tokens": max_tokens,
+                "stage": stage,
+                "caption_controls": caption_controls,
+            }
+            if self.process_boundary is not None and hasattr(provider, "repair_json_isolated"):
+                repaired = provider.repair_json_isolated(self.process_boundary, **repair_call)
+            elif self.process_boundary is not None:
+                repaired = self.process_boundary.call(
+                    provider.repair_json,
+                    timeout_seconds=float(getattr(provider, "timeout", 120)),
+                    kwargs=repair_call,
+                )
+            else:
+                repaired = provider.repair_json(**repair_call)
             total_cost += self._record(
                 provider,
                 model,

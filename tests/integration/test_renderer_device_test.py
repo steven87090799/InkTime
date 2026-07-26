@@ -5,6 +5,7 @@ from io import BytesIO
 from PIL import Image
 
 from tests.conftest import create_admin, csrf, login
+from inktime.app.workers.runner import WorkerRunner
 
 
 def _photo_upload(color: str = "#5079a8"):
@@ -12,6 +13,13 @@ def _photo_upload(color: str = "#5079a8"):
     Image.new("RGB", (160, 240), color).save(output, "PNG")
     output.seek(0)
     return output, "person.png"
+
+
+def _large_photo_upload():
+    output = BytesIO()
+    Image.new("RGB", (3500, 3500), "#5079a8").save(output, "PNG")
+    output.seek(0)
+    return output, "large.png"
 
 
 def test_browser_canvas_cannot_be_published_as_test_release(client, app):
@@ -27,6 +35,79 @@ def test_browser_canvas_cannot_be_published_as_test_release(client, app):
     )
     assert response.status_code == 400
     assert "Browser Canvas 不可直接發布" in response.get_json()["message"]
+
+
+def test_viewer_cannot_create_test_release(client, app):
+    app.extensions["inktime_auth_repository"].create_user(
+        "viewer", "very-safe-passphrase", role="viewer"
+    )
+    login(client, username="viewer")
+    response = client.post(
+        "/api/v1/rendering/test-release",
+        data={"photo": _photo_upload()},
+        headers={"X-CSRF-Token": csrf(client)},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 403
+
+
+def test_preview_jobs_have_per_user_limit(client, app):
+    create_admin(app)
+    login(client)
+    headers = {"X-CSRF-Token": csrf(client)}
+    for _index in range(2):
+        response = client.post(
+            "/api/v1/rendering/compare",
+            data={
+                "photo": _photo_upload(),
+                "profile": "gdep073e01_6c",
+                "preset": "photo_balanced",
+                "fit": "cover",
+                "options": '{"dither":"nearest"}',
+                "palette": '{"mode":"default"}',
+            },
+            headers=headers,
+            content_type="multipart/form-data",
+        )
+        assert response.status_code == 202
+    limited = client.post(
+        "/api/v1/rendering/compare",
+        data={
+            "photo": _photo_upload(),
+            "profile": "gdep073e01_6c",
+            "preset": "photo_balanced",
+            "fit": "cover",
+            "options": '{"dither":"nearest"}',
+            "palette": '{"mode":"default"}',
+        },
+        headers=headers,
+        content_type="multipart/form-data",
+    )
+    assert limited.status_code == 429
+
+
+def test_oversized_simulator_preview_returns_background_job(client, app):
+    create_admin(app)
+    login(client)
+    response = client.post(
+        "/api/v1/rendering/simulate",
+        data={
+            "photo": _large_photo_upload(),
+            "profile": "safe_4c",
+            "dither": "nearest",
+            "fit": "contain",
+        },
+        headers={"X-CSRF-Token": csrf(client)},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 202
+    created = response.get_json()
+    WorkerRunner(app).run_once()
+    status = client.get(created["status_url"]).get_json()
+    assert status["status"] == "completed"
+    preview = client.get(status["result"]["preview"])
+    assert preview.status_code == 200
+    assert preview.mimetype == "image/png"
 
 
 def test_ab_preview_is_server_rendered_and_reports_palette_statistics(client, app):
@@ -50,12 +131,36 @@ def test_ab_preview_is_server_rendered_and_reports_palette_statistics(client, ap
         headers={"X-CSRF-Token": csrf(client)},
         content_type="multipart/form-data",
     )
-    assert response.status_code == 200
-    body = response.get_json()
+    assert response.status_code == 202
+    created = response.get_json()
+    WorkerRunner(app).run_once()
+    status = client.get(created["status_url"])
+    assert status.status_code == 200
+    assert status.get_json()["status"] == "completed"
+    body = status.get_json()["result"]
     assert body["publish_source"] == "server_original_upload_only"
     assert body["payload_bytes"] == 192_000
     assert len(body["palette"]) == 6
     assert sum(item["pixels"] for item in body["palette"]) == 480 * 800
+
+    repeated = client.post(
+        "/api/v1/rendering/compare",
+        data={
+            "photo": _photo_upload("#c59d78"),
+            "profile": "gdep073e01_6c",
+            "preset": "photo_balanced",
+            "fit": "cover",
+            "options": '{"dither":"nearest"}',
+            "palette": '{"mode":"default"}',
+        },
+        headers={"X-CSRF-Token": csrf(client)},
+        content_type="multipart/form-data",
+    )
+    assert repeated.status_code == 202
+    WorkerRunner(app).run_once()
+    assert app.extensions["inktime_render_workload_service"].observability()[
+        "compare_cache_hit"
+    ] == 1
 
 
 def test_test_release_is_one_time_and_does_not_overwrite_formal_schedule(client, app):
@@ -90,8 +195,13 @@ def test_test_release_is_one_time_and_does_not_overwrite_formal_schedule(client,
         headers={"X-CSRF-Token": csrf(client)},
         content_type="multipart/form-data",
     )
-    assert response.status_code == 201
-    test_release = response.get_json()
+    assert response.status_code == 202
+    created = response.get_json()
+    WorkerRunner(app).run_once()
+    status = client.get(created["status_url"])
+    assert status.status_code == 200
+    assert status.get_json()["status"] == "completed"
+    test_release = status.get_json()["result"]
     assert test_release["formal_schedule_overwritten"] is False
     assert pointer.read_text() == formal["release_id"]
     assert repository.get(device_id)["schedule"] == "07:30"

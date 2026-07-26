@@ -42,6 +42,8 @@ from inktime.app.services.diagnostics import DiagnosticsService
 from inktime.app.domain.photos import LocationResolver, ThumbnailCache
 from inktime.app.domain.rendering import AtomicReleasePublisher, FontManager
 from inktime.app.services.rendering import RenderService
+from inktime.app.services.render_cache import BoundedRenderCache
+from inktime.app.services.render_workloads import RenderWorkloadService
 from inktime.app.services.release_coordinator import ReleaseCoordinator
 from inktime.app.services.display_prepare import DisplayPreparationService
 from inktime.app.services.analysis import PhotoAnalysisService
@@ -52,6 +54,7 @@ from inktime.app.services.notifications import DeviceNotificationService
 from inktime.app.services.device_energy import DeviceEnergyService
 from inktime.app.services.weather import WeatherService
 from inktime.app.services.observability import ObservabilityService
+from inktime.app.workers.process_boundary import KillableProcessBoundary
 from inktime.app.core.logging import configure_logging, log_event
 from inktime.app.web.access import csrf_token, verify_csrf
 
@@ -104,6 +107,7 @@ def initialize_platform(
         SESSION_COOKIE_SECURE=os.environ.get("INKTIME_COOKIE_SECURE", "0") == "1",
         PERMANENT_SESSION_LIFETIME=timedelta(minutes=30),
         INKTIME_RELEASE_DIR=release_dir.resolve(),
+        INKTIME_RENDER_WORK_DIR=(data_dir / "cache" / "render-workloads").resolve(),
         INKTIME_PHOTO_DIR=(photo_dir or data_dir.parent / "simulation_photos").resolve(),
         INKTIME_VERSION=__version__,
         TESTING=testing,
@@ -151,6 +155,7 @@ def initialize_platform(
     app.extensions["inktime_observability_service"] = ObservabilityService(
         database, settings_repository, app.extensions["inktime_diagnostics_service"]
     )
+    app.extensions["inktime_process_boundary"] = KillableProcessBoundary(max_processes=2)
     app.extensions["inktime_analysis_service"] = PhotoAnalysisService(
         app.extensions["inktime_photo_repository"],
         app.extensions["inktime_usage_repository"],
@@ -158,6 +163,7 @@ def initialize_platform(
         budget_service,
         settings_repository,
         app.extensions["inktime_observability_service"],
+        app.extensions["inktime_process_boundary"],
     )
     app.extensions["inktime_scoring_lab_service"] = ScoringLabService(
         app.extensions["inktime_provider_service"],
@@ -173,6 +179,16 @@ def initialize_platform(
     app.extensions["inktime_font_manager"] = font_manager
     app.extensions["inktime_location_resolver"] = location_resolver
     app.extensions["inktime_release_publisher"] = release_publisher
+    app.extensions["inktime_render_cache"] = BoundedRenderCache(
+        data_dir / "cache" / "renderer"
+    )
+    app.extensions["inktime_render_workload_service"] = RenderWorkloadService(
+        data_dir / "cache" / "render-workloads",
+        release_publisher,
+        app.extensions["inktime_device_repository"],
+        release_dir,
+        settings_repository,
+    )
     release_coordinator = ReleaseCoordinator(database, release_publisher)
     app.extensions["inktime_release_coordinator"] = release_coordinator
     weather_service = WeatherService(settings_repository)
