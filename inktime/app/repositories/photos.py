@@ -536,6 +536,10 @@ class PhotoRepository:
                         f"""
                         UPDATE photos SET
                             exif_json=NULL,captured_at=NULL,gps_lat=NULL,gps_lon=NULL,
+                            exif_orientation_original=NULL,visual_orientation_rotation_cw=NULL,
+                            visual_orientation_confidence=NULL,visual_orientation_ambiguous=1,
+                            visual_orientation_evidence_json=NULL,manual_orientation_rotation_cw=NULL,
+                            manual_orientation_updated_at=NULL,manual_orientation_updated_by=NULL,
                             metadata_status='pending',perceptual_hash=NULL,difference_hash=NULL,
                             brightness=NULL,contrast=NULL,blur_score=NULL,
                             overexposed_ratio=NULL,underexposed_ratio=NULL,
@@ -803,6 +807,9 @@ class PhotoRepository:
                         _local_candidate_score(features),
                         LOCAL_QUALITY_RULE_VERSION,
                         features.orientation,
+                        int(plan["content_changed"]),
+                        features.orientation,
+                        features.orientation,
                         features.camera_make,
                         features.camera_model,
                         features.lens_model,
@@ -821,6 +828,7 @@ class PhotoRepository:
                 connection.executemany(
                     """
                     UPDATE photos SET local_candidate_score=?,feature_version=?,orientation=?,
+                        exif_orientation_original=CASE WHEN ? THEN ? ELSE COALESCE(exif_orientation_original,?) END,
                         camera_make=?,camera_model=?,lens_model=?,eligible=?,exclusion_status=?,
                         reject_reason=?,reject_rule=?,reject_rule_version=?,reject_details_json=?,
                         rejected_at=?,manual_override=? WHERE id=?
@@ -1036,7 +1044,8 @@ class PhotoRepository:
         with self.database.session() as connection:
             row = connection.execute(
                 """
-                SELECT a.* FROM photos target
+                SELECT a.*,source.visual_orientation_rotation_cw,source.visual_orientation_confidence,
+                       source.visual_orientation_ambiguous,source.visual_orientation_evidence_json FROM photos target
                 JOIN photos source ON source.sha256=target.sha256 AND source.id<>target.id
                 JOIN photo_analysis a ON a.photo_id=source.id
                 WHERE target.id=? ORDER BY a.created_at DESC LIMIT 1
@@ -1060,6 +1069,12 @@ class PhotoRepository:
             "sensitive": bool(row["sensitive"]),
             "reason": row["reason"],
             "ranking_score": row["ranking_score"],
+            "visual_orientation": {
+                "rotation_cw": row["visual_orientation_rotation_cw"],
+                "confidence": row["visual_orientation_confidence"] if row["visual_orientation_confidence"] is not None else 0.0,
+                "ambiguous": bool(row["visual_orientation_ambiguous"]),
+                "evidence": json.loads(row["visual_orientation_evidence_json"] or '["insufficient_visual_cues"]'),
+            },
         }
         self.save_analysis(
             photo_id,
@@ -1769,15 +1784,19 @@ class PhotoRepository:
                 connection.execute(
                     "UPDATE photos SET status='analyzed',updated_at=? WHERE id=?", (now, photo_id)
                 )
-                visual = result.get("visual_orientation") or {}
-                connection.execute("UPDATE photos SET exif_orientation_original=COALESCE(exif_orientation_original,orientation),visual_orientation_rotation_cw=?,visual_orientation_confidence=?,visual_orientation_ambiguous=?,visual_orientation_evidence_json=?,updated_at=? WHERE id=?", (visual.get("rotation_cw"), visual.get("confidence"), int(bool(visual.get("ambiguous", True))), json.dumps(visual.get("evidence", []), ensure_ascii=False), now, photo_id))
+                # Local quality/fallback rows have no visual model judgement and must
+                # never erase the latest provider result.
+                is_provider_result = provider not in {"local", "local_fallback", "local-prefilter", "local-quality-v3"}
+                if is_provider_result:
+                    visual = result.get("visual_orientation") or {}
+                    connection.execute("UPDATE photos SET exif_orientation_original=COALESCE(exif_orientation_original,orientation),visual_orientation_rotation_cw=?,visual_orientation_confidence=?,visual_orientation_ambiguous=?,visual_orientation_evidence_json=?,updated_at=? WHERE id=?", (visual.get("rotation_cw"), visual.get("confidence"), int(bool(visual.get("ambiguous", True))), json.dumps(visual.get("evidence", []), ensure_ascii=False), now, photo_id))
                 connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
 
     def set_manual_orientation(self, photo_id: str, rotation_cw: int | None, changed_by: str) -> dict:
-        if rotation_cw not in {0, 90, 180, 270, None}:
+        if isinstance(rotation_cw, bool) or rotation_cw not in {0, 90, 180, 270, None}:
             raise ValueError("旋轉角度不合法")
         now = datetime.now(timezone.utc).isoformat()
         with self.database.transaction() as connection:

@@ -69,7 +69,7 @@ ANALYSIS_JSON_SCHEMA = {
         "additionalProperties": False,
         "required": sorted(REQUIRED_FIELDS),
         "properties": {
-            "schema_version": {"type": "integer", "const": 1},
+            "schema_version": {"type": "integer", "const": 2},
             "caption": {"type": "string", "minLength": 1, "maxLength": 1000},
             "types": {
                 "type": "array",
@@ -207,7 +207,7 @@ def validate_analysis_result(raw: str | dict) -> dict:
         value = dict(raw)
     # v3 cache entries predate this additive field.  Keep them readable without
     # treating the missing value as a confident orientation recommendation.
-    if "visual_orientation" not in value:
+    if value.get("schema_version") == 1 and "visual_orientation" not in value:
         value["visual_orientation"] = {"rotation_cw": None, "confidence": 0.0, "ambiguous": True, "evidence": ["insufficient_visual_cues"]}
     allowed = BASIC_REQUIRED_FIELDS | FULL_OPTIONAL_FIELDS
     if not BASIC_REQUIRED_FIELDS <= set(value) or not set(value) <= allowed:
@@ -216,6 +216,8 @@ def validate_analysis_result(raw: str | dict) -> dict:
         raise AnalysisValidationError(f"欄位不符合 Schema；缺少={missing}，多餘={extra}")
     if value["schema_version"] not in {1, 2}:
         raise AnalysisValidationError("不支援的 schema_version")
+    if value["schema_version"] == 2 and "visual_orientation" not in value:
+        raise AnalysisValidationError("schema v2 必須包含 visual_orientation")
     if not isinstance(value["caption"], str) or not value["caption"].strip():
         raise AnalysisValidationError("caption 不可空白")
     if not isinstance(value["side_caption"], str) or len(value["side_caption"]) > 120:

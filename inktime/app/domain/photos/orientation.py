@@ -8,6 +8,15 @@ ROTATIONS = {0, 90, 180, 270}
 EVIDENCE = {"faces_upright", "text_upright", "horizon_level", "gravity_objects", "architecture_vertical", "insufficient_visual_cues"}
 
 
+def original_exif_orientation(photo: Any) -> int | None:
+    """Read pre-migration rows and new rows through one safe fallback."""
+    keys = photo.keys() if hasattr(photo, "keys") else photo
+    value = photo["exif_orientation_original"] if "exif_orientation_original" in keys else None
+    if value is None and "orientation" in keys:
+        value = photo["orientation"]
+    return int(value) if value is not None else None
+
+
 @dataclass(frozen=True)
 class EffectiveOrientation:
     rotation_degrees: int

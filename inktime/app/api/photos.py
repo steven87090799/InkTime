@@ -15,7 +15,7 @@ from inktime.app.domain.analysis.scoring import (
     score_band,
 )
 from inktime.app.web.access import administrator_required, login_required
-from inktime.app.domain.photos.orientation import resolve_effective_orientation
+from inktime.app.domain.photos.orientation import original_exif_orientation, resolve_effective_orientation
 
 
 bp = Blueprint("photos", __name__)
@@ -299,6 +299,13 @@ def photo_detail(photo_id: str):
             analysis["score_band"] = score_band(percentile, calibrated)
         analyses.append(analysis)
     prefilter = current_app.extensions["inktime_analysis_service"].prefilter_snapshot(photo)
+    orientation = resolve_effective_orientation(
+        exif_orientation=original_exif_orientation(photo),
+        manual_rotation_cw=photo["manual_orientation_rotation_cw"] if "manual_orientation_rotation_cw" in photo.keys() else None,
+        ai_rotation_cw=photo["visual_orientation_rotation_cw"] if "visual_orientation_rotation_cw" in photo.keys() else None,
+        ai_confidence=photo["visual_orientation_confidence"] if "visual_orientation_confidence" in photo.keys() else None,
+        ai_ambiguous=bool(photo["visual_orientation_ambiguous"]) if "visual_orientation_ambiguous" in photo.keys() else True,
+    ).as_dict()
     return render_template(
         "photo_detail.html",
         photo=photo,
@@ -309,6 +316,7 @@ def photo_detail(photo_id: str):
         allowed_types=sorted(ALLOWED_TYPES),
         location_name=location_name,
         prefilter=prefilter,
+        orientation=orientation,
     )
 
 
@@ -344,7 +352,7 @@ def photo_orientation_status(photo_id: str):
     if photo is None:
         abort(404)
     return resolve_effective_orientation(
-        exif_orientation=photo["exif_orientation_original"] if "exif_orientation_original" in photo.keys() else photo["orientation"],
+        exif_orientation=original_exif_orientation(photo),
         manual_rotation_cw=photo["manual_orientation_rotation_cw"] if "manual_orientation_rotation_cw" in photo.keys() else None,
         ai_rotation_cw=photo["visual_orientation_rotation_cw"] if "visual_orientation_rotation_cw" in photo.keys() else None,
         ai_confidence=photo["visual_orientation_confidence"] if "visual_orientation_confidence" in photo.keys() else None,
@@ -355,8 +363,14 @@ def photo_orientation_status(photo_id: str):
 @bp.put("/api/v1/photos/<photo_id>/orientation")
 @administrator_required
 def update_photo_orientation(photo_id: str):
-    payload = request.get_json(silent=True) or {}
-    rotation = payload.get("rotation_cw")
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        abort(400, description="IMG-004 Request Body 必須是 JSON Object")
+    if "rotation_cw" not in payload:
+        abort(400, description="IMG-004 缺少 rotation_cw")
+    rotation = payload["rotation_cw"]
+    if isinstance(rotation, bool) or rotation not in {0, 90, 180, 270, None}:
+        abort(400, description="IMG-004 旋轉角度不合法")
     try:
         _repository().set_manual_orientation(photo_id, rotation, str(g.user["id"]))
     except KeyError:

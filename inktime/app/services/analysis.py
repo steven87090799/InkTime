@@ -124,7 +124,7 @@ class PhotoAnalysisService:
         quality = max(0.0, min(100.0, float(photo["blur_score"] or 0) ** 0.5 * 4))
         screenshot = float(photo["screenshot_likelihood"] or 0) >= 0.65
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "caption": "已完成本地影像特徵分析，未將照片傳送至模型。",
             "types": ["截圖" if screenshot else "其他"],
             "memory_score": 10.0 if screenshot else 50.0,
@@ -322,7 +322,7 @@ class PhotoAnalysisService:
             memory_score = 15.0
             types = ["其他"]
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "caption": f"本機預篩選已排除{label}，未將圖片傳送至模型。",
             "types": types,
             "memory_score": memory_score,
@@ -514,7 +514,7 @@ class PhotoAnalysisService:
             provider=provider.name,
             model_name=model,
             prompt_version=prompt_version,
-            schema_version=1,
+            schema_version=2,
             schema_kind=schema_kind,
         )
         if cached is not None:
@@ -526,7 +526,7 @@ class PhotoAnalysisService:
                 pass
         cache_key = hashlib.sha256(
             json.dumps(
-                [content_sha256, provider.name, model, prompt_version, 1, schema_kind],
+                [content_sha256, provider.name, model, prompt_version, 2, schema_kind],
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
@@ -542,7 +542,7 @@ class PhotoAnalysisService:
                 provider=provider.name,
                 model_name=model,
                 prompt_version=prompt_version,
-                schema_version=1,
+                schema_version=2,
                 schema_kind=schema_kind,
             )
             if cached is not None:

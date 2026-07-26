@@ -145,6 +145,9 @@ class AtomicReleasePublisher:
             }
             if metadata:
                 manifest["render_options"] = metadata
+                # Additive metadata: device payload readers continue to use files.
+                if "photo_orientations" in metadata:
+                    manifest["photo_orientations"] = metadata["photo_orientations"]
             manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
             (temporary / "manifest.json").write_bytes(manifest_bytes)
             for path in temporary.iterdir():
