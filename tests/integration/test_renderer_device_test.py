@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from io import BytesIO
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import shutil
+import time
 
 from PIL import Image
 import pytest
@@ -27,6 +29,10 @@ def _large_photo_upload():
     Image.new("RGB", (3500, 3500), "#5079a8").save(output, "PNG")
     output.seek(0)
     return output, "large.png"
+
+
+def _hang_library_preview_child():
+    time.sleep(5)
 
 
 def _library_photo(app, root: Path, photo_id: str = "preview-photo") -> str:
@@ -69,7 +75,7 @@ def _library_photo(app, root: Path, photo_id: str = "preview-photo") -> str:
     return photo_id
 
 
-def _claimed_test_release(client, app, *, save_preset: bool = False):
+def _queued_test_release(client, app, *, save_preset: bool = False):
     repository = app.extensions["inktime_device_repository"]
     device_id, _token = repository.create(
         "Test Release 隔離", panel_profile="gdep073e01_6c"
@@ -95,6 +101,13 @@ def _claimed_test_release(client, app, *, save_preset: bool = False):
     )
     assert response.status_code == 202
     job_id = response.get_json()["job_id"]
+    return device_id, job_id
+
+
+def _claimed_test_release(client, app, *, save_preset: bool = False):
+    device_id, job_id = _queued_test_release(
+        client, app, save_preset=save_preset
+    )
     jobs = app.extensions["inktime_job_repository"]
     item = dict(jobs.claim(job_id, "test-worker", 1)[0])
     settings = json.loads(str(jobs.get(job_id)["settings_json"]))
@@ -236,19 +249,122 @@ def test_library_preview_cache_miss_never_renders_in_request_thread(
     login(client)
     photo_id = _library_photo(app, tmp_path / "preview-library")
     service = app.extensions["inktime_render_service"]
-    original = service.render_photo
-    calls = []
-
-    def counted(*args, **kwargs):
-        calls.append(str(args[0]))
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(service, "render_photo", counted)
+    monkeypatch.setattr(
+        service,
+        "render_photo",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("parent process must not render a library preview")
+        ),
+    )
     response = client.get(f"/api/v1/rendering/preview/{photo_id}")
     assert response.status_code == 202
-    assert calls == []
+    job_id = response.get_json()["job_id"]
     WorkerRunner(app).run_once()
-    assert calls == [photo_id]
+    item = app.extensions["inktime_job_repository"].list_items(job_id)[0]
+    result = json.loads(str(item["result_json"]))
+    assert str(item["status"]) == "completed"
+    assert result["stage"] == "preview_completed"
+    assert result["cache_hit"] is False
+    assert result["preview_url"].endswith("/preview.png")
+    assert list(
+        app.extensions["inktime_render_workload_service"].prepared_root.iterdir()
+    ) == []
+
+
+def test_library_preview_timeout_retries_without_committing_artifacts(
+    client, app, tmp_path, monkeypatch
+):
+    create_admin(app)
+    login(client)
+    photo_id = _library_photo(app, tmp_path / "preview-timeout", "timeout-photo")
+    response = client.get(f"/api/v1/rendering/preview/{photo_id}")
+    assert response.status_code == 202
+    job_id = response.get_json()["job_id"]
+    jobs = app.extensions["inktime_job_repository"]
+    with app.extensions["inktime_database"].session() as connection:
+        settings = json.loads(
+            str(connection.execute(
+                "SELECT settings_json FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()["settings_json"])
+        )
+        settings["max_retries"] = 1
+        connection.execute(
+            "UPDATE jobs SET settings_json=? WHERE id=?",
+            (json.dumps(settings, ensure_ascii=False), job_id),
+        )
+    workload = app.extensions["inktime_render_workload_service"]
+    render_cache = app.extensions["inktime_render_cache"]
+    process_boundary = workload.process_boundary
+    real_call = process_boundary.call
+
+    def timeout_in_spawn_child(_function, **options):
+        return real_call(
+            _hang_library_preview_child,
+            timeout_seconds=0.1,
+            kwargs={},
+            cancel_requested=options.get("cancel_requested"),
+            process_name="inktime-library-preview-timeout-child",
+        )
+
+    monkeypatch.setattr(
+        process_boundary,
+        "call",
+        timeout_in_spawn_child,
+    )
+
+    WorkerRunner(app).run_once()
+
+    job = jobs.get(job_id)
+    item = jobs.list_items(job_id)[0]
+    assert str(job["status"]) == "completed_with_errors"
+    assert str(item["status"]) == "failed"
+    assert str(item["error_code"]) == ProcessCallTimeout.code
+    assert list(render_cache.root.glob("*.png")) == []
+    assert list(workload.result_root.iterdir()) == []
+    assert list(workload.prepared_root.iterdir()) == []
+    assert process_boundary.observability()["active"] == 0
+    assert process_boundary.observability()["timeout"] == 1
+    assert process_boundary.observability()["terminated"] == 1
+    assert not [
+        child
+        for child in multiprocessing.active_children()
+        if child.name == "inktime-library-preview-timeout-child"
+    ]
+
+
+def test_library_preview_lease_loss_discards_prepared_cache_and_result(
+    client, app, tmp_path, monkeypatch
+):
+    create_admin(app)
+    login(client)
+    photo_id = _library_photo(app, tmp_path / "preview-lease", "lease-photo")
+    response = client.get(f"/api/v1/rendering/preview/{photo_id}")
+    assert response.status_code == 202
+    job_id = response.get_json()["job_id"]
+    jobs = app.extensions["inktime_job_repository"]
+    workload = app.extensions["inktime_render_workload_service"]
+    render_cache = app.extensions["inktime_render_cache"]
+
+    def finish_after_lease_loss(_function, *, kwargs, **_options):
+        prepared = Path(kwargs["prepared_path"])
+        Image.new("RGB", (480, 800), "white").save(prepared / "preview.png")
+        with app.extensions["inktime_database"].session() as connection:
+            connection.execute(
+                "UPDATE job_items SET lease_until='2000-01-01T00:00:00+00:00' "
+                "WHERE job_id=?",
+                (job_id,),
+            )
+        return {"stage": "preview_completed"}
+
+    monkeypatch.setattr(workload.process_boundary, "call", finish_after_lease_loss)
+    WorkerRunner(app).run_once()
+
+    item = jobs.list_items(job_id)[0]
+    assert str(item["status"]) == "pending"
+    assert str(item["error_code"]) == ProcessCallError.code
+    assert list(render_cache.root.glob("*.png")) == []
+    assert list(workload.result_root.iterdir()) == []
+    assert list(workload.prepared_root.iterdir()) == []
 
 
 def test_library_preview_cache_hit_returns_png_without_render(
@@ -708,3 +824,75 @@ def test_test_release_parent_commit_is_idempotent_for_same_item(client, app):
     )
     assert list(presets) == [first["saved_preset"]["id"]]
     assert list(workload.prepared_root.iterdir()) == []
+
+
+def test_preset_write_failure_does_not_fail_assigned_test_release(
+    client, app, monkeypatch
+):
+    create_admin(app)
+    login(client)
+    device_id, job_id = _queued_test_release(client, app, save_preset=True)
+    workload = app.extensions["inktime_render_workload_service"]
+    monkeypatch.setattr(
+        workload.settings,
+        "update",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("private settings failure")
+        ),
+    )
+
+    WorkerRunner(app).run_once()
+
+    job = app.extensions["inktime_job_repository"].get(job_id)
+    item = app.extensions["inktime_job_repository"].list_items(job_id)[0]
+    result = json.loads(str(item["result_json"]))
+    assert str(job["status"]) == "completed"
+    assert result["preset_saved"] is False
+    assert result["preset_error"] == "RENDER-PRESET-WRITE"
+    assert len(app.extensions["inktime_release_publisher"].list()) == 1
+    assert DeviceTestReleaseStore(app.config["INKTIME_RELEASE_DIR"]).active(
+        device_id, "gdep073e01_6c"
+    ) is not None
+    with app.extensions["inktime_database"].session() as connection:
+        warnings = connection.execute(
+            "SELECT message,details_json FROM job_events "
+            "WHERE job_id=? AND event='preset_warning'",
+            (job_id,),
+        ).fetchall()
+    assert len(warnings) == 1
+    assert "private settings failure" not in str(warnings[0]["details_json"])
+
+
+def test_oversized_preset_does_not_block_test_release(client, app, monkeypatch):
+    create_admin(app)
+    login(client)
+    device_id, job_id = _queued_test_release(client, app, save_preset=True)
+    workload = app.extensions["inktime_render_workload_service"]
+    original_get = workload.settings.get
+
+    def oversized(key, default=None):
+        if key == "render.custom_photo_presets":
+            return json.dumps({"padding": {"value": "x" * 50_000}})
+        return original_get(key, default)
+
+    monkeypatch.setattr(workload.settings, "get", oversized)
+    updates = []
+    monkeypatch.setattr(
+        workload.settings,
+        "update",
+        lambda *_args, **_kwargs: updates.append((_args, _kwargs)),
+    )
+
+    WorkerRunner(app).run_once()
+
+    job = app.extensions["inktime_job_repository"].get(job_id)
+    item = app.extensions["inktime_job_repository"].list_items(job_id)[0]
+    result = json.loads(str(item["result_json"]))
+    assert str(job["status"]) == "completed"
+    assert result["preset_saved"] is False
+    assert result["preset_error"] == "RENDER-PRESET-SIZE"
+    assert updates == []
+    assert len(app.extensions["inktime_release_publisher"].list()) == 1
+    assert DeviceTestReleaseStore(app.config["INKTIME_RELEASE_DIR"]).active(
+        device_id, "gdep073e01_6c"
+    ) is not None

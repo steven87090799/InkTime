@@ -11,6 +11,7 @@ import threading
 import time
 
 from PIL import Image
+import pytest
 import requests
 
 from inktime.app.db.connection import ManagedConnection
@@ -32,6 +33,65 @@ def _hang(_item):
 def _hang_call(*, seconds: float):
     time.sleep(seconds)
     return "late"
+
+
+def _return_call(*, value: str):
+    return value
+
+
+class _FaultyReceiver:
+    def __init__(self, receiver, failure: str):
+        self.receiver = receiver
+        self.failure = failure
+
+    def poll(self, *_args, **_kwargs):
+        if self.failure == "poll":
+            raise RuntimeError("simulated poll failure")
+        return True
+
+    def recv(self):
+        if self.failure == "recv":
+            raise RuntimeError("simulated recv failure")
+        return self.receiver.recv()
+
+    def close(self):
+        self.receiver.close()
+        raise RuntimeError("simulated close failure")
+
+
+class _FaultContext:
+    def __init__(self, failure: str):
+        self.context = multiprocessing.get_context("spawn")
+        self.failure = failure
+
+    def Pipe(self, *, duplex=False):  # noqa: N802 - multiprocessing API
+        receiver, sender = self.context.Pipe(duplex=duplex)
+        return _FaultyReceiver(receiver, self.failure), sender
+
+    def Process(self, **kwargs):  # noqa: N802 - multiprocessing API
+        return self.context.Process(**kwargs)
+
+    def get_start_method(self):
+        return self.context.get_start_method()
+
+
+class _StartFailureProcess:
+    def start(self):
+        raise RuntimeError("simulated start failure")
+
+
+class _StartFailureContext:
+    def __init__(self):
+        self.context = multiprocessing.get_context("spawn")
+
+    def Pipe(self, *, duplex=False):  # noqa: N802 - multiprocessing API
+        return self.context.Pipe(duplex=duplex)
+
+    def Process(self, **_kwargs):  # noqa: N802 - multiprocessing API
+        return _StartFailureProcess()
+
+    def get_start_method(self):
+        return self.context.get_start_method()
 
 
 class _ProviderHandler(BaseHTTPRequestHandler):
@@ -119,6 +179,79 @@ def test_provider_call_process_boundary_has_hard_cap_and_shutdown_cleanup():
     }
     boundary.shutdown()
     assert not [child for child in multiprocessing.active_children() if child.name == "inktime-provider-child"]
+
+
+def test_parent_cancel_callback_exception_still_reaps_child_and_releases_slot():
+    boundary = KillableProcessBoundary(max_processes=1, terminate_grace_seconds=0.1)
+
+    def broken_cancel():
+        raise RuntimeError("simulated cancel callback failure")
+
+    with pytest.raises(RuntimeError, match="cancel callback"):
+        boundary.call(
+            _hang_call,
+            timeout_seconds=5,
+            kwargs={"seconds": 5},
+            cancel_requested=broken_cancel,
+            process_name="inktime-cancel-fault-child",
+        )
+    assert boundary.observability()["active"] == 0
+    assert boundary.call(
+        _return_call, timeout_seconds=1, kwargs={"value": "reused"}
+    ) == "reused"
+    boundary.shutdown()
+    boundary.shutdown()
+    assert not [
+        child
+        for child in multiprocessing.active_children()
+        if child.name == "inktime-cancel-fault-child"
+    ]
+
+
+def test_child_start_failure_keeps_metrics_zero_and_releases_slot():
+    boundary = KillableProcessBoundary(max_processes=1, terminate_grace_seconds=0.1)
+    boundary._context = _StartFailureContext()
+    with pytest.raises(RuntimeError, match="start failure"):
+        boundary.call(
+            _return_call,
+            timeout_seconds=1,
+            kwargs={"value": "never-started"},
+        )
+    assert boundary.observability() == {
+        "active": 0,
+        "active_max": 0,
+        "timeout": 0,
+        "terminated": 0,
+        "cooperative": 0,
+    }
+    boundary._context = multiprocessing.get_context("spawn")
+    assert boundary.call(
+        _return_call, timeout_seconds=1, kwargs={"value": "reused"}
+    ) == "reused"
+
+
+@pytest.mark.parametrize("failure", ["poll", "recv"])
+def test_parent_pipe_exception_still_reaps_child(failure):
+    boundary = KillableProcessBoundary(max_processes=1, terminate_grace_seconds=0.1)
+    boundary._context = _FaultContext(failure)
+    with pytest.raises(RuntimeError, match=failure):
+        boundary.call(
+            _hang_call,
+            timeout_seconds=5,
+            kwargs={"seconds": 5},
+            process_name=f"inktime-{failure}-fault-child",
+        )
+    assert boundary.observability()["active"] == 0
+    boundary._context = multiprocessing.get_context("spawn")
+    assert boundary.call(
+        _return_call, timeout_seconds=1, kwargs={"value": "reused"}
+    ) == "reused"
+    boundary.shutdown()
+    assert not [
+        child
+        for child in multiprocessing.active_children()
+        if child.name == f"inktime-{failure}-fault-child"
+    ]
 
 
 def test_four_parent_threads_use_spawned_provider_children_without_inheriting_session(

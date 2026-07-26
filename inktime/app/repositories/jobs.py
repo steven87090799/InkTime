@@ -180,7 +180,7 @@ class JobRepository:
                     (
                         job_id,
                         "created",
-                        "已建立 render_preview 維護工作",
+                        f"已建立 {kind} 維護工作",
                         "{}",
                         now,
                     ),
@@ -189,7 +189,6 @@ class JobRepository:
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
-        self.add_event(job_id, "created", f"已建立 {kind} 維護工作")
         return job_id
 
     def create_maintenance_with_capacity(
@@ -250,6 +249,16 @@ class JobRepository:
                 connection.execute(
                     "INSERT INTO job_items(id,job_id,photo_id,available_at) VALUES (?,?,NULL,?)",
                     (item_id, job_id, now),
+                )
+                connection.execute(
+                    "INSERT INTO job_events(job_id,event,message,details_json,created_at) VALUES (?,?,?,?,?)",
+                    (
+                        job_id,
+                        "created",
+                        f"已建立 {kind} 維護工作",
+                        "{}",
+                        now,
+                    ),
                 )
                 connection.execute("COMMIT")
             except Exception:

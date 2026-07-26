@@ -54,6 +54,7 @@ class KillableProcessBoundary:
         self.terminate_grace_seconds = max(0.05, float(terminate_grace_seconds))
         self._slots = threading.BoundedSemaphore(self.max_processes)
         self._lock = threading.Lock()
+        self._reap_lock = threading.Lock()
         self._active: dict[str, tuple[Any, Any]] = {}
         self._metrics = {
             "active": 0,
@@ -72,17 +73,29 @@ class KillableProcessBoundary:
     def supported(self) -> bool:
         return self._context is not None
 
+    @staticmethod
+    def _safe_close(resource) -> None:
+        if resource is None:
+            return
+        try:
+            resource.close()
+        except Exception:  # noqa: S110 -- cleanup must not mask the primary failure
+            pass
+
     def _terminate(self, process) -> None:
-        if process.is_alive():
-            process.terminate()
-            with self._lock:
-                self._metrics["terminated"] += 1
-        process.join(self.terminate_grace_seconds)
-        if process.is_alive():
-            process.kill()
+        """Idempotently reap a started child, even during concurrent shutdown."""
+
+        with self._reap_lock:
+            if process.is_alive():
+                process.terminate()
+                with self._lock:
+                    self._metrics["terminated"] += 1
             process.join(self.terminate_grace_seconds)
-        else:
-            process.join(0)
+            if process.is_alive():
+                process.kill()
+                process.join(self.terminate_grace_seconds)
+            else:
+                process.join(0)
 
     def _run(
         self,
@@ -99,21 +112,29 @@ class KillableProcessBoundary:
         if not self._slots.acquire(timeout=timeout):
             raise ProcessCallTimeout("provider process capacity timeout")
         token = uuid4().hex
-        receiver, sender = self._context.Pipe(duplex=False)
-        process = self._context.Process(
-            target=target,
-            args=(*args, sender),
-            name=process_name,
-        )
+        receiver = None
+        sender = None
+        process = None
+        started = False
+        registered = False
         try:
+            receiver, sender = self._context.Pipe(duplex=False)
+            process = self._context.Process(
+                target=target,
+                args=(*args, sender),
+                name=process_name,
+            )
             process.start()
-            sender.close()
+            started = True
+            self._safe_close(sender)
+            sender = None
             with self._lock:
                 self._active[token] = (process, receiver)
                 self._metrics["active"] += 1
                 self._metrics["active_max"] = max(
                     self._metrics["active_max"], self._metrics["active"]
                 )
+                registered = True
             deadline = time.monotonic() + timeout
             while not receiver.poll(min(0.1, max(0.0, deadline - time.monotonic()))):
                 if cancel_requested is not None and cancel_requested():
@@ -137,11 +158,19 @@ class KillableProcessBoundary:
                 raise ProcessCallError(str(value))
             return value
         finally:
-            sender.close()
-            receiver.close()
-            with self._lock:
-                self._active.pop(token, None)
-                self._metrics["active"] = max(0, self._metrics["active"] - 1)
+            # Reap before closing IPC, removing observability state, or releasing
+            # capacity. Parent-side poll/recv/cancel exceptions must not orphan a
+            # still-running child.
+            if started and process is not None:
+                self._terminate(process)
+            self._safe_close(sender)
+            self._safe_close(receiver)
+            if registered:
+                with self._lock:
+                    self._active.pop(token, None)
+                    self._metrics["active"] = max(
+                        0, self._metrics["active"] - 1
+                    )
             self._slots.release()
 
     def call(
@@ -197,7 +226,7 @@ class KillableProcessBoundary:
             active = list(self._active.values())
         for process, receiver in active:
             self._terminate(process)
-            receiver.close()
+            self._safe_close(receiver)
 
     def record_cooperative(self) -> None:
         with self._lock:

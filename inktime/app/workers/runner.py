@@ -9,14 +9,10 @@ import threading
 import time
 from pathlib import Path
 
-from PIL import Image
-
 from inktime.app.core.logging import configure_logging, log_event
 from inktime.app.workers.job_worker import BoundedJobWorker
 from inktime.app.workers.scanner import PhotoScanner
 from inktime.app.domain.photos import PhotoPreprocessor
-from inktime.app.domain.rendering import encode_image
-from inktime.app.services.rendering import PORTRAIT_ONLY_LAYOUTS
 
 
 LOGGER = logging.getLogger("worker")
@@ -162,50 +158,21 @@ class WorkerRunner:
                             },
                         )
                     elif operation == "library_preview":
-                        arguments = dict(settings["arguments"])
                         service = self.app.extensions["inktime_render_service"]
                         render_cache = self.app.extensions["inktime_render_cache"]
-                        fingerprint = dict(settings["fingerprint"])
-                        image = render_cache.get(fingerprint)
-                        if image is None:
-                            image = service.render_photo(
-                                str(arguments["photo_id"]),
-                                layout=arguments.get("layout"),
-                                crop_x=arguments.get("crop_x"),
-                                crop_y=arguments.get("crop_y"),
-                                secondary_photo_id=arguments.get("secondary_photo_id"),
-                                orientation=arguments.get("orientation"),
-                                fit_mode=arguments.get("fit_mode"),
-                            )
-                            if bool(arguments.get("quantized")):
-                                image = encode_image(
-                                    image,
-                                    profile_key=str(arguments["profile"]),
-                                    dither=str(arguments["dither"]),
-                                    color_distance=str(runtime_settings.get("render.color_distance", "oklab")),
-                                    strength=float(runtime_settings.get("render.dither_strength", 1.0)),
-                                ).preview
-                            layout_key = str(
-                                arguments.get("layout")
-                                or runtime_settings.get("render.layout", "photo_info")
-                            )
-                            orientation_key = str(
-                                arguments.get("orientation")
-                                or runtime_settings.get("render.frame_orientation", "portrait")
-                            )
-                            if (
-                                "portrait"
-                                if layout_key in PORTRAIT_ONLY_LAYOUTS
-                                else orientation_key
-                            ) == "landscape":
-                                image = image.transpose(Image.Transpose.ROTATE_90)
-                            render_cache.put(fingerprint, image)
-                        result = {
-                            "stage": "preview_completed",
-                            "preview_url": self.app.extensions[
-                                "inktime_render_workload_service"
-                            ].save_background_preview(image),
-                        }
+                        result = self.app.extensions[
+                            "inktime_render_workload_service"
+                        ].library_preview(
+                            settings,
+                            {
+                                "job_id": str(job["id"]),
+                                "item_id": str(item["id"]),
+                                "worker_id": str(item["worker_id"]),
+                                "idempotency_key": str(item["idempotency_key"]),
+                            },
+                            render_service=service,
+                            render_cache=render_cache,
+                        )
                     elif operation == "history_test_release":
                         result = self.app.extensions[
                             "inktime_render_workload_service"

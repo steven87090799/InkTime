@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import tempfile
 from typing import BinaryIO, Any
 from uuid import uuid4
@@ -15,11 +16,21 @@ from PIL import Image
 from PIL import ImageOps
 
 from inktime.app.domain.rendering import (
+    AtomicReleasePublisher,
     DeviceTestReleaseStore,
+    FontManager,
     encode_image,
     palette_for_profile,
     render_photo,
 )
+from inktime.app.db import Database
+from inktime.app.domain.photos import LocationResolver
+from inktime.app.repositories.photos import PhotoRepository
+from inktime.app.repositories.render_candidates import RenderCandidateRepository
+from inktime.app.repositories.settings import SettingsRepository
+from inktime.app.services.release_coordinator import ReleaseCoordinator
+from inktime.app.services.rendering import PORTRAIT_ONLY_LAYOUTS, RenderService
+from inktime.app.services.weather import WeatherService
 from inktime.app.workers.process_boundary import ProcessCallError
 
 
@@ -193,6 +204,73 @@ def _prepare_test_release_child(
     }
 
 
+def _prepare_library_preview_child(
+    *,
+    settings: dict[str, Any],
+    database_path: str,
+    prepared_path: str,
+    font_root: str,
+    font_builtin_root: str,
+    location_csv: str,
+) -> dict[str, Any]:
+    """Render only against a private database snapshot and prepared directory."""
+
+    prepared = Path(prepared_path)
+    prepared.mkdir(mode=0o700, parents=True, exist_ok=True)
+    database = Database(Path(database_path))
+    settings_repository = SettingsRepository(database)
+    publisher = AtomicReleasePublisher(prepared / "release-sandbox")
+    service = RenderService(
+        database,
+        PhotoRepository(database),
+        settings_repository,
+        FontManager(Path(font_root), Path(font_builtin_root)),
+        publisher,
+        RenderCandidateRepository(database),
+        ReleaseCoordinator(database, publisher),
+        LocationResolver(Path(location_csv)),
+        WeatherService(settings_repository),
+    )
+    arguments = dict(settings["arguments"])
+    image = service.render_photo(
+        str(arguments["photo_id"]),
+        layout=arguments.get("layout"),
+        crop_x=arguments.get("crop_x"),
+        crop_y=arguments.get("crop_y"),
+        secondary_photo_id=arguments.get("secondary_photo_id"),
+        orientation=arguments.get("orientation"),
+        fit_mode=arguments.get("fit_mode"),
+    )
+    quantized = bool(arguments.get("quantized"))
+    if quantized:
+        image = encode_image(
+            image,
+            profile_key=str(arguments["profile"]),
+            dither=str(arguments["dither"]),
+            color_distance=str(settings["color_distance"]),
+            strength=float(settings["dither_strength"]),
+        ).preview
+    layout_key = str(
+        arguments.get("layout")
+        or settings_repository.get("render.layout", "photo_info")
+    )
+    orientation_key = str(
+        arguments.get("orientation")
+        or settings_repository.get("render.frame_orientation", "portrait")
+    )
+    if (
+        "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
+    ) == "landscape":
+        image = image.transpose(Image.Transpose.ROTATE_90)
+    _atomic_png_file(prepared / "preview.png", image)
+    return {
+        "stage": "preview_completed",
+        "width": image.width,
+        "height": image.height,
+        "quantized": quantized,
+    }
+
+
 class RenderWorkloadService:
     """Persist bounded private inputs/results for existing background Jobs."""
 
@@ -310,6 +388,131 @@ class RenderWorkloadService:
         self._atomic_png(self.result_path(token, "preview"), image)
         self.cleanup()
         return self._result_url(token, "preview")
+
+    @staticmethod
+    def _private_database_snapshot(source: Path, destination: Path) -> None:
+        """Copy a consistent SQLite view and remove credentials from the child copy."""
+
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        source_connection = sqlite3.connect(source)
+        snapshot_connection = sqlite3.connect(destination)
+        try:
+            source_connection.backup(snapshot_connection)
+            snapshot_connection.execute("DELETE FROM secrets")
+            snapshot_connection.execute("UPDATE users SET password_hash=''")
+            snapshot_connection.execute(
+                "UPDATE devices SET token_hash='preview-' || id"
+            )
+            snapshot_connection.commit()
+        finally:
+            snapshot_connection.close()
+            source_connection.close()
+
+    def library_preview(
+        self,
+        settings: dict[str, Any],
+        commit_context: dict[str, str],
+        *,
+        render_service,
+        render_cache,
+    ) -> dict[str, Any]:
+        """Prepare in a spawn child; commit cache/result only for the lease owner."""
+
+        context = dict(commit_context)
+        fingerprint = dict(settings["fingerprint"])
+
+        def cancelled() -> bool:
+            return not self.jobs.can_commit_item(
+                context["job_id"],
+                context["item_id"],
+                context["worker_id"],
+                context["idempotency_key"],
+            )
+
+        if cancelled():
+            raise ProcessCallError("library preview lease lost")
+        image = render_cache.get(fingerprint)
+        if image is not None:
+            if cancelled():
+                raise ProcessCallError("library preview lease lost")
+            preview_url = self.save_background_preview(image)
+            result_token = preview_url.split("/")[-2]
+            cached_result_path = self.result_root / result_token
+            if cancelled():
+                shutil.rmtree(cached_result_path, ignore_errors=True)
+                raise ProcessCallError("library preview lease lost")
+            return {
+                "stage": "preview_completed",
+                "preview_url": preview_url,
+                "cache_hit": True,
+            }
+
+        prepared = self.prepared_root / uuid4().hex
+        cache_path: Path | None = None
+        result_path: Path | None = None
+        try:
+            prepared.mkdir(mode=0o700, parents=True)
+            snapshot_path = prepared / "render.db"
+            self._private_database_snapshot(
+                Path(render_service.database.path), snapshot_path
+            )
+            if cancelled():
+                raise ProcessCallError("library preview lease lost")
+            child_result = self.process_boundary.call(
+                _prepare_library_preview_child,
+                timeout_seconds=float(settings.get("timeout_seconds", 30)),
+                kwargs={
+                    "settings": {
+                        "arguments": dict(settings["arguments"]),
+                        "color_distance": str(
+                            self.settings.get("render.color_distance", "oklab")
+                        ),
+                        "dither_strength": float(
+                            self.settings.get("render.dither_strength", 1.0)
+                        ),
+                    },
+                    "database_path": str(snapshot_path),
+                    "prepared_path": str(prepared),
+                    "font_root": str(render_service.fonts.root),
+                    "font_builtin_root": str(render_service.fonts.builtin_root),
+                    "location_csv": str(render_service.locations.csv_path),
+                },
+                cancel_requested=cancelled,
+                process_name="inktime-library-preview-child",
+            )
+            if cancelled():
+                raise ProcessCallError("library preview lease lost")
+            with Image.open(prepared / "preview.png") as opened:
+                opened.load()
+                image = opened.convert("RGB")
+            if cancelled():
+                raise ProcessCallError("library preview lease lost")
+            cache_key = render_cache.put(fingerprint, image)
+            cache_path = render_cache.root / f"{cache_key}.png"
+            if cancelled():
+                cache_path.unlink(missing_ok=True)
+                raise ProcessCallError("library preview lease lost")
+            preview_url = self.save_background_preview(image)
+            result_token = preview_url.split("/")[-2]
+            result_path = self.result_root / result_token
+            if cancelled():
+                cache_path.unlink(missing_ok=True)
+                shutil.rmtree(result_path, ignore_errors=True)
+                raise ProcessCallError("library preview lease lost")
+            return {
+                **dict(child_result),
+                "preview_url": preview_url,
+                "cache_hit": False,
+            }
+        except Exception:
+            if cancelled():
+                if cache_path is not None:
+                    cache_path.unlink(missing_ok=True)
+                if result_path is not None:
+                    shutil.rmtree(result_path, ignore_errors=True)
+            raise
+        finally:
+            shutil.rmtree(prepared, ignore_errors=True)
 
     @staticmethod
     def _atomic_json(path: Path, value: dict) -> None:
@@ -458,6 +661,64 @@ class RenderWorkloadService:
                 raise ValueError("DEVICE-006 測試色盤與裝置面板 Profile 不相容")
             return dict(current)
 
+        def prepare_preset() -> tuple[
+            dict | None, str | None, bool | None, str | None
+        ]:
+            """Prepare optional preset data without making the release depend on it."""
+
+            if not bool(settings.get("save_preset")):
+                return None, None, None, None
+            try:
+                configuration = dict(settings["configuration"])
+                try:
+                    existing = json.loads(
+                        str(self.settings.get("render.custom_photo_presets", "{}"))
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    existing = {}
+                if not isinstance(existing, dict):
+                    existing = {}
+                preset_id = "custom-" + sha256(
+                    context["idempotency_key"].encode("utf-8")
+                ).hexdigest()[:10]
+                candidate = {
+                    "id": preset_id,
+                    "label": str(
+                        settings.get("preset_label", "測試後儲存")
+                    ).strip()[:80]
+                    or "測試後儲存",
+                    "source_preset": configuration["preset"],
+                    "options": configuration["overrides"],
+                    "palette": configuration["palette"],
+                }
+                stored = existing.get(preset_id)
+                if isinstance(stored, dict):
+                    return dict(stored), None, True, None
+                existing[preset_id] = candidate
+                encoded = json.dumps(
+                    existing, ensure_ascii=False, separators=(",", ":")
+                )
+                if len(encoded) > 50_000:
+                    return candidate, None, False, "RENDER-PRESET-SIZE"
+                return candidate, encoded, False, None
+            except Exception:
+                return None, None, False, "RENDER-PRESET-VALIDATION"
+
+        def record_preset_warning(error_code: str, error_type: str) -> None:
+            try:
+                self.jobs.add_event(
+                    context["job_id"],
+                    "preset_warning",
+                    "Test Release 已完成，但 Preset 未儲存",
+                    {
+                        "error_code": error_code[:64],
+                        "error_type": error_type[:80],
+                    },
+                )
+            except Exception:  # noqa: S110 -- release success cannot depend on warning I/O
+                # Optional warning persistence must not fail a successful release.
+                pass
+
         try:
             if cancelled():
                 raise ProcessCallError("test release commit lease is no longer valid")
@@ -513,6 +774,7 @@ class RenderWorkloadService:
                 raise ProcessCallError("test release commit lease is no longer valid")
             if not created_release:
                 validate_device()
+            preset, preset_payload, preset_saved, preset_error = prepare_preset()
             assignment = DeviceTestReleaseStore(self.release_dir).assign(
                 device_id,
                 manifest["release_id"],
@@ -521,42 +783,20 @@ class RenderWorkloadService:
                 one_time=bool(settings["one_time"]),
                 restore_formal=bool(settings["restore_formal"]),
             )
-            saved_preset = None
-            if bool(settings.get("save_preset")):
-                configuration = dict(settings["configuration"])
+            if preset_payload is not None:
                 try:
-                    existing = json.loads(
-                        str(self.settings.get("render.custom_photo_presets", "{}"))
+                    self.settings.update(
+                        "render.custom_photo_presets",
+                        preset_payload,
+                        changed_by=str(settings.get("created_by", "system")),
+                        source_ip="background-job",
                     )
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    existing = {}
-                if not isinstance(existing, dict):
-                    existing = {}
-                preset_id = "custom-" + sha256(
-                    context["idempotency_key"].encode("utf-8")
-                ).hexdigest()[:10]
-                saved_preset = {
-                    "id": preset_id,
-                    "label": str(settings.get("preset_label", "測試後儲存")).strip()[:80]
-                    or "測試後儲存",
-                    "source_preset": configuration["preset"],
-                    "options": configuration["overrides"],
-                    "palette": configuration["palette"],
-                }
-                existing[preset_id] = saved_preset
-                encoded = json.dumps(
-                    existing, ensure_ascii=False, separators=(",", ":")
-                )
-                if len(encoded) > 50_000:
-                    raise ValueError(
-                        "RENDER-007 自訂 Preset 總資料量超過 50000 字元"
-                    )
-                self.settings.update(
-                    "render.custom_photo_presets",
-                    encoded,
-                    changed_by=str(settings.get("created_by", "system")),
-                    source_ip="background-job",
-                )
+                    preset_saved = True
+                except Exception as exc:
+                    preset_error = "RENDER-PRESET-WRITE"
+                    record_preset_warning(preset_error, type(exc).__name__)
+            elif preset_error is not None:
+                record_preset_warning(preset_error, "PresetValidation")
             self.delete_input(token, suffix=suffix)
             return {
                 "release_id": manifest["release_id"],
@@ -567,7 +807,9 @@ class RenderWorkloadService:
                 "restore_formal": assignment["restore_formal"],
                 "formal_schedule_overwritten": False,
                 "server_rendered": True,
-                "saved_preset": saved_preset,
+                "saved_preset": preset if preset_saved else None,
+                "preset_saved": preset_saved,
+                "preset_error": preset_error,
                 "stage": "device_test_completed",
             }
         finally:
