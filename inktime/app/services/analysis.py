@@ -53,6 +53,16 @@ PREFILTER_PROFILES = {
 PROMPT_VERSION = "photo-quality-v4-visual-orientation"
 
 
+def _unknown_visual_orientation() -> dict:
+    """Local-only results deliberately have no authoritative orientation advice."""
+    return {
+        "rotation_cw": None,
+        "confidence": 0.0,
+        "ambiguous": True,
+        "evidence": ["insufficient_visual_cues"],
+    }
+
+
 class PhotoAnalysisService:
     def __init__(
         self,
@@ -135,7 +145,7 @@ class PhotoAnalysisService:
             "should_keep": not screenshot,
             "sensitive": False,
             "reason": "依本地清晰度、曝光與截圖特徵判定",
-            "visual_orientation": {"rotation_cw": None, "confidence": 0.0, "ambiguous": True, "evidence": ["insufficient_visual_cues"]},
+            "visual_orientation": _unknown_visual_orientation(),
         }
 
     @staticmethod
@@ -333,6 +343,7 @@ class PhotoAnalysisService:
             "should_keep": False,
             "sensitive": False,
             "reason": "、".join(reasons),
+            "visual_orientation": _unknown_visual_orientation(),
         }
 
     def _ensure_e6_suitability(self, photo_id: str, photo, source: Path):

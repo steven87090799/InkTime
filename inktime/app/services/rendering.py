@@ -431,6 +431,7 @@ class RenderService:
         orientation: str | None = None,
         fit_mode: str | None = None,
         device_config: dict[str, Any] | None = None,
+        orientation_metadata: list[dict[str, Any]] | None = None,
     ) -> Image.Image:
         photo = self.ensure_photo_features(photo_id)
         path = safe_join(Path(photo["root_path"]), photo["relative_path"])
@@ -461,6 +462,8 @@ class RenderService:
             return self._physical_frame(canvas, effective_orientation)
 
         source, orientation_info = self._load_oriented_photo(photo, path)
+        if orientation_metadata is not None:
+            orientation_metadata.append({"photo_id": photo_id, "orientation": orientation_info.as_dict()})
         with source:
             if layout_key == "adaptive_memory":
                 footer_height = 76 if effective_orientation == "landscape" else 96
@@ -490,7 +493,9 @@ class RenderService:
                             second_position = (0, slot_size[1] + gutter)
                         canvas.paste(self._fit_photo(source, photo, slot_size, None, None, "contain"), (0, 0))
                         second_path = safe_join(Path(second_row["root_path"]), second_row["relative_path"])
-                        second_source, _ = self._load_oriented_photo(second_row, second_path)
+                        second_source, second_orientation = self._load_oriented_photo(second_row, second_path)
+                        if orientation_metadata is not None:
+                            orientation_metadata.append({"photo_id": str(second_row["id"]), "orientation": second_orientation.as_dict()})
                         with second_source:
                             canvas.paste(self._fit_photo(second_source, second_row, slot_size, None, None, "contain"), second_position)
                         self._adaptive_footer(
@@ -545,7 +550,9 @@ class RenderService:
                     second_path = safe_join(
                         Path(second_photo["root_path"]), second_photo["relative_path"]
                     )
-                    second_source, _ = self._load_oriented_photo(second_photo, second_path)
+                    second_source, second_orientation = self._load_oriented_photo(second_photo, second_path)
+                    if orientation_metadata is not None:
+                        orientation_metadata.append({"photo_id": secondary_photo_id, "orientation": second_orientation.as_dict()})
                     with second_source:
                         second = self._fit_photo(
                             second_source,
@@ -705,13 +712,8 @@ class RenderService:
                 profile_key = str(device["panel_profile"])
                 if profile_key not in DISPLAY_PROFILES:
                     raise ValueError("RENDER-003 發布包含不支援的顯示 Profile")
-                images = [
-                    (
-                        photo_id,
-                        self.render_photo(photo_id, device_config=device),
-                    )
-                    for photo_id in selected[:quantity]
-                ]
+                rendered_orientations: list[dict[str, Any]] = []
+                images = [(photo_id, self.render_photo(photo_id, device_config=device, orientation_metadata=rendered_orientations)) for photo_id in selected[:quantity]]
                 manifest = self.publisher.publish(
                     images,
                     profile_key=profile_key,
@@ -720,7 +722,7 @@ class RenderService:
                     dither_strength=float(self.settings.get("render.dither_strength", 1.0)),
                     orientation=str(device.get("frame_orientation") or self.settings.get("render.frame_orientation", "portrait")),
                     activate=False,
-                    metadata={"device_id": device_id, "layout_mode": device.get("layout_mode") or layout_key, "photo_orientations": self._release_orientation_metadata(selected[:quantity])},
+                    metadata={"device_id": device_id, "layout_mode": device.get("layout_mode") or layout_key, "photo_orientations": rendered_orientations},
                 )
                 manifests.append(manifest)
                 assignments[device_id] = str(manifest["release_id"])
@@ -729,6 +731,7 @@ class RenderService:
                 device_assignments=assignments,
             )
             return {"releases": published, "device_releases": assignments}
+        rendered_orientations: list[dict[str, Any]] = []
         if layout_key == "photo_pair":
             images = []
             for index in range(0, len(selected), 2):
@@ -736,7 +739,7 @@ class RenderService:
                 secondary_id = selected[index + 1] if index + 1 < len(selected) else None
                 if secondary_id is None:
                     images.append(
-                        (primary_id, self.render_photo(primary_id, layout="photo_info"))
+                        (primary_id, self.render_photo(primary_id, layout="photo_info", orientation_metadata=rendered_orientations))
                     )
                 else:
                     images.append(
@@ -746,11 +749,12 @@ class RenderService:
                                 primary_id,
                                 layout="photo_pair",
                                 secondary_photo_id=secondary_id,
+                                orientation_metadata=rendered_orientations,
                             ),
                         )
                     )
         else:
-            images = [(photo_id, self.render_photo(photo_id)) for photo_id in selected]
+            images = [(photo_id, self.render_photo(photo_id, orientation_metadata=rendered_orientations)) for photo_id in selected]
         selected_profiles = profile_keys or [str(self.settings.get("render.profile", "safe_4c"))]
         selected_profiles = list(dict.fromkeys(selected_profiles))
         if not selected_profiles or any(key not in DISPLAY_PROFILES for key in selected_profiles):
@@ -776,7 +780,7 @@ class RenderService:
                 dither_strength=dither_strength,
                 orientation=release_orientation,
                 activate=False,
-                metadata={"photo_orientations": self._release_orientation_metadata(selected)},
+                metadata={"photo_orientations": rendered_orientations},
             )
             manifests.append(manifest)
         published = self.release_coordinator.publish(

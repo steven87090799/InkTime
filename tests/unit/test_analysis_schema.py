@@ -9,7 +9,7 @@ from inktime.app.domain.analysis.schema import AnalysisValidationError, validate
 
 def valid_result(**updates):
     value = {
-        "schema_version": 1,
+        "schema_version": 2,
         "caption": "家人在公園散步。",
         "types": ["人物", "日常"],
         "memory_score": 82,
@@ -20,6 +20,7 @@ def valid_result(**updates):
         "should_keep": True,
         "sensitive": False,
         "reason": "人物互動自然且清晰",
+        "visual_orientation": {"rotation_cw": 0, "confidence": 1.0, "ambiguous": False, "evidence": ["faces_upright"]},
     }
     value.update(updates)
     return value
@@ -28,6 +29,27 @@ def valid_result(**updates):
 def test_strict_schema_accepts_expected_result():
     result = validate_analysis_result(json.dumps(valid_result(), ensure_ascii=False))
     assert result["memory_score"] == 82
+
+
+def test_schema_v1_missing_orientation_is_safely_upgraded():
+    legacy = valid_result(schema_version=1)
+    legacy.pop("visual_orientation")
+    assert validate_analysis_result(legacy)["visual_orientation"]["rotation_cw"] is None
+
+
+@pytest.mark.parametrize(
+    "orientation",
+    [
+        {"rotation_cw": False, "confidence": 1, "ambiguous": False, "evidence": ["faces_upright"]},
+        {"rotation_cw": 0, "confidence": 1, "ambiguous": False, "evidence": []},
+        {"rotation_cw": 0, "confidence": 1, "ambiguous": False, "evidence": ["faces_upright", "faces_upright"]},
+        {"rotation_cw": 0, "confidence": 1, "ambiguous": False, "evidence": ["invalid"]},
+        {"rotation_cw": None, "confidence": 0, "ambiguous": False, "evidence": ["insufficient_visual_cues"]},
+    ],
+)
+def test_schema_v2_rejects_invalid_visual_orientation(orientation):
+    with pytest.raises(AnalysisValidationError):
+        validate_analysis_result(valid_result(visual_orientation=orientation))
 
 
 @pytest.mark.parametrize(
