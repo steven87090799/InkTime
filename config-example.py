@@ -37,8 +37,9 @@ DOWNLOAD_KEY = "yourdownloadkey"
 # Flask 静态服务
 FLASK_HOST = "0.0.0.0"
 FLASK_PORT = 8765
-# 是否开启照片库 WebUI（前期检验提示词选片效果时使用，跑通后建议关闭）
-ENABLE_REVIEW_WEBUI = True
+# 此舊設定已停用。Legacy Review／Simulator 只能以部署環境變數
+# INKTIME_ENABLE_LEGACY_WEBUI=true 明確開啟；所有環境預設關閉。
+ENABLE_REVIEW_WEBUI = False
 
 # 离线中文城市名索引，使用 geonames 数据制作
 WORLD_CITIES_CSV = "./data/world_cities_zh.csv"

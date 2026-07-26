@@ -135,10 +135,14 @@ def test_history_today_is_selected_before_higher_ranked_fallback(app, tmp_path):
     with app.extensions["inktime_database"].session() as connection:
         connection.executemany(
             """
-            INSERT INTO photos(id,library_id,relative_path,status,captured_at,e6_score,created_at,updated_at)
-            VALUES (?,?,?,'analyzed',?,80,?,?)
+            INSERT INTO photos(id,library_id,relative_path,status,captured_at,captured_date,
+                captured_month_day,capture_date_status,e6_score,created_at,updated_at)
+            VALUES (?,?,?,'analyzed',?,?,?,'valid',80,?,?)
             """,
-            [(photo_id, library_id, path, captured, now, now) for photo_id, path, captured, _ in entries],
+            [
+                (photo_id, library_id, path, captured, captured[:10], captured[5:10], now, now)
+                for photo_id, path, captured, _ in entries
+            ],
         )
     for photo_id, _path, _captured, score in entries:
         result = {

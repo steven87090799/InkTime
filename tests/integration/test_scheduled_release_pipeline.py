@@ -17,11 +17,15 @@ def test_schedule_resolves_devices_limits_years_and_commits_history_after_publis
             connection.execute(
                 """
                 INSERT INTO photos(
-                    id,library_id,relative_path,status,captured_at,eligible,lifecycle_status,
+                    id,library_id,relative_path,status,captured_at,captured_date,
+                    captured_month_day,capture_date_status,eligible,lifecycle_status,
                     local_candidate_score,created_at,updated_at
-                ) VALUES (?,?,?,'analyzed',?,1,'active',?,?,?)
+                ) VALUES (?,?,?,'analyzed',?,?,?,'valid',1,'active',?,?,?)
                 """,
-                (photo_id, library_id, filename, f"{year}-07-22T10:00:00", 90-index, now, now),
+                (
+                    photo_id, library_id, filename, f"{year}-07-22T10:00:00",
+                    f"{year}-07-22", "07-22", 90-index, now, now,
+                ),
             )
         photos.save_analysis(
             photo_id,

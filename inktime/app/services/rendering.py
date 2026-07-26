@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from inktime.app.core.paths import safe_join
 from inktime.app.db import Database
-from inktime.app.domain.photos import LocationResolver
+from inktime.app.domain.photos import LocationResolver, parse_photo_date
 from inktime.app.domain.rendering import (
     AtomicReleasePublisher,
     DISPLAY_PROFILES,
@@ -98,12 +98,7 @@ class RenderService:
 
     @staticmethod
     def _captured_date(value: Any) -> date | None:
-        if not value:
-            return None
-        try:
-            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
-        except ValueError:
-            return None
+        return parse_photo_date(value)
 
     def _today(self) -> date:
         return current_local_date(str(self.settings.get("general.timezone", "Asia/Taipei")))
@@ -249,10 +244,10 @@ class RenderService:
                     ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1
                 )
                 WHERE {RenderCandidateRepository.SQL_PREDICATE} AND p.id<>?
-                ORDER BY CASE WHEN substr(p.captured_at,1,10)=substr(?,1,10) THEN 0 ELSE 1 END,
+                ORDER BY CASE WHEN p.captured_date=? THEN 0 ELSE 1 END,
                          p.captured_at DESC,p.id DESC LIMIT 300
                 """,
-                (str(primary["id"]), str(primary.get("captured_at") or "")),
+                (str(primary["id"]), str(primary.get("captured_date") or "")),
             ).fetchall()
         if primary_analysis is not None:
             try:
@@ -810,7 +805,8 @@ class RenderService:
             with self.database.session() as connection:
                 rows = connection.execute(
                     f"""
-                    SELECT p.id,p.relative_path,p.captured_at,p.e6_score,p.e6_contrast_score,
+                    SELECT p.id,p.relative_path,p.captured_at,p.captured_date,p.captured_month_day,
+                           p.e6_score,p.e6_contrast_score,
                            p.e6_subject_score,p.e6_skin_score,p.e6_text_score,
                            p.crop_focus_x,p.crop_focus_y,p.crop_manual_x,p.crop_manual_y,
                            p.crop_method,p.crop_face_count,l.root_path,
@@ -826,12 +822,12 @@ class RenderService:
                     )
                     WHERE {RenderCandidateRepository.SQL_PREDICATE}
                       AND a.memory_score>=?
-                      AND (?=0 OR substr(p.captured_at,6,5) IN (SELECT value FROM json_each(?)))
+                      AND (?=0 OR p.captured_month_day IN (SELECT value FROM json_each(?)))
                       AND (?=0 OR (
-                          p.captured_at IS NOT NULL
-                          AND CAST(substr(p.captured_at,1,4) AS INTEGER) < ?
+                          p.captured_date IS NOT NULL
+                          AND p.captured_date < printf('%04d-01-01', ?)
                       ))
-                      AND (?=0 OR CAST(substr(p.captured_at,1,4) AS INTEGER)
+                      AND (?=0 OR CAST(substr(p.captured_date,1,4) AS INTEGER)
                           IN (SELECT value FROM json_each(?)))
                     ORDER BY combined_score DESC,p.id LIMIT 250 OFFSET ?
                     """,  # noqa: S608 -- eligibility predicate is a fixed class constant
@@ -921,7 +917,7 @@ class RenderService:
                 if photo_id in selected_ids or len(selected) >= limit:
                     continue
                 row["match_type"] = match_type
-                row["day_distance"] = distances.get(str(row["captured_at"])[5:10]) if distances else 0
+                row["day_distance"] = distances.get(str(row["captured_month_day"])) if distances else 0
                 selected.append(row)
                 selected_ids.add(photo_id)
 
@@ -945,7 +941,7 @@ class RenderService:
                 limit=max(300, limit * 30),
                 candidate_years=candidate_years,
             )
-            nearby.sort(key=lambda row: (distances.get(str(row["captured_at"])[5:10], 999), -float(row["combined_score"])))
+            nearby.sort(key=lambda row: (distances.get(str(row["captured_month_day"]), 999), -float(row["combined_score"])))
             append(nearby, "nearby_day", distances)
         if len(selected) < limit and fallback in {"nearby_then_ranked", "ranked"}:
             ranked = self._candidate_query(target=target, month_days=None, older_only=False, limit=500, candidate_years=candidate_years)
@@ -966,19 +962,19 @@ class RenderService:
     def _history_where(self, filters: dict[str, Any], *, month_day: str | None = None) -> tuple[str, list[Any]]:
         clauses = [
             RenderCandidateRepository.SQL_PREDICATE,
-            "p.captured_at IS NOT NULL",
+            "p.captured_date IS NOT NULL",
         ]
         params: list[Any] = []
         start_year = filters.get("start_year")
         end_year = filters.get("end_year")
         if isinstance(start_year, int):
-            clauses.append("CAST(substr(p.captured_at,1,4) AS INTEGER)>=?")
-            params.append(start_year)
+            clauses.append("p.captured_date>=?")
+            params.append(f"{start_year:04d}-01-01")
         if isinstance(end_year, int):
-            clauses.append("CAST(substr(p.captured_at,1,4) AS INTEGER)<=?")
-            params.append(end_year)
+            clauses.append("p.captured_date<=?")
+            params.append(f"{end_year:04d}-12-31")
         if month_day:
-            clauses.append("substr(p.captured_at,6,5)=?")
+            clauses.append("p.captured_month_day=?")
             params.append(month_day)
         type_name = self._history_type_filter(str(filters.get("type", "")))
         if type_name:
@@ -1010,7 +1006,7 @@ class RenderService:
         """Fetch a bounded, indexed candidate set; never decode image contents here."""
         where, params = self._history_where(filters, month_day=month_day)
         if history_date:
-            where += " AND substr(p.captured_at,1,10)=?"
+            where += " AND p.captured_date=?"
             params.append(history_date)
         allowed_orders = {
             "p.captured_at,p.id",
@@ -1021,7 +1017,8 @@ class RenderService:
         with self.database.session() as connection:
             rows = connection.execute(
                 f"""
-                SELECT p.id,p.relative_path,p.captured_at,p.local_candidate_score,p.exclusion_status,
+                SELECT p.id,p.relative_path,p.captured_at,p.captured_date,p.captured_month_day,
+                       p.local_candidate_score,p.exclusion_status,
                        p.manual_override,l.root_path,p.e6_score,
                        a.provider,a.model,a.prompt_version,a.schema_version,a.ranking_rule_version,
                        a.memory_score,a.beauty_score,a.technical_quality_score,a.final_ranking_score,
@@ -1078,7 +1075,7 @@ class RenderService:
             with self.database.session() as connection:
                 where, params = self._history_where(filters, month_day=month_day)
                 if history_date:
-                    where += " AND substr(p.captured_at,1,10)=?"
+                    where += " AND p.captured_date=?"
                     params.append(history_date)
                 raw_order = (
                     "COALESCE(a.final_ranking_score,a.ranking_score,a.memory_score,p.local_candidate_score,0) DESC,p.id"
@@ -1106,7 +1103,7 @@ class RenderService:
         )
         with self.database.session() as connection:
             rows = connection.execute(
-                f"SELECT DISTINCT substr(p.captured_at,1,10) AS history_date FROM photos p "  # noqa: S608 - clauses are fixed local SQL fragments
+                f"SELECT DISTINCT p.captured_date AS history_date FROM photos p "  # noqa: S608 - clauses are fixed local SQL fragments
                 f"{analysis_join} "
                 f"WHERE {where} ORDER BY history_date",
                 params,
@@ -1163,10 +1160,8 @@ class RenderService:
 
     def reroll_history_day(self, payload: dict[str, Any], *, rng: random.Random | None = None) -> dict[str, Any]:
         month_day = str(payload.get("month_day", "")).strip()
-        try:
-            datetime.strptime(month_day, "%m-%d")
-        except ValueError as exc:
-            raise ValueError("HISTORY-001 month_day 必須是 MM-DD") from exc
+        if parse_photo_date(f"2000-{month_day}", warn=False) is None:
+            raise ValueError("HISTORY-001 month_day 必須是 MM-DD")
         filters = self._validated_history_filters(payload)
         current_id = str(payload.get("current_photo_id", "")).strip()
         rows = (

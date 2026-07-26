@@ -25,7 +25,7 @@ from inktime.app.api import (
     scoring,
     settings,
 )
-from inktime.app.db import Database, migrate
+from inktime.app.db import Database, backfill_photo_capture_dates, migrate
 from inktime.app.repositories.auth import AuthRepository
 from inktime.app.repositories.devices import DeviceRepository
 from inktime.app.repositories.jobs import JobRepository
@@ -91,6 +91,7 @@ def initialize_platform(
     release_dir.mkdir(parents=True, exist_ok=True)
     database = Database(database_path)
     migrate(database, None if testing else data_dir / "backups")
+    backfill_photo_capture_dates(database)
     if not testing:
         # 每個正式程序持有 shared runtime lock；離線還原必須等所有程序停止。
         app.extensions["inktime_runtime_lock"] = database.acquire_runtime_lock(exclusive=False)

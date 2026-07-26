@@ -247,6 +247,26 @@ class Database:
             ) from exc
         return lock
 
+    def try_acquire_operation_lock(self, name: str) -> IO[bytes] | None:
+        """Try to acquire a database-scoped cross-process maintenance lock.
+
+        Callers that lose the race return immediately and let the lock holder
+        finish the idempotent operation. The lock filename contains only the
+        fixed operation name and is anchored to this resolved database path.
+        """
+
+        if not re.fullmatch(r"[a-z0-9-]+", name):
+            raise ValueError("invalid database operation lock name")
+        lock_path = Path(f"{self.path}.{name}.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock = lock_path.open("a+b")
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock.close()
+            return None
+        return lock
+
     def integrity_check(self, *, full: bool = False) -> str:
         pragma = "PRAGMA integrity_check" if full else "PRAGMA quick_check"
         with self.session() as connection:

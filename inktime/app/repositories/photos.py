@@ -15,6 +15,7 @@ from inktime.app.domain.analysis.scoring import (
     calculate_ranking_score,
 )
 from inktime.app.domain.photos.preprocessing import LocalPhotoFeatures
+from inktime.app.domain.photos.dates import materialized_capture_fields, parse_photo_datetime
 
 
 LOCAL_QUALITY_RULE = "local-quality"
@@ -535,7 +536,8 @@ class PhotoRepository:
                     connection.execute(
                         f"""
                         UPDATE photos SET
-                            exif_json=NULL,captured_at=NULL,gps_lat=NULL,gps_lon=NULL,
+                            exif_json=NULL,captured_at=NULL,captured_date=NULL,captured_month_day=NULL,
+                            capture_date_status='pending',gps_lat=NULL,gps_lon=NULL,
                             exif_orientation_original=NULL,visual_orientation_rotation_cw=NULL,
                             visual_orientation_confidence=NULL,visual_orientation_ambiguous=1,
                             visual_orientation_evidence_json=NULL,manual_orientation_rotation_cw=NULL,
@@ -758,6 +760,24 @@ class PhotoRepository:
                     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?)
                     """,
                     insert_parameters,
+                )
+
+            date_updates: list[tuple[str | None, str | None, str, str]] = []
+            for plan in plans:
+                features = plan["item"].features
+                if not features.metadata_complete:
+                    continue
+                captured_date, month_day, status = materialized_capture_fields(
+                    features.captured_at, warn=False
+                )
+                if features.capture_date_status == "invalid":
+                    status = "invalid"
+                date_updates.append((captured_date, month_day, status, plan["id"]))
+            if date_updates:
+                connection.executemany(
+                    "UPDATE photos SET captured_date=?,captured_month_day=?,capture_date_status=? "
+                    "WHERE id=?",
+                    date_updates,
                 )
 
             # 本機品質決策屬於掃描產物，不等待也不觸發大型模型。已人工處理的照片
@@ -1487,9 +1507,18 @@ class PhotoRepository:
         changed_by: str,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
+        normalized_captured_at = None
+        if captured_at:
+            parsed = parse_photo_datetime(captured_at)
+            if parsed is None:
+                raise ValueError("IMG-004 拍攝日期格式不合法")
+            normalized_captured_at = parsed.isoformat()
+        captured_date, month_day, date_status = materialized_capture_fields(
+            normalized_captured_at, warn=False
+        )
         changes = {
             "favorite": favorite,
-            "captured_at": captured_at,
+            "captured_at": normalized_captured_at,
             "types": types,
             "side_caption": side_caption,
         }
@@ -1497,8 +1526,12 @@ class PhotoRepository:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 cursor = connection.execute(
-                    "UPDATE photos SET favorite=?,captured_at=?,updated_at=? WHERE id=?",
-                    (int(favorite), captured_at or None, now, photo_id),
+                    "UPDATE photos SET favorite=?,captured_at=?,captured_date=?,"
+                    "captured_month_day=?,capture_date_status=?,updated_at=? WHERE id=?",
+                    (
+                        int(favorite), normalized_captured_at, captured_date, month_day,
+                        date_status, now, photo_id,
+                    ),
                 )
                 if cursor.rowcount != 1:
                     raise KeyError(photo_id)

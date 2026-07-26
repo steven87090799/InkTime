@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from hashlib import sha256
 import json
 import math
@@ -13,6 +12,7 @@ from PIL import ExifTags, Image, ImageOps, ImageStat
 from inktime.app.domain.rendering.composition import (
     analyze_crop_focus,
 )
+from inktime.app.domain.photos.dates import materialized_capture_fields, parse_photo_datetime
 
 try:
     from pillow_heif import register_heif_opener
@@ -64,6 +64,7 @@ class LocalPhotoFeatures:
     e6_skin_score: float | None
     e6_text_score: float | None
     e6_skin_pixels: int | None
+    capture_date_status: str = "missing"
     metadata_complete: bool = True
     local_features_complete: bool = True
 
@@ -194,11 +195,14 @@ class PhotoPreprocessor:
                 else None
             )
             captured_at = None
+            capture_date_status = "missing"
             if captured:
-                try:
-                    captured_at = datetime.strptime(str(captured), "%Y:%m:%d %H:%M:%S").isoformat()
-                except ValueError:
-                    captured_at = None
+                parsed_captured = parse_photo_datetime(str(captured))
+                if parsed_captured is not None:
+                    captured_at = parsed_captured.isoformat()
+                _captured_date, _month_day, capture_date_status = materialized_capture_fields(
+                    str(captured), warn=False
+                )
             orientation = int(exif.get(274, 1) or 1)
             camera_make = str(exif_named.get("Make", "")).strip() or None
             camera_model = str(exif_named.get("Model", "")).strip() or None
@@ -332,6 +336,7 @@ class PhotoPreprocessor:
                 e6_skin_score=None,
                 e6_text_score=None,
                 e6_skin_pixels=0 if include_local_features else None,
+                capture_date_status=capture_date_status,
                 metadata_complete=include_metadata,
                 local_features_complete=include_local_features,
             )

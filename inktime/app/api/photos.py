@@ -342,6 +342,8 @@ def update_photo(photo_id: str):
         )
     except KeyError:
         abort(404)
+    except ValueError as exc:
+        abort(400, description=str(exc))
     return {"status": "ok"}
 
 

@@ -6,6 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     INKTIME_DATABASE=/data/inktime.db \
     INKTIME_RELEASE_DIR=/data/releases \
     INKTIME_LEGACY_OUTPUT_DIR=/data/output \
+    INKTIME_ENABLE_LEGACY_WEBUI=false \
     INKTIME_PHOTO_DIR=/photos
 
 RUN groupadd --gid 10001 inktime \

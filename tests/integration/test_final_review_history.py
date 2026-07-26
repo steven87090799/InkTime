@@ -22,11 +22,15 @@ def _insert_photo(app, root: Path, photo_id: str, captured_at: str, *, eligible:
     with app.extensions["inktime_database"].session() as connection:
         connection.execute(
             """
-            INSERT INTO photos(id,library_id,relative_path,status,captured_at,eligible,lifecycle_status,
+            INSERT INTO photos(id,library_id,relative_path,status,captured_at,captured_date,
+                captured_month_day,capture_date_status,eligible,lifecycle_status,
                 local_candidate_score,created_at,updated_at)
-            VALUES (?,?,?,'analyzed',?,?, 'active',?,?,?)
+            VALUES (?,?,?,'analyzed',?,?,?,'valid',?, 'active',?,?,?)
             """,
-            (photo_id, library_id, f"{photo_id}.jpg", captured_at, eligible, score, now, now),
+            (
+                photo_id, library_id, f"{photo_id}.jpg", captured_at, captured_at[:10],
+                captured_at[5:10], eligible, score, now, now,
+            ),
         )
     photos.save_analysis(
         photo_id, None, "local", "local", "local-quality-v3",
@@ -70,12 +74,24 @@ def test_history_selection_synthetic_rows_is_bounded_sqlite_work(app, tmp_path, 
     library_id = photos.ensure_library("十萬合成", root)
     database = app.extensions["inktime_database"]
     now = "2026-07-22T00:00:00+00:00"
-    rows = [(f"synthetic-{index}", library_id, f"not-present-{index}.jpg", f"{2000 + index % 25:04d}-07-22T10:00:00", now, now) for index in range(row_count)]
-    rows[25] = ("selected", library_id, "selected.jpg", "2000-07-22T10:00:00", now, now)
+    rows = [
+        (
+            f"synthetic-{index}", library_id, f"not-present-{index}.jpg",
+            f"{2000 + index % 25:04d}-07-22T10:00:00",
+            f"{2000 + index % 25:04d}-07-22", "07-22", now, now,
+        )
+        for index in range(row_count)
+    ]
+    rows[25] = (
+        "selected", library_id, "selected.jpg", "2000-07-22T10:00:00",
+        "2000-07-22", "07-22", now, now,
+    )
     with database.session() as connection:
         connection.execute("BEGIN")
         connection.executemany(
-            "INSERT INTO photos(id,library_id,relative_path,status,captured_at,lifecycle_status,eligible,local_candidate_score,created_at,updated_at) VALUES (?,?,?,'analyzed',?,'active',1,75,?,?)",
+            "INSERT INTO photos(id,library_id,relative_path,status,captured_at,captured_date,"
+            "captured_month_day,capture_date_status,lifecycle_status,eligible,local_candidate_score,"
+            "created_at,updated_at) VALUES (?,?,?,'analyzed',?,?,?,'valid','active',1,75,?,?)",
             rows,
         )
         connection.commit()
