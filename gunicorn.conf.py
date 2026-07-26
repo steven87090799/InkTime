@@ -2,8 +2,11 @@
 
 import os
 
+from inktime.app.core.runtime_config import resolve_runtime_config
 
-bind = "0.0.0.0:8765"
+
+runtime_config = resolve_runtime_config()
+bind = f"{runtime_config.host}:{runtime_config.port}"
 workers = max(1, int(os.environ.get("INKTIME_WEB_WORKERS", "1")))
 threads = max(1, int(os.environ.get("INKTIME_WEB_THREADS", "2")))
 worker_class = "gthread"

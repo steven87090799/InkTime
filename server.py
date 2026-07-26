@@ -1,43 +1,19 @@
 #!/usr/bin/env python3
 """InkTime 正式 Web 入口；Gunicorn 請使用 ``server:app``。"""
 
-from pathlib import Path
 import mimetypes
-import os
 
-import legacy_server
-from inktime.app.platform import initialize_platform
+from inktime.app.factory import create_app
 
 
-ROOT_DIR = Path(__file__).resolve().parent
-DATA_DIR = Path(os.environ.get("INKTIME_DATA_DIR", ROOT_DIR / "data")).expanduser().resolve()
-app = legacy_server.app
-DATABASE_PATH = Path(os.environ.get("INKTIME_DATABASE", legacy_server.DB_PATH)).expanduser().resolve()
-RELEASE_DIR = Path(os.environ.get("INKTIME_RELEASE_DIR", DATA_DIR / "releases")).expanduser().resolve()
-PHOTO_DIR = Path(
-    os.environ.get("INKTIME_PHOTO_DIR", ROOT_DIR / "simulation_photos")
-).expanduser().resolve()
-
-initialize_platform(
-    app,
-    database_path=DATABASE_PATH,
-    data_dir=DATA_DIR,
-    release_dir=RELEASE_DIR,
-    photo_dir=PHOTO_DIR,
-)
-if app.config.get("INKTIME_ENABLE_LEGACY_WEBUI", False):
-    # Optional maintenance schema only; never reads images, decodes EXIF JSON or calls a provider.
-    legacy_server.prepare_legacy_data_schema()
-# 舊 URL 金鑰 API 僅在管理員明確啟用並重啟後開放；預設保持關閉。
-legacy_server.ENABLE_LEGACY_DEVICE_API = bool(
-    app.extensions["inktime_settings_repository"].get("device.legacy_api_enabled", False)
-)
+app = create_app()
 
 
 if __name__ == "__main__":
+    runtime_config = app.extensions["inktime_runtime_config"]
     mimetypes.add_type("application/octet-stream", ".bin")
-    host = os.environ.get("INKTIME_HOST", "127.0.0.1")
-    port = int(os.environ.get("INKTIME_PORT", "8765"))
-    print(f"[InkTime] 管理介面：http://{host}:{port}/")
+    print(
+        f"[InkTime] 管理介面：http://{runtime_config.host}:{runtime_config.port}/"
+    )
     print("[InkTime] 開發伺服器只適用於本機測試；正式環境請使用 Gunicorn。")
-    app.run(host=host, port=port, debug=False)
+    app.run(host=runtime_config.host, port=runtime_config.port, debug=False)

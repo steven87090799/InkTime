@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import fcntl
 from pathlib import Path
 import sqlite3
+
+from inktime.app.core.locks import fcntl
 
 from .connection import Database
 

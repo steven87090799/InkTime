@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fcntl
 from contextlib import contextmanager
 from hashlib import sha256
 import os
@@ -10,6 +9,8 @@ import tempfile
 import time
 
 from PIL import Image, ImageOps
+
+from inktime.app.core.locks import fcntl
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")

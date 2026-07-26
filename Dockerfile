@@ -2,12 +2,17 @@ FROM python:3.12-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    INKTIME_ENVIRONMENT=production \
     INKTIME_DATA_DIR=/data \
     INKTIME_DATABASE=/data/inktime.db \
     INKTIME_RELEASE_DIR=/data/releases \
+    INKTIME_BACKUP_DIR=/data/backups \
+    INKTIME_CACHE_DIR=/data/cache \
     INKTIME_LEGACY_OUTPUT_DIR=/data/output \
     INKTIME_ENABLE_LEGACY_WEBUI=false \
-    INKTIME_PHOTO_DIR=/photos
+    INKTIME_PHOTO_DIR=/photos \
+    INKTIME_HOST=0.0.0.0 \
+    INKTIME_PORT=8765
 
 RUN groupadd --gid 10001 inktime \
     && useradd --uid 10001 --gid inktime --home-dir /app --shell /usr/sbin/nologin inktime
