@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 from io import BytesIO
+import json
+import os
+from pathlib import Path
+import shutil
 
 from PIL import Image
+import pytest
 
 from tests.conftest import create_admin, csrf, login
 from inktime.app.workers.runner import WorkerRunner
+from inktime.app.domain.rendering import DeviceTestReleaseStore
+from inktime.app.workers.process_boundary import ProcessCallError, ProcessCallTimeout
 
 
 def _photo_upload(color: str = "#5079a8"):
@@ -20,6 +27,84 @@ def _large_photo_upload():
     Image.new("RGB", (3500, 3500), "#5079a8").save(output, "PNG")
     output.seek(0)
     return output, "large.png"
+
+
+def _library_photo(app, root: Path, photo_id: str = "preview-photo") -> str:
+    root.mkdir(exist_ok=True)
+    Image.new("RGB", (640, 480), "#5079a8").save(root / f"{photo_id}.jpg")
+    photos = app.extensions["inktime_photo_repository"]
+    library_id = photos.ensure_library("Preview 測試", root)
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            """
+            INSERT INTO photos(
+                id,library_id,relative_path,sha256,width,height,status,eligible,
+                lifecycle_status,crop_focus_x,crop_focus_y,e6_score,created_at,updated_at
+            ) VALUES (?,?,?,?,?,?,'analyzed',1,'active',.5,.5,80,datetime('now'),datetime('now'))
+            """,
+            (photo_id, library_id, f"{photo_id}.jpg", "a" * 64, 640, 480),
+        )
+    photos.save_analysis(
+        photo_id,
+        None,
+        "local",
+        "local",
+        "test",
+        {
+            "schema_version": 1,
+            "caption": "Preview 測試",
+            "types": ["其他"],
+            "memory_score": 80,
+            "beauty_score": 80,
+            "technical_quality_score": 80,
+            "emotion_score": 80,
+            "side_caption": "Preview 必須由背景工作產生。",
+            "should_keep": True,
+            "sensitive": False,
+            "reason": "test",
+        },
+        "{}",
+        ranking_score=80,
+    )
+    return photo_id
+
+
+def _claimed_test_release(client, app, *, save_preset: bool = False):
+    repository = app.extensions["inktime_device_repository"]
+    device_id, _token = repository.create(
+        "Test Release 隔離", panel_profile="gdep073e01_6c"
+    )
+    response = client.post(
+        "/api/v1/rendering/test-release",
+        data={
+            "photo": _photo_upload(),
+            "device_id": device_id,
+            "profile": "gdep073e01_6c",
+            "preset": "photo_balanced",
+            "fit": "cover",
+            "options": '{"dither":"nearest"}',
+            "palette": '{"mode":"default"}',
+            "delivery": "next_wake",
+            "one_time": "true",
+            "restore_formal": "true",
+            "save_preset": "true" if save_preset else "false",
+            "preset_label": "Idempotent Preset",
+        },
+        headers={"X-CSRF-Token": csrf(client)},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 202
+    job_id = response.get_json()["job_id"]
+    jobs = app.extensions["inktime_job_repository"]
+    item = dict(jobs.claim(job_id, "test-worker", 1)[0])
+    settings = json.loads(str(jobs.get(job_id)["settings_json"]))
+    context = {
+        "job_id": job_id,
+        "item_id": str(item["id"]),
+        "worker_id": "test-worker",
+        "idempotency_key": str(item["idempotency_key"]),
+    }
+    return device_id, settings, context
 
 
 def test_browser_canvas_cannot_be_published_as_test_release(client, app):
@@ -70,6 +155,7 @@ def test_preview_jobs_have_per_user_limit(client, app):
             content_type="multipart/form-data",
         )
         assert response.status_code == 202
+    inputs = set(app.extensions["inktime_render_workload_service"].input_root.iterdir())
     limited = client.post(
         "/api/v1/rendering/compare",
         data={
@@ -84,6 +170,226 @@ def test_preview_jobs_have_per_user_limit(client, app):
         content_type="multipart/form-data",
     )
     assert limited.status_code == 429
+    assert set(app.extensions["inktime_render_workload_service"].input_root.iterdir()) == inputs
+
+
+def test_preview_job_creation_failure_cleans_only_new_input(client, app, monkeypatch):
+    create_admin(app)
+    login(client)
+    workload = app.extensions["inktime_render_workload_service"]
+    before = set(workload.input_root.iterdir())
+    monkeypatch.setattr(
+        app.extensions["inktime_job_repository"],
+        "create_maintenance_with_capacity",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("create failed")),
+    )
+    with pytest.raises(RuntimeError):
+        client.post(
+            "/api/v1/rendering/compare",
+            data={
+                "photo": _photo_upload(),
+                "profile": "gdep073e01_6c",
+                "preset": "photo_balanced",
+                "fit": "cover",
+                "options": '{"dither":"nearest"}',
+                "palette": '{"mode":"default"}',
+            },
+            headers={"X-CSRF-Token": csrf(client)},
+            content_type="multipart/form-data",
+        )
+    assert set(workload.input_root.iterdir()) == before
+    assert app.extensions["inktime_job_repository"].list() == []
+
+
+def test_input_save_failure_does_not_leave_pending_job(client, app, monkeypatch):
+    create_admin(app)
+    login(client)
+    workload = app.extensions["inktime_render_workload_service"]
+    monkeypatch.setattr(
+        workload,
+        "save_upload",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("IMG-002 儲存失敗")
+        ),
+    )
+    response = client.post(
+        "/api/v1/rendering/compare",
+        data={
+            "photo": _photo_upload(),
+            "profile": "gdep073e01_6c",
+            "preset": "photo_balanced",
+            "fit": "cover",
+            "options": '{"dither":"nearest"}',
+            "palette": '{"mode":"default"}',
+        },
+        headers={"X-CSRF-Token": csrf(client)},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 413
+    assert app.extensions["inktime_job_repository"].list() == []
+
+
+def test_library_preview_cache_miss_never_renders_in_request_thread(
+    client, app, tmp_path, monkeypatch
+):
+    create_admin(app)
+    login(client)
+    photo_id = _library_photo(app, tmp_path / "preview-library")
+    service = app.extensions["inktime_render_service"]
+    original = service.render_photo
+    calls = []
+
+    def counted(*args, **kwargs):
+        calls.append(str(args[0]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(service, "render_photo", counted)
+    response = client.get(f"/api/v1/rendering/preview/{photo_id}")
+    assert response.status_code == 202
+    assert calls == []
+    WorkerRunner(app).run_once()
+    assert calls == [photo_id]
+
+
+def test_library_preview_cache_hit_returns_png_without_render(
+    client, app, tmp_path, monkeypatch
+):
+    create_admin(app)
+    login(client)
+    photo_id = _library_photo(app, tmp_path / "preview-cache", "cache-photo")
+    service = app.extensions["inktime_render_service"]
+    fingerprint = service.preview_fingerprint(photo_id)
+    app.extensions["inktime_render_cache"].put(
+        fingerprint, Image.new("RGB", (480, 800), "white")
+    )
+    monkeypatch.setattr(
+        service,
+        "render_photo",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cache hit must not render")
+        ),
+    )
+    response = client.get(f"/api/v1/rendering/preview/{photo_id}")
+    assert response.status_code == 200
+    assert response.mimetype == "image/png"
+    assert response.headers["X-InkTime-Renderer-Cache"] == "hit"
+
+
+def test_preview_fingerprint_tracks_all_render_versions(app, tmp_path, monkeypatch):
+    primary = _library_photo(app, tmp_path / "fingerprint", "fingerprint-primary")
+    secondary = _library_photo(
+        app, tmp_path / "fingerprint", "fingerprint-secondary"
+    )
+    service = app.extensions["inktime_render_service"]
+    settings = app.extensions["inktime_settings_repository"]
+
+    def key(**kwargs):
+        return app.extensions["inktime_render_cache"].fingerprint(
+            service.preview_fingerprint(
+                primary, secondary_photo_id=secondary, **kwargs
+            )
+        )
+
+    baseline = key()
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE photo_analysis SET side_caption='更新後 Caption' WHERE photo_id=?",
+            (primary,),
+        )
+    caption_changed = key()
+    assert caption_changed != baseline
+
+    settings.update(
+        "analysis.advanced_caption_enabled", True, changed_by="test", source_ip="local"
+    )
+    settings.update(
+        "analysis.copy_default_style", "warm", changed_by="test", source_ip="local"
+    )
+    style_changed = key()
+    assert style_changed != caption_changed
+
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE photos SET manual_orientation_rotation_cw=90,"
+            "manual_orientation_updated_at=datetime('now') WHERE id=?",
+            (primary,),
+        )
+    manual_orientation_changed = key()
+    assert manual_orientation_changed != style_changed
+
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE photos SET manual_orientation_rotation_cw=180,"
+            "manual_orientation_updated_at=datetime('now') WHERE id=?",
+            (secondary,),
+        )
+    secondary_orientation_changed = key()
+    assert secondary_orientation_changed != manual_orientation_changed
+
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            """
+            UPDATE photos SET crop_focus_x=.2,crop_focus_y=.7,
+                crop_subject_left=.1,crop_subject_top=.2,
+                crop_subject_right=.8,crop_subject_bottom=.9
+            WHERE id=?
+            """,
+            (primary,),
+        )
+    crop_changed = key()
+    assert crop_changed != secondary_orientation_changed
+
+    font_manager = app.extensions["inktime_font_manager"]
+    uploaded = font_manager.root / "fingerprint.ttf"
+    shutil.copyfile(font_manager.resolve("builtin:iansui"), uploaded)
+    settings.update(
+        "render.font_path",
+        "uploaded:fingerprint.ttf",
+        changed_by="test",
+        source_ip="local",
+    )
+    font_before = key()
+    payload = bytearray(uploaded.read_bytes())
+    payload[-1] ^= 1
+    uploaded.write_bytes(payload)
+    os.utime(uploaded, None)
+    font_after = key()
+    assert font_after != font_before
+
+    monkeypatch.setattr(
+        service.weather, "snapshot_fingerprint", lambda: {"snapshot": "weather-a"}
+    )
+    weather_before = key(layout="weather_sensor")
+    monkeypatch.setattr(
+        service.weather, "snapshot_fingerprint", lambda: {"snapshot": "weather-b"}
+    )
+    weather_after = key(layout="weather_sensor")
+    assert weather_after != weather_before
+
+    unrelated_before = key()
+    settings.update("backup.retention", 15, changed_by="test", source_ip="local")
+    assert key() == unrelated_before
+
+
+def test_simulator_upload_does_not_encode_in_web_thread(client, app, monkeypatch):
+    create_admin(app)
+    login(client)
+    from inktime.app.services import render_workloads
+
+    monkeypatch.setattr(
+        render_workloads,
+        "encode_image",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Web request must not encode")
+        ),
+    )
+    response = client.post(
+        "/api/v1/rendering/simulate",
+        data={"photo": _photo_upload(), "profile": "safe_4c", "dither": "nearest"},
+        headers={"X-CSRF-Token": csrf(client)},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 202
 
 
 def test_oversized_simulator_preview_returns_background_job(client, app):
@@ -163,6 +469,50 @@ def test_ab_preview_is_server_rendered_and_reports_palette_statistics(client, ap
     ] == 1
 
 
+def test_job_status_and_background_results_are_owner_scoped(app):
+    auth = app.extensions["inktime_auth_repository"]
+    auth.create_user("owner", "owner-passphrase-long", role="viewer")
+    auth.create_user("other", "other-passphrase-long", role="viewer")
+    create_admin(app)
+    owner = app.test_client()
+    other = app.test_client()
+    administrator = app.test_client()
+    anonymous = app.test_client()
+    login(owner, username="owner", password="owner-passphrase-long")
+    login(other, username="other", password="other-passphrase-long")
+    login(administrator)
+
+    response = owner.post(
+        "/api/v1/rendering/compare",
+        data={
+            "photo": _photo_upload(),
+            "profile": "gdep073e01_6c",
+            "preset": "photo_balanced",
+            "fit": "cover",
+            "options": '{"dither":"nearest"}',
+            "palette": '{"mode":"default"}',
+        },
+        headers={"X-CSRF-Token": csrf(owner)},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 202
+    created = response.get_json()
+    WorkerRunner(app).run_once()
+    owner_status = owner.get(created["status_url"])
+    assert owner_status.status_code == 200
+    result_url = owner_status.get_json()["result"]["new"]
+    assert owner.get(result_url).status_code == 200
+    assert other.get(created["status_url"]).status_code == 404
+    assert other.get(result_url).status_code == 404
+    assert administrator.get(created["status_url"]).status_code == 200
+    assert administrator.get(result_url).status_code == 200
+    assert anonymous.get(created["status_url"]).status_code == 401
+    assert anonymous.get(result_url).status_code == 401
+    assert administrator.get(
+        "/api/v1/rendering/background-results/" + "0" * 32 + "/preview.png"
+    ).status_code == 404
+
+
 def test_test_release_is_one_time_and_does_not_overwrite_formal_schedule(client, app):
     create_admin(app)
     login(client)
@@ -231,3 +581,130 @@ def test_test_release_is_one_time_and_does_not_overwrite_formal_schedule(client,
     assert acknowledged.status_code == 200
     restored = client.get("/api/device/v1/releases/latest", headers=headers).get_json()
     assert restored["release_id"] == formal["release_id"]
+
+
+def test_test_release_render_timeout_has_no_publish_assign_or_preset(
+    client, app, monkeypatch
+):
+    create_admin(app)
+    login(client)
+    device_id, settings, context = _claimed_test_release(
+        client, app, save_preset=True
+    )
+    workload = app.extensions["inktime_render_workload_service"]
+    monkeypatch.setattr(
+        workload.process_boundary,
+        "call",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ProcessCallTimeout("timeout")
+        ),
+    )
+    with pytest.raises(ProcessCallTimeout):
+        workload.test_release(settings, context)
+    assert app.extensions["inktime_release_publisher"].list() == []
+    assert DeviceTestReleaseStore(app.config["INKTIME_RELEASE_DIR"]).active(
+        device_id, "gdep073e01_6c"
+    ) is None
+    assert str(
+        app.extensions["inktime_settings_repository"].get(
+            "render.custom_photo_presets", "{}"
+        )
+    ) == "{}"
+    assert list(workload.prepared_root.iterdir()) == []
+
+
+def test_test_release_revalidates_device_after_render(client, app, monkeypatch):
+    create_admin(app)
+    login(client)
+    device_id, settings, context = _claimed_test_release(client, app)
+    workload = app.extensions["inktime_render_workload_service"]
+    original_get = workload.devices.get
+    calls = 0
+
+    def disable_after_render(selected_device_id):
+        nonlocal calls
+        calls += 1
+        device = dict(original_get(selected_device_id))
+        if calls > 1:
+            device["enabled"] = 0
+        return device
+
+    monkeypatch.setattr(workload.devices, "get", disable_after_render)
+    with pytest.raises(ValueError, match="DEVICE-006"):
+        workload.test_release(settings, context)
+    assert app.extensions["inktime_release_publisher"].list() == []
+    assert DeviceTestReleaseStore(app.config["INKTIME_RELEASE_DIR"]).active(
+        device_id, "gdep073e01_6c"
+    ) is None
+    assert list(workload.prepared_root.iterdir()) == []
+
+
+def test_cancelled_late_render_result_is_deleted_without_publish(
+    client, app, monkeypatch
+):
+    create_admin(app)
+    login(client)
+    device_id, settings, context = _claimed_test_release(client, app)
+    workload = app.extensions["inktime_render_workload_service"]
+
+    def finish_after_cancel(_function, *, kwargs, **_options):
+        prepared = Path(kwargs["prepared_path"])
+        prepared.mkdir(parents=True)
+        (prepared / "late.tmp").write_bytes(b"late")
+        app.extensions["inktime_job_repository"].cancel(context["job_id"])
+        return {}
+
+    monkeypatch.setattr(workload.process_boundary, "call", finish_after_cancel)
+    with pytest.raises(ProcessCallError):
+        workload.test_release(settings, context)
+    assert app.extensions["inktime_release_publisher"].list() == []
+    assert DeviceTestReleaseStore(app.config["INKTIME_RELEASE_DIR"]).active(
+        device_id, "gdep073e01_6c"
+    ) is None
+    assert list(workload.prepared_root.iterdir()) == []
+
+
+def test_expired_item_lease_rejects_test_release_commit(client, app, monkeypatch):
+    create_admin(app)
+    login(client)
+    _device_id, settings, context = _claimed_test_release(client, app)
+    workload = app.extensions["inktime_render_workload_service"]
+
+    def finish_after_lease_loss(_function, *, kwargs, **_options):
+        prepared = Path(kwargs["prepared_path"])
+        prepared.mkdir(parents=True)
+        with app.extensions["inktime_database"].session() as connection:
+            connection.execute(
+                "UPDATE job_items SET lease_until='2000-01-01T00:00:00+00:00' WHERE id=?",
+                (context["item_id"],),
+            )
+        return {}
+
+    monkeypatch.setattr(workload.process_boundary, "call", finish_after_lease_loss)
+    with pytest.raises(ProcessCallError):
+        workload.test_release(settings, context)
+    assert app.extensions["inktime_release_publisher"].list() == []
+    assert list(workload.prepared_root.iterdir()) == []
+
+
+def test_test_release_parent_commit_is_idempotent_for_same_item(client, app):
+    create_admin(app)
+    login(client)
+    _device_id, settings, context = _claimed_test_release(
+        client, app, save_preset=True
+    )
+    workload = app.extensions["inktime_render_workload_service"]
+    first = workload.test_release(settings, context)
+    second = workload.test_release(settings, context)
+    assert second["release_id"] == first["release_id"]
+    releases = app.extensions["inktime_release_publisher"].list()
+    assert [item["release_id"] for item in releases] == [first["release_id"]]
+    presets = json.loads(
+        str(
+            app.extensions["inktime_settings_repository"].get(
+                "render.custom_photo_presets", "{}"
+            )
+        )
+    )
+    assert list(presets) == [first["saved_preset"]["id"]]
+    assert list(workload.prepared_root.iterdir()) == []

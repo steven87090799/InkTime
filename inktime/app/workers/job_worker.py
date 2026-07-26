@@ -164,10 +164,8 @@ class BoundedJobWorker:
         """
 
         try:
-            context = multiprocessing.get_context("fork")
+            context = multiprocessing.get_context("spawn")
         except ValueError:
-            # Platforms without fork retain the existing cooperative boundary;
-            # pretending a spawned closure is killable would be unsafe.
             self.hard_timeout = False
             self.run_job(job_id)
             return

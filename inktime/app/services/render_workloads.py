@@ -6,7 +6,9 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
+from typing import BinaryIO, Any
 from uuid import uuid4
 
 from PIL import Image
@@ -18,23 +20,205 @@ from inktime.app.domain.rendering import (
     palette_for_profile,
     render_photo,
 )
+from inktime.app.workers.process_boundary import ProcessCallError
+
+
+MAX_INPUT_PIXELS = 40_000_000
+
+
+def _atomic_png_file(path: Path, image: Image.Image) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent
+    )
+    os.close(handle)
+    temporary = Path(temporary_name)
+    try:
+        image.save(temporary, "PNG", optimize=True)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _open_saved_upload(path_value: str, suffix: str) -> tuple[Image.Image, str]:
+    path = Path(path_value)
+    if suffix in {".heic", ".heif"}:
+        from pillow_heif import register_heif_opener
+
+        register_heif_opener()
+    with Image.open(path) as opened:
+        if opened.width * opened.height > MAX_INPUT_PIXELS:
+            raise ValueError("IMG-002 照片像素不可超過 4000 萬")
+        opened.load()
+        source_size = f"{opened.width}x{opened.height}"
+        image = ImageOps.exif_transpose(opened).convert("RGB")
+    return image, source_size
+
+
+def _prepare_compare_child(
+    *, settings: dict[str, Any], input_path: str, prepared_path: str
+) -> dict[str, Any]:
+    prepared = Path(prepared_path)
+    prepared.mkdir(mode=0o700, parents=True)
+    image, source_size = _open_saved_upload(input_path, str(settings["input_suffix"]))
+    configuration = dict(settings["configuration"])
+    result = render_photo(
+        image,
+        profile_key=str(settings["profile"]),
+        preset=str(configuration["preset"]),
+        overrides=dict(configuration["overrides"]),
+        fit=str(settings["fit"]),
+        palette_rgb=configuration.get("palette_rgb"),
+        palette_lab=configuration.get("palette_lab"),
+        palette_version=str(configuration["palette_version"]),
+        text_regions=list(configuration.get("text_regions", [])),
+        face_regions=list(configuration.get("face_regions", [])),
+    )
+    profile = palette_for_profile(
+        str(settings["profile"]),
+        rgb_values=configuration.get("palette_rgb"),
+        lab_values=configuration.get("palette_lab"),
+        palette_version=str(configuration["palette_version"]),
+    )
+    started = datetime.now(timezone.utc)
+    legacy = encode_image(
+        result.source,
+        profile_key=str(settings["profile"]),
+        dither="gooddisplay",
+        color_distance="rgb",
+        strength=1.0,
+    )
+    legacy_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+    for name, output in {
+        "original": result.source,
+        "legacy": legacy.preview,
+        "new": result.encoded.preview,
+    }.items():
+        _atomic_png_file(prepared / f"{name}.png", output)
+    return {
+        "source_size": source_size,
+        "payload_bytes": len(result.encoded.payload),
+        "render_ms": result.render_ms,
+        "legacy_render_ms": legacy_ms,
+        "preset": str(configuration["requested_preset"]),
+        "source_preset": result.preset,
+        "dither": result.options["dither"],
+        "color_distance": result.options["color_distance"],
+        "linear_light": bool(result.options.get("linear_light")),
+        "palette_version": profile.palette_version,
+        "palette": RenderWorkloadService._palette_statistics(
+            result.encoded.preview, result.encoded.palette
+        ),
+        "publish_source": "server_original_upload_only",
+        "model": "disabled",
+        "cache_hit": False,
+        "stage": "preview_completed",
+    }
+
+
+def _prepare_simulator_child(
+    *, settings: dict[str, Any], input_path: str, prepared_path: str
+) -> dict[str, Any]:
+    prepared = Path(prepared_path)
+    prepared.mkdir(mode=0o700, parents=True)
+    image, source_size = _open_saved_upload(input_path, str(settings["input_suffix"]))
+    size = (480, 800)
+    if str(settings["fit"]) == "cover":
+        canvas = ImageOps.fit(image, size, method=Image.Resampling.LANCZOS)
+    else:
+        fitted = ImageOps.contain(image, size, method=Image.Resampling.LANCZOS)
+        canvas = Image.new("RGB", size, "white")
+        canvas.paste(
+            fitted,
+            ((canvas.width - fitted.width) // 2, (canvas.height - fitted.height) // 2),
+        )
+    encoded = encode_image(
+        canvas,
+        profile_key=str(settings["profile"]),
+        dither=str(settings["dither"]),
+        color_distance=str(settings["color_distance"]),
+        strength=float(settings["strength"]),
+    )
+    _atomic_png_file(prepared / "preview.png", encoded.preview)
+    return {
+        "source_size": source_size,
+        "payload_bytes": len(encoded.payload),
+        "profile": str(settings["profile"]),
+        "dither": str(settings["dither"]),
+        "stage": "preview_completed",
+    }
+
+
+def _prepare_test_release_child(
+    *, settings: dict[str, Any], input_path: str, prepared_path: str
+) -> dict[str, Any]:
+    prepared = Path(prepared_path)
+    prepared.mkdir(mode=0o700, parents=True)
+    image, source_size = _open_saved_upload(input_path, str(settings["input_suffix"]))
+    configuration = dict(settings["configuration"])
+    result = render_photo(
+        image,
+        profile_key=str(settings["profile"]),
+        preset=str(configuration["preset"]),
+        overrides=dict(configuration["overrides"]),
+        fit=str(settings["fit"]),
+        palette_rgb=configuration.get("palette_rgb"),
+        palette_lab=configuration.get("palette_lab"),
+        palette_version=str(configuration["palette_version"]),
+        text_regions=list(configuration.get("text_regions", [])),
+        face_regions=list(configuration.get("face_regions", [])),
+    )
+    profile = palette_for_profile(
+        str(settings["profile"]),
+        rgb_values=configuration.get("palette_rgb"),
+        lab_values=configuration.get("palette_lab"),
+        palette_version=str(configuration["palette_version"]),
+    )
+    (prepared / "payload.bin").write_bytes(result.encoded.payload)
+    _atomic_png_file(prepared / "preview.png", result.encoded.preview)
+    return {
+        "source_size": source_size,
+        "preset": configuration["requested_preset"],
+        "source_preset": result.preset,
+        "pipeline": result.options,
+        "dither": str(result.options["dither"]),
+        "color_distance": str(result.options["color_distance"]),
+        "dither_strength": float(result.options["error_strength"]),
+        "linear_light": bool(result.options.get("linear_light")),
+        "palette_version": profile.palette_version,
+        "palette": [
+            {"code": color.code, "name": color.name, "rgb": list(color.rgb)}
+            for color in result.encoded.palette
+        ],
+    }
 
 
 class RenderWorkloadService:
     """Persist bounded private inputs/results for existing background Jobs."""
 
     def __init__(
-        self, root: Path, publisher, devices, release_dir: Path, settings_repository
+        self,
+        root: Path,
+        publisher,
+        devices,
+        release_dir: Path,
+        settings_repository,
+        process_boundary,
+        job_repository,
     ) -> None:
         self.root = root.resolve()
         self.input_root = self.root / "inputs"
         self.result_root = self.root / "results"
+        self.prepared_root = self.root / "prepared"
         self.input_root.mkdir(parents=True, exist_ok=True)
         self.result_root.mkdir(parents=True, exist_ok=True)
+        self.prepared_root.mkdir(parents=True, exist_ok=True)
         self.publisher = publisher
         self.devices = devices
         self.release_dir = release_dir.resolve()
         self.settings = settings_repository
+        self.process_boundary = process_boundary
+        self.jobs = job_repository
         self.retention = timedelta(days=2)
         self.max_result_entries = 128
         self.max_result_bytes = 256 * 1024 * 1024
@@ -48,23 +232,63 @@ class RenderWorkloadService:
 
     @staticmethod
     def _atomic_png(path: Path, image: Image.Image) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handle, temporary_name = tempfile.mkstemp(
-            prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent
-        )
-        os.close(handle)
-        temporary = Path(temporary_name)
-        try:
-            image.save(temporary, "PNG", optimize=True)
-            os.replace(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        _atomic_png_file(path, image)
 
     def save_input(self, image: Image.Image) -> tuple[str, str]:
         token = uuid4().hex
         destination = self.input_root / f"{token}.png"
         self._atomic_png(destination, image.convert("RGB"))
         return token, sha256(destination.read_bytes()).hexdigest()
+
+    def save_upload(
+        self, stream: BinaryIO, *, suffix: str, max_bytes: int
+    ) -> tuple[str, str]:
+        if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}:
+            raise ValueError("IMG-002 照片格式不支援")
+        token = uuid4().hex
+        destination = self.input_root / f"{token}{suffix}"
+        handle, temporary_name = tempfile.mkstemp(
+            prefix=f".{token}-", suffix=".upload", dir=self.input_root
+        )
+        os.close(handle)
+        temporary = Path(temporary_name)
+        digest = sha256()
+        size = 0
+        try:
+            with temporary.open("wb") as output:
+                while chunk := stream.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > int(max_bytes):
+                        raise ValueError("IMG-002 照片不可超過 25 MiB")
+                    digest.update(chunk)
+                    output.write(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+            if size == 0:
+                raise ValueError("IMG-002 照片內容不可為空")
+            os.replace(temporary, destination)
+            return token, digest.hexdigest()
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def save_file(self, source: Path, *, max_bytes: int) -> tuple[str, str, str]:
+        suffix = source.suffix.lower()
+        if not source.is_file() or source.stat().st_size > int(max_bytes):
+            raise ValueError("IMG-002 照片不可超過 25 MiB")
+        with source.open("rb") as stream:
+            token, digest = self.save_upload(
+                stream, suffix=suffix, max_bytes=max_bytes
+            )
+        return token, digest, suffix
+
+    def input_path(self, token: str, *, suffix: str) -> Path:
+        self._validate_token(token)
+        if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}:
+            raise ValueError("invalid input suffix")
+        return self.input_root / f"{token}{suffix}"
+
+    def delete_input(self, token: str, *, suffix: str) -> None:
+        self.input_path(token, suffix=suffix).unlink(missing_ok=True)
 
     def _open_input(self, token: str) -> Image.Image:
         path = self.input_root / f"{self._validate_token(token)}.png"
@@ -80,6 +304,12 @@ class RenderWorkloadService:
         if name not in {"original", "legacy", "new", "preview"}:
             raise ValueError("invalid render result name")
         return self.result_root / token / f"{name}.png"
+
+    def save_background_preview(self, image: Image.Image) -> str:
+        token = uuid4().hex
+        self._atomic_png(self.result_path(token, "preview"), image)
+        self.cleanup()
+        return self._result_url(token, "preview")
 
     @staticmethod
     def _atomic_json(path: Path, value: dict) -> None:
@@ -133,6 +363,7 @@ class RenderWorkloadService:
 
     def compare(self, settings: dict) -> dict:
         input_token = self._validate_token(str(settings["input_token"]))
+        suffix = str(settings["input_suffix"])
         fingerprint = json.dumps(
             dict(settings["cache_fingerprint"]),
             ensure_ascii=False,
@@ -142,196 +373,212 @@ class RenderWorkloadService:
         token = sha256(fingerprint.encode("utf-8")).hexdigest()[:32]
         cached = self._cached_compare(token)
         if cached is not None:
-            (self.input_root / f"{input_token}.png").unlink(missing_ok=True)
+            self.delete_input(input_token, suffix=suffix)
             cached["cache_hit"] = True
             return cached
-        image = self._open_input(input_token)
-        configuration = dict(settings["configuration"])
-        result = render_photo(
-            image,
-            profile_key=str(settings["profile"]),
-            preset=str(configuration["preset"]),
-            overrides=dict(configuration["overrides"]),
-            fit=str(settings["fit"]),
-            palette_rgb=configuration.get("palette_rgb"),
-            palette_lab=configuration.get("palette_lab"),
-            palette_version=str(configuration["palette_version"]),
-            text_regions=list(configuration.get("text_regions", [])),
-            face_regions=list(configuration.get("face_regions", [])),
-        )
-        started = datetime.now(timezone.utc)
-        legacy = encode_image(
-            result.source,
-            profile_key=str(settings["profile"]),
-            dither="gooddisplay",
-            color_distance="rgb",
-            strength=1.0,
-        )
-        legacy_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
-        for name, output in {
-            "original": result.source,
-            "legacy": legacy.preview,
-            "new": result.encoded.preview,
-        }.items():
-            self._atomic_png(self.result_path(token, name), output)
-        response = {
+        prepared = self.prepared_root / uuid4().hex
+        try:
+            response = self.process_boundary.call(
+                _prepare_compare_child,
+                timeout_seconds=float(settings.get("timeout_seconds", 30)),
+                kwargs={
+                    "settings": settings,
+                    "input_path": str(self.input_path(input_token, suffix=suffix)),
+                    "prepared_path": str(prepared),
+                },
+                process_name="inktime-render-child",
+            )
+            final = self.result_root / token
+            if final.exists():
+                shutil.rmtree(final)
+            prepared.replace(final)
+        except Exception:
+            shutil.rmtree(prepared, ignore_errors=True)
+            raise
+        response.update({
             "original": self._result_url(token, "original"),
             "legacy": self._result_url(token, "legacy"),
             "new": self._result_url(token, "new"),
-            "source_size": str(settings["source_size"]),
-            "payload_bytes": len(result.encoded.payload),
-            "render_ms": result.render_ms,
-            "legacy_render_ms": legacy_ms,
-            "preset": str(configuration["requested_preset"]),
-            "source_preset": result.preset,
-            "dither": result.options["dither"],
-            "color_distance": result.options["color_distance"],
-            "linear_light": bool(result.options.get("linear_light")),
-            "palette": self._palette_statistics(result.encoded.preview, result.encoded.palette),
-            "publish_source": "server_original_upload_only",
-            "model": "disabled",
-            "cache_hit": False,
-            "stage": "preview_completed",
-        }
+        })
         self._atomic_json(self.result_root / token / "result.json", response)
-        (self.input_root / f"{input_token}.png").unlink(missing_ok=True)
+        self.delete_input(input_token, suffix=suffix)
         self.cleanup()
         return response
 
     def simulate(self, settings: dict) -> dict:
         token = self._validate_token(str(settings["input_token"]))
-        image = self._open_input(token)
-        size = (480, 800)
-        if str(settings["fit"]) == "cover":
-            canvas = ImageOps.fit(image, size, method=Image.Resampling.LANCZOS)
-        else:
-            fitted = ImageOps.contain(image, size, method=Image.Resampling.LANCZOS)
-            canvas = Image.new("RGB", size, "white")
-            canvas.paste(
-                fitted,
-                ((canvas.width - fitted.width) // 2, (canvas.height - fitted.height) // 2),
+        suffix = str(settings["input_suffix"])
+        prepared = self.prepared_root / uuid4().hex
+        try:
+            result = self.process_boundary.call(
+                _prepare_simulator_child,
+                timeout_seconds=float(settings.get("timeout_seconds", 30)),
+                kwargs={
+                    "settings": settings,
+                    "input_path": str(self.input_path(token, suffix=suffix)),
+                    "prepared_path": str(prepared),
+                },
+                process_name="inktime-render-child",
             )
-        encoded = encode_image(
-            canvas,
-            profile_key=str(settings["profile"]),
-            dither=str(settings["dither"]),
-            color_distance=str(settings["color_distance"]),
-            strength=float(settings["strength"]),
-        )
-        self._atomic_png(self.result_path(token, "preview"), encoded.preview)
-        (self.input_root / f"{token}.png").unlink(missing_ok=True)
+            final = self.result_root / token
+            if final.exists():
+                shutil.rmtree(final)
+            prepared.replace(final)
+        except Exception:
+            shutil.rmtree(prepared, ignore_errors=True)
+            raise
+        self.delete_input(token, suffix=suffix)
         self.cleanup()
-        return {
+        result.update({
             "preview": self._result_url(token, "preview"),
-            "source_size": str(settings["source_size"]),
-            "payload_bytes": len(encoded.payload),
-            "profile": str(settings["profile"]),
-            "dither": str(settings["dither"]),
-            "stage": "preview_completed",
-        }
+        })
+        return result
 
-    def test_release(self, settings: dict) -> dict:
+    def test_release(self, settings: dict, commit_context: dict[str, str]) -> dict:
         token = self._validate_token(str(settings["input_token"]))
+        suffix = str(settings["input_suffix"])
         device_id = str(settings["device_id"])
-        device = self.devices.get(device_id)
-        if device is None or not bool(device["enabled"]):
-            raise ValueError("DEVICE-006 找不到可用測試裝置")
         profile_key = str(settings["profile"])
-        if profile_key != str(device["panel_profile"]):
-            raise ValueError("DEVICE-006 測試色盤與裝置面板 Profile 不相容")
-        configuration = dict(settings["configuration"])
-        result = render_photo(
-            self._open_input(token),
-            profile_key=profile_key,
-            preset=str(configuration["preset"]),
-            overrides=dict(configuration["overrides"]),
-            fit=str(settings["fit"]),
-            palette_rgb=configuration.get("palette_rgb"),
-            palette_lab=configuration.get("palette_lab"),
-            palette_version=str(configuration["palette_version"]),
-            text_regions=list(configuration.get("text_regions", [])),
-            face_regions=list(configuration.get("face_regions", [])),
-        )
-        profile = palette_for_profile(
-            profile_key,
-            rgb_values=configuration.get("palette_rgb"),
-            lab_values=configuration.get("palette_lab"),
-            palette_version=str(configuration["palette_version"]),
-        )
-        manifest = self.publisher.publish(
-            [("device-test-upload", result.processed)],
-            profile_key=profile_key,
-            profile_override=profile,
-            dither=str(result.options["dither"]),
-            color_distance=str(result.options["color_distance"]),
-            dither_strength=float(result.options["error_strength"]),
-            linear_light=bool(result.options.get("linear_light")),
-            protected_mask=result.protected_mask,
-            activate=False,
-            release_kind="device_test",
-            metadata={
-                "preset": configuration["requested_preset"],
-                "source_preset": result.preset,
-                "pipeline": result.options,
-                "source_size": settings["source_size"],
-                "server_rendered": True,
-            },
-        )
-        assignment = DeviceTestReleaseStore(self.release_dir).assign(
-            device_id,
-            manifest["release_id"],
-            profile_key=profile_key,
-            delivery=str(settings["delivery"]),
-            one_time=bool(settings["one_time"]),
-            restore_formal=bool(settings["restore_formal"]),
-        )
-        saved_preset = None
-        if bool(settings.get("save_preset")):
-            try:
-                existing = json.loads(
-                    str(self.settings.get("render.custom_photo_presets", "{}"))
-                )
-            except (TypeError, ValueError, json.JSONDecodeError):
-                existing = {}
-            if not isinstance(existing, dict):
-                existing = {}
-            preset_id = f"custom-{uuid4().hex[:10]}"
-            saved_preset = {
-                "id": preset_id,
-                "label": str(settings.get("preset_label", "測試後儲存")).strip()[:80]
-                or "測試後儲存",
-                "source_preset": configuration["preset"],
-                "options": configuration["overrides"],
-                "palette": configuration["palette"],
-            }
-            existing[preset_id] = saved_preset
-            encoded = json.dumps(existing, ensure_ascii=False, separators=(",", ":"))
-            if len(encoded) > 50_000:
-                raise ValueError("RENDER-007 自訂 Preset 總資料量超過 50000 字元")
-            self.settings.update(
-                "render.custom_photo_presets",
-                encoded,
-                changed_by=str(settings.get("created_by", "system")),
-                source_ip="background-job",
+        prepared = self.prepared_root / uuid4().hex
+        context = dict(commit_context)
+
+        def cancelled() -> bool:
+            return not self.jobs.can_commit_item(
+                context["job_id"],
+                context["item_id"],
+                context["worker_id"],
+                context["idempotency_key"],
             )
-        (self.input_root / f"{token}.png").unlink(missing_ok=True)
-        return {
-            "release_id": manifest["release_id"],
-            "release_kind": "device_test",
-            "device_id": device_id,
-            "delivery": assignment["delivery"],
-            "one_time": assignment["one_time"],
-            "restore_formal": assignment["restore_formal"],
-            "formal_schedule_overwritten": False,
-            "server_rendered": True,
-            "saved_preset": saved_preset,
-            "stage": "device_test_completed",
-        }
+
+        def validate_device() -> dict:
+            current = self.devices.get(device_id)
+            if current is None or not bool(current["enabled"]):
+                raise ValueError("DEVICE-006 找不到可用測試裝置")
+            if profile_key != str(current["panel_profile"]):
+                raise ValueError("DEVICE-006 測試色盤與裝置面板 Profile 不相容")
+            return dict(current)
+
+        try:
+            if cancelled():
+                raise ProcessCallError("test release commit lease is no longer valid")
+            validate_device()
+            idempotency_key = context["idempotency_key"]
+            manifest = self.publisher.find_device_test_by_idempotency(idempotency_key)
+            created_release = False
+            if manifest is None:
+                prepared_result = self.process_boundary.call(
+                    _prepare_test_release_child,
+                    timeout_seconds=float(settings.get("timeout_seconds", 30)),
+                    kwargs={
+                        "settings": settings,
+                        "input_path": str(self.input_path(token, suffix=suffix)),
+                        "prepared_path": str(prepared),
+                    },
+                    cancel_requested=cancelled,
+                    process_name="inktime-render-child",
+                )
+                if cancelled():
+                    raise ProcessCallError(
+                        "test release commit lease is no longer valid"
+                    )
+                validate_device()
+                manifest = self.publisher.publish_preencoded(
+                    source_photo_id=str(
+                        settings.get("source_photo_id", "device-test-upload")
+                    ),
+                    payload_path=prepared / "payload.bin",
+                    preview_path=prepared / "preview.png",
+                    profile_key=profile_key,
+                    dither=str(prepared_result["dither"]),
+                    color_distance=str(prepared_result["color_distance"]),
+                    dither_strength=float(prepared_result["dither_strength"]),
+                    linear_light=bool(prepared_result["linear_light"]),
+                    palette=list(prepared_result["palette"]),
+                    palette_version=str(prepared_result["palette_version"]),
+                    metadata={
+                        "idempotency_key": idempotency_key,
+                        "preset": prepared_result["preset"],
+                        "source_preset": prepared_result["source_preset"],
+                        "pipeline": prepared_result["pipeline"],
+                        "source_size": prepared_result["source_size"],
+                        "server_rendered": True,
+                    },
+                )
+                created_release = True
+            if cancelled():
+                if created_release:
+                    self.publisher.discard_unassigned_device_test(
+                        str(manifest["release_id"]), idempotency_key
+                    )
+                raise ProcessCallError("test release commit lease is no longer valid")
+            if not created_release:
+                validate_device()
+            assignment = DeviceTestReleaseStore(self.release_dir).assign(
+                device_id,
+                manifest["release_id"],
+                profile_key=profile_key,
+                delivery=str(settings["delivery"]),
+                one_time=bool(settings["one_time"]),
+                restore_formal=bool(settings["restore_formal"]),
+            )
+            saved_preset = None
+            if bool(settings.get("save_preset")):
+                configuration = dict(settings["configuration"])
+                try:
+                    existing = json.loads(
+                        str(self.settings.get("render.custom_photo_presets", "{}"))
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    existing = {}
+                if not isinstance(existing, dict):
+                    existing = {}
+                preset_id = "custom-" + sha256(
+                    context["idempotency_key"].encode("utf-8")
+                ).hexdigest()[:10]
+                saved_preset = {
+                    "id": preset_id,
+                    "label": str(settings.get("preset_label", "測試後儲存")).strip()[:80]
+                    or "測試後儲存",
+                    "source_preset": configuration["preset"],
+                    "options": configuration["overrides"],
+                    "palette": configuration["palette"],
+                }
+                existing[preset_id] = saved_preset
+                encoded = json.dumps(
+                    existing, ensure_ascii=False, separators=(",", ":")
+                )
+                if len(encoded) > 50_000:
+                    raise ValueError(
+                        "RENDER-007 自訂 Preset 總資料量超過 50000 字元"
+                    )
+                self.settings.update(
+                    "render.custom_photo_presets",
+                    encoded,
+                    changed_by=str(settings.get("created_by", "system")),
+                    source_ip="background-job",
+                )
+            self.delete_input(token, suffix=suffix)
+            return {
+                "release_id": manifest["release_id"],
+                "release_kind": "device_test",
+                "device_id": device_id,
+                "delivery": assignment["delivery"],
+                "one_time": assignment["one_time"],
+                "restore_formal": assignment["restore_formal"],
+                "formal_schedule_overwritten": False,
+                "server_rendered": True,
+                "saved_preset": saved_preset,
+                "stage": "device_test_completed",
+            }
+        finally:
+            shutil.rmtree(prepared, ignore_errors=True)
 
     def cleanup(self) -> int:
         cutoff = datetime.now(timezone.utc) - self.retention
         removed = 0
-        for path in list(self.input_root.glob("*.png")) + list(self.result_root.glob("*/*")):
+        input_files = [path for path in self.input_root.iterdir() if path.is_file()]
+        prepared_files = list(self.prepared_root.glob("*/*"))
+        for path in input_files + list(self.result_root.glob("*/*")) + prepared_files:
             try:
                 modified_at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
             except OSError:
@@ -339,8 +586,13 @@ class RenderWorkloadService:
             if modified_at < cutoff:
                 path.unlink(missing_ok=True)
                 removed += 1
+        for directory in self.prepared_root.iterdir():
+            if directory.is_dir() and not any(directory.iterdir()):
+                directory.rmdir()
         inputs: list[tuple[Path, float, int]] = []
-        for path in self.input_root.glob("*.png"):
+        for path in self.input_root.iterdir():
+            if not path.is_file():
+                continue
             try:
                 stat = path.stat()
             except OSError:

@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+import json
 from threading import Condition, Lock
 from typing import Any
 
@@ -102,6 +104,30 @@ class WeatherService:
     def observability(self) -> dict[str, int]:
         with self._lock:
             return dict(self._metrics)
+
+    def snapshot_fingerprint(self) -> dict[str, Any] | None:
+        """Return the current in-memory snapshot identity without doing HTTP I/O."""
+
+        if not bool(self.settings.get("render.weather_enabled", False)):
+            return None
+        location = (
+            float(self.settings.get("render.weather_latitude", 25.033)),
+            float(self.settings.get("render.weather_longitude", 121.5654)),
+            str(self.settings.get("general.timezone", "Asia/Taipei")),
+            "open-meteo",
+        )
+        with self._lock:
+            entry = self._cache.get(location)
+            if entry is None or entry.value is None:
+                return {"location": list(location), "snapshot": None}
+            canonical = json.dumps(
+                entry.value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+            return {
+                "location": list(location),
+                "observed_at": entry.value.get("observed_at"),
+                "snapshot": sha256(canonical.encode("utf-8")).hexdigest(),
+            }
 
     def _trim_locked(self, now: datetime) -> None:
         expired = [

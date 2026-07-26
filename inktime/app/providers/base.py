@@ -28,6 +28,11 @@ class VisionProvider(ABC):
     def name(self, value: str) -> None:
         self._name = value
 
+    def process_spec(self) -> dict | None:
+        """Serializable child construction data, or None for cooperative timeout."""
+
+        return None
+
     @abstractmethod
     def analyze(
         self,

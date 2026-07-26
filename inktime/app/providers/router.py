@@ -105,11 +105,17 @@ class FailoverVisionProvider(VisionProvider):
             if not self._available(channel) or not channel.semaphore.acquire(blocking=False):
                 continue
             try:
-                response = boundary.call(
-                    channel.provider.analyze,
-                    timeout_seconds=float(getattr(channel.provider, "timeout", 120)),
-                    kwargs=kwargs,
-                )
+                specification = channel.provider.process_spec()
+                if specification is None:
+                    boundary.record_cooperative()
+                    response = channel.provider.analyze(**kwargs)
+                else:
+                    response = boundary.call_provider(
+                        specification,
+                        "analyze",
+                        timeout_seconds=float(getattr(channel.provider, "timeout", 120)),
+                        kwargs=kwargs,
+                    )
             except Exception as exc:
                 last_error = exc
                 with self._lock:
@@ -140,8 +146,13 @@ class FailoverVisionProvider(VisionProvider):
         channel = getattr(self._local, "channel", None)
         if channel is None:
             return self._execute("repair_json", **kwargs)
-        return boundary.call(
-            channel.provider.repair_json,
+        specification = channel.provider.process_spec()
+        if specification is None:
+            boundary.record_cooperative()
+            return channel.provider.repair_json(**kwargs)
+        return boundary.call_provider(
+            specification,
+            "repair_json",
             timeout_seconds=float(getattr(channel.provider, "timeout", 120)),
             kwargs=kwargs,
         )

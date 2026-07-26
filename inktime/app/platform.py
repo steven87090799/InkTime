@@ -188,6 +188,8 @@ def initialize_platform(
         app.extensions["inktime_device_repository"],
         release_dir,
         settings_repository,
+        app.extensions["inktime_process_boundary"],
+        app.extensions["inktime_job_repository"],
     )
     release_coordinator = ReleaseCoordinator(database, release_publisher)
     app.extensions["inktime_release_coordinator"] = release_coordinator

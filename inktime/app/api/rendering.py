@@ -5,13 +5,11 @@ from hashlib import sha256
 from io import BytesIO
 import json
 from pathlib import Path
-import tempfile
-import time
 import secrets
-import threading
+import tempfile
 
 from flask import Blueprint, abort, current_app, g, jsonify, render_template, request, send_file
-from PIL import Image, ImageDraw, ImageFont, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageDraw, ImageFont
 
 from inktime.app.web.access import administrator_required, login_required
 from inktime.app.core.paths import UnsafePathError, safe_join
@@ -22,9 +20,9 @@ from inktime.app.domain.rendering import (
     FONT_COMPATIBILITY_TEXT,
     FONT_PREVIEW_TEXT,
     FontCoverageError,
-    encode_image,
     profile_summaries,
 )
+from inktime.app.repositories.jobs import PreviewCapacityError
 from inktime.app.services.rendering import (
     FIT_MODES,
     FRAME_ORIENTATIONS,
@@ -35,18 +33,13 @@ from inktime.app.services.render_cache import RENDERER_VERSION
 
 
 bp = Blueprint("rendering", __name__)
-SIMULATOR_CANVAS_SIZE = (480, 800)
 SIMULATOR_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
 MAX_SIMULATOR_PHOTO_BYTES = 25 * 1024 * 1024
-MAX_SIMULATOR_PHOTO_PIXELS = 40_000_000
 MAX_FONT_BYTES = 64 * 1024 * 1024
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 VIRTUAL_DISPLAY_POLL_SECONDS = 5
-MAX_SYNC_PREVIEW_PIXELS = 12_000_000
-SYNC_PREVIEW_DEADLINE_SECONDS = 2.5
 PREVIEW_USER_JOB_LIMIT = 2
 PREVIEW_SYSTEM_JOB_LIMIT = 8
-_SYNC_PREVIEW_SEMAPHORE = threading.BoundedSemaphore(2)
 
 
 @bp.get("/rendering")
@@ -106,37 +99,6 @@ def _custom_photo_presets(settings=None) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _decode_uploaded_photo():
-    uploaded = request.files.get("photo")
-    if uploaded is None or not uploaded.filename:
-        abort(400, description="IMG-002 請選擇原始照片；Browser Canvas 不可直接發布")
-    suffix = Path(uploaded.filename).suffix.lower()
-    if suffix not in SIMULATOR_IMAGE_SUFFIXES:
-        abort(400, description="IMG-002 照片格式不支援")
-    content = BytesIO()
-    size = 0
-    while chunk := uploaded.stream.read(UPLOAD_CHUNK_BYTES):
-        size += len(chunk)
-        if size > MAX_SIMULATOR_PHOTO_BYTES:
-            abort(413, description="IMG-002 照片不可超過 25 MiB")
-        content.write(chunk)
-    content.seek(0)
-    try:
-        if suffix in {".heic", ".heif"}:
-            from pillow_heif import register_heif_opener
-
-            register_heif_opener()
-        with Image.open(content) as opened:
-            if opened.width * opened.height > MAX_SIMULATOR_PHOTO_PIXELS:
-                abort(413, description="IMG-002 照片像素不可超過 4000 萬")
-            opened.load()
-            source_size = f"{opened.width}x{opened.height}"
-            image = opened.copy()
-    except (UnidentifiedImageError, OSError):
-        abort(400, description="IMG-002 無法解碼照片")
-    return image, source_size
-
-
 def _json_form(name: str, default):
     raw = request.form.get(name)
     if raw in {None, ""}:
@@ -182,26 +144,27 @@ def _renderer_request() -> dict:
     }
 
 
-def _preview_capacity() -> None:
-    repository = current_app.extensions["inktime_job_repository"]
-    user_id = str(g.user["id"])
-    if repository.active_count("render_preview", created_by=user_id) >= PREVIEW_USER_JOB_LIMIT:
-        abort(429, description="RENDER-009 同一使用者最多可有 2 個 Preview Job")
-    if repository.active_count("render_preview") >= PREVIEW_SYSTEM_JOB_LIMIT:
-        abort(503, description="RENDER-009 系統 Preview Job 已達固定上限")
-
-
 def _start_preview_job(name: str, settings: dict) -> tuple[dict, int]:
-    _preview_capacity()
     repository = current_app.extensions["inktime_job_repository"]
-    job_id = repository.create_maintenance(
-        kind="render_preview",
-        name=name,
-        settings=settings,
-        created_by=str(g.user["id"]),
-        priority=6,
-    )
-    current_app.extensions["inktime_job_service"].start(job_id)
+    try:
+        job_id = repository.create_maintenance_with_capacity(
+            kind="render_preview",
+            name=name,
+            settings=settings,
+            created_by=str(g.user["id"]),
+            priority=6,
+            per_user_limit=PREVIEW_USER_JOB_LIMIT,
+            system_limit=PREVIEW_SYSTEM_JOB_LIMIT,
+        )
+    except PreviewCapacityError as exc:
+        if exc.scope == "user":
+            abort(429, description="RENDER-009 同一使用者最多可有 2 個 Preview Job")
+        abort(503, description="RENDER-009 系統 Preview Job 已達固定上限")
+    try:
+        current_app.extensions["inktime_job_service"].start(job_id)
+    except Exception:
+        repository.cancel(job_id)
+        raise
     return {
         "id": job_id,
         "job_id": job_id,
@@ -210,19 +173,28 @@ def _start_preview_job(name: str, settings: dict) -> tuple[dict, int]:
     }, 202
 
 
-def _queue_upload_workload(
-    operation: str, image: Image.Image, source_size: str, settings: dict
-) -> tuple[dict, int]:
-    _preview_capacity()
-    token, photo_sha = current_app.extensions[
-        "inktime_render_workload_service"
-    ].save_input(image)
+def _queue_upload_workload(operation: str, settings: dict) -> tuple[dict, int]:
+    uploaded = request.files.get("photo")
+    if uploaded is None or not uploaded.filename:
+        abort(400, description="IMG-002 請選擇原始照片；Browser Canvas 不可直接發布")
+    suffix = Path(uploaded.filename).suffix.lower()
+    if suffix not in SIMULATOR_IMAGE_SUFFIXES:
+        abort(400, description="IMG-002 照片格式不支援")
+    workload = current_app.extensions["inktime_render_workload_service"]
+    try:
+        token, photo_sha = workload.save_upload(
+            uploaded.stream,
+            suffix=suffix,
+            max_bytes=MAX_SIMULATOR_PHOTO_BYTES,
+        )
+    except ValueError as exc:
+        abort(413, description=str(exc))
     settings.update(
         {
             "operation": operation,
             "input_token": token,
+            "input_suffix": suffix,
             "photo_sha": photo_sha,
-            "source_size": source_size,
             "timeout_seconds": 30,
         }
     )
@@ -246,10 +218,16 @@ def _queue_upload_workload(
         "font_version": None,
         "output_dimensions": [480, 800],
     }
-    return _start_preview_job(
-        "Renderer A/B Preview" if operation == "compare" else "Renderer 測試 Release",
-        settings,
-    )
+    names = {
+        "compare": "Renderer A/B Preview",
+        "simulate": "電子紙模擬 Preview",
+        "test_release": "Renderer 測試 Release",
+    }
+    try:
+        return _start_preview_job(names[operation], settings)
+    except Exception:
+        workload.delete_input(token, suffix=suffix)
+        raise
 
 
 def _virtual_display_profile() -> str:
@@ -382,99 +360,21 @@ def simulate():
     if fit not in {"cover", "contain"}:
         abort(400, description="RENDER-004 圖片縮放模式不合法")
 
-    started = time.perf_counter()
-    with tempfile.TemporaryDirectory(prefix="inktime-simulator-") as directory:
-        source_path = Path(directory) / f"source{suffix}"
-        size = 0
-        with source_path.open("wb") as destination:
-            while chunk := uploaded.stream.read(UPLOAD_CHUNK_BYTES):
-                size += len(chunk)
-                if size > MAX_SIMULATOR_PHOTO_BYTES:
-                    abort(413, description="IMG-002 模擬照片不可超過 25 MiB")
-                destination.write(chunk)
-        try:
-            if suffix in {".heic", ".heif"}:
-                from pillow_heif import register_heif_opener
-
-                register_heif_opener()
-            with Image.open(source_path) as opened:
-                if opened.width * opened.height > MAX_SIMULATOR_PHOTO_PIXELS:
-                    abort(413, description="IMG-002 模擬照片像素不可超過 4000 萬")
-                opened.load()
-                source_size = f"{opened.width}x{opened.height}"
-                image = ImageOps.exif_transpose(opened).convert("RGB")
-            workload_settings = {
-                "profile": profile_key,
-                "dither": dither,
-                "color_distance": color_distance,
-                "fit": fit,
-                "strength": strength,
-            }
-            if (
-                image.width * image.height > MAX_SYNC_PREVIEW_PIXELS
-                or not _SYNC_PREVIEW_SEMAPHORE.acquire(blocking=False)
-            ):
-                return _queue_upload_workload(
-                    "simulate", image, source_size, workload_settings
-                )
-            try:
-                if fit == "cover":
-                    canvas = ImageOps.fit(
-                        image, SIMULATOR_CANVAS_SIZE, method=Image.Resampling.LANCZOS
-                    )
-                else:
-                    fitted = ImageOps.contain(
-                        image, SIMULATOR_CANVAS_SIZE, method=Image.Resampling.LANCZOS
-                    )
-                    canvas = Image.new("RGB", SIMULATOR_CANVAS_SIZE, "white")
-                    canvas.paste(
-                        fitted,
-                        ((canvas.width - fitted.width) // 2, (canvas.height - fitted.height) // 2),
-                    )
-                encoded = encode_image(
-                    canvas,
-                    profile_key=profile_key,
-                    dither=dither,
-                    color_distance=color_distance,
-                    strength=strength,
-                )
-            finally:
-                _SYNC_PREVIEW_SEMAPHORE.release()
-        except (UnidentifiedImageError, OSError):
-            abort(400, description="IMG-002 無法解碼模擬照片")
-        except ValueError as exc:
-            description = str(exc)
-            abort(
-                400,
-                description=(
-                    description if "-" in description[:12] else f"RENDER-004 {description}"
-                ),
-            )
-
-    render_seconds = time.perf_counter() - started
-    current_app.extensions["inktime_render_cache"].record_duration(
-        int(render_seconds * 1000), background=False
+    return _queue_upload_workload(
+        "simulate",
+        {
+            "profile": profile_key,
+            "dither": dither,
+            "color_distance": color_distance,
+            "fit": fit,
+            "strength": strength,
+        },
     )
-    if render_seconds > SYNC_PREVIEW_DEADLINE_SECONDS:
-        return _queue_upload_workload("simulate", image, source_size, workload_settings)
-    output = BytesIO()
-    encoded.preview.save(output, "PNG", optimize=True)
-    output.seek(0)
-    response = send_file(output, mimetype="image/png", max_age=0)
-    response.headers["X-InkTime-Profile"] = profile_key
-    response.headers["X-InkTime-Dither"] = dither
-    response.headers["X-InkTime-Canvas"] = "480x800"
-    response.headers["X-InkTime-Source"] = source_size
-    response.headers["X-InkTime-Payload-Bytes"] = str(len(encoded.payload))
-    response.headers["X-InkTime-Render-Ms"] = str(int(render_seconds * 1000))
-    response.headers["X-InkTime-Model"] = "disabled"
-    return response
 
 
 @bp.post("/api/v1/rendering/compare")
 @login_required
 def compare_renderer():
-    image, source_size = _decode_uploaded_photo()
     profile_key = str(request.form.get("profile", "gdep073e01_6c"))
     fit = str(request.form.get("fit", "cover"))
     if profile_key not in DISPLAY_PROFILES:
@@ -482,8 +382,6 @@ def compare_renderer():
     configuration = _renderer_request()
     return _queue_upload_workload(
         "compare",
-        image,
-        source_size,
         {
             "profile": profile_key,
             "fit": fit,
@@ -544,7 +442,6 @@ def save_photo_preset():
 @bp.post("/api/v1/rendering/test-release")
 @administrator_required
 def publish_test_release():
-    image, source_size = _decode_uploaded_photo()
     device_id = str(request.form.get("device_id", "")).strip()
     device = current_app.extensions["inktime_device_repository"].get(device_id)
     if device is None:
@@ -569,8 +466,6 @@ def publish_test_release():
     }
     return _queue_upload_workload(
         "test_release",
-        image,
-        source_size,
         {
             "device_id": device_id,
             "profile": profile_key,
@@ -637,88 +532,42 @@ def preview(photo_id: str):
             profile=profile_key if quantized else None,
             dither=dither if quantized else None,
         )
-        photo = render_service.photos.get_with_path(photo_id)
     except KeyError:
         abort(404)
-    if photo is None:
-        abort(404)
-    pixels = int(photo["width"] or 0) * int(photo["height"] or 0)
     cache = current_app.extensions["inktime_render_cache"]
-    image = cache.get(fingerprint)
-    cache_status = "hit" if image is not None else "miss"
-    if image is None and (
-        pixels > MAX_SYNC_PREVIEW_PIXELS or not _SYNC_PREVIEW_SEMAPHORE.acquire(blocking=False)
-    ):
+    cached = cache.get_bytes(fingerprint)
+    if cached is None:
         return _start_preview_job(
             "Renderer 背景 Preview",
             {"operation": "library_preview", "arguments": arguments, "fingerprint": fingerprint},
         )
-    if image is None:
-        started = time.monotonic()
-        try:
-            image = render_service.render_photo(
-                photo_id,
-                layout=layout,
-                crop_x=crop_x,
-                crop_y=crop_y,
-                secondary_photo_id=secondary_photo_id,
-                orientation=orientation,
-                fit_mode=fit_mode,
-            )
-            if quantized:
-                image = encode_image(
-                    image,
-                    profile_key=profile_key,
-                    dither=dither,
-                    color_distance=str(settings.get("render.color_distance", "oklab")),
-                    strength=float(settings.get("render.dither_strength", 1.0)),
-                ).preview
-        except KeyError:
-            abort(404)
-        finally:
-            _SYNC_PREVIEW_SEMAPHORE.release()
-        duration_seconds = time.monotonic() - started
-        cache.record_duration(int(duration_seconds * 1000), background=False)
-        # Rotation is part of the cache payload and its fingerprint.
-        layout_key = layout or str(settings.get("render.layout", "photo_info"))
-        orientation_key = orientation or str(
-            settings.get("render.frame_orientation", "portrait")
-        )
-        effective_orientation = (
-            "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
-        )
-        if effective_orientation == "landscape":
-            image = image.transpose(Image.Transpose.ROTATE_90)
-        cache.put(fingerprint, image)
-        if duration_seconds > SYNC_PREVIEW_DEADLINE_SECONDS:
-            return _start_preview_job(
-                "Renderer 背景 Preview",
-                {"operation": "library_preview", "arguments": arguments, "fingerprint": fingerprint},
-            )
-    else:
-        layout_key = layout or str(settings.get("render.layout", "photo_info"))
-        orientation_key = orientation or str(
-            settings.get("render.frame_orientation", "portrait")
-        )
-        effective_orientation = (
-            "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
-        )
-    output = BytesIO()
-    image.save(output, "PNG")
-    output.seek(0)
-    response = send_file(output, mimetype="image/png", max_age=0)
+    layout_key = layout or str(settings.get("render.layout", "photo_info"))
+    orientation_key = orientation or str(
+        settings.get("render.frame_orientation", "portrait")
+    )
+    effective_orientation = (
+        "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
+    )
+    response = send_file(cached, mimetype="image/png", max_age=0)
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-InkTime-Layout"] = layout or str(
         settings.get("render.layout", "photo_info")
     )
     response.headers["X-InkTime-Orientation"] = effective_orientation
-    response.headers["X-InkTime-Renderer-Cache"] = cache_status
+    response.headers["X-InkTime-Renderer-Cache"] = "hit"
     return response
 
 
 @bp.get("/api/v1/rendering/background-results/<token>/<name>.png")
 @login_required
 def background_render_result(token: str, name: str):
+    repository = current_app.extensions["inktime_job_repository"]
+    if not repository.can_access_background_result(
+        token,
+        str(g.user["id"]),
+        administrator=str(g.user["role"]) == "administrator",
+    ):
+        abort(404)
     try:
         path = current_app.extensions["inktime_render_workload_service"].result_path(
             token, name
@@ -832,16 +681,60 @@ def publish_history_test_release():
     profile_key = str(settings.get("render.profile", "safe_4c"))
     if profile_key != str(device["panel_profile"]):
         abort(409, description="DEVICE-006 目前渲染 Profile 與裝置面板不相容")
-    return _start_preview_job(
-        "歷史照片測試 Release",
-        {
-            "operation": "history_test_release",
-            "photo_id": photo_id,
-            "device_id": device_id,
-            "profile": profile_key,
-            "delivery": str(payload.get("delivery", "next_wake")),
+    photo = current_app.extensions["inktime_photo_repository"].get_with_path(photo_id)
+    if photo is None:
+        abort(404, description="HISTORY-001 找不到照片")
+    try:
+        source = safe_join(Path(photo["root_path"]), str(photo["relative_path"]))
+    except UnsafePathError:
+        abort(404, description="HISTORY-001 照片路徑不合法")
+    workload = current_app.extensions["inktime_render_workload_service"]
+    try:
+        token, photo_sha, suffix = workload.save_file(
+            source, max_bytes=MAX_SIMULATOR_PHOTO_BYTES
+        )
+    except ValueError as exc:
+        abort(413, description=str(exc))
+    job_settings = {
+        "operation": "history_test_release",
+        "input_token": token,
+        "input_suffix": suffix,
+        "photo_sha": photo_sha,
+        "source_photo_id": photo_id,
+        "device_id": device_id,
+        "profile": profile_key,
+        "fit": str(settings.get("render.fit_mode", "contain")),
+        "delivery": str(payload.get("delivery", "next_wake")),
+        "one_time": True,
+        "restore_formal": True,
+        "save_preset": False,
+        "created_by": str(g.user["id"]),
+        "timeout_seconds": 30,
+        "configuration": {
+            "requested_preset": "photo_balanced",
+            "preset": "photo_balanced",
+            "overrides": {
+                "dither": str(settings.get("render.dither", "floyd_steinberg")),
+                "color_distance": str(
+                    settings.get("render.color_distance", "oklab")
+                ),
+                "error_strength": float(
+                    settings.get("render.dither_strength", 1.0)
+                ),
+            },
+            "palette": {"mode": "default"},
+            "palette_rgb": None,
+            "palette_lab": None,
+            "palette_version": "builtin",
+            "text_regions": [],
+            "face_regions": [],
         },
-    )
+    }
+    try:
+        return _start_preview_job("歷史照片測試 Release", job_settings)
+    except Exception:
+        workload.delete_input(token, suffix=suffix)
+        raise
 
 
 @bp.get("/rendering/releases/<release_id>/<filename>")

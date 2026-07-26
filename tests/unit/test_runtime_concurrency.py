@@ -2,15 +2,22 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
 import multiprocessing
 from pathlib import Path
 import sqlite3
+import threading
 import time
 
 from PIL import Image
 import requests
 
 from inktime.app.db.connection import ManagedConnection
+from inktime.app.providers.base import ProviderResponse, Usage
+from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
+from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
+from inktime.app.repositories.jobs import PreviewCapacityError
 from inktime.app.services.render_cache import BoundedRenderCache
 from inktime.app.services.weather import WeatherService
 from inktime.app.workers.job_worker import BoundedJobWorker
@@ -25,6 +32,41 @@ def _hang(_item):
 def _hang_call(*, seconds: float):
     time.sleep(seconds)
     return "late"
+
+
+class _ProviderHandler(BaseHTTPRequestHandler):
+    def do_POST(self):  # noqa: N802 - stdlib callback name
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        payload = json.dumps(
+            {
+                "choices": [{"message": {"content": "{}"}}],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+            }
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, _format, *_args):
+        return None
+
+
+class _ForbiddenParentSession:
+    def post(self, *_args, **_kwargs):
+        raise AssertionError("parent HTTP session must not be used by isolated child")
+
+    def close(self):
+        return None
+
+
+class _CooperativeProvider(OpenAICompatibleProvider):
+    def process_spec(self):
+        return None
+
+    def analyze(self, **_kwargs):
+        return ProviderResponse("cooperative", Usage())
 
 
 def test_hard_timeout_terminates_joins_and_rejects_late_result(app):
@@ -73,9 +115,124 @@ def test_provider_call_process_boundary_has_hard_cap_and_shutdown_cleanup():
         "active_max": 1,
         "timeout": 1,
         "terminated": 1,
+        "cooperative": 0,
     }
     boundary.shutdown()
     assert not [child for child in multiprocessing.active_children() if child.name == "inktime-provider-child"]
+
+
+def test_four_parent_threads_use_spawned_provider_children_without_inheriting_session(
+    tmp_path: Path,
+):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ProviderHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    image = tmp_path / "provider.jpg"
+    Image.new("RGB", (8, 8), "white").save(image)
+    provider = OpenAICompatibleProvider(
+        name="spawn-test",
+        base_url=f"http://127.0.0.1:{server.server_port}",
+        api_key="",
+        timeout=5,
+        session=_ForbiddenParentSession(),
+    )
+    router = FailoverVisionProvider(
+        [ProviderChannel(provider=provider, max_concurrency=4)]
+    )
+    boundary = KillableProcessBoundary(max_processes=2)
+    try:
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            responses = list(
+                executor.map(
+                    lambda _index: router.analyze_isolated(
+                        boundary,
+                        image_path=image,
+                        model="test-model",
+                        detail="low",
+                        stage="stage_one",
+                    ),
+                    range(4),
+                )
+            )
+        assert [response.content for response in responses] == ["{}"] * 4
+        assert boundary.start_method == "spawn"
+        assert boundary.observability()["active_max"] <= 2
+    finally:
+        boundary.shutdown()
+        server.shutdown()
+        server.server_close()
+    assert not [
+        child
+        for child in multiprocessing.active_children()
+        if child.name == "inktime-provider-child"
+    ]
+
+
+def test_provider_without_serializable_spec_uses_cooperative_timeout():
+    provider = _CooperativeProvider(
+        name="cooperative",
+        base_url="http://unused.invalid",
+        api_key="",
+    )
+    router = FailoverVisionProvider([ProviderChannel(provider=provider)])
+    boundary = KillableProcessBoundary(max_processes=1)
+    response = router.analyze_isolated(
+        boundary,
+        image_path=Path("unused.jpg"),
+        model="test",
+        detail="low",
+        stage="stage_one",
+    )
+    assert response.content == "cooperative"
+    assert boundary.observability()["active_max"] == 0
+    assert boundary.observability()["cooperative"] == 1
+
+
+def test_preview_capacity_is_atomic_for_twenty_requests_from_one_user(app):
+    repository = app.extensions["inktime_job_repository"]
+
+    def create(index: int) -> str:
+        try:
+            return repository.create_maintenance_with_capacity(
+                kind="render_preview",
+                name=f"preview-{index}",
+                settings={},
+                created_by="same-user",
+                priority=6,
+                per_user_limit=2,
+                system_limit=8,
+            )
+        except PreviewCapacityError as exc:
+            return exc.scope
+
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        results = list(executor.map(create, range(20)))
+    assert results.count("user") == 18
+    assert repository.active_count("render_preview", created_by="same-user") == 2
+    assert repository.active_count("render_preview") == 2
+
+
+def test_preview_capacity_is_atomic_for_twenty_distinct_users(app):
+    repository = app.extensions["inktime_job_repository"]
+
+    def create(index: int) -> str:
+        try:
+            return repository.create_maintenance_with_capacity(
+                kind="render_preview",
+                name=f"preview-{index}",
+                settings={},
+                created_by=f"user-{index}",
+                priority=6,
+                per_user_limit=2,
+                system_limit=8,
+            )
+        except PreviewCapacityError as exc:
+            return exc.scope
+
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        results = list(executor.map(create, range(20)))
+    assert results.count("system") == 12
+    assert repository.active_count("render_preview") == 8
 
 
 class _WeatherResponse:

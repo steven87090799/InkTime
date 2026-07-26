@@ -614,11 +614,24 @@ class PhotoAnalysisService:
             if self.process_boundary is not None and hasattr(provider, "analyze_isolated"):
                 response = provider.analyze_isolated(self.process_boundary, **call)
             elif self.process_boundary is not None:
-                response = self.process_boundary.call(
-                    provider.analyze,
-                    timeout_seconds=float(getattr(provider, "timeout", 120)),
-                    kwargs=call,
-                )
+                specification = provider.process_spec()
+                if specification is None:
+                    self.process_boundary.record_cooperative()
+                    response = provider.analyze(
+                        image_path=image,
+                        model=model,
+                        detail=detail,
+                        stage=stage,
+                        max_tokens=max_tokens,
+                        caption_controls=caption_controls,
+                    )
+                else:
+                    response = self.process_boundary.call_provider(
+                        specification,
+                        "analyze",
+                        timeout_seconds=float(getattr(provider, "timeout", 120)),
+                        kwargs=call,
+                    )
             else:
                 response = provider.analyze(
                     image_path=image,
@@ -660,11 +673,17 @@ class PhotoAnalysisService:
             if self.process_boundary is not None and hasattr(provider, "repair_json_isolated"):
                 repaired = provider.repair_json_isolated(self.process_boundary, **repair_call)
             elif self.process_boundary is not None:
-                repaired = self.process_boundary.call(
-                    provider.repair_json,
-                    timeout_seconds=float(getattr(provider, "timeout", 120)),
-                    kwargs=repair_call,
-                )
+                specification = provider.process_spec()
+                if specification is None:
+                    self.process_boundary.record_cooperative()
+                    repaired = provider.repair_json(**repair_call)
+                else:
+                    repaired = self.process_boundary.call_provider(
+                        specification,
+                        "repair_json",
+                        timeout_seconds=float(getattr(provider, "timeout", 120)),
+                        kwargs=repair_call,
+                    )
             else:
                 repaired = provider.repair_json(**repair_call)
             total_cost += self._record(

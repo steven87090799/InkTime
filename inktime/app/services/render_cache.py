@@ -86,6 +86,34 @@ class BoundedRenderCache:
             self._metrics["hit"] += 1
             return image
 
+    def get_bytes(self, fingerprint: dict[str, Any]) -> BytesIO | None:
+        """Return a verified cache hit without decoding pixels in the Web thread."""
+
+        key = self.fingerprint(fingerprint)
+        path = self._path(key)
+        with self._lock:
+            if not path.is_file():
+                self._metrics["miss"] += 1
+                return None
+            try:
+                if datetime.fromtimestamp(path.stat().st_mtime, timezone.utc) < (
+                    datetime.now(timezone.utc) - self.retention
+                ):
+                    path.unlink(missing_ok=True)
+                    self._metrics["miss"] += 1
+                    return None
+                payload = path.read_bytes()
+                with Image.open(BytesIO(payload)) as opened:
+                    opened.verify()
+                os.utime(path, None)
+            except (OSError, UnidentifiedImageError, ValueError):
+                path.unlink(missing_ok=True)
+                self._metrics["corrupt"] += 1
+                self._metrics["miss"] += 1
+                return None
+            self._metrics["hit"] += 1
+            return BytesIO(payload)
+
     def put(self, fingerprint: dict[str, Any], image: Image.Image) -> str:
         key = self.fingerprint(fingerprint)
         destination = self._path(key)

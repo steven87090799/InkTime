@@ -15,7 +15,7 @@ from inktime.app.core.logging import configure_logging, log_event
 from inktime.app.workers.job_worker import BoundedJobWorker
 from inktime.app.workers.scanner import PhotoScanner
 from inktime.app.domain.photos import PhotoPreprocessor
-from inktime.app.domain.rendering import DeviceTestReleaseStore, encode_image
+from inktime.app.domain.rendering import encode_image
 from inktime.app.services.rendering import PORTRAIT_ONLY_LAYOUTS
 
 
@@ -152,7 +152,15 @@ class WorkerRunner:
                     elif operation == "test_release":
                         result = self.app.extensions[
                             "inktime_render_workload_service"
-                        ].test_release(settings)
+                        ].test_release(
+                            settings,
+                            {
+                                "job_id": str(job["id"]),
+                                "item_id": str(item["id"]),
+                                "worker_id": str(item["worker_id"]),
+                                "idempotency_key": str(item["idempotency_key"]),
+                            },
+                        )
                     elif operation == "library_preview":
                         arguments = dict(settings["arguments"])
                         service = self.app.extensions["inktime_render_service"]
@@ -194,49 +202,22 @@ class WorkerRunner:
                             render_cache.put(fingerprint, image)
                         result = {
                             "stage": "preview_completed",
-                            "preview_url": f"/api/v1/rendering/preview/{arguments['photo_id']}",
+                            "preview_url": self.app.extensions[
+                                "inktime_render_workload_service"
+                            ].save_background_preview(image),
                         }
                     elif operation == "history_test_release":
-                        photo_id = str(settings["photo_id"])
-                        device_id = str(settings["device_id"])
-                        profile_key = str(settings["profile"])
-                        image = self.app.extensions[
-                            "inktime_render_service"
-                        ].render_photo(photo_id)
-                        manifest = self.app.extensions[
-                            "inktime_release_publisher"
-                        ].publish(
-                            [(photo_id, image)],
-                            profile_key=profile_key,
-                            dither=str(runtime_settings.get("render.dither", "floyd_steinberg")),
-                            color_distance=str(runtime_settings.get("render.color_distance", "oklab")),
-                            dither_strength=float(runtime_settings.get("render.dither_strength", 1.0)),
-                            activate=False,
-                            release_kind="device_test",
-                            metadata={
-                                "server_rendered": True,
-                                "source_photo_id": photo_id,
-                                "history_selection": True,
+                        result = self.app.extensions[
+                            "inktime_render_workload_service"
+                        ].test_release(
+                            settings,
+                            {
+                                "job_id": str(job["id"]),
+                                "item_id": str(item["id"]),
+                                "worker_id": str(item["worker_id"]),
+                                "idempotency_key": str(item["idempotency_key"]),
                             },
                         )
-                        assignment = DeviceTestReleaseStore(
-                            self.app.config["INKTIME_RELEASE_DIR"]
-                        ).assign(
-                            device_id,
-                            manifest["release_id"],
-                            profile_key=profile_key,
-                            delivery=str(settings.get("delivery", "next_wake")),
-                            one_time=True,
-                            restore_formal=True,
-                        )
-                        result = {
-                            "release_id": manifest["release_id"],
-                            "release_kind": "device_test",
-                            "server_rendered": True,
-                            "formal_schedule_overwritten": False,
-                            "delivery": assignment["delivery"],
-                            "stage": "device_test_completed",
-                        }
                     else:
                         raise ValueError("RENDER-008 不支援的背景渲染工作")
                     result["render_duration_ms"] = int(
@@ -431,10 +412,7 @@ class WorkerRunner:
                 error_callback=log_failure,
                 result_callback=record_result,
                 timeout_seconds=int(settings.get("timeout_seconds", 0) or 0),
-                hard_timeout=(
-                    str(job["kind"]) == "render_preview"
-                    and str(settings.get("operation")) in {"compare", "simulate"}
-                ),
+                hard_timeout=False,
             )
             log_event(
                 LOGGER,
