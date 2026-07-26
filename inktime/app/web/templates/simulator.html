@@ -189,6 +189,16 @@
     data.set('face_regions', '[]');
     return data;
   }
+  async function waitForJob(created) {
+    for(let attempt=0;attempt<120;attempt+=1){
+      const response=await window.inktimeFetch(created.status_url); const body=await response.json();
+      if(!response.ok) throw new Error(body.message||'無法取得背景工作狀態');
+      if(body.status==='completed') return body.result;
+      if(['completed_with_errors','failed','cancelled','budget_exceeded'].includes(body.status)) throw new Error(body.error_code||'背景工作未完成');
+      await new Promise(resolve=>setTimeout(resolve,750));
+    }
+    throw new Error('背景工作仍在執行，請稍後至工作中心查看');
+  }
   function updatePaletteMeta() {
     const item = profileMap[profile.value];
     document.getElementById('palette-meta').textContent = `${item.panel_profile}／${item.palette_version}；內建理論 RGB 保持不變。`;
@@ -203,8 +213,8 @@
   async function compare(event) {
     event.preventDefault(); compareButton.disabled=true; setStatus('Server 正在產生原圖、舊算法與新算法…');
     try {
-      const response=await window.inktimeFetch('/api/v1/rendering/compare',{method:'POST',body:formData()}); const body=await response.json();
-      if(!response.ok) throw new Error(body.message||'A/B 預覽失敗'); lastResult=body;
+      const response=await window.inktimeFetch('/api/v1/rendering/compare',{method:'POST',body:formData()}); const created=await response.json();
+      if(!response.ok) throw new Error(created.message||'A/B 預覽失敗'); const body=await waitForJob(created); lastResult=body;
       for(const key of ['original','legacy','new']) { const image=document.getElementById(`${key}-image`); image.src=body[key]; image.hidden=false; document.getElementById(`${key}-empty`).hidden=true; }
       document.getElementById('simulator-meta').hidden=false; document.getElementById('meta-source').textContent=body.source_size; document.getElementById('meta-bytes').textContent=`${body.payload_bytes.toLocaleString()} bytes`; document.getElementById('meta-time').textContent=`${body.render_ms} / ${body.legacy_render_ms} ms`; document.getElementById('meta-renderer').textContent=`${body.preset}／${body.dither}`; document.getElementById('download-result').href=body.new;
       const rows=document.getElementById('palette-stat-body'); rows.replaceChildren(...body.palette.map(item=>{const row=document.createElement('tr');const color=document.createElement('td');const swatch=document.createElement('i');swatch.style.backgroundColor=`rgb(${item.rgb.join(',')})`;color.append(swatch,document.createTextNode(item.name));const pixels=document.createElement('td');pixels.textContent=item.pixels.toLocaleString();const ratio=document.createElement('td');ratio.textContent=`${(item.ratio*100).toFixed(2)}%`;row.append(color,pixels,ratio);return row;})); document.getElementById('palette-statistics').hidden=false;
@@ -218,7 +228,7 @@
   async function sendTest() {
     const select=document.getElementById('test-device'); if(!select.value){setStatus('請選擇測試裝置','error');return;} if(select.selectedOptions[0].dataset.profile!==profile.value){setStatus('裝置 Profile 與目前面板不相容','error');return;}
     const button=document.getElementById('send-test'); button.disabled=true; setStatus('Server 正式渲染並建立獨立測試 Release…');
-    try { const data=formData(); data.set('device_id',select.value); data.set('delivery',document.getElementById('test-delivery').value); data.set('one_time',document.getElementById('one-time').checked); data.set('restore_formal',document.getElementById('restore-formal').checked); data.set('save_preset',document.getElementById('save-and-send').checked); data.set('preset_label','測試後儲存'); const response=await window.inktimeFetch('/api/v1/rendering/test-release',{method:'POST',body:data}); const body=await response.json(); if(!response.ok)throw new Error(body.message||'測試 Release 建立失敗'); setStatus(`測試 Release ${body.release_id} 已指派；正式排程未覆寫。`,'success'); } catch(error){setStatus(error.message||'測試傳送失敗','error');} finally{button.disabled=!lastResult;}
+    try { const data=formData(); data.set('device_id',select.value); data.set('delivery',document.getElementById('test-delivery').value); data.set('one_time',document.getElementById('one-time').checked); data.set('restore_formal',document.getElementById('restore-formal').checked); data.set('save_preset',document.getElementById('save-and-send').checked); data.set('preset_label','測試後儲存'); const response=await window.inktimeFetch('/api/v1/rendering/test-release',{method:'POST',body:data}); const created=await response.json(); if(!response.ok)throw new Error(created.message||'測試 Release 建立失敗'); const body=await waitForJob(created); const preset=body.preset_saved===false?` Preset 未儲存（${body.preset_error||'RENDER-PRESET-WRITE'}）。`:body.preset_saved?' Preset 已儲存。':''; setStatus(`測試 Release ${body.release_id} 已指派；正式排程未覆寫。${preset}`,'success'); } catch(error){setStatus(error.message||'測試傳送失敗','error');} finally{button.disabled=!lastResult;}
   }
   photo.addEventListener('change',()=>{compareButton.disabled=!photo.files[0];setStatus(photo.files[0]?`已選擇 ${photo.files[0].name}`:'請先選擇原始照片。','ready');});
   document.getElementById('drop-zone').addEventListener('drop',event=>{event.preventDefault(); if(event.dataTransfer.files[0]){const transfer=new DataTransfer();transfer.items.add(event.dataTransfer.files[0]);photo.files=transfer.files;photo.dispatchEvent(new Event('change'));}}); document.getElementById('drop-zone').addEventListener('dragover',event=>event.preventDefault());

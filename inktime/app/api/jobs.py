@@ -18,18 +18,33 @@ def _repository():
     return current_app.extensions["inktime_job_repository"]
 
 
+def _job_or_404(job_id: str):
+    repository = _repository()
+    job = repository.get(job_id)
+    if job is None or not repository.can_access(
+        job_id,
+        str(g.user["id"]),
+        administrator=str(g.user["role"]) == "administrator",
+    ):
+        abort(404)
+    return job
+
+
 @bp.get("/jobs")
 @login_required
 def jobs_page():
-    return render_template("jobs.html", jobs=_repository().list())
+    jobs = (
+        _repository().list()
+        if str(g.user["role"]) == "administrator"
+        else _repository().list_for_user(str(g.user["id"]))
+    )
+    return render_template("jobs.html", jobs=jobs)
 
 
 @bp.get("/jobs/<job_id>")
 @login_required
 def job_detail(job_id: str):
-    job = _repository().get(job_id)
-    if job is None:
-        abort(404)
+    job = _job_or_404(job_id)
     page = max(1, request.args.get("page", 1, type=int))
     return render_template(
         "job_detail.html",
@@ -77,6 +92,33 @@ def control_job(job_id: str, action: str):
     return {"status": "ok", "affected": result if isinstance(result, int) else None}
 
 
+@bp.get("/api/v1/jobs/<job_id>")
+@login_required
+def job_status(job_id: str):
+    job = _job_or_404(job_id)
+    items = _repository().list_items(job_id, limit=1)
+    result = None
+    error_code = None
+    if items:
+        error_code = items[0]["error_code"]
+        if items[0]["result_json"]:
+            try:
+                result = json.loads(str(items[0]["result_json"]))
+            except json.JSONDecodeError:
+                result = None
+    response = {
+        "id": str(job["id"]),
+        "kind": str(job["kind"]),
+        "status": str(job["status"]),
+        "completed_items": int(job["completed_items"]),
+        "failed_items": int(job["failed_items"]),
+        "total_items": int(job["total_items"]),
+        "result": result,
+        "error_code": error_code,
+    }
+    return response
+
+
 @bp.post("/api/v1/jobs/estimate")
 @administrator_required
 def estimate_job():
@@ -90,8 +132,7 @@ def estimate_job():
 @bp.get("/api/v1/jobs/<job_id>/export")
 @login_required
 def export_job(job_id: str):
-    if _repository().get(job_id) is None:
-        abort(404)
+    _job_or_404(job_id)
 
     def generate():
         yield '{"job_id":' + json.dumps(job_id) + ',"items":['

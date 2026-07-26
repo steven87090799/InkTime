@@ -27,6 +27,7 @@ class WorkerRunner:
 
     def request_stop(self, *_args) -> None:
         self.stop.set()
+        self.app.extensions["inktime_process_boundary"].shutdown()
         if self.current:
             self.current.request_stop()
 
@@ -131,7 +132,65 @@ class WorkerRunner:
                 scanner_disk_batch_size=scanner_disk_batch_size,
                 scanner_write_batch_size=scanner_write_batch_size,
                 scanner_missing_threshold_ratio=scanner_missing_threshold_ratio,
+                runtime_settings=runtime_settings,
             ):
+                if job["kind"] == "render_preview":
+                    operation = str(settings.get("operation", ""))
+                    started = time.perf_counter()
+                    if operation == "compare":
+                        result = self.app.extensions[
+                            "inktime_render_workload_service"
+                        ].compare(settings)
+                    elif operation == "simulate":
+                        result = self.app.extensions[
+                            "inktime_render_workload_service"
+                        ].simulate(settings)
+                    elif operation == "test_release":
+                        result = self.app.extensions[
+                            "inktime_render_workload_service"
+                        ].test_release(
+                            settings,
+                            {
+                                "job_id": str(job["id"]),
+                                "item_id": str(item["id"]),
+                                "worker_id": str(item["worker_id"]),
+                                "idempotency_key": str(item["idempotency_key"]),
+                            },
+                        )
+                    elif operation == "library_preview":
+                        service = self.app.extensions["inktime_render_service"]
+                        render_cache = self.app.extensions["inktime_render_cache"]
+                        result = self.app.extensions[
+                            "inktime_render_workload_service"
+                        ].library_preview(
+                            settings,
+                            {
+                                "job_id": str(job["id"]),
+                                "item_id": str(item["id"]),
+                                "worker_id": str(item["worker_id"]),
+                                "idempotency_key": str(item["idempotency_key"]),
+                            },
+                            render_service=service,
+                            render_cache=render_cache,
+                        )
+                    elif operation == "history_test_release":
+                        result = self.app.extensions[
+                            "inktime_render_workload_service"
+                        ].test_release(
+                            settings,
+                            {
+                                "job_id": str(job["id"]),
+                                "item_id": str(item["id"]),
+                                "worker_id": str(item["worker_id"]),
+                                "idempotency_key": str(item["idempotency_key"]),
+                            },
+                        )
+                    else:
+                        raise ValueError("RENDER-008 不支援的背景渲染工作")
+                    result["render_duration_ms"] = int(
+                        (time.perf_counter() - started) * 1000
+                    )
+                    return result
                 if job["kind"] == "scan":
                     scanner = PhotoScanner(
                         self.app.extensions["inktime_photo_repository"],
@@ -250,6 +309,10 @@ class WorkerRunner:
                         retention_days=int(settings.get("retention_days", 30)),
                         active_hashes=hashes,
                     )
+                if job["kind"] == "webhook":
+                    return self.app.extensions[
+                        "inktime_notification_service"
+                    ].deliver_one(int(settings["notification_id"]))
                 return analysis.analyze_photo(
                     photo_id=item["photo_id"],
                     job_id=job["id"],
@@ -281,6 +344,19 @@ class WorkerRunner:
                     force_ai=bool(settings.get("force_ai", False)),
                 )
 
+            def record_result(
+                result: dict, *, job=job, settings=settings
+            ) -> None:
+                if str(job["kind"]) != "render_preview":
+                    return
+                self.app.extensions["inktime_render_cache"].record_duration(
+                    int(result.get("render_duration_ms", 0)), background=True
+                )
+                if str(settings.get("operation")) == "compare":
+                    self.app.extensions[
+                        "inktime_render_workload_service"
+                    ].record_compare_cache(bool(result.get("cache_hit")))
+
             self.current = BoundedJobWorker(
                 repository,
                 processor,
@@ -301,7 +377,9 @@ class WorkerRunner:
                 progress_interval_seconds=progress_seconds,
                 progress_callback=log_progress,
                 error_callback=log_failure,
+                result_callback=record_result,
                 timeout_seconds=int(settings.get("timeout_seconds", 0) or 0),
+                hard_timeout=False,
             )
             log_event(
                 LOGGER,
@@ -336,6 +414,9 @@ class WorkerRunner:
                         "failed": int(finished["failed_items"]),
                         "total": int(finished["total_items"]),
                         "max_in_flight": self.current.max_observed_futures,
+                        "worker_child_active": self.current.child_active,
+                        "worker_child_timeout": self.current.child_timeouts,
+                        "worker_child_terminated": self.current.child_terminated,
                     },
                 )
             self.current = None

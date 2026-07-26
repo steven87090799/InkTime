@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
+import pytest
+
+from inktime.app.repositories.jobs import PreviewCapacityError
 from inktime.app.services.jobs import JobService
 from inktime.app.workers.job_worker import BoundedJobWorker
 
@@ -158,3 +161,81 @@ def test_active_dedupe_key_prevents_duplicate_maintenance_work(app):
         kind="cleanup", name="快取清理", settings={}, created_by="tester", dedupe_key="scheduled:cache_cleanup"
     )
     assert second == first
+    with app.extensions["inktime_database"].session() as connection:
+        created = connection.execute(
+            "SELECT message FROM job_events WHERE job_id=? AND event='created'",
+            (first,),
+        ).fetchall()
+    assert [str(row["message"]) for row in created] == ["已建立 cleanup 維護工作"]
+
+
+def test_each_maintenance_job_has_one_kind_specific_created_event(app):
+    repository = app.extensions["inktime_job_repository"]
+    for kind in ("scan", "backup", "webhook", "render_preview"):
+        job_id = repository.create_maintenance(
+            kind=kind,
+            name=f"{kind} test",
+            settings={},
+            created_by="tester",
+        )
+        with app.extensions["inktime_database"].session() as connection:
+            rows = connection.execute(
+                "SELECT message FROM job_events WHERE job_id=? AND event='created'",
+                (job_id,),
+            ).fetchall()
+        assert [str(row["message"]) for row in rows] == [
+            f"已建立 {kind} 維護工作"
+        ]
+
+
+def test_preview_capacity_failure_leaves_no_job_item_or_event(app):
+    repository = app.extensions["inktime_job_repository"]
+    owner_job_id = repository.create_maintenance_with_capacity(
+        kind="render_preview",
+        name="capacity owner",
+        settings={},
+        created_by="same-user",
+        priority=6,
+        per_user_limit=1,
+        system_limit=8,
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        created = connection.execute(
+            "SELECT message FROM job_events WHERE job_id=? AND event='created'",
+            (owner_job_id,),
+        ).fetchall()
+        before = tuple(
+            int(value)
+            for value in connection.execute(
+                "SELECT (SELECT COUNT(*) FROM jobs),"
+                "(SELECT COUNT(*) FROM job_items),"
+                "(SELECT COUNT(*) FROM job_events)"
+            ).fetchone()
+        )
+    assert [str(row["message"]) for row in created] == [
+        "已建立 render_preview 維護工作"
+    ]
+    with pytest.raises(PreviewCapacityError):
+        repository.create_maintenance_with_capacity(
+            kind="render_preview",
+            name="must roll back",
+            settings={},
+            created_by="same-user",
+            priority=6,
+            per_user_limit=1,
+            system_limit=8,
+        )
+    with app.extensions["inktime_database"].session() as connection:
+        after = tuple(
+            int(value)
+            for value in connection.execute(
+                "SELECT (SELECT COUNT(*) FROM jobs),"
+                "(SELECT COUNT(*) FROM job_items),"
+                "(SELECT COUNT(*) FROM job_events)"
+            ).fetchone()
+        )
+        leaked = connection.execute(
+            "SELECT COUNT(*) FROM jobs WHERE name='must roll back'"
+        ).fetchone()[0]
+    assert after == before
+    assert int(leaked) == 0

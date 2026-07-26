@@ -36,9 +36,13 @@ class SchedulerRunner:
         if time.monotonic() - self.last_notification_scan_at >= scan_seconds:
             notification_service.scan()
             self.last_notification_scan_at = time.monotonic()
-        # Webhook 的第一、第二次重試分別在 60、300 秒後到期；每次 Scheduler
-        # tick 只做一次有索引的 pending 查詢，沒有待送通知時不產生網路或 Log。
-        notification_service.deliver_pending()
+        # Scheduler 只做有界 Claim；實際 HTTP 由既有 Job Queue 處理，慢端點
+        # 不會卡住排程掃描與備份。
+        notification_service.enqueue_pending(
+            self.app.extensions["inktime_job_repository"],
+            self.app.extensions["inktime_job_service"],
+            limit=10,
+        )
         zone = ZoneInfo(str(settings.get("general.timezone", "Asia/Taipei")))
         now = datetime.now(zone)
         schedule_repository = self.app.extensions["inktime_schedule_repository"]

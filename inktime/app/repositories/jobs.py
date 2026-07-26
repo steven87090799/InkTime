@@ -13,6 +13,12 @@ ACTIVE_STATUSES = {"preparing", "running", "pausing", "retrying"}
 TERMINAL_STATUSES = {"completed", "completed_with_errors", "failed", "cancelled"}
 
 
+class PreviewCapacityError(RuntimeError):
+    def __init__(self, scope: str) -> None:
+        self.scope = scope
+        super().__init__(scope)
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -122,7 +128,15 @@ class JobRepository:
         priority: int | None = None,
         dedupe_key: str | None = None,
     ) -> str:
-        if kind not in {"scan", "backup", "render", "cleanup", "virtual_display"}:
+        if kind not in {
+            "scan",
+            "backup",
+            "render",
+            "render_preview",
+            "cleanup",
+            "virtual_display",
+            "webhook",
+        }:
             raise ValueError("不支援的維護工作")
         job_id = str(uuid4())
         item_id = str(uuid4())
@@ -161,21 +175,133 @@ class JobRepository:
                     "INSERT INTO job_items(id,job_id,photo_id,available_at) VALUES (?,?,NULL,?)",
                     (item_id, job_id, now),
                 )
+                connection.execute(
+                    "INSERT INTO job_events(job_id,event,message,details_json,created_at) VALUES (?,?,?,?,?)",
+                    (
+                        job_id,
+                        "created",
+                        f"已建立 {kind} 維護工作",
+                        "{}",
+                        now,
+                    ),
+                )
                 connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
-        self.add_event(job_id, "created", f"已建立 {kind} 維護工作")
+        return job_id
+
+    def create_maintenance_with_capacity(
+        self,
+        *,
+        kind: str,
+        name: str,
+        settings: dict,
+        created_by: str,
+        priority: int,
+        per_user_limit: int,
+        system_limit: int,
+    ) -> str:
+        """Count and create a one-item Preview Job under one writer lock."""
+
+        if kind != "render_preview":
+            raise ValueError("容量限制只適用於 Preview Job")
+        job_id = str(uuid4())
+        item_id = str(uuid4())
+        now = utc_now()
+        active = "('pending','preparing','running','pausing','retrying')"
+        with self.database.session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                user_count = int(
+                    connection.execute(
+                        f"SELECT COUNT(*) FROM jobs WHERE kind=? AND created_by=? AND status IN {active}",  # noqa: S608
+                        (kind, created_by),
+                    ).fetchone()[0]
+                )
+                if user_count >= max(1, int(per_user_limit)):
+                    raise PreviewCapacityError("user")
+                system_count = int(
+                    connection.execute(
+                        f"SELECT COUNT(*) FROM jobs WHERE kind=? AND status IN {active}",  # noqa: S608
+                        (kind,),
+                    ).fetchone()[0]
+                )
+                if system_count >= max(1, int(system_limit)):
+                    raise PreviewCapacityError("system")
+                connection.execute(
+                    """
+                    INSERT INTO jobs(
+                        id,kind,name,status,strategy,settings_json,total_items,
+                        created_by,created_at,priority
+                    ) VALUES (?,?,?,'pending','local',?,1,?,?,?)
+                    """,
+                    (
+                        job_id,
+                        kind,
+                        name,
+                        json.dumps(settings, ensure_ascii=False),
+                        created_by,
+                        now,
+                        max(1, min(int(priority), 6)),
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO job_items(id,job_id,photo_id,available_at) VALUES (?,?,NULL,?)",
+                    (item_id, job_id, now),
+                )
+                connection.execute(
+                    "INSERT INTO job_events(job_id,event,message,details_json,created_at) VALUES (?,?,?,?,?)",
+                    (
+                        job_id,
+                        "created",
+                        f"已建立 {kind} 維護工作",
+                        "{}",
+                        now,
+                    ),
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
         return job_id
 
     @staticmethod
     def _priority_for(kind: str) -> int:
-        return {"render": 2, "virtual_display": 2, "scan": 4, "cleanup": 6, "backup": 6}.get(kind, 4)
+        return {
+            "render": 2,
+            "virtual_display": 2,
+            "scan": 4,
+            "webhook": 5,
+            "render_preview": 6,
+            "cleanup": 6,
+            "backup": 6,
+        }.get(kind, 4)
+
+    def active_count(self, kind: str, *, created_by: str | None = None) -> int:
+        where = "kind=? AND status IN ('pending','preparing','running','pausing','retrying')"
+        parameters: list[object] = [kind]
+        if created_by is not None:
+            where += " AND created_by=?"
+            parameters.append(created_by)
+        with self.database.session() as connection:
+            row = connection.execute(
+                f"SELECT COUNT(*) FROM jobs WHERE {where}",  # noqa: S608
+                parameters,
+            ).fetchone()
+        return int(row[0]) if row else 0
 
     def list(self, limit: int = 100):
         with self.database.session() as connection:
             return connection.execute(
                 "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+
+    def list_for_user(self, user_id: str, limit: int = 100):
+        with self.database.session() as connection:
+            return connection.execute(
+                "SELECT * FROM jobs WHERE created_by=? ORDER BY created_at DESC LIMIT ?",
+                (user_id, limit),
             ).fetchall()
 
     def iter_runnable(self, page_size: int = 100):
@@ -205,6 +331,71 @@ class JobRepository:
                 "SELECT * FROM job_items WHERE job_id=? ORDER BY id LIMIT ? OFFSET ?",
                 (job_id, limit, offset),
             ).fetchall()
+
+    def can_access(self, job_id: str, user_id: str, *, administrator: bool) -> bool:
+        with self.database.session() as connection:
+            row = connection.execute(
+                "SELECT created_by FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+        return bool(
+            row is not None
+            and (administrator or str(row["created_by"] or "") == str(user_id))
+        )
+
+    def can_access_background_result(
+        self, token: str, user_id: str, *, administrator: bool
+    ) -> bool:
+        if administrator:
+            return True
+        marker = f"/background-results/{token}/"
+        with self.database.session() as connection:
+            rows = connection.execute(
+                """
+                SELECT i.result_json
+                FROM job_items i JOIN jobs j ON j.id=i.job_id
+                WHERE j.kind='render_preview' AND j.created_by=?
+                  AND i.result_json IS NOT NULL AND i.result_json LIKE ?
+                ORDER BY i.completed_at DESC LIMIT 20
+                """,
+                (user_id, f"%{marker}%"),
+            ).fetchall()
+        for row in rows:
+            try:
+                result = json.loads(str(row["result_json"]))
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(result, dict) and any(
+                isinstance(value, str) and marker in value for value in result.values()
+            ):
+                return True
+        return False
+
+    def can_commit_item(
+        self,
+        job_id: str,
+        item_id: str,
+        worker_id: str,
+        idempotency_key: str,
+    ) -> bool:
+        now = utc_now()
+        with self.database.session() as connection:
+            row = connection.execute(
+                """
+                SELECT j.status job_status,i.status item_status,i.worker_id,
+                       i.lease_until,i.idempotency_key
+                FROM jobs j JOIN job_items i ON i.job_id=j.id
+                WHERE j.id=? AND i.id=?
+                """,
+                (job_id, item_id),
+            ).fetchone()
+        return bool(
+            row is not None
+            and str(row["job_status"]) in {"running", "retrying"}
+            and str(row["item_status"]) == "running"
+            and str(row["worker_id"] or "") == worker_id
+            and str(row["idempotency_key"] or "") == idempotency_key
+            and str(row["lease_until"] or "") > now
+        )
 
     def add_event(self, job_id: str, event: str, message: str, details: dict | None = None) -> None:
         with self.database.session() as connection:

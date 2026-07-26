@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import calendar
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 import random
@@ -32,6 +33,7 @@ from inktime.app.repositories.render_candidates import RenderCandidateRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.services.weather import WeatherService
 from inktime.app.services.release_coordinator import ReleaseCoordinator
+from inktime.app.services.render_cache import RENDERER_VERSION
 
 
 LAYOUTS = {
@@ -76,6 +78,170 @@ class RenderService:
     def _activity(self, event: str, message: str, **fields) -> None:
         if self.observability is not None:
             self.observability.record("DEBUG", "renderer", event, message, **fields)
+
+    def preview_fingerprint(
+        self,
+        photo_id: str,
+        *,
+        layout: str | None = None,
+        crop_x: float | None = None,
+        crop_y: float | None = None,
+        secondary_photo_id: str | None = None,
+        orientation: str | None = None,
+        fit_mode: str | None = None,
+        profile: str | None = None,
+        dither: str | None = None,
+    ) -> dict[str, Any]:
+        photo = self.photos.get_with_path(photo_id)
+        if photo is None:
+            raise KeyError(photo_id)
+        secondary = (
+            self.photos.get_with_path(secondary_photo_id) if secondary_photo_id else None
+        )
+        layout_key = layout or str(self.settings.get("render.layout", "photo_info"))
+        frame_orientation = orientation or str(
+            self.settings.get("render.frame_orientation", "portrait")
+        )
+        effective_frame = (
+            "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else frame_orientation
+        )
+        profile_key = profile or str(self.settings.get("render.profile", "safe_4c"))
+        font_reference = str(self.settings.get("render.font_path", ""))
+        font_path = self.fonts.resolve(font_reference)
+        font_stat = font_path.stat()
+        profile_definition = DISPLAY_PROFILES[profile_key]
+
+        def photo_version(row, *, x=None, y=None) -> dict[str, Any] | None:
+            if row is None:
+                return None
+            effective = self._orientation_for(row)
+            return {
+                "sha256": str(row["sha256"] or ""),
+                "exif_normalized": True,
+                "exif_orientation_original": row["exif_orientation_original"],
+                "effective_visual_orientation": effective.rotation_degrees,
+                "orientation_source": effective.source,
+                "ai_orientation": row["visual_orientation_rotation_cw"],
+                "ai_orientation_updated_at": row["updated_at"],
+                "manual_orientation": row["manual_orientation_rotation_cw"],
+                "manual_orientation_updated_at": row[
+                    "manual_orientation_updated_at"
+                ],
+                "manual_crop": [
+                    x if x is not None else row["crop_manual_x"],
+                    y if y is not None else row["crop_manual_y"],
+                ],
+                "auto_focus": [row["crop_focus_x"], row["crop_focus_y"]],
+                "subject_box": list(self._subject_box(row) or ()),
+                "photo_updated_at": row["updated_at"],
+            }
+
+        with self.database.session() as connection:
+            analysis = connection.execute(
+                """
+                SELECT id,side_caption,semantic_json,created_at
+                FROM photo_analysis WHERE photo_id=?
+                ORDER BY created_at DESC,id DESC LIMIT 1
+                """,
+                (photo_id,),
+            ).fetchone()
+        side_caption = str(analysis["side_caption"] or "") if analysis else ""
+        semantic = str(analysis["semantic_json"] or "") if analysis else ""
+        weather_snapshot = (
+            self.weather.snapshot_fingerprint()
+            if self.weather is not None and layout_key == "weather_sensor"
+            else None
+        )
+        if (
+            layout_key == "weather_sensor"
+            and (
+                weather_snapshot is None
+                or weather_snapshot.get("snapshot") is None
+            )
+        ):
+            # A Web process without the Worker's in-memory Weather snapshot must
+            # not reuse a preview across observations. The completed Job returns
+            # its owner-bound background result directly.
+            weather_snapshot = {
+                "cache_scope": "single_job",
+                "request_nonce": datetime.now(timezone.utc).isoformat(),
+            }
+        location_text = self.location_name(photo)
+        return {
+            "primary_photo": photo_version(photo, x=crop_x, y=crop_y),
+            "secondary_photo": photo_version(secondary),
+            "analysis": {
+                "id": int(analysis["id"]) if analysis else None,
+                "created_at": analysis["created_at"] if analysis else None,
+                "side_caption_hash": hashlib.sha256(
+                    side_caption.encode("utf-8")
+                ).hexdigest(),
+                "semantic_hash": hashlib.sha256(semantic.encode("utf-8")).hexdigest(),
+                "caption_style": str(
+                    self.settings.get("analysis.copy_default_style", "natural")
+                ),
+                "caption_variants_enabled": bool(
+                    self.settings.get("analysis.caption_variants_enabled", False)
+                ),
+                "advanced_caption_enabled": bool(
+                    self.settings.get("analysis.advanced_caption_enabled", False)
+                ),
+                "caption_wrap_enabled": bool(
+                    self.settings.get("render.caption_wrap_enabled", False)
+                ),
+                "caption_max_lines": int(
+                    self.settings.get("render.caption_max_lines", 2)
+                ),
+                "caption_min_font_size": int(
+                    self.settings.get("render.caption_min_font_size", 17)
+                ),
+            },
+            "render_settings": {
+                "fit_mode": fit_mode
+                or str(self.settings.get("render.fit_mode", "contain")),
+                "layout": layout_key,
+                "frame_orientation": effective_frame,
+                "profile": profile_key,
+                "panel_profile": profile_definition.panel_profile,
+                "palette_version": profile_definition.palette_version,
+                "custom_palette_hash": None,
+                "dither": dither
+                or str(self.settings.get("render.dither", "floyd_steinberg")),
+                "color_distance": str(
+                    self.settings.get("render.color_distance", "oklab")
+                ),
+                "strength": float(
+                    self.settings.get("render.dither_strength", 1.0)
+                ),
+                "linear_light": False,
+                "preset": layout_key,
+                "show_location": bool(
+                    self.settings.get("render.show_location", True)
+                ),
+                "show_capture_date": bool(
+                    self.settings.get("render.show_capture_date", True)
+                ),
+                "timezone": str(
+                    self.settings.get("general.timezone", "Asia/Taipei")
+                ),
+                "weather_enabled": bool(
+                    self.settings.get("render.weather_enabled", False)
+                ),
+                "output_dimensions": [480, 800],
+            },
+            "font_version": {
+                "resolved_identifier": hashlib.sha256(
+                    str(font_path).encode("utf-8")
+                ).hexdigest(),
+                "size": font_stat.st_size,
+                "mtime_ns": font_stat.st_mtime_ns,
+            },
+            "weather_snapshot": weather_snapshot,
+            "location_snapshot": hashlib.sha256(
+                location_text.encode("utf-8")
+            ).hexdigest(),
+            "renderer_version": RENDERER_VERSION,
+        }
 
     def location_name(self, photo) -> str:
         if self.locations is None or not bool(self.settings.get("render.show_location", True)):

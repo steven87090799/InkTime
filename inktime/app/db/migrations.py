@@ -859,6 +859,13 @@ MIGRATIONS = (
         "CREATE INDEX IF NOT EXISTS idx_photos_captured_month_day ON photos(captured_month_day,captured_date,id)",
         "CREATE INDEX IF NOT EXISTS idx_photos_capture_date_status ON photos(capture_date_status,id)",
     )),
+    Migration(21, "加入 Webhook 冪等鍵與持久化重試 Claim", (
+        "ALTER TABLE device_notifications ADD COLUMN webhook_idempotency_key TEXT",
+        "ALTER TABLE device_notifications ADD COLUMN webhook_claimed_until TEXT",
+        "UPDATE device_notifications SET webhook_idempotency_key='legacy:' || id WHERE webhook_idempotency_key IS NULL",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_device_notifications_idempotency ON device_notifications(webhook_idempotency_key)",
+        "CREATE INDEX IF NOT EXISTS idx_device_notifications_claim ON device_notifications(webhook_status,webhook_next_attempt_at,webhook_claimed_until,id)",
+    )),
 )
 
 

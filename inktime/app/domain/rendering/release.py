@@ -176,6 +176,119 @@ class AtomicReleasePublisher:
                 continue
         return sorted(releases, key=lambda item: item["created_at"], reverse=True)
 
+    def find_device_test_by_idempotency(self, idempotency_key: str) -> dict | None:
+        for manifest in self.list():
+            options = manifest.get("render_options") or {}
+            if (
+                manifest.get("release_kind") == "device_test"
+                and isinstance(options, dict)
+                and str(options.get("idempotency_key") or "") == idempotency_key
+            ):
+                try:
+                    return self.validate(str(manifest["release_id"]))
+                except ValueError:
+                    continue
+        return None
+
+    def discard_unassigned_device_test(
+        self, release_id: str, idempotency_key: str
+    ) -> None:
+        release = self.root / release_id
+        manifest_path = release / "manifest.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        options = manifest.get("render_options") or {}
+        if (
+            release.parent == self.root
+            and manifest.get("release_kind") == "device_test"
+            and isinstance(options, dict)
+            and str(options.get("idempotency_key") or "") == idempotency_key
+        ):
+            shutil.rmtree(release, ignore_errors=True)
+
+    def publish_preencoded(
+        self,
+        *,
+        source_photo_id: str,
+        payload_path: Path,
+        preview_path: Path,
+        profile_key: str,
+        dither: str,
+        color_distance: str,
+        dither_strength: float,
+        linear_light: bool,
+        palette: builtin_list[dict[str, Any]],
+        palette_version: str,
+        metadata: dict[str, Any],
+    ) -> dict:
+        """Commit verified child output without re-running Pillow/NumPy rendering."""
+
+        profile = get_display_profile(profile_key)
+        payload = payload_path.read_bytes()
+        expected = 480 * 800 // (4 if profile.pixel_format == "2bpp" else 2)
+        if len(payload) != expected:
+            raise ValueError("RENDER-002 索引影像檔案大小驗證失敗")
+        with Image.open(preview_path) as opened:
+            opened.verify()
+            if opened.size != (480, 800):
+                raise ValueError("RENDER-002 Preview 尺寸不合法")
+        release_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(3)
+        temporary = self.root / f".{release_id}.tmp"
+        final = self.root / release_id
+        temporary.mkdir(mode=0o750)
+        try:
+            payload_target = temporary / "photo_1.bin"
+            preview_target = temporary / "preview_1.png"
+            shutil.copyfile(payload_path, payload_target)
+            shutil.copyfile(preview_path, preview_target)
+            manifest: dict[str, Any] = {
+                "schema_version": 1 if profile.pixel_format == "2bpp" else 2,
+                "release_id": release_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "display_type": profile.display_type,
+                "render_profile": profile.key,
+                "panel_profile": profile.panel_profile,
+                "palette_version": str(palette_version)[:80],
+                "release_kind": "device_test",
+                "width": 480,
+                "height": 800,
+                "pixel_format": profile.pixel_format,
+                "orientation": "portrait",
+                "panel_capabilities": {
+                    "supports_partial_refresh": profile.supports_partial_refresh,
+                    "requires_full_refresh": profile.requires_full_refresh,
+                    "supports_hibernate": profile.supports_hibernate,
+                    "minimum_refresh_interval_seconds": profile.minimum_refresh_interval_seconds,
+                },
+                "dither": dither,
+                "dither_strength": float(dither_strength),
+                "color_distance": color_distance,
+                "palette": palette,
+                "files": [
+                    {
+                        "name": "photo_1.bin",
+                        "size": len(payload),
+                        "sha256": sha256(payload).hexdigest(),
+                        "source_photo_id": source_photo_id,
+                        "preview": "preview_1.png",
+                    }
+                ],
+                "render_options": dict(metadata, linear_light=bool(linear_light)),
+            }
+            (temporary / "manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            for path in temporary.iterdir():
+                with path.open("rb") as stream:
+                    os.fsync(stream.fileno())
+            temporary.replace(final)
+            return manifest
+        except Exception:
+            shutil.rmtree(temporary, ignore_errors=True)
+            raise
+
     def validate(self, release_id: str) -> dict:
         release_dir = self.root / release_id
         manifest_path = release_dir / "manifest.json"

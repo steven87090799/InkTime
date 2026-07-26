@@ -47,6 +47,37 @@ class OpenAICompatibleProvider(VisionProvider):
         self.caption_controls = dict(caption_controls or {})
         self.session = session or requests.Session()
 
+    def process_spec(self) -> dict[str, Any]:
+        return {
+            "provider_kind": "openai_compatible",
+            "name": self.name,
+            "base_url": self.base_url,
+            "api_key": self.api_key,
+            "timeout": self.timeout,
+            "supports_json_schema": self.supports_json_schema,
+            "scoring_rules": self.scoring_rules,
+            "caption_controls": self.caption_controls,
+        }
+
+    @classmethod
+    def from_process_spec(cls, specification: dict[str, Any]):
+        if str(specification.get("provider_kind")) != "openai_compatible":
+            raise ValueError("unsupported provider process specification")
+        return cls(
+            name=str(specification["name"]),
+            base_url=str(specification["base_url"]),
+            api_key=str(specification.get("api_key", "")),
+            timeout=float(specification.get("timeout", 120)),
+            supports_json_schema=bool(
+                specification.get("supports_json_schema", True)
+            ),
+            scoring_rules=str(specification.get("scoring_rules", DEFAULT_SCORING_RULES)),
+            caption_controls=dict(specification.get("caption_controls") or {}),
+        )
+
+    def close(self) -> None:
+        self.session.close()
+
     @property
     def system_prompt(self) -> str:
         return self._system_prompt(self.caption_controls)

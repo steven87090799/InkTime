@@ -29,7 +29,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 def test_fresh_database_is_migrated(tmp_path):
     database = Database(tmp_path / "inktime.db")
-    assert migrate(database) == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    assert migrate(database) == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
     assert database.integrity_check() == "ok"
     with database.session() as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -53,7 +53,7 @@ def test_fresh_database_is_migrated(tmp_path):
             "settings_snapshots",
             "settings_snapshot_items",
         } <= tables
-    assert tuple(history) == (20, 20)
+    assert tuple(history) == (21, 21)
 
 
 def test_existing_photo_scores_table_is_preserved(tmp_path):
@@ -133,7 +133,7 @@ def test_concurrent_migrations_are_serialized(tmp_path):
     database = Database(tmp_path / "inktime.db")
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _index: migrate(database), range(2)))
-    assert sorted(results, key=len) == [[], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]]
+    assert sorted(results, key=len) == [[], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]]
     assert database.integrity_check() == "ok"
 
 
@@ -328,7 +328,7 @@ def test_v10_photo_state_and_analysis_survive_scheduler_upgrade(monkeypatch, tmp
         )
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    assert migrate(database, tmp_path / "backups") == [11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
     with database.session() as connection:
         photo = connection.execute(
             "SELECT favorite,status,lifecycle_status,metadata_status,local_features_status FROM photos WHERE id='photo'"
@@ -338,3 +338,47 @@ def test_v10_photo_state_and_analysis_survive_scheduler_upgrade(monkeypatch, tmp
         ).fetchone()[0]
     assert tuple(photo) == (1, "analyzed", "active", "complete", "complete")
     assert caption == "舊描述"
+
+
+def test_migration_21_upgrades_v20_webhooks_idempotently(monkeypatch, tmp_path):
+    database = Database(tmp_path / "inktime.db")
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:20])
+    migrate(database)
+    with database.session() as connection:
+        connection.execute(
+            """
+            INSERT INTO device_notifications(
+                kind,level,title,message,webhook_status,created_at
+            ) VALUES ('test','info','舊通知','backfill','pending',datetime('now'))
+            """
+        )
+        notification_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
+    assert migrate(database, tmp_path / "backups") == [21]
+    assert migrate(database, tmp_path / "backups") == []
+    assert database.integrity_check() == "ok"
+    with database.session() as connection:
+        row = connection.execute(
+            "SELECT webhook_idempotency_key,webhook_claimed_until "
+            "FROM device_notifications WHERE id=?",
+            (notification_id,),
+        ).fetchone()
+        indexes = {
+            str(index["name"]): int(index["unique"])
+            for index in connection.execute("PRAGMA index_list(device_notifications)")
+        }
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT INTO device_notifications(
+                    kind,level,title,message,webhook_status,
+                    webhook_idempotency_key,created_at
+                ) VALUES ('test','info','重複','duplicate','pending',?,datetime('now'))
+                """,
+                (row["webhook_idempotency_key"],),
+            )
+    assert row["webhook_idempotency_key"] == f"legacy:{notification_id}"
+    assert row["webhook_claimed_until"] is None
+    assert indexes["idx_device_notifications_idempotency"] == 1
+    assert indexes["idx_device_notifications_claim"] == 0

@@ -8,6 +8,7 @@ from PIL import Image
 from tests.conftest import create_admin, csrf, login
 from tests.integration.test_jobs import add_photos
 from tests.unit.test_analysis_schema import valid_result
+from inktime.app.workers.runner import WorkerRunner
 
 
 def test_primary_management_pages_render(client, app):
@@ -187,19 +188,23 @@ def test_epaper_simulator_works_without_photo_database_or_model(client, app):
         content_type="multipart/form-data",
     )
 
-    assert response.status_code == 200
-    assert response.mimetype == "image/png"
-    assert response.headers["X-InkTime-Model"] == "disabled"
-    assert response.headers["X-InkTime-Canvas"] == "480x800"
-    assert response.headers["X-InkTime-Payload-Bytes"] == "96000"
-    rendered = Image.open(BytesIO(response.data))
+    assert response.status_code == 202
+    created = response.get_json()
+    WorkerRunner(app).run_once()
+    status = client.get(created["status_url"])
+    assert status.status_code == 200
+    result = status.get_json()["result"]
+    assert result["payload_bytes"] == 96000
+    preview = client.get(result["preview"])
+    assert preview.status_code == 200
+    rendered = Image.open(BytesIO(preview.data))
     assert rendered.size == (480, 800)
     assert set(rendered.getdata()).issubset(
         {(0, 0, 0), (255, 255, 255), (220, 30, 30), (245, 190, 25)}
     )
     with app.extensions["inktime_database"].session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 0
-        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM releases").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 0
 
@@ -496,9 +501,14 @@ def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(
         f"/api/v1/rendering/preview/{photo_id}"
         "?layout=photo_info&orientation=landscape&fit_mode=contain"
     )
-    assert landscape.status_code == 200
-    assert landscape.headers["X-InkTime-Orientation"] == "landscape"
-    assert Image.open(BytesIO(landscape.data)).size == (800, 480)
+    assert landscape.status_code == 202
+    created = landscape.get_json()
+    WorkerRunner(app).run_once()
+    status = client.get(created["status_url"])
+    assert status.status_code == 200
+    completed = client.get(status.get_json()["result"]["preview_url"])
+    assert completed.status_code == 200
+    assert Image.open(BytesIO(completed.data)).size == (800, 480)
 
     invalid_orientation = client.get(
         f"/api/v1/rendering/preview/{photo_id}?orientation=diagonal"
