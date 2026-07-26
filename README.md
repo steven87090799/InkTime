@@ -65,7 +65,7 @@ flowchart TB
 
 | 路徑 | 用途 |
 |---|---|
-| `server.py` | Web 正式入口，組裝新版平台與舊版相容層 |
+| `server.py` | Web 正式入口，呼叫 Application Factory；Legacy 相容層預設關閉 |
 | `inktime/app/api/` | Route、登入權限、HTTP 輸入輸出 |
 | `inktime/app/services/` | 分析、成本、渲染、備份等流程 |
 | `inktime/app/repositories/` | SQLite 查詢、設定與資料存取 |
@@ -138,7 +138,7 @@ sequenceDiagram
     autonumber
     participant C as 🚀 Docker Compose
     participant W as 🌐 inktime-web
-    participant P as 🧩 platform.py
+    participant F as 🏭 factory.py / bootstrap.py
     participant D as 🗃️ Database
     participant R as 📦 ReleaseCoordinator
     participant H as ❤️ Health API
@@ -146,32 +146,32 @@ sequenceDiagram
     participant S as ⏰ Scheduler
 
     C->>W: 啟動 Gunicorn / server:app
-    W->>P: initialize_platform()
-    P->>D: 建立共用 SQLite 連線
+    W->>F: create_app() / resolve RuntimeConfig
+    F->>D: 建立 process-local SQLite 連線
     D->>D: foreign_keys=ON
     D->>D: busy_timeout、journal_mode=WAL
     D->>D: synchronous=NORMAL、writer lock
-    P->>D: 執行缺少的 Migration（目前到 v15）
+    F->>D: 以共用安全路徑執行缺少的 Migration
     alt Migration 成功
-        D-->>P: schema version 與 integrity 正常
-        P->>P: 組裝 Repository、Service、Provider、Blueprint
-        P->>R: reconcile()
+        D-->>F: schema version 與 integrity 正常
+        F->>F: 依 Web role 組裝 Repository、Service、Provider、Blueprint
+        F->>R: reconcile()
         R->>R: 檢查 DB、Manifest、Payload、latest pointer
-        R-->>P: 回傳 staged／missing／orphan／recovered 診斷
-        P->>H: 平台標記 ready
+        R-->>F: 回傳 staged／missing／orphan／recovered 診斷
+        F->>H: 平台標記 ready
         H-->>C: checks 全部 true
         C->>B: Web healthy 後啟動 Worker
         C->>S: Web healthy 後啟動 Scheduler
     else Migration 或必要目錄失敗
-        D-->>P: rollback／錯誤
-        P-->>H: 尚未 ready
+        D-->>F: rollback／錯誤
+        F-->>H: 尚未 ready
         H-->>C: readiness 失敗
         C--xB: 不開始處理正式工作
         C--xS: 不開始排程
     end
 ```
 
-程式入口：`server.py` → `inktime/app/platform.py` → `inktime/app/db/connection.py`、`migrations.py` → `services/release_coordinator.py` → `api/health.py`。
+程式入口：`server.py` → `inktime/app/factory.py` → `inktime/app/bootstrap.py` → `inktime/app/db/connection.py`、`migrations.py` → `services/release_coordinator.py` → `api/health.py`。Worker／Scheduler 使用同一 RuntimeConfig 與 Bootstrap，但不 import `server:app` 或載入 Web Template。
 
 ### 2. 照片掃描與本地預處理生命週期
 

@@ -145,7 +145,7 @@ flowchart LR
 
 1. `README.md`：功能、部署與主要入口。
 2. 本文件：執行架構、模組地圖與評分流程。
-3. `inktime/app/platform.py`：應用程式如何組裝 Repository、Service 與 Blueprint。
+3. `inktime/app/factory.py`、`bootstrap.py`：Web／Worker／Scheduler 如何共用 RuntimeConfig 與 Service 組裝。
 4. 依上方模組地圖進入目標功能。
 5. `docs/FINAL_IMPLEMENTATION_REPORT_ZH_TW.md`：完成證據與已知限制。
 
