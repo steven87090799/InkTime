@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from flask import Flask, abort, send_file, Response, request, redirect
+from flask import Flask, abort, current_app, send_file, Response, request, redirect
 import mimetypes
 import sqlite3
 import json
@@ -18,7 +18,11 @@ except ModuleNotFoundError:
 
     cfg = _DefaultConfig()
 from io import BytesIO
-import render_daily_photo as rdp
+from inktime.app.domain.photos.dates import (
+    BoundedSingleflightTTLCache,
+    materialized_capture_fields,
+    parse_photo_date,
+)
 
 ROOT_DIR = Path(__file__).resolve().parent
 
@@ -39,13 +43,9 @@ BIN_OUTPUT_DIR = Path(
 ).expanduser()
 if not BIN_OUTPUT_DIR.is_absolute():
     BIN_OUTPUT_DIR = (ROOT_DIR / BIN_OUTPUT_DIR).resolve()
-BIN_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-FLASK_HOST = str(getattr(cfg, "FLASK_HOST", "0.0.0.0") or "0.0.0.0")
+FLASK_HOST = str(getattr(cfg, "FLASK_HOST", "0.0.0.0") or "0.0.0.0")  # noqa: S104
 FLASK_PORT = int(getattr(cfg, "FLASK_PORT", 8765) or 8765)
-
-# 是否开启照片库 WebUI（跑通后建议关闭，只保留 ESP32 下载接口）
-ENABLE_REVIEW_WEBUI = bool(getattr(cfg, "ENABLE_REVIEW_WEBUI", True))
 
 DAILY_PHOTO_QUANTITY = int(getattr(cfg, "DAILY_PHOTO_QUANTITY", 5) or 5)
 if DAILY_PHOTO_QUANTITY < 1:
@@ -54,49 +54,82 @@ if DAILY_PHOTO_QUANTITY < 1:
 
 # review 分页：每页 100 张
 REVIEW_PAGE_SIZE = 100
+MAX_REVIEW_PAGE_SIZE = 100
+MAX_REVIEW_OFFSET = 100_000
+LEGACY_QUERY_BATCH_SIZE = 200
+MAX_SIM_ROWS = 1_000
 
-# /review 日期筛选的可用 MM-DD 列表缓存（避免每次都扫全库）
-_MD_CACHE: dict[str, object] = {"md_list": [], "built_at": 0.0}
-_MD_CACHE_TTL_SEC = 300.0  # 5 分钟
+_MD_CACHE = BoundedSingleflightTTLCache[list[str]](
+    ttl_seconds=300.0, max_entries=16, wait_seconds=2.0
+)
 
-def _load_all_md_list() -> list[str]:
-    """从全库提取所有存在的 MM-DD（去重、排序）。用于前端“随机一天”。"""
+
+def _database_identity() -> str:
+    try:
+        stat = DB_PATH.stat()
+        return f"{DB_PATH.resolve()}:{stat.st_dev}:{stat.st_ino}"
+    except OSError:
+        return f"{DB_PATH.resolve()}:missing"
+
+
+def _query_all_md_list() -> list[str]:
     if not DB_PATH.exists():
         return []
-
-    # 简单 TTL 缓存
-    import time
-    now = time.time()
+    library_scope = os.environ.get("INKTIME_LEGACY_LIBRARY_ID", "").strip()
+    connection = sqlite3.connect(DB_PATH)
     try:
-        built_at = float(_MD_CACHE.get("built_at") or 0.0)
-    except Exception:
-        built_at = 0.0
-    if (now - built_at) < _MD_CACHE_TTL_SEC:
-        cached = _MD_CACHE.get("md_list")
-        if isinstance(cached, list):
-            return [str(x) for x in cached]
+        if library_scope:
+            rows = connection.execute(
+                "SELECT DISTINCT captured_month_day FROM photos "
+                "INDEXED BY idx_photos_captured_month_day "
+                "WHERE captured_month_day IS NOT NULL AND library_id=? "
+                "ORDER BY captured_month_day LIMIT 367",
+                (library_scope,),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                "SELECT DISTINCT captured_month_day FROM photos "
+                "INDEXED BY idx_photos_captured_month_day "
+                "WHERE captured_month_day IS NOT NULL "
+                "ORDER BY captured_month_day LIMIT 367"
+            ).fetchall()
+    finally:
+        connection.close()
+    values: list[str] = []
+    for row in rows:
+        month_day = str(row[0])
+        if parse_photo_date(f"2000-{month_day}", warn=False) is not None:
+            values.append(month_day)
+    return values[:366]
 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    rows = c.execute("SELECT exif_json FROM photo_scores").fetchall()
-    conn.close()
+def _load_all_md_list() -> list[str]:
+    """Read at most 366 indexed modern month-days; Legacy EXIF JSON is never scanned."""
 
-    s: set[str] = set()
-    for (exif_json,) in rows:
-        d = extract_date_from_exif(exif_json)
-        if d and len(d) >= 10:
-            md = d[5:10]
-            if len(md) == 5 and md[2] == "-":
-                s.add(md)
-
-    md_list = sorted(s)
-    _MD_CACHE["md_list"] = md_list
-    _MD_CACHE["built_at"] = now
-    return md_list
+    library_scope = os.environ.get("INKTIME_LEGACY_LIBRARY_ID", "").strip() or "all"
+    return _MD_CACHE.get(f"{_database_identity()}:{library_scope}", _query_all_md_list)
 
 app = Flask(__name__)
+app.config["INKTIME_ENABLE_LEGACY_WEBUI"] = os.environ.get(
+    "INKTIME_ENABLE_LEGACY_WEBUI", "false"
+).strip().casefold() in {"1", "true", "yes", "on"}
+_LEGACY_WEBUI_ENDPOINTS = {
+    "review",
+    "api_md_list",
+    "sim",
+    "images",
+    "sim_render",
+    "browse",
+}
+
+
+@app.before_request
+def disable_legacy_webui_before_auth_or_data_access():
+    if request.endpoint in _LEGACY_WEBUI_ENDPOINTS:
+        _require_webui_enabled()
+
+
 def _require_webui_enabled() -> None:
-    if not ENABLE_REVIEW_WEBUI:
+    if not bool(current_app.config.get("INKTIME_ENABLE_LEGACY_WEBUI", False)):
         abort(404)
 
 
@@ -138,52 +171,120 @@ def _make_image_url(path_str: str) -> str:
 # --------------------------
 
 
+def _legacy_columns(connection: sqlite3.Connection) -> set[str]:
+    return {str(row[1]) for row in connection.execute("PRAGMA table_info(photo_scores)")}
+
+
+def prepare_legacy_data_schema(*, batch_size: int = 500) -> dict[str, int]:
+    """Prepare optional Legacy indexes/backfill without images, JSON scans or providers."""
+
+    if not DB_PATH.exists():
+        return {"processed": 0, "valid": 0, "invalid": 0, "missing": 0}
+    connection = sqlite3.connect(DB_PATH, timeout=10)
+    try:
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='photo_scores'"
+        ).fetchone()
+        if table is None:
+            return {"processed": 0, "valid": 0, "invalid": 0, "missing": 0}
+        columns = _legacy_columns(connection)
+        additions = {
+            "exif_datetime": "ALTER TABLE photo_scores ADD COLUMN exif_datetime TEXT",
+            "captured_date": "ALTER TABLE photo_scores ADD COLUMN captured_date TEXT",
+            "captured_month_day": "ALTER TABLE photo_scores ADD COLUMN captured_month_day TEXT",
+            "capture_date_status": (
+                "ALTER TABLE photo_scores ADD COLUMN capture_date_status TEXT "
+                "NOT NULL DEFAULT 'pending'"
+            ),
+        }
+        for column, statement in additions.items():
+            if column not in columns:
+                try:
+                    connection.execute(statement)
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc).casefold():
+                        raise
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_photo_scores_captured_month_day "
+            "ON photo_scores(captured_month_day,captured_date,path)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_photo_scores_captured_date "
+            "ON photo_scores(captured_date,path)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_photo_scores_exif_datetime "
+            "ON photo_scores(exif_datetime,path)"
+        )
+        connection.commit()
+
+        size = max(1, min(int(batch_size), 1_000))
+        cursor_path = ""
+        counts = {"processed": 0, "valid": 0, "invalid": 0, "missing": 0}
+        while True:
+            rows = connection.execute(
+                "SELECT path,exif_datetime FROM photo_scores "
+                "WHERE capture_date_status='pending' AND path>? ORDER BY path LIMIT ?",
+                (cursor_path, size),
+            ).fetchall()
+            if not rows:
+                break
+            updates = []
+            for path, raw_value in rows:
+                captured_date, month_day, status = materialized_capture_fields(raw_value)
+                updates.append((captured_date, month_day, status, path))
+                counts[status] += 1
+            connection.executemany(
+                "UPDATE photo_scores SET captured_date=?,captured_month_day=?,"
+                "capture_date_status=? WHERE path=? AND capture_date_status='pending'",
+                updates,
+            )
+            connection.commit()
+            counts["processed"] += len(rows)
+            cursor_path = str(rows[-1][0])
+        return counts
+    finally:
+        connection.close()
+
+
 def load_rows(page: int = 1, page_size: int = REVIEW_PAGE_SIZE, md: str = "", sort: str = "memory"):
-    """分页读取 review 数据。支持按 MM-DD 过滤与排序。返回 (rows, total_count)."""
+    """Bounded Legacy review query; photo_scores is not the authoritative store."""
     if not DB_PATH.exists():
         raise SystemExit(f"找不到数据库文件: {DB_PATH}")
 
-    if page < 1:
-        page = 1
-    if page_size < 1:
-        page_size = REVIEW_PAGE_SIZE
-
-    offset = (page - 1) * page_size
+    page_size = max(1, min(int(page_size), MAX_REVIEW_PAGE_SIZE))
+    page = max(1, int(page))
+    offset = min((page - 1) * page_size, MAX_REVIEW_OFFSET)
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-
-    # 从 exif_json 里提取 datetime，再拼 MM-DD
-    # 期望格式："YYYY:MM:DD HH:MM:SS"（extract_date_from_exif 也按这个假设）
-    dt_expr = "json_extract(exif_json, '$.datetime')"
-    md_expr = f"(substr({dt_expr}, 6, 2) || '-' || substr({dt_expr}, 9, 2))"
-
+    columns = _legacy_columns(conn)
     where_sql = ""
     params: list[object] = []
-
     md = (md or "").strip()
-    if md and len(md) == 5 and md[2] == "-":
-        where_sql = f"WHERE {dt_expr} IS NOT NULL AND {md_expr} = ?"
+    valid_md = parse_photo_date(f"2000-{md}", warn=False) is not None
+    if md and valid_md and "captured_month_day" in columns:
+        where_sql = "WHERE captured_month_day=?"
         params.append(md)
+    elif md:
+        where_sql = "WHERE 0"
 
-    # total_count 也要跟随过滤
-    if where_sql:
-        total_count = c.execute(f"SELECT COUNT(1) FROM photo_scores {where_sql}", params).fetchone()[0]
-    else:
-        total_count = c.execute("SELECT COUNT(1) FROM photo_scores").fetchone()[0]
+    total_count = c.execute(
+        f"SELECT COUNT(1) FROM photo_scores {where_sql}", params  # noqa: S608
+    ).fetchone()[0]
 
-    # 排序
-    sort = (sort or "memory").strip()
-    if sort == "beauty":
-        order_sql = "ORDER BY COALESCE(beauty_score, -1) DESC, COALESCE(memory_score, -1) DESC, path"
-    elif sort == "time_new":
-        # 直接按 datetime 字符串排序（固定格式下可按字典序比较）；NULL 放最后
-        order_sql = f"ORDER BY ({dt_expr} IS NULL) ASC, {dt_expr} DESC, path"
-    elif sort == "time_old":
-        order_sql = f"ORDER BY ({dt_expr} IS NULL) ASC, {dt_expr} ASC, path"
-    else:
-        # 默认 memory
-        order_sql = "ORDER BY COALESCE(memory_score, -1) DESC, COALESCE(beauty_score, -1) DESC, path"
+    sort_key = (sort or "memory").strip()
+    time_column = "captured_date" if "captured_date" in columns else (
+        "exif_datetime" if "exif_datetime" in columns else None
+    )
+    orders = {
+        "memory": "COALESCE(memory_score,-1) DESC,COALESCE(beauty_score,-1) DESC,path",
+        "beauty": "COALESCE(beauty_score,-1) DESC,COALESCE(memory_score,-1) DESC,path",
+    }
+    if time_column is not None:
+        orders["time_new"] = f"({time_column} IS NULL),{time_column} DESC,path"
+        orders["time_old"] = f"({time_column} IS NULL),{time_column} ASC,path"
+    order_sql = "ORDER BY " + orders.get(sort_key, orders["memory"])
 
     base_sql = f"""
         SELECT path,
@@ -202,7 +303,7 @@ def load_rows(page: int = 1, page_size: int = REVIEW_PAGE_SIZE, md: str = "", so
         {where_sql}
         {order_sql}
         LIMIT ? OFFSET ?
-    """
+    """  # noqa: S608 -- predicates and ordering come from fixed allowlists.
 
     q_params = list(params) + [page_size, offset]
     rows = c.execute(base_sql, q_params).fetchall()
@@ -211,7 +312,7 @@ def load_rows(page: int = 1, page_size: int = REVIEW_PAGE_SIZE, md: str = "", so
     return rows, int(total_count)
 
 
-def load_sim_rows():
+def load_sim_rows(limit: int = MAX_SIM_ROWS):
     if not DB_PATH.exists():
         raise SystemExit(f"找不到数据库文件: {DB_PATH}")
 
@@ -236,7 +337,10 @@ def load_sim_rows():
                exif_gps_lon,
                exif_city
         FROM photo_scores
+        ORDER BY path
+        LIMIT ?
         """
+        , (max(1, min(int(limit), MAX_SIM_ROWS)),)
     ).fetchall()
 
     conn.close()
@@ -252,44 +356,39 @@ def load_sim_rows_for_dates(dates: list[str]):
         raise SystemExit(f"找不到数据库文件: {DB_PATH}")
 
     # 过滤掉不合法日期字符串，避免 SQL 注入（虽然我们用参数化，但也别喂垃圾）
-    safe_dates = []
+    safe_dates: list[str] = []
     for d in dates:
         d = (d or "").strip()
-        if len(d) == 10 and d[4] == "-" and d[7] == "-":
-            safe_dates.append(d)
+        parsed = parse_photo_date(d, warn=False)
+        if parsed is not None:
+            safe_dates.append(parsed.isoformat())
+    safe_dates = list(dict.fromkeys(safe_dates))
     if not safe_dates:
         return []
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-
-    dt_expr = "json_extract(exif_json, '$.datetime')"
-    # exif datetime 形如 YYYY:MM:DD HH:MM:SS，取前 10 位并把 : 替换成 - -> YYYY-MM-DD
-    date_expr = f"replace(substr({dt_expr}, 1, 10), ':', '-')"
-
-    placeholders = ",".join(["?"] * len(safe_dates))
-    sql = f"""
-        SELECT path,
-               caption,
-               type,
-               memory_score,
-               beauty_score,
-               reason,
-               side_caption,
-               exif_json,
-               width,
-               height,
-               orientation,
-               used_at,
-               exif_gps_lat,
-               exif_gps_lon,
-               exif_city
-        FROM photo_scores
-        WHERE {dt_expr} IS NOT NULL
-          AND {date_expr} IN ({placeholders})
-    """
-
-    rows = c.execute(sql, tuple(safe_dates)).fetchall()
+    if "captured_date" not in _legacy_columns(conn):
+        conn.close()
+        return []
+    rows = []
+    for start in range(0, len(safe_dates), LEGACY_QUERY_BATCH_SIZE):
+        if len(rows) >= MAX_SIM_ROWS:
+            break
+        batch = safe_dates[start : start + LEGACY_QUERY_BATCH_SIZE]
+        placeholders = ",".join("?" for _ in batch)
+        sql = f"""
+            SELECT path,caption,type,memory_score,beauty_score,reason,side_caption,
+                   exif_json,width,height,orientation,used_at,exif_gps_lat,exif_gps_lon,exif_city
+            FROM photo_scores
+            WHERE captured_date IN ({placeholders})
+            ORDER BY captured_date,path LIMIT ?
+        """  # noqa: S608 -- placeholders are generated in bounded batches.
+        rows.extend(
+            c.execute(
+                sql, (*batch, MAX_SIM_ROWS - len(rows))
+            ).fetchall()
+        )
     conn.close()
     return rows
 
@@ -391,17 +490,11 @@ def extract_date_from_exif(exif_json: str | None) -> str:
         data = json.loads(exif_json)
     except Exception:
         return ""
-    dtv = data.get("datetime")
+    dtv = data.get("datetime") or data.get("DateTimeOriginal") or data.get("DateTime")
     if not dtv:
         return ""
-    try:
-        date_part = str(dtv).split()[0]  # "2018:03:18"
-        parts = date_part.replace(":", "-").split("-")
-        if len(parts) >= 3:
-            return f"{parts[0]}-{parts[1]}-{parts[2]}"
-    except Exception:
-        return ""
-    return ""
+    parsed = parse_photo_date(dtv)
+    return parsed.isoformat() if parsed is not None else ""
 
 
 # --------------------------
@@ -488,7 +581,6 @@ def build_html(rows, page: int, page_size: int, total_count: int):
 
     # 从请求参数回填（用于显示）
     md_q = (request.args.get("md", "") or "").strip()
-    sort_q = (request.args.get("sort", "") or "memory").strip() or "memory"
     md_hint = f" · 筛选日期 {html.escape(md_q)}" if (md_q and len(md_q) == 5) else ""
 
     html_str = f"""<!DOCTYPE html>
@@ -962,7 +1054,7 @@ def build_simulator_html(sim_rows, selected_img: str = ""):
                         if t:
                             out.append(t)
                     return out
-            except Exception:
+            except Exception:  # noqa: S110 -- tolerant display-only legacy tag parsing.
                 # JSON 不合法：继续走容错
                 pass
 
@@ -1981,6 +2073,8 @@ def sim_render():
         }
 
     try:
+        import render_daily_photo as rdp
+
         img = rdp.render_image(meta)
         img_dithered = rdp.apply_four_color_dither(img)
 

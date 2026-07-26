@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
+# Deprecated / Maintenance Only / Not Used By Production Docker Worker.
 # -*- coding: utf-8 -*-
 
 from pathlib import Path
 import base64
+import csv
+import io
 import json
+import math
 import sqlite3
 import os
+import shutil
 import subprocess
+import sys
+import tempfile
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from typing import Dict, List, Optional, Tuple
 import requests
-import io
 from PIL import Image, ExifTags, ImageOps
 import pillow_heif
-pillow_heif.register_heif_opener()
 import config as cfg
-import shutil
+from inktime.app.domain.photos.dates import materialized_capture_fields
+
+pillow_heif.register_heif_opener()
 
 
 # =======================
@@ -26,6 +34,9 @@ NAS_MOUNT_URL = str(getattr(cfg, "NAS_MOUNT_URL", "") or "").strip()
 NAS_MOUNT_POINT = Path(str(getattr(cfg, "NAS_MOUNT_POINT", "/Volumes/photo") or "/Volumes/photo")).expanduser()
 NAS_RETRY_TIMES = int(getattr(cfg, "NAS_RETRY_TIMES", 3) or 3)
 NAS_RETRY_SLEEP_SEC = float(getattr(cfg, "NAS_RETRY_SLEEP_SEC", 2.0) or 2.0)
+NAS_REMOUNT_TIMEOUT_SEC = min(
+    30.0, max(1.0, float(getattr(cfg, "NAS_REMOUNT_TIMEOUT_SEC", 15.0) or 15.0))
+)
 
 
 def _is_mount_ok() -> bool:
@@ -36,8 +47,8 @@ def _is_mount_ok() -> bool:
             if os.path.ismount(str(NAS_MOUNT_POINT)):
                 return True
         # 兜底：只要图片根目录可访问也算 OK
-        return IMAGE_DIR.exists()
-    except Exception:
+        return IMAGE_DIR.is_dir() and os.access(IMAGE_DIR, os.R_OK)
+    except OSError:
         return False
 
 
@@ -47,33 +58,36 @@ def _try_remount_nas() -> bool:
     只在配置了 NAS_MOUNT_URL 时执行；优先使用 macOS 的 AppleScript 挂载，
     这样可以复用钥匙串里保存的凭据。
     """
-    if not NAS_MOUNT_URL:
+    if not NAS_MOUNT_URL or sys.platform != "darwin":
         return False
 
-    print(f"[WARN] 检测到 NAS 可能掉盘，尝试重挂载：{NAS_MOUNT_URL}")
-
-    # 1) AppleScript（推荐）：mount volume "afp://..." / "smb://..."
+    print("[WARN] 检测到照片库不可读；macOS 维护模式尝试重新挂载 NAS（凭据已隐藏）。")
+    started = time.monotonic()
     try:
-        subprocess.run(
-            ["osascript", "-e", f'mount volume "{NAS_MOUNT_URL}"'],
+        result = subprocess.run(  # noqa: S603 -- fixed absolute executable; Darwin only.
+            ["/usr/bin/osascript", "-e", f'mount volume "{NAS_MOUNT_URL}"'],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=NAS_REMOUNT_TIMEOUT_SEC,
         )
-    except Exception:
-        pass
-
-    # 2) 兜底：如果你更喜欢命令行挂载，可以自行改成 mount_afp / mount_smbfs。
-
-    # 等待卷出现
-    for _ in range(10):
-        if _is_mount_ok():
-            print("[INFO] NAS 重挂载成功，继续处理。")
-            return True
-        time.sleep(0.5)
-
-    print("[WARN] NAS 重挂载失败（卷仍不可用）。")
-    return False
+    except subprocess.TimeoutExpired:
+        print(
+            f"[WARN] NAS 重挂载逾时 timeout_seconds={NAS_REMOUNT_TIMEOUT_SEC:.1f} "
+            f"duration_ms={(time.monotonic() - started) * 1000:.0f} mount_readable={_is_mount_ok()}"
+        )
+        return False
+    except (FileNotFoundError, OSError) as exc:
+        print(
+            f"[WARN] NAS 重挂载执行失败 error_type={type(exc).__name__} "
+            f"duration_ms={(time.monotonic() - started) * 1000:.0f} mount_readable={_is_mount_ok()}"
+        )
+        return False
+    readable = _is_mount_ok()
+    print(
+        f"[INFO] NAS 重挂载结束 return_code={result.returncode} "
+        f"duration_ms={(time.monotonic() - started) * 1000:.0f} mount_readable={readable}"
+    )
+    return result.returncode == 0 and readable
 
 
 def _read_bytes_with_nas_retry(path: Path) -> bytes:
@@ -99,15 +113,22 @@ def _read_bytes_with_nas_retry(path: Path) -> bytes:
             # 常见网络卷断连错误：57 Socket is not connected；也可能表现为 5/6 等 I/O 类错误。
             # 这里不做过度精确匹配，先判断挂载状态；如果掉盘就尝试重挂载。
             if not _is_mount_ok():
-                print(f"[WARN] 读文件失败（第 {attempt}/{NAS_RETRY_TIMES} 次）：{e}")
+                print(
+                    f"[WARN] 读文件失败 attempt={attempt}/{NAS_RETRY_TIMES} "
+                    f"error_type={type(e).__name__} path_hidden=true"
+                )
                 ok = _try_remount_nas()
                 if ok:
                     # 重挂载后立刻重试
                     continue
+                raise
 
             # 如果挂载看起来还 OK，但仍然读失败，按重试策略稍等再试
             if attempt < NAS_RETRY_TIMES:
-                print(f"[WARN] 读文件失败（第 {attempt}/{NAS_RETRY_TIMES} 次），稍后重试：{e}")
+                print(
+                    f"[WARN] 读文件失败 attempt={attempt}/{NAS_RETRY_TIMES} "
+                    f"error_type={type(e).__name__} path_hidden=true"
+                )
                 time.sleep(max(0.1, NAS_RETRY_SLEEP_SEC))
                 continue
 
@@ -223,7 +244,7 @@ def encode_image_to_b64(path: Path) -> str:
         # 处理 EXIF 旋转
         try:
             img = ImageOps.exif_transpose(img)  # type: ignore
-        except Exception:
+        except Exception:  # noqa: S110 -- optional EXIF normalization fallback.
             pass
 
         # 统一色彩模式：JPEG 需要 RGB
@@ -244,7 +265,7 @@ def encode_image_to_b64(path: Path) -> str:
                 new_w = max(1, int(round(w * scale)))
                 new_h = max(1, int(round(h * scale)))
                 img = img.resize((new_w, new_h), resample=Image.LANCZOS)
-        except Exception:
+        except Exception:  # noqa: S110 -- optional downsampling fallback.
             pass
 
         out = io.BytesIO()
@@ -287,6 +308,9 @@ def ensure_table(conn: sqlite3.Connection) -> None:
             exif_gps_alt      REAL,
             side_caption      TEXT,
             exif_city         TEXT
+            ,captured_date    TEXT
+            ,captured_month_day TEXT
+            ,capture_date_status TEXT NOT NULL DEFAULT 'pending'
         )
         """
     )
@@ -358,7 +382,61 @@ def ensure_table(conn: sqlite3.Connection) -> None:
         cur.execute("ALTER TABLE photo_scores ADD COLUMN exif_city TEXT")
     except sqlite3.OperationalError:
         pass
+    for statement in (
+        "ALTER TABLE photo_scores ADD COLUMN captured_date TEXT",
+        "ALTER TABLE photo_scores ADD COLUMN captured_month_day TEXT",
+        "ALTER TABLE photo_scores ADD COLUMN capture_date_status TEXT NOT NULL DEFAULT 'pending'",
+    ):
+        try:
+            cur.execute(statement)
+        except sqlite3.OperationalError:
+            pass
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_photo_scores_captured_month_day "
+        "ON photo_scores(captured_month_day,captured_date,path)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_photo_scores_captured_date "
+        "ON photo_scores(captured_date,path)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_photo_scores_exif_datetime "
+        "ON photo_scores(exif_datetime,path)"
+    )
     conn.commit()
+    backfill_legacy_capture_dates(conn)
+
+
+def backfill_legacy_capture_dates(
+    conn: sqlite3.Connection, *, batch_size: int = 500
+) -> dict[str, int]:
+    """Restart-safe, metadata-only Legacy backfill; never reads an image or provider."""
+
+    size = max(1, min(int(batch_size), 1_000))
+    cursor_path = ""
+    counts = {"processed": 0, "valid": 0, "invalid": 0, "missing": 0}
+    while True:
+        rows = conn.execute(
+            "SELECT path,exif_datetime FROM photo_scores "
+            "WHERE capture_date_status='pending' AND path>? ORDER BY path LIMIT ?",
+            (cursor_path, size),
+        ).fetchall()
+        if not rows:
+            break
+        updates = []
+        for path, raw_date in rows:
+            captured_date, month_day, status = materialized_capture_fields(raw_date)
+            updates.append((captured_date, month_day, status, path))
+            counts[status] += 1
+        conn.executemany(
+            "UPDATE photo_scores SET captured_date=?,captured_month_day=?,"
+            "capture_date_status=? WHERE path=? AND capture_date_status='pending'",
+            updates,
+        )
+        conn.commit()
+        counts["processed"] += len(rows)
+        cursor_path = str(rows[-1][0])
+    return counts
 
 # 生成一句话文案
 def generate_side_caption(image_path: Path) -> str | None:
@@ -438,11 +516,12 @@ def generate_side_caption(image_path: Path) -> str | None:
     return caption or None
 
 
-def list_images(limit: int | None = None) -> list[Path]:
+def list_images(limit: int | None = None):
+    """Yield image paths without materializing the photo library."""
     exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".heic", ".heif"}
-    files = []
     print("[INFO] 正在递归扫描图片目录，请稍候……")
     scanned = 0
+    yielded = 0
     for p in IMAGE_DIR.rglob("*"):
         scanned += 1
         if scanned % 500 == 0:
@@ -450,11 +529,11 @@ def list_images(limit: int | None = None) -> list[Path]:
         if p.is_file() and p.suffix.lower() in exts:
             if is_screenshot(p):
                 continue
-            files.append(p)
-    print(f"[INFO] 扫描完成，共发现 {len(files)} 张图片（文件总数 {scanned}）。")
-    if limit is not None:
-        files = files[:limit]
-    return files
+            yield p
+            yielded += 1
+            if limit is not None and yielded >= max(0, int(limit)):
+                break
+    print(f"[INFO] 扫描完成，共发现 {yielded} 张图片（文件总数 {scanned}）。")
 
 # 排除 Screenshot 图片
 def is_screenshot(path: Path) -> bool:
@@ -462,18 +541,103 @@ def is_screenshot(path: Path) -> bool:
     return "screenshot" in s.lower()
 
 
-def filter_unscored(conn: sqlite3.Connection, paths: list[Path]) -> list[Path]:
-    if not paths:
-        return []
+def filter_unscored(
+    conn: sqlite3.Connection, paths, *, batch_size: int = 500
+):
+    """Yield unscored paths using a fixed SQL placeholder bound."""
 
-    cur = conn.cursor()
+    size = max(1, min(int(batch_size), 1_000))
+    batch: list[Path] = []
+    for path in paths:
+        batch.append(path)
+        if len(batch) < size:
+            continue
+        yield from _unscored_batch(conn, batch)
+        batch = []
+    if batch:
+        yield from _unscored_batch(conn, batch)
+
+
+def _unscored_batch(conn: sqlite3.Connection, paths: list[Path]):
     placeholders = ",".join("?" for _ in paths)
-    rows = cur.execute(
-        f"SELECT path FROM photo_scores WHERE path IN ({placeholders})",
-        [str(p) for p in paths],
+    rows = conn.execute(
+        f"SELECT path FROM photo_scores WHERE path IN ({placeholders})",  # noqa: S608
+        [str(path) for path in paths],
     ).fetchall()
-    already = {row[0] for row in rows}
-    return [p for p in paths if str(p) not in already]
+    already = {str(row[0]) for row in rows}
+    for path in paths:
+        if str(path) not in already:
+            yield path
+
+
+class PathSpool:
+    """Re-iterable path collection backed by an anonymous temporary file."""
+
+    def __init__(self, paths=(), *, limit: int | None = None) -> None:
+        self._file = tempfile.TemporaryFile(mode="w+t", encoding="utf-8")
+        self._count = 0
+        for path in paths:
+            if limit is not None and self._count >= max(0, int(limit)):
+                break
+            self._file.write(str(path) + "\n")
+            self._count += 1
+        self._file.flush()
+
+    def __len__(self) -> int:
+        return self._count
+
+    def __iter__(self):
+        self._file.seek(0)
+        for line in self._file:
+            value = line.rstrip("\n")
+            if value:
+                yield Path(value)
+
+    def __getitem__(self, value: slice):
+        if not isinstance(value, slice) or value.step not in (None, 1):
+            raise TypeError("PathSpool only supports simple bounded slices")
+        start = max(0, value.start or 0)
+        stop = min(self._count, value.stop if value.stop is not None else self._count)
+        result = []
+        for index, path in enumerate(self):
+            if index >= stop:
+                break
+            if index >= start:
+                result.append(path)
+        return result
+
+    def close(self) -> None:
+        self._file.close()
+
+
+def bounded_future_results(executor, jobs, worker, *, max_in_flight: int):
+    """Submit at most max_in_flight jobs and drop each Future immediately."""
+
+    iterator = iter(jobs)
+    pending: set[Future] = set()
+
+    def submit_one() -> bool:
+        try:
+            job = next(iterator)
+        except StopIteration:
+            return False
+        pending.add(executor.submit(worker, *job))
+        return True
+
+    for _ in range(max(1, int(max_in_flight))):
+        if not submit_one():
+            break
+    try:
+        while pending:
+            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                pending.remove(future)
+                yield future
+                submit_one()
+    finally:
+        for future in pending:
+            future.cancel()
+        pending.clear()
 
 
 def _convert_gps_to_deg(value):
@@ -488,8 +652,8 @@ def read_gps_with_exiftool(path: Path):
     if not EXIFTOOL_AVAILABLE:
         return None
     try:
-        result = subprocess.run(
-            ["exiftool", "-n", "-json", str(path)],
+        result = subprocess.run(  # noqa: S603
+            ["exiftool", "-n", "-json", str(path)],  # noqa: S607
             capture_output=True,
             text=True,
             check=True,
@@ -531,7 +695,7 @@ def read_exif(path: Path) -> dict:
                 info["orientation"] = "portrait"
             else:
                 info["orientation"] = "square"
-        except Exception:
+        except Exception:  # noqa: S110 -- dimensions remain optional.
             pass
 
         # 使用公共 API getexif()，兼容 JPEG / PNG / WebP / HEIC 等格式
@@ -578,7 +742,7 @@ def read_exif(path: Path) -> dict:
                     info["f_number"] = exif_ifd.get(0x829D)  # FNumber
                 if not info.get("focal_length"):
                     info["focal_length"] = exif_ifd.get(0x920A)  # FocalLength
-        except Exception:
+        except Exception:  # noqa: S110 -- optional nested EXIF fields.
             pass
 
     # GPS 信息：优先从 get_ifd() 获取（兼容 HEIC），再降级到旧方式
@@ -606,7 +770,7 @@ def read_exif(path: Path) -> dict:
                 lon = _convert_gps_to_deg(lon_raw)
                 if lon is not None and lon_ref in ["W", "w"]:
                     lon = -lon
-    except Exception:
+    except Exception:  # noqa: S110 -- GPS fallback below remains available.
         pass
 
     # 方式 2：降级到旧的 GPSInfo dict（某些 JPEG 可能走这条路径）
@@ -665,10 +829,6 @@ def format_eta(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-import csv
-import math
-from typing import Dict, List, Tuple, Optional
-
 CityRecord = Tuple[float, float, str, str]  # (lat, lon, name_zh, name_en)
 
 _CITY_CACHE_CITIES: List[CityRecord] | None = None
@@ -702,17 +862,17 @@ def load_world_cities(csv_path: Path) -> Tuple[List[CityRecord], Dict[Tuple[int,
             try:
                 lat = float((row.get("lat") or "").strip())
                 lon = float((row.get("lon") or "").strip())
-            except Exception:
+            except Exception:  # noqa: S112 -- malformed public dataset row is skipped.
                 continue
             name_en = (row.get("name_en") or "").strip()
             name_zh = (row.get("name_zh") or "").strip()
             cities.append((lat, lon, name_zh, name_en))
 
-    for idx, (lat, lon, name_zh, name_en) in enumerate(cities):
+    for idx, (lat, lon, _name_zh, _name_en) in enumerate(cities):
         key = grid_key(lat, lon)
         grid_index.setdefault(key, []).append(idx)
 
-    print(f"[INFO] 已加载中文城市库: {csv_path}")
+    print(f"[INFO] 已加载中文城市库 records={len(cities)} path_hidden=true")
     return cities, grid_index
 
 def find_nearest_city(
@@ -869,15 +1029,16 @@ def _post_with_channel_fallback(
         tried.add(idx)
         ch = API_CHANNELS[idx]
         url, headers, body = payload_builder(ch)
-        ch_label = ch.get("model_name", url)
+        ch_label = str(ch.get("model_name") or f"channel-{idx + 1}")[:80]
 
         try:
             try:
                 resp = requests.post(url, headers=headers, json=body, timeout=timeout)
-            except Exception as e:
-                print(f"[WARN] 渠道 {ch_label} 请求异常：{e}，尝试下一个渠道")
-                last_error = str(e)
-                _mark_channel_failure(idx, ch_label, f"请求异常：{e}")
+            except requests.RequestException as e:
+                error_type = type(e).__name__
+                print(f"[WARN] 渠道 {ch_label} 请求异常 error_type={error_type}，尝试下一个渠道")
+                last_error = error_type
+                _mark_channel_failure(idx, ch_label, f"请求异常：{error_type}")
                 continue
 
             if not resp.ok:
@@ -885,32 +1046,21 @@ def _post_with_channel_fallback(
                 last_error = f"HTTP {resp.status_code}"
                 _mark_channel_failure(idx, ch_label, f"HTTP {resp.status_code}")
                 if DEBUG:
-                    try:
-                        _body_str = json.dumps(body, ensure_ascii=False)
-                        # base64 内容太长，截断后打印
-                        import re as _re
-                        _body_debug = _re.sub(
-                            r'("data:[^;]+;base64,)([A-Za-z0-9+/=]{200})[A-Za-z0-9+/=]+',
-                            r'\1\2…<truncated>',
-                            _body_str,
-                        )
-                        print(f"[DEBUG] 请求体（base64 已截断）:\n{_body_debug}")
-                    except Exception:
-                        pass
-                    try:
-                        print(f"[DEBUG] 响应体:\n{resp.text}")
-                    except Exception:
-                        pass
+                    print(
+                        f"[DEBUG] 请求与响应内容已隐藏 request_bytes_approx={len(str(body))} "
+                        f"response_bytes={len(resp.content)}"
+                    )
                 continue
 
             # 2xx 成功，如果有 parser 则尝试解析
             if response_parser is not None:
                 try:
                     parsed = response_parser(resp)
-                except Exception as e:
-                    print(f"[WARN] 渠道 {ch_label} 响应解析失败：{e}，切换到下一个渠道")
-                    last_error = str(e)
-                    _mark_channel_failure(idx, ch_label, f"响应解析失败：{e}")
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as e:
+                    error_type = type(e).__name__
+                    print(f"[WARN] 渠道 {ch_label} 响应解析失败 error_type={error_type}，切换渠道")
+                    last_error = error_type
+                    _mark_channel_failure(idx, ch_label, f"响应解析失败：{error_type}")
                     continue
                 _mark_channel_success(idx)
                 return parsed
@@ -931,11 +1081,9 @@ def call_vlm(image_path: Path) -> dict:
     try:
         img_b64 = encode_image_to_b64(image_path)
     except Exception as e:
-        raise RuntimeError(f"读取图片失败：{e}")
+        raise RuntimeError(f"读取图片失败 error_type={type(e).__name__} path_hidden=true") from e
 
     exif_info = read_exif(image_path)
-    exif_json = json.dumps(exif_info, ensure_ascii=False, default=str)
-
     system_prompt = (
         "你是一个“个人相册照片评估助手”，擅长理解真实照片的内容，并从回忆价值和美观角度打分。\n"
         "你会收到一张照片（以 base64 形式提供），你的任务是：\n"
@@ -1082,6 +1230,9 @@ def _process_one_photo(path: Path, city_resolver) -> dict | None:
     exif_gps_lat = _to_float(exif_info.get("gps_lat"))
     exif_gps_lon = _to_float(exif_info.get("gps_lon"))
     exif_gps_alt = _to_float(exif_info.get("gps_alt"))
+    captured_date, captured_month_day, capture_date_status = materialized_capture_fields(
+        exif_datetime
+    )
 
     if exif_gps_lat is not None and exif_gps_lon is not None:
         exif_city = city_resolver(exif_gps_lat, exif_gps_lon)
@@ -1119,6 +1270,9 @@ def _process_one_photo(path: Path, city_resolver) -> dict | None:
         "exif_gps_alt": exif_gps_alt,
         "side_caption": side_caption,
         "exif_city": exif_city,
+        "captured_date": captured_date,
+        "captured_month_day": captured_month_day,
+        "capture_date_status": capture_date_status,
         "cost": t_photo_end - t_photo_start,
     }
 
@@ -1133,13 +1287,15 @@ def _save_result_to_db(cur, conn, rec: dict):
          exif_json, raw_json,
          exif_datetime, exif_make, exif_model,
          exif_iso, exif_exposure_time, exif_f_number, exif_focal_length,
-         exif_gps_lat, exif_gps_lon, exif_gps_alt, side_caption, exif_city)
+         exif_gps_lat, exif_gps_lon, exif_gps_alt, side_caption, exif_city,
+         captured_date, captured_month_day, capture_date_status)
         VALUES (?, ?, ?, ?, ?, ?,
                 ?, ?, ?, COALESCE((SELECT used_at FROM photo_scores WHERE path = ?), NULL),
                 ?, ?,
                 ?, ?, ?,
                 ?, ?, ?, ?,
-                ?, ?, ?, ?, ?)
+                ?, ?, ?, ?, ?,
+                ?, ?, ?)
         """,
         (
             rec["path"],
@@ -1166,6 +1322,9 @@ def _save_result_to_db(cur, conn, rec: dict):
             rec["exif_gps_alt"],
             rec["side_caption"],
             rec["exif_city"],
+            rec["captured_date"],
+            rec["captured_month_day"],
+            rec["capture_date_status"],
         ),
     )
     conn.commit()
@@ -1200,37 +1359,19 @@ def main():
     if DEBUG:
         print("[INFO] 调试模式已启用")
 
-    concurrency = max(1, args.concurrency)
+    concurrency = max(1, min(int(args.concurrency), 16))
     if concurrency > 1:
         print(f"[INFO] 并发模式：{concurrency} 个工作线程")
 
-    filelist_path = ROOT_DIR / "filelist.txt"
-    cache_path = ROOT_DIR / ".filelist_cache.txt"
-
     if args.cache:
-        print("[WARN] --cache 仅建议用于调试提速，不适合生产环境。")
-        print("[WARN] 使用缓存会跳过目录重扫：新增照片不会被发现，已删除照片的旧记录也可能保留在数据库中。")
+        print("[WARN] --cache 已停用；Maintenance 模式每次串流扫描，避免保存完整私人路径清单。")
 
-    if args.cache and cache_path.exists():
-        print(f"[INFO] 读取缓存文件列表：{cache_path}")
-        cached = cache_path.read_text(encoding="utf-8").strip().splitlines()
-        imgs = [Path(p) for p in cached if p.strip()]
-        print(f"[INFO] 从缓存加载 {len(imgs)} 个文件。")
-    else:
-        print("[INFO] 正在扫描图片目录……")
-        imgs = list_images()
-        if args.cache:
-            cache_path.write_text("\n".join(str(p) for p in imgs), encoding="utf-8")
-            print(f"[INFO] 已写入缓存文件：{cache_path}")
-
-    filelist_path.write_text("\n".join(str(p) for p in imgs), encoding="utf-8")
-    print(f"[INFO] 已更新文件列表 filelist.txt，共 {len(imgs)} 个文件。")
-    if not imgs:
-        raise SystemExit(f"目录下没有图片文件: {IMAGE_DIR}")
-
-    imgs = [p for p in imgs if not is_screenshot(p)]
-    if not imgs:
-        raise SystemExit("[INFO] 所有图片都被 Screenshot 过滤规则排除了，没有可处理的图片。")
+    print("[INFO] 正在串流扫描图片目录……")
+    imgs = PathSpool(list_images())
+    if len(imgs) == 0:
+        imgs.close()
+        raise SystemExit("照片目录内没有可处理的图片（私人路径已隐藏）。")
+    print(f"[INFO] 临时清单已建立，共 {len(imgs)} 张；程序结束即删除。")
 
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     ensure_table(conn)
@@ -1248,7 +1389,7 @@ def main():
         conn.execute("CREATE TEMP TABLE _temp_existing_paths (path TEXT PRIMARY KEY)")
 
         # 批量插入当前扫描到的文件列表
-        CHUNK = 2000
+        CHUNK = 500
         total_files = len(imgs)
         inserted = 0
         for i in range(0, total_files, CHUNK):
@@ -1304,14 +1445,15 @@ def main():
     ).fetchone()[0]
     print(f"[INFO] 数据库中已有 {counted} 张已分析照片（仅统计当前目录）。")
 
-    target_paths = filter_unscored(conn, imgs)
-    if not target_paths:
+    target_paths = PathSpool(
+        filter_unscored(conn, imgs, batch_size=500), limit=BATCH_LIMIT
+    )
+    if len(target_paths) == 0:
         print("[INFO] 所有图片都已经在 photo_scores 中有记录。")
+        target_paths.close()
+        imgs.close()
         conn.close()
         return
-
-    if BATCH_LIMIT is not None:
-        target_paths = target_paths[:BATCH_LIMIT]
 
     # 进度条口径：以“本次启动时的快照”为准。
     # total = 已分析(当前目录) + 本次待处理（filter_unscored 产生的目标集合）
@@ -1329,7 +1471,7 @@ def main():
             t_photo_start = time.perf_counter()
             sep = "=" * 60
             print("\n" + sep)
-            print(f"[{idx}/{len(target_paths)}] 处理: {path}")
+            print(f"[{idx}/{len(target_paths)}] 处理中（私人路径已隐藏）")
 
             rec = _process_one_photo(path, city_resolver)
             if rec is None:
@@ -1364,14 +1506,21 @@ def main():
         def _worker(idx: int, path: Path) -> tuple[int, Path, dict | None]:
             return idx, path, _process_one_photo(path, city_resolver)
 
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            futures = {
-                executor.submit(_worker, idx, path): (idx, path)
-                for idx, path in enumerate(target_paths, start=1)
-            }
-
-            for future in as_completed(futures):
-                idx, path, rec = future.result()
+        executor = ThreadPoolExecutor(max_workers=concurrency)
+        try:
+            jobs = ((idx, path) for idx, path in enumerate(target_paths, start=1))
+            for future in bounded_future_results(
+                executor, jobs, _worker, max_in_flight=concurrency * 2
+            ):
+                try:
+                    idx, _path, rec = future.result()
+                except Exception as exc:
+                    idx = completed_count + 1
+                    rec = None
+                    print(
+                        f"[WARN] 单张任务失败 error_type={type(exc).__name__} "
+                        "path_hidden=true"
+                    )
 
                 with completed_lock:
                     completed_count += 1
@@ -1380,7 +1529,7 @@ def main():
                 with print_lock:
                     sep = "=" * 60
                     print("\n" + sep)
-                    print(f"[{done_so_far}/{len(target_paths)}] 完成: {path}")
+                    print(f"[{done_so_far}/{len(target_paths)}] 完成（私人路径已隐藏）")
 
                     if rec is not None:
                         _print_result(rec)
@@ -1404,7 +1553,18 @@ def main():
 
                     cost_str = f"{rec['cost']:4.1f}s" if rec else "N/A"
                     print(f"[进度] {bar} {progress*100:5.1f}%  {processed_now}/{total}  本张耗时 {cost_str}  预计剩余 {eta} ")
+        except KeyboardInterrupt:
+            print("[WARN] 收到取消信号；停止提交新任务并取消尚未开始的任务。")
+            executor.shutdown(wait=False, cancel_futures=True)
+            target_paths.close()
+            imgs.close()
+            conn.close()
+            raise
+        else:
+            executor.shutdown(wait=True, cancel_futures=True)
 
+    target_paths.close()
+    imgs.close()
     conn.close()
     print("\n[完成] 本批次处理完成。")
 

@@ -14,12 +14,12 @@ from __future__ import annotations
 
 from pathlib import Path
 import sqlite3
-import json
 import datetime as dt
 import os
 from typing import List, Dict, Any, Tuple, Optional
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from inktime.app.domain.rendering.dates import current_local_date, day_of_year_to_month_day, month_day_to_day_of_year
+from inktime.app.domain.photos.dates import parse_photo_date
 try:
     import config as cfg
 except ModuleNotFoundError:
@@ -71,24 +71,18 @@ def extract_date_from_exif(exif_json: Optional[str]) -> str:
     """
     if not exif_json:
         return ""
+    import json
+
     try:
         data = json.loads(exif_json)
-    except Exception:
+    except (TypeError, ValueError):
         return ""
-    dt_str = data.get("datetime")
-    if not dt_str:
-        return ""
-    try:
-        date_part = str(dt_str).split()[0]
-        parts = date_part.replace(":", "-").split("-")
-        if len(parts) >= 3:
-            return f"{parts[0]}-{parts[1]}-{parts[2]}"
-    except Exception:
-        return ""
-    return ""
+    value = data.get("datetime") or data.get("DateTimeOriginal") or data.get("DateTime")
+    parsed = parse_photo_date(value)
+    return parsed.isoformat() if parsed is not None else ""
 
 
-def load_sim_rows() -> List[Dict[str, Any]]:
+def load_sim_rows(limit: int = 5_000) -> List[Dict[str, Any]]:
     """
     加载 InkTime 用的核心字段：
     - path: 照片路径
@@ -103,24 +97,32 @@ def load_sim_rows() -> List[Dict[str, Any]]:
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
+    columns = {str(row[1]) for row in c.execute("PRAGMA table_info(photo_scores)")}
+    if "captured_date" not in columns:
+        conn.close()
+        return []
     rows = c.execute(
         """
         SELECT path,
-               exif_json,
+               captured_date,
                side_caption,
                memory_score,
                exif_gps_lat,
                exif_gps_lon,
                exif_city
         FROM photo_scores
-        WHERE exif_json IS NOT NULL
-        """
+        WHERE captured_date IS NOT NULL
+        ORDER BY captured_date,path
+        LIMIT ?
+        """,
+        (max(1, min(int(limit), 5_000)),),
     ).fetchall()
     conn.close()
 
     items: List[Dict[str, Any]] = []
-    for path, exif_json, side_caption, memory_score, gps_lat, gps_lon, exif_city in rows:
-        date_str = extract_date_from_exif(exif_json)
+    for path, captured_date, side_caption, memory_score, gps_lat, gps_lon, exif_city in rows:
+        parsed = parse_photo_date(captured_date)
+        date_str = parsed.isoformat() if parsed is not None else ""
         if not date_str:
             continue
         # 再次兜底过滤 Screenshot 等

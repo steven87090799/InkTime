@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+from contextlib import contextmanager
 from hashlib import sha256
 import os
 from pathlib import Path
@@ -16,10 +17,44 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 class ThumbnailCache:
     ALLOWED_SIZES = {512, 1024, 1600}
+    LOCK_SHARDS = 256
 
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        self.lock_root = self.root / ".locks"
+        self.lock_root.mkdir(mode=0o700, exist_ok=True)
+        self.lock_root.chmod(0o700)
+
+    @contextmanager
+    def _generation_lock(self, cache_key: str):
+        """Use a fixed shard and honor an already-existing pre-shard lock."""
+
+        shard = int(sha256(cache_key.encode("ascii")).hexdigest()[:8], 16) % self.LOCK_SHARDS
+        shard_path = self.lock_root / f"shard-{shard:03d}.lock"
+        legacy_path = self.root / f".{cache_key}.lock"
+        shard_descriptor = os.open(shard_path, os.O_RDWR | os.O_CREAT, 0o600)
+        legacy_descriptor: int | None = None
+        try:
+            os.chmod(shard_path, 0o600)
+            fcntl.flock(shard_descriptor, fcntl.LOCK_EX)
+            # Rolling upgrades can leave an old per-key lock. Lock it as well,
+            # but never create or unlink one: deleting a live inode is unsafe.
+            try:
+                legacy_descriptor = os.open(
+                    legacy_path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+                )
+            except FileNotFoundError:
+                legacy_descriptor = None
+            if legacy_descriptor is not None:
+                fcntl.flock(legacy_descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            if legacy_descriptor is not None:
+                fcntl.flock(legacy_descriptor, fcntl.LOCK_UN)
+                os.close(legacy_descriptor)
+            fcntl.flock(shard_descriptor, fcntl.LOCK_UN)
+            os.close(shard_descriptor)
 
     @staticmethod
     def _validate(path: Path, size: int) -> bool:
@@ -58,10 +93,8 @@ class ThumbnailCache:
         if not _SHA256.fullmatch(normalized_hash):
             raise ValueError("THUMB-002 縮圖內容雜湊必須是 SHA-256")
         destination = self.root / f"{normalized_hash}-{size}.jpg"
-        lock_path = self.root / f".{normalized_hash}-{size}.lock"
         temporary: Path | None = None
-        with lock_path.open("a+b") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        with self._generation_lock(f"{normalized_hash}-{size}"):
             if destination.is_file() and self._validate(destination, size):
                 # Cache hits refresh recency for cleanup without rewriting the generated thumbnail.
                 cached_stat = destination.stat()

@@ -25,6 +25,9 @@ initialize_platform(
     release_dir=RELEASE_DIR,
     photo_dir=PHOTO_DIR,
 )
+if app.config.get("INKTIME_ENABLE_LEGACY_WEBUI", False):
+    # Optional maintenance schema only; never reads images, decodes EXIF JSON or calls a provider.
+    legacy_server.prepare_legacy_data_schema()
 # 舊 URL 金鑰 API 僅在管理員明確啟用並重啟後開放；預設保持關閉。
 legacy_server.ENABLE_LEGACY_DEVICE_API = bool(
     app.extensions["inktime_settings_repository"].get("device.legacy_api_enabled", False)
