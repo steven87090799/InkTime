@@ -38,7 +38,9 @@ BASIC_REQUIRED_FIELDS = {
     "should_keep",
     "sensitive",
     "reason",
+    "visual_orientation",
 }
+ORIENTATION_EVIDENCE = {"faces_upright", "text_upright", "horizon_level", "gravity_objects", "architecture_vertical", "insufficient_visual_cues"}
 
 # 仍保留舊版基本 Schema，讓既有 Provider 與歷史資料可持續使用；完整 Schema
 # 的延伸欄位刻意不是必填，模型不確定時可以省略，而不是補造內容。
@@ -67,7 +69,7 @@ ANALYSIS_JSON_SCHEMA = {
         "additionalProperties": False,
         "required": sorted(REQUIRED_FIELDS),
         "properties": {
-            "schema_version": {"type": "integer", "const": 1},
+            "schema_version": {"type": "integer", "const": 2},
             "caption": {"type": "string", "minLength": 1, "maxLength": 1000},
             "types": {
                 "type": "array",
@@ -83,6 +85,7 @@ ANALYSIS_JSON_SCHEMA = {
             "should_keep": {"type": "boolean"},
             "sensitive": {"type": "boolean"},
             "reason": {"type": "string", "minLength": 1, "maxLength": 240},
+            "visual_orientation": {"type": "object", "additionalProperties": False, "required": ["rotation_cw", "confidence", "ambiguous", "evidence"], "properties": {"rotation_cw": {"anyOf": [{"type": "integer", "enum": [0,90,180,270]}, {"type": "null"}]}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}, "ambiguous": {"type": "boolean"}, "evidence": {"type": "array", "items": {"type": "string", "enum": sorted(ORIENTATION_EVIDENCE)}, "minItems": 1, "uniqueItems": True}}},
         },
     },
 }
@@ -202,6 +205,10 @@ def validate_analysis_result(raw: str | dict) -> dict:
             raise error from exc
     else:
         value = dict(raw)
+    # v3 cache entries predate this additive field.  Keep them readable without
+    # treating the missing value as a confident orientation recommendation.
+    if value.get("schema_version") == 1 and "visual_orientation" not in value:
+        value["visual_orientation"] = {"rotation_cw": None, "confidence": 0.0, "ambiguous": True, "evidence": ["insufficient_visual_cues"]}
     allowed = BASIC_REQUIRED_FIELDS | FULL_OPTIONAL_FIELDS
     if not BASIC_REQUIRED_FIELDS <= set(value) or not set(value) <= allowed:
         missing = sorted(BASIC_REQUIRED_FIELDS - set(value))
@@ -209,6 +216,8 @@ def validate_analysis_result(raw: str | dict) -> dict:
         raise AnalysisValidationError(f"欄位不符合 Schema；缺少={missing}，多餘={extra}")
     if value["schema_version"] not in {1, 2}:
         raise AnalysisValidationError("不支援的 schema_version")
+    if value["schema_version"] == 2 and "visual_orientation" not in value:
+        raise AnalysisValidationError("schema v2 必須包含 visual_orientation")
     if not isinstance(value["caption"], str) or not value["caption"].strip():
         raise AnalysisValidationError("caption 不可空白")
     if not isinstance(value["side_caption"], str) or len(value["side_caption"]) > 120:
@@ -227,6 +236,21 @@ def validate_analysis_result(raw: str | dict) -> dict:
         raise AnalysisValidationError("布林欄位格式不合法")
     for field in ("memory_score", "beauty_score", "technical_quality_score", "emotion_score"):
         value[field] = _score(value[field], field)
+    orientation = value["visual_orientation"]
+    if not isinstance(orientation, dict) or set(orientation) != {"rotation_cw", "confidence", "ambiguous", "evidence"}:
+        raise AnalysisValidationError("visual_orientation 欄位不合法")
+    rotation = orientation["rotation_cw"]
+    if rotation not in {0, 90, 180, 270, None} or isinstance(rotation, bool):
+        raise AnalysisValidationError("visual_orientation.rotation_cw 不合法")
+    if isinstance(orientation["confidence"], bool) or not isinstance(orientation["confidence"], (int, float)) or not 0 <= float(orientation["confidence"]) <= 1:
+        raise AnalysisValidationError("visual_orientation.confidence 不合法")
+    if not isinstance(orientation["ambiguous"], bool) or not isinstance(orientation["evidence"], list) or not orientation["evidence"] or len(orientation["evidence"]) != len(set(orientation["evidence"])) or any(item not in ORIENTATION_EVIDENCE for item in orientation["evidence"]):
+        raise AnalysisValidationError("visual_orientation evidence 不合法")
+    if "insufficient_visual_cues" in orientation["evidence"] and orientation["evidence"] != ["insufficient_visual_cues"]:
+        raise AnalysisValidationError("insufficient_visual_cues 不可與其他證據混用")
+    if orientation["rotation_cw"] is None and (not orientation["ambiguous"] or orientation["evidence"] != ["insufficient_visual_cues"]):
+        raise AnalysisValidationError("方向不明必須標示 insufficient_visual_cues")
+    orientation["confidence"] = float(orientation["confidence"])
     value["caption"] = value["caption"].strip()
     value["side_caption"] = value["side_caption"].strip()
     value["reason"] = value["reason"].strip()

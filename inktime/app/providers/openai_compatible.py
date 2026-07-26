@@ -12,7 +12,7 @@ from inktime.app.domain.analysis.scoring import DEFAULT_SCORING_RULES
 from .base import ProviderResponse, Usage, VisionProvider
 
 
-SYSTEM_PROMPT = """你是 InkTime 個人照片分析器。只輸出符合指定 JSON Schema 的精簡 JSON，不可使用 Markdown code fence 或長篇敘述。請以繁體中文（台灣用語）描述。未知值使用 null 或 unknown；不得虛構人物關係、身份、地點或事件。完整 Schema 必須在同一次請求完成回憶、美學、技術、情緒、顯示適合度、場景、主體、裁切、電子紙與搜尋資訊；文案、地標與電子紙資訊不得再另行呼叫模型。評分等級使用 S/A/B/C/D/E，程式會換算排序分。"""
+SYSTEM_PROMPT = """你是 InkTime 個人照片分析器。只輸出符合指定 JSON Schema 的精簡 JSON，不可使用 Markdown code fence 或長篇敘述。請以繁體中文（台灣用語）描述。未知值使用 null 或 unknown；不得虛構人物關係、身份、地點或事件。完整 Schema 必須在同一次請求完成回憶、美學、技術、情緒、顯示適合度、場景、主體、裁切、電子紙與搜尋資訊；文案、地標與電子紙資訊不得再另行呼叫模型。評分等級使用 S/A/B/C/D/E，程式會換算排序分。visual_orientation 的基準是圖片已套用 EXIF transpose 後，尚需順時針旋轉多少度才正立；只能填 0/90/180/270/null。無可靠視覺線索時 rotation_cw=null、ambiguous=true 且 evidence 僅為 insufficient_visual_cues。"""
 
 
 class ProviderHTTPError(RuntimeError):

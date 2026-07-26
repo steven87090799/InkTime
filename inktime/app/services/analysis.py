@@ -50,7 +50,17 @@ PREFILTER_PROFILES = {
         "short_edge": 480,
     },
 }
-PROMPT_VERSION = "photo-quality-v3"
+PROMPT_VERSION = "photo-quality-v4-visual-orientation"
+
+
+def _unknown_visual_orientation() -> dict:
+    """Local-only results deliberately have no authoritative orientation advice."""
+    return {
+        "rotation_cw": None,
+        "confidence": 0.0,
+        "ambiguous": True,
+        "evidence": ["insufficient_visual_cues"],
+    }
 
 
 class PhotoAnalysisService:
@@ -124,7 +134,7 @@ class PhotoAnalysisService:
         quality = max(0.0, min(100.0, float(photo["blur_score"] or 0) ** 0.5 * 4))
         screenshot = float(photo["screenshot_likelihood"] or 0) >= 0.65
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "caption": "已完成本地影像特徵分析，未將照片傳送至模型。",
             "types": ["截圖" if screenshot else "其他"],
             "memory_score": 10.0 if screenshot else 50.0,
@@ -135,6 +145,7 @@ class PhotoAnalysisService:
             "should_keep": not screenshot,
             "sensitive": False,
             "reason": "依本地清晰度、曝光與截圖特徵判定",
+            "visual_orientation": _unknown_visual_orientation(),
         }
 
     @staticmethod
@@ -321,7 +332,7 @@ class PhotoAnalysisService:
             memory_score = 15.0
             types = ["其他"]
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "caption": f"本機預篩選已排除{label}，未將圖片傳送至模型。",
             "types": types,
             "memory_score": memory_score,
@@ -332,6 +343,7 @@ class PhotoAnalysisService:
             "should_keep": False,
             "sensitive": False,
             "reason": "、".join(reasons),
+            "visual_orientation": _unknown_visual_orientation(),
         }
 
     def _ensure_e6_suitability(self, photo_id: str, photo, source: Path):
@@ -513,7 +525,7 @@ class PhotoAnalysisService:
             provider=provider.name,
             model_name=model,
             prompt_version=prompt_version,
-            schema_version=1,
+            schema_version=2,
             schema_kind=schema_kind,
         )
         if cached is not None:
@@ -525,7 +537,7 @@ class PhotoAnalysisService:
                 pass
         cache_key = hashlib.sha256(
             json.dumps(
-                [content_sha256, provider.name, model, prompt_version, 1, schema_kind],
+                [content_sha256, provider.name, model, prompt_version, 2, schema_kind],
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
@@ -541,7 +553,7 @@ class PhotoAnalysisService:
                 provider=provider.name,
                 model_name=model,
                 prompt_version=prompt_version,
-                schema_version=1,
+                schema_version=2,
                 schema_kind=schema_kind,
             )
             if cached is not None:
