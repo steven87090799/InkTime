@@ -6,6 +6,7 @@ from pathlib import Path
 import base64
 import csv
 import io
+from itertools import islice
 import json
 import math
 import sqlite3
@@ -610,11 +611,26 @@ class PathSpool:
         self._file.close()
 
 
-def bounded_future_results(executor, jobs, worker, *, max_in_flight: int):
+def chunked_paths(paths, size: int):
+    """Yield bounded path lists from one forward-only iterator pass."""
+
+    iterator = iter(paths)
+    chunk_size = max(1, min(int(size), 500))
+    while chunk := list(islice(iterator, chunk_size)):
+        yield chunk
+
+
+def bounded_future_results(
+    executor, jobs, worker, *, max_in_flight: int, on_pending_change=None
+):
     """Submit at most max_in_flight jobs and drop each Future immediately."""
 
     iterator = iter(jobs)
     pending: set[Future] = set()
+
+    def observe_pending() -> None:
+        if on_pending_change is not None:
+            on_pending_change(len(pending))
 
     def submit_one() -> bool:
         try:
@@ -622,6 +638,7 @@ def bounded_future_results(executor, jobs, worker, *, max_in_flight: int):
         except StopIteration:
             return False
         pending.add(executor.submit(worker, *job))
+        observe_pending()
         return True
 
     for _ in range(max(1, int(max_in_flight))):
@@ -632,12 +649,14 @@ def bounded_future_results(executor, jobs, worker, *, max_in_flight: int):
             done, _ = wait(pending, return_when=FIRST_COMPLETED)
             for future in done:
                 pending.remove(future)
+                observe_pending()
                 yield future
                 submit_one()
     finally:
         for future in pending:
             future.cancel()
         pending.clear()
+        observe_pending()
 
 
 def _convert_gps_to_deg(value):
@@ -1392,8 +1411,7 @@ def main():
         CHUNK = 500
         total_files = len(imgs)
         inserted = 0
-        for i in range(0, total_files, CHUNK):
-            chunk = imgs[i : i + CHUNK]
+        for chunk in chunked_paths(iter(imgs), CHUNK):
             conn.executemany(
                 "INSERT OR IGNORE INTO _temp_existing_paths(path) VALUES (?)",
                 [(str(p),) for p in chunk],

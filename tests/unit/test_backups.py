@@ -19,8 +19,14 @@ def seed(database: Database, *, extra_photo: bool = False) -> None:
         connection.execute(
             """
             INSERT OR IGNORE INTO photos(
-                id,library_id,relative_path,sha256,status,favorite,created_at,updated_at
-            ) VALUES ('photo','lib','memory.jpg','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','analyzed',1,datetime('now'),datetime('now'))
+                id,library_id,relative_path,sha256,status,favorite,captured_at,captured_date,
+                captured_month_day,capture_date_status,created_at,updated_at
+            ) VALUES (
+                'photo','lib','memory.jpg',
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                'analyzed',1,'2024-02-29T12:30:00','2024-02-29','02-29','valid',
+                datetime('now'),datetime('now')
+            )
             """
         )
         connection.execute(
@@ -123,6 +129,11 @@ def test_backup_excludes_secrets_and_restores_analysis_and_photo_state(tmp_path)
     assert settings["settings"][0]["key"] == "backup.retention"
     assert b"full-api-key-must-not-be-backed-up" not in backed_up_database.read_bytes()
 
+    with database.session() as connection:
+        connection.execute(
+            "UPDATE photos SET captured_at=NULL,captured_date=NULL,captured_month_day=NULL,"
+            "capture_date_status='missing' WHERE id='photo'"
+        )
     seed(database, extra_photo=True)
     restored = service.restore(archive)
 
@@ -139,6 +150,21 @@ def test_backup_excludes_secrets_and_restores_analysis_and_photo_state(tmp_path)
         assert connection.execute("SELECT COUNT(*) FROM display_history").fetchone()[0] == 1
         assert connection.execute("SELECT status FROM jobs").fetchone()[0] == "pending"
         assert connection.execute("SELECT COUNT(*) FROM secrets").fetchone()[0] == 0
+        captured = connection.execute(
+            "SELECT captured_at,captured_date,captured_month_day,capture_date_status "
+            "FROM photos WHERE id='photo'"
+        ).fetchone()
+        assert tuple(captured) == (
+            "2024-02-29T12:30:00",
+            "2024-02-29",
+            "02-29",
+            "valid",
+        )
+        assert connection.execute(
+            "SELECT id FROM photos INDEXED BY idx_photos_captured_month_day "
+            "WHERE captured_month_day='02-29'"
+        ).fetchone()[0] == "photo"
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert not list(tmp_path.glob(".inktime-restore-*"))
 
 

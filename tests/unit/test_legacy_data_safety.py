@@ -135,6 +135,64 @@ def test_legacy_date_collection_batches_placeholders(monkeypatch, tmp_path):
     assert legacy.LEGACY_QUERY_BATCH_SIZE <= 200
 
 
+@pytest.mark.parametrize("exif_json", [None, "{broken-json", '{"make":"camera"}'])
+def test_simulator_prefers_materialized_date_when_exif_json_is_unusable(
+    monkeypatch, tmp_path, exif_json
+):
+    legacy = _legacy_server(monkeypatch, tmp_path)
+    photo_root = tmp_path / "photos"
+    photo_root.mkdir()
+    photo = photo_root / "memory.jpg"
+    photo.write_bytes(b"synthetic")
+    connection = sqlite3.connect(legacy.DB_PATH)
+    connection.execute(
+        "CREATE TABLE photo_scores(path TEXT PRIMARY KEY,caption TEXT,type TEXT,memory_score REAL,"
+        "beauty_score REAL,reason TEXT,side_caption TEXT,captured_date TEXT,exif_datetime TEXT,"
+        "exif_json TEXT,width INTEGER,height INTEGER,orientation TEXT,used_at TEXT,"
+        "exif_gps_lat REAL,exif_gps_lon REAL,exif_city TEXT)"
+    )
+    connection.execute(
+        "INSERT INTO photo_scores VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            str(photo),
+            "caption",
+            "memory",
+            88.0,
+            77.0,
+            "reason",
+            "side",
+            "2024-02-29",
+            "2020:01:02 03:04:05",
+            exif_json,
+            1200,
+            800,
+            "landscape",
+            None,
+            None,
+            None,
+            "Taipei",
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    rows = legacy.load_sim_rows_for_dates(["2024-02-29"])
+    assert len(rows) == 1
+    assert rows[0][7:10] == ("2024-02-29", "2020:01:02 03:04:05", exif_json)
+    assert legacy.load_sim_rows()[0][7:10] == rows[0][7:10]
+    assert legacy.get_photo_meta_by_path(str(photo))["date"] == "2024-02-29"
+    html = legacy.build_simulator_html(rows)
+    assert '"date": "2024-02-29"' in html
+    assert '"exif_json":' in html
+
+    monkeypatch.setenv("INKTIME_LEGACY_OUTPUT_DIR", str(tmp_path / "output"))
+    sys.modules.pop("render_daily_photo", None)
+    renderer = importlib.import_module("render_daily_photo")
+    rendered_rows = renderer.load_sim_rows()
+    assert rendered_rows[0]["date"] == "2024-02-29"
+    assert rendered_rows[0]["exif_json"] == (exif_json or "")
+
+
 def test_legacy_analyzer_futures_and_sql_batches_are_bounded(monkeypatch):
     config = types.ModuleType("config")
     monkeypatch.setitem(sys.modules, "config", config)
@@ -146,26 +204,79 @@ def test_legacy_analyzer_futures_and_sql_batches_are_bounded(monkeypatch):
     assert len(list(analyzer.filter_unscored(connection, iter(paths), batch_size=200))) == 2_001
     assert max(len(chunk) for chunk in (paths[i : i + 200] for i in range(0, len(paths), 200))) == 200
 
-    active = 0
-    maximum = 0
-    lock = analyzer.threading.Lock()
+    pending_counts: list[int] = []
+    completed = 0
 
     def worker(index):
-        nonlocal active, maximum
-        with lock:
-            active += 1
-            maximum = max(maximum, active)
         analyzer.time.sleep(0.005)
-        with lock:
-            active -= 1
+        if index % 17 == 0:
+            raise RuntimeError("synthetic worker failure")
         return index
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = analyzer.bounded_future_results(
-            executor, ((index,) for index in range(100)), worker, max_in_flight=8
+            executor,
+            ((index,) for index in range(100)),
+            worker,
+            max_in_flight=8,
+            on_pending_change=pending_counts.append,
         )
-        assert [future.result() for future in futures] != []
-    assert maximum <= 4
+        for future in futures:
+            completed += 1
+            try:
+                future.result()
+            except RuntimeError:
+                pass
+    assert completed == 100
+    assert max(pending_counts) == 8
+    assert pending_counts[-1] == 0
+
+    class ManualExecutor:
+        def __init__(self):
+            self.futures = []
+
+        def submit(self, callback, *args):
+            future = analyzer.Future()
+            self.futures.append(future)
+            if len(self.futures) == 1:
+                future.set_result(callback(*args))
+            return future
+
+    manual = ManualExecutor()
+    results = analyzer.bounded_future_results(
+        manual, ((index,) for index in range(100)), lambda index: index, max_in_flight=8
+    )
+    assert next(results).result() == 0
+    results.close()
+    assert len(manual.futures) == 8
+    assert all(future.cancelled() for future in manual.futures[1:])
+
+
+def test_path_spool_bulk_flow_uses_one_iterator_pass(monkeypatch):
+    config = types.ModuleType("config")
+    monkeypatch.setitem(sys.modules, "config", config)
+    sys.modules.pop("legacy_analyze_photos", None)
+    analyzer = importlib.import_module("legacy_analyze_photos")
+
+    class CountingPathSpool(analyzer.PathSpool):
+        def __init__(self, paths):
+            super().__init__(paths)
+            self.iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            yield from super().__iter__()
+
+    spool = CountingPathSpool(analyzer.Path(f"/{index}.jpg") for index in range(1_201))
+    try:
+        chunks = list(analyzer.chunked_paths(iter(spool), 500))
+    finally:
+        spool.close()
+    assert [len(chunk) for chunk in chunks] == [500, 500, 201]
+    assert spool.iterations == 1
+    assert sum(len(chunk) for chunk in chunks) == 1_201
+    source = analyzer.Path("legacy_analyze_photos.py").read_text(encoding="utf-8")
+    assert "imgs[i : i + CHUNK]" not in source
 
 
 def test_production_entrypoints_do_not_import_legacy_analyzer():

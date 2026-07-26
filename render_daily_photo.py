@@ -82,11 +82,22 @@ def extract_date_from_exif(exif_json: Optional[str]) -> str:
     return parsed.isoformat() if parsed is not None else ""
 
 
+def resolve_legacy_capture_date(
+    captured_date: object, exif_datetime: object, exif_json: Optional[str]
+) -> str:
+    for value in (captured_date, exif_datetime):
+        parsed = parse_photo_date(value)
+        if parsed is not None:
+            return parsed.isoformat()
+    return extract_date_from_exif(exif_json)
+
+
 def load_sim_rows(limit: int = 5_000) -> List[Dict[str, Any]]:
     """
     加载 InkTime 用的核心字段：
     - path: 照片路径
-    - exif_json: 用于解析日期 / GPS
+    - captured_date / exif_datetime: 主要与次要日期来源
+    - exif_json: 仅用于旧数据日期相容 fallback
     - side_caption: 文案
     - memory_score: 回忆度
     - exif_gps_lat / exif_gps_lon / exif_city: 地点信息（纯本地，不上网）
@@ -98,31 +109,52 @@ def load_sim_rows(limit: int = 5_000) -> List[Dict[str, Any]]:
     c = conn.cursor()
 
     columns = {str(row[1]) for row in c.execute("PRAGMA table_info(photo_scores)")}
-    if "captured_date" not in columns:
+    captured_date_sql = "captured_date" if "captured_date" in columns else "NULL"
+    exif_datetime_sql = "exif_datetime" if "exif_datetime" in columns else "NULL"
+    exif_json_sql = "exif_json" if "exif_json" in columns else "NULL"
+    date_predicates = [
+        column + " IS NOT NULL"
+        for column in ("captured_date", "exif_datetime", "exif_json")
+        if column in columns
+    ]
+    if not date_predicates:
         conn.close()
         return []
     rows = c.execute(
-        """
+        f"""
         SELECT path,
-               captured_date,
+               {captured_date_sql},
+               {exif_datetime_sql},
+               {exif_json_sql},
                side_caption,
                memory_score,
                exif_gps_lat,
                exif_gps_lon,
                exif_city
         FROM photo_scores
-        WHERE captured_date IS NOT NULL
-        ORDER BY captured_date,path
+        WHERE {" OR ".join(date_predicates)}
+        ORDER BY path
         LIMIT ?
-        """,
+        """,  # noqa: S608 -- expressions are selected from fixed column allowlists.
         (max(1, min(int(limit), 5_000)),),
     ).fetchall()
     conn.close()
 
     items: List[Dict[str, Any]] = []
-    for path, captured_date, side_caption, memory_score, gps_lat, gps_lon, exif_city in rows:
-        parsed = parse_photo_date(captured_date)
-        date_str = parsed.isoformat() if parsed is not None else ""
+    for (
+        path,
+        captured_date,
+        exif_datetime,
+        exif_json,
+        side_caption,
+        memory_score,
+        gps_lat,
+        gps_lon,
+        exif_city,
+    ) in rows:
+        date_str = resolve_legacy_capture_date(
+            captured_date, exif_datetime, exif_json
+        )
         if not date_str:
             continue
         # 再次兜底过滤 Screenshot 等
@@ -138,6 +170,9 @@ def load_sim_rows(limit: int = 5_000) -> List[Dict[str, Any]]:
         item = {
             "path": str(path),
             "date": date_str,  # YYYY-MM-DD
+            "captured_date": captured_date,
+            "exif_datetime": exif_datetime,
+            "exif_json": exif_json or "",
             "md": md,          # MM-DD
             "side": side_caption or "",
             "memory": float(memory_score) if memory_score is not None else -1.0,

@@ -175,6 +175,12 @@ def _legacy_columns(connection: sqlite3.Connection) -> set[str]:
     return {str(row[1]) for row in connection.execute("PRAGMA table_info(photo_scores)")}
 
 
+def _legacy_column_projection(columns: set[str], name: str) -> str:
+    if name not in {"captured_date", "exif_datetime", "exif_json"}:
+        raise ValueError("unsupported Legacy column projection")
+    return name if name in columns else f"NULL AS {name}"
+
+
 def prepare_legacy_data_schema(*, batch_size: int = 500) -> dict[str, int]:
     """Prepare optional Legacy indexes/backfill without images, JSON scans or providers."""
 
@@ -318,9 +324,13 @@ def load_sim_rows(limit: int = MAX_SIM_ROWS):
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    columns = _legacy_columns(conn)
+    captured_date_sql = _legacy_column_projection(columns, "captured_date")
+    exif_datetime_sql = _legacy_column_projection(columns, "exif_datetime")
+    exif_json_sql = _legacy_column_projection(columns, "exif_json")
 
     rows = c.execute(
-        """
+        f"""
         SELECT path,
                caption,
                type,
@@ -328,7 +338,9 @@ def load_sim_rows(limit: int = MAX_SIM_ROWS):
                beauty_score,
                reason,
                side_caption,
-               exif_json,
+               {captured_date_sql},
+               {exif_datetime_sql},
+               {exif_json_sql},
                width,
                height,
                orientation,
@@ -339,8 +351,8 @@ def load_sim_rows(limit: int = MAX_SIM_ROWS):
         FROM photo_scores
         ORDER BY path
         LIMIT ?
-        """
-        , (max(1, min(int(limit), MAX_SIM_ROWS)),)
+        """,  # noqa: S608 -- projections come from a fixed column allowlist.
+        (max(1, min(int(limit), MAX_SIM_ROWS)),),
     ).fetchall()
 
     conn.close()
@@ -368,9 +380,12 @@ def load_sim_rows_for_dates(dates: list[str]):
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    if "captured_date" not in _legacy_columns(conn):
+    columns = _legacy_columns(conn)
+    if "captured_date" not in columns:
         conn.close()
         return []
+    exif_datetime_sql = _legacy_column_projection(columns, "exif_datetime")
+    exif_json_sql = _legacy_column_projection(columns, "exif_json")
     rows = []
     for start in range(0, len(safe_dates), LEGACY_QUERY_BATCH_SIZE):
         if len(rows) >= MAX_SIM_ROWS:
@@ -379,11 +394,12 @@ def load_sim_rows_for_dates(dates: list[str]):
         placeholders = ",".join("?" for _ in batch)
         sql = f"""
             SELECT path,caption,type,memory_score,beauty_score,reason,side_caption,
-                   exif_json,width,height,orientation,used_at,exif_gps_lat,exif_gps_lon,exif_city
+                   captured_date,{exif_datetime_sql},{exif_json_sql},width,height,orientation,used_at,
+                   exif_gps_lat,exif_gps_lon,exif_city
             FROM photo_scores
             WHERE captured_date IN ({placeholders})
             ORDER BY captured_date,path LIMIT ?
-        """  # noqa: S608 -- placeholders are generated in bounded batches.
+        """  # noqa: S608 -- placeholders/projections are bounded fixed allowlists.
         rows.extend(
             c.execute(
                 sql, (*batch, MAX_SIM_ROWS - len(rows))
@@ -402,10 +418,16 @@ def get_photo_meta_by_path(abs_path: str):
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    columns = _legacy_columns(conn)
+    captured_date_sql = _legacy_column_projection(columns, "captured_date")
+    exif_datetime_sql = _legacy_column_projection(columns, "exif_datetime")
+    exif_json_sql = _legacy_column_projection(columns, "exif_json")
     row = c.execute(
-        """
+        f"""
         SELECT path,
-               exif_json,
+               {captured_date_sql},
+               {exif_datetime_sql},
+               {exif_json_sql},
                side_caption,
                memory_score,
                exif_gps_lat,
@@ -414,7 +436,7 @@ def get_photo_meta_by_path(abs_path: str):
         FROM photo_scores
         WHERE path = ?
         LIMIT 1
-        """,
+        """,  # noqa: S608 -- projections come from a fixed column allowlist.
         (abs_path,),
     ).fetchone()
     conn.close()
@@ -422,8 +444,18 @@ def get_photo_meta_by_path(abs_path: str):
     if not row:
         return None
 
-    path, exif_json, side_caption, memory_score, gps_lat, gps_lon, exif_city = row
-    date_str = extract_date_from_exif(exif_json)
+    (
+        path,
+        captured_date,
+        exif_datetime,
+        exif_json,
+        side_caption,
+        memory_score,
+        gps_lat,
+        gps_lon,
+        exif_city,
+    ) = row
+    date_str = resolve_legacy_capture_date(captured_date, exif_datetime, exif_json)
     if not date_str:
         return None
 
@@ -495,6 +527,18 @@ def extract_date_from_exif(exif_json: str | None) -> str:
         return ""
     parsed = parse_photo_date(dtv)
     return parsed.isoformat() if parsed is not None else ""
+
+
+def resolve_legacy_capture_date(
+    captured_date: object, exif_datetime: object, exif_json: str | None
+) -> str:
+    """Resolve one Legacy row without treating its EXIF JSON as authoritative."""
+
+    for value in (captured_date, exif_datetime):
+        parsed = parse_photo_date(value)
+        if parsed is not None:
+            return parsed.isoformat()
+    return extract_date_from_exif(exif_json)
 
 
 # --------------------------
@@ -1076,6 +1120,8 @@ def build_simulator_html(sim_rows, selected_img: str = ""):
         beauty_score,
         reason,
         side_caption,
+        captured_date,
+        exif_datetime,
         exif_json,
         width,
         height,
@@ -1085,7 +1131,9 @@ def build_simulator_html(sim_rows, selected_img: str = ""):
         gps_lon,
         exif_city,
     ) in sim_rows:
-        date_str = extract_date_from_exif(exif_json)
+        date_str = resolve_legacy_capture_date(
+            captured_date, exif_datetime, exif_json
+        )
         if not date_str:
             continue
         img_uri = _make_image_url(str(path))
@@ -1098,6 +1146,8 @@ def build_simulator_html(sim_rows, selected_img: str = ""):
         items.append({
             "path": img_uri,
             "date": date_str,
+            "captured_date": captured_date or "",
+            "exif_datetime": exif_datetime or "",
             "memory": float(memory_score) if memory_score is not None else None,
             "beauty": float(beauty_score) if beauty_score is not None else None,
             "city": exif_city or "",

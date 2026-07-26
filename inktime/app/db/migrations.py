@@ -1094,28 +1094,34 @@ def backfill_photo_capture_dates(database: Database, *, batch_size: int = 500) -
     from inktime.app.domain.photos.dates import materialized_capture_fields
 
     size = max(1, min(int(batch_size), 1_000))
-    cursor_id = ""
     counts = {"processed": 0, "valid": 0, "invalid": 0, "missing": 0}
-    while True:
-        with database.session() as connection:
-            rows = connection.execute(
-                "SELECT id,captured_at FROM photos "
-                "WHERE capture_date_status='pending' AND id>? ORDER BY id LIMIT ?",
-                (cursor_id, size),
-            ).fetchall()
-        if not rows:
-            break
-        updates: list[tuple[str | None, str | None, str, str]] = []
-        for row in rows:
-            captured_date, month_day, status = materialized_capture_fields(row["captured_at"])
-            updates.append((captured_date, month_day, status, str(row["id"])))
-            counts[status] += 1
-        with database.transaction() as connection:
-            connection.executemany(
-                "UPDATE photos SET captured_date=?,captured_month_day=?,capture_date_status=? "
-                "WHERE id=? AND capture_date_status='pending'",
-                updates,
-            )
-        counts["processed"] += len(rows)
-        cursor_id = str(rows[-1]["id"])
+    lock = database.try_acquire_operation_lock("capture-date-backfill")
+    if lock is None:
+        return counts
+    try:
+        cursor_id = ""
+        while True:
+            with database.session() as connection:
+                rows = connection.execute(
+                    "SELECT id,captured_at FROM photos "
+                    "WHERE capture_date_status='pending' AND id>? ORDER BY id LIMIT ?",
+                    (cursor_id, size),
+                ).fetchall()
+            if not rows:
+                break
+            updates: list[tuple[str | None, str | None, str, str]] = []
+            for row in rows:
+                captured_date, month_day, status = materialized_capture_fields(row["captured_at"])
+                updates.append((captured_date, month_day, status, str(row["id"])))
+                counts[status] += 1
+            with database.transaction() as connection:
+                connection.executemany(
+                    "UPDATE photos SET captured_date=?,captured_month_day=?,capture_date_status=? "
+                    "WHERE id=? AND capture_date_status='pending'",
+                    updates,
+                )
+            counts["processed"] += len(rows)
+            cursor_id = str(rows[-1]["id"])
+    finally:
+        lock.close()
     return counts

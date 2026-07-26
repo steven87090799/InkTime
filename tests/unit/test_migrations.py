@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import multiprocessing
+from pathlib import Path
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -9,6 +11,20 @@ import pytest
 import inktime.app.db.migrations as migrations_module
 from inktime.app.db import Database, MigrationError, migrate
 from inktime.app.db.migrations import Migration, MIGRATIONS
+
+
+def _run_capture_date_backfill(database_path: str, start, results) -> None:
+    if not start.wait(10):
+        results.put({"error": "start timeout"})
+        return
+    try:
+        results.put(
+            migrations_module.backfill_photo_capture_dates(
+                Database(Path(database_path)), batch_size=500
+            )
+        )
+    except Exception as exc:
+        results.put({"error": type(exc).__name__})
 
 
 def test_fresh_database_is_migrated(tmp_path):
@@ -119,6 +135,80 @@ def test_concurrent_migrations_are_serialized(tmp_path):
         results = list(executor.map(lambda _index: migrate(database), range(2)))
     assert sorted(results, key=len) == [[], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]]
     assert database.integrity_check() == "ok"
+
+
+def test_capture_date_backfill_is_cross_process_singleflight(tmp_path):
+    database = Database(tmp_path / "inktime.db")
+    migrate(database)
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO libraries(id,name,root_path,created_at,updated_at) "
+            "VALUES ('lib','L','/photos',datetime('now'),datetime('now'))"
+        )
+        connection.executemany(
+            "INSERT INTO photos(id,library_id,relative_path,status,captured_at,created_at,updated_at) "
+            "VALUES (?,'lib',?,'discovered','2024-02-29T12:30:00',datetime('now'),datetime('now'))",
+            [(f"photo-{index:04d}", f"{index}.jpg") for index in range(500)],
+        )
+
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_run_capture_date_backfill,
+            args=(str(database.path), start, results),
+        )
+        for _index in range(2)
+    ]
+    for process in processes:
+        process.start()
+    start.set()
+    for process in processes:
+        process.join(20)
+        assert not process.is_alive()
+        assert process.exitcode == 0
+
+    outcomes = [results.get(timeout=5) for _index in processes]
+    assert all("error" not in outcome for outcome in outcomes)
+    assert sorted(outcome["processed"] for outcome in outcomes) == [0, 500]
+    with database.session() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM photos WHERE capture_date_status='pending'"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM photos WHERE captured_date='2024-02-29' "
+            "AND captured_month_day='02-29' AND capture_date_status='valid'"
+        ).fetchone()[0] == 500
+
+
+def test_capture_date_backfill_releases_operation_lock_after_exception(
+    monkeypatch, tmp_path
+):
+    from inktime.app.domain.photos import dates
+
+    database = Database(tmp_path / "inktime.db")
+    migrate(database)
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO libraries(id,name,root_path,created_at,updated_at) "
+            "VALUES ('lib','L','/photos',datetime('now'),datetime('now'))"
+        )
+        connection.execute(
+            "INSERT INTO photos(id,library_id,relative_path,status,captured_at,created_at,updated_at) "
+            "VALUES ('photo','lib','a.jpg','discovered','2024-02-29',datetime('now'),datetime('now'))"
+        )
+
+    original = dates.materialized_capture_fields
+
+    def fail(_value):
+        raise RuntimeError("synthetic parse failure")
+
+    monkeypatch.setattr(dates, "materialized_capture_fields", fail)
+    with pytest.raises(RuntimeError, match="synthetic parse failure"):
+        migrations_module.backfill_photo_capture_dates(database)
+    monkeypatch.setattr(dates, "materialized_capture_fields", original)
+    assert migrations_module.backfill_photo_capture_dates(database)["processed"] == 1
 
 
 def test_wal_allows_reader_while_cross_process_writer_boundary_serializes_writes(tmp_path):
