@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-import fcntl
 import logging
 from pathlib import Path
 import random
@@ -10,6 +9,8 @@ import sqlite3
 import threading
 import time
 from typing import IO, Iterator
+
+from inktime.app.core.locks import fcntl
 
 
 LOGGER = logging.getLogger(__name__)

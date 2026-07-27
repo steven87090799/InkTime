@@ -1119,6 +1119,73 @@ class PhotoRepository:
                 (photo_id,),
             ).fetchone()
 
+    def compatibility_page(
+        self,
+        *,
+        month_day: str = "",
+        sort: str = "memory",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list, int]:
+        """Bounded read model for the temporary Legacy compatibility surface."""
+
+        bounded_limit = max(1, min(int(limit), 100))
+        bounded_offset = max(0, min(int(offset), 100_000))
+        clauses = ["p.lifecycle_status='active'"]
+        parameters: list[object] = []
+        if month_day:
+            parsed = parse_photo_datetime(f"2000-{month_day}", warn=False)
+            if parsed is None:
+                clauses.append("0")
+            else:
+                clauses.append("p.captured_month_day=?")
+                parameters.append(month_day)
+        orderings = {
+            "memory": "COALESCE(a.memory_score,-1) DESC,COALESCE(a.beauty_score,-1) DESC,p.id",
+            "beauty": "COALESCE(a.beauty_score,-1) DESC,COALESCE(a.memory_score,-1) DESC,p.id",
+            "time_new": "(p.captured_date IS NULL),p.captured_date DESC,p.id",
+            "time_old": "(p.captured_date IS NULL),p.captured_date ASC,p.id",
+        }
+        ordering = orderings.get(sort, orderings["memory"])
+        where = " AND ".join(clauses)
+        latest_analysis = (
+            "a.id=(SELECT latest.id FROM photo_analysis latest "
+            "WHERE latest.photo_id=p.id ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1)"
+        )
+        with self.database.session() as connection:
+            total = int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM photos p WHERE {where}",  # noqa: S608
+                    parameters,
+                ).fetchone()[0]
+            )
+            rows = connection.execute(
+                f"""
+                SELECT p.id,p.relative_path,p.width,p.height,p.orientation,p.captured_date,
+                       p.captured_month_day,p.gps_lat,p.gps_lon,p.exif_json,
+                       l.name AS library_name,a.caption,a.types_json,a.memory_score,
+                       a.beauty_score,a.technical_quality_score,a.emotion_score,
+                       a.ranking_score,a.side_caption,a.reason,a.created_at AS analyzed_at
+                FROM photos p JOIN libraries l ON l.id=p.library_id
+                LEFT JOIN photo_analysis a ON {latest_analysis}
+                WHERE {where} ORDER BY {ordering} LIMIT ? OFFSET ?
+                """,  # noqa: S608 -- every fragment is selected from a fixed allowlist.
+                (*parameters, bounded_limit, bounded_offset),
+            ).fetchall()
+        return rows, total
+
+    def compatibility_month_days(self) -> list[str]:
+        """Return only indexed materialized dates; never parse full-library EXIF JSON."""
+
+        with self.database.session() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT captured_month_day FROM photos "
+                "INDEXED BY idx_photos_captured_month_day "
+                "WHERE lifecycle_status='active' AND captured_month_day IS NOT NULL "
+                "ORDER BY captured_month_day LIMIT 367"
+            ).fetchall()
+        return [str(row[0]) for row in rows[:366]]
+
     def set_exclusion(
         self,
         photo_id: str,

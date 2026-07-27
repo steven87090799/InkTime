@@ -49,6 +49,7 @@ def ready():
 @administrator_required
 def detail():
     database = current_app.extensions["inktime_database"]
+    runtime_config = current_app.extensions["inktime_runtime_config"]
     return {
         "status": "ok",
         "python": sys.version.split()[0],
@@ -56,6 +57,7 @@ def detail():
         "database_integrity": database.integrity_check(),
         "database_bytes": database.path.stat().st_size if database.path.exists() else 0,
         "version": current_app.config.get("INKTIME_VERSION"),
+        "runtime_config": runtime_config.diagnostic_summary(),
         "runtime_metrics": {
             "sqlite_writer_wait": database.observability(),
             "weather": current_app.extensions[

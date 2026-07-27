@@ -3,22 +3,30 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from flask import Flask
-
-from inktime.app.platform import initialize_platform
+from inktime.app.core.runtime_config import RuntimeConfig
+from inktime.app.factory import create_app
 
 
 @pytest.fixture
 def app(tmp_path: Path):
-    application = Flask(__name__)
-    initialize_platform(
-        application,
+    runtime_config = RuntimeConfig.from_sources(
+        environ={},
+        base_dir=tmp_path,
+        environment="test",
         database_path=tmp_path / "inktime.db",
         data_dir=tmp_path / "data",
         release_dir=tmp_path / "releases",
+        backup_dir=tmp_path / "backups",
+        cache_dir=tmp_path / "cache",
+        photo_dir=tmp_path / "photos",
         testing=True,
+        development=False,
+        legacy_enabled=False,
+        cookie_secure=False,
     )
-    return application
+    application = create_app(runtime_config)
+    yield application
+    application.extensions["inktime_service_container"].close()
 
 
 @pytest.fixture

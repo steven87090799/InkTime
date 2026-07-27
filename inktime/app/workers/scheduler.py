@@ -101,7 +101,10 @@ class SchedulerRunner:
             "retry_interval_seconds": int(task["retry_interval_seconds"]),
         }
         if task["kind"] == "scan":
-            root_path = str(config.get("root_path") or self.app.config["INKTIME_PHOTO_DIR"])
+            root_path = str(
+                config.get("root_path")
+                or self.app.extensions["inktime_runtime_config"].photo_dir
+            )
             mode = str(config.get("mode", "incremental"))
             job_id = repository.create_maintenance(
                 kind="scan",
@@ -174,13 +177,17 @@ class SchedulerRunner:
 
 
 def main() -> None:
-    from server import app
+    from inktime.app.bootstrap import bootstrap_services
+    from inktime.app.core.runtime_config import resolve_runtime_config
 
-    runner = SchedulerRunner(app)
+    container = bootstrap_services(resolve_runtime_config(), role="scheduler")
+    runner = SchedulerRunner(container)
     signal.signal(signal.SIGTERM, runner.request_stop)
     signal.signal(signal.SIGINT, runner.request_stop)
-    with app.app_context():
+    try:
         runner.run_forever()
+    finally:
+        container.close()
 
 
 if __name__ == "__main__":

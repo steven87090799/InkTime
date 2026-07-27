@@ -360,11 +360,16 @@ class WorkerRunner:
             self.current = BoundedJobWorker(
                 repository,
                 processor,
-                concurrency=int(
-                    settings.get(
-                        "concurrency",
-                        self.app.extensions["inktime_settings_repository"].get("analysis.concurrency"),
-                    )
+                concurrency=min(
+                    int(
+                        settings.get(
+                            "concurrency",
+                            self.app.extensions["inktime_settings_repository"].get(
+                                "analysis.concurrency"
+                            ),
+                        )
+                    ),
+                    self.app.extensions["inktime_runtime_config"].worker_concurrency,
                 ),
                 queue_multiplier=int(runtime_settings.get("worker.queue_multiplier", 1)),
                 max_attempts=int(
@@ -455,18 +460,22 @@ def main() -> None:
     mode.add_argument("--once", action="store_true", help="單次檢查後結束")
     mode.add_argument("--drain", action="store_true", help="處理目前 Queue 後結束")
     args = parser.parse_args()
-    from server import app
+    from inktime.app.bootstrap import bootstrap_services
+    from inktime.app.core.runtime_config import resolve_runtime_config
 
-    runner = WorkerRunner(app)
+    container = bootstrap_services(resolve_runtime_config(), role="worker")
+    runner = WorkerRunner(container)
     signal.signal(signal.SIGTERM, runner.request_stop)
     signal.signal(signal.SIGINT, runner.request_stop)
-    with app.app_context():
+    try:
         if args.once:
             runner.run_once()
         elif args.drain:
             runner.run_drain()
         else:
             runner.run_forever()
+    finally:
+        container.close()
 
 
 if __name__ == "__main__":
