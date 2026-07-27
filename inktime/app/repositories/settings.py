@@ -812,7 +812,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "render.profile": {
         "category": "渲染設定",
-        "default": "safe_4c",
+        "default": "gdep073e01_6c",
         "type": "string",
         "description": "正式發布使用的電子紙面板色彩 Profile",
         "risk": "必須與裝置頁設定的面板型號一致；不一致時韌體會拒絕更新",
@@ -821,7 +821,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "render.dither": {
         "category": "渲染設定",
-        "default": "floyd_steinberg",
+        "default": "gooddisplay",
         "type": "string",
         "description": "有限色電子紙的抖動算法；可選 GDEP 原廠相容或減少色塊與雜點的照片平滑模式",
         "risk": "原廠相容與照片平滑固定使用標準強度；照片平滑可能略微柔化極細線條",
@@ -915,7 +915,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "device.default_panel_profile": {
         "category": "裝置設定",
-        "default": "safe_4c",
+        "default": "gdep073e01_6c",
         "type": "string",
         "description": "新增 ESP32 裝置時套用的面板 Profile",
         "risk": "請依實際面板型號選擇；選錯會由韌體安全拒絕",
