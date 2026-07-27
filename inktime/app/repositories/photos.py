@@ -15,11 +15,12 @@ from inktime.app.domain.analysis.scoring import (
     calculate_ranking_score,
 )
 from inktime.app.domain.photos.preprocessing import LocalPhotoFeatures
+from inktime.app.domain.photos.quality_policy import FEATURE_VERSION, evaluate_local_quality
 from inktime.app.domain.photos.dates import materialized_capture_fields, parse_photo_datetime
 
 
 LOCAL_QUALITY_RULE = "local-quality"
-LOCAL_QUALITY_RULE_VERSION = "local-quality-v3"
+LOCAL_QUALITY_RULE_VERSION = FEATURE_VERSION
 
 
 def _local_candidate_score(features: LocalPhotoFeatures) -> float:
@@ -31,36 +32,17 @@ def _local_candidate_score(features: LocalPhotoFeatures) -> float:
     )
     short_edge = min(features.width, features.height)
     resolution = min(12.0, short_edge / 100.0)
-    return round(max(0.0, min(100.0, blur**0.5 * 3.2 + contrast * 0.8 + resolution - exposure_penalty * 45)), 2)
+    # Contrast is helpful, but must not dominate the local technical score.
+    contrast_contribution = min(32.0, contrast * 0.8)
+    return round(max(0.0, min(100.0, blur**0.5 * 3.2 + contrast_contribution + resolution - exposure_penalty * 45)), 2)
 
 
 def _automatic_exclusion(relative_path: str, features: LocalPhotoFeatures) -> tuple[str, dict] | None:
-    """回傳可重現的本機排除證據；不得在此處呼叫 Provider。"""
-    filename = Path(relative_path).name.casefold()
-    document_markers = ("receipt", "invoice", "document", "scan", "收據", "發票", "文件")
-    if any(marker in filename for marker in document_markers):
-        return "document_or_receipt", {"measured_value": filename, "threshold": "filename marker"}
-    screenshot = float(features.screenshot_likelihood or 0.0)
-    if screenshot >= 0.65:
-        return "screenshot", {"measured_value": round(screenshot, 3), "threshold": 0.65}
-    short_edge = min(features.width, features.height)
-    if short_edge < 240:
-        return "resolution_too_low", {"measured_value": short_edge, "threshold": 240}
-    blur = float(features.blur_score or 0.0)
-    contrast = float(features.contrast or 0.0)
-    if blur < 8 and contrast < 12 and short_edge < 600:
-        return "blur_too_high", {
-            "measured_value": round(blur, 2),
-            "threshold": 8.0,
-            "secondary_threshold": "short_edge < 600",
-        }
-    overexposed = float(features.overexposed_ratio or 0.0)
-    underexposed = float(features.underexposed_ratio or 0.0)
-    if overexposed >= 0.7:
-        return "overexposed", {"measured_value": round(overexposed, 4), "threshold": 0.7}
-    if underexposed >= 0.7:
-        return "underexposed", {"measured_value": round(underexposed, 4), "threshold": 0.7}
-    return None
+    """Return the single shared v4 decision; never call a Provider here."""
+    evaluation = evaluate_local_quality({"relative_path": relative_path, **features.as_dict()})
+    if evaluation["decision"] != "auto_excluded":
+        return None
+    return str(evaluation["primary_reason"]), evaluation
 
 
 def _stored_exclusion(photo: dict) -> tuple[str, dict] | None:
@@ -101,7 +83,10 @@ def _stored_exclusion(photo: dict) -> tuple[str, dict] | None:
         e6_text_score=None,
         e6_skin_pixels=None,
     )
-    return _automatic_exclusion(str(photo.get("relative_path") or ""), features)
+    evaluation = evaluate_local_quality({**photo, "relative_path": str(photo.get("relative_path") or "")})
+    if evaluation["decision"] != "auto_excluded":
+        return None
+    return str(evaluation["primary_reason"]), evaluation
 
 
 @dataclass(frozen=True)
@@ -788,9 +773,14 @@ class PhotoRepository:
                 if not features.local_features_complete:
                     continue
                 existing = plan["existing"]
-                protected = bool(existing) and not plan["content_changed"] and str(
-                    existing.get("exclusion_status") or ""
-                ) in {"manually_restored", "manually_excluded"}
+                # Automatic rules are never allowed to overwrite a favourite or
+                # a manual decision unless the content itself changed.
+                protected = bool(existing) and not plan["content_changed"] and (
+                    bool(existing.get("favorite"))
+                    or bool(existing.get("manual_override"))
+                    or str(existing.get("exclusion_status") or "")
+                    in {"manually_restored", "manually_excluded"}
+                )
                 exclusion = None if protected else _automatic_exclusion(plan["item"].relative_path, features)
                 if protected:
                     eligible = int(existing.get("eligible", 1))
@@ -1429,15 +1419,18 @@ class PhotoRepository:
             )
 
     def get_ai_cache(
-        self, *, content_sha256: str, provider: str, model_name: str, prompt_version: str, schema_version: int, schema_kind: str
+        self, *, content_sha256: str, provider: str, model_name: str, prompt_version: str, schema_version: int, schema_kind: str,
+        vision_request_fingerprint: str | None = None,
     ) -> dict | None:
         with self.database.session() as connection:
             row = connection.execute(
                 """
                 SELECT * FROM ai_analysis_cache WHERE content_sha256=? AND provider=? AND model_name=?
                   AND prompt_version=? AND schema_version=? AND schema_kind=?
+                  AND (? IS NULL OR vision_request_fingerprint=?)
                 """,
-                (content_sha256, provider, model_name, prompt_version, schema_version, schema_kind),
+                (content_sha256, provider, model_name, prompt_version, schema_version, schema_kind,
+                 vision_request_fingerprint, vision_request_fingerprint),
             ).fetchone()
         if row is None:
             return None
@@ -1464,13 +1457,16 @@ class PhotoRepository:
         cached_tokens: int,
         estimated_cost: float,
         latency_ms: int,
+        vision_request_fingerprint: str | None = None,
+        vision_input_spec_json: str | None = None,
     ) -> None:
         with self.database.session() as connection:
             connection.execute(
                 """
                 INSERT INTO ai_analysis_cache(content_sha256,provider,model_name,prompt_version,schema_version,schema_kind,
-                    result_json,raw_json,input_tokens,output_tokens,cached_tokens,estimated_cost,latency_ms,created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    result_json,raw_json,input_tokens,output_tokens,cached_tokens,estimated_cost,latency_ms,created_at,
+                    vision_request_fingerprint,vision_input_spec_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(content_sha256,provider,model_name,prompt_version,schema_version,schema_kind)
                 DO UPDATE SET result_json=excluded.result_json,raw_json=excluded.raw_json,input_tokens=excluded.input_tokens,
                     output_tokens=excluded.output_tokens,cached_tokens=excluded.cached_tokens,estimated_cost=excluded.estimated_cost,
@@ -1480,6 +1476,7 @@ class PhotoRepository:
                     content_sha256, provider, model_name, prompt_version, schema_version, schema_kind,
                     json.dumps(result, ensure_ascii=False), raw_json, input_tokens, output_tokens, cached_tokens,
                     estimated_cost, latency_ms, datetime.now(timezone.utc).isoformat(),
+                    vision_request_fingerprint, vision_input_spec_json,
                 ),
             )
 
@@ -1824,6 +1821,10 @@ class PhotoRepository:
         travel_bonus: float = 0.0,
         location_rule_version: str | None = None,
         prompt_version: str = "photo-quality-v3",
+        analysis_fingerprint: str | None = None,
+        analysis_spec_json: str | None = None,
+        vision_request_fingerprint: str | None = None,
+        vision_input_spec_json: str | None = None,
     ) -> None:
         import json
 
@@ -1837,8 +1838,9 @@ class PhotoRepository:
                         memory_score,beauty_score,technical_quality_score,emotion_score,side_caption,should_keep,
                         sensitive,reason,raw_json,analysis_source,ranking_score,scoring_version_id,created_at,
                         schema_kind,semantic_json,local_score,semantic_score,base_ranking_score,final_ranking_score,
-                        ranking_rule_version,travel_bonus,location_rule_version,prompt_version)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        ranking_rule_version,travel_bonus,location_rule_version,prompt_version,
+                        analysis_fingerprint,analysis_spec_json,vision_request_fingerprint,vision_input_spec_json)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         photo_id,
@@ -1879,6 +1881,10 @@ class PhotoRepository:
                         travel_bonus,
                         location_rule_version,
                         prompt_version,
+                        analysis_fingerprint,
+                        analysis_spec_json,
+                        vision_request_fingerprint,
+                        vision_input_spec_json,
                     ),
                 )
                 connection.execute(

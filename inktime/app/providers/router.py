@@ -185,3 +185,10 @@ class FailoverVisionProvider(VisionProvider):
     def validate_config(self) -> tuple[bool, str]:
         results = [channel.provider.validate_config() for channel in self.channels]
         return (any(result[0] for result in results), "；".join(result[1] for result in results))
+
+    def close(self) -> None:
+        """Release all HTTP sessions deterministically after a worker job."""
+        for channel in self.channels:
+            close = getattr(channel.provider, "close", None)
+            if callable(close):
+                close()

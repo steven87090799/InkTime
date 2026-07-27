@@ -19,6 +19,7 @@ from inktime.app.domain.rendering import (
     DISPLAY_PROFILES,
     FontManager,
     analyze_crop_focus,
+    calculate_epaper_contrast_risk,
     current_local_date,
     evaluate_e6_suitability,
     fit_with_focus,
@@ -111,6 +112,10 @@ class RenderService:
         font_path = self.fonts.resolve(font_reference)
         font_stat = font_path.stat()
         profile_definition = DISPLAY_PROFILES[profile_key]
+        epaper_risk = calculate_epaper_contrast_risk(photo)
+        effective_dither = dither or str(self.settings.get("render.dither", DEFAULT_RENDER_DITHER))
+        if dither is None and bool(self.settings.get("render.auto_photo_smooth_enabled", False)) and epaper_risk == "high":
+            effective_dither = "photo_smooth"
 
         def photo_version(row, *, x=None, y=None) -> dict[str, Any] | None:
             if row is None:
@@ -133,6 +138,7 @@ class RenderService:
                 "auto_focus": [row["crop_focus_x"], row["crop_focus_y"]],
                 "subject_box": list(self._subject_box(row) or ()),
                 "photo_updated_at": row["updated_at"],
+                "epaper_contrast_risk": calculate_epaper_contrast_risk(row),
             }
 
         with self.database.session() as connection:
@@ -189,7 +195,8 @@ class RenderService:
                 "panel_profile": profile_definition.panel_profile,
                 "palette_version": profile_definition.palette_version,
                 "custom_palette_hash": None,
-                "dither": dither or str(self.settings.get("render.dither", DEFAULT_RENDER_DITHER)),
+                "dither": effective_dither,
+                "epaper_contrast_risk_rule": "epaper-contrast-risk-v1",
                 "color_distance": str(self.settings.get("render.color_distance", "oklab")),
                 "strength": float(self.settings.get("render.dither_strength", 1.0)),
                 "linear_light": False,
@@ -637,7 +644,6 @@ class RenderService:
                 source_orientation = photo_orientation(source.size)
                 if source_orientation in {"square", effective_orientation}:
                     layout_key = "photo_info"
-                    fit_mode_key = "contain"
                 else:
                     primary = dict(photo)
                     primary.update({"id": photo_id, "city": "", "types": []})
@@ -648,7 +654,6 @@ class RenderService:
                     )
                     if second_row is None:
                         layout_key = "photo_info"
-                        fit_mode_key = "contain"
                     else:
                         text_parts = [
                             caption or "這一天留下了兩個值得記住的片段。",
@@ -663,7 +668,7 @@ class RenderService:
                         else:
                             slot_size = (frame_width, (frame_height - footer_height - gutter) // 2)
                             second_position = (0, slot_size[1] + gutter)
-                        canvas.paste(self._fit_photo(source, photo, slot_size, None, None, "contain"), (0, 0))
+                        canvas.paste(self._fit_photo(source, photo, slot_size, None, None, fit_mode_key), (0, 0))
                         second_path = safe_join(Path(second_row["root_path"]), second_row["relative_path"])
                         second_source, second_orientation = self._load_oriented_photo(second_row, second_path)
                         if orientation_metadata is not None:
@@ -675,7 +680,7 @@ class RenderService:
                             )
                         with second_source:
                             canvas.paste(
-                                self._fit_photo(second_source, second_row, slot_size, None, None, "contain"),
+                                self._fit_photo(second_source, second_row, slot_size, None, None, fit_mode_key),
                                 second_position,
                             )
                         self._adaptive_footer(

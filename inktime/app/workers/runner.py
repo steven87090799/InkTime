@@ -342,6 +342,7 @@ class WorkerRunner:
                     favorite_bonus=float(scoring_profile["favorite_bonus"]),
                     scoring_version_id=str(scoring_profile["id"]),
                     force_ai=bool(settings.get("force_ai", False)),
+                    force_recompute=bool(job["force_recompute"]),
                 )
 
             def record_result(
@@ -395,6 +396,9 @@ class WorkerRunner:
                 details={"recovered_items": recovered},
             )
             self.current.run_job(job["id"])
+            close_provider = getattr(provider, "close", None)
+            if callable(close_provider):
+                close_provider()
             finished = repository.get(job["id"])
             if finished is not None:
                 scheduled_task = settings.get("scheduled_task")

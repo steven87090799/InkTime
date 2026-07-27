@@ -7,6 +7,8 @@ from pathlib import Path
 import time
 from typing import Callable, Iterable, Iterator, Sequence
 
+from PIL import Image
+
 from inktime.app.domain.photos import PhotoPreprocessor, ThumbnailCache
 from inktime.app.repositories.photos import (
     BatchPhotoResult,
@@ -47,10 +49,12 @@ def iter_media(
 ) -> Iterator[tuple[Path, str]]:
     """串流回傳媒體；walk 的權限／I/O 錯誤不得被靜默忽略。"""
 
-    for directory, dirnames, filenames in os.walk(root, onerror=on_error):
-        dirnames[:] = [name for name in dirnames if not name.startswith(".")]
+    for directory, dirnames, filenames in os.walk(root, onerror=on_error, followlinks=False):
+        dirnames[:] = [name for name in dirnames if not name.startswith(".") and name not in {"@eaDir", "@tmp", "#recycle"} and not (Path(directory) / name).is_symlink()]
         for filename in filenames:
             path = Path(directory) / filename
+            if filename.startswith(".") or filename in {"Thumbs.db", "desktop.ini"} or path.is_symlink():
+                continue
             suffix = path.suffix.lower()
             if suffix in SUPPORTED_EXTENSIONS:
                 yield path, "image"
@@ -133,6 +137,12 @@ class PhotoScanner:
         return metadata, local
 
     def _analyze(self, entry: DiskPhoto, *, metadata: bool, local: bool):
+        # Reject bombs from metadata before the full feature pipeline decodes
+        # pixels.  MemoryError/RecursionError remain fatal by design.
+        with Image.open(entry.path) as image:
+            width, height = image.size
+            if width * height > self.max_pixels or max(width, height) > self.max_edge_px:
+                raise Image.DecompressionBombError("scanner image dimensions exceed configured limit")
         try:
             return self.preprocessor.analyze(
                 entry.path,
@@ -161,6 +171,9 @@ class PhotoScanner:
         progress_callback: Callable[[dict], None] | None = None,
         progress_interval_items: int = 50,
         progress_interval_seconds: int = 300,
+        max_file_bytes: int = 200 * 1024 * 1024,
+        max_pixels: int = 60_000_000,
+        max_edge_px: int = 12_000,
     ) -> dict:
         if mode not in SCAN_MODES:
             raise ValueError("SCAN-003 不支援的掃描模式")
@@ -177,6 +190,9 @@ class PhotoScanner:
 
         disk_batch_size = max(100, min(int(disk_batch_size), 10_000))
         write_batch_size = max(100, min(int(write_batch_size), 2_000))
+        self.max_pixels = max(1_000_000, int(max_pixels))
+        self.max_edge_px = max(1_000, int(max_edge_px))
+        max_file_bytes = max(1_024 * 1_024, int(max_file_bytes))
         cancel_requested = cancel_requested or (lambda: False)
         library_id = self.repository.ensure_library(name, root)
         scan_id = self.repository.begin_scan(
@@ -255,6 +271,10 @@ class PhotoScanner:
                 try:
                     relative_path = path.relative_to(root).as_posix()
                     stat = path.stat()
+                    if int(stat.st_size) > max_file_bytes:
+                        counts["skipped"] += 1
+                        errors.append(_scan_error(str(path), stage="safety", error_code="SCAN-SIZE-001", exc=ValueError("file too large"), retryable=False))
+                        continue
                     disk_entries.append(
                         DiskPhoto(path, relative_path, int(stat.st_size), float(stat.st_mtime))
                     )
@@ -324,6 +344,8 @@ class PhotoScanner:
                         )
                     )
                     classifications[entry.relative_path] = classification
+                except (MemoryError, RecursionError):
+                    raise
                 except Exception as exc:
                     if stored is not None:
                         processing_failures.append((stored.id, metadata, local))

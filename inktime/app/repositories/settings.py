@@ -82,17 +82,17 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "min": 0, "max": 1000, "restart": False,
     },
     "analysis.side_caption_min_chars": {
-        "category": "照片描述與相框文案", "default": 10, "type": "integer",
+        "category": "照片描述與相框文案", "default": 8, "type": "integer",
         "description": "相框一句話最少字元數", "risk": "必須與目標、上限保持 min ≤ target ≤ max",
         "min": 0, "max": 120, "restart": False,
     },
     "analysis.side_caption_target_chars": {
-        "category": "照片描述與相框文案", "default": 22, "type": "integer",
+        "category": "照片描述與相框文案", "default": 12, "type": "integer",
         "description": "相框一句話的大致目標字元數", "risk": "必須與最少、上限保持 min ≤ target ≤ max",
         "min": 0, "max": 120, "restart": False,
     },
     "analysis.side_caption_max_chars": {
-        "category": "照片描述與相框文案", "default": 42, "type": "integer",
+        "category": "照片描述與相框文案", "default": 16, "type": "integer",
         "description": "相框一句話最多字元數", "risk": "必須與最少、目標保持 min ≤ target ≤ max",
         "min": 0, "max": 120, "restart": False,
     },
@@ -304,6 +304,11 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "max": 100,
         "restart": False,
     },
+    "analysis.high_image_max_side": {
+        "category": "分析設定", "default": 1024, "type": "integer",
+        "description": "高品質 Vision 輸入最長邊", "risk": "1600 會增加成本與延遲",
+        "choices": [1024, 1600], "restart": False,
+    },
     "analysis.prefilter_enabled": {
         "category": "本機預篩選",
         "default": True,
@@ -486,13 +491,43 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "scanner.write_batch_size": {
         "category": "效能與待機",
-        "default": 500,
+        "default": 200,
         "type": "integer",
         "description": "Scanner 單一 SQLite 批次交易的照片數",
-        "risk": "建議 500；提高會延長單次 writer 鎖時間",
+        "risk": "建議 200；提高會延長單次 writer 鎖時間",
         "min": 100,
         "max": 2000,
         "restart": False,
+    },
+    "scanner.max_file_bytes": {
+        "category": "效能與待機", "default": 209715200, "type": "integer",
+        "description": "Scanner 接受的單張檔案最大位元組數", "risk": "過大檔案會增加記憶體風險",
+        "min": 1048576, "max": 2147483648, "restart": False,
+    },
+    "scanner.max_pixels": {
+        "category": "效能與待機", "default": 60000000, "type": "integer",
+        "description": "Scanner 接受的單張像素上限", "risk": "提高會增加解壓縮炸彈風險",
+        "min": 1000000, "max": 500000000, "restart": False,
+    },
+    "scanner.max_edge_px": {
+        "category": "效能與待機", "default": 12000, "type": "integer",
+        "description": "Scanner 接受的單張影像邊長上限", "risk": "提高會增加記憶體風險",
+        "min": 1000, "max": 100000, "restart": False,
+    },
+    "scanner.thumbnail_capacity_check_interval": {
+        "category": "效能與待機", "default": 500, "type": "integer",
+        "description": "建立縮圖後檢查容量的間隔", "risk": "過低會增加檔案系統讀取",
+        "min": 50, "max": 10000, "restart": False,
+    },
+    "thumbnail_cache.max_bytes": {
+        "category": "效能與待機", "default": 5368709120, "type": "integer",
+        "description": "縮圖快取容量上限", "risk": "超過上限只清理縮圖",
+        "min": 104857600, "max": 107374182400, "restart": False,
+    },
+    "thumbnail_cache.retention_days": {
+        "category": "效能與待機", "default": 30, "type": "integer",
+        "description": "縮圖快取保留天數", "risk": "較短會增加重新生成頻率",
+        "min": 1, "max": 3650, "restart": False,
     },
     "scanner.missing_threshold_percent": {
         "category": "效能與待機",
@@ -849,6 +884,11 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
             "bayer_ordered": "Bayer Ordered（新 Renderer）",
             "serpentine_floyd_steinberg": "蛇形 Floyd–Steinberg（新 Renderer）",
         },
+        "restart": False,
+    },
+    "render.auto_photo_smooth_enabled": {
+        "category": "渲染設定", "default": False, "type": "boolean",
+        "description": "高暗部風險照片自動使用 photo_smooth", "risk": "需待 Spectra 6 實機校正",
         "restart": False,
     },
     "render.dither_strength": {

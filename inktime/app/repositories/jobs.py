@@ -48,6 +48,67 @@ class JobRepository:
             if remaining is not None:
                 remaining -= len(rows)
 
+    def selection_preview(self, *, analysis_fingerprint: str | None, selection_mode: str = "pending", limit: int | None = None) -> dict:
+        """Bounded SQLite-only pending selector; it never touches image files."""
+        fingerprint = str(analysis_fingerprint or "")
+        active = "('pending','preparing','running','pausing','retrying')"
+        current = "EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id AND a.analysis_fingerprint=?)"
+        queued = f"EXISTS (SELECT 1 FROM job_items ji JOIN jobs j ON j.id=ji.job_id WHERE ji.photo_id=p.id AND ji.status IN ('pending','running','retrying') AND j.status IN {active} AND COALESCE(j.analysis_fingerprint,'')=?)"
+        if selection_mode == "force_all":
+            predicate = "1=1"
+        elif selection_mode == "stale_only":
+            predicate = f"NOT {current} AND EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id)"
+        else:
+            predicate = f"NOT {current}"
+        with self.database.session() as connection:
+            params = [fingerprint, fingerprint]
+            if selection_mode != "force_all":
+                params.append(fingerprint)
+            params.append(fingerprint)
+            row = connection.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS total_active,
+                    SUM(CASE WHEN p.eligible=0 THEN 1 ELSE 0 END) AS excluded,
+                    SUM(CASE WHEN p.lifecycle_status='missing' THEN 1 ELSE 0 END) AS missing,
+                    SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id) THEN 1 ELSE 0 END) AS never_analyzed,
+                    SUM(CASE WHEN {current} THEN 1 ELSE 0 END) AS already_current,
+                    SUM(CASE WHEN {queued} THEN 1 ELSE 0 END) AS already_queued,
+                    SUM(CASE WHEN p.eligible=1 AND {predicate} AND NOT ({queued}) THEN 1 ELSE 0 END) AS pending_total
+                FROM photos p WHERE p.lifecycle_status='active'
+                """,
+                params,
+            ).fetchone()
+            limited_to = min(int(row["pending_total"] or 0), max(0, int(limit))) if limit is not None else int(row["pending_total"] or 0)
+        return {**dict(row), "pending_total": int(row["pending_total"] or 0), "limited_to": limited_to, "selection_mode": selection_mode}
+
+    def iter_pending_photo_ids(self, *, analysis_fingerprint: str | None, selection_mode: str = "pending", limit: int | None = None) -> Iterator[str]:
+        fingerprint = str(analysis_fingerprint or "")
+        active = "('pending','preparing','running','pausing','retrying')"
+        current = "EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id AND a.analysis_fingerprint=?)"
+        queued = f"EXISTS (SELECT 1 FROM job_items ji JOIN jobs j ON j.id=ji.job_id WHERE ji.photo_id=p.id AND ji.status IN ('pending','running','retrying') AND j.status IN {active} AND COALESCE(j.analysis_fingerprint,'')=?)"
+        predicate = "1=1" if selection_mode == "force_all" else (f"NOT {current} AND EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id)" if selection_mode == "stale_only" else f"NOT {current}")
+        last_id = ""
+        remaining = limit
+        while remaining is None or remaining > 0:
+            size = min(500, remaining) if remaining is not None else 500
+            with self.database.session() as connection:
+                params = [last_id]
+                if selection_mode != "force_all":
+                    params.append(fingerprint)
+                params.extend([fingerprint, size])
+                rows = connection.execute(
+                    f"SELECT p.id FROM photos p WHERE p.lifecycle_status='active' AND p.eligible=1 AND p.id>? AND {predicate} AND NOT ({queued}) ORDER BY p.local_candidate_score DESC,p.id LIMIT ?",
+                    params,
+                ).fetchall()
+            if not rows:
+                return
+            for row in rows:
+                yield str(row["id"])
+            last_id = str(rows[-1]["id"])
+            if remaining is not None:
+                remaining -= len(rows)
+
     def create(
         self,
         *,
@@ -59,6 +120,9 @@ class JobRepository:
         budget_limit: float | None = None,
         priority: int = 3,
         dedupe_key: str | None = None,
+        selection_mode: str = "pending",
+        analysis_fingerprint: str | None = None,
+        force_recompute: bool = False,
     ) -> str:
         job_id = str(uuid4())
         now = utc_now()
@@ -69,8 +133,9 @@ class JobRepository:
                 connection.execute(
                     """
                     INSERT INTO jobs(id, kind, name, status, strategy, settings_json,
-                                     budget_limit, created_by, created_at, priority, dedupe_key)
-                    VALUES (?, 'analysis', ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
+                                     budget_limit, created_by, created_at, priority, dedupe_key,
+                                     selection_mode,analysis_fingerprint,analysis_spec_json,force_recompute)
+                    VALUES (?, 'analysis', ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?,?,?,?)
                     """,
                     (
                         job_id,
@@ -82,6 +147,10 @@ class JobRepository:
                         now,
                         max(1, min(int(priority), 6)),
                         dedupe_key,
+                        selection_mode,
+                        analysis_fingerprint,
+                        json.dumps(settings, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                        int(force_recompute),
                     ),
                 )
                 batch: list[tuple] = []

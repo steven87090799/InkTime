@@ -25,12 +25,25 @@ class JobService:
         photo_ids=None,
         priority: int = 3,
         dedupe_key: str | None = None,
+        selection_mode: str = "pending",
+        analysis_fingerprint: str | None = None,
+        force_recompute: bool = False,
     ) -> str:
         if strategy not in self.STRATEGIES:
             raise ValueError("不支援的分析策略")
         if budget_limit is not None and budget_limit < 0:
             raise ValueError("預算不可小於零")
-        selected = photo_ids if photo_ids is not None else self.repository.iter_photo_ids(limit=limit)
+        if photo_ids is None:
+            preview = self.repository.selection_preview(
+                analysis_fingerprint=analysis_fingerprint, selection_mode=selection_mode, limit=limit
+            )
+            if not preview["limited_to"]:
+                raise ValueError("目前沒有符合條件的待分析照片")
+            selected = self.repository.iter_pending_photo_ids(
+                analysis_fingerprint=analysis_fingerprint, selection_mode=selection_mode, limit=limit
+            )
+        else:
+            selected = photo_ids
         return self.repository.create(
             name=name.strip() or "未命名分析工作",
             strategy=strategy,
@@ -40,6 +53,9 @@ class JobService:
             budget_limit=budget_limit,
             priority=priority,
             dedupe_key=dedupe_key,
+            selection_mode=selection_mode,
+            analysis_fingerprint=analysis_fingerprint,
+            force_recompute=force_recompute,
         )
 
     def start(self, job_id: str) -> None:

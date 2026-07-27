@@ -897,6 +897,27 @@ MIGRATIONS = (
         "CREATE INDEX idx_decision_traces_correlation ON selection_decision_traces(correlation_key,execution_mode,created_at DESC)",
         "CREATE INDEX idx_feedback_null_scope ON photo_feedback(user_id,photo_id,feedback_type) WHERE device_id IS NULL",
     )),
+    Migration(24, "加入待分析選片與 Vision Input 指紋", (
+        "ALTER TABLE photo_analysis ADD COLUMN analysis_fingerprint TEXT",
+        "ALTER TABLE photo_analysis ADD COLUMN analysis_spec_json TEXT",
+        "ALTER TABLE photo_analysis ADD COLUMN vision_request_fingerprint TEXT",
+        "ALTER TABLE photo_analysis ADD COLUMN vision_input_spec_json TEXT",
+        "ALTER TABLE ai_analysis_cache ADD COLUMN vision_request_fingerprint TEXT",
+        "ALTER TABLE ai_analysis_cache ADD COLUMN vision_input_spec_json TEXT",
+        "ALTER TABLE jobs ADD COLUMN selection_mode TEXT NOT NULL DEFAULT 'pending'",
+        "ALTER TABLE jobs ADD COLUMN analysis_fingerprint TEXT",
+        "ALTER TABLE jobs ADD COLUMN analysis_spec_json TEXT",
+        "ALTER TABLE jobs ADD COLUMN force_recompute INTEGER NOT NULL DEFAULT 0 CHECK(force_recompute IN (0,1))",
+        "CREATE INDEX idx_photo_analysis_photo_fingerprint ON photo_analysis(photo_id,analysis_fingerprint)",
+        "CREATE INDEX idx_photo_analysis_vision_fingerprint ON photo_analysis(vision_request_fingerprint)",
+        "CREATE INDEX idx_ai_cache_vision_fingerprint ON ai_analysis_cache(vision_request_fingerprint)",
+        "CREATE INDEX idx_jobs_active_fingerprint ON jobs(analysis_fingerprint,status)",
+        "CREATE INDEX idx_job_items_photo_status ON job_items(photo_id,status)",
+        "UPDATE settings SET value_json='8',updated_at=datetime('now') WHERE key='analysis.side_caption_min_chars' AND value_json='10'",
+        "UPDATE settings SET value_json='12',updated_at=datetime('now') WHERE key='analysis.side_caption_target_chars' AND value_json='22'",
+        "UPDATE settings SET value_json='16',updated_at=datetime('now') WHERE key='analysis.side_caption_max_chars' AND value_json='42'",
+        "UPDATE settings SET value_json='200',updated_at=datetime('now') WHERE key='scanner.write_batch_size' AND value_json='500'",
+    )),
 )
 
 
