@@ -1,9 +1,11 @@
 """SSRF boundary for outbound Webhooks; validation is deliberately DNS-aware."""
+
 from __future__ import annotations
 
 import ipaddress
 import os
 import socket
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from urllib.parse import urlparse
 
 
@@ -12,7 +14,9 @@ class UnsafeWebhookURL(ValueError):
 
 
 def _allowlisted(host: str, address: ipaddress._BaseAddress) -> bool:
-    values = [item.strip() for item in os.environ.get("INKTIME_WEBHOOK_ALLOWLIST", "").split(",") if item.strip()]
+    values = [
+        item.strip() for item in os.environ.get("INKTIME_WEBHOOK_ALLOWLIST", "").split(",") if item.strip()
+    ]
     for item in values:
         if item.casefold() == host.casefold():
             return True
@@ -31,12 +35,25 @@ def validate_webhook_url(url: str) -> str:
     if parsed.port and not 1 <= parsed.port <= 65535:
         raise UnsafeWebhookURL("WEBHOOK-SSRF-001 Webhook Port 不合法")
     try:
-        records = socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
-    except socket.gaierror as exc:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            records = executor.submit(
+                socket.getaddrinfo,
+                parsed.hostname,
+                parsed.port or (443 if parsed.scheme == "https" else 80),
+                type=socket.SOCK_STREAM,
+            ).result(timeout=2)
+    except (socket.gaierror, TimeoutError) as exc:
         raise UnsafeWebhookURL("WEBHOOK-SSRF-002 Webhook 網域無法解析") from exc
     addresses = {ipaddress.ip_address(record[4][0]) for record in records}
     for address in addresses:
-        blocked = address.is_private or address.is_loopback or address.is_link_local or address.is_reserved or address.is_multicast or address.is_unspecified
+        blocked = (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_multicast
+            or address.is_unspecified
+        )
         if blocked and not _allowlisted(parsed.hostname, address):
             raise UnsafeWebhookURL("WEBHOOK-SSRF-003 Webhook 不可解析至內部或保留網路")
     return parsed.geturl()

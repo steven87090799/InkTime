@@ -39,12 +39,19 @@ def preview_preset(key: str):
     preset_settings = cast(dict[str, Any], preset["settings"])
     repository = current_app.extensions["inktime_settings_repository"]
     changed, current, _merged = repository.prepare_updates(preset_settings, reject_control_center=True)
+    compatible_profiles = set(cast(list[str], preset["compatible_panel_profiles"]))
+    with current_app.extensions["inktime_database"].session() as connection:
+        devices = connection.execute(
+            "SELECT id,name,panel_profile FROM devices WHERE enabled=1 ORDER BY name,id"
+        ).fetchall()
+    compatible = [dict(row) for row in devices if str(row["panel_profile"]) in compatible_profiles]
+    incompatible = [dict(row) for row in devices if str(row["panel_profile"]) not in compatible_profiles]
     return {
         "preset": preset,
         "changed_keys": list(changed),
         "unchanged_keys": [name for name in preset_settings if name not in changed],
-        "affected_devices": 0,
-        "incompatible_devices": 0,
+        "affected_devices": compatible,
+        "incompatible_devices": incompatible,
         "requires_new_release": bool(changed),
         "current": {name: current[name] for name in preset_settings},
     }
@@ -57,6 +64,30 @@ def apply_preset(key: str):
     if preset is None:
         return {"error_code": "PRESET-001", "message": "找不到 Preset"}, 404
     preset_settings = cast(dict[str, Any], preset["settings"])
+    payload = request.get_json(silent=True) or {}
+    selected = payload.get("update_existing_device_ids", [])
+    if not isinstance(selected, list) or any(not isinstance(item, str) for item in selected):
+        abort(400, description="PRESET-002 update_existing_device_ids 必須是裝置 ID 陣列")
+    if selected and payload.get("confirm_physical_panel") is not True:
+        abort(409, description="PRESET-003 更新既有裝置需要 confirm_physical_panel=true")
+    compatible_profiles = set(cast(list[str], preset["compatible_panel_profiles"]))
+    database = current_app.extensions["inktime_database"]
+    with database.transaction() as connection:
+        selected_ids = set(selected)
+        rows = [
+            row
+            for row in connection.execute("SELECT id,panel_profile FROM devices").fetchall()
+            if str(row["id"]) in selected_ids
+        ]
+        if len(rows) != len(set(selected)) or any(
+            str(row["panel_profile"]) not in compatible_profiles for row in rows
+        ):
+            abort(409, description="PRESET-004 只能明確更新相容的既有 Spectra 6 裝置")
+        if selected:
+            connection.executemany(
+                "UPDATE devices SET panel_profile=?,updated_at=datetime('now') WHERE id=?",
+                [(preset_settings["device.default_panel_profile"], identifier) for identifier in selected],
+            )
     repository = current_app.extensions["inktime_settings_repository"]
     result = repository.update_many(
         preset_settings,
@@ -69,7 +100,7 @@ def apply_preset(key: str):
         "preset": key,
         "changed_keys": changed,
         "unchanged_keys": [name for name in preset_settings if name not in changed],
-        "affected_devices": [],
+        "affected_devices": selected,
         "incompatible_devices": [],
         "requires_new_release": bool(changed),
     }

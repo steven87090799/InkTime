@@ -79,8 +79,10 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _json(value: Any) -> str:
-    return json.dumps(value if value is not None else {}, ensure_ascii=False, separators=(",", ":"))
+def _json(value: Any, *, sort_keys: bool = False) -> str:
+    return json.dumps(
+        value if value is not None else {}, ensure_ascii=False, separators=(",", ":"), sort_keys=sort_keys
+    )
 
 
 class ResilienceRepository:
@@ -108,7 +110,7 @@ class ResilienceRepository:
         pairing: str,
         scoring: str,
     ) -> str:
-        snapshot = _json(configuration)
+        snapshot = _json(configuration, sort_keys=True)
         digest = sha256(snapshot.encode("utf-8")).hexdigest()
         with self.database.transaction() as connection:
             row = connection.execute(
@@ -127,7 +129,12 @@ class ResilienceRepository:
                     name[:100],
                     version[:100],
                     digest,
-                    snapshot[:20_000],
+                    snapshot
+                    if len(snapshot) <= 20_000
+                    else _json(
+                        {"truncated": True, "sha256": digest, "keys": sorted(configuration)[:100]},
+                        sort_keys=True,
+                    ),
                     renderer[:100],
                     layout[:100],
                     pairing[:100],
@@ -155,6 +162,7 @@ class ResilienceRepository:
         context: dict[str, Any] | None = None,
         duration_ms: int = 0,
         release_id: str | None = None,
+        correlation_key: str | None = None,
     ) -> str:
         if execution_mode not in {"production", "shadow", "manual_preview", "test"}:
             raise ValueError("DECISION-001 execution_mode 不合法")
@@ -167,16 +175,17 @@ class ResilienceRepository:
                 (item.get("adjusted_score") for item in capped if item.get("selected")), None
             )
             connection.execute(
-                """INSERT INTO selection_decision_traces(trace_id,device_id,execution_mode,algorithm_version_id,release_id,
+                """INSERT INTO selection_decision_traces(trace_id,device_id,execution_mode,algorithm_version_id,release_id,correlation_key,
                    primary_photo_id,secondary_photo_id,layout_mode,fit_mode,candidate_count,eligible_count,selected_score,
                    decision_reasons_json,rejection_summary_json,context_snapshot_json,duration_ms,created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     trace_id,
                     device_id,
                     execution_mode,
                     algorithm_version_id,
                     release_id,
+                    (correlation_key or trace_id)[:100],
                     primary_photo_id,
                     secondary_photo_id,
                     layout_mode,
@@ -345,9 +354,15 @@ class ResilienceRepository:
         )
         with self.database.transaction() as connection:
             if table == "photo_feedback":
+                # SQLite UNIQUE treats NULL scopes as distinct.  Replace the precise
+                # nullable scope explicitly so repeated no-device feedback is idempotent.
+                connection.execute(
+                    "DELETE FROM photo_feedback WHERE user_id=? AND device_id IS ? AND photo_id=? AND feedback_type=?",
+                    (user_id, device_id, photo_id, kind),
+                )
                 connection.execute(
                     """INSERT INTO photo_feedback(user_id,device_id,photo_id,decision_trace_id,feedback_type,value,expires_at,metadata_json,created_at,updated_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,device_id,photo_id,feedback_type) DO UPDATE SET value=excluded.value,expires_at=excluded.expires_at,metadata_json=excluded.metadata_json,updated_at=excluded.updated_at""",
+                    VALUES (?,?,?,?,?,?,?,?,?,?)""",
                     (
                         user_id,
                         device_id,
@@ -368,9 +383,22 @@ class ResilienceRepository:
                     )
                 elif kind == "RESTORE":
                     connection.execute(
+                        "DELETE FROM photo_feedback WHERE photo_id=? AND feedback_type IN ('NEVER_SHOW','SKIP_TEMPORARILY')",
+                        (photo_id,),
+                    )
+                    connection.execute(
                         "UPDATE photos SET eligible=1,exclusion_status='manually_restored',reject_reason=NULL,updated_at=? WHERE id=?",
                         (now, photo_id),
                     )
+                connection.execute(
+                    "INSERT INTO activity_events(source,source_id,severity,component,event,message,photo_id,details_json,created_at) VALUES ('feedback',?,'info','resilience','feedback_written','使用者回饋已寫入',?,?,?)",
+                    (
+                        f"{user_id}:{photo_id}:{kind}",
+                        photo_id,
+                        _json({"feedback_type": kind, "device_id": device_id}),
+                        now,
+                    ),
+                )
             elif table == "photo_pair_feedback":
                 connection.execute(
                     """INSERT INTO photo_pair_feedback(user_id,device_id,photo_id,secondary_photo_id,decision_trace_id,feedback_type,value,expires_at,metadata_json,created_at,updated_at)
@@ -408,6 +436,21 @@ class ResilienceRepository:
                     ),
                 )
         return {"status": "ok", "feedback_type": kind, "expires_at": expires_at}
+
+    def delete_feedback(self, feedback_id: int) -> bool:
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                "SELECT photo_id,feedback_type FROM photo_feedback WHERE id=?", (feedback_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            if str(row["feedback_type"]) in {"NEVER_SHOW", "SKIP_TEMPORARILY"}:
+                connection.execute(
+                    "UPDATE photos SET eligible=1,exclusion_status='manually_restored',reject_reason=NULL,updated_at=? WHERE id=?",
+                    (utc_now(), row["photo_id"]),
+                )
+            connection.execute("DELETE FROM photo_feedback WHERE id=?", (feedback_id,))
+        return True
 
     def preference_adjustment(self, photo_id: str, *, user_id: str | None = None) -> float:
         clauses, params = ["photo_id=?", "(expires_at IS NULL OR expires_at>?)"], [photo_id, utc_now()]
@@ -534,20 +577,24 @@ class ResilienceRepository:
             if not compatible:
                 raise ValueError("QUEUE-002 Release 不存在或不是已發布狀態")
             duplicate = connection.execute(
-                "SELECT * FROM device_content_queue_items WHERE device_id=? AND release_id=?",
+                "SELECT * FROM device_content_queue_items WHERE device_id=? AND release_id=? AND status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')",
                 (device_id, release_id),
             ).fetchone()
             if duplicate:
                 return dict(duplicate)
             active = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM device_content_queue_items WHERE device_id=? AND status NOT IN ('EXPIRED','CANCELLED')",
+                    "SELECT COUNT(*) FROM device_content_queue_items WHERE device_id=? AND status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')",
                     (device_id,),
                 ).fetchone()[0]
             )
             if active >= int(queue["depth"]):
                 connection.execute(
                     "UPDATE device_content_queue_items SET status='CANCELLED',updated_at=? WHERE id=(SELECT id FROM device_content_queue_items WHERE device_id=? AND status IN ('PENDING','READY','AVAILABLE') ORDER BY priority ASC,position DESC,id DESC LIMIT 1)",
+                    (now, device_id),
+                )
+                connection.execute(
+                    "UPDATE device_content_queues SET queue_version=queue_version+1,updated_at=? WHERE device_id=?",
                     (now, device_id),
                 )
             assigned_position = position or int(
@@ -593,7 +640,7 @@ class ResilienceRepository:
         now = utc_now()
         items = []
         for row in queue["items"]:
-            if row["status"] in {"EXPIRED", "CANCELLED", "FAILED"} or (
+            if row["status"] not in {"READY", "AVAILABLE", "DOWNLOADED", "ACKNOWLEDGED"} or (
                 row["expires_at"] and str(row["expires_at"]) < now
             ):
                 continue

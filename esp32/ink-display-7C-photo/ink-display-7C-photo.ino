@@ -457,6 +457,16 @@ void handleSave() {
 #if DEBUG_LOG
   DBG_PRINTLN("[HTTP] POST /save");
 #endif
+  if (!portalSaveAllowed || portalSaveAttempts++ >= AP_MAX_SAVE_ATTEMPTS ||
+      server.arg("setup_secret") != portalSetupSecret || server.arg("nonce") != portalNonce) {
+    server.send(403, "text/plain; charset=utf-8", "PAIRING-001 配對授權失效");
+    if (portalSaveAttempts >= AP_MAX_SAVE_ATTEMPTS) {
+      portalSaveAllowed = false;
+      server.stop();
+      goDeepSleepMinutes(minutesToNextRefreshFromLastEpoch(g_cfg));
+    }
+    return;
+  }
   String ssid     = server.arg("ssid");
   String pass     = server.arg("pass");
   String host     = server.arg("hostport");
@@ -697,6 +707,12 @@ void startConfigPortal() {
 bool runUsbServiceMode() {
   photoPainter.refreshPowerState();
   if (!photoPainter.usbConnected()) return false;
+  // USB power alone is not authorization to alter Wi-Fi or a device token.
+  if (!isFactoryResetRequestedAtBoot()) return false;
+  portalSetupSecret = randomPortalSecret();
+  portalNonce = randomPortalSecret();
+  portalSaveAttempts = 0;
+  portalSaveAllowed = true;
 
   server.on("/", HTTP_GET, handleRoot);
   server.on("/save", HTTP_POST, handleSave);
@@ -1379,7 +1395,3 @@ void setup() {
 
 void loop() {
 }
-  if (!portalSaveAllowed || portalSaveAttempts++ >= AP_MAX_SAVE_ATTEMPTS || server.arg("setup_secret") != portalSetupSecret || server.arg("nonce") != portalNonce) {
-    server.send(403, "text/plain; charset=utf-8", "PAIRING-001 配對授權失效");
-    return;
-  }

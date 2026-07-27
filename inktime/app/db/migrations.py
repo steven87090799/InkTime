@@ -892,6 +892,11 @@ MIGRATIONS = (
         "CREATE INDEX idx_decision_traces_mode_created ON selection_decision_traces(execution_mode,created_at DESC,id DESC)",
         "INSERT INTO data_retention_policies(data_type,retention_days,minimum_items_to_keep,updated_at) VALUES ('decision_trace',180,0,datetime('now')),('decision_candidate',60,0,datetime('now')),('shadow_preview',30,0,datetime('now')),('device_event',180,0,datetime('now')),('queue_event',90,0,datetime('now')),('job_log',30,0,datetime('now'))",
     )),
+    Migration(23, "修正決策關聯與韌性資料一致性", (
+        "ALTER TABLE selection_decision_traces ADD COLUMN correlation_key TEXT",
+        "CREATE INDEX idx_decision_traces_correlation ON selection_decision_traces(correlation_key,execution_mode,created_at DESC)",
+        "CREATE INDEX idx_feedback_null_scope ON photo_feedback(user_id,photo_id,feedback_type) WHERE device_id IS NULL",
+    )),
 )
 
 

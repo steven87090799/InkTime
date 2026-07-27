@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from inktime.app.db import Database
+from inktime.app.domain.rendering.system_presets import DEFAULT_RENDER_PROFILE
 
 
 _CLOCK = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
@@ -104,9 +105,7 @@ class DisplayPrepareConfig:
         return min(50, self.daily_count * self.prefetch_count)
 
     def target_times(self, target: date) -> tuple[str, ...]:
-        return tuple(
-            f"{target.isoformat()}T{clock}:00" for clock in self.display_times[: self.daily_count]
-        )
+        return tuple(f"{target.isoformat()}T{clock}:00" for clock in self.display_times[: self.daily_count])
 
     def preparation_times(self, target: date) -> tuple[str, ...]:
         prepared: list[str] = []
@@ -124,7 +123,7 @@ class DisplayPreparationService:
 
     def _profiles(self, config: DisplayPrepareConfig) -> list[str]:
         if not config.device_ids:
-            return [str(self.render_service.settings.get("render.profile", "safe_4c"))]
+            return [str(self.render_service.settings.get("render.profile", DEFAULT_RENDER_PROFILE))]
         placeholders = ",".join("?" for _ in config.device_ids)
         with self.database.session() as connection:
             rows = connection.execute(
@@ -165,9 +164,7 @@ class DisplayPreparationService:
             result = self.render_service.publish(photo_ids, created_by, **publish_kwargs)
         except Exception as exc:
             if config.render_fallback == "keep_current":
-                raise ValueError(
-                    "DISPLAY-005 渲染失敗；已保留目前正式 Release，排程未標記成功"
-                ) from exc
+                raise ValueError("DISPLAY-005 渲染失敗；已保留目前正式 Release，排程未標記成功") from exc
             raise
         return {
             "release": result,

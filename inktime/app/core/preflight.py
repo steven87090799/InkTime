@@ -3,6 +3,7 @@
 The inspector intentionally does not try to make SQLite safe on network storage:
 WAL and flock are retained, but a remote mount is refused before either is used.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -11,7 +12,9 @@ from typing import Protocol
 from urllib.parse import urlparse
 
 
-UNSAFE_NETWORK_FILESYSTEMS = frozenset({"nfs", "nfs4", "cifs", "smbfs", "sshfs", "9p"})
+UNSAFE_NETWORK_FILESYSTEMS = frozenset(
+    {"nfs", "nfs4", "cifs", "smbfs", "sshfs", "fuse.sshfs", "fuseblk", "9p"}
+)
 
 
 class PreflightError(ValueError):
@@ -64,7 +67,11 @@ class ProductionPreflight:
         return not self.degraded
 
     def summary(self) -> dict[str, object]:
-        return {"status": "ok" if self.healthy else "degraded", "database_filesystem": self.database_filesystem or "unknown", "warnings": list(self.degraded)}
+        return {
+            "status": "ok" if self.healthy else "degraded",
+            "database_filesystem": self.database_filesystem or "unknown",
+            "warnings": list(self.degraded),
+        }
 
 
 def run_production_preflight(config, *, adapter: OSAdapter | None = None) -> ProductionPreflight:
@@ -81,10 +88,12 @@ def run_production_preflight(config, *, adapter: OSAdapter | None = None) -> Pro
         raise PreflightError("INKTIME_PROXY_TRUST 僅可設定 0 至 2 個受信任 proxy")
     fs_type = filesystem_for(config.database_path.parent, adapter)
     unsafe = fs_type in UNSAFE_NETWORK_FILESYSTEMS
-    if unsafe and not config.allow_unsafe_network_database:
-        raise PreflightError("Production SQLite、WAL 與鎖不得位於遠端網路掛載；僅能以 INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE=1 明確覆寫")
+    if (unsafe or fs_type is None) and not config.allow_unsafe_network_database:
+        raise PreflightError(
+            "Production SQLite、WAL 與鎖不得位於遠端網路掛載；僅能以 INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE=1 明確覆寫"
+        )
     warnings: list[str] = []
-    if unsafe:
+    if unsafe or fs_type is None:
         warnings.append("SQLite 位於不安全網路掛載；已由明確覆寫啟動，flock 與 WAL 未被停用")
     if parsed.scheme != "https":
         warnings.append("Production HTTP 已由明確覆寫啟動；Cookie 與傳輸安全降級")

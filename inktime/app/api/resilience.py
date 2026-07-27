@@ -176,9 +176,7 @@ def patch_feedback(feedback_id: int):
 @bp.delete("/api/feedback/<int:feedback_id>")
 @administrator_required
 def delete_feedback(feedback_id: int):
-    with current_app.extensions["inktime_database"].transaction() as connection:
-        cursor = connection.execute("DELETE FROM photo_feedback WHERE id=?", (feedback_id,))
-    if cursor.rowcount != 1:
+    if not _repo().delete_feedback(feedback_id):
         abort(404, description="FEEDBACK-001 找不到回饋")
     return {"status": "ok"}
 
@@ -207,7 +205,7 @@ def shadow_comparisons():
             p.secondary_photo_id AS production_secondary_photo_id,s.secondary_photo_id AS shadow_secondary_photo_id,
             p.layout_mode AS production_layout_mode,s.layout_mode AS shadow_layout_mode,p.fit_mode AS production_fit_mode,s.fit_mode AS shadow_fit_mode,
             p.selected_score AS production_score,s.selected_score AS shadow_score,p.duration_ms AS production_duration_ms,s.duration_ms AS shadow_duration_ms
-            FROM selection_decision_traces p JOIN selection_decision_traces s ON s.device_id IS p.device_id AND date(s.created_at)=date(p.created_at)
+            FROM selection_decision_traces p JOIN selection_decision_traces s ON s.correlation_key=p.correlation_key
             WHERE p.execution_mode='production' AND s.execution_mode='shadow' ORDER BY p.created_at DESC LIMIT 100""").fetchall()
     return {"items": [dict(row) for row in rows]}
 
@@ -265,7 +263,8 @@ def device_queue_manifest():
     return _repo().manifest(str(device["id"]), release_root=current_app.config["INKTIME_RELEASE_DIR"])
 
 
-@bp.post("/api/device/queue/ack")
+@bp.post("/api/device/queue/ack")  # legacy compatibility alias
+@bp.post("/api/device/v1/queue/ack")
 def device_queue_ack():
     device = _authenticated_device()
     if (request.content_length or 0) > 16 * 1024:

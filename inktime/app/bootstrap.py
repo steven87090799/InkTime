@@ -63,9 +63,7 @@ class ServiceContainer:
             runtime_lock.close()  # type: ignore[attr-defined]
 
 
-def _persistent_secret(
-    runtime_config: RuntimeConfig, lock_provider: LockProvider
-) -> str:
+def _persistent_secret(runtime_config: RuntimeConfig, lock_provider: LockProvider) -> str:
     if runtime_config.testing:
         return "test-secret-not-for-production"
     import os
@@ -136,12 +134,8 @@ def bootstrap_services(
         config.cache_dir / "thumbnails",
         settings_repository=settings_repository,
     )
-    notification_service = DeviceNotificationService(
-        database, settings_repository, secret_store
-    )
-    observability_service = ObservabilityService(
-        database, settings_repository, diagnostics_service
-    )
+    notification_service = DeviceNotificationService(database, settings_repository, secret_store)
+    observability_service = ObservabilityService(database, settings_repository, diagnostics_service)
     extensions.update(
         {
             "inktime_settings_repository": settings_repository,
@@ -179,9 +173,7 @@ def bootstrap_services(
         process_boundary,
     )
     font_manager = FontManager(config.data_dir / "fonts")
-    location_resolver = LocationResolver(
-        Path(__file__).resolve().parents[2] / "data" / "world_cities_zh.csv"
-    )
+    location_resolver = LocationResolver(Path(__file__).resolve().parents[2] / "data" / "world_cities_zh.csv")
     release_publisher = AtomicReleasePublisher(config.release_dir)
     observability_service.publisher = release_publisher
     render_candidate_repository = RenderCandidateRepository(database)
@@ -209,6 +201,7 @@ def bootstrap_services(
         location_resolver,
         weather_service,
         observability_service,
+        resilience_repository,
     )
     extensions.update(
         {
@@ -239,9 +232,7 @@ def bootstrap_services(
             "inktime_release_coordinator": release_coordinator,
             "inktime_weather_service": weather_service,
             "inktime_render_service": render_service,
-            "inktime_display_preparation_service": DisplayPreparationService(
-                database, render_service
-            ),
+            "inktime_display_preparation_service": DisplayPreparationService(database, render_service),
         }
     )
     if role == "web":
