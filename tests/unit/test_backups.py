@@ -109,7 +109,7 @@ def test_backup_excludes_secrets_and_restores_analysis_and_photo_state(tmp_path)
     manifest = service.validate(archive)
 
     assert manifest["backup_format_version"] == 2
-    assert manifest["database_schema_version"] == 21
+    assert manifest["database_schema_version"] == 22
     assert manifest["secrets_policy"] == "excluded"
     assert manifest["important_table_counts"]["photos"] == 1
     assert manifest["important_table_counts"]["releases"] == 1
@@ -137,7 +137,7 @@ def test_backup_excludes_secrets_and_restores_analysis_and_photo_state(tmp_path)
     seed(database, extra_photo=True)
     restored = service.restore(archive)
 
-    assert restored["schema_version"] == 21
+    assert restored["schema_version"] == 22
     assert Path(restored["safety_copy"]).is_file()
     with database.session() as connection:
         photo = connection.execute(
