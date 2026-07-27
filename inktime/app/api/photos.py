@@ -9,6 +9,7 @@ from flask import Blueprint, abort, current_app, g, render_template, request, se
 
 from inktime.app.core.paths import safe_join
 from inktime.app.domain.analysis.schema import ALLOWED_TYPES
+from inktime.app.domain.analysis.plan import fingerprint
 from inktime.app.domain.analysis.scoring import (
     calculate_distinguishing_score,
     prepare_score_distribution,
@@ -26,7 +27,9 @@ def _repository():
     return current_app.extensions["inktime_photo_repository"]
 
 
-def _queue_ai(photo_ids: list[str], *, created_by: str, name: str) -> dict:
+def _queue_ai(
+    photo_ids: list[str], *, created_by: str, name: str, force_ai: bool = False
+) -> dict:
     settings = current_app.extensions["inktime_settings_repository"]
     if str(settings.get("analysis.ai_mode", "top_candidates")) == "off":
         raise ValueError("AI 模式目前為關閉；不會建立模型工作")
@@ -39,14 +42,29 @@ def _queue_ai(photo_ids: list[str], *, created_by: str, name: str) -> dict:
     ):
         raise ValueError("已達 AI 每日或每月照片上限；目前會保留本機選片結果")
     selected = list(dict.fromkeys(photo_ids))[:daily_limit]
+    if not force_ai:
+        eligible = set(_repository().eligible_photo_ids(include_all_active=False))
+        selected = [photo_id for photo_id in selected if photo_id in eligible]
+    if not selected:
+        raise ValueError("沒有符合資格且可送入 AI 的照片")
+    strategy = str(settings.get("analysis.strategy", "smart_two_stage"))
+    analysis = current_app.extensions["inktime_analysis_service"]
+    plan = analysis.build_plan(
+        strategy=strategy,
+        provider_route=current_app.extensions["inktime_provider_service"].route_snapshot(),
+        scoring_profile=dict(current_app.extensions["inktime_scoring_repository"].current()),
+    )
     job_id = current_app.extensions["inktime_job_service"].create_analysis_job(
         name=name,
-        strategy=str(settings.get("analysis.strategy", "smart_two_stage")),
-        settings={"force_ai": True, "source": "photo-exclusion-management"},
+        strategy=strategy,
+        settings={"force_ai": force_ai, "source": "photo-exclusion-management" if force_ai else "ai-mode"},
         created_by=created_by,
         budget_limit=None,
         photo_ids=selected,
         priority=2,
+        analysis_fingerprint=fingerprint(plan),
+        force_recompute=force_ai,
+        analysis_spec=plan,
     )
     return {"id": job_id, "queued": len(selected), "detail_url": f"/jobs/{job_id}"}
 
@@ -184,7 +202,7 @@ def queue_photo_ai(photo_id: str):
     if _repository().get_with_path(photo_id) is None:
         abort(404)
     try:
-        return _queue_ai([photo_id], created_by=str(g.user["id"]), name="排除照片 AI 分析"), 201
+        return _queue_ai([photo_id], created_by=str(g.user["id"]), name="排除照片 AI 分析", force_ai=True), 201
     except ValueError as exc:
         return {"error_code": "VLM-008", "message": str(exc)}, 409
 
@@ -195,7 +213,7 @@ def queue_exclusions_ai():
     payload = request.get_json(silent=True) or {}
     photo_ids = [str(value) for value in payload.get("photo_ids", [])][:500]
     try:
-        return _queue_ai(photo_ids, created_by=str(g.user["id"]), name="排除照片批次 AI 分析"), 201
+        return _queue_ai(photo_ids, created_by=str(g.user["id"]), name="排除照片批次 AI 分析", force_ai=True), 201
     except ValueError as exc:
         return {"error_code": "VLM-008", "message": str(exc)}, 409
 

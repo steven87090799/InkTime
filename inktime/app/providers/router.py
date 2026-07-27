@@ -64,6 +64,47 @@ class FailoverVisionProvider(VisionProvider):
             channel.request_times.append(now)
             return True
 
+    def select_channel(self, *, excluded: set[str] | None = None) -> ProviderChannel:
+        """Reserve the concrete provider that will own one cache key.
+
+        Cache identity must never be the synthetic router name.  Keeping the
+        reservation here also preserves the router's concurrency and circuit
+        breaker guarantees for callers that need to inspect the provider before
+        making a request.
+        """
+        excluded = excluded or set()
+        for channel in self.channels:
+            if channel.provider.name in excluded:
+                continue
+            if self._available(channel) and channel.semaphore.acquire(blocking=False):
+                self._local.channel = channel
+                return channel
+        raise ProviderHTTPError("所有 Provider 暫時不可用或已達 Rate Limit", "VLM-005")
+
+    def release_channel(
+        self,
+        channel: ProviderChannel,
+        *,
+        usage: Usage | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        """Complete a reservation acquired by :meth:`select_channel`."""
+        with self._lock:
+            if error is not None:
+                channel.failures += 1
+                retry_after = getattr(error, "retry_after", None)
+                if channel.failures >= self.failure_threshold or retry_after:
+                    channel.circuit_until = time.monotonic() + max(
+                        float(retry_after or 0), channel.cooldown_seconds
+                    )
+            else:
+                channel.failures = 0
+                if usage is not None:
+                    used_tokens = usage.input_tokens + usage.output_tokens
+                    if used_tokens:
+                        channel.token_events.append((time.monotonic(), used_tokens))
+        channel.semaphore.release()
+
     def _execute(self, method: str, **kwargs) -> ProviderResponse:
         last_error: Exception | None = None
         for channel in self.channels:

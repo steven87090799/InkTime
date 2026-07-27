@@ -38,3 +38,13 @@ class ProviderService:
                 )
             )
         return FailoverVisionProvider(channels) if channels else None
+
+    def route_snapshot(self) -> list[dict]:
+        """Allowlisted ordered routing identity for an Analysis Plan."""
+        return [
+            {"name": str(row["name"]), "priority": int(row["priority"])}
+            for row in sorted(
+                (row for row in self.repository.list() if row["enabled"]),
+                key=lambda row: (int(row["priority"]), str(row["name"])),
+            )
+        ]

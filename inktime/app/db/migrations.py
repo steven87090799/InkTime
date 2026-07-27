@@ -913,9 +913,17 @@ MIGRATIONS = (
         "CREATE INDEX idx_ai_cache_vision_fingerprint ON ai_analysis_cache(vision_request_fingerprint)",
         "CREATE INDEX idx_jobs_active_fingerprint ON jobs(analysis_fingerprint,status)",
         "CREATE INDEX idx_job_items_photo_status ON job_items(photo_id,status)",
-        "UPDATE settings SET value_json='8',updated_at=datetime('now') WHERE key='analysis.side_caption_min_chars' AND value_json='10'",
-        "UPDATE settings SET value_json='12',updated_at=datetime('now') WHERE key='analysis.side_caption_target_chars' AND value_json='22'",
-        "UPDATE settings SET value_json='16',updated_at=datetime('now') WHERE key='analysis.side_caption_max_chars' AND value_json='42'",
+        """
+        UPDATE settings SET value_json=CASE key
+            WHEN 'analysis.side_caption_min_chars' THEN '8'
+            WHEN 'analysis.side_caption_target_chars' THEN '12'
+            WHEN 'analysis.side_caption_max_chars' THEN '16' END,
+            updated_at=datetime('now')
+        WHERE key IN ('analysis.side_caption_min_chars','analysis.side_caption_target_chars','analysis.side_caption_max_chars')
+          AND (SELECT COUNT(*) FROM settings WHERE (key='analysis.side_caption_min_chars' AND value_json='10')
+               OR (key='analysis.side_caption_target_chars' AND value_json='22')
+               OR (key='analysis.side_caption_max_chars' AND value_json='42'))=3
+        """,
         "UPDATE settings SET value_json='200',updated_at=datetime('now') WHERE key='scanner.write_batch_size' AND value_json='500'",
     )),
 )

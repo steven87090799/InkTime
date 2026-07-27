@@ -70,17 +70,26 @@ class JobRepository:
                 SELECT
                     COUNT(*) AS total_active,
                     SUM(CASE WHEN p.eligible=0 THEN 1 ELSE 0 END) AS excluded,
-                    SUM(CASE WHEN p.lifecycle_status='missing' THEN 1 ELSE 0 END) AS missing,
                     SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id) THEN 1 ELSE 0 END) AS never_analyzed,
                     SUM(CASE WHEN {current} THEN 1 ELSE 0 END) AS already_current,
                     SUM(CASE WHEN {queued} THEN 1 ELSE 0 END) AS already_queued,
-                    SUM(CASE WHEN p.eligible=1 AND {predicate} AND NOT ({queued}) THEN 1 ELSE 0 END) AS pending_total
+                    SUM(CASE WHEN p.eligible=1 AND {predicate} AND NOT ({queued}) THEN 1 ELSE 0 END) AS pending_total,
+                    SUM(CASE WHEN EXISTS (SELECT 1 FROM job_items ji WHERE ji.photo_id=p.id AND ji.status='failed') THEN 1 ELSE 0 END) AS failed,
+                    SUM(CASE WHEN EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id) AND NOT ({current}) THEN 1 ELSE 0 END) AS stale
                 FROM photos p WHERE p.lifecycle_status='active'
                 """,
-                params,
+                [*params, fingerprint],
+            ).fetchone()
+            missing = int(connection.execute("SELECT COUNT(*) FROM photos WHERE lifecycle_status='missing'").fetchone()[0])
+            scan = connection.execute(
+                "SELECT completed_at FROM scan_runs WHERE status IN ('completed','completed_with_warnings') "
+                "AND completed_at IS NOT NULL ORDER BY completed_at DESC,id DESC LIMIT 1"
             ).fetchone()
             limited_to = min(int(row["pending_total"] or 0), max(0, int(limit))) if limit is not None else int(row["pending_total"] or 0)
-        return {**dict(row), "pending_total": int(row["pending_total"] or 0), "limited_to": limited_to, "selection_mode": selection_mode}
+        return {**dict(row), "missing": missing, "pending_total": int(row["pending_total"] or 0),
+                "limited_to": limited_to, "failed": int(row["failed"] or 0), "stale": int(row["stale"] or 0),
+                "last_successful_scan_at": str(scan["completed_at"]) if scan else None,
+                "selection_mode": selection_mode}
 
     def iter_pending_photo_ids(self, *, analysis_fingerprint: str | None, selection_mode: str = "pending", limit: int | None = None) -> Iterator[str]:
         fingerprint = str(analysis_fingerprint or "")
@@ -88,17 +97,21 @@ class JobRepository:
         current = "EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id AND a.analysis_fingerprint=?)"
         queued = f"EXISTS (SELECT 1 FROM job_items ji JOIN jobs j ON j.id=ji.job_id WHERE ji.photo_id=p.id AND ji.status IN ('pending','running','retrying') AND j.status IN {active} AND COALESCE(j.analysis_fingerprint,'')=?)"
         predicate = "1=1" if selection_mode == "force_all" else (f"NOT {current} AND EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id)" if selection_mode == "stale_only" else f"NOT {current}")
+        last_score = float("inf")
         last_id = ""
         remaining = limit
         while remaining is None or remaining > 0:
             size = min(500, remaining) if remaining is not None else 500
             with self.database.session() as connection:
-                params = [last_id]
+                params = [last_score, last_score, last_id]
                 if selection_mode != "force_all":
                     params.append(fingerprint)
                 params.extend([fingerprint, size])
                 rows = connection.execute(
-                    f"SELECT p.id FROM photos p WHERE p.lifecycle_status='active' AND p.eligible=1 AND p.id>? AND {predicate} AND NOT ({queued}) ORDER BY p.local_candidate_score DESC,p.id LIMIT ?",
+                    f"SELECT p.id,COALESCE(p.local_candidate_score,-1) AS candidate_score FROM photos p "
+                    f"WHERE p.lifecycle_status='active' AND p.eligible=1 AND "
+                    f"(COALESCE(p.local_candidate_score,-1) < ? OR (COALESCE(p.local_candidate_score,-1)=? AND p.id>?)) "
+                    f"AND {predicate} AND NOT ({queued}) ORDER BY candidate_score DESC,p.id ASC LIMIT ?",
                     params,
                 ).fetchall()
             if not rows:
@@ -106,6 +119,7 @@ class JobRepository:
             for row in rows:
                 yield str(row["id"])
             last_id = str(rows[-1]["id"])
+            last_score = float(rows[-1]["candidate_score"])
             if remaining is not None:
                 remaining -= len(rows)
 
@@ -123,6 +137,7 @@ class JobRepository:
         selection_mode: str = "pending",
         analysis_fingerprint: str | None = None,
         force_recompute: bool = False,
+        analysis_spec: dict | None = None,
     ) -> str:
         job_id = str(uuid4())
         now = utc_now()
@@ -149,7 +164,7 @@ class JobRepository:
                         dedupe_key,
                         selection_mode,
                         analysis_fingerprint,
-                        json.dumps(settings, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                        json.dumps(analysis_spec or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
                         int(force_recompute),
                     ),
                 )

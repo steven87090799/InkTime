@@ -163,7 +163,7 @@ class ThumbnailCache:
         max_bytes = max(0, int(max_bytes))
         retention_seconds = max(0, int(retention_days)) * 86400
         now = time.time()
-        entries: list[tuple[Path, int, float, bool]] = []
+        entries: list[tuple[Path, int, float, int, bool]] = []
         for path in self.root.glob("*.jpg"):
             if not path.is_file():
                 continue
@@ -177,17 +177,22 @@ class ThumbnailCache:
                 or size not in self.ALLOWED_SIZES
                 or not self._validate(path, size)
             )
-            entries.append((path, stat.st_size, stat.st_atime, orphan))
+            entries.append((path, stat.st_size, stat.st_atime, size, orphan))
         selected: list[Path] = []
-        total = sum(size for _, size, _, _ in entries)
-        for path, size, accessed, orphan in entries:
+        total = sum(bytes_used for _, bytes_used, _, _, _ in entries)
+        # Always clear invalid/orphaned and expired files before evicting valid
+        # cache entries.  Capacity eviction then drops the largest derivatives
+        # first (1600, 1024, 512), preserving the fastest preview cache.
+        for path, bytes_used, accessed, _size, orphan in entries:
             if orphan or (retention_seconds and now - accessed > retention_seconds):
                 selected.append(path)
-                total -= size
-        for path, size, _accessed, _orphan in sorted(entries, key=lambda entry: entry[2]):
+                total -= bytes_used
+        for path, bytes_used, _accessed, _size, _orphan in sorted(
+            entries, key=lambda entry: (-entry[3], entry[2])
+        ):
             if total <= max_bytes:
                 break
             if path not in selected:
                 selected.append(path)
-                total -= size
+                total -= bytes_used
         return selected

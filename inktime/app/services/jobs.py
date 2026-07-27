@@ -28,6 +28,7 @@ class JobService:
         selection_mode: str = "pending",
         analysis_fingerprint: str | None = None,
         force_recompute: bool = False,
+        analysis_spec: dict | None = None,
     ) -> str:
         if strategy not in self.STRATEGIES:
             raise ValueError("不支援的分析策略")
@@ -56,6 +57,7 @@ class JobService:
             selection_mode=selection_mode,
             analysis_fingerprint=analysis_fingerprint,
             force_recompute=force_recompute,
+            analysis_spec=analysis_spec,
         )
 
     def start(self, job_id: str) -> None:

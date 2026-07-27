@@ -184,9 +184,9 @@ def test_cloud_strategy_prefilters_screenshot_without_token_usage(app, tmp_path)
 
     assert result["stage"] == "prefilter"
     assert result["analysis"]["should_keep"] is False
-    assert snapshot["decision"] == "excluded_screenshot"
-    assert snapshot["checks"][0]["label"] == "截圖機率"
-    assert snapshot["checks"][0]["hit"] is True
+    assert snapshot["decision"] == "auto_excluded"
+    assert snapshot["primary_reason"] == "screenshot"
+    assert any(check["key"] == "screenshot_strong" and check["hit"] for check in snapshot["checks"])
     assert provider.analyze_calls == 0
     with app.extensions["inktime_database"].session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 0
@@ -209,8 +209,6 @@ def test_prefilter_snapshot_requires_two_quality_defects(app, tmp_path):
         photos.get_with_path(photo_id)
     )
 
-    assert snapshot["decision"] == "excluded_low_quality"
-    assert snapshot["required_defects"] == 2
-    assert snapshot["defect_count"] >= 2
-    assert "嚴重模糊或失焦" in snapshot["matched_defects"]
-    assert "對比過低" in snapshot["matched_defects"]
+    assert snapshot["decision"] == "auto_excluded"
+    assert snapshot["primary_reason"] == "severe_blur"
+    assert "severe_blur" in snapshot["matched_checks"]

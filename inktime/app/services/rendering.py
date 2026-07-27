@@ -87,6 +87,28 @@ class RenderService:
         if self.observability is not None:
             self.observability.record("DEBUG", "renderer", event, message, **fields)
 
+    def resolve_effective_dither(self, primary, secondary=None, *, requested: str | None = None, device_config: dict | None = None) -> dict[str, Any]:
+        """One dither decision for preview fingerprints and release payloads."""
+        device_config = device_config or {}
+        photos = primary if isinstance(primary, (list, tuple)) else [primary, secondary]
+        risks = [calculate_epaper_contrast_risk(photo) for photo in photos if photo is not None]
+        primary_risk = risks[0] if risks else "low"
+        secondary_risk = risks[1] if len(risks) > 1 else None
+        device_override = device_config.get("dither")
+        if requested:
+            effective, source = requested, "request_override"
+        elif device_override:
+            effective, source = str(device_override), "device_override"
+        elif bool(self.settings.get("render.auto_photo_smooth_enabled", False)) and "high" in risks:
+            effective, source = "photo_smooth", "auto_photo_smooth"
+        else:
+            effective, source = str(self.settings.get("render.dither", DEFAULT_RENDER_DITHER)), "global"
+        return {"requested_dither": requested, "effective_dither": effective, "override_source": source,
+                "auto_photo_smooth_enabled": bool(self.settings.get("render.auto_photo_smooth_enabled", False)),
+                "epaper_contrast_risk": "high" if "high" in risks else "medium" if "medium" in risks else "low",
+                "primary_photo_risk": primary_risk, "secondary_photo_risk": secondary_risk,
+                "epaper_contrast_risk_rule_version": "epaper-contrast-risk-v1"}
+
     def preview_fingerprint(
         self,
         photo_id: str,
@@ -112,10 +134,8 @@ class RenderService:
         font_path = self.fonts.resolve(font_reference)
         font_stat = font_path.stat()
         profile_definition = DISPLAY_PROFILES[profile_key]
-        epaper_risk = calculate_epaper_contrast_risk(photo)
-        effective_dither = dither or str(self.settings.get("render.dither", DEFAULT_RENDER_DITHER))
-        if dither is None and bool(self.settings.get("render.auto_photo_smooth_enabled", False)) and epaper_risk == "high":
-            effective_dither = "photo_smooth"
+        dither_plan = self.resolve_effective_dither(photo, secondary, requested=dither)
+        effective_dither = str(dither_plan["effective_dither"])
 
         def photo_version(row, *, x=None, y=None) -> dict[str, Any] | None:
             if row is None:
@@ -196,7 +216,7 @@ class RenderService:
                 "palette_version": profile_definition.palette_version,
                 "custom_palette_hash": None,
                 "dither": effective_dither,
-                "epaper_contrast_risk_rule": "epaper-contrast-risk-v1",
+                **dither_plan,
                 "color_distance": str(self.settings.get("render.color_distance", "oklab")),
                 "strength": float(self.settings.get("render.dither_strength", 1.0)),
                 "linear_light": False,
@@ -946,10 +966,13 @@ class RenderService:
                     )
                     for photo_id in selected[:quantity]
                 ]
+                device_rows = [self.photos.get_with_path(photo_id) for photo_id in selected[:quantity]]
+                risks = [row for row in device_rows if row is not None]
+                dither_plan = self.resolve_effective_dither(risks, device_config=device)
                 manifest = self.publisher.publish(
                     images,
                     profile_key=profile_key,
-                    dither=str(self.settings.get("render.dither", DEFAULT_RENDER_DITHER)),
+                    dither=str(dither_plan["effective_dither"]),
                     color_distance=str(self.settings.get("render.color_distance", "oklab")),
                     dither_strength=float(self.settings.get("render.dither_strength", 1.0)),
                     orientation=str(
@@ -961,6 +984,7 @@ class RenderService:
                         "device_id": device_id,
                         "layout_mode": device.get("layout_mode") or layout_key,
                         "photo_orientations": device_orientation_metadata,
+                        **dither_plan,
                     },
                 )
                 manifests.append(manifest)
@@ -1012,7 +1036,10 @@ class RenderService:
         selected_profiles = list(dict.fromkeys(selected_profiles))
         if not selected_profiles or any(key not in DISPLAY_PROFILES for key in selected_profiles):
             raise ValueError("RENDER-003 發布包含不支援的顯示 Profile")
-        dither = str(self.settings.get("render.dither", DEFAULT_RENDER_DITHER))
+        release_rows = [self.photos.get_with_path(photo_id) for photo_id in selected]
+        risk_rows = [row for row in release_rows if row is not None]
+        dither_plan = self.resolve_effective_dither(risk_rows)
+        dither = str(dither_plan["effective_dither"])
         color_distance = str(self.settings.get("render.color_distance", "oklab"))
         dither_strength = float(self.settings.get("render.dither_strength", 1.0))
         requested_orientation = str(self.settings.get("render.frame_orientation", "portrait"))
@@ -1027,7 +1054,7 @@ class RenderService:
                 dither_strength=dither_strength,
                 orientation=release_orientation,
                 activate=False,
-                metadata={"photo_orientations": release_orientation_metadata},
+                metadata={"photo_orientations": release_orientation_metadata, **dither_plan},
             )
             manifests.append(manifest)
         published = self.release_coordinator.publish(

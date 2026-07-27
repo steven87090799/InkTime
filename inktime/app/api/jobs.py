@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from flask import Blueprint, Response, abort, current_app, g, render_template, request, stream_with_context
-import hashlib
 import json
 
+from flask import Blueprint, Response, abort, current_app, g, render_template, request, stream_with_context
+
+from inktime.app.domain.analysis.plan import canonical_json, fingerprint
 from inktime.app.services.jobs import InvalidJobTransition, JobService
 from inktime.app.web.access import administrator_required, login_required
 
@@ -17,6 +18,18 @@ def _service() -> JobService:
 
 def _repository():
     return current_app.extensions["inktime_job_repository"]
+
+
+def _analysis_plan(strategy: str) -> tuple[dict, str]:
+    analysis = current_app.extensions["inktime_analysis_service"]
+    provider_service = current_app.extensions["inktime_provider_service"]
+    scoring = dict(current_app.extensions["inktime_scoring_repository"].current())
+    plan = analysis.build_plan(
+        strategy=strategy,
+        provider_route=provider_service.route_snapshot(),
+        scoring_profile=scoring,
+    )
+    return plan, canonical_json(plan)
 
 
 def _job_or_404(job_id: str):
@@ -62,28 +75,18 @@ def create_job():
     budget = payload.get("budget_limit")
     limit = payload.get("limit")
     settings = dict(payload.get("settings") or {})
-    runtime = current_app.extensions["inktime_settings_repository"]
-    # Freeze the non-secret analysis plan at creation so a long-running job is
-    # reproducible even if global settings change before its first item.
-    for key, setting_key, default in (
-        ("low_model", "model.low_model", "low-cost-vision"),
-        ("high_model", "model.high_model", "high-quality-vision"),
-        ("stage_two_threshold", "analysis.stage_two_threshold", 65),
-        ("high_image_max_side", "analysis.high_image_max_side", 1024),
-    ):
-        settings.setdefault(key, runtime.get(setting_key, default))
     selection_mode = str(payload.get("selection_mode", "pending"))
     if selection_mode not in {"pending", "stale_only", "force_all"}:
         return {"message": "不支援的選片模式"}, 400
     if selection_mode == "force_all" and str(g.user["role"]) != "administrator":
         return {"message": "force_all 僅限管理員"}, 403
-    analysis_fingerprint = str(payload.get("analysis_fingerprint") or "") or hashlib.sha256(
-        json.dumps({"strategy": payload.get("strategy", "smart_two_stage"), "plan": settings}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    strategy = str(payload.get("strategy", "smart_two_stage"))
+    plan, _ = _analysis_plan(strategy)
+    analysis_fingerprint = fingerprint(plan)
     try:
         job_id = _service().create_analysis_job(
             name=str(payload.get("name", "分析工作")),
-            strategy=str(payload.get("strategy", "smart_two_stage")),
+            strategy=strategy,
             settings=settings,
             created_by=g.user["id"],
             budget_limit=float(budget) if budget not in (None, "") else None,
@@ -92,6 +95,7 @@ def create_job():
             selection_mode=selection_mode,
             analysis_fingerprint=analysis_fingerprint,
             force_recompute=bool(payload.get("force_recompute", selection_mode == "force_all")),
+            analysis_spec=plan,
         )
     except ValueError as exc:
         return {"message": str(exc)}, 409
@@ -106,15 +110,20 @@ def selection_preview():
     if mode not in {"pending", "stale_only", "force_all"}:
         return {"message": "不支援的選片模式"}, 400
     limit = payload.get("limit")
+    strategy = str(payload.get("strategy", "smart_two_stage"))
+    _plan, _ = _analysis_plan(strategy)
     preview = _repository().selection_preview(
-        analysis_fingerprint=str(payload.get("analysis_fingerprint") or "") or None,
+        analysis_fingerprint=fingerprint(_plan),
         selection_mode=mode,
         limit=max(1, min(int(limit), 100_000)) if limit not in (None, "") else None,
     )
-    estimate = _service().estimate(int(preview["limited_to"]), str(payload.get("strategy", "smart_two_stage")))
-    return {**preview, "failed": 0, "stale": preview["pending_total"] if mode == "stale_only" else 0,
-            "estimated_stage_one": estimate["stage_one_photos"], "estimated_stage_two": estimate["stage_two_photos"],
-            "estimated_cost": estimate["average_cost"], "last_successful_scan_at": None}
+    estimate = _service().estimate(int(preview["limited_to"]), strategy)
+    return {
+        **preview,
+        "estimated_stage_one": estimate["stage_one_photos"],
+        "estimated_stage_two": estimate["stage_two_photos"],
+        "estimated_cost": estimate["average_cost"],
+    }
 
 
 @bp.post("/api/v1/jobs/<job_id>/<action>")

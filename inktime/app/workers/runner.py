@@ -43,7 +43,11 @@ class WorkerRunner:
                 continue
             settings = json.loads(job["settings_json"])
             scoring_profile = self.app.extensions["inktime_scoring_repository"].current()
-            provider = self.app.extensions["inktime_provider_service"].build_router()
+            provider = (
+                self.app.extensions["inktime_provider_service"].build_router()
+                if str(job["kind"]) == "analysis"
+                else None
+            )
             analysis = self.app.extensions["inktime_analysis_service"]
             runtime_settings = self.app.extensions["inktime_settings_repository"]
             progress_items = int(runtime_settings.get("worker.progress_items", 50))
@@ -52,11 +56,19 @@ class WorkerRunner:
                 runtime_settings.get("scanner.disk_batch_size", 1000)
             )
             scanner_write_batch_size = int(
-                runtime_settings.get("scanner.write_batch_size", 500)
+                runtime_settings.get("scanner.write_batch_size", 200)
             )
             scanner_missing_threshold_ratio = (
                 float(runtime_settings.get("scanner.missing_threshold_percent", 10)) / 100
             )
+            scanner_safety = {
+                "max_file_bytes": int(runtime_settings.get("scanner.max_file_bytes", 200 * 1024 * 1024)),
+                "max_pixels": int(runtime_settings.get("scanner.max_pixels", 60_000_000)),
+                "max_edge_px": int(runtime_settings.get("scanner.max_edge_px", 12_000)),
+                "thumbnail_capacity_check_interval": int(runtime_settings.get("scanner.thumbnail_capacity_check_interval", 500)),
+                "thumbnail_max_bytes": int(runtime_settings.get("thumbnail_cache.max_bytes", 5 * 1024 * 1024 * 1024)),
+                "thumbnail_retention_days": int(runtime_settings.get("thumbnail_cache.retention_days", 30)),
+            }
 
             def log_progress(_processed_since_start: int, *, job_id=str(job["id"])) -> None:
                 current = repository.get(job_id)
@@ -132,6 +144,7 @@ class WorkerRunner:
                 scanner_disk_batch_size=scanner_disk_batch_size,
                 scanner_write_batch_size=scanner_write_batch_size,
                 scanner_missing_threshold_ratio=scanner_missing_threshold_ratio,
+                scanner_safety=scanner_safety,
                 runtime_settings=runtime_settings,
             ):
                 if job["kind"] == "render_preview":
@@ -212,6 +225,7 @@ class WorkerRunner:
                         progress_callback=log_scan_progress,
                         progress_interval_items=progress_items,
                         progress_interval_seconds=progress_seconds,
+                        **scanner_safety,
                     )
                 if job["kind"] == "render":
                     display_prepare = settings.get("display_prepare")
@@ -260,6 +274,7 @@ class WorkerRunner:
                         progress_callback=log_scan_progress,
                         progress_interval_items=progress_items,
                         progress_interval_seconds=progress_seconds,
+                        **scanner_safety,
                     )
                     photo_ids = self.app.extensions[
                         "inktime_photo_repository"
@@ -318,30 +333,9 @@ class WorkerRunner:
                     job_id=job["id"],
                     provider=provider,
                     strategy=job["strategy"],
-                    low_model=settings.get(
-                        "low_model", self.app.extensions["inktime_settings_repository"].get("model.low_model")
-                    ),
-                    high_model=settings.get(
-                        "high_model",
-                        self.app.extensions["inktime_settings_repository"].get("model.high_model"),
-                    ),
-                    stage_two_threshold=float(
-                        settings.get(
-                            "stage_two_threshold",
-                            self.app.extensions["inktime_settings_repository"].get(
-                                "analysis.stage_two_threshold"
-                            ),
-                        )
-                    ),
-                    ranking_weights={
-                        "memory": float(scoring_profile["memory_weight"]),
-                        "beauty": float(scoring_profile["beauty_weight"]),
-                        "technical_quality": float(scoring_profile["technical_weight"]),
-                        "emotion": float(scoring_profile["emotion_weight"]),
-                    },
-                    favorite_bonus=float(scoring_profile["favorite_bonus"]),
-                    scoring_version_id=str(scoring_profile["id"]),
+                    analysis_plan=json.loads(str(job["analysis_spec_json"] or "{}")),
                     force_ai=bool(settings.get("force_ai", False)),
+                    force_actor=str(job["created_by"] or "system"),
                     force_recompute=bool(job["force_recompute"]),
                 )
 
@@ -395,10 +389,12 @@ class WorkerRunner:
                 job_id=job["id"],
                 details={"recovered_items": recovered},
             )
-            self.current.run_job(job["id"])
-            close_provider = getattr(provider, "close", None)
-            if callable(close_provider):
-                close_provider()
+            try:
+                self.current.run_job(job["id"])
+            finally:
+                close_provider = getattr(provider, "close", None)
+                if callable(close_provider):
+                    close_provider()
             finished = repository.get(job["id"])
             if finished is not None:
                 scheduled_task = settings.get("scheduled_task")

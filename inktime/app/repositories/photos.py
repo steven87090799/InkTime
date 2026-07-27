@@ -15,7 +15,7 @@ from inktime.app.domain.analysis.scoring import (
     calculate_ranking_score,
 )
 from inktime.app.domain.photos.preprocessing import LocalPhotoFeatures
-from inktime.app.domain.photos.quality_policy import FEATURE_VERSION, evaluate_local_quality
+from inktime.app.domain.photos.quality_policy import FEATURE_VERSION, evaluate_local_quality, local_candidate_score
 from inktime.app.domain.photos.dates import materialized_capture_fields, parse_photo_datetime
 
 
@@ -23,66 +23,8 @@ LOCAL_QUALITY_RULE = "local-quality"
 LOCAL_QUALITY_RULE_VERSION = FEATURE_VERSION
 
 
-def _local_candidate_score(features: LocalPhotoFeatures) -> float:
-    """不需要模型的可選片分數；只描述技術可用性，不代替回憶或語意評分。"""
-    blur = max(0.0, float(features.blur_score or 0.0))
-    contrast = max(0.0, min(100.0, float(features.contrast or 0.0)))
-    exposure_penalty = max(
-        float(features.overexposed_ratio or 0.0), float(features.underexposed_ratio or 0.0)
-    )
-    short_edge = min(features.width, features.height)
-    resolution = min(12.0, short_edge / 100.0)
-    # Contrast is helpful, but must not dominate the local technical score.
-    contrast_contribution = min(32.0, contrast * 0.8)
-    return round(max(0.0, min(100.0, blur**0.5 * 3.2 + contrast_contribution + resolution - exposure_penalty * 45)), 2)
-
-
-def _automatic_exclusion(relative_path: str, features: LocalPhotoFeatures) -> tuple[str, dict] | None:
-    """Return the single shared v4 decision; never call a Provider here."""
-    evaluation = evaluate_local_quality({"relative_path": relative_path, **features.as_dict()})
-    if evaluation["decision"] != "auto_excluded":
-        return None
-    return str(evaluation["primary_reason"]), evaluation
-
-
 def _stored_exclusion(photo: dict) -> tuple[str, dict] | None:
     """讓人工要求重新套用時使用同一規則與相同門檻。"""
-    features = LocalPhotoFeatures(
-        sha256=str(photo.get("sha256") or ""),
-        perceptual_hash=photo.get("perceptual_hash"),
-        difference_hash=photo.get("difference_hash"),
-        width=int(photo.get("width") or 0),
-        height=int(photo.get("height") or 0),
-        format=str(photo.get("format") or ""),
-        orientation=int(photo.get("orientation") or 1),
-        camera_make=photo.get("camera_make"),
-        camera_model=photo.get("camera_model"),
-        lens_model=photo.get("lens_model"),
-        exif_json=photo.get("exif_json"),
-        captured_at=photo.get("captured_at"),
-        gps_lat=photo.get("gps_lat"),
-        gps_lon=photo.get("gps_lon"),
-        brightness=photo.get("brightness"),
-        contrast=photo.get("contrast"),
-        blur_score=photo.get("blur_score"),
-        overexposed_ratio=photo.get("overexposed_ratio"),
-        underexposed_ratio=photo.get("underexposed_ratio"),
-        screenshot_likelihood=photo.get("screenshot_likelihood"),
-        crop_focus_x=None,
-        crop_focus_y=None,
-        crop_subject_left=None,
-        crop_subject_top=None,
-        crop_subject_right=None,
-        crop_subject_bottom=None,
-        crop_method=None,
-        crop_face_count=None,
-        e6_score=None,
-        e6_contrast_score=None,
-        e6_subject_score=None,
-        e6_skin_score=None,
-        e6_text_score=None,
-        e6_skin_pixels=None,
-    )
     evaluation = evaluate_local_quality({**photo, "relative_path": str(photo.get("relative_path") or "")})
     if evaluation["decision"] != "auto_excluded":
         return None
@@ -781,7 +723,14 @@ class PhotoRepository:
                     or str(existing.get("exclusion_status") or "")
                     in {"manually_restored", "manually_excluded"}
                 )
-                exclusion = None if protected else _automatic_exclusion(plan["item"].relative_path, features)
+                policy = evaluate_local_quality(
+                    {"relative_path": plan["item"].relative_path, **features.as_dict()}
+                )
+                exclusion = (
+                    None
+                    if protected or policy["decision"] != "auto_excluded"
+                    else (str(policy["primary_reason"]), policy)
+                )
                 if protected:
                     eligible = int(existing.get("eligible", 1))
                     exclusion_status = str(existing.get("exclusion_status") or "eligible")
@@ -814,7 +763,10 @@ class PhotoRepository:
                     manual_override = 0
                 quality_updates.append(
                     (
-                        _local_candidate_score(features),
+                        local_candidate_score(
+                            features.as_dict(),
+                            evaluation=policy,
+                        ),
                         LOCAL_QUALITY_RULE_VERSION,
                         features.orientation,
                         int(plan["content_changed"]),
@@ -1241,26 +1193,7 @@ class PhotoRepository:
                         connection.execute(
                             "UPDATE photos SET local_candidate_score=?,feature_version=?,updated_at=? WHERE id=?",
                             (
-                                _local_candidate_score(
-                                    LocalPhotoFeatures(
-                                        sha256=str(photo.get("sha256") or ""), perceptual_hash=None,
-                                        difference_hash=None, width=int(photo.get("width") or 0),
-                                        height=int(photo.get("height") or 0), format=str(photo.get("format") or ""),
-                                        orientation=int(photo.get("orientation") or 1), camera_make=None,
-                                        camera_model=None, lens_model=None, exif_json=None,
-                                        captured_at=None, gps_lat=None, gps_lon=None,
-                                        brightness=photo.get("brightness"), contrast=photo.get("contrast"),
-                                        blur_score=photo.get("blur_score"),
-                                        overexposed_ratio=photo.get("overexposed_ratio"),
-                                        underexposed_ratio=photo.get("underexposed_ratio"),
-                                        screenshot_likelihood=photo.get("screenshot_likelihood"),
-                                        crop_focus_x=None, crop_focus_y=None, crop_subject_left=None,
-                                        crop_subject_top=None, crop_subject_right=None, crop_subject_bottom=None,
-                                        crop_method=None, crop_face_count=None, e6_score=None,
-                                        e6_contrast_score=None, e6_subject_score=None, e6_skin_score=None,
-                                        e6_text_score=None, e6_skin_pixels=None,
-                                    )
-                                ),
+                                local_candidate_score(photo),
                                 LOCAL_QUALITY_RULE_VERSION,
                                 now,
                                 photo_id,
@@ -1303,6 +1236,43 @@ class PhotoRepository:
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+
+    def persist_prefilter_exclusion(self, photo_id: str, evaluation: dict) -> None:
+        """Persist one v4 automatic exclusion without disturbing manual state."""
+        if evaluation.get("decision") != "auto_excluded":
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        details = json.dumps(
+            {"policy_decision": evaluation["decision"], "primary_reason": evaluation["primary_reason"],
+             "sensitivity": evaluation["sensitivity"], "matched_checks": evaluation["matched_checks"],
+             "thresholds": evaluation["thresholds"], "e6_threshold": evaluation.get("e6_threshold"),
+             "feature_version": evaluation["feature_version"], "evidence": evaluation["evidence"]},
+            ensure_ascii=False, sort_keys=True,
+        )
+        with self.database.transaction() as connection:
+            connection.execute(
+                """UPDATE photos SET eligible=0,exclusion_status='auto_excluded',reject_reason=?,
+                   reject_rule=?,reject_rule_version=?,reject_details_json=?,rejected_at=?,updated_at=?
+                   WHERE id=? AND favorite=0 AND manual_override=0
+                   AND exclusion_status NOT IN ('manually_restored','manually_excluded')""",
+                (evaluation["primary_reason"], LOCAL_QUALITY_RULE, FEATURE_VERSION, details, now, now, photo_id),
+            )
+
+    def record_force_ai_event(
+        self, photo_id: str, *, job_id: str | None, provider: str, model: str, actor: str
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.transaction() as connection:
+            connection.execute(
+                "INSERT INTO photo_events(photo_id,event,changes_json,changed_by,created_at) VALUES (?,?,?,?,?)",
+                (
+                    photo_id,
+                    "force_ai_analysis_completed",
+                    json.dumps({"job_id": job_id, "provider": provider, "model": model}, ensure_ascii=False),
+                    actor,
+                    now,
+                ),
+            )
 
     def search_exclusions(
         self,
@@ -1470,7 +1440,9 @@ class PhotoRepository:
                 ON CONFLICT(content_sha256,provider,model_name,prompt_version,schema_version,schema_kind)
                 DO UPDATE SET result_json=excluded.result_json,raw_json=excluded.raw_json,input_tokens=excluded.input_tokens,
                     output_tokens=excluded.output_tokens,cached_tokens=excluded.cached_tokens,estimated_cost=excluded.estimated_cost,
-                    latency_ms=excluded.latency_ms,created_at=excluded.created_at
+                    latency_ms=excluded.latency_ms,created_at=excluded.created_at,
+                    vision_request_fingerprint=excluded.vision_request_fingerprint,
+                    vision_input_spec_json=excluded.vision_input_spec_json
                 """,
                 (
                     content_sha256, provider, model_name, prompt_version, schema_version, schema_kind,
@@ -1481,7 +1453,7 @@ class PhotoRepository:
             )
 
     def acquire_ai_cache_reservation(
-        self, cache_key: str, owner_id: str, *, lease_seconds: int = 120
+        self, cache_key: str, owner_id: str, *, lease_seconds: int = 480
     ) -> bool:
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
@@ -1501,7 +1473,9 @@ class PhotoRepository:
                     (cache_key, owner_id, lease_until, now, now),
                 )
                 return True
-            takeover = str(row["status"]) == "failed" or str(row["lease_until"]) <= now
+            # A completed marker without a matching cache row is harmless: the
+            # caller always rechecks cache after acquiring, then may take over.
+            takeover = str(row["status"]) in {"failed", "completed"} or str(row["lease_until"]) <= now
             if not takeover:
                 return str(row["owner_id"]) == owner_id
             connection.execute(

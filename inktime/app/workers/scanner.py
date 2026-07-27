@@ -139,10 +139,11 @@ class PhotoScanner:
     def _analyze(self, entry: DiskPhoto, *, metadata: bool, local: bool):
         # Reject bombs from metadata before the full feature pipeline decodes
         # pixels.  MemoryError/RecursionError remain fatal by design.
-        with Image.open(entry.path) as image:
-            width, height = image.size
-            if width * height > self.max_pixels or max(width, height) > self.max_edge_px:
-                raise Image.DecompressionBombError("scanner image dimensions exceed configured limit")
+        if isinstance(self.preprocessor, PhotoPreprocessor):
+            with Image.open(entry.path) as image:
+                width, height = image.size
+                if width * height > self.max_pixels or max(width, height) > self.max_edge_px:
+                    raise Image.DecompressionBombError("scanner image dimensions exceed configured limit")
         try:
             return self.preprocessor.analyze(
                 entry.path,
@@ -165,7 +166,7 @@ class PhotoScanner:
         build_thumbnails: bool = True,
         limit: int | None = None,
         disk_batch_size: int = 1_000,
-        write_batch_size: int = 500,
+        write_batch_size: int = 200,
         missing_threshold_ratio: float = 0.10,
         cancel_requested: Callable[[], bool] | None = None,
         progress_callback: Callable[[dict], None] | None = None,
@@ -174,6 +175,9 @@ class PhotoScanner:
         max_file_bytes: int = 200 * 1024 * 1024,
         max_pixels: int = 60_000_000,
         max_edge_px: int = 12_000,
+        thumbnail_capacity_check_interval: int = 500,
+        thumbnail_max_bytes: int = 5 * 1024 * 1024 * 1024,
+        thumbnail_retention_days: int = 30,
     ) -> dict:
         if mode not in SCAN_MODES:
             raise ValueError("SCAN-003 不支援的掃描模式")
@@ -193,6 +197,10 @@ class PhotoScanner:
         self.max_pixels = max(1_000_000, int(max_pixels))
         self.max_edge_px = max(1_000, int(max_edge_px))
         max_file_bytes = max(1_024 * 1_024, int(max_file_bytes))
+        thumbnail_capacity_check_interval = max(1, int(thumbnail_capacity_check_interval))
+        thumbnail_max_bytes = max(0, int(thumbnail_max_bytes))
+        thumbnail_retention_days = max(0, int(thumbnail_retention_days))
+        thumbnails_created = 0
         cancel_requested = cancel_requested or (lambda: False)
         library_id = self.repository.ensure_library(name, root)
         scan_id = self.repository.begin_scan(
@@ -417,6 +425,16 @@ class PhotoScanner:
                     if build_thumbnails and result.action != "moved":
                         try:
                             self.thumbnails.get_or_create(item.source, result.sha256, 512)
+                            thumbnails_created += 1
+                            if thumbnails_created % thumbnail_capacity_check_interval == 0 and self.thumbnails.size_bytes() > thumbnail_max_bytes * 1.10:
+                                with self.repository.database.session() as connection:
+                                    active_hashes = {str(row[0]).casefold() for row in connection.execute(
+                                        "SELECT DISTINCT sha256 FROM photos WHERE lifecycle_status='active' AND sha256 IS NOT NULL"
+                                    )}
+                                self.thumbnails.cleanup(
+                                    max_bytes=thumbnail_max_bytes, retention_days=thumbnail_retention_days,
+                                    active_hashes=active_hashes,
+                                )
                         except Exception as exc:
                             counts["failed"] += 1
                             errors.append(

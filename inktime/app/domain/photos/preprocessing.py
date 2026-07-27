@@ -26,6 +26,8 @@ _DCT_COS = tuple(
     tuple(math.cos((2 * position + 1) * frequency * math.pi / 64) for position in range(32))
     for frequency in range(8)
 )
+_EXIF_JSON_MAX_BYTES = 64 * 1024
+_EXIF_BYTES_MAX = 1024
 
 
 @dataclass(frozen=True)
@@ -108,7 +110,7 @@ def _phash(image: Image.Image) -> str:
 
 
 def _blur_variance(image: Image.Image) -> float:
-    sample = image.convert("L")
+    sample = image if image.mode == "L" else image.convert("L")
     sample.thumbnail((256, 256))
     width, height = sample.size
     if width < 3 or height < 3:
@@ -145,6 +147,23 @@ def _gps_coordinate(values, reference: str | None) -> float | None:
         return None
     result = _rational(values[0]) + _rational(values[1]) / 60 + _rational(values[2]) / 3600
     return -result if reference in {"S", "W"} else result
+
+
+def _safe_exif_json(values: dict[str, Any]) -> str:
+    """Bound EXIF before it reaches SQLite; binary values are never persisted."""
+    safe: dict[str, Any] = {}
+    for key in sorted(values):
+        value = values[key]
+        if isinstance(value, bytes):
+            safe[key] = {"type": "bytes", "length": len(value)} if len(value) > _EXIF_BYTES_MAX else value.hex()
+        else:
+            text = str(value)
+            safe[key] = text[:4096]
+        encoded = json.dumps(safe, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(encoded) > _EXIF_JSON_MAX_BYTES:
+            safe.pop(key)
+            break
+    return json.dumps(safe, ensure_ascii=False, separators=(",", ":"))
 
 
 class PhotoPreprocessor:
@@ -212,9 +231,7 @@ class PhotoPreprocessor:
                 if orientation in {5, 6, 7, 8}
                 else (original_width, original_height)
             )
-            serializable_exif = (
-                {key: str(value) for key, value in exif_named.items()} if include_metadata else None
-            )
+            serializable_exif = dict(exif_named) if include_metadata else None
             if serializable_exif is not None and lat is not None and lon is not None:
                 serializable_exif["gps"] = "[已擷取；診斷包會遮蔽精確座標]"
 
@@ -308,11 +325,7 @@ class PhotoPreprocessor:
                 camera_make=camera_make,
                 camera_model=camera_model,
                 lens_model=lens_model,
-                exif_json=(
-                    json.dumps(serializable_exif, ensure_ascii=False)
-                    if serializable_exif is not None
-                    else None
-                ),
+                exif_json=_safe_exif_json(serializable_exif) if serializable_exif is not None else None,
                 captured_at=captured_at,
                 gps_lat=lat,
                 gps_lon=lon,
