@@ -1023,6 +1023,7 @@ class PhotoRepository:
     def inherit_existing_analysis(
         self, photo_id: str, job_id: str | None, *, analysis_context: dict | None = None
     ) -> dict | None:
+        required_fingerprint = str((analysis_context or {}).get("analysis_fingerprint") or "")
         with self.database.session() as connection:
             row = connection.execute(
                 """
@@ -1030,9 +1031,11 @@ class PhotoRepository:
                        source.visual_orientation_ambiguous,source.visual_orientation_evidence_json FROM photos target
                 JOIN photos source ON source.sha256=target.sha256 AND source.id<>target.id
                 JOIN photo_analysis a ON a.photo_id=source.id
-                WHERE target.id=? ORDER BY a.created_at DESC LIMIT 1
+                WHERE target.id=?
+                  AND (?='' OR a.analysis_fingerprint=?)
+                ORDER BY a.created_at DESC,a.id DESC LIMIT 1
                 """,
-                (photo_id,),
+                (photo_id, required_fingerprint, required_fingerprint),
             ).fetchone()
         if row is None:
             return None
@@ -1074,6 +1077,12 @@ class PhotoRepository:
             analysis_spec_json=(analysis_context or {}).get("analysis_spec_json") or row["analysis_spec_json"],
             vision_request_fingerprint=(analysis_context or {}).get("vision_request_fingerprint") or row["vision_request_fingerprint"],
             vision_input_spec_json=(analysis_context or {}).get("vision_input_spec_json") or row["vision_input_spec_json"],
+            inherited_from={
+                "analysis_id": int(row["id"]),
+                "photo_id": str(row["photo_id"]),
+                "analysis_fingerprint": str(row["analysis_fingerprint"] or ""),
+                "vision_request_fingerprint": str(row["vision_request_fingerprint"] or ""),
+            },
         )
         return result
 
@@ -1869,6 +1878,7 @@ class PhotoRepository:
         vision_request_fingerprint: str | None = None,
         vision_input_spec_json: str | None = None,
         prefilter_evaluation: dict | None = None,
+        inherited_from: dict | None = None,
     ) -> None:
         import json
 
@@ -1895,7 +1905,10 @@ class PhotoRepository:
                         changes = {"reason": prefilter_evaluation["primary_reason"], "feature_version": FEATURE_VERSION}
                     connection.execute(
                         "INSERT INTO photo_events(photo_id,event,changes_json,changed_by,created_at) VALUES (?,?,?,?,?)",
-                        (photo_id, event, json.dumps(changes, ensure_ascii=False), "system", now),
+                        # Automatic policy decisions have no authenticated user;
+                        # `changed_by` is a foreign key and must remain NULL
+                        # rather than inventing a non-existent system account.
+                        (photo_id, event, json.dumps(changes, ensure_ascii=False), None, now),
                     )
                 connection.execute(
                     """
@@ -1935,6 +1948,7 @@ class PhotoRepository:
                                 "source": "local" if provider == "local" else "model",
                                 "confidence": (result.get("details") or {}).get("confidence"),
                                 "values": result.get("details") or {},
+                                **({"inherited_from": inherited_from} if inherited_from else {}),
                             },
                             ensure_ascii=False,
                         ),

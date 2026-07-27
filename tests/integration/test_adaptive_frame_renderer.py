@@ -102,6 +102,26 @@ def test_adaptive_square_and_missing_pair_fall_back_to_single_contain(app, tmp_p
     assert _logical_landscape(fallback).getpixel((10, 100)) == (255, 255, 255)
 
 
+def test_all_formal_frame_layouts_render_with_the_resolved_photos(app, tmp_path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    _analyzed_photo(app, root, "primary", (1600, 900), "2024-07-01T10:00:00+00:00")
+    _analyzed_photo(app, root, "secondary", (900, 1600), "2024-07-01T10:30:00+00:00")
+    service = app.extensions["inktime_render_service"]
+
+    for layout in ("full", "postcard", "photo_info", "calendar", "weather_sensor"):
+        image = service.render_photo("primary", layout=layout, orientation="landscape", fit_mode="cover")
+        assert image.size == (480, 800)
+    paired = service.render_photo(
+        "primary",
+        layout="photo_pair",
+        secondary_photo_id="secondary",
+        orientation="landscape",
+        fit_mode="cover",
+    )
+    assert paired.size == (480, 800)
+
+
 def test_device_releases_keep_profile_manifest_and_independent_layouts(app, tmp_path):
     root = tmp_path / "photos"
     root.mkdir()

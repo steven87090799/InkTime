@@ -497,6 +497,15 @@ class PhotoAnalysisService:
         # Request Fingerprint is the authoritative additional cache dimension.
         cache_schema_kind = schema_kind
         vision_json = canonical_json(vision_input)
+        baseline_cache_created_at: str | None = None
+        if force_recompute:
+            baseline = self.photos.get_ai_cache(
+                content_sha256=content_sha256, provider=actual_provider, model_name=model,
+                prompt_version=prompt_version, schema_version=2, schema_kind=cache_schema_kind,
+                vision_request_fingerprint=request_fingerprint,
+            )
+            if baseline is not None:
+                baseline_cache_created_at = str(baseline["created_at"])
         if not force_recompute:
             cached = self.photos.get_ai_cache(
                 content_sha256=content_sha256, provider=actual_provider, model_name=model,
@@ -510,6 +519,14 @@ class PhotoAnalysisService:
                     return validate_analysis_result(cached["result"]), str(cached["raw_json"]), 0.0, True, actual_provider, model, request_fingerprint, vision_json, Usage(), 0
                 except AnalysisValidationError:
                     pass
+
+        def is_force_generation(cache_row: dict) -> bool:
+            return (
+                not force_recompute
+                or baseline_cache_created_at is None
+                or str(cache_row["created_at"]) != baseline_cache_created_at
+            )
+
         cache_key = request_fingerprint
         self._activity("DEBUG", "caption_cache_miss", "Caption AI Cache 未命中", job_id=job_id, photo_id=photo_id, stage=stage, trace_id=prompt_version)
         owner_id = str(uuid4())
@@ -523,23 +540,22 @@ class PhotoAnalysisService:
             time.sleep(0.05)
             # A forced request ignores a pre-existing entry, but once another
             # forced owner has completed its fresh result, all waiters share it.
-            if not force_recompute or waited_for_owner:
-                cached = self.photos.get_ai_cache(
-                    content_sha256=content_sha256, provider=actual_provider, model_name=model,
-                    prompt_version=prompt_version, schema_version=2, schema_kind=cache_schema_kind,
-                    vision_request_fingerprint=request_fingerprint,
-                )
-                if cached is not None:
-                    self._activity("DEBUG", "caption_cache_hit", "等待中的 Caption AI Cache 已完成", job_id=job_id, photo_id=photo_id, stage=stage, trace_id=prompt_version)
-                    release_selected()
-                    return validate_analysis_result(cached["result"]), str(cached["raw_json"]), 0.0, True, actual_provider, model, request_fingerprint, vision_json, Usage(), 0
+            cached = self.photos.get_ai_cache(
+                content_sha256=content_sha256, provider=actual_provider, model_name=model,
+                prompt_version=prompt_version, schema_version=2, schema_kind=cache_schema_kind,
+                vision_request_fingerprint=request_fingerprint,
+            )
+            if cached is not None and is_force_generation(cached):
+                self._activity("DEBUG", "caption_cache_hit", "等待中的 Caption AI Cache 已完成", job_id=job_id, photo_id=photo_id, stage=stage, trace_id=prompt_version)
+                release_selected()
+                return validate_analysis_result(cached["result"]), str(cached["raw_json"]), 0.0, True, actual_provider, model, request_fingerprint, vision_json, Usage(), 0
         if not force_recompute or waited_for_owner:
             cached = self.photos.get_ai_cache(
                 content_sha256=content_sha256, provider=actual_provider, model_name=model,
                 prompt_version=prompt_version, schema_version=2, schema_kind=cache_schema_kind,
                 vision_request_fingerprint=request_fingerprint,
             )
-            if cached is not None:
+            if cached is not None and is_force_generation(cached):
                 self.photos.finish_ai_cache_reservation(cache_key, owner_id)
                 release_selected()
                 return validate_analysis_result(cached["result"]), str(cached["raw_json"]), 0.0, True, actual_provider, model, request_fingerprint, vision_json, Usage(), 0
@@ -826,9 +842,14 @@ class PhotoAnalysisService:
             }
         self._activity("DEBUG", "caption_analysis_started", "Caption 分析開始", job_id=job_id, photo_id=photo_id, stage=strategy, trace_id=prompt_version, advanced_caption=bool(caption_controls))
         weights = ranking_weights or DEFAULT_RANKING_WEIGHTS
+        # Identical bytes can only inherit an analysis that was produced by the
+        # exact same frozen plan.  Reusing a different prompt/schema/Vision
+        # Input would make selection-preview incorrectly consider it current.
         inherited = self.photos.inherit_existing_analysis(
-            photo_id, job_id, analysis_context=local_context("basic")
-        ) if self.settings is None else None
+            photo_id,
+            job_id,
+            analysis_context={"analysis_fingerprint": analysis_fingerprint},
+        )
         if inherited is not None:
             return {"analysis": inherited, "stage": "inherited", "_actual_cost": 0}
         if strategy == "local":

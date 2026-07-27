@@ -168,6 +168,16 @@ def test_analysis_selector_keyset_returns_1200_unique_eligible_active_photos(app
     assert len(selected) == 1198
     assert len(set(selected)) == 1198
     assert photo_ids[0] not in selected and photo_ids[1] not in selected
+    with app.extensions["inktime_database"].session() as connection:
+        expected = [
+            str(row["id"])
+            for row in connection.execute(
+                "SELECT id FROM photos WHERE lifecycle_status='active' AND eligible=1 "
+                "ORDER BY COALESCE(local_candidate_score,-1) DESC,id ASC"
+            )
+        ]
+    assert selected == expected
+    assert list(repository.iter_pending_photo_ids(analysis_fingerprint="plan-a", limit=137)) == expected[:137]
 
 
 def test_active_dedupe_key_prevents_duplicate_maintenance_work(app):
