@@ -8,6 +8,7 @@ from typing import Literal
 from inktime.app.core.locks import FcntlLockProvider, LockProvider
 from inktime.app.core.logging import configure_logging
 from inktime.app.core.runtime_config import RuntimeConfig, resolve_runtime_config
+from inktime.app.core.preflight import run_production_preflight
 from inktime.app.db import Database, backfill_photo_capture_dates, migrate
 from inktime.app.domain.photos import LocationResolver, ThumbnailCache
 from inktime.app.domain.rendering import AtomicReleasePublisher, FontManager
@@ -74,8 +75,14 @@ def _persistent_secret(
         return configured
     path = runtime_config.data_dir / "session.key"
     path.parent.mkdir(parents=True, exist_ok=True)
+    data_root = runtime_config.data_dir.resolve()
+    if path.is_symlink() or path.resolve().parent != data_root:
+        raise RuntimeError("SESSION-001 session.key 必須是 data_dir 內的非符號連結檔案")
     with lock_provider.exclusive(path.with_suffix(".key.lock")):
         if path.exists():
+            if path.is_symlink() or path.resolve().parent != data_root:
+                raise RuntimeError("SESSION-001 session.key 必須是 data_dir 內的非符號連結檔案")
+            path.chmod(0o600)
             value = path.read_text(encoding="utf-8").strip()
             if value:
                 return value
@@ -96,6 +103,7 @@ def bootstrap_services(
     config = resolve_runtime_config(runtime_config)
     locks = lock_provider or FcntlLockProvider()
     configure_logging()
+    preflight = run_production_preflight(config)
 
     # Filesystem creation is an explicit bootstrap step, never an import side effect.
     for path in (config.data_dir, config.cache_dir, config.backup_dir, config.release_dir):
@@ -107,6 +115,7 @@ def bootstrap_services(
     extensions: dict[str, object] = {
         "inktime_runtime_config": config,
         "inktime_database": database,
+        "inktime_production_preflight": preflight,
     }
     if not config.testing:
         extensions["inktime_runtime_lock"] = database.acquire_runtime_lock(exclusive=False)
