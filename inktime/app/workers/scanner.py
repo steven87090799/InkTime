@@ -428,15 +428,17 @@ class PhotoScanner:
                         try:
                             self.thumbnails.get_or_create(item.source, result.sha256, 512)
                             thumbnails_created += 1
-                            if thumbnails_created % thumbnail_capacity_check_interval == 0 and self.thumbnails.size_bytes() > thumbnail_max_bytes * 1.10:
-                                with self.repository.database.session() as connection:
-                                    active_hashes = {str(row[0]).casefold() for row in connection.execute(
-                                        "SELECT DISTINCT sha256 FROM photos WHERE lifecycle_status='active' AND sha256 IS NOT NULL"
-                                    )}
-                                self.thumbnails.cleanup(
-                                    max_bytes=thumbnail_max_bytes, retention_days=thumbnail_retention_days,
-                                    active_hashes=active_hashes,
-                                )
+                            if thumbnails_created % thumbnail_capacity_check_interval == 0:
+                                inventory = self.thumbnails.inventory()
+                                if sum(entry[1] for entry in inventory) > thumbnail_max_bytes * 1.10:
+                                    active_hashes = self.repository.active_hashes_for(
+                                        [entry[4] for entry in inventory]
+                                    )
+                                    self.thumbnails.cleanup(
+                                        max_bytes=thumbnail_max_bytes, retention_days=thumbnail_retention_days,
+                                        active_hashes=active_hashes,
+                                        inventory=inventory,
+                                    )
                         except Exception as exc:
                             counts["failed"] += 1
                             errors.append(

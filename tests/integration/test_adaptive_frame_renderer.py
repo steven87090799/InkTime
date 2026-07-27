@@ -119,9 +119,17 @@ def test_device_releases_keep_profile_manifest_and_independent_layouts(app, tmp_
             "SELECT device_id,release_id FROM device_render_releases ORDER BY device_id"
         ).fetchall()
     assert len(assignments) == 2
+    secondary_ids = set()
     for release_id in result["device_releases"].values():
         manifest = app.extensions["inktime_release_publisher"].validate(release_id)
         assert manifest["render_profile"] == "safe_4c"
         assert manifest["width"] == 480 and manifest["height"] == 800
         assert manifest["files"][0]["name"] == "photo_1.bin"
         assert manifest["files"][0]["size"] == 96_000
+        options = manifest["render_options"]
+        assert options["aggregation_scope"] == "release"
+        assert options["render_plans"][0]["primary_photo_id"] == "primary"
+        secondary_ids.add(options["render_plans"][0]["secondary_photo_id"])
+        assert "secondary_sha256" in options["render_plans"][0]
+        assert options["effective_dither"] == manifest["dither"]
+    assert secondary_ids == {None, "secondary"}

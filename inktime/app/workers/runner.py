@@ -325,18 +325,15 @@ class WorkerRunner:
                     path = self.app.extensions["inktime_backup_service"].create()
                     return {"backup": path.name}
                 if job["kind"] == "cleanup":
-                    with self.app.extensions["inktime_database"].session() as connection:
-                        hashes = {
-                            str(row[0]).casefold()
-                            for row in connection.execute(
-                                "SELECT DISTINCT sha256 FROM photos WHERE lifecycle_status='active' AND sha256 IS NOT NULL"
-                            )
-                        }
                     cache = self.app.extensions["inktime_thumbnail_cache"]
+                    inventory = cache.inventory()
                     return cache.cleanup(
                         max_bytes=int(settings.get("max_bytes", 5 * 1024 * 1024 * 1024)),
                         retention_days=int(settings.get("retention_days", 30)),
-                        active_hashes=hashes,
+                        active_hashes=self.app.extensions["inktime_photo_repository"].active_hashes_for(
+                            [entry[4] for entry in inventory]
+                        ),
+                        inventory=inventory,
                     )
                 if job["kind"] == "webhook":
                     return self.app.extensions[

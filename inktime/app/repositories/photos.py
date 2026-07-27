@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import re
 from typing import Any, Iterable, Sequence
 from uuid import uuid4
 
@@ -21,6 +22,7 @@ from inktime.app.domain.photos.dates import materialized_capture_fields, parse_p
 
 LOCAL_QUALITY_RULE = "local-quality"
 LOCAL_QUALITY_RULE_VERSION = FEATURE_VERSION
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _effective_cache_version(prompt_version: str, vision_request_fingerprint: str | None) -> str:
@@ -1361,6 +1363,26 @@ class PhotoRepository:
                 "SELECT COUNT(*) FROM photos WHERE lifecycle_status='active' AND eligible=1"
             ).fetchone()
         return int(row[0] or 0)
+
+    def active_hashes_for(self, cache_hashes: Sequence[str]) -> set[str]:
+        """Look up only cache-visible SHA values; never materialize the photo library."""
+        requested = list(
+            dict.fromkeys(
+                value.casefold() for value in cache_hashes if _SHA256_RE.fullmatch(value.casefold())
+            )
+        )
+        active: set[str] = set()
+        with self.database.session() as connection:
+            for chunk in _chunks(requested, 400):
+                placeholders = ",".join("?" for _ in chunk)
+                active.update(
+                    str(row["sha256"]).casefold()
+                    for row in connection.execute(
+                        f"SELECT DISTINCT sha256 FROM photos WHERE lifecycle_status='active' AND sha256 IN ({placeholders})",  # noqa: S608
+                        tuple(chunk),
+                    ).fetchall()
+                )
+        return active
 
     def active_eligible_requested_ids(self, photo_ids: Sequence[str], *, limit: int) -> list[str]:
         """Bounded SQL validation that preserves the caller's ordering."""

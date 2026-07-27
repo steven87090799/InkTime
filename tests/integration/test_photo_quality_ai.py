@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
+from uuid import uuid4
 
 from PIL import Image
 
 from inktime.app.domain.photos import PhotoPreprocessor
 from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
 from inktime.app.workers.scanner import PhotoScanner
-from tests.conftest import create_admin, login
+from tests.conftest import create_admin, csrf, login
 from tests.unit.test_analysis_schema import valid_result
 
 
@@ -131,3 +133,49 @@ def test_full_json_allows_missing_nonessential_fields_and_travel_bonus_is_indepe
     assert row["memory_score"] == result["memory_score"]
     assert row["travel_bonus"] > 0
     assert row["final_ranking_score"] == row["base_ranking_score"] + row["travel_bonus"]
+
+
+def test_full_library_confirmation_and_queue_count_only_active_eligible_photos(client, app):
+    create_admin(app)
+    login(client)
+    now = datetime.now(timezone.utc).isoformat()
+    library_id = str(uuid4())
+    eligible_ids = [str(uuid4()) for _ in range(3)]
+    excluded_id = str(uuid4())
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "INSERT INTO libraries(id,name,root_path,created_at,updated_at) VALUES (?,?,?,?,?)",
+            (library_id, "完整選片", "/photos", now, now),
+        )
+        connection.executemany(
+            """
+            INSERT INTO photos(id,library_id,relative_path,status,eligible,lifecycle_status,
+                               local_candidate_score,created_at,updated_at)
+            VALUES (?,?,?,'preprocessed',?,'active',?,?,?)
+            """,
+            [
+                (photo_id, library_id, f"{index}.jpg", 1, float(10 - index), now, now)
+                for index, photo_id in enumerate(eligible_ids)
+            ]
+            + [(excluded_id, library_id, "excluded.jpg", 0, 99.0, now, now)],
+        )
+    _setting(app, "analysis.ai_mode", "full_library")
+    _setting(app, "analysis.ai_daily_photo_limit", 2)
+    headers = {"X-CSRF-Token": csrf(client)}
+    confirmation = client.post("/api/v1/photos/ai/run", json={}, headers=headers)
+    assert confirmation.status_code == 409
+    assert confirmation.json["photos"] == 2
+    assert confirmation.json["eligible_total"] == 3
+
+    queued = client.post(
+        "/api/v1/photos/ai/run", json={"confirm": True, "batch_by": "year"}, headers=headers
+    )
+    assert queued.status_code == 201
+    assert queued.json["queued"] == 2
+    with app.extensions["inktime_database"].session() as connection:
+        photo_ids = {
+            str(row["photo_id"])
+            for row in connection.execute("SELECT photo_id FROM job_items WHERE photo_id IS NOT NULL")
+        }
+    assert photo_ids <= set(eligible_ids)
+    assert excluded_id not in photo_ids

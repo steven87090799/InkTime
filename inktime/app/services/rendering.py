@@ -107,6 +107,10 @@ class RenderService:
                 "auto_photo_smooth_enabled": bool(self.settings.get("render.auto_photo_smooth_enabled", False)),
                 "epaper_contrast_risk": "high" if "high" in risks else "medium" if "medium" in risks else "low",
                 "primary_photo_risk": primary_risk, "secondary_photo_risk": secondary_risk,
+                "photo_risks": [
+                    {"photo_id": str(photo["id"]), "risk": calculate_epaper_contrast_risk(photo)}
+                    for photo in photos if photo is not None
+                ],
                 "epaper_contrast_risk_rule_version": "epaper-contrast-risk-v1"}
 
     def resolve_render_plan(
@@ -158,10 +162,17 @@ class RenderService:
             "version": "render-plan-v1",
             "layout": layout_key,
             "primary_photo_id": str(primary["id"]),
+            "primary_sha256": str(primary["sha256"] or ""),
             "secondary_photo_id": str(secondary["id"]) if secondary is not None else None,
+            "secondary_sha256": str(secondary["sha256"] or "") if secondary is not None else None,
             "fit_mode": fit_key,
             "manual_crop": [crop_x if crop_x is not None else primary["crop_manual_x"], crop_y if crop_y is not None else primary["crop_manual_y"]],
             "subject_box": list(self._subject_box(primary) or ()),
+            "secondary_manual_crop": (
+                [secondary["crop_manual_x"], secondary["crop_manual_y"]]
+                if secondary is not None else None
+            ),
+            "secondary_subject_box": list(self._subject_box(secondary) or ()) if secondary is not None else [],
             "orientation": effective_orientation,
             "profile": profile or str(device.get("panel_profile") or self.settings.get("render.profile", DEFAULT_RENDER_PROFILE)),
             "requested_dither": dither,
@@ -169,6 +180,41 @@ class RenderService:
             **dither_plan,
             "renderer_version": RENDERER_VERSION,
         }
+
+    def _render_plan_image(
+        self,
+        plan: dict[str, Any],
+        *,
+        device_config: dict[str, Any] | None = None,
+        orientation_metadata: list[dict[str, Any]] | None = None,
+    ) -> Image.Image:
+        crop_x, crop_y = plan["manual_crop"]
+        return self.render_photo(
+            str(plan["primary_photo_id"]),
+            layout=str(plan["layout"]),
+            crop_x=crop_x,
+            crop_y=crop_y,
+            secondary_photo_id=plan["secondary_photo_id"],
+            orientation=str(plan["orientation"]),
+            fit_mode=str(plan["fit_mode"]),
+            device_config=device_config,
+            orientation_metadata=orientation_metadata,
+        )
+
+    def _render_plan_rows(self, plans: list[dict[str, Any]]) -> list[Any]:
+        ids = self._render_plan_photo_ids(plans)
+        return [row for row in (self.photos.get_with_path(photo_id) for photo_id in ids) if row is not None]
+
+    @staticmethod
+    def _render_plan_photo_ids(plans: list[dict[str, Any]]) -> list[str]:
+        return list(
+            dict.fromkeys(
+                str(photo_id)
+                for plan in plans
+                for photo_id in (plan["primary_photo_id"], plan["secondary_photo_id"])
+                if photo_id
+            )
+        )
 
     def preview_fingerprint(
         self,
@@ -757,7 +803,10 @@ class RenderService:
                         else:
                             slot_size = (frame_width, (frame_height - footer_height - gutter) // 2)
                             second_position = (0, slot_size[1] + gutter)
-                        canvas.paste(self._fit_photo(source, photo, slot_size, None, None, fit_mode_key), (0, 0))
+                        canvas.paste(
+                            self._fit_photo(source, photo, slot_size, crop_x, crop_y, fit_mode_key),
+                            (0, 0),
+                        )
                         second_path = safe_join(Path(second_row["root_path"]), second_row["relative_path"])
                         second_source, second_orientation = self._load_oriented_photo(second_row, second_path)
                         if orientation_metadata is not None:
@@ -769,7 +818,14 @@ class RenderService:
                             )
                         with second_source:
                             canvas.paste(
-                                self._fit_photo(second_source, second_row, slot_size, None, None, fit_mode_key),
+                                self._fit_photo(
+                                    second_source,
+                                    second_row,
+                                    slot_size,
+                                    second_row["crop_manual_x"],
+                                    second_row["crop_manual_y"],
+                                    fit_mode_key,
+                                ),
                                 second_position,
                             )
                         self._adaptive_footer(
@@ -844,8 +900,8 @@ class RenderService:
                             second_source,
                             second_photo,
                             first_size,
-                            None,
-                            None,
+                            second_photo["crop_manual_x"],
+                            second_photo["crop_manual_y"],
                             fit_mode_key,
                         )
                     canvas.paste(second, second_position)
@@ -1020,24 +1076,36 @@ class RenderService:
                 raise ValueError("DISPLAY-004 指定裝置不存在或已停用")
             manifests = []
             assignments: dict[str, str] = {}
+            release_photo_ids: list[str] = []
             for device_id in unique_device_ids:
                 device = by_id[device_id]
                 profile_key = str(device["panel_profile"])
                 if profile_key not in DISPLAY_PROFILES:
                     raise ValueError("RENDER-003 發布包含不支援的顯示 Profile")
                 device_orientation_metadata: list[dict[str, Any]] = []
-                images = [
-                    (
-                        photo_id,
-                        self.render_photo(
-                            photo_id, device_config=device, orientation_metadata=device_orientation_metadata
-                        ),
-                    )
+                plans = [
+                    self.resolve_render_plan(photo_id, device_config=device, profile=profile_key)
                     for photo_id in selected[:quantity]
                 ]
-                device_rows = [self.photos.get_with_path(photo_id) for photo_id in selected[:quantity]]
-                risks = [row for row in device_rows if row is not None]
-                dither_plan = self.resolve_effective_dither(risks, device_config=device)
+                release_photo_ids.extend(self._render_plan_photo_ids(plans))
+                images = [
+                    (
+                        "+".join(
+                            photo_id
+                            for photo_id in (plan["primary_photo_id"], plan["secondary_photo_id"])
+                            if photo_id
+                        ),
+                        self._render_plan_image(
+                            plan,
+                            device_config=device,
+                            orientation_metadata=device_orientation_metadata,
+                        ),
+                    )
+                    for plan in plans
+                ]
+                dither_plan = self.resolve_effective_dither(
+                    self._render_plan_rows(plans), device_config=device
+                )
                 manifest = self.publisher.publish(
                     images,
                     profile_key=profile_key,
@@ -1052,6 +1120,8 @@ class RenderService:
                     metadata={
                         "device_id": device_id,
                         "layout_mode": device.get("layout_mode") or layout_key,
+                        "aggregation_scope": "release",
+                        "render_plans": plans,
                         "photo_orientations": device_orientation_metadata,
                         **dither_plan,
                     },
@@ -1061,58 +1131,48 @@ class RenderService:
             published = self.release_coordinator.publish(
                 manifests,
                 created_by=created_by,
-                photo_ids=selected[:quantity],
+                photo_ids=list(dict.fromkeys(release_photo_ids)),
                 history=history,
                 device_assignments=assignments,
             )
-            self._record_production_trace(selected, published, layout_key)
+            self._record_production_trace(list(dict.fromkeys(release_photo_ids)), published, layout_key)
             return {"releases": published, "device_releases": assignments}
         release_orientation_metadata: list[dict[str, Any]] = []
         if layout_key == "photo_pair":
-            images = []
+            plans = []
             for index in range(0, len(selected), 2):
                 primary_id = selected[index]
                 secondary_id = selected[index + 1] if index + 1 < len(selected) else None
-                if secondary_id is None:
-                    images.append(
-                        (
-                            primary_id,
-                            self.render_photo(
-                                primary_id,
-                                layout="photo_info",
-                                orientation_metadata=release_orientation_metadata,
-                            ),
-                        )
+                plans.append(
+                    self.resolve_render_plan(
+                        primary_id,
+                        layout="photo_pair" if secondary_id else "photo_info",
+                        secondary_photo_id=secondary_id,
                     )
-                else:
-                    images.append(
-                        (
-                            f"{primary_id}+{secondary_id}",
-                            self.render_photo(
-                                primary_id,
-                                layout="photo_pair",
-                                secondary_photo_id=secondary_id,
-                                orientation_metadata=release_orientation_metadata,
-                            ),
-                        )
-                    )
+                )
         else:
-            images = [
-                (photo_id, self.render_photo(photo_id, orientation_metadata=release_orientation_metadata))
-                for photo_id in selected
-            ]
+            plans = [self.resolve_render_plan(photo_id) for photo_id in selected]
+        release_photo_ids = self._render_plan_photo_ids(plans)
+        images = [
+            (
+                "+".join(
+                    photo_id
+                    for photo_id in (plan["primary_photo_id"], plan["secondary_photo_id"])
+                    if photo_id
+                ),
+                self._render_plan_image(plan, orientation_metadata=release_orientation_metadata),
+            )
+            for plan in plans
+        ]
         selected_profiles = profile_keys or [str(self.settings.get("render.profile", DEFAULT_RENDER_PROFILE))]
         selected_profiles = list(dict.fromkeys(selected_profiles))
         if not selected_profiles or any(key not in DISPLAY_PROFILES for key in selected_profiles):
             raise ValueError("RENDER-003 發布包含不支援的顯示 Profile")
-        release_rows = [self.photos.get_with_path(photo_id) for photo_id in selected]
-        risk_rows = [row for row in release_rows if row is not None]
-        dither_plan = self.resolve_effective_dither(risk_rows)
+        dither_plan = self.resolve_effective_dither(self._render_plan_rows(plans))
         dither = str(dither_plan["effective_dither"])
         color_distance = str(self.settings.get("render.color_distance", "oklab"))
         dither_strength = float(self.settings.get("render.dither_strength", 1.0))
-        requested_orientation = str(self.settings.get("render.frame_orientation", "portrait"))
-        release_orientation = "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else requested_orientation
+        release_orientation = str(plans[0]["orientation"]) if plans else "portrait"
         manifests = []
         for profile_key in selected_profiles:
             manifest = self.publisher.publish(
@@ -1123,16 +1183,21 @@ class RenderService:
                 dither_strength=dither_strength,
                 orientation=release_orientation,
                 activate=False,
-                metadata={"photo_orientations": release_orientation_metadata, **dither_plan},
+                metadata={
+                    "aggregation_scope": "release",
+                    "render_plans": plans,
+                    "photo_orientations": release_orientation_metadata,
+                    **dither_plan,
+                },
             )
             manifests.append(manifest)
         published = self.release_coordinator.publish(
             manifests,
             created_by=created_by,
-            photo_ids=selected,
+            photo_ids=release_photo_ids,
             history=history,
         )
-        self._record_production_trace(selected, published, layout_key)
+        self._record_production_trace(release_photo_ids, published, layout_key)
         return published[0] if len(published) == 1 else {"releases": published}
 
     def _record_production_trace(

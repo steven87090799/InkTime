@@ -236,12 +236,16 @@ def queue_ai_mode_run():
         return {"error_code": "VLM-008", "message": "AI 模式目前為關閉"}, 409
     daily_limit = int(settings.get("analysis.ai_daily_photo_limit", 50))
     if mode == "full_library" and not bool(payload.get("confirm", False)):
-        total = _repository().count_active_eligible()
-        estimate = current_app.extensions["inktime_job_service"].estimate(total, str(settings.get("analysis.strategy", "smart_two_stage")))
+        total_eligible = _repository().count_active_eligible()
+        queued_now = min(total_eligible, daily_limit)
+        estimate = current_app.extensions["inktime_job_service"].estimate(
+            queued_now, str(settings.get("analysis.strategy", "smart_two_stage"))
+        )
         return {
             "error_code": "VLM-009",
             "message": "完整照片庫模式需要確認照片數量與估算成本",
-            "photos": total,
+            "photos": queued_now,
+            "eligible_total": total_eligible,
             "estimate": estimate,
             "confirmation_required": True,
         }, 409

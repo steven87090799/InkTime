@@ -126,6 +126,21 @@ def test_different_shards_can_run_in_parallel(tmp_path):
     assert len(entered) == 2
 
 
+def test_cleanup_reuses_an_explicit_empty_inventory(tmp_path, monkeypatch):
+    cache = ThumbnailCache(tmp_path / "cache")
+
+    def unexpected_inventory():
+        raise AssertionError("cleanup must not rescan an explicitly supplied inventory")
+
+    monkeypatch.setattr(cache, "inventory", unexpected_inventory)
+    assert cache.cleanup(
+        max_bytes=0,
+        retention_days=0,
+        active_hashes=set(),
+        inventory=[],
+    ) == {"files": 0, "bytes": 0}
+
+
 def test_legacy_lock_cleanup_is_dry_run_explicit_and_symlink_safe(tmp_path):
     root = tmp_path / "cache"
     root.mkdir()

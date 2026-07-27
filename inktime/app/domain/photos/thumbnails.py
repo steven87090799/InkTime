@@ -160,6 +160,19 @@ class ThumbnailCache:
                 removed += 1
         return removed
 
+    def inventory(self) -> list[tuple[Path, int, float, int, str]]:
+        """Read cache metadata once so callers can bound their DB lookup."""
+        entries: list[tuple[Path, int, float, int, str]] = []
+        for path in self.root.glob("*.jpg"):
+            if not path.is_file():
+                continue
+            stat = path.stat()
+            stem = path.stem.split("-", 1)[0].casefold()
+            size_text = path.stem.rsplit("-", 1)[-1]
+            size = int(size_text) if size_text.isdigit() else 0
+            entries.append((path, stat.st_size, stat.st_atime, size, stem))
+        return entries
+
     def estimate_cleanup(self, *, max_bytes: int, retention_days: int, active_hashes: set[str]) -> dict:
         candidates = self._cleanup_candidates(max_bytes, retention_days, active_hashes)
         return {"files": len(candidates), "bytes": sum(path.stat().st_size for path in candidates if path.exists())}
@@ -172,11 +185,14 @@ class ThumbnailCache:
         active_hashes: set[str],
         max_files_per_run: int = 500,
         max_bytes_per_run: int = 512 * 1024 * 1024,
+        inventory: list[tuple[Path, int, float, int, str]] | None = None,
     ) -> dict:
         with self._cleanup_lock() as acquired:
             if not acquired:
                 return {"files": 0, "bytes": 0, "skipped": "cleanup_locked"}
-            candidates = self._cleanup_candidates(max_bytes, retention_days, active_hashes)
+            candidates = self._cleanup_candidates(
+                max_bytes, retention_days, active_hashes, inventory=inventory
+            )
             removed = 0
             released = 0
             for path in candidates:
@@ -190,25 +206,28 @@ class ThumbnailCache:
                     continue
             return {"files": removed, "bytes": released}
 
-    def _cleanup_candidates(self, max_bytes: int, retention_days: int, active_hashes: set[str]) -> list[Path]:
+    def _cleanup_candidates(
+        self,
+        max_bytes: int,
+        retention_days: int,
+        active_hashes: set[str],
+        *,
+        inventory: list[tuple[Path, int, float, int, str]] | None = None,
+    ) -> list[Path]:
         max_bytes = max(0, int(max_bytes))
         retention_seconds = max(0, int(retention_days)) * 86400
         now = time.time()
         entries: list[tuple[Path, int, float, int, bool]] = []
-        for path in self.root.glob("*.jpg"):
-            if not path.is_file():
-                continue
-            stem = path.stem.split("-", 1)[0].casefold()
-            size_text = path.stem.rsplit("-", 1)[-1]
-            size = int(size_text) if size_text.isdigit() else 0
-            stat = path.stat()
+        for path, bytes_used, accessed, size, stem in (
+            inventory if inventory is not None else self.inventory()
+        ):
             orphan = (
                 not _SHA256.fullmatch(stem)
                 or stem not in active_hashes
                 or size not in self.ALLOWED_SIZES
                 or not self._validate(path, size)
             )
-            entries.append((path, stat.st_size, stat.st_atime, size, orphan))
+            entries.append((path, bytes_used, accessed, size, orphan))
         selected: list[Path] = []
         total = sum(bytes_used for _, bytes_used, _, _, _ in entries)
         # Always clear invalid/orphaned and expired files before evicting valid
