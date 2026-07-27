@@ -31,20 +31,19 @@ def _queue_ai(
     photo_ids: list[str], *, created_by: str, name: str, force_ai: bool = False
 ) -> dict:
     settings = current_app.extensions["inktime_settings_repository"]
-    if str(settings.get("analysis.ai_mode", "top_candidates")) == "off":
+    if not force_ai and str(settings.get("analysis.ai_mode", "top_candidates")) == "off":
         raise ValueError("AI 模式目前為關閉；不會建立模型工作")
     if not photo_ids:
         raise ValueError("沒有可送入 AI 的照片")
     daily_limit = int(settings.get("analysis.ai_daily_photo_limit", 50))
-    if _repository().ai_limit_reached(
+    if not force_ai and _repository().ai_limit_reached(
         daily_limit=daily_limit,
         monthly_limit=int(settings.get("analysis.ai_monthly_photo_limit", 500)),
     ):
         raise ValueError("已達 AI 每日或每月照片上限；目前會保留本機選片結果")
-    selected = list(dict.fromkeys(photo_ids))[:daily_limit]
-    if not force_ai:
-        eligible = set(_repository().eligible_photo_ids(include_all_active=False))
-        selected = [photo_id for photo_id in selected if photo_id in eligible]
+    selected = list(dict.fromkeys(photo_ids))[:500] if force_ai else _repository().active_eligible_requested_ids(
+        photo_ids, limit=daily_limit
+    )
     if not selected:
         raise ValueError("沒有符合資格且可送入 AI 的照片")
     strategy = str(settings.get("analysis.strategy", "smart_two_stage"))
@@ -199,8 +198,11 @@ def change_exclusions_batch():
 @bp.post("/api/v1/photos/<photo_id>/ai")
 @administrator_required
 def queue_photo_ai(photo_id: str):
-    if _repository().get_with_path(photo_id) is None:
+    photo = _repository().get_with_path(photo_id)
+    if photo is None:
         abort(404)
+    if str(photo["exclusion_status"] or "eligible") == "eligible":
+        abort(403, description="IMG-004 Force AI 僅限排除照片管理操作")
     try:
         return _queue_ai([photo_id], created_by=str(g.user["id"]), name="排除照片 AI 分析", force_ai=True), 201
     except ValueError as exc:
@@ -212,6 +214,12 @@ def queue_photo_ai(photo_id: str):
 def queue_exclusions_ai():
     payload = request.get_json(silent=True) or {}
     photo_ids = [str(value) for value in payload.get("photo_ids", [])][:500]
+    photo_ids = [
+        photo_id
+        for photo_id in photo_ids
+        if (photo := _repository().get_with_path(photo_id)) is not None
+        and str(photo["exclusion_status"] or "eligible") != "eligible"
+    ]
     try:
         return _queue_ai(photo_ids, created_by=str(g.user["id"]), name="排除照片批次 AI 分析", force_ai=True), 201
     except ValueError as exc:
@@ -228,7 +236,7 @@ def queue_ai_mode_run():
         return {"error_code": "VLM-008", "message": "AI 模式目前為關閉"}, 409
     daily_limit = int(settings.get("analysis.ai_daily_photo_limit", 50))
     if mode == "full_library" and not bool(payload.get("confirm", False)):
-        total = len(_repository().eligible_photo_ids(include_all_active=True))
+        total = _repository().count_active_eligible()
         estimate = current_app.extensions["inktime_job_service"].estimate(total, str(settings.get("analysis.strategy", "smart_two_stage")))
         return {
             "error_code": "VLM-009",
@@ -243,7 +251,7 @@ def queue_ai_mode_run():
         if group_by not in {"year", "folder"}:
             abort(400, description="IMG-004 完整照片庫分批方式不合法")
         batches = _repository().eligible_photo_batches(
-            group_by=group_by, limit=daily_limit, include_all_active=True
+            group_by=group_by, limit=daily_limit, include_all_active=False
         )
         try:
             jobs = [
@@ -253,7 +261,7 @@ def queue_ai_mode_run():
             return {"jobs": jobs, "queued": sum(job["queued"] for job in jobs), "batch_by": group_by}, 201
         except ValueError as exc:
             return {"error_code": "VLM-008", "message": str(exc)}, 409
-    selected = _repository().eligible_photo_ids(limit=limit, include_all_active=mode == "full_library")
+    selected = _repository().eligible_photo_ids(limit=limit, include_all_active=False)
     try:
         return _queue_ai(selected, created_by=str(g.user["id"]), name="AI 模式批次分析"), 201
     except ValueError as exc:

@@ -42,9 +42,12 @@ class WorkerRunner:
             if self.stop.is_set() or job["status"] not in {"running", "retrying"}:
                 continue
             settings = json.loads(job["settings_json"])
-            scoring_profile = self.app.extensions["inktime_scoring_repository"].current()
+            analysis_plan = json.loads(str(job["analysis_spec_json"] or "{}")) if str(job["kind"]) == "analysis" else {}
             provider = (
-                self.app.extensions["inktime_provider_service"].build_router()
+                self.app.extensions["inktime_provider_service"].build_router(
+                    list(analysis_plan.get("provider_route") or []),
+                    scoring_rules=str(analysis_plan.get("scoring_rules") or ""),
+                )
                 if str(job["kind"]) == "analysis"
                 else None
             )
@@ -68,6 +71,17 @@ class WorkerRunner:
                 "thumbnail_capacity_check_interval": int(runtime_settings.get("scanner.thumbnail_capacity_check_interval", 500)),
                 "thumbnail_max_bytes": int(runtime_settings.get("thumbnail_cache.max_bytes", 5 * 1024 * 1024 * 1024)),
                 "thumbnail_retention_days": int(runtime_settings.get("thumbnail_cache.retention_days", 30)),
+                "quality_policy_settings": {
+                    key: runtime_settings.get(key, default)
+                    for key, default in (
+                        ("analysis.prefilter_enabled", True),
+                        ("analysis.prefilter_screenshots", True),
+                        ("analysis.prefilter_low_quality", True),
+                        ("analysis.prefilter_sensitivity", "conservative"),
+                        ("analysis.e6_prefilter_enabled", True),
+                        ("analysis.e6_min_score", 25),
+                    )
+                },
             }
 
             def log_progress(_processed_since_start: int, *, job_id=str(job["id"])) -> None:
@@ -138,7 +152,7 @@ class WorkerRunner:
                 settings=settings,
                 provider=provider,
                 analysis=analysis,
-                scoring_profile=scoring_profile,
+                analysis_plan=analysis_plan,
                 progress_items=progress_items,
                 progress_seconds=progress_seconds,
                 scanner_disk_batch_size=scanner_disk_batch_size,
@@ -333,7 +347,7 @@ class WorkerRunner:
                     job_id=job["id"],
                     provider=provider,
                     strategy=job["strategy"],
-                    analysis_plan=json.loads(str(job["analysis_spec_json"] or "{}")),
+                    analysis_plan=analysis_plan,
                     force_ai=bool(settings.get("force_ai", False)),
                     force_actor=str(job["created_by"] or "system"),
                     force_recompute=bool(job["force_recompute"]),

@@ -80,6 +80,28 @@ def test_single_model_call_returns_all_fields_and_usage(app, tmp_path):
     assert tuple(usage) == (1000, 100)
 
 
+def test_provider_and_local_results_persist_a_complete_analysis_context(app, tmp_path):
+    _, ids, service = prepare(app, tmp_path)
+    service.analyze_photo(
+        photo_id=ids[0], job_id=None, provider=MockProvider([valid_result()]), strategy="high_quality"
+    )
+    (tmp_path / "local").mkdir()
+    _, local_ids, local_service = prepare(app, tmp_path / "local")
+    local_service.analyze_photo(
+        photo_id=local_ids[0], job_id=None, provider=None, strategy="local"
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        rows = connection.execute(
+            "SELECT analysis_fingerprint,analysis_spec_json,prompt_version,schema_kind,"
+            "scoring_version_id,vision_request_fingerprint,vision_input_spec_json "
+            "FROM photo_analysis ORDER BY created_at,id"
+        ).fetchall()
+    assert len(rows) == 2
+    assert all(row["analysis_fingerprint"] and row["analysis_spec_json"] for row in rows)
+    assert all(row["prompt_version"] and row["schema_kind"] for row in rows)
+    assert all(row["vision_request_fingerprint"] and row["vision_input_spec_json"] for row in rows)
+
+
 def test_favorite_change_recalculates_latest_ranking_with_original_version(app, tmp_path):
     user_id = create_admin(app)
     _, ids, service = prepare(app, tmp_path)

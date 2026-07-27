@@ -116,9 +116,12 @@ def evaluate_local_quality(row: Mapping[str, Any], *, settings: Mapping[str, Any
     sensitivity = str(config.get("analysis.prefilter_sensitivity", "conservative"))
     protected = bool(_value(row, "favorite", False) or _value(row, "manual_override", False)) or str(_value(row, "exclusion_status", "")) in {"manually_restored", "manually_excluded"}
     e6_score = _value(row, "e6_score")
+    screenshot_threshold = {"conservative": .90, "balanced": .75, "aggressive": .60}.get(sensitivity, .90)
     checks = {
         "screenshot_strong": strong_screen,
-        "screenshot_mixed_signal": family_count >= 3 and score >= .75,
+        "screenshot_mixed_signal": (
+            not camera and family_count >= 3 and screenshot_score >= screenshot_threshold
+        ),
         "document_token_with_evidence": bool(document_token and (scanner_evidence or not camera)),
         "severe_blur": blur_raw is not None and contrast_raw is not None and blur < 5 and contrast < 8,
         "suspected_blur": blur_raw is not None and contrast_raw is not None and blur < 12 and contrast < 14,
@@ -144,16 +147,16 @@ def evaluate_local_quality(row: Mapping[str, Any], *, settings: Mapping[str, Any
         excluded_reasons.append("tiny_nearly_blank")
     if low_quality_enabled and checks["extreme_exposure_low_contrast"]:
         excluded_reasons.append("extreme_exposure_low_contrast")
-    low_reasons = [key for key in ("suspected_blur", "small_compressed", "exposure_low_priority", "social_export") if low_quality_enabled and checks[key]]
     if e6_enabled and checks["e6_low"]:
-        low_reasons.append("e6_low")
+        excluded_reasons.append("e6_below_threshold")
+    low_reasons = [key for key in ("suspected_blur", "small_compressed", "exposure_low_priority", "social_export") if low_quality_enabled and checks[key]]
     decision = "disabled" if not enabled else "protected" if protected else "auto_excluded" if excluded_reasons else "low_priority" if low_reasons else "pass"
     primary = (excluded_reasons or low_reasons or ["passed"])[0]
     return {
         "decision": decision,
         "primary_reason": primary,
         "matched_checks": matched,
-        "thresholds": {"screenshot_score": .75, "screenshot_signals": 3, "short_edge": 240, "severe_blur": [5, 8], "suspected_blur": [12, 14], "exposure_low_priority": .60, "e6_min_score": e6_threshold},
+        "thresholds": {"screenshot_score": screenshot_threshold, "screenshot_signals": 3, "short_edge": 240, "severe_blur": [5, 8], "suspected_blur": [12, 14], "exposure_low_priority": .60, "e6_min_score": e6_threshold},
         "sensitivity": sensitivity,
         "feature_version": FEATURE_VERSION,
         "e6_feature_version": "e6-prefilter-v1", "e6_threshold": e6_threshold,

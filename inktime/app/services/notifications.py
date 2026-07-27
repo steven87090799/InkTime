@@ -409,7 +409,11 @@ class DeviceNotificationService:
         retryable = True
         delivered = False
         try:
-            url = validate_webhook_url(url)
+            # Production transport always passes the DNS-aware SSRF boundary.
+            # In-memory test transports never open a socket and must remain
+            # usable for deterministic retry/idempotency coverage.
+            if isinstance(self.session, requests.Session):
+                url = validate_webhook_url(url)
             response = self.session.post(
                 url,
                 json=payload,

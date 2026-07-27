@@ -109,6 +109,67 @@ class RenderService:
                 "primary_photo_risk": primary_risk, "secondary_photo_risk": secondary_risk,
                 "epaper_contrast_risk_rule_version": "epaper-contrast-risk-v1"}
 
+    def resolve_render_plan(
+        self,
+        photo_id: str,
+        *,
+        layout: str | None = None,
+        crop_x: float | None = None,
+        crop_y: float | None = None,
+        secondary_photo_id: str | None = None,
+        orientation: str | None = None,
+        fit_mode: str | None = None,
+        profile: str | None = None,
+        dither: str | None = None,
+        device_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Resolve every data-dependent render choice before fingerprinting."""
+        primary = self.photos.get_with_path(photo_id)
+        if primary is None:
+            raise KeyError(photo_id)
+        device = device_config or {}
+        layout_key = layout or str(device.get("layout_mode") or self.settings.get("render.layout", "photo_info"))
+        orientation_key = orientation or str(device.get("frame_orientation") or self.settings.get("render.frame_orientation", "portrait"))
+        effective_orientation = "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
+        fit_key = fit_mode or str(device.get("fit_mode") or self.settings.get("render.fit_mode", "contain"))
+        if layout_key not in LAYOUTS or effective_orientation not in FRAME_ORIENTATIONS or fit_key not in FIT_MODES:
+            raise ValueError("RENDER-005 無法建立有效的 Render Plan")
+        secondary_id = secondary_photo_id
+        if layout_key == "adaptive_memory" and secondary_id is None:
+            source_path = safe_join(Path(primary["root_path"]), str(primary["relative_path"]))
+            source, _info = self._load_oriented_photo(primary, source_path)
+            with source:
+                source_orientation = photo_orientation(source.size)
+            if source_orientation in {"square", effective_orientation}:
+                layout_key = "photo_info"
+            else:
+                candidate = select_pair_candidate(
+                    dict(primary), self._adaptive_pair_candidates(dict(primary)), frame_orientation=effective_orientation
+                )
+                if candidate is None:
+                    layout_key = "photo_info"
+                else:
+                    secondary_id = str(candidate["id"])
+        secondary = self.photos.get_with_path(secondary_id) if secondary_id else None
+        if secondary_id and secondary is None:
+            raise KeyError(secondary_id)
+        dither_plan = self.resolve_effective_dither(primary, secondary, requested=dither, device_config=device)
+        return {
+            "version": "render-plan-v1",
+            "layout": layout_key,
+            "primary_photo_id": str(primary["id"]),
+            "secondary_photo_id": str(secondary["id"]) if secondary is not None else None,
+            "fit_mode": fit_key,
+            "manual_crop": [crop_x if crop_x is not None else primary["crop_manual_x"], crop_y if crop_y is not None else primary["crop_manual_y"]],
+            "subject_box": list(self._subject_box(primary) or ()),
+            "orientation": effective_orientation,
+            "profile": profile or str(device.get("panel_profile") or self.settings.get("render.profile", DEFAULT_RENDER_PROFILE)),
+            "requested_dither": dither,
+            "device_override": str(device.get("dither") or "") or None,
+            **dither_plan,
+            "renderer_version": RENDERER_VERSION,
+        }
+
     def preview_fingerprint(
         self,
         photo_id: str,
@@ -122,14 +183,17 @@ class RenderService:
         profile: str | None = None,
         dither: str | None = None,
     ) -> dict[str, Any]:
+        plan = self.resolve_render_plan(
+            photo_id, layout=layout, crop_x=crop_x, crop_y=crop_y,
+            secondary_photo_id=secondary_photo_id, orientation=orientation,
+            fit_mode=fit_mode, profile=profile, dither=dither,
+        )
         photo = self.photos.get_with_path(photo_id)
-        if photo is None:
-            raise KeyError(photo_id)
-        secondary = self.photos.get_with_path(secondary_photo_id) if secondary_photo_id else None
-        layout_key = layout or str(self.settings.get("render.layout", "photo_info"))
-        frame_orientation = orientation or str(self.settings.get("render.frame_orientation", "portrait"))
-        effective_frame = "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else frame_orientation
-        profile_key = profile or str(self.settings.get("render.profile", DEFAULT_RENDER_PROFILE))
+        assert photo is not None
+        secondary = self.photos.get_with_path(plan["secondary_photo_id"]) if plan["secondary_photo_id"] else None
+        layout_key = str(plan["layout"])
+        effective_frame = str(plan["orientation"])
+        profile_key = str(plan["profile"])
         font_reference = str(self.settings.get("render.font_path", ""))
         font_path = self.fonts.resolve(font_reference)
         font_stat = font_path.stat()
@@ -189,6 +253,7 @@ class RenderService:
             }
         location_text = self.location_name(photo)
         return {
+            "render_plan": plan,
             "primary_photo": photo_version(photo, x=crop_x, y=crop_y),
             "secondary_photo": photo_version(secondary),
             "analysis": {
@@ -667,10 +732,14 @@ class RenderService:
                 else:
                     primary = dict(photo)
                     primary.update({"id": photo_id, "city": "", "types": []})
-                    second_row = select_pair_candidate(
-                        primary,
-                        self._adaptive_pair_candidates(primary),
-                        frame_orientation=effective_orientation,
+                    second_row = (
+                        dict(self.photos.get_with_path(secondary_photo_id))
+                        if secondary_photo_id and self.photos.get_with_path(secondary_photo_id) is not None
+                        else select_pair_candidate(
+                            primary,
+                            self._adaptive_pair_candidates(primary),
+                            frame_orientation=effective_orientation,
+                        )
                     )
                     if second_row is None:
                         layout_key = "photo_info"

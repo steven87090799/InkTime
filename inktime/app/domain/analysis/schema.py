@@ -155,11 +155,9 @@ FULL_ANALYSIS_JSON_SCHEMA = {
 def json_schema_for_stage(stage: str, *, caption_controls: dict[str, Any] | None = None) -> dict:
     """完整分析只在高細節單次請求使用；其餘採用成本較低的基本 Schema。"""
     full_stage = stage in {"single_high", "stage_two", "full"}
-    schema = deepcopy(FULL_ANALYSIS_JSON_SCHEMA if full_stage else ANALYSIS_JSON_SCHEMA)
     if not caption_controls:
-        caption_controls = {"caption_min_chars": 0, "caption_max_chars": 1000,
-                            "side_caption_min_chars": 8, "side_caption_max_chars": 16,
-                            "caption_variants_enabled": False}
+        return FULL_ANALYSIS_JSON_SCHEMA if full_stage else ANALYSIS_JSON_SCHEMA
+    schema = deepcopy(FULL_ANALYSIS_JSON_SCHEMA if full_stage else ANALYSIS_JSON_SCHEMA)
     properties = cast(dict[str, Any], cast(dict[str, Any], schema["schema"])["properties"])
     properties["caption"].update(
         minLength=int(caption_controls["caption_min_chars"]),

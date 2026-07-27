@@ -12,6 +12,7 @@ from PIL import ExifTags, Image, ImageOps, ImageStat
 from inktime.app.domain.rendering.composition import (
     analyze_crop_focus,
 )
+from inktime.app.domain.rendering.composition import evaluate_e6_suitability
 from inktime.app.domain.photos.dates import materialized_capture_fields, parse_photo_datetime
 
 try:
@@ -299,12 +300,15 @@ class PhotoPreprocessor:
                 underexposed_ratio = sum(histogram[:11]) / total_pixels
                 screenshot_likelihood = min(
                     1.0,
-                    (0.85 if filename_match else 0)
-                    + (0.75 if software_match else 0)
-                    + (0.65 if exact_screen_size else 0)
-                    + (0.3 if screen_ratio and not exact_screen_size else 0)
-                    + (0.25 if not exif_named.get("Make") else 0)
-                    + (0.15 if original_format.upper() == "PNG" else 0),
+                    # Screen dimensions, missing EXIF and PNG are useful
+                    # corroborating evidence, not proof by themselves.  This
+                    # keeps ordinary 1080x1920 PNG exports out of auto-exclude.
+                    (0.95 if filename_match else 0)
+                    + (0.90 if software_match else 0)
+                    + (0.08 if exact_screen_size else 0)
+                    + (0.04 if screen_ratio and not exact_screen_size else 0)
+                    + (0.08 if not exif_named.get("Make") else 0)
+                    + (0.04 if original_format.upper() == "PNG" else 0),
                 )
                 crop_focus_x = crop.focus_x
                 crop_focus_y = crop.focus_y
@@ -314,6 +318,13 @@ class PhotoPreprocessor:
                 crop_subject_bottom = crop.subject_bottom
                 crop_method = crop.method
                 crop_face_count = crop.face_count
+                e6_metrics = None
+                if include_local_features:
+                    # Reuse the already decoded/oriented image and bound the
+                    # E6 calculation to the same 512px working sample.
+                    e6_sample = image.copy()
+                    e6_sample.thumbnail((512, 512), Image.Resampling.LANCZOS)
+                    e6_metrics = evaluate_e6_suitability(e6_sample.convert("RGB"))
             return LocalPhotoFeatures(
                 sha256=digest.hexdigest(),
                 perceptual_hash=perceptual_hash,
@@ -343,12 +354,12 @@ class PhotoPreprocessor:
                 crop_subject_bottom=crop_subject_bottom,
                 crop_method=crop_method,
                 crop_face_count=crop_face_count,
-                e6_score=None,
-                e6_contrast_score=None,
-                e6_subject_score=None,
-                e6_skin_score=None,
-                e6_text_score=None,
-                e6_skin_pixels=0 if include_local_features else None,
+                e6_score=e6_metrics.score if e6_metrics is not None else None,
+                e6_contrast_score=e6_metrics.contrast_score if e6_metrics is not None else None,
+                e6_subject_score=e6_metrics.subject_score if e6_metrics is not None else None,
+                e6_skin_score=e6_metrics.skin_score if e6_metrics is not None else None,
+                e6_text_score=e6_metrics.text_score if e6_metrics is not None else None,
+                e6_skin_pixels=e6_metrics.skin_pixels if e6_metrics is not None else None,
                 capture_date_status=capture_date_status,
                 metadata_complete=include_metadata,
                 local_features_complete=include_local_features,

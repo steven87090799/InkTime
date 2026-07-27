@@ -64,6 +64,37 @@ class FailoverVisionProvider(VisionProvider):
             channel.request_times.append(now)
             return True
 
+    def candidate_channels(self, *, excluded: set[str] | None = None) -> list[ProviderChannel]:
+        """Return concrete identities without reserving RPM or a network permit."""
+        excluded = excluded or set()
+        now = time.monotonic()
+        result: list[ProviderChannel] = []
+        with self._lock:
+            for channel in self.channels:
+                while channel.request_times and channel.request_times[0] <= now - 60:
+                    channel.request_times.popleft()
+                while channel.token_events and channel.token_events[0][0] <= now - 60:
+                    channel.token_events.popleft()
+                provider_identity = str(getattr(channel.provider, "provider_id", channel.provider.name))
+                if provider_identity in excluded or channel.circuit_until > now:
+                    continue
+                if channel.requests_per_minute and len(channel.request_times) >= channel.requests_per_minute:
+                    continue
+                if channel.tokens_per_minute and sum(event[1] for event in channel.token_events) >= channel.tokens_per_minute:
+                    continue
+                result.append(channel)
+        return result
+
+    def acquire_channel(self, channel: ProviderChannel) -> bool:
+        """Reserve RPM and network concurrency only for the cache owner."""
+        if not channel.semaphore.acquire(blocking=False):
+            return False
+        if self._available(channel):
+            self._local.channel = channel
+            return True
+        channel.semaphore.release()
+        return False
+
     def select_channel(self, *, excluded: set[str] | None = None) -> ProviderChannel:
         """Reserve the concrete provider that will own one cache key.
 
@@ -74,7 +105,7 @@ class FailoverVisionProvider(VisionProvider):
         """
         excluded = excluded or set()
         for channel in self.channels:
-            if channel.provider.name in excluded:
+            if str(getattr(channel.provider, "provider_id", channel.provider.name)) in excluded:
                 continue
             if self._available(channel) and channel.semaphore.acquire(blocking=False):
                 self._local.channel = channel

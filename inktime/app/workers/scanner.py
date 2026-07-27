@@ -178,6 +178,7 @@ class PhotoScanner:
         thumbnail_capacity_check_interval: int = 500,
         thumbnail_max_bytes: int = 5 * 1024 * 1024 * 1024,
         thumbnail_retention_days: int = 30,
+        quality_policy_settings: dict | None = None,
     ) -> dict:
         if mode not in SCAN_MODES:
             raise ValueError("SCAN-003 不支援的掃描模式")
@@ -377,7 +378,8 @@ class PhotoScanner:
             for prepared_chunk in _slices(prepared, write_batch_size):
                 try:
                     batch_results = self.repository.apply_scan_batch(
-                        library_id, scan_id, root, prepared_chunk
+                        library_id, scan_id, root, prepared_chunk,
+                        quality_policy_settings=quality_policy_settings,
                     )
                 except Exception as exc:
                     major_io_errors += 1

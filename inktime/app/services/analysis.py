@@ -8,8 +8,6 @@ import time
 from uuid import uuid4
 from typing import Any, Callable
 
-from PIL import Image, ImageOps
-
 from inktime.app.core.paths import safe_join
 from inktime.app.domain.analysis import (
     AnalysisValidationError,
@@ -27,7 +25,6 @@ from inktime.app.domain.analysis.scoring import (
 )
 from inktime.app.domain.photos import ThumbnailCache
 from inktime.app.domain.photos.quality_policy import FEATURE_VERSION, evaluate_local_quality
-from inktime.app.domain.rendering import evaluate_e6_suitability
 from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.settings import SettingsRepository
@@ -106,6 +103,32 @@ class PhotoAnalysisService:
         settings = self.settings
         controls = self._caption_controls()
         prompt_version = self._prompt_version(controls)
+        prefilter = {
+            "enabled": bool(settings.get("analysis.prefilter_enabled", True)),
+            "screenshots_enabled": bool(settings.get("analysis.prefilter_screenshots", True)),
+            "low_quality_enabled": bool(settings.get("analysis.prefilter_low_quality", True)),
+            "sensitivity": str(settings.get("analysis.prefilter_sensitivity", "conservative")),
+            "e6_enabled": bool(settings.get("analysis.e6_prefilter_enabled", True)),
+            "e6_min_score": float(settings.get("analysis.e6_min_score", 25)),
+        }
+        execution_policy = {
+            "ai_mode": str(settings.get("analysis.ai_mode", "top_candidates")),
+            "top_n": int(settings.get("analysis.ai_top_n", 50)),
+            "daily_photo_limit": int(settings.get("analysis.ai_daily_photo_limit", 50)),
+            "monthly_photo_limit": int(settings.get("analysis.ai_monthly_photo_limit", 500)),
+        }
+        travel_policy = {
+            "enabled": bool(settings.get("travel_bonus_enabled", True)),
+            "home_latitude": settings.get("home_latitude"),
+            "home_longitude": settings.get("home_longitude"),
+            "home_radius_km": float(settings.get("home_radius_km", 60)),
+            "near_bonus": float(settings.get("travel_bonus_near", 2)),
+            "far_bonus": float(settings.get("travel_bonus_far", 4)),
+            "foreign_bonus": float(settings.get("foreign_country_bonus", 6)),
+            "rare_bonus": float(settings.get("rare_location_bonus", 2)),
+            "maximum_bonus": float(settings.get("max_total_bonus", 8)),
+            "location_rule_version": str(settings.get("location_rule_version", "travel-v1")),
+        }
         return build_analysis_plan(
             strategy=strategy,
             provider_route=provider_route,
@@ -117,6 +140,10 @@ class PhotoAnalysisService:
             caption_controls=controls,
             prompt_version=prompt_version,
             high_image_max_side=int(settings.get("analysis.high_image_max_side", 1024)),
+            prefilter=prefilter,
+            execution_policy=execution_policy,
+            travel_policy=travel_policy,
+            scoring_rules=str(settings.get("analysis.scoring_rules", "")),
         )
 
     @staticmethod
@@ -168,8 +195,8 @@ class PhotoAnalysisService:
             2,
         )
 
-    def prefilter_snapshot(self, photo) -> dict:
-        policy_settings = {
+    def prefilter_snapshot(self, photo, *, policy_settings: dict | None = None) -> dict:
+        policy_settings = policy_settings or {
             key: self.settings.get(key, default) if self.settings is not None else default
             for key, default in (
                 ("analysis.prefilter_enabled", True), ("analysis.prefilter_screenshots", True),
@@ -195,18 +222,18 @@ class PhotoAnalysisService:
             "evidence": policy["evidence"], "checks": checks,
             "summary": f"本機品質規則：{policy['decision']}（{policy['primary_reason']}）",
         }
-    def _prefilter_result(self, photo) -> dict | None:
-        evaluation = self.prefilter_snapshot(photo)
+    def _prefilter_result(self, photo, *, policy_settings: dict | None = None) -> dict | None:
+        evaluation = self.prefilter_snapshot(photo, policy_settings=policy_settings)
         if not evaluation["excluded"]:
             return None
 
         quality = self._local_quality(photo)
-        if evaluation["decision"] == "excluded_screenshot":
+        if evaluation["primary_reason"] == "screenshot":
             label = "截圖"
             reasons = ["本機截圖特徵達排除門檻"]
             memory_score = 5.0
             types = ["截圖"]
-        elif evaluation["decision"] == "excluded_e6":
+        elif evaluation["primary_reason"] == "e6_below_threshold":
             label = "不適合 E6 六色顯示的照片"
             reasons = ["六色量化後對比、主體、膚色或細節保留不足"]
             memory_score = 20.0
@@ -232,37 +259,37 @@ class PhotoAnalysisService:
         }
 
     def _ensure_e6_suitability(self, photo_id: str, photo, source: Path):
-        if photo["e6_score"] is not None:
-            return photo
-        with Image.open(source) as opened:
-            opened.draft("RGB", (256, 256))
-            opened.thumbnail((256, 256), Image.Resampling.LANCZOS)
-            metrics = evaluate_e6_suitability(ImageOps.exif_transpose(opened).convert("RGB"))
-        self.photos.update_e6_suitability(photo_id, metrics)
-        return self.photos.get_with_path(photo_id)
+        # E6 is a bounded Scanner feature.  Analysis must not reopen the
+        # original image merely to backfill an old row.
+        return photo
 
-    def _ai_mode(self) -> str:
+    def _ai_mode(self, execution_policy: dict | None = None) -> str:
+        if execution_policy:
+            return str(execution_policy.get("ai_mode", "top_candidates"))
         return str(self.settings.get("analysis.ai_mode", "top_candidates")) if self.settings else "legacy"
 
-    def _allow_ai_for_photo(self, photo_id: str, *, force_ai: bool) -> bool:
-        mode = self._ai_mode()
-        if mode == "off":
-            return False
+    def _allow_ai_for_photo(
+        self, photo_id: str, *, force_ai: bool, execution_policy: dict | None = None
+    ) -> bool:
         if force_ai:
             return True
+        mode = self._ai_mode(execution_policy)
+        if mode == "off":
+            return False
         if mode == "on_demand":
             return False
         if mode == "top_candidates":
-            limit = int(self.settings.get("analysis.ai_top_n", 50)) if self.settings else 50
+            limit = int((execution_policy or {}).get("top_n", 50))
             return self.photos.is_top_candidate(photo_id, limit)
         return mode in {"eligible", "full_library", "legacy"}
 
-    def _photo_limits_reached(self) -> bool:
+    def _photo_limits_reached(self, execution_policy: dict | None = None) -> bool:
         if self.settings is None:
             return False
+        policy = execution_policy or {}
         return self.photos.ai_limit_reached(
-            daily_limit=int(self.settings.get("analysis.ai_daily_photo_limit", 50)),
-            monthly_limit=int(self.settings.get("analysis.ai_monthly_photo_limit", 500)),
+            daily_limit=int(policy.get("daily_photo_limit", self.settings.get("analysis.ai_daily_photo_limit", 50))),
+            monthly_limit=int(policy.get("monthly_photo_limit", self.settings.get("analysis.ai_monthly_photo_limit", 500))),
         )
 
     def _score_result(
@@ -272,6 +299,7 @@ class PhotoAnalysisService:
         *,
         ranking_weights: dict[str, float],
         favorite_bonus: float,
+        travel_policy: dict | None = None,
     ) -> dict:
         details = result.get("details") or {}
         for target, grade_key in (
@@ -289,25 +317,49 @@ class PhotoAnalysisService:
         )
         travel_bonus = 0.0
         location_rule_version = None
-        if self.settings is not None and bool(self.settings.get("travel_bonus_enabled", True)):
+        policy = travel_policy or {}
+        travel_enabled = bool(policy.get("enabled")) if policy else (
+            self.settings is not None and bool(self.settings.get("travel_bonus_enabled", True))
+        )
+        if travel_enabled:
             country = str(details.get("country_candidate") or "").strip().casefold()
             foreign = bool(country) and country not in {"tw", "taiwan", "台灣", "臺灣", "中華民國"}
             visits = self.photos.location_visit_count(photo["gps_lat"], photo["gps_lon"])
+            if policy:
+                home_latitude = policy.get("home_latitude")
+                home_longitude = policy.get("home_longitude")
+                home_radius_km = float(policy.get("home_radius_km", 60))
+                near_bonus = float(policy.get("near_bonus", 2))
+                far_bonus = float(policy.get("far_bonus", 4))
+                foreign_bonus = float(policy.get("foreign_bonus", 6))
+                rare_bonus = float(policy.get("rare_bonus", 2))
+                maximum_bonus = float(policy.get("maximum_bonus", 8))
+                location_rule_version = str(policy.get("location_rule_version", "travel-v1"))
+            else:
+                assert self.settings is not None
+                home_latitude = self.settings.get("home_latitude")
+                home_longitude = self.settings.get("home_longitude")
+                home_radius_km = float(self.settings.get("home_radius_km", 60))
+                near_bonus = float(self.settings.get("travel_bonus_near", 2))
+                far_bonus = float(self.settings.get("travel_bonus_far", 4))
+                foreign_bonus = float(self.settings.get("foreign_country_bonus", 6))
+                rare_bonus = float(self.settings.get("rare_location_bonus", 2))
+                maximum_bonus = float(self.settings.get("max_total_bonus", 8))
+                location_rule_version = str(self.settings.get("location_rule_version", "travel-v1"))
             travel_bonus, _distance = calculate_travel_bonus(
                 latitude=photo["gps_lat"],
                 longitude=photo["gps_lon"],
-                home_latitude=self.settings.get("home_latitude"),
-                home_longitude=self.settings.get("home_longitude"),
-                home_radius_km=float(self.settings.get("home_radius_km", 60)),
-                near_bonus=float(self.settings.get("travel_bonus_near", 2)),
-                far_bonus=float(self.settings.get("travel_bonus_far", 4)),
-                foreign_bonus=float(self.settings.get("foreign_country_bonus", 6)),
-                rare_bonus=float(self.settings.get("rare_location_bonus", 2)),
+                home_latitude=home_latitude,
+                home_longitude=home_longitude,
+                home_radius_km=home_radius_km,
+                near_bonus=near_bonus,
+                far_bonus=far_bonus,
+                foreign_bonus=foreign_bonus,
+                rare_bonus=rare_bonus,
                 foreign_country=foreign,
                 rare_location=0 < visits <= 3,
-                maximum=float(self.settings.get("max_total_bonus", 8)),
+                maximum=maximum_bonus,
             )
-            location_rule_version = str(self.settings.get("location_rule_version", "travel-v1"))
         result["local_score"] = float(photo["local_candidate_score"] or 0.0)
         result["semantic_score"] = base
         result["base_ranking_score"] = base
@@ -337,9 +389,12 @@ class PhotoAnalysisService:
         analysis_spec_json: str | None = None,
         vision_request_fingerprint: str | None = None,
         vision_input_spec_json: str | None = None,
+        prefilter_evaluation: dict | None = None,
+        travel_policy: dict | None = None,
     ) -> dict:
         ranked = self._score_result(
-            result, photo, ranking_weights=ranking_weights, favorite_bonus=favorite_bonus
+            result, photo, ranking_weights=ranking_weights, favorite_bonus=favorite_bonus,
+            travel_policy=travel_policy,
         )
         self.photos.save_analysis(
             photo_id,
@@ -363,6 +418,7 @@ class PhotoAnalysisService:
             analysis_spec_json=analysis_spec_json,
             vision_request_fingerprint=vision_request_fingerprint,
             vision_input_spec_json=vision_input_spec_json,
+            prefilter_evaluation=prefilter_evaluation,
         )
         self._activity("DEBUG", "caption_analysis_completed", "Caption 分析完成", job_id=job_id, photo_id=photo_id, stage=stage, trace_id=prompt_version)
         return ranked
@@ -417,15 +473,19 @@ class PhotoAnalysisService:
         _excluded_providers: set[str] | None = None,
     ) -> tuple[dict, str, float, bool, str, str, str, str, Usage, int]:
         selected_channel = None
+        network_permit = False
         selected_provider = provider
-        selector = getattr(provider, "select_channel", None)
+        selector = getattr(provider, "candidate_channels", None)
         if callable(selector):
-            selected_channel = selector(excluded=_excluded_providers)
+            candidates = selector(excluded=_excluded_providers)
+            if not candidates:
+                raise ValueError("VLM-005 所有 Provider 暫時不可用或已達 Rate Limit")
+            selected_channel = candidates[0]
             selected_provider = selected_channel.provider
-        actual_provider = selected_provider.name
+        actual_provider = str(getattr(selected_provider, "provider_id", selected_provider.name))
 
         def release_selected(*, usage: Usage | None = None, error: Exception | None = None) -> None:
-            if selected_channel is not None:
+            if selected_channel is not None and network_permit:
                 router: Any = provider
                 router.release_channel(selected_channel, usage=usage, error=error)
         request_fingerprint = fingerprint({
@@ -473,7 +533,7 @@ class PhotoAnalysisService:
                     self._activity("DEBUG", "caption_cache_hit", "等待中的 Caption AI Cache 已完成", job_id=job_id, photo_id=photo_id, stage=stage, trace_id=prompt_version)
                     release_selected()
                     return validate_analysis_result(cached["result"]), str(cached["raw_json"]), 0.0, True, actual_provider, model, request_fingerprint, vision_json, Usage(), 0
-        if not force_recompute:
+        if not force_recompute or waited_for_owner:
             cached = self.photos.get_ai_cache(
                 content_sha256=content_sha256, provider=actual_provider, model_name=model,
                 prompt_version=prompt_version, schema_version=2, schema_kind=cache_schema_kind,
@@ -484,6 +544,11 @@ class PhotoAnalysisService:
                 release_selected()
                 return validate_analysis_result(cached["result"]), str(cached["raw_json"]), 0.0, True, actual_provider, model, request_fingerprint, vision_json, Usage(), 0
         try:
+            if selected_channel is not None:
+                router: Any = provider
+                if not router.acquire_channel(selected_channel):
+                    raise TimeoutError("VLM-005 Provider Network Permit 暫時不可用")
+                network_permit = True
             # The only owner generates a JPEG, after both cache checks.
             image = image_factory()
             result, raw, cost, usage, latency = self._perform_uncached_model_call(
@@ -501,6 +566,7 @@ class PhotoAnalysisService:
                 cache_schema_kind=cache_schema_kind,
                 vision_request_fingerprint=request_fingerprint,
                 vision_input_spec_json=vision_json,
+                cache_provider_identity=actual_provider,
             )
         except Exception as exc:
             self.photos.finish_ai_cache_reservation(cache_key, owner_id, error=str(exc))
@@ -546,6 +612,7 @@ class PhotoAnalysisService:
         cache_schema_kind: str,
         vision_request_fingerprint: str,
         vision_input_spec_json: str,
+        cache_provider_identity: str,
     ) -> tuple[dict, str, float, Usage, int]:
         if self.budgets:
             self.budgets.assert_request_allowed(job_id, photo_id)
@@ -656,7 +723,7 @@ class PhotoAnalysisService:
             total_cached_tokens += repaired.usage.cached_tokens
         self.photos.put_ai_cache(
             content_sha256=content_sha256,
-            provider=provider.name,
+            provider=cache_provider_identity,
             model_name=model,
             prompt_version=prompt_version,
             schema_version=int(result["schema_version"]),
@@ -722,9 +789,46 @@ class PhotoAnalysisService:
         scoring_version_id = str(analysis_spec["scoring_profile_id"]) or scoring_version_id
         analysis_spec_json = canonical_json(analysis_spec)
         analysis_fingerprint = fingerprint(analysis_spec)
+        content_sha = str(photo["sha256"] or "")
+        plan_prefilter = {
+            "analysis.prefilter_enabled": bool(analysis_spec.get("prefilter", {}).get("enabled", True)),
+            "analysis.prefilter_screenshots": bool(analysis_spec.get("prefilter", {}).get("screenshots_enabled", True)),
+            "analysis.prefilter_low_quality": bool(analysis_spec.get("prefilter", {}).get("low_quality_enabled", True)),
+            "analysis.prefilter_sensitivity": str(analysis_spec.get("prefilter", {}).get("sensitivity", "conservative")),
+            "analysis.e6_prefilter_enabled": bool(analysis_spec.get("prefilter", {}).get("e6_enabled", True)),
+            "analysis.e6_min_score": float(analysis_spec.get("prefilter", {}).get("e6_min_score", 25)),
+        }
+        execution_policy = dict(analysis_spec.get("ai_execution_policy") or {})
+        travel_policy = dict(analysis_spec.get("travel_policy") or {})
+
+        def local_context(schema_kind: str) -> dict[str, Any]:
+            input_spec = {
+                "mode": "local-only",
+                "schema_kind": schema_kind,
+                "feature_version": FEATURE_VERSION,
+                "analysis_plan_fingerprint": analysis_fingerprint,
+            }
+            input_json = canonical_json(input_spec)
+            return {
+                "prompt_version": prompt_version,
+                "analysis_fingerprint": analysis_fingerprint,
+                "analysis_spec_json": analysis_spec_json,
+                "vision_request_fingerprint": fingerprint(
+                    {
+                        "content_sha256": content_sha,
+                        "provider_id": "local",
+                        "prompt_version": prompt_version,
+                        **input_spec,
+                    }
+                ),
+                "vision_input_spec_json": input_json,
+                "travel_policy": travel_policy,
+            }
         self._activity("DEBUG", "caption_analysis_started", "Caption 分析開始", job_id=job_id, photo_id=photo_id, stage=strategy, trace_id=prompt_version, advanced_caption=bool(caption_controls))
         weights = ranking_weights or DEFAULT_RANKING_WEIGHTS
-        inherited = self.photos.inherit_existing_analysis(photo_id, job_id) if self.settings is None else None
+        inherited = self.photos.inherit_existing_analysis(
+            photo_id, job_id, analysis_context=local_context("basic")
+        ) if self.settings is None else None
         if inherited is not None:
             return {"analysis": inherited, "stage": "inherited", "_actual_cost": 0}
         if strategy == "local":
@@ -734,39 +838,48 @@ class PhotoAnalysisService:
                 photo_id=photo_id, job_id=job_id, stage="local", provider="local", model="local",
                 result=result, raw=raw, photo=photo, ranking_weights=weights,
                 favorite_bonus=favorite_bonus, scoring_version_id=scoring_version_id, schema_kind="basic",
+                **local_context("basic"),
             )
             return {"analysis": result, "stage": "local", "_actual_cost": 0}
 
         if self.settings is not None and not force_ai and not bool(photo["eligible"]) and not bool(photo["manual_override"]):
-            result = validate_analysis_result(self._prefilter_result(photo) or self._local_result(photo))
+            result = validate_analysis_result(self._prefilter_result(photo, policy_settings=plan_prefilter) or self._local_result(photo))
             result["should_keep"] = False
             raw = json.dumps(result, ensure_ascii=False)
             result = self._save_result(
                 photo_id=photo_id, job_id=job_id, stage="prefilter", provider="local",
                 model=FEATURE_VERSION, result=result, raw=raw, photo=photo, ranking_weights=weights,
                 favorite_bonus=favorite_bonus, scoring_version_id=scoring_version_id, schema_kind="basic",
+                **local_context("basic"),
             )
             return {"analysis": result, "stage": "prefilter", "_actual_cost": 0}
 
-        if not self._allow_ai_for_photo(photo_id, force_ai=force_ai) or self._photo_limits_reached():
+        if not self._allow_ai_for_photo(photo_id, force_ai=force_ai, execution_policy=execution_policy) or (
+            not force_ai and self._photo_limits_reached(execution_policy)
+        ):
             result = validate_analysis_result(self._local_result(photo))
             raw = json.dumps(result, ensure_ascii=False)
             result = self._save_result(
                 photo_id=photo_id, job_id=job_id, stage="local_fallback", provider="local",
                 model="local-quality-v3", result=result, raw=raw, photo=photo, ranking_weights=weights,
                 favorite_bonus=favorite_bonus, scoring_version_id=scoring_version_id, schema_kind="basic",
+                **local_context("basic"),
             )
             return {"analysis": result, "stage": "local_fallback", "_actual_cost": 0}
 
-        prefiltered = None if force_ai or self.settings is None else self._prefilter_result(photo)
+        prefiltered = None if force_ai or self.settings is None else self._prefilter_result(
+            photo, policy_settings=plan_prefilter
+        )
         if prefiltered is not None:
-            self.photos.persist_prefilter_exclusion(photo_id, self.prefilter_snapshot(photo))
+            prefilter_evaluation = self.prefilter_snapshot(photo, policy_settings=plan_prefilter)
             result = validate_analysis_result(prefiltered)
             raw = json.dumps(result, ensure_ascii=False)
             result = self._save_result(
                 photo_id=photo_id, job_id=job_id, stage="prefilter", provider="local",
                 model="local-prefilter", result=result, raw=raw, photo=photo, ranking_weights=weights,
                 favorite_bonus=favorite_bonus, scoring_version_id=scoring_version_id, schema_kind="basic",
+                **local_context("basic"),
+                prefilter_evaluation=prefilter_evaluation,
             )
             return {"analysis": result, "stage": "prefilter", "_actual_cost": 0}
         if provider is None:
@@ -780,7 +893,12 @@ class PhotoAnalysisService:
         def record_force(provider_name: str, model_name: str) -> None:
             if force_ai:
                 self.photos.record_force_ai_event(
-                    photo_id, job_id=job_id, provider=provider_name, model=model_name, actor=force_actor
+                    photo_id,
+                    job_id=job_id,
+                    provider=provider_name,
+                    provider_name=str(getattr(provider, "name", provider_name)),
+                    model=model_name,
+                    actor=force_actor,
                 )
 
         if strategy in {"low_cost", "smart_two_stage"}:
@@ -814,6 +932,7 @@ class PhotoAnalysisService:
                     prompt_version=prompt_version,
                     analysis_fingerprint=analysis_fingerprint, analysis_spec_json=analysis_spec_json,
                     vision_request_fingerprint=request_fingerprint, vision_input_spec_json=input_spec_json,
+                    travel_policy=travel_policy,
                 )
                 record_force(actual_provider, actual_model)
                 return {"analysis": low, "stage": "cache" if cache_hit else "stage_one", "_actual_cost": total_cost}
@@ -843,6 +962,7 @@ class PhotoAnalysisService:
             prompt_version=prompt_version,
             analysis_fingerprint=analysis_fingerprint, analysis_spec_json=analysis_spec_json,
             vision_request_fingerprint=request_fingerprint, vision_input_spec_json=input_spec_json,
+            travel_policy=travel_policy,
         )
         record_force(actual_provider, actual_model)
         return {

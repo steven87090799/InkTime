@@ -165,7 +165,7 @@ def test_scan_counts_videos_without_creating_photo_records(app, tmp_path):
 def test_new_analysis_job_selects_preprocessed_scan_results(app, tmp_path):
     root = tmp_path / "ready-for-analysis"
     root.mkdir()
-    Image.new("RGB", (64, 64), "purple").save(root / "new.jpg")
+    Image.effect_noise((640, 640), 100).convert("RGB").save(root / "new.jpg")
     scanner, _ = make_scanner(app, tmp_path)
     scanner.scan("待分析", root, build_thumbnails=False)
 

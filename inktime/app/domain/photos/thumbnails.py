@@ -26,6 +26,24 @@ class ThumbnailCache:
         self.lock_root = self.root / ".locks"
         self.lock_root.mkdir(mode=0o700, exist_ok=True)
         self.lock_root.chmod(0o700)
+        self.cleanup_lock_path = self.lock_root / "cleanup.lock"
+
+    @contextmanager
+    def _cleanup_lock(self):
+        descriptor = os.open(self.cleanup_lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        acquired = False
+        try:
+            os.chmod(self.cleanup_lock_path, 0o600)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except BlockingIOError:
+                acquired = False
+            yield acquired
+        finally:
+            if acquired:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
     @contextmanager
     def _generation_lock(self, cache_key: str):
@@ -146,18 +164,31 @@ class ThumbnailCache:
         candidates = self._cleanup_candidates(max_bytes, retention_days, active_hashes)
         return {"files": len(candidates), "bytes": sum(path.stat().st_size for path in candidates if path.exists())}
 
-    def cleanup(self, *, max_bytes: int, retention_days: int, active_hashes: set[str]) -> dict:
-        candidates = self._cleanup_candidates(max_bytes, retention_days, active_hashes)
-        removed = 0
-        released = 0
-        for path in candidates:
-            try:
-                released += path.stat().st_size
-                path.unlink()
-                removed += 1
-            except FileNotFoundError:
-                continue
-        return {"files": removed, "bytes": released}
+    def cleanup(
+        self,
+        *,
+        max_bytes: int,
+        retention_days: int,
+        active_hashes: set[str],
+        max_files_per_run: int = 500,
+        max_bytes_per_run: int = 512 * 1024 * 1024,
+    ) -> dict:
+        with self._cleanup_lock() as acquired:
+            if not acquired:
+                return {"files": 0, "bytes": 0, "skipped": "cleanup_locked"}
+            candidates = self._cleanup_candidates(max_bytes, retention_days, active_hashes)
+            removed = 0
+            released = 0
+            for path in candidates:
+                if removed >= max(1, int(max_files_per_run)) or released >= max(1, int(max_bytes_per_run)):
+                    break
+                try:
+                    released += path.stat().st_size
+                    path.unlink()
+                    removed += 1
+                except FileNotFoundError:
+                    continue
+            return {"files": removed, "bytes": released}
 
     def _cleanup_candidates(self, max_bytes: int, retention_days: int, active_hashes: set[str]) -> list[Path]:
         max_bytes = max(0, int(max_bytes))

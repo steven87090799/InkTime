@@ -534,6 +534,11 @@ def preview(photo_id: str):
         )
     except KeyError:
         abort(404)
+    arguments["render_plan"] = fingerprint["render_plan"]
+    arguments["layout"] = fingerprint["render_plan"]["layout"]
+    arguments["secondary_photo_id"] = fingerprint["render_plan"]["secondary_photo_id"]
+    arguments["orientation"] = fingerprint["render_plan"]["orientation"]
+    arguments["fit_mode"] = fingerprint["render_plan"]["fit_mode"]
     cache = current_app.extensions["inktime_render_cache"]
     cached = cache.get_bytes(fingerprint)
     if cached is None:

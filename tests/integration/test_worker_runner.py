@@ -107,7 +107,8 @@ def test_virtual_display_inbox_scans_and_publishes_without_provider(client, app,
     assert WorkerRunner(app).run_once() == 1
     job = app.extensions["inktime_job_repository"].get(job_id)
     assert job["status"] == "completed"
-    manifest = client.get("/api/v1/virtual-display/manifest?profile=safe_4c")
+    profile_key = str(app.extensions["inktime_settings_repository"].get("render.profile"))
+    manifest = client.get(f"/api/v1/virtual-display/manifest?profile={profile_key}")
     assert manifest.status_code == 200
     assert manifest.json["files"][0]["source_photo_id"]
     with app.extensions["inktime_database"].session() as connection:

@@ -61,6 +61,7 @@ class JobRepository:
         else:
             predicate = f"NOT {current}"
         with self.database.session() as connection:
+            # Bind the repeated fingerprint predicates in their SQL order.
             params = [fingerprint, fingerprint]
             if selection_mode != "force_all":
                 params.append(fingerprint)
@@ -74,11 +75,15 @@ class JobRepository:
                     SUM(CASE WHEN {current} THEN 1 ELSE 0 END) AS already_current,
                     SUM(CASE WHEN {queued} THEN 1 ELSE 0 END) AS already_queued,
                     SUM(CASE WHEN p.eligible=1 AND {predicate} AND NOT ({queued}) THEN 1 ELSE 0 END) AS pending_total,
-                    SUM(CASE WHEN EXISTS (SELECT 1 FROM job_items ji WHERE ji.photo_id=p.id AND ji.status='failed') THEN 1 ELSE 0 END) AS failed,
+                    SUM(CASE WHEN NOT ({current}) AND EXISTS (
+                        SELECT 1 FROM job_items ji JOIN jobs j ON j.id=ji.job_id
+                        WHERE ji.photo_id=p.id AND ji.status='failed'
+                          AND COALESCE(j.analysis_fingerprint,'')=?
+                    ) THEN 1 ELSE 0 END) AS failed,
                     SUM(CASE WHEN EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id) AND NOT ({current}) THEN 1 ELSE 0 END) AS stale
                 FROM photos p WHERE p.lifecycle_status='active'
                 """,
-                [*params, fingerprint],
+                [*params, fingerprint, fingerprint, fingerprint],
             ).fetchone()
             missing = int(connection.execute("SELECT COUNT(*) FROM photos WHERE lifecycle_status='missing'").fetchone()[0])
             scan = connection.execute(

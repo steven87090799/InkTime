@@ -23,6 +23,13 @@ LOCAL_QUALITY_RULE = "local-quality"
 LOCAL_QUALITY_RULE_VERSION = FEATURE_VERSION
 
 
+def _effective_cache_version(prompt_version: str, vision_request_fingerprint: str | None) -> str:
+    """Keep the legacy unique key while separating every Vision Input variant."""
+    if not vision_request_fingerprint:
+        return prompt_version
+    return f"{prompt_version}@vision-{vision_request_fingerprint[:16]}"
+
+
 def _stored_exclusion(photo: dict) -> tuple[str, dict] | None:
     """讓人工要求重新套用時使用同一規則與相同門檻。"""
     evaluation = evaluate_local_quality({**photo, "relative_path": str(photo.get("relative_path") or "")})
@@ -222,6 +229,7 @@ class PhotoRepository:
         scan_id: str,
         root: Path,
         items: Sequence[PreparedScanPhoto],
+        quality_policy_settings: dict | None = None,
     ) -> list[BatchPhotoResult]:
         """批次查詢、記憶體比對，再於單一交易寫入整批照片與初始狀態。"""
 
@@ -724,7 +732,8 @@ class PhotoRepository:
                     in {"manually_restored", "manually_excluded"}
                 )
                 policy = evaluate_local_quality(
-                    {"relative_path": plan["item"].relative_path, **features.as_dict()}
+                    {"relative_path": plan["item"].relative_path, **features.as_dict()},
+                    settings=quality_policy_settings,
                 )
                 exclusion = (
                     None
@@ -775,6 +784,12 @@ class PhotoRepository:
                         features.camera_make,
                         features.camera_model,
                         features.lens_model,
+                        features.e6_score,
+                        features.e6_contrast_score,
+                        features.e6_subject_score,
+                        features.e6_skin_score,
+                        features.e6_text_score,
+                        features.e6_skin_pixels,
                         eligible,
                         exclusion_status,
                         reason,
@@ -791,7 +806,8 @@ class PhotoRepository:
                     """
                     UPDATE photos SET local_candidate_score=?,feature_version=?,orientation=?,
                         exif_orientation_original=CASE WHEN ? THEN ? ELSE COALESCE(exif_orientation_original,?) END,
-                        camera_make=?,camera_model=?,lens_model=?,eligible=?,exclusion_status=?,
+                        camera_make=?,camera_model=?,lens_model=?,e6_score=?,e6_contrast_score=?,
+                        e6_subject_score=?,e6_skin_score=?,e6_text_score=?,e6_skin_pixels=?,eligible=?,exclusion_status=?,
                         reject_reason=?,reject_rule=?,reject_rule_version=?,reject_details_json=?,
                         rejected_at=?,manual_override=? WHERE id=?
                     """,
@@ -1002,7 +1018,9 @@ class PhotoRepository:
         with self.database.session() as connection:
             return connection.execute("SELECT * FROM scan_runs WHERE id=?", (scan_id,)).fetchone()
 
-    def inherit_existing_analysis(self, photo_id: str, job_id: str | None) -> dict | None:
+    def inherit_existing_analysis(
+        self, photo_id: str, job_id: str | None, *, analysis_context: dict | None = None
+    ) -> dict | None:
         with self.database.session() as connection:
             row = connection.execute(
                 """
@@ -1049,6 +1067,11 @@ class PhotoRepository:
             "inherited",
             ranking_score=row["ranking_score"],
             scoring_version_id=row["scoring_version_id"],
+            prompt_version=str((analysis_context or {}).get("prompt_version") or row["prompt_version"] or "photo-quality-v3"),
+            analysis_fingerprint=(analysis_context or {}).get("analysis_fingerprint") or row["analysis_fingerprint"],
+            analysis_spec_json=(analysis_context or {}).get("analysis_spec_json") or row["analysis_spec_json"],
+            vision_request_fingerprint=(analysis_context or {}).get("vision_request_fingerprint") or row["vision_request_fingerprint"],
+            vision_input_spec_json=(analysis_context or {}).get("vision_input_spec_json") or row["vision_input_spec_json"],
         )
         return result
 
@@ -1259,7 +1282,7 @@ class PhotoRepository:
             )
 
     def record_force_ai_event(
-        self, photo_id: str, *, job_id: str | None, provider: str, model: str, actor: str
+        self, photo_id: str, *, job_id: str | None, provider: str, provider_name: str, model: str, actor: str
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self.database.transaction() as connection:
@@ -1268,7 +1291,7 @@ class PhotoRepository:
                 (
                     photo_id,
                     "force_ai_analysis_completed",
-                    json.dumps({"job_id": job_id, "provider": provider, "model": model}, ensure_ascii=False),
+                    json.dumps({"job_id": job_id, "provider_id": provider, "provider_name": provider_name, "model": model}, ensure_ascii=False),
                     actor,
                     now,
                 ),
@@ -1332,23 +1355,46 @@ class PhotoRepository:
         with self.database.session() as connection:
             return [str(row["id"]) for row in connection.execute(query, params).fetchall()]
 
+    def count_active_eligible(self) -> int:
+        with self.database.session() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM photos WHERE lifecycle_status='active' AND eligible=1"
+            ).fetchone()
+        return int(row[0] or 0)
+
+    def active_eligible_requested_ids(self, photo_ids: Sequence[str], *, limit: int) -> list[str]:
+        """Bounded SQL validation that preserves the caller's ordering."""
+        requested = list(dict.fromkeys(str(photo_id) for photo_id in photo_ids))
+        allowed: set[str] = set()
+        with self.database.session() as connection:
+            for chunk in _chunks(requested, 400):
+                placeholders = ",".join("?" for _ in chunk)
+                allowed.update(
+                    str(row["id"])
+                    for row in connection.execute(
+                        f"SELECT id FROM photos WHERE lifecycle_status='active' AND eligible=1 AND id IN ({placeholders})",  # noqa: S608
+                        tuple(chunk),
+                    ).fetchall()
+                )
+        return [photo_id for photo_id in requested if photo_id in allowed][:max(1, limit)]
+
     def eligible_photo_batches(
         self, *, group_by: str, limit: int, include_all_active: bool = False
     ) -> list[tuple[str, list[str]]]:
         """完整照片庫模式以年份或第一層資料夾拆成可暫停／續跑的既有工作。"""
         where = "lifecycle_status='active'" if include_all_active else "lifecycle_status='active' AND eligible=1"
+        remaining = max(1, min(int(limit), 100_000))
         with self.database.session() as connection:
             rows = connection.execute(
                 f"""
                 SELECT id,relative_path,captured_at,created_at FROM photos WHERE {where}
                 ORDER BY COALESCE(captured_at,created_at),relative_path,id
-                """
+                LIMIT ?
+                """,
+                (remaining,),
             ).fetchall()
         groups: dict[str, list[str]] = {}
-        remaining = max(1, min(int(limit), 100_000))
         for row in rows:
-            if remaining <= 0:
-                break
             path = str(row["relative_path"] or "")
             key = (
                 path.split("/", 1)[0] or "根目錄"
@@ -1356,7 +1402,6 @@ class PhotoRepository:
                 else str(row["captured_at"] or row["created_at"] or "未知")[:4]
             )
             groups.setdefault(key or "未知", []).append(str(row["id"]))
-            remaining -= 1
         return list(groups.items())
 
     def is_top_candidate(self, photo_id: str, limit: int) -> bool:
@@ -1392,6 +1437,7 @@ class PhotoRepository:
         self, *, content_sha256: str, provider: str, model_name: str, prompt_version: str, schema_version: int, schema_kind: str,
         vision_request_fingerprint: str | None = None,
     ) -> dict | None:
+        cache_prompt_version = _effective_cache_version(prompt_version, vision_request_fingerprint)
         with self.database.session() as connection:
             row = connection.execute(
                 """
@@ -1399,7 +1445,7 @@ class PhotoRepository:
                   AND prompt_version=? AND schema_version=? AND schema_kind=?
                   AND (? IS NULL OR vision_request_fingerprint=?)
                 """,
-                (content_sha256, provider, model_name, prompt_version, schema_version, schema_kind,
+                (content_sha256, provider, model_name, cache_prompt_version, schema_version, schema_kind,
                  vision_request_fingerprint, vision_request_fingerprint),
             ).fetchone()
         if row is None:
@@ -1430,6 +1476,7 @@ class PhotoRepository:
         vision_request_fingerprint: str | None = None,
         vision_input_spec_json: str | None = None,
     ) -> None:
+        cache_prompt_version = _effective_cache_version(prompt_version, vision_request_fingerprint)
         with self.database.session() as connection:
             connection.execute(
                 """
@@ -1445,7 +1492,7 @@ class PhotoRepository:
                     vision_input_spec_json=excluded.vision_input_spec_json
                 """,
                 (
-                    content_sha256, provider, model_name, prompt_version, schema_version, schema_kind,
+                    content_sha256, provider, model_name, cache_prompt_version, schema_version, schema_kind,
                     json.dumps(result, ensure_ascii=False), raw_json, input_tokens, output_tokens, cached_tokens,
                     estimated_cost, latency_ms, datetime.now(timezone.utc).isoformat(),
                     vision_request_fingerprint, vision_input_spec_json,
@@ -1799,6 +1846,7 @@ class PhotoRepository:
         analysis_spec_json: str | None = None,
         vision_request_fingerprint: str | None = None,
         vision_input_spec_json: str | None = None,
+        prefilter_evaluation: dict | None = None,
     ) -> None:
         import json
 
@@ -1806,6 +1854,27 @@ class PhotoRepository:
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                if prefilter_evaluation and prefilter_evaluation.get("decision") == "auto_excluded":
+                    current = connection.execute(
+                        "SELECT favorite,manual_override,exclusion_status FROM photos WHERE id=?", (photo_id,)
+                    ).fetchone()
+                    protected = current is None or bool(current["favorite"]) or bool(current["manual_override"]) or str(current["exclusion_status"] or "") in {"manually_restored", "manually_excluded"}
+                    if protected:
+                        event = "automatic_exclusion_skipped"
+                        changes = {"reason": "manual_override_or_favorite"}
+                    else:
+                        details = json.dumps(prefilter_evaluation, ensure_ascii=False, sort_keys=True)
+                        connection.execute(
+                            """UPDATE photos SET eligible=0,exclusion_status='auto_excluded',reject_reason=?,
+                               reject_rule=?,reject_rule_version=?,reject_details_json=?,rejected_at=?,updated_at=? WHERE id=?""",
+                            (prefilter_evaluation["primary_reason"], LOCAL_QUALITY_RULE, FEATURE_VERSION, details, now, now, photo_id),
+                        )
+                        event = "automatic_exclusion"
+                        changes = {"reason": prefilter_evaluation["primary_reason"], "feature_version": FEATURE_VERSION}
+                    connection.execute(
+                        "INSERT INTO photo_events(photo_id,event,changes_json,changed_by,created_at) VALUES (?,?,?,?,?)",
+                        (photo_id, event, json.dumps(changes, ensure_ascii=False), "system", now),
+                    )
                 connection.execute(
                     """
                     INSERT INTO photo_analysis(photo_id,job_id,schema_version,stage,provider,model,caption,types_json,
