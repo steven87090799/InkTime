@@ -126,6 +126,49 @@ def test_different_shards_can_run_in_parallel(tmp_path):
     assert len(entered) == 2
 
 
+def test_cleanup_skips_a_thumbnail_held_by_an_active_use_lease(tmp_path):
+    source, digest = _source(tmp_path)
+    cache = ThumbnailCache(tmp_path / "cache")
+    thumbnail = cache.get_or_create(source, digest, 512)
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def provider_read() -> None:
+        with cache.acquire_for_use(source, digest, 512) as path:
+            assert path.is_file()
+            acquired.set()
+            assert release.wait(2)
+            assert path.read_bytes()
+
+    thread = threading.Thread(target=provider_read)
+    thread.start()
+    assert acquired.wait(2)
+    skipped = cache.cleanup(max_bytes=0, retention_days=0, active_hashes=set())
+    assert skipped["files"] == 0
+    assert thumbnail.exists()
+    release.set()
+    thread.join(2)
+    assert not thread.is_alive()
+    removed = cache.cleanup(max_bytes=0, retention_days=0, active_hashes=set())
+    assert removed["files"] == 1
+    assert not thumbnail.exists()
+
+
+def test_cleanup_reuses_an_explicit_empty_inventory(tmp_path, monkeypatch):
+    cache = ThumbnailCache(tmp_path / "cache")
+
+    def unexpected_inventory():
+        raise AssertionError("cleanup must not rescan an explicitly supplied inventory")
+
+    monkeypatch.setattr(cache, "inventory", unexpected_inventory)
+    assert cache.cleanup(
+        max_bytes=0,
+        retention_days=0,
+        active_hashes=set(),
+        inventory=[],
+    ) == {"files": 0, "bytes": 0}
+
+
 def test_legacy_lock_cleanup_is_dry_run_explicit_and_symlink_safe(tmp_path):
     root = tmp_path / "cache"
     root.mkdir()

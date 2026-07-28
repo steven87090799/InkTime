@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from flask import Blueprint, abort, current_app, g, make_response, render_template, request
@@ -18,9 +19,91 @@ from inktime.app.repositories.settings import (
     SETTING_DEFINITIONS,
 )
 from inktime.app.web.access import administrator_required, login_required
-
+from inktime.app.domain.rendering.system_presets import SYSTEM_PRESETS
 
 bp = Blueprint("settings", __name__)
+
+
+@bp.get("/api/v1/settings/presets")
+@login_required
+def list_presets():
+    return {"presets": list(SYSTEM_PRESETS.values())}
+
+
+@bp.post("/api/v1/settings/presets/<key>/preview")
+@administrator_required
+def preview_preset(key: str):
+    preset = SYSTEM_PRESETS.get(key)
+    if preset is None:
+        return {"error_code": "PRESET-001", "message": "找不到 Preset"}, 404
+    preset_settings = cast(dict[str, Any], preset["settings"])
+    repository = current_app.extensions["inktime_settings_repository"]
+    changed, current, _merged = repository.prepare_updates(preset_settings, reject_control_center=True)
+    compatible_profiles = set(cast(list[str], preset["compatible_panel_profiles"]))
+    with current_app.extensions["inktime_database"].session() as connection:
+        devices = connection.execute(
+            "SELECT id,name,panel_profile FROM devices WHERE enabled=1 ORDER BY name,id"
+        ).fetchall()
+    compatible = [dict(row) for row in devices if str(row["panel_profile"]) in compatible_profiles]
+    incompatible = [dict(row) for row in devices if str(row["panel_profile"]) not in compatible_profiles]
+    return {
+        "preset": preset,
+        "changed_keys": list(changed),
+        "unchanged_keys": [name for name in preset_settings if name not in changed],
+        "affected_devices": compatible,
+        "incompatible_devices": incompatible,
+        "requires_new_release": bool(changed),
+        "current": {name: current[name] for name in preset_settings},
+    }
+
+
+@bp.post("/api/v1/settings/presets/<key>/apply")
+@administrator_required
+def apply_preset(key: str):
+    preset = SYSTEM_PRESETS.get(key)
+    if preset is None:
+        return {"error_code": "PRESET-001", "message": "找不到 Preset"}, 404
+    preset_settings = cast(dict[str, Any], preset["settings"])
+    payload = request.get_json(silent=True) or {}
+    selected = payload.get("update_existing_device_ids", [])
+    if not isinstance(selected, list) or any(not isinstance(item, str) for item in selected):
+        abort(400, description="PRESET-002 update_existing_device_ids 必須是裝置 ID 陣列")
+    if selected and payload.get("confirm_physical_panel") is not True:
+        abort(409, description="PRESET-003 更新既有裝置需要 confirm_physical_panel=true")
+    compatible_profiles = set(cast(list[str], preset["compatible_panel_profiles"]))
+    database = current_app.extensions["inktime_database"]
+    with database.transaction() as connection:
+        selected_ids = set(selected)
+        rows = [
+            row
+            for row in connection.execute("SELECT id,panel_profile FROM devices").fetchall()
+            if str(row["id"]) in selected_ids
+        ]
+        if len(rows) != len(set(selected)) or any(
+            str(row["panel_profile"]) not in compatible_profiles for row in rows
+        ):
+            abort(409, description="PRESET-004 只能明確更新相容的既有 Spectra 6 裝置")
+        if selected:
+            connection.executemany(
+                "UPDATE devices SET panel_profile=?,updated_at=datetime('now') WHERE id=?",
+                [(preset_settings["device.default_panel_profile"], identifier) for identifier in selected],
+            )
+    repository = current_app.extensions["inktime_settings_repository"]
+    result = repository.update_many(
+        preset_settings,
+        changed_by=str(g.user["id"]),
+        source_ip=request.remote_addr or "unknown",
+        reason=f"preset:{key}",
+    )
+    changed = result["changed_keys"]
+    return {
+        "preset": key,
+        "changed_keys": changed,
+        "unchanged_keys": [name for name in preset_settings if name not in changed],
+        "affected_devices": selected,
+        "incompatible_devices": [],
+        "requires_new_release": bool(changed),
+    }
 
 
 @bp.get("/settings")
@@ -56,9 +139,7 @@ def settings_page():
             "access_log": os.environ.get("INKTIME_ACCESS_LOG", "0") == "1",
             "revision": os.environ.get("INKTIME_GIT_REVISION", "unknown"),
         },
-        webhook_token_configured=current_app.extensions[
-            "inktime_notification_service"
-        ].token_configured(),
+        webhook_token_configured=current_app.extensions["inktime_notification_service"].token_configured(),
     )
 
 
@@ -70,16 +151,13 @@ def update_settings():
         abort(400, description="SET-002 設定更新必須是 JSON 物件")
     repository = current_app.extensions["inktime_settings_repository"]
     try:
-        changed, current, _merged = repository.prepare_updates(
-            payload, reject_control_center=True
-        )
+        changed, current, _merged = repository.prepare_updates(payload, reject_control_center=True)
         impact = _impact(changed)
         high_risk = _confirmation_reasons(changed, current, impact)
         if high_risk and request.headers.get("X-InkTime-Confirm-Risk") != "true":
             abort(
                 409,
-                description="SET-007 高風險變更需要先預覽並明確確認："
-                + "、".join(high_risk),
+                description="SET-007 高風險變更需要先預覽並明確確認：" + "、".join(high_risk),
             )
         result = repository.update_many(
             payload,
@@ -150,12 +228,8 @@ def _impact(changed: dict[str, object]) -> dict[str, object]:
         "changed_keys": changed_keys,
         "validation_errors": [],
         "warnings": warnings,
-        "restart_required": any(
-            bool(definition["restart_required"]) for definition in definitions
-        ),
-        "affects_new_jobs": any(
-            definition["effective_scope"] == "next_job" for definition in definitions
-        ),
+        "restart_required": any(bool(definition["restart_required"]) for definition in definitions),
+        "affects_new_jobs": any(definition["effective_scope"] == "next_job" for definition in definitions),
         "cache_fingerprint_changed": cache_changed,
         "ranking_only": ranking_only,
         "reanalysis_required": reanalysis and not ranking_only,
@@ -169,13 +243,9 @@ def _impact(changed: dict[str, object]) -> dict[str, object]:
             "裝置群組覆寫",
             "可靠 Provider 成本估算",
         ],
-        "existing_releases_unchanged": any(
-            bool(definition["rerender_impact"]) for definition in definitions
-        ),
+        "existing_releases_unchanged": any(bool(definition["rerender_impact"]) for definition in definitions),
         "release_notice": (
-            "既有 Release 不會因設定修改而改變；必須建立新 Release 才會套用新渲染設定"
-            if rerender
-            else None
+            "既有 Release 不會因設定修改而改變；必須建立新 Release 才會套用新渲染設定" if rerender else None
         ),
     }
 
@@ -211,20 +281,15 @@ def _confirmation_reasons(
             reasons.append(str(SETTING_DEFINITIONS[key]["label_zh_tw"]))
     if impact["cache_fingerprint_changed"]:
         reasons.append("改變 AI Cache Fingerprint")
-    if (
-        "observability.activity_retention_days" in changed
-        and int(str(changed["observability.activity_retention_days"]))
-        < int(str(current["observability.activity_retention_days"]))
-    ):
+    if "observability.activity_retention_days" in changed and int(
+        str(changed["observability.activity_retention_days"])
+    ) < int(str(current["observability.activity_retention_days"])):
         reasons.append("縮短重要 Activity 保留期間")
     if int(str(impact["affected_device_count"])) >= 10 and any(
         SETTING_DEFINITIONS[key]["device_override_allowed"] for key in changed
     ):
         reasons.append("影響大量裝置的系統預設")
-    if (
-        int(str(impact["affected_release_count"])) >= 50
-        and impact["rerender_required"]
-    ):
+    if int(str(impact["affected_release_count"])) >= 50 and impact["rerender_required"]:
         reasons.append("影響大量既有 Release 的渲染判讀")
     return list(dict.fromkeys(reasons))
 
@@ -235,9 +300,7 @@ def preview_settings():
     payload = request.get_json(silent=True) or {}
     repository = current_app.extensions["inktime_settings_repository"]
     try:
-        changed, _current, _merged = repository.prepare_updates(
-            payload, reject_control_center=True
-        )
+        changed, _current, _merged = repository.prepare_updates(payload, reject_control_center=True)
     except PermissionError as exc:
         return _impact({}) | {
             "validation_errors": [_permission_error_message(exc)],
@@ -299,9 +362,7 @@ def setting_snapshot(snapshot_id: str):
 @administrator_required
 def rollback_preview(snapshot_id: str):
     try:
-        preview = current_app.extensions["inktime_settings_repository"].rollback_preview(
-            snapshot_id
-        )
+        preview = current_app.extensions["inktime_settings_repository"].rollback_preview(snapshot_id)
     except KeyError:
         abort(404, description="SET-004 找不到設定 Snapshot")
     except ValueError as exc:
@@ -368,9 +429,7 @@ def export_settings():
         )
     )
     response.headers["Content-Type"] = "application/json; charset=utf-8"
-    response.headers[
-        "Content-Disposition"
-    ] = "attachment; filename=inktime-settings.json"
+    response.headers["Content-Disposition"] = "attachment; filename=inktime-settings.json"
     response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -378,13 +437,10 @@ def export_settings():
 def _protected_import_reason(key: str) -> str | None:
     if key in SENSITIVE_STATUS_KEYS:
         return "敏感位置、私人路徑或 Webhook URI 只能在本機個別設定，不接受一般匯入"
-    if key in SETTING_DEFINITIONS and not SETTING_DEFINITIONS[key].get(
-        "runtime_wired", True
-    ):
+    if key in SETTING_DEFINITIONS and not SETTING_DEFINITIONS[key].get("runtime_wired", True):
         return "尚未接上 Runtime，僅供唯讀"
     if key in SETTING_DEFINITIONS and (
-        SETTING_DEFINITIONS[key].get("control_center")
-        or SETTING_DEFINITIONS[key].get("secret")
+        SETTING_DEFINITIONS[key].get("control_center") or SETTING_DEFINITIONS[key].get("secret")
     ):
         return "必須由專屬控制中心或 Secret Store 管理"
     if key.startswith(
@@ -421,24 +477,17 @@ def _import_preview(document: object) -> dict[str, object]:
     if not isinstance(raw_settings, dict):
         raise ValueError("settings 必須是 JSON 物件")
     protected_reasons = {
-        str(key): reason
-        for key in raw_settings
-        if (reason := _protected_import_reason(str(key))) is not None
+        str(key): reason for key in raw_settings if (reason := _protected_import_reason(str(key))) is not None
     }
     blocked_keys = sorted(protected_reasons)
-    unknown_keys = sorted(
-        set(map(str, raw_settings)) - set(SETTING_DEFINITIONS) - set(blocked_keys)
-    )
+    unknown_keys = sorted(set(map(str, raw_settings)) - set(SETTING_DEFINITIONS) - set(blocked_keys))
     accepted = {
         str(key): value
         for key, value in raw_settings.items()
-        if str(key) in SETTING_DEFINITIONS
-        and str(key) not in blocked_keys
+        if str(key) in SETTING_DEFINITIONS and str(key) not in blocked_keys
     }
     repository = current_app.extensions["inktime_settings_repository"]
-    changed, _current, _merged = repository.prepare_updates(
-        accepted, reject_control_center=True
-    )
+    changed, _current, _merged = repository.prepare_updates(accepted, reject_control_center=True)
     return {
         "valid": True,
         "unknown_keys": unknown_keys,

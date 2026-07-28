@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}電子紙渲染｜InkTime{% endblock %}
-{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='font-library.css') }}">{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='font-library.css') }}"><script type="module" src="{{ url_for('static', filename='spectra6-preset.js') }}"></script>{% endblock %}
 {% block content %}
 <div class="page-head">
   <div>
@@ -8,7 +8,7 @@
     <h1>電子紙渲染</h1>
     <p>可選直向或橫向排版；傳給面板的資料仍固定為 480×800，依 Profile 產生四色 2bpp 或六／七色 indexed4。</p>
   </div>
-  <div><a class="secondary" href="/simulator">開啟手動模擬器</a> <a class="secondary" href="/virtual-display" target="_blank" rel="noopener">開啟虛擬墨水屏</a>{% if g.user.role=='administrator' %} <button class="primary" id="publish">發布目前 Profile</button> <button class="secondary" id="publish-all">發布全部 Profile</button>{% endif %}</div>
+  <div><a class="secondary" href="/simulator">開啟手動模擬器</a> <a class="secondary" href="/virtual-display" target="_blank" rel="noopener">開啟虛擬墨水屏</a>{% if g.user.role=='administrator' %} <button class="secondary" type="button" data-spectra6-preset>一鍵套用微雪 7.3 吋 Spectra 6 原廠色彩與演算法</button> <button class="primary" id="publish">發布目前 Profile</button> <button class="secondary" id="publish-all">發布全部 Profile</button>{% endif %}</div>
 </div>
 
 {% set active = profiles|selectattr('key','equalto',current_profile)|first %}

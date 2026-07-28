@@ -11,6 +11,7 @@ from flask import Blueprint, abort, current_app, render_template, request
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.core.logging import log_event
 from inktime.app.domain.rendering import DISPLAY_PROFILES, DeviceTestReleaseStore
+from inktime.app.domain.rendering.system_presets import DEFAULT_DEVICE_PANEL_PROFILE
 from inktime.app.services.rendering import FIT_MODES, FRAME_ORIENTATIONS, LAYOUTS
 from inktime.app.repositories.devices import DeviceRateLimitError, DeviceRepository
 from inktime.app.web.access import administrator_required, login_required
@@ -67,7 +68,7 @@ def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
     else:
         enabled = bool(enabled_value)
     panel_profile = str(
-        payload.get("panel_profile", defaults.get("panel_profile", "safe_4c"))
+        payload.get("panel_profile", defaults.get("panel_profile", DEFAULT_DEVICE_PANEL_PROFILE))
     )
     if panel_profile not in DISPLAY_PROFILES:
         abort(400, description="DEVICE-003 不支援的電子紙面板 Profile")
@@ -110,7 +111,7 @@ def devices_page():
             "timezone": str(settings.get("device.default_timezone", "Asia/Taipei")),
             "schedule": str(settings.get("device.default_schedule", "08:00")),
             "rotation": int(settings.get("device.default_rotation", 0)),
-            "panel_profile": str(settings.get("device.default_panel_profile", "safe_4c")),
+            "panel_profile": str(settings.get("device.default_panel_profile", DEFAULT_DEVICE_PANEL_PROFILE)),
             "frame_orientation": None,
             "layout_mode": None,
             "fit_mode": None,
@@ -172,9 +173,7 @@ def update_energy_profile(device_id: str):
     if not isinstance(payload, dict):
         abort(400, description="DEVICE-005 能源參數必須是 JSON 物件")
 
-    def bounded_number(
-        key: str, minimum: float, maximum: float, *, nullable: bool, default
-    ) -> float | None:
+    def bounded_number(key: str, minimum: float, maximum: float, *, nullable: bool, default) -> float | None:
         value = payload.get(key, default)
         if value is None or value == "":
             if nullable:
@@ -249,7 +248,7 @@ def create_device():
             "timezone": str(settings.get("device.default_timezone", "Asia/Taipei")),
             "schedule": str(settings.get("device.default_schedule", "08:00")),
             "rotation": int(settings.get("device.default_rotation", 0)),
-            "panel_profile": str(settings.get("device.default_panel_profile", "safe_4c")),
+            "panel_profile": str(settings.get("device.default_panel_profile", DEFAULT_DEVICE_PANEL_PROFILE)),
         },
     )
     device_id, token = _repository().create(**fields)
@@ -286,7 +285,7 @@ def update_device(device_id: str):
 def latest_release():
     device = _authenticated_device()
     release_root = current_app.config["INKTIME_RELEASE_DIR"]
-    profile_key = str(device["panel_profile"] or "safe_4c")
+    profile_key = str(device["panel_profile"] or DEFAULT_DEVICE_PANEL_PROFILE)
     assignment = DeviceTestReleaseStore(release_root).active(str(device["id"]), profile_key)
     if assignment is not None:
         release_id = str(assignment["release_id"])
@@ -470,9 +469,7 @@ def report_status():
             "battery_percent_estimated": optional_bool("battery_percent_estimated"),
             "temperature_c": optional_float("temperature_c", -100.0, 150.0),
             "humidity_percent": optional_float("humidity_percent", 0.0, 100.0),
-            "last_refresh_duration_ms": optional_int(
-                "last_refresh_duration_ms", 0, 600_000
-            ),
+            "last_refresh_duration_ms": optional_int("last_refresh_duration_ms", 0, 600_000),
             "wake_duration_ms": optional_int("wake_duration_ms", 0, 86_400_000),
             "button_wakeup": optional_bool("button_wakeup"),
         },

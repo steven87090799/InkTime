@@ -31,6 +31,12 @@ def test_primary_management_pages_render(client, app):
         "/diagnostics",
         "/errors",
         "/backups",
+        "/decision-traces",
+        "/feedback",
+        "/shadow",
+        "/device-queues",
+        "/retention",
+        "/rollouts",
     ):
         response = client.get(path)
         assert response.status_code == 200, path

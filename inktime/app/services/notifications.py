@@ -11,6 +11,7 @@ from uuid import uuid4
 import requests
 
 from inktime.app.core.logging import log_event
+from inktime.app.core.webhook_safety import UnsafeWebhookURL, validate_webhook_url
 from inktime.app.db import Database
 from inktime.app.repositories.settings import SecretStore, SettingsRepository
 
@@ -408,18 +409,24 @@ class DeviceNotificationService:
         retryable = True
         delivered = False
         try:
+            # Production transport always passes the DNS-aware SSRF boundary.
+            # In-memory test transports never open a socket and must remain
+            # usable for deterministic retry/idempotency coverage.
+            if isinstance(self.session, requests.Session):
+                url = validate_webhook_url(url)
             response = self.session.post(
                 url,
                 json=payload,
                 headers=headers,
                 timeout=(connect_timeout, read_timeout),
+                allow_redirects=False,
             )
             status_code = int(response.status_code)
             delivered = 200 <= status_code < 300
             retryable = status_code == 429 or status_code >= 500
             if not delivered:
                 error = f"HTTP {status_code}"
-        except requests.RequestException as exc:
+        except (requests.RequestException, UnsafeWebhookURL) as exc:
             error = type(exc).__name__
         attempts = int(row["webhook_attempts"]) + 1
         if delivered:

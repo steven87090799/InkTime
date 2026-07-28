@@ -70,6 +70,9 @@ class RuntimeConfig:
     worker_concurrency: int
     scheduler_identity: str
     cookie_secure: bool
+    public_url: str = "http://127.0.0.1"
+    allow_insecure_http: bool = False
+    allow_unsafe_network_database: bool = False
 
     def __post_init__(self) -> None:
         environment = self.environment.strip().casefold()
@@ -130,6 +133,9 @@ class RuntimeConfig:
         worker_concurrency: int | str | None = None,
         scheduler_identity: str | None = None,
         cookie_secure: bool | str | None = None,
+        public_url: str | None = None,
+        allow_insecure_http: bool | str | None = None,
+        allow_unsafe_network_database: bool | str | None = None,
     ) -> "RuntimeConfig":
         """Resolve explicit arguments, then environment, then safe defaults."""
 
@@ -223,6 +229,9 @@ class RuntimeConfig:
                 else source.get("INKTIME_COOKIE_SECURE", production),
                 name="INKTIME_COOKIE_SECURE",
             ),
+            public_url=str(public_url if public_url is not None else source.get("INKTIME_PUBLIC_URL", "https://localhost" if production else "http://127.0.0.1")),
+            allow_insecure_http=_boolean(allow_insecure_http if allow_insecure_http is not None else source.get("INKTIME_ALLOW_INSECURE_HTTP", False), name="INKTIME_ALLOW_INSECURE_HTTP"),
+            allow_unsafe_network_database=_boolean(allow_unsafe_network_database if allow_unsafe_network_database is not None else source.get("INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE", False), name="INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE"),
         )
 
     def diagnostic_summary(self) -> dict[str, object]:
@@ -246,6 +255,9 @@ class RuntimeConfig:
             "worker_concurrency": self.worker_concurrency,
             "scheduler_identity": self.scheduler_identity,
             "cookie_secure": self.cookie_secure,
+            "public_url_scheme": self.public_url.split(":", 1)[0],
+            "allow_insecure_http": self.allow_insecure_http,
+            "allow_unsafe_network_database": self.allow_unsafe_network_database,
         }
 
 

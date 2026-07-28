@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}設定控制中心｜InkTime{% endblock %}
+{% block head %}<script type="module" src="{{ url_for('static', filename='spectra6-preset.js') }}"></script>{% endblock %}
 {% block content %}
 <div class="page-head settings-page-head">
   <div>
@@ -11,6 +12,7 @@
     {% if g.user.role == 'administrator' %}
     <a class="secondary" href="/api/v1/settings/export">匯出安全設定</a>
     <button class="secondary" type="button" id="open-import">匯入設定</button>
+    <button class="primary" type="button" data-spectra6-preset>一鍵套用微雪 7.3 吋 Spectra 6 原廠色彩與演算法</button>
     {% endif %}
   </div>
 </div>

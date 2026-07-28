@@ -8,6 +8,7 @@ from typing import Literal
 from inktime.app.core.locks import FcntlLockProvider, LockProvider
 from inktime.app.core.logging import configure_logging
 from inktime.app.core.runtime_config import RuntimeConfig, resolve_runtime_config
+from inktime.app.core.preflight import run_production_preflight
 from inktime.app.db import Database, backfill_photo_capture_dates, migrate
 from inktime.app.domain.photos import LocationResolver, ThumbnailCache
 from inktime.app.domain.rendering import AtomicReleasePublisher, FontManager
@@ -17,6 +18,7 @@ from inktime.app.repositories.jobs import JobRepository
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.providers import ProviderRepository
 from inktime.app.repositories.render_candidates import RenderCandidateRepository
+from inktime.app.repositories.resilience import ResilienceRepository
 from inktime.app.repositories.schedules import ScheduledTaskRepository
 from inktime.app.repositories.scoring import ScoringProfileRepository
 from inktime.app.repositories.settings import SecretStore, SettingsRepository
@@ -61,9 +63,7 @@ class ServiceContainer:
             runtime_lock.close()  # type: ignore[attr-defined]
 
 
-def _persistent_secret(
-    runtime_config: RuntimeConfig, lock_provider: LockProvider
-) -> str:
+def _persistent_secret(runtime_config: RuntimeConfig, lock_provider: LockProvider) -> str:
     if runtime_config.testing:
         return "test-secret-not-for-production"
     import os
@@ -73,8 +73,14 @@ def _persistent_secret(
         return configured
     path = runtime_config.data_dir / "session.key"
     path.parent.mkdir(parents=True, exist_ok=True)
+    data_root = runtime_config.data_dir.resolve()
+    if path.is_symlink() or path.resolve().parent != data_root:
+        raise RuntimeError("SESSION-001 session.key 必須是 data_dir 內的非符號連結檔案")
     with lock_provider.exclusive(path.with_suffix(".key.lock")):
         if path.exists():
+            if path.is_symlink() or path.resolve().parent != data_root:
+                raise RuntimeError("SESSION-001 session.key 必須是 data_dir 內的非符號連結檔案")
+            path.chmod(0o600)
             value = path.read_text(encoding="utf-8").strip()
             if value:
                 return value
@@ -95,6 +101,7 @@ def bootstrap_services(
     config = resolve_runtime_config(runtime_config)
     locks = lock_provider or FcntlLockProvider()
     configure_logging()
+    preflight = run_production_preflight(config)
 
     # Filesystem creation is an explicit bootstrap step, never an import side effect.
     for path in (config.data_dir, config.cache_dir, config.backup_dir, config.release_dir):
@@ -106,6 +113,7 @@ def bootstrap_services(
     extensions: dict[str, object] = {
         "inktime_runtime_config": config,
         "inktime_database": database,
+        "inktime_production_preflight": preflight,
     }
     if not config.testing:
         extensions["inktime_runtime_lock"] = database.acquire_runtime_lock(exclusive=False)
@@ -126,12 +134,8 @@ def bootstrap_services(
         config.cache_dir / "thumbnails",
         settings_repository=settings_repository,
     )
-    notification_service = DeviceNotificationService(
-        database, settings_repository, secret_store
-    )
-    observability_service = ObservabilityService(
-        database, settings_repository, diagnostics_service
-    )
+    notification_service = DeviceNotificationService(database, settings_repository, secret_store)
+    observability_service = ObservabilityService(database, settings_repository, diagnostics_service)
     extensions.update(
         {
             "inktime_settings_repository": settings_repository,
@@ -169,12 +173,11 @@ def bootstrap_services(
         process_boundary,
     )
     font_manager = FontManager(config.data_dir / "fonts")
-    location_resolver = LocationResolver(
-        Path(__file__).resolve().parents[2] / "data" / "world_cities_zh.csv"
-    )
+    location_resolver = LocationResolver(Path(__file__).resolve().parents[2] / "data" / "world_cities_zh.csv")
     release_publisher = AtomicReleasePublisher(config.release_dir)
     observability_service.publisher = release_publisher
     render_candidate_repository = RenderCandidateRepository(database)
+    resilience_repository = ResilienceRepository(database)
     render_cache = BoundedRenderCache(config.cache_dir / "renderer")
     render_workload_service = RenderWorkloadService(
         config.cache_dir / "render-workloads",
@@ -198,6 +201,7 @@ def bootstrap_services(
         location_resolver,
         weather_service,
         observability_service,
+        resilience_repository,
     )
     extensions.update(
         {
@@ -222,14 +226,13 @@ def bootstrap_services(
             "inktime_location_resolver": location_resolver,
             "inktime_release_publisher": release_publisher,
             "inktime_render_candidate_repository": render_candidate_repository,
+            "inktime_resilience_repository": resilience_repository,
             "inktime_render_cache": render_cache,
             "inktime_render_workload_service": render_workload_service,
             "inktime_release_coordinator": release_coordinator,
             "inktime_weather_service": weather_service,
             "inktime_render_service": render_service,
-            "inktime_display_preparation_service": DisplayPreparationService(
-                database, render_service
-            ),
+            "inktime_display_preparation_service": DisplayPreparationService(database, render_service),
         }
     )
     if role == "web":

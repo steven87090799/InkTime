@@ -59,6 +59,7 @@ static const uint32_t FACTORY_RESET_SAMPLE_DELAY_MS = 5;
 //  AP 配置页保底：进入 AP 后 5 分钟没保存配置 -> 睡到“下一个刷新点”
 // =======================
 static const uint32_t AP_TIMEOUT_MS = 5UL * 60UL * 1000UL; // 5 分钟
+static const uint8_t AP_MAX_SAVE_ATTEMPTS = 5;
 
 // 實體面板固定 800x480；既有伺服器 payload 契約維持直向 480x800。
 static constexpr int EPD_WIDTH  = kBoardConfig.display.width;
@@ -90,8 +91,8 @@ GxEPD2_7C<
 // No trusted CA provisioning exists yet. HTTPS is rejected by default instead
 // of silently downgrading certificate verification. Isolated LAN HTTP remains
 // supported; an explicit development override prints a warning.
-#ifndef INKTIME_ALLOW_UNVERIFIED_HTTPS
-#define INKTIME_ALLOW_UNVERIFIED_HTTPS 0
+#ifndef INKTIME_ALLOW_INSECURE_DEVICE_HTTP
+#define INKTIME_ALLOW_INSECURE_DEVICE_HTTP 0
 #endif
 
 // =======================
@@ -125,6 +126,10 @@ bool frameIndexed4 = false;
 bool frameNativePalette = false;
 bool serverConfigChanged = false;
 bool currentPayloadShaVerified = false;
+String portalSetupSecret;
+String portalNonce;
+uint8_t portalSaveAttempts = 0;
+bool portalSaveAllowed = false;
 String currentReleaseId;
 String currentRenderProfile;
 String lastDeviceErrorCode;
@@ -140,17 +145,22 @@ static int calculateSha256(const unsigned char* input, size_t length, unsigned c
 }
 
 static bool backendTransportAllowed(const String &base) {
-  if (!base.startsWith("https://")) return true;
-#if INKTIME_ALLOW_UNVERIFIED_HTTPS
-#if DEBUG_LOG
-  DBG_PRINTLN("[TLS] WARNING: unverified HTTPS override is enabled");
-#endif
+  if (base.startsWith("https://")) return true;
+#if INKTIME_ALLOW_INSECURE_DEVICE_HTTP
+  lastDeviceErrorCode = "DEVICE-INSECURE-HTTP";
+  lastDeviceErrorMessage = "已啟用明確 HTTP 開發覆寫；不可用於不可信網路";
   return true;
 #else
-  lastDeviceErrorCode = "DEVICE-TLS-UNCONFIGURED";
-  lastDeviceErrorMessage = "HTTPS 尚未配置可信 CA，已拒絕未驗證連線";
+  lastDeviceErrorCode = "DEVICE-HTTP-DISALLOWED";
+  lastDeviceErrorMessage = "正式裝置 Backend 必須使用 HTTPS";
   return false;
 #endif
+}
+
+static String randomPortalSecret() {
+  char value[25];
+  for (uint8_t i = 0; i < 12; ++i) snprintf(value + i * 2, 3, "%02x", static_cast<unsigned>(esp_random() & 0xff));
+  return String(value);
 }
 
 static void releaseAllGpioHoldsAtBoot() {
@@ -350,7 +360,7 @@ String buildConfigPage() {
   html += F("<meta name='viewport' content='width=device-width,initial-scale=1'>");
   html += F("<title>InkTime 設定</title></head><body>");
   html += F("<h2>InkTime 首次配對</h2>");
-  html += F("<form method='POST' action='/save'>");
+  html += F("<form method='POST' action='/save'><input type='hidden' name='setup_secret' value='"); html += portalSetupSecret; html += F("'><input type='hidden' name='nonce' value='"); html += portalNonce; html += F("'>");
 
   html += F("WiFi SSID:<br>");
   html += F("<select id='ssid_select' style='width: 288px;' onchange=\"document.getElementById('ssid_input').value=this.value;\">");
@@ -376,7 +386,7 @@ String buildConfigPage() {
 
   html += F("密碼:<br><input name='pass' type='password' style='width: 280px;'><br><br>");
 
-  html += F("InkTime 伺服器 (http://host:port):<br><input name='hostport' size='40' value='");
+  html += F("InkTime 伺服器 (https://host:port):<br><input name='hostport' size='40' value='");
   html += host;
   html += F("'><br><br>");
 
@@ -447,6 +457,16 @@ void handleSave() {
 #if DEBUG_LOG
   DBG_PRINTLN("[HTTP] POST /save");
 #endif
+  if (!portalSaveAllowed || portalSaveAttempts++ >= AP_MAX_SAVE_ATTEMPTS ||
+      server.arg("setup_secret") != portalSetupSecret || server.arg("nonce") != portalNonce) {
+    server.send(403, "text/plain; charset=utf-8", "PAIRING-001 配對授權失效");
+    if (portalSaveAttempts >= AP_MAX_SAVE_ATTEMPTS) {
+      portalSaveAllowed = false;
+      server.stop();
+      goDeepSleepMinutes(minutesToNextRefreshFromLastEpoch(g_cfg));
+    }
+    return;
+  }
   String ssid     = server.arg("ssid");
   String pass     = server.arg("pass");
   String host     = server.arg("hostport");
@@ -459,6 +479,10 @@ void handleSave() {
   ssid.trim();
   host.trim();
   deviceToken.trim();
+  if (ssid.length() > 32 || pass.length() > 63 || host.length() > 240 || deviceToken.length() > 256 || host.indexOf('@') >= 0 || (!host.startsWith("https://") && !host.startsWith("http://"))) {
+    server.send(400, "text/plain; charset=utf-8", "PAIRING-002 設定格式或長度不合法");
+    return;
+  }
 
   Config newCfg = g_cfg;
 
@@ -486,6 +510,7 @@ void handleSave() {
   newCfg.valid     = (newCfg.wifi_ssid.length() > 0);
 
   saveConfig(newCfg);
+  portalSaveAllowed = false; portalSetupSecret = ""; portalNonce = "";
 
   server.send(
     200,
@@ -615,12 +640,15 @@ void startConfigPortal() {
 
   wifiHardResetForPortal();
 
+  portalSetupSecret = randomPortalSecret();
+  portalNonce = randomPortalSecret();
+  portalSaveAttempts = 0; portalSaveAllowed = true;
   String chipHex = String((uint32_t)ESP.getEfuseMac(), HEX);
   chipHex.toUpperCase();
   while (chipHex.length() < 8) chipHex = "0" + chipHex;
   String shortId = chipHex.substring(chipHex.length() - 6);
   String apSsid = "InkTime-" + shortId;
-  String apPassword = "InkTime" + shortId;
+  String apPassword = randomPortalSecret(); // never derived from SSID, MAC, or chip ID
 
   bool apOk = WiFi.softAP(apSsid.c_str(), apPassword.c_str());
   (void)apOk;
@@ -679,6 +707,12 @@ void startConfigPortal() {
 bool runUsbServiceMode() {
   photoPainter.refreshPowerState();
   if (!photoPainter.usbConnected()) return false;
+  // USB power alone is not authorization to alter Wi-Fi or a device token.
+  if (!isFactoryResetRequestedAtBoot()) return false;
+  portalSetupSecret = randomPortalSecret();
+  portalNonce = randomPortalSecret();
+  portalSaveAttempts = 0;
+  portalSaveAllowed = true;
 
   server.on("/", HTTP_GET, handleRoot);
   server.on("/save", HTTP_POST, handleSave);
@@ -818,7 +852,7 @@ bool downloadDailyPhotoBin(Config &cfg) {
 
   String base = cfg.backend_hostport;
   base.trim();
-  if (!base.startsWith("http://") && !base.startsWith("https://")) base = "http://" + base;
+  if (!base.startsWith("http://") && !base.startsWith("https://")) base = "https://" + base;
   while (base.endsWith("/")) base.remove(base.length() - 1);
   if (!backendTransportAllowed(base)) return false;
   String manifestUrl = base + String(DEVICE_MANIFEST_PATH);
@@ -1065,7 +1099,7 @@ void reportDeviceStatus(const Config &cfg, bool displayUpdated) {
   if (WiFi.status() != WL_CONNECTED || cfg.backend_hostport.length() == 0 || cfg.device_token.length() == 0) return;
   String base = cfg.backend_hostport;
   base.trim();
-  if (!base.startsWith("http://") && !base.startsWith("https://")) base = "http://" + base;
+  if (!base.startsWith("http://") && !base.startsWith("https://")) base = "https://" + base;
   while (base.endsWith("/")) base.remove(base.length() - 1);
   if (!backendTransportAllowed(base)) return;
 

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from flask import Blueprint, Response, abort, current_app, g, render_template, request, stream_with_context
 import json
 
+from flask import Blueprint, Response, abort, current_app, g, render_template, request, stream_with_context
+
+from inktime.app.domain.analysis.plan import canonical_json, fingerprint
 from inktime.app.services.jobs import InvalidJobTransition, JobService
 from inktime.app.web.access import administrator_required, login_required
 
@@ -16,6 +18,18 @@ def _service() -> JobService:
 
 def _repository():
     return current_app.extensions["inktime_job_repository"]
+
+
+def _analysis_plan(strategy: str) -> tuple[dict, str]:
+    analysis = current_app.extensions["inktime_analysis_service"]
+    provider_service = current_app.extensions["inktime_provider_service"]
+    scoring = dict(current_app.extensions["inktime_scoring_repository"].current())
+    plan = analysis.build_plan(
+        strategy=strategy,
+        provider_route=provider_service.route_snapshot(),
+        scoring_profile=scoring,
+    )
+    return plan, canonical_json(plan)
 
 
 def _job_or_404(job_id: str):
@@ -60,16 +74,56 @@ def create_job():
     payload = request.get_json(silent=True) or {}
     budget = payload.get("budget_limit")
     limit = payload.get("limit")
-    job_id = _service().create_analysis_job(
-        name=str(payload.get("name", "分析工作")),
-        strategy=str(payload.get("strategy", "smart_two_stage")),
-        settings=dict(payload.get("settings") or {}),
-        created_by=g.user["id"],
-        budget_limit=float(budget) if budget not in (None, "") else None,
-        limit=max(1, min(int(limit), 100_000)) if limit not in (None, "") else None,
-        photo_ids=payload.get("photo_ids"),
-    )
+    settings = dict(payload.get("settings") or {})
+    selection_mode = str(payload.get("selection_mode", "pending"))
+    if selection_mode not in {"pending", "stale_only", "force_all"}:
+        return {"message": "不支援的選片模式"}, 400
+    if selection_mode == "force_all" and str(g.user["role"]) != "administrator":
+        return {"message": "force_all 僅限管理員"}, 403
+    strategy = str(payload.get("strategy", "smart_two_stage"))
+    plan, _ = _analysis_plan(strategy)
+    analysis_fingerprint = fingerprint(plan)
+    try:
+        job_id = _service().create_analysis_job(
+            name=str(payload.get("name", "分析工作")),
+            strategy=strategy,
+            settings=settings,
+            created_by=g.user["id"],
+            budget_limit=float(budget) if budget not in (None, "") else None,
+            limit=max(1, min(int(limit), 100_000)) if limit not in (None, "") else None,
+            photo_ids=payload.get("photo_ids"),
+            selection_mode=selection_mode,
+            analysis_fingerprint=analysis_fingerprint,
+            force_recompute=bool(payload.get("force_recompute", selection_mode == "force_all")),
+            analysis_spec=plan,
+        )
+    except ValueError as exc:
+        return {"message": str(exc)}, 409
     return {"id": job_id, "detail_url": f"/jobs/{job_id}"}, 201
+
+
+@bp.post("/api/v1/jobs/selection-preview")
+@administrator_required
+def selection_preview():
+    payload = request.get_json(silent=True) or {}
+    mode = str(payload.get("selection_mode", "pending"))
+    if mode not in {"pending", "stale_only", "force_all"}:
+        return {"message": "不支援的選片模式"}, 400
+    limit = payload.get("limit")
+    strategy = str(payload.get("strategy", "smart_two_stage"))
+    _plan, _ = _analysis_plan(strategy)
+    preview = _repository().selection_preview(
+        analysis_fingerprint=fingerprint(_plan),
+        selection_mode=mode,
+        limit=max(1, min(int(limit), 100_000)) if limit not in (None, "") else None,
+    )
+    estimate = _service().estimate(int(preview["limited_to"]), strategy)
+    return {
+        **preview,
+        "estimated_stage_one": estimate["stage_one_photos"],
+        "estimated_stage_two": estimate["stage_two_photos"],
+        "estimated_cost": estimate["average_cost"],
+    }
 
 
 @bp.post("/api/v1/jobs/<job_id>/<action>")

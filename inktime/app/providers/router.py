@@ -64,6 +64,100 @@ class FailoverVisionProvider(VisionProvider):
             channel.request_times.append(now)
             return True
 
+    def candidate_channels(self, *, excluded: set[str] | None = None) -> list[ProviderChannel]:
+        """Return identities that are currently eligible for network work.
+
+        This remains the compatibility API for direct router callers.  It is
+        deliberately *not* suitable for cache lookup because it filters
+        circuit-, rate-, and token-limited channels.
+        """
+        excluded = excluded or set()
+        now = time.monotonic()
+        result: list[ProviderChannel] = []
+        with self._lock:
+            for channel in self.channels:
+                while channel.request_times and channel.request_times[0] <= now - 60:
+                    channel.request_times.popleft()
+                while channel.token_events and channel.token_events[0][0] <= now - 60:
+                    channel.token_events.popleft()
+                provider_identity = str(getattr(channel.provider, "provider_id", channel.provider.name))
+                if provider_identity in excluded or channel.circuit_until > now:
+                    continue
+                if channel.requests_per_minute and len(channel.request_times) >= channel.requests_per_minute:
+                    continue
+                if channel.tokens_per_minute and sum(event[1] for event in channel.token_events) >= channel.tokens_per_minute:
+                    continue
+                result.append(channel)
+        return result
+
+    def route_channels(self, *, excluded: set[str] | None = None) -> list[ProviderChannel]:
+        """Return Frozen Route identities without inspecting network state.
+
+        Cache identity is a configured provider identity, not a promise that a
+        network request can currently be made.  This method neither consumes
+        quotas nor acquires permits, and never filters a channel for an open
+        circuit, RPM, TPM, or semaphore state.
+        """
+        excluded = excluded or set()
+        with self._lock:
+            return [
+                channel
+                for channel in self.channels
+                if str(getattr(channel.provider, "provider_id", channel.provider.name))
+                not in excluded
+            ]
+
+    def acquire_channel(self, channel: ProviderChannel) -> bool:
+        """Reserve RPM and network concurrency only for the cache owner."""
+        if not channel.semaphore.acquire(blocking=False):
+            return False
+        if self._available(channel):
+            self._local.channel = channel
+            return True
+        channel.semaphore.release()
+        return False
+
+    def select_channel(self, *, excluded: set[str] | None = None) -> ProviderChannel:
+        """Reserve the concrete provider that will own one cache key.
+
+        Cache identity must never be the synthetic router name.  Keeping the
+        reservation here also preserves the router's concurrency and circuit
+        breaker guarantees for callers that need to inspect the provider before
+        making a request.
+        """
+        excluded = excluded or set()
+        for channel in self.channels:
+            if str(getattr(channel.provider, "provider_id", channel.provider.name)) in excluded:
+                continue
+            if self._available(channel) and channel.semaphore.acquire(blocking=False):
+                self._local.channel = channel
+                return channel
+        raise ProviderHTTPError("所有 Provider 暫時不可用或已達 Rate Limit", "VLM-005")
+
+    def release_channel(
+        self,
+        channel: ProviderChannel,
+        *,
+        usage: Usage | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        """Complete a reservation acquired by :meth:`select_channel`."""
+        with self._lock:
+            if error is not None:
+                channel.failures += 1
+                retry_after = getattr(error, "retry_after", None)
+                if channel.failures >= self.failure_threshold or retry_after:
+                    channel.circuit_until = time.monotonic() + max(
+                        float(retry_after or 0), channel.cooldown_seconds
+                    )
+            else:
+                channel.failures = 0
+                if usage is not None:
+                    used_tokens = usage.input_tokens + usage.output_tokens
+                    if used_tokens:
+                        channel.token_events.append((time.monotonic(), used_tokens))
+        channel.semaphore.release()
+
     def _execute(self, method: str, **kwargs) -> ProviderResponse:
         last_error: Exception | None = None
         for channel in self.channels:
@@ -185,3 +279,10 @@ class FailoverVisionProvider(VisionProvider):
     def validate_config(self) -> tuple[bool, str]:
         results = [channel.provider.validate_config() for channel in self.channels]
         return (any(result[0] for result in results), "；".join(result[1] for result in results))
+
+    def close(self) -> None:
+        """Release all HTTP sessions deterministically after a worker job."""
+        for channel in self.channels:
+            close = getattr(channel.provider, "close", None)
+            if callable(close):
+                close()

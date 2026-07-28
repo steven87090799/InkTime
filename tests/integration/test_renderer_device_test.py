@@ -271,6 +271,98 @@ def test_library_preview_cache_miss_never_renders_in_request_thread(
     ) == []
 
 
+def test_quantized_preview_preserves_resolved_auto_dither_in_background(
+    client, app, tmp_path, monkeypatch
+):
+    create_admin(app)
+    login(client)
+    photo_id = _library_photo(app, tmp_path / "preview-auto-dither", "high-risk")
+    settings_repository = app.extensions["inktime_settings_repository"]
+    settings_repository.update(
+        "render.auto_photo_smooth_enabled", True,
+        changed_by="test", source_ip="127.0.0.1",
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            """
+            UPDATE photos
+            SET brightness=40,contrast=5,underexposed_ratio=.7,e6_score=20,
+                e6_contrast_score=20,e6_subject_score=20
+            WHERE id=?
+            """,
+            (photo_id,),
+        )
+
+    response = client.get(
+        f"/api/v1/rendering/preview/{photo_id}?quantized=1&profile=safe_4c"
+    )
+    assert response.status_code == 202
+    job_id = response.get_json()["job_id"]
+    jobs = app.extensions["inktime_job_repository"]
+    queued = json.loads(str(jobs.get(job_id)["settings_json"]))
+    arguments = queued["arguments"]
+    assert arguments["requested_dither"] is None
+    assert arguments["effective_dither"] == "photo_smooth"
+    assert arguments["override_source"] == "auto_photo_smooth"
+
+    workload = app.extensions["inktime_render_workload_service"]
+    real_call = workload.process_boundary.call
+    captured: dict = {}
+
+    def capture_child_call(function, **options):
+        captured.update(options["kwargs"]["settings"]["arguments"])
+        return real_call(function, **options)
+
+    monkeypatch.setattr(workload.process_boundary, "call", capture_child_call)
+    WorkerRunner(app).run_once()
+    item = jobs.list_items(job_id)[0]
+    result = json.loads(str(item["result_json"]))
+    assert captured["effective_dither"] == "photo_smooth"
+    assert captured["requested_dither"] is None
+    assert result["effective_dither"] == "photo_smooth"
+    assert result["override_source"] == "auto_photo_smooth"
+
+    cached = client.get(
+        f"/api/v1/rendering/preview/{photo_id}?quantized=1&profile=safe_4c"
+    )
+    assert cached.status_code == 200
+    assert cached.headers["X-InkTime-Effective-Dither"] == "photo_smooth"
+    assert cached.headers["X-InkTime-Dither-Override-Source"] == "auto_photo_smooth"
+
+
+def test_quantized_preview_treats_explicit_dither_as_an_override(client, app, tmp_path):
+    create_admin(app)
+    login(client)
+    photo_id = _library_photo(app, tmp_path / "preview-request-dither", "override")
+    settings_repository = app.extensions["inktime_settings_repository"]
+    settings_repository.update(
+        "render.auto_photo_smooth_enabled", True,
+        changed_by="test", source_ip="127.0.0.1",
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            """
+            UPDATE photos
+            SET brightness=40,contrast=5,underexposed_ratio=.7,e6_score=20,
+                e6_contrast_score=20,e6_subject_score=20
+            WHERE id=?
+            """,
+            (photo_id,),
+        )
+
+    response = client.get(
+        f"/api/v1/rendering/preview/{photo_id}?quantized=1&profile=safe_4c&dither=gooddisplay"
+    )
+    assert response.status_code == 202
+    queued = json.loads(
+        str(app.extensions["inktime_job_repository"].get(response.get_json()["job_id"])["settings_json"])
+    )
+    arguments = queued["arguments"]
+    assert arguments["requested_dither"] == "gooddisplay"
+    assert arguments["effective_dither"] == "gooddisplay"
+    assert arguments["override_source"] == "request_override"
+
+
 def test_library_preview_timeout_retries_without_committing_artifacts(
     client, app, tmp_path, monkeypatch
 ):

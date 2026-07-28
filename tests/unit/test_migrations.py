@@ -29,7 +29,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 def test_fresh_database_is_migrated(tmp_path):
     database = Database(tmp_path / "inktime.db")
-    assert migrate(database) == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+    assert migrate(database) == list(range(1, 25))
     assert database.integrity_check() == "ok"
     with database.session() as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -53,7 +53,7 @@ def test_fresh_database_is_migrated(tmp_path):
             "settings_snapshots",
             "settings_snapshot_items",
         } <= tables
-    assert tuple(history) == (21, 21)
+    assert tuple(history) == (24, 24)
 
 
 def test_existing_photo_scores_table_is_preserved(tmp_path):
@@ -133,7 +133,7 @@ def test_concurrent_migrations_are_serialized(tmp_path):
     database = Database(tmp_path / "inktime.db")
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _index: migrate(database), range(2)))
-    assert sorted(results, key=len) == [[], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]]
+    assert sorted(results, key=len) == [[], list(range(1, 25))]
     assert database.integrity_check() == "ok"
 
 
@@ -328,7 +328,7 @@ def test_v10_photo_state_and_analysis_survive_scheduler_upgrade(monkeypatch, tmp
         )
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+    assert migrate(database, tmp_path / "backups") == list(range(11, 25))
     with database.session() as connection:
         photo = connection.execute(
             "SELECT favorite,status,lifecycle_status,metadata_status,local_features_status FROM photos WHERE id='photo'"
@@ -355,7 +355,7 @@ def test_migration_21_upgrades_v20_webhooks_idempotently(monkeypatch, tmp_path):
         notification_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [21]
+    assert migrate(database, tmp_path / "backups") == [21, 22, 23, 24]
     assert migrate(database, tmp_path / "backups") == []
     assert database.integrity_check() == "ok"
     with database.session() as connection:
@@ -382,3 +382,38 @@ def test_migration_21_upgrades_v20_webhooks_idempotently(monkeypatch, tmp_path):
     assert row["webhook_claimed_until"] is None
     assert indexes["idx_device_notifications_idempotency"] == 1
     assert indexes["idx_device_notifications_claim"] == 0
+
+
+def test_migration_24_updates_caption_defaults_only_as_one_legacy_set(monkeypatch, tmp_path):
+    database = Database(tmp_path / "inktime.db")
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:23])
+    migrate(database)
+    keys = (
+        "analysis.side_caption_min_chars",
+        "analysis.side_caption_target_chars",
+        "analysis.side_caption_max_chars",
+    )
+    with database.session() as connection:
+        connection.executemany(
+            "INSERT INTO settings(key,category,value_json,value_type,updated_at) VALUES (?,'analysis',?,'integer',datetime('now'))",
+            [(keys[0], "10"), (keys[1], "30"), (keys[2], "42")],
+        )
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
+    migrate(database)
+    with database.session() as connection:
+        values = [connection.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()[0] for key in keys]
+    assert values == ["10", "30", "42"]
+
+    second = Database(tmp_path / "second.db")
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:23])
+    migrate(second)
+    with second.session() as connection:
+        connection.executemany(
+            "INSERT INTO settings(key,category,value_json,value_type,updated_at) VALUES (?,'analysis',?,'integer',datetime('now'))",
+            [(keys[0], "10"), (keys[1], "22"), (keys[2], "42")],
+        )
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
+    migrate(second)
+    with second.session() as connection:
+        values = [connection.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()[0] for key in keys]
+    assert values == ["8", "12", "16"]

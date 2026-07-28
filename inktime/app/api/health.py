@@ -38,6 +38,9 @@ def ready():
         "worker": int(stalled) == 0,
         "settings": current_app.extensions["inktime_settings_repository"].get("general.timezone") is not None,
     }
+    preflight = current_app.extensions["inktime_production_preflight"]
+    if not preflight.healthy:
+        checks["production_preflight"] = "degraded"
     return (
         ({"status": "ready", "checks": checks}, 200)
         if all(checks.values())
@@ -76,4 +79,5 @@ def detail():
                 "inktime_process_boundary"
             ].observability(),
         },
+        "production_preflight": current_app.extensions["inktime_production_preflight"].summary(),
     }

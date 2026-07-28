@@ -152,6 +152,34 @@ def test_keyset_queue_reaches_old_job_after_more_than_one_hundred(app):
     assert str(runnable[-1]["id"]) == job_ids[-1]
 
 
+def test_analysis_selector_keyset_returns_1200_unique_eligible_active_photos(app):
+    photo_ids = add_photos(app, 1200)
+    repository = app.extensions["inktime_job_repository"]
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE photos SET local_candidate_score=CAST(substr(relative_path,1,instr(relative_path,'.')-1) AS REAL) % 101")
+        connection.execute("UPDATE photos SET eligible=0 WHERE id=?", (photo_ids[0],))
+        connection.execute("UPDATE photos SET lifecycle_status='missing' WHERE id=?", (photo_ids[1],))
+    preview = repository.selection_preview(analysis_fingerprint="plan-a", limit=None)
+    selected = list(repository.iter_pending_photo_ids(analysis_fingerprint="plan-a", limit=None))
+    assert preview["total_active"] == 1199
+    assert preview["excluded"] == 1
+    assert preview["missing"] == 1
+    assert preview["pending_total"] == 1198
+    assert len(selected) == 1198
+    assert len(set(selected)) == 1198
+    assert photo_ids[0] not in selected and photo_ids[1] not in selected
+    with app.extensions["inktime_database"].session() as connection:
+        expected = [
+            str(row["id"])
+            for row in connection.execute(
+                "SELECT id FROM photos WHERE lifecycle_status='active' AND eligible=1 "
+                "ORDER BY COALESCE(local_candidate_score,-1) DESC,id ASC"
+            )
+        ]
+    assert selected == expected
+    assert list(repository.iter_pending_photo_ids(analysis_fingerprint="plan-a", limit=137)) == expected[:137]
+
+
 def test_active_dedupe_key_prevents_duplicate_maintenance_work(app):
     repository = app.extensions["inktime_job_repository"]
     first = repository.create_maintenance(

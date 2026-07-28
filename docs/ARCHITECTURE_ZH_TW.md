@@ -1,5 +1,7 @@
 # InkTime 專案架構與照片評分流程
 
+> 決策與韌性擴充：Migration 17 以既有 SQLite WAL／single-writer transaction 加入 Decision Trace、回饋、Shadow、Queue、Retention 與 Canary 資料。正式發布仍由 `RenderService → ReleaseCoordinator` 管理；追蹤或 Shadow 寫入失敗不會中斷正式 Release。
+
 這份文件是閱讀程式碼的入口。先看「執行架構」，再依要修改的功能查「模組地圖」；照片評分、模型與門檻集中在後半段。
 
 ## 執行架構

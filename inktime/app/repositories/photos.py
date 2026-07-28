@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import re
 from typing import Any, Iterable, Sequence
 from uuid import uuid4
 
@@ -15,93 +16,28 @@ from inktime.app.domain.analysis.scoring import (
     calculate_ranking_score,
 )
 from inktime.app.domain.photos.preprocessing import LocalPhotoFeatures
+from inktime.app.domain.photos.quality_policy import FEATURE_VERSION, evaluate_local_quality, local_candidate_score
 from inktime.app.domain.photos.dates import materialized_capture_fields, parse_photo_datetime
 
 
 LOCAL_QUALITY_RULE = "local-quality"
-LOCAL_QUALITY_RULE_VERSION = "local-quality-v3"
+LOCAL_QUALITY_RULE_VERSION = FEATURE_VERSION
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
-def _local_candidate_score(features: LocalPhotoFeatures) -> float:
-    """不需要模型的可選片分數；只描述技術可用性，不代替回憶或語意評分。"""
-    blur = max(0.0, float(features.blur_score or 0.0))
-    contrast = max(0.0, min(100.0, float(features.contrast or 0.0)))
-    exposure_penalty = max(
-        float(features.overexposed_ratio or 0.0), float(features.underexposed_ratio or 0.0)
-    )
-    short_edge = min(features.width, features.height)
-    resolution = min(12.0, short_edge / 100.0)
-    return round(max(0.0, min(100.0, blur**0.5 * 3.2 + contrast * 0.8 + resolution - exposure_penalty * 45)), 2)
-
-
-def _automatic_exclusion(relative_path: str, features: LocalPhotoFeatures) -> tuple[str, dict] | None:
-    """回傳可重現的本機排除證據；不得在此處呼叫 Provider。"""
-    filename = Path(relative_path).name.casefold()
-    document_markers = ("receipt", "invoice", "document", "scan", "收據", "發票", "文件")
-    if any(marker in filename for marker in document_markers):
-        return "document_or_receipt", {"measured_value": filename, "threshold": "filename marker"}
-    screenshot = float(features.screenshot_likelihood or 0.0)
-    if screenshot >= 0.65:
-        return "screenshot", {"measured_value": round(screenshot, 3), "threshold": 0.65}
-    short_edge = min(features.width, features.height)
-    if short_edge < 240:
-        return "resolution_too_low", {"measured_value": short_edge, "threshold": 240}
-    blur = float(features.blur_score or 0.0)
-    contrast = float(features.contrast or 0.0)
-    if blur < 8 and contrast < 12 and short_edge < 600:
-        return "blur_too_high", {
-            "measured_value": round(blur, 2),
-            "threshold": 8.0,
-            "secondary_threshold": "short_edge < 600",
-        }
-    overexposed = float(features.overexposed_ratio or 0.0)
-    underexposed = float(features.underexposed_ratio or 0.0)
-    if overexposed >= 0.7:
-        return "overexposed", {"measured_value": round(overexposed, 4), "threshold": 0.7}
-    if underexposed >= 0.7:
-        return "underexposed", {"measured_value": round(underexposed, 4), "threshold": 0.7}
-    return None
+def _effective_cache_version(prompt_version: str, vision_request_fingerprint: str | None) -> str:
+    """Keep the legacy unique key while separating every Vision Input variant."""
+    if not vision_request_fingerprint:
+        return prompt_version
+    return f"{prompt_version}@vision-{vision_request_fingerprint[:16]}"
 
 
 def _stored_exclusion(photo: dict) -> tuple[str, dict] | None:
     """讓人工要求重新套用時使用同一規則與相同門檻。"""
-    features = LocalPhotoFeatures(
-        sha256=str(photo.get("sha256") or ""),
-        perceptual_hash=photo.get("perceptual_hash"),
-        difference_hash=photo.get("difference_hash"),
-        width=int(photo.get("width") or 0),
-        height=int(photo.get("height") or 0),
-        format=str(photo.get("format") or ""),
-        orientation=int(photo.get("orientation") or 1),
-        camera_make=photo.get("camera_make"),
-        camera_model=photo.get("camera_model"),
-        lens_model=photo.get("lens_model"),
-        exif_json=photo.get("exif_json"),
-        captured_at=photo.get("captured_at"),
-        gps_lat=photo.get("gps_lat"),
-        gps_lon=photo.get("gps_lon"),
-        brightness=photo.get("brightness"),
-        contrast=photo.get("contrast"),
-        blur_score=photo.get("blur_score"),
-        overexposed_ratio=photo.get("overexposed_ratio"),
-        underexposed_ratio=photo.get("underexposed_ratio"),
-        screenshot_likelihood=photo.get("screenshot_likelihood"),
-        crop_focus_x=None,
-        crop_focus_y=None,
-        crop_subject_left=None,
-        crop_subject_top=None,
-        crop_subject_right=None,
-        crop_subject_bottom=None,
-        crop_method=None,
-        crop_face_count=None,
-        e6_score=None,
-        e6_contrast_score=None,
-        e6_subject_score=None,
-        e6_skin_score=None,
-        e6_text_score=None,
-        e6_skin_pixels=None,
-    )
-    return _automatic_exclusion(str(photo.get("relative_path") or ""), features)
+    evaluation = evaluate_local_quality({**photo, "relative_path": str(photo.get("relative_path") or "")})
+    if evaluation["decision"] != "auto_excluded":
+        return None
+    return str(evaluation["primary_reason"]), evaluation
 
 
 @dataclass(frozen=True)
@@ -295,6 +231,7 @@ class PhotoRepository:
         scan_id: str,
         root: Path,
         items: Sequence[PreparedScanPhoto],
+        quality_policy_settings: dict | None = None,
     ) -> list[BatchPhotoResult]:
         """批次查詢、記憶體比對，再於單一交易寫入整批照片與初始狀態。"""
 
@@ -788,10 +725,23 @@ class PhotoRepository:
                 if not features.local_features_complete:
                     continue
                 existing = plan["existing"]
-                protected = bool(existing) and not plan["content_changed"] and str(
-                    existing.get("exclusion_status") or ""
-                ) in {"manually_restored", "manually_excluded"}
-                exclusion = None if protected else _automatic_exclusion(plan["item"].relative_path, features)
+                # Automatic rules are never allowed to overwrite a favourite or
+                # a manual decision unless the content itself changed.
+                protected = bool(existing) and not plan["content_changed"] and (
+                    bool(existing.get("favorite"))
+                    or bool(existing.get("manual_override"))
+                    or str(existing.get("exclusion_status") or "")
+                    in {"manually_restored", "manually_excluded"}
+                )
+                policy = evaluate_local_quality(
+                    {"relative_path": plan["item"].relative_path, **features.as_dict()},
+                    settings=quality_policy_settings,
+                )
+                exclusion = (
+                    None
+                    if protected or policy["decision"] != "auto_excluded"
+                    else (str(policy["primary_reason"]), policy)
+                )
                 if protected:
                     eligible = int(existing.get("eligible", 1))
                     exclusion_status = str(existing.get("exclusion_status") or "eligible")
@@ -824,7 +774,10 @@ class PhotoRepository:
                     manual_override = 0
                 quality_updates.append(
                     (
-                        _local_candidate_score(features),
+                        local_candidate_score(
+                            features.as_dict(),
+                            evaluation=policy,
+                        ),
                         LOCAL_QUALITY_RULE_VERSION,
                         features.orientation,
                         int(plan["content_changed"]),
@@ -833,6 +786,12 @@ class PhotoRepository:
                         features.camera_make,
                         features.camera_model,
                         features.lens_model,
+                        features.e6_score,
+                        features.e6_contrast_score,
+                        features.e6_subject_score,
+                        features.e6_skin_score,
+                        features.e6_text_score,
+                        features.e6_skin_pixels,
                         eligible,
                         exclusion_status,
                         reason,
@@ -849,7 +808,8 @@ class PhotoRepository:
                     """
                     UPDATE photos SET local_candidate_score=?,feature_version=?,orientation=?,
                         exif_orientation_original=CASE WHEN ? THEN ? ELSE COALESCE(exif_orientation_original,?) END,
-                        camera_make=?,camera_model=?,lens_model=?,eligible=?,exclusion_status=?,
+                        camera_make=?,camera_model=?,lens_model=?,e6_score=?,e6_contrast_score=?,
+                        e6_subject_score=?,e6_skin_score=?,e6_text_score=?,e6_skin_pixels=?,eligible=?,exclusion_status=?,
                         reject_reason=?,reject_rule=?,reject_rule_version=?,reject_details_json=?,
                         rejected_at=?,manual_override=? WHERE id=?
                     """,
@@ -1060,7 +1020,10 @@ class PhotoRepository:
         with self.database.session() as connection:
             return connection.execute("SELECT * FROM scan_runs WHERE id=?", (scan_id,)).fetchone()
 
-    def inherit_existing_analysis(self, photo_id: str, job_id: str | None) -> dict | None:
+    def inherit_existing_analysis(
+        self, photo_id: str, job_id: str | None, *, analysis_context: dict | None = None
+    ) -> dict | None:
+        required_fingerprint = str((analysis_context or {}).get("analysis_fingerprint") or "")
         with self.database.session() as connection:
             row = connection.execute(
                 """
@@ -1068,9 +1031,11 @@ class PhotoRepository:
                        source.visual_orientation_ambiguous,source.visual_orientation_evidence_json FROM photos target
                 JOIN photos source ON source.sha256=target.sha256 AND source.id<>target.id
                 JOIN photo_analysis a ON a.photo_id=source.id
-                WHERE target.id=? ORDER BY a.created_at DESC LIMIT 1
+                WHERE target.id=?
+                  AND (?='' OR a.analysis_fingerprint=?)
+                ORDER BY a.created_at DESC,a.id DESC LIMIT 1
                 """,
-                (photo_id,),
+                (photo_id, required_fingerprint, required_fingerprint),
             ).fetchone()
         if row is None:
             return None
@@ -1107,6 +1072,17 @@ class PhotoRepository:
             "inherited",
             ranking_score=row["ranking_score"],
             scoring_version_id=row["scoring_version_id"],
+            prompt_version=str((analysis_context or {}).get("prompt_version") or row["prompt_version"] or "photo-quality-v3"),
+            analysis_fingerprint=(analysis_context or {}).get("analysis_fingerprint") or row["analysis_fingerprint"],
+            analysis_spec_json=(analysis_context or {}).get("analysis_spec_json") or row["analysis_spec_json"],
+            vision_request_fingerprint=(analysis_context or {}).get("vision_request_fingerprint") or row["vision_request_fingerprint"],
+            vision_input_spec_json=(analysis_context or {}).get("vision_input_spec_json") or row["vision_input_spec_json"],
+            inherited_from={
+                "analysis_id": int(row["id"]),
+                "photo_id": str(row["photo_id"]),
+                "analysis_fingerprint": str(row["analysis_fingerprint"] or ""),
+                "vision_request_fingerprint": str(row["vision_request_fingerprint"] or ""),
+            },
         )
         return result
 
@@ -1251,26 +1227,7 @@ class PhotoRepository:
                         connection.execute(
                             "UPDATE photos SET local_candidate_score=?,feature_version=?,updated_at=? WHERE id=?",
                             (
-                                _local_candidate_score(
-                                    LocalPhotoFeatures(
-                                        sha256=str(photo.get("sha256") or ""), perceptual_hash=None,
-                                        difference_hash=None, width=int(photo.get("width") or 0),
-                                        height=int(photo.get("height") or 0), format=str(photo.get("format") or ""),
-                                        orientation=int(photo.get("orientation") or 1), camera_make=None,
-                                        camera_model=None, lens_model=None, exif_json=None,
-                                        captured_at=None, gps_lat=None, gps_lon=None,
-                                        brightness=photo.get("brightness"), contrast=photo.get("contrast"),
-                                        blur_score=photo.get("blur_score"),
-                                        overexposed_ratio=photo.get("overexposed_ratio"),
-                                        underexposed_ratio=photo.get("underexposed_ratio"),
-                                        screenshot_likelihood=photo.get("screenshot_likelihood"),
-                                        crop_focus_x=None, crop_focus_y=None, crop_subject_left=None,
-                                        crop_subject_top=None, crop_subject_right=None, crop_subject_bottom=None,
-                                        crop_method=None, crop_face_count=None, e6_score=None,
-                                        e6_contrast_score=None, e6_subject_score=None, e6_skin_score=None,
-                                        e6_text_score=None, e6_skin_pixels=None,
-                                    )
-                                ),
+                                local_candidate_score(photo),
                                 LOCAL_QUALITY_RULE_VERSION,
                                 now,
                                 photo_id,
@@ -1313,6 +1270,43 @@ class PhotoRepository:
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+
+    def persist_prefilter_exclusion(self, photo_id: str, evaluation: dict) -> None:
+        """Persist one v4 automatic exclusion without disturbing manual state."""
+        if evaluation.get("decision") != "auto_excluded":
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        details = json.dumps(
+            {"policy_decision": evaluation["decision"], "primary_reason": evaluation["primary_reason"],
+             "sensitivity": evaluation["sensitivity"], "matched_checks": evaluation["matched_checks"],
+             "thresholds": evaluation["thresholds"], "e6_threshold": evaluation.get("e6_threshold"),
+             "feature_version": evaluation["feature_version"], "evidence": evaluation["evidence"]},
+            ensure_ascii=False, sort_keys=True,
+        )
+        with self.database.transaction() as connection:
+            connection.execute(
+                """UPDATE photos SET eligible=0,exclusion_status='auto_excluded',reject_reason=?,
+                   reject_rule=?,reject_rule_version=?,reject_details_json=?,rejected_at=?,updated_at=?
+                   WHERE id=? AND favorite=0 AND manual_override=0
+                   AND exclusion_status NOT IN ('manually_restored','manually_excluded')""",
+                (evaluation["primary_reason"], LOCAL_QUALITY_RULE, FEATURE_VERSION, details, now, now, photo_id),
+            )
+
+    def record_force_ai_event(
+        self, photo_id: str, *, job_id: str | None, provider: str, provider_name: str, model: str, actor: str
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.transaction() as connection:
+            connection.execute(
+                "INSERT INTO photo_events(photo_id,event,changes_json,changed_by,created_at) VALUES (?,?,?,?,?)",
+                (
+                    photo_id,
+                    "force_ai_analysis_completed",
+                    json.dumps({"job_id": job_id, "provider_id": provider, "provider_name": provider_name, "model": model}, ensure_ascii=False),
+                    actor,
+                    now,
+                ),
+            )
 
     def search_exclusions(
         self,
@@ -1372,23 +1366,66 @@ class PhotoRepository:
         with self.database.session() as connection:
             return [str(row["id"]) for row in connection.execute(query, params).fetchall()]
 
+    def count_active_eligible(self) -> int:
+        with self.database.session() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM photos WHERE lifecycle_status='active' AND eligible=1"
+            ).fetchone()
+        return int(row[0] or 0)
+
+    def active_hashes_for(self, cache_hashes: Sequence[str]) -> set[str]:
+        """Look up only cache-visible SHA values; never materialize the photo library."""
+        requested = list(
+            dict.fromkeys(
+                value.casefold() for value in cache_hashes if _SHA256_RE.fullmatch(value.casefold())
+            )
+        )
+        active: set[str] = set()
+        with self.database.session() as connection:
+            for chunk in _chunks(requested, 400):
+                placeholders = ",".join("?" for _ in chunk)
+                active.update(
+                    str(row["sha256"]).casefold()
+                    for row in connection.execute(
+                        f"SELECT DISTINCT sha256 FROM photos WHERE lifecycle_status='active' AND sha256 IN ({placeholders})",  # noqa: S608
+                        tuple(chunk),
+                    ).fetchall()
+                )
+        return active
+
+    def active_eligible_requested_ids(self, photo_ids: Sequence[str], *, limit: int) -> list[str]:
+        """Bounded SQL validation that preserves the caller's ordering."""
+        requested = list(dict.fromkeys(str(photo_id) for photo_id in photo_ids))
+        allowed: set[str] = set()
+        with self.database.session() as connection:
+            for chunk in _chunks(requested, 400):
+                placeholders = ",".join("?" for _ in chunk)
+                allowed.update(
+                    str(row["id"])
+                    for row in connection.execute(
+                        f"SELECT id FROM photos WHERE lifecycle_status='active' AND eligible=1 AND id IN ({placeholders})",  # noqa: S608
+                        tuple(chunk),
+                    ).fetchall()
+                )
+        return [photo_id for photo_id in requested if photo_id in allowed][:max(1, limit)]
+
     def eligible_photo_batches(
         self, *, group_by: str, limit: int, include_all_active: bool = False
     ) -> list[tuple[str, list[str]]]:
         """完整照片庫模式以年份或第一層資料夾拆成可暫停／續跑的既有工作。"""
         where = "lifecycle_status='active'" if include_all_active else "lifecycle_status='active' AND eligible=1"
+        remaining = max(1, min(int(limit), 100_000))
         with self.database.session() as connection:
             rows = connection.execute(
                 f"""
                 SELECT id,relative_path,captured_at,created_at FROM photos WHERE {where}
                 ORDER BY COALESCE(captured_at,created_at),relative_path,id
-                """
+                LIMIT ?
+                """,
+                (remaining,),
             ).fetchall()
         groups: dict[str, list[str]] = {}
-        remaining = max(1, min(int(limit), 100_000))
         for row in rows:
-            if remaining <= 0:
-                break
             path = str(row["relative_path"] or "")
             key = (
                 path.split("/", 1)[0] or "根目錄"
@@ -1396,7 +1433,6 @@ class PhotoRepository:
                 else str(row["captured_at"] or row["created_at"] or "未知")[:4]
             )
             groups.setdefault(key or "未知", []).append(str(row["id"]))
-            remaining -= 1
         return list(groups.items())
 
     def is_top_candidate(self, photo_id: str, limit: int) -> bool:
@@ -1429,15 +1465,19 @@ class PhotoRepository:
             )
 
     def get_ai_cache(
-        self, *, content_sha256: str, provider: str, model_name: str, prompt_version: str, schema_version: int, schema_kind: str
+        self, *, content_sha256: str, provider: str, model_name: str, prompt_version: str, schema_version: int, schema_kind: str,
+        vision_request_fingerprint: str | None = None,
     ) -> dict | None:
+        cache_prompt_version = _effective_cache_version(prompt_version, vision_request_fingerprint)
         with self.database.session() as connection:
             row = connection.execute(
                 """
                 SELECT * FROM ai_analysis_cache WHERE content_sha256=? AND provider=? AND model_name=?
                   AND prompt_version=? AND schema_version=? AND schema_kind=?
+                  AND (? IS NULL OR vision_request_fingerprint=?)
                 """,
-                (content_sha256, provider, model_name, prompt_version, schema_version, schema_kind),
+                (content_sha256, provider, model_name, cache_prompt_version, schema_version, schema_kind,
+                 vision_request_fingerprint, vision_request_fingerprint),
             ).fetchone()
         if row is None:
             return None
@@ -1464,27 +1504,34 @@ class PhotoRepository:
         cached_tokens: int,
         estimated_cost: float,
         latency_ms: int,
+        vision_request_fingerprint: str | None = None,
+        vision_input_spec_json: str | None = None,
     ) -> None:
+        cache_prompt_version = _effective_cache_version(prompt_version, vision_request_fingerprint)
         with self.database.session() as connection:
             connection.execute(
                 """
                 INSERT INTO ai_analysis_cache(content_sha256,provider,model_name,prompt_version,schema_version,schema_kind,
-                    result_json,raw_json,input_tokens,output_tokens,cached_tokens,estimated_cost,latency_ms,created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    result_json,raw_json,input_tokens,output_tokens,cached_tokens,estimated_cost,latency_ms,created_at,
+                    vision_request_fingerprint,vision_input_spec_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(content_sha256,provider,model_name,prompt_version,schema_version,schema_kind)
                 DO UPDATE SET result_json=excluded.result_json,raw_json=excluded.raw_json,input_tokens=excluded.input_tokens,
                     output_tokens=excluded.output_tokens,cached_tokens=excluded.cached_tokens,estimated_cost=excluded.estimated_cost,
-                    latency_ms=excluded.latency_ms,created_at=excluded.created_at
+                    latency_ms=excluded.latency_ms,created_at=excluded.created_at,
+                    vision_request_fingerprint=excluded.vision_request_fingerprint,
+                    vision_input_spec_json=excluded.vision_input_spec_json
                 """,
                 (
-                    content_sha256, provider, model_name, prompt_version, schema_version, schema_kind,
+                    content_sha256, provider, model_name, cache_prompt_version, schema_version, schema_kind,
                     json.dumps(result, ensure_ascii=False), raw_json, input_tokens, output_tokens, cached_tokens,
                     estimated_cost, latency_ms, datetime.now(timezone.utc).isoformat(),
+                    vision_request_fingerprint, vision_input_spec_json,
                 ),
             )
 
     def acquire_ai_cache_reservation(
-        self, cache_key: str, owner_id: str, *, lease_seconds: int = 120
+        self, cache_key: str, owner_id: str, *, lease_seconds: int = 480
     ) -> bool:
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
@@ -1504,7 +1551,9 @@ class PhotoRepository:
                     (cache_key, owner_id, lease_until, now, now),
                 )
                 return True
-            takeover = str(row["status"]) == "failed" or str(row["lease_until"]) <= now
+            # A completed marker without a matching cache row is harmless: the
+            # caller always rechecks cache after acquiring, then may take over.
+            takeover = str(row["status"]) in {"failed", "completed"} or str(row["lease_until"]) <= now
             if not takeover:
                 return str(row["owner_id"]) == owner_id
             connection.execute(
@@ -1824,6 +1873,12 @@ class PhotoRepository:
         travel_bonus: float = 0.0,
         location_rule_version: str | None = None,
         prompt_version: str = "photo-quality-v3",
+        analysis_fingerprint: str | None = None,
+        analysis_spec_json: str | None = None,
+        vision_request_fingerprint: str | None = None,
+        vision_input_spec_json: str | None = None,
+        prefilter_evaluation: dict | None = None,
+        inherited_from: dict | None = None,
     ) -> None:
         import json
 
@@ -1831,14 +1886,39 @@ class PhotoRepository:
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                if prefilter_evaluation and prefilter_evaluation.get("decision") == "auto_excluded":
+                    current = connection.execute(
+                        "SELECT favorite,manual_override,exclusion_status FROM photos WHERE id=?", (photo_id,)
+                    ).fetchone()
+                    protected = current is None or bool(current["favorite"]) or bool(current["manual_override"]) or str(current["exclusion_status"] or "") in {"manually_restored", "manually_excluded"}
+                    if protected:
+                        event = "automatic_exclusion_skipped"
+                        changes = {"reason": "manual_override_or_favorite"}
+                    else:
+                        details = json.dumps(prefilter_evaluation, ensure_ascii=False, sort_keys=True)
+                        connection.execute(
+                            """UPDATE photos SET eligible=0,exclusion_status='auto_excluded',reject_reason=?,
+                               reject_rule=?,reject_rule_version=?,reject_details_json=?,rejected_at=?,updated_at=? WHERE id=?""",
+                            (prefilter_evaluation["primary_reason"], LOCAL_QUALITY_RULE, FEATURE_VERSION, details, now, now, photo_id),
+                        )
+                        event = "automatic_exclusion"
+                        changes = {"reason": prefilter_evaluation["primary_reason"], "feature_version": FEATURE_VERSION}
+                    connection.execute(
+                        "INSERT INTO photo_events(photo_id,event,changes_json,changed_by,created_at) VALUES (?,?,?,?,?)",
+                        # Automatic policy decisions have no authenticated user;
+                        # `changed_by` is a foreign key and must remain NULL
+                        # rather than inventing a non-existent system account.
+                        (photo_id, event, json.dumps(changes, ensure_ascii=False), None, now),
+                    )
                 connection.execute(
                     """
                     INSERT INTO photo_analysis(photo_id,job_id,schema_version,stage,provider,model,caption,types_json,
                         memory_score,beauty_score,technical_quality_score,emotion_score,side_caption,should_keep,
                         sensitive,reason,raw_json,analysis_source,ranking_score,scoring_version_id,created_at,
                         schema_kind,semantic_json,local_score,semantic_score,base_ranking_score,final_ranking_score,
-                        ranking_rule_version,travel_bonus,location_rule_version,prompt_version)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        ranking_rule_version,travel_bonus,location_rule_version,prompt_version,
+                        analysis_fingerprint,analysis_spec_json,vision_request_fingerprint,vision_input_spec_json)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         photo_id,
@@ -1868,6 +1948,7 @@ class PhotoRepository:
                                 "source": "local" if provider == "local" else "model",
                                 "confidence": (result.get("details") or {}).get("confidence"),
                                 "values": result.get("details") or {},
+                                **({"inherited_from": inherited_from} if inherited_from else {}),
                             },
                             ensure_ascii=False,
                         ),
@@ -1879,6 +1960,10 @@ class PhotoRepository:
                         travel_bonus,
                         location_rule_version,
                         prompt_version,
+                        analysis_fingerprint,
+                        analysis_spec_json,
+                        vision_request_fingerprint,
+                        vision_input_spec_json,
                     ),
                 )
                 connection.execute(

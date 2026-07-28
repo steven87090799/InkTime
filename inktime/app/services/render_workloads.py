@@ -246,9 +246,9 @@ def _prepare_library_preview_child(
         image = encode_image(
             image,
             profile_key=str(arguments["profile"]),
-            dither=str(arguments["dither"]),
-            color_distance=str(settings["color_distance"]),
-            strength=float(settings["dither_strength"]),
+            dither=str(arguments["effective_dither"]),
+            color_distance=str(arguments["color_distance"]),
+            strength=float(arguments["dither_strength"]),
         ).preview
     layout_key = str(
         arguments.get("layout")
@@ -268,6 +268,9 @@ def _prepare_library_preview_child(
         "width": image.width,
         "height": image.height,
         "quantized": quantized,
+        "requested_dither": arguments.get("requested_dither"),
+        "effective_dither": arguments.get("effective_dither"),
+        "override_source": arguments.get("override_source"),
     }
 
 
@@ -464,12 +467,6 @@ class RenderWorkloadService:
                 kwargs={
                     "settings": {
                         "arguments": dict(settings["arguments"]),
-                        "color_distance": str(
-                            self.settings.get("render.color_distance", "oklab")
-                        ),
-                        "dither_strength": float(
-                            self.settings.get("render.dither_strength", 1.0)
-                        ),
                     },
                     "database_path": str(snapshot_path),
                     "prepared_path": str(prepared),

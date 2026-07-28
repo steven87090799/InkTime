@@ -867,6 +867,65 @@ MIGRATIONS = (
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_device_notifications_idempotency ON device_notifications(webhook_idempotency_key)",
         "CREATE INDEX IF NOT EXISTS idx_device_notifications_claim ON device_notifications(webhook_status,webhook_next_attempt_at,webhook_claimed_until,id)",
     )),
+    Migration(22, "加入決策追蹤、回饋、離線佇列、保留與 Canary 發布", (
+        "CREATE TABLE algorithm_versions (id TEXT PRIMARY KEY,algorithm_name TEXT NOT NULL,algorithm_version TEXT NOT NULL,configuration_hash TEXT NOT NULL,configuration_snapshot_json TEXT NOT NULL DEFAULT '{}',renderer_version TEXT NOT NULL,layout_strategy_version TEXT NOT NULL,pairing_strategy_version TEXT NOT NULL,scoring_strategy_version TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(algorithm_name,algorithm_version,configuration_hash))",
+        "CREATE TABLE selection_decision_traces (id INTEGER PRIMARY KEY AUTOINCREMENT,trace_id TEXT NOT NULL UNIQUE,device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,execution_mode TEXT NOT NULL,algorithm_version_id TEXT REFERENCES algorithm_versions(id) ON DELETE SET NULL,render_job_id TEXT,release_id TEXT REFERENCES releases(id) ON DELETE SET NULL,primary_photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,secondary_photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,layout_mode TEXT,fit_mode TEXT,candidate_count INTEGER NOT NULL DEFAULT 0,eligible_count INTEGER NOT NULL DEFAULT 0,selected_score REAL,decision_reasons_json TEXT NOT NULL DEFAULT '[]',rejection_summary_json TEXT NOT NULL DEFAULT '{}',context_snapshot_json TEXT NOT NULL DEFAULT '{}',duration_ms INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL)",
+        "CREATE TABLE selection_decision_candidates (id INTEGER PRIMARY KEY AUTOINCREMENT,trace_id TEXT NOT NULL REFERENCES selection_decision_traces(trace_id) ON DELETE CASCADE,photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,rank INTEGER NOT NULL,base_score REAL,adjusted_score REAL,selected INTEGER NOT NULL DEFAULT 0,rejection_code TEXT,score_components_json TEXT NOT NULL DEFAULT '{}',UNIQUE(trace_id,rank),UNIQUE(trace_id,photo_id))",
+        "CREATE TABLE photo_feedback (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT REFERENCES users(id) ON DELETE SET NULL,device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,decision_trace_id TEXT REFERENCES selection_decision_traces(trace_id) ON DELETE SET NULL,feedback_type TEXT NOT NULL,value REAL NOT NULL DEFAULT 1,expires_at TEXT,metadata_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(user_id,device_id,photo_id,feedback_type))",
+        "CREATE TABLE photo_pair_feedback (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT,device_id TEXT,photo_id TEXT NOT NULL,secondary_photo_id TEXT NOT NULL,decision_trace_id TEXT,feedback_type TEXT NOT NULL,value REAL NOT NULL DEFAULT 1,expires_at TEXT,metadata_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(user_id,device_id,photo_id,secondary_photo_id,feedback_type))",
+        "CREATE TABLE layout_feedback (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT,device_id TEXT,photo_id TEXT,secondary_photo_id TEXT,decision_trace_id TEXT,feedback_type TEXT NOT NULL,value REAL NOT NULL DEFAULT 1,expires_at TEXT,metadata_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(user_id,device_id,decision_trace_id,feedback_type))",
+        "CREATE TABLE caption_feedback (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT,device_id TEXT,photo_id TEXT,decision_trace_id TEXT,feedback_type TEXT NOT NULL,value REAL NOT NULL DEFAULT 1,expires_at TEXT,metadata_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(user_id,device_id,decision_trace_id,feedback_type))",
+        "CREATE TABLE shadow_config (id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL DEFAULT 0,algorithm_version_id TEXT,device_ids_json TEXT NOT NULL DEFAULT '[]',sample_percent INTEGER NOT NULL DEFAULT 10,daily_max_runs INTEGER NOT NULL DEFAULT 10,generate_preview INTEGER NOT NULL DEFAULT 1,preview_retention_days INTEGER NOT NULL DEFAULT 30,updated_by TEXT,updated_at TEXT NOT NULL)",
+        "INSERT INTO shadow_config(id,updated_at) VALUES (1,datetime('now'))",
+        "CREATE TABLE device_content_queues (device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,depth INTEGER NOT NULL DEFAULT 3,queue_version INTEGER NOT NULL DEFAULT 0,current_release_id TEXT,last_known_good_release_id TEXT,next_queued_release_id TEXT,emergency_fallback_release_id TEXT,updated_at TEXT NOT NULL)",
+        "CREATE TABLE device_content_queue_items (id TEXT PRIMARY KEY,device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE RESTRICT,position INTEGER NOT NULL,priority INTEGER NOT NULL DEFAULT 100,display_after TEXT,expires_at TEXT,status TEXT NOT NULL,downloaded_at TEXT,displayed_at TEXT,retry_count INTEGER NOT NULL DEFAULT 0,last_error_code TEXT,idempotency_key TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(device_id,release_id),UNIQUE(device_id,position),UNIQUE(device_id,idempotency_key))",
+        "CREATE TABLE device_content_queue_events (id INTEGER PRIMARY KEY AUTOINCREMENT,queue_item_id TEXT NOT NULL REFERENCES device_content_queue_items(id) ON DELETE CASCADE,device_id TEXT NOT NULL,event_type TEXT NOT NULL,idempotency_key TEXT,payload_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,UNIQUE(queue_item_id,event_type,idempotency_key))",
+        "CREATE TABLE data_retention_policies (data_type TEXT PRIMARY KEY,enabled INTEGER NOT NULL DEFAULT 1,retention_days INTEGER NOT NULL,maximum_items INTEGER,maximum_bytes INTEGER,minimum_items_to_keep INTEGER NOT NULL DEFAULT 0,cleanup_batch_size INTEGER NOT NULL DEFAULT 200,dry_run INTEGER NOT NULL DEFAULT 1,last_run_at TEXT,updated_at TEXT NOT NULL)",
+        "CREATE TABLE data_cleanup_runs (id TEXT PRIMARY KEY,started_at TEXT NOT NULL,completed_at TEXT,dry_run INTEGER NOT NULL,status TEXT NOT NULL,summary_json TEXT NOT NULL DEFAULT '{}',error_code TEXT)",
+        "CREATE TABLE data_cleanup_items (id INTEGER PRIMARY KEY AUTOINCREMENT,cleanup_run_id TEXT NOT NULL REFERENCES data_cleanup_runs(id) ON DELETE CASCADE,data_type TEXT NOT NULL,reference_id TEXT NOT NULL,action TEXT NOT NULL,bytes_freed INTEGER NOT NULL DEFAULT 0,result TEXT NOT NULL,created_at TEXT NOT NULL)",
+        "CREATE TABLE rollout_campaigns (id TEXT PRIMARY KEY,release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE RESTRICT,name TEXT NOT NULL,status TEXT NOT NULL,previous_release_id TEXT,config_json TEXT NOT NULL DEFAULT '{}',created_by TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,rollback_reason TEXT)",
+        "CREATE TABLE rollout_stages (id INTEGER PRIMARY KEY AUTOINCREMENT,rollout_id TEXT NOT NULL REFERENCES rollout_campaigns(id) ON DELETE CASCADE,stage_number INTEGER NOT NULL,target_percent INTEGER NOT NULL,minimum_observation_minutes INTEGER NOT NULL DEFAULT 30,minimum_successful_devices INTEGER NOT NULL DEFAULT 1,maximum_failure_rate REAL NOT NULL DEFAULT .1,maximum_timeout_rate REAL NOT NULL DEFAULT .1,minimum_ack_rate REAL NOT NULL DEFAULT .9,manual_approval_required INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'pending',started_at TEXT,completed_at TEXT,UNIQUE(rollout_id,stage_number))",
+        "CREATE TABLE rollout_targets (id INTEGER PRIMARY KEY AUTOINCREMENT,rollout_id TEXT NOT NULL REFERENCES rollout_campaigns(id) ON DELETE CASCADE,device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,status TEXT NOT NULL DEFAULT 'pending',queue_item_id TEXT REFERENCES device_content_queue_items(id) ON DELETE SET NULL,last_error_code TEXT,updated_at TEXT NOT NULL,UNIQUE(rollout_id,device_id))",
+        "CREATE TABLE rollout_health_events (id INTEGER PRIMARY KEY AUTOINCREMENT,rollout_id TEXT NOT NULL REFERENCES rollout_campaigns(id) ON DELETE CASCADE,device_id TEXT,event_type TEXT NOT NULL,severity TEXT NOT NULL,error_code TEXT,details_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL)",
+        "CREATE TABLE rollout_actions (id INTEGER PRIMARY KEY AUTOINCREMENT,rollout_id TEXT NOT NULL REFERENCES rollout_campaigns(id) ON DELETE CASCADE,actor_id TEXT,action TEXT NOT NULL,reason TEXT,details_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL)",
+        "CREATE INDEX idx_queue_items_device_status_position ON device_content_queue_items(device_id,status,position)",
+        "CREATE INDEX idx_decision_traces_mode_created ON selection_decision_traces(execution_mode,created_at DESC,id DESC)",
+        "INSERT INTO data_retention_policies(data_type,retention_days,minimum_items_to_keep,updated_at) VALUES ('decision_trace',180,0,datetime('now')),('decision_candidate',60,0,datetime('now')),('shadow_preview',30,0,datetime('now')),('device_event',180,0,datetime('now')),('queue_event',90,0,datetime('now')),('job_log',30,0,datetime('now'))",
+    )),
+    Migration(23, "修正決策關聯與韌性資料一致性", (
+        "ALTER TABLE selection_decision_traces ADD COLUMN correlation_key TEXT",
+        "CREATE INDEX idx_decision_traces_correlation ON selection_decision_traces(correlation_key,execution_mode,created_at DESC)",
+        "CREATE INDEX idx_feedback_null_scope ON photo_feedback(user_id,photo_id,feedback_type) WHERE device_id IS NULL",
+    )),
+    Migration(24, "加入待分析選片與 Vision Input 指紋", (
+        "ALTER TABLE photo_analysis ADD COLUMN analysis_fingerprint TEXT",
+        "ALTER TABLE photo_analysis ADD COLUMN analysis_spec_json TEXT",
+        "ALTER TABLE photo_analysis ADD COLUMN vision_request_fingerprint TEXT",
+        "ALTER TABLE photo_analysis ADD COLUMN vision_input_spec_json TEXT",
+        "ALTER TABLE ai_analysis_cache ADD COLUMN vision_request_fingerprint TEXT",
+        "ALTER TABLE ai_analysis_cache ADD COLUMN vision_input_spec_json TEXT",
+        "ALTER TABLE jobs ADD COLUMN selection_mode TEXT NOT NULL DEFAULT 'pending'",
+        "ALTER TABLE jobs ADD COLUMN analysis_fingerprint TEXT",
+        "ALTER TABLE jobs ADD COLUMN analysis_spec_json TEXT",
+        "ALTER TABLE jobs ADD COLUMN force_recompute INTEGER NOT NULL DEFAULT 0 CHECK(force_recompute IN (0,1))",
+        "CREATE INDEX idx_photo_analysis_photo_fingerprint ON photo_analysis(photo_id,analysis_fingerprint)",
+        "CREATE INDEX idx_photo_analysis_vision_fingerprint ON photo_analysis(vision_request_fingerprint)",
+        "CREATE INDEX idx_ai_cache_vision_fingerprint ON ai_analysis_cache(vision_request_fingerprint)",
+        "CREATE INDEX idx_jobs_active_fingerprint ON jobs(analysis_fingerprint,status)",
+        "CREATE INDEX idx_job_items_photo_status ON job_items(photo_id,status)",
+        """
+        UPDATE settings SET value_json=CASE key
+            WHEN 'analysis.side_caption_min_chars' THEN '8'
+            WHEN 'analysis.side_caption_target_chars' THEN '12'
+            WHEN 'analysis.side_caption_max_chars' THEN '16' END,
+            updated_at=datetime('now')
+        WHERE key IN ('analysis.side_caption_min_chars','analysis.side_caption_target_chars','analysis.side_caption_max_chars')
+          AND (SELECT COUNT(*) FROM settings WHERE (key='analysis.side_caption_min_chars' AND value_json='10')
+               OR (key='analysis.side_caption_target_chars' AND value_json='22')
+               OR (key='analysis.side_caption_max_chars' AND value_json='42'))=3
+        """,
+        "UPDATE settings SET value_json='200',updated_at=datetime('now') WHERE key='scanner.write_batch_size' AND value_json='500'",
+    )),
 )
 
 

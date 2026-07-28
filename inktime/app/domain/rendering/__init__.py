@@ -27,6 +27,7 @@ from .palette import (
 from .photo_renderer import BUILTIN_PHOTO_PRESETS, PhotoRenderResult, render_photo
 from .release import AtomicReleasePublisher, DeviceTestReleaseStore, pack_four_color_2bpp
 from .adaptive_layout import photo_orientation, select_pair_candidate
+from .contrast_risk import EPAPER_CONTRAST_RISK_VERSION, calculate_epaper_contrast_risk
 
 __all__ = [
     "current_local_date",
@@ -59,4 +60,6 @@ __all__ = [
     "pack_four_color_2bpp",
     "photo_orientation",
     "select_pair_candidate",
+    "EPAPER_CONTRAST_RISK_VERSION",
+    "calculate_epaper_contrast_risk",
 ]
