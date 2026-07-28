@@ -73,6 +73,76 @@ def test_pair_caption_plan_preserves_ai_and_local_provenance(app, tmp_path):
     assert second["source"] != "ai_side_caption"
 
 
+def test_caption_uses_latest_analysis_with_usable_caption_content(app, tmp_path):
+    root = tmp_path / "caption-analysis-selection"
+    root.mkdir()
+    _photo(app, root, "caption-a", (1600, 900), "2021-07-28T10:00:00+00:00", "#4477aa")
+    photos = app.extensions["inktime_photo_repository"]
+
+    def save(*, side_caption: str = "", details=None):
+        photos.save_analysis(
+            "caption-a", None, "caption", "test-ai", "caption-model",
+            {"schema_version": 1, "caption": "完整說明", "types": ["其他"], "memory_score": 90,
+             "beauty_score": 90, "technical_quality_score": 90, "emotion_score": 90,
+             "side_caption": side_caption, "should_keep": True, "sensitive": False,
+             "reason": "測試", "details": details or {}},
+            "{}", prompt_version="caption-test-v1",
+        )
+
+    save(side_caption="較舊的 AI 文案")
+    save()
+    plan = app.extensions["inktime_render_service"].resolve_render_plan("caption-a")
+    assert plan["primary_caption"]["text"] == "較舊的 AI 文案"
+    assert plan["primary_caption"]["source"] == "ai_side_caption"
+    assert plan["primary_caption"]["is_ai_generated"] is True
+
+
+def test_caption_uses_variant_when_latest_analysis_has_no_side_caption(app, tmp_path):
+    root = tmp_path / "caption-variant-selection"
+    root.mkdir()
+    _photo(app, root, "variant-a", (1600, 900), "2021-07-28T10:00:00+00:00", "#4477aa")
+    photos = app.extensions["inktime_photo_repository"]
+
+    def save(*, details=None):
+        photos.save_analysis(
+            "variant-a", None, "caption", "test-ai", "caption-model",
+            {"schema_version": 1, "caption": "完整說明", "types": ["其他"], "memory_score": 90,
+             "beauty_score": 90, "technical_quality_score": 90, "emotion_score": 90,
+             "side_caption": "", "should_keep": True, "sensitive": False,
+             "reason": "測試", "details": details or {}},
+            "{}", prompt_version="caption-test-v1",
+        )
+
+    save(details={"caption_variants": {"natural": "較舊的 Variant 文案"}})
+    save()
+    settings = app.extensions["inktime_settings_repository"]
+    settings.update("analysis.advanced_caption_enabled", True, changed_by="test", source_ip="test")
+    settings.update("analysis.caption_variants_enabled", True, changed_by="test", source_ip="test")
+    plan = app.extensions["inktime_render_service"].resolve_render_plan("variant-a")
+    assert plan["primary_caption"]["text"] == "較舊的 Variant 文案"
+    assert plan["primary_caption"]["source"] == "ai_side_caption"
+    assert plan["primary_caption"]["is_ai_generated"] is True
+
+
+def test_caption_falls_back_locally_when_no_analysis_has_caption_content(app, tmp_path):
+    root = tmp_path / "caption-local-fallback"
+    root.mkdir()
+    _photo(app, root, "fallback-a", (1600, 900), "2021-07-28T10:00:00+00:00", "#4477aa")
+    photos = app.extensions["inktime_photo_repository"]
+    for _ in range(2):
+        photos.save_analysis(
+            "fallback-a", None, "caption", "test-ai", "caption-model",
+            {"schema_version": 1, "caption": "完整說明", "types": ["其他"], "memory_score": 90,
+             "beauty_score": 90, "technical_quality_score": 90, "emotion_score": 90,
+             "side_caption": "", "should_keep": True, "sensitive": False, "reason": "測試"},
+            "{}", prompt_version="caption-test-v1",
+        )
+    caption = app.extensions["inktime_render_service"].resolve_render_plan("fallback-a")["primary_caption"]
+    assert caption["text"]
+    assert caption["is_ai_generated"] is False
+    assert caption["source"] != "ai_side_caption"
+
+
 def test_dual_pair_compare_uses_one_frozen_pair_for_four_formal_previews(client, app, tmp_path):
     root = tmp_path / "compare"
     root.mkdir()

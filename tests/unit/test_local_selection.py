@@ -102,9 +102,23 @@ def test_pair_secondary_stays_inside_effective_fallback_pool(app, tmp_path):
         trace = connection.execute(
             "SELECT context_snapshot_json FROM selection_decision_traces WHERE trace_id=?", (result["decision_trace_id"],)
         ).fetchone()
+        candidate = connection.execute(
+            """SELECT score_components_json FROM selection_decision_candidates
+               WHERE trace_id=? AND photo_id='exact-a'""",
+            (result["decision_trace_id"],),
+        ).fetchone()
     context = json.loads(trace[0])
     assert context["secondary_selection_stage"] == "nearby"
     assert context["pair_candidate_count"] == 1
+    components = json.loads(candidate[0])
+    assert components["paired_secondary_photo_id"] == "nearby-b"
+    assert "pair_score" in components
+    assert set(components["pair_score_components"]) >= {
+        "primary_local_display_score", "secondary_local_display_score", "orientation_compatibility",
+        "capture_time_proximity", "known_location_match", "location_data_available",
+        "dual_low_priority_penalty", "dual_high_epaper_risk_penalty", "dual_recent_display_penalty",
+    }
+    assert "gps_lat" not in json.dumps(components)
 
 
 def test_pair_score_uses_only_offline_resolved_city(app, tmp_path):

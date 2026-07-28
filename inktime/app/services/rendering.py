@@ -541,7 +541,7 @@ class RenderService:
         )
 
     def _caption_analyses(self, photo_ids: list[str]) -> dict[str, dict[str, Any]]:
-        """Fetch newest caption-capable analyses in one bounded query."""
+        """Fetch the newest usable caption analysis per photo in one bounded query."""
         ids = list(dict.fromkeys(str(photo_id) for photo_id in photo_ids if photo_id))
         if not ids:
             return {}
@@ -558,9 +558,30 @@ class RenderService:
                 ids,
             ).fetchall()
         result: dict[str, dict[str, Any]] = {}
+        latest: dict[str, dict[str, Any]] = {}
         for row in rows:
-            result.setdefault(str(row["photo_id"]), dict(row))
-        return result
+            photo_id = str(row["photo_id"])
+            analysis = dict(row)
+            latest.setdefault(photo_id, analysis)
+            if photo_id not in result and self._has_caption_content(analysis):
+                result[photo_id] = analysis
+        return {photo_id: result.get(photo_id, analysis) for photo_id, analysis in latest.items()}
+
+    @staticmethod
+    def _caption_variants(analysis: dict[str, Any] | None) -> dict[str, Any]:
+        try:
+            variants = (json.loads(str((analysis or {}).get("semantic_json") or "{}")).get("values") or {}).get(
+                "caption_variants"
+            ) or {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return variants if isinstance(variants, dict) else {}
+
+    @classmethod
+    def _has_caption_content(cls, analysis: dict[str, Any]) -> bool:
+        if str(analysis.get("side_caption") or "").strip():
+            return True
+        return any(str(value or "").strip() for value in cls._caption_variants(analysis).values())
 
     def _caption_text(self, photo_id: str, analysis: dict[str, Any] | None) -> str:
         """Choose a configured variant without changing its provenance."""
@@ -573,12 +594,7 @@ class RenderService:
             and bool(self.settings.get("analysis.caption_variants_enabled", False))
         ):
             return side_caption
-        try:
-            variants = (json.loads(str(row.get("semantic_json") or "{}")).get("values") or {}).get(
-                "caption_variants"
-            ) or {}
-        except (TypeError, ValueError, json.JSONDecodeError):
-            variants = {}
+        variants = self._caption_variants(row)
         style = str(self.settings.get("analysis.copy_default_style", "natural"))
         selected = str(
             variants.get(style) or variants.get("natural") or side_caption or "畫面把此刻收好了。"
@@ -1299,16 +1315,12 @@ class RenderService:
         layout_key = str(self.settings.get("render.layout", "photo_info"))
         source_limit = quantity * 2 if layout_key in {"photo_pair", "photo_pair_caption"} else quantity
         selected = photo_ids[:source_limit]
-        eligibility_sources: dict[str, str] = {}
         if not selected:
             selected = self.select_candidates(source_limit)
-        else:
-            # 明確指定不合格照片必須穩定失敗；不得靜默改選其他照片。
-            required = self.candidates.require_for_execution_mode(
-                selected, execution_mode(self.settings)
-            )
-            selected = [str(row["id"]) for row in required]
-            eligibility_sources = {str(row["id"]): str(row["eligibility_source"]) for row in required}
+        # 明確指定與自動選片都必須在發布前重新驗證；不得使用過期候選或遺失來源契約。
+        required = self.candidates.require_for_execution_mode(selected, execution_mode(self.settings))
+        selected = [str(row["id"]) for row in required]
+        eligibility_sources = {str(row["id"]): str(row["eligibility_source"]) for row in required}
         if device_ids:
             unique_device_ids = list(dict.fromkeys(str(value) for value in device_ids if str(value)))
             placeholders = ",".join("?" for _ in unique_device_ids)

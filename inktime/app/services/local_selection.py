@@ -212,6 +212,28 @@ class LocalSelectionPolicy:
         trace_id = None
         if self.resilience is not None:
             selected_ids = {str(row["id"]) for row in selected}
+            trace_candidates: list[dict[str, Any]] = []
+            for row in allowed[:50]:
+                candidate = {
+                    "photo_id": row["id"],
+                    "base_score": row.get("local_candidate_score"),
+                    "adjusted_score": row["local_display_score"],
+                    "selected": str(row["id"]) in selected_ids,
+                    "score_components": {
+                        **row["score_components"],
+                        "candidate_stage": stage_by_id[str(row["id"])],
+                        "selected_role": "primary" if selected and str(row["id"]) == str(selected[0]["id"])
+                        else "secondary" if len(selected) > 1 and str(row["id"]) == str(selected[1]["id"])
+                        else "not_selected",
+                    },
+                }
+                if selected and len(selected) > 1 and str(row["id"]) == str(selected[0]["id"]) and "pair_score" in row:
+                    candidate["score_components"].update(
+                        pair_score=row["pair_score"],
+                        pair_score_components=row["pair_score_components"],
+                        paired_secondary_photo_id=str(selected[1]["id"]),
+                    )
+                trace_candidates.append(candidate)
             algorithm = self.resilience.algorithm_version(
                 name="local_display_selection", version="v1",
                 configuration={"candidate_limit": min(len(ranked), 200), "fallback_setting": fallback},
@@ -221,15 +243,8 @@ class LocalSelectionPolicy:
                 execution_mode="production", algorithm_version_id=algorithm,
                 primary_photo_id=str(selected[0]["id"]) if selected else None,
                 secondary_photo_id=str(selected[1]["id"]) if len(selected) > 1 and layout in {"photo_pair", "photo_pair_caption"} else None,
-                layout_mode=layout, candidates=[
-                    {"photo_id": row["id"], "base_score": row.get("local_candidate_score"),
-                     "adjusted_score": row["local_display_score"], "selected": str(row["id"]) in selected_ids,
-                     "score_components": {**row["score_components"], "candidate_stage": stage_by_id[str(row["id"])],
-                                          "selected_role": "primary" if selected and str(row["id"]) == str(selected[0]["id"])
-                                          else "secondary" if len(selected) > 1 and str(row["id"]) == str(selected[1]["id"])
-                                          else "not_selected"}}
-                    for row in allowed[:50]
-                ], candidate_count=len(allowed), eligible_count=len(allowed),
+                layout_mode=layout, candidates=trace_candidates,
+                candidate_count=len(allowed), eligible_count=len(allowed),
                 reasons=[fallback_type], context={"target_date": target.isoformat(), "requested_month_day": requested_month_day,
                     "effective_month_day": effective_month_day, "fallback_type": fallback_type,
                     "fallback_reason": leap_reason, "fallback_setting": fallback, "window_days": window,
