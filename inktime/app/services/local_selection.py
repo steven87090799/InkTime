@@ -13,8 +13,8 @@ from inktime.app.domain.rendering.contrast_risk import calculate_epaper_contrast
 class LocalSelectionPolicy:
     """SQLite-first local candidate ranking and stable two-photo pairing."""
 
-    def __init__(self, database, settings, resilience=None) -> None:
-        self.database, self.settings, self.resilience = database, settings, resilience
+    def __init__(self, database, settings, resilience=None, locations=None) -> None:
+        self.database, self.settings, self.resilience, self.locations = database, settings, resilience, locations
 
     def _rows(self, *, target: date, limit: int) -> list[dict[str, Any]]:
         month_day = target.strftime("%m-%d")
@@ -95,8 +95,22 @@ class LocalSelectionPolicy:
             item["local_display_score"] = round(sum(components.values()), 3)
             item["epaper_contrast_risk"] = risk
             item["local_quality_decision"] = quality["decision"]
+            # The resolver is offline and returns a coarse display city only.
+            # A missing resolver/data intentionally remains an unscored location.
+            item["city"] = self._location_name(item)
             result.append(item)
         return sorted(result, key=lambda row: (-float(row["local_display_score"]), str(row.get("captured_at") or ""), str(row["id"])))
+
+    def _location_name(self, row: dict[str, Any]) -> str:
+        if self.locations is None:
+            return ""
+        try:
+            return str(self.locations.resolve(
+                row.get("gps_lat"), row.get("gps_lon"),
+                max_distance_km=float(self.settings.get("render.location_max_distance_km", 80)),
+            ) or "").strip()
+        except (TypeError, ValueError):
+            return ""
 
     @staticmethod
     def _effective_month_day(target: date, target_month_day: str | None) -> tuple[str, str | None]:
@@ -122,7 +136,9 @@ class LocalSelectionPolicy:
         orientation_bonus = 4.0 if primary_landscape != secondary_landscape else 1.0
         if orientation == "portrait":
             orientation_bonus += 1.0 if primary_landscape or secondary_landscape else 0.0
-        location_bonus = 3.0 if primary.get("city") and primary.get("city") == secondary.get("city") else 0.0
+        primary_city = str(primary.get("city") or "").strip()
+        secondary_city = str(secondary.get("city") or "").strip()
+        location_bonus = 3.0 if primary_city and primary_city.casefold() == secondary_city.casefold() else 0.0
         p_date, s_date = str(primary.get("captured_date") or ""), str(secondary.get("captured_date") or "")
         proximity = 2.0 if p_date and s_date and p_date[:7] == s_date[:7] else 0.0
         low_penalty = 8.0 if primary.get("local_quality_decision") == secondary.get("local_quality_decision") == "low_priority" else 0.0
@@ -131,7 +147,9 @@ class LocalSelectionPolicy:
         components = {
             "primary_local_display_score": primary_score, "secondary_local_display_score": secondary_score,
             "orientation_compatibility": orientation_bonus, "capture_time_proximity": proximity,
-            "known_location_match": location_bonus, "dual_low_priority_penalty": low_penalty,
+            "known_location_match": location_bonus,
+            "location_data_available": float(bool(primary_city and secondary_city)),
+            "dual_low_priority_penalty": low_penalty,
             "dual_high_epaper_risk_penalty": risk_penalty, "dual_recent_display_penalty": recent_penalty,
         }
         return round(primary_score + secondary_score + orientation_bonus + proximity + location_bonus - low_penalty - risk_penalty - recent_penalty, 3), components
@@ -141,24 +159,43 @@ class LocalSelectionPolicy:
         excluded_ids: set[str] | None = None, target_month_day: str | None = None,
     ) -> dict[str, Any]:
         ranked = self.ranked(target=target, orientation=orientation, excluded_ids=excluded_ids)
-        requested_month_day, leap_reason = self._effective_month_day(target, target_month_day)
+        requested_month_day = str(target_month_day or target.strftime("%m-%d"))
+        effective_month_day, leap_reason = self._effective_month_day(target, target_month_day)
         window = int(self.settings.get("render.history_today_window_days", 7))
         fallback = str(self.settings.get("render.history_today_fallback", "nearby_then_ranked"))
-        exact = [row for row in ranked if str(row.get("captured_month_day") or "") == requested_month_day]
-        nearby_days = self._nearby_days(requested_month_day, window)
+        exact = [row for row in ranked if str(row.get("captured_month_day") or "") == effective_month_day]
+        nearby_days = self._nearby_days(effective_month_day, window)
         nearby = sorted(
             [row for row in ranked if str(row.get("captured_month_day") or "") in nearby_days],
             key=lambda row: (nearby_days[str(row["captured_month_day"])], -float(row["local_display_score"]), str(row["id"])),
         )
-        selected = exact[:max(1, quantity)]
-        if len(selected) < quantity and fallback in {"nearby_then_ranked", "nearby_only"}:
-            selected.extend(row for row in nearby if row not in selected)
-        if len(selected) < quantity and fallback in {"nearby_then_ranked", "ranked"}:
-            selected.extend(row for row in ranked if row not in selected)
-        selected = selected[:max(1, quantity)]
-        if layout in {"photo_pair", "photo_pair_caption"} and len(selected) >= 2:
+        exact_ids = {str(row["id"]) for row in exact}
+        nearby_ids = {str(row["id"]) for row in nearby}
+        ranked_only = [row for row in ranked if str(row["id"]) not in exact_ids | nearby_ids]
+        needed = max(1, quantity)
+        if fallback == "ranked":
+            allowed = list(ranked)
+        else:
+            # A pool becomes eligible stage-by-stage only when the previous
+            # stage cannot satisfy this release.  This keeps an exact pair
+            # exact instead of letting Pair Score replace its secondary with
+            # an otherwise permitted ranked photo.
+            allowed = list(exact)
+            if len(allowed) < needed and fallback in {"nearby_only", "nearby_then_ranked"}:
+                allowed.extend(nearby)
+            if len(allowed) < needed and fallback == "nearby_then_ranked":
+                allowed.extend(ranked_only)
+        stage_by_id = {
+            str(row["id"]): "exact" if str(row["id"]) in exact_ids else
+            "nearby" if str(row["id"]) in nearby_ids else "ranked"
+            for row in allowed
+        }
+        selected = allowed[:needed]
+        pair_candidate_count = 0
+        if layout in {"photo_pair", "photo_pair_caption"} and selected:
             primary = selected[0]
-            peers = [row for row in ranked[:50] if str(row["id"]) != str(primary["id"])]
+            peers = [row for row in allowed[:50] if str(row["id"]) != str(primary["id"])]
+            pair_candidate_count = len(peers)
             if peers:
                 pairs = [(self._pair_score(primary, peer, orientation=orientation), peer) for peer in peers]
                 (pair_score, pair_components), secondary = sorted(pairs, key=lambda item: (-item[0][0], str(item[1]["id"])))[0]
@@ -166,13 +203,18 @@ class LocalSelectionPolicy:
                 primary["pair_score"] = pair_score
                 primary["pair_score_components"] = pair_components
                 selected = [primary, secondary] + selected[2:]
-        fallback_type = "exact_day" if exact else "nearby_day" if nearby else "ranked_fallback" if selected else "none"
+        selected = selected[:needed]
+        selected_stages = [stage_by_id[str(row["id"])] for row in selected]
+        fallback_type = (
+            "none" if not selected else "ranked_fallback" if "ranked" in selected_stages else
+            "nearby_day" if "nearby" in selected_stages else "exact_day"
+        )
         trace_id = None
         if self.resilience is not None:
             selected_ids = {str(row["id"]) for row in selected}
             algorithm = self.resilience.algorithm_version(
                 name="local_display_selection", version="v1",
-                configuration={"candidate_limit": min(len(ranked), 200), "fallback": fallback_type},
+                configuration={"candidate_limit": min(len(ranked), 200), "fallback_setting": fallback},
                 renderer="server", layout=layout, pairing="local-v1", scoring="local-display-v1",
             )
             trace_id = self.resilience.create_trace(
@@ -182,13 +224,22 @@ class LocalSelectionPolicy:
                 layout_mode=layout, candidates=[
                     {"photo_id": row["id"], "base_score": row.get("local_candidate_score"),
                      "adjusted_score": row["local_display_score"], "selected": str(row["id"]) in selected_ids,
-                     "score_components": row["score_components"]}
-                    for row in ranked[:50]
-                ], candidate_count=len(ranked), eligible_count=len(ranked),
+                     "score_components": {**row["score_components"], "candidate_stage": stage_by_id[str(row["id"])],
+                                          "selected_role": "primary" if selected and str(row["id"]) == str(selected[0]["id"])
+                                          else "secondary" if len(selected) > 1 and str(row["id"]) == str(selected[1]["id"])
+                                          else "not_selected"}}
+                    for row in allowed[:50]
+                ], candidate_count=len(allowed), eligible_count=len(allowed),
                 reasons=[fallback_type], context={"target_date": target.isoformat(), "requested_month_day": requested_month_day,
-                    "effective_month_day": requested_month_day, "fallback_type": fallback_type,
-                    "fallback_reason": leap_reason or fallback_type, "window_days": window,
-                    "exact_count": len(exact), "nearby_count": len(nearby), "ranked_count": len(ranked),
+                    "effective_month_day": effective_month_day, "fallback_type": fallback_type,
+                    "fallback_reason": leap_reason, "fallback_setting": fallback, "window_days": window,
+                    "exact_count": len(exact), "nearby_count": len(nearby), "ranked_count": len(ranked_only),
+                    "allowed_pool_count": len(allowed), "pair_candidate_count": pair_candidate_count,
+                    "primary_selection_stage": selected_stages[0] if selected_stages else None,
+                    "secondary_selection_stage": selected_stages[1] if len(selected_stages) > 1 else None,
+                    "selection_stages": {str(row["id"]): stage_by_id[str(row["id"])] for row in allowed[:50]},
                     "selection_mode": "local_only"},
             )
-        return {"candidates": ranked, "selected": selected, "fallback": fallback_type, "decision_trace_id": trace_id}
+        return {"candidates": ranked, "selected": selected, "fallback": fallback_type,
+                "allowed_pool": allowed, "exact_pool": exact, "nearby_pool": nearby,
+                "ranked_pool": ranked_only, "decision_trace_id": trace_id}
