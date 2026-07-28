@@ -109,6 +109,13 @@ class RenderCandidateRepository:
         self, photo_ids: Iterable[str], execution: str
     ) -> list[dict[str, Any]]:
         """Use one formal-release contract at every API and service boundary."""
-        if execution in {"disabled", "local_only", "local_with_manual_ai"}:
+        if execution == "automatic_ai":
+            return self.require(photo_ids)
+        # Existing analysed photos remain publishable in the non-automatic
+        # modes, while scanner-only rows are the explicit local fallback.
+        # This keeps disabled display-only behaviour and older analysed
+        # libraries usable without requiring a new analysis run.
+        try:
+            return self.require(photo_ids)
+        except IneligiblePhotoError:
             return self.require_local(photo_ids)
-        return self.require(photo_ids)
