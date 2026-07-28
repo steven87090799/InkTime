@@ -151,6 +151,21 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "description": "額外文案規則；只在進階文案啟用時傳給模型", "risk": "不可要求模型猜測人物關係、地點或事件",
         "multiline": True, "rows": 6, "max_length": 8000, "restart": False,
     },
+    "analysis.execution_mode": {
+        "category": "分析執行模式",
+        "default": "local_only",
+        "type": "string",
+        "description": "分析執行模式；本機選片不會讀取 Provider 或產生模型費用",
+        "risk": "自動 AI 分析才會依既有排程與 Provider 設定執行模型工作",
+        "choices": ["disabled", "local_only", "local_with_manual_ai", "automatic_ai"],
+        "choice_labels": {
+            "disabled": "完全停用",
+            "local_only": "僅使用本機選片",
+            "local_with_manual_ai": "本機選片＋手動 AI",
+            "automatic_ai": "自動 AI 分析",
+        },
+        "restart": False,
+    },
     "analysis.ai_mode": {
         "category": "AI 模式",
         "default": "top_candidates",
@@ -711,6 +726,16 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "choices": ["nearby_then_ranked", "nearby_only", "ranked", "none"],
         "restart": False,
     },
+    "render.local_candidate_limit": {
+        "category": "渲染設定",
+        "default": 200,
+        "type": "integer",
+        "description": "本機選片每次最多由 SQLite 取出的候選數",
+        "risk": "提高數值會增加本機排序與配對成本，不會呼叫模型",
+        "min": 20,
+        "max": 1000,
+        "restart": False,
+    },
     "render.e6_weight": {
         "category": "渲染設定",
         "default": 20,
@@ -732,6 +757,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
             "postcard",
             "photo_info",
             "photo_pair",
+            "photo_pair_caption",
             "adaptive_memory",
             "calendar",
             "weather_sensor",
@@ -741,6 +767,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
             "postcard": "明信片",
             "photo_info": "單張照片＋資訊",
             "photo_pair": "雙照片拼版",
+            "photo_pair_caption": "雙照片・各自一句話",
             "adaptive_memory": "智慧自適應回憶（建議）",
             "calendar": "月曆相框（直向）",
             "weather_sensor": "天氣與室內溫溼度（直向）",
@@ -1153,6 +1180,7 @@ DEVICE_OVERRIDE_KEYS = {
 _BASIC_KEYS = {
     "general.timezone",
     "analysis.strategy",
+    "analysis.execution_mode",
     "analysis.advanced_caption_enabled",
     "analysis.caption_variants_enabled",
     "analysis.ai_mode",
@@ -1175,6 +1203,7 @@ _BASIC_KEYS = {
     "backup.retention",
 }
 _HIGH_RISK_KEYS = {
+    "analysis.execution_mode",
     "analysis.ai_mode",
     "analysis.ai_daily_photo_limit",
     "analysis.ai_monthly_photo_limit",
@@ -1197,6 +1226,7 @@ _HIGH_RISK_KEYS = {
 _LABEL_OVERRIDES = {
     "general.timezone": "系統時區",
     "analysis.strategy": "新工作分析策略",
+    "analysis.execution_mode": "分析執行模式",
     "analysis.ai_mode": "AI 分析模式",
     "analysis.ai_top_n": "AI 候選照片上限",
     "analysis.ai_daily_photo_limit": "每日 AI 分析照片上限",
@@ -1289,7 +1319,7 @@ def _metadata_dependencies(key: str) -> list[dict[str, Any]]:
         "analysis.max_retries",
         "analysis.concurrency",
     }:
-        return [{"key": "analysis.ai_mode", "not_equals": "off"}]
+        return [{"key": "analysis.execution_mode", "equals": "automatic_ai"}]
     return []
 
 
@@ -1362,6 +1392,13 @@ class SettingsRepository:
     def ensure_defaults(self) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self.database.session() as connection:
+            # Determine upgrade intent before inserting the new key.  A fresh
+            # database starts local-only; an existing installation keeps the
+            # old ai_mode policy through the compatibility adapter.
+            existing = {
+                str(row["key"]): json.loads(row["value_json"])
+                for row in connection.execute("SELECT key,value_json FROM settings").fetchall()
+            }
             connection.executemany(
                 "INSERT OR IGNORE INTO settings(key,category,value_json,value_type,requires_restart,updated_at) VALUES (?,?,?,?,?,?)",
                 [
@@ -1376,8 +1413,27 @@ class SettingsRepository:
                         now,
                     )
                     for key, definition in SETTING_DEFINITIONS.items()
+                    if key != "analysis.execution_mode"
                 ],
             )
+            if "analysis.execution_mode" not in existing:
+                from inktime.app.domain.analysis.execution_mode import legacy_execution_mode
+
+                mode = (
+                    "local_only"
+                    if not existing
+                    else legacy_execution_mode(
+                        existing.get("analysis.ai_mode", "off"),
+                        local_processing_enabled=bool(
+                            existing.get("analysis.prefilter_enabled", True)
+                        ),
+                    )
+                )
+                definition = SETTING_DEFINITIONS["analysis.execution_mode"]
+                connection.execute(
+                    "INSERT OR IGNORE INTO settings(key,category,value_json,value_type,requires_restart,updated_at) VALUES (?,?,?,?,?,?)",
+                    ("analysis.execution_mode", definition["category"], json.dumps(mode), definition["type"], 0, now),
+                )
             connection.executemany(
                 "UPDATE settings SET category=?,value_type=?,requires_restart=? WHERE key=?",
                 [
@@ -1748,6 +1804,18 @@ class SettingsRepository:
             if not definition.get("runtime_wired", True):
                 raise PermissionError(f"{key} 尚未接上 Runtime，僅供唯讀")
             normalized[key] = self._coerce(key, value)
+        # Older API clients still submit analysis.ai_mode.  Treat that as an
+        # explicit compatibility request for the new authority, never as an
+        # implicit provider discovery rule.
+        if "analysis.ai_mode" in normalized and "analysis.execution_mode" not in normalized:
+            from inktime.app.domain.analysis.execution_mode import legacy_execution_mode
+
+            normalized["analysis.execution_mode"] = legacy_execution_mode(
+                normalized["analysis.ai_mode"],
+                local_processing_enabled=bool(
+                    normalized.get("analysis.prefilter_enabled", True)
+                ),
+            )
         with self.database.session() as connection:
             current = self._values_from_connection(connection)
         merged = current | normalized

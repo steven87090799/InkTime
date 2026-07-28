@@ -14,6 +14,7 @@ from inktime.app.workers.job_worker import BoundedJobWorker
 from inktime.app.workers.scanner import PhotoScanner
 from inktime.app.domain.photos import PhotoPreprocessor
 from inktime.app.services.analysis import ProviderUnavailableError
+from inktime.app.domain.analysis.execution_mode import permits_automatic_ai, permits_manual_ai
 
 
 LOGGER = logging.getLogger("worker")
@@ -46,7 +47,11 @@ class WorkerRunner:
             analysis_plan = json.loads(str(job["analysis_spec_json"] or "{}")) if str(job["kind"]) == "analysis" else {}
             provider = None
             provider_error: ProviderUnavailableError | None = None
-            if str(job["kind"]) == "analysis" and str(job["strategy"]) != "local":
+            execution = str((analysis_plan.get("ai_execution_policy") or {}).get("execution_mode", "automatic_ai"))
+            may_build_provider = permits_automatic_ai(execution) or (
+                bool(settings.get("force_ai", False)) and permits_manual_ai(execution)
+            )
+            if str(job["kind"]) == "analysis" and str(job["strategy"]) != "local" and may_build_provider:
                 try:
                     provider = self.app.extensions["inktime_provider_service"].build_router(
                         analysis_plan.get("provider_route"),

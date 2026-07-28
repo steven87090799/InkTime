@@ -5,6 +5,7 @@ import json
 from flask import Blueprint, Response, abort, current_app, g, render_template, request, stream_with_context
 
 from inktime.app.domain.analysis.plan import canonical_json, fingerprint
+from inktime.app.domain.analysis.execution_mode import execution_mode, permits_automatic_ai
 from inktime.app.services.jobs import InvalidJobTransition, JobService
 from inktime.app.web.access import administrator_required, login_required
 
@@ -22,11 +23,14 @@ def _repository():
 
 def _analysis_plan(strategy: str) -> tuple[dict, str]:
     analysis = current_app.extensions["inktime_analysis_service"]
-    provider_service = current_app.extensions["inktime_provider_service"]
+    settings = current_app.extensions["inktime_settings_repository"]
     scoring = dict(current_app.extensions["inktime_scoring_repository"].current())
     plan = analysis.build_plan(
         strategy=strategy,
-        provider_route=provider_service.route_snapshot(),
+        provider_route=(
+            current_app.extensions["inktime_provider_service"].route_snapshot()
+            if permits_automatic_ai(execution_mode(settings)) else []
+        ),
         scoring_profile=scoring,
     )
     return plan, canonical_json(plan)

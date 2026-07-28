@@ -73,6 +73,9 @@ def test_production_runner_completes_local_job_without_provider(app, tmp_path, m
 
 
 def test_cloud_job_with_an_empty_frozen_route_fails_without_discovering_provider(app, tmp_path):
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="127.0.0.1"
+    )
     root = tmp_path / "photos"
     root.mkdir()
     Image.effect_noise((900, 600), 90).convert("RGB").save(root / "a.jpg")

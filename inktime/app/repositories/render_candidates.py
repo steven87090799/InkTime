@@ -80,3 +80,27 @@ class RenderCandidateRepository:
                 )
             rows.append(row)
         return rows
+
+    def get_local(self, photo_id: str) -> dict[str, Any] | None:
+        """Local-only formal releases require scanner features, not AI rows."""
+        with self.database.session() as connection:
+            row = connection.execute(
+                """
+                SELECT p.*,l.root_path,l.enabled AS library_enabled
+                FROM photos p JOIN libraries l ON l.id=p.library_id
+                WHERE p.id=? AND p.lifecycle_status='active' AND p.eligible=1
+                  AND p.local_features_status='complete' AND l.enabled=1
+                  AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')
+                """,
+                (photo_id,),
+            ).fetchone()
+        return dict(row) if row is not None and self.available(row) else None
+
+    def require_local(self, photo_ids: Iterable[str]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for photo_id in dict.fromkeys(str(value) for value in photo_ids if str(value)):
+            row = self.get_local(photo_id)
+            if row is None:
+                raise IneligiblePhotoError(photo_id, "照片未完成本機特徵、已排除或原始檔不存在")
+            rows.append(row)
+        return rows

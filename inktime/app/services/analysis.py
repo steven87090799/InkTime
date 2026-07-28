@@ -16,6 +16,11 @@ from inktime.app.domain.analysis import (
     fingerprint,
     validate_analysis_result,
 )
+from inktime.app.domain.analysis.execution_mode import (
+    execution_mode,
+    permits_automatic_ai,
+    permits_manual_ai,
+)
 from inktime.app.domain.analysis.scoring import (
     DEFAULT_FAVORITE_BONUS,
     DEFAULT_RANKING_WEIGHTS,
@@ -116,6 +121,7 @@ class PhotoAnalysisService:
             "e6_min_score": float(settings.get("analysis.e6_min_score", 25)),
         }
         execution_policy = {
+            "execution_mode": execution_mode(settings),
             "ai_mode": str(settings.get("analysis.ai_mode", "top_candidates")),
             "top_n": int(settings.get("analysis.ai_top_n", 50)),
             "daily_photo_limit": int(settings.get("analysis.ai_daily_photo_limit", 50)),
@@ -275,8 +281,13 @@ class PhotoAnalysisService:
     def _allow_ai_for_photo(
         self, photo_id: str, *, force_ai: bool, execution_policy: dict | None = None
     ) -> bool:
+        execution = str((execution_policy or {}).get("execution_mode") or (
+            execution_mode(self.settings) if self.settings is not None else "automatic_ai"
+        ))
         if force_ai:
-            return True
+            return permits_manual_ai(execution)
+        if not permits_automatic_ai(execution):
+            return False
         mode = self._ai_mode(execution_policy)
         if mode == "off":
             return False
