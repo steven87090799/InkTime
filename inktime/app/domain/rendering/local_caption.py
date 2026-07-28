@@ -61,6 +61,8 @@ def build_local_caption(
     existing_side_caption: str | None = None,
     existing_caption_source: str | None = None,
     existing_caption_is_ai_generated: bool | None = None,
+    source_detail: dict[str, Any] | None = None,
+    source_updated_at: str | None = None,
     orientation: str | None = None,
     maximum_characters: int = 16,
 ) -> dict[str, Any]:
@@ -101,5 +103,6 @@ def build_local_caption(
         "photo_id": str(photo_id),
         "text_hash": sha256((text or "那年今日").encode("utf-8")).hexdigest(),
         "is_ai_generated": ai,
-        "source_updated_at": None,
+        "source_detail": dict(source_detail or {}) if ai else {},
+        "source_updated_at": source_updated_at if existing else None,
     }

@@ -45,6 +45,34 @@ def test_pair_caption_plan_keeps_two_independent_records_and_fingerprint(app, tm
     assert plan["secondary_caption"]["photo_id"] == "b"
 
 
+def test_pair_caption_plan_preserves_ai_and_local_provenance(app, tmp_path):
+    root = tmp_path / "caption-provenance"
+    root.mkdir()
+    _photo(app, root, "ai-a", (1600, 900), "2021-07-28T10:00:00+00:00", "#4477aa")
+    _photo(app, root, "local-b", (900, 1600), "2020-01-02T10:00:00+00:00", "#aa7744")
+    app.extensions["inktime_photo_repository"].save_analysis(
+        "ai-a", None, "caption", "test-ai", "caption-model",
+        {"schema_version": 1, "caption": "完整說明", "types": ["其他"], "memory_score": 90,
+         "beauty_score": 90, "technical_quality_score": 90, "emotion_score": 90,
+         "side_caption": "AI 的短句", "should_keep": True, "sensitive": False, "reason": "測試"},
+        "{}", prompt_version="caption-test-v1",
+    )
+    plan = app.extensions["inktime_render_service"].resolve_render_plan(
+        "ai-a", layout="photo_pair_caption", secondary_photo_id="local-b", orientation="portrait"
+    )
+    first, second = plan["primary_caption"], plan["secondary_caption"]
+    assert first["source"] == "ai_side_caption"
+    assert first["is_ai_generated"] is True
+    assert first["source_detail"] == {
+        "provider_id": "test-ai", "model": "caption-model", "stage": "caption",
+        "prompt_version": "caption-test-v1", "schema_version": 1,
+    }
+    assert first["source_updated_at"]
+    assert second["photo_id"] == "local-b"
+    assert second["is_ai_generated"] is False
+    assert second["source"] != "ai_side_caption"
+
+
 def test_dual_pair_compare_uses_one_frozen_pair_for_four_formal_previews(client, app, tmp_path):
     root = tmp_path / "compare"
     root.mkdir()
