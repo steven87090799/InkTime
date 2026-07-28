@@ -23,8 +23,22 @@ def test_existing_photo_caption_is_preserved_only_for_its_photo():
         existing_side_caption="照片 A 的既有句子", maximum_characters=30,
     )
     assert caption["text"] == "照片 A 的既有句子"
-    assert caption["source"] == "existing_ai_side_caption"
-    assert caption["is_ai_generated"] is True
+    assert caption["source"] == "existing_caption_unknown"
+    assert caption["is_ai_generated"] is False
+
+
+def test_caption_source_distinguishes_manual_ai_and_unknown():
+    ai = build_local_caption(
+        photo_id="a", captured_at=None, display_date="2026-07-28", timezone="Asia/Taipei",
+        existing_side_caption="AI 說明", existing_caption_source="ai_side_caption",
+        existing_caption_is_ai_generated=True,
+    )
+    manual = build_local_caption(
+        photo_id="a", captured_at=None, display_date="2026-07-28", timezone="Asia/Taipei",
+        manual_caption="人工說明",
+    )
+    assert ai["source"] == "ai_side_caption" and ai["is_ai_generated"] is True
+    assert manual["source"] == "manual_caption" and manual["is_ai_generated"] is False
 
 
 def test_caption_uses_requested_timezone_for_historical_today():

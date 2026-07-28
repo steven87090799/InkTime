@@ -4,6 +4,9 @@ from pathlib import Path
 
 from PIL import Image
 
+from inktime.app.workers.runner import WorkerRunner
+from tests.conftest import create_admin, csrf, login
+
 
 def _photo(app, root: Path, photo_id: str, size: tuple[int, int], captured_at: str, color: str):
     Image.new("RGB", size, color).save(root / f"{photo_id}.jpg")
@@ -40,3 +43,33 @@ def test_pair_caption_plan_keeps_two_independent_records_and_fingerprint(app, tm
     plan = manifest["render_options"]["render_plans"][0]
     assert plan["primary_caption"]["photo_id"] == "a"
     assert plan["secondary_caption"]["photo_id"] == "b"
+
+
+def test_dual_pair_compare_uses_one_frozen_pair_for_four_formal_previews(client, app, tmp_path):
+    root = tmp_path / "compare"
+    root.mkdir()
+    _photo(app, root, "a", (1600, 900), "2021-07-28T10:00:00+00:00", "#4477aa")
+    _photo(app, root, "b", (900, 1600), "2020-01-02T10:00:00+00:00", "#aa7744")
+    create_admin(app)
+    login(client)
+    response = client.post(
+        "/api/v1/rendering/dual-pair-compare",
+        json={"primary_photo_id": "a", "secondary_photo_id": "b", "profile": "gdep073e01_6c", "fit_mode": "contain"},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert response.status_code == 202
+    job_id = response.json["id"]
+    assert WorkerRunner(app).run_once() == 1
+    status = client.get(f"/api/v1/jobs/{job_id}").json
+    previews = status["result"]["previews"]
+    assert {(item["layout"], item["orientation"]) for item in previews} == {
+        ("photo_pair", "portrait"), ("photo_pair", "landscape"),
+        ("photo_pair_caption", "portrait"), ("photo_pair_caption", "landscape"),
+    }
+    assert {item["primary_photo_id"] for item in previews} == {"a"}
+    assert {item["secondary_photo_id"] for item in previews} == {"b"}
+    assert len({item["effective_dither"] for item in previews}) == 1
+    captions = [item for item in previews if item["layout"] == "photo_pair_caption"]
+    assert len({item["primary_caption"]["text_hash"] for item in captions}) == 1
+    assert len({item["secondary_caption"]["text_hash"] for item in captions}) == 1
+    assert all(client.get(item["preview_url"]).status_code == 200 for item in previews)

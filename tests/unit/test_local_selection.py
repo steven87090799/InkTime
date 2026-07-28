@@ -32,3 +32,23 @@ def test_local_policy_is_bounded_deterministic_and_pairs_different_photos(app, t
     assert [row["id"] for row in result["selected"][:2]] == ["a", "b"]
     assert result["selected"][0]["id"] != result["selected"][1]["id"]
     assert "base_local_score" in result["selected"][0]["score_components"]
+
+
+def test_disabled_library_never_enters_local_candidates_or_trace(app, tmp_path):
+    root = tmp_path / "disabled-library"
+    root.mkdir()
+    _candidate(app, root, "disabled", 99, "07-28")
+    photos = app.extensions["inktime_photo_repository"]
+    with app.extensions["inktime_database"].session() as connection:
+        library_id = connection.execute("SELECT library_id FROM photos WHERE id='disabled'").fetchone()[0]
+        connection.execute("UPDATE libraries SET enabled=0 WHERE id=?", (library_id,))
+    policy = LocalSelectionPolicy(
+        app.extensions["inktime_database"], app.extensions["inktime_settings_repository"],
+        app.extensions["inktime_resilience_repository"],
+    )
+    result = policy.select(target=date(2026, 7, 28), orientation="portrait", quantity=2, layout="photo_pair")
+    assert result["candidates"] == []
+    assert result["selected"] == []
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE libraries SET enabled=1 WHERE id=?", (library_id,))
+    assert policy.ranked(target=date(2026, 7, 28), orientation="portrait")[0]["id"] == "disabled"

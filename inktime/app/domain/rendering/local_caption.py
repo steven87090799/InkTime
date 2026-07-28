@@ -59,6 +59,8 @@ def build_local_caption(
     selection_mode: str = "local_only",
     manual_caption: str | None = None,
     existing_side_caption: str | None = None,
+    existing_caption_source: str | None = None,
+    existing_caption_is_ai_generated: bool | None = None,
     orientation: str | None = None,
     maximum_characters: int = 16,
 ) -> dict[str, Any]:
@@ -75,7 +77,9 @@ def build_local_caption(
     if manual:
         text, source, ai = manual, "manual_caption", False
     elif existing:
-        text, source, ai = existing, "existing_ai_side_caption", True
+        text = existing
+        source = str(existing_caption_source or "existing_caption_unknown")
+        ai = bool(existing_caption_is_ai_generated) if existing_caption_is_ai_generated is not None else False
     elif captured and display and (captured.month, captured.day) == (display.month, display.day):
         elapsed = years_ago if years_ago is not None else max(0, display.year - captured.year)
         text, source, ai = (

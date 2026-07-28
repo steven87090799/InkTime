@@ -214,6 +214,12 @@ class WorkerRunner:
                             render_service=service,
                             render_cache=render_cache,
                         )
+                    elif operation == "dual_pair_compare":
+                        result = self.app.extensions["inktime_render_workload_service"].dual_pair_compare(
+                            settings,
+                            {"job_id": str(job["id"]), "item_id": str(item["id"]), "worker_id": str(item["worker_id"]), "idempotency_key": str(item["idempotency_key"])},
+                            render_service=self.app.extensions["inktime_render_service"],
+                        )
                     elif operation == "history_test_release":
                         result = self.app.extensions[
                             "inktime_render_workload_service"
