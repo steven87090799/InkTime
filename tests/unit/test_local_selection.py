@@ -38,7 +38,6 @@ def test_disabled_library_never_enters_local_candidates_or_trace(app, tmp_path):
     root = tmp_path / "disabled-library"
     root.mkdir()
     _candidate(app, root, "disabled", 99, "07-28")
-    photos = app.extensions["inktime_photo_repository"]
     with app.extensions["inktime_database"].session() as connection:
         library_id = connection.execute("SELECT library_id FROM photos WHERE id='disabled'").fetchone()[0]
         connection.execute("UPDATE libraries SET enabled=0 WHERE id=?", (library_id,))
