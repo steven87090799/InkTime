@@ -120,6 +120,7 @@ def test_force_ai_calls_provider_when_ai_is_off_and_preserves_exclusion_audit(ap
     repository = app.extensions["inktime_photo_repository"]
     before = repository.get_with_path(photo_id)
     _setting(app, "analysis.ai_mode", "off")
+    _setting(app, "analysis.execution_mode", "local_with_manual_ai")
     provider = CountingProvider()
     provider.provider_id = "provider-force-test"
     plan = app.extensions["inktime_analysis_service"].build_plan(
@@ -189,6 +190,7 @@ def test_force_ai_api_is_admin_exclusion_only_and_creates_fresh_job(client, app,
             (eligible_id,),
         )
     _setting(app, "analysis.ai_mode", "off")
+    _setting(app, "analysis.execution_mode", "local_with_manual_ai")
     headers = {"X-CSRF-Token": csrf(client)}
     forbidden = client.post(f"/api/v1/photos/{eligible_id}/ai", headers=headers)
     assert forbidden.status_code == 403

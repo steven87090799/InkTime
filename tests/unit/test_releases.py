@@ -74,6 +74,9 @@ def test_failed_release_does_not_replace_latest(tmp_path):
 
 
 def test_automatic_release_candidates_respect_configured_memory_threshold(app, tmp_path):
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "automatic_ai", changed_by="tester", source_ip="127.0.0.1"
+    )
     photos = app.extensions["inktime_photo_repository"]
     root = Path(tmp_path / "photos")
     root.mkdir()
@@ -120,6 +123,9 @@ def test_automatic_release_candidates_respect_configured_memory_threshold(app, t
 
 
 def test_history_today_is_selected_before_higher_ranked_fallback(app, tmp_path):
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "automatic_ai", changed_by="tester", source_ip="127.0.0.1"
+    )
     photos = app.extensions["inktime_photo_repository"]
     root = tmp_path / "history-today"
     root.mkdir()

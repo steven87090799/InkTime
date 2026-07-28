@@ -901,19 +901,6 @@ class PhotoAnalysisService:
             )
             return {"analysis": result, "stage": "prefilter", "_actual_cost": 0}
 
-        if not self._allow_ai_for_photo(photo_id, force_ai=force_ai, execution_policy=execution_policy) or (
-            not force_ai and self._photo_limits_reached(execution_policy)
-        ):
-            result = validate_analysis_result(self._local_result(photo))
-            raw = json.dumps(result, ensure_ascii=False)
-            result = self._save_result(
-                photo_id=photo_id, job_id=job_id, stage="local_fallback", provider="local",
-                model="local-quality-v3", result=result, raw=raw, photo=photo, ranking_weights=weights,
-                favorite_bonus=favorite_bonus, scoring_version_id=scoring_version_id, schema_kind="basic",
-                **local_context("basic"),
-            )
-            return {"analysis": result, "stage": "local_fallback", "_actual_cost": 0}
-
         prefiltered = None if force_ai or self.settings is None else self._prefilter_result(
             photo, policy_settings=plan_prefilter
         )
@@ -929,6 +916,19 @@ class PhotoAnalysisService:
                 prefilter_evaluation=prefilter_evaluation,
             )
             return {"analysis": result, "stage": "prefilter", "_actual_cost": 0}
+
+        if not self._allow_ai_for_photo(photo_id, force_ai=force_ai, execution_policy=execution_policy) or (
+            not force_ai and self._photo_limits_reached(execution_policy)
+        ):
+            result = validate_analysis_result(self._local_result(photo))
+            raw = json.dumps(result, ensure_ascii=False)
+            result = self._save_result(
+                photo_id=photo_id, job_id=job_id, stage="local_fallback", provider="local",
+                model="local-quality-v3", result=result, raw=raw, photo=photo, ranking_weights=weights,
+                favorite_bonus=favorite_bonus, scoring_version_id=scoring_version_id, schema_kind="basic",
+                **local_context("basic"),
+            )
+            return {"analysis": result, "stage": "local_fallback", "_actual_cost": 0}
         if provider is None:
             raise ProviderUnavailableError("VLM-008 尚未設定可用 Provider")
 

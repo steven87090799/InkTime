@@ -4,6 +4,9 @@ from PIL import Image
 
 
 def test_schedule_resolves_devices_limits_years_and_commits_history_after_publish(app, tmp_path):
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="127.0.0.1"
+    )
     root = tmp_path / "scheduled"
     root.mkdir()
     photos = app.extensions["inktime_photo_repository"]
