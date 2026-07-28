@@ -51,3 +51,26 @@ def test_disabled_library_never_enters_local_candidates_or_trace(app, tmp_path):
     with app.extensions["inktime_database"].session() as connection:
         connection.execute("UPDATE libraries SET enabled=1 WHERE id=?", (library_id,))
     assert policy.ranked(target=date(2026, 7, 28), orientation="portrait")[0]["id"] == "disabled"
+
+
+def test_history_fallback_and_leap_day_are_explicit_and_bounded(app, tmp_path):
+    root = tmp_path / "history"
+    root.mkdir()
+    _candidate(app, root, "nearby", 80, "07-27")
+    _candidate(app, root, "ranked", 99, "01-01")
+    _candidate(app, root, "leap-fallback", 70, "02-28")
+    settings = app.extensions["inktime_settings_repository"]
+    settings.update("render.history_today_window_days", 3, changed_by="test", source_ip="test")
+    settings.update("render.history_today_fallback", "nearby_only", changed_by="test", source_ip="test")
+    policy = LocalSelectionPolicy(
+        app.extensions["inktime_database"], app.extensions["inktime_settings_repository"],
+        app.extensions["inktime_resilience_repository"],
+    )
+    nearby = policy.select(target=date(2026, 7, 28), orientation="portrait", quantity=1, layout="photo_info")
+    assert nearby["fallback"] == "nearby_day"
+    assert [row["id"] for row in nearby["selected"]] == ["nearby"]
+    settings.update("render.history_today_fallback", "none", changed_by="test", source_ip="test")
+    none = policy.select(target=date(2026, 7, 28), orientation="portrait", quantity=1, layout="photo_info")
+    assert none["selected"] == []
+    leap = policy.select(target=date(2025, 2, 28), target_month_day="02-29", orientation="portrait", quantity=1, layout="photo_info")
+    assert [row["id"] for row in leap["selected"]] == ["leap-fallback"]
