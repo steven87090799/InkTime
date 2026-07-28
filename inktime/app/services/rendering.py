@@ -165,9 +165,12 @@ class RenderService:
             raise KeyError(secondary_id)
         dither_plan = self.resolve_effective_dither(primary, secondary, requested=dither, device_config=device)
         display_date = self._today()
-        primary_caption = dict(primary_caption or self._caption_record(primary, display_date))
+        caption_records = self._caption_records(
+            [photo for photo in (primary, secondary) if photo is not None], display_date
+        )
+        primary_caption = dict(primary_caption or caption_records[str(primary["id"])])
         resolved_secondary_caption = (
-            dict(secondary_caption or self._caption_record(secondary, display_date))
+            dict(secondary_caption or caption_records[str(secondary["id"])])
             if secondary is not None else None
         )
         return {
@@ -537,7 +540,99 @@ class RenderService:
             subject_box=None if manual else self._subject_box(photo),
         )
 
+    def _caption_analyses(self, photo_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Fetch newest caption-capable analyses in one bounded query."""
+        ids = list(dict.fromkeys(str(photo_id) for photo_id in photo_ids if photo_id))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        with self.database.session() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT a.photo_id,a.side_caption,a.semantic_json,a.provider,a.model,a.stage,
+                       a.prompt_version,a.schema_version,a.created_at,a.analysis_source
+                FROM photo_analysis a
+                WHERE a.photo_id IN ({placeholders})
+                ORDER BY a.photo_id,a.created_at DESC,a.id DESC
+                """,  # noqa: S608 -- placeholders are generated from a small in-memory list.
+                ids,
+            ).fetchall()
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            result.setdefault(str(row["photo_id"]), dict(row))
+        return result
+
+    def _caption_text(self, photo_id: str, analysis: dict[str, Any] | None) -> str:
+        """Choose a configured variant without changing its provenance."""
+        row = analysis
+        if row is None:
+            return ""
+        side_caption = str(row.get("side_caption") or "").strip()
+        if not (
+            bool(self.settings.get("analysis.advanced_caption_enabled", False))
+            and bool(self.settings.get("analysis.caption_variants_enabled", False))
+        ):
+            return side_caption
+        try:
+            variants = (json.loads(str(row.get("semantic_json") or "{}")).get("values") or {}).get(
+                "caption_variants"
+            ) or {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            variants = {}
+        style = str(self.settings.get("analysis.copy_default_style", "natural"))
+        selected = str(
+            variants.get(style) or variants.get("natural") or side_caption or "畫面把此刻收好了。"
+        ).strip()
+        self._activity(
+            "caption_style_selected", "Renderer 已選擇 Caption 候選風格", photo_id=photo_id, style=style
+        )
+        return selected
+
     def _caption(self, photo_id: str) -> str:
+        return self._caption_text(photo_id, self._caption_analyses([photo_id]).get(photo_id))
+
+    def _caption_records(self, photos: list[Any], display_date: date) -> dict[str, dict[str, Any]]:
+        analyses = self._caption_analyses([str(photo["id"]) for photo in photos])
+        return {
+            str(photo["id"]): self._caption_record(photo, display_date, analyses.get(str(photo["id"])))
+            for photo in photos
+        }
+
+    def _caption_record(
+        self, photo, display_date: date, analysis: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        photo_id = str(photo["id"])
+        if analysis is None:
+            analysis = self._caption_analyses([photo_id]).get(photo_id)
+        caption = self._caption_text(photo_id, analysis)
+        provider = str((analysis or {}).get("provider") or "").strip()
+        is_ai_caption = bool(caption and provider and provider != "local")
+        source_detail = (
+            {
+                "provider_id": provider,
+                "model": str((analysis or {}).get("model") or ""),
+                "stage": str((analysis or {}).get("stage") or ""),
+                "prompt_version": str((analysis or {}).get("prompt_version") or ""),
+                "schema_version": (analysis or {}).get("schema_version"),
+            }
+            if is_ai_caption else {}
+        )
+        return build_local_caption(
+            photo_id=photo_id,
+            captured_at=photo["captured_at"],
+            display_date=display_date,
+            timezone=str(self.settings.get("general.timezone", "Asia/Taipei")),
+            known_location=self.location_name(photo),
+            existing_side_caption=caption,
+            existing_caption_source="ai_side_caption" if is_ai_caption else None,
+            existing_caption_is_ai_generated=is_ai_caption if caption else None,
+            source_detail=source_detail,
+            source_updated_at=str((analysis or {}).get("created_at") or "") or None,
+            maximum_characters=int(self.settings.get("analysis.side_caption_max_chars", 16)),
+        )
+
+    def _caption_legacy(self, photo_id: str) -> str:
+        """Compatibility implementation retained for old call sites during migration."""
         with self.database.session() as connection:
             row = connection.execute(
                 "SELECT side_caption,semantic_json FROM photo_analysis WHERE photo_id=? ORDER BY created_at DESC,id DESC LIMIT 1",
@@ -565,18 +660,6 @@ class RenderService:
             "caption_style_selected", "Renderer 已選擇 Caption 候選風格", photo_id=photo_id, style=style
         )
         return selected
-
-    def _caption_record(self, photo, display_date: date) -> dict[str, Any]:
-        photo_id = str(photo["id"])
-        return build_local_caption(
-            photo_id=photo_id,
-            captured_at=photo["captured_at"],
-            display_date=display_date,
-            timezone=str(self.settings.get("general.timezone", "Asia/Taipei")),
-            known_location=self.location_name(photo),
-            existing_side_caption=self._caption(photo_id),
-            maximum_characters=int(self.settings.get("analysis.side_caption_max_chars", 16)),
-        )
 
     def _draw_footer_caption(
         self, draw, text: str, *, x: int, top: int, bottom: int, width: int, fill: str = "black"
@@ -844,7 +927,6 @@ class RenderService:
     ) -> Image.Image:
         photo = self.ensure_photo_features(photo_id)
         path = safe_join(Path(photo["root_path"]), photo["relative_path"])
-        caption = self._caption(photo_id)
         location = self.location_name(photo)
         captured = self._captured_date(photo["captured_at"])
         show_date = bool(self.settings.get("render.show_capture_date", True))
@@ -855,6 +937,9 @@ class RenderService:
         )
         if layout_key not in LAYOUTS:
             raise ValueError("RENDER-005 不支援的相框版型")
+        # Pair-caption rendering reads its frozen per-photo records below;
+        # avoid an unrelated caption query that could observe newer analysis.
+        caption = "" if layout_key == "photo_pair_caption" else self._caption(photo_id)
         adaptive_requested = layout_key == "adaptive_memory"
         orientation_key = orientation or str(
             device_config.get("frame_orientation")
@@ -1214,6 +1299,7 @@ class RenderService:
         layout_key = str(self.settings.get("render.layout", "photo_info"))
         source_limit = quantity * 2 if layout_key in {"photo_pair", "photo_pair_caption"} else quantity
         selected = photo_ids[:source_limit]
+        eligibility_sources: dict[str, str] = {}
         if not selected:
             selected = self.select_candidates(source_limit)
         else:
@@ -1222,6 +1308,7 @@ class RenderService:
                 selected, execution_mode(self.settings)
             )
             selected = [str(row["id"]) for row in required]
+            eligibility_sources = {str(row["id"]): str(row["eligibility_source"]) for row in required}
         if device_ids:
             unique_device_ids = list(dict.fromkeys(str(value) for value in device_ids if str(value)))
             placeholders = ",".join("?" for _ in unique_device_ids)
@@ -1259,6 +1346,9 @@ class RenderService:
                         self.resolve_render_plan(photo_id, device_config=device, profile=profile_key)
                         for photo_id in selected[:quantity]
                     ]
+                for plan in composition_plans:
+                    plan["primary_eligibility_source"] = eligibility_sources.get(str(plan["primary_photo_id"]))
+                    plan["secondary_eligibility_source"] = eligibility_sources.get(str(plan["secondary_photo_id"])) if plan.get("secondary_photo_id") else None
                 release_photo_ids.extend(self._render_plan_photo_ids(composition_plans))
                 dither_plan = self.resolve_effective_dither(
                     self._render_plan_rows(composition_plans), device_config=device
@@ -1337,6 +1427,9 @@ class RenderService:
                 )
         else:
             plans = [self.resolve_render_plan(photo_id) for photo_id in selected]
+        for plan in plans:
+            plan["primary_eligibility_source"] = eligibility_sources.get(str(plan["primary_photo_id"]))
+            plan["secondary_eligibility_source"] = eligibility_sources.get(str(plan["secondary_photo_id"])) if plan.get("secondary_photo_id") else None
         release_photo_ids = self._render_plan_photo_ids(plans)
         images = [
             (
@@ -1545,7 +1638,7 @@ class RenderService:
         limit = max(1, min(int(limit), 50))
         target = target_date or self._today()
         if execution_mode(self.settings) in {"local_only", "local_with_manual_ai"}:
-            result = LocalSelectionPolicy(self.database, self.settings, self.resilience).select(
+            result = LocalSelectionPolicy(self.database, self.settings, self.resilience, self.locations).select(
                 target=target,
                 orientation=str(self.settings.get("render.frame_orientation", "portrait")),
                 quantity=limit,
