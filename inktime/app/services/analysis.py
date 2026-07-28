@@ -479,7 +479,12 @@ class PhotoAnalysisService:
         selected_channel = None
         network_permit = False
         selected_provider = provider
-        selector = getattr(provider, "candidate_channels", None)
+        # Enumerate Frozen Route identities before consulting network state.
+        # A cache hit is valid even while its provider is circuit-open or rate
+        # limited, so it must never be hidden by candidate_channels().
+        selector = getattr(provider, "route_channels", None)
+        if not callable(selector):
+            selector = getattr(provider, "candidate_channels", None)
         if callable(selector):
             candidates = selector(excluded=_excluded_providers)
             if not candidates:

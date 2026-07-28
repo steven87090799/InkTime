@@ -503,10 +503,13 @@ def preview(photo_id: str):
         abort(400, description="RENDER-005 裁切位置必須同時提供且介於 0 到 1")
     settings = current_app.extensions["inktime_settings_repository"]
     render_service = current_app.extensions["inktime_render_service"]
-    profile_key = request.args.get("profile", str(settings.get("render.profile", "safe_4c")))
-    dither = request.args.get("dither", str(settings.get("render.dither", "floyd_steinberg")))
     quantized = request.args.get("quantized") == "1"
-    if quantized and (profile_key not in DISPLAY_PROFILES or dither not in DITHER_ALGORITHMS):
+    profile_key = request.args.get("profile", str(settings.get("render.profile", "safe_4c")))
+    requested_dither = str(request.args.get("dither", "")).strip() or None
+    if quantized and (
+        profile_key not in DISPLAY_PROFILES
+        or (requested_dither is not None and requested_dither not in DITHER_ALGORITHMS)
+    ):
         abort(400, description="RENDER-004 預覽 Profile 或抖動算法不合法")
     arguments = {
         "photo_id": photo_id,
@@ -517,7 +520,7 @@ def preview(photo_id: str):
         "orientation": orientation,
         "fit_mode": fit_mode,
         "profile": profile_key if quantized else None,
-        "dither": dither if quantized else None,
+        "requested_dither": requested_dither if quantized else None,
         "quantized": quantized,
     }
     try:
@@ -530,7 +533,7 @@ def preview(photo_id: str):
             orientation=orientation,
             fit_mode=fit_mode,
             profile=profile_key if quantized else None,
-            dither=dither if quantized else None,
+            dither=requested_dither if quantized else None,
         )
     except KeyError:
         abort(404)
@@ -539,6 +542,16 @@ def preview(photo_id: str):
     arguments["secondary_photo_id"] = fingerprint["render_plan"]["secondary_photo_id"]
     arguments["orientation"] = fingerprint["render_plan"]["orientation"]
     arguments["fit_mode"] = fingerprint["render_plan"]["fit_mode"]
+    arguments.update(
+        {
+            "profile": fingerprint["render_plan"]["profile"] if quantized else None,
+            "dither": fingerprint["render_plan"]["effective_dither"] if quantized else None,
+            "effective_dither": fingerprint["render_plan"]["effective_dither"] if quantized else None,
+            "override_source": fingerprint["render_plan"]["override_source"] if quantized else None,
+            "color_distance": fingerprint["render_settings"]["color_distance"],
+            "dither_strength": fingerprint["render_settings"]["strength"],
+        }
+    )
     cache = current_app.extensions["inktime_render_cache"]
     cached = cache.get_bytes(fingerprint)
     if cached is None:
@@ -560,6 +573,16 @@ def preview(photo_id: str):
     )
     response.headers["X-InkTime-Orientation"] = effective_orientation
     response.headers["X-InkTime-Renderer-Cache"] = "hit"
+    if quantized:
+        response.headers["X-InkTime-Requested-Dither"] = str(
+            fingerprint["render_plan"]["requested_dither"] or ""
+        )
+        response.headers["X-InkTime-Effective-Dither"] = str(
+            fingerprint["render_plan"]["effective_dither"]
+        )
+        response.headers["X-InkTime-Dither-Override-Source"] = str(
+            fingerprint["render_plan"]["override_source"]
+        )
     return response
 
 

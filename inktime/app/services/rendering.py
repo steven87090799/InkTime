@@ -297,7 +297,23 @@ class RenderService:
         font_path = self.fonts.resolve(font_reference)
         font_stat = font_path.stat()
         profile_definition = DISPLAY_PROFILES[profile_key]
-        dither_plan = self.resolve_effective_dither(photo, secondary, requested=dither)
+        # resolve_render_plan() already selected the primary/secondary photos
+        # and made the one authoritative dither decision.  Recomputing here
+        # could observe changed settings and drift from background pixels.
+        dither_plan = {
+            key: plan[key]
+            for key in (
+                "requested_dither",
+                "effective_dither",
+                "override_source",
+                "auto_photo_smooth_enabled",
+                "epaper_contrast_risk",
+                "primary_photo_risk",
+                "secondary_photo_risk",
+                "photo_risks",
+                "epaper_contrast_risk_rule_version",
+            )
+        }
         effective_dither = str(dither_plan["effective_dither"])
 
         def photo_version(row, *, x=None, y=None) -> dict[str, Any] | None:

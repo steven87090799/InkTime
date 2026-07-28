@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 import pytest
 
@@ -108,6 +109,22 @@ def test_candidate_inspection_does_not_consume_rpm_or_network_permit():
     assert len(channel.request_times) == 1
     router.release_channel(channel, usage=Usage(input_tokens=10, output_tokens=2))
     assert router.candidate_channels() == []
+
+
+def test_route_channels_keep_cache_identities_when_network_is_unavailable():
+    provider = StubProvider("cache-owner")
+    channel = ProviderChannel(provider, requests_per_minute=1, tokens_per_minute=10)
+    router = FailoverVisionProvider([channel])
+    now = time.monotonic()
+    channel.circuit_until = now + 60
+    channel.request_times.append(now)
+    channel.token_events.append((now, 10))
+
+    assert router.route_channels() == [channel]
+    assert list(channel.request_times) == [now]
+    assert list(channel.token_events) == [(now, 10)]
+    assert channel.semaphore.acquire(blocking=False) is True
+    channel.semaphore.release()
 
 
 def test_failed_cache_owner_releases_permit_and_opens_circuit():

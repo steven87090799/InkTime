@@ -65,7 +65,12 @@ class FailoverVisionProvider(VisionProvider):
             return True
 
     def candidate_channels(self, *, excluded: set[str] | None = None) -> list[ProviderChannel]:
-        """Return concrete identities without reserving RPM or a network permit."""
+        """Return identities that are currently eligible for network work.
+
+        This remains the compatibility API for direct router callers.  It is
+        deliberately *not* suitable for cache lookup because it filters
+        circuit-, rate-, and token-limited channels.
+        """
         excluded = excluded or set()
         now = time.monotonic()
         result: list[ProviderChannel] = []
@@ -84,6 +89,23 @@ class FailoverVisionProvider(VisionProvider):
                     continue
                 result.append(channel)
         return result
+
+    def route_channels(self, *, excluded: set[str] | None = None) -> list[ProviderChannel]:
+        """Return Frozen Route identities without inspecting network state.
+
+        Cache identity is a configured provider identity, not a promise that a
+        network request can currently be made.  This method neither consumes
+        quotas nor acquires permits, and never filters a channel for an open
+        circuit, RPM, TPM, or semaphore state.
+        """
+        excluded = excluded or set()
+        with self._lock:
+            return [
+                channel
+                for channel in self.channels
+                if str(getattr(channel.provider, "provider_id", channel.provider.name))
+                not in excluded
+            ]
 
     def acquire_channel(self, channel: ProviderChannel) -> bool:
         """Reserve RPM and network concurrency only for the cache owner."""

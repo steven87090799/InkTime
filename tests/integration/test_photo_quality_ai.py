@@ -12,6 +12,7 @@ from PIL import Image
 from inktime.app.domain.analysis.plan import fingerprint
 from inktime.app.domain.photos import PhotoPreprocessor
 from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
+from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
 from inktime.app.services import analysis as analysis_module
 from inktime.app.workers.scanner import PhotoScanner
 from tests.conftest import create_admin, csrf, login
@@ -224,6 +225,151 @@ def test_ai_cache_hit_does_not_call_provider_twice(app, tmp_path, monkeypatch):
     assert cached["stage"] == "cache"
     assert second.analyze_calls == 0
     assert calls == 0
+
+
+def test_circuit_open_provider_cache_is_used_before_failover(app, tmp_path):
+    photo_id = _scan(app, tmp_path)[0]
+    _setting(app, "analysis.ai_mode", "eligible")
+    _setting(app, "analysis.prefilter_enabled", False)
+    service = app.extensions["inktime_analysis_service"]
+    first = CountingProvider()
+    first.provider_id = "provider-a"
+    fallback = CountingProvider()
+    fallback.provider_id = "provider-b"
+    service.analyze_photo(
+        photo_id=photo_id, job_id=None, provider=first,
+        strategy="high_quality", high_model="route-cache",
+    )
+    channel = ProviderChannel(first, priority=1, max_concurrency=1)
+    channel.circuit_until = time.monotonic() + 60
+    router = FailoverVisionProvider([channel, ProviderChannel(fallback, priority=2)])
+
+    result = service.analyze_photo(
+        photo_id=photo_id, job_id=None, provider=router,
+        strategy="high_quality", high_model="route-cache",
+    )
+
+    assert result["stage"] == "cache"
+    assert first.analyze_calls == 1
+    assert fallback.analyze_calls == 0
+    assert not channel.request_times
+    assert channel.semaphore.acquire(blocking=False) is True
+    channel.semaphore.release()
+
+
+def test_rate_limited_provider_cache_is_used_without_a_network_permit(app, tmp_path):
+    photo_id = _scan(app, tmp_path)[0]
+    _setting(app, "analysis.ai_mode", "eligible")
+    _setting(app, "analysis.prefilter_enabled", False)
+    service = app.extensions["inktime_analysis_service"]
+    first = CountingProvider()
+    first.provider_id = "provider-a"
+    fallback = CountingProvider()
+    fallback.provider_id = "provider-b"
+    service.analyze_photo(
+        photo_id=photo_id, job_id=None, provider=first,
+        strategy="high_quality", high_model="rate-cache",
+    )
+    channel = ProviderChannel(first, priority=1, max_concurrency=1, requests_per_minute=1)
+    channel.request_times.append(time.monotonic())
+    router = FailoverVisionProvider([channel, ProviderChannel(fallback, priority=2)])
+
+    result = service.analyze_photo(
+        photo_id=photo_id, job_id=None, provider=router,
+        strategy="high_quality", high_model="rate-cache",
+    )
+
+    assert result["stage"] == "cache"
+    assert first.analyze_calls == 1
+    assert fallback.analyze_calls == 0
+    assert len(channel.request_times) == 1
+    assert channel.semaphore.acquire(blocking=False) is True
+    channel.semaphore.release()
+
+
+def test_token_limited_provider_cache_is_used_without_failover(app, tmp_path):
+    photo_id = _scan(app, tmp_path)[0]
+    _setting(app, "analysis.ai_mode", "eligible")
+    _setting(app, "analysis.prefilter_enabled", False)
+    service = app.extensions["inktime_analysis_service"]
+    first = CountingProvider()
+    first.provider_id = "provider-a"
+    fallback = CountingProvider()
+    fallback.provider_id = "provider-b"
+    service.analyze_photo(
+        photo_id=photo_id, job_id=None, provider=first,
+        strategy="high_quality", high_model="token-cache",
+    )
+    channel = ProviderChannel(first, priority=1, max_concurrency=1, tokens_per_minute=1)
+    channel.token_events.append((time.monotonic(), 1))
+    router = FailoverVisionProvider([channel, ProviderChannel(fallback, priority=2)])
+
+    result = service.analyze_photo(
+        photo_id=photo_id, job_id=None, provider=router,
+        strategy="high_quality", high_model="token-cache",
+    )
+
+    assert result["stage"] == "cache"
+    assert first.analyze_calls == 1
+    assert fallback.analyze_calls == 0
+    assert len(channel.token_events) == 1
+    assert channel.semaphore.acquire(blocking=False) is True
+    channel.semaphore.release()
+
+
+def test_failover_checks_next_provider_cache_after_first_network_miss(app, tmp_path):
+    photo_id = _scan(app, tmp_path)[0]
+    _setting(app, "analysis.ai_mode", "eligible")
+    _setting(app, "analysis.prefilter_enabled", False)
+    service = app.extensions["inktime_analysis_service"]
+    first = CountingProvider()
+    first.provider_id = "provider-a"
+    fallback = CountingProvider()
+    fallback.provider_id = "provider-b"
+    service.analyze_photo(
+        photo_id=photo_id, job_id=None, provider=fallback,
+        strategy="high_quality", high_model="failover-cache",
+    )
+    channel = ProviderChannel(first, priority=1)
+    channel.circuit_until = time.monotonic() + 60
+    router = FailoverVisionProvider([channel, ProviderChannel(fallback, priority=2)])
+
+    result = service.analyze_photo(
+        photo_id=photo_id, job_id=None, provider=router,
+        strategy="high_quality", high_model="failover-cache",
+    )
+
+    assert result["stage"] == "cache"
+    assert first.analyze_calls == 0
+    assert fallback.analyze_calls == 1
+
+
+def test_network_unavailable_provider_fails_over_after_cache_miss(app, tmp_path):
+    photo_id = _scan(app, tmp_path)[0]
+    _setting(app, "analysis.ai_mode", "eligible")
+    _setting(app, "analysis.prefilter_enabled", False)
+    service = app.extensions["inktime_analysis_service"]
+    first = CountingProvider()
+    first.provider_id = "provider-a"
+    fallback = CountingProvider()
+    fallback.provider_id = "provider-b"
+    channel = ProviderChannel(first, priority=1, requests_per_minute=1)
+    channel.request_times.append(time.monotonic())
+    router = FailoverVisionProvider([channel, ProviderChannel(fallback, priority=2)])
+
+    result = service.analyze_photo(
+        photo_id=photo_id, job_id=None, provider=router,
+        strategy="high_quality", high_model="network-failover",
+    )
+
+    assert result["stage"] == "single_high"
+    assert first.analyze_calls == 0
+    assert fallback.analyze_calls == 1
+    with app.extensions["inktime_database"].session() as connection:
+        reserved = connection.execute(
+            "SELECT count(*) FROM ai_cache_reservations WHERE status='reserved'"
+        ).fetchone()[0]
+    assert reserved == 0
 
 
 def test_concurrent_requests_share_one_provider_call_and_thumbnail(app, tmp_path, monkeypatch):
