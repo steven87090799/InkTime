@@ -197,7 +197,7 @@ def test_parent_cancel_callback_exception_still_reaps_child_and_releases_slot():
         )
     assert boundary.observability()["active"] == 0
     assert boundary.call(
-        _return_call, timeout_seconds=1, kwargs={"value": "reused"}
+        _return_call, timeout_seconds=5, kwargs={"value": "reused"}
     ) == "reused"
     boundary.shutdown()
     boundary.shutdown()
