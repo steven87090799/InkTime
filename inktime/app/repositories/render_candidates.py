@@ -104,3 +104,11 @@ class RenderCandidateRepository:
                 raise IneligiblePhotoError(photo_id, "照片未完成本機特徵、已排除或原始檔不存在")
             rows.append(row)
         return rows
+
+    def require_for_execution_mode(
+        self, photo_ids: Iterable[str], execution: str
+    ) -> list[dict[str, Any]]:
+        """Use one formal-release contract at every API and service boundary."""
+        if execution in {"disabled", "local_only", "local_with_manual_ai"}:
+            return self.require_local(photo_ids)
+        return self.require(photo_ids)

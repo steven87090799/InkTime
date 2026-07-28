@@ -975,6 +975,21 @@ class RenderService:
                 text_parts.extend(["這一天留下了一個值得記住的片段。", "這一天留下了兩個值得記住的片段。"])
             if layout_key == "photo_pair":
                 text_parts.append("請選擇第二張照片")
+            if layout_key == "photo_pair_caption":
+                if not secondary_photo_id:
+                    raise ValueError("RENDER-005 雙照片各自一句話需要第二張照片")
+                second_for_caption = self.photos.get_with_path(secondary_photo_id)
+                if second_for_caption is None:
+                    raise ValueError("RENDER-005 第二張照片不存在")
+                first_record = dict(primary_caption or self._caption_record(photo, today))
+                second_record = dict(secondary_caption or self._caption_record(second_for_caption, today))
+                # Both rendered caption regions are part of the font contract.
+                # Prefixes make a coverage failure actionable without changing
+                # the pixels rendered into either region.
+                text_parts.extend([
+                    f"Caption A：{first_record['text']}",
+                    f"Caption B：{second_record['text']}",
+                ])
             if weather:
                 text_parts.extend(
                     [str(weather.get("condition", "")), weather_location, "室外室內最高最低溫溼度"]
@@ -1203,18 +1218,9 @@ class RenderService:
             selected = self.select_candidates(source_limit)
         else:
             # 明確指定不合格照片必須穩定失敗；不得靜默改選其他照片。
-            if execution_mode(self.settings) in {"local_only", "local_with_manual_ai"}:
-                # Existing analysed records remain valid during the transition;
-                # otherwise use the scanner-only formal eligibility contract.
-                try:
-                    required = self.candidates.require(selected)
-                except Exception as exc:
-                    from inktime.app.repositories.render_candidates import IneligiblePhotoError
-                    if not isinstance(exc, IneligiblePhotoError):
-                        raise
-                    required = self.candidates.require_local(selected)
-            else:
-                required = self.candidates.require(selected)
+            required = self.candidates.require_for_execution_mode(
+                selected, execution_mode(self.settings)
+            )
             selected = [str(row["id"]) for row in required]
         if device_ids:
             unique_device_ids = list(dict.fromkeys(str(value) for value in device_ids if str(value)))

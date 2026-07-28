@@ -37,6 +37,12 @@ from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.budgets import BudgetService
 
 
+class AnalysisDisabledError(RuntimeError):
+    """Frozen disabled jobs must never create a new analysis record."""
+
+    code = "ANALYSIS-DISABLED"
+
+
 PROMPT_VERSION = "photo-quality-v4-visual-orientation"
 
 
@@ -842,6 +848,8 @@ class PhotoAnalysisService:
         }
         execution_policy = dict(analysis_spec.get("ai_execution_policy") or {})
         travel_policy = dict(analysis_spec.get("travel_policy") or {})
+        if str(execution_policy.get("execution_mode", "automatic_ai")) == "disabled":
+            raise AnalysisDisabledError("目前分析執行模式為完全停用，不會建立新的分析結果")
 
         def local_context(schema_kind: str) -> dict[str, Any]:
             input_spec = {

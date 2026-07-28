@@ -85,6 +85,11 @@ def create_job():
     if selection_mode == "force_all" and str(g.user["role"]) != "administrator":
         return {"message": "force_all 僅限管理員"}, 403
     strategy = str(payload.get("strategy", "smart_two_stage"))
+    if execution_mode(current_app.extensions["inktime_settings_repository"]) == "disabled":
+        return {
+            "error_code": "ANALYSIS-DISABLED",
+            "message": "目前分析執行模式為完全停用，不會建立新的分析工作。",
+        }, 409
     plan, _ = _analysis_plan(strategy)
     analysis_fingerprint = fingerprint(plan)
     try:
@@ -115,6 +120,11 @@ def selection_preview():
         return {"message": "不支援的選片模式"}, 400
     limit = payload.get("limit")
     strategy = str(payload.get("strategy", "smart_two_stage"))
+    if execution_mode(current_app.extensions["inktime_settings_repository"]) == "disabled":
+        return {
+            "error_code": "ANALYSIS-DISABLED",
+            "message": "目前分析執行模式為完全停用，不會建立新的分析工作。",
+        }, 409
     _plan, _ = _analysis_plan(strategy)
     preview = _repository().selection_preview(
         analysis_fingerprint=fingerprint(_plan),

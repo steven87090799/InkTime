@@ -119,7 +119,7 @@ class BoundedJobWorker:
             return
         # Frozen Provider configuration is deterministic for this Job. Retrying
         # cannot make an empty, deleted, disabled, or revised route valid.
-        attempts = 1 if code == "VLM-008" else self.max_attempts
+        attempts = 1 if code in {"VLM-008", "ANALYSIS-DISABLED"} else self.max_attempts
         self.repository.fail_item(job_id, item_id, code, str(exc), max_attempts=attempts)
         if self.error_callback and (
             self.failure_count <= 3 or self.failure_count % self.progress_interval_items == 0

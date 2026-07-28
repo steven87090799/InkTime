@@ -50,3 +50,24 @@ def test_missing_or_removed_file_is_never_a_candidate(app, tmp_path):
     _candidate(app, root, "removed")
     (root / "removed.jpg").unlink()
     assert app.extensions["inktime_render_candidate_repository"].get("removed") is None
+
+
+def test_local_only_explicit_local_feature_photo_can_queue_release(client, app, tmp_path):
+    root = tmp_path / "local-only"
+    root.mkdir()
+    Image.new("RGB", (640, 480), "white").save(root / "local.jpg")
+    photos = app.extensions["inktime_photo_repository"]
+    library = photos.ensure_library("本機", root)
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            """INSERT INTO photos(id,library_id,relative_path,status,eligible,lifecycle_status,
+               exclusion_status,local_features_status,created_at,updated_at)
+               VALUES ('local-only',?,'local.jpg','discovered',1,'active','eligible','complete','2026-01-01','2026-01-01')""",
+            (library,),
+        )
+    create_admin(app)
+    login(client)
+    response = client.post(
+        "/api/v1/releases", json={"photo_ids": ["local-only"]}, headers={"X-CSRF-Token": csrf(client)}
+    )
+    assert response.status_code == 202

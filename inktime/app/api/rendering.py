@@ -30,6 +30,7 @@ from inktime.app.services.rendering import (
     PORTRAIT_ONLY_LAYOUTS,
 )
 from inktime.app.services.render_cache import RENDERER_VERSION
+from inktime.app.domain.analysis.execution_mode import execution_mode
 
 
 bp = Blueprint("rendering", __name__)
@@ -625,8 +626,9 @@ def publish_release():
     requested_photo_ids = [str(value) for value in payload.get("photo_ids", [])]
     if requested_photo_ids:
         try:
-            current_app.extensions["inktime_render_candidate_repository"].require(
-                requested_photo_ids
+            current_app.extensions["inktime_render_candidate_repository"].require_for_execution_mode(
+                requested_photo_ids,
+                execution_mode(current_app.extensions["inktime_settings_repository"]),
             )
         except ValueError as exc:
             abort(409, description=str(exc))

@@ -1,23 +1,40 @@
 """Deterministic, non-generative captions for local-only rendering."""
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone as utc_timezone
 from hashlib import sha256
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 LOCAL_CAPTION_VERSION = "local-caption-v1"
 
 
-def _as_date(value: Any) -> date | None:
+def _zone(name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(str(name or "UTC"))
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("UTC")
+
+
+def _as_date(value: Any, *, timezone_name: str) -> date | None:
     if isinstance(value, datetime):
-        return value.date()
+        if value.tzinfo is None:
+            # Existing photo timestamps without an offset are treated as UTC,
+            # matching parse_photo_date's explicit server-neutral contract.
+            value = value.replace(tzinfo=utc_timezone.utc)
+        return value.astimezone(_zone(timezone_name)).date()
     if isinstance(value, date):
         return value
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
+        if "T" not in str(value) and " " not in str(value):
+            return date.fromisoformat(str(value))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=utc_timezone.utc)
+        return parsed.astimezone(_zone(timezone_name)).date()
     except ValueError:
         return None
 
@@ -46,10 +63,13 @@ def build_local_caption(
     maximum_characters: int = 16,
 ) -> dict[str, Any]:
     """Resolve one photo's text without inferring people, events, or emotion."""
-    _ = (timezone, selection_mode, orientation)  # part of the explicit stable contract
+    _ = (selection_mode, orientation)  # part of the explicit stable contract
     manual = str(manual_caption or "").strip()
     existing = str(existing_side_caption or "").strip()
-    captured, display = _as_date(captured_at), _as_date(display_date)
+    captured, display = (
+        _as_date(captured_at, timezone_name=timezone),
+        _as_date(display_date, timezone_name=timezone),
+    )
     location = str(known_location or "").strip()
     source = "local_fallback"
     if manual:
