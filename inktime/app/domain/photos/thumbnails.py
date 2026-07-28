@@ -46,17 +46,25 @@ class ThumbnailCache:
             os.close(descriptor)
 
     @contextmanager
-    def _generation_lock(self, cache_key: str):
-        """Use a fixed shard and honor an already-existing pre-shard lock."""
+    def _generation_lock(self, cache_key: str, *, blocking: bool = True):
+        """Lock one cache shard for generation, use, or nonblocking cleanup."""
 
         shard = int(sha256(cache_key.encode("ascii")).hexdigest()[:8], 16) % self.LOCK_SHARDS
         shard_path = self.lock_root / f"shard-{shard:03d}.lock"
         legacy_path = self.root / f".{cache_key}.lock"
         shard_descriptor = os.open(shard_path, os.O_RDWR | os.O_CREAT, 0o600)
         legacy_descriptor: int | None = None
+        acquired = False
         try:
             os.chmod(shard_path, 0o600)
-            fcntl.flock(shard_descriptor, fcntl.LOCK_EX)
+            try:
+                fcntl.flock(
+                    shard_descriptor, fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+                )
+            except BlockingIOError:
+                yield False
+                return
+            acquired = True
             # Rolling upgrades can leave an old per-key lock. Lock it as well,
             # but never create or unlink one: deleting a live inode is unsafe.
             try:
@@ -66,13 +74,24 @@ class ThumbnailCache:
             except FileNotFoundError:
                 legacy_descriptor = None
             if legacy_descriptor is not None:
-                fcntl.flock(legacy_descriptor, fcntl.LOCK_EX)
-            yield
+                try:
+                    fcntl.flock(
+                        legacy_descriptor, fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+                    )
+                except BlockingIOError:
+                    os.close(legacy_descriptor)
+                    legacy_descriptor = None
+                    fcntl.flock(shard_descriptor, fcntl.LOCK_UN)
+                    acquired = False
+                    yield False
+                    return
+            yield True
         finally:
             if legacy_descriptor is not None:
                 fcntl.flock(legacy_descriptor, fcntl.LOCK_UN)
                 os.close(legacy_descriptor)
-            fcntl.flock(shard_descriptor, fcntl.LOCK_UN)
+            if acquired:
+                fcntl.flock(shard_descriptor, fcntl.LOCK_UN)
             os.close(shard_descriptor)
 
     @staticmethod
@@ -105,49 +124,64 @@ class ThumbnailCache:
         finally:
             os.close(descriptor)
 
-    def get_or_create(self, source: Path, content_hash: str, size: int) -> Path:
+    def _destination(self, content_hash: str, size: int) -> tuple[str, Path]:
         if size not in self.ALLOWED_SIZES:
             raise ValueError("縮圖尺寸只支援 512、1024 或 1600px")
         normalized_hash = content_hash.casefold()
         if not _SHA256.fullmatch(normalized_hash):
             raise ValueError("THUMB-002 縮圖內容雜湊必須是 SHA-256")
-        destination = self.root / f"{normalized_hash}-{size}.jpg"
+        return normalized_hash, self.root / f"{normalized_hash}-{size}.jpg"
+
+    def _get_or_create_locked(self, source: Path, normalized_hash: str, destination: Path, size: int) -> Path:
         temporary: Path | None = None
-        with self._generation_lock(f"{normalized_hash}-{size}"):
-            if destination.is_file() and self._validate(destination, size):
-                # Cache hits refresh recency for cleanup without rewriting the generated thumbnail.
-                cached_stat = destination.stat()
-                os.utime(destination, ns=(time.time_ns(), cached_stat.st_mtime_ns))
-                return destination
-            if destination.exists():
-                destination.unlink()
-            handle = tempfile.NamedTemporaryFile(
-                dir=self.root,
-                prefix=f".{normalized_hash}-{size}-",
-                suffix=".tmp",
-                delete=False,
-            )
-            temporary = Path(handle.name)
-            handle.close()
-            try:
-                with Image.open(source) as opened:
-                    image = ImageOps.exif_transpose(opened).convert("RGB")
-                    image.thumbnail((size, size), Image.Resampling.LANCZOS)
-                    image.save(temporary, format="JPEG", quality=88, optimize=True)
-                if self._content_sha256(source) != normalized_hash:
-                    raise OSError("THUMB-004 原始照片內容已在縮圖建立期間改變")
-                if not self._validate(temporary, size):
-                    raise OSError("THUMB-003 縮圖格式或尺寸驗證失敗")
-                with temporary.open("rb") as stream:
-                    os.fsync(stream.fileno())
-                os.replace(temporary, destination)
-                self._fsync_directory(self.root)
-                temporary = None
-                os.utime(destination, None)
-                return destination
-            finally:
-                if temporary is not None:
-                    temporary.unlink(missing_ok=True)
+        if destination.is_file() and self._validate(destination, size):
+            # Cache hits refresh recency for cleanup without rewriting the generated thumbnail.
+            cached_stat = destination.stat()
+            os.utime(destination, ns=(time.time_ns(), cached_stat.st_mtime_ns))
+            return destination
+        if destination.exists():
+            destination.unlink()
+        handle = tempfile.NamedTemporaryFile(
+            dir=self.root,
+            prefix=f".{normalized_hash}-{size}-",
+            suffix=".tmp",
+            delete=False,
+        )
+        temporary = Path(handle.name)
+        handle.close()
+        try:
+            with Image.open(source) as opened:
+                image = ImageOps.exif_transpose(opened).convert("RGB")
+                image.thumbnail((size, size), Image.Resampling.LANCZOS)
+                image.save(temporary, format="JPEG", quality=88, optimize=True)
+            if self._content_sha256(source) != normalized_hash:
+                raise OSError("THUMB-004 原始照片內容已在縮圖建立期間改變")
+            if not self._validate(temporary, size):
+                raise OSError("THUMB-003 縮圖格式或尺寸驗證失敗")
+            with temporary.open("rb") as stream:
+                os.fsync(stream.fileno())
+            os.replace(temporary, destination)
+            self._fsync_directory(self.root)
+            temporary = None
+            os.utime(destination, None)
+            return destination
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    def get_or_create(self, source: Path, content_hash: str, size: int) -> Path:
+        normalized_hash, destination = self._destination(content_hash, size)
+        with self._generation_lock(f"{normalized_hash}-{size}") as acquired:
+            assert acquired
+            return self._get_or_create_locked(source, normalized_hash, destination, size)
+
+    @contextmanager
+    def acquire_for_use(self, source: Path, content_hash: str, size: int):
+        """Keep this cache shard alive until the caller has finished reading it."""
+        normalized_hash, destination = self._destination(content_hash, size)
+        with self._generation_lock(f"{normalized_hash}-{size}") as acquired:
+            assert acquired
+            yield self._get_or_create_locked(source, normalized_hash, destination, size)
 
     def size_bytes(self) -> int:
         return sum(path.stat().st_size for path in self.root.glob("*.jpg") if path.is_file())
@@ -199,9 +233,13 @@ class ThumbnailCache:
                 if removed >= max(1, int(max_files_per_run)) or released >= max(1, int(max_bytes_per_run)):
                     break
                 try:
-                    released += path.stat().st_size
-                    path.unlink()
-                    removed += 1
+                    cache_key = path.stem
+                    with self._generation_lock(cache_key, blocking=False) as acquired:
+                        if not acquired:
+                            continue
+                        released += path.stat().st_size
+                        path.unlink()
+                        removed += 1
                 except FileNotFoundError:
                     continue
             return {"files": removed, "bytes": released}

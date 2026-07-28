@@ -191,6 +191,72 @@ def test_provider_service_uses_only_frozen_route_and_rejects_changed_members(app
 
     with app.extensions["inktime_database"].session() as connection:
         connection.execute("UPDATE providers SET enabled=1 WHERE id=?", (second,))
-        connection.execute("UPDATE providers SET updated_at='changed' WHERE id=?", (first,))
+        connection.execute("UPDATE providers SET base_url='https://changed.invalid/v1' WHERE id=?", (first,))
     with pytest.raises(ValueError, match="設定已變更"):
+        service.build_router(snapshot)
+
+
+def test_empty_frozen_route_never_discovers_a_later_provider(app):
+    repository = app.extensions["inktime_provider_repository"]
+    service = app.extensions["inktime_provider_service"]
+
+    assert service.build_router([]) is None
+    repository.save(
+        {
+            "name": "late",
+            "base_url": "https://example.invalid/v1",
+            "api_key": "late-secret",
+            "enabled": True,
+        },
+        user_id="test",
+    )
+    assert service.build_router([]) is None
+    assert service.build_router() is not None
+
+
+def test_provider_config_revision_ignores_secret_rotation_and_rejects_behavior_changes(app):
+    repository = app.extensions["inktime_provider_repository"]
+    service = app.extensions["inktime_provider_service"]
+    provider_id = repository.save(
+        {
+            "name": "stable",
+            "base_url": "https://example.invalid/v1",
+            "api_key": "first-secret",
+            "timeout_seconds": 30,
+            "enabled": True,
+        },
+        user_id="test",
+    )
+    snapshot = service.route_snapshot()
+    assert len(snapshot) == 1
+    assert "secret" not in str(snapshot).casefold()
+    original_revision = snapshot[0]["config_revision"]
+
+    repository.save(
+        {
+            "id": provider_id,
+            "name": "stable",
+            "base_url": "https://example.invalid/v1",
+            "api_key": "rotated-secret",
+            "timeout_seconds": 30,
+            "enabled": True,
+        },
+        user_id="test",
+    )
+    assert service.route_snapshot()[0]["config_revision"] == original_revision
+    assert service.build_router(snapshot) is not None
+
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE providers SET timeout_seconds=31 WHERE id=?", (provider_id,))
+    with pytest.raises(ValueError, match="設定已變更"):
+        service.build_router(snapshot)
+
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE providers SET timeout_seconds=30, enabled=0 WHERE id=?", (provider_id,))
+    with pytest.raises(ValueError, match="已停用"):
+        service.build_router(snapshot)
+
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("DELETE FROM providers WHERE id=?", (provider_id,))
+    with pytest.raises(ValueError, match="已刪除"):
         service.build_router(snapshot)

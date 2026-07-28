@@ -13,6 +13,7 @@ from inktime.app.core.logging import configure_logging, log_event
 from inktime.app.workers.job_worker import BoundedJobWorker
 from inktime.app.workers.scanner import PhotoScanner
 from inktime.app.domain.photos import PhotoPreprocessor
+from inktime.app.services.analysis import ProviderUnavailableError
 
 
 LOGGER = logging.getLogger("worker")
@@ -43,14 +44,16 @@ class WorkerRunner:
                 continue
             settings = json.loads(job["settings_json"])
             analysis_plan = json.loads(str(job["analysis_spec_json"] or "{}")) if str(job["kind"]) == "analysis" else {}
-            provider = (
-                self.app.extensions["inktime_provider_service"].build_router(
-                    list(analysis_plan.get("provider_route") or []),
-                    scoring_rules=str(analysis_plan.get("scoring_rules") or ""),
-                )
-                if str(job["kind"]) == "analysis"
-                else None
-            )
+            provider = None
+            provider_error: ProviderUnavailableError | None = None
+            if str(job["kind"]) == "analysis" and str(job["strategy"]) != "local":
+                try:
+                    provider = self.app.extensions["inktime_provider_service"].build_router(
+                        analysis_plan.get("provider_route"),
+                        scoring_rules=str(analysis_plan.get("scoring_rules") or ""),
+                    )
+                except ValueError as exc:
+                    provider_error = ProviderUnavailableError(str(exc))
             analysis = self.app.extensions["inktime_analysis_service"]
             runtime_settings = self.app.extensions["inktime_settings_repository"]
             progress_items = int(runtime_settings.get("worker.progress_items", 50))
@@ -151,6 +154,7 @@ class WorkerRunner:
                 job=job,
                 settings=settings,
                 provider=provider,
+                provider_error=provider_error,
                 analysis=analysis,
                 analysis_plan=analysis_plan,
                 progress_items=progress_items,
@@ -161,6 +165,8 @@ class WorkerRunner:
                 scanner_safety=scanner_safety,
                 runtime_settings=runtime_settings,
             ):
+                if provider_error is not None:
+                    raise provider_error
                 if job["kind"] == "render_preview":
                     operation = str(settings.get("operation", ""))
                     started = time.perf_counter()

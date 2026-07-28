@@ -216,6 +216,59 @@ class RenderService:
             )
         )
 
+    def _manifest_render_plans(
+        self,
+        composition_plans: list[dict[str, Any]],
+        *,
+        profile_key: str,
+        dither_plan: dict[str, Any],
+        color_distance: str,
+        dither_strength: float,
+    ) -> list[dict[str, Any]]:
+        """Bind immutable composition choices to one manifest's quantization."""
+        profile = DISPLAY_PROFILES[profile_key]
+        return [
+            {
+                **plan,
+                "profile": profile_key,
+                "panel_profile": profile.panel_profile,
+                "palette_version": profile.palette_version,
+                "requested_dither": dither_plan["requested_dither"],
+                "effective_dither": dither_plan["effective_dither"],
+                "override_source": dither_plan["override_source"],
+                "aggregation_scope": "release",
+                "epaper_contrast_risk_rule_version": dither_plan[
+                    "epaper_contrast_risk_rule_version"
+                ],
+                "photo_risks": list(dither_plan["photo_risks"]),
+                "epaper_contrast_risk": dither_plan["epaper_contrast_risk"],
+                "color_distance": color_distance,
+                "dither_strength": dither_strength,
+            }
+            for plan in composition_plans
+        ]
+
+    @staticmethod
+    def _quantization_metadata(
+        profile_key: str, dither_plan: dict[str, Any], *, color_distance: str, dither_strength: float
+    ) -> dict[str, Any]:
+        profile = DISPLAY_PROFILES[profile_key]
+        return {
+            "profile_key": profile_key,
+            "panel_profile": profile.panel_profile,
+            "palette_version": profile.palette_version,
+            "requested_dither": dither_plan["requested_dither"],
+            "effective_dither": dither_plan["effective_dither"],
+            "override_source": dither_plan["override_source"],
+            "aggregation_scope": "release",
+            "epaper_contrast_risk_rule_version": dither_plan[
+                "epaper_contrast_risk_rule_version"
+            ],
+            "photo_risks": list(dither_plan["photo_risks"]),
+            "color_distance": color_distance,
+            "dither_strength": dither_strength,
+        }
+
     def preview_fingerprint(
         self,
         photo_id: str,
@@ -1083,11 +1136,23 @@ class RenderService:
                 if profile_key not in DISPLAY_PROFILES:
                     raise ValueError("RENDER-003 發布包含不支援的顯示 Profile")
                 device_orientation_metadata: list[dict[str, Any]] = []
-                plans = [
+                composition_plans = [
                     self.resolve_render_plan(photo_id, device_config=device, profile=profile_key)
                     for photo_id in selected[:quantity]
                 ]
-                release_photo_ids.extend(self._render_plan_photo_ids(plans))
+                release_photo_ids.extend(self._render_plan_photo_ids(composition_plans))
+                dither_plan = self.resolve_effective_dither(
+                    self._render_plan_rows(composition_plans), device_config=device
+                )
+                color_distance = str(self.settings.get("render.color_distance", "oklab"))
+                dither_strength = float(self.settings.get("render.dither_strength", 1.0))
+                manifest_plans = self._manifest_render_plans(
+                    composition_plans,
+                    profile_key=profile_key,
+                    dither_plan=dither_plan,
+                    color_distance=color_distance,
+                    dither_strength=dither_strength,
+                )
                 images = [
                     (
                         "+".join(
@@ -1101,17 +1166,14 @@ class RenderService:
                             orientation_metadata=device_orientation_metadata,
                         ),
                     )
-                    for plan in plans
+                    for plan in composition_plans
                 ]
-                dither_plan = self.resolve_effective_dither(
-                    self._render_plan_rows(plans), device_config=device
-                )
                 manifest = self.publisher.publish(
                     images,
                     profile_key=profile_key,
                     dither=str(dither_plan["effective_dither"]),
-                    color_distance=str(self.settings.get("render.color_distance", "oklab")),
-                    dither_strength=float(self.settings.get("render.dither_strength", 1.0)),
+                    color_distance=color_distance,
+                    dither_strength=dither_strength,
                     orientation=str(
                         device.get("frame_orientation")
                         or self.settings.get("render.frame_orientation", "portrait")
@@ -1121,7 +1183,11 @@ class RenderService:
                         "device_id": device_id,
                         "layout_mode": device.get("layout_mode") or layout_key,
                         "aggregation_scope": "release",
-                        "render_plans": plans,
+                        "render_plans": manifest_plans,
+                        "quantization_plan": self._quantization_metadata(
+                            profile_key, dither_plan,
+                            color_distance=color_distance, dither_strength=dither_strength,
+                        ),
                         "photo_orientations": device_orientation_metadata,
                         **dither_plan,
                     },
@@ -1175,6 +1241,13 @@ class RenderService:
         release_orientation = str(plans[0]["orientation"]) if plans else "portrait"
         manifests = []
         for profile_key in selected_profiles:
+            manifest_plans = self._manifest_render_plans(
+                plans,
+                profile_key=profile_key,
+                dither_plan=dither_plan,
+                color_distance=color_distance,
+                dither_strength=dither_strength,
+            )
             manifest = self.publisher.publish(
                 images,
                 profile_key=profile_key,
@@ -1185,7 +1258,11 @@ class RenderService:
                 activate=False,
                 metadata={
                     "aggregation_scope": "release",
-                    "render_plans": plans,
+                    "render_plans": manifest_plans,
+                    "quantization_plan": self._quantization_metadata(
+                        profile_key, dither_plan,
+                        color_distance=color_distance, dither_strength=dither_strength,
+                    ),
                     "photo_orientations": release_orientation_metadata,
                     **dither_plan,
                 },

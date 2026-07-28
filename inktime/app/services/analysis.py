@@ -35,6 +35,10 @@ from inktime.app.services.budgets import BudgetService
 PROMPT_VERSION = "photo-quality-v4-visual-orientation"
 
 
+class ProviderUnavailableError(ValueError):
+    code = "VLM-008"
+
+
 def _unknown_visual_orientation() -> dict:
     """Local-only results deliberately have no authoritative orientation advice."""
     return {
@@ -458,7 +462,7 @@ class PhotoAnalysisService:
         self,
         *,
         provider: VisionProvider,
-        image_factory: Callable[[], Path],
+        image_factory: Callable[[], Any],
         model: str,
         detail: str,
         stage: str,
@@ -530,9 +534,15 @@ class PhotoAnalysisService:
         cache_key = request_fingerprint
         self._activity("DEBUG", "caption_cache_miss", "Caption AI Cache 未命中", job_id=job_id, photo_id=photo_id, stage=stage, trace_id=prompt_version)
         owner_id = str(uuid4())
-        deadline = time.monotonic() + 120
+        provider_timeout = max(5, int(getattr(selected_provider, "timeout", 120)))
+        # A legal owner may need one vision call and one JSON repair.  Wait no
+        # less than that bounded lease, so a healthy owner is never displaced.
+        reservation_lease_seconds = provider_timeout * 2 + max(10, provider_timeout // 10)
+        deadline = time.monotonic() + reservation_lease_seconds
         waited_for_owner = False
-        while not self.photos.acquire_ai_cache_reservation(cache_key, owner_id):
+        while not self.photos.acquire_ai_cache_reservation(
+            cache_key, owner_id, lease_seconds=reservation_lease_seconds
+        ):
             waited_for_owner = True
             if time.monotonic() >= deadline:
                 release_selected(error=TimeoutError("AI-CACHE-001 等待相同分析結果逾時"))
@@ -566,24 +576,24 @@ class PhotoAnalysisService:
                     raise TimeoutError("VLM-005 Provider Network Permit 暫時不可用")
                 network_permit = True
             # The only owner generates a JPEG, after both cache checks.
-            image = image_factory()
-            result, raw, cost, usage, latency = self._perform_uncached_model_call(
-                provider=selected_provider,
-                image=image,
-                model=model,
-                detail=detail,
-                stage=stage,
-                job_id=job_id,
-                photo_id=photo_id,
-                content_sha256=content_sha256,
-                schema_kind=schema_kind,
-                caption_controls=caption_controls,
-                prompt_version=prompt_version,
-                cache_schema_kind=cache_schema_kind,
-                vision_request_fingerprint=request_fingerprint,
-                vision_input_spec_json=vision_json,
-                cache_provider_identity=actual_provider,
-            )
+            with image_factory() as image:
+                result, raw, cost, usage, latency = self._perform_uncached_model_call(
+                    provider=selected_provider,
+                    image=image,
+                    model=model,
+                    detail=detail,
+                    stage=stage,
+                    job_id=job_id,
+                    photo_id=photo_id,
+                    content_sha256=content_sha256,
+                    schema_kind=schema_kind,
+                    caption_controls=caption_controls,
+                    prompt_version=prompt_version,
+                    cache_schema_kind=cache_schema_kind,
+                    vision_request_fingerprint=request_fingerprint,
+                    vision_input_spec_json=vision_json,
+                    cache_provider_identity=actual_provider,
+                )
         except Exception as exc:
             self.photos.finish_ai_cache_reservation(cache_key, owner_id, error=str(exc))
             release_selected(error=exc)
@@ -904,7 +914,7 @@ class PhotoAnalysisService:
             )
             return {"analysis": result, "stage": "prefilter", "_actual_cost": 0}
         if provider is None:
-            raise ValueError("VLM-008 尚未設定可用 Provider")
+            raise ProviderUnavailableError("VLM-008 尚未設定可用 Provider")
 
         sha = str(photo["sha256"] or "")
         if not sha:
@@ -926,7 +936,7 @@ class PhotoAnalysisService:
             low_input = analysis_spec["low_vision_input"]
             low, raw, cost, cache_hit, actual_provider, actual_model, request_fingerprint, input_spec_json, _usage, _latency = self._model_call(
                 provider=provider,
-                image_factory=lambda: self.thumbnails.get_or_create(source, sha, 512),
+                image_factory=lambda: self.thumbnails.acquire_for_use(source, sha, 512),
                 model=low_model,
                 detail="low",
                 stage="stage_one",
@@ -961,7 +971,7 @@ class PhotoAnalysisService:
         high_input = analysis_spec["high_vision_input"]
         high, raw, cost, cache_hit, actual_provider, actual_model, request_fingerprint, input_spec_json, _usage, _latency = self._model_call(
             provider=provider,
-            image_factory=lambda: self.thumbnails.get_or_create(source, sha, high_max_side),
+            image_factory=lambda: self.thumbnails.acquire_for_use(source, sha, high_max_side),
             model=high_model,
             detail="high",
             stage="stage_two" if strategy == "smart_two_stage" else "single_high",

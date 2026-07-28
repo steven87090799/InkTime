@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -11,6 +12,7 @@ from PIL import Image
 from inktime.app.domain.analysis.plan import fingerprint
 from inktime.app.domain.photos import PhotoPreprocessor
 from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
+from inktime.app.services import analysis as analysis_module
 from inktime.app.workers.scanner import PhotoScanner
 from tests.conftest import create_admin, csrf, login
 from tests.unit.test_analysis_schema import valid_result
@@ -208,14 +210,16 @@ def test_ai_cache_hit_does_not_call_provider_twice(app, tmp_path, monkeypatch):
     second = CountingProvider()
     cache = app.extensions["inktime_thumbnail_cache"]
     calls = 0
-    original = cache.get_or_create
+    original = cache.acquire_for_use
 
+    @contextmanager
     def counted_thumbnail(*args, **kwargs):
         nonlocal calls
         calls += 1
-        return original(*args, **kwargs)
+        with original(*args, **kwargs) as path:
+            yield path
 
-    monkeypatch.setattr(cache, "get_or_create", counted_thumbnail)
+    monkeypatch.setattr(cache, "acquire_for_use", counted_thumbnail)
     cached = service.analyze_photo(photo_id=first_id, job_id=None, provider=second, strategy="high_quality", high_model="test")
     assert cached["stage"] == "cache"
     assert second.analyze_calls == 0
@@ -230,14 +234,16 @@ def test_concurrent_requests_share_one_provider_call_and_thumbnail(app, tmp_path
     provider = SlowCountingProvider()
     cache = app.extensions["inktime_thumbnail_cache"]
     calls = 0
-    original = cache.get_or_create
+    original = cache.acquire_for_use
 
+    @contextmanager
     def counted_thumbnail(*args, **kwargs):
         nonlocal calls
         calls += 1
-        return original(*args, **kwargs)
+        with original(*args, **kwargs) as path:
+            yield path
 
-    monkeypatch.setattr(cache, "get_or_create", counted_thumbnail)
+    monkeypatch.setattr(cache, "acquire_for_use", counted_thumbnail)
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(
             executor.map(
@@ -286,6 +292,56 @@ def test_concurrent_force_requests_share_one_fresh_generation(app, tmp_path):
     assert initial.analyze_calls == 1
     assert force.analyze_calls == 1
     assert {result["analysis"]["memory_score"] for result in results} == {77}
+
+
+def test_cache_wait_deadline_covers_provider_and_one_json_repair(app, tmp_path, monkeypatch):
+    photo_id = _scan(app, tmp_path)[0]
+    photos = app.extensions["inktime_photo_repository"]
+    photo = photos.get_with_path(photo_id)
+    assert photo is not None
+    service = app.extensions["inktime_analysis_service"]
+    provider = CountingProvider()
+    leases: list[int] = []
+    acquisitions = iter([False])
+    cached = {
+        "result": valid_result(),
+        "raw_json": json.dumps(valid_result(), ensure_ascii=False),
+        "created_at": "fresh-owner-result",
+    }
+    cache_reads = 0
+
+    def acquire(_key, _owner, *, lease_seconds=480):
+        leases.append(lease_seconds)
+        return next(acquisitions, False)
+
+    def get_cache(**_kwargs):
+        nonlocal cache_reads
+        cache_reads += 1
+        return None if cache_reads == 1 else cached
+
+    clock = iter([0.0, 121.0])
+    monkeypatch.setattr(photos, "acquire_ai_cache_reservation", acquire)
+    monkeypatch.setattr(photos, "get_ai_cache", get_cache)
+    monkeypatch.setattr(analysis_module.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(analysis_module.time, "sleep", lambda _seconds: None)
+
+    result = service._model_call(
+        provider=provider,
+        image_factory=lambda: (_ for _ in ()).throw(AssertionError("waiter must reuse owner cache")),
+        model="wait-deadline",
+        detail="high",
+        stage="single_high",
+        job_id=None,
+        photo_id=photo_id,
+        content_sha256=str(photo["sha256"]),
+        schema_kind="full",
+        caption_controls=None,
+        prompt_version="test",
+        vision_input={"mode": "test"},
+    )
+    assert result[3] is True
+    assert provider.analyze_calls == 0
+    assert leases == [252]
 
 
 def test_full_json_allows_missing_nonessential_fields_and_travel_bonus_is_independent(app, tmp_path):
