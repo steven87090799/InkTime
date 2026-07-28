@@ -23,7 +23,10 @@ from inktime.app.domain.rendering import (
     current_local_date,
     evaluate_e6_suitability,
     fit_with_focus,
+    build_local_caption,
 )
+from inktime.app.domain.analysis.execution_mode import execution_mode
+from inktime.app.services.local_selection import LocalSelectionPolicy
 from inktime.app.domain.rendering.system_presets import DEFAULT_RENDER_DITHER, DEFAULT_RENDER_PROFILE
 from inktime.app.domain.photos.orientation import (
     EffectiveOrientation,
@@ -47,6 +50,7 @@ LAYOUTS = {
     "postcard": "明信片",
     "photo_info": "照片＋日期地點",
     "photo_pair": "雙照片拼版",
+    "photo_pair_caption": "雙照片・各自一句話",
     "adaptive_memory": "智慧自適應回憶",
     "calendar": "月曆相框",
     "weather_sensor": "天氣＋室內溫溼度",
@@ -125,6 +129,8 @@ class RenderService:
         fit_mode: str | None = None,
         profile: str | None = None,
         dither: str | None = None,
+        primary_caption: dict[str, Any] | None = None,
+        secondary_caption: dict[str, Any] | None = None,
         device_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Resolve every data-dependent render choice before fingerprinting."""
@@ -158,6 +164,12 @@ class RenderService:
         if secondary_id and secondary is None:
             raise KeyError(secondary_id)
         dither_plan = self.resolve_effective_dither(primary, secondary, requested=dither, device_config=device)
+        display_date = self._today()
+        primary_caption = dict(primary_caption or self._caption_record(primary, display_date))
+        resolved_secondary_caption = (
+            dict(secondary_caption or self._caption_record(secondary, display_date))
+            if secondary is not None else None
+        )
         return {
             "version": "render-plan-v1",
             "layout": layout_key,
@@ -173,6 +185,18 @@ class RenderService:
                 if secondary is not None else None
             ),
             "secondary_subject_box": list(self._subject_box(secondary) or ()) if secondary is not None else [],
+            "primary_caption": primary_caption,
+            "secondary_caption": resolved_secondary_caption,
+            "primary_caption_text_hash": primary_caption["text_hash"],
+            "primary_caption_source": primary_caption["source"],
+            "primary_caption_version": primary_caption["version"],
+            "primary_caption_region": "primary_card_footer",
+            "primary_caption_ratio": 0.20,
+            "secondary_caption_text_hash": resolved_secondary_caption["text_hash"] if resolved_secondary_caption else None,
+            "secondary_caption_source": resolved_secondary_caption["source"] if resolved_secondary_caption else None,
+            "secondary_caption_version": resolved_secondary_caption["version"] if resolved_secondary_caption else None,
+            "secondary_caption_region": "secondary_card_footer" if resolved_secondary_caption else None,
+            "secondary_caption_ratio": 0.20 if resolved_secondary_caption else None,
             "orientation": effective_orientation,
             "profile": profile or str(device.get("panel_profile") or self.settings.get("render.profile", DEFAULT_RENDER_PROFILE)),
             "requested_dither": dither,
@@ -197,6 +221,8 @@ class RenderService:
             secondary_photo_id=plan["secondary_photo_id"],
             orientation=str(plan["orientation"]),
             fit_mode=str(plan["fit_mode"]),
+            primary_caption=dict(plan["primary_caption"]),
+            secondary_caption=dict(plan["secondary_caption"]) if plan.get("secondary_caption") else None,
             device_config=device_config,
             orientation_metadata=orientation_metadata,
         )
@@ -540,6 +566,18 @@ class RenderService:
         )
         return selected
 
+    def _caption_record(self, photo, display_date: date) -> dict[str, Any]:
+        photo_id = str(photo["id"])
+        return build_local_caption(
+            photo_id=photo_id,
+            captured_at=photo["captured_at"],
+            display_date=display_date,
+            timezone=str(self.settings.get("general.timezone", "Asia/Taipei")),
+            known_location=self.location_name(photo),
+            existing_side_caption=self._caption(photo_id),
+            maximum_characters=int(self.settings.get("analysis.side_caption_max_chars", 16)),
+        )
+
     def _draw_footer_caption(
         self, draw, text: str, *, x: int, top: int, bottom: int, width: int, fill: str = "black"
     ) -> None:
@@ -799,6 +837,8 @@ class RenderService:
         secondary_photo_id: str | None = None,
         orientation: str | None = None,
         fit_mode: str | None = None,
+        primary_caption: dict[str, Any] | None = None,
+        secondary_caption: dict[str, Any] | None = None,
         device_config: dict[str, Any] | None = None,
         orientation_metadata: list[dict[str, Any]] | None = None,
     ) -> Image.Image:
@@ -988,6 +1028,39 @@ class RenderService:
                     )
                 return finish(canvas)
 
+            if layout_key == "photo_pair_caption":
+                if not secondary_photo_id:
+                    raise ValueError("RENDER-005 雙照片各自一句話需要第二張照片")
+                second_photo = self.ensure_photo_features(secondary_photo_id)
+                second_path = safe_join(Path(second_photo["root_path"]), second_photo["relative_path"])
+                second_source, second_orientation = self._load_oriented_photo(second_photo, second_path)
+                if orientation_metadata is not None:
+                    orientation_metadata.append({"photo_id": secondary_photo_id, "orientation": second_orientation.as_dict()})
+                first_caption = dict(primary_caption or self._caption_record(photo, self._today()))
+                second_caption = dict(secondary_caption or self._caption_record(second_photo, self._today()))
+                gutter, caption_ratio = 8, .20
+                if effective_orientation == "landscape":
+                    card_width = (frame_width - gutter) // 2
+                    caption_height = max(int(frame_height * .15), min(int(frame_height * .25), int(frame_height * caption_ratio)))
+                    image_size = (card_width, frame_height - caption_height)
+                    positions = ((0, 0), (card_width + gutter, 0))
+                    caption_boxes = ((0, image_size[1], card_width, frame_height), (card_width + gutter, image_size[1], frame_width, frame_height))
+                else:
+                    card_height = (frame_height - gutter) // 2
+                    caption_height = max(int(card_height * .15), min(int(card_height * .25), int(card_height * caption_ratio)))
+                    image_size = (frame_width, card_height - caption_height)
+                    positions = ((0, 0), (0, card_height + gutter))
+                    caption_boxes = ((0, image_size[1], frame_width, card_height), (0, card_height + gutter + image_size[1], frame_width, frame_height))
+                canvas.paste(self._fit_photo(source, photo, image_size, crop_x, crop_y, fit_mode_key), positions[0])
+                with second_source:
+                    canvas.paste(self._fit_photo(second_source, second_photo, image_size, second_photo["crop_manual_x"], second_photo["crop_manual_y"], fit_mode_key), positions[1])
+                for record, box in ((first_caption, caption_boxes[0]), (second_caption, caption_boxes[1])):
+                    left, top, right, bottom = box
+                    draw.rectangle(box, fill="white")
+                    draw.line((left + 8, top + 2, right - 8, top + 2), fill="#1d2822", width=1)
+                    self._draw_footer_caption(draw, str(record["text"]), x=left + 12, top=top + 8, bottom=bottom - 6, width=max(1, right - left - 24), fill="#17221c")
+                return finish(canvas)
+
             if layout_key == "postcard":
                 footer_height = 122 if effective_orientation == "landscape" else 142
                 photo_size = (frame_width - 48, frame_height - footer_height - 24)
@@ -1124,13 +1197,25 @@ class RenderService:
     ) -> dict:
         quantity = int(self.settings.get("render.quantity", 5))
         layout_key = str(self.settings.get("render.layout", "photo_info"))
-        source_limit = quantity * 2 if layout_key == "photo_pair" else quantity
+        source_limit = quantity * 2 if layout_key in {"photo_pair", "photo_pair_caption"} else quantity
         selected = photo_ids[:source_limit]
         if not selected:
             selected = self.select_candidates(source_limit)
         else:
             # 明確指定不合格照片必須穩定失敗；不得靜默改選其他照片。
-            selected = [str(row["id"]) for row in self.candidates.require(selected)]
+            if execution_mode(self.settings) in {"local_only", "local_with_manual_ai"}:
+                # Existing analysed records remain valid during the transition;
+                # otherwise use the scanner-only formal eligibility contract.
+                try:
+                    required = self.candidates.require(selected)
+                except Exception as exc:
+                    from inktime.app.repositories.render_candidates import IneligiblePhotoError
+                    if not isinstance(exc, IneligiblePhotoError):
+                        raise
+                    required = self.candidates.require_local(selected)
+            else:
+                required = self.candidates.require(selected)
+            selected = [str(row["id"]) for row in required]
         if device_ids:
             unique_device_ids = list(dict.fromkeys(str(value) for value in device_ids if str(value)))
             placeholders = ",".join("?" for _ in unique_device_ids)
@@ -1152,10 +1237,22 @@ class RenderService:
                 if profile_key not in DISPLAY_PROFILES:
                     raise ValueError("RENDER-003 發布包含不支援的顯示 Profile")
                 device_orientation_metadata: list[dict[str, Any]] = []
-                composition_plans = [
-                    self.resolve_render_plan(photo_id, device_config=device, profile=profile_key)
-                    for photo_id in selected[:quantity]
-                ]
+                if layout_key in {"photo_pair", "photo_pair_caption"}:
+                    composition_plans = [
+                        self.resolve_render_plan(
+                            selected[index],
+                            layout=layout_key if index + 1 < len(selected) else "photo_info",
+                            secondary_photo_id=selected[index + 1] if index + 1 < len(selected) else None,
+                            device_config=device,
+                            profile=profile_key,
+                        )
+                        for index in range(0, min(len(selected), quantity * 2), 2)
+                    ]
+                else:
+                    composition_plans = [
+                        self.resolve_render_plan(photo_id, device_config=device, profile=profile_key)
+                        for photo_id in selected[:quantity]
+                    ]
                 release_photo_ids.extend(self._render_plan_photo_ids(composition_plans))
                 dither_plan = self.resolve_effective_dither(
                     self._render_plan_rows(composition_plans), device_config=device
@@ -1220,7 +1317,7 @@ class RenderService:
             self._record_production_trace(list(dict.fromkeys(release_photo_ids)), published, layout_key)
             return {"releases": published, "device_releases": assignments}
         release_orientation_metadata: list[dict[str, Any]] = []
-        if layout_key == "photo_pair":
+        if layout_key in {"photo_pair", "photo_pair_caption"}:
             plans = []
             for index in range(0, len(selected), 2):
                 primary_id = selected[index]
@@ -1228,7 +1325,7 @@ class RenderService:
                 plans.append(
                     self.resolve_render_plan(
                         primary_id,
-                        layout="photo_pair" if secondary_id else "photo_info",
+                        layout=layout_key if secondary_id else "photo_info",
                         secondary_photo_id=secondary_id,
                     )
                 )
@@ -1314,7 +1411,9 @@ class RenderService:
             execution_mode="production",
             algorithm_version_id=algorithm,
             primary_photo_id=photo_ids[0] if photo_ids else None,
-            secondary_photo_id=photo_ids[1] if layout == "photo_pair" and len(photo_ids) > 1 else None,
+            secondary_photo_id=(
+                photo_ids[1] if layout in {"photo_pair", "photo_pair_caption"} and len(photo_ids) > 1 else None
+            ),
             layout_mode=layout,
             candidates=candidates,
             candidate_count=len(photo_ids),
@@ -1439,6 +1538,14 @@ class RenderService:
         limit = quantity if quantity is not None else int(self.settings.get("render.quantity", 5))
         limit = max(1, min(int(limit), 50))
         target = target_date or self._today()
+        if execution_mode(self.settings) in {"local_only", "local_with_manual_ai"}:
+            result = LocalSelectionPolicy(self.database, self.settings, self.resilience).select(
+                target=target,
+                orientation=str(self.settings.get("render.frame_orientation", "portrait")),
+                quantity=limit,
+                layout=str(self.settings.get("render.layout", "photo_info")),
+            )
+            return result["selected"][:limit]
         mode = str(self.settings.get("render.selection_mode", "history_today"))
         if mode == "top_ranked":
             rows = self._candidate_query(

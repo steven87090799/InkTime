@@ -540,6 +540,8 @@ def preview(photo_id: str):
     arguments["render_plan"] = fingerprint["render_plan"]
     arguments["layout"] = fingerprint["render_plan"]["layout"]
     arguments["secondary_photo_id"] = fingerprint["render_plan"]["secondary_photo_id"]
+    arguments["primary_caption"] = fingerprint["render_plan"]["primary_caption"]
+    arguments["secondary_caption"] = fingerprint["render_plan"]["secondary_caption"]
     arguments["orientation"] = fingerprint["render_plan"]["orientation"]
     arguments["fit_mode"] = fingerprint["render_plan"]["fit_mode"]
     arguments.update(

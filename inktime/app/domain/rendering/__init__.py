@@ -6,6 +6,7 @@ from .composition import (
     evaluate_e6_suitability,
     fit_with_focus,
 )
+from .local_caption import build_local_caption, LOCAL_CAPTION_VERSION
 from .fonts import (
     BUILTIN_FONTS,
     DEFAULT_FONT_REFERENCE,
@@ -35,6 +36,8 @@ __all__ = [
     "month_day_to_day_of_year",
     "CropAnalysis",
     "E6Suitability",
+    "build_local_caption",
+    "LOCAL_CAPTION_VERSION",
     "analyze_crop_focus",
     "evaluate_e6_suitability",
     "fit_with_focus",

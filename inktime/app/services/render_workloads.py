@@ -240,6 +240,8 @@ def _prepare_library_preview_child(
         secondary_photo_id=arguments.get("secondary_photo_id"),
         orientation=arguments.get("orientation"),
         fit_mode=arguments.get("fit_mode"),
+        primary_caption=arguments.get("primary_caption"),
+        secondary_caption=arguments.get("secondary_caption"),
     )
     quantized = bool(arguments.get("quantized"))
     if quantized:
