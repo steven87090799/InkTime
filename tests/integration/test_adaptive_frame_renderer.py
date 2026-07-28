@@ -200,3 +200,36 @@ def test_each_manifest_binds_the_release_dither_and_its_own_profile_plan(app, tm
         assert {plan["effective_dither"] for plan in options["render_plans"]} == {manifest["dither"]}
         assert all(plan["aggregation_scope"] == "release" for plan in options["render_plans"])
         assert any(risk["photo_id"] == "high-risk" and risk["risk"] == "high" for risk in options["quantization_plan"]["photo_risks"])
+
+
+def test_adaptive_secondary_risk_controls_the_preview_dither_plan(app, tmp_path):
+    root = tmp_path / "photos"
+    root.mkdir()
+    _analyzed_photo(app, root, "primary", (900, 1600), "2024-07-01T10:00:00+00:00")
+    _analyzed_photo(app, root, "secondary", (900, 1600), "2024-07-01T10:30:00+00:00")
+    settings = app.extensions["inktime_settings_repository"]
+    settings.update("render.auto_photo_smooth_enabled", True, changed_by="test", source_ip="127.0.0.1")
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            """
+            UPDATE photos
+            SET brightness=40,contrast=5,underexposed_ratio=.7,e6_score=20,
+                e6_contrast_score=20,e6_subject_score=20
+            WHERE id='secondary'
+            """
+        )
+
+    service = app.extensions["inktime_render_service"]
+    fingerprint = service.preview_fingerprint(
+        "primary", layout="adaptive_memory", orientation="landscape"
+    )
+    plan = fingerprint["render_plan"]
+
+    assert plan["secondary_photo_id"] == "secondary"
+    assert plan["effective_dither"] == "photo_smooth"
+    assert plan["override_source"] == "auto_photo_smooth"
+    assert fingerprint["render_settings"]["effective_dither"] == "photo_smooth"
+    assert any(
+        risk == {"photo_id": "secondary", "risk": "high"}
+        for risk in plan["photo_risks"]
+    )
