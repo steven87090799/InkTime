@@ -4,7 +4,7 @@ from flask import Blueprint, current_app, flash, g, redirect, render_template, r
 
 from inktime.app.repositories.auth import AuthRepository
 from inktime.app.core.errors import ApplicationError
-from inktime.app.domain.auth import SetupAlreadyCompleted
+from inktime.app.domain.auth import AuthValidationError, SetupAlreadyCompleted, validate_role
 from inktime.app.web.access import administrator_required, login_required
 
 
@@ -113,18 +113,29 @@ def create_user():
 @bp.patch("/api/v1/users/<user_id>")
 @administrator_required
 def update_user(user_id: str):
-    payload = request.get_json(silent=True) or {}
-    repository = _repository()
+    payload = request.get_json(silent=True)
     allowed = {"enabled", "role"}
-    if not payload or not set(payload) <= allowed:
-        from inktime.app.domain.auth import AuthValidationError
-
+    if not isinstance(payload, dict) or not payload or not set(payload) <= allowed:
         raise AuthValidationError("只允許更新 enabled 或 role。", code="user_update_invalid")
+    enabled = payload.get("enabled") if "enabled" in payload else None
     if "enabled" in payload:
-        repository.set_enabled(user_id, payload["enabled"])
-    if "role" in payload:
-        repository.set_role(user_id, payload["role"])
-    return {"id": user_id}
+        if type(enabled) is not bool:
+            raise AuthValidationError(
+                "enabled 必須是 Boolean。",
+                code="enabled_invalid_type",
+            )
+    role = validate_role(payload["role"]) if "role" in payload else None
+    user = _repository().update_user_security_state(
+        user_id=user_id,
+        enabled=enabled,
+        role=role,
+    )
+    return {
+        "id": str(user["id"]),
+        "enabled": bool(user["enabled"]),
+        "role": str(user["role"]),
+        "session_version": int(user["session_version"]),
+    }
 
 
 @bp.post("/api/v1/users/<user_id>/password")

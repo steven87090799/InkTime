@@ -8,6 +8,7 @@ from inktime.app.core.security import hash_password, verify_password
 from inktime.app.db import Database
 from inktime.app.domain.auth import (
     AuthValidationError,
+    LastAdministratorRequired,
     SetupAlreadyCompleted,
     normalize_username,
     validate_role,
@@ -189,31 +190,80 @@ class AuthRepository:
                 (password_hash, now, user_id),
             )
 
-    def set_enabled(self, user_id: str, enabled: bool) -> None:
-        if type(enabled) is not bool:
-            raise AuthValidationError("enabled 必須是 Boolean。", code="enabled_invalid_type")
-        now = datetime.now(timezone.utc).isoformat()
-        with self.database.transaction(operation="auth.set_enabled") as connection:
-            cursor = connection.execute(
-                """
-                UPDATE users
-                SET enabled=?,disabled_at=?,session_version=session_version+1
-                WHERE id=?
-                """,
-                (int(enabled), None if enabled else now, user_id),
+    def update_user_security_state(
+        self,
+        *,
+        user_id: str,
+        enabled: bool | None = None,
+        role: str | None = None,
+    ):
+        if enabled is None and role is None:
+            raise AuthValidationError(
+                "至少需要一個可更新欄位。",
+                code="user_update_invalid",
             )
-            if cursor.rowcount != 1:
+        if enabled is not None and type(enabled) is not bool:
+            raise AuthValidationError(
+                "enabled 必須是 Boolean。",
+                code="enabled_invalid_type",
+            )
+        resolved_role = validate_role(role) if role is not None else None
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.transaction(
+            immediate=True,
+            operation="auth.update_user_security_state",
+        ) as connection:
+            current = connection.execute(
+                """
+                SELECT id,username,role,enabled,password_hash,session_version,disabled_at
+                FROM users WHERE id=?
+                """,
+                (user_id,),
+            ).fetchone()
+            if current is None:
                 raise AuthValidationError("找不到使用者。", code="user_not_found", http_status=404)
+
+            final_enabled = bool(current["enabled"]) if enabled is None else enabled
+            final_role = str(current["role"]) if resolved_role is None else resolved_role
+            other_administrators = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM users
+                    WHERE id<>? AND enabled=1 AND role='administrator'
+                    """,
+                    (user_id,),
+                ).fetchone()[0]
+            )
+            if other_administrators + int(final_enabled and final_role == "administrator") == 0:
+                raise LastAdministratorRequired()
+
+            enabled_changed = enabled is not None and final_enabled != bool(current["enabled"])
+            role_changed = resolved_role is not None and final_role != str(current["role"])
+            if enabled_changed or role_changed:
+                disabled_at = None if final_enabled else now if enabled_changed else current["disabled_at"]
+                connection.execute(
+                    """
+                    UPDATE users
+                    SET enabled=?,role=?,disabled_at=?,
+                        session_version=session_version+1
+                    WHERE id=?
+                    """,
+                    (int(final_enabled), final_role, disabled_at, user_id),
+                )
+            return connection.execute(
+                """
+                SELECT id,username,role,enabled,password_hash,session_version
+                FROM users WHERE id=?
+                """,
+                (user_id,),
+            ).fetchone()
+
+    def set_enabled(self, user_id: str, enabled: bool) -> None:
+        self.update_user_security_state(user_id=user_id, enabled=enabled)
 
     def set_role(self, user_id: str, role: object) -> None:
         resolved_role = validate_role(role)
-        with self.database.transaction(operation="auth.set_role") as connection:
-            cursor = connection.execute(
-                "UPDATE users SET role=?,session_version=session_version+1 WHERE id=?",
-                (resolved_role, user_id),
-            )
-            if cursor.rowcount != 1:
-                raise AuthValidationError("找不到使用者。", code="user_not_found", http_status=404)
+        self.update_user_security_state(user_id=user_id, role=resolved_role)
 
     def reset_password(self, user_id: str, new_password: object) -> None:
         password_hash = hash_password(new_password)  # type: ignore[arg-type]

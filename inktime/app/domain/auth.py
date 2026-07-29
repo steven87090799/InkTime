@@ -25,6 +25,12 @@ class SetupAlreadyCompleted(ApplicationError):
     http_status = 409
 
 
+class LastAdministratorRequired(ApplicationError):
+    code = "last_administrator_required"
+    public_message = "系統至少必須保留一位啟用中的管理員。"
+    http_status = 409
+
+
 def normalize_username(value: str) -> str:
     return unicodedata.normalize("NFKC", value.strip()).casefold()
 

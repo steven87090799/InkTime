@@ -7,7 +7,11 @@ import threading
 import pytest
 
 from inktime.app.core.security import hash_password
-from inktime.app.domain.auth import AuthValidationError, SetupAlreadyCompleted
+from inktime.app.domain.auth import (
+    AuthValidationError,
+    LastAdministratorRequired,
+    SetupAlreadyCompleted,
+)
 from tests.conftest import create_admin, csrf, login
 
 
@@ -218,6 +222,11 @@ def test_session_logout(client, app):
 
 def test_disabled_user_existing_session_is_revoked(client, app):
     user_id = create_admin(app)
+    app.extensions["inktime_auth_repository"].create_user(
+        "backup-admin",
+        "very-safe-backup-passphrase",
+        "administrator",
+    )
     login(client)
     app.extensions["inktime_auth_repository"].set_enabled(user_id, False)
 
@@ -233,6 +242,11 @@ def test_reenabled_user_must_login_again(client, app):
     user_id = create_admin(app)
     login(client)
     repository = app.extensions["inktime_auth_repository"]
+    repository.create_user(
+        "backup-admin",
+        "very-safe-backup-passphrase",
+        "administrator",
+    )
     repository.set_enabled(user_id, False)
     repository.set_enabled(user_id, True)
 
@@ -258,6 +272,11 @@ def test_password_change_revokes_other_sessions(app):
 
 def test_role_change_revokes_existing_sessions(client, app):
     user_id = create_admin(app)
+    app.extensions["inktime_auth_repository"].create_user(
+        "backup-admin",
+        "very-safe-backup-passphrase",
+        "administrator",
+    )
     login(client)
     app.extensions["inktime_auth_repository"].set_role(user_id, "viewer")
 
@@ -291,3 +310,240 @@ def test_create_user_api_uses_stable_validation_error(client, app):
             "message": "密碼至少需要 12 個字元。",
         }
     }
+
+
+def _user_state(app, user_id: str):
+    with app.extensions["inktime_database"].session() as connection:
+        return connection.execute(
+            "SELECT enabled,role,session_version FROM users WHERE id=?",
+            (user_id,),
+        ).fetchone()
+
+
+def test_cannot_disable_last_enabled_administrator(app):
+    user_id = create_admin(app)
+    repository = app.extensions["inktime_auth_repository"]
+
+    with pytest.raises(LastAdministratorRequired) as raised:
+        repository.update_user_security_state(user_id=user_id, enabled=False)
+
+    assert raised.value.code == "last_administrator_required"
+    assert tuple(_user_state(app, user_id)) == (1, "administrator", 1)
+
+
+def test_cannot_demote_last_enabled_administrator(app):
+    user_id = create_admin(app)
+    repository = app.extensions["inktime_auth_repository"]
+
+    with pytest.raises(LastAdministratorRequired):
+        repository.update_user_security_state(user_id=user_id, role="viewer")
+
+    assert tuple(_user_state(app, user_id)) == (1, "administrator", 1)
+
+
+def test_cannot_disable_and_demote_last_administrator(app):
+    user_id = create_admin(app)
+    repository = app.extensions["inktime_auth_repository"]
+
+    with pytest.raises(LastAdministratorRequired):
+        repository.update_user_security_state(
+            user_id=user_id,
+            enabled=False,
+            role="viewer",
+        )
+
+    assert tuple(_user_state(app, user_id)) == (1, "administrator", 1)
+
+
+def test_can_disable_administrator_when_another_enabled_admin_exists(app):
+    repository = app.extensions["inktime_auth_repository"]
+    first_id = create_admin(app)
+    repository.create_user("second-admin", "very-safe-second-pass", "administrator")
+
+    updated = repository.update_user_security_state(user_id=first_id, enabled=False)
+
+    assert (updated["enabled"], updated["role"], updated["session_version"]) == (
+        0,
+        "administrator",
+        2,
+    )
+
+
+def test_can_demote_administrator_when_another_enabled_admin_exists(app):
+    repository = app.extensions["inktime_auth_repository"]
+    first_id = create_admin(app)
+    repository.create_user("second-admin", "very-safe-second-pass", "administrator")
+
+    updated = repository.update_user_security_state(user_id=first_id, role="viewer")
+
+    assert (updated["enabled"], updated["role"], updated["session_version"]) == (1, "viewer", 2)
+
+
+@pytest.mark.parametrize(
+    ("first_changes", "second_changes"),
+    [
+        ({"enabled": False}, {"enabled": False}),
+        ({"role": "viewer"}, {"role": "viewer"}),
+        ({"enabled": False}, {"role": "viewer"}),
+    ],
+)
+def test_concurrent_admin_updates_cannot_leave_zero_administrators(
+    app,
+    first_changes,
+    second_changes,
+):
+    repository = app.extensions["inktime_auth_repository"]
+    first_id = create_admin(app)
+    second_id = repository.create_user(
+        "second-admin",
+        "very-safe-second-pass",
+        "administrator",
+    )
+    barrier = threading.Barrier(2)
+
+    def update(item: tuple[str, dict]) -> str:
+        user_id, changes = item
+        barrier.wait(timeout=5)
+        try:
+            repository.update_user_security_state(user_id=user_id, **changes)
+        except LastAdministratorRequired:
+            return "rejected"
+        return "updated"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                update,
+                ((first_id, first_changes), (second_id, second_changes)),
+            )
+        )
+
+    assert sorted(results) == ["rejected", "updated"]
+    with app.extensions["inktime_database"].session() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM users WHERE enabled=1 AND role='administrator'"
+            ).fetchone()[0]
+            == 1
+        )
+
+
+def test_rejected_last_admin_update_does_not_change_session_version(app):
+    user_id = create_admin(app)
+
+    with pytest.raises(LastAdministratorRequired):
+        app.extensions["inktime_auth_repository"].update_user_security_state(
+            user_id=user_id,
+            enabled=False,
+        )
+
+    assert _user_state(app, user_id)["session_version"] == 1
+
+
+def test_last_admin_api_rejection_uses_stable_conflict_error(client, app):
+    user_id = create_admin(app)
+    login(client)
+
+    response = client.patch(
+        f"/api/v1/users/{user_id}",
+        json={"enabled": False},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "error": {
+            "code": "last_administrator_required",
+            "message": "系統至少必須保留一位啟用中的管理員。",
+        }
+    }
+    assert tuple(_user_state(app, user_id)) == (1, "administrator", 1)
+
+
+def test_user_patch_is_atomic_when_role_is_invalid(client, app):
+    user_id = create_admin(app)
+    login(client)
+
+    response = client.patch(
+        f"/api/v1/users/{user_id}",
+        json={"enabled": False, "role": "invalid-role"},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+
+    assert response.status_code == 400
+    assert tuple(_user_state(app, user_id)) == (1, "administrator", 1)
+
+
+def test_user_patch_is_atomic_when_enabled_type_is_invalid(client, app):
+    user_id = create_admin(app)
+    login(client)
+
+    response = client.patch(
+        f"/api/v1/users/{user_id}",
+        json={"enabled": "false", "role": "viewer"},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+
+    assert response.status_code == 400
+    assert tuple(_user_state(app, user_id)) == (1, "administrator", 1)
+
+
+def test_combined_role_and_enabled_update_commits_together(client, app):
+    repository = app.extensions["inktime_auth_repository"]
+    first_id = create_admin(app)
+    repository.create_user("second-admin", "very-safe-second-pass", "administrator")
+    login(client)
+
+    response = client.patch(
+        f"/api/v1/users/{first_id}",
+        json={"enabled": False, "role": "viewer"},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+
+    assert response.status_code == 200
+    assert tuple(_user_state(app, first_id)) == (0, "viewer", 2)
+
+
+def test_combined_update_increments_session_version_once(client, app):
+    repository = app.extensions["inktime_auth_repository"]
+    first_id = create_admin(app)
+    repository.create_user("second-admin", "very-safe-second-pass", "administrator")
+    login(client)
+
+    response = client.patch(
+        f"/api/v1/users/{first_id}",
+        json={"enabled": False, "role": "viewer"},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["session_version"] == 2
+
+
+def test_noop_user_patch_does_not_increment_session_version(client, app):
+    user_id = create_admin(app)
+    login(client)
+
+    response = client.patch(
+        f"/api/v1/users/{user_id}",
+        json={"enabled": True, "role": "administrator"},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["session_version"] == 1
+    assert client.get("/dashboard").status_code == 200
+
+
+def test_unknown_user_patch_fields_are_rejected(client, app):
+    user_id = create_admin(app)
+    login(client)
+
+    response = client.patch(
+        f"/api/v1/users/{user_id}",
+        json={"enabled": True, "unexpected": False},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+
+    assert response.status_code == 400
+    assert tuple(_user_state(app, user_id)) == (1, "administrator", 1)
