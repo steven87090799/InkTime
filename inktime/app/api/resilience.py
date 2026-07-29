@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from hashlib import sha256
-import json
+from flask import Blueprint, abort, current_app, g, render_template, request
 
-from flask import Blueprint, abort, current_app, g, render_template, request, send_file
-
-from inktime.app.core.paths import UnsafePathError, safe_join
+from inktime.app.core.paths import UnsafePathError
 from inktime.app.web.access import administrator_required, login_required
 
 
@@ -291,27 +287,24 @@ def queue_item_file(item_id: str, filename: str):
     )
     if item is None:
         abort(403, description="QUEUE-002 Queue Item 不屬於此裝置或已失效")
-    try:
-        path = safe_join(Path(current_app.config["INKTIME_RELEASE_DIR"]), f"{item['release_id']}/{filename}")
-    except UnsafePathError:
-        abort(400, description="PATH-001 路徑超出允許範圍")
-    if not path.is_file() or path.name == "manifest.json":
-        abort(404)
-    data = path.read_bytes()
-    # 檔案仍要與 Release Manifest 校驗，ID 猜測不能跨裝置取得資料。
-    manifest = json.loads(
-        (
-            Path(current_app.config["INKTIME_RELEASE_DIR"]) / str(item["release_id"]) / "manifest.json"
-        ).read_text(encoding="utf-8")
+    service = current_app.extensions["inktime_device_release_service"]
+    authorization = service.authorize_release_for_device(
+        device_id=str(device["id"]),
+        profile_key=str(device["panel_profile"]),
+        release_id=str(item["release_id"]),
     )
-    entry = next((value for value in manifest.get("files", []) if value.get("name") == filename), None)
-    if (
-        not entry
-        or int(entry.get("size", -1)) != len(data)
-        or entry.get("sha256") != sha256(data).hexdigest()
-    ):
+    if not authorization.allowed:
+        abort(404, description="QUEUE-002 Queue Item 不存在或已失效")
+    try:
+        data, entry = service.read_payload(authorization, filename)
+    except (FileNotFoundError, UnsafePathError):
+        abort(404)
+    except ValueError:
         abort(409, description="QUEUE-002 Release 檔案完整性驗證失敗")
-    return send_file(path, mimetype="application/octet-stream", conditional=True)
+    response = current_app.response_class(data, mimetype="application/octet-stream")
+    response.content_length = len(data)
+    response.set_etag(str(entry["sha256"]))
+    return response
 
 
 @bp.get("/api/retention/policies")

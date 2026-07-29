@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from inktime.app.domain.rendering import DeviceTestReleaseStore
 from tests.conftest import create_admin, csrf, login
 
 
@@ -195,6 +198,96 @@ def test_device_status_rejects_malformed_numeric_telemetry(client, app):
     assert "DEVICE-004" in response.get_data(as_text=True)
 
 
+@pytest.mark.parametrize("value", ["true", "false", "1", "0", 1, 0, None, [], {}])
+@pytest.mark.parametrize("field", ["display_updated", "payload_sha256_verified"])
+def test_device_status_rejects_non_boolean_values(client, app, field, value):
+    device_id, token = app.extensions["inktime_device_repository"].create("strict-boolean-device")
+    response = client.post(
+        "/api/device/v1/status",
+        json={field: value},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 400
+    with app.extensions["inktime_database"].session() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM device_events WHERE device_id=?",
+                (device_id,),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM device_power_samples WHERE device_id=?",
+                (device_id,),
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_string_false_cannot_consume_assignment_or_complete_queue(client, app):
+    from PIL import Image
+
+    device_id, token = app.extensions["inktime_device_repository"].create("false-string-device")
+    manifest = app.extensions["inktime_release_publisher"].publish(
+        [("photo", Image.new("RGB", (480, 800), "white"))]
+    )
+    store = DeviceTestReleaseStore(app.config["INKTIME_RELEASE_DIR"])
+    store.assign(
+        device_id,
+        manifest["release_id"],
+        profile_key="safe_4c",
+        delivery="next_wake",
+        one_time=True,
+        restore_formal=True,
+    )
+    assert store.active(device_id, "safe_4c") is not None
+    store.mark_downloaded(device_id, manifest["release_id"])
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO releases(
+                id,display_type,width,height,pixel_format,manifest_json,status,
+                created_at,published_at,render_profile,reconciliation_status
+            ) VALUES (?,?,?,?,?,?,'published',datetime('now'),datetime('now'),?,'ok')
+            """,
+            (
+                manifest["release_id"],
+                manifest["display_type"],
+                manifest["width"],
+                manifest["height"],
+                manifest["pixel_format"],
+                json.dumps(manifest),
+                manifest["render_profile"],
+            ),
+        )
+    queue = app.extensions["inktime_resilience_repository"]
+    queue.ensure_queue(device_id)
+    item = queue.enqueue_release(device_id=device_id, release_id=manifest["release_id"])
+
+    response = client.post(
+        "/api/device/v1/status",
+        json={
+            "release_id": manifest["release_id"],
+            "payload_sha256_verified": "false",
+            "display_updated": "false",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 400
+    assignment = store.active(device_id, "safe_4c")
+    assert assignment is not None
+    assert assignment["status"] == "payload_downloaded"
+    with app.extensions["inktime_database"].session() as connection:
+        status = connection.execute(
+            "SELECT status FROM device_content_queue_items WHERE id=?",
+            (item["id"],),
+        ).fetchone()[0]
+    assert status == "READY"
+
+
 def test_device_configuration_version_is_acknowledged_only_after_report(client, app):
     repository = app.extensions["inktime_device_repository"]
     device_id, token = repository.create("七色電子紙", panel_profile="gdey073d46_7c")
@@ -235,9 +328,7 @@ def test_device_configuration_version_is_acknowledged_only_after_report(client, 
 def test_device_receives_only_its_panel_profile_release(client, app):
     from PIL import Image
 
-    _, token = app.extensions["inktime_device_repository"].create(
-        "六色電子紙", panel_profile="gdep073e01_6c"
-    )
+    _, token = app.extensions["inktime_device_repository"].create("六色電子紙", panel_profile="gdep073e01_6c")
     publisher = app.extensions["inktime_release_publisher"]
     publisher.publish(
         [("photo-six", Image.new("RGB", (480, 800), "blue"))],
@@ -250,9 +341,7 @@ def test_device_receives_only_its_panel_profile_release(client, app):
         dither="none",
     )
 
-    response = client.get(
-        "/api/device/v1/releases/latest", headers={"Authorization": f"Bearer {token}"}
-    )
+    response = client.get("/api/device/v1/releases/latest", headers={"Authorization": f"Bearer {token}"})
     body = response.get_json()
     assert response.status_code == 200
     assert body["render_profile"] == "gdep073e01_6c"

@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-import json
 import logging
 import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Blueprint, abort, current_app, render_template, request
 
-from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.core.logging import log_event
+from inktime.app.core.paths import UnsafePathError
 from inktime.app.domain.rendering import DISPLAY_PROFILES, DeviceTestReleaseStore
 from inktime.app.domain.rendering.system_presets import DEFAULT_DEVICE_PANEL_PROFILE
 from inktime.app.services.rendering import FIT_MODES, FRAME_ORIENTATIONS, LAYOUTS
@@ -41,6 +40,15 @@ def _authenticated_device():
     if device is None:
         abort(401, description="DEVICE-001 裝置驗證失敗")
     return device
+
+
+def optional_bool(payload: dict, field: str, *, default: bool | None = None) -> bool | None:
+    if field not in payload:
+        return default
+    value = payload[field]
+    if type(value) is not bool:
+        abort(400, description=f"DEVICE-004 {field} 必須是 JSON Boolean")
+    return value
 
 
 def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
@@ -284,35 +292,15 @@ def update_device(device_id: str):
 @bp.get("/api/device/v1/releases/latest")
 def latest_release():
     device = _authenticated_device()
-    release_root = current_app.config["INKTIME_RELEASE_DIR"]
     profile_key = str(device["panel_profile"] or DEFAULT_DEVICE_PANEL_PROFILE)
-    assignment = DeviceTestReleaseStore(release_root).active(str(device["id"]), profile_key)
-    if assignment is not None:
-        release_id = str(assignment["release_id"])
-    else:
-        with current_app.extensions["inktime_database"].session() as connection:
-            assigned = connection.execute(
-                "SELECT release_id FROM device_render_releases WHERE device_id=?",
-                (str(device["id"]),),
-            ).fetchone()
-        if assigned is not None:
-            release_id = str(assigned["release_id"])
-        else:
-            latest_pointer = release_root / f"latest.{profile_key}"
-            if not latest_pointer.exists() and profile_key == "safe_4c":
-                latest_pointer = release_root / "latest"
-            if not latest_pointer.exists():
-                abort(404, description="目前沒有可用的發布版本")
-            release_id = latest_pointer.read_text(encoding="utf-8").strip()
-    try:
-        manifest_path = safe_join(release_root, f"{release_id}/manifest.json")
-    except UnsafePathError:
-        abort(500, description="DEVICE-002 發布指標不合法")
-    if not manifest_path.is_file():
-        abort(404, description="找不到發布 Manifest")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if str(manifest.get("render_profile")) != profile_key:
-        abort(409, description="DEVICE-008 Release Profile 與裝置不相容")
+    authorization = current_app.extensions["inktime_device_release_service"].latest_for_device(
+        device_id=str(device["id"]),
+        profile_key=profile_key,
+    )
+    if not authorization.allowed or authorization.manifest is None:
+        abort(404, description="目前沒有可用的發布版本")
+    release_id = authorization.release_id
+    manifest = dict(authorization.manifest)
     manifest["download_base_url"] = f"/api/device/v1/releases/{release_id}/files/"
     zone = ZoneInfo(str(device["timezone"]))
     offset = datetime.now(zone).utcoffset()
@@ -325,7 +313,8 @@ def latest_release():
         "schedule": str(device["schedule"]),
         "rotation": int(device["rotation"]),
     }
-    if assignment is not None:
+    if authorization.test_assignment is not None:
+        assignment = authorization.test_assignment
         manifest["test_delivery"] = {
             "mode": assignment["delivery"],
             "one_time": bool(assignment["one_time"]),
@@ -349,65 +338,56 @@ def latest_release():
 @bp.get("/api/device/v1/releases/<release_id>/files/<path:filename>")
 def release_file(release_id: str, filename: str):
     device = _authenticated_device()
-    from flask import send_file
-
-    release_root = current_app.config["INKTIME_RELEASE_DIR"]
-    try:
-        path = safe_join(release_root, f"{release_id}/{filename}")
-    except UnsafePathError:
-        _repository().record_download(device["id"], release_id, False)
-        abort(400, description="PATH-001 路徑超出允許範圍")
-    manifest_path = release_root / release_id / "manifest.json"
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        _repository().record_download(device["id"], release_id, False)
-        abort(404, description="DEVICE-002 Release Manifest 不存在")
-    if str(manifest.get("render_profile")) != str(device["panel_profile"]):
-        _repository().record_download(device["id"], release_id, False)
-        abort(403, description="DEVICE-008 Release Profile 與裝置不相容")
-    entry = next(
-        (
-            item
-            for item in manifest.get("files", [])
-            if isinstance(item, dict) and str(item.get("name")) == filename
-        ),
-        None,
+    profile_key = str(device["panel_profile"] or DEFAULT_DEVICE_PANEL_PROFILE)
+    service = current_app.extensions["inktime_device_release_service"]
+    authorization = service.authorize_release_for_device(
+        device_id=str(device["id"]),
+        profile_key=profile_key,
+        release_id=release_id,
     )
-    if not path.is_file() or path.name == "manifest.json" or entry is None:
+    if not authorization.allowed:
+        _repository().record_download(device["id"], release_id[:128], False)
+        abort(404, description="DEVICE-002 Release 或檔案不存在")
+    try:
+        payload, entry = service.read_payload(authorization, filename)
+    except (FileNotFoundError, UnsafePathError):
         _repository().record_download(device["id"], release_id, False)
-        abort(404)
-    from hashlib import sha256
-
-    payload = path.read_bytes()
-    if len(payload) != int(entry.get("size", -1)) or sha256(payload).hexdigest() != str(
-        entry.get("sha256", "")
-    ):
+        abort(404, description="DEVICE-002 Release 或檔案不存在")
+    except ValueError:
         _repository().record_download(device["id"], release_id, False)
         abort(409, description="DEVICE-009 Release Payload 完整性驗證失敗")
     _repository().record_download(device["id"], release_id, True)
-    if filename.endswith(".bin"):
+    if filename.endswith(".bin") and authorization.source == "test_assignment":
         # 只前進到 payload_downloaded；不會在 HTTP 傳輸階段 consumed。
-        DeviceTestReleaseStore(release_root).mark_downloaded(str(device["id"]), release_id)
+        service.test_store.mark_downloaded(str(device["id"]), release_id)
     log_event(
         LOGGER,
         logging.DEBUG,
         "裝置下載發布檔案",
         event="device_download",
-        details={"device_id": str(device["id"]), "release_id": release_id, "filename": path.name},
+        details={"device_id": str(device["id"]), "release_id": release_id, "filename": filename},
     )
-    return send_file(path, mimetype="application/octet-stream", conditional=True)
+    response = current_app.response_class(payload, mimetype="application/octet-stream")
+    response.content_length = len(payload)
+    response.set_etag(str(entry["sha256"]))
+    return response
 
 
 @bp.post("/api/device/v1/status")
 def report_status():
     device = _authenticated_device()
     payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        abort(400, description="DEVICE-004 狀態 Payload 必須是 JSON 物件")
+    if (request.content_length or 0) > 64 * 1024:
+        abort(413, description="DEVICE-004 狀態 Payload 不可超過 64 KiB")
 
     def optional_int(key: str, minimum: int, maximum: int) -> int | None:
         value = payload.get(key)
         if value is None:
             return None
+        if isinstance(value, bool):
+            abort(400, description=f"DEVICE-004 {key} 必須是整數")
         try:
             return max(minimum, min(int(value), maximum))
         except (TypeError, ValueError):
@@ -417,26 +397,38 @@ def report_status():
         value = payload.get(key)
         if value is None:
             return None
+        if isinstance(value, bool):
+            abort(400, description=f"DEVICE-004 {key} 必須是數字")
         try:
             return max(minimum, min(float(value), maximum))
         except (TypeError, ValueError):
             abort(400, description=f"DEVICE-004 {key} 必須是數字")
 
-    def optional_bool(key: str) -> bool | None:
-        value = payload.get(key)
-        if value is None:
-            return None
-        if not isinstance(value, bool):
-            abort(400, description=f"DEVICE-004 {key} 必須是布林值")
-        return value
-
     battery = payload.get("battery_percent")
+    if isinstance(battery, bool):
+        abort(400, description="DEVICE-004 battery_percent 必須是數字")
     try:
         battery_percent = max(0.0, min(float(battery), 100.0)) if battery is not None else None
     except (TypeError, ValueError):
         abort(400, description="DEVICE-004 battery_percent 必須是數字")
     error_code = str(payload.get("error_code", "")).strip()[:64]
     error_message = str(payload.get("error_message", "")).strip()[:500]
+    display_updated = optional_bool(payload, "display_updated", default=False)
+    payload_verified = optional_bool(payload, "payload_sha256_verified", default=False)
+    assert display_updated is not None
+    assert payload_verified is not None
+    boolean_details = {
+        key: optional_bool(payload, key)
+        for key in (
+            "flash_ready",
+            "psram_ready",
+            "sd_card",
+            "rtc",
+            "usb_power",
+            "battery_percent_estimated",
+            "button_wakeup",
+        )
+    }
     _repository().record_status(
         str(device["id"]),
         firmware_version=str(payload.get("firmware_version", "unknown")),
@@ -449,8 +441,8 @@ def report_status():
         wake_reason=str(payload.get("wake_reason", "")),
         applied_config_version=optional_int("applied_config_version", 0, 2_147_483_647),
         details={
-            "display_updated": bool(payload.get("display_updated", False)),
-            "payload_sha256_verified": bool(payload.get("payload_sha256_verified", False)),
+            "display_updated": display_updated,
+            "payload_sha256_verified": payload_verified,
             "release_id": str(payload.get("release_id", ""))[:100],
             "render_profile": str(payload.get("render_profile", ""))[:100],
             "reported_panel_profile": str(payload.get("panel_profile", ""))[:100],
@@ -458,28 +450,28 @@ def report_status():
             "board_profile": str(payload.get("board_profile", ""))[:100],
             "flash_bytes": optional_int("flash_bytes", 0, 2_147_483_647),
             "psram_bytes": optional_int("psram_bytes", 0, 2_147_483_647),
-            "flash_ready": optional_bool("flash_ready"),
-            "psram_ready": optional_bool("psram_ready"),
-            "sd_card": optional_bool("sd_card"),
-            "rtc": optional_bool("rtc"),
+            "flash_ready": boolean_details["flash_ready"],
+            "psram_ready": boolean_details["psram_ready"],
+            "sd_card": boolean_details["sd_card"],
+            "rtc": boolean_details["rtc"],
             "cache_status": str(payload.get("cache_status", ""))[:32],
             "pmic_type": str(payload.get("pmic_type", ""))[:32],
-            "usb_power": optional_bool("usb_power"),
+            "usb_power": boolean_details["usb_power"],
             "battery_voltage": optional_float("battery_voltage", 0.0, 10.0),
-            "battery_percent_estimated": optional_bool("battery_percent_estimated"),
+            "battery_percent_estimated": boolean_details["battery_percent_estimated"],
             "temperature_c": optional_float("temperature_c", -100.0, 150.0),
             "humidity_percent": optional_float("humidity_percent", 0.0, 100.0),
             "last_refresh_duration_ms": optional_int("last_refresh_duration_ms", 0, 600_000),
             "wake_duration_ms": optional_int("wake_duration_ms", 0, 86_400_000),
-            "button_wakeup": optional_bool("button_wakeup"),
+            "button_wakeup": boolean_details["button_wakeup"],
         },
     )
     DeviceTestReleaseStore(current_app.config["INKTIME_RELEASE_DIR"]).confirm_display(
         str(device["id"]),
         str(payload.get("release_id", ""))[:100],
         profile_key=str(device["panel_profile"]),
-        payload_verified=bool(payload.get("payload_sha256_verified", False)),
-        display_updated=bool(payload.get("display_updated", False)),
+        payload_verified=payload_verified,
+        display_updated=display_updated,
         error_code=error_code,
     )
     log_event(
