@@ -121,7 +121,7 @@
 {% endif %}
 {% endblock %}
 
-{% block scripts %}{% if energy %}<script>
+{% block scripts %}{% if energy %}<script nonce="{{ csp_nonce }}">
 const energySamples={{ energy.chart_samples|tojson }};
 const svgNamespace='http://www.w3.org/2000/svg';
 function svgNode(name,attributes={},content=''){

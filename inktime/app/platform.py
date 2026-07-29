@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 import logging
 from pathlib import Path
+import secrets
 
 from flask import Flask, flash, g, redirect, request, session, url_for
 from jinja2 import FileSystemLoader
@@ -104,7 +105,10 @@ def configure_web_application(
                 ).fetchall()
         except Exception:
             rows = []
-        return {"critical_alerts": rows}
+        return {
+            "critical_alerts": rows,
+            "csp_nonce": getattr(g, "csp_nonce", ""),
+        }
 
     public_endpoints = {
         "auth.setup",
@@ -128,6 +132,7 @@ def configure_web_application(
 
     @app.before_request
     def enforce_access():
+        g.csp_nonce = secrets.token_urlsafe(24)
         endpoint = request.endpoint or ""
         repository: AuthRepository = app.extensions["inktime_auth_repository"]
         user_id = session.get("user_id")
@@ -156,8 +161,9 @@ def configure_web_application(
         response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
         response.headers.setdefault(
             "Content-Security-Policy",
-            "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
-            "script-src 'self' 'unsafe-inline'; connect-src 'self'",
+            "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; "
+            "form-action 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; "
+            f"script-src 'self' 'nonce-{g.csp_nonce}'; connect-src 'self'",
         )
         if (
             runtime_config.environment == "production"

@@ -189,7 +189,7 @@
   </tbody></table></div>
 </section>
 {% endblock %}
-{% block scripts %}{% if g.user.role=='administrator' %}<script>
+{% block scripts %}{% if g.user.role=='administrator' %}<script nonce="{{ csp_nonce }}">
 async function publishProfiles(profileKeys){if(!confirm('將發布通過最低回憶分門檻、且綜合排序分最高的照片，確定？'))return;const body={photo_ids:[]};if(profileKeys)body.profile_keys=profileKeys;const r=await window.inktimeFetch('/api/v1/releases',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),d=await r.json();if(r.ok)location.href=d.detail_url;else alert(d.message||'發布失敗');}
 async function pollRenderJob(statusUrl){for(let attempt=0;attempt<120;attempt+=1){const response=await window.inktimeFetch(statusUrl),body=await response.json();if(!response.ok)throw new Error(body.message||'無法取得背景工作狀態');if(body.status==='completed')return body.result;if(['completed_with_errors','failed','cancelled','budget_exceeded'].includes(body.status))throw new Error(body.error_code||'背景工作未完成');await new Promise(resolve=>setTimeout(resolve,750));}throw new Error('背景工作仍在執行，請稍後至工作中心查看');}
 document.getElementById('publish').onclick=()=>publishProfiles(['{{ current_profile }}']);

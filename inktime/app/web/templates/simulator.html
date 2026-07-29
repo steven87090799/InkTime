@@ -119,7 +119,7 @@
 </section>
 {% endblock %}
 {% block scripts %}
-<script>
+<script nonce="{{ csp_nonce }}">
 (() => {
   const profiles = {{ profiles|tojson }};
   const builtins = {{ photo_presets|tojson }};

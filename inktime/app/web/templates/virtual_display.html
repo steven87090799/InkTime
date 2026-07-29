@@ -84,7 +84,7 @@
     </section>
   </main>
 
-  <script id="receiver-config" type="application/json">{{ {
+  <script nonce="{{ csp_nonce }}" id="receiver-config" type="application/json">{{ {
     "manifestUrl": manifest_url,
     "pollSeconds": poll_seconds,
     "profile": {

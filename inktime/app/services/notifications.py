@@ -6,12 +6,14 @@ import hashlib
 import json
 import logging
 import random
+import http.client
+import ssl
 from uuid import uuid4
 
 import requests
 
 from inktime.app.core.logging import log_event
-from inktime.app.core.webhook_safety import UnsafeWebhookURL, validate_webhook_url
+from inktime.app.core.webhook_safety import PinnedWebhookTransport, UnsafeWebhookURL
 from inktime.app.db import Database
 from inktime.app.repositories.settings import SecretStore, SettingsRepository
 
@@ -27,7 +29,7 @@ class DeviceNotificationService:
         settings: SettingsRepository,
         secrets: SecretStore,
         *,
-        session: requests.Session | None = None,
+        session=None,
         max_attempts: int = 5,
         retry_base_seconds: float = 60.0,
         retry_max_seconds: float = 3600.0,
@@ -35,7 +37,7 @@ class DeviceNotificationService:
         self.database = database
         self.settings = settings
         self.secrets = secrets
-        self.session = session or requests.Session()
+        self.session = session or PinnedWebhookTransport()
         self.max_attempts = max(1, int(max_attempts))
         self.retry_base_seconds = max(1.0, float(retry_base_seconds))
         self.retry_max_seconds = max(self.retry_base_seconds, float(retry_max_seconds))
@@ -129,9 +131,7 @@ class DeviceNotificationService:
         cutoff = (current - timedelta(hours=threshold)).isoformat()
         cooldown = float(self.settings.get("notification.device_offline_cooldown_hours", 24))
         repeat_cutoff = (current - timedelta(hours=cooldown)).isoformat()
-        repeat_enabled = bool(
-            self.settings.get("notification.device_offline_repeat_enabled", False)
-        )
+        repeat_enabled = bool(self.settings.get("notification.device_offline_repeat_enabled", False))
         offline_enabled = bool(self.settings.get("notification.device_offline_enabled", True))
         recovery_enabled = bool(self.settings.get("notification.device_recovery_enabled", True))
         counts = {"offline": 0, "offline_reminder": 0, "recovery": 0}
@@ -200,8 +200,7 @@ class DeviceNotificationService:
                             device["last_status_at"] or device["last_seen_at"] or device["created_at"]
                         )
                         message = (
-                            f"{device['name']} 已超過 {threshold:g} 小時未連線；"
-                            f"最後活動：{last_contact}。"
+                            f"{device['name']} 已超過 {threshold:g} 小時未連線；最後活動：{last_contact}。"
                         )
                         connection.execute(
                             """
@@ -396,9 +395,7 @@ class DeviceNotificationService:
             "title": str(row["title"]),
             "message": str(row["message"]),
             "device": (
-                {"id": str(row["device_id"]), "name": str(row["device_name"])}
-                if row["device_id"]
-                else None
+                {"id": str(row["device_id"]), "name": str(row["device_name"])} if row["device_id"] else None
             ),
             "details": json.loads(str(row["details_json"])),
             "created_at": str(row["created_at"]),
@@ -409,11 +406,6 @@ class DeviceNotificationService:
         retryable = True
         delivered = False
         try:
-            # Production transport always passes the DNS-aware SSRF boundary.
-            # In-memory test transports never open a socket and must remain
-            # usable for deterministic retry/idempotency coverage.
-            if isinstance(self.session, requests.Session):
-                url = validate_webhook_url(url)
             response = self.session.post(
                 url,
                 json=payload,
@@ -426,7 +418,13 @@ class DeviceNotificationService:
             retryable = status_code == 429 or status_code >= 500
             if not delivered:
                 error = f"HTTP {status_code}"
-        except (requests.RequestException, UnsafeWebhookURL) as exc:
+        except (
+            requests.RequestException,
+            UnsafeWebhookURL,
+            OSError,
+            ssl.SSLError,
+            http.client.HTTPException,
+        ) as exc:
             error = type(exc).__name__
         attempts = int(row["webhook_attempts"]) + 1
         if delivered:

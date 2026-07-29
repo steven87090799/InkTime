@@ -72,7 +72,7 @@
 {% endblock %}
 
 {% block scripts %}{% if g.user.role == 'administrator' %}
-<script>
+<script nonce="{{ csp_nonce }}">
 (() => {
   const profileForm = document.getElementById('scoring-profile-form');
   const weightNames = ['memory_weight', 'beauty_weight', 'technical_weight', 'emotion_weight'];

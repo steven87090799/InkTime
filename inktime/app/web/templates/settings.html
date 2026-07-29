@@ -208,7 +208,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
+<script nonce="{{ csp_nonce }}">
 (() => {
   const form = document.getElementById('settings-form');
   const canEdit = form.dataset.canEdit === 'true';
