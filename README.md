@@ -13,7 +13,7 @@ InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複
 - 以 SHA-256、pHash、dHash、EXIF、亮度、對比、模糊與曝光做本地預處理；相同內容不重複呼叫模型。
 - 512／1024／1600px 內容雜湊縮圖快取；預設不傳原始 4K／8K 圖片。
 - 單一分析請求同時回傳描述、類型、四種分數、短文案與敏感判斷；JSON 最多純文字修復一次。
-- 低成本第一階段與高品質第二階段；支援 OpenAI 即時、OpenAI 相容端點與本地相容端點；OpenAI Batch 已完成提交／查詢／取消 Provider 介面，但尚未接入背景工作的完整生命週期。
+- 低成本第一階段與高品質第二階段；支援 OpenAI 即時、OpenAI 相容端點與本地相容端點。OpenAI Batch 僅為 **Experimental／Provider API only**：目前只有提交、查詢、取消原語，尚未接入持久化背景工作、重啟恢復、結果回填、Retry、成本統計與取消補償。
 - 持久化 Job、逐張狀態、有界佇列、暫停、續跑、取消、失敗重跑、重啟恢復與成本停止線。
 - administrator／viewer、Session、CSRF、登入限制與每台 ESP32 獨立 Bearer Token。
 - 480×800 四色 2bpp 與完整六／七色 indexed4 版本化發布；OKLab／RGB 色差、五種抖動、Profile 獨立 latest、SHA-256 與回滾。
@@ -632,15 +632,27 @@ flowchart TD
 
 ## Docker 快速安裝
 
-需求：Docker Engine 24+ 與 Compose v2。先準備可寫資料目錄與唯讀照片目錄：
+需求：Docker Engine 24+ 與 Compose v2。請先選擇部署模式，不要混用 HTTP 與 Secure Cookie 設定。
+
+可信任 LAN／本機 HTTP：
 
 ```bash
-cp .env.example .env
-# 預設已使用 ./simulation_photos；可再把 INKTIME_PHOTO_PATH 改成正式相簿路徑。
+cp .env.local.example .env
+# 把 INKTIME_PUBLIC_URL 改成瀏覽器實際使用的 http://主機:8765
 docker compose up -d --build
 ```
 
-開啟 `http://主機IP:8765/`，首次啟動精靈會要求建立非空白的管理員密碼；系統不限制長度，但正式環境仍建議使用密碼管理器產生的長密碼。正式 HTTPS 反向代理請將 `INKTIME_COOKIE_SECURE=1`。
+這個模式使用 `INKTIME_COOKIE_SECURE=0` 與明確的 `INKTIME_ALLOW_INSECURE_HTTP=1`，只適合可信任 LAN 或測試環境，不可直接公開到 Internet。
+
+正式 HTTPS Reverse Proxy：
+
+```bash
+cp .env.production.example .env
+# 必須先把範例網域改成實際 HTTPS 網址，並確認 Proxy Trust。
+docker compose up -d --build
+```
+
+正式模式使用 `INKTIME_COOKIE_SECURE=1`、`INKTIME_ALLOW_INSECURE_HTTP=0`。不合理組合、localhost／範例 Production 網域、URL 內帳密或路徑會讓啟動明確失敗。首次管理員帳號需 3–64 個 ASCII 識別字元，密碼需 12–128 字元；密碼前後空白會被保留。
 
 三個服務使用同一映像檔：
 
@@ -708,6 +720,10 @@ python -m inktime.app.workers.runner
 
 - 不要 Commit `.env`、`config.py`、資料庫、Session Key、API Key 或裝置 Token。
 - 公網部署必須使用 HTTPS、Secure Cookie、反向代理限流與 NAS 最小權限。
+- HTTP 模式只可用於可信任 LAN／測試；`INKTIME_COOKIE_SECURE=0` 不適合公開網路。
+- Reverse Proxy 必須只傳入可信任來源的 `Host`、`X-Forwarded-Proto` 與 `X-Forwarded-For`，且 `INKTIME_PROXY_TRUST` 要等於實際 Proxy hop 數。
+- Webhook 會把通知內容送到外部服務；目的地只允許 DNS-pinned HTTPS、禁止 redirect 與內部位址，Bearer Token 仍應視為高敏感 Secret。
+- Device Token 只顯示一次，應存放於裝置受保護設定；不要放進 URL、Log、截圖或文件。
 - 舊 `/static/inktime/<key>/...` API 預設關閉；只有隔離網路短期遷移才可明確開啟。
 - viewer 只能查看，不能修改設定、建立／控制工作、管理 Token、發布或備份。
 

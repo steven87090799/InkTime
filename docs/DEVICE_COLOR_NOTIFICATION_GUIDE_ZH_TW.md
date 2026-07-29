@@ -62,7 +62,7 @@ Scheduler 預設每 300 秒掃描一次，不為每次掃描輸出 INFO Log。�
 
 ## 5. Webhook
 
-1. Web「設定」→「裝置通知」填完整 `http://` 或 `https://` URL 並啟用 Webhook。
+1. Web「設定」→「裝置通知」填完整 `https://` URL 並啟用 Webhook。
 2. 若接收端需要 Bearer Token，在同頁「Webhook 認證 Token」輸入；它以平台主密鑰加密保存在 `secrets`，不進一般設定歷史或 Log。
 3. 按「傳送測試通知」。HTTP 2xx 視為成功。
 4. 失敗會在 60 秒、再 300 秒後重試；第三次仍失敗後標記 `failed`，不無限重送。
@@ -83,7 +83,7 @@ Payload 範例：
 }
 ```
 
-Webhook URL 是 administrator 級設定，允許可信內網端點；這也代表管理員可以要求容器連到內網服務。不要把管理員權限交給不可信帳號。正式跨網路傳輸應使用 HTTPS；Token 不會放進 payload，只會放在 `Authorization: Bearer` Header。
+Webhook URL 是 administrator 級設定，但預設仍拒絕內網、Loopback、Link-local 與保留位址。確實需要內網接收端時，部署者必須用 `INKTIME_WEBHOOK_ALLOWLIST` 明確列出精確 hostname、`.example.com` 子網域、IP 或 CIDR；Suffix 比對有網域邊界，不會讓 `evil-example.com` 通過。DNS 驗證後的連線固定使用同一 IP、拒絕 Redirect，TLS SNI／憑證仍驗證原 hostname。Token 不會放進 payload，只會放在 `Authorization: Bearer` Header。
 
 ## 6. 資源與容量
 
