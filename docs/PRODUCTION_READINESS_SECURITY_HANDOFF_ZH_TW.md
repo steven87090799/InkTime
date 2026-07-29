@@ -52,7 +52,7 @@ Webhook 採 at-least-once。每個事件持久化穩定 Event ID，所有後續 
 
 ## Dependency／Actions
 
-- 2026-07-29 以 GitHub Dependabot API 查詢 default repository：open/all alerts 皆為空陣列。最終仍須以 `pip-audit -r requirements.txt` 與 Final-Head CI 為準。
+- 2026-07-29 GitHub push banner 與 alert #1 確認 `pytest` direct development dependency 受 GHSA-6w46-j5rx-g56g／CVE-2025-71176 影響（`<9.0.3`，UNIX tmpdir local privilege／DoS，runtime 不載入）；已將 `requirements-dev.txt` 升至首個修正版 9.0.3。`pip-audit -r requirements.txt` 的 runtime dependency 掃描無已知漏洞，最終仍以 Final-Head CI 為準。
 - `actions/checkout` v7.0.1、`actions/setup-python` v7.0.0、`gitleaks-action` v3.0.0 已更新至官方 Node 24 版本並 pin commit SHA。
 - `arduino/setup-arduino-cli` 官方最新 v2.0.0 仍宣告 `node20`；保留官方 commit `81d310742121c928ea9c8bbd407b4217b432ae02`。移除條件：官方發布 Node 24 相容正式版並通過完整 ESP32 compile matrix。
 
