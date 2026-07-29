@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 
 from flask import Blueprint, abort, current_app, g, render_template, request, send_file
 
+from inktime.app.core.json_values import JsonScalarError, json_bool
 from inktime.app.core.paths import safe_join
 from inktime.app.domain.analysis.schema import ALLOWED_TYPES
 from inktime.app.domain.analysis.plan import fingerprint
@@ -161,15 +162,21 @@ def excluded_photos_page():
 def change_exclusion(photo_id: str):
     payload = request.get_json(silent=True) or {}
     try:
+        reapply_rules = json_bool(
+            payload,
+            "reapply_rules",
+            default=False,
+            error_prefix="IMG-004",
+        )
         photo = _repository().set_exclusion(
             photo_id,
             action=str(payload.get("action", "")),
             changed_by=str(g.user["id"]),
-            reapply_rules=bool(payload.get("reapply_rules", False)),
+            reapply_rules=reapply_rules,
         )
     except KeyError:
         abort(404)
-    except ValueError as exc:
+    except (JsonScalarError, ValueError) as exc:
         abort(400, description=f"IMG-004 {exc}")
     return {"status": "ok", "photo": photo}
 
@@ -182,6 +189,15 @@ def change_exclusions_batch():
     action = str(payload.get("action", ""))
     if not photo_ids or action not in {"restore", "exclude", "favorite", "candidate", "reanalyze"}:
         abort(400, description="IMG-004 批次操作不合法")
+    try:
+        reapply_rules = json_bool(
+            payload,
+            "reapply_rules",
+            default=False,
+            error_prefix="IMG-004",
+        )
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
     changed = 0
     for photo_id in dict.fromkeys(photo_ids):
         try:
@@ -189,7 +205,7 @@ def change_exclusions_batch():
                 photo_id,
                 action=action,
                 changed_by=str(g.user["id"]),
-                reapply_rules=bool(payload.get("reapply_rules", False)),
+                reapply_rules=reapply_rules,
             )
             changed += 1
         except KeyError:
@@ -238,7 +254,11 @@ def queue_ai_mode_run():
     if not permits_automatic_ai(execution):
         return {"error_code": "VLM-008", "message": "AI 模式目前為關閉"}, 409
     daily_limit = int(settings.get("analysis.ai_daily_photo_limit", 50))
-    if mode == "full_library" and not bool(payload.get("confirm", False)):
+    try:
+        confirmed = json_bool(payload, "confirm", default=False, error_prefix="VLM-009")
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
+    if mode == "full_library" and not confirmed:
         total_eligible = _repository().count_active_eligible()
         queued_now = min(total_eligible, daily_limit)
         estimate = current_app.extensions["inktime_job_service"].estimate(
@@ -365,9 +385,10 @@ def update_photo(photo_id: str):
         abort(400, description="IMG-004 電子紙短文案不可超過 120 字")
     captured_at = str(payload.get("captured_at", "")).strip() or None
     try:
+        favorite = json_bool(payload, "favorite", default=False, error_prefix="IMG-004")
         _repository().update_manual(
             photo_id,
-            favorite=bool(payload.get("favorite", False)),
+            favorite=favorite,
             captured_at=captured_at,
             types=types,
             side_caption=side_caption,
@@ -375,7 +396,7 @@ def update_photo(photo_id: str):
         )
     except KeyError:
         abort(404)
-    except ValueError as exc:
+    except (JsonScalarError, ValueError) as exc:
         abort(400, description=str(exc))
     return {"status": "ok"}
 

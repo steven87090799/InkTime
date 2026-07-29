@@ -5,6 +5,7 @@ from __future__ import annotations
 from flask import Blueprint, abort, current_app, g, render_template, request
 
 from inktime.app.api.device_auth import authenticate_device_request
+from inktime.app.core.json_values import JsonScalarError, json_bool
 from inktime.app.core.paths import UnsafePathError
 from inktime.app.web.access import administrator_required, login_required
 
@@ -322,7 +323,16 @@ def retention_dry_run():
 @bp.post("/api/retention/run")
 @administrator_required
 def retention_run():
-    return _repo().cleanup(dry_run=bool(_payload().get("dry_run", False)))
+    try:
+        dry_run = json_bool(
+            _payload(),
+            "dry_run",
+            default=False,
+            error_prefix="RETENTION-001",
+        )
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
+    return _repo().cleanup(dry_run=dry_run)
 
 
 @bp.get("/api/rollouts")

@@ -6,6 +6,8 @@ import json
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from inktime.app.core.json_values import json_bool
+
 from inktime.app.repositories.jobs import utc_now
 from inktime.app.db import Database
 from inktime.app.services.display_prepare import DisplayPrepareConfig
@@ -90,7 +92,7 @@ class ScheduledTaskRepository:
         start_time = self._clock(str(payload.get("start_time", current["start_time"])))
         window_start = self._optional_clock(payload.get("window_start", current["window_start"]))
         window_end = self._optional_clock(payload.get("window_end", current["window_end"]))
-        enabled = bool(payload.get("enabled", current["enabled"]))
+        enabled = json_bool(payload, "enabled", default=bool(current["enabled"]))
         config = current["config"] | dict(payload.get("config") or {})
         if current["kind"] == "render":
             config = dict(DisplayPrepareConfig.from_mapping(config).__dict__)

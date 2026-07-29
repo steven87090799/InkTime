@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from flask import Blueprint, abort, current_app, g, render_template, request, send_file
+
+from inktime.app.core.json_values import JsonScalarError, json_bool
 from inktime.app.core.security import redact
 
 from inktime.app.core.paths import safe_join
@@ -279,6 +281,15 @@ def enqueue_scan():
     mode = str(payload.get("mode", "incremental"))
     if mode not in SCAN_MODES:
         abort(400, description="SCAN-003 不支援的掃描模式")
+    try:
+        build_thumbnails = json_bool(
+            payload,
+            "build_thumbnails",
+            default=True,
+            error_prefix="SCAN-003",
+        )
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
     repository = current_app.extensions["inktime_job_repository"]
     job_id = repository.create_maintenance(
         kind="scan",
@@ -286,7 +297,7 @@ def enqueue_scan():
         settings={
             "root_path": root_path,
             "library_name": str(payload.get("library_name", "主要照片庫")),
-            "build_thumbnails": bool(payload.get("build_thumbnails", True)),
+            "build_thumbnails": build_thumbnails,
             "mode": mode,
             "trigger_source": "api",
         },

@@ -4,6 +4,7 @@ import json
 
 from flask import Blueprint, Response, abort, current_app, g, render_template, request, stream_with_context
 
+from inktime.app.core.json_values import json_bool
 from inktime.app.domain.analysis.plan import canonical_json, fingerprint
 from inktime.app.domain.analysis.execution_mode import execution_mode, permits_automatic_ai
 from inktime.app.services.jobs import InvalidJobTransition, JobService
@@ -93,6 +94,12 @@ def create_job():
     plan, _ = _analysis_plan(strategy)
     analysis_fingerprint = fingerprint(plan)
     try:
+        force_recompute = json_bool(
+            payload,
+            "force_recompute",
+            default=selection_mode == "force_all",
+            error_prefix="JOB-001",
+        )
         job_id = _service().create_analysis_job(
             name=str(payload.get("name", "分析工作")),
             strategy=strategy,
@@ -103,7 +110,7 @@ def create_job():
             photo_ids=payload.get("photo_ids"),
             selection_mode=selection_mode,
             analysis_fingerprint=analysis_fingerprint,
-            force_recompute=bool(payload.get("force_recompute", selection_mode == "force_all")),
+            force_recompute=force_recompute,
             analysis_spec=plan,
         )
     except ValueError as exc:

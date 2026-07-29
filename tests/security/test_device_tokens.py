@@ -48,6 +48,21 @@ def test_device_can_be_fully_configured_when_created_from_web(client, app):
     assert device["rotation"] == 180
 
 
+@pytest.mark.parametrize("value", ["false", "true", 0, 1, None, [], {}])
+def test_device_enabled_rejects_non_boolean(client, app, value):
+    create_admin(app)
+    login(client)
+
+    response = client.post(
+        "/api/v1/devices",
+        json={"name": "嚴格型別裝置", "enabled": value},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+
+    assert response.status_code == 400
+    assert app.extensions["inktime_device_repository"].list() == []
+
+
 def test_device_bearer_authentication_and_revocation(client, app):
     repository = app.extensions["inktime_device_repository"]
     device_id, old_token = repository.create("書房")
@@ -271,6 +286,42 @@ def test_device_status_rejects_malformed_numeric_telemetry(client, app):
     )
     assert response.status_code == 400
     assert "DEVICE-004" in response.get_data(as_text=True)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"wifi_rssi": True},
+        {"wifi_rssi": -61.5},
+        {"wifi_rssi": "-61"},
+        {"wifi_rssi": -128},
+        {"battery_percent": 101},
+        {"temperature_c": float("nan")},
+        {"humidity_percent": float("inf")},
+    ],
+)
+def test_device_status_rejects_ambiguous_or_out_of_range_numeric_values(
+    client,
+    app,
+    payload,
+):
+    device_id, token = app.extensions["inktime_device_repository"].create("strict-number-device")
+
+    response = client.post(
+        "/api/device/v1/status",
+        json=payload,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 400
+    with app.extensions["inktime_database"].session() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM device_events WHERE device_id=?",
+                (device_id,),
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_device_status_rejects_json_array_without_writing_state(client, app):

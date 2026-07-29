@@ -9,6 +9,8 @@ from pathlib import Path
 import random
 from typing import Any
 
+from inktime.app.core.json_values import json_bool
+
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from inktime.app.core.paths import safe_join
@@ -1912,7 +1914,7 @@ class RenderService:
         filters["type"] = type_name
         filters["city"] = str(payload.get("city", "")).strip()[:80]
         filters["country"] = str(payload.get("country", "")).strip()[:80]
-        filters["unseen_only"] = bool(payload.get("unseen_only", False))
+        filters["unseen_only"] = json_bool(payload, "unseen_only", default=False)
         return filters
 
     def select_random_history_day(

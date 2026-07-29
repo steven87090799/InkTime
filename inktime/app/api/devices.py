@@ -8,6 +8,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from flask import Blueprint, abort, current_app, render_template, request
 
 from inktime.app.api.device_auth import authenticate_device_request
+from inktime.app.core.json_values import (
+    JsonScalarError,
+    json_bool,
+    json_int,
+    optional_json_bool,
+    optional_json_float,
+    optional_json_int,
+)
 from inktime.app.core.logging import log_event
 from inktime.app.core.paths import UnsafePathError
 from inktime.app.domain.rendering import DISPLAY_PROFILES, DeviceTestReleaseStore
@@ -27,12 +35,12 @@ def _repository() -> DeviceRepository:
 
 
 def optional_bool(payload: dict, field: str, *, default: bool | None = None) -> bool | None:
-    if field not in payload:
-        return default
-    value = payload[field]
-    if type(value) is not bool:
-        abort(400, description=f"DEVICE-004 {field} 必須是 JSON Boolean")
-    return value
+    try:
+        if field not in payload:
+            return default
+        return optional_json_bool(payload, field, error_prefix="DEVICE-004")
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
 
 
 def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
@@ -43,9 +51,16 @@ def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
     except ZoneInfoNotFoundError:
         abort(400, description="DEVICE-003 時區不是有效的 IANA 時區")
     try:
-        rotation = int(payload.get("rotation", defaults.get("rotation", 0)))
-    except (TypeError, ValueError):
-        abort(400, description="DEVICE-003 畫面旋轉角度格式錯誤")
+        rotation = json_int(
+            payload,
+            "rotation",
+            default=int(defaults.get("rotation", 0)),
+            minimum=0,
+            maximum=180,
+            error_prefix="DEVICE-003",
+        )
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
     if rotation not in {0, 180}:
         abort(400, description="DEVICE-003 目前正式韌體的旋轉角度只支援 0、180")
     schedule = str(payload.get("schedule", defaults.get("schedule", "08:00")))
@@ -54,11 +69,15 @@ def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
     name = str(payload.get("name", "")).strip()
     if not name:
         abort(400, description="DEVICE-003 裝置名稱不可空白")
-    enabled_value = payload.get("enabled", defaults.get("enabled", True))
-    if isinstance(enabled_value, str):
-        enabled = enabled_value.lower() in {"1", "true", "yes", "on"}
-    else:
-        enabled = bool(enabled_value)
+    try:
+        enabled = json_bool(
+            payload,
+            "enabled",
+            default=bool(defaults.get("enabled", True)),
+            error_prefix="DEVICE-003",
+        )
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
     panel_profile = str(
         payload.get("panel_profile", defaults.get("panel_profile", DEFAULT_DEVICE_PANEL_PROFILE))
     )
@@ -369,34 +388,30 @@ def report_status():
         abort(400, description="DEVICE-004 狀態 Payload 必須是 JSON 物件")
 
     def optional_int(key: str, minimum: int, maximum: int) -> int | None:
-        value = payload.get(key)
-        if value is None:
-            return None
-        if isinstance(value, bool):
-            abort(400, description=f"DEVICE-004 {key} 必須是整數")
         try:
-            return max(minimum, min(int(value), maximum))
-        except (TypeError, ValueError):
-            abort(400, description=f"DEVICE-004 {key} 必須是整數")
+            return optional_json_int(
+                payload,
+                key,
+                minimum=minimum,
+                maximum=maximum,
+                error_prefix="DEVICE-004",
+            )
+        except JsonScalarError as exc:
+            abort(400, description=str(exc))
 
     def optional_float(key: str, minimum: float, maximum: float) -> float | None:
-        value = payload.get(key)
-        if value is None:
-            return None
-        if isinstance(value, bool):
-            abort(400, description=f"DEVICE-004 {key} 必須是數字")
         try:
-            return max(minimum, min(float(value), maximum))
-        except (TypeError, ValueError):
-            abort(400, description=f"DEVICE-004 {key} 必須是數字")
+            return optional_json_float(
+                payload,
+                key,
+                minimum=minimum,
+                maximum=maximum,
+                error_prefix="DEVICE-004",
+            )
+        except JsonScalarError as exc:
+            abort(400, description=str(exc))
 
-    battery = payload.get("battery_percent")
-    if isinstance(battery, bool):
-        abort(400, description="DEVICE-004 battery_percent 必須是數字")
-    try:
-        battery_percent = max(0.0, min(float(battery), 100.0)) if battery is not None else None
-    except (TypeError, ValueError):
-        abort(400, description="DEVICE-004 battery_percent 必須是數字")
+    battery_percent = optional_float("battery_percent", 0.0, 100.0)
     error_code = str(payload.get("error_code", "")).strip()[:64]
     error_message = str(payload.get("error_message", "")).strip()[:500]
     display_updated = optional_bool(payload, "display_updated", default=False)
