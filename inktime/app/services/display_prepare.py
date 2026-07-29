@@ -44,15 +44,11 @@ class DisplayPrepareConfig:
 
         def bounded_int(key: str, default: int, lower: int, upper: int) -> int:
             raw = value.get(key, default)
-            if isinstance(raw, bool):
+            if type(raw) is not int:
                 raise ValueError(f"DISPLAY-001 {key} 必須是整數")
-            try:
-                parsed = int(raw)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"DISPLAY-001 {key} 必須是整數") from exc
-            if not lower <= parsed <= upper:
+            if not lower <= raw <= upper:
                 raise ValueError(f"DISPLAY-001 {key} 必須介於 {lower} 到 {upper}")
-            return parsed
+            return raw
 
         display_times_raw = value.get("display_times", ["08:00"])
         if not isinstance(display_times_raw, list) or not display_times_raw:
@@ -74,15 +70,11 @@ class DisplayPrepareConfig:
             raise ValueError("DISPLAY-001 candidate_years 必須是年份陣列")
         years: list[int] = []
         for raw in years_raw:
-            if isinstance(raw, bool):
+            if type(raw) is not int:
                 raise ValueError("DISPLAY-001 candidate_years 必須是年份陣列")
-            try:
-                year = int(raw)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("DISPLAY-001 candidate_years 必須是年份陣列") from exc
-            if not 1900 <= year <= 2200:
+            if not 1900 <= raw <= 2200:
                 raise ValueError("DISPLAY-001 candidate_years 超出 1900 到 2200")
-            years.append(year)
+            years.append(raw)
         ai_fallback = str(value.get("ai_fallback", "use_existing"))
         if ai_fallback not in {"use_existing", "skip", "fail"}:
             raise ValueError("DISPLAY-001 ai_fallback 不支援")

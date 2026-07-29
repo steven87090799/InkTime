@@ -4,6 +4,7 @@ from flask import Blueprint, current_app, flash, g, redirect, render_template, r
 
 from inktime.app.repositories.auth import AuthRepository
 from inktime.app.core.errors import ApplicationError
+from inktime.app.core.json_values import json_object_payload
 from inktime.app.domain.auth import AuthValidationError, SetupAlreadyCompleted, validate_role
 from inktime.app.web.access import administrator_required, login_required
 
@@ -13,6 +14,10 @@ bp = Blueprint("auth", __name__)
 
 def _repository() -> AuthRepository:
     return current_app.extensions["inktime_auth_repository"]
+
+
+def _payload() -> dict:
+    return json_object_payload(request, maximum_bytes=32 * 1024, error_prefix="AUTH-001")
 
 
 @bp.route("/setup", methods=["GET", "POST"])
@@ -101,7 +106,7 @@ def change_password():
 @bp.post("/api/v1/users")
 @administrator_required
 def create_user():
-    payload = request.get_json(silent=True) or {}
+    payload = _payload()
     user_id = _repository().create_user(
         payload.get("username"),
         payload.get("password"),
@@ -113,7 +118,7 @@ def create_user():
 @bp.patch("/api/v1/users/<user_id>")
 @administrator_required
 def update_user(user_id: str):
-    payload = request.get_json(silent=True)
+    payload = _payload()
     allowed = {"enabled", "role"}
     if not isinstance(payload, dict) or not payload or not set(payload) <= allowed:
         raise AuthValidationError("只允許更新 enabled 或 role。", code="user_update_invalid")
@@ -141,6 +146,6 @@ def update_user(user_id: str):
 @bp.post("/api/v1/users/<user_id>/password")
 @administrator_required
 def reset_user_password(user_id: str):
-    payload = request.get_json(silent=True) or {}
+    payload = _payload()
     _repository().reset_password(user_id, payload.get("password"))
     return {"id": user_id}

@@ -11,7 +11,10 @@ from inktime.app.api.device_auth import authenticate_device_request
 from inktime.app.core.json_values import (
     JsonScalarError,
     json_bool,
+    json_float,
     json_int,
+    json_object_payload,
+    nullable_json_float,
     optional_json_bool,
     optional_json_float,
     optional_json_int,
@@ -32,6 +35,10 @@ SCHEDULE_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
 def _repository() -> DeviceRepository:
     return current_app.extensions["inktime_device_repository"]
+
+
+def _json_payload(error_prefix: str = "DEVICE-003", *, maximum_bytes: int = 64 * 1024) -> dict:
+    return json_object_payload(request, maximum_bytes=maximum_bytes, error_prefix=error_prefix)
 
 
 def optional_bool(payload: dict, field: str, *, default: bool | None = None) -> bool | None:
@@ -180,69 +187,55 @@ def update_energy_profile(device_id: str):
     device = repository.get(device_id)
     if device is None:
         abort(404)
-    payload = request.get_json(silent=True) or {}
-    if not isinstance(payload, dict):
-        abort(400, description="DEVICE-005 能源參數必須是 JSON 物件")
-
-    def bounded_number(key: str, minimum: float, maximum: float, *, nullable: bool, default) -> float | None:
-        value = payload.get(key, default)
-        if value is None or value == "":
-            if nullable:
-                return None
-            abort(400, description=f"DEVICE-005 {key} 不可空白")
-        if isinstance(value, bool):
-            abort(400, description=f"DEVICE-005 {key} 必須是數字")
-        try:
-            parsed = float(value)
-        except (TypeError, ValueError):
-            abort(400, description=f"DEVICE-005 {key} 必須是數字")
-        if not minimum <= parsed <= maximum:
-            abort(400, description=f"DEVICE-005 {key} 超出 {minimum:g}–{maximum:g}")
-        return parsed
-
-    refreshes_per_day = bounded_number(
-        "refreshes_per_day",
-        0.01,
-        96,
-        nullable=False,
-        default=device["refreshes_per_day"],
-    )
-    battery_reserve_percent = bounded_number(
-        "battery_reserve_percent",
-        0,
-        50,
-        nullable=False,
-        default=device["battery_reserve_percent"],
-    )
-    if refreshes_per_day is None or battery_reserve_percent is None:
-        abort(400, description="DEVICE-005 續航估算參數不可空白")
+    payload = _json_payload("DEVICE-005")
     try:
+        refreshes_per_day = json_float(
+            payload,
+            "refreshes_per_day",
+            default=device["refreshes_per_day"],
+            minimum=0.01,
+            maximum=96,
+            error_prefix="DEVICE-005",
+        )
+        battery_reserve_percent = json_float(
+            payload,
+            "battery_reserve_percent",
+            default=device["battery_reserve_percent"],
+            minimum=0,
+            maximum=50,
+            error_prefix="DEVICE-005",
+        )
         repository.update_energy_profile(
             device_id,
-            battery_capacity_mah=bounded_number(
+            battery_capacity_mah=nullable_json_float(
+                payload,
                 "battery_capacity_mah",
-                10,
-                100_000,
-                nullable=True,
                 default=device["battery_capacity_mah"],
+                minimum=10,
+                maximum=100_000,
+                error_prefix="DEVICE-005",
             ),
-            standby_current_ma=bounded_number(
+            standby_current_ma=nullable_json_float(
+                payload,
                 "standby_current_ma",
-                0.001,
-                10_000,
-                nullable=True,
                 default=device["standby_current_ma"],
+                minimum=0.001,
+                maximum=10_000,
+                error_prefix="DEVICE-005",
             ),
-            active_current_ma=bounded_number(
+            active_current_ma=nullable_json_float(
+                payload,
                 "active_current_ma",
-                0.001,
-                10_000,
-                nullable=True,
                 default=device["active_current_ma"],
+                minimum=0.001,
+                maximum=10_000,
+                error_prefix="DEVICE-005",
             ),
             refreshes_per_day=refreshes_per_day,
             battery_reserve_percent=battery_reserve_percent,
         )
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
     except KeyError:
         abort(404)
     return {"status": "ok"}
@@ -251,7 +244,7 @@ def update_energy_profile(device_id: str):
 @bp.post("/api/v1/devices")
 @administrator_required
 def create_device():
-    payload = request.get_json(silent=True) or request.form
+    payload = _json_payload() if request.is_json else request.form
     settings = current_app.extensions["inktime_settings_repository"]
     fields = _validated_device_fields(
         payload,
@@ -283,7 +276,7 @@ def regenerate_device_token(device_id: str):
 @bp.patch("/api/v1/devices/<device_id>")
 @administrator_required
 def update_device(device_id: str):
-    payload = request.get_json(silent=True) or {}
+    payload = _json_payload()
     fields = _validated_device_fields(payload)
     try:
         _repository().update(device_id, **fields)
@@ -379,13 +372,7 @@ def release_file(release_id: str, filename: str):
 @bp.post("/api/device/v1/status")
 def report_status():
     device = authenticate_device_request()
-    if (request.content_length or 0) > 64 * 1024:
-        abort(413, description="DEVICE-004 狀態 Payload 不可超過 64 KiB")
-    payload = request.get_json(silent=True)
-    if payload is None:
-        payload = {}
-    if not isinstance(payload, dict):
-        abort(400, description="DEVICE-004 狀態 Payload 必須是 JSON 物件")
+    payload = _json_payload("DEVICE-004")
 
     def optional_int(key: str, minimum: int, maximum: int) -> int | None:
         try:

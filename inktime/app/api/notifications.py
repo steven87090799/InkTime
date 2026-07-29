@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from flask import Blueprint, abort, current_app, g, request
 
-from inktime.app.core.json_values import JsonScalarError, json_bool
+from inktime.app.core.json_values import JsonScalarError, json_bool, json_object_payload
 from inktime.app.services.notifications import WEBHOOK_SECRET_KEY
 from inktime.app.web.access import administrator_required, login_required
 
@@ -20,7 +20,7 @@ def list_notifications():
 @bp.post("/api/v1/notifications/webhook-secret")
 @administrator_required
 def save_webhook_secret():
-    payload = request.get_json(silent=True) or {}
+    payload = json_object_payload(request, maximum_bytes=16 * 1024, error_prefix="NOTIFY-001")
     secret_store = current_app.extensions["inktime_secret_store"]
     try:
         clear = json_bool(payload, "clear", default=False, error_prefix="NOTIFY-001")

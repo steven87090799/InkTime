@@ -7,6 +7,7 @@ import tempfile
 from flask import Blueprint, abort, current_app, g, render_template, request
 from PIL import UnidentifiedImageError
 
+from inktime.app.core.json_values import JsonScalarError, json_float, json_object_payload
 from inktime.app.domain.analysis import AnalysisValidationError
 from inktime.app.domain.analysis.scoring import (
     DISTINCTIVE_SCORING_RULES,
@@ -55,22 +56,24 @@ def scoring_page():
 @bp.post("/api/v1/scoring/profiles")
 @administrator_required
 def create_profile():
-    payload = request.get_json(silent=True) or {}
+    payload = json_object_payload(request, maximum_bytes=64 * 1024, error_prefix="SET-002")
     try:
         profile = current_app.extensions["inktime_scoring_repository"].create(
             name=str(payload.get("name", "")),
             rules=str(payload.get("rules", "")),
             weights={
-                "memory": float(payload.get("memory_weight", 0)),
-                "beauty": float(payload.get("beauty_weight", 0)),
-                "technical_quality": float(payload.get("technical_weight", 0)),
-                "emotion": float(payload.get("emotion_weight", 0)),
+                "memory": json_float(payload, "memory_weight", default=0, minimum=0, maximum=100),
+                "beauty": json_float(payload, "beauty_weight", default=0, minimum=0, maximum=100),
+                "technical_quality": json_float(
+                    payload, "technical_weight", default=0, minimum=0, maximum=100
+                ),
+                "emotion": json_float(payload, "emotion_weight", default=0, minimum=0, maximum=100),
             },
-            favorite_bonus=float(payload.get("favorite_bonus", 0)),
+            favorite_bonus=json_float(payload, "favorite_bonus", default=0, minimum=-100, maximum=100),
             created_by=str(g.user["id"]),
             source_ip=request.remote_addr or "unknown",
         )
-    except (TypeError, ValueError) as exc:
+    except (JsonScalarError, TypeError, ValueError) as exc:
         abort(400, description=f"SET-002 {exc}")
     return {"id": profile["id"], "name": profile["name"]}, 201
 
@@ -109,9 +112,7 @@ def test_scoring():
                     abort(413, description="IMG-002 測試照片不可超過 25 MiB")
                 destination.write(chunk)
         try:
-            current_app.extensions["inktime_scoring_lab_service"].normalize_image(
-                source, normalized
-            )
+            current_app.extensions["inktime_scoring_lab_service"].normalize_image(source, normalized)
             result = current_app.extensions["inktime_scoring_lab_service"].analyze(normalized)
         except (UnidentifiedImageError, OSError):
             abort(400, description="IMG-002 無法解碼測試照片")
@@ -125,16 +126,12 @@ def test_scoring():
             description = str(exc)
             abort(
                 400,
-                description=(
-                    description if "-" in description[:12] else f"VLM-008 {description}"
-                ),
+                description=(description if "-" in description[:12] else f"VLM-008 {description}"),
             )
     raw_score = float(result["ranking_score"])
     calibrated, percentile = calculate_distinguishing_score(
         raw_score,
-        prepare_score_distribution(
-            current_app.extensions["inktime_photo_repository"].score_population()
-        ),
+        prepare_score_distribution(current_app.extensions["inktime_photo_repository"].score_population()),
     )
     result["distinguishing_score"] = calibrated
     result["ranking_percentile"] = percentile
