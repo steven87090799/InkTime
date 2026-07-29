@@ -1055,9 +1055,9 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "category": "裝置通知",
         "default": "",
         "type": "string",
-        "description": "接收通知的完整 http:// 或 https:// URL",
-        "risk": "管理員可設定內網端點；請只使用可信服務",
-        "pattern": "optional_http_url",
+        "description": "接收通知的完整 https:// URL",
+        "risk": "只允許 DNS-pinned HTTPS；內部位址需明確 Allowlist",
+        "pattern": "optional_https_url",
         "max_length": 2048,
         "restart": False,
     },
@@ -1741,15 +1741,16 @@ class SettingsRepository:
                 or len(parts[1]) != 2
             ):
                 raise ValueError(f"{key} 必須使用 00:00 到 23:59 格式")
-        if definition.get("pattern") == "optional_http_url" and value:
+        if definition.get("pattern") == "optional_https_url" and value:
             parsed = urlparse(str(value))
             if (
-                parsed.scheme not in {"http", "https"}
+                parsed.scheme != "https"
                 or not parsed.netloc
                 or parsed.username is not None
                 or parsed.password is not None
+                or bool(parsed.fragment)
             ):
-                raise ValueError(f"{key} 必須是無帳密的完整 http:// 或 https:// URL")
+                raise ValueError(f"{key} 必須是無帳密與 Fragment 的完整 https:// URL")
         if key in {"general.timezone", "device.default_timezone"}:
             try:
                 ZoneInfo(str(value))

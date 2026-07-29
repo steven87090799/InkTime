@@ -126,7 +126,7 @@ class AuthRepository:
                 """
                 SELECT * FROM users
                 WHERE normalized_username=?
-                   OR (normalized_username IS NULL AND username=? COLLATE NOCASE)
+                   OR username=? COLLATE NOCASE
                 """,
                 (normalized, username.strip()),
             ).fetchone()

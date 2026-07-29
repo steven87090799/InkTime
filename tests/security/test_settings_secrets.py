@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tests.conftest import create_admin, csrf, login
 
 
@@ -70,6 +72,29 @@ def test_webhook_uri_is_status_only_in_snapshot_and_export(client, app):
     exported = client.get("/api/v1/settings/export")
     assert exported.headers["Cache-Control"] == "no-store"
     assert webhook not in exported.get_data(as_text=True)
-    assert json.loads(exported.get_data(as_text=True))["sensitive_status"][
-        "notification.webhook_url"
-    ] == {"configured": True}
+    assert json.loads(exported.get_data(as_text=True))["sensitive_status"]["notification.webhook_url"] == {
+        "configured": True
+    }
+
+
+@pytest.mark.parametrize(
+    "webhook",
+    [
+        "http://hooks.example.test/inktime",
+        "https://hooks.example.test/inktime#fragment",
+        "https://user:secret@hooks.example.test/inktime",
+    ],
+)
+def test_webhook_setting_rejects_non_https_or_credentialed_urls(client, app, webhook):
+    create_admin(app)
+    login(client)
+    response = client.post(
+        "/api/v1/settings",
+        json={"notification.webhook_url": webhook},
+        headers={
+            "X-CSRF-Token": csrf(client),
+            "X-InkTime-Confirm-Risk": "true",
+        },
+    )
+
+    assert response.status_code == 400

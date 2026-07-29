@@ -198,6 +198,25 @@ def test_device_status_rejects_malformed_numeric_telemetry(client, app):
     assert "DEVICE-004" in response.get_data(as_text=True)
 
 
+def test_device_status_rejects_json_array_without_writing_state(client, app):
+    device_id, token = app.extensions["inktime_device_repository"].create("array-status-device")
+    response = client.post(
+        "/api/device/v1/status",
+        json=[],
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 400
+    with app.extensions["inktime_database"].session() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM device_events WHERE device_id=?",
+                (device_id,),
+            ).fetchone()[0]
+            == 0
+        )
+
+
 @pytest.mark.parametrize("value", ["true", "false", "1", "0", 1, 0, None, [], {}])
 @pytest.mark.parametrize("field", ["display_updated", "payload_sha256_verified"])
 def test_device_status_rejects_non_boolean_values(client, app, field, value):

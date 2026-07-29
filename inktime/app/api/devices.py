@@ -376,7 +376,9 @@ def release_file(release_id: str, filename: str):
 @bp.post("/api/device/v1/status")
 def report_status():
     device = _authenticated_device()
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if payload is None:
+        payload = {}
     if not isinstance(payload, dict):
         abort(400, description="DEVICE-004 狀態 Payload 必須是 JSON 物件")
     if (request.content_length or 0) > 64 * 1024:

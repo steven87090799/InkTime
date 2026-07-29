@@ -6,6 +6,7 @@ import threading
 
 import pytest
 
+from inktime.app.core.security import hash_password
 from inktime.app.domain.auth import AuthValidationError, SetupAlreadyCompleted
 from tests.conftest import create_admin, csrf, login
 
@@ -84,6 +85,22 @@ def test_password_whitespace_is_preserved(app):
     repository.create_user("space-user", password)
     assert repository.authenticate("space-user", password) is not None
     assert repository.authenticate("space-user", password.strip()) is None
+
+
+def test_migrated_unicode_username_keeps_exact_login_compatibility(app):
+    password = "legacy-unicode-password"
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            """
+            INSERT INTO users(
+                id,username,normalized_username,password_hash,role,enabled,
+                session_version,password_changed_at,created_at
+            ) VALUES ('legacy-user','Straße','straße',?,'administrator',1,1,datetime('now'),datetime('now'))
+            """,
+            (hash_password(password),),
+        )
+
+    assert app.extensions["inktime_auth_repository"].authenticate("Straße", password) is not None
 
 
 def test_password_is_never_written_to_logs(caplog, app):
