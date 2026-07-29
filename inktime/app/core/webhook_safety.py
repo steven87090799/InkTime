@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import http.client
 import ipaddress
 import json
+import math
 import os
 import socket
 import ssl
@@ -15,6 +16,18 @@ from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 class UnsafeWebhookURL(ValueError):
     pass
+
+
+class WebhookTimeoutError(OSError):
+    code = "webhook_timeout"
+
+
+class WebhookConnectTimeout(WebhookTimeoutError):
+    code = "webhook_connect_timeout"
+
+
+class WebhookReadTimeout(WebhookTimeoutError):
+    code = "webhook_read_timeout"
 
 
 def _normalized_ip(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
@@ -234,6 +247,19 @@ class PinnedWebhookTransport:
     ) -> WebhookResponse:
         if allow_redirects:
             raise ValueError("Webhook transport 不允許 Redirect")
+        if (
+            not isinstance(timeout, tuple)
+            or len(timeout) != 2
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or float(value) <= 0
+                for value in timeout
+            )
+        ):
+            raise ValueError("Webhook timeout 必須包含正數 connect/read 秒數")
+        connect_timeout, read_timeout = map(float, timeout)
         target = resolve_webhook_destination(
             url,
             resolver=self.resolver,
@@ -250,25 +276,45 @@ class PinnedWebhookTransport:
             connection = self.connection_factory(
                 target,
                 address,
-                float(timeout[0]),
+                connect_timeout,
                 self.ssl_context,
             )
+            response: http.client.HTTPResponse | None = None
             try:
+                try:
+                    connection.connect()
+                except (TimeoutError, socket.timeout) as exc:
+                    last_error = WebhookConnectTimeout("Webhook TCP/TLS 連線逾時")
+                    last_error.__cause__ = exc
+                    continue
+                if connection.sock is None:
+                    last_error = OSError("Webhook 連線未建立 Socket")
+                    continue
+                connection.sock.settimeout(read_timeout)
                 connection.request(
                     "POST",
                     target.request_target,
                     body=body,
                     headers=request_headers,
                 )
-                response = connection.getresponse()
-                response.read(64 * 1024)
+                try:
+                    response = connection.getresponse()
+                    response.read(64 * 1024)
+                except (TimeoutError, socket.timeout) as exc:
+                    raise WebhookReadTimeout("Webhook 等待回應逾時") from exc
                 return WebhookResponse(
                     int(response.status),
                     {key: value for key, value in response.getheaders()},
                 )
+            except WebhookReadTimeout:
+                # The request may already have reached the destination. Trying
+                # another pinned address could duplicate the webhook.
+                raise
             except (OSError, http.client.HTTPException) as exc:
                 last_error = exc
             finally:
+                if response is not None:
+                    response.close()
                 connection.close()
         if last_error is not None:
             raise last_error
