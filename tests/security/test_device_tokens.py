@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 
 import pytest
 
 from inktime.app.domain.rendering import DeviceTestReleaseStore
+from inktime.app.repositories.devices import DeviceRateLimitError
 from tests.conftest import create_admin, csrf, login
 
 
@@ -128,6 +130,124 @@ def test_device_auth_rate_limit_is_consistent(
     body = response.get_data(as_text=True)
     assert "another-invalid-token" not in body
     assert "attempt" not in body.casefold()
+
+
+def test_valid_token_bypasses_shared_ip_failure_limit(client, app):
+    _device_id, token = app.extensions["inktime_device_repository"].create("valid-behind-nat")
+    _trigger_device_auth_rate_limit(client)
+
+    response = client.post(
+        "/api/device/v1/status",
+        json={},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+
+
+def test_two_valid_devices_share_ip_without_lockout(client, app):
+    _first_id, first = app.extensions["inktime_device_repository"].create("nat-first")
+    _second_id, second = app.extensions["inktime_device_repository"].create("nat-second")
+    _trigger_device_auth_rate_limit(client)
+
+    for token in (first, second):
+        response = client.post(
+            "/api/device/v1/status",
+            json={},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
+
+
+def test_valid_token_does_not_clear_shared_ip_failures(client, app):
+    _device_id, token = app.extensions["inktime_device_repository"].create("nat-valid")
+    _trigger_device_auth_rate_limit(client)
+    with app.extensions["inktime_database"].session() as connection:
+        before = connection.execute("SELECT COUNT(*) FROM device_auth_failures").fetchone()[0]
+
+    assert (
+        client.post(
+            "/api/device/v1/status",
+            json={},
+            headers={"Authorization": f"Bearer {token}"},
+        ).status_code
+        == 200
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        after = connection.execute("SELECT COUNT(*) FROM device_auth_failures").fetchone()[0]
+
+    assert before == after == 20
+
+
+def test_invalid_token_remains_rate_limited_after_valid_device_auth(client, app):
+    _device_id, token = app.extensions["inktime_device_repository"].create("nat-history")
+    _trigger_device_auth_rate_limit(client)
+    assert (
+        client.post(
+            "/api/device/v1/status",
+            json={},
+            headers={"Authorization": f"Bearer {token}"},
+        ).status_code
+        == 200
+    )
+
+    response = client.get(
+        "/api/device/v1/releases/latest",
+        headers={"Authorization": "Bearer still-invalid"},
+    )
+    assert response.status_code == 429
+
+
+@pytest.mark.parametrize("mode", ["disabled", "revoked"])
+def test_disabled_or_revoked_device_token_does_not_bypass_rate_limit(client, app, mode):
+    repository = app.extensions["inktime_device_repository"]
+    device_id, token = repository.create(f"invalid-{mode}")
+    if mode == "disabled":
+        with app.extensions["inktime_database"].transaction() as connection:
+            connection.execute("UPDATE devices SET enabled=0 WHERE id=?", (device_id,))
+    else:
+        repository.regenerate(device_id)
+    _trigger_device_auth_rate_limit(client)
+
+    response = client.get(
+        "/api/device/v1/releases/latest",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 429
+
+
+def test_concurrent_invalid_attempts_enforce_limit_atomically(app):
+    repository = app.extensions["inktime_device_repository"]
+
+    def attempt(index: int) -> str:
+        try:
+            result = repository.authenticate(f"concurrent-invalid-{index}", "203.0.113.10")
+        except DeviceRateLimitError:
+            return "limited"
+        assert result is None
+        return "invalid"
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(attempt, range(40)))
+
+    assert results.count("invalid") == 20
+    assert results.count("limited") == 20
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM device_auth_failures").fetchone()[0] == 20
+
+
+def test_rate_limit_storage_does_not_contain_raw_ip_or_token(app):
+    repository = app.extensions["inktime_device_repository"]
+    raw_ip = "198.51.100.42"
+    raw_token = "plain-device-secret"
+
+    assert repository.authenticate(raw_token, raw_ip) is None
+    with app.extensions["inktime_database"].session() as connection:
+        rows = connection.execute("SELECT ip_hash,attempted_at FROM device_auth_failures").fetchall()
+
+    serialized = json.dumps([dict(row) for row in rows])
+    assert raw_ip not in serialized
+    assert raw_token not in serialized
 
 
 @pytest.mark.parametrize(
