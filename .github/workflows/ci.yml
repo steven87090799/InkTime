@@ -97,7 +97,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       NO_PROXY: inktime-ci.acme.dev,127.0.0.1
-      no_proxy: inktime-ci.acme.dev,127.0.0.1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
       - name: Create isolated test CA and server certificate
