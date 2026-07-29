@@ -148,6 +148,11 @@ def test_device_downloads_versioned_manifest_and_verified_file(client, app):
     manifest = app.extensions["inktime_release_publisher"].publish(
         [("photo-1", Image.new("RGB", (480, 800), "white"))]
     )
+    app.extensions["inktime_release_coordinator"].publish(
+        [manifest],
+        created_by="security-test",
+        photo_ids=[],
+    )
     headers = {"Authorization": f"Bearer {token}"}
     response = client.get("/api/device/v1/releases/latest", headers=headers)
     assert response.status_code == 200
@@ -439,15 +444,20 @@ def test_device_receives_only_its_panel_profile_release(client, app):
 
     _, token = app.extensions["inktime_device_repository"].create("六色電子紙", panel_profile="gdep073e01_6c")
     publisher = app.extensions["inktime_release_publisher"]
-    publisher.publish(
+    six_color = publisher.publish(
         [("photo-six", Image.new("RGB", (480, 800), "blue"))],
         profile_key="gdep073e01_6c",
         dither="none",
     )
-    publisher.publish(
+    seven_color = publisher.publish(
         [("photo-seven", Image.new("RGB", (480, 800), "orange"))],
         profile_key="gdey073d46_7c",
         dither="none",
+    )
+    app.extensions["inktime_release_coordinator"].publish(
+        [six_color, seven_color],
+        created_by="security-test",
+        photo_ids=[],
     )
 
     response = client.get("/api/device/v1/releases/latest", headers={"Authorization": f"Bearer {token}"})

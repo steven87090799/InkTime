@@ -13,6 +13,11 @@ def test_one_time_device_release_remains_retryable_until_verified_display_ack(cl
         [("formal", Image.new("RGB", (480, 800), "white"))],
         profile_key="safe_4c",
     )
+    app.extensions["inktime_release_coordinator"].publish(
+        [formal],
+        created_by="integration-test",
+        photo_ids=[],
+    )
     test_release = publisher.publish(
         [("test", Image.new("RGB", (480, 800), "black"))],
         profile_key="safe_4c",

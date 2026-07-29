@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -10,14 +11,14 @@ import re
 import stat
 from typing import Any
 
-from inktime.app.core.paths import UnsafePathError, safe_join
+from inktime.app.core.paths import UnsafePathError
 from inktime.app.db import Database
 from inktime.app.domain.rendering import DeviceTestReleaseStore
 
 
 _RELEASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _ACTIVE_QUEUE_STATES = ("READY", "AVAILABLE", "DOWNLOADED", "ACKNOWLEDGED")
-_INVALID_RELEASE_STATES = {"staged_failed", "orphaned", "deleted", "withdrawn"}
+_DOWNLOADABLE_RELEASE_STATES = {"published"}
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class DeviceReleaseAuthorization:
     release_dir: Path | None = None
     manifest: dict[str, Any] | None = None
     test_assignment: dict[str, Any] | None = None
+    release_dir_identity: tuple[int, int] | None = None
 
 
 class DeviceReleaseService:
@@ -47,6 +49,63 @@ class DeviceReleaseService:
             raise UnsafePathError("只允許讀取一般檔案")
         return os.fdopen(descriptor, "rb")
 
+    @staticmethod
+    @contextmanager
+    def _open_directory(path: Path):
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise UnsafePathError("只允許讀取 Release 目錄")
+            yield descriptor, (int(metadata.st_dev), int(metadata.st_ino))
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _open_file_at(directory_fd: int, filename: str):
+        if (
+            not isinstance(filename, str)
+            or not filename
+            or filename in {".", ".."}
+            or "\x00" in filename
+            or "/" in filename
+            or "\\" in filename
+        ):
+            raise UnsafePathError("Release 檔名不合法")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(filename, flags, dir_fd=directory_fd)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            os.close(descriptor)
+            raise UnsafePathError("只允許讀取一般檔案")
+        return os.fdopen(descriptor, "rb")
+
+    @contextmanager
+    def _open_release_directory(self, release_id: str):
+        if _RELEASE_ID.fullmatch(release_id) is None:
+            raise UnsafePathError("Release ID 不合法")
+        with self._open_directory(self.release_root) as (root_fd, _root_identity):
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            release_fd = os.open(release_id, flags, dir_fd=root_fd)
+            try:
+                metadata = os.fstat(release_fd)
+                if not stat.S_ISDIR(metadata.st_mode):
+                    raise UnsafePathError("Release 路徑不是目錄")
+                yield release_fd, (int(metadata.st_dev), int(metadata.st_ino))
+            finally:
+                os.close(release_fd)
+
     def _pointer_release(self, profile_key: str) -> str | None:
         pointer = self.release_root / f"latest.{profile_key}"
         if not pointer.exists() and profile_key == "safe_4c":
@@ -58,19 +117,19 @@ class DeviceReleaseService:
             return None
         return value if _RELEASE_ID.fullmatch(value) else None
 
-    def _load_manifest(self, release_id: str) -> tuple[Path, dict[str, Any]]:
-        release_dir = safe_join(self.release_root, release_id)
-        if release_dir.parent != self.release_root:
-            raise UnsafePathError("Release 路徑不合法")
-        manifest_path = safe_join(release_dir, "manifest.json")
-        with self._open_readonly(manifest_path) as handle:
-            raw = handle.read(1024 * 1024 + 1)
+    def _load_manifest(
+        self,
+        release_id: str,
+    ) -> tuple[Path, tuple[int, int], dict[str, Any]]:
+        with self._open_release_directory(release_id) as (release_fd, identity):
+            with self._open_file_at(release_fd, "manifest.json") as handle:
+                raw = handle.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:
             raise ValueError("Release Manifest 過大")
         manifest = json.loads(raw.decode("utf-8"))
         if not isinstance(manifest, dict) or str(manifest.get("release_id")) != release_id:
             raise ValueError("Release Manifest 身分不一致")
-        return release_dir, manifest
+        return self.release_root / release_id, identity, manifest
 
     def _source(
         self,
@@ -80,8 +139,6 @@ class DeviceReleaseService:
         release_id: str,
     ) -> tuple[str | None, dict[str, Any] | None]:
         assignment = self.test_store.active(device_id, profile_key)
-        if assignment is not None and str(assignment.get("release_id")) == release_id:
-            return "test_assignment", assignment
         with self.database.session() as connection:
             formal = connection.execute(
                 "SELECT 1 FROM device_render_releases WHERE device_id=? AND release_id=?",
@@ -105,7 +162,14 @@ class DeviceReleaseService:
                 "SELECT status FROM releases WHERE id=?",
                 (release_id,),
             ).fetchone()
-        if release is not None and str(release["status"]) in _INVALID_RELEASE_STATES:
+        release_status = str(release["status"]) if release is not None else None
+        if assignment is not None and str(assignment.get("release_id")) == release_id:
+            # Device test releases are intentionally filesystem-backed. If a
+            # database row exists, however, it must still be downloadable.
+            if release_status is not None and release_status not in _DOWNLOADABLE_RELEASE_STATES:
+                return None, None
+            return "test_assignment", assignment
+        if release_status not in _DOWNLOADABLE_RELEASE_STATES:
             return None, None
         if formal is not None:
             return "device_assignment", None
@@ -132,7 +196,7 @@ class DeviceReleaseService:
         if source is None:
             return DeviceReleaseAuthorization(False, None, "not_assigned", release_id)
         try:
-            release_dir, manifest = self._load_manifest(release_id)
+            release_dir, release_dir_identity, manifest = self._load_manifest(release_id)
         except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
             return DeviceReleaseAuthorization(False, None, "invalid_manifest", release_id)
         except UnsafePathError:
@@ -140,13 +204,14 @@ class DeviceReleaseService:
         if str(manifest.get("render_profile")) != profile_key:
             return DeviceReleaseAuthorization(False, None, "profile_mismatch", release_id)
         return DeviceReleaseAuthorization(
-            True,
-            source,
-            None,
-            release_id,
-            release_dir,
-            manifest,
-            assignment,
+            allowed=True,
+            source=source,
+            reason=None,
+            release_id=release_id,
+            release_dir=release_dir,
+            manifest=manifest,
+            test_assignment=assignment,
+            release_dir_identity=release_dir_identity,
         )
 
     def latest_for_device(
@@ -180,7 +245,11 @@ class DeviceReleaseService:
         authorization: DeviceReleaseAuthorization,
         filename: str,
     ) -> tuple[bytes, dict[str, Any]]:
-        if not authorization.allowed or authorization.release_dir is None:
+        if (
+            not authorization.allowed
+            or authorization.release_dir is None
+            or authorization.release_dir_identity is None
+        ):
             raise PermissionError("Release 未授權")
         manifest = authorization.manifest or {}
         entry = next(
@@ -193,10 +262,17 @@ class DeviceReleaseService:
         )
         if entry is None or filename == "manifest.json":
             raise FileNotFoundError(filename)
-        path = safe_join(authorization.release_dir, filename)
         try:
-            with self._open_readonly(path) as handle:
-                payload = handle.read()
+            with self._open_release_directory(authorization.release_id) as (
+                release_fd,
+                identity,
+            ):
+                if identity != authorization.release_dir_identity:
+                    raise UnsafePathError("Release 目錄在授權後已被替換")
+                with self._open_file_at(release_fd, filename) as handle:
+                    payload = handle.read()
+        except UnsafePathError:
+            raise
         except OSError as exc:
             raise FileNotFoundError(filename) from exc
         expected_size = entry.get("size")
