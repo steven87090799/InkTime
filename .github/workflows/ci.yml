@@ -50,7 +50,7 @@ jobs:
           INKTIME_DATA_PATH=.ci-data
           INKTIME_PHOTO_PATH=.ci-photos
           INKTIME_ENVIRONMENT=production
-          INKTIME_PUBLIC_URL=http://inktime-ci.test:8765
+          INKTIME_PUBLIC_URL=http://inktime-ci.acme.dev:8765
           INKTIME_COOKIE_SECURE=0
           INKTIME_ALLOW_INSECURE_HTTP=1
           INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE=0
