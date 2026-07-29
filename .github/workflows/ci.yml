@@ -157,7 +157,7 @@ jobs:
         if: always()
         run: |
           docker compose --env-file .ci-tls.env -f docker-compose.yml -f .github/tls-smoke/docker-compose.tls.yml down -v --remove-orphans
-          rm -rf .ci-tls .ci-data .ci-photos
+          sudo rm -rf .ci-tls .ci-data .ci-photos
 
   bounded-runtime-soak:
     runs-on: ubuntu-latest
