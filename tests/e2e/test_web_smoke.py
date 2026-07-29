@@ -13,6 +13,14 @@ def test_first_setup_login_and_primary_console_pages():
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
+        csp_violations: list[str] = []
+        page.on(
+            "console",
+            lambda message: csp_violations.append(message.text)
+            if "Content Security Policy" in message.text
+            or "violates the following Content Security Policy directive" in message.text
+            else None,
+        )
         page.goto(base + "/setup")
         page.get_by_label("管理員帳號").fill("e2e-admin")
         page.get_by_label("密碼", exact=True).fill("e2e-password-long")
@@ -47,4 +55,5 @@ def test_first_setup_login_and_primary_console_pages():
         page.wait_for_load_state("networkidle")
         page.get_by_role("radio", name="進階").check()
         assert page.locator('[name="analysis.concurrency"]').input_value() == "3"
+        assert csp_violations == []
         browser.close()
