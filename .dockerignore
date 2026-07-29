@@ -1,17 +1,37 @@
 .git
+.github
 .venv
 venv
 __pycache__
 *.pyc
 *.db
+*.sqlite
+*.sqlite3
+.coverage
+htmlcov
+docs
+tests
+esp32
 data/backups
 data/cache
 data/releases
+data/*
+!data/world_cities_zh.csv
 logs
 output
-test
+simulation_photos
 .DS_Store
 .env
+.env.*
+!.env.example
+!.env.local.example
+!.env.production.example
+README*
+USER_MANUAL.html
+legacy_*.py
+render_daily_photo*.py
+analyze_photos.py
+config-example.py
 legacy_server 2.py
 scripts/import_legacy_config 2.py
 scripts/migrate 2.py
