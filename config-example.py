@@ -35,7 +35,7 @@ CHANNEL_FAILOVER_COOLDOWN_SEC = 300
 DOWNLOAD_KEY = "yourdownloadkey"
 
 # Flask 静态服务
-FLASK_HOST = "0.0.0.0"
+FLASK_HOST = "0.0.0.0"  # noqa: S104 - explicit container/LAN example binding.
 FLASK_PORT = 8765
 # 此舊設定已停用。Legacy Review／Simulator 只能以部署環境變數
 # INKTIME_ENABLE_LEGACY_WEBUI=true 明確開啟；所有環境預設關閉。
