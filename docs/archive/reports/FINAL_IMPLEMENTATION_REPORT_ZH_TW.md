@@ -1,5 +1,7 @@
 # InkTime 最終實作與驗收報告
 
+> **歷史報告（2026-07-17）**：此報告反映 Migration v1–v7 時的交付範圍；目前資料庫已繼續演進。請由 [`../../README.md`](../../README.md) 和 [`../../architecture/ARCHITECTURE_ZH_TW.md`](../../architecture/ARCHITECTURE_ZH_TW.md) 查詢現況。
+
 報告日期：2026-07-17  
 分支：`feature/inktime-platform-hardening`  
 實作基準：`b09baab415f155dcdb28f1ace57222227281045f`  

@@ -1,5 +1,7 @@
 # SQLite 與照片掃描安全審計
 
+> **歷史稽核**：本文件列出的問題是後續修正工作的輸入，不應視為目前缺陷清單。請以現行 [架構文件](../../architecture/ARCHITECTURE_ZH_TW.md)、[備份還原指南](../../operations/BACKUP_RESTORE_ZH_TW.md)與測試為準。
+
 審計範圍僅涵蓋 SQLite、Migration、照片掃描、Missing／搬移／重複、縮圖與備份還原。AI 評分、排程介面、Renderer、Firmware 與歷史今日頁面不在本階段。
 
 ## 現況

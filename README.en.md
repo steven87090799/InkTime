@@ -1,4 +1,6 @@
-# InkTime · E-Ink Memory Frame
+# InkTime · E-Ink Memory Frame (Legacy Overview)
+
+> This English document describes the original project flow and is retained for compatibility. For the current Web/Worker/Scheduler platform, local-only selection, device queue, resilience features, and the complete document map, start with the [Chinese README](README.md), the [documentation portal](USER_MANUAL.html), and [docs/README.md](docs/README.md).
 
 [中文](README.md) | **English**
 

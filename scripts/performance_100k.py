@@ -26,7 +26,7 @@ PHOTO_COUNT = 100_000
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=Path, default=Path("docs/PERFORMANCE_REPORT.md"))
+    parser.add_argument("--output", type=Path, default=Path("docs/reports/PERFORMANCE_REPORT.md"))
     args = parser.parse_args()
     root = Path(tempfile.mkdtemp(prefix="inktime-performance-"))
     database = Database(root / "performance.db")
