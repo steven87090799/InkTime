@@ -25,6 +25,7 @@ from inktime.app.api import (
 )
 from inktime.app.bootstrap import ServiceContainer, bootstrap_services
 from inktime.app.core.logging import log_event
+from inktime.app.core.errors import ApplicationError
 from inktime.app.core.runtime_config import RuntimeConfig
 from inktime.app.repositories.auth import AuthRepository
 from inktime.app.repositories.settings import SettingsRepository
@@ -57,11 +58,10 @@ def configure_web_application(
         INKTIME_PHOTO_DIR=runtime_config.photo_dir,
         INKTIME_VERSION=__version__,
         INKTIME_ENABLE_LEGACY_WEBUI=runtime_config.legacy_enabled,
+        PREFERRED_URL_SCHEME=runtime_config.public_url.split(":", 1)[0],
         TESTING=runtime_config.testing,
     )
-    settings_repository: SettingsRepository = container.extensions[
-        "inktime_settings_repository"
-    ]  # type: ignore[assignment]
+    settings_repository: SettingsRepository = container.extensions["inktime_settings_repository"]  # type: ignore[assignment]
     app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(
         minutes=int(settings_repository.get("security.session_minutes", 30))
     )
@@ -131,7 +131,11 @@ def configure_web_application(
         endpoint = request.endpoint or ""
         repository: AuthRepository = app.extensions["inktime_auth_repository"]
         user_id = session.get("user_id")
-        g.user = repository.find_by_id(str(user_id)) if user_id else None
+        g.user = (
+            repository.find_session_user(str(user_id), session.get("session_version")) if user_id else None
+        )
+        if user_id and g.user is None:
+            session.clear()
         if request.method in {"POST", "PUT", "PATCH", "DELETE"} and endpoint not in device_endpoints:
             verify_csrf()
         if endpoint in public_endpoints:
@@ -155,6 +159,15 @@ def configure_web_application(
             "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
             "script-src 'self' 'unsafe-inline'; connect-src 'self'",
         )
+        if (
+            runtime_config.environment == "production"
+            and runtime_config.public_url.startswith("https://")
+            and request.is_secure
+        ):
+            response.headers.setdefault(
+                "Strict-Transport-Security",
+                "max-age=31536000; includeSubDomains",
+            )
         return response
 
     @app.errorhandler(HTTPException)
@@ -174,6 +187,13 @@ def configure_web_application(
         error_code = first if "-" in first else "HTTP-{:03d}".format(exc.code or 500)
         message = remainder if separator else description
         return {"error_code": error_code, "message": message}, exc.code or 500
+
+    @app.errorhandler(ApplicationError)
+    def application_error(exc: ApplicationError):
+        if request.path.startswith("/api/"):
+            return exc.response_body(), exc.http_status
+        flash(exc.public_message, "error")
+        return redirect(request.referrer or url_for("dashboard.dashboard"), code=303)
 
     log_event(
         LOGGER,

@@ -926,6 +926,13 @@ MIGRATIONS = (
         """,
         "UPDATE settings SET value_json='200',updated_at=datetime('now') WHERE key='scanner.write_batch_size' AND value_json='500'",
     )),
+    Migration(25, "加入帳號正規化與 Session 撤銷版本", (
+        "ALTER TABLE users ADD COLUMN normalized_username TEXT",
+        "UPDATE users SET normalized_username=lower(trim(username)) WHERE normalized_username IS NULL",
+        "CREATE UNIQUE INDEX idx_users_normalized_username ON users(normalized_username)",
+        "ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1 CHECK(session_version >= 1)",
+        "ALTER TABLE users ADD COLUMN disabled_at TEXT",
+    )),
 )
 
 

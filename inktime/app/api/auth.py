@@ -3,6 +3,8 @@ from __future__ import annotations
 from flask import Blueprint, current_app, flash, g, redirect, render_template, request, session, url_for
 
 from inktime.app.repositories.auth import AuthRepository
+from inktime.app.core.errors import ApplicationError
+from inktime.app.domain.auth import SetupAlreadyCompleted
 from inktime.app.web.access import administrator_required, login_required
 
 
@@ -19,21 +21,22 @@ def setup():
     if repository.count_users() > 0:
         return redirect(url_for("auth.login"))
     if request.method == "POST":
-        username = request.form.get("username", "").strip()
+        username = request.form.get("username", "")
         password = request.form.get("password", "")
         confirmation = request.form.get("password_confirmation", "")
-        if not username:
-            flash("請輸入管理員帳號。", "error")
-        elif password != confirmation:
+        if password != confirmation:
             flash("兩次輸入的密碼不同。", "error")
         else:
             try:
-                user_id = repository.create_user(username, password)
-            except Exception as exc:
-                flash(str(exc), "error")
+                user_id = repository.create_initial_administrator(username, password)
+            except SetupAlreadyCompleted:
+                return redirect(url_for("auth.login"))
+            except ApplicationError as exc:
+                flash(exc.public_message, "error")
             else:
                 session.clear()
                 session["user_id"] = user_id
+                session["session_version"] = 1
                 session.permanent = True
                 flash("管理員建立完成。", "success")
                 return redirect(url_for("dashboard.dashboard"))
@@ -58,6 +61,7 @@ def login():
         else:
             session.clear()
             session["user_id"] = user["id"]
+            session["session_version"] = int(user["session_version"])
             session.permanent = True
             next_path = request.args.get("next", "")
             if not next_path.startswith("/") or next_path.startswith("//"):
@@ -85,8 +89,8 @@ def change_password():
                 _repository().change_password(
                     g.user["id"], request.form.get("current_password", ""), new_password
                 )
-            except ValueError as exc:
-                flash(str(exc), "error")
+            except ApplicationError as exc:
+                flash(exc.public_message, "error")
             else:
                 session.clear()
                 flash("密碼已變更，請重新登入。", "success")
@@ -99,8 +103,33 @@ def change_password():
 def create_user():
     payload = request.get_json(silent=True) or {}
     user_id = _repository().create_user(
-        str(payload.get("username", "")),
-        str(payload.get("password", "")),
-        str(payload.get("role", "viewer")),
+        payload.get("username"),
+        payload.get("password"),
+        payload.get("role", "viewer"),
     )
     return {"id": user_id}, 201
+
+
+@bp.patch("/api/v1/users/<user_id>")
+@administrator_required
+def update_user(user_id: str):
+    payload = request.get_json(silent=True) or {}
+    repository = _repository()
+    allowed = {"enabled", "role"}
+    if not payload or not set(payload) <= allowed:
+        from inktime.app.domain.auth import AuthValidationError
+
+        raise AuthValidationError("只允許更新 enabled 或 role。", code="user_update_invalid")
+    if "enabled" in payload:
+        repository.set_enabled(user_id, payload["enabled"])
+    if "role" in payload:
+        repository.set_role(user_id, payload["role"])
+    return {"id": user_id}
+
+
+@bp.post("/api/v1/users/<user_id>/password")
+@administrator_required
+def reset_user_password(user_id: str):
+    payload = request.get_json(silent=True) or {}
+    _repository().reset_password(user_id, payload.get("password"))
+    return {"id": user_id}

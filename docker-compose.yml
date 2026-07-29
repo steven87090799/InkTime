@@ -10,7 +10,7 @@ x-common: &common
   init: true
   stop_grace_period: 45s
   environment:
-    INKTIME_ENVIRONMENT: ${INKTIME_ENVIRONMENT:-production}
+    INKTIME_ENVIRONMENT: ${INKTIME_ENVIRONMENT:-development}
     INKTIME_DATA_DIR: /data
     INKTIME_DATABASE: /data/inktime.db
     INKTIME_PHOTO_DIR: /photos
@@ -26,9 +26,9 @@ x-common: &common
     # 所有排程、歷史今日與 Log 時間使用的時區。
     TZ: ${TZ:-Asia/Taipei}
     # 只有經 HTTPS 反向代理時設為 1，讓 Session Cookie 僅透過 HTTPS 傳送。
-    INKTIME_COOKIE_SECURE: ${INKTIME_COOKIE_SECURE:-1}
-    INKTIME_PUBLIC_URL: ${INKTIME_PUBLIC_URL:-https://localhost}
-    INKTIME_ALLOW_INSECURE_HTTP: ${INKTIME_ALLOW_INSECURE_HTTP:-0}
+    INKTIME_COOKIE_SECURE: ${INKTIME_COOKIE_SECURE:-0}
+    INKTIME_PUBLIC_URL: ${INKTIME_PUBLIC_URL:-http://localhost:8765}
+    INKTIME_ALLOW_INSECURE_HTTP: ${INKTIME_ALLOW_INSECURE_HTTP:-1}
     INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE: ${INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE:-0}
     # 容器預設輸出 JSON Log，方便 NAS 或集中式 Log 系統收集。
     INKTIME_LOG_FORMAT: ${INKTIME_LOG_FORMAT:-json}

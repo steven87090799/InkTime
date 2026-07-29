@@ -33,6 +33,47 @@ class NativeOSAdapter:
             return ""
 
 
+def validate_public_url(config):
+    parsed = urlparse(config.public_url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise PreflightError(
+            "INKTIME_PUBLIC_URL 必須是 http 或 https 的完整公開 Origin，且不可包含帳密、路徑、Query 或 Fragment"
+        )
+    if parsed.scheme == "http":
+        if config.cookie_secure:
+            raise PreflightError(
+                "INKTIME_PUBLIC_URL 使用 HTTP 時必須設定 INKTIME_COOKIE_SECURE=0，"
+                "否則瀏覽器不會送回 Session Cookie"
+            )
+        if not config.allow_insecure_http:
+            raise PreflightError(
+                "INKTIME_PUBLIC_URL 使用 HTTP 時必須明確設定 INKTIME_ALLOW_INSECURE_HTTP=1；"
+                "公開部署請改用 HTTPS"
+            )
+    if config.environment == "production":
+        hostname = (parsed.hostname or "").rstrip(".").casefold()
+        placeholder = (
+            hostname in {"localhost", "127.0.0.1", "::1", "example.com"}
+            or hostname.endswith(".invalid")
+            or hostname.endswith(".example.com")
+        )
+        if placeholder:
+            raise PreflightError(
+                "Production 的 INKTIME_PUBLIC_URL 不可使用 localhost 或範例網域；請改成實際 HTTPS 公開網址"
+            )
+        if parsed.scheme == "https" and not config.cookie_secure:
+            raise PreflightError("Production HTTPS 必須設定 INKTIME_COOKIE_SECURE=1")
+    return parsed
+
+
 def filesystem_for(path: Path, adapter: OSAdapter | None = None) -> str | None:
     """Return the deepest Linux mount type; an empty result is deliberately safe.
 
@@ -75,15 +116,9 @@ class ProductionPreflight:
 
 
 def run_production_preflight(config, *, adapter: OSAdapter | None = None) -> ProductionPreflight:
+    parsed = validate_public_url(config)
     if config.environment != "production":
         return ProductionPreflight(None)
-    parsed = urlparse(config.public_url)
-    if not parsed.scheme or not parsed.netloc or parsed.username or parsed.password:
-        raise PreflightError("INKTIME_PUBLIC_URL 必須是沒有帳密的完整公開 URL")
-    if parsed.scheme != "https" and not config.allow_insecure_http:
-        raise PreflightError("Production HTTP 必須明確設定 INKTIME_ALLOW_INSECURE_HTTP=1")
-    if parsed.scheme == "https" and not config.cookie_secure:
-        raise PreflightError("Production HTTPS 必須設定 INKTIME_COOKIE_SECURE=1")
     if config.proxy_trust > 2:
         raise PreflightError("INKTIME_PROXY_TRUST 僅可設定 0 至 2 個受信任 proxy")
     fs_type = filesystem_for(config.database_path.parent, adapter)
