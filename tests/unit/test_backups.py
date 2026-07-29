@@ -8,6 +8,12 @@ import zipfile
 import pytest
 
 from inktime.app.db import Database, RuntimeLockError, migrate
+from inktime.app.bootstrap import bootstrap_services
+from inktime.app.core.runtime_config import RuntimeConfig
+from inktime.app.factory import create_app
+from inktime.app.repositories.auth import AuthRepository
+from inktime.app.repositories.devices import DeviceRepository
+from inktime.app.repositories.resilience import ResilienceRepository
 from inktime.app.services.backups import BackupService
 
 
@@ -140,9 +146,7 @@ def test_backup_excludes_secrets_and_restores_analysis_and_photo_state(tmp_path)
     assert restored["schema_version"] == 25
     assert Path(restored["safety_copy"]).is_file()
     with database.session() as connection:
-        photo = connection.execute(
-            "SELECT favorite,status FROM photos WHERE id='photo'"
-        ).fetchone()
+        photo = connection.execute("SELECT favorite,status FROM photos WHERE id='photo'").fetchone()
         assert tuple(photo) == (1, "analyzed")
         assert connection.execute("SELECT caption FROM photo_analysis").fetchone()[0] == "重要分析"
         assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 1
@@ -160,10 +164,13 @@ def test_backup_excludes_secrets_and_restores_analysis_and_photo_state(tmp_path)
             "02-29",
             "valid",
         )
-        assert connection.execute(
-            "SELECT id FROM photos INDEXED BY idx_photos_captured_month_day "
-            "WHERE captured_month_day='02-29'"
-        ).fetchone()[0] == "photo"
+        assert (
+            connection.execute(
+                "SELECT id FROM photos INDEXED BY idx_photos_captured_month_day "
+                "WHERE captured_month_day='02-29'"
+            ).fetchone()[0]
+            == "photo"
+        )
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert not list(tmp_path.glob(".inktime-restore-*"))
 
@@ -202,9 +209,7 @@ def test_restore_requires_all_runtime_processes_to_be_stopped(tmp_path):
         assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 1
 
 
-def test_post_replace_validation_failure_automatically_recovers_current_database(
-    monkeypatch, tmp_path
-):
+def test_post_replace_validation_failure_automatically_recovers_current_database(monkeypatch, tmp_path):
     database, service = make_service(tmp_path)
     seed(database)
     archive = service.create()
@@ -217,9 +222,7 @@ def test_post_replace_validation_failure_automatically_recovers_current_database
         calls += 1
         if path == database.path and calls >= 2:
             raise ValueError("forced post-restore failure")
-        return original_validate(
-            path, manifest, require_platform_tables=require_platform_tables
-        )
+        return original_validate(path, manifest, require_platform_tables=require_platform_tables)
 
     monkeypatch.setattr(service, "_validate_restore_database", fail_after_replace)
     with pytest.raises(ValueError, match="forced post-restore failure"):
@@ -242,3 +245,86 @@ def test_empty_sqlite_snapshot_is_rejected_before_current_database_is_touched(tm
     with database.session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 1
         assert connection.execute("SELECT caption FROM photo_analysis").fetchone()[0] == "重要分析"
+
+
+def test_fresh_volume_restore_preserves_platform_identity_and_roles(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    source_database = Database(source / "inktime.db")
+    migrate(source_database)
+    seed(source_database)
+    AuthRepository(source_database).create_initial_administrator("restore-admin", "restore-test-passphrase")
+    source_devices = DeviceRepository(source_database, "restore-pepper")
+    device_id, device_token = source_devices.create("restore-device")
+    source_queue = ResilienceRepository(source_database)
+    source_queue.ensure_queue(device_id)
+    queue_item = source_queue.enqueue_release(device_id=device_id, release_id="release")
+    with source_database.session() as connection:
+        connection.execute("UPDATE settings SET value_json='21' WHERE key='backup.retention'")
+
+    archive = BackupService(source_database, source / "backups").create()
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    restored_database = Database(fresh / "inktime.db")
+    migrate(restored_database)
+    restored = BackupService(restored_database, fresh / "backups").restore(archive)
+
+    assert restored["schema_version"] == 25
+    assert AuthRepository(restored_database).authenticate("restore-admin", "restore-test-passphrase")
+    assert DeviceRepository(restored_database, "restore-pepper").authenticate(device_token, "203.0.113.20")
+    with restored_database.session() as connection:
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 25
+        assert connection.execute("SELECT COUNT(*) FROM secrets").fetchone()[0] == 0
+        assert (
+            connection.execute(
+                "SELECT release_id FROM device_content_queue_items WHERE id=?",
+                (queue_item["id"],),
+            ).fetchone()[0]
+            == "release"
+        )
+        assert (
+            connection.execute("SELECT value_json FROM settings WHERE key='backup.retention'").fetchone()[0]
+            == "21"
+        )
+
+    runtime = RuntimeConfig.from_sources(
+        environ={},
+        base_dir=fresh,
+        environment="test",
+        database_path=fresh / "inktime.db",
+        data_dir=fresh,
+        release_dir=fresh / "releases",
+        backup_dir=fresh / "backups",
+        cache_dir=fresh / "cache",
+        photo_dir=fresh / "photos",
+        testing=True,
+        development=False,
+        legacy_enabled=False,
+        cookie_secure=False,
+    )
+    app = create_app(runtime)
+    client = app.test_client()
+    client.get("/login")
+    with client.session_transaction() as session:
+        csrf_token = str(session["csrf_token"])
+    response = client.post(
+        "/login",
+        data={
+            "username": "restore-admin",
+            "password": "restore-test-passphrase",
+            "csrf_token": csrf_token,
+        },
+    )
+    assert response.status_code == 302
+    with client.session_transaction() as session:
+        assert session.get("user_id")
+    app.extensions["inktime_service_container"].close()
+
+    worker = bootstrap_services(runtime, role="worker")
+    scheduler = bootstrap_services(runtime, role="scheduler")
+    try:
+        assert worker.role == "worker"
+        assert scheduler.role == "scheduler"
+    finally:
+        scheduler.close()
+        worker.close()
