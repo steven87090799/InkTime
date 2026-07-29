@@ -3,6 +3,7 @@ from __future__ import annotations
 import socket
 import ssl
 import time
+import http.client
 
 import pytest
 
@@ -286,3 +287,82 @@ def test_webhook_fast_response_succeeds_with_separate_timeouts_and_closes_resour
     assert connection.sock.timeout == 4.5
     assert connection.response.closed is True
     assert connection.closed is True
+
+
+def test_webhook_fails_over_when_connect_fails_before_request():
+    connections = []
+
+    class ConnectFailure(_Connection):
+        def connect(self):
+            raise OSError("connect failed")
+
+    def factory(*_args):
+        connection = ConnectFailure([]) if not connections else _Connection([])
+        connections.append(connection)
+        return connection
+
+    transport = PinnedWebhookTransport(
+        resolver=lambda *_args, **_kwargs: _records("8.8.8.8", "1.1.1.1"),
+        connection_factory=factory,
+    )
+
+    response = transport.post(
+        "https://hooks.example.net/hook",
+        json={"event": "test"},
+        headers={},
+        timeout=(1.0, 1.0),
+        allow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert len(connections) == 2
+
+
+@pytest.mark.parametrize(
+    "phase,exception",
+    [
+        ("request", BrokenPipeError("broken pipe")),
+        ("response", ConnectionResetError("peer reset")),
+        ("response", http.client.RemoteDisconnected("remote disconnected")),
+        ("response", http.client.BadStatusLine("invalid response")),
+    ],
+    ids=("request-write", "peer-reset", "remote-disconnect", "http-parse"),
+)
+def test_webhook_does_not_fail_over_after_request_begins(phase, exception):
+    first_requests = []
+    second_requests = []
+    connections = []
+
+    class AmbiguousFailure(_Connection):
+        def request(self, method, target, *, body, headers):
+            super().request(method, target, body=body, headers=headers)
+            if phase == "request":
+                raise exception
+
+        def getresponse(self):
+            if phase == "response":
+                raise exception
+            return super().getresponse()
+
+    def factory(*_args):
+        connection = AmbiguousFailure(first_requests) if not connections else _Connection(second_requests)
+        connections.append(connection)
+        return connection
+
+    transport = PinnedWebhookTransport(
+        resolver=lambda *_args, **_kwargs: _records("8.8.8.8", "1.1.1.1"),
+        connection_factory=factory,
+    )
+
+    with pytest.raises(type(exception)):
+        transport.post(
+            "https://hooks.example.net/hook",
+            json={"event": "test"},
+            headers={},
+            timeout=(1.0, 1.0),
+            allow_redirects=False,
+        )
+
+    assert len(first_requests) == 1
+    assert second_requests == []
+    assert len(connections) == 1

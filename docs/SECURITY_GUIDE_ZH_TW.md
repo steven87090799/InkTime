@@ -7,7 +7,7 @@
 - Device Token 為高熵隨機值，資料庫只存 HMAC-SHA256；完整值只顯示一次且不進 URL／Log。Release、status 與 Queue manifest/file/ACK 共用同一認證入口；缺少／錯誤／撤銷 Token 回 401，失敗嘗試超限回 429 並帶 `Retry-After`。
 - Device Release 由裝置正式指派、Profile latest、有效 Test Assignment 或有效 Queue Item 的單一授權來源判斷；正式指派、latest 與 Queue 必須存在 `published` 的 `releases` row，Test Assignment 明確允許只有受控 Filesystem Release。未授權與不存在一律回 404。目錄與檔案以 dirfd/openat、`O_NOFOLLOW` 逐層開啟；size、SHA-256 與 response 使用同一 descriptor。
 - API Key 由部署主密鑰衍生 Fernet 金鑰加密；診斷與 JSON Log 會遞迴遮蔽敏感鍵。
-- Webhook 預設只允許 HTTPS，禁止 userinfo、fragment、redirect、private／loopback／link-local／reserved IPv4/IPv6；DNS 驗證後實際連線固定使用同一 IP，TLS SNI 與憑證驗證仍以原 hostname 執行。TCP connect 與 TLS handshake 受 connect timeout 限制；連線後 socket 另套 read timeout。Read timeout 後不換 IP 重送，並關閉 response／connection。內網例外只能由部署者透過 `INKTIME_WEBHOOK_ALLOWLIST` 明確設定 hostname、子網域、IP 或 CIDR。
+- Webhook 預設只允許 HTTPS，禁止 userinfo、fragment、redirect、private／loopback／link-local／reserved IPv4/IPv6；DNS 驗證後實際連線固定使用同一 IP，TLS SNI 與憑證驗證仍以原 hostname 執行。TCP connect 與 TLS handshake 受 connect timeout 限制；連線後 socket 另套 read timeout。只有 request 尚未開始送出前才能切換已驗證 IP；一旦 request 可能已全部或部分送達，任何 timeout、reset、broken pipe、remote disconnect 或 HTTP parse error 都不會在同一次 delivery 中換 IP 重送。Webhook 採 at-least-once 語意，所有後續重試都重用穩定的 `Idempotency-Key`／`X-InkTime-Event-ID`，接收端必須依 Key 去重。內網例外只能由部署者透過 `INKTIME_WEBHOOK_ALLOWLIST` 明確設定 hostname、子網域、IP 或 CIDR。
 - JSON API 的 Boolean 只接受 `true`／`false`；不接受字串、0/1、集合或 null。整數拒絕 Boolean、字串與小數；浮點必須有限且在契約範圍內。這會拒絕過去可能被 truthy coercion 接受的模糊輸入。
 - CSP 使用每個 response 獨立的密碼學 nonce，`script-src` 不允許 `unsafe-inline`；Production HTTPS 才送出 HSTS。
 - 舊裝置 API 預設關閉。Production 預設且建議 HTTPS；明確的 insecure HTTP break-glass 只供受控環境，Health／Preflight 會 degraded，且不得公開至公網。

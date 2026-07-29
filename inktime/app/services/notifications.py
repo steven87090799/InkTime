@@ -380,15 +380,18 @@ class DeviceNotificationService:
         read_timeout = float(self.settings.get("notification.webhook_timeout_seconds", 10))
         connect_timeout = min(3.0, max(1.0, read_timeout))
         token = self.secrets.get(WEBHOOK_SECRET_KEY) or ""
+        event_id = str(row["webhook_idempotency_key"])
         headers = {
             "Content-Type": "application/json",
             "User-Agent": "InkTime/2",
-            "Idempotency-Key": str(row["webhook_idempotency_key"]),
+            "Idempotency-Key": event_id,
+            "X-InkTime-Event-ID": event_id,
         }
         if token:
             headers["Authorization"] = f"Bearer {token}"
         payload = {
             "schema_version": 1,
+            "event_id": event_id,
             "notification_id": int(row["id"]),
             "kind": str(row["kind"]),
             "level": str(row["level"]),

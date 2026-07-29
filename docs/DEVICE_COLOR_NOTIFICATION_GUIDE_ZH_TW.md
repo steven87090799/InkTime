@@ -62,6 +62,8 @@ Scheduler 預設每 300 秒掃描一次，不為每次掃描輸出 INFO Log。�
 
 ## 5. Webhook
 
+Webhook delivery 採 **at-least-once** 語意。每個通知事件會持久化一個穩定 Event ID，並在每次重試重用相同的 `Idempotency-Key`、`X-InkTime-Event-ID` 與 payload `event_id`；接收端必須以此 Key 去重。InkTime 只會在 TCP／TLS 連線尚未完成、request 尚未開始送出時切換到下一個已驗證 IP；一旦 request 可能已全部或部分送達，便不會在同一次 delivery 中換 IP 重送。
+
 1. Web「設定」→「裝置通知」填完整 `https://` URL 並啟用 Webhook。
 2. 若接收端需要 Bearer Token，在同頁「Webhook 認證 Token」輸入；它以平台主密鑰加密保存在 `secrets`，不進一般設定歷史或 Log。
 3. 按「傳送測試通知」。HTTP 2xx 視為成功。

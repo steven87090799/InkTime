@@ -280,6 +280,7 @@ class PinnedWebhookTransport:
                 self.ssl_context,
             )
             response: http.client.HTTPResponse | None = None
+            request_may_have_been_sent = False
             try:
                 try:
                     connection.connect()
@@ -291,6 +292,9 @@ class PinnedWebhookTransport:
                     last_error = OSError("Webhook 連線未建立 Socket")
                     continue
                 connection.sock.settimeout(read_timeout)
+                # From this point forward, even a local write error is ambiguous:
+                # the peer may have received all or part of the request.
+                request_may_have_been_sent = True
                 connection.request(
                     "POST",
                     target.request_target,
@@ -311,6 +315,8 @@ class PinnedWebhookTransport:
                 # another pinned address could duplicate the webhook.
                 raise
             except (OSError, http.client.HTTPException) as exc:
+                if request_may_have_been_sent:
+                    raise
                 last_error = exc
             finally:
                 if response is not None:
