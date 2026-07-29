@@ -70,6 +70,76 @@ def test_device_token_is_not_accepted_in_url(client, app):
     assert response.status_code == 401
 
 
+def _trigger_device_auth_rate_limit(client) -> None:
+    for index in range(20):
+        response = client.get(
+            "/api/device/v1/releases/latest",
+            headers={"Authorization": f"Bearer invalid-{index}"},
+        )
+        assert response.status_code == 401
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "json_payload"),
+    [
+        ("get", "/api/device/v1/releases/latest", None),
+        ("get", "/api/device/v1/queue/manifest", None),
+        ("get", "/api/device/v1/queue/items/missing/files/photo.bin", None),
+        ("post", "/api/device/v1/queue/ack", {}),
+    ],
+    ids=("release", "queue-manifest", "queue-file", "queue-ack"),
+)
+def test_device_auth_rate_limit_is_consistent(
+    client,
+    method,
+    path,
+    json_payload,
+):
+    _trigger_device_auth_rate_limit(client)
+
+    response = client.open(
+        path,
+        method=method.upper(),
+        json=json_payload,
+        headers={"Authorization": "Bearer another-invalid-token"},
+    )
+
+    assert response.status_code == 429
+    assert 1 <= int(response.headers["Retry-After"]) <= 300
+    assert response.get_json() == {
+        "error_code": "DEVICE-007",
+        "message": "裝置驗證嘗試過多，請稍後再試",
+    }
+    body = response.get_data(as_text=True)
+    assert "another-invalid-token" not in body
+    assert "attempt" not in body.casefold()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/device/v1/releases/latest",
+        "/api/device/v1/releases/missing/files/photo.bin",
+        "/api/device/v1/status",
+        "/api/device/v1/queue/manifest",
+        "/api/device/v1/queue/items/missing/files/photo.bin",
+        "/api/device/v1/queue/ack",
+    ],
+)
+def test_device_auth_endpoints_share_identical_missing_token_behavior(client, path):
+    response = client.open(
+        path,
+        method="POST" if path.endswith("/status") or path.endswith("/ack") else "GET",
+        json={},
+    )
+
+    assert response.status_code == 401
+    assert response.get_json() == {
+        "error_code": "DEVICE-001",
+        "message": "裝置驗證失敗",
+    }
+
+
 def test_device_downloads_versioned_manifest_and_verified_file(client, app):
     from PIL import Image
     from hashlib import sha256

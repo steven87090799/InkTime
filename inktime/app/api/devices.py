@@ -7,12 +7,13 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Blueprint, abort, current_app, render_template, request
 
+from inktime.app.api.device_auth import authenticate_device_request
 from inktime.app.core.logging import log_event
 from inktime.app.core.paths import UnsafePathError
 from inktime.app.domain.rendering import DISPLAY_PROFILES, DeviceTestReleaseStore
 from inktime.app.domain.rendering.system_presets import DEFAULT_DEVICE_PANEL_PROFILE
 from inktime.app.services.rendering import FIT_MODES, FRAME_ORIENTATIONS, LAYOUTS
-from inktime.app.repositories.devices import DeviceRateLimitError, DeviceRepository
+from inktime.app.repositories.devices import DeviceRepository
 from inktime.app.web.access import administrator_required, login_required
 
 
@@ -23,23 +24,6 @@ SCHEDULE_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
 def _repository() -> DeviceRepository:
     return current_app.extensions["inktime_device_repository"]
-
-
-def _bearer_token() -> str:
-    value = request.headers.get("Authorization", "")
-    if not value.startswith("Bearer "):
-        abort(401, description="DEVICE-001 裝置驗證失敗")
-    return value[7:].strip()
-
-
-def _authenticated_device():
-    try:
-        device = _repository().authenticate(_bearer_token(), request.remote_addr or "unknown")
-    except DeviceRateLimitError:
-        abort(429, description="DEVICE-007 裝置驗證嘗試過多，請稍後再試")
-    if device is None:
-        abort(401, description="DEVICE-001 裝置驗證失敗")
-    return device
 
 
 def optional_bool(payload: dict, field: str, *, default: bool | None = None) -> bool | None:
@@ -291,7 +275,7 @@ def update_device(device_id: str):
 
 @bp.get("/api/device/v1/releases/latest")
 def latest_release():
-    device = _authenticated_device()
+    device = authenticate_device_request()
     profile_key = str(device["panel_profile"] or DEFAULT_DEVICE_PANEL_PROFILE)
     authorization = current_app.extensions["inktime_device_release_service"].latest_for_device(
         device_id=str(device["id"]),
@@ -337,7 +321,7 @@ def latest_release():
 
 @bp.get("/api/device/v1/releases/<release_id>/files/<path:filename>")
 def release_file(release_id: str, filename: str):
-    device = _authenticated_device()
+    device = authenticate_device_request()
     profile_key = str(device["panel_profile"] or DEFAULT_DEVICE_PANEL_PROFILE)
     service = current_app.extensions["inktime_device_release_service"]
     authorization = service.authorize_release_for_device(
@@ -375,7 +359,7 @@ def release_file(release_id: str, filename: str):
 
 @bp.post("/api/device/v1/status")
 def report_status():
-    device = _authenticated_device()
+    device = authenticate_device_request()
     if (request.content_length or 0) > 64 * 1024:
         abort(413, description="DEVICE-004 狀態 Payload 不可超過 64 KiB")
     payload = request.get_json(silent=True)

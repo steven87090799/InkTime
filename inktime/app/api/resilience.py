@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from flask import Blueprint, abort, current_app, g, render_template, request
 
+from inktime.app.api.device_auth import authenticate_device_request
 from inktime.app.core.paths import UnsafePathError
 from inktime.app.web.access import administrator_required, login_required
 
@@ -241,28 +242,16 @@ def generate_queue(device_id: str):
     return {"queue": _repo().queue(device_id), "item": item}, 201
 
 
-def _authenticated_device():
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        abort(401, description="DEVICE-001 裝置驗證失敗")
-    device = current_app.extensions["inktime_device_repository"].authenticate(
-        auth[7:].strip(), request.remote_addr or "unknown"
-    )
-    if device is None:
-        abort(401, description="DEVICE-001 裝置驗證失敗")
-    return device
-
-
 @bp.get("/api/device/v1/queue/manifest")
 def device_queue_manifest():
-    device = _authenticated_device()
+    device = authenticate_device_request()
     return _repo().manifest(str(device["id"]), release_root=current_app.config["INKTIME_RELEASE_DIR"])
 
 
 @bp.post("/api/device/queue/ack")  # legacy compatibility alias
 @bp.post("/api/device/v1/queue/ack")
 def device_queue_ack():
-    device = _authenticated_device()
+    device = authenticate_device_request()
     if (request.content_length or 0) > 16 * 1024:
         abort(413, description="QUEUE-001 ACK Payload 不可超過 16 KiB")
     try:
@@ -275,7 +264,7 @@ def device_queue_ack():
 
 @bp.get("/api/device/v1/queue/items/<item_id>/files/<path:filename>")
 def queue_item_file(item_id: str, filename: str):
-    device = _authenticated_device()
+    device = authenticate_device_request()
     queue = _repo().queue(str(device["id"]))
     item = next(
         (

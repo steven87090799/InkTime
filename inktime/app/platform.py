@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 import secrets
 
-from flask import Flask, flash, g, redirect, request, session, url_for
+from flask import Flask, flash, g, jsonify, redirect, request, session, url_for
 from jinja2 import FileSystemLoader
 from werkzeug.exceptions import HTTPException
 
@@ -192,7 +192,12 @@ def configure_web_application(
         first, separator, remainder = description.partition(" ")
         error_code = first if "-" in first else "HTTP-{:03d}".format(exc.code or 500)
         message = remainder if separator else description
-        return {"error_code": error_code, "message": message}, exc.code or 500
+        response = jsonify({"error_code": error_code, "message": message})
+        response.status_code = exc.code or 500
+        retry_after = exc.get_response().headers.get("Retry-After")
+        if retry_after is not None:
+            response.headers["Retry-After"] = retry_after
+        return response
 
     @app.errorhandler(ApplicationError)
     def application_error(exc: ApplicationError):
