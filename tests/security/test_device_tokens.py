@@ -217,6 +217,26 @@ def test_device_status_rejects_json_array_without_writing_state(client, app):
         )
 
 
+def test_device_status_rejects_oversized_body_before_parsing_or_writing(client, app):
+    device_id, token = app.extensions["inktime_device_repository"].create("oversized-status-device")
+    response = client.post(
+        "/api/device/v1/status",
+        data='{"error_message":"' + ("x" * (65 * 1024)) + '"}',
+        content_type="application/json",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 413
+    with app.extensions["inktime_database"].session() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM device_events WHERE device_id=?",
+                (device_id,),
+            ).fetchone()[0]
+            == 0
+        )
+
+
 @pytest.mark.parametrize("value", ["true", "false", "1", "0", 1, 0, None, [], {}])
 @pytest.mark.parametrize("field", ["display_updated", "payload_sha256_verified"])
 def test_device_status_rejects_non_boolean_values(client, app, field, value):
