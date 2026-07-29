@@ -72,7 +72,46 @@ def test_production_runner_completes_local_job_without_provider(app, tmp_path, m
     assert job["completed_items"] == 1
 
 
+def test_runner_permanently_rejects_a_frozen_disabled_analysis_plan(app, tmp_path, monkeypatch):
+    root = tmp_path / "disabled"
+    root.mkdir()
+    Image.new("RGB", (200, 150), "blue").save(root / "a.jpg")
+    photos = PhotoRepository(app.extensions["inktime_database"])
+    PhotoScanner(photos, PhotoPreprocessor(), app.extensions["inktime_thumbnail_cache"]).scan("照片", root)
+    with app.extensions["inktime_database"].session() as connection:
+        photo_id = str(connection.execute("SELECT id FROM photos").fetchone()[0])
+    settings = app.extensions["inktime_settings_repository"]
+    settings.update("analysis.execution_mode", "disabled", changed_by="test", source_ip="test")
+    plan = app.extensions["inktime_analysis_service"].build_plan(
+        strategy="high_quality", provider_route=[],
+        scoring_profile=dict(app.extensions["inktime_scoring_repository"].current()),
+    )
+    monkeypatch.setattr(
+        app.extensions["inktime_analysis_service"], "analyze_photo",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("disabled job must not analyze")),
+    )
+    monkeypatch.setattr(
+        app.extensions["inktime_provider_service"], "build_router",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("disabled job must not build router")),
+    )
+    jobs = app.extensions["inktime_job_service"]
+    job_id = jobs.create_analysis_job(
+        name="frozen disabled", strategy="high_quality", settings={}, created_by="tester",
+        budget_limit=None, photo_ids=[photo_id], analysis_fingerprint=fingerprint(plan), analysis_spec=plan,
+    )
+    jobs.start(job_id)
+    assert WorkerRunner(app).run_once() == 1
+    item = app.extensions["inktime_job_repository"].list_items(job_id)[0]
+    assert item["status"] == "failed"
+    assert item["error_code"] == "ANALYSIS-DISABLED"
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM photo_analysis").fetchone()[0] == 0
+
+
 def test_cloud_job_with_an_empty_frozen_route_fails_without_discovering_provider(app, tmp_path):
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="127.0.0.1"
+    )
     root = tmp_path / "photos"
     root.mkdir()
     Image.effect_noise((900, 600), 90).convert("RGB").save(root / "a.jpg")

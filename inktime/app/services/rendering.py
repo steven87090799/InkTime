@@ -23,7 +23,10 @@ from inktime.app.domain.rendering import (
     current_local_date,
     evaluate_e6_suitability,
     fit_with_focus,
+    build_local_caption,
 )
+from inktime.app.domain.analysis.execution_mode import execution_mode
+from inktime.app.services.local_selection import LocalSelectionPolicy
 from inktime.app.domain.rendering.system_presets import DEFAULT_RENDER_DITHER, DEFAULT_RENDER_PROFILE
 from inktime.app.domain.photos.orientation import (
     EffectiveOrientation,
@@ -47,6 +50,7 @@ LAYOUTS = {
     "postcard": "明信片",
     "photo_info": "照片＋日期地點",
     "photo_pair": "雙照片拼版",
+    "photo_pair_caption": "雙照片・各自一句話",
     "adaptive_memory": "智慧自適應回憶",
     "calendar": "月曆相框",
     "weather_sensor": "天氣＋室內溫溼度",
@@ -125,6 +129,8 @@ class RenderService:
         fit_mode: str | None = None,
         profile: str | None = None,
         dither: str | None = None,
+        primary_caption: dict[str, Any] | None = None,
+        secondary_caption: dict[str, Any] | None = None,
         device_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Resolve every data-dependent render choice before fingerprinting."""
@@ -158,6 +164,15 @@ class RenderService:
         if secondary_id and secondary is None:
             raise KeyError(secondary_id)
         dither_plan = self.resolve_effective_dither(primary, secondary, requested=dither, device_config=device)
+        display_date = self._today()
+        caption_records = self._caption_records(
+            [photo for photo in (primary, secondary) if photo is not None], display_date
+        )
+        primary_caption = dict(primary_caption or caption_records[str(primary["id"])])
+        resolved_secondary_caption = (
+            dict(secondary_caption or caption_records[str(secondary["id"])])
+            if secondary is not None else None
+        )
         return {
             "version": "render-plan-v1",
             "layout": layout_key,
@@ -173,6 +188,18 @@ class RenderService:
                 if secondary is not None else None
             ),
             "secondary_subject_box": list(self._subject_box(secondary) or ()) if secondary is not None else [],
+            "primary_caption": primary_caption,
+            "secondary_caption": resolved_secondary_caption,
+            "primary_caption_text_hash": primary_caption["text_hash"],
+            "primary_caption_source": primary_caption["source"],
+            "primary_caption_version": primary_caption["version"],
+            "primary_caption_region": "primary_card_footer",
+            "primary_caption_ratio": 0.20,
+            "secondary_caption_text_hash": resolved_secondary_caption["text_hash"] if resolved_secondary_caption else None,
+            "secondary_caption_source": resolved_secondary_caption["source"] if resolved_secondary_caption else None,
+            "secondary_caption_version": resolved_secondary_caption["version"] if resolved_secondary_caption else None,
+            "secondary_caption_region": "secondary_card_footer" if resolved_secondary_caption else None,
+            "secondary_caption_ratio": 0.20 if resolved_secondary_caption else None,
             "orientation": effective_orientation,
             "profile": profile or str(device.get("panel_profile") or self.settings.get("render.profile", DEFAULT_RENDER_PROFILE)),
             "requested_dither": dither,
@@ -197,6 +224,8 @@ class RenderService:
             secondary_photo_id=plan["secondary_photo_id"],
             orientation=str(plan["orientation"]),
             fit_mode=str(plan["fit_mode"]),
+            primary_caption=dict(plan["primary_caption"]),
+            secondary_caption=dict(plan["secondary_caption"]) if plan.get("secondary_caption") else None,
             device_config=device_config,
             orientation_metadata=orientation_metadata,
         )
@@ -511,7 +540,115 @@ class RenderService:
             subject_box=None if manual else self._subject_box(photo),
         )
 
+    def _caption_analyses(self, photo_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Fetch the newest usable caption analysis per photo in one bounded query."""
+        ids = list(dict.fromkeys(str(photo_id) for photo_id in photo_ids if photo_id))
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        with self.database.session() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT a.photo_id,a.side_caption,a.semantic_json,a.provider,a.model,a.stage,
+                       a.prompt_version,a.schema_version,a.created_at,a.analysis_source
+                FROM photo_analysis a
+                WHERE a.photo_id IN ({placeholders})
+                ORDER BY a.photo_id,a.created_at DESC,a.id DESC
+                """,  # noqa: S608 -- placeholders are generated from a small in-memory list.
+                ids,
+            ).fetchall()
+        result: dict[str, dict[str, Any]] = {}
+        latest: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            photo_id = str(row["photo_id"])
+            analysis = dict(row)
+            latest.setdefault(photo_id, analysis)
+            if photo_id not in result and self._has_caption_content(analysis):
+                result[photo_id] = analysis
+        return {photo_id: result.get(photo_id, analysis) for photo_id, analysis in latest.items()}
+
+    @staticmethod
+    def _caption_variants(analysis: dict[str, Any] | None) -> dict[str, Any]:
+        try:
+            variants = (json.loads(str((analysis or {}).get("semantic_json") or "{}")).get("values") or {}).get(
+                "caption_variants"
+            ) or {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return variants if isinstance(variants, dict) else {}
+
+    @classmethod
+    def _has_caption_content(cls, analysis: dict[str, Any]) -> bool:
+        if str(analysis.get("side_caption") or "").strip():
+            return True
+        return any(str(value or "").strip() for value in cls._caption_variants(analysis).values())
+
+    def _caption_text(self, photo_id: str, analysis: dict[str, Any] | None) -> str:
+        """Choose a configured variant without changing its provenance."""
+        row = analysis
+        if row is None:
+            return ""
+        side_caption = str(row.get("side_caption") or "").strip()
+        if not (
+            bool(self.settings.get("analysis.advanced_caption_enabled", False))
+            and bool(self.settings.get("analysis.caption_variants_enabled", False))
+        ):
+            return side_caption
+        variants = self._caption_variants(row)
+        style = str(self.settings.get("analysis.copy_default_style", "natural"))
+        selected = str(
+            variants.get(style) or variants.get("natural") or side_caption or "畫面把此刻收好了。"
+        ).strip()
+        self._activity(
+            "caption_style_selected", "Renderer 已選擇 Caption 候選風格", photo_id=photo_id, style=style
+        )
+        return selected
+
     def _caption(self, photo_id: str) -> str:
+        return self._caption_text(photo_id, self._caption_analyses([photo_id]).get(photo_id))
+
+    def _caption_records(self, photos: list[Any], display_date: date) -> dict[str, dict[str, Any]]:
+        analyses = self._caption_analyses([str(photo["id"]) for photo in photos])
+        return {
+            str(photo["id"]): self._caption_record(photo, display_date, analyses.get(str(photo["id"])))
+            for photo in photos
+        }
+
+    def _caption_record(
+        self, photo, display_date: date, analysis: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        photo_id = str(photo["id"])
+        if analysis is None:
+            analysis = self._caption_analyses([photo_id]).get(photo_id)
+        caption = self._caption_text(photo_id, analysis)
+        provider = str((analysis or {}).get("provider") or "").strip()
+        is_ai_caption = bool(caption and provider and provider != "local")
+        source_detail = (
+            {
+                "provider_id": provider,
+                "model": str((analysis or {}).get("model") or ""),
+                "stage": str((analysis or {}).get("stage") or ""),
+                "prompt_version": str((analysis or {}).get("prompt_version") or ""),
+                "schema_version": (analysis or {}).get("schema_version"),
+            }
+            if is_ai_caption else {}
+        )
+        return build_local_caption(
+            photo_id=photo_id,
+            captured_at=photo["captured_at"],
+            display_date=display_date,
+            timezone=str(self.settings.get("general.timezone", "Asia/Taipei")),
+            known_location=self.location_name(photo),
+            existing_side_caption=caption,
+            existing_caption_source="ai_side_caption" if is_ai_caption else None,
+            existing_caption_is_ai_generated=is_ai_caption if caption else None,
+            source_detail=source_detail,
+            source_updated_at=str((analysis or {}).get("created_at") or "") or None,
+            maximum_characters=int(self.settings.get("analysis.side_caption_max_chars", 16)),
+        )
+
+    def _caption_legacy(self, photo_id: str) -> str:
+        """Compatibility implementation retained for old call sites during migration."""
         with self.database.session() as connection:
             row = connection.execute(
                 "SELECT side_caption,semantic_json FROM photo_analysis WHERE photo_id=? ORDER BY created_at DESC,id DESC LIMIT 1",
@@ -799,12 +936,13 @@ class RenderService:
         secondary_photo_id: str | None = None,
         orientation: str | None = None,
         fit_mode: str | None = None,
+        primary_caption: dict[str, Any] | None = None,
+        secondary_caption: dict[str, Any] | None = None,
         device_config: dict[str, Any] | None = None,
         orientation_metadata: list[dict[str, Any]] | None = None,
     ) -> Image.Image:
         photo = self.ensure_photo_features(photo_id)
         path = safe_join(Path(photo["root_path"]), photo["relative_path"])
-        caption = self._caption(photo_id)
         location = self.location_name(photo)
         captured = self._captured_date(photo["captured_at"])
         show_date = bool(self.settings.get("render.show_capture_date", True))
@@ -815,6 +953,9 @@ class RenderService:
         )
         if layout_key not in LAYOUTS:
             raise ValueError("RENDER-005 不支援的相框版型")
+        # Pair-caption rendering reads its frozen per-photo records below;
+        # avoid an unrelated caption query that could observe newer analysis.
+        caption = "" if layout_key == "photo_pair_caption" else self._caption(photo_id)
         adaptive_requested = layout_key == "adaptive_memory"
         orientation_key = orientation or str(
             device_config.get("frame_orientation")
@@ -935,6 +1076,21 @@ class RenderService:
                 text_parts.extend(["這一天留下了一個值得記住的片段。", "這一天留下了兩個值得記住的片段。"])
             if layout_key == "photo_pair":
                 text_parts.append("請選擇第二張照片")
+            if layout_key == "photo_pair_caption":
+                if not secondary_photo_id:
+                    raise ValueError("RENDER-005 雙照片各自一句話需要第二張照片")
+                second_for_caption = self.photos.get_with_path(secondary_photo_id)
+                if second_for_caption is None:
+                    raise ValueError("RENDER-005 第二張照片不存在")
+                first_record = dict(primary_caption or self._caption_record(photo, today))
+                second_record = dict(secondary_caption or self._caption_record(second_for_caption, today))
+                # Both rendered caption regions are part of the font contract.
+                # Prefixes make a coverage failure actionable without changing
+                # the pixels rendered into either region.
+                text_parts.extend([
+                    f"Caption A：{first_record['text']}",
+                    f"Caption B：{second_record['text']}",
+                ])
             if weather:
                 text_parts.extend(
                     [str(weather.get("condition", "")), weather_location, "室外室內最高最低溫溼度"]
@@ -986,6 +1142,39 @@ class RenderService:
                         font=fonts["body"],
                         fill="black",
                     )
+                return finish(canvas)
+
+            if layout_key == "photo_pair_caption":
+                if not secondary_photo_id:
+                    raise ValueError("RENDER-005 雙照片各自一句話需要第二張照片")
+                second_photo = self.ensure_photo_features(secondary_photo_id)
+                second_path = safe_join(Path(second_photo["root_path"]), second_photo["relative_path"])
+                second_source, second_orientation = self._load_oriented_photo(second_photo, second_path)
+                if orientation_metadata is not None:
+                    orientation_metadata.append({"photo_id": secondary_photo_id, "orientation": second_orientation.as_dict()})
+                first_caption = dict(primary_caption or self._caption_record(photo, self._today()))
+                second_caption = dict(secondary_caption or self._caption_record(second_photo, self._today()))
+                gutter, caption_ratio = 8, .20
+                if effective_orientation == "landscape":
+                    card_width = (frame_width - gutter) // 2
+                    caption_height = max(int(frame_height * .15), min(int(frame_height * .25), int(frame_height * caption_ratio)))
+                    image_size = (card_width, frame_height - caption_height)
+                    positions = ((0, 0), (card_width + gutter, 0))
+                    caption_boxes = ((0, image_size[1], card_width, frame_height), (card_width + gutter, image_size[1], frame_width, frame_height))
+                else:
+                    card_height = (frame_height - gutter) // 2
+                    caption_height = max(int(card_height * .15), min(int(card_height * .25), int(card_height * caption_ratio)))
+                    image_size = (frame_width, card_height - caption_height)
+                    positions = ((0, 0), (0, card_height + gutter))
+                    caption_boxes = ((0, image_size[1], frame_width, card_height), (0, card_height + gutter + image_size[1], frame_width, frame_height))
+                canvas.paste(self._fit_photo(source, photo, image_size, crop_x, crop_y, fit_mode_key), positions[0])
+                with second_source:
+                    canvas.paste(self._fit_photo(second_source, second_photo, image_size, second_photo["crop_manual_x"], second_photo["crop_manual_y"], fit_mode_key), positions[1])
+                for record, box in ((first_caption, caption_boxes[0]), (second_caption, caption_boxes[1])):
+                    left, top, right, bottom = box
+                    draw.rectangle(box, fill="white")
+                    draw.line((left + 8, top + 2, right - 8, top + 2), fill="#1d2822", width=1)
+                    self._draw_footer_caption(draw, str(record["text"]), x=left + 12, top=top + 8, bottom=bottom - 6, width=max(1, right - left - 24), fill="#17221c")
                 return finish(canvas)
 
             if layout_key == "postcard":
@@ -1124,13 +1313,14 @@ class RenderService:
     ) -> dict:
         quantity = int(self.settings.get("render.quantity", 5))
         layout_key = str(self.settings.get("render.layout", "photo_info"))
-        source_limit = quantity * 2 if layout_key == "photo_pair" else quantity
+        source_limit = quantity * 2 if layout_key in {"photo_pair", "photo_pair_caption"} else quantity
         selected = photo_ids[:source_limit]
         if not selected:
             selected = self.select_candidates(source_limit)
-        else:
-            # 明確指定不合格照片必須穩定失敗；不得靜默改選其他照片。
-            selected = [str(row["id"]) for row in self.candidates.require(selected)]
+        # 明確指定與自動選片都必須在發布前重新驗證；不得使用過期候選或遺失來源契約。
+        required = self.candidates.require_for_execution_mode(selected, execution_mode(self.settings))
+        selected = [str(row["id"]) for row in required]
+        eligibility_sources = {str(row["id"]): str(row["eligibility_source"]) for row in required}
         if device_ids:
             unique_device_ids = list(dict.fromkeys(str(value) for value in device_ids if str(value)))
             placeholders = ",".join("?" for _ in unique_device_ids)
@@ -1152,10 +1342,25 @@ class RenderService:
                 if profile_key not in DISPLAY_PROFILES:
                     raise ValueError("RENDER-003 發布包含不支援的顯示 Profile")
                 device_orientation_metadata: list[dict[str, Any]] = []
-                composition_plans = [
-                    self.resolve_render_plan(photo_id, device_config=device, profile=profile_key)
-                    for photo_id in selected[:quantity]
-                ]
+                if layout_key in {"photo_pair", "photo_pair_caption"}:
+                    composition_plans = [
+                        self.resolve_render_plan(
+                            selected[index],
+                            layout=layout_key if index + 1 < len(selected) else "photo_info",
+                            secondary_photo_id=selected[index + 1] if index + 1 < len(selected) else None,
+                            device_config=device,
+                            profile=profile_key,
+                        )
+                        for index in range(0, min(len(selected), quantity * 2), 2)
+                    ]
+                else:
+                    composition_plans = [
+                        self.resolve_render_plan(photo_id, device_config=device, profile=profile_key)
+                        for photo_id in selected[:quantity]
+                    ]
+                for plan in composition_plans:
+                    plan["primary_eligibility_source"] = eligibility_sources.get(str(plan["primary_photo_id"]))
+                    plan["secondary_eligibility_source"] = eligibility_sources.get(str(plan["secondary_photo_id"])) if plan.get("secondary_photo_id") else None
                 release_photo_ids.extend(self._render_plan_photo_ids(composition_plans))
                 dither_plan = self.resolve_effective_dither(
                     self._render_plan_rows(composition_plans), device_config=device
@@ -1220,7 +1425,7 @@ class RenderService:
             self._record_production_trace(list(dict.fromkeys(release_photo_ids)), published, layout_key)
             return {"releases": published, "device_releases": assignments}
         release_orientation_metadata: list[dict[str, Any]] = []
-        if layout_key == "photo_pair":
+        if layout_key in {"photo_pair", "photo_pair_caption"}:
             plans = []
             for index in range(0, len(selected), 2):
                 primary_id = selected[index]
@@ -1228,12 +1433,15 @@ class RenderService:
                 plans.append(
                     self.resolve_render_plan(
                         primary_id,
-                        layout="photo_pair" if secondary_id else "photo_info",
+                        layout=layout_key if secondary_id else "photo_info",
                         secondary_photo_id=secondary_id,
                     )
                 )
         else:
             plans = [self.resolve_render_plan(photo_id) for photo_id in selected]
+        for plan in plans:
+            plan["primary_eligibility_source"] = eligibility_sources.get(str(plan["primary_photo_id"]))
+            plan["secondary_eligibility_source"] = eligibility_sources.get(str(plan["secondary_photo_id"])) if plan.get("secondary_photo_id") else None
         release_photo_ids = self._render_plan_photo_ids(plans)
         images = [
             (
@@ -1314,7 +1522,9 @@ class RenderService:
             execution_mode="production",
             algorithm_version_id=algorithm,
             primary_photo_id=photo_ids[0] if photo_ids else None,
-            secondary_photo_id=photo_ids[1] if layout == "photo_pair" and len(photo_ids) > 1 else None,
+            secondary_photo_id=(
+                photo_ids[1] if layout in {"photo_pair", "photo_pair_caption"} and len(photo_ids) > 1 else None
+            ),
             layout_mode=layout,
             candidates=candidates,
             candidate_count=len(photo_ids),
@@ -1439,6 +1649,14 @@ class RenderService:
         limit = quantity if quantity is not None else int(self.settings.get("render.quantity", 5))
         limit = max(1, min(int(limit), 50))
         target = target_date or self._today()
+        if execution_mode(self.settings) in {"local_only", "local_with_manual_ai"}:
+            result = LocalSelectionPolicy(self.database, self.settings, self.resilience, self.locations).select(
+                target=target,
+                orientation=str(self.settings.get("render.frame_orientation", "portrait")),
+                quantity=limit,
+                layout=str(self.settings.get("render.layout", "photo_info")),
+            )
+            return result["selected"][:limit]
         mode = str(self.settings.get("render.selection_mode", "history_today"))
         if mode == "top_ranked":
             rows = self._candidate_query(

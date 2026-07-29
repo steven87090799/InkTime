@@ -13,7 +13,8 @@ from inktime.app.core.logging import configure_logging, log_event
 from inktime.app.workers.job_worker import BoundedJobWorker
 from inktime.app.workers.scanner import PhotoScanner
 from inktime.app.domain.photos import PhotoPreprocessor
-from inktime.app.services.analysis import ProviderUnavailableError
+from inktime.app.services.analysis import AnalysisDisabledError, ProviderUnavailableError
+from inktime.app.domain.analysis.execution_mode import permits_automatic_ai, permits_manual_ai
 
 
 LOGGER = logging.getLogger("worker")
@@ -46,7 +47,11 @@ class WorkerRunner:
             analysis_plan = json.loads(str(job["analysis_spec_json"] or "{}")) if str(job["kind"]) == "analysis" else {}
             provider = None
             provider_error: ProviderUnavailableError | None = None
-            if str(job["kind"]) == "analysis" and str(job["strategy"]) != "local":
+            execution = str((analysis_plan.get("ai_execution_policy") or {}).get("execution_mode", "automatic_ai"))
+            may_build_provider = permits_automatic_ai(execution) or (
+                bool(settings.get("force_ai", False)) and permits_manual_ai(execution)
+            )
+            if str(job["kind"]) == "analysis" and str(job["strategy"]) != "local" and may_build_provider:
                 try:
                     provider = self.app.extensions["inktime_provider_service"].build_router(
                         analysis_plan.get("provider_route"),
@@ -157,6 +162,7 @@ class WorkerRunner:
                 provider_error=provider_error,
                 analysis=analysis,
                 analysis_plan=analysis_plan,
+                execution=execution,
                 progress_items=progress_items,
                 progress_seconds=progress_seconds,
                 scanner_disk_batch_size=scanner_disk_batch_size,
@@ -165,6 +171,8 @@ class WorkerRunner:
                 scanner_safety=scanner_safety,
                 runtime_settings=runtime_settings,
             ):
+                if job["kind"] == "analysis" and execution == "disabled":
+                    raise AnalysisDisabledError("Frozen Analysis Plan 指定完全停用；工作項目已拒絕")
                 if provider_error is not None:
                     raise provider_error
                 if job["kind"] == "render_preview":
@@ -205,6 +213,12 @@ class WorkerRunner:
                             },
                             render_service=service,
                             render_cache=render_cache,
+                        )
+                    elif operation == "dual_pair_compare":
+                        result = self.app.extensions["inktime_render_workload_service"].dual_pair_compare(
+                            settings,
+                            {"job_id": str(job["id"]), "item_id": str(item["id"]), "worker_id": str(item["worker_id"]), "idempotency_key": str(item["idempotency_key"])},
+                            render_service=self.app.extensions["inktime_render_service"],
                         )
                     elif operation == "history_test_release":
                         result = self.app.extensions[

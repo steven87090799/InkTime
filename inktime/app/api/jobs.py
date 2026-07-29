@@ -5,6 +5,7 @@ import json
 from flask import Blueprint, Response, abort, current_app, g, render_template, request, stream_with_context
 
 from inktime.app.domain.analysis.plan import canonical_json, fingerprint
+from inktime.app.domain.analysis.execution_mode import execution_mode, permits_automatic_ai
 from inktime.app.services.jobs import InvalidJobTransition, JobService
 from inktime.app.web.access import administrator_required, login_required
 
@@ -22,11 +23,14 @@ def _repository():
 
 def _analysis_plan(strategy: str) -> tuple[dict, str]:
     analysis = current_app.extensions["inktime_analysis_service"]
-    provider_service = current_app.extensions["inktime_provider_service"]
+    settings = current_app.extensions["inktime_settings_repository"]
     scoring = dict(current_app.extensions["inktime_scoring_repository"].current())
     plan = analysis.build_plan(
         strategy=strategy,
-        provider_route=provider_service.route_snapshot(),
+        provider_route=(
+            current_app.extensions["inktime_provider_service"].route_snapshot()
+            if permits_automatic_ai(execution_mode(settings)) else []
+        ),
         scoring_profile=scoring,
     )
     return plan, canonical_json(plan)
@@ -81,6 +85,11 @@ def create_job():
     if selection_mode == "force_all" and str(g.user["role"]) != "administrator":
         return {"message": "force_all 僅限管理員"}, 403
     strategy = str(payload.get("strategy", "smart_two_stage"))
+    if execution_mode(current_app.extensions["inktime_settings_repository"]) == "disabled":
+        return {
+            "error_code": "ANALYSIS-DISABLED",
+            "message": "目前分析執行模式為完全停用，不會建立新的分析工作。",
+        }, 409
     plan, _ = _analysis_plan(strategy)
     analysis_fingerprint = fingerprint(plan)
     try:
@@ -111,6 +120,11 @@ def selection_preview():
         return {"message": "不支援的選片模式"}, 400
     limit = payload.get("limit")
     strategy = str(payload.get("strategy", "smart_two_stage"))
+    if execution_mode(current_app.extensions["inktime_settings_repository"]) == "disabled":
+        return {
+            "error_code": "ANALYSIS-DISABLED",
+            "message": "目前分析執行模式為完全停用，不會建立新的分析工作。",
+        }, 409
     _plan, _ = _analysis_plan(strategy)
     preview = _repository().selection_preview(
         analysis_fingerprint=fingerprint(_plan),

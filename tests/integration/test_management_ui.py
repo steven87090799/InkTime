@@ -458,6 +458,9 @@ def test_photo_library_loads_200_per_page_and_keeps_filters(client, app):
 def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(
     client, app, tmp_path
 ):
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="127.0.0.1"
+    )
     create_admin(app)
     login(client)
     photo_id = add_photos(app, 1)[0]

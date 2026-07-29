@@ -10,6 +10,7 @@ from flask import Blueprint, abort, current_app, g, render_template, request, se
 from inktime.app.core.paths import safe_join
 from inktime.app.domain.analysis.schema import ALLOWED_TYPES
 from inktime.app.domain.analysis.plan import fingerprint
+from inktime.app.domain.analysis.execution_mode import execution_mode, permits_automatic_ai, permits_manual_ai
 from inktime.app.domain.analysis.scoring import (
     calculate_distinguishing_score,
     prepare_score_distribution,
@@ -31,7 +32,8 @@ def _queue_ai(
     photo_ids: list[str], *, created_by: str, name: str, force_ai: bool = False
 ) -> dict:
     settings = current_app.extensions["inktime_settings_repository"]
-    if not force_ai and str(settings.get("analysis.ai_mode", "top_candidates")) == "off":
+    mode = execution_mode(settings)
+    if (force_ai and not permits_manual_ai(mode)) or (not force_ai and not permits_automatic_ai(mode)):
         raise ValueError("AI 模式目前為關閉；不會建立模型工作")
     if not photo_ids:
         raise ValueError("沒有可送入 AI 的照片")
@@ -231,8 +233,9 @@ def queue_exclusions_ai():
 def queue_ai_mode_run():
     payload = request.get_json(silent=True) or {}
     settings = current_app.extensions["inktime_settings_repository"]
+    execution = execution_mode(settings)
     mode = str(settings.get("analysis.ai_mode", "top_candidates"))
-    if mode == "off":
+    if not permits_automatic_ai(execution):
         return {"error_code": "VLM-008", "message": "AI 模式目前為關閉"}, 409
     daily_limit = int(settings.get("analysis.ai_daily_photo_limit", 50))
     if mode == "full_library" and not bool(payload.get("confirm", False)):

@@ -30,6 +30,7 @@ from inktime.app.services.rendering import (
     PORTRAIT_ONLY_LAYOUTS,
 )
 from inktime.app.services.render_cache import RENDERER_VERSION
+from inktime.app.domain.analysis.execution_mode import execution_mode
 
 
 bp = Blueprint("rendering", __name__)
@@ -482,6 +483,48 @@ def publish_test_release():
     )
 
 
+@bp.post("/api/v1/rendering/dual-pair-compare")
+@administrator_required
+def dual_pair_compare_preview():
+    """Freeze one pair/caption/dither contract for the four formal previews."""
+    payload = request.get_json(silent=True) or {}
+    primary = str(payload.get("primary_photo_id", "")).strip()
+    secondary = str(payload.get("secondary_photo_id", "")).strip()
+    profile = str(payload.get("profile", "gdep073e01_6c"))
+    fit_mode = str(payload.get("fit_mode", "contain"))
+    if not primary or not secondary or primary == secondary:
+        abort(400, description="RENDER-005 雙照片比較需要兩張不同照片")
+    if profile not in DISPLAY_PROFILES or fit_mode not in FIT_MODES:
+        abort(400, description="RENDER-005 Preview Profile 或縮放模式不合法")
+    service = current_app.extensions["inktime_render_service"]
+    try:
+        seed = service.resolve_render_plan(
+            primary, layout="photo_pair_caption", secondary_photo_id=secondary,
+            orientation="portrait", fit_mode=fit_mode, profile=profile,
+        )
+        plans = [
+            service.resolve_render_plan(primary, layout=layout, secondary_photo_id=secondary,
+                                        orientation=orientation, fit_mode=fit_mode, profile=profile,
+                                        primary_caption=seed["primary_caption"], secondary_caption=seed["secondary_caption"])
+            for layout, orientation in (
+                ("photo_pair", "portrait"), ("photo_pair", "landscape"),
+                ("photo_pair_caption", "portrait"), ("photo_pair_caption", "landscape"),
+            )
+        ]
+    except (KeyError, ValueError) as exc:
+        abort(409, description=str(exc))
+    dither_values = {str(plan["effective_dither"]) for plan in plans}
+    if len(dither_values) != 1:
+        abort(409, description="RENDER-005 比較 Preview 必須使用同一個有效抖動決策")
+    settings = current_app.extensions["inktime_settings_repository"]
+    return _start_preview_job(
+        "雙照片四種正式 Preview",
+        {"operation": "dual_pair_compare", "plans": plans,
+         "color_distance": str(settings.get("render.color_distance", "oklab")),
+         "dither_strength": float(settings.get("render.dither_strength", 1.0))},
+    )
+
+
 @bp.get("/api/v1/rendering/preview/<photo_id>")
 @login_required
 def preview(photo_id: str):
@@ -540,6 +583,8 @@ def preview(photo_id: str):
     arguments["render_plan"] = fingerprint["render_plan"]
     arguments["layout"] = fingerprint["render_plan"]["layout"]
     arguments["secondary_photo_id"] = fingerprint["render_plan"]["secondary_photo_id"]
+    arguments["primary_caption"] = fingerprint["render_plan"]["primary_caption"]
+    arguments["secondary_caption"] = fingerprint["render_plan"]["secondary_caption"]
     arguments["orientation"] = fingerprint["render_plan"]["orientation"]
     arguments["fit_mode"] = fingerprint["render_plan"]["fit_mode"]
     arguments.update(
@@ -623,8 +668,9 @@ def publish_release():
     requested_photo_ids = [str(value) for value in payload.get("photo_ids", [])]
     if requested_photo_ids:
         try:
-            current_app.extensions["inktime_render_candidate_repository"].require(
-                requested_photo_ids
+            current_app.extensions["inktime_render_candidate_repository"].require_for_execution_mode(
+                requested_photo_ids,
+                execution_mode(current_app.extensions["inktime_settings_repository"]),
             )
         except ValueError as exc:
             abort(409, description=str(exc))

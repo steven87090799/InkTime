@@ -37,6 +37,9 @@ def test_first_setup_login_and_primary_console_pages():
             assert page.locator("html").get_attribute("lang") == "zh-Hant-TW", label
         page.goto(base + "/settings")
         page.get_by_role("radio", name="進階").check()
+        # 新安裝預設為 local_only；這個 smoke flow 要驗證 AI 進階設定
+        # 可儲存，因此明確切到會啟用該欄位的自動 AI 模式。
+        page.locator('[name="analysis.execution_mode"]').select_option("automatic_ai")
         page.get_by_placeholder("輸入中文名稱、說明或技術 Key").fill("AI 分析並行")
         page.locator('[name="analysis.concurrency"]').fill("3")
         page.get_by_role("button", name="預覽影響").click()

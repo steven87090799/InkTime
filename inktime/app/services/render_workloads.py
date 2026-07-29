@@ -240,6 +240,8 @@ def _prepare_library_preview_child(
         secondary_photo_id=arguments.get("secondary_photo_id"),
         orientation=arguments.get("orientation"),
         fit_mode=arguments.get("fit_mode"),
+        primary_caption=arguments.get("primary_caption"),
+        secondary_caption=arguments.get("secondary_caption"),
     )
     quantized = bool(arguments.get("quantized"))
     if quantized:
@@ -272,6 +274,40 @@ def _prepare_library_preview_child(
         "effective_dither": arguments.get("effective_dither"),
         "override_source": arguments.get("override_source"),
     }
+
+
+def _prepare_dual_pair_compare_child(
+    *, settings: dict[str, Any], database_path: str, prepared_path: str,
+    font_root: str, font_builtin_root: str, location_csv: str,
+) -> dict[str, Any]:
+    """Render the four frozen dual-photo plans in one isolated renderer child."""
+    prepared = Path(prepared_path)
+    prepared.mkdir(mode=0o700, parents=True, exist_ok=True)
+    database = Database(Path(database_path))
+    settings_repository = SettingsRepository(database)
+    publisher = AtomicReleasePublisher(prepared / "release-sandbox")
+    service = RenderService(
+        database, PhotoRepository(database), settings_repository,
+        FontManager(Path(font_root), Path(font_builtin_root)), publisher,
+        RenderCandidateRepository(database), ReleaseCoordinator(database, publisher),
+        LocationResolver(Path(location_csv)), WeatherService(settings_repository),
+    )
+    previews: list[dict[str, Any]] = []
+    for index, plan in enumerate(settings["plans"]):
+        image = service._render_plan_image(dict(plan))
+        image = encode_image(
+            image, profile_key=str(plan["profile"]), dither=str(plan["effective_dither"]),
+            color_distance=str(settings["color_distance"]), strength=float(settings["dither_strength"]),
+        ).preview
+        if str(plan["orientation"]) == "landscape":
+            image = image.transpose(Image.Transpose.ROTATE_90)
+        name = f"preview_{index}.png"
+        _atomic_png_file(prepared / name, image)
+        previews.append({"name": name, "layout": plan["layout"], "orientation": plan["orientation"],
+                         "profile": plan["profile"], "effective_dither": plan["effective_dither"],
+                         "primary_photo_id": plan["primary_photo_id"], "secondary_photo_id": plan["secondary_photo_id"],
+                         "primary_caption": plan["primary_caption"], "secondary_caption": plan.get("secondary_caption")})
+    return {"stage": "dual_pair_compare_completed", "previews": previews}
 
 
 class RenderWorkloadService:
@@ -508,6 +544,33 @@ class RenderWorkloadService:
                 if result_path is not None:
                     shutil.rmtree(result_path, ignore_errors=True)
             raise
+        finally:
+            shutil.rmtree(prepared, ignore_errors=True)
+
+    def dual_pair_compare(self, settings: dict[str, Any], commit_context: dict[str, str], *, render_service) -> dict[str, Any]:
+        """One frozen background job produces all four formal renderer previews."""
+        context = dict(commit_context)
+        if not self.jobs.can_commit_item(context["job_id"], context["item_id"], context["worker_id"], context["idempotency_key"]):
+            raise ProcessCallError("dual preview lease lost")
+        prepared = self.prepared_root / uuid4().hex
+        try:
+            prepared.mkdir(mode=0o700, parents=True)
+            snapshot_path = prepared / "render.db"
+            self._private_database_snapshot(Path(render_service.database.path), snapshot_path)
+            result = self.process_boundary.call(
+                _prepare_dual_pair_compare_child, timeout_seconds=float(settings.get("timeout_seconds", 45)),
+                kwargs={"settings": {"plans": list(settings["plans"]), "color_distance": settings["color_distance"], "dither_strength": settings["dither_strength"]},
+                        "database_path": str(snapshot_path), "prepared_path": str(prepared),
+                        "font_root": str(render_service.fonts.root), "font_builtin_root": str(render_service.fonts.builtin_root),
+                        "location_csv": str(render_service.locations.csv_path)},
+                process_name="inktime-dual-pair-preview-child",
+            )
+            previews = []
+            for item in result["previews"]:
+                with Image.open(prepared / item["name"]) as opened:
+                    preview_url = self.save_background_preview(opened.convert("RGB"))
+                previews.append({**item, "preview_url": preview_url})
+            return {"stage": result["stage"], "previews": previews}
         finally:
             shutil.rmtree(prepared, ignore_errors=True)
 

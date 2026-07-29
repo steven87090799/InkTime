@@ -16,6 +16,11 @@ from inktime.app.domain.analysis import (
     fingerprint,
     validate_analysis_result,
 )
+from inktime.app.domain.analysis.execution_mode import (
+    execution_mode,
+    permits_automatic_ai,
+    permits_manual_ai,
+)
 from inktime.app.domain.analysis.scoring import (
     DEFAULT_FAVORITE_BONUS,
     DEFAULT_RANKING_WEIGHTS,
@@ -30,6 +35,12 @@ from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.budgets import BudgetService
+
+
+class AnalysisDisabledError(RuntimeError):
+    """Frozen disabled jobs must never create a new analysis record."""
+
+    code = "ANALYSIS-DISABLED"
 
 
 PROMPT_VERSION = "photo-quality-v4-visual-orientation"
@@ -116,6 +127,7 @@ class PhotoAnalysisService:
             "e6_min_score": float(settings.get("analysis.e6_min_score", 25)),
         }
         execution_policy = {
+            "execution_mode": execution_mode(settings),
             "ai_mode": str(settings.get("analysis.ai_mode", "top_candidates")),
             "top_n": int(settings.get("analysis.ai_top_n", 50)),
             "daily_photo_limit": int(settings.get("analysis.ai_daily_photo_limit", 50)),
@@ -275,8 +287,13 @@ class PhotoAnalysisService:
     def _allow_ai_for_photo(
         self, photo_id: str, *, force_ai: bool, execution_policy: dict | None = None
     ) -> bool:
+        execution = str((execution_policy or {}).get("execution_mode") or (
+            execution_mode(self.settings) if self.settings is not None else "automatic_ai"
+        ))
         if force_ai:
-            return True
+            return permits_manual_ai(execution)
+        if not permits_automatic_ai(execution):
+            return False
         mode = self._ai_mode(execution_policy)
         if mode == "off":
             return False
@@ -831,6 +848,8 @@ class PhotoAnalysisService:
         }
         execution_policy = dict(analysis_spec.get("ai_execution_policy") or {})
         travel_policy = dict(analysis_spec.get("travel_policy") or {})
+        if str(execution_policy.get("execution_mode", "automatic_ai")) == "disabled":
+            raise AnalysisDisabledError("目前分析執行模式為完全停用，不會建立新的分析結果")
 
         def local_context(schema_kind: str) -> dict[str, Any]:
             input_spec = {
@@ -890,19 +909,6 @@ class PhotoAnalysisService:
             )
             return {"analysis": result, "stage": "prefilter", "_actual_cost": 0}
 
-        if not self._allow_ai_for_photo(photo_id, force_ai=force_ai, execution_policy=execution_policy) or (
-            not force_ai and self._photo_limits_reached(execution_policy)
-        ):
-            result = validate_analysis_result(self._local_result(photo))
-            raw = json.dumps(result, ensure_ascii=False)
-            result = self._save_result(
-                photo_id=photo_id, job_id=job_id, stage="local_fallback", provider="local",
-                model="local-quality-v3", result=result, raw=raw, photo=photo, ranking_weights=weights,
-                favorite_bonus=favorite_bonus, scoring_version_id=scoring_version_id, schema_kind="basic",
-                **local_context("basic"),
-            )
-            return {"analysis": result, "stage": "local_fallback", "_actual_cost": 0}
-
         prefiltered = None if force_ai or self.settings is None else self._prefilter_result(
             photo, policy_settings=plan_prefilter
         )
@@ -918,6 +924,19 @@ class PhotoAnalysisService:
                 prefilter_evaluation=prefilter_evaluation,
             )
             return {"analysis": result, "stage": "prefilter", "_actual_cost": 0}
+
+        if not self._allow_ai_for_photo(photo_id, force_ai=force_ai, execution_policy=execution_policy) or (
+            not force_ai and self._photo_limits_reached(execution_policy)
+        ):
+            result = validate_analysis_result(self._local_result(photo))
+            raw = json.dumps(result, ensure_ascii=False)
+            result = self._save_result(
+                photo_id=photo_id, job_id=job_id, stage="local_fallback", provider="local",
+                model="local-quality-v3", result=result, raw=raw, photo=photo, ranking_weights=weights,
+                favorite_bonus=favorite_bonus, scoring_version_id=scoring_version_id, schema_kind="basic",
+                **local_context("basic"),
+            )
+            return {"analysis": result, "stage": "local_fallback", "_actual_cost": 0}
         if provider is None:
             raise ProviderUnavailableError("VLM-008 尚未設定可用 Provider")
 
