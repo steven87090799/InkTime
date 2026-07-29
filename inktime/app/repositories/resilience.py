@@ -667,57 +667,19 @@ class ResilienceRepository:
                 "SELECT * FROM device_content_queue_items WHERE id=?", (item_id,)
             ).fetchone()
 
-    def manifest(self, device_id: str, *, release_root) -> dict[str, Any]:
-        queue = self.queue(device_id)
-        if not queue:
-            self.ensure_queue(device_id)
-            queue = self.queue(device_id)
-        assert queue is not None
-        now = utc_now()
-        items = []
-        for row in queue["items"]:
-            if row["status"] not in {"READY", "AVAILABLE", "DOWNLOADED", "ACKNOWLEDGED"} or (
-                row["expires_at"] and str(row["expires_at"]) < now
-            ):
-                continue
-            manifest_path = release_root / str(row["release_id"]) / "manifest.json"
-            try:
-                release = json.loads(manifest_path.read_text(encoding="utf-8"))
-                file_item = next(
-                    item for item in release.get("files", []) if str(item.get("name", "")).endswith(".bin")
-                )
-            except (OSError, ValueError, StopIteration, json.JSONDecodeError):
-                continue
-            items.append(
-                {
-                    "queue_item_id": row["id"],
-                    "release_id": row["release_id"],
-                    "display_after": row["display_after"],
-                    "expires_at": row["expires_at"],
-                    "priority": row["priority"],
-                    "sha256": file_item.get("sha256"),
-                    "size": file_item.get("size"),
-                    "download_url": f"/api/device/v1/queue/items/{row['id']}/files/{file_item.get('name')}",
-                }
-            )
-        return {
-            "schema_version": 1,
-            "queue_version": queue["queue"]["queue_version"],
-            "device_id": device_id,
-            "generated_at": now,
-            "items": items,
-            "last_known_good_release_id": queue["queue"]["last_known_good_release_id"],
-        }
-
     def queue_ack(self, *, device_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         item_id, event = str(payload.get("queue_item_id", "")), str(payload.get("event", ""))
         key = str(payload.get("idempotency_key", "")).strip()
         if event not in QUEUE_EVENTS or not item_id or not key:
             raise ValueError("QUEUE-001 ACK 缺少 queue_item_id、event 或 idempotency_key")
-        try:
-            queue_version = int(str(payload.get("queue_version")))
-        except (TypeError, ValueError) as exc:
-            raise ValueError("QUEUE-001 ACK 缺少有效 queue_version") from exc
+        queue_version = json_int(
+            payload,
+            "queue_version",
+            required=True,
+            minimum=0,
+            maximum=2_147_483_647,
+            error_prefix="QUEUE-001",
+        )
         now = utc_now()
         with self.database.transaction() as connection:
             item = connection.execute(
