@@ -58,7 +58,7 @@ INKTIME_ALLOW_INSECURE_HTTP=1
 cp .env.production.example .env
 ```
 
-必須先把 `https://inktime.example.com` 改成實際網域；Production 會拒絕 localhost、`.invalid`、`example.com`／子網域、URL 內帳密與帶路徑 URL。正式模式固定搭配：
+必須先把 `https://inktime.example.com` 改成實際網域；Production 會拒絕 localhost、`.invalid`、`example.com`／子網域、URL 內帳密與帶路徑 URL。公開部署預設且建議固定搭配：
 
 ```dotenv
 INKTIME_ENVIRONMENT=production
@@ -69,6 +69,20 @@ INKTIME_PROXY_TRUST=1
 ```
 
 `INKTIME_PROXY_TRUST` 必須等於實際受信任 Proxy hop 數，不可為了「讓它能跑」任意放大。
+
+### 3.3 Production HTTP break-glass
+
+Production 在特殊、受控且不連接公網的測試環境，可明確設定：
+
+```dotenv
+INKTIME_ENVIRONMENT=production
+INKTIME_PUBLIC_URL=http://受控主機:8765
+INKTIME_COOKIE_SECURE=0
+INKTIME_ALLOW_INSECURE_HTTP=1
+INKTIME_PROXY_TRUST=0
+```
+
+這是 break-glass，而不是推薦部署方式。Health／Preflight 會標示 `degraded`；Secure Cookie、HSTS 與 TLS 安全保證均不成立，不可透過 Internet 使用。系統不會自動從 HTTPS fallback 到此模式。
 
 不要把 `.env`、資料庫、`session.key`、API Key 或裝置 Token Commit。啟動：
 
@@ -88,10 +102,10 @@ curl -fsS http://127.0.0.1:8765/health/ready
 | `INKTIME_PORT` | `8765` | 主機對外 Port |
 | `INKTIME_DATA_PATH` | `./data` | SQLite、快取、字型、備份、發布；可寫 |
 | `INKTIME_PHOTO_PATH` | `./simulation_photos` | 原始照片；容器內固定 `/photos` 且唯讀。無實體面板時可直接使用專案內投放區 |
-| `INKTIME_ENVIRONMENT` | local 範例為 `development` | 公開部署必須為 `production` |
+| `INKTIME_ENVIRONMENT` | local 範例為 `development` | 公開部署必須為 `production`；受控 break-glass 仍維持 production |
 | `INKTIME_PUBLIC_URL` | `http://localhost:8765` | 瀏覽器實際使用的 Origin；不可含帳密、路徑、Query 或 Fragment |
-| `INKTIME_COOKIE_SECURE` | local `0`／production `1` | 必須和 HTTP／HTTPS 模式一致 |
-| `INKTIME_ALLOW_INSECURE_HTTP` | local `1`／production `0` | HTTP 的明確降級開關，不會自動 fallback |
+| `INKTIME_COOKIE_SECURE` | local `0`／production 建議 `1` | 必須和 HTTP／HTTPS 模式一致；break-glass HTTP 為 `0` |
+| `INKTIME_ALLOW_INSECURE_HTTP` | local `1`／production 建議 `0` | HTTP 的明確降級開關，不會自動 fallback；Production 啟用時 health degraded |
 | `INKTIME_PROXY_TRUST` | local `0` | 只信任實際存在的 Proxy hop，正式單層 Proxy 通常為 `1` |
 | `INKTIME_WEBHOOK_ALLOWLIST` | 空 | 僅在確實需要內網 Webhook 時填精確 hostname、`.example.com` 子網域、IP 或 CIDR；一般公開端點不需設定 |
 | `INKTIME_ACCESS_LOG` | `0` | 是否逐一輸出 HTTP request；正式環境維持關閉 |

@@ -36,4 +36,4 @@ gunicorn --config gunicorn.conf.py server:app
 
 ## 首次啟動
 
-瀏覽 `/setup` 建立 administrator。新帳號需 3–64 個 ASCII 識別字元，密碼需 12–128 字元且不會裁切前後空白。LAN HTTP 必須使用 `COOKIE_SECURE=0`／`ALLOW_INSECURE_HTTP=1`；正式 HTTPS 必須使用 `COOKIE_SECURE=1`／`ALLOW_INSECURE_HTTP=0`。反向代理只可傳入可信任的 Host、Proto 與來源 IP 標頭。安裝後立即建立備份並測試下載。
+瀏覽 `/setup` 建立 administrator。新帳號需 3–64 個 ASCII 識別字元，密碼需 12–128 字元且不會裁切前後空白。LAN HTTP 使用 `COOKIE_SECURE=0`／`ALLOW_INSECURE_HTTP=1`；Production 預設且建議 HTTPS、`COOKIE_SECURE=1`／`ALLOW_INSECURE_HTTP=0`。Production 若明確改用 insecure HTTP break-glass，Health／Preflight 會 degraded，且不可公開至公網。反向代理只可傳入可信任的 Host、Proto 與來源 IP 標頭。安裝後立即建立備份並測試下載。

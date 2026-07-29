@@ -652,7 +652,7 @@ cp .env.production.example .env
 docker compose up -d --build
 ```
 
-正式模式使用 `INKTIME_COOKIE_SECURE=1`、`INKTIME_ALLOW_INSECURE_HTTP=0`。不合理組合、localhost／範例 Production 網域、URL 內帳密或路徑會讓啟動明確失敗。首次管理員帳號需 3–64 個 ASCII 識別字元，密碼需 12–128 字元；密碼前後空白會被保留。
+Production 預設且建議使用 `INKTIME_COOKIE_SECURE=1`、`INKTIME_ALLOW_INSECURE_HTTP=0`。若在特殊受控環境明確改成 `INKTIME_ALLOW_INSECURE_HTTP=1`／`INKTIME_COOKIE_SECURE=0`，系統可用 break-glass HTTP 啟動，但 Health／Preflight 會標示 degraded；此模式不可公開至 Internet，且沒有 Secure Cookie、HSTS 或 TLS 保證。不合理組合、localhost／範例 Production 網域、URL 內帳密或路徑會讓啟動明確失敗。首次管理員帳號需 3–64 個 ASCII 識別字元，密碼需 12–128 字元；密碼前後空白會被保留。
 
 三個服務使用同一映像檔：
 

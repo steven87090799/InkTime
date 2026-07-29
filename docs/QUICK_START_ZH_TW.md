@@ -1,7 +1,7 @@
 # 快速開始
 
 1. 可信任 LAN／本機 HTTP 執行 `cp .env.local.example .env`；正式 HTTPS Reverse Proxy 執行 `cp .env.production.example .env`，並先替換實際公開網域。
-2. 確認 HTTP 模式為 `COOKIE_SECURE=0`／`ALLOW_INSECURE_HTTP=1`；HTTPS 模式為 `COOKIE_SECURE=1`／`ALLOW_INSECURE_HTTP=0`。不可混用。
+2. 確認 HTTP 模式為 `COOKIE_SECURE=0`／`ALLOW_INSECURE_HTTP=1`；HTTPS 模式為 `COOKIE_SECURE=1`／`ALLOW_INSECURE_HTTP=0`。Production 預設且建議 HTTPS；Production HTTP 只可作受控 break-glass，Health／Preflight 會 degraded 且不可公開至公網。
 3. `docker compose up -d --build`；HTTP LAN 開啟 `http://NAS-IP:8765/`，Production 從設定的 HTTPS 網域進入。
 4. 建立管理員；到「模型」新增 Provider 並測試連線。
 5. 無實體面板時，先把照片放進 `simulation_photos/`，到「維護」按「掃描並送到虛擬墨水屏」，另開 `/virtual-display` 接收；正式照片庫仍可用 `/photos` 建立一般掃描工作。
