@@ -16,41 +16,88 @@ jobs:
       matrix:
         python-version: ["3.10", "3.12"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with: {fetch-depth: 0}
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with: {python-version: "${{ matrix.python-version }}", cache: pip}
       - run: pip install -r requirements-dev.txt
       - run: ruff check inktime tests scripts server.py analyze_photos.py
       - run: mypy inktime
-      - run: pytest --cov=inktime --cov-report=term-missing tests/unit tests/security tests/integration
+      - run: pytest --cov=inktime --cov-report=term-missing --cov-fail-under=80 tests/unit tests/security tests/integration
       - run: pytest tests/unit/test_migrations.py
       - run: pip-audit -r requirements.txt
 
   secret-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with: {fetch-depth: 0}
-      - uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  docker-health:
+  compose-production-smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - run: mkdir -p .ci-data .ci-photos && chmod 777 .ci-data
-      - run: INKTIME_DATA_PATH=.ci-data INKTIME_PHOTO_PATH=.ci-photos docker compose up -d --build inktime-web
-      - run: timeout 120 sh -c 'until curl -fsS http://127.0.0.1:8765/health/ready; do sleep 2; done'
-      - if: always()
-        run: docker compose logs --no-color && docker compose down --volumes
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Prepare isolated production smoke environment
+        run: |
+          mkdir -p .ci-data .ci-photos
+          chmod 777 .ci-data
+          cat > .ci.env <<'EOF'
+          TZ=Asia/Taipei
+          INKTIME_PORT=8765
+          INKTIME_DATA_PATH=.ci-data
+          INKTIME_PHOTO_PATH=.ci-photos
+          INKTIME_ENVIRONMENT=production
+          INKTIME_PUBLIC_URL=http://inktime-ci.test:8765
+          INKTIME_COOKIE_SECURE=0
+          INKTIME_ALLOW_INSECURE_HTTP=1
+          INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE=0
+          INKTIME_PROXY_TRUST=0
+          INKTIME_IMAGE_TAG=ci
+          EOF
+      - name: Build and start Web, Worker and Scheduler
+        run: docker compose --env-file .ci.env up -d --build
+      - name: Wait for all service healthchecks
+        run: |
+          timeout 180 sh -c '
+            until
+              curl -fsS http://127.0.0.1:8765/health/ready >/dev/null &&
+              docker compose --env-file .ci.env exec -T inktime-worker python scripts/container_health.py worker &&
+              docker compose --env-file .ci.env exec -T inktime-scheduler python scripts/container_health.py scheduler
+            do sleep 2; done
+          '
+      - name: Verify setup, login, worker job and scheduler heartbeat
+        run: python scripts/production_compose_smoke.py
+      - name: Verify runtime identity, permissions and image contents
+        run: |
+          docker compose --env-file .ci.env exec -T inktime-web sh -c '
+            test "$(id -u)" = 10001
+            test -w /data
+            ! touch /app/.ci-write-test
+            ! python -m pip --version
+            test ! -e /app/tests
+            test ! -e /app/.github
+            test ! -e /app/docs
+            test ! -e /app/.env
+            test ! -e /app/esp32
+          '
+      - name: Collect Compose diagnostics
+        if: failure()
+        run: |
+          docker compose --env-file .ci.env ps
+          docker compose --env-file .ci.env logs --no-color
+          docker compose --env-file .ci.env ps --format json
+      - name: Remove smoke volumes and containers
+        if: always()
+        run: docker compose --env-file .ci.env down -v --remove-orphans
 
   playwright:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with: {python-version: "3.12", cache: pip}
       - run: pip install -r requirements.txt pytest playwright
       - run: playwright install --with-deps chromium
@@ -61,8 +108,8 @@ jobs:
   esp32-compile:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: arduino/setup-arduino-cli@81d310742121c928ea9c8bbd407b4217b432ae02 # v2.0.0
       - run: arduino-cli config init
       - run: arduino-cli core update-index && arduino-cli core install esp32:esp32@3.3.10
       - run: arduino-cli lib install GxEPD2@1.6.9 ArduinoJson@7.4.3
