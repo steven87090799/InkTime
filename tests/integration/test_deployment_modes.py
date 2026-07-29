@@ -20,7 +20,7 @@ def _config(root: Path, *, production: bool) -> RuntimeConfig:
         release_dir=root / "data/releases",
         backup_dir=root / "data/backups",
         cache_dir=root / "data/cache",
-        public_url=("https://inktime.home.example.net" if production else "http://localhost:8765"),
+        public_url=("https://inktime.home.acme.dev" if production else "http://localhost:8765"),
         cookie_secure=production,
         allow_insecure_http=not production,
         allow_unsafe_network_database=production,
@@ -53,11 +53,11 @@ def test_production_https_cookie_is_secure_and_hsts_is_https_only(tmp_path):
     app = create_app(_config(tmp_path / "production", production=True))
     try:
         client = app.test_client()
-        https_response = client.get("/setup", base_url="https://inktime.home.example.net")
+        https_response = client.get("/setup", base_url="https://inktime.home.acme.dev")
         assert "Secure" in https_response.headers.get("Set-Cookie", "")
         assert https_response.headers["Strict-Transport-Security"].startswith("max-age=31536000")
 
-        http_response = client.get("/setup", base_url="http://inktime.home.example.net")
+        http_response = client.get("/setup", base_url="http://inktime.home.acme.dev")
         assert "Strict-Transport-Security" not in http_response.headers
     finally:
         app.extensions["inktime_service_container"].close()

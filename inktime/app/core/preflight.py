@@ -60,10 +60,19 @@ def validate_public_url(config):
             )
     if config.environment == "production":
         hostname = (parsed.hostname or "").rstrip(".").casefold()
+        reserved_suffixes = (".example", ".invalid", ".localhost", ".test")
         placeholder = (
-            hostname in {"localhost", "127.0.0.1", "::1", "example.com"}
-            or hostname.endswith(".invalid")
-            or hostname.endswith(".example.com")
+            hostname
+            in {
+                "localhost",
+                "127.0.0.1",
+                "::1",
+                "example.com",
+                "example.net",
+                "example.org",
+            }
+            or hostname.endswith(reserved_suffixes)
+            or hostname.endswith((".example.com", ".example.net", ".example.org"))
         )
         if placeholder:
             raise PreflightError(

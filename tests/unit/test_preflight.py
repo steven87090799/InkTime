@@ -24,7 +24,7 @@ def _config(tmp_path: Path, **overrides) -> RuntimeConfig:
         "release_dir": tmp_path / "runtime/releases",
         "backup_dir": tmp_path / "runtime/backups",
         "cache_dir": tmp_path / "runtime/cache",
-        "public_url": "https://inktime.home.example.net",
+        "public_url": "https://inktime.home.acme.dev",
         "cookie_secure": True,
         "allow_insecure_http": False,
     }
@@ -53,6 +53,9 @@ def test_production_https_configuration_is_accepted(tmp_path):
             "ALLOW_INSECURE_HTTP=1",
         ),
         ({"public_url": "https://inktime.example.com"}, "範例網域"),
+        ({"public_url": "https://inktime.example.net"}, "範例網域"),
+        ({"public_url": "https://inktime.your-domain.example"}, "範例網域"),
+        ({"public_url": "https://inktime.example.test"}, "範例網域"),
         ({"public_url": "https://localhost"}, "localhost"),
         ({"public_url": "https://user:secret@inktime.test.net"}, "不可包含帳密"),
     ],
