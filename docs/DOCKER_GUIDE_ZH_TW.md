@@ -36,21 +36,22 @@ mkdir -p data
 sudo chown -R 10001:10001 data
 ```
 
-### 3.1 可信任 LAN／本機 HTTP
+### 3.1 可信任 LAN Production HTTP
 
 ```bash
-cp .env.local.example .env
+cp .env.lan.production.example .env
 ```
 
-至少把 `INKTIME_PUBLIC_URL` 改成瀏覽器實際使用的 `http://主機:8765`，並設定資料／照片路徑。此模式固定搭配：
+把 `INKTIME_PUBLIC_URL` 改成瀏覽器實際使用的 RFC1918 IP、`.local` 或單標籤內網主機；設定不同的絕對資料／唯讀照片路徑，並用實際 Git SHA 與 UTC build time 取代 `CHANGE_ME`。此模式固定搭配：
 
 ```dotenv
-INKTIME_ENVIRONMENT=development
+INKTIME_ENVIRONMENT=production
 INKTIME_COOKIE_SECURE=0
 INKTIME_ALLOW_INSECURE_HTTP=1
+INKTIME_PROXY_TRUST=0
 ```
 
-它只適合可信任 LAN 或測試環境，不可直接公開至 Internet。
+啟動前執行 `python scripts/production_preflight.py --mode lan --env-file .env`。它會檢查 transport 組合、LAN host、placeholder／相對路徑、唯讀 photos mount、SQLite `/data`、network filesystem opt-in 與 immutable image identity，失敗時輸出穩定錯誤碼及修正方式。成功後 Health／diagnostics 仍會明確顯示 `environment=production`、`transport=trusted-lan-http`、`security_state=degraded`、`tls_enabled=false`、`secure_cookie=false`。此模式不可直接公開至 Internet；`.env.local.example` 只供 development／模擬。
 
 ### 3.2 正式 HTTPS Reverse Proxy
 
@@ -70,7 +71,7 @@ INKTIME_PROXY_TRUST=1
 
 `INKTIME_PROXY_TRUST` 必須等於實際受信任 Proxy hop 數，不可為了「讓它能跑」任意放大。
 
-### 3.3 Production HTTP break-glass
+### 3.3 既有 Production HTTP break-glass 相容邊界
 
 Production 在特殊、受控且不連接公網的測試環境，可明確設定：
 
@@ -82,13 +83,14 @@ INKTIME_ALLOW_INSECURE_HTTP=1
 INKTIME_PROXY_TRUST=0
 ```
 
-這是 break-glass，而不是推薦部署方式。Health／Preflight 會標示 `degraded`；Secure Cookie、HSTS 與 TLS 安全保證均不成立，不可透過 Internet 使用。系統不會自動從 HTTPS fallback 到此模式。
+新 LAN 部署請用 3.1 的專用範例與 preflight。這段只說明既有環境的相容邊界：Health／Preflight 會標示 `degraded`；Secure Cookie、HSTS 與 TLS 安全保證均不成立，不可透過 Internet 使用。系統不會自動從 HTTPS fallback 到此模式。
 
 不要把 `.env`、資料庫、`session.key`、API Key 或裝置 Token Commit。啟動：
 
 ```bash
 docker compose config --quiet
-docker compose up -d --build
+scripts/build_release_image.sh
+docker compose up -d
 docker compose ps
 curl -fsS http://127.0.0.1:8765/health/ready
 ```
@@ -100,9 +102,9 @@ curl -fsS http://127.0.0.1:8765/health/ready
 | 欄位 | 預設 | 說明 |
 |---|---|---|
 | `INKTIME_PORT` | `8765` | 主機對外 Port |
-| `INKTIME_DATA_PATH` | `./data` | SQLite、快取、字型、備份、發布；可寫 |
-| `INKTIME_PHOTO_PATH` | `./simulation_photos` | 原始照片；容器內固定 `/photos` 且唯讀。無實體面板時可直接使用專案內投放區 |
-| `INKTIME_ENVIRONMENT` | local 範例為 `development` | 公開部署必須為 `production`；受控 break-glass 仍維持 production |
+| `INKTIME_DATA_PATH` | 範例要求絕對路徑 | SQLite、快取、字型、備份、發布；正式模式可寫且資料庫位於容器 `/data` |
+| `INKTIME_PHOTO_PATH` | 範例要求絕對路徑 | 原始照片；容器內固定 `/photos` 且唯讀。正式模式拒絕 `simulation_photos` 與 placeholder |
+| `INKTIME_ENVIRONMENT` | local 範例為 `development` | LAN／HTTPS 正式部署都必須為 `production` |
 | `INKTIME_PUBLIC_URL` | `http://localhost:8765` | 瀏覽器實際使用的 Origin；不可含帳密、路徑、Query 或 Fragment |
 | `INKTIME_COOKIE_SECURE` | local `0`／production 建議 `1` | 必須和 HTTP／HTTPS 模式一致；break-glass HTTP 為 `0` |
 | `INKTIME_ALLOW_INSECURE_HTTP` | local `1`／production 建議 `0` | HTTP 的明確降級開關，不會自動 fallback；Production 啟用時 health degraded |
@@ -206,3 +208,14 @@ curl -fsS http://127.0.0.1:8765/health/ready
 - [ ] 重啟 Worker 後工作可從租約恢復。
 - [ ] ESP32 取得 Manifest、下載 96,000-byte 檔案、回報韌體與訊號。
 - [ ] 備份可下載並通過完整性檢查。
+
+## 10. 純軟體長時間驗證
+
+CI 的 `workflow_dispatch` 可執行 30 分鐘、2 小時或 5 小時 bounded soak，並上傳不含 Token、認證資料或宿主路徑的 JSON summary。24 小時 soak 只在受控 LAN 主機本地執行：
+
+```bash
+python scripts/runtime_soak.py --duration-seconds 86400 \
+  --timeout-seconds 86520 --summary-json /tmp/inktime-soak-24h.json
+```
+
+Soak 會檢查 RSS、FD、thread、SQLite connection／WAL、child process、pending async work、job age 與 Scheduler heartbeat；timeout、未清理資源或超過門檻皆非 PASS。

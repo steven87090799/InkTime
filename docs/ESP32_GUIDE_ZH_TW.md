@@ -13,7 +13,7 @@ GDEY073D46 原廠資料為 800×480、7 色、3.3 V、50-pin FPC、SPI、15–35
 
 未來新採購建議 GDEP073E01＋DESPI-C73 或原廠 ESP32E6-E01。GDEP073E01 為 800×480、6 色 Spectra 6、3.3 V、50-pin SPI、0–50°C、全刷約 15–22 秒；韌體已可選用 GxEPD2 的 `GxEPD2_730c_GDEP073E01` 類別。[Good Display GDEP073E01](https://www.good-display.com/product/533.html) [DESPI-C73 adapter](https://www.good-display.com/product/522.html) [GxEPD2 支援清單](https://github.com/ZinggJM/GxEPD2)
 
-伺服器、Manifest schema v2 與韌體 2.2.0 已共同支援完整六／七色；色盤、五種抖動、混合面板發布、設定 ACK 與離線通知詳見[裝置可靠性與六／七色渲染指南](DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。
+伺服器、Manifest schema v2 與韌體 2.5.0 已共同支援完整六／七色、Offline Queue ACK 與相同內容安全 skip；色盤、抖動、混合面板發布、設定 ACK 與離線通知詳見[裝置可靠性與六／七色渲染指南](DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。
 
 Waveshare 整合的中央 Profile、SD／PMIC／RTC／SHTC3、安全 BUSY timeout、授權與
 20 項實機清單見 [PhotoPainter 支援與實機驗收](WAVESHARE_PHOTOPAINTER_ZH_TW.md)。
@@ -65,11 +65,16 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3 esp32/ink-display-7C-photo
 arduino-cli compile --fqbn esp32:esp32:esp32s3 \
   --build-property "compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1" \
   esp32/ink-display-7C-photo
+
+# 可信任 LAN Production；secure build 的預設值仍是 0
+arduino-cli compile --fqbn esp32:esp32:esp32s3 \
+  --build-property "compiler.cpp.extra_flags=-DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1" \
+  esp32/ink-display-7C-photo
 ```
 
 Board 選 ESP32-S3，啟用 OPI PSRAM。正式版 `INKTIME_DEBUG_LOG=0`；短期硬體除錯才加入 `-DINKTIME_DEBUG_LOG=1`。序列 Log 不輸出 Token，但正式環境仍不應長期開啟。PhotoPainter 必須使用 16 MiB Flash／OPI PSRAM 與中央 `DEVICE_PROFILE`，完整命令見上方專用指南。
 
-2026-07-19 以 Arduino CLI 1.5.1、ESP32 core 3.3.10、GxEPD2 1.6.9、ArduinoJson 7.4.3 實際編譯 2.4.0：GDEY Profile 使用 1,213,069 bytes、GDEP Profile 使用 1,213,141 bytes，兩者都是預設 1,310,720-byte app partition 的 92%；全域變數均為 96,564 bytes（29%）。這表示目前可燒錄，但 Release Flash headroom 只有約 7.5%，Debug 更達 98%；新增 OTA、TLS certificate 或大型 Web UI 前必須重新檢查 partition、實際板上 Flash 與 OTA 雙分區，不能只看模組標示的總 Flash。編譯器顯示約 231 KB 可用動態記憶體不包含執行期碎片與 TLS buffer；下載索引改放 PSRAM，板上仍必須啟用並檢查 PSRAM。PhotoPainter 的完整矩陣與實機邊界見專用指南。
+2026-07-30 以 Arduino CLI 1.5.1、ESP32 core 3.3.10、GxEPD2 1.6.9、ArduinoJson 7.4.3 實際編譯 2.5.0：secure GDEY 使用 1,228,261 bytes，LAN GDEY 1,228,545 bytes，LAN GDEP 1,228,645 bytes，均為預設 1,310,720-byte app partition 的 93%；LAN PhotoPainter 使用 1,177,311 bytes（其 3 MiB app partition 的 37%）。GDEY／GDEP 全域變數約 96.6 KiB，PhotoPainter 約 49.2 KiB。這表示目前可編譯，但不是實體燒錄、Heap、PSRAM、BUSY 或功耗證據；新增 OTA、TLS certificate 或大型 Web UI 前仍須重新檢查 partition 與實板餘裕。
 
 上傳前先用原廠 sample／GxEPD2 Example 驗證「面板型號＋adapter＋供電＋引腳」能完整刷新，再燒 InkTime 韌體。不同面板 driver class 不可混用。
 
@@ -88,13 +93,15 @@ Token 只存於 ESP32 NVS 與 server 雜湊，不進 URL、不印到序列埠。
 
 ## 6. 網路協定
 
-1. `GET /api/device/v1/releases/latest`，Header：`Authorization: Bearer <token>`。
-2. 驗證 Manifest schema 1／2、`pixel_format=2bpp`／`indexed4`、Profile、`width=480`、`height=800`。
-3. 套用 `device_config` schema v2：設定版本、面板 Profile、IANA 時區換算後的 UTC offset、`HH:MM`、rotation。
-4. 隨機選檔；失敗時嘗試下一個。
-5. 四色檔必須剛好 96,000 bytes、六／七色必須 192,000 bytes且 SHA-256 相符；維持壓縮索引，不展開 384,000-byte framebuffer。
-6. 完整成功才刷新面板；全部失敗保留舊畫面。
-7. `POST /api/device/v1/status` 回報 firmware、面板／渲染 Profile、release、設定 ACK、RSSI、free heap／PSRAM、wake reason、是否刷新與錯誤碼。
+1. 優先 `GET /api/device/v1/queue/manifest`；只有 404 或 Queue 空白才回退 `GET /api/device/v1/releases/latest`，Header 均為 `Authorization: Bearer <token>`。
+2. Queue Manifest 僅接受 bounded top-level JSON object、真正 JSON integer、Item 綁定的同源相對 URL；拒絕 absolute／cross-origin／traversal／NUL／backslash。
+3. 驗證 Manifest schema、`pixel_format=2bpp`／`indexed4`、Profile、`width=480`、`height=800`。
+4. 套用 `device_config` schema v2：設定版本、面板 Profile、IANA 時區換算後的 UTC offset、`HH:MM`、rotation。
+5. 四色檔必須剛好 96,000 bytes、六／七色必須 192,000 bytes；Content-Type、Content-Length、實際長度與 SHA-256 都須相符。
+6. Queue 事件先持久化 NVS，再送 canonical `POST /api/device/v1/queue/ack`；timeout／5xx／restart 重用同一 idempotency key，2xx 才清除，409 重新取得 Manifest。
+7. 只有已驗證的 SHA、Release、render profile、rotation、board profile 與先前成功狀態完全相同才 skip；forced refresh 或 NVS 損壞不可 skip。
+8. 完整成功才刷新面板；全部失敗保留舊畫面並回報 `DISPLAY_FAILED`。
+9. `POST /api/device/v1/status` 回報 firmware、transport、Queue、面板／渲染 Profile、release、設定 ACK、RSSI、free heap／PSRAM、wake reason、`display_skipped` 與錯誤碼。
 
 Web 裝置頁會顯示最後狀態、下載成功／失敗、韌體、訊號、Heap、PSRAM 與最近事件；Docker INFO Log 只記每日狀態，檔案下載細節在 DEBUG 才出現。
 
@@ -117,8 +124,8 @@ Web 裝置頁會顯示最後狀態、下載成功／失敗、韌體、訊號、H
 - 面板脆弱，避免彎折、點壓、扭曲與 FPC 拉扯；不要撕除非原廠指示可移除的保護層。
 - 電子紙可能有 ghosting／色偏；本韌體採 full refresh，不把 GxEPD2 partial window API 當成 GDEY 可用的快速局刷。
 - 強烈建議用 SHA-256 驗證與「成功才刷新」；不要為省幾秒移除。
-- 完整六／七色需 server、裝置 Profile 與 2.2.0 韌體配對；舊韌體升級期間使用 `safe_4c`。
-- 目前 app partition 已使用 92%；增加函式庫、TLS 或 OTA 前要重新量測 Flash／Heap／PSRAM，並做實機連續刷新與斷電恢復測試。
+- 完整六／七色 Queue 流程需 server、裝置 Profile 與 2.5.0 韌體配對；舊韌體升級期間使用 `safe_4c`。
+- 目前 GDEY／GDEP app partition 已使用 93%；增加函式庫、TLS 或 OTA 前要重新量測 Flash／Heap／PSRAM，並做實機連續刷新與斷電恢復測試。
 
 ## 9. 常見錯誤
 
@@ -131,6 +138,11 @@ Web 裝置頁會顯示最後狀態、下載成功／失敗、韌體、訊號、H
 | `DEVICE-CONFIG-PROFILE` | 設定版本倒退或面板 Profile 與韌體不符 | 核對面板型號、編譯 flag、裝置頁 Profile |
 | `DEVICE-MEMORY` | PSRAM 未啟用或不足 | Arduino 啟用 PSRAM、檢查板型／供電 |
 | `DEVICE-DOWNLOAD` | 長度或 SHA-256 失敗 | 查 RSSI、代理快取、N100 Log |
+| `DEVICE-QUEUE-SCHEMA`／`INTEGER`／`ITEM` | Queue JSON、型別、歸屬或 URL 不合法 | 核對 Server／Firmware 版本，不得放寬驗證 |
+| `DEVICE-QUEUE-DOWNLOAD`／`HASH` | Queue body、Content-Type／Length 或 SHA 不符 | 保留舊畫面；檢查 Release 與代理 |
+| `DEVICE-QUEUE-ACK-RETRY` | ACK timeout 或 5xx，NVS 仍保留 pending event | 保持網路可達；下次 wake 會以同一 Key 重送 |
+| `DEVICE-QUEUE-STALE` | ACK 409，Queue version 已更新 | 下次重新讀取 Manifest；不可把舊 Item 當成功 |
+| `DEVICE-QUEUE-AUTH` | ACK 401／403 | 更新或重新配對 Device Token；不可匿名 fallback |
 | 畫面不刷新 | BUSY／接線／供電／driver class 錯 | 先跑原廠 sample，量 3.3 V，核對面板型號 |
 | 顏色錯誤 | 面板類別或 palette 不符 | 核對 GDEY／GDEP compile flag，不混用 13.3 driver |
 

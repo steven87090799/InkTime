@@ -37,11 +37,20 @@
 | `DEVICE-001` | 裝置驗證失敗 | 確認 Bearer Token、裝置啟用狀態或重新配對 |
 | `DEVICE-002` | 發布檔案校驗失敗 | 裝置應保留舊畫面並回報失敗 |
 | `DEVICE-CONFIG-PROFILE` | 設定版本倒退或面板 Profile 不相容 | 核對面板、韌體 compile flag 與 Web 裝置設定 |
+| `DEVICE-QUEUE-SCHEMA`／`DEVICE-QUEUE-INTEGER`／`DEVICE-QUEUE-ITEM` | Queue Manifest schema、JSON 型別、Item 歸屬或 URL 不合法 | 核對 Server／Firmware 版本；不得放寬 strict parser |
+| `DEVICE-QUEUE-DOWNLOAD`／`DEVICE-QUEUE-HASH` | Queue body、Content-Type／Length 或 SHA-256 不符 | 保留舊畫面，檢查 Release、代理與檔案完整性 |
+| `DEVICE-QUEUE-ACK-KEY`／`DEVICE-QUEUE-ACK-RETRY` | 無法持久化 idempotency key，或 ACK timeout／5xx 等待重送 | 檢查 NVS 與網路；不得清除未獲 2xx 的 pending event |
+| `DEVICE-QUEUE-STALE` | ACK 回 409，Queue version 已失效 | 重新取得 Manifest，不顯示或完成舊 Item |
+| `DEVICE-QUEUE-AUTH` | Queue／ACK 回 401 或 403 | 重新配對 Device Token；不可匿名 fallback |
 | `DEVICE-OFFLINE` | 裝置超過門檻未連線 | 檢查電源、Wi-Fi、Token、刷新週期與 N100 可達性 |
 | `NOTIFY-WEBHOOK` | Webhook 暫時或永久失敗 | 查看裝置頁嘗試次數、HTTP 狀態與端點 Log |
 | `BACKUP-001` | 備份建立或驗證失敗 | 檢查空間、權限與資料庫完整性 |
 | `BACKUP-002`／`BACKUP-003` | 備份格式或 SHA-256 損壞 | 不會覆蓋現有資料庫；改用另一份已驗證備份 |
 | `RESTORE-001` | 仍有 InkTime 程序持有資料庫 | 停止 Web、Worker、Scheduler 後再執行離線還原 |
 | `RESTORE-002`～`RESTORE-006` | 還原內容、Schema 或驗收失敗 | 工具會自動保持／回復原資料庫；保留安全副本並查看明確錯誤 |
+| `PREFLIGHT-CONFIG-001` | LAN／HTTPS production transport、URL 或 runtime 設定不一致 | 依輸出的 `fix` 修正 `.env` 後重跑 preflight |
+| `PREFLIGHT-PATH-001` | 正式資料／照片路徑為 placeholder、相對路徑、相同路徑或模擬照片 | 換成不同的實際絕對路徑 |
+| `PREFLIGHT-MOUNT-001` | `/photos` 非唯讀、SQLite 不在 `/data`，或資料庫位於未允許的 network filesystem | 修正 Compose mount；SQLite 改放本機 POSIX filesystem |
+| `PREFLIGHT-BUILD-001` | image tag／Git revision／build time 仍是 local、placeholder 或彼此不一致 | 用 clean exact Git SHA 執行 release image build |
 
 API 錯誤回應至少包含 `error_code` 與繁體中文 `message`；內部例外堆疊只寫入受保護的記錄，不傳送給 viewer 或裝置。
