@@ -20,7 +20,12 @@ def valid_result(**updates):
         "should_keep": True,
         "sensitive": False,
         "reason": "人物互動自然且清晰",
-        "visual_orientation": {"rotation_cw": 0, "confidence": 1.0, "ambiguous": False, "evidence": ["faces_upright"]},
+        "visual_orientation": {
+            "rotation_cw": 0,
+            "confidence": 1.0,
+            "ambiguous": False,
+            "evidence": ["faces_upright"],
+        },
     }
     value.update(updates)
     return value
@@ -42,7 +47,12 @@ def test_schema_v1_missing_orientation_is_safely_upgraded():
     [
         {"rotation_cw": False, "confidence": 1, "ambiguous": False, "evidence": ["faces_upright"]},
         {"rotation_cw": 0, "confidence": 1, "ambiguous": False, "evidence": []},
-        {"rotation_cw": 0, "confidence": 1, "ambiguous": False, "evidence": ["faces_upright", "faces_upright"]},
+        {
+            "rotation_cw": 0,
+            "confidence": 1,
+            "ambiguous": False,
+            "evidence": ["faces_upright", "faces_upright"],
+        },
         {"rotation_cw": 0, "confidence": 1, "ambiguous": False, "evidence": ["invalid"]},
         {"rotation_cw": None, "confidence": 0, "ambiguous": False, "evidence": ["insufficient_visual_cues"]},
     ],

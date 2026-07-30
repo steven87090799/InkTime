@@ -1,4 +1,5 @@
 """Bounded, deterministic selection that never depends on AI analysis rows."""
+
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
@@ -14,7 +15,12 @@ class LocalSelectionPolicy:
     """SQLite-first local candidate ranking and stable two-photo pairing."""
 
     def __init__(self, database, settings, resilience=None, locations=None) -> None:
-        self.database, self.settings, self.resilience, self.locations = database, settings, resilience, locations
+        self.database, self.settings, self.resilience, self.locations = (
+            database,
+            settings,
+            resilience,
+            locations,
+        )
 
     def _rows(self, *, target: date, limit: int) -> list[dict[str, Any]]:
         month_day = target.strftime("%m-%d")
@@ -56,12 +62,19 @@ class LocalSelectionPolicy:
         return (8.0 if days >= 30 else 0.0, 12.0 if days < 7 else 5.0 if days < 30 else 0.0)
 
     def ranked(
-        self, *, target: date, orientation: str, limit: int | None = None, excluded_ids: set[str] | None = None
+        self,
+        *,
+        target: date,
+        orientation: str,
+        limit: int | None = None,
+        excluded_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         bound = max(20, min(int(limit or self.settings.get("render.local_candidate_limit", 200)), 1000))
         rows = self._rows(target=target, limit=bound)
         excluded_ids = excluded_ids or set()
-        feedback = self.resilience.preference_adjustments(row["id"] for row in rows) if self.resilience else {}
+        feedback = (
+            self.resilience.preference_adjustments(row["id"] for row in rows) if self.resilience else {}
+        )
         now = datetime.now(timezone.utc)
         result: list[dict[str, Any]] = []
         for item in rows:
@@ -73,11 +86,14 @@ class LocalSelectionPolicy:
                 continue
             not_recent, recent_penalty = self._recent(item.get("last_displayed_at"), now=now)
             captured = str(item.get("captured_month_day") or "")
-            orientation_fit = 3.0 if (
-                orientation == "landscape" and int(item.get("width") or 0) >= int(item.get("height") or 0)
-            ) or (
-                orientation == "portrait" and int(item.get("height") or 0) >= int(item.get("width") or 0)
-            ) else 0.0
+            orientation_fit = (
+                3.0
+                if (
+                    orientation == "landscape" and int(item.get("width") or 0) >= int(item.get("height") or 0)
+                )
+                or (orientation == "portrait" and int(item.get("height") or 0) >= int(item.get("width") or 0))
+                else 0.0
+            )
             risk = calculate_epaper_contrast_risk(item)
             components = {
                 "base_local_score": float(item.get("local_candidate_score") or 0),
@@ -99,16 +115,27 @@ class LocalSelectionPolicy:
             # A missing resolver/data intentionally remains an unscored location.
             item["city"] = self._location_name(item)
             result.append(item)
-        return sorted(result, key=lambda row: (-float(row["local_display_score"]), str(row.get("captured_at") or ""), str(row["id"])))
+        return sorted(
+            result,
+            key=lambda row: (
+                -float(row["local_display_score"]),
+                str(row.get("captured_at") or ""),
+                str(row["id"]),
+            ),
+        )
 
     def _location_name(self, row: dict[str, Any]) -> str:
         if self.locations is None:
             return ""
         try:
-            return str(self.locations.resolve(
-                row.get("gps_lat"), row.get("gps_lon"),
-                max_distance_km=float(self.settings.get("render.location_max_distance_km", 80)),
-            ) or "").strip()
+            return str(
+                self.locations.resolve(
+                    row.get("gps_lat"),
+                    row.get("gps_lon"),
+                    max_distance_km=float(self.settings.get("render.location_max_distance_km", 80)),
+                )
+                or ""
+            ).strip()
         except (TypeError, ValueError):
             return ""
 
@@ -128,7 +155,9 @@ class LocalSelectionPolicy:
             values[(anchor + timedelta(days=offset)).strftime("%m-%d")] = offset
         return values
 
-    def _pair_score(self, primary: dict[str, Any], secondary: dict[str, Any], *, orientation: str) -> tuple[float, dict[str, float]]:
+    def _pair_score(
+        self, primary: dict[str, Any], secondary: dict[str, Any], *, orientation: str
+    ) -> tuple[float, dict[str, float]]:
         primary_score = float(primary["local_display_score"])
         secondary_score = float(secondary["local_display_score"])
         primary_landscape = int(primary.get("width") or 0) >= int(primary.get("height") or 0)
@@ -141,22 +170,56 @@ class LocalSelectionPolicy:
         location_bonus = 3.0 if primary_city and primary_city.casefold() == secondary_city.casefold() else 0.0
         p_date, s_date = str(primary.get("captured_date") or ""), str(secondary.get("captured_date") or "")
         proximity = 2.0 if p_date and s_date and p_date[:7] == s_date[:7] else 0.0
-        low_penalty = 8.0 if primary.get("local_quality_decision") == secondary.get("local_quality_decision") == "low_priority" else 0.0
-        risk_penalty = 8.0 if primary.get("epaper_contrast_risk") == secondary.get("epaper_contrast_risk") == "high" else 0.0
-        recent_penalty = 8.0 if primary["score_components"]["recent_display_penalty"] and secondary["score_components"]["recent_display_penalty"] else 0.0
+        low_penalty = (
+            8.0
+            if primary.get("local_quality_decision")
+            == secondary.get("local_quality_decision")
+            == "low_priority"
+            else 0.0
+        )
+        risk_penalty = (
+            8.0
+            if primary.get("epaper_contrast_risk") == secondary.get("epaper_contrast_risk") == "high"
+            else 0.0
+        )
+        recent_penalty = (
+            8.0
+            if primary["score_components"]["recent_display_penalty"]
+            and secondary["score_components"]["recent_display_penalty"]
+            else 0.0
+        )
         components = {
-            "primary_local_display_score": primary_score, "secondary_local_display_score": secondary_score,
-            "orientation_compatibility": orientation_bonus, "capture_time_proximity": proximity,
+            "primary_local_display_score": primary_score,
+            "secondary_local_display_score": secondary_score,
+            "orientation_compatibility": orientation_bonus,
+            "capture_time_proximity": proximity,
             "known_location_match": location_bonus,
             "location_data_available": float(bool(primary_city and secondary_city)),
             "dual_low_priority_penalty": low_penalty,
-            "dual_high_epaper_risk_penalty": risk_penalty, "dual_recent_display_penalty": recent_penalty,
+            "dual_high_epaper_risk_penalty": risk_penalty,
+            "dual_recent_display_penalty": recent_penalty,
         }
-        return round(primary_score + secondary_score + orientation_bonus + proximity + location_bonus - low_penalty - risk_penalty - recent_penalty, 3), components
+        return round(
+            primary_score
+            + secondary_score
+            + orientation_bonus
+            + proximity
+            + location_bonus
+            - low_penalty
+            - risk_penalty
+            - recent_penalty,
+            3,
+        ), components
 
     def select(
-        self, *, target: date, orientation: str, quantity: int, layout: str,
-        excluded_ids: set[str] | None = None, target_month_day: str | None = None,
+        self,
+        *,
+        target: date,
+        orientation: str,
+        quantity: int,
+        layout: str,
+        excluded_ids: set[str] | None = None,
+        target_month_day: str | None = None,
     ) -> dict[str, Any]:
         ranked = self.ranked(target=target, orientation=orientation, excluded_ids=excluded_ids)
         requested_month_day = str(target_month_day or target.strftime("%m-%d"))
@@ -167,7 +230,11 @@ class LocalSelectionPolicy:
         nearby_days = self._nearby_days(effective_month_day, window)
         nearby = sorted(
             [row for row in ranked if str(row.get("captured_month_day") or "") in nearby_days],
-            key=lambda row: (nearby_days[str(row["captured_month_day"])], -float(row["local_display_score"]), str(row["id"])),
+            key=lambda row: (
+                nearby_days[str(row["captured_month_day"])],
+                -float(row["local_display_score"]),
+                str(row["id"]),
+            ),
         )
         exact_ids = {str(row["id"]) for row in exact}
         nearby_ids = {str(row["id"]) for row in nearby}
@@ -186,8 +253,11 @@ class LocalSelectionPolicy:
             if len(allowed) < needed and fallback == "nearby_then_ranked":
                 allowed.extend(ranked_only)
         stage_by_id = {
-            str(row["id"]): "exact" if str(row["id"]) in exact_ids else
-            "nearby" if str(row["id"]) in nearby_ids else "ranked"
+            str(row["id"]): "exact"
+            if str(row["id"]) in exact_ids
+            else "nearby"
+            if str(row["id"]) in nearby_ids
+            else "ranked"
             for row in allowed
         }
         selected = allowed[:needed]
@@ -198,16 +268,25 @@ class LocalSelectionPolicy:
             pair_candidate_count = len(peers)
             if peers:
                 pairs = [(self._pair_score(primary, peer, orientation=orientation), peer) for peer in peers]
-                (pair_score, pair_components), secondary = sorted(pairs, key=lambda item: (-item[0][0], str(item[1]["id"])))[0]
-                primary["score_components"]["pair_compatibility_bonus"] = pair_components["orientation_compatibility"]
+                (pair_score, pair_components), secondary = sorted(
+                    pairs, key=lambda item: (-item[0][0], str(item[1]["id"]))
+                )[0]
+                primary["score_components"]["pair_compatibility_bonus"] = pair_components[
+                    "orientation_compatibility"
+                ]
                 primary["pair_score"] = pair_score
                 primary["pair_score_components"] = pair_components
                 selected = [primary, secondary] + selected[2:]
         selected = selected[:needed]
         selected_stages = [stage_by_id[str(row["id"])] for row in selected]
         fallback_type = (
-            "none" if not selected else "ranked_fallback" if "ranked" in selected_stages else
-            "nearby_day" if "nearby" in selected_stages else "exact_day"
+            "none"
+            if not selected
+            else "ranked_fallback"
+            if "ranked" in selected_stages
+            else "nearby_day"
+            if "nearby" in selected_stages
+            else "exact_day"
         )
         trace_id = None
         if self.resilience is not None:
@@ -222,12 +301,19 @@ class LocalSelectionPolicy:
                     "score_components": {
                         **row["score_components"],
                         "candidate_stage": stage_by_id[str(row["id"])],
-                        "selected_role": "primary" if selected and str(row["id"]) == str(selected[0]["id"])
-                        else "secondary" if len(selected) > 1 and str(row["id"]) == str(selected[1]["id"])
+                        "selected_role": "primary"
+                        if selected and str(row["id"]) == str(selected[0]["id"])
+                        else "secondary"
+                        if len(selected) > 1 and str(row["id"]) == str(selected[1]["id"])
                         else "not_selected",
                     },
                 }
-                if selected and len(selected) > 1 and str(row["id"]) == str(selected[0]["id"]) and "pair_score" in row:
+                if (
+                    selected
+                    and len(selected) > 1
+                    and str(row["id"]) == str(selected[0]["id"])
+                    and "pair_score" in row
+                ):
                     candidate["score_components"].update(
                         pair_score=row["pair_score"],
                         pair_score_components=row["pair_score_components"],
@@ -235,26 +321,52 @@ class LocalSelectionPolicy:
                     )
                 trace_candidates.append(candidate)
             algorithm = self.resilience.algorithm_version(
-                name="local_display_selection", version="v1",
+                name="local_display_selection",
+                version="v1",
                 configuration={"candidate_limit": min(len(ranked), 200), "fallback_setting": fallback},
-                renderer="server", layout=layout, pairing="local-v1", scoring="local-display-v1",
+                renderer="server",
+                layout=layout,
+                pairing="local-v1",
+                scoring="local-display-v1",
             )
             trace_id = self.resilience.create_trace(
-                execution_mode="production", algorithm_version_id=algorithm,
+                execution_mode="production",
+                algorithm_version_id=algorithm,
                 primary_photo_id=str(selected[0]["id"]) if selected else None,
-                secondary_photo_id=str(selected[1]["id"]) if len(selected) > 1 and layout in {"photo_pair", "photo_pair_caption"} else None,
-                layout_mode=layout, candidates=trace_candidates,
-                candidate_count=len(allowed), eligible_count=len(allowed),
-                reasons=[fallback_type], context={"target_date": target.isoformat(), "requested_month_day": requested_month_day,
-                    "effective_month_day": effective_month_day, "fallback_type": fallback_type,
-                    "fallback_reason": leap_reason, "fallback_setting": fallback, "window_days": window,
-                    "exact_count": len(exact), "nearby_count": len(nearby), "ranked_count": len(ranked_only),
-                    "allowed_pool_count": len(allowed), "pair_candidate_count": pair_candidate_count,
+                secondary_photo_id=str(selected[1]["id"])
+                if len(selected) > 1 and layout in {"photo_pair", "photo_pair_caption"}
+                else None,
+                layout_mode=layout,
+                candidates=trace_candidates,
+                candidate_count=len(allowed),
+                eligible_count=len(allowed),
+                reasons=[fallback_type],
+                context={
+                    "target_date": target.isoformat(),
+                    "requested_month_day": requested_month_day,
+                    "effective_month_day": effective_month_day,
+                    "fallback_type": fallback_type,
+                    "fallback_reason": leap_reason,
+                    "fallback_setting": fallback,
+                    "window_days": window,
+                    "exact_count": len(exact),
+                    "nearby_count": len(nearby),
+                    "ranked_count": len(ranked_only),
+                    "allowed_pool_count": len(allowed),
+                    "pair_candidate_count": pair_candidate_count,
                     "primary_selection_stage": selected_stages[0] if selected_stages else None,
                     "secondary_selection_stage": selected_stages[1] if len(selected_stages) > 1 else None,
                     "selection_stages": {str(row["id"]): stage_by_id[str(row["id"])] for row in allowed[:50]},
-                    "selection_mode": "local_only"},
+                    "selection_mode": "local_only",
+                },
             )
-        return {"candidates": ranked, "selected": selected, "fallback": fallback_type,
-                "allowed_pool": allowed, "exact_pool": exact, "nearby_pool": nearby,
-                "ranked_pool": ranked_only, "decision_trace_id": trace_id}
+        return {
+            "candidates": ranked,
+            "selected": selected,
+            "fallback": fallback_type,
+            "allowed_pool": allowed,
+            "exact_pool": exact,
+            "nearby_pool": nearby,
+            "ranked_pool": ranked_only,
+            "decision_trace_id": trace_id,
+        }

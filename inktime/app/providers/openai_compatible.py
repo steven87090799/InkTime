@@ -68,9 +68,7 @@ class OpenAICompatibleProvider(VisionProvider):
             base_url=str(specification["base_url"]),
             api_key=str(specification.get("api_key", "")),
             timeout=float(specification.get("timeout", 120)),
-            supports_json_schema=bool(
-                specification.get("supports_json_schema", True)
-            ),
+            supports_json_schema=bool(specification.get("supports_json_schema", True)),
             scoring_rules=str(specification.get("scoring_rules", DEFAULT_SCORING_RULES)),
             caption_controls=dict(specification.get("caption_controls") or {}),
         )
@@ -152,7 +150,10 @@ class OpenAICompatibleProvider(VisionProvider):
     def _post_completion(self, body: dict) -> ProviderResponse:
         try:
             response = self.session.post(
-                self._url("/chat/completions"), headers=self._headers(), json=body, timeout=self.request_timeout
+                self._url("/chat/completions"),
+                headers=self._headers(),
+                json=body,
+                timeout=self.request_timeout,
             )
         except requests.Timeout as exc:
             raise ProviderHTTPError("Provider API 逾時", "VLM-001") from exc
@@ -206,7 +207,9 @@ class OpenAICompatibleProvider(VisionProvider):
         if self.supports_json_schema:
             body["response_format"] = {
                 "type": "json_schema",
-                "json_schema": json_schema_for_stage(stage, caption_controls=caption_controls or self.caption_controls),
+                "json_schema": json_schema_for_stage(
+                    stage, caption_controls=caption_controls or self.caption_controls
+                ),
             }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
@@ -235,7 +238,9 @@ class OpenAICompatibleProvider(VisionProvider):
                         {
                             "invalid_json": invalid_content[:12000],
                             "error": validation_error,
-                            "schema": json_schema_for_stage(stage, caption_controls=caption_controls or self.caption_controls)["schema"],
+                            "schema": json_schema_for_stage(
+                                stage, caption_controls=caption_controls or self.caption_controls
+                            )["schema"],
                         },
                         ensure_ascii=False,
                     ),
@@ -246,7 +251,9 @@ class OpenAICompatibleProvider(VisionProvider):
         if self.supports_json_schema:
             body["response_format"] = {
                 "type": "json_schema",
-                "json_schema": json_schema_for_stage(stage, caption_controls=caption_controls or self.caption_controls),
+                "json_schema": json_schema_for_stage(
+                    stage, caption_controls=caption_controls or self.caption_controls
+                ),
             }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
@@ -323,7 +330,9 @@ class OpenAICompatibleProvider(VisionProvider):
     def validate_config(self) -> tuple[bool, str]:
         try:
             response = self.session.get(
-                self._url("/models"), headers=self._headers(), timeout=(min(10.0, self.timeout), min(self.timeout, 15))
+                self._url("/models"),
+                headers=self._headers(),
+                timeout=(min(10.0, self.timeout), min(self.timeout, 15)),
             )
         except requests.RequestException as exc:
             return False, f"無法連線：{exc.__class__.__name__}"

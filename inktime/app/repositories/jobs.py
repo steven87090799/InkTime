@@ -48,7 +48,9 @@ class JobRepository:
             if remaining is not None:
                 remaining -= len(rows)
 
-    def selection_preview(self, *, analysis_fingerprint: str | None, selection_mode: str = "pending", limit: int | None = None) -> dict:
+    def selection_preview(
+        self, *, analysis_fingerprint: str | None, selection_mode: str = "pending", limit: int | None = None
+    ) -> dict:
         """Bounded SQLite-only pending selector; it never touches image files."""
         fingerprint = str(analysis_fingerprint or "")
         active = "('pending','preparing','running','pausing','retrying')"
@@ -85,23 +87,47 @@ class JobRepository:
                 """,
                 [*params, fingerprint, fingerprint, fingerprint],
             ).fetchone()
-            missing = int(connection.execute("SELECT COUNT(*) FROM photos WHERE lifecycle_status='missing'").fetchone()[0])
+            missing = int(
+                connection.execute("SELECT COUNT(*) FROM photos WHERE lifecycle_status='missing'").fetchone()[
+                    0
+                ]
+            )
             scan = connection.execute(
                 "SELECT completed_at FROM scan_runs WHERE status IN ('completed','completed_with_warnings') "
                 "AND completed_at IS NOT NULL ORDER BY completed_at DESC,id DESC LIMIT 1"
             ).fetchone()
-            limited_to = min(int(row["pending_total"] or 0), max(0, int(limit))) if limit is not None else int(row["pending_total"] or 0)
-        return {**dict(row), "missing": missing, "pending_total": int(row["pending_total"] or 0),
-                "limited_to": limited_to, "failed": int(row["failed"] or 0), "stale": int(row["stale"] or 0),
-                "last_successful_scan_at": str(scan["completed_at"]) if scan else None,
-                "selection_mode": selection_mode}
+            limited_to = (
+                min(int(row["pending_total"] or 0), max(0, int(limit)))
+                if limit is not None
+                else int(row["pending_total"] or 0)
+            )
+        return {
+            **dict(row),
+            "missing": missing,
+            "pending_total": int(row["pending_total"] or 0),
+            "limited_to": limited_to,
+            "failed": int(row["failed"] or 0),
+            "stale": int(row["stale"] or 0),
+            "last_successful_scan_at": str(scan["completed_at"]) if scan else None,
+            "selection_mode": selection_mode,
+        }
 
-    def iter_pending_photo_ids(self, *, analysis_fingerprint: str | None, selection_mode: str = "pending", limit: int | None = None) -> Iterator[str]:
+    def iter_pending_photo_ids(
+        self, *, analysis_fingerprint: str | None, selection_mode: str = "pending", limit: int | None = None
+    ) -> Iterator[str]:
         fingerprint = str(analysis_fingerprint or "")
         active = "('pending','preparing','running','pausing','retrying')"
         current = "EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id AND a.analysis_fingerprint=?)"
         queued = f"EXISTS (SELECT 1 FROM job_items ji JOIN jobs j ON j.id=ji.job_id WHERE ji.photo_id=p.id AND ji.status IN ('pending','running','retrying') AND j.status IN {active} AND COALESCE(j.analysis_fingerprint,'')=?)"
-        predicate = "1=1" if selection_mode == "force_all" else (f"NOT {current} AND EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id)" if selection_mode == "stale_only" else f"NOT {current}")
+        predicate = (
+            "1=1"
+            if selection_mode == "force_all"
+            else (
+                f"NOT {current} AND EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id)"
+                if selection_mode == "stale_only"
+                else f"NOT {current}"
+            )
+        )
         last_score = float("inf")
         last_id = ""
         remaining = limit
@@ -169,7 +195,9 @@ class JobRepository:
                         dedupe_key,
                         selection_mode,
                         analysis_fingerprint,
-                        json.dumps(analysis_spec or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                        json.dumps(
+                            analysis_spec or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                        ),
                         int(force_recompute),
                     ),
                 )
@@ -423,17 +451,10 @@ class JobRepository:
 
     def can_access(self, job_id: str, user_id: str, *, administrator: bool) -> bool:
         with self.database.session() as connection:
-            row = connection.execute(
-                "SELECT created_by FROM jobs WHERE id=?", (job_id,)
-            ).fetchone()
-        return bool(
-            row is not None
-            and (administrator or str(row["created_by"] or "") == str(user_id))
-        )
+            row = connection.execute("SELECT created_by FROM jobs WHERE id=?", (job_id,)).fetchone()
+        return bool(row is not None and (administrator or str(row["created_by"] or "") == str(user_id)))
 
-    def can_access_background_result(
-        self, token: str, user_id: str, *, administrator: bool
-    ) -> bool:
+    def can_access_background_result(self, token: str, user_id: str, *, administrator: bool) -> bool:
         if administrator:
             return True
         marker = f"/background-results/{token}/"
@@ -632,9 +653,7 @@ class JobRepository:
                 connection.execute("ROLLBACK")
                 raise
 
-    def record_late_completion(
-        self, job_id: str, item_id: str, result: dict, actual_cost: float = 0
-    ) -> None:
+    def record_late_completion(self, job_id: str, item_id: str, result: dict, actual_cost: float = 0) -> None:
         """Timeout 後底層 Thread 才結束：只記錄一次診斷，不可轉成正式成功。"""
         now = utc_now()
         with self.database.transaction() as connection:

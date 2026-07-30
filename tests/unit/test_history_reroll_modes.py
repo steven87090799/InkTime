@@ -22,9 +22,7 @@ class FirstChoice:
         ("prefer_person", "person"),
     ],
 )
-def test_same_day_reroll_modes_are_bounded_and_do_not_fallback_dates(
-    app, monkeypatch, mode, expected
-):
+def test_same_day_reroll_modes_are_bounded_and_do_not_fallback_dates(app, monkeypatch, mode, expected):
     service = app.extensions["inktime_render_service"]
     rows = [
         {
@@ -43,9 +41,7 @@ def test_same_day_reroll_modes_are_bounded_and_do_not_fallback_dates(
     monkeypatch.setattr(service, "_iter_history_rows", lambda *args, **kwargs: iter(rows))
     monkeypatch.setattr(service, "_was_displayed", lambda photo_id: photo_id == "person")
 
-    result = service.reroll_history_day(
-        {"month_day": "07-22", "mode": mode, "top_n": 1}, rng=FirstChoice()
-    )
+    result = service.reroll_history_day({"month_day": "07-22", "mode": mode, "top_n": 1}, rng=FirstChoice())
 
     assert result["status"] == "ok"
     assert result["month_day"] == "07-22"

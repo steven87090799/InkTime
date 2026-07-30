@@ -52,10 +52,7 @@ fcntl = FcntlAdapter()
 
 
 class LockProvider(Protocol):
-    def exclusive(
-        self, path: Path, timeout_seconds: float = 10.0
-    ) -> ContextManager[IO[bytes]]:
-        ...
+    def exclusive(self, path: Path, timeout_seconds: float = 10.0) -> ContextManager[IO[bytes]]: ...
 
 
 class FcntlLockProvider:

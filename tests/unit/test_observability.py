@@ -77,13 +77,21 @@ def test_provider_and_release_incidents_recover_after_existing_data_recovers(tmp
         )
     service.tick()
     with database.session() as connection:
-        codes = {row[0] for row in connection.execute("SELECT error_code FROM job_errors WHERE resolved_at IS NULL")}
+        codes = {
+            row[0]
+            for row in connection.execute("SELECT error_code FROM job_errors WHERE resolved_at IS NULL")
+        }
         connection.execute("UPDATE api_usage SET status='completed',error_code=NULL")
-        connection.execute("UPDATE releases SET status='published',published_at=? WHERE id='release'", (now.isoformat(),))
+        connection.execute(
+            "UPDATE releases SET status='published',published_at=? WHERE id='release'", (now.isoformat(),)
+        )
     assert {"AI-PROVIDER-TIMEOUT", "RELEASE-STUCK"} <= codes
     service.tick()
     with database.session() as connection:
-        unresolved = {row[0] for row in connection.execute("SELECT error_code FROM job_errors WHERE resolved_at IS NULL")}
+        unresolved = {
+            row[0]
+            for row in connection.execute("SELECT error_code FROM job_errors WHERE resolved_at IS NULL")
+        }
     assert "AI-PROVIDER-TIMEOUT" not in unresolved
     assert "RELEASE-STUCK" not in unresolved
 
@@ -111,26 +119,39 @@ def test_retention_50000_rows_is_batched_and_preserves_unresolved_errors(tmp_pat
     service.cleanup(now)
     with database.session() as connection:
         remaining = int(connection.execute("SELECT COUNT(*) FROM activity_events").fetchone()[0])
-        kept = int(connection.execute("SELECT COUNT(*) FROM activity_events WHERE error_code='KEEP'").fetchone()[0])
+        kept = int(
+            connection.execute("SELECT COUNT(*) FROM activity_events WHERE error_code='KEEP'").fetchone()[0]
+        )
         first_counts = {
             row[0]: int(row[1])
             for row in connection.execute("SELECT severity,COUNT(*) FROM activity_events GROUP BY severity")
         }
-        connection.execute("UPDATE observability_state SET updated_at=? WHERE key='cleanup'", ((now - timedelta(hours=2)).isoformat(),))
+        connection.execute(
+            "UPDATE observability_state SET updated_at=? WHERE key='cleanup'",
+            ((now - timedelta(hours=2)).isoformat(),),
+        )
     service.cleanup(now)
     with database.session() as connection:
         after = int(connection.execute("SELECT COUNT(*) FROM activity_events").fetchone()[0])
-        unresolved = int(connection.execute("SELECT COUNT(*) FROM job_errors WHERE error_code='KEEP' AND resolved_at IS NULL").fetchone()[0])
+        unresolved = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM job_errors WHERE error_code='KEEP' AND resolved_at IS NULL"
+            ).fetchone()[0]
+        )
         second_counts = {
             row[0]: int(row[1])
             for row in connection.execute("SELECT severity,COUNT(*) FROM activity_events GROUP BY severity")
         }
-        plan = connection.execute("EXPLAIN QUERY PLAN SELECT id FROM activity_events WHERE severity='ERROR' ORDER BY id DESC LIMIT 200").fetchall()
+        plan = connection.execute(
+            "EXPLAIN QUERY PLAN SELECT id FROM activity_events WHERE severity='ERROR' ORDER BY id DESC LIMIT 200"
+        ).fetchall()
     wal = database.path.with_name(database.path.name + "-wal")
     # A single aggregated capacity warning is intentionally retained, rather than looping writes.
     assert remaining == 48_001 and after == 46_001
     assert first_counts["DEBUG"] < first_counts["INFO"]
     assert second_counts["DEBUG"] < first_counts["DEBUG"]
     assert kept == 20_000 and unresolved == 1
-    assert database.path.stat().st_size >= before and (not wal.exists() or wal.stat().st_size < 64 * 1024 * 1024)
+    assert database.path.stat().st_size >= before and (
+        not wal.exists() or wal.stat().st_size < 64 * 1024 * 1024
+    )
     assert any("idx_activity_events" in str(tuple(row)) for row in plan)

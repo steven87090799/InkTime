@@ -19,12 +19,27 @@ def _analyzed_photo(app, root: Path, photo_id: str, size: tuple[int, int], captu
             (photo_id, library_id, f"{photo_id}.jpg", *size, captured_at, captured_at, captured_at),
         )
     photos.save_analysis(
-        photo_id, None, "local", "local", "test",
-        {"schema_version": 1, "caption": "測試", "types": ["人物"], "memory_score": 99,
-         "beauty_score": 99, "technical_quality_score": 99, "emotion_score": 99,
-         "side_caption": "這是一段足夠長的相框回憶短句，用來驗證 Footer 文字會被安全截斷。",
-         "should_keep": True, "sensitive": False, "reason": "測試"}, "{}",
-        ranking_score=99, final_ranking_score=99,
+        photo_id,
+        None,
+        "local",
+        "local",
+        "test",
+        {
+            "schema_version": 1,
+            "caption": "測試",
+            "types": ["人物"],
+            "memory_score": 99,
+            "beauty_score": 99,
+            "technical_quality_score": 99,
+            "emotion_score": 99,
+            "side_caption": "這是一段足夠長的相框回憶短句，用來驗證 Footer 文字會被安全截斷。",
+            "should_keep": True,
+            "sensitive": False,
+            "reason": "測試",
+        },
+        "{}",
+        ranking_score=99,
+        final_ranking_score=99,
     )
 
 
@@ -199,7 +214,10 @@ def test_each_manifest_binds_the_release_dither_and_its_own_profile_plan(app, tm
         assert {plan["profile"] for plan in options["render_plans"]} == {manifest["render_profile"]}
         assert {plan["effective_dither"] for plan in options["render_plans"]} == {manifest["dither"]}
         assert all(plan["aggregation_scope"] == "release" for plan in options["render_plans"])
-        assert any(risk["photo_id"] == "high-risk" and risk["risk"] == "high" for risk in options["quantization_plan"]["photo_risks"])
+        assert any(
+            risk["photo_id"] == "high-risk" and risk["risk"] == "high"
+            for risk in options["quantization_plan"]["photo_risks"]
+        )
 
 
 def test_adaptive_secondary_risk_controls_the_preview_dither_plan(app, tmp_path):
@@ -220,16 +238,11 @@ def test_adaptive_secondary_risk_controls_the_preview_dither_plan(app, tmp_path)
         )
 
     service = app.extensions["inktime_render_service"]
-    fingerprint = service.preview_fingerprint(
-        "primary", layout="adaptive_memory", orientation="landscape"
-    )
+    fingerprint = service.preview_fingerprint("primary", layout="adaptive_memory", orientation="landscape")
     plan = fingerprint["render_plan"]
 
     assert plan["secondary_photo_id"] == "secondary"
     assert plan["effective_dither"] == "photo_smooth"
     assert plan["override_source"] == "auto_photo_smooth"
     assert fingerprint["render_settings"]["effective_dither"] == "photo_smooth"
-    assert any(
-        risk == {"photo_id": "secondary", "risk": "high"}
-        for risk in plan["photo_risks"]
-    )
+    assert any(risk == {"photo_id": "secondary", "risk": "high"} for risk in plan["photo_risks"])

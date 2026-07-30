@@ -38,9 +38,7 @@ def test_weather_service_is_opt_in_cached_and_returns_traditional_chinese(app):
     session = _Session()
     service = WeatherService(settings, session=session)
     assert service.current() is None
-    settings.update(
-        "render.weather_enabled", True, changed_by="test", source_ip="127.0.0.1"
-    )
+    settings.update("render.weather_enabled", True, changed_by="test", source_ip="127.0.0.1")
 
     first = service.current()
     second = service.current()

@@ -95,17 +95,11 @@ def _phash(image: Image.Image) -> str:
     coefficients: list[float] = []
     # 以可分離 DCT 取代每個係數重算 32×32 次三角函數；結果等價但 CPU 工作量更低。
     x_projection = [
-        [
-            sum(pixels[y * 32 + x] * _DCT_COS[u][x] for x in range(32))
-            for y in range(32)
-        ]
-        for u in range(8)
+        [sum(pixels[y * 32 + x] * _DCT_COS[u][x] for x in range(32)) for y in range(32)] for u in range(8)
     ]
     for u in range(8):
         for v in range(8):
-            coefficients.append(
-                sum(x_projection[u][y] * _DCT_COS[v][y] for y in range(32))
-            )
+            coefficients.append(sum(x_projection[u][y] * _DCT_COS[v][y] for y in range(32)))
     median = sorted(coefficients[1:])[len(coefficients[1:]) // 2]
     return _bits_to_hex([value > median for value in coefficients])
 
@@ -123,11 +117,7 @@ def _blur_variance(image: Image.Image) -> float:
     for y in range(1, height - 1):
         for x in range(1, width - 1):
             value = (
-                4 * pixels[x, y]
-                - pixels[x - 1, y]
-                - pixels[x + 1, y]
-                - pixels[x, y - 1]
-                - pixels[x, y + 1]
+                4 * pixels[x, y] - pixels[x - 1, y] - pixels[x + 1, y] - pixels[x, y - 1] - pixels[x, y + 1]
             )
             count += 1
             delta = value - mean
@@ -156,7 +146,9 @@ def _safe_exif_json(values: dict[str, Any]) -> str:
     for key in sorted(values):
         value = values[key]
         if isinstance(value, bytes):
-            safe[key] = {"type": "bytes", "length": len(value)} if len(value) > _EXIF_BYTES_MAX else value.hex()
+            safe[key] = (
+                {"type": "bytes", "length": len(value)} if len(value) > _EXIF_BYTES_MAX else value.hex()
+            )
         else:
             text = str(value)
             safe[key] = text[:4096]
@@ -210,9 +202,7 @@ class PhotoPreprocessor:
                 else None
             )
             captured = (
-                exif_named.get("DateTimeOriginal") or exif_named.get("DateTime")
-                if include_metadata
-                else None
+                exif_named.get("DateTimeOriginal") or exif_named.get("DateTime") if include_metadata else None
             )
             captured_at = None
             capture_date_status = "missing"
@@ -285,12 +275,9 @@ class PhotoPreprocessor:
                 filename = path.name.casefold()
                 software = str(exif_named.get("Software", "")).casefold()
                 filename_match = any(
-                    marker in filename
-                    for marker in ("screenshot", "screen shot", "截圖", "螢幕快照")
+                    marker in filename for marker in ("screenshot", "screen shot", "截圖", "螢幕快照")
                 )
-                software_match = any(
-                    marker in software for marker in ("screenshot", "screen capture")
-                )
+                software_match = any(marker in software for marker in ("screenshot", "screen capture"))
                 perceptual_hash = _phash(image)
                 difference_hash = _dhash(image)
                 brightness = float(stat.mean[0])

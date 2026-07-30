@@ -3,6 +3,7 @@
 The mode is deliberately independent from provider configuration.  A configured
 API key must never make an installation start paid analysis by itself.
 """
+
 from __future__ import annotations
 
 EXECUTION_MODES = frozenset({"disabled", "local_only", "local_with_manual_ai", "automatic_ai"})

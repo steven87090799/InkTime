@@ -107,9 +107,7 @@ def test_cross_field_validation_uses_current_plus_partial_update(client, app):
     assert invalid.status_code == 200
     assert invalid.json["valid"] is False
     assert "min ≤ target ≤ max" in invalid.json["validation_errors"][0]
-    assert app.extensions["inktime_settings_repository"].get(
-        "analysis.caption_min_chars"
-    ) == 120
+    assert app.extensions["inktime_settings_repository"].get("analysis.caption_min_chars") == 120
 
     valid = client.post(
         "/api/v1/settings",
@@ -185,9 +183,7 @@ def test_private_locations_are_redacted_from_snapshot_and_export(client, app):
         },
         confirm=True,
     )
-    snapshot = app.extensions["inktime_settings_repository"].snapshot(
-        response.json["snapshot_id"]
-    )
+    snapshot = app.extensions["inktime_settings_repository"].snapshot(response.json["snapshot_id"])
     assert "home_latitude" not in snapshot["before"]
     assert "home_latitude" not in snapshot["after"]
     assert all(item["old_value"] == {"status": "已設定"} for item in snapshot["items"])
@@ -228,9 +224,7 @@ def test_viewer_html_and_snapshot_apis_never_receive_sensitive_values(client, ap
     )
     login(client, "viewer-sensitive", "viewer-password-long")
     settings_html = client.get("/settings").get_data(as_text=True)
-    snapshot_body = client.get(
-        f"/api/v1/settings/snapshots/{snapshot_id}"
-    ).get_data(as_text=True)
+    snapshot_body = client.get(f"/api/v1/settings/snapshots/{snapshot_id}").get_data(as_text=True)
     snapshot_list = client.get("/api/v1/settings/snapshots").get_data(as_text=True)
     metadata = client.get("/api/v1/settings/metadata").get_data(as_text=True)
 
@@ -286,9 +280,9 @@ def test_webhook_url_path_query_and_token_never_enter_snapshot_or_export(client,
     assert exported.headers["Cache-Control"] == "no-store"
     assert "/private/path" not in exported.get_data(as_text=True)
     assert "do-not-store" not in exported.get_data(as_text=True)
-    assert json.loads(exported.get_data(as_text=True))["sensitive_status"][
-        "notification.webhook_url"
-    ] == {"configured": True}
+    assert json.loads(exported.get_data(as_text=True))["sensitive_status"]["notification.webhook_url"] == {
+        "configured": True
+    }
 
 
 def test_rollback_preview_and_apply_create_new_snapshot(client, app):
@@ -336,17 +330,23 @@ def test_rollback_preview_is_exact_changed_keys_diff_and_marks_later_overwrite(c
         {"analysis.concurrency": 2},
         confirm=True,
     ).json["snapshot_id"]
-    assert _post(
-        client,
-        "/api/v1/settings",
-        {"general.timezone": "UTC"},
-    ).status_code == 200
-    assert _post(
-        client,
-        "/api/v1/settings",
-        {"analysis.concurrency": 3},
-        confirm=True,
-    ).status_code == 200
+    assert (
+        _post(
+            client,
+            "/api/v1/settings",
+            {"general.timezone": "UTC"},
+        ).status_code
+        == 200
+    )
+    assert (
+        _post(
+            client,
+            "/api/v1/settings",
+            {"analysis.concurrency": 3},
+            confirm=True,
+        ).status_code
+        == 200
+    )
 
     preview = _post(
         client,
@@ -537,9 +537,7 @@ def test_runtime_unwired_setting_is_read_only_for_api_import_and_ui(client, app)
     assert preview.status_code == 200
     assert preview.json["changes"] == {}
     assert preview.json["blocked_keys"] == ["observability.debug_level"]
-    assert "尚未接上 Runtime" in preview.json["blocked_reasons"][
-        "observability.debug_level"
-    ]
+    assert "尚未接上 Runtime" in preview.json["blocked_reasons"]["observability.debug_level"]
 
     body = client.get("/settings").get_data(as_text=True)
     assert 'data-key="observability.debug_level"' in body
@@ -550,22 +548,14 @@ def test_runtime_unwired_setting_is_read_only_for_api_import_and_ui(client, app)
 
 def test_device_override_and_effective_scope_metadata_use_actual_whitelists():
     allowed = {
-        key
-        for key, definition in SETTING_DEFINITIONS.items()
-        if definition["device_override_allowed"]
+        key for key, definition in SETTING_DEFINITIONS.items() if definition["device_override_allowed"]
     }
     assert allowed == DEVICE_OVERRIDE_KEYS
     assert SETTING_DEFINITIONS["render.layout"]["device_override_allowed"] is True
     assert SETTING_DEFINITIONS["render.dither"]["device_override_allowed"] is False
     assert SETTING_DEFINITIONS["render.layout"]["effective_scope"] == "next_render"
-    assert (
-        SETTING_DEFINITIONS["device.default_schedule"]["effective_scope"]
-        == "future_device_only"
-    )
-    assert (
-        SETTING_DEFINITIONS["observability.debug_level"]["effective_scope"]
-        == "not_wired"
-    )
+    assert SETTING_DEFINITIONS["device.default_schedule"]["effective_scope"] == "future_device_only"
+    assert SETTING_DEFINITIONS["observability.debug_level"]["effective_scope"] == "not_wired"
     assert SETTING_DEFINITIONS["render.layout"]["existing_release_unchanged"] is True
     assert "建立新 Release" in SETTING_DEFINITIONS["render.layout"]["effective_note"]
 
@@ -599,16 +589,15 @@ def test_snapshot_retention_is_bounded_and_keeps_latest_rollback_source(app):
             """
         ).fetchone()
         assert latest_rollback["rollback_source_snapshot_id"] == first
-        assert connection.execute(
-            "SELECT COUNT(*) FROM settings_snapshots WHERE id=?", (first,)
-        ).fetchone()[0] == 1
+        assert (
+            connection.execute("SELECT COUNT(*) FROM settings_snapshots WHERE id=?", (first,)).fetchone()[0]
+            == 1
+        )
 
 
 def test_viewer_has_read_only_governed_ui(client, app):
     create_admin(app)
-    app.extensions["inktime_auth_repository"].create_user(
-        "viewer", "viewer-password-long", "viewer"
-    )
+    app.extensions["inktime_auth_repository"].create_user("viewer", "viewer-password-long", "viewer")
     login(client, "viewer", "viewer-password-long")
     body = client.get("/settings").get_data(as_text=True)
     assert "設定控制中心" in body

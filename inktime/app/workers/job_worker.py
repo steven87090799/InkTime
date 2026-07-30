@@ -181,9 +181,7 @@ class BoundedJobWorker:
                 if job is None or job["status"] not in {"running", "retrying", "pausing"}:
                     break
                 if not self.stop_event.is_set() and job["status"] in {"running", "retrying"}:
-                    claimed = self.repository.claim(
-                        job_id, self.worker_id, self.concurrency - len(tasks)
-                    )
+                    claimed = self.repository.claim(job_id, self.worker_id, self.concurrency - len(tasks))
                     for row in claimed:
                         item = dict(row)
                         receiver, sender = context.Pipe(duplex=False)
@@ -195,9 +193,7 @@ class BoundedJobWorker:
                         process.start()
                         sender.close()
                         item_id = str(item["id"])
-                        tasks[item_id] = _ChildTask(
-                            item_id, process, receiver, time.monotonic()
-                        )
+                        tasks[item_id] = _ChildTask(item_id, process, receiver, time.monotonic())
                         self.child_active += 1
                         self.child_active_max = max(self.child_active_max, self.child_active)
                     self.max_observed_futures = max(self.max_observed_futures, len(tasks))
@@ -226,9 +222,7 @@ class BoundedJobWorker:
                                 job_id, str(completed_id), dict(result), float(cost)
                             )
                         else:
-                            self._record_failure(
-                                job_id, item_id, JobChildError(str(message[1]))
-                            )
+                            self._record_failure(job_id, item_id, JobChildError(str(message[1])))
                         self._record_processed()
                         progressed = True
                         continue
@@ -236,9 +230,7 @@ class BoundedJobWorker:
                         self.child_timeouts += 1
                         self._stop_child(task)
                         tasks.pop(item_id, None)
-                        self._record_failure(
-                            job_id, item_id, JobHardTimeoutError("child process timeout")
-                        )
+                        self._record_failure(job_id, item_id, JobHardTimeoutError("child process timeout"))
                         self._record_processed()
                         progressed = True
 
@@ -258,9 +250,7 @@ class BoundedJobWorker:
             # children. Their late pipe results are deliberately never consumed.
             for item_id, task in list(tasks.items()):
                 self._stop_child(task)
-                self._record_failure(
-                    job_id, item_id, JobChildError("worker shutdown")
-                )
+                self._record_failure(job_id, item_id, JobChildError("worker shutdown"))
             job = self.repository.get(job_id)
             if job is not None and job["status"] == "pausing":
                 self.repository.acknowledge_pause(job_id)
@@ -314,11 +304,17 @@ class BoundedJobWorker:
                     # 可能正在等待指數退避；單次執行先交還 Scheduler。
                     break
 
-                done, _ = wait(futures, timeout=min(30, self.timeout_seconds or 30), return_when=FIRST_COMPLETED)
+                done, _ = wait(
+                    futures, timeout=min(30, self.timeout_seconds or 30), return_when=FIRST_COMPLETED
+                )
                 if not done:
                     self.repository.renew_leases(job_id, self.worker_id)
                     if self.timeout_seconds:
-                        expired = [future for future, (_item_id, started) in futures.items() if time.monotonic() - started >= self.timeout_seconds]
+                        expired = [
+                            future
+                            for future, (_item_id, started) in futures.items()
+                            if time.monotonic() - started >= self.timeout_seconds
+                        ]
                         for future in expired:
                             timed_out.add(future)
                             timeout_triggered = True
@@ -334,9 +330,7 @@ class BoundedJobWorker:
                         self._record_failure(job_id, item_id, exc)
                     else:
                         if future in timed_out:
-                            self.repository.record_late_completion(
-                                job_id, completed_id, result, cost
-                            )
+                            self.repository.record_late_completion(job_id, completed_id, result, cost)
                         else:
                             if self.result_callback:
                                 self.result_callback(result)

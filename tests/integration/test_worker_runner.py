@@ -55,7 +55,9 @@ def test_production_runner_completes_local_job_without_provider(app, tmp_path, m
     monkeypatch.setattr(
         app.extensions["inktime_provider_service"],
         "build_router",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("local job must not load Provider secrets")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("local job must not load Provider secrets")
+        ),
     )
     job_id = service.create_analysis_job(
         name="本地工作",
@@ -83,21 +85,30 @@ def test_runner_permanently_rejects_a_frozen_disabled_analysis_plan(app, tmp_pat
     settings = app.extensions["inktime_settings_repository"]
     settings.update("analysis.execution_mode", "disabled", changed_by="test", source_ip="test")
     plan = app.extensions["inktime_analysis_service"].build_plan(
-        strategy="high_quality", provider_route=[],
+        strategy="high_quality",
+        provider_route=[],
         scoring_profile=dict(app.extensions["inktime_scoring_repository"].current()),
     )
     monkeypatch.setattr(
-        app.extensions["inktime_analysis_service"], "analyze_photo",
+        app.extensions["inktime_analysis_service"],
+        "analyze_photo",
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("disabled job must not analyze")),
     )
     monkeypatch.setattr(
-        app.extensions["inktime_provider_service"], "build_router",
+        app.extensions["inktime_provider_service"],
+        "build_router",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("disabled job must not build router")),
     )
     jobs = app.extensions["inktime_job_service"]
     job_id = jobs.create_analysis_job(
-        name="frozen disabled", strategy="high_quality", settings={}, created_by="tester",
-        budget_limit=None, photo_ids=[photo_id], analysis_fingerprint=fingerprint(plan), analysis_spec=plan,
+        name="frozen disabled",
+        strategy="high_quality",
+        settings={},
+        created_by="tester",
+        budget_limit=None,
+        photo_ids=[photo_id],
+        analysis_fingerprint=fingerprint(plan),
+        analysis_spec=plan,
     )
     jobs.start(job_id)
     assert WorkerRunner(app).run_once() == 1
@@ -165,7 +176,9 @@ def test_runner_uses_the_frozen_job_plan_after_settings_change(app, tmp_path, mo
     settings = app.extensions["inktime_settings_repository"]
     settings.update("analysis.ai_mode", "eligible", changed_by="test", source_ip="127.0.0.1")
     analysis = app.extensions["inktime_analysis_service"]
-    route = [{"provider_id": "frozen-provider", "display_name": "Frozen", "priority": 1, "config_revision": "v1"}]
+    route = [
+        {"provider_id": "frozen-provider", "display_name": "Frozen", "priority": 1, "config_revision": "v1"}
+    ]
     plan = analysis.build_plan(
         strategy="high_quality",
         provider_route=route,

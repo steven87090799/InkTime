@@ -60,13 +60,21 @@ def pair_score(primary: dict[str, Any], candidate: dict[str, Any], *, desired_or
         score += 30
         related = True
     try:
-        delta = abs((datetime.fromisoformat(str(primary["captured_at"]).replace("Z", "+00:00")) - datetime.fromisoformat(str(candidate["captured_at"]).replace("Z", "+00:00"))).total_seconds())
+        delta = abs(
+            (
+                datetime.fromisoformat(str(primary["captured_at"]).replace("Z", "+00:00"))
+                - datetime.fromisoformat(str(candidate["captured_at"]).replace("Z", "+00:00"))
+            ).total_seconds()
+        )
         if delta <= 2 * 3600:
             score += 25
             related = True
     except (KeyError, TypeError, ValueError):
         pass
-    if primary.get("city") and str(primary.get("city")).casefold() == str(candidate.get("city") or "").casefold():
+    if (
+        primary.get("city")
+        and str(primary.get("city")).casefold() == str(candidate.get("city") or "").casefold()
+    ):
         score += 20
         related = True
     elif (distance := _distance_km(primary, candidate)) is not None and distance <= 25:
@@ -82,10 +90,16 @@ def pair_score(primary: dict[str, Any], candidate: dict[str, Any], *, desired_or
     return score
 
 
-def select_pair_candidate(primary: dict[str, Any], candidates: list[dict[str, Any]], *, frame_orientation: str) -> dict[str, Any] | None:
+def select_pair_candidate(
+    primary: dict[str, Any], candidates: list[dict[str, Any]], *, frame_orientation: str
+) -> dict[str, Any] | None:
     desired = pair_orientation(frame_orientation)
-    scored = [(pair_score(primary, candidate, desired_orientation=desired), candidate) for candidate in candidates]
+    scored = [
+        (pair_score(primary, candidate, desired_orientation=desired), candidate) for candidate in candidates
+    ]
     available = [(score, candidate) for score, candidate in scored if score is not None]
     if not available:
         return None
-    return max(available, key=lambda item: (item[0], str(item[1].get("captured_at") or ""), str(item[1].get("id"))))[1]
+    return max(
+        available, key=lambda item: (item[0], str(item[1].get("captured_at") or ""), str(item[1].get("id")))
+    )[1]

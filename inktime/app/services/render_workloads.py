@@ -39,9 +39,7 @@ MAX_INPUT_PIXELS = 40_000_000
 
 def _atomic_png_file(path: Path, image: Image.Image) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent
-    )
+    handle, temporary_name = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent)
     os.close(handle)
     temporary = Path(temporary_name)
     try:
@@ -117,9 +115,7 @@ def _prepare_compare_child(
         "color_distance": result.options["color_distance"],
         "linear_light": bool(result.options.get("linear_light")),
         "palette_version": profile.palette_version,
-        "palette": RenderWorkloadService._palette_statistics(
-            result.encoded.preview, result.encoded.palette
-        ),
+        "palette": RenderWorkloadService._palette_statistics(result.encoded.preview, result.encoded.palette),
         "publish_source": "server_original_upload_only",
         "model": "disabled",
         "cache_hit": False,
@@ -252,17 +248,11 @@ def _prepare_library_preview_child(
             color_distance=str(arguments["color_distance"]),
             strength=float(arguments["dither_strength"]),
         ).preview
-    layout_key = str(
-        arguments.get("layout")
-        or settings_repository.get("render.layout", "photo_info")
-    )
+    layout_key = str(arguments.get("layout") or settings_repository.get("render.layout", "photo_info"))
     orientation_key = str(
-        arguments.get("orientation")
-        or settings_repository.get("render.frame_orientation", "portrait")
+        arguments.get("orientation") or settings_repository.get("render.frame_orientation", "portrait")
     )
-    if (
-        "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
-    ) == "landscape":
+    if ("portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key) == "landscape":
         image = image.transpose(Image.Transpose.ROTATE_90)
     _atomic_png_file(prepared / "preview.png", image)
     return {
@@ -277,8 +267,13 @@ def _prepare_library_preview_child(
 
 
 def _prepare_dual_pair_compare_child(
-    *, settings: dict[str, Any], database_path: str, prepared_path: str,
-    font_root: str, font_builtin_root: str, location_csv: str,
+    *,
+    settings: dict[str, Any],
+    database_path: str,
+    prepared_path: str,
+    font_root: str,
+    font_builtin_root: str,
+    location_csv: str,
 ) -> dict[str, Any]:
     """Render the four frozen dual-photo plans in one isolated renderer child."""
     prepared = Path(prepared_path)
@@ -287,26 +282,43 @@ def _prepare_dual_pair_compare_child(
     settings_repository = SettingsRepository(database)
     publisher = AtomicReleasePublisher(prepared / "release-sandbox")
     service = RenderService(
-        database, PhotoRepository(database), settings_repository,
-        FontManager(Path(font_root), Path(font_builtin_root)), publisher,
-        RenderCandidateRepository(database), ReleaseCoordinator(database, publisher),
-        LocationResolver(Path(location_csv)), WeatherService(settings_repository),
+        database,
+        PhotoRepository(database),
+        settings_repository,
+        FontManager(Path(font_root), Path(font_builtin_root)),
+        publisher,
+        RenderCandidateRepository(database),
+        ReleaseCoordinator(database, publisher),
+        LocationResolver(Path(location_csv)),
+        WeatherService(settings_repository),
     )
     previews: list[dict[str, Any]] = []
     for index, plan in enumerate(settings["plans"]):
         image = service._render_plan_image(dict(plan))
         image = encode_image(
-            image, profile_key=str(plan["profile"]), dither=str(plan["effective_dither"]),
-            color_distance=str(settings["color_distance"]), strength=float(settings["dither_strength"]),
+            image,
+            profile_key=str(plan["profile"]),
+            dither=str(plan["effective_dither"]),
+            color_distance=str(settings["color_distance"]),
+            strength=float(settings["dither_strength"]),
         ).preview
         if str(plan["orientation"]) == "landscape":
             image = image.transpose(Image.Transpose.ROTATE_90)
         name = f"preview_{index}.png"
         _atomic_png_file(prepared / name, image)
-        previews.append({"name": name, "layout": plan["layout"], "orientation": plan["orientation"],
-                         "profile": plan["profile"], "effective_dither": plan["effective_dither"],
-                         "primary_photo_id": plan["primary_photo_id"], "secondary_photo_id": plan["secondary_photo_id"],
-                         "primary_caption": plan["primary_caption"], "secondary_caption": plan.get("secondary_caption")})
+        previews.append(
+            {
+                "name": name,
+                "layout": plan["layout"],
+                "orientation": plan["orientation"],
+                "profile": plan["profile"],
+                "effective_dither": plan["effective_dither"],
+                "primary_photo_id": plan["primary_photo_id"],
+                "secondary_photo_id": plan["secondary_photo_id"],
+                "primary_caption": plan["primary_caption"],
+                "secondary_caption": plan.get("secondary_caption"),
+            }
+        )
     return {"stage": "dual_pair_compare_completed", "previews": previews}
 
 
@@ -357,16 +369,12 @@ class RenderWorkloadService:
         self._atomic_png(destination, image.convert("RGB"))
         return token, sha256(destination.read_bytes()).hexdigest()
 
-    def save_upload(
-        self, stream: BinaryIO, *, suffix: str, max_bytes: int
-    ) -> tuple[str, str]:
+    def save_upload(self, stream: BinaryIO, *, suffix: str, max_bytes: int) -> tuple[str, str]:
         if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}:
             raise ValueError("IMG-002 照片格式不支援")
         token = uuid4().hex
         destination = self.input_root / f"{token}{suffix}"
-        handle, temporary_name = tempfile.mkstemp(
-            prefix=f".{token}-", suffix=".upload", dir=self.input_root
-        )
+        handle, temporary_name = tempfile.mkstemp(prefix=f".{token}-", suffix=".upload", dir=self.input_root)
         os.close(handle)
         temporary = Path(temporary_name)
         digest = sha256()
@@ -393,9 +401,7 @@ class RenderWorkloadService:
         if not source.is_file() or source.stat().st_size > int(max_bytes):
             raise ValueError("IMG-002 照片不可超過 25 MiB")
         with source.open("rb") as stream:
-            token, digest = self.save_upload(
-                stream, suffix=suffix, max_bytes=max_bytes
-            )
+            token, digest = self.save_upload(stream, suffix=suffix, max_bytes=max_bytes)
         return token, digest, suffix
 
     def input_path(self, token: str, *, suffix: str) -> Path:
@@ -439,9 +445,7 @@ class RenderWorkloadService:
             source_connection.backup(snapshot_connection)
             snapshot_connection.execute("DELETE FROM secrets")
             snapshot_connection.execute("UPDATE users SET password_hash=''")
-            snapshot_connection.execute(
-                "UPDATE devices SET token_hash='preview-' || id"
-            )
+            snapshot_connection.execute("UPDATE devices SET token_hash='preview-' || id")
             snapshot_connection.commit()
         finally:
             snapshot_connection.close()
@@ -492,9 +496,7 @@ class RenderWorkloadService:
         try:
             prepared.mkdir(mode=0o700, parents=True)
             snapshot_path = prepared / "render.db"
-            self._private_database_snapshot(
-                Path(render_service.database.path), snapshot_path
-            )
+            self._private_database_snapshot(Path(render_service.database.path), snapshot_path)
             if cancelled():
                 raise ProcessCallError("library preview lease lost")
             child_result = self.process_boundary.call(
@@ -547,10 +549,14 @@ class RenderWorkloadService:
         finally:
             shutil.rmtree(prepared, ignore_errors=True)
 
-    def dual_pair_compare(self, settings: dict[str, Any], commit_context: dict[str, str], *, render_service) -> dict[str, Any]:
+    def dual_pair_compare(
+        self, settings: dict[str, Any], commit_context: dict[str, str], *, render_service
+    ) -> dict[str, Any]:
         """One frozen background job produces all four formal renderer previews."""
         context = dict(commit_context)
-        if not self.jobs.can_commit_item(context["job_id"], context["item_id"], context["worker_id"], context["idempotency_key"]):
+        if not self.jobs.can_commit_item(
+            context["job_id"], context["item_id"], context["worker_id"], context["idempotency_key"]
+        ):
             raise ProcessCallError("dual preview lease lost")
         prepared = self.prepared_root / uuid4().hex
         try:
@@ -558,11 +564,20 @@ class RenderWorkloadService:
             snapshot_path = prepared / "render.db"
             self._private_database_snapshot(Path(render_service.database.path), snapshot_path)
             result = self.process_boundary.call(
-                _prepare_dual_pair_compare_child, timeout_seconds=float(settings.get("timeout_seconds", 45)),
-                kwargs={"settings": {"plans": list(settings["plans"]), "color_distance": settings["color_distance"], "dither_strength": settings["dither_strength"]},
-                        "database_path": str(snapshot_path), "prepared_path": str(prepared),
-                        "font_root": str(render_service.fonts.root), "font_builtin_root": str(render_service.fonts.builtin_root),
-                        "location_csv": str(render_service.locations.csv_path)},
+                _prepare_dual_pair_compare_child,
+                timeout_seconds=float(settings.get("timeout_seconds", 45)),
+                kwargs={
+                    "settings": {
+                        "plans": list(settings["plans"]),
+                        "color_distance": settings["color_distance"],
+                        "dither_strength": settings["dither_strength"],
+                    },
+                    "database_path": str(snapshot_path),
+                    "prepared_path": str(prepared),
+                    "font_root": str(render_service.fonts.root),
+                    "font_builtin_root": str(render_service.fonts.builtin_root),
+                    "location_csv": str(render_service.locations.csv_path),
+                },
                 process_name="inktime-dual-pair-preview-child",
             )
             previews = []
@@ -577,15 +592,11 @@ class RenderWorkloadService:
     @staticmethod
     def _atomic_json(path: Path, value: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        handle, temporary_name = tempfile.mkstemp(
-            prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent
-        )
+        handle, temporary_name = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent)
         os.close(handle)
         temporary = Path(temporary_name)
         try:
-            temporary.write_text(
-                json.dumps(value, ensure_ascii=False, sort_keys=True), encoding="utf-8"
-            )
+            temporary.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True), encoding="utf-8")
             os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
@@ -658,11 +669,13 @@ class RenderWorkloadService:
         except Exception:
             shutil.rmtree(prepared, ignore_errors=True)
             raise
-        response.update({
-            "original": self._result_url(token, "original"),
-            "legacy": self._result_url(token, "legacy"),
-            "new": self._result_url(token, "new"),
-        })
+        response.update(
+            {
+                "original": self._result_url(token, "original"),
+                "legacy": self._result_url(token, "legacy"),
+                "new": self._result_url(token, "new"),
+            }
+        )
         self._atomic_json(self.result_root / token / "result.json", response)
         self.delete_input(input_token, suffix=suffix)
         self.cleanup()
@@ -692,9 +705,11 @@ class RenderWorkloadService:
             raise
         self.delete_input(token, suffix=suffix)
         self.cleanup()
-        result.update({
-            "preview": self._result_url(token, "preview"),
-        })
+        result.update(
+            {
+                "preview": self._result_url(token, "preview"),
+            }
+        )
         return result
 
     def test_release(self, settings: dict, commit_context: dict[str, str]) -> dict:
@@ -721,9 +736,7 @@ class RenderWorkloadService:
                 raise ValueError("DEVICE-006 測試色盤與裝置面板 Profile 不相容")
             return dict(current)
 
-        def prepare_preset() -> tuple[
-            dict | None, str | None, bool | None, str | None
-        ]:
+        def prepare_preset() -> tuple[dict | None, str | None, bool | None, str | None]:
             """Prepare optional preset data without making the release depend on it."""
 
             if not bool(settings.get("save_preset")):
@@ -731,22 +744,15 @@ class RenderWorkloadService:
             try:
                 configuration = dict(settings["configuration"])
                 try:
-                    existing = json.loads(
-                        str(self.settings.get("render.custom_photo_presets", "{}"))
-                    )
+                    existing = json.loads(str(self.settings.get("render.custom_photo_presets", "{}")))
                 except (TypeError, ValueError, json.JSONDecodeError):
                     existing = {}
                 if not isinstance(existing, dict):
                     existing = {}
-                preset_id = "custom-" + sha256(
-                    context["idempotency_key"].encode("utf-8")
-                ).hexdigest()[:10]
+                preset_id = "custom-" + sha256(context["idempotency_key"].encode("utf-8")).hexdigest()[:10]
                 candidate = {
                     "id": preset_id,
-                    "label": str(
-                        settings.get("preset_label", "測試後儲存")
-                    ).strip()[:80]
-                    or "測試後儲存",
+                    "label": str(settings.get("preset_label", "測試後儲存")).strip()[:80] or "測試後儲存",
                     "source_preset": configuration["preset"],
                     "options": configuration["overrides"],
                     "palette": configuration["palette"],
@@ -755,9 +761,7 @@ class RenderWorkloadService:
                 if isinstance(stored, dict):
                     return dict(stored), None, True, None
                 existing[preset_id] = candidate
-                encoded = json.dumps(
-                    existing, ensure_ascii=False, separators=(",", ":")
-                )
+                encoded = json.dumps(existing, ensure_ascii=False, separators=(",", ":"))
                 if len(encoded) > 50_000:
                     return candidate, None, False, "RENDER-PRESET-SIZE"
                 return candidate, encoded, False, None
@@ -799,14 +803,10 @@ class RenderWorkloadService:
                     process_name="inktime-render-child",
                 )
                 if cancelled():
-                    raise ProcessCallError(
-                        "test release commit lease is no longer valid"
-                    )
+                    raise ProcessCallError("test release commit lease is no longer valid")
                 validate_device()
                 manifest = self.publisher.publish_preencoded(
-                    source_photo_id=str(
-                        settings.get("source_photo_id", "device-test-upload")
-                    ),
+                    source_photo_id=str(settings.get("source_photo_id", "device-test-upload")),
                     payload_path=prepared / "payload.bin",
                     preview_path=prepared / "preview.png",
                     profile_key=profile_key,

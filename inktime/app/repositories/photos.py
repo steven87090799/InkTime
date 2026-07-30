@@ -16,7 +16,11 @@ from inktime.app.domain.analysis.scoring import (
     calculate_ranking_score,
 )
 from inktime.app.domain.photos.preprocessing import LocalPhotoFeatures
-from inktime.app.domain.photos.quality_policy import FEATURE_VERSION, evaluate_local_quality, local_candidate_score
+from inktime.app.domain.photos.quality_policy import (
+    FEATURE_VERSION,
+    evaluate_local_quality,
+    local_candidate_score,
+)
 from inktime.app.domain.photos.dates import materialized_capture_fields, parse_photo_datetime
 
 
@@ -190,9 +194,7 @@ class PhotoRepository:
                 [(scan_id, now, photo_id) for photo_id in unique_ids],
             )
 
-    def mark_processing_failed_batch(
-        self, scan_id: str, failures: Sequence[tuple[str, bool, bool]]
-    ) -> None:
+    def mark_processing_failed_batch(self, scan_id: str, failures: Sequence[tuple[str, bool, bool]]) -> None:
         """保留既有照片資料，但把本次未完成區段標成 failed 供增量重試。"""
 
         if not failures:
@@ -242,9 +244,7 @@ class PhotoRepository:
         hashes = list(dict.fromkeys(item.features.sha256 for item in items))
         phashes = list(
             dict.fromkeys(
-                item.features.perceptual_hash
-                for item in items
-                if item.features.perceptual_hash is not None
+                item.features.perceptual_hash for item in items if item.features.perceptual_hash is not None
             )
         )
         results: list[BatchPhotoResult] = []
@@ -356,9 +356,7 @@ class PhotoRepository:
                         continue
 
                 content_changed = bool(existing and existing.get("sha256") != features.sha256)
-                eligible_exact = [
-                    row for row in exact if str(row["id"]) not in reserved_move_ids
-                ]
+                eligible_exact = [row for row in exact if str(row["id"]) not in reserved_move_ids]
                 near = []
                 if features.perceptual_hash is not None:
                     near = [
@@ -371,14 +369,8 @@ class PhotoRepository:
                 inherited = bool(eligible_exact)
                 if existing is not None:
                     photo_id = str(existing["id"])
-                    action = (
-                        "restored"
-                        if str(existing["lifecycle_status"]) == "missing"
-                        else "changed"
-                    )
-                    duplicate_group = (
-                        existing.get("duplicate_group_id") if not content_changed else None
-                    )
+                    action = "restored" if str(existing["lifecycle_status"]) == "missing" else "changed"
+                    duplicate_group = existing.get("duplicate_group_id") if not content_changed else None
                     analysis_source = str(existing.get("analysis_source") or "direct")
                     status = str(existing["status"])
                     if content_changed:
@@ -398,9 +390,7 @@ class PhotoRepository:
 
                 if duplicate_source is not None:
                     duplicate_group = (
-                        duplicate_source.get("duplicate_group_id")
-                        or duplicate_group
-                        or str(uuid4())
+                        duplicate_source.get("duplicate_group_id") or duplicate_group or str(uuid4())
                     )
                     set_group(duplicate_source, str(duplicate_group))
 
@@ -712,8 +702,7 @@ class PhotoRepository:
                 date_updates.append((captured_date, month_day, status, plan["id"]))
             if date_updates:
                 connection.executemany(
-                    "UPDATE photos SET captured_date=?,captured_month_day=?,capture_date_status=? "
-                    "WHERE id=?",
+                    "UPDATE photos SET captured_date=?,captured_month_day=?,capture_date_status=? WHERE id=?",
                     date_updates,
                 )
 
@@ -727,11 +716,15 @@ class PhotoRepository:
                 existing = plan["existing"]
                 # Automatic rules are never allowed to overwrite a favourite or
                 # a manual decision unless the content itself changed.
-                protected = bool(existing) and not plan["content_changed"] and (
-                    bool(existing.get("favorite"))
-                    or bool(existing.get("manual_override"))
-                    or str(existing.get("exclusion_status") or "")
-                    in {"manually_restored", "manually_excluded"}
+                protected = (
+                    bool(existing)
+                    and not plan["content_changed"]
+                    and (
+                        bool(existing.get("favorite"))
+                        or bool(existing.get("manual_override"))
+                        or str(existing.get("exclusion_status") or "")
+                        in {"manually_restored", "manually_excluded"}
+                    )
                 )
                 policy = evaluate_local_quality(
                     {"relative_path": plan["item"].relative_path, **features.as_dict()},
@@ -1056,9 +1049,13 @@ class PhotoRepository:
             "ranking_score": row["ranking_score"],
             "visual_orientation": {
                 "rotation_cw": row["visual_orientation_rotation_cw"],
-                "confidence": row["visual_orientation_confidence"] if row["visual_orientation_confidence"] is not None else 0.0,
+                "confidence": row["visual_orientation_confidence"]
+                if row["visual_orientation_confidence"] is not None
+                else 0.0,
                 "ambiguous": bool(row["visual_orientation_ambiguous"]),
-                "evidence": json.loads(row["visual_orientation_evidence_json"] or '["insufficient_visual_cues"]'),
+                "evidence": json.loads(
+                    row["visual_orientation_evidence_json"] or '["insufficient_visual_cues"]'
+                ),
             },
         }
         self.save_analysis(
@@ -1072,11 +1069,17 @@ class PhotoRepository:
             "inherited",
             ranking_score=row["ranking_score"],
             scoring_version_id=row["scoring_version_id"],
-            prompt_version=str((analysis_context or {}).get("prompt_version") or row["prompt_version"] or "photo-quality-v3"),
-            analysis_fingerprint=(analysis_context or {}).get("analysis_fingerprint") or row["analysis_fingerprint"],
-            analysis_spec_json=(analysis_context or {}).get("analysis_spec_json") or row["analysis_spec_json"],
-            vision_request_fingerprint=(analysis_context or {}).get("vision_request_fingerprint") or row["vision_request_fingerprint"],
-            vision_input_spec_json=(analysis_context or {}).get("vision_input_spec_json") or row["vision_input_spec_json"],
+            prompt_version=str(
+                (analysis_context or {}).get("prompt_version") or row["prompt_version"] or "photo-quality-v3"
+            ),
+            analysis_fingerprint=(analysis_context or {}).get("analysis_fingerprint")
+            or row["analysis_fingerprint"],
+            analysis_spec_json=(analysis_context or {}).get("analysis_spec_json")
+            or row["analysis_spec_json"],
+            vision_request_fingerprint=(analysis_context or {}).get("vision_request_fingerprint")
+            or row["vision_request_fingerprint"],
+            vision_input_spec_json=(analysis_context or {}).get("vision_input_spec_json")
+            or row["vision_input_spec_json"],
             inherited_from={
                 "analysis_id": int(row["id"]),
                 "photo_id": str(row["photo_id"]),
@@ -1219,7 +1222,11 @@ class PhotoRepository:
                         (int(action == "favorite"), exclusion_status, now, photo_id),
                     )
                     event = "added_to_favorites" if action == "favorite" else "added_to_candidate_pool"
-                    changes = {"eligible": True, "favorite": action == "favorite", "candidate_pool": action == "candidate"}
+                    changes = {
+                        "eligible": True,
+                        "favorite": action == "favorite",
+                        "candidate_pool": action == "candidate",
+                    }
                 elif action == "reanalyze":
                     exclusion = _stored_exclusion(photo)
                     protected = bool(photo.get("manual_override")) and not reapply_rules
@@ -1254,10 +1261,22 @@ class PhotoRepository:
                                 reject_rule=?,reject_rule_version=?,reject_details_json=?,rejected_at=?,
                                 manual_override=0,feature_version=?,updated_at=? WHERE id=?
                             """,
-                            (reason, LOCAL_QUALITY_RULE, LOCAL_QUALITY_RULE_VERSION, details, now, LOCAL_QUALITY_RULE_VERSION, now, photo_id),
+                            (
+                                reason,
+                                LOCAL_QUALITY_RULE,
+                                LOCAL_QUALITY_RULE_VERSION,
+                                details,
+                                now,
+                                LOCAL_QUALITY_RULE_VERSION,
+                                now,
+                                photo_id,
+                            ),
                         )
                     event = "local_reanalysis"
-                    changes = {"reapply_rules": reapply_rules, "manual_override": not reapply_rules and bool(photo.get("manual_override"))}
+                    changes = {
+                        "reapply_rules": reapply_rules,
+                        "manual_override": not reapply_rules and bool(photo.get("manual_override")),
+                    }
                 else:
                     raise ValueError("不支援的排除操作")
                 connection.execute(
@@ -1277,11 +1296,18 @@ class PhotoRepository:
             return
         now = datetime.now(timezone.utc).isoformat()
         details = json.dumps(
-            {"policy_decision": evaluation["decision"], "primary_reason": evaluation["primary_reason"],
-             "sensitivity": evaluation["sensitivity"], "matched_checks": evaluation["matched_checks"],
-             "thresholds": evaluation["thresholds"], "e6_threshold": evaluation.get("e6_threshold"),
-             "feature_version": evaluation["feature_version"], "evidence": evaluation["evidence"]},
-            ensure_ascii=False, sort_keys=True,
+            {
+                "policy_decision": evaluation["decision"],
+                "primary_reason": evaluation["primary_reason"],
+                "sensitivity": evaluation["sensitivity"],
+                "matched_checks": evaluation["matched_checks"],
+                "thresholds": evaluation["thresholds"],
+                "e6_threshold": evaluation.get("e6_threshold"),
+                "feature_version": evaluation["feature_version"],
+                "evidence": evaluation["evidence"],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
         )
         with self.database.transaction() as connection:
             connection.execute(
@@ -1289,7 +1315,15 @@ class PhotoRepository:
                    reject_rule=?,reject_rule_version=?,reject_details_json=?,rejected_at=?,updated_at=?
                    WHERE id=? AND favorite=0 AND manual_override=0
                    AND exclusion_status NOT IN ('manually_restored','manually_excluded')""",
-                (evaluation["primary_reason"], LOCAL_QUALITY_RULE, FEATURE_VERSION, details, now, now, photo_id),
+                (
+                    evaluation["primary_reason"],
+                    LOCAL_QUALITY_RULE,
+                    FEATURE_VERSION,
+                    details,
+                    now,
+                    now,
+                    photo_id,
+                ),
             )
 
     def record_force_ai_event(
@@ -1302,7 +1336,15 @@ class PhotoRepository:
                 (
                     photo_id,
                     "force_ai_analysis_completed",
-                    json.dumps({"job_id": job_id, "provider_id": provider, "provider_name": provider_name, "model": model}, ensure_ascii=False),
+                    json.dumps(
+                        {
+                            "job_id": job_id,
+                            "provider_id": provider,
+                            "provider_name": provider_name,
+                            "model": model,
+                        },
+                        ensure_ascii=False,
+                    ),
                     actor,
                     now,
                 ),
@@ -1407,13 +1449,15 @@ class PhotoRepository:
                         tuple(chunk),
                     ).fetchall()
                 )
-        return [photo_id for photo_id in requested if photo_id in allowed][:max(1, limit)]
+        return [photo_id for photo_id in requested if photo_id in allowed][: max(1, limit)]
 
     def eligible_photo_batches(
         self, *, group_by: str, limit: int, include_all_active: bool = False
     ) -> list[tuple[str, list[str]]]:
         """完整照片庫模式以年份或第一層資料夾拆成可暫停／續跑的既有工作。"""
-        where = "lifecycle_status='active'" if include_all_active else "lifecycle_status='active' AND eligible=1"
+        where = (
+            "lifecycle_status='active'" if include_all_active else "lifecycle_status='active' AND eligible=1"
+        )
         remaining = max(1, min(int(limit), 100_000))
         with self.database.session() as connection:
             rows = connection.execute(
@@ -1460,12 +1504,24 @@ class PhotoRepository:
                     """
                     SELECT COUNT(*) FROM photos WHERE gps_lat BETWEEN ? AND ? AND gps_lon BETWEEN ? AND ?
                     """,
-                    (float(latitude) - delta, float(latitude) + delta, float(longitude) - delta, float(longitude) + delta),
+                    (
+                        float(latitude) - delta,
+                        float(latitude) + delta,
+                        float(longitude) - delta,
+                        float(longitude) + delta,
+                    ),
                 ).fetchone()[0]
             )
 
     def get_ai_cache(
-        self, *, content_sha256: str, provider: str, model_name: str, prompt_version: str, schema_version: int, schema_kind: str,
+        self,
+        *,
+        content_sha256: str,
+        provider: str,
+        model_name: str,
+        prompt_version: str,
+        schema_version: int,
+        schema_kind: str,
         vision_request_fingerprint: str | None = None,
     ) -> dict | None:
         cache_prompt_version = _effective_cache_version(prompt_version, vision_request_fingerprint)
@@ -1476,8 +1532,16 @@ class PhotoRepository:
                   AND prompt_version=? AND schema_version=? AND schema_kind=?
                   AND (? IS NULL OR vision_request_fingerprint=?)
                 """,
-                (content_sha256, provider, model_name, cache_prompt_version, schema_version, schema_kind,
-                 vision_request_fingerprint, vision_request_fingerprint),
+                (
+                    content_sha256,
+                    provider,
+                    model_name,
+                    cache_prompt_version,
+                    schema_version,
+                    schema_kind,
+                    vision_request_fingerprint,
+                    vision_request_fingerprint,
+                ),
             ).fetchone()
         if row is None:
             return None
@@ -1523,10 +1587,22 @@ class PhotoRepository:
                     vision_input_spec_json=excluded.vision_input_spec_json
                 """,
                 (
-                    content_sha256, provider, model_name, cache_prompt_version, schema_version, schema_kind,
-                    json.dumps(result, ensure_ascii=False), raw_json, input_tokens, output_tokens, cached_tokens,
-                    estimated_cost, latency_ms, datetime.now(timezone.utc).isoformat(),
-                    vision_request_fingerprint, vision_input_spec_json,
+                    content_sha256,
+                    provider,
+                    model_name,
+                    cache_prompt_version,
+                    schema_version,
+                    schema_kind,
+                    json.dumps(result, ensure_ascii=False),
+                    raw_json,
+                    input_tokens,
+                    output_tokens,
+                    cached_tokens,
+                    estimated_cost,
+                    latency_ms,
+                    datetime.now(timezone.utc).isoformat(),
+                    vision_request_fingerprint,
+                    vision_input_spec_json,
                 ),
             )
 
@@ -1566,9 +1642,7 @@ class PhotoRepository:
             )
             return True
 
-    def finish_ai_cache_reservation(
-        self, cache_key: str, owner_id: str, *, error: str | None = None
-    ) -> None:
+    def finish_ai_cache_reservation(self, cache_key: str, owner_id: str, *, error: str | None = None) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self.database.session() as connection:
             connection.execute(
@@ -1577,12 +1651,16 @@ class PhotoRepository:
                 SET status=?,updated_at=?,last_error=?
                 WHERE cache_key=? AND owner_id=? AND status='reserved'
                 """,
-                ("failed" if error else "completed", now, error[:500] if error else None, cache_key, owner_id),
+                (
+                    "failed" if error else "completed",
+                    now,
+                    error[:500] if error else None,
+                    cache_key,
+                    owner_id,
+                ),
             )
 
-    def list_existing_photo_ids(
-        self, library_id: str, root: Path, *, limit: int
-    ) -> list[str]:
+    def list_existing_photo_ids(self, library_id: str, root: Path, *, limit: int) -> list[str]:
         """依檔案修改時間挑選仍存在於指定照片庫內的照片。"""
         bounded_limit = max(1, min(int(limit), 100))
         root = root.expanduser().resolve()
@@ -1645,8 +1723,13 @@ class PhotoRepository:
                     "UPDATE photos SET favorite=?,captured_at=?,captured_date=?,"
                     "captured_month_day=?,capture_date_status=?,updated_at=? WHERE id=?",
                     (
-                        int(favorite), normalized_captured_at, captured_date, month_day,
-                        date_status, now, photo_id,
+                        int(favorite),
+                        normalized_captured_at,
+                        captured_date,
+                        month_day,
+                        date_status,
+                        now,
+                        photo_id,
                     ),
                 )
                 if cursor.rowcount != 1:
@@ -1719,8 +1802,10 @@ class PhotoRepository:
     def update_crop(self, photo_id: str, *, manual_x: float | None, manual_y: float | None) -> None:
         if (manual_x is None) != (manual_y is None):
             raise ValueError("裁切 X 與 Y 必須同時設定或同時清除")
-        if manual_x is not None and manual_y is not None and not (
-            0.0 <= manual_x <= 1.0 and 0.0 <= manual_y <= 1.0
+        if (
+            manual_x is not None
+            and manual_y is not None
+            and not (0.0 <= manual_x <= 1.0 and 0.0 <= manual_y <= 1.0)
         ):
             raise ValueError("裁切位置必須介於 0 到 1")
         now = datetime.now(timezone.utc).isoformat()
@@ -1890,7 +1975,13 @@ class PhotoRepository:
                     current = connection.execute(
                         "SELECT favorite,manual_override,exclusion_status FROM photos WHERE id=?", (photo_id,)
                     ).fetchone()
-                    protected = current is None or bool(current["favorite"]) or bool(current["manual_override"]) or str(current["exclusion_status"] or "") in {"manually_restored", "manually_excluded"}
+                    protected = (
+                        current is None
+                        or bool(current["favorite"])
+                        or bool(current["manual_override"])
+                        or str(current["exclusion_status"] or "")
+                        in {"manually_restored", "manually_excluded"}
+                    )
                     if protected:
                         event = "automatic_exclusion_skipped"
                         changes = {"reason": "manual_override_or_favorite"}
@@ -1899,10 +1990,21 @@ class PhotoRepository:
                         connection.execute(
                             """UPDATE photos SET eligible=0,exclusion_status='auto_excluded',reject_reason=?,
                                reject_rule=?,reject_rule_version=?,reject_details_json=?,rejected_at=?,updated_at=? WHERE id=?""",
-                            (prefilter_evaluation["primary_reason"], LOCAL_QUALITY_RULE, FEATURE_VERSION, details, now, now, photo_id),
+                            (
+                                prefilter_evaluation["primary_reason"],
+                                LOCAL_QUALITY_RULE,
+                                FEATURE_VERSION,
+                                details,
+                                now,
+                                now,
+                                photo_id,
+                            ),
                         )
                         event = "automatic_exclusion"
-                        changes = {"reason": prefilter_evaluation["primary_reason"], "feature_version": FEATURE_VERSION}
+                        changes = {
+                            "reason": prefilter_evaluation["primary_reason"],
+                            "feature_version": FEATURE_VERSION,
+                        }
                     connection.execute(
                         "INSERT INTO photo_events(photo_id,event,changes_json,changed_by,created_at) VALUES (?,?,?,?,?)",
                         # Automatic policy decisions have no authenticated user;
@@ -1971,10 +2073,25 @@ class PhotoRepository:
                 )
                 # Local quality/fallback rows have no visual model judgement and must
                 # never erase the latest provider result.
-                is_provider_result = provider not in {"local", "local_fallback", "local-prefilter", "local-quality-v3"}
+                is_provider_result = provider not in {
+                    "local",
+                    "local_fallback",
+                    "local-prefilter",
+                    "local-quality-v3",
+                }
                 if is_provider_result:
                     visual = result.get("visual_orientation") or {}
-                    connection.execute("UPDATE photos SET exif_orientation_original=COALESCE(exif_orientation_original,orientation),visual_orientation_rotation_cw=?,visual_orientation_confidence=?,visual_orientation_ambiguous=?,visual_orientation_evidence_json=?,updated_at=? WHERE id=?", (visual.get("rotation_cw"), visual.get("confidence"), int(bool(visual.get("ambiguous", True))), json.dumps(visual.get("evidence", []), ensure_ascii=False), now, photo_id))
+                    connection.execute(
+                        "UPDATE photos SET exif_orientation_original=COALESCE(exif_orientation_original,orientation),visual_orientation_rotation_cw=?,visual_orientation_confidence=?,visual_orientation_ambiguous=?,visual_orientation_evidence_json=?,updated_at=? WHERE id=?",
+                        (
+                            visual.get("rotation_cw"),
+                            visual.get("confidence"),
+                            int(bool(visual.get("ambiguous", True))),
+                            json.dumps(visual.get("evidence", []), ensure_ascii=False),
+                            now,
+                            photo_id,
+                        ),
+                    )
                 connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")
@@ -1988,6 +2105,18 @@ class PhotoRepository:
             row = connection.execute("SELECT id FROM photos WHERE id=?", (photo_id,)).fetchone()
             if row is None:
                 raise KeyError(photo_id)
-            connection.execute("UPDATE photos SET manual_orientation_rotation_cw=?,manual_orientation_updated_at=?,manual_orientation_updated_by=?,updated_at=? WHERE id=?", (rotation_cw, now if rotation_cw is not None else None, changed_by if rotation_cw is not None else None, now, photo_id))
-            connection.execute("INSERT INTO photo_events(photo_id,event,changes_json,changed_by,created_at) VALUES (?,'manual_orientation',?,?,?)", (photo_id, json.dumps({"rotation_cw": rotation_cw}, ensure_ascii=False), changed_by, now))
+            connection.execute(
+                "UPDATE photos SET manual_orientation_rotation_cw=?,manual_orientation_updated_at=?,manual_orientation_updated_by=?,updated_at=? WHERE id=?",
+                (
+                    rotation_cw,
+                    now if rotation_cw is not None else None,
+                    changed_by if rotation_cw is not None else None,
+                    now,
+                    photo_id,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO photo_events(photo_id,event,changes_json,changed_by,created_at) VALUES (?,'manual_orientation',?,?,?)",
+                (photo_id, json.dumps({"rotation_cw": rotation_cw}, ensure_ascii=False), changed_by, now),
+            )
         return {"rotation_cw": rotation_cw}

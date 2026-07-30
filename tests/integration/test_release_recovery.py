@@ -28,9 +28,7 @@ def test_second_profile_activation_failure_restores_all_old_pointers(app, monkey
 
     monkeypatch.setattr(publisher, "activate_manifests", fail_after_first)
     with pytest.raises(OSError, match="second profile"):
-        coordinator.publish(
-            [first, second], created_by="test", photo_ids=[], history=None
-        )
+        coordinator.publish([first, second], created_by="test", photo_ids=[], history=None)
     assert not (publisher.root / "latest.safe_4c").exists()
     with app.extensions["inktime_database"].session() as connection:
         statuses = {
@@ -46,9 +44,7 @@ def test_second_profile_activation_failure_restores_all_old_pointers(app, monkey
 def test_display_history_failure_restores_pointer_and_recovery_marks_staged(app):
     publisher = app.extensions["inktime_release_publisher"]
     coordinator = app.extensions["inktime_release_coordinator"]
-    old = publisher.publish(
-        [("old", Image.new("RGB", (480, 800), "black"))], profile_key="safe_4c"
-    )
+    old = publisher.publish([("old", Image.new("RGB", (480, 800), "black"))], profile_key="safe_4c")
     staged = _stage(publisher, "safe_4c")
     with pytest.raises(sqlite3.IntegrityError):
         coordinator.publish(
@@ -68,9 +64,15 @@ def test_display_history_failure_restores_pointer_and_recovery_marks_staged(app)
             VALUES (?,?,?,?,?,?,'staged',?,?,?,datetime('now'))
             """,
             (
-                another["release_id"], another["display_type"], another["width"],
-                another["height"], another["pixel_format"], json.dumps(another),
-                another["created_at"], "test", another["render_profile"],
+                another["release_id"],
+                another["display_type"],
+                another["width"],
+                another["height"],
+                another["pixel_format"],
+                json.dumps(another),
+                another["created_at"],
+                "test",
+                another["render_profile"],
             ),
         )
     assert coordinator.reconcile()["staged"] >= 1

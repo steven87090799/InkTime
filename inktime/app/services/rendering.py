@@ -93,7 +93,9 @@ class RenderService:
         if self.observability is not None:
             self.observability.record("DEBUG", "renderer", event, message, **fields)
 
-    def resolve_effective_dither(self, primary, secondary=None, *, requested: str | None = None, device_config: dict | None = None) -> dict[str, Any]:
+    def resolve_effective_dither(
+        self, primary, secondary=None, *, requested: str | None = None, device_config: dict | None = None
+    ) -> dict[str, Any]:
         """One dither decision for preview fingerprints and release payloads."""
         device_config = device_config or {}
         photos = primary if isinstance(primary, (list, tuple)) else [primary, secondary]
@@ -109,15 +111,21 @@ class RenderService:
             effective, source = "photo_smooth", "auto_photo_smooth"
         else:
             effective, source = str(self.settings.get("render.dither", DEFAULT_RENDER_DITHER)), "global"
-        return {"requested_dither": requested, "effective_dither": effective, "override_source": source,
-                "auto_photo_smooth_enabled": bool(self.settings.get("render.auto_photo_smooth_enabled", False)),
-                "epaper_contrast_risk": "high" if "high" in risks else "medium" if "medium" in risks else "low",
-                "primary_photo_risk": primary_risk, "secondary_photo_risk": secondary_risk,
-                "photo_risks": [
-                    {"photo_id": str(photo["id"]), "risk": calculate_epaper_contrast_risk(photo)}
-                    for photo in photos if photo is not None
-                ],
-                "epaper_contrast_risk_rule_version": "epaper-contrast-risk-v1"}
+        return {
+            "requested_dither": requested,
+            "effective_dither": effective,
+            "override_source": source,
+            "auto_photo_smooth_enabled": bool(self.settings.get("render.auto_photo_smooth_enabled", False)),
+            "epaper_contrast_risk": "high" if "high" in risks else "medium" if "medium" in risks else "low",
+            "primary_photo_risk": primary_risk,
+            "secondary_photo_risk": secondary_risk,
+            "photo_risks": [
+                {"photo_id": str(photo["id"]), "risk": calculate_epaper_contrast_risk(photo)}
+                for photo in photos
+                if photo is not None
+            ],
+            "epaper_contrast_risk_rule_version": "epaper-contrast-risk-v1",
+        }
 
     def resolve_render_plan(
         self,
@@ -140,11 +148,19 @@ class RenderService:
         if primary is None:
             raise KeyError(photo_id)
         device = device_config or {}
-        layout_key = layout or str(device.get("layout_mode") or self.settings.get("render.layout", "photo_info"))
-        orientation_key = orientation or str(device.get("frame_orientation") or self.settings.get("render.frame_orientation", "portrait"))
+        layout_key = layout or str(
+            device.get("layout_mode") or self.settings.get("render.layout", "photo_info")
+        )
+        orientation_key = orientation or str(
+            device.get("frame_orientation") or self.settings.get("render.frame_orientation", "portrait")
+        )
         effective_orientation = "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
         fit_key = fit_mode or str(device.get("fit_mode") or self.settings.get("render.fit_mode", "contain"))
-        if layout_key not in LAYOUTS or effective_orientation not in FRAME_ORIENTATIONS or fit_key not in FIT_MODES:
+        if (
+            layout_key not in LAYOUTS
+            or effective_orientation not in FRAME_ORIENTATIONS
+            or fit_key not in FIT_MODES
+        ):
             raise ValueError("RENDER-005 無法建立有效的 Render Plan")
         secondary_id = secondary_photo_id
         if layout_key == "adaptive_memory" and secondary_id is None:
@@ -156,7 +172,9 @@ class RenderService:
                 layout_key = "photo_info"
             else:
                 candidate = select_pair_candidate(
-                    dict(primary), self._adaptive_pair_candidates(dict(primary)), frame_orientation=effective_orientation
+                    dict(primary),
+                    self._adaptive_pair_candidates(dict(primary)),
+                    frame_orientation=effective_orientation,
                 )
                 if candidate is None:
                     layout_key = "photo_info"
@@ -165,7 +183,9 @@ class RenderService:
         secondary = self.photos.get_with_path(secondary_id) if secondary_id else None
         if secondary_id and secondary is None:
             raise KeyError(secondary_id)
-        dither_plan = self.resolve_effective_dither(primary, secondary, requested=dither, device_config=device)
+        dither_plan = self.resolve_effective_dither(
+            primary, secondary, requested=dither, device_config=device
+        )
         display_date = self._today()
         caption_records = self._caption_records(
             [photo for photo in (primary, secondary) if photo is not None], display_date
@@ -173,7 +193,8 @@ class RenderService:
         primary_caption = dict(primary_caption or caption_records[str(primary["id"])])
         resolved_secondary_caption = (
             dict(secondary_caption or caption_records[str(secondary["id"])])
-            if secondary is not None else None
+            if secondary is not None
+            else None
         )
         return {
             "version": "render-plan-v1",
@@ -183,13 +204,17 @@ class RenderService:
             "secondary_photo_id": str(secondary["id"]) if secondary is not None else None,
             "secondary_sha256": str(secondary["sha256"] or "") if secondary is not None else None,
             "fit_mode": fit_key,
-            "manual_crop": [crop_x if crop_x is not None else primary["crop_manual_x"], crop_y if crop_y is not None else primary["crop_manual_y"]],
+            "manual_crop": [
+                crop_x if crop_x is not None else primary["crop_manual_x"],
+                crop_y if crop_y is not None else primary["crop_manual_y"],
+            ],
             "subject_box": list(self._subject_box(primary) or ()),
             "secondary_manual_crop": (
-                [secondary["crop_manual_x"], secondary["crop_manual_y"]]
-                if secondary is not None else None
+                [secondary["crop_manual_x"], secondary["crop_manual_y"]] if secondary is not None else None
             ),
-            "secondary_subject_box": list(self._subject_box(secondary) or ()) if secondary is not None else [],
+            "secondary_subject_box": list(self._subject_box(secondary) or ())
+            if secondary is not None
+            else [],
             "primary_caption": primary_caption,
             "secondary_caption": resolved_secondary_caption,
             "primary_caption_text_hash": primary_caption["text_hash"],
@@ -197,13 +222,22 @@ class RenderService:
             "primary_caption_version": primary_caption["version"],
             "primary_caption_region": "primary_card_footer",
             "primary_caption_ratio": 0.20,
-            "secondary_caption_text_hash": resolved_secondary_caption["text_hash"] if resolved_secondary_caption else None,
-            "secondary_caption_source": resolved_secondary_caption["source"] if resolved_secondary_caption else None,
-            "secondary_caption_version": resolved_secondary_caption["version"] if resolved_secondary_caption else None,
+            "secondary_caption_text_hash": resolved_secondary_caption["text_hash"]
+            if resolved_secondary_caption
+            else None,
+            "secondary_caption_source": resolved_secondary_caption["source"]
+            if resolved_secondary_caption
+            else None,
+            "secondary_caption_version": resolved_secondary_caption["version"]
+            if resolved_secondary_caption
+            else None,
             "secondary_caption_region": "secondary_card_footer" if resolved_secondary_caption else None,
             "secondary_caption_ratio": 0.20 if resolved_secondary_caption else None,
             "orientation": effective_orientation,
-            "profile": profile or str(device.get("panel_profile") or self.settings.get("render.profile", DEFAULT_RENDER_PROFILE)),
+            "profile": profile
+            or str(
+                device.get("panel_profile") or self.settings.get("render.profile", DEFAULT_RENDER_PROFILE)
+            ),
             "requested_dither": dither,
             "device_override": str(device.get("dither") or "") or None,
             **dither_plan,
@@ -268,9 +302,7 @@ class RenderService:
                 "effective_dither": dither_plan["effective_dither"],
                 "override_source": dither_plan["override_source"],
                 "aggregation_scope": "release",
-                "epaper_contrast_risk_rule_version": dither_plan[
-                    "epaper_contrast_risk_rule_version"
-                ],
+                "epaper_contrast_risk_rule_version": dither_plan["epaper_contrast_risk_rule_version"],
                 "photo_risks": list(dither_plan["photo_risks"]),
                 "epaper_contrast_risk": dither_plan["epaper_contrast_risk"],
                 "color_distance": color_distance,
@@ -292,9 +324,7 @@ class RenderService:
             "effective_dither": dither_plan["effective_dither"],
             "override_source": dither_plan["override_source"],
             "aggregation_scope": "release",
-            "epaper_contrast_risk_rule_version": dither_plan[
-                "epaper_contrast_risk_rule_version"
-            ],
+            "epaper_contrast_risk_rule_version": dither_plan["epaper_contrast_risk_rule_version"],
             "photo_risks": list(dither_plan["photo_risks"]),
             "color_distance": color_distance,
             "dither_strength": dither_strength,
@@ -314,13 +344,21 @@ class RenderService:
         dither: str | None = None,
     ) -> dict[str, Any]:
         plan = self.resolve_render_plan(
-            photo_id, layout=layout, crop_x=crop_x, crop_y=crop_y,
-            secondary_photo_id=secondary_photo_id, orientation=orientation,
-            fit_mode=fit_mode, profile=profile, dither=dither,
+            photo_id,
+            layout=layout,
+            crop_x=crop_x,
+            crop_y=crop_y,
+            secondary_photo_id=secondary_photo_id,
+            orientation=orientation,
+            fit_mode=fit_mode,
+            profile=profile,
+            dither=dither,
         )
         photo = self.photos.get_with_path(photo_id)
         assert photo is not None
-        secondary = self.photos.get_with_path(plan["secondary_photo_id"]) if plan["secondary_photo_id"] else None
+        secondary = (
+            self.photos.get_with_path(plan["secondary_photo_id"]) if plan["secondary_photo_id"] else None
+        )
         layout_key = str(plan["layout"])
         effective_frame = str(plan["orientation"])
         profile_key = str(plan["profile"])
@@ -572,9 +610,9 @@ class RenderService:
     @staticmethod
     def _caption_variants(analysis: dict[str, Any] | None) -> dict[str, Any]:
         try:
-            variants = (json.loads(str((analysis or {}).get("semantic_json") or "{}")).get("values") or {}).get(
-                "caption_variants"
-            ) or {}
+            variants = (
+                json.loads(str((analysis or {}).get("semantic_json") or "{}")).get("values") or {}
+            ).get("caption_variants") or {}
         except (TypeError, ValueError, json.JSONDecodeError):
             return {}
         return variants if isinstance(variants, dict) else {}
@@ -633,7 +671,8 @@ class RenderService:
                 "prompt_version": str((analysis or {}).get("prompt_version") or ""),
                 "schema_version": (analysis or {}).get("schema_version"),
             }
-            if is_ai_caption else {}
+            if is_ai_caption
+            else {}
         )
         return build_local_caption(
             photo_id=photo_id,
@@ -1089,10 +1128,12 @@ class RenderService:
                 # Both rendered caption regions are part of the font contract.
                 # Prefixes make a coverage failure actionable without changing
                 # the pixels rendered into either region.
-                text_parts.extend([
-                    f"Caption A：{first_record['text']}",
-                    f"Caption B：{second_record['text']}",
-                ])
+                text_parts.extend(
+                    [
+                        f"Caption A：{first_record['text']}",
+                        f"Caption B：{second_record['text']}",
+                    ]
+                )
             if weather:
                 text_parts.extend(
                     [str(weather.get("condition", "")), weather_location, "室外室內最高最低溫溼度"]
@@ -1153,30 +1194,64 @@ class RenderService:
                 second_path = safe_join(Path(second_photo["root_path"]), second_photo["relative_path"])
                 second_source, second_orientation = self._load_oriented_photo(second_photo, second_path)
                 if orientation_metadata is not None:
-                    orientation_metadata.append({"photo_id": secondary_photo_id, "orientation": second_orientation.as_dict()})
+                    orientation_metadata.append(
+                        {"photo_id": secondary_photo_id, "orientation": second_orientation.as_dict()}
+                    )
                 first_caption = dict(primary_caption or self._caption_record(photo, self._today()))
                 second_caption = dict(secondary_caption or self._caption_record(second_photo, self._today()))
-                gutter, caption_ratio = 8, .20
+                gutter, caption_ratio = 8, 0.20
                 if effective_orientation == "landscape":
                     card_width = (frame_width - gutter) // 2
-                    caption_height = max(int(frame_height * .15), min(int(frame_height * .25), int(frame_height * caption_ratio)))
+                    caption_height = max(
+                        int(frame_height * 0.15),
+                        min(int(frame_height * 0.25), int(frame_height * caption_ratio)),
+                    )
                     image_size = (card_width, frame_height - caption_height)
                     positions = ((0, 0), (card_width + gutter, 0))
-                    caption_boxes = ((0, image_size[1], card_width, frame_height), (card_width + gutter, image_size[1], frame_width, frame_height))
+                    caption_boxes = (
+                        (0, image_size[1], card_width, frame_height),
+                        (card_width + gutter, image_size[1], frame_width, frame_height),
+                    )
                 else:
                     card_height = (frame_height - gutter) // 2
-                    caption_height = max(int(card_height * .15), min(int(card_height * .25), int(card_height * caption_ratio)))
+                    caption_height = max(
+                        int(card_height * 0.15),
+                        min(int(card_height * 0.25), int(card_height * caption_ratio)),
+                    )
                     image_size = (frame_width, card_height - caption_height)
                     positions = ((0, 0), (0, card_height + gutter))
-                    caption_boxes = ((0, image_size[1], frame_width, card_height), (0, card_height + gutter + image_size[1], frame_width, frame_height))
-                canvas.paste(self._fit_photo(source, photo, image_size, crop_x, crop_y, fit_mode_key), positions[0])
+                    caption_boxes = (
+                        (0, image_size[1], frame_width, card_height),
+                        (0, card_height + gutter + image_size[1], frame_width, frame_height),
+                    )
+                canvas.paste(
+                    self._fit_photo(source, photo, image_size, crop_x, crop_y, fit_mode_key), positions[0]
+                )
                 with second_source:
-                    canvas.paste(self._fit_photo(second_source, second_photo, image_size, second_photo["crop_manual_x"], second_photo["crop_manual_y"], fit_mode_key), positions[1])
+                    canvas.paste(
+                        self._fit_photo(
+                            second_source,
+                            second_photo,
+                            image_size,
+                            second_photo["crop_manual_x"],
+                            second_photo["crop_manual_y"],
+                            fit_mode_key,
+                        ),
+                        positions[1],
+                    )
                 for record, box in ((first_caption, caption_boxes[0]), (second_caption, caption_boxes[1])):
                     left, top, right, bottom = box
                     draw.rectangle(box, fill="white")
                     draw.line((left + 8, top + 2, right - 8, top + 2), fill="#1d2822", width=1)
-                    self._draw_footer_caption(draw, str(record["text"]), x=left + 12, top=top + 8, bottom=bottom - 6, width=max(1, right - left - 24), fill="#17221c")
+                    self._draw_footer_caption(
+                        draw,
+                        str(record["text"]),
+                        x=left + 12,
+                        top=top + 8,
+                        bottom=bottom - 6,
+                        width=max(1, right - left - 24),
+                        fill="#17221c",
+                    )
                 return finish(canvas)
 
             if layout_key == "postcard":
@@ -1361,8 +1436,14 @@ class RenderService:
                         for photo_id in selected[:quantity]
                     ]
                 for plan in composition_plans:
-                    plan["primary_eligibility_source"] = eligibility_sources.get(str(plan["primary_photo_id"]))
-                    plan["secondary_eligibility_source"] = eligibility_sources.get(str(plan["secondary_photo_id"])) if plan.get("secondary_photo_id") else None
+                    plan["primary_eligibility_source"] = eligibility_sources.get(
+                        str(plan["primary_photo_id"])
+                    )
+                    plan["secondary_eligibility_source"] = (
+                        eligibility_sources.get(str(plan["secondary_photo_id"]))
+                        if plan.get("secondary_photo_id")
+                        else None
+                    )
                 release_photo_ids.extend(self._render_plan_photo_ids(composition_plans))
                 dither_plan = self.resolve_effective_dither(
                     self._render_plan_rows(composition_plans), device_config=device
@@ -1408,8 +1489,10 @@ class RenderService:
                         "aggregation_scope": "release",
                         "render_plans": manifest_plans,
                         "quantization_plan": self._quantization_metadata(
-                            profile_key, dither_plan,
-                            color_distance=color_distance, dither_strength=dither_strength,
+                            profile_key,
+                            dither_plan,
+                            color_distance=color_distance,
+                            dither_strength=dither_strength,
                         ),
                         "photo_orientations": device_orientation_metadata,
                         **dither_plan,
@@ -1443,7 +1526,11 @@ class RenderService:
             plans = [self.resolve_render_plan(photo_id) for photo_id in selected]
         for plan in plans:
             plan["primary_eligibility_source"] = eligibility_sources.get(str(plan["primary_photo_id"]))
-            plan["secondary_eligibility_source"] = eligibility_sources.get(str(plan["secondary_photo_id"])) if plan.get("secondary_photo_id") else None
+            plan["secondary_eligibility_source"] = (
+                eligibility_sources.get(str(plan["secondary_photo_id"]))
+                if plan.get("secondary_photo_id")
+                else None
+            )
         release_photo_ids = self._render_plan_photo_ids(plans)
         images = [
             (
@@ -1486,8 +1573,10 @@ class RenderService:
                     "aggregation_scope": "release",
                     "render_plans": manifest_plans,
                     "quantization_plan": self._quantization_metadata(
-                        profile_key, dither_plan,
-                        color_distance=color_distance, dither_strength=dither_strength,
+                        profile_key,
+                        dither_plan,
+                        color_distance=color_distance,
+                        dither_strength=dither_strength,
                     ),
                     "photo_orientations": release_orientation_metadata,
                     **dither_plan,
@@ -1525,7 +1614,9 @@ class RenderService:
             algorithm_version_id=algorithm,
             primary_photo_id=photo_ids[0] if photo_ids else None,
             secondary_photo_id=(
-                photo_ids[1] if layout in {"photo_pair", "photo_pair_caption"} and len(photo_ids) > 1 else None
+                photo_ids[1]
+                if layout in {"photo_pair", "photo_pair_caption"} and len(photo_ids) > 1
+                else None
             ),
             layout_mode=layout,
             candidates=candidates,
@@ -1652,7 +1743,9 @@ class RenderService:
         limit = max(1, min(int(limit), 50))
         target = target_date or self._today()
         if execution_mode(self.settings) in {"local_only", "local_with_manual_ai"}:
-            result = LocalSelectionPolicy(self.database, self.settings, self.resilience, self.locations).select(
+            result = LocalSelectionPolicy(
+                self.database, self.settings, self.resilience, self.locations
+            ).select(
                 target=target,
                 orientation=str(self.settings.get("render.frame_orientation", "portrait")),
                 quantity=limit,

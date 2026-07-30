@@ -64,9 +64,7 @@ def test_date_warning_limiter_is_bounded_and_deduplicated(caplog):
 
 
 def test_singleflight_twenty_threads_only_load_once():
-    cache = BoundedSingleflightTTLCache[list[str]](
-        ttl_seconds=60, max_entries=4, wait_seconds=5
-    )
+    cache = BoundedSingleflightTTLCache[list[str]](ttl_seconds=60, max_entries=4, wait_seconds=5)
     barrier = threading.Barrier(20)
     calls = 0
     lock = threading.Lock()
@@ -88,9 +86,7 @@ def test_singleflight_twenty_threads_only_load_once():
 
 
 def test_singleflight_failure_keeps_last_successful_stale_value():
-    cache = BoundedSingleflightTTLCache[list[str]](
-        ttl_seconds=0.01, max_entries=1, wait_seconds=1
-    )
+    cache = BoundedSingleflightTTLCache[list[str]](ttl_seconds=0.01, max_entries=1, wait_seconds=1)
     assert cache.get("db", lambda: ["01-01"]) == ["01-01"]
     threading.Event().wait(0.02)
 

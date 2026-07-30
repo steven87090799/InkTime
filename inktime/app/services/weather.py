@@ -76,9 +76,7 @@ class WeatherService:
         self.session = session or requests.Session()
         self._lock = Lock()
         self._condition = Condition(self._lock)
-        self._cache: OrderedDict[tuple[float, float, str, str], _WeatherCacheEntry] = (
-            OrderedDict()
-        )
+        self._cache: OrderedDict[tuple[float, float, str, str], _WeatherCacheEntry] = OrderedDict()
         self.fresh_ttl = fresh_ttl
         self.stale_ttl = max(stale_ttl, fresh_ttl)
         self.failure_retry_ttl = failure_retry_ttl
@@ -120,9 +118,7 @@ class WeatherService:
             entry = self._cache.get(location)
             if entry is None or entry.value is None:
                 return {"location": list(location), "snapshot": None}
-            canonical = json.dumps(
-                entry.value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-            )
+            canonical = json.dumps(entry.value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             return {
                 "location": list(location),
                 "observed_at": entry.value.get("observed_at"),
@@ -133,16 +129,12 @@ class WeatherService:
         expired = [
             key
             for key, entry in self._cache.items()
-            if not entry.refreshing
-            and entry.stale_until <= now
-            and entry.retry_after <= now
+            if not entry.refreshing and entry.stale_until <= now and entry.retry_after <= now
         ]
         for key in expired:
             self._cache.pop(key, None)
         while len(self._cache) > self.max_entries:
-            removable = next(
-                (key for key, entry in self._cache.items() if not entry.refreshing), None
-            )
+            removable = next((key for key, entry in self._cache.items() if not entry.refreshing), None)
             if removable is None:
                 break
             self._cache.pop(removable, None)
@@ -167,9 +159,7 @@ class WeatherService:
                 if entry.value is not None and now < entry.stale_until:
                     self._metrics["stale"] += 1
                     return dict(entry.value)
-                self._condition.wait_for(
-                    lambda: not entry.refreshing, timeout=self.wait_seconds
-                )
+                self._condition.wait_for(lambda: not entry.refreshing, timeout=self.wait_seconds)
                 now = datetime.now(timezone.utc)
                 if entry.value is not None and now < entry.stale_until:
                     self._metrics["stale"] += 1

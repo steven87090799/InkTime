@@ -39,9 +39,7 @@ class RenderCandidateRepository:
     @staticmethod
     def available(row: Any) -> bool:
         try:
-            return safe_join(
-                Path(str(row["root_path"])), str(row["relative_path"])
-            ).is_file()
+            return safe_join(Path(str(row["root_path"])), str(row["relative_path"])).is_file()
         except (OSError, UnsafePathError, ValueError):
             return False
 
@@ -106,9 +104,7 @@ class RenderCandidateRepository:
             rows.append(row)
         return rows
 
-    def require_for_execution_mode(
-        self, photo_ids: Iterable[str], execution: str
-    ) -> list[dict[str, Any]]:
+    def require_for_execution_mode(self, photo_ids: Iterable[str], execution: str) -> list[dict[str, Any]]:
         """Resolve one release contract per requested photo, without N+1 queries.
 
         Non-automatic modes deliberately accept a mix of old, fully analysed
@@ -148,7 +144,9 @@ class RenderCandidateRepository:
             if not bool(row.get("library_enabled")):
                 raise IneligiblePhotoError(photo_id, "PHOTO-ELIGIBILITY-002 照片庫已停用")
             if str(row.get("lifecycle_status") or "") != "active":
-                raise IneligiblePhotoError(photo_id, "PHOTO-ELIGIBILITY-003 照片已 Missing 或不在 active 狀態")
+                raise IneligiblePhotoError(
+                    photo_id, "PHOTO-ELIGIBILITY-003 照片已 Missing 或不在 active 狀態"
+                )
             if str(row.get("exclusion_status") or "eligible") in {"auto_excluded", "manually_excluded"}:
                 raise IneligiblePhotoError(photo_id, "PHOTO-ELIGIBILITY-004 照片已排除")
             if not self.available(row):
@@ -159,7 +157,9 @@ class RenderCandidateRepository:
                 and bool(row.get("eligible"))
                 and row.get("latest_analysis_id") is not None
             )
-            local_eligible = bool(row.get("eligible")) and str(row.get("local_features_status") or "") == "complete"
+            local_eligible = (
+                bool(row.get("eligible")) and str(row.get("local_features_status") or "") == "complete"
+            )
             if execution == "automatic_ai":
                 if not analysis_eligible:
                     raise IneligiblePhotoError(photo_id, "PHOTO-ELIGIBILITY-007 缺少有效正式分析")
@@ -169,13 +169,17 @@ class RenderCandidateRepository:
             elif local_eligible:
                 source = "local"
             else:
-                raise IneligiblePhotoError(photo_id, "PHOTO-ELIGIBILITY-006 本機特徵未完成，且缺少有效正式分析")
+                raise IneligiblePhotoError(
+                    photo_id, "PHOTO-ELIGIBILITY-006 本機特徵未完成，且缺少有效正式分析"
+                )
 
-            resolved.append({
-                **row,
-                "eligibility_source": source,
-                "analysis_eligible": analysis_eligible,
-                "local_eligible": local_eligible,
-                "selected_contract": source,
-            })
+            resolved.append(
+                {
+                    **row,
+                    "eligibility_source": source,
+                    "analysis_eligible": analysis_eligible,
+                    "local_eligible": local_eligible,
+                    "selected_contract": source,
+                }
+            )
         return resolved

@@ -35,14 +35,13 @@ def test_one_time_device_release_remains_retryable_until_verified_display_ack(cl
     headers = {"Authorization": f"Bearer {token}"}
 
     manifest = client.get("/api/device/v1/releases/latest", headers=headers).get_json()
-    response = client.get(
-        manifest["download_base_url"] + manifest["files"][0]["name"], headers=headers
-    )
+    response = client.get(manifest["download_base_url"] + manifest["files"][0]["name"], headers=headers)
     assert response.status_code == 200
     response.close()
-    assert client.get("/api/device/v1/releases/latest", headers=headers).get_json()[
-        "release_id"
-    ] == test_release["release_id"]
+    assert (
+        client.get("/api/device/v1/releases/latest", headers=headers).get_json()["release_id"]
+        == test_release["release_id"]
+    )
 
     client.post(
         "/api/device/v1/status",
@@ -55,9 +54,10 @@ def test_one_time_device_release_remains_retryable_until_verified_display_ack(cl
             "error_code": "",
         },
     )
-    assert client.get("/api/device/v1/releases/latest", headers=headers).get_json()[
-        "release_id"
-    ] == test_release["release_id"]
+    assert (
+        client.get("/api/device/v1/releases/latest", headers=headers).get_json()["release_id"]
+        == test_release["release_id"]
+    )
 
     client.post(
         "/api/device/v1/status",
@@ -70,6 +70,7 @@ def test_one_time_device_release_remains_retryable_until_verified_display_ack(cl
             "error_code": "",
         },
     )
-    assert client.get("/api/device/v1/releases/latest", headers=headers).get_json()[
-        "release_id"
-    ] == formal["release_id"]
+    assert (
+        client.get("/api/device/v1/releases/latest", headers=headers).get_json()["release_id"]
+        == formal["release_id"]
+    )

@@ -100,9 +100,7 @@ def test_provider_and_local_results_persist_a_complete_analysis_context(app, tmp
     )
     (tmp_path / "local").mkdir()
     _, local_ids, local_service = prepare(app, tmp_path / "local")
-    local_service.analyze_photo(
-        photo_id=local_ids[0], job_id=None, provider=None, strategy="local"
-    )
+    local_service.analyze_photo(photo_id=local_ids[0], job_id=None, provider=None, strategy="local")
     with app.extensions["inktime_database"].session() as connection:
         rows = connection.execute(
             "SELECT analysis_fingerprint,analysis_spec_json,prompt_version,schema_kind,"
@@ -437,7 +435,9 @@ def test_prefilter_transaction_rolls_back_photo_and_audit_when_analysis_insert_f
         photo = connection.execute(
             "SELECT eligible,exclusion_status,reject_reason FROM photos WHERE id=?", (photo_id,)
         ).fetchone()
-        events = connection.execute("SELECT COUNT(*) FROM photo_events WHERE photo_id=?", (photo_id,)).fetchone()[0]
+        events = connection.execute(
+            "SELECT COUNT(*) FROM photo_events WHERE photo_id=?", (photo_id,)
+        ).fetchone()[0]
     assert tuple(photo) == before
     assert events == 0
 
@@ -455,9 +455,7 @@ def test_prefilter_snapshot_requires_two_quality_defects(app, tmp_path):
     with app.extensions["inktime_database"].session() as connection:
         photo_id = str(connection.execute("SELECT id FROM photos").fetchone()[0])
 
-    snapshot = app.extensions["inktime_analysis_service"].prefilter_snapshot(
-        photos.get_with_path(photo_id)
-    )
+    snapshot = app.extensions["inktime_analysis_service"].prefilter_snapshot(photos.get_with_path(photo_id))
 
     assert snapshot["decision"] == "auto_excluded"
     assert snapshot["primary_reason"] == "severe_blur"
