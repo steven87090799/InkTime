@@ -21,6 +21,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
         with: {python-version: "${{ matrix.python-version }}", cache: pip}
       - run: pip install -r requirements-dev.txt
+      - run: python scripts/check_dependency_policy.py
       - run: ruff check inktime tests scripts server.py analyze_photos.py
       - run: mypy inktime
       - run: pytest --cov=inktime --cov-report=term-missing --cov-fail-under=80 tests/unit tests/security tests/integration
@@ -174,7 +175,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
         with: {python-version: "3.12", cache: pip}
-      - run: pip install -r requirements.txt pytest playwright
+      - run: pip install -r requirements-e2e.txt
       - run: playwright install --with-deps chromium
       - run: mkdir -p .ci-e2e && INKTIME_DATA_DIR=.ci-e2e INKTIME_DATABASE=.ci-e2e/inktime.db gunicorn --bind 127.0.0.1:8765 server:app &
       - run: timeout 60 sh -c 'until curl -fsS http://127.0.0.1:8765/health/live; do sleep 1; done'
