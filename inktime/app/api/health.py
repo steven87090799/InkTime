@@ -40,7 +40,7 @@ def ready():
     }
     preflight = current_app.extensions["inktime_production_preflight"]
     if not preflight.healthy:
-        checks["production_preflight"] = "degraded"
+        checks["production_preflight"] = preflight.summary()
     return (
         ({"status": "ready", "checks": checks}, 200)
         if all(checks.values())
@@ -70,21 +70,11 @@ def detail():
         "runtime_config": runtime_config.diagnostic_summary(),
         "runtime_metrics": {
             "sqlite_writer_wait": database.observability(),
-            "weather": current_app.extensions[
-                "inktime_weather_service"
-            ].observability(),
-            "renderer_cache": current_app.extensions[
-                "inktime_render_cache"
-            ].observability(),
-            "renderer_workloads": current_app.extensions[
-                "inktime_render_workload_service"
-            ].observability(),
-            "webhook": current_app.extensions[
-                "inktime_notification_service"
-            ].observability(),
-            "worker_child": current_app.extensions[
-                "inktime_process_boundary"
-            ].observability(),
+            "weather": current_app.extensions["inktime_weather_service"].observability(),
+            "renderer_cache": current_app.extensions["inktime_render_cache"].observability(),
+            "renderer_workloads": current_app.extensions["inktime_render_workload_service"].observability(),
+            "webhook": current_app.extensions["inktime_notification_service"].observability(),
+            "worker_child": current_app.extensions["inktime_process_boundary"].observability(),
         },
         "service_heartbeats": heartbeats,
         "production_preflight": current_app.extensions["inktime_production_preflight"].summary(),

@@ -7,8 +7,10 @@ WAL and flock are retained, but a remote mount is refused before either is used.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ipaddress
+import os
 from pathlib import Path
-from typing import Protocol
+from typing import Mapping, Protocol
 from urllib.parse import urlparse
 
 
@@ -19,6 +21,16 @@ UNSAFE_NETWORK_FILESYSTEMS = frozenset(
 
 class PreflightError(ValueError):
     """Deployment configuration must be corrected before startup."""
+
+    def __init__(self, code: str, message: str, fix: str) -> None:
+        self.code = code
+        self.message = message
+        self.fix = fix
+        super().__init__(f"{code} {message}；修正方式：{fix}")
+
+
+def _fail(code: str, message: str, fix: str) -> None:
+    raise PreflightError(code, message, fix)
 
 
 class OSAdapter(Protocol):
@@ -33,7 +45,20 @@ class NativeOSAdapter:
             return ""
 
 
-def validate_public_url(config):
+def _trusted_lan_hostname(hostname: str, *, allow_test_host: bool = False) -> bool:
+    normalized = hostname.rstrip(".").casefold()
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        if normalized.endswith(".local") and len(normalized) > len(".local"):
+            return True
+        if allow_test_host and normalized == "inktime-lan.test":
+            return True
+        return "." not in normalized and normalized not in {"example", "invalid"}
+    return address.is_private or address.is_loopback or address.is_link_local
+
+
+def validate_public_url(config, *, mode: str | None = None, allow_test_host: bool = False):
     parsed = urlparse(config.public_url)
     if (
         parsed.scheme not in {"http", "https"}
@@ -44,22 +69,47 @@ def validate_public_url(config):
         or parsed.fragment
         or parsed.path not in {"", "/"}
     ):
-        raise PreflightError(
-            "INKTIME_PUBLIC_URL 必須是 http 或 https 的完整公開 Origin，且不可包含帳密、路徑、Query 或 Fragment"
+        _fail(
+            "PREFLIGHT-URL-001",
+            "INKTIME_PUBLIC_URL 必須是 http 或 https 的完整 Origin，且不可包含帳密、路徑、Query 或 Fragment",
+            "改用例如 https://inktime.example.net 或 http://192.168.1.100:8765",
         )
     if parsed.scheme == "http":
         if config.cookie_secure:
-            raise PreflightError(
-                "INKTIME_PUBLIC_URL 使用 HTTP 時必須設定 INKTIME_COOKIE_SECURE=0，"
-                "否則瀏覽器不會送回 Session Cookie"
+            _fail(
+                "PREFLIGHT-HTTP-001",
+                "INKTIME_PUBLIC_URL 使用 HTTP 時必須設定 INKTIME_COOKIE_SECURE=0，否則瀏覽器不會送回 Session Cookie",
+                "在 LAN 專用 env 設定 INKTIME_COOKIE_SECURE=0；公開部署請改用 HTTPS",
             )
         if not config.allow_insecure_http:
-            raise PreflightError(
-                "INKTIME_PUBLIC_URL 使用 HTTP 時必須明確設定 INKTIME_ALLOW_INSECURE_HTTP=1；"
-                "公開部署請改用 HTTPS"
+            _fail(
+                "PREFLIGHT-HTTP-002",
+                "INKTIME_PUBLIC_URL 使用 HTTP 時必須明確 opt-in",
+                "可信任 LAN 設定 INKTIME_ALLOW_INSECURE_HTTP=1；公開部署請改用 HTTPS",
             )
     if config.environment == "production":
         hostname = (parsed.hostname or "").rstrip(".").casefold()
+        resolved_mode = mode or ("lan" if parsed.scheme == "http" else "https")
+        if resolved_mode == "lan":
+            if parsed.scheme != "http":
+                _fail(
+                    "PREFLIGHT-LAN-001",
+                    "LAN Production 必須使用明確 HTTP Origin",
+                    "將 INKTIME_PUBLIC_URL 設為可信任 LAN 的 http:// 位址",
+                )
+            if config.proxy_trust != 0:
+                _fail(
+                    "PREFLIGHT-LAN-002",
+                    "LAN Production 不得信任未配置的 Reverse Proxy",
+                    "設定 INKTIME_PROXY_TRUST=0",
+                )
+            if not _trusted_lan_hostname(hostname, allow_test_host=allow_test_host):
+                _fail(
+                    "PREFLIGHT-LAN-003",
+                    "LAN HTTP Host 不是 RFC1918、loopback、link-local、.local 或單標籤內網 hostname",
+                    "使用實際內網 IP、inktime.local 或明確單標籤 hostname；公網 hostname 必須改用 HTTPS",
+                )
+            return parsed
         reserved_suffixes = (".example", ".invalid", ".localhost", ".test")
         placeholder = (
             hostname
@@ -75,12 +125,79 @@ def validate_public_url(config):
             or hostname.endswith((".example.com", ".example.net", ".example.org"))
         )
         if placeholder:
-            raise PreflightError(
-                "Production 的 INKTIME_PUBLIC_URL 不可使用 localhost 或範例網域；請改成實際 HTTPS 公開網址"
+            _fail(
+                "PREFLIGHT-HTTPS-001",
+                "Production HTTPS 的 INKTIME_PUBLIC_URL 不可使用 localhost 或範例網域",
+                "改成實際 HTTPS Origin",
             )
         if parsed.scheme == "https" and not config.cookie_secure:
-            raise PreflightError("Production HTTPS 必須設定 INKTIME_COOKIE_SECURE=1")
+            _fail(
+                "PREFLIGHT-HTTPS-002",
+                "Production HTTPS 必須設定 INKTIME_COOKIE_SECURE=1",
+                "設定 INKTIME_COOKIE_SECURE=1",
+            )
     return parsed
+
+
+def validate_lan_environment(environ: Mapping[str, str], compose_text: str) -> None:
+    """Validate host-side LAN deployment values without exposing their contents."""
+
+    exact = {
+        "INKTIME_ENVIRONMENT": "production",
+        "INKTIME_ALLOW_INSECURE_HTTP": "1",
+        "INKTIME_COOKIE_SECURE": "0",
+        "INKTIME_PROXY_TRUST": "0",
+        "INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE": "0",
+    }
+    for name, expected in exact.items():
+        if str(environ.get(name, "")).strip() != expected:
+            _fail(
+                "PREFLIGHT-LAN-ENV-001",
+                f"{name} 必須明確設定為 {expected}",
+                "使用 .env.lan.production.example 建立專用 LAN Production env",
+            )
+    for name in ("INKTIME_DATA_PATH", "INKTIME_PHOTO_PATH"):
+        raw = str(environ.get(name, "")).strip()
+        if not raw or "change_me" in raw.casefold() or not Path(raw).expanduser().is_absolute():
+            _fail(
+                "PREFLIGHT-LAN-PATH-001",
+                f"{name} 必須是已替換 placeholder 的絕對路徑",
+                "改成 NAS/host 上實際存在且權限正確的絕對路徑",
+            )
+        if "simulation_photos" in raw.casefold():
+            _fail(
+                "PREFLIGHT-LAN-PATH-002",
+                f"{name} 不得使用 simulation_photos",
+                "改成正式資料或唯讀照片目錄",
+            )
+    data_path = Path(str(environ["INKTIME_DATA_PATH"])).expanduser().resolve()
+    photo_path = Path(str(environ["INKTIME_PHOTO_PATH"])).expanduser().resolve()
+    if data_path == photo_path:
+        _fail(
+            "PREFLIGHT-LAN-PATH-003",
+            "Data path 與 Photo path 不得相同",
+            "使用獨立可寫資料目錄與唯讀照片目錄",
+        )
+    image_tag = str(environ.get("INKTIME_IMAGE_TAG", "")).strip()
+    revision = str(environ.get("INKTIME_GIT_REVISION", "")).strip()
+    if image_tag.casefold() in {"", "local", "unknown", "change_me_git_sha"}:
+        _fail(
+            "PREFLIGHT-LAN-BUILD-001",
+            "正式 LAN image tag 不可為 local、unknown 或 placeholder",
+            "使用 scripts/build_release_image.sh 產生 immutable Git SHA tag",
+        )
+    if revision.casefold() in {"", "unknown", "change_me_git_sha"}:
+        _fail(
+            "PREFLIGHT-LAN-BUILD-002",
+            "正式 LAN build 必須提供 Git revision",
+            "將 INKTIME_GIT_REVISION 設為實際完整 Git SHA",
+        )
+    if ":/photos:ro" not in compose_text.replace(" ", ""):
+        _fail(
+            "PREFLIGHT-LAN-MOUNT-001",
+            "Compose 的 /photos mount 必須唯讀",
+            "將照片 volume 設為 /photos:ro",
+        )
 
 
 def filesystem_for(path: Path, adapter: OSAdapter | None = None) -> str | None:
@@ -110,6 +227,10 @@ def filesystem_for(path: Path, adapter: OSAdapter | None = None) -> str | None:
 @dataclass(frozen=True)
 class ProductionPreflight:
     database_filesystem: str | None
+    transport: str = "https"
+    security_state: str = "secure"
+    tls_enabled: bool = True
+    secure_cookie: bool = True
     degraded: tuple[str, ...] = ()
 
     @property
@@ -119,26 +240,71 @@ class ProductionPreflight:
     def summary(self) -> dict[str, object]:
         return {
             "status": "ok" if self.healthy else "degraded",
+            "transport": self.transport,
+            "security_state": self.security_state,
+            "tls_enabled": self.tls_enabled,
+            "secure_cookie": self.secure_cookie,
             "database_filesystem": self.database_filesystem or "unknown",
             "warnings": list(self.degraded),
         }
 
 
-def run_production_preflight(config, *, adapter: OSAdapter | None = None) -> ProductionPreflight:
-    parsed = validate_public_url(config)
+def run_production_preflight(
+    config,
+    *,
+    adapter: OSAdapter | None = None,
+    mode: str | None = None,
+    allow_test_host: bool | None = None,
+) -> ProductionPreflight:
+    allow_test = (
+        os.environ.get("INKTIME_LAN_TEST_MODE", "0") == "1" if allow_test_host is None else allow_test_host
+    )
+    parsed = validate_public_url(config, mode=mode, allow_test_host=allow_test)
     if config.environment != "production":
-        return ProductionPreflight(None)
+        return ProductionPreflight(
+            None,
+            "development-http",
+            "development",
+            False,
+            config.cookie_secure,
+        )
     if config.proxy_trust > 2:
-        raise PreflightError("INKTIME_PROXY_TRUST 僅可設定 0 至 2 個受信任 proxy")
+        _fail(
+            "PREFLIGHT-PROXY-001",
+            "INKTIME_PROXY_TRUST 僅可設定 0 至 2 個受信任 proxy",
+            "設定實際 proxy hop 數；LAN 直連必須為 0",
+        )
+    if config.database_path.parent != config.data_dir:
+        _fail(
+            "PREFLIGHT-DB-001",
+            "Production SQLite database 必須直接位於 /data 對應的 data directory",
+            "設定 INKTIME_DATABASE=/data/inktime.db",
+        )
+    if config.photo_dir == config.data_dir:
+        _fail(
+            "PREFLIGHT-PATH-001",
+            "Production photo directory 不得與 data directory 相同",
+            "使用獨立 /photos 唯讀 mount",
+        )
     fs_type = filesystem_for(config.database_path.parent, adapter)
     unsafe = fs_type in UNSAFE_NETWORK_FILESYSTEMS
     if (unsafe or fs_type is None) and not config.allow_unsafe_network_database:
-        raise PreflightError(
-            "Production SQLite、WAL 與鎖不得位於遠端網路掛載；僅能以 INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE=1 明確覆寫"
+        _fail(
+            "PREFLIGHT-DB-002",
+            "Production SQLite、WAL 與鎖不得位於未明確允許的遠端網路掛載",
+            "把 /data 放在本機 filesystem；僅在已接受風險時設定 INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE=1",
         )
     warnings: list[str] = []
     if unsafe or fs_type is None:
         warnings.append("SQLite 位於不安全網路掛載；已由明確覆寫啟動，flock 與 WAL 未被停用")
     if parsed.scheme != "https":
         warnings.append("Production HTTP 已由明確覆寫啟動；Cookie 與傳輸安全降級")
-    return ProductionPreflight(fs_type, tuple(warnings))
+    lan_http = parsed.scheme == "http"
+    return ProductionPreflight(
+        fs_type,
+        "trusted-lan-http" if lan_http else "https",
+        "degraded" if lan_http else "secure",
+        not lan_http,
+        config.cookie_secure,
+        tuple(warnings),
+    )
