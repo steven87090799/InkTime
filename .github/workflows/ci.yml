@@ -23,7 +23,7 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: python scripts/check_dependency_policy.py
       - run: ruff check inktime tests scripts server.py analyze_photos.py
-      - run: mypy inktime
+      - run: mypy
       - run: pytest --cov=inktime --cov-report=term-missing --cov-fail-under=80 tests/unit tests/security tests/integration
       - run: pytest tests/unit/test_migrations.py
       - run: pip-audit -r requirements.txt

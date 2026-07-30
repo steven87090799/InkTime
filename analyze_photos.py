@@ -24,8 +24,8 @@ def main() -> None:
 
     container = bootstrap_services(resolve_runtime_config(), role="worker")
     try:
-        repository = container.extensions["inktime_job_repository"]
-        service = container.extensions["inktime_job_service"]
+        repository = container.job_repository
+        service = container.job_service
         if args.scan:
             scan_id = repository.create_maintenance(
                 kind="scan",
@@ -41,9 +41,7 @@ def main() -> None:
             WorkerRunner(container).run_once()
             print(f"掃描工作完成：{scan_id}")
 
-        strategy = args.strategy or container.extensions["inktime_settings_repository"].get(
-            "analysis.strategy"
-        )
+        strategy = args.strategy or container.settings_repository.get("analysis.strategy")
         job_id = service.create_analysis_job(
             name="CLI 照片分析",
             strategy=strategy,

@@ -20,7 +20,18 @@ ignore = ["S101"]
 
 [tool.mypy]
 python_version = "3.10"
-packages = ["inktime"]
+files = [
+  "inktime",
+  "server.py",
+  "analyze_photos.py",
+  "scripts/container_health.py",
+  "scripts/migrate.py",
+  "scripts/restore_backup.py",
+  "scripts/production_preflight.py",
+  "scripts/check_dependency_policy.py",
+  "scripts/runtime_soak.py",
+  "scripts/lan_production_gate.py",
+]
 ignore_missing_imports = true
 warn_unused_ignores = true
 
