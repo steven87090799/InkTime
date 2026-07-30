@@ -194,12 +194,20 @@ jobs:
           /tmp/inktime-core-default
           c++ -std=c++17 -Wall -Wextra -Werror -pedantic -DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -Iesp32/ink-display-7C-photo tests/firmware/test_photopainter_core.cpp -o /tmp/inktime-core-photopainter
           /tmp/inktime-core-photopainter
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -Iesp32/ink-display-7C-photo tests/firmware/test_queue_client_core.cpp -o /tmp/inktime-queue-core
+          /tmp/inktime-queue-core
       - name: Existing default GDEY release
         run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-path /tmp/build-existing-release esp32/ink-display-7C-photo
       - name: Existing default PCB with GDEP release
         run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-property 'compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1' --build-path /tmp/build-existing-gdep-release esp32/ink-display-7C-photo
       - name: Waveshare PhotoPainter release
         run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER' --build-path /tmp/build-photopainter-release esp32/ink-display-7C-photo
+      - name: Trusted LAN GDEY release
+        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-property 'compiler.cpp.extra_flags=-DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-existing-lan esp32/ink-display-7C-photo
+      - name: Trusted LAN GDEP release
+        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-property 'compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1 -DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-gdep-lan esp32/ink-display-7C-photo
+      - name: Trusted LAN Waveshare PhotoPainter release
+        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-photopainter-lan esp32/ink-display-7C-photo
       - name: Existing default debug
         run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3:DebugLevel=debug' --build-property 'compiler.cpp.extra_flags=-DINKTIME_DEBUG_LOG=1' --build-path /tmp/build-existing-debug esp32/ink-display-7C-photo
       - name: Waveshare PhotoPainter debug

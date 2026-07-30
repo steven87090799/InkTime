@@ -367,6 +367,8 @@ def test_device_status_is_recorded_without_exposing_token(client, app):
             "wake_duration_ms": 61000,
             "wake_reason": "4",
             "display_updated": False,
+            "display_skipped": True,
+            "display_skip_reason": "same_sha256",
             "error_code": "DEVICE-DOWNLOAD",
             "error_message": "SHA-256 校驗失敗",
         },
@@ -385,6 +387,8 @@ def test_device_status_is_recorded_without_exposing_token(client, app):
     assert details["pmic_type"] == "axp2101"
     assert details["cache_status"] == "hit"
     assert details["last_refresh_duration_ms"] == 25000
+    assert details["display_skipped"] is True
+    assert details["display_skip_reason"] == "same_sha256"
     with app.extensions["inktime_database"].session() as connection:
         sample = connection.execute(
             "SELECT * FROM device_power_samples WHERE device_id=?", (device_id,)
