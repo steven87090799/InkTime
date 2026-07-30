@@ -82,7 +82,9 @@ jobs:
       - name: Seed one deterministic formal Release while services are stopped
         run: |
           docker compose --env-file .ci-lan.env stop
+          sudo chown -R "$(id -u):$(id -g)" .ci-data
           python scripts/lan_production_gate.py seed-release --state .ci-lan-state.json --data-dir .ci-data
+          sudo chown -R 10001:10001 .ci-data
           docker compose --env-file .ci-lan.env start
           timeout 180 sh -c 'until curl -fsS http://127.0.0.1:8765/health/ready >/dev/null; do sleep 2; done'
       - name: Exercise Latest, Queue, ACK, same-content status and Backup
@@ -101,15 +103,18 @@ jobs:
       - name: Verify offline integrity, mutate, then restore the validated Backup
         run: |
           docker compose --env-file .ci-lan.env stop
+          sudo chown -R "$(id -u):$(id -g)" .ci-data
           python scripts/lan_production_gate.py offline-verify --state .ci-lan-state.json --data-dir .ci-data
           python scripts/lan_production_gate.py mutate --state .ci-lan-state.json --data-dir .ci-data
           backup_name=$(python -c 'import json; print(json.load(open(".ci-lan-state.json"))["backup_name"])')
+          sudo chown -R 10001:10001 .ci-data
           docker compose --env-file .ci-lan.env run --rm --no-deps inktime-web \
             python scripts/restore_backup.py "/data/backups/${backup_name}" --yes
           docker compose --env-file .ci-lan.env up -d
           timeout 180 sh -c 'until curl -fsS http://127.0.0.1:8765/health/ready >/dev/null; do sleep 2; done'
           python scripts/lan_production_gate.py verify --state .ci-lan-state.json
           docker compose --env-file .ci-lan.env stop
+          sudo chown -R "$(id -u):$(id -g)" .ci-data
           python scripts/lan_production_gate.py offline-verify --state .ci-lan-state.json --data-dir .ci-data
       - name: Verify runtime identity, permissions and image contents
         run: |
