@@ -30,6 +30,8 @@ x-common: &common
     INKTIME_PUBLIC_URL: ${INKTIME_PUBLIC_URL:-http://localhost:8765}
     INKTIME_ALLOW_INSECURE_HTTP: ${INKTIME_ALLOW_INSECURE_HTTP:-1}
     INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE: ${INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE:-0}
+    # 僅供 CI 驗證保留的 .test LAN hostname；正式部署保持 0。
+    INKTIME_LAN_TEST_MODE: ${INKTIME_LAN_TEST_MODE:-0}
     # 容器預設輸出 JSON Log，方便 NAS 或集中式 Log 系統收集。
     INKTIME_LOG_FORMAT: ${INKTIME_LOG_FORMAT:-json}
     # 應用 Log 啟動預設；服務啟動後可在 Web 設定頁動態調整。
