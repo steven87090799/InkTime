@@ -14,12 +14,12 @@ import time
 from urllib.parse import urlencode
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
-
 BASE_URL = os.environ.get("INKTIME_LAN_GATE_URL", "http://127.0.0.1:8765").rstrip("/")
 USERNAME = "lan-gate-admin"
 PASSWORD = "lan-gate-passphrase"  # noqa: S105 - isolated disposable CI account
 CSRF = re.compile(r'<meta name="csrf-token" content="([^"]+)"')
 RELEASE_ID = "lan-gate-release-v1"
+EXPECTED_MIGRATION_VERSION = 26
 
 
 def _read_state(path: Path) -> dict[str, object]:
@@ -231,7 +231,7 @@ def _seed_release(state_path: Path, data_dir: Path) -> None:
         )
         connection.commit()
         migration = int(connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0])
-        if migration != 25:
+        if migration != EXPECTED_MIGRATION_VERSION:
             raise RuntimeError(f"unexpected migration version: {migration}")
     finally:
         connection.close()
@@ -341,7 +341,10 @@ def _offline_verify(state_path: Path, data_dir: Path) -> None:
     try:
         if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise RuntimeError("SQLite integrity check failed")
-        if int(connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]) != 25:
+        if (
+            int(connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0])
+            != EXPECTED_MIGRATION_VERSION
+        ):
             raise RuntimeError("migration version changed")
         if (
             connection.execute("SELECT value_json FROM settings WHERE key='general.timezone'").fetchone()[0]
