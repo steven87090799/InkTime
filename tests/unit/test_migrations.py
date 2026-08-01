@@ -78,6 +78,18 @@ def test_fresh_database_is_migrated(tmp_path):
         "side_effect_owner",
         "input_file_bytes",
         "input_file_deleted",
+        "cleanup_final_action",
+        "input_file_delete_unknown",
+        "output_file_delete_unknown",
+        "error_file_delete_unknown",
+        "cleanup_error_code",
+        "cleanup_error_message",
+        "reconciliation_error_code",
+        "reconciliation_error_message",
+        "provider_config_revision",
+        "provider_base_url_fingerprint",
+        "provider_project_id",
+        "provider_account_fingerprint",
     } <= batch_columns
     assert {"custom_id", "vision_request_fingerprint", "raw_response_json", "imported_at"} <= item_columns
     assert {"batch_id", "batch_item_id", "processing_mode", "reasoning_tokens"} <= usage_columns

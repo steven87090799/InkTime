@@ -244,8 +244,14 @@ def _wire_fake(app, fake):
             "batch_multiplier": 0.5,
         }
     }
+    provider_config = providers.get("fake-batch", include_secret=True)
     provider_service.route_snapshot = lambda: [
-        {"provider_id": "fake-batch", "display_name": "Fake Batch", "priority": 1, "config_revision": "v1"}
+        {
+            "provider_id": "fake-batch",
+            "display_name": "Fake Batch",
+            "priority": 1,
+            "config_revision": provider_service.config_revision(provider_config),
+        }
     ]
     provider_service.build_router = lambda *args, **kwargs: fake
     return service
@@ -322,7 +328,7 @@ def test_stream_jsonl_shards_split_at_500_requests(tmp_path):
 def test_scheduler_poll_excludes_unknown_holds_from_bounded_oldest_first_queue(app, monkeypatch):
     fake = CountingBatchProvider()
     service = _wire_fake(app, fake)
-    repository = AnalysisBatchRepository(app.extensions["inktime_database"])
+    repository = service.batches
     for index in range(25):
         _insert_batch(
             app,
@@ -677,7 +683,8 @@ def test_ambiguous_batch_submission_is_persisted_and_recovery_only_binds_existin
     unknown = dict(repository.get(batch_id))
     assert unknown["status"] == "submission_unknown"
     assert unknown["remote_status"] == "submission_unknown"
-    assert unknown["last_error_code"] == "submission_unknown"
+    assert unknown["reconciliation_error_code"] == "submission_unknown"
+    assert unknown["last_error_code"] is None
     assert unknown["input_file_id"] == "file-input"
     assert all(item["error_code"] == "submission_unknown" for item in repository.items(batch_id))
     assert service.estimate(scope="all_eligible_missing_analysis")["candidate_count"] == 0
@@ -817,7 +824,7 @@ def test_poll_plan_parse_failure_enters_cleanup_instead_of_staying_validating(ap
     assert result["enqueued"] == 1
     current = dict(repository.get(batch_id))
     assert current["status"] == "cleanup_pending"
-    assert current["last_error_code"] == "BATCH-POLL-PLAN-001"
+    assert current["reconciliation_error_code"] == "BATCH-POLL-PLAN-001"
     service.import_batch(batch_id, cleanup_only=True)
     assert dict(repository.get(batch_id))["cleanup_status"] == "completed"
 
@@ -1190,3 +1197,244 @@ def test_cleanup_crash_after_remote_delete_reconciles_without_second_delete(app,
     assert fake.deleted.count("file-output") == 1
     assert fake.deleted.count("file-error") == 1
     assert dict(repository.get(batch_id))["cleanup_status"] == "completed"
+
+
+def _assert_terminal_batch_invariants(app, batch_id: str):
+    repository = AnalysisBatchRepository(app.extensions["inktime_database"])
+    batch = dict(repository.get(batch_id))
+    assert batch["status"] in {"completed", "completed_with_errors", "failed", "expired", "cancelled"}
+    assert not {
+        item["status"]
+        for item in repository.items(batch_id)
+        if item["status"] in {"pending", "submitted", "upload_unknown", "submission_unknown"}
+    }
+    assert batch["cleanup_status"] in {"completed", "not_required"}
+    assert batch["cleanup_completed_at"] is not None
+    if batch["input_file_id"]:
+        assert batch["input_file_deleted"] == 1
+    if batch["output_file_id"]:
+        assert batch["output_file_deleted"] == 1
+    if batch["error_file_id"]:
+        assert batch["error_file_deleted"] == 1
+    if batch["job_id"]:
+        with app.extensions["inktime_database"].session() as connection:
+            active_job_items = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM job_items WHERE job_id=? AND status IN ('pending','running','retrying')",
+                    (batch["job_id"],),
+                ).fetchone()[0]
+            )
+        assert active_job_items == 0
+
+
+@pytest.mark.parametrize(("intent", "terminal"), [("cancel", "cancelled"), ("abandon", "failed")])
+def test_cleanup_final_action_survives_partial_delete_retry_and_atomically_finalizes(
+    app, tmp_path, intent, terminal
+):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    repository = AnalysisBatchRepository(app.extensions["inktime_database"])
+    batch_id = service.submit(scope="manual_selection", photo_ids=[photo_id], created_by="tester")[
+        "batch_ids"
+    ][0]
+    if intent == "cancel":
+        repository.update_batch(batch_id, status="uploaded", remote_batch_id=None)
+    else:
+        repository.update_batch(
+            batch_id,
+            status="submission_unknown",
+            remote_status="submission_unknown",
+            remote_batch_id=None,
+        )
+    repository.update_batch(batch_id, output_file_id="file-output", error_file_id="file-error")
+    calls: dict[str, int] = {"file-input": 0, "file-output": 0, "file-error": 0}
+
+    def delete_once_fails(file_id: str):
+        calls[file_id] += 1
+        if file_id == "file-output" and calls[file_id] == 1:
+            raise ProviderHTTPError("transient cleanup failure", "BATCH-CLEANUP-500", http_status=500)
+        fake.deleted.append(file_id)
+        return {"id": file_id, "deleted": True}
+
+    fake.delete_remote_file = delete_once_fails
+    if intent == "cancel":
+        assert service.cancel(batch_id)["status"] == "cleanup_pending"
+    else:
+        assert service.abandon(batch_id, confirmed_no_remote=True)["status"] == "cleanup_pending"
+    service.import_batch(batch_id, cleanup_only=True)
+    partial = dict(repository.get(batch_id))
+    assert partial["cleanup_status"] == "partial"
+    assert partial["cleanup_final_action"] == intent
+    assert partial["cleanup_error_code"] == "BATCH-CLEANUP-500"
+    service.retry_cleanup(batch_id)
+    service.import_batch(batch_id, cleanup_only=True)
+    final = dict(repository.get(batch_id))
+    assert final["status"] == terminal
+    assert final["cleanup_final_action"] == intent
+    assert final["cleanup_status"] == "completed"
+    assert calls == {"file-input": 1, "file-output": 2, "file-error": 1}
+    _assert_terminal_batch_invariants(app, batch_id)
+
+
+def test_upload_unknown_retry_cleanup_requires_operator_and_keeps_reservation(app, tmp_path):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    fake = UploadUnknownFakeBatchProvider()
+    service = _wire_fake(app, fake)
+    repository = AnalysisBatchRepository(app.extensions["inktime_database"])
+    batch_id = service.submit(scope="manual_selection", photo_ids=[photo_id], created_by="tester")[
+        "prepared_batch_ids"
+    ][0]
+    assert service.retry_cleanup(batch_id) == {"status": "operator_action_required", "batch_id": batch_id}
+    assert service.retry_cleanup(batch_id) == {"status": "operator_action_required", "batch_id": batch_id}
+    held = dict(repository.get(batch_id))
+    assert held["status"] == "upload_unknown"
+    assert held["cleanup_status"] == "pending"
+    assert held["cleanup_completed_at"] is None
+    assert held["cleanup_error_code"] == "BATCH-CLEANUP-UPLOAD-UNKNOWN"
+    assert fake.upload_calls == 1
+    assert fake.deleted == []
+    assert all(item["status"] == "upload_unknown" for item in repository.items(batch_id))
+
+
+def test_local_cancel_finalization_rolls_back_batch_items_and_parent_job_together(app, tmp_path, monkeypatch):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    repository = service.batches
+    batch_id = service.submit(scope="manual_selection", photo_ids=[photo_id], created_by="tester")[
+        "batch_ids"
+    ][0]
+    repository.update_batch(
+        batch_id,
+        status="uploaded",
+        remote_status="uploaded",
+        remote_batch_id=None,
+        input_file_id=None,
+    )
+    before_batch = dict(repository.get(batch_id))
+    before_items = [dict(item) for item in repository.items(batch_id)]
+    original_totals = repository._item_totals_locked
+
+    def fail_after_item_updates(*_args, **_kwargs):
+        raise RuntimeError("injected finalization transaction failure")
+
+    monkeypatch.setattr(repository, "_item_totals_locked", fail_after_item_updates)
+    with pytest.raises(RuntimeError, match="injected finalization"):
+        service.cancel(batch_id)
+    monkeypatch.setattr(repository, "_item_totals_locked", original_totals)
+    assert dict(repository.get(batch_id))["status"] == before_batch["status"]
+    assert [dict(item)["status"] for item in repository.items(batch_id)] == [
+        item["status"] for item in before_items
+    ]
+    with app.extensions["inktime_database"].session() as connection:
+        job_status = connection.execute(
+            "SELECT status FROM jobs WHERE id=?", (before_batch["job_id"],)
+        ).fetchone()[0]
+    assert job_status in {"running", "pending", "retrying"}
+
+
+@pytest.mark.parametrize("kind", ["invalid_jsonl", "unexpected_custom_id"])
+def test_reconciliation_error_survives_cleanup_and_finishes_with_errors(app, tmp_path, kind):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    repository = AnalysisBatchRepository(app.extensions["inktime_database"])
+    batch_id = service.submit(scope="manual_selection", photo_ids=[photo_id], created_by="tester")[
+        "batch_ids"
+    ][0]
+    service.poll_due(limit=20)
+    original_download = fake.download_file_content
+
+    def download_with_reconciliation_error(file_id, destination):
+        path = original_download(file_id, destination)
+        if kind == "invalid_jsonl":
+            path.open("a", encoding="utf-8").write("not-json\n")
+        else:
+            path.open("a", encoding="utf-8").write(
+                json.dumps(
+                    {
+                        "custom_id": "ibt:ffffffff-ffff-ffff-ffff-ffffffffffff",
+                        "response": {"status_code": 400, "body": {}},
+                    }
+                )
+                + "\n"
+            )
+        return path
+
+    fake.download_file_content = download_with_reconciliation_error
+    result = service.import_batch(batch_id)
+    assert result["success"] == 1
+    final = dict(repository.get(batch_id))
+    assert final["status"] == "completed_with_errors"
+    assert final["reconciliation_error_code"] == kind
+    assert final["cleanup_final_action"] == "complete"
+    _assert_terminal_batch_invariants(app, batch_id)
+
+
+@pytest.mark.parametrize(
+    "identity_field",
+    [
+        "provider_base_url_fingerprint",
+        "provider_project_id",
+        "provider_account_fingerprint",
+    ],
+)
+def test_malformed_frozen_plan_refuses_cleanup_when_provider_identity_changes(
+    app, tmp_path, monkeypatch, identity_field
+):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    repository = AnalysisBatchRepository(app.extensions["inktime_database"])
+    batch_id = service.submit(scope="manual_selection", photo_ids=[photo_id], created_by="tester")[
+        "batch_ids"
+    ][0]
+    batch = dict(repository.get(batch_id))
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE jobs SET analysis_spec_json='{' WHERE id=?", (batch["job_id"],))
+    original_identity = service.provider_service.identity_snapshot
+
+    def changed_identity(provider_id):
+        identity = dict(original_identity(provider_id))
+        identity[identity_field] = "different-provider-context"
+        return identity
+
+    monkeypatch.setattr(service.provider_service, "identity_snapshot", changed_identity)
+    result = service.import_batch(batch_id)
+    assert result == {"batch_id": batch_id, "cleanup_only": True}
+    held = dict(repository.get(batch_id))
+    assert held["status"] == "cleanup_pending"
+    assert held["cleanup_error_code"] == "BATCH-CLEANUP-PROVIDER-MISMATCH"
+    assert held["input_file_deleted"] == 0
+    assert fake.deleted == []
+
+
+def test_upload_and_submission_claims_receive_fresh_leases(app, tmp_path, monkeypatch):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    fake = CountingBatchProvider()
+    service = _wire_fake(app, fake)
+    repository = service.batches
+    leases = iter(["2099-01-01T00:00:00+00:00", "2099-01-02T00:00:00+00:00"])
+    claimed: list[tuple[str, str]] = []
+    original_upload = repository.claim_upload
+    original_submission = repository.claim_submission
+    monkeypatch.setattr(service, "_side_effect_lease_until", lambda _provider_id: next(leases))
+
+    def claim_upload(*args):
+        claimed.append(("upload", args[-1]))
+        return original_upload(*args)
+
+    def claim_submission(*args):
+        claimed.append(("submission", args[-1]))
+        return original_submission(*args)
+
+    monkeypatch.setattr(repository, "claim_upload", claim_upload)
+    monkeypatch.setattr(repository, "claim_submission", claim_submission)
+    service.submit(scope="manual_selection", photo_ids=[photo_id], created_by="tester")
+    assert claimed == [
+        ("upload", "2099-01-01T00:00:00+00:00"),
+        ("submission", "2099-01-02T00:00:00+00:00"),
+    ]
+    assert fake.upload_calls >= 1
+    assert fake.create_calls >= 1
