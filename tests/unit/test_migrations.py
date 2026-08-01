@@ -65,9 +65,67 @@ def test_fresh_database_is_migrated(tmp_path):
             row["name"] for row in connection.execute("PRAGMA table_info(analysis_batch_items)").fetchall()
         }
         usage_columns = {row["name"] for row in connection.execute("PRAGMA table_info(api_usage)").fetchall()}
-    assert {"remote_batch_id", "output_file_id", "cleanup_completed_at", "peak_rss_bytes"} <= batch_columns
+    assert {
+        "remote_batch_id",
+        "output_file_id",
+        "cleanup_completed_at",
+        "peak_rss_bytes",
+        "upload_attempt_id",
+        "submission_attempt_id",
+        "input_file_deleted",
+    } <= batch_columns
     assert {"custom_id", "vision_request_fingerprint", "raw_response_json", "imported_at"} <= item_columns
     assert {"batch_id", "batch_item_id", "processing_mode", "reasoning_tokens"} <= usage_columns
+    with database.session() as connection:
+        indexes = {
+            str(row["name"])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%batch%'"
+            ).fetchall()
+        }
+    assert "idx_analysis_batches_remote_id" in indexes
+
+
+def test_batch_unknown_states_and_reservations_are_persistent(tmp_path):
+    database = Database(tmp_path / "states.db")
+    migrate(database)
+    with database.transaction() as connection:
+        for batch_id, status in (("batch-a", "submission_unknown"), ("batch-b", "upload_unknown")):
+            connection.execute(
+                "INSERT INTO analysis_batches(id,model,endpoint,analysis_fingerprint,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                (batch_id, "gpt-5.6-luna", "/v1/chat/completions", "fp", status, "now", "now"),
+            )
+        connection.execute(
+            "INSERT INTO analysis_batch_items(id,batch_id,custom_id,content_sha256,analysis_fingerprint,vision_request_fingerprint,vision_input_spec_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                "item-a",
+                "batch-a",
+                "ibt:00000000-0000-0000-0000-000000000001",
+                "sha",
+                "fp",
+                "vfp",
+                "{}",
+                "submission_unknown",
+                "now",
+                "now",
+            ),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO analysis_batch_items(id,batch_id,custom_id,content_sha256,analysis_fingerprint,vision_request_fingerprint,vision_input_spec_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "item-b",
+                    "batch-b",
+                    "ibt:00000000-0000-0000-0000-000000000002",
+                    "sha",
+                    "fp",
+                    "vfp",
+                    "{}",
+                    "pending",
+                    "now",
+                    "now",
+                ),
+            )
 
 
 def test_migration_25_to_batch_lifecycle_is_idempotent(monkeypatch, tmp_path):

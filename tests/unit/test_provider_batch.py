@@ -150,3 +150,93 @@ def test_reasoning_effort_is_capability_gated_and_sync_uses_same_builder(tmp_pat
         reasoning_effort="none",
     )
     assert "reasoning_effort" not in compatible_body
+
+
+class StatusSession(FakeSession):
+    def __init__(self, status_code, payload=None, *, error=None):
+        super().__init__()
+        self.status_code = status_code
+        self.payload = payload if payload is not None else {"error": {"code": "provider_error"}}
+        self.error = error
+
+    def post(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        if self.error is not None:
+            raise self.error
+        return FakeResponse(self.payload, self.status_code)
+
+
+@pytest.mark.parametrize("status_code", [400, 401, 403, 404, 409, 422, 429])
+def test_create_batch_definite_http_rejections_are_not_ambiguous(status_code):
+    session = StatusSession(status_code)
+    provider = OpenAICompatibleProvider(
+        name="OpenAI", base_url="https://api.openai.com/v1", api_key="secret", session=session
+    )
+    with pytest.raises(ProviderHTTPError) as raised:
+        provider.create_batch("file-123")
+    assert raised.value.http_status == status_code
+    assert raised.value.ambiguous is False
+    assert raised.value.provider_error_code == "provider_error"
+    assert len(session.calls) == 1
+
+
+@pytest.mark.parametrize("status_code", [500, 502, 503])
+def test_create_batch_unknown_5xx_is_ambiguous_and_not_retried(status_code):
+    session = StatusSession(status_code)
+    provider = OpenAICompatibleProvider(
+        name="OpenAI", base_url="https://api.openai.com/v1", api_key="secret", session=session
+    )
+    with pytest.raises(ProviderHTTPError) as raised:
+        provider.create_batch("file-123")
+    assert raised.value.http_status == status_code
+    assert raised.value.ambiguous is True
+    assert raised.value.code == "BATCH-SUBMISSION-UNKNOWN"
+    assert len(session.calls) == 1
+
+
+def test_create_batch_invalid_json_or_missing_id_is_ambiguous():
+    invalid = StatusSession(200)
+    invalid.payload = object()
+    invalid_response = FakeResponse({"not": "json"})
+    invalid_response.json = lambda: (_ for _ in ()).throw(ValueError("bad json"))
+    invalid.post = lambda url, **kwargs: invalid_response
+    provider = OpenAICompatibleProvider(
+        name="OpenAI", base_url="https://api.openai.com/v1", api_key="secret", session=invalid
+    )
+    with pytest.raises(ProviderHTTPError) as raised:
+        provider.create_batch("file-123")
+    assert raised.value.ambiguous is True
+    missing = StatusSession(200, {})
+    provider = OpenAICompatibleProvider(
+        name="OpenAI", base_url="https://api.openai.com/v1", api_key="secret", session=missing
+    )
+    with pytest.raises(ProviderHTTPError) as raised:
+        provider.create_batch("file-123")
+    assert raised.value.code == "BATCH-SUBMISSION-UNKNOWN"
+    assert raised.value.ambiguous is True
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_ambiguous"),
+    [
+        (requests.Timeout("after remote create"), True),
+        (requests.ConnectionError("connection reset"), True),
+        ("500", True),
+        ("429", False),
+        ("400", False),
+    ],
+)
+def test_upload_file_side_effect_is_never_retried(tmp_path, outcome, expected_ambiguous):
+    path = tmp_path / "input.jsonl"
+    path.write_text('{"custom_id":"ibt:00000000-0000-0000-0000-000000000000"}\n')
+    if isinstance(outcome, Exception):
+        session = StatusSession(200, error=outcome)
+    else:
+        session = StatusSession(int(outcome))
+    provider = OpenAICompatibleProvider(
+        name="OpenAI", base_url="https://api.openai.com/v1", api_key="secret", session=session
+    )
+    with pytest.raises(ProviderHTTPError) as raised:
+        provider.upload_batch_file(path, remote_filename="inktime-batch-anonymous.jsonl")
+    assert raised.value.ambiguous is expected_ambiguous
+    assert len(session.calls) == 1

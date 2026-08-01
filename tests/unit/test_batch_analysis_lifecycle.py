@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from PIL import Image
+import pytest
 
 from inktime.app.domain.photos import PhotoPreprocessor
 from inktime.app.providers.base import VisionProvider
@@ -22,6 +23,7 @@ class FakeBatchProvider(VisionProvider):
         self.custom_ids: list[str] = []
         self.deleted: list[str] = []
         self.downloads = 0
+        self.recovered_batch_id = ""
 
     def build_analysis_request_body(self, **kwargs):
         return {
@@ -48,8 +50,13 @@ class FakeBatchProvider(VisionProvider):
     def retrieve_batch(self, batch_id: str):
         return {
             "id": batch_id,
+            "endpoint": "/v1/chat/completions",
             "status": "completed",
             "input_file_id": "file-input",
+            "metadata": {
+                "inktime_batch_id": self.recovered_batch_id,
+                "inktime_version": "batch-lifecycle-v1",
+            },
             "output_file_id": "file-output",
             "request_counts": {"total": len(self.custom_ids), "completed": len(self.custom_ids), "failed": 0},
         }
@@ -112,6 +119,7 @@ class AmbiguousFakeBatchProvider(FakeBatchProvider):
 
     def create_batch(self, input_file_id: str, **kwargs):
         self.create_calls += 1
+        self.recovered_batch_id = str((kwargs.get("metadata") or {}).get("inktime_batch_id") or "")
         raise ProviderHTTPError(
             "response lost after remote creation",
             "BATCH-SUBMISSION-UNKNOWN",
@@ -271,11 +279,19 @@ def test_ambiguous_batch_submission_is_persisted_and_recovery_only_binds_existin
     batch_id = submitted["prepared_batch_ids"][0]
     repository = AnalysisBatchRepository(app.extensions["inktime_database"])
     unknown = dict(repository.get(batch_id))
-    assert unknown["status"] == "failed"
+    assert unknown["status"] == "submission_unknown"
     assert unknown["remote_status"] == "submission_unknown"
     assert unknown["last_error_code"] == "submission_unknown"
     assert unknown["input_file_id"] == "file-input"
     assert all(item["error_code"] == "submission_unknown" for item in repository.items(batch_id))
+    assert service.estimate(scope="all_eligible_missing_analysis")["candidate_count"] == 0
+    with app.extensions["inktime_database"].session() as connection:
+        assert (
+            connection.execute(
+                "SELECT status,completed_at FROM jobs WHERE id=?", (unknown["job_id"],)
+            ).fetchone()["status"]
+            == "running"
+        )
     with app.extensions["inktime_database"].session() as connection:
         assert (
             connection.execute("SELECT COUNT(*) FROM api_usage WHERE batch_id=?", (batch_id,)).fetchone()[0]
@@ -286,13 +302,128 @@ def test_ambiguous_batch_submission_is_persisted_and_recovery_only_binds_existin
     assert recovered == {
         "batch_id": batch_id,
         "remote_batch_id": "batch-existing-123",
-        "status": "validating",
+        "status": "import_pending",
     }
     assert fake.create_calls == 1
     bound = dict(repository.get(batch_id))
     assert bound["remote_batch_id"] == "batch-existing-123"
-    assert bound["status"] == "validating"
+    assert bound["status"] == "import_pending"
     assert all(item["status"] == "submitted" for item in repository.items(batch_id))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "code"),
+    [
+        ("endpoint", "/v1/responses", "BATCH-RECOVERY-OWNERSHIP-002"),
+        ("input_file_id", "other-file", "BATCH-RECOVERY-OWNERSHIP-003"),
+        (
+            "metadata",
+            {"inktime_batch_id": "other", "inktime_version": "batch-lifecycle-v1"},
+            "BATCH-RECOVERY-OWNERSHIP-005",
+        ),
+        (
+            "metadata",
+            {"inktime_batch_id": "__BATCH_ID__", "inktime_version": "old"},
+            "BATCH-RECOVERY-OWNERSHIP-006",
+        ),
+        ("request_counts", {"total": 999}, "BATCH-RECOVERY-OWNERSHIP-008"),
+    ],
+)
+def test_recovery_ownership_mismatch_preserves_local_state_and_does_not_cleanup(
+    app, tmp_path, field, value, code
+):
+    _prepare_photos(app, tmp_path, count=2)
+    fake = AmbiguousFakeBatchProvider()
+    service = _wire_fake(app, fake)
+    submitted = service.submit(scope="sample", sample_count=100, created_by="tester")
+    batch_id = submitted["prepared_batch_ids"][0]
+    repository = AnalysisBatchRepository(app.extensions["inktime_database"])
+    before = dict(repository.get(batch_id))
+    remote_id = "batch-existing-ownership"
+    remote = {
+        "id": remote_id,
+        "endpoint": "/v1/chat/completions",
+        "status": "validating",
+        "input_file_id": "file-input",
+        "metadata": {"inktime_batch_id": batch_id, "inktime_version": "batch-lifecycle-v1"},
+        "request_counts": {"total": 2},
+    }
+    remote[field] = value
+    if field == "metadata" and value.get("inktime_batch_id") == "__BATCH_ID__":
+        remote[field] = {**value, "inktime_batch_id": batch_id}
+    fake.retrieve_batch = lambda _batch_id: remote
+    with pytest.raises(BatchLifecycleError) as raised:
+        service.recover_submission(batch_id, remote_id)
+    assert raised.value.code == code
+    assert dict(repository.get(batch_id)) == before
+    assert fake.deleted == []
+
+
+def test_recovery_remote_404_preserves_local_state_and_does_not_cleanup(app, tmp_path):
+    _prepare_photos(app, tmp_path, count=1)
+    fake = AmbiguousFakeBatchProvider()
+    service = _wire_fake(app, fake)
+    batch_id = service.submit(scope="sample", sample_count=100, created_by="tester")["prepared_batch_ids"][0]
+    repository = AnalysisBatchRepository(app.extensions["inktime_database"])
+    before = dict(repository.get(batch_id))
+
+    def not_found(_batch_id):
+        raise ProviderHTTPError("not found", "BATCH-REMOTE-404", http_status=404)
+
+    fake.retrieve_batch = not_found
+    with pytest.raises(ProviderHTTPError):
+        service.recover_submission(batch_id, "batch-missing")
+    assert dict(repository.get(batch_id)) == before
+    assert fake.deleted == []
+
+
+def test_cleanup_retry_only_retries_the_file_that_failed(app, tmp_path):
+    _prepare_photos(app, tmp_path, count=2)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    batch_id = service.submit(scope="sample", sample_count=100, created_by="tester")["batch_ids"][0]
+    service.poll_due(limit=10)
+    repository = AnalysisBatchRepository(app.extensions["inktime_database"])
+    repository.update_batch(batch_id, error_file_id="file-error")
+    failed_once = {"file-output"}
+    original_delete = fake.delete_remote_file
+
+    def delete(file_id):
+        if file_id in failed_once:
+            failed_once.remove(file_id)
+            raise ProviderHTTPError("temporary cleanup failure", "BATCH-CLEANUP-RETRY", http_status=503)
+        return original_delete(file_id)
+
+    fake.delete_remote_file = delete
+    service.import_batch(batch_id)
+    detail = dict(repository.get(batch_id))
+    assert detail["cleanup_status"] == "partial"
+    assert detail["input_file_deleted"] == 1
+    assert detail["output_file_deleted"] == 0
+    assert detail["error_file_deleted"] == 1
+    service.import_batch(batch_id, cleanup_only=True)
+    assert fake.deleted.count("file-input") == 1
+    assert fake.deleted.count("file-error") == 1
+    assert fake.deleted.count("file-output") == 1
+    assert dict(repository.get(batch_id))["cleanup_status"] == "completed"
+
+
+def test_poll_plan_parse_failure_enters_cleanup_instead_of_staying_validating(app, tmp_path):
+    _prepare_photos(app, tmp_path, count=1)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    batch_id = service.submit(scope="sample", sample_count=100, created_by="tester")["batch_ids"][0]
+    repository = AnalysisBatchRepository(app.extensions["inktime_database"])
+    batch = dict(repository.get(batch_id))
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE jobs SET analysis_spec_json=? WHERE id=?", ("{", batch["job_id"]))
+    result = service.poll_due(limit=10)
+    assert result["enqueued"] == 1
+    current = dict(repository.get(batch_id))
+    assert current["status"] == "cleanup_pending"
+    assert current["last_error_code"] == "BATCH-POLL-PLAN-001"
+    service.import_batch(batch_id, cleanup_only=True)
+    assert dict(repository.get(batch_id))["cleanup_status"] == "completed"
 
 
 def test_control_plane_fake_batch_100_sample_end_to_end(app, tmp_path):
