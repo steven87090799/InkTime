@@ -271,9 +271,9 @@ class FailoverVisionProvider(VisionProvider):
         channel = getattr(self._local, "channel", None)
         return channel.provider if channel is not None else self.channels[0].provider
 
-    def upload_batch_file(self, path: Path) -> str:
+    def upload_batch_file(self, path: Path, *, remote_filename: str | None = None) -> str:
         provider = self._batch_provider()
-        result = provider.upload_batch_file(path)
+        result = provider.upload_batch_file(path, remote_filename=remote_filename)
         return str(result)
 
     def build_analysis_request_body(self, **kwargs) -> dict:

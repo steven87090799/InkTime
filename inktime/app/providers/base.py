@@ -49,7 +49,7 @@ class VisionProvider(ABC):
     ) -> dict:
         raise NotImplementedError("Provider 未實作共用分析 Request Body Builder")
 
-    def upload_batch_file(self, path: Path) -> str:
+    def upload_batch_file(self, path: Path, *, remote_filename: str | None = None) -> str:
         raise NotImplementedError("Provider 不支援 Batch File Upload")
 
     def create_batch(

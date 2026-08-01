@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import time
 from typing import Any
+from uuid import uuid4
 
 import requests
 
@@ -27,16 +28,24 @@ class ProviderHTTPError(RuntimeError):
         retry_after: float | None = None,
         *,
         ambiguous: bool = False,
+        http_status: int | None = None,
+        provider_error_code: str | None = None,
+        response_info: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.retry_after = retry_after
         self.ambiguous = ambiguous
+        self.http_status = http_status
+        self.provider_error_code = provider_error_code
+        self.response_info = dict(response_info or {})
 
 
 SAFE_READ = "safe_read"
 SAFE_IDEMPOTENT = "safe_idempotent"
 AMBIGUOUS_CREATE = "ambiguous_create"
+AMBIGUOUS_UPLOAD = "ambiguous_upload"
+NO_RETRY_SIDE_EFFECT = "no_retry_side_effect"
 
 
 class OpenAICompatibleProvider(VisionProvider):
@@ -196,8 +205,12 @@ class OpenAICompatibleProvider(VisionProvider):
 
     def _send(self, method: str, path: str, *, retry_policy: str = SAFE_READ, **kwargs):
         last_response = None
-        attempts = 1 if retry_policy == AMBIGUOUS_CREATE else 3
-        ambiguous = retry_policy == AMBIGUOUS_CREATE
+        no_retry = retry_policy in {AMBIGUOUS_CREATE, AMBIGUOUS_UPLOAD, NO_RETRY_SIDE_EFFECT}
+        attempts = 1 if no_retry else 3
+        ambiguous = retry_policy in {AMBIGUOUS_CREATE, AMBIGUOUS_UPLOAD}
+        unknown_code = (
+            "BATCH-UPLOAD-UNKNOWN" if retry_policy == AMBIGUOUS_UPLOAD else "BATCH-SUBMISSION-UNKNOWN"
+        )
         for attempt in range(attempts):
             try:
                 sender = getattr(self.session, method.lower())
@@ -206,7 +219,7 @@ class OpenAICompatibleProvider(VisionProvider):
                 if ambiguous:
                     raise ProviderHTTPError(
                         "Batch 建立回應未知，未自動重送",
-                        "BATCH-SUBMISSION-UNKNOWN",
+                        unknown_code,
                         ambiguous=True,
                     ) from exc
                 if attempt == attempts - 1:
@@ -217,7 +230,7 @@ class OpenAICompatibleProvider(VisionProvider):
                 if ambiguous:
                     raise ProviderHTTPError(
                         "Batch 建立回應未知，未自動重送",
-                        "BATCH-SUBMISSION-UNKNOWN",
+                        unknown_code,
                         ambiguous=True,
                     ) from exc
                 if attempt == attempts - 1:
@@ -227,12 +240,26 @@ class OpenAICompatibleProvider(VisionProvider):
             last_response = response
             status = int(getattr(response, "status_code", 0) or 0)
             if status == 429 or status >= 500:
-                if ambiguous:
+                if status == 429 and no_retry:
+                    # A rate-limit response is a definite rejection of this
+                    # request, but preserve its structured provider error for
+                    # the caller instead of classifying it as unknown.
+                    return response
+                if ambiguous and status >= 500:
                     raise ProviderHTTPError(
-                        self._redact(f"Batch 建立回應 HTTP {status}，結果未知"),
-                        "BATCH-SUBMISSION-UNKNOWN",
+                        self._redact(f"Provider side effect HTTP {status} 結果未知"),
+                        unknown_code,
                         self._retry_after(response),
                         ambiguous=True,
+                        http_status=status,
+                    )
+                if no_retry:
+                    code = "BATCH-RATE-LIMITED" if status == 429 else "BATCH-SIDE-EFFECT-5XX"
+                    raise ProviderHTTPError(
+                        self._redact(f"Provider 回應 HTTP {status}"),
+                        code,
+                        self._retry_after(response),
+                        http_status=status,
                     )
                 if attempt == attempts - 1:
                     code = "VLM-002" if status == 429 else "VLM-007"
@@ -245,18 +272,41 @@ class OpenAICompatibleProvider(VisionProvider):
             return response
         raise ProviderHTTPError("Provider API 重試失敗", "VLM-007") from last_response
 
-    def _json_response(self, response, *, error_code: str = "VLM-007") -> dict:
+    def _json_response(
+        self, response, *, error_code: str = "VLM-007", ambiguous_on_invalid: bool = False
+    ) -> dict:
         status = int(getattr(response, "status_code", 0) or 0)
         if status >= 400:
+            provider_error_code = None
+            response_info: dict[str, Any] = {}
+            try:
+                body = response.json()
+                if isinstance(body, dict):
+                    error = body.get("error") if isinstance(body.get("error"), dict) else body
+                    if isinstance(error, dict):
+                        provider_error_code = str(error.get("code") or error.get("type") or "") or None
+                        if provider_error_code:
+                            response_info["provider_error_code"] = provider_error_code[:120]
+            except (ValueError, TypeError, json.JSONDecodeError):
+                pass
             raise ProviderHTTPError(
-                self._redact(f"Provider 回應 HTTP {status}"), error_code, self._retry_after(response)
+                self._redact(f"Provider 回應 HTTP {status}"),
+                error_code,
+                self._retry_after(response),
+                http_status=status,
+                provider_error_code=provider_error_code,
+                response_info=response_info,
             )
         try:
             payload = response.json()
         except (ValueError, json.JSONDecodeError) as exc:
-            raise ProviderHTTPError("Provider 回應不是有效 JSON", error_code) from exc
+            raise ProviderHTTPError(
+                "Provider 回應不是有效 JSON", error_code, ambiguous=ambiguous_on_invalid
+            ) from exc
         if not isinstance(payload, dict):
-            raise ProviderHTTPError("Provider 回應必須是 JSON Object", error_code)
+            raise ProviderHTTPError(
+                "Provider 回應必須是 JSON Object", error_code, ambiguous=ambiguous_on_invalid
+            )
         return payload
 
     def _post_completion(self, body: dict) -> ProviderResponse:
@@ -403,33 +453,35 @@ class OpenAICompatibleProvider(VisionProvider):
         upload = self._send(
             "POST",
             "/files",
+            retry_policy=AMBIGUOUS_UPLOAD,
             headers=upload_headers,
             data={"purpose": "batch"},
-            files={"file": ("inktime-batch.jsonl", data, "application/jsonl")},
+            files={"file": (f"inktime-batch-{uuid4()}.jsonl", data, "application/jsonl")},
             timeout=self.request_timeout,
         )
-        payload = self._json_response(upload)
+        payload = self._json_response(upload, ambiguous_on_invalid=True)
         input_file_id = payload.get("id")
         if not input_file_id:
-            raise ProviderHTTPError("Batch 上傳回應缺少 file id", "VLM-007")
+            raise ProviderHTTPError("Batch 上傳回應缺少 file id", "BATCH-UPLOAD-UNKNOWN", ambiguous=True)
         return str(self.create_batch(str(input_file_id), completion_window=completion_window)["id"])
 
-    def upload_batch_file(self, path: Path) -> str:
+    def upload_batch_file(self, path: Path, *, remote_filename: str | None = None) -> str:
         if not path.is_file():
             raise FileNotFoundError("BATCH-FILE-001 找不到本機 JSONL")
         with path.open("rb") as stream:
             response = self._send(
                 "POST",
                 "/files",
+                retry_policy=AMBIGUOUS_UPLOAD,
                 headers={"Authorization": f"Bearer {self.api_key}"} if self.api_key else {},
                 data={"purpose": "batch"},
-                files={"file": (path.name, stream, "application/jsonl")},
+                files={"file": (remote_filename or path.name, stream, "application/jsonl")},
                 timeout=self.request_timeout,
             )
-        payload = self._json_response(response)
+        payload = self._json_response(response, ambiguous_on_invalid=True)
         file_id = payload.get("id")
         if not isinstance(file_id, str) or not file_id:
-            raise ProviderHTTPError("Batch 上傳回應缺少 file id", "VLM-007")
+            raise ProviderHTTPError("Batch 上傳回應缺少 file id", "BATCH-UPLOAD-UNKNOWN", ambiguous=True)
         return file_id
 
     def create_batch(
@@ -458,28 +510,18 @@ class OpenAICompatibleProvider(VisionProvider):
                 "anchor": "created_at",
                 "seconds": min(2_592_000, max(3_600, int(output_expires_after_seconds))),
             }
-        try:
-            response = self._send(
-                "POST",
-                "/batches",
-                retry_policy=AMBIGUOUS_CREATE,
-                headers=self._headers(),
-                json=body,
-                timeout=self.request_timeout,
-            )
-            payload = self._json_response(response)
-            if not isinstance(payload.get("id"), str) or not payload["id"]:
-                raise ProviderHTTPError("Batch 建立回應缺少 batch id", "VLM-007")
-            return payload
-        except ProviderHTTPError as exc:
-            if exc.ambiguous:
-                raise
-            raise ProviderHTTPError(
-                "Batch 建立結果未知，未自動重送",
-                "BATCH-SUBMISSION-UNKNOWN",
-                exc.retry_after,
-                ambiguous=True,
-            ) from exc
+        response = self._send(
+            "POST",
+            "/batches",
+            retry_policy=AMBIGUOUS_CREATE,
+            headers=self._headers(),
+            json=body,
+            timeout=self.request_timeout,
+        )
+        payload = self._json_response(response, ambiguous_on_invalid=True)
+        if not isinstance(payload.get("id"), str) or not payload["id"]:
+            raise ProviderHTTPError("Batch 建立回應缺少 batch id", "BATCH-SUBMISSION-UNKNOWN", ambiguous=True)
+        return payload
 
     def poll_batch(self, batch_id: str) -> dict:
         return self.retrieve_batch(batch_id)
@@ -494,7 +536,11 @@ class OpenAICompatibleProvider(VisionProvider):
 
     def cancel_batch(self, batch_id: str) -> dict:
         response = self._send(
-            "POST", f"/batches/{batch_id}/cancel", headers=self._headers(), timeout=self.request_timeout
+            "POST",
+            f"/batches/{batch_id}/cancel",
+            retry_policy=NO_RETRY_SIDE_EFFECT,
+            headers=self._headers(),
+            timeout=self.request_timeout,
         )
         return self._json_response(response)
 
