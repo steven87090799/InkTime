@@ -983,6 +983,7 @@ MIGRATIONS = (
             "ALTER TABLE api_usage ADD COLUMN batch_item_id TEXT REFERENCES analysis_batch_items(id) ON DELETE SET NULL",
             "ALTER TABLE api_usage ADD COLUMN processing_mode TEXT NOT NULL DEFAULT 'sync' CHECK(processing_mode IN ('sync','batch'))",
             "ALTER TABLE api_usage ADD COLUMN request_id TEXT",
+            "ALTER TABLE api_usage ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0 CHECK(reasoning_tokens >= 0)",
             "CREATE INDEX IF NOT EXISTS idx_photos_never_upload_candidate ON photos(never_upload,lifecycle_status,eligible,sha256)",
             "CREATE INDEX IF NOT EXISTS idx_api_usage_batch ON api_usage(batch_id,batch_item_id)",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_api_usage_batch_item_once ON api_usage(batch_item_id) WHERE batch_item_id IS NOT NULL",
@@ -1024,6 +1025,7 @@ MIGRATIONS = (
                 last_polled_at TEXT,
                 completed_at TEXT,
                 cleanup_completed_at TEXT,
+                remote_status TEXT,
                 sample_seed TEXT,
                 candidate_snapshot_json TEXT NOT NULL DEFAULT '[]',
                 scope TEXT NOT NULL DEFAULT 'all_eligible_missing_analysis'
@@ -1079,14 +1081,15 @@ MIGRATIONS = (
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_batch_items_active_job_item
             ON analysis_batch_items(job_item_id)
-            WHERE job_item_id IS NOT NULL AND status IN ('pending','submitted','success','failed','missing','retry_pending','stale','schema_invalid')
+            WHERE job_item_id IS NOT NULL AND status IN ('pending','submitted','success')
             """,
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_batch_items_active_content_request
             ON analysis_batch_items(content_sha256,vision_request_fingerprint)
-            WHERE status IN ('pending','submitted','success','failed','missing','retry_pending','stale','schema_invalid')
+            WHERE status IN ('pending','submitted','success')
             """,
             "CREATE INDEX IF NOT EXISTS idx_batch_items_custom_id ON analysis_batch_items(custom_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_photo_analysis_batch_once ON photo_analysis(job_id,photo_id,analysis_fingerprint) WHERE analysis_source='analysis_batch' AND job_id IS NOT NULL AND analysis_fingerprint IS NOT NULL",
         ),
     ),
 )

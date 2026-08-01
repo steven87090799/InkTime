@@ -27,7 +27,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 def test_fresh_database_is_migrated(tmp_path):
     database = Database(tmp_path / "inktime.db")
-    assert migrate(database) == list(range(1, 26))
+    assert migrate(database) == list(range(1, 27))
     assert database.integrity_check() == "ok"
     with database.session() as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -50,11 +50,34 @@ def test_fresh_database_is_migrated(tmp_path):
         "ai_analysis_cache",
         "settings_snapshots",
         "settings_snapshot_items",
+        "analysis_batches",
+        "analysis_batch_items",
     } <= tables
-    assert tuple(history) == (25, 25)
+    assert tuple(history) == (26, 26)
     with database.session() as connection:
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
     assert {"normalized_username", "session_version", "disabled_at"} <= columns
+    with database.session() as connection:
+        batch_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(analysis_batches)").fetchall()
+        }
+        item_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(analysis_batch_items)").fetchall()
+        }
+        usage_columns = {row["name"] for row in connection.execute("PRAGMA table_info(api_usage)").fetchall()}
+    assert {"remote_batch_id", "output_file_id", "cleanup_completed_at", "peak_rss_bytes"} <= batch_columns
+    assert {"custom_id", "vision_request_fingerprint", "raw_response_json", "imported_at"} <= item_columns
+    assert {"batch_id", "batch_item_id", "processing_mode", "reasoning_tokens"} <= usage_columns
+
+
+def test_migration_25_to_batch_lifecycle_is_idempotent(monkeypatch, tmp_path):
+    database = Database(tmp_path / "inktime.db")
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:25])
+    migrate(database)
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
+    assert migrate(database, tmp_path / "backups") == [26]
+    assert migrate(database, tmp_path / "backups") == []
+    assert database.integrity_check() == "ok"
 
 
 def test_existing_photo_scores_table_is_preserved(tmp_path):
@@ -131,7 +154,7 @@ def test_concurrent_migrations_are_serialized(tmp_path):
     database = Database(tmp_path / "inktime.db")
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _index: migrate(database), range(2)))
-    assert sorted(results, key=len) == [[], list(range(1, 26))]
+        assert sorted(results, key=len) == [[], list(range(1, 27))]
     assert database.integrity_check() == "ok"
 
 
@@ -330,7 +353,7 @@ def test_v10_photo_state_and_analysis_survive_scheduler_upgrade(monkeypatch, tmp
         )
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == list(range(11, 26))
+    assert migrate(database, tmp_path / "backups") == list(range(11, 27))
     with database.session() as connection:
         photo = connection.execute(
             "SELECT favorite,status,lifecycle_status,metadata_status,local_features_status FROM photos WHERE id='photo'"
@@ -357,7 +380,7 @@ def test_migration_21_upgrades_v20_webhooks_idempotently(monkeypatch, tmp_path):
         notification_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [21, 22, 23, 24, 25]
+    assert migrate(database, tmp_path / "backups") == [21, 22, 23, 24, 25, 26]
     assert migrate(database, tmp_path / "backups") == []
     assert database.integrity_check() == "ok"
     with database.session() as connection:

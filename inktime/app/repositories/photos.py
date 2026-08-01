@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
@@ -1570,9 +1571,12 @@ class PhotoRepository:
         latency_ms: int,
         vision_request_fingerprint: str | None = None,
         vision_input_spec_json: str | None = None,
+        connection=None,
     ) -> None:
         cache_prompt_version = _effective_cache_version(prompt_version, vision_request_fingerprint)
-        with self.database.session() as connection:
+        context = self.database.session() if connection is None else nullcontext(connection)
+        with context as active_connection:
+            connection = active_connection
             connection.execute(
                 """
                 INSERT INTO ai_analysis_cache(content_sha256,provider,model_name,prompt_version,schema_version,schema_kind,
@@ -1799,6 +1803,36 @@ class PhotoRepository:
                 connection.execute("ROLLBACK")
                 raise
 
+    def set_upload_privacy(self, photo_id: str, *, never_upload: bool, changed_by: str) -> dict:
+        """Toggle model-upload privacy without changing display or saved analysis."""
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                "SELECT id,never_upload,never_display FROM photos WHERE id=?", (photo_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(photo_id)
+            connection.execute(
+                "UPDATE photos SET never_upload=?,updated_at=? WHERE id=?",
+                (int(never_upload), now, photo_id),
+            )
+            connection.execute(
+                "INSERT INTO photo_events(photo_id,event,changes_json,changed_by,created_at) VALUES (?,?,?,?,?)",
+                (
+                    photo_id,
+                    "upload_privacy_changed",
+                    json.dumps({"never_upload": bool(never_upload)}, ensure_ascii=False),
+                    changed_by,
+                    now,
+                ),
+            )
+        return {
+            "id": photo_id,
+            "never_upload": bool(never_upload),
+            "never_display": bool(row["never_display"]),
+        }
+
     def update_crop(self, photo_id: str, *, manual_x: float | None, manual_y: float | None) -> None:
         if (manual_x is None) != (manual_y is None):
             raise ValueError("裁切 X 與 Y 必須同時設定或同時清除")
@@ -1964,12 +1998,17 @@ class PhotoRepository:
         vision_input_spec_json: str | None = None,
         prefilter_evaluation: dict | None = None,
         inherited_from: dict | None = None,
+        connection=None,
     ) -> None:
         import json
 
         now = datetime.now(timezone.utc).isoformat()
-        with self.database.session() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        context = self.database.session() if connection is None else nullcontext(connection)
+        with context as active_connection:
+            own_transaction = connection is None
+            connection = active_connection
+            if own_transaction:
+                connection.execute("BEGIN IMMEDIATE")
             try:
                 if prefilter_evaluation and prefilter_evaluation.get("decision") == "auto_excluded":
                     current = connection.execute(
@@ -2092,9 +2131,11 @@ class PhotoRepository:
                             photo_id,
                         ),
                     )
-                connection.execute("COMMIT")
+                if own_transaction:
+                    connection.execute("COMMIT")
             except Exception:
-                connection.execute("ROLLBACK")
+                if own_transaction and connection.in_transaction:
+                    connection.execute("ROLLBACK")
                 raise
 
     def set_manual_orientation(self, photo_id: str, rotation_cw: int | None, changed_by: str) -> dict:

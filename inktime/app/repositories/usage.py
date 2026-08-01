@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime, timezone
 
 from inktime.app.db import Database
@@ -27,14 +28,20 @@ class UsageRepository:
         status: str,
         retry_count: int = 0,
         error_code: str | None = None,
+        batch_id: str | None = None,
+        batch_item_id: str | None = None,
+        processing_mode: str = "sync",
+        request_id: str | None = None,
+        reasoning_tokens: int = 0,
     ) -> None:
         completed_at = datetime.now(timezone.utc).isoformat()
         with self.database.session() as connection:
             connection.execute(
                 """
                 INSERT INTO api_usage(provider,model,job_id,photo_id,request_type,input_tokens,output_tokens,
-                    cached_tokens,estimated_cost,actual_cost,started_at,completed_at,latency_ms,status,retry_count,error_code)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    cached_tokens,estimated_cost,actual_cost,started_at,completed_at,latency_ms,status,retry_count,error_code,
+                    batch_id,batch_item_id,processing_mode,request_id,reasoning_tokens)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     provider,
@@ -53,5 +60,71 @@ class UsageRepository:
                     status,
                     retry_count,
                     error_code,
+                    batch_id,
+                    batch_item_id,
+                    processing_mode,
+                    request_id,
+                    reasoning_tokens,
                 ),
             )
+
+    def record_batch_once(
+        self,
+        *,
+        provider: str,
+        model: str,
+        job_id: str | None,
+        photo_id: str | None,
+        batch_id: str,
+        batch_item_id: str,
+        request_type: str,
+        input_tokens: int,
+        cached_tokens: int,
+        output_tokens: int,
+        reasoning_tokens: int,
+        estimated_cost: float,
+        actual_cost: float,
+        request_id: str | None,
+        started_at: str,
+        status: str = "completed",
+        connection=None,
+    ) -> bool:
+        """Record one Batch item exactly once; the migration enforces the same invariant."""
+
+        completed_at = datetime.now(timezone.utc).isoformat()
+        context = self.database.session() if connection is None else nullcontext(connection)
+        with context as active_connection:
+            connection = active_connection
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO api_usage(
+                    provider,model,job_id,photo_id,request_type,input_tokens,output_tokens,cached_tokens,
+                    estimated_cost,actual_cost,started_at,completed_at,latency_ms,status,retry_count,error_code,
+                    batch_id,batch_item_id,processing_mode,request_id,reasoning_tokens
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    provider,
+                    model,
+                    job_id,
+                    photo_id,
+                    request_type,
+                    max(0, int(input_tokens)),
+                    max(0, int(output_tokens)),
+                    max(0, int(cached_tokens)),
+                    max(0.0, float(estimated_cost)),
+                    max(0.0, float(actual_cost)),
+                    started_at,
+                    completed_at,
+                    0,
+                    status,
+                    0,
+                    None,
+                    batch_id,
+                    batch_item_id,
+                    "batch",
+                    request_id,
+                    max(0, int(reasoning_tokens)),
+                ),
+            )
+        return bool(cursor.rowcount)

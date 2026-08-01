@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -157,6 +158,7 @@ class JobRepository:
     def create(
         self,
         *,
+        kind: str = "analysis",
         name: str,
         strategy: str,
         settings: dict,
@@ -181,10 +183,11 @@ class JobRepository:
                     INSERT INTO jobs(id, kind, name, status, strategy, settings_json,
                                      budget_limit, created_by, created_at, priority, dedupe_key,
                                      selection_mode,analysis_fingerprint,analysis_spec_json,force_recompute)
-                    VALUES (?, 'analysis', ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?,?,?,?)
+                    VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?,?,?,?)
                     """,
                     (
                         job_id,
+                        kind,
                         name,
                         strategy,
                         json.dumps(settings, ensure_ascii=False),
@@ -253,6 +256,7 @@ class JobRepository:
             "cleanup",
             "virtual_display",
             "webhook",
+            "analysis_batch_import",
         }:
             raise ValueError("不支援的維護工作")
         job_id = str(uuid4())
@@ -817,3 +821,74 @@ class JobRepository:
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+
+    def complete_batch_item(
+        self, job_id: str, item_id: str, result: dict, actual_cost: float = 0, connection=None
+    ) -> bool:
+        """Persist a remote Batch result without claiming it in the normal worker queue."""
+
+        now = utc_now()
+        context = self.database.transaction() if connection is None else nullcontext(connection)
+        with context as active_connection:
+            connection = active_connection
+            cursor = connection.execute(
+                """
+                UPDATE job_items SET status='completed',completed_at=?,result_json=?,
+                    estimated_cost=?,stage='analysis_batch',lease_until=NULL
+                WHERE id=? AND job_id=? AND status NOT IN ('completed','failed','cancelled')
+                """,
+                (now, json.dumps(result, ensure_ascii=False), actual_cost, item_id, job_id),
+            )
+            if cursor.rowcount:
+                connection.execute(
+                    "UPDATE jobs SET completed_items=completed_items+1,spent=spent+?,heartbeat_at=? WHERE id=?",
+                    (actual_cost, now, job_id),
+                )
+            return bool(cursor.rowcount)
+
+    def fail_batch_item(
+        self, job_id: str, item_id: str, error_code: str, message: str, connection=None
+    ) -> bool:
+        now = utc_now()
+        context = self.database.transaction() if connection is None else nullcontext(connection)
+        with context as active_connection:
+            connection = active_connection
+            cursor = connection.execute(
+                """
+                UPDATE job_items SET status='failed',completed_at=?,error_code=?,stage='analysis_batch',lease_until=NULL
+                WHERE id=? AND job_id=? AND status NOT IN ('completed','failed','cancelled')
+                """,
+                (now, error_code, item_id, job_id),
+            )
+            if cursor.rowcount:
+                connection.execute(
+                    "UPDATE jobs SET failed_items=failed_items+1,heartbeat_at=? WHERE id=?", (now, job_id)
+                )
+                connection.execute(
+                    """
+                    INSERT INTO job_errors(job_id,job_item_id,photo_id,component,error_code,fingerprint,severity,message,first_seen_at,last_seen_at)
+                    SELECT ?,?,photo_id,'analysis_batch',?,?, 'error',?,?,? FROM job_items WHERE id=?
+                    """,
+                    (
+                        job_id,
+                        item_id,
+                        error_code,
+                        hashlib.sha256(f"{job_id}:{item_id}:{error_code}".encode()).hexdigest(),
+                        message[:1000],
+                        now,
+                        now,
+                        item_id,
+                    ),
+                )
+            return bool(cursor.rowcount)
+
+    def finalize_batch_job(self, job_id: str, *, status: str) -> bool:
+        if status not in {"completed", "completed_with_errors", "failed", "cancelled"}:
+            raise ValueError("不合法的 Batch Job terminal status")
+        now = utc_now()
+        with self.database.session() as connection:
+            cursor = connection.execute(
+                "UPDATE jobs SET status=?,completed_at=?,heartbeat_at=? WHERE id=? AND status NOT IN ('completed','completed_with_errors','failed','cancelled')",
+                (status, now, now, job_id),
+            )
+        return bool(cursor.rowcount)
