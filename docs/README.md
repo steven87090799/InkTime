@@ -13,6 +13,7 @@
 | 開發或修改系統 | [開發指南](getting-started/DEVELOPMENT_GUIDE_ZH_TW.md) → [架構文件](architecture/ARCHITECTURE_ZH_TW.md) |
 | 接入 ESP32 或 PhotoPainter | [ESP32 指南](devices/ESP32_GUIDE_ZH_TW.md) → [PhotoPainter](devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) |
 | 使用本機無 AI 模式 | [Local-only 選片與雙照片](guides/LOCAL_ONLY_SELECTION_ZH_TW.md) |
+| 執行 OpenAI Batch 分析 | [OpenAI Batch 照片分析](OPENAI_BATCH_ANALYSIS_ZH_TW.md) → [正式交付與安全交接](PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md) |
 | 使用 Decision Trace、Queue 或 Canary | [決策與韌性總覽](resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md) |
 
 ## 文件規則
@@ -34,6 +35,11 @@
 - [`../README.md`](../README.md)：中文專案首頁、完整資料流與快速入口。
 - [`../README.en.md`](../README.en.md)：英文 legacy README；僅供舊使用方式參考。
 - [`../USER_MANUAL.html`](../USER_MANUAL.html)：可瀏覽的專案規格與所有 Markdown 文件索引。
+
+### Batch 與交付專項
+
+- [`OPENAI_BATCH_ANALYSIS_ZH_TW.md`](OPENAI_BATCH_ANALYSIS_ZH_TW.md)：Batch 輸入快照、隱私、生命週期、成本與實際人工 smoke 邊界。
+- [`PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md`](PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md)：正式環境安全、LAN、持久化與交接檢查。
 
 ### 開始使用
 
@@ -102,6 +108,7 @@
 - [`archive/audits/CONTROL_CENTER_AUDIT.md`](archive/audits/CONTROL_CENTER_AUDIT.md)：設定控制中心歷史稽核。
 - [`archive/audits/LEGACY_MEMORY_DATA_SAFETY_AUDIT.md`](archive/audits/LEGACY_MEMORY_DATA_SAFETY_AUDIT.md)：Legacy 記憶體與資料安全稽核。
 - [`archive/audits/SQLITE_AND_SCANNER_AUDIT.md`](archive/audits/SQLITE_AND_SCANNER_AUDIT.md)：SQLite／掃描器修正前稽核。
+- [`archive/audits/OPENAI_BATCH_LIFECYCLE_AUDIT_ZH_TW.md`](archive/audits/OPENAI_BATCH_LIFECYCLE_AUDIT_ZH_TW.md)：OpenAI Batch 生命週期歷史稽核。
 - [`archive/reports/FINAL_IMPLEMENTATION_REPORT_ZH_TW.md`](archive/reports/FINAL_IMPLEMENTATION_REPORT_ZH_TW.md)：2026-07-17 實作與驗收報告。
 - [`archive/reports/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md`](archive/reports/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md)：2026-07-22 跨模組與硬體邊界報告。
 - [`archive/reports/N100_IMPLEMENTATION_REPORT_ZH_TW.md`](archive/reports/N100_IMPLEMENTATION_REPORT_ZH_TW.md)：2026-07-18 N100 實作／量測報告。

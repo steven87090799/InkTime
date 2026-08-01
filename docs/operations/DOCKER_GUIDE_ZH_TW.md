@@ -1,6 +1,6 @@
 # InkTime Docker 部署規格（Intel N100）
 
-OpenAI Batch 正式操作與故障排除另見 [OpenAI Batch 照片分析指南](OPENAI_BATCH_ANALYSIS_ZH_TW.md)。`/data/batches` 必須與 SQLite 一起掛載持久化；Batch JSONL 不使用 `/tmp`，照片掛載仍保持唯讀。
+OpenAI Batch 正式操作與故障排除另見 [OpenAI Batch 照片分析指南](../OPENAI_BATCH_ANALYSIS_ZH_TW.md)。`/data/batches` 必須與 SQLite 一起掛載持久化；Batch JSONL 不使用 `/tmp`，照片掛載仍保持唯讀。
 
 這份文件是正式部署契約。日常分析、排程、裝置、備份與 Log 層級都從 Web 管理；只有主機路徑、Port、映像版本、HTTPS 與容器 CPU／記憶體上限需要在容器外設定。
 
