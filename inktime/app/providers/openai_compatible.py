@@ -289,9 +289,10 @@ class OpenAICompatibleProvider(VisionProvider):
                             response_info["provider_error_code"] = provider_error_code[:120]
             except (ValueError, TypeError, json.JSONDecodeError):
                 pass
+            classified_code = "BATCH-RATE-LIMITED" if status == 429 else error_code
             raise ProviderHTTPError(
                 self._redact(f"Provider 回應 HTTP {status}"),
-                error_code,
+                classified_code,
                 self._retry_after(response),
                 http_status=status,
                 provider_error_code=provider_error_code,
@@ -459,7 +460,7 @@ class OpenAICompatibleProvider(VisionProvider):
             files={"file": (f"inktime-batch-{uuid4()}.jsonl", data, "application/jsonl")},
             timeout=self.request_timeout,
         )
-        payload = self._json_response(upload, ambiguous_on_invalid=True)
+        payload = self._json_response(upload, error_code="BATCH-UPLOAD-REJECTED", ambiguous_on_invalid=True)
         input_file_id = payload.get("id")
         if not input_file_id:
             raise ProviderHTTPError("Batch 上傳回應缺少 file id", "BATCH-UPLOAD-UNKNOWN", ambiguous=True)
@@ -478,7 +479,7 @@ class OpenAICompatibleProvider(VisionProvider):
                 files={"file": (remote_filename or path.name, stream, "application/jsonl")},
                 timeout=self.request_timeout,
             )
-        payload = self._json_response(response, ambiguous_on_invalid=True)
+        payload = self._json_response(response, error_code="BATCH-UPLOAD-REJECTED", ambiguous_on_invalid=True)
         file_id = payload.get("id")
         if not isinstance(file_id, str) or not file_id:
             raise ProviderHTTPError("Batch 上傳回應缺少 file id", "BATCH-UPLOAD-UNKNOWN", ambiguous=True)
@@ -518,7 +519,9 @@ class OpenAICompatibleProvider(VisionProvider):
             json=body,
             timeout=self.request_timeout,
         )
-        payload = self._json_response(response, ambiguous_on_invalid=True)
+        payload = self._json_response(
+            response, error_code="BATCH-SUBMISSION-REJECTED", ambiguous_on_invalid=True
+        )
         if not isinstance(payload.get("id"), str) or not payload["id"]:
             raise ProviderHTTPError("Batch 建立回應缺少 batch id", "BATCH-SUBMISSION-UNKNOWN", ambiguous=True)
         return payload
@@ -531,6 +534,14 @@ class OpenAICompatibleProvider(VisionProvider):
             raise ValueError("BATCH-REMOTE-003 batch_id 不可空白")
         response = self._send(
             "GET", f"/batches/{batch_id}", headers=self._headers(), timeout=self.request_timeout
+        )
+        return self._json_response(response)
+
+    def retrieve_file(self, file_id: str) -> dict:
+        if not file_id:
+            raise ValueError("BATCH-FILE-005 file_id 不可空白")
+        response = self._send(
+            "GET", f"/files/{file_id}", headers=self._headers(), timeout=self.request_timeout
         )
         return self._json_response(response)
 

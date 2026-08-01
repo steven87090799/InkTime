@@ -65,6 +65,9 @@ class VisionProvider(ABC):
     def retrieve_batch(self, batch_id: str) -> dict:
         return self.poll_batch(batch_id)
 
+    def retrieve_file(self, file_id: str) -> dict:
+        raise NotImplementedError("Provider 不支援 Batch File Metadata Recovery")
+
     def download_file_content(self, file_id: str, destination: Path) -> Path:
         raise NotImplementedError("Provider 不支援 Batch File Download")
 

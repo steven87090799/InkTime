@@ -300,6 +300,9 @@ class FailoverVisionProvider(VisionProvider):
     def retrieve_batch(self, batch_id: str) -> dict:
         return self._batch_provider().retrieve_batch(batch_id)
 
+    def retrieve_file(self, file_id: str) -> dict:
+        return self._batch_provider().retrieve_file(file_id)
+
     def cancel_batch(self, batch_id: str) -> dict:
         return self._batch_provider().cancel_batch(batch_id)
 
