@@ -1003,9 +1003,13 @@ MIGRATIONS = (
                 )),
                 upload_attempt_id TEXT,
                 submission_attempt_id TEXT,
+                side_effect_version INTEGER NOT NULL DEFAULT 0 CHECK(side_effect_version >= 0),
+                side_effect_lease_until TEXT,
+                side_effect_owner TEXT,
                 phase_started_at TEXT,
                 abandon_confirmed_at TEXT,
                 input_file_id TEXT,
+                input_file_bytes INTEGER CHECK(input_file_bytes IS NULL OR input_file_bytes >= 0),
                 remote_batch_id TEXT,
                 output_file_id TEXT,
                 error_file_id TEXT,
@@ -1040,12 +1044,15 @@ MIGRATIONS = (
                     CHECK(scope IN ('sample','all_eligible_missing_analysis','new_or_changed','manual_selection')),
                 peak_rss_bytes INTEGER NOT NULL DEFAULT 0,
                 cleanup_status TEXT NOT NULL DEFAULT 'pending'
-                    CHECK(cleanup_status IN ('pending','partial','completed','not_required')),
+                    CHECK(cleanup_status IN ('pending','partial','completed','not_required')
+                        AND (cleanup_status!='not_required'
+                             OR (input_file_id IS NULL AND output_file_id IS NULL AND error_file_id IS NULL))),
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
             """,
             "CREATE INDEX IF NOT EXISTS idx_analysis_batches_poll ON analysis_batches(status,last_polled_at,updated_at)",
+            "CREATE INDEX IF NOT EXISTS idx_analysis_batches_poll_due ON analysis_batches(status,side_effect_lease_until,last_polled_at,phase_started_at,updated_at,created_at,id)",
             "CREATE INDEX IF NOT EXISTS idx_analysis_batches_job ON analysis_batches(job_id,created_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_analysis_batches_remote ON analysis_batches(remote_batch_id)",
             "CREATE INDEX IF NOT EXISTS idx_analysis_batches_retry ON analysis_batches(status,completed_at,updated_at)",

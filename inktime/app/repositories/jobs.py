@@ -882,11 +882,36 @@ class JobRepository:
                 )
             return bool(cursor.rowcount)
 
-    def finalize_batch_job(self, job_id: str, *, status: str) -> bool:
+    def cancel_batch_item(
+        self, job_id: str, item_id: str, reason: str = "cancelled", connection=None
+    ) -> bool:
+        """Cancel a Batch item without leaving its parent queue item pending."""
+
+        now = utc_now()
+        context = self.database.transaction() if connection is None else nullcontext(connection)
+        with context as active_connection:
+            connection = active_connection
+            cursor = connection.execute(
+                """
+                UPDATE job_items SET status='cancelled',completed_at=?,error_code=?,stage='analysis_batch',lease_until=NULL
+                WHERE id=? AND job_id=? AND status NOT IN ('completed','failed','cancelled')
+                """,
+                (now, reason[:120], item_id, job_id),
+            )
+            if cursor.rowcount:
+                connection.execute(
+                    "UPDATE jobs SET heartbeat_at=? WHERE id=? AND status!='cancelled'",
+                    (now, job_id),
+                )
+            return bool(cursor.rowcount)
+
+    def finalize_batch_job(self, job_id: str, *, status: str, connection=None) -> bool:
         if status not in {"completed", "completed_with_errors", "failed", "cancelled"}:
             raise ValueError("不合法的 Batch Job terminal status")
         now = utc_now()
-        with self.database.session() as connection:
+        context = self.database.session() if connection is None else nullcontext(connection)
+        with context as active_connection:
+            connection = active_connection
             cursor = connection.execute(
                 "UPDATE jobs SET status=?,completed_at=?,heartbeat_at=? WHERE id=? AND status NOT IN ('completed','completed_with_errors','failed','cancelled')",
                 (status, now, now, job_id),
@@ -918,16 +943,39 @@ class JobRepository:
             self.add_event(job_id, "reservation_conflict", "Batch reservation 未取得，工作已安全結束")
         return bool(cursor.rowcount)
 
-    def reopen_batch_job(self, job_id: str) -> bool:
+    def reopen_batch_job(self, job_id: str, connection=None) -> bool:
         """Reopen a Batch parent after manual remote ownership recovery."""
 
         now = utc_now()
-        with self.database.transaction() as connection:
+        context = self.database.transaction() if connection is None else nullcontext(connection)
+        with context as active_connection:
+            connection = active_connection
             cursor = connection.execute(
-                """UPDATE jobs SET status='running',completed_at=NULL,heartbeat_at=?
-                   WHERE id=? AND status NOT IN ('cancelled')""",
+                """
+                UPDATE jobs SET status='running',completed_at=NULL,heartbeat_at=?
+                WHERE id=? AND status IN ('pending','running','retrying','failed','completed_with_errors')
+                """,
                 (now, job_id),
             )
-        if cursor.rowcount:
+            if cursor.rowcount:
+                connection.execute(
+                    """
+                    UPDATE job_items SET status='pending',completed_at=NULL,error_code=NULL,lease_until=NULL
+                    WHERE job_id=? AND status IN ('failed','retrying')
+                    """,
+                    (job_id,),
+                )
+                connection.execute(
+                    """
+                    UPDATE jobs SET completed_items=(
+                        SELECT COUNT(*) FROM job_items WHERE job_id=? AND status='completed'
+                    ),failed_items=(
+                        SELECT COUNT(*) FROM job_items WHERE job_id=? AND status='failed'
+                    )
+                    WHERE id=?
+                    """,
+                    (job_id, job_id, job_id),
+                )
+        if cursor.rowcount and connection is not None and not getattr(connection, "in_transaction", False):
             self.add_event(job_id, "batch_reopened", "人工 Recovery 後重新開啟 Batch 工作")
         return bool(cursor.rowcount)
