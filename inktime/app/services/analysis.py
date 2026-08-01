@@ -14,6 +14,7 @@ from inktime.app.domain.analysis import (
     build_analysis_plan,
     canonical_json,
     fingerprint,
+    normalize_reasoning_effort,
     validate_analysis_result,
 )
 from inktime.app.domain.analysis.execution_mode import (
@@ -164,6 +165,7 @@ class PhotoAnalysisService:
             execution_policy=execution_policy,
             travel_policy=travel_policy,
             scoring_rules=str(settings.get("analysis.scoring_rules", "")),
+            reasoning_effort=normalize_reasoning_effort(settings.get("batch.reasoning_effort", "none")),
         )
 
     @staticmethod
@@ -541,6 +543,7 @@ class PhotoAnalysisService:
         photo_id: str,
         content_sha256: str,
         schema_kind: str,
+        reasoning_effort: str = "none",
         caption_controls: dict | None,
         prompt_version: str,
         vision_input: dict,
@@ -577,6 +580,7 @@ class PhotoAnalysisService:
                 "prompt_version": prompt_version,
                 "schema_version": 2,
                 "schema_kind": schema_kind,
+                "reasoning_effort": reasoning_effort,
                 **vision_input,
             }
         )
@@ -743,6 +747,7 @@ class PhotoAnalysisService:
                     photo_id=photo_id,
                     content_sha256=content_sha256,
                     schema_kind=schema_kind,
+                    reasoning_effort=reasoning_effort,
                     caption_controls=caption_controls,
                     prompt_version=prompt_version,
                     cache_schema_kind=cache_schema_kind,
@@ -766,6 +771,7 @@ class PhotoAnalysisService:
                     photo_id=photo_id,
                     content_sha256=content_sha256,
                     schema_kind=schema_kind,
+                    reasoning_effort=reasoning_effort,
                     caption_controls=caption_controls,
                     prompt_version=prompt_version,
                     vision_input=vision_input,
@@ -800,6 +806,7 @@ class PhotoAnalysisService:
         photo_id: str,
         content_sha256: str,
         schema_kind: str,
+        reasoning_effort: str,
         caption_controls: dict | None,
         prompt_version: str,
         cache_schema_kind: str,
@@ -830,6 +837,7 @@ class PhotoAnalysisService:
                 "detail": detail,
                 "stage": stage,
                 "max_tokens": max_tokens,
+                "reasoning_effort": reasoning_effort,
                 "caption_controls": caption_controls,
             }
             if self.process_boundary is not None and hasattr(provider, "analyze_isolated"):
@@ -844,6 +852,7 @@ class PhotoAnalysisService:
                         detail=detail,
                         stage=stage,
                         max_tokens=max_tokens,
+                        reasoning_effort=reasoning_effort,
                         caption_controls=caption_controls,
                     )
                 else:
@@ -860,6 +869,7 @@ class PhotoAnalysisService:
                     detail=detail,
                     stage=stage,
                     max_tokens=max_tokens,
+                    reasoning_effort=reasoning_effort,
                     caption_controls=caption_controls,
                 )
         except TimeoutError:
@@ -1038,6 +1048,9 @@ class PhotoAnalysisService:
                 if self.settings
                 else 1024,
             )
+        analysis_spec["reasoning_effort"] = normalize_reasoning_effort(
+            analysis_spec.get("reasoning_effort", "none")
+        )
         strategy = str(analysis_spec["strategy"])
         low_model = str(analysis_spec["low_model"])
         high_model = str(analysis_spec["high_model"])
@@ -1254,6 +1267,7 @@ class PhotoAnalysisService:
                 photo_id=photo_id,
                 content_sha256=sha,
                 schema_kind="basic",
+                reasoning_effort=str(analysis_spec["reasoning_effort"]),
                 caption_controls=caption_controls,
                 prompt_version=prompt_version,
                 vision_input=low_input,
@@ -1315,6 +1329,7 @@ class PhotoAnalysisService:
             photo_id=photo_id,
             content_sha256=sha,
             schema_kind="full",
+            reasoning_effort=str(analysis_spec["reasoning_effort"]),
             caption_controls=caption_controls,
             prompt_version=prompt_version,
             vision_input=high_input,

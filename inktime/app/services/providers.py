@@ -57,6 +57,7 @@ class ProviderService:
                 supports_json_schema=bool(config["supports_json_schema"]),
                 scoring_rules=rules,
                 caption_controls=caption_controls,
+                supports_reasoning_effort=str(config.get("kind") or "") == "openai",
             )
             provider.provider_id = provider_id
             provider.display_name = str(config["name"])

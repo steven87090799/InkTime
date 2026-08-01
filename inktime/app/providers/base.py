@@ -21,6 +21,8 @@ class ProviderResponse:
 
 
 class VisionProvider(ABC):
+    supports_reasoning_effort = False
+
     @property
     def name(self) -> str:
         return self._name
@@ -43,6 +45,7 @@ class VisionProvider(ABC):
         stage: str,
         max_tokens: int | None = None,
         caption_controls: dict | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict:
         raise NotImplementedError("Provider 未實作共用分析 Request Body Builder")
 
@@ -83,6 +86,7 @@ class VisionProvider(ABC):
         stage: str,
         max_tokens: int | None = None,
         caption_controls: dict | None = None,
+        reasoning_effort: str | None = None,
     ) -> ProviderResponse:
         raise NotImplementedError
 

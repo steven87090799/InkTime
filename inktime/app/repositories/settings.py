@@ -798,6 +798,15 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "risk": "模型必須在已啟用且支援 Batch 的 Provider 上可用",
         "restart": False,
     },
+    "batch.reasoning_effort": {
+        "category": "Batch 分析",
+        "default": "none",
+        "type": "string",
+        "description": "官方 OpenAI GPT-5.6 Luna 的推理強度",
+        "risk": "提高推理強度會增加成本與延遲；相容 Provider 不會收到此欄位",
+        "choices": ["none", "low", "medium", "high", "xhigh", "max"],
+        "restart": False,
+    },
     "batch.max_items_per_shard": {
         "category": "Batch 分析",
         "default": 500,
