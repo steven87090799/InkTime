@@ -8,7 +8,7 @@
 
 ## 資料模型與索引
 
-Migration 17 建立 algorithm version、decision trace／candidate、四種 feedback、Shadow 設定、device queue／event、retention policy／run／item、rollout campaign／stage／target／health／action。核心查詢均有 `(device_id, created_at)`、模式時間、Queue 狀態位置、Release、Rollout target 與 health event 索引；Trace 候選永遠只留前 50 筆。
+Migration 22 建立 algorithm version、decision trace／candidate、四種 feedback、Shadow 設定、device queue／event、retention policy／run／item、rollout campaign／stage／target／health／action；Migration 23 補上 correlation key 與資料一致性索引，Migration 24 補上分析／Vision Input 指紋。核心查詢均有 `(device_id, created_at)`、模式時間、Queue 狀態位置、Release、Rollout target 與 health event 索引；Trace 候選永遠只留前 50 筆。
 
 ## API、UI、排程與狀態
 

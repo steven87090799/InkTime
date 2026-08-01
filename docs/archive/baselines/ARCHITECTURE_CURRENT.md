@@ -1,4 +1,6 @@
-# 目前架構
+# 舊架構基線
+
+> **歷史基線（2026-07-17）**：本文件描述重構前的腳本式架構，不是目前架構。請改讀 [`../../architecture/ARCHITECTURE_ZH_TW.md`](../../architecture/ARCHITECTURE_ZH_TW.md)。
 
 ```text
 config.py

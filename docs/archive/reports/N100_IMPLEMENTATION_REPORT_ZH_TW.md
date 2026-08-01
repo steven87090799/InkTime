@@ -1,9 +1,11 @@
 # Docker／N100／ESP32 最終實作與驗收報告
 
+> **歷史報告（2026-07-18）**：本文件保存當時的量測與交付邊界，不代表目前功能或實機驗證狀態。現行部署請改讀 [Docker 部署規格](../../operations/DOCKER_GUIDE_ZH_TW.md) 與 [N100 資源指南](../../operations/N100_RESOURCE_GUIDE_ZH_TW.md)。
+
 日期：2026-07-18
 目標平台：Intel Processor N100、Docker Engine 24+、Compose v2、Linux x86_64
 
-這份報告記錄本次真正完成的變更、資源瓶頸判斷、隔離 Docker 實測與後續功能優先順序。部署時使用的固定規格見 [Docker 部署規格](DOCKER_GUIDE_ZH_TW.md)，日常維運見 [N100 資源指南](N100_RESOURCE_GUIDE_ZH_TW.md)與 [Log 指南](LOGGING_GUIDE_ZH_TW.md)。
+這份報告記錄本次真正完成的變更、資源瓶頸判斷、隔離 Docker 實測與後續功能優先順序。部署時使用的固定規格見 [Docker 部署規格](../../operations/DOCKER_GUIDE_ZH_TW.md)，日常維運見 [N100 資源指南](../../operations/N100_RESOURCE_GUIDE_ZH_TW.md)與 [Log 指南](../../operations/LOGGING_GUIDE_ZH_TW.md)。
 
 ## 結論
 
@@ -41,7 +43,7 @@ InkTime 已拆成 Web、Worker、Scheduler 三個健康檢查完整的容器程�
 
 ## 2026-07-18 隔離驗收數字
 
-以下在 Apple Silicon／OrbStack Linux ARM64 的隔離資料目錄量測，目的是驗證容器限制、健康、待機行為與記憶體量級；它不是 Intel N100 的耗電或效能保證。N100 實機上線後應依 [N100 資源指南](N100_RESOURCE_GUIDE_ZH_TW.md)再跑一次相同步驟。
+以下在 Apple Silicon／OrbStack Linux ARM64 的隔離資料目錄量測，目的是驗證容器限制、健康、待機行為與記憶體量級；它不是 Intel N100 的耗電或效能保證。N100 實機上線後應依 [N100 資源指南](../../operations/N100_RESOURCE_GUIDE_ZH_TW.md)再跑一次相同步驟。
 
 | 項目 | 實測 |
 |---|---:|
@@ -72,7 +74,7 @@ InkTime 已拆成 Web、Worker、Scheduler 三個健康檢查完整的容器程�
 - **完整 6／7 色渲染 Profile**：GDEP 六色、GDEY 七色、舊四色相容、OKLab／RGB 與 Floyd–Steinberg／Atkinson／Bayer／none。
 - **設定版本 ACK**：每台裝置期望與已套用版本、NVS 保存、Profile 安全拒絕與 Web 狀態。
 
-詳細規格見[裝置可靠性與六／七色渲染指南](DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。
+詳細規格見[裝置可靠性與六／七色渲染指南](../../devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。
 
 ## 建議增加的功能
 

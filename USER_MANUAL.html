@@ -648,6 +648,160 @@
         .mobile-menu-btn {
             display: none;
         }
+
+        /* Current manual refinement: presentation only; navigation hierarchy stays unchanged. */
+        :root {
+            --inktime-navy: #07152b;
+            --inktime-panel: rgba(16, 32, 58, 0.82);
+            --inktime-line: rgba(148, 184, 255, 0.18);
+            --inktime-glow: rgba(82, 155, 255, 0.22);
+        }
+
+        body {
+            background:
+                radial-gradient(circle at 83% -12%, rgba(55, 126, 220, 0.22), transparent 30rem),
+                radial-gradient(circle at 35% 0%, rgba(107, 86, 202, 0.13), transparent 27rem),
+                var(--bg-body);
+            text-rendering: optimizeLegibility;
+        }
+
+        html.light body {
+            background:
+                radial-gradient(circle at 85% -10%, rgba(67, 134, 224, 0.13), transparent 30rem),
+                radial-gradient(circle at 28% 0%, rgba(132, 103, 218, 0.08), transparent 25rem),
+                var(--bg-body);
+        }
+
+        aside.sidebar {
+            background: linear-gradient(180deg, rgba(18, 31, 54, 0.98), rgba(13, 22, 39, 0.98));
+            border-right-color: var(--inktime-line);
+            box-shadow: 12px 0 34px rgba(0, 0, 0, 0.12);
+        }
+
+        html.light aside.sidebar {
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(244, 248, 255, 0.98));
+        }
+
+        .sidebar-header {
+            padding: 24px 22px 20px;
+            background: linear-gradient(135deg, rgba(67, 131, 225, 0.15), transparent 62%);
+        }
+
+        .sidebar-header h2 { letter-spacing: 0.01em; }
+        .search-input { border-radius: 12px; background: rgba(3, 10, 23, 0.32); }
+        html.light .search-input { background: rgba(255, 255, 255, 0.82); }
+        .toc-group { margin-bottom: 8px; }
+        .toc-h2-link { padding: 9px 11px; border: 1px solid transparent; }
+        .toc-h2-link:hover, .toc-h2-link.active {
+            border-color: rgba(88, 166, 255, 0.2);
+            box-shadow: inset 3px 0 0 var(--accent-blue);
+        }
+        .toc-sub-tree { border-left-color: var(--inktime-line); }
+
+        header.top-nav {
+            height: 68px;
+            background: color-mix(in srgb, var(--bg-header) 86%, transparent);
+            border-bottom-color: var(--inktime-line);
+            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.08);
+        }
+
+        main.main-content {
+            margin-top: 68px;
+            max-width: 1240px;
+            padding: 56px clamp(26px, 5vw, 78px) 132px;
+        }
+
+        article.markdown-body { font-size: 15.5px; }
+
+        .doc-h1 {
+            padding: 28px 30px;
+            border: 1px solid var(--inktime-line);
+            border-radius: 18px;
+            background: linear-gradient(135deg, rgba(60, 125, 224, 0.16), rgba(114, 85, 208, 0.10));
+            box-shadow: 0 18px 46px rgba(0, 0, 0, 0.12);
+            line-height: 1.35;
+        }
+
+        .doc-h2 {
+            padding: 14px 0 12px;
+            border-bottom: 1px solid var(--inktime-line);
+            letter-spacing: -0.01em;
+        }
+
+        .doc-h2::after {
+            content: '';
+            display: block;
+            width: 46px;
+            height: 3px;
+            margin-left: auto;
+            border-radius: 999px;
+            background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
+        }
+
+        .doc-h3 { line-height: 1.55; }
+        .doc-p { max-width: 84ch; line-height: 1.9; }
+        .doc-list li { padding-left: 2px; }
+        .table-wrapper, .code-wrapper, .mermaid-box {
+            border-color: var(--inktime-line);
+            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.08);
+        }
+
+        .section-reference {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            margin: 4px 0 2px 10px;
+            padding: 3px 9px;
+            border: 1px solid rgba(88, 166, 255, 0.30);
+            border-radius: 999px;
+            color: var(--accent-indigo);
+            background: rgba(88, 166, 255, 0.09);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            font-weight: 500;
+            line-height: 1.45;
+            text-decoration: none;
+            vertical-align: middle;
+            overflow-wrap: anywhere;
+        }
+
+        .section-reference:hover {
+            color: var(--text-primary);
+            border-color: var(--accent-blue);
+            background: rgba(88, 166, 255, 0.18);
+        }
+
+        .current-card {
+            margin: 18px 0 26px;
+            padding: 18px 20px;
+            border: 1px solid rgba(88, 166, 255, 0.26);
+            border-radius: 14px;
+            background: linear-gradient(135deg, rgba(48, 117, 216, 0.12), rgba(106, 80, 194, 0.07));
+            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.08);
+        }
+
+        .current-card h4 {
+            margin: 0 0 8px;
+            color: var(--text-primary);
+            font-size: 14px;
+        }
+
+        .current-card p, .current-card li { color: var(--text-secondary); }
+        .current-card p { margin: 0; }
+        .current-card ul { margin: 9px 0 0 20px; }
+        .current-card li { margin: 5px 0; }
+
+        @media (max-width: 1024px) {
+            main.main-content { margin-top: 68px; }
+        }
+
+        @media (max-width: 640px) {
+            header.top-nav { padding: 0 14px; }
+            main.main-content { padding: 32px 18px 96px; }
+            .doc-h1 { padding: 22px 20px; font-size: 25px; }
+            .doc-h2 { font-size: 20px; }
+            .section-reference { margin-left: 0; font-size: 10px; }
+        }
     </style>
 </head>
 <body>
@@ -1030,6 +1184,26 @@
             </li>
 </ul>
 </li>
+<li class="toc-group">
+        <a href="#sec-15" class="toc-h2-link">
+            <i class="fa-solid fa-folder-open toc-folder"></i>
+            <span>十五、 文件地圖與 Markdown 索引</span>
+        </a>
+<ul class="toc-sub-tree">
+<li>
+                <a href="#sec-15-1" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>15.1 依工作情境找文件</span>
+                </a>
+            </li>
+<li>
+                <a href="#sec-15-2" class="toc-h3-link">
+                    <i class="fa-solid fa-angle-right toc-bullet"></i>
+                    <span>15.2 完整 Markdown 檔案索引</span>
+                </a>
+            </li>
+</ul>
+</li>
             </ul>
         </nav>
     </aside>
@@ -1068,7 +1242,7 @@
             <h1 id="inktime-墨水屏電子相框系統-終極百科全書級操作手冊與開發者指南" class="doc-h1">InkTime 墨水屏電子相框系統 終極百科全書級操作手冊與開發者指南</h1>
 <hr class="doc-divider">
 <h2 id="toc" class="doc-h2"><span class="h2-anchor-icon">#</span> 摘要目錄</h2>
-<ul class="doc-list"><li><a href="#sec-1" class="doc-link">一、 系統架構與設計哲學</a></li><li><a href="#sec-2" class="doc-link">二、 硬體選型、電路設計與面板選擇</a></li><li><a href="#sec-2-1" class="doc-link">2.1 三大彩色電子紙面板規格與光學特性</a></li><li><a href="#sec-2-2" class="doc-link">2.2 完整 GPIO 引腳映射與 SPI 時脈規範</a></li><li><a href="#sec-2-3" class="doc-link">2.3 電池功耗模型與 ADC 分壓量測電路</a></li><li><a href="#sec-3" class="doc-link">三、 ESP32 / ESP32-S3 韌體開發與刷機指南</a></li><li><a href="#sec-3-1" class="doc-link">3.1 PlatformIO 與 Arduino IDE 環境配置</a></li><li><a href="#sec-3-2" class="doc-link">3.2 韌體原始碼邏輯與驅動初始化序列</a></li><li><a href="#sec-3-3" class="doc-link">3.3 燒錄、Wi-Fi 配網與 Token 註冊流程</a></li><li><a href="#sec-4" class="doc-link">四、 AI 大語言模型連接與組態指南</a></li><li><a href="#sec-4-1" class="doc-link">4.1 OpenAI 官方 Vision API 連接 (GPT-4o / GPT-4o-mini)</a></li><li><a href="#sec-4-2" class="doc-link">4.2 本機 LMStudio 視覺大模型連接 (Qwen2.5-VL / Qwen3-VL)</a></li><li><a href="#sec-4-3" class="doc-link">4.3 Ollama 本機模型相容介面連接 (LLaVA / Qwen-VL)</a></li><li><a href="#sec-4-4" class="doc-link">4.4 Azure OpenAI 與自訂相容 Vision 端點</a></li><li><a href="#sec-5" class="doc-link">五、 Web 控制台全頁面、按鈕與 API 介面深度解析</a></li><li><a href="#sec-5-1" class="doc-link">5.1 儀表板 (Dashboard)</a></li><li><a href="#sec-5-2" class="doc-link">5.2 照片庫與照片詳情 (Photos & Photo Detail)</a></li><li><a href="#sec-5-3" class="doc-link">5.3 預篩選排除清單 (Excluded Photos)</a></li><li><a href="#sec-5-4" class="doc-link">5.4 照片分析與 AI 工作佇列 (Photo Analysis & Jobs)</a></li><li><a href="#sec-5-5" class="doc-link">5.5 AI 提供者與成本控制 (Providers & Budgets)</a></li><li><a href="#sec-5-6" class="doc-link">5.6 評分控制中心 (Scoring Lab)</a></li><li><a href="#sec-5-7" class="doc-link">5.7 渲染設定與 A/B 模擬器 (Rendering & Simulator)</a></li><li><a href="#sec-5-8" class="doc-link">5.8 虛擬電子紙與畫面發布 (Virtual Display & Release Publisher)</a></li><li><a href="#sec-5-9" class="doc-link">5.9 裝置管理與能量分析 (Devices & Energy)</a></li><li><a href="#sec-5-10" class="doc-link">5.10 排程工作管理 (Schedules)</a></li><li><a href="#sec-5-11" class="doc-link">5.11 系統維護與決策韌性 (Maintenance & Resilience)</a></li><li><a href="#sec-5-12" class="doc-link">5.12 熱備份與系統診斷 (Backups & Diagnostics)</a></li><li><a href="#sec-6" class="doc-link">六、 DEBUG 模式、除錯診斷工具與測試清單</a></li><li><a href="#sec-6-1" class="doc-link">6.1 伺服器端 DEBUG 日誌模式切換</a></li><li><a href="#sec-6-2" class="doc-link">6.2 ESP32 Serial 串口監控與除錯訊息</a></li><li><a href="#sec-6-3" class="doc-link">6.3 系統日常維護與健康檢查 5 步清單</a></li><li><a href="#sec-7" class="doc-link">七、 4 大核心 JSON 資料格式與逐行註解範例集</a></li><li><a href="#sec-7-1" class="doc-link">7.1 EXIF 照片元資料 JSON 格式 (<code>photo_scores.exif_json</code>)</a></li><li><a href="#sec-7-2" class="doc-link">7.2 送往 Vision LLM 之 Request Input Payload JSON</a></li><li><a href="#sec-7-3" class="doc-link">7.3 Vision LLM 回傳之 Response JSON (<code>ANALYSIS_JSON_SCHEMA</code>)</a></li><li><a href="#sec-7-4" class="doc-link">7.4 ESP32 設備回報狀態 JSON (<code>report_status</code>)</a></li><li><a href="#sec-8" class="doc-link">八、 7 大畫布版型幾何佈局與渲染引擎細節</a></li><li><a href="#sec-9" class="doc-link">九、 10 種 Dithering 抖動演算法與色彩空間演算法數學原理</a></li><li><a href="#sec-10" class="doc-link">十、 SQLite 資料庫 13 張 Table 完全 Schema 規格</a></li><li><a href="#sec-11" class="doc-link">十一、 RESTful API 端點與 Error Code 錯誤碼完全對照表</a></li><li><a href="#sec-12" class="doc-link">十二、 Docker 部署、環境變數與生產環境配置</a></li><li><a href="#sec-12-1" class="doc-link">12.1 <code>docker-compose.yml</code> 逐行中文註解配置檔</a></li><li><a href="#sec-12-2" class="doc-link">12.2 全系統環境變數逐行詳細解析</a></li><li><a href="#sec-12-3" class="doc-link">12.3 初次設定「必須設定」的 5 大項目清單</a></li><li><a href="#sec-12-4" class="doc-link">12.4 進階「設定後會更好」的 8 大系統優化清單</a></li><li><a href="#sec-13" class="doc-link">十三、 系統設定參數 100% 完全對照表</a></li><li><a href="#sec-14" class="doc-link">十四、 全情境故障排除與問題診斷指南</a></li><li><a href="#sec-14-1" class="doc-link">14.1 網路連線與 ESP32 硬體故障排除</a></li><li><a href="#sec-14-2" class="doc-link">14.2 照片庫、磁碟與 NAS 掛載故障排除</a></li><li><a href="#sec-14-3" class="doc-link">14.3 AI 模型分析與 Token 成本故障排除</a></li><li><a href="#sec-14-4" class="doc-link">14.4 影像渲染與墨水屏顯示畫質故障排除</a></li><li><a href="#sec-14-5" class="doc-link">14.5 資料庫與鎖定競爭故障排除</a></li></ul>
+<ul class="doc-list"><li><a href="#sec-1" class="doc-link">一、 系統架構與設計哲學</a></li><li><a href="#sec-2" class="doc-link">二、 硬體選型、電路設計與面板選擇</a></li><li><a href="#sec-2-1" class="doc-link">2.1 三大彩色電子紙面板規格與光學特性</a></li><li><a href="#sec-2-2" class="doc-link">2.2 完整 GPIO 引腳映射與 SPI 時脈規範</a></li><li><a href="#sec-2-3" class="doc-link">2.3 電池功耗模型與 ADC 分壓量測電路</a></li><li><a href="#sec-3" class="doc-link">三、 ESP32 / ESP32-S3 韌體開發與刷機指南</a></li><li><a href="#sec-3-1" class="doc-link">3.1 PlatformIO 與 Arduino IDE 環境配置</a></li><li><a href="#sec-3-2" class="doc-link">3.2 韌體原始碼邏輯與驅動初始化序列</a></li><li><a href="#sec-3-3" class="doc-link">3.3 燒錄、Wi-Fi 配網與 Token 註冊流程</a></li><li><a href="#sec-4" class="doc-link">四、 AI 大語言模型連接與組態指南</a></li><li><a href="#sec-4-1" class="doc-link">4.1 OpenAI 官方 Vision API 連接 (GPT-4o / GPT-4o-mini)</a></li><li><a href="#sec-4-2" class="doc-link">4.2 本機 LMStudio 視覺大模型連接 (Qwen2.5-VL / Qwen3-VL)</a></li><li><a href="#sec-4-3" class="doc-link">4.3 Ollama 本機模型相容介面連接 (LLaVA / Qwen-VL)</a></li><li><a href="#sec-4-4" class="doc-link">4.4 Azure OpenAI 與自訂相容 Vision 端點</a></li><li><a href="#sec-5" class="doc-link">五、 Web 控制台全頁面、按鈕與 API 介面深度解析</a></li><li><a href="#sec-5-1" class="doc-link">5.1 儀表板 (Dashboard)</a></li><li><a href="#sec-5-2" class="doc-link">5.2 照片庫與照片詳情 (Photos &amp; Photo Detail)</a></li><li><a href="#sec-5-3" class="doc-link">5.3 預篩選排除清單 (Excluded Photos)</a></li><li><a href="#sec-5-4" class="doc-link">5.4 照片分析與 AI 工作佇列 (Photo Analysis &amp; Jobs)</a></li><li><a href="#sec-5-5" class="doc-link">5.5 AI 提供者與成本控制 (Providers &amp; Budgets)</a></li><li><a href="#sec-5-6" class="doc-link">5.6 評分控制中心 (Scoring Lab)</a></li><li><a href="#sec-5-7" class="doc-link">5.7 渲染設定與 A/B 模擬器 (Rendering &amp; Simulator)</a></li><li><a href="#sec-5-8" class="doc-link">5.8 虛擬電子紙與畫面發布 (Virtual Display &amp; Release Publisher)</a></li><li><a href="#sec-5-9" class="doc-link">5.9 裝置管理與能量分析 (Devices &amp; Energy)</a></li><li><a href="#sec-5-10" class="doc-link">5.10 排程工作管理 (Schedules)</a></li><li><a href="#sec-5-11" class="doc-link">5.11 系統維護與決策韌性 (Maintenance &amp; Resilience)</a></li><li><a href="#sec-5-12" class="doc-link">5.12 熱備份與系統診斷 (Backups &amp; Diagnostics)</a></li><li><a href="#sec-6" class="doc-link">六、 DEBUG 模式、除錯診斷工具與測試清單</a></li><li><a href="#sec-6-1" class="doc-link">6.1 伺服器端 DEBUG 日誌模式切換</a></li><li><a href="#sec-6-2" class="doc-link">6.2 ESP32 Serial 串口監控與除錯訊息</a></li><li><a href="#sec-6-3" class="doc-link">6.3 系統日常維護與健康檢查 5 步清單</a></li><li><a href="#sec-7" class="doc-link">七、 4 大核心 JSON 資料格式與逐行註解範例集</a></li><li><a href="#sec-7-1" class="doc-link">7.1 EXIF 照片元資料 JSON 格式 (<code>photo_scores.exif_json</code>)</a></li><li><a href="#sec-7-2" class="doc-link">7.2 送往 Vision LLM 之 Request Input Payload JSON</a></li><li><a href="#sec-7-3" class="doc-link">7.3 Vision LLM 回傳之 Response JSON (<code>ANALYSIS_JSON_SCHEMA</code>)</a></li><li><a href="#sec-7-4" class="doc-link">7.4 ESP32 設備回報狀態 JSON (<code>report_status</code>)</a></li><li><a href="#sec-8" class="doc-link">八、 7 大畫布版型幾何佈局與渲染引擎細節</a></li><li><a href="#sec-9" class="doc-link">九、 10 種 Dithering 抖動演算法與色彩空間演算法數學原理</a></li><li><a href="#sec-10" class="doc-link">十、 SQLite 資料庫 13 張 Table 完全 Schema 規格</a></li><li><a href="#sec-11" class="doc-link">十一、 RESTful API 端點與 Error Code 錯誤碼完全對照表</a></li><li><a href="#sec-12" class="doc-link">十二、 Docker 部署、環境變數與生產環境配置</a></li><li><a href="#sec-12-1" class="doc-link">12.1 <code>docker-compose.yml</code> 逐行中文註解配置檔</a></li><li><a href="#sec-12-2" class="doc-link">12.2 全系統環境變數逐行詳細解析</a></li><li><a href="#sec-12-3" class="doc-link">12.3 初次設定「必須設定」的 5 大項目清單</a></li><li><a href="#sec-12-4" class="doc-link">12.4 進階「設定後會更好」的 8 大系統優化清單</a></li><li><a href="#sec-13" class="doc-link">十三、 系統設定參數 100% 完全對照表</a></li><li><a href="#sec-14" class="doc-link">十四、 全情境故障排除與問題診斷指南</a></li><li><a href="#sec-14-1" class="doc-link">14.1 網路連線與 ESP32 硬體故障排除</a></li><li><a href="#sec-14-2" class="doc-link">14.2 照片庫、磁碟與 NAS 掛載故障排除</a></li><li><a href="#sec-14-3" class="doc-link">14.3 AI 模型分析與 Token 成本故障排除</a></li><li><a href="#sec-14-4" class="doc-link">14.4 影像渲染與墨水屏顯示畫質故障排除</a></li><li><a href="#sec-14-5" class="doc-link">14.5 資料庫與鎖定競爭故障排除</a></li><li><a href="#sec-15" class="doc-link">十五、 文件地圖與 Markdown 索引</a></li><li><a href="#sec-15-1" class="doc-link">15.1 依工作情境找文件</a></li><li><a href="#sec-15-2" class="doc-link">15.2 完整 Markdown 檔案索引</a></li></ul>
 <hr class="doc-divider">
 <h2 id="sec-1" class="doc-h2"><span class="h2-anchor-icon">#</span> 一、 系統架構與設計哲學</h2>
 <p class="doc-p">InkTime 採用 Clean Architecture（潔淨架構）設計，將領域邏輯 (Domain)、資料庫與儲存庫 (Repositories)、業務服務 (Services) 以及 Web API/介面 (API & Web) 嚴格解耦：</p>
@@ -1865,6 +2039,124 @@ INKTIME_LOG_LEVEL=INFO</code></pre>
 <h4 id="現象-1-系統日誌出現-sqlite3-operationalerror-database-is-locked" class="doc-h4">現象 1：系統日誌出現 <code>sqlite3.OperationalError: database is locked</code></h4>
 <ul class="doc-list"><li><strong>可能原因</strong>：</li><li>有背景 Worker 或掃描器正執行長時間的 SQLite 寫入交易。</li><li>Gunicorn 部署了多個 Process，在無跨程序寫入鎖的情況下競爭寫入資料庫。</li><li><strong>排除步驟與診斷</strong>：</li><li>確定系統均使用 <code>ManagedConnection</code> 進行連線。</li><li>在 <code>/settings</code> 將 <code>scanner.write_batch_size</code> 由 1000 降低為 <code>500</code>，縮短單次 <code>fcntl.flock</code> 鎖定時間。</li></ul>
 <h4 id="現象-2-熱備份還原失敗-提示-restore-001-inktime-web-worker-或-scheduler-尚未停止" class="doc-h4">現象 2：熱備份還原失敗，提示 <code>RESTORE-001: InkTime Web、Worker 或 Scheduler 尚未停止</code></h4>
+<hr class="doc-divider">
+<h2 id="sec-15" class="doc-h2"><span class="h2-anchor-icon">#</span> 十五、 文件地圖與 Markdown 索引</h2>
+<p class="doc-p">本章保留原手冊的完整閱讀方式，並提供目前專案內 <strong>全部 Markdown 文件</strong> 的單一入口。每一列都列出實際相對路徑、檔名、用途與可直接開啟的連結；文件移動後，應同步更新本章與 <a href="docs/README.md" class="doc-link">docs/README.md</a>。</p>
+<p class="doc-p">本手冊的既有章節適合連續閱讀；遇到安裝、維運、裝置、架構或歷史決策等需要深入查核的議題，請依下列連結前往對應的 Markdown 原始文件。<strong>archive/</strong> 下的內容是歷史證據，不應作為現行行為規格。</p>
+
+<h3 id="sec-15-1" class="doc-h3">15.1 依工作情境找文件</h3>
+<div class="table-wrapper"><table><thead><tr><th>你要做的事</th><th>建議先讀</th></tr></thead><tbody>
+<tr class="even"><td>第一次啟動或安裝</td><td><a href="docs/getting-started/QUICK_START_ZH_TW.md" class="doc-link">快速開始</a> → <a href="docs/getting-started/INSTALLATION_ZH_TW.md" class="doc-link">安裝指南</a></td></tr>
+<tr class="odd"><td>管理照片、模型、裝置與排程</td><td><a href="docs/guides/ADMIN_GUIDE_ZH_TW.md" class="doc-link">管理員指南</a> → <a href="docs/guides/USER_GUIDE_ZH_TW.md" class="doc-link">使用者指南</a></td></tr>
+<tr class="even"><td>部署、備份或排除故障</td><td><a href="docs/operations/DOCKER_GUIDE_ZH_TW.md" class="doc-link">Docker 部署</a> → <a href="docs/operations/BACKUP_RESTORE_ZH_TW.md" class="doc-link">備份還原</a> → <a href="docs/operations/TROUBLESHOOTING_ZH_TW.md" class="doc-link">疑難排解</a></td></tr>
+<tr class="odd"><td>理解或修改程式架構</td><td><a href="docs/architecture/ARCHITECTURE_ZH_TW.md" class="doc-link">現行架構</a> → <a href="docs/architecture/APPLICATION_FACTORY.md" class="doc-link">Application Factory</a> → <a href="docs/getting-started/DEVELOPMENT_GUIDE_ZH_TW.md" class="doc-link">開發指南</a></td></tr>
+<tr class="even"><td>接入 ESP32、電子紙或 PhotoPainter</td><td><a href="docs/devices/ESP32_GUIDE_ZH_TW.md" class="doc-link">ESP32 指南</a> → <a href="docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md" class="doc-link">PhotoPainter</a></td></tr>
+<tr class="odd"><td>使用本機無 AI 選片、Decision Trace 或 Canary</td><td><a href="docs/guides/LOCAL_ONLY_SELECTION_ZH_TW.md" class="doc-link">Local-only 選片</a> → <a href="docs/resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md" class="doc-link">決策與韌性總覽</a></td></tr>
+</tbody></table></div>
+
+<h3 id="sec-15-2" class="doc-h3">15.2 完整 Markdown 檔案索引</h3>
+<p class="doc-p">以下共 58 份 Markdown 文件，路徑均以專案根目錄為起點；點擊檔名即可開啟原始文件。</p>
+
+<h4 class="doc-h4">專案入口</h4>
+<ul class="doc-list">
+<li><a href="README.md" class="doc-link"><code>README.md</code></a>：中文專案首頁、完整資料流與快速入口。</li>
+<li><a href="README.en.md" class="doc-link"><code>README.en.md</code></a>：英文舊版概要；現行資訊請以中文首頁與本手冊為準。</li>
+<li><a href="docs/README.md" class="doc-link"><code>docs/README.md</code></a>：Markdown 版文件地圖、分類規則與維護方式。</li>
+</ul>
+
+<h4 class="doc-h4">開始使用與開發（<code>docs/getting-started/</code>）</h4>
+<ul class="doc-list">
+<li><a href="docs/getting-started/QUICK_START_ZH_TW.md" class="doc-link"><code>docs/getting-started/QUICK_START_ZH_TW.md</code></a>：Docker 最短啟動路徑與首輪驗收。</li>
+<li><a href="docs/getting-started/INSTALLATION_ZH_TW.md" class="doc-link"><code>docs/getting-started/INSTALLATION_ZH_TW.md</code></a>：Docker／原生安裝與首次管理員設定。</li>
+<li><a href="docs/getting-started/DEVELOPMENT_GUIDE_ZH_TW.md" class="doc-link"><code>docs/getting-started/DEVELOPMENT_GUIDE_ZH_TW.md</code></a>：分層規則、開發指令與測試原則。</li>
+</ul>
+
+<h4 class="doc-h4">使用指南（<code>docs/guides/</code>）</h4>
+<ul class="doc-list">
+<li><a href="docs/guides/ADMIN_GUIDE_ZH_TW.md" class="doc-link"><code>docs/guides/ADMIN_GUIDE_ZH_TW.md</code></a>：設定欄位、裝置、排程與管理界面責任。</li>
+<li><a href="docs/guides/USER_GUIDE_ZH_TW.md" class="doc-link"><code>docs/guides/USER_GUIDE_ZH_TW.md</code></a>：照片、工作、渲染、發布與診斷操作。</li>
+<li><a href="docs/guides/API_PROVIDER_GUIDE_ZH_TW.md" class="doc-link"><code>docs/guides/API_PROVIDER_GUIDE_ZH_TW.md</code></a>：OpenAI 相容 Provider 與各廠商接入步驟。</li>
+<li><a href="docs/guides/EPAPER_SIMULATOR_ZH_TW.md" class="doc-link"><code>docs/guides/EPAPER_SIMULATOR_ZH_TW.md</code></a>：虛擬電子紙接收端與無硬體驗收。</li>
+<li><a href="docs/guides/LOCAL_ONLY_SELECTION_ZH_TW.md" class="doc-link"><code>docs/guides/LOCAL_ONLY_SELECTION_ZH_TW.md</code></a>：<code>analysis.execution_mode</code>、本機選片、雙照片與文案來源。</li>
+</ul>
+
+<h4 class="doc-h4">Batch 與正式交付</h4>
+<ul class="doc-list">
+<li><a href="docs/OPENAI_BATCH_ANALYSIS_ZH_TW.md" class="doc-link"><code>docs/OPENAI_BATCH_ANALYSIS_ZH_TW.md</code></a>：Batch 輸入快照、隱私、生命週期、成本與實際人工 smoke 邊界。</li>
+<li><a href="docs/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md" class="doc-link"><code>docs/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md</code></a>：正式環境安全、LAN、持久化與交接檢查。</li>
+</ul>
+
+<h4 class="doc-h4">架構與設計（<code>docs/architecture/</code>）</h4>
+<ul class="doc-list">
+<li><a href="docs/architecture/ARCHITECTURE_ZH_TW.md" class="doc-link"><code>docs/architecture/ARCHITECTURE_ZH_TW.md</code></a>：現行執行架構、資料流、選片與 Release Coordinator。</li>
+<li><a href="docs/architecture/ARCHITECTURE_TARGET.md" class="doc-link"><code>docs/architecture/ARCHITECTURE_TARGET.md</code></a>：架構責任與不變條件。</li>
+<li><a href="docs/architecture/APPLICATION_FACTORY.md" class="doc-link"><code>docs/architecture/APPLICATION_FACTORY.md</code></a>：Web／Worker／Scheduler 的 Factory 與初始化順序。</li>
+<li><a href="docs/architecture/RUNTIME_CONFIGURATION.md" class="doc-link"><code>docs/architecture/RUNTIME_CONFIGURATION.md</code></a>：RuntimeConfig 與部署設定邊界。</li>
+<li><a href="docs/architecture/LEGACY_RETIREMENT_PLAN.md" class="doc-link"><code>docs/architecture/LEGACY_RETIREMENT_PLAN.md</code></a>：Legacy 相容與退休門檻。</li>
+<li><a href="docs/architecture/VISUAL_ORIENTATION_CORRECTION.md" class="doc-link"><code>docs/architecture/VISUAL_ORIENTATION_CORRECTION.md</code></a>：EXIF、AI 與人工視覺方向規則。</li>
+<li><a href="docs/architecture/TECH_DEBT_LOCAL_ONLY_ZH_TW.md" class="doc-link"><code>docs/architecture/TECH_DEBT_LOCAL_ONLY_ZH_TW.md</code></a>：Local-only 交付刻意未處理的技術債。</li>
+</ul>
+
+<h4 class="doc-h4">維運、安全與部署（<code>docs/operations/</code>）</h4>
+<ul class="doc-list">
+<li><a href="docs/operations/DOCKER_GUIDE_ZH_TW.md" class="doc-link"><code>docs/operations/DOCKER_GUIDE_ZH_TW.md</code></a>：N100 Docker 部署、資源、健康檢查、更新與回滾。</li>
+<li><a href="docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md" class="doc-link"><code>docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md</code></a>：N100 容量與低功耗調校。</li>
+<li><a href="docs/operations/LOGGING_GUIDE_ZH_TW.md" class="doc-link"><code>docs/operations/LOGGING_GUIDE_ZH_TW.md</code></a>：Log 層級、遮罩與判讀方法。</li>
+<li><a href="docs/operations/TROUBLESHOOTING_ZH_TW.md" class="doc-link"><code>docs/operations/TROUBLESHOOTING_ZH_TW.md</code></a>：常見故障與處理順序。</li>
+<li><a href="docs/operations/ERROR_CODES_ZH_TW.md" class="doc-link"><code>docs/operations/ERROR_CODES_ZH_TW.md</code></a>：穩定錯誤碼與建議處置。</li>
+<li><a href="docs/operations/SECURITY_GUIDE_ZH_TW.md" class="doc-link"><code>docs/operations/SECURITY_GUIDE_ZH_TW.md</code></a>：登入、CSRF、Secret、Token 與網路安全。</li>
+<li><a href="docs/operations/PRODUCTION_PREFLIGHT_ZH_TW.md" class="doc-link"><code>docs/operations/PRODUCTION_PREFLIGHT_ZH_TW.md</code></a>：公開 URL、Cookie、Proxy 與 SQLite 掛載預檢。</li>
+<li><a href="docs/operations/BACKUP_RESTORE_ZH_TW.md" class="doc-link"><code>docs/operations/BACKUP_RESTORE_ZH_TW.md</code></a>：備份內容、驗證與離線還原。</li>
+<li><a href="docs/operations/SECRET_RECOVERY_ZH_TW.md" class="doc-link"><code>docs/operations/SECRET_RECOVERY_ZH_TW.md</code></a>：加密 Secret 的災難復原 Bundle。</li>
+<li><a href="docs/operations/MIGRATION_GUIDE_ZH_TW.md" class="doc-link"><code>docs/operations/MIGRATION_GUIDE_ZH_TW.md</code></a>：舊版遷移與 <code>config.py</code> 匯入。</li>
+<li><a href="docs/operations/MIGRATION_PLAN.md" class="doc-link"><code>docs/operations/MIGRATION_PLAN.md</code></a>：升級、回滾與資料相容原則。</li>
+<li><a href="docs/operations/OPERATIONS_ZH_TW.md" class="doc-link"><code>docs/operations/OPERATIONS_ZH_TW.md</code></a>：Decision、Queue、保留與發布日常操作。</li>
+</ul>
+
+<h4 class="doc-h4">裝置與電子紙（<code>docs/devices/</code>）</h4>
+<ul class="doc-list">
+<li><a href="docs/devices/ESP32_GUIDE_ZH_TW.md" class="doc-link"><code>docs/devices/ESP32_GUIDE_ZH_TW.md</code></a>：ESP32-S3、配網、Manifest、低功耗與燒錄。</li>
+<li><a href="docs/devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md" class="doc-link"><code>docs/devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md</code></a>：六／七色、抖動、ACK、通知與 Webhook。</li>
+<li><a href="docs/devices/DEVICE_PROTOCOL_ZH_TW.md" class="doc-link"><code>docs/devices/DEVICE_PROTOCOL_ZH_TW.md</code></a>：離線 Queue Manifest、下載與 ACK 協定。</li>
+<li><a href="docs/devices/DEVICE_TRANSPORT_SECURITY_ZH_TW.md" class="doc-link"><code>docs/devices/DEVICE_TRANSPORT_SECURITY_ZH_TW.md</code></a>：Bearer Token、HTTP/HTTPS 與傳輸限制。</li>
+<li><a href="docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md" class="doc-link"><code>docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md</code></a>：PhotoPainter 板型、電源、PSRAM 與實機驗收。</li>
+<li><a href="docs/devices/SECURE_OTA_DESIGN_ZH_TW.md" class="doc-link"><code>docs/devices/SECURE_OTA_DESIGN_ZH_TW.md</code></a>：尚未啟用 OTA 的安全前提。</li>
+</ul>
+
+<h4 class="doc-h4">決策與韌性（<code>docs/resilience/</code>）</h4>
+<ul class="doc-list">
+<li><a href="docs/resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md" class="doc-link"><code>docs/resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md</code></a>：Decision Trace、回饋、Queue、Retention、Canary 的整體設計。</li>
+<li><a href="docs/resilience/DECISION_TRACE_ZH_TW.md" class="doc-link"><code>docs/resilience/DECISION_TRACE_ZH_TW.md</code></a>：Trace 內容、查詢與回饋 API。</li>
+<li><a href="docs/resilience/SHADOW_MODE_ZH_TW.md" class="doc-link"><code>docs/resilience/SHADOW_MODE_ZH_TW.md</code></a>：不影響正式發布的 Shadow 比較模式。</li>
+<li><a href="docs/resilience/OFFLINE_QUEUE_ZH_TW.md" class="doc-link"><code>docs/resilience/OFFLINE_QUEUE_ZH_TW.md</code></a>：裝置離線內容佇列。</li>
+<li><a href="docs/resilience/DEVICE_QUEUE_AND_ROLLOUT_ZH_TW.md" class="doc-link"><code>docs/resilience/DEVICE_QUEUE_AND_ROLLOUT_ZH_TW.md</code></a>：Queue、LKG 與 Canary 邊界。</li>
+<li><a href="docs/resilience/CANARY_ROLLOUT_ZH_TW.md" class="doc-link"><code>docs/resilience/CANARY_ROLLOUT_ZH_TW.md</code></a>：Canary 發布與回滾行為。</li>
+<li><a href="docs/resilience/DATA_RETENTION_ZH_TW.md" class="doc-link"><code>docs/resilience/DATA_RETENTION_ZH_TW.md</code></a>：資料保留與 Dry Run 清理。</li>
+</ul>
+
+<h4 class="doc-h4">參考、量測與歷史紀錄</h4>
+<ul class="doc-list">
+<li><a href="docs/reference/TOKEN_COST_GUIDE_ZH_TW.md" class="doc-link"><code>docs/reference/TOKEN_COST_GUIDE_ZH_TW.md</code></a>：Token、預篩選、預算與成本邊界。</li>
+<li><a href="docs/reference/CHANGELOG.md" class="doc-link"><code>docs/reference/CHANGELOG.md</code></a>：版本變更記錄。</li>
+<li><a href="docs/reports/PERFORMANCE_REPORT.md" class="doc-link"><code>docs/reports/PERFORMANCE_REPORT.md</code></a>：100,000 筆效能測試紀錄；測試腳本會更新此檔。</li>
+<li><a href="docs/archive/baselines/ARCHITECTURE_CURRENT.md" class="doc-link"><code>docs/archive/baselines/ARCHITECTURE_CURRENT.md</code></a>：2026-07-17 前的舊架構基線，非目前架構。</li>
+<li><a href="docs/archive/baselines/PROJECT_AUDIT_ZH_TW.md" class="doc-link"><code>docs/archive/baselines/PROJECT_AUDIT_ZH_TW.md</code></a>：重構前工程稽核，非目前行為。</li>
+<li><a href="docs/archive/audits/CONTROL_CENTER_AUDIT.md" class="doc-link"><code>docs/archive/audits/CONTROL_CENTER_AUDIT.md</code></a>：設定控制中心歷史稽核。</li>
+<li><a href="docs/archive/audits/LEGACY_MEMORY_DATA_SAFETY_AUDIT.md" class="doc-link"><code>docs/archive/audits/LEGACY_MEMORY_DATA_SAFETY_AUDIT.md</code></a>：Legacy 記憶體與資料安全稽核。</li>
+<li><a href="docs/archive/audits/SQLITE_AND_SCANNER_AUDIT.md" class="doc-link"><code>docs/archive/audits/SQLITE_AND_SCANNER_AUDIT.md</code></a>：SQLite／掃描器修正前稽核。</li>
+<li><a href="docs/archive/audits/OPENAI_BATCH_LIFECYCLE_AUDIT_ZH_TW.md" class="doc-link"><code>docs/archive/audits/OPENAI_BATCH_LIFECYCLE_AUDIT_ZH_TW.md</code></a>：OpenAI Batch 生命週期歷史稽核。</li>
+<li><a href="docs/archive/reports/FINAL_IMPLEMENTATION_REPORT_ZH_TW.md" class="doc-link"><code>docs/archive/reports/FINAL_IMPLEMENTATION_REPORT_ZH_TW.md</code></a>：2026-07-17 實作與驗收報告。</li>
+<li><a href="docs/archive/reports/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md" class="doc-link"><code>docs/archive/reports/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md</code></a>：2026-07-22 跨模組與硬體邊界報告。</li>
+<li><a href="docs/archive/reports/N100_IMPLEMENTATION_REPORT_ZH_TW.md" class="doc-link"><code>docs/archive/reports/N100_IMPLEMENTATION_REPORT_ZH_TW.md</code></a>：2026-07-18 N100 實作／量測報告。</li>
+</ul>
+
+<h4 class="doc-h4">元件旁文件</h4>
+<ul class="doc-list">
+<li><a href="esp32/ink-display-133C-photo/README.md" class="doc-link"><code>esp32/ink-display-133C-photo/README.md</code></a>：133C 韌體元件說明。</li>
+<li><a href="esp32/ink-display-7C-photo/THIRD_PARTY_NOTICES.md" class="doc-link"><code>esp32/ink-display-7C-photo/THIRD_PARTY_NOTICES.md</code></a>：7C／PhotoPainter 韌體第三方授權聲明。</li>
+<li><a href="inktime/app/domain/rendering/font_assets/README.md" class="doc-link"><code>inktime/app/domain/rendering/font_assets/README.md</code></a>：內建繁體中文字型資產說明。</li>
+<li><a href="simulation_photos/README.md" class="doc-link"><code>simulation_photos/README.md</code></a>：模擬器照片投放資料夾說明。</li>
+</ul>
         </article>
     </main>
 
@@ -1880,6 +2172,156 @@ INKTIME_LOG_LEVEL=INFO</code></pre>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+
+    <script>
+        /* The manual is a browsable specification.  Current contracts live in the linked files. */
+        document.addEventListener('DOMContentLoaded', () => {
+            const headingLabels = {
+                'sec-7': '七、 核心資料、分析與裝置資料契約',
+                'sec-7-1': '7.1 照片掃描與本機特徵資料',
+                'sec-7-2': '7.2 分析計畫、指紋與 Provider 請求',
+                'sec-7-3': '7.3 分析結果、文案與選片決策資料',
+                'sec-7-4': '7.4 裝置狀態、Release 與 Queue 回報資料',
+                'sec-8': '八、 8 大畫布版型與渲染計畫',
+                'sec-10': '十、 SQLite 資料模型、Migration 與相容性',
+                'sec-13': '十三、 系統設定參數與變更管理'
+            };
+            const referenceMap = {
+                'sec-1': 'docs/architecture/ARCHITECTURE_ZH_TW.md',
+                'sec-2': 'docs/devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md',
+                'sec-2-1': 'docs/devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md',
+                'sec-2-2': 'docs/devices/ESP32_GUIDE_ZH_TW.md',
+                'sec-2-3': 'docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md',
+                'sec-3': 'docs/devices/ESP32_GUIDE_ZH_TW.md',
+                'sec-3-1': 'docs/devices/ESP32_GUIDE_ZH_TW.md',
+                'sec-3-2': 'docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md',
+                'sec-3-3': 'docs/devices/ESP32_GUIDE_ZH_TW.md',
+                'sec-4': 'docs/guides/API_PROVIDER_GUIDE_ZH_TW.md',
+                'sec-4-1': 'docs/guides/API_PROVIDER_GUIDE_ZH_TW.md',
+                'sec-4-2': 'docs/guides/API_PROVIDER_GUIDE_ZH_TW.md',
+                'sec-4-3': 'docs/guides/API_PROVIDER_GUIDE_ZH_TW.md',
+                'sec-4-4': 'docs/guides/API_PROVIDER_GUIDE_ZH_TW.md',
+                'sec-5': 'docs/guides/ADMIN_GUIDE_ZH_TW.md',
+                'sec-5-1': 'docs/guides/USER_GUIDE_ZH_TW.md',
+                'sec-5-2': 'docs/guides/USER_GUIDE_ZH_TW.md',
+                'sec-5-3': 'docs/guides/USER_GUIDE_ZH_TW.md',
+                'sec-5-4': 'docs/guides/LOCAL_ONLY_SELECTION_ZH_TW.md',
+                'sec-5-5': 'docs/guides/API_PROVIDER_GUIDE_ZH_TW.md',
+                'sec-5-6': 'docs/architecture/ARCHITECTURE_ZH_TW.md',
+                'sec-5-7': 'docs/guides/EPAPER_SIMULATOR_ZH_TW.md',
+                'sec-5-8': 'docs/devices/DEVICE_PROTOCOL_ZH_TW.md',
+                'sec-5-9': 'docs/devices/ESP32_GUIDE_ZH_TW.md',
+                'sec-5-10': 'docs/operations/OPERATIONS_ZH_TW.md',
+                'sec-5-11': 'docs/resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md',
+                'sec-5-12': 'docs/operations/BACKUP_RESTORE_ZH_TW.md',
+                'sec-6': 'docs/operations/LOGGING_GUIDE_ZH_TW.md',
+                'sec-6-1': 'docs/operations/LOGGING_GUIDE_ZH_TW.md',
+                'sec-6-2': 'docs/devices/ESP32_GUIDE_ZH_TW.md',
+                'sec-6-3': 'docs/operations/TROUBLESHOOTING_ZH_TW.md',
+                'sec-7': 'docs/architecture/ARCHITECTURE_ZH_TW.md',
+                'sec-7-1': 'docs/guides/LOCAL_ONLY_SELECTION_ZH_TW.md',
+                'sec-7-2': 'docs/guides/API_PROVIDER_GUIDE_ZH_TW.md',
+                'sec-7-3': 'docs/resilience/DECISION_TRACE_ZH_TW.md',
+                'sec-7-4': 'docs/devices/DEVICE_PROTOCOL_ZH_TW.md',
+                'sec-8': 'docs/guides/LOCAL_ONLY_SELECTION_ZH_TW.md',
+                'sec-9': 'docs/devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md',
+                '9-1-抖動演算法數學矩陣': 'docs/devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md',
+                '9-2-色彩距離空間-oklab-vs-srgb': 'docs/devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md',
+                'sec-10': 'docs/operations/MIGRATION_PLAN.md',
+                'sec-11': 'docs/operations/ERROR_CODES_ZH_TW.md',
+                '11-1-主要-rest-api-端點總覽': 'docs/architecture/ARCHITECTURE_ZH_TW.md',
+                '11-2-系統標準-error-code-錯誤碼全覽表': 'docs/operations/ERROR_CODES_ZH_TW.md',
+                'sec-12': 'docs/operations/DOCKER_GUIDE_ZH_TW.md',
+                'sec-12-1': 'docs/operations/DOCKER_GUIDE_ZH_TW.md',
+                'sec-12-2': 'docs/architecture/RUNTIME_CONFIGURATION.md',
+                'sec-12-3': 'docs/getting-started/INSTALLATION_ZH_TW.md',
+                'sec-12-4': 'docs/operations/PRODUCTION_PREFLIGHT_ZH_TW.md',
+                'sec-13': 'docs/guides/ADMIN_GUIDE_ZH_TW.md',
+                'sec-14': 'docs/operations/TROUBLESHOOTING_ZH_TW.md',
+                'sec-14-1': 'docs/devices/DEVICE_TRANSPORT_SECURITY_ZH_TW.md',
+                'sec-14-2': 'docs/operations/TROUBLESHOOTING_ZH_TW.md',
+                'sec-14-3': 'docs/guides/API_PROVIDER_GUIDE_ZH_TW.md',
+                'sec-14-4': 'docs/devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md',
+                'sec-14-5': 'docs/operations/BACKUP_RESTORE_ZH_TW.md',
+                'sec-15': 'docs/README.md',
+                'sec-15-1': 'docs/README.md',
+                'sec-15-2': 'docs/README.md'
+            };
+
+            const setHeading = (id, label) => {
+                const heading = document.getElementById(id);
+                if (!heading) return;
+                if (heading.classList.contains('doc-h2')) {
+                    heading.innerHTML = '<span class="h2-anchor-icon">#</span> ' + label;
+                } else {
+                    heading.textContent = label;
+                }
+                document.querySelectorAll(`a[href="#${id}"] span`).forEach((node) => { node.textContent = label; });
+                document.querySelectorAll(`a[href="#${id}"].doc-link`).forEach((node) => { node.textContent = label; });
+            };
+
+            Object.entries(headingLabels).forEach(([id, label]) => setHeading(id, label));
+
+            const replaceAfterHeading = (id, html) => {
+                const heading = document.getElementById(id);
+                if (!heading) return;
+                let next = heading.nextElementSibling;
+                while (next && !next.matches('.doc-h2, .doc-h3')) {
+                    const remove = next;
+                    next = next.nextElementSibling;
+                    remove.remove();
+                }
+                heading.insertAdjacentHTML('afterend', html);
+            };
+
+            const insertCard = (id, html) => {
+                const heading = document.getElementById(id);
+                if (heading) heading.insertAdjacentHTML('afterend', `<section class="current-card">${html}</section>`);
+            };
+
+            insertCard('sec-1', '<h4>現行架構基準</h4><p>Web、Worker 與 Scheduler 是分離的 Runtime；Web 不執行長時間圖片工作。照片掃描、本機特徵、分析、Render Plan、Release Coordinator 與裝置下載皆有明確責任邊界；Decision Trace、Shadow、離線 Queue、資料保留與 Canary 失敗時不應中斷既有正式 Release。</p>');
+            insertCard('sec-4', '<h4>現行分析與 Provider 行為</h4><ul><li><code>analysis.execution_mode</code> 是權威：<code>disabled</code>、<code>local_only</code>、<code>local_with_manual_ai</code>、<code>automatic_ai</code>；新安裝預設為 <code>local_only</code>。</li><li>僅 <code>automatic_ai</code> 會依設定自動呼叫 Provider；本機選片不讀取 Provider Secret、不建立模型請求、也不產生成本。</li><li>Provider 使用 OpenAI Chat Completions 相容介面；可設定路由、限流、熔斷與快取，請勿把特定模型名稱視為固定契約。</li></ul>');
+            insertCard('sec-5', '<h4>控制台目前涵蓋的功能</h4><ul><li>照片庫、排除／還原、方向與裁切、掃描與本機特徵。</li><li>分析工作、選片預覽、Provider／成本、評分版本與單張測試。</li><li>Render Plan、8 種版型、模擬器、字型覆蓋驗證、Release 與回滾。</li><li>裝置 Token、面板／能源設定、Manifest、SHA-256 驗證、狀態回報與離線 Queue。</li><li>設定快照、備份、診斷、Activity、Decision Trace、Shadow、Retention 與 Canary Rollout。</li></ul>');
+            insertCard('sec-6', '<h4>除錯安全基準</h4><p>Debug、Activity 與診斷輸出不得記錄 API Key、Bearer Token、未遮罩路徑或精確 GPS。先使用診斷 Bundle、工作詳情與設備回報定位問題；實體裝置成功顯示與本機／CI 成功是不同層級的證據。</p>');
+
+            replaceAfterHeading('sec-7-1', '<p class="doc-p">掃描結果以 <code>photos</code>、Library 與本機特徵為核心：相對路徑、SHA-256、尺寸、EXIF／方向、狀態、本機品質、E6 適合度與 <code>eligible</code> 共同決定是否能進入候選池。相同內容雜湊只在符合規則時繼承結果；原始檔變更會清除過期特徵與分析。</p><div class="current-card"><h4>資料使用原則</h4><p>地點只以離線解析的粗略城市參與選片；精確 GPS、照片路徑與 Secret 不寫入 Decision Trace 或 Release Metadata。</p></div>');
+            replaceAfterHeading('sec-7-2', '<p class="doc-p">分析工作先建立可重現的分析計畫與指紋，再依執行模式、Provider 路由、模型、Prompt／Schema 版本與評分設定執行。快取命中、限流或熔斷時會安全退回可用本機資料，而不是偽造新的模型結果。</p><div class="current-card"><h4>工作契約</h4><p>建立工作使用 <code>POST /api/v1/jobs</code>；選片預覽與成本估算各有獨立端點。只有允許的執行模式才會建立模型分析工作。</p></div>');
+            replaceAfterHeading('sec-7-3', '<p class="doc-p">分析結果保存原始分數、語意資料、文案候選、來源與版本資訊；選片結果另保存 Render Plan 與 Decision Trace。雙照片會分開保存 primary／secondary 的資格、文案、裁切、方向、風險與來源，不會以整批 fallback 混淆結果。</p><div class="current-card"><h4>文案與選片</h4><p><code>photo_pair</code> 是純照片；<code>photo_pair_caption</code> 為每張照片各自一段文字。Local Caption 只使用日期與已知粗略地點，不推測人物關係、事件或情緒。</p></div>');
+            replaceAfterHeading('sec-7-4', '<p class="doc-p">裝置使用 Bearer Token 取得匹配面板 Profile 的 Release，下載後驗證 SHA-256，再以 <code>POST /api/device/v1/status</code> 回報韌體、RSSI、電量百分比、Heap／PSRAM、顯示結果、Release、面板與硬體能力。離線內容則由 Queue Manifest、檔案下載與 ACK 組成可驗證流程。</p><div class="current-card"><h4>不可省略的回報</h4><p>裝置已下載不代表已顯示；下載、Payload 驗證、顯示完成與設定 ACK 均為不同狀態。</p></div>');
+
+            replaceAfterHeading('sec-8', '<p class="doc-p">所有 Render Plan 先固定照片、次要照片、方向、裁切、Profile、Effective Dither 與文案，再交給 Preview 或正式 Release 共用；因此預覽、快取命中與裝置發布不會重選照片或替換第二張照片。</p><div class="table-wrapper"><table><thead><tr><th>版型</th><th>現行用途</th><th>限制</th></tr></thead><tbody><tr class="even"><td><code>full</code></td><td>單張全畫面照片</td><td>可直／橫向</td></tr><tr class="odd"><td><code>postcard</code></td><td>明信片式照片與文字</td><td>依字型覆蓋驗證</td></tr><tr class="even"><td><code>photo_info</code></td><td>照片、日期與粗略地點資訊</td><td>可直／橫向</td></tr><tr class="odd"><td><code>photo_pair</code></td><td>雙照片純影像版型</td><td>不顯示文案</td></tr><tr class="even"><td><code>photo_pair_caption</code></td><td>雙照片、各自一句話</td><td>每張照片有獨立 Caption</td></tr><tr class="odd"><td><code>adaptive_memory</code></td><td>依照片與候選池決定合適版型／配對</td><td>會把決策寫入 Trace</td></tr><tr class="even"><td><code>calendar</code></td><td>照片與月曆</td><td>固定直向</td></tr><tr class="odd"><td><code>weather_sensor</code></td><td>照片、天氣與室內感測資料</td><td>固定直向；需對應設定</td></tr></tbody></table></div>');
+
+            insertCard('sec-9', '<h4>現行抖動清單與選擇順序</h4><p>支援 <code>none</code>、<code>nearest</code>、<code>floyd_steinberg</code>、<code>serpentine_floyd_steinberg</code>、<code>atkinson</code>、<code>bayer4</code>、<code>bayer8</code>、<code>bayer_ordered</code>、<code>gooddisplay</code>、<code>photo_smooth</code>。Effective Dither 的優先順序為請求覆寫 → 裝置覆寫 → 高風險照片的自動 <code>photo_smooth</code> → 全域設定；其來源會寫入 Render Plan。</p>');
+
+            replaceAfterHeading('sec-10', '<p class="doc-p">資料庫 Schema 由順序 Migration 管理，而不是固定「幾張表」的靜態 SQL。啟動時會在交易內檢查、套用並記錄 Migration；未完成 Migration 必須阻止啟動，不能靠人工複製 SQL 修補。</p><div class="table-wrapper"><table><thead><tr><th>資料領域</th><th>目前責任</th></tr></thead><tbody><tr class="even"><td>照片與分析</td><td>Library、照片、EXIF／本機特徵、分析、快取、工作與用量。</td></tr><tr class="odd"><td>渲染與裝置</td><td>Render Plan、Release、Manifest、裝置、下載／狀態與設定 ACK。</td></tr><tr class="even"><td>設定與安全</td><td>設定、快照、變更歷史、加密 Secret、使用者與權限。</td></tr><tr class="odd"><td>韌性</td><td>Decision Trace、回饋、Shadow、Queue、Retention、Canary 與 Rollback。</td></tr></tbody></table></div><div class="current-card"><h4>變更規則</h4><p>新增欄位或資料表必須新增 Migration、相容讀取與必要測試；舊 Schema 的欄位不得在文件中當作現行唯一真相。升級與回滾請依 Migration 文件執行。</p></div>');
+
+            replaceAfterHeading('11-1-主要-rest-api-端點總覽', '<p class="doc-p">下表是現行主要 API 群組；權限由登入／管理員／裝置 Bearer Token 分別控制。請以路由程式與對應 Markdown 為完整契約，不使用舊的 <code>/devices/latest_release</code> 或 <code>/devices/report_status</code> 路徑。</p><div class="table-wrapper"><table><thead><tr><th>群組</th><th>目前端點範例</th><th>用途</th></tr></thead><tbody><tr class="even"><td>設定</td><td><code>GET /api/v1/settings/metadata</code><br><code>POST /api/v1/settings</code></td><td>讀取欄位定義與更新設定。</td></tr><tr class="odd"><td>工作</td><td><code>POST /api/v1/jobs</code><br><code>POST /api/v1/jobs/{id}/{action}</code></td><td>建立、開始、暫停、恢復、取消或重試工作。</td></tr><tr class="even"><td>渲染／發布</td><td><code>POST /api/v1/rendering/simulate</code><br><code>POST /api/v1/releases</code><br><code>POST /api/v1/releases/{id}/rollback</code></td><td>Preview、發布與回滾。</td></tr><tr class="odd"><td>裝置</td><td><code>GET /api/device/v1/releases/latest</code><br><code>POST /api/device/v1/status</code></td><td>取得匹配 Release 與回報裝置狀態。</td></tr><tr class="even"><td>離線 Queue</td><td><code>GET /api/device/v1/queue/manifest</code><br><code>POST /api/device/v1/queue/ack</code></td><td>取得離線內容與回報下載／顯示進度。</td></tr><tr class="odd"><td>韌性</td><td><code>/api/decision-traces</code>、<code>/api/shadow/*</code>、<code>/api/retention/*</code>、<code>/api/rollouts/*</code></td><td>Trace、Shadow、留存與 Canary 管理。</td></tr></tbody></table></div>');
+            replaceAfterHeading('11-2-系統標準-error-code-錯誤碼全覽表', '<p class="doc-p">錯誤碼會隨模組增加；請以 <a href="docs/operations/ERROR_CODES_ZH_TW.md" class="doc-link">ERROR_CODES_ZH_TW.md</a> 為完整清單。常見現行碼包括 <code>ANALYSIS-DISABLED</code>（執行模式拒絕新分析）、<code>RENDER-003</code>（不支援 Profile）、<code>RENDER-005</code>（無法建立有效 Render Plan）、<code>RENDER-009</code>（資格或 Preview 容量限制）、<code>DEVICE-004</code>（裝置回報欄位不合法）與 <code>DEVICE-009</code>（Payload 完整性失敗）。</p><div class="current-card"><h4>處理原則</h4><p>先保留原始錯誤碼、Trace ID／Job ID／Release ID，再依文件確認是否可重試。裝置顯示失敗不可用「HTTP 已下載」當作成功證明。</p></div>');
+
+            replaceAfterHeading('sec-12-1', '<p class="doc-p">容器由 Web、Worker 與 Scheduler 分工，三者共用映像與必要的 <code>/data</code>，但 Web 不承擔長時間圖片工作。照片庫以唯讀方式提供；資料庫、快取、字型、備份與 Release 位於受控資料目錄。</p>');
+            replaceAfterHeading('sec-12-2', '<p class="doc-p">部署層環境變數由 RuntimeConfig 解析，日常功能設定由管理介面的 Settings Repository 管理。不可把 Provider Key、Token、Cookie 或照片路徑放入手冊範例；公開 URL、Cookie、Proxy、SQLite 掛載與資料目錄需先完成 Production Preflight。</p>');
+            replaceAfterHeading('sec-12-3', '<ul class="doc-list"><li>完成管理員初始化與安全 Session 設定。</li><li>驗證照片庫掛載、資料目錄可寫與 SQLite 可用。</li><li>設定裝置 Profile、Bearer Token 與時區，先用模擬器或測試 Release 驗證。</li><li>預設可維持 <code>analysis.execution_mode=local_only</code>；要使用自動 AI 時再明確設定 Provider 與預算。</li><li>確認備份與診斷流程，再連接實體電子紙。</li></ul>');
+            replaceAfterHeading('sec-12-4', '<ul class="doc-list"><li>啟用設定快照與變更前預覽，避免高風險設定直接覆寫。</li><li>使用 Decision Trace、Shadow 與 Canary 驗證選片／發布變更。</li><li>為裝置維持 Queue、SHA-256 驗證、下載／顯示 ACK 與可回滾的 Release。</li><li>定期執行備份驗證、Retention Dry Run 與診斷 Bundle 匯出。</li></ul>');
+
+            replaceAfterHeading('sec-13', '<p class="doc-p">設定欄位、預設值、驗證範圍、是否可即時套用與敏感遮罩，均以 <code>inktime/app/repositories/settings.py</code> 的 <code>SETTING_DEFINITIONS</code> 及 <code>GET /api/v1/settings/metadata</code> 為準。本章不再宣稱固定設定數量，避免程式新增設定後文件立即過期。</p><div class="table-wrapper"><table><thead><tr><th>重點設定群組</th><th>現行行為</th></tr></thead><tbody><tr class="even"><td>分析執行模式</td><td><code>disabled</code>、<code>local_only</code>、<code>local_with_manual_ai</code>、<code>automatic_ai</code>；預設為 <code>local_only</code>。</td></tr><tr class="odd"><td>本機候選與 AI</td><td>本機特徵、資格、候選上限、Provider 路由、預算與快取各自有驗證；只有允許的模式才呼叫模型。</td></tr><tr class="even"><td>渲染與裝置</td><td>Profile、Dither、版型、方向、字型、天氣與裝置覆寫會在 Render Plan 中解析並記錄來源。</td></tr><tr class="odd"><td>維運與安全</td><td>Debug／Activity 留存、備份、Session、診斷與敏感值遮罩皆受設定定義限制。</td></tr></tbody></table></div><div class="current-card"><h4>安全變更順序</h4><p>先取得 metadata 與預覽，確認高風險欄位與即時套用狀態；變更後查看快照、Activity、Job／Release 結果。不得以舊表格中的預設值覆寫目前設定。</p></div>');
+
+            replaceAfterHeading('sec-14-1', '<ul class="doc-list"><li>確認裝置以 <code>/api/device/v1/releases/latest</code> 取得符合自身 Profile 的 Release，並帶入 Bearer Token。</li><li>下載後驗證檔案大小與 SHA-256；HTTP 成功不等於面板已成功顯示。</li><li>以 <code>/api/device/v1/status</code> 回報 RSSI、電量、Heap／PSRAM、面板、Release 與錯誤碼；再依裝置指南確認 BUSY、電源與深度睡眠。</li></ul>');
+            replaceAfterHeading('sec-14-2', '<ul class="doc-list"><li>先確認 Library 已啟用、原始照片存在且可讀；再檢查掃描、metadata／local features、eligible 與排除原因。</li><li>Missing 防護會避免在掛載異常時大量誤標，需確認照片目錄與權限後再確認掃描結果。</li><li>日期、方向、裁切與本機品質資料的判斷依目前照片資料與對應指南，不直接相信舊 EXIF 範例。</li></ul>');
+            replaceAfterHeading('sec-14-3', '<ul class="doc-list"><li>先檢查 <code>analysis.execution_mode</code>：<code>local_only</code> 不會建立自動模型請求，這不是 Provider 故障。</li><li>在允許 AI 的模式下，再檢查 Provider 路由、模型相容性、Schema、限流、熔斷、預算與快取。</li><li>保留 Job ID、分析指紋與錯誤碼；不要因重試而繞過預算或資格限制。</li></ul>');
+            replaceAfterHeading('sec-14-4', '<ul class="doc-list"><li>確認實體面板與 Release 的 Profile 一致；六色／七色的有效 Dither 與預覽必須使用同一份 Render Plan。</li><li>檢查 Effective Dither 的來源：請求、裝置覆寫、自動 <code>photo_smooth</code> 或全域設定。</li><li>字型缺字、裁切、方向與雙照片 Caption 都應在 Preview／Release 前明確失敗，不可靜默降級。</li></ul>');
+            replaceAfterHeading('sec-14-5', '<ul class="doc-list"><li>不要直接編輯 SQLite 或刪除 WAL；先匯出診斷 Bundle 並確認 Web、Worker、Scheduler 的運行狀態。</li><li>備份與還原必須遵循離線流程與既有鎖定規則；Migration 未完成時應停止啟動並依遷移計畫處理。</li><li>若問題涉及 Decision Trace、Queue 或 Canary，先保留 Release／Trace 證據，再執行回滾或 Retention Dry Run。</li></ul>');
+
+            Object.entries(referenceMap).forEach(([id, path]) => {
+                const heading = document.getElementById(id);
+                if (!heading || heading.querySelector('.section-reference')) return;
+                const reference = document.createElement('a');
+                reference.className = 'section-reference';
+                reference.href = path;
+                reference.innerHTML = '<i class="fa-solid fa-book-open"></i> 參考：' + path;
+                heading.appendChild(reference);
+            });
+        });
+    </script>
 
     <script>
         document.addEventListener('DOMContentLoaded', () => {
