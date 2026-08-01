@@ -11,6 +11,7 @@ import pytest
 import inktime.app.db.migrations as migrations_module
 from inktime.app.db import Database, MigrationError, migrate
 from inktime.app.db.migrations import Migration, MIGRATIONS
+from inktime.app.repositories.analysis_batches import TERMINAL_BATCH_STATUSES
 
 
 def _run_capture_date_backfill(database_path: str, start, results) -> None:
@@ -72,6 +73,10 @@ def test_fresh_database_is_migrated(tmp_path):
         "peak_rss_bytes",
         "upload_attempt_id",
         "submission_attempt_id",
+        "side_effect_version",
+        "side_effect_lease_until",
+        "side_effect_owner",
+        "input_file_bytes",
         "input_file_deleted",
     } <= batch_columns
     assert {"custom_id", "vision_request_fingerprint", "raw_response_json", "imported_at"} <= item_columns
@@ -84,6 +89,20 @@ def test_fresh_database_is_migrated(tmp_path):
             ).fetchall()
         }
     assert "idx_analysis_batches_remote_id" in indexes
+    assert "submission_unknown" not in TERMINAL_BATCH_STATUSES
+    assert "upload_unknown" not in TERMINAL_BATCH_STATUSES
+    with database.session() as connection:
+        index_names = {
+            str(row["name"])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name IN ('idx_batch_items_active_job_item','idx_batch_items_active_content_request','idx_analysis_batches_remote_id')"
+            ).fetchall()
+        }
+    assert index_names == {
+        "idx_batch_items_active_job_item",
+        "idx_batch_items_active_content_request",
+        "idx_analysis_batches_remote_id",
+    }
 
 
 def test_batch_unknown_states_and_reservations_are_persistent(tmp_path):

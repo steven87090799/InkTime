@@ -177,6 +177,9 @@ def test_create_batch_definite_http_rejections_are_not_ambiguous(status_code):
     assert raised.value.http_status == status_code
     assert raised.value.ambiguous is False
     assert raised.value.provider_error_code == "provider_error"
+    assert "secret" not in str(raised.value)
+    if status_code == 429:
+        assert raised.value.code == "BATCH-RATE-LIMITED"
     assert len(session.calls) == 1
 
 
@@ -239,4 +242,6 @@ def test_upload_file_side_effect_is_never_retried(tmp_path, outcome, expected_am
     with pytest.raises(ProviderHTTPError) as raised:
         provider.upload_batch_file(path, remote_filename="inktime-batch-anonymous.jsonl")
     assert raised.value.ambiguous is expected_ambiguous
+    assert session.calls[0][1]["files"]["file"][0] == "inktime-batch-anonymous.jsonl"
+    assert "secret" not in str(raised.value)
     assert len(session.calls) == 1
