@@ -10,6 +10,7 @@ from typing import Any
 
 import requests
 
+from inktime.app.domain.analysis.plan import normalize_reasoning_effort
 from inktime.app.domain.analysis.schema import json_schema_for_stage
 from inktime.app.domain.analysis.scoring import DEFAULT_SCORING_RULES
 from .base import ProviderResponse, Usage, VisionProvider
@@ -19,10 +20,23 @@ SYSTEM_PROMPT = """你是 InkTime 個人照片分析器。只輸出符合指定 
 
 
 class ProviderHTTPError(RuntimeError):
-    def __init__(self, message: str, code: str, retry_after: float | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        code: str,
+        retry_after: float | None = None,
+        *,
+        ambiguous: bool = False,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.retry_after = retry_after
+        self.ambiguous = ambiguous
+
+
+SAFE_READ = "safe_read"
+SAFE_IDEMPOTENT = "safe_idempotent"
+AMBIGUOUS_CREATE = "ambiguous_create"
 
 
 class OpenAICompatibleProvider(VisionProvider):
@@ -37,6 +51,7 @@ class OpenAICompatibleProvider(VisionProvider):
         supports_json_schema: bool = True,
         scoring_rules: str = DEFAULT_SCORING_RULES,
         caption_controls: dict[str, Any] | None = None,
+        supports_reasoning_effort: bool = False,
         session: requests.Session | None = None,
     ) -> None:
         self.name = name
@@ -48,6 +63,7 @@ class OpenAICompatibleProvider(VisionProvider):
         self.supports_json_schema = supports_json_schema
         self.scoring_rules = scoring_rules.strip() or DEFAULT_SCORING_RULES
         self.caption_controls = dict(caption_controls or {})
+        self.supports_reasoning_effort = bool(supports_reasoning_effort)
         self.session = session or requests.Session()
 
     def process_spec(self) -> dict[str, Any]:
@@ -60,6 +76,7 @@ class OpenAICompatibleProvider(VisionProvider):
             "supports_json_schema": self.supports_json_schema,
             "scoring_rules": self.scoring_rules,
             "caption_controls": self.caption_controls,
+            "supports_reasoning_effort": self.supports_reasoning_effort,
         }
 
     @classmethod
@@ -74,6 +91,7 @@ class OpenAICompatibleProvider(VisionProvider):
             supports_json_schema=bool(specification.get("supports_json_schema", True)),
             scoring_rules=str(specification.get("scoring_rules", DEFAULT_SCORING_RULES)),
             caption_controls=dict(specification.get("caption_controls") or {}),
+            supports_reasoning_effort=bool(specification.get("supports_reasoning_effort", False)),
         )
 
     def close(self) -> None:
@@ -176,26 +194,47 @@ class OpenAICompatibleProvider(VisionProvider):
         except (TypeError, ValueError):
             return None
 
-    def _send(self, method: str, path: str, **kwargs):
+    def _send(self, method: str, path: str, *, retry_policy: str = SAFE_READ, **kwargs):
         last_response = None
-        for attempt in range(3):
+        attempts = 1 if retry_policy == AMBIGUOUS_CREATE else 3
+        ambiguous = retry_policy == AMBIGUOUS_CREATE
+        for attempt in range(attempts):
             try:
                 sender = getattr(self.session, method.lower())
                 response = sender(self._url(path), **kwargs)
             except requests.Timeout as exc:
-                if attempt == 2:
+                if ambiguous:
+                    raise ProviderHTTPError(
+                        "Batch 建立回應未知，未自動重送",
+                        "BATCH-SUBMISSION-UNKNOWN",
+                        ambiguous=True,
+                    ) from exc
+                if attempt == attempts - 1:
                     raise ProviderHTTPError("Provider API 逾時", "VLM-001") from exc
                 time.sleep(min(1.0, 0.1 * (attempt + 1)))
                 continue
             except requests.RequestException as exc:
-                if attempt == 2:
+                if ambiguous:
+                    raise ProviderHTTPError(
+                        "Batch 建立回應未知，未自動重送",
+                        "BATCH-SUBMISSION-UNKNOWN",
+                        ambiguous=True,
+                    ) from exc
+                if attempt == attempts - 1:
                     raise ProviderHTTPError("Provider 連線失敗", "VLM-001") from exc
                 time.sleep(min(1.0, 0.1 * (attempt + 1)))
                 continue
             last_response = response
             status = int(getattr(response, "status_code", 0) or 0)
             if status == 429 or status >= 500:
-                if attempt == 2:
+                if ambiguous:
+                    raise ProviderHTTPError(
+                        self._redact(f"Batch 建立回應 HTTP {status}，結果未知"),
+                        "BATCH-SUBMISSION-UNKNOWN",
+                        self._retry_after(response),
+                        ambiguous=True,
+                    )
+                if attempt == attempts - 1:
                     code = "VLM-002" if status == 429 else "VLM-007"
                     raise ProviderHTTPError(
                         self._redact(f"Provider 回應 HTTP {status}"), code, self._retry_after(response)
@@ -243,6 +282,7 @@ class OpenAICompatibleProvider(VisionProvider):
         stage: str,
         max_tokens: int | None = None,
         caption_controls: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
         body: dict[str, Any] = {
@@ -271,6 +311,8 @@ class OpenAICompatibleProvider(VisionProvider):
             }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
+        if self.supports_reasoning_effort and reasoning_effort is not None:
+            body["reasoning_effort"] = normalize_reasoning_effort(reasoning_effort)
         return body
 
     def analyze(
@@ -282,6 +324,7 @@ class OpenAICompatibleProvider(VisionProvider):
         stage: str,
         max_tokens: int | None = None,
         caption_controls: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> ProviderResponse:
         body = self.build_analysis_request_body(
             image_path=image_path,
@@ -290,6 +333,7 @@ class OpenAICompatibleProvider(VisionProvider):
             stage=stage,
             max_tokens=max_tokens,
             caption_controls=caption_controls,
+            reasoning_effort=reasoning_effort,
         )
         return self._post_completion(body)
 
@@ -410,14 +454,32 @@ class OpenAICompatibleProvider(VisionProvider):
                 if str(key)[:64].replace("_", "").isalnum()
             }
         if output_expires_after_seconds is not None:
-            body["output_expires_after"] = {"seconds": max(3600, int(output_expires_after_seconds))}
-        response = self._send(
-            "POST", "/batches", headers=self._headers(), json=body, timeout=self.request_timeout
-        )
-        payload = self._json_response(response)
-        if not isinstance(payload.get("id"), str) or not payload["id"]:
-            raise ProviderHTTPError("Batch 建立回應缺少 batch id", "VLM-007")
-        return payload
+            body["output_expires_after"] = {
+                "anchor": "created_at",
+                "seconds": min(2_592_000, max(3_600, int(output_expires_after_seconds))),
+            }
+        try:
+            response = self._send(
+                "POST",
+                "/batches",
+                retry_policy=AMBIGUOUS_CREATE,
+                headers=self._headers(),
+                json=body,
+                timeout=self.request_timeout,
+            )
+            payload = self._json_response(response)
+            if not isinstance(payload.get("id"), str) or not payload["id"]:
+                raise ProviderHTTPError("Batch 建立回應缺少 batch id", "VLM-007")
+            return payload
+        except ProviderHTTPError as exc:
+            if exc.ambiguous:
+                raise
+            raise ProviderHTTPError(
+                "Batch 建立結果未知，未自動重送",
+                "BATCH-SUBMISSION-UNKNOWN",
+                exc.retry_after,
+                ambiguous=True,
+            ) from exc
 
     def poll_batch(self, batch_id: str) -> dict:
         return self.retrieve_batch(batch_id)
@@ -474,7 +536,11 @@ class OpenAICompatibleProvider(VisionProvider):
         if not file_id:
             raise ValueError("BATCH-FILE-004 file_id 不可空白")
         response = self._send(
-            "DELETE", f"/files/{file_id}", headers=self._headers(), timeout=self.request_timeout
+            "DELETE",
+            f"/files/{file_id}",
+            retry_policy=SAFE_IDEMPOTENT,
+            headers=self._headers(),
+            timeout=self.request_timeout,
         )
         return self._json_response(response)
 
