@@ -1,5 +1,7 @@
 # InkTime Docker 部署規格（Intel N100）
 
+OpenAI Batch 正式操作與故障排除另見 [OpenAI Batch 照片分析指南](OPENAI_BATCH_ANALYSIS_ZH_TW.md)。`/data/batches` 必須與 SQLite 一起掛載持久化；Batch JSONL 不使用 `/tmp`，照片掛載仍保持唯讀。
+
 這份文件是正式部署契約。日常分析、排程、裝置、備份與 Log 層級都從 Web 管理；只有主機路徑、Port、映像版本、HTTPS 與容器 CPU／記憶體上限需要在容器外設定。
 
 Intel N100 為 4 核心／4 執行緒、最高 3.4 GHz、6 W Processor Base Power；對 InkTime 的單機 Web、SQLite、低並行圖片處理足夠。6 W 是處理器規格，不等於整台迷你主機插座功耗。[Intel N100 官方規格](https://www.intel.com/content/www/us/en/products/compare.html?productIds=88183%2C231803)

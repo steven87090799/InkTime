@@ -49,7 +49,7 @@
 | 每分鐘 Token 上限 | 不確定就留空；知道方案限制才填 | 同上；填太低會讓工作等待，填太高仍可能收到廠商 429。 |
 | HTTP 逾時秒數 | 雲端 `120`；本地小模型 `180`；本地大模型 `300–600` | 最大可填 600。圖片分析通常比純文字慢。 |
 | 故障冷卻秒數 | `300` | 發生失敗或 429 後暫時避開此 Provider；若廠商有明確 `Retry-After`，InkTime 會尊重較長時間。 |
-| 支援 Batch API | **先不要勾** | **Experimental／Provider API only**。目前只有提交、查詢、取消原語；持久化 Job、重啟恢復、結果回填、Retry、成本統計與完整取消補償都尚未接入。即使廠商支援 Batch，也不代表大量工作會自動走 Batch。 |
+| 支援 Batch API | 只有確認該端點完整支援 `/files`、`/batches`、`/files/<id>/content` 與刪除才勾選 | 勾選後可由管理員在 Batch 頁執行完整的持久化、輪詢、結果回填、部分成功重試與遠端檔案清理；CI 一律使用 Fake Provider，不會呼叫真實 OpenAI。 |
 | 支援嚴格 JSON Schema | 確定支援才勾；不確定先取消 | 勾選後 InkTime 會傳送 OpenAI 形式的 `response_format: json_schema`。不支援的端點通常回 400。取消後仍會在應用層驗證 JSON，失敗時最多做一次純文字修復。 |
 
 儲存後按「測試」。看到「連線成功」後，還不能直接跑全相簿；請繼續完成模型名稱與單張照片測試。
@@ -106,10 +106,10 @@
 | 最大並行 | `1` |
 | HTTP 逾時 | `120` |
 | 故障冷卻 | `300` |
-| Batch | 不勾；目前 InkTime 大量工作仍走即時 API |
+| Batch | 確認 `/files`、`/batches`、結果／錯誤檔下載與刪除權限後勾選；完整生命週期由 Batch 管理頁執行 |
 | 嚴格 JSON Schema | 勾選 |
 
-「設定」頁可先填一組目前帳號確實有權限、支援圖片與 Chat Completions 的模型。若使用仍可用的 GPT-4.1 系列，可用 `gpt-4.1-mini` 作 low、`gpt-4.1` 作 high；若廠商已提供更新型號，請先確認它仍接受 InkTime 送出的 `temperature=0.1`、Chat Completions 圖片與 JSON Schema，再替換模型 ID。
+「設定」頁可先填一組目前帳號確實有權限、支援圖片與 Chat Completions 的模型；Batch 頁的 `batch.model` 預設是 `gpt-5.6-luna`，每張照片只做一次完整 `single_high/full` 分析，不建立 Stage Two。Provider 價格頁可填標準 Input `0.20`、Cached Input `0.02`、Output `1.20` USD／1M，Batch multiplier `0.5`，也可改成管理員實際價格。若模型或端點不支援 Chat Completions 圖片與 JSON Schema，請先不要勾選 Batch。
 
 ### 2. Google Gemini API：使用 Google AI Studio Key
 
@@ -388,6 +388,6 @@ Fireworks、NVIDIA NIM、自架 vLLM、LiteLLM Proxy 或其他平台若同時滿
 - [ ] 「成本」頁有 Token／Provider／模型紀錄，並已了解金額可能尚未正確換算。
 - [ ] 已用 5–10 張照片的小工作驗證，而不是直接跑完整相簿。
 - [ ] 免費層、本地模型或 N100 的最大並行先維持 1。
-- [ ] Batch 保持關閉，直到背景自動分批與結果匯入完整實作。
+- [ ] 僅在已完成 Base URL、模型、價格與 100 張 Sample 驗收後啟用 Batch；完整生命週期由「Batch 照片分析」管理頁執行。
 
 完成以上檢查後，再依實際 429、延遲、記憶體與費用逐步提高並行或改用兩階段模型。任何 Provider 只通過 `/models` 測試，都不能算完成接入；**單張圖片 Schema 驗收與小批次工作成功才算真正可用**。

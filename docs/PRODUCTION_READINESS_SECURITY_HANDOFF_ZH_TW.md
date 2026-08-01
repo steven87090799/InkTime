@@ -48,7 +48,7 @@ Webhook 採 at-least-once。每個事件持久化穩定 Event ID，所有後續 
 - `compose-lan-production-persistence`：使用專用 production LAN env、絕對 Volume、degraded transport diagnostics、登入／CSRF／Device Token／Queue download／ACK、Compose restart、down/up 同一儲存、離線 integrity／Migration 25、備份、破壞後還原與還原後 API 驗證。CI runner／本機 Docker 證據不等於真實 NAS reboot／filesystem／ACL。
 - `compose-production-tls-smoke`：用一次性測試 CA、SAN certificate、Nginx 與不屬保留 suffix 的 `inktime-ci.acme.dev`；client 明確信任 CA，不使用 `verify=False`／ignore-certificate。驗證 HTTP redirect、TLS hostname/chain、Secure＋HttpOnly＋SameSite=Strict、CSRF、login/logout/dashboard、HTTPS-only HSTS、production preflight 與 proxy hop diagnostics；backend port 不公開。
 - `bounded-runtime-soak`：Web app、Worker、Scheduler 同時執行；重複 session、device auth success/failure、Queue manifest/ACK、release metadata、scan、scheduler heartbeat 與 webhook mock。輸出 RSS、thread、FD、SQLite connection／writer、open file、child process、pending async work／job、oldest job、scheduler age、WAL、timeout、cleanup、exit status 與 final JSON summary。手動 workflow 可跑 30 分鐘、2 小時或 5 小時；24 小時只在受控 LAN 主機本地執行。
-- Backup/Restore：fresh database → full metadata backup → fresh target restore；驗證 Migration 25、administrator/password/session、device token、release/queue、settings、Secret exclusion、Worker/Scheduler bootstrap。舊 snapshot upgrade 由 migration fixtures 覆蓋。
+- Backup/Restore：fresh database → full metadata backup → fresh target restore；驗證 Migration 26、administrator/password/session、device token、release/queue、settings、Batch lifecycle tables、Secret exclusion、Worker/Scheduler bootstrap。舊 snapshot upgrade 由 migration fixtures 覆蓋。
 - Rollback：不支援只降程式、不還原 DB。必須停止 Web/Worker/Scheduler、還原相容 snapshot，再切回相容 image/commit。
 
 ## Dependency／Actions
@@ -59,7 +59,7 @@ Webhook 採 at-least-once。每個事件持久化穩定 Event ID，所有後續 
 
 ## OpenAI Batch 邊界
 
-Batch 仍是 `Experimental／Provider API only`，UI 不預設勾選，文件要求保持關閉。現況只有 submit/query/cancel primitives，沒有 persistent lifecycle、restart recovery、result ingestion、retry、cost accounting 或 cancellation compensation；不得描述為 Worker-managed production job。
+Batch 已完成 Worker-managed 的持久化生命週期：選片、JSONL 分片、提交、poll、結果對帳、冪等匯入、失敗重試、成本、重啟恢復與遠端檔案清理。正式啟用前仍須由管理員完成 Provider／價格設定與 100 張 Sample 驗收；真實 OpenAI 與 NAS／硬體驗證不由 CI 代替。
 
 ## 人工驗證
 
