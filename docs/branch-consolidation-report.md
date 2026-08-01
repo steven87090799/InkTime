@@ -5,6 +5,8 @@
 - 本次 `main` worktree：`/Users/steven/Desktop/inktime/InkTime-caption-controls`
 - 回滾基準：`pre-branch-consolidation-20260801T195556Z`，建立於原始 `main` `dc6614cc2f1969056de52ce96e20ece64296b2cf`。
 - 本次主線快照（最終證據文件提交前）：`4bab2a431af86cc06861e4f6c955c43db8f1288f`。
+- 最終程式與文件證據提交：`4eb8b0d93f9078ea5d67efee3b975f4215a2e4e3`；main hosted run `30720945614` 的 8/8 jobs 全數成功。
+- 第一個整併後 rollback tag：`post-branch-consolidation-20260801T224520Z`，指向 `4eb8b0d93f9078ea5d67efee3b975f4215a2e4e3`。
 - GitHub branch protection 與 rulesets 查詢結果：未設定；因此本報告以實際 hosted checks、merge commit 與 ancestry 驗證為準。
 - 所有原有工作樹與未追蹤使用者檔案均保留；沒有使用 reset、clean、force push 或覆寫其他工作樹。
 
@@ -76,6 +78,12 @@
 
 已刪除的歷史 PR head（例如 #4、#24 對應的 branch）不在本次 current remote inventory，因此未被重新刪除。所有 `retain-open` dependency branches 均保留。
 
+## 清理後複核
+
+- 在 final hosted run 成功與 rollback tag 建立後，已依上表明列刪除 29 個 `eligible-delete` remote branches；沒有使用 wildcard，也沒有刪除 `main` 或 Dependabot branches。
+- 清理後 `origin` 僅保留 `main` 與六個 open Dependabot branches：#35、#36、#37、#38、#39、#40。
+- 所有本地 branches 與原有 worktrees 仍保留，包含仍被本地 worktree 使用的歷史分支；本次只清理 remote refs。
+
 ## 驗證邊界
 
 ### 已執行並可重現
@@ -94,4 +102,4 @@
 
 ## Dependency alert
 
-GitHub Dependabot API 仍回報 `pytest` alert #1 為 open；其 advisory 的 first patched version 是 `9.0.3`，而目前 `main:requirements-dev.txt` 已是 `pytest==9.0.3`。未做假性 dismiss；#37 的 `9.1.1` upgrade PR 保留給獨立 dependency review。
+GitHub Dependabot API 目前回報 `pytest` alert #1 為 `fixed`，`fixed_at=2026-08-01T21:12:48Z`；其 advisory 的 first patched version 是 `9.0.3`，而目前 `main:requirements-dev.txt` 已是 `pytest==9.0.3`。`dismissed_at` 為 null，沒有做假性 dismiss；#37 的 `9.1.1` upgrade PR 保留給獨立 dependency review。
