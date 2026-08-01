@@ -9,10 +9,15 @@ from inktime.app.db import Database
 
 
 _UNSET = object()
+_DEVICE_AUTH_FAILURE_LIMIT = 20
+_DEVICE_AUTH_FAILURE_WINDOW = timedelta(minutes=5)
+_DEVICE_AUTH_FAILURE_MAX_ROWS = 10_000
 
 
 class DeviceRateLimitError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, retry_after_seconds: int = 300) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = max(1, min(int(retry_after_seconds), 300))
 
 
 class DeviceRepository:
@@ -121,7 +126,9 @@ class DeviceRepository:
                 ).fetchone()
                 if current is None:
                     raise KeyError(device_id)
-                selected_orientation = current["frame_orientation"] if frame_orientation is _UNSET else frame_orientation
+                selected_orientation = (
+                    current["frame_orientation"] if frame_orientation is _UNSET else frame_orientation
+                )
                 selected_layout = current["layout_mode"] if layout_mode is _UNSET else layout_mode
                 selected_fit = current["fit_mode"] if fit_mode is _UNSET else fit_mode
                 remote_changed = any(
@@ -165,17 +172,8 @@ class DeviceRepository:
         digest = hash_device_token(token, self.pepper)
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
-        cutoff = (now_dt - timedelta(minutes=5)).isoformat()
-        ip_hash = hash_device_token(ip_address[:64], self.pepper)
+        cutoff = (now_dt - _DEVICE_AUTH_FAILURE_WINDOW).isoformat()
         with self.database.transaction() as connection:
-            failures = int(
-                connection.execute(
-                    "SELECT COUNT(*) FROM device_auth_failures WHERE ip_hash=? AND attempted_at>=?",
-                    (ip_hash, cutoff),
-                ).fetchone()[0]
-            )
-            if failures >= 20:
-                raise DeviceRateLimitError("DEVICE-007 裝置驗證嘗試過多")
             row = connection.execute(
                 "SELECT * FROM devices WHERE token_hash=? AND enabled=1", (digest,)
             ).fetchone()
@@ -184,16 +182,44 @@ class DeviceRepository:
                     "UPDATE devices SET last_seen_at=?, last_ip=?, updated_at=? WHERE id=?",
                     (now, ip_address[:64], now, row["id"]),
                 )
-                connection.execute("DELETE FROM device_auth_failures WHERE ip_hash=?", (ip_hash,))
-            else:
-                connection.execute(
-                    "INSERT INTO device_auth_failures(ip_hash,attempted_at) VALUES (?,?)",
-                    (ip_hash, now),
+                return row
+
+            ip_hash = hash_device_token(ip_address[:64], self.pepper)
+            connection.execute("DELETE FROM device_auth_failures WHERE attempted_at<?", (cutoff,))
+            failure_state = connection.execute(
+                """
+                    SELECT COUNT(*) AS attempts, MIN(attempted_at) AS earliest
+                    FROM device_auth_failures
+                    WHERE ip_hash=? AND attempted_at>=?
+                    """,
+                (ip_hash, cutoff),
+            ).fetchone()
+            if int(failure_state["attempts"]) >= _DEVICE_AUTH_FAILURE_LIMIT:
+                earliest = datetime.fromisoformat(str(failure_state["earliest"]))
+                retry_after = max(
+                    1,
+                    int(((earliest + _DEVICE_AUTH_FAILURE_WINDOW) - now_dt).total_seconds()) + 1,
                 )
-                connection.execute(
-                    "DELETE FROM device_auth_failures WHERE attempted_at<?", (cutoff,)
+                raise DeviceRateLimitError(
+                    "DEVICE-007 裝置驗證嘗試過多",
+                    retry_after_seconds=retry_after,
                 )
-        return row
+            connection.execute(
+                "INSERT INTO device_auth_failures(ip_hash,attempted_at) VALUES (?,?)",
+                (ip_hash, now),
+            )
+            connection.execute(
+                """
+                DELETE FROM device_auth_failures
+                WHERE id IN (
+                    SELECT id FROM device_auth_failures
+                    ORDER BY attempted_at DESC,id DESC
+                    LIMIT -1 OFFSET ?
+                )
+                """,
+                (_DEVICE_AUTH_FAILURE_MAX_ROWS,),
+            )
+        return None
 
     def record_download(self, device_id: str, release_id: str, succeeded: bool) -> None:
         now = datetime.now(timezone.utc).isoformat()

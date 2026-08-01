@@ -51,11 +51,12 @@ def test_two_app_instances_have_isolated_database_cache_extensions_and_config(tm
     first = create_app(_config(tmp_path / "first"))
     second = create_app(_config(tmp_path / "second"))
     try:
+        assert first.config["MAX_CONTENT_LENGTH"] == 32 * 1024 * 1024
         assert first is not second
         assert first.extensions["inktime_database"] is not second.extensions["inktime_database"]
         assert first.extensions["inktime_thumbnail_cache"] is not second.extensions["inktime_thumbnail_cache"]
         assert first.extensions["inktime_runtime_config"] is not second.extensions["inktime_runtime_config"]
-        first.extensions["inktime_auth_repository"].create_user("first", "password")
+        first.extensions["inktime_auth_repository"].create_user("first", "password-long")
         assert second.extensions["inktime_auth_repository"].count_users() == 0
     finally:
         first.extensions["inktime_service_container"].close()

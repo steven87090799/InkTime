@@ -13,6 +13,7 @@ import json
 from typing import Any, Iterable
 from uuid import uuid4
 
+from inktime.app.core.json_values import json_bool, json_int, nullable_json_int
 from inktime.app.db import Database
 
 
@@ -493,7 +494,14 @@ class ResilienceRepository:
 
     def update_shadow_config(self, payload: dict[str, Any], *, user_id: str) -> dict[str, Any]:
         current = self.shadow_config()
-        percent = int(payload.get("sample_percent", current["sample_percent"]))
+        percent = json_int(
+            payload,
+            "sample_percent",
+            default=int(current["sample_percent"]),
+            minimum=10,
+            maximum=100,
+            error_prefix="SHADOW-001",
+        )
         if percent not in {10, 25, 50, 100}:
             raise ValueError("SHADOW-001 抽樣比例只支援 10、25、50、100")
         device_ids = payload.get("device_ids", current["device_ids"])
@@ -502,13 +510,41 @@ class ResilienceRepository:
         ):
             raise ValueError("SHADOW-001 device_ids 必須是裝置 ID 陣列")
         values = (
-            int(bool(payload.get("enabled", current["enabled"]))),
+            int(
+                json_bool(
+                    payload,
+                    "enabled",
+                    default=bool(current["enabled"]),
+                    error_prefix="SHADOW-001",
+                )
+            ),
             payload.get("algorithm_version_id", current["algorithm_version_id"]),
             _json(list(dict.fromkeys(device_ids))),
             percent,
-            max(1, min(int(payload.get("daily_max_runs", current["daily_max_runs"])), 1000)),
-            int(bool(payload.get("generate_preview", current["generate_preview"]))),
-            max(1, min(int(payload.get("preview_retention_days", current["preview_retention_days"])), 365)),
+            json_int(
+                payload,
+                "daily_max_runs",
+                default=int(current["daily_max_runs"]),
+                minimum=1,
+                maximum=1000,
+                error_prefix="SHADOW-001",
+            ),
+            int(
+                json_bool(
+                    payload,
+                    "generate_preview",
+                    default=bool(current["generate_preview"]),
+                    error_prefix="SHADOW-001",
+                )
+            ),
+            json_int(
+                payload,
+                "preview_retention_days",
+                default=int(current["preview_retention_days"]),
+                minimum=1,
+                maximum=365,
+                error_prefix="SHADOW-001",
+            ),
             user_id,
             utc_now(),
         )
@@ -631,57 +667,19 @@ class ResilienceRepository:
                 "SELECT * FROM device_content_queue_items WHERE id=?", (item_id,)
             ).fetchone()
 
-    def manifest(self, device_id: str, *, release_root) -> dict[str, Any]:
-        queue = self.queue(device_id)
-        if not queue:
-            self.ensure_queue(device_id)
-            queue = self.queue(device_id)
-        assert queue is not None
-        now = utc_now()
-        items = []
-        for row in queue["items"]:
-            if row["status"] not in {"READY", "AVAILABLE", "DOWNLOADED", "ACKNOWLEDGED"} or (
-                row["expires_at"] and str(row["expires_at"]) < now
-            ):
-                continue
-            manifest_path = release_root / str(row["release_id"]) / "manifest.json"
-            try:
-                release = json.loads(manifest_path.read_text(encoding="utf-8"))
-                file_item = next(
-                    item for item in release.get("files", []) if str(item.get("name", "")).endswith(".bin")
-                )
-            except (OSError, ValueError, StopIteration, json.JSONDecodeError):
-                continue
-            items.append(
-                {
-                    "queue_item_id": row["id"],
-                    "release_id": row["release_id"],
-                    "display_after": row["display_after"],
-                    "expires_at": row["expires_at"],
-                    "priority": row["priority"],
-                    "sha256": file_item.get("sha256"),
-                    "size": file_item.get("size"),
-                    "download_url": f"/api/device/v1/queue/items/{row['id']}/files/{file_item.get('name')}",
-                }
-            )
-        return {
-            "schema_version": 1,
-            "queue_version": queue["queue"]["queue_version"],
-            "device_id": device_id,
-            "generated_at": now,
-            "items": items,
-            "last_known_good_release_id": queue["queue"]["last_known_good_release_id"],
-        }
-
     def queue_ack(self, *, device_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         item_id, event = str(payload.get("queue_item_id", "")), str(payload.get("event", ""))
         key = str(payload.get("idempotency_key", "")).strip()
         if event not in QUEUE_EVENTS or not item_id or not key:
             raise ValueError("QUEUE-001 ACK 缺少 queue_item_id、event 或 idempotency_key")
-        try:
-            queue_version = int(str(payload.get("queue_version")))
-        except (TypeError, ValueError) as exc:
-            raise ValueError("QUEUE-001 ACK 缺少有效 queue_version") from exc
+        queue_version = json_int(
+            payload,
+            "queue_version",
+            required=True,
+            minimum=0,
+            maximum=2_147_483_647,
+            error_prefix="QUEUE-001",
+        )
         now = utc_now()
         with self.database.transaction() as connection:
             item = connection.execute(
@@ -896,22 +894,69 @@ class ResilienceRepository:
             raise KeyError(data_type)
         current = next(row for row in self.retention_policies() if row["data_type"] == data_type)
         days, batch = (
-            int(payload.get("retention_days", current["retention_days"])),
-            int(payload.get("cleanup_batch_size", current["cleanup_batch_size"])),
+            json_int(
+                payload,
+                "retention_days",
+                default=int(current["retention_days"]),
+                minimum=1,
+                maximum=36500,
+                error_prefix="RETENTION-001",
+            ),
+            json_int(
+                payload,
+                "cleanup_batch_size",
+                default=int(current["cleanup_batch_size"]),
+                minimum=1,
+                maximum=1000,
+                error_prefix="RETENTION-001",
+            ),
         )
-        if not 1 <= days <= 36500 or not 1 <= batch <= 1000:
-            raise ValueError("RETENTION-001 保留天數或批次大小超出範圍")
         with self.database.transaction() as connection:
             connection.execute(
                 "UPDATE data_retention_policies SET enabled=?,retention_days=?,maximum_items=?,maximum_bytes=?,minimum_items_to_keep=?,cleanup_batch_size=?,dry_run=?,updated_at=? WHERE data_type=?",
                 (
-                    int(bool(payload.get("enabled", current["enabled"]))),
+                    int(
+                        json_bool(
+                            payload,
+                            "enabled",
+                            default=bool(current["enabled"]),
+                            error_prefix="RETENTION-001",
+                        )
+                    ),
                     days,
-                    payload.get("maximum_items", current["maximum_items"]),
-                    payload.get("maximum_bytes", current["maximum_bytes"]),
-                    max(0, int(payload.get("minimum_items_to_keep", current["minimum_items_to_keep"]))),
+                    nullable_json_int(
+                        payload,
+                        "maximum_items",
+                        default=current["maximum_items"],
+                        minimum=0,
+                        maximum=9_223_372_036_854_775_807,
+                        error_prefix="RETENTION-001",
+                    ),
+                    nullable_json_int(
+                        payload,
+                        "maximum_bytes",
+                        default=current["maximum_bytes"],
+                        minimum=0,
+                        maximum=9_223_372_036_854_775_807,
+                        error_prefix="RETENTION-001",
+                    ),
+                    json_int(
+                        payload,
+                        "minimum_items_to_keep",
+                        default=int(current["minimum_items_to_keep"]),
+                        minimum=0,
+                        maximum=9_223_372_036_854_775_807,
+                        error_prefix="RETENTION-001",
+                    ),
                     batch,
-                    int(bool(payload.get("dry_run", current["dry_run"]))),
+                    int(
+                        json_bool(
+                            payload,
+                            "dry_run",
+                            default=bool(current["dry_run"]),
+                            error_prefix="RETENTION-001",
+                        )
+                    ),
                     utc_now(),
                     data_type,
                 ),

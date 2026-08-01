@@ -27,6 +27,8 @@ from inktime.app.services.analysis import PhotoAnalysisService
 from inktime.app.services.backups import BackupService
 from inktime.app.services.budgets import BudgetService
 from inktime.app.services.device_energy import DeviceEnergyService
+from inktime.app.services.device_queue_manifests import DeviceQueueManifestService
+from inktime.app.services.device_releases import DeviceReleaseService
 from inktime.app.services.diagnostics import DiagnosticsService
 from inktime.app.services.display_prepare import DisplayPreparationService
 from inktime.app.services.jobs import JobService
@@ -178,6 +180,7 @@ def bootstrap_services(
     observability_service.publisher = release_publisher
     render_candidate_repository = RenderCandidateRepository(database)
     resilience_repository = ResilienceRepository(database)
+    device_release_service = DeviceReleaseService(database, config.release_dir)
     render_cache = BoundedRenderCache(config.cache_dir / "renderer")
     render_workload_service = RenderWorkloadService(
         config.cache_dir / "render-workloads",
@@ -206,6 +209,12 @@ def bootstrap_services(
     extensions.update(
         {
             "inktime_device_repository": device_repository,
+            "inktime_device_release_service": device_release_service,
+            "inktime_device_queue_manifest_service": DeviceQueueManifestService(
+                resilience_repository,
+                device_release_service,
+                observability_service,
+            ),
             "inktime_photo_repository": photo_repository,
             "inktime_provider_repository": provider_repository,
             "inktime_scoring_repository": scoring_repository,

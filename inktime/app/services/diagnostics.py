@@ -48,7 +48,23 @@ class DiagnosticsService:
     def _directory_size(root: Path) -> int:
         if not root.exists():
             return 0
-        return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
+        total = 0
+        for path in root.rglob("*"):
+            try:
+                if path.is_file():
+                    total += path.stat().st_size
+            except OSError:
+                # Cache/WAL maintenance may remove a file between discovery
+                # and stat; diagnostics must remain best-effort.
+                continue
+        return total
+
+    @staticmethod
+    def _file_size(path: Path) -> int:
+        try:
+            return path.stat().st_size
+        except OSError:
+            return 0
 
     @staticmethod
     def _read_text(path: str) -> str | None:
@@ -131,8 +147,8 @@ class DiagnosticsService:
             "cgroup": self._cgroup_snapshot(),
             "disk": {"used": disk.used, "total": disk.total, "free": disk.free, "percent": disk.percent},
             "database": {
-                "bytes": self.database.path.stat().st_size if self.database.path.exists() else 0,
-                "wal_bytes": wal.stat().st_size if wal.exists() else 0,
+                "bytes": self._file_size(self.database.path),
+                "wal_bytes": self._file_size(wal),
                 "integrity": self.database.integrity_check(),
             },
             "cache_bytes": cache_bytes,
@@ -142,9 +158,7 @@ class DiagnosticsService:
                 "readable": sum(Path(row["root_path"]).is_dir() for row in libraries),
             },
             "providers_enabled": int(providers),
-            "fonts": sum(
-                (DEFAULT_FONT_ASSET_ROOT / font.filename).is_file() for font in BUILTIN_FONTS
-            )
+            "fonts": sum((DEFAULT_FONT_ASSET_ROOT / font.filename).is_file() for font in BUILTIN_FONTS)
             + sum(
                 path.is_file() and path.suffix.lower() in SUPPORTED_FONT_SUFFIXES
                 for path in (self.data_dir / "fonts").glob("*")
@@ -172,9 +186,7 @@ class DiagnosticsService:
             "uptime_seconds": int(time.time() - self.started_at),
             "runtime_profile": {
                 "analysis_concurrency": int(
-                    self.settings_repository.get("analysis.concurrency", 1)
-                    if self.settings_repository
-                    else 1
+                    self.settings_repository.get("analysis.concurrency", 1) if self.settings_repository else 1
                 ),
                 "queue_multiplier": int(
                     self.settings_repository.get("worker.queue_multiplier", 1)

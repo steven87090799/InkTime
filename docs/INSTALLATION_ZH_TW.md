@@ -9,8 +9,11 @@
 ## Docker
 
 ```bash
-cp .env.example .env
-# 設定 INKTIME_PHOTO_PATH 與 INKTIME_DATA_PATH
+# 可信任 LAN／本機 HTTP：
+cp .env.local.example .env
+# 正式 HTTPS Reverse Proxy 則改用：
+# cp .env.production.example .env
+# 設定實際 INKTIME_PUBLIC_URL、INKTIME_PHOTO_PATH 與 INKTIME_DATA_PATH
 mkdir -p data
 docker compose up -d --build
 docker compose ps
@@ -33,4 +36,4 @@ gunicorn --config gunicorn.conf.py server:app
 
 ## 首次啟動
 
-瀏覽 `/setup` 建立 administrator。密碼不可空白且不限制長度；正式環境仍建議使用密碼管理器產生的長密碼。反向代理終止 TLS 時設定 `INKTIME_COOKIE_SECURE=1`，並限制 Proxy 傳入可信任的來源 IP 標頭。安裝後立即建立備份並測試下載。
+瀏覽 `/setup` 建立 administrator。新帳號需 3–64 個 ASCII 識別字元，密碼需 12–128 字元且不會裁切前後空白。LAN HTTP 使用 `COOKIE_SECURE=0`／`ALLOW_INSECURE_HTTP=1`；Production 預設且建議 HTTPS、`COOKIE_SECURE=1`／`ALLOW_INSECURE_HTTP=0`。Production 若明確改用 insecure HTTP break-glass，Health／Preflight 會 degraded，且不可公開至公網。反向代理只可傳入可信任的 Host、Proto 與來源 IP 標頭。安裝後立即建立備份並測試下載。

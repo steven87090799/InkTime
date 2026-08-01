@@ -11,6 +11,8 @@ from typing import Any
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from inktime.app.domain.auth import validate_password
+
 
 SENSITIVE_KEY = re.compile(
     r"^(?:api[_-]?key|token|password|secret|authorization|cookie|session|bearer|device[_-]?(?:credential|token))$",
@@ -51,8 +53,7 @@ def redact_text(value: str) -> str:
 
 
 def hash_password(password: str) -> str:
-    if not password:
-        raise ValueError("密碼不可空白")
+    password = validate_password(password)
     method = "scrypt" if hasattr(hashlib, "scrypt") else "pbkdf2:sha256:600000"
     return generate_password_hash(password, method=method)
 

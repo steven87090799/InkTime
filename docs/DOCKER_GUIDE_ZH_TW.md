@@ -27,26 +27,62 @@ Intel N100 為 4 核心／4 執行緒、最高 3.4 GHz、6 W Processor Base Powe
 
 上限不是預先保留量。閒置時容器只保留 Python 程序與必要頁面，不會主動占滿設定值。若 Worker 因超大或損壞圖片觸發 OOM，先在 Web 將 `analysis.concurrency=1`、`worker.queue_multiplier=1`，再把 `INKTIME_WORKER_MEMORY` 提高到 `1536m`；不要先無限制提高並行。
 
-## 3. 首次部署
+## 3. 首次部署：先選 LAN HTTP 或 Production HTTPS
 
 ```bash
 git clone <你的 InkTime 私有儲存庫 URL> InkTime
 cd InkTime
-cp .env.example .env
 mkdir -p data
 sudo chown -R 10001:10001 data
 ```
 
-編輯 `.env`，至少確認：
+### 3.1 可信任 LAN／本機 HTTP
+
+```bash
+cp .env.local.example .env
+```
+
+至少把 `INKTIME_PUBLIC_URL` 改成瀏覽器實際使用的 `http://主機:8765`，並設定資料／照片路徑。此模式固定搭配：
 
 ```dotenv
-TZ=Asia/Taipei
-INKTIME_PORT=8765
-INKTIME_DATA_PATH=/srv/inktime/data
-INKTIME_PHOTO_PATH=/mnt/photos
+INKTIME_ENVIRONMENT=development
 INKTIME_COOKIE_SECURE=0
-INKTIME_IMAGE_TAG=local
+INKTIME_ALLOW_INSECURE_HTTP=1
 ```
+
+它只適合可信任 LAN 或測試環境，不可直接公開至 Internet。
+
+### 3.2 正式 HTTPS Reverse Proxy
+
+```bash
+cp .env.production.example .env
+```
+
+必須先把 `https://inktime.example.com` 改成實際網域；Production 會拒絕 localhost、`.invalid`、`example.com`／子網域、URL 內帳密與帶路徑 URL。公開部署預設且建議固定搭配：
+
+```dotenv
+INKTIME_ENVIRONMENT=production
+INKTIME_PUBLIC_URL=https://inktime.your-domain.example
+INKTIME_COOKIE_SECURE=1
+INKTIME_ALLOW_INSECURE_HTTP=0
+INKTIME_PROXY_TRUST=1
+```
+
+`INKTIME_PROXY_TRUST` 必須等於實際受信任 Proxy hop 數，不可為了「讓它能跑」任意放大。
+
+### 3.3 Production HTTP break-glass
+
+Production 在特殊、受控且不連接公網的測試環境，可明確設定：
+
+```dotenv
+INKTIME_ENVIRONMENT=production
+INKTIME_PUBLIC_URL=http://受控主機:8765
+INKTIME_COOKIE_SECURE=0
+INKTIME_ALLOW_INSECURE_HTTP=1
+INKTIME_PROXY_TRUST=0
+```
+
+這是 break-glass，而不是推薦部署方式。Health／Preflight 會標示 `degraded`；Secure Cookie、HSTS 與 TLS 安全保證均不成立，不可透過 Internet 使用。系統不會自動從 HTTPS fallback 到此模式。
 
 不要把 `.env`、資料庫、`session.key`、API Key 或裝置 Token Commit。啟動：
 
@@ -57,7 +93,7 @@ docker compose ps
 curl -fsS http://127.0.0.1:8765/health/ready
 ```
 
-三個服務都應顯示 `healthy`。瀏覽 `http://N100-IP:8765/` 建立非空白的管理員密碼；系統不限制長度，但正式環境仍建議使用密碼管理器產生的長密碼。
+三個服務都應顯示 `healthy`。首次管理員帳號需 3–64 個 ASCII 識別字元，密碼需 12–128 字元；密碼前後空白屬於密碼內容，不會被自動裁切。
 
 ## 4. `.env` 部署欄位
 
@@ -66,7 +102,12 @@ curl -fsS http://127.0.0.1:8765/health/ready
 | `INKTIME_PORT` | `8765` | 主機對外 Port |
 | `INKTIME_DATA_PATH` | `./data` | SQLite、快取、字型、備份、發布；可寫 |
 | `INKTIME_PHOTO_PATH` | `./simulation_photos` | 原始照片；容器內固定 `/photos` 且唯讀。無實體面板時可直接使用專案內投放區 |
-| `INKTIME_COOKIE_SECURE` | `0` | HTTPS 反向代理完成後設 `1` |
+| `INKTIME_ENVIRONMENT` | local 範例為 `development` | 公開部署必須為 `production`；受控 break-glass 仍維持 production |
+| `INKTIME_PUBLIC_URL` | `http://localhost:8765` | 瀏覽器實際使用的 Origin；不可含帳密、路徑、Query 或 Fragment |
+| `INKTIME_COOKIE_SECURE` | local `0`／production 建議 `1` | 必須和 HTTP／HTTPS 模式一致；break-glass HTTP 為 `0` |
+| `INKTIME_ALLOW_INSECURE_HTTP` | local `1`／production 建議 `0` | HTTP 的明確降級開關，不會自動 fallback；Production 啟用時 health degraded |
+| `INKTIME_PROXY_TRUST` | local `0` | 只信任實際存在的 Proxy hop，正式單層 Proxy 通常為 `1` |
+| `INKTIME_WEBHOOK_ALLOWLIST` | 空 | 僅在確實需要內網 Webhook 時填精確 hostname、`.example.com` 子網域、IP 或 CIDR；一般公開端點不需設定 |
 | `INKTIME_ACCESS_LOG` | `0` | 是否逐一輸出 HTTP request；正式環境維持關閉 |
 | `INKTIME_ENABLE_LEGACY_WEBUI` | `false` | 舊 `/review`、`/sim` 與相關 API；正式、開發、測試皆須明確設為 `true` 才開啟，且仍受平台登入／權限保護 |
 | `INKTIME_LOG_LEVEL` | `INFO` | 資料庫尚未初始化前的 bootstrap 層級；之後從 Web 控制 |
@@ -113,9 +154,33 @@ docker stats --no-stream
 - `/health/detail`：登入管理員後查看詳細版本。
 - Worker／Scheduler：Compose healthcheck 確認目標程序仍存在。
 
-## 7. HTTPS 與網路
+## 7. HTTPS、Reverse Proxy 與網路
 
-對外公開時必須由 Caddy、Nginx、Traefik 或 NAS 反向代理終止 TLS，並把 `.env` 的 `INKTIME_COOKIE_SECURE=1` 後重建容器。只開放 Web Port，不公開 SQLite 或 `/data`；限制管理頁來源網段。ESP32 韌體若未配置可信 CA，不應直接跨不可信公網使用 HTTPS，建議先用隔離 IoT VLAN＋反向代理或 VPN。
+對外公開時必須由 Caddy、Nginx、Traefik 或 NAS 反向代理終止 TLS。以下 Nginx 範例假設 TLS 憑證已由你的 ACME／憑證管理流程提供：
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name inktime.example.net;
+
+    ssl_certificate     /etc/letsencrypt/live/inktime.example.net/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/inktime.example.net/privkey.pem;
+
+    client_max_body_size 32m;
+
+    location / {
+        proxy_pass http://127.0.0.1:8765;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 180s;
+        proxy_send_timeout 180s;
+    }
+}
+```
+
+Nginx 負責 TLS 與公開入口限流；InkTime 負責 Session／CSRF／CSP／HSTS（只有確認 HTTPS request 才送出）。只開放 Proxy 的 443，不公開 SQLite 或 `/data`，並限制管理頁來源網段。Webhook 會把通知資料送到外部 HTTPS 服務；Bearer Token 應加密保存，目的地不得使用 redirect 或內部位址。Device Token 只顯示一次，不得放在 URL／Log。ESP32 韌體若未配置可信 CA，不應直接跨不可信公網使用 HTTPS，建議先用隔離 IoT VLAN＋反向代理或 VPN。
 
 ## 8. 更新、備份與回滾
 

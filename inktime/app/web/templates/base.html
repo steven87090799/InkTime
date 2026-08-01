@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>{% block title %}InkTime{% endblock %}</title>
-  <script>
+  <script nonce="{{ csp_nonce }}">
     (() => {
       let savedTheme = null;
       try {
@@ -51,7 +51,7 @@
     {% endfor %}
     {% block content %}{% endblock %}
   </main>
-  <script>
+  <script nonce="{{ csp_nonce }}">
     window.inktimeFetch = (url, options = {}) => {
       options.headers = Object.assign({'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]').content}, options.headers || {});
       return fetch(url, options);
@@ -79,6 +79,12 @@
       applyTheme(document.documentElement.dataset.theme);
       toggle.addEventListener('click', () => {
         applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark', true);
+      });
+    })();
+
+    (() => {
+      document.querySelectorAll('[data-dialog-close]').forEach(button => {
+        button.addEventListener('click', () => button.closest('dialog')?.close());
       });
     })();
 

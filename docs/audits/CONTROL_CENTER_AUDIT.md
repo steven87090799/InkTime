@@ -78,7 +78,7 @@ conflict、validation group 與 impact 均由同一個 `SETTING_DEFINITIONS` 在
 | Palette／Dither | `profile`, `dither`, `dither_strength`, `color_distance`, `custom_photo_presets` | 是／是／是 | Profile／Palette／Dither 安全白名單；0–2 | `safe_4c` 等；中；動態 | Re+D；不開放尺寸/BIN；P1；PR-RENDER |
 | 裝置預設 | `device.default_timezone`, `default_schedule`, `default_rotation`, `default_panel_profile`, `legacy_api_enabled` | 是／是／前四項 | IANA、HH:MM、0/180、Profile choice、bool | 安全預設；legacy 高；動態／重啟 | D；legacy 未接；P1；PR-DEVICE |
 | 裝置通知 | `notification.device_offline_enabled`, `device_offline_hours`, `device_recovery_enabled`, `device_offline_repeat_enabled`, `device_offline_cooldown_hours`, `scan_seconds` | 是／是／是 | bool、1–720 hr、60–3600 秒 | 原預設；中；動態 | —；P1；PR-NOTIFY |
-| Webhook | `notification.webhook_enabled`, `webhook_url`, `webhook_timeout_seconds` | 是／是／是 | bool、無帳密 HTTP(S)、1–60 秒 | 關閉；高；動態 | Token 另存 Secret Store；P1；PR-NOTIFY |
+| Webhook | `notification.webhook_enabled`, `webhook_url`, `webhook_timeout_seconds` | 是／是／是 | bool、無帳密／Fragment HTTPS、1–60 秒 | 關閉；高；動態 | DNS-pinned；Token 另存 Secret Store；P1；PR-NOTIFY |
 | Log／診斷 | `system.log_level`, `log_format`, `diagnostics_cache_seconds` | 是／是／是 | level/format choice、30–3600 秒 | INFO/json/300；中；動態 | —；不記秘密；P1；本 PR |
 | Session | `security.session_minutes` | 是／是／是 | 5–1440 分 | 30；高；動態 | Auth 不可關閉；P0；本 PR |
 | 備份 | `backup.schedule_enabled`, `backup.hour`, `backup.retention` | 是／是／是 | bool、0–23、1–365 份 | true/3/14；中；動態 | 不刪目前必要備份；P1；PR-STORAGE |

@@ -9,6 +9,8 @@ from pathlib import Path
 import random
 from typing import Any
 
+from inktime.app.core.json_values import json_bool, json_int
+
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from inktime.app.core.paths import safe_join
@@ -1891,18 +1893,24 @@ class RenderService:
     def _validated_history_filters(payload: dict[str, Any]) -> dict[str, Any]:
         filters: dict[str, Any] = {}
         for key in ("start_year", "end_year", "exclude_recent_days"):
-            value = payload.get(key)
-            if value is None or value == "":
+            if key not in payload or payload[key] is None:
                 continue
-            try:
-                parsed = int(value)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"HISTORY-001 {key} 必須是整數") from exc
             if key == "exclude_recent_days":
-                if not 0 <= parsed <= 3650:
-                    raise ValueError("HISTORY-001 排除近期天數必須介於 0 到 3650")
-            elif not 1900 <= parsed <= 2200:
-                raise ValueError("HISTORY-001 年份必須介於 1900 到 2200")
+                parsed = json_int(
+                    payload,
+                    key,
+                    minimum=0,
+                    maximum=3650,
+                    error_prefix="HISTORY-001",
+                )
+            else:
+                parsed = json_int(
+                    payload,
+                    key,
+                    minimum=1900,
+                    maximum=2200,
+                    error_prefix="HISTORY-001",
+                )
             filters[key] = parsed
         if filters.get("start_year", 1900) > filters.get("end_year", 2200):
             raise ValueError("HISTORY-001 起始年份不得晚於結束年份")
@@ -1912,7 +1920,7 @@ class RenderService:
         filters["type"] = type_name
         filters["city"] = str(payload.get("city", "")).strip()[:80]
         filters["country"] = str(payload.get("country", "")).strip()[:80]
-        filters["unseen_only"] = bool(payload.get("unseen_only", False))
+        filters["unseen_only"] = json_bool(payload, "unseen_only", default=False)
         return filters
 
     def select_random_history_day(
@@ -1970,7 +1978,14 @@ class RenderService:
         seen = 0
         preferred_seen = 0
         weighted_total = 0.0
-        top_limit = max(1, min(int(payload.get("top_n", 10)), 100))
+        top_limit = json_int(
+            payload,
+            "top_n",
+            default=10,
+            minimum=1,
+            maximum=100,
+            error_prefix="HISTORY-001",
+        )
         fallback = None
 
         def reservoir(current, candidate, count: int):

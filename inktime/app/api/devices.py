@@ -1,19 +1,30 @@
 from __future__ import annotations
 
 from datetime import datetime
-import json
 import logging
 import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Blueprint, abort, current_app, render_template, request
 
-from inktime.app.core.paths import UnsafePathError, safe_join
+from inktime.app.api.device_auth import authenticate_device_request
+from inktime.app.core.json_values import (
+    JsonScalarError,
+    json_bool,
+    json_float,
+    json_int,
+    json_object_payload,
+    nullable_json_float,
+    optional_json_bool,
+    optional_json_float,
+    optional_json_int,
+)
 from inktime.app.core.logging import log_event
+from inktime.app.core.paths import UnsafePathError
 from inktime.app.domain.rendering import DISPLAY_PROFILES, DeviceTestReleaseStore
 from inktime.app.domain.rendering.system_presets import DEFAULT_DEVICE_PANEL_PROFILE
 from inktime.app.services.rendering import FIT_MODES, FRAME_ORIENTATIONS, LAYOUTS
-from inktime.app.repositories.devices import DeviceRateLimitError, DeviceRepository
+from inktime.app.repositories.devices import DeviceRepository
 from inktime.app.web.access import administrator_required, login_required
 
 
@@ -26,21 +37,17 @@ def _repository() -> DeviceRepository:
     return current_app.extensions["inktime_device_repository"]
 
 
-def _bearer_token() -> str:
-    value = request.headers.get("Authorization", "")
-    if not value.startswith("Bearer "):
-        abort(401, description="DEVICE-001 裝置驗證失敗")
-    return value[7:].strip()
+def _json_payload(error_prefix: str = "DEVICE-003", *, maximum_bytes: int = 64 * 1024) -> dict:
+    return json_object_payload(request, maximum_bytes=maximum_bytes, error_prefix=error_prefix)
 
 
-def _authenticated_device():
+def optional_bool(payload: dict, field: str, *, default: bool | None = None) -> bool | None:
     try:
-        device = _repository().authenticate(_bearer_token(), request.remote_addr or "unknown")
-    except DeviceRateLimitError:
-        abort(429, description="DEVICE-007 裝置驗證嘗試過多，請稍後再試")
-    if device is None:
-        abort(401, description="DEVICE-001 裝置驗證失敗")
-    return device
+        if field not in payload:
+            return default
+        return optional_json_bool(payload, field, error_prefix="DEVICE-004")
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
 
 
 def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
@@ -51,9 +58,16 @@ def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
     except ZoneInfoNotFoundError:
         abort(400, description="DEVICE-003 時區不是有效的 IANA 時區")
     try:
-        rotation = int(payload.get("rotation", defaults.get("rotation", 0)))
-    except (TypeError, ValueError):
-        abort(400, description="DEVICE-003 畫面旋轉角度格式錯誤")
+        rotation = json_int(
+            payload,
+            "rotation",
+            default=int(defaults.get("rotation", 0)),
+            minimum=0,
+            maximum=180,
+            error_prefix="DEVICE-003",
+        )
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
     if rotation not in {0, 180}:
         abort(400, description="DEVICE-003 目前正式韌體的旋轉角度只支援 0、180")
     schedule = str(payload.get("schedule", defaults.get("schedule", "08:00")))
@@ -62,11 +76,15 @@ def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
     name = str(payload.get("name", "")).strip()
     if not name:
         abort(400, description="DEVICE-003 裝置名稱不可空白")
-    enabled_value = payload.get("enabled", defaults.get("enabled", True))
-    if isinstance(enabled_value, str):
-        enabled = enabled_value.lower() in {"1", "true", "yes", "on"}
-    else:
-        enabled = bool(enabled_value)
+    try:
+        enabled = json_bool(
+            payload,
+            "enabled",
+            default=bool(defaults.get("enabled", True)),
+            error_prefix="DEVICE-003",
+        )
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
     panel_profile = str(
         payload.get("panel_profile", defaults.get("panel_profile", DEFAULT_DEVICE_PANEL_PROFILE))
     )
@@ -169,69 +187,55 @@ def update_energy_profile(device_id: str):
     device = repository.get(device_id)
     if device is None:
         abort(404)
-    payload = request.get_json(silent=True) or {}
-    if not isinstance(payload, dict):
-        abort(400, description="DEVICE-005 能源參數必須是 JSON 物件")
-
-    def bounded_number(key: str, minimum: float, maximum: float, *, nullable: bool, default) -> float | None:
-        value = payload.get(key, default)
-        if value is None or value == "":
-            if nullable:
-                return None
-            abort(400, description=f"DEVICE-005 {key} 不可空白")
-        if isinstance(value, bool):
-            abort(400, description=f"DEVICE-005 {key} 必須是數字")
-        try:
-            parsed = float(value)
-        except (TypeError, ValueError):
-            abort(400, description=f"DEVICE-005 {key} 必須是數字")
-        if not minimum <= parsed <= maximum:
-            abort(400, description=f"DEVICE-005 {key} 超出 {minimum:g}–{maximum:g}")
-        return parsed
-
-    refreshes_per_day = bounded_number(
-        "refreshes_per_day",
-        0.01,
-        96,
-        nullable=False,
-        default=device["refreshes_per_day"],
-    )
-    battery_reserve_percent = bounded_number(
-        "battery_reserve_percent",
-        0,
-        50,
-        nullable=False,
-        default=device["battery_reserve_percent"],
-    )
-    if refreshes_per_day is None or battery_reserve_percent is None:
-        abort(400, description="DEVICE-005 續航估算參數不可空白")
+    payload = _json_payload("DEVICE-005")
     try:
+        refreshes_per_day = json_float(
+            payload,
+            "refreshes_per_day",
+            default=device["refreshes_per_day"],
+            minimum=0.01,
+            maximum=96,
+            error_prefix="DEVICE-005",
+        )
+        battery_reserve_percent = json_float(
+            payload,
+            "battery_reserve_percent",
+            default=device["battery_reserve_percent"],
+            minimum=0,
+            maximum=50,
+            error_prefix="DEVICE-005",
+        )
         repository.update_energy_profile(
             device_id,
-            battery_capacity_mah=bounded_number(
+            battery_capacity_mah=nullable_json_float(
+                payload,
                 "battery_capacity_mah",
-                10,
-                100_000,
-                nullable=True,
                 default=device["battery_capacity_mah"],
+                minimum=10,
+                maximum=100_000,
+                error_prefix="DEVICE-005",
             ),
-            standby_current_ma=bounded_number(
+            standby_current_ma=nullable_json_float(
+                payload,
                 "standby_current_ma",
-                0.001,
-                10_000,
-                nullable=True,
                 default=device["standby_current_ma"],
+                minimum=0.001,
+                maximum=10_000,
+                error_prefix="DEVICE-005",
             ),
-            active_current_ma=bounded_number(
+            active_current_ma=nullable_json_float(
+                payload,
                 "active_current_ma",
-                0.001,
-                10_000,
-                nullable=True,
                 default=device["active_current_ma"],
+                minimum=0.001,
+                maximum=10_000,
+                error_prefix="DEVICE-005",
             ),
             refreshes_per_day=refreshes_per_day,
             battery_reserve_percent=battery_reserve_percent,
         )
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
     except KeyError:
         abort(404)
     return {"status": "ok"}
@@ -240,7 +244,7 @@ def update_energy_profile(device_id: str):
 @bp.post("/api/v1/devices")
 @administrator_required
 def create_device():
-    payload = request.get_json(silent=True) or request.form
+    payload = _json_payload() if request.is_json else request.form
     settings = current_app.extensions["inktime_settings_repository"]
     fields = _validated_device_fields(
         payload,
@@ -272,7 +276,7 @@ def regenerate_device_token(device_id: str):
 @bp.patch("/api/v1/devices/<device_id>")
 @administrator_required
 def update_device(device_id: str):
-    payload = request.get_json(silent=True) or {}
+    payload = _json_payload()
     fields = _validated_device_fields(payload)
     try:
         _repository().update(device_id, **fields)
@@ -283,36 +287,16 @@ def update_device(device_id: str):
 
 @bp.get("/api/device/v1/releases/latest")
 def latest_release():
-    device = _authenticated_device()
-    release_root = current_app.config["INKTIME_RELEASE_DIR"]
+    device = authenticate_device_request()
     profile_key = str(device["panel_profile"] or DEFAULT_DEVICE_PANEL_PROFILE)
-    assignment = DeviceTestReleaseStore(release_root).active(str(device["id"]), profile_key)
-    if assignment is not None:
-        release_id = str(assignment["release_id"])
-    else:
-        with current_app.extensions["inktime_database"].session() as connection:
-            assigned = connection.execute(
-                "SELECT release_id FROM device_render_releases WHERE device_id=?",
-                (str(device["id"]),),
-            ).fetchone()
-        if assigned is not None:
-            release_id = str(assigned["release_id"])
-        else:
-            latest_pointer = release_root / f"latest.{profile_key}"
-            if not latest_pointer.exists() and profile_key == "safe_4c":
-                latest_pointer = release_root / "latest"
-            if not latest_pointer.exists():
-                abort(404, description="目前沒有可用的發布版本")
-            release_id = latest_pointer.read_text(encoding="utf-8").strip()
-    try:
-        manifest_path = safe_join(release_root, f"{release_id}/manifest.json")
-    except UnsafePathError:
-        abort(500, description="DEVICE-002 發布指標不合法")
-    if not manifest_path.is_file():
-        abort(404, description="找不到發布 Manifest")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if str(manifest.get("render_profile")) != profile_key:
-        abort(409, description="DEVICE-008 Release Profile 與裝置不相容")
+    authorization = current_app.extensions["inktime_device_release_service"].latest_for_device(
+        device_id=str(device["id"]),
+        profile_key=profile_key,
+    )
+    if not authorization.allowed or authorization.manifest is None:
+        abort(404, description="目前沒有可用的發布版本")
+    release_id = authorization.release_id
+    manifest = dict(authorization.manifest)
     manifest["download_base_url"] = f"/api/device/v1/releases/{release_id}/files/"
     zone = ZoneInfo(str(device["timezone"]))
     offset = datetime.now(zone).utcoffset()
@@ -325,7 +309,8 @@ def latest_release():
         "schedule": str(device["schedule"]),
         "rotation": int(device["rotation"]),
     }
-    if assignment is not None:
+    if authorization.test_assignment is not None:
+        assignment = authorization.test_assignment
         manifest["test_delivery"] = {
             "mode": assignment["delivery"],
             "one_time": bool(assignment["one_time"]),
@@ -348,95 +333,90 @@ def latest_release():
 
 @bp.get("/api/device/v1/releases/<release_id>/files/<path:filename>")
 def release_file(release_id: str, filename: str):
-    device = _authenticated_device()
-    from flask import send_file
-
-    release_root = current_app.config["INKTIME_RELEASE_DIR"]
-    try:
-        path = safe_join(release_root, f"{release_id}/{filename}")
-    except UnsafePathError:
-        _repository().record_download(device["id"], release_id, False)
-        abort(400, description="PATH-001 路徑超出允許範圍")
-    manifest_path = release_root / release_id / "manifest.json"
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        _repository().record_download(device["id"], release_id, False)
-        abort(404, description="DEVICE-002 Release Manifest 不存在")
-    if str(manifest.get("render_profile")) != str(device["panel_profile"]):
-        _repository().record_download(device["id"], release_id, False)
-        abort(403, description="DEVICE-008 Release Profile 與裝置不相容")
-    entry = next(
-        (
-            item
-            for item in manifest.get("files", [])
-            if isinstance(item, dict) and str(item.get("name")) == filename
-        ),
-        None,
+    device = authenticate_device_request()
+    profile_key = str(device["panel_profile"] or DEFAULT_DEVICE_PANEL_PROFILE)
+    service = current_app.extensions["inktime_device_release_service"]
+    authorization = service.authorize_release_for_device(
+        device_id=str(device["id"]),
+        profile_key=profile_key,
+        release_id=release_id,
     )
-    if not path.is_file() or path.name == "manifest.json" or entry is None:
+    if not authorization.allowed:
+        _repository().record_download(device["id"], release_id[:128], False)
+        abort(404, description="DEVICE-002 Release 或檔案不存在")
+    try:
+        payload, entry = service.read_payload(authorization, filename)
+    except (FileNotFoundError, UnsafePathError):
         _repository().record_download(device["id"], release_id, False)
-        abort(404)
-    from hashlib import sha256
-
-    payload = path.read_bytes()
-    if len(payload) != int(entry.get("size", -1)) or sha256(payload).hexdigest() != str(
-        entry.get("sha256", "")
-    ):
+        abort(404, description="DEVICE-002 Release 或檔案不存在")
+    except ValueError:
         _repository().record_download(device["id"], release_id, False)
         abort(409, description="DEVICE-009 Release Payload 完整性驗證失敗")
     _repository().record_download(device["id"], release_id, True)
-    if filename.endswith(".bin"):
+    if filename.endswith(".bin") and authorization.source == "test_assignment":
         # 只前進到 payload_downloaded；不會在 HTTP 傳輸階段 consumed。
-        DeviceTestReleaseStore(release_root).mark_downloaded(str(device["id"]), release_id)
+        service.test_store.mark_downloaded(str(device["id"]), release_id)
     log_event(
         LOGGER,
         logging.DEBUG,
         "裝置下載發布檔案",
         event="device_download",
-        details={"device_id": str(device["id"]), "release_id": release_id, "filename": path.name},
+        details={"device_id": str(device["id"]), "release_id": release_id, "filename": filename},
     )
-    return send_file(path, mimetype="application/octet-stream", conditional=True)
+    response = current_app.response_class(payload, mimetype="application/octet-stream")
+    response.content_length = len(payload)
+    response.set_etag(str(entry["sha256"]))
+    return response
 
 
 @bp.post("/api/device/v1/status")
 def report_status():
-    device = _authenticated_device()
-    payload = request.get_json(silent=True) or {}
+    device = authenticate_device_request()
+    payload = _json_payload("DEVICE-004")
 
     def optional_int(key: str, minimum: int, maximum: int) -> int | None:
-        value = payload.get(key)
-        if value is None:
-            return None
         try:
-            return max(minimum, min(int(value), maximum))
-        except (TypeError, ValueError):
-            abort(400, description=f"DEVICE-004 {key} 必須是整數")
+            return optional_json_int(
+                payload,
+                key,
+                minimum=minimum,
+                maximum=maximum,
+                error_prefix="DEVICE-004",
+            )
+        except JsonScalarError as exc:
+            abort(400, description=str(exc))
 
     def optional_float(key: str, minimum: float, maximum: float) -> float | None:
-        value = payload.get(key)
-        if value is None:
-            return None
         try:
-            return max(minimum, min(float(value), maximum))
-        except (TypeError, ValueError):
-            abort(400, description=f"DEVICE-004 {key} 必須是數字")
+            return optional_json_float(
+                payload,
+                key,
+                minimum=minimum,
+                maximum=maximum,
+                error_prefix="DEVICE-004",
+            )
+        except JsonScalarError as exc:
+            abort(400, description=str(exc))
 
-    def optional_bool(key: str) -> bool | None:
-        value = payload.get(key)
-        if value is None:
-            return None
-        if not isinstance(value, bool):
-            abort(400, description=f"DEVICE-004 {key} 必須是布林值")
-        return value
-
-    battery = payload.get("battery_percent")
-    try:
-        battery_percent = max(0.0, min(float(battery), 100.0)) if battery is not None else None
-    except (TypeError, ValueError):
-        abort(400, description="DEVICE-004 battery_percent 必須是數字")
+    battery_percent = optional_float("battery_percent", 0.0, 100.0)
     error_code = str(payload.get("error_code", "")).strip()[:64]
     error_message = str(payload.get("error_message", "")).strip()[:500]
+    display_updated = optional_bool(payload, "display_updated", default=False)
+    payload_verified = optional_bool(payload, "payload_sha256_verified", default=False)
+    assert display_updated is not None
+    assert payload_verified is not None
+    boolean_details = {
+        key: optional_bool(payload, key)
+        for key in (
+            "flash_ready",
+            "psram_ready",
+            "sd_card",
+            "rtc",
+            "usb_power",
+            "battery_percent_estimated",
+            "button_wakeup",
+        )
+    }
     _repository().record_status(
         str(device["id"]),
         firmware_version=str(payload.get("firmware_version", "unknown")),
@@ -449,8 +429,8 @@ def report_status():
         wake_reason=str(payload.get("wake_reason", "")),
         applied_config_version=optional_int("applied_config_version", 0, 2_147_483_647),
         details={
-            "display_updated": bool(payload.get("display_updated", False)),
-            "payload_sha256_verified": bool(payload.get("payload_sha256_verified", False)),
+            "display_updated": display_updated,
+            "payload_sha256_verified": payload_verified,
             "release_id": str(payload.get("release_id", ""))[:100],
             "render_profile": str(payload.get("render_profile", ""))[:100],
             "reported_panel_profile": str(payload.get("panel_profile", ""))[:100],
@@ -458,28 +438,28 @@ def report_status():
             "board_profile": str(payload.get("board_profile", ""))[:100],
             "flash_bytes": optional_int("flash_bytes", 0, 2_147_483_647),
             "psram_bytes": optional_int("psram_bytes", 0, 2_147_483_647),
-            "flash_ready": optional_bool("flash_ready"),
-            "psram_ready": optional_bool("psram_ready"),
-            "sd_card": optional_bool("sd_card"),
-            "rtc": optional_bool("rtc"),
+            "flash_ready": boolean_details["flash_ready"],
+            "psram_ready": boolean_details["psram_ready"],
+            "sd_card": boolean_details["sd_card"],
+            "rtc": boolean_details["rtc"],
             "cache_status": str(payload.get("cache_status", ""))[:32],
             "pmic_type": str(payload.get("pmic_type", ""))[:32],
-            "usb_power": optional_bool("usb_power"),
+            "usb_power": boolean_details["usb_power"],
             "battery_voltage": optional_float("battery_voltage", 0.0, 10.0),
-            "battery_percent_estimated": optional_bool("battery_percent_estimated"),
+            "battery_percent_estimated": boolean_details["battery_percent_estimated"],
             "temperature_c": optional_float("temperature_c", -100.0, 150.0),
             "humidity_percent": optional_float("humidity_percent", 0.0, 100.0),
             "last_refresh_duration_ms": optional_int("last_refresh_duration_ms", 0, 600_000),
             "wake_duration_ms": optional_int("wake_duration_ms", 0, 86_400_000),
-            "button_wakeup": optional_bool("button_wakeup"),
+            "button_wakeup": boolean_details["button_wakeup"],
         },
     )
     DeviceTestReleaseStore(current_app.config["INKTIME_RELEASE_DIR"]).confirm_display(
         str(device["id"]),
         str(payload.get("release_id", ""))[:100],
         profile_key=str(device["panel_profile"]),
-        payload_verified=bool(payload.get("payload_sha256_verified", False)),
-        display_updated=bool(payload.get("display_updated", False)),
+        payload_verified=payload_verified,
+        display_updated=display_updated,
         error_code=error_code,
     )
     log_event(

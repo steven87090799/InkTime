@@ -6,6 +6,8 @@ import json
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from inktime.app.core.json_values import json_bool, json_int
+
 from inktime.app.repositories.jobs import utc_now
 from inktime.app.db import Database
 from inktime.app.services.display_prepare import DisplayPrepareConfig
@@ -13,38 +15,98 @@ from inktime.app.services.display_prepare import DisplayPrepareConfig
 
 TASK_DEFAULTS: dict[str, dict[str, Any]] = {
     "incremental_scan": {
-        "name": "增量掃描", "kind": "scan", "cron": "0 2 * * *", "start_time": "02:00",
-        "window_start": "00:00", "window_end": "06:00", "timeout_seconds": 14400,
-        "retry_count": 2, "retry_interval_seconds": 900,
-        "config": {"library_name": "主要照片庫", "root_path": "", "mode": "incremental", "build_thumbnails": True,
-                   "batch_size": 500, "concurrency": 1, "catch_up": True, "delay_high_load": True},
+        "name": "增量掃描",
+        "kind": "scan",
+        "cron": "0 2 * * *",
+        "start_time": "02:00",
+        "window_start": "00:00",
+        "window_end": "06:00",
+        "timeout_seconds": 14400,
+        "retry_count": 2,
+        "retry_interval_seconds": 900,
+        "config": {
+            "library_name": "主要照片庫",
+            "root_path": "",
+            "mode": "incremental",
+            "build_thumbnails": True,
+            "batch_size": 500,
+            "concurrency": 1,
+            "catch_up": True,
+            "delay_high_load": True,
+        },
     },
     "full_reconcile": {
-        "name": "完整一致性掃描", "kind": "scan", "cron": "0 3 * * 0", "start_time": "03:00",
-        "window_start": "00:00", "window_end": "08:00", "timeout_seconds": 28800,
-        "retry_count": 1, "retry_interval_seconds": 1800,
-        "config": {"library_name": "主要照片庫", "root_path": "", "mode": "full", "check_missing": True,
-                   "check_moves": True, "verify_hashes": False, "clean_orphan_thumbnails": True,
-                   "missing_safe_percent": 10, "delay_high_load": True},
+        "name": "完整一致性掃描",
+        "kind": "scan",
+        "cron": "0 3 * * 0",
+        "start_time": "03:00",
+        "window_start": "00:00",
+        "window_end": "08:00",
+        "timeout_seconds": 28800,
+        "retry_count": 1,
+        "retry_interval_seconds": 1800,
+        "config": {
+            "library_name": "主要照片庫",
+            "root_path": "",
+            "mode": "full",
+            "check_missing": True,
+            "check_moves": True,
+            "verify_hashes": False,
+            "clean_orphan_thumbnails": True,
+            "missing_safe_percent": 10,
+            "delay_high_load": True,
+        },
     },
     "display_prepare": {
-        "name": "換圖準備", "kind": "render", "cron": "30 7 * * *", "start_time": "07:30",
-        "window_start": None, "window_end": None, "timeout_seconds": 3600,
-        "retry_count": 1, "retry_interval_seconds": 600,
-        "config": {"lead_minutes": 30, "display_times": ["08:00"], "daily_count": 1, "device_ids": [],
-                   "candidate_years": [], "prefetch_count": 1, "ai_fallback": "use_existing", "render_fallback": "keep_current"},
+        "name": "換圖準備",
+        "kind": "render",
+        "cron": "30 7 * * *",
+        "start_time": "07:30",
+        "window_start": None,
+        "window_end": None,
+        "timeout_seconds": 3600,
+        "retry_count": 1,
+        "retry_interval_seconds": 600,
+        "config": {
+            "lead_minutes": 30,
+            "display_times": ["08:00"],
+            "daily_count": 1,
+            "device_ids": [],
+            "candidate_years": [],
+            "prefetch_count": 1,
+            "ai_fallback": "use_existing",
+            "render_fallback": "keep_current",
+        },
     },
     "ai_schedule": {
-        "name": "AI 排程入口", "kind": "analysis", "cron": "0 1 * * *", "start_time": "01:00",
-        "window_start": "00:00", "window_end": "06:00", "timeout_seconds": 14400,
-        "retry_count": 2, "retry_interval_seconds": 900,
-        "config": {"mode": "disabled", "fixed_times": ["01:00"], "night_window": ["00:00", "06:00"],
-                   "new_photo_delay_minutes": 30, "strategy": "smart_two_stage", "concurrency": 1},
+        "name": "AI 排程入口",
+        "kind": "analysis",
+        "cron": "0 1 * * *",
+        "start_time": "01:00",
+        "window_start": "00:00",
+        "window_end": "06:00",
+        "timeout_seconds": 14400,
+        "retry_count": 2,
+        "retry_interval_seconds": 900,
+        "config": {
+            "mode": "disabled",
+            "fixed_times": ["01:00"],
+            "night_window": ["00:00", "06:00"],
+            "new_photo_delay_minutes": 30,
+            "strategy": "smart_two_stage",
+            "concurrency": 1,
+        },
     },
     "cache_cleanup": {
-        "name": "快取清理", "kind": "cleanup", "cron": "30 4 * * *", "start_time": "04:30",
-        "window_start": "00:00", "window_end": "06:00", "timeout_seconds": 3600,
-        "retry_count": 1, "retry_interval_seconds": 900,
+        "name": "快取清理",
+        "kind": "cleanup",
+        "cron": "30 4 * * *",
+        "start_time": "04:30",
+        "window_start": "00:00",
+        "window_end": "06:00",
+        "timeout_seconds": 3600,
+        "retry_count": 1,
+        "retry_interval_seconds": 900,
         "config": {"max_bytes": 5368709120, "retention_days": 30, "clean_orphans": True},
     },
 }
@@ -66,9 +128,22 @@ class ScheduledTaskRepository:
                         retry_interval_seconds,next_run,config_json,created_at,updated_at
                     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
-                    (key, task["name"], task["kind"], task["cron"], task["start_time"], task["window_start"],
-                     task["window_end"], task["timeout_seconds"], task["retry_count"], task["retry_interval_seconds"],
-                     next_run.isoformat(), json.dumps(task["config"], ensure_ascii=False), utc_now(), utc_now()),
+                    (
+                        key,
+                        task["name"],
+                        task["kind"],
+                        task["cron"],
+                        task["start_time"],
+                        task["window_start"],
+                        task["window_end"],
+                        task["timeout_seconds"],
+                        task["retry_count"],
+                        task["retry_interval_seconds"],
+                        next_run.isoformat(),
+                        json.dumps(task["config"], ensure_ascii=False),
+                        utc_now(),
+                        utc_now(),
+                    ),
                 )
 
     def list(self) -> builtin_list[dict[str, Any]]:
@@ -90,8 +165,8 @@ class ScheduledTaskRepository:
         start_time = self._clock(str(payload.get("start_time", current["start_time"])))
         window_start = self._optional_clock(payload.get("window_start", current["window_start"]))
         window_end = self._optional_clock(payload.get("window_end", current["window_end"]))
-        enabled = bool(payload.get("enabled", current["enabled"]))
-        config = current["config"] | dict(payload.get("config") or {})
+        enabled = json_bool(payload, "enabled", default=bool(current["enabled"]))
+        config = self._config(current["kind"], current["config"], payload.get("config", {}))
         if current["kind"] == "render":
             config = dict(DisplayPrepareConfig.from_mapping(config).__dict__)
             config["display_times"] = list(config["display_times"])
@@ -100,11 +175,21 @@ class ScheduledTaskRepository:
         now = datetime.now(ZoneInfo(timezone))
         next_run = self._next_run(cron, now, weekdays).isoformat() if enabled else None
         values = (
-            int(enabled), cron, json.dumps(weekdays), start_time, window_start, window_end,
+            int(enabled),
+            cron,
+            json.dumps(weekdays),
+            start_time,
+            window_start,
+            window_end,
             self._bounded(payload.get("timeout_seconds", current["timeout_seconds"]), 30, 86400),
             self._bounded(payload.get("retry_count", current["retry_count"]), 0, 10),
-            self._bounded(payload.get("retry_interval_seconds", current["retry_interval_seconds"]), 30, 86400),
-            next_run, json.dumps(config, ensure_ascii=False), utc_now(), key,
+            self._bounded(
+                payload.get("retry_interval_seconds", current["retry_interval_seconds"]), 30, 86400
+            ),
+            next_run,
+            json.dumps(config, ensure_ascii=False),
+            utc_now(),
+            key,
         )
         with self.database.session() as connection:
             connection.execute(
@@ -155,20 +240,23 @@ class ScheduledTaskRepository:
 
     @staticmethod
     def _bounded(value: Any, lower: int, upper: int) -> int:
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("排程數值格式錯誤") from exc
-        if not lower <= parsed <= upper:
+        if type(value) is not int:
+            raise ValueError("排程數值必須是 JSON 整數")
+        if not lower <= value <= upper:
             raise ValueError(f"排程數值必須介於 {lower}–{upper}")
-        return parsed
+        return value
 
     @staticmethod
     def _clock(value: str) -> str:
         if len(value) != 5 or value[2] != ":":
             raise ValueError("時間必須是 HH:MM")
         hour, minute = value.split(":")
-        if not hour.isdigit() or not minute.isdigit() or not 0 <= int(hour) <= 23 or not 0 <= int(minute) <= 59:
+        if (
+            not hour.isdigit()
+            or not minute.isdigit()
+            or not 0 <= int(hour) <= 23
+            or not 0 <= int(minute) <= 59
+        ):
             raise ValueError("時間必須是 HH:MM")
         return value
 
@@ -177,9 +265,89 @@ class ScheduledTaskRepository:
 
     @staticmethod
     def _weekdays(value: Any) -> builtin_list[int]:
-        if not isinstance(value, list) or any(not isinstance(day, int) or day < 0 or day > 6 for day in value):
+        if not isinstance(value, list) or any(type(day) is not int or day < 0 or day > 6 for day in value):
             raise ValueError("星期必須是 0 到 6 的陣列")
         return sorted(set(value))
+
+    @staticmethod
+    def _config(kind: str, current: dict[str, Any], updates: Any) -> dict[str, Any]:
+        if type(updates) is not dict:
+            raise ValueError("排程 config 必須是 JSON 物件")
+        integer_fields: dict[str, tuple[int, int]] = {
+            "batch_size": (1, 100_000),
+            "concurrency": (1, 32),
+            "missing_safe_percent": (0, 100),
+            "lead_minutes": (0, 1440),
+            "daily_count": (1, 20),
+            "prefetch_count": (1, 10),
+            "new_photo_delay_minutes": (0, 43_200),
+            "max_bytes": (1, 10 * 1024 * 1024 * 1024 * 1024),
+            "retention_days": (0, 3650),
+        }
+        boolean_fields = {
+            "build_thumbnails",
+            "catch_up",
+            "delay_high_load",
+            "check_missing",
+            "check_moves",
+            "verify_hashes",
+            "clean_orphan_thumbnails",
+            "clean_orphans",
+        }
+        allowed_by_kind = {
+            "scan": {
+                "library_name",
+                "root_path",
+                "mode",
+                "batch_size",
+                "concurrency",
+                "catch_up",
+                "delay_high_load",
+                "build_thumbnails",
+                "check_missing",
+                "check_moves",
+                "verify_hashes",
+                "clean_orphan_thumbnails",
+                "missing_safe_percent",
+            },
+            "render": set(DisplayPrepareConfig.ALLOWED_KEYS),
+            "analysis": {
+                "mode",
+                "fixed_times",
+                "night_window",
+                "new_photo_delay_minutes",
+                "strategy",
+                "concurrency",
+            },
+            "cleanup": {"max_bytes", "retention_days", "clean_orphans"},
+        }
+        allowed = allowed_by_kind.get(kind)
+        if allowed is None:
+            raise ValueError("不支援的排程 kind")
+        unknown = sorted(set(updates) - allowed)
+        if unknown:
+            raise ValueError(f"排程 config 不支援欄位：{', '.join(unknown)}")
+        validated = dict(updates)
+        for field in set(updates) & set(integer_fields):
+            lower, upper = integer_fields[field]
+            validated[field] = json_int(
+                updates,
+                field,
+                minimum=lower,
+                maximum=upper,
+                error_prefix="SCHEDULE-002",
+            )
+        for field in set(updates) & boolean_fields:
+            validated[field] = json_bool(updates, field, error_prefix="SCHEDULE-002")
+        merged = current | validated
+        if kind == "render":
+            normalized = DisplayPrepareConfig.from_mapping(merged)
+            result = dict(normalized.__dict__)
+            result["display_times"] = list(result["display_times"])
+            result["device_ids"] = list(result["device_ids"])
+            result["candidate_years"] = list(result["candidate_years"])
+            return result
+        return merged
 
     @staticmethod
     def _cron(value: str) -> str:

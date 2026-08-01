@@ -735,6 +735,11 @@ def test_test_release_is_one_time_and_does_not_overwrite_formal_schedule(client,
         [("formal", Image.new("RGB", (480, 800), "white"))],
         profile_key="gdep073e01_6c",
     )
+    app.extensions["inktime_release_coordinator"].publish(
+        [formal],
+        created_by="integration-test",
+        photo_ids=[],
+    )
     pointer = app.config["INKTIME_RELEASE_DIR"] / "latest.gdep073e01_6c"
     response = client.post(
         "/api/v1/rendering/test-release",

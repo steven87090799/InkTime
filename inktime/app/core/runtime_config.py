@@ -77,9 +77,7 @@ class RuntimeConfig:
     def __post_init__(self) -> None:
         environment = self.environment.strip().casefold()
         if environment not in _ENVIRONMENTS:
-            raise RuntimeConfigurationError(
-                "INKTIME_ENVIRONMENT 必須是 development、test 或 production"
-            )
+            raise RuntimeConfigurationError("INKTIME_ENVIRONMENT 必須是 development、test 或 production")
         if not self.host.strip():
             raise RuntimeConfigurationError("INKTIME_HOST 不可空白")
         if not 1 <= self.port <= 65535:
@@ -141,9 +139,11 @@ class RuntimeConfig:
 
         source = os.environ if environ is None else environ
         root = (base_dir or _PROJECT_ROOT).expanduser().resolve()
-        resolved_environment = str(
-            environment if environment is not None else source.get("INKTIME_ENVIRONMENT", "development")
-        ).strip().casefold()
+        resolved_environment = (
+            str(environment if environment is not None else source.get("INKTIME_ENVIRONMENT", "development"))
+            .strip()
+            .casefold()
+        )
         production = resolved_environment == "production"
         resolved_testing = _boolean(
             testing if testing is not None else source.get("INKTIME_TESTING", resolved_environment == "test"),
@@ -168,9 +168,7 @@ class RuntimeConfig:
             base_dir=root,
         )
 
-        def resolve_child(
-            explicit: Path | str | None, env_name: str, default: Path
-        ) -> Path:
+        def resolve_child(explicit: Path | str | None, env_name: str, default: Path) -> Path:
             return _path(
                 explicit if explicit is not None else source.get(env_name, default),
                 base_dir=root,
@@ -195,7 +193,11 @@ class RuntimeConfig:
                 minimum=1,
                 maximum=65535,
             ),
-            timezone=str(timezone if timezone is not None else source.get("INKTIME_TIMEZONE", source.get("TZ", "Asia/Taipei"))),
+            timezone=str(
+                timezone
+                if timezone is not None
+                else source.get("INKTIME_TIMEZONE", source.get("TZ", "Asia/Taipei"))
+            ),
             proxy_trust=_integer(
                 proxy_trust if proxy_trust is not None else source.get("INKTIME_PROXY_TRUST", 0),
                 name="INKTIME_PROXY_TRUST",
@@ -229,9 +231,25 @@ class RuntimeConfig:
                 else source.get("INKTIME_COOKIE_SECURE", production),
                 name="INKTIME_COOKIE_SECURE",
             ),
-            public_url=str(public_url if public_url is not None else source.get("INKTIME_PUBLIC_URL", "https://localhost" if production else "http://127.0.0.1")),
-            allow_insecure_http=_boolean(allow_insecure_http if allow_insecure_http is not None else source.get("INKTIME_ALLOW_INSECURE_HTTP", False), name="INKTIME_ALLOW_INSECURE_HTTP"),
-            allow_unsafe_network_database=_boolean(allow_unsafe_network_database if allow_unsafe_network_database is not None else source.get("INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE", False), name="INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE"),
+            public_url=str(
+                public_url
+                if public_url is not None
+                else source.get(
+                    "INKTIME_PUBLIC_URL", "https://localhost" if production else "http://127.0.0.1"
+                )
+            ),
+            allow_insecure_http=_boolean(
+                allow_insecure_http
+                if allow_insecure_http is not None
+                else source.get("INKTIME_ALLOW_INSECURE_HTTP", not production),
+                name="INKTIME_ALLOW_INSECURE_HTTP",
+            ),
+            allow_unsafe_network_database=_boolean(
+                allow_unsafe_network_database
+                if allow_unsafe_network_database is not None
+                else source.get("INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE", False),
+                name="INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE",
+            ),
         )
 
     def diagnostic_summary(self) -> dict[str, object]:

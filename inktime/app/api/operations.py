@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from flask import Blueprint, abort, current_app, g, render_template, request, send_file
+
+from inktime.app.core.json_values import JsonScalarError, json_bool, json_int, json_object_payload
 from inktime.app.core.security import redact
 
 from inktime.app.core.paths import safe_join
@@ -9,6 +11,31 @@ from inktime.app.workers.scanner import SCAN_MODES
 
 
 bp = Blueprint("operations", __name__)
+
+
+def _payload(error_prefix: str = "OPS-001") -> dict:
+    return json_object_payload(request, maximum_bytes=64 * 1024, error_prefix=error_prefix)
+
+
+def _cache_cleanup_parameters(payload: dict) -> tuple[int, int]:
+    return (
+        json_int(
+            payload,
+            "max_bytes",
+            default=5 * 1024 * 1024 * 1024,
+            minimum=1,
+            maximum=10 * 1024 * 1024 * 1024 * 1024,
+            error_prefix="CACHE-001",
+        ),
+        json_int(
+            payload,
+            "retention_days",
+            default=30,
+            minimum=0,
+            maximum=3650,
+            error_prefix="CACHE-001",
+        ),
+    )
 
 
 def _activity_filters():
@@ -23,13 +50,20 @@ def _activity_filters():
 
 
 def _matches_activity(row: dict, filters: dict) -> bool:
-    if filters["severity"] in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"} and row["severity"] != filters["severity"]:
+    if (
+        filters["severity"] in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+        and row["severity"] != filters["severity"]
+    ):
         return False
     for key in ("component", "job_id", "photo_id", "device_id"):
         if filters[key] and str(row.get(key) or "") != filters[key]:
             return False
     needle = filters["query"].casefold()
-    return not needle or needle in " ".join(str(row.get(key) or "") for key in ("message", "event", "error_code")).casefold()
+    return (
+        not needle
+        or needle
+        in " ".join(str(row.get(key) or "") for key in ("message", "event", "error_code")).casefold()
+    )
 
 
 def _timeline_rows(connection, filters: dict, after: int) -> list[dict]:
@@ -38,7 +72,8 @@ def _timeline_rows(connection, filters: dict, after: int) -> list[dict]:
     activity_values = (after,) if after else ()
     rows: list[dict] = []
     for row in connection.execute(
-        f"SELECT id,source,source_id,severity,component,event,message,job_id,photo_id,device_id,stage,progress_done,progress_total,error_code,trace_id,details_json,created_at FROM activity_events {activity_after} ORDER BY id DESC LIMIT 200", activity_values  # noqa: S608
+        f"SELECT id,source,source_id,severity,component,event,message,job_id,photo_id,device_id,stage,progress_done,progress_total,error_code,trace_id,details_json,created_at FROM activity_events {activity_after} ORDER BY id DESC LIMIT 200",  # noqa: S608 -- fixed clause selected from trusted cursor state
+        activity_values,
     ).fetchall():
         item = dict(row)
         item.update(
@@ -51,15 +86,98 @@ def _timeline_rows(connection, filters: dict, after: int) -> list[dict]:
         rows.append(item)
     if after:
         return [redact(item) for item in rows if _matches_activity(item, filters)][:200]
-    for row in connection.execute("SELECT id,job_id,event,message,details_json,created_at FROM job_events ORDER BY id DESC LIMIT 200").fetchall():
-        rows.append({"id": f"job:{row['id']}", "source": "job_events", "source_id": str(row["id"]), "severity": "INFO", "component": "job", "event": row["event"], "message": row["message"], "job_id": row["job_id"], "photo_id": None, "device_id": None, "stage": None, "progress_done": None, "progress_total": None, "error_code": None, "trace_id": None, "details_json": row["details_json"], "created_at": row["created_at"], "occurred_at": row["created_at"]})
-    for row in connection.execute("SELECT id,device_id,level,event,error_code,message,details_json,created_at FROM device_events ORDER BY id DESC LIMIT 200").fetchall():
+    for row in connection.execute(
+        "SELECT id,job_id,event,message,details_json,created_at FROM job_events ORDER BY id DESC LIMIT 200"
+    ).fetchall():
+        rows.append(
+            {
+                "id": f"job:{row['id']}",
+                "source": "job_events",
+                "source_id": str(row["id"]),
+                "severity": "INFO",
+                "component": "job",
+                "event": row["event"],
+                "message": row["message"],
+                "job_id": row["job_id"],
+                "photo_id": None,
+                "device_id": None,
+                "stage": None,
+                "progress_done": None,
+                "progress_total": None,
+                "error_code": None,
+                "trace_id": None,
+                "details_json": row["details_json"],
+                "created_at": row["created_at"],
+                "occurred_at": row["created_at"],
+            }
+        )
+    for row in connection.execute(
+        "SELECT id,device_id,level,event,error_code,message,details_json,created_at FROM device_events ORDER BY id DESC LIMIT 200"
+    ).fetchall():
         level = str(row["level"]).upper()
-        rows.append({"id": f"device:{row['id']}", "source": "device_events", "source_id": str(row["id"]), "severity": {"INFO": "INFO", "WARNING": "WARNING", "ERROR": "ERROR", "CRITICAL": "CRITICAL"}.get(level, "INFO"), "component": "device", "event": row["event"], "message": row["message"], "job_id": None, "photo_id": None, "device_id": row["device_id"], "stage": None, "progress_done": None, "progress_total": None, "error_code": row["error_code"], "trace_id": None, "details_json": row["details_json"], "created_at": row["created_at"], "occurred_at": row["created_at"]})
-    for row in connection.execute("SELECT id,job_id,photo_id,component,error_code,severity,message,occurrences,first_seen_at,last_seen_at,resolved_at,resolution_note FROM job_errors ORDER BY last_seen_at DESC,id DESC LIMIT 200").fetchall():
-        rows.append({"id": f"error:{row['id']}", "source": "job_errors", "source_id": str(row["id"]), "severity": str(row["severity"]).upper(), "component": row["component"], "event": "error_resolved" if row["resolved_at"] else "error", "message": row["message"], "job_id": row["job_id"], "photo_id": row["photo_id"], "device_id": None, "stage": None, "progress_done": None, "progress_total": None, "error_code": row["error_code"], "trace_id": None, "details_json": {"occurrences": row["occurrences"], "first_seen_at": row["first_seen_at"], "resolved_at": row["resolved_at"], "resolution_note": row["resolution_note"]}, "created_at": row["last_seen_at"], "occurred_at": row["last_seen_at"]})
+        rows.append(
+            {
+                "id": f"device:{row['id']}",
+                "source": "device_events",
+                "source_id": str(row["id"]),
+                "severity": {
+                    "INFO": "INFO",
+                    "WARNING": "WARNING",
+                    "ERROR": "ERROR",
+                    "CRITICAL": "CRITICAL",
+                }.get(level, "INFO"),
+                "component": "device",
+                "event": row["event"],
+                "message": row["message"],
+                "job_id": None,
+                "photo_id": None,
+                "device_id": row["device_id"],
+                "stage": None,
+                "progress_done": None,
+                "progress_total": None,
+                "error_code": row["error_code"],
+                "trace_id": None,
+                "details_json": row["details_json"],
+                "created_at": row["created_at"],
+                "occurred_at": row["created_at"],
+            }
+        )
+    for row in connection.execute(
+        "SELECT id,job_id,photo_id,component,error_code,severity,message,occurrences,first_seen_at,last_seen_at,resolved_at,resolution_note FROM job_errors ORDER BY last_seen_at DESC,id DESC LIMIT 200"
+    ).fetchall():
+        rows.append(
+            {
+                "id": f"error:{row['id']}",
+                "source": "job_errors",
+                "source_id": str(row["id"]),
+                "severity": str(row["severity"]).upper(),
+                "component": row["component"],
+                "event": "error_resolved" if row["resolved_at"] else "error",
+                "message": row["message"],
+                "job_id": row["job_id"],
+                "photo_id": row["photo_id"],
+                "device_id": None,
+                "stage": None,
+                "progress_done": None,
+                "progress_total": None,
+                "error_code": row["error_code"],
+                "trace_id": None,
+                "details_json": {
+                    "occurrences": row["occurrences"],
+                    "first_seen_at": row["first_seen_at"],
+                    "resolved_at": row["resolved_at"],
+                    "resolution_note": row["resolution_note"],
+                },
+                "created_at": row["last_seen_at"],
+                "occurred_at": row["last_seen_at"],
+            }
+        )
     unique = {(item["source"], item["source_id"]): item for item in rows}
-    ordered = sorted(unique.values(), key=lambda item: (str(item["occurred_at"]), str(item["source"]), str(item["source_id"])), reverse=True)
+    ordered = sorted(
+        unique.values(),
+        key=lambda item: (str(item["occurred_at"]), str(item["source"]), str(item["source_id"])),
+        reverse=True,
+    )
     return [redact(item) for item in ordered if _matches_activity(item, filters)][:200]
 
 
@@ -79,12 +197,34 @@ def activity_feed():
     filters = _activity_filters()
     with current_app.extensions["inktime_database"].session() as connection:
         events = _timeline_rows(connection, filters, after)
-        summary = connection.execute("SELECT COUNT(*) running_jobs FROM jobs WHERE status IN ('running','retrying','pausing')").fetchone()
-        queue = connection.execute("SELECT COUNT(*) FROM job_items WHERE status IN ('pending','running')").fetchone()[0]
-        issues = connection.execute("SELECT upper(severity) severity,COUNT(*) count FROM job_errors WHERE resolved_at IS NULL GROUP BY upper(severity)").fetchall()
+        summary = connection.execute(
+            "SELECT COUNT(*) running_jobs FROM jobs WHERE status IN ('running','retrying','pausing')"
+        ).fetchone()
+        queue = connection.execute(
+            "SELECT COUNT(*) FROM job_items WHERE status IN ('pending','running')"
+        ).fetchone()[0]
+        issues = connection.execute(
+            "SELECT upper(severity) severity,COUNT(*) count FROM job_errors WHERE resolved_at IS NULL GROUP BY upper(severity)"
+        ).fetchall()
     levels = {row["severity"]: int(row["count"]) for row in issues}
-    status = "嚴重故障" if levels.get("CRITICAL") else "部分失敗" if levels.get("ERROR") else "有警告" if levels.get("WARNING") else "正常"
-    return {"events": events, "summary": {"status": status, "running_jobs": int(summary["running_jobs"]), "queue": int(queue), "issues": levels}}
+    status = (
+        "嚴重故障"
+        if levels.get("CRITICAL")
+        else "部分失敗"
+        if levels.get("ERROR")
+        else "有警告"
+        if levels.get("WARNING")
+        else "正常"
+    )
+    return {
+        "events": events,
+        "summary": {
+            "status": status,
+            "running_jobs": int(summary["running_jobs"]),
+            "queue": int(queue),
+            "issues": levels,
+        },
+    }
 
 
 @bp.get("/api/v1/activity/download")
@@ -135,7 +275,7 @@ def errors_page():
 def resolve_error(error_id: int):
     from datetime import datetime, timezone
 
-    payload = request.get_json(silent=True) or {}
+    payload = _payload()
     with current_app.extensions["inktime_database"].session() as connection:
         cursor = connection.execute(
             "UPDATE job_errors SET resolved_at=?,resolution_note=? WHERE id=?",
@@ -201,7 +341,7 @@ def list_schedules():
 @bp.patch("/api/v1/schedules/<key>")
 @administrator_required
 def update_schedule(key: str):
-    payload = request.get_json(silent=True) or {}
+    payload = _payload("SCHEDULE-002")
     try:
         task = current_app.extensions["inktime_schedule_repository"].update(
             key, payload, str(current_app.extensions["inktime_settings_repository"].get("general.timezone"))
@@ -248,37 +388,50 @@ def _active_thumbnail_hashes() -> set[str]:
 @bp.post("/api/v1/maintenance/cache/estimate")
 @administrator_required
 def estimate_cache_cleanup():
-    payload = request.get_json(silent=True) or {}
+    payload = _payload("CACHE-001")
     cache = current_app.extensions["inktime_thumbnail_cache"]
+    try:
+        max_bytes, retention_days = _cache_cleanup_parameters(payload)
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
     return cache.estimate_cleanup(
-        max_bytes=int(payload.get("max_bytes", 5 * 1024 * 1024 * 1024)),
-        retention_days=int(payload.get("retention_days", 30)),
-        active_hashes=_active_thumbnail_hashes(),
+        max_bytes=max_bytes, retention_days=retention_days, active_hashes=_active_thumbnail_hashes()
     )
 
 
 @bp.post("/api/v1/maintenance/cache/cleanup")
 @administrator_required
 def cleanup_cache():
-    payload = request.get_json(silent=True) or {}
+    payload = _payload("CACHE-001")
     cache = current_app.extensions["inktime_thumbnail_cache"]
+    try:
+        max_bytes, retention_days = _cache_cleanup_parameters(payload)
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
     return cache.cleanup(
-        max_bytes=int(payload.get("max_bytes", 5 * 1024 * 1024 * 1024)),
-        retention_days=int(payload.get("retention_days", 30)),
-        active_hashes=_active_thumbnail_hashes(),
+        max_bytes=max_bytes, retention_days=retention_days, active_hashes=_active_thumbnail_hashes()
     )
 
 
 @bp.post("/api/v1/maintenance/scan")
 @administrator_required
 def enqueue_scan():
-    payload = request.get_json(silent=True) or {}
+    payload = _payload("SCAN-003")
     root_path = str(payload.get("root_path", "")).strip()
     if not root_path:
         abort(400, description="SCAN-001 請輸入照片資料夾路徑")
     mode = str(payload.get("mode", "incremental"))
     if mode not in SCAN_MODES:
         abort(400, description="SCAN-003 不支援的掃描模式")
+    try:
+        build_thumbnails = json_bool(
+            payload,
+            "build_thumbnails",
+            default=True,
+            error_prefix="SCAN-003",
+        )
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
     repository = current_app.extensions["inktime_job_repository"]
     job_id = repository.create_maintenance(
         kind="scan",
@@ -286,7 +439,7 @@ def enqueue_scan():
         settings={
             "root_path": root_path,
             "library_name": str(payload.get("library_name", "主要照片庫")),
-            "build_thumbnails": bool(payload.get("build_thumbnails", True)),
+            "build_thumbnails": build_thumbnails,
             "mode": mode,
             "trigger_source": "api",
         },

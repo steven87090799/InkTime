@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from inktime.app.core.json_values import json_bool
 from inktime.app.core.security import mask_secret
 from inktime.app.db import Database
 from inktime.app.repositories.settings import SecretStore
@@ -60,11 +61,11 @@ class ProviderRepository:
                     str(payload.get("kind", "openai_compatible")),
                     str(payload.get("base_url", "")),
                     secret_key if api_key else None,
-                    int(bool(payload.get("enabled", True))),
+                    int(json_bool(payload, "enabled", default=True)),
                     int(payload.get("priority", 100)),
                     1,
-                    int(bool(payload.get("supports_batch", False))),
-                    int(bool(payload.get("supports_json_schema", True))),
+                    int(json_bool(payload, "supports_batch", default=False)),
+                    int(json_bool(payload, "supports_json_schema", default=True)),
                     payload.get("rate_limit_rpm"),
                     payload.get("token_limit_tpm"),
                     int(payload.get("max_concurrency", 2)),

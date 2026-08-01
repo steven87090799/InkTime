@@ -4,6 +4,14 @@ import json
 
 from flask import Blueprint, Response, abort, current_app, g, render_template, request, stream_with_context
 
+from inktime.app.core.json_values import (
+    JsonScalarError,
+    json_bool,
+    json_int,
+    json_object_payload,
+    nullable_json_float,
+    optional_json_int,
+)
 from inktime.app.domain.analysis.plan import canonical_json, fingerprint
 from inktime.app.domain.analysis.execution_mode import execution_mode, permits_automatic_ai
 from inktime.app.services.jobs import InvalidJobTransition, JobService
@@ -21,6 +29,10 @@ def _repository():
     return current_app.extensions["inktime_job_repository"]
 
 
+def _payload() -> dict:
+    return json_object_payload(request, maximum_bytes=256 * 1024, error_prefix="JOB-001")
+
+
 def _analysis_plan(strategy: str) -> tuple[dict, str]:
     analysis = current_app.extensions["inktime_analysis_service"]
     settings = current_app.extensions["inktime_settings_repository"]
@@ -29,7 +41,8 @@ def _analysis_plan(strategy: str) -> tuple[dict, str]:
         strategy=strategy,
         provider_route=(
             current_app.extensions["inktime_provider_service"].route_snapshot()
-            if permits_automatic_ai(execution_mode(settings)) else []
+            if permits_automatic_ai(execution_mode(settings))
+            else []
         ),
         scoring_profile=scoring,
     )
@@ -75,10 +88,34 @@ def job_detail(job_id: str):
 @bp.post("/api/v1/jobs")
 @administrator_required
 def create_job():
-    payload = request.get_json(silent=True) or {}
-    budget = payload.get("budget_limit")
-    limit = payload.get("limit")
-    settings = dict(payload.get("settings") or {})
+    payload = _payload()
+    raw_settings = payload.get("settings", {})
+    if type(raw_settings) is not dict:
+        return {"message": "JOB-001 settings 必須是 JSON 物件"}, 400
+    settings = dict(raw_settings)
+    try:
+        budget = nullable_json_float(
+            payload,
+            "budget_limit",
+            minimum=0,
+            maximum=1_000_000,
+            error_prefix="JOB-001",
+        )
+        limit = optional_json_int(
+            payload,
+            "limit",
+            minimum=1,
+            maximum=100_000,
+            error_prefix="JOB-001",
+        )
+        force_recompute = json_bool(
+            payload,
+            "force_recompute",
+            default=str(payload.get("selection_mode", "pending")) == "force_all",
+            error_prefix="JOB-001",
+        )
+    except JsonScalarError as exc:
+        return {"message": str(exc)}, 400
     selection_mode = str(payload.get("selection_mode", "pending"))
     if selection_mode not in {"pending", "stale_only", "force_all"}:
         return {"message": "不支援的選片模式"}, 400
@@ -98,12 +135,12 @@ def create_job():
             strategy=strategy,
             settings=settings,
             created_by=g.user["id"],
-            budget_limit=float(budget) if budget not in (None, "") else None,
-            limit=max(1, min(int(limit), 100_000)) if limit not in (None, "") else None,
+            budget_limit=budget,
+            limit=limit,
             photo_ids=payload.get("photo_ids"),
             selection_mode=selection_mode,
             analysis_fingerprint=analysis_fingerprint,
-            force_recompute=bool(payload.get("force_recompute", selection_mode == "force_all")),
+            force_recompute=force_recompute,
             analysis_spec=plan,
         )
     except ValueError as exc:
@@ -114,11 +151,20 @@ def create_job():
 @bp.post("/api/v1/jobs/selection-preview")
 @administrator_required
 def selection_preview():
-    payload = request.get_json(silent=True) or {}
+    payload = _payload()
     mode = str(payload.get("selection_mode", "pending"))
     if mode not in {"pending", "stale_only", "force_all"}:
         return {"message": "不支援的選片模式"}, 400
-    limit = payload.get("limit")
+    try:
+        limit = optional_json_int(
+            payload,
+            "limit",
+            minimum=1,
+            maximum=100_000,
+            error_prefix="JOB-001",
+        )
+    except JsonScalarError as exc:
+        return {"message": str(exc)}, 400
     strategy = str(payload.get("strategy", "smart_two_stage"))
     if execution_mode(current_app.extensions["inktime_settings_repository"]) == "disabled":
         return {
@@ -129,7 +175,7 @@ def selection_preview():
     preview = _repository().selection_preview(
         analysis_fingerprint=fingerprint(_plan),
         selection_mode=mode,
-        limit=max(1, min(int(limit), 100_000)) if limit not in (None, "") else None,
+        limit=limit,
     )
     estimate = _service().estimate(int(preview["limited_to"]), strategy)
     return {
@@ -190,11 +236,19 @@ def job_status(job_id: str):
 @bp.post("/api/v1/jobs/estimate")
 @administrator_required
 def estimate_job():
-    payload = request.get_json(silent=True) or {}
-    return _service().estimate(
-        max(0, int(payload.get("photo_count", 0))),
-        str(payload.get("strategy", "smart_two_stage")),
-    )
+    payload = _payload()
+    try:
+        photo_count = json_int(
+            payload,
+            "photo_count",
+            default=0,
+            minimum=0,
+            maximum=1_000_000,
+            error_prefix="JOB-001",
+        )
+    except JsonScalarError as exc:
+        return {"message": str(exc)}, 400
+    return _service().estimate(photo_count, str(payload.get("strategy", "smart_two_stage")))
 
 
 @bp.get("/api/v1/jobs/<job_id>/export")

@@ -10,6 +10,12 @@ from urllib.parse import urlparse
 
 from flask import Blueprint, abort, current_app, g, make_response, render_template, request
 
+from inktime.app.core.json_values import (
+    JsonScalarError,
+    json_int,
+    json_object_payload,
+    nullable_json_int,
+)
 from inktime.app.core.logging import configure_logging
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
 from inktime.app.repositories.settings import (
@@ -22,6 +28,10 @@ from inktime.app.web.access import administrator_required, login_required
 from inktime.app.domain.rendering.system_presets import SYSTEM_PRESETS
 
 bp = Blueprint("settings", __name__)
+
+
+def _payload(error_prefix: str = "SET-002", *, maximum_bytes: int = 256 * 1024) -> dict:
+    return json_object_payload(request, maximum_bytes=maximum_bytes, error_prefix=error_prefix)
 
 
 @bp.get("/api/v1/settings/presets")
@@ -64,7 +74,7 @@ def apply_preset(key: str):
     if preset is None:
         return {"error_code": "PRESET-001", "message": "找不到 Preset"}, 404
     preset_settings = cast(dict[str, Any], preset["settings"])
-    payload = request.get_json(silent=True) or {}
+    payload = _payload("PRESET-002")
     selected = payload.get("update_existing_device_ids", [])
     if not isinstance(selected, list) or any(not isinstance(item, str) for item in selected):
         abort(400, description="PRESET-002 update_existing_device_ids 必須是裝置 ID 陣列")
@@ -146,9 +156,7 @@ def settings_page():
 @bp.post("/api/v1/settings")
 @administrator_required
 def update_settings():
-    payload = request.get_json(silent=True) or {}
-    if not isinstance(payload, dict):
-        abort(400, description="SET-002 設定更新必須是 JSON 物件")
+    payload = _payload()
     repository = current_app.extensions["inktime_settings_repository"]
     try:
         changed, current, _merged = repository.prepare_updates(payload, reject_control_center=True)
@@ -297,7 +305,7 @@ def _confirmation_reasons(
 @bp.post("/api/v1/settings/preview")
 @login_required
 def preview_settings():
-    payload = request.get_json(silent=True) or {}
+    payload = _payload()
     repository = current_app.extensions["inktime_settings_repository"]
     try:
         changed, _current, _merged = repository.prepare_updates(payload, reject_control_center=True)
@@ -373,7 +381,7 @@ def rollback_preview(snapshot_id: str):
 @bp.post("/api/v1/settings/snapshots/<snapshot_id>/rollback")
 @administrator_required
 def rollback_settings(snapshot_id: str):
-    payload = request.get_json(silent=True) or {}
+    payload = _payload("SET-005")
     if payload.get("confirm") is not True:
         abort(400, description="SET-005 Rollback 需要明確確認")
     try:
@@ -503,7 +511,7 @@ def _import_preview(document: object) -> dict[str, object]:
 @administrator_required
 def import_preview():
     try:
-        return _import_preview(request.get_json(silent=True))
+        return _import_preview(_payload("SET-006", maximum_bytes=1024 * 1024))
     except (KeyError, PermissionError, TypeError, ValueError) as exc:
         abort(400, description=f"SET-006 {exc}")
 
@@ -511,7 +519,7 @@ def import_preview():
 @bp.post("/api/v1/settings/import")
 @administrator_required
 def import_settings():
-    payload = request.get_json(silent=True) or {}
+    payload = _payload("SET-006", maximum_bytes=1024 * 1024)
     if payload.get("confirm") is not True:
         abort(400, description="SET-006 匯入需要明確確認")
     try:
@@ -539,28 +547,37 @@ def providers_page():
 @bp.post("/api/v1/providers")
 @administrator_required
 def save_provider():
-    payload = request.get_json(silent=True) or {}
+    payload = _payload("SET-003")
     if not payload.get("base_url") or not payload.get("name"):
         abort(400, description="SET-003 Provider 名稱與 URL 不可空白")
     parsed = urlparse(str(payload["base_url"]))
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         abort(400, description="SET-003 Provider URL 必須是完整的 http:// 或 https:// 位址")
     try:
-        bounded = {
-            "priority": (int(payload.get("priority", 100)), 1, 10000),
-            "max_concurrency": (int(payload.get("max_concurrency", 2)), 1, 32),
-            "timeout_seconds": (int(payload.get("timeout_seconds", 120)), 5, 600),
-            "cooldown_seconds": (int(payload.get("cooldown_seconds", 300)), 1, 86400),
-        }
-        for field, (value, minimum, maximum) in bounded.items():
-            if not minimum <= value <= maximum:
-                abort(400, description=f"SET-003 {field} 超出 {minimum}–{maximum}")
-            payload[field] = value
+        for field, default, minimum, maximum in (
+            ("priority", 100, 1, 10_000),
+            ("max_concurrency", 2, 1, 32),
+            ("timeout_seconds", 120, 5, 600),
+            ("cooldown_seconds", 300, 1, 86_400),
+        ):
+            payload[field] = json_int(
+                payload,
+                field,
+                default=default,
+                minimum=minimum,
+                maximum=maximum,
+                error_prefix="SET-003",
+            )
         for field in ("rate_limit_rpm", "token_limit_tpm"):
-            value = payload.get(field)
-            payload[field] = None if value in {None, ""} else max(1, int(value))
-    except (TypeError, ValueError):
-        abort(400, description="SET-003 Provider 數值欄位格式錯誤")
+            payload[field] = nullable_json_int(
+                payload,
+                field,
+                minimum=1,
+                maximum=2_147_483_647,
+                error_prefix="SET-003",
+            )
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
     provider_id = current_app.extensions["inktime_provider_repository"].save(payload, g.user["id"])
     return {"id": provider_id}, 201
 

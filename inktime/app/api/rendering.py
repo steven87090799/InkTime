@@ -11,6 +11,7 @@ import tempfile
 from flask import Blueprint, abort, current_app, g, jsonify, render_template, request, send_file
 from PIL import Image, ImageDraw, ImageFont
 
+from inktime.app.core.json_values import json_object_payload
 from inktime.app.web.access import administrator_required, login_required
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.domain.rendering import (
@@ -41,6 +42,10 @@ UPLOAD_CHUNK_BYTES = 1024 * 1024
 VIRTUAL_DISPLAY_POLL_SECONDS = 5
 PREVIEW_USER_JOB_LIMIT = 2
 PREVIEW_SYSTEM_JOB_LIMIT = 8
+
+
+def _payload() -> dict:
+    return json_object_payload(request, maximum_bytes=256 * 1024, error_prefix="RENDER-001")
 
 
 @bp.get("/rendering")
@@ -286,9 +291,7 @@ def virtual_display_manifest():
     profile_key = _virtual_display_profile()
     manifest = _latest_virtual_manifest(profile_key)
     release_id = str(manifest["release_id"])
-    manifest["download_base_url"] = (
-        f"/api/v1/virtual-display/releases/{release_id}/files/"
-    )
+    manifest["download_base_url"] = f"/api/v1/virtual-display/releases/{release_id}/files/"
     manifest["receiver"] = {
         "mode": "read_only",
         "server_time": datetime.now(timezone.utc).isoformat(),
@@ -327,9 +330,10 @@ def virtual_display_file(release_id: str, filename: str):
         abort(404, description="發布 Manifest 未列出此檔案")
     payload = payload_path.read_bytes()
     actual_sha256 = sha256(payload).hexdigest()
-    if len(payload) != int(file_entry.get("size", -1)) or actual_sha256 != str(
-        file_entry.get("sha256", "")
-    ).lower():
+    if (
+        len(payload) != int(file_entry.get("size", -1))
+        or actual_sha256 != str(file_entry.get("sha256", "")).lower()
+    ):
         abort(409, description="DEVICE-002 電子紙 Payload 大小或 SHA-256 驗證失敗")
     response = send_file(payload_path, mimetype="application/octet-stream", max_age=0)
     response.headers["Cache-Control"] = "no-store"
@@ -432,7 +436,7 @@ def _persist_custom_preset(payload: dict) -> dict:
 @bp.post("/api/v1/rendering/presets")
 @administrator_required
 def save_photo_preset():
-    payload = request.get_json(silent=True) or {}
+    payload = _payload()
     try:
         preset = _persist_custom_preset(payload)
     except (KeyError, TypeError, ValueError) as exc:
@@ -487,7 +491,7 @@ def publish_test_release():
 @administrator_required
 def dual_pair_compare_preview():
     """Freeze one pair/caption/dither contract for the four formal previews."""
-    payload = request.get_json(silent=True) or {}
+    payload = _payload()
     primary = str(payload.get("primary_photo_id", "")).strip()
     secondary = str(payload.get("secondary_photo_id", "")).strip()
     profile = str(payload.get("profile", "gdep073e01_6c"))
@@ -499,16 +503,29 @@ def dual_pair_compare_preview():
     service = current_app.extensions["inktime_render_service"]
     try:
         seed = service.resolve_render_plan(
-            primary, layout="photo_pair_caption", secondary_photo_id=secondary,
-            orientation="portrait", fit_mode=fit_mode, profile=profile,
+            primary,
+            layout="photo_pair_caption",
+            secondary_photo_id=secondary,
+            orientation="portrait",
+            fit_mode=fit_mode,
+            profile=profile,
         )
         plans = [
-            service.resolve_render_plan(primary, layout=layout, secondary_photo_id=secondary,
-                                        orientation=orientation, fit_mode=fit_mode, profile=profile,
-                                        primary_caption=seed["primary_caption"], secondary_caption=seed["secondary_caption"])
+            service.resolve_render_plan(
+                primary,
+                layout=layout,
+                secondary_photo_id=secondary,
+                orientation=orientation,
+                fit_mode=fit_mode,
+                profile=profile,
+                primary_caption=seed["primary_caption"],
+                secondary_caption=seed["secondary_caption"],
+            )
             for layout, orientation in (
-                ("photo_pair", "portrait"), ("photo_pair", "landscape"),
-                ("photo_pair_caption", "portrait"), ("photo_pair_caption", "landscape"),
+                ("photo_pair", "portrait"),
+                ("photo_pair", "landscape"),
+                ("photo_pair_caption", "portrait"),
+                ("photo_pair_caption", "landscape"),
             )
         ]
     except (KeyError, ValueError) as exc:
@@ -519,9 +536,12 @@ def dual_pair_compare_preview():
     settings = current_app.extensions["inktime_settings_repository"]
     return _start_preview_job(
         "雙照片四種正式 Preview",
-        {"operation": "dual_pair_compare", "plans": plans,
-         "color_distance": str(settings.get("render.color_distance", "oklab")),
-         "dither_strength": float(settings.get("render.dither_strength", 1.0))},
+        {
+            "operation": "dual_pair_compare",
+            "plans": plans,
+            "color_distance": str(settings.get("render.color_distance", "oklab")),
+            "dither_strength": float(settings.get("render.dither_strength", 1.0)),
+        },
     )
 
 
@@ -605,26 +625,18 @@ def preview(photo_id: str):
             {"operation": "library_preview", "arguments": arguments, "fingerprint": fingerprint},
         )
     layout_key = layout or str(settings.get("render.layout", "photo_info"))
-    orientation_key = orientation or str(
-        settings.get("render.frame_orientation", "portrait")
-    )
-    effective_orientation = (
-        "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
-    )
+    orientation_key = orientation or str(settings.get("render.frame_orientation", "portrait"))
+    effective_orientation = "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
     response = send_file(cached, mimetype="image/png", max_age=0)
     response.headers["Cache-Control"] = "no-store"
-    response.headers["X-InkTime-Layout"] = layout or str(
-        settings.get("render.layout", "photo_info")
-    )
+    response.headers["X-InkTime-Layout"] = layout or str(settings.get("render.layout", "photo_info"))
     response.headers["X-InkTime-Orientation"] = effective_orientation
     response.headers["X-InkTime-Renderer-Cache"] = "hit"
     if quantized:
         response.headers["X-InkTime-Requested-Dither"] = str(
             fingerprint["render_plan"]["requested_dither"] or ""
         )
-        response.headers["X-InkTime-Effective-Dither"] = str(
-            fingerprint["render_plan"]["effective_dither"]
-        )
+        response.headers["X-InkTime-Effective-Dither"] = str(fingerprint["render_plan"]["effective_dither"])
         response.headers["X-InkTime-Dither-Override-Source"] = str(
             fingerprint["render_plan"]["override_source"]
         )
@@ -642,9 +654,7 @@ def background_render_result(token: str, name: str):
     ):
         abort(404)
     try:
-        path = current_app.extensions["inktime_render_workload_service"].result_path(
-            token, name
-        )
+        path = current_app.extensions["inktime_render_workload_service"].result_path(token, name)
     except ValueError:
         abort(404)
     if not path.is_file():
@@ -657,7 +667,7 @@ def background_render_result(token: str, name: str):
 @bp.post("/api/v1/releases")
 @administrator_required
 def publish_release():
-    payload = request.get_json(silent=True) or {}
+    payload = _payload()
     repository = current_app.extensions["inktime_job_repository"]
     profile_keys = [str(value) for value in payload.get("profile_keys", [])]
     if profile_keys and any(value not in DISPLAY_PROFILES for value in profile_keys):
@@ -720,9 +730,7 @@ def _history_response(selection: dict) -> dict:
 @administrator_required
 def select_history_day():
     try:
-        selection = current_app.extensions["inktime_render_service"].select_random_history_day(
-            request.get_json(silent=True) or {}
-        )
+        selection = current_app.extensions["inktime_render_service"].select_random_history_day(_payload())
     except ValueError as exc:
         abort(400, description=str(exc))
     return _history_response(selection)
@@ -732,9 +740,7 @@ def select_history_day():
 @administrator_required
 def reroll_history_day():
     try:
-        selection = current_app.extensions["inktime_render_service"].reroll_history_day(
-            request.get_json(silent=True) or {}
-        )
+        selection = current_app.extensions["inktime_render_service"].reroll_history_day(_payload())
     except ValueError as exc:
         abort(400, description=str(exc))
     return _history_response(selection)
@@ -743,7 +749,7 @@ def reroll_history_day():
 @bp.post("/api/v1/rendering/history/test-release")
 @administrator_required
 def publish_history_test_release():
-    payload = request.get_json(silent=True) or {}
+    payload = _payload()
     photo_id = str(payload.get("photo_id", "")).strip()
     device_id = str(payload.get("device_id", "")).strip()
     device = current_app.extensions["inktime_device_repository"].get(device_id)
@@ -764,9 +770,7 @@ def publish_history_test_release():
         abort(404, description="HISTORY-001 照片路徑不合法")
     workload = current_app.extensions["inktime_render_workload_service"]
     try:
-        token, photo_sha, suffix = workload.save_file(
-            source, max_bytes=MAX_SIMULATOR_PHOTO_BYTES
-        )
+        token, photo_sha, suffix = workload.save_file(source, max_bytes=MAX_SIMULATOR_PHOTO_BYTES)
     except ValueError as exc:
         abort(413, description=str(exc))
     job_settings = {
@@ -789,12 +793,8 @@ def publish_history_test_release():
             "preset": "photo_balanced",
             "overrides": {
                 "dither": str(settings.get("render.dither", "floyd_steinberg")),
-                "color_distance": str(
-                    settings.get("render.color_distance", "oklab")
-                ),
-                "error_strength": float(
-                    settings.get("render.dither_strength", 1.0)
-                ),
+                "color_distance": str(settings.get("render.color_distance", "oklab")),
+                "error_strength": float(settings.get("render.dither_strength", 1.0)),
             },
             "palette": {"mode": "default"},
             "palette_rgb": None,
@@ -870,7 +870,7 @@ def _set_current_font(reference: str) -> None:
 @bp.post("/api/v1/fonts/select")
 @administrator_required
 def select_font():
-    payload = request.get_json(silent=True) or {}
+    payload = _payload()
     reference = str(payload.get("reference", "")).strip()
     manager = current_app.extensions["inktime_font_manager"]
     try:

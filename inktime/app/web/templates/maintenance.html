@@ -37,7 +37,7 @@
 </section>
 {% endblock %}
 {% block scripts %}
-<script>
+<script nonce="{{ csp_nonce }}">
 document.getElementById('scan-form').onsubmit=async event=>{event.preventDefault();const form=new FormData(event.target);const body={library_name:form.get('library_name'),root_path:form.get('root_path'),mode:form.get('mode'),build_thumbnails:form.has('build_thumbnails')};const response=await window.inktimeFetch('/api/v1/maintenance/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),data=await response.json();if(response.ok)location.href=data.detail_url;else alert(data.message||'建立失敗');};
 const virtualButton=document.getElementById('publish-virtual');
 if(virtualButton)virtualButton.onclick=async()=>{const status=document.getElementById('virtual-status');virtualButton.disabled=true;status.textContent='正在建立掃描與發布工作…';const response=await window.inktimeFetch('/api/v1/maintenance/virtual-display',{method:'POST'}),data=await response.json();if(response.ok){status.innerHTML=`工作已建立。<a href="${data.detail_url}">查看進度</a>；完成後虛擬墨水屏會自動收到畫面。`;}else{virtualButton.disabled=false;status.textContent=data.message||'建立失敗';}};

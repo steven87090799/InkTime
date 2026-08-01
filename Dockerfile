@@ -1,3 +1,13 @@
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+FROM python:3.12-slim AS builder
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /build
+COPY requirements.txt ./
+RUN python -m pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt
+
 FROM python:3.12-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -19,8 +29,14 @@ RUN groupadd --gid 10001 inktime \
 
 WORKDIR /app
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
-COPY --chown=inktime:inktime . .
+RUN --mount=type=bind,from=builder,source=/wheels,target=/wheels \
+    python -m pip install --no-cache-dir --no-compile --no-index --find-links=/wheels -r requirements.txt \
+    && python -m pip uninstall --yes pip setuptools \
+    && rm -f requirements.txt
+COPY --chown=inktime:inktime inktime/ ./inktime/
+COPY --chown=inktime:inktime data/world_cities_zh.csv ./data/world_cities_zh.csv
+COPY --chown=inktime:inktime scripts/container_health.py scripts/migrate.py scripts/restore_backup.py ./scripts/
+COPY --chown=inktime:inktime server.py gunicorn.conf.py ./
 RUN mkdir -p /data /photos && chown -R inktime:inktime /data /app
 
 ARG INKTIME_GIT_REVISION=unknown

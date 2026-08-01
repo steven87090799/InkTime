@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import sqlite3
 from uuid import uuid4
 
 from inktime.app.core.security import hash_password, verify_password
 from inktime.app.db import Database
+from inktime.app.domain.auth import (
+    AuthValidationError,
+    LastAdministratorRequired,
+    SetupAlreadyCompleted,
+    normalize_username,
+    validate_role,
+    validate_username,
+)
 
 
 class AuthRepository:
@@ -15,38 +24,112 @@ class AuthRepository:
         with self.database.session() as connection:
             return int(connection.execute("SELECT COUNT(*) FROM users").fetchone()[0])
 
-    def create_user(self, username: str, password: str, role: str = "administrator") -> str:
-        if role not in {"administrator", "viewer"}:
-            raise ValueError("不支援的角色")
-        now = datetime.now(timezone.utc).isoformat()
+    @staticmethod
+    def _insert_user(
+        connection: sqlite3.Connection,
+        *,
+        username: str,
+        normalized_username: str,
+        password_hash: str,
+        role: str,
+        now: str,
+    ) -> str:
         user_id = str(uuid4())
-        with self.database.session() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                connection.execute(
-                    """
-                    INSERT INTO users(id, username, password_hash, role, password_changed_at, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (user_id, username.strip(), hash_password(password), role, now, now),
-                )
-                connection.execute("COMMIT")
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
+        connection.execute(
+            """
+            INSERT INTO users(
+                id,username,normalized_username,password_hash,role,
+                session_version,password_changed_at,created_at
+            )
+            VALUES (?,?,?,?,?,1,?,?)
+            """,
+            (user_id, username, normalized_username, password_hash, role, now, now),
+        )
         return user_id
+
+    def create_user(self, username: object, password: object, role: object = "administrator") -> str:
+        display, normalized = validate_username(username)
+        resolved_role = validate_role(role)
+        password_hash = hash_password(password)  # type: ignore[arg-type]
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with self.database.transaction(operation="auth.create_user") as connection:
+                return self._insert_user(
+                    connection,
+                    username=display,
+                    normalized_username=normalized,
+                    password_hash=password_hash,
+                    role=resolved_role,
+                    now=now,
+                )
+        except sqlite3.IntegrityError as exc:
+            raise AuthValidationError(
+                "這個帳號已經存在。",
+                code="username_taken",
+                http_status=409,
+            ) from exc
+
+    def create_initial_administrator(self, username: object, password: object) -> str:
+        display, normalized = validate_username(username)
+        password_hash = hash_password(password)  # type: ignore[arg-type]
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with self.database.transaction(
+                immediate=True,
+                operation="auth.create_initial_administrator",
+            ) as connection:
+                if int(connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]) != 0:
+                    raise SetupAlreadyCompleted()
+                return self._insert_user(
+                    connection,
+                    username=display,
+                    normalized_username=normalized,
+                    password_hash=password_hash,
+                    role="administrator",
+                    now=now,
+                )
+        except sqlite3.IntegrityError as exc:
+            raise AuthValidationError(
+                "這個帳號已經存在。",
+                code="username_taken",
+                http_status=409,
+            ) from exc
 
     def find_by_id(self, user_id: str):
         with self.database.session() as connection:
             return connection.execute(
-                "SELECT id, username, role, enabled, password_hash FROM users WHERE id=?",
+                """
+                SELECT id,username,role,enabled,password_hash,session_version
+                FROM users WHERE id=?
+                """,
                 (user_id,),
             ).fetchone()
 
-    def authenticate(self, username: str, password: str):
+    def find_session_user(self, user_id: str, session_version: object):
+        if type(session_version) is not int:
+            return None
+        with self.database.session() as connection:
+            return connection.execute(
+                """
+                SELECT id,username,role,enabled,password_hash,session_version
+                FROM users
+                WHERE id=? AND enabled=1 AND session_version=?
+                """,
+                (user_id, session_version),
+            ).fetchone()
+
+    def authenticate(self, username: object, password: object):
+        if not isinstance(username, str) or not isinstance(password, str):
+            return None
+        normalized = normalize_username(username)
         with self.database.session() as connection:
             row = connection.execute(
-                "SELECT * FROM users WHERE username=? COLLATE NOCASE", (username.strip(),)
+                """
+                SELECT * FROM users
+                WHERE normalized_username=?
+                   OR username=? COLLATE NOCASE
+                """,
+                (normalized, username.strip()),
             ).fetchone()
         if row is None or not row["enabled"] or not verify_password(row["password_hash"], password):
             return None
@@ -83,13 +166,116 @@ class AuthRepository:
                     (now, user_id),
                 )
 
-    def change_password(self, user_id: str, current: str, new_password: str) -> None:
-        row = self.find_by_id(user_id)
-        if row is None or not verify_password(row["password_hash"], current):
-            raise ValueError("目前密碼不正確")
+    def change_password(self, user_id: str, current: object, new_password: object) -> None:
+        if not isinstance(current, str):
+            raise AuthValidationError("目前密碼不正確。", code="current_password_invalid")
+        password_hash = hash_password(new_password)  # type: ignore[arg-type]
         now = datetime.now(timezone.utc).isoformat()
-        with self.database.session() as connection:
+        with self.database.transaction(operation="auth.change_password") as connection:
+            row = connection.execute(
+                "SELECT password_hash FROM users WHERE id=? AND enabled=1",
+                (user_id,),
+            ).fetchone()
+            if row is None or not verify_password(row["password_hash"], current):
+                raise AuthValidationError(
+                    "目前密碼不正確。",
+                    code="current_password_invalid",
+                )
             connection.execute(
-                "UPDATE users SET password_hash=?, password_changed_at=? WHERE id=?",
-                (hash_password(new_password), now, user_id),
+                """
+                UPDATE users
+                SET password_hash=?,password_changed_at=?,session_version=session_version+1
+                WHERE id=?
+                """,
+                (password_hash, now, user_id),
             )
+
+    def update_user_security_state(
+        self,
+        *,
+        user_id: str,
+        enabled: bool | None = None,
+        role: str | None = None,
+    ):
+        if enabled is None and role is None:
+            raise AuthValidationError(
+                "至少需要一個可更新欄位。",
+                code="user_update_invalid",
+            )
+        if enabled is not None and type(enabled) is not bool:
+            raise AuthValidationError(
+                "enabled 必須是 Boolean。",
+                code="enabled_invalid_type",
+            )
+        resolved_role = validate_role(role) if role is not None else None
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.transaction(
+            immediate=True,
+            operation="auth.update_user_security_state",
+        ) as connection:
+            current = connection.execute(
+                """
+                SELECT id,username,role,enabled,password_hash,session_version,disabled_at
+                FROM users WHERE id=?
+                """,
+                (user_id,),
+            ).fetchone()
+            if current is None:
+                raise AuthValidationError("找不到使用者。", code="user_not_found", http_status=404)
+
+            final_enabled = bool(current["enabled"]) if enabled is None else enabled
+            final_role = str(current["role"]) if resolved_role is None else resolved_role
+            other_administrators = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM users
+                    WHERE id<>? AND enabled=1 AND role='administrator'
+                    """,
+                    (user_id,),
+                ).fetchone()[0]
+            )
+            if other_administrators + int(final_enabled and final_role == "administrator") == 0:
+                raise LastAdministratorRequired()
+
+            enabled_changed = enabled is not None and final_enabled != bool(current["enabled"])
+            role_changed = resolved_role is not None and final_role != str(current["role"])
+            if enabled_changed or role_changed:
+                disabled_at = None if final_enabled else now if enabled_changed else current["disabled_at"]
+                connection.execute(
+                    """
+                    UPDATE users
+                    SET enabled=?,role=?,disabled_at=?,
+                        session_version=session_version+1
+                    WHERE id=?
+                    """,
+                    (int(final_enabled), final_role, disabled_at, user_id),
+                )
+            return connection.execute(
+                """
+                SELECT id,username,role,enabled,password_hash,session_version
+                FROM users WHERE id=?
+                """,
+                (user_id,),
+            ).fetchone()
+
+    def set_enabled(self, user_id: str, enabled: bool) -> None:
+        self.update_user_security_state(user_id=user_id, enabled=enabled)
+
+    def set_role(self, user_id: str, role: object) -> None:
+        resolved_role = validate_role(role)
+        self.update_user_security_state(user_id=user_id, role=resolved_role)
+
+    def reset_password(self, user_id: str, new_password: object) -> None:
+        password_hash = hash_password(new_password)  # type: ignore[arg-type]
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.transaction(operation="auth.reset_password") as connection:
+            cursor = connection.execute(
+                """
+                UPDATE users
+                SET password_hash=?,password_changed_at=?,session_version=session_version+1
+                WHERE id=?
+                """,
+                (password_hash, now, user_id),
+            )
+            if cursor.rowcount != 1:
+                raise AuthValidationError("找不到使用者。", code="user_not_found", http_status=404)

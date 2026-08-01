@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from hashlib import sha256
-import json
+from flask import Blueprint, abort, current_app, g, render_template, request
 
-from flask import Blueprint, abort, current_app, g, render_template, request, send_file
-
-from inktime.app.core.paths import UnsafePathError, safe_join
+from inktime.app.api.device_auth import authenticate_device_request
+from inktime.app.core.json_values import (
+    JsonScalarError,
+    json_bool,
+    json_float,
+    json_int,
+    json_object_payload,
+)
+from inktime.app.core.paths import UnsafePathError
 from inktime.app.web.access import administrator_required, login_required
 
 
@@ -19,11 +23,29 @@ def _repo():
     return current_app.extensions["inktime_resilience_repository"]
 
 
-def _payload() -> dict:
-    data = request.get_json(silent=True) or {}
-    if not isinstance(data, dict):
-        abort(400, description="DECISION-001 JSON Payload 必須是物件")
-    return data
+def _payload(*, maximum_bytes: int = 64 * 1024, error_prefix: str = "DECISION-001") -> dict:
+    return json_object_payload(request, maximum_bytes=maximum_bytes, error_prefix=error_prefix)
+
+
+def _feedback_payload() -> dict:
+    payload = _payload(error_prefix="FEEDBACK-001")
+    if "days" in payload:
+        payload["days"] = json_int(
+            payload,
+            "days",
+            minimum=1,
+            maximum=3650,
+            error_prefix="FEEDBACK-001",
+        )
+    if "value" in payload:
+        payload["value"] = json_float(
+            payload,
+            "value",
+            minimum=-1,
+            maximum=1,
+            error_prefix="FEEDBACK-001",
+        )
+    return payload
 
 
 @bp.get("/decision-traces")
@@ -126,7 +148,9 @@ def trace_feedback(trace_id: str):
     if _repo().trace(trace_id) is None:
         abort(404, description="DECISION-001 找不到決策追蹤")
     try:
-        return _repo().submit_feedback(user_id=str(g.user["id"]), payload=_payload(), trace_id=trace_id), 201
+        return _repo().submit_feedback(
+            user_id=str(g.user["id"]), payload=_feedback_payload(), trace_id=trace_id
+        ), 201
     except ValueError as exc:
         abort(400, description=str(exc))
 
@@ -152,7 +176,7 @@ def feedback_list():
 @administrator_required
 def create_feedback():
     try:
-        return _repo().submit_feedback(user_id=str(g.user["id"]), payload=_payload()), 201
+        return _repo().submit_feedback(user_id=str(g.user["id"]), payload=_feedback_payload()), 201
     except ValueError as exc:
         abort(400, description=str(exc))
 
@@ -160,7 +184,7 @@ def create_feedback():
 @bp.patch("/api/feedback/<int:feedback_id>")
 @administrator_required
 def patch_feedback(feedback_id: int):
-    payload = _payload()
+    payload = _feedback_payload()
     with current_app.extensions["inktime_database"].transaction() as connection:
         existing = connection.execute("SELECT * FROM photo_feedback WHERE id=?", (feedback_id,)).fetchone()
         if not existing:
@@ -168,7 +192,7 @@ def patch_feedback(feedback_id: int):
         if "value" in payload:
             connection.execute(
                 "UPDATE photo_feedback SET value=?,updated_at=datetime('now') WHERE id=?",
-                (float(payload["value"]), feedback_id),
+                (payload["value"], feedback_id),
             )
     return {"status": "ok"}
 
@@ -224,13 +248,29 @@ def get_queue(device_id: str):
 def generate_queue(device_id: str):
     payload = _payload()
     try:
-        _repo().ensure_queue(device_id, depth=int(payload.get("depth", 3)))
+        depth = json_int(
+            payload,
+            "depth",
+            default=3,
+            minimum=1,
+            maximum=14,
+            error_prefix="QUEUE-001",
+        )
+        priority = json_int(
+            payload,
+            "priority",
+            default=100,
+            minimum=1,
+            maximum=1000,
+            error_prefix="QUEUE-001",
+        )
+        _repo().ensure_queue(device_id, depth=depth)
         release_id = str(payload.get("release_id", "")).strip()
         item = (
             _repo().enqueue_release(
                 device_id=device_id,
                 release_id=release_id,
-                priority=int(payload.get("priority", 100)),
+                priority=priority,
                 display_after=payload.get("display_after"),
                 expires_at=payload.get("expires_at"),
                 idempotency_key=request.headers.get("Idempotency-Key"),
@@ -245,32 +285,30 @@ def generate_queue(device_id: str):
     return {"queue": _repo().queue(device_id), "item": item}, 201
 
 
-def _authenticated_device():
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        abort(401, description="DEVICE-001 裝置驗證失敗")
-    device = current_app.extensions["inktime_device_repository"].authenticate(
-        auth[7:].strip(), request.remote_addr or "unknown"
-    )
-    if device is None:
-        abort(401, description="DEVICE-001 裝置驗證失敗")
-    return device
-
-
 @bp.get("/api/device/v1/queue/manifest")
 def device_queue_manifest():
-    device = _authenticated_device()
-    return _repo().manifest(str(device["id"]), release_root=current_app.config["INKTIME_RELEASE_DIR"])
+    device = authenticate_device_request()
+    return current_app.extensions["inktime_device_queue_manifest_service"].build_manifest(
+        device_id=str(device["id"]),
+        profile_key=str(device["panel_profile"]),
+    )
 
 
 @bp.post("/api/device/queue/ack")  # legacy compatibility alias
 @bp.post("/api/device/v1/queue/ack")
 def device_queue_ack():
-    device = _authenticated_device()
-    if (request.content_length or 0) > 16 * 1024:
-        abort(413, description="QUEUE-001 ACK Payload 不可超過 16 KiB")
+    device = authenticate_device_request()
     try:
-        return _repo().queue_ack(device_id=str(device["id"]), payload=_payload())
+        payload = _payload(maximum_bytes=16 * 1024, error_prefix="QUEUE-001")
+        payload["queue_version"] = json_int(
+            payload,
+            "queue_version",
+            required=True,
+            minimum=0,
+            maximum=2_147_483_647,
+            error_prefix="QUEUE-001",
+        )
+        return _repo().queue_ack(device_id=str(device["id"]), payload=payload)
     except PermissionError as exc:
         abort(403, description=str(exc))
     except ValueError as exc:
@@ -279,7 +317,7 @@ def device_queue_ack():
 
 @bp.get("/api/device/v1/queue/items/<item_id>/files/<path:filename>")
 def queue_item_file(item_id: str, filename: str):
-    device = _authenticated_device()
+    device = authenticate_device_request()
     queue = _repo().queue(str(device["id"]))
     item = next(
         (
@@ -291,27 +329,24 @@ def queue_item_file(item_id: str, filename: str):
     )
     if item is None:
         abort(403, description="QUEUE-002 Queue Item 不屬於此裝置或已失效")
-    try:
-        path = safe_join(Path(current_app.config["INKTIME_RELEASE_DIR"]), f"{item['release_id']}/{filename}")
-    except UnsafePathError:
-        abort(400, description="PATH-001 路徑超出允許範圍")
-    if not path.is_file() or path.name == "manifest.json":
-        abort(404)
-    data = path.read_bytes()
-    # 檔案仍要與 Release Manifest 校驗，ID 猜測不能跨裝置取得資料。
-    manifest = json.loads(
-        (
-            Path(current_app.config["INKTIME_RELEASE_DIR"]) / str(item["release_id"]) / "manifest.json"
-        ).read_text(encoding="utf-8")
+    service = current_app.extensions["inktime_device_release_service"]
+    authorization = service.authorize_release_for_device(
+        device_id=str(device["id"]),
+        profile_key=str(device["panel_profile"]),
+        release_id=str(item["release_id"]),
     )
-    entry = next((value for value in manifest.get("files", []) if value.get("name") == filename), None)
-    if (
-        not entry
-        or int(entry.get("size", -1)) != len(data)
-        or entry.get("sha256") != sha256(data).hexdigest()
-    ):
+    if not authorization.allowed:
+        abort(404, description="QUEUE-002 Queue Item 不存在或已失效")
+    try:
+        data, entry = service.read_payload(authorization, filename)
+    except (FileNotFoundError, UnsafePathError):
+        abort(404)
+    except ValueError:
         abort(409, description="QUEUE-002 Release 檔案完整性驗證失敗")
-    return send_file(path, mimetype="application/octet-stream", conditional=True)
+    response = current_app.response_class(data, mimetype="application/octet-stream")
+    response.content_length = len(data)
+    response.set_etag(str(entry["sha256"]))
+    return response
 
 
 @bp.get("/api/retention/policies")
@@ -340,7 +375,16 @@ def retention_dry_run():
 @bp.post("/api/retention/run")
 @administrator_required
 def retention_run():
-    return _repo().cleanup(dry_run=bool(_payload().get("dry_run", False)))
+    try:
+        dry_run = json_bool(
+            _payload(),
+            "dry_run",
+            default=False,
+            error_prefix="RETENTION-001",
+        )
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
+    return _repo().cleanup(dry_run=dry_run)
 
 
 @bp.get("/api/rollouts")

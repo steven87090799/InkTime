@@ -56,6 +56,15 @@ def test_webhook_retry_is_persisted_idempotent_and_survives_service_restart(app)
     assert restarted.deliver_pending(now=due)["delivered"] == 1
     assert restarted.deliver_pending(now=due + timedelta(minutes=1))["delivered"] == 0
     assert restarted.list()[0]["webhook_status"] == "delivered"
+    first_request = original.session.calls[0][1]
+    retry_request = restarted.session.calls[0][1]
+    event_id = stored["webhook_idempotency_key"]
+    assert first_request["headers"]["Idempotency-Key"] == event_id
+    assert first_request["headers"]["X-InkTime-Event-ID"] == event_id
+    assert first_request["json"]["event_id"] == event_id
+    assert retry_request["headers"]["Idempotency-Key"] == event_id
+    assert retry_request["headers"]["X-InkTime-Event-ID"] == event_id
+    assert retry_request["json"]["event_id"] == event_id
 
 
 def test_webhook_retry_after_is_capped_and_general_4xx_is_terminal(app):
@@ -73,9 +82,7 @@ def test_webhook_retry_after_is_capped_and_general_4xx_is_terminal(app):
 
     assert service.deliver_one(first, now=now)["status"] == "retrying"
     first_row = next(row for row in service.list() if row["id"] == first)
-    assert datetime.fromisoformat(first_row["webhook_next_attempt_at"]) == now + timedelta(
-        seconds=300
-    )
+    assert datetime.fromisoformat(first_row["webhook_next_attempt_at"]) == now + timedelta(seconds=300)
     assert service.deliver_one(second, now=now)["status"] == "failed"
 
 
@@ -117,3 +124,5 @@ def test_webhook_job_uses_existing_worker_queue_and_separate_timeouts(app):
     request = fake.calls[0][1]
     assert isinstance(request["timeout"], tuple) and len(request["timeout"]) == 2
     assert request["headers"]["Idempotency-Key"] == row["webhook_idempotency_key"]
+    assert request["headers"]["X-InkTime-Event-ID"] == row["webhook_idempotency_key"]
+    assert request["json"]["event_id"] == row["webhook_idempotency_key"]

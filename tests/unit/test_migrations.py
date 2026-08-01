@@ -19,9 +19,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
         return
     try:
         results.put(
-            migrations_module.backfill_photo_capture_dates(
-                Database(Path(database_path)), batch_size=500
-            )
+            migrations_module.backfill_photo_capture_dates(Database(Path(database_path)), batch_size=500)
         )
     except Exception as exc:
         results.put({"error": type(exc).__name__})
@@ -29,7 +27,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 def test_fresh_database_is_migrated(tmp_path):
     database = Database(tmp_path / "inktime.db")
-    assert migrate(database) == list(range(1, 25))
+    assert migrate(database) == list(range(1, 26))
     assert database.integrity_check() == "ok"
     with database.session() as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -45,15 +43,18 @@ def test_fresh_database_is_migrated(tmp_path):
         "devices",
         "device_power_samples",
         "scoring_rule_versions",
-            "migration_history",
-            "scan_runs",
-            "scan_errors",
-            "scan_missing_candidates",
-            "ai_analysis_cache",
-            "settings_snapshots",
-            "settings_snapshot_items",
-        } <= tables
-    assert tuple(history) == (24, 24)
+        "migration_history",
+        "scan_runs",
+        "scan_errors",
+        "scan_missing_candidates",
+        "ai_analysis_cache",
+        "settings_snapshots",
+        "settings_snapshot_items",
+    } <= tables
+    assert tuple(history) == (25, 25)
+    with database.session() as connection:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
+    assert {"normalized_username", "session_version", "disabled_at"} <= columns
 
 
 def test_existing_photo_scores_table_is_preserved(tmp_path):
@@ -97,9 +98,7 @@ def test_failed_migration_rolls_back(monkeypatch, tmp_path):
     assert history["migration_completed_at"]
 
 
-def test_history_completion_failure_keeps_running_marker_and_stops_restart(
-    monkeypatch, tmp_path
-):
+def test_history_completion_failure_keeps_running_marker_and_stops_restart(monkeypatch, tmp_path):
     database = Database(tmp_path / "inktime.db")
     migrate(database)
     committed = Migration(999, "收尾失敗", ("CREATE TABLE committed_schema(id INTEGER)",))
@@ -116,15 +115,14 @@ def test_history_completion_failure_keeps_running_marker_and_stops_restart(
         migrate(database, tmp_path / "backups")
 
     with database.session() as connection:
-        assert connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE name='committed_schema'"
-        ).fetchone()
-        assert connection.execute(
-            "SELECT 1 FROM schema_migrations WHERE version=999"
-        ).fetchone()
-        assert connection.execute(
-            "SELECT migration_status FROM migration_history WHERE schema_version=999"
-        ).fetchone()[0] == "running"
+        assert connection.execute("SELECT 1 FROM sqlite_master WHERE name='committed_schema'").fetchone()
+        assert connection.execute("SELECT 1 FROM schema_migrations WHERE version=999").fetchone()
+        assert (
+            connection.execute(
+                "SELECT migration_status FROM migration_history WHERE schema_version=999"
+            ).fetchone()[0]
+            == "running"
+        )
     with pytest.raises(MigrationError, match="MIGRATION-002"):
         migrate(database, tmp_path / "backups")
 
@@ -133,7 +131,7 @@ def test_concurrent_migrations_are_serialized(tmp_path):
     database = Database(tmp_path / "inktime.db")
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _index: migrate(database), range(2)))
-    assert sorted(results, key=len) == [[], list(range(1, 25))]
+    assert sorted(results, key=len) == [[], list(range(1, 26))]
     assert database.integrity_check() == "ok"
 
 
@@ -173,18 +171,22 @@ def test_capture_date_backfill_is_cross_process_singleflight(tmp_path):
     assert all("error" not in outcome for outcome in outcomes)
     assert sorted(outcome["processed"] for outcome in outcomes) == [0, 500]
     with database.session() as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM photos WHERE capture_date_status='pending'"
-        ).fetchone()[0] == 0
-        assert connection.execute(
-            "SELECT COUNT(*) FROM photos WHERE captured_date='2024-02-29' "
-            "AND captured_month_day='02-29' AND capture_date_status='valid'"
-        ).fetchone()[0] == 500
+        assert (
+            connection.execute("SELECT COUNT(*) FROM photos WHERE capture_date_status='pending'").fetchone()[
+                0
+            ]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM photos WHERE captured_date='2024-02-29' "
+                "AND captured_month_day='02-29' AND capture_date_status='valid'"
+            ).fetchone()[0]
+            == 500
+        )
 
 
-def test_capture_date_backfill_releases_operation_lock_after_exception(
-    monkeypatch, tmp_path
-):
+def test_capture_date_backfill_releases_operation_lock_after_exception(monkeypatch, tmp_path):
     from inktime.app.domain.photos import dates
 
     database = Database(tmp_path / "inktime.db")
@@ -261,9 +263,9 @@ def test_existing_empty_font_setting_moves_to_builtin_iansui(monkeypatch, tmp_pa
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:9])
     assert migrate(database) == [9]
     with database.session() as connection:
-        value = connection.execute(
-            "SELECT value_json FROM settings WHERE key='render.font_path'"
-        ).fetchone()[0]
+        value = connection.execute("SELECT value_json FROM settings WHERE key='render.font_path'").fetchone()[
+            0
+        ]
     assert value == '"builtin:iansui"'
 
 
@@ -299,9 +301,9 @@ def test_unfinished_migration_stops_startup_before_new_schema_writes(tmp_path):
     with pytest.raises(MigrationError, match="MIGRATION-002.*停止啟動"):
         migrate(database)
     with database.session() as connection:
-        assert connection.execute(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version=999"
-        ).fetchone()[0] == 0
+        assert (
+            connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version=999").fetchone()[0] == 0
+        )
 
 
 def test_v10_photo_state_and_analysis_survive_scheduler_upgrade(monkeypatch, tmp_path):
@@ -328,14 +330,14 @@ def test_v10_photo_state_and_analysis_survive_scheduler_upgrade(monkeypatch, tmp
         )
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == list(range(11, 25))
+    assert migrate(database, tmp_path / "backups") == list(range(11, 26))
     with database.session() as connection:
         photo = connection.execute(
             "SELECT favorite,status,lifecycle_status,metadata_status,local_features_status FROM photos WHERE id='photo'"
         ).fetchone()
-        caption = connection.execute(
-            "SELECT caption FROM photo_analysis WHERE photo_id='photo'"
-        ).fetchone()[0]
+        caption = connection.execute("SELECT caption FROM photo_analysis WHERE photo_id='photo'").fetchone()[
+            0
+        ]
     assert tuple(photo) == (1, "analyzed", "active", "complete", "complete")
     assert caption == "舊描述"
 
@@ -355,13 +357,12 @@ def test_migration_21_upgrades_v20_webhooks_idempotently(monkeypatch, tmp_path):
         notification_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [21, 22, 23, 24]
+    assert migrate(database, tmp_path / "backups") == [21, 22, 23, 24, 25]
     assert migrate(database, tmp_path / "backups") == []
     assert database.integrity_check() == "ok"
     with database.session() as connection:
         row = connection.execute(
-            "SELECT webhook_idempotency_key,webhook_claimed_until "
-            "FROM device_notifications WHERE id=?",
+            "SELECT webhook_idempotency_key,webhook_claimed_until FROM device_notifications WHERE id=?",
             (notification_id,),
         ).fetchone()
         indexes = {
@@ -401,7 +402,10 @@ def test_migration_24_updates_caption_defaults_only_as_one_legacy_set(monkeypatc
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
     migrate(database)
     with database.session() as connection:
-        values = [connection.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()[0] for key in keys]
+        values = [
+            connection.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()[0]
+            for key in keys
+        ]
     assert values == ["10", "30", "42"]
 
     second = Database(tmp_path / "second.db")
@@ -415,5 +419,8 @@ def test_migration_24_updates_caption_defaults_only_as_one_legacy_set(monkeypatc
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
     migrate(second)
     with second.session() as connection:
-        values = [connection.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()[0] for key in keys]
+        values = [
+            connection.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()[0]
+            for key in keys
+        ]
     assert values == ["8", "12", "16"]

@@ -26,6 +26,7 @@ def create_app(runtime_config: RuntimeConfig | None = None) -> Flask:
         static_folder=str(web_root / "static"),
         static_url_path="/static",
     )
+    app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
     if config.proxy_trust:
         app.wsgi_app = ProxyFix(  # type: ignore[method-assign]
             app.wsgi_app,

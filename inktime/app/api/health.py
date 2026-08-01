@@ -53,6 +53,13 @@ def ready():
 def detail():
     database = current_app.extensions["inktime_database"]
     runtime_config = current_app.extensions["inktime_runtime_config"]
+    with database.session() as connection:
+        heartbeats = {
+            str(row["key"]).split(":", 1)[1]: str(row["updated_at"])
+            for row in connection.execute(
+                "SELECT key,updated_at FROM observability_state WHERE key LIKE 'heartbeat:%'"
+            ).fetchall()
+        }
     return {
         "status": "ok",
         "python": sys.version.split()[0],
@@ -79,5 +86,6 @@ def detail():
                 "inktime_process_boundary"
             ].observability(),
         },
+        "service_heartbeats": heartbeats,
         "production_preflight": current_app.extensions["inktime_production_preflight"].summary(),
     }
