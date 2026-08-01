@@ -128,6 +128,9 @@ def test_batch_management_api_dispatches_lifecycle_actions(client, app, monkeypa
         def retry_cleanup(self, batch_id):
             return f"cleanup-{batch_id}"
 
+        def recover_submission(self, batch_id, remote_batch_id):
+            return {"batch_id": batch_id, "remote_batch_id": remote_batch_id, "status": "validating"}
+
     monkeypatch.setitem(app.extensions, "inktime_batch_analysis_service", FakeBatchService())
     headers = {"X-CSRF-Token": csrf(client)}
     estimate = client.post("/api/v1/analysis/batches/estimate", json={"scope": "sample"}, headers=headers)
@@ -142,6 +145,21 @@ def test_batch_management_api_dispatches_lifecycle_actions(client, app, monkeypa
     cleanup = client.post("/api/v1/analysis/batches/batch-ui/retry-cleanup", headers=headers)
     assert cleanup.status_code == 200
     assert cleanup.json["job_id"] == "cleanup-batch-ui"
+    recovered = client.post(
+        "/api/v1/analysis/batches/batch-ui/recover-submission",
+        json={"remote_batch_id": "batch-existing"},
+        headers=headers,
+    )
+    assert recovered.status_code == 200
+    assert recovered.json["remote_batch_id"] == "batch-existing"
+    assert (
+        client.post(
+            "/api/v1/analysis/batches/batch-ui/recover-submission",
+            json={"remote_batch_id": "batch-existing", "unexpected": True},
+            headers=headers,
+        ).status_code
+        == 400
+    )
 
 
 def test_device_energy_dashboard_uses_telemetry_and_audited_measurements(client, app):

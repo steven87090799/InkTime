@@ -112,6 +112,8 @@ def batches_page_action():
             _service().retry_failed(str(request.form["batch_id"]), created_by=str(g.user["id"]))
         elif action == "cleanup":
             _service().retry_cleanup(str(request.form["batch_id"]))
+        elif action == "recover":
+            _service().recover_submission(str(request.form["batch_id"]), str(request.form["remote_batch_id"]))
         else:
             abort(400, description="BATCH-API-002 不支援的操作")
     except (ValueError, KeyError, BatchLifecycleError) as exc:
@@ -211,3 +213,19 @@ def retry_cleanup(batch_id: str):
         return {"job_id": _service().retry_cleanup(batch_id)}
     except (KeyError, ValueError, BatchLifecycleError) as exc:
         abort(409, description=f"BATCH-API-006 {exc}")
+
+
+@bp.post("/api/v1/analysis/batches/<batch_id>/recover-submission")
+@administrator_required
+def recover_submission(batch_id: str):
+    try:
+        payload = _payload()
+        reject_unknown_fields(payload, {"remote_batch_id"}, error_prefix="BATCH-API-007")
+        remote_batch_id = payload.get("remote_batch_id")
+        if type(remote_batch_id) is not str or not remote_batch_id.strip():
+            raise ValueError("remote_batch_id 必須是非空字串")
+        return _service().recover_submission(batch_id, remote_batch_id)
+    except JsonScalarError as exc:
+        abort(400, description=f"BATCH-API-007 {exc}")
+    except (ValueError, KeyError, BatchLifecycleError) as exc:
+        abort(409, description=f"BATCH-API-007 {exc}")

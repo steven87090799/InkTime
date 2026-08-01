@@ -7,6 +7,8 @@ from PIL import Image
 
 from inktime.app.domain.photos import PhotoPreprocessor
 from inktime.app.providers.base import VisionProvider
+from inktime.app.providers.openai_compatible import ProviderHTTPError
+from inktime.app.repositories.analysis_batches import AnalysisBatchRepository
 from inktime.app.services.batch_analysis import BatchLifecycleError, stream_jsonl_shards
 from inktime.app.workers.scanner import PhotoScanner
 from tests.unit.test_analysis_schema import valid_result
@@ -101,6 +103,20 @@ class FakeBatchProvider(VisionProvider):
 
     def validate_config(self):
         return True, "ok"
+
+
+class AmbiguousFakeBatchProvider(FakeBatchProvider):
+    def __init__(self):
+        super().__init__()
+        self.create_calls = 0
+
+    def create_batch(self, input_file_id: str, **kwargs):
+        self.create_calls += 1
+        raise ProviderHTTPError(
+            "response lost after remote creation",
+            "BATCH-SUBMISSION-UNKNOWN",
+            ambiguous=True,
+        )
 
 
 def _prepare_photos(app, tmp_path, count=3):
@@ -245,7 +261,41 @@ def test_fake_batch_imports_unordered_results_once(app, tmp_path):
     assert usage_count == len(photo_ids)
 
 
-def test_fake_batch_100_sample_end_to_end(app, tmp_path):
+def test_ambiguous_batch_submission_is_persisted_and_recovery_only_binds_existing_remote(app, tmp_path):
+    _prepare_photos(app, tmp_path, count=2)
+    fake = AmbiguousFakeBatchProvider()
+    service = _wire_fake(app, fake)
+
+    submitted = service.submit(scope="sample", sample_count=100, created_by="tester")
+    assert submitted["batch_ids"] == []
+    batch_id = submitted["prepared_batch_ids"][0]
+    repository = AnalysisBatchRepository(app.extensions["inktime_database"])
+    unknown = dict(repository.get(batch_id))
+    assert unknown["status"] == "failed"
+    assert unknown["remote_status"] == "submission_unknown"
+    assert unknown["last_error_code"] == "submission_unknown"
+    assert unknown["input_file_id"] == "file-input"
+    assert all(item["error_code"] == "submission_unknown" for item in repository.items(batch_id))
+    with app.extensions["inktime_database"].session() as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM api_usage WHERE batch_id=?", (batch_id,)).fetchone()[0]
+            == 0
+        )
+
+    recovered = service.recover_submission(batch_id, "batch-existing-123")
+    assert recovered == {
+        "batch_id": batch_id,
+        "remote_batch_id": "batch-existing-123",
+        "status": "validating",
+    }
+    assert fake.create_calls == 1
+    bound = dict(repository.get(batch_id))
+    assert bound["remote_batch_id"] == "batch-existing-123"
+    assert bound["status"] == "validating"
+    assert all(item["status"] == "submitted" for item in repository.items(batch_id))
+
+
+def test_control_plane_fake_batch_100_sample_end_to_end(app, tmp_path):
     _prepare_photos(app, tmp_path, count=100)
     fake = FakeBatchProvider()
     service = _wire_fake(app, fake)

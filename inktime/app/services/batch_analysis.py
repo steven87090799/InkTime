@@ -22,6 +22,7 @@ from inktime.app.domain.analysis import (
     AnalysisValidationError,
     canonical_json,
     fingerprint,
+    normalize_reasoning_effort,
     validate_analysis_result,
 )
 from inktime.app.domain.analysis.plan import SCHEMA_VERSION
@@ -39,6 +40,7 @@ MAX_OPENAI_BYTES = 200 * 1024 * 1024
 DEFAULT_MAX_ITEMS = 500
 DEFAULT_MAX_BYTES = 150 * 1024 * 1024
 CUSTOM_ID_RE = re.compile(r"^ibt:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+REMOTE_BATCH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$")
 
 
 class BatchLifecycleError(RuntimeError):
@@ -236,6 +238,9 @@ class BatchAnalysisService:
         plan["batch_endpoint"] = self.ENDPOINT
         plan["batch_schema_kind"] = "full"
         plan["batch_completion_window"] = "24h"
+        plan["reasoning_effort"] = normalize_reasoning_effort(
+            self.settings.get("batch.reasoning_effort", "none")
+        )
         return plan, fingerprint(plan), model
 
     def _base_candidate_sql(self) -> tuple[str, list[Any]]:
@@ -319,6 +324,7 @@ class BatchAnalysisService:
         sha_duplicates = 0
         vision_input = dict(plan["high_vision_input"])
         vision_input["schema_kind"] = "full"
+        vision_input["reasoning_effort"] = str(plan["reasoning_effort"])
         for item in safe_rows:
             photo = item["photo"]
             content_sha = str(photo["sha256"] or "").casefold()
@@ -334,6 +340,7 @@ class BatchAnalysisService:
                     "prompt_version": str(plan["prompt_version"]),
                     "schema_version": SCHEMA_VERSION,
                     "schema_kind": "full",
+                    "reasoning_effort": str(plan["reasoning_effort"]),
                     **vision_input,
                 }
             )
@@ -458,6 +465,7 @@ class BatchAnalysisService:
                 stage="single_high",
                 max_tokens=max_tokens,
                 caption_controls=plan.get("caption_controls") or None,
+                reasoning_effort=str(plan["reasoning_effort"]),
             )
             payload = {
                 "custom_id": str(item["custom_id"]),
@@ -558,20 +566,28 @@ class BatchAnalysisService:
         except Exception as exc:
             current = self.batches.get(batch_id)
             has_uploaded_file = bool(current is not None and current["input_file_id"])
+            ambiguous = bool(getattr(exc, "ambiguous", False)) or str(getattr(exc, "code", "")) in {
+                "BATCH-SUBMISSION-UNKNOWN",
+                "BATCH-REMOTE-004",
+            }
             self.batches.update_batch(
                 batch_id,
-                status="cleanup_pending" if has_uploaded_file else "failed",
-                remote_status="failed",
+                status="failed" if ambiguous or not has_uploaded_file else "cleanup_pending",
+                remote_status="submission_unknown" if ambiguous else "failed",
                 cleanup_status="pending" if has_uploaded_file else "not_required",
-                last_error_code=str(getattr(exc, "code", "BATCH-SUBMIT-001")),
+                last_error_code="submission_unknown"
+                if ambiguous
+                else str(getattr(exc, "code", "BATCH-SUBMIT-001")),
                 last_error_message=str(exc)[:1000],
             )
             for item in self.batches.items(batch_id):
                 if str(item["status"]) == "pending":
                     self.batches.update_item(
-                        str(item["id"]), status="retry_pending", error_code="submit_failed"
+                        str(item["id"]),
+                        status="failed" if ambiguous else "retry_pending",
+                        error_code="submission_unknown" if ambiguous else "submit_failed",
                     )
-            if not has_uploaded_file:
+            if ambiguous or not has_uploaded_file:
                 self._finish(batch_id)
             raise
         finally:
@@ -807,11 +823,49 @@ class BatchAnalysisService:
         photo_ids = [
             str(item["photo_id"])
             for item in items
-            if str(item["status"]) in retry_statuses and item["photo_id"]
+            if str(item["status"]) in retry_statuses
+            and str(item.get("error_code") or "") != "submission_unknown"
+            and item["photo_id"]
         ]
         if not photo_ids:
             raise BatchLifecycleError("此 Batch 沒有可重試項目", "BATCH-RETRY-001")
         return self.submit(scope="manual_selection", photo_ids=photo_ids, created_by=created_by)
+
+    def recover_submission(self, batch_id: str, remote_batch_id: str) -> dict[str, Any]:
+        """Bind a manually confirmed remote Batch without creating another one."""
+
+        remote_id = str(remote_batch_id or "").strip()
+        if not REMOTE_BATCH_ID_RE.fullmatch(remote_id):
+            raise BatchLifecycleError("遠端 Batch ID 格式不合法", "BATCH-RECOVERY-001")
+        batch = self.batches.get(batch_id)
+        if batch is None:
+            raise KeyError(batch_id)
+        if str(batch["last_error_code"] or "") != "submission_unknown":
+            raise BatchLifecycleError("只有提交結果未知的 Batch 可以 Recovery", "BATCH-RECOVERY-002")
+        existing = str(batch["remote_batch_id"] or "")
+        if existing and existing != remote_id:
+            raise BatchLifecycleError("Batch 已綁定其他遠端 ID", "BATCH-RECOVERY-003")
+        self.batches.update_batch(
+            batch_id,
+            status="validating",
+            remote_batch_id=remote_id,
+            remote_status="recovered_pending_poll",
+            last_error_code=None,
+            last_error_message=None,
+        )
+        for item in self.batches.items(batch_id):
+            if str(item["error_code"] or "") == "submission_unknown":
+                self.batches.update_item(
+                    str(item["id"]), status="submitted", error_code=None, error_message=None
+                )
+        self._activity(
+            "INFO",
+            "batch_submission_recovered",
+            "已綁定人工確認的既有遠端 Batch",
+            batch_id=batch_id,
+            status="validating",
+        )
+        return {"batch_id": batch_id, "remote_batch_id": remote_id, "status": "validating"}
 
     def retry_cleanup(self, batch_id: str) -> str:
         batch = self.batches.get(batch_id)
@@ -1158,6 +1212,11 @@ class BatchAnalysisService:
         )
         if current_status in {"expired", "cancelled"}:
             final_status = current_status
+        if (
+            current_status == "submission_unknown"
+            or str(batch["last_error_code"] or "") == "submission_unknown"
+        ):
+            final_status = "failed"
         if current_status == "failed" and imported == 0:
             final_status = "failed"
         self.batches.update_batch(

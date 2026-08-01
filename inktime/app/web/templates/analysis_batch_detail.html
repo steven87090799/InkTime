@@ -3,6 +3,9 @@
 {% block content %}
 <main class="page-shell">
   <div class="page-head"><div><p class="eyebrow">Batch 詳情</p><h1>{{ batch.id }}</h1><p>{{ batch.scope }} · {{ batch.status }} · {{ batch.model }}</p></div><a href="{{ url_for('analysis_batches.batches_page') }}">返回 Batch 清單</a></div>
+  {% if batch.last_error_code == 'submission_unknown' %}
+  <section class="card notice"><h2>提交結果未知</h2><p>請先在 OpenAI Dashboard／API 確認是否已建立遠端 Batch。確認後只綁定既有 remote_batch_id，不會重新建立或重送照片。</p>{% if g.user and g.user.role == 'administrator' %}<form method="post" action="{{ url_for('analysis_batches.batches_page_action') }}" class="form-stack"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="batch_id" value="{{ batch.id }}"><label>既有 remote_batch_id<input name="remote_batch_id" required maxlength="200" pattern="[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}"></label><button class="primary" name="action" value="recover" type="submit">綁定既有遠端 Batch</button></form>{% endif %}</section>
+  {% endif %}
   <section class="card">
     <h2>結果與成本</h2>
     <p>總數 {{ batch.total_items }}；成功 {{ batch.imported_items }}；失敗 {{ batch.failed_items }}；漏件 {{ batch.missing_items }}；Stale {{ batch.stale_items }}。</p>
