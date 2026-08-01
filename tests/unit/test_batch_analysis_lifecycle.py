@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import threading
 
 from PIL import Image
 import pytest
@@ -491,3 +493,43 @@ def test_control_plane_fake_batch_100_sample_end_to_end(app, tmp_path):
     assert detail["schema_success_rate"] == 100.0
     assert detail["actual_jsonl_bytes"] > 0
     assert detail["peak_rss_bytes"] > 0
+
+
+def test_concurrent_submit_keeps_one_reservation_and_one_remote_batch(app, tmp_path):
+    photo_ids = _prepare_photos(app, tmp_path, count=1)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    reservation_barrier = threading.Barrier(2)
+    original_create_with_items = service.batches.create_with_items
+
+    def synchronized_create_with_items(*args, **kwargs):
+        reservation_barrier.wait(timeout=10)
+        return original_create_with_items(*args, **kwargs)
+
+    service.batches.create_with_items = synchronized_create_with_items
+
+    def submit_once():
+        try:
+            return service.submit(scope="manual_selection", photo_ids=photo_ids, created_by="tester")
+        except BatchLifecycleError as exc:
+            return exc.code
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = [future.result(timeout=30) for future in [executor.submit(submit_once) for _ in range(2)]]
+
+    assert sorted(result if isinstance(result, str) else "success" for result in results) == [
+        "BATCH-RESERVATION-CONFLICT",
+        "success",
+    ]
+    with app.extensions["inktime_database"].session() as connection:
+        batch_count = int(connection.execute("SELECT COUNT(*) FROM analysis_batches").fetchone()[0])
+        item_count = int(connection.execute("SELECT COUNT(*) FROM analysis_batch_items").fetchone()[0])
+        valid_job_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM jobs WHERE kind='analysis_batch' AND status NOT IN ('failed','cancelled')"
+            ).fetchone()[0]
+        )
+    assert batch_count == 1
+    assert item_count == 1
+    assert valid_job_count == 1
+    assert fake.custom_ids
