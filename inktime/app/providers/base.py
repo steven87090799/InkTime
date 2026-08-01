@@ -10,6 +10,7 @@ class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
     cached_tokens: int = 0
+    reasoning_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,31 @@ class VisionProvider(ABC):
         """Serializable child construction data, or None for cooperative timeout."""
 
         return None
+
+    def build_analysis_request_body(self, **kwargs) -> dict:
+        raise NotImplementedError("Provider 未實作共用分析 Request Body Builder")
+
+    def upload_batch_file(self, path: Path) -> str:
+        raise NotImplementedError("Provider 不支援 Batch File Upload")
+
+    def create_batch(
+        self,
+        input_file_id: str,
+        *,
+        completion_window: str = "24h",
+        metadata: dict | None = None,
+        output_expires_after_seconds: int | None = None,
+    ) -> dict:
+        raise NotImplementedError("Provider 不支援 Batch Create")
+
+    def retrieve_batch(self, batch_id: str) -> dict:
+        return self.poll_batch(batch_id)
+
+    def download_file_content(self, file_id: str, destination: Path) -> Path:
+        raise NotImplementedError("Provider 不支援 Batch File Download")
+
+    def delete_remote_file(self, file_id: str) -> dict:
+        raise NotImplementedError("Provider 不支援 Remote File Delete")
 
     @abstractmethod
     def analyze(

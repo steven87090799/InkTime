@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 import threading
 import time
 
@@ -266,13 +267,44 @@ class FailoverVisionProvider(VisionProvider):
         error = ProviderHTTPError("所有 Provider 的 Batch 提交均失敗", "VLM-007")
         raise error from last_error
 
+    def _batch_provider(self):
+        channel = getattr(self._local, "channel", None)
+        return channel.provider if channel is not None else self.channels[0].provider
+
+    def upload_batch_file(self, path: Path) -> str:
+        provider = self._batch_provider()
+        result = provider.upload_batch_file(path)
+        return str(result)
+
+    def create_batch(
+        self,
+        input_file_id: str,
+        *,
+        completion_window: str = "24h",
+        metadata: dict | None = None,
+        output_expires_after_seconds: int | None = None,
+    ) -> dict:
+        return self._batch_provider().create_batch(
+            input_file_id,
+            completion_window=completion_window,
+            metadata=metadata,
+            output_expires_after_seconds=output_expires_after_seconds,
+        )
+
     def poll_batch(self, batch_id: str) -> dict:
-        channel = getattr(self._local, "channel", self.channels[0])
-        return channel.provider.poll_batch(batch_id)
+        return self._batch_provider().retrieve_batch(batch_id)
+
+    def retrieve_batch(self, batch_id: str) -> dict:
+        return self._batch_provider().retrieve_batch(batch_id)
 
     def cancel_batch(self, batch_id: str) -> dict:
-        channel = getattr(self._local, "channel", self.channels[0])
-        return channel.provider.cancel_batch(batch_id)
+        return self._batch_provider().cancel_batch(batch_id)
+
+    def download_file_content(self, file_id: str, destination: Path) -> Path:
+        return self._batch_provider().download_file_content(file_id, destination)
+
+    def delete_remote_file(self, file_id: str) -> dict:
+        return self._batch_provider().delete_remote_file(file_id)
 
     def estimate_cost(self, model: str, usage: Usage) -> float:
         channel = getattr(self._local, "channel", self.channels[0])
