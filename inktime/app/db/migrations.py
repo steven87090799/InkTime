@@ -969,6 +969,126 @@ MIGRATIONS = (
             "ALTER TABLE users ADD COLUMN disabled_at TEXT",
         ),
     ),
+    Migration(
+        26,
+        "加入 OpenAI Batch 照片分析持久化生命週期",
+        (
+            "ALTER TABLE photos ADD COLUMN never_upload INTEGER NOT NULL DEFAULT 0 CHECK(never_upload IN (0,1))",
+            "ALTER TABLE photos ADD COLUMN never_display INTEGER NOT NULL DEFAULT 0 CHECK(never_display IN (0,1))",
+            "ALTER TABLE model_pricing ADD COLUMN batch_multiplier REAL NOT NULL DEFAULT 0.5",
+            "ALTER TABLE model_pricing ADD COLUMN batch_input_per_million REAL",
+            "ALTER TABLE model_pricing ADD COLUMN batch_cached_input_per_million REAL",
+            "ALTER TABLE model_pricing ADD COLUMN batch_output_per_million REAL",
+            "ALTER TABLE api_usage ADD COLUMN batch_id TEXT REFERENCES analysis_batches(id) ON DELETE SET NULL",
+            "ALTER TABLE api_usage ADD COLUMN batch_item_id TEXT REFERENCES analysis_batch_items(id) ON DELETE SET NULL",
+            "ALTER TABLE api_usage ADD COLUMN processing_mode TEXT NOT NULL DEFAULT 'sync' CHECK(processing_mode IN ('sync','batch'))",
+            "ALTER TABLE api_usage ADD COLUMN request_id TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_photos_never_upload_candidate ON photos(never_upload,lifecycle_status,eligible,sha256)",
+            "CREATE INDEX IF NOT EXISTS idx_api_usage_batch ON api_usage(batch_id,batch_item_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_api_usage_batch_item_once ON api_usage(batch_item_id) WHERE batch_item_id IS NOT NULL",
+            """
+            CREATE TABLE IF NOT EXISTS analysis_batches (
+                id TEXT PRIMARY KEY,
+                job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+                provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL,
+                model TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                analysis_fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN (
+                    'preparing','uploading','validating','in_progress','finalizing',
+                    'import_pending','importing','completed','completed_with_errors',
+                    'failed','expired','cancelling','cancelled','cleanup_pending'
+                )),
+                input_file_id TEXT,
+                remote_batch_id TEXT,
+                output_file_id TEXT,
+                error_file_id TEXT,
+                local_input_path TEXT,
+                local_output_path TEXT,
+                local_error_path TEXT,
+                total_items INTEGER NOT NULL DEFAULT 0 CHECK(total_items >= 0),
+                completed_items INTEGER NOT NULL DEFAULT 0 CHECK(completed_items >= 0),
+                failed_items INTEGER NOT NULL DEFAULT 0 CHECK(failed_items >= 0),
+                missing_items INTEGER NOT NULL DEFAULT 0 CHECK(missing_items >= 0),
+                stale_items INTEGER NOT NULL DEFAULT 0 CHECK(stale_items >= 0),
+                imported_items INTEGER NOT NULL DEFAULT 0 CHECK(imported_items >= 0),
+                input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens >= 0),
+                cached_tokens INTEGER NOT NULL DEFAULT 0 CHECK(cached_tokens >= 0),
+                output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens >= 0),
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0 CHECK(reasoning_tokens >= 0),
+                estimated_cost REAL NOT NULL DEFAULT 0 CHECK(estimated_cost >= 0),
+                actual_cost REAL NOT NULL DEFAULT 0 CHECK(actual_cost >= 0),
+                last_error_code TEXT,
+                last_error_message TEXT,
+                submitted_at TEXT,
+                last_polled_at TEXT,
+                completed_at TEXT,
+                cleanup_completed_at TEXT,
+                sample_seed TEXT,
+                candidate_snapshot_json TEXT NOT NULL DEFAULT '[]',
+                scope TEXT NOT NULL DEFAULT 'all_eligible_missing_analysis'
+                    CHECK(scope IN ('sample','all_eligible_missing_analysis','new_or_changed','manual_selection')),
+                peak_rss_bytes INTEGER NOT NULL DEFAULT 0,
+                cleanup_status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(cleanup_status IN ('pending','partial','completed','not_required')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_analysis_batches_poll ON analysis_batches(status,last_polled_at,updated_at)",
+            "CREATE INDEX IF NOT EXISTS idx_analysis_batches_job ON analysis_batches(job_id,created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_analysis_batches_remote ON analysis_batches(remote_batch_id)",
+            "CREATE INDEX IF NOT EXISTS idx_analysis_batches_retry ON analysis_batches(status,completed_at,updated_at)",
+            """
+            CREATE TABLE IF NOT EXISTS analysis_batch_items (
+                id TEXT PRIMARY KEY,
+                batch_id TEXT NOT NULL REFERENCES analysis_batches(id) ON DELETE CASCADE,
+                job_item_id TEXT REFERENCES job_items(id) ON DELETE SET NULL,
+                photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,
+                custom_id TEXT NOT NULL UNIQUE,
+                content_sha256 TEXT NOT NULL,
+                analysis_fingerprint TEXT NOT NULL,
+                vision_request_fingerprint TEXT NOT NULL,
+                vision_input_spec_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN (
+                    'pending','submitted','success','failed','missing','retry_pending',
+                    'stale','schema_invalid','duplicate_custom_id','unexpected_custom_id',
+                    'imported','cancelled','expired'
+                )),
+                request_id TEXT,
+                http_status INTEGER,
+                input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens >= 0),
+                cached_tokens INTEGER NOT NULL DEFAULT 0 CHECK(cached_tokens >= 0),
+                output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens >= 0),
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0 CHECK(reasoning_tokens >= 0),
+                estimated_cost REAL NOT NULL DEFAULT 0 CHECK(estimated_cost >= 0),
+                actual_cost REAL NOT NULL DEFAULT 0 CHECK(actual_cost >= 0),
+                raw_response_json TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                imported_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_analysis_batch_items_batch_status ON analysis_batch_items(batch_id,status,updated_at)",
+            "CREATE INDEX IF NOT EXISTS idx_analysis_batch_items_photo ON analysis_batch_items(photo_id,batch_id,status)",
+            "CREATE INDEX IF NOT EXISTS idx_analysis_batch_items_job_item ON analysis_batch_items(job_item_id,batch_id,status)",
+            "CREATE INDEX IF NOT EXISTS idx_analysis_batch_items_fingerprint ON analysis_batch_items(content_sha256,vision_request_fingerprint,status)",
+            "CREATE INDEX IF NOT EXISTS idx_analysis_batch_items_retry ON analysis_batch_items(status,updated_at)",
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_batch_items_active_job_item
+            ON analysis_batch_items(job_item_id)
+            WHERE job_item_id IS NOT NULL AND status IN ('pending','submitted','success','failed','missing','retry_pending','stale','schema_invalid')
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_batch_items_active_content_request
+            ON analysis_batch_items(content_sha256,vision_request_fingerprint)
+            WHERE status IN ('pending','submitted','success','failed','missing','retry_pending','stale','schema_invalid')
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_batch_items_custom_id ON analysis_batch_items(custom_id)",
+        ),
+    ),
 )
 
 
