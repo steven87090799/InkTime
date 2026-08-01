@@ -4,6 +4,7 @@ from flask import Blueprint, abort, current_app, g, redirect, render_template, r
 
 from inktime.app.core.json_values import (
     JsonScalarError,
+    json_bool,
     json_int,
     json_object_payload,
     nullable_json_float,
@@ -114,6 +115,10 @@ def batches_page_action():
             _service().retry_cleanup(str(request.form["batch_id"]))
         elif action == "recover":
             _service().recover_submission(str(request.form["batch_id"]), str(request.form["remote_batch_id"]))
+        elif action == "abandon":
+            if request.form.get("confirm") != "true":
+                raise ValueError("Abandon 必須明確確認遠端 Batch 不存在")
+            _service().abandon(str(request.form["batch_id"]), confirmed_no_remote=True)
         else:
             abort(400, description="BATCH-API-002 不支援的操作")
     except (ValueError, KeyError, BatchLifecycleError) as exc:
@@ -227,5 +232,23 @@ def recover_submission(batch_id: str):
         return _service().recover_submission(batch_id, remote_batch_id)
     except JsonScalarError as exc:
         abort(400, description=f"BATCH-API-007 {exc}")
-    except (ValueError, KeyError, BatchLifecycleError) as exc:
+    except BatchLifecycleError as exc:
+        return {"error_code": exc.code, "message": str(exc)}, 409
+    except (ValueError, KeyError) as exc:
         abort(409, description=f"BATCH-API-007 {exc}")
+
+
+@bp.post("/api/v1/analysis/batches/<batch_id>/abandon")
+@administrator_required
+def abandon_batch(batch_id: str):
+    try:
+        payload = _payload()
+        reject_unknown_fields(payload, {"confirm"}, error_prefix="BATCH-API-008")
+        confirmed = json_bool(payload, "confirm", default=False, error_prefix="BATCH-API-008")
+        return _service().abandon(batch_id, confirmed_no_remote=confirmed)
+    except JsonScalarError as exc:
+        abort(400, description=f"BATCH-API-008 {exc}")
+    except BatchLifecycleError as exc:
+        return {"error_code": exc.code, "message": str(exc)}, 409
+    except (ValueError, KeyError) as exc:
+        abort(409, description=f"BATCH-API-008 {exc}")

@@ -49,6 +49,7 @@
               <button name="action" value="retry" type="submit">重試失敗</button>
               <button name="action" value="cleanup" type="submit">重試清理</button>
             </form>
+            <form method="post" action="{{ url_for('analysis_batches.batches_page_action') }}" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="batch_id" value="{{ batch.id }}"><label><input type="checkbox" name="confirm" value="true" required> 已確認遠端不存在</label><button name="action" value="abandon" type="submit">Abandon 並清理</button></form>
           {% endif %}
           </td>
         </tr>

@@ -8,11 +8,14 @@ the worker that submitted it.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 import re
 import resource
+import sqlite3
 import time
 from typing import Any, Callable, Iterable
 from uuid import uuid4
@@ -454,6 +457,20 @@ class BatchAnalysisService:
             raise BatchLifecycleError("Frozen Batch Provider 無法建立", "BATCH-PROVIDER-004")
         return provider
 
+    def _cleanup_plan(self, batch: dict[str, Any]) -> dict[str, Any]:
+        """Build a non-analysis fallback route solely to clean known files."""
+
+        route = [
+            item
+            for item in self.provider_service.route_snapshot()
+            if str(item.get("provider_id")) == str(batch["provider_id"])
+        ]
+        if not route:
+            raise BatchLifecycleError(
+                "原 Provider route 已不存在，無法安全清理遠端檔案", "BATCH-CLEANUP-PROVIDER-001"
+            )
+        return {"provider_route": route, "scoring_rules": ""}
+
     def _line_factory(self, provider, plan: dict[str, Any]) -> Callable[[dict[str, Any]], bytes]:
         max_tokens = int(self.settings.get("budget.max_tokens", 8000))
 
@@ -539,15 +556,60 @@ class BatchAnalysisService:
         batch = self.batches.get(batch_id)
         if batch is None:
             raise KeyError(batch_id)
+        if str(batch["status"]) in {"upload_unknown", "submission_unknown"}:
+            raise BatchLifecycleError(
+                "Batch 外部 side effect 結果未知，必須先由管理員 Recovery 或 Abandon",
+                "BATCH-UNKNOWN-HOLD",
+            )
         provider = self._provider(str(batch["provider_id"]), plan)
         try:
-            self.batches.update_batch(batch_id, status="uploading")
-            input_file_id = provider.upload_batch_file(Path(str(batch["local_input_path"])))
+            current = self.batches.get(batch_id)
+            if current is None:
+                raise KeyError(batch_id)
+            if not current["input_file_id"]:
+                attempt_id = str(uuid4())
+                self.batches.update_batch(
+                    batch_id,
+                    status="uploading",
+                    upload_attempt_id=attempt_id,
+                    phase_started_at=utc_now(),
+                    last_error_code=None,
+                    last_error_message=None,
+                )
+                input_path = Path(str(current["local_input_path"] or ""))
+                if not input_path.is_file():
+                    raise BatchLifecycleError("找不到待上傳的 JSONL 分片", "BATCH-INPUT-002")
+                upload_method = provider.upload_batch_file
+                parameters = inspect.signature(upload_method).parameters
+                if "remote_filename" in parameters or any(
+                    parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+                ):
+                    input_file_id = upload_method(
+                        input_path, remote_filename=f"inktime-batch-{batch_id}.jsonl"
+                    )
+                else:  # compatibility with older test and third-party providers
+                    input_file_id = upload_method(input_path)
+                if not isinstance(input_file_id, str) or not input_file_id:
+                    raise BatchLifecycleError("上傳回應缺少 file id", "BATCH-UPLOAD-UNKNOWN")
+                self.batches.update_batch(
+                    batch_id,
+                    input_file_id=input_file_id,
+                    status="uploaded",
+                    phase_started_at=utc_now(),
+                )
+            current = self.batches.get(batch_id)
+            if current is None or not current["input_file_id"]:
+                raise BatchLifecycleError("Batch 缺少已保存的 input_file_id", "BATCH-UPLOAD-UNKNOWN")
+            attempt_id = str(uuid4())
             self.batches.update_batch(
-                batch_id, input_file_id=input_file_id, status="validating", submitted_at=utc_now()
+                batch_id,
+                status="submitting",
+                submission_attempt_id=attempt_id,
+                phase_started_at=utc_now(),
+                submitted_at=utc_now(),
             )
             remote = provider.create_batch(
-                input_file_id,
+                str(current["input_file_id"]),
                 completion_window="24h",
                 metadata={"inktime_batch_id": batch_id, "inktime_version": "batch-lifecycle-v1"},
                 output_expires_after_seconds=int(
@@ -556,38 +618,65 @@ class BatchAnalysisService:
             )
             remote_id = remote.get("id")
             if not isinstance(remote_id, str) or not remote_id:
-                raise BatchLifecycleError("遠端 Batch 建立回應缺少 id", "BATCH-REMOTE-004")
-            self.batches.update_batch(batch_id, remote_batch_id=remote_id)
-            self.batches.set_status_from_remote(batch_id, remote)
-            for item in self.batches.items(batch_id):
-                if str(item["status"]) == "pending":
-                    self.batches.update_item(str(item["id"]), status="submitted")
+                raise BatchLifecycleError("遠端 Batch 建立回應缺少 id", "BATCH-SUBMISSION-UNKNOWN")
+            self.batches.bind_recovered_remote(batch_id, remote)
             self._activity("INFO", "batch_submitted", "Batch 已提交", batch_id=batch_id, status="validating")
         except Exception as exc:
             current = self.batches.get(batch_id)
             has_uploaded_file = bool(current is not None and current["input_file_id"])
-            ambiguous = bool(getattr(exc, "ambiguous", False)) or str(getattr(exc, "code", "")) in {
+            code = str(getattr(exc, "code", "BATCH-SUBMIT-001"))
+            ambiguous = bool(getattr(exc, "ambiguous", False)) or code in {
                 "BATCH-SUBMISSION-UNKNOWN",
-                "BATCH-REMOTE-004",
+                "BATCH-UPLOAD-UNKNOWN",
             }
-            self.batches.update_batch(
-                batch_id,
-                status="failed" if ambiguous or not has_uploaded_file else "cleanup_pending",
-                remote_status="submission_unknown" if ambiguous else "failed",
-                cleanup_status="pending" if has_uploaded_file else "not_required",
-                last_error_code="submission_unknown"
-                if ambiguous
-                else str(getattr(exc, "code", "BATCH-SUBMIT-001")),
-                last_error_message=str(exc)[:1000],
+            upload_unknown = code == "BATCH-UPLOAD-UNKNOWN" or (
+                ambiguous and current is not None and str(current["status"]) == "uploading"
             )
+            if ambiguous:
+                next_status = "upload_unknown" if upload_unknown else "submission_unknown"
+                self.batches.update_batch(
+                    batch_id,
+                    status=next_status,
+                    remote_status=next_status,
+                    cleanup_status="pending" if has_uploaded_file else "not_required",
+                    last_error_code=next_status,
+                    last_error_message=str(exc)[:1000],
+                    phase_started_at=utc_now(),
+                )
+            elif has_uploaded_file:
+                # A definite HTTP rejection leaves the uploaded input file to
+                # the cleanup worker; it is never silently retried as a new Batch.
+                self.batches.update_batch(
+                    batch_id,
+                    status="cleanup_pending",
+                    remote_status="failed",
+                    cleanup_status="pending",
+                    last_error_code=code,
+                    last_error_message=str(exc)[:1000],
+                    phase_started_at=utc_now(),
+                )
+            else:
+                self.batches.update_batch(
+                    batch_id,
+                    status="failed",
+                    remote_status="failed",
+                    cleanup_status="not_required",
+                    last_error_code=code,
+                    last_error_message=str(exc)[:1000],
+                    phase_started_at=utc_now(),
+                )
             for item in self.batches.items(batch_id):
                 if str(item["status"]) == "pending":
                     self.batches.update_item(
                         str(item["id"]),
-                        status="failed" if ambiguous else "retry_pending",
-                        error_code="submission_unknown" if ambiguous else "submit_failed",
+                        status=("upload_unknown" if upload_unknown else "submission_unknown")
+                        if ambiguous
+                        else ("retry_pending" if has_uploaded_file else "failed"),
+                        error_code=("upload_unknown" if upload_unknown else "submission_unknown")
+                        if ambiguous
+                        else "submit_failed",
                     )
-            if ambiguous or not has_uploaded_file:
+            if not ambiguous and not has_uploaded_file:
                 self._finish(batch_id)
             raise
         finally:
@@ -632,7 +721,6 @@ class BatchAnalysisService:
             analysis_fingerprint=analysis_fp,
             analysis_spec=plan,
         )
-        self.job_service.start(job_id)
         job_items = self.jobs.list_items(job_id, limit=max(100, len(candidates)))
         job_items_by_photo = {str(item["photo_id"]): item for item in job_items}
         estimated_each = float(estimate["estimated_cost"] or 0) / max(1, len(candidates))
@@ -653,23 +741,47 @@ class BatchAnalysisService:
                     "estimated_cost": estimated_each,
                 }
             )
-        self.batches.create_with_items(
-            {
-                "id": batch_id,
-                "job_id": job_id,
-                "provider_id": provider_id,
-                "model": model,
-                "endpoint": self.ENDPOINT,
-                "analysis_fingerprint": analysis_fp,
-                "estimated_cost": estimate["estimated_cost"],
-                "sample_seed": seed,
-                "candidate_snapshot_json": self.batches.snapshot_json(
-                    [str(item["photo"]["id"]) for item in candidates]
-                ),
-                "scope": scope,
-            },
-            item_rows,
-        )
+        try:
+            self.batches.create_with_items(
+                {
+                    "id": batch_id,
+                    "job_id": job_id,
+                    "provider_id": provider_id,
+                    "model": model,
+                    "endpoint": self.ENDPOINT,
+                    "analysis_fingerprint": analysis_fp,
+                    "estimated_cost": estimate["estimated_cost"],
+                    "sample_seed": seed,
+                    "candidate_snapshot_json": self.batches.snapshot_json(
+                        [str(item["photo"]["id"]) for item in candidates]
+                    ),
+                    "scope": scope,
+                },
+                item_rows,
+            )
+        except sqlite3.IntegrityError as exc:
+            # The partial unique reservation indexes serialize concurrent
+            # submits.  The losing Job was never started and is explicitly
+            # closed so it cannot become an orphan pending/running Job.
+            self.jobs.abandon_unstarted(job_id)
+            raise BatchLifecycleError(
+                "候選照片已被另一個 Batch reservation 取得，未建立第二個遠端 Batch",
+                "BATCH-RESERVATION-CONFLICT",
+            ) from exc
+        try:
+            self.job_service.start(job_id)
+        except Exception as exc:
+            self.jobs.abandon_unstarted(job_id, "BATCH-JOB-START-001")
+            self.batches.update_batch(
+                batch_id,
+                status="failed",
+                remote_status="failed",
+                cleanup_status="not_required",
+                last_error_code="BATCH-JOB-START-001",
+                last_error_message=str(exc)[:1000],
+            )
+            self._finish(batch_id)
+            raise
         provider = self._provider(provider_id, plan)
         try:
             batch_ids = self._prepare_shards(batch_id, candidates, plan, provider)
@@ -731,8 +843,40 @@ class BatchAnalysisService:
             self.job_service.start(job_id)
         return job_id
 
+    def _phase_is_stale(self, batch: dict[str, Any]) -> bool:
+        raw = str(batch.get("phase_started_at") or batch.get("updated_at") or "")
+        try:
+            started = datetime.fromisoformat(raw).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            return True
+        timeout = max(60, int(self.settings.get("batch.recovery_timeout_seconds", 900)))
+        return time.time() - started >= timeout
+
+    def _mark_unknown_after_restart(self, batch: dict[str, Any], *, upload: bool) -> None:
+        state = "upload_unknown" if upload else "submission_unknown"
+        self.batches.update_batch(
+            str(batch["id"]),
+            status=state,
+            remote_status=state,
+            last_error_code=state,
+            last_error_message="程序重啟後外部 side effect 結果未知，等待管理員驗證",
+            completed_at=None,
+            phase_started_at=utc_now(),
+        )
+        for item in self.batches.items(str(batch["id"])):
+            if str(item["status"]) in {"pending", "submitted"}:
+                self.batches.update_item(
+                    str(item["id"]), status=state, error_code=state, error_message="restart recovery hold"
+                )
+
     def poll_due(self, *, limit: int = 20) -> dict[str, int]:
         statuses = {
+            "preparing",
+            "uploading",
+            "upload_unknown",
+            "uploaded",
+            "submitting",
+            "submission_unknown",
             "validating",
             "in_progress",
             "finalizing",
@@ -746,11 +890,56 @@ class BatchAnalysisService:
         enqueued = 0
         for batch in rows:
             batch_id = str(batch["id"])
-            if str(batch["status"]) == "cleanup_pending":
+            status = str(batch["status"])
+            if status == "preparing":
+                if self._phase_is_stale(batch):
+                    self.batches.update_batch(
+                        batch_id,
+                        status="failed",
+                        remote_status="failed",
+                        last_error_code="BATCH-RECOVERY-PREPARING",
+                        last_error_message="JSONL preparation 在重啟前未完成",
+                        cleanup_status="not_required",
+                    )
+                    for item in self.batches.items(batch_id):
+                        if str(item["status"]) == "pending":
+                            self.batches.update_item(
+                                str(item["id"]), status="failed", error_code="BATCH-RECOVERY-PREPARING"
+                            )
+                    self._finish(batch_id)
+                continue
+            if status == "uploading":
+                if self._phase_is_stale(batch):
+                    self._mark_unknown_after_restart(batch, upload=True)
+                continue
+            if status == "upload_unknown" or status == "submission_unknown":
+                # Unknown side effects are an intentional hold.  Scheduler
+                # must never call POST /files or POST /batches again.
+                continue
+            if status == "uploaded":
+                plan_row = self.jobs.get(str(batch["job_id"])) if batch["job_id"] else None
+                try:
+                    plan = json.loads(str(plan_row["analysis_spec_json"] or "{}")) if plan_row else {}
+                    self._submit_one(batch_id, plan)
+                except Exception as exc:
+                    self.batches.update_batch(
+                        batch_id,
+                        last_error_code=str(getattr(exc, "code", "BATCH-RECOVERY-UPLOAD-001")),
+                        last_error_message=str(exc)[:1000],
+                    )
+                continue
+            if status == "submitting":
+                if self._phase_is_stale(batch):
+                    self._mark_unknown_after_restart(batch, upload=False)
+                continue
+            if status == "validating" and not batch["remote_batch_id"]:
+                self._mark_unknown_after_restart(batch, upload=False)
+                continue
+            if status == "cleanup_pending":
                 self._enqueue_import(batch_id, cleanup_only=True)
                 enqueued += 1
                 continue
-            if str(batch["status"]) in {"import_pending", "importing"}:
+            if status in {"import_pending", "importing"}:
                 self._enqueue_import(batch_id)
                 enqueued += 1
                 continue
@@ -758,8 +947,29 @@ class BatchAnalysisService:
             if not remote_id:
                 continue
             plan_row = self.jobs.get(str(batch["job_id"])) if batch["job_id"] else None
+            provider = None
             try:
-                plan = json.loads(str(plan_row["analysis_spec_json"] or "{}")) if plan_row else {}
+                try:
+                    plan = json.loads(str(plan_row["analysis_spec_json"] or "{}")) if plan_row else {}
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    has_files = any(
+                        batch[key] for key in ("input_file_id", "output_file_id", "error_file_id")
+                    )
+                    self.batches.update_batch(
+                        batch_id,
+                        status="cleanup_pending" if has_files else "failed",
+                        remote_status="failed",
+                        cleanup_status="pending" if has_files else "not_required",
+                        last_error_code="BATCH-POLL-PLAN-001",
+                        last_error_message="Frozen Analysis Plan JSON 無法解析；停止輪詢並進入清理",
+                        completed_at=None if has_files else utc_now(),
+                    )
+                    if has_files:
+                        self._enqueue_import(batch_id, cleanup_only=True)
+                        enqueued += 1
+                    else:
+                        self._finish(batch_id)
+                    continue
                 provider = self._provider(str(batch["provider_id"]), plan)
                 remote = provider.retrieve_batch(remote_id)
                 state = self.batches.set_status_from_remote(batch_id, remote)
@@ -774,9 +984,8 @@ class BatchAnalysisService:
                     last_error_message=str(exc)[:1000],
                 )
             finally:
-                close = locals().get("provider")
-                if close is not None and callable(getattr(close, "close", None)):
-                    close.close()
+                if provider is not None and callable(getattr(provider, "close", None)):
+                    provider.close()
         return {"polled": polled, "enqueued": enqueued}
 
     def cancel(self, batch_id: str) -> dict[str, Any]:
@@ -784,17 +993,42 @@ class BatchAnalysisService:
         if batch is None:
             raise KeyError(batch_id)
         if str(batch["status"]) in TERMINAL_BATCH_STATUSES:
+            if str(batch["cleanup_status"]) not in {"completed", "not_required"}:
+                self.batches.update_batch(batch_id, status="cleanup_pending")
+                self._enqueue_import(batch_id, cleanup_only=True)
+                return {"status": "cleanup_pending", "cleanup_retry": True}
             return {"status": str(batch["status"]), "already_terminal": True}
         plan_row = self.jobs.get(str(batch["job_id"])) if batch["job_id"] else None
         plan = json.loads(str(plan_row["analysis_spec_json"] or "{}")) if plan_row else {}
         if not batch["remote_batch_id"]:
+            if str(batch["status"]) in {"upload_unknown", "submission_unknown", "submitting", "uploading"}:
+                raise BatchLifecycleError(
+                    "外部 side effect 結果未知，請使用 Confirm no remote Batch / Abandon",
+                    "BATCH-CANCEL-UNKNOWN",
+                )
+            has_files = any(batch[key] for key in ("input_file_id", "output_file_id", "error_file_id"))
+            if has_files:
+                self.batches.update_batch(
+                    batch_id,
+                    status="cleanup_pending",
+                    remote_status="cancelled",
+                    last_error_code="cancel_pending_cleanup",
+                    last_error_message="取消後等待本機已知的遠端檔案清理",
+                    cleanup_status="pending",
+                )
+                self._enqueue_import(batch_id, cleanup_only=True)
+                return {"status": "cleanup_pending", "local_only": True}
             self.batches.update_batch(
-                batch_id, status="cancelled", remote_status="cancelled", completed_at=utc_now()
+                batch_id,
+                status="cancelled",
+                remote_status="cancelled",
+                completed_at=utc_now(),
+                cleanup_status="not_required",
+                cleanup_completed_at=utc_now(),
             )
             for item in self.batches.items(batch_id):
-                if str(item["status"]) in {"pending", "submitted"}:
+                if str(item["status"]) in {"pending", "submitted", "upload_unknown", "submission_unknown"}:
                     self.batches.update_item(str(item["id"]), status="cancelled", error_code="cancelled")
-            self.batches.update_batch(batch_id, cleanup_status="not_required", cleanup_completed_at=utc_now())
             self._finish(batch_id)
             return {"status": "cancelled", "local_only": True}
         provider = self._provider(str(batch["provider_id"]), plan)
@@ -809,6 +1043,45 @@ class BatchAnalysisService:
             close = getattr(provider, "close", None)
             if callable(close):
                 close()
+
+    def abandon(self, batch_id: str, *, confirmed_no_remote: bool) -> dict[str, Any]:
+        """Explicitly abandon an unknown submission after human confirmation."""
+
+        if confirmed_no_remote is not True:
+            raise BatchLifecycleError("Abandon 必須明確確認遠端 Batch 不存在", "BATCH-ABANDON-CONFIRM-001")
+        batch = self.batches.get(batch_id)
+        if batch is None:
+            raise KeyError(batch_id)
+        if batch["remote_batch_id"]:
+            raise BatchLifecycleError("已有遠端 Batch ID，不可 Abandon", "BATCH-ABANDON-REMOTE-001")
+        if str(batch["status"]) not in {
+            "upload_unknown",
+            "submission_unknown",
+            "submitting",
+            "uploading",
+            "uploaded",
+            "validating",
+        }:
+            raise BatchLifecycleError("目前 Batch 不在可 Abandon 階段", "BATCH-ABANDON-002")
+        has_files = any(batch[key] for key in ("input_file_id", "output_file_id", "error_file_id"))
+        self.batches.update_batch(
+            batch_id,
+            abandon_confirmed_at=utc_now(),
+            last_error_code="abandon_pending_cleanup" if has_files else "abandoned",
+            last_error_message="管理員已確認遠端 Batch 不存在",
+            status="cleanup_pending" if has_files else "failed",
+            remote_status="abandoned",
+            cleanup_status="pending" if has_files else "not_required",
+            completed_at=None if has_files else utc_now(),
+        )
+        if has_files:
+            self._enqueue_import(batch_id, cleanup_only=True)
+            return {"status": "cleanup_pending", "batch_id": batch_id}
+        for item in self.batches.items(batch_id):
+            if str(item["status"]) not in {"imported", "failed", "cancelled"}:
+                self.batches.update_item(str(item["id"]), status="failed", error_code="abandoned")
+        self._finish(batch_id)
+        return {"status": str(self.batches.get(batch_id)["status"]), "batch_id": batch_id}
 
     def retry_failed(self, batch_id: str, *, created_by: str | None = None) -> dict[str, Any]:
         items = self.batches.items(batch_id)
@@ -832,7 +1105,12 @@ class BatchAnalysisService:
         return self.submit(scope="manual_selection", photo_ids=photo_ids, created_by=created_by)
 
     def recover_submission(self, batch_id: str, remote_batch_id: str) -> dict[str, Any]:
-        """Bind a manually confirmed remote Batch without creating another one."""
+        """Bind a manually confirmed remote Batch without creating another one.
+
+        The remote object is fetched with the frozen Provider route first.  No
+        local mutation or cleanup is allowed until every ownership assertion
+        succeeds.
+        """
 
         remote_id = str(remote_batch_id or "").strip()
         if not REMOTE_BATCH_ID_RE.fullmatch(remote_id):
@@ -840,32 +1118,91 @@ class BatchAnalysisService:
         batch = self.batches.get(batch_id)
         if batch is None:
             raise KeyError(batch_id)
-        if str(batch["last_error_code"] or "") != "submission_unknown":
-            raise BatchLifecycleError("只有提交結果未知的 Batch 可以 Recovery", "BATCH-RECOVERY-002")
+        if str(batch["status"]) not in {"submission_unknown", "submitting", "validating"}:
+            raise BatchLifecycleError("目前 Batch 不在可 Recovery 的提交階段", "BATCH-RECOVERY-002")
+        if str(batch["status"]) == "validating" and batch["remote_batch_id"]:
+            raise BatchLifecycleError("Batch 已有遠端 ID，應由 Poll 流程處理", "BATCH-RECOVERY-002")
+        plan_row = self.jobs.get(str(batch["job_id"])) if batch["job_id"] else None
+        try:
+            plan = json.loads(str(plan_row["analysis_spec_json"] or "{}")) if plan_row else {}
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise BatchLifecycleError(
+                "Frozen Analysis Plan JSON 無法解析", "BATCH-RECOVERY-PLAN-001"
+            ) from exc
+        provider = None
+        try:
+            provider = self._provider(str(batch["provider_id"]), plan)
+            remote = provider.retrieve_batch(remote_id)
+        finally:
+            if provider is not None and callable(getattr(provider, "close", None)):
+                provider.close()
+        if not isinstance(remote, dict) or str(remote.get("id") or "") != remote_id:
+            raise BatchLifecycleError("遠端 Batch ID 與人工輸入不一致", "BATCH-RECOVERY-OWNERSHIP-001")
+        if str(remote.get("endpoint") or "") != self.ENDPOINT:
+            raise BatchLifecycleError("遠端 Batch endpoint 不符合本機契約", "BATCH-RECOVERY-OWNERSHIP-002")
+        if str(remote.get("input_file_id") or "") != str(batch["input_file_id"] or ""):
+            raise BatchLifecycleError(
+                "遠端 input_file_id 不符合本機已保存檔案", "BATCH-RECOVERY-OWNERSHIP-003"
+            )
+        metadata = remote.get("metadata")
+        if not isinstance(metadata, dict):
+            raise BatchLifecycleError("遠端 Batch 缺少 ownership metadata", "BATCH-RECOVERY-OWNERSHIP-004")
+        if str(metadata.get("inktime_batch_id") or "") != batch_id:
+            raise BatchLifecycleError(
+                "遠端 metadata Batch ID 不符合本機 Batch", "BATCH-RECOVERY-OWNERSHIP-005"
+            )
+        if str(metadata.get("inktime_version") or "") != "batch-lifecycle-v1":
+            raise BatchLifecycleError(
+                "遠端 Batch lifecycle version 不符合本機契約", "BATCH-RECOVERY-OWNERSHIP-006"
+            )
+        route = next(
+            (
+                item
+                for item in plan.get("provider_route", [])
+                if str(item.get("provider_id")) == str(batch["provider_id"])
+            ),
+            None,
+        )
+        current_route = next(
+            (
+                item
+                for item in self.provider_service.route_snapshot()
+                if str(item.get("provider_id")) == str(batch["provider_id"])
+            ),
+            None,
+        )
+        if (
+            not route
+            or not current_route
+            or str(route.get("config_revision")) != str(current_route.get("config_revision"))
+        ):
+            raise BatchLifecycleError(
+                "Provider/project context 已變更，拒絕 Recovery", "BATCH-RECOVERY-OWNERSHIP-007"
+            )
+        counts = remote.get("request_counts")
+        if (
+            isinstance(counts, dict)
+            and "total" in counts
+            and int(counts.get("total") or 0) != int(batch["total_items"] or 0)
+        ):
+            raise BatchLifecycleError(
+                "遠端 request_counts.total 與本機 Batch 數量不一致", "BATCH-RECOVERY-OWNERSHIP-008"
+            )
         existing = str(batch["remote_batch_id"] or "")
         if existing and existing != remote_id:
             raise BatchLifecycleError("Batch 已綁定其他遠端 ID", "BATCH-RECOVERY-003")
-        self.batches.update_batch(
-            batch_id,
-            status="validating",
-            remote_batch_id=remote_id,
-            remote_status="recovered_pending_poll",
-            last_error_code=None,
-            last_error_message=None,
-        )
-        for item in self.batches.items(batch_id):
-            if str(item["error_code"] or "") == "submission_unknown":
-                self.batches.update_item(
-                    str(item["id"]), status="submitted", error_code=None, error_message=None
-                )
+        state = self.batches.bind_recovered_remote(batch_id, remote)
+        self.jobs.reopen_batch_job(str(batch["job_id"])) if batch["job_id"] else None
         self._activity(
             "INFO",
             "batch_submission_recovered",
             "已綁定人工確認的既有遠端 Batch",
             batch_id=batch_id,
-            status="validating",
+            status=state,
         )
-        return {"batch_id": batch_id, "remote_batch_id": remote_id, "status": "validating"}
+        if state == "import_pending":
+            self._enqueue_import(batch_id)
+        return {"batch_id": batch_id, "remote_batch_id": remote_id, "status": state}
 
     def retry_cleanup(self, batch_id: str) -> str:
         batch = self.batches.get(batch_id)
@@ -1148,28 +1485,45 @@ class BatchAnalysisService:
                 continue
 
     def _cleanup_remote(self, batch: dict[str, Any], plan: dict[str, Any]) -> bool:
-        file_ids = [
-            str(batch[key]) for key in ("input_file_id", "output_file_id", "error_file_id") if batch[key]
-        ]
-        if not file_ids:
+        files = (
+            ("input", "input_file_id", "input_file_deleted"),
+            ("output", "output_file_id", "output_file_deleted"),
+            ("error", "error_file_id", "error_file_deleted"),
+        )
+        if not any(batch[file_key] for _, file_key, _ in files):
             self.batches.update_batch(
                 batch["id"], cleanup_status="not_required", cleanup_completed_at=utc_now()
             )
             self._cleanup_local(batch)
             return True
+        pending = [entry for entry in files if batch[entry[1]] and not bool(batch[entry[2]])]
+        if not pending:
+            self.batches.update_batch(batch["id"], cleanup_status="completed", cleanup_completed_at=utc_now())
+            self._cleanup_local(batch)
+            return True
         provider = self._provider(str(batch["provider_id"]), plan)
         failed = False
         try:
-            for file_id in file_ids:
+            for file_kind, file_key, _ in pending:
+                file_id = str(batch[file_key])
                 try:
                     provider.delete_remote_file(file_id)
                 except Exception as exc:
-                    failed = True
-                    self.batches.update_batch(
-                        str(batch["id"]),
-                        last_error_code=str(getattr(exc, "code", "BATCH-CLEANUP-001")),
-                        last_error_message=str(exc)[:1000],
-                    )
+                    status = int(getattr(exc, "http_status", 0) or 0)
+                    code = str(getattr(exc, "code", "BATCH-CLEANUP-001"))
+                    # DELETE is idempotent from the lifecycle perspective:
+                    # not-found and expired remote files are already cleaned.
+                    if status not in {404, 410} and not any(
+                        marker in code.casefold() for marker in ("not_found", "not-found", "expired")
+                    ):
+                        failed = True
+                        self.batches.update_batch(
+                            str(batch["id"]),
+                            last_error_code=code,
+                            last_error_message=str(exc)[:1000],
+                        )
+                        continue
+                self.batches.mark_file_deleted(str(batch["id"]), file_kind)
         finally:
             close = getattr(provider, "close", None)
             if callable(close):
@@ -1180,12 +1534,34 @@ class BatchAnalysisService:
         self.batches.update_batch(
             str(batch["id"]), cleanup_status="completed", cleanup_completed_at=utc_now()
         )
+        marker = str(self.batches.get(str(batch["id"]))["last_error_code"] or "")
+        if marker in {"abandon_pending_cleanup", "cancel_pending_cleanup"}:
+            target = "failed" if marker == "abandon_pending_cleanup" else "cancelled"
+            for item in self.batches.items(str(batch["id"])):
+                if str(item["status"]) not in {"imported", "failed", "cancelled"}:
+                    self.batches.update_item(
+                        str(item["id"]), status=target, error_code=marker, error_message=marker
+                    )
+            self.batches.update_batch(
+                str(batch["id"]),
+                status=target,
+                remote_status=target,
+                completed_at=utc_now(),
+            )
         self._cleanup_local(batch)
         return True
 
     def _finish(self, batch_id: str) -> None:
         batch = self.batches.get(batch_id)
         if batch is None:
+            return
+        if str(batch["status"]) in {"upload_unknown", "submission_unknown"} or str(
+            batch["remote_status"] or ""
+        ) in {"upload_unknown", "submission_unknown"}:
+            # Unknown side effects retain the item reservation and the parent
+            # Job.  Only verified Recovery or explicit Abandon may leave this
+            # state; never terminalize it as a local failure.
+            self.batches.update_batch(batch_id, completed_at=None)
             return
         counts = self.batches.counts(batch_id)
         imported = int(counts.get("imported", 0))
@@ -1262,7 +1638,29 @@ class BatchAnalysisService:
         if str(batch["status"]) in TERMINAL_BATCH_STATUSES and str(batch["cleanup_status"]) == "completed":
             return {"batch_id": batch_id, "already_imported": True}
         plan_row = self.jobs.get(str(batch["job_id"])) if batch["job_id"] else None
-        plan = json.loads(str(plan_row["analysis_spec_json"] or "{}")) if plan_row else {}
+        try:
+            plan = json.loads(str(plan_row["analysis_spec_json"] or "{}")) if plan_row else {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            has_files = any(batch[key] for key in ("input_file_id", "output_file_id", "error_file_id"))
+            self.batches.update_batch(
+                batch_id,
+                status="cleanup_pending" if has_files else "failed",
+                remote_status="failed",
+                cleanup_status="pending" if has_files else "not_required",
+                last_error_code="BATCH-IMPORT-PLAN-001",
+                last_error_message="Frozen Analysis Plan JSON 無法解析；不匯入不完整結果",
+                completed_at=None if has_files else utc_now(),
+            )
+            for item in self.batches.items(batch_id):
+                if str(item["status"]) not in {"imported", "failed", "cancelled"}:
+                    self.batches.update_item(
+                        str(item["id"]),
+                        status="failed",
+                        error_code="BATCH-IMPORT-PLAN-001",
+                        error_message="Frozen Analysis Plan JSON 無法解析",
+                    )
+            plan = self._cleanup_plan(batch) if has_files else {}
+            cleanup_only = True
         if cleanup_only or str(batch["status"]) == "cleanup_pending":
             self._cleanup_remote(batch, plan)
             if str(self.batches.get(batch_id)["cleanup_status"]) == "completed":

@@ -9,7 +9,7 @@ InkTime 的 Batch 是「一行一個獨立 Chat Completions Request」，不是�
 3. 以內容 SHA 去重，檢查目前 Analysis Fingerprint、Vision Request Fingerprint 與 AI Cache。
 4. 在 SQLite 先建立 `analysis_batches`、`analysis_batch_items` 與匿名 `custom_id` 對照並 Commit。
 5. 逐張從 ThumbnailCache 產生 EXIF transpose、1024px、JPEG Quality 88 的無 EXIF/GPS 縮圖，串流寫入 `/data/batches/<batch-id>/<shard-id>/input.jsonl`。
-6. 上傳 Input File、建立 24h Batch 後立即釋放提交 Worker；`output_expires_after` 使用 `anchor=created_at`，秒數限制在 3600–2592000；Scheduler 只輪詢，Worker 只處理有界 Import 工作。
+6. 上傳 Input File、建立 24h Batch 後立即釋放提交 Worker；`/files` 是不可安全重送的 side effect，呼叫前會保存 attempt identity，timeout、connection reset 或未知 5xx 會進入 `upload_unknown`。`output_expires_after` 使用 `anchor=created_at`，秒數限制在 3600–2592000；Scheduler 只輪詢，Worker 只處理有界 Import 工作。
 7. 遠端 terminal state 後下載 Output/Error File，逐行驗證、對帳、使用既有評分與儲存邏輯匯入。
 8. 成功、失敗、漏件、Stale 與 Schema 無效分開統計；最後刪除遠端三種 File。刪除失敗只進 `cleanup_pending`，不回滾已匯入結果。
 
@@ -21,7 +21,7 @@ InkTime 的 Batch 是「一行一個獨立 Chat Completions Request」，不是�
 
 ## 狀態、取消、過期與重試
 
-本機狀態包含 `preparing`、`uploading`、`validating`、`in_progress`、`finalizing`、`import_pending`、`importing`、`completed`、`completed_with_errors`、`failed`、`expired`、`cancelling`、`cancelled` 與 `cleanup_pending`。若建立 Batch 的 POST 逾時或回應遺失，會以 `last_error_code=submission_unknown` 保留為「提交結果未知」，不會自動重送。
+本機狀態包含 `preparing`、`uploading`、`upload_unknown`、`uploaded`、`submitting`、`submission_unknown`、`validating`、`in_progress`、`finalizing`、`import_pending`、`importing`、`completed`、`completed_with_errors`、`failed`、`expired`、`cancelling`、`cancelled` 與 `cleanup_pending`。`upload_unknown` 與 `submission_unknown` 都是非 terminal hold：保留照片 reservation 與 parent Job，Scheduler 不會再次 POST `/files` 或 `/batches`。若建立 Batch 的 POST 逾時、connection loss 或未知 5xx，會以 `last_error_code=submission_unknown` 保留為「提交結果未知」，不會自動重送。
 
 取消或過期時仍先匯入已完成成功行；明確 Error File 行記錄遠端錯誤；未出現於 Success/Error 集合的項目進 `missing`／`retry_pending`。重試只建立失敗、漏件、Schema 無效與可重試項目的新 Batch，不重送已匯入成功項目。
 
@@ -49,9 +49,14 @@ Docker 重啟後 Scheduler 由 `remote_batch_id` 繼續 Poll；若 Output 已下
 - `BATCH-INPUT-TOO-LARGE`：單張縮圖形成的 Request 已超過分片上限；不要無限重試，降低圖片上限或檢查異常檔案。
 - `missing_result`／`unexpected_custom_id`／`duplicate_custom_id`：保留 Output/Error File 與對帳狀態，先查 Batch Detail，再只重試失敗項目。
 - `stale`：照片在遠端執行期間內容或 Fingerprint 改變；舊結果不會寫入新內容，下一次增量 Batch 會處理目前版本。
-- `cleanup_pending`：分析結果已完成，只有遠端 File 刪除失敗；按「重試遠端清理」，不要重送整批。
-- `submission_unknown`：先在 OpenAI Dashboard／API 確認既有遠端 Batch，再在 Batch 詳情輸入既有 `remote_batch_id`；Recovery 只綁定既有 Batch，不會再次 POST `/batches`。
+- `cleanup_pending`：分析結果已完成，只有尚未完成的遠端 File 刪除失敗；每個 input/output/error file 都會在成功或 404/410 後立即持久化完成，按「重試遠端清理」只會處理尚未完成的檔案，不要重送整批。
+- `upload_unknown`：遠端 File 是否建立不明；不要重試上傳。若無法由遠端檔案 identity 可靠辨識，請依 Batch 詳情告警人工處理。
+- `submission_unknown`：先在 OpenAI Dashboard／API 確認既有遠端 Batch，再在 Batch 詳情使用「綁定並驗證」輸入既有 `remote_batch_id`。Recovery 會用原本 Provider route 驗證 ID、endpoint、input file、匿名 metadata、版本與 request count，失敗時不改本地狀態，也不刪除任何遠端檔案。確認遠端不存在後才可勾選 Abandon；清理完成後才會 terminalize 與釋放 reservation。
 
 ## 離線 Payload 驗證
 
-`control_plane_test` 使用 Fake Provider 驗證生命週期、亂序對帳與冪等匯入；`payload_memory_test` 另使用真正的 OpenAI-compatible Request Builder、System Prompt、full JSON Schema、ThumbnailCache 與 100 張 deterministic structured JPEG，驗證每行都有 `data:image/jpeg;base64,`、匿名 `custom_id`、0600 權限、實際 JSONL bytes 與峰值 RSS。Fake lifecycle 的輸出大小不能代表正式圖片 Payload 大小。
+`control_plane_test` 使用 Fake Provider 驗證生命週期、亂序對帳與冪等匯入；`payload_memory_test` 另使用真正的 OpenAI-compatible Request Builder、System Prompt、full JSON Schema、ThumbnailCache 與 100／500 張 deterministic structured JPEG，驗證每行都有 `data:image/jpeg;base64,`、匿名 `custom_id`、0600 權限、實際 JSONL bytes、分片限制與峰值 RSS。Fake lifecycle 的輸出大小不能代表正式圖片 Payload 大小。
+
+## 真實 API 人工 Smoke 邊界
+
+CI 不會呼叫真實 OpenAI，也不會保存或輸出 API Key。需要人工驗收時，先準備 1–3 張非敏感測試 JPEG，設定 `INKTIME_OPENAI_LIVE_SMOKE=1`、`OPENAI_API_KEY`、可選的 `OPENAI_BASE_URL` 與 `INKTIME_LIVE_SMOKE_IMAGES`，執行 `scripts/openai_batch_live_smoke.py`。先確認模型 `gpt-5.6-luna`、Chat Completions、image input、`reasoning_effort`、full JSON Schema、Output/Error File、Token、成本與三種遠端檔案清理，再到管理介面跑 100 張 Sample，最後才允許 `all_eligible_missing_analysis`。若未執行此腳本，報告必須標記為 `NOT RUN`。
