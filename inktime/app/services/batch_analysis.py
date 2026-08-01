@@ -1706,7 +1706,9 @@ class BatchAnalysisService:
             close = getattr(provider, "close", None)
             if callable(close):
                 close()
-        expected = {str(item["custom_id"]): item for item in self.batches.items(batch_id)}
+        expected: dict[str, dict[str, Any]] = {
+            str(item["custom_id"]): item for item in self.batches.items(batch_id)
+        }
         unknown = set(records) - set(expected)
         if unknown:
             self.batches.update_batch(
@@ -1715,12 +1717,12 @@ class BatchAnalysisService:
                 last_error_message=f"結果檔含 {len(unknown)} 個未預期 custom_id",
             )
         for custom_id, (kind, record, body) in records.items():
-            item = expected.get(custom_id)
-            if item is None:
+            expected_item: dict[str, Any] | None = expected.get(custom_id)
+            if expected_item is None:
                 continue
             if kind == "duplicate":
                 self._mark_item_error(
-                    item,
+                    expected_item,
                     "duplicate_custom_id",
                     "同一 custom_id 出現在多個結果行或成功／錯誤檔",
                     "duplicate_custom_id",
@@ -1730,7 +1732,7 @@ class BatchAnalysisService:
             elif kind == "error":
                 error = record.get("error") or {}
                 self._mark_item_error(
-                    item,
+                    expected_item,
                     str(error.get("code") or "BATCH-HTTP-ERROR"),
                     str(error.get("message") or "遠端 Batch 項目失敗"),
                     "failed",
@@ -1739,7 +1741,7 @@ class BatchAnalysisService:
                 errors.add(custom_id)
             elif kind == "schema_invalid":
                 self._mark_item_error(
-                    item,
+                    expected_item,
                     "BATCH-RESPONSE-BODY",
                     "Batch Response Body 不是 JSON Object",
                     "schema_invalid",
@@ -1748,7 +1750,7 @@ class BatchAnalysisService:
                 errors.add(custom_id)
             elif kind == "success" and body is not None:
                 successes.add(custom_id)
-                self._import_success(batch, item, record, body, plan, provider)
+                self._import_success(batch, expected_item, record, body, plan, provider)
         seen = set(records)
         for custom_id, item in expected.items():
             if custom_id in seen:
