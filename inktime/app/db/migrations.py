@@ -1047,6 +1047,19 @@ MIGRATIONS = (
                     CHECK(cleanup_status IN ('pending','partial','completed','not_required')
                         AND (cleanup_status!='not_required'
                              OR (input_file_id IS NULL AND output_file_id IS NULL AND error_file_id IS NULL))),
+                cleanup_final_action TEXT NOT NULL DEFAULT 'none'
+                    CHECK(cleanup_final_action IN ('none','complete','cancel','abandon','fail')),
+                input_file_delete_unknown INTEGER NOT NULL DEFAULT 0 CHECK(input_file_delete_unknown IN (0,1)),
+                output_file_delete_unknown INTEGER NOT NULL DEFAULT 0 CHECK(output_file_delete_unknown IN (0,1)),
+                error_file_delete_unknown INTEGER NOT NULL DEFAULT 0 CHECK(error_file_delete_unknown IN (0,1)),
+                cleanup_error_code TEXT,
+                cleanup_error_message TEXT,
+                reconciliation_error_code TEXT,
+                reconciliation_error_message TEXT,
+                provider_config_revision TEXT,
+                provider_base_url_fingerprint TEXT,
+                provider_project_id TEXT,
+                provider_account_fingerprint TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )

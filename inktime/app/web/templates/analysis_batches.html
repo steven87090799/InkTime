@@ -35,7 +35,7 @@
   <section class="card notice">
     <h2>需要管理員處理的外部結果未知 Batch</h2>
     <p>這些 Batch 不會占用 Scheduler 的自動 Poll 配額，也不會自動重新上傳或重新建立遠端 Batch。請開啟詳情完成 File／Batch ownership Recovery，或在取得刪除證據後 Abandon。</p>
-    <ul>{% for hold in operator_holds %}<li><a href="{{ url_for('analysis_batches.batch_detail_page', batch_id=hold.id) }}">{{ hold.id }}</a>：{{ hold.status }}</li>{% endfor %}</ul>
+    <ul>{% for hold in operator_holds %}<li><a href="{{ url_for('analysis_batches.batch_detail_page', batch_id=hold.id) }}">{{ hold.id }}</a>：{{ hold.status }}{% if hold.cleanup_error_code %}（{{ hold.cleanup_error_code }}）{% endif %}</li>{% endfor %}</ul>
   </section>
   {% endif %}
   <section class="card">

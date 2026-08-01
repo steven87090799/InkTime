@@ -107,3 +107,27 @@ class ProviderService:
                 key=lambda row: (int(row.get("priority") or 100), str(row.get("name") or row["id"])),
             )
         ]
+
+    def identity_snapshot(self, provider_id: str) -> dict[str, str]:
+        """Return the non-secret identity required for safe Batch cleanup.
+
+        The account value is a one-way fingerprint of the configured secret.
+        It is intentionally never returned by the Provider API/UI or written
+        to logs; it only prevents a rotated credential from being mistaken for
+        the account that created a remote Batch file.
+        """
+
+        config = self.repository.get(provider_id, include_secret=True)
+        if config is None:
+            raise ValueError(f"VLM-008 找不到 Job 指定的 Provider：{provider_id}")
+        base_url = OpenAICompatibleProvider.normalize_base_url(str(config.get("base_url") or ""))
+        project_id = str(config.get("project_id") or config.get("project") or "")
+        account_secret = str(config.get("api_key") or "")
+        return {
+            "provider_config_revision": self.config_revision(config),
+            "provider_base_url_fingerprint": sha256(base_url.encode("utf-8")).hexdigest(),
+            "provider_project_id": project_id,
+            "provider_account_fingerprint": (
+                sha256(account_secret.encode("utf-8")).hexdigest() if account_secret else ""
+            ),
+        }

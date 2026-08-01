@@ -84,6 +84,18 @@ class AnalysisBatchRepository:
         "scope",
         "peak_rss_bytes",
         "cleanup_status",
+        "cleanup_final_action",
+        "input_file_delete_unknown",
+        "output_file_delete_unknown",
+        "error_file_delete_unknown",
+        "cleanup_error_code",
+        "cleanup_error_message",
+        "reconciliation_error_code",
+        "reconciliation_error_message",
+        "provider_config_revision",
+        "provider_base_url_fingerprint",
+        "provider_project_id",
+        "provider_account_fingerprint",
     }
     ITEM_FIELDS = {
         "batch_id",
@@ -121,8 +133,10 @@ class AnalysisBatchRepository:
                 INSERT INTO analysis_batches(
                     id,job_id,provider_id,model,endpoint,analysis_fingerprint,status,
                     total_items,estimated_cost,sample_seed,candidate_snapshot_json,scope,
+                    provider_config_revision,provider_base_url_fingerprint,provider_project_id,
+                    provider_account_fingerprint,
                     created_at,updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     str(batch["id"]),
@@ -137,6 +151,10 @@ class AnalysisBatchRepository:
                     batch.get("sample_seed"),
                     str(batch.get("candidate_snapshot_json", "[]")),
                     str(batch.get("scope", "all_eligible_missing_analysis")),
+                    batch.get("provider_config_revision"),
+                    batch.get("provider_base_url_fingerprint"),
+                    batch.get("provider_project_id"),
+                    batch.get("provider_account_fingerprint"),
                     now,
                     now,
                 ),
@@ -203,8 +221,10 @@ class AnalysisBatchRepository:
                 INSERT INTO analysis_batches(
                     id,job_id,provider_id,model,endpoint,analysis_fingerprint,status,
                     local_input_path,total_items,estimated_cost,sample_seed,candidate_snapshot_json,scope,
-                    peak_rss_bytes,input_file_bytes,created_at,updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    peak_rss_bytes,input_file_bytes,provider_config_revision,
+                    provider_base_url_fingerprint,provider_project_id,provider_account_fingerprint,
+                    created_at,updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     child_id,
@@ -224,6 +244,10 @@ class AnalysisBatchRepository:
                     parent["scope"],
                     int(peak_rss_bytes),
                     input_file_bytes,
+                    parent["provider_config_revision"],
+                    parent["provider_base_url_fingerprint"],
+                    parent["provider_project_id"],
+                    parent["provider_account_fingerprint"],
                     now,
                     now,
                 ),
@@ -434,7 +458,7 @@ class AnalysisBatchRepository:
                 """
                 UPDATE analysis_batches
                 SET status='upload_unknown',remote_status='upload_unknown',cleanup_status='pending',
-                    last_error_code=?,last_error_message=?,completed_at=NULL,phase_started_at=?,updated_at=?,
+                    reconciliation_error_code=?,reconciliation_error_message=?,completed_at=NULL,phase_started_at=?,updated_at=?,
                     side_effect_owner=NULL,side_effect_lease_until=NULL,side_effect_version=side_effect_version+1
                 WHERE id=? AND status='uploading' AND upload_attempt_id=? AND side_effect_owner=?
                 """,
@@ -539,6 +563,8 @@ class AnalysisBatchRepository:
                 "remote_status": remote_status,
                 "last_error_code": None,
                 "last_error_message": None,
+                "reconciliation_error_code": None,
+                "reconciliation_error_message": None,
                 "last_polled_at": now,
                 "phase_started_at": now,
                 "side_effect_owner": None,
@@ -582,7 +608,7 @@ class AnalysisBatchRepository:
                 """
                 UPDATE analysis_batches
                 SET status='submission_unknown',remote_status='submission_unknown',
-                    last_error_code=?,last_error_message=?,completed_at=NULL,phase_started_at=?,updated_at=?,
+                    reconciliation_error_code=?,reconciliation_error_message=?,completed_at=NULL,phase_started_at=?,updated_at=?,
                     side_effect_owner=NULL,side_effect_lease_until=NULL,side_effect_version=side_effect_version+1
                 WHERE id=? AND status='submitting' AND submission_attempt_id=? AND side_effect_owner=?
                 """,
@@ -613,7 +639,9 @@ class AnalysisBatchRepository:
                 """
                 UPDATE analysis_batches
                 SET input_file_id=?,input_file_bytes=COALESCE(?,input_file_bytes),status='uploaded',
-                    cleanup_status='pending',last_error_code=NULL,last_error_message=NULL,phase_started_at=?,
+                    cleanup_status='pending',cleanup_error_code=NULL,cleanup_error_message=NULL,
+                    last_error_code=NULL,last_error_message=NULL,
+                    reconciliation_error_code=NULL,reconciliation_error_message=NULL,phase_started_at=?,
                     side_effect_owner=NULL,side_effect_lease_until=NULL,side_effect_version=side_effect_version+1,
                     updated_at=?
                 WHERE id=? AND status='upload_unknown' AND remote_batch_id IS NULL
@@ -635,53 +663,30 @@ class AnalysisBatchRepository:
             raise ValueError("必須提供遠端 File 已刪除的明確證據")
         now = utc_now()
         with self.database.transaction() as connection:
-            batch = connection.execute(
-                "SELECT job_id,status FROM analysis_batches WHERE id=?", (batch_id,)
-            ).fetchone()
+            batch = connection.execute("SELECT * FROM analysis_batches WHERE id=?", (batch_id,)).fetchone()
             if batch is None:
                 raise KeyError(batch_id)
             if str(batch["status"]) != "upload_unknown":
                 raise ValueError("目前 Batch 不在 upload_unknown")
             cursor = connection.execute(
                 """
-                UPDATE analysis_batches SET status='failed',remote_status='abandoned',cleanup_status='completed',
-                    cleanup_completed_at=?,completed_at=?,abandon_confirmed_at=?,last_error_code='abandoned',
-                    last_error_message='管理員確認遠端 File 已刪除',input_file_id=NULL,
-                    input_file_deleted=1,side_effect_owner=NULL,side_effect_lease_until=NULL,
-                    side_effect_version=side_effect_version+1,updated_at=?
+                UPDATE analysis_batches SET remote_status='abandoned',abandon_confirmed_at=?,
+                    input_file_deleted=1,updated_at=?
                 WHERE id=? AND status='upload_unknown'
                 """,
-                (now, now, now, now, batch_id),
+                (now, now, batch_id),
             )
-            if cursor.rowcount:
-                connection.execute(
-                    """
-                    UPDATE analysis_batch_items SET status='failed',error_code='abandoned',
-                        error_message='管理員確認遠端 File 已刪除',updated_at=?
-                    WHERE batch_id=? AND status NOT IN ('imported','failed','cancelled')
-                    """,
-                    (now, batch_id),
-                )
-                if batch["job_id"]:
-                    job_id = str(batch["job_id"])
-                    connection.execute(
-                        """
-                        UPDATE job_items SET status='failed',completed_at=?,error_code='abandoned',lease_until=NULL
-                        WHERE job_id=? AND status NOT IN ('completed','failed','cancelled')
-                        """,
-                        (now, job_id),
-                    )
-                    connection.execute(
-                        """
-                        UPDATE jobs SET status='failed',completed_at=?,completed_items=(
-                            SELECT COUNT(*) FROM job_items WHERE job_id=? AND status='completed'
-                        ),failed_items=(
-                            SELECT COUNT(*) FROM job_items WHERE job_id=? AND status='failed'
-                        ),heartbeat_at=?
-                        WHERE id=? AND status NOT IN ('completed','completed_with_errors','failed','cancelled')
-                        """,
-                        (now, job_id, job_id, now, job_id),
-                    )
+            if not cursor.rowcount:
+                return False
+            self._finalize_batch_locked(
+                connection,
+                batch_id,
+                status="failed",
+                cleanup_final_action="abandon",
+                cleanup_status="completed",
+                error_code="abandoned",
+                error_message="管理員確認遠端 File 已刪除",
+            )
         return bool(cursor.rowcount)
 
     def fail_local_batch(
@@ -726,7 +731,7 @@ class AnalysisBatchRepository:
                 f"""
                 UPDATE analysis_batches SET status='failed',remote_status='failed',cleanup_status='not_required',
                     cleanup_completed_at=?,completed_at=?,failed_items=total_items,missing_items=0,stale_items=0,
-                    imported_items=0,last_error_code=?,last_error_message=?,
+                    imported_items=0,cleanup_final_action='fail',last_error_code=?,last_error_message=?,
                     side_effect_owner=NULL,side_effect_lease_until=NULL,side_effect_version=side_effect_version+1,
                     updated_at=?
                 WHERE id IN ({placeholders}) AND remote_batch_id IS NULL AND input_file_id IS NULL
@@ -974,6 +979,8 @@ class AnalysisBatchRepository:
                 "remote_status": status,
                 "last_error_code": None,
                 "last_error_message": None,
+                "reconciliation_error_code": None,
+                "reconciliation_error_message": None,
                 "phase_started_at": now,
                 "last_polled_at": now,
                 "side_effect_owner": None,
@@ -1027,17 +1034,17 @@ class AnalysisBatchRepository:
         self, batch_id: str, file_kind: str, owner: str, lease_until: str
     ) -> tuple[str, bool] | None:
         columns = {
-            "input": ("input_file_id", "input_file_deleted"),
-            "output": ("output_file_id", "output_file_deleted"),
-            "error": ("error_file_id", "error_file_deleted"),
+            "input": ("input_file_id", "input_file_deleted", "input_file_delete_unknown"),
+            "output": ("output_file_id", "output_file_deleted", "output_file_delete_unknown"),
+            "error": ("error_file_id", "error_file_deleted", "error_file_delete_unknown"),
         }
-        file_column, deleted_column = columns.get(file_kind, (None, None))
-        if file_column is None or deleted_column is None:
+        file_column, deleted_column, unknown_column = columns.get(file_kind, (None, None, None))
+        if file_column is None or deleted_column is None or unknown_column is None:
             raise ValueError("不支援的 Batch remote file 類型")
         now = utc_now()
         with self.database.transaction() as connection:
             before = connection.execute(
-                f"SELECT {file_column},last_error_code FROM analysis_batches WHERE id=? AND {file_column} IS NOT NULL AND {deleted_column}=0",  # noqa: S608
+                f"SELECT {file_column},{unknown_column} FROM analysis_batches WHERE id=? AND {file_column} IS NOT NULL AND {deleted_column}=0",  # noqa: S608
                 (batch_id,),
             ).fetchone()
             if before is None:
@@ -1046,14 +1053,13 @@ class AnalysisBatchRepository:
                 f"""
                 UPDATE analysis_batches
                 SET side_effect_owner=?,side_effect_lease_until=?,side_effect_version=side_effect_version+1,
-                    last_error_code=?,last_error_message=NULL,updated_at=?
+                    {unknown_column}=1,updated_at=?
                 WHERE id=? AND {file_column} IS NOT NULL AND {deleted_column}=0
                   AND (side_effect_lease_until IS NULL OR side_effect_lease_until<=?)
                 """,  # noqa: S608
                 (
                     owner,
                     lease_until,
-                    f"cleanup_delete_unknown:{file_kind}",
                     now,
                     batch_id,
                     now,
@@ -1061,42 +1067,287 @@ class AnalysisBatchRepository:
             )
             if cursor.rowcount != 1:
                 return None
-            return str(before[file_column]), str(before["last_error_code"] or "") == (
-                f"cleanup_delete_unknown:{file_kind}"
-            )
+            return str(before[file_column]), bool(before[unknown_column])
 
     def complete_cleanup_file(self, batch_id: str, file_kind: str, owner: str) -> bool:
         columns = {
-            "input": "input_file_deleted",
-            "output": "output_file_deleted",
-            "error": "error_file_deleted",
+            "input": ("input_file_deleted", "input_file_delete_unknown"),
+            "output": ("output_file_deleted", "output_file_delete_unknown"),
+            "error": ("error_file_deleted", "error_file_delete_unknown"),
         }
-        column = columns.get(file_kind)
-        if column is None:
+        resolved = columns.get(file_kind)
+        if resolved is None:
             raise ValueError("不支援的 Batch remote file 類型")
+        column, unknown_column = resolved
         with self.database.transaction() as connection:
             cursor = connection.execute(
                 f"""
                 UPDATE analysis_batches SET {column}=1,side_effect_owner=NULL,side_effect_lease_until=NULL,
-                    side_effect_version=side_effect_version+1,last_error_code=NULL,last_error_message=NULL,updated_at=?
+                    side_effect_version=side_effect_version+1,
+                    {unknown_column}=0,
+                    updated_at=?
                 WHERE id=? AND side_effect_owner=?
                 """,  # noqa: S608
-                (utc_now(), batch_id, owner),
+                (
+                    utc_now(),
+                    batch_id,
+                    owner,
+                ),
             )
         return bool(cursor.rowcount)
 
-    def fail_cleanup_file(self, batch_id: str, owner: str, error_code: str, error_message: str) -> bool:
+    def fail_cleanup_file(
+        self,
+        batch_id: str,
+        owner: str,
+        error_code: str,
+        error_message: str,
+    ) -> bool:
         with self.database.transaction() as connection:
             cursor = connection.execute(
                 """
                 UPDATE analysis_batches
                 SET side_effect_owner=NULL,side_effect_lease_until=NULL,side_effect_version=side_effect_version+1,
-                    last_error_code=?,last_error_message=?,updated_at=?
+                    cleanup_error_code=?,cleanup_error_message=?,updated_at=?
                 WHERE id=? AND side_effect_owner=?
                 """,
-                (error_code, error_message[:1000], utc_now(), batch_id, owner),
+                (
+                    error_code,
+                    error_message[:1000],
+                    utc_now(),
+                    batch_id,
+                    owner,
+                ),
             )
         return bool(cursor.rowcount)
+
+    @staticmethod
+    def _item_totals_locked(connection, batch_id: str) -> dict[str, int | float]:
+        row = connection.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN status='imported' THEN 1 ELSE 0 END),0) AS imported,
+                COALESCE(SUM(CASE WHEN status IN ('failed','schema_invalid','duplicate_custom_id','unexpected_custom_id') THEN 1 ELSE 0 END),0) AS failed,
+                COALESCE(SUM(CASE WHEN status IN ('missing','retry_pending') THEN 1 ELSE 0 END),0) AS missing,
+                COALESCE(SUM(CASE WHEN status='stale' THEN 1 ELSE 0 END),0) AS stale,
+                COALESCE(SUM(input_tokens),0) AS input_tokens,
+                COALESCE(SUM(cached_tokens),0) AS cached_tokens,
+                COALESCE(SUM(output_tokens),0) AS output_tokens,
+                COALESCE(SUM(reasoning_tokens),0) AS reasoning_tokens,
+                COALESCE(SUM(actual_cost),0) AS actual_cost
+            FROM analysis_batch_items WHERE batch_id=?
+            """,
+            (batch_id,),
+        ).fetchone()
+        return dict(row)
+
+    def _finalize_batch_locked(
+        self,
+        connection,
+        batch_id: str,
+        *,
+        status: str,
+        cleanup_final_action: str | None,
+        cleanup_status: str | None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> str:
+        """Close a Batch, its Items, and its parent Job in one transaction."""
+
+        if status not in TERMINAL_BATCH_STATUSES:
+            raise ValueError("Batch finalization 必須使用 terminal status")
+        batch = connection.execute("SELECT * FROM analysis_batches WHERE id=?", (batch_id,)).fetchone()
+        if batch is None:
+            raise KeyError(batch_id)
+        now = utc_now()
+        active_statuses = ("pending", "submitted", "upload_unknown", "submission_unknown")
+        if status in {"failed", "cancelled", "expired"}:
+            item_status = (
+                "cancelled" if status == "cancelled" else ("expired" if status == "expired" else "failed")
+            )
+            connection.execute(
+                f"""
+                UPDATE analysis_batch_items
+                SET status=?,error_code=COALESCE(?,error_code),error_message=COALESCE(?,error_message),updated_at=?
+                WHERE batch_id=? AND status IN ({",".join("?" for _ in active_statuses)})
+                """,  # noqa: S608
+                (
+                    item_status,
+                    error_code,
+                    error_message[:1000] if error_message else None,
+                    now,
+                    batch_id,
+                    *active_statuses,
+                ),
+            )
+        unresolved = connection.execute(
+            f"SELECT COUNT(*) FROM analysis_batch_items WHERE batch_id=? AND status IN ({','.join('?' for _ in active_statuses)})",  # noqa: S608
+            (batch_id, *active_statuses),
+        ).fetchone()[0]
+        if int(unresolved):
+            raise ValueError("terminal Batch 不可保留 active Batch Item")
+
+        totals = self._item_totals_locked(connection, batch_id)
+        action = (
+            cleanup_final_action
+            if cleanup_final_action is not None
+            else str(batch["cleanup_final_action"] or "none")
+        )
+        assignments: dict[str, Any] = {
+            "status": status,
+            "completed_items": int(totals["imported"] or 0),
+            "failed_items": int(totals["failed"] or 0),
+            "missing_items": int(totals["missing"] or 0),
+            "stale_items": int(totals["stale"] or 0),
+            "imported_items": int(totals["imported"] or 0),
+            "input_tokens": int(totals["input_tokens"] or 0),
+            "cached_tokens": int(totals["cached_tokens"] or 0),
+            "output_tokens": int(totals["output_tokens"] or 0),
+            "reasoning_tokens": int(totals["reasoning_tokens"] or 0),
+            "actual_cost": float(totals["actual_cost"] or 0),
+            "cleanup_final_action": action,
+            "completed_at": now,
+            "side_effect_owner": None,
+            "side_effect_lease_until": None,
+            "side_effect_version": int(batch["side_effect_version"] or 0) + 1,
+            "updated_at": now,
+        }
+        if cleanup_status is not None:
+            assignments["cleanup_status"] = cleanup_status
+            assignments["cleanup_completed_at"] = now
+        if error_code is not None:
+            assignments["last_error_code"] = error_code
+            assignments["last_error_message"] = (error_message or "")[:1000]
+        connection.execute(
+            f"UPDATE analysis_batches SET {','.join(f'{key}=?' for key in assignments)} WHERE id=?",  # noqa: S608
+            [assignments[key] for key in assignments] + [batch_id],
+        )
+
+        job_id = str(batch["job_id"] or "")
+        if not job_id:
+            return status
+        job_item_status = "cancelled" if status == "cancelled" else "failed"
+        if status in {"failed", "cancelled", "expired"}:
+            connection.execute(
+                """
+                UPDATE job_items SET status=?,completed_at=?,error_code=COALESCE(?,error_code),lease_until=NULL
+                WHERE id IN (
+                    SELECT job_item_id FROM analysis_batch_items
+                    WHERE batch_id=? AND job_item_id IS NOT NULL
+                      AND status IN ('failed','cancelled','expired')
+                ) AND status IN ('pending','running','retrying')
+                """,
+                (job_item_status, now, error_code, batch_id),
+            )
+        terminal_marks = ",".join("?" for _ in TERMINAL_BATCH_STATUSES)
+        pending = int(
+            connection.execute(
+                f"SELECT COUNT(*) FROM analysis_batches WHERE job_id=? AND status NOT IN ({terminal_marks})",  # noqa: S608
+                (job_id, *sorted(TERMINAL_BATCH_STATUSES)),
+            ).fetchone()[0]
+        )
+        aggregates = connection.execute(
+            """
+            SELECT COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),0) AS completed,
+                   COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),0) AS failed
+            FROM job_items WHERE job_id=?
+            """,
+            (job_id,),
+        ).fetchone()
+        if pending:
+            connection.execute(
+                "UPDATE jobs SET completed_items=?,failed_items=?,heartbeat_at=? WHERE id=? AND status!='cancelled'",
+                (int(aggregates["completed"] or 0), int(aggregates["failed"] or 0), now, job_id),
+            )
+            return status
+        siblings = [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT status FROM analysis_batches WHERE job_id=?", (job_id,)
+            ).fetchall()
+        ]
+        job_status = (
+            "cancelled"
+            if siblings and all(value == "cancelled" for value in siblings)
+            else (
+                "failed"
+                if siblings and all(value == "failed" for value in siblings)
+                else (
+                    "completed"
+                    if siblings and all(value == "completed" for value in siblings)
+                    else "completed_with_errors"
+                )
+            )
+        )
+        connection.execute(
+            """
+            UPDATE jobs SET status=?,completed_at=?,completed_items=?,failed_items=?,heartbeat_at=?
+            WHERE id=? AND status!='cancelled'
+            """,
+            (job_status, now, int(aggregates["completed"] or 0), int(aggregates["failed"] or 0), now, job_id),
+        )
+        return status
+
+    def finalize_batch_result(
+        self,
+        batch_id: str,
+        *,
+        status: str,
+        cleanup_final_action: str | None = None,
+        cleanup_status: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        connection=None,
+    ) -> str:
+        context = self.database.transaction() if connection is None else nullcontext(connection)
+        with context as active_connection:
+            return self._finalize_batch_locked(
+                active_connection,
+                batch_id,
+                status=status,
+                cleanup_final_action=cleanup_final_action,
+                cleanup_status=cleanup_status,
+                error_code=error_code,
+                error_message=error_message,
+            )
+
+    def finalize_cleanup(self, batch_id: str, *, connection=None) -> str:
+        """Use the durable cleanup intent after every known remote file is gone."""
+
+        context = self.database.transaction() if connection is None else nullcontext(connection)
+        with context as active_connection:
+            batch = active_connection.execute(
+                "SELECT * FROM analysis_batches WHERE id=?", (batch_id,)
+            ).fetchone()
+            if batch is None:
+                raise KeyError(batch_id)
+            file_states = (
+                ("input_file_id", "input_file_deleted"),
+                ("output_file_id", "output_file_deleted"),
+                ("error_file_id", "error_file_deleted"),
+            )
+            if any(batch[file_id] and not bool(batch[deleted]) for file_id, deleted in file_states):
+                raise ValueError("尚有未清理的 remote File")
+            action = str(batch["cleanup_final_action"] or "none")
+            target = (
+                "cancelled" if action == "cancel" else ("failed" if action in {"abandon", "fail"} else None)
+            )
+            if target is None:
+                return str(batch["status"])
+            cleanup_status = (
+                "completed" if any(batch[file_id] for file_id, _ in file_states) else "not_required"
+            )
+            return self._finalize_batch_locked(
+                active_connection,
+                batch_id,
+                status=target,
+                cleanup_final_action=action,
+                cleanup_status=cleanup_status,
+                error_code="abandoned"
+                if action == "abandon"
+                else ("cancelled" if action == "cancel" else "failed"),
+                error_message="cleanup final action completed",
+            )
 
     def counts(self, batch_id: str) -> dict[str, int]:
         with self.database.session() as connection:
