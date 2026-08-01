@@ -31,6 +31,13 @@
     </form>
   </section>
   {% endif %}
+  {% if operator_holds %}
+  <section class="card notice">
+    <h2>需要管理員處理的外部結果未知 Batch</h2>
+    <p>這些 Batch 不會占用 Scheduler 的自動 Poll 配額，也不會自動重新上傳或重新建立遠端 Batch。請開啟詳情完成 File／Batch ownership Recovery，或在取得刪除證據後 Abandon。</p>
+    <ul>{% for hold in operator_holds %}<li><a href="{{ url_for('analysis_batches.batch_detail_page', batch_id=hold.id) }}">{{ hold.id }}</a>：{{ hold.status }}</li>{% endfor %}</ul>
+  </section>
+  {% endif %}
   <section class="card">
     <h2>Batch 清單</h2>
     <table>
@@ -49,7 +56,7 @@
               <button name="action" value="retry" type="submit">重試失敗</button>
               <button name="action" value="cleanup" type="submit">重試清理</button>
             </form>
-            <form method="post" action="{{ url_for('analysis_batches.batches_page_action') }}" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="batch_id" value="{{ batch.id }}"><label><input type="checkbox" name="confirm" value="true" required> 已確認遠端不存在</label><button name="action" value="abandon" type="submit">Abandon 並清理</button></form>
+            <form method="post" action="{{ url_for('analysis_batches.batches_page_action') }}" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="batch_id" value="{{ batch.id }}"><label><input type="checkbox" name="confirm" value="true" required> 已確認遠端 Batch 不存在</label>{% if batch.status == 'upload_unknown' %}<label><input type="checkbox" name="confirmed_remote_file_deleted" value="true" required> 已確認遠端 File 已刪除</label>{% endif %}<button name="action" value="abandon" type="submit">Abandon 並清理</button></form>
           {% endif %}
           </td>
         </tr>

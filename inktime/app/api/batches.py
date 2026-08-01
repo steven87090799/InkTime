@@ -79,6 +79,7 @@ def _parameters(payload: dict) -> dict:
 @login_required
 def batches_page():
     rows = _repository().list(limit=100)
+    holds = _repository().list_operator_holds(limit=100)
     if str(g.user["role"]) != "administrator":
         rows = [
             row
@@ -88,7 +89,15 @@ def batches_page():
                 str(row["job_id"]), str(g.user["id"]), administrator=False
             )
         ]
-    return render_template("analysis_batches.html", batches=rows)
+        holds = [
+            row
+            for row in holds
+            if row.get("job_id")
+            and current_app.extensions["inktime_job_repository"].can_access(
+                str(row["job_id"]), str(g.user["id"]), administrator=False
+            )
+        ]
+    return render_template("analysis_batches.html", batches=rows, operator_holds=holds)
 
 
 @bp.post("/analysis/batches/action")
@@ -104,7 +113,10 @@ def batches_page_action():
             if action == "estimate":
                 result = _service().estimate(**_parameters(payload))
                 return render_template(
-                    "analysis_batches.html", batches=_repository().list(limit=100), estimate=result
+                    "analysis_batches.html",
+                    batches=_repository().list(limit=100),
+                    operator_holds=_repository().list_operator_holds(limit=100),
+                    estimate=result,
                 )
             _service().submit(created_by=str(g.user["id"]), **_parameters(payload))
         elif action == "cancel":
@@ -115,10 +127,19 @@ def batches_page_action():
             _service().retry_cleanup(str(request.form["batch_id"]))
         elif action == "recover":
             _service().recover_submission(str(request.form["batch_id"]), str(request.form["remote_batch_id"]))
+        elif action == "recover_upload":
+            _service().recover_uploaded_file(
+                str(request.form["batch_id"]), str(request.form["remote_file_id"])
+            )
         elif action == "abandon":
             if request.form.get("confirm") != "true":
                 raise ValueError("Abandon 必須明確確認遠端 Batch 不存在")
-            _service().abandon(str(request.form["batch_id"]), confirmed_no_remote=True)
+            _service().abandon(
+                str(request.form["batch_id"]),
+                confirmed_no_remote=True,
+                remote_file_id=request.form.get("remote_file_id") or None,
+                confirmed_remote_file_deleted=request.form.get("confirmed_remote_file_deleted") == "true",
+            )
         else:
             abort(400, description="BATCH-API-002 不支援的操作")
     except (ValueError, KeyError, BatchLifecycleError) as exc:
@@ -197,8 +218,10 @@ def batch_detail_page(batch_id: str):
 @administrator_required
 def cancel_batch(batch_id: str):
     try:
+        payload = _payload()
+        reject_unknown_fields(payload, set(), error_prefix="BATCH-API-004")
         return _service().cancel(batch_id)
-    except (KeyError, ValueError, BatchLifecycleError) as exc:
+    except (JsonScalarError, KeyError, ValueError, BatchLifecycleError) as exc:
         abort(409, description=f"BATCH-API-004 {exc}")
 
 
@@ -206,8 +229,10 @@ def cancel_batch(batch_id: str):
 @administrator_required
 def retry_failed(batch_id: str):
     try:
+        payload = _payload()
+        reject_unknown_fields(payload, set(), error_prefix="BATCH-API-005")
         return _service().retry_failed(batch_id, created_by=str(g.user["id"]))
-    except (KeyError, ValueError, BatchLifecycleError) as exc:
+    except (JsonScalarError, KeyError, ValueError, BatchLifecycleError) as exc:
         abort(409, description=f"BATCH-API-005 {exc}")
 
 
@@ -215,8 +240,11 @@ def retry_failed(batch_id: str):
 @administrator_required
 def retry_cleanup(batch_id: str):
     try:
-        return {"job_id": _service().retry_cleanup(batch_id)}
-    except (KeyError, ValueError, BatchLifecycleError) as exc:
+        payload = _payload()
+        reject_unknown_fields(payload, set(), error_prefix="BATCH-API-006")
+        result = _service().retry_cleanup(batch_id)
+        return result
+    except (JsonScalarError, KeyError, ValueError, BatchLifecycleError) as exc:
         abort(409, description=f"BATCH-API-006 {exc}")
 
 
@@ -238,14 +266,47 @@ def recover_submission(batch_id: str):
         abort(409, description=f"BATCH-API-007 {exc}")
 
 
+@bp.post("/api/v1/analysis/batches/<batch_id>/recover-upload")
+@administrator_required
+def recover_upload(batch_id: str):
+    try:
+        payload = _payload()
+        reject_unknown_fields(payload, {"remote_file_id"}, error_prefix="BATCH-API-009")
+        remote_file_id = payload.get("remote_file_id")
+        if type(remote_file_id) is not str or not remote_file_id.strip():
+            raise ValueError("remote_file_id 必須是非空字串")
+        return _service().recover_uploaded_file(batch_id, remote_file_id)
+    except JsonScalarError as exc:
+        abort(400, description=f"BATCH-API-009 {exc}")
+    except BatchLifecycleError as exc:
+        return {"error_code": exc.code, "message": str(exc)}, 409
+    except (ValueError, KeyError) as exc:
+        abort(409, description=f"BATCH-API-009 {exc}")
+
+
 @bp.post("/api/v1/analysis/batches/<batch_id>/abandon")
 @administrator_required
 def abandon_batch(batch_id: str):
     try:
         payload = _payload()
-        reject_unknown_fields(payload, {"confirm"}, error_prefix="BATCH-API-008")
+        reject_unknown_fields(
+            payload,
+            {"confirm", "remote_file_id", "confirmed_remote_file_deleted"},
+            error_prefix="BATCH-API-008",
+        )
         confirmed = json_bool(payload, "confirm", default=False, error_prefix="BATCH-API-008")
-        return _service().abandon(batch_id, confirmed_no_remote=confirmed)
+        confirmed_deleted = json_bool(
+            payload, "confirmed_remote_file_deleted", default=False, error_prefix="BATCH-API-008"
+        )
+        remote_file_id = payload.get("remote_file_id")
+        if remote_file_id is not None and type(remote_file_id) is not str:
+            raise ValueError("remote_file_id 必須是字串")
+        return _service().abandon(
+            batch_id,
+            confirmed_no_remote=confirmed,
+            remote_file_id=remote_file_id,
+            confirmed_remote_file_deleted=confirmed_deleted,
+        )
     except JsonScalarError as exc:
         abort(400, description=f"BATCH-API-008 {exc}")
     except BatchLifecycleError as exc:

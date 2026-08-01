@@ -126,7 +126,7 @@ def test_batch_management_api_dispatches_lifecycle_actions(client, app, monkeypa
             return {"batch_id": batch_id, "retry": True, **kwargs}
 
         def retry_cleanup(self, batch_id):
-            return f"cleanup-{batch_id}"
+            return {"status": "cleanup_pending", "job_id": f"cleanup-{batch_id}"}
 
         def recover_submission(self, batch_id, remote_batch_id):
             return {"batch_id": batch_id, "remote_batch_id": remote_batch_id, "status": "validating"}
@@ -140,9 +140,14 @@ def test_batch_management_api_dispatches_lifecycle_actions(client, app, monkeypa
     assert client.get("/api/v1/analysis/batches").status_code == 200
     assert client.get("/api/v1/analysis/batches/batch-ui").status_code == 200
     assert client.get("/analysis/batches/batch-ui").status_code == 200
-    assert client.post("/api/v1/analysis/batches/batch-ui/cancel", headers=headers).status_code == 200
-    assert client.post("/api/v1/analysis/batches/batch-ui/retry-failed", headers=headers).status_code == 200
-    cleanup = client.post("/api/v1/analysis/batches/batch-ui/retry-cleanup", headers=headers)
+    assert (
+        client.post("/api/v1/analysis/batches/batch-ui/cancel", json={}, headers=headers).status_code == 200
+    )
+    assert (
+        client.post("/api/v1/analysis/batches/batch-ui/retry-failed", json={}, headers=headers).status_code
+        == 200
+    )
+    cleanup = client.post("/api/v1/analysis/batches/batch-ui/retry-cleanup", json={}, headers=headers)
     assert cleanup.status_code == 200
     assert cleanup.json["job_id"] == "cleanup-batch-ui"
     recovered = client.post(
