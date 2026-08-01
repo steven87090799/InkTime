@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 import threading
+import time
 
 from PIL import Image
 import pytest
@@ -366,6 +367,43 @@ def test_scheduler_poll_excludes_unknown_holds_from_bounded_oldest_first_queue(a
     service.poll_due(limit=20)
     assert fake.create_calls == 0
     assert fake.upload_calls == 0
+
+
+def test_concurrent_schedulers_claim_one_poll_side_effect(app, monkeypatch):
+    _insert_batch(app, "concurrent-poll", "in_progress")
+    repository = AnalysisBatchRepository(app.extensions["inktime_database"])
+    fake = CountingBatchProvider()
+    service = _wire_fake(app, fake)
+    poll_calls = {"count": 0}
+    poll_lock = threading.Lock()
+
+    def retrieve(_batch_id):
+        with poll_lock:
+            poll_calls["count"] += 1
+        time.sleep(0.05)
+        return {
+            "id": "remote-live",
+            "status": "in_progress",
+            "request_counts": {"total": 0, "completed": 0, "failed": 0},
+        }
+
+    fake.retrieve_batch = retrieve
+    monkeypatch.setattr(service, "_provider", lambda _provider_id, _plan: fake)
+    original_claim = repository.claim_poll
+    claim_barrier = threading.Barrier(2)
+
+    def synchronized_claim(*args, **kwargs):
+        result = original_claim(*args, **kwargs)
+        claim_barrier.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(repository, "claim_poll", synchronized_claim)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _value: service.poll_due(limit=1), range(2)))
+
+    assert sum(result["polled"] for result in results) == 1
+    assert poll_calls["count"] == 1
+    assert dict(repository.get("concurrent-poll"))["status"] == "in_progress"
 
 
 def test_poll_due_isolates_provider_creation_failure_per_iteration(app, monkeypatch):
@@ -1199,6 +1237,51 @@ def test_cleanup_crash_after_remote_delete_reconciles_without_second_delete(app,
     assert dict(repository.get(batch_id))["cleanup_status"] == "completed"
 
 
+def test_concurrent_cleanup_workers_do_not_duplicate_delete_or_regress_success(app, tmp_path):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    repository = AnalysisBatchRepository(app.extensions["inktime_database"])
+    batch_id = service.submit(scope="manual_selection", photo_ids=[photo_id], created_by="tester")[
+        "batch_ids"
+    ][0]
+    item_id = str(repository.items(batch_id)[0]["id"])
+    repository.update_item(item_id, status="failed")
+    repository.update_batch(
+        batch_id,
+        status="cleanup_pending",
+        remote_status="failed",
+        cleanup_final_action="complete",
+        cleanup_status="partial",
+        input_file_id="file-input",
+        output_file_id="file-output",
+        error_file_id="file-error",
+        input_file_deleted=0,
+        output_file_deleted=0,
+        error_file_deleted=0,
+    )
+    original_delete = fake.delete_remote_file
+    delete_lock = threading.Lock()
+
+    def slow_delete(file_id: str):
+        with delete_lock:
+            result = original_delete(file_id)
+            time.sleep(0.05)
+            return result
+
+    fake.delete_remote_file = slow_delete
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(lambda _value: service.import_batch(batch_id, cleanup_only=True), range(2))
+        )
+
+    assert all(result["cleanup_only"] is True for result in results)
+    assert sorted(fake.deleted) == ["file-error", "file-input", "file-output"]
+    final = dict(repository.get(batch_id))
+    assert final["cleanup_status"] == "completed"
+    assert final["status"] == "failed"
+
+
 def _assert_terminal_batch_invariants(app, batch_id: str):
     repository = AnalysisBatchRepository(app.extensions["inktime_database"])
     batch = dict(repository.get(batch_id))
@@ -1225,6 +1308,62 @@ def _assert_terminal_batch_invariants(app, batch_id: str):
                 ).fetchone()[0]
             )
         assert active_job_items == 0
+
+
+@pytest.mark.parametrize(
+    ("initial_status", "remote_status", "item_status"),
+    [
+        ("completed", None, "imported"),
+        ("completed_with_errors", None, "failed"),
+        ("failed", None, "failed"),
+        ("cancelled", None, "cancelled"),
+        ("expired", None, "expired"),
+    ],
+)
+def test_cleanup_retry_preserves_existing_terminal_semantic(
+    app, tmp_path, initial_status, remote_status, item_status
+):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    repository = AnalysisBatchRepository(app.extensions["inktime_database"])
+    batch_id = service.submit(scope="manual_selection", photo_ids=[photo_id], created_by="tester")[
+        "batch_ids"
+    ][0]
+    item_id = str(repository.items(batch_id)[0]["id"])
+    repository.update_item(item_id, status=item_status)
+    repository.update_batch(
+        batch_id,
+        status=initial_status,
+        remote_status=remote_status,
+        completed_at="2026-08-01T00:00:00+00:00",
+        input_file_id="file-input",
+        output_file_id="file-output",
+        error_file_id="file-error",
+        cleanup_status="partial",
+        cleanup_final_action="none",
+        input_file_deleted=0,
+        output_file_deleted=0,
+        error_file_deleted=0,
+    )
+
+    cancelled = service.cancel(batch_id)
+    assert cancelled["status"] == initial_status
+    assert cancelled["cleanup_pending"] is True
+    retried = service.retry_cleanup(batch_id)
+    assert retried["status"] == initial_status
+    assert retried["cleanup_pending"] is True
+    service.import_batch(batch_id, cleanup_only=True)
+    service.retry_cleanup(batch_id)
+    service.import_batch(batch_id, cleanup_only=True)
+
+    final = dict(repository.get(batch_id))
+    assert final["status"] == initial_status
+    assert final["cleanup_status"] == "completed"
+    assert final["cleanup_final_action"] == ("cancel" if initial_status == "cancelled" else "complete")
+    assert fake.deleted.count("file-input") == 1
+    assert fake.deleted.count("file-output") == 1
+    assert fake.deleted.count("file-error") == 1
 
 
 @pytest.mark.parametrize(("intent", "terminal"), [("cancel", "cancelled"), ("abandon", "failed")])

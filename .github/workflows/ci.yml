@@ -217,7 +217,7 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: mkdir -p .artifacts && timeout 240 python scripts/runtime_soak.py --max-iterations 30 --timeout-seconds 180 --summary-json .artifacts/runtime-soak-bounded.json
       - if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
         with:
           name: runtime-soak-bounded-summary
           path: .artifacts/runtime-soak-bounded.json
@@ -239,7 +239,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
-      - uses: arduino/setup-arduino-cli@81d310742121c928ea9c8bbd407b4217b432ae02 # v2.0.0
+      - name: Install pinned Arduino CLI
+        env:
+          ARDUINO_CLI_VERSION: "1.5.1"
+          ARDUINO_CLI_SHA256: "28a8e119c498a25607821c36cb2dc49e8463941b261a0d99091baa7bc692dd2b"
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/arduino-cli_${ARDUINO_CLI_VERSION}_Linux_64bit.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "${archive}" \
+            "https://github.com/arduino/arduino-cli/releases/download/v${ARDUINO_CLI_VERSION}/arduino-cli_${ARDUINO_CLI_VERSION}_Linux_64bit.tar.gz"
+          printf '%s  %s\n' "${ARDUINO_CLI_SHA256}" "${archive}" | sha256sum --check --strict
+          tar --extract --gzip --file="${archive}" --directory="${RUNNER_TEMP}"
+          chmod 0755 "${RUNNER_TEMP}/arduino-cli"
+          printf '%s\n' "${RUNNER_TEMP}" >> "${GITHUB_PATH}"
       - run: arduino-cli config init
       - run: arduino-cli core update-index && arduino-cli core install esp32:esp32@3.3.10
       - run: arduino-cli lib install GxEPD2@1.6.9 ArduinoJson@7.4.3

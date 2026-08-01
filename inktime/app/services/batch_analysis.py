@@ -1322,14 +1322,17 @@ class BatchAnalysisService:
             if unresolved_files:
                 self.batches.update_batch(
                     batch_id,
-                    status="cleanup_pending",
                     cleanup_status="pending",
                     cleanup_final_action="cancel"
                     if str(batch["status"]) == "cancelled"
                     else self._cleanup_action_for(batch),
                 )
                 self._enqueue_import(batch_id, cleanup_only=True)
-                return {"status": "cleanup_pending", "cleanup_retry": True}
+                return {
+                    "status": str(batch["status"]),
+                    "cleanup_pending": True,
+                    "cleanup_retry": True,
+                }
             if has_file_ids and str(batch["cleanup_status"]) != "completed":
                 self.batches.update_batch(
                     batch_id, cleanup_status="completed", cleanup_completed_at=utc_now()
@@ -1732,6 +1735,7 @@ class BatchAnalysisService:
         unresolved_files = any(
             batch[file_key] and not bool(batch[deleted_key]) for file_key, deleted_key in file_entries
         )
+        terminal_status = str(batch["status"]) in TERMINAL_BATCH_STATUSES
         if str(batch["status"]) == "upload_unknown" and not batch["input_file_id"]:
             # An upload response can be lost after the remote File exists.
             # There is no safe automatic DELETE target until an administrator
@@ -1771,14 +1775,16 @@ class BatchAnalysisService:
                 "already_cleaned": True,
                 "batch_id": batch_id,
             }
-        self.batches.update_batch(
-            batch_id,
-            status="cleanup_pending",
-            cleanup_status="pending",
-            cleanup_final_action=self._cleanup_action_for(batch),
-        )
+        cleanup_changes = {
+            "cleanup_status": "pending",
+            "cleanup_final_action": self._cleanup_action_for(batch),
+        }
+        if not terminal_status:
+            cleanup_changes["status"] = "cleanup_pending"
+        self.batches.update_batch(batch_id, **cleanup_changes)
         return {
-            "status": "cleanup_pending",
+            "status": str(batch["status"]) if terminal_status else "cleanup_pending",
+            "cleanup_pending": True,
             "job_id": self._enqueue_import(batch_id, cleanup_only=True),
             "batch_id": batch_id,
         }
@@ -2238,6 +2244,12 @@ class BatchAnalysisService:
     def _finish(self, batch_id: str) -> None:
         batch = self.batches.get(batch_id)
         if batch is None:
+            return
+        if str(batch["status"]) in TERMINAL_BATCH_STATUSES:
+            # Cleanup may be retried after a terminal result has already been
+            # recorded.  Never derive a new semantic from remote_status or
+            # item counts and accidentally rewrite completed/failed/cancelled/
+            # expired into another terminal state.
             return
         if str(batch["status"]) in {"upload_unknown", "submission_unknown"} or str(
             batch["remote_status"] or ""
