@@ -1593,7 +1593,7 @@ class BatchAnalysisService:
             or str(batch["last_error_code"] or "") == "submission_unknown"
         ):
             final_status = "failed"
-        if current_status == "failed" and imported == 0:
+        if current_status in {"failed", "abandoned"} and imported == 0:
             final_status = "failed"
         self.batches.update_batch(
             batch_id,

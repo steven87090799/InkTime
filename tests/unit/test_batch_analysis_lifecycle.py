@@ -426,6 +426,55 @@ def test_poll_plan_parse_failure_enters_cleanup_instead_of_staying_validating(ap
     assert dict(repository.get(batch_id))["cleanup_status"] == "completed"
 
 
+def test_restart_reconciliation_moves_each_external_phase_to_a_safe_exit(app, tmp_path):
+    photo_ids = _prepare_photos(app, tmp_path, count=4)
+    repository = AnalysisBatchRepository(app.extensions["inktime_database"])
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    for index, phase in enumerate(("uploading", "submitting", "validating", "preparing")):
+        batch_id = service.submit(
+            scope="manual_selection", photo_ids=[photo_ids[index]], created_by="tester"
+        )["batch_ids"][0]
+        repository.update_batch(
+            batch_id,
+            status=phase,
+            remote_batch_id=None,
+            phase_started_at="2000-01-01T00:00:00+00:00",
+        )
+        service.poll_due(limit=10)
+        current = dict(repository.get(batch_id))
+        if phase == "uploading":
+            assert current["status"] == "upload_unknown"
+        elif phase in {"submitting", "validating"}:
+            assert current["status"] == "submission_unknown"
+        else:
+            assert current["status"] == "failed"
+
+
+def test_cancel_without_remote_batch_cleans_input_and_abandon_releases_unknown(app, tmp_path):
+    photo_ids = _prepare_photos(app, tmp_path, count=2)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    repository = AnalysisBatchRepository(app.extensions["inktime_database"])
+    batch_id = service.submit(scope="manual_selection", photo_ids=[photo_ids[0]], created_by="tester")[
+        "batch_ids"
+    ][0]
+    repository.update_batch(batch_id, status="uploaded", remote_batch_id=None)
+    cancelled = service.cancel(batch_id)
+    assert cancelled["status"] == "cleanup_pending"
+    service.import_batch(batch_id, cleanup_only=True)
+    assert dict(repository.get(batch_id))["cleanup_status"] == "completed"
+
+    ambiguous = AmbiguousFakeBatchProvider()
+    service.provider_service.build_router = lambda *args, **kwargs: ambiguous
+    unknown_id = service.submit(scope="manual_selection", photo_ids=[photo_ids[1]], created_by="tester")[
+        "prepared_batch_ids"
+    ][0]
+    repository.update_batch(unknown_id, input_file_id=None, cleanup_status="not_required")
+    result = service.abandon(unknown_id, confirmed_no_remote=True)
+    assert result["status"] == "failed"
+
+
 def test_control_plane_fake_batch_100_sample_end_to_end(app, tmp_path):
     _prepare_photos(app, tmp_path, count=100)
     fake = FakeBatchProvider()
