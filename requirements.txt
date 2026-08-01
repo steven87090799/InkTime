@@ -6,7 +6,7 @@ cryptography==48.0.1
 gunicorn==23.0.0
 psutil==7.0.0
 fonttools==4.60.2
-opencv-python-headless==4.13.0.92
+opencv-python-headless==5.0.0.93
 # 2.2.6 is the newest shared line verified with Python 3.10/3.12 and OpenCV 4.13.
 # Newer NumPy lines no longer share the project's complete supported interpreter matrix.
 numpy==2.2.6
