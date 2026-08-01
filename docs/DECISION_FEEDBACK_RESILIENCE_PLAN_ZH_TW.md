@@ -12,7 +12,7 @@ Migration 17 建立 algorithm version、decision trace／candidate、四種 feed
 
 ## API、UI、排程與狀態
 
-管理 API 位於 `/api/decision-traces`、`/api/feedback`、`/api/shadow`、`/api/devices/<id>/queue`、`/api/retention`、`/api/rollouts`；裝置 API 為 `/api/device/v1/queue/manifest` 與 `/api/device/queue/ack`。UI 使用既有管理站導覽中的「決策與韌性」六頁。
+管理 API 位於 `/api/decision-traces`、`/api/feedback`、`/api/shadow`、`/api/devices/<id>/queue`、`/api/retention`、`/api/rollouts`；裝置 API 為 `/api/device/v1/queue/manifest` 與 canonical `/api/device/v1/queue/ack`。舊 `/api/device/queue/ack` 僅保留相容性。UI 使用既有管理站導覽中的「決策與韌性」六頁。
 
 Queue 狀態為 `PENDING → READY → AVAILABLE → DOWNLOADED → ACKNOWLEDGED → DISPLAYED`，失敗、過期與取消是終止狀態。Rollout 轉換由 repository 集中限制：`DRAFT → VALIDATING → CANARY → OBSERVING/EXPANDING → COMPLETED`，任一步可暫停或進入 `ROLLING_BACK → ROLLED_BACK`。
 

@@ -49,9 +49,7 @@ def cleanup(root: Path, *, confirmed: bool, services_stopped: bool) -> dict[str,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="離線清理 InkTime 舊版逐照片縮圖鎖；預設只預覽"
-    )
+    parser = argparse.ArgumentParser(description="離線清理 InkTime 舊版逐照片縮圖鎖；預設只預覽")
     parser.add_argument("cache_dir", type=Path)
     parser.add_argument("--yes", action="store_true", help="實際刪除符合規則的舊鎖")
     parser.add_argument(
@@ -60,9 +58,7 @@ def main() -> None:
         help="確認 Web、Worker、Scheduler 均已停止且沒有程序持有舊鎖",
     )
     args = parser.parse_args()
-    result = cleanup(
-        args.cache_dir, confirmed=args.yes, services_stopped=args.services_stopped
-    )
+    result = cleanup(args.cache_dir, confirmed=args.yes, services_stopped=args.services_stopped)
     print(
         f"mode={result['mode']} matched={result['matched']} removed={result['removed']} "
         f"sample={','.join(result['sample'])}"

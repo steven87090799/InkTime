@@ -178,7 +178,9 @@ def test_provider_call_process_boundary_has_hard_cap_and_shutdown_cleanup():
         "cooperative": 0,
     }
     boundary.shutdown()
-    assert not [child for child in multiprocessing.active_children() if child.name == "inktime-provider-child"]
+    assert not [
+        child for child in multiprocessing.active_children() if child.name == "inktime-provider-child"
+    ]
 
 
 def test_parent_cancel_callback_exception_still_reaps_child_and_releases_slot():
@@ -196,15 +198,11 @@ def test_parent_cancel_callback_exception_still_reaps_child_and_releases_slot():
             process_name="inktime-cancel-fault-child",
         )
     assert boundary.observability()["active"] == 0
-    assert boundary.call(
-        _return_call, timeout_seconds=5, kwargs={"value": "reused"}
-    ) == "reused"
+    assert boundary.call(_return_call, timeout_seconds=5, kwargs={"value": "reused"}) == "reused"
     boundary.shutdown()
     boundary.shutdown()
     assert not [
-        child
-        for child in multiprocessing.active_children()
-        if child.name == "inktime-cancel-fault-child"
+        child for child in multiprocessing.active_children() if child.name == "inktime-cancel-fault-child"
     ]
 
 
@@ -225,9 +223,7 @@ def test_child_start_failure_keeps_metrics_zero_and_releases_slot():
         "cooperative": 0,
     }
     boundary._context = multiprocessing.get_context("spawn")
-    assert boundary.call(
-        _return_call, timeout_seconds=1, kwargs={"value": "reused"}
-    ) == "reused"
+    assert boundary.call(_return_call, timeout_seconds=1, kwargs={"value": "reused"}) == "reused"
 
 
 @pytest.mark.parametrize("failure", ["poll", "recv"])
@@ -243,14 +239,10 @@ def test_parent_pipe_exception_still_reaps_child(failure):
         )
     assert boundary.observability()["active"] == 0
     boundary._context = multiprocessing.get_context("spawn")
-    assert boundary.call(
-        _return_call, timeout_seconds=1, kwargs={"value": "reused"}
-    ) == "reused"
+    assert boundary.call(_return_call, timeout_seconds=1, kwargs={"value": "reused"}) == "reused"
     boundary.shutdown()
     assert not [
-        child
-        for child in multiprocessing.active_children()
-        if child.name == f"inktime-{failure}-fault-child"
+        child for child in multiprocessing.active_children() if child.name == f"inktime-{failure}-fault-child"
     ]
 
 
@@ -269,9 +261,7 @@ def test_four_parent_threads_use_spawned_provider_children_without_inheriting_se
         timeout=5,
         session=_ForbiddenParentSession(),
     )
-    router = FailoverVisionProvider(
-        [ProviderChannel(provider=provider, max_concurrency=4)]
-    )
+    router = FailoverVisionProvider([ProviderChannel(provider=provider, max_concurrency=4)])
     boundary = KillableProcessBoundary(max_processes=2)
     try:
         with ThreadPoolExecutor(max_workers=4) as executor:
@@ -295,9 +285,7 @@ def test_four_parent_threads_use_spawned_provider_children_without_inheriting_se
         server.shutdown()
         server.server_close()
     assert not [
-        child
-        for child in multiprocessing.active_children()
-        if child.name == "inktime-provider-child"
+        child for child in multiprocessing.active_children() if child.name == "inktime-provider-child"
     ]
 
 
@@ -450,9 +438,7 @@ def test_weather_failure_keeps_last_success_and_honors_failure_ttl_and_key(app):
     assert stale == first == retry_suppressed
     assert session.calls == 2
 
-    settings.update(
-        "render.weather_latitude", 24.15, changed_by="test", source_ip="local"
-    )
+    settings.update("render.weather_latitude", 24.15, changed_by="test", source_ip="local")
     separated = service.current()
     assert separated and separated["available"] is True
     assert session.calls == 3
@@ -462,9 +448,7 @@ def test_weather_cold_failure_retry_ttl_suppresses_repeated_calls(app):
     settings = app.extensions["inktime_settings_repository"]
     settings.update("render.weather_enabled", True, changed_by="test", source_ip="local")
     session = _FailingWeatherSession()
-    service = WeatherService(
-        settings, session=session, failure_retry_ttl=timedelta(hours=1)
-    )
+    service = WeatherService(settings, session=session, failure_retry_ttl=timedelta(hours=1))
     assert service.current()["available"] is False
     assert service.current()["available"] is False
     assert session.calls == 1

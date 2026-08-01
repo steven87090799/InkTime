@@ -68,9 +68,7 @@ def test_legacy_review_has_page_limit_sort_allowlist_and_materialized_filter(mon
 def test_legacy_metadata_backfill_is_repeatable_and_does_not_read_exif_json(monkeypatch, tmp_path):
     legacy = _legacy_server(monkeypatch, tmp_path)
     connection = sqlite3.connect(legacy.DB_PATH)
-    connection.execute(
-        "CREATE TABLE photo_scores(path TEXT PRIMARY KEY,exif_datetime TEXT,exif_json TEXT)"
-    )
+    connection.execute("CREATE TABLE photo_scores(path TEXT PRIMARY KEY,exif_datetime TEXT,exif_json TEXT)")
     connection.executemany(
         "INSERT INTO photo_scores(path,exif_datetime,exif_json) VALUES (?,?,?)",
         [
@@ -136,9 +134,7 @@ def test_legacy_date_collection_batches_placeholders(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("exif_json", [None, "{broken-json", '{"make":"camera"}'])
-def test_simulator_prefers_materialized_date_when_exif_json_is_unusable(
-    monkeypatch, tmp_path, exif_json
-):
+def test_simulator_prefers_materialized_date_when_exif_json_is_unusable(monkeypatch, tmp_path, exif_json):
     legacy = _legacy_server(monkeypatch, tmp_path)
     photo_root = tmp_path / "photos"
     photo_root.mkdir()

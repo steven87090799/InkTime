@@ -25,19 +25,11 @@ def test_integer_coercion_never_truncates_fractional_or_non_finite_values(value)
 
 def test_effective_scopes_and_device_overrides_are_explicit():
     assert {
-        key
-        for key, definition in SETTING_DEFINITIONS.items()
-        if definition["device_override_allowed"]
+        key for key, definition in SETTING_DEFINITIONS.items() if definition["device_override_allowed"]
     } == DEVICE_OVERRIDE_KEYS
     assert SETTING_DEFINITIONS["render.layout"]["effective_scope"] == "next_render"
-    assert (
-        SETTING_DEFINITIONS["device.default_schedule"]["effective_scope"]
-        == "future_device_only"
-    )
-    assert (
-        SETTING_DEFINITIONS["observability.debug_level"]["effective_scope"]
-        == "not_wired"
-    )
+    assert SETTING_DEFINITIONS["device.default_schedule"]["effective_scope"] == "future_device_only"
+    assert SETTING_DEFINITIONS["observability.debug_level"]["effective_scope"] == "not_wired"
     assert SETTING_DEFINITIONS["render.dither"]["device_override_allowed"] is False
 
 

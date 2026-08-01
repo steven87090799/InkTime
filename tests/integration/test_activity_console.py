@@ -14,10 +14,21 @@ def _seed_sources(app):
             "INSERT INTO jobs(id,kind,name,status,strategy,settings_json,created_at) VALUES ('activity-job','analysis','Activity','completed','local','{}',?)",
             (now,),
         )
-        connection.execute("INSERT INTO job_events(job_id,event,message,details_json,created_at) VALUES ('activity-job','completed','工作完成','{}',?)", (now,))
-        connection.execute("INSERT INTO device_events(device_id,level,event,message,details_json,created_at) VALUES (?,'warning','status_report','Bearer secret-token','{}',?)", (device_id, now))
-        connection.execute("INSERT INTO job_errors(job_id,component,error_code,fingerprint,severity,message,first_seen_at,last_seen_at) VALUES ('activity-job','worker','WORKER-001','activity-error','error','/Users/test/private.jpg',?,?)", (now, now))
-    app.extensions["inktime_observability_service"].record("INFO", "test", "activity", "已遮蔽 API key", job_id="activity-job")
+        connection.execute(
+            "INSERT INTO job_events(job_id,event,message,details_json,created_at) VALUES ('activity-job','completed','工作完成','{}',?)",
+            (now,),
+        )
+        connection.execute(
+            "INSERT INTO device_events(device_id,level,event,message,details_json,created_at) VALUES (?,'warning','status_report','Bearer secret-token','{}',?)",
+            (device_id, now),
+        )
+        connection.execute(
+            "INSERT INTO job_errors(job_id,component,error_code,fingerprint,severity,message,first_seen_at,last_seen_at) VALUES ('activity-job','worker','WORKER-001','activity-error','error','/Users/test/private.jpg',?,?)",
+            (now, now),
+        )
+    app.extensions["inktime_observability_service"].record(
+        "INFO", "test", "activity", "已遮蔽 API key", job_id="activity-job"
+    )
 
 
 def test_activity_is_bounded_unifies_sources_and_redacts(client, app):
@@ -45,7 +56,9 @@ def test_activity_access_is_read_only_for_viewer(client, app):
     login(client, "viewer", "viewer-passphrase")
     assert client.get("/activity").status_code == 200
     assert client.get("/api/v1/activity/download").status_code == 403
-    response = client.post("/api/v1/settings", json={"observability.debug_enabled": True}, headers={"X-CSRF-Token": csrf(client)})
+    response = client.post(
+        "/api/v1/settings", json={"observability.debug_enabled": True}, headers={"X-CSRF-Token": csrf(client)}
+    )
     assert response.status_code == 403
 
 
@@ -74,8 +87,13 @@ def test_caption_and_observability_settings_coexist_and_caption_events_are_redac
     settings.update("observability.stuck_job_minutes", 6, changed_by="test", source_ip="test")
     assert analysis._prompt_version(analysis._caption_controls()) == fingerprint
     app.extensions["inktime_observability_service"].record(
-        "DEBUG", "analysis", "caption_cache_hit", "Prompt Bearer secret-token",
-        photo_id="photo", trace_id=fingerprint, api_key="not-for-activity",
+        "DEBUG",
+        "analysis",
+        "caption_cache_hit",
+        "Prompt Bearer secret-token",
+        photo_id="photo",
+        trace_id=fingerprint,
+        api_key="not-for-activity",
     )
     body = client.get("/api/v1/activity?photo_id=photo").get_data(as_text=True)
     assert "secret-token" not in body and "not-for-activity" not in body

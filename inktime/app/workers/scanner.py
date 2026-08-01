@@ -50,7 +50,13 @@ def iter_media(
     """串流回傳媒體；walk 的權限／I/O 錯誤不得被靜默忽略。"""
 
     for directory, dirnames, filenames in os.walk(root, onerror=on_error, followlinks=False):
-        dirnames[:] = [name for name in dirnames if not name.startswith(".") and name not in {"@eaDir", "@tmp", "#recycle"} and not (Path(directory) / name).is_symlink()]
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if not name.startswith(".")
+            and name not in {"@eaDir", "@tmp", "#recycle"}
+            and not (Path(directory) / name).is_symlink()
+        ]
         for filename in filenames:
             path = Path(directory) / filename
             if filename.startswith(".") or filename in {"Thumbs.db", "desktop.ini"} or path.is_symlink():
@@ -282,7 +288,15 @@ class PhotoScanner:
                     stat = path.stat()
                     if int(stat.st_size) > max_file_bytes:
                         counts["skipped"] += 1
-                        errors.append(_scan_error(str(path), stage="safety", error_code="SCAN-SIZE-001", exc=ValueError("file too large"), retryable=False))
+                        errors.append(
+                            _scan_error(
+                                str(path),
+                                stage="safety",
+                                error_code="SCAN-SIZE-001",
+                                exc=ValueError("file too large"),
+                                retryable=False,
+                            )
+                        )
                         continue
                     disk_entries.append(
                         DiskPhoto(path, relative_path, int(stat.st_size), float(stat.st_mtime))
@@ -320,14 +334,9 @@ class PhotoScanner:
                     counts["skipped"] += 1
                     continue
                 signature_changed = not bool(
-                    stored
-                    and stored.matches(
-                        file_size=entry.file_size, modified_time=entry.modified_time
-                    )
+                    stored and stored.matches(file_size=entry.file_size, modified_time=entry.modified_time)
                 )
-                metadata, local = self._sections(
-                    mode, stored, signature_changed=signature_changed
-                )
+                metadata, local = self._sections(mode, stored, signature_changed=signature_changed)
                 if not metadata and not local:
                     if stored is not None:
                         seen_without_write.append(stored.id)
@@ -378,7 +387,10 @@ class PhotoScanner:
             for prepared_chunk in _slices(prepared, write_batch_size):
                 try:
                     batch_results = self.repository.apply_scan_batch(
-                        library_id, scan_id, root, prepared_chunk,
+                        library_id,
+                        scan_id,
+                        root,
+                        prepared_chunk,
                         quality_policy_settings=quality_policy_settings,
                     )
                 except Exception as exc:
@@ -435,7 +447,8 @@ class PhotoScanner:
                                         [entry[4] for entry in inventory]
                                     )
                                     self.thumbnails.cleanup(
-                                        max_bytes=thumbnail_max_bytes, retention_days=thumbnail_retention_days,
+                                        max_bytes=thumbnail_max_bytes,
+                                        retention_days=thumbnail_retention_days,
                                         active_hashes=active_hashes,
                                         inventory=inventory,
                                     )

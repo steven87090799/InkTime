@@ -29,9 +29,7 @@ class ScoringProfileRepository:
             "rules": str(self.settings.get(SETTING_KEYS["rules"], "")),
             "memory_weight": float(self.settings.get(SETTING_KEYS["memory"], 50)),
             "beauty_weight": float(self.settings.get(SETTING_KEYS["beauty"], 20)),
-            "technical_weight": float(
-                self.settings.get(SETTING_KEYS["technical_quality"], 10)
-            ),
+            "technical_weight": float(self.settings.get(SETTING_KEYS["technical_quality"], 10)),
             "emotion_weight": float(self.settings.get(SETTING_KEYS["emotion"], 20)),
             "favorite_bonus": float(self.settings.get(SETTING_KEYS["favorite_bonus"], 5)),
         }
@@ -76,9 +74,7 @@ class ScoringProfileRepository:
 
     def current(self) -> dict:
         with self.database.session() as connection:
-            row = connection.execute(
-                "SELECT * FROM scoring_rule_versions WHERE is_active=1"
-            ).fetchone()
+            row = connection.execute("SELECT * FROM scoring_rule_versions WHERE is_active=1").fetchone()
         if row is None:
             self.ensure_initial()
             return self.current()
@@ -130,9 +126,7 @@ class ScoringProfileRepository:
                 after = before | setting_values
                 self.settings._validate_all(after)
                 changed_settings = {
-                    key: value
-                    for key, value in setting_values.items()
-                    if before.get(key) != value
+                    key: value for key, value in setting_values.items() if before.get(key) != value
                 }
                 if changed_settings:
                     self.settings._create_snapshot(

@@ -16,9 +16,7 @@ from inktime.app.services.backups import BackupService
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="InkTime 離線備份還原；Web、Worker、Scheduler 必須全部停止"
-    )
+    parser = argparse.ArgumentParser(description="InkTime 離線備份還原；Web、Worker、Scheduler 必須全部停止")
     parser.add_argument("backup", type=Path, help="inktime-backup-*.zip 或 pre-migration .sqlite3")
     parser.add_argument(
         "--database",

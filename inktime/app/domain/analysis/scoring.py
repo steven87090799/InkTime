@@ -41,9 +41,7 @@ def calculate_library_percentile(
 ) -> float | None:
     """將原始排序分轉成照片庫內的相對位置；同分使用平均名次。"""
     distribution = (
-        population
-        if isinstance(population, ScoreDistribution)
-        else prepare_score_distribution(population)
+        population if isinstance(population, ScoreDistribution) else prepare_score_distribution(population)
     )
     values = distribution.values
     if len(values) < 5 or distribution.unique_count < 3:

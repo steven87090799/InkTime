@@ -74,12 +74,8 @@ class AtomicReleasePublisher:
             raise ValueError("RENDER-006 自訂色盤與面板 Profile 不一致")
         if release_kind not in {"formal", "device_test"}:
             raise ValueError("RENDER-008 Release 類型不合法")
-        effective_strength = (
-            1.0 if dither in {"gooddisplay", "photo_smooth"} else float(dither_strength)
-        )
-        effective_color_distance = (
-            "rgb" if dither in {"gooddisplay", "photo_smooth"} else color_distance
-        )
+        effective_strength = 1.0 if dither in {"gooddisplay", "photo_smooth"} else float(dither_strength)
+        effective_color_distance = "rgb" if dither in {"gooddisplay", "photo_smooth"} else color_distance
         files = []
         output_palette = profile.colors
         try:
@@ -190,9 +186,7 @@ class AtomicReleasePublisher:
                     continue
         return None
 
-    def discard_unassigned_device_test(
-        self, release_id: str, idempotency_key: str
-    ) -> None:
+    def discard_unassigned_device_test(self, release_id: str, idempotency_key: str) -> None:
         release = self.root / release_id
         manifest_path = release / "manifest.json"
         try:
@@ -446,9 +440,10 @@ class DeviceTestReleaseStore:
         }
         if assignment.get("status") not in allowed or assignment.get("profile_key") != profile_key:
             return None
-        if float(assignment.get("expires_at", 0)) <= datetime.now(timezone.utc).timestamp() or int(
-            assignment.get("retry_count", 0)
-        ) >= 5:
+        if (
+            float(assignment.get("expires_at", 0)) <= datetime.now(timezone.utc).timestamp()
+            or int(assignment.get("retry_count", 0)) >= 5
+        ):
             assignment["status"] = "expired"
             assignment["expired_at"] = datetime.now(timezone.utc).isoformat()
             self._write(path, assignment)
@@ -515,7 +510,5 @@ class DeviceTestReleaseStore:
     @staticmethod
     def _write(path: Path, assignment: dict) -> None:
         temporary = path.with_suffix(".tmp")
-        temporary.write_text(
-            json.dumps(assignment, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        temporary.write_text(json.dumps(assignment, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(path)

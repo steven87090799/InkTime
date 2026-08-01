@@ -102,7 +102,7 @@ flowchart TD
     RELEASE --> HISTORY["🗂️ published 與 display_history 同一 DB Transaction<br/>記錄發布事實，不等同實體面板 ACK"]
     RELEASE --> MANIFEST["8️⃣ 裝置取得 Profile 專屬 Manifest"]
     MANIFEST --> DOWNLOAD["9️⃣ 下載既有靜態 BIN 並驗證 SHA-256"]
-    DOWNLOAD --> DISPLAY["🔟 目前主流程全刷電子紙<br/>相同內容 skip 為已測純邏輯 policy／待正式接入驗收"]
+    DOWNLOAD --> DISPLAY["🔟 Queue-first＋SHA 驗證<br/>相同內容由正式韌體安全跳過刷新"]
     DISPLAY --> ACK["1️⃣1️⃣ ESP32 回報狀態與顯示 ACK"]
     ACK --> TELEMETRY["1️⃣2️⃣ 裝置遙測、錯誤與測試 Release consumed 狀態可供查詢"]
 
@@ -461,7 +461,7 @@ sequenceDiagram
         Note over T: Assignment 不 consumed，期限／重試內仍可重取
     else Payload 正確
         T->>T: payload_downloaded
-        Note over E: 相同內容 skip／最小刷新間隔已有純邏輯 policy；正式主流程接入與實體驗收仍列為邊界
+        Note over E: 相同內容 skip 已接入正式韌體；實體面板刷新與最小間隔仍待硬體驗收
         E->>P: 目前主流程執行六／七色完整刷新
         P-->>E: BUSY 在 Timeout 內完成
         E->>E: 保存有效 Cache 狀態、power off／hibernate
@@ -634,15 +634,17 @@ flowchart TD
 
 需求：Docker Engine 24+ 與 Compose v2。請先選擇部署模式，不要混用 HTTP 與 Secure Cookie 設定。
 
-可信任 LAN／本機 HTTP：
+可信任 LAN Production HTTP（僅可信任 LAN／IoT VLAN）：
 
 ```bash
-cp .env.local.example .env
-# 把 INKTIME_PUBLIC_URL 改成瀏覽器實際使用的 http://主機:8765
-docker compose up -d --build
+cp .env.lan.production.example .env
+# 換成實際 LAN URL、絕對 data/photos 路徑與 immutable Git SHA。
+python scripts/production_preflight.py --mode lan --env-file .env
+scripts/build_release_image.sh
+docker compose up -d
 ```
 
-這個模式使用 `INKTIME_COOKIE_SECURE=0` 與明確的 `INKTIME_ALLOW_INSECURE_HTTP=1`，只適合可信任 LAN 或測試環境，不可直接公開到 Internet。
+這個模式仍是 `INKTIME_ENVIRONMENT=production`，使用 `INKTIME_COOKIE_SECURE=0` 與明確的 `INKTIME_ALLOW_INSECURE_HTTP=1`。Health／diagnostics 會顯示 `transport=trusted-lan-http`、`security_state=degraded`、`tls_enabled=false` 與 `secure_cookie=false`；不可直接公開到 Internet。`.env.local.example` 只供 development／模擬。
 
 正式 HTTPS Reverse Proxy：
 
@@ -700,7 +702,7 @@ Production 預設且建議使用 `INKTIME_COOKIE_SECURE=1`、`INKTIME_ALLOW_INSE
 
 ## ESP32 配對與可靠性
 
-新版韌體不再把金鑰放在 URL。裝置先以 Bearer Token 取得專屬面板 Profile 的 Manifest，套用 Web 管理且帶版本的面板／時區／每日排程／旋轉，驗證尺寸與 SHA-256，成功才刷新；之後回報設定 ACK、firmware、RSSI、Heap／PSRAM 與最後錯誤。Scheduler 以低頻掃描建立離線／恢復通知，可選去重 Webhook。既有 EOL GDEY073D46 與新 GDEP073E01 有不同 compile profile；完整設定見[裝置可靠性與六／七色渲染指南](docs/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。
+新版韌體不再把金鑰放在 URL。裝置以 Bearer Token 優先讀取 Offline Queue，嚴格驗證 Item 綁定的相對下載 URL、尺寸、格式、長度與 SHA-256；只有 Queue 404／空白才回退 Latest Release。顯示事件先持久化 NVS，再以 canonical `/api/device/v1/queue/ack` 重送穩定 idempotency key。成功顯示的 SHA／Release／Profile／rotation／board 完全相同時可安全跳過刷新；forced refresh 與狀態損壞會 fail closed。Scheduler 以低頻掃描建立離線／恢復通知，可選去重 Webhook。完整設定見[裝置可靠性與六／七色渲染指南](docs/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。
 
 ## 原生安裝與相容 CLI
 
@@ -748,7 +750,7 @@ python -m inktime.app.workers.runner
 - 一般發布、歷史選片與排程共用同一候選資格：已分析、可選、active、最新分析存在，而且原始檔仍位於啟用的 Library Root。
 - Release 先產生 staged 檔案並驗證 Manifest／大小／SHA-256，再以補償式流程切換 Profile pointer、提交 DB 與 `display_history`。啟動時標記漂移，失效 pointer 可回復到同 Profile 最新完整版本，但不自動刪除未知 Release。
 - 裝置仍使用 `Authorization: Bearer`；Bearer Token 不會加密 HTTP。HTTP 只適合隔離 IoT VLAN，跨網路必須使用已驗證 CA 的 HTTPS 或 VPN。
-- 六／七色 Profile 明確宣告不支援 Partial Refresh；相同內容跳過刷新與最小刷新間隔仍須由正式韌體／實體面板完成驗收。
+- 六／七色 Profile 明確宣告不支援 Partial Refresh；正式韌體已實作經驗證的相同內容跳過刷新，但真實面板的 BUSY、方向、殘影、色彩與功耗仍須實體驗收。
 - 預設備份只有 Metadata DB，不含原始照片或 Release Payload。還原後會進行 Release reconciliation。
 
 詳見[裝置傳輸安全](docs/DEVICE_TRANSPORT_SECURITY_ZH_TW.md)、[安全 OTA 設計](docs/SECURE_OTA_DESIGN_ZH_TW.md)與[最終跨模組稽核](docs/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md)。

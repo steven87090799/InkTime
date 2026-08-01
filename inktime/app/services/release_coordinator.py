@@ -56,9 +56,7 @@ class ReleaseCoordinator:
                 self.publisher.mark_orphan(str(manifest["release_id"]), "database_stage_failed")
             raise
 
-        snapshot = self.publisher.pointer_snapshot(
-            [str(item["render_profile"]) for item in verified]
-        )
+        snapshot = self.publisher.pointer_snapshot([str(item["render_profile"]) for item in verified])
         try:
             if not device_assignments:
                 self.publisher.activate_manifests(verified)
@@ -76,7 +74,10 @@ class ReleaseCoordinator:
                         ON CONFLICT(device_id) DO UPDATE SET
                             release_id=excluded.release_id,assigned_at=excluded.assigned_at
                         """,
-                        [(device_id, release_id, now) for device_id, release_id in device_assignments.items()],
+                        [
+                            (device_id, release_id, now)
+                            for device_id, release_id in device_assignments.items()
+                        ],
                     )
                 if history and photo_ids:
                     history_date = str(history.get("history_date") or now[:10])
@@ -125,9 +126,7 @@ class ReleaseCoordinator:
             "pointer_recovered": 0,
         }
         with self.database.session() as connection:
-            rows = connection.execute(
-                "SELECT id,status,render_profile,created_at FROM releases"
-            ).fetchall()
+            rows = connection.execute("SELECT id,status,render_profile,created_at FROM releases").fetchall()
             known = {str(row["id"]) for row in rows}
         valid: dict[str, list[tuple[str, str]]] = {}
         for row in rows:
@@ -163,9 +162,7 @@ class ReleaseCoordinator:
                 release_id = ""
             profile = pointer_name.removeprefix("latest.") if pointer_name != "latest" else ""
             compatible = (
-                valid.get(profile, [])
-                if profile
-                else [item for values in valid.values() for item in values]
+                valid.get(profile, []) if profile else [item for values in valid.values() for item in values]
             )
             valid_ids = {item[1] for item in compatible}
             if release_id not in valid_ids:

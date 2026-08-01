@@ -86,8 +86,7 @@ def _empirical_estimate(
         return None
 
     span_days = (
-        _timestamp(battery_samples[-1]["recorded_at"])
-        - _timestamp(battery_samples[0]["recorded_at"])
+        _timestamp(battery_samples[-1]["recorded_at"]) - _timestamp(battery_samples[0]["recorded_at"])
     ) / SECONDS_PER_DAY
     drain_percent_per_day = median(rates)
     remaining_percent = max(0.0, current_percent - reserve_percent)
@@ -217,9 +216,7 @@ def summarize_energy(device: dict[str, Any], samples: list[dict[str, Any]]) -> d
             "count": len(refresh_durations),
             "latest_seconds": refresh_durations[-1] / 1000.0 if refresh_durations else None,
             "average_seconds": (
-                sum(refresh_durations) / len(refresh_durations) / 1000.0
-                if refresh_durations
-                else None
+                sum(refresh_durations) / len(refresh_durations) / 1000.0 if refresh_durations else None
             ),
             "median_seconds": median(refresh_durations) / 1000.0 if refresh_durations else None,
             "p95_seconds": (
@@ -264,9 +261,7 @@ class DeviceEnergyService:
                     if sample["wake_duration_ms"] is not None
                     else None
                 ),
-                "usb_power": (
-                    None if sample["usb_power"] is None else bool(sample["usb_power"])
-                ),
+                "usb_power": (None if sample["usb_power"] is None else bool(sample["usb_power"])),
             }
             for sample in samples
         ]

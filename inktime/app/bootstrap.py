@@ -56,6 +56,27 @@ class ServiceContainer:
     extensions: dict[str, object]
     session_secret: str = field(repr=False)
 
+    @property
+    def job_repository(self) -> JobRepository:
+        value = self.extensions["inktime_job_repository"]
+        if not isinstance(value, JobRepository):
+            raise TypeError("inktime_job_repository extension type mismatch")
+        return value
+
+    @property
+    def job_service(self) -> JobService:
+        value = self.extensions["inktime_job_service"]
+        if not isinstance(value, JobService):
+            raise TypeError("inktime_job_service extension type mismatch")
+        return value
+
+    @property
+    def settings_repository(self) -> SettingsRepository:
+        value = self.extensions["inktime_settings_repository"]
+        if not isinstance(value, SettingsRepository):
+            raise TypeError("inktime_settings_repository extension type mismatch")
+        return value
+
     def close(self) -> None:
         boundary = self.extensions.get("inktime_process_boundary")
         if boundary is not None:

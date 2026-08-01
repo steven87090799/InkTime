@@ -72,9 +72,7 @@ def _scan(app, tmp_path, *, screenshot=False, duplicate=False):
 
 
 def _setting(app, key, value):
-    app.extensions["inktime_settings_repository"].update(
-        key, value, changed_by="test", source_ip="127.0.0.1"
-    )
+    app.extensions["inktime_settings_repository"].update(key, value, changed_by="test", source_ip="127.0.0.1")
 
 
 def test_excluded_photo_is_shown_and_restore_is_selectable(client, app, tmp_path):
@@ -201,7 +199,9 @@ def test_force_ai_api_is_admin_exclusion_only_and_creates_fresh_job(client, app,
     assert json.loads(job["settings_json"])["force_ai"] is True
     assert job["force_recompute"] == 1
     assert job["analysis_fingerprint"]
-    assert [item["photo_id"] for item in app.extensions["inktime_job_repository"].list_items(job["id"])] == [excluded_id]
+    assert [item["photo_id"] for item in app.extensions["inktime_job_repository"].list_items(job["id"])] == [
+        excluded_id
+    ]
 
 
 def test_ai_cache_hit_does_not_call_provider_twice(app, tmp_path, monkeypatch):
@@ -209,7 +209,9 @@ def test_ai_cache_hit_does_not_call_provider_twice(app, tmp_path, monkeypatch):
     _setting(app, "analysis.ai_mode", "eligible")
     first = CountingProvider()
     service = app.extensions["inktime_analysis_service"]
-    service.analyze_photo(photo_id=first_id, job_id=None, provider=first, strategy="high_quality", high_model="test")
+    service.analyze_photo(
+        photo_id=first_id, job_id=None, provider=first, strategy="high_quality", high_model="test"
+    )
     second = CountingProvider()
     cache = app.extensions["inktime_thumbnail_cache"]
     calls = 0
@@ -223,7 +225,9 @@ def test_ai_cache_hit_does_not_call_provider_twice(app, tmp_path, monkeypatch):
             yield path
 
     monkeypatch.setattr(cache, "acquire_for_use", counted_thumbnail)
-    cached = service.analyze_photo(photo_id=first_id, job_id=None, provider=second, strategy="high_quality", high_model="test")
+    cached = service.analyze_photo(
+        photo_id=first_id, job_id=None, provider=second, strategy="high_quality", high_model="test"
+    )
     assert cached["stage"] == "cache"
     assert second.analyze_calls == 0
     assert calls == 0
@@ -239,16 +243,22 @@ def test_circuit_open_provider_cache_is_used_before_failover(app, tmp_path):
     fallback = CountingProvider()
     fallback.provider_id = "provider-b"
     service.analyze_photo(
-        photo_id=photo_id, job_id=None, provider=first,
-        strategy="high_quality", high_model="route-cache",
+        photo_id=photo_id,
+        job_id=None,
+        provider=first,
+        strategy="high_quality",
+        high_model="route-cache",
     )
     channel = ProviderChannel(first, priority=1, max_concurrency=1)
     channel.circuit_until = time.monotonic() + 60
     router = FailoverVisionProvider([channel, ProviderChannel(fallback, priority=2)])
 
     result = service.analyze_photo(
-        photo_id=photo_id, job_id=None, provider=router,
-        strategy="high_quality", high_model="route-cache",
+        photo_id=photo_id,
+        job_id=None,
+        provider=router,
+        strategy="high_quality",
+        high_model="route-cache",
     )
 
     assert result["stage"] == "cache"
@@ -269,16 +279,22 @@ def test_rate_limited_provider_cache_is_used_without_a_network_permit(app, tmp_p
     fallback = CountingProvider()
     fallback.provider_id = "provider-b"
     service.analyze_photo(
-        photo_id=photo_id, job_id=None, provider=first,
-        strategy="high_quality", high_model="rate-cache",
+        photo_id=photo_id,
+        job_id=None,
+        provider=first,
+        strategy="high_quality",
+        high_model="rate-cache",
     )
     channel = ProviderChannel(first, priority=1, max_concurrency=1, requests_per_minute=1)
     channel.request_times.append(time.monotonic())
     router = FailoverVisionProvider([channel, ProviderChannel(fallback, priority=2)])
 
     result = service.analyze_photo(
-        photo_id=photo_id, job_id=None, provider=router,
-        strategy="high_quality", high_model="rate-cache",
+        photo_id=photo_id,
+        job_id=None,
+        provider=router,
+        strategy="high_quality",
+        high_model="rate-cache",
     )
 
     assert result["stage"] == "cache"
@@ -299,16 +315,22 @@ def test_token_limited_provider_cache_is_used_without_failover(app, tmp_path):
     fallback = CountingProvider()
     fallback.provider_id = "provider-b"
     service.analyze_photo(
-        photo_id=photo_id, job_id=None, provider=first,
-        strategy="high_quality", high_model="token-cache",
+        photo_id=photo_id,
+        job_id=None,
+        provider=first,
+        strategy="high_quality",
+        high_model="token-cache",
     )
     channel = ProviderChannel(first, priority=1, max_concurrency=1, tokens_per_minute=1)
     channel.token_events.append((time.monotonic(), 1))
     router = FailoverVisionProvider([channel, ProviderChannel(fallback, priority=2)])
 
     result = service.analyze_photo(
-        photo_id=photo_id, job_id=None, provider=router,
-        strategy="high_quality", high_model="token-cache",
+        photo_id=photo_id,
+        job_id=None,
+        provider=router,
+        strategy="high_quality",
+        high_model="token-cache",
     )
 
     assert result["stage"] == "cache"
@@ -329,16 +351,22 @@ def test_failover_checks_next_provider_cache_after_first_network_miss(app, tmp_p
     fallback = CountingProvider()
     fallback.provider_id = "provider-b"
     service.analyze_photo(
-        photo_id=photo_id, job_id=None, provider=fallback,
-        strategy="high_quality", high_model="failover-cache",
+        photo_id=photo_id,
+        job_id=None,
+        provider=fallback,
+        strategy="high_quality",
+        high_model="failover-cache",
     )
     channel = ProviderChannel(first, priority=1)
     channel.circuit_until = time.monotonic() + 60
     router = FailoverVisionProvider([channel, ProviderChannel(fallback, priority=2)])
 
     result = service.analyze_photo(
-        photo_id=photo_id, job_id=None, provider=router,
-        strategy="high_quality", high_model="failover-cache",
+        photo_id=photo_id,
+        job_id=None,
+        provider=router,
+        strategy="high_quality",
+        high_model="failover-cache",
     )
 
     assert result["stage"] == "cache"
@@ -360,8 +388,11 @@ def test_network_unavailable_provider_fails_over_after_cache_miss(app, tmp_path)
     router = FailoverVisionProvider([channel, ProviderChannel(fallback, priority=2)])
 
     result = service.analyze_photo(
-        photo_id=photo_id, job_id=None, provider=router,
-        strategy="high_quality", high_model="network-failover",
+        photo_id=photo_id,
+        job_id=None,
+        provider=router,
+        strategy="high_quality",
+        high_model="network-failover",
     )
 
     assert result["stage"] == "single_high"
@@ -545,9 +576,7 @@ def test_full_library_confirmation_and_queue_count_only_active_eligible_photos(c
     assert confirmation.json["photos"] == 2
     assert confirmation.json["eligible_total"] == 3
 
-    queued = client.post(
-        "/api/v1/photos/ai/run", json={"confirm": True, "batch_by": "year"}, headers=headers
-    )
+    queued = client.post("/api/v1/photos/ai/run", json={"confirm": True, "batch_by": "year"}, headers=headers)
     assert queued.status_code == 201
     assert queued.json["queued"] == 2
     with app.extensions["inktime_database"].session() as connection:
@@ -567,6 +596,6 @@ def test_thumbnail_cleanup_only_queries_hashes_visible_in_cache(app, tmp_path):
     with app.extensions["inktime_database"].session() as connection:
         connection.execute("UPDATE photos SET lifecycle_status='missing' WHERE id=?", (photo_ids[1],))
 
-    assert repository.active_hashes_for(
-        [str(first["sha256"]), str(second["sha256"]), "not-a-sha"]
-    ) == {str(first["sha256"])}
+    assert repository.active_hashes_for([str(first["sha256"]), str(second["sha256"]), "not-a-sha"]) == {
+        str(first["sha256"])
+    }

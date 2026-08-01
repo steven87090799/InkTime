@@ -48,9 +48,7 @@ class BoundedRenderCache:
 
     @staticmethod
     def fingerprint(values: dict[str, Any]) -> str:
-        canonical = json.dumps(
-            values, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        )
+        canonical = json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return sha256(canonical.encode("utf-8")).hexdigest()
 
     def _path(self, key: str) -> Path:
@@ -118,9 +116,7 @@ class BoundedRenderCache:
         key = self.fingerprint(fingerprint)
         destination = self._path(key)
         with self._lock:
-            handle, temporary_name = tempfile.mkstemp(
-                prefix=f".{key}-", suffix=".tmp", dir=self.root
-            )
+            handle, temporary_name = tempfile.mkstemp(prefix=f".{key}-", suffix=".tmp", dir=self.root)
             os.close(handle)
             temporary = Path(temporary_name)
             try:

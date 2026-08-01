@@ -402,9 +402,18 @@ def report_status():
     error_code = str(payload.get("error_code", "")).strip()[:64]
     error_message = str(payload.get("error_message", "")).strip()[:500]
     display_updated = optional_bool(payload, "display_updated", default=False)
+    display_skipped = optional_bool(payload, "display_skipped", default=False)
     payload_verified = optional_bool(payload, "payload_sha256_verified", default=False)
     assert display_updated is not None
+    assert display_skipped is not None
     assert payload_verified is not None
+    display_skip_reason = str(payload.get("display_skip_reason", "")).strip()
+    if display_skipped and display_skip_reason != "same_sha256":
+        abort(400, description="DEVICE-004 display_skip_reason 必須是 same_sha256")
+    if not display_skipped and display_skip_reason:
+        abort(400, description="DEVICE-004 未 skip 時不得提供 display_skip_reason")
+    if len(display_skip_reason) > 64:
+        abort(400, description="DEVICE-004 display_skip_reason 過長")
     boolean_details = {
         key: optional_bool(payload, key)
         for key in (
@@ -430,6 +439,8 @@ def report_status():
         applied_config_version=optional_int("applied_config_version", 0, 2_147_483_647),
         details={
             "display_updated": display_updated,
+            "display_skipped": display_skipped,
+            "display_skip_reason": display_skip_reason,
             "payload_sha256_verified": payload_verified,
             "release_id": str(payload.get("release_id", ""))[:100],
             "render_profile": str(payload.get("render_profile", ""))[:100],
@@ -459,7 +470,7 @@ def report_status():
         str(payload.get("release_id", ""))[:100],
         profile_key=str(device["panel_profile"]),
         payload_verified=payload_verified,
-        display_updated=display_updated,
+        display_updated=display_updated or display_skipped,
         error_code=error_code,
     )
     log_event(

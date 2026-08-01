@@ -39,21 +39,29 @@ def test_landscape_frame_requires_a_portrait_partner():
     primary = _photo("primary")
     portrait = _photo("portrait")
     landscape = _photo("landscape", width=1600, height=900)
-    assert select_pair_candidate(primary, [landscape, portrait], frame_orientation="landscape")["id"] == "portrait"
+    assert (
+        select_pair_candidate(primary, [landscape, portrait], frame_orientation="landscape")["id"]
+        == "portrait"
+    )
 
 
 def test_portrait_frame_requires_a_landscape_partner():
     primary = _photo("primary", width=1600, height=900)
     portrait = _photo("portrait")
     landscape = _photo("landscape", width=1600, height=900)
-    assert select_pair_candidate(primary, [portrait, landscape], frame_orientation="portrait")["id"] == "landscape"
+    assert (
+        select_pair_candidate(primary, [portrait, landscape], frame_orientation="portrait")["id"]
+        == "landscape"
+    )
 
 
 def test_pairing_prefers_same_day_then_nearer_time_and_location():
     primary = _photo("primary")
     farther = _photo("farther", captured_at="2024-07-01T16:00:00+00:00", gps_lat=24.0)
     closest = _photo("closest", captured_at="2024-07-01T10:30:00+00:00")
-    assert select_pair_candidate(primary, [farther, closest], frame_orientation="landscape")["id"] == "closest"
+    assert (
+        select_pair_candidate(primary, [farther, closest], frame_orientation="landscape")["id"] == "closest"
+    )
 
 
 def test_pairing_excludes_self_recent_and_near_duplicate_and_returns_none():
@@ -61,13 +69,20 @@ def test_pairing_excludes_self_recent_and_near_duplicate_and_returns_none():
     self_photo = _photo("primary")
     recent = _photo("recent", recently_displayed=True)
     duplicate = _photo("duplicate", perceptual_hash=primary["perceptual_hash"])
-    assert select_pair_candidate(primary, [self_photo, recent, duplicate], frame_orientation="landscape") is None
+    assert (
+        select_pair_candidate(primary, [self_photo, recent, duplicate], frame_orientation="landscape") is None
+    )
 
 
 def test_pairing_does_not_fill_an_unrelated_photo_just_to_make_a_pair():
     primary = _photo("primary")
     unrelated = _photo(
-        "unrelated", captured_at="2023-01-01T03:00:00+00:00", gps_lat=35.6,
-        gps_lon=139.7, city="東京", types=["風景"], ever_displayed=True,
+        "unrelated",
+        captured_at="2023-01-01T03:00:00+00:00",
+        gps_lat=35.6,
+        gps_lon=139.7,
+        city="東京",
+        types=["風景"],
+        ever_displayed=True,
     )
     assert select_pair_candidate(primary, [unrelated], frame_orientation="landscape") is None

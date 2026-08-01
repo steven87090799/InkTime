@@ -85,7 +85,10 @@ class FailoverVisionProvider(VisionProvider):
                     continue
                 if channel.requests_per_minute and len(channel.request_times) >= channel.requests_per_minute:
                     continue
-                if channel.tokens_per_minute and sum(event[1] for event in channel.token_events) >= channel.tokens_per_minute:
+                if (
+                    channel.tokens_per_minute
+                    and sum(event[1] for event in channel.token_events) >= channel.tokens_per_minute
+                ):
                     continue
                 result.append(channel)
         return result
@@ -103,8 +106,7 @@ class FailoverVisionProvider(VisionProvider):
             return [
                 channel
                 for channel in self.channels
-                if str(getattr(channel.provider, "provider_id", channel.provider.name))
-                not in excluded
+                if str(getattr(channel.provider, "provider_id", channel.provider.name)) not in excluded
             ]
 
     def acquire_channel(self, channel: ProviderChannel) -> bool:

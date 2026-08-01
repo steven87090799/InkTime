@@ -109,8 +109,7 @@ def test_different_shards_can_run_in_parallel(tmp_path):
     second = next(
         f"{index:064x}-512"
         for index in range(1, 10_000)
-        if int(sha256(f"{index:064x}-512".encode("ascii")).hexdigest()[:8], 16)
-        % cache.LOCK_SHARDS
+        if int(sha256(f"{index:064x}-512".encode("ascii")).hexdigest()[:8], 16) % cache.LOCK_SHARDS
         != first_shard
     )
     barrier = threading.Barrier(2)

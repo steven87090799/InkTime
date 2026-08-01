@@ -24,6 +24,7 @@ data/*.key
 
 # Outputs
 output/
+build-manifest.json
 simulation_photos/*
 !simulation_photos/README.md
 

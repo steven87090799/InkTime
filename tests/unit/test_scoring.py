@@ -90,9 +90,7 @@ def test_scoring_profile_create_and_restore_are_versioned(app):
     assert created["is_active"] == 1
     assert created["memory_weight"] == 55
     assert repository.get(str(initial["id"]))["is_active"] == 0
-    assert app.extensions["inktime_settings_repository"].get(
-        "analysis.ranking_memory_weight"
-    ) == 55
+    assert app.extensions["inktime_settings_repository"].get("analysis.ranking_memory_weight") == 55
     with app.extensions["inktime_database"].session() as connection:
         history_count = connection.execute(
             "SELECT COUNT(*) FROM setting_history WHERE changed_by=?", (user_id,)
@@ -103,17 +101,18 @@ def test_scoring_profile_create_and_restore_are_versioned(app):
     assert history_count == 4
     assert snapshot_count == 1
 
-    restored = repository.restore(
-        str(initial["id"]), created_by=user_id, source_ip="127.0.0.1"
-    )
+    restored = repository.restore(str(initial["id"]), created_by=user_id, source_ip="127.0.0.1")
     assert restored["is_active"] == 1
     assert restored["name"].startswith("還原：")
     assert restored["memory_weight"] == initial["memory_weight"]
     assert len(repository.list()) == 3
     with app.extensions["inktime_database"].session() as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM settings_snapshots WHERE actor_id=?", (user_id,)
-        ).fetchone()[0] == 2
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM settings_snapshots WHERE actor_id=?", (user_id,)
+            ).fetchone()[0]
+            == 2
+        )
 
 
 class LabProvider(VisionProvider):

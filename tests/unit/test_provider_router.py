@@ -150,15 +150,11 @@ def test_isolated_router_keeps_failover_and_repair_on_the_selected_provider():
     )
     boundary = CooperativeBoundary()
 
-    response = router.analyze_isolated(
-        boundary, image_path=Path("x"), model="m", detail="low", stage="one"
-    )
+    response = router.analyze_isolated(boundary, image_path=Path("x"), model="m", detail="low", stage="one")
     repaired = router.repair_json_isolated(
         boundary, invalid_content="{}", validation_error="invalid", model="m"
     )
-    repaired_directly = router.repair_json(
-        invalid_content="{}", validation_error="invalid", model="m"
-    )
+    repaired_directly = router.repair_json(invalid_content="{}", validation_error="invalid", model="m")
     assert router.submit_batch([{"request": "x"}]) == "batch"
     assert router.poll_batch("batch") == {}
     assert router.cancel_batch("batch") == {}

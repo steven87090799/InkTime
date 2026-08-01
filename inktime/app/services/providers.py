@@ -25,7 +25,11 @@ class ProviderService:
         if not requested:
             return None
         channels = []
-        rules = str(self.settings.get("analysis.scoring_rules", "")) if scoring_rules is None else str(scoring_rules)
+        rules = (
+            str(self.settings.get("analysis.scoring_rules", ""))
+            if scoring_rules is None
+            else str(scoring_rules)
+        )
         summaries = {str(item["id"]): item for item in self.repository.list()}
         for snapshot in requested:
             provider_id = str(snapshot.get("provider_id") or snapshot.get("id") or "")

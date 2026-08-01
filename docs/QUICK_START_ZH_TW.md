@@ -1,8 +1,8 @@
 # 快速開始
 
-1. 可信任 LAN／本機 HTTP 執行 `cp .env.local.example .env`；正式 HTTPS Reverse Proxy 執行 `cp .env.production.example .env`，並先替換實際公開網域。
-2. 確認 HTTP 模式為 `COOKIE_SECURE=0`／`ALLOW_INSECURE_HTTP=1`；HTTPS 模式為 `COOKIE_SECURE=1`／`ALLOW_INSECURE_HTTP=0`。Production 預設且建議 HTTPS；Production HTTP 只可作受控 break-glass，Health／Preflight 會 degraded 且不可公開至公網。
-3. `docker compose up -d --build`；HTTP LAN 開啟 `http://NAS-IP:8765/`，Production 從設定的 HTTPS 網域進入。
+1. 可信任 LAN Production 執行 `cp .env.lan.production.example .env`；正式 HTTPS Reverse Proxy 執行 `cp .env.production.example .env`。`.env.local.example` 只供 development／模擬。
+2. 填入實際 URL、不同的絕對 data/photos 路徑與 Git SHA；LAN 執行 `python scripts/production_preflight.py --mode lan --env-file .env`，HTTPS 使用 `--mode https`。
+3. 執行 `scripts/build_release_image.sh` 與 `docker compose up -d`；LAN Health 顯示 production／trusted-lan-http／degraded，且不可公開至公網。
 4. 建立管理員；到「模型」新增 Provider 並測試連線。
 5. 無實體面板時，先把照片放進 `simulation_photos/`，到「維護」按「掃描並送到虛擬墨水屏」，另開 `/virtual-display` 接收；正式照片庫仍可用 `/photos` 建立一般掃描工作。
 6. 建立「兩階段智慧分析」，先用 10～100 張與小額預算驗證。

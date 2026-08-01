@@ -44,8 +44,13 @@ def test_device_adaptive_settings_validate_known_values(client, app):
     response = client.patch(
         f"/api/v1/devices/{device_id}",
         json={
-            "name": "相框", "enabled": True, "timezone": "Asia/Taipei", "schedule": "08:00",
-            "rotation": 0, "panel_profile": "safe_4c", "frame_orientation": "diagonal",
+            "name": "相框",
+            "enabled": True,
+            "timezone": "Asia/Taipei",
+            "schedule": "08:00",
+            "rotation": 0,
+            "panel_profile": "safe_4c",
+            "frame_orientation": "diagonal",
         },
         headers={"X-CSRF-Token": csrf(client)},
     )

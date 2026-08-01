@@ -1,4 +1,5 @@
 """Deterministic, non-generative captions for local-only rendering."""
+
 from __future__ import annotations
 
 from datetime import date, datetime, timezone as utc_timezone

@@ -74,9 +74,7 @@ def configure_logging(
     selected = str(
         format_name or repository_format or os.environ.get("INKTIME_LOG_FORMAT") or "human"
     ).lower()
-    selected_level = str(
-        level or repository_level or os.environ.get("INKTIME_LOG_LEVEL") or "INFO"
-    ).upper()
+    selected_level = str(level or repository_level or os.environ.get("INKTIME_LOG_LEVEL") or "INFO").upper()
     if selected not in {"human", "json"}:
         selected = "human"
     if selected_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:

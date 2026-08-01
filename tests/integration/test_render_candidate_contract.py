@@ -20,11 +20,27 @@ def _candidate(app, root, photo_id: str, *, eligible: int = 1, lifecycle: str = 
             (photo_id, library, f"{photo_id}.jpg", eligible, lifecycle, now, now),
         )
     photos.save_analysis(
-        photo_id, None, "local", "local", "test",
-        {"schema_version": 1, "caption": "測試", "types": ["其他"], "memory_score": 99,
-         "beauty_score": 99, "technical_quality_score": 99, "emotion_score": 99,
-         "side_caption": "", "should_keep": True, "sensitive": False, "reason": "測試"}, "{}",
-        ranking_score=99, final_ranking_score=99,
+        photo_id,
+        None,
+        "local",
+        "local",
+        "test",
+        {
+            "schema_version": 1,
+            "caption": "測試",
+            "types": ["其他"],
+            "memory_score": 99,
+            "beauty_score": 99,
+            "technical_quality_score": 99,
+            "emotion_score": 99,
+            "side_caption": "",
+            "should_keep": True,
+            "sensitive": False,
+            "reason": "測試",
+        },
+        "{}",
+        ranking_score=99,
+        final_ranking_score=99,
     )
 
 
@@ -174,7 +190,9 @@ def test_candidate_error_names_the_actual_photo(app, tmp_path):
     root.mkdir()
     _candidate(app, root, "disabled-library")
     with app.extensions["inktime_database"].session() as connection:
-        library_id = connection.execute("SELECT library_id FROM photos WHERE id='disabled-library'").fetchone()[0]
+        library_id = connection.execute(
+            "SELECT library_id FROM photos WHERE id='disabled-library'"
+        ).fetchone()[0]
         connection.execute("UPDATE libraries SET enabled=0 WHERE id=?", (library_id,))
     candidates = app.extensions["inktime_render_candidate_repository"]
     for photo_id in ("does-not-exist", "disabled-library"):

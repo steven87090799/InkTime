@@ -26,8 +26,7 @@ GOODDISPLAY_CODE_BY_RGB = {
 
 def _unpack_indexed4(payload: bytes, pixels: int) -> list[int]:
     return [
-        payload[index // 2] >> 4 if index % 2 == 0 else payload[index // 2] & 0x0F
-        for index in range(pixels)
+        payload[index // 2] >> 4 if index % 2 == 0 else payload[index // 2] & 0x0F for index in range(pixels)
     ]
 
 
@@ -35,9 +34,7 @@ def _solid_blocks(image: Image.Image, size: int = 4) -> int:
     pixels = image.load()
     return sum(
         all(
-            pixels[column, row] == pixels[x, y]
-            for row in range(y, y + size)
-            for column in range(x, x + size)
+            pixels[column, row] == pixels[x, y] for row in range(y, y + size) for column in range(x, x + size)
         )
         for y in range(0, image.height - size + 1, size)
         for x in range(0, image.width - size + 1, size)

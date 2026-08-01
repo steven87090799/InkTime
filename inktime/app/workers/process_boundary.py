@@ -27,9 +27,7 @@ def _call_child(function: Callable[..., Any], kwargs: dict[str, Any], sender) ->
         sender.close()
 
 
-def _provider_child(
-    specification: dict[str, Any], method: str, kwargs: dict[str, Any], sender
-) -> None:
+def _provider_child(specification: dict[str, Any], method: str, kwargs: dict[str, Any], sender) -> None:
     provider = None
     try:
         if str(specification.get("provider_kind")) != "openai_compatible":
@@ -131,9 +129,7 @@ class KillableProcessBoundary:
             with self._lock:
                 self._active[token] = (process, receiver)
                 self._metrics["active"] += 1
-                self._metrics["active_max"] = max(
-                    self._metrics["active_max"], self._metrics["active"]
-                )
+                self._metrics["active_max"] = max(self._metrics["active_max"], self._metrics["active"])
                 registered = True
             deadline = time.monotonic() + timeout
             while not receiver.poll(min(0.1, max(0.0, deadline - time.monotonic()))):
@@ -168,9 +164,7 @@ class KillableProcessBoundary:
             if registered:
                 with self._lock:
                     self._active.pop(token, None)
-                    self._metrics["active"] = max(
-                        0, self._metrics["active"] - 1
-                    )
+                    self._metrics["active"] = max(0, self._metrics["active"] - 1)
             self._slots.release()
 
     def call(

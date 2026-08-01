@@ -13,9 +13,7 @@ from typing import Generic, TypeVar
 LOGGER = logging.getLogger(__name__)
 
 _DATE_ONLY = re.compile(r"^(\d{4})([-/:])(\d{2})\2(\d{2})$")
-_EXIF_DATETIME = re.compile(
-    r"^(\d{4})([-/:])(\d{2})\2(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(\.\d+)?$"
-)
+_EXIF_DATETIME = re.compile(r"^(\d{4})([-/:])(\d{2})\2(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(\.\d+)?$")
 _ISO_WITH_ZONE = re.compile(
     r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$",
     re.IGNORECASE,
@@ -169,8 +167,13 @@ def parse_photo_datetime(value: object, *, warn: bool = True) -> datetime | None
         try:
             microseconds = int(float(match[8] or "0") * 1_000_000)
             return datetime(
-                int(match[1]), int(match[3]), int(match[4]), int(match[5]),
-                int(match[6]), int(match[7]), microseconds,
+                int(match[1]),
+                int(match[3]),
+                int(match[4]),
+                int(match[5]),
+                int(match[6]),
+                int(match[7]),
+                microseconds,
             )
         except (OverflowError, ValueError):
             if warn:
@@ -196,9 +199,7 @@ def parse_photo_date(value: object, *, warn: bool = True) -> date | None:
     return parsed.date() if parsed is not None else None
 
 
-def materialized_capture_fields(
-    value: object, *, warn: bool = True
-) -> tuple[str | None, str | None, str]:
+def materialized_capture_fields(value: object, *, warn: bool = True) -> tuple[str | None, str | None, str]:
     """Return ISO date, MM-DD and an auditable parse status."""
 
     if value is None or (isinstance(value, str) and not value.strip()):

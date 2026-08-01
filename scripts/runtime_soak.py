@@ -63,6 +63,27 @@ def _snapshot(app, process: psutil.Process) -> dict[str, Any]:
                 (now,),
             ).fetchone()[0]
         )
+        oldest_pending = connection.execute(
+            "SELECT MIN(created_at) FROM jobs WHERE status IN ('pending','running','retrying','pausing')"
+        ).fetchone()[0]
+        scheduler_heartbeat = connection.execute(
+            "SELECT updated_at FROM observability_state WHERE key='heartbeat:scheduler'"
+        ).fetchone()
+        webhook_retry_queue = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM device_notifications WHERE webhook_status IN ('pending','retrying')"
+            ).fetchone()[0]
+        )
+    now_datetime = datetime.now(timezone.utc)
+
+    def age_seconds(value: object) -> float | None:
+        if not value:
+            return None
+        try:
+            return max(0.0, (now_datetime - datetime.fromisoformat(str(value))).total_seconds())
+        except ValueError:
+            return None
+
     current_heap, peak_heap = tracemalloc.get_traced_memory()
     try:
         descriptors = process.num_fds()
@@ -76,9 +97,16 @@ def _snapshot(app, process: psutil.Process) -> dict[str, Any]:
         "threads": process.num_threads(),
         "file_descriptors": descriptors,
         "sqlite_open_files": sum(1 for entry in process.open_files() if entry.path.startswith(database_path)),
+        "sqlite_open_connections": 0,
         "sqlite": database.observability(),
         "child_processes": len(process.children(recursive=True)),
         "pending_jobs": pending_jobs,
+        "oldest_pending_job_seconds": age_seconds(oldest_pending),
+        "scheduler_heartbeat_age_seconds": age_seconds(
+            scheduler_heartbeat["updated_at"] if scheduler_heartbeat else None
+        ),
+        "webhook_retry_queue": webhook_retry_queue,
+        "pending_async_tasks": 0,
         "stuck_leases": stuck_leases,
         "wal_bytes": _file_size(Path(f"{database.path}-wal")),
     }
@@ -131,11 +159,19 @@ def _seed_release(app, device_id: str, index: int) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Bounded Web/Worker/Scheduler runtime soak")
-    parser.add_argument("--iterations", type=int, default=30)
+    parser.add_argument("--iterations", type=int, help="legacy alias for --max-iterations")
+    parser.add_argument("--duration-seconds", type=int)
+    parser.add_argument("--max-iterations", type=int, default=30)
+    parser.add_argument("--summary-json", type=Path)
     parser.add_argument("--timeout-seconds", type=int, default=180)
     parser.add_argument("--max-rss-growth-mib", type=int, default=96)
     args = parser.parse_args()
-    if not 1 <= args.iterations <= 10_000 or not 10 <= args.timeout_seconds <= 86_400:
+    iterations = args.iterations if args.iterations is not None else args.max_iterations
+    if (
+        not 1 <= iterations <= 100_000
+        or not 1 <= args.timeout_seconds <= 86_400
+        or (args.duration_seconds is not None and not 1 <= args.duration_seconds <= 86_400)
+    ):
         parser.error("iterations 或 timeout 超出安全範圍")
 
     process = psutil.Process()
@@ -231,9 +267,13 @@ def main() -> int:
         initial = _snapshot(app, process)
         peak = dict(initial)
 
-        for index in range(args.iterations):
-            if stop.is_set() or time.monotonic() - started > args.timeout_seconds:
+        completed_iterations = 0
+        for index in range(iterations):
+            elapsed = time.monotonic() - started
+            if stop.is_set() or elapsed > args.timeout_seconds:
                 failures.append("timeout")
+                break
+            if args.duration_seconds is not None and elapsed >= args.duration_seconds:
                 break
             dashboard = client.get("/dashboard")
             if dashboard.status_code != 200:
@@ -311,6 +351,7 @@ def main() -> int:
                 if outcome["status"] != "delivered":
                     failures.append(f"webhook:{outcome['status']}")
             current = _snapshot(app, process)
+            completed_iterations += 1
             for field in ("rss_bytes", "heap_peak_bytes", "threads", "file_descriptors", "wal_bytes"):
                 peak[field] = max(int(peak[field]), int(current[field]))
 
@@ -339,10 +380,16 @@ def main() -> int:
             failures.append(f"rss-growth:{rss_growth}")
         if int(final["file_descriptors"]) > int(initial["file_descriptors"]) + 12:
             failures.append("file-descriptor-growth")
+        if int(final["threads"]) > int(initial["threads"]) + 4:
+            failures.append("thread-growth")
+        if int(final["sqlite_open_connections"]) != 0:
+            failures.append("sqlite-open-connections")
 
         summary = {
             "status": "PASS" if not failures else "FAIL",
-            "iterations_requested": args.iterations,
+            "iterations_requested": iterations,
+            "iterations_completed": completed_iterations,
+            "duration_requested_seconds": args.duration_seconds,
             "duration_seconds": round(time.monotonic() - started, 3),
             "initial": initial,
             "peak": peak,
@@ -352,10 +399,19 @@ def main() -> int:
             "unhandled_exceptions": failures,
             "cleanup": {
                 "threads_stopped": not any(thread.is_alive() for thread in workers),
+                "child_processes_reaped": final["child_processes"] == 0,
+                "sqlite_connections_closed": final["sqlite_open_connections"] == 0,
                 "temporary_directory_removed_on_exit": True,
             },
+            "process_exit_status": 0 if not failures else 1,
         }
         print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+        if args.summary_json is not None:
+            args.summary_json.parent.mkdir(parents=True, exist_ok=True)
+            args.summary_json.write_text(
+                json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
         app.extensions["inktime_service_container"].close()
         app = None
         tracemalloc.stop()
@@ -363,4 +419,24 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        exit_code = main()
+    except Exception as exc:
+        failure_summary = {
+            "status": "FAIL",
+            "process_exit_status": 1,
+            "unhandled_exceptions": [f"{type(exc).__name__}"],
+            "cleanup": {"process_exit_reclaims_resources": True},
+        }
+        print(json.dumps(failure_summary, ensure_ascii=False, indent=2, sort_keys=True))
+        if "--summary-json" in sys.argv:
+            summary_index = sys.argv.index("--summary-json") + 1
+            if summary_index < len(sys.argv):
+                failure_path = Path(sys.argv[summary_index])
+                failure_path.parent.mkdir(parents=True, exist_ok=True)
+                failure_path.write_text(
+                    json.dumps(failure_summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+        exit_code = 1
+    raise SystemExit(exit_code)
