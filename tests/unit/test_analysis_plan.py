@@ -35,3 +35,5 @@ def test_analysis_plan_is_canonical_non_secret_and_input_specific():
     assert fingerprint(plan) == fingerprint(_plan())
     assert fingerprint(plan) != fingerprint(_plan(prompt_version="prompt-2"))
     assert fingerprint(plan) != fingerprint(_plan(high_image_max_side=1024))
+    assert plan["reasoning_effort"] == "none"
+    assert fingerprint(plan) != fingerprint(_plan(reasoning_effort="low"))

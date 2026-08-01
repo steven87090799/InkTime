@@ -14,7 +14,11 @@ from inktime.app.core.json_values import (
     JsonScalarError,
     json_int,
     json_object_payload,
+    json_float,
+    json_bool,
     nullable_json_int,
+    nullable_json_float,
+    reject_unknown_fields,
 )
 from inktime.app.core.logging import configure_logging
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
@@ -597,6 +601,65 @@ def test_provider(provider_id: str):
     )
     ok, message = provider.validate_config()
     return {"ok": ok, "message": message}, 200 if ok else 502
+
+
+@bp.post("/api/v1/providers/<provider_id>/pricing")
+@administrator_required
+def save_provider_pricing(provider_id: str):
+    payload = _payload("SET-004")
+    try:
+        reject_unknown_fields(
+            payload,
+            {
+                "model",
+                "input_per_million",
+                "cached_input_per_million",
+                "output_per_million",
+                "batch_multiplier",
+                "batch_input_per_million",
+                "batch_cached_input_per_million",
+                "batch_output_per_million",
+                "enabled",
+            },
+            error_prefix="SET-004",
+        )
+        if type(payload.get("model")) is not str or not payload["model"].strip():
+            abort(400, description="SET-004 model 不可空白")
+        for field in ("input_per_million", "cached_input_per_million", "output_per_million"):
+            payload[field] = json_float(
+                payload,
+                field,
+                minimum=0,
+                maximum=1_000_000,
+                error_prefix="SET-004",
+            )
+        payload["batch_multiplier"] = json_float(
+            payload,
+            "batch_multiplier",
+            default=0.5,
+            minimum=0,
+            maximum=10,
+            error_prefix="SET-004",
+        )
+        for field in (
+            "batch_input_per_million",
+            "batch_cached_input_per_million",
+            "batch_output_per_million",
+        ):
+            payload[field] = nullable_json_float(
+                payload,
+                field,
+                minimum=0,
+                maximum=1_000_000,
+                error_prefix="SET-004",
+            )
+        payload["enabled"] = json_bool(payload, "enabled", default=True, error_prefix="SET-004")
+        current_app.extensions["inktime_provider_repository"].save_pricing(provider_id, payload)
+    except (JsonScalarError, ValueError) as exc:
+        abort(400, description=f"SET-004 {exc}")
+    except KeyError:
+        abort(404)
+    return {"status": "ok", "provider_id": provider_id, "model": payload["model"]}
 
 
 @bp.get("/costs")

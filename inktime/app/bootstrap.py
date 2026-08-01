@@ -13,6 +13,7 @@ from inktime.app.db import Database, backfill_photo_capture_dates, migrate
 from inktime.app.domain.photos import LocationResolver, ThumbnailCache
 from inktime.app.domain.rendering import AtomicReleasePublisher, FontManager
 from inktime.app.repositories.auth import AuthRepository
+from inktime.app.repositories.analysis_batches import AnalysisBatchRepository
 from inktime.app.repositories.devices import DeviceRepository
 from inktime.app.repositories.jobs import JobRepository
 from inktime.app.repositories.photos import PhotoRepository
@@ -24,6 +25,7 @@ from inktime.app.repositories.scoring import ScoringProfileRepository
 from inktime.app.repositories.settings import SecretStore, SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.analysis import PhotoAnalysisService
+from inktime.app.services.batch_analysis import BatchAnalysisService
 from inktime.app.services.backups import BackupService
 from inktime.app.services.budgets import BudgetService
 from inktime.app.services.device_energy import DeviceEnergyService
@@ -173,9 +175,6 @@ def bootstrap_services(
         }
     )
 
-    if role == "scheduler":
-        return ServiceContainer(config, role, extensions, secret)
-
     device_repository = DeviceRepository(database, secret)
     photo_repository = PhotoRepository(database)
     provider_repository = ProviderRepository(database, secret_store)
@@ -194,6 +193,23 @@ def bootstrap_services(
         settings_repository,
         observability_service,
         process_boundary,
+    )
+    analysis_batch_repository = AnalysisBatchRepository(database)
+    batch_analysis_service = BatchAnalysisService(
+        database,
+        analysis_batch_repository,
+        job_repository,
+        job_service,
+        photo_repository,
+        provider_repository,
+        provider_service,
+        usage_repository,
+        thumbnail_cache,
+        analysis_service,
+        settings_repository,
+        config.data_dir,
+        observability_service,
+        scoring_repository=scoring_repository,
     )
     font_manager = FontManager(config.data_dir / "fonts")
     location_resolver = LocationResolver(Path(__file__).resolve().parents[2] / "data" / "world_cities_zh.csv")
@@ -245,6 +261,8 @@ def bootstrap_services(
             "inktime_provider_service": provider_service,
             "inktime_process_boundary": process_boundary,
             "inktime_analysis_service": analysis_service,
+            "inktime_analysis_batch_repository": analysis_batch_repository,
+            "inktime_batch_analysis_service": batch_analysis_service,
             "inktime_scoring_lab_service": ScoringLabService(
                 provider_service,
                 scoring_repository,
@@ -273,4 +291,24 @@ def bootstrap_services(
                 "inktime_release_reconciliation": release_coordinator.reconcile(),
             }
         )
+    elif role == "scheduler":
+        # Scheduler needs the photo/provider/batch graph for bounded polling,
+        # but must not expose rendering or device services as a web-like graph.
+        for key in (
+            "inktime_font_manager",
+            "inktime_location_resolver",
+            "inktime_release_publisher",
+            "inktime_render_candidate_repository",
+            "inktime_resilience_repository",
+            "inktime_render_cache",
+            "inktime_render_workload_service",
+            "inktime_release_coordinator",
+            "inktime_weather_service",
+            "inktime_render_service",
+            "inktime_display_preparation_service",
+            "inktime_device_repository",
+            "inktime_device_release_service",
+            "inktime_device_queue_manifest_service",
+        ):
+            extensions.pop(key, None)
     return ServiceContainer(config, role, extensions, secret)

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import base64
+from io import BytesIO
 import json
+import os
 from pathlib import Path
+import time
 from typing import Any
+from uuid import uuid4
 
 import requests
 
+from inktime.app.domain.analysis.plan import normalize_reasoning_effort
 from inktime.app.domain.analysis.schema import json_schema_for_stage
 from inktime.app.domain.analysis.scoring import DEFAULT_SCORING_RULES
 from .base import ProviderResponse, Usage, VisionProvider
@@ -16,10 +21,31 @@ SYSTEM_PROMPT = """你是 InkTime 個人照片分析器。只輸出符合指定 
 
 
 class ProviderHTTPError(RuntimeError):
-    def __init__(self, message: str, code: str, retry_after: float | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        code: str,
+        retry_after: float | None = None,
+        *,
+        ambiguous: bool = False,
+        http_status: int | None = None,
+        provider_error_code: str | None = None,
+        response_info: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.retry_after = retry_after
+        self.ambiguous = ambiguous
+        self.http_status = http_status
+        self.provider_error_code = provider_error_code
+        self.response_info = dict(response_info or {})
+
+
+SAFE_READ = "safe_read"
+SAFE_IDEMPOTENT = "safe_idempotent"
+AMBIGUOUS_CREATE = "ambiguous_create"
+AMBIGUOUS_UPLOAD = "ambiguous_upload"
+NO_RETRY_SIDE_EFFECT = "no_retry_side_effect"
 
 
 class OpenAICompatibleProvider(VisionProvider):
@@ -34,10 +60,11 @@ class OpenAICompatibleProvider(VisionProvider):
         supports_json_schema: bool = True,
         scoring_rules: str = DEFAULT_SCORING_RULES,
         caption_controls: dict[str, Any] | None = None,
+        supports_reasoning_effort: bool = False,
         session: requests.Session | None = None,
     ) -> None:
         self.name = name
-        self.base_url = base_url.rstrip("/")
+        self.base_url = self.normalize_base_url(base_url)
         self.api_key = api_key
         self.pricing = pricing or {}
         self.timeout = timeout
@@ -45,6 +72,7 @@ class OpenAICompatibleProvider(VisionProvider):
         self.supports_json_schema = supports_json_schema
         self.scoring_rules = scoring_rules.strip() or DEFAULT_SCORING_RULES
         self.caption_controls = dict(caption_controls or {})
+        self.supports_reasoning_effort = bool(supports_reasoning_effort)
         self.session = session or requests.Session()
 
     def process_spec(self) -> dict[str, Any]:
@@ -57,6 +85,7 @@ class OpenAICompatibleProvider(VisionProvider):
             "supports_json_schema": self.supports_json_schema,
             "scoring_rules": self.scoring_rules,
             "caption_controls": self.caption_controls,
+            "supports_reasoning_effort": self.supports_reasoning_effort,
         }
 
     @classmethod
@@ -71,10 +100,21 @@ class OpenAICompatibleProvider(VisionProvider):
             supports_json_schema=bool(specification.get("supports_json_schema", True)),
             scoring_rules=str(specification.get("scoring_rules", DEFAULT_SCORING_RULES)),
             caption_controls=dict(specification.get("caption_controls") or {}),
+            supports_reasoning_effort=bool(specification.get("supports_reasoning_effort", False)),
         )
 
     def close(self) -> None:
         self.session.close()
+
+    @staticmethod
+    def normalize_base_url(base_url: str) -> str:
+        value = str(base_url or "").strip().rstrip("/")
+        for suffix in ("/chat/completions", "/batches"):
+            if value.endswith(suffix):
+                value = value[: -len(suffix)].rstrip("/")
+        if not value:
+            raise ValueError("Provider Base URL 不可空白")
+        return value
 
     @property
     def system_prompt(self) -> str:
@@ -141,42 +181,150 @@ class OpenAICompatibleProvider(VisionProvider):
     def _usage(payload: dict) -> Usage:
         usage = payload.get("usage") or {}
         details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
+        completion_details = usage.get("completion_tokens_details") or {}
         return Usage(
             input_tokens=int(usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0),
             output_tokens=int(usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0),
             cached_tokens=int(details.get("cached_tokens", 0) or 0),
+            reasoning_tokens=int(completion_details.get("reasoning_tokens", 0) or 0),
         )
+
+    def _redact(self, message: str) -> str:
+        value = str(message)
+        if self.api_key:
+            value = value.replace(self.api_key, "[REDACTED]")
+        return value.replace("Authorization", "[REDACTED-AUTHORIZATION]")
+
+    @staticmethod
+    def _retry_after(response) -> float | None:
+        value = response.headers.get("Retry-After") if hasattr(response, "headers") else None
+        try:
+            return max(0.0, float(value)) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _send(self, method: str, path: str, *, retry_policy: str = SAFE_READ, **kwargs):
+        last_response = None
+        no_retry = retry_policy in {AMBIGUOUS_CREATE, AMBIGUOUS_UPLOAD, NO_RETRY_SIDE_EFFECT}
+        attempts = 1 if no_retry else 3
+        ambiguous = retry_policy in {AMBIGUOUS_CREATE, AMBIGUOUS_UPLOAD}
+        unknown_code = (
+            "BATCH-UPLOAD-UNKNOWN" if retry_policy == AMBIGUOUS_UPLOAD else "BATCH-SUBMISSION-UNKNOWN"
+        )
+        for attempt in range(attempts):
+            try:
+                sender = getattr(self.session, method.lower())
+                response = sender(self._url(path), **kwargs)
+            except requests.Timeout as exc:
+                if ambiguous:
+                    raise ProviderHTTPError(
+                        "Batch 建立回應未知，未自動重送",
+                        unknown_code,
+                        ambiguous=True,
+                    ) from exc
+                if attempt == attempts - 1:
+                    raise ProviderHTTPError("Provider API 逾時", "VLM-001") from exc
+                time.sleep(min(1.0, 0.1 * (attempt + 1)))
+                continue
+            except requests.RequestException as exc:
+                if ambiguous:
+                    raise ProviderHTTPError(
+                        "Batch 建立回應未知，未自動重送",
+                        unknown_code,
+                        ambiguous=True,
+                    ) from exc
+                if attempt == attempts - 1:
+                    raise ProviderHTTPError("Provider 連線失敗", "VLM-001") from exc
+                time.sleep(min(1.0, 0.1 * (attempt + 1)))
+                continue
+            last_response = response
+            status = int(getattr(response, "status_code", 0) or 0)
+            if status == 429 or status >= 500:
+                if status == 429 and no_retry:
+                    # A rate-limit response is a definite rejection of this
+                    # request, but preserve its structured provider error for
+                    # the caller instead of classifying it as unknown.
+                    return response
+                if ambiguous and status >= 500:
+                    raise ProviderHTTPError(
+                        self._redact(f"Provider side effect HTTP {status} 結果未知"),
+                        unknown_code,
+                        self._retry_after(response),
+                        ambiguous=True,
+                        http_status=status,
+                    )
+                if no_retry:
+                    code = "BATCH-RATE-LIMITED" if status == 429 else "BATCH-SIDE-EFFECT-5XX"
+                    raise ProviderHTTPError(
+                        self._redact(f"Provider 回應 HTTP {status}"),
+                        code,
+                        self._retry_after(response),
+                        http_status=status,
+                    )
+                if attempt == attempts - 1:
+                    code = "VLM-002" if status == 429 else "VLM-007"
+                    raise ProviderHTTPError(
+                        self._redact(f"Provider 回應 HTTP {status}"), code, self._retry_after(response)
+                    )
+                delay = self._retry_after(response) or min(1.0, 0.1 * (attempt + 1))
+                time.sleep(min(30.0, delay))
+                continue
+            return response
+        raise ProviderHTTPError("Provider API 重試失敗", "VLM-007") from last_response
+
+    def _json_response(
+        self, response, *, error_code: str = "VLM-007", ambiguous_on_invalid: bool = False
+    ) -> dict:
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status >= 400:
+            provider_error_code = None
+            response_info: dict[str, Any] = {}
+            try:
+                body = response.json()
+                if isinstance(body, dict):
+                    error = body.get("error") if isinstance(body.get("error"), dict) else body
+                    if isinstance(error, dict):
+                        provider_error_code = str(error.get("code") or error.get("type") or "") or None
+                        if provider_error_code:
+                            response_info["provider_error_code"] = provider_error_code[:120]
+            except (ValueError, TypeError, json.JSONDecodeError):
+                pass
+            classified_code = "BATCH-RATE-LIMITED" if status == 429 else error_code
+            raise ProviderHTTPError(
+                self._redact(f"Provider 回應 HTTP {status}"),
+                classified_code,
+                self._retry_after(response),
+                http_status=status,
+                provider_error_code=provider_error_code,
+                response_info=response_info,
+            )
+        try:
+            payload = response.json()
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise ProviderHTTPError(
+                "Provider 回應不是有效 JSON", error_code, ambiguous=ambiguous_on_invalid
+            ) from exc
+        if not isinstance(payload, dict):
+            raise ProviderHTTPError(
+                "Provider 回應必須是 JSON Object", error_code, ambiguous=ambiguous_on_invalid
+            )
+        return payload
 
     def _post_completion(self, body: dict) -> ProviderResponse:
+        response = self._send(
+            "POST", "/chat/completions", headers=self._headers(), json=body, timeout=self.request_timeout
+        )
+        payload = self._json_response(response, error_code="VLM-006")
         try:
-            response = self.session.post(
-                self._url("/chat/completions"),
-                headers=self._headers(),
-                json=body,
-                timeout=self.request_timeout,
-            )
-        except requests.Timeout as exc:
-            raise ProviderHTTPError("Provider API 逾時", "VLM-001") from exc
-        except requests.RequestException as exc:
-            raise ProviderHTTPError("Provider 連線失敗", "VLM-001") from exc
-        if response.status_code == 429:
-            retry_after = response.headers.get("Retry-After")
-            raise ProviderHTTPError(
-                "Provider Rate Limit",
-                "VLM-002",
-                float(retry_after) if retry_after and retry_after.isdigit() else None,
-            )
-        if response.status_code >= 400:
-            raise ProviderHTTPError(f"Provider 回應 HTTP {response.status_code}", "VLM-006")
-        payload = response.json()
-        content = payload["choices"][0]["message"]["content"]
+            content = payload["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ProviderHTTPError("Provider 回應缺少有效 Response Body", "VLM-006") from exc
         if isinstance(content, list):
             content = "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
-        return ProviderResponse(
-            str(content).strip(), self._usage(payload), response.headers.get("x-request-id")
-        )
+        headers = getattr(response, "headers", {}) or {}
+        return ProviderResponse(str(content).strip(), self._usage(payload), headers.get("x-request-id"))
 
-    def analyze(
+    def build_analysis_request_body(
         self,
         *,
         image_path: Path,
@@ -185,7 +333,8 @@ class OpenAICompatibleProvider(VisionProvider):
         stage: str,
         max_tokens: int | None = None,
         caption_controls: dict[str, Any] | None = None,
-    ) -> ProviderResponse:
+        reasoning_effort: str | None = None,
+    ) -> dict[str, Any]:
         encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
         body: dict[str, Any] = {
             "model": model,
@@ -213,6 +362,30 @@ class OpenAICompatibleProvider(VisionProvider):
             }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
+        if self.supports_reasoning_effort and reasoning_effort is not None:
+            body["reasoning_effort"] = normalize_reasoning_effort(reasoning_effort)
+        return body
+
+    def analyze(
+        self,
+        *,
+        image_path: Path,
+        model: str,
+        detail: str,
+        stage: str,
+        max_tokens: int | None = None,
+        caption_controls: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
+    ) -> ProviderResponse:
+        body = self.build_analysis_request_body(
+            image_path=image_path,
+            model=model,
+            detail=detail,
+            stage=stage,
+            max_tokens=max_tokens,
+            caption_controls=caption_controls,
+            reasoning_effort=reasoning_effort,
+        )
         return self._post_completion(body)
 
     def repair_json(
@@ -262,7 +435,7 @@ class OpenAICompatibleProvider(VisionProvider):
     def submit_batch(self, requests: list[dict], *, completion_window: str = "24h") -> str:
         if not requests or len(requests) > 50_000:
             raise ValueError("單一 Batch 必須包含 1 到 50,000 個請求")
-        lines = []
+        content = BytesIO()
         for index, request in enumerate(requests):
             item = dict(request)
             item.setdefault("custom_id", f"inktime-{index}")
@@ -270,52 +443,163 @@ class OpenAICompatibleProvider(VisionProvider):
             item.setdefault("url", "/v1/chat/completions")
             if "body" not in item:
                 raise ValueError("Batch 每個請求都需要 body")
-            lines.append(json.dumps(item, ensure_ascii=False, separators=(",", ":")))
-        content = ("\n".join(lines) + "\n").encode("utf-8")
-        if len(content) > 200 * 1024 * 1024:
+            content.write(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            content.write(b"\n")
+        data = content.getvalue()
+        if len(data) > 200 * 1024 * 1024:
             raise ValueError("Batch JSONL 不可超過 200 MB")
         upload_headers = {}
         if self.api_key:
             upload_headers["Authorization"] = f"Bearer {self.api_key}"
-        upload = self.session.post(
-            self._url("/files"),
+        upload = self._send(
+            "POST",
+            "/files",
+            retry_policy=AMBIGUOUS_UPLOAD,
             headers=upload_headers,
             data={"purpose": "batch"},
-            files={"file": ("inktime-batch.jsonl", content, "application/jsonl")},
+            files={"file": (f"inktime-batch-{uuid4()}.jsonl", data, "application/jsonl")},
             timeout=self.request_timeout,
         )
-        if upload.status_code >= 400:
-            raise ProviderHTTPError(f"Batch 檔案上傳失敗 HTTP {upload.status_code}", "VLM-007")
-        input_file_id = upload.json()["id"]
-        response = self.session.post(
-            self._url("/batches"),
+        payload = self._json_response(upload, error_code="BATCH-UPLOAD-REJECTED", ambiguous_on_invalid=True)
+        input_file_id = payload.get("id")
+        if not input_file_id:
+            raise ProviderHTTPError("Batch 上傳回應缺少 file id", "BATCH-UPLOAD-UNKNOWN", ambiguous=True)
+        return str(self.create_batch(str(input_file_id), completion_window=completion_window)["id"])
+
+    def upload_batch_file(self, path: Path, *, remote_filename: str | None = None) -> str:
+        if not path.is_file():
+            raise FileNotFoundError("BATCH-FILE-001 找不到本機 JSONL")
+        with path.open("rb") as stream:
+            response = self._send(
+                "POST",
+                "/files",
+                retry_policy=AMBIGUOUS_UPLOAD,
+                headers={"Authorization": f"Bearer {self.api_key}"} if self.api_key else {},
+                data={"purpose": "batch"},
+                files={"file": (remote_filename or path.name, stream, "application/jsonl")},
+                timeout=self.request_timeout,
+            )
+        payload = self._json_response(response, error_code="BATCH-UPLOAD-REJECTED", ambiguous_on_invalid=True)
+        file_id = payload.get("id")
+        if not isinstance(file_id, str) or not file_id:
+            raise ProviderHTTPError("Batch 上傳回應缺少 file id", "BATCH-UPLOAD-UNKNOWN", ambiguous=True)
+        return file_id
+
+    def create_batch(
+        self,
+        input_file_id: str,
+        *,
+        completion_window: str = "24h",
+        metadata: dict | None = None,
+        output_expires_after_seconds: int | None = None,
+    ) -> dict:
+        if not input_file_id:
+            raise ValueError("BATCH-REMOTE-002 input_file_id 不可空白")
+        body: dict[str, Any] = {
+            "input_file_id": input_file_id,
+            "endpoint": "/v1/chat/completions",
+            "completion_window": completion_window,
+        }
+        if metadata:
+            body["metadata"] = {
+                str(key): str(value)[:120]
+                for key, value in metadata.items()
+                if str(key)[:64].replace("_", "").isalnum()
+            }
+        if output_expires_after_seconds is not None:
+            body["output_expires_after"] = {
+                "anchor": "created_at",
+                "seconds": min(2_592_000, max(3_600, int(output_expires_after_seconds))),
+            }
+        response = self._send(
+            "POST",
+            "/batches",
+            retry_policy=AMBIGUOUS_CREATE,
             headers=self._headers(),
-            json={
-                "input_file_id": input_file_id,
-                "endpoint": "/v1/chat/completions",
-                "completion_window": completion_window,
-            },
+            json=body,
             timeout=self.request_timeout,
         )
-        if response.status_code >= 400:
-            raise ProviderHTTPError(f"Batch 建立失敗 HTTP {response.status_code}", "VLM-007")
-        return str(response.json()["id"])
+        payload = self._json_response(
+            response, error_code="BATCH-SUBMISSION-REJECTED", ambiguous_on_invalid=True
+        )
+        if not isinstance(payload.get("id"), str) or not payload["id"]:
+            raise ProviderHTTPError("Batch 建立回應缺少 batch id", "BATCH-SUBMISSION-UNKNOWN", ambiguous=True)
+        return payload
 
     def poll_batch(self, batch_id: str) -> dict:
-        response = self.session.get(
-            self._url(f"/batches/{batch_id}"), headers=self._headers(), timeout=self.request_timeout
+        return self.retrieve_batch(batch_id)
+
+    def retrieve_batch(self, batch_id: str) -> dict:
+        if not batch_id:
+            raise ValueError("BATCH-REMOTE-003 batch_id 不可空白")
+        response = self._send(
+            "GET", f"/batches/{batch_id}", headers=self._headers(), timeout=self.request_timeout
         )
-        if response.status_code >= 400:
-            raise ProviderHTTPError(f"Batch 查詢失敗 HTTP {response.status_code}", "VLM-007")
-        return dict(response.json())
+        return self._json_response(response)
+
+    def retrieve_file(self, file_id: str) -> dict:
+        if not file_id:
+            raise ValueError("BATCH-FILE-005 file_id 不可空白")
+        response = self._send(
+            "GET", f"/files/{file_id}", headers=self._headers(), timeout=self.request_timeout
+        )
+        return self._json_response(response)
 
     def cancel_batch(self, batch_id: str) -> dict:
-        response = self.session.post(
-            self._url(f"/batches/{batch_id}/cancel"), headers=self._headers(), timeout=self.request_timeout
+        response = self._send(
+            "POST",
+            f"/batches/{batch_id}/cancel",
+            retry_policy=NO_RETRY_SIDE_EFFECT,
+            headers=self._headers(),
+            timeout=self.request_timeout,
         )
-        if response.status_code >= 400:
-            raise ProviderHTTPError(f"Batch 取消失敗 HTTP {response.status_code}", "VLM-007")
-        return dict(response.json())
+        return self._json_response(response)
+
+    def download_file_content(self, file_id: str, destination: Path) -> Path:
+        if not file_id:
+            raise ValueError("BATCH-FILE-002 file_id 不可空白")
+        destination = destination.expanduser().resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(destination.name + ".part")
+        temporary.unlink(missing_ok=True)
+        try:
+            response = self._send(
+                "GET",
+                f"/files/{file_id}/content",
+                headers=self._headers(),
+                timeout=self.request_timeout,
+                stream=True,
+            )
+            if int(response.status_code) >= 400:
+                self._json_response(response)
+            with temporary.open("wb") as stream:
+                os.chmod(temporary, 0o600)
+                iterator = response.iter_content(chunk_size=1024 * 1024)
+                for chunk in iterator:
+                    if chunk:
+                        stream.write(chunk)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, destination)
+            os.chmod(destination, 0o600)
+            return destination
+        except Exception as exc:
+            temporary.unlink(missing_ok=True)
+            if isinstance(exc, ProviderHTTPError):
+                raise
+            raise ProviderHTTPError("Batch 檔案下載中斷", "BATCH-FILE-003") from exc
+
+    def delete_remote_file(self, file_id: str) -> dict:
+        if not file_id:
+            raise ValueError("BATCH-FILE-004 file_id 不可空白")
+        response = self._send(
+            "DELETE",
+            f"/files/{file_id}",
+            retry_policy=SAFE_IDEMPOTENT,
+            headers=self._headers(),
+            timeout=self.request_timeout,
+        )
+        return self._json_response(response)
 
     def estimate_cost(self, model: str, usage: Usage) -> float:
         price = self.pricing.get(model, {})
@@ -327,6 +611,25 @@ class OpenAICompatibleProvider(VisionProvider):
             + usage.output_tokens * float(price.get("output_per_million", 0))
         ) / 1_000_000
 
+    def estimate_batch_cost(self, model: str, usage: Usage) -> float:
+        price = self.pricing.get(model, {})
+        multiplier = float(price.get("batch_multiplier", 0.5) or 0.5)
+        input_price = price.get("batch_input_per_million")
+        cached_price = price.get("batch_cached_input_per_million")
+        output_price = price.get("batch_output_per_million")
+        if input_price is None:
+            input_price = float(price.get("input_per_million", 0) or 0) * multiplier
+        if cached_price is None:
+            cached_price = float(price.get("cached_input_per_million", 0) or 0) * multiplier
+        if output_price is None:
+            output_price = float(price.get("output_per_million", 0) or 0) * multiplier
+        uncached = max(0, usage.input_tokens - usage.cached_tokens)
+        return (
+            uncached * float(input_price)
+            + usage.cached_tokens * float(cached_price)
+            + usage.output_tokens * float(output_price)
+        ) / 1_000_000
+
     def validate_config(self) -> tuple[bool, str]:
         try:
             response = self.session.get(
@@ -336,6 +639,6 @@ class OpenAICompatibleProvider(VisionProvider):
             )
         except requests.RequestException as exc:
             return False, f"無法連線：{exc.__class__.__name__}"
-        if response.status_code >= 400:
+        if int(getattr(response, "status_code", 0) or 0) >= 400:
             return False, f"Provider 回應 HTTP {response.status_code}"
         return True, "連線成功"

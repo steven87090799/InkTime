@@ -10,6 +10,7 @@ class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
     cached_tokens: int = 0
+    reasoning_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,8 @@ class ProviderResponse:
 
 
 class VisionProvider(ABC):
+    supports_reasoning_effort = False
+
     @property
     def name(self) -> str:
         return self._name
@@ -33,6 +36,49 @@ class VisionProvider(ABC):
 
         return None
 
+    def build_analysis_request_body(
+        self,
+        *,
+        image_path: Path,
+        model: str,
+        detail: str,
+        stage: str,
+        max_tokens: int | None = None,
+        caption_controls: dict | None = None,
+        reasoning_effort: str | None = None,
+    ) -> dict:
+        raise NotImplementedError("Provider 未實作共用分析 Request Body Builder")
+
+    def upload_batch_file(self, path: Path, *, remote_filename: str | None = None) -> str:
+        raise NotImplementedError("Provider 不支援 Batch File Upload")
+
+    def create_batch(
+        self,
+        input_file_id: str,
+        *,
+        completion_window: str = "24h",
+        metadata: dict | None = None,
+        output_expires_after_seconds: int | None = None,
+    ) -> dict:
+        raise NotImplementedError("Provider 不支援 Batch Create")
+
+    def retrieve_batch(self, batch_id: str) -> dict:
+        return self.poll_batch(batch_id)
+
+    def retrieve_file(self, file_id: str) -> dict:
+        raise NotImplementedError("Provider 不支援 Batch File Metadata Recovery")
+
+    def download_file_content(self, file_id: str, destination: Path) -> Path:
+        raise NotImplementedError("Provider 不支援 Batch File Download")
+
+    def delete_remote_file(self, file_id: str) -> dict:
+        raise NotImplementedError("Provider 不支援 Remote File Delete")
+
+    def estimate_batch_cost(self, model: str, usage: Usage) -> float:
+        """Use provider pricing when available; compatible providers may override."""
+
+        return self.estimate_cost(model, usage)
+
     @abstractmethod
     def analyze(
         self,
@@ -43,6 +89,7 @@ class VisionProvider(ABC):
         stage: str,
         max_tokens: int | None = None,
         caption_controls: dict | None = None,
+        reasoning_effort: str | None = None,
     ) -> ProviderResponse:
         raise NotImplementedError
 

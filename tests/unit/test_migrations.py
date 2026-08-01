@@ -11,6 +11,7 @@ import pytest
 import inktime.app.db.migrations as migrations_module
 from inktime.app.db import Database, MigrationError, migrate
 from inktime.app.db.migrations import Migration, MIGRATIONS
+from inktime.app.repositories.analysis_batches import TERMINAL_BATCH_STATUSES
 
 
 def _run_capture_date_backfill(database_path: str, start, results) -> None:
@@ -27,7 +28,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 def test_fresh_database_is_migrated(tmp_path):
     database = Database(tmp_path / "inktime.db")
-    assert migrate(database) == list(range(1, 26))
+    assert migrate(database) == list(range(1, 27))
     assert database.integrity_check() == "ok"
     with database.session() as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -50,11 +51,122 @@ def test_fresh_database_is_migrated(tmp_path):
         "ai_analysis_cache",
         "settings_snapshots",
         "settings_snapshot_items",
+        "analysis_batches",
+        "analysis_batch_items",
     } <= tables
-    assert tuple(history) == (25, 25)
+    assert tuple(history) == (26, 26)
     with database.session() as connection:
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
     assert {"normalized_username", "session_version", "disabled_at"} <= columns
+    with database.session() as connection:
+        batch_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(analysis_batches)").fetchall()
+        }
+        item_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(analysis_batch_items)").fetchall()
+        }
+        usage_columns = {row["name"] for row in connection.execute("PRAGMA table_info(api_usage)").fetchall()}
+    assert {
+        "remote_batch_id",
+        "output_file_id",
+        "cleanup_completed_at",
+        "peak_rss_bytes",
+        "upload_attempt_id",
+        "submission_attempt_id",
+        "side_effect_version",
+        "side_effect_lease_until",
+        "side_effect_owner",
+        "input_file_bytes",
+        "input_file_deleted",
+        "cleanup_final_action",
+        "input_file_delete_unknown",
+        "output_file_delete_unknown",
+        "error_file_delete_unknown",
+        "cleanup_error_code",
+        "cleanup_error_message",
+        "reconciliation_error_code",
+        "reconciliation_error_message",
+        "provider_config_revision",
+        "provider_base_url_fingerprint",
+        "provider_project_id",
+        "provider_account_fingerprint",
+    } <= batch_columns
+    assert {"custom_id", "vision_request_fingerprint", "raw_response_json", "imported_at"} <= item_columns
+    assert {"batch_id", "batch_item_id", "processing_mode", "reasoning_tokens"} <= usage_columns
+    with database.session() as connection:
+        indexes = {
+            str(row["name"])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%batch%'"
+            ).fetchall()
+        }
+    assert "idx_analysis_batches_remote_id" in indexes
+    assert "submission_unknown" not in TERMINAL_BATCH_STATUSES
+    assert "upload_unknown" not in TERMINAL_BATCH_STATUSES
+    with database.session() as connection:
+        index_names = {
+            str(row["name"])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name IN ('idx_batch_items_active_job_item','idx_batch_items_active_content_request','idx_analysis_batches_remote_id')"
+            ).fetchall()
+        }
+    assert index_names == {
+        "idx_batch_items_active_job_item",
+        "idx_batch_items_active_content_request",
+        "idx_analysis_batches_remote_id",
+    }
+
+
+def test_batch_unknown_states_and_reservations_are_persistent(tmp_path):
+    database = Database(tmp_path / "states.db")
+    migrate(database)
+    with database.transaction() as connection:
+        for batch_id, status in (("batch-a", "submission_unknown"), ("batch-b", "upload_unknown")):
+            connection.execute(
+                "INSERT INTO analysis_batches(id,model,endpoint,analysis_fingerprint,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
+                (batch_id, "gpt-5.6-luna", "/v1/chat/completions", "fp", status, "now", "now"),
+            )
+        connection.execute(
+            "INSERT INTO analysis_batch_items(id,batch_id,custom_id,content_sha256,analysis_fingerprint,vision_request_fingerprint,vision_input_spec_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                "item-a",
+                "batch-a",
+                "ibt:00000000-0000-0000-0000-000000000001",
+                "sha",
+                "fp",
+                "vfp",
+                "{}",
+                "submission_unknown",
+                "now",
+                "now",
+            ),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO analysis_batch_items(id,batch_id,custom_id,content_sha256,analysis_fingerprint,vision_request_fingerprint,vision_input_spec_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "item-b",
+                    "batch-b",
+                    "ibt:00000000-0000-0000-0000-000000000002",
+                    "sha",
+                    "fp",
+                    "vfp",
+                    "{}",
+                    "pending",
+                    "now",
+                    "now",
+                ),
+            )
+
+
+def test_migration_25_to_batch_lifecycle_is_idempotent(monkeypatch, tmp_path):
+    database = Database(tmp_path / "inktime.db")
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:25])
+    migrate(database)
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
+    assert migrate(database, tmp_path / "backups") == [26]
+    assert migrate(database, tmp_path / "backups") == []
+    assert database.integrity_check() == "ok"
 
 
 def test_existing_photo_scores_table_is_preserved(tmp_path):
@@ -131,7 +243,7 @@ def test_concurrent_migrations_are_serialized(tmp_path):
     database = Database(tmp_path / "inktime.db")
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _index: migrate(database), range(2)))
-    assert sorted(results, key=len) == [[], list(range(1, 26))]
+        assert sorted(results, key=len) == [[], list(range(1, 27))]
     assert database.integrity_check() == "ok"
 
 
@@ -330,7 +442,7 @@ def test_v10_photo_state_and_analysis_survive_scheduler_upgrade(monkeypatch, tmp
         )
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == list(range(11, 26))
+    assert migrate(database, tmp_path / "backups") == list(range(11, 27))
     with database.session() as connection:
         photo = connection.execute(
             "SELECT favorite,status,lifecycle_status,metadata_status,local_features_status FROM photos WHERE id='photo'"
@@ -357,7 +469,7 @@ def test_migration_21_upgrades_v20_webhooks_idempotently(monkeypatch, tmp_path):
         notification_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [21, 22, 23, 24, 25]
+    assert migrate(database, tmp_path / "backups") == [21, 22, 23, 24, 25, 26]
     assert migrate(database, tmp_path / "backups") == []
     assert database.integrity_check() == "ok"
     with database.session() as connection:
