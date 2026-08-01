@@ -276,6 +276,9 @@ class FailoverVisionProvider(VisionProvider):
         result = provider.upload_batch_file(path)
         return str(result)
 
+    def build_analysis_request_body(self, **kwargs) -> dict:
+        return self._batch_provider().build_analysis_request_body(**kwargs)
+
     def create_batch(
         self,
         input_file_id: str,
@@ -309,6 +312,10 @@ class FailoverVisionProvider(VisionProvider):
     def estimate_cost(self, model: str, usage: Usage) -> float:
         channel = getattr(self._local, "channel", self.channels[0])
         return channel.provider.estimate_cost(model, usage)
+
+    def estimate_batch_cost(self, model: str, usage: Usage) -> float:
+        channel = getattr(self._local, "channel", self.channels[0])
+        return channel.provider.estimate_batch_cost(model, usage)
 
     def validate_config(self) -> tuple[bool, str]:
         results = [channel.provider.validate_config() for channel in self.channels]

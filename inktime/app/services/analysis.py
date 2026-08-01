@@ -450,6 +450,8 @@ class PhotoAnalysisService:
         vision_input_spec_json: str | None = None,
         prefilter_evaluation: dict | None = None,
         travel_policy: dict | None = None,
+        analysis_source: str = "direct",
+        connection=None,
     ) -> dict:
         ranked = self._score_result(
             result,
@@ -466,6 +468,7 @@ class PhotoAnalysisService:
             model,
             ranked,
             raw,
+            analysis_source,
             ranking_score=ranked["ranking_score"],
             scoring_version_id=scoring_version_id,
             schema_kind=schema_kind,
@@ -481,6 +484,7 @@ class PhotoAnalysisService:
             vision_request_fingerprint=vision_request_fingerprint,
             vision_input_spec_json=vision_input_spec_json,
             prefilter_evaluation=prefilter_evaluation,
+            connection=connection,
         )
         self._activity(
             "DEBUG",
@@ -521,6 +525,7 @@ class PhotoAnalysisService:
             latency_ms=int((time.perf_counter() - started_perf) * 1000),
             status="completed",
             retry_count=retry_count,
+            reasoning_tokens=response.usage.reasoning_tokens,
         )
         return cost
 
@@ -885,6 +890,7 @@ class PhotoAnalysisService:
         total_input_tokens = response.usage.input_tokens
         total_output_tokens = response.usage.output_tokens
         total_cached_tokens = response.usage.cached_tokens
+        total_reasoning_tokens = response.usage.reasoning_tokens
         try:
             result = self._apply_caption_variant(validate_analysis_result(response.content), caption_controls)
             raw = response.content
@@ -951,6 +957,7 @@ class PhotoAnalysisService:
             total_input_tokens += repaired.usage.input_tokens
             total_output_tokens += repaired.usage.output_tokens
             total_cached_tokens += repaired.usage.cached_tokens
+            total_reasoning_tokens += repaired.usage.reasoning_tokens
         self.photos.put_ai_cache(
             content_sha256=content_sha256,
             provider=cache_provider_identity,
@@ -973,7 +980,12 @@ class PhotoAnalysisService:
             result,
             raw,
             total_cost,
-            Usage(total_input_tokens, total_output_tokens, total_cached_tokens),
+            Usage(
+                total_input_tokens,
+                total_output_tokens,
+                total_cached_tokens,
+                total_reasoning_tokens,
+            ),
             latency,
         )
 

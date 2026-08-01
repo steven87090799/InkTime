@@ -221,7 +221,9 @@ class OpenAICompatibleProvider(VisionProvider):
         return payload
 
     def _post_completion(self, body: dict) -> ProviderResponse:
-        response = self._send("POST", "/chat/completions", headers=self._headers(), json=body, timeout=self.request_timeout)
+        response = self._send(
+            "POST", "/chat/completions", headers=self._headers(), json=body, timeout=self.request_timeout
+        )
         payload = self._json_response(response, error_code="VLM-006")
         try:
             content = payload["choices"][0]["message"]["content"]
@@ -229,9 +231,8 @@ class OpenAICompatibleProvider(VisionProvider):
             raise ProviderHTTPError("Provider 回應缺少有效 Response Body", "VLM-006") from exc
         if isinstance(content, list):
             content = "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
-        return ProviderResponse(
-            str(content).strip(), self._usage(payload), response.headers.get("x-request-id")
-        )
+        headers = getattr(response, "headers", {}) or {}
+        return ProviderResponse(str(content).strip(), self._usage(payload), headers.get("x-request-id"))
 
     def build_analysis_request_body(
         self,
@@ -410,7 +411,9 @@ class OpenAICompatibleProvider(VisionProvider):
             }
         if output_expires_after_seconds is not None:
             body["output_expires_after"] = {"seconds": max(3600, int(output_expires_after_seconds))}
-        response = self._send("POST", "/batches", headers=self._headers(), json=body, timeout=self.request_timeout)
+        response = self._send(
+            "POST", "/batches", headers=self._headers(), json=body, timeout=self.request_timeout
+        )
         payload = self._json_response(response)
         if not isinstance(payload.get("id"), str) or not payload["id"]:
             raise ProviderHTTPError("Batch 建立回應缺少 batch id", "VLM-007")
@@ -485,6 +488,25 @@ class OpenAICompatibleProvider(VisionProvider):
             + usage.output_tokens * float(price.get("output_per_million", 0))
         ) / 1_000_000
 
+    def estimate_batch_cost(self, model: str, usage: Usage) -> float:
+        price = self.pricing.get(model, {})
+        multiplier = float(price.get("batch_multiplier", 0.5) or 0.5)
+        input_price = price.get("batch_input_per_million")
+        cached_price = price.get("batch_cached_input_per_million")
+        output_price = price.get("batch_output_per_million")
+        if input_price is None:
+            input_price = float(price.get("input_per_million", 0) or 0) * multiplier
+        if cached_price is None:
+            cached_price = float(price.get("cached_input_per_million", 0) or 0) * multiplier
+        if output_price is None:
+            output_price = float(price.get("output_per_million", 0) or 0) * multiplier
+        uncached = max(0, usage.input_tokens - usage.cached_tokens)
+        return (
+            uncached * float(input_price)
+            + usage.cached_tokens * float(cached_price)
+            + usage.output_tokens * float(output_price)
+        ) / 1_000_000
+
     def validate_config(self) -> tuple[bool, str]:
         try:
             response = self.session.get(
@@ -494,6 +516,6 @@ class OpenAICompatibleProvider(VisionProvider):
             )
         except requests.RequestException as exc:
             return False, f"無法連線：{exc.__class__.__name__}"
-        if response.status_code >= 400:
+        if int(getattr(response, "status_code", 0) or 0) >= 400:
             return False, f"Provider 回應 HTTP {response.status_code}"
         return True, "連線成功"

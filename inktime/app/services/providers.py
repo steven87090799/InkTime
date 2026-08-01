@@ -16,7 +16,11 @@ class ProviderService:
         self.settings = settings
 
     def build_router(
-        self, route_snapshot: list[dict] | None = None, *, scoring_rules: str | None = None
+        self,
+        route_snapshot: list[dict] | None = None,
+        *,
+        scoring_rules: str | None = None,
+        caption_controls: dict | None = None,
     ) -> FailoverVisionProvider | None:
         # ``None`` preserves the legacy "use the current route" behavior.  An
         # explicit empty snapshot is a frozen decision that no Provider may be
@@ -52,6 +56,7 @@ class ProviderService:
                 timeout=config["timeout_seconds"],
                 supports_json_schema=bool(config["supports_json_schema"]),
                 scoring_rules=rules,
+                caption_controls=caption_controls,
             )
             provider.provider_id = provider_id
             provider.display_name = str(config["name"])

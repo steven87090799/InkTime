@@ -34,7 +34,16 @@ class VisionProvider(ABC):
 
         return None
 
-    def build_analysis_request_body(self, **kwargs) -> dict:
+    def build_analysis_request_body(
+        self,
+        *,
+        image_path: Path,
+        model: str,
+        detail: str,
+        stage: str,
+        max_tokens: int | None = None,
+        caption_controls: dict | None = None,
+    ) -> dict:
         raise NotImplementedError("Provider 未實作共用分析 Request Body Builder")
 
     def upload_batch_file(self, path: Path) -> str:
@@ -58,6 +67,11 @@ class VisionProvider(ABC):
 
     def delete_remote_file(self, file_id: str) -> dict:
         raise NotImplementedError("Provider 不支援 Remote File Delete")
+
+    def estimate_batch_cost(self, model: str, usage: Usage) -> float:
+        """Use provider pricing when available; compatible providers may override."""
+
+        return self.estimate_cost(model, usage)
 
     @abstractmethod
     def analyze(
