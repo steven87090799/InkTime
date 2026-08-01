@@ -40,6 +40,8 @@
 
 - [`OPENAI_BATCH_ANALYSIS_ZH_TW.md`](OPENAI_BATCH_ANALYSIS_ZH_TW.md)：Batch 輸入快照、隱私、生命週期、成本與實際人工 smoke 邊界。
 - [`PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md`](PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md)：正式環境安全、LAN、持久化與交接檢查。
+- [`branch-consolidation-report.md`](branch-consolidation-report.md)：分支整併、Migration 26、CI 與遠端分支清理證據。
+- [`post-merge-hardware-validation.md`](post-merge-hardware-validation.md)：軟體／hosted PASS 與真實 OpenAI、NAS、ESP32 驗收的 NOT RUN 邊界。
 
 ### 開始使用
 
