@@ -13,6 +13,10 @@ from inktime.app.db import Database
 ACTIVE_BATCH_STATUSES = {
     "preparing",
     "uploading",
+    "upload_unknown",
+    "uploaded",
+    "submitting",
+    "submission_unknown",
     "validating",
     "in_progress",
     "finalizing",
@@ -38,10 +42,17 @@ class AnalysisBatchRepository:
         "endpoint",
         "analysis_fingerprint",
         "status",
+        "upload_attempt_id",
+        "submission_attempt_id",
+        "phase_started_at",
+        "abandon_confirmed_at",
         "input_file_id",
         "remote_batch_id",
         "output_file_id",
         "error_file_id",
+        "input_file_deleted",
+        "output_file_deleted",
+        "error_file_deleted",
         "local_input_path",
         "local_output_path",
         "local_error_path",
@@ -261,7 +272,7 @@ class AnalysisBatchRepository:
             ).fetchone()
         return dict(row) if row is not None else None
 
-    def update_batch(self, batch_id: str, **changes: Any) -> None:
+    def update_batch(self, batch_id: str, *, connection=None, **changes: Any) -> None:
         unknown = set(changes) - self.BATCH_FIELDS
         if unknown:
             raise ValueError(f"不支援的 Batch 欄位: {', '.join(sorted(unknown))}")
@@ -272,8 +283,9 @@ class AnalysisBatchRepository:
         assignments = ",".join(f"{key}=?" for key in changes)
         values = [changes[key] for key in changes]
         values.append(batch_id)
-        with self.database.session() as connection:
-            cursor = connection.execute(
+        context = self.database.session() if connection is None else nullcontext(connection)
+        with context as active_connection:
+            cursor = active_connection.execute(
                 f"UPDATE analysis_batches SET {assignments} WHERE id=?",  # noqa: S608
                 values,
             )
@@ -316,6 +328,20 @@ class AnalysisBatchRepository:
         if status not in allowed:
             raise ValueError("BATCH-REMOTE-001 遠端 Batch 缺少有效 status")
         counts = remote.get("request_counts") or {}
+        current = self.get(batch_id)
+        if current is None:
+            raise KeyError(batch_id)
+        remote_id = remote.get("id") or remote.get("remote_batch_id")
+        if remote_id is not None and str(current["remote_batch_id"] or "") not in {"", str(remote_id)}:
+            raise ValueError("BATCH-REMOTE-IDENTITY-001 遠端 Batch ID 不可變更")
+        remote_input = remote.get("input_file_id")
+        if remote_input is not None and str(current["input_file_id"] or "") not in {"", str(remote_input)}:
+            raise ValueError("BATCH-REMOTE-IDENTITY-002 遠端 input_file_id 不可變更")
+        for key in ("output_file_id", "error_file_id"):
+            remote_value = remote.get(key)
+            local_value = current[key]
+            if remote_value is not None and local_value not in (None, "", remote_value):
+                raise ValueError(f"BATCH-REMOTE-IDENTITY-003 {key} 不可變更")
         changes: dict[str, Any] = {
             "status": "import_pending"
             if status in {"completed", "failed", "expired", "cancelled"}
@@ -326,10 +352,12 @@ class AnalysisBatchRepository:
             or remote.get("cancelled_at"),
             "remote_status": status,
         }
-        for key in ("input_file_id", "remote_batch_id", "output_file_id", "error_file_id"):
+        for key in ("remote_batch_id", "output_file_id", "error_file_id"):
             value = remote.get(key)
             if value is not None:
                 changes[key] = value
+        if remote_input is not None and not current["input_file_id"]:
+            changes["input_file_id"] = remote_input
         if "total" in counts:
             changes["total_items"] = max(0, int(counts.get("total") or 0))
         if "completed" in counts:
@@ -342,6 +370,81 @@ class AnalysisBatchRepository:
             changes["last_error_message"] = str(errors)[:1000]
         self.update_batch(batch_id, **changes)
         return str(changes["status"])
+
+    def bind_recovered_remote(
+        self, batch_id: str, remote: dict[str, Any], *, item_status: str = "submitted"
+    ) -> str:
+        """Atomically bind an already-existing remote Batch after ownership checks."""
+
+        remote_id = str(remote.get("id") or remote.get("remote_batch_id") or "")
+        if not remote_id:
+            raise ValueError("BATCH-RECOVERY-004 遠端 Batch 缺少 id")
+        status = str(remote.get("status") or "")
+        terminal = {"completed", "failed", "expired", "cancelled"}
+        local_status = "import_pending" if status in terminal else status
+        if local_status not in {"import_pending", "validating", "in_progress", "finalizing", "cancelling"}:
+            raise ValueError("BATCH-RECOVERY-005 遠端 Batch 狀態不支援")
+        now = utc_now()
+        with self.database.transaction() as connection:
+            batch = connection.execute("SELECT * FROM analysis_batches WHERE id=?", (batch_id,)).fetchone()
+            if batch is None:
+                raise KeyError(batch_id)
+            other = connection.execute(
+                "SELECT id FROM analysis_batches WHERE remote_batch_id=? AND id<>?",
+                (remote_id, batch_id),
+            ).fetchone()
+            if other is not None:
+                raise ValueError("BATCH-RECOVERY-006 遠端 Batch 已綁定其他本機 Batch")
+            if batch["remote_batch_id"] not in (None, "", remote_id):
+                raise ValueError("BATCH-RECOVERY-003 Batch 已綁定其他遠端 ID")
+            counts = remote.get("request_counts") or {}
+            assignments: dict[str, Any] = {
+                "remote_batch_id": remote_id,
+                "status": local_status,
+                "remote_status": status,
+                "last_error_code": None,
+                "last_error_message": None,
+                "phase_started_at": now,
+                "last_polled_at": now,
+            }
+            if status in terminal:
+                assignments["completed_at"] = (
+                    remote.get("completed_at") or remote.get("expired_at") or remote.get("cancelled_at")
+                )
+            for key in ("output_file_id", "error_file_id"):
+                if remote.get(key) is not None:
+                    assignments[key] = remote[key]
+            if "total" in counts:
+                assignments["total_items"] = max(0, int(counts.get("total") or 0))
+            assignments["updated_at"] = now
+            values = [assignments[key] for key in assignments] + [batch_id]
+            connection.execute(
+                f"UPDATE analysis_batches SET {','.join(f'{key}=?' for key in assignments)} WHERE id=?",  # noqa: S608
+                values,
+            )
+            connection.execute(
+                "UPDATE analysis_batch_items SET status=?,error_code=NULL,error_message=NULL,updated_at=? "
+                "WHERE batch_id=? AND status IN ('pending','upload_unknown','submission_unknown')",
+                (item_status, now, batch_id),
+            )
+        return local_status
+
+    def mark_file_deleted(self, batch_id: str, file_kind: str) -> None:
+        columns = {
+            "input": "input_file_deleted",
+            "output": "output_file_deleted",
+            "error": "error_file_deleted",
+        }
+        column = columns.get(file_kind)
+        if column is None:
+            raise ValueError("不支援的 Batch remote file 類型")
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                f"UPDATE analysis_batches SET {column}=1,updated_at=? WHERE id=?",  # noqa: S608
+                (utc_now(), batch_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(batch_id)
 
     def counts(self, batch_id: str) -> dict[str, int]:
         with self.database.session() as connection:

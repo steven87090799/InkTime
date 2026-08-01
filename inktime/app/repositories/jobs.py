@@ -892,3 +892,42 @@ class JobRepository:
                 (status, now, now, job_id),
             )
         return bool(cursor.rowcount)
+
+    def abandon_unstarted(self, job_id: str, error_code: str = "BATCH-RESERVATION-CONFLICT") -> bool:
+        """Close a job whose durable Batch reservation could not be acquired.
+
+        This is intentionally different from worker cancellation: the job has
+        never started and must not remain pending/running after a uniqueness
+        conflict during Batch item reservation.
+        """
+
+        now = utc_now()
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                """UPDATE jobs SET status='failed',completed_at=?,heartbeat_at=?
+                   WHERE id=? AND status='pending'""",
+                (now, now, job_id),
+            )
+            if cursor.rowcount:
+                connection.execute(
+                    """UPDATE job_items SET status='failed',completed_at=?,error_code=?
+                       WHERE job_id=? AND status IN ('pending','retrying')""",
+                    (now, error_code, job_id),
+                )
+        if cursor.rowcount:
+            self.add_event(job_id, "reservation_conflict", "Batch reservation 未取得，工作已安全結束")
+        return bool(cursor.rowcount)
+
+    def reopen_batch_job(self, job_id: str) -> bool:
+        """Reopen a Batch parent after manual remote ownership recovery."""
+
+        now = utc_now()
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                """UPDATE jobs SET status='running',completed_at=NULL,heartbeat_at=?
+                   WHERE id=? AND status NOT IN ('cancelled')""",
+                (now, job_id),
+            )
+        if cursor.rowcount:
+            self.add_event(job_id, "batch_reopened", "人工 Recovery 後重新開啟 Batch 工作")
+        return bool(cursor.rowcount)

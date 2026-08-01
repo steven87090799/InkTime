@@ -996,14 +996,22 @@ MIGRATIONS = (
                 endpoint TEXT NOT NULL,
                 analysis_fingerprint TEXT NOT NULL,
                 status TEXT NOT NULL CHECK(status IN (
-                    'preparing','uploading','validating','in_progress','finalizing',
+                    'preparing','uploading','upload_unknown','uploaded','submitting','submission_unknown',
+                    'validating','in_progress','finalizing',
                     'import_pending','importing','completed','completed_with_errors',
                     'failed','expired','cancelling','cancelled','cleanup_pending'
                 )),
+                upload_attempt_id TEXT,
+                submission_attempt_id TEXT,
+                phase_started_at TEXT,
+                abandon_confirmed_at TEXT,
                 input_file_id TEXT,
                 remote_batch_id TEXT,
                 output_file_id TEXT,
                 error_file_id TEXT,
+                input_file_deleted INTEGER NOT NULL DEFAULT 0 CHECK(input_file_deleted IN (0,1)),
+                output_file_deleted INTEGER NOT NULL DEFAULT 0 CHECK(output_file_deleted IN (0,1)),
+                error_file_deleted INTEGER NOT NULL DEFAULT 0 CHECK(error_file_deleted IN (0,1)),
                 local_input_path TEXT,
                 local_output_path TEXT,
                 local_error_path TEXT,
@@ -1055,7 +1063,7 @@ MIGRATIONS = (
                 status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN (
                     'pending','submitted','success','failed','missing','retry_pending',
                     'stale','schema_invalid','duplicate_custom_id','unexpected_custom_id',
-                    'imported','cancelled','expired'
+                    'imported','cancelled','expired','upload_unknown','submission_unknown'
                 )),
                 request_id TEXT,
                 http_status INTEGER,
@@ -1081,13 +1089,16 @@ MIGRATIONS = (
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_batch_items_active_job_item
             ON analysis_batch_items(job_item_id)
-            WHERE job_item_id IS NOT NULL AND status IN ('pending','submitted','success')
+            WHERE job_item_id IS NOT NULL AND status IN (
+                'pending','submitted','success','upload_unknown','submission_unknown'
+            )
             """,
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_batch_items_active_content_request
             ON analysis_batch_items(content_sha256,vision_request_fingerprint)
-            WHERE status IN ('pending','submitted','success')
+            WHERE status IN ('pending','submitted','success','upload_unknown','submission_unknown')
             """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_batches_remote_id ON analysis_batches(remote_batch_id) WHERE remote_batch_id IS NOT NULL",
             "CREATE INDEX IF NOT EXISTS idx_batch_items_custom_id ON analysis_batch_items(custom_id)",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_photo_analysis_batch_once ON photo_analysis(job_id,photo_id,analysis_fingerprint) WHERE analysis_source='analysis_batch' AND job_id IS NOT NULL AND analysis_fingerprint IS NOT NULL",
         ),
