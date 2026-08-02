@@ -654,8 +654,6 @@ void loadConfig(Config &cfg) {
   DBG_PRINT("[CFG] refresh_hour="); DBG_PRINTLN((int)cfg.refresh_hour);
   DBG_PRINT("[CFG] refresh_minute="); DBG_PRINTLN((int)cfg.refresh_minute);
   DBG_PRINT("[CFG] rotate180="); DBG_PRINTLN(cfg.rotate180 ? "true" : "false");
-  DBG_PRINT("[CFG] delivery_mode="); DBG_PRINTLN(cfg.delivery_mode);
-  DBG_PRINT("[CFG] schedule_count="); DBG_PRINTLN((int)cfg.schedule_count);
   DBG_PRINT("[CFG] valid="); DBG_PRINTLN(cfg.valid ? "true" : "false");
 #endif
 }
@@ -994,10 +992,6 @@ static void deepSleepHoldOnlyEpdPins() {
 // =======================
 static void goDeepSleepSeconds(uint64_t seconds) {
   if (seconds < 1U) seconds = 1U;
-
-#if DEBUG_LOG
-  DBG_PRINT("[SLEEP] seconds="); DBG_PRINTLN((unsigned long)seconds);
-#endif
 
   uint64_t us = seconds * 1000000ULL;
 
@@ -2455,9 +2449,6 @@ void sleepUntilNextSchedule(const Config &cfg, bool hasTime, const struct tm &no
         ? nextDisplay - static_cast<time_t>(leadSeconds)
         : nextDisplay;
       const time_t wakeEpoch = prefetchEpoch > nowEpoch ? prefetchEpoch : nextDisplay;
-#if DEBUG_LOG
-      DBG_PRINT("[SLEEP] offline exact wake epoch="); DBG_PRINTLN((long)wakeEpoch);
-#endif
       goDeepSleepUntilEpoch(nowEpoch, wakeEpoch);
       return;
     }
@@ -2725,9 +2716,6 @@ void setup() {
       && !photoPainter.forceNetworkRefresh()) {
     time_t rtcEpoch = 0;
     if (!photoPainter.readRtc(rtcEpoch)) {
-#if DEBUG_LOG
-      DBG_PRINTLN("[BOOT] enhanced offline schedule: no RTC, local-only cycle");
-#endif
       runOfflineLocalCycle();
       return;
     }
@@ -2737,16 +2725,10 @@ void setup() {
     const bool networkWake = g_cfg.prefetch_lead_minutes == 0U
       || offlinePrefetchWake(g_cfg, rtcEpoch);
     if (!networkWake) {
-#if DEBUG_LOG
-      DBG_PRINTLN("[BOOT] enhanced offline schedule: local-only display cycle");
-#endif
       runOfflineLocalCycle();
       return;
     }
     enhancedNetworkWakeRequested = true;
-#if DEBUG_LOG
-    DBG_PRINTLN("[BOOT] enhanced offline schedule: bounded prefetch network cycle");
-#endif
   }
 #endif
 
