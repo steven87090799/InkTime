@@ -166,7 +166,7 @@ class ManagedConnection(sqlite3.Connection):
                     with self._writer_metrics_lock:
                         self._writer_metrics["busy_timeout_count"] += 1
                     raise sqlite3.OperationalError("database writer lock timeout") from exc
-                maximum = min(0.250, 0.005 * (2**min(attempt, 8)), deadline - now)
+                maximum = min(0.250, 0.005 * (2 ** min(attempt, 8)), deadline - now)
                 wait_seconds = random.uniform(0.0, maximum)  # noqa: S311 - contention jitter
                 with self._writer_metrics_lock:
                     self._writer_metrics["writer_lock_wait_count"] += 1
@@ -324,9 +324,7 @@ class Database:
                             float(self._metrics["long_transaction_max_ms"]), duration_ms
                         )
                     category = (
-                        operation
-                        if re.fullmatch(r"[a-z0-9_.-]{1,64}", operation)
-                        else "repository_write"
+                        operation if re.fullmatch(r"[a-z0-9_.-]{1,64}", operation) else "repository_write"
                     )
                     LOGGER.warning(
                         "SQLite long transaction operation=%s duration_ms=%.1f",
@@ -358,9 +356,7 @@ class Database:
             fcntl.flock(lock.fileno(), operation)
         except BlockingIOError as exc:
             lock.close()
-            raise RuntimeLockError(
-                "RESTORE-001 InkTime Web、Worker 或 Scheduler 尚未停止"
-            ) from exc
+            raise RuntimeLockError("RESTORE-001 InkTime Web、Worker 或 Scheduler 尚未停止") from exc
         return lock
 
     def try_acquire_operation_lock(self, name: str) -> IO[bytes] | None:

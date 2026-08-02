@@ -44,12 +44,15 @@ def test_vision_input_variants_keep_independent_cache_rows(app):
             vision_input_spec_json='{"max_side":1024}',
         )
     for fingerprint in ("1" * 64, "2" * 64, "3" * 64):
-        assert repository.get_ai_cache(
-            content_sha256="a" * 64,
-            provider="provider-id",
-            model_name="vision",
-            prompt_version="prompt-v4",
-            schema_version=2,
-            schema_kind="full",
-            vision_request_fingerprint=fingerprint,
-        ) is not None
+        assert (
+            repository.get_ai_cache(
+                content_sha256="a" * 64,
+                provider="provider-id",
+                model_name="vision",
+                prompt_version="prompt-v4",
+                schema_version=2,
+                schema_kind="full",
+                vision_request_fingerprint=fingerprint,
+            )
+            is not None
+        )

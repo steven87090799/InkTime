@@ -87,6 +87,7 @@ class DeviceQueueManifestService:
                 )
                 continue
             filename = str(payload["name"])
+            release_manifest = authorization.manifest or {}
             items.append(
                 {
                     "queue_item_id": item_id,
@@ -96,6 +97,10 @@ class DeviceQueueManifestService:
                     "priority": row["priority"],
                     "sha256": payload["sha256"],
                     "size": payload["size"],
+                    "width": release_manifest.get("width"),
+                    "height": release_manifest.get("height"),
+                    "pixel_format": release_manifest.get("pixel_format"),
+                    "render_profile": release_manifest.get("render_profile"),
                     "download_url": (
                         f"/api/device/v1/queue/items/{quote(item_id, safe='')}/files/"
                         f"{quote(filename, safe='')}"

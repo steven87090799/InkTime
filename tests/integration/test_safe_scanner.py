@@ -170,13 +170,11 @@ def test_missing_is_safe_and_reappearing_photo_preserves_analysis(app, tmp_path)
     payload = target.read_bytes()
     repository = app.extensions["inktime_photo_repository"]
     with app.extensions["inktime_database"].session() as connection:
-        photo_id = connection.execute(
-            "SELECT id FROM photos WHERE relative_path='photo-000.jpg'"
-        ).fetchone()[0]
+        photo_id = connection.execute("SELECT id FROM photos WHERE relative_path='photo-000.jpg'").fetchone()[
+            0
+        ]
     analysis = valid_result()
-    repository.save_analysis(
-        str(photo_id), None, "local", "local", "local", analysis, json.dumps(analysis)
-    )
+    repository.save_analysis(str(photo_id), None, "local", "local", "local", analysis, json.dumps(analysis))
     target.unlink()
 
     missing = scanner.scan("家庭相簿", root, build_thumbnails=False)
@@ -214,27 +212,25 @@ def test_mount_failure_and_cancelled_scan_never_mark_library_missing(app, tmp_pa
     with pytest.raises(FileNotFoundError, match="SCAN-001"):
         scanner.scan("NAS", root, build_thumbnails=False)
     with app.extensions["inktime_database"].session() as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM photos WHERE lifecycle_status='missing'"
-        ).fetchone()[0] == 0
+        assert (
+            connection.execute("SELECT COUNT(*) FROM photos WHERE lifecycle_status='missing'").fetchone()[0]
+            == 0
+        )
 
     hidden.rename(root)
     for path in root.glob("*.jpg"):
         path.unlink()
-    cancelled = scanner.scan(
-        "NAS", root, build_thumbnails=False, cancel_requested=lambda: True
-    )
+    cancelled = scanner.scan("NAS", root, build_thumbnails=False, cancel_requested=lambda: True)
     assert cancelled["cancelled"] is True
     assert cancelled["reconciliation_status"] == "skipped"
     with app.extensions["inktime_database"].session() as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM photos WHERE lifecycle_status='missing'"
-        ).fetchone()[0] == 0
+        assert (
+            connection.execute("SELECT COUNT(*) FROM photos WHERE lifecycle_status='missing'").fetchone()[0]
+            == 0
+        )
 
 
-def test_stat_io_error_continues_scan_but_blocks_missing_reconciliation(
-    app, tmp_path, monkeypatch
-):
+def test_stat_io_error_continues_scan_but_blocks_missing_reconciliation(app, tmp_path, monkeypatch):
     root = tmp_path / "photos"
     seed_files(root, 1)
     scanner, _ = make_scanner(app, tmp_path)
@@ -264,9 +260,10 @@ def test_stat_io_error_continues_scan_but_blocks_missing_reconciliation(
     assert result["warning_code"] == "SCAN-IO-002"
     assert result["reconciliation_status"] == "skipped"
     with app.extensions["inktime_database"].session() as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM photos WHERE lifecycle_status='missing'"
-        ).fetchone()[0] == 0
+        assert (
+            connection.execute("SELECT COUNT(*) FROM photos WHERE lifecycle_status='missing'").fetchone()[0]
+            == 0
+        )
 
 
 def test_large_missing_drop_requires_manual_confirmation(app, tmp_path):
@@ -283,15 +280,19 @@ def test_large_missing_drop_requires_manual_confirmation(app, tmp_path):
     assert result["warning_code"] == "SCAN-MISSING-THRESHOLD"
     assert result["reconciliation_status"] == "confirmation_required"
     with app.extensions["inktime_database"].session() as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM scan_missing_candidates WHERE scan_id=?",
-            (result["scan_id"],),
-        ).fetchone()[0] == 1
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM scan_missing_candidates WHERE scan_id=?",
+                (result["scan_id"],),
+            ).fetchone()[0]
+            == 1
+        )
     assert app.extensions["inktime_photo_repository"].confirm_missing(result["scan_id"]) == 1
     with app.extensions["inktime_database"].session() as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM photos WHERE lifecycle_status='missing'"
-        ).fetchone()[0] == 1
+        assert (
+            connection.execute("SELECT COUNT(*) FROM photos WHERE lifecycle_status='missing'").fetchone()[0]
+            == 1
+        )
 
 
 def test_move_keeps_id_analysis_favorite_history_and_does_not_rebuild_thumbnail(app, tmp_path):
@@ -310,9 +311,7 @@ def test_move_keeps_id_analysis_favorite_history_and_does_not_rebuild_thumbnail(
             (photo_id,),
         )
     analysis = valid_result()
-    repository.save_analysis(
-        str(photo_id), None, "local", "local", "local", analysis, json.dumps(analysis)
-    )
+    repository.save_analysis(str(photo_id), None, "local", "local", "local", analysis, json.dumps(analysis))
     source.rename(root / "new.png")
 
     def thumbnail_must_not_run(*_args, **_kwargs):
@@ -323,9 +322,7 @@ def test_move_keeps_id_analysis_favorite_history_and_does_not_rebuild_thumbnail(
 
     assert result["moved"] == 1
     with app.extensions["inktime_database"].session() as connection:
-        photo = connection.execute(
-            "SELECT id,relative_path,favorite,status FROM photos"
-        ).fetchone()
+        photo = connection.execute("SELECT id,relative_path,favorite,status FROM photos").fetchone()
         analysis_count = connection.execute("SELECT COUNT(*) FROM photo_analysis").fetchone()[0]
         history_count = connection.execute("SELECT COUNT(*) FROM photo_events").fetchone()[0]
     assert tuple(photo) == (photo_id, "new.png", 1, "analyzed")
@@ -397,9 +394,7 @@ def test_content_change_invalidates_sections_not_run_by_partial_mode(app, tmp_pa
     with app.extensions["inktime_database"].session() as connection:
         photo_id = str(connection.execute("SELECT id FROM photos").fetchone()[0])
     analysis = valid_result()
-    repository.save_analysis(
-        photo_id, None, "local", "local", "local", analysis, json.dumps(analysis)
-    )
+    repository.save_analysis(photo_id, None, "local", "local", "local", analysis, json.dumps(analysis))
 
     photo = root / "photo-000.jpg"
     photo.write_bytes(b"changed-content-for-metadata-only")
@@ -429,17 +424,13 @@ def test_scan_modes_fill_only_requested_sections(app, tmp_path):
     metadata = scanner.scan("模式", root, mode="metadata-only", build_thumbnails=False)
     assert metadata["processed"] == 1
     with app.extensions["inktime_database"].session() as connection:
-        row = connection.execute(
-            "SELECT status,metadata_status,local_features_status FROM photos"
-        ).fetchone()
+        row = connection.execute("SELECT status,metadata_status,local_features_status FROM photos").fetchone()
     assert tuple(row) == ("discovered", "complete", "pending")
 
     local = scanner.scan("模式", root, mode="local-features-only", build_thumbnails=False)
     assert local["processed"] == 1
     with app.extensions["inktime_database"].session() as connection:
-        row = connection.execute(
-            "SELECT status,metadata_status,local_features_status FROM photos"
-        ).fetchone()
+        row = connection.execute("SELECT status,metadata_status,local_features_status FROM photos").fetchone()
     assert tuple(row) == ("preprocessed", "complete", "complete")
 
     assert scanner.scan("模式", root, mode="incremental", build_thumbnails=False)["skipped"] == 1

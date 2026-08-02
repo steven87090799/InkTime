@@ -19,6 +19,7 @@ def test_primary_management_pages_render(client, app):
         "/photos",
         "/jobs",
         "/providers",
+        "/analysis/batches",
         "/scoring",
         "/costs",
         "/simulator",
@@ -48,6 +49,122 @@ def test_primary_management_pages_render(client, app):
     settings = client.get("/settings").get_data(as_text=True)
     assert "Good Display 原廠相容" in settings
     assert "照片平滑（減少色塊／雜點）" in settings
+
+
+def test_batch_management_api_is_admin_only_and_strict_json(client, app):
+    create_admin(app)
+    login(client)
+    assert client.get("/analysis/batches").status_code == 200
+    assert client.post("/api/v1/analysis/batches/estimate", json={}).status_code == 403
+    unknown = client.post(
+        "/api/v1/analysis/batches/estimate",
+        json={"scope": "sample", "unexpected": True},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert unknown.status_code == 400
+    scalar = client.post(
+        "/api/v1/analysis/batches/estimate",
+        json=["sample"],
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert scalar.status_code == 400
+
+    app.extensions["inktime_auth_repository"].create_user("batch-viewer", "batch-viewer-password", "viewer")
+    viewer = app.test_client()
+    login(viewer, "batch-viewer", "batch-viewer-password")
+    assert viewer.get("/analysis/batches").status_code == 200
+    assert viewer.post("/api/v1/analysis/batches/estimate", json={}).status_code == 403
+
+
+def test_batch_management_api_dispatches_lifecycle_actions(client, app, monkeypatch):
+    create_admin(app)
+    login(client)
+
+    detail = {
+        "id": "batch-ui",
+        "job_id": None,
+        "scope": "sample",
+        "status": "completed",
+        "model": "gpt-5.6-luna",
+        "total_items": 1,
+        "imported_items": 1,
+        "failed_items": 0,
+        "missing_items": 0,
+        "stale_items": 0,
+        "input_tokens": 10,
+        "cached_tokens": 0,
+        "output_tokens": 2,
+        "reasoning_tokens": 0,
+        "actual_cost": 0.01,
+        "average_cost": 0.01,
+        "per_thousand_cost": 10.0,
+        "eligible_missing_count": 1,
+        "full_library_estimated_cost": 0.01,
+        "schema_success_rate": 100.0,
+        "actual_jsonl_bytes": 10,
+        "cleanup_status": "completed",
+        "peak_rss_bytes": 100,
+        "candidate_snapshot_json": "[]",
+        "shard_sizes": [],
+        "items": [],
+    }
+
+    class FakeBatchService:
+        def estimate(self, **kwargs):
+            return {"candidate_count": 1, **kwargs}
+
+        def submit(self, **kwargs):
+            return {"batch_ids": ["batch-ui"], **kwargs}
+
+        def get_detail(self, _batch_id):
+            return detail
+
+        def cancel(self, batch_id):
+            return {"batch_id": batch_id, "status": "cancelled"}
+
+        def retry_failed(self, batch_id, **kwargs):
+            return {"batch_id": batch_id, "retry": True, **kwargs}
+
+        def retry_cleanup(self, batch_id):
+            return {"status": "cleanup_pending", "job_id": f"cleanup-{batch_id}"}
+
+        def recover_submission(self, batch_id, remote_batch_id):
+            return {"batch_id": batch_id, "remote_batch_id": remote_batch_id, "status": "validating"}
+
+    monkeypatch.setitem(app.extensions, "inktime_batch_analysis_service", FakeBatchService())
+    headers = {"X-CSRF-Token": csrf(client)}
+    estimate = client.post("/api/v1/analysis/batches/estimate", json={"scope": "sample"}, headers=headers)
+    assert estimate.status_code == 200
+    created = client.post("/api/v1/analysis/batches", json={"scope": "sample"}, headers=headers)
+    assert created.status_code == 201
+    assert client.get("/api/v1/analysis/batches").status_code == 200
+    assert client.get("/api/v1/analysis/batches/batch-ui").status_code == 200
+    assert client.get("/analysis/batches/batch-ui").status_code == 200
+    assert (
+        client.post("/api/v1/analysis/batches/batch-ui/cancel", json={}, headers=headers).status_code == 200
+    )
+    assert (
+        client.post("/api/v1/analysis/batches/batch-ui/retry-failed", json={}, headers=headers).status_code
+        == 200
+    )
+    cleanup = client.post("/api/v1/analysis/batches/batch-ui/retry-cleanup", json={}, headers=headers)
+    assert cleanup.status_code == 200
+    assert cleanup.json["job_id"] == "cleanup-batch-ui"
+    recovered = client.post(
+        "/api/v1/analysis/batches/batch-ui/recover-submission",
+        json={"remote_batch_id": "batch-existing"},
+        headers=headers,
+    )
+    assert recovered.status_code == 200
+    assert recovered.json["remote_batch_id"] == "batch-existing"
+    assert (
+        client.post(
+            "/api/v1/analysis/batches/batch-ui/recover-submission",
+            json={"remote_batch_id": "batch-existing", "unexpected": True},
+            headers=headers,
+        ).status_code
+        == 400
+    )
 
 
 def test_device_energy_dashboard_uses_telemetry_and_audited_measurements(client, app):
@@ -155,9 +272,7 @@ def test_scoring_test_upload_is_normalized_and_not_persisted(client, app, monkey
         observed["exists_during_analysis"] = path.exists()
         return {"ranking_score": 88, "analysis": {"caption": "測試照片"}}
 
-    monkeypatch.setattr(
-        app.extensions["inktime_scoring_lab_service"], "analyze", fake_analyze
-    )
+    monkeypatch.setattr(app.extensions["inktime_scoring_lab_service"], "analyze", fake_analyze)
     image = BytesIO()
     Image.new("RGB", (32, 32), "navy").save(image, "JPEG")
     image.seek(0)
@@ -205,9 +320,7 @@ def test_epaper_simulator_works_without_photo_database_or_model(client, app):
     assert preview.status_code == 200
     rendered = Image.open(BytesIO(preview.data))
     assert rendered.size == (480, 800)
-    assert set(rendered.getdata()).issubset(
-        {(0, 0, 0), (255, 255, 255), (220, 30, 30), (245, 190, 25)}
-    )
+    assert set(rendered.getdata()).issubset({(0, 0, 0), (255, 255, 255), (220, 30, 30), (245, 190, 25)})
     with app.extensions["inktime_database"].session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
@@ -272,9 +385,7 @@ def test_virtual_display_receives_and_verifies_formal_release_payload(client, ap
     assert second_payload.status_code == 200
     assert second_payload.headers["X-InkTime-Payload-SHA256"] == second_entry["sha256"]
 
-    missing = client.get(
-        f"/api/v1/virtual-display/releases/{manifest['release_id']}/files/manifest.json"
-    )
+    missing = client.get(f"/api/v1/virtual-display/releases/{manifest['release_id']}/files/manifest.json")
     assert missing.status_code == 404
 
 
@@ -455,9 +566,7 @@ def test_photo_library_loads_200_per_page_and_keeps_filters(client, app):
     assert "第 2 / 2 頁" in second_body
 
 
-def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(
-    client, app, tmp_path
-):
+def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(client, app, tmp_path):
     app.extensions["inktime_settings_repository"].update(
         "analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="127.0.0.1"
     )
@@ -470,8 +579,7 @@ def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(
     result = valid_result()
     with app.extensions["inktime_database"].session() as connection:
         connection.execute(
-            "UPDATE libraries SET root_path=? "
-            "WHERE id=(SELECT library_id FROM photos WHERE id=?)",
+            "UPDATE libraries SET root_path=? WHERE id=(SELECT library_id FROM photos WHERE id=?)",
             (str(photo_root), photo_id),
         )
         connection.execute(
@@ -507,8 +615,7 @@ def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(
     assert "歷年今日優先" in body
 
     landscape = client.get(
-        f"/api/v1/rendering/preview/{photo_id}"
-        "?layout=photo_info&orientation=landscape&fit_mode=contain"
+        f"/api/v1/rendering/preview/{photo_id}?layout=photo_info&orientation=landscape&fit_mode=contain"
     )
     assert landscape.status_code == 202
     created = landscape.get_json()
@@ -519,9 +626,7 @@ def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(
     assert completed.status_code == 200
     assert Image.open(BytesIO(completed.data)).size == (800, 480)
 
-    invalid_orientation = client.get(
-        f"/api/v1/rendering/preview/{photo_id}?orientation=diagonal"
-    )
+    invalid_orientation = client.get(f"/api/v1/rendering/preview/{photo_id}?orientation=diagonal")
     assert invalid_orientation.status_code == 400
 
     response = client.patch(
@@ -554,9 +659,7 @@ def test_photo_detail_backfills_local_e6_and_crop_without_model(client, app, tmp
             """,
             (library_id, "memory.jpg", now, now),
         )
-    repository.save_analysis(
-        "legacy-photo", None, "stage_one", "test", "vision", valid_result(), "{}"
-    )
+    repository.save_analysis("legacy-photo", None, "stage_one", "test", "vision", valid_result(), "{}")
 
     page = client.get("/photos/legacy-photo")
 

@@ -308,11 +308,28 @@ def device_queue_ack():
             maximum=2_147_483_647,
             error_prefix="QUEUE-001",
         )
+        if "display_skipped" in payload:
+            payload["display_skipped"] = json_bool(
+                payload,
+                "display_skipped",
+                error_prefix="QUEUE-001",
+            )
+        skip_reason = str(payload.get("skip_reason", "")).strip()
+        if payload.get("display_skipped") is True and skip_reason != "same_sha256":
+            raise ValueError("QUEUE-001 skip_reason 必須是 same_sha256")
+        if payload.get("display_skipped") is not True and skip_reason:
+            raise ValueError("QUEUE-001 未 skip 時不得提供 skip_reason")
+        if payload.get("display_skipped") is True and payload.get("event") != "DISPLAY_COMPLETED":
+            raise ValueError("QUEUE-001 display_skipped 僅可用於 DISPLAY_COMPLETED")
+        if len(skip_reason) > 64:
+            raise ValueError("QUEUE-001 skip_reason 過長")
+        payload["skip_reason"] = skip_reason
         return _repo().queue_ack(device_id=str(device["id"]), payload=payload)
     except PermissionError as exc:
         abort(403, description=str(exc))
     except ValueError as exc:
-        abort(400, description=str(exc))
+        status = 409 if str(exc).startswith("QUEUE-003") else 400
+        abort(status, description=str(exc))
 
 
 @bp.get("/api/device/v1/queue/items/<item_id>/files/<path:filename>")

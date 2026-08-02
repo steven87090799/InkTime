@@ -97,9 +97,12 @@ def test_legacy_adapter_reads_modern_tables_and_never_writes_photo_scores(tmp_pa
         page = app.extensions["inktime_legacy_photo_adapter"].page(page=1, page_size=10)
         assert page.items == ()
         with database.session() as connection:
-            assert connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='photo_scores'"
-            ).fetchone() is not None
+            assert (
+                connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='photo_scores'"
+                ).fetchone()
+                is not None
+            )
     finally:
         app.extensions["inktime_service_container"].close()
 

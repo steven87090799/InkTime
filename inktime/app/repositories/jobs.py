@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -48,7 +49,9 @@ class JobRepository:
             if remaining is not None:
                 remaining -= len(rows)
 
-    def selection_preview(self, *, analysis_fingerprint: str | None, selection_mode: str = "pending", limit: int | None = None) -> dict:
+    def selection_preview(
+        self, *, analysis_fingerprint: str | None, selection_mode: str = "pending", limit: int | None = None
+    ) -> dict:
         """Bounded SQLite-only pending selector; it never touches image files."""
         fingerprint = str(analysis_fingerprint or "")
         active = "('pending','preparing','running','pausing','retrying')"
@@ -85,23 +88,47 @@ class JobRepository:
                 """,
                 [*params, fingerprint, fingerprint, fingerprint],
             ).fetchone()
-            missing = int(connection.execute("SELECT COUNT(*) FROM photos WHERE lifecycle_status='missing'").fetchone()[0])
+            missing = int(
+                connection.execute("SELECT COUNT(*) FROM photos WHERE lifecycle_status='missing'").fetchone()[
+                    0
+                ]
+            )
             scan = connection.execute(
                 "SELECT completed_at FROM scan_runs WHERE status IN ('completed','completed_with_warnings') "
                 "AND completed_at IS NOT NULL ORDER BY completed_at DESC,id DESC LIMIT 1"
             ).fetchone()
-            limited_to = min(int(row["pending_total"] or 0), max(0, int(limit))) if limit is not None else int(row["pending_total"] or 0)
-        return {**dict(row), "missing": missing, "pending_total": int(row["pending_total"] or 0),
-                "limited_to": limited_to, "failed": int(row["failed"] or 0), "stale": int(row["stale"] or 0),
-                "last_successful_scan_at": str(scan["completed_at"]) if scan else None,
-                "selection_mode": selection_mode}
+            limited_to = (
+                min(int(row["pending_total"] or 0), max(0, int(limit)))
+                if limit is not None
+                else int(row["pending_total"] or 0)
+            )
+        return {
+            **dict(row),
+            "missing": missing,
+            "pending_total": int(row["pending_total"] or 0),
+            "limited_to": limited_to,
+            "failed": int(row["failed"] or 0),
+            "stale": int(row["stale"] or 0),
+            "last_successful_scan_at": str(scan["completed_at"]) if scan else None,
+            "selection_mode": selection_mode,
+        }
 
-    def iter_pending_photo_ids(self, *, analysis_fingerprint: str | None, selection_mode: str = "pending", limit: int | None = None) -> Iterator[str]:
+    def iter_pending_photo_ids(
+        self, *, analysis_fingerprint: str | None, selection_mode: str = "pending", limit: int | None = None
+    ) -> Iterator[str]:
         fingerprint = str(analysis_fingerprint or "")
         active = "('pending','preparing','running','pausing','retrying')"
         current = "EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id AND a.analysis_fingerprint=?)"
         queued = f"EXISTS (SELECT 1 FROM job_items ji JOIN jobs j ON j.id=ji.job_id WHERE ji.photo_id=p.id AND ji.status IN ('pending','running','retrying') AND j.status IN {active} AND COALESCE(j.analysis_fingerprint,'')=?)"
-        predicate = "1=1" if selection_mode == "force_all" else (f"NOT {current} AND EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id)" if selection_mode == "stale_only" else f"NOT {current}")
+        predicate = (
+            "1=1"
+            if selection_mode == "force_all"
+            else (
+                f"NOT {current} AND EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id)"
+                if selection_mode == "stale_only"
+                else f"NOT {current}"
+            )
+        )
         last_score = float("inf")
         last_id = ""
         remaining = limit
@@ -131,6 +158,7 @@ class JobRepository:
     def create(
         self,
         *,
+        kind: str = "analysis",
         name: str,
         strategy: str,
         settings: dict,
@@ -155,10 +183,11 @@ class JobRepository:
                     INSERT INTO jobs(id, kind, name, status, strategy, settings_json,
                                      budget_limit, created_by, created_at, priority, dedupe_key,
                                      selection_mode,analysis_fingerprint,analysis_spec_json,force_recompute)
-                    VALUES (?, 'analysis', ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?,?,?,?)
+                    VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?,?,?,?)
                     """,
                     (
                         job_id,
+                        kind,
                         name,
                         strategy,
                         json.dumps(settings, ensure_ascii=False),
@@ -169,7 +198,9 @@ class JobRepository:
                         dedupe_key,
                         selection_mode,
                         analysis_fingerprint,
-                        json.dumps(analysis_spec or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                        json.dumps(
+                            analysis_spec or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                        ),
                         int(force_recompute),
                     ),
                 )
@@ -225,6 +256,7 @@ class JobRepository:
             "cleanup",
             "virtual_display",
             "webhook",
+            "analysis_batch_import",
         }:
             raise ValueError("不支援的維護工作")
         job_id = str(uuid4())
@@ -423,17 +455,10 @@ class JobRepository:
 
     def can_access(self, job_id: str, user_id: str, *, administrator: bool) -> bool:
         with self.database.session() as connection:
-            row = connection.execute(
-                "SELECT created_by FROM jobs WHERE id=?", (job_id,)
-            ).fetchone()
-        return bool(
-            row is not None
-            and (administrator or str(row["created_by"] or "") == str(user_id))
-        )
+            row = connection.execute("SELECT created_by FROM jobs WHERE id=?", (job_id,)).fetchone()
+        return bool(row is not None and (administrator or str(row["created_by"] or "") == str(user_id)))
 
-    def can_access_background_result(
-        self, token: str, user_id: str, *, administrator: bool
-    ) -> bool:
+    def can_access_background_result(self, token: str, user_id: str, *, administrator: bool) -> bool:
         if administrator:
             return True
         marker = f"/background-results/{token}/"
@@ -632,9 +657,7 @@ class JobRepository:
                 connection.execute("ROLLBACK")
                 raise
 
-    def record_late_completion(
-        self, job_id: str, item_id: str, result: dict, actual_cost: float = 0
-    ) -> None:
+    def record_late_completion(self, job_id: str, item_id: str, result: dict, actual_cost: float = 0) -> None:
         """Timeout 後底層 Thread 才結束：只記錄一次診斷，不可轉成正式成功。"""
         now = utc_now()
         with self.database.transaction() as connection:
@@ -798,3 +821,161 @@ class JobRepository:
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+
+    def complete_batch_item(
+        self, job_id: str, item_id: str, result: dict, actual_cost: float = 0, connection=None
+    ) -> bool:
+        """Persist a remote Batch result without claiming it in the normal worker queue."""
+
+        now = utc_now()
+        context = self.database.transaction() if connection is None else nullcontext(connection)
+        with context as active_connection:
+            connection = active_connection
+            cursor = connection.execute(
+                """
+                UPDATE job_items SET status='completed',completed_at=?,result_json=?,
+                    estimated_cost=?,stage='analysis_batch',lease_until=NULL
+                WHERE id=? AND job_id=? AND status NOT IN ('completed','failed','cancelled')
+                """,
+                (now, json.dumps(result, ensure_ascii=False), actual_cost, item_id, job_id),
+            )
+            if cursor.rowcount:
+                connection.execute(
+                    "UPDATE jobs SET completed_items=completed_items+1,spent=spent+?,heartbeat_at=? WHERE id=?",
+                    (actual_cost, now, job_id),
+                )
+            return bool(cursor.rowcount)
+
+    def fail_batch_item(
+        self, job_id: str, item_id: str, error_code: str, message: str, connection=None
+    ) -> bool:
+        now = utc_now()
+        context = self.database.transaction() if connection is None else nullcontext(connection)
+        with context as active_connection:
+            connection = active_connection
+            cursor = connection.execute(
+                """
+                UPDATE job_items SET status='failed',completed_at=?,error_code=?,stage='analysis_batch',lease_until=NULL
+                WHERE id=? AND job_id=? AND status NOT IN ('completed','failed','cancelled')
+                """,
+                (now, error_code, item_id, job_id),
+            )
+            if cursor.rowcount:
+                connection.execute(
+                    "UPDATE jobs SET failed_items=failed_items+1,heartbeat_at=? WHERE id=?", (now, job_id)
+                )
+                connection.execute(
+                    """
+                    INSERT INTO job_errors(job_id,job_item_id,photo_id,component,error_code,fingerprint,severity,message,first_seen_at,last_seen_at)
+                    SELECT ?,?,photo_id,'analysis_batch',?,?, 'error',?,?,? FROM job_items WHERE id=?
+                    """,
+                    (
+                        job_id,
+                        item_id,
+                        error_code,
+                        hashlib.sha256(f"{job_id}:{item_id}:{error_code}".encode()).hexdigest(),
+                        message[:1000],
+                        now,
+                        now,
+                        item_id,
+                    ),
+                )
+            return bool(cursor.rowcount)
+
+    def cancel_batch_item(
+        self, job_id: str, item_id: str, reason: str = "cancelled", connection=None
+    ) -> bool:
+        """Cancel a Batch item without leaving its parent queue item pending."""
+
+        now = utc_now()
+        context = self.database.transaction() if connection is None else nullcontext(connection)
+        with context as active_connection:
+            connection = active_connection
+            cursor = connection.execute(
+                """
+                UPDATE job_items SET status='cancelled',completed_at=?,error_code=?,stage='analysis_batch',lease_until=NULL
+                WHERE id=? AND job_id=? AND status NOT IN ('completed','failed','cancelled')
+                """,
+                (now, reason[:120], item_id, job_id),
+            )
+            if cursor.rowcount:
+                connection.execute(
+                    "UPDATE jobs SET heartbeat_at=? WHERE id=? AND status!='cancelled'",
+                    (now, job_id),
+                )
+            return bool(cursor.rowcount)
+
+    def finalize_batch_job(self, job_id: str, *, status: str, connection=None) -> bool:
+        if status not in {"completed", "completed_with_errors", "failed", "cancelled"}:
+            raise ValueError("不合法的 Batch Job terminal status")
+        now = utc_now()
+        context = self.database.session() if connection is None else nullcontext(connection)
+        with context as active_connection:
+            connection = active_connection
+            cursor = connection.execute(
+                "UPDATE jobs SET status=?,completed_at=?,heartbeat_at=? WHERE id=? AND status NOT IN ('completed','completed_with_errors','failed','cancelled')",
+                (status, now, now, job_id),
+            )
+        return bool(cursor.rowcount)
+
+    def abandon_unstarted(self, job_id: str, error_code: str = "BATCH-RESERVATION-CONFLICT") -> bool:
+        """Close a job whose durable Batch reservation could not be acquired.
+
+        This is intentionally different from worker cancellation: the job has
+        never started and must not remain pending/running after a uniqueness
+        conflict during Batch item reservation.
+        """
+
+        now = utc_now()
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                """UPDATE jobs SET status='failed',completed_at=?,heartbeat_at=?
+                   WHERE id=? AND status='pending'""",
+                (now, now, job_id),
+            )
+            if cursor.rowcount:
+                connection.execute(
+                    """UPDATE job_items SET status='failed',completed_at=?,error_code=?
+                       WHERE job_id=? AND status IN ('pending','retrying')""",
+                    (now, error_code, job_id),
+                )
+        if cursor.rowcount:
+            self.add_event(job_id, "reservation_conflict", "Batch reservation 未取得，工作已安全結束")
+        return bool(cursor.rowcount)
+
+    def reopen_batch_job(self, job_id: str, connection=None) -> bool:
+        """Reopen a Batch parent after manual remote ownership recovery."""
+
+        now = utc_now()
+        context = self.database.transaction() if connection is None else nullcontext(connection)
+        with context as active_connection:
+            connection = active_connection
+            cursor = connection.execute(
+                """
+                UPDATE jobs SET status='running',completed_at=NULL,heartbeat_at=?
+                WHERE id=? AND status IN ('pending','running','retrying','failed','completed_with_errors')
+                """,
+                (now, job_id),
+            )
+            if cursor.rowcount:
+                connection.execute(
+                    """
+                    UPDATE job_items SET status='pending',completed_at=NULL,error_code=NULL,lease_until=NULL
+                    WHERE job_id=? AND status IN ('failed','retrying')
+                    """,
+                    (job_id,),
+                )
+                connection.execute(
+                    """
+                    UPDATE jobs SET completed_items=(
+                        SELECT COUNT(*) FROM job_items WHERE job_id=? AND status='completed'
+                    ),failed_items=(
+                        SELECT COUNT(*) FROM job_items WHERE job_id=? AND status='failed'
+                    )
+                    WHERE id=?
+                    """,
+                    (job_id, job_id, job_id),
+                )
+        if cursor.rowcount and connection is not None and not getattr(connection, "in_transaction", False):
+            self.add_event(job_id, "batch_reopened", "人工 Recovery 後重新開啟 Batch 工作")
+        return bool(cursor.rowcount)

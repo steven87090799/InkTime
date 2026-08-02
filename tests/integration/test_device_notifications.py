@@ -17,9 +17,7 @@ class _WebhookSession:
 
 
 def _update_setting(app, key, value):
-    app.extensions["inktime_settings_repository"].update(
-        key, value, changed_by="test", source_ip="127.0.0.1"
-    )
+    app.extensions["inktime_settings_repository"].update(key, value, changed_by="test", source_ip="127.0.0.1")
 
 
 def test_offline_notification_is_deduplicated_and_recovery_is_recorded(app):
@@ -28,9 +26,7 @@ def test_offline_notification_is_deduplicated_and_recovery_is_recorded(app):
     now = datetime(2026, 7, 18, 12, tzinfo=timezone.utc)
     old = (now - timedelta(hours=40)).isoformat()
     with app.extensions["inktime_database"].session() as connection:
-        connection.execute(
-            "UPDATE devices SET created_at=?,updated_at=? WHERE id=?", (old, old, device_id)
-        )
+        connection.execute("UPDATE devices SET created_at=?,updated_at=? WHERE id=?", (old, old, device_id))
 
     service = app.extensions["inktime_notification_service"]
     assert service.scan(now=now)["offline"] == 1
@@ -52,9 +48,7 @@ def test_offline_notification_is_deduplicated_and_recovery_is_recorded(app):
 def test_webhook_token_is_not_in_payload_and_delivery_is_persisted(app):
     _update_setting(app, "notification.webhook_enabled", True)
     _update_setting(app, "notification.webhook_url", "https://hooks.example.test/inktime")
-    app.extensions["inktime_secret_store"].set(
-        "notification.webhook_token", "top-secret", "test"
-    )
+    app.extensions["inktime_secret_store"].set("notification.webhook_token", "top-secret", "test")
     service = app.extensions["inktime_notification_service"]
     fake = _WebhookSession()
     service.session = fake

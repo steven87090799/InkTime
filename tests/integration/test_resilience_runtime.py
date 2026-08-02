@@ -51,6 +51,10 @@ def test_queue_manifest_download_ack_is_owned_idempotent_and_updates_history(cli
         "/api/device/v1/queue/manifest", headers={"Authorization": f"Bearer {token}"}
     ).get_json()
     item = manifest["items"][0]
+    assert item["width"] == 480
+    assert item["height"] == 800
+    assert item["pixel_format"] == "2bpp"
+    assert item["render_profile"] == "safe_4c"
     assert (
         client.get(item["download_url"], headers={"Authorization": f"Bearer {other_token}"}).status_code
         == 403
@@ -129,8 +133,69 @@ def test_queue_rejects_stale_version_and_illegal_transition(client, app):
         _ack(
             client, token, item["id"], manifest["queue_version"] - 1, "MANIFEST_RECEIVED", "old-version"
         ).status_code
-        == 400
+        == 409
     )
+
+
+def test_same_content_queue_ack_is_strict_and_idempotent(client, app):
+    create_admin(app)
+    login(client)
+    _seed_photo(app)
+    device_id, token = app.extensions["inktime_device_repository"].create("Same content")
+    release = _published_release(app)
+    created = client.post(
+        f"/api/devices/{device_id}/queue/generate",
+        json={"release_id": release["release_id"]},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    item = created.get_json()["item"]
+    manifest = client.get(
+        "/api/device/v1/queue/manifest", headers={"Authorization": f"Bearer {token}"}
+    ).get_json()
+    for index, event in enumerate(
+        ("MANIFEST_RECEIVED", "DOWNLOAD_STARTED", "DOWNLOAD_COMPLETED", "HASH_VERIFIED")
+    ):
+        assert (
+            _ack(client, token, item["id"], manifest["queue_version"], event, f"skip-{index}").status_code
+            == 200
+        )
+    payload = {
+        "queue_item_id": item["id"],
+        "queue_version": manifest["queue_version"],
+        "event": "DISPLAY_COMPLETED",
+        "idempotency_key": "same-content",
+        "display_skipped": True,
+        "skip_reason": "same_sha256",
+    }
+    first = client.post(
+        "/api/device/v1/queue/ack",
+        json=payload,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    duplicate = client.post(
+        "/api/device/v1/queue/ack",
+        json=payload,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert first.status_code == 200
+    assert duplicate.status_code == 200 and duplicate.get_json()["idempotent"] is True
+
+
+def test_queue_ack_rejects_string_skip_boolean(client, app):
+    _device_id, token = app.extensions["inktime_device_repository"].create("Strict skip")
+    response = client.post(
+        "/api/device/v1/queue/ack",
+        json={
+            "queue_item_id": "item",
+            "queue_version": 0,
+            "event": "DISPLAY_COMPLETED",
+            "idempotency_key": "key",
+            "display_skipped": "true",
+            "skip_reason": "same_sha256",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 400
 
 
 def test_canary_failure_creates_last_known_good_rollback_queue(client, app):

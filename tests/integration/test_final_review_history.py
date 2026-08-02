@@ -15,7 +15,9 @@ class FirstChoice:
         return [values[0]] * k
 
 
-def _insert_photo(app, root: Path, photo_id: str, captured_at: str, *, eligible: int = 1, score: float = 80) -> None:
+def _insert_photo(
+    app, root: Path, photo_id: str, captured_at: str, *, eligible: int = 1, score: float = 80
+) -> None:
     photos = app.extensions["inktime_photo_repository"]
     library_id = photos.ensure_library("歷史選片", root)
     now = "2026-07-22T00:00:00+00:00"
@@ -28,16 +30,41 @@ def _insert_photo(app, root: Path, photo_id: str, captured_at: str, *, eligible:
             VALUES (?,?,?,'analyzed',?,?,?,'valid',?, 'active',?,?,?)
             """,
             (
-                photo_id, library_id, f"{photo_id}.jpg", captured_at, captured_at[:10],
-                captured_at[5:10], eligible, score, now, now,
+                photo_id,
+                library_id,
+                f"{photo_id}.jpg",
+                captured_at,
+                captured_at[:10],
+                captured_at[5:10],
+                eligible,
+                score,
+                now,
+                now,
             ),
         )
     photos.save_analysis(
-        photo_id, None, "local", "local", "local-quality-v3",
-        {"schema_version": 1, "caption": "測試", "types": ["旅行", "人物"], "memory_score": score,
-         "beauty_score": score, "technical_quality_score": score, "emotion_score": score,
-         "side_caption": "測試", "should_keep": True, "sensitive": False, "reason": "測試"}, "{}",
-        ranking_score=score, final_ranking_score=score, travel_bonus=4,
+        photo_id,
+        None,
+        "local",
+        "local",
+        "local-quality-v3",
+        {
+            "schema_version": 1,
+            "caption": "測試",
+            "types": ["旅行", "人物"],
+            "memory_score": score,
+            "beauty_score": score,
+            "technical_quality_score": score,
+            "emotion_score": score,
+            "side_caption": "測試",
+            "should_keep": True,
+            "sensitive": False,
+            "reason": "測試",
+        },
+        "{}",
+        ranking_score=score,
+        final_ranking_score=score,
+        travel_bonus=4,
     )
 
 
@@ -76,15 +103,26 @@ def test_history_selection_synthetic_rows_is_bounded_sqlite_work(app, tmp_path, 
     now = "2026-07-22T00:00:00+00:00"
     rows = [
         (
-            f"synthetic-{index}", library_id, f"not-present-{index}.jpg",
+            f"synthetic-{index}",
+            library_id,
+            f"not-present-{index}.jpg",
             f"{2000 + index % 25:04d}-07-22T10:00:00",
-            f"{2000 + index % 25:04d}-07-22", "07-22", now, now,
+            f"{2000 + index % 25:04d}-07-22",
+            "07-22",
+            now,
+            now,
         )
         for index in range(row_count)
     ]
     rows[25] = (
-        "selected", library_id, "selected.jpg", "2000-07-22T10:00:00",
-        "2000-07-22", "07-22", now, now,
+        "selected",
+        library_id,
+        "selected.jpg",
+        "2000-07-22T10:00:00",
+        "2000-07-22",
+        "07-22",
+        now,
+        now,
     )
     with database.session() as connection:
         connection.execute("BEGIN")
@@ -96,11 +134,27 @@ def test_history_selection_synthetic_rows_is_bounded_sqlite_work(app, tmp_path, 
         )
         connection.commit()
     photos.save_analysis(
-        "selected", None, "local", "local", "synthetic",
-        {"schema_version": 1, "caption": "測試", "types": ["其他"], "memory_score": 75,
-         "beauty_score": 75, "technical_quality_score": 75, "emotion_score": 75,
-         "side_caption": "", "should_keep": True, "sensitive": False, "reason": "測試"}, "{}",
-        ranking_score=75, final_ranking_score=75,
+        "selected",
+        None,
+        "local",
+        "local",
+        "synthetic",
+        {
+            "schema_version": 1,
+            "caption": "測試",
+            "types": ["其他"],
+            "memory_score": 75,
+            "beauty_score": 75,
+            "technical_quality_score": 75,
+            "emotion_score": 75,
+            "side_caption": "",
+            "should_keep": True,
+            "sensitive": False,
+            "reason": "測試",
+        },
+        "{}",
+        ranking_score=75,
+        final_ranking_score=75,
     )
     statements: list[str] = []
     with database.session() as connection:
@@ -111,6 +165,8 @@ def test_history_selection_synthetic_rows_is_bounded_sqlite_work(app, tmp_path, 
     assert result["status"] == "ok"
     assert result["candidates"][0]["id"] == "selected"
     assert elapsed < 8
-    assert len([statement for statement in statements if statement.lstrip().upper().startswith("SELECT")]) <= 2
+    assert (
+        len([statement for statement in statements if statement.lstrip().upper().startswith("SELECT")]) <= 2
+    )
     with sqlite3.connect(database.path) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"

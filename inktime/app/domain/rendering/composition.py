@@ -84,12 +84,19 @@ def _saliency_focus(image: Image.Image) -> CropAnalysis:
             center_y = (top + bottom) / 2 / sample.height
             center_prior = max(0.0, 1.0 - (((center_x - 0.5) ** 2 + (center_y - 0.45) ** 2) ** 0.5))
             score = edge_mean * 0.55 + saturation * 0.25 + center_prior * 35
-            cells.append((score, center_x, center_y, (
-                left / sample.width,
-                top / sample.height,
-                right / sample.width,
-                bottom / sample.height,
-            )))
+            cells.append(
+                (
+                    score,
+                    center_x,
+                    center_y,
+                    (
+                        left / sample.width,
+                        top / sample.height,
+                        right / sample.width,
+                        bottom / sample.height,
+                    ),
+                )
+            )
     ordered = sorted(cells, reverse=True)
     chosen = ordered[: max(3, len(ordered) // 8)]
     total = sum(max(0.001, item[0]) for item in chosen)
@@ -172,9 +179,7 @@ def fit_with_focus(
         top = max(0.0, min(source.height - crop_height, top))
         box = (0.0, top, crop_width, top + crop_height)
     crop_box = cast(tuple[int, int, int, int], tuple(round(value) for value in box))
-    return source.crop(crop_box).resize(
-        size, Image.Resampling.LANCZOS
-    )
+    return source.crop(crop_box).resize(size, Image.Resampling.LANCZOS)
 
 
 def _edge_energy(image: Image.Image) -> float:
@@ -246,8 +251,8 @@ def evaluate_e6_suitability(image: Image.Image) -> E6Suitability:
     ).preview
     original_contrast = float(ImageStat.Stat(sample.convert("L")).stddev[0])
     preview_contrast = float(ImageStat.Stat(preview.convert("L")).stddev[0])
-    contrast_score = 100.0 if original_contrast < 4 else min(
-        100.0, preview_contrast / original_contrast * 100.0
+    contrast_score = (
+        100.0 if original_contrast < 4 else min(100.0, preview_contrast / original_contrast * 100.0)
     )
     original_edges = _edge_energy(sample)
     preview_edges = _edge_energy(preview)
@@ -255,12 +260,7 @@ def evaluate_e6_suitability(image: Image.Image) -> E6Suitability:
     subject_score = contrast_score * 0.55 + detail_score * 0.45
     text_score = _strong_edge_retention(sample, preview)
     skin_score, skin_pixels = _skin_fidelity(sample, preview)
-    score = (
-        contrast_score * 0.25
-        + subject_score * 0.35
-        + skin_score * 0.20
-        + text_score * 0.20
-    )
+    score = contrast_score * 0.25 + subject_score * 0.35 + skin_score * 0.20 + text_score * 0.20
     return E6Suitability(
         score=round(_clamp(score / 100.0) * 100.0, 2),
         contrast_score=round(_clamp(contrast_score / 100.0) * 100.0, 2),

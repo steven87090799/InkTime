@@ -68,12 +68,8 @@ def simulator_render():
 def register_legacy(app: Flask) -> None:
     app_root = Path(__file__).resolve().parents[1]
     legacy_root = Path(__file__).resolve().parent
-    assert_no_asset_collisions(
-        app_root / "web" / "templates", legacy_root / "templates", kind="Template"
-    )
-    assert_no_asset_collisions(
-        app_root / "web" / "static", legacy_root / "static", kind="Static"
-    )
+    assert_no_asset_collisions(app_root / "web" / "templates", legacy_root / "templates", kind="Template")
+    assert_no_asset_collisions(app_root / "web" / "static", legacy_root / "static", kind="Static")
     app.extensions["inktime_legacy_photo_adapter"] = LegacyPhotoRepositoryAdapter(
         app.extensions["inktime_photo_repository"]
     )

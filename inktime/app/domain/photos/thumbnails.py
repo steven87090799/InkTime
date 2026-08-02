@@ -58,9 +58,7 @@ class ThumbnailCache:
         try:
             os.chmod(shard_path, 0o600)
             try:
-                fcntl.flock(
-                    shard_descriptor, fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
-                )
+                fcntl.flock(shard_descriptor, fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 yield False
                 return
@@ -68,9 +66,7 @@ class ThumbnailCache:
             # Rolling upgrades can leave an old per-key lock. Lock it as well,
             # but never create or unlink one: deleting a live inode is unsafe.
             try:
-                legacy_descriptor = os.open(
-                    legacy_path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-                )
+                legacy_descriptor = os.open(legacy_path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
             except FileNotFoundError:
                 legacy_descriptor = None
             if legacy_descriptor is not None:
@@ -209,7 +205,10 @@ class ThumbnailCache:
 
     def estimate_cleanup(self, *, max_bytes: int, retention_days: int, active_hashes: set[str]) -> dict:
         candidates = self._cleanup_candidates(max_bytes, retention_days, active_hashes)
-        return {"files": len(candidates), "bytes": sum(path.stat().st_size for path in candidates if path.exists())}
+        return {
+            "files": len(candidates),
+            "bytes": sum(path.stat().st_size for path in candidates if path.exists()),
+        }
 
     def cleanup(
         self,

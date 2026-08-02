@@ -22,6 +22,7 @@ class ProviderRepository:
             item = dict(row)
             secret = self.secrets.get(row["api_key_secret"]) if row["api_key_secret"] else None
             item["api_key_masked"] = mask_secret(secret or "")
+            item["pricing"] = self.pricing(str(row["id"]))
             values.append(item)
         return values
 
@@ -87,6 +88,45 @@ class ProviderRepository:
                 "input_per_million": row["input_per_million"],
                 "cached_input_per_million": row["cached_input_per_million"],
                 "output_per_million": row["output_per_million"],
+                "batch_multiplier": row["batch_multiplier"],
+                "batch_input_per_million": row["batch_input_per_million"],
+                "batch_cached_input_per_million": row["batch_cached_input_per_million"],
+                "batch_output_per_million": row["batch_output_per_million"],
             }
             for row in rows
         }
+
+    def save_pricing(self, provider_id: str, payload: dict) -> None:
+        with self.database.session() as connection:
+            provider = connection.execute("SELECT id FROM providers WHERE id=?", (provider_id,)).fetchone()
+            if provider is None:
+                raise KeyError(provider_id)
+            connection.execute(
+                """
+                INSERT INTO model_pricing(
+                    provider_id,model,input_per_million,cached_input_per_million,output_per_million,enabled,
+                    batch_multiplier,batch_input_per_million,batch_cached_input_per_million,batch_output_per_million
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(provider_id,model) DO UPDATE SET
+                    input_per_million=excluded.input_per_million,
+                    cached_input_per_million=excluded.cached_input_per_million,
+                    output_per_million=excluded.output_per_million,
+                    enabled=excluded.enabled,
+                    batch_multiplier=excluded.batch_multiplier,
+                    batch_input_per_million=excluded.batch_input_per_million,
+                    batch_cached_input_per_million=excluded.batch_cached_input_per_million,
+                    batch_output_per_million=excluded.batch_output_per_million
+                """,
+                (
+                    provider_id,
+                    str(payload["model"]),
+                    float(payload["input_per_million"]),
+                    float(payload["cached_input_per_million"]),
+                    float(payload["output_per_million"]),
+                    int(payload.get("enabled", True)),
+                    float(payload.get("batch_multiplier", 0.5)),
+                    payload.get("batch_input_per_million"),
+                    payload.get("batch_cached_input_per_million"),
+                    payload.get("batch_output_per_million"),
+                ),
+            )

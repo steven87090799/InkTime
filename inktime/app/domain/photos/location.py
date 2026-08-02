@@ -31,10 +31,7 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     phi2 = math.radians(lat2)
     delta_phi = math.radians(lat2 - lat1)
     delta_lambda = math.radians(lon2 - lon1)
-    value = (
-        math.sin(delta_phi / 2) ** 2
-        + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
-    )
+    value = math.sin(delta_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
     return radius * 2 * math.atan2(math.sqrt(value), math.sqrt(max(0.0, 1.0 - value)))
 
 
@@ -75,9 +72,7 @@ class LocationResolver:
                             )
                         except (TypeError, ValueError):
                             continue
-                        grid.setdefault(self._grid_key(city.latitude, city.longitude), []).append(
-                            len(cities)
-                        )
+                        grid.setdefault(self._grid_key(city.latitude, city.longitude), []).append(len(cities))
                         cities.append(city)
             self._cities = cities
             self._grid = grid

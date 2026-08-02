@@ -1,10 +1,10 @@
 # InkTime｜照片分析與電子紙回憶管理平台
 
-[English legacy README](README.en.md) · [完整程式流程圖](#完整程式流程圖從啟動照片分析到電子紙顯示) · [快速開始](docs/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/DOCKER_GUIDE_ZH_TW.md) · [ESP32／電子紙指南](docs/ESP32_GUIDE_ZH_TW.md) · [Waveshare PhotoPainter](docs/WAVESHARE_PHOTOPAINTER_ZH_TW.md) · [資源與低功耗](docs/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/LOGGING_GUIDE_ZH_TW.md) · [本次實作與功能路線圖](docs/N100_IMPLEMENTATION_REPORT_ZH_TW.md)
+[English legacy README](README.en.md) · [專案規格與文件入口](USER_MANUAL.html) · [完整 Markdown 文件地圖](docs/README.md) · [完整程式流程圖](#完整程式流程圖從啟動照片分析到電子紙顯示) · [快速開始](docs/getting-started/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/guides/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/operations/DOCKER_GUIDE_ZH_TW.md) · [ESP32／電子紙指南](docs/devices/ESP32_GUIDE_ZH_TW.md) · [Waveshare PhotoPainter](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) · [資源與低功耗](docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/operations/LOGGING_GUIDE_ZH_TW.md)
 
 InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複與低價值照片，再以可控預算的視覺模型產生繁體中文描述、分類、分數與電子紙短文案。所有工作、模型、成本、裝置、渲染、備份與診斷都能由登入後的 Web 管理介面操作。
 
-決策追蹤、回饋閉環、Shadow Mode、離線內容 Queue、資料保留與 Canary 發布皆為可選功能，預設不會改變既有配對裝置、正式 Release 或選片。啟用與故障處理請見 [實作計畫](docs/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md)、[決策追蹤](docs/DECISION_TRACE_ZH_TW.md)、[Shadow Mode](docs/SHADOW_MODE_ZH_TW.md)、[離線 Queue](docs/OFFLINE_QUEUE_ZH_TW.md)、[資料保留](docs/DATA_RETENTION_ZH_TW.md)、[Canary](docs/CANARY_ROLLOUT_ZH_TW.md)。
+決策追蹤、回饋閉環、Shadow Mode、離線內容 Queue、資料保留與 Canary 發布皆為可選功能，預設不會改變既有配對裝置、正式 Release 或選片。啟用與故障處理請見 [實作計畫](docs/resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md)、[決策追蹤](docs/resilience/DECISION_TRACE_ZH_TW.md)、[Shadow Mode](docs/resilience/SHADOW_MODE_ZH_TW.md)、[離線 Queue](docs/resilience/OFFLINE_QUEUE_ZH_TW.md)、[資料保留](docs/resilience/DATA_RETENTION_ZH_TW.md)、[Canary](docs/resilience/CANARY_ROLLOUT_ZH_TW.md)。
 
 ![InkTime 繁體中文儀表板](docs/images/dashboard.png)
 
@@ -13,7 +13,7 @@ InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複
 - 以 SHA-256、pHash、dHash、EXIF、亮度、對比、模糊與曝光做本地預處理；相同內容不重複呼叫模型。
 - 512／1024／1600px 內容雜湊縮圖快取；預設不傳原始 4K／8K 圖片。
 - 單一分析請求同時回傳描述、類型、四種分數、短文案與敏感判斷；JSON 最多純文字修復一次。
-- 低成本第一階段與高品質第二階段；支援 OpenAI 即時、OpenAI 相容端點與本地相容端點。OpenAI Batch 僅為 **Experimental／Provider API only**：目前只有提交、查詢、取消原語，尚未接入持久化背景工作、重啟恢復、結果回填、Retry、成本統計與取消補償。
+- 支援同步 Vision 與 OpenAI Batch。OpenAI Files Batch lifecycle 已接入背景工作，支援 JSONL preparation、upload、submission、poll、result import 與 remote cleanup；同時支援 `upload_unknown`／`submission_unknown` 人工 Recovery、Cancel／Abandon、CAS、lease、attempt identity，以及 Job／Batch／Item transaction invariants。Fake lifecycle 與 CI 已覆蓋；真實 OpenAI API live smoke 仍為 `NOT RUN`，正式啟用前應先用 1–3 張非敏感圖片進行 gated live smoke。完整操作見 [OpenAI Batch 照片分析指南](docs/OPENAI_BATCH_ANALYSIS_ZH_TW.md)。
 - 持久化 Job、逐張狀態、有界佇列、暫停、續跑、取消、失敗重跑、重啟恢復與成本停止線。
 - administrator／viewer、Session、CSRF、登入限制與每台 ESP32 獨立 Bearer Token。
 - 480×800 四色 2bpp 與完整六／七色 indexed4 版本化發布；OKLab／RGB 色差、五種抖動、Profile 獨立 latest、SHA-256 與回滾。
@@ -61,7 +61,7 @@ flowchart TB
     DOMAIN --> DATA
 ```
 
-從哪個目錄開始看、照片如何從掃描走到模型評分與電子紙發布，請見 [專案架構與評分流程](docs/ARCHITECTURE_ZH_TW.md)。詳細分層邊界請見 [目標架構](docs/ARCHITECTURE_TARGET.md)；重構前證據在 [工程稽核](docs/PROJECT_AUDIT_ZH_TW.md)。
+從哪個目錄開始看、照片如何從掃描走到模型評分與電子紙發布，請見 [專案架構與評分流程](docs/architecture/ARCHITECTURE_ZH_TW.md)。詳細分層邊界請見 [目標架構](docs/architecture/ARCHITECTURE_TARGET.md)；重構前證據已歸檔於 [工程稽核](docs/archive/baselines/PROJECT_AUDIT_ZH_TW.md)。
 
 ### 目錄入口
 
@@ -102,7 +102,7 @@ flowchart TD
     RELEASE --> HISTORY["🗂️ published 與 display_history 同一 DB Transaction<br/>記錄發布事實，不等同實體面板 ACK"]
     RELEASE --> MANIFEST["8️⃣ 裝置取得 Profile 專屬 Manifest"]
     MANIFEST --> DOWNLOAD["9️⃣ 下載既有靜態 BIN 並驗證 SHA-256"]
-    DOWNLOAD --> DISPLAY["🔟 目前主流程全刷電子紙<br/>相同內容 skip 為已測純邏輯 policy／待正式接入驗收"]
+    DOWNLOAD --> DISPLAY["🔟 Queue-first＋SHA 驗證<br/>相同內容由正式韌體安全跳過刷新"]
     DISPLAY --> ACK["1️⃣1️⃣ ESP32 回報狀態與顯示 ACK"]
     ACK --> TELEMETRY["1️⃣2️⃣ 裝置遙測、錯誤與測試 Release consumed 狀態可供查詢"]
 
@@ -461,7 +461,7 @@ sequenceDiagram
         Note over T: Assignment 不 consumed，期限／重試內仍可重取
     else Payload 正確
         T->>T: payload_downloaded
-        Note over E: 相同內容 skip／最小刷新間隔已有純邏輯 policy；正式主流程接入與實體驗收仍列為邊界
+        Note over E: 相同內容 skip 已接入正式韌體；實體面板刷新與最小間隔仍待硬體驗收
         E->>P: 目前主流程執行六／七色完整刷新
         P-->>E: BUSY 在 Timeout 內完成
         E->>E: 保存有效 Cache 狀態、power off／hibernate
@@ -628,21 +628,23 @@ flowchart TD
     KIND -->|未知 Release 檔案| KEEP_ORPHAN["只標記 orphan；不自動刪除"]
 ```
 
-更細的錯誤碼與操作步驟請見[錯誤碼](docs/ERROR_CODES_ZH_TW.md)、[疑難排解](docs/TROUBLESHOOTING_ZH_TW.md)、[備份還原](docs/BACKUP_RESTORE_ZH_TW.md)與[最終跨模組稽核](docs/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md)。
+更細的錯誤碼與操作步驟請見[錯誤碼](docs/operations/ERROR_CODES_ZH_TW.md)、[疑難排解](docs/operations/TROUBLESHOOTING_ZH_TW.md)、[備份還原](docs/operations/BACKUP_RESTORE_ZH_TW.md)與[最終跨模組稽核（歷史）](docs/archive/reports/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md)。
 
 ## Docker 快速安裝
 
 需求：Docker Engine 24+ 與 Compose v2。請先選擇部署模式，不要混用 HTTP 與 Secure Cookie 設定。
 
-可信任 LAN／本機 HTTP：
+可信任 LAN Production HTTP（僅可信任 LAN／IoT VLAN）：
 
 ```bash
-cp .env.local.example .env
-# 把 INKTIME_PUBLIC_URL 改成瀏覽器實際使用的 http://主機:8765
-docker compose up -d --build
+cp .env.lan.production.example .env
+# 換成實際 LAN URL、絕對 data/photos 路徑與 immutable Git SHA。
+python scripts/production_preflight.py --mode lan --env-file .env
+scripts/build_release_image.sh
+docker compose up -d
 ```
 
-這個模式使用 `INKTIME_COOKIE_SECURE=0` 與明確的 `INKTIME_ALLOW_INSECURE_HTTP=1`，只適合可信任 LAN 或測試環境，不可直接公開到 Internet。
+這個模式仍是 `INKTIME_ENVIRONMENT=production`，使用 `INKTIME_COOKIE_SECURE=0` 與明確的 `INKTIME_ALLOW_INSECURE_HTTP=1`。Health／diagnostics 會顯示 `transport=trusted-lan-http`、`security_state=degraded`、`tls_enabled=false` 與 `secure_cookie=false`；不可直接公開到 Internet。`.env.local.example` 只供 development／模擬。
 
 正式 HTTPS Reverse Proxy：
 
@@ -660,7 +662,7 @@ Production 預設且建議使用 `INKTIME_COOKIE_SECURE=1`、`INKTIME_ALLOW_INSE
 - `inktime-worker`：照片掃描、分析、重試與渲染工作。
 - `inktime-scheduler`：租約回收、每日備份與保留策略。
 
-完整 N100 資源上限、Volume 權限、健康檢查、HTTPS、更新與回滾見 [Docker 部署規格](docs/DOCKER_GUIDE_ZH_TW.md)。
+完整 N100 資源上限、Volume 權限、健康檢查、HTTPS、更新與回滾見 [Docker 部署規格](docs/operations/DOCKER_GUIDE_ZH_TW.md)。
 
 ## 首次使用
 
@@ -681,7 +683,7 @@ Production 預設且建議使用 `INKTIME_COOKIE_SECURE=1`、`INKTIME_ALLOW_INSE
 
 ## 不用修改程式碼的日常設定
 
-一般、分析、Worker 待機、模型、成本、渲染、裝置、Log 層級、安全與備份設定都在「設定」頁。每次修改會記錄時間、使用者、來源 IP、舊值／新值摘要與生效方式；Secret 不會寫入歷史。只有 Volume、Port、映像、HTTPS 與 Docker cgroup／Log 輪替屬於一次性部署邊界。完整欄位、預設值、範圍與風險見 [管理指南](docs/ADMIN_GUIDE_ZH_TW.md)。
+一般、分析、Worker 待機、模型、成本、渲染、裝置、Log 層級、安全與備份設定都在「設定」頁。每次修改會記錄時間、使用者、來源 IP、舊值／新值摘要與生效方式；Secret 不會寫入歷史。只有 Volume、Port、映像、HTTPS 與 Docker cgroup／Log 輪替屬於一次性部署邊界。完整欄位、預設值、範圍與風險見 [管理指南](docs/guides/ADMIN_GUIDE_ZH_TW.md)。
 
 ## 照片評分與模型調整在哪裡
 
@@ -692,15 +694,15 @@ Production 預設且建議使用 `INKTIME_COOKIE_SECURE=1`、`INKTIME_ALLOW_INSE
 - `analysis.stage_two_threshold`：第一階段的回憶分達到多少才升級到高品質分析；人物或最愛照片也會升級。
 - `render.memory_threshold`：電子紙歷史今日選片的最低回憶分門檻。
 
-四項模型原始分數 `memory_score`、`beauty_score`、`technical_quality_score`、`emotion_score` 永遠保留；系統另以版本化權重計算 `ranking_score`，預設為回憶 50%、美觀 20%、技術 10%、情緒 20%，最愛照片再加 5 分（最高 100）。新規則只影響之後的分析；每筆分析會記住使用的規則版本。測試台照片只在暫存目錄停留，但模型 Token 與費用仍會記入成本頁。完整資料流見 [專案架構與評分流程](docs/ARCHITECTURE_ZH_TW.md)。
+四項模型原始分數 `memory_score`、`beauty_score`、`technical_quality_score`、`emotion_score` 永遠保留；系統另以版本化權重計算 `ranking_score`，預設為回憶 50%、美觀 20%、技術 10%、情緒 20%，最愛照片再加 5 分（最高 100）。新規則只影響之後的分析；每筆分析會記住使用的規則版本。測試台照片只在暫存目錄停留，但模型 Token 與費用仍會記入成本頁。完整資料流見 [專案架構與評分流程](docs/architecture/ARCHITECTURE_ZH_TW.md)。
 
 ## Token 與成本控制
 
-建議預設使用「兩階段智慧分析」：512px 低成本初篩，只有回憶分數達門檻、人物或最愛照片才使用 1600px 高品質模型。相同 SHA-256 繼承既有結果；短文案與所有分數在同一階段圖片請求輸出。管理介面提供每日、每月、單工作與單張照片停止值。詳見 [Token 成本指南](docs/TOKEN_COST_GUIDE_ZH_TW.md)。
+建議預設使用「兩階段智慧分析」：512px 低成本初篩，只有回憶分數達門檻、人物或最愛照片才使用 1600px 高品質模型。相同 SHA-256 繼承既有結果；短文案與所有分數在同一階段圖片請求輸出。管理介面提供每日、每月、單工作與單張照片停止值。詳見 [Token 成本指南](docs/reference/TOKEN_COST_GUIDE_ZH_TW.md)。
 
 ## ESP32 配對與可靠性
 
-新版韌體不再把金鑰放在 URL。裝置先以 Bearer Token 取得專屬面板 Profile 的 Manifest，套用 Web 管理且帶版本的面板／時區／每日排程／旋轉，驗證尺寸與 SHA-256，成功才刷新；之後回報設定 ACK、firmware、RSSI、Heap／PSRAM 與最後錯誤。Scheduler 以低頻掃描建立離線／恢復通知，可選去重 Webhook。既有 EOL GDEY073D46 與新 GDEP073E01 有不同 compile profile；完整設定見[裝置可靠性與六／七色渲染指南](docs/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。
+新版韌體不再把金鑰放在 URL。裝置以 Bearer Token 取得專屬面板 Profile 的 Manifest，優先讀取 Offline Queue，嚴格驗證 Item 綁定的相對下載 URL、尺寸、格式、長度與 SHA-256；只有 Queue 404／空白才回退 Latest Release。顯示事件先持久化 NVS，再以 canonical `/api/device/v1/queue/ack` 重送穩定 idempotency key；成功顯示的 SHA／Release／Profile／rotation／board 完全相同時可安全跳過刷新，forced refresh 與狀態損壞會 fail closed。裝置也會回報設定 ACK、firmware、RSSI、Heap／PSRAM 與最後錯誤。既有 EOL GDEY073D46 與新 GDEP073E01 有不同 compile profile；Scheduler 以低頻掃描建立離線／恢復通知，可選去重 Webhook。完整設定見[裝置可靠性與六／七色渲染指南](docs/devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。
 
 ## 原生安裝與相容 CLI
 
@@ -727,11 +729,11 @@ python -m inktime.app.workers.runner
 - 舊 `/static/inktime/<key>/...` API 預設關閉；只有隔離網路短期遷移才可明確開啟。
 - viewer 只能查看，不能修改設定、建立／控制工作、管理 Token、發布或備份。
 
-詳見 [安全指南](docs/SECURITY_GUIDE_ZH_TW.md)與[錯誤碼](docs/ERROR_CODES_ZH_TW.md)。
+詳見 [安全指南](docs/operations/SECURITY_GUIDE_ZH_TW.md)與[錯誤碼](docs/operations/ERROR_CODES_ZH_TW.md)。
 
 ## 更新、遷移與回滾
 
-更新前先從介面建立備份，再拉取映像並執行 `docker compose up -d --build`。Migration 使用版本、狀態歷史、單一交易、升級前備份與完整 `integrity_check`；任何失敗或未完成狀態都會停止啟動。回滾時停止三個服務，使用離線還原工具驗證並原子恢復舊資料庫與映像。詳細步驟見 [遷移指南](docs/MIGRATION_GUIDE_ZH_TW.md)與[備份還原](docs/BACKUP_RESTORE_ZH_TW.md)。
+更新前先從介面建立備份，再拉取映像並執行 `docker compose up -d --build`。Migration 使用版本、狀態歷史、單一交易、升級前備份與完整 `integrity_check`；任何失敗或未完成狀態都會停止啟動。回滾時停止三個服務，使用離線還原工具驗證並原子恢復舊資料庫與映像。詳細步驟見 [遷移指南](docs/operations/MIGRATION_GUIDE_ZH_TW.md)與[備份還原](docs/operations/BACKUP_RESTORE_ZH_TW.md)。
 
 ## 常見問題
 
@@ -741,17 +743,17 @@ python -m inktime.app.workers.runner
 - 繁中變方框：到「渲染」確認已選取內建芫荽／霞鶩文楷 TC，或上傳涵蓋短文案所有字元的繁中字型；系統不會靜默改用 PIL 預設字型。
 - 裝置 401：Token 已撤銷、輸入錯誤或裝置被停用；重新產生後需更新裝置。
 
-更多處理方式見 [疑難排解](docs/TROUBLESHOOTING_ZH_TW.md)。效能證據見 [100,000 筆報告](docs/PERFORMANCE_REPORT.md)，最終完成邊界見 [實作報告](docs/FINAL_IMPLEMENTATION_REPORT_ZH_TW.md)。
+更多處理方式見 [疑難排解](docs/operations/TROUBLESHOOTING_ZH_TW.md)。效能證據見 [100,000 筆報告](docs/reports/PERFORMANCE_REPORT.md)，歷史完成邊界見 [實作報告](docs/archive/reports/FINAL_IMPLEMENTATION_REPORT_ZH_TW.md)。
 
 ## 正式發布與裝置安全邊界
 
 - 一般發布、歷史選片與排程共用同一候選資格：已分析、可選、active、最新分析存在，而且原始檔仍位於啟用的 Library Root。
 - Release 先產生 staged 檔案並驗證 Manifest／大小／SHA-256，再以補償式流程切換 Profile pointer、提交 DB 與 `display_history`。啟動時標記漂移，失效 pointer 可回復到同 Profile 最新完整版本，但不自動刪除未知 Release。
 - 裝置仍使用 `Authorization: Bearer`；Bearer Token 不會加密 HTTP。HTTP 只適合隔離 IoT VLAN，跨網路必須使用已驗證 CA 的 HTTPS 或 VPN。
-- 六／七色 Profile 明確宣告不支援 Partial Refresh；相同內容跳過刷新與最小刷新間隔仍須由正式韌體／實體面板完成驗收。
+- 六／七色 Profile 明確宣告不支援 Partial Refresh；正式韌體已實作經驗證的相同內容跳過刷新，但真實面板的 BUSY、方向、殘影、色彩與功耗仍須實體驗收。
 - 預設備份只有 Metadata DB，不含原始照片或 Release Payload。還原後會進行 Release reconciliation。
 
-詳見[裝置傳輸安全](docs/DEVICE_TRANSPORT_SECURITY_ZH_TW.md)、[安全 OTA 設計](docs/SECURE_OTA_DESIGN_ZH_TW.md)與[最終跨模組稽核](docs/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md)。
+詳見[裝置傳輸安全](docs/devices/DEVICE_TRANSPORT_SECURITY_ZH_TW.md)、[安全 OTA 設計](docs/devices/SECURE_OTA_DESIGN_ZH_TW.md)與[最終跨模組稽核（歷史）](docs/archive/reports/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md)。
 
 ## 授權
 

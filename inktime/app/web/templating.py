@@ -10,11 +10,7 @@ class AssetCollisionError(RuntimeError):
 def _relative_files(root: Path) -> set[str]:
     if not root.exists():
         return set()
-    return {
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file()
-    }
+    return {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
 
 
 def assert_no_asset_collisions(modern_root: Path, legacy_root: Path, *, kind: str) -> None:

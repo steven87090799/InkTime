@@ -26,8 +26,15 @@ def test_schedule_resolves_devices_limits_years_and_commits_history_after_publis
                 ) VALUES (?,?,?,'analyzed',?,?,?,'valid',1,'active',?,?,?)
                 """,
                 (
-                    photo_id, library_id, filename, f"{year}-07-22T10:00:00",
-                    f"{year}-07-22", "07-22", 90-index, now, now,
+                    photo_id,
+                    library_id,
+                    filename,
+                    f"{year}-07-22T10:00:00",
+                    f"{year}-07-22",
+                    "07-22",
+                    90 - index,
+                    now,
+                    now,
                 ),
             )
         photos.save_analysis(
@@ -40,7 +47,7 @@ def test_schedule_resolves_devices_limits_years_and_commits_history_after_publis
                 "schema_version": 1,
                 "caption": "排程測試",
                 "types": ["日常"],
-                "memory_score": 90-index,
+                "memory_score": 90 - index,
                 "beauty_score": 80,
                 "technical_quality_score": 80,
                 "emotion_score": 80,
@@ -50,8 +57,8 @@ def test_schedule_resolves_devices_limits_years_and_commits_history_after_publis
                 "reason": "測試",
             },
             "{}",
-            ranking_score=90-index,
-            final_ranking_score=90-index,
+            ranking_score=90 - index,
+            final_ranking_score=90 - index,
         )
 
     devices = app.extensions["inktime_device_repository"]
@@ -77,9 +84,7 @@ def test_schedule_resolves_devices_limits_years_and_commits_history_after_publis
         releases = connection.execute(
             "SELECT id,render_profile,status FROM releases ORDER BY render_profile"
         ).fetchall()
-        history = connection.execute(
-            "SELECT photo_id,release_id FROM display_history"
-        ).fetchall()
+        history = connection.execute("SELECT photo_id,release_id FROM display_history").fetchall()
     assert {row["render_profile"] for row in releases} == {"safe_4c", "gdep073e01_6c"}
     assert {row["status"] for row in releases} == {"published"}
     assert {row["release_id"] for row in history} == {row["id"] for row in releases}

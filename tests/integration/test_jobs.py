@@ -86,9 +86,7 @@ def test_worker_never_submits_all_items_at_once(app):
 def test_completed_item_records_actual_processing_stage(app):
     service, repository, job_id = create_job(app, 1)
     service.start(job_id)
-    BoundedJobWorker(repository, lambda item: {"stage": "prefilter", "saved_tokens": True}).run_job(
-        job_id
-    )
+    BoundedJobWorker(repository, lambda item: {"stage": "prefilter", "saved_tokens": True}).run_job(job_id)
 
     item = repository.list_items(job_id)[0]
     assert item["status"] == "completed"
@@ -156,7 +154,9 @@ def test_analysis_selector_keyset_returns_1200_unique_eligible_active_photos(app
     photo_ids = add_photos(app, 1200)
     repository = app.extensions["inktime_job_repository"]
     with app.extensions["inktime_database"].session() as connection:
-        connection.execute("UPDATE photos SET local_candidate_score=CAST(substr(relative_path,1,instr(relative_path,'.')-1) AS REAL) % 101")
+        connection.execute(
+            "UPDATE photos SET local_candidate_score=CAST(substr(relative_path,1,instr(relative_path,'.')-1) AS REAL) % 101"
+        )
         connection.execute("UPDATE photos SET eligible=0 WHERE id=?", (photo_ids[0],))
         connection.execute("UPDATE photos SET lifecycle_status='missing' WHERE id=?", (photo_ids[1],))
     preview = repository.selection_preview(analysis_fingerprint="plan-a", limit=None)
@@ -183,10 +183,18 @@ def test_analysis_selector_keyset_returns_1200_unique_eligible_active_photos(app
 def test_active_dedupe_key_prevents_duplicate_maintenance_work(app):
     repository = app.extensions["inktime_job_repository"]
     first = repository.create_maintenance(
-        kind="cleanup", name="快取清理", settings={}, created_by="tester", dedupe_key="scheduled:cache_cleanup"
+        kind="cleanup",
+        name="快取清理",
+        settings={},
+        created_by="tester",
+        dedupe_key="scheduled:cache_cleanup",
     )
     second = repository.create_maintenance(
-        kind="cleanup", name="快取清理", settings={}, created_by="tester", dedupe_key="scheduled:cache_cleanup"
+        kind="cleanup",
+        name="快取清理",
+        settings={},
+        created_by="tester",
+        dedupe_key="scheduled:cache_cleanup",
     )
     assert second == first
     with app.extensions["inktime_database"].session() as connection:
@@ -211,9 +219,7 @@ def test_each_maintenance_job_has_one_kind_specific_created_event(app):
                 "SELECT message FROM job_events WHERE job_id=? AND event='created'",
                 (job_id,),
             ).fetchall()
-        assert [str(row["message"]) for row in rows] == [
-            f"已建立 {kind} 維護工作"
-        ]
+        assert [str(row["message"]) for row in rows] == [f"已建立 {kind} 維護工作"]
 
 
 def test_preview_capacity_failure_leaves_no_job_item_or_event(app):
@@ -240,9 +246,7 @@ def test_preview_capacity_failure_leaves_no_job_item_or_event(app):
                 "(SELECT COUNT(*) FROM job_events)"
             ).fetchone()
         )
-    assert [str(row["message"]) for row in created] == [
-        "已建立 render_preview 維護工作"
-    ]
+    assert [str(row["message"]) for row in created] == ["已建立 render_preview 維護工作"]
     with pytest.raises(PreviewCapacityError):
         repository.create_maintenance_with_capacity(
             kind="render_preview",
@@ -262,8 +266,6 @@ def test_preview_capacity_failure_leaves_no_job_item_or_event(app):
                 "(SELECT COUNT(*) FROM job_events)"
             ).fetchone()
         )
-        leaked = connection.execute(
-            "SELECT COUNT(*) FROM jobs WHERE name='must roll back'"
-        ).fetchone()[0]
+        leaked = connection.execute("SELECT COUNT(*) FROM jobs WHERE name='must roll back'").fetchone()[0]
     assert after == before
     assert int(leaked) == 0

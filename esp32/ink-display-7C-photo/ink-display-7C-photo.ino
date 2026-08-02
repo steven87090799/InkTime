@@ -11,6 +11,8 @@
 
 #include "hardware_profile.h"
 #include "photopainter_core.h"
+#include "queue_client_core.h"
+#include "queue_runtime_types.h"
 #if INKTIME_PHOTOPAINTER_ENABLED
 #include "photopainter_support.h"
 #include "power_manager.h"
@@ -86,7 +88,9 @@ GxEPD2_7C<
 // =======================
 #define DEVICE_MANIFEST_PATH "/api/device/v1/releases/latest"
 #define DEVICE_STATUS_PATH   "/api/device/v1/status"
-#define INKTIME_FIRMWARE_VERSION "2.4.0"
+#define DEVICE_QUEUE_MANIFEST_PATH "/api/device/v1/queue/manifest"
+#define DEVICE_QUEUE_ACK_PATH "/api/device/v1/queue/ack"
+#define INKTIME_FIRMWARE_VERSION "2.5.0"
 
 // No trusted CA provisioning exists yet. HTTPS is rejected by default instead
 // of silently downgrading certificate verification. Isolated LAN HTTP remains
@@ -126,12 +130,18 @@ bool frameIndexed4 = false;
 bool frameNativePalette = false;
 bool serverConfigChanged = false;
 bool currentPayloadShaVerified = false;
+bool currentDisplaySkipped = false;
+bool currentFromQueue = false;
+bool currentPayloadIntegrityTrusted = false;
 String portalSetupSecret;
 String portalNonce;
 uint8_t portalSaveAttempts = 0;
 bool portalSaveAllowed = false;
 String currentReleaseId;
 String currentRenderProfile;
+String currentPayloadSha256;
+String currentQueueItemId;
+int64_t currentQueueVersion = -1;
 String lastDeviceErrorCode;
 String lastDeviceErrorMessage;
 uint32_t lastRefreshDurationMs = 0;
@@ -147,14 +157,18 @@ static int calculateSha256(const unsigned char* input, size_t length, unsigned c
 static bool backendTransportAllowed(const String &base) {
   if (base.startsWith("https://")) return true;
 #if INKTIME_ALLOW_INSECURE_DEVICE_HTTP
-  lastDeviceErrorCode = "DEVICE-INSECURE-HTTP";
-  lastDeviceErrorMessage = "已啟用明確 HTTP 開發覆寫；不可用於不可信網路";
   return true;
 #else
   lastDeviceErrorCode = "DEVICE-HTTP-DISALLOWED";
   lastDeviceErrorMessage = "正式裝置 Backend 必須使用 HTTPS";
   return false;
 #endif
+}
+
+static void configureHttpClient(HTTPClient &client, uint32_t timeoutMs) {
+  client.setConnectTimeout(10000);
+  client.setTimeout(timeoutMs);
+  client.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
 }
 
 static String randomPortalSecret() {
@@ -228,6 +242,114 @@ static void saveLastPhotoIndex(size_t index) {
   prefs.end();
 }
 #endif
+
+static StoredDisplayRecord loadDisplayRecord() {
+  prefs.begin("dashcfg", true);
+  const uint8_t version = prefs.getUChar("disp_ver", 0);
+  StoredDisplayRecord record = {
+    prefs.getString("last_sha", ""),
+    prefs.getString("last_rel", ""),
+    prefs.getString("last_prof", ""),
+    prefs.getString("last_board", ""),
+    static_cast<int16_t>(prefs.getShort("last_rot", -1)),
+    prefs.getBool("last_ok", false),
+    false,
+  };
+  prefs.end();
+  record.valid = version == 1U
+    && inktime::isSha256HexValue(record.sha256.c_str())
+    && record.releaseId.length() > 0U && record.releaseId.length() <= 128U
+    && record.renderProfile.length() > 0U && record.renderProfile.length() <= 64U
+    && record.boardProfile.length() > 0U && record.boardProfile.length() <= 96U
+    && (record.rotation == 0 || record.rotation == 180);
+  return record;
+}
+
+static void saveDisplayRecord(const Config &cfg, bool succeeded) {
+  if (!inktime::isSha256HexValue(currentPayloadSha256.c_str())
+      || currentReleaseId.length() == 0U || currentReleaseId.length() > 128U
+      || currentRenderProfile.length() == 0U || currentRenderProfile.length() > 64U) {
+    return;
+  }
+  prefs.begin("dashcfg", false);
+  prefs.putUChar("disp_ver", 1U);
+  prefs.putString("last_sha", currentPayloadSha256);
+  prefs.putString("last_rel", currentReleaseId);
+  prefs.putString("last_prof", currentRenderProfile);
+  prefs.putString("last_board", kBoardConfig.name);
+  prefs.putShort("last_rot", cfg.rotate180 ? 180 : 0);
+  prefs.putBool("last_ok", succeeded);
+  prefs.end();
+}
+
+static bool shouldSkipCurrentDisplay(const Config &cfg) {
+  const StoredDisplayRecord stored = loadDisplayRecord();
+#if INKTIME_PHOTOPAINTER_ENABLED
+  const bool forcedRefresh = photoPainter.forceNetworkRefresh();
+#else
+  const bool forcedRefresh = false;
+#endif
+  const inktime::DisplayRecord record = {
+    stored.sha256.c_str(),
+    stored.releaseId.c_str(),
+    stored.renderProfile.c_str(),
+    stored.boardProfile.c_str(),
+    stored.rotation,
+    stored.succeeded,
+    stored.valid,
+  };
+  const inktime::DisplayCandidate candidate = {
+    currentPayloadSha256.c_str(),
+    currentReleaseId.c_str(),
+    currentRenderProfile.c_str(),
+    kBoardConfig.name,
+    static_cast<int16_t>(cfg.rotate180 ? 180 : 0),
+    currentPayloadShaVerified,
+    currentPayloadIntegrityTrusted,
+    forcedRefresh,
+    false,
+    false,
+  };
+  return inktime::shouldSkipDisplay(record, candidate);
+}
+
+static PendingQueueAck loadPendingQueueAck() {
+  prefs.begin("dashcfg", true);
+  PendingQueueAck pending = {
+    prefs.getString("ack_item", ""),
+    prefs.getInt("ack_ver", -1),
+    static_cast<inktime::QueueEvent>(prefs.getUChar("ack_event", 255U)),
+    prefs.getBool("ack_skip", false),
+    prefs.getString("ack_error", ""),
+    false,
+  };
+  prefs.end();
+  const uint8_t event = static_cast<uint8_t>(pending.event);
+  pending.valid = inktime::boundedText(pending.queueItemId.c_str(), inktime::kQueueIdentifierMaxBytes)
+    && pending.queueVersion >= 0 && event <= static_cast<uint8_t>(inktime::QueueEvent::DisplayFailed)
+    && pending.errorCode.length() <= 64U;
+  return pending;
+}
+
+static void persistPendingQueueAck(const PendingQueueAck &pending) {
+  prefs.begin("dashcfg", false);
+  prefs.putString("ack_item", pending.queueItemId);
+  prefs.putInt("ack_ver", pending.queueVersion);
+  prefs.putUChar("ack_event", static_cast<uint8_t>(pending.event));
+  prefs.putBool("ack_skip", pending.displaySkipped);
+  prefs.putString("ack_error", pending.errorCode);
+  prefs.end();
+}
+
+static void clearPendingQueueAck() {
+  prefs.begin("dashcfg", false);
+  prefs.remove("ack_item");
+  prefs.remove("ack_ver");
+  prefs.remove("ack_event");
+  prefs.remove("ack_skip");
+  prefs.remove("ack_error");
+  prefs.end();
+}
 
 static uint32_t minutesToNextRefreshFromLastEpoch(const Config &cfg) {
   time_t lastEpoch;
@@ -386,7 +508,13 @@ String buildConfigPage() {
 
   html += F("密碼:<br><input name='pass' type='password' style='width: 280px;'><br><br>");
 
+#if INKTIME_ALLOW_INSECURE_DEVICE_HTTP
+  html += F("<p style='color:#a33'><strong>LAN build：</strong>HTTP 僅限可信任 LAN／IoT VLAN，沒有 TLS 保護；可用 http://host:port。</p>");
+  html += F("InkTime 伺服器 (https:// 或可信任 LAN http://host:port):<br><input name='hostport' size='40' value='");
+#else
+  html += F("<p><strong>Secure build：</strong>InkTime 伺服器只允許 HTTPS。</p>");
   html += F("InkTime 伺服器 (https://host:port):<br><input name='hostport' size='40' value='");
+#endif
   html += host;
   html += F("'><br><br>");
 
@@ -479,7 +607,17 @@ void handleSave() {
   ssid.trim();
   host.trim();
   deviceToken.trim();
-  if (ssid.length() > 32 || pass.length() > 63 || host.length() > 240 || deviceToken.length() > 256 || host.indexOf('@') >= 0 || (!host.startsWith("https://") && !host.startsWith("http://"))) {
+  const int schemeEnd = host.indexOf("://");
+  const String hostOrigin = schemeEnd >= 0 ? host.substring(schemeEnd + 3) : String("");
+  const bool unsafeOrigin = hostOrigin.length() == 0 || hostOrigin.indexOf('/') >= 0
+    || hostOrigin.indexOf('?') >= 0 || hostOrigin.indexOf('#') >= 0;
+#if INKTIME_ALLOW_INSECURE_DEVICE_HTTP
+  const bool allowedScheme = host.startsWith("https://") || host.startsWith("http://");
+#else
+  const bool allowedScheme = host.startsWith("https://");
+#endif
+  if (ssid.length() > 32 || pass.length() > 63 || host.length() > 240 || deviceToken.length() > 256
+      || host.indexOf('@') >= 0 || !allowedScheme || unsafeOrigin) {
     server.send(400, "text/plain; charset=utf-8", "PAIRING-002 設定格式或長度不合法");
     return;
   }
@@ -825,12 +963,133 @@ bool syncTime(const Config &cfg, struct tm &outLocal) {
   return false;
 }
 
+static bool normalizedBackendBase(const Config &cfg, String &base) {
+  base = cfg.backend_hostport;
+  base.trim();
+  if (!base.startsWith("http://") && !base.startsWith("https://")) base = "https://" + base;
+  while (base.endsWith("/")) base.remove(base.length() - 1U);
+  const int schemeEnd = base.indexOf("://");
+  const String origin = schemeEnd >= 0 ? base.substring(schemeEnd + 3) : String("");
+  if (origin.length() == 0U || origin.indexOf('/') >= 0 || origin.indexOf('?') >= 0
+      || origin.indexOf('#') >= 0 || origin.indexOf('@') >= 0) {
+    lastDeviceErrorCode = "DEVICE-BACKEND-ORIGIN";
+    lastDeviceErrorMessage = "Backend 必須是不含帳密、路徑、Query 或 Fragment 的 Origin";
+    return false;
+  }
+  return backendTransportAllowed(base);
+}
+
+static bool queueAckIdempotencyKey(const PendingQueueAck &pending, String &key) {
+  char material[320];
+  if (!inktime::idempotencyMaterial(
+        pending.queueItemId.c_str(), pending.queueVersion, pending.event, material, sizeof(material))) {
+    return false;
+  }
+  unsigned char digest[32];
+  if (calculateSha256(
+        reinterpret_cast<const unsigned char*>(material), strlen(material), digest) != 0) {
+    return false;
+  }
+  char output[65];
+  for (size_t index = 0; index < 32U; ++index) {
+    snprintf(output + index * 2U, 3U, "%02x", digest[index]);
+  }
+  output[64] = '\0';
+  key = output;
+  return true;
+}
+
+static bool sendQueueAck(const Config &cfg, const PendingQueueAck &pending, bool persistFirst) {
+  String base;
+  if (!pending.valid || WiFi.status() != WL_CONNECTED || !normalizedBackendBase(cfg, base)) return false;
+  String idempotencyKey;
+  if (!queueAckIdempotencyKey(pending, idempotencyKey)) {
+    lastDeviceErrorCode = "DEVICE-QUEUE-ACK-KEY";
+    lastDeviceErrorMessage = "Queue ACK idempotency key 無法建立";
+    return false;
+  }
+  if (persistFirst) persistPendingQueueAck(pending);
+
+  JsonDocument payload;
+  payload["queue_item_id"] = pending.queueItemId;
+  payload["queue_version"] = pending.queueVersion;
+  payload["event"] = inktime::queueEventName(pending.event);
+  payload["idempotency_key"] = idempotencyKey;
+  if (pending.displaySkipped) {
+    payload["display_skipped"] = true;
+    payload["skip_reason"] = "same_sha256";
+  }
+  if (pending.errorCode.length() > 0U) payload["error_code"] = pending.errorCode;
+  String body;
+  serializeJson(payload, body);
+
+  for (uint8_t attempt = 0; attempt <= inktime::kQueueRetryLimit; ++attempt) {
+    HTTPClient ackHttp;
+    configureHttpClient(ackHttp, 15000);
+    if (!ackHttp.begin(base + String(DEVICE_QUEUE_ACK_PATH))) break;
+    ackHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
+    ackHttp.addHeader("Content-Type", "application/json");
+    const int status = ackHttp.POST(body);
+    ackHttp.end();
+    const inktime::AckDecision decision = inktime::ackDecision(status, attempt);
+    if (decision == inktime::AckDecision::Accepted) {
+      clearPendingQueueAck();
+      return true;
+    }
+    if (decision == inktime::AckDecision::StaleManifest) {
+      clearPendingQueueAck();
+      lastDeviceErrorCode = "DEVICE-QUEUE-STALE";
+      lastDeviceErrorMessage = "QUEUE-003 Queue version 已過期；下次重新取得 Manifest";
+      return false;
+    }
+    if (decision == inktime::AckDecision::AuthorizationFailed) {
+      lastDeviceErrorCode = "DEVICE-QUEUE-AUTH";
+      lastDeviceErrorMessage = "Queue ACK Token／authorization 被拒絕";
+      return false;
+    }
+    if (decision != inktime::AckDecision::Retry) break;
+    delay(250U * (attempt + 1U));
+  }
+  lastDeviceErrorCode = "DEVICE-QUEUE-ACK-RETRY";
+  lastDeviceErrorMessage = "Queue ACK 已達有界 retry 上限；pending event 已保留";
+  return false;
+}
+
+static bool sendQueueEvent(
+  const Config &cfg,
+  inktime::QueueEvent event,
+  bool displaySkipped = false,
+  const String &errorCode = String("")
+) {
+  PendingQueueAck pending = {
+    currentQueueItemId,
+    static_cast<int32_t>(currentQueueVersion),
+    event,
+    displaySkipped,
+    errorCode.substring(0, 64),
+    currentQueueItemId.length() > 0U && currentQueueVersion >= 0,
+  };
+  return sendQueueAck(cfg, pending, true);
+}
+
+static bool resumePendingQueueAck(const Config &cfg) {
+  const PendingQueueAck pending = loadPendingQueueAck();
+  return !pending.valid || sendQueueAck(cfg, pending, false);
+}
+
 // =======================
 //  下载每日相册 BIN
 // =======================
-bool downloadDailyPhotoBin(Config &cfg) {
+bool downloadLatestPhotoBin(Config &cfg) {
   lastDeviceErrorCode = "";
   lastDeviceErrorMessage = "";
+  currentFromQueue = false;
+  currentQueueItemId = "";
+  currentQueueVersion = -1;
+  currentDisplaySkipped = false;
+  currentPayloadShaVerified = false;
+  currentPayloadIntegrityTrusted = false;
+  currentPayloadSha256 = "";
   const size_t pixelCount = (size_t)FB_WIDTH * FB_HEIGHT;
 
 #if INKTIME_PHOTOPAINTER_ENABLED
@@ -850,11 +1109,8 @@ bool downloadDailyPhotoBin(Config &cfg) {
     return false;
   }
 
-  String base = cfg.backend_hostport;
-  base.trim();
-  if (!base.startsWith("http://") && !base.startsWith("https://")) base = "https://" + base;
-  while (base.endsWith("/")) base.remove(base.length() - 1);
-  if (!backendTransportAllowed(base)) return false;
+  String base;
+  if (!normalizedBackendBase(cfg, base)) return false;
   String manifestUrl = base + String(DEVICE_MANIFEST_PATH);
 
 #if DEBUG_LOG
@@ -862,8 +1118,7 @@ bool downloadDailyPhotoBin(Config &cfg) {
 #endif
 
   HTTPClient manifestHttp;
-  manifestHttp.setConnectTimeout(10000);
-  manifestHttp.setTimeout(30000);
+  configureHttpClient(manifestHttp, 30000);
   const char* manifestHeaders[] = {"Content-Type"};
   manifestHttp.collectHeaders(manifestHeaders, 1);
   if (!manifestHttp.begin(manifestUrl)) {
@@ -1008,6 +1263,8 @@ bool downloadDailyPhotoBin(Config &cfg) {
       currentReleaseId = manifest["release_id"] | "";
       currentRenderProfile = renderProfile;
       currentPayloadShaVerified = true;
+      currentPayloadIntegrityTrusted = true;
+      currentPayloadSha256 = expectedSha;
       saveLastPhotoIndex(fileIndex);
       return true;
     }
@@ -1015,8 +1272,7 @@ bool downloadDailyPhotoBin(Config &cfg) {
 
     String fileUrl = base + String(downloadBaseRaw) + fileName;
     HTTPClient fileHttp;
-    fileHttp.setConnectTimeout(10000);
-    fileHttp.setTimeout(60000);
+    configureHttpClient(fileHttp, 60000);
     const char* fileHeaders[] = {"Content-Type"};
     fileHttp.collectHeaders(fileHeaders, 1);
     if (!fileHttp.begin(fileUrl)) continue;
@@ -1053,6 +1309,8 @@ bool downloadDailyPhotoBin(Config &cfg) {
     actualSha[64] = '\0';
     if (!expectedSha.equalsIgnoreCase(String(actualSha))) continue;
     currentPayloadShaVerified = true;
+    currentPayloadIntegrityTrusted = true;
+    currentPayloadSha256 = expectedSha;
 
     // 完整下載與 SHA-256 都通過後才替換資料。
     if (frameData) heap_caps_free(frameData);
@@ -1095,13 +1353,272 @@ bool downloadDailyPhotoBin(Config &cfg) {
   return false;
 }
 
+static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
+  String base;
+  if (!normalizedBackendBase(cfg, base)) return QueueDownloadResult::Failed;
+
+  HTTPClient manifestHttp;
+  configureHttpClient(manifestHttp, 30000);
+  const char* manifestHeaders[] = {"Content-Type"};
+  manifestHttp.collectHeaders(manifestHeaders, 1);
+  if (!manifestHttp.begin(base + String(DEVICE_QUEUE_MANIFEST_PATH))) {
+    lastDeviceErrorCode = "DEVICE-QUEUE-URL";
+    lastDeviceErrorMessage = "Queue Manifest URL 無法初始化";
+    return QueueDownloadResult::Failed;
+  }
+  manifestHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
+  const int status = manifestHttp.GET();
+  if (status == HTTP_CODE_NOT_FOUND) {
+    manifestHttp.end();
+    return QueueDownloadResult::EmptyOrUnsupported;
+  }
+  const int manifestLength = manifestHttp.getSize();
+  const String contentType = manifestHttp.header("Content-Type");
+  if (status != HTTP_CODE_OK || manifestLength <= 0
+      || manifestLength > static_cast<int>(inktime::kQueueManifestMaxBytes)
+      || !contentType.startsWith("application/json")) {
+    manifestHttp.end();
+    lastDeviceErrorCode = "DEVICE-QUEUE-HTTP";
+    lastDeviceErrorMessage = "Queue Manifest HTTP／Content-Type／長度不合法";
+    return QueueDownloadResult::Failed;
+  }
+
+  JsonDocument manifest;
+  const DeserializationError jsonError = deserializeJson(manifest, manifestHttp.getStream());
+  manifestHttp.end();
+  const JsonVariantConst schema = manifest["schema_version"];
+  const JsonVariantConst version = manifest["queue_version"];
+  const JsonVariantConst rawItems = manifest["items"];
+  if (jsonError || manifest.overflowed() || !schema.is<int32_t>() || schema.is<bool>()
+      || schema.as<int32_t>() != 1 || !version.is<int32_t>() || version.is<bool>()
+      || version.as<int32_t>() < 0 || !rawItems.is<JsonArrayConst>()) {
+    lastDeviceErrorCode = "DEVICE-QUEUE-SCHEMA";
+    lastDeviceErrorMessage = "Queue Manifest schema、version 或 items 不合法";
+    return QueueDownloadResult::Failed;
+  }
+  const JsonArrayConst items = rawItems.as<JsonArrayConst>();
+  if (items.size() == 0U) return QueueDownloadResult::EmptyOrUnsupported;
+  if (items.size() > 14U) {
+    lastDeviceErrorCode = "DEVICE-QUEUE-COUNT";
+    lastDeviceErrorMessage = "Queue Item 數量超過裝置上限";
+    return QueueDownloadResult::Failed;
+  }
+
+  String selectedItemId;
+  String selectedReleaseId;
+  String selectedSha;
+  String selectedDownloadUrl;
+  String selectedPixelFormat;
+  String selectedRenderProfile;
+  int64_t selectedSize = 0;
+  for (size_t index = 0; index < items.size(); ++index) {
+    const JsonVariantConst rawItem = items[index];
+    if (!rawItem.is<JsonObjectConst>()) {
+      lastDeviceErrorCode = "DEVICE-QUEUE-ITEM";
+      lastDeviceErrorMessage = "Queue Item 必須是 JSON object";
+      return QueueDownloadResult::Failed;
+    }
+    const JsonObjectConst item = rawItem.as<JsonObjectConst>();
+    const JsonVariantConst rawSize = item["size"];
+    const JsonVariantConst rawWidth = item["width"];
+    const JsonVariantConst rawHeight = item["height"];
+    if (!rawSize.is<int64_t>() || rawSize.is<bool>() || !rawWidth.is<int32_t>()
+        || rawWidth.is<bool>() || !rawHeight.is<int32_t>() || rawHeight.is<bool>()) {
+      lastDeviceErrorCode = "DEVICE-QUEUE-INTEGER";
+      lastDeviceErrorMessage = "Queue size／width／height 必須是真正 JSON integer";
+      return QueueDownloadResult::Failed;
+    }
+    String itemId = item["queue_item_id"] | "";
+    String releaseId = item["release_id"] | "";
+    String sha = item["sha256"] | "";
+    String downloadUrl = item["download_url"] | "";
+    String pixelFormat = item["pixel_format"] | "";
+    String renderProfile = item["render_profile"] | "";
+    const int64_t size = rawSize.as<int64_t>();
+    const inktime::QueueItemContract contract = {
+      itemId.c_str(), releaseId.c_str(), sha.c_str(), downloadUrl.c_str(), true, size,
+    };
+    const bool compatibleProfile = renderProfile == "safe_4c"
+      || renderProfile == String(INKTIME_PANEL_PROFILE);
+    if (!inktime::validQueueItem(contract) || rawWidth.as<int32_t>() != FB_WIDTH
+        || rawHeight.as<int32_t>() != FB_HEIGHT
+        || (pixelFormat != "2bpp" && pixelFormat != "indexed4")
+        || !compatibleProfile) {
+      lastDeviceErrorCode = "DEVICE-QUEUE-ITEM";
+      lastDeviceErrorMessage = "Queue Item 身分、SHA、路徑、尺寸或 Profile 不合法";
+      return QueueDownloadResult::Failed;
+    }
+    if (index == 0U) {
+      selectedItemId = itemId;
+      selectedReleaseId = releaseId;
+      selectedSha = sha;
+      selectedDownloadUrl = downloadUrl;
+      selectedPixelFormat = pixelFormat;
+      selectedRenderProfile = renderProfile;
+      selectedSize = size;
+    }
+  }
+
+  currentFromQueue = true;
+  currentQueueItemId = selectedItemId;
+  currentQueueVersion = version.as<int32_t>();
+  currentReleaseId = selectedReleaseId;
+  currentRenderProfile = selectedRenderProfile;
+  currentPayloadSha256 = selectedSha;
+  currentPayloadShaVerified = false;
+  currentPayloadIntegrityTrusted = false;
+  currentDisplaySkipped = false;
+  if (!sendQueueEvent(cfg, inktime::QueueEvent::ManifestReceived)) {
+    return QueueDownloadResult::Failed;
+  }
+
+  const bool indexed4 = selectedPixelFormat == "indexed4";
+  const size_t packedSize = static_cast<size_t>(FB_WIDTH) * FB_HEIGHT / (indexed4 ? 2U : 4U);
+  if (selectedSize != static_cast<int64_t>(packedSize)) {
+    lastDeviceErrorCode = "DEVICE-QUEUE-SIZE";
+    lastDeviceErrorMessage = "Queue Payload size 與 pixel format 不一致";
+    return QueueDownloadResult::Failed;
+  }
+
+  uint8_t* packed = nullptr;
+#if INKTIME_PHOTOPAINTER_ENABLED
+  packed = photoPainter.allocateWireBuffer(packedSize);
+#else
+  packed = static_cast<uint8_t*>(heap_caps_malloc(packedSize, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM));
+  if (!packed) packed = static_cast<uint8_t*>(heap_caps_malloc(packedSize, MALLOC_CAP_8BIT));
+#endif
+  if (!packed) {
+    lastDeviceErrorCode = "DEVICE-MEMORY";
+    lastDeviceErrorMessage = "無法配置 Queue 下載緩衝區";
+    return QueueDownloadResult::Failed;
+  }
+  if (!sendQueueEvent(cfg, inktime::QueueEvent::DownloadStarted)) {
+    heap_caps_free(packed);
+    return QueueDownloadResult::Failed;
+  }
+
+  HTTPClient fileHttp;
+  configureHttpClient(fileHttp, 60000);
+  const char* fileHeaders[] = {"Content-Type"};
+  fileHttp.collectHeaders(fileHeaders, 1);
+  if (!fileHttp.begin(base + selectedDownloadUrl)) {
+    heap_caps_free(packed);
+    lastDeviceErrorCode = "DEVICE-QUEUE-FILE-URL";
+    lastDeviceErrorMessage = "Queue download URL 無法初始化";
+    return QueueDownloadResult::Failed;
+  }
+  fileHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
+  const int fileStatus = fileHttp.GET();
+  const String fileContentType = fileHttp.header("Content-Type");
+  if (fileStatus != HTTP_CODE_OK || fileHttp.getSize() != static_cast<int>(packedSize)
+      || !fileContentType.startsWith("application/octet-stream")) {
+    fileHttp.end();
+    heap_caps_free(packed);
+    lastDeviceErrorCode = "DEVICE-QUEUE-DOWNLOAD";
+    lastDeviceErrorMessage = "Queue download HTTP／Content-Type／長度不合法";
+    return QueueDownloadResult::Failed;
+  }
+  WiFiClient* stream = fileHttp.getStreamPtr();
+  size_t total = 0U;
+  const uint32_t started = millis();
+  while (total < packedSize && millis() - started < 60000U) {
+    const size_t available = stream->available();
+    if (available == 0U) {
+      if (!fileHttp.connected()) break;
+      delay(1);
+      continue;
+    }
+    const size_t count = min(available, packedSize - total);
+    const int received = stream->read(packed + total, count);
+    if (received > 0) total += static_cast<size_t>(received);
+  }
+  fileHttp.end();
+  if (total != packedSize) {
+    heap_caps_free(packed);
+    lastDeviceErrorCode = "DEVICE-QUEUE-DOWNLOAD";
+    lastDeviceErrorMessage = "Queue Payload 未完整下載";
+    return QueueDownloadResult::Failed;
+  }
+  if (!sendQueueEvent(cfg, inktime::QueueEvent::DownloadCompleted)) {
+    heap_caps_free(packed);
+    return QueueDownloadResult::Failed;
+  }
+
+  unsigned char digest[32];
+  if (calculateSha256(packed, packedSize, digest) != 0) {
+    heap_caps_free(packed);
+    lastDeviceErrorCode = "DEVICE-QUEUE-HASH";
+    lastDeviceErrorMessage = "Queue Payload SHA-256 計算失敗";
+    return QueueDownloadResult::Failed;
+  }
+  char actualSha[65];
+  for (size_t index = 0; index < 32U; ++index) {
+    snprintf(actualSha + index * 2U, 3U, "%02x", digest[index]);
+  }
+  actualSha[64] = '\0';
+  if (!selectedSha.equalsIgnoreCase(String(actualSha))) {
+    heap_caps_free(packed);
+    lastDeviceErrorCode = "DEVICE-QUEUE-HASH";
+    lastDeviceErrorMessage = "Queue Payload SHA-256 不一致";
+    return QueueDownloadResult::Failed;
+  }
+  currentPayloadShaVerified = true;
+  if (!sendQueueEvent(cfg, inktime::QueueEvent::HashVerified)) {
+    heap_caps_free(packed);
+    return QueueDownloadResult::Failed;
+  }
+
+  if (frameData) heap_caps_free(frameData);
+#if INKTIME_PHOTOPAINTER_ENABLED
+  const uint32_t sourceHash = inktime::sourceHash32(selectedSha.c_str());
+  const inktime::DisplayRotation rotation = cfg.rotate180
+    ? inktime::DisplayRotation::Rotate180
+    : inktime::DisplayRotation::Rotate0;
+  uint8_t* nativeFrame = nullptr;
+  if (!photoPainter.loadCachedFrame(sourceHash, rotation, &nativeFrame)
+      && !photoPainter.convertAndCache(
+        packed, packedSize, indexed4, sourceHash, rotation, &nativeFrame)) {
+    heap_caps_free(packed);
+    frameData = nullptr;
+    lastDeviceErrorCode = photoPainter.lastError();
+    lastDeviceErrorMessage = "PhotoPainter Queue framebuffer 轉換失敗";
+    return QueueDownloadResult::Failed;
+  }
+  heap_caps_free(packed);
+  frameData = nativeFrame;
+  frameDataSize = inktime::kPhotoPainterFrameBytes;
+  frameIndexed4 = true;
+  frameNativePalette = true;
+#else
+  frameData = packed;
+  frameDataSize = packedSize;
+  frameIndexed4 = indexed4;
+  frameNativePalette = false;
+#endif
+  currentPayloadIntegrityTrusted = true;
+  currentDisplaySkipped = shouldSkipCurrentDisplay(cfg);
+  return QueueDownloadResult::Used;
+}
+
+bool downloadDailyPhotoBin(Config &cfg) {
+  if (!resumePendingQueueAck(cfg)) return false;
+  const QueueDownloadResult queueResult = downloadQueuePhotoBin(cfg);
+  if (queueResult == QueueDownloadResult::Used) return true;
+  if (queueResult == QueueDownloadResult::Failed) {
+    if (currentFromQueue && !loadPendingQueueAck().valid) {
+      sendQueueEvent(cfg, inktime::QueueEvent::DisplayFailed, false, lastDeviceErrorCode);
+    }
+    return false;
+  }
+  const bool latest = downloadLatestPhotoBin(cfg);
+  if (latest) currentDisplaySkipped = shouldSkipCurrentDisplay(cfg);
+  return latest;
+}
+
 void reportDeviceStatus(const Config &cfg, bool displayUpdated) {
   if (WiFi.status() != WL_CONNECTED || cfg.backend_hostport.length() == 0 || cfg.device_token.length() == 0) return;
-  String base = cfg.backend_hostport;
-  base.trim();
-  if (!base.startsWith("http://") && !base.startsWith("https://")) base = "https://" + base;
-  while (base.endsWith("/")) base.remove(base.length() - 1);
-  if (!backendTransportAllowed(base)) return;
+  String base;
+  if (!normalizedBackendBase(cfg, base)) return;
 
 #if INKTIME_PHOTOPAINTER_ENABLED
   photoPainter.readEnvironment();
@@ -1114,6 +1631,8 @@ void reportDeviceStatus(const Config &cfg, bool displayUpdated) {
   payload["free_psram_bytes"] = ESP.getFreePsram();
   payload["wake_reason"] = String((int)esp_sleep_get_wakeup_cause());
   payload["display_updated"] = displayUpdated;
+  payload["display_skipped"] = currentDisplaySkipped;
+  if (currentDisplaySkipped) payload["display_skip_reason"] = "same_sha256";
   payload["payload_sha256_verified"] = currentPayloadShaVerified;
   payload["applied_config_version"] = cfg.config_version;
   payload["panel_profile"] = INKTIME_PANEL_PROFILE;
@@ -1121,6 +1640,14 @@ void reportDeviceStatus(const Config &cfg, bool displayUpdated) {
   payload["release_id"] = currentReleaseId;
   payload["error_code"] = lastDeviceErrorCode;
   payload["error_message"] = lastDeviceErrorMessage;
+#if INKTIME_ALLOW_INSECURE_DEVICE_HTTP
+  payload["transport_profile"] = "trusted-lan-http";
+  payload["transport_security_state"] = "degraded";
+  payload["transport_warning"] = "no_tls";
+#else
+  payload["transport_profile"] = "https-only";
+  payload["transport_security_state"] = "secure-required";
+#endif
 #if INKTIME_PHOTOPAINTER_ENABLED
   payload["flash_bytes"] = ESP.getFlashChipSize();
   payload["psram_bytes"] = ESP.getPsramSize();
@@ -1150,8 +1677,7 @@ void reportDeviceStatus(const Config &cfg, bool displayUpdated) {
   serializeJson(payload, body);
 
   HTTPClient statusHttp;
-  statusHttp.setConnectTimeout(10000);
-  statusHttp.setTimeout(15000);
+  configureHttpClient(statusHttp, 15000);
   if (!statusHttp.begin(base + String(DEVICE_STATUS_PATH))) return;
   statusHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
   statusHttp.addHeader("Content-Type", "application/json");
@@ -1290,6 +1816,9 @@ void setup() {
 #if DEBUG_LOG
   DBG_PRINTLN();
   DBG_PRINTLN("===== ESP32-S3 InkTime Daily Photo boot =====");
+#if INKTIME_ALLOW_INSECURE_DEVICE_HTTP
+  DBG_PRINTLN("[SECURITY] trusted-LAN HTTP build：僅限可信任 LAN／IoT VLAN，沒有 TLS");
+#endif
 #endif
 
   if (isFactoryResetRequestedAtBoot()) {
@@ -1360,15 +1889,35 @@ void setup() {
   if (serverConfigChanged) hasTime = syncTime(g_cfg, timeinfo);
   bool displayUpdated = false;
   if (ok) {
-    initDisplay(g_cfg);
-    displayUpdated = drawFromFrameData(g_cfg);
-    if (!displayUpdated) {
+    bool mayDisplay = true;
+    if (currentDisplaySkipped) {
+      saveDisplayRecord(g_cfg, true);
+      if (currentFromQueue) {
+        mayDisplay = sendQueueEvent(g_cfg, inktime::QueueEvent::DisplayCompleted, true);
+      }
+    } else if (currentFromQueue) {
+      mayDisplay = sendQueueEvent(g_cfg, inktime::QueueEvent::DisplayStarted);
+    }
+    if (mayDisplay && !currentDisplaySkipped) {
+      initDisplay(g_cfg);
+      displayUpdated = drawFromFrameData(g_cfg);
+    }
+    if (displayUpdated) {
+      saveDisplayRecord(g_cfg, true);
+      if (currentFromQueue) {
+        sendQueueEvent(g_cfg, inktime::QueueEvent::DisplayCompleted);
+      }
+    } else if (!currentDisplaySkipped && mayDisplay) {
 #if INKTIME_PHOTOPAINTER_ENABLED
       lastDeviceErrorCode = photoPainter.lastError();
 #else
       lastDeviceErrorCode = "DEVICE-DISPLAY";
 #endif
       lastDeviceErrorMessage = "電子紙刷新失敗或逾時";
+      saveDisplayRecord(g_cfg, false);
+      if (currentFromQueue && !loadPendingQueueAck().valid) {
+        sendQueueEvent(g_cfg, inktime::QueueEvent::DisplayFailed, false, lastDeviceErrorCode);
+      }
     }
   } else {
 #if DEBUG_LOG

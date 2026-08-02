@@ -11,7 +11,14 @@ def _plan(**changes):
         "high_model": "large",
         "stage_two_threshold": 65,
         "favorite_override": True,
-        "scoring_profile": {"id": "rules-1", "memory_weight": 1, "beauty_weight": 2, "technical_weight": 3, "emotion_weight": 4, "favorite_bonus": 5},
+        "scoring_profile": {
+            "id": "rules-1",
+            "memory_weight": 1,
+            "beauty_weight": 2,
+            "technical_weight": 3,
+            "emotion_weight": 4,
+            "favorite_bonus": 5,
+        },
         "caption_controls": {"caption_variants_enabled": True},
         "prompt_version": "prompt-1",
         "high_image_max_side": 1600,
@@ -28,3 +35,5 @@ def test_analysis_plan_is_canonical_non_secret_and_input_specific():
     assert fingerprint(plan) == fingerprint(_plan())
     assert fingerprint(plan) != fingerprint(_plan(prompt_version="prompt-2"))
     assert fingerprint(plan) != fingerprint(_plan(high_image_max_side=1024))
+    assert plan["reasoning_effort"] == "none"
+    assert fingerprint(plan) != fingerprint(_plan(reasoning_effort="low"))

@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Batch 詳情{% endblock %}
+{% block content %}
+<main class="page-shell">
+  <div class="page-head"><div><p class="eyebrow">Batch 詳情</p><h1>{{ batch.id }}</h1><p>{{ batch.scope }} · {{ batch.status }} · {{ batch.model }}</p></div><a href="{{ url_for('analysis_batches.batches_page') }}">返回 Batch 清單</a></div>
+  {% if batch.status in ['submission_unknown', 'submitting', 'validating', 'upload_unknown', 'uploading'] %}
+  <section class="card notice"><h2>需要人工 Recovery</h2><p>請先確認遠端檔案／Batch 所有權。Recovery 會重新取得並驗證遠端 identity，不會重新建立或重送照片。</p>{% if g.user and g.user.role == 'administrator' %}
+    {% if batch.status == 'upload_unknown' %}
+    <form method="post" action="{{ url_for('analysis_batches.batches_page_action') }}" class="form-stack"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="batch_id" value="{{ batch.id }}"><label>既有 remote_file_id<input name="remote_file_id" required maxlength="200" pattern="[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}"></label><button class="primary" name="action" value="recover_upload" type="submit">驗證並綁定既有遠端 File</button></form>
+    <form method="post" action="{{ url_for('analysis_batches.batches_page_action') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="batch_id" value="{{ batch.id }}"><label><input type="checkbox" name="confirm" value="true" required> 我已確認遠端 Batch 不存在</label><label><input type="checkbox" name="confirmed_remote_file_deleted" value="true" required> 我已確認遠端 File 已刪除</label><button name="action" value="abandon" type="submit">確認 File 已刪除並 Abandon</button></form>
+    {% else %}
+    <form method="post" action="{{ url_for('analysis_batches.batches_page_action') }}" class="form-stack"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="batch_id" value="{{ batch.id }}"><label>既有 remote_batch_id<input name="remote_batch_id" required maxlength="200" pattern="[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}"></label><button class="primary" name="action" value="recover" type="submit">綁定並驗證既有遠端 Batch</button></form><form method="post" action="{{ url_for('analysis_batches.batches_page_action') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="batch_id" value="{{ batch.id }}"><label><input type="checkbox" name="confirm" value="true" required> 我已確認遠端 Batch 不存在</label><button name="action" value="abandon" type="submit">確認不存在並 Abandon</button></form>
+    {% endif %}
+  {% endif %}</section>
+  {% endif %}
+  <section class="card">
+    <h2>結果與成本</h2>
+    <p>總數 {{ batch.total_items }}；成功 {{ batch.imported_items }}；失敗 {{ batch.failed_items }}；漏件 {{ batch.missing_items }}；Stale {{ batch.stale_items }}。</p>
+    <p>Input {{ batch.input_tokens }}；Cached {{ batch.cached_tokens }}；Output {{ batch.output_tokens }}；Reasoning {{ batch.reasoning_tokens }}；實際成本 USD {{ batch.actual_cost }}。</p>
+    <p>平均每張 USD {{ '%.6f'|format(batch.average_cost) }}；每千張推估 USD {{ '%.3f'|format(batch.per_thousand_cost) }}；目前全庫缺件 {{ batch.eligible_missing_count }} 張，推估全庫 USD {{ '%.3f'|format(batch.full_library_estimated_cost) }}；Schema 成功率 {{ '%.2f'|format(batch.schema_success_rate) }}%。</p>
+    <p>實際 Input JSONL {{ batch.actual_jsonl_bytes }} bytes；遠端清理：{{ batch.cleanup_status }}；最終意圖：{{ batch.cleanup_final_action }}；本機峰值 RSS：{{ batch.peak_rss_bytes }} bytes。</p>
+    {% if batch.cleanup_error_code %}<p class="notice">清理等待：{{ batch.cleanup_error_code }}。{{ batch.cleanup_error_message }}</p>{% endif %}
+    {% if batch.reconciliation_error_code %}<p class="notice">結果對帳錯誤：{{ batch.reconciliation_error_code }}。{{ batch.reconciliation_error_message }}</p>{% endif %}
+    <p>各分片實際大小：{% for shard in batch["shard_sizes"] %}<code>{{ shard.batch_id }}={{ shard.bytes }} bytes</code>{% if not loop.last %}、{% endif %}{% else %}尚無本機分片{% endfor %}</p>
+    <details><summary>候選 Snapshot</summary><pre>{{ batch.candidate_snapshot_json }}</pre></details>
+  </section>
+  <section class="card"><h2>Item 對帳</h2><table><thead><tr><th>狀態</th><th>匿名 custom_id</th><th>HTTP</th><th>錯誤碼</th><th>Token</th><th>成本</th></tr></thead><tbody>{% for item in batch["items"] %}<tr><td>{{ item.status }}</td><td><code>{{ item.custom_id }}</code></td><td>{{ item.http_status or '—' }}</td><td>{{ item.error_code or '—' }}</td><td>{{ item.input_tokens + item.output_tokens }}</td><td>{{ item.actual_cost }}</td></tr>{% else %}<tr><td colspan="6">尚無 Item。</td></tr>{% endfor %}</tbody></table></section>
+</main>
+{% endblock %}

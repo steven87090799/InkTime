@@ -32,15 +32,94 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "risk": "錯誤時區會造成跨日選片偏移",
         "restart": False,
     },
-    "observability.debug_enabled": {"category": "系統監控與除錯", "default": False, "type": "boolean", "description": "Debug 事件記錄；到期自動關閉", "risk": "只用於短期診斷，避免增加 SQLite 寫入", "restart": False},
-    "observability.debug_level": {"category": "系統監控與除錯", "default": "normal", "type": "string", "description": "Debug 詳細程度", "risk": "detailed 只限短期使用", "choices": ["normal", "detailed"], "restart": False},
-    "observability.debug_components": {"category": "系統監控與除錯", "default": "", "type": "string", "description": "Debug 元件，每行一項；留空為全部", "risk": "不記錄密鑰、Token、未遮蔽路徑或 GPS", "multiline": True, "rows": 4, "max_length": 2000, "restart": False},
-    "observability.debug_auto_disable_minutes": {"category": "系統監控與除錯", "default": 60, "type": "integer", "description": "Debug 自動關閉分鐘數", "risk": "到期後僅保留 WARNING 以上與重要工作狀態", "min": 1, "max": 1440, "restart": False},
-    "observability.activity_retention_days": {"category": "系統監控與除錯", "default": 14, "type": "integer", "description": "WARNING 以上與重要事件保留天數", "risk": "DEBUG 採較短保留，避免資料庫膨脹", "min": 1, "max": 365, "restart": False},
-    "observability.debug_retention_hours": {"category": "系統監控與除錯", "default": 24, "type": "integer", "description": "DEBUG 事件保留小時", "risk": "短期診斷完成後自動清理", "min": 1, "max": 168, "restart": False},
-    "observability.activity_max_rows": {"category": "系統監控與除錯", "default": 50000, "type": "integer", "description": "Activity 最大列數", "risk": "超過時優先清理最舊 DEBUG/INFO", "min": 1000, "max": 500000, "restart": False},
-    "observability.activity_poll_seconds": {"category": "系統監控與除錯", "default": 5, "type": "integer", "description": "監控頁有界輪詢秒數", "risk": "最小 3 秒以避免 NAS 待機寫入或 CPU 壓力", "min": 3, "max": 60, "restart": False},
-    "observability.stuck_job_minutes": {"category": "系統監控與除錯", "default": 5, "type": "integer", "description": "工作 heartbeat 過期告警門檻", "risk": "過低可能誤判長時間模型請求", "min": 1, "max": 120, "restart": False},
+    "observability.debug_enabled": {
+        "category": "系統監控與除錯",
+        "default": False,
+        "type": "boolean",
+        "description": "Debug 事件記錄；到期自動關閉",
+        "risk": "只用於短期診斷，避免增加 SQLite 寫入",
+        "restart": False,
+    },
+    "observability.debug_level": {
+        "category": "系統監控與除錯",
+        "default": "normal",
+        "type": "string",
+        "description": "Debug 詳細程度",
+        "risk": "detailed 只限短期使用",
+        "choices": ["normal", "detailed"],
+        "restart": False,
+    },
+    "observability.debug_components": {
+        "category": "系統監控與除錯",
+        "default": "",
+        "type": "string",
+        "description": "Debug 元件，每行一項；留空為全部",
+        "risk": "不記錄密鑰、Token、未遮蔽路徑或 GPS",
+        "multiline": True,
+        "rows": 4,
+        "max_length": 2000,
+        "restart": False,
+    },
+    "observability.debug_auto_disable_minutes": {
+        "category": "系統監控與除錯",
+        "default": 60,
+        "type": "integer",
+        "description": "Debug 自動關閉分鐘數",
+        "risk": "到期後僅保留 WARNING 以上與重要工作狀態",
+        "min": 1,
+        "max": 1440,
+        "restart": False,
+    },
+    "observability.activity_retention_days": {
+        "category": "系統監控與除錯",
+        "default": 14,
+        "type": "integer",
+        "description": "WARNING 以上與重要事件保留天數",
+        "risk": "DEBUG 採較短保留，避免資料庫膨脹",
+        "min": 1,
+        "max": 365,
+        "restart": False,
+    },
+    "observability.debug_retention_hours": {
+        "category": "系統監控與除錯",
+        "default": 24,
+        "type": "integer",
+        "description": "DEBUG 事件保留小時",
+        "risk": "短期診斷完成後自動清理",
+        "min": 1,
+        "max": 168,
+        "restart": False,
+    },
+    "observability.activity_max_rows": {
+        "category": "系統監控與除錯",
+        "default": 50000,
+        "type": "integer",
+        "description": "Activity 最大列數",
+        "risk": "超過時優先清理最舊 DEBUG/INFO",
+        "min": 1000,
+        "max": 500000,
+        "restart": False,
+    },
+    "observability.activity_poll_seconds": {
+        "category": "系統監控與除錯",
+        "default": 5,
+        "type": "integer",
+        "description": "監控頁有界輪詢秒數",
+        "risk": "最小 3 秒以避免 NAS 待機寫入或 CPU 壓力",
+        "min": 3,
+        "max": 60,
+        "restart": False,
+    },
+    "observability.stuck_job_minutes": {
+        "category": "系統監控與除錯",
+        "default": 5,
+        "type": "integer",
+        "description": "工作 heartbeat 過期告警門檻",
+        "risk": "過低可能誤判長時間模型請求",
+        "min": 1,
+        "max": 120,
+        "restart": False,
+    },
     "analysis.strategy": {
         "category": "分析設定",
         "default": "smart_two_stage",
@@ -67,89 +146,176 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "restart": False,
     },
     "analysis.caption_min_chars": {
-        "category": "照片描述與相框文案", "default": 120, "type": "integer",
-        "description": "詳細照片描述最少字元數", "risk": "必須與目標、上限保持 min ≤ target ≤ max",
-        "min": 0, "max": 1000, "restart": False,
+        "category": "照片描述與相框文案",
+        "default": 120,
+        "type": "integer",
+        "description": "詳細照片描述最少字元數",
+        "risk": "必須與目標、上限保持 min ≤ target ≤ max",
+        "min": 0,
+        "max": 1000,
+        "restart": False,
     },
     "analysis.caption_target_chars": {
-        "category": "照片描述與相框文案", "default": 160, "type": "integer",
-        "description": "詳細照片描述的大致目標字元數，不要求模型精確湊字數", "risk": "必須與最少、上限保持 min ≤ target ≤ max",
-        "min": 0, "max": 1000, "restart": False,
+        "category": "照片描述與相框文案",
+        "default": 160,
+        "type": "integer",
+        "description": "詳細照片描述的大致目標字元數，不要求模型精確湊字數",
+        "risk": "必須與最少、上限保持 min ≤ target ≤ max",
+        "min": 0,
+        "max": 1000,
+        "restart": False,
     },
     "analysis.caption_max_chars": {
-        "category": "照片描述與相框文案", "default": 220, "type": "integer",
-        "description": "詳細照片描述最多字元數", "risk": "必須與最少、目標保持 min ≤ target ≤ max",
-        "min": 0, "max": 1000, "restart": False,
+        "category": "照片描述與相框文案",
+        "default": 220,
+        "type": "integer",
+        "description": "詳細照片描述最多字元數",
+        "risk": "必須與最少、目標保持 min ≤ target ≤ max",
+        "min": 0,
+        "max": 1000,
+        "restart": False,
     },
     "analysis.side_caption_min_chars": {
-        "category": "照片描述與相框文案", "default": 8, "type": "integer",
-        "description": "相框一句話最少字元數", "risk": "必須與目標、上限保持 min ≤ target ≤ max",
-        "min": 0, "max": 120, "restart": False,
+        "category": "照片描述與相框文案",
+        "default": 8,
+        "type": "integer",
+        "description": "相框一句話最少字元數",
+        "risk": "必須與目標、上限保持 min ≤ target ≤ max",
+        "min": 0,
+        "max": 120,
+        "restart": False,
     },
     "analysis.side_caption_target_chars": {
-        "category": "照片描述與相框文案", "default": 12, "type": "integer",
-        "description": "相框一句話的大致目標字元數", "risk": "必須與最少、上限保持 min ≤ target ≤ max",
-        "min": 0, "max": 120, "restart": False,
+        "category": "照片描述與相框文案",
+        "default": 12,
+        "type": "integer",
+        "description": "相框一句話的大致目標字元數",
+        "risk": "必須與最少、上限保持 min ≤ target ≤ max",
+        "min": 0,
+        "max": 120,
+        "restart": False,
     },
     "analysis.side_caption_max_chars": {
-        "category": "照片描述與相框文案", "default": 16, "type": "integer",
-        "description": "相框一句話最多字元數", "risk": "必須與最少、目標保持 min ≤ target ≤ max",
-        "min": 0, "max": 120, "restart": False,
+        "category": "照片描述與相框文案",
+        "default": 16,
+        "type": "integer",
+        "description": "相框一句話最多字元數",
+        "risk": "必須與最少、目標保持 min ≤ target ≤ max",
+        "min": 0,
+        "max": 120,
+        "restart": False,
     },
     "analysis.copy_default_style": {
-        "category": "照片描述與相框文案", "default": "natural", "type": "string",
-        "description": "相框預設顯示的已儲存候選風格", "risk": "只切換既有候選，不會重新分析圖片",
-        "choices": ["natural", "warm", "literary", "humorous", "minimal"], "restart": False,
+        "category": "照片描述與相框文案",
+        "default": "natural",
+        "type": "string",
+        "description": "相框預設顯示的已儲存候選風格",
+        "risk": "只切換既有候選，不會重新分析圖片",
+        "choices": ["natural", "warm", "literary", "humorous", "minimal"],
+        "restart": False,
     },
     "analysis.copy_humor_level": {
-        "category": "照片描述與相框文案", "default": 1, "type": "integer",
-        "description": "相框文案幽默程度（0 為不刻意幽默）", "risk": "過高可能降低正式場合的適用性",
-        "min": 0, "max": 5, "restart": False,
+        "category": "照片描述與相框文案",
+        "default": 1,
+        "type": "integer",
+        "description": "相框文案幽默程度（0 為不刻意幽默）",
+        "risk": "過高可能降低正式場合的適用性",
+        "min": 0,
+        "max": 5,
+        "restart": False,
     },
     "analysis.copy_poetic_level": {
-        "category": "照片描述與相框文案", "default": 1, "type": "integer",
-        "description": "相框文案詩意程度（0 為最直白）", "risk": "過高可能讓文案較含蓄",
-        "min": 0, "max": 5, "restart": False,
+        "category": "照片描述與相框文案",
+        "default": 1,
+        "type": "integer",
+        "description": "相框文案詩意程度（0 為最直白）",
+        "risk": "過高可能讓文案較含蓄",
+        "min": 0,
+        "max": 5,
+        "restart": False,
     },
     "analysis.copy_avoid_cliche": {
-        "category": "照片描述與相框文案", "default": True, "type": "boolean",
-        "description": "避免雞湯、濫情、空泛與模板句", "risk": "會限制模型可使用的常見文案語氣", "restart": False,
+        "category": "照片描述與相框文案",
+        "default": True,
+        "type": "boolean",
+        "description": "避免雞湯、濫情、空泛與模板句",
+        "risk": "會限制模型可使用的常見文案語氣",
+        "restart": False,
     },
     "analysis.copy_avoid_direct_description": {
-        "category": "照片描述與相框文案", "default": True, "type": "boolean",
-        "description": "相框一句話避免只是直接重述照片內容", "risk": "仍以照片可確認內容為界，不可虛構故事", "restart": False,
+        "category": "照片描述與相框文案",
+        "default": True,
+        "type": "boolean",
+        "description": "相框一句話避免只是直接重述照片內容",
+        "risk": "仍以照片可確認內容為界，不可虛構故事",
+        "restart": False,
     },
     "analysis.copy_forbid_exclamation": {
-        "category": "照片描述與相框文案", "default": True, "type": "boolean",
-        "description": "相框一句話不使用驚嘆號", "risk": "降低強烈語氣", "restart": False,
+        "category": "照片描述與相框文案",
+        "default": True,
+        "type": "boolean",
+        "description": "相框一句話不使用驚嘆號",
+        "risk": "降低強烈語氣",
+        "restart": False,
     },
     "analysis.copy_forbid_like_phrase": {
-        "category": "照片描述與相框文案", "default": True, "type": "boolean",
-        "description": "避免使用像是、彷彿、彷佛等比喻起手式", "risk": "限制部分文學修辭", "restart": False,
+        "category": "照片描述與相框文案",
+        "default": True,
+        "type": "boolean",
+        "description": "避免使用像是、彷彿、彷佛等比喻起手式",
+        "risk": "限制部分文學修辭",
+        "restart": False,
     },
     "analysis.copy_max_commas": {
-        "category": "照片描述與相框文案", "default": 2, "type": "integer",
-        "description": "相框一句話最多逗號數", "risk": "過低會讓長句較不易閱讀",
-        "min": 0, "max": 10, "restart": False,
+        "category": "照片描述與相框文案",
+        "default": 2,
+        "type": "integer",
+        "description": "相框一句話最多逗號數",
+        "risk": "過低會讓長句較不易閱讀",
+        "min": 0,
+        "max": 10,
+        "restart": False,
     },
     "analysis.copy_avoid_abstract_ending": {
-        "category": "照片描述與相框文案", "default": True, "type": "boolean",
-        "description": "避免以空泛人生結論收尾", "risk": "限制總結式文案", "restart": False,
+        "category": "照片描述與相框文案",
+        "default": True,
+        "type": "boolean",
+        "description": "避免以空泛人生結論收尾",
+        "risk": "限制總結式文案",
+        "restart": False,
     },
     "analysis.copy_banned_words": {
-        "category": "照片描述與相框文案", "default": "世界\n時光\n歲月\n治癒\n剛剛好\n悄悄\n慢慢\n值得珍藏\n美好瞬間\n時光定格\n歲月靜好\n生活中的小確幸\n一切都是最好的安排", "type": "string",
-        "description": "每行一個禁止詞；只在進階文案啟用時套用", "risk": "過多禁止詞可能使文案選詞受限",
-        "multiline": True, "rows": 8, "max_length": 4000, "restart": False,
+        "category": "照片描述與相框文案",
+        "default": "世界\n時光\n歲月\n治癒\n剛剛好\n悄悄\n慢慢\n值得珍藏\n美好瞬間\n時光定格\n歲月靜好\n生活中的小確幸\n一切都是最好的安排",
+        "type": "string",
+        "description": "每行一個禁止詞；只在進階文案啟用時套用",
+        "risk": "過多禁止詞可能使文案選詞受限",
+        "multiline": True,
+        "rows": 8,
+        "max_length": 4000,
+        "restart": False,
     },
     "analysis.copy_banned_patterns": {
-        "category": "照片描述與相框文案", "default": "", "type": "string",
-        "description": "每行一個禁止句型；只在進階文案啟用時套用", "risk": "請使用可理解的文字片段，非正規表示式",
-        "multiline": True, "rows": 5, "max_length": 4000, "restart": False,
+        "category": "照片描述與相框文案",
+        "default": "",
+        "type": "string",
+        "description": "每行一個禁止句型；只在進階文案啟用時套用",
+        "risk": "請使用可理解的文字片段，非正規表示式",
+        "multiline": True,
+        "rows": 5,
+        "max_length": 4000,
+        "restart": False,
     },
     "analysis.copy_custom_rules": {
-        "category": "照片描述與相框文案", "default": "", "type": "string",
-        "description": "額外文案規則；只在進階文案啟用時傳給模型", "risk": "不可要求模型猜測人物關係、地點或事件",
-        "multiline": True, "rows": 6, "max_length": 8000, "restart": False,
+        "category": "照片描述與相框文案",
+        "default": "",
+        "type": "string",
+        "description": "額外文案規則；只在進階文案啟用時傳給模型",
+        "risk": "不可要求模型猜測人物關係、地點或事件",
+        "multiline": True,
+        "rows": 6,
+        "max_length": 8000,
+        "restart": False,
     },
     "analysis.execution_mode": {
         "category": "分析執行模式",
@@ -320,9 +486,13 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "restart": False,
     },
     "analysis.high_image_max_side": {
-        "category": "分析設定", "default": 1024, "type": "integer",
-        "description": "高品質 Vision 輸入最長邊", "risk": "1600 會增加成本與延遲",
-        "choices": [1024, 1600], "restart": False,
+        "category": "分析設定",
+        "default": 1024,
+        "type": "integer",
+        "description": "高品質 Vision 輸入最長邊",
+        "risk": "1600 會增加成本與延遲",
+        "choices": [1024, 1600],
+        "restart": False,
     },
     "analysis.prefilter_enabled": {
         "category": "本機預篩選",
@@ -515,34 +685,64 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "restart": False,
     },
     "scanner.max_file_bytes": {
-        "category": "效能與待機", "default": 209715200, "type": "integer",
-        "description": "Scanner 接受的單張檔案最大位元組數", "risk": "過大檔案會增加記憶體風險",
-        "min": 1048576, "max": 2147483648, "restart": False,
+        "category": "效能與待機",
+        "default": 209715200,
+        "type": "integer",
+        "description": "Scanner 接受的單張檔案最大位元組數",
+        "risk": "過大檔案會增加記憶體風險",
+        "min": 1048576,
+        "max": 2147483648,
+        "restart": False,
     },
     "scanner.max_pixels": {
-        "category": "效能與待機", "default": 60000000, "type": "integer",
-        "description": "Scanner 接受的單張像素上限", "risk": "提高會增加解壓縮炸彈風險",
-        "min": 1000000, "max": 500000000, "restart": False,
+        "category": "效能與待機",
+        "default": 60000000,
+        "type": "integer",
+        "description": "Scanner 接受的單張像素上限",
+        "risk": "提高會增加解壓縮炸彈風險",
+        "min": 1000000,
+        "max": 500000000,
+        "restart": False,
     },
     "scanner.max_edge_px": {
-        "category": "效能與待機", "default": 12000, "type": "integer",
-        "description": "Scanner 接受的單張影像邊長上限", "risk": "提高會增加記憶體風險",
-        "min": 1000, "max": 100000, "restart": False,
+        "category": "效能與待機",
+        "default": 12000,
+        "type": "integer",
+        "description": "Scanner 接受的單張影像邊長上限",
+        "risk": "提高會增加記憶體風險",
+        "min": 1000,
+        "max": 100000,
+        "restart": False,
     },
     "scanner.thumbnail_capacity_check_interval": {
-        "category": "效能與待機", "default": 500, "type": "integer",
-        "description": "建立縮圖後檢查容量的間隔", "risk": "過低會增加檔案系統讀取",
-        "min": 50, "max": 10000, "restart": False,
+        "category": "效能與待機",
+        "default": 500,
+        "type": "integer",
+        "description": "建立縮圖後檢查容量的間隔",
+        "risk": "過低會增加檔案系統讀取",
+        "min": 50,
+        "max": 10000,
+        "restart": False,
     },
     "thumbnail_cache.max_bytes": {
-        "category": "效能與待機", "default": 5368709120, "type": "integer",
-        "description": "縮圖快取容量上限", "risk": "超過上限只清理縮圖",
-        "min": 104857600, "max": 107374182400, "restart": False,
+        "category": "效能與待機",
+        "default": 5368709120,
+        "type": "integer",
+        "description": "縮圖快取容量上限",
+        "risk": "超過上限只清理縮圖",
+        "min": 104857600,
+        "max": 107374182400,
+        "restart": False,
     },
     "thumbnail_cache.retention_days": {
-        "category": "效能與待機", "default": 30, "type": "integer",
-        "description": "縮圖快取保留天數", "risk": "較短會增加重新生成頻率",
-        "min": 1, "max": 3650, "restart": False,
+        "category": "效能與待機",
+        "default": 30,
+        "type": "integer",
+        "description": "縮圖快取保留天數",
+        "risk": "較短會增加重新生成頻率",
+        "min": 1,
+        "max": 3650,
+        "restart": False,
     },
     "scanner.missing_threshold_percent": {
         "category": "效能與待機",
@@ -588,6 +788,73 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": "string",
         "description": "第二階段高品質模型",
         "risk": "請確認 Provider 價格",
+        "restart": False,
+    },
+    "batch.model": {
+        "category": "Batch 分析",
+        "default": "gpt-5.6-luna",
+        "type": "string",
+        "description": "OpenAI Batch 完整照片分析模型",
+        "risk": "模型必須在已啟用且支援 Batch 的 Provider 上可用",
+        "restart": False,
+    },
+    "batch.reasoning_effort": {
+        "category": "Batch 分析",
+        "default": "none",
+        "type": "string",
+        "description": "官方 OpenAI GPT-5.6 Luna 的推理強度",
+        "risk": "提高推理強度會增加成本與延遲；相容 Provider 不會收到此欄位",
+        "choices": ["none", "low", "medium", "high", "xhigh", "max"],
+        "restart": False,
+    },
+    "batch.max_items_per_shard": {
+        "category": "Batch 分析",
+        "default": 500,
+        "type": "integer",
+        "description": "單一本機 JSONL 分片最多請求數",
+        "risk": "較大值會增加 NAS 記憶體與磁碟壓力",
+        "min": 1,
+        "max": 50000,
+        "restart": False,
+    },
+    "batch.max_jsonl_bytes": {
+        "category": "Batch 分析",
+        "default": 157286400,
+        "type": "integer",
+        "description": "單一本機 JSONL 分片最多 bytes（預設 150 MiB）",
+        "risk": "不可超過 OpenAI 200 MB 硬限制",
+        "min": 1048576,
+        "max": 209715200,
+        "restart": False,
+    },
+    "batch.poll_seconds": {
+        "category": "Batch 分析",
+        "default": 300,
+        "type": "integer",
+        "description": "Batch 遠端狀態輪詢間隔秒數",
+        "risk": "過小會增加 API 請求；過大會延遲匯入",
+        "min": 60,
+        "max": 3600,
+        "restart": False,
+    },
+    "batch.output_expires_after_seconds": {
+        "category": "Batch 分析",
+        "default": 86400,
+        "type": "integer",
+        "description": "請求遠端結果檔保留秒數",
+        "risk": "必須足夠讓 Worker 完成匯入",
+        "min": 3600,
+        "max": 2592000,
+        "restart": False,
+    },
+    "batch.local_retention_days": {
+        "category": "Batch 分析",
+        "default": 7,
+        "type": "integer",
+        "description": "本機 Batch JSONL 結果檔保留天數",
+        "risk": "保留太久會增加 NAS 磁碟使用量",
+        "min": 0,
+        "max": 3650,
         "restart": False,
     },
     "budget.daily_warning": {
@@ -679,14 +946,24 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "restart": False,
     },
     "render.caption_max_lines": {
-        "category": "照片描述與相框文案", "default": 2, "type": "integer",
-        "description": "相框文案開啟換行時的最大行數", "risk": "Footer 空間不足時仍會縮小或截斷",
-        "min": 1, "max": 2, "restart": False,
+        "category": "照片描述與相框文案",
+        "default": 2,
+        "type": "integer",
+        "description": "相框文案開啟換行時的最大行數",
+        "risk": "Footer 空間不足時仍會縮小或截斷",
+        "min": 1,
+        "max": 2,
+        "restart": False,
     },
     "render.caption_min_font_size": {
-        "category": "照片描述與相框文案", "default": 17, "type": "integer",
-        "description": "相框文案開啟換行時可縮小到的最小字型大小", "risk": "字型過小會影響電子紙可讀性",
-        "min": 10, "max": 24, "restart": False,
+        "category": "照片描述與相框文案",
+        "default": 17,
+        "type": "integer",
+        "description": "相框文案開啟換行時可縮小到的最小字型大小",
+        "risk": "字型過小會影響電子紙可讀性",
+        "min": 10,
+        "max": 24,
+        "restart": False,
     },
     "render.quantity": {
         "category": "渲染設定",
@@ -914,8 +1191,11 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "restart": False,
     },
     "render.auto_photo_smooth_enabled": {
-        "category": "渲染設定", "default": False, "type": "boolean",
-        "description": "高暗部風險照片自動使用 photo_smooth", "risk": "需待 Spectra 6 實機校正",
+        "category": "渲染設定",
+        "default": False,
+        "type": "boolean",
+        "description": "高暗部風險照片自動使用 photo_smooth",
+        "risk": "需待 Spectra 6 實機校正",
         "restart": False,
     },
     "render.dither_strength": {
@@ -1280,10 +1560,7 @@ def _risk_level(description: str, key: str) -> str:
         )
     ):
         return "high"
-    if any(
-        marker in text
-        for marker in ("模型", "分析", "保留", "快取", "通知", "渲染", "排程", "裝置")
-    ):
+    if any(marker in text for marker in ("模型", "分析", "保留", "快取", "通知", "渲染", "排程", "裝置")):
         return "medium"
     return "low"
 
@@ -1305,8 +1582,10 @@ def _effective_scope(key: str, definition: dict[str, Any]) -> str:
 def _metadata_dependencies(key: str) -> list[dict[str, Any]]:
     if key == "analysis.caption_variants_enabled":
         return [{"key": "analysis.advanced_caption_enabled", "equals": True}]
-    if key.startswith("analysis.copy_") or key.startswith("analysis.caption_") or key.startswith(
-        "analysis.side_caption_"
+    if (
+        key.startswith("analysis.copy_")
+        or key.startswith("analysis.caption_")
+        or key.startswith("analysis.side_caption_")
     ):
         return [{"key": "analysis.advanced_caption_enabled", "equals": True}]
     if key in {"render.caption_max_lines", "render.caption_min_font_size"}:
@@ -1356,9 +1635,8 @@ def _govern_definition(key: str, definition: dict[str, Any]) -> None:
             "restart_required": bool(definition.get("restart", False)),
             "effective_scope": _effective_scope(key, definition),
             "cache_impact": cache_impact,
-            "reanalysis_impact": cache_impact or key.startswith(
-                ("analysis.prefilter_", "analysis.e6_", "analysis.scoring_")
-            ),
+            "reanalysis_impact": cache_impact
+            or key.startswith(("analysis.prefilter_", "analysis.e6_", "analysis.scoring_")),
             "rerender_impact": key.startswith("render."),
             "device_override_allowed": key in DEVICE_OVERRIDE_KEYS,
             "dependencies": _metadata_dependencies(key),
@@ -1405,9 +1683,7 @@ class SettingsRepository:
                     (
                         key,
                         definition["category"],
-                        json.dumps(
-                            definition["default"], ensure_ascii=False, allow_nan=False
-                        ),
+                        json.dumps(definition["default"], ensure_ascii=False, allow_nan=False),
                         definition["type"],
                         int(definition.get("restart", False)),
                         now,
@@ -1424,15 +1700,20 @@ class SettingsRepository:
                     if not existing
                     else legacy_execution_mode(
                         existing.get("analysis.ai_mode", "off"),
-                        local_processing_enabled=bool(
-                            existing.get("analysis.prefilter_enabled", True)
-                        ),
+                        local_processing_enabled=bool(existing.get("analysis.prefilter_enabled", True)),
                     )
                 )
                 definition = SETTING_DEFINITIONS["analysis.execution_mode"]
                 connection.execute(
                     "INSERT OR IGNORE INTO settings(key,category,value_json,value_type,requires_restart,updated_at) VALUES (?,?,?,?,?,?)",
-                    ("analysis.execution_mode", definition["category"], json.dumps(mode), definition["type"], 0, now),
+                    (
+                        "analysis.execution_mode",
+                        definition["category"],
+                        json.dumps(mode),
+                        definition["type"],
+                        0,
+                        now,
+                    ),
                 )
             connection.executemany(
                 "UPDATE settings SET category=?,value_type=?,requires_restart=? WHERE key=?",
@@ -1505,24 +1786,18 @@ class SettingsRepository:
     def snapshots(self, limit: int = 50):
         with self.database.session() as connection:
             rows = connection.execute(
-                    """
+                """
                     SELECT id,created_at,actor_id,reason,changed_keys_json,
                            schema_version,application_version,rollback_source_snapshot_id
                     FROM settings_snapshots ORDER BY created_at DESC,id DESC LIMIT ?
                     """,
-                    (max(1, min(int(limit), 200)),),
-                ).fetchall()
-        return [
-            dict(row)
-            | {"changed_keys_count": len(json.loads(row["changed_keys_json"]))}
-            for row in rows
-        ]
+                (max(1, min(int(limit), 200)),),
+            ).fetchall()
+        return [dict(row) | {"changed_keys_count": len(json.loads(row["changed_keys_json"]))} for row in rows]
 
     def _snapshot_record(self, snapshot_id: str) -> dict[str, Any]:
         with self.database.session() as connection:
-            row = connection.execute(
-                "SELECT * FROM settings_snapshots WHERE id=?", (snapshot_id,)
-            ).fetchone()
+            row = connection.execute("SELECT * FROM settings_snapshots WHERE id=?", (snapshot_id,)).fetchone()
             if row is None:
                 raise KeyError(snapshot_id)
             items = connection.execute(
@@ -1575,12 +1850,8 @@ class SettingsRepository:
         result["items"] = [
             {
                 **item,
-                "old_value": self._public_snapshot_value(
-                    str(item["key"]), item["old_value"]
-                ),
-                "new_value": self._public_snapshot_value(
-                    str(item["key"]), item["new_value"], changed=True
-                ),
+                "old_value": self._public_snapshot_value(str(item["key"]), item["old_value"]),
+                "new_value": self._public_snapshot_value(str(item["key"]), item["new_value"], changed=True),
                 "metadata": self.public_metadata(str(item["key"])),
             }
             for item in result["items"]
@@ -1653,9 +1924,7 @@ class SettingsRepository:
         )
         metadata = {"key": key} | {field: definition.get(field) for field in fields}
         if key in SENSITIVE_STATUS_KEYS:
-            metadata["default"] = SettingsRepository._status_value(
-                definition.get("default")
-            )
+            metadata["default"] = SettingsRepository._status_value(definition.get("default"))
             metadata["safe_fallback"] = metadata["default"]
         return metadata
 
@@ -1667,17 +1936,11 @@ class SettingsRepository:
         return {"status": "已設定" if configured else "未設定"}
 
     @staticmethod
-    def _public_snapshot_value(
-        key: str, value: Any, *, changed: bool = False
-    ) -> Any:
+    def _public_snapshot_value(key: str, value: Any, *, changed: bool = False) -> Any:
         if key not in SETTING_DEFINITIONS:
             return {"status": "已移除設定"}
         if key in SENSITIVE_STATUS_KEYS:
-            if (
-                isinstance(value, dict)
-                and value.get("status")
-                in {"未設定", "已設定", "已變更", "已清除"}
-            ):
+            if isinstance(value, dict) and value.get("status") in {"未設定", "已設定", "已變更", "已清除"}:
                 return {"status": str(value["status"])}
             return SettingsRepository._status_value(value, changed=changed)
         return value
@@ -1783,9 +2046,7 @@ class SettingsRepository:
     @staticmethod
     def _values_from_connection(connection) -> dict[str, Any]:
         rows = connection.execute("SELECT key,value_json FROM settings").fetchall()
-        values = {
-            key: definition["default"] for key, definition in SETTING_DEFINITIONS.items()
-        }
+        values = {key: definition["default"] for key, definition in SETTING_DEFINITIONS.items()}
         values.update({str(row["key"]): json.loads(row["value_json"]) for row in rows})
         return values
 
@@ -1813,9 +2074,7 @@ class SettingsRepository:
 
             normalized["analysis.execution_mode"] = legacy_execution_mode(
                 normalized["analysis.ai_mode"],
-                local_processing_enabled=bool(
-                    normalized.get("analysis.prefilter_enabled", True)
-                ),
+                local_processing_enabled=bool(normalized.get("analysis.prefilter_enabled", True)),
             )
         with self.database.session() as connection:
             current = self._values_from_connection(connection)
@@ -1835,8 +2094,12 @@ class SettingsRepository:
 
     def _caption_range_values(self, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
         keys = (
-            "analysis.caption_min_chars", "analysis.caption_target_chars", "analysis.caption_max_chars",
-            "analysis.side_caption_min_chars", "analysis.side_caption_target_chars", "analysis.side_caption_max_chars",
+            "analysis.caption_min_chars",
+            "analysis.caption_target_chars",
+            "analysis.caption_max_chars",
+            "analysis.side_caption_min_chars",
+            "analysis.side_caption_target_chars",
+            "analysis.side_caption_max_chars",
         )
         with self.database.session() as connection:
             rows = connection.execute(
@@ -1944,11 +2207,7 @@ class SettingsRepository:
         ).fetchall()
         if len(snapshot_rows) > SETTINGS_SNAPSHOT_LIMIT:
             latest_rollback = next(
-                (
-                    row
-                    for row in snapshot_rows
-                    if row["rollback_source_snapshot_id"] is not None
-                ),
+                (row for row in snapshot_rows if row["rollback_source_snapshot_id"] is not None),
                 None,
             )
             protected = set()
@@ -1964,9 +2223,7 @@ class SettingsRepository:
                 if len(keep) >= SETTINGS_SNAPSHOT_LIMIT:
                     break
                 keep.add(str(row["id"]))
-            removable = [
-                str(row["id"]) for row in snapshot_rows if str(row["id"]) not in keep
-            ]
+            removable = [str(row["id"]) for row in snapshot_rows if str(row["id"]) not in keep]
             connection.executemany(
                 """
                 UPDATE settings_snapshots SET rollback_source_snapshot_id=NULL
@@ -2001,9 +2258,7 @@ class SettingsRepository:
             normalized = {key: self._coerce(key, value) for key, value in changed.items()}
             after = before | normalized
             self._validate_all(after)
-            actual = {
-                key: value for key, value in normalized.items() if before.get(key) != value
-            }
+            actual = {key: value for key, value in normalized.items() if before.get(key) != value}
             if not actual:
                 return {"updated": 0, "changed_keys": [], "snapshot_id": None}
             snapshot_id = self._create_snapshot(
@@ -2074,14 +2329,11 @@ class SettingsRepository:
         )
         with self.database.session() as connection:
             current = self._values_from_connection(connection)
-        unknown_keys = sorted(
-            key for key in recorded_keys if key not in SETTING_DEFINITIONS
-        )
+        unknown_keys = sorted(key for key in recorded_keys if key not in SETTING_DEFINITIONS)
         sensitive_unrestorable_keys = sorted(
             key
             for key in snapshot_changed_keys
-            if key in SETTING_DEFINITIONS
-            and not SETTING_DEFINITIONS[key].get("snapshot_allowed", True)
+            if key in SETTING_DEFINITIONS and not SETTING_DEFINITIONS[key].get("snapshot_allowed", True)
         )
         unsupported_keys = sorted(
             key
@@ -2108,15 +2360,11 @@ class SettingsRepository:
                 "label_zh_tw": SETTING_DEFINITIONS[key]["label_zh_tw"],
                 "current_value": current[key],
                 "target_value": changed[key],
-                "changed_since_snapshot": (
-                    key in target_after and current[key] != target_after[key]
-                ),
+                "changed_since_snapshot": (key in target_after and current[key] != target_after[key]),
             }
             for key in sorted(changed)
         ]
-        overwrites_later_changes = any(
-            item["changed_since_snapshot"] for item in diff
-        )
+        overwrites_later_changes = any(item["changed_since_snapshot"] for item in diff)
         return {
             "snapshot_id": snapshot_id,
             "changed_keys": sorted(changed),
@@ -2162,9 +2410,7 @@ class SettingsRepository:
         _caption_ranges_checked: bool = False,
     ) -> None:
         del _caption_ranges_checked
-        self.update_many(
-            {key: value}, changed_by=changed_by, source_ip=source_ip
-        )
+        self.update_many({key: value}, changed_by=changed_by, source_ip=source_ip)
 
 
 class SecretStore:

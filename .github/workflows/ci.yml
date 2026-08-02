@@ -21,8 +21,9 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
         with: {python-version: "${{ matrix.python-version }}", cache: pip}
       - run: pip install -r requirements-dev.txt
+      - run: python scripts/check_dependency_policy.py
       - run: ruff check inktime tests scripts server.py analyze_photos.py
-      - run: mypy inktime
+      - run: mypy
       - run: pytest --cov=inktime --cov-report=term-missing --cov-fail-under=80 tests/unit tests/security tests/integration
       - run: pytest tests/unit/test_migrations.py
       - run: pip-audit -r requirements.txt
@@ -36,7 +37,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  compose-production-smoke:
+  compose-lan-production-persistence:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
@@ -44,35 +45,81 @@ jobs:
         run: |
           mkdir -p .ci-data .ci-photos
           chmod 777 .ci-data
-          cat > .ci.env <<'EOF'
+          ci_root=$(pwd)
+          revision=$(git rev-parse HEAD)
+          build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          cat > .ci-lan.env <<EOF
           TZ=Asia/Taipei
           INKTIME_PORT=8765
-          INKTIME_DATA_PATH=.ci-data
-          INKTIME_PHOTO_PATH=.ci-photos
+          INKTIME_DATA_PATH=${ci_root}/.ci-data
+          INKTIME_PHOTO_PATH=${ci_root}/.ci-photos
           INKTIME_ENVIRONMENT=production
-          INKTIME_PUBLIC_URL=http://inktime-ci.acme.dev:8765
+          INKTIME_PUBLIC_URL=http://inktime-lan.test:8765
           INKTIME_COOKIE_SECURE=0
           INKTIME_ALLOW_INSECURE_HTTP=1
           INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE=0
           INKTIME_PROXY_TRUST=0
-          INKTIME_IMAGE_TAG=ci
+          INKTIME_LAN_TEST_MODE=1
+          INKTIME_IMAGE_TAG=ci-lan
+          INKTIME_GIT_REVISION=${revision}
+          INKTIME_BUILD_TIME=${build_time}
           EOF
+          chmod 600 .ci-lan.env
+          python scripts/production_preflight.py --mode lan --env-file .ci-lan.env
       - name: Build and start Web, Worker and Scheduler
-        run: docker compose --env-file .ci.env up -d --build
+        run: docker compose --env-file .ci-lan.env up -d --build
       - name: Wait for all service healthchecks
         run: |
           timeout 180 sh -c '
             until
               curl -fsS http://127.0.0.1:8765/health/ready >/dev/null &&
-              docker compose --env-file .ci.env exec -T inktime-worker python scripts/container_health.py worker &&
-              docker compose --env-file .ci.env exec -T inktime-scheduler python scripts/container_health.py scheduler
+              docker compose --env-file .ci-lan.env exec -T inktime-worker python scripts/container_health.py worker &&
+              docker compose --env-file .ci-lan.env exec -T inktime-scheduler python scripts/container_health.py scheduler
             do sleep 2; done
           '
-      - name: Verify setup, login, worker job and scheduler heartbeat
-        run: python scripts/production_compose_smoke.py
+      - name: Initialize LAN setup, session, setting and Device Token
+        run: python scripts/lan_production_gate.py initialize --state .ci-lan-state.json
+      - name: Seed one deterministic formal Release while services are stopped
+        run: |
+          docker compose --env-file .ci-lan.env stop
+          sudo chown -R "$(id -u):$(id -g)" .ci-data
+          python scripts/lan_production_gate.py seed-release --state .ci-lan-state.json --data-dir .ci-data
+          sudo chown -R 10001:10001 .ci-data
+          docker compose --env-file .ci-lan.env start
+          timeout 180 sh -c 'until curl -fsS http://127.0.0.1:8765/health/ready >/dev/null; do sleep 2; done'
+      - name: Exercise Latest, Queue, ACK, same-content status and Backup
+        run: python scripts/lan_production_gate.py exercise --state .ci-lan-state.json
+      - name: Verify docker compose restart persistence
+        run: |
+          docker compose --env-file .ci-lan.env restart
+          timeout 180 sh -c 'until curl -fsS http://127.0.0.1:8765/health/ready >/dev/null; do sleep 2; done'
+          python scripts/lan_production_gate.py verify --state .ci-lan-state.json
+      - name: Verify down and up with the same persistent storage
+        run: |
+          docker compose --env-file .ci-lan.env down --remove-orphans
+          docker compose --env-file .ci-lan.env up -d
+          timeout 180 sh -c 'until curl -fsS http://127.0.0.1:8765/health/ready >/dev/null; do sleep 2; done'
+          python scripts/lan_production_gate.py verify --state .ci-lan-state.json
+      - name: Verify offline integrity, mutate, then restore the validated Backup
+        run: |
+          docker compose --env-file .ci-lan.env stop
+          sudo chown -R "$(id -u):$(id -g)" .ci-data
+          python scripts/lan_production_gate.py offline-verify --state .ci-lan-state.json --data-dir .ci-data
+          python scripts/lan_production_gate.py mutate --state .ci-lan-state.json --data-dir .ci-data
+          backup_name=$(python -c 'import json; print(json.load(open(".ci-lan-state.json"))["backup_name"])')
+          sudo chown -R 10001:10001 .ci-data
+          docker compose --env-file .ci-lan.env run --rm --no-deps inktime-web \
+            python scripts/restore_backup.py "/data/backups/${backup_name}" --yes
+          docker compose --env-file .ci-lan.env up -d
+          timeout 180 sh -c 'until curl -fsS http://127.0.0.1:8765/health/ready >/dev/null; do sleep 2; done'
+          python scripts/lan_production_gate.py verify --state .ci-lan-state.json
+          docker compose --env-file .ci-lan.env stop
+          sudo chown -R "$(id -u):$(id -g)" .ci-data
+          python scripts/lan_production_gate.py offline-verify --state .ci-lan-state.json --data-dir .ci-data
       - name: Verify runtime identity, permissions and image contents
         run: |
-          docker compose --env-file .ci.env exec -T inktime-web sh -c '
+          docker compose --env-file .ci-lan.env start inktime-web
+          docker compose --env-file .ci-lan.env exec -T inktime-web sh -c '
             test "$(id -u)" = 10001
             test -w /data
             ! touch /app/.ci-write-test
@@ -86,12 +133,14 @@ jobs:
       - name: Collect Compose diagnostics
         if: failure()
         run: |
-          docker compose --env-file .ci.env ps
-          docker compose --env-file .ci.env logs --no-color
-          docker compose --env-file .ci.env ps --format json
+          docker compose --env-file .ci-lan.env ps
+          docker compose --env-file .ci-lan.env logs --no-color
+          docker compose --env-file .ci-lan.env ps --format json
       - name: Remove smoke volumes and containers
         if: always()
-        run: docker compose --env-file .ci.env down -v --remove-orphans
+        run: |
+          docker compose --env-file .ci-lan.env down -v --remove-orphans
+          sudo rm -rf .ci-data .ci-photos .ci-lan.env .ci-lan-state.json
 
   compose-production-tls-smoke:
     runs-on: ubuntu-latest
@@ -166,7 +215,13 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
         with: {python-version: "3.12", cache: pip}
       - run: pip install -r requirements-dev.txt
-      - run: timeout 240 python scripts/runtime_soak.py --iterations 30 --timeout-seconds 180
+      - run: mkdir -p .artifacts && timeout 240 python scripts/runtime_soak.py --max-iterations 30 --timeout-seconds 180 --summary-json .artifacts/runtime-soak-bounded.json
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
+        with:
+          name: runtime-soak-bounded-summary
+          path: .artifacts/runtime-soak-bounded.json
+          if-no-files-found: error
 
   playwright:
     runs-on: ubuntu-latest
@@ -174,7 +229,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
         with: {python-version: "3.12", cache: pip}
-      - run: pip install -r requirements.txt pytest playwright
+      - run: pip install -r requirements-e2e.txt
       - run: playwright install --with-deps chromium
       - run: mkdir -p .ci-e2e && INKTIME_DATA_DIR=.ci-e2e INKTIME_DATABASE=.ci-e2e/inktime.db gunicorn --bind 127.0.0.1:8765 server:app &
       - run: timeout 60 sh -c 'until curl -fsS http://127.0.0.1:8765/health/live; do sleep 1; done'
@@ -184,7 +239,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
-      - uses: arduino/setup-arduino-cli@81d310742121c928ea9c8bbd407b4217b432ae02 # v2.0.0
+      - name: Install pinned Arduino CLI
+        env:
+          ARDUINO_CLI_VERSION: "1.5.1"
+          ARDUINO_CLI_SHA256: "28a8e119c498a25607821c36cb2dc49e8463941b261a0d99091baa7bc692dd2b"
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/arduino-cli_${ARDUINO_CLI_VERSION}_Linux_64bit.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "${archive}" \
+            "https://github.com/arduino/arduino-cli/releases/download/v${ARDUINO_CLI_VERSION}/arduino-cli_${ARDUINO_CLI_VERSION}_Linux_64bit.tar.gz"
+          printf '%s  %s\n' "${ARDUINO_CLI_SHA256}" "${archive}" | sha256sum --check --strict
+          tar --extract --gzip --file="${archive}" --directory="${RUNNER_TEMP}"
+          chmod 0755 "${RUNNER_TEMP}/arduino-cli"
+          printf '%s\n' "${RUNNER_TEMP}" >> "${GITHUB_PATH}"
       - run: arduino-cli config init
       - run: arduino-cli core update-index && arduino-cli core install esp32:esp32@3.3.10
       - run: arduino-cli lib install GxEPD2@1.6.9 ArduinoJson@7.4.3
@@ -194,12 +262,20 @@ jobs:
           /tmp/inktime-core-default
           c++ -std=c++17 -Wall -Wextra -Werror -pedantic -DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -Iesp32/ink-display-7C-photo tests/firmware/test_photopainter_core.cpp -o /tmp/inktime-core-photopainter
           /tmp/inktime-core-photopainter
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -Iesp32/ink-display-7C-photo tests/firmware/test_queue_client_core.cpp -o /tmp/inktime-queue-core
+          /tmp/inktime-queue-core
       - name: Existing default GDEY release
         run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-path /tmp/build-existing-release esp32/ink-display-7C-photo
       - name: Existing default PCB with GDEP release
         run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-property 'compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1' --build-path /tmp/build-existing-gdep-release esp32/ink-display-7C-photo
       - name: Waveshare PhotoPainter release
         run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER' --build-path /tmp/build-photopainter-release esp32/ink-display-7C-photo
+      - name: Trusted LAN GDEY release
+        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-property 'compiler.cpp.extra_flags=-DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-existing-lan esp32/ink-display-7C-photo
+      - name: Trusted LAN GDEP release
+        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-property 'compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1 -DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-gdep-lan esp32/ink-display-7C-photo
+      - name: Trusted LAN Waveshare PhotoPainter release
+        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-photopainter-lan esp32/ink-display-7C-photo
       - name: Existing default debug
         run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3:DebugLevel=debug' --build-property 'compiler.cpp.extra_flags=-DINKTIME_DEBUG_LOG=1' --build-path /tmp/build-existing-debug esp32/ink-display-7C-photo
       - name: Waveshare PhotoPainter debug

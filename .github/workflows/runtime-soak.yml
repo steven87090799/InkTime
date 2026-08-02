@@ -1,0 +1,40 @@
+name: InkTime Parameterized Runtime Soak
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: GitHub-hosted bounded duration
+        required: true
+        default: "7200"
+        type: choice
+        options: ["1800", "7200", "18000"]
+
+permissions:
+  contents: read
+
+jobs:
+  long-runtime-soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements-dev.txt
+      - name: Run bounded long soak
+        run: |
+          mkdir -p .artifacts
+          python scripts/runtime_soak.py \
+            --duration-seconds '${{ inputs.duration_seconds }}' \
+            --max-iterations 100000 \
+            --timeout-seconds 21600 \
+            --summary-json .artifacts/runtime-soak.json
+      - name: Upload summary even on failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
+        with:
+          name: runtime-soak-summary
+          path: .artifacts/runtime-soak.json
+          if-no-files-found: error
+          retention-days: 14

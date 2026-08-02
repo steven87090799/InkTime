@@ -23,6 +23,9 @@ IMPORTANT_TABLES = (
     "photo_events",
     "jobs",
     "job_items",
+    "analysis_batches",
+    "analysis_batch_items",
+    "api_usage",
     "scan_runs",
     "scan_missing_candidates",
     "releases",
@@ -38,6 +41,9 @@ _COUNT_SQL = {
     "photo_events": "SELECT COUNT(*) FROM photo_events",
     "jobs": "SELECT COUNT(*) FROM jobs",
     "job_items": "SELECT COUNT(*) FROM job_items",
+    "analysis_batches": "SELECT COUNT(*) FROM analysis_batches",
+    "analysis_batch_items": "SELECT COUNT(*) FROM analysis_batch_items",
+    "api_usage": "SELECT COUNT(*) FROM api_usage",
     "scan_runs": "SELECT COUNT(*) FROM scan_runs",
     "scan_missing_candidates": "SELECT COUNT(*) FROM scan_missing_candidates",
     "releases": "SELECT COUNT(*) FROM releases",
@@ -63,8 +69,7 @@ def _stream_sha256(stream: IO[bytes]) -> tuple[str, int]:
 
 def _database_counts(connection: sqlite3.Connection) -> dict[str, int]:
     existing = {
-        str(row[0])
-        for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
     return {
         table: int(connection.execute(_COUNT_SQL[table]).fetchone()[0])
@@ -150,9 +155,7 @@ class BackupService:
         zip_handle.close()
         try:
             counts = self._copy_database(temporary_db, include_secrets=include_secrets)
-            settings = self._settings_export(
-                temporary_db, include_secrets=include_secrets
-            )
+            settings = self._settings_export(temporary_db, include_secrets=include_secrets)
             with temporary_db.open("rb") as stream:
                 database_hash, database_size = _stream_sha256(stream)
             settings_hash = sha256(settings).hexdigest()
@@ -203,9 +206,7 @@ class BackupService:
             ) as bundle:
                 bundle.write(temporary_db, "inktime.sqlite3")
                 bundle.writestr("settings.json", settings)
-                bundle.writestr(
-                    "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2)
-                )
+                bundle.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
             self.validate(temporary_archive)
             with temporary_archive.open("rb") as stream:
                 os.fsync(stream.fileno())
@@ -225,7 +226,9 @@ class BackupService:
             ).fetchone()
             if not exists:
                 return 0
-            return int(connection.execute("SELECT COALESCE(MAX(version),0) FROM schema_migrations").fetchone()[0])
+            return int(
+                connection.execute("SELECT COALESCE(MAX(version),0) FROM schema_migrations").fetchone()[0]
+            )
         finally:
             connection.close()
 
@@ -251,9 +254,7 @@ class BackupService:
                 if info.file_size > 1024 * 1024:
                     raise ValueError("BACKUP-002 manifest 大小異常")
                 manifest = json.loads(bundle.read("manifest.json"))
-                version = int(
-                    manifest.get("backup_format_version", manifest.get("schema_version", 0))
-                )
+                version = int(manifest.get("backup_format_version", manifest.get("schema_version", 0)))
                 expected = (
                     {"inktime.sqlite3", "manifest.json"}
                     if version == 1
@@ -296,8 +297,7 @@ class BackupService:
             if integrity is None or str(integrity[0]) != "ok":
                 raise ValueError("RESTORE-002 還原資料庫 integrity_check 失敗")
             tables = {
-                str(row[0])
-                for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
             required = {"schema_migrations", "photos", "jobs", "photo_analysis"}
             if require_platform_tables and not required <= tables:

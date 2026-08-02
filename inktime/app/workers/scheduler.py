@@ -21,6 +21,7 @@ class SchedulerRunner:
         self.stop = threading.Event()
         self.last_backup_date: str | None = None
         self.last_notification_scan_at = 0.0
+        self.last_batch_poll_at = 0.0
 
     def request_stop(self, *_args) -> None:
         self.stop.set()
@@ -31,6 +32,20 @@ class SchedulerRunner:
         observability.heartbeat("scheduler")
         observability.tick()
         self.app.extensions["inktime_job_repository"].recover_stale()
+        batch_poll_seconds = int(settings.get("batch.poll_seconds", 300))
+        if time.monotonic() - self.last_batch_poll_at >= max(60, batch_poll_seconds):
+            try:
+                self.app.extensions["inktime_batch_analysis_service"].poll_due(limit=20)
+            except Exception as exc:
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "Batch 遠端輪詢失敗；下次排程會重試",
+                    event="analysis_batch_poll_failed",
+                    error_code="BATCH-POLL-001",
+                    details={"error_type": exc.__class__.__name__},
+                )
+            self.last_batch_poll_at = time.monotonic()
         notification_service = self.app.extensions["inktime_notification_service"]
         scan_seconds = int(settings.get("notification.scan_seconds", 300))
         if time.monotonic() - self.last_notification_scan_at >= scan_seconds:
@@ -102,8 +117,7 @@ class SchedulerRunner:
         }
         if task["kind"] == "scan":
             root_path = str(
-                config.get("root_path")
-                or self.app.extensions["inktime_runtime_config"].photo_dir
+                config.get("root_path") or self.app.extensions["inktime_runtime_config"].photo_dir
             )
             mode = str(config.get("mode", "incremental"))
             job_id = repository.create_maintenance(
@@ -112,7 +126,8 @@ class SchedulerRunner:
                 priority=4 if mode != "full" else 5,
                 dedupe_key=dedupe_key,
                 created_by=None,
-                settings=common | {
+                settings=common
+                | {
                     "root_path": root_path,
                     "library_name": str(config.get("library_name", "主要照片庫")),
                     "mode": mode,
@@ -124,28 +139,46 @@ class SchedulerRunner:
             )
         elif task["kind"] == "render":
             job_id = repository.create_maintenance(
-                kind="render", name=f"排程：{task['name']}", priority=2, dedupe_key=dedupe_key,
-                created_by=None, settings=common | {"photo_ids": [], "display_prepare": config},
+                kind="render",
+                name=f"排程：{task['name']}",
+                priority=2,
+                dedupe_key=dedupe_key,
+                created_by=None,
+                settings=common | {"photo_ids": [], "display_prepare": config},
             )
         elif task["kind"] == "analysis":
             if config.get("mode") == "disabled" and not force:
                 self.app.extensions["inktime_schedule_repository"].mark_enqueued(task, now)
                 return
             job_id = self.app.extensions["inktime_job_service"].create_analysis_job(
-                name=f"排程：{task['name']}", strategy=str(config.get("strategy", "smart_two_stage")),
-                settings=common | {"concurrency": int(config.get("concurrency", 1))}, created_by="system",
-                budget_limit=None, priority=3, dedupe_key=dedupe_key,
+                name=f"排程：{task['name']}",
+                strategy=str(config.get("strategy", "smart_two_stage")),
+                settings=common | {"concurrency": int(config.get("concurrency", 1))},
+                created_by="system",
+                budget_limit=None,
+                priority=3,
+                dedupe_key=dedupe_key,
             )
         else:
             job_id = repository.create_maintenance(
-                kind="cleanup", name=f"排程：{task['name']}", priority=6, dedupe_key=dedupe_key,
-                created_by=None, settings=common | config,
+                kind="cleanup",
+                name=f"排程：{task['name']}",
+                priority=6,
+                dedupe_key=dedupe_key,
+                created_by=None,
+                settings=common | config,
             )
         if str(repository.get(job_id)["status"]) == "pending":
             self.app.extensions["inktime_job_service"].start(job_id)
         self.app.extensions["inktime_schedule_repository"].mark_enqueued(task, now)
-        log_event(LOGGER, logging.INFO, "已建立排程背景工作", event="scheduled_task_enqueued", job_id=job_id,
-                  details={"task": task["key"], "priority": repository.get(job_id)["priority"]})
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "已建立排程背景工作",
+            event="scheduled_task_enqueued",
+            job_id=job_id,
+            details={"task": task["key"], "priority": repository.get(job_id)["priority"]},
+        )
 
     @staticmethod
     def _high_load() -> bool:

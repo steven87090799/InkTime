@@ -148,8 +148,7 @@ def profile_summaries() -> list[dict]:
             "supports_hibernate": profile.supports_hibernate,
             "minimum_refresh_interval_seconds": profile.minimum_refresh_interval_seconds,
             "colors": [
-                {"code": color.code, "name": color.name, "rgb": list(color.rgb)}
-                for color in profile.colors
+                {"code": color.code, "name": color.name, "rgb": list(color.rgb)} for color in profile.colors
             ],
             **{
                 f"{name}_lab": list(_color_lab(profile, name))
@@ -169,8 +168,7 @@ def _gooddisplay_colors(profile: DisplayProfile) -> tuple[PaletteColor, ...]:
     if profile.key != "gdep073e01_6c":
         return profile.colors
     return tuple(
-        PaletteColor(color.code, color.name, _GOODDISPLAY_RGB_BY_NAME[color.name])
-        for color in profile.colors
+        PaletteColor(color.code, color.name, _GOODDISPLAY_RGB_BY_NAME[color.name]) for color in profile.colors
     )
 
 
@@ -366,11 +364,9 @@ def _quantize_ordered(
     for y in range(rgb.height):
         for x in range(rgb.width):
             red, green, blue = cast(tuple[int, int, int], source[x, y])
-            threshold = ((matrix[y % matrix_size][x % matrix_size] + 0.5) / (matrix_size**2) - 0.5)
+            threshold = (matrix[y % matrix_size][x % matrix_size] + 0.5) / (matrix_size**2) - 0.5
             perturbation = threshold * amplitude
-            palette_index = _nearest(
-                lookup, red + perturbation, green + perturbation, blue + perturbation
-            )
+            palette_index = _nearest(lookup, red + perturbation, green + perturbation, blue + perturbation)
             indexes[y * rgb.width + x] = palette_index
             target[x, y] = profile.colors[palette_index].rgb
     return indexes, preview
@@ -401,9 +397,7 @@ def _quantize_diffusion(
     following = [0.0] * row_size
     second = [0.0] * row_size
     mask = cast(Any, protected_mask.convert("1").load()) if protected_mask is not None else None
-    monochrome = [
-        index for index, color in enumerate(profile.colors) if color.name in {"black", "white"}
-    ]
+    monochrome = [index for index, color in enumerate(profile.colors) if color.name in {"black", "white"}]
 
     def protected(x: int, y: int) -> bool:
         return bool(mask is not None and 0 <= x < rgb.width and 0 <= y < rgb.height and mask[x, y])
@@ -432,7 +426,9 @@ def _quantize_diffusion(
             chosen = profile.colors[palette_index].rgb
             indexes[y * rgb.width + x] = palette_index
             target[x, y] = chosen
-            chosen_space = tuple(_linear_channel(float(value)) for value in chosen) if linear_light else chosen
+            chosen_space = (
+                tuple(_linear_channel(float(value)) for value in chosen) if linear_light else chosen
+            )
             error = tuple((adjusted[channel] - chosen_space[channel]) * strength for channel in range(3))
             if protected(x, y):
                 continue

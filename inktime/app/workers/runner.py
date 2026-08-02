@@ -43,11 +43,19 @@ class WorkerRunner:
         for job in repository.iter_runnable():
             if self.stop.is_set() or job["status"] not in {"running", "retrying"}:
                 continue
+            # An analysis_batch Job is only a durable parent/progress record;
+            # its remote work is owned by OpenAI and is never claimed here.
+            if str(job["kind"]) == "analysis_batch":
+                continue
             settings = json.loads(job["settings_json"])
-            analysis_plan = json.loads(str(job["analysis_spec_json"] or "{}")) if str(job["kind"]) == "analysis" else {}
+            analysis_plan = (
+                json.loads(str(job["analysis_spec_json"] or "{}")) if str(job["kind"]) == "analysis" else {}
+            )
             provider = None
             provider_error: ProviderUnavailableError | None = None
-            execution = str((analysis_plan.get("ai_execution_policy") or {}).get("execution_mode", "automatic_ai"))
+            execution = str(
+                (analysis_plan.get("ai_execution_policy") or {}).get("execution_mode", "automatic_ai")
+            )
             may_build_provider = permits_automatic_ai(execution) or (
                 bool(settings.get("force_ai", False)) and permits_manual_ai(execution)
             )
@@ -63,12 +71,8 @@ class WorkerRunner:
             runtime_settings = self.app.extensions["inktime_settings_repository"]
             progress_items = int(runtime_settings.get("worker.progress_items", 50))
             progress_seconds = int(runtime_settings.get("worker.progress_seconds", 300))
-            scanner_disk_batch_size = int(
-                runtime_settings.get("scanner.disk_batch_size", 1000)
-            )
-            scanner_write_batch_size = int(
-                runtime_settings.get("scanner.write_batch_size", 200)
-            )
+            scanner_disk_batch_size = int(runtime_settings.get("scanner.disk_batch_size", 1000))
+            scanner_write_batch_size = int(runtime_settings.get("scanner.write_batch_size", 200))
             scanner_missing_threshold_ratio = (
                 float(runtime_settings.get("scanner.missing_threshold_percent", 10)) / 100
             )
@@ -76,8 +80,12 @@ class WorkerRunner:
                 "max_file_bytes": int(runtime_settings.get("scanner.max_file_bytes", 200 * 1024 * 1024)),
                 "max_pixels": int(runtime_settings.get("scanner.max_pixels", 60_000_000)),
                 "max_edge_px": int(runtime_settings.get("scanner.max_edge_px", 12_000)),
-                "thumbnail_capacity_check_interval": int(runtime_settings.get("scanner.thumbnail_capacity_check_interval", 500)),
-                "thumbnail_max_bytes": int(runtime_settings.get("thumbnail_cache.max_bytes", 5 * 1024 * 1024 * 1024)),
+                "thumbnail_capacity_check_interval": int(
+                    runtime_settings.get("scanner.thumbnail_capacity_check_interval", 500)
+                ),
+                "thumbnail_max_bytes": int(
+                    runtime_settings.get("thumbnail_cache.max_bytes", 5 * 1024 * 1024 * 1024)
+                ),
                 "thumbnail_retention_days": int(runtime_settings.get("thumbnail_cache.retention_days", 30)),
                 "quality_policy_settings": {
                     key: runtime_settings.get(key, default)
@@ -147,9 +155,7 @@ class WorkerRunner:
                 now = time.monotonic()
                 if now - last_cancel_check >= 1.0:
                     current_job = repository.get(job_id)
-                    cancellation_cached = bool(
-                        current_job is None or current_job["status"] == "cancelled"
-                    )
+                    cancellation_cached = bool(current_job is None or current_job["status"] == "cancelled")
                     last_cancel_check = now
                 return cancellation_cached
 
@@ -175,21 +181,20 @@ class WorkerRunner:
                     raise AnalysisDisabledError("Frozen Analysis Plan 指定完全停用；工作項目已拒絕")
                 if provider_error is not None:
                     raise provider_error
+                if job["kind"] == "analysis_batch_import":
+                    return self.app.extensions["inktime_batch_analysis_service"].import_batch(
+                        str(settings["batch_id"]),
+                        cleanup_only=bool(settings.get("cleanup_only", False)),
+                    )
                 if job["kind"] == "render_preview":
                     operation = str(settings.get("operation", ""))
                     started = time.perf_counter()
                     if operation == "compare":
-                        result = self.app.extensions[
-                            "inktime_render_workload_service"
-                        ].compare(settings)
+                        result = self.app.extensions["inktime_render_workload_service"].compare(settings)
                     elif operation == "simulate":
-                        result = self.app.extensions[
-                            "inktime_render_workload_service"
-                        ].simulate(settings)
+                        result = self.app.extensions["inktime_render_workload_service"].simulate(settings)
                     elif operation == "test_release":
-                        result = self.app.extensions[
-                            "inktime_render_workload_service"
-                        ].test_release(
+                        result = self.app.extensions["inktime_render_workload_service"].test_release(
                             settings,
                             {
                                 "job_id": str(job["id"]),
@@ -201,9 +206,7 @@ class WorkerRunner:
                     elif operation == "library_preview":
                         service = self.app.extensions["inktime_render_service"]
                         render_cache = self.app.extensions["inktime_render_cache"]
-                        result = self.app.extensions[
-                            "inktime_render_workload_service"
-                        ].library_preview(
+                        result = self.app.extensions["inktime_render_workload_service"].library_preview(
                             settings,
                             {
                                 "job_id": str(job["id"]),
@@ -217,13 +220,16 @@ class WorkerRunner:
                     elif operation == "dual_pair_compare":
                         result = self.app.extensions["inktime_render_workload_service"].dual_pair_compare(
                             settings,
-                            {"job_id": str(job["id"]), "item_id": str(item["id"]), "worker_id": str(item["worker_id"]), "idempotency_key": str(item["idempotency_key"])},
+                            {
+                                "job_id": str(job["id"]),
+                                "item_id": str(item["id"]),
+                                "worker_id": str(item["worker_id"]),
+                                "idempotency_key": str(item["idempotency_key"]),
+                            },
                             render_service=self.app.extensions["inktime_render_service"],
                         )
                     elif operation == "history_test_release":
-                        result = self.app.extensions[
-                            "inktime_render_workload_service"
-                        ].test_release(
+                        result = self.app.extensions["inktime_render_workload_service"].test_release(
                             settings,
                             {
                                 "job_id": str(job["id"]),
@@ -234,9 +240,7 @@ class WorkerRunner:
                         )
                     else:
                         raise ValueError("RENDER-008 不支援的背景渲染工作")
-                    result["render_duration_ms"] = int(
-                        (time.perf_counter() - started) * 1000
-                    )
+                    result["render_duration_ms"] = int((time.perf_counter() - started) * 1000)
                     return result
                 if job["kind"] == "scan":
                     scanner = PhotoScanner(
@@ -254,7 +258,8 @@ class WorkerRunner:
                         write_batch_size=scanner_write_batch_size,
                         missing_threshold_ratio=float(
                             settings.get("missing_threshold_percent", scanner_missing_threshold_ratio * 100)
-                        ) / 100,
+                        )
+                        / 100,
                         cancel_requested=scan_cancel_requested,
                         progress_callback=log_scan_progress,
                         progress_interval_items=progress_items,
@@ -284,7 +289,9 @@ class WorkerRunner:
                         release = self.app.extensions["inktime_render_service"].publish(*arguments, **kwargs)
                     else:
                         if isinstance(history, dict):
-                            release = self.app.extensions["inktime_render_service"].publish(*arguments, history=history)
+                            release = self.app.extensions["inktime_render_service"].publish(
+                                *arguments, history=history
+                            )
                         else:
                             release = self.app.extensions["inktime_render_service"].publish(*arguments)
                     return release
@@ -310,9 +317,7 @@ class WorkerRunner:
                         progress_interval_seconds=progress_seconds,
                         **scanner_safety,
                     )
-                    photo_ids = self.app.extensions[
-                        "inktime_photo_repository"
-                    ].list_existing_photo_ids(
+                    photo_ids = self.app.extensions["inktime_photo_repository"].list_existing_photo_ids(
                         str(scan["library_id"]),
                         root,
                         limit=int(settings.get("quantity", 5)),
@@ -325,15 +330,27 @@ class WorkerRunner:
                         if candidate_repository.get(photo_id) is not None:
                             continue
                         photo_repository.save_analysis(
-                            photo_id, str(job["id"]), "local", "local", "virtual-display-local",
+                            photo_id,
+                            str(job["id"]),
+                            "local",
+                            "local",
+                            "virtual-display-local",
                             {
-                                "schema_version": 1, "caption": "本機電子紙收件匣照片",
-                                "types": ["其他"], "memory_score": 50, "beauty_score": 50,
-                                "technical_quality_score": 50, "emotion_score": 50,
-                                "side_caption": "", "should_keep": True, "sensitive": False,
+                                "schema_version": 1,
+                                "caption": "本機電子紙收件匣照片",
+                                "types": ["其他"],
+                                "memory_score": 50,
+                                "beauty_score": 50,
+                                "technical_quality_score": 50,
+                                "emotion_score": 50,
+                                "side_caption": "",
+                                "should_keep": True,
+                                "sensitive": False,
                                 "reason": "本機無模型發布",
                             },
-                            "{}", ranking_score=50, final_ranking_score=50,
+                            "{}",
+                            ranking_score=50,
+                            final_ranking_score=50,
                         )
                     release = self.app.extensions["inktime_render_service"].publish(
                         photo_ids,
@@ -356,9 +373,9 @@ class WorkerRunner:
                         inventory=inventory,
                     )
                 if job["kind"] == "webhook":
-                    return self.app.extensions[
-                        "inktime_notification_service"
-                    ].deliver_one(int(settings["notification_id"]))
+                    return self.app.extensions["inktime_notification_service"].deliver_one(
+                        int(settings["notification_id"])
+                    )
                 return analysis.analyze_photo(
                     photo_id=item["photo_id"],
                     job_id=job["id"],
@@ -370,18 +387,16 @@ class WorkerRunner:
                     force_recompute=bool(job["force_recompute"]),
                 )
 
-            def record_result(
-                result: dict, *, job=job, settings=settings
-            ) -> None:
+            def record_result(result: dict, *, job=job, settings=settings) -> None:
                 if str(job["kind"]) != "render_preview":
                     return
                 self.app.extensions["inktime_render_cache"].record_duration(
                     int(result.get("render_duration_ms", 0)), background=True
                 )
                 if str(settings.get("operation")) == "compare":
-                    self.app.extensions[
-                        "inktime_render_workload_service"
-                    ].record_compare_cache(bool(result.get("cache_hit")))
+                    self.app.extensions["inktime_render_workload_service"].record_compare_cache(
+                        bool(result.get("cache_hit"))
+                    )
 
             self.current = BoundedJobWorker(
                 repository,
@@ -390,9 +405,7 @@ class WorkerRunner:
                     int(
                         settings.get(
                             "concurrency",
-                            self.app.extensions["inktime_settings_repository"].get(
-                                "analysis.concurrency"
-                            ),
+                            self.app.extensions["inktime_settings_repository"].get("analysis.concurrency"),
                         )
                     ),
                     self.app.extensions["inktime_runtime_config"].worker_concurrency,
@@ -436,7 +449,9 @@ class WorkerRunner:
                     elif str(finished["status"]) not in {"running", "retrying"}:
                         task = schedules.get(str(scheduled_task))
                         if task:
-                            schedules.record_failure(task, str(finished["status"]), datetime.now().astimezone())
+                            schedules.record_failure(
+                                task, str(finished["status"]), datetime.now().astimezone()
+                            )
                 level = logging.WARNING if int(finished["failed_items"]) else logging.INFO
                 log_event(
                     LOGGER,

@@ -798,17 +798,24 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_device_render_releases_release ON device_render_releases(release_id)",
         ),
     ),
-    Migration(17, "加入有界系統監控事件", (
-        "CREATE TABLE IF NOT EXISTS activity_events (id INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT NOT NULL DEFAULT 'activity',source_id TEXT,severity TEXT NOT NULL,component TEXT NOT NULL,event TEXT NOT NULL,message TEXT NOT NULL,job_id TEXT,photo_id TEXT,device_id TEXT,stage TEXT,progress_done INTEGER,progress_total INTEGER,error_code TEXT,trace_id TEXT,details_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL)",
-        "CREATE INDEX IF NOT EXISTS idx_activity_events_id ON activity_events(id DESC)",
-        "CREATE INDEX IF NOT EXISTS idx_activity_events_filter ON activity_events(severity,component,id DESC)",
-        "CREATE INDEX IF NOT EXISTS idx_activity_events_severity_id ON activity_events(severity,id DESC)",
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_activity_events_source ON activity_events(source,source_id) WHERE source_id IS NOT NULL",
-        "CREATE INDEX IF NOT EXISTS idx_activity_events_time ON activity_events(created_at DESC,id DESC)",
-        "CREATE TABLE IF NOT EXISTS observability_state (key TEXT PRIMARY KEY,value_json TEXT NOT NULL,updated_at TEXT NOT NULL)",
-    )),
-    Migration(18, "加入版本化設定快照與安全回復", (
-        """
+    Migration(
+        17,
+        "加入有界系統監控事件",
+        (
+            "CREATE TABLE IF NOT EXISTS activity_events (id INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT NOT NULL DEFAULT 'activity',source_id TEXT,severity TEXT NOT NULL,component TEXT NOT NULL,event TEXT NOT NULL,message TEXT NOT NULL,job_id TEXT,photo_id TEXT,device_id TEXT,stage TEXT,progress_done INTEGER,progress_total INTEGER,error_code TEXT,trace_id TEXT,details_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL)",
+            "CREATE INDEX IF NOT EXISTS idx_activity_events_id ON activity_events(id DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_activity_events_filter ON activity_events(severity,component,id DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_activity_events_severity_id ON activity_events(severity,id DESC)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_activity_events_source ON activity_events(source,source_id) WHERE source_id IS NOT NULL",
+            "CREATE INDEX IF NOT EXISTS idx_activity_events_time ON activity_events(created_at DESC,id DESC)",
+            "CREATE TABLE IF NOT EXISTS observability_state (key TEXT PRIMARY KEY,value_json TEXT NOT NULL,updated_at TEXT NOT NULL)",
+        ),
+    ),
+    Migration(
+        18,
+        "加入版本化設定快照與安全回復",
+        (
+            """
         CREATE TABLE IF NOT EXISTS settings_snapshots (
             id TEXT PRIMARY KEY,
             created_at TEXT NOT NULL,
@@ -824,7 +831,7 @@ MIGRATIONS = (
                 REFERENCES settings_snapshots(id) ON DELETE RESTRICT
         )
         """,
-        """
+            """
         CREATE TABLE IF NOT EXISTS settings_snapshot_items (
             snapshot_id TEXT NOT NULL
                 REFERENCES settings_snapshots(id) ON DELETE CASCADE,
@@ -836,84 +843,108 @@ MIGRATIONS = (
             PRIMARY KEY(snapshot_id,key)
         )
         """,
-        "CREATE INDEX IF NOT EXISTS idx_settings_snapshots_created ON settings_snapshots(created_at DESC,id DESC)",
-        "CREATE INDEX IF NOT EXISTS idx_settings_snapshot_items_key ON settings_snapshot_items(key,snapshot_id)",
-        "CREATE INDEX IF NOT EXISTS idx_settings_snapshots_rollback_source ON settings_snapshots(rollback_source_snapshot_id)",
-    )),
-    Migration(19, "加入照片視覺方向校正與人工設定", (
-        "ALTER TABLE photos ADD COLUMN exif_orientation_original INTEGER",
-        "ALTER TABLE photos ADD COLUMN visual_orientation_rotation_cw INTEGER CHECK(visual_orientation_rotation_cw IN (0,90,180,270) OR visual_orientation_rotation_cw IS NULL)",
-        "ALTER TABLE photos ADD COLUMN visual_orientation_confidence REAL CHECK(visual_orientation_confidence IS NULL OR visual_orientation_confidence BETWEEN 0 AND 1)",
-        "ALTER TABLE photos ADD COLUMN visual_orientation_ambiguous INTEGER NOT NULL DEFAULT 1 CHECK(visual_orientation_ambiguous IN (0,1))",
-        "ALTER TABLE photos ADD COLUMN visual_orientation_evidence_json TEXT",
-        "ALTER TABLE photos ADD COLUMN manual_orientation_rotation_cw INTEGER CHECK(manual_orientation_rotation_cw IN (0,90,180,270) OR manual_orientation_rotation_cw IS NULL)",
-        "ALTER TABLE photos ADD COLUMN manual_orientation_updated_at TEXT",
-        "ALTER TABLE photos ADD COLUMN manual_orientation_updated_by TEXT",
-        "UPDATE photos SET exif_orientation_original=orientation WHERE exif_orientation_original IS NULL",
-        "CREATE INDEX IF NOT EXISTS idx_photos_visual_orientation ON photos(manual_orientation_rotation_cw,visual_orientation_rotation_cw)",
-    )),
-    Migration(20, "加入可索引拍攝日期與解析狀態", (
-        "ALTER TABLE photos ADD COLUMN captured_date TEXT",
-        "ALTER TABLE photos ADD COLUMN captured_month_day TEXT",
-        "ALTER TABLE photos ADD COLUMN capture_date_status TEXT NOT NULL DEFAULT 'pending' CHECK(capture_date_status IN ('pending','valid','invalid','missing'))",
-        "CREATE INDEX IF NOT EXISTS idx_photos_captured_date ON photos(captured_date,id)",
-        "CREATE INDEX IF NOT EXISTS idx_photos_captured_month_day ON photos(captured_month_day,captured_date,id)",
-        "CREATE INDEX IF NOT EXISTS idx_photos_capture_date_status ON photos(capture_date_status,id)",
-    )),
-    Migration(21, "加入 Webhook 冪等鍵與持久化重試 Claim", (
-        "ALTER TABLE device_notifications ADD COLUMN webhook_idempotency_key TEXT",
-        "ALTER TABLE device_notifications ADD COLUMN webhook_claimed_until TEXT",
-        "UPDATE device_notifications SET webhook_idempotency_key='legacy:' || id WHERE webhook_idempotency_key IS NULL",
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_device_notifications_idempotency ON device_notifications(webhook_idempotency_key)",
-        "CREATE INDEX IF NOT EXISTS idx_device_notifications_claim ON device_notifications(webhook_status,webhook_next_attempt_at,webhook_claimed_until,id)",
-    )),
-    Migration(22, "加入決策追蹤、回饋、離線佇列、保留與 Canary 發布", (
-        "CREATE TABLE algorithm_versions (id TEXT PRIMARY KEY,algorithm_name TEXT NOT NULL,algorithm_version TEXT NOT NULL,configuration_hash TEXT NOT NULL,configuration_snapshot_json TEXT NOT NULL DEFAULT '{}',renderer_version TEXT NOT NULL,layout_strategy_version TEXT NOT NULL,pairing_strategy_version TEXT NOT NULL,scoring_strategy_version TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(algorithm_name,algorithm_version,configuration_hash))",
-        "CREATE TABLE selection_decision_traces (id INTEGER PRIMARY KEY AUTOINCREMENT,trace_id TEXT NOT NULL UNIQUE,device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,execution_mode TEXT NOT NULL,algorithm_version_id TEXT REFERENCES algorithm_versions(id) ON DELETE SET NULL,render_job_id TEXT,release_id TEXT REFERENCES releases(id) ON DELETE SET NULL,primary_photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,secondary_photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,layout_mode TEXT,fit_mode TEXT,candidate_count INTEGER NOT NULL DEFAULT 0,eligible_count INTEGER NOT NULL DEFAULT 0,selected_score REAL,decision_reasons_json TEXT NOT NULL DEFAULT '[]',rejection_summary_json TEXT NOT NULL DEFAULT '{}',context_snapshot_json TEXT NOT NULL DEFAULT '{}',duration_ms INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL)",
-        "CREATE TABLE selection_decision_candidates (id INTEGER PRIMARY KEY AUTOINCREMENT,trace_id TEXT NOT NULL REFERENCES selection_decision_traces(trace_id) ON DELETE CASCADE,photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,rank INTEGER NOT NULL,base_score REAL,adjusted_score REAL,selected INTEGER NOT NULL DEFAULT 0,rejection_code TEXT,score_components_json TEXT NOT NULL DEFAULT '{}',UNIQUE(trace_id,rank),UNIQUE(trace_id,photo_id))",
-        "CREATE TABLE photo_feedback (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT REFERENCES users(id) ON DELETE SET NULL,device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,decision_trace_id TEXT REFERENCES selection_decision_traces(trace_id) ON DELETE SET NULL,feedback_type TEXT NOT NULL,value REAL NOT NULL DEFAULT 1,expires_at TEXT,metadata_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(user_id,device_id,photo_id,feedback_type))",
-        "CREATE TABLE photo_pair_feedback (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT,device_id TEXT,photo_id TEXT NOT NULL,secondary_photo_id TEXT NOT NULL,decision_trace_id TEXT,feedback_type TEXT NOT NULL,value REAL NOT NULL DEFAULT 1,expires_at TEXT,metadata_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(user_id,device_id,photo_id,secondary_photo_id,feedback_type))",
-        "CREATE TABLE layout_feedback (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT,device_id TEXT,photo_id TEXT,secondary_photo_id TEXT,decision_trace_id TEXT,feedback_type TEXT NOT NULL,value REAL NOT NULL DEFAULT 1,expires_at TEXT,metadata_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(user_id,device_id,decision_trace_id,feedback_type))",
-        "CREATE TABLE caption_feedback (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT,device_id TEXT,photo_id TEXT,decision_trace_id TEXT,feedback_type TEXT NOT NULL,value REAL NOT NULL DEFAULT 1,expires_at TEXT,metadata_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(user_id,device_id,decision_trace_id,feedback_type))",
-        "CREATE TABLE shadow_config (id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL DEFAULT 0,algorithm_version_id TEXT,device_ids_json TEXT NOT NULL DEFAULT '[]',sample_percent INTEGER NOT NULL DEFAULT 10,daily_max_runs INTEGER NOT NULL DEFAULT 10,generate_preview INTEGER NOT NULL DEFAULT 1,preview_retention_days INTEGER NOT NULL DEFAULT 30,updated_by TEXT,updated_at TEXT NOT NULL)",
-        "INSERT INTO shadow_config(id,updated_at) VALUES (1,datetime('now'))",
-        "CREATE TABLE device_content_queues (device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,depth INTEGER NOT NULL DEFAULT 3,queue_version INTEGER NOT NULL DEFAULT 0,current_release_id TEXT,last_known_good_release_id TEXT,next_queued_release_id TEXT,emergency_fallback_release_id TEXT,updated_at TEXT NOT NULL)",
-        "CREATE TABLE device_content_queue_items (id TEXT PRIMARY KEY,device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE RESTRICT,position INTEGER NOT NULL,priority INTEGER NOT NULL DEFAULT 100,display_after TEXT,expires_at TEXT,status TEXT NOT NULL,downloaded_at TEXT,displayed_at TEXT,retry_count INTEGER NOT NULL DEFAULT 0,last_error_code TEXT,idempotency_key TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(device_id,release_id),UNIQUE(device_id,position),UNIQUE(device_id,idempotency_key))",
-        "CREATE TABLE device_content_queue_events (id INTEGER PRIMARY KEY AUTOINCREMENT,queue_item_id TEXT NOT NULL REFERENCES device_content_queue_items(id) ON DELETE CASCADE,device_id TEXT NOT NULL,event_type TEXT NOT NULL,idempotency_key TEXT,payload_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,UNIQUE(queue_item_id,event_type,idempotency_key))",
-        "CREATE TABLE data_retention_policies (data_type TEXT PRIMARY KEY,enabled INTEGER NOT NULL DEFAULT 1,retention_days INTEGER NOT NULL,maximum_items INTEGER,maximum_bytes INTEGER,minimum_items_to_keep INTEGER NOT NULL DEFAULT 0,cleanup_batch_size INTEGER NOT NULL DEFAULT 200,dry_run INTEGER NOT NULL DEFAULT 1,last_run_at TEXT,updated_at TEXT NOT NULL)",
-        "CREATE TABLE data_cleanup_runs (id TEXT PRIMARY KEY,started_at TEXT NOT NULL,completed_at TEXT,dry_run INTEGER NOT NULL,status TEXT NOT NULL,summary_json TEXT NOT NULL DEFAULT '{}',error_code TEXT)",
-        "CREATE TABLE data_cleanup_items (id INTEGER PRIMARY KEY AUTOINCREMENT,cleanup_run_id TEXT NOT NULL REFERENCES data_cleanup_runs(id) ON DELETE CASCADE,data_type TEXT NOT NULL,reference_id TEXT NOT NULL,action TEXT NOT NULL,bytes_freed INTEGER NOT NULL DEFAULT 0,result TEXT NOT NULL,created_at TEXT NOT NULL)",
-        "CREATE TABLE rollout_campaigns (id TEXT PRIMARY KEY,release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE RESTRICT,name TEXT NOT NULL,status TEXT NOT NULL,previous_release_id TEXT,config_json TEXT NOT NULL DEFAULT '{}',created_by TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,rollback_reason TEXT)",
-        "CREATE TABLE rollout_stages (id INTEGER PRIMARY KEY AUTOINCREMENT,rollout_id TEXT NOT NULL REFERENCES rollout_campaigns(id) ON DELETE CASCADE,stage_number INTEGER NOT NULL,target_percent INTEGER NOT NULL,minimum_observation_minutes INTEGER NOT NULL DEFAULT 30,minimum_successful_devices INTEGER NOT NULL DEFAULT 1,maximum_failure_rate REAL NOT NULL DEFAULT .1,maximum_timeout_rate REAL NOT NULL DEFAULT .1,minimum_ack_rate REAL NOT NULL DEFAULT .9,manual_approval_required INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'pending',started_at TEXT,completed_at TEXT,UNIQUE(rollout_id,stage_number))",
-        "CREATE TABLE rollout_targets (id INTEGER PRIMARY KEY AUTOINCREMENT,rollout_id TEXT NOT NULL REFERENCES rollout_campaigns(id) ON DELETE CASCADE,device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,status TEXT NOT NULL DEFAULT 'pending',queue_item_id TEXT REFERENCES device_content_queue_items(id) ON DELETE SET NULL,last_error_code TEXT,updated_at TEXT NOT NULL,UNIQUE(rollout_id,device_id))",
-        "CREATE TABLE rollout_health_events (id INTEGER PRIMARY KEY AUTOINCREMENT,rollout_id TEXT NOT NULL REFERENCES rollout_campaigns(id) ON DELETE CASCADE,device_id TEXT,event_type TEXT NOT NULL,severity TEXT NOT NULL,error_code TEXT,details_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL)",
-        "CREATE TABLE rollout_actions (id INTEGER PRIMARY KEY AUTOINCREMENT,rollout_id TEXT NOT NULL REFERENCES rollout_campaigns(id) ON DELETE CASCADE,actor_id TEXT,action TEXT NOT NULL,reason TEXT,details_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL)",
-        "CREATE INDEX idx_queue_items_device_status_position ON device_content_queue_items(device_id,status,position)",
-        "CREATE INDEX idx_decision_traces_mode_created ON selection_decision_traces(execution_mode,created_at DESC,id DESC)",
-        "INSERT INTO data_retention_policies(data_type,retention_days,minimum_items_to_keep,updated_at) VALUES ('decision_trace',180,0,datetime('now')),('decision_candidate',60,0,datetime('now')),('shadow_preview',30,0,datetime('now')),('device_event',180,0,datetime('now')),('queue_event',90,0,datetime('now')),('job_log',30,0,datetime('now'))",
-    )),
-    Migration(23, "修正決策關聯與韌性資料一致性", (
-        "ALTER TABLE selection_decision_traces ADD COLUMN correlation_key TEXT",
-        "CREATE INDEX idx_decision_traces_correlation ON selection_decision_traces(correlation_key,execution_mode,created_at DESC)",
-        "CREATE INDEX idx_feedback_null_scope ON photo_feedback(user_id,photo_id,feedback_type) WHERE device_id IS NULL",
-    )),
-    Migration(24, "加入待分析選片與 Vision Input 指紋", (
-        "ALTER TABLE photo_analysis ADD COLUMN analysis_fingerprint TEXT",
-        "ALTER TABLE photo_analysis ADD COLUMN analysis_spec_json TEXT",
-        "ALTER TABLE photo_analysis ADD COLUMN vision_request_fingerprint TEXT",
-        "ALTER TABLE photo_analysis ADD COLUMN vision_input_spec_json TEXT",
-        "ALTER TABLE ai_analysis_cache ADD COLUMN vision_request_fingerprint TEXT",
-        "ALTER TABLE ai_analysis_cache ADD COLUMN vision_input_spec_json TEXT",
-        "ALTER TABLE jobs ADD COLUMN selection_mode TEXT NOT NULL DEFAULT 'pending'",
-        "ALTER TABLE jobs ADD COLUMN analysis_fingerprint TEXT",
-        "ALTER TABLE jobs ADD COLUMN analysis_spec_json TEXT",
-        "ALTER TABLE jobs ADD COLUMN force_recompute INTEGER NOT NULL DEFAULT 0 CHECK(force_recompute IN (0,1))",
-        "CREATE INDEX idx_photo_analysis_photo_fingerprint ON photo_analysis(photo_id,analysis_fingerprint)",
-        "CREATE INDEX idx_photo_analysis_vision_fingerprint ON photo_analysis(vision_request_fingerprint)",
-        "CREATE INDEX idx_ai_cache_vision_fingerprint ON ai_analysis_cache(vision_request_fingerprint)",
-        "CREATE INDEX idx_jobs_active_fingerprint ON jobs(analysis_fingerprint,status)",
-        "CREATE INDEX idx_job_items_photo_status ON job_items(photo_id,status)",
-        """
+            "CREATE INDEX IF NOT EXISTS idx_settings_snapshots_created ON settings_snapshots(created_at DESC,id DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_settings_snapshot_items_key ON settings_snapshot_items(key,snapshot_id)",
+            "CREATE INDEX IF NOT EXISTS idx_settings_snapshots_rollback_source ON settings_snapshots(rollback_source_snapshot_id)",
+        ),
+    ),
+    Migration(
+        19,
+        "加入照片視覺方向校正與人工設定",
+        (
+            "ALTER TABLE photos ADD COLUMN exif_orientation_original INTEGER",
+            "ALTER TABLE photos ADD COLUMN visual_orientation_rotation_cw INTEGER CHECK(visual_orientation_rotation_cw IN (0,90,180,270) OR visual_orientation_rotation_cw IS NULL)",
+            "ALTER TABLE photos ADD COLUMN visual_orientation_confidence REAL CHECK(visual_orientation_confidence IS NULL OR visual_orientation_confidence BETWEEN 0 AND 1)",
+            "ALTER TABLE photos ADD COLUMN visual_orientation_ambiguous INTEGER NOT NULL DEFAULT 1 CHECK(visual_orientation_ambiguous IN (0,1))",
+            "ALTER TABLE photos ADD COLUMN visual_orientation_evidence_json TEXT",
+            "ALTER TABLE photos ADD COLUMN manual_orientation_rotation_cw INTEGER CHECK(manual_orientation_rotation_cw IN (0,90,180,270) OR manual_orientation_rotation_cw IS NULL)",
+            "ALTER TABLE photos ADD COLUMN manual_orientation_updated_at TEXT",
+            "ALTER TABLE photos ADD COLUMN manual_orientation_updated_by TEXT",
+            "UPDATE photos SET exif_orientation_original=orientation WHERE exif_orientation_original IS NULL",
+            "CREATE INDEX IF NOT EXISTS idx_photos_visual_orientation ON photos(manual_orientation_rotation_cw,visual_orientation_rotation_cw)",
+        ),
+    ),
+    Migration(
+        20,
+        "加入可索引拍攝日期與解析狀態",
+        (
+            "ALTER TABLE photos ADD COLUMN captured_date TEXT",
+            "ALTER TABLE photos ADD COLUMN captured_month_day TEXT",
+            "ALTER TABLE photos ADD COLUMN capture_date_status TEXT NOT NULL DEFAULT 'pending' CHECK(capture_date_status IN ('pending','valid','invalid','missing'))",
+            "CREATE INDEX IF NOT EXISTS idx_photos_captured_date ON photos(captured_date,id)",
+            "CREATE INDEX IF NOT EXISTS idx_photos_captured_month_day ON photos(captured_month_day,captured_date,id)",
+            "CREATE INDEX IF NOT EXISTS idx_photos_capture_date_status ON photos(capture_date_status,id)",
+        ),
+    ),
+    Migration(
+        21,
+        "加入 Webhook 冪等鍵與持久化重試 Claim",
+        (
+            "ALTER TABLE device_notifications ADD COLUMN webhook_idempotency_key TEXT",
+            "ALTER TABLE device_notifications ADD COLUMN webhook_claimed_until TEXT",
+            "UPDATE device_notifications SET webhook_idempotency_key='legacy:' || id WHERE webhook_idempotency_key IS NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_device_notifications_idempotency ON device_notifications(webhook_idempotency_key)",
+            "CREATE INDEX IF NOT EXISTS idx_device_notifications_claim ON device_notifications(webhook_status,webhook_next_attempt_at,webhook_claimed_until,id)",
+        ),
+    ),
+    Migration(
+        22,
+        "加入決策追蹤、回饋、離線佇列、保留與 Canary 發布",
+        (
+            "CREATE TABLE algorithm_versions (id TEXT PRIMARY KEY,algorithm_name TEXT NOT NULL,algorithm_version TEXT NOT NULL,configuration_hash TEXT NOT NULL,configuration_snapshot_json TEXT NOT NULL DEFAULT '{}',renderer_version TEXT NOT NULL,layout_strategy_version TEXT NOT NULL,pairing_strategy_version TEXT NOT NULL,scoring_strategy_version TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(algorithm_name,algorithm_version,configuration_hash))",
+            "CREATE TABLE selection_decision_traces (id INTEGER PRIMARY KEY AUTOINCREMENT,trace_id TEXT NOT NULL UNIQUE,device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,execution_mode TEXT NOT NULL,algorithm_version_id TEXT REFERENCES algorithm_versions(id) ON DELETE SET NULL,render_job_id TEXT,release_id TEXT REFERENCES releases(id) ON DELETE SET NULL,primary_photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,secondary_photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,layout_mode TEXT,fit_mode TEXT,candidate_count INTEGER NOT NULL DEFAULT 0,eligible_count INTEGER NOT NULL DEFAULT 0,selected_score REAL,decision_reasons_json TEXT NOT NULL DEFAULT '[]',rejection_summary_json TEXT NOT NULL DEFAULT '{}',context_snapshot_json TEXT NOT NULL DEFAULT '{}',duration_ms INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL)",
+            "CREATE TABLE selection_decision_candidates (id INTEGER PRIMARY KEY AUTOINCREMENT,trace_id TEXT NOT NULL REFERENCES selection_decision_traces(trace_id) ON DELETE CASCADE,photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,rank INTEGER NOT NULL,base_score REAL,adjusted_score REAL,selected INTEGER NOT NULL DEFAULT 0,rejection_code TEXT,score_components_json TEXT NOT NULL DEFAULT '{}',UNIQUE(trace_id,rank),UNIQUE(trace_id,photo_id))",
+            "CREATE TABLE photo_feedback (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT REFERENCES users(id) ON DELETE SET NULL,device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,decision_trace_id TEXT REFERENCES selection_decision_traces(trace_id) ON DELETE SET NULL,feedback_type TEXT NOT NULL,value REAL NOT NULL DEFAULT 1,expires_at TEXT,metadata_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(user_id,device_id,photo_id,feedback_type))",
+            "CREATE TABLE photo_pair_feedback (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT,device_id TEXT,photo_id TEXT NOT NULL,secondary_photo_id TEXT NOT NULL,decision_trace_id TEXT,feedback_type TEXT NOT NULL,value REAL NOT NULL DEFAULT 1,expires_at TEXT,metadata_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(user_id,device_id,photo_id,secondary_photo_id,feedback_type))",
+            "CREATE TABLE layout_feedback (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT,device_id TEXT,photo_id TEXT,secondary_photo_id TEXT,decision_trace_id TEXT,feedback_type TEXT NOT NULL,value REAL NOT NULL DEFAULT 1,expires_at TEXT,metadata_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(user_id,device_id,decision_trace_id,feedback_type))",
+            "CREATE TABLE caption_feedback (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT,device_id TEXT,photo_id TEXT,decision_trace_id TEXT,feedback_type TEXT NOT NULL,value REAL NOT NULL DEFAULT 1,expires_at TEXT,metadata_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(user_id,device_id,decision_trace_id,feedback_type))",
+            "CREATE TABLE shadow_config (id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL DEFAULT 0,algorithm_version_id TEXT,device_ids_json TEXT NOT NULL DEFAULT '[]',sample_percent INTEGER NOT NULL DEFAULT 10,daily_max_runs INTEGER NOT NULL DEFAULT 10,generate_preview INTEGER NOT NULL DEFAULT 1,preview_retention_days INTEGER NOT NULL DEFAULT 30,updated_by TEXT,updated_at TEXT NOT NULL)",
+            "INSERT INTO shadow_config(id,updated_at) VALUES (1,datetime('now'))",
+            "CREATE TABLE device_content_queues (device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,depth INTEGER NOT NULL DEFAULT 3,queue_version INTEGER NOT NULL DEFAULT 0,current_release_id TEXT,last_known_good_release_id TEXT,next_queued_release_id TEXT,emergency_fallback_release_id TEXT,updated_at TEXT NOT NULL)",
+            "CREATE TABLE device_content_queue_items (id TEXT PRIMARY KEY,device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE RESTRICT,position INTEGER NOT NULL,priority INTEGER NOT NULL DEFAULT 100,display_after TEXT,expires_at TEXT,status TEXT NOT NULL,downloaded_at TEXT,displayed_at TEXT,retry_count INTEGER NOT NULL DEFAULT 0,last_error_code TEXT,idempotency_key TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(device_id,release_id),UNIQUE(device_id,position),UNIQUE(device_id,idempotency_key))",
+            "CREATE TABLE device_content_queue_events (id INTEGER PRIMARY KEY AUTOINCREMENT,queue_item_id TEXT NOT NULL REFERENCES device_content_queue_items(id) ON DELETE CASCADE,device_id TEXT NOT NULL,event_type TEXT NOT NULL,idempotency_key TEXT,payload_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,UNIQUE(queue_item_id,event_type,idempotency_key))",
+            "CREATE TABLE data_retention_policies (data_type TEXT PRIMARY KEY,enabled INTEGER NOT NULL DEFAULT 1,retention_days INTEGER NOT NULL,maximum_items INTEGER,maximum_bytes INTEGER,minimum_items_to_keep INTEGER NOT NULL DEFAULT 0,cleanup_batch_size INTEGER NOT NULL DEFAULT 200,dry_run INTEGER NOT NULL DEFAULT 1,last_run_at TEXT,updated_at TEXT NOT NULL)",
+            "CREATE TABLE data_cleanup_runs (id TEXT PRIMARY KEY,started_at TEXT NOT NULL,completed_at TEXT,dry_run INTEGER NOT NULL,status TEXT NOT NULL,summary_json TEXT NOT NULL DEFAULT '{}',error_code TEXT)",
+            "CREATE TABLE data_cleanup_items (id INTEGER PRIMARY KEY AUTOINCREMENT,cleanup_run_id TEXT NOT NULL REFERENCES data_cleanup_runs(id) ON DELETE CASCADE,data_type TEXT NOT NULL,reference_id TEXT NOT NULL,action TEXT NOT NULL,bytes_freed INTEGER NOT NULL DEFAULT 0,result TEXT NOT NULL,created_at TEXT NOT NULL)",
+            "CREATE TABLE rollout_campaigns (id TEXT PRIMARY KEY,release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE RESTRICT,name TEXT NOT NULL,status TEXT NOT NULL,previous_release_id TEXT,config_json TEXT NOT NULL DEFAULT '{}',created_by TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,rollback_reason TEXT)",
+            "CREATE TABLE rollout_stages (id INTEGER PRIMARY KEY AUTOINCREMENT,rollout_id TEXT NOT NULL REFERENCES rollout_campaigns(id) ON DELETE CASCADE,stage_number INTEGER NOT NULL,target_percent INTEGER NOT NULL,minimum_observation_minutes INTEGER NOT NULL DEFAULT 30,minimum_successful_devices INTEGER NOT NULL DEFAULT 1,maximum_failure_rate REAL NOT NULL DEFAULT .1,maximum_timeout_rate REAL NOT NULL DEFAULT .1,minimum_ack_rate REAL NOT NULL DEFAULT .9,manual_approval_required INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'pending',started_at TEXT,completed_at TEXT,UNIQUE(rollout_id,stage_number))",
+            "CREATE TABLE rollout_targets (id INTEGER PRIMARY KEY AUTOINCREMENT,rollout_id TEXT NOT NULL REFERENCES rollout_campaigns(id) ON DELETE CASCADE,device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,status TEXT NOT NULL DEFAULT 'pending',queue_item_id TEXT REFERENCES device_content_queue_items(id) ON DELETE SET NULL,last_error_code TEXT,updated_at TEXT NOT NULL,UNIQUE(rollout_id,device_id))",
+            "CREATE TABLE rollout_health_events (id INTEGER PRIMARY KEY AUTOINCREMENT,rollout_id TEXT NOT NULL REFERENCES rollout_campaigns(id) ON DELETE CASCADE,device_id TEXT,event_type TEXT NOT NULL,severity TEXT NOT NULL,error_code TEXT,details_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL)",
+            "CREATE TABLE rollout_actions (id INTEGER PRIMARY KEY AUTOINCREMENT,rollout_id TEXT NOT NULL REFERENCES rollout_campaigns(id) ON DELETE CASCADE,actor_id TEXT,action TEXT NOT NULL,reason TEXT,details_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL)",
+            "CREATE INDEX idx_queue_items_device_status_position ON device_content_queue_items(device_id,status,position)",
+            "CREATE INDEX idx_decision_traces_mode_created ON selection_decision_traces(execution_mode,created_at DESC,id DESC)",
+            "INSERT INTO data_retention_policies(data_type,retention_days,minimum_items_to_keep,updated_at) VALUES ('decision_trace',180,0,datetime('now')),('decision_candidate',60,0,datetime('now')),('shadow_preview',30,0,datetime('now')),('device_event',180,0,datetime('now')),('queue_event',90,0,datetime('now')),('job_log',30,0,datetime('now'))",
+        ),
+    ),
+    Migration(
+        23,
+        "修正決策關聯與韌性資料一致性",
+        (
+            "ALTER TABLE selection_decision_traces ADD COLUMN correlation_key TEXT",
+            "CREATE INDEX idx_decision_traces_correlation ON selection_decision_traces(correlation_key,execution_mode,created_at DESC)",
+            "CREATE INDEX idx_feedback_null_scope ON photo_feedback(user_id,photo_id,feedback_type) WHERE device_id IS NULL",
+        ),
+    ),
+    Migration(
+        24,
+        "加入待分析選片與 Vision Input 指紋",
+        (
+            "ALTER TABLE photo_analysis ADD COLUMN analysis_fingerprint TEXT",
+            "ALTER TABLE photo_analysis ADD COLUMN analysis_spec_json TEXT",
+            "ALTER TABLE photo_analysis ADD COLUMN vision_request_fingerprint TEXT",
+            "ALTER TABLE photo_analysis ADD COLUMN vision_input_spec_json TEXT",
+            "ALTER TABLE ai_analysis_cache ADD COLUMN vision_request_fingerprint TEXT",
+            "ALTER TABLE ai_analysis_cache ADD COLUMN vision_input_spec_json TEXT",
+            "ALTER TABLE jobs ADD COLUMN selection_mode TEXT NOT NULL DEFAULT 'pending'",
+            "ALTER TABLE jobs ADD COLUMN analysis_fingerprint TEXT",
+            "ALTER TABLE jobs ADD COLUMN analysis_spec_json TEXT",
+            "ALTER TABLE jobs ADD COLUMN force_recompute INTEGER NOT NULL DEFAULT 0 CHECK(force_recompute IN (0,1))",
+            "CREATE INDEX idx_photo_analysis_photo_fingerprint ON photo_analysis(photo_id,analysis_fingerprint)",
+            "CREATE INDEX idx_photo_analysis_vision_fingerprint ON photo_analysis(vision_request_fingerprint)",
+            "CREATE INDEX idx_ai_cache_vision_fingerprint ON ai_analysis_cache(vision_request_fingerprint)",
+            "CREATE INDEX idx_jobs_active_fingerprint ON jobs(analysis_fingerprint,status)",
+            "CREATE INDEX idx_job_items_photo_status ON job_items(photo_id,status)",
+            """
         UPDATE settings SET value_json=CASE key
             WHEN 'analysis.side_caption_min_chars' THEN '8'
             WHEN 'analysis.side_caption_target_chars' THEN '12'
@@ -924,15 +955,174 @@ MIGRATIONS = (
                OR (key='analysis.side_caption_target_chars' AND value_json='22')
                OR (key='analysis.side_caption_max_chars' AND value_json='42'))=3
         """,
-        "UPDATE settings SET value_json='200',updated_at=datetime('now') WHERE key='scanner.write_batch_size' AND value_json='500'",
-    )),
-    Migration(25, "加入帳號正規化與 Session 撤銷版本", (
-        "ALTER TABLE users ADD COLUMN normalized_username TEXT",
-        "UPDATE users SET normalized_username=lower(trim(username)) WHERE normalized_username IS NULL",
-        "CREATE UNIQUE INDEX idx_users_normalized_username ON users(normalized_username)",
-        "ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1 CHECK(session_version >= 1)",
-        "ALTER TABLE users ADD COLUMN disabled_at TEXT",
-    )),
+            "UPDATE settings SET value_json='200',updated_at=datetime('now') WHERE key='scanner.write_batch_size' AND value_json='500'",
+        ),
+    ),
+    Migration(
+        25,
+        "加入帳號正規化與 Session 撤銷版本",
+        (
+            "ALTER TABLE users ADD COLUMN normalized_username TEXT",
+            "UPDATE users SET normalized_username=lower(trim(username)) WHERE normalized_username IS NULL",
+            "CREATE UNIQUE INDEX idx_users_normalized_username ON users(normalized_username)",
+            "ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1 CHECK(session_version >= 1)",
+            "ALTER TABLE users ADD COLUMN disabled_at TEXT",
+        ),
+    ),
+    Migration(
+        26,
+        "加入 OpenAI Batch 照片分析持久化生命週期",
+        (
+            "ALTER TABLE photos ADD COLUMN never_upload INTEGER NOT NULL DEFAULT 0 CHECK(never_upload IN (0,1))",
+            "ALTER TABLE photos ADD COLUMN never_display INTEGER NOT NULL DEFAULT 0 CHECK(never_display IN (0,1))",
+            "ALTER TABLE model_pricing ADD COLUMN batch_multiplier REAL NOT NULL DEFAULT 0.5",
+            "ALTER TABLE model_pricing ADD COLUMN batch_input_per_million REAL",
+            "ALTER TABLE model_pricing ADD COLUMN batch_cached_input_per_million REAL",
+            "ALTER TABLE model_pricing ADD COLUMN batch_output_per_million REAL",
+            "ALTER TABLE api_usage ADD COLUMN batch_id TEXT REFERENCES analysis_batches(id) ON DELETE SET NULL",
+            "ALTER TABLE api_usage ADD COLUMN batch_item_id TEXT REFERENCES analysis_batch_items(id) ON DELETE SET NULL",
+            "ALTER TABLE api_usage ADD COLUMN processing_mode TEXT NOT NULL DEFAULT 'sync' CHECK(processing_mode IN ('sync','batch'))",
+            "ALTER TABLE api_usage ADD COLUMN request_id TEXT",
+            "ALTER TABLE api_usage ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0 CHECK(reasoning_tokens >= 0)",
+            "CREATE INDEX IF NOT EXISTS idx_photos_never_upload_candidate ON photos(never_upload,lifecycle_status,eligible,sha256)",
+            "CREATE INDEX IF NOT EXISTS idx_api_usage_batch ON api_usage(batch_id,batch_item_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_api_usage_batch_item_once ON api_usage(batch_item_id) WHERE batch_item_id IS NOT NULL",
+            """
+            CREATE TABLE IF NOT EXISTS analysis_batches (
+                id TEXT PRIMARY KEY,
+                job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+                provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL,
+                model TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                analysis_fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN (
+                    'preparing','uploading','upload_unknown','uploaded','submitting','submission_unknown',
+                    'validating','in_progress','finalizing',
+                    'import_pending','importing','completed','completed_with_errors',
+                    'failed','expired','cancelling','cancelled','cleanup_pending'
+                )),
+                upload_attempt_id TEXT,
+                submission_attempt_id TEXT,
+                side_effect_version INTEGER NOT NULL DEFAULT 0 CHECK(side_effect_version >= 0),
+                side_effect_lease_until TEXT,
+                side_effect_owner TEXT,
+                phase_started_at TEXT,
+                abandon_confirmed_at TEXT,
+                input_file_id TEXT,
+                input_file_bytes INTEGER CHECK(input_file_bytes IS NULL OR input_file_bytes >= 0),
+                remote_batch_id TEXT,
+                output_file_id TEXT,
+                error_file_id TEXT,
+                input_file_deleted INTEGER NOT NULL DEFAULT 0 CHECK(input_file_deleted IN (0,1)),
+                output_file_deleted INTEGER NOT NULL DEFAULT 0 CHECK(output_file_deleted IN (0,1)),
+                error_file_deleted INTEGER NOT NULL DEFAULT 0 CHECK(error_file_deleted IN (0,1)),
+                local_input_path TEXT,
+                local_output_path TEXT,
+                local_error_path TEXT,
+                total_items INTEGER NOT NULL DEFAULT 0 CHECK(total_items >= 0),
+                completed_items INTEGER NOT NULL DEFAULT 0 CHECK(completed_items >= 0),
+                failed_items INTEGER NOT NULL DEFAULT 0 CHECK(failed_items >= 0),
+                missing_items INTEGER NOT NULL DEFAULT 0 CHECK(missing_items >= 0),
+                stale_items INTEGER NOT NULL DEFAULT 0 CHECK(stale_items >= 0),
+                imported_items INTEGER NOT NULL DEFAULT 0 CHECK(imported_items >= 0),
+                input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens >= 0),
+                cached_tokens INTEGER NOT NULL DEFAULT 0 CHECK(cached_tokens >= 0),
+                output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens >= 0),
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0 CHECK(reasoning_tokens >= 0),
+                estimated_cost REAL NOT NULL DEFAULT 0 CHECK(estimated_cost >= 0),
+                actual_cost REAL NOT NULL DEFAULT 0 CHECK(actual_cost >= 0),
+                last_error_code TEXT,
+                last_error_message TEXT,
+                submitted_at TEXT,
+                last_polled_at TEXT,
+                completed_at TEXT,
+                cleanup_completed_at TEXT,
+                remote_status TEXT,
+                sample_seed TEXT,
+                candidate_snapshot_json TEXT NOT NULL DEFAULT '[]',
+                scope TEXT NOT NULL DEFAULT 'all_eligible_missing_analysis'
+                    CHECK(scope IN ('sample','all_eligible_missing_analysis','new_or_changed','manual_selection')),
+                peak_rss_bytes INTEGER NOT NULL DEFAULT 0,
+                cleanup_status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(cleanup_status IN ('pending','partial','completed','not_required')
+                        AND (cleanup_status!='not_required'
+                             OR (input_file_id IS NULL AND output_file_id IS NULL AND error_file_id IS NULL))),
+                cleanup_final_action TEXT NOT NULL DEFAULT 'none'
+                    CHECK(cleanup_final_action IN ('none','complete','cancel','abandon','fail')),
+                input_file_delete_unknown INTEGER NOT NULL DEFAULT 0 CHECK(input_file_delete_unknown IN (0,1)),
+                output_file_delete_unknown INTEGER NOT NULL DEFAULT 0 CHECK(output_file_delete_unknown IN (0,1)),
+                error_file_delete_unknown INTEGER NOT NULL DEFAULT 0 CHECK(error_file_delete_unknown IN (0,1)),
+                cleanup_error_code TEXT,
+                cleanup_error_message TEXT,
+                reconciliation_error_code TEXT,
+                reconciliation_error_message TEXT,
+                provider_config_revision TEXT,
+                provider_base_url_fingerprint TEXT,
+                provider_project_id TEXT,
+                provider_account_fingerprint TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_analysis_batches_poll ON analysis_batches(status,last_polled_at,updated_at)",
+            "CREATE INDEX IF NOT EXISTS idx_analysis_batches_poll_due ON analysis_batches(status,side_effect_lease_until,last_polled_at,phase_started_at,updated_at,created_at,id)",
+            "CREATE INDEX IF NOT EXISTS idx_analysis_batches_job ON analysis_batches(job_id,created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_analysis_batches_remote ON analysis_batches(remote_batch_id)",
+            "CREATE INDEX IF NOT EXISTS idx_analysis_batches_retry ON analysis_batches(status,completed_at,updated_at)",
+            """
+            CREATE TABLE IF NOT EXISTS analysis_batch_items (
+                id TEXT PRIMARY KEY,
+                batch_id TEXT NOT NULL REFERENCES analysis_batches(id) ON DELETE CASCADE,
+                job_item_id TEXT REFERENCES job_items(id) ON DELETE SET NULL,
+                photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,
+                custom_id TEXT NOT NULL UNIQUE,
+                content_sha256 TEXT NOT NULL,
+                analysis_fingerprint TEXT NOT NULL,
+                vision_request_fingerprint TEXT NOT NULL,
+                vision_input_spec_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN (
+                    'pending','submitted','success','failed','missing','retry_pending',
+                    'stale','schema_invalid','duplicate_custom_id','unexpected_custom_id',
+                    'imported','cancelled','expired','upload_unknown','submission_unknown'
+                )),
+                request_id TEXT,
+                http_status INTEGER,
+                input_tokens INTEGER NOT NULL DEFAULT 0 CHECK(input_tokens >= 0),
+                cached_tokens INTEGER NOT NULL DEFAULT 0 CHECK(cached_tokens >= 0),
+                output_tokens INTEGER NOT NULL DEFAULT 0 CHECK(output_tokens >= 0),
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0 CHECK(reasoning_tokens >= 0),
+                estimated_cost REAL NOT NULL DEFAULT 0 CHECK(estimated_cost >= 0),
+                actual_cost REAL NOT NULL DEFAULT 0 CHECK(actual_cost >= 0),
+                raw_response_json TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                imported_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_analysis_batch_items_batch_status ON analysis_batch_items(batch_id,status,updated_at)",
+            "CREATE INDEX IF NOT EXISTS idx_analysis_batch_items_photo ON analysis_batch_items(photo_id,batch_id,status)",
+            "CREATE INDEX IF NOT EXISTS idx_analysis_batch_items_job_item ON analysis_batch_items(job_item_id,batch_id,status)",
+            "CREATE INDEX IF NOT EXISTS idx_analysis_batch_items_fingerprint ON analysis_batch_items(content_sha256,vision_request_fingerprint,status)",
+            "CREATE INDEX IF NOT EXISTS idx_analysis_batch_items_retry ON analysis_batch_items(status,updated_at)",
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_batch_items_active_job_item
+            ON analysis_batch_items(job_item_id)
+            WHERE job_item_id IS NOT NULL AND status IN (
+                'pending','submitted','success','upload_unknown','submission_unknown'
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_batch_items_active_content_request
+            ON analysis_batch_items(content_sha256,vision_request_fingerprint)
+            WHERE status IN ('pending','submitted','success','upload_unknown','submission_unknown')
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_batches_remote_id ON analysis_batches(remote_batch_id) WHERE remote_batch_id IS NOT NULL",
+            "CREATE INDEX IF NOT EXISTS idx_batch_items_custom_id ON analysis_batch_items(custom_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_photo_analysis_batch_once ON photo_analysis(job_id,photo_id,analysis_fingerprint) WHERE analysis_source='analysis_batch' AND job_id IS NOT NULL AND analysis_fingerprint IS NOT NULL",
+        ),
+    ),
 )
 
 
@@ -961,9 +1151,7 @@ def backup_database(database: Database, backup_dir: Path) -> Path | None:
 
 def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
     return bool(
-        connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
-        ).fetchone()
+        connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
     )
 
 
@@ -1080,9 +1268,7 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
             raise MigrationError(
                 f"MIGRATION-003 資料庫 Schema Version {newest} 高於本程式可支援版本；停止啟動以避免降級寫入"
             )
-        has_pending_migrations = any(
-            migration.version not in applied_versions for migration in MIGRATIONS
-        )
+        has_pending_migrations = any(migration.version not in applied_versions for migration in MIGRATIONS)
         # 只有真的要升級既有資料庫才建立備份；三個容器每次重啟不再各複製一次。
         backup_path = None
         if backup_dir is not None and had_database and has_pending_migrations:
@@ -1093,9 +1279,7 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
             if migration.version in applied_versions:
                 continue
             started_at = _utc_now()
-            history_id = _start_history(
-                database, migration, backup_path, started_at=started_at
-            )
+            history_id = _start_history(database, migration, backup_path, started_at=started_at)
             history_completed_in_transaction = False
             try:
                 with database.transaction() as connection:
@@ -1105,9 +1289,7 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
                         "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
                         (migration.version, migration.name, _utc_now()),
                     )
-                    if history_id is None and _table_exists(
-                        connection, "migration_history"
-                    ):
+                    if history_id is None and _table_exists(connection, "migration_history"):
                         connection.execute(
                             """
                             INSERT INTO migration_history(

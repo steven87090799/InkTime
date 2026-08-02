@@ -77,9 +77,7 @@ def _library_photo(app, root: Path, photo_id: str = "preview-photo") -> str:
 
 def _queued_test_release(client, app, *, save_preset: bool = False):
     repository = app.extensions["inktime_device_repository"]
-    device_id, _token = repository.create(
-        "Test Release 隔離", panel_profile="gdep073e01_6c"
-    )
+    device_id, _token = repository.create("Test Release 隔離", panel_profile="gdep073e01_6c")
     response = client.post(
         "/api/v1/rendering/test-release",
         data={
@@ -105,9 +103,7 @@ def _queued_test_release(client, app, *, save_preset: bool = False):
 
 
 def _claimed_test_release(client, app, *, save_preset: bool = False):
-    device_id, job_id = _queued_test_release(
-        client, app, save_preset=save_preset
-    )
+    device_id, job_id = _queued_test_release(client, app, save_preset=save_preset)
     jobs = app.extensions["inktime_job_repository"]
     item = dict(jobs.claim(job_id, "test-worker", 1)[0])
     settings = json.loads(str(jobs.get(job_id)["settings_json"]))
@@ -136,9 +132,7 @@ def test_browser_canvas_cannot_be_published_as_test_release(client, app):
 
 
 def test_viewer_cannot_create_test_release(client, app):
-    app.extensions["inktime_auth_repository"].create_user(
-        "viewer", "very-safe-passphrase", role="viewer"
-    )
+    app.extensions["inktime_auth_repository"].create_user("viewer", "very-safe-passphrase", role="viewer")
     login(client, username="viewer")
     response = client.post(
         "/api/v1/rendering/test-release",
@@ -221,9 +215,7 @@ def test_input_save_failure_does_not_leave_pending_job(client, app, monkeypatch)
     monkeypatch.setattr(
         workload,
         "save_upload",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            ValueError("IMG-002 儲存失敗")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("IMG-002 儲存失敗")),
     )
     response = client.post(
         "/api/v1/rendering/compare",
@@ -242,9 +234,7 @@ def test_input_save_failure_does_not_leave_pending_job(client, app, monkeypatch)
     assert app.extensions["inktime_job_repository"].list() == []
 
 
-def test_library_preview_cache_miss_never_renders_in_request_thread(
-    client, app, tmp_path, monkeypatch
-):
+def test_library_preview_cache_miss_never_renders_in_request_thread(client, app, tmp_path, monkeypatch):
     create_admin(app)
     login(client)
     photo_id = _library_photo(app, tmp_path / "preview-library")
@@ -266,21 +256,19 @@ def test_library_preview_cache_miss_never_renders_in_request_thread(
     assert result["stage"] == "preview_completed"
     assert result["cache_hit"] is False
     assert result["preview_url"].endswith("/preview.png")
-    assert list(
-        app.extensions["inktime_render_workload_service"].prepared_root.iterdir()
-    ) == []
+    assert list(app.extensions["inktime_render_workload_service"].prepared_root.iterdir()) == []
 
 
-def test_quantized_preview_preserves_resolved_auto_dither_in_background(
-    client, app, tmp_path, monkeypatch
-):
+def test_quantized_preview_preserves_resolved_auto_dither_in_background(client, app, tmp_path, monkeypatch):
     create_admin(app)
     login(client)
     photo_id = _library_photo(app, tmp_path / "preview-auto-dither", "high-risk")
     settings_repository = app.extensions["inktime_settings_repository"]
     settings_repository.update(
-        "render.auto_photo_smooth_enabled", True,
-        changed_by="test", source_ip="127.0.0.1",
+        "render.auto_photo_smooth_enabled",
+        True,
+        changed_by="test",
+        source_ip="127.0.0.1",
     )
     with app.extensions["inktime_database"].session() as connection:
         connection.execute(
@@ -293,9 +281,7 @@ def test_quantized_preview_preserves_resolved_auto_dither_in_background(
             (photo_id,),
         )
 
-    response = client.get(
-        f"/api/v1/rendering/preview/{photo_id}?quantized=1&profile=safe_4c"
-    )
+    response = client.get(f"/api/v1/rendering/preview/{photo_id}?quantized=1&profile=safe_4c")
     assert response.status_code == 202
     job_id = response.get_json()["job_id"]
     jobs = app.extensions["inktime_job_repository"]
@@ -322,9 +308,7 @@ def test_quantized_preview_preserves_resolved_auto_dither_in_background(
     assert result["effective_dither"] == "photo_smooth"
     assert result["override_source"] == "auto_photo_smooth"
 
-    cached = client.get(
-        f"/api/v1/rendering/preview/{photo_id}?quantized=1&profile=safe_4c"
-    )
+    cached = client.get(f"/api/v1/rendering/preview/{photo_id}?quantized=1&profile=safe_4c")
     assert cached.status_code == 200
     assert cached.headers["X-InkTime-Effective-Dither"] == "photo_smooth"
     assert cached.headers["X-InkTime-Dither-Override-Source"] == "auto_photo_smooth"
@@ -336,8 +320,10 @@ def test_quantized_preview_treats_explicit_dither_as_an_override(client, app, tm
     photo_id = _library_photo(app, tmp_path / "preview-request-dither", "override")
     settings_repository = app.extensions["inktime_settings_repository"]
     settings_repository.update(
-        "render.auto_photo_smooth_enabled", True,
-        changed_by="test", source_ip="127.0.0.1",
+        "render.auto_photo_smooth_enabled",
+        True,
+        changed_by="test",
+        source_ip="127.0.0.1",
     )
     with app.extensions["inktime_database"].session() as connection:
         connection.execute(
@@ -363,9 +349,7 @@ def test_quantized_preview_treats_explicit_dither_as_an_override(client, app, tm
     assert arguments["override_source"] == "request_override"
 
 
-def test_library_preview_timeout_retries_without_committing_artifacts(
-    client, app, tmp_path, monkeypatch
-):
+def test_library_preview_timeout_retries_without_committing_artifacts(client, app, tmp_path, monkeypatch):
     create_admin(app)
     login(client)
     photo_id = _library_photo(app, tmp_path / "preview-timeout", "timeout-photo")
@@ -375,9 +359,11 @@ def test_library_preview_timeout_retries_without_committing_artifacts(
     jobs = app.extensions["inktime_job_repository"]
     with app.extensions["inktime_database"].session() as connection:
         settings = json.loads(
-            str(connection.execute(
-                "SELECT settings_json FROM jobs WHERE id=?", (job_id,)
-            ).fetchone()["settings_json"])
+            str(
+                connection.execute("SELECT settings_json FROM jobs WHERE id=?", (job_id,)).fetchone()[
+                    "settings_json"
+                ]
+            )
         )
         settings["max_retries"] = 1
         connection.execute(
@@ -424,9 +410,7 @@ def test_library_preview_timeout_retries_without_committing_artifacts(
     ]
 
 
-def test_library_preview_lease_loss_discards_prepared_cache_and_result(
-    client, app, tmp_path, monkeypatch
-):
+def test_library_preview_lease_loss_discards_prepared_cache_and_result(client, app, tmp_path, monkeypatch):
     create_admin(app)
     login(client)
     photo_id = _library_photo(app, tmp_path / "preview-lease", "lease-photo")
@@ -442,8 +426,7 @@ def test_library_preview_lease_loss_discards_prepared_cache_and_result(
         Image.new("RGB", (480, 800), "white").save(prepared / "preview.png")
         with app.extensions["inktime_database"].session() as connection:
             connection.execute(
-                "UPDATE job_items SET lease_until='2000-01-01T00:00:00+00:00' "
-                "WHERE job_id=?",
+                "UPDATE job_items SET lease_until='2000-01-01T00:00:00+00:00' WHERE job_id=?",
                 (job_id,),
             )
         return {"stage": "preview_completed"}
@@ -459,23 +442,17 @@ def test_library_preview_lease_loss_discards_prepared_cache_and_result(
     assert list(workload.prepared_root.iterdir()) == []
 
 
-def test_library_preview_cache_hit_returns_png_without_render(
-    client, app, tmp_path, monkeypatch
-):
+def test_library_preview_cache_hit_returns_png_without_render(client, app, tmp_path, monkeypatch):
     create_admin(app)
     login(client)
     photo_id = _library_photo(app, tmp_path / "preview-cache", "cache-photo")
     service = app.extensions["inktime_render_service"]
     fingerprint = service.preview_fingerprint(photo_id)
-    app.extensions["inktime_render_cache"].put(
-        fingerprint, Image.new("RGB", (480, 800), "white")
-    )
+    app.extensions["inktime_render_cache"].put(fingerprint, Image.new("RGB", (480, 800), "white"))
     monkeypatch.setattr(
         service,
         "render_photo",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("cache hit must not render")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("cache hit must not render")),
     )
     response = client.get(f"/api/v1/rendering/preview/{photo_id}")
     assert response.status_code == 200
@@ -485,17 +462,13 @@ def test_library_preview_cache_hit_returns_png_without_render(
 
 def test_preview_fingerprint_tracks_all_render_versions(app, tmp_path, monkeypatch):
     primary = _library_photo(app, tmp_path / "fingerprint", "fingerprint-primary")
-    secondary = _library_photo(
-        app, tmp_path / "fingerprint", "fingerprint-secondary"
-    )
+    secondary = _library_photo(app, tmp_path / "fingerprint", "fingerprint-secondary")
     service = app.extensions["inktime_render_service"]
     settings = app.extensions["inktime_settings_repository"]
 
     def key(**kwargs):
         return app.extensions["inktime_render_cache"].fingerprint(
-            service.preview_fingerprint(
-                primary, secondary_photo_id=secondary, **kwargs
-            )
+            service.preview_fingerprint(primary, secondary_photo_id=secondary, **kwargs)
         )
 
     baseline = key()
@@ -507,12 +480,8 @@ def test_preview_fingerprint_tracks_all_render_versions(app, tmp_path, monkeypat
     caption_changed = key()
     assert caption_changed != baseline
 
-    settings.update(
-        "analysis.advanced_caption_enabled", True, changed_by="test", source_ip="local"
-    )
-    settings.update(
-        "analysis.copy_default_style", "warm", changed_by="test", source_ip="local"
-    )
+    settings.update("analysis.advanced_caption_enabled", True, changed_by="test", source_ip="local")
+    settings.update("analysis.copy_default_style", "warm", changed_by="test", source_ip="local")
     style_changed = key()
     assert style_changed != caption_changed
 
@@ -564,13 +533,9 @@ def test_preview_fingerprint_tracks_all_render_versions(app, tmp_path, monkeypat
     font_after = key()
     assert font_after != font_before
 
-    monkeypatch.setattr(
-        service.weather, "snapshot_fingerprint", lambda: {"snapshot": "weather-a"}
-    )
+    monkeypatch.setattr(service.weather, "snapshot_fingerprint", lambda: {"snapshot": "weather-a"})
     weather_before = key(layout="weather_sensor")
-    monkeypatch.setattr(
-        service.weather, "snapshot_fingerprint", lambda: {"snapshot": "weather-b"}
-    )
+    monkeypatch.setattr(service.weather, "snapshot_fingerprint", lambda: {"snapshot": "weather-b"})
     weather_after = key(layout="weather_sensor")
     assert weather_after != weather_before
 
@@ -587,9 +552,7 @@ def test_simulator_upload_does_not_encode_in_web_thread(client, app, monkeypatch
     monkeypatch.setattr(
         render_workloads,
         "encode_image",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("Web request must not encode")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Web request must not encode")),
     )
     response = client.post(
         "/api/v1/rendering/simulate",
@@ -672,9 +635,7 @@ def test_ab_preview_is_server_rendered_and_reports_palette_statistics(client, ap
     )
     assert repeated.status_code == 202
     WorkerRunner(app).run_once()
-    assert app.extensions["inktime_render_workload_service"].observability()[
-        "compare_cache_hit"
-    ] == 1
+    assert app.extensions["inktime_render_workload_service"].observability()["compare_cache_hit"] == 1
 
 
 def test_job_status_and_background_results_are_owner_scoped(app):
@@ -716,9 +677,10 @@ def test_job_status_and_background_results_are_owner_scoped(app):
     assert administrator.get(result_url).status_code == 200
     assert anonymous.get(created["status_url"]).status_code == 401
     assert anonymous.get(result_url).status_code == 401
-    assert administrator.get(
-        "/api/v1/rendering/background-results/" + "0" * 32 + "/preview.png"
-    ).status_code == 404
+    assert (
+        administrator.get("/api/v1/rendering/background-results/" + "0" * 32 + "/preview.png").status_code
+        == 404
+    )
 
 
 def test_test_release_is_one_time_and_does_not_overwrite_formal_schedule(client, app):
@@ -773,9 +735,7 @@ def test_test_release_is_one_time_and_does_not_overwrite_formal_schedule(client,
     assigned = client.get("/api/device/v1/releases/latest", headers=headers).get_json()
     assert assigned["release_id"] == test_release["release_id"]
     assert assigned["release_kind"] == "device_test"
-    downloaded = client.get(
-        assigned["download_base_url"] + assigned["files"][0]["name"], headers=headers
-    )
+    downloaded = client.get(assigned["download_base_url"] + assigned["files"][0]["name"], headers=headers)
     assert downloaded.status_code == 200
     downloaded.close()
     still_assigned = client.get("/api/device/v1/releases/latest", headers=headers).get_json()
@@ -796,33 +756,23 @@ def test_test_release_is_one_time_and_does_not_overwrite_formal_schedule(client,
     assert restored["release_id"] == formal["release_id"]
 
 
-def test_test_release_render_timeout_has_no_publish_assign_or_preset(
-    client, app, monkeypatch
-):
+def test_test_release_render_timeout_has_no_publish_assign_or_preset(client, app, monkeypatch):
     create_admin(app)
     login(client)
-    device_id, settings, context = _claimed_test_release(
-        client, app, save_preset=True
-    )
+    device_id, settings, context = _claimed_test_release(client, app, save_preset=True)
     workload = app.extensions["inktime_render_workload_service"]
     monkeypatch.setattr(
         workload.process_boundary,
         "call",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            ProcessCallTimeout("timeout")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ProcessCallTimeout("timeout")),
     )
     with pytest.raises(ProcessCallTimeout):
         workload.test_release(settings, context)
     assert app.extensions["inktime_release_publisher"].list() == []
-    assert DeviceTestReleaseStore(app.config["INKTIME_RELEASE_DIR"]).active(
-        device_id, "gdep073e01_6c"
-    ) is None
-    assert str(
-        app.extensions["inktime_settings_repository"].get(
-            "render.custom_photo_presets", "{}"
-        )
-    ) == "{}"
+    assert (
+        DeviceTestReleaseStore(app.config["INKTIME_RELEASE_DIR"]).active(device_id, "gdep073e01_6c") is None
+    )
+    assert str(app.extensions["inktime_settings_repository"].get("render.custom_photo_presets", "{}")) == "{}"
     assert list(workload.prepared_root.iterdir()) == []
 
 
@@ -846,15 +796,13 @@ def test_test_release_revalidates_device_after_render(client, app, monkeypatch):
     with pytest.raises(ValueError, match="DEVICE-006"):
         workload.test_release(settings, context)
     assert app.extensions["inktime_release_publisher"].list() == []
-    assert DeviceTestReleaseStore(app.config["INKTIME_RELEASE_DIR"]).active(
-        device_id, "gdep073e01_6c"
-    ) is None
+    assert (
+        DeviceTestReleaseStore(app.config["INKTIME_RELEASE_DIR"]).active(device_id, "gdep073e01_6c") is None
+    )
     assert list(workload.prepared_root.iterdir()) == []
 
 
-def test_cancelled_late_render_result_is_deleted_without_publish(
-    client, app, monkeypatch
-):
+def test_cancelled_late_render_result_is_deleted_without_publish(client, app, monkeypatch):
     create_admin(app)
     login(client)
     device_id, settings, context = _claimed_test_release(client, app)
@@ -871,9 +819,9 @@ def test_cancelled_late_render_result_is_deleted_without_publish(
     with pytest.raises(ProcessCallError):
         workload.test_release(settings, context)
     assert app.extensions["inktime_release_publisher"].list() == []
-    assert DeviceTestReleaseStore(app.config["INKTIME_RELEASE_DIR"]).active(
-        device_id, "gdep073e01_6c"
-    ) is None
+    assert (
+        DeviceTestReleaseStore(app.config["INKTIME_RELEASE_DIR"]).active(device_id, "gdep073e01_6c") is None
+    )
     assert list(workload.prepared_root.iterdir()) == []
 
 
@@ -903,9 +851,7 @@ def test_expired_item_lease_rejects_test_release_commit(client, app, monkeypatch
 def test_test_release_parent_commit_is_idempotent_for_same_item(client, app):
     create_admin(app)
     login(client)
-    _device_id, settings, context = _claimed_test_release(
-        client, app, save_preset=True
-    )
+    _device_id, settings, context = _claimed_test_release(client, app, save_preset=True)
     workload = app.extensions["inktime_render_workload_service"]
     first = workload.test_release(settings, context)
     second = workload.test_release(settings, context)
@@ -913,19 +859,13 @@ def test_test_release_parent_commit_is_idempotent_for_same_item(client, app):
     releases = app.extensions["inktime_release_publisher"].list()
     assert [item["release_id"] for item in releases] == [first["release_id"]]
     presets = json.loads(
-        str(
-            app.extensions["inktime_settings_repository"].get(
-                "render.custom_photo_presets", "{}"
-            )
-        )
+        str(app.extensions["inktime_settings_repository"].get("render.custom_photo_presets", "{}"))
     )
     assert list(presets) == [first["saved_preset"]["id"]]
     assert list(workload.prepared_root.iterdir()) == []
 
 
-def test_preset_write_failure_does_not_fail_assigned_test_release(
-    client, app, monkeypatch
-):
+def test_preset_write_failure_does_not_fail_assigned_test_release(client, app, monkeypatch):
     create_admin(app)
     login(client)
     device_id, job_id = _queued_test_release(client, app, save_preset=True)
@@ -933,9 +873,7 @@ def test_preset_write_failure_does_not_fail_assigned_test_release(
     monkeypatch.setattr(
         workload.settings,
         "update",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("private settings failure")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("private settings failure")),
     )
 
     WorkerRunner(app).run_once()
@@ -947,13 +885,13 @@ def test_preset_write_failure_does_not_fail_assigned_test_release(
     assert result["preset_saved"] is False
     assert result["preset_error"] == "RENDER-PRESET-WRITE"
     assert len(app.extensions["inktime_release_publisher"].list()) == 1
-    assert DeviceTestReleaseStore(app.config["INKTIME_RELEASE_DIR"]).active(
-        device_id, "gdep073e01_6c"
-    ) is not None
+    assert (
+        DeviceTestReleaseStore(app.config["INKTIME_RELEASE_DIR"]).active(device_id, "gdep073e01_6c")
+        is not None
+    )
     with app.extensions["inktime_database"].session() as connection:
         warnings = connection.execute(
-            "SELECT message,details_json FROM job_events "
-            "WHERE job_id=? AND event='preset_warning'",
+            "SELECT message,details_json FROM job_events WHERE job_id=? AND event='preset_warning'",
             (job_id,),
         ).fetchall()
     assert len(warnings) == 1
@@ -990,6 +928,7 @@ def test_oversized_preset_does_not_block_test_release(client, app, monkeypatch):
     assert result["preset_error"] == "RENDER-PRESET-SIZE"
     assert updates == []
     assert len(app.extensions["inktime_release_publisher"].list()) == 1
-    assert DeviceTestReleaseStore(app.config["INKTIME_RELEASE_DIR"]).active(
-        device_id, "gdep073e01_6c"
-    ) is not None
+    assert (
+        DeviceTestReleaseStore(app.config["INKTIME_RELEASE_DIR"]).active(device_id, "gdep073e01_6c")
+        is not None
+    )
