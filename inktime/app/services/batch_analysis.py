@@ -17,7 +17,7 @@ import re
 import resource
 import sqlite3
 import time
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 from uuid import uuid4
 
 from inktime.app.core.paths import safe_join
@@ -555,13 +555,38 @@ class BatchAnalysisService:
         return True, "", ""
 
     def _mark_cleanup_provider_unknown(self, batch_id: str, code: str, message: str) -> None:
+        current = self.batches.get(batch_id)
+        if current is None:
+            return
+        changes: dict[str, Any] = {
+            "cleanup_status": "partial",
+            "cleanup_error_code": code,
+            "cleanup_error_message": message[:1000],
+        }
+        if str(current["status"]) not in TERMINAL_BATCH_STATUSES:
+            changes["status"] = "cleanup_pending"
+        self.batches.update_batch(batch_id, **changes)
+
+    def _hold_terminal_cleanup_for_invalid_plan(
+        self,
+        batch: Mapping[str, Any],
+        *,
+        error_code: str,
+        error_message: str,
+        cleanup_status: str = "partial",
+    ) -> dict[str, Any]:
+        """Record a cleanup hold without changing terminal Batch semantics."""
+
+        if str(batch["status"]) not in TERMINAL_BATCH_STATUSES:
+            raise ValueError("terminal cleanup hold 只能套用於 terminal Batch")
         self.batches.update_batch(
-            batch_id,
-            status="cleanup_pending",
-            cleanup_status="partial",
-            cleanup_error_code=code,
-            cleanup_error_message=message[:1000],
+            str(batch["id"]),
+            cleanup_status=cleanup_status,
+            cleanup_error_code=error_code,
+            cleanup_error_message=error_message[:1000],
         )
+        current = self.batches.get(str(batch["id"]))
+        return dict(current) if current is not None else dict(batch)
 
     @staticmethod
     def _cleanup_action_for(batch: dict[str, Any]) -> str:
@@ -1081,6 +1106,8 @@ class BatchAnalysisService:
 
     def _mark_unknown_after_restart(self, batch: dict[str, Any], *, upload: bool) -> None:
         batch = dict(batch)
+        if str(batch["status"]) in TERMINAL_BATCH_STATUSES:
+            return
         state = "upload_unknown" if upload else "submission_unknown"
         self.batches.update_batch(
             str(batch["id"]),
@@ -1111,13 +1138,44 @@ class BatchAnalysisService:
         batch = self.batches.get(batch_id)
         if batch is None:
             return False
+        batch = dict(batch)
+        original_status = str(batch["status"])
         has_side_effect = any(
             batch[key] for key in ("input_file_id", "remote_batch_id", "output_file_id", "error_file_id")
         )
         if not has_side_effect:
+            if original_status in TERMINAL_BATCH_STATUSES:
+                self._hold_terminal_cleanup_for_invalid_plan(
+                    batch,
+                    error_code=error_code,
+                    error_message=message,
+                    cleanup_status="not_required",
+                )
+                return False
             self.batches.fail_local_batch(batch_id, error_code, message)
             self._cleanup_local(batch, immediate=True)
             return False
+        if original_status in TERMINAL_BATCH_STATUSES:
+            has_file_ids = any(batch[key] for key in ("input_file_id", "output_file_id", "error_file_id"))
+            unresolved_files = any(
+                batch[file_key] and not bool(batch[deleted_key])
+                for file_key, deleted_key in (
+                    ("input_file_id", "input_file_deleted"),
+                    ("output_file_id", "output_file_deleted"),
+                    ("error_file_id", "error_file_deleted"),
+                )
+            )
+            cleanup_status = (
+                "pending" if unresolved_files else ("completed" if has_file_ids else "not_required")
+            )
+            self.batches.update_batch(
+                batch_id,
+                cleanup_status=cleanup_status,
+                cleanup_error_code=error_code,
+                cleanup_error_message=message[:1000],
+            )
+            self._enqueue_import(batch_id, cleanup_only=True)
+            return True
         self.batches.update_batch(
             batch_id,
             status="cleanup_pending",
@@ -1766,12 +1824,16 @@ class BatchAnalysisService:
             action = self._cleanup_action_for(current)
             if action in {"cancel", "abandon", "fail"}:
                 self.batches.update_batch(batch_id, cleanup_final_action=action)
-                self.batches.finalize_cleanup(batch_id)
+                if str(current["status"]) not in TERMINAL_BATCH_STATUSES:
+                    self.batches.finalize_cleanup(batch_id)
+                else:
+                    self._finish(batch_id)
             elif action == "complete":
                 self.batches.update_batch(batch_id, cleanup_final_action="complete")
                 self._finish(batch_id)
+            current = dict(self.batches.get(batch_id) or current)
             return {
-                "status": str(batch["cleanup_status"]),
+                "status": str(current["cleanup_status"]),
                 "already_cleaned": True,
                 "batch_id": batch_id,
             }
@@ -2109,6 +2171,21 @@ class BatchAnalysisService:
 
     def _cleanup_remote(self, batch: dict[str, Any], plan: dict[str, Any]) -> bool:
         batch = dict(batch)
+
+        def complete_cleanup() -> None:
+            current = self.batches.get(str(batch["id"]))
+            if current is None:
+                return
+            current = dict(current)
+            action = self._cleanup_action_for(current)
+            if (
+                action in {"cancel", "abandon", "fail"}
+                and str(current["status"]) not in TERMINAL_BATCH_STATUSES
+            ):
+                self.batches.finalize_cleanup(str(batch["id"]))
+            else:
+                self._finish(str(batch["id"]))
+
         files = (
             ("input", "input_file_id", "input_file_deleted"),
             ("output", "output_file_id", "output_file_deleted"),
@@ -2129,10 +2206,7 @@ class BatchAnalysisService:
                 cleanup_completed_at=utc_now(),
                 cleanup_final_action=self._cleanup_action_for(batch),
             )
-            if self._cleanup_action_for(batch) in {"cancel", "abandon", "fail"}:
-                self.batches.finalize_cleanup(str(batch["id"]))
-            else:
-                self._finish(str(batch["id"]))
+            complete_cleanup()
             self._cleanup_local(batch)
             return True
         pending = [entry for entry in files if batch[entry[1]] and not bool(batch[entry[2]])]
@@ -2145,10 +2219,7 @@ class BatchAnalysisService:
                 cleanup_error_code=None,
                 cleanup_error_message=None,
             )
-            if self._cleanup_action_for(batch) in {"cancel", "abandon", "fail"}:
-                self.batches.finalize_cleanup(str(batch["id"]))
-            else:
-                self._finish(str(batch["id"]))
+            complete_cleanup()
             self._cleanup_local(batch)
             return True
         matched, code, message = self._cleanup_identity_matches(batch)
@@ -2224,7 +2295,11 @@ class BatchAnalysisService:
             if callable(close):
                 close()
         if failed:
-            self.batches.update_batch(str(batch["id"]), status="cleanup_pending", cleanup_status="partial")
+            current = dict(self.batches.get(str(batch["id"])) or batch)
+            cleanup_changes: dict[str, Any] = {"cleanup_status": "partial"}
+            if str(current["status"]) not in TERMINAL_BATCH_STATUSES:
+                cleanup_changes["status"] = "cleanup_pending"
+            self.batches.update_batch(str(batch["id"]), **cleanup_changes)
             return False
         self.batches.update_batch(
             str(batch["id"]),
@@ -2234,10 +2309,7 @@ class BatchAnalysisService:
             cleanup_error_code=None,
             cleanup_error_message=None,
         )
-        if self._cleanup_action_for(batch) in {"cancel", "abandon", "fail"}:
-            self.batches.finalize_cleanup(str(batch["id"]))
-        else:
-            self._finish(str(batch["id"]))
+        complete_cleanup()
         self._cleanup_local(batch)
         return True
 
@@ -2301,8 +2373,40 @@ class BatchAnalysisService:
     ) -> dict[str, Any] | None:
         """Stop import and only clean through the exact persisted Provider identity."""
 
+        batch = dict(batch)
+        original_status = str(batch["status"])
+        original_remote_status = batch.get("remote_status")
+        original_completed_at = batch.get("completed_at")
+        terminal = original_status in TERMINAL_BATCH_STATUSES
+
+        def verify_terminal_semantic() -> None:
+            if not terminal:
+                return
+            current = self.batches.get(batch_id)
+            if current is None:
+                return
+            current = dict(current)
+            if (
+                str(current["status"]) != original_status
+                or current.get("remote_status") != original_remote_status
+                or current.get("completed_at") != original_completed_at
+            ):
+                raise BatchLifecycleError(
+                    "Frozen Plan cleanup 不得改寫既有 terminal Batch semantic",
+                    "BATCH-CLEANUP-TERMINAL-001",
+                )
+
         has_files = any(batch[key] for key in ("input_file_id", "output_file_id", "error_file_id"))
         if not has_files:
+            if terminal:
+                self._hold_terminal_cleanup_for_invalid_plan(
+                    batch,
+                    error_code="BATCH-IMPORT-PLAN-001",
+                    error_message=message,
+                    cleanup_status="not_required",
+                )
+                verify_terminal_semantic()
+                return None
             self.batches.finalize_batch_result(
                 batch_id,
                 status="failed",
@@ -2312,6 +2416,21 @@ class BatchAnalysisService:
                 error_message=message,
             )
             return None
+        if terminal:
+            self.batches.update_batch(
+                batch_id,
+                cleanup_status="pending",
+                cleanup_error_code="BATCH-IMPORT-PLAN-001",
+                cleanup_error_message=message[:1000],
+            )
+            try:
+                plan = self._cleanup_plan(batch)
+            except BatchLifecycleError as exc:
+                self._mark_cleanup_provider_unknown(batch_id, exc.code, str(exc))
+                verify_terminal_semantic()
+                return None
+            verify_terminal_semantic()
+            return plan
         self.batches.update_batch(
             batch_id,
             status="cleanup_pending",
@@ -2335,21 +2454,24 @@ class BatchAnalysisService:
         if str(batch["status"]) in TERMINAL_BATCH_STATUSES and str(batch["cleanup_status"]) == "completed":
             return {"batch_id": batch_id, "already_imported": True}
         plan_row = self.jobs.get(str(batch["job_id"])) if batch["job_id"] else None
+        plan_error: str | None = None
         try:
             plan = json.loads(str(plan_row["analysis_spec_json"] or "{}")) if plan_row else {}
         except (TypeError, ValueError, json.JSONDecodeError):
-            plan = self._fail_closed_frozen_plan(
-                batch_id, dict(batch), "Frozen Analysis Plan JSON 無法解析；不匯入不完整結果"
-            )
+            plan = None
+            plan_error = "Frozen Analysis Plan JSON 無法解析；不匯入不完整結果"
+        if plan_error is not None:
+            plan = self._fail_closed_frozen_plan(batch_id, dict(batch), plan_error)
             cleanup_only = True
-        if not isinstance(plan, dict):
+        elif not isinstance(plan, dict) or not plan.get("provider_route"):
             plan = self._fail_closed_frozen_plan(
-                batch_id, dict(batch), "Frozen Analysis Plan JSON 必須是物件"
+                batch_id, dict(batch), "Frozen Analysis Plan JSON 缺少有效 provider route"
             )
             cleanup_only = True
         if cleanup_only or str(batch["status"]) == "cleanup_pending":
             if isinstance(plan, dict):
-                self._cleanup_remote(batch, plan)
+                current = self.batches.get(batch_id)
+                self._cleanup_remote(dict(current) if current is not None else dict(batch), plan)
             return {"batch_id": batch_id, "cleanup_only": True}
         assert isinstance(plan, dict)
         self.batches.update_batch(batch_id, status="importing")
