@@ -1159,6 +1159,11 @@ class AnalysisBatchRepository:
         batch = connection.execute("SELECT * FROM analysis_batches WHERE id=?", (batch_id,)).fetchone()
         if batch is None:
             raise KeyError(batch_id)
+        if str(batch["status"]) in TERMINAL_BATCH_STATUSES:
+            # Cleanup retries may run after the result semantic was already
+            # committed.  They can update cleanup-only columns, but they must
+            # never re-finalize Items or the parent Job from a stale intent.
+            return str(batch["status"])
         now = utc_now()
         active_statuses = ("pending", "submitted", "upload_unknown", "submission_unknown")
         if status in {"failed", "cancelled", "expired"}:
@@ -1328,6 +1333,10 @@ class AnalysisBatchRepository:
             )
             if any(batch[file_id] and not bool(batch[deleted]) for file_id, deleted in file_states):
                 raise ValueError("尚有未清理的 remote File")
+            if str(batch["status"]) in TERMINAL_BATCH_STATUSES:
+                # A terminal Batch keeps its original status even when an old
+                # cleanup action is replayed after the remote files converge.
+                return str(batch["status"])
             action = str(batch["cleanup_final_action"] or "none")
             target = (
                 "cancelled" if action == "cancel" else ("failed" if action in {"abandon", "fail"} else None)
