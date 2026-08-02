@@ -45,10 +45,10 @@ Webhook 採 at-least-once。每個事件持久化穩定 Event ID，所有後續 
 ## Production gates
 
 - `compose-production-smoke`：保留明確 HTTP break-glass 測試，不當作 TLS 證據。
-- `compose-lan-production-persistence`：使用專用 production LAN env、絕對 Volume、degraded transport diagnostics、登入／CSRF／Device Token／Queue download／ACK、Compose restart、down/up 同一儲存、離線 integrity／Migration 25、備份、破壞後還原與還原後 API 驗證。CI runner／本機 Docker 證據不等於真實 NAS reboot／filesystem／ACL。
+- `compose-lan-production-persistence`：使用專用 production LAN env、絕對 Volume、degraded transport diagnostics、登入／CSRF／Device Token／Queue download／ACK、Compose restart、down/up 同一儲存、離線 integrity／Migration 27、備份、破壞後還原與還原後 API 驗證。CI runner／本機 Docker 證據不等於真實 NAS reboot／filesystem／ACL。
 - `compose-production-tls-smoke`：用一次性測試 CA、SAN certificate、Nginx 與不屬保留 suffix 的 `inktime-ci.acme.dev`；client 明確信任 CA，不使用 `verify=False`／ignore-certificate。驗證 HTTP redirect、TLS hostname/chain、Secure＋HttpOnly＋SameSite=Strict、CSRF、login/logout/dashboard、HTTPS-only HSTS、production preflight 與 proxy hop diagnostics；backend port 不公開。
 - `bounded-runtime-soak`：Web app、Worker、Scheduler 同時執行；重複 session、device auth success/failure、Queue manifest/ACK、release metadata、scan、scheduler heartbeat 與 webhook mock。輸出 RSS、thread、FD、SQLite connection／writer、open file、child process、pending async work／job、oldest job、scheduler age、WAL、timeout、cleanup、exit status 與 final JSON summary。手動 workflow 可跑 30 分鐘、2 小時或 5 小時；24 小時只在受控 LAN 主機本地執行。
-- Backup/Restore：fresh database → full metadata backup → fresh target restore；驗證 Migration 26、administrator/password/session、device token、release/queue、settings、Batch lifecycle tables、Secret exclusion、Worker/Scheduler bootstrap。舊 snapshot upgrade 由 migration fixtures 覆蓋。
+- Backup/Restore：fresh database → full metadata backup → fresh target restore；驗證 Migration 27、administrator/password/session、device token、release/queue、settings、Batch lifecycle tables、Review／offline schedule tables、Secret exclusion、Worker/Scheduler bootstrap。舊 snapshot upgrade 由 migration fixtures 覆蓋。
 - Rollback：不支援只降程式、不還原 DB。必須停止 Web/Worker/Scheduler、還原相容 snapshot，再切回相容 image/commit。
 
 ## Dependency／Actions
