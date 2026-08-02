@@ -9,6 +9,14 @@ from typing import Any, Mapping, Sequence
 
 VISION_INPUT_VERSION = "vision-input-v2"
 SCHEMA_VERSION = 2
+REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
+
+
+def normalize_reasoning_effort(value: Any) -> str:
+    resolved = str(value or "none").strip().casefold()
+    if resolved not in REASONING_EFFORTS:
+        raise ValueError(f"reasoning_effort 只允許：{'、'.join(REASONING_EFFORTS)}")
+    return resolved
 
 
 def canonical_json(value: Mapping[str, Any]) -> str:
@@ -35,6 +43,7 @@ def build_analysis_plan(
     execution_policy: Mapping[str, Any] | None = None,
     travel_policy: Mapping[str, Any] | None = None,
     scoring_rules: str = "",
+    reasoning_effort: str = "none",
 ) -> dict[str, Any]:
     """Return a complete immutable plan without secrets or endpoint URLs."""
     high_side = int(high_image_max_side)
@@ -88,4 +97,5 @@ def build_analysis_plan(
         "prefilter": dict(prefilter or {}),
         "ai_execution_policy": dict(execution_policy or {}),
         "travel_policy": dict(travel_policy or {}),
+        "reasoning_effort": normalize_reasoning_effort(reasoning_effort),
     }

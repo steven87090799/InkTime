@@ -21,6 +21,7 @@ class SchedulerRunner:
         self.stop = threading.Event()
         self.last_backup_date: str | None = None
         self.last_notification_scan_at = 0.0
+        self.last_batch_poll_at = 0.0
 
     def request_stop(self, *_args) -> None:
         self.stop.set()
@@ -31,6 +32,20 @@ class SchedulerRunner:
         observability.heartbeat("scheduler")
         observability.tick()
         self.app.extensions["inktime_job_repository"].recover_stale()
+        batch_poll_seconds = int(settings.get("batch.poll_seconds", 300))
+        if time.monotonic() - self.last_batch_poll_at >= max(60, batch_poll_seconds):
+            try:
+                self.app.extensions["inktime_batch_analysis_service"].poll_due(limit=20)
+            except Exception as exc:
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "Batch 遠端輪詢失敗；下次排程會重試",
+                    event="analysis_batch_poll_failed",
+                    error_code="BATCH-POLL-001",
+                    details={"error_type": exc.__class__.__name__},
+                )
+            self.last_batch_poll_at = time.monotonic()
         notification_service = self.app.extensions["inktime_notification_service"]
         scan_seconds = int(settings.get("notification.scan_seconds", 300))
         if time.monotonic() - self.last_notification_scan_at >= scan_seconds:

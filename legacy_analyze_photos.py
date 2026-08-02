@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Deprecated / Maintenance Only / Not Used By Production Docker Worker.
 # -*- coding: utf-8 -*-
+from __future__ import annotations
 
 from pathlib import Path
 import base64

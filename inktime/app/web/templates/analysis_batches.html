@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Batch 照片分析{% endblock %}
+{% block content %}
+<main class="page-shell">
+  <h1>OpenAI Batch 照片分析</h1>
+  <p class="muted">每張照片只做一次完整分析；提交後由背景 Scheduler 輪詢，Worker 逐行匯入。</p>
+  {% if estimate %}
+  <section class="card">
+    <h2>提交前估算</h2>
+    <p>候選 {{ estimate.candidate_count }} 張、Cache 命中 {{ estimate.cache_hits }}、SHA 去重 {{ estimate.sha_duplicates }}、never_upload 排除 {{ estimate.never_upload_excluded }}。</p>
+    <p>預估 JSONL {{ estimate.estimated_jsonl_bytes }} bytes、分片 {{ estimate.estimated_shard_count }}、Input Token {{ estimate.estimated_input_tokens }}、Output Token {{ estimate.estimated_output_tokens }}、成本 USD {{ estimate.estimated_cost }}。</p>
+    <p>模型 {{ estimate.model }}；Analysis Fingerprint {{ estimate.analysis_fingerprint }}。</p>
+  </section>
+  {% endif %}
+  {% if g.user and g.user.role == 'administrator' %}
+  <section class="card">
+    <h2>建立 Batch</h2>
+    <form method="post" action="{{ url_for('analysis_batches.batches_page_action') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <label>範圍
+        <select name="scope">
+          <option value="sample">測試 100 張</option>
+          <option value="all_eligible_missing_analysis">所有 eligible 且缺少目前分析</option>
+          <option value="new_or_changed">僅新增／變更</option>
+          <option value="manual_selection">手動選取（請使用 API）</option>
+        </select>
+      </label>
+      <label>Sample 數量 <input name="sample_count" type="number" min="1" max="100000" value="100"></label>
+      <button name="action" value="estimate" type="submit">估算</button>
+      <button name="action" value="submit" type="submit">提交</button>
+    </form>
+  </section>
+  {% endif %}
+  {% if operator_holds %}
+  <section class="card notice">
+    <h2>需要管理員處理的外部結果未知 Batch</h2>
+    <p>這些 Batch 不會占用 Scheduler 的自動 Poll 配額，也不會自動重新上傳或重新建立遠端 Batch。請開啟詳情完成 File／Batch ownership Recovery，或在取得刪除證據後 Abandon。</p>
+    <ul>{% for hold in operator_holds %}<li><a href="{{ url_for('analysis_batches.batch_detail_page', batch_id=hold.id) }}">{{ hold.id }}</a>：{{ hold.status }}{% if hold.cleanup_error_code %}（{{ hold.cleanup_error_code }}）{% endif %}</li>{% endfor %}</ul>
+  </section>
+  {% endif %}
+  <section class="card">
+    <h2>Batch 清單</h2>
+    <table>
+      <thead><tr><th>ID</th><th>範圍</th><th>狀態</th><th>總數</th><th>成功</th><th>失敗</th><th>漏件</th><th>成本</th><th>操作</th></tr></thead>
+      <tbody>
+      {% for batch in batches %}
+        <tr>
+          <td><a href="{{ url_for('analysis_batches.batch_detail_page', batch_id=batch.id) }}">{{ batch.id }}</a></td>
+          <td>{{ batch.scope }}</td><td>{{ batch.status }}</td><td>{{ batch.total_items }}</td>
+          <td>{{ batch.imported_items }}</td><td>{{ batch.failed_items }}</td><td>{{ batch.missing_items }}</td><td>{{ batch.actual_cost }}</td>
+          <td>
+          {% if g.user and g.user.role == 'administrator' %}
+            <form method="post" action="{{ url_for('analysis_batches.batches_page_action') }}" class="inline-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="batch_id" value="{{ batch.id }}">
+              <button name="action" value="cancel" type="submit">取消</button>
+              <button name="action" value="retry" type="submit">重試失敗</button>
+              <button name="action" value="cleanup" type="submit">重試清理</button>
+            </form>
+            <form method="post" action="{{ url_for('analysis_batches.batches_page_action') }}" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="batch_id" value="{{ batch.id }}"><label><input type="checkbox" name="confirm" value="true" required> 已確認遠端 Batch 不存在</label>{% if batch.status == 'upload_unknown' %}<label><input type="checkbox" name="confirmed_remote_file_deleted" value="true" required> 已確認遠端 File 已刪除</label>{% endif %}<button name="action" value="abandon" type="submit">Abandon 並清理</button></form>
+          {% endif %}
+          </td>
+        </tr>
+      {% else %}<tr><td colspan="9">目前沒有 Batch。</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </section>
+</main>
+{% endblock %}

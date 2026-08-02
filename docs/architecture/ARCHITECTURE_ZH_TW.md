@@ -1,6 +1,6 @@
 # InkTime 專案架構與照片評分流程
 
-> 決策與韌性擴充：Migration 17 以既有 SQLite WAL／single-writer transaction 加入 Decision Trace、回饋、Shadow、Queue、Retention 與 Canary 資料。正式發布仍由 `RenderService → ReleaseCoordinator` 管理；追蹤或 Shadow 寫入失敗不會中斷正式 Release。
+> 決策與韌性擴充：Migration 22 加入 Decision Trace、回饋、Shadow、Queue、Retention 與 Canary 資料；Migration 23 補強決策關聯，Migration 24 補上分析／Vision Input 指紋。正式發布仍由 `RenderService → ReleaseCoordinator` 管理；追蹤或 Shadow 寫入失敗不會中斷正式 Release。
 
 這份文件是閱讀程式碼的入口。先看「執行架構」，再依要修改的功能查「模組地圖」；照片評分、模型與門檻集中在後半段。
 
@@ -145,11 +145,11 @@ flowchart LR
 
 ## 建議閱讀順序
 
-1. `README.md`：功能、部署與主要入口。
+1. [`README.md`](../../README.md)：功能、部署與主要入口。
 2. 本文件：執行架構、模組地圖與評分流程。
 3. `inktime/app/factory.py`、`bootstrap.py`：Web／Worker／Scheduler 如何共用 RuntimeConfig 與 Service 組裝。
 4. 依上方模組地圖進入目標功能。
-5. `docs/FINAL_IMPLEMENTATION_REPORT_ZH_TW.md`：完成證據與已知限制。
+5. [`FINAL_IMPLEMENTATION_REPORT_ZH_TW.md`](../archive/reports/FINAL_IMPLEMENTATION_REPORT_ZH_TW.md)：歷史完成證據與已知限制。
 
 ## 正式候選與 Release Coordinator
 

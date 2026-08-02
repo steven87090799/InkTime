@@ -24,6 +24,11 @@
     </fieldset>
     <button class="primary">儲存人工修正</button>
   </form>
+  <hr>
+  <h3>模型上傳隱私</h3>
+  <p>never_upload 只阻止未來上傳，不會刪除既有分析，也不影響照片顯示。</p>
+  <label><input id="never-upload" type="checkbox" {% if photo.never_upload %}checked{% endif %}> 永不上傳此照片至模型</label>
+  <button id="save-never-upload" class="secondary" type="button">儲存上傳隱私</button>
 </section>
 {% endif %}
 
@@ -121,4 +126,4 @@
   </section>
 </div>
 {% endblock %}
-{% block scripts %}{% if g.user.role == 'administrator' %}<script nonce="{{ csp_nonce }}">document.getElementById('photo-edit').onsubmit=async event=>{event.preventDefault();const form=new FormData(event.target);const response=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({favorite:form.has('favorite'),captured_at:form.get('captured_at'),side_caption:form.get('side_caption'),types:form.getAll('types')})});if(response.ok)location.reload();else alert((await response.json()).message||'更新失敗');};document.querySelectorAll('.orientation-set').forEach(b=>b.onclick=async()=>{const r=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}/orientation',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({rotation_cw:b.dataset.clear?null:Number(b.dataset.rotation)})});if(r.ok)location.reload();else alert((await r.json()).message||'儲存失敗')});</script>{% endif %}{% endblock %}
+{% block scripts %}{% if g.user.role == 'administrator' %}<script nonce="{{ csp_nonce }}">document.getElementById('photo-edit').onsubmit=async event=>{event.preventDefault();const form=new FormData(event.target);const response=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({favorite:form.has('favorite'),captured_at:form.get('captured_at'),side_caption:form.get('side_caption'),types:form.getAll('types')})});if(response.ok)location.reload();else alert((await response.json()).message||'更新失敗');};document.querySelectorAll('.orientation-set').forEach(b=>b.onclick=async()=>{const r=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}/orientation',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({rotation_cw:b.dataset.clear?null:Number(b.dataset.rotation)})});if(r.ok)location.reload();else alert((await r.json()).message||'儲存失敗')});const privacyButton=document.getElementById('save-never-upload');if(privacyButton)privacyButton.onclick=async()=>{const r=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}/upload-privacy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({never_upload:document.getElementById('never-upload').checked})});if(r.ok)location.reload();else alert((await r.json()).message||'儲存失敗')};</script>{% endif %}{% endblock %}

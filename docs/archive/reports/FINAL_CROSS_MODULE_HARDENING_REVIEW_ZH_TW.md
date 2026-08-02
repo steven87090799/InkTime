@@ -1,5 +1,7 @@
 # 最終跨模組一致性、安全性、低功耗與發布可靠性稽核
 
+> **歷史報告（2026-07-22）**：本文件保存當時的 CI 與實機驗證缺口；現行裝置行為請讀 `../../devices/`，不要將本報告當成當前硬體驗收。
+
 基準：`origin/main` 65c471b；2026-07-22 main CI run 29930737301 成功。PR #20 已合併且 python-quality 成功。
 
 | 分類 | 實際位置／目前行為 | 真正風險與本 PR | 測試證據／硬體邊界 |
@@ -18,7 +20,7 @@
 | `partially_present` | PhotoPainter `photopainter_support.cpp` | 已檢查 PSRAM/Flash、BUSY timeout、低電壓與集中 sleep；wire/native buffer 尚未完全改為 begin-time 唯一 owner | Compile/host tests；需實體 PSRAM 壓力與 USB 長駐測試 |
 | `partially_present` | `.ino`、`power_policy.h` | 已避免一般喚醒清除 Wi-Fi 持久設定並定義 battery/USB budget；cached BSSID/channel fast-connect 尚未接入 NVS 實作 | host policy tests；需 AP/弱訊號/功耗量測 |
 | `partially_present` | transport guard | 正式模式拒絕未配置 CA 的 HTTPS且無 `setInsecure()`；可信 CA provisioning 尚未完成 | 靜態搜尋；跨網路使用 VPN，見傳輸文件 |
-| `deferred_with_reason` | OTA | 目前 partition/rollback/signature/低電壓實體證據不完整，不加入半套 OTA | 見 `SECURE_OTA_DESIGN_ZH_TW.md` |
+| `deferred_with_reason` | OTA | 目前 partition/rollback/signature/低電壓實體證據不完整，不加入半套 OTA | 見 `../../devices/SECURE_OTA_DESIGN_ZH_TW.md` |
 | `partially_present` | `.ino` 主流程 | HTTP/NTP/BUSY/AP 多數已有 timeout/yield；尚未完整拆成 DeviceStateMachine 與 Task WDT | 五種 CI compile 尚需本 PR CI；實體 WDT fault injection 未完成 |
 
 ## 已確認不存在或已處理

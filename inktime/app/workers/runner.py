@@ -43,6 +43,10 @@ class WorkerRunner:
         for job in repository.iter_runnable():
             if self.stop.is_set() or job["status"] not in {"running", "retrying"}:
                 continue
+            # An analysis_batch Job is only a durable parent/progress record;
+            # its remote work is owned by OpenAI and is never claimed here.
+            if str(job["kind"]) == "analysis_batch":
+                continue
             settings = json.loads(job["settings_json"])
             analysis_plan = (
                 json.loads(str(job["analysis_spec_json"] or "{}")) if str(job["kind"]) == "analysis" else {}
@@ -177,6 +181,11 @@ class WorkerRunner:
                     raise AnalysisDisabledError("Frozen Analysis Plan 指定完全停用；工作項目已拒絕")
                 if provider_error is not None:
                     raise provider_error
+                if job["kind"] == "analysis_batch_import":
+                    return self.app.extensions["inktime_batch_analysis_service"].import_batch(
+                        str(settings["batch_id"]),
+                        cleanup_only=bool(settings.get("cleanup_only", False)),
+                    )
                 if job["kind"] == "render_preview":
                     operation = str(settings.get("operation", ""))
                     started = time.perf_counter()

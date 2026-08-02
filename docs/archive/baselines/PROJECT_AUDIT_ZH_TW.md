@@ -1,4 +1,6 @@
-# InkTime 工程現況稽核
+# InkTime 工程舊基線稽核
+
+> **歷史基線（2026-07-17）**：本文件是重構前稽核，不代表目前程式行為。現行入口請見 [`../../architecture/ARCHITECTURE_ZH_TW.md`](../../architecture/ARCHITECTURE_ZH_TW.md)。
 
 稽核基線：`main` / `b09baab`，2026-07-17。本文描述重構開始前的實際狀態，不代表目標平台已完成。
 

@@ -13,3 +13,5 @@
 - 舊裝置 API 預設關閉。Production 預設且建議 HTTPS；明確的 insecure HTTP break-glass 只供受控環境，Health／Preflight 會 degraded，且不得公開至公網。
 
 若主密鑰／`session.key` 遺失，既有 Secret 無法解密；應從備份恢復或重新輸入 Provider Key。疑似 Token 洩漏時立即重新產生並查看最後 IP／連線時間。
+
+Batch 的 JSONL 只含匿名 `custom_id`、獨立 Chat Completions Request 與無 EXIF/GPS 的縮圖 Base64；不含路徑、檔名、GPS、相簿名稱或 API Key。`never_upload` 是管理員可設定的上傳封鎖，與 `never_display` 分離，且不會刪除既有分析。遠端 Input／Output／Error File 在匯入後刪除；刪除失敗進 `cleanup_pending`，不回滾已完成分析。

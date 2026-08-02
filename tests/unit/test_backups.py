@@ -115,7 +115,7 @@ def test_backup_excludes_secrets_and_restores_analysis_and_photo_state(tmp_path)
     manifest = service.validate(archive)
 
     assert manifest["backup_format_version"] == 2
-    assert manifest["database_schema_version"] == 25
+    assert manifest["database_schema_version"] == 26
     assert manifest["secrets_policy"] == "excluded"
     assert manifest["important_table_counts"]["photos"] == 1
     assert manifest["important_table_counts"]["releases"] == 1
@@ -143,7 +143,7 @@ def test_backup_excludes_secrets_and_restores_analysis_and_photo_state(tmp_path)
     seed(database, extra_photo=True)
     restored = service.restore(archive)
 
-    assert restored["schema_version"] == 25
+    assert restored["schema_version"] == 26
     assert Path(restored["safety_copy"]).is_file()
     with database.session() as connection:
         photo = connection.execute("SELECT favorite,status FROM photos WHERE id='photo'").fetchone()
@@ -269,11 +269,11 @@ def test_fresh_volume_restore_preserves_platform_identity_and_roles(tmp_path):
     migrate(restored_database)
     restored = BackupService(restored_database, fresh / "backups").restore(archive)
 
-    assert restored["schema_version"] == 25
+    assert restored["schema_version"] == 26
     assert AuthRepository(restored_database).authenticate("restore-admin", "restore-test-passphrase")
     assert DeviceRepository(restored_database, "restore-pepper").authenticate(device_token, "203.0.113.20")
     with restored_database.session() as connection:
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 25
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 26
         assert connection.execute("SELECT COUNT(*) FROM secrets").fetchone()[0] == 0
         assert (
             connection.execute(

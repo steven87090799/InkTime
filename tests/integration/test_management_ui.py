@@ -19,6 +19,7 @@ def test_primary_management_pages_render(client, app):
         "/photos",
         "/jobs",
         "/providers",
+        "/analysis/batches",
         "/scoring",
         "/costs",
         "/simulator",
@@ -48,6 +49,122 @@ def test_primary_management_pages_render(client, app):
     settings = client.get("/settings").get_data(as_text=True)
     assert "Good Display 原廠相容" in settings
     assert "照片平滑（減少色塊／雜點）" in settings
+
+
+def test_batch_management_api_is_admin_only_and_strict_json(client, app):
+    create_admin(app)
+    login(client)
+    assert client.get("/analysis/batches").status_code == 200
+    assert client.post("/api/v1/analysis/batches/estimate", json={}).status_code == 403
+    unknown = client.post(
+        "/api/v1/analysis/batches/estimate",
+        json={"scope": "sample", "unexpected": True},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert unknown.status_code == 400
+    scalar = client.post(
+        "/api/v1/analysis/batches/estimate",
+        json=["sample"],
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert scalar.status_code == 400
+
+    app.extensions["inktime_auth_repository"].create_user("batch-viewer", "batch-viewer-password", "viewer")
+    viewer = app.test_client()
+    login(viewer, "batch-viewer", "batch-viewer-password")
+    assert viewer.get("/analysis/batches").status_code == 200
+    assert viewer.post("/api/v1/analysis/batches/estimate", json={}).status_code == 403
+
+
+def test_batch_management_api_dispatches_lifecycle_actions(client, app, monkeypatch):
+    create_admin(app)
+    login(client)
+
+    detail = {
+        "id": "batch-ui",
+        "job_id": None,
+        "scope": "sample",
+        "status": "completed",
+        "model": "gpt-5.6-luna",
+        "total_items": 1,
+        "imported_items": 1,
+        "failed_items": 0,
+        "missing_items": 0,
+        "stale_items": 0,
+        "input_tokens": 10,
+        "cached_tokens": 0,
+        "output_tokens": 2,
+        "reasoning_tokens": 0,
+        "actual_cost": 0.01,
+        "average_cost": 0.01,
+        "per_thousand_cost": 10.0,
+        "eligible_missing_count": 1,
+        "full_library_estimated_cost": 0.01,
+        "schema_success_rate": 100.0,
+        "actual_jsonl_bytes": 10,
+        "cleanup_status": "completed",
+        "peak_rss_bytes": 100,
+        "candidate_snapshot_json": "[]",
+        "shard_sizes": [],
+        "items": [],
+    }
+
+    class FakeBatchService:
+        def estimate(self, **kwargs):
+            return {"candidate_count": 1, **kwargs}
+
+        def submit(self, **kwargs):
+            return {"batch_ids": ["batch-ui"], **kwargs}
+
+        def get_detail(self, _batch_id):
+            return detail
+
+        def cancel(self, batch_id):
+            return {"batch_id": batch_id, "status": "cancelled"}
+
+        def retry_failed(self, batch_id, **kwargs):
+            return {"batch_id": batch_id, "retry": True, **kwargs}
+
+        def retry_cleanup(self, batch_id):
+            return {"status": "cleanup_pending", "job_id": f"cleanup-{batch_id}"}
+
+        def recover_submission(self, batch_id, remote_batch_id):
+            return {"batch_id": batch_id, "remote_batch_id": remote_batch_id, "status": "validating"}
+
+    monkeypatch.setitem(app.extensions, "inktime_batch_analysis_service", FakeBatchService())
+    headers = {"X-CSRF-Token": csrf(client)}
+    estimate = client.post("/api/v1/analysis/batches/estimate", json={"scope": "sample"}, headers=headers)
+    assert estimate.status_code == 200
+    created = client.post("/api/v1/analysis/batches", json={"scope": "sample"}, headers=headers)
+    assert created.status_code == 201
+    assert client.get("/api/v1/analysis/batches").status_code == 200
+    assert client.get("/api/v1/analysis/batches/batch-ui").status_code == 200
+    assert client.get("/analysis/batches/batch-ui").status_code == 200
+    assert (
+        client.post("/api/v1/analysis/batches/batch-ui/cancel", json={}, headers=headers).status_code == 200
+    )
+    assert (
+        client.post("/api/v1/analysis/batches/batch-ui/retry-failed", json={}, headers=headers).status_code
+        == 200
+    )
+    cleanup = client.post("/api/v1/analysis/batches/batch-ui/retry-cleanup", json={}, headers=headers)
+    assert cleanup.status_code == 200
+    assert cleanup.json["job_id"] == "cleanup-batch-ui"
+    recovered = client.post(
+        "/api/v1/analysis/batches/batch-ui/recover-submission",
+        json={"remote_batch_id": "batch-existing"},
+        headers=headers,
+    )
+    assert recovered.status_code == 200
+    assert recovered.json["remote_batch_id"] == "batch-existing"
+    assert (
+        client.post(
+            "/api/v1/analysis/batches/batch-ui/recover-submission",
+            json={"remote_batch_id": "batch-existing", "unexpected": True},
+            headers=headers,
+        ).status_code
+        == 400
+    )
 
 
 def test_device_energy_dashboard_uses_telemetry_and_audited_measurements(client, app):
