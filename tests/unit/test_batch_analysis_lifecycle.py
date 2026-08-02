@@ -258,6 +258,52 @@ def _wire_fake(app, fake):
     return service
 
 
+def _prepare_terminal_import_case(app, tmp_path, status: str, cleanup_status: str, *, remote_files: bool):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    repository = AnalysisBatchRepository(app.extensions["inktime_database"])
+    batch_id = service.submit(scope="manual_selection", photo_ids=[photo_id], created_by="tester")[
+        "batch_ids"
+    ][0]
+    remote_status = {
+        "completed": "completed",
+        "completed_with_errors": "completed",
+        "failed": "failed",
+        "cancelled": "cancelled",
+        "expired": "expired",
+    }[status]
+    changes = {
+        "status": status,
+        "remote_status": remote_status,
+        "completed_at": "2026-08-02T00:00:00+00:00",
+        "cleanup_status": cleanup_status,
+        "cleanup_final_action": "none",
+    }
+    if remote_files:
+        changes.update(
+            {
+                "input_file_id": "file-input",
+                "output_file_id": "file-output",
+                "error_file_id": "file-error",
+                "input_file_deleted": 0,
+                "output_file_deleted": 0,
+                "error_file_deleted": 0,
+            }
+        )
+    else:
+        changes.update(
+            {
+                "input_file_id": None,
+                "output_file_id": None,
+                "error_file_id": None,
+                "remote_batch_id": None,
+            }
+        )
+    repository.update_batch(batch_id, **changes)
+    return service, fake, repository, batch_id
+
+
 def _insert_batch(app, batch_id: str, status: str, *, created_at: str = "2000-01-01T00:00:00+00:00"):
     now = created_at
     with app.extensions["inktime_database"].transaction() as connection:
@@ -707,6 +753,232 @@ def test_fake_batch_imports_unordered_results_once(app, tmp_path):
         )
     assert analysis_count == len(photo_ids)
     assert usage_count == len(photo_ids)
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    ["completed", "completed_with_errors", "failed", "cancelled", "expired"],
+)
+@pytest.mark.parametrize("cleanup_status", ["completed", "not_required"])
+def test_terminal_import_is_an_idempotent_noop_for_finished_cleanup(
+    app, tmp_path, monkeypatch, terminal_status, cleanup_status
+):
+    service, fake, repository, batch_id = _prepare_terminal_import_case(
+        app, tmp_path, terminal_status, cleanup_status, remote_files=False
+    )
+    batch_before = dict(repository.get(batch_id))
+    items_before = [dict(item) for item in repository.items(batch_id)]
+    job_id = str(batch_before["job_id"])
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE jobs SET analysis_spec_json='{' WHERE id=?", (job_id,))
+        job_before = dict(connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+        job_items_before = [
+            dict(row) for row in connection.execute("SELECT * FROM job_items WHERE job_id=?", (job_id,))
+        ]
+    provider_calls = {"build": 0, "retrieve": 0, "enqueue": 0}
+
+    def build_provider(*_args, **_kwargs):
+        provider_calls["build"] += 1
+        return fake
+
+    fake.retrieve_file = lambda file_id: provider_calls.__setitem__(
+        "retrieve", provider_calls["retrieve"] + 1
+    ) or {"id": file_id}
+    monkeypatch.setattr(service, "_provider", build_provider)
+    monkeypatch.setattr(
+        service,
+        "_enqueue_import",
+        lambda *_args, **_kwargs: provider_calls.__setitem__("enqueue", provider_calls["enqueue"] + 1)
+        or "unexpected",
+    )
+    monkeypatch.setattr(
+        service,
+        "_read_results",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("terminal no-op must not read results")
+        ),
+    )
+
+    result = service.import_batch(batch_id)
+
+    assert result == {"batch_id": batch_id, "already_imported": True}
+    assert dict(repository.get(batch_id)) == batch_before
+    assert [dict(item) for item in repository.items(batch_id)] == items_before
+    with app.extensions["inktime_database"].session() as connection:
+        assert dict(connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()) == job_before
+        assert [
+            dict(row) for row in connection.execute("SELECT * FROM job_items WHERE job_id=?", (job_id,))
+        ] == job_items_before
+    assert provider_calls == {"build": 0, "retrieve": 0, "enqueue": 0}
+    assert fake.downloads == 0
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    ["completed", "completed_with_errors", "failed", "cancelled", "expired"],
+)
+@pytest.mark.parametrize("cleanup_status", ["pending", "partial"])
+@pytest.mark.parametrize("identity_mode", ["matches", "mismatch"])
+def test_terminal_import_pending_cleanup_never_reimports_results(
+    app, tmp_path, monkeypatch, terminal_status, cleanup_status, identity_mode
+):
+    service, fake, repository, batch_id = _prepare_terminal_import_case(
+        app, tmp_path, terminal_status, cleanup_status, remote_files=True
+    )
+    batch_before = dict(repository.get(batch_id))
+    items_before = [dict(item) for item in repository.items(batch_id)]
+    job_id = str(batch_before["job_id"])
+    with app.extensions["inktime_database"].session() as connection:
+        job_before = dict(connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+        job_items_before = [
+            dict(row) for row in connection.execute("SELECT * FROM job_items WHERE job_id=?", (job_id,))
+        ]
+
+    def active_reservations() -> int:
+        with app.extensions["inktime_database"].session() as connection:
+            return int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM analysis_batch_items WHERE batch_id=? "
+                    "AND status IN ('pending','submitted','upload_unknown','submission_unknown')",
+                    (batch_id,),
+                ).fetchone()[0]
+            )
+
+    provider_calls = {"build": 0, "retrieve": 0, "enqueue": 0}
+
+    def build_provider(*_args, **_kwargs):
+        provider_calls["build"] += 1
+        return fake
+
+    fake.retrieve_file = lambda file_id: provider_calls.__setitem__(
+        "retrieve", provider_calls["retrieve"] + 1
+    ) or {"id": file_id}
+    monkeypatch.setattr(service, "_provider", build_provider)
+    monkeypatch.setattr(
+        service,
+        "_enqueue_import",
+        lambda *_args, **_kwargs: provider_calls.__setitem__("enqueue", provider_calls["enqueue"] + 1)
+        or "unexpected",
+    )
+    monkeypatch.setattr(
+        service,
+        "_read_results",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("cleanup-only must not read results")),
+    )
+    if identity_mode == "mismatch":
+        original_identity = service.provider_service.identity_snapshot
+
+        def changed_identity(provider_id):
+            identity = dict(original_identity(provider_id))
+            identity["provider_account_fingerprint"] = "different-provider-context"
+            return identity
+
+        monkeypatch.setattr(service.provider_service, "identity_snapshot", changed_identity)
+
+    reservations_before = active_reservations()
+    first = service.import_batch(batch_id)
+    second = service.import_batch(batch_id)
+    final = dict(repository.get(batch_id))
+
+    assert first == {"batch_id": batch_id, "cleanup_only": True}
+    assert second in (
+        {"batch_id": batch_id, "cleanup_only": True},
+        {"batch_id": batch_id, "already_imported": True},
+    )
+    assert final["status"] == batch_before["status"]
+    assert final["remote_status"] == batch_before["remote_status"]
+    assert final["completed_at"] == batch_before["completed_at"]
+    assert [dict(item) for item in repository.items(batch_id)] == items_before
+    assert active_reservations() == reservations_before
+    with app.extensions["inktime_database"].session() as connection:
+        assert dict(connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()) == job_before
+        assert [
+            dict(row) for row in connection.execute("SELECT * FROM job_items WHERE job_id=?", (job_id,))
+        ] == job_items_before
+    assert provider_calls["enqueue"] == 0
+    assert provider_calls["retrieve"] == 0
+    assert fake.downloads == 0
+    if identity_mode == "mismatch":
+        assert provider_calls["build"] == 0
+        assert fake.deleted == []
+        assert final["cleanup_status"] == "partial"
+        assert final["cleanup_error_code"] == "BATCH-CLEANUP-PROVIDER-MISMATCH"
+    else:
+        assert provider_calls["build"] == 1
+        assert sorted(fake.deleted) == ["file-error", "file-input", "file-output"]
+        assert final["cleanup_status"] == "completed"
+
+
+def test_terminal_import_cleanup_claims_are_concurrent_and_idempotent(app, tmp_path):
+    service, fake, repository, batch_id = _prepare_terminal_import_case(
+        app, tmp_path, "completed_with_errors", "partial", remote_files=True
+    )
+    batch_before = dict(repository.get(batch_id))
+    items_before = [dict(item) for item in repository.items(batch_id)]
+    job_id = str(batch_before["job_id"])
+    with app.extensions["inktime_database"].session() as connection:
+        job_before = dict(connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+        job_items_before = [
+            dict(row) for row in connection.execute("SELECT * FROM job_items WHERE job_id=?", (job_id,))
+        ]
+    original_delete = fake.delete_remote_file
+    delete_lock = threading.Lock()
+
+    def slow_delete(file_id: str):
+        with delete_lock:
+            result = original_delete(file_id)
+            time.sleep(0.05)
+            return result
+
+    fake.delete_remote_file = slow_delete
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _value: service.import_batch(batch_id), range(2)))
+
+    assert results == [
+        {"batch_id": batch_id, "cleanup_only": True},
+        {"batch_id": batch_id, "cleanup_only": True},
+    ]
+    final = dict(repository.get(batch_id))
+    assert final["status"] == batch_before["status"]
+    assert final["remote_status"] == batch_before["remote_status"]
+    assert final["completed_at"] == batch_before["completed_at"]
+    assert final["cleanup_status"] == "completed"
+    assert sorted(fake.deleted) == ["file-error", "file-input", "file-output"]
+    assert [dict(item) for item in repository.items(batch_id)] == items_before
+    with app.extensions["inktime_database"].session() as connection:
+        assert dict(connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()) == job_before
+        assert [
+            dict(row) for row in connection.execute("SELECT * FROM job_items WHERE job_id=?", (job_id,))
+        ] == job_items_before
+
+
+@pytest.mark.parametrize("initial_status", ["import_pending", "importing", "finalizing"])
+def test_non_terminal_import_states_still_import_results(app, tmp_path, initial_status):
+    photo_ids = _prepare_photos(app, tmp_path, count=1)
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    repository = AnalysisBatchRepository(app.extensions["inktime_database"])
+    batch_id = service.submit(scope="manual_selection", photo_ids=photo_ids, created_by="tester")[
+        "batch_ids"
+    ][0]
+    repository.update_batch(
+        batch_id,
+        status=initial_status,
+        remote_status="completed",
+        output_file_id="file-output",
+        error_file_id=None,
+        input_file_deleted=0,
+        output_file_deleted=0,
+        cleanup_status="pending",
+        cleanup_final_action="complete",
+    )
+
+    result = service.import_batch(batch_id)
+
+    assert result == {"batch_id": batch_id, "success": 1, "errors": 0, "missing": 0}
+    assert dict(repository.get(batch_id))["status"] == "completed"
+    assert fake.downloads == 1
+    assert sorted(fake.deleted) == ["file-input", "file-output"]
 
 
 def test_ambiguous_batch_submission_is_persisted_and_recovery_only_binds_existing_remote(app, tmp_path):

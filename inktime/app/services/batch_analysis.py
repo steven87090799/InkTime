@@ -17,7 +17,7 @@ import re
 import resource
 import sqlite3
 import time
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Literal, Mapping
 from uuid import uuid4
 
 from inktime.app.core.paths import safe_join
@@ -2447,12 +2447,27 @@ class BatchAnalysisService:
             self._mark_cleanup_provider_unknown(batch_id, exc.code, str(exc))
             return None
 
+    @staticmethod
+    def _terminal_import_mode(
+        batch: Mapping[str, Any],
+    ) -> Literal["noop", "cleanup_only"] | None:
+        """Return the only safe import mode for a terminal Batch."""
+
+        if str(batch["status"]) not in TERMINAL_BATCH_STATUSES:
+            return None
+        if str(batch["cleanup_status"] or "") in {"completed", "not_required"}:
+            return "noop"
+        return "cleanup_only"
+
     def import_batch(self, batch_id: str, *, cleanup_only: bool = False) -> dict[str, Any]:
         batch = self.batches.get(batch_id)
         if batch is None:
             raise KeyError(batch_id)
-        if str(batch["status"]) in TERMINAL_BATCH_STATUSES and str(batch["cleanup_status"]) == "completed":
+        terminal_mode = self._terminal_import_mode(batch)
+        if terminal_mode == "noop":
             return {"batch_id": batch_id, "already_imported": True}
+        if terminal_mode == "cleanup_only":
+            cleanup_only = True
         plan_row = self.jobs.get(str(batch["job_id"])) if batch["job_id"] else None
         plan_error: str | None = None
         try:
