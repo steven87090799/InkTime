@@ -7,9 +7,11 @@ from PIL import Image
 from inktime.app.domain.analysis.plan import fingerprint
 from inktime.app.domain.photos import PhotoPreprocessor
 from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
+from inktime.app.repositories.analysis_batches import AnalysisBatchRepository
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.workers.runner import WorkerRunner
 from inktime.app.workers.scanner import PhotoScanner
+from tests.unit.test_batch_analysis_lifecycle import FakeBatchProvider, _prepare_photos, _wire_fake
 from tests.unit.test_analysis_schema import valid_result
 
 
@@ -41,6 +43,78 @@ class FrozenPlanProvider(VisionProvider):
 
     def validate_config(self):
         return True, "ok"
+
+
+def test_worker_runner_finishes_stale_terminal_batch_import_as_a_noop(app, tmp_path, monkeypatch):
+    photo_id = _prepare_photos(app, tmp_path, count=1)[0]
+    fake = FakeBatchProvider()
+    service = _wire_fake(app, fake)
+    batches = AnalysisBatchRepository(app.extensions["inktime_database"])
+    batch_id = service.submit(scope="manual_selection", photo_ids=[photo_id], created_by="tester")[
+        "batch_ids"
+    ][0]
+    batches.update_batch(
+        batch_id,
+        status="failed",
+        remote_status="failed",
+        completed_at="2026-08-02T00:00:00+00:00",
+        cleanup_status="not_required",
+        input_file_id=None,
+        output_file_id=None,
+        error_file_id=None,
+        remote_batch_id=None,
+    )
+    parent_batch = dict(batches.get(batch_id))
+    parent_job_id = str(parent_batch["job_id"])
+    import_job_id = service._enqueue_import(batch_id)
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            "UPDATE jobs SET analysis_spec_json='{',status='retrying',completed_at=NULL WHERE id=?",
+            (parent_job_id,),
+        )
+        connection.execute("UPDATE jobs SET status='retrying',completed_at=NULL WHERE id=?", (import_job_id,))
+        parent_job_before = dict(
+            connection.execute("SELECT * FROM jobs WHERE id=?", (parent_job_id,)).fetchone()
+        )
+        parent_items_before = [
+            dict(row)
+            for row in connection.execute("SELECT * FROM job_items WHERE job_id=?", (parent_job_id,))
+        ]
+    provider_calls = 0
+
+    def build_provider(*_args, **_kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        return fake
+
+    monkeypatch.setattr(service, "_provider", build_provider)
+    monkeypatch.setattr(
+        service,
+        "_read_results",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("worker replay must not import results")
+        ),
+    )
+
+    runner = WorkerRunner(app)
+    assert runner.run_once() == 1
+    import_job = app.extensions["inktime_job_repository"].get(import_job_id)
+    assert import_job["status"] == "completed"
+    assert import_job["completed_items"] == 1
+    assert app.extensions["inktime_job_repository"].list_items(import_job_id)[0]["status"] == "completed"
+    assert runner.run_once() == 0
+    assert provider_calls == 0
+    assert fake.downloads == 0
+    assert dict(batches.get(batch_id)) == parent_batch
+    with app.extensions["inktime_database"].session() as connection:
+        assert (
+            dict(connection.execute("SELECT * FROM jobs WHERE id=?", (parent_job_id,)).fetchone())
+            == parent_job_before
+        )
+        assert [
+            dict(row)
+            for row in connection.execute("SELECT * FROM job_items WHERE job_id=?", (parent_job_id,))
+        ] == parent_items_before
 
 
 def test_production_runner_completes_local_job_without_provider(app, tmp_path, monkeypatch):
