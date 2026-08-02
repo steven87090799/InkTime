@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timezone
 import json
 import re
 from typing import Any, Sequence
@@ -249,9 +249,8 @@ class OfflineScheduleRepository:
                     str(device["timezone"]),
                     grace_minutes=15,
                 )
-                for slot_index, (slot, release_id) in enumerate(
-                    zip(configured_times, normalized_release_ids)
-                ):
+                for slot_index, slot in enumerate(configured_times):
+                    release_id = normalized_release_ids[slot_index]
                     release = connection.execute(
                         """
                         SELECT id,manifest_json FROM releases r

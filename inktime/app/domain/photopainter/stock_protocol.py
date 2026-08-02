@@ -138,6 +138,8 @@ def _rgb_from_packed(payload: bytes, *, profile_key: str, width: int = 480, heig
     indices = _unpack_indices(payload, width=width, height=height, pixel_format=profile.pixel_format)
     image = Image.new("RGB", (width, height))
     pixels = image.load()
+    if pixels is None:
+        raise ValueError("PHOTOPAINTER-004 無法配置 BMP 像素緩衝")
     try:
         colors = {color.code: INDEXED4_RGB[color.name] for color in profile.colors}
     except KeyError as exc:

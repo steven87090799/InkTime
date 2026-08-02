@@ -259,7 +259,8 @@ class DisplayPreparationService:
         self.resilience.ensure_queue(device_id, depth=max(3, len(schedule_times)))
 
         release_ids: list[str] = []
-        for _slot, candidate in zip(schedule_times, unique_candidates):
+        for slot_index, _slot in enumerate(schedule_times):
+            candidate = unique_candidates[slot_index]
             result = self.render_service.publish(
                 [str(candidate["id"])],
                 created_by,

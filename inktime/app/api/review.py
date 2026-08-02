@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from flask import Blueprint, abort, current_app, g, render_template, request, send_file
 
 from inktime.app.core.json_values import json_int, json_object_payload
@@ -17,7 +19,7 @@ def _repository():
     return current_app.extensions["inktime_review_repository"]
 
 
-def _filters() -> dict:
+def _filters() -> dict[str, Any]:
     boolean_keys = (
         "candidate_pool",
         "favorite",
@@ -28,7 +30,7 @@ def _filters() -> dict:
         "caption_bad",
         "scores_unreasonable",
     )
-    result = {
+    result: dict[str, Any] = {
         "q": request.args.get("q", ""),
         "review_state": request.args.get("review_state", ""),
         "review_status": request.args.get("review_status", ""),

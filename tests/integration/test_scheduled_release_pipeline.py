@@ -117,7 +117,7 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
                     photo_id,
                     library_id,
                     filename,
-                    f"2020-07-22T10:00:00",
+                    "2020-07-22T10:00:00",
                     "2020-07-22",
                     "07-22",
                     90 - index,

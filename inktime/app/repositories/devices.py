@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+from typing import Sequence
 from uuid import uuid4
 
 from inktime.app.core.security import hash_device_token, issue_device_token
@@ -60,8 +61,8 @@ class DeviceRepository:
         schedule: str = "08:00",
         delivery_mode: str = "legacy_online",
         offline_prefetch_allowed: bool = False,
-        offline_schedule: list[str] | None = None,
-        schedule_times: list[str] | None = None,
+        offline_schedule: Sequence[str] | None = None,
+        schedule_times: Sequence[str] | None = None,
         prefetch_lead_minutes: int = 5,
         button_wake_action: str = "check_new",
         stock_endpoint_host: str | None = None,
@@ -141,8 +142,8 @@ class DeviceRepository:
         schedule: str,
         delivery_mode: str = "legacy_online",
         offline_prefetch_allowed: bool = False,
-        offline_schedule: list[str] | None = None,
-        schedule_times: list[str] | None = None,
+        offline_schedule: Sequence[str] | None = None,
+        schedule_times: Sequence[str] | None = None,
         prefetch_lead_minutes: int = 5,
         button_wake_action: str = "check_new",
         stock_endpoint_host: str | None = None,

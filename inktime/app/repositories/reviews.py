@@ -146,11 +146,11 @@ class ReviewRepository:
         score_min = filters.get("score_min")
         if score_min not in {None, ""}:
             clauses.append("COALESCE(a.ranking_score,0)>=?")
-            params.append(float(score_min))
+            params.append(float(str(score_min)))
         score_max = filters.get("score_max")
         if score_max not in {None, ""}:
             clauses.append("COALESCE(a.ranking_score,0)<=?")
-            params.append(float(score_max))
+            params.append(float(str(score_max)))
         confidence = (
             "COALESCE(json_extract(a.semantic_json,'$.confidence.overall'),"
             "json_extract(a.semantic_json,'$.confidence'))"
@@ -264,22 +264,22 @@ class ReviewRepository:
         with self.database.session() as connection:
             total = int(
                 connection.execute(
-                    f"SELECT COUNT(*) FROM photos p "
+                    f"SELECT COUNT(*) FROM photos p "  # noqa: S608 -- clauses are fixed above
                     "LEFT JOIN photo_analysis a ON a.id=(SELECT MAX(id) FROM photo_analysis WHERE photo_id=p.id) "
                     "LEFT JOIN photo_reviews r ON r.photo_id=p.id AND ((a.id IS NOT NULL AND r.analysis_id=a.id) OR (a.id IS NULL AND r.analysis_id IS NULL)) "
                     f"WHERE {where}",
                     params,
                 ).fetchone()[0]
-            )  # noqa: S608
+            )
             states = connection.execute(
-                f"SELECT COALESCE(r.review_state,'unreviewed') AS state,COUNT(*) AS count FROM photos p "
+                f"SELECT COALESCE(r.review_state,'unreviewed') AS state,COUNT(*) AS count FROM photos p "  # noqa: S608 -- clauses are fixed above
                 "LEFT JOIN photo_analysis a ON a.id=(SELECT MAX(id) FROM photo_analysis WHERE photo_id=p.id) "
                 "LEFT JOIN photo_reviews r ON r.photo_id=p.id AND ((a.id IS NOT NULL AND r.analysis_id=a.id) OR (a.id IS NULL AND r.analysis_id IS NULL)) "
                 f"WHERE {where} GROUP BY state",
                 params,
-            ).fetchall()  # noqa: S608
+            ).fetchall()
             feedback = connection.execute(
-                f"SELECT "
+                f"SELECT "  # noqa: S608 -- clauses are fixed above
                 "COALESCE(SUM(CASE WHEN COALESCE(r.understanding_incorrect,0)=1 THEN 1 ELSE 0 END),0) AS understanding_incorrect,"
                 "COALESCE(SUM(CASE WHEN COALESCE(r.caption_bad,0)=1 THEN 1 ELSE 0 END),0) AS caption_bad,"
                 "COALESCE(SUM(CASE WHEN COALESCE(r.scores_unreasonable,0)=1 THEN 1 ELSE 0 END),0) AS scores_unreasonable,"
@@ -290,7 +290,7 @@ class ReviewRepository:
                 "LEFT JOIN photo_reviews r ON r.photo_id=p.id AND ((a.id IS NOT NULL AND r.analysis_id=a.id) OR (a.id IS NULL AND r.analysis_id IS NULL)) "
                 f"WHERE {where}",
                 params,
-            ).fetchone()  # noqa: S608
+            ).fetchone()
             years = connection.execute("SELECT substr(COALESCE(review_taken_at,captured_at,created_at),1,4) AS year,COUNT(*) AS count FROM photos WHERE lifecycle_status NOT IN ('deleted','archived') GROUP BY year ORDER BY year DESC LIMIT 30").fetchall()
             reasons = connection.execute("SELECT COALESCE(reject_reason,reject_rule,exclusion_status,'unknown') AS reason,COUNT(*) AS count FROM photos WHERE lifecycle_status NOT IN ('deleted','archived') GROUP BY reason ORDER BY count DESC,reason LIMIT 50").fetchall()
         return {
@@ -333,7 +333,9 @@ class ReviewRepository:
                 f"SELECT substr({date_expr},9,2) AS value,COUNT(*) AS count{base}WHERE {where} GROUP BY value ORDER BY value LIMIT 31",
                 params,
             ).fetchall()
-        convert = lambda rows: [{"value": str(row["value"]), "count": int(row["count"])} for row in rows if row["value"]]
+        def convert(rows: Any) -> list[dict[str, Any]]:
+            return [{"value": str(row["value"]), "count": int(row["count"])} for row in rows if row["value"]]
+
         return {"years": convert(years), "months": convert(months), "days": convert(days)}
 
     def get(self, photo_id: str) -> dict[str, Any] | None:
@@ -365,8 +367,8 @@ class ReviewRepository:
         }
         if unknown:
             raise ValueError("REVIEW-001 不支援的欄位")
-        state = str(payload.get("review_state", payload.get("review_status", ""))).strip() or None
-        state = {"accepted": "keep", "rejected": "exclude", "kept": "keep"}.get(state, state)
+        state_value = str(payload.get("review_state", payload.get("review_status", ""))).strip()
+        state = {"accepted": "keep", "rejected": "exclude", "kept": "keep"}.get(state_value, state_value) or None
         if state is not None and state not in REVIEW_STATES:
             raise ValueError("REVIEW-001 review_state 不合法")
         caption_key = (
