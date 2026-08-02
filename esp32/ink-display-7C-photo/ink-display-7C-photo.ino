@@ -116,11 +116,13 @@ struct Config {
   uint8_t refresh_hour;
   uint8_t refresh_minute;
   bool    rotate180;
+#if INKTIME_PHOTOPAINTER_ENABLED
   inktime::OfflineSlot schedule_slots[inktime::kMaxOfflineSlots];
   uint8_t schedule_count;
   uint16_t prefetch_lead_minutes;
   String  delivery_mode;
   String  button_wake_action;
+#endif
   uint32_t config_version;
   bool    valid;
 };
@@ -129,6 +131,7 @@ const char*  DEFAULT_HOSTPORT = "";
 const int32_t DEFAULT_TZ_MINUTES = 8 * 60;
 const uint8_t DEFAULT_HOUR    = 8;
 const uint8_t DEFAULT_MINUTE  = 0;
+#if INKTIME_PHOTOPAINTER_ENABLED
 const uint16_t DEFAULT_PREFETCH_LEAD_MINUTES = 5;
 
 static bool parseOfflineClock(const String &value, inktime::OfflineSlot &slot) {
@@ -236,6 +239,7 @@ static bool loadStoredSchedule(Config &cfg) {
   cfg.refresh_minute = slots[0].minute;
   return true;
 }
+#endif
 
 Config g_cfg;
 uint8_t* frameData = nullptr;
@@ -634,6 +638,7 @@ void loadConfig(Config &cfg) {
   cfg.refresh_hour     = (uint8_t)prefs.getUChar("hour", DEFAULT_HOUR);
   cfg.refresh_minute   = (uint8_t)prefs.getUChar("minute", DEFAULT_MINUTE);
   cfg.rotate180        = prefs.getBool("rot180", false);
+#if INKTIME_PHOTOPAINTER_ENABLED
   cfg.prefetch_lead_minutes = prefs.getUShort("prefetch", DEFAULT_PREFETCH_LEAD_MINUTES);
   cfg.delivery_mode     = prefs.getString("delivery", "legacy_online");
   cfg.button_wake_action = prefs.getString("button", "check_new");
@@ -642,6 +647,7 @@ void loadConfig(Config &cfg) {
   if (!validButtonWakeAction(cfg.button_wake_action)) cfg.button_wake_action = "check_new";
   if (cfg.prefetch_lead_minutes > 120U) cfg.prefetch_lead_minutes = DEFAULT_PREFETCH_LEAD_MINUTES;
   if (!loadStoredSchedule(cfg)) setLegacySchedule(cfg);
+#endif
   prefs.end();
 
   cfg.valid = (cfg.wifi_ssid.length() > 0);
@@ -668,6 +674,7 @@ void saveConfig(const Config &cfg) {
   prefs.putUChar("hour", cfg.refresh_hour);
   prefs.putUChar("minute", cfg.refresh_minute);
   prefs.putBool("rot180", cfg.rotate180);
+#if INKTIME_PHOTOPAINTER_ENABLED
   prefs.putUShort("prefetch", cfg.prefetch_lead_minutes);
   prefs.putString("delivery", cfg.delivery_mode);
   prefs.putString("button", cfg.button_wake_action);
@@ -676,6 +683,7 @@ void saveConfig(const Config &cfg) {
     const String key = String("s") + String(index);
     prefs.putString(key.c_str(), offlineClock(cfg.schedule_slots[index]));
   }
+#endif
   prefs.putULong("cfgver", cfg.config_version);
   prefs.end();
 
@@ -1455,12 +1463,16 @@ bool downloadLatestPhotoBin(Config &cfg) {
     String desiredPanelProfile = remoteConfig["panel_profile"] | "safe_4c";
     bool compatiblePanel = desiredPanelProfile == "safe_4c"
       || desiredPanelProfile == String(INKTIME_PANEL_PROFILE);
+#if INKTIME_PHOTOPAINTER_ENABLED
     Config candidate = cfg;
     bool validSchedule = applyRemoteSchedule(
       remoteConfig,
       remoteConfig["schema_version"] | 0,
       candidate
     );
+#else
+    const bool validSchedule = true;
+#endif
     bool validRemote = offsetMinutes >= -12 * 60 && offsetMinutes <= 14 * 60
       && remoteHour >= 0 && remoteHour <= 23 && remoteMinute >= 0 && remoteMinute <= 59
       && (rotation == 0 || rotation == 180) && compatiblePanel
@@ -1474,14 +1486,26 @@ bool downloadLatestPhotoBin(Config &cfg) {
         cfg.tz_offset_minutes != offsetMinutes || cfg.refresh_hour != remoteHour
         || cfg.refresh_minute != remoteMinute || cfg.rotate180 != (rotation == 180)
         || cfg.config_version != desiredConfigVersion
+#if INKTIME_PHOTOPAINTER_ENABLED
         || cfg.delivery_mode != candidate.delivery_mode
         || cfg.schedule_count != candidate.schedule_count
         || cfg.prefetch_lead_minutes != candidate.prefetch_lead_minutes
         || cfg.button_wake_action != candidate.button_wake_action) {
+#else
+        ) {
+#endif
+#if INKTIME_PHOTOPAINTER_ENABLED
       candidate.tz_offset_minutes = offsetMinutes;
       candidate.rotate180 = rotation == 180;
       candidate.config_version = desiredConfigVersion;
       cfg = candidate;
+#else
+      cfg.tz_offset_minutes = offsetMinutes;
+      cfg.refresh_hour = static_cast<uint8_t>(remoteHour);
+      cfg.refresh_minute = static_cast<uint8_t>(remoteMinute);
+      cfg.rotate180 = rotation == 180;
+      cfg.config_version = desiredConfigVersion;
+#endif
       saveConfig(cfg);
       serverConfigChanged = true;
 #if DEBUG_LOG
@@ -1983,8 +2007,10 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
   String selectedPixelFormat;
   String selectedRenderProfile;
   int64_t selectedSize = 0;
+#if INKTIME_PHOTOPAINTER_ENABLED
   bool selected = false;
   const bool enhancedOffline = cfg.delivery_mode == "inktime_offline_schedule";
+#endif
   for (size_t index = 0; index < items.size(); ++index) {
     const JsonVariantConst rawItem = items[index];
     if (!rawItem.is<JsonObjectConst>()) {
@@ -2008,6 +2034,7 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
     String downloadUrl = item["download_url"] | "";
     String pixelFormat = item["pixel_format"] | "";
     String renderProfile = item["render_profile"] | "";
+#if INKTIME_PHOTOPAINTER_ENABLED
     const JsonVariantConst rawOfflinePrefetch = item["offline_prefetch_allowed"];
     if (!rawOfflinePrefetch.isNull()
         && (!rawOfflinePrefetch.is<bool>() || rawOfflinePrefetch.is<int>())) {
@@ -2017,6 +2044,7 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
     }
     const bool offlinePrefetchAllowed = rawOfflinePrefetch | false;
     const String deliveryMode = item["delivery_mode"] | "online_queue";
+#endif
     const int64_t size = rawSize.as<int64_t>();
     const inktime::QueueItemContract contract = {
       itemId.c_str(), releaseId.c_str(), sha.c_str(), downloadUrl.c_str(), true, size,
@@ -2031,10 +2059,14 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
       lastDeviceErrorMessage = "Queue Item 身分、SHA、路徑、尺寸或 Profile 不合法";
       return QueueDownloadResult::Failed;
     }
+#if INKTIME_PHOTOPAINTER_ENABLED
     if (enhancedOffline && (deliveryMode != "offline_schedule" || !offlinePrefetchAllowed)) {
       continue;
     }
     if (!selected) {
+#else
+    if (index == 0U) {
+#endif
       selectedItemId = itemId;
       selectedReleaseId = releaseId;
       selectedSha = sha;
@@ -2042,11 +2074,15 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
       selectedPixelFormat = pixelFormat;
       selectedRenderProfile = renderProfile;
       selectedSize = size;
+#if INKTIME_PHOTOPAINTER_ENABLED
       selected = true;
+#endif
     }
   }
 
+#if INKTIME_PHOTOPAINTER_ENABLED
   if (!selected) return QueueDownloadResult::EmptyOrUnsupported;
+#endif
 
   currentFromQueue = true;
   currentQueueItemId = selectedItemId;
@@ -2198,6 +2234,7 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
   return QueueDownloadResult::Used;
 }
 
+#if INKTIME_PHOTOPAINTER_ENABLED
 static bool offlinePrefetchWake(const Config &cfg, time_t nowEpoch) {
   if (cfg.delivery_mode != "inktime_offline_schedule"
       || cfg.schedule_count == 0 || cfg.prefetch_lead_minutes == 0 || nowEpoch <= 0) {
@@ -2224,6 +2261,7 @@ static bool offlinePrefetchWake(const Config &cfg, time_t nowEpoch) {
   const time_t lead = static_cast<time_t>(cfg.prefetch_lead_minutes) * 60;
   return nowEpoch >= nextDisplay - lead && nowEpoch < nextDisplay;
 }
+#endif
 
 #if INKTIME_PHOTOPAINTER_ENABLED
 static bool loadOfflineScheduledLocalFrame(const Config &cfg, time_t nowEpoch);
@@ -2425,6 +2463,7 @@ void sleepUntilNextSchedule(const Config &cfg, bool hasTime, const struct tm &no
     return;
   }
 
+#if INKTIME_PHOTOPAINTER_ENABLED
   if (cfg.delivery_mode == "inktime_offline_schedule"
       && cfg.schedule_count > 0 && cfg.schedule_count <= inktime::kMaxOfflineSlots) {
     struct tm localNow = now;
@@ -2453,6 +2492,7 @@ void sleepUntilNextSchedule(const Config &cfg, bool hasTime, const struct tm &no
       return;
     }
   }
+#endif
 
   int curMinOfDay = now.tm_hour * 60 + now.tm_min;
   int targetMin   = (int)cfg.refresh_hour * 60 + (int)cfg.refresh_minute;
