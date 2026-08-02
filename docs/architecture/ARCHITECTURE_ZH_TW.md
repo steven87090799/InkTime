@@ -54,7 +54,7 @@ flowchart TB
 |---|---|---|
 | 登入、權限、CSRF | `inktime/app/api/auth.py`、`web/access.py` | `repositories/auth.py`、`core/security.py` |
 | 照片掃描與本地特徵 | `workers/scanner.py` | `domain/photos/preprocessing.py`、`repositories/photos.py` |
-| 模型分析與兩階段判斷 | `services/analysis.py` | `providers/openai_compatible.py`、`domain/analysis/schema.py` |
+| 單次模型分析與舊策略正規化 | `services/analysis.py`、`domain/analysis/plan.py` | `providers/openai_compatible.py`、`domain/analysis/schema.py` |
 | 評分規則、權重、測試與還原 | `api/scoring.py`、`services/scoring_lab.py` | `repositories/scoring.py`、`domain/analysis/scoring.py` |
 | 背景工作、暫停與恢復 | `workers/runner.py`、`workers/job_worker.py` | `repositories/jobs.py` |
 | 模型路由、限流與熔斷 | `providers/router.py` | `services/providers.py`、`repositories/providers.py` |
@@ -73,11 +73,9 @@ flowchart LR
     DUP -->|"是"| INHERIT["繼承結果<br/>不呼叫模型"]
     DUP -->|"否"| STRATEGY{"分析策略"}
     STRATEGY -->|"local"| LOCAL_SCORE["本地固定公式"]
-    STRATEGY -->|"low_cost／smart"| STAGE1["512px 第一階段模型"]
-    STRATEGY -->|"high_quality"| STAGE2["1600px 高品質模型"]
-    STAGE1 --> GATE{"回憶分達門檻<br/>或人物／最愛？"}
-    GATE -->|"是"| STAGE2
-    GATE -->|"否"| SAVE["保存四項原始分數、綜合分與規則版本"]
+    STRATEGY -->|"single"| VISION["一次高細節 Vision 模型"]
+    STRATEGY -->|"local"| LOCAL_SCORE["本地固定公式"]
+    VISION --> SAVE["保存四項原始分數、綜合分與規則版本"]
     STAGE2 --> SAVE
     LOCAL_SCORE --> SAVE
     INHERIT --> SAVE
@@ -96,7 +94,7 @@ flowchart LR
 | `technical_quality_score` | 清晰、曝光、構圖等技術品質 | 視覺模型依固定 Prompt 判斷 |
 | `emotion_score` | 情緒與故事性 | 視覺模型依固定 Prompt 判斷 |
 
-`memory_score` 不是加權總分；它是模型直接輸出的回憶分。系統另外保存 `ranking_score`：預設以回憶 50%、美觀 20%、技術品質 10%、情緒 20% 計算，最愛照片再加 5 分並限制在 0–100。管理員可在「評分」頁調整權重；四項必須合計 100%。`analysis.stage_two_threshold` 與 `render.memory_threshold` 仍是門檻，不是權重。
+`memory_score` 不是加權總分；它是模型直接輸出的回憶分。系統另外保存 `ranking_score`：預設以回憶 50%、美觀 20%、技術品質 10%、情緒 20% 計算，最愛照片再加 5 分並限制在 0–100。管理員可在「評分」頁調整權重；四項必須合計 100%。`analysis.stage_two_threshold` 僅是舊設定讀取相容欄位，`render.memory_threshold` 才是電子紙候選的最低回憶分門檻。
 
 ### 不改程式碼可以調整的項目
 
@@ -104,13 +102,13 @@ flowchart LR
 
 | 設定鍵 | 用途 | 預設值 |
 |---|---|---:|
-| `model.low_model` | 第一階段低成本模型 | `gpt-4o-mini` |
-| `model.high_model` | 第二階段高品質模型 | `gpt-4o` |
+| `model.analysis_model` | 單次完整 Vision 模型 | `gpt-4o` |
+| `model.low_model`／`model.high_model` | 舊版模型設定 | 僅讀取相容，不恢復第二次圖片請求 |
 | 「評分」控制中心 | 規則、權重、最愛加分、版本歷史與單張測試 | 內建完整舊版規則 |
-| `analysis.stage_two_threshold` | 第一階段回憶分達此值才升級；人物／最愛例外 | 65 |
+| `analysis.stage_two_threshold` | 舊版兩階段設定的讀取相容欄位 | 65 |
 | `render.memory_threshold` | 電子紙候選照片最低回憶分 | 70 |
 
-建立工作時可在「工作」頁選擇 `local`、`low_cost`、`high_quality` 或 `smart_two_stage`。Provider、Base URL、API Key、價格與優先順序在「模型」頁管理。
+建立工作時可在「工作」頁選擇 `local` 或 `single`。`low_cost`、`smart`、`smart_two_stage`、`high_quality` 與 `single_high` 是舊輸入的讀取相容別名，會正規化為 `single`，不會再次啟用兩階段圖片請求。Provider、Base URL、API Key、價格與 `model.analysis_model` 在「模型」頁管理。
 
 ### 要改評分規則時看哪裡
 
@@ -120,7 +118,7 @@ flowchart LR
 - 評分規則版本化預設：`inktime/app/domain/analysis/scoring.py` 的 `DEFAULT_SCORING_RULES`。
 - 不可由網頁覆寫的 JSON／語言／防虛構指令：`inktime/app/providers/openai_compatible.py` 的 `SYSTEM_PROMPT`。
 - 分數欄位、型別與 0–100 範圍：`inktime/app/domain/analysis/schema.py`。
-- 兩階段門檻判斷：`inktime/app/services/analysis.py` 的 `requires_second`。
+- 單次圖片請求與文字修復界線：`inktime/app/services/analysis.py`；每張照片最多一次圖片請求，JSON 修復只允許文字請求。
 - 僅本地策略的固定分數公式：同檔案的 `_local_result()`。
 - Worker 如何讀取設定：`inktime/app/workers/runner.py`。
 - 電子紙自動選片排序：`inktime/app/services/rendering.py`。

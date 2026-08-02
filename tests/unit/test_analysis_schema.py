@@ -42,6 +42,34 @@ def test_schema_v1_missing_orientation_is_safely_upgraded():
     assert validate_analysis_result(legacy)["visual_orientation"]["rotation_cw"] is None
 
 
+def test_schema_v3_normalizes_grades_and_preserves_confidence_details():
+    result = valid_result(
+        schema_version=3,
+        memory_grade="A",
+        aesthetic_grade="B",
+        technical_grade="S",
+        emotion_grade="C",
+        display_suitability_grade="A",
+        confidence={"overall": 0.91, "orientation": 0.72},
+    )
+    for field in ("memory_score", "beauty_score", "technical_quality_score", "emotion_score"):
+        result.pop(field)
+
+    normalized = validate_analysis_result(result)
+
+    assert normalized["memory_score"] == 85.0
+    assert normalized["beauty_score"] == 75.0
+    assert normalized["technical_quality_score"] == 95.0
+    assert normalized["emotion_score"] == 60.0
+    assert normalized["details"]["display_suitability_grade"] == "A"
+    assert normalized["details"]["confidence"]["overall"] == 0.91
+
+
+def test_schema_v3_rejects_unknown_grade():
+    with pytest.raises(AnalysisValidationError):
+        validate_analysis_result(valid_result(schema_version=3, memory_grade="Z"))
+
+
 @pytest.mark.parametrize(
     "orientation",
     [

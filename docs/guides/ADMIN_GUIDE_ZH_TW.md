@@ -10,8 +10,8 @@
 | 欄位 | 預設 | 合法範圍／建議 | 風險 | 重啟 |
 |---|---:|---|---|---|
 | `general.timezone` | Asia/Taipei | IANA 時區 | 影響跨日與排程 | 否 |
-| `analysis.strategy` | smart_two_stage | 五種策略 | 高品質成本高 | 否 |
-| `analysis.stage_two_threshold` | 65 | 0–100，建議 60–75 | 越低成本越高 | 否 |
+| `analysis.strategy` | single | `local`／`single` | `single` 每張照片最多一次圖片模型請求 | 否 |
+| `analysis.stage_two_threshold` | 65 | 舊版讀取相容欄位 | 新工作不再使用，不會觸發第二次圖片請求 | 否 |
 | 本機預篩選 | 啟用 | 截圖／明顯低品質可分別停用 | 排除項目 0 Token；不刪原檔 | 否 |
 | `analysis.prefilter_sensitivity` | conservative | conservative／balanced／aggressive | 越積極越省 Token，也越可能誤排除 | 否 |
 | `analysis.e6_prefilter_enabled` | true | true／false | 關閉後不會因六色量化失真而省下模型請求 | 否 |
@@ -26,8 +26,8 @@
 | `worker.progress_seconds` | 300 | 30–3,600 | 越小 Docker Log 越多 | 否 |
 | `scheduler.poll_seconds` | 60 | 30–3,600 | 越小 SQLite／CPU 喚醒越多 | 否 |
 | `analysis.max_retries` | 3 | 0–10 | 重試增加成本 | 否 |
-| `model.low_model` | gpt-4o-mini | 支援圖片／Schema 的模型 | 能力不足會進錯誤佇列 | 否 |
-| `model.high_model` | gpt-4o | 同上 | 先設定價格 | 否 |
+| `model.analysis_model` | gpt-4o | 支援圖片／Schema 的模型 | 能力不足會進錯誤佇列 | 否 |
+| `model.low_model`／`model.high_model` | 舊值 | 舊版讀取相容欄位 | 新工作不會恢復低／高兩次圖片請求 | 否 |
 | `budget.daily_warning` | 5 | ≥0 美元 | 只警告 | 否 |
 | `budget.daily_stop` | 10 | ≥0 美元 | 達到即停新請求 | 否 |
 | `budget.monthly_warning` | 50 | ≥0 美元 | 只警告 | 否 |
@@ -70,6 +70,8 @@
 | `backup.retention` | 14 | 1–365 | 過低縮短回復期 | 否 |
 
 所有修改寫入 `setting_history`，最近 100 筆直接顯示在設定頁；Secret 永不寫入摘要。Web、Worker、排程、Log 與 Session 的新設定均動態生效。只有舊版裝置 API 這類啟動時安全邊界仍需重啟。
+
+新工作只有 `local` 與 `single` 兩個正式策略。`low_cost`、`smart`、`smart_two_stage`、`high_quality` 與 `single_high` 仍可讀取舊工作或舊 API payload，但會正規化為單次完整分析；不會再執行低成本→高品質的第二次圖片上傳。`analysis.caption_variants_enabled` 仍可讀取舊設定，但已移到進階設定，新的基本設定頁不再突出顯示五種候選文案。
 
 ## Web 與部署設定的邊界
 
@@ -122,10 +124,10 @@ deep-sleep 待機電流、完整喚醒週期平均電流、每日刷新次數及
 
 ## 照片評分與門檻
 
-模型會直接輸出回憶、美觀、技術品質與情緒四個 0–100 原始分數。系統另用「評分」頁的四項權重算出 `ranking_score`，並在最愛照片上加入設定的額外分數；原始四項分數不會被覆寫。`analysis.stage_two_threshold` 仍只決定是否進入第二階段，`render.memory_threshold` 仍是電子紙候選的最低回憶分門檻。
+模型一次輸出回憶、美觀、技術品質與情緒四個 0–100 原始分數。系統另用「評分」頁的四項權重算出 `ranking_score`，並在最愛照片上加入設定的額外分數；原始四項分數不會被覆寫。`analysis.stage_two_threshold` 僅保留舊設定讀取相容，`render.memory_threshold` 才是電子紙候選的最低回憶分門檻。
 
-- 改模型：在「設定」調整 `model.low_model`／`model.high_model`，並在「模型」頁設定 Provider。
-- 改第二階段成本與品質取捨：調整 `analysis.stage_two_threshold`。
+- 改模型：在「設定」調整 `model.analysis_model`，並在「模型」頁設定 Provider。
+- 舊版 `model.low_model`／`model.high_model` 與 `analysis.stage_two_threshold` 僅供相容讀取，不會恢復第二次圖片請求。
 - 改電子紙最低回憶分：調整 `render.memory_threshold`。
 - 改模型評分規則或綜合權重：到「評分」頁儲存為新版本；下一次分析立即生效，既有照片不會自動重算。
 - 測試照片：在「評分」頁選一張照片並確認付費請求；暫存檔會在請求結束後刪除，Token、費用與延遲仍寫入成本紀錄。

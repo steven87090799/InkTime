@@ -122,11 +122,11 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "analysis.strategy": {
         "category": "分析設定",
-        "default": "smart_two_stage",
+        "default": "single",
         "type": "string",
-        "description": "新工作的預設分析策略",
-        "risk": "高品質策略成本較高",
-        "choices": ["local", "low_cost", "smart_two_stage", "high_quality"],
+        "description": "新工作的預設分析策略；每張照片最多一次圖片模型請求",
+        "risk": "模型請求仍受本機預篩選、預算與每日上限約束",
+        "choices": ["local", "single"],
         "restart": False,
     },
     "analysis.advanced_caption_enabled": {
@@ -479,8 +479,8 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "category": "分析設定",
         "default": 65,
         "type": "number",
-        "description": "進入第二階段的回憶分數門檻",
-        "risk": "數值越低，模型成本越高",
+        "description": "舊版兩階段工作的讀取相容欄位；新工作不再使用",
+        "risk": "僅保留歷史設定，不會增加新照片的圖片模型請求",
         "min": 0,
         "max": 100,
         "restart": False,
@@ -492,6 +492,15 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "description": "高品質 Vision 輸入最長邊",
         "risk": "1600 會增加成本與延遲",
         "choices": [1024, 1600],
+        "restart": False,
+    },
+    "analysis.image_max_side": {
+        "category": "分析設定",
+        "default": 1024,
+        "type": "integer",
+        "description": "單次完整 Vision 分析輸入圖片最長邊",
+        "risk": "1600 會增加成本、記憶體與延遲",
+        "choices": [512, 1024, 1600],
         "restart": False,
     },
     "analysis.prefilter_enabled": {
@@ -782,12 +791,20 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "risk": "模型必須支援圖片與 JSON Schema",
         "restart": False,
     },
+    "model.analysis_model": {
+        "category": "模型設定",
+        "default": "gpt-4o",
+        "type": "string",
+        "description": "新單次照片分析使用的 Vision 模型",
+        "risk": "模型必須支援圖片與 JSON Schema；價格與上下文限制由管理員確認",
+        "restart": False,
+    },
     "model.high_model": {
         "category": "模型設定",
         "default": "gpt-4o",
         "type": "string",
-        "description": "第二階段高品質模型",
-        "risk": "請確認 Provider 價格",
+        "description": "舊版高品質模型的讀取相容欄位；新工作由 model.analysis_model 取代",
+        "risk": "僅保留歷史工作相容性，不會啟用第二次圖片請求",
         "restart": False,
     },
     "batch.model": {
@@ -1462,7 +1479,6 @@ _BASIC_KEYS = {
     "analysis.strategy",
     "analysis.execution_mode",
     "analysis.advanced_caption_enabled",
-    "analysis.caption_variants_enabled",
     "analysis.ai_mode",
     "analysis.ai_top_n",
     "analysis.ai_daily_photo_limit",
@@ -1490,6 +1506,7 @@ _HIGH_RISK_KEYS = {
     "analysis.concurrency",
     "analysis.max_retries",
     "model.low_model",
+    "model.analysis_model",
     "model.high_model",
     "budget.daily_warning",
     "budget.daily_stop",
@@ -1772,6 +1789,12 @@ class SettingsRepository:
         with self.database.session() as connection:
             row = connection.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()
         return json.loads(row["value_json"]) if row else default
+
+    def is_explicit(self, key: str) -> bool:
+        """Whether an operator has stored a non-default value for ``key``."""
+        with self.database.session() as connection:
+            row = connection.execute("SELECT updated_by FROM settings WHERE key=?", (key,)).fetchone()
+        return bool(row and row["updated_by"])
 
     def history(self, limit: int = 100, *, redact_source_ip: bool = False):
         with self.database.session() as connection:

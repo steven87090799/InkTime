@@ -597,14 +597,30 @@ class ResilienceRepository:
         display_after: str | None = None,
         expires_at: str | None = None,
         idempotency_key: str | None = None,
+        delivery_mode: str = "online_queue",
+        offline_prefetch_allowed: bool = False,
+        offline_slot: str | None = None,
+        ack_deadline: str | None = None,
     ) -> dict[str, Any]:
         item_id, now = str(uuid4()), utc_now()
+        if delivery_mode not in {"online_queue", "offline_schedule"}:
+            raise ValueError("QUEUE-005 delivery_mode 不合法")
+        if delivery_mode == "online_queue" and offline_prefetch_allowed:
+            raise ValueError("QUEUE-005 一般 online Queue 不得標記 offline_prefetch_allowed")
+        if delivery_mode == "offline_schedule" and not offline_prefetch_allowed:
+            raise ValueError("QUEUE-005 offline Schedule Queue 必須標記 offline_prefetch_allowed")
         with self.database.transaction() as connection:
             queue = connection.execute(
                 "SELECT depth FROM device_content_queues WHERE device_id=?", (device_id,)
             ).fetchone()
             if not queue:
                 raise ValueError("QUEUE-001 必須先建立裝置 Queue")
+            if delivery_mode == "offline_schedule":
+                device = connection.execute(
+                    "SELECT delivery_mode,offline_prefetch_allowed FROM devices WHERE id=?", (device_id,)
+                ).fetchone()
+                if not device or str(device["delivery_mode"]) != "inktime_offline_schedule" or not bool(device["offline_prefetch_allowed"]):
+                    raise ValueError("QUEUE-005 裝置未啟用離線排程或 Prefetch")
             compatible = connection.execute(
                 """SELECT 1 FROM releases r JOIN devices d ON d.id=?
                 WHERE r.id=? AND r.status='published' AND r.render_profile=d.panel_profile""",
@@ -640,7 +656,7 @@ class ResilienceRepository:
                 ).fetchone()[0]
             )
             connection.execute(
-                "INSERT INTO device_content_queue_items(id,device_id,release_id,position,priority,display_after,expires_at,status,idempotency_key,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO device_content_queue_items(id,device_id,release_id,position,priority,display_after,expires_at,status,idempotency_key,delivery_mode,offline_prefetch_allowed,offline_slot,ack_deadline,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     item_id,
                     device_id,
@@ -651,6 +667,10 @@ class ResilienceRepository:
                     expires_at,
                     "READY",
                     idempotency_key,
+                    delivery_mode,
+                    int(bool(offline_prefetch_allowed)),
+                    offline_slot,
+                    ack_deadline,
                     now,
                     now,
                 ),
@@ -690,7 +710,19 @@ class ResilienceRepository:
             queue = connection.execute(
                 "SELECT queue_version FROM device_content_queues WHERE device_id=?", (device_id,)
             ).fetchone()
-            if queue is None or int(queue["queue_version"]) != queue_version:
+            delayed_terminal = (
+                event in {"DISPLAY_COMPLETED", "DISPLAY_FAILED"}
+                and str(payload.get("ack_mode", "")) == "delayed_terminal"
+                and str(item["delivery_mode"]) == "offline_schedule"
+                and bool(item["offline_prefetch_allowed"])
+                and str(item["status"]) in {"ACKNOWLEDGED", "DISPLAYED"}
+                and str(payload.get("release_id", item["release_id"])) == str(item["release_id"])
+                and (item["ack_deadline"] is None or str(item["ack_deadline"]) >= now)
+            )
+            if queue is None or (
+                int(queue["queue_version"]) != queue_version
+                and not (delayed_terminal and queue_version <= int(queue["queue_version"]))
+            ):
                 raise ValueError("QUEUE-003 ACK Queue 版本已過期")
             existing_event = connection.execute(
                 "SELECT 1 FROM device_content_queue_events WHERE queue_item_id=? AND event_type=? AND idempotency_key=?",
@@ -877,7 +909,7 @@ class ResilienceRepository:
                             (now, rollout_id),
                         )
                         self._action(connection, rollout_id, None, "rollback_completed", None)
-        return {"status": "ok", "queue_item_id": item_id, "event": event}
+        return {"status": "ok", "queue_item_id": item_id, "event": event, "delayed_terminal": delayed_terminal}
 
     def retention_policies(self) -> list[dict[str, Any]]:
         with self.database.session() as connection:

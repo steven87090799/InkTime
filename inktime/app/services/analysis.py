@@ -11,12 +11,16 @@ from typing import Any, Callable
 from inktime.app.core.paths import safe_join
 from inktime.app.domain.analysis import (
     AnalysisValidationError,
+    SCHEMA_VERSION,
     build_analysis_plan,
     canonical_json,
     fingerprint,
+    normalize_analysis_plan,
+    normalize_analysis_strategy,
     normalize_reasoning_effort,
     validate_analysis_result,
 )
+from inktime.app.domain.analysis.json_repair import extract_json_value
 from inktime.app.domain.analysis.execution_mode import (
     execution_mode,
     permits_automatic_ai,
@@ -150,17 +154,34 @@ class PhotoAnalysisService:
             "maximum_bonus": float(settings.get("max_total_bonus", 8)),
             "location_rule_version": str(settings.get("location_rule_version", "travel-v1")),
         }
+        analysis_model_value = settings.get("model.analysis_model", None)
+        legacy_model_value = settings.get("model.high_model", None)
+        # Existing installations may have a customized legacy high model.  A
+        # newly inserted canonical default must not silently discard it; once
+        # the new key is explicitly customized, it becomes authoritative.
+        legacy_is_authoritative = (
+            callable(getattr(settings, "is_explicit", None))
+            and not settings.is_explicit("model.analysis_model")
+            and settings.is_explicit("model.high_model")
+        )
+        analysis_model = str(
+            (legacy_model_value if legacy_is_authoritative else analysis_model_value)
+            or legacy_model_value
+            or settings.get("model.low_model", "high-quality-vision")
+        )
         return build_analysis_plan(
             strategy=strategy,
             provider_route=provider_route,
             low_model=str(settings.get("model.low_model", "low-cost-vision")),
-            high_model=str(settings.get("model.high_model", "high-quality-vision")),
+            high_model=analysis_model,
             stage_two_threshold=float(settings.get("analysis.stage_two_threshold", 65)),
             favorite_override=bool(settings.get("analysis.favorite_override", True)),
             scoring_profile=scoring_profile,
             caption_controls=controls,
             prompt_version=prompt_version,
-            high_image_max_side=int(settings.get("analysis.high_image_max_side", 1024)),
+            high_image_max_side=int(
+                settings.get("analysis.image_max_side", settings.get("analysis.high_image_max_side", 1024))
+            ),
             prefilter=prefilter,
             execution_policy=execution_policy,
             travel_policy=travel_policy,
@@ -363,11 +384,14 @@ class PhotoAnalysisService:
         details = result.get("details") or {}
         for target, grade_key in (
             ("memory_score", "memory_grade"),
-            ("beauty_score", "aesthetic_grade"),
+            ("beauty_score", "beauty_grade"),
             ("technical_quality_score", "technical_grade"),
             ("emotion_score", "emotion_grade"),
         ):
-            result[target] = grade_to_score(details.get(grade_key), float(result[target]))
+            fallback_grade = "aesthetic_grade" if grade_key == "beauty_grade" else grade_key
+            result[target] = grade_to_score(
+                details.get(grade_key, details.get(fallback_grade)), float(result[target])
+            )
         base = calculate_ranking_score(
             result,
             ranking_weights,
@@ -578,7 +602,7 @@ class PhotoAnalysisService:
                 "actual_provider": actual_provider,
                 "model": model,
                 "prompt_version": prompt_version,
-                "schema_version": 2,
+                "schema_version": SCHEMA_VERSION if schema_kind == "full" else 2,
                 "schema_kind": schema_kind,
                 "reasoning_effort": reasoning_effort,
                 **vision_input,
@@ -587,30 +611,31 @@ class PhotoAnalysisService:
         # Legacy schema constrains this column to basic/full; the v4 Vision
         # Request Fingerprint is the authoritative additional cache dimension.
         cache_schema_kind = schema_kind
+        cache_schema_versions = (SCHEMA_VERSION, 2) if schema_kind == "full" else (2,)
         vision_json = canonical_json(vision_input)
+
+        def get_cache() -> dict | None:
+            for cache_schema_version in cache_schema_versions:
+                cached_row = self.photos.get_ai_cache(
+                    content_sha256=content_sha256,
+                    provider=actual_provider,
+                    model_name=model,
+                    prompt_version=prompt_version,
+                    schema_version=cache_schema_version,
+                    schema_kind=cache_schema_kind,
+                    vision_request_fingerprint=request_fingerprint,
+                )
+                if cached_row is not None:
+                    return cached_row
+            return None
+
         baseline_cache_created_at: str | None = None
         if force_recompute:
-            baseline = self.photos.get_ai_cache(
-                content_sha256=content_sha256,
-                provider=actual_provider,
-                model_name=model,
-                prompt_version=prompt_version,
-                schema_version=2,
-                schema_kind=cache_schema_kind,
-                vision_request_fingerprint=request_fingerprint,
-            )
+            baseline = get_cache()
             if baseline is not None:
                 baseline_cache_created_at = str(baseline["created_at"])
         if not force_recompute:
-            cached = self.photos.get_ai_cache(
-                content_sha256=content_sha256,
-                provider=actual_provider,
-                model_name=model,
-                prompt_version=prompt_version,
-                schema_version=2,
-                schema_kind=cache_schema_kind,
-                vision_request_fingerprint=request_fingerprint,
-            )
+            cached = get_cache()
             if cached is not None:
                 try:
                     self._activity(
@@ -672,15 +697,7 @@ class PhotoAnalysisService:
             time.sleep(0.05)
             # A forced request ignores a pre-existing entry, but once another
             # forced owner has completed its fresh result, all waiters share it.
-            cached = self.photos.get_ai_cache(
-                content_sha256=content_sha256,
-                provider=actual_provider,
-                model_name=model,
-                prompt_version=prompt_version,
-                schema_version=2,
-                schema_kind=cache_schema_kind,
-                vision_request_fingerprint=request_fingerprint,
-            )
+            cached = get_cache()
             if cached is not None and is_force_generation(cached):
                 self._activity(
                     "DEBUG",
@@ -705,15 +722,7 @@ class PhotoAnalysisService:
                     0,
                 )
         if not force_recompute or waited_for_owner:
-            cached = self.photos.get_ai_cache(
-                content_sha256=content_sha256,
-                provider=actual_provider,
-                model_name=model,
-                prompt_version=prompt_version,
-                schema_version=2,
-                schema_kind=cache_schema_kind,
-                vision_request_fingerprint=request_fingerprint,
-            )
+            cached = get_cache()
             if cached is not None and is_force_generation(cached):
                 self.photos.finish_ai_cache_reservation(cache_key, owner_id)
                 release_selected()
@@ -758,6 +767,37 @@ class PhotoAnalysisService:
         except Exception as exc:
             self.photos.finish_ai_cache_reservation(cache_key, owner_id, error=str(exc))
             release_selected(error=exc)
+            record_outcome = getattr(self.photos, "record_analysis_request_outcome", None)
+            if callable(record_outcome):
+                ambiguous = bool(getattr(exc, "ambiguous", False))
+                try:
+                    record_outcome(
+                        photo_id=photo_id,
+                        job_id=job_id,
+                        provider=actual_provider,
+                        model=model,
+                        request_fingerprint=request_fingerprint,
+                        outcome="ambiguous_failed" if ambiguous else "failed",
+                        error_code=getattr(exc, "code", None),
+                        error_message=str(exc),
+                        requires_manual_confirmation=ambiguous,
+                    )
+                except Exception as persist_error:
+                    # The original provider failure remains authoritative; a
+                    # telemetry write must never cause a second image call.
+                    self._activity(
+                        "ERROR",
+                        "analysis_outcome_persist_failed",
+                        "AI 請求結果無法持久化",
+                        job_id=job_id,
+                        photo_id=photo_id,
+                        error=str(persist_error)[:500],
+                    )
+            # A timeout/connection failure after a vision POST may have
+            # completed remotely.  Keep the reservation error visible and
+            # never send the same image to another Provider automatically.
+            if bool(getattr(exc, "ambiguous", False)):
+                raise
             channels = getattr(provider, "channels", ())
             excluded = set(_excluded_providers or ()) | {actual_provider}
             if selected_channel is not None and len(excluded) < len(channels):
@@ -902,7 +942,9 @@ class PhotoAnalysisService:
         total_cached_tokens = response.usage.cached_tokens
         total_reasoning_tokens = response.usage.reasoning_tokens
         try:
-            result = self._apply_caption_variant(validate_analysis_result(response.content), caption_controls)
+            local_json = extract_json_value(response.content)
+            candidate = local_json if isinstance(local_json, dict) else response.content
+            result = self._apply_caption_variant(validate_analysis_result(candidate), caption_controls)
             raw = response.content
             if caption_controls and caption_controls["caption_variants_enabled"]:
                 self._activity(
@@ -1044,21 +1086,25 @@ class PhotoAnalysisService:
                 },
                 caption_controls=self._caption_controls(),
                 prompt_version=self._prompt_version(self._caption_controls()),
-                high_image_max_side=int(self.settings.get("analysis.high_image_max_side", 1024))
+                high_image_max_side=int(
+                    self.settings.get(
+                        "analysis.image_max_side", self.settings.get("analysis.high_image_max_side", 1024)
+                    )
+                )
                 if self.settings
                 else 1024,
             )
+        analysis_spec = normalize_analysis_plan(analysis_spec)
         analysis_spec["reasoning_effort"] = normalize_reasoning_effort(
             analysis_spec.get("reasoning_effort", "none")
         )
         strategy = str(analysis_spec["strategy"])
-        low_model = str(analysis_spec["low_model"])
-        high_model = str(analysis_spec["high_model"])
-        stage_two_threshold = float(analysis_spec["stage_two_threshold"])
+        model = str(analysis_spec.get("model") or analysis_spec.get("high_model") or "")
         favorite_override = bool(analysis_spec["favorite_override"])
         caption_controls = dict(analysis_spec["caption_controls"]) or None
         prompt_version = str(analysis_spec["prompt_version"])
-        high_max_side = int(analysis_spec["high_vision_input"]["max_side"])
+        vision_input = dict(analysis_spec["vision_input"])
+        image_max_side = int(vision_input["max_side"])
         ranking_weights = dict(analysis_spec["ranking_weights"])
         favorite_bonus = float(analysis_spec["favorite_bonus"])
         scoring_version_id = str(analysis_spec["scoring_profile_id"]) or scoring_version_id
@@ -1244,72 +1290,8 @@ class PhotoAnalysisService:
                     actor=force_actor,
                 )
 
-        if strategy in {"low_cost", "smart_two_stage"}:
-            low_input = analysis_spec["low_vision_input"]
-            (
-                low,
-                raw,
-                cost,
-                cache_hit,
-                actual_provider,
-                actual_model,
-                request_fingerprint,
-                input_spec_json,
-                _usage,
-                _latency,
-            ) = self._model_call(
-                provider=provider,
-                image_factory=lambda: self.thumbnails.acquire_for_use(source, sha, 512),
-                model=low_model,
-                detail="low",
-                stage="stage_one",
-                job_id=job_id,
-                photo_id=photo_id,
-                content_sha256=sha,
-                schema_kind="basic",
-                reasoning_effort=str(analysis_spec["reasoning_effort"]),
-                caption_controls=caption_controls,
-                prompt_version=prompt_version,
-                vision_input=low_input,
-                force_recompute=force_recompute,
-            )
-            total_cost += cost
-            requires_second = strategy == "smart_two_stage" and (
-                low["memory_score"] >= stage_two_threshold
-                or "人物" in low["types"]
-                or (favorite_override and bool(photo["favorite"]))
-            )
-            if not requires_second:
-                low = self._save_result(
-                    photo_id=photo_id,
-                    job_id=job_id,
-                    stage="stage_one",
-                    provider=actual_provider,
-                    model=actual_model,
-                    result=low,
-                    raw=raw,
-                    photo=photo,
-                    ranking_weights=weights,
-                    favorite_bonus=favorite_bonus,
-                    scoring_version_id=scoring_version_id,
-                    schema_kind="basic",
-                    prompt_version=prompt_version,
-                    analysis_fingerprint=analysis_fingerprint,
-                    analysis_spec_json=analysis_spec_json,
-                    vision_request_fingerprint=request_fingerprint,
-                    vision_input_spec_json=input_spec_json,
-                    travel_policy=travel_policy,
-                )
-                record_force(actual_provider, actual_model)
-                return {
-                    "analysis": low,
-                    "stage": "cache" if cache_hit else "stage_one",
-                    "_actual_cost": total_cost,
-                }
-
-        high_input = analysis_spec["high_vision_input"]
         (
-            high,
+            result,
             raw,
             cost,
             cache_hit,
@@ -1321,10 +1303,10 @@ class PhotoAnalysisService:
             _latency,
         ) = self._model_call(
             provider=provider,
-            image_factory=lambda: self.thumbnails.acquire_for_use(source, sha, high_max_side),
-            model=high_model,
-            detail="high",
-            stage="stage_two" if strategy == "smart_two_stage" else "single_high",
+            image_factory=lambda: self.thumbnails.acquire_for_use(source, sha, image_max_side),
+            model=model,
+            detail=str(vision_input.get("detail", "high")),
+            stage="single",
             job_id=job_id,
             photo_id=photo_id,
             content_sha256=sha,
@@ -1332,18 +1314,17 @@ class PhotoAnalysisService:
             reasoning_effort=str(analysis_spec["reasoning_effort"]),
             caption_controls=caption_controls,
             prompt_version=prompt_version,
-            vision_input=high_input,
+            vision_input=vision_input,
             force_recompute=force_recompute,
         )
-        total_cost += cost
-        final_stage = "stage_two" if strategy == "smart_two_stage" else "single_high"
-        high = self._save_result(
+        total_cost = cost
+        result = self._save_result(
             photo_id=photo_id,
             job_id=job_id,
-            stage=final_stage,
+            stage="single",
             provider=actual_provider,
             model=actual_model,
-            result=high,
+            result=result,
             raw=raw,
             photo=photo,
             ranking_weights=weights,
@@ -1359,7 +1340,7 @@ class PhotoAnalysisService:
         )
         record_force(actual_provider, actual_model)
         return {
-            "analysis": high,
-            "stage": "cache" if cache_hit else final_stage,
+            "analysis": result,
+            "stage": "cache" if cache_hit else "single",
             "_actual_cost": total_cost,
         }

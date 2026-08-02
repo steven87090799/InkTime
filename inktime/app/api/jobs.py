@@ -12,7 +12,7 @@ from inktime.app.core.json_values import (
     nullable_json_float,
     optional_json_int,
 )
-from inktime.app.domain.analysis.plan import canonical_json, fingerprint
+from inktime.app.domain.analysis.plan import canonical_json, fingerprint, normalize_analysis_strategy
 from inktime.app.domain.analysis.execution_mode import execution_mode, permits_automatic_ai
 from inktime.app.services.jobs import InvalidJobTransition, JobService
 from inktime.app.web.access import administrator_required, login_required
@@ -121,7 +121,10 @@ def create_job():
         return {"message": "不支援的選片模式"}, 400
     if selection_mode == "force_all" and str(g.user["role"]) != "administrator":
         return {"message": "force_all 僅限管理員"}, 403
-    strategy = str(payload.get("strategy", "smart_two_stage"))
+    try:
+        strategy = normalize_analysis_strategy(payload.get("strategy", "single"))
+    except ValueError as exc:
+        return {"message": str(exc)}, 400
     if execution_mode(current_app.extensions["inktime_settings_repository"]) == "disabled":
         return {
             "error_code": "ANALYSIS-DISABLED",
@@ -165,7 +168,10 @@ def selection_preview():
         )
     except JsonScalarError as exc:
         return {"message": str(exc)}, 400
-    strategy = str(payload.get("strategy", "smart_two_stage"))
+    try:
+        strategy = normalize_analysis_strategy(payload.get("strategy", "single"))
+    except ValueError as exc:
+        return {"message": str(exc)}, 400
     if execution_mode(current_app.extensions["inktime_settings_repository"]) == "disabled":
         return {
             "error_code": "ANALYSIS-DISABLED",
@@ -180,6 +186,7 @@ def selection_preview():
     estimate = _service().estimate(int(preview["limited_to"]), strategy)
     return {
         **preview,
+        "image_calls": estimate["image_calls"],
         "estimated_stage_one": estimate["stage_one_photos"],
         "estimated_stage_two": estimate["stage_two_photos"],
         "estimated_cost": estimate["average_cost"],
@@ -248,7 +255,11 @@ def estimate_job():
         )
     except JsonScalarError as exc:
         return {"message": str(exc)}, 400
-    return _service().estimate(photo_count, str(payload.get("strategy", "smart_two_stage")))
+    try:
+        strategy = normalize_analysis_strategy(payload.get("strategy", "single"))
+    except ValueError as exc:
+        return {"message": str(exc)}, 400
+    return _service().estimate(photo_count, strategy)
 
 
 @bp.get("/api/v1/jobs/<job_id>/export")

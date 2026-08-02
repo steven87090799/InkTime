@@ -105,6 +105,34 @@ class CompletionSession(FakeSession):
         return super().post(url, **kwargs)
 
 
+class VisionTimeoutSession(FakeSession):
+    def __init__(self):
+        super().__init__()
+        self.vision_attempts = 0
+
+    def post(self, url, **kwargs):
+        if url.endswith("/chat/completions"):
+            self.vision_attempts += 1
+            raise requests.Timeout("response lost after vision POST")
+        return super().post(url, **kwargs)
+
+
+def test_vision_post_timeout_is_ambiguous_and_never_retried(tmp_path):
+    image = Path(tmp_path) / "vision-test.jpg"
+    image.write_bytes(b"jpeg-fixture")
+    session = VisionTimeoutSession()
+    provider = OpenAICompatibleProvider(
+        name="OpenAI", base_url="https://api.openai.com/v1", api_key="secret", session=session
+    )
+
+    with pytest.raises(ProviderHTTPError) as raised:
+        provider.analyze(image_path=image, model="vision", detail="high", stage="single_high")
+
+    assert raised.value.code == "VLM-AMBIGUOUS"
+    assert raised.value.ambiguous is True
+    assert session.vision_attempts == 1
+
+
 def test_reasoning_effort_is_capability_gated_and_sync_uses_same_builder(tmp_path):
     image = Path(tmp_path) / "provider-test.jpg"
     image.write_bytes(b"jpeg-fixture")

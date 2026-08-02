@@ -58,7 +58,7 @@ def _queue_ai(photo_ids: list[str], *, created_by: str, name: str, force_ai: boo
     )
     if not selected:
         raise ValueError("沒有符合資格且可送入 AI 的照片")
-    strategy = str(settings.get("analysis.strategy", "smart_two_stage"))
+    strategy = str(settings.get("analysis.strategy", "single"))
     analysis = current_app.extensions["inktime_analysis_service"]
     plan = analysis.build_plan(
         strategy=strategy,
@@ -290,7 +290,7 @@ def queue_ai_mode_run():
         total_eligible = _repository().count_active_eligible()
         queued_now = min(total_eligible, daily_limit)
         estimate = current_app.extensions["inktime_job_service"].estimate(
-            queued_now, str(settings.get("analysis.strategy", "smart_two_stage"))
+            queued_now, str(settings.get("analysis.strategy", "single"))
         )
         return {
             "error_code": "VLM-009",

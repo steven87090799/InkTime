@@ -45,6 +45,7 @@ SAFE_READ = "safe_read"
 SAFE_IDEMPOTENT = "safe_idempotent"
 AMBIGUOUS_CREATE = "ambiguous_create"
 AMBIGUOUS_UPLOAD = "ambiguous_upload"
+AMBIGUOUS_VISION_ANALYSIS = "ambiguous_vision_analysis"
 NO_RETRY_SIDE_EFFECT = "no_retry_side_effect"
 
 
@@ -205,11 +206,23 @@ class OpenAICompatibleProvider(VisionProvider):
 
     def _send(self, method: str, path: str, *, retry_policy: str = SAFE_READ, **kwargs):
         last_response = None
-        no_retry = retry_policy in {AMBIGUOUS_CREATE, AMBIGUOUS_UPLOAD, NO_RETRY_SIDE_EFFECT}
+        no_retry = retry_policy in {
+            AMBIGUOUS_CREATE,
+            AMBIGUOUS_UPLOAD,
+            AMBIGUOUS_VISION_ANALYSIS,
+            NO_RETRY_SIDE_EFFECT,
+        }
         attempts = 1 if no_retry else 3
-        ambiguous = retry_policy in {AMBIGUOUS_CREATE, AMBIGUOUS_UPLOAD}
+        ambiguous = retry_policy in {AMBIGUOUS_CREATE, AMBIGUOUS_UPLOAD, AMBIGUOUS_VISION_ANALYSIS}
         unknown_code = (
             "BATCH-UPLOAD-UNKNOWN" if retry_policy == AMBIGUOUS_UPLOAD else "BATCH-SUBMISSION-UNKNOWN"
+        )
+        if retry_policy == AMBIGUOUS_VISION_ANALYSIS:
+            unknown_code = "VLM-AMBIGUOUS"
+        unknown_message = (
+            "Vision 分析請求回應未知，未自動重送"
+            if retry_policy == AMBIGUOUS_VISION_ANALYSIS
+            else "Batch 建立回應未知，未自動重送"
         )
         for attempt in range(attempts):
             try:
@@ -218,7 +231,7 @@ class OpenAICompatibleProvider(VisionProvider):
             except requests.Timeout as exc:
                 if ambiguous:
                     raise ProviderHTTPError(
-                        "Batch 建立回應未知，未自動重送",
+                        unknown_message,
                         unknown_code,
                         ambiguous=True,
                     ) from exc
@@ -229,7 +242,7 @@ class OpenAICompatibleProvider(VisionProvider):
             except requests.RequestException as exc:
                 if ambiguous:
                     raise ProviderHTTPError(
-                        "Batch 建立回應未知，未自動重送",
+                        unknown_message,
                         unknown_code,
                         ambiguous=True,
                     ) from exc
@@ -289,7 +302,13 @@ class OpenAICompatibleProvider(VisionProvider):
                             response_info["provider_error_code"] = provider_error_code[:120]
             except (ValueError, TypeError, json.JSONDecodeError):
                 pass
-            classified_code = "BATCH-RATE-LIMITED" if status == 429 else error_code
+            classified_code = (
+                "BATCH-RATE-LIMITED"
+                if status == 429 and str(error_code).startswith("BATCH")
+                else "VLM-002"
+                if status == 429
+                else error_code
+            )
             raise ProviderHTTPError(
                 self._redact(f"Provider 回應 HTTP {status}"),
                 classified_code,
@@ -312,13 +331,20 @@ class OpenAICompatibleProvider(VisionProvider):
 
     def _post_completion(self, body: dict) -> ProviderResponse:
         response = self._send(
-            "POST", "/chat/completions", headers=self._headers(), json=body, timeout=self.request_timeout
+            "POST",
+            "/chat/completions",
+            retry_policy=AMBIGUOUS_VISION_ANALYSIS,
+            headers=self._headers(),
+            json=body,
+            timeout=self.request_timeout,
         )
-        payload = self._json_response(response, error_code="VLM-006")
+        payload = self._json_response(response, error_code="VLM-006", ambiguous_on_invalid=True)
         try:
             content = payload["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise ProviderHTTPError("Provider 回應缺少有效 Response Body", "VLM-006") from exc
+            raise ProviderHTTPError(
+                "Provider 回應缺少有效 Response Body", "VLM-006", ambiguous=True
+            ) from exc
         if isinstance(content, list):
             content = "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
         headers = getattr(response, "headers", {}) or {}

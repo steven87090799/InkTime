@@ -15,11 +15,13 @@ from inktime.app.domain.rendering import AtomicReleasePublisher, FontManager
 from inktime.app.repositories.auth import AuthRepository
 from inktime.app.repositories.analysis_batches import AnalysisBatchRepository
 from inktime.app.repositories.devices import DeviceRepository
+from inktime.app.repositories.offline_schedules import OfflineScheduleRepository
 from inktime.app.repositories.jobs import JobRepository
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.providers import ProviderRepository
 from inktime.app.repositories.render_candidates import RenderCandidateRepository
 from inktime.app.repositories.resilience import ResilienceRepository
+from inktime.app.repositories.reviews import ReviewRepository
 from inktime.app.repositories.schedules import ScheduledTaskRepository
 from inktime.app.repositories.scoring import ScoringProfileRepository
 from inktime.app.repositories.settings import SecretStore, SettingsRepository
@@ -31,6 +33,7 @@ from inktime.app.services.budgets import BudgetService
 from inktime.app.services.device_energy import DeviceEnergyService
 from inktime.app.services.device_queue_manifests import DeviceQueueManifestService
 from inktime.app.services.device_releases import DeviceReleaseService
+from inktime.app.services.photopainter_stock import StockCompatibilityService
 from inktime.app.services.diagnostics import DiagnosticsService
 from inktime.app.services.display_prepare import DisplayPreparationService
 from inktime.app.services.jobs import JobService
@@ -217,6 +220,7 @@ def bootstrap_services(
     observability_service.publisher = release_publisher
     render_candidate_repository = RenderCandidateRepository(database)
     resilience_repository = ResilienceRepository(database)
+    review_repository = ReviewRepository(database)
     device_release_service = DeviceReleaseService(database, config.release_dir)
     render_cache = BoundedRenderCache(config.cache_dir / "renderer")
     render_workload_service = RenderWorkloadService(
@@ -243,10 +247,13 @@ def bootstrap_services(
         observability_service,
         resilience_repository,
     )
+    offline_schedule_repository = OfflineScheduleRepository(database)
     extensions.update(
         {
             "inktime_device_repository": device_repository,
+            "inktime_offline_schedule_repository": offline_schedule_repository,
             "inktime_device_release_service": device_release_service,
+            "inktime_stock_compatibility_service": StockCompatibilityService(device_release_service),
             "inktime_device_queue_manifest_service": DeviceQueueManifestService(
                 resilience_repository,
                 device_release_service,
@@ -275,12 +282,18 @@ def bootstrap_services(
             "inktime_release_publisher": release_publisher,
             "inktime_render_candidate_repository": render_candidate_repository,
             "inktime_resilience_repository": resilience_repository,
+            "inktime_review_repository": review_repository,
             "inktime_render_cache": render_cache,
             "inktime_render_workload_service": render_workload_service,
             "inktime_release_coordinator": release_coordinator,
             "inktime_weather_service": weather_service,
             "inktime_render_service": render_service,
-            "inktime_display_preparation_service": DisplayPreparationService(database, render_service),
+            "inktime_display_preparation_service": DisplayPreparationService(
+                database,
+                render_service,
+                resilience_repository=resilience_repository,
+                offline_schedule_repository=offline_schedule_repository,
+            ),
         }
     )
     if role == "web":

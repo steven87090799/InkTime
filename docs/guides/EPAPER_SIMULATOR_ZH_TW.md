@@ -40,10 +40,10 @@ flowchart LR
 ### 從 Web UI 啟用模型
 
 1. 到「模型」新增 Provider：填名稱、完整 Base URL、API Key、優先順序與限制，儲存後先執行連線測試。
-2. 到「設定」選擇 `model.low_model`、`model.high_model`，並先設定每日、每月、單工作與單張預算上限。
+2. 到「設定」選擇 `model.analysis_model`，並先設定每日、每月、單工作與單張預算上限。
 3. 到「評分」以單張測試台確認模型能回傳符合 Schema 的繁體中文描述、四項分數與 `side_caption`。
 4. 到「維護」掃描照片資料夾；掃描只做本地 EXIF、雜湊與影像特徵，不會自行開始付費分析。
-5. 到「工作」先用 10～100 張建立 `smart_two_stage` 工作。Worker 會依設定呼叫 Provider，並將分析與用量寫入 SQLite。
+5. 到「工作」先用 10～100 張建立 `single` 工作。每張照片最多一次圖片模型請求；Worker 會依設定呼叫 Provider，並將分析與用量寫入 SQLite。
 6. 到「照片」檢查實際分數與文案；到「成本」確認 Token 與費用。
 7. 到「渲染」檢查智慧裁切、E6 六色適合度與版型後發布。預設先選過去年度同月同日的照片，不足才依設定取鄰近日或綜合排名；E6 分數也可加入排序，最後產生裝置可下載的版本。
 
@@ -57,7 +57,7 @@ flowchart LR
 | 改 Provider HTTP／Schema 行為 | `inktime/app/providers/openai_compatible.py` |
 | 改路由、優先順序、限流與熔斷 | `inktime/app/providers/router.py`、`inktime/app/services/providers.py` |
 | 改模型輸出欄位與驗證 | `inktime/app/domain/analysis/schema.py` |
-| 改兩階段分析與預算流程 | `inktime/app/services/analysis.py`、`inktime/app/services/budgets.py` |
+| 改單次分析與預算流程 | `inktime/app/services/analysis.py`、`inktime/app/services/budgets.py` |
 | 改背景工作的模型選擇 | `inktime/app/workers/runner.py` |
 | 改最終電子紙排版與選片 | `inktime/app/services/rendering.py` |
 | 改色盤、抖動或二進位格式 | `inktime/app/domain/rendering/palette.py` |

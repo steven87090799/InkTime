@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Review 工作台｜InkTime{% endblock %}
+{% block head %}
+<style>
+  .review-toolbar{display:grid;grid-template-columns:2fr repeat(7,minmax(110px,1fr));gap:.6rem;align-items:end;margin:1rem 0}
+  .review-toolbar label{display:grid;gap:.25rem;font-size:.8rem;color:var(--muted)}
+  .review-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:1rem}
+  .review-card{border:1px solid var(--border);border-radius:14px;background:var(--surface);overflow:hidden;display:grid;grid-template-rows:auto 1fr}
+  .review-card.selected{outline:3px solid var(--accent)}
+  .review-card img{width:100%;aspect-ratio:1.25;object-fit:cover;background:#111;display:block}
+  .review-card-body{padding:.8rem;display:grid;gap:.35rem}
+  .review-card-body small{color:var(--muted)}
+  .review-actions{display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.35rem}
+  .review-actions button{font-size:.8rem}
+  .review-card textarea{width:100%;min-height:3rem;resize:vertical}
+  .review-status{min-height:1.4rem;color:var(--muted)}
+  .review-summary{display:flex;gap:1rem;flex-wrap:wrap;color:var(--muted)}
+  @media (max-width:800px){.review-toolbar{grid-template-columns:1fr 1fr}.review-toolbar label:first-child{grid-column:1/-1}}
+</style>
+{% endblock %}
+{% block content %}
+<div class="page-head"><div><p class="eyebrow">照片人工判讀</p><h1>Review 工作台</h1><p>縮圖、分析摘要與排除證據集中在同一個可恢復工作面；不載入原始照片、不改動來源檔。</p></div></div>
+<form id="review-filter" class="review-toolbar">
+  <label>搜尋<input name="q" placeholder="描述或路徑片段"></label>
+  <label>狀態<select name="review_state"><option value="">全部狀態</option><option value="unreviewed">未判讀</option><option value="keep">保留</option><option value="exclude">排除</option><option value="needs_review">待確認</option></select></label>
+  <label>年份<input name="year" inputmode="numeric" maxlength="4" placeholder="2026"></label>
+  <label>月份<input name="month" inputmode="numeric" maxlength="2" placeholder="06"></label>
+  <label>日期<input name="day" inputmode="numeric" maxlength="2" placeholder="15"></label>
+  <label>AI 狀態<select name="ai_status"><option value="">全部</option><option value="completed">已完成</option><option value="missing">未分析</option></select></label>
+  <label>候選<select name="candidate_pool"><option value="">全部</option><option value="1">候選池</option><option value="0">非候選</option></select></label>
+  <label>低信心<select name="low_confidence"><option value="">全部</option><option value="1">低於 0.60</option></select></label>
+  <button>套用</button>
+</form>
+<div class="review-summary" id="review-summary" aria-live="polite">讀取中…</div>
+<p class="review-status" id="review-status">快捷鍵：K 保留、X 排除、N 待確認、F 候選池、←/→ 選取卡片。篩選條件會保留在網址。</p>
+<section class="review-grid" id="review-grid" aria-live="polite"></section>
+<div style="display:flex;justify-content:center;margin:1.2rem"><button class="secondary" id="review-more" hidden>載入更多</button></div>
+{% endblock %}
+{% block scripts %}
+<script nonce="{{ csp_nonce }}">
+(() => {
+  const form=document.getElementById('review-filter'), grid=document.getElementById('review-grid'), more=document.getElementById('review-more'), summary=document.getElementById('review-summary'), status=document.getElementById('review-status');
+  let cursor=null, selected=-1, items=[];
+  const params=()=>new URLSearchParams([...new FormData(form).entries()].filter(([,v])=>v));
+  const syncUrl=()=>history.replaceState(null,'','?'+params().toString());
+  const escapeHtml=value=>String(value??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+  const draw=()=>{grid.innerHTML=items.map((p,i)=>`<article class="review-card${i===selected?' selected':''}" data-index="${i}"><img loading="lazy" src="${escapeHtml(p.thumbnail_url)}" alt="${escapeHtml(p.caption||'照片縮圖')}"><div class="review-card-body"><strong>${escapeHtml(p.caption_override||p.side_caption||'尚未有短文案')}</strong><small>${escapeHtml(p.review_state)} · ${escapeHtml(p.review_taken_at||'日期未知')} · ${p.analysis_id?'已有分析':'尚無分析'} · ${escapeHtml(p.analysis_provider||'—')}／${escapeHtml(p.analysis_model||'—')}</small><small>回憶 ${p.memory_score??'—'}／美觀 ${p.beauty_score??'—'}／技術 ${p.technical_quality_score??'—'}／情緒 ${p.emotion_score??'—'}／綜合 ${p.ranking_score??'—'} · 信心 ${escapeHtml(p.confidence??'—')}</small><small>${escapeHtml(p.reject_reason||p.reject_rule||'沒有排除理由')} · ${p.low_confidence?'低信心':''}</small><label>人工短文案<textarea data-caption maxlength="1000">${escapeHtml(p.caption_override||'')}</textarea></label><div class="review-actions"><button data-action="keep">接受</button><button data-action="exclude">排除</button><button data-action="needs_review">待確認</button><button data-action="candidate">${p.candidate_pool?'移出候選':'加入候選'}</button><button data-action="favorite">${p.favorite?'移除最愛':'加入最愛'}</button><button data-action="understanding_incorrect">${p.understanding_incorrect?'清除理解錯誤':'理解錯誤'}</button><button data-action="caption_bad">${p.caption_bad?'清除文案問題':'文案不好'}</button><button data-action="scores_unreasonable">${p.scores_unreasonable?'清除分數問題':'分數不合理'}</button><button data-action="save_caption">保存短文案</button></div></div></article>`).join(''); grid.querySelectorAll('.review-card').forEach(card=>card.addEventListener('click',()=>{selected=Number(card.dataset.index);draw();})); grid.querySelectorAll('[data-action]').forEach(button=>button.addEventListener('click',event=>{event.stopPropagation(); update(button.closest('.review-card').dataset.index,button.dataset.action);}));};
+  const load=async append=>{if(!append){cursor=null;items=[];selected=-1;grid.textContent='讀取中…';syncUrl();} const query=params(); if(cursor)query.set('cursor',cursor); const response=await fetch('/api/v1/review/photos?'+query); const data=await response.json(); if(!response.ok){status.textContent=data.message||'讀取失敗，請重試';return;} items=append?items.concat(data.items):data.items; cursor=data.next_cursor; more.hidden=!data.has_more; draw(); const s=await fetch('/api/v1/review/summary?'+params()); const sd=await s.json(); summary.textContent=`總數 ${sd.total??0}｜`+Object.entries(sd.states||{}).map(([key,value])=>`${key} ${value}`).join('｜');};
+  const update=async(index,action)=>{const p=items[Number(index)]; if(!p)return; const card=grid.querySelector(`.review-card[data-index="${Number(index)}"]`); const payload={expected_version:p.review_version}; if(action==='candidate')payload.candidate_pool=!p.candidate_pool; else if(action==='favorite')payload.favorite=!p.favorite; else if(['understanding_incorrect','caption_bad','scores_unreasonable'].includes(action))payload[action]=!p[action]; else if(action==='save_caption')payload.caption_override=card?.querySelector('[data-caption]')?.value??''; else payload.review_state=action; const response=await window.inktimeFetch('/api/v1/review/photos/'+encodeURIComponent(p.id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); const data=await response.json(); if(!response.ok){status.textContent=data.message||'寫入失敗，請重新載入';return;} items[Number(index)]=data.photo; status.textContent='已儲存 '+p.id; draw();};
+  [...form.elements].forEach(element=>{const key=element.name;const value=new URLSearchParams(location.search).get(key);if(value!==null)element.value=value;}); form.addEventListener('submit',event=>{event.preventDefault();load(false);}); more.addEventListener('click',()=>load(true)); document.addEventListener('keydown',event=>{if(['INPUT','SELECT','TEXTAREA'].includes(document.activeElement?.tagName))return; if(event.key==='ArrowRight'){selected=Math.min(items.length-1,selected+1);draw();} else if(event.key==='ArrowLeft'){selected=Math.max(0,selected-1);draw();} else if(selected>=0&&{'k':'keep','x':'exclude','n':'needs_review','f':'candidate'}[event.key.toLowerCase()])update(selected,{'k':'keep','x':'exclude','n':'needs_review','f':'candidate'}[event.key.toLowerCase()]);}); load(false);
+})();
+</script>
+{% endblock %}

@@ -267,6 +267,13 @@ class WorkerRunner:
                         **scanner_safety,
                     )
                 if job["kind"] == "render":
+                    offline_prepare = settings.get("offline_prepare")
+                    if isinstance(offline_prepare, dict):
+                        return self.app.extensions["inktime_display_preparation_service"].prepare_device_day(
+                            device_id=str(offline_prepare["device_id"]),
+                            target_date=str(offline_prepare["target_date"]),
+                            created_by=str(job["created_by"] or "system"),
+                        )
                     display_prepare = settings.get("display_prepare")
                     if display_prepare is not None:
                         return self.app.extensions["inktime_display_preparation_service"].prepare(

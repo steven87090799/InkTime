@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+import json
 import re
 from typing import Any
 
 from inktime.app.db import Database
+from inktime.app.domain.photopainter.offline_schedule import validate_offline_schedule
 from inktime.app.domain.rendering.system_presets import DEFAULT_RENDER_PROFILE
 
 
@@ -109,9 +111,18 @@ class DisplayPrepareConfig:
 
 
 class DisplayPreparationService:
-    def __init__(self, database: Database, render_service) -> None:
+    def __init__(
+        self,
+        database: Database,
+        render_service,
+        *,
+        resilience_repository=None,
+        offline_schedule_repository=None,
+    ) -> None:
         self.database = database
         self.render_service = render_service
+        self.resilience = resilience_repository
+        self.offline_schedules = offline_schedule_repository
 
     def _profiles(self, config: DisplayPrepareConfig) -> list[str]:
         if not config.device_ids:
@@ -164,4 +175,115 @@ class DisplayPreparationService:
             "target_display_times": config.target_times(target),
             "preparation_times": config.preparation_times(target),
             "output_count": len(photo_ids),
+        }
+
+    @staticmethod
+    def _offline_release_id(result: Any, device_id: str) -> str:
+        if isinstance(result, dict):
+            assignments = result.get("device_releases")
+            if isinstance(assignments, dict) and assignments.get(device_id):
+                return str(assignments[device_id])
+            releases = result.get("releases")
+            if isinstance(releases, list) and len(releases) == 1 and isinstance(releases[0], dict):
+                release_id = releases[0].get("release_id") or releases[0].get("id")
+                if release_id:
+                    return str(release_id)
+            release_id = result.get("release_id") or result.get("id")
+            if release_id:
+                return str(release_id)
+        raise ValueError("DISPLAY-006 渲染結果沒有可用的 Release ID")
+
+    def prepare_device_day(
+        self,
+        *,
+        device_id: str,
+        target_date: str,
+        created_by: str,
+    ) -> dict[str, Any]:
+        """Prepare one composed Release per Enhanced offline schedule slot.
+
+        The scheduler only creates this bounded render job.  Candidate
+        selection and Pillow work remain in the worker process, while the
+        repository commits the final queue and slot projection atomically.
+        """
+
+        if self.offline_schedules is None or self.resilience is None:
+            raise RuntimeError("DISPLAY-006 Enhanced offline schedule services 未配置")
+        try:
+            target = date.fromisoformat(str(target_date))
+        except ValueError as exc:
+            raise ValueError("DISPLAY-006 target_date 必須是 YYYY-MM-DD") from exc
+        with self.database.session() as connection:
+            device = connection.execute(
+                """
+                SELECT id,panel_profile,timezone,schedule_times_json,config_version,
+                       delivery_mode,offline_prefetch_allowed
+                FROM devices WHERE id=? AND enabled=1
+                """,
+                (device_id,),
+            ).fetchone()
+        if device is None:
+            raise ValueError("DISPLAY-004 指定裝置不存在或已停用")
+        if str(device["delivery_mode"]) != "inktime_offline_schedule" or not bool(
+            device["offline_prefetch_allowed"]
+        ):
+            raise ValueError("QUEUE-005 裝置未啟用離線排程或 Prefetch")
+        try:
+            schedule_times = validate_offline_schedule(
+                json.loads(str(device["schedule_times_json"] or "[]")), maximum=12
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("DISPLAY-006 裝置 schedule_times 不可解析") from exc
+
+        existing = self.offline_schedules.ready_for_device(
+            device_id=device_id,
+            target_date=target.isoformat(),
+            config_version=int(device["config_version"]),
+        )
+        if existing is not None:
+            return {
+                "status": "ready",
+                "idempotent": True,
+                "schedule": existing["schedule"],
+                "slots": existing["slots"],
+            }
+
+        candidates = self.render_service.select_candidates_details(
+            len(schedule_times), target_date=target
+        )
+        unique_candidates = list(
+            dict((str(row["id"]), row) for row in candidates).values()
+        )
+        if len(unique_candidates) < len(schedule_times):
+            raise ValueError("DISPLAY-003 沒有足夠的既有且符合資格的分析結果")
+        self.resilience.ensure_queue(device_id, depth=max(3, len(schedule_times)))
+
+        release_ids: list[str] = []
+        for _slot, candidate in zip(schedule_times, unique_candidates):
+            result = self.render_service.publish(
+                [str(candidate["id"])],
+                created_by,
+                history={
+                    "history_date": target.isoformat(),
+                    "selection_method": "offline_schedule_prepare",
+                },
+                device_ids=[device_id],
+                quantity_override=1,
+            )
+            release_ids.append(self._offline_release_id(result, device_id))
+
+        prepared = self.offline_schedules.prepare_day(
+            device_id=device_id,
+            target_date=target.isoformat(),
+            release_ids=release_ids,
+        )
+        return {
+            "status": "ready",
+            "idempotent": False,
+            "schedule": prepared["schedule"],
+            "slots": prepared["slots"],
+            "target_display_times": [
+                f"{target.isoformat()}T{slot}:00" for slot in schedule_times
+            ],
+            "output_count": len(release_ids),
         }

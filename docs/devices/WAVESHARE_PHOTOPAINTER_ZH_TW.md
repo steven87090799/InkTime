@@ -14,6 +14,24 @@ Arduino CLI 以 `compiler.cpp.extra_flags` 傳入同一個值。GPIO、能力、
 SPI 時脈與 payload 尺寸只定義在
 `esp32/ink-display-7C-photo/hardware_profile.h`；韌體不支援運行中改接 GPIO。
 
+## Stock-first 與 Enhanced 邊界
+
+本專案把 PhotoPainter 分成兩條可驗證的路徑：
+
+- `stock_compat`：保留原廠韌體、不刷機；InkTime 在 Server 交付邊界把既有直向
+  Production BIN 轉為 Stock `/dataUP` 的 mode byte + 24-bit BMP，固定為
+  `1,152,055` bytes。原廠 HTTP 回應只代表 upload accepted，不能推導電子紙已完成刷新。
+- `inktime_offline_schedule`：只有明確刷入並設定 Enhanced 韌體才啟用多時間離線排程。
+  Server 以每個 Slot 一個 Release／Queue Item 管理，韌體把通過 SHA-256、尺寸、CRC
+  與 rotation 驗證的 native frame 原子寫入 `/inktime/frames/<sha256>-r*.itf`。
+
+Stock 原始碼交叉核對固定在官方 repository commit
+[`a5e8f757ba0cafbb5586f07d3e83bda3184c0845`](https://github.com/waveshareteam/ESP32-S3-PhotoPainter/commit/a5e8f757ba0cafbb5586f07d3e83bda3184c0845)。
+該版本的 Mode 1 設定檔與圖片目錄是
+`/sdcard/06_user_Foundation_img/config.txt` 與 `/sdcard/06_user_foundation_img`；
+Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任意每日時間清單，因此
+`STOCK_CUSTOM_TIME_LIST = NOT SUPPORTED/UNVERIFIED`。精準不等間隔時間請使用 Enhanced。
+
 ## 中央 BoardConfig
 
 | 功能 | PhotoPainter GPIO／設定 |
@@ -51,11 +69,14 @@ SPI 時脈與 payload 尺寸只定義在
 
 - SD 先以 20 MHz 初始化，失敗後只以 4 MHz重試一次；無 SD 時 Wi-Fi、下載、
   診斷與 RAM→面板流程仍可執行。
-- 啟動建立 `/originals`、`/cache`、`/config`、`/logs`。
+- 啟動建立 `/originals`、`/cache`、`/config`、`/logs`，以及 Enhanced 使用的
+  `/inktime/schedule`、`/inktime/frames`、`/inktime/journal`、`/inktime/state`。
 - PSRAM 與 SD 之間固定經 4,096-byte internal-RAM bounce buffer；逐 chunk 檢查
   read／write byte count，寫完 flush／close。
-- 快取 header 驗證 magic、版本、800×480、4bpp、rotation、來源 hash、payload
-  長度與 CRC32。損壞快取會刪除並重新下載。
+- `/cache` 是可重建的 derived cache；其 header 驗證 magic、版本、800×480、4bpp、
+  rotation、來源 hash、payload 長度與 CRC32。Enhanced 正式內容另使用完整 SHA-256
+  檔名與 `ITF2` header，不把 32-bit cache key 當成內容身份。損壞檔案會刪除並保留
+  舊的可用檔案，不會把半寫入內容當成畫面。
 - 寫入採同目錄 `.tmp`，舊檔先 rename 為 `.bak`，新檔再 rename 成正式檔；若中途
   斷電，下次啟動可恢復 `.bak`，不會把半寫入檔案當成有效畫面。
 
@@ -73,8 +94,9 @@ SPI 時脈與 payload 尺寸只定義在
 
 ## 按鍵、喚醒與網路邊界
 
-- GPIO 4 有 debounce 且可作 EXT0 active-low wake。短按依 NVS 上次 index 顯示下一張；
-  長按至少 1.2 秒會重抓目前圖片並略過 cache。睡前等待按鍵釋放以免重複喚醒。
+- GPIO 4 有 debounce 且可作 EXT0 active-low wake。Stock／Online 路徑短按檢查新內容，
+  長按至少 1.2 秒要求 bounded network refresh；Enhanced timer wake 的本地排程只讀
+  正式 Frame，不呼叫 Wi-Fi、NTP 或 HTTP。睡前等待按鍵釋放以免重複喚醒。
 - GPIO 5 完全不作一般輸出；GPIO 0 不取樣、不驅動，完整保留原廠 BOOT／下載用途。
 - Wi-Fi、HTTP、NTP、AP 與 EPD 都有有限 timeout。已知電池模式 Wi-Fi 失敗後直接依
   RTC／備援排程睡眠，不無限重試。已確認 AXP2101 USB 供電時，設定 WebServer

@@ -1121,6 +1121,150 @@ MIGRATIONS = (
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_batches_remote_id ON analysis_batches(remote_batch_id) WHERE remote_batch_id IS NOT NULL",
             "CREATE INDEX IF NOT EXISTS idx_batch_items_custom_id ON analysis_batch_items(custom_id)",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_photo_analysis_batch_once ON photo_analysis(job_id,photo_id,analysis_fingerprint) WHERE analysis_source='analysis_batch' AND job_id IS NOT NULL AND analysis_fingerprint IS NOT NULL",
+            "CREATE INDEX IF NOT EXISTS idx_photo_analysis_photo_id ON photo_analysis(photo_id,id DESC)",
+        ),
+    ),
+    Migration(
+        27,
+        "加入人工 Review、Stock 相容與離線排程契約",
+        (
+            "ALTER TABLE photos ADD COLUMN review_taken_at TEXT",
+            "ALTER TABLE photos ADD COLUMN review_date_source TEXT NOT NULL DEFAULT 'captured_at'",
+            "ALTER TABLE devices ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'legacy_online' CHECK(delivery_mode IN ('legacy_online','stock_compat','inktime_offline_schedule'))",
+            "ALTER TABLE devices ADD COLUMN offline_prefetch_allowed INTEGER NOT NULL DEFAULT 0 CHECK(offline_prefetch_allowed IN (0,1))",
+            "ALTER TABLE devices ADD COLUMN offline_schedule_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE devices ADD COLUMN offline_schedule_version INTEGER NOT NULL DEFAULT 0 CHECK(offline_schedule_version >= 0)",
+            "ALTER TABLE devices ADD COLUMN last_offline_slot TEXT",
+            "ALTER TABLE devices ADD COLUMN schedule_times_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE devices ADD COLUMN prefetch_lead_minutes INTEGER NOT NULL DEFAULT 5 CHECK(prefetch_lead_minutes BETWEEN 0 AND 120)",
+            "ALTER TABLE devices ADD COLUMN button_wake_action TEXT NOT NULL DEFAULT 'check_new' CHECK(button_wake_action IN ('check_new','local_next'))",
+            "ALTER TABLE devices ADD COLUMN stock_endpoint_host TEXT",
+            "ALTER TABLE device_content_queue_items ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'online_queue' CHECK(delivery_mode IN ('online_queue','offline_schedule'))",
+            "ALTER TABLE device_content_queue_items ADD COLUMN offline_prefetch_allowed INTEGER NOT NULL DEFAULT 0 CHECK(offline_prefetch_allowed IN (0,1))",
+            "ALTER TABLE device_content_queue_items ADD COLUMN offline_slot TEXT",
+            "ALTER TABLE device_content_queue_items ADD COLUMN ack_deadline TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_photos_review_taken ON photos(review_taken_at,id)",
+            "CREATE INDEX IF NOT EXISTS idx_photos_review_date_source ON photos(review_date_source,review_taken_at,id)",
+            "CREATE INDEX IF NOT EXISTS idx_devices_delivery_mode ON devices(delivery_mode,enabled,id)",
+            "CREATE INDEX IF NOT EXISTS idx_queue_items_offline_slot ON device_content_queue_items(device_id,delivery_mode,offline_slot,status)",
+            "CREATE INDEX IF NOT EXISTS idx_devices_schedule_times ON devices(delivery_mode,enabled,prefetch_lead_minutes,id)",
+            """
+            UPDATE photos
+            SET review_taken_at=COALESCE(captured_at,created_at),
+                review_date_source=CASE WHEN captured_at IS NULL THEN 'created_at' ELSE 'captured_at' END
+            WHERE review_taken_at IS NULL
+            """,
+            """
+            UPDATE devices
+            SET schedule_times_json=CASE
+                    WHEN schedule_times_json='[]' THEN json_array(COALESCE(schedule,'08:00'))
+                    ELSE schedule_times_json
+                END,
+                offline_schedule_json=CASE
+                    WHEN offline_schedule_json='[]' THEN json_array(COALESCE(schedule,'08:00'))
+                    ELSE offline_schedule_json
+                END
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS device_offline_schedules (
+                id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                target_date TEXT NOT NULL,
+                config_version INTEGER NOT NULL,
+                timezone TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('preparing','ready','failed','cancelled')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(device_id,target_date,config_version)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS device_offline_schedule_slots (
+                id TEXT PRIMARY KEY,
+                schedule_id TEXT NOT NULL REFERENCES device_offline_schedules(id) ON DELETE CASCADE,
+                slot_index INTEGER NOT NULL CHECK(slot_index >= 0),
+                show_at TEXT NOT NULL,
+                release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE RESTRICT,
+                queue_item_id TEXT NOT NULL REFERENCES device_content_queue_items(id) ON DELETE RESTRICT,
+                sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(schedule_id,slot_index),
+                UNIQUE(schedule_id,show_at)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_offline_schedules_device_date ON device_offline_schedules(device_id,target_date,status)",
+            "CREATE INDEX IF NOT EXISTS idx_offline_schedule_slots_schedule_index ON device_offline_schedule_slots(schedule_id,slot_index)",
+            """
+            CREATE TABLE IF NOT EXISTS photo_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                analysis_id INTEGER REFERENCES photo_analysis(id) ON DELETE CASCADE,
+                review_state TEXT NOT NULL DEFAULT 'unreviewed'
+                    CHECK(review_state IN ('unreviewed','keep','exclude','needs_review')),
+                caption_override TEXT,
+                candidate_pool INTEGER NOT NULL DEFAULT 0 CHECK(candidate_pool IN (0,1)),
+                note TEXT,
+                understanding_incorrect INTEGER NOT NULL DEFAULT 0 CHECK(understanding_incorrect IN (0,1)),
+                caption_bad INTEGER NOT NULL DEFAULT 0 CHECK(caption_bad IN (0,1)),
+                scores_unreasonable INTEGER NOT NULL DEFAULT 0 CHECK(scores_unreasonable IN (0,1)),
+                accepted_at TEXT,
+                version INTEGER NOT NULL DEFAULT 0 CHECK(version >= 0),
+                updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(photo_id,analysis_id)
+            )
+            """,
+            """
+            INSERT OR IGNORE INTO photo_reviews(photo_id,analysis_id,review_state,candidate_pool,version,updated_at)
+            SELECT p.id,latest.id,
+                   CASE
+                       WHEN p.exclusion_status='manually_excluded' THEN 'exclude'
+                       WHEN p.exclusion_status='pending_review' THEN 'needs_review'
+                       ELSE 'unreviewed'
+                   END,
+                   CASE WHEN p.eligible=1 AND p.lifecycle_status='active' THEN 1 ELSE 0 END,
+                   0,
+                   COALESCE(p.updated_at,datetime('now'))
+            FROM photos p
+            JOIN (SELECT photo_id,MAX(id) AS id FROM photo_analysis GROUP BY photo_id) latest
+              ON latest.photo_id=p.id
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_photo_reviews_state ON photo_reviews(review_state,updated_at,photo_id)",
+            "CREATE INDEX IF NOT EXISTS idx_photo_reviews_candidate ON photo_reviews(candidate_pool,review_state,photo_id)",
+            "CREATE INDEX IF NOT EXISTS idx_photo_reviews_analysis ON photo_reviews(analysis_id,review_state,photo_id)",
+            "CREATE INDEX IF NOT EXISTS idx_photo_reviews_feedback ON photo_reviews(understanding_incorrect,caption_bad,scores_unreasonable,photo_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_photo_reviews_without_analysis ON photo_reviews(photo_id) WHERE analysis_id IS NULL",
+            """
+            CREATE TABLE IF NOT EXISTS photo_review_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                analysis_id INTEGER REFERENCES photo_analysis(id) ON DELETE CASCADE,
+                action TEXT NOT NULL,
+                before_json TEXT NOT NULL DEFAULT '{}',
+                after_json TEXT NOT NULL DEFAULT '{}',
+                actor_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+                client_version INTEGER,
+                created_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_photo_review_events_photo ON photo_review_events(photo_id,created_at DESC,id DESC)",
+            """
+            CREATE TABLE IF NOT EXISTS analysis_request_outcomes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,
+                job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+                provider TEXT,
+                model TEXT,
+                request_fingerprint TEXT NOT NULL,
+                outcome TEXT NOT NULL CHECK(outcome IN ('completed','ambiguous_failed','failed')),
+                error_code TEXT,
+                error_message TEXT,
+                requires_manual_confirmation INTEGER NOT NULL DEFAULT 0 CHECK(requires_manual_confirmation IN (0,1)),
+                created_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_analysis_request_outcomes_photo ON analysis_request_outcomes(photo_id,created_at DESC,id DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_analysis_request_outcomes_fingerprint ON analysis_request_outcomes(request_fingerprint,created_at DESC)",
         ),
     ),
 )

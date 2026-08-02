@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 import logging
 import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -23,8 +24,11 @@ from inktime.app.core.logging import log_event
 from inktime.app.core.paths import UnsafePathError
 from inktime.app.domain.rendering import DISPLAY_PROFILES, DeviceTestReleaseStore
 from inktime.app.domain.rendering.system_presets import DEFAULT_DEVICE_PANEL_PROFILE
+from inktime.app.domain.photopainter.offline_schedule import validate_offline_schedule
 from inktime.app.services.rendering import FIT_MODES, FRAME_ORIENTATIONS, LAYOUTS
+from inktime.app.services.stock_transport import UnsafeStockEndpoint, StockTransportError, validate_stock_endpoint_host
 from inktime.app.repositories.devices import DeviceRepository
+from inktime.app.repositories.offline_schedules import OfflineScheduleRepository
 from inktime.app.web.access import administrator_required, login_required
 
 
@@ -35,6 +39,10 @@ SCHEDULE_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
 def _repository() -> DeviceRepository:
     return current_app.extensions["inktime_device_repository"]
+
+
+def _offline_schedules() -> OfflineScheduleRepository:
+    return current_app.extensions["inktime_offline_schedule_repository"]
 
 
 def _json_payload(error_prefix: str = "DEVICE-003", *, maximum_bytes: int = 64 * 1024) -> dict:
@@ -73,7 +81,53 @@ def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
     schedule = str(payload.get("schedule", defaults.get("schedule", "08:00")))
     if not SCHEDULE_PATTERN.fullmatch(schedule):
         abort(400, description="DEVICE-003 排程必須使用 00:00 到 23:59 格式")
-    name = str(payload.get("name", "")).strip()
+    delivery_mode = str(payload.get("delivery_mode", defaults.get("delivery_mode", "legacy_online"))).strip()
+    if delivery_mode not in {"legacy_online", "stock_compat", "inktime_offline_schedule"}:
+        abort(400, description="DEVICE-008 delivery_mode 不合法")
+    if "schedule_times" in payload:
+        schedule_values = payload.get("schedule_times")
+    elif "offline_schedule" in payload:
+        schedule_values = payload.get("offline_schedule")
+    elif defaults.get("delivery_mode") == "inktime_offline_schedule":
+        schedule_values = defaults.get("schedule_times", defaults.get("offline_schedule", [schedule]))
+    else:
+        schedule_values = [schedule]
+    try:
+        schedule_values = validate_offline_schedule(schedule_values, maximum=12)
+    except ValueError as exc:
+        abort(400, description=str(exc))
+    try:
+        offline_prefetch_allowed = json_bool(
+            payload,
+            "offline_prefetch_allowed",
+            default=bool(defaults.get("offline_prefetch_allowed", delivery_mode == "inktime_offline_schedule")),
+            error_prefix="DEVICE-008",
+        )
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
+    try:
+        stock_endpoint_host = validate_stock_endpoint_host(
+            payload.get("stock_endpoint_host", defaults.get("stock_endpoint_host"))
+        )
+    except UnsafeStockEndpoint as exc:
+        abort(400, description=str(exc))
+    try:
+        prefetch_lead_minutes = json_int(
+            payload,
+            "prefetch_lead_minutes",
+            default=int(defaults.get("prefetch_lead_minutes", 5)),
+            minimum=0,
+            maximum=120,
+            error_prefix="DEVICE-008",
+        )
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
+    button_wake_action = str(
+        payload.get("button_wake_action", defaults.get("button_wake_action", "check_new"))
+    ).strip()
+    if button_wake_action not in {"check_new", "local_next"}:
+        abort(400, description="DEVICE-008 button_wake_action 不合法")
+    name = str(payload.get("name", defaults.get("name", ""))).strip()
     if not name:
         abort(400, description="DEVICE-003 裝置名稱不可空白")
     try:
@@ -107,6 +161,12 @@ def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
         "enabled": enabled,
         "timezone_name": timezone_name,
         "schedule": schedule,
+        "delivery_mode": delivery_mode,
+        "offline_prefetch_allowed": offline_prefetch_allowed,
+        "schedule_times": schedule_values,
+        "prefetch_lead_minutes": prefetch_lead_minutes,
+        "button_wake_action": button_wake_action,
+        "stock_endpoint_host": stock_endpoint_host,
         "rotation": rotation,
         "panel_profile": panel_profile,
         "frame_orientation": frame_orientation,
@@ -130,6 +190,12 @@ def devices_page():
             "schedule": str(settings.get("device.default_schedule", "08:00")),
             "rotation": int(settings.get("device.default_rotation", 0)),
             "panel_profile": str(settings.get("device.default_panel_profile", DEFAULT_DEVICE_PANEL_PROFILE)),
+            "delivery_mode": "legacy_online",
+            "offline_prefetch_allowed": False,
+            "schedule_times": [str(settings.get("device.default_schedule", "08:00"))],
+            "prefetch_lead_minutes": 5,
+            "button_wake_action": "check_new",
+            "stock_endpoint_host": None,
             "frame_orientation": None,
             "layout_mode": None,
             "fit_mode": None,
@@ -253,6 +319,11 @@ def create_device():
             "schedule": str(settings.get("device.default_schedule", "08:00")),
             "rotation": int(settings.get("device.default_rotation", 0)),
             "panel_profile": str(settings.get("device.default_panel_profile", DEFAULT_DEVICE_PANEL_PROFILE)),
+            "delivery_mode": "legacy_online",
+            "schedule_times": [str(settings.get("device.default_schedule", "08:00"))],
+            "prefetch_lead_minutes": 5,
+            "button_wake_action": "check_new",
+            "stock_endpoint_host": None,
         },
     )
     device_id, token = _repository().create(**fields)
@@ -277,7 +348,33 @@ def regenerate_device_token(device_id: str):
 @administrator_required
 def update_device(device_id: str):
     payload = _json_payload()
-    fields = _validated_device_fields(payload)
+    existing = _repository().get(device_id)
+    if existing is None:
+        abort(404)
+    try:
+        existing_schedule = json.loads(str(existing["schedule_times_json"] or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        existing_schedule = [str(existing["schedule"] or "08:00")]
+    fields = _validated_device_fields(
+        payload,
+        defaults={
+            "name": existing["name"],
+            "enabled": bool(existing["enabled"]),
+            "timezone": existing["timezone"],
+            "schedule": existing["schedule"],
+            "rotation": existing["rotation"],
+            "panel_profile": existing["panel_profile"],
+            "delivery_mode": existing["delivery_mode"],
+            "offline_prefetch_allowed": bool(existing["offline_prefetch_allowed"]),
+            "schedule_times": existing_schedule,
+            "prefetch_lead_minutes": int(existing["prefetch_lead_minutes"] or 5),
+            "button_wake_action": str(existing["button_wake_action"] or "check_new"),
+            "stock_endpoint_host": existing["stock_endpoint_host"],
+            "frame_orientation": existing["frame_orientation"],
+            "layout_mode": existing["layout_mode"],
+            "fit_mode": existing["fit_mode"],
+        },
+    )
     try:
         _repository().update(device_id, **fields)
     except KeyError:
@@ -309,6 +406,18 @@ def latest_release():
         "schedule": str(device["schedule"]),
         "rotation": int(device["rotation"]),
     }
+    if str(device["delivery_mode"] or "legacy_online") == "inktime_offline_schedule":
+        manifest["device_config"].update(
+            {
+                "schema_version": 3,
+                "delivery_mode": "inktime_offline_schedule",
+                "offline_prefetch_allowed": bool(device["offline_prefetch_allowed"]),
+                "schedule_times": json.loads(str(device["schedule_times_json"] or "[]")),
+                "prefetch_lead_minutes": int(device["prefetch_lead_minutes"] or 0),
+                "button_wake_action": str(device["button_wake_action"] or "check_new"),
+                "offline_schedule_version": int(device["offline_schedule_version"] or 0),
+            }
+        )
     if authorization.test_assignment is not None:
         assignment = authorization.test_assignment
         manifest["test_delivery"] = {
@@ -329,6 +438,177 @@ def latest_release():
         },
     )
     return manifest
+
+
+@bp.get("/api/device/v1/stock/dataUP")
+def stock_data_up_payload():
+    """Return the exact Stock `/dataUP` body for a bearer-authenticated bridge."""
+    device = authenticate_device_request()
+    if str(device["delivery_mode"] or "legacy_online") != "stock_compat":
+        abort(409, description="DEVICE-008 裝置目前不是 Stock 相容模式")
+    try:
+        payload, metadata = current_app.extensions["inktime_stock_compatibility_service"].payload_for_latest(
+            device_id=str(device["id"]),
+            profile_key=str(device["panel_profile"] or DEFAULT_DEVICE_PANEL_PROFILE),
+            rotate180=int(device["rotation"] or 0) == 180,
+        )
+    except PermissionError:
+        abort(404, description="DEVICE-002 目前沒有可用 Stock Release")
+    except (OSError, ValueError):
+        abort(409, description="DEVICE-009 Stock Payload 完整性驗證失敗")
+    response = current_app.response_class(payload, mimetype="application/octet-stream")
+    response.content_length = len(payload)
+    response.set_etag(str(metadata["stock_sha256"]))
+    response.headers["X-InkTime-Stock-Mode"] = str(metadata["mode"])
+    response.headers["X-InkTime-Source-Release"] = str(metadata["release_id"])
+    return response
+
+
+@bp.post("/api/v1/devices/<device_id>/stock-photopainter/display")
+@administrator_required
+def stock_photopainter_display(device_id: str):
+    """Upload one authorized Release to the explicitly configured Stock host."""
+
+    device = _repository().get(device_id)
+    if device is None:
+        abort(404, description="DEVICE-002 找不到裝置")
+    if str(device["delivery_mode"] or "legacy_online") != "stock_compat":
+        abort(409, description="DEVICE-008 裝置目前不是 Stock 相容模式")
+    try:
+        host = validate_stock_endpoint_host(device["stock_endpoint_host"])
+    except UnsafeStockEndpoint as exc:
+        abort(409, description=str(exc))
+    if host is None:
+        abort(409, description="DEVICE-009 尚未設定 Stock Host")
+    payload = _json_payload("DEVICE-009", maximum_bytes=16 * 1024)
+    release_id = str(payload.get("release_id", "")).strip()
+    file_name = str(payload.get("file_name", "")).strip()
+    if (
+        not release_id
+        or not file_name
+        or len(release_id) > 128
+        or len(file_name) > 255
+        or any(marker in file_name for marker in ("/", "\\", "\x00"))
+    ):
+        abort(400, description="DEVICE-009 release_id 與 file_name 必須是合法單一檔名")
+    service = current_app.extensions["inktime_stock_compatibility_service"]
+    try:
+        result = service.display_release(
+            device_id=device_id,
+            profile_key=str(device["panel_profile"] or DEFAULT_DEVICE_PANEL_PROFILE),
+            release_id=release_id,
+            file_name=file_name,
+            host=host,
+            rotate180=int(device["rotation"] or 0) == 180,
+        )
+    except PermissionError as exc:
+        _repository().record_stock_upload_event(
+            device_id,
+            release_id=release_id,
+            file_name=file_name,
+            payload_bytes=0,
+            status_code=None,
+            upload_accepted=False,
+            error_code="release_not_authorized",
+        )
+        abort(404, description=str(exc))
+    except (FileNotFoundError, UnsafeStockEndpoint, ValueError) as exc:
+        _repository().record_stock_upload_event(
+            device_id,
+            release_id=release_id,
+            file_name=file_name,
+            payload_bytes=0,
+            status_code=None,
+            upload_accepted=False,
+            error_code="payload_invalid",
+        )
+        abort(409, description=str(exc))
+    except StockTransportError as exc:
+        _repository().record_stock_upload_event(
+            device_id,
+            release_id=release_id,
+            file_name=file_name,
+            payload_bytes=0,
+            status_code=None,
+            upload_accepted=False,
+            error_code=exc.code,
+        )
+        abort(502, description=str(exc))
+    _repository().record_stock_upload_event(
+        device_id,
+        release_id=release_id,
+        file_name=file_name,
+        payload_bytes=int(result["size"]),
+        status_code=int(result["http_status"]),
+        upload_accepted=bool(result["upload_accepted"]),
+    )
+    return result, 202 if result["upload_accepted"] else 502
+
+
+@bp.post("/api/v1/devices/<device_id>/offline-schedule/prepare")
+@administrator_required
+def prepare_offline_schedule(device_id: str):
+    payload = _json_payload("DEVICE-008", maximum_bytes=32 * 1024)
+    target_date = str(payload.get("target_date", "")).strip()
+    release_ids = payload.get("release_ids")
+    if not isinstance(release_ids, list):
+        abort(400, description="DEVICE-008 release_ids 必須是陣列")
+    try:
+        return _offline_schedules().prepare_day(
+            device_id=device_id,
+            target_date=target_date,
+            release_ids=[str(value) for value in release_ids],
+        ), 201
+    except KeyError:
+        abort(404, description="DEVICE-002 找不到或停用的裝置")
+    except ValueError as exc:
+        abort(400, description=str(exc))
+
+
+@bp.get("/api/device/v1/offline-schedule")
+def device_offline_schedule():
+    device = authenticate_device_request()
+    if str(device["delivery_mode"] or "legacy_online") != "inktime_offline_schedule":
+        abort(409, description="DEVICE-008 裝置目前不是 enhanced offline schedule 模式")
+    result = _offline_schedules().latest_for_device(str(device["id"]))
+    if result is None:
+        abort(404, description="DEVICE-008 尚未準備今日離線排程")
+    try:
+        schedule_times = json.loads(str(device["schedule_times_json"] or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        abort(409, description="DEVICE-008 裝置 schedule_times 不可解析")
+    schedule = result["schedule"]
+    timezone_name = str(schedule["timezone"])
+    try:
+        local_zone = ZoneInfo(timezone_name)
+        slots = []
+        for raw_slot in result["slots"]:
+            slot = dict(raw_slot)
+            slot["show_at"] = datetime.fromisoformat(str(slot["show_at"])).astimezone(local_zone).isoformat()
+            slots.append(slot)
+    except (TypeError, ValueError, ZoneInfoNotFoundError):
+        abort(409, description="DEVICE-008 離線排程時間資料不合法")
+    device_projection = result.get("device") or {}
+    queue_version = max((int(slot.get("queue_version") or 0) for slot in slots), default=0)
+    return {
+        "schema_version": 1,
+        "device_id": str(device["id"]),
+        "schedule_id": str(schedule["id"]),
+        "config_version": int(schedule["config_version"]),
+        "target_date": str(schedule["target_date"]),
+        "target_local_date": str(schedule["target_date"]),
+        "timezone": str(schedule["timezone"]),
+        "delivery_mode": "inktime_offline_schedule",
+        "panel_profile": str(device_projection.get("panel_profile") or device["panel_profile"]),
+        "rotation": int(device_projection.get("rotation") or device["rotation"] or 0),
+        "schedule": schedule_times,
+        "schedule_times": schedule_times,
+        "prefetch_lead_minutes": int(device["prefetch_lead_minutes"] or 0),
+        "offline_schedule_version": int(device["offline_schedule_version"] or 0),
+        "queue_version": queue_version,
+        "status": str(schedule["status"]),
+        "slots": slots,
+    }
 
 
 @bp.get("/api/device/v1/releases/<release_id>/files/<path:filename>")

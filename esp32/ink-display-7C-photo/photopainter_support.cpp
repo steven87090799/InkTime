@@ -337,6 +337,49 @@ bool makeCachePaths(
       && static_cast<size_t>(backupLength) < capacity;
 }
 
+bool makeFormalFramePaths(
+  const char* sourceSha256,
+  DisplayRotation rotation,
+  char* finalPath,
+  char* temporaryPath,
+  char* backupPath,
+  size_t capacity
+) {
+  if (!isSha256Hex(sourceSha256) || finalPath == nullptr || temporaryPath == nullptr
+      || backupPath == nullptr || capacity == 0) {
+    return false;
+  }
+  const unsigned rotationValue = static_cast<unsigned>(rotation);
+  const int finalLength = snprintf(
+    finalPath, capacity, "/inktime/frames/%s-r%u.itf", sourceSha256, rotationValue);
+  const int temporaryLength = snprintf(
+    temporaryPath, capacity, "/inktime/frames/%s-r%u.tmp", sourceSha256, rotationValue);
+  const int backupLength = snprintf(
+    backupPath, capacity, "/inktime/frames/%s-r%u.bak", sourceSha256, rotationValue);
+  return finalLength > 0 && temporaryLength > 0 && backupLength > 0
+      && static_cast<size_t>(finalLength) < capacity
+      && static_cast<size_t>(temporaryLength) < capacity
+      && static_cast<size_t>(backupLength) < capacity;
+}
+
+bool makeActiveSchedulePaths(
+  char* finalPath,
+  char* temporaryPath,
+  char* backupPath,
+  size_t capacity
+) {
+  if (finalPath == nullptr || temporaryPath == nullptr || backupPath == nullptr || capacity == 0) {
+    return false;
+  }
+  const int finalLength = snprintf(finalPath, capacity, "/inktime/schedule/active.json");
+  const int temporaryLength = snprintf(temporaryPath, capacity, "/inktime/schedule/active.tmp");
+  const int backupLength = snprintf(backupPath, capacity, "/inktime/schedule/active.bak");
+  return finalLength > 0 && temporaryLength > 0 && backupLength > 0
+      && static_cast<size_t>(finalLength) < capacity
+      && static_cast<size_t>(temporaryLength) < capacity
+      && static_cast<size_t>(backupLength) < capacity;
+}
+
 struct PhotoPainterSupport::Impl {
   explicit Impl(const BoardConfig& board)
       : epdSpi(FSPI),
@@ -429,7 +472,10 @@ bool PhotoPainterSupport::begin() {
     sdReady_ = beginSd(board_.sdFallbackClockHz);
   }
   if (sdReady_) {
-    const char* directories[] = {"/originals", "/cache", "/config", "/logs"};
+    const char* directories[] = {
+      "/originals", "/cache", "/config", "/logs", "/inktime", "/inktime/schedule",
+      "/inktime/frames", "/inktime/journal", "/inktime/state",
+    };
     for (const char* directory : directories) {
       if (!SD.exists(directory) && !SD.mkdir(directory)) {
         sdReady_ = false;
@@ -471,7 +517,8 @@ uint8_t* PhotoPainterSupport::allocateWireBuffer(size_t length) const {
 bool PhotoPainterSupport::loadCachedFrame(
   uint32_t sourceHash,
   DisplayRotation rotation,
-  uint8_t** output
+  uint8_t** output,
+  const char* sourceSha256
 ) {
   if (output == nullptr) return false;
   *output = nullptr;
@@ -494,17 +541,27 @@ bool PhotoPainterSupport::loadCachedFrame(
     cacheStatus_ = CacheStatus::Miss;
     return false;
   }
-  CacheHeader header = {};
-  const bool headerRead = file.read(reinterpret_cast<uint8_t*>(&header), sizeof(header))
-                       == sizeof(header);
-  const bool plausible = headerRead && header.magic == kCacheMagic
-      && header.version == kCacheVersion
-      && header.width == board_.display.width && header.height == board_.display.height
-      && header.bitsPerPixel == kNativeBitsPerPixel
-      && header.rotation == static_cast<uint8_t>(rotation)
-      && header.sourceHash == sourceHash && header.payloadSize == kPhotoPainterFrameBytes
-      && static_cast<size_t>(file.size()) == sizeof(CacheHeader) + kPhotoPainterFrameBytes;
-  if (!plausible) {
+  const bool hasFullSource = isSha256Hex(sourceSha256);
+  CacheHeader legacyHeader = {};
+  CacheHeaderV2 fullHeader = {};
+  const bool useFullHeader = hasFullSource
+      && static_cast<size_t>(file.size()) == sizeof(CacheHeaderV2) + kPhotoPainterFrameBytes;
+  CacheValidation headerValidation = CacheValidation::BadLength;
+  if (useFullHeader) {
+    if (file.read(reinterpret_cast<uint8_t*>(&fullHeader), sizeof(fullHeader)) != sizeof(fullHeader)) {
+      file.close();
+      SD.remove(finalPath);
+      cacheStatus_ = CacheStatus::Invalid;
+      return false;
+    }
+  } else if (static_cast<size_t>(file.size()) == sizeof(CacheHeader) + kPhotoPainterFrameBytes) {
+    if (file.read(reinterpret_cast<uint8_t*>(&legacyHeader), sizeof(legacyHeader)) != sizeof(legacyHeader)) {
+      file.close();
+      SD.remove(finalPath);
+      cacheStatus_ = CacheStatus::Invalid;
+      return false;
+    }
+  } else {
     file.close();
     SD.remove(finalPath);
     cacheStatus_ = CacheStatus::Invalid;
@@ -527,10 +584,81 @@ bool PhotoPainterSupport::loadCachedFrame(
     total += received;
   }
   file.close();
-  if (total != kPhotoPainterFrameBytes
-      || validateCache(header, sourceHash, rotation, framebuffer, total) != CacheValidation::Valid) {
+  if (total == kPhotoPainterFrameBytes) {
+    headerValidation = useFullHeader
+      ? validateCacheV2(fullHeader, sourceSha256, rotation, framebuffer, total)
+      : validateCache(legacyHeader, sourceHash, rotation, framebuffer, total);
+  }
+  if (total != kPhotoPainterFrameBytes || headerValidation != CacheValidation::Valid) {
     heap_caps_free(framebuffer);
     SD.remove(finalPath);
+    cacheStatus_ = CacheStatus::Invalid;
+    return false;
+  }
+  *output = framebuffer;
+  cacheStatus_ = CacheStatus::Hit;
+  return true;
+}
+
+bool PhotoPainterSupport::loadFormalFrame(
+  const char* sourceSha256,
+  DisplayRotation rotation,
+  uint8_t** output
+) {
+  if (output == nullptr) return false;
+  *output = nullptr;
+  if (!sdReady_ || impl_->ioBuffer == nullptr || !isSha256Hex(sourceSha256)) {
+    cacheStatus_ = sdReady_ ? CacheStatus::Miss : CacheStatus::Disabled;
+    return false;
+  }
+  char finalPath[128] = {0};
+  char temporaryPath[128] = {0};
+  char backupPath[128] = {0};
+  if (!makeFormalFramePaths(
+        sourceSha256, rotation, finalPath, temporaryPath, backupPath, sizeof(finalPath))) {
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  if (!SD.exists(finalPath) && SD.exists(backupPath)) SD.rename(backupPath, finalPath);
+  File file = SD.open(finalPath, FILE_READ);
+  if (!file || static_cast<size_t>(file.size())
+      != sizeof(FormalFrameHeader) + kPhotoPainterFrameBytes) {
+    if (file) file.close();
+    if (SD.exists(finalPath)) SD.remove(finalPath);
+    if (SD.exists(backupPath)) SD.rename(backupPath, finalPath);
+    cacheStatus_ = CacheStatus::Miss;
+    return false;
+  }
+  FormalFrameHeader header = {};
+  if (file.read(reinterpret_cast<uint8_t*>(&header), sizeof(header)) != sizeof(header)) {
+    file.close();
+    SD.remove(finalPath);
+    if (SD.exists(backupPath)) SD.rename(backupPath, finalPath);
+    cacheStatus_ = CacheStatus::Invalid;
+    return false;
+  }
+  uint8_t* framebuffer = allocateWireBuffer(kPhotoPainterFrameBytes);
+  if (framebuffer == nullptr) {
+    file.close();
+    cacheStatus_ = CacheStatus::Error;
+    lastError_ = "DEVICE-PSRAM-ALLOC";
+    return false;
+  }
+  size_t total = 0;
+  while (total < kPhotoPainterFrameBytes) {
+    const size_t requested = min(kIoChunkSize, kPhotoPainterFrameBytes - total);
+    const size_t received = file.read(impl_->ioBuffer, requested);
+    if (received != requested) break;
+    memcpy(framebuffer + total, impl_->ioBuffer, received);
+    total += received;
+  }
+  file.close();
+  if (total != kPhotoPainterFrameBytes
+      || validateFormalFrameHeader(
+           header, sourceSha256, rotation, framebuffer, total) != CacheValidation::Valid) {
+    heap_caps_free(framebuffer);
+    SD.remove(finalPath);
+    if (SD.exists(backupPath)) SD.rename(backupPath, finalPath);
     cacheStatus_ = CacheStatus::Invalid;
     return false;
   }
@@ -545,7 +673,8 @@ bool PhotoPainterSupport::convertAndCache(
   bool indexed4,
   uint32_t sourceHash,
   DisplayRotation rotation,
-  uint8_t** output
+  uint8_t** output,
+  const char* sourceSha256
 ) {
   if (output == nullptr) return false;
   *output = nullptr;
@@ -580,10 +709,16 @@ bool PhotoPainterSupport::convertAndCache(
     cacheStatus_ = CacheStatus::Error;
     return true;
   }
-  const CacheHeader header = makeCacheHeader(
+  const bool useFullHeader = isSha256Hex(sourceSha256);
+  CacheHeader legacyHeader = makeCacheHeader(
     sourceHash, rotation, framebuffer, kPhotoPainterFrameBytes);
-  bool writeOk = file.write(reinterpret_cast<const uint8_t*>(&header), sizeof(header))
-              == sizeof(header);
+  CacheHeaderV2 fullHeader = makeCacheHeaderV2(
+    sourceSha256, rotation, framebuffer, kPhotoPainterFrameBytes);
+  const uint8_t* headerBytes = useFullHeader
+    ? reinterpret_cast<const uint8_t*>(&fullHeader)
+    : reinterpret_cast<const uint8_t*>(&legacyHeader);
+  const size_t headerSize = useFullHeader ? sizeof(fullHeader) : sizeof(legacyHeader);
+  bool writeOk = file.write(headerBytes, headerSize) == headerSize;
   size_t total = 0;
   while (writeOk && total < kPhotoPainterFrameBytes) {
     const size_t requested = min(kIoChunkSize, kPhotoPainterFrameBytes - total);
@@ -611,6 +746,142 @@ bool PhotoPainterSupport::convertAndCache(
   }
   SD.remove(backupPath);
   cacheStatus_ = CacheStatus::Written;
+  return true;
+}
+
+bool PhotoPainterSupport::writeFormalFrame(
+  const char* sourceSha256,
+  DisplayRotation rotation,
+  const uint8_t* framebuffer,
+  size_t length
+) {
+  if (!sdReady_ || impl_->ioBuffer == nullptr || !isSha256Hex(sourceSha256)
+      || framebuffer == nullptr || length != kPhotoPainterFrameBytes) {
+    cacheStatus_ = sdReady_ ? CacheStatus::Error : CacheStatus::Disabled;
+    return false;
+  }
+  char finalPath[128] = {0};
+  char temporaryPath[128] = {0};
+  char backupPath[128] = {0};
+  if (!makeFormalFramePaths(
+        sourceSha256, rotation, finalPath, temporaryPath, backupPath, sizeof(finalPath))) {
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  SD.remove(temporaryPath);
+  File file = SD.open(temporaryPath, FILE_WRITE);
+  if (!file) {
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  const FormalFrameHeader header = makeFormalFrameHeader(
+    sourceSha256, rotation, framebuffer, length);
+  bool writeOk = file.write(
+    reinterpret_cast<const uint8_t*>(&header), sizeof(header)) == sizeof(header);
+  size_t total = 0;
+  while (writeOk && total < length) {
+    const size_t requested = min(kIoChunkSize, length - total);
+    memcpy(impl_->ioBuffer, framebuffer + total, requested);
+    const size_t written = file.write(impl_->ioBuffer, requested);
+    writeOk = written == requested;
+    total += written;
+  }
+  file.flush();
+  file.close();
+  if (!writeOk || total != length) {
+    SD.remove(temporaryPath);
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  SD.remove(backupPath);
+  const bool movedOld = !SD.exists(finalPath) || SD.rename(finalPath, backupPath);
+  const bool installed = movedOld && SD.rename(temporaryPath, finalPath);
+  if (!installed) {
+    SD.remove(temporaryPath);
+    if (!SD.exists(finalPath) && SD.exists(backupPath)) SD.rename(backupPath, finalPath);
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  SD.remove(backupPath);
+  cacheStatus_ = CacheStatus::Written;
+  return true;
+}
+
+bool PhotoPainterSupport::writeActiveSchedule(const char* json, size_t length) {
+  static constexpr size_t kMaxScheduleBytes = 32768U;
+  if (!sdReady_ || json == nullptr || length == 0 || length > kMaxScheduleBytes) {
+    cacheStatus_ = sdReady_ ? CacheStatus::Error : CacheStatus::Disabled;
+    return false;
+  }
+  char finalPath[64] = {0};
+  char temporaryPath[64] = {0};
+  char backupPath[64] = {0};
+  if (!makeActiveSchedulePaths(
+        finalPath, temporaryPath, backupPath, sizeof(finalPath))) {
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  SD.remove(temporaryPath);
+  File file = SD.open(temporaryPath, FILE_WRITE);
+  if (!file) {
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  const size_t written = file.write(
+    reinterpret_cast<const uint8_t*>(json), length);
+  file.flush();
+  file.close();
+  if (written != length) {
+    SD.remove(temporaryPath);
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  SD.remove(backupPath);
+  const bool movedOld = !SD.exists(finalPath) || SD.rename(finalPath, backupPath);
+  const bool installed = movedOld && SD.rename(temporaryPath, finalPath);
+  if (!installed) {
+    SD.remove(temporaryPath);
+    if (!SD.exists(finalPath) && SD.exists(backupPath)) SD.rename(backupPath, finalPath);
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  SD.remove(backupPath);
+  cacheStatus_ = CacheStatus::Written;
+  return true;
+}
+
+bool PhotoPainterSupport::readActiveSchedule(String& json) {
+  static constexpr size_t kMaxScheduleBytes = 32768U;
+  json = "";
+  if (!sdReady_) {
+    cacheStatus_ = CacheStatus::Disabled;
+    return false;
+  }
+  char finalPath[64] = {0};
+  char temporaryPath[64] = {0};
+  char backupPath[64] = {0};
+  if (!makeActiveSchedulePaths(
+        finalPath, temporaryPath, backupPath, sizeof(finalPath))) {
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  if (!SD.exists(finalPath) && SD.exists(backupPath)) SD.rename(backupPath, finalPath);
+  File file = SD.open(finalPath, FILE_READ);
+  if (!file || file.size() <= 0 || static_cast<size_t>(file.size()) > kMaxScheduleBytes) {
+    if (file) file.close();
+    cacheStatus_ = CacheStatus::Miss;
+    return false;
+  }
+  const size_t length = static_cast<size_t>(file.size());
+  json.reserve(length + 1U);
+  while (file.available()) json += static_cast<char>(file.read());
+  file.close();
+  if (json.length() != length) {
+    json = "";
+    cacheStatus_ = CacheStatus::Invalid;
+    return false;
+  }
+  cacheStatus_ = CacheStatus::Hit;
   return true;
 }
 

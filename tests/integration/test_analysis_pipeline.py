@@ -8,6 +8,7 @@ import pytest
 
 from inktime.app.domain.photos import PhotoPreprocessor, ThumbnailCache
 from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
+from inktime.app.providers.openai_compatible import ProviderHTTPError
 from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.usage import UsageRepository
@@ -64,6 +65,14 @@ class FailingProvider(MockProvider):
         raise RuntimeError("provider unavailable")
 
 
+class AmbiguousProvider(MockProvider):
+    name = "Ambiguous Provider"
+
+    def analyze(self, **kwargs):
+        self.analyze_calls += 1
+        raise ProviderHTTPError("response lost after vision POST", "VLM-AMBIGUOUS", ambiguous=True)
+
+
 def prepare(app, tmp_path, duplicate=False):
     root = tmp_path / "photos"
     root.mkdir()
@@ -91,6 +100,25 @@ def test_single_model_call_returns_all_fields_and_usage(app, tmp_path):
     with app.extensions["inktime_database"].session() as connection:
         usage = connection.execute("SELECT input_tokens,output_tokens FROM api_usage").fetchone()
     assert tuple(usage) == (1000, 100)
+
+
+def test_ambiguous_vision_failure_is_persisted_without_provider_failover(app, tmp_path):
+    _, ids, service = prepare(app, tmp_path)
+    provider = AmbiguousProvider([])
+
+    with pytest.raises(ProviderHTTPError):
+        service.analyze_photo(
+            photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock"
+        )
+
+    assert provider.analyze_calls == 1
+    with app.extensions["inktime_database"].session() as connection:
+        outcome = connection.execute(
+            "SELECT outcome,requires_manual_confirmation,error_code FROM analysis_request_outcomes "
+            "WHERE photo_id=? ORDER BY id DESC LIMIT 1",
+            (ids[0],),
+        ).fetchone()
+    assert tuple(outcome) == ("ambiguous_failed", 1, "VLM-AMBIGUOUS")
 
 
 def test_provider_and_local_results_persist_a_complete_analysis_context(app, tmp_path):
@@ -161,7 +189,7 @@ def test_invalid_json_is_repaired_only_once_without_second_image_call(app, tmp_p
     assert provider.repair_calls == 1
 
 
-def test_smart_stage_filters_low_value_photo(app, tmp_path):
+def test_legacy_smart_strategy_uses_the_single_full_contract(app, tmp_path):
     _, ids, service = prepare(app, tmp_path)
     provider = MockProvider([valid_result(memory_score=40, types=["雜物"])])
     result = service.analyze_photo(
@@ -172,7 +200,7 @@ def test_smart_stage_filters_low_value_photo(app, tmp_path):
         low_model="cheap",
         high_model="quality",
     )
-    assert result["stage"] == "stage_one"
+    assert result["stage"] == "single"
     assert provider.analyze_calls == 1
 
 
@@ -202,7 +230,7 @@ def test_failover_rebuilds_cache_identity_for_the_next_provider(app, tmp_path):
         photo_id=ids[0], job_id=None, provider=router, strategy="high_quality", analysis_plan=plan
     )
 
-    assert result["stage"] == "single_high"
+    assert result["stage"] == "single"
     assert failing.analyze_calls == 1
     assert succeeding.analyze_calls == 1
     with app.extensions["inktime_database"].session() as connection:
@@ -287,13 +315,13 @@ def test_worker_context_does_not_inherit_a_different_frozen_plan(app, tmp_path):
     service.analyze_photo(
         photo_id=ids[0], job_id=None, provider=first, strategy="high_quality", analysis_plan=first_plan
     )
-    settings.update("model.high_model", "new-model", changed_by="test", source_ip="127.0.0.1")
+    settings.update("model.analysis_model", "new-model", changed_by="test", source_ip="127.0.0.1")
     second_plan = service.build_plan(strategy="high_quality", provider_route=[], scoring_profile=profile)
     second = MockProvider([valid_result(memory_score=77)])
     result = service.analyze_photo(
         photo_id=ids[1], job_id=None, provider=second, strategy="high_quality", analysis_plan=second_plan
     )
-    assert result["stage"] == "single_high"
+    assert result["stage"] == "single"
     assert second.analyze_calls == 1
 
 

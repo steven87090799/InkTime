@@ -54,6 +54,21 @@ ORIENTATION_EVIDENCE = {
 REQUIRED_FIELDS = BASIC_REQUIRED_FIELDS
 FULL_OPTIONAL_FIELDS = {"details"}
 GRADE_VALUES = {"S", "A", "B", "C", "D", "E", "unknown"}
+V3_GRADE_FIELDS = {
+    "memory_grade": "memory_score",
+    "beauty_grade": "beauty_score",
+    "technical_grade": "technical_quality_score",
+    "emotion_grade": "emotion_score",
+}
+V3_GRADE_ALIASES = {
+    "aesthetic_grade": "beauty_grade",
+    "aesthetic": "beauty_grade",
+    "memory": "memory_grade",
+    "beauty": "beauty_grade",
+    "technical": "technical_grade",
+    "emotion": "emotion_grade",
+}
+V3_TOP_LEVEL_OPTIONAL_FIELDS = {"reason_codes"}
 
 
 def _nullable(schema: dict) -> dict:
@@ -117,6 +132,8 @@ ANALYSIS_JSON_SCHEMA = {
 
 _DETAIL_PROPERTIES = {
     "memory_grade": _detail_property({"type": "string", "enum": sorted(GRADE_VALUES)}),
+    "beauty_grade": _detail_property({"type": "string", "enum": sorted(GRADE_VALUES)}),
+    # Historical semantic_json rows may still carry this spelling.
     "aesthetic_grade": _detail_property({"type": "string", "enum": sorted(GRADE_VALUES)}),
     "technical_grade": _detail_property({"type": "string", "enum": sorted(GRADE_VALUES)}),
     "emotion_grade": _detail_property({"type": "string", "enum": sorted(GRADE_VALUES)}),
@@ -130,6 +147,9 @@ _DETAIL_PROPERTIES = {
     "people_interaction": _detail_property({"type": "string", "maxLength": 100}),
     "face_visibility": _detail_property({"type": "string", "maxLength": 60}),
     "primary_subject": _detail_property({"type": "string", "maxLength": 120}),
+    "subjects": _detail_property(
+        {"type": "array", "items": {"type": "string", "maxLength": 80}, "maxItems": 5}
+    ),
     "objects": _detail_property(
         {"type": "array", "items": {"type": "string", "maxLength": 40}, "maxItems": 12}
     ),
@@ -165,7 +185,17 @@ _DETAIL_PROPERTIES = {
         {"type": "array", "items": {"type": "string", "maxLength": 40}, "maxItems": 12}
     ),
     "short_copy": _detail_property({"type": "string", "maxLength": 120}),
-    "confidence": _detail_property({"type": "number", "minimum": 0, "maximum": 1}),
+    "confidence": _detail_property(
+        {
+            "anyOf": [
+                {"type": "number", "minimum": 0, "maximum": 1},
+                {
+                    "type": "object",
+                    "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1},
+                },
+            ]
+        }
+    ),
 }
 CAPTION_VARIANT_STYLES = ("natural", "warm", "literary", "humorous", "minimal")
 
@@ -175,13 +205,56 @@ FULL_ANALYSIS_JSON_SCHEMA = {
     "schema": {
         "type": "object",
         "additionalProperties": False,
-        "required": sorted(BASIC_REQUIRED_FIELDS),
+        "required": sorted(
+            (BASIC_REQUIRED_FIELDS - set(V3_GRADE_FIELDS.values()))
+            | set(V3_GRADE_FIELDS)
+            | {"confidence"}
+        ),
         "properties": {
             **cast(dict[str, Any], ANALYSIS_JSON_SCHEMA["schema"])["properties"],
+            "schema_version": {"type": "integer", "const": 3},
+            "caption": {"type": "string", "minLength": 1, "maxLength": 200},
+            "side_caption": {"type": "string", "minLength": 8, "maxLength": 16},
+            "types": {
+                "type": "array",
+                "items": {"type": "string", "enum": sorted(ALLOWED_TYPES)},
+                "minItems": 1,
+                "maxItems": 5,
+                "uniqueItems": True,
+            },
+            "reason": {"type": "string", "minLength": 1, "maxLength": 100},
+            **{
+                field: {"type": "string", "enum": sorted(GRADE_VALUES)}
+                for field in V3_GRADE_FIELDS
+            },
+            "confidence": {
+                "anyOf": [
+                    {"type": "number", "minimum": 0, "maximum": 1},
+                    {
+                        "type": "object",
+                        "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1},
+                    },
+                ]
+            },
+            "reason_codes": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1, "maxLength": 60},
+                "maxItems": 5,
+                "uniqueItems": True,
+            },
             "details": {
                 "type": "object",
                 "additionalProperties": False,
-                "properties": _DETAIL_PROPERTIES,
+                "properties": {
+                    **_DETAIL_PROPERTIES,
+                    "scene": _detail_property({"type": "string", "maxLength": 60}),
+                    "landmark_candidates": _detail_property(
+                        {"type": "array", "items": {"type": "string", "maxLength": 80}, "maxItems": 3}
+                    ),
+                    "search_keywords": _detail_property(
+                        {"type": "array", "items": {"type": "string", "maxLength": 40}, "maxItems": 8}
+                    ),
+                },
             },
         },
     },
@@ -190,7 +263,7 @@ FULL_ANALYSIS_JSON_SCHEMA = {
 
 def json_schema_for_stage(stage: str, *, caption_controls: dict[str, Any] | None = None) -> dict:
     """完整分析只在高細節單次請求使用；其餘採用成本較低的基本 Schema。"""
-    full_stage = stage in {"single_high", "stage_two", "full"}
+    full_stage = stage in {"single", "single_high", "stage_two", "full"}
     if not caption_controls:
         return FULL_ANALYSIS_JSON_SCHEMA if full_stage else ANALYSIS_JSON_SCHEMA
     schema = deepcopy(FULL_ANALYSIS_JSON_SCHEMA if full_stage else ANALYSIS_JSON_SCHEMA)
@@ -229,6 +302,45 @@ def _score(value: Any, field: str) -> float:
     return result
 
 
+def _grade_score(value: Any) -> float:
+    values = {"S": 95.0, "A": 85.0, "B": 75.0, "C": 60.0, "D": 40.0, "E": 20.0, "unknown": 0.0}
+    if value not in values:
+        raise AnalysisValidationError("v3 等級必須是 S/A/B/C/D/E/unknown")
+    return values[value]
+
+
+def _normalize_v3(value: dict) -> dict:
+    """Convert the grade-oriented response to the stable persistence shape."""
+    normalized = dict(value)
+    raw_details = normalized.get("details")
+    if raw_details is not None and not isinstance(raw_details, dict):
+        raise AnalysisValidationError("details 必須是 JSON Object")
+    details = dict(raw_details or {})
+    grades = normalized.pop("grades", None)
+    if grades is not None:
+        if not isinstance(grades, dict):
+            raise AnalysisValidationError("grades 必須是 JSON Object")
+        for key, grade in grades.items():
+            canonical = V3_GRADE_ALIASES.get(str(key), str(key))
+            if canonical in V3_GRADE_FIELDS:
+                details[canonical] = grade
+    for field in (*V3_GRADE_FIELDS, *V3_GRADE_ALIASES):
+        if field in normalized:
+            details[V3_GRADE_ALIASES.get(field, field)] = normalized.pop(field)
+    if "display_suitability_grade" in normalized:
+        details["display_suitability_grade"] = normalized.pop("display_suitability_grade")
+    confidence = normalized.pop("confidence", None)
+    if confidence is not None:
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float, dict)):
+            raise AnalysisValidationError("confidence 必須是 0 到 1 的數字或 Object")
+        details["confidence"] = confidence
+    for grade_field, score_field in V3_GRADE_FIELDS.items():
+        if score_field not in normalized:
+            normalized[score_field] = _grade_score(details.get(grade_field, "unknown"))
+    normalized["details"] = details
+    return normalized
+
+
 def validate_analysis_result(raw: str | dict) -> dict:
     if isinstance(raw, str):
         if "```" in raw:
@@ -241,7 +353,9 @@ def validate_analysis_result(raw: str | dict) -> dict:
             raise error from exc
     else:
         value = dict(raw)
-    # v3 cache entries predate this additive field.  Keep them readable without
+    if value.get("schema_version") == 3:
+        value = _normalize_v3(value)
+    # v1 cache entries predate this additive field.  Keep them readable without
     # treating the missing value as a confident orientation recommendation.
     if value.get("schema_version") == 1 and "visual_orientation" not in value:
         value["visual_orientation"] = {
@@ -251,27 +365,56 @@ def validate_analysis_result(raw: str | dict) -> dict:
             "evidence": ["insufficient_visual_cues"],
         }
     allowed = BASIC_REQUIRED_FIELDS | FULL_OPTIONAL_FIELDS
+    if value.get("schema_version") == 3:
+        allowed |= V3_TOP_LEVEL_OPTIONAL_FIELDS
     if not BASIC_REQUIRED_FIELDS <= set(value) or not set(value) <= allowed:
         missing = sorted(BASIC_REQUIRED_FIELDS - set(value))
         extra = sorted(set(value) - allowed)
         raise AnalysisValidationError(f"欄位不符合 Schema；缺少={missing}，多餘={extra}")
-    if value["schema_version"] not in {1, 2}:
+    if value["schema_version"] not in {1, 2, 3}:
         raise AnalysisValidationError("不支援的 schema_version")
     if value["schema_version"] == 2 and "visual_orientation" not in value:
         raise AnalysisValidationError("schema v2 必須包含 visual_orientation")
+    if value["schema_version"] == 3:
+        details = value.get("details") or {}
+        for grade_field in (*V3_GRADE_FIELDS, "display_suitability_grade"):
+            if grade_field in details and details[grade_field] not in GRADE_VALUES:
+                raise AnalysisValidationError(f"{grade_field} 等級不合法")
+        confidence = details.get("confidence")
+        if confidence is not None:
+            if isinstance(confidence, bool) or not isinstance(confidence, (int, float, dict)):
+                raise AnalysisValidationError("confidence 格式不合法")
+            if isinstance(confidence, dict) and any(
+                isinstance(item, bool) or not isinstance(item, (int, float)) or not 0 <= float(item) <= 1
+                for item in confidence.values()
+            ):
+                raise AnalysisValidationError("confidence Object 值必須介於 0 到 1")
+            if isinstance(confidence, (int, float)) and not 0 <= float(confidence) <= 1:
+                raise AnalysisValidationError("confidence 必須介於 0 到 1")
+        reason_codes = value.get("reason_codes", [])
+        if not isinstance(reason_codes, list) or len(reason_codes) > 5:
+            raise AnalysisValidationError("reason_codes 格式不合法")
+        if any(not isinstance(item, str) or not item.strip() or len(item) > 60 for item in reason_codes):
+            raise AnalysisValidationError("reason_codes 格式不合法")
+        if len(reason_codes) != len(set(reason_codes)):
+            raise AnalysisValidationError("reason_codes 格式不合法")
     if not isinstance(value["caption"], str) or not value["caption"].strip():
         raise AnalysisValidationError("caption 不可空白")
     if not isinstance(value["side_caption"], str) or len(value["side_caption"]) > 120:
         raise AnalysisValidationError("side_caption 格式不合法")
     if not isinstance(value["reason"], str) or not value["reason"].strip() or len(value["reason"]) > 240:
         raise AnalysisValidationError("reason 格式不合法")
+    if value.get("schema_version") == 3:
+        if len(value["caption"]) > 200 or not 8 <= len(value["side_caption"]) <= 16:
+            raise AnalysisValidationError("v3 caption／side_caption 長度不合法")
+        if len(value["reason"]) > 100 or len(value["types"]) > 5:
+            raise AnalysisValidationError("v3 reason／types 長度不合法")
     types = value["types"]
-    if (
-        not isinstance(types, list)
-        or not types
-        or len(types) != len(set(types))
-        or any(item not in ALLOWED_TYPES for item in types)
-    ):
+    if not isinstance(types, list) or not types:
+        raise AnalysisValidationError("types 含有不允許或重複的類型")
+    if any(not isinstance(item, str) or item not in ALLOWED_TYPES for item in types):
+        raise AnalysisValidationError("types 含有不允許或重複的類型")
+    if len(types) != len(set(types)):
         raise AnalysisValidationError("types 含有不允許或重複的類型")
     if not isinstance(value["should_keep"], bool) or not isinstance(value["sensitive"], bool):
         raise AnalysisValidationError("布林欄位格式不合法")
@@ -286,7 +429,7 @@ def validate_analysis_result(raw: str | dict) -> dict:
     }:
         raise AnalysisValidationError("visual_orientation 欄位不合法")
     rotation = orientation["rotation_cw"]
-    if rotation not in {0, 90, 180, 270, None} or isinstance(rotation, bool):
+    if rotation is not None and (isinstance(rotation, bool) or not isinstance(rotation, int) or rotation not in {0, 90, 180, 270}):
         raise AnalysisValidationError("visual_orientation.rotation_cw 不合法")
     if (
         isinstance(orientation["confidence"], bool)
@@ -298,9 +441,10 @@ def validate_analysis_result(raw: str | dict) -> dict:
         not isinstance(orientation["ambiguous"], bool)
         or not isinstance(orientation["evidence"], list)
         or not orientation["evidence"]
-        or len(orientation["evidence"]) != len(set(orientation["evidence"]))
-        or any(item not in ORIENTATION_EVIDENCE for item in orientation["evidence"])
+        or any(not isinstance(item, str) or item not in ORIENTATION_EVIDENCE for item in orientation["evidence"])
     ):
+        raise AnalysisValidationError("visual_orientation evidence 不合法")
+    if len(orientation["evidence"]) != len(set(orientation["evidence"])):
         raise AnalysisValidationError("visual_orientation evidence 不合法")
     if "insufficient_visual_cues" in orientation["evidence"] and orientation["evidence"] != [
         "insufficient_visual_cues"
@@ -327,6 +471,16 @@ def validate_analysis_result(raw: str | dict) -> dict:
                 if any(not isinstance(value, str) or not value.strip() for value in detail.values()):
                     raise AnalysisValidationError("caption_variants 必須是非空白文字")
                 details[field] = {style: value.strip() for style, value in detail.items()}
+                continue
+            if field in {"subjects", "objects", "animals", "vehicles", "landmark_candidates", "search_keywords"}:
+                if not isinstance(detail, list) or any(
+                    not isinstance(item, str) or not item.strip() for item in detail
+                ):
+                    raise AnalysisValidationError(f"{field} 必須是非空白文字陣列")
+                limits = {"subjects": 5, "landmark_candidates": 3, "search_keywords": 8}
+                if value.get("schema_version") == 3 and len(detail) > limits.get(field, 12):
+                    raise AnalysisValidationError(f"{field} 超過數量上限")
+                details[field] = [item.strip() for item in detail]
                 continue
             if isinstance(detail, str):
                 details[field] = detail.strip()

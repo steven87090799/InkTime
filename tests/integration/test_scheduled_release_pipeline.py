@@ -89,3 +89,97 @@ def test_schedule_resolves_devices_limits_years_and_commits_history_after_publis
     assert {row["status"] for row in releases} == {"published"}
     assert {row["release_id"] for row in history} == {row["id"] for row in releases}
     assert len(history) == 4
+
+
+def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idempotent(app, tmp_path):
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="127.0.0.1"
+    )
+    root = tmp_path / "offline-scheduled"
+    root.mkdir()
+    photos = app.extensions["inktime_photo_repository"]
+    library_id = photos.ensure_library("離線排程照片", root)
+    now = "2026-07-22T00:00:00+00:00"
+    for index in (1, 2):
+        photo_id = f"offline-scheduled-{index}"
+        filename = f"{photo_id}.jpg"
+        Image.new("RGB", (480, 800), (index * 40, 80, 120)).save(root / filename)
+        with app.extensions["inktime_database"].session() as connection:
+            connection.execute(
+                """
+                INSERT INTO photos(
+                    id,library_id,relative_path,status,captured_at,captured_date,
+                    captured_month_day,capture_date_status,eligible,lifecycle_status,
+                    local_candidate_score,created_at,updated_at
+                ) VALUES (?,?,?,'analyzed',?,?,?,'valid',1,'active',?,?,?)
+                """,
+                (
+                    photo_id,
+                    library_id,
+                    filename,
+                    f"2020-07-22T10:00:00",
+                    "2020-07-22",
+                    "07-22",
+                    90 - index,
+                    now,
+                    now,
+                ),
+            )
+        photos.save_analysis(
+            photo_id,
+            None,
+            "local",
+            "local",
+            "offline-scheduled-test",
+            {
+                "schema_version": 1,
+                "caption": "離線測試",
+                "types": ["日常"],
+                "memory_score": 90 - index,
+                "beauty_score": 80,
+                "technical_quality_score": 80,
+                "emotion_score": 80,
+                "side_caption": "",
+                "should_keep": True,
+                "sensitive": False,
+                "reason": "測試",
+            },
+            "{}",
+            ranking_score=90 - index,
+            final_ranking_score=90 - index,
+        )
+
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "Enhanced 離線相框",
+        panel_profile="safe_4c",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00", "20:00"],
+        prefetch_lead_minutes=5,
+    )
+    service = app.extensions["inktime_display_preparation_service"]
+    prepared = service.prepare_device_day(
+        device_id=device_id,
+        target_date="2026-08-03",
+        created_by="offline-scheduled-test",
+    )
+    repeated = service.prepare_device_day(
+        device_id=device_id,
+        target_date="2026-08-03",
+        created_by="offline-scheduled-test",
+    )
+
+    assert prepared["status"] == "ready"
+    assert prepared["idempotent"] is False
+    assert len(prepared["slots"]) == 2
+    assert repeated["idempotent"] is True
+    with app.extensions["inktime_database"].session() as connection:
+        release_count = connection.execute(
+            "SELECT COUNT(*) FROM releases WHERE created_by='offline-scheduled-test'"
+        ).fetchone()[0]
+        queue_count = connection.execute(
+            "SELECT COUNT(*) FROM device_content_queue_items WHERE device_id=? AND delivery_mode='offline_schedule'",
+            (device_id,),
+        ).fetchone()[0]
+    assert release_count == 2
+    assert queue_count == 2

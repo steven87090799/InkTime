@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from inktime.app.core.security import hash_device_token, issue_device_token
 from inktime.app.db import Database
+from inktime.app.domain.photopainter.offline_schedule import validate_offline_schedule
 
 
 _UNSET = object()
@@ -38,6 +39,9 @@ class DeviceRepository:
                        last_offline_alert_at, last_recovery_alert_at,
                        battery_capacity_mah, standby_current_ma, active_current_ma,
                        refreshes_per_day, battery_reserve_percent, energy_profile_updated_at,
+                       delivery_mode, offline_prefetch_allowed, offline_schedule_json,
+                       offline_schedule_version, last_offline_slot, schedule_times_json,
+                       prefetch_lead_minutes, button_wake_action, stock_endpoint_host,
                        frame_orientation, layout_mode, fit_mode
                 FROM devices ORDER BY name
                 """
@@ -54,6 +58,13 @@ class DeviceRepository:
         enabled: bool = True,
         timezone_name: str = "Asia/Taipei",
         schedule: str = "08:00",
+        delivery_mode: str = "legacy_online",
+        offline_prefetch_allowed: bool = False,
+        offline_schedule: list[str] | None = None,
+        schedule_times: list[str] | None = None,
+        prefetch_lead_minutes: int = 5,
+        button_wake_action: str = "check_new",
+        stock_endpoint_host: str | None = None,
         rotation: int = 0,
         panel_profile: str = "safe_4c",
         frame_orientation: str | None = None,
@@ -63,14 +74,24 @@ class DeviceRepository:
         device_id = str(uuid4())
         token = issue_device_token()
         now = datetime.now(timezone.utc).isoformat()
+        if delivery_mode not in {"legacy_online", "stock_compat", "inktime_offline_schedule"}:
+            raise ValueError("DEVICE-008 delivery_mode 不合法")
+        schedule_values = validate_offline_schedule(schedule_times or offline_schedule or [schedule], maximum=12)
+        if not 0 <= int(prefetch_lead_minutes) <= 120:
+            raise ValueError("DEVICE-008 prefetch_lead_minutes 必須介於 0 到 120")
+        if button_wake_action not in {"check_new", "local_next"}:
+            raise ValueError("DEVICE-008 button_wake_action 不合法")
         with self.database.session() as connection:
             connection.execute(
                 """
                 INSERT INTO devices(
                     id, name, token_hash, enabled, timezone, schedule, rotation, panel_profile,
-                    frame_orientation, layout_mode, fit_mode, created_at, updated_at
+                    frame_orientation, layout_mode, fit_mode, delivery_mode,
+                    offline_prefetch_allowed, offline_schedule_json, offline_schedule_version,
+                    schedule_times_json, prefetch_lead_minutes, button_wake_action,
+                    stock_endpoint_host, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     device_id,
@@ -84,6 +105,14 @@ class DeviceRepository:
                     frame_orientation,
                     layout_mode,
                     fit_mode,
+                    delivery_mode,
+                    int(bool(offline_prefetch_allowed)),
+                    json.dumps(schedule_values, ensure_ascii=False),
+                    1 if delivery_mode == "inktime_offline_schedule" else 0,
+                    json.dumps(schedule_values, ensure_ascii=False),
+                    int(prefetch_lead_minutes),
+                    button_wake_action,
+                    stock_endpoint_host,
                     now,
                     now,
                 ),
@@ -110,6 +139,13 @@ class DeviceRepository:
         enabled: bool,
         timezone_name: str,
         schedule: str,
+        delivery_mode: str = "legacy_online",
+        offline_prefetch_allowed: bool = False,
+        offline_schedule: list[str] | None = None,
+        schedule_times: list[str] | None = None,
+        prefetch_lead_minutes: int = 5,
+        button_wake_action: str = "check_new",
+        stock_endpoint_host: str | None = None,
         rotation: int,
         panel_profile: str,
         frame_orientation: str | None | object = _UNSET,
@@ -121,7 +157,12 @@ class DeviceRepository:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 current = connection.execute(
-                    "SELECT timezone,schedule,rotation,panel_profile,frame_orientation,layout_mode,fit_mode FROM devices WHERE id=?",
+                    """
+                    SELECT timezone,schedule,rotation,panel_profile,delivery_mode,offline_prefetch_allowed,
+                           offline_schedule_json,schedule_times_json,prefetch_lead_minutes,
+                           button_wake_action,stock_endpoint_host,frame_orientation,layout_mode,fit_mode
+                    FROM devices WHERE id=?
+                    """,
                     (device_id,),
                 ).fetchone()
                 if current is None:
@@ -131,18 +172,46 @@ class DeviceRepository:
                 )
                 selected_layout = current["layout_mode"] if layout_mode is _UNSET else layout_mode
                 selected_fit = current["fit_mode"] if fit_mode is _UNSET else fit_mode
+                if delivery_mode not in {"legacy_online", "stock_compat", "inktime_offline_schedule"}:
+                    raise ValueError("DEVICE-008 delivery_mode 不合法")
+                try:
+                    existing_schedule = json.loads(str(current["schedule_times_json"] or "[]"))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    existing_schedule = []
+                if not isinstance(existing_schedule, list) or not existing_schedule:
+                    try:
+                        existing_schedule = json.loads(str(current["offline_schedule_json"] or "[]"))
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        existing_schedule = []
+                selected_schedule = schedule_times or offline_schedule or existing_schedule or [schedule]
+                if schedule_times is None and offline_schedule is None and len(existing_schedule) == 1:
+                    selected_schedule = [schedule]
+                schedule_values = validate_offline_schedule(selected_schedule, maximum=12)
+                if not 0 <= int(prefetch_lead_minutes) <= 120:
+                    raise ValueError("DEVICE-008 prefetch_lead_minutes 必須介於 0 到 120")
+                if button_wake_action not in {"check_new", "local_next"}:
+                    raise ValueError("DEVICE-008 button_wake_action 不合法")
                 remote_changed = any(
                     (
                         str(current["timezone"]) != timezone_name,
-                        str(current["schedule"]) != schedule[:100],
+                        str(current["schedule"]) != schedule_values[0],
                         int(current["rotation"]) != rotation,
                         str(current["panel_profile"]) != panel_profile,
+                        str(current["delivery_mode"]) != delivery_mode,
+                        bool(current["offline_prefetch_allowed"]) != bool(offline_prefetch_allowed),
+                        existing_schedule != schedule_values,
+                        int(current["prefetch_lead_minutes"]) != int(prefetch_lead_minutes),
+                        str(current["button_wake_action"]) != button_wake_action,
+                        (current["stock_endpoint_host"] or None) != (stock_endpoint_host or None),
                     )
                 )
                 cursor = connection.execute(
                     """
                     UPDATE devices
                     SET name=?,enabled=?,timezone=?,schedule=?,rotation=?,panel_profile=?,
+                        delivery_mode=?,offline_prefetch_allowed=?,offline_schedule_json=?,schedule_times_json=?,
+                        prefetch_lead_minutes=?,button_wake_action=?,stock_endpoint_host=?,
+                        offline_schedule_version=offline_schedule_version+CASE WHEN ? THEN 1 ELSE 0 END,
                         frame_orientation=?,layout_mode=?,fit_mode=?,config_version=config_version+?,updated_at=?
                     WHERE id=?
                     """,
@@ -150,9 +219,17 @@ class DeviceRepository:
                         name.strip(),
                         int(enabled),
                         timezone_name,
-                        schedule[:100],
+                        schedule_values[0],
                         rotation,
                         panel_profile,
+                        delivery_mode,
+                        int(bool(offline_prefetch_allowed)),
+                        json.dumps(schedule_values, ensure_ascii=False),
+                        json.dumps(schedule_values, ensure_ascii=False),
+                        int(prefetch_lead_minutes),
+                        button_wake_action,
+                        stock_endpoint_host,
+                        int(remote_changed),
                         selected_orientation,
                         selected_layout,
                         selected_fit,
@@ -234,6 +311,46 @@ class DeviceRepository:
                 WHERE id=?
                 """,
                 (int(succeeded), int(succeeded), now, int(succeeded), release_id, now, device_id),
+            )
+
+    def record_stock_upload_event(
+        self,
+        device_id: str,
+        *,
+        release_id: str,
+        file_name: str,
+        payload_bytes: int,
+        status_code: int | None,
+        upload_accepted: bool,
+        error_code: str | None = None,
+    ) -> None:
+        """Record bounded Stock transport telemetry without payload/path data."""
+
+        now = datetime.now(timezone.utc).isoformat()
+        details = {
+            "release_id": str(release_id)[:128],
+            "file_name": str(file_name)[:128],
+            "payload_bytes": max(0, min(int(payload_bytes), 2_147_483_647)),
+            "status_code": None if status_code is None else max(100, min(int(status_code), 599)),
+            "upload_accepted": bool(upload_accepted),
+            "display_completed": False,
+        }
+        with self.database.session() as connection:
+            connection.execute(
+                """
+                INSERT INTO device_events(
+                    device_id,level,event,error_code,message,details_json,created_at
+                ) VALUES (?,?,?,?,?,?,?)
+                """,
+                (
+                    device_id,
+                    "info" if upload_accepted else "warning",
+                    "stock_upload",
+                    str(error_code or "")[:64] or None,
+                    "Stock Payload 已上傳" if upload_accepted else "Stock Payload 上傳未被接受",
+                    json.dumps(details, ensure_ascii=False),
+                    now,
+                ),
             )
 
     def record_status(

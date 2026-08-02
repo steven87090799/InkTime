@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, time as clock_time, timedelta, timezone
+import json
 import logging
 import os
 import signal
@@ -10,6 +11,7 @@ import time
 from zoneinfo import ZoneInfo
 
 from inktime.app.core.logging import configure_logging, log_event
+from inktime.app.domain.photopainter.offline_schedule import validate_offline_schedule
 
 
 LOGGER = logging.getLogger("scheduler")
@@ -74,6 +76,7 @@ class SchedulerRunner:
                     error_code="SCHEDULE-001",
                     details={"task": task["key"]},
                 )
+        self._prepare_due_offline_devices(datetime.now(timezone.utc))
         if not settings.get("backup.schedule_enabled", True):
             return
         today = now.date().isoformat()
@@ -90,6 +93,113 @@ class SchedulerRunner:
                 event="backup_completed",
                 details={"filename": path.name, "removed": removed},
             )
+
+    @staticmethod
+    def _offline_prefetch_target_date(
+        local_now: datetime,
+        schedule: list[str],
+        lead_minutes: int,
+    ) -> date | None:
+        """Return the latest local day whose first slot is due for prefetch."""
+
+        if type(lead_minutes) is not int or not 0 <= lead_minutes <= 120:
+            raise ValueError("DEVICE-008 prefetch_lead_minutes 不合法")
+        slots = validate_offline_schedule(schedule, maximum=12)
+        zone = local_now.tzinfo
+        if zone is None:
+            raise ValueError("DEVICE-008 裝置時間必須包含時區")
+
+        def prefetch_at(target: date) -> datetime:
+            hour, minute = (int(part) for part in slots[0].split(":"))
+            return datetime.combine(target, clock_time(hour, minute), tzinfo=zone) - timedelta(
+                minutes=lead_minutes
+            )
+
+        target = local_now.date()
+        if local_now < prefetch_at(target):
+            return None
+        # A stalled scheduler may miss more than one midnight.  Keep the
+        # catch-up bounded while still selecting the newest day that needs a
+        # complete schedule.
+        for _ in range(370):
+            next_target = target + timedelta(days=1)
+            if local_now < prefetch_at(next_target):
+                break
+            target = next_target
+        return target
+
+    def _prepare_due_offline_devices(self, now: datetime) -> None:
+        offline_schedules = self.app.extensions.get("inktime_offline_schedule_repository")
+        if offline_schedules is None:
+            return
+        job_repository = self.app.extensions["inktime_job_repository"]
+        job_service = self.app.extensions["inktime_job_service"]
+        for device in offline_schedules.due_prefetch_devices(limit=10):
+            try:
+                timezone_name = str(device["timezone"] or "UTC")
+                local_now = now.astimezone(ZoneInfo(timezone_name))
+                schedule = validate_offline_schedule(
+                    json.loads(str(device["schedule_times_json"] or "[]")), maximum=12
+                )
+                target = self._offline_prefetch_target_date(
+                    local_now,
+                    schedule,
+                    int(device["prefetch_lead_minutes"] or 0),
+                )
+                if target is None:
+                    continue
+                target_iso = target.isoformat()
+                if offline_schedules.ready_for_device(
+                    device_id=str(device["id"]),
+                    target_date=target_iso,
+                    config_version=int(device["config_version"]),
+                ) is not None:
+                    continue
+                dedupe_key = f"offline-prepare:{device['id']}:{target_iso}:{int(device['config_version'])}"
+                job_id = job_repository.create_maintenance(
+                    kind="render",
+                    name=f"離線排程準備：{str(device['name'])} {target_iso}",
+                    priority=2,
+                    dedupe_key=dedupe_key,
+                    created_by=None,
+                    settings={
+                        "offline_prepare": {
+                            "device_id": str(device["id"]),
+                            "target_date": target_iso,
+                            "config_version": int(device["config_version"]),
+                        },
+                        "trigger_source": "offline-scheduler",
+                        "timeout_seconds": 1800,
+                        "max_retries": 1,
+                    },
+                )
+                current = job_repository.get(job_id)
+                if current is not None and str(current["status"]) == "pending":
+                    job_service.start(job_id)
+                log_event(
+                    LOGGER,
+                    logging.INFO,
+                    "已建立離線排程準備工作",
+                    event="offline_schedule_prepare_enqueued",
+                    job_id=job_id,
+                    details={
+                        "device_id": str(device["id"]),
+                        "target_date": target_iso,
+                        "config_version": int(device["config_version"]),
+                    },
+                )
+            except Exception as exc:
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "離線排程準備建立失敗；其他裝置持續執行",
+                    event="offline_schedule_prepare_failed",
+                    error_code="OFFLINE-001",
+                    details={
+                        "device_id": str(device.get("id", "")),
+                        "error_type": exc.__class__.__name__,
+                    },
+                )
 
     def _enqueue_task(self, task: dict, now: datetime, *, force: bool = False) -> None:
         config = dict(task["config"])
@@ -152,7 +262,7 @@ class SchedulerRunner:
                 return
             job_id = self.app.extensions["inktime_job_service"].create_analysis_job(
                 name=f"排程：{task['name']}",
-                strategy=str(config.get("strategy", "smart_two_stage")),
+                strategy=str(config.get("strategy", "single")),
                 settings=common | {"concurrency": int(config.get("concurrency", 1))},
                 created_by="system",
                 budget_limit=None,

@@ -248,7 +248,7 @@ class BatchAnalysisService:
         if scoring_repository is not None:
             scoring = dict(scoring_repository.current())
         plan = self.analysis.build_plan(
-            strategy="high_quality",
+            strategy="single",
             provider_route=route,
             scoring_profile=scoring,
         )
@@ -257,9 +257,8 @@ class BatchAnalysisService:
             raise BatchLifecycleError("Batch 模型不可空白", "BATCH-MODEL-001")
         # Batch is a single full analysis.  The legacy smart_two_stage path is
         # not used and no second model call is made during import.
-        plan["strategy"] = "high_quality"
-        plan["low_model"] = model
-        plan["high_model"] = model
+        plan["strategy"] = "single"
+        plan["model"] = model
         plan["processing_mode"] = "batch"
         plan["batch_endpoint"] = self.ENDPOINT
         plan["batch_schema_kind"] = "full"
@@ -348,7 +347,7 @@ class BatchAnalysisService:
         seen_sha: set[str] = set()
         cache_hits = 0
         sha_duplicates = 0
-        vision_input = dict(plan["high_vision_input"])
+        vision_input = dict(plan.get("vision_input") or plan.get("high_vision_input") or {})
         vision_input["schema_kind"] = "full"
         vision_input["reasoning_effort"] = str(plan["reasoning_effort"])
         for item in safe_rows:
@@ -703,9 +702,9 @@ class BatchAnalysisService:
         def make_line(item: dict[str, Any]) -> bytes:
             body = provider.build_analysis_request_body(
                 image_path=item["thumbnail"],
-                model=str(plan["high_model"]),
-                detail=str(plan["high_vision_input"]["detail"]),
-                stage="single_high",
+                model=str(plan.get("model") or plan.get("high_model") or ""),
+                detail=str((plan.get("vision_input") or plan.get("high_vision_input") or {})["detail"]),
+                stage="single",
                 max_tokens=max_tokens,
                 caption_controls=plan.get("caption_controls") or None,
                 reasoning_effort=str(plan["reasoning_effort"]),
@@ -735,7 +734,7 @@ class BatchAnalysisService:
             with self.thumbnails.acquire_for_use(
                 source,
                 str(item["content_sha256"]),
-                int(plan["high_vision_input"]["max_side"]),
+                int((plan.get("vision_input") or plan.get("high_vision_input") or {})["max_side"]),
             ) as thumbnail:
                 item["thumbnail"] = thumbnail
                 try:
@@ -973,7 +972,7 @@ class BatchAnalysisService:
         job_id = self.jobs.create(
             kind="analysis_batch",
             name=f"OpenAI Batch：{scope}",
-            strategy="high_quality",
+            strategy="single",
             settings={"processing_mode": "batch", "scope": scope, "sample_seed": seed},
             photo_ids=[str(item["photo"]["id"]) for item in candidates],
             created_by=created_by,
@@ -1996,7 +1995,7 @@ class BatchAnalysisService:
             ranked = self.analysis._save_result(
                 photo_id=str(item["photo_id"]),
                 job_id=str(batch["job_id"]) if batch["job_id"] else None,
-                stage="single_high",
+                stage="single",
                 provider=str(batch["provider_id"]),
                 model=str(batch["model"]),
                 result=result,
@@ -2069,7 +2068,7 @@ class BatchAnalysisService:
                 self.jobs.complete_batch_item(
                     str(batch["job_id"]),
                     str(item["job_item_id"]),
-                    {"stage": "single_high", "processing_mode": "batch", "analysis": ranked},
+                    {"stage": "single", "processing_mode": "batch", "analysis": ranked},
                     actual_cost,
                     connection=connection,
                 )

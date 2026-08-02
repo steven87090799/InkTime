@@ -1351,6 +1351,45 @@ class PhotoRepository:
                 ),
             )
 
+    def record_analysis_request_outcome(
+        self,
+        *,
+        photo_id: str,
+        job_id: str | None,
+        provider: str,
+        model: str,
+        request_fingerprint: str,
+        outcome: str,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        requires_manual_confirmation: bool = False,
+    ) -> None:
+        """Persist an AI request outcome without treating an unknown POST as safe to retry."""
+        if outcome not in {"completed", "ambiguous_failed", "failed"}:
+            raise ValueError("ANALYSIS-OUTCOME-001 outcome 不合法")
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO analysis_request_outcomes(
+                    photo_id,job_id,provider,model,request_fingerprint,outcome,
+                    error_code,error_message,requires_manual_confirmation,created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    photo_id,
+                    job_id,
+                    provider[:128],
+                    model[:128],
+                    request_fingerprint[:128],
+                    outcome,
+                    (str(error_code)[:64] if error_code else None),
+                    (str(error_message)[:500] if error_message else None),
+                    int(bool(requires_manual_confirmation)),
+                    now,
+                ),
+            )
+
     def search_exclusions(
         self,
         *,

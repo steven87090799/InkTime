@@ -29,8 +29,12 @@ def _plan(**changes):
 
 def test_analysis_plan_is_canonical_non_secret_and_input_specific():
     plan = _plan()
-    assert plan["low_vision_input"]["max_side"] == 512
-    assert plan["high_vision_input"]["max_side"] == 1600
+    assert plan["strategy"] == "single"
+    assert plan["analysis_call_policy"]["max_image_calls_per_photo"] == 1
+    assert plan["vision_input"]["max_side"] == 1600
+    assert "low_model" not in plan
+    assert "high_model" not in plan
+    assert "stage_two_threshold" not in plan
     assert "api_key" not in canonical_json(plan).casefold()
     assert fingerprint(plan) == fingerprint(_plan())
     assert fingerprint(plan) != fingerprint(_plan(prompt_version="prompt-2"))

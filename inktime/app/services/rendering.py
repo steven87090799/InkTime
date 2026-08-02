@@ -1387,8 +1387,14 @@ class RenderService:
         profile_keys: list[str] | None = None,
         history: dict[str, str] | None = None,
         device_ids: list[str] | None = None,
+        quantity_override: int | None = None,
     ) -> dict:
-        quantity = int(self.settings.get("render.quantity", 5))
+        if quantity_override is None:
+            quantity = int(self.settings.get("render.quantity", 5))
+        else:
+            if type(quantity_override) is not int or not 1 <= quantity_override <= 50:
+                raise ValueError("RENDER-001 quantity_override 必須介於 1 到 50")
+            quantity = quantity_override
         layout_key = str(self.settings.get("render.layout", "photo_info"))
         source_limit = quantity * 2 if layout_key in {"photo_pair", "photo_pair_caption"} else quantity
         selected = photo_ids[:source_limit]

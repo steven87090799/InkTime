@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "photopainter_core.h"
+#include "offline_schedule_core.h"
 #include "power_policy.h"
 
 using namespace inktime;
@@ -85,6 +86,38 @@ int main() {
   assert(validateCache(
     header, sourceHash, DisplayRotation::Rotate0,
     nativeFrame.data(), nativeFrame.size()) == CacheValidation::BadRotation);
+
+  CacheHeaderV2 headerV2 = makeCacheHeaderV2(
+    sourceSha, DisplayRotation::Rotate180, nativeFrame.data(), nativeFrame.size());
+  assert(validateCacheV2(
+    headerV2, sourceSha, DisplayRotation::Rotate180,
+    nativeFrame.data(), nativeFrame.size()) == CacheValidation::Valid);
+  assert(validateCacheV2(
+    headerV2, changedSha, DisplayRotation::Rotate180,
+    nativeFrame.data(), nativeFrame.size()) == CacheValidation::BadSource);
+  assert(sha256HexToBytes(sourceSha, headerV2.sourceSha256, kSha256Bytes));
+  static_assert(sizeof(FormalFrameHeader) == 54);
+  FormalFrameHeader formal = makeFormalFrameHeader(
+    sourceSha, DisplayRotation::Rotate180, nativeFrame.data(), nativeFrame.size());
+  assert(validateFormalFrameHeader(
+    formal, sourceSha, DisplayRotation::Rotate180,
+    nativeFrame.data(), nativeFrame.size()) == CacheValidation::Valid);
+  assert(validateFormalFrameHeader(
+    formal, changedSha, DisplayRotation::Rotate180,
+    nativeFrame.data(), nativeFrame.size()) == CacheValidation::BadSource);
+
+  const OfflineSlot slots[] = {{8, 0}, {12, 0}, {16, 0}, {20, 0}};
+  assert(validateOfflineSlots(slots, 4));
+  const OfflineSlot unsorted[] = {{12, 0}, {8, 0}};
+  assert(!validateOfflineSlots(unsorted, 2));
+  OfflineWakePlan wakePlan = {};
+  assert(buildOfflineWakePlan(100, 200, 400, wakePlan));
+  assert(wakePlan.sleepUntilEpoch == 200);
+  assert(exactSleepSeconds(200, 200) == 1);
+  AckJournal journal;
+  assert(journal.remember("release-a:slot-08:00"));
+  assert(journal.contains("release-a:slot-08:00"));
+  assert(journal.size() == 1);
 
   const NetworkBudget batteryBudget = networkBudget(false);
   const NetworkBudget usbBudget = networkBudget(true);
