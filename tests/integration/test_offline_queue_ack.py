@@ -349,7 +349,7 @@ def test_display_completed_pointer_uses_event_time_and_replay_keeps_one_history(
     def at(value: str):
         monkeypatch.setattr(resilience_module, "utc_now", lambda: value)
 
-    for item, release in zip(items, releases):
+    for item, release in zip(items, releases, strict=True):
         at("2026-08-03T00:00:00+00:00")
         for index, event in enumerate(("MANIFEST_RECEIVED", "DOWNLOAD_COMPLETED", "HASH_VERIFIED")):
             queue.queue_ack(
@@ -367,7 +367,7 @@ def test_display_completed_pointer_uses_event_time_and_replay_keeps_one_history(
         "2026-08-03T12:00:00+00:00",
         "2026-08-03T16:00:00+00:00",
     )
-    for item, release, displayed_at in zip(items[:3], releases[:3], pointer_times):
+    for item, release, displayed_at in zip(items[:3], releases[:3], pointer_times, strict=True):
         at(displayed_at)
         queue.queue_ack(
             device_id=device_id,
