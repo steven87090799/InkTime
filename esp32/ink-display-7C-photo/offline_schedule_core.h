@@ -1,6 +1,8 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 namespace inktime {
 
@@ -8,6 +10,7 @@ namespace inktime {
 // may retain more history, but a device only stages twelve formal slots.
 constexpr uint8_t kMaxOfflineSlots = 12;
 constexpr uint8_t kMaxAckJournalEntries = 32;
+constexpr int32_t kOfflineScheduleSchemaVersion = 1;
 
 struct OfflineSlot {
   uint8_t hour;
@@ -27,6 +30,64 @@ inline bool validateOfflineSlots(const OfflineSlot* slots, uint8_t count) {
       const uint16_t current = static_cast<uint16_t>(slots[index].hour) * 60U + slots[index].minute;
       if (current <= previous) return false;  // sorted and unique
     }
+  }
+  return true;
+}
+
+struct OfflineScheduleContract {
+  int32_t schemaVersion;
+  const char* deliveryMode;
+  const char* targetDate;
+  const char* localDate;
+  const char* timezone;
+  uint32_t configVersion;
+  uint32_t currentConfigVersion;
+  int32_t rotation;
+  const char* panelProfile;
+  const char* expectedPanelProfile;
+  const char* buttonWakeAction;
+  uint8_t slotCount;
+  uint8_t scheduleCount;
+  bool queueIdentityValid;
+  bool sha256Valid;
+};
+
+inline bool validIsoLocalDate(const char* value) {
+  if (value == nullptr || strlen(value) != 10U) return false;
+  for (uint8_t index = 0; index < 10U; ++index) {
+    if (index == 4U || index == 7U) {
+      if (value[index] != '-') return false;
+    } else if (value[index] < '0' || value[index] > '9') {
+      return false;
+    }
+  }
+  const int month = (value[5] - '0') * 10 + (value[6] - '0');
+  const int day = (value[8] - '0') * 10 + (value[9] - '0');
+  return month >= 1 && month <= 12 && day >= 1 && day <= 31;
+}
+
+inline bool validOfflineScheduleContract(const OfflineScheduleContract& contract) {
+  if (contract.schemaVersion != kOfflineScheduleSchemaVersion
+      || contract.deliveryMode == nullptr
+      || strcmp(contract.deliveryMode, "inktime_offline_schedule") != 0
+      || !validIsoLocalDate(contract.targetDate)
+      || !validIsoLocalDate(contract.localDate)
+      || strcmp(contract.targetDate, contract.localDate) != 0
+      || contract.timezone == nullptr || contract.timezone[0] == '\0'
+      || strlen(contract.timezone) > 64U
+      || contract.configVersion < contract.currentConfigVersion
+      || (contract.rotation != 0 && contract.rotation != 180)
+      || contract.panelProfile == nullptr || contract.panelProfile[0] == '\0'
+      || contract.expectedPanelProfile == nullptr
+      || (strcmp(contract.panelProfile, "safe_4c") != 0
+          && strcmp(contract.panelProfile, contract.expectedPanelProfile) != 0)
+      || contract.buttonWakeAction == nullptr
+      || (strcmp(contract.buttonWakeAction, "check_new") != 0
+          && strcmp(contract.buttonWakeAction, "local_next") != 0)
+      || contract.slotCount == 0U || contract.slotCount > kMaxOfflineSlots
+      || contract.slotCount != contract.scheduleCount
+      || !contract.queueIdentityValid || !contract.sha256Valid) {
+    return false;
   }
   return true;
 }

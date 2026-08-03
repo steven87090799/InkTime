@@ -80,10 +80,16 @@ class ReviewRepository:
         if state:
             if state not in REVIEW_STATES:
                 raise ValueError("REVIEW-001 review_state 不合法")
-            clauses.append("COALESCE(r.review_state,'unreviewed')=?")
+            clauses.append(
+                "CASE WHEN decision.id IS NOT NULL THEN decision.review_state "
+                "ELSE COALESCE(feedback.review_state,'unreviewed') END=?"
+            )
             params.append(state)
         if filters.get("candidate_pool") is not None:
-            clauses.append("COALESCE(r.candidate_pool,0)=?")
+            clauses.append(
+                "CASE WHEN decision.id IS NOT NULL THEN decision.candidate_pool "
+                "ELSE COALESCE(feedback.candidate_pool,0) END=?"
+            )
             params.append(int(bool(filters["candidate_pool"])))
         if filters.get("favorite") is not None:
             clauses.append("p.favorite=?")
@@ -160,7 +166,7 @@ class ReviewRepository:
             params.append(LOW_CONFIDENCE_THRESHOLD)
         for key in ("understanding_incorrect", "caption_bad", "scores_unreasonable"):
             if filters.get(key) is not None:
-                clauses.append(f"COALESCE(r.{key},0)=?")
+                clauses.append(f"COALESCE(feedback.{key},decision.{key},0)=?")
                 params.append(int(bool(filters[key])))
         return clauses, params
 
@@ -178,10 +184,18 @@ class ReviewRepository:
                    p.lifecycle_status,p.captured_at,p.captured_date,p.captured_month_day,
                    COALESCE(p.review_taken_at,p.captured_at,p.created_at) AS review_taken_at,
                    COALESCE(p.review_date_source,CASE WHEN p.captured_at IS NULL THEN 'created_at' ELSE 'captured_at' END) AS review_date_source,
-                   r.analysis_id AS review_analysis_id,r.review_state,r.caption_override,r.candidate_pool,r.note,
-                   r.understanding_incorrect,r.caption_bad,r.scores_unreasonable,r.accepted_at,
-                   r.version AS review_version,
-                   r.updated_at AS review_updated_at,r.updated_by AS review_updated_by,
+                   COALESCE(feedback.analysis_id,decision.analysis_id) AS review_analysis_id,
+                   CASE WHEN decision.id IS NOT NULL THEN decision.review_state ELSE COALESCE(feedback.review_state,'unreviewed') END AS review_state,
+                   CASE WHEN decision.id IS NOT NULL THEN decision.caption_override ELSE feedback.caption_override END AS caption_override,
+                   CASE WHEN decision.id IS NOT NULL THEN decision.candidate_pool ELSE COALESCE(feedback.candidate_pool,0) END AS candidate_pool,
+                   CASE WHEN decision.id IS NOT NULL THEN decision.note ELSE feedback.note END AS note,
+                   COALESCE(feedback.understanding_incorrect,decision.understanding_incorrect,0) AS understanding_incorrect,
+                   COALESCE(feedback.caption_bad,decision.caption_bad,0) AS caption_bad,
+                   COALESCE(feedback.scores_unreasonable,decision.scores_unreasonable,0) AS scores_unreasonable,
+                   CASE WHEN decision.id IS NOT NULL THEN decision.accepted_at ELSE feedback.accepted_at END AS accepted_at,
+                   CASE WHEN decision.id IS NOT NULL THEN decision.version ELSE COALESCE(feedback.version,0) END AS review_version,
+                   CASE WHEN decision.id IS NOT NULL THEN decision.updated_at ELSE feedback.updated_at END AS review_updated_at,
+                   CASE WHEN decision.id IS NOT NULL THEN decision.updated_by ELSE feedback.updated_by END AS review_updated_by,
                    a.id AS analysis_id,a.schema_version AS analysis_schema_version,a.stage AS analysis_stage,
                    a.provider AS analysis_provider,a.model AS analysis_model,a.prompt_version,
                    a.analysis_fingerprint,a.created_at AS analysis_created_at,a.caption,a.side_caption,
@@ -191,9 +205,8 @@ class ReviewRepository:
                    p.visual_orientation_ambiguous,p.visual_orientation_evidence_json
             FROM photos p
             LEFT JOIN latest_analysis a ON a.photo_id=p.id
-            LEFT JOIN photo_reviews r ON r.photo_id=p.id
-                AND ((a.id IS NOT NULL AND r.analysis_id=a.id)
-                     OR (a.id IS NULL AND r.analysis_id IS NULL))
+            LEFT JOIN photo_reviews decision ON decision.photo_id=p.id AND decision.analysis_id IS NULL
+            LEFT JOIN photo_reviews feedback ON feedback.photo_id=p.id AND feedback.analysis_id=a.id
         """
 
     @staticmethod
@@ -266,28 +279,32 @@ class ReviewRepository:
                 connection.execute(
                     f"SELECT COUNT(*) FROM photos p "  # noqa: S608 -- clauses are fixed above
                     "LEFT JOIN photo_analysis a ON a.id=(SELECT MAX(id) FROM photo_analysis WHERE photo_id=p.id) "
-                    "LEFT JOIN photo_reviews r ON r.photo_id=p.id AND ((a.id IS NOT NULL AND r.analysis_id=a.id) OR (a.id IS NULL AND r.analysis_id IS NULL)) "
+                    "LEFT JOIN photo_reviews decision ON decision.photo_id=p.id AND decision.analysis_id IS NULL "
+                    "LEFT JOIN photo_reviews feedback ON feedback.photo_id=p.id AND feedback.analysis_id=a.id "
                     f"WHERE {where}",
                     params,
                 ).fetchone()[0]
             )
             states = connection.execute(
-                f"SELECT COALESCE(r.review_state,'unreviewed') AS state,COUNT(*) AS count FROM photos p "  # noqa: S608 -- clauses are fixed above
+                "SELECT CASE WHEN decision.id IS NOT NULL THEN decision.review_state "  # noqa: S608 -- clauses are fixed above
+                "ELSE COALESCE(feedback.review_state,'unreviewed') END AS state,COUNT(*) AS count FROM photos p "  # noqa: S608 -- clauses are fixed above
                 "LEFT JOIN photo_analysis a ON a.id=(SELECT MAX(id) FROM photo_analysis WHERE photo_id=p.id) "
-                "LEFT JOIN photo_reviews r ON r.photo_id=p.id AND ((a.id IS NOT NULL AND r.analysis_id=a.id) OR (a.id IS NULL AND r.analysis_id IS NULL)) "
-                f"WHERE {where} GROUP BY state",
+                "LEFT JOIN photo_reviews decision ON decision.photo_id=p.id AND decision.analysis_id IS NULL "
+                "LEFT JOIN photo_reviews feedback ON feedback.photo_id=p.id AND feedback.analysis_id=a.id "
+                f"WHERE {where} GROUP BY state",  # noqa: S608 -- clauses are fixed above
                 params,
             ).fetchall()
             feedback = connection.execute(
                 f"SELECT "  # noqa: S608 -- clauses are fixed above
-                "COALESCE(SUM(CASE WHEN COALESCE(r.understanding_incorrect,0)=1 THEN 1 ELSE 0 END),0) AS understanding_incorrect,"
-                "COALESCE(SUM(CASE WHEN COALESCE(r.caption_bad,0)=1 THEN 1 ELSE 0 END),0) AS caption_bad,"
-                "COALESCE(SUM(CASE WHEN COALESCE(r.scores_unreasonable,0)=1 THEN 1 ELSE 0 END),0) AS scores_unreasonable,"
+                "COALESCE(SUM(CASE WHEN COALESCE(feedback.understanding_incorrect,decision.understanding_incorrect,0)=1 THEN 1 ELSE 0 END),0) AS understanding_incorrect,"
+                "COALESCE(SUM(CASE WHEN COALESCE(feedback.caption_bad,decision.caption_bad,0)=1 THEN 1 ELSE 0 END),0) AS caption_bad,"
+                "COALESCE(SUM(CASE WHEN COALESCE(feedback.scores_unreasonable,decision.scores_unreasonable,0)=1 THEN 1 ELSE 0 END),0) AS scores_unreasonable,"
                 "COALESCE(SUM(CASE WHEN COALESCE(a.should_keep,0)=0 AND a.id IS NOT NULL THEN 1 ELSE 0 END),0) AS model_excluded,"
-                "COALESCE(SUM(CASE WHEN COALESCE(r.candidate_pool,0)=1 THEN 1 ELSE 0 END),0) AS candidate_pool "
+                "COALESCE(SUM(CASE WHEN COALESCE(CASE WHEN decision.id IS NOT NULL THEN decision.candidate_pool ELSE feedback.candidate_pool END,0)=1 THEN 1 ELSE 0 END),0) AS candidate_pool "
                 "FROM photos p "
                 "LEFT JOIN photo_analysis a ON a.id=(SELECT MAX(id) FROM photo_analysis WHERE photo_id=p.id) "
-                "LEFT JOIN photo_reviews r ON r.photo_id=p.id AND ((a.id IS NOT NULL AND r.analysis_id=a.id) OR (a.id IS NULL AND r.analysis_id IS NULL)) "
+                "LEFT JOIN photo_reviews decision ON decision.photo_id=p.id AND decision.analysis_id IS NULL "
+                "LEFT JOIN photo_reviews feedback ON feedback.photo_id=p.id AND feedback.analysis_id=a.id "
                 f"WHERE {where}",
                 params,
             ).fetchone()
@@ -317,7 +334,8 @@ class ReviewRepository:
         base = (
             " FROM photos p "
             "LEFT JOIN photo_analysis a ON a.id=(SELECT MAX(id) FROM photo_analysis WHERE photo_id=p.id) "
-            "LEFT JOIN photo_reviews r ON r.photo_id=p.id AND ((a.id IS NOT NULL AND r.analysis_id=a.id) OR (a.id IS NULL AND r.analysis_id IS NULL)) "
+            "LEFT JOIN photo_reviews decision ON decision.photo_id=p.id AND decision.analysis_id IS NULL "
+            "LEFT JOIN photo_reviews feedback ON feedback.photo_id=p.id AND feedback.analysis_id=a.id "
         )
         date_expr = "COALESCE(p.review_taken_at,p.captured_at,p.created_at)"
         with self.database.session() as connection:
@@ -394,27 +412,74 @@ class ReviewRepository:
                 "SELECT MAX(id) AS id FROM photo_analysis WHERE photo_id=?", (photo_id,)
             ).fetchone()
             latest_analysis_id = int(latest["id"]) if latest and latest["id"] is not None else None
-            if latest_analysis_id is not None:
-                current = connection.execute(
+            decision = connection.execute(
+                "SELECT * FROM photo_reviews WHERE photo_id=? AND analysis_id IS NULL ORDER BY id DESC LIMIT 1",
+                (photo_id,),
+            ).fetchone()
+            feedback = (
+                connection.execute(
                     "SELECT * FROM photo_reviews WHERE photo_id=? AND analysis_id=? ORDER BY id DESC LIMIT 1",
                     (photo_id, latest_analysis_id),
                 ).fetchone()
-            else:
+                if latest_analysis_id is not None
+                else None
+            )
+            if decision is None:
+                source = feedback
+                # Keep an analysis-scoped compatibility mirror ahead of the
+                # durable photo-level row when this is the first review after
+                # an analysis was created.  Older readers that select the
+                # first row by photo_id still see the review they wrote, while
+                # the NULL analysis_id row remains authoritative across
+                # re-analysis.
+                if latest_analysis_id is not None and source is None:
+                    connection.execute(
+                        """
+                        INSERT INTO photo_reviews(
+                            photo_id,analysis_id,review_state,caption_override,candidate_pool,note,
+                            accepted_at,version,updated_by,updated_at
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            photo_id,
+                            latest_analysis_id,
+                            "unreviewed",
+                            None,
+                            0,
+                            None,
+                            None,
+                            0,
+                            None,
+                            now,
+                        ),
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO photo_reviews(
+                        photo_id,analysis_id,review_state,caption_override,candidate_pool,note,
+                        accepted_at,version,updated_by,updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        photo_id,
+                        None,
+                        str(source["review_state"]) if source is not None else "unreviewed",
+                        source["caption_override"] if source is not None else None,
+                        int(source["candidate_pool"]) if source is not None else 0,
+                        source["note"] if source is not None else None,
+                        source["accepted_at"] if source is not None else None,
+                        int(source["version"]) if source is not None else 0,
+                        source["updated_by"] if source is not None else None,
+                        source["updated_at"] if source is not None else now,
+                    ),
+                )
                 current = connection.execute(
                     "SELECT * FROM photo_reviews WHERE photo_id=? AND analysis_id IS NULL ORDER BY id DESC LIMIT 1",
                     (photo_id,),
                 ).fetchone()
-            if current is None:
-                connection.execute(
-                    "INSERT INTO photo_reviews(photo_id,analysis_id,updated_at) VALUES (?,?,?)",
-                    (photo_id, latest_analysis_id, now),
-                )
-                current = connection.execute(
-                    "SELECT * FROM photo_reviews WHERE photo_id=? AND ((analysis_id=? AND ? IS NOT NULL) OR (analysis_id IS NULL AND ? IS NULL)) ORDER BY id DESC LIMIT 1",
-                    (photo_id, latest_analysis_id, latest_analysis_id, latest_analysis_id),
-                ).fetchone()
-            assert current is not None
-            logical_current = dict(current)
+                decision = current
+            assert decision is not None
+            logical_current = self._logical_review_row(decision, feedback)
             requested_analysis_id = payload.get("analysis_id")
             if requested_analysis_id is not None and (
                 type(requested_analysis_id) is not int or requested_analysis_id < 0
@@ -434,6 +499,16 @@ class ReviewRepository:
                 if "candidate_pool" in payload
                 else int(logical_current["candidate_pool"])
             )
+            if next_state == "exclude":
+                if "candidate_pool" in payload and next_pool:
+                    raise ValueError("REVIEW-001 exclude 不得同時加入 candidate_pool")
+                next_pool = 0
+            elif next_state == "needs_review":
+                # Pending review is an eligible, explicit selection candidate;
+                # it must never retain the permanent-exclude projection.
+                next_pool = 1
+            elif next_state == "unreviewed":
+                next_pool = 0
             next_note = note if "note" in payload else logical_current["note"]
             next_favorite = self._bool_payload(payload, "favorite") if "favorite" in payload else None
             next_understanding = (
@@ -455,13 +530,12 @@ class ReviewRepository:
             connection.execute(
                 """
                 UPDATE photo_reviews
-                SET analysis_id=?,review_state=?,caption_override=?,candidate_pool=?,note=?,
+                SET review_state=?,caption_override=?,candidate_pool=?,note=?,
                     understanding_incorrect=?,caption_bad=?,scores_unreasonable=?,
                     accepted_at=?,version=?,updated_by=?,updated_at=?
-                WHERE id=? AND version=?
+                WHERE id=? AND analysis_id IS NULL AND version=?
                 """,
                 (
-                    latest_analysis_id,
                     next_state,
                     next_caption,
                     next_pool,
@@ -473,22 +547,69 @@ class ReviewRepository:
                     next_version,
                     actor_id,
                     now,
-                    int(current["id"]),
-                    int(current["version"]),
+                    int(decision["id"]),
+                    int(logical_current["version"]),
                 ),
             )
+            if latest_analysis_id is not None:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO photo_reviews(photo_id,analysis_id,updated_at)
+                    VALUES (?,?,?)
+                    """,
+                    (photo_id, latest_analysis_id, now),
+                )
+                # Keep the latest analysis row as a compatibility mirror for
+                # older readers.  The NULL analysis_id row remains the sole
+                # durable photo-level decision across re-analysis.
+                connection.execute(
+                    """
+                    UPDATE photo_reviews
+                    SET review_state=?,caption_override=?,candidate_pool=?,note=?,
+                        understanding_incorrect=?,caption_bad=?,scores_unreasonable=?,
+                        accepted_at=?,version=?,updated_by=?,updated_at=?
+                    WHERE photo_id=? AND analysis_id=?
+                    """,
+                    (
+                        next_state,
+                        next_caption,
+                        next_pool,
+                        next_note,
+                        next_understanding,
+                        next_caption_bad,
+                        next_scores_unreasonable,
+                        now if next_state == "keep" else None,
+                        next_version,
+                        actor_id,
+                        now,
+                        photo_id,
+                        latest_analysis_id,
+                    ),
+                )
             if next_state == "keep":
                 connection.execute("UPDATE photos SET eligible=1,exclusion_status='manually_restored',reject_reason=NULL,manual_override=1,updated_at=? WHERE id=?", (now, photo_id))
             elif next_state == "exclude":
                 connection.execute("UPDATE photos SET eligible=0,exclusion_status='manually_excluded',reject_reason='REVIEW_EXCLUDED',manual_override=1,updated_at=? WHERE id=?", (now, photo_id))
+            elif next_state == "needs_review":
+                connection.execute("UPDATE photos SET eligible=1,exclusion_status='pending_review',reject_reason='REVIEW_PENDING',manual_override=1,updated_at=? WHERE id=?", (now, photo_id))
+            elif next_state == "unreviewed":
+                connection.execute("UPDATE photos SET eligible=1,exclusion_status='eligible',reject_reason=NULL,manual_override=0,updated_at=? WHERE id=?", (now, photo_id))
             if next_favorite is not None:
                 connection.execute("UPDATE photos SET favorite=?,updated_at=? WHERE id=?", (next_favorite, now, photo_id))
             current_after = connection.execute(
-                "SELECT * FROM photo_reviews WHERE id=?", (int(current["id"]),)
+                "SELECT * FROM photo_reviews WHERE id=?", (int(decision["id"]),)
             ).fetchone()
             if current_after is None:
                 raise RuntimeError("REVIEW-500 更新後 Review 資料不存在")
-            after = self._current_from_row(current_after)
+            feedback_after = (
+                connection.execute(
+                    "SELECT * FROM photo_reviews WHERE photo_id=? AND analysis_id=? ORDER BY id DESC LIMIT 1",
+                    (photo_id, latest_analysis_id),
+                ).fetchone()
+                if latest_analysis_id is not None
+                else None
+            )
+            after = self._current_from_row(self._logical_review_row(current_after, feedback_after))
             connection.execute(
                 "INSERT INTO photo_review_events(photo_id,analysis_id,action,before_json,after_json,actor_id,client_version,created_at) VALUES (?,?,?,?,?,?,?,?)",
                 (
@@ -503,6 +624,34 @@ class ReviewRepository:
                 ),
             )
         return self.get(photo_id) or after
+
+    @staticmethod
+    def _logical_review_row(decision: Any, feedback: Any | None) -> dict[str, Any]:
+        """Merge durable photo state with latest-analysis feedback."""
+
+        if decision is not None:
+            durable = decision
+        elif feedback is not None:
+            durable = feedback
+        else:
+            raise RuntimeError("REVIEW-500 缺少 Review projection")
+        latest = feedback if feedback is not None else durable
+        return {
+            "id": durable["id"],
+            "photo_id": durable["photo_id"],
+            "analysis_id": latest["analysis_id"],
+            "review_state": durable["review_state"],
+            "caption_override": durable["caption_override"],
+            "candidate_pool": durable["candidate_pool"],
+            "note": durable["note"],
+            "understanding_incorrect": latest["understanding_incorrect"],
+            "caption_bad": latest["caption_bad"],
+            "scores_unreasonable": latest["scores_unreasonable"],
+            "accepted_at": durable["accepted_at"],
+            "version": durable["version"],
+            "updated_at": durable["updated_at"],
+            "updated_by": durable["updated_by"],
+        }
 
     @staticmethod
     def _current_from_row(row: Any) -> dict[str, Any]:

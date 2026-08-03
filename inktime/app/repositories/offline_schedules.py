@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 import json
 import re
 from typing import Any, Sequence
@@ -54,19 +54,12 @@ class OfflineScheduleRepository:
         ).fetchone()
         if schedule is None:
             return None
-        device = connection.execute(
-            """
-            SELECT id,panel_profile,rotation,timezone,schedule_times_json,
-                   prefetch_lead_minutes,offline_schedule_version
-            FROM devices WHERE id=?
-            """,
-            (schedule["device_id"],),
-        ).fetchone()
         slots = connection.execute(
             """
             SELECT s.id AS slot_id,s.slot_index,s.show_at,s.release_id,s.queue_item_id,s.sha256,
                    r.width,r.height,r.pixel_format,r.render_profile,r.manifest_json,
-                   q.queue_version,qi.offline_prefetch_allowed
+                   q.queue_version,qi.offline_prefetch_allowed,qi.offline_schedule_id,
+                   qi.ack_deadline,qi.terminal_ack_retention
             FROM device_offline_schedule_slots s
             JOIN releases r ON r.id=s.release_id
             JOIN device_content_queue_items qi ON qi.id=s.queue_item_id
@@ -101,9 +94,24 @@ class OfflineScheduleRepository:
                 }
             )
             normalized_slots.append(slot)
+        try:
+            snapshot_json = json.loads(str(schedule["snapshot_json"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            snapshot_json = {}
+        device_snapshot = {
+            "id": str(schedule["device_id"]),
+            "panel_profile": str(schedule["panel_profile"]),
+            "rotation": int(schedule["rotation"]),
+            "timezone": str(schedule["timezone"]),
+            "schedule_times_json": str(schedule["schedule_times_json"]),
+            "prefetch_lead_minutes": int(schedule["prefetch_lead_minutes"]),
+            "button_wake_action": str(schedule["button_wake_action"]),
+            "offline_schedule_version": int(schedule["offline_schedule_version"]),
+            "snapshot_json": snapshot_json if isinstance(snapshot_json, dict) else {},
+        }
         return {
             "schedule": dict(schedule),
-            "device": dict(device) if device is not None else {},
+            "device": device_snapshot,
             "slots": normalized_slots,
         }
 
@@ -146,6 +154,7 @@ class OfflineScheduleRepository:
         device_id: str,
         target_date: str,
         release_ids: Sequence[str],
+        expected_config_version: int | None = None,
     ) -> dict[str, Any]:
         day = self._date(target_date)
         if not 1 <= len(release_ids) <= MAX_PREPARED_SLOTS:
@@ -162,13 +171,19 @@ class OfflineScheduleRepository:
                 device = connection.execute(
                     """
                     SELECT timezone,config_version,delivery_mode,offline_prefetch_allowed,
-                           schedule_times_json,prefetch_lead_minutes
+                           panel_profile,rotation,schedule_times_json,prefetch_lead_minutes,
+                           button_wake_action,offline_schedule_version
                     FROM devices WHERE id=? AND enabled=1
                     """,
                     (device_id,),
                 ).fetchone()
                 if device is None:
                     raise KeyError(device_id)
+                current_config_version = int(device["config_version"])
+                if expected_config_version is not None and current_config_version != int(
+                    expected_config_version
+                ):
+                    raise ValueError("DISPLAY-CONFIG-RACE 裝置設定已變更，拒絕提交舊離線排程")
                 if str(device["delivery_mode"]) != "inktime_offline_schedule" or not bool(
                     device["offline_prefetch_allowed"]
                 ):
@@ -185,33 +200,78 @@ class OfflineScheduleRepository:
                     SELECT id,status FROM device_offline_schedules
                     WHERE device_id=? AND target_date=? AND config_version=?
                     """,
-                    (device_id, day.isoformat(), int(device["config_version"])),
+                    (device_id, day.isoformat(), current_config_version),
                 ).fetchone()
                 if existing is not None and str(existing["status"]) == "ready":
                     return self._row(connection, str(existing["id"])) or {}
                 schedule_id = str(existing["id"]) if existing is not None else str(uuid4())
+                snapshot = {
+                    "panel_profile": str(device["panel_profile"]),
+                    "rotation": int(device["rotation"]),
+                    "timezone": str(device["timezone"]),
+                    "schedule_times": list(configured_times),
+                    "prefetch_lead_minutes": int(device["prefetch_lead_minutes"]),
+                    "button_wake_action": str(device["button_wake_action"]),
+                    "offline_schedule_version": int(device["offline_schedule_version"]),
+                    "config_version": current_config_version,
+                }
                 connection.execute(
                     """
                     INSERT INTO device_offline_schedules(
-                        id,device_id,target_date,config_version,timezone,status,created_at,updated_at
-                    ) VALUES (?,?,?,?,?,?,?,?)
+                        id,device_id,target_date,config_version,timezone,status,created_at,updated_at,
+                        panel_profile,rotation,schedule_times_json,prefetch_lead_minutes,
+                        button_wake_action,offline_schedule_version,snapshot_json
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(device_id,target_date,config_version) DO UPDATE SET
-                        status='preparing',updated_at=excluded.updated_at
+                        status='preparing',updated_at=excluded.updated_at,
+                        panel_profile=excluded.panel_profile,rotation=excluded.rotation,
+                        schedule_times_json=excluded.schedule_times_json,
+                        prefetch_lead_minutes=excluded.prefetch_lead_minutes,
+                        button_wake_action=excluded.button_wake_action,
+                        offline_schedule_version=excluded.offline_schedule_version,
+                        snapshot_json=excluded.snapshot_json
                     """,
                     (
                         schedule_id,
                         device_id,
                         day.isoformat(),
-                        int(device["config_version"]),
+                        current_config_version,
                         str(device["timezone"]),
                         "preparing",
                         now,
                         now,
+                        str(device["panel_profile"]),
+                        int(device["rotation"]),
+                        json.dumps(configured_times, ensure_ascii=False, separators=(",", ":")),
+                        int(device["prefetch_lead_minutes"]),
+                        str(device["button_wake_action"]),
+                        int(device["offline_schedule_version"]),
+                        json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
                     ),
                 )
                 connection.execute(
                     "DELETE FROM device_offline_schedule_slots WHERE schedule_id=?", (schedule_id,)
                 )
+                # Current and future dates are independent queue owners.  A
+                # retry may supersede only an earlier preparation for this
+                # same local date.
+                connection.execute(
+                    """
+                    UPDATE device_offline_schedules SET status='cancelled',updated_at=?
+                    WHERE device_id=? AND target_date=? AND id<>? AND status IN ('preparing','ready')
+                    """,
+                    (now, device_id, day.isoformat(), schedule_id),
+                )
+                cancelled = connection.execute(
+                    """
+                    UPDATE device_content_queue_items SET status='CANCELLED',updated_at=?
+                    WHERE device_id=? AND offline_schedule_id IN (
+                        SELECT id FROM device_offline_schedules
+                        WHERE device_id=? AND target_date=? AND id<>? AND status='cancelled'
+                    ) AND status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')
+                    """,
+                    (now, device_id, device_id, day.isoformat(), schedule_id),
+                ).rowcount
                 queue = connection.execute(
                     "SELECT depth,queue_version FROM device_content_queues WHERE device_id=?",
                     (device_id,),
@@ -227,15 +287,6 @@ class OfflineScheduleRepository:
                     ).fetchone()
                 if int(queue["depth"]) < len(normalized_release_ids):
                     raise ValueError("QUEUE-005 Queue depth 小於離線 Slot 數量")
-                cancelled = connection.execute(
-                    """
-                    UPDATE device_content_queue_items
-                    SET status='CANCELLED',updated_at=?
-                    WHERE device_id=? AND delivery_mode='offline_schedule'
-                      AND status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')
-                    """,
-                    (now, device_id),
-                ).rowcount
                 queue_version = int(queue["queue_version"]) + (1 if cancelled else 0)
                 next_position = int(
                     connection.execute(
@@ -255,9 +306,9 @@ class OfflineScheduleRepository:
                         """
                         SELECT id,manifest_json FROM releases r
                         WHERE r.id=? AND r.status='published'
-                          AND r.render_profile=(SELECT panel_profile FROM devices WHERE id=?)
+                          AND r.render_profile=?
                         """,
-                        (release_id, device_id),
+                        (release_id, str(device["panel_profile"])),
                     ).fetchone()
                     if release is None:
                         raise ValueError("QUEUE-002 Release 不存在、未發布或 Profile 不相容")
@@ -281,8 +332,8 @@ class OfflineScheduleRepository:
                         INSERT INTO device_content_queue_items(
                             id,device_id,release_id,position,priority,display_after,expires_at,status,
                             idempotency_key,delivery_mode,offline_prefetch_allowed,offline_slot,ack_deadline,
-                            created_at,updated_at
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            terminal_ack_retention,offline_schedule_id,created_at,updated_at
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                         """,
                         (
                             queue_item_id,
@@ -298,6 +349,8 @@ class OfflineScheduleRepository:
                             1,
                             slot,
                             deadline,
+                            (datetime.fromisoformat(deadline) + timedelta(days=7)).isoformat(),
+                            schedule_id,
                             now,
                             now,
                         ),
@@ -332,6 +385,26 @@ class OfflineScheduleRepository:
                     "UPDATE device_offline_schedules SET status='ready',updated_at=? WHERE id=?",
                     (now, schedule_id),
                 )
+                current = connection.execute(
+                    """
+                    SELECT config_version,panel_profile,rotation,timezone,schedule_times_json,
+                           prefetch_lead_minutes,button_wake_action,offline_schedule_version
+                    FROM devices WHERE id=? AND enabled=1
+                    """,
+                    (device_id,),
+                ).fetchone()
+                if current is None or (
+                    int(current["config_version"]) != current_config_version
+                    or str(current["panel_profile"]) != str(device["panel_profile"])
+                    or int(current["rotation"]) != int(device["rotation"])
+                    or str(current["timezone"]) != str(device["timezone"])
+                    or str(current["schedule_times_json"]) != str(device["schedule_times_json"])
+                    or int(current["prefetch_lead_minutes"]) != int(device["prefetch_lead_minutes"])
+                    or str(current["button_wake_action"]) != str(device["button_wake_action"])
+                    or int(current["offline_schedule_version"])
+                    != int(device["offline_schedule_version"])
+                ):
+                    raise ValueError("DISPLAY-CONFIG-RACE 裝置設定在離線排程提交前已變更")
                 connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")
@@ -341,17 +414,51 @@ class OfflineScheduleRepository:
                 raise RuntimeError("DEVICE-008 離線排程準備結果不存在")
             return result
 
-    def due_prefetch_devices(self, *, limit: int = 32) -> list[dict[str, Any]]:
+    def due_prefetch_devices(
+        self, *, limit: int = 32, after_device_id: str | None = None
+    ) -> list[dict[str, Any]]:
         bounded = max(1, min(int(limit), 128))
         with self.database.session() as connection:
+            after = str(after_device_id or "")
             rows = connection.execute(
                 """
                 SELECT id,name,timezone,schedule_times_json,prefetch_lead_minutes,config_version
                 FROM devices
                 WHERE enabled=1 AND delivery_mode='inktime_offline_schedule'
                   AND offline_prefetch_allowed=1
+                  AND id>?
                 ORDER BY id LIMIT ?
                 """,
-                (bounded,),
+                (after, bounded),
             ).fetchall()
+            if not rows and after:
+                rows = connection.execute(
+                    """
+                    SELECT id,name,timezone,schedule_times_json,prefetch_lead_minutes,config_version
+                    FROM devices
+                    WHERE enabled=1 AND delivery_mode='inktime_offline_schedule'
+                      AND offline_prefetch_allowed=1
+                    ORDER BY id LIMIT ?
+                    """,
+                    (bounded,),
+                ).fetchall()
         return [dict(row) for row in rows]
+
+    def prefetch_cursor(self) -> str | None:
+        with self.database.session() as connection:
+            row = connection.execute(
+                "SELECT last_device_id FROM device_offline_prefetch_cursors WHERE id=1"
+            ).fetchone()
+        return str(row["last_device_id"]) if row and row["last_device_id"] else None
+
+    def advance_prefetch_cursor(self, device_id: str) -> None:
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO device_offline_prefetch_cursors(id,last_device_id,updated_at)
+                VALUES (1,?,?)
+                ON CONFLICT(id) DO UPDATE SET
+                    last_device_id=excluded.last_device_id,updated_at=excluded.updated_at
+                """,
+                (str(device_id), datetime.now(timezone.utc).isoformat()),
+            )

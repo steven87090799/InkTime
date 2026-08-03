@@ -287,6 +287,8 @@ def generate_queue(device_id: str):
                 offline_prefetch_allowed=offline_prefetch_allowed,
                 offline_slot=str(payload.get("offline_slot", "")).strip() or None,
                 ack_deadline=str(payload.get("ack_deadline", "")).strip() or None,
+                offline_schedule_id=str(payload.get("offline_schedule_id", "")).strip() or None,
+                terminal_ack_retention=str(payload.get("terminal_ack_retention", "")).strip() or None,
             )
             if release_id
             else None

@@ -324,19 +324,29 @@ def _normalize_v3(value: dict) -> dict:
             canonical = V3_GRADE_ALIASES.get(str(key), str(key))
             if canonical in V3_GRADE_FIELDS:
                 details[canonical] = grade
+    for key in list(details):
+        canonical = V3_GRADE_ALIASES.get(str(key), str(key))
+        if canonical in V3_GRADE_FIELDS:
+            details[canonical] = details.pop(key)
     for field in (*V3_GRADE_FIELDS, *V3_GRADE_ALIASES):
         if field in normalized:
             details[V3_GRADE_ALIASES.get(field, field)] = normalized.pop(field)
     if "display_suitability_grade" in normalized:
         details["display_suitability_grade"] = normalized.pop("display_suitability_grade")
+    confidence_present = "confidence" in normalized
     confidence = normalized.pop("confidence", None)
-    if confidence is not None:
+    if confidence_present:
+        if confidence is None:
+            raise AnalysisValidationError("confidence 不可為 null")
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float, dict)):
             raise AnalysisValidationError("confidence 必須是 0 到 1 的數字或 Object")
         details["confidence"] = confidence
     for grade_field, score_field in V3_GRADE_FIELDS.items():
-        if score_field not in normalized:
-            normalized[score_field] = _grade_score(details.get(grade_field, "unknown"))
+        if grade_field not in details:
+            raise AnalysisValidationError(f"schema v3 缺少 details.{grade_field}")
+        normalized[score_field] = _grade_score(details[grade_field])
+    if "confidence" not in details:
+        raise AnalysisValidationError("schema v3 缺少 details.confidence")
     normalized["details"] = details
     return normalized
 
@@ -351,8 +361,35 @@ def validate_analysis_result(raw: str | dict) -> dict:
             error = AnalysisValidationError("模型回傳無效 JSON")
             error.code = "VLM-003"
             raise error from exc
-    else:
+    elif isinstance(raw, dict):
         value = dict(raw)
+    else:
+        error = AnalysisValidationError("模型回傳頂層必須是 JSON Object")
+        error.code = "VLM-003"
+        raise error
+    if not isinstance(value, dict):
+        error = AnalysisValidationError("模型回傳頂層必須是 JSON Object")
+        error.code = "VLM-003"
+        raise error
+    if value.get("schema_version") == 3:
+        details = value.get("details")
+        if details is not None and not isinstance(details, dict):
+            raise AnalysisValidationError("details 必須是 JSON Object")
+        grades = value.get("grades")
+        if grades is not None and not isinstance(grades, dict):
+            raise AnalysisValidationError("grades 必須是 JSON Object")
+        sources = dict(details or {})
+        sources.update(dict(grades or {}))
+        sources.update(value)
+        for canonical in V3_GRADE_FIELDS:
+            aliases = [alias for alias, target in V3_GRADE_ALIASES.items() if target == canonical]
+            if not any(
+                key in sources
+                for key in (canonical, *aliases)
+            ):
+                raise AnalysisValidationError(f"schema v3 缺少 {canonical}")
+        if "confidence" not in sources:
+            raise AnalysisValidationError("schema v3 缺少 confidence")
     if value.get("schema_version") == 3:
         value = _normalize_v3(value)
     # v1 cache entries predate this additive field.  Keep them readable without
@@ -381,16 +418,17 @@ def validate_analysis_result(raw: str | dict) -> dict:
             if grade_field in details and details[grade_field] not in GRADE_VALUES:
                 raise AnalysisValidationError(f"{grade_field} 等級不合法")
         confidence = details.get("confidence")
-        if confidence is not None:
-            if isinstance(confidence, bool) or not isinstance(confidence, (int, float, dict)):
-                raise AnalysisValidationError("confidence 格式不合法")
-            if isinstance(confidence, dict) and any(
-                isinstance(item, bool) or not isinstance(item, (int, float)) or not 0 <= float(item) <= 1
-                for item in confidence.values()
-            ):
-                raise AnalysisValidationError("confidence Object 值必須介於 0 到 1")
-            if isinstance(confidence, (int, float)) and not 0 <= float(confidence) <= 1:
-                raise AnalysisValidationError("confidence 必須介於 0 到 1")
+        if confidence is None:
+            raise AnalysisValidationError("schema v3 confidence 不可為 null")
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float, dict)):
+            raise AnalysisValidationError("confidence 格式不合法")
+        if isinstance(confidence, dict) and any(
+            isinstance(item, bool) or not isinstance(item, (int, float)) or not 0 <= float(item) <= 1
+            for item in confidence.values()
+        ):
+            raise AnalysisValidationError("confidence Object 值必須介於 0 到 1")
+        if isinstance(confidence, (int, float)) and not 0 <= float(confidence) <= 1:
+            raise AnalysisValidationError("confidence 必須介於 0 到 1")
         reason_codes = value.get("reason_codes", [])
         if not isinstance(reason_codes, list) or len(reason_codes) > 5:
             raise AnalysisValidationError("reason_codes 格式不合法")

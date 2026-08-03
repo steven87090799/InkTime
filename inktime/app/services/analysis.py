@@ -595,18 +595,25 @@ class PhotoAnalysisService:
                 router: Any = provider
                 router.release_channel(selected_channel, usage=usage, error=error)
 
+        fingerprint_material = {
+            "content_sha256": content_sha256,
+            "actual_provider": actual_provider,
+            "model": model,
+            "prompt_version": prompt_version,
+            "schema_kind": schema_kind,
+            "reasoning_effort": reasoning_effort,
+            **vision_input,
+        }
         request_fingerprint = fingerprint(
             {
-                "content_sha256": content_sha256,
-                "actual_provider": actual_provider,
-                "model": model,
-                "prompt_version": prompt_version,
+                **fingerprint_material,
                 "schema_version": SCHEMA_VERSION if schema_kind == "full" else 2,
-                "schema_kind": schema_kind,
-                "reasoning_effort": reasoning_effort,
-                **vision_input,
             }
         )
+        # Before the v3 contract, full analyses used schema_version=2 in the
+        # request fingerprint.  Keep that exact identity for backward lookup;
+        # new successful writes still use the canonical v3 fingerprint.
+        legacy_v2_fingerprint = fingerprint({**fingerprint_material, "schema_version": 2})
         # Legacy schema constrains this column to basic/full; the v4 Vision
         # Request Fingerprint is the authoritative additional cache dimension.
         cache_schema_kind = schema_kind
@@ -615,17 +622,23 @@ class PhotoAnalysisService:
 
         def get_cache() -> dict | None:
             for cache_schema_version in cache_schema_versions:
-                cached_row = self.photos.get_ai_cache(
-                    content_sha256=content_sha256,
-                    provider=actual_provider,
-                    model_name=model,
-                    prompt_version=prompt_version,
-                    schema_version=cache_schema_version,
-                    schema_kind=cache_schema_kind,
-                    vision_request_fingerprint=request_fingerprint,
+                fingerprints = (
+                    (request_fingerprint, legacy_v2_fingerprint)
+                    if cache_schema_version == 2
+                    else (request_fingerprint,)
                 )
-                if cached_row is not None:
-                    return cached_row
+                for cache_fingerprint in fingerprints:
+                    cached_row = self.photos.get_ai_cache(
+                        content_sha256=content_sha256,
+                        provider=actual_provider,
+                        model_name=model,
+                        prompt_version=prompt_version,
+                        schema_version=cache_schema_version,
+                        schema_kind=cache_schema_kind,
+                        vision_request_fingerprint=cache_fingerprint,
+                    )
+                    if cached_row is not None:
+                        return cached_row
             return None
 
         baseline_cache_created_at: str | None = None

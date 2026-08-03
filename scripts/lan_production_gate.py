@@ -19,7 +19,7 @@ USERNAME = "lan-gate-admin"
 PASSWORD = "lan-gate-passphrase"  # noqa: S105 - isolated disposable CI account
 CSRF = re.compile(r'<meta name="csrf-token" content="([^"]+)"')
 RELEASE_ID = "lan-gate-release-v1"
-EXPECTED_MIGRATION_VERSION = 27
+EXPECTED_MIGRATION_VERSION = 28
 
 
 def _read_state(path: Path) -> dict[str, object]:

@@ -110,6 +110,42 @@ int main() {
   assert(validateOfflineSlots(slots, 4));
   const OfflineSlot unsorted[] = {{12, 0}, {8, 0}};
   assert(!validateOfflineSlots(unsorted, 2));
+  const OfflineScheduleContract validSchedule = {
+    1,
+    "inktime_offline_schedule",
+    "2026-08-03",
+    "2026-08-03",
+    "Asia/Taipei",
+    2,
+    1,
+    0,
+    "safe_4c",
+    "gdep073e01_6c",
+    "check_new",
+    4,
+    4,
+    true,
+    true,
+  };
+  assert(validOfflineScheduleContract(validSchedule));
+  OfflineScheduleContract staleConfig = validSchedule;
+  staleConfig.configVersion = 0;
+  assert(!validOfflineScheduleContract(staleConfig));
+  OfflineScheduleContract wrongDay = validSchedule;
+  wrongDay.localDate = "2026-08-02";
+  assert(!validOfflineScheduleContract(wrongDay));
+  OfflineScheduleContract futureSchedule = validSchedule;
+  futureSchedule.targetDate = "2026-08-04";
+  assert(!validOfflineScheduleContract(futureSchedule));
+  OfflineScheduleContract rotate180 = validSchedule;
+  rotate180.rotation = 180;
+  assert(validOfflineScheduleContract(rotate180));
+  OfflineScheduleContract malformedDate = validSchedule;
+  malformedDate.targetDate = "2026-99-99";
+  assert(!validOfflineScheduleContract(malformedDate));
+  OfflineScheduleContract invalidIdentity = validSchedule;
+  invalidIdentity.queueIdentityValid = false;
+  assert(!validOfflineScheduleContract(invalidIdentity));
   OfflineWakePlan wakePlan = {};
   assert(buildOfflineWakePlan(100, 200, 400, wakePlan));
   assert(wakePlan.sleepUntilEpoch == 200);

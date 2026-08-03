@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from PIL import Image
+import pytest
 
 
 def _release(app, name: str) -> dict:
@@ -33,15 +34,22 @@ def test_offline_day_preparation_is_atomic_and_device_projection_contains_full_s
         target_date="2026-08-03",
         release_ids=[first["release_id"], second["release_id"]],
     )
+    same_day = repository.prepare_day(
+        device_id=device_id,
+        target_date="2026-08-03",
+        release_ids=[first["release_id"], second["release_id"]],
+    )
 
     assert prepared["schedule"]["status"] == "ready"
+    assert same_day["schedule"]["id"] == prepared["schedule"]["id"]
     assert len(prepared["slots"]) == 2
     assert all(len(slot["sha256"]) == 64 for slot in prepared["slots"])
     assert all(slot["show_at"].endswith("+00:00") for slot in prepared["slots"])
     with app.extensions["inktime_database"].session() as connection:
         queue_items = connection.execute(
             """
-            SELECT delivery_mode,offline_prefetch_allowed,offline_slot
+            SELECT delivery_mode,offline_prefetch_allowed,offline_slot,offline_schedule_id,
+                   terminal_ack_retention
             FROM device_content_queue_items WHERE device_id=? ORDER BY position
             """,
             (device_id,),
@@ -50,6 +58,9 @@ def test_offline_day_preparation_is_atomic_and_device_projection_contains_full_s
         ("offline_schedule", 1),
         ("offline_schedule", 1),
     ]
+    assert all(row["offline_schedule_id"] == prepared["schedule"]["id"] for row in queue_items)
+    assert all(row["terminal_ack_retention"] for row in queue_items)
+    assert prepared["device"]["rotation"] == 0
 
     response = client.get(
         "/api/device/v1/offline-schedule",
@@ -82,7 +93,114 @@ def test_offline_day_preparation_is_atomic_and_device_projection_contains_full_s
             "SELECT status FROM device_content_queue_items WHERE device_id=? ORDER BY position",
             (device_id,),
         ).fetchall()
-    assert [row["status"] for row in statuses] == ["CANCELLED", "CANCELLED", "READY", "READY"]
+    assert [row["status"] for row in statuses] == ["READY", "READY", "READY", "READY"]
+    still_today = client.get(
+        "/api/device/v1/offline-schedule",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert still_today.status_code == 200
+    assert still_today.get_json()["schedule_id"] == prepared["schedule"]["id"]
+    assert still_today.get_json()["target_local_date"] == "2026-08-03"
+
+
+def test_offline_schedule_snapshot_does_not_follow_live_device_config(client, app):
+    device_id, token = app.extensions["inktime_device_repository"].create(
+        "離線快照",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00"],
+        rotation=0,
+    )
+    release = _release(app, "offline-snapshot")
+    repository = app.extensions["inktime_offline_schedule_repository"]
+    prepared = repository.prepare_day(
+        device_id=device_id,
+        target_date="2026-08-03",
+        release_ids=[release["release_id"]],
+    )
+    app.extensions["inktime_device_repository"].update(
+        device_id,
+        name="離線快照已變更",
+        enabled=True,
+        timezone_name="Asia/Taipei",
+        schedule="08:00",
+        schedule_times=["08:00"],
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        rotation=180,
+        panel_profile="safe_4c",
+        prefetch_lead_minutes=5,
+        button_wake_action="check_new",
+    )
+    stored = repository.ready_for_device(
+        device_id=device_id,
+        target_date="2026-08-03",
+        config_version=int(prepared["schedule"]["config_version"]),
+    )
+    assert stored is not None
+    assert stored["device"]["rotation"] == 0
+    assert repository.latest_for_device(device_id)["schedule"]["id"] == prepared["schedule"]["id"]
+    assert client.get(
+        "/api/device/v1/offline-schedule",
+        headers={"Authorization": f"Bearer {token}"},
+    ).status_code == 404
+
+
+def test_offline_schedule_repository_fails_closed_on_corrupt_manifest_and_keeps_snapshot_typed(app):
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "離線完整性邊界",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00"],
+    )
+    release = _release(app, "offline-corruptible")
+    repository = app.extensions["inktime_offline_schedule_repository"]
+    prepared = repository.prepare_day(
+        device_id=device_id,
+        target_date="2026-08-03",
+        release_ids=[release["release_id"]],
+    )
+
+    with app.extensions["inktime_database"].session() as connection:
+        assert repository._row(connection, "missing-schedule") is None
+    with pytest.raises(ValueError, match="不可解析"):
+        repository._manifest_entry("not-json")
+
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE device_offline_schedules SET snapshot_json='not-json' WHERE id=?",
+            (prepared["schedule"]["id"],),
+        )
+    snapshot = repository.ready_for_device(
+        device_id=device_id,
+        target_date="2026-08-03",
+        config_version=int(prepared["schedule"]["config_version"]),
+    )
+    assert snapshot is not None
+    assert snapshot["device"]["snapshot_json"] == {}
+
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE releases SET manifest_json='not-json' WHERE id=?", (release["release_id"],)
+        )
+    with pytest.raises(ValueError, match="Manifest"):
+        repository.ready_for_device(
+            device_id=device_id,
+            target_date="2026-08-03",
+            config_version=int(prepared["schedule"]["config_version"]),
+        )
+
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE releases SET manifest_json=? WHERE id=?",
+            ('{"files": []}', release["release_id"]),
+        )
+    with pytest.raises(ValueError, match="Manifest"):
+        repository.ready_for_device(
+            device_id=device_id,
+            target_date="2026-08-03",
+            config_version=int(prepared["schedule"]["config_version"]),
+        )
 
 
 def test_offline_day_preparation_rolls_back_when_a_release_is_invalid(app):
@@ -113,3 +231,60 @@ def test_offline_day_preparation_rolls_back_when_a_release_is_invalid(app):
         assert connection.execute(
             "SELECT COUNT(*) FROM device_content_queue_items WHERE device_id=?", (device_id,)
         ).fetchone()[0] == 0
+
+
+def test_offline_prepare_rejects_invalid_dates_config_and_snapshot_inputs(app):
+    repository = app.extensions["inktime_offline_schedule_repository"]
+    devices = app.extensions["inktime_device_repository"]
+    device_id, _token = devices.create(
+        "離線輸入邊界",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00"],
+    )
+    first = _release(app, "offline-boundary-first")
+    second = _release(app, "offline-boundary-second")
+
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        repository.prepare_day(device_id=device_id, target_date="bad-date", release_ids=[first["release_id"]])
+    with pytest.raises(ValueError, match="最多 12"):
+        repository.prepare_day(device_id=device_id, target_date="2026-08-03", release_ids=[])
+    with pytest.raises(ValueError, match="Release ID"):
+        repository.prepare_day(device_id=device_id, target_date="2026-08-03", release_ids=["bad/id"])
+    with pytest.raises(ValueError, match="不可重複"):
+        repository.prepare_day(
+            device_id=device_id,
+            target_date="2026-08-03",
+            release_ids=[first["release_id"], first["release_id"]],
+        )
+
+    with app.extensions["inktime_database"].session() as connection:
+        config_version = int(
+            connection.execute("SELECT config_version FROM devices WHERE id=?", (device_id,)).fetchone()[0]
+        )
+        connection.execute("UPDATE devices SET schedule_times_json='not-json' WHERE id=?", (device_id,))
+    with pytest.raises(ValueError, match="設定已變更"):
+        repository.prepare_day(
+            device_id=device_id,
+            target_date="2026-08-03",
+            release_ids=[first["release_id"]],
+            expected_config_version=config_version + 1,
+        )
+    with pytest.raises(ValueError, match="schedule_times"):
+        repository.prepare_day(device_id=device_id, target_date="2026-08-03", release_ids=[first["release_id"]])
+
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE devices SET schedule_times_json=? WHERE id=?", ('["08:00"]', device_id))
+    with pytest.raises(ValueError, match="數量"):
+        repository.prepare_day(
+            device_id=device_id,
+            target_date="2026-08-03",
+            release_ids=[first["release_id"], second["release_id"]],
+        )
+
+    online_id, _online_token = devices.create("非離線裝置")
+    with pytest.raises(ValueError, match="未啟用離線"):
+        repository.prepare_day(device_id=online_id, target_date="2026-08-03", release_ids=[first["release_id"]])
+
+    with pytest.raises(KeyError):
+        repository.prepare_day(device_id="missing-device", target_date="2026-08-03", release_ids=[first["release_id"]])

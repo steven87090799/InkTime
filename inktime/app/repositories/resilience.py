@@ -601,6 +601,8 @@ class ResilienceRepository:
         offline_prefetch_allowed: bool = False,
         offline_slot: str | None = None,
         ack_deadline: str | None = None,
+        offline_schedule_id: str | None = None,
+        terminal_ack_retention: str | None = None,
     ) -> dict[str, Any]:
         item_id, now = str(uuid4()), utc_now()
         if delivery_mode not in {"online_queue", "offline_schedule"}:
@@ -609,6 +611,10 @@ class ResilienceRepository:
             raise ValueError("QUEUE-005 一般 online Queue 不得標記 offline_prefetch_allowed")
         if delivery_mode == "offline_schedule" and not offline_prefetch_allowed:
             raise ValueError("QUEUE-005 offline Schedule Queue 必須標記 offline_prefetch_allowed")
+        if delivery_mode == "offline_schedule" and not str(offline_schedule_id or "").strip():
+            raise ValueError("QUEUE-005 offline Schedule Queue 必須綁定 offline_schedule_id")
+        if delivery_mode == "online_queue" and offline_schedule_id is not None:
+            raise ValueError("QUEUE-005 online Queue 不得綁定 offline_schedule_id")
         with self.database.transaction() as connection:
             queue = connection.execute(
                 "SELECT depth FROM device_content_queues WHERE device_id=?", (device_id,)
@@ -621,6 +627,12 @@ class ResilienceRepository:
                 ).fetchone()
                 if not device or str(device["delivery_mode"]) != "inktime_offline_schedule" or not bool(device["offline_prefetch_allowed"]):
                     raise ValueError("QUEUE-005 裝置未啟用離線排程或 Prefetch")
+                schedule_owner = connection.execute(
+                    "SELECT 1 FROM device_offline_schedules WHERE id=? AND device_id=?",
+                    (str(offline_schedule_id), device_id),
+                ).fetchone()
+                if schedule_owner is None:
+                    raise ValueError("QUEUE-005 offline_schedule_id 不屬於此裝置")
             compatible = connection.execute(
                 """SELECT 1 FROM releases r JOIN devices d ON d.id=?
                 WHERE r.id=? AND r.status='published' AND r.render_profile=d.panel_profile""",
@@ -656,7 +668,7 @@ class ResilienceRepository:
                 ).fetchone()[0]
             )
             connection.execute(
-                "INSERT INTO device_content_queue_items(id,device_id,release_id,position,priority,display_after,expires_at,status,idempotency_key,delivery_mode,offline_prefetch_allowed,offline_slot,ack_deadline,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO device_content_queue_items(id,device_id,release_id,position,priority,display_after,expires_at,status,idempotency_key,delivery_mode,offline_prefetch_allowed,offline_slot,ack_deadline,terminal_ack_retention,offline_schedule_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     item_id,
                     device_id,
@@ -671,6 +683,8 @@ class ResilienceRepository:
                     int(bool(offline_prefetch_allowed)),
                     offline_slot,
                     ack_deadline,
+                    terminal_ack_retention,
+                    offline_schedule_id,
                     now,
                     now,
                 ),
@@ -690,7 +704,7 @@ class ResilienceRepository:
     def queue_ack(self, *, device_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         item_id, event = str(payload.get("queue_item_id", "")), str(payload.get("event", ""))
         key = str(payload.get("idempotency_key", "")).strip()
-        if event not in QUEUE_EVENTS or not item_id or not key:
+        if event not in QUEUE_EVENTS or not item_id or not key or len(key) > 128:
             raise ValueError("QUEUE-001 ACK 缺少 queue_item_id、event 或 idempotency_key")
         queue_version = json_int(
             payload,
@@ -708,16 +722,20 @@ class ResilienceRepository:
             if not item:
                 raise PermissionError("QUEUE-002 Queue Item 不屬於此裝置")
             queue = connection.execute(
-                "SELECT queue_version FROM device_content_queues WHERE device_id=?", (device_id,)
+                "SELECT queue_version,current_release_id FROM device_content_queues WHERE device_id=?",
+                (device_id,),
             ).fetchone()
             delayed_terminal = (
                 event in {"DISPLAY_COMPLETED", "DISPLAY_FAILED"}
                 and str(payload.get("ack_mode", "")) == "delayed_terminal"
                 and str(item["delivery_mode"]) == "offline_schedule"
                 and bool(item["offline_prefetch_allowed"])
+                and bool(item["offline_schedule_id"])
                 and str(item["status"]) in {"ACKNOWLEDGED", "DISPLAYED"}
-                and str(payload.get("release_id", item["release_id"])) == str(item["release_id"])
-                and (item["ack_deadline"] is None or str(item["ack_deadline"]) >= now)
+                and "release_id" in payload
+                and str(payload.get("release_id")) == str(item["release_id"])
+                and item["terminal_ack_retention"] is not None
+                and str(item["terminal_ack_retention"]) >= now
             )
             if queue is None or (
                 int(queue["queue_version"]) != queue_version
@@ -759,10 +777,17 @@ class ResilienceRepository:
                 ),
             )
             if event == "DISPLAY_COMPLETED":
-                connection.execute(
-                    "UPDATE device_content_queues SET current_release_id=?,last_known_good_release_id=?,updated_at=? WHERE device_id=?",
-                    (item["release_id"], item["release_id"], now, device_id),
-                )
+                # A delayed terminal ACK is audit evidence for an already
+                # displayed offline slot.  It must never move the queue's
+                # current pointer back to an older release.
+                should_advance_pointer = not delayed_terminal or queue is None or not queue["current_release_id"] or str(
+                    queue["current_release_id"]
+                ) == str(item["release_id"])
+                if should_advance_pointer:
+                    connection.execute(
+                        "UPDATE device_content_queues SET current_release_id=?,last_known_good_release_id=?,updated_at=? WHERE device_id=?",
+                        (item["release_id"], item["release_id"], now, device_id),
+                    )
                 release = connection.execute(
                     "SELECT manifest_json FROM releases WHERE id=?", (item["release_id"],)
                 ).fetchone()

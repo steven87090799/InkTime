@@ -496,9 +496,10 @@ def test_cache_wait_deadline_covers_provider_and_one_json_repair(app, tmp_path, 
     def get_cache(**_kwargs):
         nonlocal cache_reads
         cache_reads += 1
-        # Full-analysis cache lookup accepts the current schema and the
-        # historical v2 row, so the initial miss probes both versions.
-        return None if cache_reads <= 2 else cached
+        # Full-analysis cache lookup accepts a current-schema row, a newly
+        # written v2 row carrying the canonical fingerprint, and the
+        # historical v2 fingerprint.
+        return None if cache_reads <= 3 else cached
 
     clock = iter([0.0, 121.0])
     monkeypatch.setattr(photos, "acquire_ai_cache_reservation", acquire)

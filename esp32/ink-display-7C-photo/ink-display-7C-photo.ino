@@ -1829,11 +1829,29 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg) {
   const JsonVariantConst schema = schedule["schema_version"];
   const JsonVariantConst rawSlots = schedule["slots"];
   const String deliveryMode = schedule["delivery_mode"] | "";
+  const String targetLocalDate = schedule["target_local_date"] | "";
+  const String targetDate = schedule["target_date"] | "";
+  const String timezoneName = schedule["timezone"] | "";
+  const String scheduleId = schedule["schedule_id"] | "";
+  const String panelProfile = schedule["panel_profile"] | "";
+  const String buttonWakeAction = schedule["button_wake_action"] | "";
+  const JsonVariantConst rawConfigVersion = schedule["config_version"];
+  const JsonVariantConst rawRotation = schedule["rotation"];
+  const JsonVariantConst rawScheduleVersion = schedule["offline_schedule_version"];
   if (jsonError || schedule.overflowed() || !schema.is<int32_t>() || schema.is<bool>()
       || schema.as<int32_t>() != 1 || deliveryMode != "inktime_offline_schedule"
-      || !rawSlots.is<JsonArrayConst>()) {
+      || !rawSlots.is<JsonArrayConst>() || targetLocalDate.length() == 0U
+      || (targetDate.length() > 0U && targetDate != targetLocalDate)
+      || timezoneName.length() == 0U || timezoneName.length() > 64U
+      || scheduleId.length() == 0U
+      || !inktime::boundedText(scheduleId.c_str(), inktime::kQueueIdentifierMaxBytes)
+      || panelProfile.length() == 0U || !buttonWakeAction.length()
+      || !rawConfigVersion.is<uint32_t>() || rawConfigVersion.is<bool>()
+      || !rawRotation.is<int32_t>() || rawRotation.is<bool>()
+      || !rawScheduleVersion.is<int32_t>() || rawScheduleVersion.is<bool>()
+      || rawScheduleVersion.as<int32_t>() < 0) {
     lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-SCHEMA";
-    lastDeviceErrorMessage = "離線排程 schema 或 delivery_mode 不相容";
+    lastDeviceErrorMessage = "離線排程 schema、日期或快照欄位不相容";
     return false;
   }
   const JsonArrayConst slots = rawSlots.as<JsonArrayConst>();
@@ -1846,7 +1864,7 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg) {
   JsonArrayConst rawTimes = schedule["schedule_times"].as<JsonArrayConst>();
   if (rawTimes.isNull()) rawTimes = schedule["schedule"].as<JsonArrayConst>();
   if (rawTimes.isNull() || rawTimes.size() == 0U
-      || rawTimes.size() > inktime::kMaxOfflineSlots) {
+      || rawTimes.size() > inktime::kMaxOfflineSlots || rawTimes.size() != slots.size()) {
     lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-SCHEMA";
     lastDeviceErrorMessage = "離線排程 schedule_times 不合法";
     return false;
@@ -1864,14 +1882,114 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg) {
     lastDeviceErrorMessage = "離線排程時刻未排序或重複";
     return false;
   }
+  time_t rtcEpoch = 0;
+  if (!photoPainter.readRtc(rtcEpoch)) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-RTC";
+    lastDeviceErrorMessage = "離線排程無法由 PhotoPainter RTC 驗證本地日期";
+    return false;
+  }
+  applyFixedTimezoneWithoutNtp(cfg.tz_offset_minutes);
+  struct tm localNow = {};
+  if (localtime_r(&rtcEpoch, &localNow) == nullptr) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-RTC";
+    lastDeviceErrorMessage = "離線排程 RTC 本地時間轉換失敗";
+    return false;
+  }
+  char localDate[11] = {0};
+  snprintf(
+    localDate,
+    sizeof(localDate),
+    "%04d-%02d-%02d",
+    localNow.tm_year + 1900,
+    localNow.tm_mon + 1,
+    localNow.tm_mday
+  );
+  const uint32_t remoteConfigVersion = rawConfigVersion.as<uint32_t>();
+  const int32_t remoteRotation = rawRotation.as<int32_t>();
+  inktime::OfflineScheduleContract contract = {
+    1,
+    deliveryMode.c_str(),
+    targetLocalDate.c_str(),
+    localDate,
+    timezoneName.c_str(),
+    remoteConfigVersion,
+    cfg.config_version,
+    remoteRotation,
+    panelProfile.c_str(),
+    INKTIME_PANEL_PROFILE,
+    buttonWakeAction.c_str(),
+    static_cast<uint8_t>(slots.size()),
+    static_cast<uint8_t>(rawTimes.size()),
+    true,
+    true,
+  };
+  for (size_t index = 0; index < slots.size(); ++index) {
+    const JsonVariantConst rawSlot = slots[index];
+    if (!rawSlot.is<JsonObjectConst>()) {
+      contract.queueIdentityValid = false;
+      contract.sha256Valid = false;
+      break;
+    }
+    const JsonObjectConst slot = rawSlot.as<JsonObjectConst>();
+    const JsonVariantConst rawSize = slot["size"];
+    const JsonVariantConst rawWidth = slot["width"];
+    const JsonVariantConst rawHeight = slot["height"];
+    const JsonVariantConst rawSlotIndex = slot["slot_index"];
+    const JsonVariantConst rawQueueVersion = slot["queue_version"];
+    const String itemId = slot["queue_item_id"] | "";
+    const String releaseId = slot["release_id"] | "";
+    const String slotScheduleId = slot["offline_schedule_id"] | "";
+    const String sha = slot["sha256"] | "";
+    const String downloadUrl = slot["download_url"] | "";
+    const String pixelFormat = slot["pixel_format"] | "";
+    const String renderProfile = slot["render_profile"] | "";
+    const bool indexed4 = pixelFormat == "indexed4";
+    const int64_t expectedSize = static_cast<int64_t>(FB_WIDTH) * FB_HEIGHT
+      / (indexed4 ? 2 : 4);
+    const bool validIdentity = rawSlot.is<JsonObjectConst>()
+      && rawSlotIndex.is<int32_t>() && !rawSlotIndex.is<bool>()
+      && rawSlotIndex.as<int32_t>() == static_cast<int32_t>(index)
+      && rawQueueVersion.is<int32_t>() && !rawQueueVersion.is<bool>()
+      && rawQueueVersion.as<int32_t>() >= 0
+      && inktime::boundedText(itemId.c_str(), inktime::kQueueIdentifierMaxBytes)
+      && inktime::boundedText(releaseId.c_str(), inktime::kQueueIdentifierMaxBytes)
+      && inktime::boundedText(slotScheduleId.c_str(), inktime::kQueueIdentifierMaxBytes)
+      && slotScheduleId == scheduleId
+      && inktime::isSafeQueueDownloadPathForItem(
+           downloadUrl.c_str(), downloadUrl.length(), itemId.c_str())
+      && (renderProfile == "safe_4c" || renderProfile == String(INKTIME_PANEL_PROFILE));
+    const bool validPayload = rawSize.is<int64_t>() && !rawSize.is<bool>()
+      && rawSize.as<int64_t>() == expectedSize
+      && rawWidth.is<int32_t>() && !rawWidth.is<bool>()
+      && rawHeight.is<int32_t>() && !rawHeight.is<bool>()
+      && rawWidth.as<int32_t>() == FB_WIDTH && rawHeight.as<int32_t>() == FB_HEIGHT
+      && (pixelFormat == "indexed4" || pixelFormat == "2bpp")
+      && inktime::isSha256Hex(sha.c_str());
+    contract.queueIdentityValid = contract.queueIdentityValid && validIdentity;
+    contract.sha256Valid = contract.sha256Valid && validPayload;
+  }
+  if (!inktime::validOfflineScheduleContract(contract)) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-SCHEMA";
+    lastDeviceErrorMessage = "離線排程快照過期、日期錯誤或 Slot 完整性不合法";
+    return false;
+  }
   scheduleCandidate.schedule_count = static_cast<uint8_t>(rawTimes.size());
   for (uint8_t index = 0; index < scheduleCandidate.schedule_count; ++index) {
     scheduleCandidate.schedule_slots[index] = scheduleSlots[index];
   }
   scheduleCandidate.refresh_hour = scheduleSlots[0].hour;
   scheduleCandidate.refresh_minute = scheduleSlots[0].minute;
-  scheduleCandidate.config_version = schedule["config_version"] | cfg.config_version;
-  const int remoteLead = schedule["prefetch_lead_minutes"] | cfg.prefetch_lead_minutes;
+  scheduleCandidate.rotate180 = remoteRotation == 180;
+  scheduleCandidate.delivery_mode = deliveryMode;
+  scheduleCandidate.button_wake_action = buttonWakeAction;
+  scheduleCandidate.config_version = remoteConfigVersion;
+  const JsonVariantConst rawLead = schedule["prefetch_lead_minutes"];
+  if (!rawLead.is<int32_t>() || rawLead.is<bool>()) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-SCHEMA";
+    lastDeviceErrorMessage = "離線排程 prefetch_lead_minutes 缺少或型別不合法";
+    return false;
+  }
+  const int remoteLead = rawLead.as<int32_t>();
   if (remoteLead < 0 || remoteLead > 120) {
     lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-SCHEMA";
     lastDeviceErrorMessage = "離線排程 prefetch_lead_minutes 不合法";
@@ -2549,8 +2667,29 @@ static bool loadOfflineScheduledLocalFrame(const Config &cfg, time_t nowEpoch) {
   const JsonVariantConst rawSlots = active["slots"];
   String targetDate = active["target_local_date"] | "";
   if (targetDate.length() == 0U) targetDate = active["target_date"] | "";
+  const String activeTargetDate = active["target_local_date"] | "";
+  const String activeLegacyDate = active["target_date"] | "";
+  const String activeDeliveryMode = active["delivery_mode"] | "";
+  const String activeTimezone = active["timezone"] | "";
+  const String activeScheduleId = active["schedule_id"] | "";
+  const String activePanelProfile = active["panel_profile"] | "";
+  const String activeButtonWakeAction = active["button_wake_action"] | "";
+  const JsonVariantConst activeSchema = active["schema_version"];
+  const JsonVariantConst activeConfigVersion = active["config_version"];
+  const JsonVariantConst activeRotation = active["rotation"];
+  const JsonVariantConst activeScheduleVersion = active["offline_schedule_version"];
   if (jsonError || active.overflowed() || !rawSlots.is<JsonArrayConst>()
-      || targetDate.length() != 10) {
+      || targetDate.length() != 10 || activeTargetDate.length() == 0U
+      || (activeLegacyDate.length() > 0U && activeLegacyDate != activeTargetDate)
+      || !activeSchema.is<int32_t>() || activeSchema.is<bool>()
+      || activeSchema.as<int32_t>() != inktime::kOfflineScheduleSchemaVersion
+      || activeDeliveryMode != "inktime_offline_schedule"
+      || activeTimezone.length() == 0U || activeTimezone.length() > 64U
+      || activeScheduleId.length() == 0U
+      || !activeConfigVersion.is<uint32_t>() || activeConfigVersion.is<bool>()
+      || !activeRotation.is<int32_t>() || activeRotation.is<bool>()
+      || !activeScheduleVersion.is<int32_t>() || activeScheduleVersion.is<bool>()
+      || activeScheduleVersion.as<int32_t>() < 0) {
     lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
     lastDeviceErrorMessage = "離線排程 active schedule schema 不合法";
     return false;
@@ -2571,6 +2710,99 @@ static bool loadOfflineScheduledLocalFrame(const Config &cfg, time_t nowEpoch) {
     return false;
   }
   const JsonArrayConst slots = rawSlots.as<JsonArrayConst>();
+  JsonArrayConst rawTimes = active["schedule_times"].as<JsonArrayConst>();
+  if (rawTimes.isNull()) rawTimes = active["schedule"].as<JsonArrayConst>();
+  if (rawTimes.isNull() || rawTimes.size() == 0U
+      || rawTimes.size() > inktime::kMaxOfflineSlots || rawTimes.size() != slots.size()) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
+    lastDeviceErrorMessage = "離線排程 active schedule_times 不合法";
+    return false;
+  }
+  inktime::OfflineSlot activeScheduleSlots[inktime::kMaxOfflineSlots] = {};
+  for (size_t index = 0; index < rawTimes.size(); ++index) {
+    if (!parseOfflineClock(rawTimes[index] | "", activeScheduleSlots[index])) {
+      lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
+      lastDeviceErrorMessage = "離線排程 active 時刻格式不合法";
+      return false;
+    }
+  }
+  if (!inktime::validateOfflineSlots(activeScheduleSlots, static_cast<uint8_t>(rawTimes.size()))
+      || rawTimes.size() != cfg.schedule_count
+      || !inktime::validateOfflineSlots(cfg.schedule_slots, cfg.schedule_count)) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
+    lastDeviceErrorMessage = "離線排程 active 時刻與本機設定不一致";
+    return false;
+  }
+  for (uint8_t index = 0; index < cfg.schedule_count; ++index) {
+    if (activeScheduleSlots[index].hour != cfg.schedule_slots[index].hour
+        || activeScheduleSlots[index].minute != cfg.schedule_slots[index].minute) {
+      lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
+      lastDeviceErrorMessage = "離線排程 active 時刻與本機設定不一致";
+      return false;
+    }
+  }
+  char localDate[11] = {0};
+  snprintf(
+    localDate,
+    sizeof(localDate),
+    "%04d-%02d-%02d",
+    nowLocal.tm_year + 1900,
+    nowLocal.tm_mon + 1,
+    nowLocal.tm_mday
+  );
+  inktime::OfflineScheduleContract contract = {
+    activeSchema.as<int32_t>(),
+    activeDeliveryMode.c_str(),
+    activeTargetDate.c_str(),
+    localDate,
+    activeTimezone.c_str(),
+    activeConfigVersion.as<uint32_t>(),
+    cfg.config_version,
+    activeRotation.as<int32_t>(),
+    activePanelProfile.c_str(),
+    INKTIME_PANEL_PROFILE,
+    activeButtonWakeAction.c_str(),
+    static_cast<uint8_t>(slots.size()),
+    static_cast<uint8_t>(rawTimes.size()),
+    true,
+    true,
+  };
+  if (activeConfigVersion.as<uint32_t>() != cfg.config_version
+      || !inktime::validOfflineScheduleContract(contract)
+      || cfg.delivery_mode != "inktime_offline_schedule"
+      || cfg.rotate180 != (activeRotation.as<int32_t>() == 180)) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
+    lastDeviceErrorMessage = "離線排程 active 快照與本機設定不一致";
+    return false;
+  }
+  for (size_t index = 0; index < slots.size(); ++index) {
+    const JsonVariantConst rawSlot = slots[index];
+    if (!rawSlot.is<JsonObjectConst>()) {
+      lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
+      lastDeviceErrorMessage = "離線排程 active Slot 身分不合法";
+      return false;
+    }
+    const JsonObjectConst slot = rawSlot.as<JsonObjectConst>();
+    const JsonVariantConst rawIndex = slot["slot_index"];
+    const JsonVariantConst rawVersion = slot["queue_version"];
+    const String slotScheduleId = slot["offline_schedule_id"] | "";
+    const String slotItemId = slot["queue_item_id"] | "";
+    const String slotReleaseId = slot["release_id"] | "";
+    const String slotSha = slot["sha256"] | "";
+    const String slotProfile = slot["render_profile"] | "";
+    if (!rawIndex.is<int32_t>() || rawIndex.is<bool>()
+        || rawIndex.as<int32_t>() != static_cast<int32_t>(index)
+        || !rawVersion.is<int32_t>() || rawVersion.is<bool>() || rawVersion.as<int32_t>() < 0
+        || slotScheduleId != activeScheduleId
+        || !inktime::boundedText(slotItemId.c_str(), inktime::kQueueIdentifierMaxBytes)
+        || !inktime::boundedText(slotReleaseId.c_str(), inktime::kQueueIdentifierMaxBytes)
+        || !inktime::isSha256Hex(slotSha.c_str())
+        || (slotProfile != "safe_4c" && slotProfile != String(INKTIME_PANEL_PROFILE))) {
+      lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
+      lastDeviceErrorMessage = "離線排程 active Slot 身分或完整性不合法";
+      return false;
+    }
+  }
   int selectedIndex = -1;
   time_t selectedEpoch = 0;
   String selectedSha;
@@ -2583,10 +2815,10 @@ static bool loadOfflineScheduledLocalFrame(const Config &cfg, time_t nowEpoch) {
     if (!rawSlot.is<JsonObjectConst>()) continue;
     const JsonObjectConst slot = rawSlot.as<JsonObjectConst>();
     const int slotIndex = slot["slot_index"] | -1;
-    if (slotIndex < 0 || slotIndex >= cfg.schedule_count) continue;
+    if (slotIndex < 0 || slotIndex >= static_cast<int>(rawTimes.size())) continue;
     struct tm candidate = targetLocal;
-    candidate.tm_hour = cfg.schedule_slots[slotIndex].hour;
-    candidate.tm_min = cfg.schedule_slots[slotIndex].minute;
+    candidate.tm_hour = activeScheduleSlots[slotIndex].hour;
+    candidate.tm_min = activeScheduleSlots[slotIndex].minute;
     candidate.tm_sec = 0;
     const time_t candidateEpoch = mktime(&candidate);
     const String sha = slot["sha256"] | "";
@@ -2606,7 +2838,7 @@ static bool loadOfflineScheduledLocalFrame(const Config &cfg, time_t nowEpoch) {
     lastDeviceErrorMessage = "目前離線排程 Slot 沒有可驗證的正式 Frame";
     return false;
   }
-  const inktime::DisplayRotation rotation = cfg.rotate180
+  const inktime::DisplayRotation rotation = activeRotation.as<int32_t>() == 180
     ? inktime::DisplayRotation::Rotate180
     : inktime::DisplayRotation::Rotate0;
   currentReleaseId = selectedRelease;

@@ -99,11 +99,14 @@ class SchedulerRunner:
         local_now: datetime,
         schedule: list[str],
         lead_minutes: int,
+        server_margin_minutes: int = 0,
     ) -> date | None:
         """Return the latest local day whose first slot is due for prefetch."""
 
         if type(lead_minutes) is not int or not 0 <= lead_minutes <= 120:
             raise ValueError("DEVICE-008 prefetch_lead_minutes 不合法")
+        if type(server_margin_minutes) is not int or not 0 <= server_margin_minutes <= 60:
+            raise ValueError("DEVICE-008 server_prefetch_margin_minutes 不合法")
         slots = validate_offline_schedule(schedule, maximum=12)
         zone = local_now.tzinfo
         if zone is None:
@@ -112,7 +115,7 @@ class SchedulerRunner:
         def prefetch_at(target: date) -> datetime:
             hour, minute = (int(part) for part in slots[0].split(":"))
             return datetime.combine(target, clock_time(hour, minute), tzinfo=zone) - timedelta(
-                minutes=lead_minutes
+                minutes=lead_minutes + server_margin_minutes
             )
 
         target = local_now.date()
@@ -134,7 +137,15 @@ class SchedulerRunner:
             return
         job_repository = self.app.extensions["inktime_job_repository"]
         job_service = self.app.extensions["inktime_job_service"]
-        for device in offline_schedules.due_prefetch_devices(limit=10):
+        settings = self.app.extensions["inktime_settings_repository"]
+        try:
+            server_margin = int(settings.get("offline.server_prefetch_margin_minutes", 15))
+        except (TypeError, ValueError):
+            server_margin = 15
+        server_margin = max(0, min(server_margin, 60))
+        cursor = offline_schedules.prefetch_cursor()
+        devices = offline_schedules.due_prefetch_devices(limit=10, after_device_id=cursor)
+        for device in devices:
             try:
                 timezone_name = str(device["timezone"] or "UTC")
                 local_now = now.astimezone(ZoneInfo(timezone_name))
@@ -145,6 +156,7 @@ class SchedulerRunner:
                     local_now,
                     schedule,
                     int(device["prefetch_lead_minutes"] or 0),
+                    server_margin,
                 )
                 if target is None:
                     continue
@@ -200,6 +212,8 @@ class SchedulerRunner:
                         "error_type": exc.__class__.__name__,
                     },
                 )
+            finally:
+                offline_schedules.advance_prefetch_cursor(str(device["id"]))
 
     def _enqueue_task(self, task: dict, now: datetime, *, force: bool = False) -> None:
         config = dict(task["config"])

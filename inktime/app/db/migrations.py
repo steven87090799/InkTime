@@ -1267,6 +1267,86 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_analysis_request_outcomes_fingerprint ON analysis_request_outcomes(request_fingerprint,created_at DESC)",
         ),
     ),
+    Migration(
+        28,
+        "加入離線排程不可變快照、佇列歸屬與延遲 ACK 保留",
+        (
+            # Migration 27 schedules were built from live device settings.  A
+            # ready row from that version is therefore never trusted as a
+            # device-consumable schedule.
+            "ALTER TABLE device_offline_schedules ADD COLUMN panel_profile TEXT NOT NULL DEFAULT 'safe_4c'",
+            "ALTER TABLE device_offline_schedules ADD COLUMN rotation INTEGER NOT NULL DEFAULT 0 CHECK(rotation IN (0,180))",
+            "ALTER TABLE device_offline_schedules ADD COLUMN schedule_times_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE device_offline_schedules ADD COLUMN prefetch_lead_minutes INTEGER NOT NULL DEFAULT 5 CHECK(prefetch_lead_minutes BETWEEN 0 AND 120)",
+            "ALTER TABLE device_offline_schedules ADD COLUMN button_wake_action TEXT NOT NULL DEFAULT 'check_new' CHECK(button_wake_action IN ('check_new','local_next'))",
+            "ALTER TABLE device_offline_schedules ADD COLUMN offline_schedule_version INTEGER NOT NULL DEFAULT 0 CHECK(offline_schedule_version >= 0)",
+            "ALTER TABLE device_offline_schedules ADD COLUMN snapshot_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE device_content_queue_items ADD COLUMN offline_schedule_id TEXT REFERENCES device_offline_schedules(id) ON DELETE SET NULL",
+            "ALTER TABLE device_content_queue_items ADD COLUMN terminal_ack_retention TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_queue_items_offline_schedule_status ON device_content_queue_items(device_id,offline_schedule_id,status)",
+            "CREATE INDEX IF NOT EXISTS idx_offline_schedules_exact_ready ON device_offline_schedules(device_id,target_date,config_version,status,updated_at)",
+            "CREATE TABLE IF NOT EXISTS device_offline_prefetch_cursors (id INTEGER PRIMARY KEY CHECK(id=1),last_device_id TEXT,updated_at TEXT NOT NULL)",
+            "INSERT OR IGNORE INTO device_offline_prefetch_cursors(id,updated_at) VALUES (1,datetime('now'))",
+            "UPDATE device_offline_schedules SET status='cancelled',updated_at=datetime('now') WHERE status='ready'",
+            """
+            UPDATE device_content_queue_items
+            SET offline_schedule_id=(SELECT schedule_id FROM device_offline_schedule_slots s WHERE s.queue_item_id=device_content_queue_items.id)
+            WHERE delivery_mode='offline_schedule' AND offline_schedule_id IS NULL
+            """,
+            """
+            UPDATE device_content_queue_items
+            SET status='CANCELLED',updated_at=datetime('now')
+            WHERE delivery_mode='offline_schedule' AND offline_schedule_id IN (SELECT id FROM device_offline_schedules WHERE status='cancelled')
+              AND status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')
+            """,
+            """
+            UPDATE device_content_queue_items
+            SET status='CANCELLED',updated_at=datetime('now')
+            WHERE delivery_mode='offline_schedule' AND offline_schedule_id IS NULL
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_queue_offline_schedule_owner_insert
+            BEFORE INSERT ON device_content_queue_items
+            WHEN NEW.delivery_mode='offline_schedule' AND (NEW.offline_schedule_id IS NULL OR NOT EXISTS(
+                SELECT 1 FROM device_offline_schedules s WHERE s.id=NEW.offline_schedule_id AND s.device_id=NEW.device_id))
+            BEGIN SELECT RAISE(ABORT,'QUEUE-005 offline queue item requires matching offline_schedule_id'); END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_queue_offline_schedule_owner_update
+            BEFORE UPDATE OF delivery_mode,offline_schedule_id,device_id ON device_content_queue_items
+            WHEN NEW.delivery_mode='offline_schedule' AND (NEW.offline_schedule_id IS NULL OR NOT EXISTS(
+                SELECT 1 FROM device_offline_schedules s WHERE s.id=NEW.offline_schedule_id AND s.device_id=NEW.device_id))
+            BEGIN SELECT RAISE(ABORT,'QUEUE-005 offline queue item requires matching offline_schedule_id'); END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_queue_online_schedule_owner
+            BEFORE INSERT ON device_content_queue_items
+            WHEN NEW.delivery_mode='online_queue' AND NEW.offline_schedule_id IS NOT NULL
+            BEGIN SELECT RAISE(ABORT,'QUEUE-005 online queue item cannot own offline schedule'); END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_queue_online_schedule_owner_update
+            BEFORE UPDATE OF delivery_mode,offline_schedule_id ON device_content_queue_items
+            WHEN NEW.delivery_mode='online_queue' AND NEW.offline_schedule_id IS NOT NULL
+            BEGIN SELECT RAISE(ABORT,'QUEUE-005 online queue item cannot own offline schedule'); END
+            """,
+            # A NULL analysis_id row is the durable photo-level human
+            # decision.  Existing analysis-scoped rows remain feedback for
+            # that analysis and are copied only when they carry a human state.
+            """
+            INSERT OR IGNORE INTO photo_reviews(photo_id,analysis_id,review_state,caption_override,candidate_pool,note,understanding_incorrect,caption_bad,scores_unreasonable,accepted_at,version,updated_by,updated_at)
+            SELECT legacy.photo_id,NULL,legacy.review_state,legacy.caption_override,legacy.candidate_pool,legacy.note,0,0,0,legacy.accepted_at,legacy.version,legacy.updated_by,legacy.updated_at
+            FROM photo_reviews legacy
+            WHERE (legacy.review_state IN ('keep','exclude','needs_review') OR legacy.candidate_pool=1)
+              AND legacy.id=(
+                  SELECT MAX(latest.id) FROM photo_reviews latest
+                  WHERE latest.photo_id=legacy.photo_id
+                    AND (latest.review_state IN ('keep','exclude','needs_review') OR latest.candidate_pool=1)
+              )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_photo_reviews_photo_level ON photo_reviews(photo_id,analysis_id,version DESC)",
+        ),
+    ),
 )
 
 

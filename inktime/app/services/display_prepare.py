@@ -199,6 +199,7 @@ class DisplayPreparationService:
         device_id: str,
         target_date: str,
         created_by: str,
+        expected_config_version: int | None = None,
     ) -> dict[str, Any]:
         """Prepare one composed Release per Enhanced offline schedule slot.
 
@@ -216,14 +217,18 @@ class DisplayPreparationService:
         with self.database.session() as connection:
             device = connection.execute(
                 """
-                SELECT id,panel_profile,timezone,schedule_times_json,config_version,
-                       delivery_mode,offline_prefetch_allowed
+                SELECT *
                 FROM devices WHERE id=? AND enabled=1
                 """,
                 (device_id,),
             ).fetchone()
         if device is None:
             raise ValueError("DISPLAY-004 指定裝置不存在或已停用")
+        if expected_config_version is not None and int(device["config_version"]) != int(
+            expected_config_version
+        ):
+            raise ValueError("DISPLAY-CONFIG-RACE 裝置設定已變更，拒絕使用舊排程工作")
+        snapshot_config_version = int(device["config_version"])
         if str(device["delivery_mode"]) != "inktime_offline_schedule" or not bool(
             device["offline_prefetch_allowed"]
         ):
@@ -259,25 +264,36 @@ class DisplayPreparationService:
         self.resilience.ensure_queue(device_id, depth=max(3, len(schedule_times)))
 
         release_ids: list[str] = []
-        for slot_index, _slot in enumerate(schedule_times):
-            candidate = unique_candidates[slot_index]
-            result = self.render_service.publish(
-                [str(candidate["id"])],
-                created_by,
-                history={
-                    "history_date": target.isoformat(),
-                    "selection_method": "offline_schedule_prepare",
-                },
-                device_ids=[device_id],
-                quantity_override=1,
-            )
-            release_ids.append(self._offline_release_id(result, device_id))
+        try:
+            for slot_index, _slot in enumerate(schedule_times):
+                candidate = unique_candidates[slot_index]
+                result = self.render_service.publish(
+                    [str(candidate["id"])],
+                    created_by,
+                    history={
+                        "history_date": target.isoformat(),
+                        "selection_method": "offline_schedule_prepare",
+                    },
+                    device_ids=[device_id],
+                    quantity_override=1,
+                    device_configs={device_id: dict(device)},
+                    activate_pointers=False,
+                    assign_device_releases=False,
+                )
+                release_ids.append(self._offline_release_id(result, device_id))
 
-        prepared = self.offline_schedules.prepare_day(
-            device_id=device_id,
-            target_date=target.isoformat(),
-            release_ids=release_ids,
-        )
+            prepared = self.offline_schedules.prepare_day(
+                device_id=device_id,
+                target_date=target.isoformat(),
+                release_ids=release_ids,
+                expected_config_version=snapshot_config_version,
+            )
+        except Exception as exc:
+            self.render_service.release_coordinator.abort_staged(
+                release_ids,
+                f"offline_prepare_failed:{exc.__class__.__name__}:{exc}",
+            )
+            raise
         return {
             "status": "ready",
             "idempotent": False,

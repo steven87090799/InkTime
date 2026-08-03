@@ -1332,6 +1332,12 @@ class PhotoRepository:
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self.database.transaction() as connection:
+            # Background jobs commonly use the descriptive actor "system";
+            # it is not an authenticated users.id and must not violate the
+            # photo_events.changed_by foreign key.
+            actor_id = connection.execute(
+                "SELECT id FROM users WHERE id=?", (actor,)
+            ).fetchone()
             connection.execute(
                 "INSERT INTO photo_events(photo_id,event,changes_json,changed_by,created_at) VALUES (?,?,?,?,?)",
                 (
@@ -1346,7 +1352,7 @@ class PhotoRepository:
                         },
                         ensure_ascii=False,
                     ),
-                    actor,
+                    actor if actor_id is not None else None,
                     now,
                 ),
             )

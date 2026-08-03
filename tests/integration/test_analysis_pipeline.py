@@ -14,6 +14,7 @@ from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.analysis import PhotoAnalysisService
 from inktime.app.domain.analysis.plan import fingerprint
+from inktime.app.domain.analysis.schema import AnalysisValidationError
 from inktime.app.workers.scanner import PhotoScanner
 from tests.conftest import create_admin
 from tests.unit.test_analysis_schema import valid_result
@@ -187,6 +188,88 @@ def test_invalid_json_is_repaired_only_once_without_second_image_call(app, tmp_p
     )
     assert provider.analyze_calls == 1
     assert provider.repair_calls == 1
+
+
+def test_invalid_repair_container_fails_without_a_second_vision_request(app, tmp_path):
+    _, ids, service = prepare(app, tmp_path)
+    provider = MockProvider(["[]", "{}"])
+    with pytest.raises(AnalysisValidationError):
+        service.analyze_photo(
+            photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock"
+        )
+    assert provider.analyze_calls == 1
+    assert provider.repair_calls == 1
+
+
+def test_full_analysis_hits_historical_v2_cache_without_an_image_call(app, tmp_path):
+    _, ids, service = prepare(app, tmp_path)
+    first = MockProvider([valid_result()])
+    service.analyze_photo(
+        photo_id=ids[0],
+        job_id=None,
+        provider=first,
+        strategy="high_quality",
+        high_model="mock",
+        force_ai=True,
+    )
+    repository = app.extensions["inktime_photo_repository"]
+    with app.extensions["inktime_database"].session() as connection:
+        analysis = connection.execute(
+            "SELECT p.sha256 AS content_sha256,a.provider,a.model,a.prompt_version,a.schema_kind,"
+            "a.analysis_spec_json,a.vision_input_spec_json "
+            "FROM photo_analysis a JOIN photos p ON p.id=a.photo_id "
+            "WHERE a.photo_id=? ORDER BY a.id DESC LIMIT 1",
+            (ids[0],),
+        ).fetchone()
+        cached = connection.execute(
+            "SELECT result_json,raw_json,input_tokens,output_tokens,cached_tokens,estimated_cost,latency_ms "
+            "FROM ai_analysis_cache WHERE content_sha256=? ORDER BY created_at DESC LIMIT 1",
+            (analysis["content_sha256"],),
+        ).fetchone()
+    assert cached is not None
+    analysis_spec = json.loads(analysis["analysis_spec_json"])
+    vision_input = json.loads(analysis["vision_input_spec_json"])
+    legacy_fingerprint = fingerprint(
+        {
+            "content_sha256": analysis["content_sha256"],
+            "actual_provider": analysis["provider"],
+            "model": analysis["model"],
+            "prompt_version": analysis["prompt_version"],
+            "schema_kind": analysis["schema_kind"],
+            "reasoning_effort": analysis_spec["reasoning_effort"],
+            **vision_input,
+            "schema_version": 2,
+        }
+    )
+    repository.put_ai_cache(
+        content_sha256=analysis["content_sha256"],
+        provider=analysis["provider"],
+        model_name=analysis["model"],
+        prompt_version=analysis["prompt_version"],
+        schema_version=2,
+        schema_kind=analysis["schema_kind"],
+        result=json.loads(cached["result_json"]),
+        raw_json=cached["raw_json"],
+        input_tokens=cached["input_tokens"],
+        output_tokens=cached["output_tokens"],
+        cached_tokens=cached["cached_tokens"],
+        estimated_cost=cached["estimated_cost"],
+        latency_ms=cached["latency_ms"],
+        vision_request_fingerprint=legacy_fingerprint,
+        vision_input_spec_json=analysis["vision_input_spec_json"],
+    )
+
+    second = MockProvider([])
+    result = service.analyze_photo(
+        photo_id=ids[0],
+        job_id=None,
+        provider=second,
+        strategy="high_quality",
+        high_model="mock",
+        force_ai=True,
+    )
+    assert result["stage"] == "cache"
+    assert second.analyze_calls == 0
 
 
 def test_legacy_smart_strategy_uses_the_single_full_contract(app, tmp_path):

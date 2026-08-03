@@ -273,6 +273,11 @@ class WorkerRunner:
                             device_id=str(offline_prepare["device_id"]),
                             target_date=str(offline_prepare["target_date"]),
                             created_by=str(job["created_by"] or "system"),
+                            expected_config_version=(
+                                int(offline_prepare["config_version"])
+                                if offline_prepare.get("config_version") is not None
+                                else None
+                            ),
                         )
                     display_prepare = settings.get("display_prepare")
                     if display_prepare is not None:

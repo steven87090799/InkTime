@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from inktime.app.workers.scheduler import SchedulerRunner
 
 
@@ -88,3 +90,53 @@ def test_offline_prefetch_creates_one_deduplicated_render_job(app):
     assert offline_jobs[0]["dedupe_key"] == (
         f"offline-prepare:{device_id}:2026-08-03:1"
     )
+
+
+def test_server_prepare_margin_stays_before_device_prefetch(app):
+    zone = ZoneInfo("Asia/Taipei")
+    schedule = ["08:00"]
+    assert SchedulerRunner._offline_prefetch_target_date(
+        datetime(2026, 8, 3, 7, 39, tzinfo=zone), schedule, 5, 15
+    ) is None
+    assert SchedulerRunner._offline_prefetch_target_date(
+        datetime(2026, 8, 3, 7, 40, tzinfo=zone), schedule, 5, 15
+    ).isoformat() == "2026-08-03"
+
+
+def test_offline_prefetch_target_date_rejects_invalid_time_contracts_and_catches_up():
+    zone = ZoneInfo("Asia/Taipei")
+    now = datetime(2026, 8, 9, 9, 0, tzinfo=zone)
+    with pytest.raises(ValueError, match="prefetch_lead_minutes"):
+        SchedulerRunner._offline_prefetch_target_date(now, ["08:00"], -1)
+    with pytest.raises(ValueError, match="server_prefetch_margin_minutes"):
+        SchedulerRunner._offline_prefetch_target_date(now, ["08:00"], 5, 61)
+    with pytest.raises(ValueError, match="時區"):
+        SchedulerRunner._offline_prefetch_target_date(datetime(2026, 8, 7, 9, 0), ["08:00"], 5)
+    assert SchedulerRunner._offline_prefetch_target_date(now, ["08:00"], 0).isoformat() == "2026-08-09"
+
+
+def test_offline_prefetch_cursor_eventually_visits_more_than_first_ten_devices(app):
+    device_ids = []
+    for index in range(25):
+        device_id, _token = app.extensions["inktime_device_repository"].create(
+            f"大量離線裝置 {index:02d}",
+            delivery_mode="inktime_offline_schedule",
+            offline_prefetch_allowed=True,
+            schedule_times=["08:00"],
+            prefetch_lead_minutes=5,
+        )
+        device_ids.append(device_id)
+    runner = SchedulerRunner(app)
+    now = datetime(2026, 8, 3, 7, 55, tzinfo=timezone.utc)
+    for _index in range(4):
+        runner._prepare_due_offline_devices(now)
+
+    jobs = app.extensions["inktime_job_repository"].list()
+    prepared_ids = {
+        str(device_id)
+        for job in jobs
+        if '"offline_prepare"' in str(job["settings_json"])
+        for device_id in device_ids
+        if str(device_id) in str(job["settings_json"])
+    }
+    assert prepared_ids == set(device_ids)

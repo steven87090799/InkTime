@@ -570,25 +570,44 @@ def device_offline_schedule():
     device = authenticate_device_request()
     if str(device["delivery_mode"] or "legacy_online") != "inktime_offline_schedule":
         abort(409, description="DEVICE-008 裝置目前不是 enhanced offline schedule 模式")
-    result = _offline_schedules().latest_for_device(str(device["id"]))
-    if result is None:
-        abort(404, description="DEVICE-008 尚未準備今日離線排程")
     try:
-        schedule_times = json.loads(str(device["schedule_times_json"] or "[]"))
+        local_zone = ZoneInfo(str(device["timezone"]))
+        local_date = datetime.now(local_zone).date().isoformat()
+    except (TypeError, ValueError, ZoneInfoNotFoundError):
+        abort(409, description="DEVICE-008 裝置 IANA 時區不合法")
+    result = _offline_schedules().ready_for_device(
+        device_id=str(device["id"]),
+        target_date=local_date,
+        config_version=int(device["config_version"]),
+    )
+    if result is None:
+        abort(404, description="DEVICE-008 schedule_not_ready")
+    try:
+        schedule_times = json.loads(str(result["schedule"]["schedule_times_json"] or "[]"))
+        schedule_times = validate_offline_schedule(schedule_times, maximum=12)
     except (TypeError, ValueError, json.JSONDecodeError):
-        abort(409, description="DEVICE-008 裝置 schedule_times 不可解析")
+        abort(409, description="DEVICE-008 離線排程快照 schedule_times 不可解析")
     schedule = result["schedule"]
     timezone_name = str(schedule["timezone"])
     try:
-        local_zone = ZoneInfo(timezone_name)
+        snapshot_zone = ZoneInfo(timezone_name)
         slots = []
         for raw_slot in result["slots"]:
             slot = dict(raw_slot)
-            slot["show_at"] = datetime.fromisoformat(str(slot["show_at"])).astimezone(local_zone).isoformat()
+            slot["show_at"] = datetime.fromisoformat(str(slot["show_at"])).astimezone(snapshot_zone).isoformat()
             slots.append(slot)
     except (TypeError, ValueError, ZoneInfoNotFoundError):
         abort(409, description="DEVICE-008 離線排程時間資料不合法")
     device_projection = result.get("device") or {}
+    panel_profile = device_projection.get("panel_profile")
+    rotation = device_projection.get("rotation")
+    prefetch_lead = device_projection.get("prefetch_lead_minutes")
+    schedule_version = device_projection.get("offline_schedule_version")
+    if panel_profile is None or rotation is None or prefetch_lead is None or schedule_version is None:
+        abort(409, description="DEVICE-008 離線排程快照不完整")
+    button_wake_action = device_projection.get("button_wake_action")
+    if button_wake_action is None:
+        abort(409, description="DEVICE-008 離線排程快照 button_wake_action 不完整")
     queue_version = max((int(slot.get("queue_version") or 0) for slot in slots), default=0)
     return {
         "schema_version": 1,
@@ -599,12 +618,13 @@ def device_offline_schedule():
         "target_local_date": str(schedule["target_date"]),
         "timezone": str(schedule["timezone"]),
         "delivery_mode": "inktime_offline_schedule",
-        "panel_profile": str(device_projection.get("panel_profile") or device["panel_profile"]),
-        "rotation": int(device_projection.get("rotation") or device["rotation"] or 0),
+        "panel_profile": str(panel_profile),
+        "rotation": int(rotation),
         "schedule": schedule_times,
         "schedule_times": schedule_times,
-        "prefetch_lead_minutes": int(device["prefetch_lead_minutes"] or 0),
-        "offline_schedule_version": int(device["offline_schedule_version"] or 0),
+        "prefetch_lead_minutes": int(prefetch_lead),
+        "button_wake_action": str(button_wake_action),
+        "offline_schedule_version": int(schedule_version),
         "queue_version": queue_version,
         "status": str(schedule["status"]),
         "slots": slots,
