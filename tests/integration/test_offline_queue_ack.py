@@ -7,6 +7,8 @@ from uuid import uuid4
 from PIL import Image
 import pytest
 
+import inktime.app.repositories.resilience as resilience_module
+
 
 def _release(app, source_photo_id: str = "offline-ack") -> dict:
     staged = app.extensions["inktime_release_publisher"].publish(
@@ -90,8 +92,14 @@ def test_delayed_terminal_ack_is_only_allowed_for_prefetched_offline_item(client
     )
     with app.extensions["inktime_database"].session() as connection:
         connection.execute(
-            "UPDATE device_content_queues SET current_release_id=?,last_known_good_release_id=? WHERE device_id=?",
-            (newer_release["release_id"], newer_release["release_id"], device_id),
+            "UPDATE device_content_queues SET current_release_id=?,current_displayed_at=?,last_known_good_release_id=?,last_known_good_displayed_at=? WHERE device_id=?",
+            (
+                newer_release["release_id"],
+                (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                newer_release["release_id"],
+                (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                device_id,
+            ),
         )
 
     delayed_started = _ack(
@@ -310,3 +318,194 @@ def test_queue_enqueue_requires_explicit_offline_schedule_ownership(app):
         offline_schedule_id=schedule["schedule"]["id"],
     )
     assert duplicate["offline_schedule_id"] == schedule["schedule"]["id"]
+
+
+def test_display_completed_pointer_uses_event_time_and_replay_keeps_one_history(app, monkeypatch):
+    devices = app.extensions["inktime_device_repository"]
+    queue = app.extensions["inktime_resilience_repository"]
+    device_id, _token = devices.create("Pointer ordering")
+    queue.ensure_queue(device_id, depth=4)
+    now = datetime.now(timezone.utc).isoformat()
+    library_id = str(uuid4())
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            "INSERT INTO libraries(id,name,root_path,created_at,updated_at) VALUES (?,?,?,?,?)",
+            (library_id, "Pointer photos", ".", now, now),
+        )
+        connection.executemany(
+            "INSERT INTO photos(id,library_id,relative_path,status,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+            [
+                (f"pointer-{letter}", library_id, f"pointer-{letter}.jpg", "analyzed", now, now)
+                for letter in ("a", "b", "c", "d")
+            ],
+        )
+    releases = [_release(app, f"pointer-{letter}") for letter in ("a", "b", "c", "d")]
+    items = [
+        queue.enqueue_release(device_id=device_id, release_id=release["release_id"])
+        for release in releases
+    ]
+    version = int(queue.queue(device_id)["queue"]["queue_version"])
+
+    def at(value: str):
+        monkeypatch.setattr(resilience_module, "utc_now", lambda: value)
+
+    for item, release in zip(items, releases):
+        at("2026-08-03T00:00:00+00:00")
+        for index, event in enumerate(("MANIFEST_RECEIVED", "DOWNLOAD_COMPLETED", "HASH_VERIFIED")):
+            queue.queue_ack(
+                device_id=device_id,
+                payload={
+                    "queue_item_id": item["id"],
+                    "queue_version": version,
+                    "event": event,
+                    "idempotency_key": f"{release['release_id']}-{index}",
+                },
+            )
+
+    pointer_times = (
+        "2026-08-03T08:00:00+00:00",
+        "2026-08-03T12:00:00+00:00",
+        "2026-08-03T16:00:00+00:00",
+    )
+    for item, release, displayed_at in zip(items[:3], releases[:3], pointer_times):
+        at(displayed_at)
+        queue.queue_ack(
+            device_id=device_id,
+            payload={
+                "queue_item_id": item["id"],
+                "queue_version": version,
+                "event": "DISPLAY_COMPLETED",
+                "idempotency_key": f"display-{release['release_id']}",
+            },
+        )
+        with app.extensions["inktime_database"].session() as connection:
+            head = connection.execute(
+                "SELECT current_release_id,current_displayed_at FROM device_content_queues WHERE device_id=?",
+                (device_id,),
+            ).fetchone()
+        assert head["current_release_id"] == release["release_id"]
+        assert head["current_displayed_at"] == displayed_at
+
+    # A late terminal for the oldest display is recorded but cannot move the
+    # current/LKG pointer back to its older event time.
+    at("2026-08-03T07:00:00+00:00")
+    late_payload = {
+        "queue_item_id": items[0]["id"],
+        "queue_version": version,
+        "event": "DISPLAY_COMPLETED",
+        "idempotency_key": "display-late-a",
+    }
+    queue.queue_ack(device_id=device_id, payload=late_payload)
+    queue.queue_ack(device_id=device_id, payload=late_payload)
+
+    at("2026-08-03T16:00:00+00:00")
+    with pytest.raises(ValueError, match="相同 displayed_at"):
+        queue.queue_ack(
+            device_id=device_id,
+            payload={
+                "queue_item_id": items[3]["id"],
+                "queue_version": version,
+                "event": "DISPLAY_COMPLETED",
+                "idempotency_key": "display-same-time-d",
+            },
+        )
+
+    with app.extensions["inktime_database"].session() as connection:
+        head = connection.execute(
+            "SELECT current_release_id,current_displayed_at,last_known_good_release_id,last_known_good_displayed_at FROM device_content_queues WHERE device_id=?",
+            (device_id,),
+        ).fetchone()
+        event_count = connection.execute(
+            "SELECT COUNT(*) FROM device_content_queue_events WHERE queue_item_id=? AND event_type='DISPLAY_COMPLETED'",
+            (items[0]["id"],),
+        ).fetchone()[0]
+        history_count = connection.execute(
+            "SELECT COUNT(*) FROM display_history WHERE release_id=? AND selection_method='device_queue_ack'",
+            (releases[0]["release_id"],),
+        ).fetchone()[0]
+    assert head["current_release_id"] == releases[2]["release_id"]
+    assert head["current_displayed_at"] == pointer_times[2]
+    assert head["last_known_good_release_id"] == releases[2]["release_id"]
+    assert head["last_known_good_displayed_at"] == pointer_times[2]
+    assert event_count == 2
+    assert history_count == 1
+
+
+def test_mode_transition_cancels_incompatible_active_delivery_with_audit(app):
+    devices = app.extensions["inktime_device_repository"]
+    queue = app.extensions["inktime_resilience_repository"]
+    online_id, _online_token = devices.create("online to offline")
+    online_release = _release(app, "mode-online")
+    queue.ensure_queue(online_id)
+    online_item = queue.enqueue_release(device_id=online_id, release_id=online_release["release_id"])
+    devices.update(
+        online_id,
+        name="online to offline",
+        enabled=True,
+        timezone_name="Asia/Taipei",
+        schedule="08:00",
+        schedule_times=["08:00"],
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        rotation=0,
+        panel_profile="safe_4c",
+        prefetch_lead_minutes=5,
+        button_wake_action="check_new",
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        cancelled_online = connection.execute(
+            "SELECT status,last_error_code FROM device_content_queue_items WHERE id=?",
+            (online_item["id"],),
+        ).fetchone()
+        transition_event = connection.execute(
+            "SELECT event_type FROM device_content_queue_events WHERE queue_item_id=?",
+            (online_item["id"],),
+        ).fetchone()
+    assert tuple(cancelled_online) == ("CANCELLED", "QUEUE-005")
+    assert transition_event["event_type"] == "DELIVERY_MODE_TRANSITION_CANCELLED"
+    with pytest.raises(ValueError, match="Enhanced offline"):
+        queue.enqueue_release(device_id=online_id, release_id=online_release["release_id"])
+
+    offline_id, _offline_token = devices.create(
+        "offline to online",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00"],
+    )
+    offline_release = _release(app, "mode-offline")
+    prepared = app.extensions["inktime_offline_schedule_repository"].prepare_day(
+        device_id=offline_id,
+        target_date="2026-08-03",
+        release_ids=[offline_release["release_id"]],
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        offline_item = connection.execute(
+            "SELECT id FROM device_content_queue_items WHERE device_id=?",
+            (offline_id,),
+        ).fetchone()
+    devices.update(
+        offline_id,
+        name="offline to online",
+        enabled=True,
+        timezone_name="Asia/Taipei",
+        schedule="08:00",
+        schedule_times=["08:00"],
+        delivery_mode="legacy_online",
+        offline_prefetch_allowed=False,
+        rotation=0,
+        panel_profile="safe_4c",
+        prefetch_lead_minutes=5,
+        button_wake_action="check_new",
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        cancelled_offline = connection.execute(
+            "SELECT status FROM device_content_queue_items WHERE id=?",
+            (offline_item["id"],),
+        ).fetchone()
+        transition_count = connection.execute(
+            "SELECT COUNT(*) FROM device_content_queue_events WHERE queue_item_id=? AND event_type='DELIVERY_MODE_TRANSITION_CANCELLED'",
+            (offline_item["id"],),
+        ).fetchone()[0]
+    assert cancelled_offline["status"] == "CANCELLED"
+    assert transition_count == 1
+    assert prepared["schedule"]["status"] == "ready"

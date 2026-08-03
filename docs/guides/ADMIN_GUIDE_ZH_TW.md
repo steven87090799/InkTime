@@ -25,6 +25,8 @@
 | `worker.progress_items` | 50 | 5–10,000 | 越小 Docker Log 越多 | 否 |
 | `worker.progress_seconds` | 300 | 30–3,600 | 越小 Docker Log 越多 | 否 |
 | `scheduler.poll_seconds` | 60 | 30–3,600 | 越小 SQLite／CPU 喚醒越多 | 否 |
+| `offline.server_prefetch_margin_minutes` | 15 | 0–60 分鐘 | 太短可能來不及完成 Enhanced Slot 渲染 | 否 |
+| `offline.future_schedule_prepare_hour_local` | 20 | 0–23 點 | 裝置本地到達此時後準備明日；過早會增加未來快照保留 | 否 |
 | `analysis.max_retries` | 3 | 0–10 | 重試增加成本 | 否 |
 | `model.analysis_model` | gpt-4o | 支援圖片／Schema 的模型 | 能力不足會進錯誤佇列 | 否 |
 | `model.low_model`／`model.high_model` | 舊值 | 舊版讀取相容欄位 | 新工作不會恢復低／高兩次圖片請求 | 否 |
@@ -75,7 +77,7 @@
 
 ## Web 與部署設定的邊界
 
-不需要修改 Python。分析、排程、模型、成本、渲染、裝置、Log 層級、Session 與備份都由 Web 控制。宿主機 Volume、Port、映像 Tag、HTTPS Secure Cookie、Docker CPU／RAM／PID 上限與 logging driver 必須在容器啟動前由 `.env`／Compose 決定；容器內程式不應取得 Docker socket 去改寫宿主機。設定頁會只讀顯示目前部署資訊。
+不需要修改 Python。分析、排程、模型、成本、渲染、裝置、Log 層級、Session 與備份都由 Web 控制。Enhanced PhotoPainter 的 `offline.server_prefetch_margin_minutes` 預設為 15 分鐘；`offline.future_schedule_prepare_hour_local` 預設為裝置本地 20:00，之後 Scheduler 會預先準備明日排程。兩者都必須保留足夠渲染與網路緩衝，不應改成造成裝置高頻輪詢的值。宿主機 Volume、Port、映像 Tag、HTTPS Secure Cookie、Docker CPU／RAM／PID 上限與 logging driver 必須在容器啟動前由 `.env`／Compose 決定；容器內程式不應取得 Docker socket 去改寫宿主機。設定頁會只讀顯示目前部署資訊。
 
 ## 繁體中文字型
 

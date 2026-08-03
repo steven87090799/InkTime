@@ -92,6 +92,34 @@ def test_offline_prefetch_creates_one_deduplicated_render_job(app):
     )
 
 
+def test_offline_scheduler_prepares_tomorrow_after_local_prepare_hour_without_cancelling_today(app):
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "預先準備明日的離線相框",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00"],
+        prefetch_lead_minutes=5,
+    )
+    runner = SchedulerRunner(app)
+    # 12:00 UTC is 20:00 in the device's Asia/Taipei zone.
+    now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    runner._prepare_due_offline_devices(now)
+    runner._prepare_due_offline_devices(now)
+
+    jobs = app.extensions["inktime_job_repository"].list()
+    offline_jobs = [
+        job
+        for job in jobs
+        if '"offline_prepare"' in str(job["settings_json"])
+        and device_id in str(job["settings_json"])
+    ]
+    assert {job["dedupe_key"] for job in offline_jobs} == {
+        f"offline-prepare:{device_id}:2026-08-03:1",
+        f"offline-prepare:{device_id}:2026-08-04:1",
+    }
+    assert len(offline_jobs) == 2
+
+
 def test_server_prepare_margin_stays_before_device_prefetch(app):
     zone = ZoneInfo("Asia/Taipei")
     schedule = ["08:00"]

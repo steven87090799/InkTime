@@ -6,7 +6,7 @@ import logging
 import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from flask import Blueprint, abort, current_app, render_template, request
+from flask import Blueprint, abort, current_app, jsonify, render_template, request
 
 from inktime.app.api.device_auth import authenticate_device_request
 from inktime.app.core.json_values import (
@@ -581,7 +581,36 @@ def device_offline_schedule():
         config_version=int(device["config_version"]),
     )
     if result is None:
-        abort(404, description="DEVICE-008 schedule_not_ready")
+        now_epoch = int(datetime.now(timezone.utc).timestamp())
+        try:
+            device_schedule = json.loads(str(device["schedule_times_json"] or "[]"))
+            server_margin = int(
+                current_app.extensions["inktime_settings_repository"].get(
+                    "offline.server_prefetch_margin_minutes", 15
+                )
+            )
+            retry_after_epoch = OfflineScheduleRepository.retry_after_epoch(
+                now=datetime.now(timezone.utc),
+                timezone_name=str(device["timezone"]),
+                schedule_times=device_schedule,
+                prefetch_lead_minutes=int(device["prefetch_lead_minutes"]),
+                server_margin_minutes=max(0, min(server_margin, 60)),
+            )
+        except (TypeError, ValueError, json.JSONDecodeError, KeyError):
+            # A malformed live device setting is itself bounded recovery
+            # input; never make the firmware poll at a fixed one-minute rate.
+            retry_after_epoch = now_epoch + 15 * 60
+        response = jsonify(
+            {
+                "error": "schedule_not_ready",
+                "error_code": "DEVICE-008",
+                "message": "schedule_not_ready",
+                "retry_after_epoch": int(retry_after_epoch),
+            }
+        )
+        response.status_code = 404
+        response.headers["Retry-After"] = str(max(1, int(retry_after_epoch) - now_epoch))
+        return response
     try:
         schedule_times = json.loads(str(result["schedule"]["schedule_times_json"] or "[]"))
         schedule_times = validate_offline_schedule(schedule_times, maximum=12)

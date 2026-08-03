@@ -633,6 +633,14 @@ class ResilienceRepository:
                 ).fetchone()
                 if schedule_owner is None:
                     raise ValueError("QUEUE-005 offline_schedule_id 不屬於此裝置")
+            else:
+                device = connection.execute(
+                    "SELECT delivery_mode FROM devices WHERE id=?", (device_id,)
+                ).fetchone()
+                if device is None:
+                    raise KeyError(device_id)
+                if str(device["delivery_mode"]) == "inktime_offline_schedule":
+                    raise ValueError("QUEUE-005 Enhanced offline 裝置不得接收 online Queue")
             compatible = connection.execute(
                 """SELECT 1 FROM releases r JOIN devices d ON d.id=?
                 WHERE r.id=? AND r.status='published' AND r.render_profile=d.panel_profile""",
@@ -646,15 +654,17 @@ class ResilienceRepository:
             ).fetchone()
             if duplicate:
                 return dict(duplicate)
+            if delivery_mode == "offline_schedule":
+                raise ValueError("QUEUE-005 offline Slot 只能由 prepare_day() 建立")
             active = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM device_content_queue_items WHERE device_id=? AND status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')",
+                    "SELECT COUNT(*) FROM device_content_queue_items WHERE device_id=? AND delivery_mode='online_queue' AND status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')",
                     (device_id,),
                 ).fetchone()[0]
-            )
+            ) if delivery_mode == "online_queue" else 0
             if active >= int(queue["depth"]):
                 connection.execute(
-                    "UPDATE device_content_queue_items SET status='CANCELLED',updated_at=? WHERE id=(SELECT id FROM device_content_queue_items WHERE device_id=? AND status IN ('PENDING','READY','AVAILABLE') ORDER BY priority ASC,position DESC,id DESC LIMIT 1)",
+                    "UPDATE device_content_queue_items SET status='CANCELLED',updated_at=? WHERE id=(SELECT id FROM device_content_queue_items WHERE device_id=? AND delivery_mode='online_queue' AND status IN ('PENDING','READY','AVAILABLE') ORDER BY priority ASC,position DESC,id DESC LIMIT 1)",
                     (now, device_id),
                 )
                 connection.execute(
@@ -739,7 +749,7 @@ class ResilienceRepository:
                     raise PermissionError("QUEUE-002 ACK replay 裝置身分不一致")
                 return {"status": "ok", "queue_item_id": item_id, "event": event, "idempotent": True}
             queue = connection.execute(
-                "SELECT queue_version,current_release_id FROM device_content_queues WHERE device_id=?",
+                "SELECT queue_version,current_release_id,current_displayed_at,last_known_good_release_id,last_known_good_displayed_at FROM device_content_queues WHERE device_id=?",
                 (device_id,),
             ).fetchone()
             delayed_terminal = (
@@ -819,7 +829,7 @@ class ResilienceRepository:
             status = QUEUE_STATUS_FOR_EVENT[event]
             displayed_at = event_at if event == "DISPLAY_COMPLETED" else None
             connection.execute(
-                "UPDATE device_content_queue_items SET status=?,downloaded_at=CASE WHEN ? IN ('DOWNLOAD_COMPLETED','HASH_VERIFIED') THEN ? ELSE downloaded_at END,displayed_at=COALESCE(?,displayed_at),retry_count=retry_count+CASE WHEN ?='DISPLAY_FAILED' THEN 1 ELSE 0 END,last_error_code=?,updated_at=? WHERE id=?",
+                "UPDATE device_content_queue_items SET status=?,downloaded_at=CASE WHEN ? IN ('DOWNLOAD_COMPLETED','HASH_VERIFIED') THEN ? ELSE downloaded_at END,displayed_at=COALESCE(displayed_at,?),retry_count=retry_count+CASE WHEN ?='DISPLAY_FAILED' THEN 1 ELSE 0 END,last_error_code=?,updated_at=? WHERE id=?",
                 (
                     status,
                     event,
@@ -832,16 +842,33 @@ class ResilienceRepository:
                 ),
             )
             if event == "DISPLAY_COMPLETED":
-                # A delayed terminal ACK is audit evidence for an already
-                # displayed offline slot.  It must never move the queue's
-                # current pointer back to an older release.
-                should_advance_pointer = not delayed_terminal or queue is None or not queue["current_release_id"] or str(
-                    queue["current_release_id"]
-                ) == str(item["release_id"])
+                # DISPLAY_COMPLETED is ordered by the event's actual display
+                # time, not by ACK arrival order or release identity.  A
+                # legacy pointer without a timestamp is advanced once so the
+                # new ordering contract can take effect safely.
+                incoming_displayed_at = datetime.fromisoformat(str(event_at))
+                if incoming_displayed_at.tzinfo is None:
+                    incoming_displayed_at = incoming_displayed_at.replace(tzinfo=timezone.utc)
+                incoming_displayed_at = incoming_displayed_at.astimezone(timezone.utc)
+                current_release_id = str(queue["current_release_id"] or "")
+                current_displayed_at = str(queue["current_displayed_at"] or "")
+                should_advance_pointer = not current_release_id or not current_displayed_at
+                if current_displayed_at and current_release_id:
+                    try:
+                        current_displayed = datetime.fromisoformat(current_displayed_at)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError("QUEUE-005 current pointer displayed_at 格式不合法") from exc
+                    if current_displayed.tzinfo is None:
+                        current_displayed = current_displayed.replace(tzinfo=timezone.utc)
+                    current_displayed = current_displayed.astimezone(timezone.utc)
+                    if incoming_displayed_at > current_displayed:
+                        should_advance_pointer = True
+                    elif incoming_displayed_at == current_displayed and current_release_id != str(item["release_id"]):
+                        raise ValueError("QUEUE-005 相同 displayed_at 不可綁定不同 Release")
                 if should_advance_pointer:
                     connection.execute(
-                        "UPDATE device_content_queues SET current_release_id=?,last_known_good_release_id=?,updated_at=? WHERE device_id=?",
-                        (item["release_id"], item["release_id"], now, device_id),
+                        "UPDATE device_content_queues SET current_release_id=?,current_displayed_at=?,last_known_good_release_id=?,last_known_good_displayed_at=?,updated_at=? WHERE device_id=?",
+                        (item["release_id"], event_at, item["release_id"], event_at, now, device_id),
                     )
                 release = connection.execute(
                     "SELECT manifest_json FROM releases WHERE id=?", (item["release_id"],)
@@ -927,6 +954,29 @@ class ResilienceRepository:
                     rollback_ready = True
                     for target_row in targets:
                         rollback_device = str(target_row["device_id"])
+                        rollback_device_mode = connection.execute(
+                            "SELECT delivery_mode FROM devices WHERE id=?", (rollback_device,)
+                        ).fetchone()
+                        if rollback_device_mode and str(
+                            rollback_device_mode["delivery_mode"] or "legacy_online"
+                        ) == "inktime_offline_schedule":
+                            connection.execute(
+                                "UPDATE rollout_targets SET queue_item_id=NULL,status='rollback_skipped_incompatible_offline',last_error_code='ROLLBACK-005',updated_at=? WHERE rollout_id=? AND device_id=?",
+                                (now, rollout_id, rollback_device),
+                            )
+                            connection.execute(
+                                "INSERT INTO rollout_health_events(rollout_id,device_id,event_type,severity,error_code,details_json,created_at) VALUES (?,?,?,?,?,?,?)",
+                                (
+                                    rollout_id,
+                                    rollback_device,
+                                    "ROLLBACK_TARGET_SKIPPED",
+                                    "warning",
+                                    "ROLLBACK-005",
+                                    _json({"reason": "enhanced_offline_requires_offline_schedule"}),
+                                    now,
+                                ),
+                            )
+                            continue
                         fallback = connection.execute(
                             "SELECT last_known_good_release_id FROM device_content_queues WHERE device_id=?",
                             (rollback_device,),
@@ -982,7 +1032,7 @@ class ResilienceRepository:
                 elif event == "DISPLAY_COMPLETED":
                     pending = int(
                         connection.execute(
-                            "SELECT COUNT(*) FROM rollout_targets WHERE rollout_id=? AND status<>'succeeded'",
+                            "SELECT COUNT(*) FROM rollout_targets WHERE rollout_id=? AND status NOT IN ('succeeded','skipped_incompatible_offline','rollback_skipped_incompatible_offline')",
                             (rollout_id,),
                         ).fetchone()[0]
                     )
@@ -1213,12 +1263,38 @@ class ResilienceRepository:
             ).fetchone()
             if not stage:
                 raise ValueError("ROLLOUT-001 發布活動沒有 Stage")
-            devices = connection.execute(
-                "SELECT d.id FROM devices d JOIN releases r ON r.id=? AND r.render_profile=d.panel_profile WHERE d.enabled=1 ORDER BY d.id",
+            all_devices = connection.execute(
+                "SELECT d.id,d.delivery_mode FROM devices d JOIN releases r ON r.id=? AND r.render_profile=d.panel_profile WHERE d.enabled=1 ORDER BY d.id",
                 (campaign["release_id"],),
             ).fetchall()
+            offline_devices = [
+                row for row in all_devices
+                if str(row["delivery_mode"] or "legacy_online") == "inktime_offline_schedule"
+            ]
+            devices = [
+                row for row in all_devices
+                if str(row["delivery_mode"] or "legacy_online") != "inktime_offline_schedule"
+            ]
             if not devices:
-                raise ValueError("ROLLOUT-001 沒有可用裝置")
+                raise ValueError("ROLLOUT-005 Enhanced offline 裝置只能透過 offline schedule rollout")
+            for device in offline_devices:
+                device_id = str(device["id"])
+                connection.execute(
+                    "INSERT OR REPLACE INTO rollout_targets(rollout_id,device_id,status,queue_item_id,last_error_code,updated_at) VALUES (?,?,?,NULL,?,?)",
+                    (rollout_id, device_id, "skipped_incompatible_offline", "ROLLOUT-005", now),
+                )
+                connection.execute(
+                    "INSERT INTO rollout_health_events(rollout_id,device_id,event_type,severity,error_code,details_json,created_at) VALUES (?,?,?,?,?,?,?)",
+                    (
+                        rollout_id,
+                        device_id,
+                        "ROLLOUT_TARGET_SKIPPED",
+                        "warning",
+                        "ROLLOUT-005",
+                        _json({"reason": "enhanced_offline_requires_offline_schedule"}),
+                        now,
+                    ),
+                )
             target_count = min(
                 len(devices),
                 max(

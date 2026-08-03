@@ -143,6 +143,11 @@ class SchedulerRunner:
         except (TypeError, ValueError):
             server_margin = 15
         server_margin = max(0, min(server_margin, 60))
+        try:
+            future_prepare_hour = int(settings.get("offline.future_schedule_prepare_hour_local", 20))
+        except (TypeError, ValueError):
+            future_prepare_hour = 20
+        future_prepare_hour = max(0, min(future_prepare_hour, 23))
         cursor = offline_schedules.prefetch_cursor()
         devices = offline_schedules.due_prefetch_devices(limit=10, after_device_id=cursor)
         for device in devices:
@@ -159,47 +164,54 @@ class SchedulerRunner:
                     server_margin,
                 )
                 if target is None:
-                    continue
-                target_iso = target.isoformat()
-                if offline_schedules.ready_for_device(
-                    device_id=str(device["id"]),
-                    target_date=target_iso,
-                    config_version=int(device["config_version"]),
-                ) is not None:
-                    continue
-                dedupe_key = f"offline-prepare:{device['id']}:{target_iso}:{int(device['config_version'])}"
-                job_id = job_repository.create_maintenance(
-                    kind="render",
-                    name=f"離線排程準備：{str(device['name'])} {target_iso}",
-                    priority=2,
-                    dedupe_key=dedupe_key,
-                    created_by=None,
-                    settings={
-                        "offline_prepare": {
+                    targets: list[date] = []
+                else:
+                    targets = [target]
+                if local_now.hour >= future_prepare_hour:
+                    tomorrow = local_now.date() + timedelta(days=1)
+                    if tomorrow not in targets:
+                        targets.append(tomorrow)
+                for target_date in targets[:2]:
+                    target_iso = target_date.isoformat()
+                    if offline_schedules.ready_for_device(
+                        device_id=str(device["id"]),
+                        target_date=target_iso,
+                        config_version=int(device["config_version"]),
+                    ) is not None:
+                        continue
+                    dedupe_key = f"offline-prepare:{device['id']}:{target_iso}:{int(device['config_version'])}"
+                    job_id = job_repository.create_maintenance(
+                        kind="render",
+                        name=f"離線排程準備：{str(device['name'])} {target_iso}",
+                        priority=2,
+                        dedupe_key=dedupe_key,
+                        created_by=None,
+                        settings={
+                            "offline_prepare": {
+                                "device_id": str(device["id"]),
+                                "target_date": target_iso,
+                                "config_version": int(device["config_version"]),
+                            },
+                            "trigger_source": "offline-scheduler",
+                            "timeout_seconds": 1800,
+                            "max_retries": 1,
+                        },
+                    )
+                    current = job_repository.get(job_id)
+                    if current is not None and str(current["status"]) == "pending":
+                        job_service.start(job_id)
+                    log_event(
+                        LOGGER,
+                        logging.INFO,
+                        "已建立離線排程準備工作",
+                        event="offline_schedule_prepare_enqueued",
+                        job_id=job_id,
+                        details={
                             "device_id": str(device["id"]),
                             "target_date": target_iso,
                             "config_version": int(device["config_version"]),
                         },
-                        "trigger_source": "offline-scheduler",
-                        "timeout_seconds": 1800,
-                        "max_retries": 1,
-                    },
-                )
-                current = job_repository.get(job_id)
-                if current is not None and str(current["status"]) == "pending":
-                    job_service.start(job_id)
-                log_event(
-                    LOGGER,
-                    logging.INFO,
-                    "已建立離線排程準備工作",
-                    event="offline_schedule_prepare_enqueued",
-                    job_id=job_id,
-                    details={
-                        "device_id": str(device["id"]),
-                        "target_date": target_iso,
-                        "config_version": int(device["config_version"]),
-                    },
-                )
+                    )
             except Exception as exc:
                 log_event(
                     LOGGER,

@@ -157,6 +157,27 @@ def test_offline_schedule_snapshot_does_not_follow_live_device_config(client, ap
     ).status_code == 404
 
 
+def test_missing_today_schedule_returns_bounded_server_retry_epoch(client, app):
+    _device_id, token = app.extensions["inktime_device_repository"].create(
+        "離線尚未準備",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00"],
+        prefetch_lead_minutes=5,
+    )
+    before = int(datetime.now().timestamp())
+    response = client.get(
+        "/api/device/v1/offline-schedule",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    body = response.get_json()
+    assert response.status_code == 404
+    assert body["error"] == "schedule_not_ready"
+    assert body["error_code"] == "DEVICE-008"
+    assert body["retry_after_epoch"] > before
+    assert int(response.headers["Retry-After"]) >= 1
+
+
 def test_offline_schedule_repository_fails_closed_on_corrupt_manifest_and_keeps_snapshot_typed(app):
     device_id, _token = app.extensions["inktime_device_repository"].create(
         "離線完整性邊界",

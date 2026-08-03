@@ -783,6 +783,16 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "max": 60,
         "restart": False,
     },
+    "offline.future_schedule_prepare_hour_local": {
+        "category": "效能與待機",
+        "default": 20,
+        "type": "integer",
+        "description": "裝置本地時間到達此時後，Scheduler 預先準備下一個本地日排程",
+        "risk": "過晚可能縮短渲染緩衝；過早會增加未來 Slot 暫存時間",
+        "min": 0,
+        "max": 23,
+        "restart": False,
+    },
     "analysis.max_retries": {
         "category": "分析設定",
         "default": 3,

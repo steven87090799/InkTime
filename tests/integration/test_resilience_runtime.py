@@ -267,3 +267,45 @@ def test_canary_failure_creates_last_known_good_rollback_queue(client, app):
     assert {(row["release_id"], row["priority"], row["status"]) for row in rollback_items} == {
         (last_known_good["release_id"], 1000, "READY")
     }
+
+
+def test_rollout_skips_enhanced_offline_devices_without_online_queue_items(client, app):
+    create_admin(app)
+    login(client)
+    _seed_photo(app, "offline-rollout-photo")
+    online_id, _online_token = app.extensions["inktime_device_repository"].create("Rollout online")
+    offline_id, _offline_token = app.extensions["inktime_device_repository"].create(
+        "Rollout offline",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00"],
+    )
+    release = _published_release(app, "offline-rollout-photo")
+    created = client.post(
+        "/api/rollouts",
+        json={
+            "name": "模式隔離 rollout",
+            "release_id": release["release_id"],
+            "stages": [{"target_percent": 100, "minimum_successful_devices": 1}],
+        },
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert created.status_code == 201
+    rollout_id = created.get_json()["campaign"]["id"]
+    started = client.post(
+        f"/api/rollouts/{rollout_id}/start", json={}, headers={"X-CSRF-Token": csrf(client)}
+    )
+    assert started.status_code == 200
+    targets = {target["device_id"]: target for target in started.get_json()["targets"]}
+    assert targets[offline_id]["status"] == "skipped_incompatible_offline"
+    assert targets[offline_id]["queue_item_id"] is None
+    assert targets[online_id]["queue_item_id"]
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM device_content_queue_items WHERE device_id=? AND delivery_mode='online_queue'",
+            (offline_id,),
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM rollout_health_events WHERE rollout_id=? AND device_id=? AND error_code='ROLLOUT-005'",
+            (rollout_id, offline_id),
+        ).fetchone()[0] == 1

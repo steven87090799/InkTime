@@ -123,6 +123,59 @@ inline uint64_t exactSleepSeconds(uint64_t nowEpoch, uint64_t nextEpoch) {
   return nextEpoch > nowEpoch ? nextEpoch - nowEpoch : 1U;
 }
 
+constexpr uint64_t kOfflineRetryFirstSeconds = 15ULL * 60ULL;
+constexpr uint64_t kOfflineRetrySecondSeconds = 30ULL * 60ULL;
+constexpr uint64_t kOfflineRetryMaximumSeconds = 60ULL * 60ULL;
+constexpr uint64_t kOfflineRetryMaximumHorizonSeconds = 7ULL * 24ULL * 60ULL * 60ULL;
+
+inline uint64_t offlineRetryFallbackSeconds(uint8_t attempt) {
+  if (attempt == 0U) return kOfflineRetryFirstSeconds;
+  if (attempt == 1U) return kOfflineRetrySecondSeconds;
+  return kOfflineRetryMaximumSeconds;
+}
+
+inline bool validOfflineRetryEpoch(uint64_t nowEpoch, int64_t retryEpoch) {
+  if (retryEpoch <= static_cast<int64_t>(nowEpoch)) return false;
+  return static_cast<uint64_t>(retryEpoch) - nowEpoch <= kOfflineRetryMaximumHorizonSeconds;
+}
+
+struct OfflineRetryPlan {
+  uint64_t sleepUntilEpoch;
+  uint8_t nextAttempt;
+  bool serverProvided;
+};
+
+inline OfflineRetryPlan buildOfflineRetryPlan(
+  uint64_t nowEpoch,
+  uint8_t attempt,
+  int64_t serverRetryEpoch
+) {
+  if (validOfflineRetryEpoch(nowEpoch, serverRetryEpoch)) {
+    return {
+      static_cast<uint64_t>(serverRetryEpoch),
+      0U,
+      true,
+    };
+  }
+  const uint8_t boundedAttempt = attempt > 2U ? 2U : attempt;
+  const uint8_t nextAttempt = boundedAttempt >= 2U ? 2U : boundedAttempt + 1U;
+  return {
+    nowEpoch + offlineRetryFallbackSeconds(boundedAttempt),
+    nextAttempt,
+    false,
+  };
+}
+
+struct OfflineDisplayIntent {
+  bool manualPreview;
+  bool ownsFormalSlot;
+  bool emitsTerminalAck;
+};
+
+inline OfflineDisplayIntent offlineDisplayIntent(bool localNext) {
+  return {localNext, !localNext, !localNext};
+}
+
 class AckJournal {
  public:
   bool contains(const char* key) const {

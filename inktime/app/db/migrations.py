@@ -1504,6 +1504,129 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        30,
+        "加入顯示指標時間並隔離裝置交付模式",
+        (
+            # Pointer timestamps make DISPLAY_COMPLETED ordering explicit;
+            # NULL is retained for legacy rows whose historical ordering is
+            # not trustworthy.
+            "ALTER TABLE device_content_queues ADD COLUMN current_displayed_at TEXT",
+            "ALTER TABLE device_content_queues ADD COLUMN last_known_good_displayed_at TEXT",
+            # Close any incompatible active rows that pre-date the central
+            # delivery-mode guard, while preserving an auditable queue event.
+            """
+            INSERT OR IGNORE INTO device_content_queue_events(
+                queue_item_id,device_id,event_type,idempotency_key,payload_json,created_at
+            )
+            SELECT qi.id,qi.device_id,'DELIVERY_MODE_TRANSITION_CANCELLED',
+                   'migration30:delivery-mode:' || qi.id,
+                   '{"reason":"migration30_incompatible_delivery_mode"}',datetime('now')
+            FROM device_content_queue_items qi
+            JOIN devices d ON d.id=qi.device_id
+            WHERE qi.status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')
+              AND (
+                  (d.delivery_mode='inktime_offline_schedule' AND qi.delivery_mode='online_queue')
+                  OR (d.delivery_mode<>'inktime_offline_schedule' AND qi.delivery_mode='offline_schedule')
+              )
+            """,
+            """
+            UPDATE device_content_queues
+            SET queue_version=queue_version + (
+                    SELECT COUNT(*)
+                    FROM device_content_queue_items qi
+                    JOIN devices d ON d.id=qi.device_id
+                    WHERE qi.device_id=device_content_queues.device_id
+                      AND qi.status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')
+                      AND (
+                          (d.delivery_mode='inktime_offline_schedule' AND qi.delivery_mode='online_queue')
+                          OR (d.delivery_mode<>'inktime_offline_schedule' AND qi.delivery_mode='offline_schedule')
+                      )
+                ),
+                updated_at=CASE WHEN EXISTS(
+                    SELECT 1
+                    FROM device_content_queue_items qi
+                    JOIN devices d ON d.id=qi.device_id
+                    WHERE qi.device_id=device_content_queues.device_id
+                      AND qi.status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')
+                      AND (
+                          (d.delivery_mode='inktime_offline_schedule' AND qi.delivery_mode='online_queue')
+                          OR (d.delivery_mode<>'inktime_offline_schedule' AND qi.delivery_mode='offline_schedule')
+                      )
+                ) THEN datetime('now') ELSE updated_at END
+            WHERE EXISTS(
+                SELECT 1
+                FROM device_content_queue_items qi
+                JOIN devices d ON d.id=qi.device_id
+                WHERE qi.device_id=device_content_queues.device_id
+                  AND qi.status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')
+                  AND (
+                      (d.delivery_mode='inktime_offline_schedule' AND qi.delivery_mode='online_queue')
+                      OR (d.delivery_mode<>'inktime_offline_schedule' AND qi.delivery_mode='offline_schedule')
+                  )
+            )
+            """,
+            """
+            UPDATE device_content_queue_items
+            SET status='CANCELLED',last_error_code='QUEUE-005',updated_at=datetime('now')
+            WHERE status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')
+              AND EXISTS(
+                  SELECT 1 FROM devices d
+                  WHERE d.id=device_content_queue_items.device_id
+                    AND (
+                        (d.delivery_mode='inktime_offline_schedule' AND device_content_queue_items.delivery_mode='online_queue')
+                        OR (d.delivery_mode<>'inktime_offline_schedule' AND device_content_queue_items.delivery_mode='offline_schedule')
+                    )
+              )
+            """,
+            """
+            UPDATE rollout_targets
+            SET status='cancelled_mode_transition',last_error_code='QUEUE-005',updated_at=datetime('now')
+            WHERE queue_item_id IN (
+                SELECT queue_item_id
+                FROM device_content_queue_events
+                WHERE event_type='DELIVERY_MODE_TRANSITION_CANCELLED'
+                  AND idempotency_key LIKE 'migration30:delivery-mode:%'
+            )
+            """,
+            """
+            CREATE TRIGGER trg_queue_device_delivery_mode_insert
+            BEFORE INSERT ON device_content_queue_items
+            WHEN (
+                NEW.delivery_mode='online_queue' AND EXISTS(
+                    SELECT 1 FROM devices d
+                    WHERE d.id=NEW.device_id AND d.delivery_mode='inktime_offline_schedule'
+                )
+            ) OR (
+                NEW.delivery_mode='offline_schedule' AND NOT EXISTS(
+                    SELECT 1 FROM devices d
+                    WHERE d.id=NEW.device_id
+                      AND d.delivery_mode='inktime_offline_schedule'
+                      AND d.offline_prefetch_allowed=1
+                )
+            )
+            BEGIN SELECT RAISE(ABORT,'QUEUE-005 queue delivery mode incompatible with device'); END
+            """,
+            """
+            CREATE TRIGGER trg_queue_device_delivery_mode_update
+            BEFORE UPDATE OF delivery_mode,device_id ON device_content_queue_items
+            WHEN (
+                NEW.delivery_mode='online_queue' AND EXISTS(
+                    SELECT 1 FROM devices d
+                    WHERE d.id=NEW.device_id AND d.delivery_mode='inktime_offline_schedule'
+                )
+            ) OR (
+                NEW.delivery_mode='offline_schedule' AND NOT EXISTS(
+                    SELECT 1 FROM devices d
+                    WHERE d.id=NEW.device_id
+                      AND d.delivery_mode='inktime_offline_schedule'
+                      AND d.offline_prefetch_allowed=1
+                )
+            )
+            BEGIN SELECT RAISE(ABORT,'QUEUE-005 queue delivery mode incompatible with device'); END
+            """,
+        ),
+    ),
 )
 
 

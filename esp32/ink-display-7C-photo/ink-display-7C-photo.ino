@@ -346,6 +346,47 @@ static bool loadLastTimeEpoch(time_t &epochOut) {
 }
 
 #if INKTIME_PHOTOPAINTER_ENABLED
+static bool loadOfflineRetryState(uint8_t &attemptOut, int64_t &epochOut) {
+  prefs.begin("dashcfg", true);
+  const uint8_t storedAttempt = prefs.getUChar("offretry_attempt", 0U);
+  const int64_t storedEpoch = prefs.getLong64("offretry_epoch", 0);
+  prefs.end();
+  attemptOut = storedAttempt > 2U ? 2U : storedAttempt;
+  epochOut = storedEpoch;
+  return storedEpoch > 0;
+}
+
+static void saveOfflineRetryState(uint8_t attempt, int64_t epoch) {
+  prefs.begin("dashcfg", false);
+  prefs.putUChar("offretry_attempt", attempt > 2U ? 2U : attempt);
+  prefs.putLong64("offretry_epoch", epoch);
+  prefs.end();
+}
+
+static void clearOfflineRetryState() {
+  prefs.begin("dashcfg", false);
+  prefs.remove("offretry_attempt");
+  prefs.remove("offretry_epoch");
+  prefs.end();
+}
+
+static time_t scheduleOfflineRecovery(time_t nowEpoch, int64_t serverRetryEpoch = 0) {
+  if (nowEpoch <= 0) return 0;
+  uint8_t attempt = 0U;
+  int64_t storedEpoch = 0;
+  loadOfflineRetryState(attempt, storedEpoch);
+  if (serverRetryEpoch <= 0 && inktime::validOfflineRetryEpoch(
+        static_cast<uint64_t>(nowEpoch), storedEpoch)) {
+    return static_cast<time_t>(storedEpoch);
+  }
+  const inktime::OfflineRetryPlan plan = inktime::buildOfflineRetryPlan(
+    static_cast<uint64_t>(nowEpoch), attempt, serverRetryEpoch);
+  saveOfflineRetryState(plan.nextAttempt, static_cast<int64_t>(plan.sleepUntilEpoch));
+  return static_cast<time_t>(plan.sleepUntilEpoch);
+}
+#endif
+
+#if INKTIME_PHOTOPAINTER_ENABLED
 static bool loadLastPhotoIndex(size_t fileCount, size_t &indexOut) {
   if (fileCount == 0) return false;
   prefs.begin("dashcfg", true);
@@ -1824,6 +1865,33 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg) {
   const int status = scheduleHttp.GET();
   const int length = scheduleHttp.getSize();
   const String contentType = scheduleHttp.header("Content-Type");
+  if (status == HTTP_CODE_NOT_FOUND && length > 0 && length <= 4096
+      && contentType.startsWith("application/json")) {
+    JsonDocument notReady;
+    const DeserializationError notReadyError = deserializeJson(notReady, scheduleHttp.getStream());
+    scheduleHttp.end();
+    const String errorName = notReady["error"] | "";
+    const JsonVariantConst rawRetryEpoch = notReady["retry_after_epoch"];
+    int64_t serverRetryEpoch = 0;
+    if (!notReadyError && !notReady.overflowed()
+        && errorName == "schedule_not_ready"
+        && rawRetryEpoch.is<int64_t>() && !rawRetryEpoch.is<bool>()) {
+      serverRetryEpoch = rawRetryEpoch.as<int64_t>();
+    }
+    time_t recoveryNow = time(nullptr);
+    if (recoveryNow <= 0) (void)photoPainter.readRtc(recoveryNow);
+    if (errorName == "schedule_not_ready") {
+      const time_t retryEpoch = scheduleOfflineRecovery(recoveryNow, serverRetryEpoch);
+      lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-NOT-READY";
+      lastDeviceErrorMessage = retryEpoch > recoveryNow
+        ? "伺服器尚未準備今日離線排程；已保存 bounded retry epoch"
+        : "伺服器尚未準備今日離線排程；時間無效，使用 bounded fallback";
+      return false;
+    }
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-HTTP";
+    lastDeviceErrorMessage = "離線排程 schedule_not_ready JSON 不合法";
+    return false;
+  }
   if (status != HTTP_CODE_OK || length <= 0 || length > 32768
       || !contentType.startsWith("application/json")) {
     scheduleHttp.end();
@@ -2083,6 +2151,7 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg) {
   cfg = scheduleCandidate;
   saveConfig(cfg);
   serverConfigChanged = true;
+  clearOfflineRetryState();
   currentFromQueue = false;
   currentPayloadIntegrityTrusted = true;
   return true;
@@ -2634,13 +2703,13 @@ bool drawFromFrameData(const Config &cfg) {
 //  睡到下一个唤醒点
 // =======================
 void sleepUntilNextSchedule(const Config &cfg, bool hasTime, const struct tm &now) {
-  if (!hasTime) {
-    goDeepSleepMinutes(1440);
-    return;
-  }
-
 #if INKTIME_PHOTOPAINTER_ENABLED
   if (cfg.delivery_mode == "inktime_offline_schedule") {
+    if (!hasTime) {
+      // Unknown time is a bounded recovery wake, never a 24-hour blind sleep.
+      goDeepSleepSeconds(inktime::kOfflineRetryFirstSeconds);
+      return;
+    }
     time_t nowEpoch = time(nullptr);
     if (nowEpoch <= 0) {
       time_t rtcEpoch = 0;
@@ -2659,21 +2728,30 @@ void sleepUntilNextSchedule(const Config &cfg, bool hasTime, const struct tm &no
           goDeepSleepUntilEpoch(nowEpoch, wakeEpoch);
           return;
         }
-        // The active server-authored day is exhausted.  Wake at its exact
-        // UTC boundary so the next network wake can request the next local
-        // day without reconstructing a DST-sensitive epoch locally.
+        // An exhausted day uses the same persisted bounded recovery plan as
+        // a missing schedule, instead of a one-minute storm.
         if (targetEnd > nowEpoch) {
           goDeepSleepUntilEpoch(nowEpoch, targetEnd);
         } else {
-          goDeepSleepUntilEpoch(nowEpoch, nowEpoch + 60);
+          const time_t recoveryEpoch = scheduleOfflineRecovery(nowEpoch);
+          if (recoveryEpoch > nowEpoch) goDeepSleepUntilEpoch(nowEpoch, recoveryEpoch);
+          else goDeepSleepSeconds(inktime::kOfflineRetryFirstSeconds);
         }
         return;
       }
+      const time_t recoveryEpoch = scheduleOfflineRecovery(nowEpoch);
+      if (recoveryEpoch > nowEpoch) goDeepSleepUntilEpoch(nowEpoch, recoveryEpoch);
+      else goDeepSleepSeconds(inktime::kOfflineRetryFirstSeconds);
+      return;
     }
-    goDeepSleepMinutes(1440);
+    goDeepSleepSeconds(inktime::kOfflineRetryFirstSeconds);
     return;
   }
 #endif
+  if (!hasTime) {
+    goDeepSleepMinutes(1440);
+    return;
+  }
 
   int curMinOfDay = now.tm_hour * 60 + now.tm_min;
   int targetMin   = (int)cfg.refresh_hour * 60 + (int)cfg.refresh_minute;
@@ -2899,7 +2977,8 @@ static bool loadOfflineScheduledLocalFrame(
   currentRenderProfile = selectedProfile;
   currentQueueItemId = selectedQueueItemId;
   currentQueueVersion = selectedQueueVersion;
-  currentFromQueue = inktime::boundedText(
+  const inktime::OfflineDisplayIntent displayIntent = inktime::offlineDisplayIntent(selectNext);
+  currentFromQueue = displayIntent.ownsFormalSlot && inktime::boundedText(
       currentQueueItemId.c_str(), inktime::kQueueIdentifierMaxBytes)
     && currentQueueVersion >= 0;
   uint8_t* localFrame = nullptr;

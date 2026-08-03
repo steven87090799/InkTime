@@ -38,6 +38,44 @@ class OfflineScheduleRepository:
         return local.astimezone(timezone.utc).isoformat()
 
     @staticmethod
+    def retry_after_epoch(
+        *,
+        now: datetime,
+        timezone_name: str,
+        schedule_times: Sequence[str],
+        prefetch_lead_minutes: int,
+        server_margin_minutes: int,
+    ) -> int:
+        """Calculate the next bounded server retry using the device's IANA zone."""
+
+        if not 0 <= int(prefetch_lead_minutes) <= 120:
+            raise ValueError("DEVICE-008 prefetch_lead_minutes 不合法")
+        if not 0 <= int(server_margin_minutes) <= 60:
+            raise ValueError("DEVICE-008 server_prefetch_margin_minutes 不合法")
+        try:
+            zone = ZoneInfo(str(timezone_name))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("DEVICE-008 裝置 IANA 時區不合法") from exc
+        local_now = now
+        if local_now.tzinfo is None:
+            local_now = local_now.replace(tzinfo=timezone.utc)
+        local_now = local_now.astimezone(zone)
+        slots = validate_offline_schedule(schedule_times, maximum=MAX_PREPARED_SLOTS)
+        hour, minute = (int(part) for part in slots[0].split(":"))
+        candidate = datetime.combine(
+            local_now.date(), time(hour, minute), tzinfo=zone
+        ) - timedelta(minutes=int(prefetch_lead_minutes) + int(server_margin_minutes))
+        if candidate <= local_now:
+            candidate = datetime.combine(
+                local_now.date() + timedelta(days=1), time(hour, minute), tzinfo=zone
+            ) - timedelta(minutes=int(prefetch_lead_minutes) + int(server_margin_minutes))
+        retry_epoch = int(candidate.astimezone(timezone.utc).timestamp())
+        now_epoch = int(local_now.astimezone(timezone.utc).timestamp())
+        if retry_epoch <= now_epoch:
+            raise ValueError("DEVICE-008 retry_after_epoch 必須晚於目前時間")
+        return retry_epoch
+
+    @staticmethod
     def _manifest_entry(manifest_json: str) -> dict[str, Any]:
         try:
             manifest = json.loads(manifest_json)

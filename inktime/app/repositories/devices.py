@@ -239,6 +239,66 @@ class DeviceRepository:
                         device_id,
                     ),
                 )
+                incompatible_modes: list[str] = []
+                if delivery_mode == "inktime_offline_schedule":
+                    incompatible_modes.append("online_queue")
+                    # A changed Enhanced configuration invalidates any
+                    # already prepared slot snapshot; the next scheduler
+                    # job must prepare the new config version instead.
+                    if str(current["delivery_mode"]) == delivery_mode and remote_changed:
+                        incompatible_modes.append("offline_schedule")
+                else:
+                    incompatible_modes.append("offline_schedule")
+                if incompatible_modes:
+                    placeholders = ",".join("?" for _ in incompatible_modes)
+                    active_items = connection.execute(
+                        f"SELECT id,delivery_mode FROM device_content_queue_items "
+                        f"WHERE device_id=? AND delivery_mode IN ({placeholders}) "
+                        "AND status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED') "
+                        "ORDER BY id",  # noqa: S608 -- placeholders are generated from a fixed local list
+                        (device_id, *incompatible_modes),
+                    ).fetchall()
+                    event_type = (
+                        "DELIVERY_MODE_TRANSITION_CANCELLED"
+                        if str(current["delivery_mode"]) != delivery_mode
+                        else "DELIVERY_CONFIG_CHANGED_CANCELLED"
+                    )
+                    reason = "delivery_mode_transition" if event_type.endswith("TRANSITION_CANCELLED") else "device_config_changed"
+                    for item in active_items:
+                        item_id = str(item["id"])
+                        connection.execute(
+                            "UPDATE device_content_queue_items SET status='CANCELLED',last_error_code='QUEUE-005',updated_at=? WHERE id=?",
+                            (now, item_id),
+                        )
+                        connection.execute(
+                            "INSERT OR IGNORE INTO device_content_queue_events(queue_item_id,device_id,event_type,idempotency_key,payload_json,created_at) VALUES (?,?,?,?,?,?)",
+                            (
+                                item_id,
+                                device_id,
+                                event_type,
+                                f"{event_type}:{device_id}:{item_id}:{now}",
+                                json.dumps(
+                                    {
+                                        "reason": reason,
+                                        "old_delivery_mode": str(current["delivery_mode"]),
+                                        "new_delivery_mode": delivery_mode,
+                                        "queue_item_delivery_mode": str(item["delivery_mode"]),
+                                    },
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                ),
+                                now,
+                            ),
+                        )
+                        connection.execute(
+                            "UPDATE rollout_targets SET status='cancelled_mode_transition',last_error_code='QUEUE-005',updated_at=? WHERE queue_item_id=?",
+                            (now, item_id),
+                        )
+                    if active_items:
+                        connection.execute(
+                            "UPDATE device_content_queues SET queue_version=queue_version+?,updated_at=? WHERE device_id=?",
+                            (len(active_items), now, device_id),
+                        )
                 connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")
