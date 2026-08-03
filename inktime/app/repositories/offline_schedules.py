@@ -77,9 +77,14 @@ class OfflineScheduleRepository:
             except (TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise ValueError("QUEUE-002 Release Manifest 不符合離線排程契約") from exc
             filename = str(entry["name"])
+            try:
+                show_at_epoch = int(datetime.fromisoformat(str(slot["show_at"])).timestamp())
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("QUEUE-002 離線排程 show_at 時間格式不合法") from exc
             slot.update(
                 {
                     "sha256": str(entry["sha256"]).lower(),
+                    "show_at_epoch": show_at_epoch,
                     "size": int(entry["size"]),
                     "width": int(slot["width"]),
                     "height": int(slot["height"]),

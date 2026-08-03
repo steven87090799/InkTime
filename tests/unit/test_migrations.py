@@ -28,7 +28,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 def test_fresh_database_is_migrated(tmp_path):
     database = Database(tmp_path / "inktime.db")
-    assert migrate(database) == list(range(1, 29))
+    assert migrate(database) == list(range(1, 30))
     assert database.integrity_check() == "ok"
     with database.session() as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -54,7 +54,7 @@ def test_fresh_database_is_migrated(tmp_path):
         "analysis_batches",
         "analysis_batch_items",
     } <= tables
-    assert tuple(history) == (28, 28)
+    assert tuple(history) == (29, 29)
     with database.session() as connection:
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
     assert {"normalized_username", "session_version", "disabled_at"} <= columns
@@ -164,7 +164,7 @@ def test_migration_25_to_batch_lifecycle_is_idempotent(monkeypatch, tmp_path):
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:25])
     migrate(database)
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [26, 27, 28]
+    assert migrate(database, tmp_path / "backups") == [26, 27, 28, 29]
     assert migrate(database, tmp_path / "backups") == []
     assert database.integrity_check() == "ok"
 
@@ -227,7 +227,7 @@ def test_migration_27_to_28_freezes_ownership_and_invalidates_legacy_ready_rows(
         )
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [28]
+    assert migrate(database, tmp_path / "backups") == [28, 29]
     with database.session() as connection:
         schedule = connection.execute(
             "SELECT status,panel_profile,rotation,snapshot_json FROM device_offline_schedules WHERE id='legacy-schedule'"
@@ -259,6 +259,13 @@ def test_migration_27_to_28_freezes_ownership_and_invalidates_legacy_ready_rows(
             connection.execute(
                 "UPDATE device_content_queue_items SET offline_schedule_id='legacy-schedule' WHERE id='online-item'"
             )
+        schedule_fk = connection.execute(
+            "SELECT on_delete FROM pragma_foreign_key_list('device_content_queue_items') "
+            "WHERE \"table\"='device_offline_schedules' AND \"from\"='offline_schedule_id'"
+        ).fetchone()
+        assert schedule_fk["on_delete"] == "RESTRICT"
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("DELETE FROM device_offline_schedules WHERE id='legacy-schedule'")
 
 
 def test_existing_photo_scores_table_is_preserved(tmp_path):
@@ -335,7 +342,7 @@ def test_concurrent_migrations_are_serialized(tmp_path):
     database = Database(tmp_path / "inktime.db")
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _index: migrate(database), range(2)))
-        assert sorted(results, key=len) == [[], list(range(1, 29))]
+        assert sorted(results, key=len) == [[], list(range(1, 30))]
     assert database.integrity_check() == "ok"
 
 
@@ -534,7 +541,7 @@ def test_v10_photo_state_and_analysis_survive_scheduler_upgrade(monkeypatch, tmp
         )
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == list(range(11, 29))
+    assert migrate(database, tmp_path / "backups") == list(range(11, 30))
     with database.session() as connection:
         photo = connection.execute(
             "SELECT favorite,status,lifecycle_status,metadata_status,local_features_status FROM photos WHERE id='photo'"
@@ -561,7 +568,7 @@ def test_migration_21_upgrades_v20_webhooks_idempotently(monkeypatch, tmp_path):
         notification_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [21, 22, 23, 24, 25, 26, 27, 28]
+    assert migrate(database, tmp_path / "backups") == [21, 22, 23, 24, 25, 26, 27, 28, 29]
     assert migrate(database, tmp_path / "backups") == []
     assert database.integrity_check() == "ok"
     with database.session() as connection:

@@ -160,6 +160,10 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
         prefetch_lead_minutes=5,
     )
     service = app.extensions["inktime_display_preparation_service"]
+    with app.extensions["inktime_database"].session() as connection:
+        history_before = connection.execute(
+            "SELECT COUNT(*) FROM display_history WHERE selection_method='offline_schedule_prepare'"
+        ).fetchone()[0]
     prepared = service.prepare_device_day(
         device_id=device_id,
         target_date="2026-08-03",
@@ -183,8 +187,13 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
             "SELECT COUNT(*) FROM device_content_queue_items WHERE device_id=? AND delivery_mode='offline_schedule'",
             (device_id,),
         ).fetchone()[0]
+        history_after = connection.execute(
+            "SELECT COUNT(*) FROM display_history WHERE selection_method='offline_schedule_prepare'"
+        ).fetchone()[0]
     assert release_count == 2
     assert queue_count == 2
+    assert history_before == 0
+    assert history_after == 0
 
 
 def test_enhanced_prepare_fails_closed_when_device_config_changes_before_commit(app, tmp_path, monkeypatch):
@@ -278,9 +287,13 @@ def test_enhanced_prepare_fails_closed_when_device_config_changes_before_commit(
         release_state = connection.execute(
             "SELECT status,reconciliation_status FROM releases WHERE created_by='offline-race'"
         ).fetchone()
+        failed_history = connection.execute(
+            "SELECT COUNT(*) FROM display_history WHERE selection_method='offline_schedule_prepare'"
+        ).fetchone()[0]
     assert release_state is not None
     assert tuple(release_state) == ("staged_failed", "aborted")
     assert release_state["status"] != "published"
+    assert failed_history == 0
 
 
 def test_release_coordinator_abort_staged_retains_payload_for_reconciliation(app):

@@ -440,6 +440,7 @@ static bool validPendingQueueAck(PendingQueueAck &pending) {
     && pending.queueVersion >= 0
     && event <= static_cast<uint8_t>(inktime::QueueEvent::DisplayFailed)
     && pending.errorCode.length() <= 64U
+    && pending.eventEpoch >= 0
     && (!pending.delayedTerminal || (
         (pending.event == inktime::QueueEvent::DisplayCompleted
           || pending.event == inktime::QueueEvent::DisplayFailed)
@@ -461,6 +462,7 @@ static PendingQueueAck readAckJournalEntry(Preferences &journal, uint8_t index) 
     journal.getString(ackJournalKey('r', index).c_str(), ""),
     journal.getBool(ackJournalKey('d', index).c_str(), false),
     journal.getString(ackJournalKey('l', index).c_str(), ""),
+    journal.getLong64(ackJournalKey('t', index).c_str(), 0),
     false,
   };
   validPendingQueueAck(pending);
@@ -480,6 +482,7 @@ static void writeAckJournalEntry(
   journal.putString(ackJournalKey('r', index).c_str(), pending.errorCode);
   journal.putBool(ackJournalKey('d', index).c_str(), pending.delayedTerminal);
   journal.putString(ackJournalKey('l', index).c_str(), pending.releaseId);
+  journal.putLong64(ackJournalKey('t', index).c_str(), pending.eventEpoch);
 }
 
 static bool samePendingQueueAck(
@@ -559,6 +562,7 @@ static void removePendingQueueAck(const PendingQueueAck &pending) {
     journal.remove(ackJournalKey('r', last).c_str());
     journal.remove(ackJournalKey('d', last).c_str());
     journal.remove(ackJournalKey('l', last).c_str());
+    journal.remove(ackJournalKey('t', last).c_str());
     journal.putUChar("count", last);
   }
   journal.end();
@@ -588,6 +592,7 @@ static PendingQueueAck loadPendingQueueAck() {
     prefs.getString("ack_error", ""),
     false,
     "",
+    0,
     false,
   };
   prefs.end();
@@ -1302,6 +1307,7 @@ static bool sendQueueAck(const Config &cfg, const PendingQueueAck &pending, bool
   if (pending.delayedTerminal) {
     payload["ack_mode"] = "delayed_terminal";
     payload["release_id"] = pending.releaseId;
+    if (pending.eventEpoch > 0) payload["event_epoch"] = pending.eventEpoch;
   }
   if (pending.errorCode.length() > 0U) payload["error_code"] = pending.errorCode;
   String body;
@@ -1346,6 +1352,7 @@ static bool sendQueueEvent(
   const String &errorCode = String(""),
   bool delayedTerminal = false
 ) {
+  const time_t eventNow = time(nullptr);
   PendingQueueAck pending = {
     currentQueueItemId,
     static_cast<int32_t>(currentQueueVersion),
@@ -1354,6 +1361,7 @@ static bool sendQueueEvent(
     errorCode.substring(0, 64),
     delayedTerminal,
     currentReleaseId,
+    delayedTerminal && eventNow > 0 ? static_cast<int64_t>(eventNow) : 0,
     currentQueueItemId.length() > 0U && currentQueueVersion >= 0,
   };
   return sendQueueAck(cfg, pending, true);
@@ -1838,6 +1846,8 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg) {
   const JsonVariantConst rawConfigVersion = schedule["config_version"];
   const JsonVariantConst rawRotation = schedule["rotation"];
   const JsonVariantConst rawScheduleVersion = schedule["offline_schedule_version"];
+  const JsonVariantConst rawTargetStartEpoch = schedule["target_start_epoch"];
+  const JsonVariantConst rawTargetEndEpoch = schedule["target_end_epoch"];
   if (jsonError || schedule.overflowed() || !schema.is<int32_t>() || schema.is<bool>()
       || schema.as<int32_t>() != 1 || deliveryMode != "inktime_offline_schedule"
       || !rawSlots.is<JsonArrayConst>() || targetLocalDate.length() == 0U
@@ -1849,7 +1859,11 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg) {
       || !rawConfigVersion.is<uint32_t>() || rawConfigVersion.is<bool>()
       || !rawRotation.is<int32_t>() || rawRotation.is<bool>()
       || !rawScheduleVersion.is<int32_t>() || rawScheduleVersion.is<bool>()
-      || rawScheduleVersion.as<int32_t>() < 0) {
+      || rawScheduleVersion.as<int32_t>() < 0
+      || !rawTargetStartEpoch.is<int64_t>() || rawTargetStartEpoch.is<bool>()
+      || !rawTargetEndEpoch.is<int64_t>() || rawTargetEndEpoch.is<bool>()
+      || rawTargetStartEpoch.as<int64_t>() <= 0
+      || rawTargetEndEpoch.as<int64_t>() <= rawTargetStartEpoch.as<int64_t>()) {
     lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-SCHEMA";
     lastDeviceErrorMessage = "離線排程 schema、日期或快照欄位不相容";
     return false;
@@ -1888,30 +1902,25 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg) {
     lastDeviceErrorMessage = "離線排程無法由 PhotoPainter RTC 驗證本地日期";
     return false;
   }
-  applyFixedTimezoneWithoutNtp(cfg.tz_offset_minutes);
-  struct tm localNow = {};
-  if (localtime_r(&rtcEpoch, &localNow) == nullptr) {
+  const int64_t targetStartEpoch = rawTargetStartEpoch.as<int64_t>();
+  const int64_t targetEndEpoch = rawTargetEndEpoch.as<int64_t>();
+  if (static_cast<int64_t>(rtcEpoch) < targetStartEpoch
+      || static_cast<int64_t>(rtcEpoch) >= targetEndEpoch) {
     lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-RTC";
-    lastDeviceErrorMessage = "離線排程 RTC 本地時間轉換失敗";
+    lastDeviceErrorMessage = "離線排程 RTC 不在伺服器授權的目標本地日範圍";
     return false;
   }
-  char localDate[11] = {0};
-  snprintf(
-    localDate,
-    sizeof(localDate),
-    "%04d-%02d-%02d",
-    localNow.tm_year + 1900,
-    localNow.tm_mon + 1,
-    localNow.tm_mday
-  );
   const uint32_t remoteConfigVersion = rawConfigVersion.as<uint32_t>();
   const int32_t remoteRotation = rawRotation.as<int32_t>();
   inktime::OfflineScheduleContract contract = {
     1,
     deliveryMode.c_str(),
     targetLocalDate.c_str(),
-    localDate,
+    targetLocalDate.c_str(),
     timezoneName.c_str(),
+    targetStartEpoch,
+    targetEndEpoch,
+    static_cast<int64_t>(rtcEpoch),
     remoteConfigVersion,
     cfg.config_version,
     remoteRotation,
@@ -1922,7 +1931,9 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg) {
     static_cast<uint8_t>(rawTimes.size()),
     true,
     true,
+    true,
   };
+  int64_t previousShowAtEpoch = 0;
   for (size_t index = 0; index < slots.size(); ++index) {
     const JsonVariantConst rawSlot = slots[index];
     if (!rawSlot.is<JsonObjectConst>()) {
@@ -1936,6 +1947,7 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg) {
     const JsonVariantConst rawHeight = slot["height"];
     const JsonVariantConst rawSlotIndex = slot["slot_index"];
     const JsonVariantConst rawQueueVersion = slot["queue_version"];
+    const JsonVariantConst rawShowAtEpoch = slot["show_at_epoch"];
     const String itemId = slot["queue_item_id"] | "";
     const String releaseId = slot["release_id"] | "";
     const String slotScheduleId = slot["offline_schedule_id"] | "";
@@ -1965,8 +1977,14 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg) {
       && rawWidth.as<int32_t>() == FB_WIDTH && rawHeight.as<int32_t>() == FB_HEIGHT
       && (pixelFormat == "indexed4" || pixelFormat == "2bpp")
       && inktime::isSha256Hex(sha.c_str());
+    const bool validShowAtEpoch = rawShowAtEpoch.is<int64_t>() && !rawShowAtEpoch.is<bool>()
+      && rawShowAtEpoch.as<int64_t>() >= targetStartEpoch
+      && rawShowAtEpoch.as<int64_t>() < targetEndEpoch
+      && (index == 0U || rawShowAtEpoch.as<int64_t>() > previousShowAtEpoch);
     contract.queueIdentityValid = contract.queueIdentityValid && validIdentity;
     contract.sha256Valid = contract.sha256Valid && validPayload;
+    contract.slotEpochsValid = contract.slotEpochsValid && validShowAtEpoch;
+    if (validShowAtEpoch) previousShowAtEpoch = rawShowAtEpoch.as<int64_t>();
   }
   if (!inktime::validOfflineScheduleContract(contract)) {
     lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-SCHEMA";
@@ -2009,6 +2027,7 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg) {
     const JsonVariantConst rawHeight = slot["height"];
     const JsonVariantConst rawSlotIndex = slot["slot_index"];
     const JsonVariantConst rawQueueVersion = slot["queue_version"];
+    const JsonVariantConst rawShowAtEpoch = slot["show_at_epoch"];
     const String itemId = slot["queue_item_id"] | "";
     const String releaseId = slot["release_id"] | "";
     const String sha = slot["sha256"] | "";
@@ -2022,6 +2041,9 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg) {
         || rawSlotIndex.as<int32_t>() != static_cast<int32_t>(index)
         || !rawQueueVersion.is<int32_t>() || rawQueueVersion.is<bool>()
         || rawQueueVersion.as<int32_t>() < 0
+        || !rawShowAtEpoch.is<int64_t>() || rawShowAtEpoch.is<bool>()
+        || rawShowAtEpoch.as<int64_t>() < targetStartEpoch
+        || rawShowAtEpoch.as<int64_t>() >= targetEndEpoch
         || rawWidth.as<int32_t>() != FB_WIDTH || rawHeight.as<int32_t>() != FB_HEIGHT
         || !inktime::isSha256Hex(sha.c_str())
         || !inktime::boundedText(itemId.c_str(), inktime::kQueueIdentifierMaxBytes)
@@ -2068,6 +2090,13 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg) {
 #endif
 
 static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
+#if INKTIME_PHOTOPAINTER_ENABLED
+  if (cfg.delivery_mode == "inktime_offline_schedule") {
+    // Enhanced offline schedules are consumed only from the signed schedule
+    // endpoint; the generic queue can never select an arbitrary first item.
+    return QueueDownloadResult::EmptyOrUnsupported;
+  }
+#endif
   String base;
   if (!normalizedBackendBase(cfg, base)) return QueueDownloadResult::Failed;
 
@@ -2353,28 +2382,44 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
 }
 
 #if INKTIME_PHOTOPAINTER_ENABLED
-static bool offlinePrefetchWake(const Config &cfg, time_t nowEpoch) {
-  if (cfg.delivery_mode != "inktime_offline_schedule"
-      || cfg.schedule_count == 0 || cfg.prefetch_lead_minutes == 0 || nowEpoch <= 0) {
-    return false;
-  }
-  struct tm localNow = {};
-  localtime_r(&nowEpoch, &localNow);
-  time_t nextDisplay = 0;
-  for (int dayOffset = 0; dayOffset <= 1; ++dayOffset) {
-    for (uint8_t index = 0; index < cfg.schedule_count; ++index) {
-      struct tm candidate = localNow;
-      candidate.tm_sec = 0;
-      candidate.tm_min = cfg.schedule_slots[index].minute;
-      candidate.tm_hour = cfg.schedule_slots[index].hour;
-      candidate.tm_mday += dayOffset;
-      const time_t candidateEpoch = mktime(&candidate);
-      if (candidateEpoch > nowEpoch
-          && (nextDisplay == 0 || candidateEpoch < nextDisplay)) {
-        nextDisplay = candidateEpoch;
-      }
+static bool activeOfflineEpochs(
+  time_t nowEpoch, time_t &nextDisplayEpoch, time_t &targetEndEpoch) {
+  nextDisplayEpoch = 0;
+  targetEndEpoch = 0;
+  String activeJson;
+  if (!photoPainter.readActiveSchedule(activeJson)) return false;
+  JsonDocument active;
+  if (deserializeJson(active, activeJson) || active.overflowed()) return false;
+  const JsonVariantConst rawEnd = active["target_end_epoch"];
+  const JsonVariantConst rawSlots = active["slots"];
+  if (!rawEnd.is<int64_t>() || rawEnd.is<bool>() || rawEnd.as<int64_t>() <= 0
+      || !rawSlots.is<JsonArrayConst>()) return false;
+  targetEndEpoch = static_cast<time_t>(rawEnd.as<int64_t>());
+  const JsonArrayConst slots = rawSlots.as<JsonArrayConst>();
+  for (size_t index = 0; index < slots.size(); ++index) {
+    const JsonVariantConst rawSlot = slots[index];
+    if (!rawSlot.is<JsonObjectConst>()) return false;
+    const JsonVariantConst rawShowAt = rawSlot["show_at_epoch"];
+    if (!rawShowAt.is<int64_t>() || rawShowAt.is<bool>() || rawShowAt.as<int64_t>() <= 0) {
+      return false;
+    }
+    const time_t showAt = static_cast<time_t>(rawShowAt.as<int64_t>());
+    if (showAt > nowEpoch && (nextDisplayEpoch == 0 || showAt < nextDisplayEpoch)) {
+      nextDisplayEpoch = showAt;
     }
   }
+  return true;
+}
+
+static bool offlinePrefetchWake(const Config &cfg, time_t nowEpoch) {
+  if (cfg.delivery_mode != "inktime_offline_schedule"
+      || cfg.prefetch_lead_minutes == 0 || nowEpoch <= 0) {
+    return false;
+  }
+  time_t nextDisplay = 0;
+  time_t targetEnd = 0;
+  if (!activeOfflineEpochs(nowEpoch, nextDisplay, targetEnd)) return true;
+  if (targetEnd > 0 && nowEpoch >= targetEnd) return true;
   if (nextDisplay <= nowEpoch) return false;
   const time_t lead = static_cast<time_t>(cfg.prefetch_lead_minutes) * 60;
   return nowEpoch >= nextDisplay - lead && nowEpoch < nextDisplay;
@@ -2382,25 +2427,38 @@ static bool offlinePrefetchWake(const Config &cfg, time_t nowEpoch) {
 #endif
 
 #if INKTIME_PHOTOPAINTER_ENABLED
-static bool loadOfflineScheduledLocalFrame(const Config &cfg, time_t nowEpoch);
+static bool loadOfflineScheduledLocalFrame(
+  const Config &cfg, time_t nowEpoch, bool selectNext = false);
 #endif
 
 bool downloadDailyPhotoBin(Config &cfg) {
   currentPrefetchOnly = false;
   if (!resumePendingQueueAck(cfg)) return false;
 #if INKTIME_PHOTOPAINTER_ENABLED
+  const bool userButtonWake = photoPainter.wokeFromUserButton();
   const bool timerRequestedNetwork = enhancedNetworkWakeRequested;
   enhancedNetworkWakeRequested = false;
-  if (cfg.delivery_mode == "inktime_offline_schedule"
-      && (timerRequestedNetwork || offlinePrefetchWake(cfg, time(nullptr)))) {
-    const bool displayAtThisWake = cfg.prefetch_lead_minutes == 0U;
-    currentPrefetchOnly = !displayAtThisWake;
-    const bool prefetched = downloadOfflineScheduleAndFrames(cfg);
-    if (prefetched && displayAtThisWake) {
+  if (cfg.delivery_mode == "inktime_offline_schedule") {
+    if (userButtonWake && cfg.button_wake_action == "check_new") {
+      // A button check may replace the active schedule, but a missing or
+      // unavailable remote schedule must leave the cached formal day usable.
+      (void)downloadOfflineScheduleAndFrames(cfg);
       currentPrefetchOnly = false;
-      return loadOfflineScheduledLocalFrame(cfg, time(nullptr));
+      return loadOfflineScheduledLocalFrame(cfg, time(nullptr), false);
     }
-    return prefetched;
+    if (timerRequestedNetwork || offlinePrefetchWake(cfg, time(nullptr))) {
+      const bool displayAtThisWake = cfg.prefetch_lead_minutes == 0U;
+      currentPrefetchOnly = !displayAtThisWake;
+      const bool prefetched = downloadOfflineScheduleAndFrames(cfg);
+      if (prefetched && displayAtThisWake) {
+        currentPrefetchOnly = false;
+        return loadOfflineScheduledLocalFrame(cfg, time(nullptr), false);
+      }
+      return prefetched;
+    }
+    // Enhanced offline mode has no generic/latest-photo fallback.  Formal
+    // frames are selected only from the active server-authored schedule.
+    return false;
   }
 #endif
   const QueueDownloadResult queueResult = downloadQueuePhotoBin(cfg);
@@ -2582,33 +2640,38 @@ void sleepUntilNextSchedule(const Config &cfg, bool hasTime, const struct tm &no
   }
 
 #if INKTIME_PHOTOPAINTER_ENABLED
-  if (cfg.delivery_mode == "inktime_offline_schedule"
-      && cfg.schedule_count > 0 && cfg.schedule_count <= inktime::kMaxOfflineSlots) {
-    struct tm localNow = now;
-    const time_t nowEpoch = mktime(&localNow);
-    time_t nextDisplay = 0;
-    for (int dayOffset = 0; dayOffset <= 1; ++dayOffset) {
-      for (uint8_t index = 0; index < cfg.schedule_count; ++index) {
-        struct tm candidate = localNow;
-        candidate.tm_sec = 0;
-        candidate.tm_min = cfg.schedule_slots[index].minute;
-        candidate.tm_hour = cfg.schedule_slots[index].hour;
-        candidate.tm_mday += dayOffset;
-        const time_t candidateEpoch = mktime(&candidate);
-        if (candidateEpoch > nowEpoch && (nextDisplay == 0 || candidateEpoch < nextDisplay)) {
-          nextDisplay = candidateEpoch;
+  if (cfg.delivery_mode == "inktime_offline_schedule") {
+    time_t nowEpoch = time(nullptr);
+    if (nowEpoch <= 0) {
+      time_t rtcEpoch = 0;
+      if (photoPainter.readRtc(rtcEpoch)) nowEpoch = rtcEpoch;
+    }
+    if (nowEpoch > 0) {
+      time_t nextDisplay = 0;
+      time_t targetEnd = 0;
+      if (activeOfflineEpochs(nowEpoch, nextDisplay, targetEnd)) {
+        if (nextDisplay > nowEpoch) {
+          const uint64_t leadSeconds = static_cast<uint64_t>(cfg.prefetch_lead_minutes) * 60ULL;
+          const time_t prefetchEpoch = nextDisplay > static_cast<time_t>(leadSeconds)
+            ? nextDisplay - static_cast<time_t>(leadSeconds)
+            : nextDisplay;
+          const time_t wakeEpoch = prefetchEpoch > nowEpoch ? prefetchEpoch : nextDisplay;
+          goDeepSleepUntilEpoch(nowEpoch, wakeEpoch);
+          return;
         }
+        // The active server-authored day is exhausted.  Wake at its exact
+        // UTC boundary so the next network wake can request the next local
+        // day without reconstructing a DST-sensitive epoch locally.
+        if (targetEnd > nowEpoch) {
+          goDeepSleepUntilEpoch(nowEpoch, targetEnd);
+        } else {
+          goDeepSleepUntilEpoch(nowEpoch, nowEpoch + 60);
+        }
+        return;
       }
     }
-    if (nextDisplay > nowEpoch) {
-      const uint64_t leadSeconds = static_cast<uint64_t>(cfg.prefetch_lead_minutes) * 60ULL;
-      const time_t prefetchEpoch = nextDisplay > static_cast<time_t>(leadSeconds)
-        ? nextDisplay - static_cast<time_t>(leadSeconds)
-        : nextDisplay;
-      const time_t wakeEpoch = prefetchEpoch > nowEpoch ? prefetchEpoch : nextDisplay;
-      goDeepSleepUntilEpoch(nowEpoch, wakeEpoch);
-      return;
-    }
+    goDeepSleepMinutes(1440);
+    return;
   }
 #endif
 
@@ -2631,23 +2694,8 @@ void sleepUntilNextSchedule(const Config &cfg, bool hasTime, const struct tm &no
 }
 
 #if INKTIME_PHOTOPAINTER_ENABLED
-static bool parseOfflineLocalDate(const String &value, struct tm &output) {
-  if (value.length() != 10 || value[4] != '-' || value[7] != '-') return false;
-  const int year = value.substring(0, 4).toInt();
-  const int month = value.substring(5, 7).toInt();
-  const int day = value.substring(8, 10).toInt();
-  if (year < 2020 || year > 2200 || month < 1 || month > 12 || day < 1 || day > 31) {
-    return false;
-  }
-  output = {};
-  output.tm_year = year - 1900;
-  output.tm_mon = month - 1;
-  output.tm_mday = day;
-  output.tm_isdst = -1;
-  return true;
-}
-
-static bool loadOfflineScheduledLocalFrame(const Config &cfg, time_t nowEpoch) {
+static bool loadOfflineScheduledLocalFrame(
+  const Config &cfg, time_t nowEpoch, bool selectNext) {
   // Enhanced local mode is deliberately cache-only.  It never calls Wi-Fi,
   // NTP, Manifest, or status endpoints; a missing formal frame is a safe
   // no-refresh result instead of a network fallback.
@@ -2656,6 +2704,11 @@ static bool loadOfflineScheduledLocalFrame(const Config &cfg, time_t nowEpoch) {
     lastDeviceErrorMessage = "離線排程沒有可驗證的 RTC 時間";
     return false;
   }
+  currentFromQueue = false;
+  currentQueueItemId = "";
+  currentQueueVersion = -1;
+  currentReleaseId = "";
+  currentRenderProfile = "";
   String activeJson;
   if (!photoPainter.readActiveSchedule(activeJson)) {
     lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
@@ -2678,6 +2731,8 @@ static bool loadOfflineScheduledLocalFrame(const Config &cfg, time_t nowEpoch) {
   const JsonVariantConst activeConfigVersion = active["config_version"];
   const JsonVariantConst activeRotation = active["rotation"];
   const JsonVariantConst activeScheduleVersion = active["offline_schedule_version"];
+  const JsonVariantConst activeTargetStartEpoch = active["target_start_epoch"];
+  const JsonVariantConst activeTargetEndEpoch = active["target_end_epoch"];
   if (jsonError || active.overflowed() || !rawSlots.is<JsonArrayConst>()
       || targetDate.length() != 10 || activeTargetDate.length() == 0U
       || (activeLegacyDate.length() > 0U && activeLegacyDate != activeTargetDate)
@@ -2689,24 +2744,21 @@ static bool loadOfflineScheduledLocalFrame(const Config &cfg, time_t nowEpoch) {
       || !activeConfigVersion.is<uint32_t>() || activeConfigVersion.is<bool>()
       || !activeRotation.is<int32_t>() || activeRotation.is<bool>()
       || !activeScheduleVersion.is<int32_t>() || activeScheduleVersion.is<bool>()
-      || activeScheduleVersion.as<int32_t>() < 0) {
+      || activeScheduleVersion.as<int32_t>() < 0
+      || !activeTargetStartEpoch.is<int64_t>() || activeTargetStartEpoch.is<bool>()
+      || !activeTargetEndEpoch.is<int64_t>() || activeTargetEndEpoch.is<bool>()
+      || activeTargetStartEpoch.as<int64_t>() <= 0
+      || activeTargetEndEpoch.as<int64_t>() <= activeTargetStartEpoch.as<int64_t>()) {
     lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
     lastDeviceErrorMessage = "離線排程 active schedule schema 不合法";
     return false;
   }
-  struct tm targetLocal = {};
-  if (!parseOfflineLocalDate(targetDate, targetLocal)) {
+  const int64_t targetStartEpoch = activeTargetStartEpoch.as<int64_t>();
+  const int64_t targetEndEpoch = activeTargetEndEpoch.as<int64_t>();
+  if (static_cast<int64_t>(nowEpoch) < targetStartEpoch
+      || static_cast<int64_t>(nowEpoch) >= targetEndEpoch) {
     lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
-    lastDeviceErrorMessage = "離線排程 target date 不合法";
-    return false;
-  }
-  struct tm nowLocal = {};
-  localtime_r(&nowEpoch, &nowLocal);
-  if (nowLocal.tm_year != targetLocal.tm_year
-      || nowLocal.tm_mon != targetLocal.tm_mon
-      || nowLocal.tm_mday != targetLocal.tm_mday) {
-    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
-    lastDeviceErrorMessage = "離線排程不是目前本地日期";
+    lastDeviceErrorMessage = "離線排程不是伺服器授權的目前本地日期";
     return false;
   }
   const JsonArrayConst slots = rawSlots.as<JsonArrayConst>();
@@ -2741,21 +2793,15 @@ static bool loadOfflineScheduledLocalFrame(const Config &cfg, time_t nowEpoch) {
       return false;
     }
   }
-  char localDate[11] = {0};
-  snprintf(
-    localDate,
-    sizeof(localDate),
-    "%04d-%02d-%02d",
-    nowLocal.tm_year + 1900,
-    nowLocal.tm_mon + 1,
-    nowLocal.tm_mday
-  );
   inktime::OfflineScheduleContract contract = {
     activeSchema.as<int32_t>(),
     activeDeliveryMode.c_str(),
     activeTargetDate.c_str(),
-    localDate,
+    activeTargetDate.c_str(),
     activeTimezone.c_str(),
+    targetStartEpoch,
+    targetEndEpoch,
+    static_cast<int64_t>(nowEpoch),
     activeConfigVersion.as<uint32_t>(),
     cfg.config_version,
     activeRotation.as<int32_t>(),
@@ -2764,6 +2810,7 @@ static bool loadOfflineScheduledLocalFrame(const Config &cfg, time_t nowEpoch) {
     activeButtonWakeAction.c_str(),
     static_cast<uint8_t>(slots.size()),
     static_cast<uint8_t>(rawTimes.size()),
+    true,
     true,
     true,
   };
@@ -2775,6 +2822,7 @@ static bool loadOfflineScheduledLocalFrame(const Config &cfg, time_t nowEpoch) {
     lastDeviceErrorMessage = "離線排程 active 快照與本機設定不一致";
     return false;
   }
+  int64_t previousShowAtEpoch = 0;
   for (size_t index = 0; index < slots.size(); ++index) {
     const JsonVariantConst rawSlot = slots[index];
     if (!rawSlot.is<JsonObjectConst>()) {
@@ -2785,6 +2833,7 @@ static bool loadOfflineScheduledLocalFrame(const Config &cfg, time_t nowEpoch) {
     const JsonObjectConst slot = rawSlot.as<JsonObjectConst>();
     const JsonVariantConst rawIndex = slot["slot_index"];
     const JsonVariantConst rawVersion = slot["queue_version"];
+    const JsonVariantConst rawShowAtEpoch = slot["show_at_epoch"];
     const String slotScheduleId = slot["offline_schedule_id"] | "";
     const String slotItemId = slot["queue_item_id"] | "";
     const String slotReleaseId = slot["release_id"] | "";
@@ -2793,6 +2842,10 @@ static bool loadOfflineScheduledLocalFrame(const Config &cfg, time_t nowEpoch) {
     if (!rawIndex.is<int32_t>() || rawIndex.is<bool>()
         || rawIndex.as<int32_t>() != static_cast<int32_t>(index)
         || !rawVersion.is<int32_t>() || rawVersion.is<bool>() || rawVersion.as<int32_t>() < 0
+        || !rawShowAtEpoch.is<int64_t>() || rawShowAtEpoch.is<bool>()
+        || rawShowAtEpoch.as<int64_t>() < targetStartEpoch
+        || rawShowAtEpoch.as<int64_t>() >= targetEndEpoch
+        || (index > 0U && rawShowAtEpoch.as<int64_t>() <= previousShowAtEpoch)
         || slotScheduleId != activeScheduleId
         || !inktime::boundedText(slotItemId.c_str(), inktime::kQueueIdentifierMaxBytes)
         || !inktime::boundedText(slotReleaseId.c_str(), inktime::kQueueIdentifierMaxBytes)
@@ -2802,9 +2855,10 @@ static bool loadOfflineScheduledLocalFrame(const Config &cfg, time_t nowEpoch) {
       lastDeviceErrorMessage = "離線排程 active Slot 身分或完整性不合法";
       return false;
     }
+    previousShowAtEpoch = rawShowAtEpoch.as<int64_t>();
   }
   int selectedIndex = -1;
-  time_t selectedEpoch = 0;
+  int64_t selectedEpoch = selectNext ? INT64_MAX : 0;
   String selectedSha;
   String selectedRelease;
   String selectedProfile;
@@ -2816,14 +2870,14 @@ static bool loadOfflineScheduledLocalFrame(const Config &cfg, time_t nowEpoch) {
     const JsonObjectConst slot = rawSlot.as<JsonObjectConst>();
     const int slotIndex = slot["slot_index"] | -1;
     if (slotIndex < 0 || slotIndex >= static_cast<int>(rawTimes.size())) continue;
-    struct tm candidate = targetLocal;
-    candidate.tm_hour = activeScheduleSlots[slotIndex].hour;
-    candidate.tm_min = activeScheduleSlots[slotIndex].minute;
-    candidate.tm_sec = 0;
-    const time_t candidateEpoch = mktime(&candidate);
+    const JsonVariantConst rawShowAtEpoch = slot["show_at_epoch"];
+    if (!rawShowAtEpoch.is<int64_t>() || rawShowAtEpoch.is<bool>()) continue;
+    const int64_t candidateEpoch = rawShowAtEpoch.as<int64_t>();
     const String sha = slot["sha256"] | "";
-    if (candidateEpoch <= nowEpoch && candidateEpoch >= selectedEpoch
-        && inktime::isSha256Hex(sha.c_str())) {
+    const bool candidateMatches = selectNext
+      ? candidateEpoch > static_cast<int64_t>(nowEpoch) && candidateEpoch < selectedEpoch
+      : candidateEpoch <= static_cast<int64_t>(nowEpoch) && candidateEpoch >= selectedEpoch;
+    if (candidateMatches && inktime::isSha256Hex(sha.c_str())) {
       selectedIndex = slotIndex;
       selectedEpoch = candidateEpoch;
       selectedSha = sha;
@@ -2866,7 +2920,7 @@ static bool loadOfflineScheduledLocalFrame(const Config &cfg, time_t nowEpoch) {
   return true;
 }
 
-static void runOfflineLocalCycle() {
+static void runOfflineLocalCycle(bool selectNext = false) {
   time_t rtcEpoch = 0;
   struct tm offlineTime = {};
   const bool hasOfflineTime = photoPainter.readRtc(rtcEpoch);
@@ -2876,7 +2930,8 @@ static void runOfflineLocalCycle() {
     applyFixedTimezoneWithoutNtp(g_cfg.tz_offset_minutes);
     localtime_r(&rtcEpoch, &offlineTime);
   }
-  const bool ok = loadOfflineScheduledLocalFrame(g_cfg, hasOfflineTime ? rtcEpoch : 0);
+  const bool ok = loadOfflineScheduledLocalFrame(
+    g_cfg, hasOfflineTime ? rtcEpoch : 0, selectNext);
   bool displayUpdated = false;
   if (ok) {
     if (currentDisplaySkipped) {
@@ -2984,6 +3039,14 @@ void setup() {
 #if INKTIME_PHOTOPAINTER_ENABLED
   const esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
   const bool timerWake = wakeCause == ESP_SLEEP_WAKEUP_TIMER;
+  if (g_cfg.delivery_mode == "inktime_offline_schedule"
+      && photoPainter.wokeFromUserButton()
+      && g_cfg.button_wake_action == "local_next") {
+    // local_next is a strict cache-only action.  It must not connect Wi-Fi or
+    // ask the generic queue for its first item.
+    runOfflineLocalCycle(true);
+    return;
+  }
   if (g_cfg.delivery_mode == "inktime_offline_schedule" && timerWake
       && !photoPainter.forceNetworkRefresh()) {
     time_t rtcEpoch = 0;

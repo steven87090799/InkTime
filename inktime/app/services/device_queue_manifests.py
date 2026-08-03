@@ -10,6 +10,7 @@ from inktime.app.services.device_releases import DeviceReleaseService
 
 
 _ADVERTISED_QUEUE_STATES = {"READY", "AVAILABLE", "DOWNLOADED", "ACKNOWLEDGED"}
+_GENERIC_QUEUE_MAX_ITEMS = 14
 
 
 class DeviceQueueManifestService:
@@ -63,7 +64,24 @@ class DeviceQueueManifestService:
             item_id = str(row["id"])
             if row["status"] not in _ADVERTISED_QUEUE_STATES:
                 continue
+            if str(row["delivery_mode"] or "online_queue") != "online_queue":
+                # Enhanced offline schedules have their own bounded endpoint;
+                # never mix today and future schedule reservations into the
+                # generic firmware manifest.
+                self._audit_skip(
+                    device_id=device_id,
+                    queue_item_id=item_id,
+                    reason="offline_schedule_separate_endpoint",
+                )
+                continue
             if row["expires_at"] and str(row["expires_at"]) <= now:
+                continue
+            if len(items) >= _GENERIC_QUEUE_MAX_ITEMS:
+                self._audit_skip(
+                    device_id=device_id,
+                    queue_item_id=item_id,
+                    reason="generic_manifest_bound",
+                )
                 continue
             authorization = self.release_service.authorize_release_for_device(
                 device_id=device_id,

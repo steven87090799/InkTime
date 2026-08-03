@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from PIL import Image
 import pytest
 
@@ -73,12 +75,21 @@ def test_offline_day_preparation_is_atomic_and_device_projection_contains_full_s
     assert body["target_local_date"] == "2026-08-03"
     assert body["panel_profile"] == "safe_4c"
     assert body["rotation"] == 0
+    assert body["target_start_epoch"] < body["slots"][0]["show_at_epoch"] < body["target_end_epoch"]
+    assert body["slots"][0]["show_at_epoch"] == int(
+        datetime.fromisoformat(body["slots"][0]["show_at"]).timestamp()
+    )
     assert body["schedule_times"] == ["08:00", "20:00"]
     assert body["prefetch_lead_minutes"] == 5
     assert body["slots"][0]["sha256"] == prepared["slots"][0]["sha256"]
     assert body["slots"][0]["show_at"].endswith("+08:00")
     assert body["slots"][0]["download_url"].startswith("/api/device/v1/queue/items/")
     assert body["slots"][0]["size"] == 96_000
+    generic_manifest = client.get(
+        "/api/device/v1/queue/manifest",
+        headers={"Authorization": f"Bearer {token}"},
+    ).get_json()
+    assert generic_manifest["items"] == []
 
     third = _release(app, "offline-third")
     fourth = _release(app, "offline-fourth")

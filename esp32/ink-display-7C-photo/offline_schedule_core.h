@@ -40,6 +40,9 @@ struct OfflineScheduleContract {
   const char* targetDate;
   const char* localDate;
   const char* timezone;
+  int64_t targetStartEpoch;
+  int64_t targetEndEpoch;
+  int64_t nowEpoch;
   uint32_t configVersion;
   uint32_t currentConfigVersion;
   int32_t rotation;
@@ -50,6 +53,7 @@ struct OfflineScheduleContract {
   uint8_t scheduleCount;
   bool queueIdentityValid;
   bool sha256Valid;
+  bool slotEpochsValid;
 };
 
 inline bool validIsoLocalDate(const char* value) {
@@ -75,6 +79,10 @@ inline bool validOfflineScheduleContract(const OfflineScheduleContract& contract
       || strcmp(contract.targetDate, contract.localDate) != 0
       || contract.timezone == nullptr || contract.timezone[0] == '\0'
       || strlen(contract.timezone) > 64U
+      || contract.targetStartEpoch <= 0
+      || contract.targetEndEpoch <= contract.targetStartEpoch
+      || contract.nowEpoch < contract.targetStartEpoch
+      || contract.nowEpoch >= contract.targetEndEpoch
       || contract.configVersion < contract.currentConfigVersion
       || (contract.rotation != 0 && contract.rotation != 180)
       || contract.panelProfile == nullptr || contract.panelProfile[0] == '\0'
@@ -86,7 +94,7 @@ inline bool validOfflineScheduleContract(const OfflineScheduleContract& contract
           && strcmp(contract.buttonWakeAction, "local_next") != 0)
       || contract.slotCount == 0U || contract.slotCount > kMaxOfflineSlots
       || contract.slotCount != contract.scheduleCount
-      || !contract.queueIdentityValid || !contract.sha256Valid) {
+      || !contract.queueIdentityValid || !contract.sha256Valid || !contract.slotEpochsValid) {
     return false;
   }
   return true;

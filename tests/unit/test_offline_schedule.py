@@ -10,6 +10,7 @@ from inktime.app.domain.photopainter.offline_schedule import (
     slot_deadlines,
     validate_offline_schedule,
 )
+from inktime.app.repositories.offline_schedules import OfflineScheduleRepository
 
 
 def test_offline_schedule_is_sorted_unique_and_has_five_minute_prefetch_slots():
@@ -55,3 +56,16 @@ def test_slot_deadlines_keep_prefetched_items_until_the_following_slot():
         "2026-08-03T12:15:00+00:00",
         "2026-08-04T00:15:00+00:00",
     ]
+
+
+@pytest.mark.parametrize(
+    ("target_date", "expected_epoch"),
+    [
+        (date(2026, 1, 15), int(datetime(2026, 1, 15, 13, tzinfo=timezone.utc).timestamp())),
+        (date(2026, 7, 15), int(datetime(2026, 7, 15, 12, tzinfo=timezone.utc).timestamp())),
+    ],
+)
+def test_server_show_at_epoch_is_iana_timezone_authoritative(target_date, expected_epoch):
+    show_at = OfflineScheduleRepository._show_at(target_date, "08:00", "America/New_York")
+
+    assert int(datetime.fromisoformat(show_at).timestamp()) == expected_epoch

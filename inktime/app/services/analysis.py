@@ -34,7 +34,7 @@ from inktime.app.domain.analysis.scoring import (
 )
 from inktime.app.domain.photos import ThumbnailCache
 from inktime.app.domain.photos.quality_policy import FEATURE_VERSION, evaluate_local_quality
-from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
+from inktime.app.providers.base import ProviderResponse, Usage, VisionAttemptState, VisionProvider
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
@@ -751,6 +751,7 @@ class PhotoAnalysisService:
                     0,
                 )
         try:
+            vision_attempt = VisionAttemptState()
             if selected_channel is not None:
                 router: Any = provider
                 if not router.acquire_channel(selected_channel):
@@ -775,6 +776,7 @@ class PhotoAnalysisService:
                     vision_request_fingerprint=request_fingerprint,
                     vision_input_spec_json=vision_json,
                     cache_provider_identity=actual_provider,
+                    vision_attempt=vision_attempt,
                 )
         except Exception as exc:
             self.photos.finish_ai_cache_reservation(cache_key, owner_id, error=str(exc))
@@ -808,7 +810,9 @@ class PhotoAnalysisService:
             # A timeout/connection failure after a vision POST may have
             # completed remotely.  Keep the reservation error visible and
             # never send the same image to another Provider automatically.
-            if bool(getattr(exc, "ambiguous", False)):
+            if vision_attempt.vision_started or bool(getattr(exc, "vision_started", False)) or bool(
+                getattr(exc, "ambiguous", False)
+            ):
                 raise
             channels = getattr(provider, "channels", ())
             excluded = set(_excluded_providers or ()) | {actual_provider}
@@ -865,6 +869,7 @@ class PhotoAnalysisService:
         vision_request_fingerprint: str,
         vision_input_spec_json: str,
         cache_provider_identity: str,
+        vision_attempt: VisionAttemptState,
     ) -> tuple[dict, str, float, Usage, int]:
         if self.budgets:
             self.budgets.assert_request_allowed(job_id, photo_id)
@@ -892,6 +897,11 @@ class PhotoAnalysisService:
                 "reasoning_effort": reasoning_effort,
                 "caption_controls": caption_controls,
             }
+            if self.process_boundary is None:
+                # Cooperative providers may use this mutable marker to tell
+                # the caller exactly when their transport has been handed the
+                # image.  It is deliberately not sent into a child process.
+                call["vision_attempt"] = vision_attempt
             if self.process_boundary is not None and hasattr(provider, "analyze_isolated"):
                 response = provider.analyze_isolated(self.process_boundary, **call)
             elif self.process_boundary is not None:
@@ -906,6 +916,7 @@ class PhotoAnalysisService:
                         max_tokens=max_tokens,
                         reasoning_effort=reasoning_effort,
                         caption_controls=caption_controls,
+                        vision_attempt=vision_attempt,
                     )
                 else:
                     response = self.process_boundary.call_provider(
@@ -923,7 +934,10 @@ class PhotoAnalysisService:
                     max_tokens=max_tokens,
                     reasoning_effort=reasoning_effort,
                     caption_controls=caption_controls,
+                    vision_attempt=vision_attempt,
                 )
+            vision_attempt.vision_started = True
+            vision_attempt.vision_completed = True
         except TimeoutError:
             self._activity(
                 "WARNING",
@@ -969,6 +983,7 @@ class PhotoAnalysisService:
                     trace_id=prompt_version,
                 )
         except AnalysisValidationError as first_error:
+            vision_attempt.repair_attempted = True
             self._activity(
                 "DEBUG",
                 "provider_json_retry",

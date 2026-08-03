@@ -270,10 +270,9 @@ class DisplayPreparationService:
                 result = self.render_service.publish(
                     [str(candidate["id"])],
                     created_by,
-                    history={
-                        "history_date": target.isoformat(),
-                        "selection_method": "offline_schedule_prepare",
-                    },
+                    # Preparation reserves and downloads a formal frame; it
+                    # is not evidence that the panel displayed it.
+                    history=None,
                     device_ids=[device_id],
                     quantity_override=1,
                     device_configs={device_id: dict(device)},

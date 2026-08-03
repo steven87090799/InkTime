@@ -20,6 +20,15 @@ class ProviderResponse:
     request_id: str | None = None
 
 
+@dataclass
+class VisionAttemptState:
+    """Bound one analysis attempt to at most one image-bearing request."""
+
+    vision_started: bool = False
+    vision_completed: bool = False
+    repair_attempted: bool = False
+
+
 class VisionProvider(ABC):
     supports_reasoning_effort = False
 
@@ -90,6 +99,7 @@ class VisionProvider(ABC):
         max_tokens: int | None = None,
         caption_controls: dict | None = None,
         reasoning_effort: str | None = None,
+        vision_attempt: VisionAttemptState | None = None,
     ) -> ProviderResponse:
         raise NotImplementedError
 

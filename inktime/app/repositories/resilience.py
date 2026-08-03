@@ -721,6 +721,23 @@ class ResilienceRepository:
             ).fetchone()
             if not item:
                 raise PermissionError("QUEUE-002 Queue Item 不屬於此裝置")
+            existing_event = connection.execute(
+                "SELECT device_id,payload_json FROM device_content_queue_events "
+                "WHERE queue_item_id=? AND event_type=? AND idempotency_key=?",
+                (item_id, event, key),
+            ).fetchone()
+            if existing_event:
+                try:
+                    stored_payload = json.loads(str(existing_event["payload_json"] or "{}"))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    stored_payload = {}
+                incoming_release = str(payload.get("release_id", "")).strip()
+                stored_release = str(stored_payload.get("release_id", "")).strip()
+                if incoming_release and incoming_release != stored_release:
+                    raise ValueError("QUEUE-005 ACK replay release_id 身分不一致")
+                if str(existing_event["device_id"]) != device_id:
+                    raise PermissionError("QUEUE-002 ACK replay 裝置身分不一致")
+                return {"status": "ok", "queue_item_id": item_id, "event": event, "idempotent": True}
             queue = connection.execute(
                 "SELECT queue_version,current_release_id FROM device_content_queues WHERE device_id=?",
                 (device_id,),
@@ -742,14 +759,52 @@ class ResilienceRepository:
                 and not (delayed_terminal and queue_version <= int(queue["queue_version"]))
             ):
                 raise ValueError("QUEUE-003 ACK Queue 版本已過期")
-            existing_event = connection.execute(
-                "SELECT 1 FROM device_content_queue_events WHERE queue_item_id=? AND event_type=? AND idempotency_key=?",
-                (item_id, event, key),
-            ).fetchone()
-            if existing_event:
-                return {"status": "ok", "queue_item_id": item_id, "event": event, "idempotent": True}
             if event not in QUEUE_ALLOWED_EVENTS.get(str(item["status"]), set()):
                 raise ValueError("QUEUE-004 ACK 狀態轉移不合法")
+            if payload.get("event_epoch") is not None and not delayed_terminal:
+                raise ValueError("QUEUE-005 event_epoch 僅可用於 delayed_terminal ACK")
+            event_at = now
+            timestamp_source = "server_fallback"
+            history_date = now[:10]
+            if delayed_terminal:
+                slot = connection.execute(
+                    """
+                    SELECT s.show_at,os.target_date,os.timezone
+                    FROM device_offline_schedule_slots s
+                    JOIN device_offline_schedules os ON os.id=s.schedule_id
+                    WHERE s.queue_item_id=? AND s.schedule_id=?
+                    LIMIT 1
+                    """,
+                    (item_id, str(item["offline_schedule_id"])),
+                ).fetchone()
+                if slot is None:
+                    raise ValueError("QUEUE-005 delayed_terminal 缺少離線 Slot 身分")
+                history_date = str(slot["target_date"])
+                if payload.get("event_epoch") is not None:
+                    event_epoch = json_int(
+                        payload,
+                        "event_epoch",
+                        required=True,
+                        minimum=1,
+                        maximum=4_102_444_800,
+                        error_prefix="QUEUE-005",
+                    )
+                    try:
+                        event_dt = datetime.fromtimestamp(event_epoch, timezone.utc)
+                        show_at = datetime.fromisoformat(str(slot["show_at"]))
+                        retention = datetime.fromisoformat(str(item["terminal_ack_retention"]))
+                    except (TypeError, ValueError, OverflowError) as exc:
+                        raise ValueError("QUEUE-005 event_epoch 時間格式不合法") from exc
+                    server_now = datetime.fromisoformat(now)
+                    skew = timedelta(minutes=10)
+                    if (
+                        event_dt > server_now + skew
+                        or event_dt < show_at - skew
+                        or event_dt > retention
+                    ):
+                        raise ValueError("QUEUE-005 event_epoch 超出離線顯示時間範圍")
+                    event_at = event_dt.isoformat()
+                    timestamp_source = "device_event"
             connection.execute(
                 "INSERT INTO device_content_queue_events(queue_item_id,device_id,event_type,idempotency_key,payload_json,created_at) VALUES (?,?,?,?,?,?)",
                 (
@@ -762,7 +817,7 @@ class ResilienceRepository:
                 ),
             )
             status = QUEUE_STATUS_FOR_EVENT[event]
-            displayed_at = now if event == "DISPLAY_COMPLETED" else None
+            displayed_at = event_at if event == "DISPLAY_COMPLETED" else None
             connection.execute(
                 "UPDATE device_content_queue_items SET status=?,downloaded_at=CASE WHEN ? IN ('DOWNLOAD_COMPLETED','HASH_VERIFIED') THEN ? ELSE downloaded_at END,displayed_at=COALESCE(?,displayed_at),retry_count=retry_count+CASE WHEN ?='DISPLAY_FAILED' THEN 1 ELSE 0 END,last_error_code=?,updated_at=? WHERE id=?",
                 (
@@ -807,10 +862,16 @@ class ResilienceRepository:
                             (SELECT 1 FROM display_history WHERE photo_id=? AND release_id=? AND selection_method='device_queue_ack')""",
                             (
                                 photo_id,
-                                now[:10],
+                                history_date,
                                 item["release_id"],
-                                now,
-                                _json({"device_id": device_id, "queue_item_id": item_id}),
+                                event_at,
+                                _json(
+                                    {
+                                        "device_id": device_id,
+                                        "queue_item_id": item_id,
+                                        "timestamp_source": timestamp_source,
+                                    }
+                                ),
                                 photo_id,
                                 item["release_id"],
                             ),

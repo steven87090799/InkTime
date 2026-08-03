@@ -1347,6 +1347,163 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_photo_reviews_photo_level ON photo_reviews(photo_id,analysis_id,version DESC)",
         ),
     ),
+    Migration(
+        29,
+        "修正離線排程佇列外鍵刪除策略並保留既有資料",
+        (
+            # Migration 28 used ON DELETE SET NULL for the queue item's
+            # schedule owner while the ownership trigger required that owner
+            # to remain non-NULL.  Rebuild the queue and its three dependent
+            # tables together so the stricter RESTRICT contract is real at
+            # the SQLite FK layer, without changing any prior migration.
+            "PRAGMA defer_foreign_keys=ON",
+            "DROP TRIGGER IF EXISTS trg_queue_offline_schedule_owner_insert",
+            "DROP TRIGGER IF EXISTS trg_queue_offline_schedule_owner_update",
+            "DROP TRIGGER IF EXISTS trg_queue_online_schedule_owner",
+            "DROP TRIGGER IF EXISTS trg_queue_online_schedule_owner_update",
+            """
+            CREATE TABLE device_content_queue_items_v29 (
+                id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE RESTRICT,
+                position INTEGER NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 100,
+                display_after TEXT,
+                expires_at TEXT,
+                status TEXT NOT NULL,
+                downloaded_at TEXT,
+                displayed_at TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error_code TEXT,
+                idempotency_key TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                delivery_mode TEXT NOT NULL DEFAULT 'online_queue'
+                    CHECK(delivery_mode IN ('online_queue','offline_schedule')),
+                offline_prefetch_allowed INTEGER NOT NULL DEFAULT 0
+                    CHECK(offline_prefetch_allowed IN (0,1)),
+                offline_slot TEXT,
+                ack_deadline TEXT,
+                offline_schedule_id TEXT REFERENCES device_offline_schedules(id) ON DELETE RESTRICT,
+                terminal_ack_retention TEXT,
+                UNIQUE(device_id,release_id),
+                UNIQUE(device_id,position),
+                UNIQUE(device_id,idempotency_key)
+            )
+            """,
+            """
+            INSERT INTO device_content_queue_items_v29(
+                id,device_id,release_id,position,priority,display_after,expires_at,status,
+                downloaded_at,displayed_at,retry_count,last_error_code,idempotency_key,created_at,updated_at,
+                delivery_mode,offline_prefetch_allowed,offline_slot,ack_deadline,offline_schedule_id,
+                terminal_ack_retention
+            )
+            SELECT
+                id,device_id,release_id,position,priority,display_after,expires_at,status,
+                downloaded_at,displayed_at,retry_count,last_error_code,idempotency_key,created_at,updated_at,
+                delivery_mode,offline_prefetch_allowed,offline_slot,ack_deadline,offline_schedule_id,
+                terminal_ack_retention
+            FROM device_content_queue_items
+            """,
+            """
+            CREATE TABLE device_content_queue_events_v29 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                queue_item_id TEXT NOT NULL REFERENCES device_content_queue_items_v29(id) ON DELETE CASCADE,
+                device_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                idempotency_key TEXT,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                UNIQUE(queue_item_id,event_type,idempotency_key)
+            )
+            """,
+            """
+            INSERT INTO device_content_queue_events_v29(
+                id,queue_item_id,device_id,event_type,idempotency_key,payload_json,created_at
+            )
+            SELECT id,queue_item_id,device_id,event_type,idempotency_key,payload_json,created_at
+            FROM device_content_queue_events
+            """,
+            """
+            CREATE TABLE device_offline_schedule_slots_v29 (
+                id TEXT PRIMARY KEY,
+                schedule_id TEXT NOT NULL REFERENCES device_offline_schedules(id) ON DELETE CASCADE,
+                slot_index INTEGER NOT NULL CHECK(slot_index >= 0),
+                show_at TEXT NOT NULL,
+                release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE RESTRICT,
+                queue_item_id TEXT NOT NULL REFERENCES device_content_queue_items_v29(id) ON DELETE RESTRICT,
+                sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(schedule_id,slot_index),
+                UNIQUE(schedule_id,show_at)
+            )
+            """,
+            """
+            INSERT INTO device_offline_schedule_slots_v29(
+                id,schedule_id,slot_index,show_at,release_id,queue_item_id,sha256,created_at
+            )
+            SELECT id,schedule_id,slot_index,show_at,release_id,queue_item_id,sha256,created_at
+            FROM device_offline_schedule_slots
+            """,
+            """
+            CREATE TABLE rollout_targets_v29 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rollout_id TEXT NOT NULL REFERENCES rollout_campaigns(id) ON DELETE CASCADE,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                status TEXT NOT NULL DEFAULT 'pending',
+                queue_item_id TEXT REFERENCES device_content_queue_items_v29(id) ON DELETE SET NULL,
+                last_error_code TEXT,
+                updated_at TEXT NOT NULL,
+                UNIQUE(rollout_id,device_id)
+            )
+            """,
+            """
+            INSERT INTO rollout_targets_v29(
+                id,rollout_id,device_id,status,queue_item_id,last_error_code,updated_at
+            )
+            SELECT id,rollout_id,device_id,status,queue_item_id,last_error_code,updated_at
+            FROM rollout_targets
+            """,
+            "DROP TABLE device_content_queue_events",
+            "DROP TABLE device_offline_schedule_slots",
+            "DROP TABLE rollout_targets",
+            "DROP TABLE device_content_queue_items",
+            "ALTER TABLE device_content_queue_items_v29 RENAME TO device_content_queue_items",
+            "ALTER TABLE device_content_queue_events_v29 RENAME TO device_content_queue_events",
+            "ALTER TABLE device_offline_schedule_slots_v29 RENAME TO device_offline_schedule_slots",
+            "ALTER TABLE rollout_targets_v29 RENAME TO rollout_targets",
+            "CREATE INDEX idx_queue_items_device_status_position ON device_content_queue_items(device_id,status,position)",
+            "CREATE INDEX idx_queue_items_offline_slot ON device_content_queue_items(device_id,delivery_mode,offline_slot,status)",
+            "CREATE INDEX idx_queue_items_offline_schedule_status ON device_content_queue_items(device_id,offline_schedule_id,status)",
+            "CREATE INDEX idx_offline_schedule_slots_schedule_index ON device_offline_schedule_slots(schedule_id,slot_index)",
+            """
+            CREATE TRIGGER trg_queue_offline_schedule_owner_insert
+            BEFORE INSERT ON device_content_queue_items
+            WHEN NEW.delivery_mode='offline_schedule' AND (NEW.offline_schedule_id IS NULL OR NOT EXISTS(
+                SELECT 1 FROM device_offline_schedules s WHERE s.id=NEW.offline_schedule_id AND s.device_id=NEW.device_id))
+            BEGIN SELECT RAISE(ABORT,'QUEUE-005 offline queue item requires matching offline_schedule_id'); END
+            """,
+            """
+            CREATE TRIGGER trg_queue_offline_schedule_owner_update
+            BEFORE UPDATE OF delivery_mode,offline_schedule_id,device_id ON device_content_queue_items
+            WHEN NEW.delivery_mode='offline_schedule' AND (NEW.offline_schedule_id IS NULL OR NOT EXISTS(
+                SELECT 1 FROM device_offline_schedules s WHERE s.id=NEW.offline_schedule_id AND s.device_id=NEW.device_id))
+            BEGIN SELECT RAISE(ABORT,'QUEUE-005 offline queue item requires matching offline_schedule_id'); END
+            """,
+            """
+            CREATE TRIGGER trg_queue_online_schedule_owner
+            BEFORE INSERT ON device_content_queue_items
+            WHEN NEW.delivery_mode='online_queue' AND NEW.offline_schedule_id IS NOT NULL
+            BEGIN SELECT RAISE(ABORT,'QUEUE-005 online queue item cannot own offline schedule'); END
+            """,
+            """
+            CREATE TRIGGER trg_queue_online_schedule_owner_update
+            BEFORE UPDATE OF delivery_mode,offline_schedule_id ON device_content_queue_items
+            WHEN NEW.delivery_mode='online_queue' AND NEW.offline_schedule_id IS NOT NULL
+            BEGIN SELECT RAISE(ABORT,'QUEUE-005 online queue item cannot own offline schedule'); END
+            """,
+        ),
+    ),
 )
 
 

@@ -201,6 +201,27 @@ def test_invalid_repair_container_fails_without_a_second_vision_request(app, tmp
     assert provider.repair_calls == 1
 
 
+def test_router_does_not_fail_over_after_initial_vision_and_repair_failure(app, tmp_path):
+    _, ids, service = prepare(app, tmp_path)
+    first = MockProvider(["[]", "{}"])
+    first.provider_id = "first-vision"
+    second = MockProvider([valid_result()])
+    second.provider_id = "second-vision"
+    router = FailoverVisionProvider(
+        [ProviderChannel(first, priority=1), ProviderChannel(second, priority=2)],
+        failure_threshold=1,
+    )
+
+    with pytest.raises(AnalysisValidationError):
+        service.analyze_photo(
+            photo_id=ids[0], job_id=None, provider=router, strategy="high_quality", high_model="mock"
+        )
+
+    assert first.analyze_calls == 1
+    assert first.repair_calls == 1
+    assert second.analyze_calls == 0
+
+
 def test_full_analysis_hits_historical_v2_cache_without_an_image_call(app, tmp_path):
     _, ids, service = prepare(app, tmp_path)
     first = MockProvider([valid_result()])

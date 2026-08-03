@@ -108,6 +108,22 @@ def test_queue_manifest_download_ack_is_owned_idempotent_and_updates_history(cli
     assert other_id != device_id
 
 
+def test_generic_queue_manifest_is_bounded_and_excludes_offline_schedule_rows(client, app):
+    device_id, token = app.extensions["inktime_device_repository"].create("Queue bound")
+    queue = app.extensions["inktime_resilience_repository"]
+    queue.ensure_queue(device_id, depth=14)
+    for index in range(14):
+        release = _published_release(app, f"queue-bound-{index}")
+        queue.enqueue_release(device_id=device_id, release_id=release["release_id"])
+
+    manifest = client.get(
+        "/api/device/v1/queue/manifest", headers={"Authorization": f"Bearer {token}"}
+    ).get_json()
+
+    assert len(manifest["items"]) == 14
+    assert all(item["delivery_mode"] == "online_queue" for item in manifest["items"])
+
+
 def test_queue_rejects_stale_version_and_illegal_transition(client, app):
     create_admin(app)
     login(client)

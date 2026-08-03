@@ -116,6 +116,9 @@ int main() {
     "2026-08-03",
     "2026-08-03",
     "Asia/Taipei",
+    1785686400,
+    1785772800,
+    1785700000,
     2,
     1,
     0,
@@ -124,6 +127,7 @@ int main() {
     "check_new",
     4,
     4,
+    true,
     true,
     true,
   };
@@ -146,6 +150,9 @@ int main() {
   OfflineScheduleContract invalidIdentity = validSchedule;
   invalidIdentity.queueIdentityValid = false;
   assert(!validOfflineScheduleContract(invalidIdentity));
+  OfflineScheduleContract invalidEpochs = validSchedule;
+  invalidEpochs.slotEpochsValid = false;
+  assert(!validOfflineScheduleContract(invalidEpochs));
   OfflineWakePlan wakePlan = {};
   assert(buildOfflineWakePlan(100, 200, 400, wakePlan));
   assert(wakePlan.sleepUntilEpoch == 200);

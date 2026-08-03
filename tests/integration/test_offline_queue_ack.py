@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from uuid import uuid4
 
 from PIL import Image
@@ -104,6 +105,7 @@ def test_delayed_terminal_ack_is_only_allowed_for_prefetched_offline_item(client
         release_id=release["release_id"],
     )
     assert delayed_started.status_code == 400
+    completed_epoch = int(datetime.now(timezone.utc).timestamp())
     delayed = _ack(
         client,
         token,
@@ -113,6 +115,7 @@ def test_delayed_terminal_ack_is_only_allowed_for_prefetched_offline_item(client
         "delayed-completed",
         ack_mode="delayed_terminal",
         release_id=release["release_id"],
+        event_epoch=completed_epoch,
     )
     assert delayed.status_code == 200
     replay = _ack(
@@ -138,9 +141,90 @@ def test_delayed_terminal_ack_is_only_allowed_for_prefetched_offline_item(client
             "SELECT COUNT(*) FROM display_history WHERE release_id=? AND selection_method='device_queue_ack'",
             (release["release_id"],),
         ).fetchone()[0]
+        history = connection.execute(
+            "SELECT history_date,displayed_at,metadata_json FROM display_history WHERE release_id=? AND selection_method='device_queue_ack'",
+            (release["release_id"],),
+        ).fetchone()
     assert queue_head["current_release_id"] == newer_release["release_id"]
     assert event_count == 1
     assert history_count == 1
+    assert history["history_date"] == "2026-08-03"
+    assert history["displayed_at"] == datetime.fromtimestamp(completed_epoch, timezone.utc).isoformat()
+    assert json.loads(history["metadata_json"])["timestamp_source"] == "device_event"
+
+    failed_device, failed_token = app.extensions["inktime_device_repository"].create(
+        "離線失敗 ACK",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00"],
+    )
+    failed_release = _release(app, "offline-failed-ack")
+    schedule_repository.prepare_day(
+        device_id=failed_device,
+        target_date="2026-08-03",
+        release_ids=[failed_release["release_id"]],
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        failed_item = dict(
+            connection.execute(
+                "SELECT * FROM device_content_queue_items WHERE device_id=?",
+                (failed_device,),
+            ).fetchone()
+        )
+        failed_version = int(
+            connection.execute(
+                "SELECT queue_version FROM device_content_queues WHERE device_id=?",
+                (failed_device,),
+            ).fetchone()[0]
+        )
+    failed_token_epoch = int(datetime.now(timezone.utc).timestamp())
+    for index, event in enumerate(("MANIFEST_RECEIVED", "DOWNLOAD_COMPLETED", "HASH_VERIFIED")):
+        assert _ack(
+            client,
+            failed_token,
+            failed_item["id"],
+            failed_version,
+            event,
+            f"failed-prepare-{index}",
+        ).status_code == 200
+    failed = _ack(
+        client,
+        failed_token,
+        failed_item["id"],
+        failed_version - 1,
+        "DISPLAY_FAILED",
+        "delayed-failed",
+        ack_mode="delayed_terminal",
+        release_id=failed_release["release_id"],
+        event_epoch=failed_token_epoch,
+        error_code="DISPLAY-TIMEOUT",
+    )
+    failed_replay = _ack(
+        client,
+        failed_token,
+        failed_item["id"],
+        failed_version - 1,
+        "DISPLAY_FAILED",
+        "delayed-failed",
+        ack_mode="delayed_terminal",
+        release_id=failed_release["release_id"],
+        event_epoch=failed_token_epoch,
+        error_code="DISPLAY-TIMEOUT",
+    )
+    assert failed.status_code == 200
+    assert failed_replay.status_code == 200
+    assert failed_replay.get_json()["idempotent"] is True
+    with app.extensions["inktime_database"].session() as connection:
+        failed_state = connection.execute(
+            "SELECT status,COUNT(*) OVER () AS _count FROM device_content_queue_items WHERE id=?",
+            (failed_item["id"],),
+        ).fetchone()
+        failed_event_count = connection.execute(
+            "SELECT COUNT(*) FROM device_content_queue_events WHERE queue_item_id=? AND event_type='DISPLAY_FAILED'",
+            (failed_item["id"],),
+        ).fetchone()[0]
+    assert failed_state["status"] == "FAILED"
+    assert failed_event_count == 1
 
     ordinary, ordinary_token = app.extensions["inktime_device_repository"].create("一般 ACK")
     ordinary_release = _release(app, "ordinary-ack")

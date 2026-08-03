@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, time, timedelta, timezone
 import json
 import logging
 import re
@@ -591,12 +591,20 @@ def device_offline_schedule():
     timezone_name = str(schedule["timezone"])
     try:
         snapshot_zone = ZoneInfo(timezone_name)
+        target_day = date.fromisoformat(str(schedule["target_date"]))
+        target_start = datetime.combine(target_day, time.min, tzinfo=snapshot_zone)
+        target_end = datetime.combine(target_day + timedelta(days=1), time.min, tzinfo=snapshot_zone)
+        target_start_epoch = int(target_start.astimezone(timezone.utc).timestamp())
+        target_end_epoch = int(target_end.astimezone(timezone.utc).timestamp())
+        utc_offset = target_start.utcoffset()
+        utc_offset_minutes = int(utc_offset.total_seconds() // 60) if utc_offset is not None else None
         slots = []
         for raw_slot in result["slots"]:
             slot = dict(raw_slot)
             slot["show_at"] = datetime.fromisoformat(str(slot["show_at"])).astimezone(snapshot_zone).isoformat()
+            slot["show_at_epoch"] = int(datetime.fromisoformat(str(slot["show_at"])).timestamp())
             slots.append(slot)
-    except (TypeError, ValueError, ZoneInfoNotFoundError):
+    except (TypeError, ValueError, OverflowError, ZoneInfoNotFoundError):
         abort(409, description="DEVICE-008 離線排程時間資料不合法")
     device_projection = result.get("device") or {}
     panel_profile = device_projection.get("panel_profile")
@@ -617,6 +625,9 @@ def device_offline_schedule():
         "target_date": str(schedule["target_date"]),
         "target_local_date": str(schedule["target_date"]),
         "timezone": str(schedule["timezone"]),
+        "target_start_epoch": target_start_epoch,
+        "target_end_epoch": target_end_epoch,
+        "utc_offset_minutes_for_target_date": utc_offset_minutes,
         "delivery_mode": "inktime_offline_schedule",
         "panel_profile": str(panel_profile),
         "rotation": int(rotation),
