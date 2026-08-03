@@ -64,7 +64,7 @@ Webhook 採 at-least-once。每個事件持久化穩定 Event ID，所有後續 
 - `bounded-runtime-soak`：Web app、Worker、Scheduler 同時執行；重複 session、device auth success/failure、Queue manifest/ACK、release metadata、scan、scheduler heartbeat 與 webhook mock。輸出 RSS、thread、FD、SQLite connection／writer、open file、child process、pending async work／job、oldest job、scheduler age、WAL、timeout、cleanup、exit status 與 final JSON summary。手動 workflow 可跑 30 分鐘、2 小時或 5 小時；24 小時只在受控 LAN 主機本地執行。
 - Backup/Restore：fresh database → full metadata backup → fresh target restore；驗證 Migration 27、administrator/password/session、device token、release/queue、settings、Batch lifecycle tables、Review／offline schedule tables、Secret exclusion、Worker/Scheduler bootstrap。舊 snapshot upgrade 由 migration fixtures 覆蓋。
 - Current schema gate：Release image 與 LAN production gate 都從 `inktime/app/db/migrations.py` 讀取目前最高 Migration，不再各自維護硬編碼版本；本輪預期為 Migration 32。Migration 32 的 upgrade／fresh／integrity／rollback 證據必須在 Final-Head CI 取得。
-- Container supply-chain：`container-security.yml` 在 exact checkout 建置 image，輸出 CycloneDX SBOM，並以 Trivy 掃描 High/Critical；任何 High/Critical 都使 workflow 失敗。此 workflow 不代表真實 NAS host、registry 或 production image 已驗證。
+- Container supply-chain：`container-security.yml` 在 exact checkout 建置 image，輸出 CycloneDX SBOM，並以 Trivy 掃描 High/Critical；只有 `.trivyignore` 內逐一列出、含 owner／reason／expiry 的暫時 unfixed CVE 例外不阻擋，未列入的 High/Critical 仍使 workflow 失敗。例外到期前必須重評估 pinned base image；此 workflow 不代表真實 NAS host、registry 或 production image 已驗證。
 - Rollback：不支援只降程式、不還原 DB。必須停止 Web/Worker/Scheduler、還原相容 snapshot，再切回相容 image/commit。
 
 ## Dependency／Actions

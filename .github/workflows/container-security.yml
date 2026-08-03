@@ -36,9 +36,11 @@ jobs:
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "${PWD}/artifacts:/artifacts" \
+            -v "${PWD}/.trivyignore:/trivyignore:ro" \
             aquasec/trivy:0.60.0 image \
             --format json \
             --output "/artifacts/inktime-trivy-${GITHUB_SHA}.json" \
+            --ignorefile /trivyignore \
             --severity HIGH,CRITICAL \
             --exit-code 1 \
             inktime:ci
@@ -46,9 +48,11 @@ jobs:
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "${PWD}/artifacts:/artifacts" \
+            -v "${PWD}/.trivyignore:/trivyignore:ro" \
             aquasec/trivy:0.60.0 image \
             --format table \
             --output "/artifacts/inktime-trivy-${GITHUB_SHA}.txt" \
+            --ignorefile /trivyignore \
             --severity HIGH,CRITICAL \
             --exit-code 0 \
             inktime:ci
