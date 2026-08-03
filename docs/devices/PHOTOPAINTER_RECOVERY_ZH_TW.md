@@ -33,3 +33,10 @@
 ## 觀測與驗證邊界
 
 伺服器事件可證明的是授權、轉換、HTTP status、Queue 狀態與資料庫原子性；它不能證明 Stock 面板已刷新。實機恢復必須另外記錄 board revision、firmware commit、供電、BUSY waveform、刷新時間、PMIC/SD/RTC 狀態、畫面方向與待機電流。這些量測尚未在本輪執行，狀態是 `NOT RUN`。
+
+## 跨日恢復順序
+
+1. 只以 `target=current` 或 `target=next` 取得排程；`target=next` 的 404 必須保留 `target_date`、`retry_after_epoch` 與第一個可服務 `next_slot_epoch`，重試不能跳到 generic `now+15m` 而越過明日第一 Slot。
+2. 明日檔案先進 `/inktime/schedule/staged_next.json`。它包含 future schedule、button、rotation、prefetch lead 與 config snapshot，但在午夜前不改 active schedule 或 NVS config。
+3. 午夜以可靠 RTC 先做 staged-next revalidation，再執行原子 promote；若 staged 不存在，current schedule 仍可在 target start 後用 due-formal-slot 規則進行 network recovery。lead 大於 0 不得把已到 00:00 的正式 Slot 誤判成只有 prefetch。
+4. `local_next` 顯示成功只代表本地預覽，不清除 persisted retry；只有 formal display、正式下載或成功 promote 才能清除相應 retry。若第一個 Slot 距離不到一秒，伺服器以整數 epoch 略過該 Slot，選下一個仍可服務的 future Slot。

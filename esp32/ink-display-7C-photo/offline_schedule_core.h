@@ -100,6 +100,92 @@ inline bool validOfflineScheduleContract(const OfflineScheduleContract& contract
   return true;
 }
 
+// A next-day snapshot is validated against the currently active schedule by
+// the firmware before promotion.  It deliberately has a separate contract so
+// the existing current-day aggregate initializer remains source-compatible.
+struct OfflineNextScheduleContract {
+  int32_t schemaVersion;
+  const char* deliveryMode;
+  const char* targetDate;
+  const char* timezone;
+  int64_t targetStartEpoch;
+  int64_t targetEndEpoch;
+  int64_t activeTargetEndEpoch;
+  int64_t nowEpoch;
+  uint32_t configVersion;
+  uint32_t currentConfigVersion;
+  int32_t rotation;
+  const char* panelProfile;
+  const char* expectedPanelProfile;
+  const char* buttonWakeAction;
+  uint8_t slotCount;
+  uint8_t scheduleCount;
+  bool targetDateIsNext;
+  bool queueIdentityValid;
+  bool sha256Valid;
+  bool slotEpochsValid;
+};
+
+inline bool validOfflineNextScheduleContract(const OfflineNextScheduleContract& contract) {
+  if (contract.schemaVersion != kOfflineScheduleSchemaVersion
+      || contract.deliveryMode == nullptr
+      || strcmp(contract.deliveryMode, "inktime_offline_schedule") != 0
+      || !validIsoLocalDate(contract.targetDate)
+      || contract.timezone == nullptr || contract.timezone[0] == '\0'
+      || strlen(contract.timezone) > 64U
+      || contract.targetStartEpoch <= 0
+      || contract.targetEndEpoch <= contract.targetStartEpoch
+      || contract.activeTargetEndEpoch != contract.targetStartEpoch
+      || contract.nowEpoch <= 0
+      || contract.nowEpoch >= contract.targetStartEpoch
+      || contract.configVersion < contract.currentConfigVersion
+      || (contract.rotation != 0 && contract.rotation != 180)
+      || contract.panelProfile == nullptr || contract.panelProfile[0] == '\0'
+      || contract.expectedPanelProfile == nullptr
+      || (strcmp(contract.panelProfile, "safe_4c") != 0
+          && strcmp(contract.panelProfile, contract.expectedPanelProfile) != 0)
+      || contract.buttonWakeAction == nullptr
+      || (strcmp(contract.buttonWakeAction, "check_new") != 0
+          && strcmp(contract.buttonWakeAction, "local_next") != 0)
+      || contract.slotCount == 0U || contract.slotCount > kMaxOfflineSlots
+      || contract.slotCount != contract.scheduleCount
+      || !contract.targetDateIsNext
+      || !contract.queueIdentityValid || !contract.sha256Valid || !contract.slotEpochsValid) {
+    return false;
+  }
+  return true;
+}
+
+inline bool scheduleHasDueFormalSlot(
+  const int64_t* showAtEpochs,
+  uint8_t count,
+  uint64_t nowEpoch,
+  uint64_t graceSeconds = 15ULL * 60ULL
+) {
+  if (showAtEpochs == nullptr || count == 0U || count > kMaxOfflineSlots) return false;
+  for (uint8_t index = 0; index < count; ++index) {
+    if (showAtEpochs[index] <= 0 || showAtEpochs[index] > static_cast<int64_t>(nowEpoch)) continue;
+    if (nowEpoch - static_cast<uint64_t>(showAtEpochs[index]) <= graceSeconds) return true;
+  }
+  return false;
+}
+
+inline bool validOfflineNextPrefetchEpoch(
+  int64_t nowEpoch,
+  int64_t targetStartEpoch,
+  int64_t firstSlotEpoch,
+  uint16_t leadMinutes,
+  int64_t& outputEpoch
+) {
+  outputEpoch = 0;
+  if (nowEpoch <= 0 || targetStartEpoch <= nowEpoch || firstSlotEpoch <= targetStartEpoch
+      || leadMinutes > 120U) return false;
+  const int64_t candidate = firstSlotEpoch - static_cast<int64_t>(leadMinutes) * 60LL;
+  if (candidate <= nowEpoch || candidate >= firstSlotEpoch) return false;
+  outputEpoch = candidate;
+  return true;
+}
+
 struct OfflineWakePlan {
   uint64_t prefetchEpoch;
   uint64_t displayEpoch;

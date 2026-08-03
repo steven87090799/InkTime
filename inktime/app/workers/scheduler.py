@@ -130,15 +130,69 @@ class SchedulerRunner:
         # the configured local preparation hour.
         if not any(slot_at(target, slot) > local_now for slot in slots):
             return None
-        # A stalled scheduler may miss more than one midnight.  Keep the
-        # catch-up bounded while still selecting the newest day that needs a
-        # complete schedule.
-        for _ in range(370):
-            next_target = target + timedelta(days=1)
-            if local_now < prefetch_at(next_target):
-                break
-            target = next_target
+        # This helper is intentionally today-only.  A separate tomorrow
+        # decision below prevents a due tomorrow preparation point from
+        # replacing a still-serviceable later slot today.
         return target
+
+    @staticmethod
+    def _offline_tomorrow_prefetch_due(
+        local_now: datetime,
+        schedule: list[str],
+        lead_minutes: int,
+        server_margin_minutes: int,
+        future_prepare_hour: int,
+    ) -> bool:
+        """Return whether tomorrow needs technical preparation now."""
+
+        if type(future_prepare_hour) is not int or not 0 <= future_prepare_hour <= 23:
+            raise ValueError("DEVICE-008 future_schedule_prepare_hour_local 不合法")
+        if type(lead_minutes) is not int or not 0 <= lead_minutes <= 120:
+            raise ValueError("DEVICE-008 prefetch_lead_minutes 不合法")
+        if type(server_margin_minutes) is not int or not 0 <= server_margin_minutes <= 60:
+            raise ValueError("DEVICE-008 server_prefetch_margin_minutes 不合法")
+        slots = validate_offline_schedule(schedule, maximum=12)
+        zone = local_now.tzinfo
+        if zone is None:
+            raise ValueError("DEVICE-008 裝置時間必須包含時區")
+        tomorrow = local_now.date() + timedelta(days=1)
+        configured = datetime.combine(
+            local_now.date(), clock_time(future_prepare_hour, 0), tzinfo=zone
+        )
+        hour, minute = (int(part) for part in slots[0].split(":"))
+        technical = datetime.combine(
+            tomorrow, clock_time(hour, minute), tzinfo=zone
+        ) - timedelta(minutes=lead_minutes + server_margin_minutes)
+        return local_now >= min(configured, technical)
+
+    @classmethod
+    def _offline_prefetch_target_dates(
+        cls,
+        local_now: datetime,
+        schedule: list[str],
+        lead_minutes: int,
+        server_margin_minutes: int = 0,
+        future_prepare_hour: int = 20,
+    ) -> list[date]:
+        """Return independent today/tomorrow preparation targets in order."""
+
+        targets: list[date] = []
+        today = cls._offline_prefetch_target_date(
+            local_now, schedule, lead_minutes, server_margin_minutes
+        )
+        if today is not None:
+            targets.append(today)
+        if cls._offline_tomorrow_prefetch_due(
+            local_now,
+            schedule,
+            lead_minutes,
+            server_margin_minutes,
+            future_prepare_hour,
+        ):
+            tomorrow = local_now.date() + timedelta(days=1)
+            if tomorrow not in targets:
+                targets.append(tomorrow)
+        return targets
 
     def _prepare_due_offline_devices(self, now: datetime) -> None:
         offline_schedules = self.app.extensions.get("inktime_offline_schedule_repository")
@@ -166,20 +220,13 @@ class SchedulerRunner:
                 schedule = validate_offline_schedule(
                     json.loads(str(device["schedule_times_json"] or "[]")), maximum=12
                 )
-                target = self._offline_prefetch_target_date(
+                targets = self._offline_prefetch_target_dates(
                     local_now,
                     schedule,
                     int(device["prefetch_lead_minutes"] or 0),
                     server_margin,
+                    future_prepare_hour,
                 )
-                if target is None:
-                    targets: list[date] = []
-                else:
-                    targets = [target]
-                if local_now.hour >= future_prepare_hour:
-                    tomorrow = local_now.date() + timedelta(days=1)
-                    if tomorrow not in targets:
-                        targets.append(tomorrow)
                 for target_date in targets[:2]:
                     target_iso = target_date.isoformat()
                     if offline_schedules.ready_for_device(

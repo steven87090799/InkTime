@@ -49,3 +49,7 @@ Migration 31 的 Fresh、30→31、pre-migration backup、restore/restart、`PRA
 升級流程必須涵蓋 Fresh Database、29→30、30→31、升級前 SQLite backup、restore、restart、`PRAGMA foreign_key_check` 與 `PRAGMA integrity_check`。任何 Migration 失敗都會在同一交易 rollback；重新啟動會檢查 migration history，發現未完成標記時停止寫入，應使用 pre-migration backup 還原。
 
 升級前建立的 Session 沒有 `session_version`，因此升級後會失效一次並要求重新登入。之後停用／重新啟用帳號、變更或重設密碼、變更角色都會遞增版本並立即撤銷既有 Session。舊帳號與舊密碼仍可登入；新建帳號與變更密碼才套用 3–64 字元帳號與 12–128 字元密碼規則。
+
+## PR #52 跨日修復的資料相容性
+
+本次跨日 staged-next 修復不新增 SQLite schema，也不修改既有 Migration；`MIGRATION=none`。明日 schedule 以 PhotoPainter SD 上 bounded 的 `staged_next.json`、`.tmp` 與 `.bak` 保存，active schedule 仍由既有 snapshot／Queue schema 管理。部署時不需重跑資料遷移；需確認韌體版本同時支援 `target=current|next`、future rotation、午夜 promote 與 non-terminal prefetch ACK。

@@ -575,18 +575,27 @@ def device_offline_schedule():
     device = authenticate_device_request()
     if str(device["delivery_mode"] or "legacy_online") != "inktime_offline_schedule":
         abort(409, description="DEVICE-008 裝置目前不是 enhanced offline schedule 模式")
+    requested_targets = request.args.getlist("target")
+    if len(requested_targets) > 1:
+        abort(400, description="DEVICE-008 target 只允許單一 current 或 next")
+    target = (requested_targets[0] if requested_targets else "current").strip().lower()
+    if target not in {"current", "next"}:
+        abort(400, description="DEVICE-008 target 只允許 current 或 next")
     try:
         local_zone = ZoneInfo(str(device["timezone"]))
-        local_date = datetime.now(local_zone).date().isoformat()
+        current_day = datetime.now(local_zone).date()
     except (TypeError, ValueError, ZoneInfoNotFoundError):
         abort(409, description="DEVICE-008 裝置 IANA 時區不合法")
+    target_day = current_day if target == "current" else current_day + timedelta(days=1)
+    target_date = target_day.isoformat()
     result = _offline_schedules().ready_for_device(
         device_id=str(device["id"]),
-        target_date=local_date,
+        target_date=target_date,
         config_version=int(device["config_version"]),
     )
     if result is None:
-        now_epoch = int(datetime.now(timezone.utc).timestamp())
+        now = datetime.now(timezone.utc)
+        now_epoch = int(now.timestamp())
         try:
             device_schedule = json.loads(str(device["schedule_times_json"] or "[]"))
             server_margin = int(
@@ -594,13 +603,23 @@ def device_offline_schedule():
                     "offline.server_prefetch_margin_minutes", 15
                 )
             )
-            retry_details = OfflineScheduleRepository.retry_after_details(
-                now=datetime.now(timezone.utc),
-                timezone_name=str(device["timezone"]),
-                schedule_times=device_schedule,
-                prefetch_lead_minutes=int(device["prefetch_lead_minutes"]),
-                server_margin_minutes=max(0, min(server_margin, 60)),
-            )
+            if target == "next":
+                retry_details = OfflineScheduleRepository.retry_after_target_details(
+                    now=now,
+                    timezone_name=str(device["timezone"]),
+                    target_date=target_date,
+                    schedule_times=device_schedule,
+                    prefetch_lead_minutes=int(device["prefetch_lead_minutes"]),
+                    server_margin_minutes=max(0, min(server_margin, 60)),
+                )
+            else:
+                retry_details = OfflineScheduleRepository.retry_after_details(
+                    now=now,
+                    timezone_name=str(device["timezone"]),
+                    schedule_times=device_schedule,
+                    prefetch_lead_minutes=int(device["prefetch_lead_minutes"]),
+                    server_margin_minutes=max(0, min(server_margin, 60)),
+                )
             retry_after_epoch = retry_details.retry_after_epoch
             next_slot_epoch = retry_details.next_slot_epoch
         except (TypeError, ValueError, json.JSONDecodeError, KeyError):
@@ -613,6 +632,8 @@ def device_offline_schedule():
                 "error": "schedule_not_ready",
                 "error_code": "DEVICE-008",
                 "message": "schedule_not_ready",
+                "target": target,
+                "target_date": target_date,
                 "retry_after_epoch": int(retry_after_epoch),
                 "next_slot_epoch": next_slot_epoch,
             }
@@ -654,17 +675,35 @@ def device_offline_schedule():
     button_wake_action = device_projection.get("button_wake_action")
     if button_wake_action is None:
         abort(409, description="DEVICE-008 離線排程快照 button_wake_action 不完整")
+    next_target_day = target_day + timedelta(days=1)
+    next_target_start = datetime.combine(next_target_day, time.min, tzinfo=snapshot_zone)
+    next_target_start_epoch = int(next_target_start.astimezone(timezone.utc).timestamp())
+    first_next_slot = OfflineScheduleRepository._show_at(
+        next_target_day, schedule_times[0], timezone_name
+    )
+    next_first_slot_epoch = int(datetime.fromisoformat(first_next_slot).timestamp())
+    next_prefetch_epoch = next_first_slot_epoch - int(prefetch_lead) * 60
+    if (
+        next_prefetch_epoch <= int(datetime.now(timezone.utc).timestamp())
+        or next_prefetch_epoch >= next_first_slot_epoch
+    ):
+        # A past/invalid technical deadline is not a wake instruction.  Keep
+        # the field present so firmware can fail closed without guessing.
+        next_prefetch_epoch = 0
     queue_version = max((int(slot.get("queue_version") or 0) for slot in slots), default=0)
     return {
         "schema_version": 1,
         "device_id": str(device["id"]),
         "schedule_id": str(schedule["id"]),
         "config_version": int(schedule["config_version"]),
+        "target": target,
         "target_date": str(schedule["target_date"]),
         "target_local_date": str(schedule["target_date"]),
         "timezone": str(schedule["timezone"]),
         "target_start_epoch": target_start_epoch,
         "target_end_epoch": target_end_epoch,
+        "next_target_start_epoch": next_target_start_epoch,
+        "next_schedule_prefetch_epoch": next_prefetch_epoch,
         "utc_offset_minutes_for_target_date": utc_offset_minutes,
         "delivery_mode": "inktime_offline_schedule",
         "panel_profile": str(panel_profile),

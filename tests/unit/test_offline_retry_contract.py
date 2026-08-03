@@ -54,3 +54,29 @@ def test_retry_uses_iana_dst_transition_and_keeps_epoch_bounds():
     next_slot_epoch = int(datetime(2026, 3, 8, 3, 30, tzinfo=zone).timestamp())
     assert now_epoch < details.retry_after_epoch < next_slot_epoch
     assert details.next_slot_epoch == next_slot_epoch
+
+
+def test_retry_skips_subsecond_imminent_slot_and_uses_next_serviceable_slot():
+    zone = ZoneInfo("Asia/Taipei")
+    now = datetime(2026, 8, 3, 7, 59, 59, 500000, tzinfo=zone)
+    details = _retry(now, ["08:00", "12:00"])
+    now_epoch = int(now.timestamp())
+    next_slot_epoch = int(datetime(2026, 8, 3, 12, 0, tzinfo=zone).timestamp())
+    assert now_epoch < details.retry_after_epoch < next_slot_epoch
+    assert details.next_slot_epoch == next_slot_epoch
+
+
+def test_next_target_retry_is_bounded_before_tomorrow_first_slot():
+    zone = ZoneInfo("Asia/Taipei")
+    details = OfflineScheduleRepository.retry_after_target_details(
+        now=datetime(2026, 8, 3, 20, 0, tzinfo=zone),
+        timezone_name="Asia/Taipei",
+        target_date="2026-08-04",
+        schedule_times=["08:00", "20:00"],
+        prefetch_lead_minutes=5,
+        server_margin_minutes=15,
+    )
+    first_slot = int(datetime(2026, 8, 4, 8, 0, tzinfo=zone).timestamp())
+    now_epoch = int(datetime(2026, 8, 3, 20, 0, tzinfo=zone).timestamp())
+    assert now_epoch < details.retry_after_epoch < first_slot
+    assert details.next_slot_epoch == first_slot

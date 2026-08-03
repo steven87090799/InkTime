@@ -15,3 +15,11 @@ Enhanced `local_next` 是人工 cache-only 預覽；NVS cursor 讓每次按鍵�
 `schedule_not_ready` 的 `retry_after_epoch` 不得越過今日下一個 `next_slot_epoch`；今日尚有未來 Slot 時，重試留在今日，只有今日所有 Slot 已過才允許明日 prepare point。若本地 20:00 後今日沒有 `slot.show_at > local_now`，Scheduler 只建立 tomorrow job；今日仍有未來 Slot 才可與 tomorrow 一起準備。
 
 成功顯示後，韌體在 NVS 保存 SHA-256、Release、render profile、rotation、board profile 與成功標記。下一次只有所有欄位完全相同且狀態完整時才回報 `display_skipped=true` 並跳過面板刷新；forced refresh、rotation／profile／board 改變或 NVS 損壞都不可 skip。
+
+## 跨日生命週期
+
+`GET /api/device/v1/offline-schedule` 只接受 `target=current`（預設）與 `target=next`。current 200 另提供 `next_target_start_epoch`、`next_schedule_prefetch_epoch`；所有 epoch 由裝置 IANA 時區在 server 計算，韌體不以固定 offset 推算明日。
+
+`target=next` 的 snapshot 會先以 `.tmp` 寫入 staged-next、驗證完整 SHA／Queue identity／Profile／rotation／config version／Slot 範圍，再 rename 成 staged file。active schedule 在此期間保持不變。RTC 到達 target start 後，裝置再次驗證 `target_start == active.target_end` 與下一個本地日，才以 `.bak` rollback-safe 的原子 promote，最後套用 future config，使 00:00 formal Slot 可服務。
+
+明日 prefetch 的 non-terminal ACK 只能到 `HASH_VERIFIED`；在真正刷新前不產生 display terminal event，Queue 保持 `ACKNOWLEDGED`。`local_next` 成功不清除 retry；只有 formal display、formal schedule download 或 promotion 成功才清除。Scheduler 對 today 與 tomorrow 分開決策，避免已到明日技術截止時捨棄 today 尚未到的晚間 Slot。

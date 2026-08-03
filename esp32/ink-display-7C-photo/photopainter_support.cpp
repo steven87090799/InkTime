@@ -380,6 +380,24 @@ bool makeActiveSchedulePaths(
       && static_cast<size_t>(backupLength) < capacity;
 }
 
+bool makeStagedNextSchedulePaths(
+  char* finalPath,
+  char* temporaryPath,
+  char* backupPath,
+  size_t capacity
+) {
+  if (finalPath == nullptr || temporaryPath == nullptr || backupPath == nullptr || capacity == 0) {
+    return false;
+  }
+  const int finalLength = snprintf(finalPath, capacity, "/inktime/schedule/staged_next.json");
+  const int temporaryLength = snprintf(temporaryPath, capacity, "/inktime/schedule/staged_next.tmp");
+  const int backupLength = snprintf(backupPath, capacity, "/inktime/schedule/staged_next.bak");
+  return finalLength > 0 && temporaryLength > 0 && backupLength > 0
+      && static_cast<size_t>(finalLength) < capacity
+      && static_cast<size_t>(temporaryLength) < capacity
+      && static_cast<size_t>(backupLength) < capacity;
+}
+
 struct PhotoPainterSupport::Impl {
   explicit Impl(const BoardConfig& board)
       : epdSpi(FSPI),
@@ -882,6 +900,142 @@ bool PhotoPainterSupport::readActiveSchedule(String& json) {
     return false;
   }
   cacheStatus_ = CacheStatus::Hit;
+  return true;
+}
+
+bool PhotoPainterSupport::writeStagedNextSchedule(const char* json, size_t length) {
+  static constexpr size_t kMaxScheduleBytes = 32768U;
+  if (!sdReady_ || json == nullptr || length == 0 || length > kMaxScheduleBytes) {
+    cacheStatus_ = sdReady_ ? CacheStatus::Error : CacheStatus::Disabled;
+    return false;
+  }
+  char finalPath[64] = {0};
+  char temporaryPath[64] = {0};
+  char backupPath[64] = {0};
+  if (!makeStagedNextSchedulePaths(
+        finalPath, temporaryPath, backupPath, sizeof(finalPath))) {
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  SD.remove(temporaryPath);
+  File file = SD.open(temporaryPath, FILE_WRITE);
+  if (!file) {
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  const size_t written = file.write(reinterpret_cast<const uint8_t*>(json), length);
+  file.flush();
+  file.close();
+  if (written != length) {
+    SD.remove(temporaryPath);
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  SD.remove(backupPath);
+  const bool movedOld = !SD.exists(finalPath) || SD.rename(finalPath, backupPath);
+  const bool installed = movedOld && SD.rename(temporaryPath, finalPath);
+  if (!installed) {
+    SD.remove(temporaryPath);
+    if (!SD.exists(finalPath) && SD.exists(backupPath)) SD.rename(backupPath, finalPath);
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  SD.remove(backupPath);
+  cacheStatus_ = CacheStatus::Written;
+  return true;
+}
+
+bool PhotoPainterSupport::readStagedNextSchedule(String& json) {
+  static constexpr size_t kMaxScheduleBytes = 32768U;
+  json = "";
+  if (!sdReady_) {
+    cacheStatus_ = CacheStatus::Disabled;
+    return false;
+  }
+  char finalPath[64] = {0};
+  char temporaryPath[64] = {0};
+  char backupPath[64] = {0};
+  if (!makeStagedNextSchedulePaths(
+        finalPath, temporaryPath, backupPath, sizeof(finalPath))) {
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  if (!SD.exists(finalPath) && SD.exists(backupPath)) SD.rename(backupPath, finalPath);
+  File file = SD.open(finalPath, FILE_READ);
+  if (!file || file.size() <= 0 || static_cast<size_t>(file.size()) > kMaxScheduleBytes) {
+    if (file) file.close();
+    cacheStatus_ = CacheStatus::Miss;
+    return false;
+  }
+  const size_t length = static_cast<size_t>(file.size());
+  json.reserve(length + 1U);
+  while (file.available()) json += static_cast<char>(file.read());
+  file.close();
+  if (json.length() != length) {
+    json = "";
+    cacheStatus_ = CacheStatus::Invalid;
+    return false;
+  }
+  cacheStatus_ = CacheStatus::Hit;
+  return true;
+}
+
+bool PhotoPainterSupport::clearStagedNextSchedule() {
+  if (!sdReady_) {
+    cacheStatus_ = CacheStatus::Disabled;
+    return false;
+  }
+  char finalPath[64] = {0};
+  char temporaryPath[64] = {0};
+  char backupPath[64] = {0};
+  if (!makeStagedNextSchedulePaths(
+        finalPath, temporaryPath, backupPath, sizeof(finalPath))) {
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  SD.remove(finalPath);
+  SD.remove(temporaryPath);
+  SD.remove(backupPath);
+  cacheStatus_ = CacheStatus::Written;
+  return true;
+}
+
+bool PhotoPainterSupport::promoteStagedNextSchedule() {
+  if (!sdReady_) {
+    cacheStatus_ = CacheStatus::Disabled;
+    return false;
+  }
+  char activeFinal[64] = {0};
+  char activeTemporary[64] = {0};
+  char activeBackup[64] = {0};
+  char stagedFinal[64] = {0};
+  char stagedTemporary[64] = {0};
+  char stagedBackup[64] = {0};
+  if (!makeActiveSchedulePaths(
+        activeFinal, activeTemporary, activeBackup, sizeof(activeFinal))
+      || !makeStagedNextSchedulePaths(
+        stagedFinal, stagedTemporary, stagedBackup, sizeof(stagedFinal))) {
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  if (!SD.exists(stagedFinal) && SD.exists(stagedBackup)) SD.rename(stagedBackup, stagedFinal);
+  if (!SD.exists(stagedFinal)) {
+    cacheStatus_ = CacheStatus::Miss;
+    return false;
+  }
+  SD.remove(activeBackup);
+  const bool movedActive = !SD.exists(activeFinal) || SD.rename(activeFinal, activeBackup);
+  const bool installed = movedActive && SD.rename(stagedFinal, activeFinal);
+  if (!installed) {
+    if (!SD.exists(activeFinal) && SD.exists(activeBackup)) SD.rename(activeBackup, activeFinal);
+    cacheStatus_ = CacheStatus::Error;
+    return false;
+  }
+  SD.remove(activeTemporary);
+  SD.remove(activeBackup);
+  SD.remove(stagedTemporary);
+  SD.remove(stagedBackup);
+  cacheStatus_ = CacheStatus::Written;
   return true;
 }
 

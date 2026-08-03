@@ -142,6 +142,31 @@ def test_offline_prefetch_target_date_rejects_invalid_time_contracts_and_catches
     assert SchedulerRunner._offline_prefetch_target_date(now, ["08:00"], 0) is None
 
 
+def test_offline_prefetch_keeps_today_and_tomorrow_decisions_independent():
+    zone = ZoneInfo("Asia/Taipei")
+    evening = datetime(2026, 8, 3, 20, 0, tzinfo=zone)
+    assert SchedulerRunner._offline_prefetch_target_dates(
+        evening, ["08:00"], 5, 15, 20
+    ) == [datetime(2026, 8, 4, tzinfo=zone).date()]
+    assert SchedulerRunner._offline_prefetch_target_dates(
+        evening, ["08:00", "22:00"], 5, 15, 20
+    ) == [
+        datetime(2026, 8, 3, tzinfo=zone).date(),
+        datetime(2026, 8, 4, tzinfo=zone).date(),
+    ]
+    late_today = datetime(2026, 8, 3, 22, 0, tzinfo=zone)
+    assert SchedulerRunner._offline_prefetch_target_dates(
+        late_today, ["00:10", "23:00"], 120, 60, 20
+    ) == [
+        datetime(2026, 8, 3, tzinfo=zone).date(),
+        datetime(2026, 8, 4, tzinfo=zone).date(),
+    ]
+    technical_deadline = datetime(2026, 8, 3, 21, 10, tzinfo=zone)
+    assert SchedulerRunner._offline_prefetch_target_dates(
+        technical_deadline, ["00:10"], 120, 60, 23
+    ) == [datetime(2026, 8, 4, tzinfo=zone).date()]
+
+
 def test_offline_scheduler_skips_expired_today_but_keeps_a_future_today_slot(app):
     def offline_jobs(device_id):
         return {

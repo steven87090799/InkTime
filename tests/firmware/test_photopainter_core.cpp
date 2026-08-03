@@ -153,6 +153,44 @@ int main() {
   OfflineScheduleContract invalidEpochs = validSchedule;
   invalidEpochs.slotEpochsValid = false;
   assert(!validOfflineScheduleContract(invalidEpochs));
+  const OfflineNextScheduleContract validNextSchedule = {
+    1,
+    "inktime_offline_schedule",
+    "2026-08-04",
+    "Asia/Taipei",
+    1785772800,
+    1785859200,
+    1785772800,
+    1785700000,
+    2,
+    1,
+    180,
+    "safe_4c",
+    "gdep073e01_6c",
+    "local_next",
+    2,
+    2,
+    true,
+    true,
+    true,
+    true,
+  };
+  assert(validOfflineNextScheduleContract(validNextSchedule));
+  OfflineNextScheduleContract alreadyDueNext = validNextSchedule;
+  alreadyDueNext.nowEpoch = alreadyDueNext.targetStartEpoch;
+  assert(!validOfflineNextScheduleContract(alreadyDueNext));
+  OfflineNextScheduleContract wrongBoundary = validNextSchedule;
+  wrongBoundary.activeTargetEndEpoch -= 1;
+  assert(!validOfflineNextScheduleContract(wrongBoundary));
+  const int64_t dueEpochs[] = {2000, 4000};
+  assert(scheduleHasDueFormalSlot(dueEpochs, 2, 2000));
+  assert(scheduleHasDueFormalSlot(dueEpochs, 2, 2900));
+  assert(!scheduleHasDueFormalSlot(dueEpochs, 2, 3001));
+  int64_t nextPrefetchEpoch = 0;
+  assert(validOfflineNextPrefetchEpoch(100, 200, 400, 2, nextPrefetchEpoch));
+  assert(nextPrefetchEpoch == 280);
+  assert(!validOfflineNextPrefetchEpoch(300, 200, 400, 2, nextPrefetchEpoch));
+  assert(!validOfflineNextPrefetchEpoch(100, 200, 200, 2, nextPrefetchEpoch));
   OfflineWakePlan wakePlan = {};
   assert(buildOfflineWakePlan(100, 200, 400, wakePlan));
   assert(wakePlan.sleepUntilEpoch == 200);

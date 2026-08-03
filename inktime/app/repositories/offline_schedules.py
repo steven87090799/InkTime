@@ -97,50 +97,112 @@ class OfflineScheduleRepository:
         def epoch(value: datetime) -> int:
             return int(value.astimezone(timezone.utc).timestamp())
 
+        def retry_before_slots(slot_epochs: list[int]) -> RetryAfterDetails | None:
+            for slot_epoch in slot_epochs:
+                # Integer epochs deliberately leave a one-second guard.  A
+                # sub-second "almost due" Slot is not a valid retry target;
+                # continue to the next serviceable Slot instead.
+                if slot_epoch <= now_epoch + 1:
+                    continue
+                safe_deadline = slot_epoch - min(lead, 5) * 60
+                candidate = min(now_epoch + 15 * 60, safe_deadline)
+                candidate = max(candidate, now_epoch + 60)
+                if candidate >= slot_epoch:
+                    candidate = slot_epoch - 1
+                if now_epoch < candidate < slot_epoch:
+                    return RetryAfterDetails(candidate, slot_epoch)
+            return None
+
+        def retry_for_day(target: date, *, allow_prepare_point: bool) -> RetryAfterDetails | None:
+            slot_epochs = [epoch(slot_at(target, slot)) for slot in slots]
+            if allow_prepare_point:
+                prepare_epoch = slot_epochs[0] - (lead + margin) * 60
+                if now_epoch < prepare_epoch < slot_epochs[0]:
+                    return RetryAfterDetails(prepare_epoch, slot_epochs[0])
+            return retry_before_slots(slot_epochs)
+
         today = local_now.date()
-        today_slots = [slot_at(today, slot) for slot in slots]
-        first_prepare = today_slots[0] - timedelta(minutes=lead + margin)
         now_epoch = epoch(local_now)
 
-        # Rule A: before the first preparation point, wake at that point and
-        # tell the firmware which today's Slot it must not cross.
-        if local_now < first_prepare:
-            retry_epoch = epoch(first_prepare)
-            next_slot_epoch = epoch(today_slots[0])
-        else:
-            future_slots = [candidate for candidate in today_slots if candidate > local_now]
-            if future_slots:
-                # Rule B: stay on today's next Slot.  Keep the safety margin
-                # small enough that a remaining Slot is never skipped.
-                next_slot = future_slots[0]
-                safe_deadline = next_slot - timedelta(minutes=min(lead, 5))
-                fallback = local_now + timedelta(minutes=15)
-                minimum_retry = local_now + timedelta(seconds=60)
-                candidate = min(fallback, safe_deadline)
-                if candidate < minimum_retry:
-                    candidate = minimum_retry
-                # A next Slot inside the one-minute lower bound is an
-                # unavoidable boundary case; keep the retry strictly before
-                # it so the firmware's guard can fail closed rather than
-                # accepting a crossed server deadline.
-                if candidate >= next_slot:
-                    candidate = next_slot - timedelta(seconds=1)
-                retry_epoch = epoch(candidate)
-                next_slot_epoch = epoch(next_slot)
-            else:
-                # Rule C: only after every Slot today has passed may the
-                # retry move to tomorrow's first preparation point.
-                tomorrow_first = slot_at(today + timedelta(days=1), slots[0])
-                retry_epoch = epoch(
-                    tomorrow_first - timedelta(minutes=lead + margin)
-                )
-                next_slot_epoch = None
+        # Rule A/B: stay on today while its first prepare point is due and a
+        # serviceable future Slot remains.  The helper uses only integer
+        # epochs, so an imminent first Slot cannot fall into a generic retry.
+        today_details = retry_for_day(today, allow_prepare_point=True)
+        if today_details is not None:
+            return today_details
 
-        if retry_epoch <= now_epoch:
-            raise ValueError("DEVICE-008 retry_after_epoch 必須晚於目前時間")
-        if next_slot_epoch is not None and retry_epoch >= next_slot_epoch:
-            raise ValueError("DEVICE-008 retry_after_epoch 不得越過下一個 Slot")
-        return RetryAfterDetails(retry_epoch, next_slot_epoch)
+        # Rule C: only after today's serviceable Slots are exhausted may the
+        # retry move to tomorrow's first prepare point.  Preserve the legacy
+        # null next_slot_epoch for this normal cross-day transition.
+        tomorrow = today + timedelta(days=1)
+        tomorrow_slots = [epoch(slot_at(tomorrow, slot)) for slot in slots]
+        tomorrow_prepare = tomorrow_slots[0] - (lead + margin) * 60
+        if now_epoch < tomorrow_prepare < tomorrow_slots[0]:
+            return RetryAfterDetails(tomorrow_prepare, None)
+        tomorrow_details = retry_before_slots(tomorrow_slots)
+        if tomorrow_details is not None:
+            return tomorrow_details
+        # There is no representable integer strictly before an imminent
+        # boundary Slot.  Keep recovery bounded at the next integer rather
+        # than turning a normal time boundary into a generic API fallback.
+        return RetryAfterDetails(now_epoch + 1, None)
+
+    @staticmethod
+    def retry_after_target_details(
+        *,
+        now: datetime,
+        timezone_name: str,
+        target_date: str,
+        schedule_times: Sequence[str],
+        prefetch_lead_minutes: int,
+        server_margin_minutes: int,
+    ) -> RetryAfterDetails:
+        """Return a bounded retry for the explicitly bounded next target day."""
+
+        target = OfflineScheduleRepository._date(target_date)
+        if not 0 <= int(prefetch_lead_minutes) <= 120:
+            raise ValueError("DEVICE-008 prefetch_lead_minutes 不合法")
+        if not 0 <= int(server_margin_minutes) <= 60:
+            raise ValueError("DEVICE-008 server_prefetch_margin_minutes 不合法")
+        try:
+            zone = ZoneInfo(str(timezone_name))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("DEVICE-008 裝置 IANA 時區不合法") from exc
+        local_now = now
+        if local_now.tzinfo is None:
+            local_now = local_now.replace(tzinfo=timezone.utc)
+        local_now = local_now.astimezone(zone)
+        slots = validate_offline_schedule(schedule_times, maximum=MAX_PREPARED_SLOTS)
+        lead = int(prefetch_lead_minutes)
+        margin = int(server_margin_minutes)
+        now_epoch = int(local_now.astimezone(timezone.utc).timestamp())
+
+        def slot_epoch(day: date, slot: str) -> int:
+            hour, minute = (int(part) for part in slot.split(":"))
+            return int(
+                datetime.combine(day, time(hour, minute), tzinfo=zone)
+                .astimezone(timezone.utc)
+                .timestamp()
+            )
+
+        epochs = [slot_epoch(target, slot) for slot in slots]
+        prepare_epoch = epochs[0] - (lead + margin) * 60
+        if now_epoch < prepare_epoch < epochs[0]:
+            return RetryAfterDetails(prepare_epoch, epochs[0])
+        for candidate_slot in epochs:
+            if candidate_slot <= now_epoch + 1:
+                continue
+            safe_deadline = candidate_slot - min(lead, 5) * 60
+            retry_epoch = min(now_epoch + 15 * 60, safe_deadline)
+            retry_epoch = max(retry_epoch, now_epoch + 60)
+            if retry_epoch >= candidate_slot:
+                retry_epoch = candidate_slot - 1
+            if now_epoch < retry_epoch < candidate_slot:
+                return RetryAfterDetails(retry_epoch, candidate_slot)
+        # At the integer boundary there may be no representable epoch strictly
+        # before the first Slot.  Return the next integer wake without a
+        # generic 15-minute exception path; callers keep next_slot nullable.
+        return RetryAfterDetails(now_epoch + 1, None)
 
     @staticmethod
     def _manifest_entry(manifest_json: str) -> dict[str, Any]:
@@ -229,7 +291,7 @@ class OfflineScheduleRepository:
         with self.database.session() as connection:
             row = connection.execute(
                 """
-                SELECT id FROM device_offline_schedules
+                SELECT device_offline_schedules.id AS id FROM device_offline_schedules
                 WHERE device_id=? AND status='ready'
                 ORDER BY target_date DESC,config_version DESC,created_at DESC
                 LIMIT 1
@@ -250,9 +312,16 @@ class OfflineScheduleRepository:
         with self.database.session() as connection:
             row = connection.execute(
                 """
-                SELECT id FROM device_offline_schedules
-                WHERE device_id=? AND target_date=? AND config_version=? AND status='ready'
-                ORDER BY updated_at DESC,id DESC LIMIT 1
+                SELECT device_offline_schedules.id AS id FROM device_offline_schedules
+                JOIN devices d ON d.id=device_offline_schedules.device_id
+                WHERE device_offline_schedules.device_id=?
+                  AND device_offline_schedules.target_date=?
+                  AND device_offline_schedules.config_version=?
+                  AND device_offline_schedules.status='ready'
+                  AND d.delivery_mode='inktime_offline_schedule'
+                  AND d.offline_prefetch_allowed=1
+                ORDER BY device_offline_schedules.updated_at DESC,
+                         device_offline_schedules.id DESC LIMIT 1
                 """,
                 (device_id, self._date(target_date).isoformat(), int(config_version)),
             ).fetchone()

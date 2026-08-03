@@ -2441,5 +2441,13 @@ INKTIME_LOG_LEVEL=INFO</code></pre>
             });
         });
     </script>
+    <section id="photopainter-cross-day-lifecycle" class="doc-section">
+      <h2>PhotoPainter Enhanced 跨日離線生命週期</h2>
+      <p>裝置端離線排程 API 只接受 <code>target=current</code>（預設）與 <code>target=next</code>；任意日期、<code>+N</code> 或 history 都會拒絕。current 回應包含由伺服器 IANA 時區計算的 <code>next_target_start_epoch</code> 與 <code>next_schedule_prefetch_epoch</code>，韌體不使用固定 UTC offset 猜測跨日。</p>
+      <p>Scheduler 將 today 與 tomorrow 分開判斷：today 仍有未來正式 Slot 才保留，tomorrow 在本地 prepare hour 與「明日第一 Slot 減 prefetch lead 與 server margin」的較早截止點準備。這避免明日已到技術截止時誤刪 today 尚未顯示的晚間 Slot。</p>
+      <p>韌體會先把明日 schedule、future rotation、button 與 config snapshot 寫入 <code>staged_next.json</code>，經 SHA、Queue identity、Slot epoch、Profile 與 config version 驗證後才完成 staged。active schedule 在午夜前不改；可靠 RTC 到達 target start 後再次驗證 <code>target_start == active.target_end</code>，以 <code>.tmp</code>／<code>.bak</code> rollback-safe 原子 promote，讓 00:00 Slot 可以正式顯示。</p>
+      <p>明日預取只回報 <code>MANIFEST_RECEIVED</code>、<code>DOWNLOAD_STARTED</code>、<code>DOWNLOAD_COMPLETED</code>、<code>HASH_VERIFIED</code>；真正面板刷新前不回報 display terminal ACK。<code>local_next</code> 是無網路預覽，不消費正式 Slot，也不清除 persisted retry。</p>
+      <p class="doc-links">延伸文件：<a href="docs/devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md">交付模式</a>、<a href="docs/devices/PHOTOPAINTER_RECOVERY_ZH_TW.md">恢復與安全停機</a>、<a href="docs/resilience/OFFLINE_QUEUE_ZH_TW.md">離線內容佇列</a>、<a href="docs/resilience/DEVICE_QUEUE_AND_ROLLOUT_ZH_TW.md">Queue／Canary／LKG</a>、<a href="docs/operations/MIGRATION_GUIDE_ZH_TW.md">遷移指南</a>、<a href="docs/guides/ADMIN_GUIDE_ZH_TW.md">管理員指南</a>。</p>
+    </section>
 </body>
 </html>

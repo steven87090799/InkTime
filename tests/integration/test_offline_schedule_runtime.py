@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from PIL import Image
 import pytest
@@ -76,6 +77,14 @@ def test_offline_day_preparation_is_atomic_and_device_projection_contains_full_s
     assert body["panel_profile"] == "safe_4c"
     assert body["rotation"] == 0
     assert body["target_start_epoch"] < body["slots"][0]["show_at_epoch"] < body["target_end_epoch"]
+    assert body["target"] == "current"
+    slot_zone = datetime.fromisoformat(body["slots"][0]["show_at"]).tzinfo
+    assert body["next_target_start_epoch"] == int(
+        datetime(2026, 8, 4, 0, 0, tzinfo=slot_zone).timestamp()
+    )
+    assert body["next_target_start_epoch"] < body["next_schedule_prefetch_epoch"] < int(
+        datetime(2026, 8, 4, 8, 0, tzinfo=slot_zone).timestamp()
+    )
     assert body["slots"][0]["show_at_epoch"] == int(
         datetime.fromisoformat(body["slots"][0]["show_at"]).timestamp()
     )
@@ -112,6 +121,20 @@ def test_offline_day_preparation_is_atomic_and_device_projection_contains_full_s
     assert still_today.status_code == 200
     assert still_today.get_json()["schedule_id"] == prepared["schedule"]["id"]
     assert still_today.get_json()["target_local_date"] == "2026-08-03"
+    next_response = client.get(
+        "/api/device/v1/offline-schedule?target=next",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert next_response.status_code == 200
+    next_body = next_response.get_json()
+    assert next_body["target"] == "next"
+    assert next_body["target_local_date"] == "2026-08-04"
+    assert next_body["schedule_id"] == next_day["schedule"]["id"]
+    for invalid_target in ("2026-08-05", "+1", "history"):
+        assert client.get(
+            f"/api/device/v1/offline-schedule?target={invalid_target}",
+            headers={"Authorization": f"Bearer {token}"},
+        ).status_code == 400
 
 
 def test_offline_schedule_snapshot_does_not_follow_live_device_config(client, app):
@@ -174,9 +197,22 @@ def test_missing_today_schedule_returns_bounded_server_retry_epoch(client, app):
     assert response.status_code == 404
     assert body["error"] == "schedule_not_ready"
     assert body["error_code"] == "DEVICE-008"
+    assert body["target"] == "current"
+    assert body["target_date"] == "2026-08-03"
     assert body["retry_after_epoch"] > before
     assert "next_slot_epoch" in body
     assert int(response.headers["Retry-After"]) >= 1
+    next_response = client.get(
+        "/api/device/v1/offline-schedule?target=next",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    next_body = next_response.get_json()
+    assert next_response.status_code == 404
+    assert next_body["target"] == "next"
+    assert next_body["target_date"] == "2026-08-04"
+    assert next_body["retry_after_epoch"] < int(
+        datetime(2026, 8, 4, 8, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+    )
 
 
 def test_offline_schedule_repository_fails_closed_on_corrupt_manifest_and_keeps_snapshot_typed(app):

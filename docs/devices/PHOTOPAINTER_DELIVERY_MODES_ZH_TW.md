@@ -69,3 +69,12 @@ HTTP timeout、read timeout、redirect、解析失敗或上傳後的未知回應
 ## 6. 驗證狀態
 
 已在隔離 worktree 完成 server unit/integration、Review UI、Stock bytes、LAN transport policy、offline transaction、Queue ACK、host C++ core 與兩個 board profile 的 host compile。真實 PhotoPainter、面板 BUSY、PMIC、SD、電池、LAN endpoint、真實 OpenAI/NAS 與 Arduino hosted compile/physical flash 本輪均為 `NOT RUN`；不把 simulator、mock 或 host compile 當成實機 PASS。
+
+## 7. 跨日 target 與 staged-next
+
+- 裝置端點只接受 `?target=current`（預設）或 `?target=next`；日期、`+1`、history 與其他任意值一律拒絕。`target=next` 僅代表裝置 IANA 本地日的下一天。
+- current 的 200 回應同時帶 `next_target_start_epoch` 與 `next_schedule_prefetch_epoch`。後者由伺服器 IANA 時區計算為明日第一個 Slot 減 `prefetch_lead_minutes`；若技術截止已過，值為 0，韌體不得猜測。
+- Scheduler 將 today 與 tomorrow 分開判斷：today 仍有 `show_at > local_now` 才保留 today；tomorrow 在本地 prepare hour 與「明日第一 Slot 減 lead 與 server margin」兩者較早者到達時獨立建立。
+- 韌體對 `target=next` 的 Slot 先下載、驗證 SHA、以遠端 rotation 轉換並寫入 `/inktime/schedule/staged_next.json`；不覆寫 active、不套用未來 config。`.tmp`／`.bak` 與 rename 失敗會 rollback。
+- RTC 確認跨過 target start 後，韌體重新驗證 target date、`target_start == active.target_end`、config version、Slot epoch、Queue identity、SHA、面板與 rotation，再原子 promote staged-next，套用 future snapshot；因此 00:00 Slot 可以正式顯示。
+- `MANIFEST_RECEIVED`、`DOWNLOAD_STARTED`、`DOWNLOAD_COMPLETED`、`HASH_VERIFIED` 是 pre-midnight non-terminal 事件；真正面板刷新前不會送 display terminal event。`local_next` 預覽也不會清除 formal retry state。

@@ -9,3 +9,9 @@ delivery contract 不可只依賴 UI：`inktime_offline_schedule` 必須 `offlin
 Enhanced Scheduler 在本地 prepare hour 後只準備仍有意義的 today：若所有 today `slot.show_at` 已過，只建立 tomorrow；若仍有 future today Slot，才允許 today + tomorrow 共存。`local_next` 使用本機持久化 cursor 循環快取預覽，不消耗 Queue、不提前更新 current/LKG，也不產生 terminal ACK／ACK journal。
 
 Canary 失敗門檻達成時停止擴散並進入回滾流程；Release 不刪除，以保留稽核資料。實際 ESP32 與電子紙全刷、BUSY 時序、Wi-Fi 斷線復原仍須在實體面板完成驗證。
+
+## 跨日 staged-next 與 ACK 邊界
+
+Enhanced 裝置的離線端點只提供 bounded `current`／`next` target。明日準備工作可以取得 manifest、下載 frame、驗證 hash 並送 non-terminal events，但不得在午夜前送 `DISPLAY_STARTED`、`DISPLAY_COMPLETED` 或 `DISPLAY_FAILED`。future rotation 與 schedule snapshot 隨 staged payload 保存，active config 直到原子 promote 才更新。
+
+在 target start，韌體以 RTC-first revalidate next local date、active target end、config version、Slot epoch、Queue identity、SHA 與 panel profile；驗證失敗保持 active，不做部分切換。`local_next` 預覽維持 persisted retry state，正式顯示才可清除 retry；retry 使用整數 epoch，不能因小於一秒的邊界 Slot 退回不受約束的 generic fallback。

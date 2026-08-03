@@ -151,3 +151,10 @@ deep-sleep 待機電流、完整喚醒週期平均電流、每日刷新次數及
 `display_prepare` 支援且只支援 `display_times`、`lead_minutes`、`daily_count`、`device_ids`、`candidate_years`、`prefetch_count`、`ai_fallback`、`render_fallback`。未知欄位不會被靜默忽略。`device_ids` 解析為實際啟用裝置的 Profile；`daily_count × prefetch_count` 決定候選數量；年份會直接限制 SQL 候選。
 
 人工排除、自動排除、Missing、deleted、路徑逃逸、原始檔缺失或沒有最新分析的照片均不能正式發布。管理員明確指定這類照片會收到 `RENDER-009`，系統不會換成另一張照片。
+
+## PhotoPainter 跨日操作檢查
+
+- API 只使用 `/api/device/v1/offline-schedule?target=current` 或 `?target=next`；不要傳任意日期、`+N` 或 history。current 回應的 `next_target_start_epoch` 與 `next_schedule_prefetch_epoch` 是 server 以 IANA timezone 計算的明日技術截止。
+- Scheduler 在本地 `offline.future_schedule_prepare_hour_local` 與「明日第一 Slot 減 `prefetch_lead_minutes` 與 `offline.server_prefetch_margin_minutes`」兩者較早者到達時準備 tomorrow；today 若仍有晚間 future Slot，兩者可以同時存在。
+- 裝置端先把 tomorrow 寫入 staged-next，不覆寫 active；午夜 RTC promote 前不套用 future rotation、按鍵或 schedule config。只在 promote 後將 00:00 Slot 視為 formal display。
+- `MANIFEST_RECEIVED` 到 `HASH_VERIFIED` 只表示 prefetch，不能當成顯示完成；實際面板刷新前不送 display terminal ACK。`local_next` 只做本地預覽並保留 retry state。
