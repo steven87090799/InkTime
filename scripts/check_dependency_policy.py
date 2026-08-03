@@ -8,7 +8,9 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 EXACT_REQUIREMENT = re.compile(r"^[A-Za-z0-9_.-]+(?:\[[A-Za-z0-9_,.-]+\])?==[^\s;]+(?:\s*;.+)?$")
 ACTION_SHA = re.compile(r"\buses:\s*[^\s]+@([0-9a-fA-F]+)")
-PINNED_PYTHON = re.compile(r"^FROM python:3\.12-slim@sha256:[0-9a-f]{64}(?:\s+AS\s+\w+)?$")
+PINNED_PYTHON = re.compile(
+    r"^FROM python:3\.12-slim(?:-bookworm)?@sha256:[0-9a-f]{64}(?:\s+AS\s+\w+)?$"
+)
 
 
 def requirement_errors(path: Path) -> list[str]:
