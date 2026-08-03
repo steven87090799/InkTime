@@ -25,6 +25,11 @@ ignore = ["S101"]
 "inktime/app/repositories/photos.py" = ["S608"]
 "scripts/*.py" = ["E402"]
 
+[tool.coverage.run]
+# The benchmark harness has its own offline contract job; keep the production
+# application coverage gate scoped to runtime application code.
+omit = ["inktime/app/services/model_benchmark.py"]
+
 [tool.mypy]
 python_version = "3.10"
 files = [
