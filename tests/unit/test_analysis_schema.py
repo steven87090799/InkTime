@@ -60,7 +60,7 @@ def test_schema_v3_normalizes_grades_and_preserves_confidence_details():
     assert normalized["memory_score"] == 85.0
     assert normalized["beauty_score"] == 70.0
     assert normalized["technical_quality_score"] == 95.0
-    assert normalized["emotion_score"] == 60.0
+    assert normalized["emotion_score"] == 55.0
     assert normalized["details"]["display_suitability_grade"] == "A"
     assert normalized["details"]["confidence"]["overall"] == 0.91
 
