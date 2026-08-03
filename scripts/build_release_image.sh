@@ -28,6 +28,7 @@ build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 image_tag=$git_revision
 if [ "$dirty" = true ]; then image_tag="${git_revision}-dirty"; fi
 image_reference="${repository}:${image_tag}"
+schema_version=$(python scripts/current_schema_version.py)
 
 docker build --pull \
   --build-arg "INKTIME_GIT_REVISION=${git_revision}" \
@@ -43,7 +44,7 @@ printf '%s\n' \
   "  \"image_tag\": \"${image_tag}\"," \
   "  \"image_reference\": \"${image_reference}\"," \
   "  \"image_id\": \"${image_id}\"," \
-  '  "migration_version": 25,' \
+  "  \"migration_version\": ${schema_version}," \
   "  \"dirty\": ${dirty}" \
   '}' > "$manifest_path"
 echo "BUILD-OK ${image_reference} manifest=${manifest_path}"

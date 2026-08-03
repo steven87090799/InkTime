@@ -68,6 +68,7 @@ class ScoringLabService:
         output_tokens = response.usage.output_tokens
         cached_tokens = response.usage.cached_tokens
         retry_count = 0
+        repaired = None
         try:
             result = validate_analysis_result(response.content)
         except AnalysisValidationError as error:
@@ -92,6 +93,16 @@ class ScoringLabService:
             ),
         )
         latency_ms = int((time.perf_counter() - started_perf) * 1000)
+        provider_reported_cost = response.usage.provider_reported_cost
+        if repaired is not None and repaired.usage.provider_reported_cost is not None:
+            provider_reported_cost = repaired.usage.provider_reported_cost
+        cost_source = "provider_reported" if provider_reported_cost is not None else "estimated" if cost is not None else "unknown"
+        metrics = dict(
+            (repaired.request_metrics if repaired is not None else None)
+            or response.request_metrics
+            or getattr(provider, "last_request_metrics", {})
+            or {}
+        )
         self.usage.record(
             provider=provider.name,
             model=model,
@@ -102,11 +113,16 @@ class ScoringLabService:
             output_tokens=output_tokens,
             cached_tokens=cached_tokens,
             estimated_cost=cost,
-            actual_cost=cost,
+            actual_cost=provider_reported_cost,
             started_at=started_at,
             latency_ms=latency_ms,
             status="completed",
             retry_count=retry_count,
+            cost_source=cost_source,
+            prompt_chars=metrics.get("prompt_chars", 0),
+            schema_chars=metrics.get("schema_chars", 0),
+            request_body_bytes=metrics.get("request_body_bytes", 0),
+            image_bytes=metrics.get("image_bytes", 0),
         )
         weights = {
             "memory": float(profile["memory_weight"]),
@@ -128,6 +144,7 @@ class ScoringLabService:
                 "output_tokens": output_tokens,
                 "cached_tokens": cached_tokens,
                 "cost": cost,
+                "cost_source": cost_source,
                 "latency_ms": latency_ms,
                 "provider": provider.name,
                 "model": model,

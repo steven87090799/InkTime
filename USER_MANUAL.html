@@ -2054,12 +2054,13 @@ INKTIME_LOG_LEVEL=INFO</code></pre>
 <tr class="odd"><td>管理照片、模型、裝置與排程</td><td><a href="docs/guides/ADMIN_GUIDE_ZH_TW.md" class="doc-link">管理員指南</a> → <a href="docs/guides/USER_GUIDE_ZH_TW.md" class="doc-link">使用者指南</a></td></tr>
 <tr class="even"><td>部署、備份或排除故障</td><td><a href="docs/operations/DOCKER_GUIDE_ZH_TW.md" class="doc-link">Docker 部署</a> → <a href="docs/operations/BACKUP_RESTORE_ZH_TW.md" class="doc-link">備份還原</a> → <a href="docs/operations/TROUBLESHOOTING_ZH_TW.md" class="doc-link">疑難排解</a></td></tr>
 <tr class="odd"><td>理解或修改程式架構</td><td><a href="docs/architecture/ARCHITECTURE_ZH_TW.md" class="doc-link">現行架構</a> → <a href="docs/architecture/APPLICATION_FACTORY.md" class="doc-link">Application Factory</a> → <a href="docs/getting-started/DEVELOPMENT_GUIDE_ZH_TW.md" class="doc-link">開發指南</a></td></tr>
-<tr class="even"><td>接入 ESP32、電子紙或 PhotoPainter</td><td><a href="docs/devices/ESP32_GUIDE_ZH_TW.md" class="doc-link">ESP32 指南</a> → <a href="docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md" class="doc-link">PhotoPainter</a> → <a href="docs/devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md" class="doc-link">交付模式</a></td></tr>
+<tr class="even"><td>接入 ESP32、電子紙或 PhotoPainter</td><td><a href="docs/devices/ESP32_GUIDE_ZH_TW.md" class="doc-link">ESP32 指南</a> → <a href="docs/devices/ESP32_TLS_PROVISIONING_ZH_TW.md" class="doc-link">TLS／配網信任根</a> → <a href="docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md" class="doc-link">PhotoPainter</a> → <a href="docs/devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md" class="doc-link">交付模式</a></td></tr>
+<tr class="odd"><td>設定 OpenRouter 或比較模型</td><td><a href="docs/providers/OPENROUTER_ZH_TW.md" class="doc-link">OpenRouter Provider</a> → <a href="docs/providers/MODEL_BENCHMARK_ZH_TW.md" class="doc-link">Model Benchmark</a> → <a href="docs/reference/TOKEN_COST_GUIDE_ZH_TW.md" class="doc-link">Token／成本</a></td></tr>
 <tr class="odd"><td>使用本機無 AI 選片、Decision Trace 或 Canary</td><td><a href="docs/guides/LOCAL_ONLY_SELECTION_ZH_TW.md" class="doc-link">Local-only 選片</a> → <a href="docs/resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md" class="doc-link">決策與韌性總覽</a></td></tr>
 </tbody></table></div>
 
 <h3 id="sec-15-2" class="doc-h3">15.2 完整 Markdown 檔案索引</h3>
-<p class="doc-p">以下共 59 份 Markdown 文件，路徑均以專案根目錄為起點；點擊檔名即可開啟原始文件。</p>
+<p class="doc-p">以下共 69 份 Markdown 文件，路徑均以專案根目錄為起點；點擊檔名即可開啟原始文件。新增或移動文件時，必須同步更新本索引與 <a href="docs/README.md" class="doc-link">docs/README.md</a>。</p>
 
 <h4 class="doc-h4">專案入口</h4>
 <ul class="doc-list">
@@ -2080,6 +2081,8 @@ INKTIME_LOG_LEVEL=INFO</code></pre>
 <li><a href="docs/guides/ADMIN_GUIDE_ZH_TW.md" class="doc-link"><code>docs/guides/ADMIN_GUIDE_ZH_TW.md</code></a>：設定欄位、裝置、排程與管理界面責任。</li>
 <li><a href="docs/guides/USER_GUIDE_ZH_TW.md" class="doc-link"><code>docs/guides/USER_GUIDE_ZH_TW.md</code></a>：照片、工作、渲染、發布與診斷操作。</li>
 <li><a href="docs/guides/API_PROVIDER_GUIDE_ZH_TW.md" class="doc-link"><code>docs/guides/API_PROVIDER_GUIDE_ZH_TW.md</code></a>：OpenAI 相容 Provider 與各廠商接入步驟。</li>
+<li><a href="docs/providers/OPENROUTER_ZH_TW.md" class="doc-link"><code>docs/providers/OPENROUTER_ZH_TW.md</code></a>：正式 OpenRouter kind、routing／privacy options、reasoning、成本與 Batch 邊界。</li>
+<li><a href="docs/providers/MODEL_BENCHMARK_ZH_TW.md" class="doc-link"><code>docs/providers/MODEL_BENCHMARK_ZH_TW.md</code></a>：offline-first、bounded live 與模型／解析度／Prompt／routing 比較契約。</li>
 <li><a href="docs/guides/EPAPER_SIMULATOR_ZH_TW.md" class="doc-link"><code>docs/guides/EPAPER_SIMULATOR_ZH_TW.md</code></a>：虛擬電子紙接收端與無硬體驗收。</li>
 <li><a href="docs/guides/LOCAL_ONLY_SELECTION_ZH_TW.md" class="doc-link"><code>docs/guides/LOCAL_ONLY_SELECTION_ZH_TW.md</code></a>：<code>analysis.execution_mode</code>、本機選片、雙照片與文案來源。</li>
 </ul>
@@ -2088,6 +2091,7 @@ INKTIME_LOG_LEVEL=INFO</code></pre>
 <ul class="doc-list">
 <li><a href="docs/OPENAI_BATCH_ANALYSIS_ZH_TW.md" class="doc-link"><code>docs/OPENAI_BATCH_ANALYSIS_ZH_TW.md</code></a>：Batch 輸入快照、隱私、生命週期、成本與實際人工 smoke 邊界。</li>
 <li><a href="docs/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md" class="doc-link"><code>docs/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md</code></a>：正式環境安全、LAN、持久化與交接檢查。</li>
+<li><a href="docs/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md" class="doc-link"><code>docs/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md</code></a>：本輪 P1、Provider、AI、Release、Container、文件與 hosted CI 交接證據。</li>
 <li><a href="docs/branch-consolidation-report.md" class="doc-link"><code>docs/branch-consolidation-report.md</code></a>：分支整併、Migration 26、CI 與遠端分支清理證據。</li>
 <li><a href="docs/post-merge-hardware-validation.md" class="doc-link"><code>docs/post-merge-hardware-validation.md</code></a>：軟體／hosted PASS 與真實 OpenAI、NAS、ESP32 驗收的 NOT RUN 邊界。</li>
 </ul>
@@ -2125,6 +2129,7 @@ INKTIME_LOG_LEVEL=INFO</code></pre>
 <li><a href="docs/devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md" class="doc-link"><code>docs/devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md</code></a>：六／七色、抖動、ACK、通知與 Webhook。</li>
 <li><a href="docs/devices/DEVICE_PROTOCOL_ZH_TW.md" class="doc-link"><code>docs/devices/DEVICE_PROTOCOL_ZH_TW.md</code></a>：離線 Queue Manifest、下載與 ACK 協定。</li>
 <li><a href="docs/devices/DEVICE_TRANSPORT_SECURITY_ZH_TW.md" class="doc-link"><code>docs/devices/DEVICE_TRANSPORT_SECURITY_ZH_TW.md</code></a>：Bearer Token、HTTP/HTTPS 與傳輸限制。</li>
+<li><a href="docs/devices/ESP32_TLS_PROVISIONING_ZH_TW.md" class="doc-link"><code>docs/devices/ESP32_TLS_PROVISIONING_ZH_TW.md</code></a>：trust anchor、HTTPS fail-closed、私有 LAN 開發 HTTP 與隨機配網密碼。</li>
 <li><a href="docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md" class="doc-link"><code>docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md</code></a>：PhotoPainter 板型、電源、PSRAM 與實機驗收。</li>
 <li><a href="docs/devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md" class="doc-link"><code>docs/devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md</code></a>：Stock 相容、既有 Online、Enhanced 離線排程與 `/dataUP` 安全契約。</li>
 <li><a href="docs/devices/PHOTOPAINTER_RECOVERY_ZH_TW.md" class="doc-link"><code>docs/devices/PHOTOPAINTER_RECOVERY_ZH_TW.md</code></a>：交付恢復、停機條件與實機驗證邊界。</li>

@@ -14,6 +14,7 @@
 #include "offline_schedule_core.h"
 #include "queue_client_core.h"
 #include "queue_runtime_types.h"
+#include "device_http_transport.h"
 #if INKTIME_PHOTOPAINTER_ENABLED
 #include "photopainter_support.h"
 #include "power_manager.h"
@@ -94,9 +95,8 @@ GxEPD2_7C<
 #define DEVICE_OFFLINE_SCHEDULE_PATH "/api/device/v1/offline-schedule"
 #define INKTIME_FIRMWARE_VERSION "2.5.0"
 
-// No trusted CA provisioning exists yet. HTTPS is rejected by default instead
-// of silently downgrading certificate verification. Isolated LAN HTTP remains
-// supported; an explicit development override prints a warning.
+// Secure builds require a compile-time or portal-provisioned trust anchor;
+// isolated LAN HTTP remains available only in an explicit development build.
 #ifndef INKTIME_ALLOW_INSECURE_DEVICE_HTTP
 #define INKTIME_ALLOW_INSECURE_DEVICE_HTTP 0
 #endif
@@ -111,6 +111,7 @@ struct Config {
   String  wifi_ssid;
   String  wifi_pass;
   String  backend_hostport;
+  String  ca_pem;
   String  device_token;
   int32_t tz_offset_minutes;
   uint8_t refresh_hour;
@@ -285,6 +286,8 @@ bool enhancedNetworkWakeRequested = false;
 bool currentPayloadIntegrityTrusted = false;
 String portalSetupSecret;
 String portalNonce;
+String portalApSsid;
+String portalApPassword;
 uint8_t portalSaveAttempts = 0;
 bool portalSaveAllowed = false;
 String currentReleaseId;
@@ -304,26 +307,17 @@ static int calculateSha256(const unsigned char* input, size_t length, unsigned c
 #endif
 }
 
-static bool backendTransportAllowed(const String &base) {
-  if (base.startsWith("https://")) return true;
-#if INKTIME_ALLOW_INSECURE_DEVICE_HTTP
-  return true;
-#else
-  lastDeviceErrorCode = "DEVICE-HTTP-DISALLOWED";
-  lastDeviceErrorMessage = "正式裝置 Backend 必須使用 HTTPS";
+static bool backendTransportAllowed(const String &base, const String &ca_pem) {
+  String errorCode;
+  if (inktime::DeviceHttpTransport::backendUrlAllowed(base, ca_pem, errorCode)) return true;
+  lastDeviceErrorCode = errorCode;
+  lastDeviceErrorMessage = "Backend URL 或 TLS trust anchor 不符合安全政策";
   return false;
-#endif
-}
-
-static void configureHttpClient(HTTPClient &client, uint32_t timeoutMs) {
-  client.setConnectTimeout(10000);
-  client.setTimeout(timeoutMs);
-  client.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
 }
 
 static String randomPortalSecret() {
   char value[25];
-  for (uint8_t i = 0; i < 12; ++i) snprintf(value + i * 2, 3, "%02x", static_cast<unsigned>(esp_random() & 0xff));
+  for (uint8_t i = 0; i < 12; ++i) snprintf(value + i * 2, 3, "%02X", static_cast<unsigned>(esp_random() & 0xff));
   return String(value);
 }
 
@@ -745,6 +739,7 @@ void loadConfig(Config &cfg) {
   cfg.wifi_ssid        = prefs.getString("ssid", "");
   cfg.wifi_pass        = prefs.getString("pass", "");
   cfg.backend_hostport = prefs.getString("hostport", DEFAULT_HOSTPORT);
+  cfg.ca_pem           = prefs.getString("ca_pem", "");
   cfg.device_token     = prefs.getString("devtoken", "");
   cfg.tz_offset_minutes = prefs.getInt("tzmin", prefs.getInt("tz", 8) * 60);
   cfg.refresh_hour     = (uint8_t)prefs.getUChar("hour", DEFAULT_HOUR);
@@ -781,6 +776,7 @@ void saveConfig(const Config &cfg) {
   prefs.putString("ssid", cfg.wifi_ssid);
   prefs.putString("pass", cfg.wifi_pass);
   prefs.putString("hostport", cfg.backend_hostport);
+  prefs.putString("ca_pem", cfg.ca_pem);
   prefs.putString("devtoken", cfg.device_token);
   prefs.putInt("tzmin", cfg.tz_offset_minutes);
   prefs.putUChar("hour", cfg.refresh_hour);
@@ -851,6 +847,7 @@ String buildConfigPage() {
 
   String curSsid = g_cfg.wifi_ssid;
   String host    = htmlEscape(g_cfg.backend_hostport);
+  String caPem   = htmlEscape(g_cfg.ca_pem);
   int32_t tz     = g_cfg.tz_offset_minutes / 60;
   if (tz < -12 || tz > 14) tz = DEFAULT_TZ_MINUTES / 60;
   uint8_t hour   = g_cfg.refresh_hour;
@@ -866,6 +863,13 @@ String buildConfigPage() {
   html += F("<meta name='viewport' content='width=device-width,initial-scale=1'>");
   html += F("<title>InkTime 設定</title></head><body>");
   html += F("<h2>InkTime 首次配對</h2>");
+  if (portalApSsid.length() > 0 && portalApPassword.length() > 0) {
+    html += F("<p><strong>本次 AP 配對資訊（5 分鐘有效）</strong><br>SSID: <code>");
+    html += htmlEscape(portalApSsid);
+    html += F("</code><br>密碼: <code>");
+    html += htmlEscape(portalApPassword);
+    html += F("</code><br>設定網址: <code>http://192.168.4.1/</code></p>");
+  }
   html += F("<form method='POST' action='/save'><input type='hidden' name='setup_secret' value='"); html += portalSetupSecret; html += F("'><input type='hidden' name='nonce' value='"); html += portalNonce; html += F("'>");
 
   html += F("WiFi SSID:<br>");
@@ -901,6 +905,10 @@ String buildConfigPage() {
 #endif
   html += host;
   html += F("'><br><br>");
+
+  html += F("TLS Root CA PEM（HTTPS 必填；可由編譯 provisioning 或此頁寫入）：<br><textarea name='ca_pem' rows='8' cols='60' maxlength='8192'>");
+  html += caPem;
+  html += F("</textarea><br><small>只接受 -----BEGIN CERTIFICATE----- 至 -----END CERTIFICATE-----；CA 不是 secret，但不會寫入狀態回報。</small><br><br>");
 
   html += F("裝置 Token（留空會保留現有 Token）：<br><input name='device_token' type='password' size='48' autocomplete='off'><br>");
   html += F("<small>請從 InkTime 裝置管理頁配對；Token 不會顯示在網址或序列埠。</small><br><br>");
@@ -982,6 +990,7 @@ void handleSave() {
   String ssid     = server.arg("ssid");
   String pass     = server.arg("pass");
   String host     = server.arg("hostport");
+  String caPem    = server.arg("ca_pem");
   String deviceToken = server.arg("device_token");
   String hourStr  = server.arg("hour");
   String minuteStr = server.arg("minute");
@@ -990,6 +999,7 @@ void handleSave() {
 
   ssid.trim();
   host.trim();
+  caPem.trim();
   deviceToken.trim();
   const int schemeEnd = host.indexOf("://");
   const String hostOrigin = schemeEnd >= 0 ? host.substring(schemeEnd + 3) : String("");
@@ -1000,7 +1010,13 @@ void handleSave() {
 #else
   const bool allowedScheme = host.startsWith("https://");
 #endif
+  const bool caProvided = caPem.length() > 0;
+  if (caProvided && !inktime::DeviceHttpTransport::trustAnchorValid(caPem)) {
+    server.send(400, "text/plain; charset=utf-8", "PAIRING-003 Root CA PEM 格式不合法");
+    return;
+  }
   if (ssid.length() > 32 || pass.length() > 63 || host.length() > 240 || deviceToken.length() > 256
+      || caPem.length() > 8192
       || host.indexOf('@') >= 0 || !allowedScheme || unsafeOrigin) {
     server.send(400, "text/plain; charset=utf-8", "PAIRING-002 設定格式或長度不合法");
     return;
@@ -1012,6 +1028,7 @@ void handleSave() {
   if (pass.length() > 0) newCfg.wifi_pass = pass;
 
   newCfg.backend_hostport = host;
+  if (caProvided) newCfg.ca_pem = caPem;
   if (deviceToken.length() > 0) newCfg.device_token = deviceToken;
 
   int32_t tz = tzStr.toInt();
@@ -1179,6 +1196,8 @@ void startConfigPortal() {
   String shortId = chipHex.substring(chipHex.length() - 6);
   String apSsid = "InkTime-" + shortId;
   String apPassword = randomPortalSecret(); // never derived from SSID, MAC, or chip ID
+  portalApSsid = apSsid;
+  portalApPassword = apPassword;
 
   bool apOk = WiFi.softAP(apSsid.c_str(), apPassword.c_str());
   (void)apOk;
@@ -1187,6 +1206,13 @@ void startConfigPortal() {
   DBG_PRINT("[CFG] softAP result = "); DBG_PRINTLN(apOk ? "OK" : "FAIL");
   DBG_PRINT("[CFG] AP SSID = "); DBG_PRINTLN(apSsid);
   DBG_PRINT("[CFG] AP IP   = "); DBG_PRINTLN(WiFi.softAPIP());
+#endif
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+  if (apOk) {
+    (void)photoPainter.displayPairingScreen(
+      apSsid.c_str(), apPassword.c_str(), "http://192.168.4.1");
+  }
 #endif
 
   server.on("/", HTTP_GET, handleRoot);
@@ -1368,7 +1394,7 @@ static bool normalizedBackendBase(const Config &cfg, String &base) {
     lastDeviceErrorMessage = "Backend 必須是不含帳密、路徑、Query 或 Fragment 的 Origin";
     return false;
   }
-  return backendTransportAllowed(base);
+  return backendTransportAllowed(base, cfg.ca_pem);
 }
 
 static bool queueAckIdempotencyKey(const PendingQueueAck &pending, String &key) {
@@ -1421,9 +1447,15 @@ static bool sendQueueAck(const Config &cfg, const PendingQueueAck &pending, bool
   serializeJson(payload, body);
 
   for (uint8_t attempt = 0; attempt <= inktime::kQueueRetryLimit; ++attempt) {
+    inktime::DeviceHttpTransport transport(cfg.ca_pem);
     HTTPClient ackHttp;
-    configureHttpClient(ackHttp, 15000);
-    if (!ackHttp.begin(base + String(DEVICE_QUEUE_ACK_PATH))) break;
+    String transportCode;
+    String transportMessage;
+    if (!transport.begin(ackHttp, base + String(DEVICE_QUEUE_ACK_PATH), 15000, transportCode, transportMessage)) {
+      lastDeviceErrorCode = transportCode;
+      lastDeviceErrorMessage = transportMessage;
+      break;
+    }
     ackHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
     ackHttp.addHeader("Content-Type", "application/json");
     const int status = ackHttp.POST(body);
@@ -1523,13 +1555,15 @@ bool downloadLatestPhotoBin(Config &cfg) {
   DBG_PRINTLN("[HTTP] 取得版本 Manifest（Authorization 已遮蔽）");
 #endif
 
+  inktime::DeviceHttpTransport transport(cfg.ca_pem);
   HTTPClient manifestHttp;
-  configureHttpClient(manifestHttp, 30000);
+  String transportCode;
+  String transportMessage;
   const char* manifestHeaders[] = {"Content-Type"};
   manifestHttp.collectHeaders(manifestHeaders, 1);
-  if (!manifestHttp.begin(manifestUrl)) {
-    lastDeviceErrorCode = "DEVICE-MANIFEST-URL";
-    lastDeviceErrorMessage = "Manifest URL 無法初始化";
+  if (!transport.begin(manifestHttp, manifestUrl, 30000, transportCode, transportMessage)) {
+    lastDeviceErrorCode = transportCode.length() ? transportCode : "DEVICE-MANIFEST-URL";
+    lastDeviceErrorMessage = transportMessage.length() ? transportMessage : "Manifest URL 無法初始化";
     return false;
   }
   manifestHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
@@ -1703,11 +1737,17 @@ bool downloadLatestPhotoBin(Config &cfg) {
 #endif
 
     String fileUrl = base + String(downloadBaseRaw) + fileName;
+    inktime::DeviceHttpTransport fileTransport(cfg.ca_pem);
     HTTPClient fileHttp;
-    configureHttpClient(fileHttp, 60000);
+    String fileTransportCode;
+    String fileTransportMessage;
     const char* fileHeaders[] = {"Content-Type"};
     fileHttp.collectHeaders(fileHeaders, 1);
-    if (!fileHttp.begin(fileUrl)) continue;
+    if (!fileTransport.begin(fileHttp, fileUrl, 60000, fileTransportCode, fileTransportMessage)) {
+      lastDeviceErrorCode = fileTransportCode;
+      lastDeviceErrorMessage = fileTransportMessage;
+      continue;
+    }
     fileHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
     int code = fileHttp.GET();
     const String fileContentType = fileHttp.header("Content-Type");
@@ -1821,14 +1861,16 @@ static bool downloadOfflineScheduleSlot(
     lastDeviceErrorMessage = "無法配置離線排程 Slot 緩衝區";
     return false;
   }
+  inktime::DeviceHttpTransport fileTransport(cfg.ca_pem);
   HTTPClient fileHttp;
-  configureHttpClient(fileHttp, 60000);
+  String fileTransportCode;
+  String fileTransportMessage;
   const char* fileHeaders[] = {"Content-Type"};
   fileHttp.collectHeaders(fileHeaders, 1);
-  if (!fileHttp.begin(base + downloadUrl)) {
+  if (!fileTransport.begin(fileHttp, base + downloadUrl, 60000, fileTransportCode, fileTransportMessage)) {
     heap_caps_free(packed);
-    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-URL";
-    lastDeviceErrorMessage = "離線排程 Slot URL 無法初始化";
+    lastDeviceErrorCode = fileTransportCode.length() ? fileTransportCode : "DEVICE-OFFLINE-SCHEDULE-URL";
+    lastDeviceErrorMessage = fileTransportMessage.length() ? fileTransportMessage : "離線排程 Slot URL 無法初始化";
     return false;
   }
   fileHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
@@ -1916,15 +1958,18 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
     lastDeviceErrorMessage = "離線排程缺少 Backend 或裝置 Token";
     return false;
   }
+  inktime::DeviceHttpTransport scheduleTransport(cfg.ca_pem);
   HTTPClient scheduleHttp;
-  configureHttpClient(scheduleHttp, 30000);
+  String scheduleTransportCode;
+  String scheduleTransportMessage;
   const char* scheduleHeaders[] = {"Content-Type"};
   scheduleHttp.collectHeaders(scheduleHeaders, 1);
   String schedulePath = DEVICE_OFFLINE_SCHEDULE_PATH;
   if (targetNext) schedulePath += "?target=next";
-  if (!scheduleHttp.begin(base + schedulePath)) {
-    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-URL";
-    lastDeviceErrorMessage = "離線排程 URL 無法初始化";
+  if (!scheduleTransport.begin(
+        scheduleHttp, base + schedulePath, 30000, scheduleTransportCode, scheduleTransportMessage)) {
+    lastDeviceErrorCode = scheduleTransportCode.length() ? scheduleTransportCode : "DEVICE-OFFLINE-SCHEDULE-URL";
+    lastDeviceErrorMessage = scheduleTransportMessage.length() ? scheduleTransportMessage : "離線排程 URL 無法初始化";
     return false;
   }
   scheduleHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
@@ -2331,13 +2376,17 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
   String base;
   if (!normalizedBackendBase(cfg, base)) return QueueDownloadResult::Failed;
 
+  inktime::DeviceHttpTransport manifestTransport(cfg.ca_pem);
   HTTPClient manifestHttp;
-  configureHttpClient(manifestHttp, 30000);
+  String manifestTransportCode;
+  String manifestTransportMessage;
   const char* manifestHeaders[] = {"Content-Type"};
   manifestHttp.collectHeaders(manifestHeaders, 1);
-  if (!manifestHttp.begin(base + String(DEVICE_QUEUE_MANIFEST_PATH))) {
-    lastDeviceErrorCode = "DEVICE-QUEUE-URL";
-    lastDeviceErrorMessage = "Queue Manifest URL 無法初始化";
+  if (!manifestTransport.begin(
+        manifestHttp, base + String(DEVICE_QUEUE_MANIFEST_PATH), 30000,
+        manifestTransportCode, manifestTransportMessage)) {
+    lastDeviceErrorCode = manifestTransportCode.length() ? manifestTransportCode : "DEVICE-QUEUE-URL";
+    lastDeviceErrorMessage = manifestTransportMessage.length() ? manifestTransportMessage : "Queue Manifest URL 無法初始化";
     return QueueDownloadResult::Failed;
   }
   manifestHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
@@ -2500,14 +2549,17 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
     return QueueDownloadResult::Failed;
   }
 
+  inktime::DeviceHttpTransport fileTransport(cfg.ca_pem);
   HTTPClient fileHttp;
-  configureHttpClient(fileHttp, 60000);
+  String fileTransportCode;
+  String fileTransportMessage;
   const char* fileHeaders[] = {"Content-Type"};
   fileHttp.collectHeaders(fileHeaders, 1);
-  if (!fileHttp.begin(base + selectedDownloadUrl)) {
+  if (!fileTransport.begin(
+        fileHttp, base + selectedDownloadUrl, 60000, fileTransportCode, fileTransportMessage)) {
     heap_caps_free(packed);
-    lastDeviceErrorCode = "DEVICE-QUEUE-FILE-URL";
-    lastDeviceErrorMessage = "Queue download URL 無法初始化";
+    lastDeviceErrorCode = fileTransportCode.length() ? fileTransportCode : "DEVICE-QUEUE-FILE-URL";
+    lastDeviceErrorMessage = fileTransportMessage.length() ? fileTransportMessage : "Queue download URL 無法初始化";
     return QueueDownloadResult::Failed;
   }
   fileHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
@@ -2992,9 +3044,17 @@ void reportDeviceStatus(const Config &cfg, bool displayUpdated) {
   String body;
   serializeJson(payload, body);
 
+  inktime::DeviceHttpTransport statusTransport(cfg.ca_pem);
   HTTPClient statusHttp;
-  configureHttpClient(statusHttp, 15000);
-  if (!statusHttp.begin(base + String(DEVICE_STATUS_PATH))) return;
+  String statusTransportCode;
+  String statusTransportMessage;
+  if (!statusTransport.begin(
+        statusHttp, base + String(DEVICE_STATUS_PATH), 15000,
+        statusTransportCode, statusTransportMessage)) {
+    lastDeviceErrorCode = statusTransportCode;
+    lastDeviceErrorMessage = statusTransportMessage;
+    return;
+  }
   statusHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
   statusHttp.addHeader("Content-Type", "application/json");
   statusHttp.POST(body);

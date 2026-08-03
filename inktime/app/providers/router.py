@@ -320,11 +320,11 @@ class FailoverVisionProvider(VisionProvider):
     def delete_remote_file(self, file_id: str) -> dict:
         return self._batch_provider().delete_remote_file(file_id)
 
-    def estimate_cost(self, model: str, usage: Usage) -> float:
+    def estimate_cost(self, model: str, usage: Usage) -> float | None:
         channel = getattr(self._local, "channel", self.channels[0])
         return channel.provider.estimate_cost(model, usage)
 
-    def estimate_batch_cost(self, model: str, usage: Usage) -> float:
+    def estimate_batch_cost(self, model: str, usage: Usage) -> float | None:
         channel = getattr(self._local, "channel", self.channels[0])
         return channel.provider.estimate_batch_cost(model, usage)
 

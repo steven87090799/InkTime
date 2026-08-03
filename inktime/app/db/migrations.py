@@ -1665,6 +1665,21 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        32,
+        "加入 Provider 路由選項與真實成本來源",
+        (
+            "ALTER TABLE providers ADD COLUMN options_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE api_usage ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0 CHECK(cache_write_tokens >= 0)",
+            "ALTER TABLE api_usage ADD COLUMN cost_source TEXT NOT NULL DEFAULT 'unknown' CHECK(cost_source IN ('provider_reported','estimated','unknown'))",
+            "ALTER TABLE api_usage ADD COLUMN prompt_chars INTEGER NOT NULL DEFAULT 0 CHECK(prompt_chars >= 0)",
+            "ALTER TABLE api_usage ADD COLUMN schema_chars INTEGER NOT NULL DEFAULT 0 CHECK(schema_chars >= 0)",
+            "ALTER TABLE api_usage ADD COLUMN request_body_bytes INTEGER NOT NULL DEFAULT 0 CHECK(request_body_bytes >= 0)",
+            "ALTER TABLE api_usage ADD COLUMN image_bytes INTEGER NOT NULL DEFAULT 0 CHECK(image_bytes >= 0)",
+            "UPDATE api_usage SET cost_source=CASE WHEN actual_cost IS NOT NULL THEN 'provider_reported' WHEN estimated_cost > 0 THEN 'estimated' ELSE 'unknown' END",
+            "CREATE INDEX IF NOT EXISTS idx_api_usage_cost_source ON api_usage(cost_source,started_at)",
+        ),
+    ),
 )
 
 

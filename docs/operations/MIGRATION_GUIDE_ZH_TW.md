@@ -50,6 +50,15 @@ Migration 31 的 Fresh、30→31、pre-migration backup、restore/restart、`PRA
 
 升級前建立的 Session 沒有 `session_version`，因此升級後會失效一次並要求重新登入。之後停用／重新啟用帳號、變更或重設密碼、變更角色都會遞增版本並立即撤銷既有 Session。舊帳號與舊密碼仍可登入；新建帳號與變更密碼才套用 3–64 字元帳號與 12–128 字元密碼規則。
 
+## Migration 32：Provider options 與可追溯成本指標
+
+Migration 32 不修改 Migration 1～31。它為 `providers` 增加受控的 `options_json`，讓正式 OpenRouter routing／privacy policy 與相容端點設定以 canonical JSON 保存；Provider capabilities 仍由 server-side kind policy 計算，不接受用戶端偽造 Batch／reasoning 能力。
+
+同一 Migration 也為 `api_usage` 增加 `cache_write_tokens`、`cost_source`、`prompt_chars`、`schema_chars`、`request_body_bytes` 與 `image_bytes`。`cost_source` 只能是 `provider_reported`、`estimated` 或 `unknown`；unknown 成本不會在預算、成本頁或照片摘要中被當作零。既有 usage row 由 schema default 保留可讀性，新 row 必須寫入明確來源。
+
+升級前仍必須建立 SQLite backup，Migration 以單一交易套用並執行
+`PRAGMA foreign_key_check`、`PRAGMA integrity_check`。Fresh Database、31→32、失敗 rollback、重啟與 production release schema gate 必須由 Final-Head CI 驗證；本機不執行測試或建置。
+
 ## PR #52 跨日修復的資料相容性
 
 本次跨日 staged-next 修復不新增 SQLite schema，也不修改既有 Migration；`MIGRATION=none`。明日 schedule 以 PhotoPainter SD 上 bounded 的 `staged_next.json`、`.tmp` 與 `.bak` 保存，active schedule 仍由既有 snapshot／Queue schema 管理。部署時不需重跑資料遷移；需確認韌體版本同時支援 `target=current|next`、future rotation、午夜 promote 與 non-terminal prefetch ACK。

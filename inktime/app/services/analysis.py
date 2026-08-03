@@ -47,7 +47,10 @@ class AnalysisDisabledError(RuntimeError):
     code = "ANALYSIS-DISABLED"
 
 
-PROMPT_VERSION = "photo-quality-v4-visual-orientation"
+PROMPT_VERSION = "photo-quality-v5-grade-anchors"
+FULL_ANALYSIS_TOKEN_CAP = 2048
+CAPTION_VARIANTS_TOKEN_CAP = 3072
+REPAIR_TOKEN_CAP = 1200
 
 
 class ProviderUnavailableError(ValueError):
@@ -119,13 +122,27 @@ class PhotoAnalysisService:
             "caption_variants_enabled": bool(self.settings.get("analysis.caption_variants_enabled", False)),
         }
 
+    @staticmethod
+    def _caption_generation_controls(controls: dict | None) -> dict | None:
+        if not controls:
+            return None
+        return {key: value for key, value in controls.items() if key != "copy_default_style"}
+
+    @staticmethod
+    def _caption_display_controls(controls: dict | None) -> dict | None:
+        if not controls:
+            return None
+        return {"copy_default_style": str(controls.get("copy_default_style", "natural"))}
+
     def build_plan(self, *, strategy: str, provider_route: list[dict], scoring_profile: dict) -> dict:
         """Build the sole server-authoritative non-secret Analysis Plan."""
         if self.settings is None:
             raise RuntimeError("分析設定尚未初始化")
         settings = self.settings
         controls = self._caption_controls()
-        prompt_version = self._prompt_version(controls)
+        generation_controls = self._caption_generation_controls(controls)
+        display_controls = self._caption_display_controls(controls)
+        prompt_version = self._prompt_version(generation_controls)
         prefilter = {
             "enabled": bool(settings.get("analysis.prefilter_enabled", True)),
             "screenshots_enabled": bool(settings.get("analysis.prefilter_screenshots", True)),
@@ -176,11 +193,12 @@ class PhotoAnalysisService:
             stage_two_threshold=float(settings.get("analysis.stage_two_threshold", 65)),
             favorite_override=bool(settings.get("analysis.favorite_override", True)),
             scoring_profile=scoring_profile,
-            caption_controls=controls,
+            caption_controls=generation_controls,
             prompt_version=prompt_version,
             high_image_max_side=int(
                 settings.get("analysis.image_max_side", settings.get("analysis.high_image_max_side", 1024))
             ),
+            caption_display_controls=display_controls,
             prefilter=prefilter,
             execution_policy=execution_policy,
             travel_policy=travel_policy,
@@ -192,8 +210,11 @@ class PhotoAnalysisService:
     def _prompt_version(caption_controls: dict | None) -> str:
         if not caption_controls:
             return PROMPT_VERSION
+        generation_controls = {
+            key: value for key, value in caption_controls.items() if key != "copy_default_style"
+        }
         fingerprint = hashlib.sha256(
-            json.dumps(caption_controls, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+            json.dumps(generation_controls, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()[:16]
         return f"{PROMPT_VERSION}-caption-{fingerprint}"
 
@@ -534,7 +555,25 @@ class PhotoAnalysisService:
         started_perf: float,
         retry_count: int = 0,
     ) -> float:
-        cost = provider.estimate_cost(model, response.usage)
+        estimated_cost = provider.estimate_cost(model, response.usage)
+        provider_cost = response.usage.provider_reported_cost
+        if provider_cost is not None:
+            actual_cost = max(0.0, float(provider_cost))
+            cost_source = "provider_reported"
+        elif estimated_cost is not None:
+            actual_cost = None
+            cost_source = "estimated"
+        else:
+            actual_cost = None
+            cost_source = "unknown"
+        effective_cost = (
+            max(0.0, float(provider_cost))
+            if provider_cost is not None
+            else max(0.0, float(estimated_cost))
+            if estimated_cost is not None
+            else 0.0
+        )
+        metrics = dict(response.request_metrics or getattr(provider, "last_request_metrics", {}) or {})
         self.usage.record(
             provider=provider.name,
             model=model,
@@ -544,15 +583,21 @@ class PhotoAnalysisService:
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
             cached_tokens=response.usage.cached_tokens,
-            estimated_cost=cost,
-            actual_cost=cost,
+            estimated_cost=estimated_cost,
+            actual_cost=actual_cost,
             started_at=started_at,
             latency_ms=int((time.perf_counter() - started_perf) * 1000),
             status="completed",
             retry_count=retry_count,
             reasoning_tokens=response.usage.reasoning_tokens,
+            cache_write_tokens=response.usage.cache_write_tokens,
+            cost_source=cost_source,
+            prompt_chars=metrics.get("prompt_chars", 0),
+            schema_chars=metrics.get("schema_chars", 0),
+            request_body_bytes=metrics.get("request_body_bytes", 0),
+            image_bytes=metrics.get("image_bytes", 0),
         )
-        return cost
+        return effective_cost
 
     def _model_call(
         self,
@@ -875,7 +920,22 @@ class PhotoAnalysisService:
             self.budgets.assert_request_allowed(job_id, photo_id)
         started_at = datetime.now(timezone.utc).isoformat()
         started_perf = time.perf_counter()
-        max_tokens = int(self.budgets.settings.get("budget.max_tokens", 8000)) if self.budgets else None
+        settings = self.budgets.settings if self.budgets else self.settings
+        global_token_cap = int(settings.get("budget.max_tokens", 8000)) if settings else 8000
+        requested_token_cap = int(
+            settings.get(
+                "budget.caption_variants_max_tokens"
+                if caption_controls and caption_controls.get("caption_variants_enabled")
+                else "budget.full_analysis_max_tokens",
+                3072 if caption_controls and caption_controls.get("caption_variants_enabled") else 2048,
+            )
+        ) if settings else 2048
+        hard_cap = (
+            CAPTION_VARIANTS_TOKEN_CAP
+            if caption_controls and caption_controls.get("caption_variants_enabled")
+            else FULL_ANALYSIS_TOKEN_CAP
+        )
+        max_tokens = max(256, min(global_token_cap, requested_token_cap, hard_cap))
         self._activity(
             "DEBUG",
             "provider_request_started",
@@ -995,11 +1055,18 @@ class PhotoAnalysisService:
             )
             repair_started_at = datetime.now(timezone.utc).isoformat()
             repair_perf = time.perf_counter()
+            repair_model = str(settings.get("model.repair_model", model) if settings else model) or model
+            repair_global_cap = int(settings.get("budget.max_tokens", 8000)) if settings else 8000
+            repair_cap = (
+                int(settings.get("budget.repair_max_tokens", REPAIR_TOKEN_CAP))
+                if settings
+                else REPAIR_TOKEN_CAP
+            )
             repair_call = {
                 "invalid_content": response.content,
                 "validation_error": str(first_error),
-                "model": model,
-                "max_tokens": max_tokens,
+                "model": repair_model,
+                "max_tokens": max(256, min(repair_global_cap, repair_cap, REPAIR_TOKEN_CAP)),
                 "stage": stage,
                 "caption_controls": caption_controls,
             }
@@ -1021,7 +1088,7 @@ class PhotoAnalysisService:
                 repaired = provider.repair_json(**repair_call)
             total_cost += self._record(
                 provider,
-                model,
+                repair_model,
                 job_id,
                 photo_id,
                 "json_repair",
@@ -1111,8 +1178,10 @@ class PhotoAnalysisService:
                     "emotion_weight": (ranking_weights or DEFAULT_RANKING_WEIGHTS)["emotion"],
                     "favorite_bonus": favorite_bonus,
                 },
-                caption_controls=self._caption_controls(),
-                prompt_version=self._prompt_version(self._caption_controls()),
+                caption_controls=self._caption_generation_controls(self._caption_controls()),
+                prompt_version=self._prompt_version(
+                    self._caption_generation_controls(self._caption_controls())
+                ),
                 high_image_max_side=int(
                     self.settings.get(
                         "analysis.image_max_side", self.settings.get("analysis.high_image_max_side", 1024)
@@ -1120,6 +1189,7 @@ class PhotoAnalysisService:
                 )
                 if self.settings
                 else 1024,
+                caption_display_controls=self._caption_display_controls(self._caption_controls()),
             )
         analysis_spec = normalize_analysis_plan(analysis_spec)
         analysis_spec["reasoning_effort"] = normalize_reasoning_effort(
@@ -1128,7 +1198,12 @@ class PhotoAnalysisService:
         strategy = str(analysis_spec["strategy"])
         model = str(analysis_spec.get("model") or analysis_spec.get("high_model") or "")
         favorite_override = bool(analysis_spec["favorite_override"])
-        caption_controls = dict(analysis_spec["caption_controls"]) or None
+        caption_controls = dict(analysis_spec.get("caption_controls") or {}) or None
+        display_controls = dict(analysis_spec.get("caption_display_controls") or {})
+        if caption_controls:
+            # Display style is frozen for the job but excluded from the
+            # provider prompt and Vision request identity.
+            caption_controls = dict(caption_controls) | display_controls
         prompt_version = str(analysis_spec["prompt_version"])
         vision_input = dict(analysis_spec["vision_input"])
         image_max_side = int(vision_input["max_side"])
@@ -1136,7 +1211,9 @@ class PhotoAnalysisService:
         favorite_bonus = float(analysis_spec["favorite_bonus"])
         scoring_version_id = str(analysis_spec["scoring_profile_id"]) or scoring_version_id
         analysis_spec_json = canonical_json(analysis_spec)
-        analysis_fingerprint = fingerprint(analysis_spec)
+        identity_spec = dict(analysis_spec)
+        identity_spec.pop("caption_display_controls", None)
+        analysis_fingerprint = fingerprint(identity_spec)
         content_sha = str(photo["sha256"] or "")
         plan_prefilter = {
             "analysis.prefilter_enabled": bool(analysis_spec.get("prefilter", {}).get("enabled", True)),

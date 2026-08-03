@@ -119,7 +119,7 @@
 
     <div class="panel">
       <h2>Token 與成本</h2>
-      {% for u in usage %}<p>{{ u.request_type }} · {{ u.model }} · {{ u.input_tokens + u.output_tokens }} Token · US$ {{ u.actual_cost or u.estimated_cost }}</p>{% else %}<p class="empty">沒有 API 使用量；若被本機預篩選排除，這裡會維持 0 Token。</p>{% endfor %}
+      {% for u in usage %}<p>{{ u.request_type }} · {{ u.model }} · {{ u.input_tokens + u.output_tokens }} Token · {% if u.cost_source == 'unknown' %}成本 unknown（Provider 未回報且無價格）{% elif u.cost_source == 'provider_reported' %}Provider 成本 US$ {{ '%.6f'|format(u.actual_cost) }}{% else %}估算成本 US$ {{ '%.6f'|format(u.estimated_cost) }}{% endif %}</p>{% else %}<p class="empty">沒有 API 使用量；若被本機預篩選排除，這裡會維持 0 Token。</p>{% endfor %}
     </div>
     <div class="panel"><h2>錯誤記錄</h2>{% for e in errors %}<p><code>{{ e.error_code }}</code> {{ e.message }}</p>{% else %}<p class="empty">沒有錯誤。</p>{% endfor %}</div>
     <div class="panel"><h2>處理歷史</h2>{% for event in events %}<p>{{ event.created_at }} · {{ event.event }}<br><code>{{ event.changes_json }}</code></p>{% else %}<p class="empty">尚無人工修改。</p>{% endfor %}</div>

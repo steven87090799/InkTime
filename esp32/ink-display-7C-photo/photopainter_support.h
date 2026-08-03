@@ -62,6 +62,7 @@ class PhotoPainterSupport {
   bool clearStagedNextSchedule();
   bool promoteStagedNextSchedule();
   bool displayFrame(const uint8_t* framebuffer, size_t length);
+  bool displayPairingScreen(const char* ssid, const char* password, const char* setup_url);
 
   bool writeRtc(time_t epoch);
   bool readRtc(time_t& epoch);

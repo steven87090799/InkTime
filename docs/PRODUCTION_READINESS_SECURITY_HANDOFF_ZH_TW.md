@@ -2,6 +2,20 @@
 
 本文件記錄安全強化分支最後一輪的操作契約與人工邊界。自動化測試通過不代表真實 NAS、正式憑證或電子紙硬體已驗證；未實際執行的項目必須標記 `NOT RUN`。
 
+## 本輪 One-shot hardening 範圍
+
+- 基準為最新 `origin/main`；正式 schema source 目前為 `Migration 32`。它保存 Provider options/capabilities、usage 的 cache-write、成本來源與 request-size metrics，舊 Migration 1–31 不修改。
+- Provider 路徑新增正式 OpenRouter contract、受控 routing/privacy options、reasoning／session routing 與 Batch hard guard；成本來源分為 `provider_reported`、`estimated`、`unknown`，unknown 不當作零成本。
+- AI 請求固定 512／1024／1600 image side；完整、變體、文字修復分別受 2048／3072／1200 token cap 約束，並保存 Prompt、Schema、request body 與 image bytes 指標。
+- ESP32 backend transport 只接受有 trust anchor 的 HTTPS；HTTP 僅限明確的私有 LAN 開發設定，沒有 `setInsecure()` fallback。首次配網會在 AP 頁面與裝置畫面顯示一次性的隨機 AP 密碼。
+- production Compose 預設 loopback bind、HTTPS public URL、Secure cookie 與禁止 insecure HTTP；`docker-compose.dev.yml` 才提供明確的本機開發覆寫。
+- 離線 benchmark 預設不呼叫外部 Provider、不寫 production analysis/release/history/cache；Container workflow 另以 Syft 產生 SBOM、Trivy 掃描 High/Critical，結果由 Final-Head GitHub Actions 決定。
+
+詳細的 Provider、benchmark 與韌體 trust-anchor 操作分別見
+[OpenRouter 正式 Provider 與安全契約](providers/OPENROUTER_ZH_TW.md)、
+[Model Benchmark 規格](providers/MODEL_BENCHMARK_ZH_TW.md) 與
+[ESP32 TLS／配網信任根配置](devices/ESP32_TLS_PROVISIONING_ZH_TW.md)。
+
 ## Queue Manifest 與 Release
 
 - `ResilienceRepository` 只查 Queue／Queue Item 資料，不讀取 Release filesystem。
@@ -49,6 +63,8 @@ Webhook 採 at-least-once。每個事件持久化穩定 Event ID，所有後續 
 - `compose-production-tls-smoke`：用一次性測試 CA、SAN certificate、Nginx 與不屬保留 suffix 的 `inktime-ci.acme.dev`；client 明確信任 CA，不使用 `verify=False`／ignore-certificate。驗證 HTTP redirect、TLS hostname/chain、Secure＋HttpOnly＋SameSite=Strict、CSRF、login/logout/dashboard、HTTPS-only HSTS、production preflight 與 proxy hop diagnostics；backend port 不公開。
 - `bounded-runtime-soak`：Web app、Worker、Scheduler 同時執行；重複 session、device auth success/failure、Queue manifest/ACK、release metadata、scan、scheduler heartbeat 與 webhook mock。輸出 RSS、thread、FD、SQLite connection／writer、open file、child process、pending async work／job、oldest job、scheduler age、WAL、timeout、cleanup、exit status 與 final JSON summary。手動 workflow 可跑 30 分鐘、2 小時或 5 小時；24 小時只在受控 LAN 主機本地執行。
 - Backup/Restore：fresh database → full metadata backup → fresh target restore；驗證 Migration 27、administrator/password/session、device token、release/queue、settings、Batch lifecycle tables、Review／offline schedule tables、Secret exclusion、Worker/Scheduler bootstrap。舊 snapshot upgrade 由 migration fixtures 覆蓋。
+- Current schema gate：Release image 與 LAN production gate 都從 `inktime/app/db/migrations.py` 讀取目前最高 Migration，不再各自維護硬編碼版本；本輪預期為 Migration 32。Migration 32 的 upgrade／fresh／integrity／rollback 證據必須在 Final-Head CI 取得。
+- Container supply-chain：`container-security.yml` 在 exact checkout 建置 image，輸出 CycloneDX SBOM，並以 Trivy 掃描 High/Critical；任何 High/Critical 都使 workflow 失敗。此 workflow 不代表真實 NAS host、registry 或 production image 已驗證。
 - Rollback：不支援只降程式、不還原 DB。必須停止 Web/Worker/Scheduler、還原相容 snapshot，再切回相容 image/commit。
 
 ## Dependency／Actions
@@ -60,6 +76,8 @@ Webhook 採 at-least-once。每個事件持久化穩定 Event ID，所有後續 
 ## OpenAI Batch 邊界
 
 Batch 已完成 Worker-managed 的持久化生命週期：選片、JSONL 分片、提交、poll、結果對帳、冪等匯入、失敗重試、成本、重啟恢復與遠端檔案清理。正式啟用前仍須由管理員完成 Provider／價格設定與 100 張 Sample 驗收；真實 OpenAI 與 NAS／硬體驗證不由 CI 代替。
+
+OpenRouter 不進入這條 Batch 路徑；generic OpenAI-compatible Provider 只有在管理員確認 `/files`、`/batches`、結果／錯誤檔下載與刪除契約後才可勾選 Batch。模型離線比較使用 bounded benchmark；live benchmark 不是 CI 預設，也不得使用 production DB 或 production AI cache。
 
 ## 人工驗證
 

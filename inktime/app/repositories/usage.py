@@ -21,7 +21,7 @@ class UsageRepository:
         input_tokens: int,
         output_tokens: int,
         cached_tokens: int,
-        estimated_cost: float,
+        estimated_cost: float | None,
         actual_cost: float | None,
         started_at: str,
         latency_ms: int,
@@ -33,6 +33,12 @@ class UsageRepository:
         processing_mode: str = "sync",
         request_id: str | None = None,
         reasoning_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        cost_source: str = "unknown",
+        prompt_chars: int = 0,
+        schema_chars: int = 0,
+        request_body_bytes: int = 0,
+        image_bytes: int = 0,
     ) -> None:
         completed_at = datetime.now(timezone.utc).isoformat()
         with self.database.session() as connection:
@@ -40,8 +46,9 @@ class UsageRepository:
                 """
                 INSERT INTO api_usage(provider,model,job_id,photo_id,request_type,input_tokens,output_tokens,
                     cached_tokens,estimated_cost,actual_cost,started_at,completed_at,latency_ms,status,retry_count,error_code,
-                    batch_id,batch_item_id,processing_mode,request_id,reasoning_tokens)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    batch_id,batch_item_id,processing_mode,request_id,reasoning_tokens,cache_write_tokens,cost_source,
+                    prompt_chars,schema_chars,request_body_bytes,image_bytes)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     provider,
@@ -52,7 +59,7 @@ class UsageRepository:
                     input_tokens,
                     output_tokens,
                     cached_tokens,
-                    estimated_cost,
+                    max(0.0, float(estimated_cost)) if estimated_cost is not None else 0.0,
                     actual_cost,
                     started_at,
                     completed_at,
@@ -65,6 +72,12 @@ class UsageRepository:
                     processing_mode,
                     request_id,
                     reasoning_tokens,
+                    max(0, int(cache_write_tokens)),
+                    cost_source if cost_source in {"provider_reported", "estimated", "unknown"} else "unknown",
+                    max(0, int(prompt_chars)),
+                    max(0, int(schema_chars)),
+                    max(0, int(request_body_bytes)),
+                    max(0, int(image_bytes)),
                 ),
             )
 
@@ -82,12 +95,14 @@ class UsageRepository:
         cached_tokens: int,
         output_tokens: int,
         reasoning_tokens: int,
-        estimated_cost: float,
-        actual_cost: float,
+        estimated_cost: float | None,
+        actual_cost: float | None,
         request_id: str | None,
         started_at: str,
         status: str = "completed",
         connection=None,
+        cache_write_tokens: int = 0,
+        cost_source: str = "unknown",
     ) -> bool:
         """Record one Batch item exactly once; the migration enforces the same invariant."""
 
@@ -100,8 +115,8 @@ class UsageRepository:
                 INSERT OR IGNORE INTO api_usage(
                     provider,model,job_id,photo_id,request_type,input_tokens,output_tokens,cached_tokens,
                     estimated_cost,actual_cost,started_at,completed_at,latency_ms,status,retry_count,error_code,
-                    batch_id,batch_item_id,processing_mode,request_id,reasoning_tokens
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    batch_id,batch_item_id,processing_mode,request_id,reasoning_tokens,cache_write_tokens,cost_source
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     provider,
@@ -112,8 +127,8 @@ class UsageRepository:
                     max(0, int(input_tokens)),
                     max(0, int(output_tokens)),
                     max(0, int(cached_tokens)),
-                    max(0.0, float(estimated_cost)),
-                    max(0.0, float(actual_cost)),
+                    max(0.0, float(estimated_cost)) if estimated_cost is not None else 0.0,
+                    max(0.0, float(actual_cost)) if actual_cost is not None else None,
                     started_at,
                     completed_at,
                     0,
@@ -125,6 +140,8 @@ class UsageRepository:
                     "batch",
                     request_id,
                     max(0, int(reasoning_tokens)),
+                    max(0, int(cache_write_tokens)),
+                    cost_source if cost_source in {"provider_reported", "estimated", "unknown"} else "unknown",
                 ),
             )
         return bool(cursor.rowcount)

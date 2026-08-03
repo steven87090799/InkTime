@@ -17,9 +17,10 @@ class BudgetService:
         with self.database.session() as connection:
             row = connection.execute(
                 """
-                SELECT COALESCE(SUM(CASE WHEN date(started_at)=date('now') THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) daily,
-                       COALESCE(SUM(CASE WHEN strftime('%Y-%m',started_at)=strftime('%Y-%m','now') THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) monthly,
-                       COALESCE(SUM(CASE WHEN photo_id=? THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) photo
+                SELECT COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND date(started_at)=date('now') THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) daily,
+                       COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND strftime('%Y-%m',started_at)=strftime('%Y-%m','now') THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) monthly,
+                       COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND photo_id=? THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) photo,
+                       COALESCE(SUM(CASE WHEN cost_source='unknown' THEN 1 ELSE 0 END),0) unknown_count
                 FROM api_usage
                 """,
                 (photo_id,),
@@ -33,12 +34,17 @@ class BudgetService:
             "daily": float(row["daily"]),
             "monthly": float(row["monthly"]),
             "photo": float(row["photo"]),
+            "unknown_count": int(row["unknown_count"] or 0),
             "job": float(job["spent"]) if job else 0,
             "job_limit": float(job["budget_limit"]) if job and job["budget_limit"] is not None else None,
         }
 
     def assert_request_allowed(self, job_id: str | None, photo_id: str | None) -> None:
         usage = self.snapshot(job_id, photo_id)
+        if usage["unknown_count"]:
+            error = BudgetExceeded("已有 API 成本為 unknown；請先設定模型價格或使用 Provider 真實成本回報")
+            error.code = "BUDGET-003"
+            raise error
         checks = (
             (usage["daily"], float(self.settings.get("budget.daily_stop", 10)), "每日 API 預算已達停止值"),
             (

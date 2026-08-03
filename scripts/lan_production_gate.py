@@ -14,12 +14,14 @@ import time
 from urllib.parse import urlencode
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
+from inktime.app.db.migrations import MIGRATIONS
+
 BASE_URL = os.environ.get("INKTIME_LAN_GATE_URL", "http://127.0.0.1:8765").rstrip("/")
 USERNAME = "lan-gate-admin"
 PASSWORD = "lan-gate-passphrase"  # noqa: S105 - isolated disposable CI account
 CSRF = re.compile(r'<meta name="csrf-token" content="([^"]+)"')
 RELEASE_ID = "lan-gate-release-v1"
-EXPECTED_MIGRATION_VERSION = 31
+EXPECTED_MIGRATION_VERSION = max(migration.version for migration in MIGRATIONS)
 
 
 def _read_state(path: Path) -> dict[str, object]:

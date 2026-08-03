@@ -29,7 +29,7 @@ def dashboard():
                 "SELECT COALESCE(SUM(input_tokens+output_tokens),0) FROM api_usage WHERE date(started_at)=date('now')"
             ).fetchone()[0],
             "month_cost": connection.execute(
-                "SELECT COALESCE(SUM(COALESCE(actual_cost, estimated_cost)),0) FROM api_usage WHERE strftime('%Y-%m',started_at)=strftime('%Y-%m','now')"
+                "SELECT COALESCE(SUM(CASE WHEN cost_source<>'unknown' THEN COALESCE(actual_cost, estimated_cost) ELSE 0 END),0) FROM api_usage WHERE strftime('%Y-%m',started_at)=strftime('%Y-%m','now')"
             ).fetchone()[0],
         }
         recent_errors = connection.execute(

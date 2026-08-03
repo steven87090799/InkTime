@@ -142,7 +142,7 @@
       element('h3', `${data.score_band}｜${analysis.caption}`),
       element('p', analysis.reason),
       element('p', `類型：${analysis.types.join('、')}`),
-      element('small', `${data.profile.name} · ${data.usage.provider}/${data.usage.model} · ${data.usage.input_tokens + data.usage.output_tokens} Token · US$ ${Number(data.usage.cost).toFixed(6)} · ${data.usage.latency_ms} ms`)
+      element('small', `${data.profile.name} · ${data.usage.provider}/${data.usage.model} · ${data.usage.input_tokens + data.usage.output_tokens} Token · ${data.usage.cost_source === 'unknown' ? '成本 unknown' : `${data.usage.cost_source === 'provider_reported' ? 'Provider' : '估算'} US$ ${Number(data.usage.cost).toFixed(6)}`} · ${data.usage.latency_ms} ms`)
     );
     result.hidden = false;
   });

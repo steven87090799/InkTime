@@ -29,6 +29,7 @@ from inktime.app.api import (
 from inktime.app.bootstrap import ServiceContainer, bootstrap_services
 from inktime.app.core.logging import log_event
 from inktime.app.core.errors import ApplicationError
+from inktime.app.core.redirects import safe_local_redirect_target
 from inktime.app.core.runtime_config import RuntimeConfig
 from inktime.app.repositories.auth import AuthRepository
 from inktime.app.repositories.settings import SettingsRepository
@@ -212,7 +213,11 @@ def configure_web_application(
         if request.path.startswith("/api/"):
             return exc.response_body(), exc.http_status
         flash(exc.public_message, "error")
-        return redirect(request.referrer or url_for("dashboard.dashboard"), code=303)
+        target = safe_local_redirect_target(
+            request.referrer,
+            allowed_host=request.host,
+        )
+        return redirect(target or url_for("dashboard.dashboard"), code=303)
 
     log_event(
         LOGGER,
