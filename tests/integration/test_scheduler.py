@@ -164,12 +164,12 @@ def test_offline_scheduler_skips_expired_today_but_keeps_a_future_today_slot(app
         schedule_times=["08:00", "22:00"],
     )
     runner = SchedulerRunner(app)
-    now = datetime(2026, 8, 3, 11, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 2, 23, 0, tzinfo=timezone.utc)
     runner._prepare_due_offline_devices(now)
     assert offline_jobs(expired_id) == set()
     assert offline_jobs(future_id) == set()
 
-    now = datetime(2026, 8, 3, 11, 30, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 2, 23, 30, tzinfo=timezone.utc)
     runner._prepare_due_offline_devices(now)
     assert offline_jobs(expired_id) == set()
     assert offline_jobs(future_id) == set()
@@ -199,7 +199,7 @@ def test_offline_prefetch_cursor_eventually_visits_more_than_first_ten_devices(a
         )
         device_ids.append(device_id)
     runner = SchedulerRunner(app)
-    now = datetime(2026, 8, 3, 7, 55, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 3, 7, 55, tzinfo=ZoneInfo("Asia/Taipei"))
     for _index in range(4):
         runner._prepare_due_offline_devices(now)
 

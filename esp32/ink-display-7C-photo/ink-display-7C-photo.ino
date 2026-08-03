@@ -3303,10 +3303,12 @@ void setup() {
       }
     }
   }
+#if INKTIME_PHOTOPAINTER_ENABLED
   if (ok && !currentPrefetchOnly && g_cfg.delivery_mode == "inktime_offline_schedule"
       && (displayUpdated || currentDisplaySkipped)) {
     clearOfflineRetryState();
   }
+#endif
   } else {
 #if DEBUG_LOG
     DBG_PRINTLN("[BOOT] downloadDailyPhotoBin FAILED");
