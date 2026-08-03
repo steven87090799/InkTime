@@ -26,7 +26,7 @@ from inktime.app.services.analysis import (
     FULL_ANALYSIS_TOKEN_CAP,
     REPAIR_TOKEN_CAP,
 )
-from inktime.app.providers.base import ProviderResponse, Usage, VisionAttemptState
+from inktime.app.providers.base import ProviderResponse, VisionAttemptState
 from inktime.app.providers.config import normalize_options
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider, ProviderHTTPError
 
