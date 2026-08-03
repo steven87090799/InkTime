@@ -225,7 +225,8 @@ class OpenAICompatibleProvider(VisionProvider):
 
     @staticmethod
     def _usage(payload: dict) -> Usage:
-        usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        usage_value: Any = payload.get("usage")
+        usage: dict[str, Any] = usage_value if isinstance(usage_value, dict) else {}
         details_value = usage.get("prompt_tokens_details") or usage.get("input_tokens_details")
         details = details_value if isinstance(details_value, dict) else {}
         completion_value = usage.get("completion_tokens_details")

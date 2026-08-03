@@ -418,7 +418,7 @@ class ModelBenchmarkService:
             raise BenchmarkError("max-cost 必須是正數")
         if sample_count < 1 or sample_count > MAX_SAMPLE_COUNT:
             raise BenchmarkError(f"sample-count 必須介於 1 到 {MAX_SAMPLE_COUNT}")
-        report = {
+        report: dict[str, Any] = {
             "benchmark_version": "model-benchmark-v1",
             "mode": "live",
             "seed": seed,

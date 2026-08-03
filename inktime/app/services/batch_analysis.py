@@ -1873,7 +1873,8 @@ class BatchAnalysisService:
 
     @staticmethod
     def _usage_from_body(body: dict[str, Any]) -> Usage:
-        usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
+        usage_value: Any = body.get("usage")
+        usage: dict[str, Any] = usage_value if isinstance(usage_value, dict) else {}
         prompt_details_value = usage.get("prompt_tokens_details") or usage.get("input_tokens_details")
         prompt_details = prompt_details_value if isinstance(prompt_details_value, dict) else {}
         completion_details_value = usage.get("completion_tokens_details")
