@@ -24,7 +24,10 @@ from inktime.app.core.logging import log_event
 from inktime.app.core.paths import UnsafePathError
 from inktime.app.domain.rendering import DISPLAY_PROFILES, DeviceTestReleaseStore
 from inktime.app.domain.rendering.system_presets import DEFAULT_DEVICE_PANEL_PROFILE
-from inktime.app.domain.photopainter.offline_schedule import validate_offline_schedule
+from inktime.app.domain.photopainter.offline_schedule import (
+    normalize_delivery_contract,
+    validate_offline_schedule,
+)
 from inktime.app.services.rendering import FIT_MODES, FRAME_ORIENTATIONS, LAYOUTS
 from inktime.app.services.stock_transport import UnsafeStockEndpoint, StockTransportError, validate_stock_endpoint_host
 from inktime.app.repositories.devices import DeviceRepository
@@ -97,13 +100,15 @@ def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
     except ValueError as exc:
         abort(400, description=str(exc))
     try:
-        offline_prefetch_allowed = json_bool(
-            payload,
-            "offline_prefetch_allowed",
-            default=bool(defaults.get("offline_prefetch_allowed", delivery_mode == "inktime_offline_schedule")),
-            error_prefix="DEVICE-008",
+        requested_prefetch = optional_json_bool(
+            payload, "offline_prefetch_allowed", error_prefix="DEVICE-008"
         )
-    except JsonScalarError as exc:
+        delivery_mode, offline_prefetch_allowed = normalize_delivery_contract(
+            delivery_mode,
+            requested_prefetch,
+            explicit_prefetch="offline_prefetch_allowed" in payload,
+        )
+    except (JsonScalarError, ValueError) as exc:
         abort(400, description=str(exc))
     try:
         stock_endpoint_host = validate_stock_endpoint_host(
@@ -589,23 +594,27 @@ def device_offline_schedule():
                     "offline.server_prefetch_margin_minutes", 15
                 )
             )
-            retry_after_epoch = OfflineScheduleRepository.retry_after_epoch(
+            retry_details = OfflineScheduleRepository.retry_after_details(
                 now=datetime.now(timezone.utc),
                 timezone_name=str(device["timezone"]),
                 schedule_times=device_schedule,
                 prefetch_lead_minutes=int(device["prefetch_lead_minutes"]),
                 server_margin_minutes=max(0, min(server_margin, 60)),
             )
+            retry_after_epoch = retry_details.retry_after_epoch
+            next_slot_epoch = retry_details.next_slot_epoch
         except (TypeError, ValueError, json.JSONDecodeError, KeyError):
             # A malformed live device setting is itself bounded recovery
             # input; never make the firmware poll at a fixed one-minute rate.
             retry_after_epoch = now_epoch + 15 * 60
+            next_slot_epoch = None
         response = jsonify(
             {
                 "error": "schedule_not_ready",
                 "error_code": "DEVICE-008",
                 "message": "schedule_not_ready",
                 "retry_after_epoch": int(retry_after_epoch),
+                "next_slot_epoch": next_slot_epoch,
             }
         )
         response.status_code = 404

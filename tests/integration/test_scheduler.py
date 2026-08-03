@@ -92,7 +92,7 @@ def test_offline_prefetch_creates_one_deduplicated_render_job(app):
     )
 
 
-def test_offline_scheduler_prepares_tomorrow_after_local_prepare_hour_without_cancelling_today(app):
+def test_offline_scheduler_prepares_only_tomorrow_after_expired_today(app):
     device_id, _token = app.extensions["inktime_device_repository"].create(
         "預先準備明日的離線相框",
         delivery_mode="inktime_offline_schedule",
@@ -114,10 +114,9 @@ def test_offline_scheduler_prepares_tomorrow_after_local_prepare_hour_without_ca
         and device_id in str(job["settings_json"])
     ]
     assert {job["dedupe_key"] for job in offline_jobs} == {
-        f"offline-prepare:{device_id}:2026-08-03:1",
         f"offline-prepare:{device_id}:2026-08-04:1",
     }
-    assert len(offline_jobs) == 2
+    assert len(offline_jobs) == 1
 
 
 def test_server_prepare_margin_stays_before_device_prefetch(app):
@@ -140,7 +139,52 @@ def test_offline_prefetch_target_date_rejects_invalid_time_contracts_and_catches
         SchedulerRunner._offline_prefetch_target_date(now, ["08:00"], 5, 61)
     with pytest.raises(ValueError, match="時區"):
         SchedulerRunner._offline_prefetch_target_date(datetime(2026, 8, 7, 9, 0), ["08:00"], 5)
-    assert SchedulerRunner._offline_prefetch_target_date(now, ["08:00"], 0).isoformat() == "2026-08-09"
+    assert SchedulerRunner._offline_prefetch_target_date(now, ["08:00"], 0) is None
+
+
+def test_offline_scheduler_skips_expired_today_but_keeps_a_future_today_slot(app):
+    def offline_jobs(device_id):
+        return {
+            job["dedupe_key"]
+            for job in app.extensions["inktime_job_repository"].list()
+            if '"offline_prepare"' in str(job["settings_json"])
+            and device_id in str(job["settings_json"])
+        }
+
+    expired_id, _token = app.extensions["inktime_device_repository"].create(
+        "只有早上時刻",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00"],
+    )
+    future_id, _token = app.extensions["inktime_device_repository"].create(
+        "晚上仍有時刻",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00", "22:00"],
+    )
+    runner = SchedulerRunner(app)
+    now = datetime(2026, 8, 3, 11, 0, tzinfo=timezone.utc)
+    runner._prepare_due_offline_devices(now)
+    assert offline_jobs(expired_id) == set()
+    assert offline_jobs(future_id) == set()
+
+    now = datetime(2026, 8, 3, 11, 30, tzinfo=timezone.utc)
+    runner._prepare_due_offline_devices(now)
+    assert offline_jobs(expired_id) == set()
+    assert offline_jobs(future_id) == set()
+
+    # 20:00 Asia/Taipei: only the device with a future 22:00 Slot keeps a
+    # meaningful today target; both devices get tomorrow.
+    now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
+    runner._prepare_due_offline_devices(now)
+    assert offline_jobs(expired_id) == {
+        f"offline-prepare:{expired_id}:2026-08-04:1"
+    }
+    assert offline_jobs(future_id) == {
+        f"offline-prepare:{future_id}:2026-08-03:1",
+        f"offline-prepare:{future_id}:2026-08-04:1",
+    }
 
 
 def test_offline_prefetch_cursor_eventually_visits_more_than_first_ten_devices(app):

@@ -59,10 +59,11 @@ HTTP timeout、read timeout、redirect、解析失敗或上傳後的未知回應
 - `schedule_times` 排序、去重，裝置端最多 12 個正式 Slot；`prefetch_lead_minutes` 為 0–120。
 - 一日準備是單一 SQLite transaction：每個 Slot 恰好一個 Release、恰好一個 Queue Item、恰好一個完整 SHA-256；中途任一 Release 不合法時整批 rollback。
 - 裝置使用 `GET /api/device/v1/offline-schedule` 取得 target date、timezone、config version、show-at 與完整 SHA-256；回應不含照片路徑或原圖。
-- 今日排程尚未準備好時回傳 bounded JSON `{"error":"schedule_not_ready","retry_after_epoch":...}`；epoch 由伺服器依 IANA 時區、第一個 Slot、Prefetch lead 與 server margin 計算，韌體驗證後 exact sleep。
+- 今日排程尚未準備好時回傳 bounded JSON `{"error":"schedule_not_ready","retry_after_epoch":...,"next_slot_epoch":...}`；若尚未到今日第一個 prepare point，重試點是今日 prepare point；若第一個 prepare point 已過但今日仍有未來 Slot，重試點留在今日且嚴格早於 `next_slot_epoch`；只有今日沒有剩餘 Slot 才能睡到明日第一個 prepare point。`next_slot_epoch` 沒有剩餘 Slot 時為 `null`，HTTP `Retry-After` 仍保留。
+- Server 與 Repository 共同強制 delivery invariant：`inktime_offline_schedule` 必須是 `offline_prefetch_allowed=true`；`legacy_online` 與 `stock_compat` 必須是 `false`。PATCH 省略欄位會依模式自動正規化，明確矛盾值回 `400 DEVICE-008`。
 - 延遲 terminal ACK 例外只允許 `DISPLAY_COMPLETED` 或 `DISPLAY_FAILED`，且 Queue Item 必須是 offline prefetched、已經 ACK/display 狀態、Release identity 與 deadline 都相符；`DISPLAY_STARTED` 不屬於 delayed terminal。一般 Online Queue 仍採嚴格 queue-version。
-- `local_next` 是 cache-only 的人工預覽：可顯示下一個未來 Slot，但不消費 Slot、不寫 terminal ACK 或 ACK journal。正式 timer wake 即使 SHA 相同仍會送出正式 `DISPLAY_COMPLETED`，其 `event_epoch` 取實際喚醒／顯示事件時間。
-- Enhanced 裝置不接收 generic online Queue。伺服器在裝置本地 20:00（可由 `offline.future_schedule_prepare_hour_local` 調整）後預先準備明日；今日與明日可同時存在，設定版本改變時舊未來快照不會由端點提供。
+- `local_next` 是 cache-only 的人工預覽：第一次按鍵選 `now` 之後最早的未來 Slot，之後依持久化 `preview_schedule_id`／`preview_slot_index` 前進並循環；候選 SHA 與目前畫面相同時繼續找下一張不同 SHA。它不消費 Slot、不寫 terminal ACK 或 ACK journal；全部候選相同時只留 bounded local diagnostic、不連網。正式 timer wake 不受 preview cursor 影響，即使 SHA 相同仍會送出正式 `DISPLAY_COMPLETED`，其 `event_epoch` 取實際喚醒／顯示事件時間。
+- Enhanced 裝置不接收 generic online Queue。伺服器在裝置本地 20:00（可由 `offline.future_schedule_prepare_hour_local` 調整）後只準備有意義的日期：今日仍有 `slot.show_at > local_now` 時可同時確保 today + tomorrow；今日所有 Slot 已過時只準備 tomorrow。設定版本改變時舊未來快照不會由端點提供。
 - Enhanced 裝置在正式 Frame 可用時以 RTC-first、exact epoch deep sleep 規劃下一個 prefetch/display 時刻；local-only wake 不呼叫 Wi-Fi、NTP、Manifest 或 Status。
 
 ## 6. 驗證狀態

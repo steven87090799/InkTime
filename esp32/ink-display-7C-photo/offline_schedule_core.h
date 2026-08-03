@@ -134,9 +134,21 @@ inline uint64_t offlineRetryFallbackSeconds(uint8_t attempt) {
   return kOfflineRetryMaximumSeconds;
 }
 
-inline bool validOfflineRetryEpoch(uint64_t nowEpoch, int64_t retryEpoch) {
+inline bool validOfflineRetryEpoch(
+  uint64_t nowEpoch,
+  int64_t retryEpoch,
+  int64_t nextSlotEpoch = 0
+) {
+  if (nextSlotEpoch < 0) return false;
   if (retryEpoch <= static_cast<int64_t>(nowEpoch)) return false;
-  return static_cast<uint64_t>(retryEpoch) - nowEpoch <= kOfflineRetryMaximumHorizonSeconds;
+  if (static_cast<uint64_t>(retryEpoch) - nowEpoch > kOfflineRetryMaximumHorizonSeconds) {
+    return false;
+  }
+  if (nextSlotEpoch > 0
+      && (nextSlotEpoch <= static_cast<int64_t>(nowEpoch) || retryEpoch >= nextSlotEpoch)) {
+    return false;
+  }
+  return true;
 }
 
 struct OfflineRetryPlan {
@@ -148,9 +160,10 @@ struct OfflineRetryPlan {
 inline OfflineRetryPlan buildOfflineRetryPlan(
   uint64_t nowEpoch,
   uint8_t attempt,
-  int64_t serverRetryEpoch
+  int64_t serverRetryEpoch,
+  int64_t nextSlotEpoch = 0
 ) {
-  if (validOfflineRetryEpoch(nowEpoch, serverRetryEpoch)) {
+  if (validOfflineRetryEpoch(nowEpoch, serverRetryEpoch, nextSlotEpoch)) {
     return {
       static_cast<uint64_t>(serverRetryEpoch),
       0U,
@@ -159,8 +172,22 @@ inline OfflineRetryPlan buildOfflineRetryPlan(
   }
   const uint8_t boundedAttempt = attempt > 2U ? 2U : attempt;
   const uint8_t nextAttempt = boundedAttempt >= 2U ? 2U : boundedAttempt + 1U;
+  uint64_t fallback = nowEpoch + offlineRetryFallbackSeconds(boundedAttempt);
+  if (nextSlotEpoch > static_cast<int64_t>(nowEpoch)
+      && fallback >= static_cast<uint64_t>(nextSlotEpoch)) {
+    const uint64_t safeDeadline = static_cast<uint64_t>(nextSlotEpoch) > 60U
+      ? static_cast<uint64_t>(nextSlotEpoch) - 60U
+      : 0U;
+    if (safeDeadline > nowEpoch && safeDeadline < static_cast<uint64_t>(nextSlotEpoch)) {
+      fallback = safeDeadline;
+    } else if (static_cast<uint64_t>(nextSlotEpoch) > nowEpoch + 1U) {
+      // There is no way to satisfy both a 60-second minimum and a strictly
+      // earlier imminent Slot; preserving the no-crossing guard wins.
+      fallback = static_cast<uint64_t>(nextSlotEpoch) - 1U;
+    }
+  }
   return {
-    nowEpoch + offlineRetryFallbackSeconds(boundedAttempt),
+    fallback,
     nextAttempt,
     false,
   };
@@ -174,6 +201,40 @@ struct OfflineDisplayIntent {
 
 inline OfflineDisplayIntent offlineDisplayIntent(bool localNext) {
   return {localNext, !localNext, !localNext};
+}
+
+inline int16_t nextOfflinePreviewSlot(
+  const int64_t* showAtEpochs,
+  const char* const* sha256Values,
+  uint8_t count,
+  int16_t cursorIndex,
+  uint64_t nowEpoch,
+  const char* currentSha256
+) {
+  if (showAtEpochs == nullptr || sha256Values == nullptr || count == 0U
+      || count > kMaxOfflineSlots) return -1;
+  const bool firstPress = cursorIndex < 0 || cursorIndex >= static_cast<int16_t>(count);
+  int16_t start = -1;
+  if (firstPress) {
+    for (uint8_t index = 0; index < count; ++index) {
+      if (showAtEpochs[index] > static_cast<int64_t>(nowEpoch)) {
+        start = static_cast<int16_t>(index);
+        break;
+      }
+    }
+    if (start < 0) return -1;
+  } else {
+    start = static_cast<int16_t>((cursorIndex + 1) % count);
+  }
+  for (uint8_t offset = 0; offset < count; ++offset) {
+    const int16_t index = static_cast<int16_t>((start + offset) % count);
+    if (firstPress && showAtEpochs[index] <= static_cast<int64_t>(nowEpoch)) continue;
+    if (sha256Values[index] == nullptr || sha256Values[index][0] == '\0') continue;
+    if (currentSha256 != nullptr && currentSha256[0] != '\0'
+        && strcmp(sha256Values[index], currentSha256) == 0) continue;
+    return index;
+  }
+  return -1;
 }
 
 class AckJournal {

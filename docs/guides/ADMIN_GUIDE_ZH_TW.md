@@ -79,6 +79,13 @@
 
 不需要修改 Python。分析、排程、模型、成本、渲染、裝置、Log 層級、Session 與備份都由 Web 控制。Enhanced PhotoPainter 的 `offline.server_prefetch_margin_minutes` 預設為 15 分鐘；`offline.future_schedule_prepare_hour_local` 預設為裝置本地 20:00，之後 Scheduler 會預先準備明日排程。兩者都必須保留足夠渲染與網路緩衝，不應改成造成裝置高頻輪詢的值。宿主機 Volume、Port、映像 Tag、HTTPS Secure Cookie、Docker CPU／RAM／PID 上限與 logging driver 必須在容器啟動前由 `.env`／Compose 決定；容器內程式不應取得 Docker socket 去改寫宿主機。設定頁會只讀顯示目前部署資訊。
 
+### PhotoPainter Enhanced 排程操作邊界
+
+- `inktime_offline_schedule` 一律搭配 `offline_prefetch_allowed=true`；`legacy_online` 與 `stock_compat` 一律是 `false`。建立或 PATCH 省略 prefetch 欄位時由模式自動正規化；明確矛盾值回 `400 DEVICE-008`。
+- `schedule_not_ready` 的 `retry_after_epoch` 會留在今日剩餘 Slot 之前；`next_slot_epoch` 可供韌體再次驗證。今日沒有剩餘 Slot 才會回明日第一個 prepare point，不能把 07:50 的今日 08:00／12:00 排程直接跳到明日。
+- 本地 20:00 後，今日若沒有 `slot.show_at > local_now`，Scheduler 只建立 tomorrow；今日仍有未來 Slot 才同時確保 today + tomorrow。重複 tick 依 dedupe key 不新增重複工作。
+- `local_next` 是無網路的本地預覽；每按一次依 NVS 的 `preview_schedule_id`／`preview_slot_index` 循環下一張，重複 SHA 會跳過。它不消耗正式 Slot、不改 Queue／current/LKG、不寫 terminal ACK 或 ACK journal；正式 timer wake 不受此 cursor 影響。
+
 ## 繁體中文字型
 
 「渲染」頁離線內建兩套 SIL OFL 1.1 字型，不需要主機預先安裝，也不需要在執行時連外下載：

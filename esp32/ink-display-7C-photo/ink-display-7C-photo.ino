@@ -346,20 +346,24 @@ static bool loadLastTimeEpoch(time_t &epochOut) {
 }
 
 #if INKTIME_PHOTOPAINTER_ENABLED
-static bool loadOfflineRetryState(uint8_t &attemptOut, int64_t &epochOut) {
+static bool loadOfflineRetryState(
+  uint8_t &attemptOut, int64_t &epochOut, int64_t &nextSlotOut) {
   prefs.begin("dashcfg", true);
   const uint8_t storedAttempt = prefs.getUChar("offretry_attempt", 0U);
   const int64_t storedEpoch = prefs.getLong64("offretry_epoch", 0);
+  const int64_t storedNextSlot = prefs.getLong64("offretry_next", 0);
   prefs.end();
   attemptOut = storedAttempt > 2U ? 2U : storedAttempt;
   epochOut = storedEpoch;
+  nextSlotOut = storedNextSlot;
   return storedEpoch > 0;
 }
 
-static void saveOfflineRetryState(uint8_t attempt, int64_t epoch) {
+static void saveOfflineRetryState(uint8_t attempt, int64_t epoch, int64_t nextSlotEpoch) {
   prefs.begin("dashcfg", false);
   prefs.putUChar("offretry_attempt", attempt > 2U ? 2U : attempt);
   prefs.putLong64("offretry_epoch", epoch);
+  prefs.putLong64("offretry_next", nextSlotEpoch > 0 ? nextSlotEpoch : 0);
   prefs.end();
 }
 
@@ -367,22 +371,54 @@ static void clearOfflineRetryState() {
   prefs.begin("dashcfg", false);
   prefs.remove("offretry_attempt");
   prefs.remove("offretry_epoch");
+  prefs.remove("offretry_next");
   prefs.end();
 }
 
-static time_t scheduleOfflineRecovery(time_t nowEpoch, int64_t serverRetryEpoch = 0) {
+static time_t scheduleOfflineRecovery(
+  time_t nowEpoch, int64_t serverRetryEpoch = 0, int64_t nextSlotEpoch = 0) {
   if (nowEpoch <= 0) return 0;
   uint8_t attempt = 0U;
   int64_t storedEpoch = 0;
-  loadOfflineRetryState(attempt, storedEpoch);
+  int64_t storedNextSlot = 0;
+  loadOfflineRetryState(attempt, storedEpoch, storedNextSlot);
   if (serverRetryEpoch <= 0 && inktime::validOfflineRetryEpoch(
-        static_cast<uint64_t>(nowEpoch), storedEpoch)) {
+        static_cast<uint64_t>(nowEpoch), storedEpoch, storedNextSlot)) {
     return static_cast<time_t>(storedEpoch);
   }
   const inktime::OfflineRetryPlan plan = inktime::buildOfflineRetryPlan(
-    static_cast<uint64_t>(nowEpoch), attempt, serverRetryEpoch);
-  saveOfflineRetryState(plan.nextAttempt, static_cast<int64_t>(plan.sleepUntilEpoch));
+    static_cast<uint64_t>(nowEpoch), attempt, serverRetryEpoch, nextSlotEpoch);
+  saveOfflineRetryState(
+    plan.nextAttempt,
+    static_cast<int64_t>(plan.sleepUntilEpoch),
+    nextSlotEpoch > 0 ? nextSlotEpoch : 0);
   return static_cast<time_t>(plan.sleepUntilEpoch);
+}
+#endif
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+// Preferences keys are kept under the ESP32 NVS key-size limit; these two
+// bounded keys represent preview_schedule_id and preview_slot_index.
+static int16_t loadPreviewCursorForSchedule(const String &scheduleId) {
+  prefs.begin("dashcfg", true);
+  const String storedScheduleId = prefs.getString("preview_sched", "");
+  const int32_t storedIndex = prefs.getInt("preview_idx", -1);
+  prefs.end();
+  if (storedScheduleId != scheduleId) {
+    prefs.begin("dashcfg", false);
+    prefs.putString("preview_sched", scheduleId);
+    prefs.putInt("preview_idx", -1);
+    prefs.end();
+    return -1;
+  }
+  return storedIndex < 0 || storedIndex > 127 ? -1 : static_cast<int16_t>(storedIndex);
+}
+
+static void savePreviewCursor(const String &scheduleId, int16_t slotIndex) {
+  prefs.begin("dashcfg", false);
+  prefs.putString("preview_sched", scheduleId);
+  prefs.putInt("preview_idx", slotIndex);
+  prefs.end();
 }
 #endif
 
@@ -1872,16 +1908,31 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg) {
     scheduleHttp.end();
     const String errorName = notReady["error"] | "";
     const JsonVariantConst rawRetryEpoch = notReady["retry_after_epoch"];
+    const JsonVariantConst rawNextSlotEpoch = notReady["next_slot_epoch"];
     int64_t serverRetryEpoch = 0;
+    int64_t nextSlotEpoch = 0;
+    bool nextSlotFieldValid = rawNextSlotEpoch.isNull();
     if (!notReadyError && !notReady.overflowed()
         && errorName == "schedule_not_ready"
         && rawRetryEpoch.is<int64_t>() && !rawRetryEpoch.is<bool>()) {
       serverRetryEpoch = rawRetryEpoch.as<int64_t>();
     }
+    if (!notReadyError && !notReady.overflowed()
+        && errorName == "schedule_not_ready"
+        && rawNextSlotEpoch.is<int64_t>() && !rawNextSlotEpoch.is<bool>()
+        && rawNextSlotEpoch.as<int64_t>() > 0) {
+      nextSlotEpoch = rawNextSlotEpoch.as<int64_t>();
+      nextSlotFieldValid = true;
+    }
+    if (!nextSlotFieldValid) {
+      serverRetryEpoch = 0;
+      nextSlotEpoch = 0;
+    }
     time_t recoveryNow = time(nullptr);
     if (recoveryNow <= 0) (void)photoPainter.readRtc(recoveryNow);
     if (errorName == "schedule_not_ready") {
-      const time_t retryEpoch = scheduleOfflineRecovery(recoveryNow, serverRetryEpoch);
+      const time_t retryEpoch = scheduleOfflineRecovery(
+        recoveryNow, serverRetryEpoch, nextSlotEpoch);
       lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-NOT-READY";
       lastDeviceErrorMessage = retryEpoch > recoveryNow
         ? "伺服器尚未準備今日離線排程；已保存 bounded retry epoch"
@@ -2900,6 +2951,10 @@ static bool loadOfflineScheduledLocalFrame(
     lastDeviceErrorMessage = "離線排程 active 快照與本機設定不一致";
     return false;
   }
+  int64_t previewEpochs[inktime::kMaxOfflineSlots] = {};
+  String previewShaValues[inktime::kMaxOfflineSlots];
+  const char* previewShaPointers[inktime::kMaxOfflineSlots] = {};
+  const int16_t previewCursor = loadPreviewCursorForSchedule(activeScheduleId);
   int64_t previousShowAtEpoch = 0;
   for (size_t index = 0; index < slots.size(); ++index) {
     const JsonVariantConst rawSlot = slots[index];
@@ -2934,6 +2989,9 @@ static bool loadOfflineScheduledLocalFrame(
       return false;
     }
     previousShowAtEpoch = rawShowAtEpoch.as<int64_t>();
+    previewEpochs[index] = previousShowAtEpoch;
+    previewShaValues[index] = slotSha;
+    previewShaPointers[index] = previewShaValues[index].c_str();
   }
   int selectedIndex = -1;
   int64_t selectedEpoch = selectNext ? INT64_MAX : 0;
@@ -2942,7 +3000,35 @@ static bool loadOfflineScheduledLocalFrame(
   String selectedProfile;
   String selectedQueueItemId;
   int32_t selectedQueueVersion = -1;
-  for (size_t index = 0; index < slots.size(); ++index) {
+  if (selectNext) {
+    const StoredDisplayRecord displayRecord = loadDisplayRecord();
+    const int16_t selectedPreviewIndex = inktime::nextOfflinePreviewSlot(
+      previewEpochs,
+      previewShaPointers,
+      static_cast<uint8_t>(slots.size()),
+      previewCursor,
+      static_cast<uint64_t>(nowEpoch),
+      displayRecord.valid ? displayRecord.sha256.c_str() : "");
+    if (selectedPreviewIndex < 0) {
+      const int16_t nextCursor = previewCursor < 0
+        ? 0
+        : static_cast<int16_t>((previewCursor + 1) % slots.size());
+      savePreviewCursor(activeScheduleId, nextCursor);
+      lastDeviceErrorCode = "DEVICE-OFFLINE-PREVIEW";
+      lastDeviceErrorMessage = "離線預覽沒有不同 SHA 的本地快取 Frame";
+      return false;
+    }
+    const JsonObjectConst slot = slots[static_cast<size_t>(selectedPreviewIndex)].as<JsonObjectConst>();
+    selectedIndex = selectedPreviewIndex;
+    selectedEpoch = slot["show_at_epoch"] | 0;
+    selectedSha = slot["sha256"] | "";
+    selectedRelease = slot["release_id"] | "";
+    selectedProfile = slot["render_profile"] | "";
+    selectedQueueItemId = slot["queue_item_id"] | "";
+    selectedQueueVersion = slot["queue_version"] | -1;
+    savePreviewCursor(activeScheduleId, selectedPreviewIndex);
+  }
+  for (size_t index = 0; index < slots.size() && !selectNext; ++index) {
     const JsonVariantConst rawSlot = slots[index];
     if (!rawSlot.is<JsonObjectConst>()) continue;
     const JsonObjectConst slot = rawSlot.as<JsonObjectConst>();
@@ -3020,6 +3106,7 @@ static void runOfflineLocalCycle(bool selectNext = false) {
       displayUpdated = drawFromFrameData(g_cfg);
     }
     if (displayUpdated) saveDisplayRecord(g_cfg, true);
+    if (displayUpdated) clearOfflineRetryState();
     if (currentFromQueue) {
       if (displayUpdated) {
         sendQueueEvent(
@@ -3215,7 +3302,11 @@ void setup() {
         sendQueueEvent(g_cfg, inktime::QueueEvent::DisplayFailed, false, lastDeviceErrorCode);
       }
     }
-    }
+  }
+  if (ok && !currentPrefetchOnly && g_cfg.delivery_mode == "inktime_offline_schedule"
+      && (displayUpdated || currentDisplaySkipped)) {
+    clearOfflineRetryState();
+  }
   } else {
 #if DEBUG_LOG
     DBG_PRINTLN("[BOOT] downloadDailyPhotoBin FAILED");

@@ -175,6 +175,7 @@ def test_missing_today_schedule_returns_bounded_server_retry_epoch(client, app):
     assert body["error"] == "schedule_not_ready"
     assert body["error_code"] == "DEVICE-008"
     assert body["retry_after_epoch"] > before
+    assert "next_slot_epoch" in body
     assert int(response.headers["Retry-After"]) >= 1
 
 

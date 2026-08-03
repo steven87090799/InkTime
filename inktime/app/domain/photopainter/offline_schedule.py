@@ -8,6 +8,8 @@ from zoneinfo import ZoneInfo
 
 
 _TIME = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+_DELIVERY_MODES = {"legacy_online", "stock_compat", "inktime_offline_schedule"}
+_ENHANCED_DELIVERY_MODE = "inktime_offline_schedule"
 
 
 def validate_offline_schedule(values, *, maximum: int = 24) -> list[str]:
@@ -19,6 +21,32 @@ def validate_offline_schedule(values, *, maximum: int = 24) -> list[str]:
     if len(set(normalized)) != len(normalized):
         raise ValueError("DEVICE-008 offline_schedule 不可重複")
     return sorted(normalized)
+
+
+def normalize_delivery_contract(
+    delivery_mode: str,
+    offline_prefetch_allowed: bool | None = None,
+    *,
+    explicit_prefetch: bool = False,
+) -> tuple[str, bool]:
+    """Return one safe delivery-mode/prefetch pair.
+
+    An omitted prefetch flag is deliberately normalized from the selected
+    delivery mode.  A caller that explicitly supplies a contradictory flag
+    fails closed so API, repository, and database boundaries cannot drift.
+    """
+
+    mode = str(delivery_mode).strip()
+    if mode not in _DELIVERY_MODES:
+        raise ValueError("DEVICE-008 delivery_mode 不合法")
+    expected = mode == _ENHANCED_DELIVERY_MODE
+    if not explicit_prefetch or offline_prefetch_allowed is None:
+        return mode, expected
+    if type(offline_prefetch_allowed) is not bool:
+        raise ValueError("DEVICE-008 offline_prefetch_allowed 必須是 Boolean")
+    if offline_prefetch_allowed != expected:
+        raise ValueError("DEVICE-008 delivery_mode 與 offline_prefetch_allowed 不一致")
+    return mode, expected
 
 
 def schedule_minutes(value: str) -> int:

@@ -2131,6 +2131,14 @@ INKTIME_LOG_LEVEL=INFO</code></pre>
 <li><a href="docs/devices/SECURE_OTA_DESIGN_ZH_TW.md" class="doc-link"><code>docs/devices/SECURE_OTA_DESIGN_ZH_TW.md</code></a>：尚未啟用 OTA 的安全前提。</li>
 </ul>
 
+<h4 class="doc-h4">PhotoPainter Enhanced 最終操作契約</h4>
+<ul class="doc-list">
+<li><code>retry_after_epoch</code> 不得越過今日下一個 Slot；只有今日所有 Slot 已過，才會回明日 prepare point。<code>next_slot_epoch</code> 為今日仍有未來 Slot 時的第二道韌體驗證欄位，HTTP <code>Retry-After</code> 仍保留。</li>
+<li><code>inktime_offline_schedule</code> 必須是 <code>offline_prefetch_allowed=true</code>；<code>legacy_online</code>／<code>stock_compat</code> 必須是 <code>false</code>。Migration 31、API、Repository 與 SQLite trigger 共同拒絕矛盾設定。</li>
+<li>本地 prepare hour 後，今日沒有 future <code>slot.show_at</code> 時只準備 tomorrow；仍有未來 today Slot 才同時準備 today + tomorrow。</li>
+<li><code>local_next</code> 只讀本地快取、不連 Wi-Fi、不消耗正式 Slot、不送 terminal ACK、不寫 ACK journal；每按一次使用持久化 cursor 循環下一張不同 SHA，正式 timer wake 不受 cursor 影響。</li>
+</ul>
+
 <h4 class="doc-h4">決策與韌性（<code>docs/resilience/</code>）</h4>
 <ul class="doc-list">
 <li><a href="docs/resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md" class="doc-link"><code>docs/resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md</code></a>：Decision Trace、回饋、Queue、Retention、Canary 的整體設計。</li>

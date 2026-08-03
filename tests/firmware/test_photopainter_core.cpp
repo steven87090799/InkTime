@@ -162,12 +162,18 @@ int main() {
   assert(offlineRetryFallbackSeconds(2) == 60U * 60U);
   assert(offlineRetryFallbackSeconds(9) == 60U * 60U);
   assert(validOfflineRetryEpoch(1000, 1001));
+  assert(validOfflineRetryEpoch(1000, 2000, 3000));
+  assert(!validOfflineRetryEpoch(1000, 3000, 3000));
+  assert(!validOfflineRetryEpoch(1000, 4000, 3000));
   assert(!validOfflineRetryEpoch(1000, 1000));
   assert(!validOfflineRetryEpoch(1000, 1000 + static_cast<int64_t>(kOfflineRetryMaximumHorizonSeconds) + 1));
-  const OfflineRetryPlan serverRetry = buildOfflineRetryPlan(1000, 2, 2000);
+  const OfflineRetryPlan serverRetry = buildOfflineRetryPlan(1000, 2, 2000, 3000);
   assert(serverRetry.sleepUntilEpoch == 2000);
   assert(serverRetry.nextAttempt == 0);
   assert(serverRetry.serverProvided);
+  const OfflineRetryPlan crossedServerRetry = buildOfflineRetryPlan(1000, 0, 4000, 3000);
+  assert(!crossedServerRetry.serverProvided);
+  assert(crossedServerRetry.sleepUntilEpoch < 3000);
   const OfflineRetryPlan fallbackRetry = buildOfflineRetryPlan(1000, 0, 0);
   assert(fallbackRetry.sleepUntilEpoch == 1000 + 15U * 60U);
   assert(fallbackRetry.nextAttempt == 1);
@@ -175,6 +181,24 @@ int main() {
   const OfflineRetryPlan boundedRetry = buildOfflineRetryPlan(1000, 99, -1);
   assert(boundedRetry.sleepUntilEpoch == 1000 + 60U * 60U);
   assert(boundedRetry.nextAttempt == 2);
+  const int64_t previewEpochs[] = {1100, 1200, 1300};
+  const char* previewShas[] = {"sha-b", "sha-c", "sha-d"};
+  int16_t previewCursor = -1;
+  previewCursor = nextOfflinePreviewSlot(
+    previewEpochs, previewShas, 3, previewCursor, 1000, "");
+  assert(previewCursor == 0);
+  previewCursor = nextOfflinePreviewSlot(
+    previewEpochs, previewShas, 3, previewCursor, 1000, "sha-b");
+  assert(previewCursor == 1);
+  previewCursor = nextOfflinePreviewSlot(
+    previewEpochs, previewShas, 3, previewCursor, 1000, "sha-c");
+  assert(previewCursor == 2);
+  previewCursor = nextOfflinePreviewSlot(
+    previewEpochs, previewShas, 3, previewCursor, 1000, "sha-d");
+  assert(previewCursor == 0);
+  const char* samePreviewShas[] = {"same", "same", "same"};
+  assert(nextOfflinePreviewSlot(previewEpochs, samePreviewShas, 3, -1, 1000, "same") == -1);
+  assert(nextOfflinePreviewSlot(previewEpochs, samePreviewShas, 3, 0, 1000, "same") == -1);
   const OfflineDisplayIntent preview = offlineDisplayIntent(true);
   assert(preview.manualPreview);
   assert(!preview.ownsFormalSlot);

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
+from dataclasses import dataclass
 import json
 import re
 from typing import Any, Sequence
@@ -18,6 +19,12 @@ from inktime.app.services.device_releases import payload_entry_from_manifest
 
 _RELEASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 MAX_PREPARED_SLOTS = 12
+
+
+@dataclass(frozen=True)
+class RetryAfterDetails:
+    retry_after_epoch: int
+    next_slot_epoch: int | None
 
 
 class OfflineScheduleRepository:
@@ -46,7 +53,26 @@ class OfflineScheduleRepository:
         prefetch_lead_minutes: int,
         server_margin_minutes: int,
     ) -> int:
-        """Calculate the next bounded server retry using the device's IANA zone."""
+        """Return the retry epoch while retaining the legacy scalar API."""
+
+        return OfflineScheduleRepository.retry_after_details(
+            now=now,
+            timezone_name=timezone_name,
+            schedule_times=schedule_times,
+            prefetch_lead_minutes=prefetch_lead_minutes,
+            server_margin_minutes=server_margin_minutes,
+        ).retry_after_epoch
+
+    @staticmethod
+    def retry_after_details(
+        *,
+        now: datetime,
+        timezone_name: str,
+        schedule_times: Sequence[str],
+        prefetch_lead_minutes: int,
+        server_margin_minutes: int,
+    ) -> RetryAfterDetails:
+        """Choose a bounded retry without skipping a remaining local slot."""
 
         if not 0 <= int(prefetch_lead_minutes) <= 120:
             raise ValueError("DEVICE-008 prefetch_lead_minutes 不合法")
@@ -61,19 +87,60 @@ class OfflineScheduleRepository:
             local_now = local_now.replace(tzinfo=timezone.utc)
         local_now = local_now.astimezone(zone)
         slots = validate_offline_schedule(schedule_times, maximum=MAX_PREPARED_SLOTS)
-        hour, minute = (int(part) for part in slots[0].split(":"))
-        candidate = datetime.combine(
-            local_now.date(), time(hour, minute), tzinfo=zone
-        ) - timedelta(minutes=int(prefetch_lead_minutes) + int(server_margin_minutes))
-        if candidate <= local_now:
-            candidate = datetime.combine(
-                local_now.date() + timedelta(days=1), time(hour, minute), tzinfo=zone
-            ) - timedelta(minutes=int(prefetch_lead_minutes) + int(server_margin_minutes))
-        retry_epoch = int(candidate.astimezone(timezone.utc).timestamp())
-        now_epoch = int(local_now.astimezone(timezone.utc).timestamp())
+        lead = int(prefetch_lead_minutes)
+        margin = int(server_margin_minutes)
+
+        def slot_at(target: date, slot: str) -> datetime:
+            hour, minute = (int(part) for part in slot.split(":"))
+            return datetime.combine(target, time(hour, minute), tzinfo=zone)
+
+        def epoch(value: datetime) -> int:
+            return int(value.astimezone(timezone.utc).timestamp())
+
+        today = local_now.date()
+        today_slots = [slot_at(today, slot) for slot in slots]
+        first_prepare = today_slots[0] - timedelta(minutes=lead + margin)
+        now_epoch = epoch(local_now)
+
+        # Rule A: before the first preparation point, wake at that point and
+        # tell the firmware which today's Slot it must not cross.
+        if local_now < first_prepare:
+            retry_epoch = epoch(first_prepare)
+            next_slot_epoch = epoch(today_slots[0])
+        else:
+            future_slots = [candidate for candidate in today_slots if candidate > local_now]
+            if future_slots:
+                # Rule B: stay on today's next Slot.  Keep the safety margin
+                # small enough that a remaining Slot is never skipped.
+                next_slot = future_slots[0]
+                safe_deadline = next_slot - timedelta(minutes=min(lead, 5))
+                fallback = local_now + timedelta(minutes=15)
+                minimum_retry = local_now + timedelta(seconds=60)
+                candidate = min(fallback, safe_deadline)
+                if candidate < minimum_retry:
+                    candidate = minimum_retry
+                # A next Slot inside the one-minute lower bound is an
+                # unavoidable boundary case; keep the retry strictly before
+                # it so the firmware's guard can fail closed rather than
+                # accepting a crossed server deadline.
+                if candidate >= next_slot:
+                    candidate = next_slot - timedelta(seconds=1)
+                retry_epoch = epoch(candidate)
+                next_slot_epoch = epoch(next_slot)
+            else:
+                # Rule C: only after every Slot today has passed may the
+                # retry move to tomorrow's first preparation point.
+                tomorrow_first = slot_at(today + timedelta(days=1), slots[0])
+                retry_epoch = epoch(
+                    tomorrow_first - timedelta(minutes=lead + margin)
+                )
+                next_slot_epoch = None
+
         if retry_epoch <= now_epoch:
             raise ValueError("DEVICE-008 retry_after_epoch 必須晚於目前時間")
-        return retry_epoch
+        if next_slot_epoch is not None and retry_epoch >= next_slot_epoch:
+            raise ValueError("DEVICE-008 retry_after_epoch 不得越過下一個 Slot")
+        return RetryAfterDetails(retry_epoch, next_slot_epoch)
 
     @staticmethod
     def _manifest_entry(manifest_json: str) -> dict[str, Any]:

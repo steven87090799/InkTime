@@ -1627,6 +1627,44 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        31,
+        "固定裝置交付模式與離線預取契約",
+        (
+            # Repair legacy rows before installing the trigger so an existing
+            # database can upgrade atomically without losing queue history.
+            """
+            UPDATE devices
+            SET offline_prefetch_allowed=CASE
+                    WHEN delivery_mode='inktime_offline_schedule' THEN 1
+                    ELSE 0
+                END,
+                updated_at=datetime('now')
+            WHERE offline_prefetch_allowed != CASE
+                    WHEN delivery_mode='inktime_offline_schedule' THEN 1
+                    ELSE 0
+                END
+            """,
+            """
+            CREATE TRIGGER trg_device_delivery_prefetch_insert
+            BEFORE INSERT ON devices
+            WHEN (NEW.delivery_mode='inktime_offline_schedule' AND NEW.offline_prefetch_allowed<>1)
+              OR (NEW.delivery_mode IN ('legacy_online','stock_compat') AND NEW.offline_prefetch_allowed<>0)
+            BEGIN
+                SELECT RAISE(ABORT,'DEVICE-008 delivery_mode 與 offline_prefetch_allowed 不一致');
+            END
+            """,
+            """
+            CREATE TRIGGER trg_device_delivery_prefetch_update
+            BEFORE UPDATE OF delivery_mode,offline_prefetch_allowed ON devices
+            WHEN (NEW.delivery_mode='inktime_offline_schedule' AND NEW.offline_prefetch_allowed<>1)
+              OR (NEW.delivery_mode IN ('legacy_online','stock_compat') AND NEW.offline_prefetch_allowed<>0)
+            BEGIN
+                SELECT RAISE(ABORT,'DEVICE-008 delivery_mode 與 offline_prefetch_allowed 不一致');
+            END
+            """,
+        ),
+    ),
 )
 
 

@@ -7,7 +7,10 @@ from uuid import uuid4
 
 from inktime.app.core.security import hash_device_token, issue_device_token
 from inktime.app.db import Database
-from inktime.app.domain.photopainter.offline_schedule import validate_offline_schedule
+from inktime.app.domain.photopainter.offline_schedule import (
+    normalize_delivery_contract,
+    validate_offline_schedule,
+)
 
 
 _UNSET = object()
@@ -60,7 +63,7 @@ class DeviceRepository:
         timezone_name: str = "Asia/Taipei",
         schedule: str = "08:00",
         delivery_mode: str = "legacy_online",
-        offline_prefetch_allowed: bool = False,
+        offline_prefetch_allowed: bool | None = None,
         offline_schedule: Sequence[str] | None = None,
         schedule_times: Sequence[str] | None = None,
         prefetch_lead_minutes: int = 5,
@@ -75,8 +78,11 @@ class DeviceRepository:
         device_id = str(uuid4())
         token = issue_device_token()
         now = datetime.now(timezone.utc).isoformat()
-        if delivery_mode not in {"legacy_online", "stock_compat", "inktime_offline_schedule"}:
-            raise ValueError("DEVICE-008 delivery_mode 不合法")
+        delivery_mode, offline_prefetch_allowed = normalize_delivery_contract(
+            delivery_mode,
+            offline_prefetch_allowed,
+            explicit_prefetch=offline_prefetch_allowed is not None,
+        )
         schedule_values = validate_offline_schedule(schedule_times or offline_schedule or [schedule], maximum=12)
         if not 0 <= int(prefetch_lead_minutes) <= 120:
             raise ValueError("DEVICE-008 prefetch_lead_minutes 必須介於 0 到 120")
@@ -107,7 +113,7 @@ class DeviceRepository:
                     layout_mode,
                     fit_mode,
                     delivery_mode,
-                    int(bool(offline_prefetch_allowed)),
+                    int(offline_prefetch_allowed),
                     json.dumps(schedule_values, ensure_ascii=False),
                     1 if delivery_mode == "inktime_offline_schedule" else 0,
                     json.dumps(schedule_values, ensure_ascii=False),
@@ -141,7 +147,7 @@ class DeviceRepository:
         timezone_name: str,
         schedule: str,
         delivery_mode: str = "legacy_online",
-        offline_prefetch_allowed: bool = False,
+        offline_prefetch_allowed: bool | None = None,
         offline_schedule: Sequence[str] | None = None,
         schedule_times: Sequence[str] | None = None,
         prefetch_lead_minutes: int = 5,
@@ -173,8 +179,11 @@ class DeviceRepository:
                 )
                 selected_layout = current["layout_mode"] if layout_mode is _UNSET else layout_mode
                 selected_fit = current["fit_mode"] if fit_mode is _UNSET else fit_mode
-                if delivery_mode not in {"legacy_online", "stock_compat", "inktime_offline_schedule"}:
-                    raise ValueError("DEVICE-008 delivery_mode 不合法")
+                delivery_mode, offline_prefetch_allowed = normalize_delivery_contract(
+                    delivery_mode,
+                    offline_prefetch_allowed,
+                    explicit_prefetch=offline_prefetch_allowed is not None,
+                )
                 try:
                     existing_schedule = json.loads(str(current["schedule_times_json"] or "[]"))
                 except (TypeError, ValueError, json.JSONDecodeError):
@@ -224,7 +233,7 @@ class DeviceRepository:
                         rotation,
                         panel_profile,
                         delivery_mode,
-                        int(bool(offline_prefetch_allowed)),
+                        int(offline_prefetch_allowed),
                         json.dumps(schedule_values, ensure_ascii=False),
                         json.dumps(schedule_values, ensure_ascii=False),
                         int(prefetch_lead_minutes),

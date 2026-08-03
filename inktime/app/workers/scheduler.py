@@ -112,6 +112,10 @@ class SchedulerRunner:
         if zone is None:
             raise ValueError("DEVICE-008 裝置時間必須包含時區")
 
+        def slot_at(target: date, slot: str) -> datetime:
+            hour, minute = (int(part) for part in slot.split(":"))
+            return datetime.combine(target, clock_time(hour, minute), tzinfo=zone)
+
         def prefetch_at(target: date) -> datetime:
             hour, minute = (int(part) for part in slots[0].split(":"))
             return datetime.combine(target, clock_time(hour, minute), tzinfo=zone) - timedelta(
@@ -120,6 +124,11 @@ class SchedulerRunner:
 
         target = local_now.date()
         if local_now < prefetch_at(target):
+            return None
+        # A day whose every display point has passed is no longer a useful
+        # today preparation target.  The caller may still add tomorrow after
+        # the configured local preparation hour.
+        if not any(slot_at(target, slot) > local_now for slot in slots):
             return None
         # A stalled scheduler may miss more than one midnight.  Keep the
         # catch-up bounded while still selecting the newest day that needs a
