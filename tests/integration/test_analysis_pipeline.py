@@ -396,7 +396,9 @@ def test_worker_context_inherits_only_the_same_frozen_plan_and_keeps_source_trac
             (ids[1],),
         ).fetchone()
     assert copied["stage"] == "inherited"
-    assert copied["analysis_fingerprint"] == fingerprint(plan) == source["analysis_fingerprint"]
+    identity_plan = dict(plan)
+    identity_plan.pop("caption_display_controls", None)
+    assert copied["analysis_fingerprint"] == fingerprint(identity_plan) == source["analysis_fingerprint"]
     assert copied["vision_request_fingerprint"] == source["vision_request_fingerprint"]
     assert copied["vision_input_spec_json"] == source["vision_input_spec_json"]
     assert json.loads(copied["semantic_json"])["inherited_from"]["analysis_id"] == source["id"]

@@ -338,7 +338,7 @@ def test_isolated_vision_failure_preserves_no_failover_metadata(tmp_path: Path):
 def test_provider_without_serializable_spec_uses_cooperative_timeout():
     provider = _CooperativeProvider(
         name="cooperative",
-        base_url="http://unused.invalid",
+        base_url="https://unused.invalid",
         api_key="",
     )
     router = FailoverVisionProvider([ProviderChannel(provider=provider)])

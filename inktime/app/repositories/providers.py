@@ -76,7 +76,7 @@ class ProviderRepository:
                 INSERT INTO providers(id,name,kind,base_url,api_key_secret,enabled,priority,supports_vision,supports_batch,
                     supports_json_schema,rate_limit_rpm,token_limit_tpm,max_concurrency,timeout_seconds,cooldown_seconds,
                     options_json,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET name=excluded.name,kind=excluded.kind,base_url=excluded.base_url,
                     api_key_secret=COALESCE(providers.api_key_secret,excluded.api_key_secret),enabled=excluded.enabled,
                     priority=excluded.priority,supports_vision=excluded.supports_vision,supports_batch=excluded.supports_batch,
