@@ -11,10 +11,16 @@ from uuid import uuid4
 
 class ProcessCallTimeout(TimeoutError):
     code = "AI-PROVIDER-TIMEOUT"
+    child_started: bool = False
+    ambiguous: bool | None = None
+    vision_started: bool | None = None
 
 
 class ProcessCallError(RuntimeError):
     code = "AI-PROVIDER-UNAVAILABLE"
+    child_started: bool = False
+    ambiguous: bool | None = None
+    vision_started: bool | None = None
 
 
 def _call_child(function: Callable[..., Any], kwargs: dict[str, Any], sender) -> None:
@@ -37,7 +43,19 @@ def _provider_child(specification: dict[str, Any], method: str, kwargs: dict[str
         provider = OpenAICompatibleProvider.from_process_spec(specification)
         sender.send(("ok", getattr(provider, method)(**kwargs)))
     except BaseException as exc:
-        sender.send(("error", type(exc).__name__))
+        # Keep only structured control metadata; never serialize provider
+        # messages, URLs, request data, or credentials across the boundary.
+        sender.send(
+            (
+                "error",
+                {
+                    "type": type(exc).__name__,
+                    "code": getattr(exc, "code", None),
+                    "ambiguous": bool(getattr(exc, "ambiguous", False)),
+                    "vision_started": bool(getattr(exc, "vision_started", False)),
+                },
+            )
+        )
     finally:
         if provider is not None:
             provider.close()
@@ -151,8 +169,22 @@ class KillableProcessBoundary:
             else:
                 process.join(0)
             if state != "ok":
+                if isinstance(value, dict):
+                    error = ProcessCallError(str(value.get("type") or "provider child failed"))
+                    child_code = value.get("code")
+                    if isinstance(child_code, str) and child_code:
+                        error.code = child_code
+                    error.ambiguous = bool(value.get("ambiguous", False))
+                    error.vision_started = bool(value.get("vision_started", False))
+                    raise error
                 raise ProcessCallError(str(value))
             return value
+        except (ProcessCallTimeout, ProcessCallError) as exc:
+            # A failed process start proves that the provider method never
+            # ran.  Once the child is running, however, timeout/pipe failure
+            # makes a remote Vision POST outcome unknowable.
+            exc.child_started = bool(started)
+            raise
         finally:
             # Reap before closing IPC, removing observability state, or releasing
             # capacity. Parent-side poll/recv/cancel exceptions must not orphan a
@@ -204,12 +236,27 @@ class KillableProcessBoundary:
             pickle.dumps((specification, method, kwargs))
         except (pickle.PickleError, TypeError, AttributeError) as exc:
             raise ProcessCallError("provider request is not serializable") from exc
-        return self._run(
-            _provider_child,
-            (specification, method, kwargs),
-            timeout_seconds=timeout_seconds,
-            process_name="inktime-provider-child",
-        )
+        try:
+            return self._run(
+                _provider_child,
+                (specification, method, kwargs),
+                timeout_seconds=timeout_seconds,
+                process_name="inktime-provider-child",
+            )
+        except (ProcessCallTimeout, ProcessCallError) as exc:
+            # Once an isolated analysis child has started, a timeout or
+            # unexpected exit cannot prove that the remote vision POST was
+            # never accepted.  Fail closed instead of sending the image to a
+            # second Provider.  Serialization failures happen before _run and
+            # therefore do not reach this branch.
+            if method == "analyze":
+                child_metadata = exc.vision_started is not None
+                consumed = bool(exc.vision_started) if child_metadata else exc.child_started
+                if consumed:
+                    exc.vision_started = True
+                    if not child_metadata:
+                        exc.ambiguous = True
+            raise
 
     @property
     def start_method(self) -> str | None:

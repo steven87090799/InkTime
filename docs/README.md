@@ -11,7 +11,7 @@
 | 管理照片、模型、裝置與設定 | [管理員指南](guides/ADMIN_GUIDE_ZH_TW.md) → [使用者指南](guides/USER_GUIDE_ZH_TW.md) |
 | 部署、備份或故障排除 | [Docker 部署](operations/DOCKER_GUIDE_ZH_TW.md) → [備份還原](operations/BACKUP_RESTORE_ZH_TW.md) → [疑難排解](operations/TROUBLESHOOTING_ZH_TW.md) |
 | 開發或修改系統 | [開發指南](getting-started/DEVELOPMENT_GUIDE_ZH_TW.md) → [架構文件](architecture/ARCHITECTURE_ZH_TW.md) |
-| 接入 ESP32 或 PhotoPainter | [ESP32 指南](devices/ESP32_GUIDE_ZH_TW.md) → [PhotoPainter](devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) |
+| 接入 ESP32 或 PhotoPainter | [ESP32 指南](devices/ESP32_GUIDE_ZH_TW.md) → [PhotoPainter](devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) → [交付模式](devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md) |
 | 使用本機無 AI 模式 | [Local-only 選片與雙照片](guides/LOCAL_ONLY_SELECTION_ZH_TW.md) |
 | 執行 OpenAI Batch 分析 | [OpenAI Batch 照片分析](OPENAI_BATCH_ANALYSIS_ZH_TW.md) → [正式交付與安全交接](PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md) |
 | 使用 Decision Trace、Queue 或 Canary | [決策與韌性總覽](resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md) |
@@ -89,6 +89,8 @@
 - [`devices/DEVICE_PROTOCOL_ZH_TW.md`](devices/DEVICE_PROTOCOL_ZH_TW.md)：離線 Queue Manifest、下載與 ACK 協定。
 - [`devices/DEVICE_TRANSPORT_SECURITY_ZH_TW.md`](devices/DEVICE_TRANSPORT_SECURITY_ZH_TW.md)：Bearer Token、HTTP/HTTPS 與傳輸限制。
 - [`devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md`](devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md)：PhotoPainter 板型、電源、PSRAM 與實機驗收。
+- [`devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md`](devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md)：Stock 相容、既有 Online、Enhanced 離線排程、`/dataUP` Payload 與安全邊界。
+- [`devices/PHOTOPAINTER_RECOVERY_ZH_TW.md`](devices/PHOTOPAINTER_RECOVERY_ZH_TW.md)：PhotoPainter 交付恢復、停機條件與實機驗證邊界。
 - [`devices/SECURE_OTA_DESIGN_ZH_TW.md`](devices/SECURE_OTA_DESIGN_ZH_TW.md)：尚未啟用 OTA 的安全前提。
 
 ### 決策與韌性

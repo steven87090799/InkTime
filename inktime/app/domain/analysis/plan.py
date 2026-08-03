@@ -8,8 +8,27 @@ from typing import Any, Mapping, Sequence
 
 
 VISION_INPUT_VERSION = "vision-input-v2"
-SCHEMA_VERSION = 2
+# v1/v2 remain readable for historical cache rows.  New model requests use
+# the additive v3 grade/confidence contract and are normalized to the stable
+# numeric fields before persistence.
+SCHEMA_VERSION = 3
 REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
+SINGLE_ANALYSIS_STRATEGIES = {"single", "single_high", "high_quality"}
+LEGACY_ANALYSIS_STRATEGIES = {"custom", "low_cost", "smart", "smart_two_stage"}
+
+
+def normalize_analysis_strategy(value: Any) -> str:
+    """Resolve every cloud strategy to the one-image execution contract."""
+    resolved = str(value or "single").strip().casefold()
+    if resolved in SINGLE_ANALYSIS_STRATEGIES:
+        return "single"
+    if resolved in LEGACY_ANALYSIS_STRATEGIES:
+        # The old names remain readable at API/job boundaries, but they must not
+        # re-enable the removed low-cost -> high-quality image sequence.
+        return "single"
+    if resolved == "local":
+        return resolved
+    raise ValueError("不支援的分析策略")
 
 
 def normalize_reasoning_effort(value: Any) -> str:
@@ -45,7 +64,14 @@ def build_analysis_plan(
     scoring_rules: str = "",
     reasoning_effort: str = "none",
 ) -> dict[str, Any]:
-    """Return a complete immutable plan without secrets or endpoint URLs."""
+    """Return a complete immutable single-image plan.
+
+    The legacy low/high arguments remain in the function signature so callers
+    that still construct a plan can be upgraded without a flag day.  New
+    frozen plans contain only the canonical single-call fields; historical
+    frozen plans are upgraded by :func:`normalize_analysis_plan`.
+    """
+    normalized_strategy = normalize_analysis_strategy(strategy)
     high_side = int(high_image_max_side)
     if high_side not in {1024, 1600}:
         high_side = 1024
@@ -59,12 +85,17 @@ def build_analysis_plan(
         for item in provider_route
     ]
     rules_sha256 = hashlib.sha256(str(scoring_rules).encode("utf-8")).hexdigest()
+    high_input = {
+        "detail": "high",
+        "max_side": high_side,
+        "jpeg_quality": 88,
+        "exif_transpose": True,
+        "preprocessing_version": VISION_INPUT_VERSION,
+    }
     return {
-        "strategy": str(strategy),
+        "strategy": normalized_strategy,
+        "model": str(high_model),
         "provider_route": route,
-        "low_model": str(low_model),
-        "high_model": str(high_model),
-        "stage_two_threshold": float(stage_two_threshold),
         "favorite_override": bool(favorite_override),
         "scoring_profile_id": str(scoring_profile.get("id", "")),
         "ranking_weights": {
@@ -79,23 +110,56 @@ def build_analysis_plan(
         "caption_controls": dict(caption_controls or {}),
         "prompt_version": str(prompt_version),
         "schema_version": SCHEMA_VERSION,
-        "schema_kind": {"low": "basic", "high": "full"},
-        "low_vision_input": {
-            "detail": "low",
-            "max_side": 512,
-            "jpeg_quality": 88,
-            "exif_transpose": True,
-            "preprocessing_version": VISION_INPUT_VERSION,
+        "schema_kind": "basic" if normalized_strategy == "local" else "full",
+        "analysis_call_policy": {
+            "max_image_calls_per_photo": 1,
+            "repair_calls_are_text_only": True,
+            "legacy_two_stage_replay": False,
         },
-        "high_vision_input": {
-            "detail": "high",
-            "max_side": high_side,
-            "jpeg_quality": 88,
-            "exif_transpose": True,
-            "preprocessing_version": VISION_INPUT_VERSION,
-        },
+        "vision_input": high_input,
         "prefilter": dict(prefilter or {}),
         "ai_execution_policy": dict(execution_policy or {}),
         "travel_policy": dict(travel_policy or {}),
         "reasoning_effort": normalize_reasoning_effort(reasoning_effort),
     }
+
+
+def normalize_analysis_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
+    """Upgrade a frozen legacy plan to the canonical one-image shape."""
+    raw = dict(plan)
+    strategy = normalize_analysis_strategy(raw.get("strategy", "single"))
+    if "model" not in raw:
+        raw["model"] = str(raw.get("high_model") or raw.get("low_model") or "")
+    if not str(raw.get("model") or "").strip() and strategy != "local":
+        raise ValueError("分析計畫缺少 model")
+    if "vision_input" not in raw:
+        raw["vision_input"] = dict(
+            raw.get("high_vision_input")
+            or raw.get("low_vision_input")
+            or {
+                "detail": "high",
+                "max_side": 1024,
+                "jpeg_quality": 88,
+                "exif_transpose": True,
+                "preprocessing_version": VISION_INPUT_VERSION,
+            }
+        )
+    vision = dict(raw["vision_input"])
+    max_side = int(vision.get("max_side", 1024))
+    if max_side not in {512, 1024, 1600}:
+        max_side = 1024
+    vision.update(
+        detail=str(vision.get("detail", "high")),
+        max_side=max_side,
+        jpeg_quality=int(vision.get("jpeg_quality", 88)),
+        exif_transpose=bool(vision.get("exif_transpose", True)),
+        preprocessing_version=str(vision.get("preprocessing_version", VISION_INPUT_VERSION)),
+    )
+    raw["vision_input"] = vision
+    raw["strategy"] = strategy
+    raw["schema_kind"] = "basic" if strategy == "local" else "full"
+    raw["schema_version"] = int(raw.get("schema_version", SCHEMA_VERSION))
+    policy = dict(raw.get("analysis_call_policy") or {})
+    policy.update(max_image_calls_per_photo=1, repair_calls_are_text_only=True, legacy_two_stage_replay=False)
+    raw["analysis_call_policy"] = policy
+    return raw

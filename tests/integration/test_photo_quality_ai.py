@@ -149,7 +149,7 @@ def test_force_ai_calls_provider_when_ai_is_off_and_preserves_exclusion_audit(ap
         analysis_plan=plan,
     )
 
-    assert result["stage"] == "single_high"
+    assert result["stage"] == "single"
     assert provider.analyze_calls == 1
     after = repository.get_with_path(photo_id)
     assert after["eligible"] == before["eligible"] == 0
@@ -172,7 +172,7 @@ def test_force_ai_calls_provider_when_ai_is_off_and_preserves_exclusion_audit(ap
     assert audit["job_id"] == job_id
     assert audit["provider_id"] == "provider-force-test"
     assert audit["provider_name"] == "Counting Provider"
-    assert audit["model"] == plan["high_model"]
+    assert audit["model"] == plan["model"]
 
 
 def test_force_ai_api_is_admin_exclusion_only_and_creates_fresh_job(client, app, tmp_path):
@@ -395,7 +395,7 @@ def test_network_unavailable_provider_fails_over_after_cache_miss(app, tmp_path)
         high_model="network-failover",
     )
 
-    assert result["stage"] == "single_high"
+    assert result["stage"] == "single"
     assert first.analyze_calls == 0
     assert fallback.analyze_calls == 1
     with app.extensions["inktime_database"].session() as connection:
@@ -438,7 +438,7 @@ def test_concurrent_requests_share_one_provider_call_and_thumbnail(app, tmp_path
         )
     assert provider.analyze_calls == 1
     assert calls == 1
-    assert {result["stage"] for result in results} == {"single_high", "cache"}
+    assert {result["stage"] for result in results} == {"single", "cache"}
 
 
 def test_concurrent_force_requests_share_one_fresh_generation(app, tmp_path):
@@ -496,7 +496,10 @@ def test_cache_wait_deadline_covers_provider_and_one_json_repair(app, tmp_path, 
     def get_cache(**_kwargs):
         nonlocal cache_reads
         cache_reads += 1
-        return None if cache_reads == 1 else cached
+        # Full-analysis cache lookup accepts a current-schema row, a newly
+        # written v2 row carrying the canonical fingerprint, and the
+        # historical v2 fingerprint.
+        return None if cache_reads <= 3 else cached
 
     clock = iter([0.0, 121.0])
     monkeypatch.setattr(photos, "acquire_ai_cache_reservation", acquire)

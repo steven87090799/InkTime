@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, time as clock_time, timedelta, timezone
+import json
 import logging
 import os
 import signal
@@ -10,6 +11,7 @@ import time
 from zoneinfo import ZoneInfo
 
 from inktime.app.core.logging import configure_logging, log_event
+from inktime.app.domain.photopainter.offline_schedule import validate_offline_schedule
 
 
 LOGGER = logging.getLogger("scheduler")
@@ -74,6 +76,7 @@ class SchedulerRunner:
                     error_code="SCHEDULE-001",
                     details={"task": task["key"]},
                 )
+        self._prepare_due_offline_devices(datetime.now(timezone.utc))
         if not settings.get("backup.schedule_enabled", True):
             return
         today = now.date().isoformat()
@@ -90,6 +93,195 @@ class SchedulerRunner:
                 event="backup_completed",
                 details={"filename": path.name, "removed": removed},
             )
+
+    @staticmethod
+    def _offline_prefetch_target_date(
+        local_now: datetime,
+        schedule: list[str],
+        lead_minutes: int,
+        server_margin_minutes: int = 0,
+    ) -> date | None:
+        """Return the latest local day whose first slot is due for prefetch."""
+
+        if type(lead_minutes) is not int or not 0 <= lead_minutes <= 120:
+            raise ValueError("DEVICE-008 prefetch_lead_minutes 不合法")
+        if type(server_margin_minutes) is not int or not 0 <= server_margin_minutes <= 60:
+            raise ValueError("DEVICE-008 server_prefetch_margin_minutes 不合法")
+        slots = validate_offline_schedule(schedule, maximum=12)
+        zone = local_now.tzinfo
+        if zone is None:
+            raise ValueError("DEVICE-008 裝置時間必須包含時區")
+
+        def slot_at(target: date, slot: str) -> datetime:
+            hour, minute = (int(part) for part in slot.split(":"))
+            return datetime.combine(target, clock_time(hour, minute), tzinfo=zone)
+
+        def prefetch_at(target: date) -> datetime:
+            hour, minute = (int(part) for part in slots[0].split(":"))
+            return datetime.combine(target, clock_time(hour, minute), tzinfo=zone) - timedelta(
+                minutes=lead_minutes + server_margin_minutes
+            )
+
+        target = local_now.date()
+        if local_now < prefetch_at(target):
+            return None
+        # A day whose every display point has passed is no longer a useful
+        # today preparation target.  The caller may still add tomorrow after
+        # the configured local preparation hour.
+        if not any(slot_at(target, slot) > local_now for slot in slots):
+            return None
+        # This helper is intentionally today-only.  A separate tomorrow
+        # decision below prevents a due tomorrow preparation point from
+        # replacing a still-serviceable later slot today.
+        return target
+
+    @staticmethod
+    def _offline_tomorrow_prefetch_due(
+        local_now: datetime,
+        schedule: list[str],
+        lead_minutes: int,
+        server_margin_minutes: int,
+        future_prepare_hour: int,
+    ) -> bool:
+        """Return whether tomorrow needs technical preparation now."""
+
+        if type(future_prepare_hour) is not int or not 0 <= future_prepare_hour <= 23:
+            raise ValueError("DEVICE-008 future_schedule_prepare_hour_local 不合法")
+        if type(lead_minutes) is not int or not 0 <= lead_minutes <= 120:
+            raise ValueError("DEVICE-008 prefetch_lead_minutes 不合法")
+        if type(server_margin_minutes) is not int or not 0 <= server_margin_minutes <= 60:
+            raise ValueError("DEVICE-008 server_prefetch_margin_minutes 不合法")
+        slots = validate_offline_schedule(schedule, maximum=12)
+        zone = local_now.tzinfo
+        if zone is None:
+            raise ValueError("DEVICE-008 裝置時間必須包含時區")
+        tomorrow = local_now.date() + timedelta(days=1)
+        configured = datetime.combine(
+            local_now.date(), clock_time(future_prepare_hour, 0), tzinfo=zone
+        )
+        hour, minute = (int(part) for part in slots[0].split(":"))
+        technical = datetime.combine(
+            tomorrow, clock_time(hour, minute), tzinfo=zone
+        ) - timedelta(minutes=lead_minutes + server_margin_minutes)
+        return local_now >= min(configured, technical)
+
+    @classmethod
+    def _offline_prefetch_target_dates(
+        cls,
+        local_now: datetime,
+        schedule: list[str],
+        lead_minutes: int,
+        server_margin_minutes: int = 0,
+        future_prepare_hour: int = 20,
+    ) -> list[date]:
+        """Return independent today/tomorrow preparation targets in order."""
+
+        targets: list[date] = []
+        today = cls._offline_prefetch_target_date(
+            local_now, schedule, lead_minutes, server_margin_minutes
+        )
+        if today is not None:
+            targets.append(today)
+        if cls._offline_tomorrow_prefetch_due(
+            local_now,
+            schedule,
+            lead_minutes,
+            server_margin_minutes,
+            future_prepare_hour,
+        ):
+            tomorrow = local_now.date() + timedelta(days=1)
+            if tomorrow not in targets:
+                targets.append(tomorrow)
+        return targets
+
+    def _prepare_due_offline_devices(self, now: datetime) -> None:
+        offline_schedules = self.app.extensions.get("inktime_offline_schedule_repository")
+        if offline_schedules is None:
+            return
+        job_repository = self.app.extensions["inktime_job_repository"]
+        job_service = self.app.extensions["inktime_job_service"]
+        settings = self.app.extensions["inktime_settings_repository"]
+        try:
+            server_margin = int(settings.get("offline.server_prefetch_margin_minutes", 15))
+        except (TypeError, ValueError):
+            server_margin = 15
+        server_margin = max(0, min(server_margin, 60))
+        try:
+            future_prepare_hour = int(settings.get("offline.future_schedule_prepare_hour_local", 20))
+        except (TypeError, ValueError):
+            future_prepare_hour = 20
+        future_prepare_hour = max(0, min(future_prepare_hour, 23))
+        cursor = offline_schedules.prefetch_cursor()
+        devices = offline_schedules.due_prefetch_devices(limit=10, after_device_id=cursor)
+        for device in devices:
+            try:
+                timezone_name = str(device["timezone"] or "UTC")
+                local_now = now.astimezone(ZoneInfo(timezone_name))
+                schedule = validate_offline_schedule(
+                    json.loads(str(device["schedule_times_json"] or "[]")), maximum=12
+                )
+                targets = self._offline_prefetch_target_dates(
+                    local_now,
+                    schedule,
+                    int(device["prefetch_lead_minutes"] or 0),
+                    server_margin,
+                    future_prepare_hour,
+                )
+                for target_date in targets[:2]:
+                    target_iso = target_date.isoformat()
+                    if offline_schedules.ready_for_device(
+                        device_id=str(device["id"]),
+                        target_date=target_iso,
+                        config_version=int(device["config_version"]),
+                    ) is not None:
+                        continue
+                    dedupe_key = f"offline-prepare:{device['id']}:{target_iso}:{int(device['config_version'])}"
+                    job_id = job_repository.create_maintenance(
+                        kind="render",
+                        name=f"離線排程準備：{str(device['name'])} {target_iso}",
+                        priority=2,
+                        dedupe_key=dedupe_key,
+                        created_by=None,
+                        settings={
+                            "offline_prepare": {
+                                "device_id": str(device["id"]),
+                                "target_date": target_iso,
+                                "config_version": int(device["config_version"]),
+                            },
+                            "trigger_source": "offline-scheduler",
+                            "timeout_seconds": 1800,
+                            "max_retries": 1,
+                        },
+                    )
+                    current = job_repository.get(job_id)
+                    if current is not None and str(current["status"]) == "pending":
+                        job_service.start(job_id)
+                    log_event(
+                        LOGGER,
+                        logging.INFO,
+                        "已建立離線排程準備工作",
+                        event="offline_schedule_prepare_enqueued",
+                        job_id=job_id,
+                        details={
+                            "device_id": str(device["id"]),
+                            "target_date": target_iso,
+                            "config_version": int(device["config_version"]),
+                        },
+                    )
+            except Exception as exc:
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "離線排程準備建立失敗；其他裝置持續執行",
+                    event="offline_schedule_prepare_failed",
+                    error_code="OFFLINE-001",
+                    details={
+                        "device_id": str(device.get("id", "")),
+                        "error_type": exc.__class__.__name__,
+                    },
+                )
+            finally:
+                offline_schedules.advance_prefetch_cursor(str(device["id"]))
 
     def _enqueue_task(self, task: dict, now: datetime, *, force: bool = False) -> None:
         config = dict(task["config"])
@@ -152,7 +344,7 @@ class SchedulerRunner:
                 return
             job_id = self.app.extensions["inktime_job_service"].create_analysis_job(
                 name=f"排程：{task['name']}",
-                strategy=str(config.get("strategy", "smart_two_stage")),
+                strategy=str(config.get("strategy", "single")),
                 settings=common | {"concurrency": int(config.get("concurrency", 1))},
                 created_by="system",
                 budget_limit=None,

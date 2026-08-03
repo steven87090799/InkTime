@@ -23,6 +23,7 @@ class ReleaseCoordinator:
         photo_ids: list[str],
         history: dict[str, str] | None = None,
         device_assignments: dict[str, str] | None = None,
+        activate_pointers: bool = True,
     ) -> list[dict[str, Any]]:
         if not manifests:
             raise ValueError("RENDER-010 沒有可發布的 Release")
@@ -56,9 +57,13 @@ class ReleaseCoordinator:
                 self.publisher.mark_orphan(str(manifest["release_id"]), "database_stage_failed")
             raise
 
-        snapshot = self.publisher.pointer_snapshot([str(item["render_profile"]) for item in verified])
+        snapshot = (
+            self.publisher.pointer_snapshot([str(item["render_profile"]) for item in verified])
+            if activate_pointers
+            else None
+        )
         try:
-            if not device_assignments:
+            if activate_pointers and not device_assignments:
                 self.publisher.activate_manifests(verified)
             with self.database.transaction() as connection:
                 for manifest in verified:
@@ -107,7 +112,7 @@ class ReleaseCoordinator:
                         rows,
                     )
         except Exception as exc:
-            if not device_assignments:
+            if activate_pointers and snapshot is not None:
                 self.publisher.restore_pointers(snapshot)
             with self.database.transaction() as connection:
                 connection.executemany(
@@ -116,6 +121,20 @@ class ReleaseCoordinator:
                 )
             raise
         return verified
+
+    def abort_staged(self, release_ids: list[str], reason: str) -> None:
+        """Retain failed payloads for reconciliation without leaving them active."""
+
+        identifiers = list(dict.fromkeys(str(value) for value in release_ids if str(value)))
+        if not identifiers:
+            return
+        with self.database.transaction() as connection:
+            connection.executemany(
+                "UPDATE releases SET status='staged_failed',failure_reason=?,reconciliation_status='aborted' WHERE id=? AND status IN ('staged','published')",
+                [(str(reason)[:500], release_id) for release_id in identifiers],
+            )
+        for release_id in identifiers:
+            self.publisher.mark_orphan(release_id, "offline_prepare_aborted")
 
     def reconcile(self) -> dict[str, int]:
         diagnostics = {

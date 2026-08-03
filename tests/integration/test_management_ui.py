@@ -17,6 +17,7 @@ def test_primary_management_pages_render(client, app):
     for path in (
         "/dashboard",
         "/photos",
+        "/review/photos",
         "/jobs",
         "/providers",
         "/analysis/batches",

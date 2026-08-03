@@ -177,6 +177,10 @@ class FailoverVisionProvider(VisionProvider):
                         channel.circuit_until = time.monotonic() + max(
                             float(retry_after or 0), channel.cooldown_seconds
                         )
+                if bool(getattr(exc, "vision_started", False)) or bool(
+                    getattr(exc, "ambiguous", False)
+                ):
+                    raise
                 continue
             finally:
                 channel.semaphore.release()
@@ -219,6 +223,10 @@ class FailoverVisionProvider(VisionProvider):
                     channel.failures += 1
                     if channel.failures >= self.failure_threshold:
                         channel.circuit_until = time.monotonic() + channel.cooldown_seconds
+                if bool(getattr(exc, "vision_started", False)) or bool(
+                    getattr(exc, "ambiguous", False)
+                ):
+                    raise
                 continue
             finally:
                 channel.semaphore.release()

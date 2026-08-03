@@ -160,6 +160,21 @@ def test_queue_ack_version_requires_json_integer(client, app, value):
     assert response.status_code == 400
 
 
+def test_queue_ack_rejects_oversized_idempotency_key(client, app):
+    _device_id, token = app.extensions["inktime_device_repository"].create("ack-key-limit")
+    response = client.post(
+        "/api/device/v1/queue/ack",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "queue_item_id": "item",
+            "queue_version": 0,
+            "event": "MANIFEST_RECEIVED",
+            "idempotency_key": "x" * 129,
+        },
+    )
+    assert response.status_code == 400
+
+
 @pytest.mark.parametrize(
     "field",
     [

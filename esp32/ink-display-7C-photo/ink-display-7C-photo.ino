@@ -11,6 +11,7 @@
 
 #include "hardware_profile.h"
 #include "photopainter_core.h"
+#include "offline_schedule_core.h"
 #include "queue_client_core.h"
 #include "queue_runtime_types.h"
 #if INKTIME_PHOTOPAINTER_ENABLED
@@ -90,6 +91,7 @@ GxEPD2_7C<
 #define DEVICE_STATUS_PATH   "/api/device/v1/status"
 #define DEVICE_QUEUE_MANIFEST_PATH "/api/device/v1/queue/manifest"
 #define DEVICE_QUEUE_ACK_PATH "/api/device/v1/queue/ack"
+#define DEVICE_OFFLINE_SCHEDULE_PATH "/api/device/v1/offline-schedule"
 #define INKTIME_FIRMWARE_VERSION "2.5.0"
 
 // No trusted CA provisioning exists yet. HTTPS is rejected by default instead
@@ -114,6 +116,13 @@ struct Config {
   uint8_t refresh_hour;
   uint8_t refresh_minute;
   bool    rotate180;
+#if INKTIME_PHOTOPAINTER_ENABLED
+  inktime::OfflineSlot schedule_slots[inktime::kMaxOfflineSlots];
+  uint8_t schedule_count;
+  uint16_t prefetch_lead_minutes;
+  String  delivery_mode;
+  String  button_wake_action;
+#endif
   uint32_t config_version;
   bool    valid;
 };
@@ -122,6 +131,145 @@ const char*  DEFAULT_HOSTPORT = "";
 const int32_t DEFAULT_TZ_MINUTES = 8 * 60;
 const uint8_t DEFAULT_HOUR    = 8;
 const uint8_t DEFAULT_MINUTE  = 0;
+#if INKTIME_PHOTOPAINTER_ENABLED
+const uint16_t DEFAULT_PREFETCH_LEAD_MINUTES = 5;
+
+static bool parseOfflineClock(const String &value, inktime::OfflineSlot &slot) {
+  if (value.length() != 5 || value[2] != ':') return false;
+  if (value[0] < '0' || value[0] > '9' || value[1] < '0' || value[1] > '9'
+      || value[3] < '0' || value[3] > '9' || value[4] < '0' || value[4] > '9') return false;
+  slot.hour = static_cast<uint8_t>((value[0] - '0') * 10 + value[1] - '0');
+  slot.minute = static_cast<uint8_t>((value[3] - '0') * 10 + value[4] - '0');
+  return inktime::validOfflineSlot(slot);
+}
+
+static String offlineClock(const inktime::OfflineSlot &slot) {
+  char value[6] = {0};
+  snprintf(value, sizeof(value), "%02u:%02u", slot.hour, slot.minute);
+  return String(value);
+}
+
+static bool nextIsoLocalDate(const String &value, String &output) {
+  output = "";
+  if (value.length() != 10U || value[4] != '-' || value[7] != '-') return false;
+  for (uint8_t index = 0; index < 10U; ++index) {
+    if (index == 4U || index == 7U) continue;
+    if (value[index] < '0' || value[index] > '9') return false;
+  }
+  int year = value.substring(0, 4).toInt();
+  int month = value.substring(5, 7).toInt();
+  int day = value.substring(8, 10).toInt();
+  if (year < 2000 || month < 1 || month > 12 || day < 1) return false;
+  const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+  const uint8_t days[] = {0, 31, static_cast<uint8_t>(leap ? 29 : 28), 31, 30, 31, 30,
+    31, 31, 30, 31, 30, 31};
+  if (day > days[month]) return false;
+  ++day;
+  if (day > days[month]) {
+    day = 1;
+    ++month;
+    if (month > 12) {
+      month = 1;
+      ++year;
+    }
+  }
+  char next[11] = {0};
+  snprintf(next, sizeof(next), "%04d-%02d-%02d", year, month, day);
+  output = String(next);
+  return true;
+}
+
+static bool validDeliveryMode(const String &value) {
+  return value == "legacy_online" || value == "stock_compat"
+      || value == "inktime_offline_schedule";
+}
+
+static bool validButtonWakeAction(const String &value) {
+  return value == "check_new" || value == "local_next";
+}
+
+static void applyFixedTimezoneWithoutNtp(int32_t offsetMinutes) {
+  const int32_t absoluteMinutes = offsetMinutes < 0 ? -offsetMinutes : offsetMinutes;
+  const char sign = offsetMinutes >= 0 ? '-' : '+';  // POSIX TZ signs are reversed.
+  char timezone[24] = {0};
+  snprintf(
+    timezone,
+    sizeof(timezone),
+    "UTC%c%02ld:%02ld",
+    sign,
+    static_cast<long>(absoluteMinutes / 60),
+    static_cast<long>(absoluteMinutes % 60)
+  );
+  setenv("TZ", timezone, 1);
+  tzset();
+}
+
+static bool applyRemoteSchedule(JsonObject remoteConfig, int schemaVersion, Config &candidate) {
+  if (schemaVersion < 3) {
+    inktime::OfflineSlot legacy = {};
+    String schedule = remoteConfig["schedule"] | "";
+    if (!parseOfflineClock(schedule, legacy)) return false;
+    candidate.schedule_count = 1;
+    candidate.schedule_slots[0] = legacy;
+    candidate.refresh_hour = legacy.hour;
+    candidate.refresh_minute = legacy.minute;
+    return true;
+  }
+  String delivery = remoteConfig["delivery_mode"] | candidate.delivery_mode;
+  String button = remoteConfig["button_wake_action"] | candidate.button_wake_action;
+  const JsonVariantConst leadValue = remoteConfig["prefetch_lead_minutes"];
+  if (!leadValue.isNull() && (!leadValue.is<int>() || leadValue.is<bool>())) return false;
+  int lead = leadValue.isNull() ? static_cast<int>(candidate.prefetch_lead_minutes) : (leadValue | -1);
+  if (!validDeliveryMode(delivery) || !validButtonWakeAction(button) || lead < 0 || lead > 120) return false;
+
+  JsonArray rawTimes = remoteConfig["schedule_times"].as<JsonArray>();
+  if (rawTimes.isNull() || rawTimes.size() == 0U || rawTimes.size() > inktime::kMaxOfflineSlots) return false;
+  inktime::OfflineSlot slots[inktime::kMaxOfflineSlots] = {};
+  for (size_t index = 0; index < rawTimes.size(); ++index) {
+    if (!parseOfflineClock(rawTimes[index] | "", slots[index])) return false;
+  }
+  if (!inktime::validateOfflineSlots(slots, static_cast<uint8_t>(rawTimes.size()))) return false;
+  candidate.delivery_mode = delivery;
+  candidate.button_wake_action = button;
+  candidate.prefetch_lead_minutes = static_cast<uint16_t>(lead);
+  candidate.schedule_count = static_cast<uint8_t>(rawTimes.size());
+  for (uint8_t index = 0; index < candidate.schedule_count; ++index) candidate.schedule_slots[index] = slots[index];
+  candidate.refresh_hour = slots[0].hour;
+  candidate.refresh_minute = slots[0].minute;
+  return true;
+}
+
+static void setLegacySchedule(Config &cfg) {
+  cfg.schedule_count = 1;
+  cfg.schedule_slots[0] = {cfg.refresh_hour, cfg.refresh_minute};
+  for (uint8_t index = 1; index < inktime::kMaxOfflineSlots; ++index) {
+    cfg.schedule_slots[index] = {0, 0};
+  }
+}
+
+static bool loadStoredSchedule(Config &cfg) {
+  const uint8_t count = prefs.getUChar("scnt", 0);
+  if (count == 0) {
+    setLegacySchedule(cfg);
+    return true;
+  }
+  if (count > inktime::kMaxOfflineSlots) return false;
+  inktime::OfflineSlot slots[inktime::kMaxOfflineSlots] = {};
+  for (uint8_t index = 0; index < count; ++index) {
+    const String key = String("s") + String(index);
+    if (!parseOfflineClock(prefs.getString(key.c_str(), ""), slots[index])) return false;
+  }
+  if (!inktime::validateOfflineSlots(slots, count)) return false;
+  cfg.schedule_count = count;
+  for (uint8_t index = 0; index < count; ++index) cfg.schedule_slots[index] = slots[index];
+  for (uint8_t index = count; index < inktime::kMaxOfflineSlots; ++index) {
+    cfg.schedule_slots[index] = {0, 0};
+  }
+  cfg.refresh_hour = slots[0].hour;
+  cfg.refresh_minute = slots[0].minute;
+  return true;
+}
+#endif
 
 Config g_cfg;
 uint8_t* frameData = nullptr;
@@ -132,6 +280,8 @@ bool serverConfigChanged = false;
 bool currentPayloadShaVerified = false;
 bool currentDisplaySkipped = false;
 bool currentFromQueue = false;
+bool currentPrefetchOnly = false;
+bool enhancedNetworkWakeRequested = false;
 bool currentPayloadIntegrityTrusted = false;
 String portalSetupSecret;
 String portalNonce;
@@ -226,6 +376,83 @@ static bool loadLastTimeEpoch(time_t &epochOut) {
 }
 
 #if INKTIME_PHOTOPAINTER_ENABLED
+static bool loadOfflineRetryState(
+  uint8_t &attemptOut, int64_t &epochOut, int64_t &nextSlotOut) {
+  prefs.begin("dashcfg", true);
+  const uint8_t storedAttempt = prefs.getUChar("offretry_attempt", 0U);
+  const int64_t storedEpoch = prefs.getLong64("offretry_epoch", 0);
+  const int64_t storedNextSlot = prefs.getLong64("offretry_next", 0);
+  prefs.end();
+  attemptOut = storedAttempt > 2U ? 2U : storedAttempt;
+  epochOut = storedEpoch;
+  nextSlotOut = storedNextSlot;
+  return storedEpoch > 0;
+}
+
+static void saveOfflineRetryState(uint8_t attempt, int64_t epoch, int64_t nextSlotEpoch) {
+  prefs.begin("dashcfg", false);
+  prefs.putUChar("offretry_attempt", attempt > 2U ? 2U : attempt);
+  prefs.putLong64("offretry_epoch", epoch);
+  prefs.putLong64("offretry_next", nextSlotEpoch > 0 ? nextSlotEpoch : 0);
+  prefs.end();
+}
+
+static void clearOfflineRetryState() {
+  prefs.begin("dashcfg", false);
+  prefs.remove("offretry_attempt");
+  prefs.remove("offretry_epoch");
+  prefs.remove("offretry_next");
+  prefs.end();
+}
+
+static time_t scheduleOfflineRecovery(
+  time_t nowEpoch, int64_t serverRetryEpoch = 0, int64_t nextSlotEpoch = 0) {
+  if (nowEpoch <= 0) return 0;
+  uint8_t attempt = 0U;
+  int64_t storedEpoch = 0;
+  int64_t storedNextSlot = 0;
+  loadOfflineRetryState(attempt, storedEpoch, storedNextSlot);
+  if (serverRetryEpoch <= 0 && inktime::validOfflineRetryEpoch(
+        static_cast<uint64_t>(nowEpoch), storedEpoch, storedNextSlot)) {
+    return static_cast<time_t>(storedEpoch);
+  }
+  const inktime::OfflineRetryPlan plan = inktime::buildOfflineRetryPlan(
+    static_cast<uint64_t>(nowEpoch), attempt, serverRetryEpoch, nextSlotEpoch);
+  saveOfflineRetryState(
+    plan.nextAttempt,
+    static_cast<int64_t>(plan.sleepUntilEpoch),
+    nextSlotEpoch > 0 ? nextSlotEpoch : 0);
+  return static_cast<time_t>(plan.sleepUntilEpoch);
+}
+#endif
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+// Preferences keys are kept under the ESP32 NVS key-size limit; these two
+// bounded keys represent preview_schedule_id and preview_slot_index.
+static int16_t loadPreviewCursorForSchedule(const String &scheduleId) {
+  prefs.begin("dashcfg", true);
+  const String storedScheduleId = prefs.getString("preview_sched", "");
+  const int32_t storedIndex = prefs.getInt("preview_idx", -1);
+  prefs.end();
+  if (storedScheduleId != scheduleId) {
+    prefs.begin("dashcfg", false);
+    prefs.putString("preview_sched", scheduleId);
+    prefs.putInt("preview_idx", -1);
+    prefs.end();
+    return -1;
+  }
+  return storedIndex < 0 || storedIndex > 127 ? -1 : static_cast<int16_t>(storedIndex);
+}
+
+static void savePreviewCursor(const String &scheduleId, int16_t slotIndex) {
+  prefs.begin("dashcfg", false);
+  prefs.putString("preview_sched", scheduleId);
+  prefs.putInt("preview_idx", slotIndex);
+  prefs.end();
+}
+#endif
+
+#if INKTIME_PHOTOPAINTER_ENABLED
 static bool loadLastPhotoIndex(size_t fileCount, size_t &indexOut) {
   if (fileCount == 0) return false;
   prefs.begin("dashcfg", true);
@@ -313,35 +540,74 @@ static bool shouldSkipCurrentDisplay(const Config &cfg) {
   return inktime::shouldSkipDisplay(record, candidate);
 }
 
-static PendingQueueAck loadPendingQueueAck() {
-  prefs.begin("dashcfg", true);
+static bool validPendingQueueAck(PendingQueueAck &pending) {
+  const uint8_t event = static_cast<uint8_t>(pending.event);
+  pending.valid = inktime::boundedText(
+      pending.queueItemId.c_str(), inktime::kQueueIdentifierMaxBytes)
+    && pending.queueVersion >= 0
+    && event <= static_cast<uint8_t>(inktime::QueueEvent::DisplayFailed)
+    && pending.errorCode.length() <= 64U
+    && pending.eventEpoch >= 0
+    && (!pending.delayedTerminal || (
+        (pending.event == inktime::QueueEvent::DisplayCompleted
+          || pending.event == inktime::QueueEvent::DisplayFailed)
+        && inktime::boundedText(pending.releaseId.c_str(), inktime::kQueueIdentifierMaxBytes)));
+  return pending.valid;
+}
+
+static String ackJournalKey(char prefix, uint8_t index) {
+  return String(prefix) + String(index);
+}
+
+static PendingQueueAck readAckJournalEntry(Preferences &journal, uint8_t index) {
   PendingQueueAck pending = {
-    prefs.getString("ack_item", ""),
-    prefs.getInt("ack_ver", -1),
-    static_cast<inktime::QueueEvent>(prefs.getUChar("ack_event", 255U)),
-    prefs.getBool("ack_skip", false),
-    prefs.getString("ack_error", ""),
+    journal.getString(ackJournalKey('i', index).c_str(), ""),
+    journal.getInt(ackJournalKey('v', index).c_str(), -1),
+    static_cast<inktime::QueueEvent>(
+      journal.getUChar(ackJournalKey('e', index).c_str(), 255U)),
+    journal.getBool(ackJournalKey('s', index).c_str(), false),
+    journal.getString(ackJournalKey('r', index).c_str(), ""),
+    journal.getBool(ackJournalKey('d', index).c_str(), false),
+    journal.getString(ackJournalKey('l', index).c_str(), ""),
+    journal.getLong64(ackJournalKey('t', index).c_str(), 0),
     false,
   };
-  prefs.end();
-  const uint8_t event = static_cast<uint8_t>(pending.event);
-  pending.valid = inktime::boundedText(pending.queueItemId.c_str(), inktime::kQueueIdentifierMaxBytes)
-    && pending.queueVersion >= 0 && event <= static_cast<uint8_t>(inktime::QueueEvent::DisplayFailed)
-    && pending.errorCode.length() <= 64U;
+  validPendingQueueAck(pending);
   return pending;
 }
 
-static void persistPendingQueueAck(const PendingQueueAck &pending) {
-  prefs.begin("dashcfg", false);
-  prefs.putString("ack_item", pending.queueItemId);
-  prefs.putInt("ack_ver", pending.queueVersion);
-  prefs.putUChar("ack_event", static_cast<uint8_t>(pending.event));
-  prefs.putBool("ack_skip", pending.displaySkipped);
-  prefs.putString("ack_error", pending.errorCode);
-  prefs.end();
+static void writeAckJournalEntry(
+  Preferences &journal,
+  uint8_t index,
+  const PendingQueueAck &pending
+) {
+  journal.putString(ackJournalKey('i', index).c_str(), pending.queueItemId);
+  journal.putInt(ackJournalKey('v', index).c_str(), pending.queueVersion);
+  journal.putUChar(
+    ackJournalKey('e', index).c_str(), static_cast<uint8_t>(pending.event));
+  journal.putBool(ackJournalKey('s', index).c_str(), pending.displaySkipped);
+  journal.putString(ackJournalKey('r', index).c_str(), pending.errorCode);
+  journal.putBool(ackJournalKey('d', index).c_str(), pending.delayedTerminal);
+  journal.putString(ackJournalKey('l', index).c_str(), pending.releaseId);
+  journal.putLong64(ackJournalKey('t', index).c_str(), pending.eventEpoch);
 }
 
-static void clearPendingQueueAck() {
+static bool samePendingQueueAck(
+  const PendingQueueAck &left,
+  const PendingQueueAck &right
+) {
+  return left.queueItemId == right.queueItemId
+    && left.queueVersion == right.queueVersion
+    && left.event == right.event;
+}
+
+static uint8_t ackJournalCount(Preferences &journal) {
+  return min(
+    journal.getUChar("count", 0U),
+    static_cast<uint8_t>(inktime::kMaxAckJournalEntries));
+}
+
+static void removeLegacyPendingQueueAck() {
   prefs.begin("dashcfg", false);
   prefs.remove("ack_item");
   prefs.remove("ack_ver");
@@ -349,6 +615,105 @@ static void clearPendingQueueAck() {
   prefs.remove("ack_skip");
   prefs.remove("ack_error");
   prefs.end();
+}
+
+static void persistPendingQueueAck(const PendingQueueAck &pending) {
+  if (!pending.valid) return;
+  Preferences journal;
+  journal.begin("acklog", false);
+  uint8_t count = ackJournalCount(journal);
+  for (uint8_t index = 0; index < count; ++index) {
+    const PendingQueueAck existing = readAckJournalEntry(journal, index);
+    if (existing.valid && samePendingQueueAck(existing, pending)) {
+      journal.end();
+      return;
+    }
+  }
+  uint8_t insertAt = count;
+  if (count >= inktime::kMaxAckJournalEntries) {
+    for (uint8_t index = 1; index < inktime::kMaxAckJournalEntries; ++index) {
+      const PendingQueueAck shifted = readAckJournalEntry(journal, index);
+      if (shifted.valid) writeAckJournalEntry(journal, index - 1U, shifted);
+    }
+    insertAt = inktime::kMaxAckJournalEntries - 1U;
+  } else {
+    ++count;
+  }
+  writeAckJournalEntry(journal, insertAt, pending);
+  journal.putUChar("count", count);
+  journal.end();
+}
+
+static void removePendingQueueAck(const PendingQueueAck &pending) {
+  Preferences journal;
+  journal.begin("acklog", false);
+  const uint8_t count = ackJournalCount(journal);
+  uint8_t found = count;
+  for (uint8_t index = 0; index < count; ++index) {
+    const PendingQueueAck existing = readAckJournalEntry(journal, index);
+    if (existing.valid && samePendingQueueAck(existing, pending)) {
+      found = index;
+      break;
+    }
+  }
+  if (found < count) {
+    for (uint8_t index = found + 1U; index < count; ++index) {
+      const PendingQueueAck shifted = readAckJournalEntry(journal, index);
+      if (shifted.valid) writeAckJournalEntry(journal, index - 1U, shifted);
+    }
+    const uint8_t last = count - 1U;
+    journal.remove(ackJournalKey('i', last).c_str());
+    journal.remove(ackJournalKey('v', last).c_str());
+    journal.remove(ackJournalKey('e', last).c_str());
+    journal.remove(ackJournalKey('s', last).c_str());
+    journal.remove(ackJournalKey('r', last).c_str());
+    journal.remove(ackJournalKey('d', last).c_str());
+    journal.remove(ackJournalKey('l', last).c_str());
+    journal.remove(ackJournalKey('t', last).c_str());
+    journal.putUChar("count", last);
+  }
+  journal.end();
+}
+
+static PendingQueueAck loadPendingQueueAck() {
+  Preferences journal;
+  journal.begin("acklog", true);
+  const uint8_t count = ackJournalCount(journal);
+  for (uint8_t index = 0; index < count; ++index) {
+    PendingQueueAck pending = readAckJournalEntry(journal, index);
+    if (pending.valid) {
+      journal.end();
+      return pending;
+    }
+  }
+  journal.end();
+
+  // Migrate the pre-journal single pending record without losing an event
+  // after an upgrade from the previous firmware.
+  prefs.begin("dashcfg", true);
+  PendingQueueAck legacy = {
+    prefs.getString("ack_item", ""),
+    prefs.getInt("ack_ver", -1),
+    static_cast<inktime::QueueEvent>(prefs.getUChar("ack_event", 255U)),
+    prefs.getBool("ack_skip", false),
+    prefs.getString("ack_error", ""),
+    false,
+    "",
+    0,
+    false,
+  };
+  prefs.end();
+  if (validPendingQueueAck(legacy)) {
+    persistPendingQueueAck(legacy);
+    removeLegacyPendingQueueAck();
+    return legacy;
+  }
+  return legacy;
+}
+
+static void clearPendingQueueAck() {
+  const PendingQueueAck pending = loadPendingQueueAck();
+  if (pending.valid) removePendingQueueAck(pending);
 }
 
 static uint32_t minutesToNextRefreshFromLastEpoch(const Config &cfg) {
@@ -385,7 +750,16 @@ void loadConfig(Config &cfg) {
   cfg.refresh_hour     = (uint8_t)prefs.getUChar("hour", DEFAULT_HOUR);
   cfg.refresh_minute   = (uint8_t)prefs.getUChar("minute", DEFAULT_MINUTE);
   cfg.rotate180        = prefs.getBool("rot180", false);
+#if INKTIME_PHOTOPAINTER_ENABLED
+  cfg.prefetch_lead_minutes = prefs.getUShort("prefetch", DEFAULT_PREFETCH_LEAD_MINUTES);
+  cfg.delivery_mode     = prefs.getString("delivery", "legacy_online");
+  cfg.button_wake_action = prefs.getString("button", "check_new");
   cfg.config_version   = prefs.getULong("cfgver", 0);
+  if (!validDeliveryMode(cfg.delivery_mode)) cfg.delivery_mode = "legacy_online";
+  if (!validButtonWakeAction(cfg.button_wake_action)) cfg.button_wake_action = "check_new";
+  if (cfg.prefetch_lead_minutes > 120U) cfg.prefetch_lead_minutes = DEFAULT_PREFETCH_LEAD_MINUTES;
+  if (!loadStoredSchedule(cfg)) setLegacySchedule(cfg);
+#endif
   prefs.end();
 
   cfg.valid = (cfg.wifi_ssid.length() > 0);
@@ -412,6 +786,16 @@ void saveConfig(const Config &cfg) {
   prefs.putUChar("hour", cfg.refresh_hour);
   prefs.putUChar("minute", cfg.refresh_minute);
   prefs.putBool("rot180", cfg.rotate180);
+#if INKTIME_PHOTOPAINTER_ENABLED
+  prefs.putUShort("prefetch", cfg.prefetch_lead_minutes);
+  prefs.putString("delivery", cfg.delivery_mode);
+  prefs.putString("button", cfg.button_wake_action);
+  prefs.putUChar("scnt", cfg.schedule_count);
+  for (uint8_t index = 0; index < cfg.schedule_count && index < inktime::kMaxOfflineSlots; ++index) {
+    const String key = String("s") + String(index);
+    prefs.putString(key.c_str(), offlineClock(cfg.schedule_slots[index]));
+  }
+#endif
   prefs.putULong("cfgver", cfg.config_version);
   prefs.end();
 
@@ -726,15 +1110,10 @@ static void deepSleepHoldOnlyEpdPins() {
 // =======================
 //  Deep Sleep
 // =======================
-void goDeepSleepMinutes(uint32_t minutes) {
-  if (minutes < 1)    minutes = 1;
-  if (minutes > 1440) minutes = 1440;
+static void goDeepSleepSeconds(uint64_t seconds) {
+  if (seconds < 1U) seconds = 1U;
 
-#if DEBUG_LOG
-  DBG_PRINT("[SLEEP] minutes="); DBG_PRINTLN((int)minutes);
-#endif
-
-  uint64_t us = (uint64_t)minutes * 60ULL * 1000000ULL;
+  uint64_t us = seconds * 1000000ULL;
 
 #if INKTIME_PHOTOPAINTER_ENABLED
   photoPainter.prepareForDeepSleep();
@@ -766,6 +1145,19 @@ void goDeepSleepMinutes(uint32_t minutes) {
   DBG_PRINTLN("[SLEEP] go deep sleep");
 #endif
   esp_deep_sleep_start();
+}
+
+void goDeepSleepMinutes(uint32_t minutes) {
+  if (minutes < 1U) minutes = 1U;
+  if (minutes > 1440U) minutes = 1440U;
+  goDeepSleepSeconds(static_cast<uint64_t>(minutes) * 60ULL);
+}
+
+void goDeepSleepUntilEpoch(time_t nowEpoch, time_t nextEpoch) {
+  goDeepSleepSeconds(inktime::exactSleepSeconds(
+    static_cast<uint64_t>(nowEpoch),
+    static_cast<uint64_t>(nextEpoch)
+  ));
 }
 
 // =======================
@@ -1000,16 +1392,16 @@ static bool queueAckIdempotencyKey(const PendingQueueAck &pending, String &key) 
 }
 
 static bool sendQueueAck(const Config &cfg, const PendingQueueAck &pending, bool persistFirst) {
+  if (!pending.valid) return false;
+  if (persistFirst) persistPendingQueueAck(pending);
   String base;
-  if (!pending.valid || WiFi.status() != WL_CONNECTED || !normalizedBackendBase(cfg, base)) return false;
+  if (WiFi.status() != WL_CONNECTED || !normalizedBackendBase(cfg, base)) return false;
   String idempotencyKey;
   if (!queueAckIdempotencyKey(pending, idempotencyKey)) {
     lastDeviceErrorCode = "DEVICE-QUEUE-ACK-KEY";
     lastDeviceErrorMessage = "Queue ACK idempotency key 無法建立";
     return false;
   }
-  if (persistFirst) persistPendingQueueAck(pending);
-
   JsonDocument payload;
   payload["queue_item_id"] = pending.queueItemId;
   payload["queue_version"] = pending.queueVersion;
@@ -1018,6 +1410,11 @@ static bool sendQueueAck(const Config &cfg, const PendingQueueAck &pending, bool
   if (pending.displaySkipped) {
     payload["display_skipped"] = true;
     payload["skip_reason"] = "same_sha256";
+  }
+  if (pending.delayedTerminal) {
+    payload["ack_mode"] = "delayed_terminal";
+    payload["release_id"] = pending.releaseId;
+    if (pending.eventEpoch > 0) payload["event_epoch"] = pending.eventEpoch;
   }
   if (pending.errorCode.length() > 0U) payload["error_code"] = pending.errorCode;
   String body;
@@ -1033,11 +1430,11 @@ static bool sendQueueAck(const Config &cfg, const PendingQueueAck &pending, bool
     ackHttp.end();
     const inktime::AckDecision decision = inktime::ackDecision(status, attempt);
     if (decision == inktime::AckDecision::Accepted) {
-      clearPendingQueueAck();
+      removePendingQueueAck(pending);
       return true;
     }
     if (decision == inktime::AckDecision::StaleManifest) {
-      clearPendingQueueAck();
+      removePendingQueueAck(pending);
       lastDeviceErrorCode = "DEVICE-QUEUE-STALE";
       lastDeviceErrorMessage = "QUEUE-003 Queue version 已過期；下次重新取得 Manifest";
       return false;
@@ -1059,22 +1456,31 @@ static bool sendQueueEvent(
   const Config &cfg,
   inktime::QueueEvent event,
   bool displaySkipped = false,
-  const String &errorCode = String("")
+  const String &errorCode = String(""),
+  bool delayedTerminal = false
 ) {
+  const time_t eventNow = time(nullptr);
   PendingQueueAck pending = {
     currentQueueItemId,
     static_cast<int32_t>(currentQueueVersion),
     event,
     displaySkipped,
     errorCode.substring(0, 64),
+    delayedTerminal,
+    currentReleaseId,
+    delayedTerminal && eventNow > 0 ? static_cast<int64_t>(eventNow) : 0,
     currentQueueItemId.length() > 0U && currentQueueVersion >= 0,
   };
   return sendQueueAck(cfg, pending, true);
 }
 
 static bool resumePendingQueueAck(const Config &cfg) {
-  const PendingQueueAck pending = loadPendingQueueAck();
-  return !pending.valid || sendQueueAck(cfg, pending, false);
+  for (uint8_t attempt = 0; attempt < inktime::kMaxAckJournalEntries; ++attempt) {
+    const PendingQueueAck pending = loadPendingQueueAck();
+    if (!pending.valid) return true;
+    if (!sendQueueAck(cfg, pending, false)) return false;
+  }
+  return false;
 }
 
 // =======================
@@ -1146,7 +1552,7 @@ bool downloadLatestPhotoBin(Config &cfg) {
   manifestHttp.end();
   int schemaVersion = manifest["schema_version"] | 0;
   String pixelFormat = manifest["pixel_format"] | "";
-  if (jsonError || (schemaVersion != 1 && schemaVersion != 2)
+  if (jsonError || (schemaVersion != 1 && schemaVersion != 2 && schemaVersion != 3)
       || (pixelFormat != "2bpp" && pixelFormat != "indexed4")) {
 #if DEBUG_LOG
     DBG_PRINTLN("[HTTP] Manifest 格式或版本不相容");
@@ -1160,7 +1566,8 @@ bool downloadLatestPhotoBin(Config &cfg) {
   JsonObject remoteConfig = manifest["device_config"].as<JsonObject>();
   if (!remoteConfig.isNull()
       && (remoteConfig["schema_version"].as<int>() == 1
-          || remoteConfig["schema_version"].as<int>() == 2)) {
+          || remoteConfig["schema_version"].as<int>() == 2
+          || remoteConfig["schema_version"].as<int>() == 3)) {
     int offsetMinutes = remoteConfig["utc_offset_minutes"] | cfg.tz_offset_minutes;
     String schedule = remoteConfig["schedule"] | "";
     int separator = schedule.indexOf(':');
@@ -1171,10 +1578,20 @@ bool downloadLatestPhotoBin(Config &cfg) {
     String desiredPanelProfile = remoteConfig["panel_profile"] | "safe_4c";
     bool compatiblePanel = desiredPanelProfile == "safe_4c"
       || desiredPanelProfile == String(INKTIME_PANEL_PROFILE);
+#if INKTIME_PHOTOPAINTER_ENABLED
+    Config candidate = cfg;
+    bool validSchedule = applyRemoteSchedule(
+      remoteConfig,
+      remoteConfig["schema_version"] | 0,
+      candidate
+    );
+#else
+    const bool validSchedule = true;
+#endif
     bool validRemote = offsetMinutes >= -12 * 60 && offsetMinutes <= 14 * 60
       && remoteHour >= 0 && remoteHour <= 23 && remoteMinute >= 0 && remoteMinute <= 59
       && (rotation == 0 || rotation == 180) && compatiblePanel
-      && desiredConfigVersion >= cfg.config_version;
+      && desiredConfigVersion >= cfg.config_version && validSchedule;
     if (!validRemote) {
       lastDeviceErrorCode = "DEVICE-CONFIG-PROFILE";
       lastDeviceErrorMessage = "遠端設定版本或面板 Profile 與韌體不相容";
@@ -1183,12 +1600,27 @@ bool downloadLatestPhotoBin(Config &cfg) {
     if (
         cfg.tz_offset_minutes != offsetMinutes || cfg.refresh_hour != remoteHour
         || cfg.refresh_minute != remoteMinute || cfg.rotate180 != (rotation == 180)
-        || cfg.config_version != desiredConfigVersion) {
+        || cfg.config_version != desiredConfigVersion
+#if INKTIME_PHOTOPAINTER_ENABLED
+        || cfg.delivery_mode != candidate.delivery_mode
+        || cfg.schedule_count != candidate.schedule_count
+        || cfg.prefetch_lead_minutes != candidate.prefetch_lead_minutes
+        || cfg.button_wake_action != candidate.button_wake_action) {
+#else
+        ) {
+#endif
+#if INKTIME_PHOTOPAINTER_ENABLED
+      candidate.tz_offset_minutes = offsetMinutes;
+      candidate.rotate180 = rotation == 180;
+      candidate.config_version = desiredConfigVersion;
+      cfg = candidate;
+#else
       cfg.tz_offset_minutes = offsetMinutes;
-      cfg.refresh_hour = (uint8_t)remoteHour;
-      cfg.refresh_minute = (uint8_t)remoteMinute;
+      cfg.refresh_hour = static_cast<uint8_t>(remoteHour);
+      cfg.refresh_minute = static_cast<uint8_t>(remoteMinute);
       cfg.rotate180 = rotation == 180;
       cfg.config_version = desiredConfigVersion;
+#endif
       saveConfig(cfg);
       serverConfigChanged = true;
 #if DEBUG_LOG
@@ -1253,7 +1685,7 @@ bool downloadLatestPhotoBin(Config &cfg) {
       ? inktime::DisplayRotation::Rotate180
       : inktime::DisplayRotation::Rotate0;
     uint8_t* cachedFrame = nullptr;
-    if (photoPainter.loadCachedFrame(sourceHash, rotation, &cachedFrame)) {
+    if (photoPainter.loadCachedFrame(sourceHash, rotation, &cachedFrame, expectedSha.c_str())) {
       heap_caps_free(packed);
       if (frameData) heap_caps_free(frameData);
       frameData = cachedFrame;
@@ -1322,7 +1754,8 @@ bool downloadLatestPhotoBin(Config &cfg) {
           indexed4,
           sourceHash,
           rotation,
-          &nativeFrame)) {
+          &nativeFrame,
+          expectedSha.c_str())) {
       frameData = nullptr;
       lastDeviceErrorCode = photoPainter.lastError();
       lastDeviceErrorMessage = "PhotoPainter framebuffer 轉換失敗";
@@ -1353,7 +1786,548 @@ bool downloadLatestPhotoBin(Config &cfg) {
   return false;
 }
 
+#if INKTIME_PHOTOPAINTER_ENABLED
+static bool downloadOfflineScheduleSlot(
+  const Config &cfg,
+  inktime::DisplayRotation rotation,
+  const String &base,
+  const String &downloadUrl,
+  const String &expectedSha,
+  const String &pixelFormat,
+  int64_t expectedSize
+) {
+  if (!inktime::isSha256Hex(expectedSha.c_str())
+      || !inktime::isSafeQueueDownloadPath(downloadUrl.c_str(), downloadUrl.length())) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-ITEM";
+    lastDeviceErrorMessage = "離線排程 Slot 身分或下載路徑不合法";
+    return false;
+  }
+  const bool indexed4 = pixelFormat == "indexed4";
+  if (pixelFormat != "indexed4" && pixelFormat != "2bpp") {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-ITEM";
+    lastDeviceErrorMessage = "離線排程 Slot pixel_format 不相容";
+    return false;
+  }
+  const size_t packedSize = static_cast<size_t>(FB_WIDTH) * FB_HEIGHT
+    / (indexed4 ? 2U : 4U);
+  if (expectedSize != static_cast<int64_t>(packedSize)) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-SIZE";
+    lastDeviceErrorMessage = "離線排程 Slot size 與 pixel format 不一致";
+    return false;
+  }
+  uint8_t* packed = photoPainter.allocateWireBuffer(packedSize);
+  if (packed == nullptr) {
+    lastDeviceErrorCode = "DEVICE-MEMORY";
+    lastDeviceErrorMessage = "無法配置離線排程 Slot 緩衝區";
+    return false;
+  }
+  HTTPClient fileHttp;
+  configureHttpClient(fileHttp, 60000);
+  const char* fileHeaders[] = {"Content-Type"};
+  fileHttp.collectHeaders(fileHeaders, 1);
+  if (!fileHttp.begin(base + downloadUrl)) {
+    heap_caps_free(packed);
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-URL";
+    lastDeviceErrorMessage = "離線排程 Slot URL 無法初始化";
+    return false;
+  }
+  fileHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
+  const int fileStatus = fileHttp.GET();
+  const String fileContentType = fileHttp.header("Content-Type");
+  if (fileStatus != HTTP_CODE_OK || fileHttp.getSize() != static_cast<int>(packedSize)
+      || !fileContentType.startsWith("application/octet-stream")) {
+    fileHttp.end();
+    heap_caps_free(packed);
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-DOWNLOAD";
+    lastDeviceErrorMessage = "離線排程 Slot HTTP／Content-Type／長度不合法";
+    return false;
+  }
+  WiFiClient* stream = fileHttp.getStreamPtr();
+  size_t total = 0U;
+  const uint32_t started = millis();
+  while (total < packedSize && millis() - started < 60000U) {
+    const size_t available = stream->available();
+    if (available == 0U) {
+      if (!fileHttp.connected()) break;
+      delay(1);
+      continue;
+    }
+    const size_t count = min(available, packedSize - total);
+    const int received = stream->read(packed + total, count);
+    if (received > 0) total += static_cast<size_t>(received);
+  }
+  fileHttp.end();
+  if (total != packedSize) {
+    heap_caps_free(packed);
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-DOWNLOAD";
+    lastDeviceErrorMessage = "離線排程 Slot Payload 未完整下載";
+    return false;
+  }
+  unsigned char digest[32];
+  if (calculateSha256(packed, packedSize, digest) != 0) {
+    heap_caps_free(packed);
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-HASH";
+    lastDeviceErrorMessage = "離線排程 Slot SHA-256 計算失敗";
+    return false;
+  }
+  char actualSha[65];
+  for (size_t index = 0; index < 32U; ++index) {
+    snprintf(actualSha + index * 2U, 3U, "%02x", digest[index]);
+  }
+  actualSha[64] = '\0';
+  if (!expectedSha.equalsIgnoreCase(String(actualSha))) {
+    heap_caps_free(packed);
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-HASH";
+    lastDeviceErrorMessage = "離線排程 Slot SHA-256 不一致";
+    return false;
+  }
+  uint8_t* nativeFrame = nullptr;
+  const uint32_t sourceHash = inktime::sourceHash32(expectedSha.c_str());
+  const bool converted = photoPainter.convertAndCache(
+    packed,
+    packedSize,
+    indexed4,
+    sourceHash,
+    rotation,
+    &nativeFrame,
+    expectedSha.c_str());
+  heap_caps_free(packed);
+  if (!converted || nativeFrame == nullptr) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-FRAME";
+    lastDeviceErrorMessage = "離線排程正式 Frame 轉換失敗";
+    return false;
+  }
+  const bool written = photoPainter.writeFormalFrame(
+    expectedSha.c_str(), rotation, nativeFrame, inktime::kPhotoPainterFrameBytes);
+  heap_caps_free(nativeFrame);
+  if (!written) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-FRAME";
+    lastDeviceErrorMessage = "離線排程正式 Frame 無法原子寫入 SD";
+    return false;
+  }
+  return true;
+}
+
+static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = false) {
+  String base;
+  if (cfg.backend_hostport.length() == 0 || cfg.device_token.length() == 0
+      || !normalizedBackendBase(cfg, base)) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-CONFIG";
+    lastDeviceErrorMessage = "離線排程缺少 Backend 或裝置 Token";
+    return false;
+  }
+  HTTPClient scheduleHttp;
+  configureHttpClient(scheduleHttp, 30000);
+  const char* scheduleHeaders[] = {"Content-Type"};
+  scheduleHttp.collectHeaders(scheduleHeaders, 1);
+  String schedulePath = DEVICE_OFFLINE_SCHEDULE_PATH;
+  if (targetNext) schedulePath += "?target=next";
+  if (!scheduleHttp.begin(base + schedulePath)) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-URL";
+    lastDeviceErrorMessage = "離線排程 URL 無法初始化";
+    return false;
+  }
+  scheduleHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
+  const int status = scheduleHttp.GET();
+  const int length = scheduleHttp.getSize();
+  const String contentType = scheduleHttp.header("Content-Type");
+  if (status == HTTP_CODE_NOT_FOUND && length > 0 && length <= 4096
+      && contentType.startsWith("application/json")) {
+    JsonDocument notReady;
+    const DeserializationError notReadyError = deserializeJson(notReady, scheduleHttp.getStream());
+    scheduleHttp.end();
+    const String errorName = notReady["error"] | "";
+    const String notReadyTarget = notReady["target"] | "";
+    const JsonVariantConst rawRetryEpoch = notReady["retry_after_epoch"];
+    const JsonVariantConst rawNextSlotEpoch = notReady["next_slot_epoch"];
+    int64_t serverRetryEpoch = 0;
+    int64_t nextSlotEpoch = 0;
+    bool nextSlotFieldValid = rawNextSlotEpoch.isNull();
+    if (!notReadyError && !notReady.overflowed()
+        && errorName == "schedule_not_ready"
+        && ((targetNext && notReadyTarget == "next")
+            || (!targetNext && (notReadyTarget.length() == 0U || notReadyTarget == "current")))
+        && rawRetryEpoch.is<int64_t>() && !rawRetryEpoch.is<bool>()) {
+      serverRetryEpoch = rawRetryEpoch.as<int64_t>();
+    }
+    if (!notReadyError && !notReady.overflowed()
+        && errorName == "schedule_not_ready"
+        && rawNextSlotEpoch.is<int64_t>() && !rawNextSlotEpoch.is<bool>()
+        && rawNextSlotEpoch.as<int64_t>() > 0) {
+      nextSlotEpoch = rawNextSlotEpoch.as<int64_t>();
+      nextSlotFieldValid = true;
+    }
+    if (!nextSlotFieldValid) {
+      serverRetryEpoch = 0;
+      nextSlotEpoch = 0;
+    }
+    time_t recoveryNow = time(nullptr);
+    if (recoveryNow <= 0) (void)photoPainter.readRtc(recoveryNow);
+    if (errorName == "schedule_not_ready"
+        && ((targetNext && notReadyTarget == "next")
+            || (!targetNext && (notReadyTarget.length() == 0U || notReadyTarget == "current")))) {
+      const time_t retryEpoch = scheduleOfflineRecovery(
+        recoveryNow, serverRetryEpoch, nextSlotEpoch);
+      lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-NOT-READY";
+      lastDeviceErrorMessage = retryEpoch > recoveryNow
+        ? "伺服器尚未準備今日離線排程；已保存 bounded retry epoch"
+        : "伺服器尚未準備今日離線排程；時間無效，使用 bounded fallback";
+      return false;
+    }
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-HTTP";
+    lastDeviceErrorMessage = "離線排程 schedule_not_ready JSON 不合法";
+    return false;
+  }
+  if (status != HTTP_CODE_OK || length <= 0 || length > 32768
+      || !contentType.startsWith("application/json")) {
+    scheduleHttp.end();
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-HTTP";
+    lastDeviceErrorMessage = "離線排程 HTTP／Content-Type／長度不合法";
+    return false;
+  }
+  JsonDocument schedule;
+  const DeserializationError jsonError = deserializeJson(schedule, scheduleHttp.getStream());
+  scheduleHttp.end();
+  const JsonVariantConst schema = schedule["schema_version"];
+  const JsonVariantConst rawSlots = schedule["slots"];
+  const String responseTarget = schedule["target"] | "current";
+  const String deliveryMode = schedule["delivery_mode"] | "";
+  const String targetLocalDate = schedule["target_local_date"] | "";
+  const String targetDate = schedule["target_date"] | "";
+  const String timezoneName = schedule["timezone"] | "";
+  const String scheduleId = schedule["schedule_id"] | "";
+  const String panelProfile = schedule["panel_profile"] | "";
+  const String buttonWakeAction = schedule["button_wake_action"] | "";
+  const JsonVariantConst rawConfigVersion = schedule["config_version"];
+  const JsonVariantConst rawRotation = schedule["rotation"];
+  const JsonVariantConst rawScheduleVersion = schedule["offline_schedule_version"];
+  const JsonVariantConst rawTargetStartEpoch = schedule["target_start_epoch"];
+  const JsonVariantConst rawTargetEndEpoch = schedule["target_end_epoch"];
+  if (jsonError || schedule.overflowed() || responseTarget != (targetNext ? "next" : "current")
+      || !schema.is<int32_t>() || schema.is<bool>()
+      || schema.as<int32_t>() != 1 || deliveryMode != "inktime_offline_schedule"
+      || !rawSlots.is<JsonArrayConst>() || targetLocalDate.length() == 0U
+      || (targetDate.length() > 0U && targetDate != targetLocalDate)
+      || timezoneName.length() == 0U || timezoneName.length() > 64U
+      || scheduleId.length() == 0U
+      || !inktime::boundedText(scheduleId.c_str(), inktime::kQueueIdentifierMaxBytes)
+      || panelProfile.length() == 0U || !buttonWakeAction.length()
+      || !rawConfigVersion.is<uint32_t>() || rawConfigVersion.is<bool>()
+      || !rawRotation.is<int32_t>() || rawRotation.is<bool>()
+      || !rawScheduleVersion.is<int32_t>() || rawScheduleVersion.is<bool>()
+      || rawScheduleVersion.as<int32_t>() < 0
+      || !rawTargetStartEpoch.is<int64_t>() || rawTargetStartEpoch.is<bool>()
+      || !rawTargetEndEpoch.is<int64_t>() || rawTargetEndEpoch.is<bool>()
+      || rawTargetStartEpoch.as<int64_t>() <= 0
+      || rawTargetEndEpoch.as<int64_t>() <= rawTargetStartEpoch.as<int64_t>()) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-SCHEMA";
+    lastDeviceErrorMessage = "離線排程 schema、日期或快照欄位不相容";
+    return false;
+  }
+  const JsonArrayConst slots = rawSlots.as<JsonArrayConst>();
+  if (slots.size() == 0U || slots.size() > inktime::kMaxOfflineSlots) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-COUNT";
+    lastDeviceErrorMessage = "離線排程 Slot 數量超過裝置上限";
+    return false;
+  }
+  Config scheduleCandidate = cfg;
+  JsonArrayConst rawTimes = schedule["schedule_times"].as<JsonArrayConst>();
+  if (rawTimes.isNull()) rawTimes = schedule["schedule"].as<JsonArrayConst>();
+  if (rawTimes.isNull() || rawTimes.size() == 0U
+      || rawTimes.size() > inktime::kMaxOfflineSlots || rawTimes.size() != slots.size()) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-SCHEMA";
+    lastDeviceErrorMessage = "離線排程 schedule_times 不合法";
+    return false;
+  }
+  inktime::OfflineSlot scheduleSlots[inktime::kMaxOfflineSlots] = {};
+  for (size_t index = 0; index < rawTimes.size(); ++index) {
+    if (!parseOfflineClock(rawTimes[index] | "", scheduleSlots[index])) {
+      lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-SCHEMA";
+      lastDeviceErrorMessage = "離線排程時刻格式不合法";
+      return false;
+    }
+  }
+  if (!inktime::validateOfflineSlots(scheduleSlots, static_cast<uint8_t>(rawTimes.size()))) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-SCHEMA";
+    lastDeviceErrorMessage = "離線排程時刻未排序或重複";
+    return false;
+  }
+  time_t rtcEpoch = 0;
+  if (!photoPainter.readRtc(rtcEpoch)) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-RTC";
+    lastDeviceErrorMessage = "離線排程無法由 PhotoPainter RTC 驗證本地日期";
+    return false;
+  }
+  const int64_t targetStartEpoch = rawTargetStartEpoch.as<int64_t>();
+  const int64_t targetEndEpoch = rawTargetEndEpoch.as<int64_t>();
+  int64_t activeTargetEndEpoch = 0;
+  bool targetDateIsNext = false;
+  String activeTargetDate;
+  if (targetNext) {
+    String activeJson;
+    JsonDocument active;
+    const bool activeReadable = photoPainter.readActiveSchedule(activeJson)
+      && !deserializeJson(active, activeJson)
+      && !active.overflowed();
+    const JsonVariantConst activeEnd = active["target_end_epoch"];
+    activeTargetDate = active["target_local_date"] | "";
+    if (activeTargetDate.length() == 0U) activeTargetDate = active["target_date"] | "";
+    String expectedNextDate;
+    if (activeReadable && activeEnd.is<int64_t>() && !activeEnd.is<bool>()
+        && activeEnd.as<int64_t>() > 0
+        && nextIsoLocalDate(activeTargetDate, expectedNextDate)
+        && targetLocalDate == expectedNextDate
+        && targetStartEpoch == activeEnd.as<int64_t>()) {
+      activeTargetEndEpoch = activeEnd.as<int64_t>();
+      targetDateIsNext = true;
+    }
+    if (!targetDateIsNext || static_cast<int64_t>(rtcEpoch) >= targetStartEpoch) {
+      lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-FUTURE";
+      lastDeviceErrorMessage = "離線排程 next 快照不是目前 active 的下一個本地日";
+      return false;
+    }
+  } else if (static_cast<int64_t>(rtcEpoch) < targetStartEpoch
+             || static_cast<int64_t>(rtcEpoch) >= targetEndEpoch) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-RTC";
+    lastDeviceErrorMessage = "離線排程 RTC 不在伺服器授權的目標本地日範圍";
+    return false;
+  }
+  const uint32_t remoteConfigVersion = rawConfigVersion.as<uint32_t>();
+  const int32_t remoteRotation = rawRotation.as<int32_t>();
+  inktime::OfflineScheduleContract contract = {
+    1,
+    deliveryMode.c_str(),
+    targetLocalDate.c_str(),
+    targetLocalDate.c_str(),
+    timezoneName.c_str(),
+    targetStartEpoch,
+    targetEndEpoch,
+    static_cast<int64_t>(rtcEpoch),
+    remoteConfigVersion,
+    cfg.config_version,
+    remoteRotation,
+    panelProfile.c_str(),
+    INKTIME_PANEL_PROFILE,
+    buttonWakeAction.c_str(),
+    static_cast<uint8_t>(slots.size()),
+    static_cast<uint8_t>(rawTimes.size()),
+    true,
+    true,
+    true,
+  };
+  inktime::OfflineNextScheduleContract nextContract = {
+    1,
+    deliveryMode.c_str(),
+    targetLocalDate.c_str(),
+    timezoneName.c_str(),
+    targetStartEpoch,
+    targetEndEpoch,
+    activeTargetEndEpoch,
+    static_cast<int64_t>(rtcEpoch),
+    remoteConfigVersion,
+    cfg.config_version,
+    remoteRotation,
+    panelProfile.c_str(),
+    INKTIME_PANEL_PROFILE,
+    buttonWakeAction.c_str(),
+    static_cast<uint8_t>(slots.size()),
+    static_cast<uint8_t>(rawTimes.size()),
+    targetDateIsNext,
+    true,
+    true,
+    true,
+  };
+  int64_t previousShowAtEpoch = 0;
+  for (size_t index = 0; index < slots.size(); ++index) {
+    const JsonVariantConst rawSlot = slots[index];
+    if (!rawSlot.is<JsonObjectConst>()) {
+      contract.queueIdentityValid = false;
+      contract.sha256Valid = false;
+      break;
+    }
+    const JsonObjectConst slot = rawSlot.as<JsonObjectConst>();
+    const JsonVariantConst rawSize = slot["size"];
+    const JsonVariantConst rawWidth = slot["width"];
+    const JsonVariantConst rawHeight = slot["height"];
+    const JsonVariantConst rawSlotIndex = slot["slot_index"];
+    const JsonVariantConst rawQueueVersion = slot["queue_version"];
+    const JsonVariantConst rawShowAtEpoch = slot["show_at_epoch"];
+    const String itemId = slot["queue_item_id"] | "";
+    const String releaseId = slot["release_id"] | "";
+    const String slotScheduleId = slot["offline_schedule_id"] | "";
+    const String sha = slot["sha256"] | "";
+    const String downloadUrl = slot["download_url"] | "";
+    const String pixelFormat = slot["pixel_format"] | "";
+    const String renderProfile = slot["render_profile"] | "";
+    const bool indexed4 = pixelFormat == "indexed4";
+    const int64_t expectedSize = static_cast<int64_t>(FB_WIDTH) * FB_HEIGHT
+      / (indexed4 ? 2 : 4);
+    const bool validIdentity = rawSlot.is<JsonObjectConst>()
+      && rawSlotIndex.is<int32_t>() && !rawSlotIndex.is<bool>()
+      && rawSlotIndex.as<int32_t>() == static_cast<int32_t>(index)
+      && rawQueueVersion.is<int32_t>() && !rawQueueVersion.is<bool>()
+      && rawQueueVersion.as<int32_t>() >= 0
+      && inktime::boundedText(itemId.c_str(), inktime::kQueueIdentifierMaxBytes)
+      && inktime::boundedText(releaseId.c_str(), inktime::kQueueIdentifierMaxBytes)
+      && inktime::boundedText(slotScheduleId.c_str(), inktime::kQueueIdentifierMaxBytes)
+      && slotScheduleId == scheduleId
+      && inktime::isSafeQueueDownloadPathForItem(
+           downloadUrl.c_str(), downloadUrl.length(), itemId.c_str())
+      && (renderProfile == "safe_4c" || renderProfile == String(INKTIME_PANEL_PROFILE));
+    const bool validPayload = rawSize.is<int64_t>() && !rawSize.is<bool>()
+      && rawSize.as<int64_t>() == expectedSize
+      && rawWidth.is<int32_t>() && !rawWidth.is<bool>()
+      && rawHeight.is<int32_t>() && !rawHeight.is<bool>()
+      && rawWidth.as<int32_t>() == FB_WIDTH && rawHeight.as<int32_t>() == FB_HEIGHT
+      && (pixelFormat == "indexed4" || pixelFormat == "2bpp")
+      && inktime::isSha256Hex(sha.c_str());
+    const bool validShowAtEpoch = rawShowAtEpoch.is<int64_t>() && !rawShowAtEpoch.is<bool>()
+      && rawShowAtEpoch.as<int64_t>() >= targetStartEpoch
+      && rawShowAtEpoch.as<int64_t>() < targetEndEpoch
+      && (index == 0U || rawShowAtEpoch.as<int64_t>() > previousShowAtEpoch);
+    contract.queueIdentityValid = contract.queueIdentityValid && validIdentity;
+    contract.sha256Valid = contract.sha256Valid && validPayload;
+    contract.slotEpochsValid = contract.slotEpochsValid && validShowAtEpoch;
+    nextContract.queueIdentityValid = nextContract.queueIdentityValid && validIdentity;
+    nextContract.sha256Valid = nextContract.sha256Valid && validPayload;
+    nextContract.slotEpochsValid = nextContract.slotEpochsValid && validShowAtEpoch;
+    if (validShowAtEpoch) previousShowAtEpoch = rawShowAtEpoch.as<int64_t>();
+  }
+  const bool validContract = targetNext
+    ? inktime::validOfflineNextScheduleContract(nextContract)
+    : inktime::validOfflineScheduleContract(contract);
+  if (!validContract) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-SCHEMA";
+    lastDeviceErrorMessage = "離線排程快照過期、日期錯誤或 Slot 完整性不合法";
+    return false;
+  }
+  scheduleCandidate.schedule_count = static_cast<uint8_t>(rawTimes.size());
+  for (uint8_t index = 0; index < scheduleCandidate.schedule_count; ++index) {
+    scheduleCandidate.schedule_slots[index] = scheduleSlots[index];
+  }
+  scheduleCandidate.refresh_hour = scheduleSlots[0].hour;
+  scheduleCandidate.refresh_minute = scheduleSlots[0].minute;
+  scheduleCandidate.rotate180 = remoteRotation == 180;
+  scheduleCandidate.delivery_mode = deliveryMode;
+  scheduleCandidate.button_wake_action = buttonWakeAction;
+  scheduleCandidate.config_version = remoteConfigVersion;
+  const JsonVariantConst rawLead = schedule["prefetch_lead_minutes"];
+  if (!rawLead.is<int32_t>() || rawLead.is<bool>()) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-SCHEMA";
+    lastDeviceErrorMessage = "離線排程 prefetch_lead_minutes 缺少或型別不合法";
+    return false;
+  }
+  const int remoteLead = rawLead.as<int32_t>();
+  if (remoteLead < 0 || remoteLead > 120) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-SCHEMA";
+    lastDeviceErrorMessage = "離線排程 prefetch_lead_minutes 不合法";
+    return false;
+  }
+  scheduleCandidate.prefetch_lead_minutes = static_cast<uint16_t>(remoteLead);
+  for (size_t index = 0; index < slots.size(); ++index) {
+    const JsonVariantConst rawSlot = slots[index];
+    if (!rawSlot.is<JsonObjectConst>()) {
+      lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-ITEM";
+      lastDeviceErrorMessage = "離線排程 Slot 必須是 JSON object";
+      return false;
+    }
+    const JsonObjectConst slot = rawSlot.as<JsonObjectConst>();
+    const JsonVariantConst rawSize = slot["size"];
+    const JsonVariantConst rawWidth = slot["width"];
+    const JsonVariantConst rawHeight = slot["height"];
+    const JsonVariantConst rawSlotIndex = slot["slot_index"];
+    const JsonVariantConst rawQueueVersion = slot["queue_version"];
+    const JsonVariantConst rawShowAtEpoch = slot["show_at_epoch"];
+    const String itemId = slot["queue_item_id"] | "";
+    const String releaseId = slot["release_id"] | "";
+    const String sha = slot["sha256"] | "";
+    const String downloadUrl = slot["download_url"] | "";
+    const String pixelFormat = slot["pixel_format"] | "";
+    const String renderProfile = slot["render_profile"] | "";
+    if (!rawSize.is<int64_t>() || rawSize.is<bool>()
+        || !rawWidth.is<int32_t>() || rawWidth.is<bool>()
+        || !rawHeight.is<int32_t>() || rawHeight.is<bool>()
+        || !rawSlotIndex.is<int32_t>() || rawSlotIndex.is<bool>()
+        || rawSlotIndex.as<int32_t>() != static_cast<int32_t>(index)
+        || !rawQueueVersion.is<int32_t>() || rawQueueVersion.is<bool>()
+        || rawQueueVersion.as<int32_t>() < 0
+        || !rawShowAtEpoch.is<int64_t>() || rawShowAtEpoch.is<bool>()
+        || rawShowAtEpoch.as<int64_t>() < targetStartEpoch
+        || rawShowAtEpoch.as<int64_t>() >= targetEndEpoch
+        || rawWidth.as<int32_t>() != FB_WIDTH || rawHeight.as<int32_t>() != FB_HEIGHT
+        || !inktime::isSha256Hex(sha.c_str())
+        || !inktime::boundedText(itemId.c_str(), inktime::kQueueIdentifierMaxBytes)
+        || !inktime::boundedText(releaseId.c_str(), inktime::kQueueIdentifierMaxBytes)
+        || !inktime::isSafeQueueDownloadPathForItem(
+             downloadUrl.c_str(), downloadUrl.length(), itemId.c_str())
+        || (renderProfile != "safe_4c" && renderProfile != String(INKTIME_PANEL_PROFILE))) {
+      lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-ITEM";
+      lastDeviceErrorMessage = "離線排程 Slot 身分、尺寸、SHA 或 Profile 不合法";
+      return false;
+    }
+    currentFromQueue = true;
+    currentQueueItemId = itemId;
+    currentQueueVersion = rawQueueVersion.as<int32_t>();
+    currentReleaseId = releaseId;
+    currentRenderProfile = renderProfile;
+    currentPayloadSha256 = sha;
+    currentPayloadShaVerified = false;
+    currentPayloadIntegrityTrusted = false;
+    if (!sendQueueEvent(cfg, inktime::QueueEvent::ManifestReceived)
+        || !sendQueueEvent(cfg, inktime::QueueEvent::DownloadStarted)
+        || !downloadOfflineScheduleSlot(
+             cfg,
+             remoteRotation == 180
+               ? inktime::DisplayRotation::Rotate180
+               : inktime::DisplayRotation::Rotate0,
+             base,
+             downloadUrl,
+             sha,
+             pixelFormat,
+             rawSize.as<int64_t>())
+        || !sendQueueEvent(cfg, inktime::QueueEvent::DownloadCompleted)) {
+      return false;
+    }
+    currentPayloadShaVerified = true;
+    if (!sendQueueEvent(cfg, inktime::QueueEvent::HashVerified)) return false;
+  }
+  String scheduleJson;
+  serializeJson(schedule, scheduleJson);
+  const bool stored = targetNext
+    ? photoPainter.writeStagedNextSchedule(scheduleJson.c_str(), scheduleJson.length())
+    : photoPainter.writeActiveSchedule(scheduleJson.c_str(), scheduleJson.length());
+  if (!stored) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-STAGE";
+    lastDeviceErrorMessage = targetNext
+      ? "離線排程 staged next 無法原子寫入"
+      : "離線排程 active schedule 無法原子切換";
+    return false;
+  }
+  if (targetNext) {
+    // The future snapshot remains a staged artifact.  Its rotation, schedule,
+    // lead and config version are not applied until the target local midnight.
+    currentFromQueue = false;
+    currentPayloadIntegrityTrusted = true;
+    return true;
+  }
+  cfg = scheduleCandidate;
+  saveConfig(cfg);
+  serverConfigChanged = true;
+  clearOfflineRetryState();
+  currentFromQueue = false;
+  currentPayloadIntegrityTrusted = true;
+  return true;
+}
+#endif
+
 static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
+#if INKTIME_PHOTOPAINTER_ENABLED
+  if (cfg.delivery_mode == "inktime_offline_schedule") {
+    // Enhanced offline schedules are consumed only from the signed schedule
+    // endpoint; the generic queue can never select an arbitrary first item.
+    return QueueDownloadResult::EmptyOrUnsupported;
+  }
+#endif
   String base;
   if (!normalizedBackendBase(cfg, base)) return QueueDownloadResult::Failed;
 
@@ -1411,6 +2385,10 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
   String selectedPixelFormat;
   String selectedRenderProfile;
   int64_t selectedSize = 0;
+#if INKTIME_PHOTOPAINTER_ENABLED
+  bool selected = false;
+  const bool enhancedOffline = cfg.delivery_mode == "inktime_offline_schedule";
+#endif
   for (size_t index = 0; index < items.size(); ++index) {
     const JsonVariantConst rawItem = items[index];
     if (!rawItem.is<JsonObjectConst>()) {
@@ -1434,6 +2412,17 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
     String downloadUrl = item["download_url"] | "";
     String pixelFormat = item["pixel_format"] | "";
     String renderProfile = item["render_profile"] | "";
+#if INKTIME_PHOTOPAINTER_ENABLED
+    const JsonVariantConst rawOfflinePrefetch = item["offline_prefetch_allowed"];
+    if (!rawOfflinePrefetch.isNull()
+        && (!rawOfflinePrefetch.is<bool>() || rawOfflinePrefetch.is<int>())) {
+      lastDeviceErrorCode = "DEVICE-QUEUE-ITEM";
+      lastDeviceErrorMessage = "offline_prefetch_allowed 必須是真正 JSON boolean";
+      return QueueDownloadResult::Failed;
+    }
+    const bool offlinePrefetchAllowed = rawOfflinePrefetch | false;
+    const String deliveryMode = item["delivery_mode"] | "online_queue";
+#endif
     const int64_t size = rawSize.as<int64_t>();
     const inktime::QueueItemContract contract = {
       itemId.c_str(), releaseId.c_str(), sha.c_str(), downloadUrl.c_str(), true, size,
@@ -1448,7 +2437,14 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
       lastDeviceErrorMessage = "Queue Item 身分、SHA、路徑、尺寸或 Profile 不合法";
       return QueueDownloadResult::Failed;
     }
+#if INKTIME_PHOTOPAINTER_ENABLED
+    if (enhancedOffline && (deliveryMode != "offline_schedule" || !offlinePrefetchAllowed)) {
+      continue;
+    }
+    if (!selected) {
+#else
     if (index == 0U) {
+#endif
       selectedItemId = itemId;
       selectedReleaseId = releaseId;
       selectedSha = sha;
@@ -1456,8 +2452,15 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
       selectedPixelFormat = pixelFormat;
       selectedRenderProfile = renderProfile;
       selectedSize = size;
+#if INKTIME_PHOTOPAINTER_ENABLED
+      selected = true;
+#endif
     }
   }
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+  if (!selected) return QueueDownloadResult::EmptyOrUnsupported;
+#endif
 
   currentFromQueue = true;
   currentQueueItemId = selectedItemId;
@@ -1575,9 +2578,9 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
     ? inktime::DisplayRotation::Rotate180
     : inktime::DisplayRotation::Rotate0;
   uint8_t* nativeFrame = nullptr;
-  if (!photoPainter.loadCachedFrame(sourceHash, rotation, &nativeFrame)
+  if (!photoPainter.loadCachedFrame(sourceHash, rotation, &nativeFrame, selectedSha.c_str())
       && !photoPainter.convertAndCache(
-        packed, packedSize, indexed4, sourceHash, rotation, &nativeFrame)) {
+        packed, packedSize, indexed4, sourceHash, rotation, &nativeFrame, selectedSha.c_str())) {
     heap_caps_free(packed);
     frameData = nullptr;
     lastDeviceErrorCode = photoPainter.lastError();
@@ -1589,6 +2592,15 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
   frameDataSize = inktime::kPhotoPainterFrameBytes;
   frameIndexed4 = true;
   frameNativePalette = true;
+  if (enhancedOffline && !photoPainter.writeFormalFrame(
+        selectedSha.c_str(), rotation, nativeFrame, inktime::kPhotoPainterFrameBytes)) {
+    heap_caps_free(nativeFrame);
+    frameData = nullptr;
+    frameDataSize = 0;
+    lastDeviceErrorCode = "DEVICE-OFFLINE-FRAME";
+    lastDeviceErrorMessage = "Enhanced Formal Frame 無法原子寫入 SD";
+    return QueueDownloadResult::Failed;
+  }
 #else
   frameData = packed;
   frameDataSize = packedSize;
@@ -1600,8 +2612,312 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
   return QueueDownloadResult::Used;
 }
 
+#if INKTIME_PHOTOPAINTER_ENABLED
+static bool activeOfflineEpochs(
+  time_t nowEpoch,
+  time_t &nextDisplayEpoch,
+  time_t &targetEndEpoch,
+  time_t &nextSchedulePrefetchEpoch
+) {
+  nextDisplayEpoch = 0;
+  targetEndEpoch = 0;
+  nextSchedulePrefetchEpoch = 0;
+  String activeJson;
+  if (!photoPainter.readActiveSchedule(activeJson)) return false;
+  JsonDocument active;
+  if (deserializeJson(active, activeJson) || active.overflowed()) return false;
+  const JsonVariantConst rawEnd = active["target_end_epoch"];
+  const JsonVariantConst rawPrefetch = active["next_schedule_prefetch_epoch"];
+  const JsonVariantConst rawSlots = active["slots"];
+  if (!rawEnd.is<int64_t>() || rawEnd.is<bool>() || rawEnd.as<int64_t>() <= 0
+      || !rawSlots.is<JsonArrayConst>()) return false;
+  if (!rawPrefetch.isNull()
+      && (!rawPrefetch.is<int64_t>() || rawPrefetch.is<bool>() || rawPrefetch.as<int64_t>() < 0)) {
+    return false;
+  }
+  targetEndEpoch = static_cast<time_t>(rawEnd.as<int64_t>());
+  if (!rawPrefetch.isNull()) {
+    nextSchedulePrefetchEpoch = static_cast<time_t>(rawPrefetch.as<int64_t>());
+  }
+  const JsonArrayConst slots = rawSlots.as<JsonArrayConst>();
+  for (size_t index = 0; index < slots.size(); ++index) {
+    const JsonVariantConst rawSlot = slots[index];
+    if (!rawSlot.is<JsonObjectConst>()) return false;
+    const JsonVariantConst rawShowAt = rawSlot["show_at_epoch"];
+    if (!rawShowAt.is<int64_t>() || rawShowAt.is<bool>() || rawShowAt.as<int64_t>() <= 0) {
+      return false;
+    }
+    const time_t showAt = static_cast<time_t>(rawShowAt.as<int64_t>());
+    if (showAt > nowEpoch && (nextDisplayEpoch == 0 || showAt < nextDisplayEpoch)) {
+      nextDisplayEpoch = showAt;
+    }
+  }
+  return true;
+}
+
+static bool activeHasDueFormalSlot(time_t nowEpoch) {
+  if (nowEpoch <= 0) return false;
+  String activeJson;
+  if (!photoPainter.readActiveSchedule(activeJson)) return false;
+  JsonDocument active;
+  if (deserializeJson(active, activeJson) || active.overflowed()) return false;
+  const JsonArrayConst slots = active["slots"].as<JsonArrayConst>();
+  if (slots.isNull() || slots.size() == 0U || slots.size() > inktime::kMaxOfflineSlots) return false;
+  int64_t showAtEpochs[inktime::kMaxOfflineSlots] = {};
+  for (size_t index = 0; index < slots.size(); ++index) {
+    const JsonVariantConst rawSlot = slots[index];
+    if (!rawSlot.is<JsonObjectConst>()) {
+      return false;
+    }
+    const JsonVariantConst rawShowAt = rawSlot["show_at_epoch"];
+    if (!rawShowAt.is<int64_t>() || rawShowAt.is<bool>()) return false;
+    showAtEpochs[index] = rawShowAt.as<int64_t>();
+  }
+  return inktime::scheduleHasDueFormalSlot(
+    showAtEpochs, static_cast<uint8_t>(slots.size()), static_cast<uint64_t>(nowEpoch));
+}
+
+static bool offlinePrefetchWake(const Config &cfg, time_t nowEpoch) {
+  if (cfg.delivery_mode != "inktime_offline_schedule" || nowEpoch <= 0) {
+    return false;
+  }
+  time_t nextDisplay = 0;
+  time_t targetEnd = 0;
+  time_t nextSchedulePrefetch = 0;
+  if (!activeOfflineEpochs(nowEpoch, nextDisplay, targetEnd, nextSchedulePrefetch)) return true;
+  if (targetEnd > 0 && nowEpoch >= targetEnd) return true;
+  if (nextSchedulePrefetch > 0 && nowEpoch >= nextSchedulePrefetch
+      && (targetEnd <= 0 || nowEpoch < targetEnd)) return true;
+  if (cfg.prefetch_lead_minutes == 0) return false;
+  if (nextDisplay <= nowEpoch) return false;
+  const time_t lead = static_cast<time_t>(cfg.prefetch_lead_minutes) * 60;
+  return nowEpoch >= nextDisplay - lead && nowEpoch < nextDisplay;
+}
+
+static bool offlineNextSchedulePrefetchDue(const Config &cfg, time_t nowEpoch) {
+  if (cfg.delivery_mode != "inktime_offline_schedule" || nowEpoch <= 0) return false;
+  time_t nextDisplay = 0;
+  time_t targetEnd = 0;
+  time_t nextSchedulePrefetch = 0;
+  if (!activeOfflineEpochs(nowEpoch, nextDisplay, targetEnd, nextSchedulePrefetch)) return false;
+  return nextSchedulePrefetch > 0 && nowEpoch >= nextSchedulePrefetch
+      && targetEnd > nowEpoch;
+}
+
+static bool promoteStagedNextIfDue(Config &cfg, time_t nowEpoch) {
+  if (nowEpoch <= 0) return false;
+  String stagedJson;
+  if (!photoPainter.readStagedNextSchedule(stagedJson)) return false;
+  JsonDocument staged;
+  if (deserializeJson(staged, stagedJson) || staged.overflowed()) return false;
+  const String responseTarget = staged["target"] | "";
+  const String deliveryMode = staged["delivery_mode"] | "";
+  String targetDate = staged["target_local_date"] | "";
+  if (targetDate.length() == 0U) targetDate = staged["target_date"] | "";
+  const String legacyTargetDate = staged["target_date"] | "";
+  const String scheduleId = staged["schedule_id"] | "";
+  const String timezoneName = staged["timezone"] | "";
+  const String panelProfile = staged["panel_profile"] | "";
+  const String buttonWakeAction = staged["button_wake_action"] | "";
+  const JsonVariantConst rawSchema = staged["schema_version"];
+  const JsonVariantConst rawConfig = staged["config_version"];
+  const JsonVariantConst rawRotation = staged["rotation"];
+  const JsonVariantConst rawScheduleVersion = staged["offline_schedule_version"];
+  const JsonVariantConst rawLead = staged["prefetch_lead_minutes"];
+  const JsonVariantConst rawStart = staged["target_start_epoch"];
+  const JsonVariantConst rawEnd = staged["target_end_epoch"];
+  const JsonArrayConst rawSlots = staged["slots"].as<JsonArrayConst>();
+  JsonArrayConst rawTimes = staged["schedule_times"].as<JsonArrayConst>();
+  if (rawTimes.isNull()) rawTimes = staged["schedule"].as<JsonArrayConst>();
+
+  String activeJson;
+  JsonDocument active;
+  if (!photoPainter.readActiveSchedule(activeJson)
+      || deserializeJson(active, activeJson) || active.overflowed()) {
+    return false;
+  }
+  String activeDate = active["target_local_date"] | "";
+  if (activeDate.length() == 0U) activeDate = active["target_date"] | "";
+  const JsonVariantConst activeEnd = active["target_end_epoch"];
+  String expectedNextDate;
+  const bool activeBoundaryValid = activeEnd.is<int64_t>() && !activeEnd.is<bool>()
+    && activeEnd.as<int64_t>() > 0
+    && nextIsoLocalDate(activeDate, expectedNextDate);
+  const int64_t targetStartEpoch = rawStart.is<int64_t>() && !rawStart.is<bool>()
+    ? rawStart.as<int64_t>() : 0;
+  const int64_t targetEndEpoch = rawEnd.is<int64_t>() && !rawEnd.is<bool>()
+    ? rawEnd.as<int64_t>() : 0;
+  const int64_t activeTargetEndEpoch = activeBoundaryValid
+    ? activeEnd.as<int64_t>() : 0;
+  const uint32_t remoteConfigVersion = rawConfig.is<uint32_t>() && !rawConfig.is<bool>()
+    ? rawConfig.as<uint32_t>() : 0;
+  const int32_t remoteRotation = rawRotation.is<int32_t>() && !rawRotation.is<bool>()
+    ? rawRotation.as<int32_t>() : -1;
+  const int remoteLead = rawLead.is<int32_t>() && !rawLead.is<bool>()
+    ? rawLead.as<int32_t>() : -1;
+  if (responseTarget != "next" || deliveryMode != "inktime_offline_schedule"
+      || !rawSchema.is<int32_t>() || rawSchema.is<bool>()
+      || rawSchema.as<int32_t>() != inktime::kOfflineScheduleSchemaVersion
+      || targetDate.length() != 10U
+      || (legacyTargetDate.length() > 0U && legacyTargetDate != targetDate)
+      || targetDate != expectedNextDate || timezoneName.length() == 0U
+      || timezoneName.length() > 64U || !inktime::boundedText(scheduleId.c_str(), inktime::kQueueIdentifierMaxBytes)
+      || panelProfile.length() == 0U
+      || (panelProfile != "safe_4c" && panelProfile != String(INKTIME_PANEL_PROFILE))
+      || !validButtonWakeAction(buttonWakeAction) || remoteLead < 0 || remoteLead > 120
+      || targetStartEpoch <= 0 || targetEndEpoch <= targetStartEpoch
+      || targetStartEpoch != activeTargetEndEpoch
+      || remoteConfigVersion < cfg.config_version
+      || (remoteRotation != 0 && remoteRotation != 180)
+      || !rawScheduleVersion.is<int32_t>() || rawScheduleVersion.is<bool>()
+      || rawScheduleVersion.as<int32_t>() < 0
+      || rawSlots.isNull() || rawSlots.size() == 0U
+      || rawSlots.size() > inktime::kMaxOfflineSlots
+      || rawTimes.isNull() || rawTimes.size() != rawSlots.size()
+      || !activeBoundaryValid || nowEpoch < targetStartEpoch || nowEpoch >= targetEndEpoch) {
+    if (targetEndEpoch > 0 && nowEpoch >= targetEndEpoch) {
+      (void)photoPainter.clearStagedNextSchedule();
+    }
+    return false;
+  }
+
+  inktime::OfflineSlot scheduleSlots[inktime::kMaxOfflineSlots] = {};
+  for (size_t index = 0; index < rawTimes.size(); ++index) {
+    if (!parseOfflineClock(rawTimes[index] | "", scheduleSlots[index])) return false;
+  }
+  if (!inktime::validateOfflineSlots(scheduleSlots, static_cast<uint8_t>(rawTimes.size()))) {
+    return false;
+  }
+  inktime::OfflineNextScheduleContract contract = {
+    rawSchema.as<int32_t>(),
+    deliveryMode.c_str(),
+    targetDate.c_str(),
+    timezoneName.c_str(),
+    targetStartEpoch,
+    targetEndEpoch,
+    activeTargetEndEpoch,
+    targetStartEpoch - 1,
+    remoteConfigVersion,
+    cfg.config_version,
+    remoteRotation,
+    panelProfile.c_str(),
+    INKTIME_PANEL_PROFILE,
+    buttonWakeAction.c_str(),
+    static_cast<uint8_t>(rawSlots.size()),
+    static_cast<uint8_t>(rawTimes.size()),
+    true,
+    true,
+    true,
+    true,
+  };
+  int64_t previousShowAtEpoch = 0;
+  for (size_t index = 0; index < rawSlots.size(); ++index) {
+    const JsonVariantConst rawSlot = rawSlots[index];
+    if (!rawSlot.is<JsonObjectConst>()) return false;
+    const JsonObjectConst slot = rawSlot.as<JsonObjectConst>();
+    const JsonVariantConst rawSize = slot["size"];
+    const JsonVariantConst rawWidth = slot["width"];
+    const JsonVariantConst rawHeight = slot["height"];
+    const JsonVariantConst rawIndex = slot["slot_index"];
+    const JsonVariantConst rawVersion = slot["queue_version"];
+    const JsonVariantConst rawShowAt = slot["show_at_epoch"];
+    const String itemId = slot["queue_item_id"] | "";
+    const String releaseId = slot["release_id"] | "";
+    const String slotScheduleId = slot["offline_schedule_id"] | "";
+    const String sha = slot["sha256"] | "";
+    const String downloadUrl = slot["download_url"] | "";
+    const String pixelFormat = slot["pixel_format"] | "";
+    const String renderProfile = slot["render_profile"] | "";
+    const int64_t expectedSize = static_cast<int64_t>(FB_WIDTH) * FB_HEIGHT
+      / (pixelFormat == "indexed4" ? 2 : 4);
+    const bool identityValid = rawIndex.is<int32_t>() && !rawIndex.is<bool>()
+      && rawIndex.as<int32_t>() == static_cast<int32_t>(index)
+      && rawVersion.is<int32_t>() && !rawVersion.is<bool>() && rawVersion.as<int32_t>() >= 0
+      && inktime::boundedText(itemId.c_str(), inktime::kQueueIdentifierMaxBytes)
+      && inktime::boundedText(releaseId.c_str(), inktime::kQueueIdentifierMaxBytes)
+      && inktime::boundedText(slotScheduleId.c_str(), inktime::kQueueIdentifierMaxBytes)
+      && slotScheduleId == scheduleId
+      && inktime::isSafeQueueDownloadPathForItem(
+        downloadUrl.c_str(), downloadUrl.length(), itemId.c_str())
+      && (renderProfile == "safe_4c" || renderProfile == String(INKTIME_PANEL_PROFILE));
+    const bool payloadValid = rawSize.is<int64_t>() && !rawSize.is<bool>()
+      && rawSize.as<int64_t>() == expectedSize
+      && rawWidth.is<int32_t>() && !rawWidth.is<bool>() && rawWidth.as<int32_t>() == FB_WIDTH
+      && rawHeight.is<int32_t>() && !rawHeight.is<bool>() && rawHeight.as<int32_t>() == FB_HEIGHT
+      && (pixelFormat == "indexed4" || pixelFormat == "2bpp")
+      && inktime::isSha256Hex(sha.c_str());
+    const bool epochValid = rawShowAt.is<int64_t>() && !rawShowAt.is<bool>()
+      && rawShowAt.as<int64_t>() >= targetStartEpoch
+      && rawShowAt.as<int64_t>() < targetEndEpoch
+      && (index == 0U || rawShowAt.as<int64_t>() > previousShowAtEpoch);
+    contract.queueIdentityValid = contract.queueIdentityValid && identityValid;
+    contract.sha256Valid = contract.sha256Valid && payloadValid;
+    contract.slotEpochsValid = contract.slotEpochsValid && epochValid;
+    if (epochValid) previousShowAtEpoch = rawShowAt.as<int64_t>();
+  }
+  if (!inktime::validOfflineNextScheduleContract(contract)) return false;
+  if (!photoPainter.promoteStagedNextSchedule()) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-PROMOTE";
+    lastDeviceErrorMessage = "離線排程 staged next 無法原子 promote 為 active";
+    return false;
+  }
+  cfg.schedule_count = static_cast<uint8_t>(rawTimes.size());
+  for (uint8_t index = 0; index < cfg.schedule_count; ++index) {
+    cfg.schedule_slots[index] = scheduleSlots[index];
+  }
+  cfg.refresh_hour = scheduleSlots[0].hour;
+  cfg.refresh_minute = scheduleSlots[0].minute;
+  cfg.rotate180 = remoteRotation == 180;
+  cfg.prefetch_lead_minutes = static_cast<uint16_t>(remoteLead);
+  cfg.delivery_mode = deliveryMode;
+  cfg.button_wake_action = buttonWakeAction;
+  cfg.config_version = remoteConfigVersion;
+  saveConfig(cfg);
+  serverConfigChanged = true;
+  clearOfflineRetryState();
+  return true;
+}
+#endif
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+static bool loadOfflineScheduledLocalFrame(
+  const Config &cfg, time_t nowEpoch, bool selectNext = false);
+#endif
+
 bool downloadDailyPhotoBin(Config &cfg) {
+  currentPrefetchOnly = false;
   if (!resumePendingQueueAck(cfg)) return false;
+#if INKTIME_PHOTOPAINTER_ENABLED
+  const bool userButtonWake = photoPainter.wokeFromUserButton();
+  const bool timerRequestedNetwork = enhancedNetworkWakeRequested;
+  enhancedNetworkWakeRequested = false;
+  if (cfg.delivery_mode == "inktime_offline_schedule") {
+    if (userButtonWake && cfg.button_wake_action == "check_new") {
+      // A button check may replace the active schedule, but a missing or
+      // unavailable remote schedule must leave the cached formal day usable.
+      (void)downloadOfflineScheduleAndFrames(cfg);
+      currentPrefetchOnly = false;
+      return loadOfflineScheduledLocalFrame(cfg, time(nullptr), false);
+    }
+    if (timerRequestedNetwork || offlinePrefetchWake(cfg, time(nullptr))) {
+      const time_t wakeEpoch = time(nullptr);
+      const bool formalSlotDue = activeHasDueFormalSlot(wakeEpoch);
+      const bool stageTomorrow = offlineNextSchedulePrefetchDue(cfg, wakeEpoch)
+        && !formalSlotDue;
+      const bool displayAtThisWake = cfg.prefetch_lead_minutes == 0U || formalSlotDue;
+      currentPrefetchOnly = stageTomorrow || !displayAtThisWake;
+      const bool prefetched = downloadOfflineScheduleAndFrames(cfg, stageTomorrow);
+      if (prefetched && displayAtThisWake && !stageTomorrow) {
+        currentPrefetchOnly = false;
+        return loadOfflineScheduledLocalFrame(cfg, time(nullptr), false);
+      }
+      return prefetched;
+    }
+    // Enhanced offline mode has no generic/latest-photo fallback.  Formal
+    // frames are selected only from the active server-authored schedule.
+    return false;
+  }
+#endif
   const QueueDownloadResult queueResult = downloadQueuePhotoBin(cfg);
   if (queueResult == QueueDownloadResult::Used) return true;
   if (queueResult == QueueDownloadResult::Failed) {
@@ -1775,6 +3091,68 @@ bool drawFromFrameData(const Config &cfg) {
 //  睡到下一个唤醒点
 // =======================
 void sleepUntilNextSchedule(const Config &cfg, bool hasTime, const struct tm &now) {
+#if INKTIME_PHOTOPAINTER_ENABLED
+  if (cfg.delivery_mode == "inktime_offline_schedule") {
+    if (!hasTime) {
+      // Unknown time is a bounded recovery wake, never a 24-hour blind sleep.
+      goDeepSleepSeconds(inktime::kOfflineRetryFirstSeconds);
+      return;
+    }
+    time_t nowEpoch = time(nullptr);
+    if (nowEpoch <= 0) {
+      time_t rtcEpoch = 0;
+      if (photoPainter.readRtc(rtcEpoch)) nowEpoch = rtcEpoch;
+    }
+    if (nowEpoch > 0) {
+      time_t nextDisplay = 0;
+      time_t targetEnd = 0;
+      time_t nextSchedulePrefetch = 0;
+      if (activeOfflineEpochs(nowEpoch, nextDisplay, targetEnd, nextSchedulePrefetch)) {
+        time_t wakeEpoch = 0;
+        const auto considerWake = [&wakeEpoch, nowEpoch](time_t candidate) {
+          if (candidate > nowEpoch && (wakeEpoch == 0 || candidate < wakeEpoch)) {
+            wakeEpoch = candidate;
+          }
+        };
+        if (nextDisplay > nowEpoch) {
+          const uint64_t leadSeconds = static_cast<uint64_t>(cfg.prefetch_lead_minutes) * 60ULL;
+          const time_t prefetchEpoch = nextDisplay > static_cast<time_t>(leadSeconds)
+            ? nextDisplay - static_cast<time_t>(leadSeconds)
+            : nextDisplay;
+          considerWake(prefetchEpoch > nowEpoch ? prefetchEpoch : nextDisplay);
+        }
+        // The next schedule's server/IANA-computed technical deadline is an
+        // independent wake candidate and may occur before today's end.
+        considerWake(nextSchedulePrefetch);
+        considerWake(targetEnd);
+        uint8_t retryAttempt = 0;
+        int64_t retryEpoch = 0;
+        int64_t retryNextSlot = 0;
+        if (loadOfflineRetryState(retryAttempt, retryEpoch, retryNextSlot)
+            && inktime::validOfflineRetryEpoch(
+              static_cast<uint64_t>(nowEpoch), retryEpoch, retryNextSlot)) {
+          considerWake(static_cast<time_t>(retryEpoch));
+        }
+        if (wakeEpoch > nowEpoch) {
+          goDeepSleepUntilEpoch(nowEpoch, wakeEpoch);
+          return;
+        }
+        // An exhausted day uses the same persisted bounded recovery plan as
+        // a missing schedule, instead of a one-minute storm.
+        const time_t recoveryEpoch = scheduleOfflineRecovery(nowEpoch);
+        if (recoveryEpoch > nowEpoch) goDeepSleepUntilEpoch(nowEpoch, recoveryEpoch);
+        else goDeepSleepSeconds(inktime::kOfflineRetryFirstSeconds);
+        return;
+      }
+      const time_t recoveryEpoch = scheduleOfflineRecovery(nowEpoch);
+      if (recoveryEpoch > nowEpoch) goDeepSleepUntilEpoch(nowEpoch, recoveryEpoch);
+      else goDeepSleepSeconds(inktime::kOfflineRetryFirstSeconds);
+      return;
+    }
+    goDeepSleepSeconds(inktime::kOfflineRetryFirstSeconds);
+    return;
+  }
+#endif
   if (!hasTime) {
     goDeepSleepMinutes(1440);
     return;
@@ -1797,6 +3175,332 @@ void sleepUntilNextSchedule(const Config &cfg, bool hasTime, const struct tm &no
 
   goDeepSleepMinutes((uint32_t)delta);
 }
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+static bool loadOfflineScheduledLocalFrame(
+  const Config &cfg, time_t nowEpoch, bool selectNext) {
+  // Enhanced local mode is deliberately cache-only.  It never calls Wi-Fi,
+  // NTP, Manifest, or status endpoints; a missing formal frame is a safe
+  // no-refresh result instead of a network fallback.
+  if (nowEpoch <= 0) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-FRAME";
+    lastDeviceErrorMessage = "離線排程沒有可驗證的 RTC 時間";
+    return false;
+  }
+  currentFromQueue = false;
+  currentQueueItemId = "";
+  currentQueueVersion = -1;
+  currentReleaseId = "";
+  currentRenderProfile = "";
+  String activeJson;
+  if (!photoPainter.readActiveSchedule(activeJson)) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
+    lastDeviceErrorMessage = "離線排程 active schedule 不存在或無法讀取";
+    return false;
+  }
+  JsonDocument active;
+  const DeserializationError jsonError = deserializeJson(active, activeJson);
+  const JsonVariantConst rawSlots = active["slots"];
+  String targetDate = active["target_local_date"] | "";
+  if (targetDate.length() == 0U) targetDate = active["target_date"] | "";
+  const String activeTargetDate = active["target_local_date"] | "";
+  const String activeLegacyDate = active["target_date"] | "";
+  const String activeDeliveryMode = active["delivery_mode"] | "";
+  const String activeTimezone = active["timezone"] | "";
+  const String activeScheduleId = active["schedule_id"] | "";
+  const String activePanelProfile = active["panel_profile"] | "";
+  const String activeButtonWakeAction = active["button_wake_action"] | "";
+  const JsonVariantConst activeSchema = active["schema_version"];
+  const JsonVariantConst activeConfigVersion = active["config_version"];
+  const JsonVariantConst activeRotation = active["rotation"];
+  const JsonVariantConst activeScheduleVersion = active["offline_schedule_version"];
+  const JsonVariantConst activeTargetStartEpoch = active["target_start_epoch"];
+  const JsonVariantConst activeTargetEndEpoch = active["target_end_epoch"];
+  if (jsonError || active.overflowed() || !rawSlots.is<JsonArrayConst>()
+      || targetDate.length() != 10 || activeTargetDate.length() == 0U
+      || (activeLegacyDate.length() > 0U && activeLegacyDate != activeTargetDate)
+      || !activeSchema.is<int32_t>() || activeSchema.is<bool>()
+      || activeSchema.as<int32_t>() != inktime::kOfflineScheduleSchemaVersion
+      || activeDeliveryMode != "inktime_offline_schedule"
+      || activeTimezone.length() == 0U || activeTimezone.length() > 64U
+      || activeScheduleId.length() == 0U
+      || !activeConfigVersion.is<uint32_t>() || activeConfigVersion.is<bool>()
+      || !activeRotation.is<int32_t>() || activeRotation.is<bool>()
+      || !activeScheduleVersion.is<int32_t>() || activeScheduleVersion.is<bool>()
+      || activeScheduleVersion.as<int32_t>() < 0
+      || !activeTargetStartEpoch.is<int64_t>() || activeTargetStartEpoch.is<bool>()
+      || !activeTargetEndEpoch.is<int64_t>() || activeTargetEndEpoch.is<bool>()
+      || activeTargetStartEpoch.as<int64_t>() <= 0
+      || activeTargetEndEpoch.as<int64_t>() <= activeTargetStartEpoch.as<int64_t>()) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
+    lastDeviceErrorMessage = "離線排程 active schedule schema 不合法";
+    return false;
+  }
+  const int64_t targetStartEpoch = activeTargetStartEpoch.as<int64_t>();
+  const int64_t targetEndEpoch = activeTargetEndEpoch.as<int64_t>();
+  if (static_cast<int64_t>(nowEpoch) < targetStartEpoch
+      || static_cast<int64_t>(nowEpoch) >= targetEndEpoch) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
+    lastDeviceErrorMessage = "離線排程不是伺服器授權的目前本地日期";
+    return false;
+  }
+  const JsonArrayConst slots = rawSlots.as<JsonArrayConst>();
+  JsonArrayConst rawTimes = active["schedule_times"].as<JsonArrayConst>();
+  if (rawTimes.isNull()) rawTimes = active["schedule"].as<JsonArrayConst>();
+  if (rawTimes.isNull() || rawTimes.size() == 0U
+      || rawTimes.size() > inktime::kMaxOfflineSlots || rawTimes.size() != slots.size()) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
+    lastDeviceErrorMessage = "離線排程 active schedule_times 不合法";
+    return false;
+  }
+  inktime::OfflineSlot activeScheduleSlots[inktime::kMaxOfflineSlots] = {};
+  for (size_t index = 0; index < rawTimes.size(); ++index) {
+    if (!parseOfflineClock(rawTimes[index] | "", activeScheduleSlots[index])) {
+      lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
+      lastDeviceErrorMessage = "離線排程 active 時刻格式不合法";
+      return false;
+    }
+  }
+  if (!inktime::validateOfflineSlots(activeScheduleSlots, static_cast<uint8_t>(rawTimes.size()))
+      || rawTimes.size() != cfg.schedule_count
+      || !inktime::validateOfflineSlots(cfg.schedule_slots, cfg.schedule_count)) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
+    lastDeviceErrorMessage = "離線排程 active 時刻與本機設定不一致";
+    return false;
+  }
+  for (uint8_t index = 0; index < cfg.schedule_count; ++index) {
+    if (activeScheduleSlots[index].hour != cfg.schedule_slots[index].hour
+        || activeScheduleSlots[index].minute != cfg.schedule_slots[index].minute) {
+      lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
+      lastDeviceErrorMessage = "離線排程 active 時刻與本機設定不一致";
+      return false;
+    }
+  }
+  inktime::OfflineScheduleContract contract = {
+    activeSchema.as<int32_t>(),
+    activeDeliveryMode.c_str(),
+    activeTargetDate.c_str(),
+    activeTargetDate.c_str(),
+    activeTimezone.c_str(),
+    targetStartEpoch,
+    targetEndEpoch,
+    static_cast<int64_t>(nowEpoch),
+    activeConfigVersion.as<uint32_t>(),
+    cfg.config_version,
+    activeRotation.as<int32_t>(),
+    activePanelProfile.c_str(),
+    INKTIME_PANEL_PROFILE,
+    activeButtonWakeAction.c_str(),
+    static_cast<uint8_t>(slots.size()),
+    static_cast<uint8_t>(rawTimes.size()),
+    true,
+    true,
+    true,
+  };
+  if (activeConfigVersion.as<uint32_t>() != cfg.config_version
+      || !inktime::validOfflineScheduleContract(contract)
+      || cfg.delivery_mode != "inktime_offline_schedule"
+      || cfg.rotate180 != (activeRotation.as<int32_t>() == 180)) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
+    lastDeviceErrorMessage = "離線排程 active 快照與本機設定不一致";
+    return false;
+  }
+  int64_t previewEpochs[inktime::kMaxOfflineSlots] = {};
+  String previewShaValues[inktime::kMaxOfflineSlots];
+  const char* previewShaPointers[inktime::kMaxOfflineSlots] = {};
+  const int16_t previewCursor = loadPreviewCursorForSchedule(activeScheduleId);
+  int64_t previousShowAtEpoch = 0;
+  for (size_t index = 0; index < slots.size(); ++index) {
+    const JsonVariantConst rawSlot = slots[index];
+    if (!rawSlot.is<JsonObjectConst>()) {
+      lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
+      lastDeviceErrorMessage = "離線排程 active Slot 身分不合法";
+      return false;
+    }
+    const JsonObjectConst slot = rawSlot.as<JsonObjectConst>();
+    const JsonVariantConst rawIndex = slot["slot_index"];
+    const JsonVariantConst rawVersion = slot["queue_version"];
+    const JsonVariantConst rawShowAtEpoch = slot["show_at_epoch"];
+    const String slotScheduleId = slot["offline_schedule_id"] | "";
+    const String slotItemId = slot["queue_item_id"] | "";
+    const String slotReleaseId = slot["release_id"] | "";
+    const String slotSha = slot["sha256"] | "";
+    const String slotProfile = slot["render_profile"] | "";
+    if (!rawIndex.is<int32_t>() || rawIndex.is<bool>()
+        || rawIndex.as<int32_t>() != static_cast<int32_t>(index)
+        || !rawVersion.is<int32_t>() || rawVersion.is<bool>() || rawVersion.as<int32_t>() < 0
+        || !rawShowAtEpoch.is<int64_t>() || rawShowAtEpoch.is<bool>()
+        || rawShowAtEpoch.as<int64_t>() < targetStartEpoch
+        || rawShowAtEpoch.as<int64_t>() >= targetEndEpoch
+        || (index > 0U && rawShowAtEpoch.as<int64_t>() <= previousShowAtEpoch)
+        || slotScheduleId != activeScheduleId
+        || !inktime::boundedText(slotItemId.c_str(), inktime::kQueueIdentifierMaxBytes)
+        || !inktime::boundedText(slotReleaseId.c_str(), inktime::kQueueIdentifierMaxBytes)
+        || !inktime::isSha256Hex(slotSha.c_str())
+        || (slotProfile != "safe_4c" && slotProfile != String(INKTIME_PANEL_PROFILE))) {
+      lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE";
+      lastDeviceErrorMessage = "離線排程 active Slot 身分或完整性不合法";
+      return false;
+    }
+    previousShowAtEpoch = rawShowAtEpoch.as<int64_t>();
+    previewEpochs[index] = previousShowAtEpoch;
+    previewShaValues[index] = slotSha;
+    previewShaPointers[index] = previewShaValues[index].c_str();
+  }
+  int selectedIndex = -1;
+  int64_t selectedEpoch = selectNext ? INT64_MAX : 0;
+  String selectedSha;
+  String selectedRelease;
+  String selectedProfile;
+  String selectedQueueItemId;
+  int32_t selectedQueueVersion = -1;
+  if (selectNext) {
+    const StoredDisplayRecord displayRecord = loadDisplayRecord();
+    const int16_t selectedPreviewIndex = inktime::nextOfflinePreviewSlot(
+      previewEpochs,
+      previewShaPointers,
+      static_cast<uint8_t>(slots.size()),
+      previewCursor,
+      static_cast<uint64_t>(nowEpoch),
+      displayRecord.valid ? displayRecord.sha256.c_str() : "");
+    if (selectedPreviewIndex < 0) {
+      const int16_t nextCursor = previewCursor < 0
+        ? 0
+        : static_cast<int16_t>((previewCursor + 1) % slots.size());
+      savePreviewCursor(activeScheduleId, nextCursor);
+      lastDeviceErrorCode = "DEVICE-OFFLINE-PREVIEW";
+      lastDeviceErrorMessage = "離線預覽沒有不同 SHA 的本地快取 Frame";
+      return false;
+    }
+    const JsonObjectConst slot = slots[static_cast<size_t>(selectedPreviewIndex)].as<JsonObjectConst>();
+    selectedIndex = selectedPreviewIndex;
+    selectedEpoch = slot["show_at_epoch"] | 0;
+    selectedSha = slot["sha256"] | "";
+    selectedRelease = slot["release_id"] | "";
+    selectedProfile = slot["render_profile"] | "";
+    selectedQueueItemId = slot["queue_item_id"] | "";
+    selectedQueueVersion = slot["queue_version"] | -1;
+    savePreviewCursor(activeScheduleId, selectedPreviewIndex);
+  }
+  for (size_t index = 0; index < slots.size() && !selectNext; ++index) {
+    const JsonVariantConst rawSlot = slots[index];
+    if (!rawSlot.is<JsonObjectConst>()) continue;
+    const JsonObjectConst slot = rawSlot.as<JsonObjectConst>();
+    const int slotIndex = slot["slot_index"] | -1;
+    if (slotIndex < 0 || slotIndex >= static_cast<int>(rawTimes.size())) continue;
+    const JsonVariantConst rawShowAtEpoch = slot["show_at_epoch"];
+    if (!rawShowAtEpoch.is<int64_t>() || rawShowAtEpoch.is<bool>()) continue;
+    const int64_t candidateEpoch = rawShowAtEpoch.as<int64_t>();
+    const String sha = slot["sha256"] | "";
+    const bool candidateMatches = selectNext
+      ? candidateEpoch > static_cast<int64_t>(nowEpoch) && candidateEpoch < selectedEpoch
+      : candidateEpoch <= static_cast<int64_t>(nowEpoch) && candidateEpoch >= selectedEpoch;
+    if (candidateMatches && inktime::isSha256Hex(sha.c_str())) {
+      selectedIndex = slotIndex;
+      selectedEpoch = candidateEpoch;
+      selectedSha = sha;
+      selectedRelease = slot["release_id"] | "";
+      selectedProfile = slot["render_profile"] | "";
+      selectedQueueItemId = slot["queue_item_id"] | "";
+      selectedQueueVersion = slot["queue_version"] | -1;
+    }
+  }
+  if (selectedIndex < 0 || !inktime::isSha256Hex(selectedSha.c_str())) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-FRAME";
+    lastDeviceErrorMessage = "目前離線排程 Slot 沒有可驗證的正式 Frame";
+    return false;
+  }
+  const inktime::DisplayRotation rotation = activeRotation.as<int32_t>() == 180
+    ? inktime::DisplayRotation::Rotate180
+    : inktime::DisplayRotation::Rotate0;
+  currentReleaseId = selectedRelease;
+  currentRenderProfile = selectedProfile;
+  currentQueueItemId = selectedQueueItemId;
+  currentQueueVersion = selectedQueueVersion;
+  const inktime::OfflineDisplayIntent displayIntent = inktime::offlineDisplayIntent(selectNext);
+  currentFromQueue = displayIntent.ownsFormalSlot && inktime::boundedText(
+      currentQueueItemId.c_str(), inktime::kQueueIdentifierMaxBytes)
+    && currentQueueVersion >= 0;
+  uint8_t* localFrame = nullptr;
+  if (!photoPainter.loadFormalFrame(selectedSha.c_str(), rotation, &localFrame)) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-FRAME";
+    lastDeviceErrorMessage = "離線排程正式 Frame 不存在或完整性驗證失敗";
+    return false;
+  }
+  if (frameData) heap_caps_free(frameData);
+  frameData = localFrame;
+  frameDataSize = inktime::kPhotoPainterFrameBytes;
+  frameIndexed4 = true;
+  frameNativePalette = true;
+  currentPayloadSha256 = selectedSha;
+  currentPayloadShaVerified = true;
+  currentPayloadIntegrityTrusted = true;
+  currentDisplaySkipped = shouldSkipCurrentDisplay(cfg);
+  return true;
+}
+
+static void runOfflineLocalCycle(bool selectNext = false) {
+  time_t rtcEpoch = 0;
+  struct tm offlineTime = {};
+  const bool hasOfflineTime = photoPainter.readRtc(rtcEpoch);
+  if (hasOfflineTime) {
+    struct timeval value = {rtcEpoch, 0};
+    settimeofday(&value, nullptr);
+    applyFixedTimezoneWithoutNtp(g_cfg.tz_offset_minutes);
+    localtime_r(&rtcEpoch, &offlineTime);
+  }
+  const bool ok = loadOfflineScheduledLocalFrame(
+    g_cfg, hasOfflineTime ? rtcEpoch : 0, selectNext);
+  bool displayUpdated = false;
+  if (ok) {
+    if (currentDisplaySkipped) {
+      displayUpdated = true;
+    } else {
+      initDisplay(g_cfg);
+      displayUpdated = drawFromFrameData(g_cfg);
+    }
+    if (displayUpdated) saveDisplayRecord(g_cfg, true);
+    if (displayUpdated && !selectNext) clearOfflineRetryState();
+    if (currentFromQueue) {
+      if (displayUpdated) {
+        sendQueueEvent(
+          g_cfg,
+          inktime::QueueEvent::DisplayCompleted,
+          currentDisplaySkipped,
+          String(""),
+          true
+        );
+      } else {
+        sendQueueEvent(
+          g_cfg,
+          inktime::QueueEvent::DisplayFailed,
+          false,
+          photoPainter.lastError(),
+          true
+        );
+      }
+    }
+  } else if (currentFromQueue) {
+    // A missing/corrupt formal frame still gets a durable terminal outcome;
+    // the queue reservation must not be silently left without a display ACK.
+    sendQueueEvent(
+      g_cfg,
+      inktime::QueueEvent::DisplayFailed,
+      false,
+      photoPainter.lastError(),
+      true
+    );
+  }
+  if (!displayUpdated && ok) {
+    lastDeviceErrorCode = photoPainter.lastError();
+    lastDeviceErrorMessage = "離線排程電子紙刷新失敗或逾時";
+    saveDisplayRecord(g_cfg, false);
+  }
+  // There is intentionally no reportDeviceStatus() here: that endpoint is a
+  // network call and enhanced local mode must remain fully offline.
+  sleepUntilNextSchedule(g_cfg, hasOfflineTime, offlineTime);
+}
+#endif
 
 // =======================
 //  setup / loop
@@ -1845,12 +3549,59 @@ void setup() {
 
   loadConfig(g_cfg);
 
+#if INKTIME_PHOTOPAINTER_ENABLED
+  if (g_cfg.delivery_mode == "inktime_offline_schedule") {
+    time_t bootRtcEpoch = 0;
+    if (photoPainter.readRtc(bootRtcEpoch) && bootRtcEpoch > 0) {
+      applyFixedTimezoneWithoutNtp(g_cfg.tz_offset_minutes);
+      struct timeval value = {bootRtcEpoch, 0};
+      settimeofday(&value, nullptr);
+      // Reliable RTC time is the authority for the local-midnight boundary;
+      // promote a fully validated staged-next snapshot before any local or
+      // network display decision is made.
+      (void)promoteStagedNextIfDue(g_cfg, bootRtcEpoch);
+    }
+  }
+#endif
+
   if (!g_cfg.valid) {
 #if DEBUG_LOG
     DBG_PRINTLN("[BOOT] no valid config -> AP portal");
 #endif
     startConfigPortal();
   }
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+  const esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
+  const bool timerWake = wakeCause == ESP_SLEEP_WAKEUP_TIMER;
+  if (g_cfg.delivery_mode == "inktime_offline_schedule"
+      && photoPainter.wokeFromUserButton()
+      && g_cfg.button_wake_action == "local_next") {
+    // local_next is a strict cache-only action.  It must not connect Wi-Fi or
+    // ask the generic queue for its first item.
+    runOfflineLocalCycle(true);
+    return;
+  }
+  if (g_cfg.delivery_mode == "inktime_offline_schedule" && timerWake
+      && !photoPainter.forceNetworkRefresh()) {
+    time_t rtcEpoch = 0;
+    if (!photoPainter.readRtc(rtcEpoch)) {
+      runOfflineLocalCycle();
+      return;
+    }
+    applyFixedTimezoneWithoutNtp(g_cfg.tz_offset_minutes);
+    struct timeval value = {rtcEpoch, 0};
+    settimeofday(&value, nullptr);
+    const bool networkWake = g_cfg.prefetch_lead_minutes == 0U
+      || activeHasDueFormalSlot(rtcEpoch)
+      || offlinePrefetchWake(g_cfg, rtcEpoch);
+    if (!networkWake) {
+      runOfflineLocalCycle();
+      return;
+    }
+    enhancedNetworkWakeRequested = true;
+  }
+#endif
 
 #if DEBUG_LOG
   DBG_PRINTLN("[BOOT] have config -> connect WiFi");
@@ -1863,8 +3614,7 @@ void setup() {
     // Known battery power must not remain in a network retry/configuration loop.
     // USB or an unidentified PMIC keeps the bounded AP diagnostics path available.
     if (photoPainter.powerSourceKnown() && !photoPainter.usbConnected()) {
-      long offsetSec = (long)g_cfg.tz_offset_minutes * 60;
-      configTime(offsetSec, 0, "pool.ntp.org");
+      applyFixedTimezoneWithoutNtp(g_cfg.tz_offset_minutes);
       time_t rtcEpoch = 0;
       struct tm offlineTime = {};
       bool hasOfflineTime = photoPainter.readRtc(rtcEpoch);
@@ -1872,6 +3622,13 @@ void setup() {
         struct timeval value = {rtcEpoch, 0};
         settimeofday(&value, nullptr);
         localtime_r(&rtcEpoch, &offlineTime);
+      }
+      if (g_cfg.delivery_mode == "inktime_offline_schedule" && hasOfflineTime
+          && activeHasDueFormalSlot(rtcEpoch)) {
+        // A due 00:00/current formal slot is serviceable from the active
+        // cache even when the midnight network recovery attempt fails.
+        runOfflineLocalCycle();
+        return;
       }
       lastDeviceErrorCode = "DEVICE-WIFI-TIMEOUT";
       lastDeviceErrorMessage = "電池模式 Wi-Fi 逾時，已停止重試";
@@ -1889,6 +3646,9 @@ void setup() {
   if (serverConfigChanged) hasTime = syncTime(g_cfg, timeinfo);
   bool displayUpdated = false;
   if (ok) {
+    if (currentPrefetchOnly) {
+      displayUpdated = false;
+    } else {
     bool mayDisplay = true;
     if (currentDisplaySkipped) {
       saveDisplayRecord(g_cfg, true);
@@ -1919,6 +3679,13 @@ void setup() {
         sendQueueEvent(g_cfg, inktime::QueueEvent::DisplayFailed, false, lastDeviceErrorCode);
       }
     }
+  }
+#if INKTIME_PHOTOPAINTER_ENABLED
+  if (ok && !currentPrefetchOnly && g_cfg.delivery_mode == "inktime_offline_schedule"
+      && (displayUpdated || currentDisplaySkipped)) {
+    clearOfflineRetryState();
+  }
+#endif
   } else {
 #if DEBUG_LOG
     DBG_PRINTLN("[BOOT] downloadDailyPhotoBin FAILED");

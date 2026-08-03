@@ -42,6 +42,161 @@ def test_schema_v1_missing_orientation_is_safely_upgraded():
     assert validate_analysis_result(legacy)["visual_orientation"]["rotation_cw"] is None
 
 
+def test_schema_v3_normalizes_grades_and_preserves_confidence_details():
+    result = valid_result(
+        schema_version=3,
+        memory_grade="A",
+        aesthetic_grade="B",
+        technical_grade="S",
+        emotion_grade="C",
+        display_suitability_grade="A",
+        confidence={"overall": 0.91, "orientation": 0.72},
+    )
+    for field in ("memory_score", "beauty_score", "technical_quality_score", "emotion_score"):
+        result.pop(field)
+
+    normalized = validate_analysis_result(result)
+
+    assert normalized["memory_score"] == 85.0
+    assert normalized["beauty_score"] == 75.0
+    assert normalized["technical_quality_score"] == 95.0
+    assert normalized["emotion_score"] == 60.0
+    assert normalized["details"]["display_suitability_grade"] == "A"
+    assert normalized["details"]["confidence"]["overall"] == 0.91
+
+
+def test_schema_v3_rejects_unknown_grade():
+    with pytest.raises(AnalysisValidationError):
+        validate_analysis_result(valid_result(schema_version=3, memory_grade="Z"))
+
+
+def test_schema_v3_requires_all_grades_and_confidence_without_silent_unknown_fill():
+    value = valid_result(schema_version=3, memory_grade="A", beauty_grade="B", technical_grade="C")
+    value.pop("emotion_score")
+    with pytest.raises(AnalysisValidationError, match="emotion_grade"):
+        validate_analysis_result(value)
+
+    details_only = valid_result(
+        schema_version=3,
+        details={
+            "memory_grade": "A",
+            "beauty_grade": "B",
+            "technical_grade": "C",
+            "emotion_grade": "D",
+            "confidence": 0.8,
+        },
+    )
+    for field in ("memory_score", "beauty_score", "technical_quality_score", "emotion_score"):
+        details_only.pop(field)
+    normalized = validate_analysis_result(details_only)
+    assert normalized["emotion_score"] == 40.0
+
+    missing_confidence = dict(details_only)
+    missing_confidence["details"] = dict(details_only["details"])
+    missing_confidence["details"].pop("confidence")
+    with pytest.raises(AnalysisValidationError, match="confidence"):
+        validate_analysis_result(missing_confidence)
+
+
+def _v3_result(**updates):
+    value = valid_result(
+        schema_version=3,
+        details={
+            "memory_grade": "A",
+            "beauty_grade": "B",
+            "technical_grade": "C",
+            "emotion_grade": "D",
+            "confidence": 0.8,
+        },
+    )
+    value.update(updates)
+    return value
+
+
+def test_schema_v3_normalized_cache_is_readable_and_explicit_unknown_is_zero():
+    normalized = validate_analysis_result(
+        _v3_result(
+            details={
+                "memory_grade": "unknown",
+                "beauty_grade": "B",
+                "technical_grade": "C",
+                "emotion_grade": "D",
+                "confidence": {"overall": 0.0},
+            }
+        )
+    )
+    reread = validate_analysis_result(normalized)
+    assert reread["memory_score"] == 0.0
+    assert reread["details"]["confidence"]["overall"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "updates,match",
+    [
+        ({"details": []}, "details"),
+        ({"grades": []}, "grades"),
+        ({"confidence": None}, "confidence"),
+        ({"confidence": True}, "confidence"),
+        ({"confidence": 2.0}, "confidence"),
+        ({"reason_codes": "not-a-list"}, "reason_codes"),
+        ({"reason_codes": ["duplicate", "duplicate"]}, "reason_codes"),
+        ({"caption": "short", "side_caption": "too"}, "side_caption"),
+        ({"reason": "x" * 101}, "reason"),
+        ({"types": ["人物", "人物"]}, "types"),
+        (
+            {
+                "details": {
+                    "memory_grade": "A",
+                    "beauty_grade": "B",
+                    "technical_grade": "C",
+                    "emotion_grade": "D",
+                    "confidence": 0.8,
+                    "caption_variants": {"unknown": "候選"},
+                }
+            },
+            "caption_variants",
+        ),
+    ],
+)
+def test_schema_v3_rejects_malformed_contract_boundaries(updates, match):
+    with pytest.raises(AnalysisValidationError, match=match):
+        validate_analysis_result(_v3_result(**updates))
+
+
+def test_schema_v3_accepts_grade_container_aliases_and_rejects_invalid_grade():
+    value = valid_result(
+        schema_version=3,
+        grades={
+            "memory": "A",
+            "beauty": "B",
+            "technical": "C",
+            "emotion": "D",
+        },
+        details={"confidence": 0.8, "aesthetic_grade": "B"},
+    )
+    normalized = validate_analysis_result(value)
+    assert normalized["beauty_score"] == 75.0
+    assert normalized["details"]["beauty_grade"] == "B"
+
+    invalid = _v3_result(
+        details={
+            "memory_grade": "Z",
+            "beauty_grade": "B",
+            "technical_grade": "C",
+            "emotion_grade": "D",
+            "confidence": 0.8,
+        }
+    )
+    with pytest.raises(AnalysisValidationError, match="v3 等級"):
+        validate_analysis_result(invalid)
+
+
+@pytest.mark.parametrize("raw", [[], 1, True, None, "[]", "1"])
+def test_analysis_result_top_level_must_be_object(raw):
+    with pytest.raises(AnalysisValidationError, match="頂層必須是 JSON Object"):
+        validate_analysis_result(raw)
+
+
 @pytest.mark.parametrize(
     "orientation",
     [

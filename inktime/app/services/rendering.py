@@ -1387,8 +1387,17 @@ class RenderService:
         profile_keys: list[str] | None = None,
         history: dict[str, str] | None = None,
         device_ids: list[str] | None = None,
+        quantity_override: int | None = None,
+        device_configs: dict[str, dict[str, Any]] | None = None,
+        activate_pointers: bool = True,
+        assign_device_releases: bool = True,
     ) -> dict:
-        quantity = int(self.settings.get("render.quantity", 5))
+        if quantity_override is None:
+            quantity = int(self.settings.get("render.quantity", 5))
+        else:
+            if type(quantity_override) is not int or not 1 <= quantity_override <= 50:
+                raise ValueError("RENDER-001 quantity_override 必須介於 1 到 50")
+            quantity = quantity_override
         layout_key = str(self.settings.get("render.layout", "photo_info"))
         source_limit = quantity * 2 if layout_key in {"photo_pair", "photo_pair_caption"} else quantity
         selected = photo_ids[:source_limit]
@@ -1414,7 +1423,7 @@ class RenderService:
             assignments: dict[str, str] = {}
             release_photo_ids: list[str] = []
             for device_id in unique_device_ids:
-                device = by_id[device_id]
+                device = dict((device_configs or {}).get(device_id) or by_id[device_id])
                 profile_key = str(device["panel_profile"])
                 if profile_key not in DISPLAY_PROFILES:
                     raise ValueError("RENDER-003 發布包含不支援的顯示 Profile")
@@ -1505,7 +1514,8 @@ class RenderService:
                 created_by=created_by,
                 photo_ids=list(dict.fromkeys(release_photo_ids)),
                 history=history,
-                device_assignments=assignments,
+                device_assignments=assignments if assign_device_releases else None,
+                activate_pointers=activate_pointers,
             )
             self._record_production_trace(list(dict.fromkeys(release_photo_ids)), published, layout_key)
             return {"releases": published, "device_releases": assignments}

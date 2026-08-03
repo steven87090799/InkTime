@@ -14,7 +14,7 @@ import requests
 from inktime.app.domain.analysis.plan import normalize_reasoning_effort
 from inktime.app.domain.analysis.schema import json_schema_for_stage
 from inktime.app.domain.analysis.scoring import DEFAULT_SCORING_RULES
-from .base import ProviderResponse, Usage, VisionProvider
+from .base import ProviderResponse, Usage, VisionAttemptState, VisionProvider
 
 
 SYSTEM_PROMPT = """你是 InkTime 個人照片分析器。只輸出符合指定 JSON Schema 的精簡 JSON，不可使用 Markdown code fence 或長篇敘述。請以繁體中文（台灣用語）描述。未知值使用 null 或 unknown；不得虛構人物關係、身份、地點或事件。完整 Schema 必須在同一次請求完成回憶、美學、技術、情緒、顯示適合度、場景、主體、裁切、電子紙與搜尋資訊；文案、地標與電子紙資訊不得再另行呼叫模型。評分等級使用 S/A/B/C/D/E，程式會換算排序分。visual_orientation 的基準是圖片已套用 EXIF transpose 後，尚需順時針旋轉多少度才正立；只能填 0/90/180/270/null。無可靠視覺線索時 rotation_cw=null、ambiguous=true 且 evidence 僅為 insufficient_visual_cues。side_caption 必須是繁體中文的一句短文案，不換行、不加引號，8 至 16 字（目標 12 字），有生活感或含蓄畫面感；不得虛構故事，不得以「這是一張」「這張照片」「照片中」「畫面中」起句，也不可只是客觀重述人物、物件或活動。"""
@@ -31,11 +31,13 @@ class ProviderHTTPError(RuntimeError):
         http_status: int | None = None,
         provider_error_code: str | None = None,
         response_info: dict[str, Any] | None = None,
+        vision_started: bool | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.retry_after = retry_after
         self.ambiguous = ambiguous
+        self.vision_started = bool(ambiguous) if vision_started is None else bool(vision_started)
         self.http_status = http_status
         self.provider_error_code = provider_error_code
         self.response_info = dict(response_info or {})
@@ -45,6 +47,7 @@ SAFE_READ = "safe_read"
 SAFE_IDEMPOTENT = "safe_idempotent"
 AMBIGUOUS_CREATE = "ambiguous_create"
 AMBIGUOUS_UPLOAD = "ambiguous_upload"
+AMBIGUOUS_VISION_ANALYSIS = "ambiguous_vision_analysis"
 NO_RETRY_SIDE_EFFECT = "no_retry_side_effect"
 
 
@@ -205,11 +208,23 @@ class OpenAICompatibleProvider(VisionProvider):
 
     def _send(self, method: str, path: str, *, retry_policy: str = SAFE_READ, **kwargs):
         last_response = None
-        no_retry = retry_policy in {AMBIGUOUS_CREATE, AMBIGUOUS_UPLOAD, NO_RETRY_SIDE_EFFECT}
+        no_retry = retry_policy in {
+            AMBIGUOUS_CREATE,
+            AMBIGUOUS_UPLOAD,
+            AMBIGUOUS_VISION_ANALYSIS,
+            NO_RETRY_SIDE_EFFECT,
+        }
         attempts = 1 if no_retry else 3
-        ambiguous = retry_policy in {AMBIGUOUS_CREATE, AMBIGUOUS_UPLOAD}
+        ambiguous = retry_policy in {AMBIGUOUS_CREATE, AMBIGUOUS_UPLOAD, AMBIGUOUS_VISION_ANALYSIS}
         unknown_code = (
             "BATCH-UPLOAD-UNKNOWN" if retry_policy == AMBIGUOUS_UPLOAD else "BATCH-SUBMISSION-UNKNOWN"
+        )
+        if retry_policy == AMBIGUOUS_VISION_ANALYSIS:
+            unknown_code = "VLM-AMBIGUOUS"
+        unknown_message = (
+            "Vision 分析請求回應未知，未自動重送"
+            if retry_policy == AMBIGUOUS_VISION_ANALYSIS
+            else "Batch 建立回應未知，未自動重送"
         )
         for attempt in range(attempts):
             try:
@@ -218,7 +233,7 @@ class OpenAICompatibleProvider(VisionProvider):
             except requests.Timeout as exc:
                 if ambiguous:
                     raise ProviderHTTPError(
-                        "Batch 建立回應未知，未自動重送",
+                        unknown_message,
                         unknown_code,
                         ambiguous=True,
                     ) from exc
@@ -229,7 +244,7 @@ class OpenAICompatibleProvider(VisionProvider):
             except requests.RequestException as exc:
                 if ambiguous:
                     raise ProviderHTTPError(
-                        "Batch 建立回應未知，未自動重送",
+                        unknown_message,
                         unknown_code,
                         ambiguous=True,
                     ) from exc
@@ -289,7 +304,13 @@ class OpenAICompatibleProvider(VisionProvider):
                             response_info["provider_error_code"] = provider_error_code[:120]
             except (ValueError, TypeError, json.JSONDecodeError):
                 pass
-            classified_code = "BATCH-RATE-LIMITED" if status == 429 else error_code
+            classified_code = (
+                "BATCH-RATE-LIMITED"
+                if status == 429 and str(error_code).startswith("BATCH")
+                else "VLM-002"
+                if status == 429
+                else error_code
+            )
             raise ProviderHTTPError(
                 self._redact(f"Provider 回應 HTTP {status}"),
                 classified_code,
@@ -310,15 +331,40 @@ class OpenAICompatibleProvider(VisionProvider):
             )
         return payload
 
-    def _post_completion(self, body: dict) -> ProviderResponse:
-        response = self._send(
-            "POST", "/chat/completions", headers=self._headers(), json=body, timeout=self.request_timeout
-        )
-        payload = self._json_response(response, error_code="VLM-006")
+    def _post_completion(
+        self, body: dict, *, vision_attempt: VisionAttemptState | None = None
+    ) -> ProviderResponse:
+        # The request body is fully built before this marker.  A transport
+        # failure after this point is therefore a consumed image attempt even
+        # when no response reaches the caller.
+        if vision_attempt is not None:
+            vision_attempt.vision_started = True
+        try:
+            response = self._send(
+                "POST",
+                "/chat/completions",
+                retry_policy=AMBIGUOUS_VISION_ANALYSIS,
+                headers=self._headers(),
+                json=body,
+                timeout=self.request_timeout,
+            )
+        except ProviderHTTPError as exc:
+            # The POST was handed to the transport.  Even a definite HTTP
+            # rejection must not cause the same image to be sent to another
+            # provider in this analysis attempt.
+            exc.vision_started = True
+            raise
+        try:
+            payload = self._json_response(response, error_code="VLM-006", ambiguous_on_invalid=True)
+        except ProviderHTTPError as exc:
+            exc.vision_started = True
+            raise
         try:
             content = payload["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise ProviderHTTPError("Provider 回應缺少有效 Response Body", "VLM-006") from exc
+            raise ProviderHTTPError(
+                "Provider 回應缺少有效 Response Body", "VLM-006", ambiguous=True
+            ) from exc
         if isinstance(content, list):
             content = "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
         headers = getattr(response, "headers", {}) or {}
@@ -376,6 +422,7 @@ class OpenAICompatibleProvider(VisionProvider):
         max_tokens: int | None = None,
         caption_controls: dict[str, Any] | None = None,
         reasoning_effort: str | None = None,
+        vision_attempt: VisionAttemptState | None = None,
     ) -> ProviderResponse:
         body = self.build_analysis_request_body(
             image_path=image_path,
@@ -386,7 +433,7 @@ class OpenAICompatibleProvider(VisionProvider):
             caption_controls=caption_controls,
             reasoning_effort=reasoning_effort,
         )
-        return self._post_completion(body)
+        return self._post_completion(body, vision_attempt=vision_attempt)
 
     def repair_json(
         self,

@@ -20,6 +20,9 @@ struct PendingQueueAck {
   inktime::QueueEvent event;
   bool displaySkipped;
   String errorCode;
+  bool delayedTerminal;
+  String releaseId;
+  int64_t eventEpoch;
   bool valid;
 };
 

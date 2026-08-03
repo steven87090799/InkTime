@@ -10,8 +10,8 @@
 | 欄位 | 預設 | 合法範圍／建議 | 風險 | 重啟 |
 |---|---:|---|---|---|
 | `general.timezone` | Asia/Taipei | IANA 時區 | 影響跨日與排程 | 否 |
-| `analysis.strategy` | smart_two_stage | 五種策略 | 高品質成本高 | 否 |
-| `analysis.stage_two_threshold` | 65 | 0–100，建議 60–75 | 越低成本越高 | 否 |
+| `analysis.strategy` | single | `local`／`single` | `single` 每張照片最多一次圖片模型請求 | 否 |
+| `analysis.stage_two_threshold` | 65 | 舊版讀取相容欄位 | 新工作不再使用，不會觸發第二次圖片請求 | 否 |
 | 本機預篩選 | 啟用 | 截圖／明顯低品質可分別停用 | 排除項目 0 Token；不刪原檔 | 否 |
 | `analysis.prefilter_sensitivity` | conservative | conservative／balanced／aggressive | 越積極越省 Token，也越可能誤排除 | 否 |
 | `analysis.e6_prefilter_enabled` | true | true／false | 關閉後不會因六色量化失真而省下模型請求 | 否 |
@@ -25,9 +25,11 @@
 | `worker.progress_items` | 50 | 5–10,000 | 越小 Docker Log 越多 | 否 |
 | `worker.progress_seconds` | 300 | 30–3,600 | 越小 Docker Log 越多 | 否 |
 | `scheduler.poll_seconds` | 60 | 30–3,600 | 越小 SQLite／CPU 喚醒越多 | 否 |
+| `offline.server_prefetch_margin_minutes` | 15 | 0–60 分鐘 | 太短可能來不及完成 Enhanced Slot 渲染 | 否 |
+| `offline.future_schedule_prepare_hour_local` | 20 | 0–23 點 | 裝置本地到達此時後準備明日；過早會增加未來快照保留 | 否 |
 | `analysis.max_retries` | 3 | 0–10 | 重試增加成本 | 否 |
-| `model.low_model` | gpt-4o-mini | 支援圖片／Schema 的模型 | 能力不足會進錯誤佇列 | 否 |
-| `model.high_model` | gpt-4o | 同上 | 先設定價格 | 否 |
+| `model.analysis_model` | gpt-4o | 支援圖片／Schema 的模型 | 能力不足會進錯誤佇列 | 否 |
+| `model.low_model`／`model.high_model` | 舊值 | 舊版讀取相容欄位 | 新工作不會恢復低／高兩次圖片請求 | 否 |
 | `budget.daily_warning` | 5 | ≥0 美元 | 只警告 | 否 |
 | `budget.daily_stop` | 10 | ≥0 美元 | 達到即停新請求 | 否 |
 | `budget.monthly_warning` | 50 | ≥0 美元 | 只警告 | 否 |
@@ -71,9 +73,18 @@
 
 所有修改寫入 `setting_history`，最近 100 筆直接顯示在設定頁；Secret 永不寫入摘要。Web、Worker、排程、Log 與 Session 的新設定均動態生效。只有舊版裝置 API 這類啟動時安全邊界仍需重啟。
 
+新工作只有 `local` 與 `single` 兩個正式策略。`low_cost`、`smart`、`smart_two_stage`、`high_quality` 與 `single_high` 仍可讀取舊工作或舊 API payload，但會正規化為單次完整分析；不會再執行低成本→高品質的第二次圖片上傳。`analysis.caption_variants_enabled` 仍可讀取舊設定，但已移到進階設定，新的基本設定頁不再突出顯示五種候選文案。
+
 ## Web 與部署設定的邊界
 
-不需要修改 Python。分析、排程、模型、成本、渲染、裝置、Log 層級、Session 與備份都由 Web 控制。宿主機 Volume、Port、映像 Tag、HTTPS Secure Cookie、Docker CPU／RAM／PID 上限與 logging driver 必須在容器啟動前由 `.env`／Compose 決定；容器內程式不應取得 Docker socket 去改寫宿主機。設定頁會只讀顯示目前部署資訊。
+不需要修改 Python。分析、排程、模型、成本、渲染、裝置、Log 層級、Session 與備份都由 Web 控制。Enhanced PhotoPainter 的 `offline.server_prefetch_margin_minutes` 預設為 15 分鐘；`offline.future_schedule_prepare_hour_local` 預設為裝置本地 20:00，之後 Scheduler 會預先準備明日排程。兩者都必須保留足夠渲染與網路緩衝，不應改成造成裝置高頻輪詢的值。宿主機 Volume、Port、映像 Tag、HTTPS Secure Cookie、Docker CPU／RAM／PID 上限與 logging driver 必須在容器啟動前由 `.env`／Compose 決定；容器內程式不應取得 Docker socket 去改寫宿主機。設定頁會只讀顯示目前部署資訊。
+
+### PhotoPainter Enhanced 排程操作邊界
+
+- `inktime_offline_schedule` 一律搭配 `offline_prefetch_allowed=true`；`legacy_online` 與 `stock_compat` 一律是 `false`。建立或 PATCH 省略 prefetch 欄位時由模式自動正規化；明確矛盾值回 `400 DEVICE-008`。
+- `schedule_not_ready` 的 `retry_after_epoch` 會留在今日剩餘 Slot 之前；`next_slot_epoch` 可供韌體再次驗證。今日沒有剩餘 Slot 才會回明日第一個 prepare point，不能把 07:50 的今日 08:00／12:00 排程直接跳到明日。
+- 本地 20:00 後，今日若沒有 `slot.show_at > local_now`，Scheduler 只建立 tomorrow；今日仍有未來 Slot 才同時確保 today + tomorrow。重複 tick 依 dedupe key 不新增重複工作。
+- `local_next` 是無網路的本地預覽；每按一次依 NVS 的 `preview_schedule_id`／`preview_slot_index` 循環下一張，重複 SHA 會跳過。它不消耗正式 Slot、不改 Queue／current/LKG、不寫 terminal ACK 或 ACK journal；正式 timer wake 不受此 cursor 影響。
 
 ## 繁體中文字型
 
@@ -122,10 +133,10 @@ deep-sleep 待機電流、完整喚醒週期平均電流、每日刷新次數及
 
 ## 照片評分與門檻
 
-模型會直接輸出回憶、美觀、技術品質與情緒四個 0–100 原始分數。系統另用「評分」頁的四項權重算出 `ranking_score`，並在最愛照片上加入設定的額外分數；原始四項分數不會被覆寫。`analysis.stage_two_threshold` 仍只決定是否進入第二階段，`render.memory_threshold` 仍是電子紙候選的最低回憶分門檻。
+模型一次輸出回憶、美觀、技術品質與情緒四個 0–100 原始分數。系統另用「評分」頁的四項權重算出 `ranking_score`，並在最愛照片上加入設定的額外分數；原始四項分數不會被覆寫。`analysis.stage_two_threshold` 僅保留舊設定讀取相容，`render.memory_threshold` 才是電子紙候選的最低回憶分門檻。
 
-- 改模型：在「設定」調整 `model.low_model`／`model.high_model`，並在「模型」頁設定 Provider。
-- 改第二階段成本與品質取捨：調整 `analysis.stage_two_threshold`。
+- 改模型：在「設定」調整 `model.analysis_model`，並在「模型」頁設定 Provider。
+- 舊版 `model.low_model`／`model.high_model` 與 `analysis.stage_two_threshold` 僅供相容讀取，不會恢復第二次圖片請求。
 - 改電子紙最低回憶分：調整 `render.memory_threshold`。
 - 改模型評分規則或綜合權重：到「評分」頁儲存為新版本；下一次分析立即生效，既有照片不會自動重算。
 - 測試照片：在「評分」頁選一張照片並確認付費請求；暫存檔會在請求結束後刪除，Token、費用與延遲仍寫入成本紀錄。
@@ -140,3 +151,10 @@ deep-sleep 待機電流、完整喚醒週期平均電流、每日刷新次數及
 `display_prepare` 支援且只支援 `display_times`、`lead_minutes`、`daily_count`、`device_ids`、`candidate_years`、`prefetch_count`、`ai_fallback`、`render_fallback`。未知欄位不會被靜默忽略。`device_ids` 解析為實際啟用裝置的 Profile；`daily_count × prefetch_count` 決定候選數量；年份會直接限制 SQL 候選。
 
 人工排除、自動排除、Missing、deleted、路徑逃逸、原始檔缺失或沒有最新分析的照片均不能正式發布。管理員明確指定這類照片會收到 `RENDER-009`，系統不會換成另一張照片。
+
+## PhotoPainter 跨日操作檢查
+
+- API 只使用 `/api/device/v1/offline-schedule?target=current` 或 `?target=next`；不要傳任意日期、`+N` 或 history。current 回應的 `next_target_start_epoch` 與 `next_schedule_prefetch_epoch` 是 server 以 IANA timezone 計算的明日技術截止。
+- Scheduler 在本地 `offline.future_schedule_prepare_hour_local` 與「明日第一 Slot 減 `prefetch_lead_minutes` 與 `offline.server_prefetch_margin_minutes`」兩者較早者到達時準備 tomorrow；today 若仍有晚間 future Slot，兩者可以同時存在。
+- 裝置端先把 tomorrow 寫入 staged-next，不覆寫 active；午夜 RTC promote 前不套用 future rotation、按鍵或 schedule config。只在 promote 後將 00:00 Slot 視為 formal display。
+- `MANIFEST_RECEIVED` 到 `HASH_VERIFIED` 只表示 prefetch，不能當成顯示完成；實際面板刷新前不送 display terminal ACK。`local_next` 只做本地預覽並保留 retry state。

@@ -28,7 +28,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 def test_fresh_database_is_migrated(tmp_path):
     database = Database(tmp_path / "inktime.db")
-    assert migrate(database) == list(range(1, 27))
+    assert migrate(database) == list(range(1, 32))
     assert database.integrity_check() == "ok"
     with database.session() as connection:
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -54,10 +54,14 @@ def test_fresh_database_is_migrated(tmp_path):
         "analysis_batches",
         "analysis_batch_items",
     } <= tables
-    assert tuple(history) == (26, 26)
+    assert tuple(history) == (31, 31)
     with database.session() as connection:
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)").fetchall()}
+        queue_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(device_content_queues)").fetchall()
+        }
     assert {"normalized_username", "session_version", "disabled_at"} <= columns
+    assert {"current_displayed_at", "last_known_good_displayed_at"} <= queue_columns
     with database.session() as connection:
         batch_columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(analysis_batches)").fetchall()
@@ -164,9 +168,203 @@ def test_migration_25_to_batch_lifecycle_is_idempotent(monkeypatch, tmp_path):
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:25])
     migrate(database)
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [26]
+    assert migrate(database, tmp_path / "backups") == [26, 27, 28, 29, 30, 31]
     assert migrate(database, tmp_path / "backups") == []
     assert database.integrity_check() == "ok"
+
+
+def test_migration_27_to_30_freezes_ownership_and_invalidates_legacy_ready_rows(monkeypatch, tmp_path):
+    database = Database(tmp_path / "legacy-offline.db")
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:27])
+    assert migrate(database) == list(range(1, 28))
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO devices(id,name,token_hash,timezone,schedule,created_at,updated_at) "
+            "VALUES ('legacy-device','Legacy PhotoPainter','legacy-token','Asia/Taipei','08:00',datetime('now'),datetime('now'))"
+        )
+        connection.execute(
+            "INSERT INTO releases(id,display_type,width,height,pixel_format,manifest_json,status,created_at,created_by) "
+            "VALUES ('legacy-release','photo',800,480,'4bpp','{}','published',datetime('now'),'migration-test')"
+        )
+        connection.execute(
+            "INSERT INTO releases(id,display_type,width,height,pixel_format,manifest_json,status,created_at,created_by) "
+            "VALUES ('online-release','photo',800,480,'4bpp','{}','published',datetime('now'),'migration-test')"
+        )
+        connection.execute(
+            "INSERT INTO device_content_queues(device_id,depth,queue_version,updated_at) "
+            "VALUES ('legacy-device',3,1,datetime('now'))"
+        )
+        connection.execute(
+            "INSERT INTO device_offline_schedules(id,device_id,target_date,config_version,timezone,status,created_at,updated_at) "
+            "VALUES ('legacy-schedule','legacy-device','2026-08-03',1,'Asia/Taipei','ready',datetime('now'),datetime('now'))"
+        )
+        connection.execute(
+            "INSERT INTO device_content_queue_items(id,device_id,release_id,position,status,delivery_mode,offline_prefetch_allowed,offline_slot,ack_deadline,created_at,updated_at) "
+            "VALUES ('legacy-item','legacy-device','legacy-release',1,'READY','offline_schedule',1,'08:00','2026-08-03T08:10:00+00:00',datetime('now'),datetime('now'))"
+        )
+        connection.execute(
+            "INSERT INTO device_offline_schedule_slots(id,schedule_id,slot_index,show_at,release_id,queue_item_id,sha256,created_at) "
+            "VALUES ('legacy-slot','legacy-schedule',0,'2026-08-03T08:00:00+00:00','legacy-release','legacy-item',?,datetime('now'))",
+            ("a" * 64,),
+        )
+        connection.execute(
+            "INSERT INTO device_content_queue_items(id,device_id,release_id,position,status,delivery_mode,created_at,updated_at) "
+            "VALUES ('online-item','legacy-device','online-release',2,'READY','online_queue',datetime('now'),datetime('now'))"
+        )
+        connection.execute(
+            "INSERT INTO libraries(id,name,root_path,created_at,updated_at) "
+            "VALUES ('legacy-library','Legacy','/photos',datetime('now'),datetime('now'))"
+        )
+        connection.execute(
+            "INSERT INTO photos(id,library_id,relative_path,status,created_at,updated_at) "
+            "VALUES ('legacy-photo','legacy-library','legacy.jpg','analyzed',datetime('now'),datetime('now'))"
+        )
+        connection.execute(
+            "INSERT INTO photo_analysis(photo_id,schema_version,stage,raw_json,created_at) "
+            "VALUES ('legacy-photo',3,'single','{}',datetime('now'))"
+        )
+        analysis_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
+        connection.execute(
+            "INSERT INTO photo_reviews(photo_id,analysis_id,review_state,version,updated_at) "
+            "VALUES ('legacy-photo',?,'exclude',3,datetime('now'))",
+            (analysis_id,),
+        )
+
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
+    assert migrate(database, tmp_path / "backups") == [28, 29, 30, 31]
+    with database.session() as connection:
+        schedule = connection.execute(
+            "SELECT status,panel_profile,rotation,snapshot_json FROM device_offline_schedules WHERE id='legacy-schedule'"
+        ).fetchone()
+        offline_item = connection.execute(
+            "SELECT status,offline_schedule_id,terminal_ack_retention FROM device_content_queue_items WHERE id='legacy-item'"
+        ).fetchone()
+        online_item = connection.execute(
+            "SELECT status,offline_schedule_id FROM device_content_queue_items WHERE id='online-item'"
+        ).fetchone()
+        decision = connection.execute(
+            "SELECT analysis_id,review_state,version FROM photo_reviews WHERE photo_id='legacy-photo' AND analysis_id IS NULL"
+        ).fetchone()
+        cursor = connection.execute(
+            "SELECT id,last_device_id FROM device_offline_prefetch_cursors"
+        ).fetchone()
+    assert tuple(schedule) == ("cancelled", "safe_4c", 0, "{}")
+    assert tuple(offline_item) == ("CANCELLED", "legacy-schedule", None)
+    assert tuple(online_item) == ("READY", None)
+    assert tuple(decision) == (None, "exclude", 3)
+    assert tuple(cursor) == (1, None)
+    with database.session() as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO device_content_queue_items(id,device_id,release_id,position,status,delivery_mode,created_at,updated_at) "
+                "VALUES ('orphan-offline','legacy-device','online-release',3,'READY','offline_schedule',datetime('now'),datetime('now'))"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE device_content_queue_items SET offline_schedule_id='legacy-schedule' WHERE id='online-item'"
+            )
+        schedule_fk = connection.execute(
+            "SELECT on_delete FROM pragma_foreign_key_list('device_content_queue_items') "
+            "WHERE \"table\"='device_offline_schedules' AND \"from\"='offline_schedule_id'"
+        ).fetchone()
+        assert schedule_fk["on_delete"] == "RESTRICT"
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("DELETE FROM device_offline_schedules WHERE id='legacy-schedule'")
+
+
+def test_migration_29_to_30_adds_pointer_times_and_mode_guards_with_backup_restart(monkeypatch, tmp_path):
+    database = Database(tmp_path / "migration-30.db")
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:29])
+    assert migrate(database) == list(range(1, 30))
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO devices(id,name,token_hash,timezone,schedule,created_at,updated_at) "
+            "VALUES ('mode-device','Mode Guard','mode-token','Asia/Taipei','08:00',datetime('now'),datetime('now'))"
+        )
+        connection.execute(
+            "INSERT INTO releases(id,display_type,width,height,pixel_format,manifest_json,status,created_at,created_by) "
+            "VALUES ('mode-release','photo',800,480,'4bpp','{}','published',datetime('now'),'migration-test')"
+        )
+        connection.execute(
+            "INSERT INTO device_content_queues(device_id,depth,queue_version,updated_at) "
+            "VALUES ('mode-device',3,0,datetime('now'))"
+        )
+
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
+    backups = tmp_path / "backups"
+    assert migrate(database, backups) == [30, 31]
+    backup_files = list(backups.glob("*.sqlite3"))
+    assert len(backup_files) == 1
+    with sqlite3.connect(backup_files[0]) as backup:
+        assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+    with database.session() as connection:
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(device_content_queues)").fetchall()
+        }
+        connection.execute(
+            "UPDATE devices SET delivery_mode='inktime_offline_schedule',offline_prefetch_allowed=1 "
+            "WHERE id='mode-device'"
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="QUEUE-005"):
+            connection.execute(
+                "INSERT INTO device_content_queue_items(id,device_id,release_id,position,status,delivery_mode,created_at,updated_at) "
+                "VALUES ('blocked-online','mode-device','mode-release',1,'READY','online_queue',datetime('now'),datetime('now'))"
+            )
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert {"current_displayed_at", "last_known_good_displayed_at"} <= columns
+    assert migrate(database, backups) == []
+
+
+def test_migration_31_repairs_delivery_prefetch_and_guards_insert_update(monkeypatch, tmp_path):
+    database = Database(tmp_path / "migration-31.db")
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:30])
+    assert migrate(database) == list(range(1, 31))
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO devices(id,name,token_hash,timezone,schedule,delivery_mode,offline_prefetch_allowed,created_at,updated_at) "
+            "VALUES ('enhanced-legacy','Enhanced legacy','token-a','Asia/Taipei','08:00','inktime_offline_schedule',0,datetime('now'),datetime('now'))"
+        )
+        connection.execute(
+            "INSERT INTO devices(id,name,token_hash,timezone,schedule,delivery_mode,offline_prefetch_allowed,created_at,updated_at) "
+            "VALUES ('online-legacy','Online legacy','token-b','Asia/Taipei','08:00','legacy_online',1,datetime('now'),datetime('now'))"
+        )
+
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
+    backups = tmp_path / "backups"
+    assert migrate(database, backups) == [31]
+    backup_files = list(backups.glob("*.sqlite3"))
+    assert len(backup_files) == 1
+    with sqlite3.connect(backup_files[0]) as backup:
+        assert backup.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+    with database.session() as connection:
+        repaired = connection.execute(
+            "SELECT id,delivery_mode,offline_prefetch_allowed FROM devices WHERE id IN ('enhanced-legacy','online-legacy') ORDER BY id"
+        ).fetchall()
+        assert [tuple(row) for row in repaired] == [
+            ("enhanced-legacy", "inktime_offline_schedule", 1),
+            ("online-legacy", "legacy_online", 0),
+        ]
+        with pytest.raises(sqlite3.IntegrityError, match="DEVICE-008"):
+            connection.execute(
+                "INSERT INTO devices(id,name,token_hash,timezone,schedule,delivery_mode,offline_prefetch_allowed,created_at,updated_at) "
+                "VALUES ('blocked-device','Blocked','token-c','Asia/Taipei','08:00','legacy_online',1,datetime('now'),datetime('now'))"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="DEVICE-008"):
+            connection.execute(
+                "UPDATE devices SET delivery_mode='inktime_offline_schedule',offline_prefetch_allowed=0 WHERE id='online-legacy'"
+            )
+        connection.execute(
+            "UPDATE devices SET delivery_mode='inktime_offline_schedule',offline_prefetch_allowed=1 WHERE id='online-legacy'"
+        )
+        connection.execute(
+            "UPDATE devices SET delivery_mode='stock_compat',offline_prefetch_allowed=0 WHERE id='online-legacy'"
+        )
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert migrate(database, backups) == []
 
 
 def test_existing_photo_scores_table_is_preserved(tmp_path):
@@ -243,7 +441,7 @@ def test_concurrent_migrations_are_serialized(tmp_path):
     database = Database(tmp_path / "inktime.db")
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _index: migrate(database), range(2)))
-        assert sorted(results, key=len) == [[], list(range(1, 27))]
+        assert sorted(results, key=len) == [[], list(range(1, 32))]
     assert database.integrity_check() == "ok"
 
 
@@ -442,7 +640,7 @@ def test_v10_photo_state_and_analysis_survive_scheduler_upgrade(monkeypatch, tmp
         )
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == list(range(11, 27))
+    assert migrate(database, tmp_path / "backups") == list(range(11, 32))
     with database.session() as connection:
         photo = connection.execute(
             "SELECT favorite,status,lifecycle_status,metadata_status,local_features_status FROM photos WHERE id='photo'"
@@ -469,7 +667,7 @@ def test_migration_21_upgrades_v20_webhooks_idempotently(monkeypatch, tmp_path):
         notification_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [21, 22, 23, 24, 25, 26]
+    assert migrate(database, tmp_path / "backups") == [21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
     assert migrate(database, tmp_path / "backups") == []
     assert database.integrity_check() == "ok"
     with database.session() as connection:

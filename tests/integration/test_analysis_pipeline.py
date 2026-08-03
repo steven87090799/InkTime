@@ -8,11 +8,13 @@ import pytest
 
 from inktime.app.domain.photos import PhotoPreprocessor, ThumbnailCache
 from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
+from inktime.app.providers.openai_compatible import ProviderHTTPError
 from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.analysis import PhotoAnalysisService
 from inktime.app.domain.analysis.plan import fingerprint
+from inktime.app.domain.analysis.schema import AnalysisValidationError
 from inktime.app.workers.scanner import PhotoScanner
 from tests.conftest import create_admin
 from tests.unit.test_analysis_schema import valid_result
@@ -64,6 +66,14 @@ class FailingProvider(MockProvider):
         raise RuntimeError("provider unavailable")
 
 
+class AmbiguousProvider(MockProvider):
+    name = "Ambiguous Provider"
+
+    def analyze(self, **kwargs):
+        self.analyze_calls += 1
+        raise ProviderHTTPError("response lost after vision POST", "VLM-AMBIGUOUS", ambiguous=True)
+
+
 def prepare(app, tmp_path, duplicate=False):
     root = tmp_path / "photos"
     root.mkdir()
@@ -91,6 +101,25 @@ def test_single_model_call_returns_all_fields_and_usage(app, tmp_path):
     with app.extensions["inktime_database"].session() as connection:
         usage = connection.execute("SELECT input_tokens,output_tokens FROM api_usage").fetchone()
     assert tuple(usage) == (1000, 100)
+
+
+def test_ambiguous_vision_failure_is_persisted_without_provider_failover(app, tmp_path):
+    _, ids, service = prepare(app, tmp_path)
+    provider = AmbiguousProvider([])
+
+    with pytest.raises(ProviderHTTPError):
+        service.analyze_photo(
+            photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock"
+        )
+
+    assert provider.analyze_calls == 1
+    with app.extensions["inktime_database"].session() as connection:
+        outcome = connection.execute(
+            "SELECT outcome,requires_manual_confirmation,error_code FROM analysis_request_outcomes "
+            "WHERE photo_id=? ORDER BY id DESC LIMIT 1",
+            (ids[0],),
+        ).fetchone()
+    assert tuple(outcome) == ("ambiguous_failed", 1, "VLM-AMBIGUOUS")
 
 
 def test_provider_and_local_results_persist_a_complete_analysis_context(app, tmp_path):
@@ -161,7 +190,110 @@ def test_invalid_json_is_repaired_only_once_without_second_image_call(app, tmp_p
     assert provider.repair_calls == 1
 
 
-def test_smart_stage_filters_low_value_photo(app, tmp_path):
+def test_invalid_repair_container_fails_without_a_second_vision_request(app, tmp_path):
+    _, ids, service = prepare(app, tmp_path)
+    provider = MockProvider(["[]", "{}"])
+    with pytest.raises(AnalysisValidationError):
+        service.analyze_photo(
+            photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock"
+        )
+    assert provider.analyze_calls == 1
+    assert provider.repair_calls == 1
+
+
+def test_router_does_not_fail_over_after_initial_vision_and_repair_failure(app, tmp_path):
+    _, ids, service = prepare(app, tmp_path)
+    first = MockProvider(["[]", "{}"])
+    first.provider_id = "first-vision"
+    second = MockProvider([valid_result()])
+    second.provider_id = "second-vision"
+    router = FailoverVisionProvider(
+        [ProviderChannel(first, priority=1), ProviderChannel(second, priority=2)],
+        failure_threshold=1,
+    )
+
+    with pytest.raises(AnalysisValidationError):
+        service.analyze_photo(
+            photo_id=ids[0], job_id=None, provider=router, strategy="high_quality", high_model="mock"
+        )
+
+    assert first.analyze_calls == 1
+    assert first.repair_calls == 1
+    assert second.analyze_calls == 0
+
+
+def test_full_analysis_hits_historical_v2_cache_without_an_image_call(app, tmp_path):
+    _, ids, service = prepare(app, tmp_path)
+    first = MockProvider([valid_result()])
+    service.analyze_photo(
+        photo_id=ids[0],
+        job_id=None,
+        provider=first,
+        strategy="high_quality",
+        high_model="mock",
+        force_ai=True,
+    )
+    repository = app.extensions["inktime_photo_repository"]
+    with app.extensions["inktime_database"].session() as connection:
+        analysis = connection.execute(
+            "SELECT p.sha256 AS content_sha256,a.provider,a.model,a.prompt_version,a.schema_kind,"
+            "a.analysis_spec_json,a.vision_input_spec_json "
+            "FROM photo_analysis a JOIN photos p ON p.id=a.photo_id "
+            "WHERE a.photo_id=? ORDER BY a.id DESC LIMIT 1",
+            (ids[0],),
+        ).fetchone()
+        cached = connection.execute(
+            "SELECT result_json,raw_json,input_tokens,output_tokens,cached_tokens,estimated_cost,latency_ms "
+            "FROM ai_analysis_cache WHERE content_sha256=? ORDER BY created_at DESC LIMIT 1",
+            (analysis["content_sha256"],),
+        ).fetchone()
+    assert cached is not None
+    analysis_spec = json.loads(analysis["analysis_spec_json"])
+    vision_input = json.loads(analysis["vision_input_spec_json"])
+    legacy_fingerprint = fingerprint(
+        {
+            "content_sha256": analysis["content_sha256"],
+            "actual_provider": analysis["provider"],
+            "model": analysis["model"],
+            "prompt_version": analysis["prompt_version"],
+            "schema_kind": analysis["schema_kind"],
+            "reasoning_effort": analysis_spec["reasoning_effort"],
+            **vision_input,
+            "schema_version": 2,
+        }
+    )
+    repository.put_ai_cache(
+        content_sha256=analysis["content_sha256"],
+        provider=analysis["provider"],
+        model_name=analysis["model"],
+        prompt_version=analysis["prompt_version"],
+        schema_version=2,
+        schema_kind=analysis["schema_kind"],
+        result=json.loads(cached["result_json"]),
+        raw_json=cached["raw_json"],
+        input_tokens=cached["input_tokens"],
+        output_tokens=cached["output_tokens"],
+        cached_tokens=cached["cached_tokens"],
+        estimated_cost=cached["estimated_cost"],
+        latency_ms=cached["latency_ms"],
+        vision_request_fingerprint=legacy_fingerprint,
+        vision_input_spec_json=analysis["vision_input_spec_json"],
+    )
+
+    second = MockProvider([])
+    result = service.analyze_photo(
+        photo_id=ids[0],
+        job_id=None,
+        provider=second,
+        strategy="high_quality",
+        high_model="mock",
+        force_ai=True,
+    )
+    assert result["stage"] == "cache"
+    assert second.analyze_calls == 0
+
+
+def test_legacy_smart_strategy_uses_the_single_full_contract(app, tmp_path):
     _, ids, service = prepare(app, tmp_path)
     provider = MockProvider([valid_result(memory_score=40, types=["雜物"])])
     result = service.analyze_photo(
@@ -172,7 +304,7 @@ def test_smart_stage_filters_low_value_photo(app, tmp_path):
         low_model="cheap",
         high_model="quality",
     )
-    assert result["stage"] == "stage_one"
+    assert result["stage"] == "single"
     assert provider.analyze_calls == 1
 
 
@@ -202,7 +334,7 @@ def test_failover_rebuilds_cache_identity_for_the_next_provider(app, tmp_path):
         photo_id=ids[0], job_id=None, provider=router, strategy="high_quality", analysis_plan=plan
     )
 
-    assert result["stage"] == "single_high"
+    assert result["stage"] == "single"
     assert failing.analyze_calls == 1
     assert succeeding.analyze_calls == 1
     with app.extensions["inktime_database"].session() as connection:
@@ -287,13 +419,13 @@ def test_worker_context_does_not_inherit_a_different_frozen_plan(app, tmp_path):
     service.analyze_photo(
         photo_id=ids[0], job_id=None, provider=first, strategy="high_quality", analysis_plan=first_plan
     )
-    settings.update("model.high_model", "new-model", changed_by="test", source_ip="127.0.0.1")
+    settings.update("model.analysis_model", "new-model", changed_by="test", source_ip="127.0.0.1")
     second_plan = service.build_plan(strategy="high_quality", provider_route=[], scoring_profile=profile)
     second = MockProvider([valid_result(memory_score=77)])
     result = service.analyze_photo(
         photo_id=ids[1], job_id=None, provider=second, strategy="high_quality", analysis_plan=second_plan
     )
-    assert result["stage"] == "single_high"
+    assert result["stage"] == "single"
     assert second.analyze_calls == 1
 
 

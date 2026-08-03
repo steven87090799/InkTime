@@ -22,7 +22,7 @@ from inktime.app.repositories.jobs import PreviewCapacityError
 from inktime.app.services.render_cache import BoundedRenderCache
 from inktime.app.services.weather import WeatherService
 from inktime.app.workers.job_worker import BoundedJobWorker
-from inktime.app.workers.process_boundary import KillableProcessBoundary, ProcessCallTimeout
+from inktime.app.workers.process_boundary import KillableProcessBoundary, ProcessCallError, ProcessCallTimeout
 
 
 def _hang(_item):
@@ -105,6 +105,20 @@ class _ProviderHandler(BaseHTTPRequestHandler):
         ).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, _format, *_args):
+        return None
+
+
+class _InvalidVisionResponseHandler(BaseHTTPRequestHandler):
+    def do_POST(self):  # noqa: N802 - stdlib callback name
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        payload = b"not-json"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
@@ -287,6 +301,38 @@ def test_four_parent_threads_use_spawned_provider_children_without_inheriting_se
     assert not [
         child for child in multiprocessing.active_children() if child.name == "inktime-provider-child"
     ]
+
+
+def test_isolated_vision_failure_preserves_no_failover_metadata(tmp_path: Path):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _InvalidVisionResponseHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    image = tmp_path / "provider-invalid.jpg"
+    Image.new("RGB", (8, 8), "white").save(image)
+    provider = OpenAICompatibleProvider(
+        name="isolated-invalid",
+        base_url=f"http://127.0.0.1:{server.server_port}",
+        api_key="",
+        timeout=5,
+        session=_ForbiddenParentSession(),
+    )
+    router = FailoverVisionProvider([ProviderChannel(provider=provider)])
+    boundary = KillableProcessBoundary(max_processes=1)
+    try:
+        with pytest.raises(ProcessCallError) as raised:
+            router.analyze_isolated(
+                boundary,
+                image_path=image,
+                model="test-model",
+                detail="low",
+                stage="stage_one",
+            )
+        assert raised.value.vision_started is True
+        assert raised.value.ambiguous is True
+    finally:
+        boundary.shutdown()
+        server.shutdown()
+        server.server_close()
 
 
 def test_provider_without_serializable_spec_uses_cooperative_timeout():

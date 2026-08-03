@@ -4,6 +4,7 @@
 
 #if INKTIME_PHOTOPAINTER_ENABLED
 
+#include <Arduino.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <time.h>
@@ -31,6 +32,12 @@ class PhotoPainterSupport {
   bool loadCachedFrame(
     uint32_t sourceHash,
     DisplayRotation rotation,
+    uint8_t** output,
+    const char* sourceSha256 = nullptr
+  );
+  bool loadFormalFrame(
+    const char* sourceSha256,
+    DisplayRotation rotation,
     uint8_t** output
   );
   bool convertAndCache(
@@ -39,8 +46,21 @@ class PhotoPainterSupport {
     bool indexed4,
     uint32_t sourceHash,
     DisplayRotation rotation,
-    uint8_t** output
+    uint8_t** output,
+    const char* sourceSha256 = nullptr
   );
+  bool writeFormalFrame(
+    const char* sourceSha256,
+    DisplayRotation rotation,
+    const uint8_t* framebuffer,
+    size_t length
+  );
+  bool writeActiveSchedule(const char* json, size_t length);
+  bool readActiveSchedule(String& json);
+  bool writeStagedNextSchedule(const char* json, size_t length);
+  bool readStagedNextSchedule(String& json);
+  bool clearStagedNextSchedule();
+  bool promoteStagedNextSchedule();
   bool displayFrame(const uint8_t* framebuffer, size_t length);
 
   bool writeRtc(time_t epoch);

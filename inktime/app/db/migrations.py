@@ -1121,6 +1121,548 @@ MIGRATIONS = (
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_analysis_batches_remote_id ON analysis_batches(remote_batch_id) WHERE remote_batch_id IS NOT NULL",
             "CREATE INDEX IF NOT EXISTS idx_batch_items_custom_id ON analysis_batch_items(custom_id)",
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_photo_analysis_batch_once ON photo_analysis(job_id,photo_id,analysis_fingerprint) WHERE analysis_source='analysis_batch' AND job_id IS NOT NULL AND analysis_fingerprint IS NOT NULL",
+            "CREATE INDEX IF NOT EXISTS idx_photo_analysis_photo_id ON photo_analysis(photo_id,id DESC)",
+        ),
+    ),
+    Migration(
+        27,
+        "加入人工 Review、Stock 相容與離線排程契約",
+        (
+            "ALTER TABLE photos ADD COLUMN review_taken_at TEXT",
+            "ALTER TABLE photos ADD COLUMN review_date_source TEXT NOT NULL DEFAULT 'captured_at'",
+            "ALTER TABLE devices ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'legacy_online' CHECK(delivery_mode IN ('legacy_online','stock_compat','inktime_offline_schedule'))",
+            "ALTER TABLE devices ADD COLUMN offline_prefetch_allowed INTEGER NOT NULL DEFAULT 0 CHECK(offline_prefetch_allowed IN (0,1))",
+            "ALTER TABLE devices ADD COLUMN offline_schedule_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE devices ADD COLUMN offline_schedule_version INTEGER NOT NULL DEFAULT 0 CHECK(offline_schedule_version >= 0)",
+            "ALTER TABLE devices ADD COLUMN last_offline_slot TEXT",
+            "ALTER TABLE devices ADD COLUMN schedule_times_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE devices ADD COLUMN prefetch_lead_minutes INTEGER NOT NULL DEFAULT 5 CHECK(prefetch_lead_minutes BETWEEN 0 AND 120)",
+            "ALTER TABLE devices ADD COLUMN button_wake_action TEXT NOT NULL DEFAULT 'check_new' CHECK(button_wake_action IN ('check_new','local_next'))",
+            "ALTER TABLE devices ADD COLUMN stock_endpoint_host TEXT",
+            "ALTER TABLE device_content_queue_items ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'online_queue' CHECK(delivery_mode IN ('online_queue','offline_schedule'))",
+            "ALTER TABLE device_content_queue_items ADD COLUMN offline_prefetch_allowed INTEGER NOT NULL DEFAULT 0 CHECK(offline_prefetch_allowed IN (0,1))",
+            "ALTER TABLE device_content_queue_items ADD COLUMN offline_slot TEXT",
+            "ALTER TABLE device_content_queue_items ADD COLUMN ack_deadline TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_photos_review_taken ON photos(review_taken_at,id)",
+            "CREATE INDEX IF NOT EXISTS idx_photos_review_date_source ON photos(review_date_source,review_taken_at,id)",
+            "CREATE INDEX IF NOT EXISTS idx_devices_delivery_mode ON devices(delivery_mode,enabled,id)",
+            "CREATE INDEX IF NOT EXISTS idx_queue_items_offline_slot ON device_content_queue_items(device_id,delivery_mode,offline_slot,status)",
+            "CREATE INDEX IF NOT EXISTS idx_devices_schedule_times ON devices(delivery_mode,enabled,prefetch_lead_minutes,id)",
+            """
+            UPDATE photos
+            SET review_taken_at=COALESCE(captured_at,created_at),
+                review_date_source=CASE WHEN captured_at IS NULL THEN 'created_at' ELSE 'captured_at' END
+            WHERE review_taken_at IS NULL
+            """,
+            """
+            UPDATE devices
+            SET schedule_times_json=CASE
+                    WHEN schedule_times_json='[]' THEN json_array(COALESCE(schedule,'08:00'))
+                    ELSE schedule_times_json
+                END,
+                offline_schedule_json=CASE
+                    WHEN offline_schedule_json='[]' THEN json_array(COALESCE(schedule,'08:00'))
+                    ELSE offline_schedule_json
+                END
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS device_offline_schedules (
+                id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                target_date TEXT NOT NULL,
+                config_version INTEGER NOT NULL,
+                timezone TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('preparing','ready','failed','cancelled')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(device_id,target_date,config_version)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS device_offline_schedule_slots (
+                id TEXT PRIMARY KEY,
+                schedule_id TEXT NOT NULL REFERENCES device_offline_schedules(id) ON DELETE CASCADE,
+                slot_index INTEGER NOT NULL CHECK(slot_index >= 0),
+                show_at TEXT NOT NULL,
+                release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE RESTRICT,
+                queue_item_id TEXT NOT NULL REFERENCES device_content_queue_items(id) ON DELETE RESTRICT,
+                sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(schedule_id,slot_index),
+                UNIQUE(schedule_id,show_at)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_offline_schedules_device_date ON device_offline_schedules(device_id,target_date,status)",
+            "CREATE INDEX IF NOT EXISTS idx_offline_schedule_slots_schedule_index ON device_offline_schedule_slots(schedule_id,slot_index)",
+            """
+            CREATE TABLE IF NOT EXISTS photo_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                analysis_id INTEGER REFERENCES photo_analysis(id) ON DELETE CASCADE,
+                review_state TEXT NOT NULL DEFAULT 'unreviewed'
+                    CHECK(review_state IN ('unreviewed','keep','exclude','needs_review')),
+                caption_override TEXT,
+                candidate_pool INTEGER NOT NULL DEFAULT 0 CHECK(candidate_pool IN (0,1)),
+                note TEXT,
+                understanding_incorrect INTEGER NOT NULL DEFAULT 0 CHECK(understanding_incorrect IN (0,1)),
+                caption_bad INTEGER NOT NULL DEFAULT 0 CHECK(caption_bad IN (0,1)),
+                scores_unreasonable INTEGER NOT NULL DEFAULT 0 CHECK(scores_unreasonable IN (0,1)),
+                accepted_at TEXT,
+                version INTEGER NOT NULL DEFAULT 0 CHECK(version >= 0),
+                updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(photo_id,analysis_id)
+            )
+            """,
+            """
+            INSERT OR IGNORE INTO photo_reviews(photo_id,analysis_id,review_state,candidate_pool,version,updated_at)
+            SELECT p.id,latest.id,
+                   CASE
+                       WHEN p.exclusion_status='manually_excluded' THEN 'exclude'
+                       WHEN p.exclusion_status='pending_review' THEN 'needs_review'
+                       ELSE 'unreviewed'
+                   END,
+                   CASE WHEN p.eligible=1 AND p.lifecycle_status='active' THEN 1 ELSE 0 END,
+                   0,
+                   COALESCE(p.updated_at,datetime('now'))
+            FROM photos p
+            JOIN (SELECT photo_id,MAX(id) AS id FROM photo_analysis GROUP BY photo_id) latest
+              ON latest.photo_id=p.id
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_photo_reviews_state ON photo_reviews(review_state,updated_at,photo_id)",
+            "CREATE INDEX IF NOT EXISTS idx_photo_reviews_candidate ON photo_reviews(candidate_pool,review_state,photo_id)",
+            "CREATE INDEX IF NOT EXISTS idx_photo_reviews_analysis ON photo_reviews(analysis_id,review_state,photo_id)",
+            "CREATE INDEX IF NOT EXISTS idx_photo_reviews_feedback ON photo_reviews(understanding_incorrect,caption_bad,scores_unreasonable,photo_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_photo_reviews_without_analysis ON photo_reviews(photo_id) WHERE analysis_id IS NULL",
+            """
+            CREATE TABLE IF NOT EXISTS photo_review_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                analysis_id INTEGER REFERENCES photo_analysis(id) ON DELETE CASCADE,
+                action TEXT NOT NULL,
+                before_json TEXT NOT NULL DEFAULT '{}',
+                after_json TEXT NOT NULL DEFAULT '{}',
+                actor_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+                client_version INTEGER,
+                created_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_photo_review_events_photo ON photo_review_events(photo_id,created_at DESC,id DESC)",
+            """
+            CREATE TABLE IF NOT EXISTS analysis_request_outcomes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,
+                job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+                provider TEXT,
+                model TEXT,
+                request_fingerprint TEXT NOT NULL,
+                outcome TEXT NOT NULL CHECK(outcome IN ('completed','ambiguous_failed','failed')),
+                error_code TEXT,
+                error_message TEXT,
+                requires_manual_confirmation INTEGER NOT NULL DEFAULT 0 CHECK(requires_manual_confirmation IN (0,1)),
+                created_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_analysis_request_outcomes_photo ON analysis_request_outcomes(photo_id,created_at DESC,id DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_analysis_request_outcomes_fingerprint ON analysis_request_outcomes(request_fingerprint,created_at DESC)",
+        ),
+    ),
+    Migration(
+        28,
+        "加入離線排程不可變快照、佇列歸屬與延遲 ACK 保留",
+        (
+            # Migration 27 schedules were built from live device settings.  A
+            # ready row from that version is therefore never trusted as a
+            # device-consumable schedule.
+            "ALTER TABLE device_offline_schedules ADD COLUMN panel_profile TEXT NOT NULL DEFAULT 'safe_4c'",
+            "ALTER TABLE device_offline_schedules ADD COLUMN rotation INTEGER NOT NULL DEFAULT 0 CHECK(rotation IN (0,180))",
+            "ALTER TABLE device_offline_schedules ADD COLUMN schedule_times_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE device_offline_schedules ADD COLUMN prefetch_lead_minutes INTEGER NOT NULL DEFAULT 5 CHECK(prefetch_lead_minutes BETWEEN 0 AND 120)",
+            "ALTER TABLE device_offline_schedules ADD COLUMN button_wake_action TEXT NOT NULL DEFAULT 'check_new' CHECK(button_wake_action IN ('check_new','local_next'))",
+            "ALTER TABLE device_offline_schedules ADD COLUMN offline_schedule_version INTEGER NOT NULL DEFAULT 0 CHECK(offline_schedule_version >= 0)",
+            "ALTER TABLE device_offline_schedules ADD COLUMN snapshot_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE device_content_queue_items ADD COLUMN offline_schedule_id TEXT REFERENCES device_offline_schedules(id) ON DELETE SET NULL",
+            "ALTER TABLE device_content_queue_items ADD COLUMN terminal_ack_retention TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_queue_items_offline_schedule_status ON device_content_queue_items(device_id,offline_schedule_id,status)",
+            "CREATE INDEX IF NOT EXISTS idx_offline_schedules_exact_ready ON device_offline_schedules(device_id,target_date,config_version,status,updated_at)",
+            "CREATE TABLE IF NOT EXISTS device_offline_prefetch_cursors (id INTEGER PRIMARY KEY CHECK(id=1),last_device_id TEXT,updated_at TEXT NOT NULL)",
+            "INSERT OR IGNORE INTO device_offline_prefetch_cursors(id,updated_at) VALUES (1,datetime('now'))",
+            "UPDATE device_offline_schedules SET status='cancelled',updated_at=datetime('now') WHERE status='ready'",
+            """
+            UPDATE device_content_queue_items
+            SET offline_schedule_id=(SELECT schedule_id FROM device_offline_schedule_slots s WHERE s.queue_item_id=device_content_queue_items.id)
+            WHERE delivery_mode='offline_schedule' AND offline_schedule_id IS NULL
+            """,
+            """
+            UPDATE device_content_queue_items
+            SET status='CANCELLED',updated_at=datetime('now')
+            WHERE delivery_mode='offline_schedule' AND offline_schedule_id IN (SELECT id FROM device_offline_schedules WHERE status='cancelled')
+              AND status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')
+            """,
+            """
+            UPDATE device_content_queue_items
+            SET status='CANCELLED',updated_at=datetime('now')
+            WHERE delivery_mode='offline_schedule' AND offline_schedule_id IS NULL
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_queue_offline_schedule_owner_insert
+            BEFORE INSERT ON device_content_queue_items
+            WHEN NEW.delivery_mode='offline_schedule' AND (NEW.offline_schedule_id IS NULL OR NOT EXISTS(
+                SELECT 1 FROM device_offline_schedules s WHERE s.id=NEW.offline_schedule_id AND s.device_id=NEW.device_id))
+            BEGIN SELECT RAISE(ABORT,'QUEUE-005 offline queue item requires matching offline_schedule_id'); END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_queue_offline_schedule_owner_update
+            BEFORE UPDATE OF delivery_mode,offline_schedule_id,device_id ON device_content_queue_items
+            WHEN NEW.delivery_mode='offline_schedule' AND (NEW.offline_schedule_id IS NULL OR NOT EXISTS(
+                SELECT 1 FROM device_offline_schedules s WHERE s.id=NEW.offline_schedule_id AND s.device_id=NEW.device_id))
+            BEGIN SELECT RAISE(ABORT,'QUEUE-005 offline queue item requires matching offline_schedule_id'); END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_queue_online_schedule_owner
+            BEFORE INSERT ON device_content_queue_items
+            WHEN NEW.delivery_mode='online_queue' AND NEW.offline_schedule_id IS NOT NULL
+            BEGIN SELECT RAISE(ABORT,'QUEUE-005 online queue item cannot own offline schedule'); END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_queue_online_schedule_owner_update
+            BEFORE UPDATE OF delivery_mode,offline_schedule_id ON device_content_queue_items
+            WHEN NEW.delivery_mode='online_queue' AND NEW.offline_schedule_id IS NOT NULL
+            BEGIN SELECT RAISE(ABORT,'QUEUE-005 online queue item cannot own offline schedule'); END
+            """,
+            # A NULL analysis_id row is the durable photo-level human
+            # decision.  Existing analysis-scoped rows remain feedback for
+            # that analysis and are copied only when they carry a human state.
+            """
+            INSERT OR IGNORE INTO photo_reviews(photo_id,analysis_id,review_state,caption_override,candidate_pool,note,understanding_incorrect,caption_bad,scores_unreasonable,accepted_at,version,updated_by,updated_at)
+            SELECT legacy.photo_id,NULL,legacy.review_state,legacy.caption_override,legacy.candidate_pool,legacy.note,0,0,0,legacy.accepted_at,legacy.version,legacy.updated_by,legacy.updated_at
+            FROM photo_reviews legacy
+            WHERE (legacy.review_state IN ('keep','exclude','needs_review') OR legacy.candidate_pool=1)
+              AND legacy.id=(
+                  SELECT MAX(latest.id) FROM photo_reviews latest
+                  WHERE latest.photo_id=legacy.photo_id
+                    AND (latest.review_state IN ('keep','exclude','needs_review') OR latest.candidate_pool=1)
+              )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_photo_reviews_photo_level ON photo_reviews(photo_id,analysis_id,version DESC)",
+        ),
+    ),
+    Migration(
+        29,
+        "修正離線排程佇列外鍵刪除策略並保留既有資料",
+        (
+            # Migration 28 used ON DELETE SET NULL for the queue item's
+            # schedule owner while the ownership trigger required that owner
+            # to remain non-NULL.  Rebuild the queue and its three dependent
+            # tables together so the stricter RESTRICT contract is real at
+            # the SQLite FK layer, without changing any prior migration.
+            "PRAGMA defer_foreign_keys=ON",
+            "DROP TRIGGER IF EXISTS trg_queue_offline_schedule_owner_insert",
+            "DROP TRIGGER IF EXISTS trg_queue_offline_schedule_owner_update",
+            "DROP TRIGGER IF EXISTS trg_queue_online_schedule_owner",
+            "DROP TRIGGER IF EXISTS trg_queue_online_schedule_owner_update",
+            """
+            CREATE TABLE device_content_queue_items_v29 (
+                id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE RESTRICT,
+                position INTEGER NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 100,
+                display_after TEXT,
+                expires_at TEXT,
+                status TEXT NOT NULL,
+                downloaded_at TEXT,
+                displayed_at TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error_code TEXT,
+                idempotency_key TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                delivery_mode TEXT NOT NULL DEFAULT 'online_queue'
+                    CHECK(delivery_mode IN ('online_queue','offline_schedule')),
+                offline_prefetch_allowed INTEGER NOT NULL DEFAULT 0
+                    CHECK(offline_prefetch_allowed IN (0,1)),
+                offline_slot TEXT,
+                ack_deadline TEXT,
+                offline_schedule_id TEXT REFERENCES device_offline_schedules(id) ON DELETE RESTRICT,
+                terminal_ack_retention TEXT,
+                UNIQUE(device_id,release_id),
+                UNIQUE(device_id,position),
+                UNIQUE(device_id,idempotency_key)
+            )
+            """,
+            """
+            INSERT INTO device_content_queue_items_v29(
+                id,device_id,release_id,position,priority,display_after,expires_at,status,
+                downloaded_at,displayed_at,retry_count,last_error_code,idempotency_key,created_at,updated_at,
+                delivery_mode,offline_prefetch_allowed,offline_slot,ack_deadline,offline_schedule_id,
+                terminal_ack_retention
+            )
+            SELECT
+                id,device_id,release_id,position,priority,display_after,expires_at,status,
+                downloaded_at,displayed_at,retry_count,last_error_code,idempotency_key,created_at,updated_at,
+                delivery_mode,offline_prefetch_allowed,offline_slot,ack_deadline,offline_schedule_id,
+                terminal_ack_retention
+            FROM device_content_queue_items
+            """,
+            """
+            CREATE TABLE device_content_queue_events_v29 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                queue_item_id TEXT NOT NULL REFERENCES device_content_queue_items_v29(id) ON DELETE CASCADE,
+                device_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                idempotency_key TEXT,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                UNIQUE(queue_item_id,event_type,idempotency_key)
+            )
+            """,
+            """
+            INSERT INTO device_content_queue_events_v29(
+                id,queue_item_id,device_id,event_type,idempotency_key,payload_json,created_at
+            )
+            SELECT id,queue_item_id,device_id,event_type,idempotency_key,payload_json,created_at
+            FROM device_content_queue_events
+            """,
+            """
+            CREATE TABLE device_offline_schedule_slots_v29 (
+                id TEXT PRIMARY KEY,
+                schedule_id TEXT NOT NULL REFERENCES device_offline_schedules(id) ON DELETE CASCADE,
+                slot_index INTEGER NOT NULL CHECK(slot_index >= 0),
+                show_at TEXT NOT NULL,
+                release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE RESTRICT,
+                queue_item_id TEXT NOT NULL REFERENCES device_content_queue_items_v29(id) ON DELETE RESTRICT,
+                sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(schedule_id,slot_index),
+                UNIQUE(schedule_id,show_at)
+            )
+            """,
+            """
+            INSERT INTO device_offline_schedule_slots_v29(
+                id,schedule_id,slot_index,show_at,release_id,queue_item_id,sha256,created_at
+            )
+            SELECT id,schedule_id,slot_index,show_at,release_id,queue_item_id,sha256,created_at
+            FROM device_offline_schedule_slots
+            """,
+            """
+            CREATE TABLE rollout_targets_v29 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rollout_id TEXT NOT NULL REFERENCES rollout_campaigns(id) ON DELETE CASCADE,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                status TEXT NOT NULL DEFAULT 'pending',
+                queue_item_id TEXT REFERENCES device_content_queue_items_v29(id) ON DELETE SET NULL,
+                last_error_code TEXT,
+                updated_at TEXT NOT NULL,
+                UNIQUE(rollout_id,device_id)
+            )
+            """,
+            """
+            INSERT INTO rollout_targets_v29(
+                id,rollout_id,device_id,status,queue_item_id,last_error_code,updated_at
+            )
+            SELECT id,rollout_id,device_id,status,queue_item_id,last_error_code,updated_at
+            FROM rollout_targets
+            """,
+            "DROP TABLE device_content_queue_events",
+            "DROP TABLE device_offline_schedule_slots",
+            "DROP TABLE rollout_targets",
+            "DROP TABLE device_content_queue_items",
+            "ALTER TABLE device_content_queue_items_v29 RENAME TO device_content_queue_items",
+            "ALTER TABLE device_content_queue_events_v29 RENAME TO device_content_queue_events",
+            "ALTER TABLE device_offline_schedule_slots_v29 RENAME TO device_offline_schedule_slots",
+            "ALTER TABLE rollout_targets_v29 RENAME TO rollout_targets",
+            "CREATE INDEX idx_queue_items_device_status_position ON device_content_queue_items(device_id,status,position)",
+            "CREATE INDEX idx_queue_items_offline_slot ON device_content_queue_items(device_id,delivery_mode,offline_slot,status)",
+            "CREATE INDEX idx_queue_items_offline_schedule_status ON device_content_queue_items(device_id,offline_schedule_id,status)",
+            "CREATE INDEX idx_offline_schedule_slots_schedule_index ON device_offline_schedule_slots(schedule_id,slot_index)",
+            """
+            CREATE TRIGGER trg_queue_offline_schedule_owner_insert
+            BEFORE INSERT ON device_content_queue_items
+            WHEN NEW.delivery_mode='offline_schedule' AND (NEW.offline_schedule_id IS NULL OR NOT EXISTS(
+                SELECT 1 FROM device_offline_schedules s WHERE s.id=NEW.offline_schedule_id AND s.device_id=NEW.device_id))
+            BEGIN SELECT RAISE(ABORT,'QUEUE-005 offline queue item requires matching offline_schedule_id'); END
+            """,
+            """
+            CREATE TRIGGER trg_queue_offline_schedule_owner_update
+            BEFORE UPDATE OF delivery_mode,offline_schedule_id,device_id ON device_content_queue_items
+            WHEN NEW.delivery_mode='offline_schedule' AND (NEW.offline_schedule_id IS NULL OR NOT EXISTS(
+                SELECT 1 FROM device_offline_schedules s WHERE s.id=NEW.offline_schedule_id AND s.device_id=NEW.device_id))
+            BEGIN SELECT RAISE(ABORT,'QUEUE-005 offline queue item requires matching offline_schedule_id'); END
+            """,
+            """
+            CREATE TRIGGER trg_queue_online_schedule_owner
+            BEFORE INSERT ON device_content_queue_items
+            WHEN NEW.delivery_mode='online_queue' AND NEW.offline_schedule_id IS NOT NULL
+            BEGIN SELECT RAISE(ABORT,'QUEUE-005 online queue item cannot own offline schedule'); END
+            """,
+            """
+            CREATE TRIGGER trg_queue_online_schedule_owner_update
+            BEFORE UPDATE OF delivery_mode,offline_schedule_id ON device_content_queue_items
+            WHEN NEW.delivery_mode='online_queue' AND NEW.offline_schedule_id IS NOT NULL
+            BEGIN SELECT RAISE(ABORT,'QUEUE-005 online queue item cannot own offline schedule'); END
+            """,
+        ),
+    ),
+    Migration(
+        30,
+        "加入顯示指標時間並隔離裝置交付模式",
+        (
+            # Pointer timestamps make DISPLAY_COMPLETED ordering explicit;
+            # NULL is retained for legacy rows whose historical ordering is
+            # not trustworthy.
+            "ALTER TABLE device_content_queues ADD COLUMN current_displayed_at TEXT",
+            "ALTER TABLE device_content_queues ADD COLUMN last_known_good_displayed_at TEXT",
+            # Close any incompatible active rows that pre-date the central
+            # delivery-mode guard, while preserving an auditable queue event.
+            """
+            INSERT OR IGNORE INTO device_content_queue_events(
+                queue_item_id,device_id,event_type,idempotency_key,payload_json,created_at
+            )
+            SELECT qi.id,qi.device_id,'DELIVERY_MODE_TRANSITION_CANCELLED',
+                   'migration30:delivery-mode:' || qi.id,
+                   '{"reason":"migration30_incompatible_delivery_mode"}',datetime('now')
+            FROM device_content_queue_items qi
+            JOIN devices d ON d.id=qi.device_id
+            WHERE qi.status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')
+              AND (
+                  (d.delivery_mode='inktime_offline_schedule' AND qi.delivery_mode='online_queue')
+                  OR (d.delivery_mode<>'inktime_offline_schedule' AND qi.delivery_mode='offline_schedule')
+              )
+            """,
+            """
+            UPDATE device_content_queues
+            SET queue_version=queue_version + (
+                    SELECT COUNT(*)
+                    FROM device_content_queue_items qi
+                    JOIN devices d ON d.id=qi.device_id
+                    WHERE qi.device_id=device_content_queues.device_id
+                      AND qi.status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')
+                      AND (
+                          (d.delivery_mode='inktime_offline_schedule' AND qi.delivery_mode='online_queue')
+                          OR (d.delivery_mode<>'inktime_offline_schedule' AND qi.delivery_mode='offline_schedule')
+                      )
+                ),
+                updated_at=CASE WHEN EXISTS(
+                    SELECT 1
+                    FROM device_content_queue_items qi
+                    JOIN devices d ON d.id=qi.device_id
+                    WHERE qi.device_id=device_content_queues.device_id
+                      AND qi.status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')
+                      AND (
+                          (d.delivery_mode='inktime_offline_schedule' AND qi.delivery_mode='online_queue')
+                          OR (d.delivery_mode<>'inktime_offline_schedule' AND qi.delivery_mode='offline_schedule')
+                      )
+                ) THEN datetime('now') ELSE updated_at END
+            WHERE EXISTS(
+                SELECT 1
+                FROM device_content_queue_items qi
+                JOIN devices d ON d.id=qi.device_id
+                WHERE qi.device_id=device_content_queues.device_id
+                  AND qi.status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')
+                  AND (
+                      (d.delivery_mode='inktime_offline_schedule' AND qi.delivery_mode='online_queue')
+                      OR (d.delivery_mode<>'inktime_offline_schedule' AND qi.delivery_mode='offline_schedule')
+                  )
+            )
+            """,
+            """
+            UPDATE device_content_queue_items
+            SET status='CANCELLED',last_error_code='QUEUE-005',updated_at=datetime('now')
+            WHERE status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')
+              AND EXISTS(
+                  SELECT 1 FROM devices d
+                  WHERE d.id=device_content_queue_items.device_id
+                    AND (
+                        (d.delivery_mode='inktime_offline_schedule' AND device_content_queue_items.delivery_mode='online_queue')
+                        OR (d.delivery_mode<>'inktime_offline_schedule' AND device_content_queue_items.delivery_mode='offline_schedule')
+                    )
+              )
+            """,
+            """
+            UPDATE rollout_targets
+            SET status='cancelled_mode_transition',last_error_code='QUEUE-005',updated_at=datetime('now')
+            WHERE queue_item_id IN (
+                SELECT queue_item_id
+                FROM device_content_queue_events
+                WHERE event_type='DELIVERY_MODE_TRANSITION_CANCELLED'
+                  AND idempotency_key LIKE 'migration30:delivery-mode:%'
+            )
+            """,
+            """
+            CREATE TRIGGER trg_queue_device_delivery_mode_insert
+            BEFORE INSERT ON device_content_queue_items
+            WHEN (
+                NEW.delivery_mode='online_queue' AND EXISTS(
+                    SELECT 1 FROM devices d
+                    WHERE d.id=NEW.device_id AND d.delivery_mode='inktime_offline_schedule'
+                )
+            ) OR (
+                NEW.delivery_mode='offline_schedule' AND NOT EXISTS(
+                    SELECT 1 FROM devices d
+                    WHERE d.id=NEW.device_id
+                      AND d.delivery_mode='inktime_offline_schedule'
+                      AND d.offline_prefetch_allowed=1
+                )
+            )
+            BEGIN SELECT RAISE(ABORT,'QUEUE-005 queue delivery mode incompatible with device'); END
+            """,
+            """
+            CREATE TRIGGER trg_queue_device_delivery_mode_update
+            BEFORE UPDATE OF delivery_mode,device_id ON device_content_queue_items
+            WHEN (
+                NEW.delivery_mode='online_queue' AND EXISTS(
+                    SELECT 1 FROM devices d
+                    WHERE d.id=NEW.device_id AND d.delivery_mode='inktime_offline_schedule'
+                )
+            ) OR (
+                NEW.delivery_mode='offline_schedule' AND NOT EXISTS(
+                    SELECT 1 FROM devices d
+                    WHERE d.id=NEW.device_id
+                      AND d.delivery_mode='inktime_offline_schedule'
+                      AND d.offline_prefetch_allowed=1
+                )
+            )
+            BEGIN SELECT RAISE(ABORT,'QUEUE-005 queue delivery mode incompatible with device'); END
+            """,
+        ),
+    ),
+    Migration(
+        31,
+        "固定裝置交付模式與離線預取契約",
+        (
+            # Repair legacy rows before installing the trigger so an existing
+            # database can upgrade atomically without losing queue history.
+            """
+            UPDATE devices
+            SET offline_prefetch_allowed=CASE
+                    WHEN delivery_mode='inktime_offline_schedule' THEN 1
+                    ELSE 0
+                END,
+                updated_at=datetime('now')
+            WHERE offline_prefetch_allowed != CASE
+                    WHEN delivery_mode='inktime_offline_schedule' THEN 1
+                    ELSE 0
+                END
+            """,
+            """
+            CREATE TRIGGER trg_device_delivery_prefetch_insert
+            BEFORE INSERT ON devices
+            WHEN (NEW.delivery_mode='inktime_offline_schedule' AND NEW.offline_prefetch_allowed<>1)
+              OR (NEW.delivery_mode IN ('legacy_online','stock_compat') AND NEW.offline_prefetch_allowed<>0)
+            BEGIN
+                SELECT RAISE(ABORT,'DEVICE-008 delivery_mode 與 offline_prefetch_allowed 不一致');
+            END
+            """,
+            """
+            CREATE TRIGGER trg_device_delivery_prefetch_update
+            BEFORE UPDATE OF delivery_mode,offline_prefetch_allowed ON devices
+            WHEN (NEW.delivery_mode='inktime_offline_schedule' AND NEW.offline_prefetch_allowed<>1)
+              OR (NEW.delivery_mode IN ('legacy_online','stock_compat') AND NEW.offline_prefetch_allowed<>0)
+            BEGIN
+                SELECT RAISE(ABORT,'DEVICE-008 delivery_mode 與 offline_prefetch_allowed 不一致');
+            END
+            """,
         ),
     ),
 )

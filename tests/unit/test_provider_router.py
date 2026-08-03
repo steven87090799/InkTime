@@ -6,8 +6,9 @@ import time
 import pytest
 
 from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
-from inktime.app.providers.openai_compatible import ProviderHTTPError
+from inktime.app.providers.openai_compatible import OpenAICompatibleProvider, ProviderHTTPError
 from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
+from inktime.app.workers.process_boundary import KillableProcessBoundary, ProcessCallError
 
 
 class StubProvider(VisionProvider):
@@ -167,6 +168,54 @@ def test_isolated_router_keeps_failover_and_repair_on_the_selected_provider():
     assert broken.calls == 1
     assert healthy.calls == 3
     assert boundary.cooperative_calls == 3
+
+
+def test_isolated_process_start_failure_can_fail_over_before_vision_request():
+    broken = OpenAICompatibleProvider(
+        name="broken-isolated",
+        base_url="http://127.0.0.1:1",
+        api_key="",
+        timeout=1,
+    )
+    healthy = StubProvider("healthy-isolated")
+    router = FailoverVisionProvider(
+        [ProviderChannel(broken, priority=1), ProviderChannel(healthy, priority=2)],
+        failure_threshold=1,
+    )
+    boundary = KillableProcessBoundary(max_processes=1)
+
+    class StartFailureProcess:
+        def start(self):
+            raise ProcessCallError("process start failed")
+
+    class StartFailureContext:
+        def __init__(self):
+            import multiprocessing
+
+            self.context = multiprocessing.get_context("spawn")
+
+        def Pipe(self, *, duplex=False):  # noqa: N802 - multiprocessing API
+            return self.context.Pipe(duplex=duplex)
+
+        def Process(self, **_kwargs):  # noqa: N802 - multiprocessing API
+            return StartFailureProcess()
+
+        def get_start_method(self):
+            return self.context.get_start_method()
+
+    boundary._context = StartFailureContext()
+    try:
+        response = router.analyze_isolated(
+            boundary,
+            image_path=Path("unused.jpg"),
+            model="m",
+            detail="low",
+            stage="one",
+        )
+    finally:
+        boundary.shutdown()
+    assert response.content == "{}"
+    assert healthy.calls == 1
 
 
 def test_provider_service_uses_only_frozen_route_and_rejects_changed_members(app):

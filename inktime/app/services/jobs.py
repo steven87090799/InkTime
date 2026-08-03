@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from inktime.app.domain.analysis.plan import normalize_analysis_strategy
 from inktime.app.repositories.jobs import JobRepository
 
 
@@ -8,7 +9,7 @@ class InvalidJobTransition(ValueError):
 
 
 class JobService:
-    STRATEGIES = {"local", "low_cost", "high_quality", "smart_two_stage", "custom"}
+    STRATEGIES = {"local", "single", "low_cost", "high_quality", "single_high", "smart", "smart_two_stage", "custom"}
 
     def __init__(self, repository: JobRepository) -> None:
         self.repository = repository
@@ -32,6 +33,7 @@ class JobService:
     ) -> str:
         if strategy not in self.STRATEGIES:
             raise ValueError("不支援的分析策略")
+        strategy = normalize_analysis_strategy(strategy)
         if budget_limit is not None and budget_limit < 0:
             raise ValueError("預算不可小於零")
         if photo_ids is None:
@@ -88,21 +90,18 @@ class JobService:
         high_cost_per_photo: float = 0.01,
         second_stage_ratio: float = 0.35,
     ) -> dict:
-        first = 0 if strategy == "local" else photo_count
-        second = (
-            photo_count
-            if strategy == "high_quality"
-            else int(photo_count * second_stage_ratio)
-            if strategy == "smart_two_stage"
-            else 0
-        )
-        average = first * low_cost_per_photo + second * high_cost_per_photo
+        normalized = normalize_analysis_strategy(strategy)
+        image_calls = 0 if normalized == "local" else photo_count
+        average = image_calls * high_cost_per_photo
         return {
             "photos": photo_count,
-            "stage_one_photos": first,
-            "stage_two_photos": second,
-            "estimated_input_tokens": first * 1000 + second * 2500,
-            "estimated_output_tokens": first * 180 + second * 500,
+            "image_calls": image_calls,
+            # These names remain in the response for old dashboards; the
+            # second-stage count is permanently zero under the new contract.
+            "stage_one_photos": image_calls,
+            "stage_two_photos": 0,
+            "estimated_input_tokens": image_calls * 2500,
+            "estimated_output_tokens": image_calls * 500,
             "minimum_cost": round(average * 0.7, 4),
             "average_cost": round(average, 4),
             "maximum_cost": round(average * 1.5, 4),

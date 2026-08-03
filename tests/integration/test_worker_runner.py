@@ -278,13 +278,13 @@ def test_runner_uses_the_frozen_job_plan_after_settings_change(app, tmp_path, mo
         analysis_spec=plan,
     )
     settings.update("analysis.ai_mode", "off", changed_by="test", source_ip="127.0.0.1")
-    settings.update("model.high_model", "changed-after-queue", changed_by="test", source_ip="127.0.0.1")
+    settings.update("model.analysis_model", "changed-after-queue", changed_by="test", source_ip="127.0.0.1")
     job_service.start(job_id)
 
     assert WorkerRunner(app).run_once() == 1
     assert app.extensions["inktime_job_repository"].get(job_id)["status"] == "completed"
     assert routed == [(route, plan["scoring_rules"])]
-    assert provider.calls and provider.calls[0]["model"] == plan["high_model"]
+    assert provider.calls and provider.calls[0]["model"] == plan["model"]
     with app.extensions["inktime_database"].session() as connection:
         row = connection.execute(
             "SELECT analysis_fingerprint,analysis_spec_json FROM photo_analysis WHERE photo_id=? ORDER BY id DESC LIMIT 1",

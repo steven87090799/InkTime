@@ -93,7 +93,7 @@ TASK_DEFAULTS: dict[str, dict[str, Any]] = {
             "fixed_times": ["01:00"],
             "night_window": ["00:00", "06:00"],
             "new_photo_delay_minutes": 30,
-            "strategy": "smart_two_stage",
+            "strategy": "single",
             "concurrency": 1,
         },
     },

@@ -264,6 +264,15 @@ def generate_queue(device_id: str):
             maximum=1000,
             error_prefix="QUEUE-001",
         )
+        delivery_mode = str(payload.get("delivery_mode", "online_queue"))
+        if delivery_mode not in {"online_queue", "offline_schedule"}:
+            raise ValueError("QUEUE-005 delivery_mode 不合法")
+        offline_prefetch_allowed = json_bool(
+            payload,
+            "offline_prefetch_allowed",
+            default=delivery_mode == "offline_schedule",
+            error_prefix="QUEUE-005",
+        )
         _repo().ensure_queue(device_id, depth=depth)
         release_id = str(payload.get("release_id", "")).strip()
         item = (
@@ -274,6 +283,12 @@ def generate_queue(device_id: str):
                 display_after=payload.get("display_after"),
                 expires_at=payload.get("expires_at"),
                 idempotency_key=request.headers.get("Idempotency-Key"),
+                delivery_mode=delivery_mode,
+                offline_prefetch_allowed=offline_prefetch_allowed,
+                offline_slot=str(payload.get("offline_slot", "")).strip() or None,
+                ack_deadline=str(payload.get("ack_deadline", "")).strip() or None,
+                offline_schedule_id=str(payload.get("offline_schedule_id", "")).strip() or None,
+                terminal_ack_retention=str(payload.get("terminal_ack_retention", "")).strip() or None,
             )
             if release_id
             else None
@@ -324,6 +339,16 @@ def device_queue_ack():
         if len(skip_reason) > 64:
             raise ValueError("QUEUE-001 skip_reason 過長")
         payload["skip_reason"] = skip_reason
+        ack_mode = str(payload.get("ack_mode", "")).strip()
+        if ack_mode and ack_mode != "delayed_terminal":
+            raise ValueError("QUEUE-005 ack_mode 不合法")
+        if ack_mode == "delayed_terminal":
+            if payload.get("event") not in {"DISPLAY_COMPLETED", "DISPLAY_FAILED"}:
+                raise ValueError("QUEUE-005 delayed_terminal 僅可用於終端顯示 ACK")
+            release_id = str(payload.get("release_id", "")).strip()
+            if not release_id or len(release_id) > 128:
+                raise ValueError("QUEUE-005 delayed_terminal 必須帶合法 release_id")
+        payload["ack_mode"] = ack_mode
         return _repo().queue_ack(device_id=str(device["id"]), payload=payload)
     except PermissionError as exc:
         abort(403, description=str(exc))

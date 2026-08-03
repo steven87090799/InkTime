@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "photopainter_core.h"
+#include "offline_schedule_core.h"
 #include "power_policy.h"
 
 using namespace inktime;
@@ -85,6 +86,169 @@ int main() {
   assert(validateCache(
     header, sourceHash, DisplayRotation::Rotate0,
     nativeFrame.data(), nativeFrame.size()) == CacheValidation::BadRotation);
+
+  CacheHeaderV2 headerV2 = makeCacheHeaderV2(
+    sourceSha, DisplayRotation::Rotate180, nativeFrame.data(), nativeFrame.size());
+  assert(validateCacheV2(
+    headerV2, sourceSha, DisplayRotation::Rotate180,
+    nativeFrame.data(), nativeFrame.size()) == CacheValidation::Valid);
+  assert(validateCacheV2(
+    headerV2, changedSha, DisplayRotation::Rotate180,
+    nativeFrame.data(), nativeFrame.size()) == CacheValidation::BadSource);
+  assert(sha256HexToBytes(sourceSha, headerV2.sourceSha256, kSha256Bytes));
+  static_assert(sizeof(FormalFrameHeader) == 54);
+  FormalFrameHeader formal = makeFormalFrameHeader(
+    sourceSha, DisplayRotation::Rotate180, nativeFrame.data(), nativeFrame.size());
+  assert(validateFormalFrameHeader(
+    formal, sourceSha, DisplayRotation::Rotate180,
+    nativeFrame.data(), nativeFrame.size()) == CacheValidation::Valid);
+  assert(validateFormalFrameHeader(
+    formal, changedSha, DisplayRotation::Rotate180,
+    nativeFrame.data(), nativeFrame.size()) == CacheValidation::BadSource);
+
+  const OfflineSlot slots[] = {{8, 0}, {12, 0}, {16, 0}, {20, 0}};
+  assert(validateOfflineSlots(slots, 4));
+  const OfflineSlot unsorted[] = {{12, 0}, {8, 0}};
+  assert(!validateOfflineSlots(unsorted, 2));
+  const OfflineScheduleContract validSchedule = {
+    1,
+    "inktime_offline_schedule",
+    "2026-08-03",
+    "2026-08-03",
+    "Asia/Taipei",
+    1785686400,
+    1785772800,
+    1785700000,
+    2,
+    1,
+    0,
+    "safe_4c",
+    "gdep073e01_6c",
+    "check_new",
+    4,
+    4,
+    true,
+    true,
+    true,
+  };
+  assert(validOfflineScheduleContract(validSchedule));
+  OfflineScheduleContract staleConfig = validSchedule;
+  staleConfig.configVersion = 0;
+  assert(!validOfflineScheduleContract(staleConfig));
+  OfflineScheduleContract wrongDay = validSchedule;
+  wrongDay.localDate = "2026-08-02";
+  assert(!validOfflineScheduleContract(wrongDay));
+  OfflineScheduleContract futureSchedule = validSchedule;
+  futureSchedule.targetDate = "2026-08-04";
+  assert(!validOfflineScheduleContract(futureSchedule));
+  OfflineScheduleContract rotate180 = validSchedule;
+  rotate180.rotation = 180;
+  assert(validOfflineScheduleContract(rotate180));
+  OfflineScheduleContract malformedDate = validSchedule;
+  malformedDate.targetDate = "2026-99-99";
+  assert(!validOfflineScheduleContract(malformedDate));
+  OfflineScheduleContract invalidIdentity = validSchedule;
+  invalidIdentity.queueIdentityValid = false;
+  assert(!validOfflineScheduleContract(invalidIdentity));
+  OfflineScheduleContract invalidEpochs = validSchedule;
+  invalidEpochs.slotEpochsValid = false;
+  assert(!validOfflineScheduleContract(invalidEpochs));
+  const OfflineNextScheduleContract validNextSchedule = {
+    1,
+    "inktime_offline_schedule",
+    "2026-08-04",
+    "Asia/Taipei",
+    1785772800,
+    1785859200,
+    1785772800,
+    1785700000,
+    2,
+    1,
+    180,
+    "safe_4c",
+    "gdep073e01_6c",
+    "local_next",
+    2,
+    2,
+    true,
+    true,
+    true,
+    true,
+  };
+  assert(validOfflineNextScheduleContract(validNextSchedule));
+  OfflineNextScheduleContract alreadyDueNext = validNextSchedule;
+  alreadyDueNext.nowEpoch = alreadyDueNext.targetStartEpoch;
+  assert(!validOfflineNextScheduleContract(alreadyDueNext));
+  OfflineNextScheduleContract wrongBoundary = validNextSchedule;
+  wrongBoundary.activeTargetEndEpoch -= 1;
+  assert(!validOfflineNextScheduleContract(wrongBoundary));
+  const int64_t dueEpochs[] = {2000, 4000};
+  assert(scheduleHasDueFormalSlot(dueEpochs, 2, 2000));
+  assert(scheduleHasDueFormalSlot(dueEpochs, 2, 2900));
+  assert(!scheduleHasDueFormalSlot(dueEpochs, 2, 3001));
+  int64_t nextPrefetchEpoch = 0;
+  assert(validOfflineNextPrefetchEpoch(100, 200, 400, 2, nextPrefetchEpoch));
+  assert(nextPrefetchEpoch == 280);
+  assert(!validOfflineNextPrefetchEpoch(300, 200, 400, 2, nextPrefetchEpoch));
+  assert(!validOfflineNextPrefetchEpoch(100, 200, 200, 2, nextPrefetchEpoch));
+  OfflineWakePlan wakePlan = {};
+  assert(buildOfflineWakePlan(100, 200, 400, wakePlan));
+  assert(wakePlan.sleepUntilEpoch == 200);
+  assert(exactSleepSeconds(200, 200) == 1);
+  assert(offlineRetryFallbackSeconds(0) == 15U * 60U);
+  assert(offlineRetryFallbackSeconds(1) == 30U * 60U);
+  assert(offlineRetryFallbackSeconds(2) == 60U * 60U);
+  assert(offlineRetryFallbackSeconds(9) == 60U * 60U);
+  assert(validOfflineRetryEpoch(1000, 1001));
+  assert(validOfflineRetryEpoch(1000, 2000, 3000));
+  assert(!validOfflineRetryEpoch(1000, 3000, 3000));
+  assert(!validOfflineRetryEpoch(1000, 4000, 3000));
+  assert(!validOfflineRetryEpoch(1000, 1000));
+  assert(!validOfflineRetryEpoch(1000, 1000 + static_cast<int64_t>(kOfflineRetryMaximumHorizonSeconds) + 1));
+  const OfflineRetryPlan serverRetry = buildOfflineRetryPlan(1000, 2, 2000, 3000);
+  assert(serverRetry.sleepUntilEpoch == 2000);
+  assert(serverRetry.nextAttempt == 0);
+  assert(serverRetry.serverProvided);
+  const OfflineRetryPlan crossedServerRetry = buildOfflineRetryPlan(1000, 0, 4000, 3000);
+  assert(!crossedServerRetry.serverProvided);
+  assert(crossedServerRetry.sleepUntilEpoch < 3000);
+  const OfflineRetryPlan fallbackRetry = buildOfflineRetryPlan(1000, 0, 0);
+  assert(fallbackRetry.sleepUntilEpoch == 1000 + 15U * 60U);
+  assert(fallbackRetry.nextAttempt == 1);
+  assert(!fallbackRetry.serverProvided);
+  const OfflineRetryPlan boundedRetry = buildOfflineRetryPlan(1000, 99, -1);
+  assert(boundedRetry.sleepUntilEpoch == 1000 + 60U * 60U);
+  assert(boundedRetry.nextAttempt == 2);
+  const int64_t previewEpochs[] = {1100, 1200, 1300};
+  const char* previewShas[] = {"sha-b", "sha-c", "sha-d"};
+  int16_t previewCursor = -1;
+  previewCursor = nextOfflinePreviewSlot(
+    previewEpochs, previewShas, 3, previewCursor, 1000, "");
+  assert(previewCursor == 0);
+  previewCursor = nextOfflinePreviewSlot(
+    previewEpochs, previewShas, 3, previewCursor, 1000, "sha-b");
+  assert(previewCursor == 1);
+  previewCursor = nextOfflinePreviewSlot(
+    previewEpochs, previewShas, 3, previewCursor, 1000, "sha-c");
+  assert(previewCursor == 2);
+  previewCursor = nextOfflinePreviewSlot(
+    previewEpochs, previewShas, 3, previewCursor, 1000, "sha-d");
+  assert(previewCursor == 0);
+  const char* samePreviewShas[] = {"same", "same", "same"};
+  assert(nextOfflinePreviewSlot(previewEpochs, samePreviewShas, 3, -1, 1000, "same") == -1);
+  assert(nextOfflinePreviewSlot(previewEpochs, samePreviewShas, 3, 0, 1000, "same") == -1);
+  const OfflineDisplayIntent preview = offlineDisplayIntent(true);
+  assert(preview.manualPreview);
+  assert(!preview.ownsFormalSlot);
+  assert(!preview.emitsTerminalAck);
+  const OfflineDisplayIntent scheduled = offlineDisplayIntent(false);
+  assert(!scheduled.manualPreview);
+  assert(scheduled.ownsFormalSlot);
+  assert(scheduled.emitsTerminalAck);
+  AckJournal journal;
+  assert(journal.remember("release-a:slot-08:00"));
+  assert(journal.contains("release-a:slot-08:00"));
+  assert(journal.size() == 1);
 
   const NetworkBudget batteryBudget = networkBudget(false);
   const NetworkBudget usbBudget = networkBudget(true);
