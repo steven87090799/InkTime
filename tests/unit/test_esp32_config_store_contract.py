@@ -88,6 +88,7 @@ def test_config_load_and_legacy_migration_are_pointer_first_and_fail_closed():
 def test_schedule_recovery_uses_identity_journal_and_fail_closed_metadata():
     firmware = FIRMWARE.read_text(encoding="utf-8")
     support = SUPPORT.read_text(encoding="utf-8")
+    store = STORE.read_text(encoding="utf-8")
     for marker in (
         "reconcilePendingScheduleConfigTransaction",
         "JournalPhase::Prepared",
@@ -102,7 +103,7 @@ def test_schedule_recovery_uses_identity_journal_and_fail_closed_metadata():
         "stagedNextScheduleId()",
         "DEVICE-OFFLINE-SCHEDULE-TXN",
     ):
-        assert marker in firmware or marker in support
+        assert marker in firmware or marker in support or marker in store
     assert "scheduleIdFromJson" in support
     assert "deserializeJson(document, json)" in support
     assert "rawScheduleId.is<const char*>()" in support
@@ -131,7 +132,8 @@ def test_committed_candidate_survives_pointer_repair():
 
 def test_prepared_journal_restores_previous_config():
     store = STORE.read_text(encoding="utf-8")
-    assert "candidate_wins ? journal.prepared_slot : journal.previous_active_slot" in store
+    assert "const char recovery_slot = candidate_wins" in store
+    assert "journal.prepared_slot : journal.previous_active_slot" in store
     assert "schedule_promotion_pending" in store
     assert "if (!schedule_promotion_pending)" in store
 
