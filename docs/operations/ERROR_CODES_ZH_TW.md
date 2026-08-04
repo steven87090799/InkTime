@@ -34,15 +34,15 @@
 | `RENDER-002` | 發布校驗失敗 | 不會更新 latest；舊版本仍可使用 |
 | `RENDER-003` | 顯示 Profile 不支援 | 從 Web 選擇內建四色／GDEP 六色／GDEY 七色 Profile |
 | `RENDER-004` | 抖動、色差或強度不合法 | 檢查 Web 渲染設定範圍 |
-| `DEVICE-001` | 裝置驗證失敗 | 確認 Bearer Token、裝置啟用狀態或重新配對 |
+| `DEVICE-001` | 裝置驗證失敗 | 自動模式確認 Device Secret／credential version 與啟用狀態；Legacy 模式才確認 Bearer Token，必要時重新配對 |
 | `DEVICE-002` | 發布檔案校驗失敗 | 裝置應保留舊畫面並回報失敗 |
 | `DEVICE-CONFIG-PROFILE` | 設定版本倒退或面板 Profile 不相容 | 核對面板、韌體 compile flag 與 Web 裝置設定 |
 | `DEVICE-QUEUE-SCHEMA`／`DEVICE-QUEUE-INTEGER`／`DEVICE-QUEUE-ITEM` | Queue Manifest schema、JSON 型別、Item 歸屬或 URL 不合法 | 核對 Server／Firmware 版本；不得放寬 strict parser |
 | `DEVICE-QUEUE-DOWNLOAD`／`DEVICE-QUEUE-HASH` | Queue body、Content-Type／Length 或 SHA-256 不符 | 保留舊畫面，檢查 Release、代理與檔案完整性 |
 | `DEVICE-QUEUE-ACK-KEY`／`DEVICE-QUEUE-ACK-RETRY` | 無法持久化 idempotency key，或 ACK timeout／5xx 等待重送 | 檢查 NVS 與網路；不得清除未獲 2xx 的 pending event |
 | `DEVICE-QUEUE-STALE` | ACK 回 409，Queue version 已失效 | 重新取得 Manifest，不顯示或完成舊 Item |
-| `DEVICE-QUEUE-AUTH` | Queue／ACK 回 401 或 403 | 重新配對 Device Token；不可匿名 fallback |
-| `DEVICE-OFFLINE` | 裝置超過門檻未連線 | 檢查電源、Wi-Fi、Token、刷新週期與 N100 可達性 |
+| `DEVICE-QUEUE-AUTH` | Queue／ACK 回 401 或 403 | 自動模式由管理員啟用重新配對；Legacy 模式才更新相容 Token；不可匿名 fallback |
+| `DEVICE-OFFLINE` | 裝置超過門檻未連線 | 檢查電源、Wi-Fi、對應 credential、刷新週期與 N100 可達性 |
 | `NOTIFY-WEBHOOK` | Webhook 暫時或永久失敗 | 查看裝置頁嘗試次數、HTTP 狀態與端點 Log |
 | `BACKUP-001` | 備份建立或驗證失敗 | 檢查空間、權限與資料庫完整性 |
 | `BACKUP-002`／`BACKUP-003` | 備份格式或 SHA-256 損壞 | 不會覆蓋現有資料庫；改用另一份已驗證備份 |

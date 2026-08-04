@@ -17,6 +17,10 @@ ConfigPayload payload(const std::string& suffix) {
   value.backend_hostport = "https://inktime.example.test:8765";
   value.ca_pem = "-----BEGIN CERTIFICATE-----\n" + suffix + "\n-----END CERTIFICATE-----";
   value.device_token = "token-" + suffix;
+  value.device_secret = "secret-" + suffix;
+  value.device_id = "esp32-" + suffix;
+  value.auth_state = "paired";
+  value.credential_version = 3;
   value.tz_offset_minutes = 480;
   value.refresh_hour = 8;
   value.refresh_minute = 30;
@@ -174,6 +178,10 @@ void test_payload_roundtrip_and_empty_overwrite() {
   empty.backend_hostport.clear();
   empty.ca_pem.clear();
   empty.device_token.clear();
+  empty.device_secret.clear();
+  empty.device_id.clear();
+  empty.auth_state = "unpaired";
+  empty.credential_version = 0;
   assert(inktime::configstore::serialize_payload(empty, encoded, error));
   assert(inktime::configstore::deserialize_payload(encoded, decoded, error));
   assert(decoded == empty);

@@ -6,4 +6,4 @@
 4. 清理一律先做 Dry Run，再檢查 `data_cleanup_runs` 與 `data_cleanup_items`；不應直接刪除 Release 目錄。
 5. Canary 先使用一台測試裝置。若出現 `ROLLBACK-001`，保留 health event 與失敗 Release，核對 Last Known Good 後再結束回滾。
 
-管理寫入 API 均需要 administrator、登入 Session 與 CSRF；裝置 Queue API 只接受其 Device Token。Log 不應包含 Token、Secret、照片絕對路徑或完整 EXIF。
+管理寫入 API 均需要 administrator、登入 Session 與 CSRF；裝置 Queue API 只接受其自動配對 Device Secret／version 或 Legacy Token。Log 不應包含 Token、Secret、pairing code、照片絕對路徑或完整 EXIF。

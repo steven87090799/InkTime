@@ -1,6 +1,6 @@
 # 裝置離線內容佇列
 
-管理員以 `POST /api/devices/<id>/queue/generate` 建立深度 1–14 的 Queue，並加入已發布 Release。裝置使用 Device Token 讀取 `GET /api/device/v1/queue/manifest`，再以 Queue Item 專屬 URL 下載；URL、Queue 歸屬、Release Manifest 與 SHA-256 都會驗證。
+管理員以 `POST /api/devices/<id>/queue/generate` 建立深度 1–14 的 Queue，並加入已發布 Release。裝置使用自動配對 Device Secret／version 或 Legacy Token 讀取 `GET /api/device/v1/queue/manifest`，再以 Queue Item 專屬 URL 下載；URL、Queue 歸屬、Release Manifest 與 SHA-256 都會驗證。
 
 `online_queue` 只服務相容的 Online 裝置；Enhanced `inktime_offline_schedule` 裝置在中央 enqueue、資料庫 guard、Canary targeting 與 rollback 都會被拒絕或明確 skip，不會收到 Firmware 永遠不會讀取的 generic Queue Item。Offline Slot 只能由 `prepare_day()` 以 target date、config version 與 schedule snapshot 原子建立；今日與未來日期各自擁有 Queue Item，重試今日不會取消明日。
 

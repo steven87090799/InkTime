@@ -2,7 +2,7 @@
 
 ## 現有資料流與插入點
 
-既有流程為 `RenderService.select_candidates_details()` 選出合格照片，`RenderService.publish()` 產生影像，`ReleaseCoordinator` 以 SQLite 交易寫入 Release、指派裝置與顯示歷史；裝置再以 Device Token 取得 Manifest、下載 payload、回報狀態。Migration、WAL 與跨程序 single-writer 已由 `Database.transaction()` 集中管理。
+既有流程為 `RenderService.select_candidates_details()` 選出合格照片，`RenderService.publish()` 產生影像，`ReleaseCoordinator` 以 SQLite 交易寫入 Release、指派裝置與顯示歷史；裝置再以自動配對 Device Secret／version 或 Legacy Token 取得 Manifest、下載 payload、回報狀態。Migration、WAL 與跨程序 single-writer 已由 `Database.transaction()` 集中管理。
 
 本功能在發布後以有界摘要寫入 Decision Trace；不改變既有選片、正式 Release、指派或 Display History。離線 Queue 與 Canary 另有資料表，只有明確 API／排程啟用後才寫入。
 
@@ -18,7 +18,7 @@ Queue 狀態為 `PENDING → READY → AVAILABLE → DOWNLOADED → ACKNOWLEDGED
 
 ## 失敗、保留與相容
 
-Trace 寫入失敗不會回滾已成功的正式發布。裝置 ACK 需 Token、Queue 歸屬與 idempotency key；下載 URL 也驗證 Queue 歸屬與檔案雜湊。保留清理先記錄 dry run、分批處理，正式 Release、有效 Queue 與 Canary 引用是保護邊界。Migration 使用 `IF NOT EXISTS`、索引與既有 transaction/migration history，因此舊資料與未啟用行為保持不變。
+Trace 寫入失敗不會回滾已成功的正式發布。裝置 ACK 需對應 credential、Queue 歸屬與 idempotency key；下載 URL 也驗證 Queue 歸屬與檔案雜湊。保留清理先記錄 dry run、分批處理，正式 Release、有效 Queue 與 Canary 引用是保護邊界。Migration 使用 `IF NOT EXISTS`、索引與既有 transaction/migration history，因此舊資料與未啟用行為保持不變。
 
 ## 分階段順序與驗證
 

@@ -1147,7 +1147,8 @@ bool PhotoPainterSupport::displayFrame(const uint8_t* framebuffer, size_t length
 bool PhotoPainterSupport::displayPairingScreen(
     const char* ssid,
     const char* password,
-    const char* setup_url
+    const char* setup_url,
+    const char* pairing_code
 ) {
   if (!hardwareReady_ || impl_ == nullptr) {
     lastError_ = "DEVICE-PAIRING-DISPLAY";
@@ -1164,7 +1165,8 @@ bool PhotoPainterSupport::displayPairingScreen(
   drawPairingText(frame, kPhotoPainterFrameBytes, 30, 112, String("WIFI SSID: ") + String(ssid == nullptr ? "" : ssid), scale);
   drawPairingText(frame, kPhotoPainterFrameBytes, 30, 182, String("AP PASSWORD: ") + String(password == nullptr ? "" : password), scale);
   drawPairingText(frame, kPhotoPainterFrameBytes, 30, 252, String("SETUP: ") + String(setup_url == nullptr ? "" : setup_url), scale);
-  drawPairingText(frame, kPhotoPainterFrameBytes, 30, 322, "VALID 5 MIN", scale);
+  drawPairingText(frame, kPhotoPainterFrameBytes, 30, 322, String("CODE: ") + String(pairing_code == nullptr ? "" : pairing_code), scale);
+  drawPairingText(frame, kPhotoPainterFrameBytes, 30, 392, "VALID 5 MIN", scale);
   const bool displayed = displayFrame(frame, kPhotoPainterFrameBytes);
   heap_caps_free(frame);
   return displayed;

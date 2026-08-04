@@ -6,7 +6,7 @@ import logging
 import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from flask import Blueprint, abort, current_app, jsonify, render_template, request
+from flask import Blueprint, abort, current_app, g, jsonify, render_template, request
 
 from inktime.app.api.device_auth import authenticate_device_request
 from inktime.app.core.json_values import (
@@ -184,9 +184,15 @@ def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
 @login_required
 def devices_page():
     settings = current_app.extensions["inktime_settings_repository"]
+    pending_pairings = (
+        current_app.extensions["inktime_device_pairing_service"].pending_for_admin()
+        if getattr(g, "user", None) is not None and g.user["role"] == "administrator"
+        else []
+    )
     return render_template(
         "devices.html",
         devices=_repository().list(),
+        pending_pairings=pending_pairings,
         device_events=_repository().list_events(100),
         notifications=current_app.extensions["inktime_notification_service"].list(100),
         display_profiles=DISPLAY_PROFILES,
@@ -331,11 +337,17 @@ def create_device():
             "stock_endpoint_host": None,
         },
     )
-    device_id, token = _repository().create(**fields)
+    device_id, _legacy_token = _repository().create(**fields, auth_mode="automatic")
+    is_stock = fields["delivery_mode"] == "stock_compat"
     return {
         "id": device_id,
-        "token": token,
-        "warning": "此 Token 只顯示一次，請立即安全地設定到裝置。",
+        "auth_mode": "stock" if is_stock else "automatic",
+        "pairing_state": "paired" if is_stock else "unpaired",
+        "warning": (
+            "Stock PhotoPainter 相容模式不使用自動配對；伺服器維持既有 /dataUP 流程。"
+            if is_stock
+            else "裝置將在首次連線時提出短效自動配對；管理員核准後只領取一次 Device Secret。"
+        ),
     }, 201
 
 
@@ -346,6 +358,8 @@ def regenerate_device_token(device_id: str):
         token = _repository().regenerate(device_id)
     except KeyError:
         abort(404)
+    except ValueError as exc:
+        abort(409, description=str(exc))
     return {"token": token, "warning": "舊 Token 已立即撤銷；新 Token 只顯示一次。"}
 
 
@@ -384,6 +398,8 @@ def update_device(device_id: str):
         _repository().update(device_id, **fields)
     except KeyError:
         abort(404)
+    except ValueError as exc:
+        abort(409, description=str(exc))
     return {"status": "ok"}
 
 

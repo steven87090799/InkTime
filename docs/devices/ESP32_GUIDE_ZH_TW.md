@@ -13,7 +13,7 @@ GDEY073D46 原廠資料為 800×480、7 色、3.3 V、50-pin FPC、SPI、15–35
 
 未來新採購建議 GDEP073E01＋DESPI-C73 或原廠 ESP32E6-E01。GDEP073E01 為 800×480、6 色 Spectra 6、3.3 V、50-pin SPI、0–50°C、全刷約 15–22 秒；韌體已可選用 GxEPD2 的 `GxEPD2_730c_GDEP073E01` 類別。[Good Display GDEP073E01](https://www.good-display.com/product/533.html) [DESPI-C73 adapter](https://www.good-display.com/product/522.html) [GxEPD2 支援清單](https://github.com/ZinggJM/GxEPD2)
 
-伺服器、Manifest schema v2 與韌體 2.5.0 已共同支援完整六／七色、Offline Queue ACK 與相同內容安全 skip；色盤、抖動、混合面板發布、設定 ACK 與離線通知詳見[裝置可靠性與六／七色渲染指南](DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。
+伺服器、Manifest schema v2 與韌體 2.6.0 已共同支援完整六／七色、Offline Queue ACK 與相同內容安全 skip；色盤、抖動、混合面板發布、設定 ACK 與離線通知詳見[裝置可靠性與六／七色渲染指南](DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。韌體 2.6.0 的新自製裝置使用自動配對；既有 Legacy Token 與 PhotoPainter Stock 相容路徑仍分流保留，完整流程見[ESP32 自動配對與憑證生命週期](ESP32_AUTOMATIC_PAIRING_ZH_TW.md)。
 
 Waveshare 整合的中央 Profile、SD／PMIC／RTC／SHTC3、安全 BUSY timeout、授權與
 20 項實機清單見 [PhotoPainter 支援與實機驗收](WAVESHARE_PHOTOPAINTER_ZH_TW.md)。
@@ -72,28 +72,30 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3 \
   esp32/ink-display-7C-photo
 ```
 
-Board 選 ESP32-S3，啟用 OPI PSRAM。正式版 `INKTIME_DEBUG_LOG=0`；短期硬體除錯才加入 `-DINKTIME_DEBUG_LOG=1`。序列 Log 不輸出 Token，但正式環境仍不應長期開啟。PhotoPainter 必須使用 16 MiB Flash／OPI PSRAM 與中央 `DEVICE_PROFILE`，完整命令見上方專用指南。
+Board 選 ESP32-S3，啟用 OPI PSRAM。正式版 `INKTIME_DEBUG_LOG=0`；短期硬體除錯才加入 `-DINKTIME_DEBUG_LOG=1`。序列 Log 不輸出 Device Secret、配對碼或 Legacy Token，但正式環境仍不應長期開啟。PhotoPainter 必須使用 16 MiB Flash／OPI PSRAM 與中央 `DEVICE_PROFILE`，完整命令見上方專用指南。
 
 2026-07-30 以 Arduino CLI 1.5.1、ESP32 core 3.3.10、GxEPD2 1.6.9、ArduinoJson 7.4.3 實際編譯 2.5.0：secure GDEY 使用 1,228,261 bytes，LAN GDEY 1,228,545 bytes，LAN GDEP 1,228,645 bytes，均為預設 1,310,720-byte app partition 的 93%；LAN PhotoPainter 使用 1,177,311 bytes（其 3 MiB app partition 的 37%）。GDEY／GDEP 全域變數約 96.6 KiB，PhotoPainter 約 49.2 KiB。這表示目前可編譯，但不是實體燒錄、Heap、PSRAM、BUSY 或功耗證據；新增 OTA、TLS certificate 或大型 Web UI 前仍須重新檢查 partition 與實板餘裕。
 
 上傳前先用原廠 sample／GxEPD2 Example 驗證「面板型號＋adapter＋供電＋引腳」能完整刷新，再燒 InkTime 韌體。不同面板 driver class 不可混用。
 
-## 5. 首次 AP 配對
+## 5. 首次 AP 配網與自動配對
 
-1. 在 InkTime Web「裝置」按「新增裝置」，立即複製只顯示一次的 `itd_...` Token。
-2. 首次開機或按住 GPIO38 再上電，裝置建立 `InkTime-XXXXXX` AP，5 分鐘未儲存會睡眠。
-3. AP 密碼為 `InkTimeXXXXXX`，其中 `XXXXXX` 與 SSID 尾碼相同；每台不同，不再使用共用 `12345678`。
-4. 連到 AP，瀏覽 `192.168.4.1`。
-5. 填 Wi-Fi SSID／密碼、InkTime URL（例如 `http://192.168.1.20:8765`）與裝置 Token。
-6. 儲存後裝置重啟、連 Wi-Fi、同步 NTP、取得 Manifest、下載並驗證圖片、刷新後 deep sleep。
+新自製 ESP32 不再要求使用者複製或手動輸入 Device Token。流程如下：
 
-Wi-Fi、伺服器 URL 與 Token 是尚未連網前的 bootstrap，無法從 InkTime Web 遠端設定。裝置一旦能連線，面板 Profile、時區、每日 HH:MM、0°／180°旋轉與啟停都在 InkTime「裝置」頁管理；下一次取得 Manifest 時自動套用並寫入 NVS，再以設定版本 ACK 證明已生效。
+1. 首次開機或按住 GPIO38 再上電，裝置建立 `InkTime-XXXXXX` AP；5 分鐘未儲存會睡眠。
+2. AP 密碼為每次啟動重新產生的隨機值，不由 SSID 尾碼推導；請以裝置畫面或 AP 設定頁顯示值為準，不使用共用密碼。
+3. 連到 AP，瀏覽 `192.168.4.1`，只填 Wi-Fi SSID／密碼與 InkTime URL（例如 `http://192.168.1.20:8765`），不要填 Token。
+4. 儲存後裝置連 Wi-Fi，向 `/api/device/v1/pairing/request` 取得短期配對碼，並在面板顯示配對碼。
+5. 管理員在 InkTime Web「裝置」頁核對裝置資訊與配對碼後按「核准配對」。裝置輪詢 claim；核准後只接收一次長效 Device Secret，寫入既有 A/B NVS 設定並立即開始受保護的 Manifest／Queue／Status 流程。
+6. 裝置重啟或下一次喚醒時不需要登入或 Session；使用 Device Secret 加上 credential version 直接呼叫裝置 API，完成下載、驗證、刷新後 deep sleep。
 
-Token 只存於 ESP32 NVS 與 server 雜湊，不進 URL、不印到序列埠。Token 遺失或懷疑外洩時在 Web 重生；舊 Token 立即失效。
+Wi-Fi、伺服器 URL 與裝置識別是尚未連網前的 bootstrap，無法從 InkTime Web 遠端設定。面板 Profile、時區、每日 HH:MM、0°／180°旋轉與啟停仍在 InkTime「裝置」頁管理；下一次取得 Manifest 時自動套用並寫入 NVS，再以設定版本 ACK 證明已生效。
+
+Device Secret 只在 claim 成功回應中顯示給裝置一次，server 只保存雜湊；不進 URL、HTML、序列 Log、Activity 或照片。管理員撤銷或啟用重新配對後，舊 Secret 立即失效，裝置必須完成新的核准流程。既有 Legacy 裝置仍可依相容路徑使用 Bearer Token；PhotoPainter Stock 模式維持 `/dataUP`，不參與自動配對。
 
 ## 6. 網路協定
 
-1. 優先 `GET /api/device/v1/queue/manifest`；只有 404 或 Queue 空白才回退 `GET /api/device/v1/releases/latest`，Header 均為 `Authorization: Bearer <token>`。
+1. 優先 `GET /api/device/v1/queue/manifest`；只有 404 或 Queue 空白才回退 `GET /api/device/v1/releases/latest`。自動配對裝置帶 `Authorization: Bearer <device-secret>` 與 `X-InkTime-Credential-Version`；Legacy 裝置維持 Bearer Token 相容格式。
 2. Queue Manifest 僅接受 bounded top-level JSON object、真正 JSON integer、Item 綁定的同源相對 URL；拒絕 absolute／cross-origin／traversal／NUL／backslash。
 3. 驗證 Manifest schema、`pixel_format=2bpp`／`indexed4`、Profile、`width=480`、`height=800`。
 4. 套用 `device_config` schema v2：設定版本、面板 Profile、IANA 時區換算後的 UTC offset、`HH:MM`、rotation。
@@ -124,15 +126,15 @@ Web 裝置頁會顯示最後狀態、下載成功／失敗、韌體、訊號、H
 - 面板脆弱，避免彎折、點壓、扭曲與 FPC 拉扯；不要撕除非原廠指示可移除的保護層。
 - 電子紙可能有 ghosting／色偏；本韌體採 full refresh，不把 GxEPD2 partial window API 當成 GDEY 可用的快速局刷。
 - 強烈建議用 SHA-256 驗證與「成功才刷新」；不要為省幾秒移除。
-- 完整六／七色 Queue 流程需 server、裝置 Profile 與 2.5.0 韌體配對；舊韌體升級期間使用 `safe_4c`。
+- 完整六／七色 Queue 流程需 server、裝置 Profile 與 2.6.0 韌體配對；舊韌體升級期間使用 `safe_4c`。
 - 目前 GDEY／GDEP app partition 已使用 93%；增加函式庫、TLS 或 OTA 前要重新量測 Flash／Heap／PSRAM，並做實機連續刷新與斷電恢復測試。
 
 ## 9. 常見錯誤
 
 | Web／Docker 錯誤 | 原因 | 處理 |
 |---|---|---|
-| `DEVICE-CONFIG` | URL 或 Token 未設定 | 重新進 AP 配對 |
-| `DEVICE-MANIFEST-HTTP` | 401／404／網路／代理 | 查 Token、是否已發布、N100 IP 與防火牆 |
+| `DEVICE-CONFIG` | URL 或 Device Secret／Legacy Token 未設定 | 重新進 AP 配網或依模式重新配對 |
+| `DEVICE-MANIFEST-HTTP` | 401／404／網路／代理 | 查配對狀態／credential version、是否已發布、N100 IP 與防火牆 |
 | `DEVICE-MANIFEST` | schema／pixel format 不相容 | Server 與 firmware 版本配對 |
 | `DEVICE-DISPLAY-MISMATCH` | 不是 480×800／無檔案 | 重新發布正確 profile |
 | `DEVICE-CONFIG-PROFILE` | 設定版本倒退或面板 Profile 與韌體不符 | 核對面板型號、編譯 flag、裝置頁 Profile |
@@ -142,7 +144,7 @@ Web 裝置頁會顯示最後狀態、下載成功／失敗、韌體、訊號、H
 | `DEVICE-QUEUE-DOWNLOAD`／`HASH` | Queue body、Content-Type／Length 或 SHA 不符 | 保留舊畫面；檢查 Release 與代理 |
 | `DEVICE-QUEUE-ACK-RETRY` | ACK timeout 或 5xx，NVS 仍保留 pending event | 保持網路可達；下次 wake 會以同一 Key 重送 |
 | `DEVICE-QUEUE-STALE` | ACK 409，Queue version 已更新 | 下次重新讀取 Manifest；不可把舊 Item 當成功 |
-| `DEVICE-QUEUE-AUTH` | ACK 401／403 | 更新或重新配對 Device Token；不可匿名 fallback |
+| `DEVICE-QUEUE-AUTH` | ACK 401／403 | 自動模式啟用重新配對或 Legacy 模式更新 Token；不可匿名 fallback |
 | 畫面不刷新 | BUSY／接線／供電／driver class 錯 | 先跑原廠 sample，量 3.3 V，核對面板型號 |
 | 顏色錯誤 | 面板類別或 palette 不符 | 核對 GDEY／GDEP compile flag，不混用 13.3 driver |
 

@@ -50,13 +50,13 @@ indexed4 採 GxEPD2 的邏輯顏色順序。偶數 pixel 放在高 4 bits、奇�
 
 ## 4. 離線、提醒與恢復
 
-韌體 2.5.0 也會把最後成功顯示的 SHA-256、Release、render profile、rotation、board profile 與成功標記寫入 NVS。再次取得相同且完整驗證的內容時可回報 `display_skipped=true`，省略實體刷新；forced refresh、任何 profile／rotation／board 改變或 NVS 損壞都會 fail closed 並重新刷新。這是軟體流程已接入，不代表真實面板的方向、殘影、色彩、BUSY 或功耗已驗證。
+韌體 2.6.0 也會把最後成功顯示的 SHA-256、Release、render profile、rotation、board profile 與成功標記寫入 NVS。再次取得相同且完整驗證的內容時可回報 `display_skipped=true`，省略實體刷新；forced refresh、任何 profile／rotation／board 改變或 NVS 損壞都會 fail closed 並重新刷新。這是軟體流程已接入，不代表真實面板的方向、殘影、色彩、BUSY 或功耗已驗證。
 
 Scheduler 預設每 300 秒掃描一次，不為每次掃描輸出 INFO Log。啟用裝置最後狀態、最後 Manifest 驗證時間或建立時間超過 `notification.device_offline_hours`（預設 30 小時）才轉為離線。
 
 - 首次離線：建立一筆 warning 裝置事件與站內通知，設置 `offline_alert_active=1`。
 - 持續離線：預設不重複通知。只有開啟 `device_offline_repeat_enabled` 才依 `device_offline_cooldown_hours` 再提醒。
-- 恢復：裝置再次以有效 Bearer Token 連線或回報狀態後，清除離線旗標；若啟用恢復通知則建立一筆 recovery。
+- 恢復：裝置再次以有效 Device Secret／credential version 或 Legacy Bearer Token 連線、回報狀態後，清除離線旗標；若啟用恢復通知則建立一筆 recovery。
 - 停用裝置不參與離線判定；新裝置也必須超過完整門檻才會通知。
 - 所有狀態與 Webhook 嘗試持久化在 SQLite，容器重新啟動不會遺失節流狀態。
 

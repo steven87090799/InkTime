@@ -87,7 +87,7 @@ INKTIME_PROXY_TRUST=0
 
 新 LAN 部署請用 3.1 的專用範例與 preflight。這段只說明既有環境的相容邊界：Health／Preflight 會標示 `degraded`；Secure Cookie、HSTS 與 TLS 安全保證均不成立，不可透過 Internet 使用。系統不會自動從 HTTPS fallback 到此模式。
 
-不要把 `.env`、資料庫、`session.key`、API Key 或裝置 Token Commit。啟動：
+不要把 `.env`、資料庫、`session.key`、API Key、Device Secret 或 Legacy 裝置 Token Commit。啟動：
 
 ```bash
 docker compose config --quiet
@@ -133,7 +133,7 @@ Compose 還啟用非 root、唯讀 root filesystem、`no-new-privileges`、PID �
 3. 「維護」：以容器路徑 `/photos` 建立掃描工作。
 4. 「工作」：先用 10～100 張與小額預算驗證，再增加數量。
 5. 「渲染」：預覽並選擇內建手寫／文青繁中字型，或上傳自訂字型，再發布 480×800 版本。
-6. 「裝置」：建立 ESP32、設定時區／每日刷新／旋轉並複製一次性 Token。
+6. 「裝置」：設定 ESP32 的時區／每日刷新／旋轉；新自製板由自動配對取得一次性 Device Secret，既有 Legacy 裝置才使用相容 Token。
 7. 「設定」：選擇 `INFO`／`WARNING`／`ERROR` Log 層級與自動備份保留數。
 8. 「診斷」：確認 Web RSS、cgroup 記憶體、Queue、WAL、照片掛載與版本。
 
@@ -184,7 +184,7 @@ server {
 }
 ```
 
-Nginx 負責 TLS 與公開入口限流；InkTime 負責 Session／CSRF／CSP／HSTS（只有確認 HTTPS request 才送出）。只開放 Proxy 的 443，不公開 SQLite 或 `/data`，並限制管理頁來源網段。Webhook 會把通知資料送到外部 HTTPS 服務；Bearer Token 應加密保存，目的地不得使用 redirect 或內部位址。Device Token 只顯示一次，不得放在 URL／Log。ESP32 韌體若未配置可信 CA，不應直接跨不可信公網使用 HTTPS，建議先用隔離 IoT VLAN＋反向代理或 VPN。
+Nginx 負責 TLS 與公開入口限流；InkTime 負責 Session／CSRF／CSP／HSTS（只有確認 HTTPS request 才送出）。只開放 Proxy 的 443，不公開 SQLite 或 `/data`，並限制管理頁來源網段。Webhook 會把通知資料送到外部 HTTPS 服務；Bearer Token、Device Secret 與 pairing code 都不得放在 URL／Log，目的地不得使用 redirect 或內部位址。ESP32 韌體若未配置可信 CA，不應直接跨不可信公網使用 HTTPS，建議先用隔離 IoT VLAN＋反向代理或 VPN。
 
 ## 8. 更新、備份與回滾
 

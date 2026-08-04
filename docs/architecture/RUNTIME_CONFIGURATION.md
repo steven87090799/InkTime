@@ -28,8 +28,8 @@ SQLite `settings` 的動態業務設定不參與這個優先序。
 proxy trust、worker concurrency 與空白 identity 都 fail closed；production 禁止 testing、
 development 與 repo 內的預設資料目錄。
 
-API Key、Device Token、Session Secret 與 Credential 不屬於 RuntimeConfig。它們分別由
-`SecretStore`、Device Repository 與啟動期持久化 Session Secret 管理；RuntimeConfig 的
+API Key、Device Secret／Legacy Device Token、Session Secret 與 Credential 不屬於 RuntimeConfig。它們分別由
+`SecretStore`、Device Repository／DevicePairingService 與啟動期持久化 Session Secret 管理；RuntimeConfig 的
 `repr`、`diagnostic_summary()`、JSON 與 Log 不包含這些值。`diagnostic_summary()` 會將
 路徑與 bind host 遮蔽，只回傳其已設定／已解析狀態及其他非敏感型別化部署欄位，供
 `/health/detail` 與三種 process 共用。

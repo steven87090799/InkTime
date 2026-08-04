@@ -119,7 +119,7 @@ ExifTool 能提供 MIME、相機、軟體、拍攝時間與 GPS 等中繼資料�
 
 ## ESP32 遠端設定
 
-首次 AP 配對只填 Wi-Fi、InkTime URL 與一次性 Token。之後從「裝置」編輯每台 ESP32 的名稱、啟停、面板 Profile、IANA 時區、每日 `HH:MM` 與 0°／180°；下一次取得 Manifest 自動套用。裝置頁以期望版本／ACK 區分「已儲存」與「裝置已生效」，並顯示離線狀態、通知、firmware、RSSI、free heap／PSRAM、下載計數與最後錯誤。完整協定、抖動與通知見[裝置可靠性與六／七色渲染指南](../devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。
+新自製 ESP32 的 AP 配對只填 Wi-Fi、InkTime URL 與 TLS Root CA；裝置首次連線會取得短效配對碼，管理員在「裝置」頁核准後由裝置一次領取 Device Secret。之後從「裝置」編輯每台 ESP32 的名稱、啟停、面板 Profile、IANA 時區、每日 `HH:MM` 與 0°／180°；下一次取得 Manifest 自動套用。既有 Legacy 裝置仍使用相容 Bearer Token，Stock PhotoPainter 走 `/dataUP` 分流。裝置頁以期望版本／ACK 區分「已儲存」與「裝置已生效」，並顯示離線狀態、通知、firmware、RSSI、free heap／PSRAM、下載計數與最後錯誤。完整協定見[ESP32 自動配對與憑證生命週期](../devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md)。
 
 ## 裝置能源儀表板
 

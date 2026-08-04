@@ -94,7 +94,10 @@ GxEPD2_7C<
 #define DEVICE_QUEUE_MANIFEST_PATH "/api/device/v1/queue/manifest"
 #define DEVICE_QUEUE_ACK_PATH "/api/device/v1/queue/ack"
 #define DEVICE_OFFLINE_SCHEDULE_PATH "/api/device/v1/offline-schedule"
-#define INKTIME_FIRMWARE_VERSION "2.5.0"
+#define DEVICE_PAIRING_REQUEST_PATH "/api/device/v1/pairing/request"
+#define DEVICE_PAIRING_CLAIM_PATH "/api/device/v1/pairing/claim"
+#define DEVICE_PAIRING_REPAIR_PERMISSION_PATH "/api/device/v1/pairing/repair-permission"
+#define INKTIME_FIRMWARE_VERSION "2.6.0"
 
 // Secure builds require a compile-time or portal-provisioned trust anchor;
 // isolated LAN HTTP remains available only in an explicit development build.
@@ -115,6 +118,10 @@ struct Config {
   String  backend_hostport;
   String  ca_pem;
   String  device_token;
+  String  device_secret;
+  String  device_id;
+  String  auth_state;
+  uint32_t credential_version;
   int32_t tz_offset_minutes;
   uint8_t refresh_hour;
   uint8_t refresh_minute;
@@ -250,6 +257,10 @@ bool currentFromQueue = false;
 bool currentPrefetchOnly = false;
 bool enhancedNetworkWakeRequested = false;
 bool currentPayloadIntegrityTrusted = false;
+bool deviceAuthInvalid = false;
+#if !INKTIME_PHOTOPAINTER_ENABLED
+static bool displayPairingCode(const Config &cfg, const String &pairingCode);
+#endif
 #if INKTIME_PHOTOPAINTER_ENABLED
 bool offlineScheduleTxnBlocked = false;
 #endif
@@ -749,6 +760,10 @@ static inktime::configstore::ConfigPayload configPayload(const Config &cfg) {
   payload.backend_hostport = cfg.backend_hostport.c_str();
   payload.ca_pem = cfg.ca_pem.c_str();
   payload.device_token = cfg.device_token.c_str();
+  payload.device_secret = cfg.device_secret.c_str();
+  payload.device_id = cfg.device_id.c_str();
+  payload.auth_state = cfg.auth_state.c_str();
+  payload.credential_version = cfg.credential_version;
   payload.tz_offset_minutes = cfg.tz_offset_minutes;
   payload.refresh_hour = cfg.refresh_hour;
   payload.refresh_minute = cfg.refresh_minute;
@@ -780,6 +795,14 @@ static void applyConfigPayload(const inktime::configstore::ConfigPayload &payloa
   cfg.backend_hostport = payload.backend_hostport.c_str();
   cfg.ca_pem = payload.ca_pem.c_str();
   cfg.device_token = payload.device_token.c_str();
+  cfg.device_secret = payload.device_secret.c_str();
+  cfg.device_id = payload.device_id.c_str();
+  cfg.auth_state = payload.auth_state.c_str();
+  cfg.credential_version = payload.credential_version;
+  if (cfg.auth_state.length() == 0U) {
+    cfg.auth_state = cfg.device_secret.length() > 0U || cfg.device_token.length() > 0U
+      ? "paired" : "unpaired";
+  }
   cfg.tz_offset_minutes = payload.tz_offset_minutes;
   cfg.refresh_hour = payload.refresh_hour;
   cfg.refresh_minute = payload.refresh_minute;
@@ -808,6 +831,8 @@ static void setConfigDefaults(Config &cfg) {
   cfg.refresh_minute = DEFAULT_MINUTE;
   cfg.rotate180 = false;
   cfg.config_version = 0U;
+  cfg.credential_version = 0U;
+  cfg.auth_state = "unpaired";
 #if INKTIME_PHOTOPAINTER_ENABLED
   cfg.schedule_count = 1U;
   cfg.schedule_slots[0] = {DEFAULT_HOUR, DEFAULT_MINUTE};
@@ -919,6 +944,46 @@ bool saveConfig(const Config &cfg, String *errorCodeOut = nullptr) {
   DBG_PRINTLN("[CFG] saved");
 #endif
   setError("");
+  return true;
+}
+
+static String deviceCredential(const Config &cfg) {
+  return cfg.device_secret.length() > 0U ? cfg.device_secret : cfg.device_token;
+}
+
+static bool hasDeviceCredential(const Config &cfg) {
+  return !deviceAuthInvalid && deviceCredential(cfg).length() > 0U;
+}
+
+static bool addDeviceAuthorization(HTTPClient &http, const Config &cfg) {
+  const String credential = deviceCredential(cfg);
+  if (!hasDeviceCredential(cfg)) return false;
+  http.addHeader("Authorization", "Bearer " + credential);
+  if (cfg.device_secret.length() > 0U && cfg.credential_version > 0U) {
+    http.addHeader("X-InkTime-Credential-Version", String(cfg.credential_version));
+  }
+  return true;
+}
+
+static void markDeviceAuthInvalid(Config &cfg, int statusCode) {
+  deviceAuthInvalid = true;
+  lastDeviceErrorCode = statusCode == 403 ? "DEVICE-AUTH-REVOKED" : "DEVICE-AUTH-INVALID";
+  lastDeviceErrorMessage = statusCode == 403
+    ? "伺服器撤銷或拒絕裝置認證；需由管理員允許重新配對"
+    : "伺服器拒絕裝置認證；保留 credential 並停止本輪網路工作";
+  Config candidate = cfg;
+  candidate.auth_state = statusCode == 403 ? "revoked" : "auth_invalid";
+  String persistError;
+  if (!saveConfig(candidate, &persistError)) {
+    setConfigPersistenceError(persistError);
+    return;
+  }
+  cfg = candidate;
+}
+
+static bool handleDeviceAuthStatus(Config &cfg, int statusCode) {
+  if (statusCode != HTTP_CODE_UNAUTHORIZED && statusCode != HTTP_CODE_FORBIDDEN) return false;
+  markDeviceAuthInvalid(cfg, statusCode);
   return true;
 }
 
@@ -1034,8 +1099,17 @@ String buildConfigPage() {
   html += caPem;
   html += F("</textarea><br><small>只接受 -----BEGIN CERTIFICATE----- 至 -----END CERTIFICATE-----；CA 不是 secret，但不會寫入狀態回報。</small><br><br>");
 
-  html += F("裝置 Token（留空會保留現有 Token）：<br><input name='device_token' type='password' size='48' autocomplete='off'><br>");
-  html += F("<small>請從 InkTime 裝置管理頁配對；Token 不會顯示在網址或序列埠。</small><br><br>");
+  html += F("<p><strong>裝置認證：</strong>");
+  if (g_cfg.device_token.length() > 0U && g_cfg.device_secret.length() == 0U) {
+    html += F("Legacy Token 相容模式（不在此頁顯示或要求重新輸入）。");
+  } else if (g_cfg.auth_state == "auth_invalid" || g_cfg.auth_state == "revoked") {
+    html += F("認證已失效，請由管理員允許重新配對後再提交設定。");
+  } else if (g_cfg.device_secret.length() > 0U) {
+    html += F("自動配對已完成；Device Secret 僅保存在裝置 NVS，不會顯示。");
+  } else {
+    html += F("尚未配對；儲存網路設定後由裝置建立短效配對請求。");
+  }
+  html += F("</p><br>");
 
   html += F("備援刷新時間（連上伺服器後改由 Web 設定）：<br><select name='hour'>");
   for (int h = 0; h < 24; ++h) {
@@ -1115,7 +1189,6 @@ void handleSave() {
   String pass     = server.arg("pass");
   String host     = server.arg("hostport");
   String caPem    = server.arg("ca_pem");
-  String deviceToken = server.arg("device_token");
   String hourStr  = server.arg("hour");
   String minuteStr = server.arg("minute");
   String tzStr    = server.arg("tz");
@@ -1124,7 +1197,6 @@ void handleSave() {
   ssid.trim();
   host.trim();
   caPem.trim();
-  deviceToken.trim();
   const int schemeEnd = host.indexOf("://");
   const String hostOrigin = schemeEnd >= 0 ? host.substring(schemeEnd + 3) : String("");
   const bool unsafeOrigin = hostOrigin.length() == 0 || hostOrigin.indexOf('/') >= 0
@@ -1147,7 +1219,7 @@ void handleSave() {
     server.send(400, "text/plain; charset=utf-8", "DEVICE-TLS-CA-INVALID Root CA PEM 格式不合法");
     return;
   }
-  if (ssid.length() > 32 || pass.length() > 63 || host.length() > 240 || deviceToken.length() > 256
+  if (ssid.length() > 32 || pass.length() > 63 || host.length() > 240
       || host.indexOf('@') >= 0 || !allowedScheme || unsafeOrigin) {
     server.send(400, "text/plain; charset=utf-8", "PAIRING-002 設定格式或長度不合法");
     return;
@@ -1160,7 +1232,6 @@ void handleSave() {
 
   newCfg.backend_hostport = host;
   if (caProvided) newCfg.ca_pem = caPem;
-  if (deviceToken.length() > 0) newCfg.device_token = deviceToken;
 
   int32_t tz = tzStr.toInt();
   if (tz < -12) tz = -12;
@@ -1548,6 +1619,241 @@ static bool normalizedBackendBase(const Config &cfg, String &base) {
   return backendTransportAllowed(base, cfg.ca_pem);
 }
 
+static bool automaticPairingAllowed(const Config &cfg) {
+#if INKTIME_PHOTOPAINTER_ENABLED
+  if (cfg.delivery_mode == "stock_compat") return false;
+#endif
+  const bool pairingState = cfg.auth_state == "unpaired"
+    || cfg.auth_state == "pairing_pending"
+    || cfg.auth_state == "pairing_expired";
+  const bool credentialCanBeReplaced = cfg.device_secret.length() == 0U
+    && cfg.device_token.length() == 0U;
+  // A credentialed repair becomes pairing_pending only after the backend
+  // explicitly authorizes it through checkRepairPermission().
+  return pairingState && (credentialCanBeReplaced || cfg.auth_state == "pairing_pending");
+}
+
+static bool persistPairingState(Config &cfg, const String &state) {
+  Config candidate = cfg;
+  candidate.auth_state = state;
+  String persistError;
+  if (!saveConfig(candidate, &persistError)) {
+    setConfigPersistenceError(persistError);
+    return false;
+  }
+  cfg = candidate;
+  return true;
+}
+
+static bool checkRepairPermission(Config &cfg) {
+  if (cfg.auth_state != "auth_invalid" && cfg.auth_state != "revoked") return false;
+  if (deviceCredential(cfg).length() == 0U) return false;
+  String base;
+  if (!normalizedBackendBase(cfg, base)) return false;
+
+  inktime::DeviceHttpTransport transport(cfg.ca_pem);
+  HTTPClient http;
+  String transportCode;
+  String transportMessage;
+  if (!transport.begin(
+        http, base + String(DEVICE_PAIRING_REPAIR_PERMISSION_PATH), 15000,
+        transportCode, transportMessage)) {
+    lastDeviceErrorCode = transportCode.length() ? transportCode : "DEVICE-PAIRING-PERMISSION-URL";
+    lastDeviceErrorMessage = transportMessage.length() ? transportMessage : "重新配對 permission URL 無法初始化";
+    return false;
+  }
+  if (!addDeviceAuthorization(http, cfg)) {
+    http.end();
+    return false;
+  }
+  const char* headers[] = {"Content-Type"};
+  http.collectHeaders(headers, 1);
+  const int status = http.GET();
+  const int length = http.getSize();
+  const String contentType = http.header("Content-Type");
+  if (status != HTTP_CODE_OK || length <= 0 || length > 2048
+      || !contentType.startsWith("application/json")) {
+    http.end();
+    lastDeviceErrorCode = "DEVICE-PAIRING-PERMISSION";
+    lastDeviceErrorMessage = "管理員尚未允許重新配對；本輪不建立 pairing request";
+    return false;
+  }
+  JsonDocument response;
+  const DeserializationError jsonError = deserializeJson(response, http.getStream());
+  http.end();
+  const String statusValue = response["status"] | "";
+  const String authorizedDeviceId = response["device_id"] | "";
+  if (jsonError || response.overflowed() || statusValue != "pairing_allowed"
+      || authorizedDeviceId != cfg.device_id) {
+    lastDeviceErrorCode = "DEVICE-PAIRING-PERMISSION-SCHEMA";
+    lastDeviceErrorMessage = "重新配對 permission response schema 不合法";
+    return false;
+  }
+  return persistPairingState(cfg, "pairing_pending");
+}
+
+static bool performAutomaticPairing(Config &cfg) {
+  if (!automaticPairingAllowed(cfg)) {
+    return cfg.auth_state == "paired" && deviceCredential(cfg).length() > 0U && !deviceAuthInvalid;
+  }
+  String base;
+  if (!normalizedBackendBase(cfg, base)) return false;
+
+  Config identityCandidate = cfg;
+  if (identityCandidate.device_id.length() == 0U) {
+    identityCandidate.device_id = String("esp32-") + randomPortalSecret();
+    String persistError;
+    if (!saveConfig(identityCandidate, &persistError)) {
+      setConfigPersistenceError(persistError);
+      return false;
+    }
+    cfg = identityCandidate;
+  }
+  const String pairingNonce = randomPortalSecret();
+  JsonDocument pairingRequest;
+  pairingRequest["device_id"] = cfg.device_id;
+  pairingRequest["pairing_nonce"] = pairingNonce;
+  pairingRequest["firmware_identity"] = kBoardConfig.name;
+  pairingRequest["firmware_version"] = INKTIME_FIRMWARE_VERSION;
+  pairingRequest["panel_profile"] = INKTIME_PANEL_PROFILE;
+  JsonObject capabilities = pairingRequest["capabilities"].to<JsonObject>();
+  capabilities["automatic_pairing"] = true;
+  capabilities["ab_credential_store"] = true;
+  capabilities["stock_compatibility"] = true;
+  capabilities["deep_sleep"] = true;
+  String requestBody;
+  serializeJson(pairingRequest, requestBody);
+
+  inktime::DeviceHttpTransport requestTransport(cfg.ca_pem);
+  HTTPClient requestHttp;
+  String transportCode;
+  String transportMessage;
+  if (!requestTransport.begin(
+        requestHttp, base + String(DEVICE_PAIRING_REQUEST_PATH), 15000,
+        transportCode, transportMessage)) {
+    lastDeviceErrorCode = transportCode.length() ? transportCode : "DEVICE-PAIRING-URL";
+    lastDeviceErrorMessage = transportMessage.length() ? transportMessage : "配對 request URL 無法初始化";
+    return false;
+  }
+  const char* pairingHeaders[] = {"Content-Type"};
+  requestHttp.collectHeaders(pairingHeaders, 1);
+  requestHttp.addHeader("Content-Type", "application/json");
+  const int requestStatus = requestHttp.POST(requestBody);
+  const int requestLength = requestHttp.getSize();
+  const String requestContentType = requestHttp.header("Content-Type");
+  if (requestStatus != HTTP_CODE_CREATED || requestLength <= 0 || requestLength > 8192
+      || !requestContentType.startsWith("application/json")) {
+    requestHttp.end();
+    lastDeviceErrorCode = "DEVICE-PAIRING-REQUEST";
+    lastDeviceErrorMessage = "配對 request HTTP／Content-Type／長度不合法";
+    return false;
+  }
+  JsonDocument requestResponse;
+  const DeserializationError requestJsonError = deserializeJson(requestResponse, requestHttp.getStream());
+  requestHttp.end();
+  const String pairingId = requestResponse["pairing_id"] | "";
+  const String pairingCode = requestResponse["pairing_code"] | "";
+  const JsonVariantConst expiresValue = requestResponse["expires_in_seconds"];
+  if (requestJsonError || requestResponse.overflowed() || pairingId.length() == 0U
+      || pairingCode.length() != 6U || !expiresValue.is<int32_t>() || expiresValue.is<bool>()
+      || expiresValue.as<int32_t>() < 1 || expiresValue.as<int32_t>() > 600) {
+    lastDeviceErrorCode = "DEVICE-PAIRING-SCHEMA";
+    lastDeviceErrorMessage = "配對 request 回應 schema 不合法";
+    return false;
+  }
+  if (!persistPairingState(cfg, "pairing_pending")) return false;
+#if INKTIME_PHOTOPAINTER_ENABLED
+  (void)photoPainter.displayPairingScreen(
+    cfg.wifi_ssid.c_str(), "", base.c_str(), pairingCode.c_str());
+#else
+  (void)displayPairingCode(cfg, pairingCode);
+#endif
+
+  const uint32_t pollWindowMs = static_cast<uint32_t>(expiresValue.as<int32_t>()) * 1000U;
+  const uint32_t pollStarted = millis();
+  while (static_cast<uint32_t>(millis() - pollStarted) < pollWindowMs) {
+    JsonDocument claimRequest;
+    claimRequest["pairing_id"] = pairingId;
+    claimRequest["pairing_nonce"] = pairingNonce;
+    String claimBody;
+    serializeJson(claimRequest, claimBody);
+    inktime::DeviceHttpTransport claimTransport(cfg.ca_pem);
+    HTTPClient claimHttp;
+    String claimTransportCode;
+    String claimTransportMessage;
+    if (!claimTransport.begin(
+          claimHttp, base + String(DEVICE_PAIRING_CLAIM_PATH), 15000,
+          claimTransportCode, claimTransportMessage)) {
+      lastDeviceErrorCode = claimTransportCode.length() ? claimTransportCode : "DEVICE-PAIRING-CLAIM-URL";
+      lastDeviceErrorMessage = claimTransportMessage.length() ? claimTransportMessage : "配對 claim URL 無法初始化";
+      return false;
+    }
+    claimHttp.collectHeaders(pairingHeaders, 1);
+    claimHttp.addHeader("Content-Type", "application/json");
+    const int claimStatus = claimHttp.POST(claimBody);
+    const int claimLength = claimHttp.getSize();
+    const String claimContentType = claimHttp.header("Content-Type");
+    if (claimStatus == HTTP_CODE_ACCEPTED) {
+      claimHttp.end();
+      delay(3000U);
+      continue;
+    }
+    if (claimStatus == HTTP_CODE_GONE) {
+      claimHttp.end();
+      (void)persistPairingState(cfg, "pairing_expired");
+      lastDeviceErrorCode = "DEVICE-PAIRING-EXPIRED";
+      lastDeviceErrorMessage = "配對碼已過期，請重新建立配對；裝置不會無限輪詢";
+      return false;
+    }
+    if (claimStatus != HTTP_CODE_OK || claimLength <= 0 || claimLength > 8192
+        || !claimContentType.startsWith("application/json")) {
+      claimHttp.end();
+      lastDeviceErrorCode = "DEVICE-PAIRING-CLAIM";
+      lastDeviceErrorMessage = "配對 claim HTTP／Content-Type／長度不合法";
+      return false;
+    }
+    JsonDocument claimResponse;
+    const DeserializationError claimJsonError = deserializeJson(claimResponse, claimHttp.getStream());
+    claimHttp.end();
+    const String secret = claimResponse["device_secret"] | "";
+    const JsonVariantConst versionValue = claimResponse["credential_version"];
+    const String claimedDeviceId = claimResponse["device_id"] | "";
+    if (claimJsonError || claimResponse.overflowed() || secret.length() < 32U
+        || secret.length() > inktime::configstore::kMaxDeviceSecretBytes
+        || !versionValue.is<uint32_t>() || versionValue.is<bool>() || versionValue.as<uint32_t>() == 0U
+        || claimedDeviceId != cfg.device_id) {
+      lastDeviceErrorCode = "DEVICE-PAIRING-SCHEMA";
+      lastDeviceErrorMessage = "配對 claim credential schema 不合法";
+      return false;
+    }
+    Config candidate = cfg;
+    candidate.device_secret = secret;
+    candidate.credential_version = versionValue.as<uint32_t>();
+    candidate.auth_state = "paired";
+#if INKTIME_PHOTOPAINTER_ENABLED
+    JsonObject claimConfig = claimResponse["config"].as<JsonObject>();
+    const String delivery = claimConfig["delivery_mode"] | candidate.delivery_mode;
+    const String button = claimConfig["button_wake_action"] | candidate.button_wake_action;
+    if (validDeliveryMode(delivery)) candidate.delivery_mode = delivery;
+    if (validButtonWakeAction(button)) candidate.button_wake_action = button;
+#endif
+    String persistError;
+    if (!saveConfig(candidate, &persistError)) {
+      setConfigPersistenceError(persistError);
+      return false;
+    }
+    cfg = candidate;
+    deviceAuthInvalid = false;
+    lastDeviceErrorCode = "";
+    lastDeviceErrorMessage = "";
+    return true;
+  }
+  (void)persistPairingState(cfg, "pairing_expired");
+  lastDeviceErrorCode = "DEVICE-PAIRING-TIMEOUT";
+  lastDeviceErrorMessage = "管理員核准逾時；配對碼已失效，請重新建立配對";
+  return false;
+}
+
 static bool queueAckIdempotencyKey(const PendingQueueAck &pending, String &key) {
   char material[320];
   if (!inktime::idempotencyMaterial(
@@ -1568,7 +1874,7 @@ static bool queueAckIdempotencyKey(const PendingQueueAck &pending, String &key) 
   return true;
 }
 
-static bool sendQueueAck(const Config &cfg, const PendingQueueAck &pending, bool persistFirst) {
+static bool sendQueueAck(Config &cfg, const PendingQueueAck &pending, bool persistFirst) {
   if (!pending.valid) return false;
   if (persistFirst) persistPendingQueueAck(pending);
   String base;
@@ -1607,10 +1913,15 @@ static bool sendQueueAck(const Config &cfg, const PendingQueueAck &pending, bool
       lastDeviceErrorMessage = transportMessage;
       break;
     }
-    ackHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
+    if (!addDeviceAuthorization(ackHttp, cfg)) {
+      ackHttp.end();
+      return false;
+    }
     ackHttp.addHeader("Content-Type", "application/json");
     const int status = ackHttp.POST(body);
+    const bool authFailed = handleDeviceAuthStatus(cfg, status);
     ackHttp.end();
+    if (authFailed) return false;
     const inktime::AckDecision decision = inktime::ackDecision(status, attempt);
     if (decision == inktime::AckDecision::Accepted) {
       removePendingQueueAck(pending);
@@ -1636,7 +1947,7 @@ static bool sendQueueAck(const Config &cfg, const PendingQueueAck &pending, bool
 }
 
 static bool sendQueueEvent(
-  const Config &cfg,
+  Config &cfg,
   inktime::QueueEvent event,
   bool displaySkipped = false,
   const String &errorCode = String(""),
@@ -1657,7 +1968,7 @@ static bool sendQueueEvent(
   return sendQueueAck(cfg, pending, true);
 }
 
-static bool resumePendingQueueAck(const Config &cfg) {
+static bool resumePendingQueueAck(Config &cfg) {
   for (uint8_t attempt = 0; attempt < inktime::kMaxAckJournalEntries; ++attempt) {
     const PendingQueueAck pending = loadPendingQueueAck();
     if (!pending.valid) return true;
@@ -1689,12 +2000,12 @@ bool downloadLatestPhotoBin(Config &cfg) {
   }
 #endif
 
-  if (cfg.backend_hostport.length() == 0 || cfg.device_token.length() == 0) {
+  if (cfg.backend_hostport.length() == 0 || !hasDeviceCredential(cfg)) {
 #if DEBUG_LOG
     DBG_PRINTLN("[HTTP] 伺服器或裝置 Token 尚未設定，跳過下載");
 #endif
     lastDeviceErrorCode = "DEVICE-CONFIG";
-    lastDeviceErrorMessage = "伺服器或裝置 Token 尚未設定";
+    lastDeviceErrorMessage = "伺服器或裝置 credential 尚未設定";
     return false;
   }
 
@@ -1717,8 +2028,15 @@ bool downloadLatestPhotoBin(Config &cfg) {
     lastDeviceErrorMessage = transportMessage.length() ? transportMessage : "Manifest URL 無法初始化";
     return false;
   }
-  manifestHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
+  if (!addDeviceAuthorization(manifestHttp, cfg)) {
+    manifestHttp.end();
+    return false;
+  }
   int manifestCode = manifestHttp.GET();
+  if (handleDeviceAuthStatus(cfg, manifestCode)) {
+    manifestHttp.end();
+    return false;
+  }
   const int manifestLength = manifestHttp.getSize();
   const String manifestContentType = manifestHttp.header("Content-Type");
   if (manifestCode != HTTP_CODE_OK || manifestLength <= 0 || manifestLength > 65536
@@ -1910,8 +2228,16 @@ bool downloadLatestPhotoBin(Config &cfg) {
       lastDeviceErrorMessage = fileTransportMessage;
       continue;
     }
-    fileHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
+    if (!addDeviceAuthorization(fileHttp, cfg)) {
+      fileHttp.end();
+      continue;
+    }
     int code = fileHttp.GET();
+    if (handleDeviceAuthStatus(cfg, code)) {
+      fileHttp.end();
+      heap_caps_free(packed);
+      return false;
+    }
     const String fileContentType = fileHttp.header("Content-Type");
     if (code != HTTP_CODE_OK || fileHttp.getSize() != (int)packedSize
         || !fileContentType.startsWith("application/octet-stream")) {
@@ -1990,7 +2316,7 @@ bool downloadLatestPhotoBin(Config &cfg) {
 
 #if INKTIME_PHOTOPAINTER_ENABLED
 static bool downloadOfflineScheduleSlot(
-  const Config &cfg,
+  Config &cfg,
   inktime::DisplayRotation rotation,
   const String &base,
   const String &downloadUrl,
@@ -2035,8 +2361,17 @@ static bool downloadOfflineScheduleSlot(
     lastDeviceErrorMessage = fileTransportMessage.length() ? fileTransportMessage : "離線排程 Slot URL 無法初始化";
     return false;
   }
-  fileHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
+  if (!addDeviceAuthorization(fileHttp, cfg)) {
+    fileHttp.end();
+    heap_caps_free(packed);
+    return false;
+  }
   const int fileStatus = fileHttp.GET();
+  if (handleDeviceAuthStatus(cfg, fileStatus)) {
+    fileHttp.end();
+    heap_caps_free(packed);
+    return false;
+  }
   const String fileContentType = fileHttp.header("Content-Type");
   if (fileStatus != HTTP_CODE_OK || fileHttp.getSize() != static_cast<int>(packedSize)
       || !fileContentType.startsWith("application/octet-stream")) {
@@ -2176,10 +2511,10 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
     return failOfflineScheduleTransaction("離線排程 transaction 尚未完成 recovery");
   }
   String base;
-  if (cfg.backend_hostport.length() == 0 || cfg.device_token.length() == 0
+  if (cfg.backend_hostport.length() == 0 || !hasDeviceCredential(cfg)
       || !normalizedBackendBase(cfg, base)) {
     lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-CONFIG";
-    lastDeviceErrorMessage = "離線排程缺少 Backend 或裝置 Token";
+    lastDeviceErrorMessage = "離線排程缺少 Backend 或裝置 credential";
     return false;
   }
   inktime::DeviceHttpTransport scheduleTransport(cfg.ca_pem);
@@ -2196,8 +2531,15 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
     lastDeviceErrorMessage = scheduleTransportMessage.length() ? scheduleTransportMessage : "離線排程 URL 無法初始化";
     return false;
   }
-  scheduleHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
+  if (!addDeviceAuthorization(scheduleHttp, cfg)) {
+    scheduleHttp.end();
+    return false;
+  }
   const int status = scheduleHttp.GET();
+  if (handleDeviceAuthStatus(cfg, status)) {
+    scheduleHttp.end();
+    return false;
+  }
   const int length = scheduleHttp.getSize();
   const String contentType = scheduleHttp.header("Content-Type");
   if (status == HTTP_CODE_NOT_FOUND && length > 0 && length <= 4096
@@ -2681,8 +3023,15 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
     lastDeviceErrorMessage = manifestTransportMessage.length() ? manifestTransportMessage : "Queue Manifest URL 無法初始化";
     return QueueDownloadResult::Failed;
   }
-  manifestHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
+  if (!addDeviceAuthorization(manifestHttp, cfg)) {
+    manifestHttp.end();
+    return QueueDownloadResult::Failed;
+  }
   const int status = manifestHttp.GET();
+  if (handleDeviceAuthStatus(cfg, status)) {
+    manifestHttp.end();
+    return QueueDownloadResult::Failed;
+  }
   if (status == HTTP_CODE_NOT_FOUND) {
     manifestHttp.end();
     return QueueDownloadResult::EmptyOrUnsupported;
@@ -2854,8 +3203,17 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
     lastDeviceErrorMessage = fileTransportMessage.length() ? fileTransportMessage : "Queue download URL 無法初始化";
     return QueueDownloadResult::Failed;
   }
-  fileHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
+  if (!addDeviceAuthorization(fileHttp, cfg)) {
+    fileHttp.end();
+    heap_caps_free(packed);
+    return QueueDownloadResult::Failed;
+  }
   const int fileStatus = fileHttp.GET();
+  if (handleDeviceAuthStatus(cfg, fileStatus)) {
+    fileHttp.end();
+    heap_caps_free(packed);
+    return QueueDownloadResult::Failed;
+  }
   const String fileContentType = fileHttp.header("Content-Type");
   if (fileStatus != HTTP_CODE_OK || fileHttp.getSize() != static_cast<int>(packedSize)
       || !fileContentType.startsWith("application/octet-stream")) {
@@ -3309,8 +3667,8 @@ bool downloadDailyPhotoBin(Config &cfg) {
   return latest;
 }
 
-void reportDeviceStatus(const Config &cfg, bool displayUpdated) {
-  if (WiFi.status() != WL_CONNECTED || cfg.backend_hostport.length() == 0 || cfg.device_token.length() == 0) return;
+void reportDeviceStatus(Config &cfg, bool displayUpdated) {
+  if (WiFi.status() != WL_CONNECTED || cfg.backend_hostport.length() == 0 || !hasDeviceCredential(cfg)) return;
   String base;
   if (!normalizedBackendBase(cfg, base)) return;
 
@@ -3381,9 +3739,13 @@ void reportDeviceStatus(const Config &cfg, bool displayUpdated) {
     lastDeviceErrorMessage = statusTransportMessage;
     return;
   }
-  statusHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
+  if (!addDeviceAuthorization(statusHttp, cfg)) {
+    statusHttp.end();
+    return;
+  }
   statusHttp.addHeader("Content-Type", "application/json");
-  statusHttp.POST(body);
+  const int status = statusHttp.POST(body);
+  (void)handleDeviceAuthStatus(cfg, status);
   statusHttp.end();
 }
 
@@ -3411,6 +3773,33 @@ void initDisplay(const Config &cfg) {
   else              display.setRotation(1);
 #endif
 }
+
+#if !INKTIME_PHOTOPAINTER_ENABLED
+static bool displayPairingCode(const Config &cfg, const String &pairingCode) {
+  initDisplay(cfg);
+  const uint32_t refreshStarted = millis();
+  display.setFullWindow();
+  display.firstPage();
+  do {
+    display.fillScreen(GxEPD_WHITE);
+    display.setTextColor(GxEPD_BLACK);
+    display.setTextSize(2);
+    display.setCursor(20, 90);
+    display.print("INKTIME PAIRING");
+    display.setCursor(20, 180);
+    display.print("CODE:");
+    display.setCursor(20, 235);
+    display.setTextSize(4);
+    display.print(pairingCode);
+    display.setTextSize(2);
+    display.setCursor(20, 330);
+    display.print("VALID 5 MIN");
+  } while (display.nextPage());
+  display.hibernate();
+  lastRefreshDurationMs = millis() - refreshStarted;
+  return true;
+}
+#endif
 
 bool drawFromFrameData(const Config &cfg) {
   (void)cfg;
@@ -4033,6 +4422,34 @@ void setup() {
     startConfigPortal();
   }
 
+  // Pairing is a one-time authorization flow, never part of an ordinary
+  // credentialed wake.  A revoked/invalid credential may re-enter this flow
+  // only after a dedicated authenticated permission probe confirms that the
+  // backend has enabled repair; the backend still requires a fresh
+  // short-lived pairing code and administrator approval.
+  bool repairPermission = false;
+  if (g_cfg.auth_state == "auth_invalid" || g_cfg.auth_state == "revoked") {
+    repairPermission = checkRepairPermission(g_cfg);
+    if (!repairPermission) {
+      goDeepSleepSeconds(60U);
+      return;
+    }
+  }
+  if ((automaticPairingAllowed(g_cfg) || repairPermission) && !performAutomaticPairing(g_cfg)) {
+    if (lastDeviceErrorCode.length() == 0U) {
+      lastDeviceErrorCode = "DEVICE-PAIRING-RECOVERY";
+      lastDeviceErrorMessage = "自動配對尚未完成；本輪停止網路工作並等待 bounded recovery wake";
+    }
+    goDeepSleepSeconds(60U);
+    return;
+  }
+  if (!hasDeviceCredential(g_cfg)) {
+    lastDeviceErrorCode = "DEVICE-AUTH-CONFIG";
+    lastDeviceErrorMessage = "裝置沒有可用 credential；不進入未授權的下載或狀態回報流程";
+    goDeepSleepSeconds(60U);
+    return;
+  }
+
   struct tm timeinfo;
   bool hasTime = syncTime(g_cfg, timeinfo);
 
@@ -4085,6 +4502,12 @@ void setup() {
 #if DEBUG_LOG
     DBG_PRINTLN("[BOOT] downloadDailyPhotoBin FAILED");
 #endif
+  }
+  if (deviceAuthInvalid) {
+    // A confirmed 401/403 stops this wake completely.  Do not send a
+    // follow-up Status or retry Queue/image work with the rejected credential.
+    goDeepSleepSeconds(60U);
+    return;
   }
   reportDeviceStatus(g_cfg, displayUpdated);
 

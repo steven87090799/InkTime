@@ -16,11 +16,11 @@ from inktime.app.domain.auth import validate_password
 
 
 SENSITIVE_KEY = re.compile(
-    r"^(?:api[_-]?key|token|password|secret|authorization|cookie|session|bearer|device[_-]?(?:credential|token))$",
+    r"^(?:api[_-]?key|token|password|secret|authorization|cookie|session|bearer|(?:previous[_-]?)?device[_-]?(?:credential|token|secret)(?:[_-]?(?:hash|ciphertext))?|pairing[_-]?(?:code|nonce)(?:[_-]?(?:hash|ciphertext))?)$",
     re.IGNORECASE,
 )
 SENSITIVE_TEXT = re.compile(
-    r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]{8,}|\b(?:sk-|itd_)[A-Za-z0-9._~-]{8,}|\b(?:api[_-]?key|token|authorization)=([^\s&]+)"
+    r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]{8,}|\b(?:sk-|itd_|ids_)[A-Za-z0-9._~-]{8,}|\b(?:api[_-]?key|token|authorization|pairing[_-]?(?:code|nonce))=([^\s&]+)"
 )
 PRIVATE_PATH = re.compile(r"(?:/Users/[^\s]+|/home/[^\s]+|/photos/[^\s]+)")
 GPS = re.compile(r"(?<!\d)(?:-?\d{1,2}\.\d{4,})\s*[,，]\s*(?:-?\d{1,3}\.\d{4,})(?!\d)")
@@ -70,8 +70,22 @@ def issue_device_token() -> str:
     return token
 
 
+def issue_device_secret() -> str:
+    """Issue the long-lived credential returned by a one-time device claim."""
+
+    secret = "ids_" + secrets.token_urlsafe(48)
+    register_secret(secret)
+    return secret
+
+
 def hash_device_token(token: str, pepper: str) -> str:
     return hmac.new(pepper.encode("utf-8"), token.encode("utf-8"), sha256).hexdigest()
+
+
+def hash_device_secret(secret: str, pepper: str) -> str:
+    """Hash a high-entropy Device Secret without storing it in the database."""
+
+    return hash_device_token(secret, pepper)
 
 
 def mask_secret(value: str) -> str:

@@ -9,9 +9,9 @@
 - 禁止 `WiFiClientSecure::setInsecure()`。
 - `HTTPClient` 停用 redirect follow；3xx 不會被裝置靜默導向其他 host。
 - HTTPS trust anchor 只能來自編譯期 `INKTIME_DEVICE_ROOT_CA` 或已驗證的 Root CA PEM 設定，不會從遠端 response 接受 CA。
-- Bearer device token 不會寫入 pairing screen、URL、序列埠或 status 回報以外的診斷文字。
+- Device Secret／Legacy Bearer credential 不會寫入 pairing screen、URL、序列埠或 status 回報以外的診斷文字；短效 pairing code 只在裝置畫面與管理員核准表出現。
 
-編譯期 provisioning 的最小概念如下；實際建置系統應透過受控 secret／board-specific build property 注入，不要把私有 CA key 或裝置 Token commit 到 Git：
+編譯期 provisioning 的最小概念如下；實際建置系統應透過受控 secret／board-specific build property 注入，不要把私有 CA key 或任何裝置 credential commit 到 Git：
 
 ```text
 -DINKTIME_DEVICE_ROOT_CA="-----BEGIN CERTIFICATE----- ... -----END CERTIFICATE-----"
@@ -19,7 +19,7 @@
 
 若使用 Web 配對頁輸入 CA，韌體只接受 64–3500 bytes、包含 `BEGIN CERTIFICATE`／`END CERTIFICATE` 且能通過 mbedTLS X.509 parse 的 PEM；私鑰、截斷與垃圾內容都拒絕。上限由 `device_http_transport.h` 的 `kMaxDeviceCaPemBytes` 與 portal `maxlength` 共用。正式設定會以完整 payload 寫入 `cfgstore` 的 A/B blob，`dashcfg` 的舊形式 key 僅作一次性 migration input；CA 不是 secret，但仍應使用正確的 server CA，不要貼入 server private key。
 
-`saveConfig()` 會先驗證 CA policy，再以 generation、CRC、active pointer 與 read-only full-payload read-back 完成 A/B commit。格式或 CA policy 失敗回 `PAIRING-NVS-001`，NVS namespace 開啟失敗回 `PAIRING-NVS-002`，寫入後 full-payload read-back 不一致回 `PAIRING-NVS-003`；pointer／journal decode failure 使用 `PAIRING-NVS-004`／`PAIRING-NVS-005`，移除或 clear 後 read-only 檢查失敗回 `PAIRING-NVS-006`，pointer restore 本身失敗回 `PAIRING-NVS-007`。legacy cleanup 失敗時保留新的 canonical journal／A/B blob，等待下次 retry。任一正式 commit 失敗都不會切換舊 active pointer、清除 portal 或重啟裝置。空字串是正式值，會覆蓋舊 password、token、CA 或 backend hostport。
+`saveConfig()` 會先驗證 CA policy，再以 generation、CRC、active pointer 與 read-only full-payload read-back 完成 A/B commit。格式或 CA policy 失敗回 `PAIRING-NVS-001`，NVS namespace 開啟失敗回 `PAIRING-NVS-002`，寫入後 full-payload read-back 不一致回 `PAIRING-NVS-003`；pointer／journal decode failure 使用 `PAIRING-NVS-004`／`PAIRING-NVS-005`，移除或 clear 後 read-only 檢查失敗回 `PAIRING-NVS-006`，pointer restore 本身失敗回 `PAIRING-NVS-007`。legacy cleanup 失敗時保留新的 canonical journal／A/B blob，等待下次 retry。任一正式 commit 失敗都不會切換舊 active pointer、清除 portal 或重啟裝置。空字串是正式值，會覆蓋舊 password、CA 或 backend hostport；Device Secret／Legacy credential 不由新配網表單重新輸入，Factory Reset 才會清除。
 
 ## 受控 LAN development build
 
@@ -39,11 +39,11 @@ LAN build 的設定頁會顯示沒有 TLS 保護的警告。正式 production co
 
 1. 產生隨機 AP SSID（`InkTime-<裝置短 ID>`）與隨機 24 字元十六進位 AP password；密碼不由 MAC、chip ID 或 SSID 推導。
 2. 啟動 AP 與 `http://192.168.4.1/` 設定頁；配對授權 secret、nonce、嘗試次數與五分鐘 expiry 仍由韌體限制。
-3. 若是 PhotoPainter，先在電子紙上顯示 `INKTIME PAIRING`、Wi-Fi SSID、AP password、setup URL 與 `VALID 5 MIN`，因此不必依賴序列埠才能完成配網。
-4. Web 表單可保存 Wi-Fi、HTTPS backend URL、Root CA PEM、device Token、時區、刷新時間與 180° 設定；保存前會再次驗證 URL／CA，且 NVS write/read-back 必須成功。
+3. 電子紙（PhotoPainter 或 GxEPD2）會顯示 `INKTIME PAIRING`、Wi-Fi SSID、AP password、setup URL 與短效 pairing code，因此不必依賴序列埠才能完成配網。
+4. Web 表單可保存 Wi-Fi、HTTPS backend URL、Root CA PEM、時區、刷新時間與 180° 設定；新自製裝置的 Device Secret 由核准後 claim 一次交付，保存前會再次驗證 URL／CA，且 NVS write/read-back 必須成功。
 5. 成功保存後停止 portal、清除 pairing secret／nonce 並重啟；超時或失敗嘗試達上限時進入 bounded sleep。
 
-AP password 是短期配對資訊，不是後端 Bearer Token。使用者完成設定後應讓 AP portal 結束，並在管理頁確認該裝置的 Token 與 delivery mode。
+AP password 是短期配網資訊，不是後端 credential。使用者完成設定後應讓 AP portal 結束，並在管理頁確認 pairing state、credential version 與 delivery mode。
 
 ## 診斷錯誤碼
 

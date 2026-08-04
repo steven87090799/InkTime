@@ -14,6 +14,9 @@ constexpr size_t kMaxWifiPasswordBytes = 128U;
 constexpr size_t kMaxBackendHostportBytes = 512U;
 constexpr size_t kMaxCaPemBytes = 3500U;
 constexpr size_t kMaxDeviceTokenBytes = 1024U;
+constexpr size_t kMaxDeviceSecretBytes = 256U;
+constexpr size_t kMaxDeviceIdBytes = 128U;
+constexpr size_t kMaxAuthStateBytes = 32U;
 constexpr size_t kMaxDeliveryModeBytes = 64U;
 constexpr size_t kMaxButtonWakeActionBytes = 64U;
 constexpr size_t kMaxScheduleIdBytes = 160U;
@@ -22,7 +25,7 @@ constexpr uint32_t kConfigSlotMagic = 0x494E4B43U;  // INKC
 constexpr uint32_t kConfigPointerMagic = 0x494E4B50U;  // INKP
 constexpr uint32_t kScheduleJournalMagic = 0x494E4B4AU;  // INKJ
 constexpr uint8_t kEnvelopeVersion = 1U;
-constexpr uint8_t kPayloadSchemaVersion = 1U;
+constexpr uint8_t kPayloadSchemaVersion = 2U;
 constexpr uint8_t kPointerVersion = 1U;
 constexpr uint8_t kJournalVersion = 1U;
 
@@ -37,6 +40,10 @@ struct ConfigPayload {
   std::string backend_hostport;
   std::string ca_pem;
   std::string device_token;
+  std::string device_secret;
+  std::string device_id;
+  std::string auth_state = "unpaired";
+  uint32_t credential_version = 0U;
   int32_t tz_offset_minutes = 8 * 60;
   uint8_t refresh_hour = 8U;
   uint8_t refresh_minute = 0U;
@@ -75,6 +82,10 @@ inline bool operator==(const ConfigPayload& left, const ConfigPayload& right) {
       || left.backend_hostport != right.backend_hostport
       || left.ca_pem != right.ca_pem
       || left.device_token != right.device_token
+      || left.device_secret != right.device_secret
+      || left.device_id != right.device_id
+      || left.auth_state != right.auth_state
+      || left.credential_version != right.credential_version
       || left.tz_offset_minutes != right.tz_offset_minutes
       || left.refresh_hour != right.refresh_hour
       || left.refresh_minute != right.refresh_minute
@@ -206,6 +217,9 @@ inline bool validate_payload(const ConfigPayload& payload, std::string& error) {
       || payload.backend_hostport.size() > kMaxBackendHostportBytes
       || payload.ca_pem.size() > kMaxCaPemBytes
       || payload.device_token.size() > kMaxDeviceTokenBytes
+      || payload.device_secret.size() > kMaxDeviceSecretBytes
+      || payload.device_id.size() > kMaxDeviceIdBytes
+      || payload.auth_state.size() > kMaxAuthStateBytes
       || payload.delivery_mode.size() > kMaxDeliveryModeBytes
       || payload.button_wake_action.size() > kMaxButtonWakeActionBytes) {
     set_error(error, "PAIRING-NVS-001");
@@ -219,7 +233,13 @@ inline bool validate_payload(const ConfigPayload& payload, std::string& error) {
           && payload.delivery_mode != "stock_compat"
           && payload.delivery_mode != "inktime_offline_schedule")
       || (payload.button_wake_action != "check_new"
-          && payload.button_wake_action != "local_next")) {
+          && payload.button_wake_action != "local_next")
+      || (payload.auth_state != "unpaired"
+          && payload.auth_state != "pairing_pending"
+          && payload.auth_state != "paired"
+          && payload.auth_state != "revoked"
+          && payload.auth_state != "auth_invalid"
+          && payload.auth_state != "pairing_expired")) {
     set_error(error, "PAIRING-NVS-001");
     return false;
   }
@@ -262,11 +282,15 @@ inline bool serialize_payload(const ConfigPayload& payload, std::string& output,
   append_u8(output, payload.schedule_count);
   append_u16(output, payload.prefetch_lead_minutes);
   if (!append_string(output, payload.delivery_mode, kMaxDeliveryModeBytes)
-      || !append_string(output, payload.button_wake_action, kMaxButtonWakeActionBytes)) {
+      || !append_string(output, payload.button_wake_action, kMaxButtonWakeActionBytes)
+      || !append_string(output, payload.device_secret, kMaxDeviceSecretBytes)
+      || !append_string(output, payload.device_id, kMaxDeviceIdBytes)
+      || !append_string(output, payload.auth_state, kMaxAuthStateBytes)) {
     set_error(error, "PAIRING-NVS-001");
     return false;
   }
   append_u32(output, payload.config_version);
+  append_u32(output, payload.credential_version);
   for (uint8_t index = 0U; index < kMaxConfigSlots; ++index) {
     append_u8(output, payload.schedule_slots[index].hour);
     append_u8(output, payload.schedule_slots[index].minute);
@@ -281,7 +305,7 @@ inline bool serialize_payload(const ConfigPayload& payload, std::string& output,
 inline bool deserialize_payload(const std::string& input, ConfigPayload& payload, std::string& error) {
   size_t offset = 0U;
   uint8_t schema = 0U;
-  if (!take_u8(input, offset, schema) || schema != kPayloadSchemaVersion
+  if (!take_u8(input, offset, schema) || (schema != 1U && schema != kPayloadSchemaVersion)
       || !take_string(input, offset, payload.wifi_ssid, kMaxWifiSsidBytes)
       || !take_string(input, offset, payload.wifi_pass, kMaxWifiPasswordBytes)
       || !take_string(input, offset, payload.backend_hostport, kMaxBackendHostportBytes)
@@ -299,12 +323,27 @@ inline bool deserialize_payload(const std::string& input, ConfigPayload& payload
       || !take_u8(input, offset, payload.schedule_count)
       || !take_u16(input, offset, payload.prefetch_lead_minutes)
       || !take_string(input, offset, payload.delivery_mode, kMaxDeliveryModeBytes)
-      || !take_string(input, offset, payload.button_wake_action, kMaxButtonWakeActionBytes)
-      || !take_u32(input, offset, payload.config_version)) {
+      || !take_string(input, offset, payload.button_wake_action, kMaxButtonWakeActionBytes)) {
     set_error(error, "PAIRING-NVS-004");
     return false;
   }
   payload.rotate180 = rotate != 0U;
+  payload.device_secret.clear();
+  payload.device_id.clear();
+  payload.auth_state = payload.device_token.empty() ? "unpaired" : "paired";
+  payload.credential_version = 0U;
+  if (schema >= 2U
+      && (!take_string(input, offset, payload.device_secret, kMaxDeviceSecretBytes)
+          || !take_string(input, offset, payload.device_id, kMaxDeviceIdBytes)
+          || !take_string(input, offset, payload.auth_state, kMaxAuthStateBytes))) {
+    set_error(error, "PAIRING-NVS-004");
+    return false;
+  }
+  if (!take_u32(input, offset, payload.config_version)
+      || (schema >= 2U && !take_u32(input, offset, payload.credential_version))) {
+    set_error(error, "PAIRING-NVS-004");
+    return false;
+  }
   for (uint8_t index = 0U; index < kMaxConfigSlots; ++index) {
     if (!take_u8(input, offset, payload.schedule_slots[index].hour)
         || !take_u8(input, offset, payload.schedule_slots[index].minute)) {
@@ -354,7 +393,7 @@ inline bool decode_slot(
       || !take_u8(input, offset, schema) || !take_u64(input, offset, generation)
       || !take_u32(input, offset, length) || !take_u32(input, offset, expected_crc)
       || magic != kConfigSlotMagic || envelope != kEnvelopeVersion
-      || schema != kPayloadSchemaVersion || length > kMaxConfigPayloadBytes
+      || (schema != 1U && schema != kPayloadSchemaVersion) || length > kMaxConfigPayloadBytes
       || length != input.size() - offset) {
     set_error(error, "PAIRING-NVS-004");
     return false;

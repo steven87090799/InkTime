@@ -4,7 +4,7 @@
 2. 執行 `python scripts/migrate.py --database <photos.db>`；舊 `photo_scores` 不會刪除。
 3. 啟動新版並建立管理員，再執行下列舊設定匯入工具。
 4. 由「維護」掃描照片；SHA-256 可在路徑移動後保留結果，相同內容建立繼承來源。
-5. 升級 ESP32 韌體、建立每台 Token、驗證 Manifest 後才移除舊 URL 金鑰。
+5. 升級 ESP32 韌體；新自製板依自動配對 request／管理員核准／claim 取得 Device Secret，既有 Legacy 裝置才建立相容 Token；驗證 Manifest 後才移除舊 URL 金鑰。
 6. 用小型本地／Mock 工作驗證，再恢復大量分析。
 
 回滾：停止三服務、驗證 pre-migration 備份、恢復舊 DB／映像／config，短期切回舊韌體。舊 API 有明確安全風險，只可在隔離網路使用。詳見 `MIGRATION_PLAN.md`。
@@ -20,7 +20,7 @@ python scripts/import_legacy_config.py ./config.py --database data/inktime.db --
 
 工具會匯入時區、渲染門檻、顯示數量、字型、舊 API 開關與 `API_CHANNELS`。API Key 直接以目前 `session.key` 加密，不會輸出到 Console；若尚無該檔案，請先啟動一次或設定 `INKTIME_SECRET_KEY`。
 
-`DOWNLOAD_KEY` 不會轉成新版 Token。請在裝置頁逐台建立 Token；舊 API 維持預設關閉。
+`DOWNLOAD_KEY` 不會轉成新版 Device Secret 或 Legacy Token。新自製板依自動配對流程完成綁定；只有既有 Legacy 裝置才在裝置頁逐台建立相容 Token；舊 API 維持預設關閉。
 
 ## Migration 25：帳號正規化與 Session 撤銷
 
