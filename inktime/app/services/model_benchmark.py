@@ -312,7 +312,8 @@ def _new_metrics() -> dict[str, Any]:
 
 
 def _quality_prediction(result: Mapping[str, Any]) -> dict[str, Any]:
-    details = result.get("details") if isinstance(result.get("details"), Mapping) else {}
+    details_value = result.get("details")
+    details: Mapping[str, Any] = details_value if isinstance(details_value, Mapping) else {}
     return {
         "memory_grade": details.get("memory_grade", "unknown"),
         "beauty_grade": details.get("beauty_grade", "unknown"),

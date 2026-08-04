@@ -296,8 +296,18 @@ def calculate_ranking_metrics(items: Sequence[Mapping[str, Any]], ks: Sequence[i
             continue
         if predicted_rank is None and predicted_score is None:
             continue
-        expected.append((identifier, -float(expected_rank) if expected_rank is not None else float(expected_score)))
-        predicted.append((identifier, -float(predicted_rank) if predicted_rank is not None else float(predicted_score)))
+        if expected_rank is not None:
+            expected_value = -float(expected_rank)
+        else:
+            assert expected_score is not None
+            expected_value = float(expected_score)
+        if predicted_rank is not None:
+            predicted_value = -float(predicted_rank)
+        else:
+            assert predicted_score is not None
+            predicted_value = float(predicted_score)
+        expected.append((identifier, expected_value))
+        predicted.append((identifier, predicted_value))
     count = len(set(identifier for identifier, _value in expected) & set(identifier for identifier, _value in predicted))
     return {
         "count": count,

@@ -78,7 +78,7 @@ def _safe_failure(
     vision_requests: int = 0,
     repair_requests: int = 0,
 ) -> dict[str, Any]:
-    result = {
+    result: dict[str, Any] = {
         "level": level,
         "ok": False,
         "message": message,
@@ -123,7 +123,7 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
             valid, _ = provider.validate_config()
         except Exception as exc:  # Keep transport details out of the API result.
             return _safe_failure(provider, level, f"Level 1 connection failed: {exc.__class__.__name__}")
-        result = {
+        result: dict[str, Any] = {
             "level": level,
             "ok": bool(valid),
             "message": "Level 1 connection and model capability passed" if valid else "Level 1 connection failed",
