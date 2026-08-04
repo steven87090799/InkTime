@@ -959,8 +959,10 @@ class ModelBenchmarkService:
                     raise BenchmarkError("quality metrics count 不得超過 quality-eligible photos")
                 if metrics["ranking_metrics"]["count"] != metrics["ranking_eligible_photos"]:
                     raise BenchmarkError("ranking metrics count 不得超過 ranking-eligible photos")
-                metrics["attempt_coverage_rate"] = _coverage_rate(
-                    metrics["attempted_photos"], metrics["selected_photos"]
+                metrics["attempt_coverage_rate"] = (
+                    _coverage_rate(metrics["attempted_photos"], metrics["selected_photos"])
+                    if metrics["attempted_photos"] > 0
+                    else None
                 )
                 metrics["schema_valid_coverage_rate"] = _coverage_rate(
                     metrics["schema_valid_photos"], metrics["attempted_photos"]

@@ -833,7 +833,13 @@ bool saveConfig(const Config &cfg, String *errorCodeOut = nullptr) {
   const inktime::configstore::ConfigPayload payload = configPayload(cfg);
   String storeError;
   if (!configStore.save(payload, storeError)) {
-    setError(storeError.length() > 0U ? storeError.c_str() : "PAIRING-NVS-001");
+    if (storeError == "PAIRING-NVS-002") {
+      setError("PAIRING-NVS-002");
+    } else if (storeError == "PAIRING-NVS-003") {
+      setError("PAIRING-NVS-003");
+    } else {
+      setError(storeError.length() > 0U ? storeError.c_str() : "PAIRING-NVS-001");
+    }
     return false;
   }
 
