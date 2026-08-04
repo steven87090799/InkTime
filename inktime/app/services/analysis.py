@@ -684,6 +684,7 @@ class PhotoAnalysisService:
             cache_schema_versions = (SCHEMA_VERSION,) if schema_kind == "full" else (2,)
         else:
             cache_schema_versions = (SCHEMA_VERSION, 2) if schema_kind == "full" else (2,)
+        cache_schema_version = SCHEMA_VERSION if has_prompt_contract and schema_kind == "full" else None
         vision_json = canonical_json(vision_input)
 
         def get_cache() -> dict | None:
@@ -840,6 +841,7 @@ class PhotoAnalysisService:
                     repair_policy=repair_policy,
                     prompt_version=prompt_version,
                     cache_schema_kind=cache_schema_kind,
+                    cache_schema_version=cache_schema_version,
                     vision_request_fingerprint=request_fingerprint,
                     vision_input_spec_json=vision_json,
                     cache_provider_identity=actual_provider,
@@ -940,6 +942,7 @@ class PhotoAnalysisService:
         repair_policy: dict | None,
         prompt_version: str,
         cache_schema_kind: str,
+        cache_schema_version: int | None,
         vision_request_fingerprint: str,
         vision_input_spec_json: str,
         cache_provider_identity: str,
@@ -1144,7 +1147,10 @@ class PhotoAnalysisService:
             provider=cache_provider_identity,
             model_name=model,
             prompt_version=prompt_version,
-            schema_version=int(result["schema_version"]),
+            # A frozen v3 plan owns a v3 cache identity even when a
+            # compatibility provider still returns the accepted v2 payload.
+            # Legacy plans retain the result's historical schema version.
+            schema_version=int(cache_schema_version or result["schema_version"]),
             schema_kind=cache_schema_kind,
             result=result,
             raw_json=raw,

@@ -230,13 +230,28 @@ def test_router_does_not_fail_over_after_initial_vision_and_repair_failure(app, 
 
 def test_full_analysis_hits_historical_v2_cache_without_an_image_call(app, tmp_path):
     _, ids, service = prepare(app, tmp_path)
+    # This fixture intentionally models a pre-contract frozen plan.  New
+    # plans include the v3 provider contract and must not fall back to v2.
+    legacy_plan = service.build_plan(
+        strategy="high_quality",
+        provider_route=[],
+        scoring_profile=dict(app.extensions["inktime_scoring_repository"].current()),
+    )
+    legacy_plan["model"] = "mock"
+    for key in (
+        "scoring_rules",
+        "scoring_rules_sha256",
+        "provider_behavior_revision",
+        "provider_prompt_contract_sha256",
+    ):
+        legacy_plan.pop(key, None)
     first = MockProvider([valid_result()])
     service.analyze_photo(
         photo_id=ids[0],
         job_id=None,
         provider=first,
         strategy="high_quality",
-        high_model="mock",
+        analysis_plan=legacy_plan,
         force_ai=True,
     )
     repository = app.extensions["inktime_photo_repository"]
@@ -292,7 +307,7 @@ def test_full_analysis_hits_historical_v2_cache_without_an_image_call(app, tmp_p
         job_id=None,
         provider=second,
         strategy="high_quality",
-        high_model="mock",
+        analysis_plan=legacy_plan,
         force_ai=True,
     )
     assert result["stage"] == "cache"

@@ -156,5 +156,5 @@ def test_scoring_lab_records_usage_and_uses_current_profile(app, tmp_path, monke
     with app.extensions["inktime_database"].session() as connection:
         usage = connection.execute(
             "SELECT request_type,input_tokens,output_tokens,cached_tokens FROM api_usage"
-        ).fetchone()
-    assert tuple(usage) == ("scoring_test", 120, 30, 10)
+        ).fetchall()
+    assert [tuple(row) for row in usage] == [("scoring_test_vision", 120, 30, 10)]
