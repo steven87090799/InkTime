@@ -52,6 +52,72 @@ def test_primary_management_pages_render(client, app):
     assert "照片平滑（減少色塊／雜點）" in settings
 
 
+def test_stock_photopainter_display_controls_are_scoped_and_server_side(client, app):
+    create_admin(app)
+    login(client)
+    repository = app.extensions["inktime_device_repository"]
+    hosted_id, _ = repository.create(
+        "客廳相框",
+        panel_profile="gdep073e01_6c",
+        delivery_mode="stock_compat",
+        stock_endpoint_host="192.168.1.50",
+    )
+    missing_host_id, _ = repository.create(
+        "書房相框",
+        panel_profile="safe_4c",
+        delivery_mode="stock_compat",
+    )
+    legacy_id, _ = repository.create(
+        "舊版相框",
+        panel_profile="safe_4c",
+        delivery_mode="legacy_online",
+        stock_endpoint_host="192.168.1.51",
+    )
+    offline_id, _ = repository.create(
+        "離線相框",
+        panel_profile="safe_4c",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00"],
+    )
+
+    page = client.get("/devices")
+    body = page.get_data(as_text=True)
+    assert page.status_code == 200
+    assert body.count('class="primary stock-display"') == 2
+    assert f'data-stock-display-device="{hosted_id}"' in body
+    assert f'data-stock-display-device="{missing_host_id}"' in body
+    assert f'data-stock-display-device="{legacy_id}"' not in body
+    assert f'data-stock-display-device="{offline_id}"' not in body
+    assert "Stock Host：192.168.1.50" in body
+    assert "Stock Host：未設定" in body
+    assert 'disabled title="尚未設定 Stock LAN Host"' in body
+    assert "尚未設定 Stock LAN Host" in body
+
+    for expected in (
+        "/api/v1/virtual-display/manifest?profile=",
+        "/api/v1/devices/",
+        "/stock-photopainter/display",
+        "window.inktimeFetch",
+        "最新 Release Manifest 不完整，已停止傳送。",
+        "PhotoPainter 已接受圖片。請查看實體相框確認刷新結果。",
+        "傳送中…",
+        "dataset.pending",
+    ):
+        assert expected in body
+    assert "/dataUP" not in body
+
+    app.extensions["inktime_auth_repository"].create_user(
+        "stock-viewer", "stock-viewer-password", "viewer"
+    )
+    viewer = app.test_client()
+    login(viewer, "stock-viewer", "stock-viewer-password")
+    viewer_body = viewer.get("/devices").get_data(as_text=True)
+    assert "立即顯示最新 Release" not in viewer_body
+    assert "data-stock-display-device" not in viewer_body
+    assert "Stock Host：192.168.1.50" in viewer_body
+
+
 def test_batch_management_api_is_admin_only_and_strict_json(client, app):
     create_admin(app)
     login(client)
