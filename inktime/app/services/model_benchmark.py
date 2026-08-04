@@ -567,7 +567,7 @@ class ModelBenchmarkService:
                         valid, message = bool(validation), ""
                     if not valid:
                         raise BenchmarkError(f"Provider /models capability check 失敗：{message or 'unknown'}")
-                    for record, image in zip(selected, axis_images):
+                    for record, image in zip(selected, axis_images, strict=True):
                         if requests_used >= max_requests or spent >= max_cost or report["stopped_by_budget"]:
                             report["stopped_by_budget"] = True
                             break

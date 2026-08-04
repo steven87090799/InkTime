@@ -40,7 +40,7 @@ def _orientation(record: Mapping[str, Any]) -> Mapping[str, Any]:
 def grade_agreement(expected: Sequence[Any], predicted: Sequence[Any]) -> dict[str, Any]:
     """Return exact/within-one/MAE grade agreement without unknown inflation."""
 
-    pairs = list(zip(expected, predicted))
+    pairs = list(zip(expected, predicted, strict=True))
     # Keep the loop explicit so invalid/unknown grades are excluded from the
     # distance metrics rather than silently treated as the lowest grade.
     exact = 0
@@ -79,7 +79,7 @@ def grade_agreement(expected: Sequence[Any], predicted: Sequence[Any]) -> dict[s
 def type_metrics(expected: Sequence[Iterable[Any]], predicted: Sequence[Iterable[Any]]) -> dict[str, Any]:
     """Calculate micro precision/recall/F1/Jaccard for multi-label types."""
 
-    pairs = list(zip(expected, predicted))
+    pairs = list(zip(expected, predicted, strict=True))
     true_positive = false_positive = false_negative = 0
     jaccards: list[float] = []
     for expected_types, predicted_types in pairs:
@@ -118,7 +118,7 @@ def type_metrics(expected: Sequence[Iterable[Any]], predicted: Sequence[Iterable
 def should_keep_metrics(expected: Sequence[Any], predicted: Sequence[Any]) -> dict[str, Any]:
     expected_values = [bool(value) for value in expected]
     predicted_values = [bool(value) for value in predicted]
-    pairs = list(zip(expected_values, predicted_values))
+    pairs = list(zip(expected_values, predicted_values, strict=True))
     true_positive = sum(left and right for left, right in pairs)
     false_positive = sum((not left) and right for left, right in pairs)
     false_negative = sum(left and (not right) for left, right in pairs)
@@ -142,7 +142,7 @@ def should_keep_metrics(expected: Sequence[Any], predicted: Sequence[Any]) -> di
 
 
 def orientation_metrics(expected: Sequence[Mapping[str, Any]], predicted: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    pairs = list(zip(expected, predicted))
+    pairs = list(zip(expected, predicted, strict=True))
     exact_unambiguous = 0
     unambiguous_expected = 0
     ambiguous_expected = 0
@@ -215,7 +215,7 @@ def spearman_rank(expected: Any, predicted: Any) -> float | None:
     right = [predicted_ranks[key] for key in keys]
     left_mean = sum(left) / len(left)
     right_mean = sum(right) / len(right)
-    covariance = sum((a - left_mean) * (b - right_mean) for a, b in zip(left, right))
+    covariance = sum((a - left_mean) * (b - right_mean) for a, b in zip(left, right, strict=True))
     left_variance = sum((a - left_mean) ** 2 for a in left)
     right_variance = sum((b - right_mean) ** 2 for b in right)
     if left_variance == 0 or right_variance == 0:
