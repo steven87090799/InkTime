@@ -240,7 +240,7 @@ def test_full_analysis_hits_historical_v2_cache_without_an_image_call(app, tmp_p
         stage_two_threshold=65,
         favorite_override=True,
         scoring_profile={
-            "id": "legacy-test",
+            "id": "",
             "memory_weight": 25,
             "beauty_weight": 25,
             "technical_weight": 25,
