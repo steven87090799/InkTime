@@ -158,7 +158,7 @@ class ScoringLabService:
                 stage="scoring_test",
                 provider_request_context_id=provider_request_context_id,
             )
-            repair_attempt = record_attempt(
+            record_attempt(
                 repaired,
                 request_type="scoring_test_repair",
                 started_at=repair_started_at,

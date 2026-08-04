@@ -23,6 +23,8 @@ ignore = ["S101"]
 "tests/**" = ["S105", "S106", "S107"]
 "inktime/app/repositories/jobs.py" = ["S608"]
 "inktime/app/repositories/photos.py" = ["S608"]
+"inktime/app/repositories/providers.py" = ["S608"]
+"inktime/app/services/budgets.py" = ["S608"]
 "scripts/*.py" = ["E402"]
 
 [tool.coverage.run]
