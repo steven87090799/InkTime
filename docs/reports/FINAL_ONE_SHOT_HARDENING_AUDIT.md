@@ -51,6 +51,12 @@
 - Provider Level 2/3 與 live benchmark 只接受 deterministic synthetic／明確 non-private golden manifest；不得讀取 production photo、AI cache、release 或 display history。
 - Container evidence 的 Trivy 語意是 `unallowlisted policy findings = PASS`；temporary unfixed CVE allowlist 仍存在，expiry 為 `2026-09-30`，不可寫成 `0 vulnerabilities`。
 - hosted CI 的 fake provider、offline benchmark、ESP32 compile 與 source contract 都不能推論真實 OpenRouter routing／ZDR／cost、NAS、正式 TLS chain、NVS、BUSY、GPIO5、deep sleep、方向、ghosting、六色顯示或功耗。
+
+## PR #53 final closure addendum
+
+本次最後收尾另外要求：ESP32 formal Config 使用 bounded binary A/B blob、generation、CRC、active pointer 與 schedule/config recovery journal；`dashcfg` formal keys 僅作一次性 migration，retry／preview／display／queue ACK 等旁路 keys 不作 Config source。Hosted CI 以 `firmware-host-contract` 執行純 core failure-injection contract，並保留既有八組 ESP32 profile compile。
+
+Benchmark live metrics 以 `selected_photos`、`attempted_photos`、`schema_valid_photos`、`quality_eligible_photos` 與 `ranking_eligible_photos` 分層；quality／ranking 是 conditional metrics，rate 的零分母為 `null`。成本固定以 attempted photos 為分母，任何 unknown usage 都使完整成本平均為 `null`。Golden manifest 在 Provider construction 前 enforce 單一 technical alias、單一 orientation representation、duplicate id 與 duplicate resolved image fail-closed。Provider Level 3 repair 以 `conservative_attempted_calls` 計數，repair timeout／500／connection reset 也算 attempt，文字 repair 不重送圖片。
 - 最終分類只能是 `CODE_READY_REAL_ENV_PENDING`；真實 OpenRouter、NAS、PhotoPainter／ESP32 與長時間現場 soak 一律 `NOT RUN`。
 
 ## 靜態交接

@@ -4,7 +4,9 @@ import json
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
+from inktime.app.providers.base import ProviderResponse, Usage
 from inktime.app.services.model_benchmark import (
     BenchmarkError,
     ModelBenchmarkService,
@@ -12,6 +14,7 @@ from inktime.app.services.model_benchmark import (
     _production_ranking_score,
     _select_benchmark_records,
 )
+from tests.unit.test_analysis_schema import valid_result
 
 
 def _axes():
@@ -167,3 +170,202 @@ def test_offline_benchmark_reports_no_network_or_production_mutation():
         "emotion": 20.0,
     }
     assert report["ranking_policy"]["favorite_bonus_policy"]["applied"] is False
+
+
+class _LiveMetricProvider:
+    def __init__(self, *, invalid_first: bool):
+        self.invalid_first = invalid_first
+        self.analyze_count = 0
+        self.last_request_metrics = {}
+
+    def validate_config(self):
+        return True, "ok"
+
+    def analyze(self, **_kwargs):
+        self.analyze_count += 1
+        if self.invalid_first and self.analyze_count == 1:
+            content = "not-json"
+        else:
+            content = json.dumps(valid_result(), ensure_ascii=False)
+        return ProviderResponse(content, Usage(input_tokens=10, output_tokens=5, provider_reported_cost=0.1))
+
+    def repair_json(self, **_kwargs):
+        return ProviderResponse(json.dumps(valid_result(), ensure_ascii=False), Usage(input_tokens=4, output_tokens=2))
+
+    def estimate_cost(self, _model, _usage):
+        return None
+
+    def close(self):
+        return None
+
+
+def _live_manifest(tmp_path: Path) -> Path:
+    expected = {
+        "memory_grade": "A",
+        "beauty_grade": "A",
+        "technical_grade": "A",
+        "emotion_grade": "A",
+        "types": ["風景"],
+        "should_keep": True,
+        "rotation_cw": 0,
+        "ambiguous": False,
+    }
+    items = []
+    for index in range(2):
+        image_name = f"live-{index}.jpg"
+        Image.new("RGB", (2, 2), "white").save(tmp_path / image_name, format="JPEG")
+        items.append(
+            {
+                "id": f"live-{index}",
+                "image": image_name,
+                "expected": expected,
+                "expected_score": 1.0,
+            }
+        )
+    path = tmp_path / "manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": "inktime-golden-v1",
+                "dataset": {"id": "test", "source": "synthetic", "privacy": "non_private"},
+                "items": items,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_live_metrics_separate_attempt_coverage_and_unknown_cost_denominator(tmp_path):
+    manifest = _live_manifest(tmp_path)
+    providers = []
+
+    def factory(**_kwargs):
+        provider = _LiveMetricProvider(invalid_first=True)
+        providers.append(provider)
+        return provider
+
+    report = ModelBenchmarkService(provider_factory=factory).run_live(
+        axes=_axes(),
+        sample_count=2,
+        seed="coverage",
+        api_key="test-key",
+        base_url="https://openrouter.ai/api/v1",
+        max_requests=8,
+        max_cost=1,
+        dataset=manifest,
+        confirm_live_quality=True,
+    )
+    metrics = report["axes"][0]["metrics"]
+    assert metrics["selected_photos"] == 2
+    assert metrics["attempted_photos"] == 1
+    assert metrics["schema_valid_photos"] == 1
+    assert metrics["quality_eligible_photos"] == 1
+    assert metrics["ranking_eligible_photos"] == 1
+    assert metrics["attempt_coverage_rate"] == 0.5
+    assert metrics["schema_valid_coverage_rate"] == 1.0
+    assert metrics["quality_coverage_rate"] == 1.0
+    assert metrics["ranking_coverage_rate"] == 1.0
+    assert metrics["unknown_cost_count"] == 1
+    assert metrics["known_cost_total"] == 0.1
+    assert metrics["cost_complete"] is False
+    assert metrics["cost_denominator"] == "attempted_photos"
+    assert metrics["avg_cost_per_attempted_photo"] is None
+    assert metrics["avg_cost_per_photo"] is None
+    assert metrics["quality_metrics"]["count"] == 1
+    assert metrics["ranking_metrics"]["count"] == 1
+    assert report["stopped_by_budget"] is True
+    assert report["network_invocations"] == 3  # capability + vision + text-only repair
+    assert len(providers) == 1
+
+
+def test_live_budget_stop_still_emits_zero_denominator_axis_metrics(tmp_path):
+    manifest = _live_manifest(tmp_path)
+
+    def factory(**_kwargs):
+        return _LiveMetricProvider(invalid_first=False)
+
+    report = ModelBenchmarkService(provider_factory=factory).run_live(
+        axes=_axes(),
+        sample_count=2,
+        seed="zero-denominator",
+        api_key="test-key",
+        base_url="https://openrouter.ai/api/v1",
+        max_requests=1,
+        max_cost=1,
+        dataset=manifest,
+        confirm_live_quality=True,
+    )
+    metrics = report["axes"][0]["metrics"]
+    assert metrics["selected_photos"] == 2
+    assert metrics["attempted_photos"] == 0
+    assert metrics["attempt_coverage_rate"] is None
+    assert metrics["schema_valid_coverage_rate"] is None
+    assert metrics["avg_cost_per_attempted_photo"] is None
+    assert metrics["cost_per_1000_attempted_photos"] is None
+    assert metrics["quality_metrics"]["count"] == 0
+    assert metrics["ranking_metrics"]["count"] == 0
+
+
+def test_golden_manifest_rejects_duplicate_ids_and_mixed_aliases_before_provider(tmp_path):
+    expected = {
+        "memory_grade": "A",
+        "beauty_grade": "A",
+        "technical_grade": "A",
+        "technical_quality_grade": "A",
+        "emotion_grade": "A",
+        "types": ["風景"],
+        "should_keep": True,
+        "visual_orientation": {"rotation_cw": 0, "ambiguous": False},
+    }
+    (tmp_path / "one.jpg").write_bytes(b"fixture")
+    (tmp_path / "two.jpg").write_bytes(b"fixture")
+    path = tmp_path / "manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": "inktime-golden-v1",
+                "dataset": {"id": "test", "source": "synthetic", "privacy": "non_private"},
+                "items": [
+                    {"id": "duplicate", "image": "one.jpg", "expected": expected},
+                    {"id": "duplicate", "image": "two.jpg", "expected": expected},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(BenchmarkError, match="只包含一個 technical grade alias"):
+        _load_golden_records(path)
+
+    expected.pop("technical_quality_grade")
+    path.write_text(
+        json.dumps(
+            {
+                "version": "inktime-golden-v1",
+                "dataset": {"id": "test", "source": "synthetic", "privacy": "non_private"},
+                "items": [
+                    {"id": "duplicate", "image": "one.jpg", "expected": expected},
+                    {"id": "duplicate", "image": "two.jpg", "expected": expected},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(BenchmarkError, match="duplicate item id"):
+        _load_golden_records(path)
+
+    path.write_text(
+        json.dumps(
+            {
+                "version": "inktime-golden-v1",
+                "dataset": {"id": "test", "source": "synthetic", "privacy": "non_private"},
+                "items": [
+                    {"id": "one", "image": "one.jpg", "expected": expected},
+                    {"id": "two", "image": "./one.jpg", "expected": expected},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(BenchmarkError, match="duplicate resolved image"):
+        _load_golden_records(path)

@@ -98,7 +98,7 @@ OpenRouter 的本地 AI Cache 仍是 InkTime 自己的內容／Provider／模型
 1. 先儲存 Provider，確認 `openrouter` type、HTTPS Base URL、options allowlist 與 Batch 未勾選。
 2. 先按「Level 1／連線」；它只做設定／`/models` capability check，不送圖片，也不自動產生付費 Vision request。
 3. 需要確認 image input 時，再按「Vision Level 2」；這會使用 256px deterministic synthetic image，要求短 JSON 的 `vision_ok`／`detected_shapes`，最多一次 Vision、`max_tokens<=256`、不做 repair，按鈕會先確認可能費用。
-4. 需要完整 Schema、usage 與 cost contract 時，再按「Full Contract Level 3」；最多一次 Vision 加一次 text-only repair，不讀 production photo。
+4. 需要完整 Schema、usage 與 cost contract 時，再按「Full Contract Level 3」；最多一次 Vision 加一次 text-only repair，不讀 production photo。結果以 `request_counting_policy=conservative_attempted_calls` 回報 `repair_attempts`／`repair_responses`／`network_request_attempts`／`network_responses`；repair timeout、HTTP 500 或 connection reset 仍算 attempted call，沒有 repair usage 時成本為 `unknown`。
 5. 在成本頁確認是 `provider_reported`、`estimated` 或 `unknown`，不要只看顯示的美元數字；真實 OpenRouter 與付費行為仍需另行核准。
 
 本分支的 hosted CI 只驗證 request contract、Fake／offline 路徑與安全邊界；真實 OpenRouter API、付費請求、家庭照片與正式資料保留驗證維持 `NOT RUN`，需由人工依正式環境核准後另行執行。

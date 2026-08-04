@@ -219,12 +219,16 @@ def _select_benchmark_records(
         raise BenchmarkError(f"sample-count 必須介於 1 到 {MAX_SAMPLE_COUNT}")
     excluded = {name: 0 for name in ("never_upload", "inactive", "ineligible", "missing", "manually_excluded")}
     eligible: list[tuple[str, Mapping[str, Any] | Any]] = []
+    seen_ids: set[str] = set()
     for index, record in enumerate(records):
         category = _exclusion_category(record)
         if category is not None:
             excluded[category] += 1
             continue
         photo_id = str(_record_value(record, "photo_id", "id", default=f"row-{index}"))
+        if photo_id in seen_ids:
+            raise BenchmarkError(f"benchmark record duplicate id：{photo_id}")
+        seen_ids.add(photo_id)
         eligible.append((photo_id, record))
     eligible.sort(key=lambda item: (hashlib.sha256(f"{seed}{item[0]}".encode("utf-8")).hexdigest(), item[0]))
     return [record for _photo_id, record in eligible[:sample_count]], excluded
@@ -285,7 +289,7 @@ def _validate_manifest_rotation(value: Any, field: str) -> None:
         raise BenchmarkError(f"golden manifest {field} rotation 不合法")
 
 
-def _validate_manifest_expected(expected: Any) -> None:
+def _validate_manifest_expected(expected: Any) -> dict[str, Any]:
     if not isinstance(expected, dict):
         raise BenchmarkError("live quality dataset item 缺少 expected schema")
     _manifest_unknown_fields(expected, _MANIFEST_EXPECTED_KEYS, "expected")
@@ -293,8 +297,8 @@ def _validate_manifest_expected(expected: Any) -> None:
         if field not in expected or not isinstance(expected[field], str) or expected[field] not in _MANIFEST_GRADE_VALUES:
             raise BenchmarkError(f"golden manifest expected.{field} 不合法")
     technical_fields = {"technical_grade", "technical_quality_grade"} & set(expected)
-    if not technical_fields:
-        raise BenchmarkError("golden manifest expected 必須包含 technical_grade 或 technical_quality_grade")
+    if len(technical_fields) != 1:
+        raise BenchmarkError("golden manifest expected 必須只包含一個 technical grade alias")
     for field in technical_fields | {"memory_grade", "beauty_grade", "emotion_grade"}:
         if not isinstance(expected[field], str) or expected[field] not in _MANIFEST_GRADE_VALUES:
             raise BenchmarkError(f"golden manifest expected.{field} 不合法")
@@ -307,7 +311,14 @@ def _validate_manifest_expected(expected: Any) -> None:
         raise BenchmarkError("golden manifest expected.types 必須是唯一字串陣列")
     if not isinstance(expected.get("should_keep"), bool):
         raise BenchmarkError("golden manifest expected.should_keep 必須是 Boolean")
-    if "visual_orientation" in expected:
+    has_nested_orientation = "visual_orientation" in expected
+    has_flat_orientation = "rotation_cw" in expected or "ambiguous" in expected
+    if has_nested_orientation and has_flat_orientation:
+        raise BenchmarkError("golden manifest expected orientation 不可同時使用 nested 與 flat alias")
+    canonical = dict(expected)
+    if "technical_quality_grade" in canonical:
+        canonical["technical_grade"] = canonical.pop("technical_quality_grade")
+    if has_nested_orientation:
         orientation = expected["visual_orientation"]
         if not isinstance(orientation, dict):
             raise BenchmarkError("golden manifest expected.visual_orientation 必須是 object")
@@ -317,27 +328,40 @@ def _validate_manifest_expected(expected: Any) -> None:
         _validate_manifest_rotation(orientation["rotation_cw"], "expected.visual_orientation")
         if not isinstance(orientation["ambiguous"], bool):
             raise BenchmarkError("golden manifest expected.visual_orientation.ambiguous 必須是 Boolean")
-    if "rotation_cw" in expected:
+        canonical["visual_orientation"] = dict(orientation)
+    elif has_flat_orientation:
+        if set(expected) & {"rotation_cw", "ambiguous"} != {"rotation_cw", "ambiguous"}:
+            raise BenchmarkError("golden manifest flat orientation 欄位不完整")
         _validate_manifest_rotation(expected["rotation_cw"], "expected")
-    if "ambiguous" in expected and not isinstance(expected["ambiguous"], bool):
-        raise BenchmarkError("golden manifest expected.ambiguous 必須是 Boolean")
-    if "visual_orientation" not in expected and not {"rotation_cw", "ambiguous"} <= set(expected):
+        if not isinstance(expected["ambiguous"], bool):
+            raise BenchmarkError("golden manifest expected.ambiguous 必須是 Boolean")
+        canonical["visual_orientation"] = {
+            "rotation_cw": expected["rotation_cw"],
+            "ambiguous": expected["ambiguous"],
+        }
+        canonical.pop("rotation_cw", None)
+        canonical.pop("ambiguous", None)
+    else:
         raise BenchmarkError("golden manifest expected 必須包含 orientation 欄位")
+    return canonical
 
 
-def _validate_manifest_item(item: Any) -> None:
+def _validate_manifest_item(item: Any) -> dict[str, Any]:
     if not isinstance(item, dict):
         raise BenchmarkError("golden manifest item 必須是 object")
     _manifest_unknown_fields(item, _MANIFEST_ITEM_KEYS, "item")
     _manifest_string(item.get("id"), "item.id", 160)
     _manifest_string(item.get("image"), "item.image", 300)
-    _validate_manifest_expected(item.get("expected"))
+    canonical_expected = _validate_manifest_expected(item.get("expected"))
     for field in ("expected_rank", "expected_score"):
         if field in item:
             _manifest_number(item[field], f"item.{field}")
     for field in ("never_upload", "inactive", "ineligible", "missing", "manually_excluded"):
         if field in item and not isinstance(item[field], bool):
             raise BenchmarkError(f"golden manifest item.{field} 必須是 Boolean")
+    canonical = dict(item)
+    canonical["expected"] = canonical_expected
+    return canonical
 
 
 def _validate_manifest_path(path: Path, *, allowed_export_parent: bool) -> None:
@@ -389,24 +413,33 @@ def _load_golden_records(dataset: Path) -> list[dict[str, Any]]:
     if not isinstance(raw_items, list) or not raw_items:
         raise BenchmarkError("live quality dataset 必須包含至少一個 item")
     records: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_images: set[Path] = set()
     for item in raw_items:
-        _validate_manifest_item(item)
-        image = (resolved.parent / item["image"]).resolve()
+        canonical_item = _validate_manifest_item(item)
+        photo_id = canonical_item["id"]
+        if photo_id in seen_ids:
+            raise BenchmarkError(f"golden manifest duplicate item id：{photo_id}")
+        seen_ids.add(photo_id)
+        image = (resolved.parent / canonical_item["image"]).resolve()
         _validate_manifest_path(image, allowed_export_parent=allowed_export_parent)
         if image == resolved or resolved.parent not in image.parents or not image.is_file():
             raise BenchmarkError("live quality dataset image 必須位於 manifest 目錄內")
+        if image in seen_images:
+            raise BenchmarkError(f"golden manifest duplicate resolved image：{image.name}")
+        seen_images.add(image)
         records.append(
             {
-                "photo_id": item["id"],
+                "photo_id": photo_id,
                 "path": str(image),
-                "expected": item["expected"],
-                "expected_rank": item.get("expected_rank"),
-                "expected_score": item.get("expected_score"),
-                "never_upload": bool(item.get("never_upload", False)),
-                "inactive": bool(item.get("inactive", False)),
-                "ineligible": bool(item.get("ineligible", False)),
-                "missing": bool(item.get("missing", False)),
-                "manually_excluded": bool(item.get("manually_excluded", False)),
+                "expected": canonical_item["expected"],
+                "expected_rank": canonical_item.get("expected_rank"),
+                "expected_score": canonical_item.get("expected_score"),
+                "never_upload": bool(canonical_item.get("never_upload", False)),
+                "inactive": bool(canonical_item.get("inactive", False)),
+                "ineligible": bool(canonical_item.get("ineligible", False)),
+                "missing": bool(canonical_item.get("missing", False)),
+                "manually_excluded": bool(canonical_item.get("manually_excluded", False)),
             }
         )
     return records
@@ -440,9 +473,24 @@ def _average(values: Iterable[float]) -> float | None:
     return round(sum(values) / len(values), 3) if values else None
 
 
+def _coverage_rate(numerator: int, denominator: int) -> float | None:
+    return round(numerator / denominator, 4) if denominator else None
+
+
 def _new_metrics() -> dict[str, Any]:
     metrics = {
         "total_photos": 0,
+        "selected_photos": 0,
+        "attempted_photos": 0,
+        "schema_valid_photos": 0,
+        "quality_eligible_photos": 0,
+        "ranking_eligible_photos": 0,
+        "attempt_coverage_rate": None,
+        "schema_valid_coverage_rate": None,
+        "quality_coverage_rate": None,
+        "ranking_coverage_rate": None,
+        "quality_metrics_scope": "schema_valid_only",
+        "ranking_metrics_scope": "schema_valid_and_rank_labeled_only",
         "provider_requests": 0,
         "vision_requests": 0,
         "repair_requests": 0,
@@ -461,6 +509,11 @@ def _new_metrics() -> dict[str, Any]:
         "provider_reported_cost": None,
         "actual_cost": None,
         "unknown_cost_count": 0,
+        "known_cost_total": 0.0,
+        "cost_complete": True,
+        "cost_denominator": "attempted_photos",
+        "avg_cost_per_attempted_photo": None,
+        "cost_per_1000_attempted_photos": None,
         "avg_cost_per_photo": None,
         "cost_per_1000_photos": None,
         "avg_latency_ms": None,
@@ -575,11 +628,20 @@ class ModelBenchmarkService:
         if usage.provider_reported_cost is not None:
             cost = max(0.0, float(usage.provider_reported_cost))
             metrics["provider_reported_cost"] = float(metrics["provider_reported_cost"] or 0) + cost
+            metrics["known_cost_total"] += cost
             return cost, True
-        estimated = provider.estimate_cost(model, usage)
+        usage_missing = (
+            usage.input_tokens <= 0
+            and usage.output_tokens <= 0
+            and usage.cached_tokens <= 0
+            and usage.cache_write_tokens <= 0
+            and usage.reasoning_tokens <= 0
+        )
+        estimated = None if usage_missing else provider.estimate_cost(model, usage)
         if estimated is not None:
             cost = max(0.0, float(estimated))
             metrics["estimated_cost"] = float(metrics["estimated_cost"] or 0) + cost
+            metrics["known_cost_total"] += cost
             return cost, True
         metrics["unknown_cost_count"] += 1
         return None, False
@@ -641,6 +703,7 @@ class ModelBenchmarkService:
                 finally:
                     provider.close()
                 metrics["total_photos"] = len(axis_images)
+                metrics["selected_photos"] = len(axis_images)
                 metrics["avg_request_body_bytes"] = _average(item.get("request_body_bytes", 0) for item in request_metrics)
                 metrics["avg_image_bytes"] = _average(item.get("image_bytes", 0) for item in request_metrics)
                 metrics["avg_system_prompt_chars"] = _average(item.get("prompt_chars", 0) for item in request_metrics)
@@ -704,12 +767,16 @@ class ModelBenchmarkService:
                 return report
             requests_used = 0
             spent = 0.0
+            class _BudgetStop(Exception):
+                pass
+
             for axis in axes:
                 metrics = _new_metrics()
                 axis_images = _resize_fixture_images(
                     images, Path(directory) / f"live-{len(report['axes']):03d}", axis.image_max_side
                 )
                 metrics["total_photos"] = len(axis_images)
+                metrics["selected_photos"] = len(axis_images)
                 latencies: list[float] = []
                 request_sizes: list[float] = []
                 image_sizes: list[float] = []
@@ -722,7 +789,7 @@ class ModelBenchmarkService:
                 try:
                     if requests_used >= max_requests:
                         report["stopped_by_budget"] = True
-                        continue
+                        raise _BudgetStop
                     validate_config = getattr(provider, "validate_config", None)
                     if not callable(validate_config):
                         raise BenchmarkError("live benchmark Provider 必須先提供 /models capability check")
@@ -749,6 +816,8 @@ class ModelBenchmarkService:
                         validated_result: dict[str, Any] | None = None
                         request_metrics_for_photo: list[dict[str, int]] = []
                         try:
+                            metrics["attempted_photos"] += 1
+                            metrics["vision_requests"] += 1
                             response = provider.analyze(
                                 image_path=image,
                                 model=axis.model,
@@ -766,7 +835,6 @@ class ModelBenchmarkService:
                             requests_used += 1
                             report["network_invocations"] += 1
                             metrics["provider_requests"] += 1
-                            metrics["vision_requests"] += 1
                             request_metrics_for_photo.append(dict(response.request_metrics or provider.last_request_metrics or {}))
                             vision_cost, vision_cost_known = self._accumulate_usage(metrics, provider, axis.model, response)
                             if vision_cost is not None:
@@ -814,6 +882,9 @@ class ModelBenchmarkService:
                                     except AnalysisValidationError:
                                         pass
                         except (ProviderHTTPError, OSError, ValueError):
+                            # An attempted call without a response has no
+                            # trustworthy usage/cost denominator entry.
+                            metrics["unknown_cost_count"] += 1
                             requests_used += 1
                             report["network_invocations"] += 1
                             metrics["provider_requests"] += 1
@@ -826,6 +897,7 @@ class ModelBenchmarkService:
                                 prompt_sizes.append(float(used_metrics.get("prompt_chars", 0)))
                                 schema_sizes.append(float(used_metrics.get("schema_chars", 0)))
                             if validated_result is not None:
+                                metrics["schema_valid_photos"] += 1
                                 expected = dict(record.get("expected") or {})
                                 quality_item: dict[str, Any] = {
                                     "id": str(record.get("photo_id") or image.name),
@@ -842,27 +914,35 @@ class ModelBenchmarkService:
                                 ):
                                     quality_item["predicted_score"] = _production_ranking_score(validated_result)
                                 quality_items.append(quality_item)
+                except _BudgetStop:
+                    pass
                 finally:
                     provider.close()
-                metrics["first_pass_schema_success_rate"] = round(first_pass_success / max(1, metrics["vision_requests"]), 4)
-                metrics["schema_success_rate"] = round(metrics["success_count"] / max(1, metrics["vision_requests"]), 4)
-                metrics["repair_rate"] = round(repairs / max(1, metrics["vision_requests"]), 4)
-                metrics["failure_rate"] = round(max(0, metrics["vision_requests"] - metrics["success_count"]) / max(1, metrics["vision_requests"]), 4)
+                metrics["quality_eligible_photos"] = len(quality_items)
                 metrics["actual_cost"] = metrics["provider_reported_cost"]
-                known_cost = (
-                    metrics["provider_reported_cost"]
-                    if metrics["provider_reported_cost"] is not None
-                    else metrics["estimated_cost"]
-                )
-                metrics["avg_cost_per_photo"] = (
-                    round(float(known_cost) / metrics["total_photos"], 6)
-                    if known_cost is not None and metrics["total_photos"]
+                metrics["cost_complete"] = metrics["unknown_cost_count"] == 0
+                metrics["avg_cost_per_attempted_photo"] = (
+                    round(float(metrics["known_cost_total"]) / metrics["attempted_photos"], 6)
+                    if metrics["attempted_photos"] > 0 and metrics["cost_complete"]
                     else None
                 )
-                metrics["cost_per_1000_photos"] = (
-                    round(float(metrics["avg_cost_per_photo"]) * 1000, 3)
-                    if metrics["avg_cost_per_photo"] is not None
+                metrics["cost_per_1000_attempted_photos"] = (
+                    round(float(metrics["avg_cost_per_attempted_photo"]) * 1000, 3)
+                    if metrics["avg_cost_per_attempted_photo"] is not None
                     else None
+                )
+                metrics["avg_cost_per_photo"] = metrics["avg_cost_per_attempted_photo"]
+                metrics["cost_per_1000_photos"] = metrics["cost_per_1000_attempted_photos"]
+                metrics["first_pass_schema_success_rate"] = _coverage_rate(
+                    first_pass_success, metrics["attempted_photos"]
+                )
+                metrics["schema_success_rate"] = _coverage_rate(
+                    metrics["schema_valid_photos"], metrics["attempted_photos"]
+                )
+                metrics["repair_rate"] = _coverage_rate(repairs, metrics["attempted_photos"])
+                metrics["failure_rate"] = _coverage_rate(
+                    max(0, metrics["attempted_photos"] - metrics["schema_valid_photos"]),
+                    metrics["attempted_photos"],
                 )
                 metrics["avg_latency_ms"] = _average(latencies)
                 metrics["p50_latency_ms"] = _percentile(latencies, 0.50)
@@ -874,6 +954,23 @@ class ModelBenchmarkService:
                 quality = calculate_benchmark_metrics(quality_items)
                 metrics["quality_metrics"] = quality["quality_metrics"]
                 metrics["ranking_metrics"] = quality["ranking_metrics"]
+                metrics["ranking_eligible_photos"] = int(quality["ranking_metrics"]["count"])
+                if metrics["quality_metrics"]["count"] != metrics["quality_eligible_photos"]:
+                    raise BenchmarkError("quality metrics count 不得超過 quality-eligible photos")
+                if metrics["ranking_metrics"]["count"] != metrics["ranking_eligible_photos"]:
+                    raise BenchmarkError("ranking metrics count 不得超過 ranking-eligible photos")
+                metrics["attempt_coverage_rate"] = _coverage_rate(
+                    metrics["attempted_photos"], metrics["selected_photos"]
+                )
+                metrics["schema_valid_coverage_rate"] = _coverage_rate(
+                    metrics["schema_valid_photos"], metrics["attempted_photos"]
+                )
+                metrics["quality_coverage_rate"] = _coverage_rate(
+                    metrics["quality_eligible_photos"], metrics["attempted_photos"]
+                )
+                metrics["ranking_coverage_rate"] = _coverage_rate(
+                    metrics["ranking_eligible_photos"], metrics["attempted_photos"]
+                )
                 axis_report = {"axis": axis.label, "metrics": metrics}
                 report["axes"].append(axis_report)
                 report["contract_metrics"].append(
@@ -910,19 +1007,27 @@ def markdown_report(report: dict[str, Any]) -> str:
             else "Live quality reports use only the explicitly supplied non-private golden manifest and bounded Provider calls."
         ),
         "",
-        "| Axis | Photos | Provider requests | Success | Schema rate | Avg body bytes | Avg image bytes | Avg latency ms | Unknown cost |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Axis | Selected | Attempted | Schema-valid | Quality coverage | Ranking coverage | Provider requests | Success | Known cost | Cost complete | Avg cost / attempted photo | Unknown cost |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|",
     ]
     if report["mode"] == "live-quality":
         lines.insert(
             8,
             "- max_cost: bounded post-response stop; unknown cost stops subsequent Provider requests and is never treated as zero.",
         )
+    if report["mode"] == "live-quality":
+        lines.extend(
+            [
+                "- cost_denominator: `attempted_photos`.",
+                "- quality_metrics_scope: `schema_valid_only`; ranking_metrics_scope: `schema_valid_and_rank_labeled_only`.",
+            ]
+        )
     for item in report["axes"]:
         metrics = item["metrics"]
         lines.append(
-            "| {axis} | {total_photos} | {provider_requests} | {success_count} | {schema_success_rate} | "
-            "{avg_request_body_bytes} | {avg_image_bytes} | {avg_latency_ms} | {unknown_cost_count} |".format(
+            "| {axis} | {selected_photos} | {attempted_photos} | {schema_valid_photos} | "
+            "{quality_coverage_rate} | {ranking_coverage_rate} | {provider_requests} | {success_count} | "
+            "{known_cost_total} | {cost_complete} | {avg_cost_per_attempted_photo} | {unknown_cost_count} |".format(
                 axis=item["axis"], **metrics
             )
         )
@@ -930,6 +1035,7 @@ def markdown_report(report: dict[str, Any]) -> str:
         [
             "",
             "The benchmark does not write `photo_analysis`, `releases`, `display_history`, or production AI cache.",
+            "Quality and ranking metrics are conditional metrics. They include only schema-valid predictions and must be interpreted together with the reported coverage rates.",
             "",
         ]
     )

@@ -12,6 +12,7 @@
 #include "hardware_profile.h"
 #include "photopainter_core.h"
 #include "offline_schedule_core.h"
+#include "device_config_store.h"
 #include "queue_client_core.h"
 #include "queue_runtime_types.h"
 #include "device_http_transport.h"
@@ -106,6 +107,7 @@ GxEPD2_7C<
 // =======================
 Preferences prefs;
 WebServer  server(80);
+inktime::DeviceConfigStore configStore;
 
 struct Config {
   String  wifi_ssid;
@@ -142,12 +144,6 @@ static bool parseOfflineClock(const String &value, inktime::OfflineSlot &slot) {
   slot.hour = static_cast<uint8_t>((value[0] - '0') * 10 + value[1] - '0');
   slot.minute = static_cast<uint8_t>((value[3] - '0') * 10 + value[4] - '0');
   return inktime::validOfflineSlot(slot);
-}
-
-static String offlineClock(const inktime::OfflineSlot &slot) {
-  char value[6] = {0};
-  snprintf(value, sizeof(value), "%02u:%02u", slot.hour, slot.minute);
-  return String(value);
 }
 
 static bool nextIsoLocalDate(const String &value, String &output) {
@@ -240,36 +236,6 @@ static bool applyRemoteSchedule(JsonObject remoteConfig, int schemaVersion, Conf
   return true;
 }
 
-static void setLegacySchedule(Config &cfg) {
-  cfg.schedule_count = 1;
-  cfg.schedule_slots[0] = {cfg.refresh_hour, cfg.refresh_minute};
-  for (uint8_t index = 1; index < inktime::kMaxOfflineSlots; ++index) {
-    cfg.schedule_slots[index] = {0, 0};
-  }
-}
-
-static bool loadStoredSchedule(Config &cfg) {
-  const uint8_t count = prefs.getUChar("scnt", 0);
-  if (count == 0) {
-    setLegacySchedule(cfg);
-    return true;
-  }
-  if (count > inktime::kMaxOfflineSlots) return false;
-  inktime::OfflineSlot slots[inktime::kMaxOfflineSlots] = {};
-  for (uint8_t index = 0; index < count; ++index) {
-    const String key = String("s") + String(index);
-    if (!parseOfflineClock(prefs.getString(key.c_str(), ""), slots[index])) return false;
-  }
-  if (!inktime::validateOfflineSlots(slots, count)) return false;
-  cfg.schedule_count = count;
-  for (uint8_t index = 0; index < count; ++index) cfg.schedule_slots[index] = slots[index];
-  for (uint8_t index = count; index < inktime::kMaxOfflineSlots; ++index) {
-    cfg.schedule_slots[index] = {0, 0};
-  }
-  cfg.refresh_hour = slots[0].hour;
-  cfg.refresh_minute = slots[0].minute;
-  return true;
-}
 #endif
 
 Config g_cfg;
@@ -284,6 +250,9 @@ bool currentFromQueue = false;
 bool currentPrefetchOnly = false;
 bool enhancedNetworkWakeRequested = false;
 bool currentPayloadIntegrityTrusted = false;
+#if INKTIME_PHOTOPAINTER_ENABLED
+bool offlineScheduleTxnBlocked = false;
+#endif
 String portalSetupSecret;
 String portalNonce;
 String portalApSsid;
@@ -298,6 +267,10 @@ int64_t currentQueueVersion = -1;
 String lastDeviceErrorCode;
 String lastDeviceErrorMessage;
 uint32_t lastRefreshDurationMs = 0;
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+static bool reconcilePendingScheduleConfigTransaction(Config &cfg);
+#endif
 
 static void setConfigPersistenceError(const String &persistError) {
   lastDeviceErrorCode = "DEVICE-CONFIG-PERSIST";
@@ -345,6 +318,8 @@ static void clearConfigNVS() {
 #if DEBUG_LOG
   DBG_PRINTLN("[NVS] clearConfigNVS()");
 #endif
+  String storeError;
+  (void)configStore.clearAll(storeError);
   prefs.begin("dashcfg", false);
   prefs.clear();
   prefs.end();
@@ -744,29 +719,93 @@ static uint32_t minutesToNextRefreshFromLastEpoch(const Config &cfg) {
 // =======================
 //  配置读写
 // =======================
-void loadConfig(Config &cfg) {
-  prefs.begin("dashcfg", true); // read-only
-  cfg.wifi_ssid        = prefs.getString("ssid", "");
-  cfg.wifi_pass        = prefs.getString("pass", "");
-  cfg.backend_hostport = prefs.getString("hostport", DEFAULT_HOSTPORT);
-  cfg.ca_pem           = prefs.getString("ca_pem", "");
-  cfg.device_token     = prefs.getString("devtoken", "");
-  cfg.tz_offset_minutes = prefs.getInt("tzmin", prefs.getInt("tz", 8) * 60);
-  cfg.refresh_hour     = (uint8_t)prefs.getUChar("hour", DEFAULT_HOUR);
-  cfg.refresh_minute   = (uint8_t)prefs.getUChar("minute", DEFAULT_MINUTE);
-  cfg.rotate180        = prefs.getBool("rot180", false);
+static inktime::configstore::ConfigPayload configPayload(const Config &cfg) {
+  inktime::configstore::ConfigPayload payload;
+  payload.wifi_ssid = cfg.wifi_ssid.c_str();
+  payload.wifi_pass = cfg.wifi_pass.c_str();
+  payload.backend_hostport = cfg.backend_hostport.c_str();
+  payload.ca_pem = cfg.ca_pem.c_str();
+  payload.device_token = cfg.device_token.c_str();
+  payload.tz_offset_minutes = cfg.tz_offset_minutes;
+  payload.refresh_hour = cfg.refresh_hour;
+  payload.refresh_minute = cfg.refresh_minute;
+  payload.rotate180 = cfg.rotate180;
+  payload.config_version = cfg.config_version;
 #if INKTIME_PHOTOPAINTER_ENABLED
-  cfg.prefetch_lead_minutes = prefs.getUShort("prefetch", DEFAULT_PREFETCH_LEAD_MINUTES);
-  cfg.delivery_mode     = prefs.getString("delivery", "legacy_online");
-  cfg.button_wake_action = prefs.getString("button", "check_new");
-  cfg.config_version   = prefs.getULong("cfgver", 0);
-  if (!validDeliveryMode(cfg.delivery_mode)) cfg.delivery_mode = "legacy_online";
-  if (!validButtonWakeAction(cfg.button_wake_action)) cfg.button_wake_action = "check_new";
-  if (cfg.prefetch_lead_minutes > 120U) cfg.prefetch_lead_minutes = DEFAULT_PREFETCH_LEAD_MINUTES;
-  if (!loadStoredSchedule(cfg)) setLegacySchedule(cfg);
+  payload.schedule_count = cfg.schedule_count;
+  payload.prefetch_lead_minutes = cfg.prefetch_lead_minutes;
+  payload.delivery_mode = cfg.delivery_mode.c_str();
+  payload.button_wake_action = cfg.button_wake_action.c_str();
+  for (uint8_t index = 0U; index < inktime::configstore::kMaxConfigSlots; ++index) {
+    payload.schedule_slots[index] = {
+      cfg.schedule_slots[index].hour,
+      cfg.schedule_slots[index].minute,
+    };
+  }
+#else
+  payload.schedule_count = 1U;
+  payload.schedule_slots[0] = {cfg.refresh_hour, cfg.refresh_minute};
+  payload.delivery_mode = "legacy_online";
+  payload.button_wake_action = "check_new";
 #endif
-  prefs.end();
+  return payload;
+}
 
+static void applyConfigPayload(const inktime::configstore::ConfigPayload &payload, Config &cfg) {
+  cfg.wifi_ssid = payload.wifi_ssid.c_str();
+  cfg.wifi_pass = payload.wifi_pass.c_str();
+  cfg.backend_hostport = payload.backend_hostport.c_str();
+  cfg.ca_pem = payload.ca_pem.c_str();
+  cfg.device_token = payload.device_token.c_str();
+  cfg.tz_offset_minutes = payload.tz_offset_minutes;
+  cfg.refresh_hour = payload.refresh_hour;
+  cfg.refresh_minute = payload.refresh_minute;
+  cfg.rotate180 = payload.rotate180;
+  cfg.config_version = payload.config_version;
+#if INKTIME_PHOTOPAINTER_ENABLED
+  cfg.schedule_count = payload.schedule_count;
+  cfg.prefetch_lead_minutes = payload.prefetch_lead_minutes;
+  cfg.delivery_mode = payload.delivery_mode.c_str();
+  cfg.button_wake_action = payload.button_wake_action.c_str();
+  for (uint8_t index = 0U; index < inktime::kMaxOfflineSlots; ++index) {
+    cfg.schedule_slots[index] = {
+      payload.schedule_slots[index].hour,
+      payload.schedule_slots[index].minute,
+    };
+  }
+#endif
+  cfg.valid = cfg.wifi_ssid.length() > 0U;
+}
+
+static void setConfigDefaults(Config &cfg) {
+  cfg = Config{};
+  cfg.backend_hostport = DEFAULT_HOSTPORT;
+  cfg.tz_offset_minutes = DEFAULT_TZ_MINUTES;
+  cfg.refresh_hour = DEFAULT_HOUR;
+  cfg.refresh_minute = DEFAULT_MINUTE;
+  cfg.rotate180 = false;
+  cfg.config_version = 0U;
+#if INKTIME_PHOTOPAINTER_ENABLED
+  cfg.schedule_count = 1U;
+  cfg.schedule_slots[0] = {DEFAULT_HOUR, DEFAULT_MINUTE};
+  for (uint8_t index = 1U; index < inktime::kMaxOfflineSlots; ++index) {
+    cfg.schedule_slots[index] = {0U, 0U};
+  }
+  cfg.prefetch_lead_minutes = DEFAULT_PREFETCH_LEAD_MINUTES;
+  cfg.delivery_mode = "legacy_online";
+  cfg.button_wake_action = "check_new";
+#endif
+}
+
+void loadConfig(Config &cfg) {
+  setConfigDefaults(cfg);
+  inktime::configstore::ConfigPayload payload;
+  String loadError;
+  if (configStore.load(payload, loadError)) {
+    applyConfigPayload(payload, cfg);
+  } else if (loadError.length() > 0U) {
+    setConfigPersistenceError(loadError);
+  }
   cfg.valid = (cfg.wifi_ssid.length() > 0);
 
 #if DEBUG_LOG
@@ -782,6 +821,7 @@ void loadConfig(Config &cfg) {
 }
 
 bool saveConfig(const Config &cfg, String *errorCodeOut = nullptr) {
+  if (errorCodeOut != nullptr) *errorCodeOut = "";
   auto setError = [errorCodeOut](const char *code) {
     if (errorCodeOut != nullptr) *errorCodeOut = code;
   };
@@ -790,51 +830,10 @@ bool saveConfig(const Config &cfg, String *errorCodeOut = nullptr) {
     setError("PAIRING-NVS-001");
     return false;
   }
-  if (!prefs.begin("dashcfg", false)) {
-    setError("PAIRING-NVS-002");
-    return false;
-  }
-  auto putString = [](Preferences &store, const char *key, const String &value) {
-    return value.length() == 0U || store.putString(key, value) > 0U;
-  };
-  bool writeOk = true;
-  writeOk = putString(prefs, "ssid", cfg.wifi_ssid) && writeOk;
-  writeOk = putString(prefs, "pass", cfg.wifi_pass) && writeOk;
-  writeOk = putString(prefs, "hostport", cfg.backend_hostport) && writeOk;
-  writeOk = putString(prefs, "ca_pem", cfg.ca_pem) && writeOk;
-  writeOk = putString(prefs, "devtoken", cfg.device_token) && writeOk;
-  writeOk = prefs.putInt("tzmin", cfg.tz_offset_minutes) > 0U && writeOk;
-  writeOk = prefs.putUChar("hour", cfg.refresh_hour) > 0U && writeOk;
-  writeOk = prefs.putUChar("minute", cfg.refresh_minute) > 0U && writeOk;
-  writeOk = prefs.putBool("rot180", cfg.rotate180) > 0U && writeOk;
-#if INKTIME_PHOTOPAINTER_ENABLED
-  writeOk = prefs.putUShort("prefetch", cfg.prefetch_lead_minutes) > 0U && writeOk;
-  writeOk = putString(prefs, "delivery", cfg.delivery_mode) && writeOk;
-  writeOk = putString(prefs, "button", cfg.button_wake_action) && writeOk;
-  writeOk = prefs.putUChar("scnt", cfg.schedule_count) > 0U && writeOk;
-  for (uint8_t index = 0; index < cfg.schedule_count && index < inktime::kMaxOfflineSlots; ++index) {
-    const String key = String("s") + String(index);
-    writeOk = putString(prefs, key.c_str(), offlineClock(cfg.schedule_slots[index])) && writeOk;
-  }
-#endif
-  writeOk = prefs.putULong("cfgver", cfg.config_version) > 0U && writeOk;
-  if (!writeOk) {
-    prefs.end();
-    setError("PAIRING-NVS-001");
-    return false;
-  }
-  prefs.end();
-  Preferences verify;
-  if (!verify.begin("dashcfg", true)) {
-    setError("PAIRING-NVS-002");
-    return false;
-  }
-  const bool readBackOk = verify.getString("ssid", "") == cfg.wifi_ssid
-    && verify.getString("hostport", "") == cfg.backend_hostport
-    && verify.getString("ca_pem", "") == cfg.ca_pem;
-  verify.end();
-  if (!readBackOk) {
-    setError("PAIRING-NVS-003");
+  const inktime::configstore::ConfigPayload payload = configPayload(cfg);
+  String storeError;
+  if (!configStore.save(payload, storeError)) {
+    setError(storeError.length() > 0U ? storeError.c_str() : "PAIRING-NVS-001");
     return false;
   }
 
@@ -2023,7 +2022,69 @@ static bool downloadOfflineScheduleSlot(
   return true;
 }
 
+static bool failOfflineScheduleTransaction(const String &message) {
+  offlineScheduleTxnBlocked = true;
+  lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-TXN";
+  lastDeviceErrorMessage = message;
+  return false;
+}
+
+static bool commitActiveScheduleAndConfig(
+  Config &cfg,
+  const Config &candidate,
+  const String &scheduleId,
+  const String &scheduleJson,
+  String &errorOut
+) {
+  errorOut = "";
+  inktime::DeviceConfigStore::Prepared prepared;
+  String persistError;
+  if (!configStore.prepare(configPayload(candidate), prepared, persistError)) {
+    errorOut = persistError;
+    setConfigPersistenceError(persistError);
+    return false;
+  }
+  inktime::configstore::RecoveryJournal journal;
+  journal.phase = inktime::configstore::JournalPhase::Prepared;
+  journal.target_schedule_id = scheduleId.c_str();
+  journal.previous_active_slot = prepared.previous_active_slot;
+  journal.previous_generation = prepared.previous_generation;
+  journal.prepared_slot = prepared.prepared_slot;
+  journal.prepared_generation = prepared.prepared_generation;
+  if (!configStore.writeJournal(journal, persistError)) {
+    errorOut = persistError;
+    setConfigPersistenceError(persistError);
+    return false;
+  }
+  if (!photoPainter.writeActiveSchedule(scheduleJson.c_str(), scheduleJson.length())
+      || photoPainter.activeScheduleId() != scheduleId) {
+    return failOfflineScheduleTransaction("離線排程 active schedule 寫入或身分驗證失敗");
+  }
+  journal.phase = inktime::configstore::JournalPhase::SchedulePromoted;
+  if (!configStore.writeJournal(journal, persistError)) {
+    errorOut = persistError;
+    return failOfflineScheduleTransaction("離線排程 promotion journal 無法寫入");
+  }
+  if (!configStore.commit(prepared, persistError)) {
+    errorOut = persistError;
+    return failOfflineScheduleTransaction("離線排程 Config A/B pointer 無法 commit");
+  }
+  journal.phase = inktime::configstore::JournalPhase::ConfigCommitted;
+  if (!configStore.writeJournal(journal, persistError)
+      || !configStore.clearJournal(persistError)) {
+    errorOut = persistError;
+    return failOfflineScheduleTransaction("離線排程完成 journal 無法清除");
+  }
+  cfg = candidate;
+  serverConfigChanged = true;
+  offlineScheduleTxnBlocked = false;
+  return true;
+}
+
 static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = false) {
+  if (offlineScheduleTxnBlocked) {
+    return failOfflineScheduleTransaction("離線排程 transaction 尚未完成 recovery");
+  }
   String base;
   if (cfg.backend_hostport.length() == 0 || cfg.device_token.length() == 0
       || !normalizedBackendBase(cfg, base)) {
@@ -2411,17 +2472,14 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
   }
   String scheduleJson;
   serializeJson(schedule, scheduleJson);
-  const bool stored = targetNext
-    ? photoPainter.writeStagedNextSchedule(scheduleJson.c_str(), scheduleJson.length())
-    : photoPainter.writeActiveSchedule(scheduleJson.c_str(), scheduleJson.length());
-  if (!stored) {
-    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-STAGE";
-    lastDeviceErrorMessage = targetNext
-      ? "離線排程 staged next 無法原子寫入"
-      : "離線排程 active schedule 無法原子切換";
-    return false;
-  }
   if (targetNext) {
+    const bool stored = photoPainter.writeStagedNextSchedule(
+      scheduleJson.c_str(), scheduleJson.length());
+    if (!stored || photoPainter.stagedNextScheduleId() != scheduleId) {
+      lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-STAGE";
+      lastDeviceErrorMessage = "離線排程 staged next 無法原子寫入或身分驗證失敗";
+      return false;
+    }
     // The future snapshot remains a staged artifact.  Its rotation, schedule,
     // lead and config version are not applied until the target local midnight.
     currentFromQueue = false;
@@ -2429,15 +2487,82 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
     return true;
   }
   String persistError;
-  if (!saveConfig(scheduleCandidate, &persistError)) {
-    setConfigPersistenceError(persistError);
+  if (!commitActiveScheduleAndConfig(
+        cfg, scheduleCandidate, scheduleId, scheduleJson, persistError)) {
+    if (persistError.length() > 0U) setConfigPersistenceError(persistError);
     return false;
   }
-  cfg = scheduleCandidate;
-  serverConfigChanged = true;
   clearOfflineRetryState();
   currentFromQueue = false;
   currentPayloadIntegrityTrusted = true;
+  return true;
+}
+
+static bool reconcilePendingScheduleConfigTransaction(Config &cfg) {
+  inktime::configstore::RecoveryJournal journal;
+  bool present = false;
+  String journalError;
+  if (!configStore.readJournal(journal, present, journalError)) {
+    return failOfflineScheduleTransaction("離線排程 recovery journal 損壞，已 fail-closed");
+  }
+  if (!present) return true;
+
+  inktime::configstore::ConfigPayload preparedPayload;
+  String preparedError;
+  if (!configStore.readPrepared(
+        journal.prepared_slot, journal.prepared_generation, preparedPayload, preparedError)) {
+    return failOfflineScheduleTransaction("離線排程 recovery 的 prepared Config 不存在或損壞");
+  }
+  inktime::configstore::ConfigPayload activePayload;
+  char activeSlot = 0;
+  uint64_t activeGeneration = 0U;
+  String activeError;
+  const bool activePresent = configStore.readActive(
+    activePayload, activeSlot, activeGeneration, activeError);
+  const String activeScheduleId = photoPainter.activeScheduleId();
+  const bool previousPointer = journal.previous_active_slot != 0
+    && activePresent
+    && activeSlot == journal.previous_active_slot
+    && activeGeneration == journal.previous_generation;
+  const bool preparedPointer = activePresent
+    && activeSlot == journal.prepared_slot
+    && activeGeneration == journal.prepared_generation;
+  const bool targetScheduleActive = activeScheduleId == journal.target_schedule_id;
+
+  if (journal.phase == inktime::configstore::JournalPhase::Prepared
+      && !targetScheduleActive
+      && (previousPointer || (!activePresent && journal.previous_active_slot == 0))) {
+    String clearError;
+    if (!configStore.clearJournal(clearError)) {
+      return failOfflineScheduleTransaction("離線排程 stale prepared journal 無法清除");
+    }
+    return true;
+  }
+  if (activeScheduleId.length() == 0U || !targetScheduleActive) {
+    return failOfflineScheduleTransaction("離線排程 active 身分與 recovery target 不一致");
+  }
+  if (!activePresent) {
+    return failOfflineScheduleTransaction("離線排程 active schedule 存在但 Config pointer 遺失");
+  }
+  if (!preparedPointer) {
+    String commitError;
+    if (!configStore.commitPreparedSlot(
+          journal.prepared_slot,
+          journal.prepared_generation,
+          preparedPayload,
+          commitError)) {
+      return failOfflineScheduleTransaction("離線排程 recovery 無法 commit prepared Config");
+    }
+  }
+  journal.phase = inktime::configstore::JournalPhase::ConfigCommitted;
+  String commitJournalError;
+  if (!configStore.writeJournal(journal, commitJournalError)
+      || !configStore.clearJournal(commitJournalError)) {
+    return failOfflineScheduleTransaction("離線排程 recovery journal 無法完成清除");
+  }
+  applyConfigPayload(preparedPayload, cfg);
+  serverConfigChanged = true;
+  offlineScheduleTxnBlocked = false;
   return true;
 }
 #endif
@@ -2834,6 +2959,9 @@ static bool offlineNextSchedulePrefetchDue(const Config &cfg, time_t nowEpoch) {
 }
 
 static bool promoteStagedNextIfDue(Config &cfg, time_t nowEpoch) {
+  if (offlineScheduleTxnBlocked) {
+    return failOfflineScheduleTransaction("離線排程 transaction 尚未完成 recovery");
+  }
   if (nowEpoch <= 0) return false;
   String stagedJson;
   if (!photoPainter.readStagedNextSchedule(stagedJson)) return false;
@@ -2985,11 +3113,6 @@ static bool promoteStagedNextIfDue(Config &cfg, time_t nowEpoch) {
     if (epochValid) previousShowAtEpoch = rawShowAt.as<int64_t>();
   }
   if (!inktime::validOfflineNextScheduleContract(contract)) return false;
-  if (!photoPainter.promoteStagedNextSchedule()) {
-    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-PROMOTE";
-    lastDeviceErrorMessage = "離線排程 staged next 無法原子 promote 為 active";
-    return false;
-  }
   Config candidate = cfg;
   candidate.schedule_count = static_cast<uint8_t>(rawTimes.size());
   for (uint8_t index = 0; index < candidate.schedule_count; ++index) {
@@ -3003,12 +3126,39 @@ static bool promoteStagedNextIfDue(Config &cfg, time_t nowEpoch) {
   candidate.button_wake_action = buttonWakeAction;
   candidate.config_version = remoteConfigVersion;
   String persistError;
-  if (!saveConfig(candidate, &persistError)) {
+  inktime::DeviceConfigStore::Prepared prepared;
+  if (!configStore.prepare(configPayload(candidate), prepared, persistError)) {
     setConfigPersistenceError(persistError);
     return false;
   }
+  inktime::configstore::RecoveryJournal journal;
+  journal.phase = inktime::configstore::JournalPhase::Prepared;
+  journal.target_schedule_id = scheduleId.c_str();
+  journal.previous_active_slot = prepared.previous_active_slot;
+  journal.previous_generation = prepared.previous_generation;
+  journal.prepared_slot = prepared.prepared_slot;
+  journal.prepared_generation = prepared.prepared_generation;
+  if (!configStore.writeJournal(journal, persistError)) {
+    setConfigPersistenceError(persistError);
+    return false;
+  }
+  if (!photoPainter.promoteStagedNextSchedule()
+      || photoPainter.activeScheduleId() != scheduleId) {
+    return failOfflineScheduleTransaction("離線排程 staged next promote 或身分驗證失敗");
+  }
+  journal.phase = inktime::configstore::JournalPhase::SchedulePromoted;
+  if (!configStore.writeJournal(journal, persistError)
+      || !configStore.commit(prepared, persistError)) {
+    return failOfflineScheduleTransaction("離線排程 midnight Config commit 失敗");
+  }
+  journal.phase = inktime::configstore::JournalPhase::ConfigCommitted;
+  if (!configStore.writeJournal(journal, persistError)
+      || !configStore.clearJournal(persistError)) {
+    return failOfflineScheduleTransaction("離線排程 midnight journal 無法清除");
+  }
   cfg = candidate;
   serverConfigChanged = true;
+  offlineScheduleTxnBlocked = false;
   clearOfflineRetryState();
   return true;
 }
@@ -3026,6 +3176,9 @@ bool downloadDailyPhotoBin(Config &cfg) {
   const bool userButtonWake = photoPainter.wokeFromUserButton();
   const bool timerRequestedNetwork = enhancedNetworkWakeRequested;
   enhancedNetworkWakeRequested = false;
+  if (offlineScheduleTxnBlocked && cfg.delivery_mode == "inktime_offline_schedule") {
+    return failOfflineScheduleTransaction("離線排程 transaction 尚未完成 recovery");
+  }
   if (cfg.delivery_mode == "inktime_offline_schedule") {
     if (userButtonWake && cfg.button_wake_action == "check_new") {
       // A button check may replace the active schedule, but a missing or
@@ -3235,6 +3388,10 @@ bool drawFromFrameData(const Config &cfg) {
 // =======================
 void sleepUntilNextSchedule(const Config &cfg, bool hasTime, const struct tm &now) {
 #if INKTIME_PHOTOPAINTER_ENABLED
+  if (offlineScheduleTxnBlocked) {
+    goDeepSleepSeconds(inktime::kOfflineRetryFirstSeconds);
+    return;
+  }
   if (cfg.delivery_mode == "inktime_offline_schedule") {
     if (!hasTime) {
       // Unknown time is a bounded recovery wake, never a 24-hour blind sleep.
@@ -3322,6 +3479,9 @@ void sleepUntilNextSchedule(const Config &cfg, bool hasTime, const struct tm &no
 #if INKTIME_PHOTOPAINTER_ENABLED
 static bool loadOfflineScheduledLocalFrame(
   const Config &cfg, time_t nowEpoch, bool selectNext) {
+  if (offlineScheduleTxnBlocked) {
+    return failOfflineScheduleTransaction("離線排程 transaction 尚未完成 recovery");
+  }
   // Enhanced local mode is deliberately cache-only.  It never calls Wi-Fi,
   // NTP, Manifest, or status endpoints; a missing formal frame is a safe
   // no-refresh result instead of a network fallback.
@@ -3693,7 +3853,8 @@ void setup() {
   loadConfig(g_cfg);
 
 #if INKTIME_PHOTOPAINTER_ENABLED
-  if (g_cfg.delivery_mode == "inktime_offline_schedule") {
+  const bool offlineTxnRecovered = reconcilePendingScheduleConfigTransaction(g_cfg);
+  if (offlineTxnRecovered && g_cfg.delivery_mode == "inktime_offline_schedule") {
     time_t bootRtcEpoch = 0;
     if (photoPainter.readRtc(bootRtcEpoch) && bootRtcEpoch > 0) {
       applyFixedTimezoneWithoutNtp(g_cfg.tz_offset_minutes);
@@ -3717,7 +3878,7 @@ void setup() {
 #if INKTIME_PHOTOPAINTER_ENABLED
   const esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
   const bool timerWake = wakeCause == ESP_SLEEP_WAKEUP_TIMER;
-  if (g_cfg.delivery_mode == "inktime_offline_schedule"
+  if (!offlineScheduleTxnBlocked && g_cfg.delivery_mode == "inktime_offline_schedule"
       && photoPainter.wokeFromUserButton()
       && g_cfg.button_wake_action == "local_next") {
     // local_next is a strict cache-only action.  It must not connect Wi-Fi or
@@ -3725,7 +3886,7 @@ void setup() {
     runOfflineLocalCycle(true);
     return;
   }
-  if (g_cfg.delivery_mode == "inktime_offline_schedule" && timerWake
+  if (!offlineScheduleTxnBlocked && g_cfg.delivery_mode == "inktime_offline_schedule" && timerWake
       && !photoPainter.forceNetworkRefresh()) {
     time_t rtcEpoch = 0;
     if (!photoPainter.readRtc(rtcEpoch)) {
@@ -3766,7 +3927,7 @@ void setup() {
         settimeofday(&value, nullptr);
         localtime_r(&rtcEpoch, &offlineTime);
       }
-      if (g_cfg.delivery_mode == "inktime_offline_schedule" && hasOfflineTime
+      if (!offlineScheduleTxnBlocked && g_cfg.delivery_mode == "inktime_offline_schedule" && hasOfflineTime
           && activeHasDueFormalSlot(rtcEpoch)) {
         // A due 00:00/current formal slot is serviceable from the active
         // cache even when the midnight network recovery attempt fails.
@@ -3824,7 +3985,8 @@ void setup() {
     }
   }
 #if INKTIME_PHOTOPAINTER_ENABLED
-  if (ok && !currentPrefetchOnly && g_cfg.delivery_mode == "inktime_offline_schedule"
+  if (ok && !offlineScheduleTxnBlocked && !currentPrefetchOnly
+      && g_cfg.delivery_mode == "inktime_offline_schedule"
       && (displayUpdated || currentDisplaySkipped)) {
     clearOfflineRetryState();
   }

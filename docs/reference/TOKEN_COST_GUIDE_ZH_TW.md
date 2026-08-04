@@ -20,6 +20,8 @@ E6 預篩選同樣完全在本機執行：以正式六色色盤量測量化後�
 
 預算、成本頁與照片詳情的已知金額只計 `provider_reported` 與 `estimated`；另列 unknown 筆數。若新請求會讓未確認成本增加，Budget service 會停止工作，直到補齊價格或改用能回報成本的 Provider。OpenRouter 的回報成本若不存在，仍依同一規則處理；不能因為使用 OpenRouter 就假設價格已知。
 
+Model Benchmark 另以 `attempted_photos` 作為平均成本分母；`known_cost_total` 只累計已知 usage。任何 attempted call 的 cost unknown 都使 `cost_complete=false`，平均與每 1000 張成本回報 `null`，不以零填補未確認帳務。
+
 ## 請求大小、快取與 Token 上限
 
 目前完整照片分析固定遵守下列上限：

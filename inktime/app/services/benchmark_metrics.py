@@ -195,6 +195,9 @@ def _rank_map(values: Any) -> dict[str, float]:
     """Build one-based average ranks from ids, scores, or id/score pairs."""
 
     pairs = _score_pairs(values)
+    identifiers = [identifier for identifier, _score in pairs]
+    if len(identifiers) != len(set(identifiers)):
+        raise ValueError("benchmark ranking identifiers must be unique")
     pairs.sort(key=lambda item: (-item[1], item[0]))
     ranks: dict[str, float] = {}
     index = 0

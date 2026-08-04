@@ -36,8 +36,16 @@ def _synthetic_contract_image(path: Path) -> Path:
 
 def _usage_snapshot(provider: Any, model: str, response: ProviderResponse) -> dict[str, Any]:
     usage = response.usage
-    estimated = provider.estimate_cost(model, usage)
     reported = usage.provider_reported_cost
+    usage_missing = (
+        usage.input_tokens <= 0
+        and usage.output_tokens <= 0
+        and usage.cached_tokens <= 0
+        and usage.cache_write_tokens <= 0
+        and usage.reasoning_tokens <= 0
+        and reported is None
+    )
+    estimated = None if usage_missing else provider.estimate_cost(model, usage)
     if reported is not None:
         source = "provider_reported"
     elif estimated is not None:
@@ -52,6 +60,7 @@ def _usage_snapshot(provider: Any, model: str, response: ProviderResponse) -> di
         "cost_source": source,
         "provider_reported_cost": reported,
         "estimated_cost": estimated,
+        "unknown_cost_count": int(source == "unknown"),
     }
 
 
@@ -94,6 +103,15 @@ def _safe_failure(
     *,
     vision_requests: int = 0,
     repair_requests: int = 0,
+    repair_attempts: int = 0,
+    repair_responses: int = 0,
+    network_request_attempts: int = 0,
+    network_responses: int = 0,
+    vision_started: bool = False,
+    vision_completed: bool = False,
+    repair_attempted: bool = False,
+    repair_completed: bool = False,
+    usage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "level": level,
@@ -101,11 +119,20 @@ def _safe_failure(
         "message": message,
         "vision_requests": vision_requests,
         "repair_requests": repair_requests,
-        "network_requests": vision_requests + repair_requests,
+        "repair_attempts": repair_attempts,
+        "repair_responses": repair_responses,
+        "network_request_attempts": network_request_attempts,
+        "network_responses": network_responses,
+        "network_requests": network_request_attempts,
+        "request_counting_policy": "conservative_attempted_calls",
+        "vision_started": vision_started,
+        "vision_completed": vision_completed,
+        "repair_attempted": repair_attempted,
+        "repair_completed": repair_completed,
         "schema_valid": False,
-        "usage": None,
+        "usage": usage,
     }
-    result["checks"] = _checks(provider, level=level, ok=False, schema_valid=False, usage=None)
+    result["checks"] = _checks(provider, level=level, ok=False, schema_valid=False, usage=usage)
     return result
 
 
@@ -139,14 +166,29 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
         try:
             valid, _ = provider.validate_config()
         except Exception as exc:  # Keep transport details out of the API result.
-            return _safe_failure(provider, level, f"Level 1 connection failed: {exc.__class__.__name__}")
+            return _safe_failure(
+                provider,
+                level,
+                f"Level 1 connection failed: {exc.__class__.__name__}",
+                network_request_attempts=1,
+                network_responses=0,
+            )
         result: dict[str, Any] = {
             "level": level,
             "ok": bool(valid),
             "message": "Level 1 connection and model capability passed" if valid else "Level 1 connection failed",
             "vision_requests": 0,
             "repair_requests": 0,
+            "repair_attempts": 0,
+            "repair_responses": 0,
+            "network_request_attempts": 1,
+            "network_responses": 1 if valid else 0,
             "network_requests": 1,
+            "request_counting_policy": "conservative_attempted_calls",
+            "vision_started": False,
+            "vision_completed": False,
+            "repair_attempted": False,
+            "repair_completed": False,
             "schema_valid": None,
             "usage": None,
         }
@@ -155,8 +197,19 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
 
     vision_requests = 0
     repair_requests = 0
+    repair_attempts = 0
+    repair_responses = 0
+    network_request_attempts = 0
+    network_responses = 0
+    vision_started = False
+    vision_completed = False
+    repair_attempted = False
+    repair_completed = False
     with tempfile.TemporaryDirectory(prefix="inktime-provider-contract-") as directory:
         image_path = _synthetic_contract_image(Path(directory) / "inktime-test.png")
+        vision_requests = 1
+        network_request_attempts = 1
+        vision_started = True
         try:
             response = provider.analyze(
                 image_path=image_path,
@@ -167,13 +220,18 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
                 reasoning_effort="none",
                 vision_attempt=VisionAttemptState(),
             )
-            vision_requests = 1
+            network_responses = 1
+            vision_completed = True
         except Exception as exc:
             return _safe_failure(
                 provider,
                 level,
                 f"Level {level} synthetic Vision failed: {exc.__class__.__name__}",
-                vision_requests=1,
+                vision_requests=vision_requests,
+                network_request_attempts=network_request_attempts,
+                network_responses=network_responses,
+                vision_started=vision_started,
+                vision_completed=vision_completed,
             )
 
         usage = _usage_snapshot(provider, model, response)
@@ -187,7 +245,16 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
                     "message": "Level 2 response did not satisfy the synthetic shape contract; no repair was attempted",
                     "vision_requests": vision_requests,
                     "repair_requests": repair_requests,
-                    "network_requests": vision_requests,
+                    "repair_attempts": repair_attempts,
+                    "repair_responses": repair_responses,
+                    "network_request_attempts": network_request_attempts,
+                    "network_responses": network_responses,
+                    "network_requests": network_request_attempts,
+                    "request_counting_policy": "conservative_attempted_calls",
+                    "vision_started": vision_started,
+                    "vision_completed": vision_completed,
+                    "repair_attempted": repair_attempted,
+                    "repair_completed": repair_completed,
                     "schema_valid": False,
                     "usage": usage,
                 }
@@ -202,6 +269,10 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
             except AnalysisValidationError:
                 pass
         if not schema_valid and level == 3:
+            repair_attempts = 1
+            repair_requests = 1
+            repair_attempted = True
+            network_request_attempts += 1
             try:
                 repaired = provider.repair_json(
                     invalid_content=response.content,
@@ -210,12 +281,15 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
                     max_tokens=REPAIR_TOKEN_CAP,
                     stage="single",
                 )
-                repair_requests = 1
+                repair_responses = 1
+                repair_completed = True
+                network_responses += 1
                 repair_usage = _usage_snapshot(provider, model, repaired)
                 # Preserve the fact that a repair happened while exposing only
                 # bounded usage fields, never raw provider response content.
                 for key in ("input_tokens", "output_tokens", "cached_tokens", "reasoning_tokens"):
                     usage[key] += repair_usage[key]
+                usage["unknown_cost_count"] += repair_usage["unknown_cost_count"]
                 if repair_usage["provider_reported_cost"] is not None:
                     usage["provider_reported_cost"] = (
                         float(usage["provider_reported_cost"] or 0)
@@ -226,7 +300,9 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
                         repair_usage["estimated_cost"]
                     )
                 usage["cost_source"] = (
-                    "provider_reported"
+                    "unknown"
+                    if usage["unknown_cost_count"]
+                    else "provider_reported"
                     if usage["provider_reported_cost"] is not None
                     else "estimated"
                     if usage["estimated_cost"] is not None
@@ -234,8 +310,28 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
                 )
                 validate_analysis_result(repaired.content)
                 schema_valid = True
-            except Exception:
+            except AnalysisValidationError:
                 schema_valid = False
+            except Exception:
+                if usage is not None:
+                    usage["unknown_cost_count"] += 1
+                    usage["cost_source"] = "unknown"
+                return _safe_failure(
+                    provider,
+                    level,
+                    "Level 3 text-only repair failed",
+                    vision_requests=vision_requests,
+                    repair_requests=repair_requests,
+                    repair_attempts=repair_attempts,
+                    repair_responses=repair_responses,
+                    network_request_attempts=network_request_attempts,
+                    network_responses=network_responses,
+                    vision_started=vision_started,
+                    vision_completed=vision_completed,
+                    repair_attempted=repair_attempted,
+                    repair_completed=repair_completed,
+                    usage=usage,
+                )
 
         result = {
             "level": level,
@@ -243,7 +339,16 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
             "message": f"Level {level} synthetic contract {'passed' if schema_valid else 'failed'}",
             "vision_requests": vision_requests,
             "repair_requests": repair_requests,
-            "network_requests": vision_requests + repair_requests,
+            "repair_attempts": repair_attempts,
+            "repair_responses": repair_responses,
+            "network_request_attempts": network_request_attempts,
+            "network_responses": network_responses,
+            "network_requests": network_request_attempts,
+            "request_counting_policy": "conservative_attempted_calls",
+            "vision_started": vision_started,
+            "vision_completed": vision_completed,
+            "repair_attempted": repair_attempted,
+            "repair_completed": repair_completed,
             "schema_valid": schema_valid,
             "usage": usage,
         }

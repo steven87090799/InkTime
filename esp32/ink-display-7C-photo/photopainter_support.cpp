@@ -3,6 +3,7 @@
 #if INKTIME_PHOTOPAINTER_ENABLED
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <FS.h>
 #include <SD.h>
 #include <SPI.h>
@@ -963,6 +964,22 @@ bool PhotoPainterSupport::readActiveSchedule(String& json) {
   return true;
 }
 
+namespace {
+
+String scheduleIdFromJson(const String& json) {
+  if (json.length() == 0U) return "";
+  JsonDocument document;
+  if (deserializeJson(document, json) || document.overflowed()) return "";
+  return document["schedule_id"] | "";
+}
+
+}  // namespace
+
+String PhotoPainterSupport::activeScheduleId() {
+  String json;
+  return readActiveSchedule(json) ? scheduleIdFromJson(json) : String("");
+}
+
 bool PhotoPainterSupport::writeStagedNextSchedule(const char* json, size_t length) {
   static constexpr size_t kMaxScheduleBytes = 32768U;
   if (!sdReady_ || json == nullptr || length == 0 || length > kMaxScheduleBytes) {
@@ -1038,6 +1055,11 @@ bool PhotoPainterSupport::readStagedNextSchedule(String& json) {
   }
   cacheStatus_ = CacheStatus::Hit;
   return true;
+}
+
+String PhotoPainterSupport::stagedNextScheduleId() {
+  String json;
+  return readStagedNextSchedule(json) ? scheduleIdFromJson(json) : String("");
 }
 
 bool PhotoPainterSupport::clearStagedNextSchedule() {

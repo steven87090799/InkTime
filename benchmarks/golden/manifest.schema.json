@@ -51,11 +51,22 @@
               }
             },
             "allOf": [
-              {"anyOf": [{"required": ["technical_grade"]}, {"required": ["technical_quality_grade"]}]},
               {
-                "anyOf": [
-                  {"required": ["visual_orientation"]},
-                  {"required": ["rotation_cw", "ambiguous"]}
+                "oneOf": [
+                  {"required": ["technical_grade"], "not": {"required": ["technical_quality_grade"]}},
+                  {"required": ["technical_quality_grade"], "not": {"required": ["technical_grade"]}}
+                ]
+              },
+              {
+                "oneOf": [
+                  {
+                    "required": ["visual_orientation"],
+                    "not": {"anyOf": [{"required": ["rotation_cw"]}, {"required": ["ambiguous"]}]}
+                  },
+                  {
+                    "required": ["rotation_cw", "ambiguous"],
+                    "not": {"required": ["visual_orientation"]}
+                  }
                 ]
               ]
             ]

@@ -47,7 +47,11 @@ offline JSON 的 `mode` 是 `offline-contract`，並回傳 `contract_metrics`；
 
 每組 Contract 報告至少包含：
 
-`total_photos`、`provider_requests`、`vision_requests`、`repair_requests`、`success_count`、`schema_success_rate`、`first_pass_schema_success_rate`、`repair_rate`、`failure_rate`、`input_tokens`、`cached_tokens`、`cache_write_tokens`、`uncached_tokens`、`output_tokens`、`reasoning_tokens`、`estimated_cost`、`provider_reported_cost`、`actual_cost`、`unknown_cost_count`、`avg_cost_per_photo`、`cost_per_1000_photos`、`avg_latency_ms`、`p50_latency_ms`、`p95_latency_ms`、`avg_request_body_bytes`、`avg_image_bytes`、`avg_system_prompt_chars` 與 `avg_schema_chars`。
+`total_photos`、`selected_photos`、`attempted_photos`、`schema_valid_photos`、`quality_eligible_photos`、`ranking_eligible_photos`、各層 coverage rate、`provider_requests`、`vision_requests`、`repair_requests`、`success_count`、`schema_success_rate`、`first_pass_schema_success_rate`、`repair_rate`、`failure_rate`、`input_tokens`、`cached_tokens`、`cache_write_tokens`、`uncached_tokens`、`output_tokens`、`reasoning_tokens`、`estimated_cost`、`provider_reported_cost`、`actual_cost`、`unknown_cost_count`、`known_cost_total`、`cost_complete`、`cost_denominator`、`avg_cost_per_attempted_photo`、`cost_per_1000_attempted_photos`、相容別名 `avg_cost_per_photo`／`cost_per_1000_photos`、`avg_latency_ms`、`p50_latency_ms`、`p95_latency_ms`、`avg_request_body_bytes`、`avg_image_bytes`、`avg_system_prompt_chars` 與 `avg_schema_chars`。
+
+Live 的 `selected_photos` 是本 axis 被選中的圖片數；每一張在呼叫 `provider.analyze` 前只增加一次 `attempted_photos`，文字 repair 不會增加 photo denominator。`schema_valid_photos` 是通過 schema 的結果，`quality_eligible_photos` 是送入 quality calculator 的結果，`ranking_eligible_photos` 只包含有 expected／predicted rank 或 score 的結果。Quality scope 固定為 `schema_valid_only`，ranking scope 固定為 `schema_valid_and_rank_labeled_only`；各 scope 都會明確回報 coverage，分母為 0 時 rate 是 `null`。
+
+成本分母固定為 `attempted_photos`。`known_cost_total` 只累加 provider-reported 或可由既有 Provider abstraction 估出的成本；只要任何 attempted call 沒有可確認成本，`cost_complete=false`，平均成本與每 1000 張成本都為 `null`，未知成本不得當成 0。兩個舊成本欄位只是相容別名，必須與 attempted-photo 欄位相等。
 
 Quality metrics 使用 [`benchmarks/golden/manifest.schema.json`](../../benchmarks/golden/manifest.schema.json) 定義的 non-private golden manifest。Manifest 的 canonical exclusion 欄位是 `inactive`、`ineligible`、`missing`、`never_upload` 與 `manually_excluded`；任何未知欄位、錯誤型別、非 `non_private` privacy、path traversal 或禁止目錄路徑都會 fail-closed，而且在任何 Provider network request 前排除。Grade 使用 `E=0` 到 `S=5`，回報 `exact_grade_accuracy`、`within_one_grade_accuracy` 與 `mean_absolute_grade_distance`；types 回報 micro precision／recall／F1 與 Jaccard；`should_keep` 回報 accuracy／precision／recall／F1；orientation 回報只針對 expected non-ambiguous 的 `rotation_exact_accuracy`、ambiguous rate 與 `false_confident_orientation_rate`。Ranking 直接重用 production `calculate_ranking_score()`；manifest 的 `expected_score`／`expected_rank` 必須代表同一套 production ranking。報告固定輸出 `ranking_rule_version`、`ranking_weights` 與 favorite bonus policy；Top-K 使用 deterministic exact-K membership，tie 不會使 overlap rate 超過 1，資料集小於 K 時使用 `effective_k=min(K,dataset_size)`。
 
@@ -72,6 +76,8 @@ python scripts/benchmark_models.py \
 ```
 
 Live quality 只接受明確的 non-private golden manifest；manifest 內的圖片必須位於 manifest 目錄內，且路徑不得落入 production photo、cache、release 或使用者圖片目錄。若要使用管理員提供的資料，必須先完成專用 benchmark export，再以 `--dataset` 明確指定，不能直接掃正式相簿。
+
+Golden manifest 的每個 item 必須在 technical grade 的 `technical_grade` 與 legacy `technical_quality_grade` 中擇一，orientation 必須在 nested `visual_orientation` 與 flat `rotation_cw`／`ambiguous` 中擇一；載入時會 canonicalize legacy alias。重複 item id 或 canonical resolved image 會在建立 Provider 前 fail-closed。
 
 Live 安全條件：
 

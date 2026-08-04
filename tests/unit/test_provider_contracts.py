@@ -43,6 +43,12 @@ class FakeContractProvider:
         return None
 
 
+class RepairFailureProvider(FakeContractProvider):
+    def repair_json(self, **kwargs):
+        self.repair_calls.append(kwargs)
+        raise TimeoutError("repair timeout")
+
+
 def test_level1_is_connection_only():
     provider = FakeContractProvider()
     result = run_provider_contract(provider, level=1, model="model")
@@ -65,12 +71,32 @@ def test_level3_allows_only_one_text_repair_and_returns_safe_usage():
     result = run_provider_contract(provider, level=3, model="model")
     assert result["vision_requests"] == 1
     assert result["repair_requests"] == 1
+    assert result["repair_attempts"] == 1
+    assert result["repair_responses"] == 1
+    assert result["network_request_attempts"] == 2
+    assert result["network_responses"] == 2
     assert len(provider.repair_calls) == 1
     assert "image_path" not in provider.repair_calls[0]
-    assert result["usage"]["cost_source"] == "provider_reported"
+    assert result["usage"]["cost_source"] == "unknown"
+    assert result["usage"]["unknown_cost_count"] == 1
     assert provider.analyze_calls[0]["reasoning_effort"] == "none"
     assert result["checks"]["privacy_policy"] == {
         "data_collection": "deny",
         "zdr": True,
         "configured": True,
     }
+
+
+def test_level3_repair_timeout_counts_attempt_without_response_and_hides_content():
+    provider = RepairFailureProvider(valid=False)
+    result = run_provider_contract(provider, level=3, model="model")
+    assert result["ok"] is False
+    assert result["repair_attempts"] == 1
+    assert result["repair_requests"] == 1
+    assert result["repair_responses"] == 0
+    assert result["network_request_attempts"] == 2
+    assert result["network_responses"] == 1
+    assert result["repair_completed"] is False
+    assert result["usage"]["cost_source"] == "unknown"
+    assert result["usage"]["unknown_cost_count"] == 1
+    assert "not-json" not in result["message"]

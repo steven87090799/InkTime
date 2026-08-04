@@ -57,8 +57,10 @@ class PhotoPainterSupport {
   );
   bool writeActiveSchedule(const char* json, size_t length);
   bool readActiveSchedule(String& json);
+  String activeScheduleId();
   bool writeStagedNextSchedule(const char* json, size_t length);
   bool readStagedNextSchedule(String& json);
+  String stagedNextScheduleId();
   bool clearStagedNextSchedule();
   bool promoteStagedNextSchedule();
   bool displayFrame(const uint8_t* framebuffer, size_t length);
