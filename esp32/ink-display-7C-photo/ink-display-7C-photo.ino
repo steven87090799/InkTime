@@ -820,6 +820,31 @@ void loadConfig(Config &cfg) {
 #endif
 }
 
+static bool verifyLegacyConfigReadback(const Config &cfg, String &error) {
+  error = "";
+  Preferences verify;
+  if (!verify.begin("dashcfg", true)) {
+    error = "PAIRING-NVS-002";
+    return false;
+  }
+  const String verifiedCaPem = verify.getString("ca_pem", "");
+  const String verifiedHostport = verify.getString("hostport", "");
+  const String verifiedSsid = verify.getString("ssid", "");
+  const bool legacyPresent = verifiedCaPem.length() > 0U
+    || verifiedHostport.length() > 0U
+    || verifiedSsid.length() > 0U;
+  const bool matches = !legacyPresent
+    || (verifiedCaPem == cfg.ca_pem
+      && verifiedHostport == cfg.backend_hostport
+      && verifiedSsid == cfg.wifi_ssid);
+  verify.end();
+  if (!matches) {
+    error = "PAIRING-NVS-003";
+    return false;
+  }
+  return true;
+}
+
 bool saveConfig(const Config &cfg, String *errorCodeOut = nullptr) {
   if (errorCodeOut != nullptr) *errorCodeOut = "";
   auto setError = [errorCodeOut](const char *code) {
@@ -840,6 +865,11 @@ bool saveConfig(const Config &cfg, String *errorCodeOut = nullptr) {
     } else {
       setError(storeError.length() > 0U ? storeError.c_str() : "PAIRING-NVS-001");
     }
+    return false;
+  }
+  String legacyReadbackError;
+  if (!verifyLegacyConfigReadback(cfg, legacyReadbackError)) {
+    setError(legacyReadbackError.length() > 0U ? legacyReadbackError.c_str() : "PAIRING-NVS-003");
     return false;
   }
 
