@@ -43,7 +43,8 @@ def test_remote_config_persists_candidate_before_runtime_commit():
     changed = block.index("serverConfigChanged = true;", commit)
     failure = block.index("if (!saveConfig(candidate, &persistError))")
 
-    assert "DEVICE-CONFIG-PERSIST" in block
+    assert "setConfigPersistenceError(persistError)" in block
+    assert 'lastDeviceErrorCode = "DEVICE-CONFIG-PERSIST"' in firmware
     assert persist < commit < changed
     assert "serverConfigChanged = true;" not in block[failure:commit]
     assert "saveConfig(cfg);" not in block

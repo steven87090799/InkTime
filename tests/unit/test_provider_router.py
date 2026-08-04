@@ -175,6 +175,7 @@ def test_isolated_process_start_failure_can_fail_over_before_vision_request():
         name="broken-isolated",
         base_url="http://127.0.0.1:1",
         api_key="",
+        options={"allow_private_http": True},
         timeout=1,
     )
     healthy = StubProvider("healthy-isolated")
