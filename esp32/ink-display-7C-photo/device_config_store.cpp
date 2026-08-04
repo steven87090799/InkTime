@@ -63,7 +63,12 @@ bool DeviceConfigStore::readSlot(
   bool present = false;
   if (!readBlob(store, slotKey(slot), bytes, present, error) || !present) return false;
   value.slot = slot;
-  return configstore::decode_slot(bytes, value.payload, value.generation, error);
+  std::string core_error;
+  if (!configstore::decode_slot(bytes, value.payload, value.generation, core_error)) {
+    setError(error, core_error.c_str());
+    return false;
+  }
+  return true;
 }
 
 bool DeviceConfigStore::readPointer(
@@ -230,7 +235,7 @@ bool DeviceConfigStore::loadLegacy(
       }
       candidate.refresh_hour = slots[0].hour;
       candidate.refresh_minute = slots[0].minute;
-      String candidate_error;
+      std::string candidate_error;
       if (configstore::validate_payload(candidate, candidate_error)) payload = candidate;
     }
   }
@@ -238,7 +243,8 @@ bool DeviceConfigStore::loadLegacy(
     payload.schedule_slots[index] = {0U, 0U};
   }
   legacy.end();
-  if (!configstore::validate_payload(payload, error)) {
+  std::string core_error;
+  if (!configstore::validate_payload(payload, core_error)) {
     setError(error, "PAIRING-NVS-001");
     return false;
   }
