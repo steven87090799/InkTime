@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from inktime.app.services.benchmark_metrics import (
     calculate_benchmark_metrics,
     grade_agreement,
@@ -149,3 +151,21 @@ def test_quality_metrics_accept_manual_golden_field_aliases():
     )
     assert result["quality_metrics"]["grades"]["technical_grade"]["exact_grade_accuracy"] == 1
     assert result["quality_metrics"]["orientation"]["rotation_exact_accuracy"] == 1
+
+
+def test_ranking_duplicate_identifiers_fail_closed():
+    with pytest.raises(ValueError, match="unique"):
+        calculate_benchmark_metrics(
+            [
+                {
+                    "id": "duplicate",
+                    "expected_rank": 1,
+                    "predicted_rank": 1,
+                },
+                {
+                    "id": "duplicate",
+                    "expected_rank": 2,
+                    "predicted_rank": 2,
+                },
+            ]
+        )

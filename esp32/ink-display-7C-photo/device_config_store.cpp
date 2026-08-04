@@ -10,7 +10,8 @@ namespace {
 constexpr const char* kSlotAKey = "slot_a";
 constexpr const char* kSlotBKey = "slot_b";
 constexpr const char* kPointerKey = "active";
-constexpr const char* kJournalKey = "journal";
+constexpr const char* kJournalKey = "sched_txn";
+constexpr const char* kLegacyJournalKey = "journal";
 
 const char* slotKey(char slot) {
   return slot == 'A' ? kSlotAKey : kSlotBKey;
@@ -358,12 +359,19 @@ bool DeviceConfigStore::prepare(
     setError(error, "PAIRING-NVS-001");
     return false;
   }
+  store.end();
+
+  Preferences verify;
+  if (!verify.begin(storage_namespace_, true)) {
+    setError(error, "PAIRING-NVS-002");
+    return false;
+  }
   SlotValue readback;
   String readback_error;
-  const bool readback_ok = readSlot(store, prepared.prepared_slot, readback, readback_error)
+  const bool readback_ok = readSlot(verify, prepared.prepared_slot, readback, readback_error)
     && readback.generation == prepared.prepared_generation
     && readback.payload == payload;
-  store.end();
+  verify.end();
   if (!readback_ok) {
     setError(error, "PAIRING-NVS-003");
     return false;
@@ -408,32 +416,47 @@ bool DeviceConfigStore::commitPreparedSlot(
   if (!readPointer(store, previous_slot, previous_generation, previous_present, pointer_error)) {
     previous_present = false;
   }
-  if (!writePointer(store, prepared_slot, prepared_generation, error)) {
-    store.end();
-    return false;
-  }
-  char read_slot_name = 0;
-  uint64_t read_generation = 0U;
-  bool read_present = false;
-  String read_error;
-  const bool pointer_ok = readPointer(
-      store, read_slot_name, read_generation, read_present, read_error)
-    && read_present && read_slot_name == prepared_slot && read_generation == prepared_generation;
-  SlotValue active;
-  const bool active_ok = pointer_ok && readSlot(store, prepared_slot, active, read_error)
-    && active.generation == prepared_generation && active.payload == payload;
-  if (!active_ok) {
+
+  const auto restorePreviousPointer = [&]() {
+    Preferences restore;
+    if (!restore.begin(storage_namespace_, false)) return;
     if (previous_present) {
       String restore_error;
-      (void)writePointer(store, previous_slot, previous_generation, restore_error);
+      (void)writePointer(restore, previous_slot, previous_generation, restore_error);
     } else {
-      store.remove(kPointerKey);
+      restore.remove(kPointerKey);
     }
+    restore.end();
+  };
+
+  if (!writePointer(store, prepared_slot, prepared_generation, error)) {
     store.end();
-    setError(error, "PAIRING-NVS-005");
+    restorePreviousPointer();
     return false;
   }
   store.end();
+
+  Preferences verify;
+  bool active_ok = false;
+  if (verify.begin(storage_namespace_, true)) {
+    char read_slot_name = 0;
+    uint64_t read_generation = 0U;
+    bool read_present = false;
+    String read_error;
+    const bool pointer_ok = readPointer(
+        verify, read_slot_name, read_generation, read_present, read_error)
+      && read_present && read_slot_name == prepared_slot
+      && read_generation == prepared_generation;
+    SlotValue active;
+    active_ok = pointer_ok && readSlot(verify, prepared_slot, active, read_error)
+      && active.generation == prepared_generation && active.payload == payload;
+    verify.end();
+  }
+  if (!active_ok) {
+    restorePreviousPointer();
+    setError(error, "PAIRING-NVS-005");
+    return false;
+  }
   return true;
 }
 
@@ -499,9 +522,21 @@ bool DeviceConfigStore::readJournal(
     return false;
   }
   std::string bytes;
-  if (!readBlob(store, kJournalKey, bytes, present, error) || !present) {
+  if (!readBlob(store, kJournalKey, bytes, present, error)) {
     store.end();
-    return error.length() == 0;
+    return false;
+  }
+  if (!present) {
+    String legacy_error;
+    if (!readBlob(store, kLegacyJournalKey, bytes, present, legacy_error)) {
+      store.end();
+      setError(error, legacy_error.length() > 0U ? legacy_error.c_str() : "PAIRING-NVS-005");
+      return false;
+    }
+  }
+  if (!present) {
+    store.end();
+    return true;
   }
   std::string core_error;
   const bool ok = configstore::decode_journal(bytes, journal, core_error);
@@ -526,6 +561,7 @@ bool DeviceConfigStore::writeJournal(
     return false;
   }
   const bool ok = store.putBytes(kJournalKey, bytes.data(), bytes.size()) == bytes.size();
+  if (ok) store.remove(kLegacyJournalKey);
   store.end();
   if (!ok) setError(error, "PAIRING-NVS-005");
   return ok;
@@ -539,6 +575,7 @@ bool DeviceConfigStore::clearJournal(String& error) {
     return false;
   }
   store.remove(kJournalKey);
+  store.remove(kLegacyJournalKey);
   store.end();
   return true;
 }

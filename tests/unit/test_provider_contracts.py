@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from inktime.app.providers.base import ProviderResponse, Usage
+from inktime.app.providers.openai_compatible import ProviderHTTPError
 from inktime.app.services.provider_contracts import run_provider_contract
 from tests.unit.test_analysis_schema import valid_result
 
@@ -47,6 +48,26 @@ class RepairFailureProvider(FakeContractProvider):
     def repair_json(self, **kwargs):
         self.repair_calls.append(kwargs)
         raise TimeoutError("repair timeout")
+
+
+class AmbiguousRepairFailureProvider(FakeContractProvider):
+    def repair_json(self, **kwargs):
+        self.repair_calls.append(kwargs)
+        raise ProviderHTTPError(
+            "repair response ambiguous",
+            "AMBIGUOUS_REPAIR",
+            ambiguous=True,
+            http_status=500,
+        )
+
+
+class CostedRepairProvider(FakeContractProvider):
+    def repair_json(self, **kwargs):
+        self.repair_calls.append(kwargs)
+        return ProviderResponse(
+            json.dumps(valid_result(), ensure_ascii=False),
+            Usage(input_tokens=5, output_tokens=3, provider_reported_cost=0.02),
+        )
 
 
 def test_level1_is_connection_only():
@@ -100,3 +121,31 @@ def test_level3_repair_timeout_counts_attempt_without_response_and_hides_content
     assert result["usage"]["cost_source"] == "unknown"
     assert result["usage"]["unknown_cost_count"] == 1
     assert "not-json" not in result["message"]
+
+
+def test_level3_ambiguous_repair_error_counts_attempt_without_response():
+    provider = AmbiguousRepairFailureProvider(valid=False)
+    result = run_provider_contract(provider, level=3, model="model")
+    assert result["ok"] is False
+    assert result["vision_requests"] == 1
+    assert result["repair_attempts"] == 1
+    assert result["repair_requests"] == 1
+    assert result["repair_responses"] == 0
+    assert result["network_request_attempts"] == 2
+    assert result["network_responses"] == 1
+    assert result["repair_completed"] is False
+    assert result["usage"]["unknown_cost_count"] == 1
+
+
+def test_level3_repair_usage_is_aggregated_without_second_vision_image():
+    provider = CostedRepairProvider(valid=False)
+    result = run_provider_contract(provider, level=3, model="model")
+    assert result["ok"] is True
+    assert result["repair_attempts"] == 1
+    assert result["repair_responses"] == 1
+    assert result["network_request_attempts"] == 2
+    assert result["network_responses"] == 2
+    assert round(result["usage"]["provider_reported_cost"], 6) == 0.1
+    assert result["usage"]["unknown_cost_count"] == 0
+    assert "image_path" not in provider.repair_calls[0]
+    assert len(provider.analyze_calls) == 1

@@ -970,7 +970,11 @@ String scheduleIdFromJson(const String& json) {
   if (json.length() == 0U) return "";
   JsonDocument document;
   if (deserializeJson(document, json) || document.overflowed()) return "";
-  return document["schedule_id"] | "";
+  const JsonVariantConst rawScheduleId = document["schedule_id"];
+  if (!rawScheduleId.is<const char*>()) return "";
+  const String scheduleId = rawScheduleId.as<const char*>();
+  if (scheduleId.length() == 0U || scheduleId.length() > 128U) return "";
+  return scheduleId;
 }
 
 }  // namespace

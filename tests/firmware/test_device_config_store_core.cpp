@@ -44,10 +44,60 @@ bool decodeSlot(
   return inktime::configstore::decode_slot(found->second, value, generation, error);
 }
 
+void rewriteCrc32(std::string& value) {
+  assert(value.size() >= 4U);
+  const uint32_t crc = inktime::configstore::crc32(value.substr(0U, value.size() - 4U));
+  for (size_t index = 0U; index < 4U; ++index) {
+    value[value.size() - 4U + index] = static_cast<char>((crc >> (index * 8U)) & 0xffU);
+  }
+}
+
+bool selectCurrent(
+    const std::map<std::string, std::string>& blobs,
+    ConfigPayload& value,
+    char& active_slot,
+    uint64_t& generation) {
+  active_slot = 0;
+  generation = 0U;
+  const auto pointer = blobs.find("active");
+  if (pointer != blobs.end()) {
+    std::string error;
+    char pointed_slot = 0;
+    uint64_t pointed_generation = 0U;
+    ConfigPayload pointed;
+    if (inktime::configstore::decode_pointer(
+          pointer->second, pointed_slot, pointed_generation, error)
+        && decodeSlot(blobs, pointed_slot, pointed, generation)
+        && generation == pointed_generation) {
+      value = pointed;
+      active_slot = pointed_slot;
+      return true;
+    }
+  }
+  ConfigPayload candidate_a;
+  ConfigPayload candidate_b;
+  uint64_t generation_a = 0U;
+  uint64_t generation_b = 0U;
+  const bool valid_a = decodeSlot(blobs, 'A', candidate_a, generation_a);
+  const bool valid_b = decodeSlot(blobs, 'B', candidate_b, generation_b);
+  if (!valid_a && !valid_b) return false;
+  if (valid_a && (!valid_b || generation_a >= generation_b)) {
+    value = candidate_a;
+    active_slot = 'A';
+    generation = generation_a;
+  } else {
+    value = candidate_b;
+    active_slot = 'B';
+    generation = generation_b;
+  }
+  return true;
+}
+
 class FakeAbStore {
  public:
   std::map<std::string, std::string> blobs;
   std::string fail_next_put;
+  std::string corrupt_next_put;
 
   bool put(const std::string& key, const std::string& value) {
     if (fail_next_put == key) {
@@ -55,6 +105,10 @@ class FakeAbStore {
       return false;
     }
     blobs[key] = value;
+    if (corrupt_next_put == key) {
+      corrupt_next_put.clear();
+      blobs[key].back() ^= 0x01;
+    }
     return true;
   }
 
@@ -115,7 +169,9 @@ void test_payload_roundtrip_and_empty_overwrite() {
   assert(decoded == original);
 
   ConfigPayload empty = original;
+  empty.wifi_ssid.clear();
   empty.wifi_pass.clear();
+  empty.backend_hostport.clear();
   empty.ca_pem.clear();
   empty.device_token.clear();
   assert(inktime::configstore::serialize_payload(empty, encoded, error));
@@ -135,6 +191,14 @@ void test_envelope_rejects_corruption_and_shape_changes() {
 
   std::string corrupted = encoded;
   corrupted.back() ^= 0x01;
+  assert(!inktime::configstore::decode_slot(corrupted, decoded, generation, error));
+
+  corrupted = encoded;
+  corrupted[4] ^= 0x01;
+  assert(!inktime::configstore::decode_slot(corrupted, decoded, generation, error));
+
+  corrupted = encoded;
+  corrupted[5] ^= 0x01;
   assert(!inktime::configstore::decode_slot(corrupted, decoded, generation, error));
 
   corrupted = encoded;
@@ -161,6 +225,9 @@ void test_ab_pointer_and_write_failure_injection() {
   const ConfigPayload third = payload("c");
   assert(store.save(first));
   const std::string first_pointer = store.blobs.at("active");
+  store.corrupt_next_put = "slot_b";
+  assert(!store.save(second));
+  assert(store.blobs.at("active") == first_pointer);
   store.fail_next_put = "slot_b";
   assert(!store.save(second));
   assert(store.blobs.at("active") == first_pointer);
@@ -181,6 +248,31 @@ void test_ab_pointer_and_write_failure_injection() {
   assert(active == second && active_generation == 2);
 }
 
+void test_pointer_selection_prefers_pointer_and_falls_back_to_newest_valid_slot() {
+  std::map<std::string, std::string> blobs;
+  std::string error;
+  assert(inktime::configstore::encode_slot(payload("a"), 4U, blobs["slot_a"], error));
+  assert(inktime::configstore::encode_slot(payload("b"), 9U, blobs["slot_b"], error));
+
+  assert(inktime::configstore::encode_pointer('A', 4U, blobs["active"], error));
+  ConfigPayload current;
+  char active_slot = 0;
+  uint64_t generation = 0U;
+  assert(selectCurrent(blobs, current, active_slot, generation));
+  assert(active_slot == 'A' && generation == 4U && current == payload("a"));
+
+  blobs["active"][0] ^= 0x01;
+  assert(selectCurrent(blobs, current, active_slot, generation));
+  assert(active_slot == 'B' && generation == 9U && current == payload("b"));
+
+  blobs["slot_b"].back() ^= 0x01;
+  assert(selectCurrent(blobs, current, active_slot, generation));
+  assert(active_slot == 'A' && generation == 4U && current == payload("a"));
+
+  blobs["slot_a"].back() ^= 0x01;
+  assert(!selectCurrent(blobs, current, active_slot, generation));
+}
+
 void test_pointer_and_journal_roundtrip() {
   std::string error;
   std::string pointer;
@@ -190,6 +282,15 @@ void test_pointer_and_journal_roundtrip() {
   assert(inktime::configstore::decode_pointer(pointer, slot, generation, error));
   assert(slot == 'B' && generation == 17);
   pointer[7] ^= 0x01;
+  assert(!inktime::configstore::decode_pointer(pointer, slot, generation, error));
+
+  assert(inktime::configstore::encode_pointer('A', 16, pointer, error));
+  pointer[5] = 'C';
+  rewriteCrc32(pointer);
+  assert(!inktime::configstore::decode_pointer(pointer, slot, generation, error));
+
+  assert(inktime::configstore::encode_pointer('B', 17, pointer, error));
+  pointer.pop_back();
   assert(!inktime::configstore::decode_pointer(pointer, slot, generation, error));
 
   for (const auto phase : {
@@ -213,6 +314,19 @@ void test_pointer_and_journal_roundtrip() {
     assert(decoded.prepared_generation == 12);
     encoded[encoded.size() - 1] ^= 0x01;
     assert(!inktime::configstore::decode_journal(encoded, decoded, error));
+
+    assert(inktime::configstore::encode_journal(journal, encoded, error));
+    encoded[4] ^= 0x01;
+    assert(!inktime::configstore::decode_journal(encoded, decoded, error));
+
+    assert(inktime::configstore::encode_journal(journal, encoded, error));
+    encoded[5] = 0U;
+    rewriteCrc32(encoded);
+    assert(!inktime::configstore::decode_journal(encoded, decoded, error));
+
+    assert(inktime::configstore::encode_journal(journal, encoded, error));
+    encoded.push_back('\0');
+    assert(!inktime::configstore::decode_journal(encoded, decoded, error));
   }
 }
 
@@ -222,6 +336,7 @@ int main() {
   test_payload_roundtrip_and_empty_overwrite();
   test_envelope_rejects_corruption_and_shape_changes();
   test_ab_pointer_and_write_failure_injection();
+  test_pointer_selection_prefers_pointer_and_falls_back_to_newest_valid_slot();
   test_pointer_and_journal_roundtrip();
   return 0;
 }

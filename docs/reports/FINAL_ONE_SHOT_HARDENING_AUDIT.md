@@ -7,12 +7,12 @@
 | Repository | `steven87090799/InkTime` |
 | PR | `#53 fix: harden final production and OpenRouter runtime` |
 | Base | `origin/main 064a599bd9e13dd95c6e7d326759d8efc9b22306` |
-| Start HEAD | `e12a865768d97916b5806a62cde95007b4bbc7dc` |
+| Start HEAD | `de9389f0e52edb96115f3b2499a05fbeaf8d4854` |
 | Branch | `fix/final-production-openrouter-and-runtime-hardening` |
 | Worktree | `/Users/steven/Desktop/inktime/InkTime-final-production-openrouter-runtime-hardening` |
 | Delivery state | Draft、Open、未 Merge、未 Mark Ready、未 Enable Auto Merge |
 
-本輪只處理與 PR #53 直接相關的 remote config atomic persistence、benchmark Top-K／production ranking／golden manifest contract、private HTTP destination safety、Provider diagnostics、Level 3 reasoning、max-cost 文件與 hosted CI evidence。OpenRouter shared repair/cost policy、Migration 32 provenance、ESP32 CA limit、scanner、scheduler、release 與 PhotoPainter rendering architecture 不在本輪重構。`ConverTo6c_bmp-7/`、`data/cache/`、`data/releases/`、使用者檔案與其他工作樹未納入修改。
+本輪只處理與 PR #53 直接相關的 P1-001 ESP32 crash-consistent Config persistence、P2-001~004 benchmark coverage／cost／manifest／repair accounting、private HTTP destination safety、Provider diagnostics、Level 3 reasoning、max-cost 文件與 hosted CI evidence。Migration 32 provenance、ESP32 CA limit、scanner、scheduler、release 與 PhotoPainter rendering architecture 不在本輪重構。`ConverTo6c_bmp-7/`、`data/cache/`、`data/releases/`、使用者檔案與其他工作樹未納入修改。
 
 ## 驗證政策
 
@@ -41,9 +41,9 @@
 
 - `PR_HEAD`：PR #53 當時 feature branch 的提交。
 - `TESTED_MERGE_REF`：`pull_request` workflow 驗證 PR 加上當前 `main` 的合併相容性。
-- `EXACT_HEAD_WORKFLOW_RUN`：最後推送後以 `workflow_dispatch` 指向 feature branch，且 `headSha == FINAL_HEAD` 的 hosted run。
+- `EXACT_HEAD_WORKFLOW_RUN`：最後推送後由 PR workflow 驗證 feature branch，且 `headSha == FINAL_HEAD` 的 hosted run；本倉庫目前不以 merge-ref 或舊 run 代替這項證據。
 
-既有 PR checks 是 merge-ref 證據；完成本輪 push 後，必須重新取得兩個 workflow dispatch run，逐一確認 `event=workflow_dispatch`、`headSha=FINAL_HEAD`、`conclusion=success`。最終 run ID 與 SHA 以 PR #53 Checks 及交接回報為唯一最新證據，避免在文件內留下會漂移的舊 run ID。
+既有 PR checks 是 merge-ref 證據；完成每次 push 後，必須重新取得兩個 exact-head run，逐一確認 `headSha=FINAL_HEAD`、`conclusion=success`。最終 run ID 與 SHA 以 PR #53 Checks 及交接回報為唯一最新證據，避免在文件內留下會漂移的舊 run ID。
 
 ## 成本、隱私與硬體邊界
 
@@ -54,7 +54,7 @@
 
 ## PR #53 final closure addendum
 
-本次最後收尾另外要求：ESP32 formal Config 使用 bounded binary A/B blob、generation、CRC、active pointer 與 schedule/config recovery journal；`dashcfg` formal keys 僅作一次性 migration，retry／preview／display／queue ACK 等旁路 keys 不作 Config source。Hosted CI 以 `firmware-host-contract` 執行純 core failure-injection contract，並保留既有八組 ESP32 profile compile。
+本次最後收尾另外要求：ESP32 formal Config 使用 bounded binary A/B blob、generation、CRC、active pointer 與 `sched_txn` schedule/config recovery journal；slot 與 pointer read-back 會 close writable handle 後以 read-only handle 驗證，pointer commit failure 會保留或恢復 last-good pointer；舊 `journal` 僅作相容 fallback，`dashcfg` formal keys 僅作一次性 migration，retry／preview／display／queue ACK 等旁路 keys 不作 Config source。Hosted CI 以 `firmware-host-contract` 執行純 core failure-injection contract，並保留既有八組 ESP32 profile compile。
 
 Benchmark live metrics 以 `selected_photos`、`attempted_photos`、`schema_valid_photos`、`quality_eligible_photos` 與 `ranking_eligible_photos` 分層；quality／ranking 是 conditional metrics，rate 的零分母為 `null`。成本固定以 attempted photos 為分母，任何 unknown usage 都使完整成本平均為 `null`。Golden manifest 在 Provider construction 前 enforce 單一 technical alias、單一 orientation representation、duplicate id 與 duplicate resolved image fail-closed。Provider Level 3 repair 以 `conservative_attempted_calls` 計數，repair timeout／500／connection reset 也算 attempt，文字 repair 不重送圖片。
 - 最終分類只能是 `CODE_READY_REAL_ENV_PENDING`；真實 OpenRouter、NAS、PhotoPainter／ESP32 與長時間現場 soak 一律 `NOT RUN`。

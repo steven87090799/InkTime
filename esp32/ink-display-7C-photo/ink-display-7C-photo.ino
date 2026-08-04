@@ -862,16 +862,20 @@ bool saveConfig(const Config &cfg, String *errorCodeOut = nullptr) {
       setError("PAIRING-NVS-002");
     } else if (storeError == "PAIRING-NVS-003") {
       setError("PAIRING-NVS-003");
+    } else if (storeError == "PAIRING-NVS-004") {
+      setError("PAIRING-NVS-004");
+    } else if (storeError == "PAIRING-NVS-005") {
+      setError("PAIRING-NVS-005");
     } else {
       setError(storeError.length() > 0U ? storeError.c_str() : "PAIRING-NVS-001");
     }
     return false;
   }
+  // cfgstore has already completed the formal A/B commit and full read-back.
+  // Old dashcfg formal keys are migration-only; stale legacy values must not
+  // turn a committed config into a reported failure.
   String legacyReadbackError;
-  if (!verifyLegacyConfigReadback(cfg, legacyReadbackError)) {
-    setError(legacyReadbackError.length() > 0U ? legacyReadbackError.c_str() : "PAIRING-NVS-003");
-    return false;
-  }
+  (void)verifyLegacyConfigReadback(cfg, legacyReadbackError);
 
 #if DEBUG_LOG
   DBG_PRINTLN("[CFG] saved");

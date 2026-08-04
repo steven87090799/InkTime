@@ -369,3 +369,43 @@ def test_golden_manifest_rejects_duplicate_ids_and_mixed_aliases_before_provider
     )
     with pytest.raises(BenchmarkError, match="duplicate resolved image"):
         _load_golden_records(path)
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["mixed_orientation", "flat_missing_rotation", "flat_missing_ambiguous", "nested_missing_field"],
+)
+def test_golden_manifest_rejects_incomplete_or_mixed_orientation_aliases(tmp_path, case):
+    path = _live_manifest(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    expected = payload["items"][0]["expected"]
+    if case == "mixed_orientation":
+        expected["visual_orientation"] = {"rotation_cw": 0, "ambiguous": False}
+    elif case == "flat_missing_rotation":
+        expected.pop("rotation_cw")
+    elif case == "flat_missing_ambiguous":
+        expected.pop("ambiguous")
+    else:
+        expected.pop("rotation_cw")
+        expected.pop("ambiguous")
+        expected["visual_orientation"] = {"rotation_cw": 0}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(BenchmarkError, match="orientation"):
+        _load_golden_records(path)
+
+
+def test_golden_manifest_legacy_aliases_are_loaded_as_canonical_fields(tmp_path):
+    path = _live_manifest(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    expected = payload["items"][0]["expected"]
+    expected["technical_quality_grade"] = expected.pop("technical_grade")
+    expected["visual_orientation"] = {
+        "rotation_cw": expected.pop("rotation_cw"),
+        "ambiguous": expected.pop("ambiguous"),
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    records = _load_golden_records(path)
+    canonical = records[0]["expected"]
+    assert canonical["technical_grade"] == "A"
+    assert "technical_quality_grade" not in canonical
+    assert canonical["visual_orientation"] == {"rotation_cw": 0, "ambiguous": False}

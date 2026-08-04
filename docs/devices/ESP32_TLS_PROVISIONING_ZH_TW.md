@@ -17,9 +17,9 @@
 -DINKTIME_DEVICE_ROOT_CA="-----BEGIN CERTIFICATE----- ... -----END CERTIFICATE-----"
 ```
 
-若使用 Web 配對頁輸入 CA，韌體只接受 64–3500 bytes 且同時包含 `BEGIN CERTIFICATE`／`END CERTIFICATE` 的 PEM；上限由 `device_http_transport.h` 的 `kMaxDeviceCaPemBytes` 與 portal `maxlength` 共用。它會保存到裝置 NVS 的 `ca_pem`；CA 不是 secret，但仍應使用正確的 server CA，不要貼入 server private key。
+若使用 Web 配對頁輸入 CA，韌體只接受 64–3500 bytes 且同時包含 `BEGIN CERTIFICATE`／`END CERTIFICATE` 的 PEM；上限由 `device_http_transport.h` 的 `kMaxDeviceCaPemBytes` 與 portal `maxlength` 共用。正式設定會以完整 payload 寫入 `cfgstore` 的 A/B blob，`dashcfg` 的舊形式 key 僅作一次性 migration input；CA 不是 secret，但仍應使用正確的 server CA，不要貼入 server private key。
 
-`saveConfig()` 會檢查每個 NVS string／numeric write 的 return value，並 read-back 比對 `ssid`、`hostport`、`ca_pem`。格式或 CA policy 失敗回 `PAIRING-NVS-001`，NVS namespace 開啟失敗回 `PAIRING-NVS-002`，寫入後 read-back 不一致回 `PAIRING-NVS-003`；任一失敗都不會清除 portal 或重啟裝置。CA 欄位留白仍保留既有 NVS CA。
+`saveConfig()` 會先驗證 CA policy，再以 generation、CRC、active pointer 與 read-only full-payload read-back 完成 A/B commit。格式或 CA policy 失敗回 `PAIRING-NVS-001`，NVS namespace 開啟失敗回 `PAIRING-NVS-002`，寫入後 full-payload read-back 不一致回 `PAIRING-NVS-003`；pointer／journal failure 使用 `PAIRING-NVS-004`／`PAIRING-NVS-005`。任一正式 commit 失敗都不會切換舊 active pointer、清除 portal 或重啟裝置。空字串是正式值，會覆蓋舊 password、token、CA 或 backend hostport。
 
 ## 受控 LAN development build
 
