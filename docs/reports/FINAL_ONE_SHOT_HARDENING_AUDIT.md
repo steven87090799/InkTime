@@ -22,25 +22,25 @@
 
 | 區域 | Code／契約狀態 | Hosted／真實環境邊界 |
 |---|---|---|
-| OpenRouter repair privacy、routing、ZDR、usage、sticky policy | CODE STATIC PASS；共用 helper，repair 無 image／reasoning，Vision／repair 共用 context | HOSTED CONTRACT PASS 待 final-head workflow；LIVE PROVIDER `NOT RUN` |
-| ESP32 CA 上限與 NVS 寫入／read-back | CODE STATIC PASS；共享 `kMaxDeviceCaPemBytes=3500`、X.509 parse 與 `PAIRING-NVS-006/007` | HOSTED COMPILE／source contract 待 final-head；physical NVS／TLS `NOT RUN` |
-| Migration 32/33 Provider 身分與歷史成本來源 | CODE STATIC PASS；legacy OpenRouter data fix、provider_id backfill、舊 actual cost 不標 `provider_reported` | HOSTED migration regression 待 final-head；正式資料 upgrade `NOT RUN` |
-| Frozen repair policy、Vision fingerprint 與 prompt contract | CODE STATIC PASS；新 plan 帶 scoring／caption／reasoning／provider revision hash，無 legacy v2 fallback | HOSTED Python contract 待 final-head；既有 production job runtime `NOT RUN` |
-| Provider Level 1/2/3 | FAKE CONTRACT PASS；Level 2/3 明確按鈕且不自動執行 | HOSTED fake contract 待 final-head；REAL PROVIDER `NOT RUN` |
-| P1-001 unknown cost budget | CODE STATIC PASS；有證據 unknown 以 reserve 計入有效預算，同 photo／job scope block，補價格後回溯 reconciliation | HOSTED budget／pricing contract 待 final-head；真實帳務 `NOT RUN` |
-| P1-002 legacy OpenRouter | CODE STATIC PASS；official exact/subdomain host effective kind，Migration 33 persist kind、停 Batch、default `require_parameters=true` | HOSTED migration/provider route contract 待 final-head；REAL PROVIDER `NOT RUN` |
-| P2-001 prompt contract cache identity | CODE STATIC PASS；scoring rules hash、caption controls、reasoning、schema、provider revision 與固定 contract version 入 hash | HOSTED cache contract 待 final-head；production cache migration `NOT RUN` |
-| P2-002 Scoring Lab usage | CODE STATIC PASS；Vision／repair 分列、成本相加、repair image bytes=0、mixed unknown 顯示 incomplete | HOSTED UI／usage contract 待 final-head；REAL PROVIDER `NOT RUN` |
-| P2-01 remote config atomic persistence | CODE STATIC PASS；candidate 先 `saveConfig(candidate)` 並完成 persistence/read-back，成功後才變更 runtime cfg／changed flag；失敗不重啟 | HOSTED firmware/source contract 待 final-head；physical NVS／reboot `NOT RUN` |
-| P2-02 Top-K tie bound | CODE STATIC PASS；deterministic exact-K、ID tie-break、`effective_k` bounded，overlap rate 不超過 1；Spearman 保留 average-rank ties | HOSTED benchmark contract 待 final-head |
-| P2-03 production ranking reuse | CODE STATIC PASS；benchmark 直接重用 `calculate_ranking_score()`、`DEFAULT_RANKING_WEIGHTS`、`RANKING_RULE_VERSION`，favorite bonus disabled | HOSTED benchmark contract 待 final-head；REAL MODEL QUALITY `NOT RUN` |
-| P2-04 golden manifest | CODE STATIC PASS；`inactive`／`ineligible`／`missing`／`never_upload`／`manually_excluded` canonical fields，unknown/type/privacy/path fail-closed 且 network 前排除 | HOSTED benchmark contract 待 final-head；REAL DATASET `NOT RUN` |
-| P2-003~005 ESP32 NVS／sticky session | CODE STATIC PASS；legacy cleanup fail 保留新 journal，older-safe pointer fallback，context 不含 path／secret | HOSTED firmware/source contract 待 final-head；physical NVS／reboot／network `NOT RUN` |
-| P3-001~004 redirect／TLS／HTTP／pricing | CODE STATIC PASS；scheme/host/port、X.509 parse、literal private HTTP、finite bounded pricing | HOSTED security／pricing contract 待 final-head；real device／TLS chain `NOT RUN` |
-| Conditional P2 private HTTP DNS safety | CODE STATIC PASS；generic Python 與 ESP32 LAN policy 僅允許 literal private/loopback IP，hostname 需明確 pinned compile flag；Ollama 無 bypass，redirect disabled | HOSTED security contract 待 final-head；REAL NETWORK `NOT RUN` |
-| P3 provider privacy diagnostic | CODE STATIC PASS；snapshot 明確回報 `data_collection=deny/allow/openrouter_default` 與 `zdr=true/false`，未明確 deny+zdr 不標 configured | HOSTED provider contract 待 final-head；REAL PROVIDER `NOT RUN` |
-| P3 Level 3 reasoning | CODE STATIC PASS；Level 3 明確使用 `reasoning_effort=none`，不硬 forcing low，能力欄位與 provider adapter 對齊 | HOSTED provider contract 待 final-head；REAL PROVIDER `NOT RUN` |
-| P3 max-cost wording／unknown stop | CODE STATIC PASS；bounded post-response stop；可靠成本可阻擋下一 request，unknown 立即停止後續 request 且不填零 | HOSTED benchmark contract 待 final-head；REAL PROVIDER `NOT RUN` |
+| OpenRouter repair privacy、routing、ZDR、usage、sticky policy | CODE STATIC PASS；共用 helper，repair 無 image／reasoning，Vision／repair 共用 context | HOSTED CONTRACT PASS；exact-head run 見 final handoff；LIVE PROVIDER `NOT RUN` |
+| ESP32 CA 上限與 NVS 寫入／read-back | CODE STATIC PASS；共享 `kMaxDeviceCaPemBytes=3500`、X.509 parse 與 `PAIRING-NVS-006/007` | HOSTED COMPILE／source contract PASS；exact-head run 見 final handoff；physical NVS／TLS `NOT RUN` |
+| Migration 32/33 Provider 身分與歷史成本來源 | CODE STATIC PASS；legacy OpenRouter data fix、provider_id backfill、舊 actual cost 不標 `provider_reported` | HOSTED migration regression PASS；exact-head run 見 final handoff；正式資料 upgrade `NOT RUN` |
+| Frozen repair policy、Vision fingerprint 與 prompt contract | CODE STATIC PASS；新 plan 帶 scoring／caption／reasoning／provider revision hash，無 legacy v2 fallback | HOSTED Python contract PASS；exact-head run 見 final handoff；既有 production job runtime `NOT RUN` |
+| Provider Level 1/2/3 | FAKE CONTRACT PASS；Level 2/3 明確按鈕且不自動執行 | HOSTED fake contract PASS；exact-head run 見 final handoff；REAL PROVIDER `NOT RUN` |
+| P1-001 unknown cost budget | CODE STATIC PASS；有證據 unknown 以 reserve 計入有效預算，同 photo／job scope block，補價格後回溯 reconciliation | HOSTED budget／pricing contract PASS；exact-head run 見 final handoff；真實帳務 `NOT RUN` |
+| P1-002 legacy OpenRouter | CODE STATIC PASS；official exact/subdomain host effective kind，Migration 33 persist kind、停 Batch、default `require_parameters=true` | HOSTED migration/provider route contract PASS；exact-head run 見 final handoff；REAL PROVIDER `NOT RUN` |
+| P2-001 prompt contract cache identity | CODE STATIC PASS；scoring rules hash、caption controls、reasoning、schema、provider revision 與固定 contract version 入 hash | HOSTED cache contract PASS；exact-head run 見 final handoff；production cache migration `NOT RUN` |
+| P2-002 Scoring Lab usage | CODE STATIC PASS；Vision／repair 分列、成本相加、repair image bytes=0、mixed unknown 顯示 incomplete | HOSTED UI／usage contract PASS；exact-head run 見 final handoff；REAL PROVIDER `NOT RUN` |
+| P2-01 remote config atomic persistence | CODE STATIC PASS；candidate 先 `saveConfig(candidate)` 並完成 persistence/read-back，成功後才變更 runtime cfg／changed flag；失敗不重啟 | HOSTED firmware/source contract PASS；exact-head run 見 final handoff；physical NVS／reboot `NOT RUN` |
+| P2-02 Top-K tie bound | CODE STATIC PASS；deterministic exact-K、ID tie-break、`effective_k` bounded，overlap rate 不超過 1；Spearman 保留 average-rank ties | HOSTED benchmark contract PASS；exact-head run 見 final handoff |
+| P2-03 production ranking reuse | CODE STATIC PASS；benchmark 直接重用 `calculate_ranking_score()`、`DEFAULT_RANKING_WEIGHTS`、`RANKING_RULE_VERSION`，favorite bonus disabled | HOSTED benchmark contract PASS；exact-head run 見 final handoff；REAL MODEL QUALITY `NOT RUN` |
+| P2-04 golden manifest | CODE STATIC PASS；`inactive`／`ineligible`／`missing`／`never_upload`／`manually_excluded` canonical fields，unknown/type/privacy/path fail-closed 且 network 前排除 | HOSTED benchmark contract PASS；exact-head run 見 final handoff；REAL DATASET `NOT RUN` |
+| P2-003~005 ESP32 NVS／sticky session | CODE STATIC PASS；legacy cleanup fail 保留新 journal，older-safe pointer fallback，context 不含 path／secret | HOSTED firmware/source contract PASS；exact-head run 見 final handoff；physical NVS／reboot／network `NOT RUN` |
+| P3-001~004 redirect／TLS／HTTP／pricing | CODE STATIC PASS；scheme/host/port、X.509 parse、literal private HTTP、finite bounded pricing | HOSTED security／pricing contract PASS；exact-head run 見 final handoff；real device／TLS chain `NOT RUN` |
+| Conditional P2 private HTTP DNS safety | CODE STATIC PASS；generic Python 與 ESP32 LAN policy 僅允許 literal private/loopback IP，hostname 需明確 pinned compile flag；Ollama 無 bypass，redirect disabled | HOSTED security contract PASS；exact-head run 見 final handoff；REAL NETWORK `NOT RUN` |
+| P3 provider privacy diagnostic | CODE STATIC PASS；snapshot 明確回報 `data_collection=deny/allow/openrouter_default` 與 `zdr=true/false`，未明確 deny+zdr 不標 configured | HOSTED provider contract PASS；exact-head run 見 final handoff；REAL PROVIDER `NOT RUN` |
+| P3 Level 3 reasoning | CODE STATIC PASS；Level 3 明確使用 `reasoning_effort=none`，不硬 forcing low，能力欄位與 provider adapter 對齊 | HOSTED provider contract PASS；exact-head run 見 final handoff；REAL PROVIDER `NOT RUN` |
+| P3 max-cost wording／unknown stop | CODE STATIC PASS；bounded post-response stop；可靠成本可阻擋下一 request，unknown 立即停止後續 request 且不填零 | HOSTED benchmark contract PASS；exact-head run 見 final handoff；REAL PROVIDER `NOT RUN` |
 | 文件與 HTML 索引 | CODE／STATIC PASS；本輪同步 OpenRouter、成本與 ESP32 邊界文件 | 連結／瀏覽器驗證不替代 source-aligned static review |
 
 ## Hosted provenance 規則
@@ -51,7 +51,7 @@
 - `TESTED_MERGE_REF`：`pull_request` workflow 驗證 PR 加上當前 `main` 的合併相容性。
 - `EXACT_HEAD_WORKFLOW_RUN`：最後推送後由 PR workflow 驗證 feature branch，且 `headSha == FINAL_HEAD` 的 hosted run；本倉庫目前不以 merge-ref 或舊 run 代替這項證據。
 
-既有 PR checks 是 merge-ref 證據；完成每次 push 後，必須重新取得兩個 exact-head run，逐一確認 `headSha=FINAL_HEAD`、`conclusion=success`。最終 run ID 與 SHA 以 PR #53 Checks 及交接回報為唯一最新證據，避免在文件內留下會漂移的舊 run ID。
+既有 PR checks 是 merge-ref 證據；完成每次 push 後，必須重新取得兩個 exact-head run，逐一確認 `headSha=FINAL_HEAD`、`conclusion=success`。本文件不硬編會漂移的 run ID；最終 run ID、SHA、coverage 與 artifact URL 以 PR #53 Checks 及交接回報為唯一最新證據。
 
 ## 成本、隱私與硬體邊界
 
