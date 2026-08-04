@@ -2527,7 +2527,7 @@ static bool reconcilePendingScheduleConfigTransaction(Config &cfg) {
   const bool preparedPointer = activePresent
     && activeSlot == journal.prepared_slot
     && activeGeneration == journal.prepared_generation;
-  const bool targetScheduleActive = activeScheduleId == journal.target_schedule_id;
+  const bool targetScheduleActive = activeScheduleId == journal.target_schedule_id.c_str();
 
   if (journal.phase == inktime::configstore::JournalPhase::Prepared
       && !targetScheduleActive
