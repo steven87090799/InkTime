@@ -15,7 +15,7 @@ def test_grade_agreement_reports_exact_within_one_and_mae():
     result = grade_agreement(["S", "A", "E"], ["S", "B", "D"])
     assert round(result["exact"], 6) == round(1 / 3, 6)
     assert round(result["within_one"], 6) == 1
-    assert result["mae"] == 1
+    assert round(result["mae"], 6) == round(2 / 3, 6)
 
 
 def test_type_f1_and_should_keep_metrics_are_bounded():
