@@ -102,4 +102,4 @@ def test_schedule_recovery_uses_identity_journal_and_fail_closed_metadata():
     assert "journal.phase == inktime::configstore::JournalPhase::Prepared" in firmware
     assert "!targetScheduleActive" in firmware
     assert "if (!preparedPointer)" in firmware
-    assert "active schedule 身分與 recovery target 不一致" in firmware
+    assert "離線排程 active 身分與 recovery target 不一致" in firmware
