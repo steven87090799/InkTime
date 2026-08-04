@@ -108,6 +108,35 @@ bool DeviceConfigStore::writePointer(
   return true;
 }
 
+bool DeviceConfigStore::clearSlot(char slot, String& error) const {
+  error = "";
+  if (!configstore::valid_slot_name(slot)) {
+    setError(error, "PAIRING-NVS-005");
+    return false;
+  }
+  Preferences store;
+  if (!store.begin(storage_namespace_, false)) {
+    setError(error, "PAIRING-NVS-006");
+    return false;
+  }
+  const char* key = slotKey(slot);
+  const bool removed = !store.isKey(key) || store.remove(key);
+  store.end();
+  if (!removed) {
+    setError(error, "PAIRING-NVS-006");
+    return false;
+  }
+  Preferences verify;
+  if (!verify.begin(storage_namespace_, true)) {
+    setError(error, "PAIRING-NVS-006");
+    return false;
+  }
+  const bool absent = !verify.isKey(key);
+  verify.end();
+  if (!absent) setError(error, "PAIRING-NVS-006");
+  return absent;
+}
+
 bool DeviceConfigStore::findNewest(
     Preferences& store,
     SlotValue& value,
@@ -306,6 +335,116 @@ bool DeviceConfigStore::removeLegacyFormalKeys(String& error) const {
 
 bool DeviceConfigStore::load(configstore::ConfigPayload& payload, String& error) {
   error = "";
+  const auto loadAndRepairCanonicalSlot = [&](char slot,
+                                               uint64_t generation,
+                                               configstore::ConfigPayload& recovered,
+                                               String& recovery_error) -> bool {
+    Preferences store;
+    if (!store.begin(storage_namespace_, false)) {
+      setError(recovery_error, "PAIRING-NVS-002");
+      return false;
+    }
+    SlotValue selected;
+    String slot_error;
+    const bool slot_ok = readSlot(store, slot, selected, slot_error)
+      && selected.generation == generation;
+    if (!slot_ok) {
+      store.end();
+      setError(recovery_error, "PAIRING-NVS-003");
+      return false;
+    }
+    String pointer_error;
+    if (!writePointer(store, slot, generation, pointer_error)) {
+      store.end();
+      setError(recovery_error, "PAIRING-NVS-005");
+      return false;
+    }
+    store.end();
+
+    Preferences verify;
+    if (!verify.begin(storage_namespace_, true)) {
+      setError(recovery_error, "PAIRING-NVS-005");
+      return false;
+    }
+    char verified_slot = 0;
+    uint64_t verified_generation = 0U;
+    bool verified_present = false;
+    String verify_error;
+    SlotValue verified;
+    const bool verified_ok = readPointer(
+        verify, verified_slot, verified_generation, verified_present, verify_error)
+      && verified_present && verified_slot == slot && verified_generation == generation
+      && readSlot(verify, slot, verified, verify_error)
+      && verified.generation == generation && verified.payload == selected.payload;
+    verify.end();
+    if (!verified_ok) {
+      setError(recovery_error, "PAIRING-NVS-005");
+      return false;
+    }
+    recovered = selected.payload;
+    return true;
+  };
+
+  configstore::RecoveryJournal journal;
+  bool journal_present = false;
+  String journal_error;
+  if (!readJournal(journal, journal_present, journal_error)) {
+    setError(error, "PAIRING-NVS-005");
+    return false;
+  }
+  if (journal_present) {
+    // A journal is authoritative.  Never fall through to generic A/B
+    // selection while an interrupted transaction still names its outcome.
+    const bool candidate_wins = journal.phase == configstore::JournalPhase::ConfigCommitted;
+    const bool schedule_promotion_pending =
+      journal.phase == configstore::JournalPhase::SchedulePromoted;
+    const char recovery_slot = candidate_wins
+      ? journal.prepared_slot : journal.previous_active_slot;
+    const uint64_t recovery_generation = candidate_wins
+      ? journal.prepared_generation : journal.previous_generation;
+    if (recovery_slot == 0) {
+      if (schedule_promotion_pending) {
+        setError(error, "PAIRING-NVS-005");
+        return false;
+      }
+      String clear_slot_error;
+      if (!clearSlot(journal.prepared_slot, clear_slot_error)) {
+        error = clear_slot_error;
+        return false;
+      }
+      String clear_error;
+      if (!clearJournal(clear_error)) {
+        error = clear_error;
+        return false;
+      }
+      return false;
+    }
+    configstore::ConfigPayload recovered;
+    String recovery_error;
+    if (!loadAndRepairCanonicalSlot(
+          recovery_slot, recovery_generation, recovered, recovery_error)) {
+      error = recovery_error;
+      return false;
+    }
+    payload = recovered;
+    // SchedulePromoted intentionally remains for the cross-domain recovery
+    // path: the schedule side must be observed before the candidate config is
+    // promoted.  Prepared, Aborted, and ConfigCommitted are complete locally.
+    if (!schedule_promotion_pending) {
+      String clear_error;
+      if (!clearJournal(clear_error)) {
+        error = clear_error;
+        return false;
+      }
+    }
+    String cleanup_error;
+    if (!removeLegacyFormalKeys(cleanup_error)) {
+      error = cleanup_error;
+      return false;
+    }
+    return true;
+  }
+
   Preferences store;
   if (!store.begin(storage_namespace_, false)) {
     setError(error, "PAIRING-NVS-002");
@@ -315,24 +454,13 @@ bool DeviceConfigStore::load(configstore::ConfigPayload& payload, String& error)
   bool current_present = false;
   String current_error;
   const bool current_ok = readCurrent(store, current, current_present, current_error);
+  store.end();
   if (current_ok && current_present) {
-    char pointer_slot = 0;
-    uint64_t pointer_generation = 0U;
-    bool pointer_present = false;
-    String pointer_error;
-    const bool pointer_ok = readPointer(
-      store, pointer_slot, pointer_generation, pointer_present, pointer_error);
-    if (!pointer_ok || !pointer_present || pointer_slot != current.slot
-        || pointer_generation != current.generation) {
-      String repair_error;
-      if (!writePointer(store, current.slot, current.generation, repair_error)) {
-        store.end();
-        setError(error, "PAIRING-NVS-005");
-        return false;
-      }
+    String repair_error;
+    if (!loadAndRepairCanonicalSlot(current.slot, current.generation, payload, repair_error)) {
+      error = repair_error;
+      return false;
     }
-    payload = current.payload;
-    store.end();
     String cleanup_error;
     if (!removeLegacyFormalKeys(cleanup_error)) {
       // Keep the canonical A/B value active, but report the cleanup failure so
@@ -342,7 +470,6 @@ bool DeviceConfigStore::load(configstore::ConfigPayload& payload, String& error)
     }
     return true;
   }
-  store.end();
 
   bool legacy_present = false;
   if (!loadLegacy(payload, legacy_present, error)) return false;
@@ -439,27 +566,61 @@ bool DeviceConfigStore::commitPreparedSlot(
     const configstore::ConfigPayload& payload,
     String& error) {
   error = "";
-  Preferences store;
-  if (!store.begin(storage_namespace_, false)) {
-    setError(error, "PAIRING-NVS-002");
+  configstore::RecoveryJournal journal;
+  bool journal_present = false;
+  String journal_error;
+  if (!readJournal(journal, journal_present, journal_error)) {
+    setError(error, "PAIRING-NVS-005");
     return false;
   }
-  SlotValue prepared;
-  String prepared_error;
-  const bool slot_ok = readSlot(store, prepared_slot, prepared, prepared_error)
-    && prepared.generation == prepared_generation
-    && prepared.payload == payload;
-  if (!slot_ok) {
-    store.end();
-    setError(error, "PAIRING-NVS-003");
-    return false;
-  }
+
   char previous_slot = 0;
   uint64_t previous_generation = 0U;
   bool previous_present = false;
-  String pointer_error;
-  if (!readPointer(store, previous_slot, previous_generation, previous_present, pointer_error)) {
-    previous_present = false;
+  if (journal_present) {
+    if (journal.prepared_slot != prepared_slot
+        || journal.prepared_generation != prepared_generation) {
+      setError(error, "PAIRING-NVS-005");
+      return false;
+    }
+    if (journal.phase == configstore::JournalPhase::Aborted) {
+      setError(error, "PAIRING-NVS-005");
+      return false;
+    }
+    if (journal.phase == configstore::JournalPhase::Prepared
+        && journal.target_schedule_id != configstore::kGenericCommitTargetScheduleId
+        && journal.target_schedule_id.length() > 0U) {
+      setError(error, "PAIRING-NVS-005");
+      return false;
+    }
+    previous_slot = journal.previous_active_slot;
+    previous_generation = journal.previous_generation;
+    previous_present = previous_slot != 0;
+  } else {
+    Preferences pointer_store;
+    if (!pointer_store.begin(storage_namespace_, true)) {
+      setError(error, "PAIRING-NVS-002");
+      return false;
+    }
+    String pointer_error;
+    const bool pointer_ok = readPointer(
+      pointer_store, previous_slot, previous_generation, previous_present, pointer_error);
+    pointer_store.end();
+    if (!pointer_ok) {
+      setError(error, "PAIRING-NVS-005");
+      return false;
+    }
+    journal.phase = configstore::JournalPhase::Prepared;
+    journal.target_schedule_id = configstore::kGenericCommitTargetScheduleId;
+    journal.previous_active_slot = previous_present ? previous_slot : 0;
+    journal.previous_generation = previous_present ? previous_generation : 0U;
+    journal.prepared_slot = prepared_slot;
+    journal.prepared_generation = prepared_generation;
+    String write_error;
+    if (!writeJournal(journal, write_error)) {
+      error = write_error;
+      return false;
+    }
   }
 
   const auto restorePreviousPointer = [&]() -> bool {
@@ -480,24 +641,21 @@ bool DeviceConfigStore::commitPreparedSlot(
     uint64_t restored_generation = 0U;
     bool restored_present = false;
     String verify_error;
+    SlotValue restored;
     const bool read_ok = readPointer(
-        verify_restore, restored_slot, restored_generation, restored_present, verify_error);
-    verify_restore.end();
-    return read_ok && restored_present == previous_present
+        verify_restore, restored_slot, restored_generation, restored_present, verify_error)
+      && restored_present == previous_present
       && (!previous_present || (restored_slot == previous_slot
-          && restored_generation == previous_generation));
+          && restored_generation == previous_generation
+          && readSlot(verify_restore, previous_slot, restored, verify_error)
+          && restored.generation == previous_generation));
+    verify_restore.end();
+    return read_ok;
   };
 
-  if (!writePointer(store, prepared_slot, prepared_generation, error)) {
-    store.end();
-    if (!restorePreviousPointer()) setError(error, "PAIRING-NVS-007");
-    return false;
-  }
-  store.end();
-
-  Preferences verify;
-  bool active_ok = false;
-  if (verify.begin(storage_namespace_, true)) {
+  const auto verifyPreparedPointer = [&]() -> bool {
+    Preferences verify;
+    if (!verify.begin(storage_namespace_, true)) return false;
     char read_slot_name = 0;
     uint64_t read_generation = 0U;
     bool read_present = false;
@@ -507,18 +665,102 @@ bool DeviceConfigStore::commitPreparedSlot(
       && read_present && read_slot_name == prepared_slot
       && read_generation == prepared_generation;
     SlotValue active;
-    active_ok = pointer_ok && readSlot(verify, prepared_slot, active, read_error)
+    const bool active_ok = pointer_ok && readSlot(verify, prepared_slot, active, read_error)
       && active.generation == prepared_generation && active.payload == payload;
     verify.end();
-  }
-  if (!active_ok) {
-    if (!restorePreviousPointer()) {
+    return active_ok;
+  };
+
+  const auto abortCommit = [&](const char* primary_error) -> bool {
+    configstore::RecoveryJournal aborted = journal;
+    aborted.phase = configstore::JournalPhase::Aborted;
+    String abort_error;
+    const bool journal_aborted = writeJournal(aborted, abort_error);
+    const bool restored = restorePreviousPointer();
+    if (!restored) {
+      // Keep the aborted journal so the next boot still has the previous
+      // pointer and payload as its only valid recovery target.
       setError(error, "PAIRING-NVS-007");
       return false;
     }
-    setError(error, "PAIRING-NVS-005");
+    if (!journal_aborted) {
+      setError(error, "PAIRING-NVS-006");
+      return false;
+    }
+    if (!previous_present) {
+      String clear_slot_error;
+      if (!clearSlot(prepared_slot, clear_slot_error)) {
+        setError(error, "PAIRING-NVS-006");
+        return false;
+      }
+    }
+    String clear_error;
+    if (!clearJournal(clear_error)) {
+      // A cleanup failure deliberately retains the aborted journal for the
+      // next boot; it must never turn a failed candidate into the active one.
+      setError(error, "PAIRING-NVS-006");
+      return false;
+    }
+    setError(error, primary_error);
+    return false;
+  };
+
+  // A committed journal is recovered as candidate-wins.  It may be left
+  // behind only by power loss between pointer promotion and journal cleanup.
+  if (journal.phase == configstore::JournalPhase::ConfigCommitted) {
+    if (!verifyPreparedPointer()) {
+      Preferences promote;
+      if (!promote.begin(storage_namespace_, false)) {
+        setError(error, "PAIRING-NVS-002");
+        return false;
+      }
+      String promote_error;
+      const bool promoted = writePointer(
+        promote, prepared_slot, prepared_generation, promote_error);
+      promote.end();
+      if (!promoted || !verifyPreparedPointer()) {
+        setError(error, "PAIRING-NVS-005");
+        return false;
+      }
+    }
+    String clear_error;
+    if (!clearJournal(clear_error)) {
+      error = clear_error;
+      return false;
+    }
+    return true;
+  }
+
+  Preferences candidate_store;
+  if (!candidate_store.begin(storage_namespace_, true)) {
+    setError(error, "PAIRING-NVS-002");
     return false;
   }
+  SlotValue prepared;
+  String prepared_error;
+  const bool slot_ok = readSlot(candidate_store, prepared_slot, prepared, prepared_error)
+    && prepared.generation == prepared_generation
+    && prepared.payload == payload;
+  candidate_store.end();
+  if (!slot_ok) return abortCommit("PAIRING-NVS-003");
+
+  Preferences promote;
+  if (!promote.begin(storage_namespace_, false)) {
+    return abortCommit("PAIRING-NVS-002");
+  }
+  String promote_error;
+  const bool promoted = writePointer(
+    promote, prepared_slot, prepared_generation, promote_error);
+  promote.end();
+  if (!promoted || !verifyPreparedPointer()) return abortCommit("PAIRING-NVS-005");
+
+  journal.phase = configstore::JournalPhase::ConfigCommitted;
+  String commit_journal_error;
+  if (!writeJournal(journal, commit_journal_error)) {
+    return abortCommit("PAIRING-NVS-006");
+  }
+  String clear_error;
+  if (!clearJournal(clear_error)) return abortCommit("PAIRING-NVS-006");
   return true;
 }
 
@@ -579,7 +821,7 @@ bool DeviceConfigStore::readJournal(
   error = "";
   present = false;
   Preferences store;
-  if (!store.begin(storage_namespace_, false)) {
+  if (!store.begin(storage_namespace_, true)) {
     setError(error, "PAIRING-NVS-002");
     return false;
   }

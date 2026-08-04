@@ -69,6 +69,7 @@ class DeviceConfigStore final {
       char active_slot,
       uint64_t generation,
       String& error) const;
+  bool clearSlot(char slot, String& error) const;
   bool findNewest(Preferences& store, SlotValue& value, String& error) const;
   bool readCurrent(
       Preferences& store,

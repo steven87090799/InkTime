@@ -50,7 +50,11 @@ def test_config_store_reopens_read_only_and_restores_pointer_on_commit_failure()
     assert store.count("verify.begin(storage_namespace_, true)") >= 2
     assert store.count("verify.end();") >= 2
     assert "const auto restorePreviousPointer" in store
+    assert "const auto abortCommit" in store
     assert "restorePreviousPointer()" in store
+    assert "clearSlot" in store
+    assert "JournalPhase::Aborted" in store
+    assert "loadAndRepairCanonicalSlot" in store
     assert 'const char* kSlotAKey = "slot_a"' in store
     assert 'const char* kSlotBKey = "slot_b"' in store
     assert 'const char* kPointerKey = "active"' in store
@@ -89,6 +93,8 @@ def test_schedule_recovery_uses_identity_journal_and_fail_closed_metadata():
         "JournalPhase::Prepared",
         "JournalPhase::SchedulePromoted",
         "JournalPhase::ConfigCommitted",
+        "JournalPhase::Aborted",
+        "kGenericCommitTargetScheduleId",
         "writeJournal",
         "clearJournal",
         "commitPreparedSlot",
@@ -103,5 +109,44 @@ def test_schedule_recovery_uses_identity_journal_and_fail_closed_metadata():
     assert "scheduleId.length() > 128U" in support
     assert "journal.phase == inktime::configstore::JournalPhase::Prepared" in firmware
     assert "!targetScheduleActive" in firmware
-    assert "if (!preparedPointer)" in firmware
+    assert "journal.phase != inktime::configstore::JournalPhase::SchedulePromoted" in firmware
     assert "離線排程 active 身分與 recovery target 不一致" in firmware
+
+
+def test_failed_commit_can_never_activate_candidate_after_reboot():
+    store = STORE.read_text(encoding="utf-8")
+    assert "aborted.phase = configstore::JournalPhase::Aborted" in store
+    assert "const bool restored = restorePreviousPointer()" in store
+    assert "loadAndRepairCanonicalSlot" in store
+    assert "const char recovery_slot = candidate_wins" in store
+    assert "candidate_wins" in store
+
+
+def test_committed_candidate_survives_pointer_repair():
+    store = STORE.read_text(encoding="utf-8")
+    assert "journal.phase == configstore::JournalPhase::ConfigCommitted" in store
+    assert "verifyPreparedPointer()" in store
+    assert "writePointer(\n        promote, prepared_slot, prepared_generation" in store
+
+
+def test_prepared_journal_restores_previous_config():
+    store = STORE.read_text(encoding="utf-8")
+    assert "candidate_wins ? journal.prepared_slot : journal.previous_active_slot" in store
+    assert "schedule_promotion_pending" in store
+    assert "if (!schedule_promotion_pending)" in store
+
+
+def test_committed_journal_finishes_candidate_activation():
+    store = STORE.read_text(encoding="utf-8")
+    assert "A committed journal is recovered as candidate-wins" in store
+    assert "if (journal.phase == configstore::JournalPhase::ConfigCommitted)" in store
+    assert "clearJournal(clear_error)" in store
+
+
+def test_pointer_corruption_without_journal_fails_safe_to_older_slot():
+    store = STORE.read_text(encoding="utf-8")
+    core = CORE.read_text(encoding="utf-8")
+    assert "findNewest(store, value, error)" in store
+    assert "candidateA.generation <= candidateB.generation" in store
+    assert "Without a valid pointer or recovery journal, the older complete slot" in store
+    assert "phase > static_cast<uint8_t>(JournalPhase::Aborted)" in core

@@ -63,7 +63,7 @@ Migration 32 不修改 Migration 1～31。它為 `providers` 增加受控的 `op
 
 Migration 33 為 `api_usage` 增加可為 null 的 `provider_id` 外鍵，只有 Provider name 唯一時才回填歷史 usage，避免同名 Provider 誤綁；並建立 Provider／model／cost、Job 與 Photo 的 unknown reconciliation 索引。既有 `openai_compatible` 且 host 為 `openrouter.ai` 或其正式子網域的 Provider 會在同一 transaction 轉成 `kind=openrouter`、停用 Batch、保留既有 options，並補上 `require_parameters=true` 預設；非正式 host 不會被轉換。
 
-Migration 33 不會把缺乏 Provider provenance 的歷史 `actual_cost` 改標為 `provider_reported`。升級前仍必須建立 SQLite backup，並由 Final-Head CI 驗證 32→33、fresh、idempotency、foreign-key／integrity check 與 rollback；本機不執行測試或建置。
+Migration 33 只會把 `cost_source='unknown'` 且 token、prompt／schema／request／image bytes 與成本欄位全為零的 legacy row 正規化成 `estimated_cost=0`；只要存在可計費 evidence，就保留 `unknown` 等待完整價格後 reconciliation。它不會把缺乏 Provider provenance 的歷史 `actual_cost` 改標為 `provider_reported`。升級前仍必須建立 SQLite backup，並由 Final-Head CI 驗證 32→33、fresh、idempotency、foreign-key／integrity check 與 rollback；本機不執行測試或建置。
 
 ## PR #52 跨日修復的資料相容性
 

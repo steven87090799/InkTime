@@ -2159,12 +2159,6 @@ static bool commitActiveScheduleAndConfig(
     errorOut = persistError;
     return failOfflineScheduleTransaction("離線排程 Config A/B pointer 無法 commit");
   }
-  journal.phase = inktime::configstore::JournalPhase::ConfigCommitted;
-  if (!configStore.writeJournal(journal, persistError)
-      || !configStore.clearJournal(persistError)) {
-    errorOut = persistError;
-    return failOfflineScheduleTransaction("離線排程完成 journal 無法清除");
-  }
   cfg = candidate;
   serverConfigChanged = true;
   offlineScheduleTxnBlocked = false;
@@ -2614,9 +2608,6 @@ static bool reconcilePendingScheduleConfigTransaction(Config &cfg) {
     && activePresent
     && activeSlot == journal.previous_active_slot
     && activeGeneration == journal.previous_generation;
-  const bool preparedPointer = activePresent
-    && activeSlot == journal.prepared_slot
-    && activeGeneration == journal.prepared_generation;
   const bool targetScheduleActive = activeScheduleId == journal.target_schedule_id.c_str();
 
   if (journal.phase == inktime::configstore::JournalPhase::Prepared
@@ -2628,27 +2619,22 @@ static bool reconcilePendingScheduleConfigTransaction(Config &cfg) {
     }
     return true;
   }
+  if (journal.phase != inktime::configstore::JournalPhase::SchedulePromoted) {
+    return failOfflineScheduleTransaction("離線排程 transaction 未完成 promotion，已 fail-closed");
+  }
   if (activeScheduleId.length() == 0U || !targetScheduleActive) {
     return failOfflineScheduleTransaction("離線排程 active 身分與 recovery target 不一致");
   }
   if (!activePresent) {
     return failOfflineScheduleTransaction("離線排程 active schedule 存在但 Config pointer 遺失");
   }
-  if (!preparedPointer) {
-    String commitError;
-    if (!configStore.commitPreparedSlot(
-          journal.prepared_slot,
-          journal.prepared_generation,
-          preparedPayload,
-          commitError)) {
-      return failOfflineScheduleTransaction("離線排程 recovery 無法 commit prepared Config");
-    }
-  }
-  journal.phase = inktime::configstore::JournalPhase::ConfigCommitted;
-  String commitJournalError;
-  if (!configStore.writeJournal(journal, commitJournalError)
-      || !configStore.clearJournal(commitJournalError)) {
-    return failOfflineScheduleTransaction("離線排程 recovery journal 無法完成清除");
+  String commitError;
+  if (!configStore.commitPreparedSlot(
+        journal.prepared_slot,
+        journal.prepared_generation,
+        preparedPayload,
+        commitError)) {
+    return failOfflineScheduleTransaction("離線排程 recovery 無法 commit prepared Config");
   }
   applyConfigPayload(preparedPayload, cfg);
   serverConfigChanged = true;
@@ -3240,11 +3226,6 @@ static bool promoteStagedNextIfDue(Config &cfg, time_t nowEpoch) {
   if (!configStore.writeJournal(journal, persistError)
       || !configStore.commit(prepared, persistError)) {
     return failOfflineScheduleTransaction("離線排程 midnight Config commit 失敗");
-  }
-  journal.phase = inktime::configstore::JournalPhase::ConfigCommitted;
-  if (!configStore.writeJournal(journal, persistError)
-      || !configStore.clearJournal(persistError)) {
-    return failOfflineScheduleTransaction("離線排程 midnight journal 無法清除");
   }
   cfg = candidate;
   serverConfigChanged = true;

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import multiprocessing
 from pathlib import Path
 import sqlite3
@@ -201,9 +202,64 @@ def test_migration_32_preserves_legacy_cost_provenance_and_allows_new_reported_c
         rows = connection.execute(
             "SELECT estimated_cost,actual_cost,cost_source FROM api_usage ORDER BY id"
         ).fetchall()
-    assert [row["cost_source"] for row in rows] == ["estimated", "unknown", "unknown", "provider_reported"]
+    assert [row["cost_source"] for row in rows] == ["estimated", "estimated", "estimated", "provider_reported"]
     assert rows[0]["actual_cost"] == 0.10
+    assert rows[1]["estimated_cost"] == 0.0
+    assert rows[1]["actual_cost"] is None
+    assert rows[2]["estimated_cost"] == 0.0
+    assert rows[2]["actual_cost"] is None
     assert rows[3]["actual_cost"] == 0.08
+
+
+def test_migration_33_backfills_provider_identity_and_keeps_billable_unknown(monkeypatch, tmp_path):
+    database = Database(tmp_path / "migration-33-provider.db")
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:32])
+    migrate(database)
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO providers(id,name,kind,base_url,supports_batch,options_json,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,datetime('now'),datetime('now'))",
+            (
+                "legacy-openrouter-id",
+                "legacy-openrouter",
+                "openai_compatible",
+                "https://openrouter.ai/api/v1",
+                1,
+                '{"privacy":"private","route":"fallback"}',
+            ),
+        )
+        connection.executemany(
+            "INSERT INTO api_usage(provider,model,request_type,estimated_cost,actual_cost,input_tokens,started_at,status) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            [
+                ("legacy-openrouter", "model", "analysis", 0.0, None, 0, "now", "completed"),
+                ("legacy-openrouter", "model", "analysis", 0.0, None, 3, "now", "completed"),
+            ],
+        )
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
+    assert migrate(database) == [33]
+    with database.transaction() as connection:
+        provider = connection.execute(
+            "SELECT id,kind,supports_batch,options_json FROM providers WHERE name=?",
+            ("legacy-openrouter",),
+        ).fetchone()
+        rows = connection.execute(
+            "SELECT provider_id,input_tokens,estimated_cost,actual_cost,cost_source "
+            "FROM api_usage ORDER BY id"
+        ).fetchall()
+    assert provider["id"] == "legacy-openrouter-id"
+    assert provider["kind"] == "openrouter"
+    assert provider["supports_batch"] == 0
+    assert json.loads(provider["options_json"]) == {
+        "privacy": "private",
+        "require_parameters": True,
+        "route": "fallback",
+    }
+    assert rows[0]["provider_id"] == "legacy-openrouter-id"
+    assert rows[0]["cost_source"] == "estimated"
+    assert rows[0]["estimated_cost"] == 0.0
+    assert rows[1]["provider_id"] == "legacy-openrouter-id"
+    assert rows[1]["cost_source"] == "unknown"
 
 
 def test_migration_27_to_30_freezes_ownership_and_invalidates_legacy_ready_rows(monkeypatch, tmp_path):

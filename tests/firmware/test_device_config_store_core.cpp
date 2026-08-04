@@ -297,6 +297,7 @@ void test_pointer_and_journal_roundtrip() {
       inktime::configstore::JournalPhase::Prepared,
       inktime::configstore::JournalPhase::SchedulePromoted,
       inktime::configstore::JournalPhase::ConfigCommitted,
+      inktime::configstore::JournalPhase::Aborted,
   }) {
     RecoveryJournal journal;
     journal.phase = phase;

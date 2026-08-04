@@ -142,6 +142,20 @@ class LabProvider(VisionProvider):
         return True, "ok"
 
 
+class RepairLabProvider(LabProvider):
+    def __init__(self):
+        self.repair_calls = 0
+
+    def analyze(self, **_kwargs):
+        return ProviderResponse('{"memory_score": 1}', Usage(120, 30, 10))
+
+    def repair_json(self, **_kwargs):
+        self.repair_calls += 1
+        import json
+
+        return ProviderResponse(json.dumps(valid_result(), ensure_ascii=False), Usage(40, 12, 2))
+
+
 def test_scoring_lab_records_usage_and_uses_current_profile(app, tmp_path, monkeypatch):
     service = app.extensions["inktime_scoring_lab_service"]
     monkeypatch.setattr(service.providers, "build_router", lambda: LabProvider())
@@ -158,3 +172,31 @@ def test_scoring_lab_records_usage_and_uses_current_profile(app, tmp_path, monke
             "SELECT request_type,input_tokens,output_tokens,cached_tokens FROM api_usage"
         ).fetchall()
     assert [tuple(row) for row in usage] == [("scoring_test_vision", 120, 30, 10)]
+
+
+def test_scoring_lab_records_vision_and_text_repair_as_separate_attempts(app, tmp_path, monkeypatch):
+    service = app.extensions["inktime_scoring_lab_service"]
+    provider = RepairLabProvider()
+    monkeypatch.setattr(service.providers, "build_router", lambda: provider)
+    image_path = tmp_path / "repair.jpg"
+    Image.new("RGB", (64, 64), "purple").save(image_path)
+
+    result = service.analyze(image_path)
+
+    assert provider.repair_calls == 1
+    assert result["usage"]["attempts"]
+    assert result["usage"]["cost"] == 0.003
+    assert result["usage"]["vision_cost"] == 0.0015
+    assert result["usage"]["repair_cost"] == 0.0015
+    with app.extensions["inktime_database"].session() as connection:
+        usage = connection.execute(
+            "SELECT request_type,input_tokens,output_tokens,cached_tokens,image_bytes,estimated_cost "
+            "FROM api_usage ORDER BY id"
+        ).fetchall()
+    assert [row["request_type"] for row in usage] == [
+        "scoring_test_vision",
+        "scoring_test_repair",
+    ]
+    assert usage[0]["image_bytes"] == image_path.stat().st_size
+    assert usage[1]["image_bytes"] == 0
+    assert [usage[0]["estimated_cost"], usage[1]["estimated_cost"]] == [0.0015, 0.0015]

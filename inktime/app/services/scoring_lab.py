@@ -75,7 +75,22 @@ class ScoringLabService:
             reported = usage.provider_reported_cost
             source = "provider_reported" if reported is not None else "estimated" if estimated is not None else "unknown"
             metrics = dict(response.request_metrics or getattr(selected_provider, "last_request_metrics", {}) or {})
-            if not image_bytes:
+            if image_bytes:
+                # Some compatible/fake providers do not expose transport
+                # metrics.  The Vision attempt still carried the image, so
+                # preserve a positive local byte measurement rather than
+                # silently recording it as a text-only request.
+                reported_image_bytes = metrics.get("image_bytes", 0)
+                try:
+                    reported_image_bytes = int(reported_image_bytes)
+                except (TypeError, ValueError):
+                    reported_image_bytes = 0
+                metrics["image_bytes"] = (
+                    reported_image_bytes
+                    if reported_image_bytes > 0
+                    else image_path.stat().st_size
+                )
+            else:
                 metrics["image_bytes"] = 0
             effective = (
                 max(0.0, float(reported))

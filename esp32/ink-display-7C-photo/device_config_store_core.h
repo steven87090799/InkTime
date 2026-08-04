@@ -25,6 +25,7 @@ constexpr uint8_t kEnvelopeVersion = 1U;
 constexpr uint8_t kPayloadSchemaVersion = 1U;
 constexpr uint8_t kPointerVersion = 1U;
 constexpr uint8_t kJournalVersion = 1U;
+constexpr const char* kGenericCommitTargetScheduleId = "__config_commit__";
 
 struct ScheduleSlot {
   uint8_t hour = 0U;
@@ -54,6 +55,7 @@ enum class JournalPhase : uint8_t {
   Prepared = 1U,
   SchedulePromoted = 2U,
   ConfigCommitted = 3U,
+  Aborted = 4U,
 };
 
 struct RecoveryJournal {
@@ -414,7 +416,8 @@ inline bool decode_pointer(
 }
 
 inline bool encode_journal(const RecoveryJournal& journal, std::string& output, std::string& error) {
-  if (journal.phase == JournalPhase::None) {
+  if (static_cast<uint8_t>(journal.phase) < static_cast<uint8_t>(JournalPhase::Prepared)
+      || static_cast<uint8_t>(journal.phase) > static_cast<uint8_t>(JournalPhase::Aborted)) {
     set_error(error, "PAIRING-NVS-005");
     return false;
   }
@@ -459,7 +462,7 @@ inline bool decode_journal(const std::string& input, RecoveryJournal& journal, s
       || !take_u32(input, offset, actual_crc)
       || offset != input.size() || magic != kScheduleJournalMagic
       || version != kJournalVersion || phase < static_cast<uint8_t>(JournalPhase::Prepared)
-      || phase > static_cast<uint8_t>(JournalPhase::ConfigCommitted)
+      || phase > static_cast<uint8_t>(JournalPhase::Aborted)
       || (previous_slot != 0U && !valid_slot_name(static_cast<char>(previous_slot)))
       || !valid_slot_name(static_cast<char>(prepared_slot)) || actual_crc != expected_crc) {
     set_error(error, "PAIRING-NVS-005");
