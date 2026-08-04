@@ -679,6 +679,7 @@ class PhotoAnalysisService:
         # Request Fingerprint is the authoritative additional cache dimension.
         cache_schema_kind = schema_kind
         has_prompt_contract = bool(provider_prompt_contract_sha256)
+        cache_schema_versions: tuple[int, ...]
         if has_prompt_contract:
             cache_schema_versions = (SCHEMA_VERSION,) if schema_kind == "full" else (2,)
         else:

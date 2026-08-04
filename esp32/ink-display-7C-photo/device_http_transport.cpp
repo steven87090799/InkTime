@@ -78,8 +78,9 @@ bool isPrivateLiteralHost(const String &host) {
   }
   ip6_addr_t ipv6;
   if (ip6addr_aton(host.c_str(), &ipv6)) {
-    const uint8_t first = ip6_addr_get_byte(&ipv6, 0);
-    const uint8_t second = ip6_addr_get_byte(&ipv6, 1);
+    const uint32_t first_block = lwip_ntohl(ipv6.addr[0]);
+    const uint8_t first = static_cast<uint8_t>(first_block >> 24U);
+    const uint8_t second = static_cast<uint8_t>((first_block >> 16U) & 0xffU);
     return ip6_addr_isloopback(&ipv6)
       || (first & 0xfeU) == 0xfcU
       || (first == 0xfeU && (second & 0xc0U) == 0x80U);
