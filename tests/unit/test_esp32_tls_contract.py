@@ -31,3 +31,19 @@ def test_device_save_reports_nvs_write_and_readback_failures_before_restart():
     assert 'verify.getString("ssid", "")' in firmware
     assert 'verify.begin("dashcfg", true)' in firmware
     assert "設定未寫入，裝置不會重新啟動" in firmware
+
+
+def test_remote_config_persists_candidate_before_runtime_commit():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    start = firmware.index("Config candidate = cfg;")
+    end = firmware.index("int width = manifest", start)
+    block = firmware[start:end]
+    persist = block.index("saveConfig(candidate, &persistError)")
+    commit = block.index("cfg = candidate;", persist)
+    changed = block.index("serverConfigChanged = true;", commit)
+    failure = block.index("if (!saveConfig(candidate, &persistError))")
+
+    assert "DEVICE-CONFIG-PERSIST" in block
+    assert persist < commit < changed
+    assert "serverConfigChanged = true;" not in block[failure:commit]
+    assert "saveConfig(cfg);" not in block

@@ -94,7 +94,7 @@ class OpenAICompatibleProvider(VisionProvider):
             raise ValueError(f"Provider kind 不支援：{self.kind}")
         self.options = normalize_options(self.kind, options or {})
         self.base_url = self.normalize_base_url(
-            validate_base_url(self.kind, base_url, self.options, require_private_http_option=False)
+            validate_base_url(self.kind, base_url, self.options)
         )
         self.openrouter_compatible = self.kind == "openai_compatible" and is_openrouter_base_url(self.base_url)
         self.provider_id = str(provider_id or name)

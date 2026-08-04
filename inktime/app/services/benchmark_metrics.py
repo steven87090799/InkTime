@@ -175,22 +175,26 @@ def orientation_metrics(expected: Sequence[Mapping[str, Any]], predicted: Sequen
     }
 
 
+def _score_pairs(values: Any) -> list[tuple[str, float]]:
+    if isinstance(values, Mapping):
+        return [(str(key), float(score)) for key, score in values.items()]
+    sequence = list(values or [])
+    pairs: list[tuple[str, float]] = []
+    for index, value in enumerate(sequence):
+        if isinstance(value, (tuple, list)) and len(value) == 2 and isinstance(value[1], (int, float)):
+            pairs.append((str(value[0]), float(value[1])))
+        else:
+            # A plain ordered id list is already a ranking.  Larger
+            # synthetic scores keep the same order and make ties explicit
+            # only when callers provide id/score pairs.
+            pairs.append((str(value), float(len(sequence) - index)))
+    return pairs
+
+
 def _rank_map(values: Any) -> dict[str, float]:
     """Build one-based average ranks from ids, scores, or id/score pairs."""
 
-    if isinstance(values, Mapping):
-        pairs = [(str(key), float(score)) for key, score in values.items()]
-    else:
-        sequence = list(values or [])
-        pairs = []
-        for index, value in enumerate(sequence):
-            if isinstance(value, (tuple, list)) and len(value) == 2 and isinstance(value[1], (int, float)):
-                pairs.append((str(value[0]), float(value[1])))
-            else:
-                # A plain ordered id list is already a ranking.  Larger
-                # synthetic scores keep the same order and make ties explicit
-                # only when callers provide id/score pairs.
-                pairs.append((str(value), float(len(sequence) - index)))
+    pairs = _score_pairs(values)
     pairs.sort(key=lambda item: (-item[1], item[0]))
     ranks: dict[str, float] = {}
     index = 0
@@ -203,6 +207,16 @@ def _rank_map(values: Any) -> dict[str, float]:
             ranks[key] = average_rank
         index = end
     return ranks
+
+
+def _top_k_ids(values: Any, *, keys: set[str], effective_k: int) -> set[str]:
+    """Select at most K IDs with deterministic identifier tie-breaking."""
+
+    if effective_k <= 0:
+        return set()
+    scores = {identifier: score for identifier, score in _score_pairs(values) if identifier in keys}
+    ordered = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+    return {identifier for identifier, _score in ordered[:effective_k]}
 
 
 def spearman_rank(expected: Any, predicted: Any) -> float | None:
@@ -224,19 +238,18 @@ def spearman_rank(expected: Any, predicted: Any) -> float | None:
 
 
 def top_k_overlap(expected: Any, predicted: Any, ks: Sequence[int] = (10, 25, 50)) -> dict[str, Any]:
-    expected_ranks = _rank_map(expected)
-    predicted_ranks = _rank_map(predicted)
-    keys = set(expected_ranks) & set(predicted_ranks)
+    keys = set(_rank_map(expected)) & set(_rank_map(predicted))
     result: dict[str, Any] = {}
     for requested_k in ks:
         effective_k = min(max(1, int(requested_k)), len(keys)) if keys else 0
-        expected_top = {key for key in keys if expected_ranks[key] <= effective_k}
-        predicted_top = {key for key in keys if predicted_ranks[key] <= effective_k}
+        expected_top = _top_k_ids(expected, keys=keys, effective_k=effective_k)
+        predicted_top = _top_k_ids(predicted, keys=keys, effective_k=effective_k)
+        overlap_count = len(expected_top & predicted_top)
         result[str(requested_k)] = {
             "requested_k": int(requested_k),
             "effective_k": effective_k,
-            "overlap_count": len(expected_top & predicted_top),
-            "overlap_rate": _rate(len(expected_top & predicted_top), effective_k),
+            "overlap_count": overlap_count,
+            "overlap_rate": _rate(overlap_count, effective_k),
         }
     return result
 

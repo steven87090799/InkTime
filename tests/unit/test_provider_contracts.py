@@ -11,6 +11,8 @@ from tests.unit.test_analysis_schema import valid_result
 class FakeContractProvider:
     def __init__(self, *, valid: bool = True):
         self.valid = valid
+        self.kind = "openrouter"
+        self.options = {"data_collection": "deny", "zdr": True}
         self.analyze_calls: list[dict] = []
         self.repair_calls: list[dict] = []
 
@@ -66,3 +68,9 @@ def test_level3_allows_only_one_text_repair_and_returns_safe_usage():
     assert len(provider.repair_calls) == 1
     assert "image_path" not in provider.repair_calls[0]
     assert result["usage"]["cost_source"] == "provider_reported"
+    assert provider.analyze_calls[0]["reasoning_effort"] == "none"
+    assert result["checks"]["privacy_policy"] == {
+        "data_collection": "deny",
+        "zdr": True,
+        "configured": True,
+    }

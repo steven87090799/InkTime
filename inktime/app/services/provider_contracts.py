@@ -55,6 +55,27 @@ def _usage_snapshot(provider: Any, model: str, response: ProviderResponse) -> di
     }
 
 
+def _privacy_policy_snapshot(provider: Any) -> dict[str, Any]:
+    if str(getattr(provider, "kind", "")).casefold() != "openrouter":
+        return {
+            "data_collection": "not_applicable",
+            "zdr": False,
+            "configured": False,
+        }
+    options = getattr(provider, "options", {})
+    options = options if isinstance(options, dict) else {}
+    data_collection = options.get("data_collection")
+    if data_collection not in {"allow", "deny"}:
+        data_collection = "openrouter_default"
+    zdr_explicit = type(options.get("zdr")) is bool
+    zdr = bool(options.get("zdr")) if zdr_explicit else False
+    return {
+        "data_collection": data_collection,
+        "zdr": zdr,
+        "configured": data_collection == "deny" and zdr_explicit and zdr,
+    }
+
+
 def _checks(provider: Any, *, level: int, ok: bool, schema_valid: bool | None, usage: dict[str, Any] | None) -> dict[str, Any]:
     return {
         "connectivity": "pass" if (level == 1 and ok) or level >= 2 and usage is not None else "fail",
@@ -62,11 +83,7 @@ def _checks(provider: Any, *, level: int, ok: bool, schema_valid: bool | None, u
         "json_schema": "not_run" if level < 2 else "pass" if schema_valid else "fail",
         "usage": "not_run" if usage is None else "pass",
         "cost_source": usage.get("cost_source") if usage is not None else None,
-        "privacy_policy": (
-            "configured"
-            if str(getattr(provider, "kind", "")).casefold() == "openrouter"
-            else "not_applicable"
-        ),
+        "privacy_policy": _privacy_policy_snapshot(provider),
     }
 
 
@@ -147,7 +164,7 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
                 detail="high",
                 stage=LEVEL2_STAGE if level == 2 else "single",
                 max_tokens=256 if level == 2 else 2048,
-                reasoning_effort="none" if level == 2 else "low",
+                reasoning_effort="none",
                 vision_attempt=VisionAttemptState(),
             )
             vision_requests = 1

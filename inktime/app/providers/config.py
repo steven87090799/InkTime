@@ -187,13 +187,14 @@ def is_openrouter_base_url(base_url: str) -> bool:
 
 def _is_private_host(host: str) -> bool:
     value = host.strip("[]").lower()
-    if value in {"localhost", "localhost.localdomain"} or value.endswith(".localhost"):
-        return True
     try:
         address = ipaddress.ip_address(value)
         return address.is_private or address.is_loopback
     except ValueError:
-        return value.endswith((".local", ".lan", ".internal"))
+        # Hostname resolution is intentionally not performed here.  A private
+        # suffix can be DNS-rebound to a public address between validation and
+        # the request, so generic HTTP accepts only literal private IPs.
+        return False
 
 
 def validate_base_url(
@@ -203,8 +204,7 @@ def validate_base_url(
     *,
     require_private_http_option: bool = True,
 ) -> str:
-    normalized_kind = str(kind or "").strip().lower()
-    normalized_options = normalize_options(normalized_kind, options)
+    normalized_options = normalize_options(str(kind or "").strip().lower(), options)
     value = str(base_url or "").strip().rstrip("/")
     if any(ord(char) < 0x20 for char in value):
         raise ValueError("PROVIDER-016 base_url 不可包含控制字元")
@@ -220,11 +220,9 @@ def validate_base_url(
         raise ValueError("PROVIDER-017 base_url 不可包含 query 或 fragment")
     if parsed.scheme == "http":
         if not _is_private_host(hostname):
-            raise ValueError("PROVIDER-018 公開 Provider 禁止 HTTP；請使用 HTTPS")
+            raise ValueError("PROVIDER-018 HTTP 只允許 literal private/loopback IP；請使用 HTTPS")
         if (
-            require_private_http_option
-            and normalized_kind != "ollama"
-            and not normalized_options.get("allow_private_http", False)
+            require_private_http_option and not normalized_options.get("allow_private_http", False)
         ):
             raise ValueError("PROVIDER-019 私有網路 HTTP 必須明確設定 allow_private_http=true")
     return value

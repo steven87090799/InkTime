@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 from pathlib import Path
 import tempfile
 import time
@@ -22,6 +23,12 @@ from PIL import Image, ImageDraw
 from inktime.app.domain.analysis import REPAIR_TOKEN_CAP
 from inktime.app.domain.analysis.plan import normalize_reasoning_effort
 from inktime.app.domain.analysis.schema import AnalysisValidationError, validate_analysis_result
+from inktime.app.domain.analysis.scoring import (
+    DEFAULT_FAVORITE_BONUS,
+    DEFAULT_RANKING_WEIGHTS,
+    RANKING_RULE_VERSION,
+    calculate_ranking_score,
+)
 from inktime.app.services.analysis import (
     CAPTION_VARIANTS_TOKEN_CAP,
     FULL_ANALYSIS_TOKEN_CAP,
@@ -35,10 +42,63 @@ from inktime.app.providers.openai_compatible import OpenAICompatibleProvider, Pr
 MAX_SAMPLE_COUNT = 100
 MAX_REQUESTS = 100
 ALLOWED_SIDES = (512, 1024, 1600)
+_MANIFEST_KEYS = {"version", "dataset", "items"}
+_MANIFEST_DATASET_KEYS = {"id", "source", "privacy"}
+_MANIFEST_ITEM_KEYS = {
+    "id",
+    "image",
+    "expected",
+    "expected_rank",
+    "expected_score",
+    "never_upload",
+    "inactive",
+    "ineligible",
+    "missing",
+    "manually_excluded",
+}
+_MANIFEST_EXPECTED_KEYS = {
+    "memory_grade",
+    "beauty_grade",
+    "technical_grade",
+    "technical_quality_grade",
+    "emotion_grade",
+    "types",
+    "should_keep",
+    "rotation_cw",
+    "ambiguous",
+    "visual_orientation",
+}
+_MANIFEST_GRADE_VALUES = {"E", "D", "C", "B", "A", "S", "unknown"}
+_MANIFEST_ROTATIONS = {0, 90, 180, 270, None}
+_BENCHMARK_RANKING_WEIGHTS = dict(DEFAULT_RANKING_WEIGHTS)
 
 
 class BenchmarkError(ValueError):
     """A user-correctable benchmark configuration or safety failure."""
+
+
+def _benchmark_ranking_policy() -> dict[str, Any]:
+    return {
+        "ranking_rule_version": RANKING_RULE_VERSION,
+        "ranking_weights": dict(_BENCHMARK_RANKING_WEIGHTS),
+        "favorite_bonus_policy": {
+            "favorite": False,
+            "applied": False,
+            "value": DEFAULT_FAVORITE_BONUS,
+            "mode": "disabled_for_golden_manifest",
+        },
+    }
+
+
+def _production_ranking_score(result: Mapping[str, Any]) -> float:
+    """Use the production scoring function without copying its arithmetic."""
+
+    return calculate_ranking_score(
+        result,
+        _BENCHMARK_RANKING_WEIGHTS,
+        favorite=False,
+        favorite_bonus=DEFAULT_FAVORITE_BONUS,
+    )
 
 
 @dataclass(frozen=True)
@@ -185,8 +245,8 @@ def _synthetic_records(directory: Path, count: int, seed: str) -> list[dict[str,
             "photo_id": f"synthetic-{index:04d}",
             "path": str(path),
             "never_upload": False,
-            "active": True,
-            "eligible": True,
+            "inactive": False,
+            "ineligible": False,
             "missing": False,
             "manually_excluded": False,
         }
@@ -194,54 +254,157 @@ def _synthetic_records(directory: Path, count: int, seed: str) -> list[dict[str,
     ]
 
 
+def _manifest_unknown_fields(value: Mapping[str, Any], allowed: set[str], label: str) -> None:
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise BenchmarkError(f"golden manifest {label} 含未知欄位：{', '.join(unknown)}")
+
+
+def _manifest_string(value: Any, field: str, maximum: int) -> str:
+    if not isinstance(value, str) or not value or len(value) > maximum:
+        raise BenchmarkError(f"golden manifest {field} 必須是 1 到 {maximum} 字元字串")
+    return value
+
+
+def _manifest_number(value: Any, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise BenchmarkError(f"golden manifest {field} 必須是有限數字")
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise BenchmarkError(f"golden manifest {field} 必須是有限數字") from exc
+    if not math.isfinite(numeric):
+        raise BenchmarkError(f"golden manifest {field} 必須是有限數字")
+    return numeric
+
+
+def _validate_manifest_rotation(value: Any, field: str) -> None:
+    if value is not None and (
+        isinstance(value, bool) or not isinstance(value, int) or value not in _MANIFEST_ROTATIONS
+    ):
+        raise BenchmarkError(f"golden manifest {field} rotation 不合法")
+
+
+def _validate_manifest_expected(expected: Any) -> None:
+    if not isinstance(expected, dict):
+        raise BenchmarkError("live quality dataset item 缺少 expected schema")
+    _manifest_unknown_fields(expected, _MANIFEST_EXPECTED_KEYS, "expected")
+    for field in ("memory_grade", "beauty_grade", "emotion_grade"):
+        if field not in expected or not isinstance(expected[field], str) or expected[field] not in _MANIFEST_GRADE_VALUES:
+            raise BenchmarkError(f"golden manifest expected.{field} 不合法")
+    technical_fields = {"technical_grade", "technical_quality_grade"} & set(expected)
+    if not technical_fields:
+        raise BenchmarkError("golden manifest expected 必須包含 technical_grade 或 technical_quality_grade")
+    for field in technical_fields | {"memory_grade", "beauty_grade", "emotion_grade"}:
+        if not isinstance(expected[field], str) or expected[field] not in _MANIFEST_GRADE_VALUES:
+            raise BenchmarkError(f"golden manifest expected.{field} 不合法")
+    types = expected.get("types")
+    if (
+        not isinstance(types, list)
+        or any(not isinstance(item, str) for item in types)
+        or len(types) != len(set(types))
+    ):
+        raise BenchmarkError("golden manifest expected.types 必須是唯一字串陣列")
+    if not isinstance(expected.get("should_keep"), bool):
+        raise BenchmarkError("golden manifest expected.should_keep 必須是 Boolean")
+    if "visual_orientation" in expected:
+        orientation = expected["visual_orientation"]
+        if not isinstance(orientation, dict):
+            raise BenchmarkError("golden manifest expected.visual_orientation 必須是 object")
+        _manifest_unknown_fields(orientation, {"rotation_cw", "ambiguous"}, "visual_orientation")
+        if set(orientation) != {"rotation_cw", "ambiguous"}:
+            raise BenchmarkError("golden manifest expected.visual_orientation 欄位不完整")
+        _validate_manifest_rotation(orientation["rotation_cw"], "expected.visual_orientation")
+        if not isinstance(orientation["ambiguous"], bool):
+            raise BenchmarkError("golden manifest expected.visual_orientation.ambiguous 必須是 Boolean")
+    if "rotation_cw" in expected:
+        _validate_manifest_rotation(expected["rotation_cw"], "expected")
+    if "ambiguous" in expected and not isinstance(expected["ambiguous"], bool):
+        raise BenchmarkError("golden manifest expected.ambiguous 必須是 Boolean")
+    if "visual_orientation" not in expected and not {"rotation_cw", "ambiguous"} <= set(expected):
+        raise BenchmarkError("golden manifest expected 必須包含 orientation 欄位")
+
+
+def _validate_manifest_item(item: Any) -> None:
+    if not isinstance(item, dict):
+        raise BenchmarkError("golden manifest item 必須是 object")
+    _manifest_unknown_fields(item, _MANIFEST_ITEM_KEYS, "item")
+    _manifest_string(item.get("id"), "item.id", 160)
+    _manifest_string(item.get("image"), "item.image", 300)
+    _validate_manifest_expected(item.get("expected"))
+    for field in ("expected_rank", "expected_score"):
+        if field in item:
+            _manifest_number(item[field], f"item.{field}")
+    for field in ("never_upload", "inactive", "ineligible", "missing", "manually_excluded"):
+        if field in item and not isinstance(item[field], bool):
+            raise BenchmarkError(f"golden manifest item.{field} 必須是 Boolean")
+
+
+def _validate_manifest_path(path: Path, *, allowed_export_parent: bool) -> None:
+    forbidden_parts = {"cache", "releases", "photos", "convertto6c_bmp-7"}
+    normalized_parts = {part.casefold() for part in path.parts}
+    if normalized_parts & forbidden_parts or (
+        "data" in normalized_parts and not allowed_export_parent
+    ):
+        raise BenchmarkError("live quality dataset 路徑落在禁止的 production/cache/release/photo 目錄")
+
+
 def _load_golden_records(dataset: Path) -> list[dict[str, Any]]:
     """Load a non-private golden manifest without accepting production paths."""
 
     resolved = dataset.expanduser().resolve()
-    forbidden_parts = {"cache", "releases", "photos", "convertto6c_bmp-7"}
-    normalized_parts = {part.casefold() for part in resolved.parts}
     allowed_export_parent = any(
         parent.name.casefold() in {"benchmarks", "benchmarks_export", "golden"}
         for parent in resolved.parents
     )
-    if normalized_parts & forbidden_parts or (
-        "data" in normalized_parts and not allowed_export_parent
-    ):
-        raise BenchmarkError("live quality dataset 必須是明確的 benchmarks golden/export manifest")
+    _validate_manifest_path(resolved, allowed_export_parent=allowed_export_parent)
     if not resolved.is_file():
         raise BenchmarkError("live quality dataset 必須是存在的 golden manifest JSON")
     try:
         payload = json.loads(resolved.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise BenchmarkError("live quality dataset manifest 無法讀取") from exc
-    if not isinstance(payload, dict) or payload.get("version") not in {"inktime-golden-v1", 1}:
+    if not isinstance(payload, dict):
+        raise BenchmarkError("live quality dataset manifest 必須是 JSON object")
+    _manifest_unknown_fields(payload, _MANIFEST_KEYS, "root")
+    if payload.get("version") != "inktime-golden-v1":
         raise BenchmarkError("live quality dataset manifest version 必須是 inktime-golden-v1")
     dataset_meta = payload.get("dataset")
-    if not isinstance(dataset_meta, dict) or dataset_meta.get("privacy") != "non_private":
+    if not isinstance(dataset_meta, dict):
+        raise BenchmarkError("live quality dataset dataset 必須是 object")
+    _manifest_unknown_fields(dataset_meta, _MANIFEST_DATASET_KEYS, "dataset")
+    dataset_id = dataset_meta.get("id")
+    dataset_source = dataset_meta.get("source")
+    dataset_privacy = dataset_meta.get("privacy")
+    if (
+        not isinstance(dataset_id, str)
+        or not dataset_id
+        or len(dataset_id) > 120
+        or not isinstance(dataset_source, str)
+        or dataset_source not in {"committed_fixture", "synthetic"}
+        or dataset_privacy != "non_private"
+    ):
         raise BenchmarkError("live quality dataset 必須宣告 privacy=non_private")
     raw_items = payload.get("items")
     if not isinstance(raw_items, list) or not raw_items:
         raise BenchmarkError("live quality dataset 必須包含至少一個 item")
     records: list[dict[str, Any]] = []
     for item in raw_items:
-        if not isinstance(item, dict) or not isinstance(item.get("image"), str):
-            raise BenchmarkError("live quality dataset item 缺少 image")
+        _validate_manifest_item(item)
         image = (resolved.parent / item["image"]).resolve()
-        if resolved.parent not in image.parents or not image.is_file():
+        _validate_manifest_path(image, allowed_export_parent=allowed_export_parent)
+        if image == resolved or resolved.parent not in image.parents or not image.is_file():
             raise BenchmarkError("live quality dataset image 必須位於 manifest 目錄內")
-        expected = item.get("expected")
-        if not isinstance(expected, dict):
-            raise BenchmarkError("live quality dataset item 缺少 expected schema")
         records.append(
             {
-                "photo_id": str(item.get("id") or image.name),
+                "photo_id": item["id"],
                 "path": str(image),
-                "expected": expected,
+                "expected": item["expected"],
                 "expected_rank": item.get("expected_rank"),
                 "expected_score": item.get("expected_score"),
                 "never_upload": bool(item.get("never_upload", False)),
-                "active": bool(item.get("active", True)),
-                "eligible": bool(item.get("eligible", True)),
+                "inactive": bool(item.get("inactive", False)),
+                "ineligible": bool(item.get("ineligible", False)),
                 "missing": bool(item.get("missing", False)),
                 "manually_excluded": bool(item.get("manually_excluded", False)),
             }
@@ -278,7 +441,7 @@ def _average(values: Iterable[float]) -> float | None:
 
 
 def _new_metrics() -> dict[str, Any]:
-    return {
+    metrics = {
         "total_photos": 0,
         "provider_requests": 0,
         "vision_requests": 0,
@@ -309,6 +472,8 @@ def _new_metrics() -> dict[str, Any]:
         "avg_schema_chars": None,
         "offline_contract_only": False,
     }
+    metrics.update(_benchmark_ranking_policy())
+    return metrics
 
 
 def _quality_prediction(result: Mapping[str, Any]) -> dict[str, Any]:
@@ -434,6 +599,7 @@ class ModelBenchmarkService:
             "contract_metrics": [],
             "quality_metrics": None,
             "ranking_metrics": None,
+            "ranking_policy": _benchmark_ranking_policy(),
             "stopped_by_budget": False,
             "network_invocations": 0,
             "production_mutations": 0,
@@ -520,6 +686,8 @@ class ModelBenchmarkService:
             "contract_metrics": [],
             "quality_metrics": [],
             "ranking_metrics": [],
+            "ranking_policy": _benchmark_ranking_policy(),
+            "max_cost_policy": "bounded_post_response_stop",
             "stopped_by_budget": False,
             "network_invocations": 0,
             "production_mutations": 0,
@@ -530,6 +698,10 @@ class ModelBenchmarkService:
             images = [Path(str(record["path"])) for record in selected]
             report["selected_count"] = len(images)
             report["excluded_counts"] = excluded
+            if not selected:
+                # A fully excluded manifest must be a zero-network result;
+                # even the Provider capability probe is unnecessary.
+                return report
             requests_used = 0
             spent = 0.0
             for axis in axes:
@@ -668,15 +840,7 @@ class ModelBenchmarkService:
                                     record.get("expected_score") is not None
                                     or record.get("expected_rank") is not None
                                 ):
-                                    quality_item["predicted_score"] = sum(
-                                        float(validated_result.get(field, 0) or 0)
-                                        for field in (
-                                            "memory_score",
-                                            "beauty_score",
-                                            "technical_quality_score",
-                                            "emotion_score",
-                                        )
-                                    )
+                                    quality_item["predicted_score"] = _production_ranking_score(validated_result)
                                 quality_items.append(quality_item)
                 finally:
                     provider.close()
@@ -736,6 +900,9 @@ def markdown_report(report: dict[str, Any]) -> str:
         f"- Network invocations: `{report['network_invocations']}`",
         f"- Production mutations: `{report['production_mutations']}`",
         f"- Stopped by budget: `{report['stopped_by_budget']}`",
+        f"- Ranking rule: `{report['ranking_policy']['ranking_rule_version']}`",
+        f"- Ranking weights: `{json.dumps(report['ranking_policy']['ranking_weights'], sort_keys=True)}`",
+        f"- Favorite bonus policy: `{report['ranking_policy']['favorite_bonus_policy']['mode']}`",
         "",
         (
             "Offline reports are request-contract measurements only; they are not model quality or accuracy claims."
@@ -746,6 +913,11 @@ def markdown_report(report: dict[str, Any]) -> str:
         "| Axis | Photos | Provider requests | Success | Schema rate | Avg body bytes | Avg image bytes | Avg latency ms | Unknown cost |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
+    if report["mode"] == "live-quality":
+        lines.insert(
+            8,
+            "- max_cost: bounded post-response stop; unknown cost stops subsequent Provider requests and is never treated as zero.",
+        )
     for item in report["axes"]:
         metrics = item["metrics"]
         lines.append(

@@ -299,6 +299,16 @@ String lastDeviceErrorCode;
 String lastDeviceErrorMessage;
 uint32_t lastRefreshDurationMs = 0;
 
+static void setConfigPersistenceError(const String &persistError) {
+  lastDeviceErrorCode = "DEVICE-CONFIG-PERSIST";
+  lastDeviceErrorMessage = "遠端設定持久化失敗：";
+  if (persistError.length() > 0U) {
+    lastDeviceErrorMessage += persistError;
+  } else {
+    lastDeviceErrorMessage += "PAIRING-NVS-UNKNOWN";
+  }
+}
+
 static int calculateSha256(const unsigned char* input, size_t length, unsigned char output[32]) {
 #if MBEDTLS_VERSION_MAJOR >= 3
   return mbedtls_sha256(input, length, output, 0);
@@ -1664,8 +1674,8 @@ bool downloadLatestPhotoBin(Config &cfg) {
     String desiredPanelProfile = remoteConfig["panel_profile"] | "safe_4c";
     bool compatiblePanel = desiredPanelProfile == "safe_4c"
       || desiredPanelProfile == String(INKTIME_PANEL_PROFILE);
-#if INKTIME_PHOTOPAINTER_ENABLED
     Config candidate = cfg;
+#if INKTIME_PHOTOPAINTER_ENABLED
     bool validSchedule = applyRemoteSchedule(
       remoteConfig,
       remoteConfig["schema_version"] | 0,
@@ -1683,11 +1693,24 @@ bool downloadLatestPhotoBin(Config &cfg) {
       lastDeviceErrorMessage = "遠端設定版本或面板 Profile 與韌體不相容";
       return false;
     }
+#if INKTIME_PHOTOPAINTER_ENABLED
+    bool scheduleChanged = cfg.schedule_count != candidate.schedule_count;
+    if (!scheduleChanged) {
+      for (uint8_t index = 0; index < candidate.schedule_count; ++index) {
+        if (cfg.schedule_slots[index].hour != candidate.schedule_slots[index].hour
+            || cfg.schedule_slots[index].minute != candidate.schedule_slots[index].minute) {
+          scheduleChanged = true;
+          break;
+        }
+      }
+    }
+#endif
     if (
         cfg.tz_offset_minutes != offsetMinutes || cfg.refresh_hour != remoteHour
         || cfg.refresh_minute != remoteMinute || cfg.rotate180 != (rotation == 180)
         || cfg.config_version != desiredConfigVersion
 #if INKTIME_PHOTOPAINTER_ENABLED
+        || scheduleChanged
         || cfg.delivery_mode != candidate.delivery_mode
         || cfg.schedule_count != candidate.schedule_count
         || cfg.prefetch_lead_minutes != candidate.prefetch_lead_minutes
@@ -1695,19 +1718,17 @@ bool downloadLatestPhotoBin(Config &cfg) {
 #else
         ) {
 #endif
-#if INKTIME_PHOTOPAINTER_ENABLED
       candidate.tz_offset_minutes = offsetMinutes;
+      candidate.refresh_hour = static_cast<uint8_t>(remoteHour);
+      candidate.refresh_minute = static_cast<uint8_t>(remoteMinute);
       candidate.rotate180 = rotation == 180;
       candidate.config_version = desiredConfigVersion;
+      String persistError;
+      if (!saveConfig(candidate, &persistError)) {
+        setConfigPersistenceError(persistError);
+        return false;
+      }
       cfg = candidate;
-#else
-      cfg.tz_offset_minutes = offsetMinutes;
-      cfg.refresh_hour = static_cast<uint8_t>(remoteHour);
-      cfg.refresh_minute = static_cast<uint8_t>(remoteMinute);
-      cfg.rotate180 = rotation == 180;
-      cfg.config_version = desiredConfigVersion;
-#endif
-      saveConfig(cfg);
       serverConfigChanged = true;
 #if DEBUG_LOG
       DBG_PRINTLN("[CFG] 已套用伺服器端裝置設定");
@@ -2407,8 +2428,12 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
     currentPayloadIntegrityTrusted = true;
     return true;
   }
+  String persistError;
+  if (!saveConfig(scheduleCandidate, &persistError)) {
+    setConfigPersistenceError(persistError);
+    return false;
+  }
   cfg = scheduleCandidate;
-  saveConfig(cfg);
   serverConfigChanged = true;
   clearOfflineRetryState();
   currentFromQueue = false;
@@ -2965,18 +2990,24 @@ static bool promoteStagedNextIfDue(Config &cfg, time_t nowEpoch) {
     lastDeviceErrorMessage = "離線排程 staged next 無法原子 promote 為 active";
     return false;
   }
-  cfg.schedule_count = static_cast<uint8_t>(rawTimes.size());
-  for (uint8_t index = 0; index < cfg.schedule_count; ++index) {
-    cfg.schedule_slots[index] = scheduleSlots[index];
+  Config candidate = cfg;
+  candidate.schedule_count = static_cast<uint8_t>(rawTimes.size());
+  for (uint8_t index = 0; index < candidate.schedule_count; ++index) {
+    candidate.schedule_slots[index] = scheduleSlots[index];
   }
-  cfg.refresh_hour = scheduleSlots[0].hour;
-  cfg.refresh_minute = scheduleSlots[0].minute;
-  cfg.rotate180 = remoteRotation == 180;
-  cfg.prefetch_lead_minutes = static_cast<uint16_t>(remoteLead);
-  cfg.delivery_mode = deliveryMode;
-  cfg.button_wake_action = buttonWakeAction;
-  cfg.config_version = remoteConfigVersion;
-  saveConfig(cfg);
+  candidate.refresh_hour = scheduleSlots[0].hour;
+  candidate.refresh_minute = scheduleSlots[0].minute;
+  candidate.rotate180 = remoteRotation == 180;
+  candidate.prefetch_lead_minutes = static_cast<uint16_t>(remoteLead);
+  candidate.delivery_mode = deliveryMode;
+  candidate.button_wake_action = buttonWakeAction;
+  candidate.config_version = remoteConfigVersion;
+  String persistError;
+  if (!saveConfig(candidate, &persistError)) {
+    setConfigPersistenceError(persistError);
+    return false;
+  }
+  cfg = candidate;
   serverConfigChanged = true;
   clearOfflineRetryState();
   return true;

@@ -49,7 +49,7 @@ offline JSON 的 `mode` 是 `offline-contract`，並回傳 `contract_metrics`；
 
 `total_photos`、`provider_requests`、`vision_requests`、`repair_requests`、`success_count`、`schema_success_rate`、`first_pass_schema_success_rate`、`repair_rate`、`failure_rate`、`input_tokens`、`cached_tokens`、`cache_write_tokens`、`uncached_tokens`、`output_tokens`、`reasoning_tokens`、`estimated_cost`、`provider_reported_cost`、`actual_cost`、`unknown_cost_count`、`avg_cost_per_photo`、`cost_per_1000_photos`、`avg_latency_ms`、`p50_latency_ms`、`p95_latency_ms`、`avg_request_body_bytes`、`avg_image_bytes`、`avg_system_prompt_chars` 與 `avg_schema_chars`。
 
-Quality metrics 使用 [`benchmarks/golden/manifest.schema.json`](../../benchmarks/golden/manifest.schema.json) 定義的 non-private golden manifest。Grade 使用 `E=0` 到 `S=5`，回報 `exact_grade_accuracy`、`within_one_grade_accuracy` 與 `mean_absolute_grade_distance`；types 回報 micro precision／recall／F1 與 Jaccard；`should_keep` 回報 accuracy／precision／recall／F1；orientation 回報只針對 expected non-ambiguous 的 `rotation_exact_accuracy`、ambiguous rate 與 `false_confident_orientation_rate`。Ranking 回報 tie-aware Spearman rank correlation 與 Top-10／25／50 overlap；資料集小於 K 時使用 `effective_k=min(K,dataset_size)`。
+Quality metrics 使用 [`benchmarks/golden/manifest.schema.json`](../../benchmarks/golden/manifest.schema.json) 定義的 non-private golden manifest。Manifest 的 canonical exclusion 欄位是 `inactive`、`ineligible`、`missing`、`never_upload` 與 `manually_excluded`；任何未知欄位、錯誤型別、非 `non_private` privacy、path traversal 或禁止目錄路徑都會 fail-closed，而且在任何 Provider network request 前排除。Grade 使用 `E=0` 到 `S=5`，回報 `exact_grade_accuracy`、`within_one_grade_accuracy` 與 `mean_absolute_grade_distance`；types 回報 micro precision／recall／F1 與 Jaccard；`should_keep` 回報 accuracy／precision／recall／F1；orientation 回報只針對 expected non-ambiguous 的 `rotation_exact_accuracy`、ambiguous rate 與 `false_confident_orientation_rate`。Ranking 直接重用 production `calculate_ranking_score()`；manifest 的 `expected_score`／`expected_rank` 必須代表同一套 production ranking。報告固定輸出 `ranking_rule_version`、`ranking_weights` 與 favorite bonus policy；Top-K 使用 deterministic exact-K membership，tie 不會使 overlap rate 超過 1，資料集小於 K 時使用 `effective_k=min(K,dataset_size)`。
 
 ## Live 模式：必須明確開啟
 
@@ -75,9 +75,9 @@ Live quality 只接受明確的 non-private golden manifest；manifest 內的圖
 
 Live 安全條件：
 
-- `max_requests` 最多 100，並同時受 `max-cost` 停止線約束。
+- `max_requests` 最多 100，並同時受 `max-cost` bounded post-response stop 約束；`max_cost` 是收到上一個 response 後的累計停止線，不是數學上的絕對 pre-request ceiling。
 - `--live`、`--api-key`、`--dataset`、`--confirm-live-quality`、`--max-requests`、`--max-cost` 與 `--sample-count` 都是明確的安全邊界。
-- 成本回報未知時增加 `unknown_cost_count`；不得以零來掩蓋未知帳務。
+- 成本回報未知時增加 `unknown_cost_count` 並停止後續 Provider request；不得以零來掩蓋未知帳務。
 - JSON 修復最多一次且只傳文字，不會第二次上傳圖片。
 - 只寫明確指定的 JSON／Markdown artifact，不寫 `photo_analysis`、`releases`、`display_history` 或正式 AI Cache。
 - `stopped_by_budget=true` 時，報告應被視為部分樣本，不可外推全庫。

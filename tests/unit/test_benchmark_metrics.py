@@ -43,6 +43,27 @@ def test_spearman_and_top_k_use_bounded_tie_aware_ranks():
     assert overlap["10"]["overlap_rate"] == 1
 
 
+def test_top_k_boundary_ties_are_deterministic_and_exact_k():
+    overlap = top_k_overlap(
+        [("c", 100), ("b", 100), ("a", 100)],
+        [("a", 100), ("c", 100), ("b", 100)],
+        ks=(2,),
+    )
+    assert overlap["2"]["effective_k"] == 2
+    assert overlap["2"]["overlap_count"] == 2
+    assert overlap["2"]["overlap_rate"] == 1
+
+
+def test_top_k_handles_small_and_empty_datasets_without_exceeding_one():
+    small = top_k_overlap([("b", 2), ("a", 1)], [("a", 2), ("b", 1)], ks=(10,))
+    assert small["10"]["effective_k"] == 2
+    assert 0 <= small["10"]["overlap_rate"] <= 1
+
+    empty = top_k_overlap([], [], ks=(10,))
+    assert empty["10"]["effective_k"] == 0
+    assert empty["10"]["overlap_rate"] is None
+
+
 def test_benchmark_metrics_keep_quality_and_ranking_separate():
     result = calculate_benchmark_metrics(
         [
