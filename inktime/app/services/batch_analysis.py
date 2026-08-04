@@ -2227,6 +2227,12 @@ class BatchAnalysisService:
     def _cleanup_remote(self, batch: dict[str, Any], plan: dict[str, Any]) -> bool:
         batch = dict(batch)
 
+        files = (
+            ("input", "input_file_id", "input_file_deleted"),
+            ("output", "output_file_id", "output_file_deleted"),
+            ("error", "error_file_id", "error_file_deleted"),
+        )
+
         def complete_cleanup() -> None:
             current = self.batches.get(str(batch["id"]))
             if current is None:
@@ -2241,11 +2247,28 @@ class BatchAnalysisService:
             else:
                 self._finish(str(batch["id"]))
 
-        files = (
-            ("input", "input_file_id", "input_file_deleted"),
-            ("output", "output_file_id", "output_file_deleted"),
-            ("error", "error_file_id", "error_file_deleted"),
-        )
+        def complete_if_converged() -> bool:
+            current = self.batches.get(str(batch["id"]))
+            if current is None:
+                return False
+            current = dict(current)
+            if any(
+                current[file_key] and not bool(current[deleted_key])
+                for _, file_key, deleted_key in files
+            ):
+                return False
+            self.batches.update_batch(
+                str(batch["id"]),
+                cleanup_status="completed",
+                cleanup_completed_at=utc_now(),
+                cleanup_final_action=self._cleanup_action_for(current),
+                cleanup_error_code=None,
+                cleanup_error_message=None,
+            )
+            complete_cleanup()
+            self._cleanup_local(current)
+            return True
+
         if not any(batch[file_key] for _, file_key, _ in files):
             if str(batch.get("status")) in {"upload_unknown", "submission_unknown"}:
                 self.batches.update_batch(
@@ -2290,13 +2313,18 @@ class BatchAnalysisService:
             )
             return False
         failed = False
+        contended = False
         try:
             for file_kind, _file_key, _ in pending:
                 owner = f"cleanup:{file_kind}:{uuid4()}"
                 lease_until = self._side_effect_lease_until(str(batch["provider_id"]))
                 claim = self.batches.claim_cleanup_file(batch["id"], file_kind, owner, lease_until)
                 if claim is None:
-                    failed = True
+                    # Another worker may own this file, or may have completed it
+                    # after this worker's initial snapshot.  Neither is a cleanup
+                    # failure and neither may regress a converging cleanup to
+                    # partial.
+                    contended = True
                     continue
                 file_id, uncertain_delete = claim
                 try:
@@ -2316,15 +2344,21 @@ class BatchAnalysisService:
                                     marker in code.casefold()
                                     for marker in ("not_found", "not-found", "expired")
                                 ):
-                                    self.batches.complete_cleanup_file(batch["id"], file_kind, owner)
+                                    if not self.batches.complete_cleanup_file(
+                                        batch["id"], file_kind, owner
+                                    ):
+                                        contended = True
                                     continue
-                                self.batches.fail_cleanup_file(
+                                recorded = self.batches.fail_cleanup_file(
                                     batch["id"],
                                     owner,
                                     code or "BATCH-CLEANUP-RECONCILE",
                                     str(exc),
                                 )
-                                failed = True
+                                if recorded:
+                                    failed = True
+                                else:
+                                    contended = True
                                 continue
                     provider.delete_remote_file(file_id)
                 except Exception as exc:
@@ -2335,26 +2369,33 @@ class BatchAnalysisService:
                     if status not in {404, 410} and not any(
                         marker in code.casefold() for marker in ("not_found", "not-found", "expired")
                     ):
-                        failed = True
-                        self.batches.fail_cleanup_file(
+                        recorded = self.batches.fail_cleanup_file(
                             str(batch["id"]),
                             owner,
                             code,
                             str(exc),
                         )
+                        if recorded:
+                            failed = True
+                        else:
+                            contended = True
                         continue
                 if not self.batches.complete_cleanup_file(str(batch["id"]), file_kind, owner):
-                    failed = True
+                    contended = True
         finally:
             close = getattr(provider, "close", None)
             if callable(close):
                 close()
+        if complete_if_converged():
+            return True
         if failed:
             current = dict(self.batches.get(str(batch["id"])) or batch)
             cleanup_changes: dict[str, Any] = {"cleanup_status": "partial"}
             if str(current["status"]) not in TERMINAL_BATCH_STATUSES:
                 cleanup_changes["status"] = "cleanup_pending"
             self.batches.update_batch(str(batch["id"]), **cleanup_changes)
+            return False
+        if contended:
             return False
         self.batches.update_batch(
             str(batch["id"]),
