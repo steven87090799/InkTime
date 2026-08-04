@@ -292,6 +292,7 @@ def test_runner_uses_the_frozen_job_plan_after_settings_change(app, tmp_path, mo
         ).fetchone()
     identity_plan = dict(plan)
     identity_plan.pop("caption_display_controls", None)
+    identity_plan.pop("repair_policy", None)
     assert row["analysis_fingerprint"] == fingerprint(identity_plan)
     assert json.loads(row["analysis_spec_json"]) == plan
 

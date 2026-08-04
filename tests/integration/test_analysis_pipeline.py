@@ -404,6 +404,7 @@ def test_worker_context_inherits_only_the_same_frozen_plan_and_keeps_source_trac
     assert copied["stage"] == "inherited"
     identity_plan = dict(plan)
     identity_plan.pop("caption_display_controls", None)
+    identity_plan.pop("repair_policy", None)
     assert copied["analysis_fingerprint"] == fingerprint(identity_plan) == source["analysis_fingerprint"]
     assert copied["vision_request_fingerprint"] == source["vision_request_fingerprint"]
     assert copied["vision_input_spec_json"] == source["vision_input_spec_json"]
