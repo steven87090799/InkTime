@@ -44,12 +44,14 @@ def test_openrouter_analysis_and_repair_share_privacy_routing_usage_and_sticky_p
         detail="high",
         stage="single",
         reasoning_effort="low",
+        provider_request_context_id="job|photo|vision-fingerprint|owner-hash",
     )
     provider.repair_json(
         invalid_content="not-json",
         validation_error="schema",
         model="repair-model",
         stage="single",
+        provider_request_context_id="job|photo|vision-fingerprint|owner-hash",
     )
     repair = provider.captured_body
 
@@ -65,7 +67,7 @@ def test_openrouter_analysis_and_repair_share_privacy_routing_usage_and_sticky_p
     assert "image_url" not in json.dumps(repair, ensure_ascii=False)
     assert "image_path" not in json.dumps(repair, ensure_ascii=False)
     assert provider.last_request_metrics["image_bytes"] == 0
-    assert analysis["session_id"] != repair["session_id"]
+    assert analysis["session_id"] == repair["session_id"]
 
 
 def test_openai_compatible_request_does_not_receive_openrouter_provider_object(tmp_path: Path):

@@ -108,6 +108,41 @@ def test_golden_manifest_uses_canonical_exclusion_flags_before_network(tmp_path)
     assert report["network_invocations"] == 0
 
 
+def test_golden_manifest_missing_flag_is_excluded_without_existing_image(tmp_path):
+    expected = {
+        "memory_grade": "A",
+        "beauty_grade": "A",
+        "technical_grade": "A",
+        "emotion_grade": "A",
+        "types": ["風景"],
+        "should_keep": True,
+        "rotation_cw": 0,
+        "ambiguous": False,
+    }
+    path = tmp_path / "manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": "inktime-golden-v1",
+                "dataset": {"id": "test", "source": "synthetic", "privacy": "non_private"},
+                "items": [
+                    {
+                        "id": "missing",
+                        "image": "missing.jpg",
+                        "expected": expected,
+                        "missing": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    records = _load_golden_records(path)
+    selected, excluded = _select_benchmark_records(records, sample_count=10, seed="missing")
+    assert selected == []
+    assert excluded["missing"] == 1
+
+
 def test_golden_manifest_unknown_field_fails_closed_before_network(tmp_path):
     manifest = {
         "version": "inktime-golden-v1",
@@ -197,6 +232,11 @@ class _LiveMetricProvider:
 
     def close(self):
         return None
+
+
+class _UnknownCostFailureProvider(_LiveMetricProvider):
+    def analyze(self, **_kwargs):
+        raise TimeoutError("synthetic provider timeout")
 
 
 def _live_manifest(tmp_path: Path) -> Path:
@@ -305,6 +345,31 @@ def test_live_budget_stop_still_emits_zero_denominator_axis_metrics(tmp_path):
     assert metrics["cost_per_1000_attempted_photos"] is None
     assert metrics["quality_metrics"]["count"] == 0
     assert metrics["ranking_metrics"]["count"] == 0
+
+
+def test_live_unknown_cost_failure_stops_subsequent_provider_requests(tmp_path):
+    manifest = _live_manifest(tmp_path)
+
+    service = ModelBenchmarkService(
+        provider_factory=lambda **_kwargs: _UnknownCostFailureProvider(invalid_first=False)
+    )
+    report = service.run_live(
+        axes=_axes() * 2,
+        sample_count=2,
+        seed="unknown-failure",
+        api_key="test-key",
+        base_url="https://openrouter.ai/api/v1",
+        max_requests=8,
+        max_cost=1,
+        dataset=manifest,
+        confirm_live_quality=True,
+    )
+    metrics = report["axes"][0]["metrics"]
+    assert metrics["attempted_photos"] == 1
+    assert metrics["unknown_cost_count"] == 1
+    assert report["stopped_by_budget"] is True
+    assert report["network_invocations"] == 2
+    assert len(report["axes"]) == 1
 
 
 def test_golden_manifest_rejects_duplicate_ids_and_mixed_aliases_before_provider(tmp_path):

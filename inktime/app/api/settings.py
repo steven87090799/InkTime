@@ -24,6 +24,7 @@ from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
 from inktime.app.providers.config import (
     PROVIDER_KINDS,
     capabilities_for,
+    effective_provider_kind,
     normalize_options,
     validate_base_url,
 )
@@ -590,12 +591,14 @@ def save_provider():
         abort(400, description="SET-003 Provider 名稱與 URL 不可空白")
     if type(payload["name"]) is not str or not payload["name"].strip() or len(payload["name"].strip()) > 120:
         abort(400, description="SET-003 Provider 名稱必須是 1 至 120 字元")
-    kind = (payload.get("kind") or "openai_compatible").strip().lower()
-    if kind not in PROVIDER_KINDS:
-        abort(400, description=f"SET-003 不支援的 Provider kind：{kind}")
+    requested_kind = (payload.get("kind") or "openai_compatible").strip().lower()
+    if requested_kind not in PROVIDER_KINDS:
+        abort(400, description=f"SET-003 不支援的 Provider kind：{requested_kind}")
     try:
+        kind = effective_provider_kind(requested_kind, str(payload["base_url"]))
         options = normalize_options(kind, payload.get("options") or {})
         payload["options"] = options
+        payload["kind"] = kind
         payload["base_url"] = validate_base_url(kind, str(payload["base_url"]), options)
         payload["enabled"] = json_bool(payload, "enabled", default=True, error_prefix="SET-003")
         payload["supports_vision"] = json_bool(payload, "supports_vision", default=True, error_prefix="SET-003")
@@ -651,7 +654,9 @@ def test_provider(provider_id: str):
     config = current_app.extensions["inktime_provider_repository"].get(provider_id, include_secret=True)
     if config is None:
         abort(404)
-    kind = str(config.get("kind") or "openai_compatible")
+    kind = effective_provider_kind(
+        str(config.get("kind") or "openai_compatible"), str(config.get("base_url") or "")
+    )
     provider = OpenAICompatibleProvider(
         name=config["name"],
         base_url=config["base_url"],
@@ -698,8 +703,14 @@ def save_provider_pricing(provider_id: str):
             },
             error_prefix="SET-004",
         )
-        if type(payload.get("model")) is not str or not payload["model"].strip():
-            abort(400, description="SET-004 model 不可空白")
+        if (
+            type(payload.get("model")) is not str
+            or not payload["model"].strip()
+            or len(payload["model"].strip()) > 200
+            or any(ord(char) < 0x20 or ord(char) == 0x7f for char in payload["model"])
+        ):
+            abort(400, description="SET-004 model 必須是 1 至 200 字元")
+        payload["model"] = payload["model"].strip()
         for field in ("input_per_million", "cached_input_per_million", "output_per_million"):
             payload[field] = json_float(
                 payload,
@@ -729,12 +740,12 @@ def save_provider_pricing(provider_id: str):
                 error_prefix="SET-004",
             )
         payload["enabled"] = json_bool(payload, "enabled", default=True, error_prefix="SET-004")
-        current_app.extensions["inktime_provider_repository"].save_pricing(provider_id, payload)
+        reconciliation = current_app.extensions["inktime_provider_repository"].save_pricing(provider_id, payload)
     except (JsonScalarError, ValueError) as exc:
         abort(400, description=f"SET-004 {exc}")
     except KeyError:
         abort(404)
-    return {"status": "ok", "provider_id": provider_id, "model": payload["model"]}
+    return {"status": "ok", "provider_id": provider_id, "model": payload["model"], **reconciliation}
 
 
 @bp.get("/costs")
@@ -747,12 +758,39 @@ def costs_page():
             SELECT COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND date(started_at)=date('now') THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) today,
                    COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND started_at>=datetime('now','-7 day') THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) week,
                    COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND strftime('%Y-%m',started_at)=strftime('%Y-%m','now') THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) month,
-                   COALESCE(SUM(CASE WHEN cost_source='unknown' THEN 1 ELSE 0 END),0) unknown_count,
+                   COALESCE(SUM(CASE WHEN cost_source='unknown' AND (
+                       COALESCE(input_tokens,0)>0 OR COALESCE(output_tokens,0)>0 OR COALESCE(cached_tokens,0)>0
+                       OR COALESCE(reasoning_tokens,0)>0 OR COALESCE(cache_write_tokens,0)>0
+                       OR COALESCE(request_body_bytes,0)>0 OR COALESCE(image_bytes,0)>0
+                       OR COALESCE(actual_cost,0)>0 OR COALESCE(estimated_cost,0)>0
+                   ) THEN 1 ELSE 0 END),0) unknown_count,
+                   COALESCE(SUM(CASE WHEN cost_source='unknown' AND date(started_at)=date('now') AND (
+                       COALESCE(input_tokens,0)>0 OR COALESCE(output_tokens,0)>0 OR COALESCE(cached_tokens,0)>0
+                       OR COALESCE(reasoning_tokens,0)>0 OR COALESCE(cache_write_tokens,0)>0
+                       OR COALESCE(request_body_bytes,0)>0 OR COALESCE(image_bytes,0)>0
+                       OR COALESCE(actual_cost,0)>0 OR COALESCE(estimated_cost,0)>0
+                   ) THEN 1 ELSE 0 END),0) today_unknown_count,
                    COALESCE(SUM(input_tokens),0) input_tokens,COALESCE(SUM(output_tokens),0) output_tokens
             FROM api_usage
             """
         ).fetchone()
         by_model = connection.execute(
-            "SELECT provider,model,SUM(input_tokens) input_tokens,SUM(output_tokens) output_tokens,SUM(CASE WHEN cost_source<>'unknown' THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END) cost,SUM(CASE WHEN cost_source='unknown' THEN 1 ELSE 0 END) unknown_count,COUNT(*) requests FROM api_usage GROUP BY provider,model ORDER BY cost DESC"
+            """SELECT provider,model,SUM(input_tokens) input_tokens,SUM(output_tokens) output_tokens,
+                      SUM(CASE WHEN cost_source<>'unknown' THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END) cost,
+                      SUM(CASE WHEN cost_source='unknown' AND (
+                          COALESCE(input_tokens,0)>0 OR COALESCE(output_tokens,0)>0 OR COALESCE(cached_tokens,0)>0
+                          OR COALESCE(reasoning_tokens,0)>0 OR COALESCE(cache_write_tokens,0)>0
+                          OR COALESCE(request_body_bytes,0)>0 OR COALESCE(image_bytes,0)>0
+                          OR COALESCE(actual_cost,0)>0 OR COALESCE(estimated_cost,0)>0
+                      ) THEN 1 ELSE 0 END) unknown_count,
+                      COUNT(*) requests
+               FROM api_usage GROUP BY provider,model ORDER BY cost DESC"""
         ).fetchall()
+    reserve = float(
+        current_app.extensions["inktime_settings_repository"].get("budget.unknown_request_reserve", 0.25)
+    )
+    summary = dict(summary)
+    summary["unknown_reserve"] = reserve
+    summary["reserved_today"] = int(summary["today_unknown_count"]) * reserve
+    summary["cost_complete"] = int(summary["unknown_count"]) == 0
     return render_template("costs.html", summary=summary, by_model=by_model)

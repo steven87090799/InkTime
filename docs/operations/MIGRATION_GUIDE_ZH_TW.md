@@ -59,6 +59,12 @@ Migration 32 不修改 Migration 1～31。它為 `providers` 增加受控的 `op
 升級前仍必須建立 SQLite backup，Migration 以單一交易套用並執行
 `PRAGMA foreign_key_check`、`PRAGMA integrity_check`。Fresh Database、31→32、失敗 rollback、重啟與 production release schema gate 必須由 Final-Head CI 驗證；本機不執行測試或建置。
 
+## Migration 33：Provider 身分、OpenRouter legacy 修復與成本回溯
+
+Migration 33 為 `api_usage` 增加可為 null 的 `provider_id` 外鍵，只有 Provider name 唯一時才回填歷史 usage，避免同名 Provider 誤綁；並建立 Provider／model／cost、Job 與 Photo 的 unknown reconciliation 索引。既有 `openai_compatible` 且 host 為 `openrouter.ai` 或其正式子網域的 Provider 會在同一 transaction 轉成 `kind=openrouter`、停用 Batch、保留既有 options，並補上 `require_parameters=true` 預設；非正式 host 不會被轉換。
+
+Migration 33 不會把缺乏 Provider provenance 的歷史 `actual_cost` 改標為 `provider_reported`。升級前仍必須建立 SQLite backup，並由 Final-Head CI 驗證 32→33、fresh、idempotency、foreign-key／integrity check 與 rollback；本機不執行測試或建置。
+
 ## PR #52 跨日修復的資料相容性
 
 本次跨日 staged-next 修復不新增 SQLite schema，也不修改既有 Migration；`MIGRATION=none`。明日 schedule 以 PhotoPainter SD 上 bounded 的 `staged_next.json`、`.tmp` 與 `.bak` 保存，active schedule 仍由既有 snapshot／Queue schema 管理。部署時不需重跑資料遷移；需確認韌體版本同時支援 `target=current|next`、future rotation、午夜 promote 與 non-terminal prefetch ACK。

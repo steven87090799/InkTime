@@ -18,7 +18,7 @@ E6 預篩選同樣完全在本機執行：以正式六色色盤量測量化後�
 - `estimated`：Provider 沒有回報成本，但已設定完整 Input／Cached Input／Output 價格，依 Token 換算的估計值。
 - `unknown`：Provider 沒有回報成本，且價格不完整、無法解析或不適用。畫面會明確顯示 unknown，不會把它改成 US$0。
 
-預算、成本頁與照片詳情的已知金額只計 `provider_reported` 與 `estimated`；另列 unknown 筆數。若新請求會讓未確認成本增加，Budget service 會停止工作，直到補齊價格或改用能回報成本的 Provider。OpenRouter 的回報成本若不存在，仍依同一規則處理；不能因為使用 OpenRouter 就假設價格已知。
+預算、成本頁與照片詳情的已知金額只計 `provider_reported` 與 `estimated`；另列有可計費證據的 unknown 筆數。每筆 unknown 以 `budget.unknown_request_reserve` 計入有效預算；同一照片或工作已有 unknown 時，該 scope 的重試會停止，但不同照片／工作的請求仍可依有效日／月預算判斷。管理員補齊該 Provider／模型價格後，保存價格會回溯可計算列並回報剩餘 unknown。OpenRouter 的回報成本若不存在，仍依同一規則處理；不能因為使用 OpenRouter 就假設價格已知。
 
 Model Benchmark 另以 `attempted_photos` 作為平均成本分母；`known_cost_total` 只累計已知 usage。任何 attempted call 的 cost unknown 都使 `cost_complete=false`，平均與每 1000 張成本回報 `null`，不以零填補未確認帳務。
 

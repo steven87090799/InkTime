@@ -3,12 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 import time
+from uuid import uuid4
 
 from PIL import Image, ImageOps
 
 from inktime.app.domain.analysis import AnalysisValidationError, validate_analysis_result
 from inktime.app.domain.analysis.scoring import calculate_ranking_score
-from inktime.app.providers.base import Usage
 from inktime.app.repositories.scoring import ScoringProfileRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
@@ -55,75 +55,130 @@ class ScoringLabService:
         profile = self.profiles.current()
         model = str(self.settings.get("model.high_model", "gpt-4o"))
         max_tokens = int(self.settings.get("budget.max_tokens", 8000))
-        started_at = datetime.now(timezone.utc).isoformat()
-        started_perf = time.perf_counter()
+        provider_request_context_id = f"scoring_test|{uuid4()}"
+        selected_provider = provider
+        provider_id = ""
+        provider_name = provider.name
+        attempt_summary: list[dict] = []
+
+        def record_attempt(
+            response,
+            *,
+            request_type: str,
+            started_at: str,
+            started_perf: float,
+            retry_count: int,
+            image_bytes: bool,
+        ) -> dict:
+            usage = response.usage
+            estimated = provider.estimate_cost(model, usage)
+            reported = usage.provider_reported_cost
+            source = "provider_reported" if reported is not None else "estimated" if estimated is not None else "unknown"
+            metrics = dict(response.request_metrics or getattr(selected_provider, "last_request_metrics", {}) or {})
+            if not image_bytes:
+                metrics["image_bytes"] = 0
+            effective = (
+                max(0.0, float(reported))
+                if reported is not None
+                else max(0.0, float(estimated))
+                if estimated is not None
+                else 0.0
+            )
+            self.usage.record(
+                provider=provider_name,
+                provider_id=provider_id,
+                model=model,
+                job_id=None,
+                photo_id=None,
+                request_type=request_type,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cached_tokens=usage.cached_tokens,
+                estimated_cost=estimated,
+                actual_cost=max(0.0, float(reported)) if reported is not None else None,
+                started_at=started_at,
+                latency_ms=int((time.perf_counter() - started_perf) * 1000),
+                status="completed",
+                retry_count=retry_count,
+                reasoning_tokens=usage.reasoning_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
+                cost_source=source,
+                prompt_chars=metrics.get("prompt_chars", 0),
+                schema_chars=metrics.get("schema_chars", 0),
+                request_body_bytes=metrics.get("request_body_bytes", 0),
+                image_bytes=metrics.get("image_bytes", 0),
+            )
+            result = {
+                "request_type": request_type,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "cached_tokens": usage.cached_tokens,
+                "estimated_cost": estimated,
+                "actual_cost": reported,
+                "effective_cost": effective,
+                "cost_source": source,
+                "latency_ms": int((time.perf_counter() - started_perf) * 1000),
+                "image_bytes": metrics.get("image_bytes", 0),
+            }
+            attempt_summary.append(result)
+            return result
+
+        vision_started_at = datetime.now(timezone.utc).isoformat()
+        vision_started_perf = time.perf_counter()
         response = provider.analyze(
             image_path=image_path,
             model=model,
             detail="high",
             stage="scoring_test",
             max_tokens=max_tokens,
+            provider_request_context_id=provider_request_context_id,
         )
-        input_tokens = response.usage.input_tokens
-        output_tokens = response.usage.output_tokens
-        cached_tokens = response.usage.cached_tokens
-        retry_count = 0
-        repaired = None
+        selected = getattr(getattr(provider, "_local", None), "channel", None)
+        selected_provider = selected.provider if selected is not None else provider
+        provider_id = str(getattr(selected_provider, "provider_id", selected_provider.name))
+        provider_name = str(getattr(selected_provider, "name", provider.name))
+        vision_attempt = record_attempt(
+            response,
+            request_type="scoring_test_vision",
+            started_at=vision_started_at,
+            started_perf=vision_started_perf,
+            retry_count=0,
+            image_bytes=True,
+        )
         try:
             result = validate_analysis_result(response.content)
         except AnalysisValidationError as error:
+            repair_started_at = datetime.now(timezone.utc).isoformat()
+            repair_started_perf = time.perf_counter()
             repaired = provider.repair_json(
                 invalid_content=response.content,
                 validation_error=str(error),
                 model=model,
                 max_tokens=max_tokens,
+                stage="scoring_test",
+                provider_request_context_id=provider_request_context_id,
             )
-            input_tokens += repaired.usage.input_tokens
-            output_tokens += repaired.usage.output_tokens
-            cached_tokens += repaired.usage.cached_tokens
-            retry_count = 1
+            repair_attempt = record_attempt(
+                repaired,
+                request_type="scoring_test_repair",
+                started_at=repair_started_at,
+                started_perf=repair_started_perf,
+                retry_count=1,
+                image_bytes=False,
+            )
             result = validate_analysis_result(repaired.content)
-
-        cost = provider.estimate_cost(
-            model,
-            Usage(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cached_tokens=cached_tokens,
-            ),
+        total_cost = sum(float(item["effective_cost"]) for item in attempt_summary)
+        unknown_count = sum(item["cost_source"] == "unknown" for item in attempt_summary)
+        cost_source = (
+            "incomplete"
+            if unknown_count
+            else "provider_reported"
+            if all(item["cost_source"] == "provider_reported" for item in attempt_summary)
+            else "estimated"
         )
-        latency_ms = int((time.perf_counter() - started_perf) * 1000)
-        provider_reported_cost = response.usage.provider_reported_cost
-        if repaired is not None and repaired.usage.provider_reported_cost is not None:
-            provider_reported_cost = repaired.usage.provider_reported_cost
-        cost_source = "provider_reported" if provider_reported_cost is not None else "estimated" if cost is not None else "unknown"
-        metrics = dict(
-            (repaired.request_metrics if repaired is not None else None)
-            or response.request_metrics
-            or getattr(provider, "last_request_metrics", {})
-            or {}
-        )
-        self.usage.record(
-            provider=provider.name,
-            model=model,
-            job_id=None,
-            photo_id=None,
-            request_type="scoring_test",
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cached_tokens=cached_tokens,
-            estimated_cost=cost,
-            actual_cost=provider_reported_cost,
-            started_at=started_at,
-            latency_ms=latency_ms,
-            status="completed",
-            retry_count=retry_count,
-            cost_source=cost_source,
-            prompt_chars=metrics.get("prompt_chars", 0),
-            schema_chars=metrics.get("schema_chars", 0),
-            request_body_bytes=metrics.get("request_body_bytes", 0),
-            image_bytes=metrics.get("image_bytes", 0),
-        )
+        total_input = sum(int(item["input_tokens"]) for item in attempt_summary)
+        total_output = sum(int(item["output_tokens"]) for item in attempt_summary)
+        total_cached = sum(int(item["cached_tokens"]) for item in attempt_summary)
         weights = {
             "memory": float(profile["memory_weight"]),
             "beauty": float(profile["beauty_weight"]),
@@ -140,13 +195,22 @@ class ScoringLabService:
             ),
             "profile": {"id": profile["id"], "name": profile["name"]},
             "usage": {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cached_tokens": cached_tokens,
-                "cost": cost,
+                "input_tokens": total_input,
+                "output_tokens": total_output,
+                "cached_tokens": total_cached,
+                "cost": total_cost,
                 "cost_source": cost_source,
-                "latency_ms": latency_ms,
-                "provider": provider.name,
+                "cost_complete": unknown_count == 0,
+                "unknown_cost_count": unknown_count,
+                "vision_cost": vision_attempt["effective_cost"],
+                "repair_cost": next(
+                    (item["effective_cost"] for item in attempt_summary if item["request_type"] == "scoring_test_repair"),
+                    0.0,
+                ),
+                "attempts": attempt_summary,
+                "latency_ms": sum(int(item["latency_ms"]) for item in attempt_summary),
+                "provider": provider_name,
+                "provider_id": provider_id,
                 "model": model,
             },
         }

@@ -171,7 +171,7 @@ def test_migration_25_to_batch_lifecycle_is_idempotent(monkeypatch, tmp_path):
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:25])
     migrate(database)
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [26, 27, 28, 29, 30, 31, 32]
+    assert migrate(database, tmp_path / "backups") == [26, 27, 28, 29, 30, 31, 32, 33]
     assert migrate(database, tmp_path / "backups") == []
     assert database.integrity_check() == "ok"
 
@@ -191,7 +191,7 @@ def test_migration_32_preserves_legacy_cost_provenance_and_allows_new_reported_c
             ],
         )
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database) == [32]
+    assert migrate(database) == [32, 33]
     with database.transaction() as connection:
         connection.execute(
             "INSERT INTO api_usage(provider,model,request_type,estimated_cost,actual_cost,started_at,status,cost_source) "

@@ -50,7 +50,7 @@ def test_config_store_reopens_read_only_and_restores_pointer_on_commit_failure()
     assert store.count("verify.begin(storage_namespace_, true)") >= 2
     assert store.count("verify.end();") >= 2
     assert "const auto restorePreviousPointer" in store
-    assert "restorePreviousPointer();" in store
+    assert "restorePreviousPointer()" in store
     assert 'const char* kSlotAKey = "slot_a"' in store
     assert 'const char* kSlotBKey = "slot_b"' in store
     assert 'const char* kPointerKey = "active"' in store
@@ -63,9 +63,9 @@ def test_config_load_and_legacy_migration_are_pointer_first_and_fail_closed():
     firmware = FIRMWARE.read_text(encoding="utf-8")
     assert "pointed.generation == pointer_generation" in store
     assert "findNewest(store, value, error)" in store
-    assert "candidateA.generation >= candidateB.generation" in store
+    assert "candidateA.generation <= candidateB.generation" in store
     assert "loadLegacy(payload, legacy_present, error)" in store
-    assert "if (save(payload, migration_error))" in store
+    assert "if (!save(payload, migration_error))" in store
     assert "removeLegacyFormalKeys(cleanup_error)" in store
     assert 'prefs.begin("dashcfg", false)' in firmware
     assert "serverConfigChanged = true;" in firmware
@@ -75,6 +75,8 @@ def test_config_load_and_legacy_migration_are_pointer_first_and_fail_closed():
         "PAIRING-NVS-003",
         "PAIRING-NVS-004",
         "PAIRING-NVS-005",
+        "PAIRING-NVS-006",
+        "PAIRING-NVS-007",
     ):
         assert code in firmware or code in store
 

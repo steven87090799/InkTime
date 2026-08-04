@@ -265,7 +265,12 @@ def _manifest_unknown_fields(value: Mapping[str, Any], allowed: set[str], label:
 
 
 def _manifest_string(value: Any, field: str, maximum: int) -> str:
-    if not isinstance(value, str) or not value or len(value) > maximum:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > maximum
+        or any(ord(char) < 0x20 or ord(char) == 0x7f for char in value)
+    ):
         raise BenchmarkError(f"golden manifest {field} 必須是 1 到 {maximum} 字元字串")
     return value
 
@@ -421,9 +426,14 @@ def _load_golden_records(dataset: Path) -> list[dict[str, Any]]:
         if photo_id in seen_ids:
             raise BenchmarkError(f"golden manifest duplicate item id：{photo_id}")
         seen_ids.add(photo_id)
-        image = (resolved.parent / canonical_item["image"]).resolve()
+        try:
+            image = (resolved.parent / canonical_item["image"]).resolve()
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise BenchmarkError("live quality dataset image 路徑不合法") from exc
         _validate_manifest_path(image, allowed_export_parent=allowed_export_parent)
-        if image == resolved or resolved.parent not in image.parents or not image.is_file():
+        if image == resolved or resolved.parent not in image.parents:
+            raise BenchmarkError("live quality dataset image 必須位於 manifest 目錄內")
+        if not canonical_item.get("missing", False) and not image.is_file():
             raise BenchmarkError("live quality dataset image 必須位於 manifest 目錄內")
         if image in seen_images:
             raise BenchmarkError(f"golden manifest duplicate resolved image：{image.name}")
@@ -787,7 +797,7 @@ class ModelBenchmarkService:
                 quality_items: list[dict[str, Any]] = []
                 provider = self._provider(axis, api_key=api_key, base_url=base_url)
                 try:
-                    if requests_used >= max_requests:
+                    if requests_used >= max_requests or report["stopped_by_budget"]:
                         report["stopped_by_budget"] = True
                         raise _BudgetStop
                     validate_config = getattr(provider, "validate_config", None)
@@ -885,6 +895,7 @@ class ModelBenchmarkService:
                             # An attempted call without a response has no
                             # trustworthy usage/cost denominator entry.
                             metrics["unknown_cost_count"] += 1
+                            report["stopped_by_budget"] = True
                             requests_used += 1
                             report["network_invocations"] += 1
                             metrics["provider_requests"] += 1

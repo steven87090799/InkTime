@@ -29,9 +29,10 @@ from inktime.app.domain.analysis import (
     normalize_reasoning_effort,
     validate_analysis_result,
 )
-from inktime.app.domain.analysis.plan import SCHEMA_VERSION
+from inktime.app.domain.analysis.plan import SCHEMA_VERSION, provider_prompt_contract_sha256
 from inktime.app.services.analysis import CAPTION_VARIANTS_TOKEN_CAP, FULL_ANALYSIS_TOKEN_CAP
 from inktime.app.providers.base import Usage
+from inktime.app.providers.openai_compatible import calculate_usage_cost
 from inktime.app.repositories.analysis_batches import (
     ACTIVE_BATCH_STATUSES,
     TERMINAL_BATCH_STATUSES,
@@ -270,6 +271,15 @@ class BatchAnalysisService:
         plan["reasoning_effort"] = normalize_reasoning_effort(
             self.settings.get("batch.reasoning_effort", "none")
         )
+        plan["provider_prompt_contract_sha256"] = provider_prompt_contract_sha256(
+            prompt_version=str(plan.get("prompt_version") or ""),
+            scoring_rules_sha256=str(plan.get("scoring_rules_sha256") or ""),
+            schema_version=int(plan.get("schema_version", SCHEMA_VERSION)),
+            schema_kind=str(plan.get("schema_kind") or "full"),
+            caption_generation_controls=dict(plan.get("caption_controls") or {}),
+            reasoning_effort=str(plan["reasoning_effort"]),
+            provider_behavior_revision=str(plan.get("provider_behavior_revision") or ""),
+        )
         return plan, fingerprint(plan), model
 
     def _base_candidate_sql(self) -> tuple[str, list[Any]]:
@@ -370,6 +380,7 @@ class BatchAnalysisService:
                     "schema_version": SCHEMA_VERSION,
                     "schema_kind": "full",
                     "reasoning_effort": str(plan["reasoning_effort"]),
+                    "provider_prompt_contract_sha256": str(plan.get("provider_prompt_contract_sha256") or ""),
                     **vision_input,
                 }
             )
@@ -460,18 +471,12 @@ class BatchAnalysisService:
         estimated_output_tokens = len(candidates) * int(
             self.settings.get("batch.estimated_output_tokens", 500)
         )
-        pricing = self.providers.pricing(provider_id).get(model, {})
-        input_price = float(
-            pricing.get("batch_input_per_million")
-            or pricing.get("input_per_million", 0) * float(pricing.get("batch_multiplier", 0.5) or 0.5)
+        pricing = self.providers.pricing(provider_id).get(model)
+        estimated_cost = calculate_usage_cost(
+            pricing,
+            Usage(input_tokens=estimated_input_tokens, output_tokens=estimated_output_tokens),
+            batch=True,
         )
-        output_price = float(
-            pricing.get("batch_output_per_million")
-            or pricing.get("output_per_million", 0) * float(pricing.get("batch_multiplier", 0.5) or 0.5)
-        )
-        estimated_cost = (
-            estimated_input_tokens * input_price + estimated_output_tokens * output_price
-        ) / 1_000_000
         return {
             "scope": scope,
             "sample_seed": sample_seed,
@@ -484,7 +489,9 @@ class BatchAnalysisService:
             "estimated_shard_count": max(0, (len(candidates) + max_items - 1) // max_items),
             "estimated_input_tokens": estimated_input_tokens,
             "estimated_output_tokens": estimated_output_tokens,
-            "estimated_cost": round(estimated_cost, 6),
+            "estimated_cost": round(estimated_cost, 6) if estimated_cost is not None else None,
+            "cost_source": "estimated" if estimated_cost is not None else "unknown",
+            "cost_complete": estimated_cost is not None,
             "model": model,
             "analysis_fingerprint": analysis_fingerprint,
             "max_items_per_shard": max_items,
@@ -988,6 +995,8 @@ class BatchAnalysisService:
             analysis_fingerprint=analysis_fp,
             provider_id=provider_id,
         )
+        if estimate["estimated_cost"] is None:
+            raise BatchLifecycleError("Batch 模型價格不完整，無法安全估算成本；請先補齊 input/cached/output 定價", "BATCH-COST-UNKNOWN")
         if budget_limit is not None and estimate["estimated_cost"] > float(budget_limit):
             raise BatchLifecycleError("整批估算成本超過 Job Budget，未提交任何分片", "BATCH-BUDGET-001")
         job_id = self.jobs.create(
@@ -1987,6 +1996,7 @@ class BatchAnalysisService:
                 "prompt_version": str(plan["prompt_version"]),
                 "schema_version": SCHEMA_VERSION,
                 "schema_kind": "full",
+                "provider_prompt_contract_sha256": str(plan.get("provider_prompt_contract_sha256") or ""),
                 **vision_input,
             }
         )
@@ -2088,6 +2098,7 @@ class BatchAnalysisService:
             )
             self.usage.record_batch_once(
                 provider=str(batch["provider_id"]),
+                provider_id=str(batch["provider_id"]),
                 model=str(batch["model"]),
                 job_id=str(batch["job_id"]) if batch["job_id"] else None,
                 photo_id=str(item["photo_id"]),

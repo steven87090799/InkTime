@@ -122,7 +122,9 @@ bool DeviceConfigStore::findNewest(
     setError(error, "");
     return false;
   }
-  if (validA && (!validB || candidateA.generation >= candidateB.generation)) {
+  // Without a valid pointer or recovery journal, the older complete slot is
+  // the only fail-safe choice: the newer slot may be a torn generic write.
+  if (validA && (!validB || candidateA.generation <= candidateB.generation)) {
     value = candidateA;
   } else {
     value = candidateB;
@@ -262,12 +264,43 @@ bool DeviceConfigStore::removeLegacyFormalKeys(String& error) const {
     "ssid", "pass", "hostport", "ca_pem", "devtoken", "tzmin", "tz", "hour", "minute",
     "rot180", "prefetch", "delivery", "button", "cfgver", "scnt",
   };
-  for (const char* key : formalKeys) legacy.remove(key);
+  for (const char* key : formalKeys) {
+    if (legacy.isKey(key) && !legacy.remove(key)) {
+      legacy.end();
+      setError(error, "PAIRING-NVS-006");
+      return false;
+    }
+  }
   for (uint8_t index = 0U; index < configstore::kMaxConfigSlots; ++index) {
     const String key = String("s") + String(index);
-    legacy.remove(key.c_str());
+    if (legacy.isKey(key.c_str()) && !legacy.remove(key.c_str())) {
+      legacy.end();
+      setError(error, "PAIRING-NVS-006");
+      return false;
+    }
   }
   legacy.end();
+  Preferences verify;
+  if (!verify.begin("dashcfg", true)) {
+    setError(error, "PAIRING-NVS-006");
+    return false;
+  }
+  for (const char* key : formalKeys) {
+    if (verify.isKey(key)) {
+      verify.end();
+      setError(error, "PAIRING-NVS-006");
+      return false;
+    }
+  }
+  for (uint8_t index = 0U; index < configstore::kMaxConfigSlots; ++index) {
+    const String key = String("s") + String(index);
+    if (verify.isKey(key.c_str())) {
+      verify.end();
+      setError(error, "PAIRING-NVS-006");
+      return false;
+    }
+  }
+  verify.end();
   return true;
 }
 
@@ -300,6 +333,13 @@ bool DeviceConfigStore::load(configstore::ConfigPayload& payload, String& error)
     }
     payload = current.payload;
     store.end();
+    String cleanup_error;
+    if (!removeLegacyFormalKeys(cleanup_error)) {
+      // Keep the canonical A/B value active, but report the cleanup failure so
+      // the next boot can retry it instead of silently declaring migration done.
+      error = cleanup_error;
+      return false;
+    }
     return true;
   }
   store.end();
@@ -309,12 +349,17 @@ bool DeviceConfigStore::load(configstore::ConfigPayload& payload, String& error)
   if (!legacy_present) return false;
 
   String migration_error;
-  if (save(payload, migration_error)) {
-    String cleanup_error;
-    if (!removeLegacyFormalKeys(cleanup_error) && error.length() == 0) error = cleanup_error;
+  if (!save(payload, migration_error)) {
+    error = migration_error;
+    return false;
   }
-  // Migration remains usable even when the new blob cannot be committed; the
-  // next boot retries it and the legacy keys are never deleted prematurely.
+  String cleanup_error;
+  if (!removeLegacyFormalKeys(cleanup_error)) {
+    // The new A/B blob remains intact; leave legacy data for the next boot so
+    // cleanup can be retried without losing the committed configuration.
+    error = cleanup_error;
+    return false;
+  }
   return true;
 }
 
@@ -417,21 +462,35 @@ bool DeviceConfigStore::commitPreparedSlot(
     previous_present = false;
   }
 
-  const auto restorePreviousPointer = [&]() {
+  const auto restorePreviousPointer = [&]() -> bool {
     Preferences restore;
-    if (!restore.begin(storage_namespace_, false)) return;
+    if (!restore.begin(storage_namespace_, false)) return false;
+    bool ok = true;
     if (previous_present) {
       String restore_error;
-      (void)writePointer(restore, previous_slot, previous_generation, restore_error);
+      ok = writePointer(restore, previous_slot, previous_generation, restore_error);
     } else {
-      restore.remove(kPointerKey);
+      ok = !restore.isKey(kPointerKey) || restore.remove(kPointerKey);
     }
     restore.end();
+    if (!ok) return false;
+    Preferences verify_restore;
+    if (!verify_restore.begin(storage_namespace_, true)) return false;
+    char restored_slot = 0;
+    uint64_t restored_generation = 0U;
+    bool restored_present = false;
+    String verify_error;
+    const bool read_ok = readPointer(
+        verify_restore, restored_slot, restored_generation, restored_present, verify_error);
+    verify_restore.end();
+    return read_ok && restored_present == previous_present
+      && (!previous_present || (restored_slot == previous_slot
+          && restored_generation == previous_generation));
   };
 
   if (!writePointer(store, prepared_slot, prepared_generation, error)) {
     store.end();
-    restorePreviousPointer();
+    if (!restorePreviousPointer()) setError(error, "PAIRING-NVS-007");
     return false;
   }
   store.end();
@@ -453,7 +512,10 @@ bool DeviceConfigStore::commitPreparedSlot(
     verify.end();
   }
   if (!active_ok) {
-    restorePreviousPointer();
+    if (!restorePreviousPointer()) {
+      setError(error, "PAIRING-NVS-007");
+      return false;
+    }
     setError(error, "PAIRING-NVS-005");
     return false;
   }
@@ -560,11 +622,37 @@ bool DeviceConfigStore::writeJournal(
     setError(error, "PAIRING-NVS-002");
     return false;
   }
-  const bool ok = store.putBytes(kJournalKey, bytes.data(), bytes.size()) == bytes.size();
-  if (ok) store.remove(kLegacyJournalKey);
+  const bool written = store.putBytes(kJournalKey, bytes.data(), bytes.size()) == bytes.size();
+  bool legacy_removed = true;
+  if (written && store.isKey(kLegacyJournalKey)) legacy_removed = store.remove(kLegacyJournalKey);
   store.end();
-  if (!ok) setError(error, "PAIRING-NVS-005");
-  return ok;
+  if (!written) {
+    setError(error, "PAIRING-NVS-005");
+    return false;
+  }
+  if (!legacy_removed) {
+    // Do not roll back the new journal: recovery must retain the canonical
+    // transaction even when legacy cleanup cannot be completed.
+    setError(error, "PAIRING-NVS-006");
+    return false;
+  }
+  Preferences verify;
+  if (!verify.begin(storage_namespace_, true)) {
+    setError(error, "PAIRING-NVS-006");
+    return false;
+  }
+  std::string readback;
+  bool present = false;
+  String readback_error;
+  configstore::RecoveryJournal decoded;
+  std::string decode_error;
+  const bool read_ok = readBlob(verify, kJournalKey, readback, present, readback_error)
+    && present && readback == bytes
+    && configstore::decode_journal(readback, decoded, decode_error)
+    && !verify.isKey(kLegacyJournalKey);
+  verify.end();
+  if (!read_ok) setError(error, "PAIRING-NVS-006");
+  return read_ok;
 }
 
 bool DeviceConfigStore::clearJournal(String& error) {
@@ -574,10 +662,23 @@ bool DeviceConfigStore::clearJournal(String& error) {
     setError(error, "PAIRING-NVS-002");
     return false;
   }
-  store.remove(kJournalKey);
-  store.remove(kLegacyJournalKey);
+  bool ok = true;
+  if (store.isKey(kJournalKey)) ok = store.remove(kJournalKey);
+  if (ok && store.isKey(kLegacyJournalKey)) ok = store.remove(kLegacyJournalKey);
   store.end();
-  return true;
+  if (!ok) {
+    setError(error, "PAIRING-NVS-006");
+    return false;
+  }
+  Preferences verify;
+  if (!verify.begin(storage_namespace_, true)) {
+    setError(error, "PAIRING-NVS-006");
+    return false;
+  }
+  const bool absent = !verify.isKey(kJournalKey) && !verify.isKey(kLegacyJournalKey);
+  verify.end();
+  if (!absent) setError(error, "PAIRING-NVS-006");
+  return absent;
 }
 
 bool DeviceConfigStore::clearAll(String& error) {
@@ -587,9 +688,23 @@ bool DeviceConfigStore::clearAll(String& error) {
     setError(error, "PAIRING-NVS-002");
     return false;
   }
-  store.clear();
+  const bool cleared = store.clear();
   store.end();
-  return true;
+  if (!cleared) {
+    setError(error, "PAIRING-NVS-006");
+    return false;
+  }
+  Preferences verify;
+  if (!verify.begin(storage_namespace_, true)) {
+    setError(error, "PAIRING-NVS-006");
+    return false;
+  }
+  const bool empty = !verify.isKey(kSlotAKey) && !verify.isKey(kSlotBKey)
+    && !verify.isKey(kPointerKey) && !verify.isKey(kJournalKey)
+    && !verify.isKey(kLegacyJournalKey);
+  verify.end();
+  if (!empty) setError(error, "PAIRING-NVS-006");
+  return empty;
 }
 
 }  // namespace inktime

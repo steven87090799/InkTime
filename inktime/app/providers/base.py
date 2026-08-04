@@ -58,6 +58,7 @@ class VisionProvider(ABC):
         max_tokens: int | None = None,
         caption_controls: dict | None = None,
         reasoning_effort: str | None = None,
+        provider_request_context_id: str | None = None,
     ) -> dict:
         raise NotImplementedError("Provider 未實作共用分析 Request Body Builder")
 
@@ -103,6 +104,7 @@ class VisionProvider(ABC):
         caption_controls: dict | None = None,
         reasoning_effort: str | None = None,
         vision_attempt: VisionAttemptState | None = None,
+        provider_request_context_id: str | None = None,
     ) -> ProviderResponse:
         raise NotImplementedError
 
@@ -116,6 +118,7 @@ class VisionProvider(ABC):
         max_tokens: int | None = None,
         stage: str = "single_high",
         caption_controls: dict | None = None,
+        provider_request_context_id: str | None = None,
     ) -> ProviderResponse:
         """只傳文字修復 JSON，不得再次上傳圖片。"""
         raise NotImplementedError

@@ -13,51 +13,105 @@ class BudgetService:
         self.database = database
         self.settings = settings
 
+    @staticmethod
+    def _billable_evidence_sql(alias: str = "") -> str:
+        prefix = f"{alias}." if alias else ""
+        return f"""(
+            COALESCE({prefix}input_tokens,0) > 0 OR COALESCE({prefix}output_tokens,0) > 0
+            OR COALESCE({prefix}cached_tokens,0) > 0 OR COALESCE({prefix}reasoning_tokens,0) > 0
+            OR COALESCE({prefix}cache_write_tokens,0) > 0 OR COALESCE({prefix}request_body_bytes,0) > 0
+            OR COALESCE({prefix}image_bytes,0) > 0 OR COALESCE({prefix}actual_cost,0) > 0
+            OR COALESCE({prefix}estimated_cost,0) > 0
+        )"""
+
     def snapshot(self, job_id: str | None = None, photo_id: str | None = None) -> dict:
+        evidence = self._billable_evidence_sql()
         with self.database.session() as connection:
             row = connection.execute(
-                """
-                SELECT COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND date(started_at)=date('now') THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) daily,
-                       COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND strftime('%Y-%m',started_at)=strftime('%Y-%m','now') THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) monthly,
-                       COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND photo_id=? THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) photo,
-                       COALESCE(SUM(CASE WHEN cost_source='unknown' THEN 1 ELSE 0 END),0) unknown_count
+                f"""
+                SELECT
+                    COALESCE(SUM(CASE WHEN cost_source<>'unknown'
+                        AND date(started_at)=date('now') THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) daily_known,
+                    COALESCE(SUM(CASE WHEN cost_source<>'unknown'
+                        AND strftime('%Y-%m',started_at)=strftime('%Y-%m','now')
+                        THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) monthly_known,
+                    COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND photo_id=?
+                        THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) photo_known,
+                    COALESCE(SUM(CASE WHEN cost_source='unknown' AND {evidence} THEN 1 ELSE 0 END),0) unknown_count,
+                    COALESCE(SUM(CASE WHEN cost_source='unknown' AND {evidence}
+                        AND date(started_at)=date('now') THEN 1 ELSE 0 END),0) daily_unknown_count,
+                    COALESCE(SUM(CASE WHEN cost_source='unknown' AND {evidence}
+                        AND strftime('%Y-%m',started_at)=strftime('%Y-%m','now') THEN 1 ELSE 0 END),0) monthly_unknown_count,
+                    COALESCE(SUM(CASE WHEN cost_source='unknown' AND {evidence} AND photo_id=? THEN 1 ELSE 0 END),0) photo_unknown_count,
+                    COALESCE(SUM(CASE WHEN cost_source='unknown' AND {evidence} AND job_id=? THEN 1 ELSE 0 END),0) job_unknown_count
                 FROM api_usage
                 """,
-                (photo_id,),
+                (photo_id, photo_id, job_id),
             ).fetchone()
             job = (
                 connection.execute("SELECT spent,budget_limit FROM jobs WHERE id=?", (job_id,)).fetchone()
                 if job_id
                 else None
             )
-        return {
-            "daily": float(row["daily"]),
-            "monthly": float(row["monthly"]),
-            "photo": float(row["photo"]),
+
+        reserve = max(0.01, min(100.0, float(self.settings.get("budget.unknown_request_reserve", 0.25))))
+        daily_known = float(row["daily_known"] or 0)
+        monthly_known = float(row["monthly_known"] or 0)
+        photo_known = float(row["photo_known"] or 0)
+        daily_unknown = int(row["daily_unknown_count"] or 0)
+        monthly_unknown = int(row["monthly_unknown_count"] or 0)
+        photo_unknown = int(row["photo_unknown_count"] or 0)
+        job_unknown = int(row["job_unknown_count"] or 0)
+        job_known = float(job["spent"] or 0) if job else 0.0
+        job_limit = float(job["budget_limit"]) if job and job["budget_limit"] is not None else None
+        snapshot = {
+            "daily_known": daily_known,
+            "monthly_known": monthly_known,
+            "photo_known": photo_known,
+            "job_known": job_known,
+            "daily_unknown_count": daily_unknown,
+            "monthly_unknown_count": monthly_unknown,
+            "photo_unknown_count": photo_unknown,
+            "job_unknown_count": job_unknown,
             "unknown_count": int(row["unknown_count"] or 0),
-            "job": float(job["spent"]) if job else 0,
-            "job_limit": float(job["budget_limit"]) if job and job["budget_limit"] is not None else None,
+            "unknown_request_reserve": reserve,
+            "daily_effective": daily_known + daily_unknown * reserve,
+            "monthly_effective": monthly_known + monthly_unknown * reserve,
+            "photo_effective": photo_known + photo_unknown * reserve,
+            "job_effective": job_known + job_unknown * reserve,
+            "job_limit": job_limit,
         }
+        # Keep the old keys as effective values so existing callers enforce the
+        # new reserve model without silently dropping historical fields.
+        snapshot.update(
+            daily=snapshot["daily_effective"],
+            monthly=snapshot["monthly_effective"],
+            photo=snapshot["photo_effective"],
+            job=snapshot["job_effective"],
+        )
+        return snapshot
 
     def assert_request_allowed(self, job_id: str | None, photo_id: str | None) -> None:
         usage = self.snapshot(job_id, photo_id)
-        if usage["unknown_count"]:
-            error = BudgetExceeded("已有 API 成本為 unknown；請先設定模型價格或使用 Provider 真實成本回報")
+        if (photo_id and usage["photo_unknown_count"]) or (job_id and usage["job_unknown_count"]):
+            error = BudgetExceeded(
+                "同一照片或工作已有 API 成本為 unknown；請先設定模型價格或完成 Provider 真實成本回報"
+            )
             error.code = "BUDGET-003"
             raise error
         checks = (
-            (usage["daily"], float(self.settings.get("budget.daily_stop", 10)), "每日 API 預算已達停止值"),
+            (usage["daily_effective"], float(self.settings.get("budget.daily_stop", 10)), "每日 API 預算已達停止值"),
             (
-                usage["monthly"],
+                usage["monthly_effective"],
                 float(self.settings.get("budget.monthly_stop", 100)),
                 "每月 API 預算已達停止值",
             ),
-            (usage["photo"], float(self.settings.get("budget.photo_max", 0.25)), "單張照片成本已達上限"),
+            (usage["photo_effective"], float(self.settings.get("budget.photo_max", 0.25)), "單張照片成本已達上限"),
         )
         for current, maximum, message in checks:
             if maximum > 0 and current >= maximum:
                 raise BudgetExceeded(message)
-        if usage["job_limit"] is not None and usage["job"] >= usage["job_limit"]:
+        if usage["job_limit"] is not None and usage["job_effective"] >= usage["job_limit"]:
             error = BudgetExceeded("工作預算已達上限")
             error.code = "BUDGET-001"
             raise error

@@ -68,7 +68,7 @@ def _bounded_string(value: Any, field: str, maximum: int) -> str:
         not isinstance(value, str)
         or not value.strip()
         or len(value.strip()) > maximum
-        or any(ord(char) < 0x20 for char in value)
+        or any(ord(char) < 0x20 or ord(char) == 0x7f for char in value)
     ):
         raise ValueError(f"PROVIDER-002 {field} 必須是 1 至 {maximum} 字元字串")
     return value.strip()
@@ -101,8 +101,17 @@ def _nonnegative_number_or_percentiles(value: Any, field: str) -> float | dict[s
     return {str(name): _nonnegative_number(item, f"{field}.{name}") for name, item in value.items()}
 
 
-def normalize_options(kind: str, options: Any) -> dict[str, Any]:
+def effective_provider_kind(kind: str, base_url: str | None = None) -> str:
+    """Resolve legacy OpenAI-compatible rows to their real OpenRouter contract."""
+
     normalized_kind = str(kind or "").strip().lower()
+    if normalized_kind == "openai_compatible" and base_url is not None and is_openrouter_base_url(base_url):
+        return "openrouter"
+    return normalized_kind
+
+
+def normalize_options(kind: str, options: Any, *, base_url: str | None = None) -> dict[str, Any]:
+    normalized_kind = effective_provider_kind(kind, base_url)
     if normalized_kind not in PROVIDER_KINDS:
         raise ValueError(f"PROVIDER-001 不支援的 Provider kind：{normalized_kind or '空白'}")
     if options is None:
@@ -171,8 +180,13 @@ def normalize_options(kind: str, options: Any) -> dict[str, Any]:
     return result
 
 
-def canonical_options(kind: str, options: Any) -> str:
-    return json.dumps(normalize_options(kind, options), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+def canonical_options(kind: str, options: Any, *, base_url: str | None = None) -> str:
+    return json.dumps(
+        normalize_options(kind, options, base_url=base_url),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def is_openrouter_base_url(base_url: str) -> bool:
@@ -204,9 +218,8 @@ def validate_base_url(
     *,
     require_private_http_option: bool = True,
 ) -> str:
-    normalized_options = normalize_options(str(kind or "").strip().lower(), options)
     value = str(base_url or "").strip().rstrip("/")
-    if any(ord(char) < 0x20 for char in value):
+    if any(ord(char) < 0x20 or ord(char) == 0x7f for char in value):
         raise ValueError("PROVIDER-016 base_url 不可包含控制字元")
     parsed = urlparse(value)
     try:
@@ -216,6 +229,8 @@ def validate_base_url(
         raise ValueError("PROVIDER-016 base_url 的 host 或 port 不合法") from exc
     if parsed.scheme not in {"http", "https"} or not hostname or parsed.username or parsed.password:
         raise ValueError("PROVIDER-016 base_url 必須是沒有帳密的完整 http/https URL")
+    effective_kind = effective_provider_kind(kind, value)
+    normalized_options = normalize_options(effective_kind, options)
     if parsed.query or parsed.fragment:
         raise ValueError("PROVIDER-017 base_url 不可包含 query 或 fragment")
     if parsed.scheme == "http":

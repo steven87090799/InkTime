@@ -14,6 +14,7 @@ class UsageRepository:
         self,
         *,
         provider: str,
+        provider_id: str | None = None,
         model: str,
         job_id: str | None,
         photo_id: str | None,
@@ -44,14 +45,15 @@ class UsageRepository:
         with self.database.session() as connection:
             connection.execute(
                 """
-                INSERT INTO api_usage(provider,model,job_id,photo_id,request_type,input_tokens,output_tokens,
+                INSERT INTO api_usage(provider,provider_id,model,job_id,photo_id,request_type,input_tokens,output_tokens,
                     cached_tokens,estimated_cost,actual_cost,started_at,completed_at,latency_ms,status,retry_count,error_code,
                     batch_id,batch_item_id,processing_mode,request_id,reasoning_tokens,cache_write_tokens,cost_source,
                     prompt_chars,schema_chars,request_body_bytes,image_bytes)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     provider,
+                    provider_id,
                     model,
                     job_id,
                     photo_id,
@@ -85,6 +87,7 @@ class UsageRepository:
         self,
         *,
         provider: str,
+        provider_id: str | None = None,
         model: str,
         job_id: str | None,
         photo_id: str | None,
@@ -113,13 +116,14 @@ class UsageRepository:
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO api_usage(
-                    provider,model,job_id,photo_id,request_type,input_tokens,output_tokens,cached_tokens,
+                    provider,provider_id,model,job_id,photo_id,request_type,input_tokens,output_tokens,cached_tokens,
                     estimated_cost,actual_cost,started_at,completed_at,latency_ms,status,retry_count,error_code,
                     batch_id,batch_item_id,processing_mode,request_id,reasoning_tokens,cache_write_tokens,cost_source
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     provider,
+                    provider_id,
                     model,
                     job_id,
                     photo_id,

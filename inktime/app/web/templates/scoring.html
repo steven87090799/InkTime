@@ -125,6 +125,7 @@
     if (!response.ok) { status.textContent = data.message || '測試失敗'; return; }
     status.textContent = '測試完成；上傳暫存檔已刪除。';
     const analysis = data.analysis;
+    const usage = data.usage || {};
     const element = (tag, text, className = '') => {
       const node = document.createElement(tag);
       node.textContent = text;
@@ -137,12 +138,34 @@
       card.append(element('span', label), element('strong', String(value)));
       cards.append(card);
     });
+    const money = value => `US$ ${Number(value || 0).toFixed(6)}`;
+    const usageRows = element('div', '', 'scoring-usage');
+    usageRows.append(element('h4', 'Usage 分列'));
+    (usage.attempts || []).forEach(attempt => {
+      const label = attempt.request_type === 'scoring_test_repair' ? 'JSON repair' : 'Vision';
+      const cost = attempt.cost_source === 'unknown'
+        ? '成本 unknown'
+        : `${attempt.cost_source === 'provider_reported' ? 'Provider' : '估算'} ${money(attempt.effective_cost)}`;
+      const row = element('div', '', 'scoring-usage-row');
+      row.append(
+        element('strong', label),
+        element('span', `${attempt.input_tokens + attempt.output_tokens} Token · ${cost}`),
+        element('span', `image bytes ${attempt.image_bytes || 0}`)
+      );
+      usageRows.append(row);
+    });
+    const costSummary = usage.cost_source === 'incomplete'
+      ? `成本 incomplete：已知合計 ${money(usage.cost)}，${usage.unknown_cost_count || 0} 筆 unknown`
+      : usage.cost_source === 'unknown'
+        ? '成本 unknown'
+        : `${usage.cost_source === 'provider_reported' ? 'Provider' : '估算'} ${money(usage.cost)}`;
     result.replaceChildren(
       cards,
       element('h3', `${data.score_band}｜${analysis.caption}`),
       element('p', analysis.reason),
       element('p', `類型：${analysis.types.join('、')}`),
-      element('small', `${data.profile.name} · ${data.usage.provider}/${data.usage.model} · ${data.usage.input_tokens + data.usage.output_tokens} Token · ${data.usage.cost_source === 'unknown' ? '成本 unknown' : `${data.usage.cost_source === 'provider_reported' ? 'Provider' : '估算'} US$ ${Number(data.usage.cost).toFixed(6)}`} · ${data.usage.latency_ms} ms`)
+      element('small', `${data.profile.name} · ${usage.provider}/${usage.model} · ${usage.input_tokens + usage.output_tokens} Token · ${costSummary} · ${usage.latency_ms} ms`),
+      usageRows
     );
     result.hidden = false;
   });

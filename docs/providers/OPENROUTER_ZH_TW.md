@@ -48,7 +48,7 @@ Provider 進階選項存放在 `providers.options_json`，API 與子程序共用
 
 未知欄位會被 API 以 `SET-003` 拒絕，不能靠前端繞過。Provider kind 也由 server allowlist 限制為 `openai`、`openrouter`、`openai_compatible`、`ollama`。
 
-若既有 `kind=openai_compatible` 的 Base URL host 是 `openrouter.ai`，控制台會提示偵測到相容端點；可先維持既有設定，再安排改存正式 `kind=openrouter`，以取得完整 routing／privacy contract 與 Batch hard guard。
+若既有 `kind=openai_compatible` 的 Base URL host 是 `openrouter.ai` 或其正式子網域，Migration 33 會在同一交易中保留 options、補上 `require_parameters=true`、停用 Batch 並持久化為 `kind=openrouter`；API 與 worker 也會在 migration 前以相同 effective kind 解讀，避免繞過 routing／privacy contract。相似但不是真正 `openrouter.ai` 的 suffix 不會被接受。
 
 ## 實際 request contract
 
@@ -62,7 +62,7 @@ OpenRouter request 與一般 OpenAI 相容 Provider 的差異集中在 adapter�
   "provider": "options 正規化後的 routing object；沒有 routing 選項時不送空 object",
   "usage": {"include": true},
   "reasoning": {"effort": "low"},
-  "session_id": "僅在 session_sticky=true 時，以 provider/model/stage/system prompt identity 雜湊產生"
+  "session_id": "僅在 session_sticky=true 時，以 provider、workflow/photo、Vision fingerprint 與 reservation owner context 雜湊產生"
 }
 ```
 
@@ -82,7 +82,7 @@ InkTime 依下列優先順序保存成本：
 2. 已在 Provider 模型價格表填入的 Token 估算 → `cost_source=estimated`。
 3. 兩者都沒有 → `cost_source=unknown`，不當作零。
 
-同時保存 `input_tokens`、`output_tokens`、`cached_tokens`、`cache_write_tokens`、`reasoning_tokens`、request ID、prompt／schema 字元數、request body bytes 與 image bytes。成本頁、照片詳情與預算計算會把 unknown 單獨標示；已有 unknown 使用量時，新的 AI request 會 fail-closed，直到管理員補價格或使用能回報成本的 Provider。
+同時保存 `input_tokens`、`output_tokens`、`cached_tokens`、`cache_write_tokens`、`reasoning_tokens`、request ID、prompt／schema 字元數、request body bytes 與 image bytes。成本頁、照片詳情與預算計算會把 unknown 單獨標示；有可計費證據的 unknown 會按 `budget.unknown_request_reserve` 計入每日／每月／照片／工作有效成本，同一照片或工作仍會阻擋重試。補齊該 Provider／模型的 input、cached input、output（以及 cache-write 尚無定價欄位時的未知狀態）後，管理員儲存價格會回溯 reconciliation；未知不會被當作零。
 
 OpenRouter 的本地 AI Cache 仍是 InkTime 自己的內容／Provider／模型／Prompt／Schema／Vision fingerprint；不要把 OpenRouter 的 upstream response cache 當成 InkTime cache，也不要因 `session_sticky` 改變圖片 request identity。
 

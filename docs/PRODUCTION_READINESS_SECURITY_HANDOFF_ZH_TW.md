@@ -4,7 +4,7 @@
 
 ## 本輪 One-shot hardening 範圍
 
-- 基準為最新 `origin/main`；正式 schema source 目前為 `Migration 32`。它保存 Provider options/capabilities、usage 的 cache-write、成本來源與 request-size metrics，舊 Migration 1–31 不修改。
+- 基準為最新 `origin/main`；正式 schema source 目前為 `Migration 33`。Migration 32 保存 Provider options/capabilities、usage 的 cache-write、成本來源與 request-size metrics；Migration 33 增加 Provider identity、OpenRouter legacy data fix 與成本回溯索引，舊 Migration 1–31 不修改。
 - Provider 路徑新增正式 OpenRouter contract、受控 routing/privacy options、reasoning／session routing 與 Batch hard guard；Vision 與 text-only JSON repair 共用 policy helper；成本來源分為 `provider_reported`、`estimated`、`unknown`，unknown 不當作零成本。
 - AI 請求固定 512／1024／1600 image side；完整、變體、文字修復分別受 2048／3072／1200 token cap 約束。repair policy 在 Analysis Plan 建立時 freeze，但不進 Vision fingerprint；每個 job 最多一次 repair，且 repair 不重新上傳圖片。
 - ESP32 backend transport 只接受有 trust anchor 的 HTTPS；HTTP 僅限明確的私有 LAN 開發設定，沒有 `setInsecure()` fallback。首次配網會在 AP 頁面與裝置畫面顯示一次性的隨機 AP 密碼。
@@ -63,7 +63,7 @@ Webhook 採 at-least-once。每個事件持久化穩定 Event ID，所有後續 
 - `compose-production-tls-smoke`：用一次性測試 CA、SAN certificate、Nginx 與不屬保留 suffix 的 `inktime-ci.acme.dev`；client 明確信任 CA，不使用 `verify=False`／ignore-certificate。驗證 HTTP redirect、TLS hostname/chain、Secure＋HttpOnly＋SameSite=Strict、CSRF、login/logout/dashboard、HTTPS-only HSTS、production preflight 與 proxy hop diagnostics；backend port 不公開。
 - `bounded-runtime-soak`：Web app、Worker、Scheduler 同時執行；重複 session、device auth success/failure、Queue manifest/ACK、release metadata、scan、scheduler heartbeat 與 webhook mock。輸出 RSS、thread、FD、SQLite connection／writer、open file、child process、pending async work／job、oldest job、scheduler age、WAL、timeout、cleanup、exit status 與 final JSON summary。手動 workflow 可跑 30 分鐘、2 小時或 5 小時；24 小時只在受控 LAN 主機本地執行。
 - Backup/Restore：fresh database → full metadata backup → fresh target restore；驗證 Migration 27、administrator/password/session、device token、release/queue、settings、Batch lifecycle tables、Review／offline schedule tables、Secret exclusion、Worker/Scheduler bootstrap。舊 snapshot upgrade 由 migration fixtures 覆蓋。
-- Current schema gate：Release image 與 LAN production gate 都從 `inktime/app/db/migrations.py` 讀取目前最高 Migration，不再各自維護硬編碼版本；本輪預期為 Migration 32。Migration 32 的 upgrade／fresh／integrity／rollback 證據必須在 Final-Head CI 取得。
+- Current schema gate：Release image 與 LAN production gate 都從 `inktime/app/db/migrations.py` 讀取目前最高 Migration，不再各自維護硬編碼版本；本輪預期為 Migration 33。Migration 32／33 的 upgrade／fresh／integrity／rollback 證據必須在 Final-Head CI 取得。
 - Container supply-chain：`container-security.yml` 在 exact checkout 建置 image，輸出 CycloneDX SBOM，並以 Trivy 掃描 High/Critical；只有 `.trivyignore` 內逐一列出、含 owner／reason／expiry 的暫時 unfixed CVE 例外不阻擋，未列入的 High/Critical 仍使 workflow 失敗。例外到期前必須重評估 pinned base image；此 workflow 不代表真實 NAS host、registry 或 production image 已驗證。
 - Rollback：不支援只降程式、不還原 DB。必須停止 Web/Worker/Scheduler、還原相容 snapshot，再切回相容 image/commit。
 

@@ -319,10 +319,33 @@ static void clearConfigNVS() {
   DBG_PRINTLN("[NVS] clearConfigNVS()");
 #endif
   String storeError;
-  (void)configStore.clearAll(storeError);
-  prefs.begin("dashcfg", false);
-  prefs.clear();
-  prefs.end();
+  const bool storeCleared = configStore.clearAll(storeError);
+  bool legacyCleared = false;
+  if (prefs.begin("dashcfg", false)) {
+    legacyCleared = prefs.clear();
+    prefs.end();
+    if (legacyCleared && prefs.begin("dashcfg", true)) {
+      const char* keys[] = {
+        "last_epoch", "offretry_attempt", "offretry_epoch", "offretry_next",
+        "ack_item", "ack_version", "ack_event", "ack_attempt", "ack_next",
+        "ssid", "pass", "hostport", "ca_pem", "devtoken", "tzmin", "tz",
+        "hour", "minute", "rot180", "prefetch", "delivery", "button", "cfgver", "scnt",
+      };
+      for (const char* key : keys) {
+        if (prefs.isKey(key)) {
+          legacyCleared = false;
+          break;
+        }
+      }
+      prefs.end();
+    } else {
+      legacyCleared = false;
+    }
+  }
+  if (!storeCleared || !legacyCleared) {
+    lastDeviceErrorCode = "PAIRING-NVS-006";
+    lastDeviceErrorMessage = storeError.length() > 0U ? storeError : "NVS clear/readback 失敗";
+  }
 }
 
 static bool isFactoryResetRequestedAtBoot() {
@@ -852,7 +875,18 @@ bool saveConfig(const Config &cfg, String *errorCodeOut = nullptr) {
   };
   if (cfg.ca_pem.length() > inktime::kMaxDeviceCaPemBytes
       || (cfg.ca_pem.length() > 0 && !inktime::DeviceHttpTransport::trustAnchorValid(cfg.ca_pem))) {
-    setError("PAIRING-NVS-001");
+    setError("DEVICE-TLS-CA-INVALID");
+    return false;
+  }
+  String transportError;
+  String transportBase = cfg.backend_hostport;
+  transportBase.trim();
+  if (!transportBase.startsWith("http://") && !transportBase.startsWith("https://")) {
+    transportBase = "https://" + transportBase;
+  }
+  if (!inktime::DeviceHttpTransport::backendUrlAllowed(
+        transportBase, cfg.ca_pem, transportError)) {
+    setError(transportError.length() > 0U ? transportError.c_str() : "DEVICE-URL-INVALID");
     return false;
   }
   const inktime::configstore::ConfigPayload payload = configPayload(cfg);
@@ -866,6 +900,10 @@ bool saveConfig(const Config &cfg, String *errorCodeOut = nullptr) {
       setError("PAIRING-NVS-004");
     } else if (storeError == "PAIRING-NVS-005") {
       setError("PAIRING-NVS-005");
+    } else if (storeError == "PAIRING-NVS-006") {
+      setError("PAIRING-NVS-006");
+    } else if (storeError == "PAIRING-NVS-007") {
+      setError("PAIRING-NVS-007");
     } else {
       setError(storeError.length() > 0U ? storeError.c_str() : "PAIRING-NVS-001");
     }
@@ -1106,7 +1144,7 @@ void handleSave() {
     return;
   }
   if (caProvided && !inktime::DeviceHttpTransport::trustAnchorValid(caPem)) {
-    server.send(400, "text/plain; charset=utf-8", "PAIRING-003 Root CA PEM 格式不合法");
+    server.send(400, "text/plain; charset=utf-8", "DEVICE-TLS-CA-INVALID Root CA PEM 格式不合法");
     return;
   }
   if (ssid.length() > 32 || pass.length() > 63 || host.length() > 240 || deviceToken.length() > 256
@@ -1140,6 +1178,18 @@ void handleSave() {
 
   newCfg.rotate180 = rot180Req;
   newCfg.valid     = (newCfg.wifi_ssid.length() > 0);
+
+  String transportError;
+  if (!inktime::DeviceHttpTransport::backendUrlAllowed(
+        newCfg.backend_hostport, newCfg.ca_pem, transportError)) {
+    server.send(
+      400,
+      "text/plain; charset=utf-8",
+      String(transportError.length() > 0U ? transportError : "DEVICE-URL-INVALID")
+        + " Backend Origin 或 TLS 設定不合法"
+    );
+    return;
+  }
 
   String saveError;
   if (!saveConfig(newCfg, &saveError)) {

@@ -216,6 +216,7 @@ def configure_web_application(
         target = safe_local_redirect_target(
             request.referrer,
             allowed_host=request.host,
+            allowed_scheme=request.scheme,
         )
         return redirect(target or url_for("dashboard.dashboard"), code=303)
 

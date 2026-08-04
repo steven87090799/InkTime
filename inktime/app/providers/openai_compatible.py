@@ -19,7 +19,7 @@ from inktime.app.domain.analysis.scoring import DEFAULT_SCORING_RULES
 from inktime.app.providers.config import (
     PROVIDER_KINDS,
     OPENROUTER_ROUTING_KEYS,
-    is_openrouter_base_url,
+    effective_provider_kind,
     normalize_options,
     validate_base_url,
 )
@@ -70,6 +70,73 @@ AMBIGUOUS_VISION_ANALYSIS = "ambiguous_vision_analysis"
 NO_RETRY_SIDE_EFFECT = "no_retry_side_effect"
 
 
+def _valid_price(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
+def calculate_usage_cost(
+    pricing: dict[str, Any] | None,
+    usage: Usage,
+    *,
+    batch: bool = False,
+) -> float | None:
+    """Apply the same input/cached/output contract to sync and Batch usage."""
+
+    input_tokens = max(0, int(usage.input_tokens))
+    cached_tokens = max(0, int(usage.cached_tokens))
+    output_tokens = max(0, int(usage.output_tokens))
+    if usage.cache_write_tokens > 0:
+        # The current pricing schema has no cache-write price field.
+        return None
+    if input_tokens == 0 and cached_tokens == 0 and output_tokens == 0:
+        return 0.0
+    if not isinstance(pricing, dict):
+        return None
+    standard_input = _valid_price(pricing.get("input_per_million"))
+    standard_cached = _valid_price(pricing.get("cached_input_per_million"))
+    standard_output = _valid_price(pricing.get("output_per_million"))
+    if batch:
+        multiplier = _valid_price(pricing.get("batch_multiplier", 0.5))
+        if multiplier is None:
+            return None
+        input_price = _valid_price(pricing.get("batch_input_per_million"))
+        cached_price = _valid_price(pricing.get("batch_cached_input_per_million"))
+        output_price = _valid_price(pricing.get("batch_output_per_million"))
+        if input_price is None and standard_input is not None:
+            input_price = standard_input * multiplier
+        if cached_price is None and standard_cached is not None:
+            cached_price = standard_cached * multiplier
+        if cached_price is None and standard_input is not None:
+            cached_price = standard_input * multiplier
+        if output_price is None and standard_output is not None:
+            output_price = standard_output * multiplier
+    else:
+        input_price = standard_input
+        cached_price = standard_cached if standard_cached is not None else standard_input
+        output_price = standard_output
+    uncached_tokens = max(0, input_tokens - cached_tokens)
+    if uncached_tokens and input_price is None:
+        return None
+    if cached_tokens and cached_price is None:
+        return None
+    if output_tokens and output_price is None:
+        return None
+    total = (
+        uncached_tokens * float(input_price or 0)
+        + cached_tokens * float(cached_price or 0)
+        + output_tokens * float(output_price or 0)
+    ) / 1_000_000
+    return total if math.isfinite(total) and total >= 0 else None
+
+
 class OpenAICompatibleProvider(VisionProvider):
     def __init__(
         self,
@@ -89,14 +156,14 @@ class OpenAICompatibleProvider(VisionProvider):
         session: requests.Session | None = None,
     ) -> None:
         self.name = name
-        self.kind = str(kind or "openai_compatible").strip().lower()
+        self.kind = effective_provider_kind(kind, base_url)
         if self.kind not in PROVIDER_KINDS:
             raise ValueError(f"Provider kind 不支援：{self.kind}")
         self.options = normalize_options(self.kind, options or {})
         self.base_url = self.normalize_base_url(
             validate_base_url(self.kind, base_url, self.options)
         )
-        self.openrouter_compatible = self.kind == "openai_compatible" and is_openrouter_base_url(self.base_url)
+        self.openrouter_compatible = self.kind == "openrouter"
         self.provider_id = str(provider_id or name)
         self.api_key = api_key
         self.pricing = pricing or {}
@@ -473,6 +540,7 @@ class OpenAICompatibleProvider(VisionProvider):
         max_tokens: int | None = None,
         caption_controls: dict[str, Any] | None = None,
         reasoning_effort: str | None = None,
+        provider_request_context_id: str | None = None,
     ) -> dict[str, Any]:
         encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
         body: dict[str, Any] = {
@@ -512,6 +580,7 @@ class OpenAICompatibleProvider(VisionProvider):
             stage=stage,
             prompt_identity=self._system_prompt(caption_controls or self.caption_controls, stage=stage),
             reasoning_effort=reasoning_effort,
+            provider_request_context_id=provider_request_context_id,
             allow_reasoning=True,
         )
         try:
@@ -541,6 +610,7 @@ class OpenAICompatibleProvider(VisionProvider):
         stage: str,
         prompt_identity: str,
         reasoning_effort: str | None,
+        provider_request_context_id: str | None,
         allow_reasoning: bool,
     ) -> dict[str, Any]:
         """Apply the provider-specific policy shared by Vision and repair.
@@ -556,8 +626,8 @@ class OpenAICompatibleProvider(VisionProvider):
             if routing:
                 body["provider"] = routing
             body["usage"] = {"include": True}
-            if self.options.get("session_sticky"):
-                session_identity = f"{self.provider_id}|{model}|{stage}|{prompt_identity}"
+            if self.options.get("session_sticky") and provider_request_context_id:
+                session_identity = f"{self.provider_id}|{provider_request_context_id}"
                 body["session_id"] = hashlib.sha256(session_identity.encode("utf-8")).hexdigest()[:32]
             if allow_reasoning:
                 normalized_effort = normalize_reasoning_effort(reasoning_effort or "none")
@@ -582,6 +652,7 @@ class OpenAICompatibleProvider(VisionProvider):
         caption_controls: dict[str, Any] | None = None,
         reasoning_effort: str | None = None,
         vision_attempt: VisionAttemptState | None = None,
+        provider_request_context_id: str | None = None,
     ) -> ProviderResponse:
         body = self.build_analysis_request_body(
             image_path=image_path,
@@ -591,6 +662,7 @@ class OpenAICompatibleProvider(VisionProvider):
             max_tokens=max_tokens,
             caption_controls=caption_controls,
             reasoning_effort=reasoning_effort,
+            provider_request_context_id=provider_request_context_id,
         )
         return self._post_completion(body, vision_attempt=vision_attempt)
 
@@ -603,6 +675,7 @@ class OpenAICompatibleProvider(VisionProvider):
         max_tokens: int | None = None,
         stage: str = "single_high",
         caption_controls: dict[str, Any] | None = None,
+        provider_request_context_id: str | None = None,
     ) -> ProviderResponse:
         repair_system_prompt = "只修復 JSON 使其符合提供的 Schema；不可新增圖片推測，不可輸出 Markdown。"
         body = {
@@ -652,6 +725,7 @@ class OpenAICompatibleProvider(VisionProvider):
             stage=f"{stage}:repair",
             prompt_identity=repair_prompt_identity,
             reasoning_effort="none",
+            provider_request_context_id=provider_request_context_id,
             allow_reasoning=False,
         )
         self.last_request_metrics = {
@@ -838,37 +912,10 @@ class OpenAICompatibleProvider(VisionProvider):
         return self._json_response(response)
 
     def estimate_cost(self, model: str, usage: Usage) -> float | None:
-        price = self.pricing.get(model, {})
-        if not price or not any(key in price for key in ("input_per_million", "output_per_million")):
-            return None
-        uncached = max(0, usage.input_tokens - usage.cached_tokens)
-        return (
-            uncached * float(price.get("input_per_million", 0))
-            + usage.cached_tokens
-            * float(price.get("cached_input_per_million", price.get("input_per_million", 0)))
-            + usage.output_tokens * float(price.get("output_per_million", 0))
-        ) / 1_000_000
+        return calculate_usage_cost(self.pricing.get(model), usage)
 
     def estimate_batch_cost(self, model: str, usage: Usage) -> float | None:
-        price = self.pricing.get(model, {})
-        if not price or not any(key in price for key in ("input_per_million", "output_per_million")):
-            return None
-        multiplier = float(price.get("batch_multiplier", 0.5) or 0.5)
-        input_price = price.get("batch_input_per_million")
-        cached_price = price.get("batch_cached_input_per_million")
-        output_price = price.get("batch_output_per_million")
-        if input_price is None:
-            input_price = float(price.get("input_per_million", 0) or 0) * multiplier
-        if cached_price is None:
-            cached_price = float(price.get("cached_input_per_million", 0) or 0) * multiplier
-        if output_price is None:
-            output_price = float(price.get("output_per_million", 0) or 0) * multiplier
-        uncached = max(0, usage.input_tokens - usage.cached_tokens)
-        return (
-            uncached * float(input_price)
-            + usage.cached_tokens * float(cached_price)
-            + usage.output_tokens * float(output_price)
-        ) / 1_000_000
+        return calculate_usage_cost(self.pricing.get(model), usage, batch=True)
 
     def validate_config(self) -> tuple[bool, str]:
         try:

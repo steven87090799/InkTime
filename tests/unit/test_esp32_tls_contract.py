@@ -14,7 +14,11 @@ def test_device_ca_contract_is_bounded_and_shared_with_portal():
     transport = TRANSPORT.read_text(encoding="utf-8")
     firmware = FIRMWARE.read_text(encoding="utf-8")
     assert "kMaxDeviceCaPemBytes = 3500U" in header
-    assert "ca.length() <= inktime::kMaxDeviceCaPemBytes" in transport
+    assert "ca.length() > inktime::kMaxDeviceCaPemBytes" in transport
+    assert "mbedtls_x509_crt_parse" in transport
+    assert "DEVICE-TLS-CA-INVALID" in transport
+    assert "#ifndef INKTIME_ALLOW_INSECURE_DEVICE_HTTP_HOSTNAMES" in transport
+    assert "INKTIME_ALLOW_INSECURE_DEVICE_HTTP_HOSTNAMES 0" in transport
     assert "maxlength='\");" in firmware
     assert "String(inktime::kMaxDeviceCaPemBytes)" in firmware
     assert "8192" not in transport + firmware

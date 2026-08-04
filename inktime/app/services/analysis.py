@@ -587,6 +587,7 @@ class PhotoAnalysisService:
         metrics = dict(response.request_metrics or getattr(provider, "last_request_metrics", {}) or {})
         self.usage.record(
             provider=provider.name,
+            provider_id=str(getattr(provider, "provider_id", provider.name)),
             model=model,
             job_id=job_id,
             photo_id=photo_id,
@@ -627,6 +628,7 @@ class PhotoAnalysisService:
         repair_policy: dict | None,
         prompt_version: str,
         vision_input: dict,
+        provider_prompt_contract_sha256: str | None = None,
         force_recompute: bool = False,
         _excluded_providers: set[str] | None = None,
     ) -> tuple[dict, str, float, bool, str, str, str, str, Usage, int]:
@@ -661,6 +663,8 @@ class PhotoAnalysisService:
             "reasoning_effort": reasoning_effort,
             **vision_input,
         }
+        if provider_prompt_contract_sha256:
+            fingerprint_material["provider_prompt_contract_sha256"] = str(provider_prompt_contract_sha256)
         request_fingerprint = fingerprint(
             {
                 **fingerprint_material,
@@ -674,15 +678,19 @@ class PhotoAnalysisService:
         # Legacy schema constrains this column to basic/full; the v4 Vision
         # Request Fingerprint is the authoritative additional cache dimension.
         cache_schema_kind = schema_kind
-        cache_schema_versions = (SCHEMA_VERSION, 2) if schema_kind == "full" else (2,)
+        has_prompt_contract = bool(provider_prompt_contract_sha256)
+        if has_prompt_contract:
+            cache_schema_versions = (SCHEMA_VERSION,) if schema_kind == "full" else (2,)
+        else:
+            cache_schema_versions = (SCHEMA_VERSION, 2) if schema_kind == "full" else (2,)
         vision_json = canonical_json(vision_input)
 
         def get_cache() -> dict | None:
             for cache_schema_version in cache_schema_versions:
                 fingerprints = (
-                    (request_fingerprint, legacy_v2_fingerprint)
-                    if cache_schema_version == 2
-                    else (request_fingerprint,)
+                    (request_fingerprint,)
+                    if has_prompt_contract or cache_schema_version != 2
+                    else (request_fingerprint, legacy_v2_fingerprint)
                 )
                 for cache_fingerprint in fingerprints:
                     cached_row = self.photos.get_ai_cache(
@@ -835,6 +843,10 @@ class PhotoAnalysisService:
                     vision_input_spec_json=vision_json,
                     cache_provider_identity=actual_provider,
                     vision_attempt=vision_attempt,
+                    provider_request_context_id=(
+                        f"{stage}|{job_id or 'manual'}|{photo_id}|{request_fingerprint}|"
+                        f"{hashlib.sha256(owner_id.encode('utf-8')).hexdigest()[:16]}"
+                    ),
                 )
         except Exception as exc:
             self.photos.finish_ai_cache_reservation(cache_key, owner_id, error=str(exc))
@@ -890,6 +902,7 @@ class PhotoAnalysisService:
                     repair_policy=repair_policy,
                     prompt_version=prompt_version,
                     vision_input=vision_input,
+                    provider_prompt_contract_sha256=provider_prompt_contract_sha256,
                     force_recompute=force_recompute,
                     _excluded_providers=excluded,
                 )
@@ -930,6 +943,7 @@ class PhotoAnalysisService:
         vision_input_spec_json: str,
         cache_provider_identity: str,
         vision_attempt: VisionAttemptState,
+        provider_request_context_id: str,
     ) -> tuple[dict, str, float, Usage, int]:
         if self.budgets:
             self.budgets.assert_request_allowed(job_id, photo_id)
@@ -971,6 +985,7 @@ class PhotoAnalysisService:
                 "max_tokens": max_tokens,
                 "reasoning_effort": reasoning_effort,
                 "caption_controls": caption_controls,
+                "provider_request_context_id": provider_request_context_id,
             }
             if self.process_boundary is None:
                 # Cooperative providers may use this mutable marker to tell
@@ -992,6 +1007,7 @@ class PhotoAnalysisService:
                         reasoning_effort=reasoning_effort,
                         caption_controls=caption_controls,
                         vision_attempt=vision_attempt,
+                        provider_request_context_id=provider_request_context_id,
                     )
                 else:
                     response = self.process_boundary.call_provider(
@@ -1010,6 +1026,7 @@ class PhotoAnalysisService:
                     reasoning_effort=reasoning_effort,
                     caption_controls=caption_controls,
                     vision_attempt=vision_attempt,
+                    provider_request_context_id=provider_request_context_id,
                 )
             vision_attempt.vision_started = True
             vision_attempt.vision_completed = True
@@ -1085,6 +1102,7 @@ class PhotoAnalysisService:
                 "max_tokens": max(256, min(repair_cap, REPAIR_TOKEN_CAP)),
                 "stage": stage,
                 "caption_controls": caption_controls,
+                "provider_request_context_id": provider_request_context_id,
             }
             if self.process_boundary is not None and hasattr(provider, "repair_json_isolated"):
                 repaired = provider.repair_json_isolated(self.process_boundary, **repair_call)
@@ -1457,6 +1475,7 @@ class PhotoAnalysisService:
             repair_policy=repair_policy,
             prompt_version=prompt_version,
             vision_input=vision_input,
+            provider_prompt_contract_sha256=str(analysis_spec.get("provider_prompt_contract_sha256") or "") or None,
             force_recompute=force_recompute,
         )
         total_cost = cost

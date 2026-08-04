@@ -81,7 +81,7 @@ bool selectCurrent(
   const bool valid_a = decodeSlot(blobs, 'A', candidate_a, generation_a);
   const bool valid_b = decodeSlot(blobs, 'B', candidate_b, generation_b);
   if (!valid_a && !valid_b) return false;
-  if (valid_a && (!valid_b || generation_a >= generation_b)) {
+  if (valid_a && (!valid_b || generation_a <= generation_b)) {
     value = candidate_a;
     active_slot = 'A';
     generation = generation_a;
@@ -248,7 +248,7 @@ void test_ab_pointer_and_write_failure_injection() {
   assert(active == second && active_generation == 2);
 }
 
-void test_pointer_selection_prefers_pointer_and_falls_back_to_newest_valid_slot() {
+void test_pointer_selection_prefers_pointer_and_falls_back_to_oldest_safe_slot() {
   std::map<std::string, std::string> blobs;
   std::string error;
   assert(inktime::configstore::encode_slot(payload("a"), 4U, blobs["slot_a"], error));
@@ -263,7 +263,7 @@ void test_pointer_selection_prefers_pointer_and_falls_back_to_newest_valid_slot(
 
   blobs["active"][0] ^= 0x01;
   assert(selectCurrent(blobs, current, active_slot, generation));
-  assert(active_slot == 'B' && generation == 9U && current == payload("b"));
+  assert(active_slot == 'A' && generation == 4U && current == payload("a"));
 
   blobs["slot_b"].back() ^= 0x01;
   assert(selectCurrent(blobs, current, active_slot, generation));
@@ -336,7 +336,7 @@ int main() {
   test_payload_roundtrip_and_empty_overwrite();
   test_envelope_rejects_corruption_and_shape_changes();
   test_ab_pointer_and_write_failure_injection();
-  test_pointer_selection_prefers_pointer_and_falls_back_to_newest_valid_slot();
+  test_pointer_selection_prefers_pointer_and_falls_back_to_oldest_safe_slot();
   test_pointer_and_journal_roundtrip();
   return 0;
 }

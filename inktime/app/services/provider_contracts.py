@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 from typing import Any
+from uuid import uuid4
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -205,6 +206,7 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
     vision_completed = False
     repair_attempted = False
     repair_completed = False
+    provider_request_context_id = f"provider-contract|{uuid4()}"
     with tempfile.TemporaryDirectory(prefix="inktime-provider-contract-") as directory:
         image_path = _synthetic_contract_image(Path(directory) / "inktime-test.png")
         vision_requests = 1
@@ -219,6 +221,7 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
                 max_tokens=256 if level == 2 else 2048,
                 reasoning_effort="none",
                 vision_attempt=VisionAttemptState(),
+                provider_request_context_id=provider_request_context_id,
             )
             network_responses = 1
             vision_completed = True
@@ -280,6 +283,7 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
                     model=model,
                     max_tokens=REPAIR_TOKEN_CAP,
                     stage="single",
+                    provider_request_context_id=provider_request_context_id,
                 )
                 repair_responses = 1
                 repair_completed = True
