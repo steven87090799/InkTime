@@ -264,7 +264,7 @@ def test_migration_27_to_30_freezes_ownership_and_invalidates_legacy_ready_rows(
         )
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [28, 29, 30, 31, 32]
+    assert migrate(database, tmp_path / "backups") == [28, 29, 30, 31, 32, 33]
     with database.session() as connection:
         schedule = connection.execute(
             "SELECT status,panel_profile,rotation,snapshot_json FROM device_offline_schedules WHERE id='legacy-schedule'"
@@ -325,7 +325,7 @@ def test_migration_29_to_30_adds_pointer_times_and_mode_guards_with_backup_resta
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
     backups = tmp_path / "backups"
-    assert migrate(database, backups) == [30, 31, 32]
+    assert migrate(database, backups) == [30, 31, 32, 33]
     backup_files = list(backups.glob("*.sqlite3"))
     assert len(backup_files) == 1
     with sqlite3.connect(backup_files[0]) as backup:
@@ -700,7 +700,7 @@ def test_migration_21_upgrades_v20_webhooks_idempotently(monkeypatch, tmp_path):
         notification_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]
+    assert migrate(database, tmp_path / "backups") == [21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33]
     assert migrate(database, tmp_path / "backups") == []
     assert database.integrity_check() == "ok"
     with database.session() as connection:

@@ -10,6 +10,15 @@ class UsageRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
 
+    @staticmethod
+    def _registered_provider_id(connection, provider_id: str | None) -> str | None:
+        """Keep the optional identity link valid for external/test providers."""
+
+        if not provider_id:
+            return None
+        row = connection.execute("SELECT id FROM providers WHERE id=?", (str(provider_id),)).fetchone()
+        return str(row[0]) if row is not None else None
+
     def record(
         self,
         *,
@@ -43,6 +52,7 @@ class UsageRepository:
     ) -> None:
         completed_at = datetime.now(timezone.utc).isoformat()
         with self.database.session() as connection:
+            registered_provider_id = self._registered_provider_id(connection, provider_id)
             connection.execute(
                 """
                 INSERT INTO api_usage(provider,provider_id,model,job_id,photo_id,request_type,input_tokens,output_tokens,
@@ -53,7 +63,7 @@ class UsageRepository:
                 """,
                 (
                     provider,
-                    provider_id,
+                    registered_provider_id,
                     model,
                     job_id,
                     photo_id,
@@ -113,6 +123,7 @@ class UsageRepository:
         context = self.database.session() if connection is None else nullcontext(connection)
         with context as active_connection:
             connection = active_connection
+            registered_provider_id = self._registered_provider_id(connection, provider_id)
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO api_usage(
@@ -123,7 +134,7 @@ class UsageRepository:
                 """,
                 (
                     provider,
-                    provider_id,
+                    registered_provider_id,
                     model,
                     job_id,
                     photo_id,
