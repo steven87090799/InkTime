@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from inktime.app.domain.analysis.plan import build_analysis_plan, canonical_json, fingerprint
+from inktime.app.domain.analysis.plan import (
+    build_analysis_plan,
+    canonical_json,
+    fingerprint,
+    normalize_analysis_plan,
+)
 
 
 def _plan(**changes):
@@ -41,3 +46,24 @@ def test_analysis_plan_is_canonical_non_secret_and_input_specific():
     assert fingerprint(plan) != fingerprint(_plan(high_image_max_side=1024))
     assert plan["reasoning_effort"] == "none"
     assert fingerprint(plan) != fingerprint(_plan(reasoning_effort="low"))
+
+
+def test_repair_policy_is_frozen_bounded_and_legacy_plans_are_upgraded():
+    plan = _plan(repair_policy={"model": "repair-a", "max_tokens": 99999})
+    assert plan["repair_policy"] == {
+        "enabled": True,
+        "model": "repair-a",
+        "max_tokens": 1200,
+        "max_attempts": 1,
+        "text_only": True,
+    }
+    legacy = normalize_analysis_plan({"strategy": "single", "model": "vision-a"})
+    assert legacy["repair_policy"]["model"] == "vision-a"
+    assert legacy["repair_policy"]["max_attempts"] == 1
+    assert legacy["repair_policy"]["text_only"] is True
+
+
+def test_repair_policy_does_not_change_vision_input_contract():
+    first = _plan(repair_policy={"model": "repair-a", "max_tokens": 256})
+    second = _plan(repair_policy={"model": "repair-b", "max_tokens": 1200})
+    assert first["vision_input"] == second["vision_input"]

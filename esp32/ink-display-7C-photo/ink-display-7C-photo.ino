@@ -771,33 +771,68 @@ void loadConfig(Config &cfg) {
 #endif
 }
 
-void saveConfig(const Config &cfg) {
-  prefs.begin("dashcfg", false);
-  prefs.putString("ssid", cfg.wifi_ssid);
-  prefs.putString("pass", cfg.wifi_pass);
-  prefs.putString("hostport", cfg.backend_hostport);
-  prefs.putString("ca_pem", cfg.ca_pem);
-  prefs.putString("devtoken", cfg.device_token);
-  prefs.putInt("tzmin", cfg.tz_offset_minutes);
-  prefs.putUChar("hour", cfg.refresh_hour);
-  prefs.putUChar("minute", cfg.refresh_minute);
-  prefs.putBool("rot180", cfg.rotate180);
+bool saveConfig(const Config &cfg, String *errorCodeOut = nullptr) {
+  auto setError = [errorCodeOut](const char *code) {
+    if (errorCodeOut != nullptr) *errorCodeOut = code;
+  };
+  if (cfg.ca_pem.length() > inktime::kMaxDeviceCaPemBytes
+      || (cfg.ca_pem.length() > 0 && !inktime::DeviceHttpTransport::trustAnchorValid(cfg.ca_pem))) {
+    setError("PAIRING-NVS-001");
+    return false;
+  }
+  if (!prefs.begin("dashcfg", false)) {
+    setError("PAIRING-NVS-002");
+    return false;
+  }
+  auto putString = [](Preferences &store, const char *key, const String &value) {
+    return value.length() == 0U || store.putString(key, value) > 0U;
+  };
+  bool writeOk = true;
+  writeOk = putString(prefs, "ssid", cfg.wifi_ssid) && writeOk;
+  writeOk = putString(prefs, "pass", cfg.wifi_pass) && writeOk;
+  writeOk = putString(prefs, "hostport", cfg.backend_hostport) && writeOk;
+  writeOk = putString(prefs, "ca_pem", cfg.ca_pem) && writeOk;
+  writeOk = putString(prefs, "devtoken", cfg.device_token) && writeOk;
+  writeOk = prefs.putInt("tzmin", cfg.tz_offset_minutes) > 0U && writeOk;
+  writeOk = prefs.putUChar("hour", cfg.refresh_hour) > 0U && writeOk;
+  writeOk = prefs.putUChar("minute", cfg.refresh_minute) > 0U && writeOk;
+  writeOk = prefs.putBool("rot180", cfg.rotate180) > 0U && writeOk;
 #if INKTIME_PHOTOPAINTER_ENABLED
-  prefs.putUShort("prefetch", cfg.prefetch_lead_minutes);
-  prefs.putString("delivery", cfg.delivery_mode);
-  prefs.putString("button", cfg.button_wake_action);
-  prefs.putUChar("scnt", cfg.schedule_count);
+  writeOk = prefs.putUShort("prefetch", cfg.prefetch_lead_minutes) > 0U && writeOk;
+  writeOk = putString(prefs, "delivery", cfg.delivery_mode) && writeOk;
+  writeOk = putString(prefs, "button", cfg.button_wake_action) && writeOk;
+  writeOk = prefs.putUChar("scnt", cfg.schedule_count) > 0U && writeOk;
   for (uint8_t index = 0; index < cfg.schedule_count && index < inktime::kMaxOfflineSlots; ++index) {
     const String key = String("s") + String(index);
-    prefs.putString(key.c_str(), offlineClock(cfg.schedule_slots[index]));
+    writeOk = putString(prefs, key.c_str(), offlineClock(cfg.schedule_slots[index])) && writeOk;
   }
 #endif
-  prefs.putULong("cfgver", cfg.config_version);
+  writeOk = prefs.putULong("cfgver", cfg.config_version) > 0U && writeOk;
+  if (!writeOk) {
+    prefs.end();
+    setError("PAIRING-NVS-001");
+    return false;
+  }
   prefs.end();
+  Preferences verify;
+  if (!verify.begin("dashcfg", true)) {
+    setError("PAIRING-NVS-002");
+    return false;
+  }
+  const bool readBackOk = verify.getString("ssid", "") == cfg.wifi_ssid
+    && verify.getString("hostport", "") == cfg.backend_hostport
+    && verify.getString("ca_pem", "") == cfg.ca_pem;
+  verify.end();
+  if (!readBackOk) {
+    setError("PAIRING-NVS-003");
+    return false;
+  }
 
 #if DEBUG_LOG
   DBG_PRINTLN("[CFG] saved");
 #endif
+  setError("");
+  return true;
 }
 
 // =======================
@@ -906,7 +941,9 @@ String buildConfigPage() {
   html += host;
   html += F("'><br><br>");
 
-  html += F("TLS Root CA PEM（HTTPS 必填；可由編譯 provisioning 或此頁寫入）：<br><textarea name='ca_pem' rows='8' cols='60' maxlength='8192'>");
+  html += F("TLS Root CA PEM（HTTPS 必填；可由編譯 provisioning 或此頁寫入）：<br><textarea name='ca_pem' rows='8' cols='60' maxlength='");
+  html += String(inktime::kMaxDeviceCaPemBytes);
+  html += F("'>");
   html += caPem;
   html += F("</textarea><br><small>只接受 -----BEGIN CERTIFICATE----- 至 -----END CERTIFICATE-----；CA 不是 secret，但不會寫入狀態回報。</small><br><br>");
 
@@ -1011,12 +1048,19 @@ void handleSave() {
   const bool allowedScheme = host.startsWith("https://");
 #endif
   const bool caProvided = caPem.length() > 0;
+  if (caPem.length() > inktime::kMaxDeviceCaPemBytes) {
+    server.send(
+      400,
+      "text/plain; charset=utf-8",
+      String("PAIRING-002 Root CA PEM 超過 ") + String(inktime::kMaxDeviceCaPemBytes) + " bytes"
+    );
+    return;
+  }
   if (caProvided && !inktime::DeviceHttpTransport::trustAnchorValid(caPem)) {
     server.send(400, "text/plain; charset=utf-8", "PAIRING-003 Root CA PEM 格式不合法");
     return;
   }
   if (ssid.length() > 32 || pass.length() > 63 || host.length() > 240 || deviceToken.length() > 256
-      || caPem.length() > 8192
       || host.indexOf('@') >= 0 || !allowedScheme || unsafeOrigin) {
     server.send(400, "text/plain; charset=utf-8", "PAIRING-002 設定格式或長度不合法");
     return;
@@ -1048,7 +1092,15 @@ void handleSave() {
   newCfg.rotate180 = rot180Req;
   newCfg.valid     = (newCfg.wifi_ssid.length() > 0);
 
-  saveConfig(newCfg);
+  String saveError;
+  if (!saveConfig(newCfg, &saveError)) {
+    server.send(
+      500,
+      "text/plain; charset=utf-8",
+      String(saveError.length() > 0 ? saveError : "PAIRING-NVS-001") + " 設定未寫入，裝置不會重新啟動"
+    );
+    return;
+  }
   portalSaveAllowed = false; portalSetupSecret = ""; portalNonce = "";
 
   server.send(

@@ -1,15 +1,15 @@
 # Security／Production Readiness 最終交接
 
-本文件記錄安全強化分支最後一輪的操作契約與人工邊界。自動化測試通過不代表真實 NAS、正式憑證或電子紙硬體已驗證；未實際執行的項目必須標記 `NOT RUN`。
+本文件記錄 PR #53 安全強化分支最後一輪的操作契約與人工邊界。自動化測試通過不代表真實 NAS、正式憑證、OpenRouter 或電子紙硬體已驗證；未實際執行的項目必須標記 `NOT RUN`。Hosted provenance 必須區分 `PR_HEAD`、`TESTED_MERGE_REF` 與 `EXACT_HEAD_WORKFLOW_RUN`。
 
 ## 本輪 One-shot hardening 範圍
 
 - 基準為最新 `origin/main`；正式 schema source 目前為 `Migration 32`。它保存 Provider options/capabilities、usage 的 cache-write、成本來源與 request-size metrics，舊 Migration 1–31 不修改。
-- Provider 路徑新增正式 OpenRouter contract、受控 routing/privacy options、reasoning／session routing 與 Batch hard guard；成本來源分為 `provider_reported`、`estimated`、`unknown`，unknown 不當作零成本。
-- AI 請求固定 512／1024／1600 image side；完整、變體、文字修復分別受 2048／3072／1200 token cap 約束，並保存 Prompt、Schema、request body 與 image bytes 指標。
+- Provider 路徑新增正式 OpenRouter contract、受控 routing/privacy options、reasoning／session routing 與 Batch hard guard；Vision 與 text-only JSON repair 共用 policy helper；成本來源分為 `provider_reported`、`estimated`、`unknown`，unknown 不當作零成本。
+- AI 請求固定 512／1024／1600 image side；完整、變體、文字修復分別受 2048／3072／1200 token cap 約束。repair policy 在 Analysis Plan 建立時 freeze，但不進 Vision fingerprint；每個 job 最多一次 repair，且 repair 不重新上傳圖片。
 - ESP32 backend transport 只接受有 trust anchor 的 HTTPS；HTTP 僅限明確的私有 LAN 開發設定，沒有 `setInsecure()` fallback。首次配網會在 AP 頁面與裝置畫面顯示一次性的隨機 AP 密碼。
 - production Compose 預設 loopback bind、HTTPS public URL、Secure cookie 與禁止 insecure HTTP；`docker-compose.dev.yml` 才提供明確的本機開發覆寫。
-- 離線 benchmark 預設不呼叫外部 Provider、不寫 production analysis/release/history/cache；Container workflow 另以 Syft 產生 SBOM、Trivy 掃描 High/Critical，結果由 Final-Head GitHub Actions 決定。
+- Provider Level 1/2/3 只由管理員明確按鈕觸發；Level 2/3 使用 synthetic image 並有 request／cost 邊界。離線 benchmark 預設不呼叫外部 Provider、不寫 production analysis/release/history/cache；quality／ranking metrics 與 contract metrics 分開，Container workflow 另以 Syft 產生 SBOM、Trivy 掃描 High/Critical，結果由 final-head GitHub Actions 決定。
 
 詳細的 Provider、benchmark 與韌體 trust-anchor 操作分別見
 [OpenRouter 正式 Provider 與安全契約](providers/OPENROUTER_ZH_TW.md)、

@@ -19,13 +19,14 @@ from typing import Any
 
 from PIL import Image, ImageDraw
 
+from inktime.app.domain.analysis import REPAIR_TOKEN_CAP
 from inktime.app.domain.analysis.plan import normalize_reasoning_effort
 from inktime.app.domain.analysis.schema import AnalysisValidationError, validate_analysis_result
 from inktime.app.services.analysis import (
     CAPTION_VARIANTS_TOKEN_CAP,
     FULL_ANALYSIS_TOKEN_CAP,
-    REPAIR_TOKEN_CAP,
 )
+from inktime.app.services.benchmark_metrics import calculate_benchmark_metrics
 from inktime.app.providers.base import ProviderResponse, VisionAttemptState
 from inktime.app.providers.config import normalize_options
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider, ProviderHTTPError
@@ -193,6 +194,61 @@ def _synthetic_records(directory: Path, count: int, seed: str) -> list[dict[str,
     ]
 
 
+def _load_golden_records(dataset: Path) -> list[dict[str, Any]]:
+    """Load a non-private golden manifest without accepting production paths."""
+
+    resolved = dataset.expanduser().resolve()
+    forbidden_parts = {"cache", "releases", "photos", "convertto6c_bmp-7"}
+    normalized_parts = {part.casefold() for part in resolved.parts}
+    allowed_export_parent = any(
+        parent.name.casefold() in {"benchmarks", "benchmarks_export", "golden"}
+        for parent in resolved.parents
+    )
+    if normalized_parts & forbidden_parts or (
+        "data" in normalized_parts and not allowed_export_parent
+    ):
+        raise BenchmarkError("live quality dataset 必須是明確的 benchmarks golden/export manifest")
+    if not resolved.is_file():
+        raise BenchmarkError("live quality dataset 必須是存在的 golden manifest JSON")
+    try:
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise BenchmarkError("live quality dataset manifest 無法讀取") from exc
+    if not isinstance(payload, dict) or payload.get("version") not in {"inktime-golden-v1", 1}:
+        raise BenchmarkError("live quality dataset manifest version 必須是 inktime-golden-v1")
+    dataset_meta = payload.get("dataset")
+    if not isinstance(dataset_meta, dict) or dataset_meta.get("privacy") != "non_private":
+        raise BenchmarkError("live quality dataset 必須宣告 privacy=non_private")
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        raise BenchmarkError("live quality dataset 必須包含至少一個 item")
+    records: list[dict[str, Any]] = []
+    for item in raw_items:
+        if not isinstance(item, dict) or not isinstance(item.get("image"), str):
+            raise BenchmarkError("live quality dataset item 缺少 image")
+        image = (resolved.parent / item["image"]).resolve()
+        if resolved.parent not in image.parents or not image.is_file():
+            raise BenchmarkError("live quality dataset image 必須位於 manifest 目錄內")
+        expected = item.get("expected")
+        if not isinstance(expected, dict):
+            raise BenchmarkError("live quality dataset item 缺少 expected schema")
+        records.append(
+            {
+                "photo_id": str(item.get("id") or image.name),
+                "path": str(image),
+                "expected": expected,
+                "expected_rank": item.get("expected_rank"),
+                "expected_score": item.get("expected_score"),
+                "never_upload": bool(item.get("never_upload", False)),
+                "active": bool(item.get("active", True)),
+                "eligible": bool(item.get("eligible", True)),
+                "missing": bool(item.get("missing", False)),
+                "manually_excluded": bool(item.get("manually_excluded", False)),
+            }
+        )
+    return records
+
+
 def _resize_fixture_images(images: Iterable[Path], directory: Path, max_side: int) -> list[Path]:
     """Materialize one bounded axis at its real maximum side; never upscale."""
 
@@ -252,6 +308,29 @@ def _new_metrics() -> dict[str, Any]:
         "avg_system_prompt_chars": None,
         "avg_schema_chars": None,
         "offline_contract_only": False,
+    }
+
+
+def _quality_prediction(result: Mapping[str, Any]) -> dict[str, Any]:
+    details = result.get("details") if isinstance(result.get("details"), Mapping) else {}
+    return {
+        "memory_grade": details.get("memory_grade", "unknown"),
+        "beauty_grade": details.get("beauty_grade", "unknown"),
+        "technical_grade": details.get("technical_grade", "unknown"),
+        "emotion_grade": details.get("emotion_grade", "unknown"),
+        "types": list(result.get("types") or []),
+        "should_keep": bool(result.get("should_keep")),
+        "visual_orientation": dict(result.get("visual_orientation") or {}),
+    }
+
+
+def _contract_metrics_snapshot(metrics: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep quality/ranking results out of the contract metric stream."""
+
+    return {
+        key: value
+        for key, value in metrics.items()
+        if key not in {"quality_metrics", "ranking_metrics"}
     }
 
 
@@ -343,14 +422,17 @@ class ModelBenchmarkService:
         if sample_count < 1 or sample_count > MAX_SAMPLE_COUNT:
             raise BenchmarkError(f"sample-count 必須介於 1 到 {MAX_SAMPLE_COUNT}")
         report: dict[str, Any] = {
-            "benchmark_version": "model-benchmark-v1",
-            "mode": "offline",
+            "benchmark_version": "model-benchmark-v2",
+            "mode": "offline-contract",
             "seed": seed,
             "sample_count": sample_count,
             "selected_count": 0,
             "dataset_source": "synthetic-generated-no-private-photos",
             "excluded_counts": {},
             "axes": [],
+            "contract_metrics": [],
+            "quality_metrics": None,
+            "ranking_metrics": None,
             "stopped_by_budget": False,
             "network_invocations": 0,
             "production_mutations": 0,
@@ -397,6 +479,7 @@ class ModelBenchmarkService:
                 metrics["avg_system_prompt_chars"] = _average(item.get("prompt_chars", 0) for item in request_metrics)
                 metrics["avg_schema_chars"] = _average(item.get("schema_chars", 0) for item in request_metrics)
                 report["axes"].append({"axis": axis.label, "metrics": metrics})
+                report["contract_metrics"].append({"axis": axis.label, "metrics": metrics})
         return report
 
     def run_live(
@@ -409,7 +492,13 @@ class ModelBenchmarkService:
         base_url: str,
         max_requests: int,
         max_cost: float,
+        dataset: Path | None = None,
+        confirm_live_quality: bool = False,
     ) -> dict[str, Any]:
+        if dataset is None:
+            raise BenchmarkError("live quality benchmark 必須明確提供 --dataset")
+        if not confirm_live_quality:
+            raise BenchmarkError("live quality benchmark 必須明確提供 --confirm-live-quality")
         if not api_key.strip():
             raise BenchmarkError("live benchmark 必須明確提供 API Key")
         if max_requests < 1 or max_requests > MAX_REQUESTS:
@@ -419,20 +508,23 @@ class ModelBenchmarkService:
         if sample_count < 1 or sample_count > MAX_SAMPLE_COUNT:
             raise BenchmarkError(f"sample-count 必須介於 1 到 {MAX_SAMPLE_COUNT}")
         report: dict[str, Any] = {
-            "benchmark_version": "model-benchmark-v1",
-            "mode": "live",
+            "benchmark_version": "model-benchmark-v2",
+            "mode": "live-quality",
             "seed": seed,
             "sample_count": sample_count,
             "selected_count": 0,
-            "dataset_source": "synthetic-generated-no-private-photos",
+            "dataset_source": f"golden-manifest:{Path(dataset).name}",
             "excluded_counts": {},
             "axes": [],
+            "contract_metrics": [],
+            "quality_metrics": [],
+            "ranking_metrics": [],
             "stopped_by_budget": False,
             "network_invocations": 0,
             "production_mutations": 0,
         }
         with tempfile.TemporaryDirectory(prefix="inktime-benchmark-live-") as directory:
-            records = _synthetic_records(Path(directory), sample_count, seed)
+            records = _load_golden_records(dataset)
             selected, excluded = _select_benchmark_records(records, sample_count=sample_count, seed=seed)
             images = [Path(str(record["path"])) for record in selected]
             report["selected_count"] = len(images)
@@ -452,6 +544,7 @@ class ModelBenchmarkService:
                 schema_sizes: list[float] = []
                 first_pass_success = 0
                 repairs = 0
+                quality_items: list[dict[str, Any]] = []
                 provider = self._provider(axis, api_key=api_key, base_url=base_url)
                 try:
                     if requests_used >= max_requests:
@@ -474,12 +567,13 @@ class ModelBenchmarkService:
                         valid, message = bool(validation), ""
                     if not valid:
                         raise BenchmarkError(f"Provider /models capability check 失敗：{message or 'unknown'}")
-                    for image in axis_images:
+                    for record, image in zip(selected, axis_images):
                         if requests_used >= max_requests or spent >= max_cost or report["stopped_by_budget"]:
                             report["stopped_by_budget"] = True
                             break
                         started = time.perf_counter()
                         response: ProviderResponse | None = None
+                        validated_result: dict[str, Any] | None = None
                         request_metrics_for_photo: list[dict[str, int]] = []
                         try:
                             response = provider.analyze(
@@ -507,7 +601,7 @@ class ModelBenchmarkService:
                             if not vision_cost_known:
                                 report["stopped_by_budget"] = True
                             try:
-                                validate_analysis_result(response.content)
+                                validated_result = validate_analysis_result(response.content)
                                 metrics["success_count"] += 1
                                 first_pass_success += 1
                             except AnalysisValidationError:
@@ -542,7 +636,7 @@ class ModelBenchmarkService:
                                     if not repair_cost_known:
                                         report["stopped_by_budget"] = True
                                     try:
-                                        validate_analysis_result(repair_response.content)
+                                        validated_result = validate_analysis_result(repair_response.content)
                                         metrics["success_count"] += 1
                                     except AnalysisValidationError:
                                         pass
@@ -558,16 +652,46 @@ class ModelBenchmarkService:
                                 image_sizes.append(float(used_metrics.get("image_bytes", 0)))
                                 prompt_sizes.append(float(used_metrics.get("prompt_chars", 0)))
                                 schema_sizes.append(float(used_metrics.get("schema_chars", 0)))
+                            if validated_result is not None:
+                                expected = dict(record.get("expected") or {})
+                                quality_item: dict[str, Any] = {
+                                    "id": str(record.get("photo_id") or image.name),
+                                    "expected": expected,
+                                    "predicted": _quality_prediction(validated_result),
+                                }
+                                if record.get("expected_score") is not None:
+                                    quality_item["expected_score"] = record["expected_score"]
+                                if record.get("expected_rank") is not None:
+                                    quality_item["expected_rank"] = record["expected_rank"]
+                                if (
+                                    record.get("expected_score") is not None
+                                    or record.get("expected_rank") is not None
+                                ):
+                                    quality_item["predicted_score"] = sum(
+                                        float(validated_result.get(field, 0) or 0)
+                                        for field in (
+                                            "memory_score",
+                                            "beauty_score",
+                                            "technical_quality_score",
+                                            "emotion_score",
+                                        )
+                                    )
+                                quality_items.append(quality_item)
                 finally:
                     provider.close()
                 metrics["first_pass_schema_success_rate"] = round(first_pass_success / max(1, metrics["vision_requests"]), 4)
                 metrics["schema_success_rate"] = round(metrics["success_count"] / max(1, metrics["vision_requests"]), 4)
                 metrics["repair_rate"] = round(repairs / max(1, metrics["vision_requests"]), 4)
                 metrics["failure_rate"] = round(max(0, metrics["vision_requests"] - metrics["success_count"]) / max(1, metrics["vision_requests"]), 4)
-                metrics["actual_cost"] = metrics["provider_reported_cost"] if metrics["provider_reported_cost"] is not None else metrics["estimated_cost"]
+                metrics["actual_cost"] = metrics["provider_reported_cost"]
+                known_cost = (
+                    metrics["provider_reported_cost"]
+                    if metrics["provider_reported_cost"] is not None
+                    else metrics["estimated_cost"]
+                )
                 metrics["avg_cost_per_photo"] = (
-                    round(float(metrics["actual_cost"]) / metrics["total_photos"], 6)
-                    if metrics["actual_cost"] is not None and metrics["total_photos"]
+                    round(float(known_cost) / metrics["total_photos"], 6)
+                    if known_cost is not None and metrics["total_photos"]
                     else None
                 )
                 metrics["cost_per_1000_photos"] = (
@@ -582,7 +706,20 @@ class ModelBenchmarkService:
                 metrics["avg_image_bytes"] = _average(image_sizes)
                 metrics["avg_system_prompt_chars"] = _average(prompt_sizes)
                 metrics["avg_schema_chars"] = _average(schema_sizes)
-                report["axes"].append({"axis": axis.label, "metrics": metrics})
+                quality = calculate_benchmark_metrics(quality_items)
+                metrics["quality_metrics"] = quality["quality_metrics"]
+                metrics["ranking_metrics"] = quality["ranking_metrics"]
+                axis_report = {"axis": axis.label, "metrics": metrics}
+                report["axes"].append(axis_report)
+                report["contract_metrics"].append(
+                    {"axis": axis.label, "metrics": _contract_metrics_snapshot(metrics)}
+                )
+                report["quality_metrics"].append(
+                    {"axis": axis.label, "metrics": quality["quality_metrics"]}
+                )
+                report["ranking_metrics"].append(
+                    {"axis": axis.label, "metrics": quality["ranking_metrics"]}
+                )
                 if report["stopped_by_budget"]:
                     break
         return report
@@ -599,7 +736,11 @@ def markdown_report(report: dict[str, Any]) -> str:
         f"- Production mutations: `{report['production_mutations']}`",
         f"- Stopped by budget: `{report['stopped_by_budget']}`",
         "",
-        "Offline reports are request-contract measurements only; they are not model quality or accuracy claims.",
+        (
+            "Offline reports are request-contract measurements only; they are not model quality or accuracy claims."
+            if report["mode"] == "offline-contract"
+            else "Live quality reports use only the explicitly supplied non-private golden manifest and bounded Provider calls."
+        ),
         "",
         "| Axis | Photos | Provider requests | Success | Schema rate | Avg body bytes | Avg image bytes | Avg latency ms | Unknown cost |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|",

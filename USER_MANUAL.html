@@ -1439,7 +1439,7 @@ lib_deps =
 <hr class="doc-divider">
 <p class="doc-p"><strong>本版本分析策略更正：</strong>新工作只提供 <code>local</code> 與 <code>single</code>；每張照片最多一次圖片 Vision 請求。<code>low_cost</code>、<code>smart</code>、<code>smart_two_stage</code>、<code>high_quality</code> 與 <code>single_high</code> 只作舊工作／API 的讀取相容別名，會正規化為 <code>single</code>，不會再執行低成本到高品質的第二次圖片上傳。</p>
 <h3 id="sec-5-5" class="doc-h3">5.5 AI 提供者與成本控制 (Providers & Budgets)</h3>
-<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/providers</code> (GET) 與 <code>/costs</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>當月與每日 Token 累積費用折線圖與模型費用比例圓餅圖。</li><li><strong>頁面控制按鈕與設定</strong>：</li><li><code>[新增 Provider]</code>：輸入 Name, Base URL, API Key（Fernet 加密）、Model Name (如 <code>gpt-4o-mini</code>, <code>qwen-vl-max</code>) 與 Prompt 單價。</li><li><code>[測試 Provider 連線]</code>：發送測試圖片 Payload 驗證 JSON Schema 解析。</li><li><code>[成本門檻欄位]</code>：</li><li><code>budget.daily_warning</code> ($USD)：每日警告門檻。</li><li><code>budget.daily_stop</code> ($USD)：每日熔斷停止門檻。</li></ul>
+<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/providers</code> (GET) 與 <code>/costs</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>當月與每日 Token 累積費用折線圖與模型費用比例圓餅圖。</li><li><strong>頁面控制按鈕與設定</strong>：</li><li><code>[新增 Provider]</code>：輸入 Name, Base URL, API Key（Fernet 加密）、Model Name (如 <code>gpt-4o-mini</code>, <code>qwen-vl-max</code>) 與 Prompt 單價。</li><li><code>[Level 1／連線]</code>：只做設定／<code>/models</code> capability check，不送圖片。</li><li><code>[Vision Level 2]</code>：使用 256px deterministic synthetic image，最多一次 Vision、<code>max_tokens≤256</code>、不做 repair；按下前會確認可能費用。</li><li><code>[Full Contract Level 3]</code>：使用 synthetic image 驗證完整 Schema、usage、cost 與 OpenRouter policy，最多一次 Vision 加一次 text-only repair；不讀 production photo。</li><li>Level 2/3 不會因為開啟頁面自動執行。</li><li><strong>成本門檻欄位</strong>：</li><li><code>budget.daily_warning</code> ($USD)：每日警告門檻。</li><li><code>budget.daily_stop</code> ($USD)：每日熔斷停止門檻。</li></ul>
 <hr class="doc-divider">
 <h3 id="sec-5-6" class="doc-h3">5.6 評分控制中心 (Scoring Lab)</h3>
 <ul class="doc-list"><li><strong>URL 路由</strong>：<code>/scoring</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>實時預覽照片綜合排序分數（Final Composite Score）公式：</li></ul>
@@ -2060,7 +2060,7 @@ INKTIME_LOG_LEVEL=INFO</code></pre>
 </tbody></table></div>
 
 <h3 id="sec-15-2" class="doc-h3">15.2 完整 Markdown 檔案索引</h3>
-<p class="doc-p">以下共 69 份 Markdown 文件，路徑均以專案根目錄為起點；點擊檔名即可開啟原始文件。新增或移動文件時，必須同步更新本索引與 <a href="docs/README.md" class="doc-link">docs/README.md</a>。</p>
+<p class="doc-p">以下共 69 份 Markdown 文件，路徑均以專案根目錄為起點；點擊檔名即可開啟原始文件。新增或移動文件時，必須同步更新本索引與 <a href="docs/README.md" class="doc-link">docs/README.md</a>。Provider Level 1/2/3、benchmark quality／ranking 與 ESP32 CA persistence 的操作細節分別見對應文件。</p>
 
 <h4 class="doc-h4">專案入口</h4>
 <ul class="doc-list">
@@ -2302,7 +2302,7 @@ INKTIME_LOG_LEVEL=INFO</code></pre>
 
             insertCard('sec-1', '<h4>現行架構基準</h4><p>Web、Worker 與 Scheduler 是分離的 Runtime；Web 不執行長時間圖片工作。照片掃描、本機特徵、分析、Render Plan、Release Coordinator 與裝置下載皆有明確責任邊界；Decision Trace、Shadow、離線 Queue、資料保留與 Canary 失敗時不應中斷既有正式 Release。</p>');
             insertCard('sec-4', '<h4>現行分析與 Provider 行為</h4><ul><li><code>analysis.execution_mode</code> 是權威：<code>disabled</code>、<code>local_only</code>、<code>local_with_manual_ai</code>、<code>automatic_ai</code>；新安裝預設為 <code>local_only</code>。</li><li>僅 <code>automatic_ai</code> 會依設定自動呼叫 Provider；本機選片不讀取 Provider Secret、不建立模型請求、也不產生成本。</li><li>Provider 使用 OpenAI Chat Completions 相容介面；可設定路由、限流、熔斷與快取，請勿把特定模型名稱視為固定契約。</li></ul>');
-            insertCard('sec-5', '<h4>控制台目前涵蓋的功能</h4><ul><li>照片庫、排除／還原、方向與裁切、掃描與本機特徵。</li><li>分析工作、選片預覽、Provider／成本、評分版本與單張測試。</li><li>Render Plan、8 種版型、模擬器、字型覆蓋驗證、Release 與回滾。</li><li>裝置 Token、面板／能源設定、Manifest、SHA-256 驗證、狀態回報與離線 Queue。</li><li>設定快照、備份、診斷、Activity、Decision Trace、Shadow、Retention 與 Canary Rollout。</li></ul><p>目前 AI 分析契約是本機預篩選後每張最多一個 Vision 圖片請求；若 JSON 不合格，只允許一次文字式修復，結果可在 <code>/review/photos</code> 以游標、篩選與人工狀態管理。PhotoPainter 先走 Stock 相容 <code>/dataUP</code>；需多時刻離線顯示時才啟用 Enhanced Offline Schedule。</p>');
+            insertCard('sec-5', '<h4>控制台目前涵蓋的功能</h4><ul><li>照片庫、排除／還原、方向與裁切、掃描與本機特徵。</li><li>分析工作、選片預覽、Provider／成本、評分版本與單張測試。</li><li>Provider 測試分為 <code>Level 1／連線</code>、<code>Vision Level 2</code>、<code>Full Contract Level 3</code>；Level 2/3 只在按鈕確認後使用 synthetic image，不會自動執行。</li><li>Render Plan、8 種版型、模擬器、字型覆蓋驗證、Release 與回滾。</li><li>裝置 Token、面板／能源設定、Manifest、SHA-256 驗證、狀態回報與離線 Queue。</li><li>設定快照、備份、診斷、Activity、Decision Trace、Shadow、Retention 與 Canary Rollout。</li></ul><p>目前 AI 分析契約是本機預篩選後每張最多一個 Vision 圖片請求；若 JSON 不合格，只允許一次文字式修復，結果可在 <code>/review/photos</code> 以游標、篩選與人工狀態管理。PhotoPainter 先走 Stock 相容 <code>/dataUP</code>；需多時刻離線顯示時才啟用 Enhanced Offline Schedule。</p>');
             insertCard('sec-6', '<h4>除錯安全基準</h4><p>Debug、Activity 與診斷輸出不得記錄 API Key、Bearer Token、未遮罩路徑或精確 GPS。先使用診斷 Bundle、工作詳情與設備回報定位問題；實體裝置成功顯示與本機／CI 成功是不同層級的證據。</p>');
 
             replaceAfterHeading('sec-7-1', '<p class="doc-p">掃描結果以 <code>photos</code>、Library 與本機特徵為核心：相對路徑、SHA-256、尺寸、EXIF／方向、狀態、本機品質、E6 適合度與 <code>eligible</code> 共同決定是否能進入候選池。相同內容雜湊只在符合規則時繼承結果；原始檔變更會清除過期特徵與分析。</p><div class="current-card"><h4>資料使用原則</h4><p>地點只以離線解析的粗略城市參與選片；精確 GPS、照片路徑與 Secret 不寫入 Decision Trace 或 Release Metadata。</p></div>');

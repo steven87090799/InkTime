@@ -41,6 +41,12 @@ def main() -> int:
     parser.add_argument("--reasoning", default="none,low")
     parser.add_argument("--max-requests", type=int, default=40)
     parser.add_argument("--max-cost", type=float, default=1.0)
+    parser.add_argument("--dataset", type=Path, help="live quality golden manifest; never a production photo path")
+    parser.add_argument(
+        "--confirm-live-quality",
+        action="store_true",
+        help="acknowledge that live quality mode can incur Provider cost",
+    )
     parser.add_argument("--base-url", default="https://openrouter.ai/api/v1")
     parser.add_argument("--api-key", default=os.environ.get("INKTIME_BENCHMARK_API_KEY", ""))
     parser.add_argument("--output", type=Path, default=Path("data/benchmarks/latest.json"))
@@ -71,6 +77,8 @@ def main() -> int:
                 base_url=args.base_url,
                 max_requests=args.max_requests,
                 max_cost=args.max_cost,
+                dataset=args.dataset,
+                confirm_live_quality=args.confirm_live_quality,
             )
             if args.live
             else service.run_offline(axes=axes, sample_count=args.sample_count, seed=args.seed)

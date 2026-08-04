@@ -131,6 +131,26 @@ ANALYSIS_JSON_SCHEMA = {
     },
 }
 
+PROVIDER_CONTRACT_JSON_SCHEMA = {
+    "name": "inktime_provider_vision_contract",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["vision_ok", "detected_shapes"],
+        "properties": {
+            "vision_ok": {"type": "boolean"},
+            "detected_shapes": {
+                "type": "array",
+                "items": {"type": "string", "enum": ["rectangle", "circle"]},
+                "minItems": 2,
+                "maxItems": 2,
+                "uniqueItems": True,
+            },
+        },
+    },
+}
+
 
 _DETAIL_PROPERTIES = {
     "memory_grade": _detail_property({"type": "string", "enum": sorted(GRADE_VALUES)}),
@@ -265,6 +285,8 @@ FULL_ANALYSIS_JSON_SCHEMA = {
 
 def json_schema_for_stage(stage: str, *, caption_controls: dict[str, Any] | None = None) -> dict:
     """完整分析只在高細節單次請求使用；其餘採用成本較低的基本 Schema。"""
+    if stage == "provider_contract_level2":
+        return PROVIDER_CONTRACT_JSON_SCHEMA
     full_stage = stage in {"single", "single_high", "stage_two", "full"}
     if not caption_controls:
         return FULL_ANALYSIS_JSON_SCHEMA if full_stage else ANALYSIS_JSON_SCHEMA

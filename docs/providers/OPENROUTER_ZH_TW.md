@@ -68,6 +68,10 @@ OpenRouter request 與一般 OpenAI 相容 Provider 的差異集中在 adapter�
 
 目前 OpenRouter 的推理欄位使用 `reasoning: {"effort": ...}`；InkTime 的 legacy `max` 會轉成 OpenRouter 公開欄位使用的 `xhigh`，不會把 OpenAI 專用的 `reasoning_effort` 原樣送給 OpenRouter。可參考 [OpenRouter reasoning tokens](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens) 與 [Provider routing](https://openrouter.ai/docs/guides/routing/provider-selection)。
 
+### JSON repair 也必須遵守同一份 policy
+
+Vision 回應若只需要一次 JSON schema repair，repair request 仍會送出上一個模型產出的文字內容，因此不能遺失 privacy／routing contract。Vision 與 repair 共用同一個 adapter helper：`provider` 只取 `OPENROUTER_ROUTING_KEYS` allowlist，保留 `require_parameters`、`allow_fallbacks`、`data_collection`、`zdr`、`usage.include=true` 與啟用時的 `session_id`。Repair 是 text-only，沒有 `image_url`、不重新讀圖片、不重新觸發 Vision，也不送 `reasoning`；OpenRouter 的 `max` 仍只在 Vision request 轉為 `xhigh`。
+
 若設定了 `http_referer`／`app_title`，adapter 會送出 OpenRouter 文件所需的 `HTTP-Referer`／`X-Title` headers；不設定就不猜測、不填入 placeholder。
 
 ## 成本與 usage
@@ -92,9 +96,9 @@ OpenRouter 的本地 AI Cache 仍是 InkTime 自己的內容／Provider／模型
 ## 驗收順序
 
 1. 先儲存 Provider，確認 `openrouter` type、HTTPS Base URL、options allowlist 與 Batch 未勾選。
-2. 按「測試」只能證明 `/models` 連線與 Key 基本有效；不代表圖片、Schema、模型 ID 或成本回報可用。
-3. 用一張非敏感測試圖驗證 structured output、繁體中文、方向欄位與 `usage`。
-4. 在成本頁確認是 `provider_reported`、`estimated` 或 `unknown`，不要只看顯示的美元數字。
-5. 先做小批次，再提高並行；若遇到 429、模型路由不符或 usage 缺失，先停工並保留 request ID。
+2. 先按「Level 1／連線」；它只做設定／`/models` capability check，不送圖片，也不自動產生付費 Vision request。
+3. 需要確認 image input 時，再按「Vision Level 2」；這會使用 256px deterministic synthetic image，要求短 JSON 的 `vision_ok`／`detected_shapes`，最多一次 Vision、`max_tokens<=256`、不做 repair，按鈕會先確認可能費用。
+4. 需要完整 Schema、usage 與 cost contract 時，再按「Full Contract Level 3」；最多一次 Vision 加一次 text-only repair，不讀 production photo。
+5. 在成本頁確認是 `provider_reported`、`estimated` 或 `unknown`，不要只看顯示的美元數字；真實 OpenRouter 與付費行為仍需另行核准。
 
 本分支的 hosted CI 只驗證 request contract、Fake／offline 路徑與安全邊界；真實 OpenRouter API、付費請求、家庭照片與正式資料保留驗證維持 `NOT RUN`，需由人工依正式環境核准後另行執行。

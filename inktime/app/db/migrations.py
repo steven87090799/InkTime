@@ -1676,7 +1676,11 @@ MIGRATIONS = (
             "ALTER TABLE api_usage ADD COLUMN schema_chars INTEGER NOT NULL DEFAULT 0 CHECK(schema_chars >= 0)",
             "ALTER TABLE api_usage ADD COLUMN request_body_bytes INTEGER NOT NULL DEFAULT 0 CHECK(request_body_bytes >= 0)",
             "ALTER TABLE api_usage ADD COLUMN image_bytes INTEGER NOT NULL DEFAULT 0 CHECK(image_bytes >= 0)",
-            "UPDATE api_usage SET cost_source=CASE WHEN actual_cost IS NOT NULL THEN 'provider_reported' WHEN estimated_cost > 0 THEN 'estimated' ELSE 'unknown' END",
+            # Before Migration 32 the synchronous recorder stored its local
+            # estimate in both estimated_cost and actual_cost.  Those legacy
+            # actual_cost values have no provider provenance and must never be
+            # relabeled as provider-reported money.
+            "UPDATE api_usage SET cost_source=CASE WHEN COALESCE(estimated_cost,0) > 0 OR COALESCE(actual_cost,0) > 0 THEN 'estimated' ELSE 'unknown' END",
             "CREATE INDEX IF NOT EXISTS idx_api_usage_cost_source ON api_usage(cost_source,started_at)",
         ),
     ),

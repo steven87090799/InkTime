@@ -21,7 +21,12 @@ from inktime.app.core.json_values import (
 )
 from inktime.app.core.logging import configure_logging
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
-from inktime.app.providers.config import PROVIDER_KINDS, normalize_options, validate_base_url
+from inktime.app.providers.config import (
+    PROVIDER_KINDS,
+    capabilities_for,
+    normalize_options,
+    validate_base_url,
+)
 from inktime.app.repositories.settings import (
     RANKING_WEIGHT_KEYS,
     SENSITIVE_STATUS_KEYS,
@@ -30,6 +35,7 @@ from inktime.app.repositories.settings import (
 )
 from inktime.app.web.access import administrator_required, login_required
 from inktime.app.domain.rendering.system_presets import SYSTEM_PRESETS
+from inktime.app.services.provider_contracts import run_provider_contract
 
 bp = Blueprint("settings", __name__)
 
@@ -634,21 +640,42 @@ def save_provider():
 @bp.post("/api/v1/providers/<provider_id>/test")
 @administrator_required
 def test_provider(provider_id: str):
+    payload = _payload("SET-005")
+    try:
+        reject_unknown_fields(payload, {"level"}, error_prefix="SET-005")
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
+    level = payload.get("level", 1)
+    if type(level) is not int or level not in {1, 2, 3}:
+        abort(400, description="SET-005 level 必須是 1、2 或 3")
     config = current_app.extensions["inktime_provider_repository"].get(provider_id, include_secret=True)
     if config is None:
         abort(404)
+    kind = str(config.get("kind") or "openai_compatible")
     provider = OpenAICompatibleProvider(
         name=config["name"],
         base_url=config["base_url"],
         api_key=config.get("api_key", ""),
-        kind=str(config.get("kind") or "openai_compatible"),
+        kind=kind,
         provider_id=str(config["id"]),
         options=config.get("options") or {},
+        pricing=current_app.extensions["inktime_provider_repository"].pricing(config["id"]),
         timeout=min(15, config["timeout_seconds"]),
         supports_json_schema=bool(config["supports_json_schema"]),
+        supports_reasoning_effort=capabilities_for(
+            kind, supports_json_schema=bool(config["supports_json_schema"])
+        ).reasoning,
     )
-    ok, message = provider.validate_config()
-    return {"ok": ok, "message": message}, 200 if ok else 502
+    try:
+        model = str(
+            current_app.extensions["inktime_settings_repository"].get("model.analysis_model", "gpt-4o")
+        )
+        result = run_provider_contract(provider, level=level, model=model)
+    except (ValueError, KeyError) as exc:
+        abort(400, description=f"SET-005 {exc}")
+    finally:
+        provider.close()
+    return result, 200 if result["ok"] else 502
 
 
 @bp.post("/api/v1/providers/<provider_id>/pricing")

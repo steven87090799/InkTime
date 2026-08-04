@@ -176,6 +176,36 @@ def test_migration_25_to_batch_lifecycle_is_idempotent(monkeypatch, tmp_path):
     assert database.integrity_check() == "ok"
 
 
+def test_migration_32_preserves_legacy_cost_provenance_and_allows_new_reported_cost(monkeypatch, tmp_path):
+    database = Database(tmp_path / "cost-provenance.db")
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:31])
+    migrate(database)
+    with database.transaction() as connection:
+        connection.executemany(
+            "INSERT INTO api_usage(provider,model,request_type,estimated_cost,actual_cost,started_at,status) "
+            "VALUES (?,?,?,?,?,?,?)",
+            [
+                ("legacy", "model", "analysis", 0.10, 0.10, "now", "completed"),
+                ("legacy", "model", "analysis", 0.00, 0.00, "now", "completed"),
+                ("legacy", "model", "analysis", 0.00, None, "now", "completed"),
+            ],
+        )
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
+    assert migrate(database) == [32]
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO api_usage(provider,model,request_type,estimated_cost,actual_cost,started_at,status,cost_source) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("openrouter", "model", "analysis", 0.0, 0.08, "now", "completed", "provider_reported"),
+        )
+        rows = connection.execute(
+            "SELECT estimated_cost,actual_cost,cost_source FROM api_usage ORDER BY id"
+        ).fetchall()
+    assert [row["cost_source"] for row in rows] == ["estimated", "unknown", "unknown", "provider_reported"]
+    assert rows[0]["actual_cost"] == 0.10
+    assert rows[3]["actual_cost"] == 0.08
+
+
 def test_migration_27_to_30_freezes_ownership_and_invalidates_legacy_ready_rows(monkeypatch, tmp_path):
     database = Database(tmp_path / "legacy-offline.db")
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:27])

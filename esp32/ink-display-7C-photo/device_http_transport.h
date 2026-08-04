@@ -7,6 +7,10 @@
 
 namespace inktime {
 
+// Keep the portal field below the practical Preferences/NVS string budget;
+// a PEM larger than this is rejected before it can be reported as saved.
+constexpr size_t kMaxDeviceCaPemBytes = 3500U;
+
 class DeviceHttpTransport {
  public:
   explicit DeviceHttpTransport(const String &ca_pem) : ca_pem_(ca_pem) {}

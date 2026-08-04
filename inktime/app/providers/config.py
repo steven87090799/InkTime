@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 
 
 PROVIDER_KINDS = {"openai", "openrouter", "openai_compatible", "ollama"}
-OPENROUTER_OPTION_KEYS = {
+OPENROUTER_ROUTING_KEYS = (
     "order",
     "allow_fallbacks",
     "require_parameters",
@@ -29,6 +29,8 @@ OPENROUTER_OPTION_KEYS = {
     "preferred_max_latency",
     "max_price",
     "enforce_distillable_text",
+)
+OPENROUTER_OPTION_KEYS = set(OPENROUTER_ROUTING_KEYS) | {
     "http_referer",
     "app_title",
     "session_sticky",

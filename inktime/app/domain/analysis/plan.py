@@ -15,6 +15,7 @@ SCHEMA_VERSION = 3
 REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 SINGLE_ANALYSIS_STRATEGIES = {"single", "single_high", "high_quality"}
 LEGACY_ANALYSIS_STRATEGIES = {"custom", "low_cost", "smart", "smart_two_stage"}
+REPAIR_TOKEN_CAP = 1200
 
 
 def normalize_analysis_strategy(value: Any) -> str:
@@ -64,6 +65,7 @@ def build_analysis_plan(
     travel_policy: Mapping[str, Any] | None = None,
     scoring_rules: str = "",
     reasoning_effort: str = "none",
+    repair_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a complete immutable single-image plan.
 
@@ -93,6 +95,13 @@ def build_analysis_plan(
         "exif_transpose": True,
         "preprocessing_version": VISION_INPUT_VERSION,
     }
+    configured_repair = dict(repair_policy or {})
+    repair_model = str(configured_repair.get("model") or high_model).strip()
+    try:
+        configured_repair_tokens = int(configured_repair.get("max_tokens", REPAIR_TOKEN_CAP))
+    except (TypeError, ValueError):
+        configured_repair_tokens = REPAIR_TOKEN_CAP
+    repair_max_tokens = max(256, min(REPAIR_TOKEN_CAP, configured_repair_tokens))
     return {
         "strategy": normalized_strategy,
         "model": str(high_model),
@@ -123,6 +132,13 @@ def build_analysis_plan(
         "ai_execution_policy": dict(execution_policy or {}),
         "travel_policy": dict(travel_policy or {}),
         "reasoning_effort": normalize_reasoning_effort(reasoning_effort),
+        "repair_policy": {
+            "enabled": bool(configured_repair.get("enabled", True)),
+            "model": repair_model,
+            "max_tokens": repair_max_tokens,
+            "max_attempts": 1,
+            "text_only": True,
+        },
     }
 
 
@@ -171,4 +187,24 @@ def normalize_analysis_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
     policy = dict(raw.get("analysis_call_policy") or {})
     policy.update(max_image_calls_per_photo=1, repair_calls_are_text_only=True, legacy_two_stage_replay=False)
     raw["analysis_call_policy"] = policy
+    configured_repair = dict(raw.get("repair_policy") or {})
+    legacy_repair_model = str(
+        configured_repair.get("model")
+        or raw.get("repair_model")
+        or raw.get("model")
+        or raw.get("high_model")
+        or raw.get("low_model")
+        or ""
+    ).strip()
+    try:
+        configured_repair_tokens = int(configured_repair.get("max_tokens", REPAIR_TOKEN_CAP))
+    except (TypeError, ValueError):
+        configured_repair_tokens = REPAIR_TOKEN_CAP
+    raw["repair_policy"] = {
+        "enabled": bool(configured_repair.get("enabled", True)),
+        "model": legacy_repair_model,
+        "max_tokens": max(256, min(REPAIR_TOKEN_CAP, configured_repair_tokens)),
+        "max_attempts": 1,
+        "text_only": True,
+    }
     return raw

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from io import BytesIO
 import json
 import math
@@ -12,11 +13,12 @@ from uuid import uuid4
 
 import requests
 
-from inktime.app.domain.analysis.plan import normalize_reasoning_effort
+from inktime.app.domain.analysis.plan import SCHEMA_VERSION, normalize_reasoning_effort
 from inktime.app.domain.analysis.schema import json_schema_for_stage
 from inktime.app.domain.analysis.scoring import DEFAULT_SCORING_RULES
 from inktime.app.providers.config import (
     PROVIDER_KINDS,
+    OPENROUTER_ROUTING_KEYS,
     is_openrouter_base_url,
     normalize_options,
     validate_base_url,
@@ -28,6 +30,7 @@ COMMON_PROMPT = """你是 InkTime 個人照片分析器。只輸出符合指定 
 SYSTEM_PROMPT = COMMON_PROMPT
 BASIC_PROMPT = """這是基本照片分析。請只完成 Schema 要求的 caption、types、memory_score、beauty_score、technical_quality_score、emotion_score、side_caption、should_keep、sensitive、reason 與 visual_orientation；四項 score 使用 0 至 100 的數字，不輸出 grade、details 或 caption_variants。"""
 FULL_PROMPT = """這是完整單次 Vision 分析。請在同一次圖片請求完成所有 required 欄位與可可靠判斷的 details；不要等待後續圖片階段，也不要為文案、地標、裁切、電子紙或搜尋資訊再次上傳圖片。四項評分使用單一 Grade map：S=95、A=85、B=70、C=55、D=35、E=15、unknown=0；輸出 grade，程式會依此 map 產生排序分，不要自行發明另一套 grade／score 對照。"""
+PROVIDER_CONTRACT_PROMPT = """這是 Provider Vision capability contract。只輸出 JSON：vision_ok 必須是 true，detected_shapes 必須包含 rectangle 與 circle；不要輸出照片分析 Schema 的其他欄位。"""
 STAGE_INSTRUCTIONS = {
     "single": "這是唯一一次圖片分析；一次完成所有 required 與可可靠判斷的 details，不要等待後續圖片階段。",
     "single_high": "這是唯一一次高品質圖片分析；優先確認方向、人物／主體、可見文字與技術品質，未知項目使用 unknown/null。",
@@ -158,6 +161,9 @@ class OpenAICompatibleProvider(VisionProvider):
         return self._system_prompt(self.caption_controls)
 
     def _system_prompt(self, caption_controls: dict[str, Any] | None, *, stage: str = "single") -> str:
+        if stage == "provider_contract_level2":
+            prompt = f"{COMMON_PROMPT}\n\n{PROVIDER_CONTRACT_PROMPT}"
+            return prompt
         full_stage = stage in {"single", "single_high", "stage_two", "full"}
         prompt = f"{COMMON_PROMPT}\n\n{FULL_PROMPT if full_stage else BASIC_PROMPT}"
         if self.scoring_rules != DEFAULT_SCORING_RULES:
@@ -500,40 +506,14 @@ class OpenAICompatibleProvider(VisionProvider):
             }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
-        if self.kind == "openrouter":
-            routing_keys = (
-                "order",
-                "allow_fallbacks",
-                "require_parameters",
-                "data_collection",
-                "zdr",
-                "only",
-                "ignore",
-                "quantizations",
-                "sort",
-                "preferred_min_throughput",
-                "preferred_max_latency",
-                "max_price",
-                "enforce_distillable_text",
-            )
-            routing = {key: self.options[key] for key in routing_keys if key in self.options}
-            if routing:
-                body["provider"] = routing
-            body["usage"] = {"include": True}
-            if self.options.get("session_sticky"):
-                session_identity = f"{self.provider_id}|{model}|{stage}|{self._system_prompt(caption_controls or self.caption_controls, stage=stage)}"
-                import hashlib
-
-                body["session_id"] = hashlib.sha256(session_identity.encode("utf-8")).hexdigest()[:32]
-            normalized_effort = normalize_reasoning_effort(reasoning_effort or "none")
-            if normalized_effort == "max":
-                # InkTime keeps the legacy max label; OpenRouter's current
-                # public field uses xhigh for the highest documented effort.
-                normalized_effort = "xhigh"
-            if normalized_effort != "none":
-                body["reasoning"] = {"effort": normalized_effort}
-        elif self.supports_reasoning_effort and reasoning_effort is not None:
-            body["reasoning_effort"] = normalize_reasoning_effort(reasoning_effort)
+        self._apply_provider_request_policy(
+            body,
+            model=model,
+            stage=stage,
+            prompt_identity=self._system_prompt(caption_controls or self.caption_controls, stage=stage),
+            reasoning_effort=reasoning_effort,
+            allow_reasoning=True,
+        )
         try:
             image_bytes = image_path.stat().st_size
         except OSError:
@@ -551,6 +531,44 @@ class OpenAICompatibleProvider(VisionProvider):
             "request_body_bytes": len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")),
             "image_bytes": max(0, int(image_bytes)),
         }
+        return body
+
+    def _apply_provider_request_policy(
+        self,
+        body: dict[str, Any],
+        *,
+        model: str,
+        stage: str,
+        prompt_identity: str,
+        reasoning_effort: str | None,
+        allow_reasoning: bool,
+    ) -> dict[str, Any]:
+        """Apply the provider-specific policy shared by Vision and repair.
+
+        OpenRouter routing/privacy/usage/session fields must be identical for
+        the image request and its text-only JSON repair.  Keeping this policy
+        in one helper prevents repair from accidentally falling back to a
+        less-private route or receiving a different structured-output policy.
+        """
+
+        if self.kind == "openrouter":
+            routing = {key: self.options[key] for key in OPENROUTER_ROUTING_KEYS if key in self.options}
+            if routing:
+                body["provider"] = routing
+            body["usage"] = {"include": True}
+            if self.options.get("session_sticky"):
+                session_identity = f"{self.provider_id}|{model}|{stage}|{prompt_identity}"
+                body["session_id"] = hashlib.sha256(session_identity.encode("utf-8")).hexdigest()[:32]
+            if allow_reasoning:
+                normalized_effort = normalize_reasoning_effort(reasoning_effort or "none")
+                if normalized_effort == "max":
+                    # Keep the legacy max input while using OpenRouter's
+                    # current highest documented effort value on the wire.
+                    normalized_effort = "xhigh"
+                if normalized_effort != "none":
+                    body["reasoning"] = {"effort": normalized_effort}
+        elif self.supports_reasoning_effort and allow_reasoning and reasoning_effort is not None:
+            body["reasoning_effort"] = normalize_reasoning_effort(reasoning_effort)
         return body
 
     def analyze(
@@ -586,12 +604,13 @@ class OpenAICompatibleProvider(VisionProvider):
         stage: str = "single_high",
         caption_controls: dict[str, Any] | None = None,
     ) -> ProviderResponse:
+        repair_system_prompt = "只修復 JSON 使其符合提供的 Schema；不可新增圖片推測，不可輸出 Markdown。"
         body = {
             "model": model,
             "messages": [
                 {
                     "role": "system",
-                    "content": "只修復 JSON 使其符合提供的 Schema；不可新增圖片推測，不可輸出 Markdown。",
+                    "content": repair_system_prompt,
                 },
                 {
                     "role": "user",
@@ -618,6 +637,23 @@ class OpenAICompatibleProvider(VisionProvider):
             }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
+        repair_prompt_identity = json.dumps(
+            {
+                "repair": "json-schema-repair",
+                "stage": stage,
+                "schema_version": SCHEMA_VERSION,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        self._apply_provider_request_policy(
+            body,
+            model=model,
+            stage=f"{stage}:repair",
+            prompt_identity=repair_prompt_identity,
+            reasoning_effort="none",
+            allow_reasoning=False,
+        )
         self.last_request_metrics = {
             "prompt_chars": len(invalid_content[:12000]) + len(validation_error),
             "schema_chars": len(json.dumps(body.get("response_format", {}), ensure_ascii=False)),

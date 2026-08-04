@@ -18,6 +18,7 @@
 | 離線比較模型與解析度 | [Model Benchmark](providers/MODEL_BENCHMARK_ZH_TW.md) |
 | 為 ESP32 配置 HTTPS 信任根 | [ESP32 TLS／配網](devices/ESP32_TLS_PROVISIONING_ZH_TW.md) |
 | 使用 Decision Trace、Queue 或 Canary | [決策與韌性總覽](resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md) |
+| 交接 PR #53 的修復與證據 | [Final One-Shot Hardening Audit](reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md) → [Production Readiness Handoff](PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md) |
 
 ## 文件規則
 
@@ -58,7 +59,7 @@
 - [`guides/USER_GUIDE_ZH_TW.md`](guides/USER_GUIDE_ZH_TW.md)：照片、工作、渲染、發布與診斷操作。
 - [`guides/API_PROVIDER_GUIDE_ZH_TW.md`](guides/API_PROVIDER_GUIDE_ZH_TW.md)：OpenAI 相容 Provider 與各廠商接入步驟。
 - [`providers/OPENROUTER_ZH_TW.md`](providers/OPENROUTER_ZH_TW.md)：正式 OpenRouter kind、routing／privacy options、reasoning、成本與 Batch 邊界。
-- [`providers/MODEL_BENCHMARK_ZH_TW.md`](providers/MODEL_BENCHMARK_ZH_TW.md)：offline-first、bounded live、解析度／Prompt／reasoning／routing 維度與輸出契約。
+- [`providers/MODEL_BENCHMARK_ZH_TW.md`](providers/MODEL_BENCHMARK_ZH_TW.md)：offline-contract／live-quality、golden manifest、quality／ranking metrics、解析度／Prompt／reasoning／routing 維度與輸出契約。
 - [`guides/EPAPER_SIMULATOR_ZH_TW.md`](guides/EPAPER_SIMULATOR_ZH_TW.md)：虛擬電子紙接收端與無硬體驗收。
 - [`guides/LOCAL_ONLY_SELECTION_ZH_TW.md`](guides/LOCAL_ONLY_SELECTION_ZH_TW.md)：`analysis.execution_mode`、本機選片、雙照片與文案來源。
 

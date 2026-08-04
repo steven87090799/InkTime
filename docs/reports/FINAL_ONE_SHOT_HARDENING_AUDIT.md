@@ -1,48 +1,52 @@
-# InkTime Final One-Shot Hardening Audit
+# InkTime PR #53 Final One-Shot Hardening Audit
 
-## Baseline
+## 基線與範圍
 
 | 項目 | 值 |
 |---|---|
-| Audit baseline main | `064a599bd9e13dd95c6e7d326759d8efc9b22306` |
-| Start HEAD | `064a599bd9e13dd95c6e7d326759d8efc9b22306` |
+| Repository | `steven87090799/InkTime` |
+| PR | `#53 fix: harden final production and OpenRouter runtime` |
+| Base | `origin/main 064a599bd9e13dd95c6e7d326759d8efc9b22306` |
+| Start HEAD | `25db8187c4afb71651ce9bf6e6bd3cbcf25dddd8` |
 | Branch | `fix/final-production-openrouter-and-runtime-hardening` |
 | Worktree | `/Users/steven/Desktop/inktime/InkTime-final-production-openrouter-runtime-hardening` |
-| Baseline worktree | clean；主工作樹與其未追蹤／使用者檔案未觸碰 |
-| Delivery terminal state | Draft PR、未 Merge、未 Mark Ready |
+| Delivery state | Draft、Open、未 Merge、未 Mark Ready、未 Enable Auto Merge |
+
+本輪只處理與 PR #53 直接相關的 Provider policy、ESP32 CA persistence、Migration 32 provenance、frozen repair policy、Provider Level 1/2/3 contract、benchmark quality/ranking contract、文件與 hosted CI evidence。`ConverTo6c_bmp-7/`、`data/cache/`、`data/releases/`、使用者檔案與其他工作樹未納入修改。
 
 ## 驗證政策
 
-本次遵守施工手冊的本機限制：不執行 pytest、ruff、mypy、pip install/pip-audit、Docker/Compose、Playwright、Arduino/PlatformIO/ESP32 編譯、runtime soak、production smoke、真實 OpenRouter API 或付費呼叫。本機只做 Git、文字檔、差異與靜態契約整理；測試與安全掃描由 GitHub Actions 執行。
+依施工手冊，本機禁止 pytest、ruff、mypy、pip install／pip-audit、Docker／Compose、Playwright、Arduino／PlatformIO／ESP32 編譯、runtime soak、production smoke、真實 OpenRouter API、付費呼叫與硬體操作。本機只做 Git、文字檔、差異與靜態契約核對；測試與安全掃描以 GitHub Actions hosted evidence 為準。
 
 ## 要求矩陣
 
-| 區域 | 實作狀態 | 證據／後續驗證 |
+| 區域 | Code／契約狀態 | Hosted／真實環境邊界 |
 |---|---|---|
-| ESP32 TLS trust anchor、禁止 redirect、HTTP 明確 allowlist | PASS（GitHub exact-head） | CI `esp32-compile`；實體裝置 TLS 仍 NOT RUN |
-| 配對密碼 Web + PhotoPainter 電子紙顯示 | PASS（GitHub exact-head） | CI firmware matrix；實體 BUSY/顯示仍 NOT RUN |
-| Scanner presence 與 processing eligibility 分離 | PASS（GitHub exact-head） | Python unit/integration |
-| Scheduler fault isolation 與 durable backup | PASS（GitHub exact-head） | Python unit/integration、Compose persistence |
-| Provider allowlist、私有 HTTP、OpenRouter routing/reasoning/cache | PASS（GitHub exact-head） | Provider contract、mypy、官方文件對照 |
-| 真實／預估／unknown 成本分離 | PASS（GitHub exact-head） | Python cost/usage contract |
-| AI 512、單次 Vision、caption fingerprint、token cap、repair model | PASS（GitHub exact-head） | Python analysis contract、coverage |
-| Offline benchmark、release schema version、Compose defaults、SBOM/Trivy | PASS（GitHub exact-head） | container-security + benchmark-contract + Compose |
-| P3 version、redirect、secret registry、WAL | PASS（GitHub exact-head） | Python security/migration checks |
-| 文件與逐項控制項說明 | PASS（靜態契約） | Markdown `63/63` 路徑已由 `USER_MANUAL.html` 連結 |
+| OpenRouter repair privacy、routing、ZDR、usage、sticky policy | CODE PASS；共用 helper，repair 無 image／reasoning | HOSTED CONTRACT PASS 待本輪 final-head workflow；LIVE PROVIDER `NOT RUN` |
+| ESP32 CA 上限與 NVS 寫入／read-back | CODE PASS；共享 `kMaxDeviceCaPemBytes=3500` 與錯誤碼契約 | HOSTED COMPILE／source contract 待 final-head；physical NVS／TLS `NOT RUN` |
+| Migration 32 歷史成本來源 | CODE PASS；舊 actual cost 只可標 `estimated`／`unknown` | HOSTED migration regression 待 final-head；正式資料 upgrade `NOT RUN` |
+| Frozen repair policy 與 Vision fingerprint | CODE PASS；plan freeze、最多一次文字 repair、排除 Vision identity | HOSTED Python contract 待 final-head；既有 production job runtime `NOT RUN` |
+| Provider Level 1/2/3 | FAKE CONTRACT PASS；Level 2/3 明確按鈕且不自動執行 | HOSTED fake contract 待 final-head；REAL PROVIDER `NOT RUN` |
+| Benchmark quality／ranking | METRIC ENGINE PASS；offline 只回 `offline-contract` | HOSTED offline contract 待 final-head；REAL MODEL QUALITY `NOT RUN` |
+| 文件與 HTML 索引 | CODE／STATIC PASS；Markdown 路徑與控制項同步 | 連結／瀏覽器驗證不替代 source-aligned static review |
 
-## Exact-head evidence
+## Hosted provenance 規則
 
-以下 hosted 證據對應本報告更新前的 implementation head `6dabcb5aefab995f3d81275e53946a6322cf4a50`；本次報告本身是文件-only 更新，推送後仍須以其新 head 的 GitHub required checks 作最後門檻。
+本報告刻意分開三種證據，不再把 Pull Request merge ref 稱為 exact-head：
 
-| Workflow | Run | 結果 |
-|---|---:|---|
-| InkTime CI | `30863318865` | PASS；Python 3.10/3.12、ESP32、Compose TLS/LAN、Playwright、bounded soak、secret scan 全部 SUCCESS |
-| InkTime Container Security and Benchmark Contracts | `30863318859` | PASS；benchmark contract 與 container security/SBOM/Trivy 全部 SUCCESS |
+- `PR_HEAD`：PR #53 當時 feature branch 的提交。
+- `TESTED_MERGE_REF`：`pull_request` workflow 驗證 PR 加上當前 `main` 的合併相容性。
+- `EXACT_HEAD_WORKFLOW_RUN`：最後推送後以 `workflow_dispatch` 指向 feature branch，且 `headSha == FINAL_HEAD` 的 hosted run。
 
-Python quality 的 hosted 摘要為 `1005 passed, 1 skipped`、coverage `80.04%`；benchmark harness 由明確 `--cov-config=pyproject.toml` 排除，並由獨立 offline benchmark contract 驗證。`pip-audit -r requirements.txt` 於 `cryptography==50.0.0` 上通過。`git diff --check` 通過；本機未執行施工手冊禁止的測試、建置或 runtime 操作。
+既有 PR checks 是 merge-ref 證據；完成本輪 push 後，必須重新取得兩個 workflow dispatch run，逐一確認 `event=workflow_dispatch`、`headSha=FINAL_HEAD`、`conclusion=success`。最終 run ID 與 SHA 以 PR #53 Checks 及交接回報為唯一最新證據，避免在文件內留下會漂移的舊 run ID。
 
-## Real-environment boundary
+## 成本、隱私與硬體邊界
 
-本次 code/CI 可標記 `CODE_READY_REAL_ENV_PENDING`，但下列項目一律維持 `NOT RUN`，不得由 CI 推論為通過：OpenRouter 真實 API、付費呼叫與實際模型／價格行為；正式 NAS／反向代理；ESP32/PhotoPainter 實體 TLS 與配對畫面；功耗、deep sleep、GPIO5、BUSY、六色方向與 ghosting；真實生產資料及長時間現場 soak。
+- Migration 32 不新增 Migration 33；歷史 `actual_cost` 沒有 provider provenance 時不得標為 `provider_reported`。
+- Provider Level 2/3 與 live benchmark 只接受 deterministic synthetic／明確 non-private golden manifest；不得讀取 production photo、AI cache、release 或 display history。
+- hosted CI 的 fake provider、offline benchmark、ESP32 compile 與 source contract 都不能推論真實 OpenRouter routing／ZDR／cost、NAS、正式 TLS chain、NVS、BUSY、GPIO5、deep sleep、方向、ghosting、六色顯示或功耗。
+- 最終分類只能是 `CODE_READY_REAL_ENV_PENDING`；真實 OpenRouter、NAS、PhotoPainter／ESP32 與長時間現場 soak 一律 `NOT RUN`。
 
-Draft PR 必須保持未 Merge、未 Mark Ready；本報告更新後新增的 exact-head required checks 仍須全部 SUCCESS 才能完成交付。
+## 靜態交接
+
+完成前只允許執行 `git diff --check`、`git status --short`、`git diff --stat origin/main...HEAD`、`git log --oneline origin/main..HEAD` 與指定 `rg` source checks。PR #53 必須保持 Draft、未 Merge、未 Mark Ready、未 Enable Auto Merge。

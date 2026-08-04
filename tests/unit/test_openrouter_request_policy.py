@@ -1,0 +1,86 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from inktime.app.providers.base import ProviderResponse, Usage
+from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
+
+
+class CaptureProvider(OpenAICompatibleProvider):
+    def _post_completion(self, body, *, vision_attempt=None):
+        self.captured_body = body
+        return ProviderResponse("{}", Usage())
+
+
+def _provider(kind: str = "openrouter", options: dict | None = None) -> CaptureProvider:
+    return CaptureProvider(
+        name="contract-provider",
+        base_url="https://openrouter.ai/api/v1" if kind == "openrouter" else "https://api.example.invalid/v1",
+        api_key="redacted-test-key",
+        kind=kind,
+        options=options or {},
+        supports_reasoning_effort=kind == "openai",
+    )
+
+
+def test_openrouter_analysis_and_repair_share_privacy_routing_usage_and_sticky_policy(tmp_path: Path):
+    image = tmp_path / "synthetic.jpg"
+    image.write_bytes(b"synthetic image")
+    options = {
+        "allow_fallbacks": False,
+        "require_parameters": True,
+        "data_collection": "deny",
+        "zdr": True,
+        "only": ["provider/model"],
+        "session_sticky": True,
+    }
+    provider = _provider(options=options)
+    analysis = provider.build_analysis_request_body(
+        image_path=image,
+        model="vision-model",
+        detail="high",
+        stage="single",
+        reasoning_effort="low",
+    )
+    provider.repair_json(
+        invalid_content="not-json",
+        validation_error="schema",
+        model="repair-model",
+        stage="single",
+    )
+    repair = provider.captured_body
+
+    for body in (analysis, repair):
+        assert body["provider"]["data_collection"] == "deny"
+        assert body["provider"]["zdr"] is True
+        assert body["provider"]["require_parameters"] is True
+        assert body["provider"]["allow_fallbacks"] is False
+        assert body["usage"] == {"include": True}
+    assert analysis["reasoning"] == {"effort": "low"}
+    assert "reasoning" not in repair
+    assert repair["messages"][1]["content"]
+    assert "image_url" not in json.dumps(repair, ensure_ascii=False)
+    assert "image_path" not in json.dumps(repair, ensure_ascii=False)
+    assert provider.last_request_metrics["image_bytes"] == 0
+    assert analysis["session_id"] != repair["session_id"]
+
+
+def test_openai_compatible_request_does_not_receive_openrouter_provider_object(tmp_path: Path):
+    image = tmp_path / "synthetic.jpg"
+    image.write_bytes(b"synthetic image")
+    body = _provider(kind="openai_compatible").build_analysis_request_body(
+        image_path=image,
+        model="vision-model",
+        detail="high",
+        stage="single",
+    )
+    assert "provider" not in body
+    assert "usage" not in body
+
+
+def test_unknown_openrouter_option_is_rejected():
+    with pytest.raises(ValueError, match="PROVIDER-007"):
+        _provider(options={"unknown_policy": True})

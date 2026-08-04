@@ -11,6 +11,7 @@ from typing import Any, Callable
 from inktime.app.core.paths import safe_join
 from inktime.app.domain.analysis import (
     AnalysisValidationError,
+    REPAIR_TOKEN_CAP,
     SCHEMA_VERSION,
     build_analysis_plan,
     canonical_json,
@@ -50,7 +51,6 @@ class AnalysisDisabledError(RuntimeError):
 PROMPT_VERSION = "photo-quality-v5-grade-anchors"
 FULL_ANALYSIS_TOKEN_CAP = 2048
 CAPTION_VARIANTS_TOKEN_CAP = 3072
-REPAIR_TOKEN_CAP = 1200
 
 
 class ProviderUnavailableError(ValueError):
@@ -185,6 +185,16 @@ class PhotoAnalysisService:
             or legacy_model_value
             or settings.get("model.low_model", "high-quality-vision")
         )
+        repair_policy = {
+            "enabled": True,
+            "model": str(settings.get("model.repair_model", analysis_model) or analysis_model),
+            "max_tokens": max(
+                256,
+                min(REPAIR_TOKEN_CAP, int(settings.get("budget.repair_max_tokens", REPAIR_TOKEN_CAP))),
+            ),
+            "max_attempts": 1,
+            "text_only": True,
+        }
         return build_analysis_plan(
             strategy=strategy,
             provider_route=provider_route,
@@ -204,6 +214,7 @@ class PhotoAnalysisService:
             travel_policy=travel_policy,
             scoring_rules=str(settings.get("analysis.scoring_rules", "")),
             reasoning_effort=normalize_reasoning_effort(settings.get("batch.reasoning_effort", "none")),
+            repair_policy=repair_policy,
         )
 
     @staticmethod
@@ -613,6 +624,7 @@ class PhotoAnalysisService:
         schema_kind: str,
         reasoning_effort: str = "none",
         caption_controls: dict | None,
+        repair_policy: dict | None,
         prompt_version: str,
         vision_input: dict,
         force_recompute: bool = False,
@@ -816,6 +828,7 @@ class PhotoAnalysisService:
                     schema_kind=schema_kind,
                     reasoning_effort=reasoning_effort,
                     caption_controls=caption_controls,
+                    repair_policy=repair_policy,
                     prompt_version=prompt_version,
                     cache_schema_kind=cache_schema_kind,
                     vision_request_fingerprint=request_fingerprint,
@@ -874,6 +887,7 @@ class PhotoAnalysisService:
                     schema_kind=schema_kind,
                     reasoning_effort=reasoning_effort,
                     caption_controls=caption_controls,
+                    repair_policy=repair_policy,
                     prompt_version=prompt_version,
                     vision_input=vision_input,
                     force_recompute=force_recompute,
@@ -909,6 +923,7 @@ class PhotoAnalysisService:
         schema_kind: str,
         reasoning_effort: str,
         caption_controls: dict | None,
+        repair_policy: dict | None,
         prompt_version: str,
         cache_schema_kind: str,
         vision_request_fingerprint: str,
@@ -1055,18 +1070,19 @@ class PhotoAnalysisService:
             )
             repair_started_at = datetime.now(timezone.utc).isoformat()
             repair_perf = time.perf_counter()
-            repair_model = str(settings.get("model.repair_model", model) if settings else model) or model
-            repair_global_cap = int(settings.get("budget.max_tokens", 8000)) if settings else 8000
-            repair_cap = (
-                int(settings.get("budget.repair_max_tokens", REPAIR_TOKEN_CAP))
-                if settings
-                else REPAIR_TOKEN_CAP
-            )
+            frozen_repair_policy = dict(repair_policy or {})
+            if not bool(frozen_repair_policy.get("enabled", True)):
+                raise first_error
+            repair_model = str(frozen_repair_policy.get("model") or model).strip() or model
+            try:
+                repair_cap = int(frozen_repair_policy.get("max_tokens", REPAIR_TOKEN_CAP))
+            except (TypeError, ValueError):
+                repair_cap = REPAIR_TOKEN_CAP
             repair_call = {
                 "invalid_content": response.content,
                 "validation_error": str(first_error),
                 "model": repair_model,
-                "max_tokens": max(256, min(repair_global_cap, repair_cap, REPAIR_TOKEN_CAP)),
+                "max_tokens": max(256, min(repair_cap, REPAIR_TOKEN_CAP)),
                 "stage": stage,
                 "caption_controls": caption_controls,
             }
@@ -1190,6 +1206,25 @@ class PhotoAnalysisService:
                 if self.settings
                 else 1024,
                 caption_display_controls=self._caption_display_controls(self._caption_controls()),
+                repair_policy={
+                    "enabled": True,
+                    "model": str(
+                        self.settings.get("model.repair_model", high_model) if self.settings else high_model
+                    ),
+                    "max_tokens": max(
+                        256,
+                        min(
+                            REPAIR_TOKEN_CAP,
+                            int(
+                                self.settings.get("budget.repair_max_tokens", REPAIR_TOKEN_CAP)
+                                if self.settings
+                                else REPAIR_TOKEN_CAP
+                            ),
+                        ),
+                    ),
+                    "max_attempts": 1,
+                    "text_only": True,
+                },
             )
         analysis_spec = normalize_analysis_plan(analysis_spec)
         analysis_spec["reasoning_effort"] = normalize_reasoning_effort(
@@ -1200,6 +1235,7 @@ class PhotoAnalysisService:
         favorite_override = bool(analysis_spec["favorite_override"])
         caption_controls = dict(analysis_spec.get("caption_controls") or {}) or None
         display_controls = dict(analysis_spec.get("caption_display_controls") or {})
+        repair_policy = dict(analysis_spec.get("repair_policy") or {})
         if caption_controls:
             # Display style is frozen for the job but excluded from the
             # provider prompt and Vision request identity.
@@ -1213,6 +1249,7 @@ class PhotoAnalysisService:
         analysis_spec_json = canonical_json(analysis_spec)
         identity_spec = dict(analysis_spec)
         identity_spec.pop("caption_display_controls", None)
+        identity_spec.pop("repair_policy", None)
         analysis_fingerprint = fingerprint(identity_spec)
         content_sha = str(photo["sha256"] or "")
         plan_prefilter = {
@@ -1417,6 +1454,7 @@ class PhotoAnalysisService:
             schema_kind="full",
             reasoning_effort=str(analysis_spec["reasoning_effort"]),
             caption_controls=caption_controls,
+            repair_policy=repair_policy,
             prompt_version=prompt_version,
             vision_input=vision_input,
             force_recompute=force_recompute,

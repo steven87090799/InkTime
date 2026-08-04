@@ -1,6 +1,6 @@
 # 模型 Benchmark：離線預設、有限 Live 與不污染正式資料
 
-入口是 [`scripts/benchmark_models.py`](../../scripts/benchmark_models.py)，服務實作是 [`inktime/app/services/model_benchmark.py`](../../inktime/app/services/model_benchmark.py)。Benchmark 的目的，是比較 request contract、Token／成本、延遲與結果契約；它不是「準確率」宣稱，也不把舊版 `smart_two_stage` 假裝成另一種現行流程。
+入口是 [`scripts/benchmark_models.py`](../../scripts/benchmark_models.py)，服務實作是 [`inktime/app/services/model_benchmark.py`](../../inktime/app/services/model_benchmark.py)，純指標位於 [`inktime/app/services/benchmark_metrics.py`](../../inktime/app/services/benchmark_metrics.py)。Benchmark 明確分為 Contract Benchmark 與 Quality／Ranking Benchmark；它不是沒有 golden data 時的「準確率」宣稱，也不把舊版 `smart_two_stage` 假裝成另一種現行流程。
 
 ## 預設離線模式
 
@@ -43,11 +43,13 @@ axes 上限為 96 組，sample 上限為 100 張；這是 bounded memory／CI �
 - reasoning `none`／`low`；OpenRouter 使用 `reasoning.effort`。
 - OpenRouter routing options，例如 `only`、`ignore`、`sort`、`data_collection`、`zdr`。
 
-每組報告至少包含：
+offline JSON 的 `mode` 是 `offline-contract`，並回傳 `contract_metrics`；`quality_metrics` 與 `ranking_metrics` 必須是 `null`。CI 只驗證 request body 與 metric calculator contract，不代表真實模型品質。
+
+每組 Contract 報告至少包含：
 
 `total_photos`、`provider_requests`、`vision_requests`、`repair_requests`、`success_count`、`schema_success_rate`、`first_pass_schema_success_rate`、`repair_rate`、`failure_rate`、`input_tokens`、`cached_tokens`、`cache_write_tokens`、`uncached_tokens`、`output_tokens`、`reasoning_tokens`、`estimated_cost`、`provider_reported_cost`、`actual_cost`、`unknown_cost_count`、`avg_cost_per_photo`、`cost_per_1000_photos`、`avg_latency_ms`、`p50_latency_ms`、`p95_latency_ms`、`avg_request_body_bytes`、`avg_image_bytes`、`avg_system_prompt_chars` 與 `avg_schema_chars`。
 
-沒有 baseline 時，不輸出 accuracy。若未來加入 golden／人工標記資料，只能使用「相對一致性」名稱，例如 score／grade、type、keep、orientation agreement、caption length；排名則報告樣本安全縮小 K 後的 Top 10／25／50 overlap 與 Spearman。
+Quality metrics 使用 [`benchmarks/golden/manifest.schema.json`](../../benchmarks/golden/manifest.schema.json) 定義的 non-private golden manifest。Grade 使用 `E=0` 到 `S=5`，回報 `exact_grade_accuracy`、`within_one_grade_accuracy` 與 `mean_absolute_grade_distance`；types 回報 micro precision／recall／F1 與 Jaccard；`should_keep` 回報 accuracy／precision／recall／F1；orientation 回報只針對 expected non-ambiguous 的 `rotation_exact_accuracy`、ambiguous rate 與 `false_confident_orientation_rate`。Ranking 回報 tie-aware Spearman rank correlation 與 Top-10／25／50 overlap；資料集小於 K 時使用 `effective_k=min(K,dataset_size)`。
 
 ## Live 模式：必須明確開啟
 
@@ -61,20 +63,23 @@ python scripts/benchmark_models.py \
   --models openai/<完整模型 ID> \
   --sample-count 20 \
   --seed inktime-benchmark-v1 \
+  --dataset path/to/approved-golden-manifest.json \
   --max-requests 40 \
   --max-cost 1.00 \
+  --confirm-live-quality \
   --output data/benchmarks/live.json \
   --markdown-output data/benchmarks/live.md
 ```
 
-目前 CLI 的 live adapter 使用 deterministic synthetic fixture，避免把私人圖片誤當成 benchmark dataset；正式相簿若要加入，必須另接具備 `never_upload`、active、eligible、missing、manual exclude 過濾與 `hash(seed + photo_id)` 排序的唯讀資料集 adapter，不能直接繞過資料邊界。
+Live quality 只接受明確的 non-private golden manifest；manifest 內的圖片必須位於 manifest 目錄內，且路徑不得落入 production photo、cache、release 或使用者圖片目錄。若要使用管理員提供的資料，必須先完成專用 benchmark export，再以 `--dataset` 明確指定，不能直接掃正式相簿。
 
 Live 安全條件：
 
 - `max_requests` 最多 100，並同時受 `max-cost` 停止線約束。
+- `--live`、`--api-key`、`--dataset`、`--confirm-live-quality`、`--max-requests`、`--max-cost` 與 `--sample-count` 都是明確的安全邊界。
 - 成本回報未知時增加 `unknown_cost_count`；不得以零來掩蓋未知帳務。
 - JSON 修復最多一次且只傳文字，不會第二次上傳圖片。
 - 只寫明確指定的 JSON／Markdown artifact，不寫 `photo_analysis`、`releases`、`display_history` 或正式 AI Cache。
 - `stopped_by_budget=true` 時，報告應被視為部分樣本，不可外推全庫。
 
-真實 OpenRouter live benchmark、付費成本與正式品質結論在本分支維持 `NOT RUN`。
+JSON 會把 `contract_metrics`、`quality_metrics`、`ranking_metrics` 分開；`live-quality` 的品質結果只代表該次明確 dataset 與 bounded sample，不可外推全庫。真實 OpenRouter live benchmark、付費成本與正式品質結論在本分支維持 `NOT RUN`。

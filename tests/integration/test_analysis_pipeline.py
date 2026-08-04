@@ -27,6 +27,7 @@ class MockProvider(VisionProvider):
         self.responses = list(responses)
         self.analyze_calls = 0
         self.repair_calls = 0
+        self.repair_kwargs: list[dict] = []
 
     def analyze(self, **kwargs):
         self.analyze_calls += 1
@@ -37,6 +38,7 @@ class MockProvider(VisionProvider):
 
     def repair_json(self, **kwargs):
         self.repair_calls += 1
+        self.repair_kwargs.append(kwargs)
         value = self.responses.pop(0)
         return ProviderResponse(
             value if isinstance(value, str) else json.dumps(value, ensure_ascii=False), Usage(200, 100, 0)
@@ -188,6 +190,8 @@ def test_invalid_json_is_repaired_only_once_without_second_image_call(app, tmp_p
     )
     assert provider.analyze_calls == 1
     assert provider.repair_calls == 1
+    assert provider.repair_kwargs[0]["max_tokens"] == 1200
+    assert "image_path" not in provider.repair_kwargs[0]
 
 
 def test_invalid_repair_container_fails_without_a_second_vision_request(app, tmp_path):
@@ -199,6 +203,8 @@ def test_invalid_repair_container_fails_without_a_second_vision_request(app, tmp
         )
     assert provider.analyze_calls == 1
     assert provider.repair_calls == 1
+    assert provider.repair_kwargs[0]["max_tokens"] == 1200
+    assert "image_path" not in provider.repair_kwargs[0]
 
 
 def test_router_does_not_fail_over_after_initial_vision_and_repair_failure(app, tmp_path):

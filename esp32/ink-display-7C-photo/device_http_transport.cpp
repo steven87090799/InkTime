@@ -46,7 +46,7 @@ bool isPrivateHost(const String &host) {
 }
 
 bool validCa(const String &ca) {
-  return ca.length() >= 64U && ca.length() <= 8192U
+  return ca.length() >= 64U && ca.length() <= inktime::kMaxDeviceCaPemBytes
       && ca.indexOf("-----BEGIN CERTIFICATE-----") >= 0
       && ca.indexOf("-----END CERTIFICATE-----") >= 0;
 }

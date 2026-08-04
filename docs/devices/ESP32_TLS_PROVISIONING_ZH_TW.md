@@ -17,7 +17,9 @@
 -DINKTIME_DEVICE_ROOT_CA="-----BEGIN CERTIFICATE----- ... -----END CERTIFICATE-----"
 ```
 
-若使用 Web 配對頁輸入 CA，韌體只接受 64–8192 bytes 且同時包含 `BEGIN CERTIFICATE`／`END CERTIFICATE` 的 PEM。它會保存到裝置 NVS 的 `ca_pem`；CA 不是 secret，但仍應使用正確的 server CA，不要貼入 server private key。
+若使用 Web 配對頁輸入 CA，韌體只接受 64–3500 bytes 且同時包含 `BEGIN CERTIFICATE`／`END CERTIFICATE` 的 PEM；上限由 `device_http_transport.h` 的 `kMaxDeviceCaPemBytes` 與 portal `maxlength` 共用。它會保存到裝置 NVS 的 `ca_pem`；CA 不是 secret，但仍應使用正確的 server CA，不要貼入 server private key。
+
+`saveConfig()` 會檢查每個 NVS string／numeric write 的 return value，並 read-back 比對 `ssid`、`hostport`、`ca_pem`。格式或 CA policy 失敗回 `PAIRING-NVS-001`，NVS namespace 開啟失敗回 `PAIRING-NVS-002`，寫入後 read-back 不一致回 `PAIRING-NVS-003`；任一失敗都不會清除 portal 或重啟裝置。CA 欄位留白仍保留既有 NVS CA。
 
 ## 受控 LAN development build
 
@@ -36,7 +38,7 @@ LAN build 的設定頁會顯示沒有 TLS 保護的警告。正式 production co
 1. 產生隨機 AP SSID（`InkTime-<裝置短 ID>`）與隨機 24 字元十六進位 AP password；密碼不由 MAC、chip ID 或 SSID 推導。
 2. 啟動 AP 與 `http://192.168.4.1/` 設定頁；配對授權 secret、nonce、嘗試次數與五分鐘 expiry 仍由韌體限制。
 3. 若是 PhotoPainter，先在電子紙上顯示 `INKTIME PAIRING`、Wi-Fi SSID、AP password、setup URL 與 `VALID 5 MIN`，因此不必依賴序列埠才能完成配網。
-4. Web 表單可保存 Wi-Fi、HTTPS backend URL、Root CA PEM、device Token、時區、刷新時間與 180° 設定；保存前會再次驗證 URL／CA。
+4. Web 表單可保存 Wi-Fi、HTTPS backend URL、Root CA PEM、device Token、時區、刷新時間與 180° 設定；保存前會再次驗證 URL／CA，且 NVS write/read-back 必須成功。
 5. 成功保存後停止 portal、清除 pairing secret／nonce 並重啟；超時或失敗嘗試達上限時進入 bounded sleep。
 
 AP password 是短期配對資訊，不是後端 Bearer Token。使用者完成設定後應讓 AP portal 結束，並在管理頁確認該裝置的 Token 與 delivery mode。
@@ -50,6 +52,9 @@ AP password 是短期配對資訊，不是後端 Bearer Token。使用者完成�
 | `DEVICE-TLS-BEGIN` | secure client 初始化失敗 | 先確認 CA、heap 與 server certificate chain；不要改成 `setInsecure()`。 |
 | `DEVICE-HTTP-DISALLOWED` | secure build 收到 HTTP | 改用 HTTPS；只有隔離開發 build 才可開 LAN HTTP flag。 |
 | `DEVICE-HTTP-PUBLIC-DISALLOWED` | LAN build 收到公開 HTTP host | 改用 HTTPS 或受控私有 host。 |
+| `PAIRING-NVS-001` | CA／設定 policy 不合法，或 NVS string／numeric write 失敗 | 修正 CA／欄位內容後重試；不要重啟或改用 `setInsecure()`。 |
+| `PAIRING-NVS-002` | NVS namespace 無法開啟 | 檢查裝置儲存狀態與硬體；設定未視為成功。 |
+| `PAIRING-NVS-003` | NVS write 後 read-back 不一致 | 保留現有設定，檢查 NVS 容量與 CA 長度後再重試。 |
 
 ## 實機驗收邊界
 
