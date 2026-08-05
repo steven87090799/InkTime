@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - main
+      - fix/final-production-openrouter-and-runtime-hardening
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
   push:
     branches:
