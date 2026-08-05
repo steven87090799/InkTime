@@ -216,7 +216,8 @@ void test_envelope_rejects_corruption_and_shape_changes() {
   assert(!inktime::configstore::decode_slot(corrupted, decoded, generation, error));
 
   corrupted = encoded;
-  corrupted[5] ^= 0x01;
+  // Schema 1 and 2 remain readable for existing A/B slots; reject an unknown schema.
+  corrupted[5] = 0U;
   assert(!inktime::configstore::decode_slot(corrupted, decoded, generation, error));
 
   corrupted = encoded;

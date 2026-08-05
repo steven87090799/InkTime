@@ -271,7 +271,7 @@ def test_migration_33_backfills_provider_identity_and_keeps_billable_unknown(mon
             ],
         )
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database) == [33]
+    assert migrate(database) == [33, 34, 35]
     with database.transaction() as connection:
         provider = connection.execute(
             "SELECT id,kind,supports_batch,options_json FROM providers WHERE name=?",
