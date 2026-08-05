@@ -238,6 +238,8 @@ bool DeviceConfigStore::loadLegacy(
   payload.backend_hostport = legacy.getString("hostport", "").c_str();
   payload.ca_pem = legacy.getString("ca_pem", "").c_str();
   payload.device_token = legacy.getString("devtoken", "").c_str();
+  payload.auth_state = payload.device_token.empty() ? "unpaired" : "paired";
+  payload.credential_version = 0U;
   payload.tz_offset_minutes = legacy.getInt("tzmin", legacy.getInt("tz", 8) * 60);
   payload.refresh_hour = legacy.getUChar("hour", 8U);
   payload.refresh_minute = legacy.getUChar("minute", 0U);

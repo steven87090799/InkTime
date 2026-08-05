@@ -14,7 +14,7 @@
 3. 執行 `python scripts/migrate.py --database <既有資料庫>`。
 4. 建立管理員並將舊一般設定匯入 `settings`，API Key 加密匯入 `secrets`。
 5. 背景匯入器分批讀取 `photo_scores`，計算相對路徑與內容指紋後建立 `photos`；原表保留供舊渲染器讀取。
-6. 升級 ESP32 取得每台裝置 Token 並改用 `/api/device/v1/releases/latest`。確認所有裝置後才關閉舊版模式。
+6. 升級 ESP32；新自製板依短效配對 request／管理員核准／claim 取得版本化 Device Secret，既有裝置保留 Legacy Token 相容路徑，再改用 `/api/device/v1/releases/latest`。確認所有裝置後才關閉舊版模式。
 7. 啟動 Web、Worker、Scheduler，先用小型 Mock Provider 工作驗證，再恢復正式排程。
 
 ## 設定對應
@@ -23,7 +23,7 @@
 - `API_CHANNELS` → Provider 設定與加密 Secret
 - `TIMEOUT`、並行數、模型 → 分析／Provider 設定
 - `MEMORY_THRESHOLD`、`DAILY_PHOTO_QUANTITY`、`FONT_PATH` → 渲染設定
-- `DOWNLOAD_KEY` → 不匯入新裝置 Token；僅在管理員明確開啟舊版不安全模式時保留
+- `DOWNLOAD_KEY` → 不匯入新裝置 Device Secret 或 Legacy Token；僅在管理員明確開啟舊版不安全模式時保留
 
 ## 回滾
 

@@ -31,6 +31,7 @@ from inktime.app.services.batch_analysis import BatchAnalysisService
 from inktime.app.services.backups import BackupService
 from inktime.app.services.budgets import BudgetService
 from inktime.app.services.device_energy import DeviceEnergyService
+from inktime.app.services.device_pairing import DevicePairingService
 from inktime.app.services.device_queue_manifests import DeviceQueueManifestService
 from inktime.app.services.device_releases import DeviceReleaseService
 from inktime.app.services.photopainter_stock import StockCompatibilityService
@@ -179,6 +180,7 @@ def bootstrap_services(
     )
 
     device_repository = DeviceRepository(database, secret)
+    device_pairing_service = DevicePairingService(database, secret, secret)
     photo_repository = PhotoRepository(database)
     provider_repository = ProviderRepository(database, secret_store)
     scoring_repository = ScoringProfileRepository(database, settings_repository)
@@ -251,6 +253,7 @@ def bootstrap_services(
     extensions.update(
         {
             "inktime_device_repository": device_repository,
+            "inktime_device_pairing_service": device_pairing_service,
             "inktime_offline_schedule_repository": offline_schedule_repository,
             "inktime_device_release_service": device_release_service,
             "inktime_stock_compatibility_service": StockCompatibilityService(device_release_service),

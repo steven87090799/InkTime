@@ -19,6 +19,15 @@ def test_config_payload_and_envelopes_are_complete_and_bounded():
         "backend_hostport",
         "ca_pem",
         "device_token",
+        "device_secret",
+        "device_id",
+        "auth_state",
+        "credential_version",
+        "pairing_id",
+        "pairing_nonce",
+        "pairing_expires_at_epoch",
+        "pairing_retry_at_epoch",
+        "pairing_retry_attempt",
         "tz_offset_minutes",
         "refresh_hour",
         "refresh_minute",
@@ -44,6 +53,8 @@ def test_config_payload_and_envelopes_are_complete_and_bounded():
         assert marker in core
     assert "std::string" in core
     assert "memcpy" not in core
+    assert "schema >= 3U" in core
+    assert "kMaxPairingNonceBytes" in core
 
 
 def test_config_store_reopens_read_only_and_restores_pointer_on_commit_failure():
@@ -100,7 +111,33 @@ def test_canonical_config_survives_legacy_cleanup_failure_and_records_warning():
 
 def test_firmware_current_version_is_bumped_for_recovery_semantics():
     firmware = FIRMWARE.read_text(encoding="utf-8")
-    assert '#define INKTIME_FIRMWARE_VERSION "2.6.0"' in firmware
+    assert '#define INKTIME_FIRMWARE_VERSION "2.7.0"' in firmware
+
+
+def test_pairing_lifecycle_persists_resume_state_and_uses_confirm_header():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    for marker in (
+        "DEVICE_PAIRING_CONFIRM_PATH",
+        "auth_state = \"credential_issued\"",
+        "pairing_retry_at_epoch",
+        "pairingBackoffForAttempt",
+        "pairingBackoffSeconds",
+        "X-InkTime-Credential-Version",
+        "Authorization\", \"Bearer \" + cfg.device_secret",
+        "kPairingPollWindowMs = 30000U",
+        "savePairingCandidate(cfg, candidate)",
+    ):
+        assert marker in firmware
+    assert 'candidate.auth_state = "paired"' in firmware
+    assert firmware.index("savePairingCandidate(cfg, requestCandidate)") < firmware.index("requestHttp.POST(requestBody)")
+
+
+def test_pairing_request_replay_redraws_pending_display_code():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    assert 'const String requestState = requestResponse["status"] | "pending";' in firmware
+    assert "const bool requestPending = requestState == \"pending\";" in firmware
+    assert "|| (requestPending && !validCode)" in firmware
+    assert "if (requestPending && validCode)" in firmware
 
 
 def test_schedule_recovery_uses_identity_journal_and_fail_closed_metadata():

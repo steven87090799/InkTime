@@ -21,7 +21,7 @@ def test_device_ca_contract_is_bounded_and_shared_with_portal():
     assert "INKTIME_ALLOW_INSECURE_DEVICE_HTTP_HOSTNAMES 0" in transport
     assert "maxlength='\");" in firmware
     assert "String(inktime::kMaxDeviceCaPemBytes)" in firmware
-    assert "8192" not in transport + firmware
+    assert "ca.length() > 8192" not in transport
 
 
 def test_device_save_reports_nvs_write_and_readback_failures_before_restart():

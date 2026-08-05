@@ -1,6 +1,6 @@
 # InkTime｜照片分析與電子紙回憶管理平台
 
-[English legacy README](README.en.md) · [專案規格與文件入口](USER_MANUAL.html) · [完整 Markdown 文件地圖](docs/README.md) · [完整程式流程圖](#完整程式流程圖從啟動照片分析到電子紙顯示) · [快速開始](docs/getting-started/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/guides/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/operations/DOCKER_GUIDE_ZH_TW.md) · [ESP32／電子紙指南](docs/devices/ESP32_GUIDE_ZH_TW.md) · [Waveshare PhotoPainter](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) · [ESP32 TLS／配網信任根](docs/devices/ESP32_TLS_PROVISIONING_ZH_TW.md) · [OpenRouter Provider](docs/providers/OPENROUTER_ZH_TW.md) · [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md) · [資源與低功耗](docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/operations/LOGGING_GUIDE_ZH_TW.md)
+[English legacy README](README.en.md) · [專案規格與文件入口](USER_MANUAL.html) · [完整 Markdown 文件地圖](docs/README.md) · [完整程式流程圖](#完整程式流程圖從啟動照片分析到電子紙顯示) · [快速開始](docs/getting-started/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/guides/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/operations/DOCKER_GUIDE_ZH_TW.md) · [ESP32／電子紙指南](docs/devices/ESP32_GUIDE_ZH_TW.md) · [ESP32 自動配對與憑證](docs/devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) · [Waveshare PhotoPainter](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) · [ESP32 TLS／配網信任根](docs/devices/ESP32_TLS_PROVISIONING_ZH_TW.md) · [OpenRouter Provider](docs/providers/OPENROUTER_ZH_TW.md) · [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md) · [資源與低功耗](docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/operations/LOGGING_GUIDE_ZH_TW.md)
 
 InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複與低價值照片，再以可控預算的視覺模型產生繁體中文描述、分類、分數與電子紙短文案。所有工作、模型、成本、裝置、渲染、備份與診斷都能由登入後的 Web 管理介面操作。
 
@@ -18,7 +18,7 @@ InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複
 - 提供預設 offline、bounded、可重現的 [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md)；不會修改 production DB、analysis、release 或 AI cache。
 - 支援同步 Vision 與 OpenAI Batch。OpenAI Files Batch lifecycle 已接入背景工作，支援 JSONL preparation、upload、submission、poll、result import 與 remote cleanup；同時支援 `upload_unknown`／`submission_unknown` 人工 Recovery、Cancel／Abandon、CAS、lease、attempt identity，以及 Job／Batch／Item transaction invariants。Fake lifecycle 與 CI 已覆蓋；真實 OpenAI API live smoke 仍為 `NOT RUN`，正式啟用前應先用 1–3 張非敏感圖片進行 gated live smoke。完整操作見 [OpenAI Batch 照片分析指南](docs/OPENAI_BATCH_ANALYSIS_ZH_TW.md)。
 - 持久化 Job、逐張狀態、有界佇列、暫停、續跑、取消、失敗重跑、重啟恢復與成本停止線。
-- administrator／viewer、Session、CSRF、登入限制與每台 ESP32 獨立 Bearer Token。
+- administrator／viewer、Session、CSRF、登入限制與每台 ESP32 的自動配對 Device Secret；既有 Legacy Bearer Token 與 PhotoPainter Stock 相容模式分流保留。
 - 480×800 四色 2bpp 與完整六／七色 indexed4 版本化發布；OKLab／RGB 色差、五種抖動、Profile 獨立 latest、SHA-256 與回滾。
 - 裝置設定版本 ACK、離線／恢復站內通知、去重／冷卻與三次持久化 Webhook 重試。
 - 繁體中文管理介面、動態 Log 層級、節流進度、錯誤中心、程序／cgroup／SQLite／Worker 診斷與已遮蔽診斷包。
@@ -56,7 +56,7 @@ flowchart TB
     end
 
     UI --> WEB --> API --> SVC
-    ESP -->|"Bearer Token"| WEB
+    ESP -->|"Device Secret／Legacy Bearer"| WEB
     WORKER --> SVC
     SCHED --> SVC
     SVC --> DOMAIN
@@ -132,7 +132,7 @@ flowchart TD
 | 5 | 手動選片、歷史模式或 `display_prepare` | 年份、數量、Profile、偏好、fallback 與同日重抽 | 有序候選清單 | `services/display_prepare.py`、`services/rendering.py` |
 | 6 | 照片、文案、版型與 Profile | Server 端 composition、字型覆蓋、調色盤、抖動與打包 | 480×800 BIN、Preview、Manifest | `domain/rendering/` |
 | 7 | 一個或多個 staged Manifest | Validate、DB staged、pointer snapshot/activate、published/history、失敗補償 | Profile 專屬正式 Release ID | `services/release_coordinator.py` |
-| 8 | ESP32 Bearer Token 與面板 Profile | 驗證 Token、裝置、Assignment、Profile 與 latest pointer | 裝置專屬 Manifest | `api/devices.py` |
+| 8 | ESP32 自動配對／Legacy Bearer 與面板 Profile | 驗證 Device Secret 版本或 Legacy Token、裝置、Assignment、Profile 與 latest pointer | 裝置專屬 Manifest | `api/device_pairing.py`、`api/devices.py` |
 | 9 | Manifest 指定檔名 | Server 驗路徑／Manifest／size／SHA；ESP32 再驗長度／SHA | 已驗證的靜態 Payload | `api/devices.py`、`esp32/ink-display-7C-photo/` |
 | 10 | 已驗證 Payload、電源與面板狀態 | 六／七色完整刷新、BUSY timeout、失敗保留舊畫面 | 電子紙顯示結果 | `spectra6_73.cpp`、`.ino` |
 | 11 | Release ID、SHA 驗證、display_updated、錯誤碼 | 保存裝置狀態；測試 Release 依 ACK 推進狀態機 | Device event／power sample／consumed assignment | `api/devices.py`、`domain/rendering/release.py` |
@@ -445,8 +445,8 @@ sequenceDiagram
 
     E->>E: 喚醒、讀取設定與電源狀態
     E->>E: 有界 Wi-Fi 連線
-    E->>A: GET /releases/latest + Authorization: Bearer
-    A->>D: HMAC Token 驗證、裝置啟用與失敗限流
+    E->>A: GET /releases/latest + Device Secret／Legacy Bearer
+    A->>D: 憑證版本／HMAC 驗證、裝置啟用與失敗限流
     D-->>A: device + panel_profile
     A->>T: 查詢未過期、未達重試上限的 assignment
     alt 有相容的 device-test assignment
@@ -592,7 +592,7 @@ flowchart LR
     subgraph WebZone["🌐 Web 邊界"]
         SESSION["Session + CSRF + 登入限流"]
         ROLE["角色權限"]
-        DEVICE_AUTH["Bearer Token HMAC 驗證 + IP HMAC 限流"]
+        DEVICE_AUTH["Device Secret 版本／Legacy Token HMAC 驗證 + IP HMAC 限流"]
         VALIDATION["JSON／範圍／路徑／Profile 驗證"]
     end
     subgraph RuntimeZone["⚙️ Runtime 邊界"]
@@ -603,7 +603,7 @@ flowchart LR
     end
     subgraph ExternalZone["外部／裝置信任邊界"]
         AI["🧠 Provider：HTTPS、Timeout、Budget、Schema"]
-        ESP32B["📟 ESP32：Bearer + Manifest + SHA-256"]
+        ESP32B["📟 ESP32：Device Secret／Legacy Bearer + Manifest + SHA-256"]
         NAS["📁 NAS：唯讀原始照片"]
     end
 
@@ -617,7 +617,7 @@ flowchart LR
     SERVICES --> AI
 ```
 
-安全重點：Production 不使用 `os.system`、`os.popen`、`shell=True` 或 ExifTool Shell；裝置 API 只提供預先產生並驗證的靜態 Payload。Bearer Token 是認證而不是傳輸加密，HTTP 只適合隔離 IoT VLAN。
+安全重點：Production 不使用 `os.system`、`os.popen`、`shell=True` 或 ExifTool Shell；裝置 API 只提供預先產生並驗證的靜態 Payload。Device Secret／Bearer Token 是認證而不是傳輸加密，HTTP 只適合隔離 IoT VLAN。
 
 ### 13. 失敗時系統保留什麼
 
@@ -677,7 +677,7 @@ Production 預設且建議使用 `INKTIME_COOKIE_SECURE=1`、`INKTIME_ALLOW_INSE
 4. 到「維護」輸入容器內照片路徑（Compose 預設 `/photos`），建立背景掃描工作。
 5. 到「工作」建立兩階段智慧分析，確認照片數、Token、費用範圍與工作預算後啟動。
 6. 到「渲染」預覽並選擇內建的手寫／文青繁中字型，測試渲染後發布 2bpp 版本；需要時仍可上傳其他字型。
-7. 到「裝置」新增 ESP32；立即複製只顯示一次的 Token 到裝置 AP 設定頁。
+7. 新自製板不必先在「裝置」建立資料列：AP 設定頁只填 Wi-Fi／InkTime URL，裝置首次連線會取得短期配對碼並顯示在實體面板，管理員在 Web 輸入該碼核准；裝置以可恢復 claim／confirm 取得 Device Secret，confirm 後才建立正式資料列。既有 Legacy 或 Stock 裝置依相容模式操作。
 8. 到「備份」建立並下載第一份備份。
 
 ## 歷史今日與安全換圖
@@ -707,7 +707,7 @@ Production 預設且建議使用 `INKTIME_COOKIE_SECURE=1`、`INKTIME_ALLOW_INSE
 
 ## ESP32 配對與可靠性
 
-新版韌體不再把金鑰放在 URL。裝置以 Bearer Token 取得專屬面板 Profile 的 Manifest，優先讀取 Offline Queue，嚴格驗證 Item 綁定的相對下載 URL、尺寸、格式、長度與 SHA-256；只有 Queue 404／空白才回退 Latest Release。顯示事件先持久化 NVS，再以 canonical `/api/device/v1/queue/ack` 重送穩定 idempotency key；成功顯示的 SHA／Release／Profile／rotation／board 完全相同時可安全跳過刷新，forced refresh 與狀態損壞會 fail closed。裝置也會回報設定 ACK、firmware、RSSI、Heap／PSRAM 與最後錯誤。既有 EOL GDEY073D46 與新 GDEP073E01 有不同 compile profile；Scheduler 以低頻掃描建立離線／恢復通知，可選去重 Webhook。完整設定見[裝置可靠性與六／七色渲染指南](docs/devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。
+新版韌體不再把金鑰放在 URL。新自製裝置以自動配對取得一次性領取的 Device Secret 與 credential version；既有裝置仍可用 Legacy Bearer Token，PhotoPainter Stock 維持 `/dataUP` 並不進入配對流程。裝置以對應憑證取得專屬面板 Profile 的 Manifest，優先讀取 Offline Queue，嚴格驗證 Item 綁定的相對下載 URL、尺寸、格式、長度與 SHA-256；只有 Queue 404／空白才回退 Latest Release。顯示事件先持久化 NVS，再以 canonical `/api/device/v1/queue/ack` 重送穩定 idempotency key；成功顯示的 SHA／Release／Profile／rotation／board 完全相同時可安全跳過刷新，forced refresh 與狀態損壞會 fail closed。裝置也會回報設定 ACK、firmware、RSSI、Heap／PSRAM 與最後錯誤。既有 EOL GDEY073D46 與新 GDEP073E01 有不同 compile profile；Scheduler 以低頻掃描建立離線／恢復通知，可選去重 Webhook。完整設定見[裝置可靠性與六／七色渲染指南](docs/devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)與[ESP32 自動配對與憑證生命週期](docs/devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md)。
 
 ## 原生安裝與相容 CLI
 
@@ -725,14 +725,14 @@ python -m inktime.app.workers.runner
 
 ## 安全注意事項
 
-- 不要 Commit `.env`、`config.py`、資料庫、Session Key、API Key 或裝置 Token。
+- 不要 Commit `.env`、`config.py`、資料庫、Session Key、API Key、Device Secret 或 Legacy 裝置 Token。
 - 公網部署必須使用 HTTPS、Secure Cookie、反向代理限流與 NAS 最小權限。
 - HTTP 模式只可用於可信任 LAN／測試；`INKTIME_COOKIE_SECURE=0` 不適合公開網路。
 - Reverse Proxy 必須只傳入可信任來源的 `Host`、`X-Forwarded-Proto` 與 `X-Forwarded-For`，且 `INKTIME_PROXY_TRUST` 要等於實際 Proxy hop 數。
 - Webhook 會把通知內容送到外部服務；目的地只允許 DNS-pinned HTTPS、禁止 redirect 與內部位址，Bearer Token 仍應視為高敏感 Secret。
-- Device Token 只顯示一次，應存放於裝置受保護設定；不要放進 URL、Log、截圖或文件。
+- Device Secret 只在自動配對 claim 回應中交付一次；Legacy Token 仍只存於裝置受保護設定。兩者都不要放進 URL、Log、截圖或文件。
 - 舊 `/static/inktime/<key>/...` API 預設關閉；只有隔離網路短期遷移才可明確開啟。
-- viewer 只能查看，不能修改設定、建立／控制工作、管理 Token、發布或備份。
+- viewer 只能查看，不能修改設定、建立／控制工作、管理配對／憑證、發布或備份。
 
 詳見 [安全指南](docs/operations/SECURITY_GUIDE_ZH_TW.md)與[錯誤碼](docs/operations/ERROR_CODES_ZH_TW.md)。
 
@@ -746,7 +746,7 @@ python -m inktime.app.workers.runner
 - 工作不動：到「診斷」確認 Worker 與 Queue，再看「錯誤中心」。
 - 模型結果無效：確認模型支援 JSON Schema；系統只修復一次，避免無限成本。
 - 繁中變方框：到「渲染」確認已選取內建芫荽／霞鶩文楷 TC，或上傳涵蓋短文案所有字元的繁中字型；系統不會靜默改用 PIL 預設字型。
-- 裝置 401：Token 已撤銷、輸入錯誤或裝置被停用；重新產生後需更新裝置。
+- 裝置 401／403：Device Secret／credential version 已撤銷、Legacy Token 錯誤或裝置被停用；自動模式請由管理員啟用重新配對，Legacy 模式才重新產生並更新 Token。
 
 更多處理方式見 [疑難排解](docs/operations/TROUBLESHOOTING_ZH_TW.md)。效能證據見 [100,000 筆報告](docs/reports/PERFORMANCE_REPORT.md)，歷史完成邊界見 [實作報告](docs/archive/reports/FINAL_IMPLEMENTATION_REPORT_ZH_TW.md)。
 
@@ -754,7 +754,7 @@ python -m inktime.app.workers.runner
 
 - 一般發布、歷史選片與排程共用同一候選資格：已分析、可選、active、最新分析存在，而且原始檔仍位於啟用的 Library Root。
 - Release 先產生 staged 檔案並驗證 Manifest／大小／SHA-256，再以補償式流程切換 Profile pointer、提交 DB 與 `display_history`。啟動時標記漂移，失效 pointer 可回復到同 Profile 最新完整版本，但不自動刪除未知 Release。
-- 裝置仍使用 `Authorization: Bearer`；Bearer Token 不會加密 HTTP。HTTP 只適合隔離 IoT VLAN，跨網路必須使用已驗證 CA 的 HTTPS 或 VPN。
+- 裝置仍使用 `Authorization: Bearer`；自動模式另帶 `X-InkTime-Credential-Version`，Legacy 模式維持相容 Token。Device Secret／Bearer Token 不會加密 HTTP；HTTP 只適合隔離 IoT VLAN，跨網路必須使用已驗證 CA 的 HTTPS 或 VPN。
 - 六／七色 Profile 明確宣告不支援 Partial Refresh；正式韌體已實作經驗證的相同內容跳過刷新，但真實面板的 BUSY、方向、殘影、色彩與功耗仍須實體驗收。
 - 預設備份只有 Metadata DB，不含原始照片或 Release Payload。還原後會進行 Release reconciliation。
 

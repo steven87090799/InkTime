@@ -10,21 +10,40 @@ from inktime.app.repositories.devices import DeviceRateLimitError
 from tests.conftest import create_admin, csrf, login
 
 
-def test_device_token_is_returned_once_and_only_hash_is_stored(client, app, caplog):
+def test_web_cannot_precreate_a_custom_automatic_device(client, app):
     create_admin(app)
     login(client)
     response = client.post(
         "/api/v1/devices",
-        json={"name": "書房電子紙"},
+        json={"name": "書房電子紙", "delivery_mode": "legacy_online"},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert response.status_code == 409
+    assert app.extensions["inktime_device_repository"].list() == []
+
+
+def test_web_created_device_is_stock_compatibility_only(client, app, caplog):
+    create_admin(app)
+    login(client)
+    response = client.post(
+        "/api/v1/devices",
+        json={"name": "Stock 書房相框", "delivery_mode": "stock_compat"},
         headers={"X-CSRF-Token": csrf(client)},
     )
     assert response.status_code == 201
-    token = response.get_json()["token"]
-    assert token.startswith("itd_")
+    body = response.get_json()
+    assert "token" not in body
+    assert body["auth_mode"] == "stock"
+    assert body["pairing_state"] == "paired"
     with app.extensions["inktime_database"].session() as connection:
-        stored = connection.execute("SELECT token_hash FROM devices").fetchone()[0]
-    assert token != stored
-    assert token not in caplog.text
+        stored = connection.execute(
+            "SELECT token_hash,auth_mode,pairing_state,device_secret_hash FROM devices"
+        ).fetchone()
+    assert stored["auth_mode"] == "stock"
+    assert stored["pairing_state"] == "paired"
+    assert stored["device_secret_hash"] is None
+    assert stored["token_hash"]
+    assert "Device Secret" not in caplog.text
 
 
 def test_device_can_be_fully_configured_when_created_from_web(client, app):

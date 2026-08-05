@@ -56,7 +56,7 @@ Scheduler 預設每 300 秒掃描一次，不為每次掃描輸出 INFO Log。�
 
 - 首次離線：建立一筆 warning 裝置事件與站內通知，設置 `offline_alert_active=1`。
 - 持續離線：預設不重複通知。只有開啟 `device_offline_repeat_enabled` 才依 `device_offline_cooldown_hours` 再提醒。
-- 恢復：裝置再次以有效 Bearer Token 連線或回報狀態後，清除離線旗標；若啟用恢復通知則建立一筆 recovery。
+- 恢復：裝置再次以有效 Device Secret／credential version 或 Legacy Bearer Token 連線、回報狀態後，清除離線旗標；若啟用恢復通知則建立一筆 recovery。
 - 停用裝置不參與離線判定；新裝置也必須超過完整門檻才會通知。
 - 所有狀態與 Webhook 嘗試持久化在 SQLite，容器重新啟動不會遺失節流狀態。
 

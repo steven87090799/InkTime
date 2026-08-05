@@ -170,7 +170,7 @@ jobs:
               docker compose --env-file .ci-lan.env exec -T inktime-scheduler python scripts/container_health.py scheduler
             do sleep 2; done
           '
-      - name: Initialize LAN setup, session, setting and Device Token
+      - name: Initialize LAN setup, session, setting and automatic pairing
         run: python scripts/lan_production_gate.py initialize --state .ci-lan-state.json
       - name: Seed one deterministic formal Release while services are stopped
         run: |

@@ -60,7 +60,7 @@ flowchart TB
 | 模型路由、限流與熔斷 | `providers/router.py` | `services/providers.py`、`repositories/providers.py` |
 | Token、成本與停止線 | `services/budgets.py` | `repositories/usage.py`、`repositories/settings.py` |
 | 電子紙渲染與發布 | `services/rendering.py` | `domain/rendering/`、`api/rendering.py` |
-| 裝置 Token 與下載 | `api/devices.py` | `repositories/devices.py`、`esp32/` |
+| 裝置自動配對／Legacy Token 與下載 | `api/devices.py`、`api/device_pairing.py` | `repositories/devices.py`、`services/device_pairing.py`、`esp32/` |
 | 管理介面 | `web/templates/` | `web/static/`、對應的 `api/*.py` |
 | Docker 與啟動 | `docker-compose.yml`、`Dockerfile` | `server.py`、`platform.py` |
 

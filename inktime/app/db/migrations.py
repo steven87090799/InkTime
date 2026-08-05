@@ -1705,6 +1705,135 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_api_usage_photo_cost_source ON api_usage(photo_id,cost_source)",
         ),
     ),
+    Migration(
+        34,
+        "加入自動裝置配對與版本化 credential 生命週期",
+        (
+            "ALTER TABLE devices ADD COLUMN auth_mode TEXT NOT NULL DEFAULT 'legacy_token' CHECK(auth_mode IN ('automatic','legacy_token','stock'))",
+            "ALTER TABLE devices ADD COLUMN pairing_state TEXT NOT NULL DEFAULT 'paired' CHECK(pairing_state IN ('unpaired','pairing_pending','paired','revoked','auth_invalid','pairing_expired'))",
+            "ALTER TABLE devices ADD COLUMN credential_version INTEGER NOT NULL DEFAULT 0 CHECK(credential_version >= 0)",
+            "ALTER TABLE devices ADD COLUMN device_secret_hash TEXT",
+            "ALTER TABLE devices ADD COLUMN paired_at TEXT",
+            "ALTER TABLE devices ADD COLUMN last_auth_at TEXT",
+            "ALTER TABLE devices ADD COLUMN auth_revoked_at TEXT",
+            "ALTER TABLE devices ADD COLUMN pairing_code_hash TEXT",
+            "ALTER TABLE devices ADD COLUMN pairing_expires_at TEXT",
+            "ALTER TABLE devices ADD COLUMN pairing_attempts INTEGER NOT NULL DEFAULT 0 CHECK(pairing_attempts >= 0)",
+            "ALTER TABLE devices ADD COLUMN pairing_claim_attempts INTEGER NOT NULL DEFAULT 0 CHECK(pairing_claim_attempts >= 0)",
+            "ALTER TABLE devices ADD COLUMN pairing_requested_at TEXT",
+            "ALTER TABLE devices ADD COLUMN firmware_identity TEXT",
+            "ALTER TABLE devices ADD COLUMN previous_device_secret_hash TEXT",
+            "ALTER TABLE devices ADD COLUMN previous_credential_version INTEGER CHECK(previous_credential_version IS NULL OR previous_credential_version >= 0)",
+            "ALTER TABLE devices ADD COLUMN previous_credential_expires_at TEXT",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_device_secret_hash ON devices(device_secret_hash) WHERE device_secret_hash IS NOT NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_previous_device_secret_hash ON devices(previous_device_secret_hash) WHERE previous_device_secret_hash IS NOT NULL",
+            "CREATE INDEX IF NOT EXISTS idx_devices_auth_state ON devices(auth_mode,pairing_state,enabled,id)",
+            """
+            CREATE TABLE IF NOT EXISTS device_pairing_requests (
+                id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+                pairing_nonce_hash TEXT NOT NULL,
+                pairing_code_hash TEXT NOT NULL,
+                pairing_code_ciphertext BLOB NOT NULL,
+                firmware_identity TEXT NOT NULL DEFAULT '',
+                firmware_version TEXT,
+                panel_profile TEXT,
+                capabilities_json TEXT NOT NULL DEFAULT '{}',
+                expires_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+                claim_attempts INTEGER NOT NULL DEFAULT 0 CHECK(claim_attempts >= 0),
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending','approved','rejected','expired','consumed')),
+                requested_at TEXT NOT NULL,
+                approved_at TEXT,
+                approved_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+                consumed_at TEXT,
+                UNIQUE(device_id,id)
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_device_pairing_active_device ON device_pairing_requests(device_id) WHERE status IN ('pending','approved')",
+            "CREATE INDEX IF NOT EXISTS idx_device_pairing_status_expiry ON device_pairing_requests(status,expires_at,id)",
+            """
+            CREATE TABLE IF NOT EXISTS device_pairing_rate_limits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope TEXT NOT NULL CHECK(scope IN ('ip','device')),
+                scope_hash TEXT NOT NULL,
+                attempted_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_device_pairing_rate_scope_time ON device_pairing_rate_limits(scope,scope_hash,attempted_at)",
+            # Existing rows keep their deployed legacy behavior.  Stock rows
+            # are explicitly separated so the new firmware pairing flow can
+            # never be reached through the Stock compatibility path.
+            "UPDATE devices SET auth_mode=CASE WHEN delivery_mode='stock_compat' THEN 'stock' ELSE 'legacy_token' END, pairing_state='paired', credential_version=0, updated_at=updated_at",
+        ),
+    ),
+    Migration(
+        35,
+        "收斂實體配對 possession、可恢復 claim 與 repair permission",
+        (
+            "ALTER TABLE devices ADD COLUMN repair_allowed_until TEXT",
+            # Graceful rotation was never exposed as a complete protocol.  The
+            # supported lifecycle is revoke -> explicit repair -> new secret.
+            "UPDATE devices SET previous_device_secret_hash=NULL, previous_credential_version=NULL, previous_credential_expires_at=NULL, repair_allowed_until=NULL",
+            # Migration 34 could create enabled, credential-less automatic rows
+            # before an ESP32 enrolled.  They are not usable devices and must
+            # not remain enabled while the new pending-enrollment model is used.
+            "UPDATE devices SET enabled=0 WHERE auth_mode='automatic' AND pairing_state IN ('unpaired','pairing_pending','pairing_expired')",
+            "DROP INDEX IF EXISTS idx_device_pairing_active_device",
+            "DROP INDEX IF EXISTS idx_device_pairing_status_expiry",
+            "ALTER TABLE device_pairing_requests RENAME TO device_pairing_requests_v34",
+            """
+            CREATE TABLE device_pairing_requests (
+                id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL,
+                pairing_nonce_hash TEXT NOT NULL,
+                pairing_code_hash TEXT NOT NULL,
+                firmware_identity TEXT NOT NULL DEFAULT '',
+                firmware_version TEXT,
+                panel_profile TEXT,
+                capabilities_json TEXT NOT NULL DEFAULT '{}',
+                config_json TEXT NOT NULL DEFAULT '{}',
+                expires_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+                claim_attempts INTEGER NOT NULL DEFAULT 0 CHECK(claim_attempts >= 0),
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending','approved','credential_issued','confirmed','rejected','expired')),
+                requested_at TEXT NOT NULL,
+                approved_at TEXT,
+                approved_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+                credential_issued_at TEXT,
+                credential_envelope_ciphertext BLOB,
+                credential_envelope_expires_at TEXT,
+                confirmed_at TEXT,
+                UNIQUE(device_id,id)
+            )
+            """,
+            """
+            INSERT INTO device_pairing_requests(
+                id,device_id,pairing_nonce_hash,pairing_code_hash,firmware_identity,
+                firmware_version,panel_profile,capabilities_json,config_json,expires_at,
+                attempts,claim_attempts,status,requested_at,approved_at,approved_by,
+                credential_issued_at,credential_envelope_ciphertext,credential_envelope_expires_at,
+                confirmed_at
+            )
+            SELECT
+                id,device_id,pairing_nonce_hash,pairing_code_hash,firmware_identity,
+                firmware_version,panel_profile,capabilities_json,'{}',expires_at,
+                attempts,claim_attempts,
+                CASE WHEN status IN ('pending','approved') THEN 'expired'
+                     WHEN status='consumed' THEN 'confirmed'
+                     ELSE status END,
+                requested_at,approved_at,approved_by,NULL,NULL,NULL,
+                CASE WHEN status='consumed' THEN consumed_at ELSE NULL END
+            FROM device_pairing_requests_v34
+            """,
+            "DROP TABLE device_pairing_requests_v34",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_device_pairing_active_device ON device_pairing_requests(device_id) WHERE status IN ('pending','approved','credential_issued')",
+            "CREATE INDEX IF NOT EXISTS idx_device_pairing_status_expiry ON device_pairing_requests(status,expires_at,id)",
+            "CREATE INDEX IF NOT EXISTS idx_device_pairing_nonce ON device_pairing_requests(device_id,pairing_nonce_hash)",
+        ),
+    ),
 )
 
 

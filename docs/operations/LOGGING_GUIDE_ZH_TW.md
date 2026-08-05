@@ -18,7 +18,7 @@ InkTime 的 stdout/stderr 由 Docker `json-file` 收集並輪替。應用 Log �
 
 ## 不會輸出的內容
 
-- 不輸出 API Key、裝置 Token、Cookie、Session、密碼或完整 Authorization Header。
+- 不輸出 API Key、Device Secret、Legacy 裝置 Token、pairing code、Cookie、Session、密碼或完整 Authorization Header。
 - 不逐張輸出成功照片。
 - 不預設輸出每個 HTTP request、健康檢查或輪詢。
 - 項目錯誤只輸出前 3 筆與後續取樣；完整聚合內容在 Web「錯誤中心」。

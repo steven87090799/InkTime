@@ -45,7 +45,7 @@ Worker（有界佇列）      ├── settings / secrets / history
 - 主要高品質分析以單一圖片請求同時回傳描述、類型、所有分數與短文案。
 - 工作項目從資料庫分批 claim，不為 100,000 張照片一次建立 Future。
 - 所有具副作用的 Web 操作要求 administrator 與 CSRF。
-- 裝置只以 Bearer Token 驗證；資料庫只存雜湊；完整 Token 只顯示一次。
+- 裝置依模式以版本化 Device Secret 或 Legacy／Stock Bearer Token 驗證；資料庫只存雜湊；Device Secret 只在 claim 交付一次。
 - Release 在暫存目錄完成校驗後以原子 rename 發布，裝置先驗 Manifest 再套用。
 - 一般設定、分析策略與成本限制由 Web UI 管理；部署密鑰仍由環境變數注入。
 

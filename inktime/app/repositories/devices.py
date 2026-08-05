@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hmac
 import json
+import secrets
 from typing import Sequence
 from uuid import uuid4
 
-from inktime.app.core.security import hash_device_token, issue_device_token
+from inktime.app.core.security import hash_device_secret, hash_device_token, issue_device_token
 from inktime.app.db import Database
 from inktime.app.domain.photopainter.offline_schedule import (
     normalize_delivery_contract,
@@ -17,6 +19,7 @@ _UNSET = object()
 _DEVICE_AUTH_FAILURE_LIMIT = 20
 _DEVICE_AUTH_FAILURE_WINDOW = timedelta(minutes=5)
 _DEVICE_AUTH_FAILURE_MAX_ROWS = 10_000
+_DEVICE_AUTH_TIMESTAMP_UPDATE_INTERVAL = timedelta(minutes=1)
 
 
 class DeviceRateLimitError(RuntimeError):
@@ -46,7 +49,10 @@ class DeviceRepository:
                        delivery_mode, offline_prefetch_allowed, offline_schedule_json,
                        offline_schedule_version, last_offline_slot, schedule_times_json,
                        prefetch_lead_minutes, button_wake_action, stock_endpoint_host,
-                       frame_orientation, layout_mode, fit_mode
+                       frame_orientation, layout_mode, fit_mode,
+                       auth_mode, pairing_state, credential_version, paired_at, last_auth_at,
+                       auth_revoked_at, repair_allowed_until, pairing_expires_at, pairing_attempts,
+                       pairing_claim_attempts, pairing_requested_at, firmware_identity
                 FROM devices ORDER BY name
                 """
             ).fetchall()
@@ -74,9 +80,24 @@ class DeviceRepository:
         frame_orientation: str | None = None,
         layout_mode: str | None = None,
         fit_mode: str | None = None,
-    ) -> tuple[str, str]:
+        auth_mode: str = "legacy_token",
+    ) -> tuple[str, str | None]:
         device_id = str(uuid4())
-        token = issue_device_token()
+        auth_mode = str(auth_mode).strip() or "legacy_token"
+        if delivery_mode == "stock_compat":
+            auth_mode = "stock"
+        if auth_mode not in {"automatic", "legacy_token", "stock"}:
+            raise ValueError("DEVICE-011 auth_mode 不合法")
+        token = issue_device_token() if auth_mode in {"legacy_token", "stock"} else None
+        # The legacy schema requires token_hash to be non-null.  An explicitly
+        # created automatic scaffold receives an unreachable random placeholder
+        # and remains disabled until the authenticated confirm step.
+        token_for_storage = token or ("auto-placeholder-" + secrets.token_urlsafe(32))
+        pairing_state = "unpaired" if auth_mode == "automatic" else "paired"
+        if auth_mode == "automatic":
+            # New custom devices must be created by ESP32 enrollment and only
+            # become enabled after the authenticated confirm step.
+            enabled = False
         now = datetime.now(timezone.utc).isoformat()
         delivery_mode, offline_prefetch_allowed = normalize_delivery_contract(
             delivery_mode,
@@ -96,14 +117,15 @@ class DeviceRepository:
                     frame_orientation, layout_mode, fit_mode, delivery_mode,
                     offline_prefetch_allowed, offline_schedule_json, offline_schedule_version,
                     schedule_times_json, prefetch_lead_minutes, button_wake_action,
-                    stock_endpoint_host, created_at, updated_at
+                    stock_endpoint_host, auth_mode, pairing_state, credential_version,
+                    created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     device_id,
                     name.strip(),
-                    hash_device_token(token, self.pepper),
+                    hash_device_token(token_for_storage, self.pepper),
                     int(enabled),
                     timezone_name,
                     schedule,
@@ -120,6 +142,9 @@ class DeviceRepository:
                     int(prefetch_lead_minutes),
                     button_wake_action,
                     stock_endpoint_host,
+                    auth_mode,
+                    pairing_state,
+                    0,
                     now,
                     now,
                 ),
@@ -130,8 +155,15 @@ class DeviceRepository:
         token = issue_device_token()
         now = datetime.now(timezone.utc).isoformat()
         with self.database.session() as connection:
+            current = connection.execute(
+                "SELECT auth_mode FROM devices WHERE id=?", (device_id,)
+            ).fetchone()
+            if current is None:
+                raise KeyError(device_id)
+            if str(current["auth_mode"] or "legacy_token") == "automatic":
+                raise ValueError("DEVICE-011 自動配對裝置不支援手動 Token")
             cursor = connection.execute(
-                "UPDATE devices SET token_hash=?, updated_at=? WHERE id=?",
+                "UPDATE devices SET token_hash=?, auth_mode=CASE WHEN auth_mode='stock' THEN 'stock' ELSE 'legacy_token' END, updated_at=? WHERE id=?",
                 (hash_device_token(token, self.pepper), now, device_id),
             )
             if cursor.rowcount != 1:
@@ -167,7 +199,8 @@ class DeviceRepository:
                     """
                     SELECT timezone,schedule,rotation,panel_profile,delivery_mode,offline_prefetch_allowed,
                            offline_schedule_json,schedule_times_json,prefetch_lead_minutes,
-                           button_wake_action,stock_endpoint_host,frame_orientation,layout_mode,fit_mode
+                           button_wake_action,stock_endpoint_host,frame_orientation,layout_mode,fit_mode,
+                           auth_mode,pairing_state
                     FROM devices WHERE id=?
                     """,
                     (device_id,),
@@ -183,6 +216,17 @@ class DeviceRepository:
                     delivery_mode,
                     offline_prefetch_allowed,
                     explicit_prefetch=offline_prefetch_allowed is not None,
+                )
+                current_auth_mode = str(current["auth_mode"] or "legacy_token")
+                if delivery_mode == "stock_compat" and current_auth_mode == "automatic":
+                    raise ValueError(
+                        "DEVICE-011 自動配對裝置不可直接切換 Stock 相容模式；請建立獨立 Stock 裝置"
+                    )
+                selected_auth_mode = "stock" if delivery_mode == "stock_compat" else (
+                    "legacy_token" if current_auth_mode == "stock" else current_auth_mode
+                )
+                selected_pairing_state = "paired" if selected_auth_mode != "automatic" else str(
+                    current["pairing_state"] or "unpaired"
                 )
                 try:
                     existing_schedule = json.loads(str(current["schedule_times_json"] or "[]"))
@@ -222,7 +266,8 @@ class DeviceRepository:
                         delivery_mode=?,offline_prefetch_allowed=?,offline_schedule_json=?,schedule_times_json=?,
                         prefetch_lead_minutes=?,button_wake_action=?,stock_endpoint_host=?,
                         offline_schedule_version=offline_schedule_version+CASE WHEN ? THEN 1 ELSE 0 END,
-                        frame_orientation=?,layout_mode=?,fit_mode=?,config_version=config_version+?,updated_at=?
+                        frame_orientation=?,layout_mode=?,fit_mode=?,auth_mode=?,pairing_state=?,
+                        config_version=config_version+?,updated_at=?
                     WHERE id=?
                     """,
                     (
@@ -243,6 +288,8 @@ class DeviceRepository:
                         selected_orientation,
                         selected_layout,
                         selected_fit,
+                        selected_auth_mode,
+                        selected_pairing_state,
                         int(remote_changed),
                         now,
                         device_id,
@@ -316,19 +363,92 @@ class DeviceRepository:
         if cursor.rowcount != 1:
             raise KeyError(device_id)
 
-    def authenticate(self, token: str, ip_address: str):
-        digest = hash_device_token(token, self.pepper)
+    def authenticate(
+        self,
+        token: str,
+        ip_address: str,
+        credential_version: int | None = None,
+        *,
+        allow_repair: bool = False,
+    ):
+        legacy_digest = hash_device_token(token, self.pepper)
+        secret_digest = hash_device_secret(token, self.pepper)
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
         cutoff = (now_dt - _DEVICE_AUTH_FAILURE_WINDOW).isoformat()
         with self.database.transaction() as connection:
-            row = connection.execute(
-                "SELECT * FROM devices WHERE token_hash=? AND enabled=1", (digest,)
-            ).fetchone()
-            if row:
+            candidates = connection.execute(
+                """
+                SELECT * FROM devices
+                WHERE enabled=1 AND (
+                    token_hash IN (?,?) OR device_secret_hash IN (?,?)
+                )
+                ORDER BY id
+                """,
+                (legacy_digest, secret_digest, legacy_digest, secret_digest),
+            ).fetchall()
+            row = None
+            for candidate in candidates:
+                mode = str(candidate["auth_mode"] or "legacy_token")
+                if not allow_repair and mode in {"legacy_token", "stock"} and hmac.compare_digest(
+                    str(candidate["token_hash"] or ""), legacy_digest
+                ):
+                    row = candidate
+                    break
+                if mode != "automatic":
+                    continue
+                pairing_state = str(candidate["pairing_state"] or "")
+                repair_authorized = (
+                    allow_repair
+                    and pairing_state == "pairing_pending"
+                    and bool(candidate["auth_revoked_at"])
+                    and self._repair_permission_active(candidate["repair_allowed_until"], now_dt)
+                )
+                if allow_repair and not repair_authorized:
+                    continue
+                if pairing_state != "paired" and not repair_authorized:
+                    continue
+                current_match = bool(candidate["device_secret_hash"]) and (
+                    hmac.compare_digest(str(candidate["device_secret_hash"]), secret_digest)
+                    or hmac.compare_digest(str(candidate["device_secret_hash"]), legacy_digest)
+                )
+                if not current_match:
+                    continue
+                if repair_authorized:
+                    if not current_match or credential_version is None:
+                        continue
+                    if credential_version != int(candidate["credential_version"] or 0):
+                        continue
+                    row = candidate
+                    break
+                # Automatic credentials are always paired with an explicit
+                # monotonic version header.  Legacy Token clients remain
+                # headerless for compatibility, but a missing or stale
+                # version must not silently authenticate a rotated Secret.
+                if credential_version is None:
+                    continue
+                expected_version = int(candidate["credential_version"] or 0)
+                if credential_version != expected_version:
+                    continue
+                row = candidate
+                break
+            if row is not None:
+                last_auth_at = str(row["last_auth_at"] or "")
+                auth_update_due = True
+                if last_auth_at:
+                    try:
+                        auth_update_due = (
+                            now_dt - datetime.fromisoformat(last_auth_at)
+                        ) >= _DEVICE_AUTH_TIMESTAMP_UPDATE_INTERVAL
+                    except ValueError:
+                        auth_update_due = True
                 connection.execute(
-                    "UPDATE devices SET last_seen_at=?, last_ip=?, updated_at=? WHERE id=?",
-                    (now, ip_address[:64], now, row["id"]),
+                    """
+                    UPDATE devices SET last_seen_at=?, last_ip=?,
+                        last_auth_at=CASE WHEN ? THEN ? ELSE last_auth_at END,
+                        updated_at=? WHERE id=?
+                    """,
+                    (now, ip_address[:64], int(auth_update_due), now, now, row["id"]),
                 )
                 return row
 
@@ -368,6 +488,13 @@ class DeviceRepository:
                 (_DEVICE_AUTH_FAILURE_MAX_ROWS,),
             )
         return None
+
+    @staticmethod
+    def _repair_permission_active(value, now: datetime) -> bool:
+        try:
+            return bool(value) and datetime.fromisoformat(str(value)) > now
+        except (TypeError, ValueError):
+            return False
 
     def record_download(self, device_id: str, release_id: str, succeeded: bool) -> None:
         now = datetime.now(timezone.utc).isoformat()
