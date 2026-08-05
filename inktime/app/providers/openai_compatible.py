@@ -51,12 +51,14 @@ class ProviderHTTPError(RuntimeError):
         provider_error_code: str | None = None,
         response_info: dict[str, Any] | None = None,
         vision_started: bool | None = None,
+        request_started: bool | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.retry_after = retry_after
         self.ambiguous = ambiguous
         self.vision_started = bool(ambiguous) if vision_started is None else bool(vision_started)
+        self.request_started = bool(ambiguous) if request_started is None else bool(request_started)
         self.http_status = http_status
         self.provider_error_code = provider_error_code
         self.response_info = dict(response_info or {})
@@ -385,6 +387,7 @@ class OpenAICompatibleProvider(VisionProvider):
                         unknown_message,
                         unknown_code,
                         ambiguous=True,
+                        request_started=True,
                     ) from exc
                 if attempt == attempts - 1:
                     raise ProviderHTTPError("Provider API 逾時", "VLM-001") from exc
@@ -396,6 +399,7 @@ class OpenAICompatibleProvider(VisionProvider):
                         unknown_message,
                         unknown_code,
                         ambiguous=True,
+                        request_started=True,
                     ) from exc
                 if attempt == attempts - 1:
                     raise ProviderHTTPError("Provider 連線失敗", "VLM-001") from exc
@@ -421,6 +425,7 @@ class OpenAICompatibleProvider(VisionProvider):
                         unknown_code,
                         self._retry_after(response),
                         ambiguous=True,
+                        request_started=True,
                         http_status=status,
                     )
                 if no_retry:
@@ -508,11 +513,13 @@ class OpenAICompatibleProvider(VisionProvider):
             # rejection must not cause the same image to be sent to another
             # provider in this analysis attempt.
             exc.vision_started = True
+            exc.request_started = True
             raise
         try:
             payload = self._json_response(response, error_code="VLM-006", ambiguous_on_invalid=True)
         except ProviderHTTPError as exc:
             exc.vision_started = True
+            exc.request_started = True
             raise
         try:
             content = payload["choices"][0]["message"]["content"]

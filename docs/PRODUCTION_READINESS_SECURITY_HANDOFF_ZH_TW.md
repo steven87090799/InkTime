@@ -1,6 +1,6 @@
 # Security／Production Readiness 最終交接
 
-本文件記錄 PR #53 安全強化分支最後一輪的操作契約與人工邊界。自動化測試通過不代表真實 NAS、正式憑證、OpenRouter 或電子紙硬體已驗證；未實際執行的項目必須標記 `NOT RUN`。Hosted provenance 必須區分 `PR_HEAD`、`TESTED_MERGE_REF` 與 `EXACT_HEAD_WORKFLOW_RUN`。
+本文件記錄 PR #53 安全強化分支最後一輪的操作契約與人工邊界。自動化測試通過不代表真實 NAS、正式憑證、OpenRouter 或電子紙硬體已驗證；未實際執行的項目必須標記 `NOT RUN`。Hosted provenance 必須區分 `PR_HEAD`、`TESTED_MERGE_REF`、`MERGE_GROUP` 與 optional `EXACT_HEAD_WORKFLOW_RUN`；最新 PR merge-ref required checks 是主要合併相容性證據。
 
 ## 本輪 One-shot hardening 範圍
 
@@ -9,7 +9,7 @@
 - AI 請求固定 512／1024／1600 image side；完整、變體、文字修復分別受 2048／3072／1200 token cap 約束。repair policy 在 Analysis Plan 建立時 freeze，但不進 Vision fingerprint；每個 job 最多一次 repair，且 repair 不重新上傳圖片。
 - ESP32 backend transport 只接受有 trust anchor 的 HTTPS；HTTP 僅限明確的私有 LAN 開發設定，沒有 `setInsecure()` fallback。首次配網會在 AP 頁面與裝置畫面顯示一次性的隨機 AP 密碼。
 - production Compose 預設 loopback bind、HTTPS public URL、Secure cookie 與禁止 insecure HTTP；`docker-compose.dev.yml` 才提供明確的本機開發覆寫。
-- Provider Level 1/2/3 只由管理員明確按鈕觸發；Level 2/3 使用 synthetic image 並有 request／cost 邊界。離線 benchmark 預設不呼叫外部 Provider、不寫 production analysis/release/history/cache；quality／ranking metrics 與 contract metrics 分開，Container workflow 另以 Syft 產生 SBOM、Trivy 掃描 High/Critical，結果由 final-head GitHub Actions 決定。
+- Provider Level 1/2/3 只由管理員明確按鈕觸發；Level 2/3 使用 synthetic image 並有 request／cost 邊界。離線 benchmark 預設不呼叫外部 Provider、不寫 production analysis/release/history/cache；quality／ranking metrics 與 contract metrics 分開，Container workflow 另以 Syft 產生 SBOM、Trivy 掃描 High/Critical，結果由 current PR merge-ref GitHub Actions 決定。
 
 詳細的 Provider、benchmark 與韌體 trust-anchor 操作分別見
 [OpenRouter 正式 Provider 與安全契約](providers/OPENROUTER_ZH_TW.md)、
@@ -46,7 +46,7 @@
 | `POST /api/v1/providers` | priority/concurrency/timeouts/quotas | `int()`；UI quota 送字串 | JSON integer；priority 1–10000、concurrency 1–32、timeout 5–600、cooldown 1–86400、quota 1–2147483647 或 null | 400 |
 | `POST /api/v1/scoring/profiles` | weights／bonus | `float()` | finite JSON number；weight 0–100、bonus -100–100 | 400 |
 
-ESP32 status firmware 以 ArduinoJson 寫入真正 number／Boolean；沒有把數值或布林序列化成字串。韌體 2.5.0 已實作 Queue-first Manifest、strict Item download、NVS-persisted canonical `/api/device/v1/queue/ack`、穩定 idempotency key、409 stale handling、bounded retry 與 verified same-content skip；Server 契約保持嚴格，沒有加入無聲 legacy coercion。
+ESP32 status firmware 以 ArduinoJson 寫入真正 number／Boolean；沒有把數值或布林序列化成字串。韌體 2.6.0 已實作 Queue-first Manifest、strict Item download、NVS-persisted canonical `/api/device/v1/queue/ack`、穩定 idempotency key、409 stale handling、bounded retry 與 verified same-content skip；Server 契約保持嚴格，沒有加入無聲 legacy coercion。
 
 ## Device Token／共享 IP
 
@@ -63,13 +63,13 @@ Webhook 採 at-least-once。每個事件持久化穩定 Event ID，所有後續 
 - `compose-production-tls-smoke`：用一次性測試 CA、SAN certificate、Nginx 與不屬保留 suffix 的 `inktime-ci.acme.dev`；client 明確信任 CA，不使用 `verify=False`／ignore-certificate。驗證 HTTP redirect、TLS hostname/chain、Secure＋HttpOnly＋SameSite=Strict、CSRF、login/logout/dashboard、HTTPS-only HSTS、production preflight 與 proxy hop diagnostics；backend port 不公開。
 - `bounded-runtime-soak`：Web app、Worker、Scheduler 同時執行；重複 session、device auth success/failure、Queue manifest/ACK、release metadata、scan、scheduler heartbeat 與 webhook mock。輸出 RSS、thread、FD、SQLite connection／writer、open file、child process、pending async work／job、oldest job、scheduler age、WAL、timeout、cleanup、exit status 與 final JSON summary。手動 workflow 可跑 30 分鐘、2 小時或 5 小時；24 小時只在受控 LAN 主機本地執行。
 - Backup/Restore：fresh database → full metadata backup → fresh target restore；驗證 Migration 27、administrator/password/session、device token、release/queue、settings、Batch lifecycle tables、Review／offline schedule tables、Secret exclusion、Worker/Scheduler bootstrap。舊 snapshot upgrade 由 migration fixtures 覆蓋。
-- Current schema gate：Release image 與 LAN production gate 都從 `inktime/app/db/migrations.py` 讀取目前最高 Migration，不再各自維護硬編碼版本；本輪預期為 Migration 33。Migration 32／33 的 upgrade／fresh／integrity／rollback 證據必須在 Final-Head CI 取得。
+- Current schema gate：Release image 與 LAN production gate 都從 `inktime/app/db/migrations.py` 讀取目前最高 Migration，不再各自維護硬編碼版本；本輪預期為 Migration 33。Migration 32／33 的 upgrade／fresh／integrity／rollback 證據必須在 current PR merge-ref CI 取得。
 - Container supply-chain：`container-security.yml` 在 exact checkout 建置 image，輸出 CycloneDX SBOM，並以 Trivy 掃描 High/Critical；只有 `.trivyignore` 內逐一列出、含 owner／reason／expiry 的暫時 unfixed CVE 例外不阻擋，未列入的 High/Critical 仍使 workflow 失敗。例外到期前必須重評估 pinned base image；此 workflow 不代表真實 NAS host、registry 或 production image 已驗證。
 - Rollback：不支援只降程式、不還原 DB。必須停止 Web/Worker/Scheduler、還原相容 snapshot，再切回相容 image/commit。
 
 ## Dependency／Actions
 
-- 2026-07-29 GitHub push banner 與 alert #1 確認 `pytest` direct development dependency 受 GHSA-6w46-j5rx-g56g／CVE-2025-71176 影響（`<9.0.3`，UNIX tmpdir local privilege／DoS，runtime 不載入）；已將 `requirements-dev.txt` 升至首個修正版 9.0.3。`pip-audit -r requirements.txt` 的 runtime dependency 掃描無已知漏洞，最終仍以 Final-Head CI 為準。
+- 2026-07-29 GitHub push banner 與 alert #1 確認 `pytest` direct development dependency 受 GHSA-6w46-j5rx-g56g／CVE-2025-71176 影響（`<9.0.3`，UNIX tmpdir local privilege／DoS，runtime 不載入）；已將 `requirements-dev.txt` 升至首個修正版 9.0.3。`pip-audit -r requirements.txt` 的 runtime dependency 掃描無已知漏洞，最終仍以 current PR merge-ref CI 為準。
 - `actions/checkout` v7.0.1、`actions/setup-python` v7.0.0、`gitleaks-action` v3.0.0 已更新至官方 Node 24 版本並 pin commit SHA。
 - `arduino/setup-arduino-cli` 官方最新 v2.0.0 仍宣告 `node20`；保留官方 commit `81d310742121c928ea9c8bbd407b4217b432ae02`。移除條件：官方發布 Node 24 相容正式版並通過完整 ESP32 compile matrix。
 
@@ -85,7 +85,7 @@ OpenRouter 不進入這條 Batch 路徑；generic OpenAI-compatible Provider 只
 
 交接狀態：
 
-- Automated software validation: PASS（仍以 Draft PR final-Head CI 終態為最終依據）
+- Automated software validation: 以 Draft PR current PR merge-ref required checks 為最終依據；新 PR_HEAD 的 hosted 終態未由本文件預先宣告 PASS
 - Physical hardware validation: NOT RUN
 - Real NAS validation: NOT RUN
 - Public DNS／certificate validation: NOT RUN（不在本次範圍）

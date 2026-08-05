@@ -333,8 +333,13 @@ bool DeviceConfigStore::removeLegacyFormalKeys(String& error) const {
   return true;
 }
 
-bool DeviceConfigStore::load(configstore::ConfigPayload& payload, String& error) {
+bool DeviceConfigStore::load(
+    configstore::ConfigPayload& payload, String& error, String* warning) {
   error = "";
+  if (warning != nullptr) *warning = "";
+  const auto recordCleanupWarning = [warning](const String& cleanup_error) {
+    if (warning != nullptr && warning->length() == 0U) *warning = cleanup_error;
+  };
   const auto loadAndRepairCanonicalSlot = [&](char slot,
                                                uint64_t generation,
                                                configstore::ConfigPayload& recovered,
@@ -439,8 +444,8 @@ bool DeviceConfigStore::load(configstore::ConfigPayload& payload, String& error)
     }
     String cleanup_error;
     if (!removeLegacyFormalKeys(cleanup_error)) {
-      error = cleanup_error;
-      return false;
+      recordCleanupWarning(cleanup_error);
+      return true;
     }
     return true;
   }
@@ -465,8 +470,8 @@ bool DeviceConfigStore::load(configstore::ConfigPayload& payload, String& error)
     if (!removeLegacyFormalKeys(cleanup_error)) {
       // Keep the canonical A/B value active, but report the cleanup failure so
       // the next boot can retry it instead of silently declaring migration done.
-      error = cleanup_error;
-      return false;
+      recordCleanupWarning(cleanup_error);
+      return true;
     }
     return true;
   }
@@ -484,8 +489,8 @@ bool DeviceConfigStore::load(configstore::ConfigPayload& payload, String& error)
   if (!removeLegacyFormalKeys(cleanup_error)) {
     // The new A/B blob remains intact; leave legacy data for the next boot so
     // cleanup can be retried without losing the committed configuration.
-    error = cleanup_error;
-    return false;
+    recordCleanupWarning(cleanup_error);
+    return true;
   }
   return true;
 }

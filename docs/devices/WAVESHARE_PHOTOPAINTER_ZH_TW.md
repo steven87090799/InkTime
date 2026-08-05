@@ -2,7 +2,7 @@
 
 ## 支援狀態
 
-InkTime 2.5.0 可用單一 compile-time Profile 切換既有 PCB 與 Waveshare
+InkTime 2.6.0 可用單一 compile-time Profile 切換既有 PCB 與 Waveshare
 ESP32-S3-PhotoPainter。這是可編譯、可靜態測試的硬體 adapter；目前沒有連接
 真實 PhotoPainter、面板、SD、電池或量測儀器，因此不得視為實機驗證完成。
 
@@ -117,7 +117,7 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
 
 ## 能源遙測與續航儀表板
 
-- 韌體 2.5.0 在低頻 Status API 回報電池電壓、估算百分比、USB 狀態、刷新耗時與
+- 韌體 2.6.0 在低頻 Status API 回報電池電壓、估算百分比、USB 狀態、刷新耗時與
   從開機到狀態上傳前的完整喚醒週期耗時；既有 Profile 也會回報刷新與喚醒耗時。
 - Web「能源」頁保存最近 400 天樣本，提供 7／30／90／365 天電量、電壓與刷新耗時
   SVG 曲線，不引入第三方圖表服務或外部 CDN。

@@ -633,7 +633,6 @@ class PhotoAnalysisService:
         _excluded_providers: set[str] | None = None,
     ) -> tuple[dict, str, float, bool, str, str, str, str, Usage, int]:
         selected_channel = None
-        network_permit = False
         selected_provider = provider
         # Enumerate Frozen Route identities before consulting network state.
         # A cache hit is valid even while its provider is circuit-open or rate
@@ -648,11 +647,6 @@ class PhotoAnalysisService:
             selected_channel = candidates[0]
             selected_provider = selected_channel.provider
         actual_provider = str(getattr(selected_provider, "provider_id", selected_provider.name))
-
-        def release_selected(*, usage: Usage | None = None, error: Exception | None = None) -> None:
-            if selected_channel is not None and network_permit:
-                router: Any = provider
-                router.release_channel(selected_channel, usage=usage, error=error)
 
         fingerprint_material = {
             "content_sha256": content_sha256,
@@ -726,7 +720,6 @@ class PhotoAnalysisService:
                         stage=stage,
                         trace_id=request_fingerprint,
                     )
-                    release_selected()
                     return (
                         validate_analysis_result(cached["result"]),
                         str(cached["raw_json"]),
@@ -771,7 +764,6 @@ class PhotoAnalysisService:
         ):
             waited_for_owner = True
             if time.monotonic() >= deadline:
-                release_selected(error=TimeoutError("AI-CACHE-001 等待相同分析結果逾時"))
                 raise TimeoutError("AI-CACHE-001 等待相同分析結果逾時")
             time.sleep(0.05)
             # A forced request ignores a pre-existing entry, but once another
@@ -787,7 +779,6 @@ class PhotoAnalysisService:
                     stage=stage,
                     trace_id=prompt_version,
                 )
-                release_selected()
                 return (
                     validate_analysis_result(cached["result"]),
                     str(cached["raw_json"]),
@@ -804,7 +795,6 @@ class PhotoAnalysisService:
             cached = get_cache()
             if cached is not None and is_force_generation(cached):
                 self.photos.finish_ai_cache_reservation(cache_key, owner_id)
-                release_selected()
                 return (
                     validate_analysis_result(cached["result"]),
                     str(cached["raw_json"]),
@@ -819,15 +809,11 @@ class PhotoAnalysisService:
                 )
         try:
             vision_attempt = VisionAttemptState()
-            if selected_channel is not None:
-                router: Any = provider
-                if not router.acquire_channel(selected_channel):
-                    raise TimeoutError("VLM-005 Provider Network Permit 暫時不可用")
-                network_permit = True
             # The only owner generates a JPEG, after both cache checks.
             with image_factory() as image:
                 result, raw, cost, usage, latency = self._perform_uncached_model_call(
-                    provider=selected_provider,
+                    provider=provider,
+                    selected_channel=selected_channel,
                     image=image,
                     model=model,
                     detail=detail,
@@ -853,7 +839,6 @@ class PhotoAnalysisService:
                 )
         except Exception as exc:
             self.photos.finish_ai_cache_reservation(cache_key, owner_id, error=str(exc))
-            release_selected(error=exc)
             record_outcome = getattr(self.photos, "record_analysis_request_outcome", None)
             if callable(record_outcome):
                 ambiguous = bool(getattr(exc, "ambiguous", False))
@@ -911,7 +896,6 @@ class PhotoAnalysisService:
                 )
             raise
         self.photos.finish_ai_cache_reservation(cache_key, owner_id)
-        release_selected(usage=usage)
         return (
             result,
             raw,
@@ -929,6 +913,7 @@ class PhotoAnalysisService:
         self,
         *,
         provider: VisionProvider,
+        selected_channel=None,
         image: Path,
         model: str,
         detail: str,
@@ -996,7 +981,14 @@ class PhotoAnalysisService:
                 # the caller exactly when their transport has been handed the
                 # image.  It is deliberately not sent into a child process.
                 call["vision_attempt"] = vision_attempt
-            if self.process_boundary is not None and hasattr(provider, "analyze_isolated"):
+            if selected_channel is not None and hasattr(provider, "_execute_sticky"):
+                response = provider._execute_sticky(
+                    selected_channel,
+                    "analyze",
+                    boundary=self.process_boundary,
+                    **call,
+                )
+            elif self.process_boundary is not None and hasattr(provider, "analyze_isolated"):
                 response = provider.analyze_isolated(self.process_boundary, **call)
             elif self.process_boundary is not None:
                 specification = provider.process_spec()
@@ -1108,7 +1100,14 @@ class PhotoAnalysisService:
                 "caption_controls": caption_controls,
                 "provider_request_context_id": provider_request_context_id,
             }
-            if self.process_boundary is not None and hasattr(provider, "repair_json_isolated"):
+            if selected_channel is not None and hasattr(provider, "_execute_sticky"):
+                repaired = provider._execute_sticky(
+                    selected_channel,
+                    "repair_json",
+                    boundary=self.process_boundary,
+                    **repair_call,
+                )
+            elif self.process_boundary is not None and hasattr(provider, "repair_json_isolated"):
                 repaired = provider.repair_json_isolated(self.process_boundary, **repair_call)
             elif self.process_boundary is not None:
                 specification = provider.process_spec()

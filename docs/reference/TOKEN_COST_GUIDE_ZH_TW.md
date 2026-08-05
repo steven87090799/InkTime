@@ -22,7 +22,7 @@ E6 預篩選同樣完全在本機執行：以正式六色色盤量測量化後�
 
 Model Benchmark 另以 `attempted_photos` 作為平均成本分母；`known_cost_total` 只累計已知 usage。任何 attempted call 的 cost unknown 都使 `cost_complete=false`，平均與每 1000 張成本回報 `null`，不以零填補未確認帳務。
 
-Migration 33 的歷史例外只適用於完全沒有 token、prompt／schema／request／image bytes 與成本 evidence 的 legacy `unknown` row，這類 row 可安全標記為 `estimated=0`；任何 billable evidence 仍維持 `unknown`，不可用零成本掩蓋。
+Migration 33 不會依照完全為零的 token、prompt／schema／request／image bytes 與成本欄位，把 historical `unknown` row 改標為 `estimated=0`；這些欄位是在舊 request 後新增的，零值不等於免費。無 billable evidence 的 row 可由 budget policy 不計 billable reserve，但 provenance 仍維持 `unknown`；任何 evidence 仍等待 reconciliation，不可用零成本掩蓋。
 
 ## 請求大小、快取與 Token 上限
 

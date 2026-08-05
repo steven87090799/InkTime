@@ -94,7 +94,7 @@ GxEPD2_7C<
 #define DEVICE_QUEUE_MANIFEST_PATH "/api/device/v1/queue/manifest"
 #define DEVICE_QUEUE_ACK_PATH "/api/device/v1/queue/ack"
 #define DEVICE_OFFLINE_SCHEDULE_PATH "/api/device/v1/offline-schedule"
-#define INKTIME_FIRMWARE_VERSION "2.5.0"
+#define INKTIME_FIRMWARE_VERSION "2.6.0"
 
 // Secure builds require a compile-time or portal-provisioned trust anchor;
 // isolated LAN HTTP remains available only in an explicit development build.
@@ -266,6 +266,8 @@ String currentQueueItemId;
 int64_t currentQueueVersion = -1;
 String lastDeviceErrorCode;
 String lastDeviceErrorMessage;
+String lastDeviceWarningCode;
+String lastDeviceWarningMessage;
 uint32_t lastRefreshDurationMs = 0;
 
 #if INKTIME_PHOTOPAINTER_ENABLED
@@ -824,8 +826,14 @@ void loadConfig(Config &cfg) {
   setConfigDefaults(cfg);
   inktime::configstore::ConfigPayload payload;
   String loadError;
-  if (configStore.load(payload, loadError)) {
+  String loadWarning;
+  if (configStore.load(payload, loadError, &loadWarning)) {
     applyConfigPayload(payload, cfg);
+    if (loadWarning.length() > 0U) {
+      lastDeviceWarningCode = "DEVICE-CONFIG-CLEANUP-PENDING";
+      lastDeviceWarningMessage = "Canonical 設定已套用；舊設定清理待下次啟動重試：";
+      lastDeviceWarningMessage += loadWarning;
+    }
   } else if (loadError.length() > 0U) {
     setConfigPersistenceError(loadError);
   }
@@ -3315,6 +3323,8 @@ void reportDeviceStatus(const Config &cfg, bool displayUpdated) {
   payload["release_id"] = currentReleaseId;
   payload["error_code"] = lastDeviceErrorCode;
   payload["error_message"] = lastDeviceErrorMessage;
+  payload["warning_code"] = lastDeviceWarningCode;
+  payload["warning_message"] = lastDeviceWarningMessage;
 #if INKTIME_ALLOW_INSECURE_DEVICE_HTTP
   payload["transport_profile"] = "trusted-lan-http";
   payload["transport_security_state"] = "degraded";

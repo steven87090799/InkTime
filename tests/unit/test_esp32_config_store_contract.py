@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 CORE = ROOT / "esp32/ink-display-7C-photo/device_config_store_core.h"
+HEADER = ROOT / "esp32/ink-display-7C-photo/device_config_store.h"
 STORE = ROOT / "esp32/ink-display-7C-photo/device_config_store.cpp"
 FIRMWARE = ROOT / "esp32/ink-display-7C-photo/ink-display-7C-photo.ino"
 SUPPORT = ROOT / "esp32/ink-display-7C-photo/photopainter_support.cpp"
@@ -83,6 +84,23 @@ def test_config_load_and_legacy_migration_are_pointer_first_and_fail_closed():
         "PAIRING-NVS-007",
     ):
         assert code in firmware or code in store
+
+
+def test_canonical_config_survives_legacy_cleanup_failure_and_records_warning():
+    header = HEADER.read_text(encoding="utf-8")
+    store = STORE.read_text(encoding="utf-8")
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    assert "String* warning = nullptr" in header
+    assert "recordCleanupWarning(cleanup_error)" in store
+    assert "configStore.load(payload, loadError, &loadWarning)" in firmware
+    assert 'lastDeviceWarningCode = "DEVICE-CONFIG-CLEANUP-PENDING"' in firmware
+    assert 'payload["warning_code"] = lastDeviceWarningCode' in firmware
+    assert 'payload["warning_message"] = lastDeviceWarningMessage' in firmware
+
+
+def test_firmware_current_version_is_bumped_for_recovery_semantics():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    assert '#define INKTIME_FIRMWARE_VERSION "2.6.0"' in firmware
 
 
 def test_schedule_recovery_uses_identity_journal_and_fail_closed_metadata():

@@ -92,9 +92,9 @@ def test_gooddisplay_mode_matches_the_vendor_fixed_palette_converter():
     ).convert("RGB")
     encoded = encode_image(image, profile_key="gdep073e01_6c", dither="gooddisplay")
 
-    assert list(encoded.preview.getdata()) == list(reference.getdata())
+    assert list(encoded.preview.get_flattened_data()) == list(reference.get_flattened_data())
     assert _unpack_indexed4(encoded.payload, image.width * image.height) == [
-        GOODDISPLAY_CODE_BY_RGB[pixel] for pixel in reference.getdata()
+        GOODDISPLAY_CODE_BY_RGB[pixel] for pixel in reference.get_flattened_data()
     ]
     assert [color.rgb for color in encoded.palette] == [
         (0, 0, 0),

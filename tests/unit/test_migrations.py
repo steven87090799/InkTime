@@ -202,7 +202,7 @@ def test_migration_32_preserves_legacy_cost_provenance_and_allows_new_reported_c
         rows = connection.execute(
             "SELECT estimated_cost,actual_cost,cost_source FROM api_usage ORDER BY id"
         ).fetchall()
-    assert [row["cost_source"] for row in rows] == ["estimated", "estimated", "estimated", "provider_reported"]
+    assert [row["cost_source"] for row in rows] == ["estimated", "unknown", "unknown", "provider_reported"]
     assert rows[0]["actual_cost"] == 0.10
     assert rows[1]["estimated_cost"] == 0.0
     assert rows[1]["actual_cost"] is None
@@ -256,8 +256,9 @@ def test_migration_33_backfills_provider_identity_and_keeps_billable_unknown(mon
         "route": "fallback",
     }
     assert rows[0]["provider_id"] == "legacy-openrouter-id"
-    assert rows[0]["cost_source"] == "estimated"
+    assert rows[0]["cost_source"] == "unknown"
     assert rows[0]["estimated_cost"] == 0.0
+    assert rows[0]["actual_cost"] is None
     assert rows[1]["provider_id"] == "legacy-openrouter-id"
     assert rows[1]["cost_source"] == "unknown"
 

@@ -50,7 +50,7 @@ indexed4 採 GxEPD2 的邏輯顏色順序。偶數 pixel 放在高 4 bits、奇�
 
 ## 4. 離線、提醒與恢復
 
-韌體 2.5.0 也會把最後成功顯示的 SHA-256、Release、render profile、rotation、board profile 與成功標記寫入 NVS。再次取得相同且完整驗證的內容時可回報 `display_skipped=true`，省略實體刷新；forced refresh、任何 profile／rotation／board 改變或 NVS 損壞都會 fail closed 並重新刷新。這是軟體流程已接入，不代表真實面板的方向、殘影、色彩、BUSY 或功耗已驗證。
+韌體 2.6.0 也會把最後成功顯示的 SHA-256、Release、render profile、rotation、board profile 與成功標記寫入 NVS。再次取得相同且完整驗證的內容時可回報 `display_skipped=true`，省略實體刷新；forced refresh、任何 profile／rotation／board 改變或 NVS 損壞都會 fail closed 並重新刷新。這是軟體流程已接入，不代表真實面板的方向、殘影、色彩、BUSY 或功耗已驗證。
 
 Scheduler 預設每 300 秒掃描一次，不為每次掃描輸出 INFO Log。啟用裝置最後狀態、最後 Manifest 驗證時間或建立時間超過 `notification.device_offline_hours`（預設 30 小時）才轉為離線。
 
@@ -99,7 +99,7 @@ Webhook URL 是 administrator 級設定，但預設仍拒絕內網、Loopback、
 
 ## 7. 升級與回滾順序
 
-建議順序：先備份資料庫與 `/data/releases` → 更新三個 Docker 服務並完成目前 Migration → 為每個實際面板發布對應 Profile → 燒錄 2.5.0 韌體 → 在裝置頁改成正確 Profile → 等待設定與 Queue ACK。
+建議順序：先備份資料庫與 `/data/releases` → 更新三個 Docker 服務並完成目前 Migration → 為每個實際面板發布對應 Profile → 燒錄 2.6.0 韌體 → 在裝置頁改成正確 Profile → 等待設定與 Queue ACK。
 
 舊 2.1.0 韌體只認 schema v1／2bpp，2.2.x／2.4.x 不具備完整 Queue ACK 與同內容 NVS 契約。升級期間可把裝置留在 `safe_4c` 並發布四色版本；不要先把它切到六／七色。若新韌體異常，先將裝置 Profile 回到 `safe_4c`、發布四色並回滾韌體；設定版本會再次增加，需等待舊／相容韌體 ACK。
 

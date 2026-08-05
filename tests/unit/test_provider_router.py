@@ -112,6 +112,34 @@ def test_candidate_inspection_does_not_consume_rpm_or_network_permit():
     assert router.candidate_channels() == []
 
 
+def test_semaphore_busy_does_not_consume_an_additional_rpm_slot():
+    provider = StubProvider("busy")
+    channel = ProviderChannel(provider, requests_per_minute=2, max_concurrency=1)
+    router = FailoverVisionProvider([channel])
+
+    assert router.acquire_channel(channel) is True
+    assert len(channel.request_times) == 1
+    with pytest.raises(ProviderHTTPError, match="指定 Provider"):
+        router._execute_sticky(channel, "repair_json")
+    assert len(channel.request_times) == 1
+    router.release_channel(channel)
+
+
+def test_sticky_repair_uses_the_selected_provider_without_failover():
+    broken = StubProvider("broken", fails=True)
+    healthy = StubProvider("healthy")
+    router = FailoverVisionProvider(
+        [ProviderChannel(broken, priority=1), ProviderChannel(healthy, priority=2)],
+        failure_threshold=1,
+    )
+
+    router._local.channel = router.channels[0]
+    with pytest.raises(RuntimeError, match="故障"):
+        router.repair_json(invalid_content="{}", validation_error="invalid", model="m")
+    assert broken.calls == 1
+    assert healthy.calls == 0
+
+
 def test_route_channels_keep_cache_identities_when_network_is_unavailable():
     provider = StubProvider("cache-owner")
     channel = ProviderChannel(provider, requests_per_minute=1, tokens_per_minute=10)

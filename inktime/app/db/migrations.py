@@ -1771,28 +1771,10 @@ def _apply_migration_33_data_fixes(connection: sqlite3.Connection) -> None:
 
     # Migration 32 cannot distinguish an old zero-activity row from an old
     # row whose pricing evidence was unavailable: both were initialized as
-    # ``unknown``.  Only rows with no billable evidence may be normalized to
-    # a free estimate.  Any token, byte, or reported/estimated amount keeps
-    # its unknown provenance so a later pricing reconciliation can still
-    # account for it conservatively.
-    connection.execute(
-        """
-        UPDATE api_usage
-        SET estimated_cost=0,actual_cost=NULL,cost_source='estimated'
-        WHERE cost_source='unknown'
-          AND COALESCE(input_tokens,0)=0
-          AND COALESCE(output_tokens,0)=0
-          AND COALESCE(cached_tokens,0)=0
-          AND COALESCE(reasoning_tokens,0)=0
-          AND COALESCE(cache_write_tokens,0)=0
-          AND COALESCE(prompt_chars,0)=0
-          AND COALESCE(schema_chars,0)=0
-          AND COALESCE(request_body_bytes,0)=0
-          AND COALESCE(image_bytes,0)=0
-          AND COALESCE(actual_cost,0)=0
-          AND COALESCE(estimated_cost,0)=0
-        """
-    )
+    # ``unknown``.  Migration 33 must preserve that historical uncertainty;
+    # newly-added zero-valued metric columns do not prove that a request was
+    # free.  Budget/reconciliation policy may avoid reserving a billable
+    # amount when no evidence exists, but it must not rewrite the provenance.
 
 
 def _applied_versions(database: Database) -> set[int]:
