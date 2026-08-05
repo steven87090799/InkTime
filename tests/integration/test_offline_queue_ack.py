@@ -438,11 +438,18 @@ def test_mode_transition_cancels_incompatible_active_delivery_with_audit(app):
     online_release = _release(app, "mode-online")
     queue.ensure_queue(online_id)
     online_item = queue.enqueue_release(device_id=online_id, release_id=online_release["release_id"])
+    past_release = _release(app, "mode-online-past")
+    past_item = queue.enqueue_release(device_id=online_id, release_id=past_release["release_id"])
     future_display = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    past_display = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
     with app.extensions["inktime_database"].transaction() as connection:
         connection.execute(
             "UPDATE device_content_queue_items SET display_after=? WHERE id=?",
             (future_display, online_item["id"]),
+        )
+        connection.execute(
+            "UPDATE device_content_queue_items SET display_after=? WHERE id=?",
+            (past_display, past_item["id"]),
         )
     devices.update(
         online_id,
@@ -467,8 +474,18 @@ def test_mode_transition_cancels_incompatible_active_delivery_with_audit(app):
             "SELECT event_type FROM device_content_queue_events WHERE queue_item_id=?",
             (online_item["id"],),
         ).fetchone()
+        preserved_past = connection.execute(
+            "SELECT status FROM device_content_queue_items WHERE id=?",
+            (past_item["id"],),
+        ).fetchone()
+        preserved_past_events = connection.execute(
+            "SELECT COUNT(*) FROM device_content_queue_events WHERE queue_item_id=?",
+            (past_item["id"],),
+        ).fetchone()[0]
     assert tuple(cancelled_online) == ("CANCELLED", "QUEUE-005")
     assert transition_event["event_type"] == "DELIVERY_MODE_TRANSITION_CANCELLED"
+    assert preserved_past["status"] != "CANCELLED"
+    assert preserved_past_events == 0
     with pytest.raises(ValueError, match="Enhanced offline"):
         queue.enqueue_release(device_id=online_id, release_id=online_release["release_id"])
 
