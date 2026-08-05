@@ -115,7 +115,11 @@ def test_stock_photopainter_display_controls_are_scoped_and_server_side(client, 
     viewer_body = viewer.get("/devices").get_data(as_text=True)
     assert "立即顯示最新 Release" not in viewer_body
     assert "data-stock-display-device" not in viewer_body
-    assert "Stock Host：192.168.1.50" in viewer_body
+    assert "192.168.1.50" not in viewer_body
+    assert "stock-display" not in viewer_body
+    assert "data-stock-host" not in viewer_body
+    assert "/stock-photopainter/display" not in viewer_body
+    assert "Stock PhotoPainter 模式" in viewer_body
 
 
 def test_batch_management_api_is_admin_only_and_strict_json(client, app):
