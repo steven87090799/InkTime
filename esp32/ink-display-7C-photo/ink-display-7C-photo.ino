@@ -4238,8 +4238,8 @@ static void nextRuntimeEpochs(
       if (activeOfflineEpochs(nowEpoch, nextDisplay, targetEnd, nextSchedulePrefetch)) {
         if (nextDisplay > nowEpoch) {
           const time_t lead = static_cast<time_t>(cfg.prefetch_lead_minutes) * 60;
-          nextSyncOut = nextDisplay > lead ? nextDisplay - lead : nextDisplay;
-          if (nextSyncOut <= nowEpoch) nextSyncOut = nextDisplay;
+          const time_t displaySync = nextDisplay > lead ? nextDisplay - lead : nextDisplay;
+          if (displaySync > nowEpoch) nextSyncOut = displaySync;
         }
         if (nextSchedulePrefetch > nowEpoch
             && (nextSyncOut == 0 || nextSchedulePrefetch < nextSyncOut)) {
