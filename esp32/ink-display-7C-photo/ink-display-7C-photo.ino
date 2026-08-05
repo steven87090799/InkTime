@@ -7,6 +7,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include "esp_heap_caps.h"
+#include "esp_sntp.h"
 #include "esp_system.h"
 
 #include "hardware_profile.h"
@@ -132,25 +133,13 @@ struct RuntimeTelemetry {
   int64_t next_wake_epoch = 0;
   int64_t next_network_sync_epoch = 0;
   bool tls_handshake_count_unavailable = true;
+  String tls_handshake_count_unavailable_reason =
+      "transport_api_does_not_expose_handshake_count";
 };
 
 RuntimeTelemetry runtimeTelemetry;
 static uint32_t networkSessionStartedMs = 0;
 static constexpr uint64_t kPairingMinimumEpoch = 1700000000ULL;
-
-static void recordNvsWrite() {
-  if (runtimeTelemetry.nvs_write_count < UINT32_MAX) ++runtimeTelemetry.nvs_write_count;
-}
-
-static int countedHttpGet(HTTPClient& http) {
-  if (runtimeTelemetry.http_request_count < UINT32_MAX) ++runtimeTelemetry.http_request_count;
-  return http.GET();
-}
-
-static int countedHttpPost(HTTPClient& http, const String& body) {
-  if (runtimeTelemetry.http_request_count < UINT32_MAX) ++runtimeTelemetry.http_request_count;
-  return http.POST(body);
-}
 
 struct Config {
   String  wifi_ssid;
@@ -183,6 +172,20 @@ struct Config {
   uint32_t config_version;
   bool    valid;
 };
+
+static void recordNvsWrite() {
+  if (runtimeTelemetry.nvs_write_count < UINT32_MAX) ++runtimeTelemetry.nvs_write_count;
+}
+
+static int countedHttpGet(HTTPClient& http) {
+  if (runtimeTelemetry.http_request_count < UINT32_MAX) ++runtimeTelemetry.http_request_count;
+  return http.GET();
+}
+
+static int countedHttpPost(HTTPClient& http, const String& body) {
+  if (runtimeTelemetry.http_request_count < UINT32_MAX) ++runtimeTelemetry.http_request_count;
+  return http.POST(body);
+}
 
 static constexpr const char* kPairingRetryNamespace = "pairing_retry";
 static constexpr const char* kPairingRetryAttemptKey = "attempt";
@@ -354,7 +357,8 @@ static bool validSyncTime(const String &value) {
 
 static bool validSyncStrategy(const String &strategy, const String &syncTime) {
   if (strategy != "first_display_lead" && strategy != "fixed_daily") return false;
-  return strategy != "fixed_daily" ? validSyncTime(syncTime) : !syncTime.isEmpty() && validSyncTime(syncTime);
+  if (strategy == "first_display_lead") return syncTime.isEmpty();
+  return !syncTime.isEmpty() && validSyncTime(syncTime);
 }
 
 static void applyFixedTimezoneWithoutNtp(int32_t offsetMinutes) {
@@ -1966,7 +1970,8 @@ bool syncTime(const Config &cfg, struct tm &outLocal, bool forceNtp = false) {
   configTime(offsetSec, 0, "pool.ntp.org", "time.nist.gov", "ntp.aliyun.com");
 
   for (int i = 0; i < 30; ++i) {
-    if (getLocalTime(&outLocal)) {
+    if (getLocalTime(&outLocal)
+        && sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
 #if DEBUG_LOG
       char buf[64];
       strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &outLocal);
@@ -1998,7 +2003,6 @@ bool syncTime(const Config &cfg, struct tm &outLocal, bool forceNtp = false) {
     struct timeval value = {rtcEpoch, 0};
     settimeofday(&value, nullptr);
     localtime_r(&rtcEpoch, &outLocal);
-    saveLastTimeEpoch(rtcEpoch);
 #if DEBUG_LOG
     DBG_PRINTLN("[TIME] restored from PCF85063");
 #endif
@@ -4553,6 +4557,8 @@ void reportDeviceStatus(Config &cfg, bool displayUpdated) {
   payload["ack_event_count"] = runtimeTelemetry.ack_event_count;
   payload["ack_batch_request_count"] = runtimeTelemetry.ack_batch_request_count;
   payload["tls_handshake_count_unavailable"] = runtimeTelemetry.tls_handshake_count_unavailable;
+  payload["tls_handshake_count_unavailable_reason"] =
+      runtimeTelemetry.tls_handshake_count_unavailable_reason;
   if (runtimeTelemetry.next_wake_epoch > 0) {
     payload["next_wake_epoch"] = runtimeTelemetry.next_wake_epoch;
   } else {

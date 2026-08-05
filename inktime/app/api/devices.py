@@ -961,7 +961,7 @@ def report_status():
         abort(400, description="DEVICE-004 未 skip 時不得提供 display_skip_reason")
     if len(display_skip_reason) > 64:
         abort(400, description="DEVICE-004 display_skip_reason 過長")
-    applied_offline_schedule_version = optional_int(
+    applied_offline_schedule_version = nullable_int(
         "applied_offline_schedule_version", 0, 2_147_483_647
     )
     telemetry = {
@@ -983,6 +983,34 @@ def report_status():
             "next_network_sync_epoch", 0, 4_294_967_295
         ),
     }
+    tls_handshake_count_unavailable = optional_bool(
+        payload, "tls_handshake_count_unavailable"
+    )
+    tls_handshake_count_unavailable_reason = optional_text(
+        "tls_handshake_count_unavailable_reason", 64
+    )
+    if (
+        tls_handshake_count_unavailable is True
+        and not tls_handshake_count_unavailable_reason
+    ):
+        abort(
+            400,
+            description=(
+                "DEVICE-004 tls_handshake_count_unavailable_reason "
+                "不可為空"
+            ),
+        )
+    if (
+        tls_handshake_count_unavailable is False
+        and tls_handshake_count_unavailable_reason
+    ):
+        abort(
+            400,
+            description=(
+                "DEVICE-004 tls_handshake_count_unavailable_reason "
+                "僅可在 handshake count unavailable 時提供"
+            ),
+        )
     boolean_details = {
         key: optional_bool(payload, key)
         for key in (
@@ -997,7 +1025,6 @@ def report_status():
             "wifi_fast_path_success",
             "ntp_sync_attempted",
             "ntp_sync_succeeded",
-            "tls_handshake_count_unavailable",
         )
     }
     wake_reason_detail = optional_text("wake_reason_detail", 64)
@@ -1046,9 +1073,10 @@ def report_status():
             "network_session_ms": telemetry["network_session_ms"],
             "http_request_count": telemetry["http_request_count"],
             "tls_handshake_count": telemetry["tls_handshake_count"],
-            "tls_handshake_count_unavailable": boolean_details[
-                "tls_handshake_count_unavailable"
-            ],
+            "tls_handshake_count_unavailable": tls_handshake_count_unavailable,
+            "tls_handshake_count_unavailable_reason": (
+                tls_handshake_count_unavailable_reason
+            ),
             "ntp_sync_attempted": boolean_details["ntp_sync_attempted"],
             "ntp_sync_succeeded": boolean_details["ntp_sync_succeeded"],
             "ntp_sync_ms": telemetry["ntp_sync_ms"],

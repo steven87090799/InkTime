@@ -392,6 +392,9 @@ def test_device_status_is_recorded_without_exposing_token(client, app):
             "network_session_ms": 9200,
             "http_request_count": 4,
             "tls_handshake_count_unavailable": True,
+            "tls_handshake_count_unavailable_reason": (
+                "transport_api_does_not_expose_handshake_count"
+            ),
             "ntp_sync_attempted": False,
             "ntp_sync_succeeded": False,
             "ntp_sync_ms": 0,
@@ -433,6 +436,9 @@ def test_device_status_is_recorded_without_exposing_token(client, app):
     assert details["wifi_fast_path_success"] is True
     assert details["download_bytes"] == 96000
     assert details["nvs_write_count"] == 3
+    assert details["tls_handshake_count_unavailable_reason"] == (
+        "transport_api_does_not_expose_handshake_count"
+    )
     assert details["next_network_sync_epoch"] == 1759990000
     with app.extensions["inktime_database"].session() as connection:
         sample = connection.execute(
@@ -466,6 +472,7 @@ def test_device_status_rejects_malformed_numeric_telemetry(client, app):
         ("next_wake_epoch", -1),
         ("wifi_fast_path_success", "true"),
         ("wake_reason_detail", "x" * 65),
+        ("tls_handshake_count_unavailable_reason", "x" * 65),
     ],
 )
 def test_device_status_rejects_unbounded_phase_two_telemetry(client, app, field, value):
@@ -697,6 +704,18 @@ def test_offline_schedule_version_is_acknowledged_without_allowing_device_to_rai
     )
     headers = {"Authorization": f"Bearer {token}"}
     desired = int(repository.get(device_id)["offline_schedule_version"])
+    unknown = client.post(
+        "/api/device/v1/status",
+        json={
+            "firmware_version": "2.8.0",
+            "applied_offline_schedule_version": None,
+        },
+        headers=headers,
+    )
+    assert unknown.status_code == 200
+    unknown_state = repository.get(device_id)
+    assert unknown_state["applied_offline_schedule_version"] == 0
+    assert unknown_state["offline_schedule_ack_at"] is None
     applied = client.post(
         "/api/device/v1/status",
         json={
