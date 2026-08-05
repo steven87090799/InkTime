@@ -372,6 +372,98 @@ def test_pairing_code_attempt_limit_and_admin_csrf_are_enforced(client, app):
     assert claim.status_code == 410
 
 
+def test_pairing_claim_attempt_limit_is_persisted(client, app):
+    payload = _pairing_payload(
+        "esp32-claim-attempt-limit",
+        nonce="nonce-for-claim-attempt-limit-0123456789",
+    )
+    requested = client.post(PAIRING_PATH, json=payload)
+    assert requested.status_code == 201
+    pairing_id = requested.get_json()["pairing_id"]
+    wrong_nonce = "wrong-nonce-for-claim-attempts-0123456789"
+
+    for expected_attempts in range(1, 5):
+        response = client.post(
+            CLAIM_PATH,
+            json={"pairing_id": pairing_id, "pairing_nonce": wrong_nonce},
+        )
+        assert response.status_code == 401
+        with app.extensions["inktime_database"].session() as connection:
+            row = connection.execute(
+                "SELECT claim_attempts,status FROM device_pairing_requests WHERE id=?",
+                (pairing_id,),
+            ).fetchone()
+        assert row["claim_attempts"] == expected_attempts
+        assert row["status"] == "pending"
+
+    fifth = client.post(
+        CLAIM_PATH,
+        json={"pairing_id": pairing_id, "pairing_nonce": wrong_nonce},
+    )
+    assert fifth.status_code == 401
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute(
+            "SELECT claim_attempts,status FROM device_pairing_requests WHERE id=?",
+            (pairing_id,),
+        ).fetchone()
+    assert row["claim_attempts"] == 5
+    assert row["status"] == "rejected"
+
+    correct = client.post(
+        CLAIM_PATH,
+        json={"pairing_id": pairing_id, "pairing_nonce": payload["pairing_nonce"]},
+    )
+    assert correct.status_code == 410
+
+
+def test_pairing_claim_rejection_clears_issued_credential_envelope(client, app):
+    payload = _pairing_payload(
+        "esp32-claim-envelope-cleanup",
+        nonce="nonce-for-claim-envelope-cleanup-0123456789",
+    )
+    requested = client.post(PAIRING_PATH, json=payload)
+    assert requested.status_code == 201
+    body = requested.get_json()
+
+    create_admin(app)
+    login(client)
+    assert _approve(client, body["pairing_id"], body["pairing_code"]).status_code == 200
+    issued = client.post(
+        CLAIM_PATH,
+        json={"pairing_id": body["pairing_id"], "pairing_nonce": payload["pairing_nonce"]},
+    )
+    assert issued.status_code == 200
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute(
+            "SELECT credential_envelope_ciphertext,credential_envelope_expires_at FROM device_pairing_requests WHERE id=?",
+            (body["pairing_id"],),
+        ).fetchone()
+    assert row["credential_envelope_ciphertext"] is not None
+    assert row["credential_envelope_expires_at"] is not None
+
+    wrong_nonce = "wrong-nonce-for-issued-envelope-0123456789"
+    for _ in range(5):
+        response = client.post(
+            CLAIM_PATH,
+            json={"pairing_id": body["pairing_id"], "pairing_nonce": wrong_nonce},
+        )
+        assert response.status_code == 401
+
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute(
+            "SELECT claim_attempts,status,credential_envelope_ciphertext,credential_envelope_expires_at FROM device_pairing_requests WHERE id=?",
+            (body["pairing_id"],),
+        ).fetchone()
+    assert row["claim_attempts"] == 5
+    assert row["status"] == "rejected"
+    assert row["credential_envelope_ciphertext"] is None
+    assert row["credential_envelope_expires_at"] is None
+    assert client.post(
+        CLAIM_PATH,
+        json={"pairing_id": body["pairing_id"], "pairing_nonce": payload["pairing_nonce"]},
+    ).status_code == 410
+
+
 def test_stock_compatibility_never_enters_automatic_pairing(client, app):
     device_id, _token = app.extensions["inktime_device_repository"].create(
         "Stock PhotoPainter", delivery_mode="stock_compat"

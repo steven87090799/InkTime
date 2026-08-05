@@ -461,6 +461,7 @@ class DevicePairingService:
         if not PAIRING_CODE_PATTERN.fullmatch(pairing_code):
             raise DevicePairingError("配對碼格式不合法", error_code="PAIR-005")
         now = self._now()
+        deferred_error: DevicePairingError | None = None
         with self.database.transaction() as connection:
             self._expire_requests(connection, now)
             row = connection.execute("SELECT * FROM device_pairing_requests WHERE id=?", (pairing_id,)).fetchone()
@@ -474,37 +475,40 @@ class DevicePairingService:
             attempts = int(row["attempts"] or 0)
             if attempts >= PAIRING_CODE_ATTEMPT_LIMIT:
                 connection.execute("UPDATE device_pairing_requests SET status='rejected' WHERE id=?", (pairing_id,))
-                raise DevicePairingError("配對碼嘗試次數已用盡", status_code=429, error_code="PAIR-006")
-            if not hmac.compare_digest(str(row["pairing_code_hash"]), self._code_hash(pairing_code)):
+                deferred_error = DevicePairingError("配對碼嘗試次數已用盡", status_code=429, error_code="PAIR-006")
+            elif not hmac.compare_digest(str(row["pairing_code_hash"]), self._code_hash(pairing_code)):
                 attempts += 1
                 next_status = "rejected" if attempts >= PAIRING_CODE_ATTEMPT_LIMIT else "pending"
                 connection.execute(
                     "UPDATE device_pairing_requests SET attempts=?,status=? WHERE id=?",
                     (attempts, next_status, pairing_id),
                 )
-                raise DevicePairingError("配對碼不正確", status_code=403, error_code="PAIR-006")
-            device = connection.execute("SELECT * FROM devices WHERE id=?", (row["device_id"],)).fetchone()
-            if device is not None:
-                if str(device["auth_mode"] or "legacy_token") != "automatic" or str(device["delivery_mode"] or "legacy_online") == "stock_compat":
-                    raise DevicePairingError("裝置不允許自動配對", status_code=409, error_code="PAIR-003")
-                if str(device["pairing_state"] or "") in {"paired", "revoked", "auth_invalid"}:
-                    raise DevicePairingError("裝置不允許自動配對", status_code=409, error_code="PAIR-003")
-            try:
-                existing_config = json.loads(str(row["config_json"] or "{}"))
-            except (TypeError, ValueError, json.JSONDecodeError):
-                existing_config = {}
-            config = self._normalize_config(device_config or existing_config, fallback_name=f"待配對裝置 {str(row['device_id'])[-6:]}")
-            connection.execute(
-                "UPDATE device_pairing_requests SET status='approved',approved_at=?,approved_by=?,config_json=? WHERE id=?",
-                (self._iso(now), administrator_id[:128], json.dumps(config, ensure_ascii=False, separators=(",", ":")), pairing_id),
-            )
-            self._activity(
-                connection,
-                device_id=str(row["device_id"]) if device is not None else None,
-                source_id=f"{pairing_id}:approved",
-                event="pairing_approved",
-                message="管理員已核准裝置配對",
-            )
+                deferred_error = DevicePairingError("配對碼不正確", status_code=403, error_code="PAIR-006")
+            else:
+                device = connection.execute("SELECT * FROM devices WHERE id=?", (row["device_id"],)).fetchone()
+                if device is not None:
+                    if str(device["auth_mode"] or "legacy_token") != "automatic" or str(device["delivery_mode"] or "legacy_online") == "stock_compat":
+                        raise DevicePairingError("裝置不允許自動配對", status_code=409, error_code="PAIR-003")
+                    if str(device["pairing_state"] or "") in {"paired", "revoked", "auth_invalid"}:
+                        raise DevicePairingError("裝置不允許自動配對", status_code=409, error_code="PAIR-003")
+                try:
+                    existing_config = json.loads(str(row["config_json"] or "{}"))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    existing_config = {}
+                config = self._normalize_config(device_config or existing_config, fallback_name=f"待配對裝置 {str(row['device_id'])[-6:]}")
+                connection.execute(
+                    "UPDATE device_pairing_requests SET status='approved',approved_at=?,approved_by=?,config_json=? WHERE id=?",
+                    (self._iso(now), administrator_id[:128], json.dumps(config, ensure_ascii=False, separators=(",", ":")), pairing_id),
+                )
+                self._activity(
+                    connection,
+                    device_id=str(row["device_id"]) if device is not None else None,
+                    source_id=f"{pairing_id}:approved",
+                    event="pairing_approved",
+                    message="管理員已核准裝置配對",
+                )
+        if deferred_error is not None:
+            raise deferred_error
         return {"status": "approved", "pairing_id": pairing_id}
 
     def _decode_envelope(self, row, now: datetime) -> dict[str, Any]:
@@ -535,6 +539,7 @@ class DevicePairingService:
         pairing_id = self._validate_text(pairing_id, "pairing_id", 128, required=True)
         pairing_nonce = self._validate_text(pairing_nonce, "pairing_nonce", 256, required=True)
         now = self._now()
+        deferred_error: DevicePairingError | None = None
         with self.database.transaction() as connection:
             self._expire_requests(connection, now)
             row = connection.execute("SELECT * FROM device_pairing_requests WHERE id=?", (pairing_id,)).fetchone()
@@ -548,56 +553,65 @@ class DevicePairingService:
             if not hmac.compare_digest(str(row["pairing_nonce_hash"]), self._nonce_hash(pairing_nonce)):
                 attempts = int(row["claim_attempts"] or 0) + 1
                 next_status = "rejected" if attempts >= PAIRING_CLAIM_ATTEMPT_LIMIT else status
-                connection.execute(
-                    "UPDATE device_pairing_requests SET claim_attempts=?,status=? WHERE id=?",
-                    (attempts, next_status, pairing_id),
-                )
-                raise DevicePairingError("配對 claim 驗證失敗", status_code=401, error_code="PAIR-008")
-            if status == "pending":
+                if next_status == "rejected":
+                    connection.execute(
+                        "UPDATE device_pairing_requests SET claim_attempts=?,status=?,credential_envelope_ciphertext=NULL,credential_envelope_expires_at=NULL WHERE id=?",
+                        (attempts, next_status, pairing_id),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE device_pairing_requests SET claim_attempts=?,status=? WHERE id=?",
+                        (attempts, next_status, pairing_id),
+                    )
+                deferred_error = DevicePairingError("配對 claim 驗證失敗", status_code=401, error_code="PAIR-008")
+            elif status == "pending":
                 return 202, {"status": "pairing_pending", "poll_after_seconds": PAIRING_POLL_SECONDS}, PAIRING_POLL_SECONDS
-            if status == "credential_issued":
+            elif status == "credential_issued":
                 return 200, self._claim_response(self._decode_envelope(row, now), now), None
-            device = connection.execute("SELECT * FROM devices WHERE id=?", (row["device_id"],)).fetchone()
-            if device is not None:
-                if str(device["auth_mode"] or "legacy_token") != "automatic" or str(device["pairing_state"] or "") in {"paired", "revoked", "auth_invalid"}:
-                    raise DevicePairingError("裝置不允許自動配對", status_code=409, error_code="PAIR-003")
-                next_version = max(1, int(device["credential_version"] or 0) + 1)
             else:
-                next_version = 1
-            try:
-                config = json.loads(str(row["config_json"] or "{}"))
-            except (TypeError, ValueError, json.JSONDecodeError):
-                config = {}
-            secret = issue_device_secret()
-            envelope = {
-                "device_id": str(row["device_id"]),
-                "device_secret": secret,
-                "credential_version": next_version,
-                "config": config,
-                "firmware_version": str(row["firmware_version"] or ""),
-                "firmware_identity": str(row["firmware_identity"] or ""),
-            }
-            envelope_expires = min(datetime.fromisoformat(str(row["expires_at"])), now + PAIRING_TTL)
-            encrypted = self._credential_envelope_cipher.encrypt(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-            connection.execute(
-                """
-                UPDATE device_pairing_requests SET status='credential_issued',credential_issued_at=?,
-                    credential_envelope_ciphertext=?,credential_envelope_expires_at=? WHERE id=?
-                """,
-                (self._iso(now), encrypted, self._iso(envelope_expires), pairing_id),
-            )
-            if device is not None:
+                device = connection.execute("SELECT * FROM devices WHERE id=?", (row["device_id"],)).fetchone()
+                if device is not None:
+                    if str(device["auth_mode"] or "legacy_token") != "automatic" or str(device["pairing_state"] or "") in {"paired", "revoked", "auth_invalid"}:
+                        raise DevicePairingError("裝置不允許自動配對", status_code=409, error_code="PAIR-003")
+                    next_version = max(1, int(device["credential_version"] or 0) + 1)
+                else:
+                    next_version = 1
+                try:
+                    config = json.loads(str(row["config_json"] or "{}"))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    config = {}
+                secret = issue_device_secret()
+                envelope = {
+                    "device_id": str(row["device_id"]),
+                    "device_secret": secret,
+                    "credential_version": next_version,
+                    "config": config,
+                    "firmware_version": str(row["firmware_version"] or ""),
+                    "firmware_identity": str(row["firmware_identity"] or ""),
+                }
+                envelope_expires = min(datetime.fromisoformat(str(row["expires_at"])), now + PAIRING_TTL)
+                encrypted = self._credential_envelope_cipher.encrypt(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
                 connection.execute(
-                    "UPDATE devices SET pairing_state='pairing_pending',pairing_code_hash=NULL,pairing_expires_at=?,pairing_claim_attempts=0,updated_at=? WHERE id=?",
-                    (self._iso(envelope_expires), self._iso(now), row["device_id"]),
+                    """
+                    UPDATE device_pairing_requests SET status='credential_issued',credential_issued_at=?,
+                        credential_envelope_ciphertext=?,credential_envelope_expires_at=? WHERE id=?
+                    """,
+                    (self._iso(now), encrypted, self._iso(envelope_expires), pairing_id),
                 )
-            self._activity(
-                connection,
-                device_id=str(row["device_id"]) if device is not None else None,
-                source_id=f"{pairing_id}:credential-issued",
-                event="pairing_credential_issued",
-                message="配對 credential 已暫存等待裝置確認",
-            )
+                if device is not None:
+                    connection.execute(
+                        "UPDATE devices SET pairing_state='pairing_pending',pairing_code_hash=NULL,pairing_expires_at=?,pairing_claim_attempts=0,updated_at=? WHERE id=?",
+                        (self._iso(envelope_expires), self._iso(now), row["device_id"]),
+                    )
+                self._activity(
+                    connection,
+                    device_id=str(row["device_id"]) if device is not None else None,
+                    source_id=f"{pairing_id}:credential-issued",
+                    event="pairing_credential_issued",
+                    message="配對 credential 已暫存等待裝置確認",
+                )
+        if deferred_error is not None:
+            raise deferred_error
         return 200, self._claim_response(envelope, now), None
 
     @staticmethod
