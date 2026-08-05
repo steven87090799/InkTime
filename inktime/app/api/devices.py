@@ -16,6 +16,7 @@ from inktime.app.core.json_values import (
     json_int,
     json_object_payload,
     nullable_json_float,
+    nullable_json_int,
     optional_json_bool,
     optional_json_float,
     optional_json_int,
@@ -921,6 +922,29 @@ def report_status():
         except JsonScalarError as exc:
             abort(400, description=str(exc))
 
+    def optional_text(key: str, maximum: int) -> str | None:
+        if key not in payload:
+            return None
+        value = payload[key]
+        if type(value) is not str:
+            abort(400, description=f"DEVICE-004 {key} 必須是字串")
+        value = value.strip()
+        if len(value) > maximum:
+            abort(400, description=f"DEVICE-004 {key} 過長")
+        return value
+
+    def nullable_int(key: str, minimum: int, maximum: int) -> int | None:
+        try:
+            return nullable_json_int(
+                payload,
+                key,
+                minimum=minimum,
+                maximum=maximum,
+                error_prefix="DEVICE-004",
+            )
+        except JsonScalarError as exc:
+            abort(400, description=str(exc))
+
     battery_percent = optional_float("battery_percent", 0.0, 100.0)
     error_code = str(payload.get("error_code", "")).strip()[:64]
     error_message = str(payload.get("error_message", "")).strip()[:500]
@@ -937,6 +961,28 @@ def report_status():
         abort(400, description="DEVICE-004 未 skip 時不得提供 display_skip_reason")
     if len(display_skip_reason) > 64:
         abort(400, description="DEVICE-004 display_skip_reason 過長")
+    applied_offline_schedule_version = optional_int(
+        "applied_offline_schedule_version", 0, 2_147_483_647
+    )
+    telemetry = {
+        "wifi_connect_ms": optional_int("wifi_connect_ms", 0, 120_000),
+        "network_session_ms": optional_int("network_session_ms", 0, 600_000),
+        "http_request_count": optional_int("http_request_count", 0, 128),
+        "tls_handshake_count": optional_int("tls_handshake_count", 0, 128),
+        "ntp_sync_ms": optional_int("ntp_sync_ms", 0, 120_000),
+        "download_bytes": optional_int("download_bytes", 0, 4_294_967_295),
+        "sd_read_bytes": optional_int("sd_read_bytes", 0, 4_294_967_295),
+        "sd_write_bytes": optional_int("sd_write_bytes", 0, 4_294_967_295),
+        "sd_write_ms": optional_int("sd_write_ms", 0, 600_000),
+        "nvs_write_count": optional_int("nvs_write_count", 0, 1_024),
+        "ack_event_count": optional_int("ack_event_count", 0, 1_024),
+        "ack_batch_request_count": optional_int("ack_batch_request_count", 0, 1_024),
+        "epd_transfer_ms": optional_int("epd_transfer_ms", 0, 600_000),
+        "next_wake_epoch": nullable_int("next_wake_epoch", 0, 4_294_967_295),
+        "next_network_sync_epoch": nullable_int(
+            "next_network_sync_epoch", 0, 4_294_967_295
+        ),
+    }
     boolean_details = {
         key: optional_bool(payload, key)
         for key in (
@@ -947,8 +993,14 @@ def report_status():
             "usb_power",
             "battery_percent_estimated",
             "button_wakeup",
+            "wifi_fast_path_attempted",
+            "wifi_fast_path_success",
+            "ntp_sync_attempted",
+            "ntp_sync_succeeded",
+            "tls_handshake_count_unavailable",
         )
     }
+    wake_reason_detail = optional_text("wake_reason_detail", 64)
     _repository().record_status(
         str(device["id"]),
         firmware_version=str(payload.get("firmware_version", "unknown")),
@@ -960,9 +1012,7 @@ def report_status():
         error_message=error_message,
         wake_reason=str(payload.get("wake_reason", "")),
         applied_config_version=optional_int("applied_config_version", 0, 2_147_483_647),
-        applied_offline_schedule_version=optional_int(
-            "applied_offline_schedule_version", 0, 2_147_483_647
-        ),
+        applied_offline_schedule_version=applied_offline_schedule_version,
         details={
             "display_updated": display_updated,
             "display_skipped": display_skipped,
@@ -972,9 +1022,7 @@ def report_status():
             "render_profile": str(payload.get("render_profile", ""))[:100],
             "reported_panel_profile": str(payload.get("panel_profile", ""))[:100],
             "applied_config_version": payload.get("applied_config_version"),
-            "applied_offline_schedule_version": payload.get(
-                "applied_offline_schedule_version"
-            ),
+            "applied_offline_schedule_version": applied_offline_schedule_version,
             "board_profile": str(payload.get("board_profile", ""))[:100],
             "flash_bytes": optional_int("flash_bytes", 0, 2_147_483_647),
             "psram_bytes": optional_int("psram_bytes", 0, 2_147_483_647),
@@ -992,6 +1040,29 @@ def report_status():
             "last_refresh_duration_ms": optional_int("last_refresh_duration_ms", 0, 600_000),
             "wake_duration_ms": optional_int("wake_duration_ms", 0, 86_400_000),
             "button_wakeup": boolean_details["button_wakeup"],
+            "wifi_connect_ms": telemetry["wifi_connect_ms"],
+            "wifi_fast_path_attempted": boolean_details["wifi_fast_path_attempted"],
+            "wifi_fast_path_success": boolean_details["wifi_fast_path_success"],
+            "network_session_ms": telemetry["network_session_ms"],
+            "http_request_count": telemetry["http_request_count"],
+            "tls_handshake_count": telemetry["tls_handshake_count"],
+            "tls_handshake_count_unavailable": boolean_details[
+                "tls_handshake_count_unavailable"
+            ],
+            "ntp_sync_attempted": boolean_details["ntp_sync_attempted"],
+            "ntp_sync_succeeded": boolean_details["ntp_sync_succeeded"],
+            "ntp_sync_ms": telemetry["ntp_sync_ms"],
+            "download_bytes": telemetry["download_bytes"],
+            "sd_read_bytes": telemetry["sd_read_bytes"],
+            "sd_write_bytes": telemetry["sd_write_bytes"],
+            "sd_write_ms": telemetry["sd_write_ms"],
+            "nvs_write_count": telemetry["nvs_write_count"],
+            "ack_event_count": telemetry["ack_event_count"],
+            "ack_batch_request_count": telemetry["ack_batch_request_count"],
+            "epd_transfer_ms": telemetry["epd_transfer_ms"],
+            "next_wake_epoch": telemetry["next_wake_epoch"],
+            "next_network_sync_epoch": telemetry["next_network_sync_epoch"],
+            "wake_reason_detail": wake_reason_detail,
         },
     )
     DeviceTestReleaseStore(current_app.config["INKTIME_RELEASE_DIR"]).confirm_display(

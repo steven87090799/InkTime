@@ -385,6 +385,27 @@ def test_device_status_is_recorded_without_exposing_token(client, app):
             "last_refresh_duration_ms": 25000,
             "wake_duration_ms": 61000,
             "wake_reason": "4",
+            "wake_reason_detail": "timer",
+            "wifi_connect_ms": 1800,
+            "wifi_fast_path_attempted": True,
+            "wifi_fast_path_success": True,
+            "network_session_ms": 9200,
+            "http_request_count": 4,
+            "tls_handshake_count_unavailable": True,
+            "ntp_sync_attempted": False,
+            "ntp_sync_succeeded": False,
+            "ntp_sync_ms": 0,
+            "download_bytes": 96000,
+            "sd_read_bytes": 192000,
+            "sd_write_bytes": 96000,
+            "sd_write_ms": 240,
+            "nvs_write_count": 3,
+            "ack_event_count": 1,
+            "ack_batch_request_count": 0,
+            "epd_transfer_ms": 25000,
+            "applied_offline_schedule_version": 7,
+            "next_wake_epoch": 1760000000,
+            "next_network_sync_epoch": 1759990000,
             "display_updated": False,
             "display_skipped": True,
             "display_skip_reason": "same_sha256",
@@ -408,6 +429,11 @@ def test_device_status_is_recorded_without_exposing_token(client, app):
     assert details["last_refresh_duration_ms"] == 25000
     assert details["display_skipped"] is True
     assert details["display_skip_reason"] == "same_sha256"
+    assert details["wifi_connect_ms"] == 1800
+    assert details["wifi_fast_path_success"] is True
+    assert details["download_bytes"] == 96000
+    assert details["nvs_write_count"] == 3
+    assert details["next_network_sync_epoch"] == 1759990000
     with app.extensions["inktime_database"].session() as connection:
         sample = connection.execute(
             "SELECT * FROM device_power_samples WHERE device_id=?", (device_id,)
@@ -429,6 +455,34 @@ def test_device_status_rejects_malformed_numeric_telemetry(client, app):
     )
     assert response.status_code == 400
     assert "DEVICE-004" in response.get_data(as_text=True)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("wifi_connect_ms", 120_001),
+        ("http_request_count", 129),
+        ("download_bytes", 4_294_967_296),
+        ("next_wake_epoch", -1),
+        ("wifi_fast_path_success", "true"),
+        ("wake_reason_detail", "x" * 65),
+    ],
+)
+def test_device_status_rejects_unbounded_phase_two_telemetry(client, app, field, value):
+    device_id, token = app.extensions["inktime_device_repository"].create("bounded-telemetry-device")
+    response = client.post(
+        "/api/device/v1/status",
+        json={field: value},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 400
+    with app.extensions["inktime_database"].session() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM device_events WHERE device_id=?", (device_id,)
+            ).fetchone()[0]
+            == 0
+        )
 
 
 @pytest.mark.parametrize(

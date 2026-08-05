@@ -627,14 +627,18 @@ bool PhotoPainterSupport::loadCachedFrame(
       && static_cast<size_t>(file.size()) == sizeof(CacheHeaderV2) + kPhotoPainterFrameBytes;
   CacheValidation headerValidation = CacheValidation::BadLength;
   if (useFullHeader) {
-    if (file.read(reinterpret_cast<uint8_t*>(&fullHeader), sizeof(fullHeader)) != sizeof(fullHeader)) {
+    const size_t received = file.read(reinterpret_cast<uint8_t*>(&fullHeader), sizeof(fullHeader));
+    sdReadBytes_ += static_cast<uint32_t>(received);
+    if (received != sizeof(fullHeader)) {
       file.close();
       SD.remove(finalPath);
       cacheStatus_ = CacheStatus::Invalid;
       return false;
     }
   } else if (static_cast<size_t>(file.size()) == sizeof(CacheHeader) + kPhotoPainterFrameBytes) {
-    if (file.read(reinterpret_cast<uint8_t*>(&legacyHeader), sizeof(legacyHeader)) != sizeof(legacyHeader)) {
+    const size_t received = file.read(reinterpret_cast<uint8_t*>(&legacyHeader), sizeof(legacyHeader));
+    sdReadBytes_ += static_cast<uint32_t>(received);
+    if (received != sizeof(legacyHeader)) {
       file.close();
       SD.remove(finalPath);
       cacheStatus_ = CacheStatus::Invalid;
@@ -658,6 +662,7 @@ bool PhotoPainterSupport::loadCachedFrame(
   while (total < kPhotoPainterFrameBytes) {
     const size_t requested = min(kIoChunkSize, kPhotoPainterFrameBytes - total);
     const size_t received = file.read(impl_->ioBuffer, requested);
+    sdReadBytes_ += static_cast<uint32_t>(received);
     if (received != requested) break;
     memcpy(framebuffer + total, impl_->ioBuffer, received);
     total += received;
@@ -709,7 +714,9 @@ bool PhotoPainterSupport::loadFormalFrame(
     return false;
   }
   FormalFrameHeader header = {};
-  if (file.read(reinterpret_cast<uint8_t*>(&header), sizeof(header)) != sizeof(header)) {
+  const size_t headerReceived = file.read(reinterpret_cast<uint8_t*>(&header), sizeof(header));
+  sdReadBytes_ += static_cast<uint32_t>(headerReceived);
+  if (headerReceived != sizeof(header)) {
     file.close();
     SD.remove(finalPath);
     if (SD.exists(backupPath)) SD.rename(backupPath, finalPath);
@@ -727,6 +734,7 @@ bool PhotoPainterSupport::loadFormalFrame(
   while (total < kPhotoPainterFrameBytes) {
     const size_t requested = min(kIoChunkSize, kPhotoPainterFrameBytes - total);
     const size_t received = file.read(impl_->ioBuffer, requested);
+    sdReadBytes_ += static_cast<uint32_t>(received);
     if (received != requested) break;
     memcpy(framebuffer + total, impl_->ioBuffer, received);
     total += received;
@@ -788,6 +796,7 @@ bool PhotoPainterSupport::convertAndCache(
     cacheStatus_ = CacheStatus::Error;
     return true;
   }
+  const uint32_t writeStarted = millis();
   const bool useFullHeader = isSha256Hex(sourceSha256);
   CacheHeader legacyHeader = makeCacheHeader(
     sourceHash, rotation, framebuffer, kPhotoPainterFrameBytes);
@@ -797,17 +806,21 @@ bool PhotoPainterSupport::convertAndCache(
     ? reinterpret_cast<const uint8_t*>(&fullHeader)
     : reinterpret_cast<const uint8_t*>(&legacyHeader);
   const size_t headerSize = useFullHeader ? sizeof(fullHeader) : sizeof(legacyHeader);
-  bool writeOk = file.write(headerBytes, headerSize) == headerSize;
+  const size_t headerWritten = file.write(headerBytes, headerSize);
+  sdWriteBytes_ += static_cast<uint32_t>(headerWritten);
+  bool writeOk = headerWritten == headerSize;
   size_t total = 0;
   while (writeOk && total < kPhotoPainterFrameBytes) {
     const size_t requested = min(kIoChunkSize, kPhotoPainterFrameBytes - total);
     memcpy(impl_->ioBuffer, framebuffer + total, requested);
     const size_t written = file.write(impl_->ioBuffer, requested);
+    sdWriteBytes_ += static_cast<uint32_t>(written);
     writeOk = written == requested;
     total += written;
   }
   file.flush();
   file.close();
+  sdWriteDurationMs_ += millis() - writeStarted;
   if (!writeOk || total != kPhotoPainterFrameBytes) {
     SD.remove(temporaryPath);
     cacheStatus_ = CacheStatus::Error;
@@ -853,20 +866,25 @@ bool PhotoPainterSupport::writeFormalFrame(
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
+  const uint32_t writeStarted = millis();
   const FormalFrameHeader header = makeFormalFrameHeader(
     sourceSha256, rotation, framebuffer, length);
-  bool writeOk = file.write(
-    reinterpret_cast<const uint8_t*>(&header), sizeof(header)) == sizeof(header);
+  const size_t headerWritten = file.write(
+    reinterpret_cast<const uint8_t*>(&header), sizeof(header));
+  sdWriteBytes_ += static_cast<uint32_t>(headerWritten);
+  bool writeOk = headerWritten == sizeof(header);
   size_t total = 0;
   while (writeOk && total < length) {
     const size_t requested = min(kIoChunkSize, length - total);
     memcpy(impl_->ioBuffer, framebuffer + total, requested);
     const size_t written = file.write(impl_->ioBuffer, requested);
+    sdWriteBytes_ += static_cast<uint32_t>(written);
     writeOk = written == requested;
     total += written;
   }
   file.flush();
   file.close();
+  sdWriteDurationMs_ += millis() - writeStarted;
   if (!writeOk || total != length) {
     SD.remove(temporaryPath);
     cacheStatus_ = CacheStatus::Error;
@@ -906,10 +924,13 @@ bool PhotoPainterSupport::writeActiveSchedule(const char* json, size_t length) {
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
+  const uint32_t writeStarted = millis();
   const size_t written = file.write(
     reinterpret_cast<const uint8_t*>(json), length);
+  sdWriteBytes_ += static_cast<uint32_t>(written);
   file.flush();
   file.close();
+  sdWriteDurationMs_ += millis() - writeStarted;
   if (written != length) {
     SD.remove(temporaryPath);
     cacheStatus_ = CacheStatus::Error;
@@ -953,7 +974,13 @@ bool PhotoPainterSupport::readActiveSchedule(String& json) {
   }
   const size_t length = static_cast<size_t>(file.size());
   json.reserve(length + 1U);
-  while (file.available()) json += static_cast<char>(file.read());
+  while (file.available()) {
+    const int value = file.read();
+    if (value >= 0) {
+      ++sdReadBytes_;
+      json += static_cast<char>(value);
+    }
+  }
   file.close();
   if (json.length() != length) {
     json = "";
@@ -1004,9 +1031,12 @@ bool PhotoPainterSupport::writeStagedNextSchedule(const char* json, size_t lengt
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
+  const uint32_t writeStarted = millis();
   const size_t written = file.write(reinterpret_cast<const uint8_t*>(json), length);
+  sdWriteBytes_ += static_cast<uint32_t>(written);
   file.flush();
   file.close();
+  sdWriteDurationMs_ += millis() - writeStarted;
   if (written != length) {
     SD.remove(temporaryPath);
     cacheStatus_ = CacheStatus::Error;
@@ -1050,7 +1080,13 @@ bool PhotoPainterSupport::readStagedNextSchedule(String& json) {
   }
   const size_t length = static_cast<size_t>(file.size());
   json.reserve(length + 1U);
-  while (file.available()) json += static_cast<char>(file.read());
+  while (file.available()) {
+    const int value = file.read();
+    if (value >= 0) {
+      ++sdReadBytes_;
+      json += static_cast<char>(value);
+    }
+  }
   file.close();
   if (json.length() != length) {
     json = "";

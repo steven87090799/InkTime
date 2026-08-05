@@ -95,6 +95,9 @@ class PhotoPainterSupport {
   float humidityPercent() const { return humidityPercent_; }
   bool environmentValid() const { return environmentValid_; }
   uint32_t lastRefreshDurationMs() const { return lastRefreshDurationMs_; }
+  uint32_t sdReadBytes() const { return sdReadBytes_; }
+  uint32_t sdWriteBytes() const { return sdWriteBytes_; }
+  uint32_t sdWriteDurationMs() const { return sdWriteDurationMs_; }
   CacheStatus cacheStatus() const { return cacheStatus_; }
   const char* lastError() const { return lastError_; }
 
@@ -114,6 +117,9 @@ class PhotoPainterSupport {
   float temperatureC_ = 0.0f;
   float humidityPercent_ = 0.0f;
   uint32_t lastRefreshDurationMs_ = 0;
+  uint32_t sdReadBytes_ = 0;
+  uint32_t sdWriteBytes_ = 0;
+  uint32_t sdWriteDurationMs_ = 0;
   CacheStatus cacheStatus_ = CacheStatus::Disabled;
   const char* lastError_ = "";
 };
