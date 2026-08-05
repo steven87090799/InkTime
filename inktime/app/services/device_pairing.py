@@ -145,7 +145,7 @@ class DevicePairingService:
         if not values or len(values) > 12 or any(not TIME_PATTERN.fullmatch(item) for item in values):
             raise DevicePairingError("schedule_times 格式不合法", error_code="PAIR-004")
         minutes = [int(item[:2]) * 60 + int(item[3:]) for item in values]
-        if any(right <= left for left, right in zip(minutes, minutes[1:])):
+        if any(right <= left for left, right in zip(minutes, minutes[1:], strict=False)):
             raise DevicePairingError("schedule_times 必須嚴格遞增", error_code="PAIR-004")
         return values
 
