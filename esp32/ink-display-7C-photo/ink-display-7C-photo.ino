@@ -95,12 +95,16 @@ GxEPD2_7C<
 #define DEVICE_STATUS_PATH   "/api/device/v1/status"
 #define DEVICE_QUEUE_MANIFEST_PATH "/api/device/v1/queue/manifest"
 #define DEVICE_QUEUE_ACK_PATH "/api/device/v1/queue/ack"
+#define DEVICE_QUEUE_ACK_BATCH_PATH "/api/device/v1/queue/acks"
 #define DEVICE_OFFLINE_SCHEDULE_PATH "/api/device/v1/offline-schedule"
 #define DEVICE_PAIRING_REQUEST_PATH "/api/device/v1/pairing/request"
 #define DEVICE_PAIRING_CLAIM_PATH "/api/device/v1/pairing/claim"
 #define DEVICE_PAIRING_CONFIRM_PATH "/api/device/v1/pairing/confirm"
 #define DEVICE_PAIRING_REPAIR_PERMISSION_PATH "/api/device/v1/pairing/repair-permission"
 #define INKTIME_FIRMWARE_VERSION "2.8.0"
+
+static constexpr uint8_t kQueueAckBatchMaxEvents = 8U;
+static constexpr size_t kQueueAckBatchMaxBodyBytes = 12U * 1024U;
 
 // Secure builds require a compile-time or portal-provisioned trust anchor;
 // isolated LAN HTTP remains available only in an explicit development build.
@@ -172,6 +176,17 @@ struct Config {
   uint32_t config_version;
   bool    valid;
 };
+
+// One transport object is shared by safe requests during a network wake.  It
+// is deliberately closed before any EPD refresh so the radio cannot remain
+// active while the panel is drawing power.
+static inktime::DeviceHttpTransport wakeHttpTransport;
+static String wakeHttpOrigin;
+static bool wakeHttpSessionOpen = false;
+static bool networkClosedForDisplay = false;
+
+static void closeWakeHttpSession();
+static void stopNetworkBeforeDisplay();
 
 static void recordNvsWrite() {
   if (runtimeTelemetry.nvs_write_count < UINT32_MAX) ++runtimeTelemetry.nvs_write_count;
@@ -837,6 +852,23 @@ static uint8_t ackJournalCount(Preferences &journal) {
   return min(
     journal.getUChar("count", 0U),
     static_cast<uint8_t>(inktime::kMaxAckJournalEntries));
+}
+
+static uint8_t loadAckJournalEntries(
+  PendingQueueAck *entries,
+  uint8_t capacity
+) {
+  if (entries == nullptr || capacity == 0U) return 0U;
+  Preferences journal;
+  journal.begin("acklog", true);
+  const uint8_t count = min(ackJournalCount(journal), capacity);
+  uint8_t loaded = 0U;
+  for (uint8_t index = 0; index < count; ++index) {
+    PendingQueueAck pending = readAckJournalEntry(journal, index);
+    if (pending.valid) entries[loaded++] = pending;
+  }
+  journal.end();
+  return loaded;
 }
 
 static void removeLegacyPendingQueueAck() {
@@ -1645,6 +1677,7 @@ static void goDeepSleepSeconds(uint64_t seconds) {
 
   powerDownEPD();
 
+  closeWakeHttpSession();
   WiFi.disconnect(false, false);
   WiFi.mode(WIFI_OFF);
   esp_wifi_stop();
@@ -2027,6 +2060,40 @@ static bool normalizedBackendBase(const Config &cfg, String &base) {
     return false;
   }
   return backendTransportAllowed(base, cfg.ca_pem);
+}
+
+static bool ensureWakeHttpSession(Config &cfg, String &base) {
+  if (WiFi.status() != WL_CONNECTED || !normalizedBackendBase(cfg, base)) return false;
+  wakeHttpTransport.configure(cfg.ca_pem);
+  if (wakeHttpSessionOpen && wakeHttpOrigin == base && wakeHttpTransport.sessionActive()) {
+    return true;
+  }
+  String transportCode;
+  String transportMessage;
+  if (!wakeHttpTransport.beginSession(base, transportCode, transportMessage)) {
+    wakeHttpSessionOpen = false;
+    lastDeviceErrorCode = transportCode.length() ? transportCode : "DEVICE-SESSION-BEGIN";
+    lastDeviceErrorMessage = transportMessage.length()
+      ? transportMessage : "Wake HTTP session 初始化失敗";
+    return false;
+  }
+  wakeHttpOrigin = base;
+  wakeHttpSessionOpen = true;
+  return true;
+}
+
+static void closeWakeHttpSession() {
+  wakeHttpTransport.closeSession();
+  wakeHttpOrigin = "";
+  wakeHttpSessionOpen = false;
+}
+
+static void stopNetworkBeforeDisplay() {
+  closeWakeHttpSession();
+  WiFi.disconnect(false, false);
+  WiFi.mode(WIFI_OFF);
+  esp_wifi_stop();
+  networkClosedForDisplay = true;
 }
 
 static constexpr uint32_t kPairingPollWindowMs = 30000U;
@@ -2532,67 +2599,185 @@ static bool queueAckIdempotencyKey(const PendingQueueAck &pending, String &key) 
   return true;
 }
 
-static bool sendQueueAck(Config &cfg, const PendingQueueAck &pending, bool persistFirst) {
-  if (!pending.valid) return false;
-  if (runtimeTelemetry.ack_event_count < UINT32_MAX) ++runtimeTelemetry.ack_event_count;
-  if (persistFirst) persistPendingQueueAck(pending);
-  String base;
-  if (WiFi.status() != WL_CONNECTED || !normalizedBackendBase(cfg, base)) return false;
-  String idempotencyKey;
-  if (!queueAckIdempotencyKey(pending, idempotencyKey)) {
-    lastDeviceErrorCode = "DEVICE-QUEUE-ACK-KEY";
-    lastDeviceErrorMessage = "Queue ACK idempotency key 無法建立";
+static PendingQueueAck ramQueueAckBatch[kQueueAckBatchMaxEvents] = {};
+static uint8_t ramQueueAckBatchCount = 0U;
+
+static bool terminalQueueAck(inktime::QueueEvent event) {
+  return event == inktime::QueueEvent::DisplayCompleted
+    || event == inktime::QueueEvent::DisplayFailed;
+}
+
+static void persistQueueAckBatch(
+  const PendingQueueAck *pending,
+  uint8_t count
+) {
+  if (pending == nullptr) return;
+  for (uint8_t index = 0U; index < count; ++index) {
+    persistPendingQueueAck(pending[index]);
+  }
+}
+
+static bool serializeQueueAckBatch(
+  const PendingQueueAck *pending,
+  uint8_t count,
+  String &body
+) {
+  if (pending == nullptr || count == 0U || count > kQueueAckBatchMaxEvents) return false;
+  JsonDocument payload;
+  JsonArray events = payload["events"].to<JsonArray>();
+  for (uint8_t index = 0U; index < count; ++index) {
+    if (!pending[index].valid) return false;
+    String idempotencyKey;
+    if (!queueAckIdempotencyKey(pending[index], idempotencyKey)) return false;
+    JsonObject event = events.add<JsonObject>();
+    event["queue_item_id"] = pending[index].queueItemId;
+    event["queue_version"] = pending[index].queueVersion;
+    event["event"] = inktime::queueEventName(pending[index].event);
+    event["idempotency_key"] = idempotencyKey;
+    if (pending[index].displaySkipped) {
+      event["display_skipped"] = true;
+      event["skip_reason"] = "same_sha256";
+    }
+    if (pending[index].delayedTerminal) {
+      event["ack_mode"] = "delayed_terminal";
+      event["release_id"] = pending[index].releaseId;
+      if (pending[index].eventEpoch > 0) event["event_epoch"] = pending[index].eventEpoch;
+    }
+    if (pending[index].errorCode.length() > 0U) event["error_code"] = pending[index].errorCode;
+  }
+  body = "";
+  serializeJson(payload, body);
+  return !payload.overflowed() && body.length() > 0U
+    && body.length() <= kQueueAckBatchMaxBodyBytes;
+}
+
+static bool postQueueAckBatch(
+  Config &cfg,
+  const PendingQueueAck *pending,
+  uint8_t count,
+  bool allowRetainedTerminal = false
+) {
+  if (pending == nullptr || count == 0U) return true;
+  if (deviceAuthInvalid) {
+    persistQueueAckBatch(pending, count);
     return false;
   }
-  JsonDocument payload;
-  payload["queue_item_id"] = pending.queueItemId;
-  payload["queue_version"] = pending.queueVersion;
-  payload["event"] = inktime::queueEventName(pending.event);
-  payload["idempotency_key"] = idempotencyKey;
-  if (pending.displaySkipped) {
-    payload["display_skipped"] = true;
-    payload["skip_reason"] = "same_sha256";
-  }
-  if (pending.delayedTerminal) {
-    payload["ack_mode"] = "delayed_terminal";
-    payload["release_id"] = pending.releaseId;
-    if (pending.eventEpoch > 0) payload["event_epoch"] = pending.eventEpoch;
-  }
-  if (pending.errorCode.length() > 0U) payload["error_code"] = pending.errorCode;
   String body;
-  serializeJson(payload, body);
+  if (!serializeQueueAckBatch(pending, count, body)) {
+    persistQueueAckBatch(pending, count);
+    lastDeviceErrorCode = "DEVICE-QUEUE-ACK-SCHEMA";
+    lastDeviceErrorMessage = "Queue ACK batch body 超過有界 schema 或 idempotency 建立失敗";
+    return false;
+  }
 
-  for (uint8_t attempt = 0; attempt <= inktime::kQueueRetryLimit; ++attempt) {
-    inktime::DeviceHttpTransport transport(cfg.ca_pem);
+  String base;
+  if (!ensureWakeHttpSession(cfg, base) || WiFi.status() != WL_CONNECTED) {
+    persistQueueAckBatch(pending, count);
+    return false;
+  }
+
+  for (uint8_t attempt = 0U; attempt <= inktime::kQueueRetryLimit; ++attempt) {
     HTTPClient ackHttp;
     String transportCode;
     String transportMessage;
-    if (!transport.begin(ackHttp, base + String(DEVICE_QUEUE_ACK_PATH), 15000, transportCode, transportMessage)) {
+    if (!wakeHttpTransport.begin(
+          ackHttp, base + String(DEVICE_QUEUE_ACK_BATCH_PATH), 15000,
+          transportCode, transportMessage)) {
       lastDeviceErrorCode = transportCode;
       lastDeviceErrorMessage = transportMessage;
       break;
     }
     if (!addDeviceAuthorization(ackHttp, cfg)) {
       ackHttp.end();
+      persistQueueAckBatch(pending, count);
       return false;
     }
+    const char* responseHeaders[] = {"Content-Type"};
+    ackHttp.collectHeaders(responseHeaders, 1);
     ackHttp.addHeader("Content-Type", "application/json");
+    if (runtimeTelemetry.ack_batch_request_count < UINT32_MAX) {
+      ++runtimeTelemetry.ack_batch_request_count;
+    }
     const int status = countedHttpPost(ackHttp, body);
     const bool authFailed = handleDeviceAuthStatus(cfg, status);
-    ackHttp.end();
-    if (authFailed) return false;
-    const inktime::AckDecision decision = inktime::ackDecision(status, attempt);
-    if (decision == inktime::AckDecision::Accepted) {
-      removePendingQueueAck(pending);
-      return true;
+    const int responseLength = ackHttp.getSize();
+    const String responseContentType = ackHttp.header("Content-Type");
+    if (authFailed) {
+      ackHttp.end();
+      persistQueueAckBatch(pending, count);
+      return false;
     }
+
+    if (status == HTTP_CODE_OK && responseLength > 0 && responseLength <= 12 * 1024
+        && responseContentType.startsWith("application/json")) {
+      JsonDocument response;
+      const DeserializationError responseError = deserializeJson(response, ackHttp.getStream());
+      const String responseStatus = response["status"] | "";
+      const JsonArrayConst results = response["results"].as<JsonArrayConst>();
+      const bool responseValid = !responseError && !response.overflowed()
+        && responseStatus == "ok" && !results.isNull() && results.size() == count;
+      if (responseValid) {
+        bool allResolved = true;
+        bool stale = false;
+        bool retainedTerminal = false;
+        bool unresolvedOther = false;
+        for (uint8_t index = 0U; index < count; ++index) {
+          const JsonObjectConst result = results[index].as<JsonObjectConst>();
+          const String responseItem = result["queue_item_id"] | "";
+          const String responseEvent = result["event"] | "";
+          const String outcome = result["status"] | "";
+          const String errorCode = result["error_code"] | "";
+          const bool identityMatches = responseItem == pending[index].queueItemId
+            && responseEvent == inktime::queueEventName(pending[index].event);
+          if (identityMatches && outcome == "accepted") {
+            removePendingQueueAck(pending[index]);
+            continue;
+          }
+          if (identityMatches && errorCode == "QUEUE-003") {
+            // A terminal event is crash-safe evidence, even when the queue
+            // version has moved on before the next wake.  Keep it durable so
+            // delayed-terminal recovery can still be accepted; dropping it
+            // here would turn a transient stale response into lost history.
+            if (terminalQueueAck(pending[index].event)) {
+              persistPendingQueueAck(pending[index]);
+              allResolved = false;
+              stale = true;
+              retainedTerminal = true;
+              continue;
+            }
+            removePendingQueueAck(pending[index]);
+            stale = true;
+            continue;
+          }
+          persistPendingQueueAck(pending[index]);
+          allResolved = false;
+          unresolvedOther = true;
+        }
+        ackHttp.end();
+        if (stale) {
+          lastDeviceErrorCode = "DEVICE-QUEUE-STALE";
+          lastDeviceErrorMessage = "QUEUE-003 Queue version 已過期；下次重新取得 Manifest";
+        }
+        if (allResolved) return true;
+        if (allowRetainedTerminal && retainedTerminal && !unresolvedOther) return true;
+        lastDeviceErrorCode = stale ? lastDeviceErrorCode : "DEVICE-QUEUE-ACK-REJECTED";
+        lastDeviceErrorMessage = stale
+          ? lastDeviceErrorMessage
+          : "Queue ACK batch 含有拒絕事件；拒絕項目已 durable 保留";
+        return false;
+      }
+    }
+
+    ackHttp.end();
+    const inktime::AckDecision decision = inktime::ackDecision(status, attempt);
     if (decision == inktime::AckDecision::StaleManifest) {
-      removePendingQueueAck(pending);
+      persistQueueAckBatch(pending, count);
       lastDeviceErrorCode = "DEVICE-QUEUE-STALE";
-      lastDeviceErrorMessage = "QUEUE-003 Queue version 已過期；下次重新取得 Manifest";
+      lastDeviceErrorMessage = "Queue ACK batch HTTP 409；pending events 已 durable 保留";
       return false;
     }
     if (decision == inktime::AckDecision::AuthorizationFailed) {
+      persistQueueAckBatch(pending, count);
       lastDeviceErrorCode = "DEVICE-QUEUE-AUTH";
       lastDeviceErrorMessage = "Queue ACK Token／authorization 被拒絕";
       return false;
@@ -2600,9 +2785,19 @@ static bool sendQueueAck(Config &cfg, const PendingQueueAck &pending, bool persi
     if (decision != inktime::AckDecision::Retry) break;
     delay(250U * (attempt + 1U));
   }
+  persistQueueAckBatch(pending, count);
   lastDeviceErrorCode = "DEVICE-QUEUE-ACK-RETRY";
-  lastDeviceErrorMessage = "Queue ACK 已達有界 retry 上限；pending event 已保留";
+  lastDeviceErrorMessage = "Queue ACK batch 已達有界 retry 上限；pending events 已 durable 保留";
   return false;
+}
+
+static bool flushRamQueueAckBatch(Config &cfg) {
+  if (ramQueueAckBatchCount == 0U) return true;
+  PendingQueueAck pending[kQueueAckBatchMaxEvents] = {};
+  const uint8_t count = ramQueueAckBatchCount;
+  for (uint8_t index = 0U; index < count; ++index) pending[index] = ramQueueAckBatch[index];
+  ramQueueAckBatchCount = 0U;
+  return postQueueAckBatch(cfg, pending, count);
 }
 
 static bool sendQueueEvent(
@@ -2624,16 +2819,31 @@ static bool sendQueueEvent(
     delayedTerminal && eventNow > 0 ? static_cast<int64_t>(eventNow) : 0,
     currentQueueItemId.length() > 0U && currentQueueVersion >= 0,
   };
-  return sendQueueAck(cfg, pending, true);
+  if (!pending.valid) return false;
+  if (runtimeTelemetry.ack_event_count < UINT32_MAX) ++runtimeTelemetry.ack_event_count;
+  if (terminalQueueAck(event)) persistPendingQueueAck(pending);
+  if (deviceAuthInvalid) return false;
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (ramQueueAckBatchCount >= kQueueAckBatchMaxEvents && !flushRamQueueAckBatch(cfg)) {
+    if (!terminalQueueAck(event)) persistPendingQueueAck(pending);
+    return false;
+  }
+  ramQueueAckBatch[ramQueueAckBatchCount++] = pending;
+  if (terminalQueueAck(event)) return flushRamQueueAckBatch(cfg);
+  return ramQueueAckBatchCount < kQueueAckBatchMaxEvents
+    || flushRamQueueAckBatch(cfg);
 }
 
 static bool resumePendingQueueAck(Config &cfg) {
-  for (uint8_t attempt = 0; attempt < inktime::kMaxAckJournalEntries; ++attempt) {
-    const PendingQueueAck pending = loadPendingQueueAck();
-    if (!pending.valid) return true;
-    if (!sendQueueAck(cfg, pending, false)) return false;
+  PendingQueueAck pending[inktime::kMaxAckJournalEntries] = {};
+  const uint8_t count = loadAckJournalEntries(
+    pending, inktime::kMaxAckJournalEntries);
+  for (uint8_t offset = 0U; offset < count; offset += kQueueAckBatchMaxEvents) {
+    const uint8_t remaining = count - offset;
+    const uint8_t batchCount = min(remaining, kQueueAckBatchMaxEvents);
+    if (!postQueueAckBatch(cfg, pending + offset, batchCount, true)) return false;
   }
-  return false;
+  return true;
 }
 
 // =======================
@@ -2670,13 +2880,14 @@ bool downloadLatestPhotoBin(Config &cfg) {
 
   String base;
   if (!normalizedBackendBase(cfg, base)) return false;
+  if (!ensureWakeHttpSession(cfg, base)) return false;
   String manifestUrl = base + String(DEVICE_MANIFEST_PATH);
 
 #if DEBUG_LOG
   DBG_PRINTLN("[HTTP] 取得版本 Manifest（Authorization 已遮蔽）");
 #endif
 
-  inktime::DeviceHttpTransport transport(cfg.ca_pem);
+  inktime::DeviceHttpTransport &transport = wakeHttpTransport;
   HTTPClient manifestHttp;
   String transportCode;
   String transportMessage;
@@ -2876,7 +3087,7 @@ bool downloadLatestPhotoBin(Config &cfg) {
 #endif
 
     String fileUrl = base + String(downloadBaseRaw) + fileName;
-    inktime::DeviceHttpTransport fileTransport(cfg.ca_pem);
+    inktime::DeviceHttpTransport &fileTransport = wakeHttpTransport;
     HTTPClient fileHttp;
     String fileTransportCode;
     String fileTransportMessage;
@@ -3005,13 +3216,19 @@ static bool downloadOfflineScheduleSlot(
     lastDeviceErrorMessage = "離線排程 Slot size 與 pixel format 不一致";
     return false;
   }
+  String sessionBase;
+  if (!ensureWakeHttpSession(cfg, sessionBase) || sessionBase != base) {
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-SESSION";
+    lastDeviceErrorMessage = "離線排程 Slot 未繫結目前 Wake Backend Origin";
+    return false;
+  }
   uint8_t* packed = photoPainter.allocateWireBuffer(packedSize);
   if (packed == nullptr) {
     lastDeviceErrorCode = "DEVICE-MEMORY";
     lastDeviceErrorMessage = "無法配置離線排程 Slot 緩衝區";
     return false;
   }
-  inktime::DeviceHttpTransport fileTransport(cfg.ca_pem);
+  inktime::DeviceHttpTransport &fileTransport = wakeHttpTransport;
   HTTPClient fileHttp;
   String fileTransportCode;
   String fileTransportMessage;
@@ -3180,7 +3397,8 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
     lastDeviceErrorMessage = "離線排程缺少 Backend 或裝置 credential";
     return false;
   }
-  inktime::DeviceHttpTransport scheduleTransport(cfg.ca_pem);
+  if (!ensureWakeHttpSession(cfg, base)) return false;
+  inktime::DeviceHttpTransport &scheduleTransport = wakeHttpTransport;
   HTTPClient scheduleHttp;
   String scheduleTransportCode;
   String scheduleTransportMessage;
@@ -3671,8 +3889,9 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
 #endif
   String base;
   if (!normalizedBackendBase(cfg, base)) return QueueDownloadResult::Failed;
+  if (!ensureWakeHttpSession(cfg, base)) return QueueDownloadResult::Failed;
 
-  inktime::DeviceHttpTransport manifestTransport(cfg.ca_pem);
+  inktime::DeviceHttpTransport &manifestTransport = wakeHttpTransport;
   HTTPClient manifestHttp;
   String manifestTransportCode;
   String manifestTransportMessage;
@@ -3852,7 +4071,7 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
     return QueueDownloadResult::Failed;
   }
 
-  inktime::DeviceHttpTransport fileTransport(cfg.ca_pem);
+  inktime::DeviceHttpTransport &fileTransport = wakeHttpTransport;
   HTTPClient fileHttp;
   String fileTransportCode;
   String fileTransportMessage;
@@ -4610,7 +4829,7 @@ bool downloadDailyPhotoBin(Config &cfg) {
   const QueueDownloadResult queueResult = downloadQueuePhotoBin(cfg);
   if (queueResult == QueueDownloadResult::Used) return true;
   if (queueResult == QueueDownloadResult::Failed) {
-    if (currentFromQueue && !loadPendingQueueAck().valid) {
+    if (currentFromQueue) {
       sendQueueEvent(cfg, inktime::QueueEvent::DisplayFailed, false, lastDeviceErrorCode);
     }
     return false;
@@ -4624,6 +4843,7 @@ void reportDeviceStatus(Config &cfg, bool displayUpdated) {
   if (WiFi.status() != WL_CONNECTED || cfg.backend_hostport.length() == 0 || !hasDeviceCredential(cfg)) return;
   String base;
   if (!normalizedBackendBase(cfg, base)) return;
+  if (!ensureWakeHttpSession(cfg, base)) return;
 
   if (networkSessionStartedMs == 0U) networkSessionStartedMs = millis();
   runtimeTelemetry.network_session_ms = millis() - networkSessionStartedMs;
@@ -4729,7 +4949,7 @@ void reportDeviceStatus(Config &cfg, bool displayUpdated) {
   String body;
   serializeJson(payload, body);
 
-  inktime::DeviceHttpTransport statusTransport(cfg.ca_pem);
+  inktime::DeviceHttpTransport &statusTransport = wakeHttpTransport;
   HTTPClient statusHttp;
   String statusTransportCode;
   String statusTransportMessage;
@@ -5250,6 +5470,7 @@ static void runOfflineLocalCycle(bool selectNext = false) {
     if (currentDisplaySkipped) {
       displayUpdated = true;
     } else {
+      stopNetworkBeforeDisplay();
       initDisplay(g_cfg);
       displayUpdated = drawFromFrameData(g_cfg);
     }
@@ -5303,6 +5524,7 @@ void setup() {
   releaseAllGpioHoldsAtBoot();
   runtimeTelemetry = RuntimeTelemetry{};
   networkSessionStartedMs = 0;
+  networkClosedForDisplay = false;
 
   setCpuFrequencyMhz(80);
   if (kBoardConfig.statusLed != inktime::kNoPin) {
@@ -5479,6 +5701,8 @@ void setup() {
   }
 
   struct tm timeinfo;
+  String wakeOrigin;
+  (void)ensureWakeHttpSession(g_cfg, wakeOrigin);
   bool hasTime = syncTime(g_cfg, timeinfo);
 
   bool ok = downloadDailyPhotoBin(g_cfg);
@@ -5487,6 +5711,7 @@ void setup() {
   if (ok) {
     if (currentPrefetchOnly) {
       displayUpdated = false;
+      (void)flushRamQueueAckBatch(g_cfg);
     } else {
     bool mayDisplay = true;
     if (currentDisplaySkipped) {
@@ -5497,7 +5722,18 @@ void setup() {
     } else if (currentFromQueue) {
       mayDisplay = sendQueueEvent(g_cfg, inktime::QueueEvent::DisplayStarted);
     }
+    if (mayDisplay && currentFromQueue) {
+      // Download/hash events and DISPLAY_STARTED are RAM-first, but all
+      // required ACK work must be attempted before radio shutdown.
+      mayDisplay = flushRamQueueAckBatch(g_cfg);
+    }
+    if (!mayDisplay && currentFromQueue && !currentDisplaySkipped) {
+      const String ackFailure = lastDeviceErrorCode.length() > 0U
+        ? lastDeviceErrorCode : String("DEVICE-QUEUE-ACK");
+      sendQueueEvent(g_cfg, inktime::QueueEvent::DisplayFailed, false, ackFailure);
+    }
     if (mayDisplay && !currentDisplaySkipped) {
+      stopNetworkBeforeDisplay();
       initDisplay(g_cfg);
       displayUpdated = drawFromFrameData(g_cfg);
     }
@@ -5514,7 +5750,7 @@ void setup() {
 #endif
       lastDeviceErrorMessage = "電子紙刷新失敗或逾時";
       saveDisplayRecord(g_cfg, false);
-      if (currentFromQueue && !loadPendingQueueAck().valid) {
+      if (currentFromQueue) {
         sendQueueEvent(g_cfg, inktime::QueueEvent::DisplayFailed, false, lastDeviceErrorCode);
       }
     }
@@ -5537,7 +5773,7 @@ void setup() {
     goDeepSleepSeconds(60U);
     return;
   }
-  reportDeviceStatus(g_cfg, displayUpdated);
+  if (!networkClosedForDisplay) reportDeviceStatus(g_cfg, displayUpdated);
 
 #if INKTIME_PHOTOPAINTER_ENABLED
   if (runUsbServiceMode()) {
@@ -5548,7 +5784,9 @@ void setup() {
 
   if (!hasTime) {
     struct tm tmp;
-    if (syncTime(g_cfg, tmp)) sleepUntilNextSchedule(g_cfg, true, tmp);
+    if (!networkClosedForDisplay && syncTime(g_cfg, tmp)) {
+      sleepUntilNextSchedule(g_cfg, true, tmp);
+    }
     else                      sleepUntilNextSchedule(g_cfg, false, timeinfo);
   } else {
     sleepUntilNextSchedule(g_cfg, true, timeinfo);

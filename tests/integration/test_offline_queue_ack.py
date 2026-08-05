@@ -35,6 +35,90 @@ def _ack(client, token: str, item_id: str, version: int, event: str, key: str, *
     )
 
 
+def _batch_ack(client, token: str, events: list[dict]):
+    return client.post(
+        "/api/device/v1/queue/acks",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"events": events},
+    )
+
+
+def test_queue_ack_batch_is_bounded_independent_and_idempotent(client, app):
+    queue = app.extensions["inktime_resilience_repository"]
+    device_id, token = app.extensions["inktime_device_repository"].create("batch ACK")
+    foreign_id, _foreign_token = app.extensions["inktime_device_repository"].create("foreign ACK")
+    release = _release(app, "batch-ack")
+    foreign_release = _release(app, "foreign-batch-ack")
+    queue.ensure_queue(device_id)
+    queue.ensure_queue(foreign_id)
+    item = queue.enqueue_release(device_id=device_id, release_id=release["release_id"])
+    foreign_item = queue.enqueue_release(
+        device_id=foreign_id,
+        release_id=foreign_release["release_id"],
+    )
+    manifest = client.get(
+        "/api/device/v1/queue/manifest",
+        headers={"Authorization": f"Bearer {token}"},
+    ).get_json()
+    version = manifest["queue_version"]
+    events = [
+        {
+            "queue_item_id": item["id"],
+            "queue_version": version,
+            "event": event,
+            "idempotency_key": f"batch-{index}",
+        }
+        for index, event in enumerate(
+            ("MANIFEST_RECEIVED", "DOWNLOAD_STARTED", "DOWNLOAD_COMPLETED", "HASH_VERIFIED")
+        )
+    ]
+    events.extend(
+        [
+            {
+                "queue_item_id": foreign_item["id"],
+                "queue_version": version,
+                "event": "MANIFEST_RECEIVED",
+                "idempotency_key": "foreign-batch",
+            },
+            {
+                "queue_item_id": item["id"],
+                "queue_version": version,
+                "event": "NOT_AN_EVENT",
+                "idempotency_key": "invalid-batch",
+            },
+        ]
+    )
+
+    response = _batch_ack(client, token, events)
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["accepted"] == 4
+    assert body["rejected"] == 2
+    assert [result["index"] for result in body["results"]] == list(range(6))
+    assert all(result["status"] == "accepted" for result in body["results"][:4])
+    assert body["results"][4]["http_status"] == 403
+    assert body["results"][4]["error_code"] == "QUEUE-002"
+    assert body["results"][5]["error_code"] == "QUEUE-001"
+
+    replay = _batch_ack(client, token, events[:4])
+    assert replay.status_code == 200
+    assert replay.get_json()["accepted"] == 4
+    assert all(result["idempotent"] for result in replay.get_json()["results"])
+    with app.extensions["inktime_database"].session() as connection:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM device_content_queue_events WHERE queue_item_id=?",
+            (item["id"],),
+        ).fetchone()[0]
+    assert count == 4
+
+    too_many = _batch_ack(
+        client,
+        token,
+        [events[0]] * 17,
+    )
+    assert too_many.status_code == 400
+
+
 def test_delayed_terminal_ack_is_only_allowed_for_prefetched_offline_item(client, app):
     device_id, token = app.extensions["inktime_device_repository"].create(
         "離線 ACK",

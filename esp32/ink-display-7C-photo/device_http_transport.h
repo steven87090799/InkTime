@@ -13,7 +13,21 @@ constexpr size_t kMaxDeviceCaPemBytes = 3500U;
 
 class DeviceHttpTransport {
  public:
+  DeviceHttpTransport() = default;
   explicit DeviceHttpTransport(const String &ca_pem) : ca_pem_(ca_pem) {}
+
+  void configure(const String &ca_pem);
+
+  // A wake owns one transport object.  The underlying client is opened lazily
+  // by HTTPClient::begin(), but the trust anchor and origin are fixed for the
+  // whole wake and the client is explicitly closed before radio shutdown.
+  bool beginSession(
+      const String &origin,
+      String &error_code,
+      String &error_message
+  );
+  void closeSession();
+  bool sessionActive() const { return session_active_; }
 
   bool begin(
       HTTPClient &http,
@@ -28,6 +42,8 @@ class DeviceHttpTransport {
 
  private:
   String ca_pem_;
+  String session_origin_;
+  bool session_active_ = false;
   WiFiClient plain_client_;
   WiFiClientSecure secure_client_;
 };

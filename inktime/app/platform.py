@@ -133,6 +133,7 @@ def configure_web_application(
         "pairing.repair_permission",
         "resilience.device_queue_manifest",
         "resilience.device_queue_ack",
+        "resilience.device_queue_acks",
         "resilience.queue_item_file",
         "static",
     }
@@ -147,6 +148,7 @@ def configure_web_application(
         "pairing.confirm_pairing",
         "pairing.repair_permission",
         "resilience.device_queue_ack",
+        "resilience.device_queue_acks",
     }
 
     @app.before_request

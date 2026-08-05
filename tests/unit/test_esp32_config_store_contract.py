@@ -135,7 +135,9 @@ def test_pairing_lifecycle_persists_resume_state_and_uses_confirm_header():
     ):
         assert marker in firmware
     assert 'candidate.auth_state = "paired"' in firmware
-    assert firmware.index("savePairingCandidate(cfg, requestCandidate)") < firmware.index("requestHttp.POST(requestBody)")
+    assert firmware.index("savePairingCandidate(cfg, requestCandidate)") < firmware.index(
+        "countedHttpPost(requestHttp, requestBody)"
+    )
 
 
 def test_pairing_request_replay_redraws_pending_display_code():
