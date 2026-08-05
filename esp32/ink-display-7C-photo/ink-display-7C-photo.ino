@@ -98,7 +98,7 @@ GxEPD2_7C<
 #define DEVICE_PAIRING_CLAIM_PATH "/api/device/v1/pairing/claim"
 #define DEVICE_PAIRING_CONFIRM_PATH "/api/device/v1/pairing/confirm"
 #define DEVICE_PAIRING_REPAIR_PERMISSION_PATH "/api/device/v1/pairing/repair-permission"
-#define INKTIME_FIRMWARE_VERSION "2.6.0"
+#define INKTIME_FIRMWARE_VERSION "2.7.0"
 
 // Secure builds require a compile-time or portal-provisioned trust anchor;
 // isolated LAN HTTP remains available only in an explicit development build.
