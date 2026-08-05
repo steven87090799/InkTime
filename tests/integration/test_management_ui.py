@@ -129,6 +129,45 @@ def test_stock_photopainter_display_controls_are_scoped_and_server_side(client, 
     assert "Stock PhotoPainter 模式" in viewer_body
 
 
+def test_device_management_preserves_legacy_automatic_and_stock_controls(client, app):
+    create_admin(app)
+    login(client)
+    repository = app.extensions["inktime_device_repository"]
+    legacy_id, _ = repository.create("Legacy 相框", auth_mode="legacy_token")
+    automatic_id, _ = repository.create("自製相框", auth_mode="automatic")
+    stock_id, _ = repository.create(
+        "Stock 相框",
+        delivery_mode="stock_compat",
+        stock_endpoint_host="10.23.45.67",
+    )
+
+    body = client.get("/devices").get_data(as_text=True)
+    assert f'class="secondary regenerate" data-id="{legacy_id}"' in body
+    assert f'class="secondary regenerate" data-id="{automatic_id}"' not in body
+    assert f'class="secondary regenerate" data-id="{stock_id}"' not in body
+    assert f'class="secondary repair-device" data-id="{automatic_id}"' in body
+    assert f'data-stock-display-device="{stock_id}"' in body
+    assert 'id="device-dialog"' in body
+    assert 'id="token-dialog"' in body
+
+    app.extensions["inktime_auth_repository"].create_user(
+        "device-viewer", "device-viewer-password", "viewer"
+    )
+    viewer = app.test_client()
+    login(viewer, "device-viewer", "device-viewer-password")
+    viewer_body = viewer.get("/devices").get_data(as_text=True)
+    assert "10.23.45.67" not in viewer_body
+    assert "Stock Host：" not in viewer_body
+    assert "stock-display" not in viewer_body
+    assert "data-stock-display-device" not in viewer_body
+    assert "data-stock-host" not in viewer_body
+    assert "class=\"secondary regenerate\"" not in viewer_body
+    assert "class=\"secondary repair-device\"" not in viewer_body
+    assert 'id="device-dialog"' not in viewer_body
+    assert 'id="token-dialog"' not in viewer_body
+    assert "Stock PhotoPainter 模式" in viewer_body
+
+
 def test_batch_management_api_is_admin_only_and_strict_json(client, app):
     create_admin(app)
     login(client)

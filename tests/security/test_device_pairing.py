@@ -213,7 +213,8 @@ def test_pairing_request_is_idempotent_for_same_nonce_but_not_for_new_nonce(clie
     second = client.post(PAIRING_PATH, json=payload)
     assert second.status_code == 200
     assert second.get_json()["pairing_id"] == first.get_json()["pairing_id"]
-    assert "pairing_code" not in second.get_json()
+    assert second.get_json()["pairing_code"] == first.get_json()["pairing_code"]
+    assert second.get_json()["request_reused"] is True
     conflict = client.post(
         PAIRING_PATH,
         json=_pairing_payload(payload["device_id"], nonce="a-different-nonce-0123456789"),
@@ -227,6 +228,54 @@ def test_pairing_request_is_idempotent_for_same_nonce_but_not_for_new_nonce(clie
         assert connection.execute(
             "SELECT COUNT(*) FROM devices WHERE id=?", (payload["device_id"],)
         ).fetchone()[0] == 0
+
+
+def test_pairing_request_replay_recovers_lost_response_with_same_display_code(client, app):
+    payload = _pairing_payload("esp32-lost-response")
+    first = client.post(PAIRING_PATH, json=payload)
+    assert first.status_code == 201
+    first_body = first.get_json()
+    pairing_id = first_body["pairing_id"]
+    pairing_code = first_body["pairing_code"]
+    with app.extensions["inktime_database"].session() as connection:
+        original = connection.execute(
+            "SELECT id,expires_at,pairing_code_hash,pairing_nonce_hash FROM device_pairing_requests WHERE id=?",
+            (pairing_id,),
+        ).fetchone()
+        assert connection.execute(
+            "SELECT COUNT(*) FROM device_pairing_requests WHERE device_id=?", (payload["device_id"],)
+        ).fetchone()[0] == 1
+
+    replay = client.post(PAIRING_PATH, json=payload)
+    assert replay.status_code == 200
+    replay_body = replay.get_json()
+    assert replay_body["status"] == "pending"
+    assert replay_body["pairing_id"] == pairing_id
+    assert replay_body["pairing_code"] == pairing_code
+    assert replay_body["request_reused"] is True
+
+    with app.extensions["inktime_database"].session() as connection:
+        current = connection.execute(
+            "SELECT id,expires_at,pairing_code_hash,pairing_nonce_hash FROM device_pairing_requests WHERE id=?",
+            (pairing_id,),
+        ).fetchone()
+        assert connection.execute(
+            "SELECT COUNT(*) FROM device_pairing_requests WHERE device_id=?", (payload["device_id"],)
+        ).fetchone()[0] == 1
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(device_pairing_requests)")}
+    assert current["id"] == original["id"]
+    assert current["expires_at"] == original["expires_at"]
+    assert current["pairing_code_hash"] == original["pairing_code_hash"]
+    assert current["pairing_code_hash"] != pairing_code
+    assert current["pairing_nonce_hash"] != payload["pairing_nonce"]
+    assert "pairing_code_ciphertext" not in columns
+
+    create_admin(app)
+    login(client)
+    pending_json = json.dumps(client.get("/api/v1/device-pairing/pending").get_json(), ensure_ascii=False)
+    pending_html = client.get("/devices").get_data(as_text=True)
+    assert pairing_code not in pending_json
+    assert pairing_code not in pending_html
 
 
 def test_pairing_code_attempt_limit_and_admin_csrf_are_enforced(client, app):

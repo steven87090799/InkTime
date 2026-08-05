@@ -132,6 +132,14 @@ def test_pairing_lifecycle_persists_resume_state_and_uses_confirm_header():
     assert firmware.index("savePairingCandidate(cfg, requestCandidate)") < firmware.index("requestHttp.POST(requestBody)")
 
 
+def test_pairing_request_replay_redraws_pending_display_code():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    assert 'const String requestState = requestResponse["status"] | "pending";' in firmware
+    assert "const bool requestPending = requestState == \"pending\";" in firmware
+    assert "|| (requestPending && !validCode)" in firmware
+    assert "if (requestPending && validCode)" in firmware
+
+
 def test_schedule_recovery_uses_identity_journal_and_fail_closed_metadata():
     firmware = FIRMWARE.read_text(encoding="utf-8")
     support = SUPPORT.read_text(encoding="utf-8")

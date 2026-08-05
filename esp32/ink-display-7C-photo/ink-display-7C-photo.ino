@@ -2043,6 +2043,7 @@ static bool performAutomaticPairing(Config &cfg) {
   requestHttp.end();
   const String pairingId = requestResponse["pairing_id"] | "";
   const String pairingCode = requestResponse["pairing_code"] | "";
+  const String requestState = requestResponse["status"] | "pending";
   const bool requestReused = requestResponse["request_reused"] | false;
   const JsonVariantConst expiresValue = requestResponse["expires_in_seconds"];
   const JsonVariantConst serverEpochValue = requestResponse["server_epoch"];
@@ -2056,11 +2057,14 @@ static bool performAutomaticPairing(Config &cfg) {
     && pairingCode[3] >= '0' && pairingCode[3] <= '9'
     && pairingCode[4] >= '0' && pairingCode[4] <= '9'
     && pairingCode[5] >= '0' && pairingCode[5] <= '9';
+  const bool requestPending = requestState == "pending";
+  const bool requestClaimable = requestState == "approved" || requestState == "credential_issued";
   if (requestJsonError || requestResponse.overflowed() || pairingId.length() == 0U
       || !expiresValue.is<int32_t>() || expiresValue.is<bool>()
       || expiresValue.as<int32_t>() < 1 || expiresValue.as<int32_t>() > 300
       || serverEpoch < kPairingMinimumEpoch
-      || (!requestReused && !validCode)
+      || (!requestPending && !requestClaimable)
+      || (requestPending && !validCode)
       || (requestReused && cfg.pairing_nonce != pairingNonce)) {
     (void)persistPairingRetry(cfg, "pairing_pending");
     lastDeviceErrorCode = "DEVICE-PAIRING-SCHEMA";
@@ -2076,12 +2080,12 @@ static bool performAutomaticPairing(Config &cfg) {
   candidate.auth_state = "pairing_pending";
   if (!savePairingCandidate(cfg, candidate)) return false;
 #if INKTIME_PHOTOPAINTER_ENABLED
-  if (!requestReused) {
+  if (requestPending && validCode) {
     (void)photoPainter.displayPairingScreen(
       cfg.wifi_ssid.c_str(), "", base.c_str(), pairingCode.c_str());
   }
 #else
-  if (!requestReused) (void)displayPairingCode(cfg, pairingCode);
+  if (requestPending && validCode) (void)displayPairingCode(cfg, pairingCode);
 #endif
   return claimPairingCredential(cfg, base);
 }

@@ -79,6 +79,12 @@ class DevicePairingService:
     def _code_hash(self, value: str) -> str:
         return hash_pairing_code(value, self.pepper)
 
+    def _pairing_display_code(self, pairing_nonce: str) -> str:
+        material = b"pairing-display-code-v1\0" + pairing_nonce.encode("utf-8")
+        digest = hmac.new(self.pepper.encode("utf-8"), material, hashlib.sha256).digest()
+        value = int.from_bytes(digest[:8], "big") % 1_000_000
+        return f"{value:06d}"
+
     def _nonce_hash(self, value: str) -> str:
         return hash_pairing_nonce(value, self.pepper)
 
@@ -319,6 +325,7 @@ class DevicePairingService:
                         "status": str(existing_request["status"]),
                         "pairing_id": str(existing_request["id"]),
                         "device_id": device_id,
+                        "pairing_code": self._pairing_display_code(pairing_nonce),
                         "expires_in_seconds": min(remaining, int(PAIRING_TTL.total_seconds())),
                         "server_epoch": int(now.timestamp()),
                         "poll_after_seconds": PAIRING_POLL_SECONDS,
@@ -345,7 +352,7 @@ class DevicePairingService:
                 fallback_name=device_name or f"待配對裝置 {device_id[-6:]}",
             )
             pairing_id = secrets.token_urlsafe(24)
-            pairing_code = f"{secrets.randbelow(1_000_000):06d}"
+            pairing_code = self._pairing_display_code(pairing_nonce)
             connection.execute(
                 """
                 INSERT INTO device_pairing_requests(
@@ -382,6 +389,7 @@ class DevicePairingService:
         # The code is returned only to the requesting device.  It is never
         # persisted reversibly, included in audit data, or sent to the admin UI.
         return 201, {
+            "status": "pending",
             "pairing_id": pairing_id,
             "device_id": device_id,
             "pairing_code": pairing_code,
