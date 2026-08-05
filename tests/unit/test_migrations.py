@@ -205,7 +205,8 @@ def test_migration_32_preserves_legacy_cost_provenance_and_allows_new_reported_c
     assert [row["cost_source"] for row in rows] == ["estimated", "unknown", "unknown", "provider_reported"]
     assert rows[0]["actual_cost"] == 0.10
     assert rows[1]["estimated_cost"] == 0.0
-    assert rows[1]["actual_cost"] is None
+    assert rows[1]["actual_cost"] == 0.0
+    assert rows[1]["cost_source"] == "unknown"
     assert rows[2]["estimated_cost"] == 0.0
     assert rows[2]["actual_cost"] is None
     assert rows[3]["actual_cost"] == 0.08
