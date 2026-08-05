@@ -861,7 +861,7 @@ class DeviceRepository:
                 local_now = now.astimezone(zone)
                 today = local_now.date().isoformat()
             except (TypeError, ValueError, ZoneInfoNotFoundError):
-                zone = timezone.utc
+                zone = ZoneInfo("UTC")
                 local_now = now
                 today = local_now.date().isoformat()
 
@@ -1017,6 +1017,7 @@ class DeviceRepository:
                     except (TypeError, ValueError, OverflowError):
                         sync_at = None
                 if display_at is not None and (sync_at is None or display_at <= sync_at):
+                    assert next_display_slot is not None
                     next_wake = {
                         "at": display_at.astimezone(timezone.utc).isoformat(),
                         "epoch": int(display_at.timestamp()),

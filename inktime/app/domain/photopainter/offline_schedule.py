@@ -33,7 +33,7 @@ def validate_offline_schedule(
         raise ValueError("DEVICE-008 offline_schedule 不可重複")
     ordered = sorted(normalized)
     minutes = [schedule_minutes(value) for value in ordered]
-    gaps = [right - left for left, right in zip(minutes, minutes[1:], strict=True)]
+    gaps = [right - left for left, right in zip(minutes, minutes[1:], strict=False)]
     if len(minutes) > 1:
         gaps.append(minutes[0] + 24 * 60 - minutes[-1])
     if any(gap < minimum_gap_minutes for gap in gaps):
