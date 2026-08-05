@@ -633,6 +633,57 @@ def test_device_configuration_version_is_acknowledged_only_after_report(client, 
     assert device["config_ack_at"] is not None
 
 
+def test_offline_schedule_version_is_acknowledged_without_allowing_device_to_raise_desired(client, app):
+    repository = app.extensions["inktime_device_repository"]
+    device_id, token = repository.create(
+        "離線排程 ACK",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00", "20:00"],
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    desired = int(repository.get(device_id)["offline_schedule_version"])
+    applied = client.post(
+        "/api/device/v1/status",
+        json={
+            "firmware_version": "2.8.0",
+            "applied_offline_schedule_version": desired,
+        },
+        headers=headers,
+    )
+    assert applied.status_code == 200
+    acknowledged = repository.get(device_id)
+    assert acknowledged["applied_offline_schedule_version"] == desired
+    assert acknowledged["offline_schedule_ack_at"] is not None
+
+    repository.update(
+        device_id,
+        name="離線排程 ACK",
+        enabled=True,
+        timezone_name="Asia/Taipei",
+        schedule="09:00",
+        schedule_times=["09:00", "20:00"],
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        rotation=0,
+        panel_profile="safe_4c",
+        prefetch_lead_minutes=5,
+        button_wake_action="check_new",
+    )
+    desired_after_change = int(repository.get(device_id)["offline_schedule_version"])
+    assert desired_after_change == desired + 1
+    newer_than_desired = client.post(
+        "/api/device/v1/status",
+        json={
+            "firmware_version": "2.8.0",
+            "applied_offline_schedule_version": desired_after_change + 10,
+        },
+        headers=headers,
+    )
+    assert newer_than_desired.status_code == 200
+    assert repository.get(device_id)["applied_offline_schedule_version"] == desired
+
+
 def test_device_receives_only_its_panel_profile_release(client, app):
     from PIL import Image
 

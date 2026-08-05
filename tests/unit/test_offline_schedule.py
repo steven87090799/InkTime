@@ -5,6 +5,7 @@ from datetime import date, datetime, timezone
 import pytest
 
 from inktime.app.domain.photopainter.offline_schedule import (
+    normalize_sync_strategy,
     next_sleep_epoch,
     prefetch_slots,
     slot_deadlines,
@@ -29,6 +30,29 @@ def test_offline_schedule_is_sorted_unique_and_has_five_minute_prefetch_slots():
 def test_offline_schedule_rejects_ambiguous_values(value):
     with pytest.raises(ValueError):
         validate_offline_schedule(value)
+
+
+def test_offline_schedule_enforces_circular_minimum_gap_with_bounded_override():
+    with pytest.raises(ValueError, match="循環最小間隔"):
+        validate_offline_schedule(["23:30", "00:00"])
+    assert validate_offline_schedule(
+        ["23:30", "00:00"], minimum_gap_minutes=30
+    ) == ["00:00", "23:30"]
+
+
+def test_fixed_daily_sync_strategy_controls_next_sleep_epoch():
+    now = datetime(2026, 8, 2, 7, 0, tzinfo=timezone.utc)
+    next_epoch = next_sleep_epoch(
+        now=now,
+        schedule=["08:00", "20:00"],
+        timezone_name="UTC",
+        lead_minutes=0,
+        sync_strategy="fixed_daily",
+        sync_time="07:30",
+    )
+    assert next_epoch == int(datetime(2026, 8, 2, 7, 30, tzinfo=timezone.utc).timestamp())
+    with pytest.raises(ValueError, match="不接受 sync_time"):
+        normalize_sync_strategy("first_display_lead", "07:30")
 
 
 def test_next_sleep_epoch_uses_exact_local_slot():

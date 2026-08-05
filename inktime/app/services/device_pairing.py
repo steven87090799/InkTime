@@ -22,6 +22,7 @@ from inktime.app.core.security import (
     register_secret,
 )
 from inktime.app.db import Database
+from inktime.app.domain.photopainter.offline_schedule import validate_offline_schedule
 
 
 PAIRING_TTL = timedelta(minutes=5)
@@ -147,6 +148,10 @@ class DevicePairingService:
         minutes = [int(item[:2]) * 60 + int(item[3:]) for item in values]
         if any(right <= left for left, right in zip(minutes, minutes[1:], strict=False)):
             raise DevicePairingError("schedule_times 必須嚴格遞增", error_code="PAIR-004")
+        try:
+            validate_offline_schedule(values, maximum=12)
+        except ValueError as exc:
+            raise DevicePairingError(str(exc), error_code="PAIR-004") from exc
         return values
 
     @classmethod

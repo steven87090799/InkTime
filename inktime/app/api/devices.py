@@ -25,7 +25,9 @@ from inktime.app.core.paths import UnsafePathError
 from inktime.app.domain.rendering import DISPLAY_PROFILES, DeviceTestReleaseStore
 from inktime.app.domain.rendering.system_presets import DEFAULT_DEVICE_PANEL_PROFILE
 from inktime.app.domain.photopainter.offline_schedule import (
+    MINIMUM_SCHEDULE_GAP_MINUTES,
     normalize_delivery_contract,
+    normalize_sync_strategy,
     validate_offline_schedule,
 )
 from inktime.app.services.rendering import FIT_MODES, FRAME_ORIENTATIONS, LAYOUTS
@@ -96,8 +98,24 @@ def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
     else:
         schedule_values = [schedule]
     try:
-        schedule_values = validate_offline_schedule(schedule_values, maximum=12)
+        minimum_schedule_gap_minutes = json_int(
+            payload,
+            "minimum_schedule_gap_minutes",
+            default=int(
+                defaults.get("minimum_schedule_gap_minutes", MINIMUM_SCHEDULE_GAP_MINUTES)
+            ),
+            minimum=30,
+            maximum=360,
+            error_prefix="DEVICE-008",
+        )
+        schedule_values = validate_offline_schedule(
+            schedule_values,
+            maximum=12,
+            minimum_gap_minutes=minimum_schedule_gap_minutes,
+        )
     except ValueError as exc:
+        abort(400, description=str(exc))
+    except JsonScalarError as exc:
         abort(400, description=str(exc))
     try:
         requested_prefetch = optional_json_bool(
@@ -132,6 +150,15 @@ def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
     ).strip()
     if button_wake_action not in {"check_new", "local_next"}:
         abort(400, description="DEVICE-008 button_wake_action 不合法")
+    sync_strategy = str(
+        payload.get("sync_strategy", defaults.get("sync_strategy", "first_display_lead"))
+    ).strip()
+    raw_sync_time = payload.get("sync_time", defaults.get("sync_time"))
+    sync_time = str(raw_sync_time).strip() if raw_sync_time not in (None, "") else None
+    try:
+        sync_strategy, sync_time = normalize_sync_strategy(sync_strategy, sync_time)
+    except ValueError as exc:
+        abort(400, description=str(exc))
     name = str(payload.get("name", defaults.get("name", ""))).strip()
     if not name:
         abort(400, description="DEVICE-003 裝置名稱不可空白")
@@ -171,6 +198,9 @@ def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
         "schedule_times": schedule_values,
         "prefetch_lead_minutes": prefetch_lead_minutes,
         "button_wake_action": button_wake_action,
+        "minimum_schedule_gap_minutes": minimum_schedule_gap_minutes,
+        "sync_strategy": sync_strategy,
+        "sync_time": sync_time,
         "stock_endpoint_host": stock_endpoint_host,
         "rotation": rotation,
         "panel_profile": panel_profile,
@@ -206,6 +236,9 @@ def devices_page():
             "schedule_times": [str(settings.get("device.default_schedule", "08:00"))],
             "prefetch_lead_minutes": 5,
             "button_wake_action": "check_new",
+            "minimum_schedule_gap_minutes": MINIMUM_SCHEDULE_GAP_MINUTES,
+            "sync_strategy": "first_display_lead",
+            "sync_time": None,
             "stock_endpoint_host": None,
             "frame_orientation": None,
             "layout_mode": None,
@@ -255,6 +288,15 @@ def device_energy(device_id: str):
         )
     except KeyError:
         abort(404)
+
+
+@bp.get("/api/v1/devices/<device_id>/runtime-summary")
+@login_required
+def device_runtime_summary(device_id: str):
+    try:
+        return _repository().runtime_summary(device_id)
+    except KeyError:
+        abort(404, description="DEVICE-002 找不到裝置")
 
 
 @bp.patch("/api/v1/devices/<device_id>/energy-profile")
@@ -334,6 +376,9 @@ def create_device():
             "schedule_times": [str(settings.get("device.default_schedule", "08:00"))],
             "prefetch_lead_minutes": 5,
             "button_wake_action": "check_new",
+            "minimum_schedule_gap_minutes": MINIMUM_SCHEDULE_GAP_MINUTES,
+            "sync_strategy": "first_display_lead",
+            "sync_time": None,
             "stock_endpoint_host": None,
         },
     )
@@ -389,6 +434,11 @@ def update_device(device_id: str):
             "schedule_times": existing_schedule,
             "prefetch_lead_minutes": int(existing["prefetch_lead_minutes"] or 5),
             "button_wake_action": str(existing["button_wake_action"] or "check_new"),
+            "minimum_schedule_gap_minutes": int(
+                existing["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
+            ),
+            "sync_strategy": str(existing["sync_strategy"] or "first_display_lead"),
+            "sync_time": existing["sync_time"],
             "stock_endpoint_host": existing["stock_endpoint_host"],
             "frame_orientation": existing["frame_orientation"],
             "layout_mode": existing["layout_mode"],
@@ -401,7 +451,24 @@ def update_device(device_id: str):
         abort(404)
     except ValueError as exc:
         abort(409, description=str(exc))
-    return {"status": "ok"}
+    updated = _repository().get(device_id)
+    if updated is None:
+        abort(404)
+    applied = int(updated["acked_config_version"]) >= int(updated["config_version"])
+    recommended_action = None
+    if str(updated["delivery_mode"] or "legacy_online") != "stock_compat" and not applied:
+        recommended_action = "press_key1"
+    return {
+        "status": "ok",
+        "config_version": int(updated["config_version"]),
+        "acked_config_version": int(updated["acked_config_version"]),
+        "applied": applied,
+        "recommended_action": recommended_action,
+        "offline_schedule_version": int(updated["offline_schedule_version"] or 0),
+        "applied_offline_schedule_version": int(
+            updated["applied_offline_schedule_version"] or 0
+        ),
+    }
 
 
 @bp.get("/api/device/v1/releases/latest")
@@ -438,6 +505,14 @@ def latest_release():
                 "prefetch_lead_minutes": int(device["prefetch_lead_minutes"] or 0),
                 "button_wake_action": str(device["button_wake_action"] or "check_new"),
                 "offline_schedule_version": int(device["offline_schedule_version"] or 0),
+                "applied_offline_schedule_version": int(
+                    device["applied_offline_schedule_version"] or 0
+                ),
+                "minimum_schedule_gap_minutes": int(
+                    device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
+                ),
+                "sync_strategy": str(device["sync_strategy"] or "first_display_lead"),
+                "sync_time": device["sync_time"],
             }
         )
     if authorization.test_assignment is not None:
@@ -628,6 +703,11 @@ def device_offline_schedule():
                     schedule_times=device_schedule,
                     prefetch_lead_minutes=int(device["prefetch_lead_minutes"]),
                     server_margin_minutes=max(0, min(server_margin, 60)),
+                    sync_strategy=str(device["sync_strategy"] or "first_display_lead"),
+                    sync_time=device["sync_time"],
+                    minimum_gap_minutes=int(
+                        device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
+                    ),
                 )
             else:
                 retry_details = OfflineScheduleRepository.retry_after_details(
@@ -636,6 +716,11 @@ def device_offline_schedule():
                     schedule_times=device_schedule,
                     prefetch_lead_minutes=int(device["prefetch_lead_minutes"]),
                     server_margin_minutes=max(0, min(server_margin, 60)),
+                    sync_strategy=str(device["sync_strategy"] or "first_display_lead"),
+                    sync_time=device["sync_time"],
+                    minimum_gap_minutes=int(
+                        device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
+                    ),
                 )
             retry_after_epoch = retry_details.retry_after_epoch
             next_slot_epoch = retry_details.next_slot_epoch
@@ -660,7 +745,12 @@ def device_offline_schedule():
         return response
     try:
         schedule_times = json.loads(str(result["schedule"]["schedule_times_json"] or "[]"))
-        schedule_times = validate_offline_schedule(schedule_times, maximum=12)
+        minimum_gap_minutes = int(
+            result["schedule"]["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
+        )
+        schedule_times = validate_offline_schedule(
+            schedule_times, maximum=12, minimum_gap_minutes=minimum_gap_minutes
+        )
     except (TypeError, ValueError, json.JSONDecodeError):
         abort(409, description="DEVICE-008 離線排程快照 schedule_times 不可解析")
     schedule = result["schedule"]
@@ -687,7 +777,15 @@ def device_offline_schedule():
     rotation = device_projection.get("rotation")
     prefetch_lead = device_projection.get("prefetch_lead_minutes")
     schedule_version = device_projection.get("offline_schedule_version")
-    if panel_profile is None or rotation is None or prefetch_lead is None or schedule_version is None:
+    sync_strategy = device_projection.get("sync_strategy")
+    sync_time = device_projection.get("sync_time")
+    if (
+        panel_profile is None
+        or rotation is None
+        or prefetch_lead is None
+        or schedule_version is None
+        or sync_strategy is None
+    ):
         abort(409, description="DEVICE-008 離線排程快照不完整")
     button_wake_action = device_projection.get("button_wake_action")
     if button_wake_action is None:
@@ -699,7 +797,24 @@ def device_offline_schedule():
         next_target_day, schedule_times[0], timezone_name
     )
     next_first_slot_epoch = int(datetime.fromisoformat(first_next_slot).timestamp())
-    next_prefetch_epoch = next_first_slot_epoch - int(prefetch_lead) * 60
+    try:
+        normalized_sync_strategy, normalized_sync_time = normalize_sync_strategy(
+            str(sync_strategy), sync_time
+        )
+    except ValueError:
+        abort(409, description="DEVICE-008 離線排程快照同步策略不完整")
+    if normalized_sync_strategy == "fixed_daily":
+        assert normalized_sync_time is not None
+        sync_hour, sync_minute = (int(part) for part in normalized_sync_time.split(":"))
+        next_prefetch_epoch = int(
+            datetime.combine(
+                next_target_day, time(sync_hour, sync_minute), tzinfo=snapshot_zone
+            )
+            .astimezone(timezone.utc)
+            .timestamp()
+        )
+    else:
+        next_prefetch_epoch = next_first_slot_epoch - int(prefetch_lead) * 60
     if (
         next_prefetch_epoch <= int(datetime.now(timezone.utc).timestamp())
         or next_prefetch_epoch >= next_first_slot_epoch
@@ -730,6 +845,9 @@ def device_offline_schedule():
         "prefetch_lead_minutes": int(prefetch_lead),
         "button_wake_action": str(button_wake_action),
         "offline_schedule_version": int(schedule_version),
+        "minimum_schedule_gap_minutes": minimum_gap_minutes,
+        "sync_strategy": normalized_sync_strategy,
+        "sync_time": normalized_sync_time,
         "queue_version": queue_version,
         "status": str(schedule["status"]),
         "slots": slots,
@@ -842,6 +960,9 @@ def report_status():
         error_message=error_message,
         wake_reason=str(payload.get("wake_reason", "")),
         applied_config_version=optional_int("applied_config_version", 0, 2_147_483_647),
+        applied_offline_schedule_version=optional_int(
+            "applied_offline_schedule_version", 0, 2_147_483_647
+        ),
         details={
             "display_updated": display_updated,
             "display_skipped": display_skipped,
@@ -851,6 +972,9 @@ def report_status():
             "render_profile": str(payload.get("render_profile", ""))[:100],
             "reported_panel_profile": str(payload.get("panel_profile", ""))[:100],
             "applied_config_version": payload.get("applied_config_version"),
+            "applied_offline_schedule_version": payload.get(
+                "applied_offline_schedule_version"
+            ),
             "board_profile": str(payload.get("board_profile", ""))[:100],
             "flash_bytes": optional_int("flash_bytes", 0, 2_147_483_647),
             "psram_bytes": optional_int("psram_bytes", 0, 2_147_483_647),

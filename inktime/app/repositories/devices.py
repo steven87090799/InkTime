@@ -6,11 +6,15 @@ import json
 import secrets
 from typing import Sequence
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from inktime.app.core.security import hash_device_secret, hash_device_token, issue_device_token
 from inktime.app.db import Database
 from inktime.app.domain.photopainter.offline_schedule import (
+    MINIMUM_SCHEDULE_GAP_MINUTES,
     normalize_delivery_contract,
+    normalize_sync_strategy,
+    next_sync_epoch,
     validate_offline_schedule,
 )
 
@@ -47,8 +51,10 @@ class DeviceRepository:
                        battery_capacity_mah, standby_current_ma, active_current_ma,
                        refreshes_per_day, battery_reserve_percent, energy_profile_updated_at,
                        delivery_mode, offline_prefetch_allowed, offline_schedule_json,
-                       offline_schedule_version, last_offline_slot, schedule_times_json,
-                       prefetch_lead_minutes, button_wake_action, stock_endpoint_host,
+                       offline_schedule_version, applied_offline_schedule_version,
+                       offline_schedule_ack_at, last_offline_slot, schedule_times_json,
+                       prefetch_lead_minutes, button_wake_action, minimum_schedule_gap_minutes,
+                       sync_strategy, sync_time, stock_endpoint_host,
                        frame_orientation, layout_mode, fit_mode,
                        auth_mode, pairing_state, credential_version, paired_at, last_auth_at,
                        auth_revoked_at, repair_allowed_until, pairing_expires_at, pairing_attempts,
@@ -74,6 +80,9 @@ class DeviceRepository:
         schedule_times: Sequence[str] | None = None,
         prefetch_lead_minutes: int = 5,
         button_wake_action: str = "check_new",
+        minimum_schedule_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
+        sync_strategy: str = "first_display_lead",
+        sync_time: str | None = None,
         stock_endpoint_host: str | None = None,
         rotation: int = 0,
         panel_profile: str = "safe_4c",
@@ -104,11 +113,18 @@ class DeviceRepository:
             offline_prefetch_allowed,
             explicit_prefetch=offline_prefetch_allowed is not None,
         )
-        schedule_values = validate_offline_schedule(schedule_times or offline_schedule or [schedule], maximum=12)
+        if type(minimum_schedule_gap_minutes) is not int or not 30 <= minimum_schedule_gap_minutes <= 360:
+            raise ValueError("DEVICE-008 minimum_schedule_gap_minutes 必須介於 30 到 360")
+        schedule_values = validate_offline_schedule(
+            schedule_times or offline_schedule or [schedule],
+            maximum=12,
+            minimum_gap_minutes=minimum_schedule_gap_minutes,
+        )
         if not 0 <= int(prefetch_lead_minutes) <= 120:
             raise ValueError("DEVICE-008 prefetch_lead_minutes 必須介於 0 到 120")
         if button_wake_action not in {"check_new", "local_next"}:
             raise ValueError("DEVICE-008 button_wake_action 不合法")
+        sync_strategy, sync_time = normalize_sync_strategy(sync_strategy, sync_time)
         with self.database.session() as connection:
             connection.execute(
                 """
@@ -117,10 +133,11 @@ class DeviceRepository:
                     frame_orientation, layout_mode, fit_mode, delivery_mode,
                     offline_prefetch_allowed, offline_schedule_json, offline_schedule_version,
                     schedule_times_json, prefetch_lead_minutes, button_wake_action,
-                    stock_endpoint_host, auth_mode, pairing_state, credential_version,
+                    minimum_schedule_gap_minutes, sync_strategy, sync_time, stock_endpoint_host,
+                    auth_mode, pairing_state, credential_version,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     device_id,
@@ -141,6 +158,9 @@ class DeviceRepository:
                     json.dumps(schedule_values, ensure_ascii=False),
                     int(prefetch_lead_minutes),
                     button_wake_action,
+                    int(minimum_schedule_gap_minutes),
+                    sync_strategy,
+                    sync_time,
                     stock_endpoint_host,
                     auth_mode,
                     pairing_state,
@@ -170,6 +190,150 @@ class DeviceRepository:
                 raise KeyError(device_id)
         return token
 
+    @staticmethod
+    def _is_future_queue_slot(value: object, now: str) -> bool:
+        if not value:
+            return False
+        try:
+            slot_at = datetime.fromisoformat(str(value))
+            authoritative_now = datetime.fromisoformat(str(now))
+        except (TypeError, ValueError):
+            return False
+        if slot_at.tzinfo is None:
+            slot_at = slot_at.replace(tzinfo=timezone.utc)
+        if authoritative_now.tzinfo is None:
+            authoritative_now = authoritative_now.replace(tzinfo=timezone.utc)
+        return slot_at.astimezone(timezone.utc) > authoritative_now.astimezone(timezone.utc)
+
+    def _supersede_future_queue_items(
+        self,
+        connection,
+        *,
+        device_id: str,
+        delivery_modes: Sequence[str],
+        now: str,
+        old_delivery_mode: str,
+        new_delivery_mode: str,
+        change_kind: str,
+    ) -> int:
+        if not delivery_modes:
+            return 0
+        placeholders = ",".join("?" for _ in delivery_modes)
+        items = connection.execute(
+            f"SELECT id,status,delivery_mode,display_after,offline_slot,offline_schedule_id "  # noqa: S608
+            f"FROM device_content_queue_items WHERE device_id=? AND delivery_mode IN ({placeholders}) "
+            "AND status NOT IN ('DISPLAYED','FAILED','EXPIRED','CANCELLED') ORDER BY id",
+            (device_id, *delivery_modes),
+        ).fetchall()
+        cancelled = 0
+        for item in items:
+            if change_kind != "delivery_mode_transition" and not self._is_future_queue_slot(
+                item["display_after"], now
+            ):
+                # Immutable history includes a past slot even if the device
+                # never reached it.  Only a genuinely future point may be
+                # replanned by a new device configuration.
+                continue
+            item_id = str(item["id"])
+            connection.execute(
+                "UPDATE device_content_queue_items SET status='CANCELLED',last_error_code='QUEUE-005',updated_at=? WHERE id=?",
+                (now, item_id),
+            )
+            event_type = (
+                "DELIVERY_MODE_TRANSITION_CANCELLED"
+                if change_kind == "delivery_mode_transition"
+                else "FUTURE_SLOT_SUPERSEDED"
+            )
+            payload = {
+                "reason": (
+                    "delivery_mode_transition"
+                    if change_kind == "delivery_mode_transition"
+                    else "device_schedule_changed"
+                ),
+                "change_kind": change_kind,
+                "old_delivery_mode": old_delivery_mode,
+                "new_delivery_mode": new_delivery_mode,
+                "queue_item_delivery_mode": str(item["delivery_mode"]),
+                "offline_slot": item["offline_slot"],
+                "offline_schedule_id": item["offline_schedule_id"],
+            }
+            connection.execute(
+                "INSERT OR IGNORE INTO device_content_queue_events(queue_item_id,device_id,event_type,idempotency_key,payload_json,created_at) VALUES (?,?,?,?,?,?)",
+                (
+                    item_id,
+                    device_id,
+                    event_type,
+                    f"{event_type}:{device_id}:{item_id}",
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                    now,
+                ),
+            )
+            connection.execute(
+                "UPDATE rollout_targets SET status='cancelled_future_schedule',last_error_code='QUEUE-005',updated_at=? WHERE queue_item_id=?",
+                (now, item_id),
+            )
+            cancelled += 1
+        if cancelled:
+            connection.execute(
+                "UPDATE device_content_queues SET queue_version=queue_version+?,updated_at=? WHERE device_id=?",
+                (cancelled, now, device_id),
+            )
+        return cancelled
+
+    @staticmethod
+    def _record_past_schedule_slots(
+        connection,
+        *,
+        device_id: str,
+        timezone_name: str,
+        old_schedule: Sequence[str],
+        new_schedule: Sequence[str],
+        now: str,
+        config_version: int,
+    ) -> None:
+        try:
+            zone = ZoneInfo(timezone_name)
+            authoritative_now = datetime.fromisoformat(now).astimezone(zone)
+        except (TypeError, ValueError, ZoneInfoNotFoundError):
+            return
+        old_values = {str(value) for value in old_schedule}
+        for slot in new_schedule:
+            normalized_slot = str(slot)
+            if normalized_slot in old_values:
+                continue
+            hour, minute = (int(part) for part in normalized_slot.split(":"))
+            slot_at = datetime.combine(
+                authoritative_now.date(),
+                datetime.min.time().replace(hour=hour, minute=minute),
+                tzinfo=zone,
+            )
+            if slot_at > authoritative_now:
+                continue
+            details = {
+                "planning_trace": "past_slot_not_replayed",
+                "slot": normalized_slot,
+                "target_local_date": authoritative_now.date().isoformat(),
+                "authoritative_now": now,
+                "config_version": config_version,
+                "reason": "device_schedule_changed",
+            }
+            connection.execute(
+                """
+                INSERT INTO device_events(
+                    device_id,level,event,error_code,message,details_json,created_at
+                ) VALUES (?,?,?,?,?,?,?)
+                """,
+                (
+                    device_id,
+                    "info",
+                    "schedule_replan_skip",
+                    "SCHEDULE-PAST-SKIP",
+                    "新排程的過去 Slot 已略過，不重播歷史時刻",
+                    json.dumps(details, ensure_ascii=False, separators=(",", ":")),
+                    now,
+                ),
+            )
+
     def update(
         self,
         device_id: str,
@@ -184,6 +348,9 @@ class DeviceRepository:
         schedule_times: Sequence[str] | None = None,
         prefetch_lead_minutes: int = 5,
         button_wake_action: str = "check_new",
+        minimum_schedule_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
+        sync_strategy: str = "first_display_lead",
+        sync_time: str | None = None,
         stock_endpoint_host: str | None = None,
         rotation: int,
         panel_profile: str,
@@ -199,8 +366,9 @@ class DeviceRepository:
                     """
                     SELECT timezone,schedule,rotation,panel_profile,delivery_mode,offline_prefetch_allowed,
                            offline_schedule_json,schedule_times_json,prefetch_lead_minutes,
-                           button_wake_action,stock_endpoint_host,frame_orientation,layout_mode,fit_mode,
-                           auth_mode,pairing_state
+                           button_wake_action,minimum_schedule_gap_minutes,sync_strategy,sync_time,
+                           stock_endpoint_host,frame_orientation,layout_mode,fit_mode,
+                           auth_mode,pairing_state,config_version
                     FROM devices WHERE id=?
                     """,
                     (device_id,),
@@ -240,11 +408,18 @@ class DeviceRepository:
                 selected_schedule = schedule_times or offline_schedule or existing_schedule or [schedule]
                 if schedule_times is None and offline_schedule is None and len(existing_schedule) == 1:
                     selected_schedule = [schedule]
-                schedule_values = validate_offline_schedule(selected_schedule, maximum=12)
+                if type(minimum_schedule_gap_minutes) is not int or not 30 <= minimum_schedule_gap_minutes <= 360:
+                    raise ValueError("DEVICE-008 minimum_schedule_gap_minutes 必須介於 30 到 360")
+                schedule_values = validate_offline_schedule(
+                    selected_schedule,
+                    maximum=12,
+                    minimum_gap_minutes=minimum_schedule_gap_minutes,
+                )
                 if not 0 <= int(prefetch_lead_minutes) <= 120:
                     raise ValueError("DEVICE-008 prefetch_lead_minutes 必須介於 0 到 120")
                 if button_wake_action not in {"check_new", "local_next"}:
                     raise ValueError("DEVICE-008 button_wake_action 不合法")
+                sync_strategy, sync_time = normalize_sync_strategy(sync_strategy, sync_time)
                 remote_changed = any(
                     (
                         str(current["timezone"]) != timezone_name,
@@ -256,6 +431,10 @@ class DeviceRepository:
                         existing_schedule != schedule_values,
                         int(current["prefetch_lead_minutes"]) != int(prefetch_lead_minutes),
                         str(current["button_wake_action"]) != button_wake_action,
+                        int(current["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES)
+                        != int(minimum_schedule_gap_minutes),
+                        str(current["sync_strategy"] or "first_display_lead") != sync_strategy,
+                        (current["sync_time"] or None) != (sync_time or None),
                         (current["stock_endpoint_host"] or None) != (stock_endpoint_host or None),
                     )
                 )
@@ -264,7 +443,8 @@ class DeviceRepository:
                     UPDATE devices
                     SET name=?,enabled=?,timezone=?,schedule=?,rotation=?,panel_profile=?,
                         delivery_mode=?,offline_prefetch_allowed=?,offline_schedule_json=?,schedule_times_json=?,
-                        prefetch_lead_minutes=?,button_wake_action=?,stock_endpoint_host=?,
+                        prefetch_lead_minutes=?,button_wake_action=?,minimum_schedule_gap_minutes=?,
+                        sync_strategy=?,sync_time=?,stock_endpoint_host=?,
                         offline_schedule_version=offline_schedule_version+CASE WHEN ? THEN 1 ELSE 0 END,
                         frame_orientation=?,layout_mode=?,fit_mode=?,auth_mode=?,pairing_state=?,
                         config_version=config_version+?,updated_at=?
@@ -283,6 +463,9 @@ class DeviceRepository:
                         json.dumps(schedule_values, ensure_ascii=False),
                         int(prefetch_lead_minutes),
                         button_wake_action,
+                        int(minimum_schedule_gap_minutes),
+                        sync_strategy,
+                        sync_time,
                         stock_endpoint_host,
                         int(remote_changed),
                         selected_orientation,
@@ -306,56 +489,33 @@ class DeviceRepository:
                 else:
                     incompatible_modes.append("offline_schedule")
                 if incompatible_modes:
-                    placeholders = ",".join("?" for _ in incompatible_modes)
-                    # The placeholder count comes only from this fixed local mode list.
-                    active_items = connection.execute(
-                        f"SELECT id,delivery_mode FROM device_content_queue_items "  # noqa: S608
-                        f"WHERE device_id=? AND delivery_mode IN ({placeholders}) "
-                        "AND status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED') "
-                        "ORDER BY id",
-                        (device_id, *incompatible_modes),
-                    ).fetchall()
-                    event_type = (
-                        "DELIVERY_MODE_TRANSITION_CANCELLED"
-                        if str(current["delivery_mode"]) != delivery_mode
-                        else "DELIVERY_CONFIG_CHANGED_CANCELLED"
+                    self._supersede_future_queue_items(
+                        connection,
+                        device_id=device_id,
+                        delivery_modes=incompatible_modes,
+                        now=now,
+                        old_delivery_mode=str(current["delivery_mode"]),
+                        new_delivery_mode=delivery_mode,
+                        change_kind=(
+                            "delivery_mode_transition"
+                            if str(current["delivery_mode"]) != delivery_mode
+                            else "device_schedule_changed"
+                        ),
                     )
-                    reason = "delivery_mode_transition" if event_type.endswith("TRANSITION_CANCELLED") else "device_config_changed"
-                    for item in active_items:
-                        item_id = str(item["id"])
-                        connection.execute(
-                            "UPDATE device_content_queue_items SET status='CANCELLED',last_error_code='QUEUE-005',updated_at=? WHERE id=?",
-                            (now, item_id),
-                        )
-                        connection.execute(
-                            "INSERT OR IGNORE INTO device_content_queue_events(queue_item_id,device_id,event_type,idempotency_key,payload_json,created_at) VALUES (?,?,?,?,?,?)",
-                            (
-                                item_id,
-                                device_id,
-                                event_type,
-                                f"{event_type}:{device_id}:{item_id}:{now}",
-                                json.dumps(
-                                    {
-                                        "reason": reason,
-                                        "old_delivery_mode": str(current["delivery_mode"]),
-                                        "new_delivery_mode": delivery_mode,
-                                        "queue_item_delivery_mode": str(item["delivery_mode"]),
-                                    },
-                                    ensure_ascii=False,
-                                    separators=(",", ":"),
-                                ),
-                                now,
-                            ),
-                        )
-                        connection.execute(
-                            "UPDATE rollout_targets SET status='cancelled_mode_transition',last_error_code='QUEUE-005',updated_at=? WHERE queue_item_id=?",
-                            (now, item_id),
-                        )
-                    if active_items:
-                        connection.execute(
-                            "UPDATE device_content_queues SET queue_version=queue_version+?,updated_at=? WHERE device_id=?",
-                            (len(active_items), now, device_id),
-                        )
+                if (
+                    delivery_mode == "inktime_offline_schedule"
+                    and remote_changed
+                    and existing_schedule != schedule_values
+                ):
+                    self._record_past_schedule_slots(
+                        connection,
+                        device_id=device_id,
+                        timezone_name=timezone_name,
+                        old_schedule=existing_schedule,
+                        new_schedule=schedule_values,
+                        now=now,
+                        config_version=int(current["config_version"]) + 1,
+                    )
                 connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")
@@ -564,6 +724,7 @@ class DeviceRepository:
         error_message: str,
         wake_reason: str,
         applied_config_version: int | None = None,
+        applied_offline_schedule_version: int | None = None,
         details: dict | None = None,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -585,6 +746,14 @@ class DeviceRepository:
                         config_ack_at=CASE
                             WHEN ? IS NOT NULL AND ? > acked_config_version AND ? <= config_version THEN ?
                             ELSE config_ack_at END,
+                        applied_offline_schedule_version=CASE
+                            WHEN ? IS NOT NULL AND ? > applied_offline_schedule_version
+                                 AND ? <= offline_schedule_version THEN ?
+                            ELSE applied_offline_schedule_version END,
+                        offline_schedule_ack_at=CASE
+                            WHEN ? IS NOT NULL AND ? > applied_offline_schedule_version
+                                 AND ? <= offline_schedule_version THEN ?
+                            ELSE offline_schedule_ack_at END,
                         updated_at=?
                     WHERE id=?
                     """,
@@ -598,14 +767,26 @@ class DeviceRepository:
                         error_message[:500] or None,
                         now,
                         wake_reason[:64] or None,
+                        # acked_config_version CASE
                         applied_config_version,
                         applied_config_version,
                         applied_config_version,
                         applied_config_version,
+                        # config_ack_at CASE
                         applied_config_version,
                         applied_config_version,
                         applied_config_version,
-                        now,
+                        applied_config_version,
+                        # applied_offline_schedule_version CASE
+                        applied_offline_schedule_version,
+                        applied_offline_schedule_version,
+                        applied_offline_schedule_version,
+                        applied_offline_schedule_version,
+                        # offline_schedule_ack_at CASE
+                        applied_offline_schedule_version,
+                        applied_offline_schedule_version,
+                        applied_offline_schedule_version,
+                        applied_offline_schedule_version,
                         now,
                         device_id,
                     ),
@@ -669,6 +850,233 @@ class DeviceRepository:
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+
+    def runtime_summary(self, device_id: str) -> dict:
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        with self.database.session() as connection:
+            device = connection.execute("SELECT * FROM devices WHERE id=?", (device_id,)).fetchone()
+            if device is None:
+                raise KeyError(device_id)
+            try:
+                zone = ZoneInfo(str(device["timezone"]))
+                local_now = now.astimezone(zone)
+                today = local_now.date().isoformat()
+            except (TypeError, ValueError, ZoneInfoNotFoundError):
+                zone = timezone.utc
+                local_now = now
+                today = local_now.date().isoformat()
+
+            def schedule_identity(row) -> dict | None:
+                if row is None:
+                    return None
+                return {
+                    "id": str(row["id"]),
+                    "target_date": str(row["target_date"]),
+                    "config_version": int(row["config_version"]),
+                    "offline_schedule_version": int(row["offline_schedule_version"] or 0),
+                    "status": str(row["status"]),
+                    "timezone": str(row["timezone"]),
+                    "sync_strategy": str(row["sync_strategy"] or "first_display_lead"),
+                    "sync_time": row["sync_time"],
+                }
+
+            active_row = connection.execute(
+                """
+                SELECT id,target_date,config_version,offline_schedule_version,status,timezone,
+                       sync_strategy,sync_time
+                FROM device_offline_schedules
+                WHERE device_id=? AND target_date=? AND status='ready'
+                ORDER BY CASE WHEN config_version=? THEN 0 ELSE 1 END,
+                         updated_at DESC,id DESC LIMIT 1
+                """,
+                (device_id, today, int(device["config_version"])),
+            ).fetchone()
+            staged_row = connection.execute(
+                """
+                SELECT id,target_date,config_version,offline_schedule_version,status,timezone,
+                       sync_strategy,sync_time
+                FROM device_offline_schedules
+                WHERE device_id=? AND target_date>? AND status='ready'
+                  AND config_version=?
+                ORDER BY target_date ASC,updated_at DESC,id DESC LIMIT 1
+                """,
+                (device_id, today, int(device["config_version"])),
+            ).fetchone()
+            timeline_rows = connection.execute(
+                """
+                SELECT s.id AS slot_id,s.slot_index,s.show_at,s.release_id,s.queue_item_id,
+                       qi.status AS queue_status,os.id AS schedule_id,os.status AS schedule_status,
+                       os.target_date,os.config_version,os.offline_schedule_version
+                FROM device_offline_schedule_slots s
+                JOIN device_offline_schedules os ON os.id=s.schedule_id
+                LEFT JOIN device_content_queue_items qi ON qi.id=s.queue_item_id
+                WHERE os.device_id=? AND os.target_date=?
+                ORDER BY s.show_at ASC,s.slot_index ASC
+                """,
+                (device_id, today),
+            ).fetchall()
+            today_timeline: list[dict] = []
+            for row in timeline_rows:
+                try:
+                    show_at = datetime.fromisoformat(str(row["show_at"]))
+                    if show_at.tzinfo is None:
+                        show_at = show_at.replace(tzinfo=timezone.utc)
+                    show_at_epoch = int(show_at.timestamp())
+                except (TypeError, ValueError, OverflowError):
+                    show_at_epoch = None
+                today_timeline.append(
+                    {
+                        "slot_id": str(row["slot_id"]),
+                        "slot_index": int(row["slot_index"]),
+                        "show_at": str(row["show_at"]),
+                        "show_at_epoch": show_at_epoch,
+                        "release_id": str(row["release_id"]),
+                        "queue_item_id": str(row["queue_item_id"]),
+                        "queue_status": row["queue_status"],
+                        "schedule_id": str(row["schedule_id"]),
+                        "schedule_status": str(row["schedule_status"]),
+                        "config_version": int(row["config_version"]),
+                        "offline_schedule_version": int(row["offline_schedule_version"] or 0),
+                    }
+                )
+            next_row = connection.execute(
+                """
+                SELECT s.id AS slot_id,s.slot_index,s.show_at,s.release_id,s.queue_item_id,
+                       qi.status AS queue_status,os.id AS schedule_id,os.status AS schedule_status,
+                       os.target_date,os.config_version,os.offline_schedule_version
+                FROM device_offline_schedule_slots s
+                JOIN device_offline_schedules os ON os.id=s.schedule_id
+                JOIN device_content_queue_items qi ON qi.id=s.queue_item_id
+                WHERE os.device_id=? AND s.show_at>? AND qi.status NOT IN
+                      ('DISPLAYED','FAILED','EXPIRED','CANCELLED')
+                ORDER BY s.show_at ASC,s.slot_index ASC LIMIT 1
+                """,
+                (device_id, now_iso),
+            ).fetchone()
+
+            next_display_slot = None
+            if next_row is not None:
+                next_display_slot = {
+                    "slot_id": str(next_row["slot_id"]),
+                    "slot_index": int(next_row["slot_index"]),
+                    "show_at": str(next_row["show_at"]),
+                    "release_id": str(next_row["release_id"]),
+                    "queue_item_id": str(next_row["queue_item_id"]),
+                    "queue_status": str(next_row["queue_status"]),
+                    "schedule_id": str(next_row["schedule_id"]),
+                    "target_date": str(next_row["target_date"]),
+                    "config_version": int(next_row["config_version"]),
+                    "offline_schedule_version": int(next_row["offline_schedule_version"] or 0),
+                }
+
+            planned_sync = None
+            try:
+                schedule_values = json.loads(str(device["schedule_times_json"] or "[]"))
+                schedule_values = validate_offline_schedule(
+                    schedule_values,
+                    maximum=12,
+                    minimum_gap_minutes=int(
+                        device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
+                    ),
+                )
+                sync_epoch = next_sync_epoch(
+                    now=now,
+                    schedule=schedule_values,
+                    timezone_name=str(device["timezone"]),
+                    lead_minutes=int(device["prefetch_lead_minutes"] or 0),
+                    sync_strategy=str(device["sync_strategy"] or "first_display_lead"),
+                    sync_time=device["sync_time"],
+                    minimum_gap_minutes=int(
+                        device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
+                    ),
+                )
+                planned_at = datetime.fromtimestamp(sync_epoch, timezone.utc).isoformat()
+                planned_sync = {
+                    "at": planned_at,
+                    "epoch": int(sync_epoch),
+                    "source": "configured_schedule",
+                    "strategy": str(device["sync_strategy"] or "first_display_lead"),
+                    "sync_time": device["sync_time"],
+                }
+            except (TypeError, ValueError, json.JSONDecodeError, ZoneInfoNotFoundError, OverflowError):
+                planned_sync = None
+
+            fallback_recovery = None
+            event = connection.execute(
+                """
+                SELECT event,error_code,details_json,created_at FROM device_events
+                WHERE device_id=? ORDER BY created_at DESC,id DESC LIMIT 1
+                """,
+                (device_id,),
+            ).fetchone()
+            event_details: dict = {}
+            if event is not None:
+                try:
+                    decoded = json.loads(str(event["details_json"] or "{}"))
+                    if isinstance(decoded, dict):
+                        event_details = decoded
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    event_details = {}
+            fallback = next(
+                (
+                    event_details.get(key)
+                    for key in ("fallback", "fallback_mode", "fallback_reason")
+                    if event_details.get(key) is not None
+                ),
+                None,
+            )
+            recovery = next(
+                (
+                    event_details.get(key)
+                    for key in ("recovery", "recovery_mode", "recovery_reason")
+                    if event_details.get(key) is not None
+                ),
+                None,
+            )
+            if fallback is not None or recovery is not None or device["last_error_code"]:
+                fallback_recovery = {
+                    "fallback": fallback,
+                    "recovery": recovery,
+                    "last_error_code": device["last_error_code"],
+                    "last_error_message": device["last_error_message"],
+                    "source_event": event["event"] if event is not None else None,
+                    "source_event_at": event["created_at"] if event is not None else None,
+                }
+
+            last_known = {
+                "firmware_version": device["firmware_version"],
+                "status_at": device["last_status_at"] or device["last_seen_at"],
+                "ip": device["last_ip"],
+                "wake_reason": device["wake_reason"],
+                "wifi_rssi": device["wifi_rssi"],
+                "free_heap_bytes": device["free_heap_bytes"],
+                "free_psram_bytes": device["free_psram_bytes"],
+                "battery_percent": device["battery_percent"],
+                "last_error_code": device["last_error_code"],
+                "last_error_message": device["last_error_message"],
+            }
+            return {
+                "status": "ok",
+                "device_id": str(device["id"]),
+                "generated_at": now_iso,
+                "desired_config_version": int(device["config_version"]),
+                "applied_config_version": int(device["acked_config_version"]),
+                "desired_offline_schedule_version": int(device["offline_schedule_version"] or 0),
+                "applied_offline_schedule_version": int(
+                    device["applied_offline_schedule_version"] or 0
+                ),
+                "offline_schedule_ack_at": device["offline_schedule_ack_at"],
+                "next_display_slot": next_display_slot,
+                "next_wake": planned_sync,
+                "next_network_sync": planned_sync,
+                "today": today,
+                "today_timeline": today_timeline,
+                "last_known": last_known,
+                "active_schedule": schedule_identity(active_row),
+                "staged_schedule": schedule_identity(staged_row),
+                "fallback_recovery": fallback_recovery,
+            }
 
     def update_energy_profile(
         self,

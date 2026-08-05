@@ -1834,6 +1834,22 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_device_pairing_nonce ON device_pairing_requests(device_id,pairing_nonce_hash)",
         ),
     ),
+    Migration(
+        36,
+        "加入離線排程套用 ACK、循環間隔與同步策略",
+        (
+            "ALTER TABLE devices ADD COLUMN applied_offline_schedule_version INTEGER NOT NULL DEFAULT 0 CHECK(applied_offline_schedule_version >= 0)",
+            "ALTER TABLE devices ADD COLUMN offline_schedule_ack_at TEXT",
+            "ALTER TABLE devices ADD COLUMN minimum_schedule_gap_minutes INTEGER NOT NULL DEFAULT 60 CHECK(minimum_schedule_gap_minutes BETWEEN 30 AND 360)",
+            "ALTER TABLE devices ADD COLUMN sync_strategy TEXT NOT NULL DEFAULT 'first_display_lead' CHECK(sync_strategy IN ('first_display_lead','fixed_daily'))",
+            "ALTER TABLE devices ADD COLUMN sync_time TEXT",
+            "ALTER TABLE device_offline_schedules ADD COLUMN minimum_schedule_gap_minutes INTEGER NOT NULL DEFAULT 60 CHECK(minimum_schedule_gap_minutes BETWEEN 30 AND 360)",
+            "ALTER TABLE device_offline_schedules ADD COLUMN sync_strategy TEXT NOT NULL DEFAULT 'first_display_lead' CHECK(sync_strategy IN ('first_display_lead','fixed_daily'))",
+            "ALTER TABLE device_offline_schedules ADD COLUMN sync_time TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_devices_offline_ack ON devices(delivery_mode,offline_schedule_version,applied_offline_schedule_version,id)",
+            "CREATE INDEX IF NOT EXISTS idx_offline_schedules_runtime ON device_offline_schedules(device_id,target_date,status,config_version,updated_at)",
+        ),
+    ),
 )
 
 
