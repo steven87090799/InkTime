@@ -4025,46 +4025,139 @@ static bool activeOfflineEpochs(
   return true;
 }
 
-static bool validatedActiveScheduleVersion(uint32_t& versionOut) {
+static bool validatedActiveScheduleVersion(
+    const Config& cfg, time_t nowEpoch, uint32_t& versionOut) {
   versionOut = 0U;
   String activeJson;
   if (!photoPainter.readActiveSchedule(activeJson)) return false;
   JsonDocument active;
-  if (deserializeJson(active, activeJson) || active.overflowed()) return false;
-  const String scheduleId = active["schedule_id"] | "";
-  const String syncStrategy = active["sync_strategy"] | "first_display_lead";
-  const String syncTime = active["sync_time"] | "";
-  const JsonVariantConst rawVersion = active["offline_schedule_version"];
-  const JsonArrayConst slots = active["slots"].as<JsonArrayConst>();
-  if (scheduleId.isEmpty() || !inktime::boundedText(
-        scheduleId.c_str(), inktime::kQueueIdentifierMaxBytes)
-      || !validSyncStrategy(syncStrategy, syncTime)
-      || !rawVersion.is<int32_t>() || rawVersion.is<bool>()
-      || rawVersion.as<int32_t>() < 0 || slots.isNull() || slots.size() == 0U
-      || slots.size() > inktime::kMaxOfflineSlots) {
+  const DeserializationError jsonError = deserializeJson(active, activeJson);
+  const JsonVariantConst rawSlots = active["slots"];
+  String targetDate = active["target_local_date"] | "";
+  if (targetDate.length() == 0U) targetDate = active["target_date"] | "";
+  const String activeTargetDate = active["target_local_date"] | "";
+  const String activeLegacyDate = active["target_date"] | "";
+  const String activeDeliveryMode = active["delivery_mode"] | "";
+  const String activeTimezone = active["timezone"] | "";
+  const String activeScheduleId = active["schedule_id"] | "";
+  const String activePanelProfile = active["panel_profile"] | "";
+  const String activeButtonWakeAction = active["button_wake_action"] | "";
+  const String activeSyncStrategy = active["sync_strategy"] | "first_display_lead";
+  const String activeSyncTime = active["sync_time"] | "";
+  const JsonVariantConst activeSchema = active["schema_version"];
+  const JsonVariantConst activeConfigVersion = active["config_version"];
+  const JsonVariantConst activeRotation = active["rotation"];
+  const JsonVariantConst activeScheduleVersion = active["offline_schedule_version"];
+  const JsonVariantConst activeTargetStartEpoch = active["target_start_epoch"];
+  const JsonVariantConst activeTargetEndEpoch = active["target_end_epoch"];
+  if (jsonError || active.overflowed() || !rawSlots.is<JsonArrayConst>()
+      || targetDate.length() != 10U || activeTargetDate.length() == 0U
+      || (activeLegacyDate.length() > 0U && activeLegacyDate != activeTargetDate)
+      || !activeSchema.is<int32_t>() || activeSchema.is<bool>()
+      || activeSchema.as<int32_t>() != inktime::kOfflineScheduleSchemaVersion
+      || activeDeliveryMode != "inktime_offline_schedule"
+      || activeTimezone.length() == 0U || activeTimezone.length() > 64U
+      || activeScheduleId.length() == 0U || !inktime::boundedText(
+        activeScheduleId.c_str(), inktime::kQueueIdentifierMaxBytes)
+      || !validSyncStrategy(activeSyncStrategy, activeSyncTime)
+      || !activeConfigVersion.is<uint32_t>() || activeConfigVersion.is<bool>()
+      || !activeRotation.is<int32_t>() || activeRotation.is<bool>()
+      || !activeScheduleVersion.is<int32_t>() || activeScheduleVersion.is<bool>()
+      || activeScheduleVersion.as<int32_t>() < 0
+      || !activeTargetStartEpoch.is<int64_t>() || activeTargetStartEpoch.is<bool>()
+      || !activeTargetEndEpoch.is<int64_t>() || activeTargetEndEpoch.is<bool>()
+      || activeTargetStartEpoch.as<int64_t>() <= 0
+      || activeTargetEndEpoch.as<int64_t>() <= activeTargetStartEpoch.as<int64_t>()
+      || nowEpoch <= 0) {
     return false;
   }
+  const int64_t targetStartEpoch = activeTargetStartEpoch.as<int64_t>();
+  const int64_t targetEndEpoch = activeTargetEndEpoch.as<int64_t>();
+  if (static_cast<int64_t>(nowEpoch) < targetStartEpoch
+      || static_cast<int64_t>(nowEpoch) >= targetEndEpoch) return false;
+
+  const JsonArrayConst slots = rawSlots.as<JsonArrayConst>();
+  JsonArrayConst rawTimes = active["schedule_times"].as<JsonArrayConst>();
+  if (rawTimes.isNull()) rawTimes = active["schedule"].as<JsonArrayConst>();
+  if (rawTimes.isNull() || rawTimes.size() == 0U
+      || rawTimes.size() > inktime::kMaxOfflineSlots || rawTimes.size() != slots.size()) {
+    return false;
+  }
+  inktime::OfflineSlot activeScheduleSlots[inktime::kMaxOfflineSlots] = {};
+  for (size_t index = 0; index < rawTimes.size(); ++index) {
+    if (!parseOfflineClock(rawTimes[index] | "", activeScheduleSlots[index])) return false;
+  }
+  if (!inktime::validateOfflineSlots(
+        activeScheduleSlots, static_cast<uint8_t>(rawTimes.size()))
+      || rawTimes.size() != cfg.schedule_count
+      || !inktime::validateOfflineSlots(cfg.schedule_slots, cfg.schedule_count)) {
+    return false;
+  }
+  for (uint8_t index = 0; index < cfg.schedule_count; ++index) {
+    if (activeScheduleSlots[index].hour != cfg.schedule_slots[index].hour
+        || activeScheduleSlots[index].minute != cfg.schedule_slots[index].minute) {
+      return false;
+    }
+  }
+  inktime::OfflineScheduleContract contract = {
+    activeSchema.as<int32_t>(),
+    activeDeliveryMode.c_str(),
+    activeTargetDate.c_str(),
+    activeTargetDate.c_str(),
+    activeTimezone.c_str(),
+    targetStartEpoch,
+    targetEndEpoch,
+    static_cast<int64_t>(nowEpoch),
+    activeConfigVersion.as<uint32_t>(),
+    cfg.config_version,
+    activeRotation.as<int32_t>(),
+    activePanelProfile.c_str(),
+    INKTIME_PANEL_PROFILE,
+    activeButtonWakeAction.c_str(),
+    static_cast<uint8_t>(slots.size()),
+    static_cast<uint8_t>(rawTimes.size()),
+    true,
+    true,
+    true,
+  };
+  if (activeConfigVersion.as<uint32_t>() != cfg.config_version
+      || !inktime::validOfflineScheduleContract(contract)
+      || cfg.delivery_mode != "inktime_offline_schedule"
+      || cfg.rotate180 != (activeRotation.as<int32_t>() == 180)) {
+    return false;
+  }
+
+  int64_t previousShowAtEpoch = 0;
   for (size_t index = 0U; index < slots.size(); ++index) {
     const JsonVariantConst rawSlot = slots[index];
     if (!rawSlot.is<JsonObjectConst>()) return false;
     const JsonObjectConst slot = rawSlot.as<JsonObjectConst>();
     const JsonVariantConst rawIndex = slot["slot_index"];
+    const JsonVariantConst rawQueueVersion = slot["queue_version"];
     const JsonVariantConst rawShowAt = slot["show_at_epoch"];
     const String slotScheduleId = slot["offline_schedule_id"] | "";
     const String queueItemId = slot["queue_item_id"] | "";
     const String releaseId = slot["release_id"] | "";
     const String sha = slot["sha256"] | "";
+    const String renderProfile = slot["render_profile"] | "";
     if (!rawIndex.is<int32_t>() || rawIndex.is<bool>()
         || rawIndex.as<int32_t>() != static_cast<int32_t>(index)
+        || !rawQueueVersion.is<int32_t>() || rawQueueVersion.is<bool>()
+        || rawQueueVersion.as<int32_t>() < 0
         || !rawShowAt.is<int64_t>() || rawShowAt.is<bool>()
-        || rawShowAt.as<int64_t>() <= 0 || slotScheduleId != scheduleId
+        || rawShowAt.as<int64_t>() < targetStartEpoch
+        || rawShowAt.as<int64_t>() >= targetEndEpoch
+        || (index > 0U && rawShowAt.as<int64_t>() <= previousShowAtEpoch)
+        || slotScheduleId != activeScheduleId
         || !inktime::boundedText(queueItemId.c_str(), inktime::kQueueIdentifierMaxBytes)
         || !inktime::boundedText(releaseId.c_str(), inktime::kQueueIdentifierMaxBytes)
-        || !inktime::isSha256Hex(sha.c_str())) {
+        || !inktime::isSha256Hex(sha.c_str())
+        || (renderProfile != "safe_4c" && renderProfile != String(INKTIME_PANEL_PROFILE))) {
       return false;
     }
+    previousShowAtEpoch = rawShowAt.as<int64_t>();
   }
-  versionOut = static_cast<uint32_t>(rawVersion.as<int32_t>());
+  versionOut = static_cast<uint32_t>(activeScheduleVersion.as<int32_t>());
   return true;
 }
 
@@ -4240,7 +4333,13 @@ static bool offlinePrefetchWake(const Config &cfg, time_t nowEpoch) {
   if (nextSchedulePrefetch > 0 && nowEpoch >= nextSchedulePrefetch
       && (targetEnd <= 0 || nowEpoch < targetEnd)) return true;
   if (syncStrategy == "fixed_daily") return false;
-  if (cfg.prefetch_lead_minutes == 0) return false;
+  if (cfg.prefetch_lead_minutes == 0) {
+    // A zero lead is a valid first_display_lead contract: the advertised
+    // network-sync epoch is the display boundary, so that boundary must take
+    // the network path instead of silently becoming a local-only wake.
+    return nextDisplay > 0 && nowEpoch >= nextDisplay
+      && (targetEnd <= 0 || nowEpoch < targetEnd);
+  }
   if (nextDisplay <= nowEpoch) return false;
   const time_t lead = static_cast<time_t>(cfg.prefetch_lead_minutes) * 60;
   return nowEpoch >= nextDisplay - lead && nowEpoch < nextDisplay;
@@ -4535,7 +4634,7 @@ void reportDeviceStatus(Config &cfg, bool displayUpdated) {
 #if INKTIME_PHOTOPAINTER_ENABLED
   photoPainter.readEnvironment();
   uint32_t validatedScheduleVersion = 0U;
-  if (validatedActiveScheduleVersion(validatedScheduleVersion)) {
+  if (validatedActiveScheduleVersion(cfg, telemetryNow, validatedScheduleVersion)) {
     runtimeTelemetry.applied_offline_schedule_version = validatedScheduleVersion;
   }
   runtimeTelemetry.epd_transfer_ms = photoPainter.lastRefreshDurationMs();
