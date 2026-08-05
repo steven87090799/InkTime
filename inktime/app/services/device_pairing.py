@@ -137,6 +137,8 @@ class DevicePairingService:
         elif isinstance(raw, str):
             values = [item.strip() for item in raw.split(",") if item.strip()]
         elif isinstance(raw, list):
+            if any(not isinstance(item, str) for item in raw):
+                raise DevicePairingError("schedule_times 格式不合法", error_code="PAIR-004")
             values = [item.strip() for item in raw if isinstance(item, str) and item.strip()]
         else:
             raise DevicePairingError("schedule_times 格式不合法", error_code="PAIR-004")

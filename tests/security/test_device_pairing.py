@@ -55,6 +55,31 @@ def test_pairing_schedule_values_use_default_fallback(app):
 
 @pytest.mark.parametrize(
     "schedule_times",
+    [
+        ["08:00", 123],
+        ["08:00", True],
+        ["08:00", None],
+        ["08:00", 12.5],
+        ["08:00", {}],
+        ["08:00", []],
+    ],
+)
+def test_pairing_schedule_values_reject_mixed_types(app, schedule_times):
+    service = app.extensions["inktime_device_pairing_service"]
+    with pytest.raises(DevicePairingError) as error:
+        service._normalize_config(
+            {
+                "name": "LAN Gate Device",
+                "panel_profile": "safe_4c",
+                "schedule_times": schedule_times,
+            },
+            fallback_name="LAN Gate Device",
+        )
+    assert error.value.error_code == "PAIR-004"
+
+
+@pytest.mark.parametrize(
+    "schedule_times",
     [["12:00", "08:00"], ["08:00", "08:00"], []],
 )
 def test_pairing_schedule_values_reject_invalid_values(app, schedule_times):
