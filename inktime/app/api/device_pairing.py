@@ -50,8 +50,11 @@ def _strict(payload: dict, allowed: set[str]) -> None:
 
 def _https_policy() -> None:
     runtime_config = current_app.extensions.get("inktime_runtime_config")
+    trusted_lan_http = runtime_config is not None \
+        and bool(getattr(runtime_config, "allow_insecure_http", False)) \
+        and str(getattr(runtime_config, "public_url", "")).startswith("http://")
     if runtime_config is not None and getattr(runtime_config, "environment", "") == "production" \
-            and not request.is_secure:
+            and not request.is_secure and not trusted_lan_http:
         abort(400, description="PAIR-010 production pairing 必須使用 HTTPS")
 
 
@@ -83,10 +86,10 @@ def request_pairing():
     payload = _json_payload()
     _strict(payload, PAIRING_REQUEST_FIELDS)
     try:
-        result = _service().request_pairing(payload, ip_address=request.remote_addr or "unknown")
+        status_code, result = _service().request_pairing(payload, ip_address=request.remote_addr or "unknown")
     except DevicePairingError as exc:
         return _error(exc)
-    return _result(result, 201)
+    return _result(result, status_code)
 
 
 @bp.post("/api/device/v1/pairing/claim")
@@ -102,6 +105,31 @@ def claim_pairing():
     except DevicePairingError as exc:
         return _error(exc)
     return _result(result, status_code, retry_after=retry_after)
+
+
+@bp.post("/api/device/v1/pairing/confirm")
+def confirm_pairing():
+    _https_policy()
+    payload = _json_payload(maximum_bytes=8 * 1024)
+    _strict(payload, {"pairing_id", "device_id", "pairing_nonce"})
+    authorization = request.headers.get("Authorization", "")
+    if len(authorization) > 4096 or not authorization.startswith("Bearer "):
+        abort(401, description="PAIR-008 confirm 必須使用 Device Secret Bearer")
+    device_secret = authorization[7:].strip()
+    raw_version = request.headers.get("X-InkTime-Credential-Version", "")
+    if not device_secret or len(device_secret) > 1024 or not raw_version.isdigit() or len(raw_version) > 12:
+        abort(401, description="PAIR-008 confirm credential header 不合法")
+    try:
+        status_code, result = _service().confirm(
+            payload.get("pairing_id"),
+            payload.get("device_id"),
+            payload.get("pairing_nonce"),
+            device_secret,
+            int(raw_version),
+        )
+    except DevicePairingError as exc:
+        return _error(exc)
+    return _result(result, status_code)
 
 
 @bp.get("/api/device/v1/pairing/repair-permission")
@@ -124,13 +152,17 @@ def pending_pairings():
 @administrator_required
 def approve_pairing(pairing_id: str):
     payload = _json_payload(maximum_bytes=8 * 1024)
-    _strict(payload, {"pairing_code"})
+    _strict(payload, {"pairing_code", "device_config"})
+    device_config = payload.get("device_config", {})
+    if not isinstance(device_config, dict):
+        abort(400, description="PAIR-004 device_config 必須是 JSON object")
     user = getattr(g, "user", None)
     try:
         result = _service().approve(
             pairing_id,
             payload.get("pairing_code"),
             administrator_id=str(user["id"] if user is not None else "admin"),
+            device_config=device_config,
         )
     except DevicePairingError as exc:
         return _error(exc)

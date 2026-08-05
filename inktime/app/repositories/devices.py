@@ -20,7 +20,6 @@ _DEVICE_AUTH_FAILURE_LIMIT = 20
 _DEVICE_AUTH_FAILURE_WINDOW = timedelta(minutes=5)
 _DEVICE_AUTH_FAILURE_MAX_ROWS = 10_000
 _DEVICE_AUTH_TIMESTAMP_UPDATE_INTERVAL = timedelta(minutes=1)
-_CREDENTIAL_ROTATION_OVERLAP = timedelta(minutes=10)
 
 
 class DeviceRateLimitError(RuntimeError):
@@ -52,7 +51,7 @@ class DeviceRepository:
                        prefetch_lead_minutes, button_wake_action, stock_endpoint_host,
                        frame_orientation, layout_mode, fit_mode,
                        auth_mode, pairing_state, credential_version, paired_at, last_auth_at,
-                       auth_revoked_at, pairing_expires_at, pairing_attempts,
+                       auth_revoked_at, repair_allowed_until, pairing_expires_at, pairing_attempts,
                        pairing_claim_attempts, pairing_requested_at, firmware_identity
                 FROM devices ORDER BY name
                 """
@@ -90,11 +89,15 @@ class DeviceRepository:
         if auth_mode not in {"automatic", "legacy_token", "stock"}:
             raise ValueError("DEVICE-011 auth_mode 不合法")
         token = issue_device_token() if auth_mode in {"legacy_token", "stock"} else None
-        # The legacy schema requires token_hash to be non-null.  Automatic
-        # devices receive an unreachable random placeholder until the first
-        # approved claim writes device_secret_hash.
+        # The legacy schema requires token_hash to be non-null.  An explicitly
+        # created automatic scaffold receives an unreachable random placeholder
+        # and remains disabled until the authenticated confirm step.
         token_for_storage = token or ("auto-placeholder-" + secrets.token_urlsafe(32))
         pairing_state = "unpaired" if auth_mode == "automatic" else "paired"
+        if auth_mode == "automatic":
+            # New custom devices must be created by ESP32 enrollment and only
+            # become enabled after the authenticated confirm step.
+            enabled = False
         now = datetime.now(timezone.utc).isoformat()
         delivery_mode, offline_prefetch_allowed = normalize_delivery_contract(
             delivery_mode,
@@ -368,7 +371,8 @@ class DeviceRepository:
         *,
         allow_repair: bool = False,
     ):
-        digest = hash_device_secret(token, self.pepper)
+        legacy_digest = hash_device_token(token, self.pepper)
+        secret_digest = hash_device_secret(token, self.pepper)
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
         cutoff = (now_dt - _DEVICE_AUTH_FAILURE_WINDOW).isoformat()
@@ -377,17 +381,17 @@ class DeviceRepository:
                 """
                 SELECT * FROM devices
                 WHERE enabled=1 AND (
-                    token_hash=? OR device_secret_hash=? OR previous_device_secret_hash=?
+                    token_hash IN (?,?) OR device_secret_hash IN (?,?)
                 )
                 ORDER BY id
                 """,
-                (digest, digest, digest),
+                (legacy_digest, secret_digest, legacy_digest, secret_digest),
             ).fetchall()
             row = None
             for candidate in candidates:
                 mode = str(candidate["auth_mode"] or "legacy_token")
                 if not allow_repair and mode in {"legacy_token", "stock"} and hmac.compare_digest(
-                    str(candidate["token_hash"] or ""), digest
+                    str(candidate["token_hash"] or ""), legacy_digest
                 ):
                     row = candidate
                     break
@@ -398,18 +402,17 @@ class DeviceRepository:
                     allow_repair
                     and pairing_state == "pairing_pending"
                     and bool(candidate["auth_revoked_at"])
+                    and self._repair_permission_active(candidate["repair_allowed_until"], now_dt)
                 )
                 if allow_repair and not repair_authorized:
                     continue
                 if pairing_state != "paired" and not repair_authorized:
                     continue
-                current_match = bool(candidate["device_secret_hash"]) and hmac.compare_digest(
-                    str(candidate["device_secret_hash"]), digest
+                current_match = bool(candidate["device_secret_hash"]) and (
+                    hmac.compare_digest(str(candidate["device_secret_hash"]), secret_digest)
+                    or hmac.compare_digest(str(candidate["device_secret_hash"]), legacy_digest)
                 )
-                previous_match = bool(candidate["previous_device_secret_hash"]) and hmac.compare_digest(
-                    str(candidate["previous_device_secret_hash"]), digest
-                )
-                if not current_match and not previous_match:
+                if not current_match:
                     continue
                 if repair_authorized:
                     if not current_match or credential_version is None:
@@ -424,20 +427,9 @@ class DeviceRepository:
                 # version must not silently authenticate a rotated Secret.
                 if credential_version is None:
                     continue
-                expected_version = (
-                    int(candidate["credential_version"] or 0)
-                    if current_match
-                    else int(candidate["previous_credential_version"] or 0)
-                )
-                if credential_version is not None and credential_version != expected_version:
+                expected_version = int(candidate["credential_version"] or 0)
+                if credential_version != expected_version:
                     continue
-                if previous_match:
-                    expires_at = str(candidate["previous_credential_expires_at"] or "")
-                    try:
-                        if not expires_at or datetime.fromisoformat(expires_at) <= now_dt:
-                            continue
-                    except ValueError:
-                        continue
                 row = candidate
                 break
             if row is not None:
@@ -496,6 +488,13 @@ class DeviceRepository:
                 (_DEVICE_AUTH_FAILURE_MAX_ROWS,),
             )
         return None
+
+    @staticmethod
+    def _repair_permission_active(value, now: datetime) -> bool:
+        try:
+            return bool(value) and datetime.fromisoformat(str(value)) > now
+        except (TypeError, ValueError):
+            return False
 
     def record_download(self, device_id: str, release_id: str, succeeded: bool) -> None:
         now = datetime.now(timezone.utc).isoformat()

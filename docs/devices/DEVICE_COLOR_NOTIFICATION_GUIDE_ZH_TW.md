@@ -99,7 +99,7 @@ Webhook URL 是 administrator 級設定，但預設仍拒絕內網、Loopback、
 
 ## 7. 升級與回滾順序
 
-建議順序：先備份資料庫與 `/data/releases` → 更新三個 Docker 服務並完成目前 Migration → 為每個實際面板發布對應 Profile → 燒錄 2.5.0 韌體 → 在裝置頁改成正確 Profile → 等待設定與 Queue ACK。
+建議順序：先備份資料庫與 `/data/releases` → 更新三個 Docker 服務並完成目前 Migration → 為每個實際面板發布對應 Profile → 燒錄 2.6.0 韌體 → 在裝置頁改成正確 Profile → 等待設定與 Queue ACK。
 
 舊 2.1.0 韌體只認 schema v1／2bpp，2.2.x／2.4.x 不具備完整 Queue ACK 與同內容 NVS 契約。升級期間可把裝置留在 `safe_4c` 並發布四色版本；不要先把它切到六／七色。若新韌體異常，先將裝置 Profile 回到 `safe_4c`、發布四色並回滾韌體；設定版本會再次增加，需等待舊／相容韌體 ACK。
 

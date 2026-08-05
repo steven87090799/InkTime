@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import sqlite3
 import sys
 import time
@@ -51,6 +52,7 @@ class Browser:
         payload: dict[str, object] | None = None,
         csrf: str | None = None,
         bearer: str | None = None,
+        credential_version: int | None = None,
     ):
         headers: dict[str, str] = {}
         data = None
@@ -64,6 +66,8 @@ class Browser:
             headers["X-CSRF-Token"] = csrf
         if bearer:
             headers["Authorization"] = f"Bearer {bearer}"
+        if credential_version is not None:
+            headers["X-InkTime-Credential-Version"] = str(credential_version)
         return self.opener.open(
             Request(  # noqa: S310 - fixed trusted CI LAN origin
                 BASE_URL + path, data=data, headers=headers
@@ -118,19 +122,84 @@ def _initialize(state_path: Path) -> None:
     with browser.request("/api/v1/settings", payload={"general.timezone": "UTC"}, csrf=csrf) as response:
         if response.status != 200:
             raise RuntimeError("representative setting update failed")
+    device_id = "lan-gate-esp32"
+    pairing_nonce = "lan-gate-" + secrets.token_urlsafe(24)
     with browser.request(
-        "/api/v1/devices",
+        "/api/device/v1/pairing/request",
         payload={
-            "name": "LAN Gate Device",
-            "enabled": True,
-            "timezone": "Asia/Taipei",
-            "schedule": "08:00",
-            "rotation": 0,
+            "device_id": device_id,
+            "pairing_nonce": pairing_nonce,
+            "firmware_identity": "LAN-Gate-ESP32",
+            "firmware_version": "2.6.0",
             "panel_profile": "safe_4c",
+            "capabilities": {"automatic_pairing": True, "ab_credential_store": True},
+        },
+    ) as response:
+        if response.status != 201:
+            raise RuntimeError("custom ESP32 pairing request failed")
+        pairing = json.load(response)
+    pairing_id = str(pairing["pairing_id"])
+    pairing_code = str(pairing["pairing_code"])
+    if len(pairing_code) != 6 or not pairing_code.isdigit():
+        raise RuntimeError("custom ESP32 pairing response did not contain a physical code")
+    with browser.request("/api/v1/device-pairing/pending") as response:
+        pending = json.load(response)
+    if pairing_code in json.dumps(pending, ensure_ascii=False):
+        raise RuntimeError("admin pending pairing response leaked the physical code")
+    with browser.request(
+        f"/api/v1/device-pairing/{pairing_id}/approve",
+        payload={
+            "pairing_code": pairing_code,
+            "device_config": {
+                "name": "LAN Gate Device",
+                "timezone": "Asia/Taipei",
+                "schedule": "08:00",
+                "schedule_times": ["08:00"],
+                "panel_profile": "safe_4c",
+            },
         },
         csrf=csrf,
     ) as response:
-        device = json.load(response)
+        if response.status != 200:
+            raise RuntimeError("custom ESP32 admin approval failed")
+    with browser.request(
+        "/api/device/v1/pairing/claim",
+        payload={"pairing_id": pairing_id, "pairing_nonce": pairing_nonce},
+    ) as response:
+        if response.status != 200:
+            raise RuntimeError("custom ESP32 credential claim failed")
+        credential = json.load(response)
+    device_secret = str(credential["device_secret"])
+    credential_version = int(credential["credential_version"])
+    _write_state(
+        state_path,
+        {
+            "device_id": device_id,
+            "device_secret": device_secret,
+            "credential_version": credential_version,
+            "pairing_id": pairing_id,
+        },
+    )
+    with browser.request(
+        "/api/device/v1/pairing/confirm",
+        payload={
+            "pairing_id": pairing_id,
+            "device_id": device_id,
+            "pairing_nonce": pairing_nonce,
+        },
+        bearer=device_secret,
+        credential_version=credential_version,
+    ) as response:
+        if response.status != 200 or json.load(response).get("status") not in {"confirmed", "already_confirmed"}:
+            raise RuntimeError("custom ESP32 credential confirm failed")
+    with browser.request(
+        "/api/device/v1/status",
+        payload={},
+        bearer=device_secret,
+        credential_version=credential_version,
+    ) as response:
+        if response.status != 200:
+            raise RuntimeError("custom ESP32 authenticated status failed after confirm")
     with browser.request("/health/detail") as response:
         detail = json.load(response)
     preflight = detail.get("production_preflight", {})
@@ -181,7 +250,12 @@ def _initialize(state_path: Path) -> None:
     browser.login()
     _write_state(
         state_path,
-        {"device_id": device["id"], "device_token": device["token"]},
+        {
+            "device_id": device_id,
+            "device_secret": device_secret,
+            "credential_version": credential_version,
+            "pairing_id": pairing_id,
+        },
     )
 
 
@@ -250,17 +324,20 @@ def _seed_release(state_path: Path, data_dir: Path) -> None:
 def _exercise(state_path: Path) -> None:
     state = _read_state(state_path)
     device_id = str(state["device_id"])
-    token = str(state["device_token"])
+    secret = str(state["device_secret"])
+    credential_version = int(state["credential_version"])
     expected_sha = str(state["release_sha256"])
     browser = Browser()
     browser.login()
     with browser.request("/api/v1/settings/export") as response:
         if json.load(response)["settings"].get("general.timezone") != "UTC":
             raise RuntimeError("representative setting did not persist")
-    with browser.request("/api/device/v1/releases/latest", bearer=token) as response:
+    with browser.request(
+        "/api/device/v1/releases/latest", bearer=secret, credential_version=credential_version
+    ) as response:
         latest = json.load(response)
     file_path = latest["download_base_url"] + latest["files"][0]["name"]
-    with browser.request(file_path, bearer=token) as response:
+    with browser.request(file_path, bearer=secret, credential_version=credential_version) as response:
         if sha256(response.read()).hexdigest() != expected_sha:
             raise RuntimeError("Latest Release download hash mismatch")
 
@@ -272,10 +349,14 @@ def _exercise(state_path: Path) -> None:
     ) as response:
         if response.status != 201:
             raise RuntimeError("Queue generation failed")
-    with browser.request("/api/device/v1/queue/manifest", bearer=token) as response:
+    with browser.request(
+        "/api/device/v1/queue/manifest", bearer=secret, credential_version=credential_version
+    ) as response:
         queue_manifest = json.load(response)
     item = queue_manifest["items"][0]
-    with browser.request(str(item["download_url"]), bearer=token) as response:
+    with browser.request(
+        str(item["download_url"]), bearer=secret, credential_version=credential_version
+    ) as response:
         if sha256(response.read()).hexdigest() != expected_sha:
             raise RuntimeError("Queue download hash mismatch")
     for index, event in enumerate(
@@ -289,7 +370,8 @@ def _exercise(state_path: Path) -> None:
                 "event": event,
                 "idempotency_key": f"lan-gate-{index}",
             },
-            bearer=token,
+            bearer=secret,
+            credential_version=credential_version,
         ) as response:
             if response.status != 200:
                 raise RuntimeError(f"Queue ACK failed: {event}")
@@ -302,7 +384,12 @@ def _exercise(state_path: Path) -> None:
         "skip_reason": "same_sha256",
     }
     for _attempt in range(2):
-        with browser.request("/api/device/v1/queue/ack", payload=completed, bearer=token) as response:
+        with browser.request(
+            "/api/device/v1/queue/ack",
+            payload=completed,
+            bearer=secret,
+            credential_version=credential_version,
+        ) as response:
             if response.status != 200:
                 raise RuntimeError("idempotent DISPLAY_COMPLETED failed")
     with browser.request(
@@ -316,7 +403,8 @@ def _exercise(state_path: Path) -> None:
             "release_id": RELEASE_ID,
             "render_profile": "safe_4c",
         },
-        bearer=token,
+        bearer=secret,
+        credential_version=credential_version,
     ) as response:
         if response.status != 200:
             raise RuntimeError("same-content Device Status failed")
@@ -330,9 +418,13 @@ def _verify(state_path: Path) -> None:
     state = _read_state(state_path)
     browser = Browser()
     browser.login()
-    with browser.request("/api/device/v1/releases/latest", bearer=str(state["device_token"])) as response:
+    with browser.request(
+        "/api/device/v1/releases/latest",
+        bearer=str(state["device_secret"]),
+        credential_version=int(state["credential_version"]),
+    ) as response:
         if json.load(response).get("release_id") != RELEASE_ID:
-            raise RuntimeError("Device Token or Release assignment did not persist")
+            raise RuntimeError("Device Secret or Release assignment did not persist")
     with browser.request(f"/api/devices/{state['device_id']}/queue") as response:
         queue = json.load(response)
     if not queue.get("items") or queue["items"][0]["status"] != "DISPLAYED":

@@ -6,7 +6,7 @@
 
 | 模式 | 後端 `auth_mode` | 認證材料 | 是否進入自動配對 |
 |---|---|---|---|
-| 自製 InkTime 韌體 | `automatic` | 一次 claim 後取得的長效 `Device Secret`＋`X-InkTime-Credential-Version` | 是 |
+| 自製 InkTime 韌體 | `automatic` | claim／confirm 後取得的長效 `Device Secret`＋`X-InkTime-Credential-Version` | 是 |
 | 舊版裝置相容 | `legacy_token` | 既有 Bearer Token | 否；保留舊 API 行為 |
 | Stock PhotoPainter | `stock` | 既有 Stock 相容路徑使用的 Bearer Token／伺服器推送 | 否；不得由配對 API 建立 |
 
@@ -14,13 +14,13 @@
 
 ## 2. 首次設定與配對流程
 
-1. 新自製裝置不必先按「新增裝置」：第一次 pairing request 會依韌體產生的 `device_id` 自動建立 `auth_mode=automatic`、`pairing_state=unpaired` 的資料列。管理員可在 `/devices` 事後調整名稱、面板 Profile、交付模式、時區與排程；頁面只回報配對提示，不回傳 Secret。
+1. 新自製裝置不必先按「新增裝置」：第一次 pairing request 只建立待處理 enrollment，不建立或啟用 `devices` 正式資料列。管理員可在 `/devices` 的待處理列輸入實體相框顯示的配對碼，並設定名稱、面板 Profile、交付模式、時區與排程；頁面不回傳 Secret 或配對碼。
 2. ESP32 進入 AP 設定頁，只填 Wi-Fi、Backend Origin 與 TLS Root CA。既有 `device_token` 若存在會保留為 Legacy 相容資料，但不再提供手動輸入欄位。
-3. ESP32 將唯一 `device_id` 與新的高熵 `pairing_nonce` POST 到 `/api/device/v1/pairing/request`。production 必須使用 HTTPS；Body 必須是精確的 `application/json` object。
-4. Server 只保存 nonce HMAC、配對碼 HMAC 與供管理員讀取的加密配對碼；配對碼短效 5 分鐘，且錯誤核准最多 5 次。Response 的六位數碼只供裝置顯示在 pairing screen（PhotoPainter 或 GxEPD2），不能寫入 Log、URL 或 Secret 欄位。
-5. 管理員在 `/devices` 的「等待配對核准」表核對裝置名稱、Firmware、Profile、Capabilities 與六位數配對碼，按「核准」。核准 API 是管理員 Session，仍需要 CSRF；Viewer 不可核准、拒絕、撤銷或允許重新配對。
-6. ESP32 每 3 秒 POST `/api/device/v1/pairing/claim`，直到核准或 5 分鐘到期。未核准回 `202` 並附 `Retry-After: 3`；核准後回傳一次 `device_secret` 與正整數 `credential_version`。
-7. ESP32 先把 Secret、Device ID、`auth_state=paired` 與 Credential Version 寫入現有 A/B `ConfigPayload`，完成全量 read-back 與 pointer 驗證後，才把本輪認證視為完成。Secret 不會再由 Server 顯示，也不會從韌體 Log 讀出。
+3. ESP32 先把新的高熵 `pairing_nonce` 寫入 A/B Config，再將唯一 `device_id` 與該 nonce POST 到 `/api/device/v1/pairing/request`。若 request 已送達但 response 在掉電中遺失，下一次喚醒會重用同一 nonce 取回原 enrollment metadata；production 必須使用 HTTPS，Body 必須是精確的 `application/json` object。
+4. Server 只保存 nonce HMAC 與配對碼 HMAC；配對碼短效 5 分鐘，且錯誤核准最多 5 次。Response 的六位數碼只供裝置顯示在 pairing screen（PhotoPainter 或 GxEPD2），不能寫入 Log、URL、DOM、Audit 或可逆欄位。
+5. 管理員在 `/devices` 的待處理表輸入實體相框上的六位數配對碼，再核對裝置名稱、Firmware、Profile、Capabilities 並按「核准」。管理頁永遠不顯示伺服器已知的配對碼；核准 API 是管理員 Session，仍需要 CSRF；Viewer 不可核准、拒絕、撤銷或允許重新配對。
+6. ESP32 每 3 秒 POST `/api/device/v1/pairing/claim`，單次喚醒最多輪詢約 30 秒。未核准回 `202` 並附 `Retry-After: 3`；核准後回傳可重試的短效 credential envelope 內容。ESP32 若在 claim 或 confirm 中斷，下一次喚醒會以同一 `pairing_id`、nonce 取回相同 credential，不建立新的 request。
+7. ESP32 先把 Secret、Device ID、`auth_state=credential_issued` 與 Credential Version 寫入現有 A/B `ConfigPayload`，用 `/api/device/v1/pairing/confirm` 以 Bearer Secret 與版本 Header 完成 confirm；只有 confirm 成功後才清除 pairing state、寫成 `paired`，Server 才建立／啟用正式 device row。Secret 不會由 Server 顯示，也不會從韌體 Log 讀出。
 
 裝置正常喚醒時不會重新 request 或 claim；只會以 NVS 中的 Secret 加上版本 Header 呼叫既有 Manifest、Queue、檔案、Offline Schedule 與 Status API。
 
@@ -44,7 +44,7 @@
 }
 ```
 
-成功回 `201`，包含 `pairing_id`、`device_id`、`pairing_code`、`expires_in_seconds=300` 與 `poll_after_seconds=3`。不包含 Device Secret。未知欄位、非 object JSON、非 JSON Content-Type、過大 Body、非法 ID／型別都拒絕。
+成功回 `201`，只在這個 ESP32 request response 包含 `pairing_id`、`device_id`、`pairing_code`、`expires_in_seconds=300` 與 `poll_after_seconds=3`。不包含 Device Secret；重試同一 request 只回相同 enrollment metadata，不再回配對碼。未知欄位、非 object JSON、非 JSON Content-Type、過大 Body、非法 ID／型別都拒絕。
 
 `POST /api/device/v1/pairing/claim`
 
@@ -52,12 +52,24 @@
 {"pairing_id":"…","pairing_nonce":"…"}
 ```
 
-狀態為 pending 時回 `202`；核准時回 `200` 並只回傳一次 `device_secret`。同一 pairing request 再 claim 回 `409`，過期回 `410`，錯誤 nonce 會增加 bounded claim attempts，不會洩漏配對狀態以外的 Secret。
+狀態為 pending 時回 `202`；核准後回 `200` 並在短效 envelope 仍有效時重試回傳相同 `device_secret` 與版本。confirm 前不建立正式 device row；confirm 後再 claim 回 `409`，過期回 `410`，錯誤 nonce 會增加 bounded claim attempts，不會洩漏配對狀態以外的 Secret。
+
+`POST /api/device/v1/pairing/confirm`
+
+```json
+{
+  "pairing_id": "…",
+  "device_id": "esp32-ABC123",
+  "pairing_nonce": "高熵隨機字串"
+}
+```
+
+此 Body 不含 Secret；Request Header 必須是 `Authorization: Bearer ids_…` 與 `X-InkTime-Credential-Version`。Server 會驗證 nonce、Secret、版本與 envelope，成功回 `confirmed`；同一有效 confirm 重送回 `already_confirmed`。
 
 ### 管理端點
 
-- `GET /api/v1/device-pairing/pending`：只回傳尚未完成的配對請求與可解密的短效配對碼，不回傳 Device Secret。
-- `POST /api/v1/device-pairing/{pairing_id}/approve`：Body 為 `{"pairing_code":"六位數"}`；管理員核准後才可 claim。
+- `GET /api/v1/device-pairing/pending`：只回傳尚未完成的配對請求、設定與嘗試次數；不回傳配對碼、nonce、hash、envelope 或 Device Secret。
+- `POST /api/v1/device-pairing/{pairing_id}/approve`：Body 為管理員輸入的 `{"pairing_code":"六位數","device_config":{...}}`；Server 只做 constant-time HMAC compare，核准後才可 claim。
 - `POST /api/v1/device-pairing/{pairing_id}/reject`：拒絕請求並讓裝置回到未配對狀態。
 - `POST /api/v1/devices/{device_id}/revoke-credential`：讓目前 Secret 立即失效；Stock 與 Legacy 不可用這個自動 credential 操作。
 - `POST /api/v1/devices/{device_id}/enable-repair`：管理員允許 automatic 裝置重新配對；下一次裝置喚醒會建立新的短效請求。
@@ -68,14 +80,14 @@
 
 ## 4. Credential 生命週期
 
-Server 只在 `devices.device_secret_hash` 保存 HMAC hash，不保存明文 Secret。每次 claim 使 `credential_version` 加一；裝置對一般 API 加上：
+Server 只在 `devices.device_secret_hash` 保存 HMAC hash，不保存明文 Secret。每次新的 claim credential 使 `credential_version` 加一；裝置對一般 API 加上：
 
 ```http
 Authorization: Bearer ids_…
 X-InkTime-Credential-Version: 2
 ```
 
-Automatic credential 缺少版本、版本不符、裝置未處於 `paired`、已停用或 hash 不符時都 fail-closed。一般 credential rotation 時新 Secret 成為 current，舊 Secret 最多保留有界 10 分鐘 overlap；管理員明確撤銷或允許重新配對時，舊 Secret 立即失效，不會因 overlap 復活。撤銷狀態本身仍拒絕所有一般裝置端點。
+Automatic credential 缺少版本、版本不符、裝置未處於 `paired`、已停用或 hash 不符時都 fail-closed。本 PR 不做 graceful rotation；管理員撤銷後 current Secret 立即失效，只有短效、單次 repair permission 允許「重新配對 → 新 Secret」。撤銷狀態本身仍拒絕所有一般裝置端點。
 
 裝置收到一般 authenticated endpoint 的 `401` 或 `403` 時：
 
@@ -88,7 +100,8 @@ Automatic credential 缺少版本、版本不符、裝置未處於 `paired`、�
 新增欄位全部位於現有 A/B `ConfigPayload`：
 
 - `device_secret`、`device_id`、`auth_state`、`credential_version`；
-- payload schema 由 1 升為 2，deserialize 仍接受舊 schema 1；
+- `pairing_id`、`pairing_nonce`、`pairing_expires_at_epoch`、`pairing_retry_at_epoch`、`pairing_retry_attempt`；
+- payload schema 由 2 升為 3，deserialize 仍接受舊 schema 1、2；
 - Config Store 仍執行 slot CRC、generation、pointer recovery、prepare／commit read-back；
 - 不新增散落的明文 `Preferences` credential key；Factory Reset 會清除新的正式 A/B payload 與既有 legacy 設定。
 
@@ -103,7 +116,7 @@ Automatic credential 缺少版本、版本不符、裝置未處於 `paired`、�
 
 | 現象／錯誤碼 | 處理 |
 |---|---|
-| `DEVICE-PAIRING-TIMEOUT`、`DEVICE-PAIRING-EXPIRED` | 管理員重新允許配對或讓裝置下一輪建立新 request；不會無限輪詢。 |
+| `DEVICE-PAIRING-TIMEOUT`、`DEVICE-PAIRING-EXPIRED` | 保留或清除正確的 pairing state，進入 1 分鐘、5 分鐘、15 分鐘、1 小時 bounded deep-sleep backoff；只有未配對裝置或明確 repair permission 才建立新 request。 |
 | `PAIR-002` | pairing request 受到 IP／Device bounded rate limit，等待 `Retry-After`。 |
 | `PAIR-006` | 配對碼錯誤次數用盡；拒絕該 request，再建立新的 request。 |
 | `PAIR-009` | claim 已消費；不可要求 Server 再顯示同一 Secret。 |

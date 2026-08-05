@@ -129,6 +129,7 @@ def configure_web_application(
         "devices.report_status",
         "pairing.request_pairing",
         "pairing.claim_pairing",
+        "pairing.confirm_pairing",
         "pairing.repair_permission",
         "resilience.device_queue_manifest",
         "resilience.device_queue_ack",
@@ -143,6 +144,7 @@ def configure_web_application(
         "devices.report_status",
         "pairing.request_pairing",
         "pairing.claim_pairing",
+        "pairing.confirm_pairing",
         "pairing.repair_permission",
         "resilience.device_queue_ack",
     }

@@ -12,6 +12,7 @@ from inktime.app.domain.analysis.scoring import (
     validate_ranking_weights,
 )
 from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
+from inktime.app.providers.openai_compatible import ProviderHTTPError
 from tests.conftest import create_admin
 from tests.unit.test_analysis_schema import valid_result
 
@@ -142,6 +143,36 @@ class LabProvider(VisionProvider):
         return True, "ok"
 
 
+class RepairLabProvider(LabProvider):
+    def __init__(self):
+        self.repair_calls = 0
+
+    def analyze(self, **_kwargs):
+        return ProviderResponse('{"memory_score": 1}', Usage(120, 30, 10))
+
+    def repair_json(self, **_kwargs):
+        self.repair_calls += 1
+        import json
+
+        return ProviderResponse(json.dumps(valid_result(), ensure_ascii=False), Usage(40, 12, 2))
+
+
+class FailingScoringProvider(LabProvider):
+    def __init__(self, *, vision_error=None, repair_error=None):
+        self.vision_error = vision_error
+        self.repair_error = repair_error
+
+    def analyze(self, **_kwargs):
+        if self.vision_error is not None:
+            raise self.vision_error
+        return ProviderResponse('{"memory_score": 1}', Usage(120, 30, 10))
+
+    def repair_json(self, **_kwargs):
+        if self.repair_error is not None:
+            raise self.repair_error
+        raise AssertionError("測試 Provider 未設定 repair response")
+
+
 def test_scoring_lab_records_usage_and_uses_current_profile(app, tmp_path, monkeypatch):
     service = app.extensions["inktime_scoring_lab_service"]
     monkeypatch.setattr(service.providers, "build_router", lambda: LabProvider())
@@ -158,3 +189,96 @@ def test_scoring_lab_records_usage_and_uses_current_profile(app, tmp_path, monke
             "SELECT request_type,input_tokens,output_tokens,cached_tokens FROM api_usage"
         ).fetchall()
     assert [tuple(row) for row in usage] == [("scoring_test_vision", 120, 30, 10)]
+
+
+def test_scoring_lab_records_vision_and_text_repair_as_separate_attempts(app, tmp_path, monkeypatch):
+    service = app.extensions["inktime_scoring_lab_service"]
+    provider = RepairLabProvider()
+    monkeypatch.setattr(service.providers, "build_router", lambda: provider)
+    image_path = tmp_path / "repair.jpg"
+    Image.new("RGB", (64, 64), "purple").save(image_path)
+
+    result = service.analyze(image_path)
+
+    assert provider.repair_calls == 1
+    assert result["usage"]["attempts"]
+    assert result["usage"]["cost"] == 0.003
+    assert result["usage"]["vision_cost"] == 0.0015
+    assert result["usage"]["repair_cost"] == 0.0015
+    with app.extensions["inktime_database"].session() as connection:
+        usage = connection.execute(
+            "SELECT request_type,input_tokens,output_tokens,cached_tokens,image_bytes,estimated_cost "
+            "FROM api_usage ORDER BY id"
+        ).fetchall()
+    assert [row["request_type"] for row in usage] == [
+        "scoring_test_vision",
+        "scoring_test_repair",
+    ]
+    assert usage[0]["image_bytes"] == image_path.stat().st_size
+    assert usage[1]["image_bytes"] == 0
+    assert [usage[0]["estimated_cost"], usage[1]["estimated_cost"]] == [0.0015, 0.0015]
+
+
+def test_scoring_lab_records_ambiguous_vision_failure_without_inventing_cost(
+    app, tmp_path, monkeypatch
+):
+    service = app.extensions["inktime_scoring_lab_service"]
+    provider = FailingScoringProvider(
+        vision_error=ProviderHTTPError("timeout", "VLM-AMBIGUOUS", ambiguous=True)
+    )
+    monkeypatch.setattr(service.providers, "build_router", lambda: provider)
+    image_path = tmp_path / "ambiguous.jpg"
+    Image.new("RGB", (64, 64), "orange").save(image_path)
+
+    with pytest.raises(ProviderHTTPError):
+        service.analyze(image_path)
+    with app.extensions["inktime_database"].session() as connection:
+        usage = connection.execute(
+            "SELECT request_type,status,cost_source,actual_cost,image_bytes,error_code FROM api_usage"
+        ).fetchone()
+    assert tuple(usage) == (
+        "scoring_test_vision",
+        "failed",
+        "unknown",
+        None,
+        image_path.stat().st_size,
+        "VLM-AMBIGUOUS",
+    )
+
+
+def test_scoring_lab_keeps_completed_vision_and_failed_repair_attempt(
+    app, tmp_path, monkeypatch
+):
+    service = app.extensions["inktime_scoring_lab_service"]
+    provider = FailingScoringProvider(
+        repair_error=ProviderHTTPError("reset", "VLM-AMBIGUOUS", ambiguous=True)
+    )
+    monkeypatch.setattr(service.providers, "build_router", lambda: provider)
+    image_path = tmp_path / "repair-failed.jpg"
+    Image.new("RGB", (64, 64), "purple").save(image_path)
+
+    with pytest.raises(ProviderHTTPError):
+        service.analyze(image_path)
+    with app.extensions["inktime_database"].session() as connection:
+        usage = connection.execute(
+            "SELECT request_type,status,cost_source,actual_cost,image_bytes FROM api_usage ORDER BY id"
+        ).fetchall()
+    assert [tuple(row) for row in usage] == [
+        ("scoring_test_vision", "completed", "estimated", None, image_path.stat().st_size),
+        ("scoring_test_repair", "failed", "unknown", None, 0),
+    ]
+
+
+def test_scoring_lab_does_not_record_pre_network_failure(
+    app, tmp_path, monkeypatch
+):
+    service = app.extensions["inktime_scoring_lab_service"]
+    provider = FailingScoringProvider(vision_error=ValueError("invalid configuration"))
+    monkeypatch.setattr(service.providers, "build_router", lambda: provider)
+    image_path = tmp_path / "preflight-failed.jpg"
+    Image.new("RGB", (64, 64), "blue").save(image_path)
+
+    with pytest.raises(ValueError, match="invalid configuration"):
+        service.analyze(image_path)
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 0

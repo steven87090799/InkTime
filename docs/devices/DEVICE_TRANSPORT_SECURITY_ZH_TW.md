@@ -2,7 +2,7 @@
 
 ## 契約
 
-裝置 API 依模式接受自動配對的 `Authorization: Bearer <device-secret>` 加 `X-InkTime-Credential-Version`，或既有 Legacy／Stock 相容的 `Authorization: Bearer <device-token>`。伺服器只保存加 pepper 的 HMAC hash；Device Secret 只在 claim 成功時交付一次，Legacy Token 只在建立或重生時顯示一次。驗證失敗依來源 HMAC 雜湊做五分鐘、20 次的有界 rate limit；停用或撤銷裝置立即拒絕。
+裝置 API 依模式接受自動配對的 `Authorization: Bearer <device-secret>` 加 `X-InkTime-Credential-Version`，或既有 Legacy／Stock 相容的 `Authorization: Bearer <device-token>`。伺服器只保存加 pepper 的 HMAC hash；claim 只以短效加密 envelope 交付 credential，允許同一 pairing retry 取回相同值，confirm 後不再保存明文。Legacy Token 只在建立或重生時顯示一次。驗證失敗依來源 HMAC 雜湊做五分鐘、20 次的有界 rate limit；停用或撤銷裝置立即拒絕。
 
 Manifest 與 BIN 必須符合 credential 所屬裝置 Profile。BIN endpoint 重新檢查 Manifest 是否列出檔案、大小與 SHA-256；Token、Device Secret、完整 NAS 路徑不進 Log、Device Event 或診斷包。
 

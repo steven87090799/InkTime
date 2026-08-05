@@ -677,7 +677,7 @@ Production 預設且建議使用 `INKTIME_COOKIE_SECURE=1`、`INKTIME_ALLOW_INSE
 4. 到「維護」輸入容器內照片路徑（Compose 預設 `/photos`），建立背景掃描工作。
 5. 到「工作」建立兩階段智慧分析，確認照片數、Token、費用範圍與工作預算後啟動。
 6. 到「渲染」預覽並選擇內建的手寫／文青繁中字型，測試渲染後發布 2bpp 版本；需要時仍可上傳其他字型。
-7. 新自製板不必先在「裝置」建立資料列：AP 設定頁只填 Wi-Fi／InkTime URL，裝置首次連線會取得短期配對碼，管理員在 Web 核准後自動領取 Device Secret，再於「裝置」頁調整名稱與排程。既有 Legacy 或 Stock 裝置依相容模式操作。
+7. 新自製板不必先在「裝置」建立資料列：AP 設定頁只填 Wi-Fi／InkTime URL，裝置首次連線會取得短期配對碼並顯示在實體面板，管理員在 Web 輸入該碼核准；裝置以可恢復 claim／confirm 取得 Device Secret，confirm 後才建立正式資料列。既有 Legacy 或 Stock 裝置依相容模式操作。
 8. 到「備份」建立並下載第一份備份。
 
 ## 歷史今日與安全換圖

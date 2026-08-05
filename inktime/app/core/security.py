@@ -79,13 +79,32 @@ def issue_device_secret() -> str:
 
 
 def hash_device_token(token: str, pepper: str) -> str:
+    """Hash the deployed Legacy/Stock token contract without changing it."""
+
     return hmac.new(pepper.encode("utf-8"), token.encode("utf-8"), sha256).hexdigest()
+
+
+def _hash_domain(value: str, pepper: str, purpose: str) -> str:
+    material = f"{purpose}\x00{value}".encode("utf-8")
+    return hmac.new(pepper.encode("utf-8"), material, sha256).hexdigest()
 
 
 def hash_device_secret(secret: str, pepper: str) -> str:
     """Hash a high-entropy Device Secret without storing it in the database."""
 
-    return hash_device_token(secret, pepper)
+    return _hash_domain(secret, pepper, "device-secret-v1")
+
+
+def hash_pairing_code(code: str, pepper: str) -> str:
+    return _hash_domain(code, pepper, "pairing-code-v1")
+
+
+def hash_pairing_nonce(nonce: str, pepper: str) -> str:
+    return _hash_domain(nonce, pepper, "pairing-nonce-v1")
+
+
+def hash_pairing_scope(scope: str, value: str, pepper: str) -> str:
+    return _hash_domain(value, pepper, f"pairing-scope-{scope}-v1")
 
 
 def mask_secret(value: str) -> str:

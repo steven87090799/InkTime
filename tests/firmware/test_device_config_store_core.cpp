@@ -21,6 +21,11 @@ ConfigPayload payload(const std::string& suffix) {
   value.device_id = "esp32-" + suffix;
   value.auth_state = "paired";
   value.credential_version = 3;
+  value.pairing_id = "pairing-" + suffix;
+  value.pairing_nonce = "nonce-" + suffix + "-0123456789";
+  value.pairing_expires_at_epoch = 1730000000ULL;
+  value.pairing_retry_at_epoch = 1729999000ULL;
+  value.pairing_retry_attempt = 2;
   value.tz_offset_minutes = 480;
   value.refresh_hour = 8;
   value.refresh_minute = 30;
@@ -182,6 +187,11 @@ void test_payload_roundtrip_and_empty_overwrite() {
   empty.device_id.clear();
   empty.auth_state = "unpaired";
   empty.credential_version = 0;
+  empty.pairing_id.clear();
+  empty.pairing_nonce.clear();
+  empty.pairing_expires_at_epoch = 0;
+  empty.pairing_retry_at_epoch = 0;
+  empty.pairing_retry_attempt = 0;
   assert(inktime::configstore::serialize_payload(empty, encoded, error));
   assert(inktime::configstore::deserialize_payload(encoded, decoded, error));
   assert(decoded == empty);
@@ -305,6 +315,7 @@ void test_pointer_and_journal_roundtrip() {
       inktime::configstore::JournalPhase::Prepared,
       inktime::configstore::JournalPhase::SchedulePromoted,
       inktime::configstore::JournalPhase::ConfigCommitted,
+      inktime::configstore::JournalPhase::Aborted,
   }) {
     RecoveryJournal journal;
     journal.phase = phase;

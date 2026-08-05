@@ -201,7 +201,7 @@ def devices_page():
             "schedule": str(settings.get("device.default_schedule", "08:00")),
             "rotation": int(settings.get("device.default_rotation", 0)),
             "panel_profile": str(settings.get("device.default_panel_profile", DEFAULT_DEVICE_PANEL_PROFILE)),
-            "delivery_mode": "legacy_online",
+            "delivery_mode": "stock_compat",
             "offline_prefetch_allowed": False,
             "schedule_times": [str(settings.get("device.default_schedule", "08:00"))],
             "prefetch_lead_minutes": 5,
@@ -330,24 +330,25 @@ def create_device():
             "schedule": str(settings.get("device.default_schedule", "08:00")),
             "rotation": int(settings.get("device.default_rotation", 0)),
             "panel_profile": str(settings.get("device.default_panel_profile", DEFAULT_DEVICE_PANEL_PROFILE)),
-            "delivery_mode": "legacy_online",
+            "delivery_mode": "stock_compat",
             "schedule_times": [str(settings.get("device.default_schedule", "08:00"))],
             "prefetch_lead_minutes": 5,
             "button_wake_action": "check_new",
             "stock_endpoint_host": None,
         },
     )
-    device_id, _legacy_token = _repository().create(**fields, auth_mode="automatic")
     is_stock = fields["delivery_mode"] == "stock_compat"
+    if not is_stock:
+        abort(
+            409,
+            description="DEVICE-011 自製 InkTime 裝置由 ESP32 首次連線建立 Pending Enrollment；只有 Stock PhotoPainter 可由管理頁新增。",
+        )
+    device_id, _legacy_token = _repository().create(**fields, auth_mode="stock")
     return {
         "id": device_id,
-        "auth_mode": "stock" if is_stock else "automatic",
-        "pairing_state": "paired" if is_stock else "unpaired",
-        "warning": (
-            "Stock PhotoPainter 相容模式不使用自動配對；伺服器維持既有 /dataUP 流程。"
-            if is_stock
-            else "裝置將在首次連線時提出短效自動配對；管理員核准後只領取一次 Device Secret。"
-        ),
+        "auth_mode": "stock",
+        "pairing_state": "paired",
+        "warning": "Stock PhotoPainter 相容模式不使用自動配對；伺服器維持既有 /dataUP 流程。",
     }, 201
 
 

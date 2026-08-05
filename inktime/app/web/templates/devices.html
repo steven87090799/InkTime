@@ -3,19 +3,20 @@
 {% block content %}
 <div class="page-head">
   <div><p class="eyebrow">ESP32 + 電子墨水</p><h1>裝置管理</h1><p>自製 InkTime 韌體使用短效核准後的一次性自動配對；Stock PhotoPainter 維持伺服器主動推送。新版流程不要求手動複製 Device Token。</p></div>
-  {% if g.user.role == 'administrator' %}<button class="primary" id="add-device">新增裝置</button>{% endif %}
+  {% if g.user.role == 'administrator' %}<button class="primary" id="add-device">新增 Stock PhotoPainter</button>{% endif %}
 </div>
 
 {% if g.user.role == 'administrator' and pending_pairings %}
 <section class="panel">
-  <div class="panel-head"><h2>等待配對核准</h2><small>配對碼只在五分鐘內有效；Device Secret 不會顯示在管理介面。</small></div>
-  <div class="table-wrap"><table><thead><tr><th>裝置</th><th>韌體／Profile</th><th>配對碼</th><th>到期</th><th>操作</th></tr></thead><tbody>
+  <div class="panel-head"><h2>等待配對核准</h2><small>配對碼只顯示在實體相框、五分鐘內有效；伺服器與管理頁都不保存或顯示它。</small></div>
+  <div class="table-wrap"><table><thead><tr><th>裝置</th><th>韌體／Profile</th><th>核准設定</th><th>實體配對碼</th><th>到期</th><th>操作</th></tr></thead><tbody>
   {% for pairing in pending_pairings %}<tr class="pairing-row" data-pairing-id="{{ pairing.pairing_id }}">
     <td><strong>{{ pairing.device_name }}</strong><small><code>{{ pairing.device_id_display }}</code></small></td>
     <td>{{ pairing.firmware_version }}<small>{{ pairing.panel_profile }}／{{ pairing.firmware_identity or '未提供硬體識別' }}</small><small>能力：{{ pairing.capabilities|tojson }}</small></td>
-    <td><code class="pairing-code">{{ pairing.pairing_code }}</code><small>錯誤 {{ pairing.attempts }}／{{ pairing.claim_attempts }}</small></td>
+    <td><label>名稱<input class="pairing-name" value="{{ pairing.config.get('name', pairing.device_name) }}" maxlength="100" autocomplete="off"></label><label>面板<select class="pairing-panel">{% for key, profile in display_profiles.items() %}<option value="{{ key }}"{% if key == pairing.config.get('panel_profile', pairing.panel_profile) %} selected{% endif %}>{{ profile.label }}</option>{% endfor %}</select></label><label>時區<input class="pairing-timezone" value="{{ pairing.config.get('timezone', 'Asia/Taipei') }}" maxlength="64"></label><label>排程<input class="pairing-schedule" type="time" value="{{ pairing.config.get('schedule', '08:00') }}"></label></td>
+    <td><input class="pairing-code-input" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="輸入相框上的 6 位碼" aria-label="{{ pairing.device_id_display }} 的實體配對碼"><small>錯誤 {{ pairing.attempts }}／{{ pairing.claim_attempts }}</small></td>
     <td>{{ pairing.expires_at }}</td>
-    <td>{% if pairing.status == 'approved' %}<span class="success">已核准，等待裝置領取</span>{% else %}<button class="primary approve-pairing" type="button">核准</button><button class="secondary reject-pairing" type="button">拒絕</button>{% endif %}</td>
+    <td>{% if pairing.status == 'approved' %}<span class="success">已核准，等待裝置領取</span>{% elif pairing.status == 'credential_issued' %}<span class="warning">等待裝置確認</span>{% else %}<button class="primary approve-pairing" type="button">核准</button><button class="secondary reject-pairing" type="button">拒絕</button>{% endif %}</td>
   </tr>{% endfor %}
   </tbody></table></div>
 </section>
@@ -51,7 +52,7 @@ function syncAdaptiveFit(){const adaptive=deviceLayoutMode.value==='adaptive_mem
 deviceLayoutMode.onchange=syncAdaptiveFit;
 async function pairingAction(url, message){if(!confirm(message))return;const response=await window.inktimeFetch(url,{method:'POST'});const data=await response.json();if(!response.ok)alert(data.message||'操作失敗');else location.reload();}
 document.getElementById('add-device').onclick=()=>{deviceDialogTitle.textContent='新增 ESP32 裝置';deviceForm.reset();deviceForm.elements.id.value='';deviceForm.elements.enabled.value='true';deviceForm.elements.timezone.value=deviceDefaults.timezone;deviceForm.elements.schedule.value=deviceDefaults.schedule;deviceForm.elements.delivery_mode.value=deviceDefaults.delivery_mode;deviceForm.elements.schedule_times.value=deviceDefaults.schedule_times.join(',');deviceForm.elements.prefetch_lead_minutes.value=String(deviceDefaults.prefetch_lead_minutes);deviceForm.elements.button_wake_action.value=deviceDefaults.button_wake_action;deviceForm.elements.stock_endpoint_host.value=deviceDefaults.stock_endpoint_host||'';deviceForm.elements.rotation.value=String(deviceDefaults.rotation);deviceForm.elements.panel_profile.value=deviceDefaults.panel_profile;deviceForm.elements.frame_orientation.value='';deviceForm.elements.layout_mode.value='';deviceForm.elements.fit_mode.value='';syncAdaptiveFit();deviceDialog.showModal();};
-document.querySelectorAll('.approve-pairing').forEach(button=>button.onclick=async()=>{const row=button.closest('.pairing-row');const code=row.querySelector('.pairing-code').textContent.trim();const response=await window.inktimeFetch(`/api/v1/device-pairing/${row.dataset.pairingId}/approve`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pairing_code:code})});const data=await response.json();if(!response.ok)alert(data.message||'核准失敗');else location.reload();});
+document.querySelectorAll('.approve-pairing').forEach(button=>button.onclick=async()=>{const row=button.closest('.pairing-row');const code=row.querySelector('.pairing-code-input').value.trim();if(!/^[0-9]{6}$/.test(code)){alert('請輸入實體相框上的 6 位配對碼');return;}const deviceConfig={name:row.querySelector('.pairing-name').value.trim(),panel_profile:row.querySelector('.pairing-panel').value,timezone:row.querySelector('.pairing-timezone').value.trim(),schedule:row.querySelector('.pairing-schedule').value,schedule_times:[row.querySelector('.pairing-schedule').value]};const response=await window.inktimeFetch(`/api/v1/device-pairing/${row.dataset.pairingId}/approve`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pairing_code:code,device_config:deviceConfig})});const data=await response.json();if(!response.ok)alert(data.message||'核准失敗');else location.reload();});
 document.querySelectorAll('.reject-pairing').forEach(button=>button.onclick=()=>{const row=button.closest('.pairing-row');pairingAction(`/api/v1/device-pairing/${row.dataset.pairingId}/reject`,'拒絕此裝置配對請求？');});
 document.querySelectorAll('.repair-device').forEach(button=>button.onclick=()=>pairingAction(`/api/v1/devices/${button.dataset.id}/enable-repair`,'允許此裝置重新配對？現有 credential 將停止使用。'));
 document.querySelectorAll('.revoke-device').forEach(button=>button.onclick=()=>pairingAction(`/api/v1/devices/${button.dataset.id}/revoke-credential`,'撤銷此裝置 credential？裝置將 fail-closed。'));

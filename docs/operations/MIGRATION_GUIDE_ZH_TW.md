@@ -4,7 +4,7 @@
 2. 執行 `python scripts/migrate.py --database <photos.db>`；舊 `photo_scores` 不會刪除。
 3. 啟動新版並建立管理員，再執行下列舊設定匯入工具。
 4. 由「維護」掃描照片；SHA-256 可在路徑移動後保留結果，相同內容建立繼承來源。
-5. 升級 ESP32 韌體；新自製板依自動配對 request／管理員核准／claim 取得 Device Secret，既有 Legacy 裝置才建立相容 Token；驗證 Manifest 後才移除舊 URL 金鑰。
+5. 升級 ESP32 韌體；新自製板依自動配對 request／實體配對碼／管理員核准／可恢復 claim-confirm 取得 Device Secret，既有 Legacy 裝置才建立相容 Token；驗證 Manifest 後才移除舊 URL 金鑰。
 6. 用小型本地／Mock 工作驗證，再恢復大量分析。
 
 回滾：停止三服務、驗證 pre-migration 備份、恢復舊 DB／映像／config，短期切回舊韌體。舊 API 有明確安全風險，只可在隔離網路使用。詳見 `MIGRATION_PLAN.md`。
@@ -20,7 +20,7 @@ python scripts/import_legacy_config.py ./config.py --database data/inktime.db --
 
 工具會匯入時區、渲染門檻、顯示數量、字型、舊 API 開關與 `API_CHANNELS`。API Key 直接以目前 `session.key` 加密，不會輸出到 Console；若尚無該檔案，請先啟動一次或設定 `INKTIME_SECRET_KEY`。
 
-`DOWNLOAD_KEY` 不會轉成新版 Device Secret 或 Legacy Token。新自製板依自動配對流程完成綁定；只有既有 Legacy 裝置才在裝置頁逐台建立相容 Token；舊 API 維持預設關閉。
+`DOWNLOAD_KEY` 不會轉成新版 Device Secret 或 Legacy Token。新自製板依實體配對碼與 claim-confirm 流程完成綁定；只有既有 Legacy 裝置才在裝置頁逐台建立相容 Token；舊 API 維持預設關閉。
 
 ## Migration 25：帳號正規化與 Session 撤銷
 
@@ -57,13 +57,13 @@ Migration 32 不修改 Migration 1～31。它為 `providers` 增加受控的 `op
 同一 Migration 也為 `api_usage` 增加 `cache_write_tokens`、`cost_source`、`prompt_chars`、`schema_chars`、`request_body_bytes` 與 `image_bytes`。`cost_source` 只能是 `provider_reported`、`estimated` 或 `unknown`；unknown 成本不會在預算、成本頁或照片摘要中被當作零。既有 usage row 由 schema default 保留可讀性，新 row 必須寫入明確來源。
 
 升級前仍必須建立 SQLite backup，Migration 以單一交易套用並執行
-`PRAGMA foreign_key_check`、`PRAGMA integrity_check`。Fresh Database、31→32、失敗 rollback、重啟與 production release schema gate 必須由 Final-Head CI 驗證；本機不執行測試或建置。
+`PRAGMA foreign_key_check`、`PRAGMA integrity_check`。Fresh Database、31→32、失敗 rollback、重啟與 production release schema gate 必須由 current PR merge-ref CI 驗證；本機不執行測試或建置。
 
 ## Migration 33：Provider 身分、OpenRouter legacy 修復與成本回溯
 
 Migration 33 為 `api_usage` 增加可為 null 的 `provider_id` 外鍵，只有 Provider name 唯一時才回填歷史 usage，避免同名 Provider 誤綁；並建立 Provider／model／cost、Job 與 Photo 的 unknown reconciliation 索引。既有 `openai_compatible` 且 host 為 `openrouter.ai` 或其正式子網域的 Provider 會在同一 transaction 轉成 `kind=openrouter`、停用 Batch、保留既有 options，並補上 `require_parameters=true` 預設；非正式 host 不會被轉換。
 
-Migration 33 不會把缺乏 Provider provenance 的歷史 `actual_cost` 改標為 `provider_reported`。升級前仍必須建立 SQLite backup，並由 Final-Head CI 驗證 32→33、fresh、idempotency、foreign-key／integrity check 與 rollback；本機不執行測試或建置。
+Migration 33 不會把 `cost_source='unknown'` 的 historical row 推論成 `estimated_cost=0`；Migration 32 之後新增的零值 token、prompt／schema／request／image bytes 欄位不能證明 request 免費。無 billable evidence 的 unknown 可由 budget policy 避免計入 billable reserve，但 provenance 仍保持 `unknown`；有 evidence 的 unknown 等待完整價格後 reconciliation。它不會把缺乏 Provider provenance 的歷史 `actual_cost` 改標為 `provider_reported`。升級前仍必須建立 SQLite backup，並由 hosted CI 驗證 32→33、fresh、idempotency、foreign-key／integrity check 與 rollback；本機不執行測試或建置。
 
 ## PR #52 跨日修復的資料相容性
 

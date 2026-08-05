@@ -2,7 +2,7 @@
 
 ## 支援狀態
 
-InkTime 2.5.0 可用單一 compile-time Profile 切換既有 PCB 與 Waveshare
+InkTime 2.6.0 可用單一 compile-time Profile 切換既有 PCB 與 Waveshare
 ESP32-S3-PhotoPainter。這是可編譯、可靜態測試的硬體 adapter；目前沒有連接
 真實 PhotoPainter、面板、SD、電池或量測儀器，因此不得視為實機驗證完成。
 

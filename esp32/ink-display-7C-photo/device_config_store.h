@@ -20,7 +20,7 @@ class DeviceConfigStore final {
   explicit DeviceConfigStore(const char* storage_namespace = "cfgstore")
       : storage_namespace_(storage_namespace == nullptr ? "cfgstore" : storage_namespace) {}
 
-  bool load(configstore::ConfigPayload& payload, String& error);
+  bool load(configstore::ConfigPayload& payload, String& error, String* warning = nullptr);
   bool save(const configstore::ConfigPayload& payload, String& error);
   bool prepare(const configstore::ConfigPayload& payload, Prepared& prepared, String& error);
   bool commit(const Prepared& prepared, String& error);
@@ -69,6 +69,7 @@ class DeviceConfigStore final {
       char active_slot,
       uint64_t generation,
       String& error) const;
+  bool clearSlot(char slot, String& error) const;
   bool findNewest(Preferences& store, SlotValue& value, String& error) const;
   bool readCurrent(
       Preferences& store,

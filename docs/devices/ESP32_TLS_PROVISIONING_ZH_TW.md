@@ -9,7 +9,7 @@
 - 禁止 `WiFiClientSecure::setInsecure()`。
 - `HTTPClient` 停用 redirect follow；3xx 不會被裝置靜默導向其他 host。
 - HTTPS trust anchor 只能來自編譯期 `INKTIME_DEVICE_ROOT_CA` 或已驗證的 Root CA PEM 設定，不會從遠端 response 接受 CA。
-- Device Secret／Legacy Bearer credential 不會寫入 pairing screen、URL、序列埠或 status 回報以外的診斷文字；短效 pairing code 只在裝置畫面與管理員核准表出現。
+- Device Secret／Legacy Bearer credential 不會寫入 pairing screen、URL、序列埠或 status 回報以外的診斷文字；短效 pairing code 只在裝置畫面出現，管理員核准表只提供輸入框，不回顯伺服器配對碼。
 
 編譯期 provisioning 的最小概念如下；實際建置系統應透過受控 secret／board-specific build property 注入，不要把私有 CA key 或任何裝置 credential commit 到 Git：
 

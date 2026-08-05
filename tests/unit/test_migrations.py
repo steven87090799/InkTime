@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import multiprocessing
 from pathlib import Path
 import sqlite3
@@ -30,6 +31,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
+    assert CURRENT_SCHEMA_VERSION == 35
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -72,6 +74,10 @@ def test_fresh_database_is_migrated(tmp_path):
                 "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'device_pairing_%'"
             ).fetchall()
         }
+        pairing_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(device_pairing_requests)").fetchall()
+        }
     assert {"normalized_username", "session_version", "disabled_at"} <= columns
     assert {"current_displayed_at", "last_known_good_displayed_at"} <= queue_columns
     assert {
@@ -81,8 +87,18 @@ def test_fresh_database_is_migrated(tmp_path):
         "device_secret_hash",
         "previous_device_secret_hash",
         "previous_credential_expires_at",
+        "repair_allowed_until",
     } <= device_columns
     assert {"device_pairing_requests", "device_pairing_rate_limits"} <= pairing_tables
+    assert {
+        "pairing_nonce_hash",
+        "pairing_code_hash",
+        "config_json",
+        "credential_envelope_ciphertext",
+        "credential_envelope_expires_at",
+        "confirmed_at",
+    } <= pairing_columns
+    assert "pairing_code_ciphertext" not in pairing_columns
     with database.session() as connection:
         batch_columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(analysis_batches)").fetchall()
@@ -189,7 +205,7 @@ def test_migration_25_to_batch_lifecycle_is_idempotent(monkeypatch, tmp_path):
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:25])
     migrate(database)
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [26, 27, 28, 29, 30, 31, 32, 33, 34]
+    assert migrate(database, tmp_path / "backups") == [26, 27, 28, 29, 30, 31, 32, 33, 34, 35]
     assert migrate(database, tmp_path / "backups") == []
     assert database.integrity_check() == "ok"
 
@@ -209,7 +225,7 @@ def test_migration_32_preserves_legacy_cost_provenance_and_allows_new_reported_c
             ],
         )
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database) == [32, 33, 34]
+    assert migrate(database) == [32, 33, 34, 35]
     with database.transaction() as connection:
         connection.execute(
             "INSERT INTO api_usage(provider,model,request_type,estimated_cost,actual_cost,started_at,status,cost_source) "
@@ -221,7 +237,63 @@ def test_migration_32_preserves_legacy_cost_provenance_and_allows_new_reported_c
         ).fetchall()
     assert [row["cost_source"] for row in rows] == ["estimated", "unknown", "unknown", "provider_reported"]
     assert rows[0]["actual_cost"] == 0.10
+    assert rows[1]["estimated_cost"] == 0.0
+    assert rows[1]["actual_cost"] is None
+    assert rows[2]["estimated_cost"] == 0.0
+    assert rows[2]["actual_cost"] is None
     assert rows[3]["actual_cost"] == 0.08
+
+
+def test_migration_33_backfills_provider_identity_and_keeps_billable_unknown(monkeypatch, tmp_path):
+    database = Database(tmp_path / "migration-33-provider.db")
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:32])
+    migrate(database)
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO providers(id,name,kind,base_url,supports_batch,options_json,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,datetime('now'),datetime('now'))",
+            (
+                "legacy-openrouter-id",
+                "legacy-openrouter",
+                "openai_compatible",
+                "https://openrouter.ai/api/v1",
+                1,
+                '{"privacy":"private","route":"fallback"}',
+            ),
+        )
+        connection.executemany(
+            "INSERT INTO api_usage(provider,model,request_type,estimated_cost,actual_cost,input_tokens,started_at,status) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            [
+                ("legacy-openrouter", "model", "analysis", 0.0, None, 0, "now", "completed"),
+                ("legacy-openrouter", "model", "analysis", 0.0, None, 3, "now", "completed"),
+            ],
+        )
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
+    assert migrate(database) == [33]
+    with database.transaction() as connection:
+        provider = connection.execute(
+            "SELECT id,kind,supports_batch,options_json FROM providers WHERE name=?",
+            ("legacy-openrouter",),
+        ).fetchone()
+        rows = connection.execute(
+            "SELECT provider_id,input_tokens,estimated_cost,actual_cost,cost_source "
+            "FROM api_usage ORDER BY id"
+        ).fetchall()
+    assert provider["id"] == "legacy-openrouter-id"
+    assert provider["kind"] == "openrouter"
+    assert provider["supports_batch"] == 0
+    assert json.loads(provider["options_json"]) == {
+        "privacy": "private",
+        "require_parameters": True,
+        "route": "fallback",
+    }
+    assert rows[0]["provider_id"] == "legacy-openrouter-id"
+    assert rows[0]["cost_source"] == "unknown"
+    assert rows[0]["estimated_cost"] == 0.0
+    assert rows[0]["actual_cost"] is None
+    assert rows[1]["provider_id"] == "legacy-openrouter-id"
+    assert rows[1]["cost_source"] == "unknown"
 
 
 def test_migration_27_to_30_freezes_ownership_and_invalidates_legacy_ready_rows(monkeypatch, tmp_path):
@@ -282,7 +354,7 @@ def test_migration_27_to_30_freezes_ownership_and_invalidates_legacy_ready_rows(
         )
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [28, 29, 30, 31, 32, 33, 34]
+    assert migrate(database, tmp_path / "backups") == [28, 29, 30, 31, 32, 33, 34, 35]
     with database.session() as connection:
         schedule = connection.execute(
             "SELECT status,panel_profile,rotation,snapshot_json FROM device_offline_schedules WHERE id='legacy-schedule'"
@@ -343,7 +415,7 @@ def test_migration_29_to_30_adds_pointer_times_and_mode_guards_with_backup_resta
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
     backups = tmp_path / "backups"
-    assert migrate(database, backups) == [30, 31, 32, 33, 34]
+    assert migrate(database, backups) == [30, 31, 32, 33, 34, 35]
     backup_files = list(backups.glob("*.sqlite3"))
     assert len(backup_files) == 1
     with sqlite3.connect(backup_files[0]) as backup:
@@ -718,7 +790,7 @@ def test_migration_21_upgrades_v20_webhooks_idempotently(monkeypatch, tmp_path):
         notification_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34]
+    assert migrate(database, tmp_path / "backups") == [21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35]
     assert migrate(database, tmp_path / "backups") == []
     assert database.integrity_check() == "ok"
     with database.session() as connection:

@@ -13,7 +13,7 @@ from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.analysis import PhotoAnalysisService
-from inktime.app.domain.analysis.plan import fingerprint
+from inktime.app.domain.analysis.plan import build_analysis_plan, fingerprint
 from inktime.app.domain.analysis.schema import AnalysisValidationError
 from inktime.app.workers.scanner import PhotoScanner
 from tests.conftest import create_admin
@@ -232,12 +232,26 @@ def test_full_analysis_hits_historical_v2_cache_without_an_image_call(app, tmp_p
     _, ids, service = prepare(app, tmp_path)
     # This fixture intentionally models a pre-contract frozen plan.  New
     # plans include the v3 provider contract and must not fall back to v2.
-    legacy_plan = service.build_plan(
+    legacy_plan = build_analysis_plan(
         strategy="high_quality",
         provider_route=[],
-        scoring_profile=dict(app.extensions["inktime_scoring_repository"].current()),
+        low_model="mock",
+        high_model="mock",
+        stage_two_threshold=65,
+        favorite_override=True,
+        scoring_profile={
+            "id": "",
+            "memory_weight": 25,
+            "beauty_weight": 25,
+            "technical_weight": 25,
+            "emotion_weight": 25,
+            "favorite_bonus": 0,
+        },
+        caption_controls=None,
+        prompt_version="legacy-test-prompt",
+        high_image_max_side=1024,
+        repair_policy={"model": "mock", "max_tokens": 1200},
     )
-    legacy_plan["model"] = "mock"
     for key in (
         "scoring_rules",
         "scoring_rules_sha256",

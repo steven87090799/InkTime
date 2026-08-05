@@ -96,6 +96,7 @@ GxEPD2_7C<
 #define DEVICE_OFFLINE_SCHEDULE_PATH "/api/device/v1/offline-schedule"
 #define DEVICE_PAIRING_REQUEST_PATH "/api/device/v1/pairing/request"
 #define DEVICE_PAIRING_CLAIM_PATH "/api/device/v1/pairing/claim"
+#define DEVICE_PAIRING_CONFIRM_PATH "/api/device/v1/pairing/confirm"
 #define DEVICE_PAIRING_REPAIR_PERMISSION_PATH "/api/device/v1/pairing/repair-permission"
 #define INKTIME_FIRMWARE_VERSION "2.6.0"
 
@@ -122,6 +123,11 @@ struct Config {
   String  device_id;
   String  auth_state;
   uint32_t credential_version;
+  String  pairing_id;
+  String  pairing_nonce;
+  uint64_t pairing_expires_at_epoch;
+  uint64_t pairing_retry_at_epoch;
+  uint8_t pairing_retry_attempt;
   int32_t tz_offset_minutes;
   uint8_t refresh_hour;
   uint8_t refresh_minute;
@@ -277,6 +283,8 @@ String currentQueueItemId;
 int64_t currentQueueVersion = -1;
 String lastDeviceErrorCode;
 String lastDeviceErrorMessage;
+String lastDeviceWarningCode;
+String lastDeviceWarningMessage;
 uint32_t lastRefreshDurationMs = 0;
 
 #if INKTIME_PHOTOPAINTER_ENABLED
@@ -764,6 +772,11 @@ static inktime::configstore::ConfigPayload configPayload(const Config &cfg) {
   payload.device_id = cfg.device_id.c_str();
   payload.auth_state = cfg.auth_state.c_str();
   payload.credential_version = cfg.credential_version;
+  payload.pairing_id = cfg.pairing_id.c_str();
+  payload.pairing_nonce = cfg.pairing_nonce.c_str();
+  payload.pairing_expires_at_epoch = cfg.pairing_expires_at_epoch;
+  payload.pairing_retry_at_epoch = cfg.pairing_retry_at_epoch;
+  payload.pairing_retry_attempt = cfg.pairing_retry_attempt;
   payload.tz_offset_minutes = cfg.tz_offset_minutes;
   payload.refresh_hour = cfg.refresh_hour;
   payload.refresh_minute = cfg.refresh_minute;
@@ -799,6 +812,11 @@ static void applyConfigPayload(const inktime::configstore::ConfigPayload &payloa
   cfg.device_id = payload.device_id.c_str();
   cfg.auth_state = payload.auth_state.c_str();
   cfg.credential_version = payload.credential_version;
+  cfg.pairing_id = payload.pairing_id.c_str();
+  cfg.pairing_nonce = payload.pairing_nonce.c_str();
+  cfg.pairing_expires_at_epoch = payload.pairing_expires_at_epoch;
+  cfg.pairing_retry_at_epoch = payload.pairing_retry_at_epoch;
+  cfg.pairing_retry_attempt = payload.pairing_retry_attempt;
   if (cfg.auth_state.length() == 0U) {
     cfg.auth_state = cfg.device_secret.length() > 0U || cfg.device_token.length() > 0U
       ? "paired" : "unpaired";
@@ -849,8 +867,14 @@ void loadConfig(Config &cfg) {
   setConfigDefaults(cfg);
   inktime::configstore::ConfigPayload payload;
   String loadError;
-  if (configStore.load(payload, loadError)) {
+  String loadWarning;
+  if (configStore.load(payload, loadError, &loadWarning)) {
     applyConfigPayload(payload, cfg);
+    if (loadWarning.length() > 0U) {
+      lastDeviceWarningCode = "DEVICE-CONFIG-CLEANUP-PENDING";
+      lastDeviceWarningMessage = "Canonical 設定已套用；舊設定清理待下次啟動重試：";
+      lastDeviceWarningMessage += loadWarning;
+    }
   } else if (loadError.length() > 0U) {
     setConfigPersistenceError(loadError);
   }
@@ -955,9 +979,9 @@ static bool hasDeviceCredential(const Config &cfg) {
   return !deviceAuthInvalid && deviceCredential(cfg).length() > 0U;
 }
 
-static bool addDeviceAuthorization(HTTPClient &http, const Config &cfg) {
+static bool addDeviceAuthorization(HTTPClient &http, const Config &cfg, bool allowInvalid = false) {
   const String credential = deviceCredential(cfg);
-  if (!hasDeviceCredential(cfg)) return false;
+  if (credential.length() == 0U || (!allowInvalid && !hasDeviceCredential(cfg))) return false;
   http.addHeader("Authorization", "Bearer " + credential);
   if (cfg.device_secret.length() > 0U && cfg.credential_version > 0U) {
     http.addHeader("X-InkTime-Credential-Version", String(cfg.credential_version));
@@ -1619,23 +1643,49 @@ static bool normalizedBackendBase(const Config &cfg, String &base) {
   return backendTransportAllowed(base, cfg.ca_pem);
 }
 
-static bool automaticPairingAllowed(const Config &cfg) {
-#if INKTIME_PHOTOPAINTER_ENABLED
-  if (cfg.delivery_mode == "stock_compat") return false;
-#endif
-  const bool pairingState = cfg.auth_state == "unpaired"
-    || cfg.auth_state == "pairing_pending"
-    || cfg.auth_state == "pairing_expired";
-  const bool credentialCanBeReplaced = cfg.device_secret.length() == 0U
-    && cfg.device_token.length() == 0U;
-  // A credentialed repair becomes pairing_pending only after the backend
-  // explicitly authorizes it through checkRepairPermission().
-  return pairingState && (credentialCanBeReplaced || cfg.auth_state == "pairing_pending");
+static constexpr uint64_t kPairingMinimumEpoch = 1700000000ULL;
+static constexpr uint32_t kPairingPollWindowMs = 30000U;
+static constexpr uint32_t kPairingPollDelayMs = 3000U;
+
+static uint64_t pairingNowEpoch() {
+  time_t now = time(nullptr);
+  if (now >= static_cast<time_t>(kPairingMinimumEpoch)) return static_cast<uint64_t>(now);
+  if (loadLastTimeEpoch(now) && now >= static_cast<time_t>(kPairingMinimumEpoch)) {
+    return static_cast<uint64_t>(now);
+  }
+  return 0U;
 }
 
-static bool persistPairingState(Config &cfg, const String &state) {
-  Config candidate = cfg;
-  candidate.auth_state = state;
+static uint32_t pairingBackoffForAttempt(uint8_t attempt) {
+  if (attempt == 0U) return 60U;
+  if (attempt == 1U) return 5U * 60U;
+  if (attempt == 2U) return 15U * 60U;
+  return 60U * 60U;
+}
+
+static bool pairingRetryDue(const Config &cfg) {
+  if (cfg.pairing_retry_at_epoch == 0U) return true;
+  const uint64_t now = pairingNowEpoch();
+  return now != 0U && now >= cfg.pairing_retry_at_epoch;
+}
+
+static uint32_t pairingBackoffSeconds(const Config &cfg) {
+  const uint64_t now = pairingNowEpoch();
+  if (now != 0U && cfg.pairing_retry_at_epoch > now) {
+    const uint64_t remaining = cfg.pairing_retry_at_epoch - now;
+    return remaining > 3600U ? 3600U : static_cast<uint32_t>(remaining);
+  }
+  return pairingBackoffForAttempt(cfg.pairing_retry_attempt);
+}
+
+static bool pairingExpiryPassed(const Config &cfg) {
+  const uint64_t now = pairingNowEpoch();
+  return cfg.pairing_expires_at_epoch != 0U
+    && now != 0U
+    && now >= cfg.pairing_expires_at_epoch;
+}
+
+static bool savePairingCandidate(Config &cfg, const Config &candidate) {
   String persistError;
   if (!saveConfig(candidate, &persistError)) {
     setConfigPersistenceError(persistError);
@@ -1643,6 +1693,58 @@ static bool persistPairingState(Config &cfg, const String &state) {
   }
   cfg = candidate;
   return true;
+}
+
+static bool persistPairingRetry(Config &cfg, const String &state) {
+  Config candidate = cfg;
+  candidate.auth_state = state;
+  const uint8_t previousAttempt = candidate.pairing_retry_attempt;
+  candidate.pairing_retry_attempt = previousAttempt < 8U
+    ? static_cast<uint8_t>(previousAttempt + 1U) : 8U;
+  const uint64_t now = pairingNowEpoch();
+  candidate.pairing_retry_at_epoch = now == 0U
+    ? 0U : now + pairingBackoffForAttempt(previousAttempt);
+  return savePairingCandidate(cfg, candidate);
+}
+
+static bool persistPairingExpired(Config &cfg) {
+  Config candidate = cfg;
+  // An unconfirmed envelope is no longer usable after expiry.  Clear its
+  // locally persisted material so a fresh enrollment can proceed.  If this
+  // was a repair flow for an existing device, the backend's
+  // repair_allowed_until gate still requires a new explicit admin permission
+  // before the next request can succeed.
+  candidate.auth_state = "pairing_expired";
+  candidate.credential_version = 0U;
+  candidate.device_secret = "";
+  candidate.pairing_id = "";
+  candidate.pairing_nonce = "";
+  candidate.pairing_expires_at_epoch = 0U;
+  const uint8_t previousAttempt = candidate.pairing_retry_attempt;
+  candidate.pairing_retry_attempt = previousAttempt < 8U
+    ? static_cast<uint8_t>(previousAttempt + 1U) : 8U;
+  const uint64_t now = pairingNowEpoch();
+  candidate.pairing_retry_at_epoch = now == 0U
+    ? 0U : now + pairingBackoffForAttempt(previousAttempt);
+  return savePairingCandidate(cfg, candidate);
+}
+
+static bool automaticPairingAllowed(const Config &cfg) {
+#if INKTIME_PHOTOPAINTER_ENABLED
+  if (cfg.delivery_mode == "stock_compat") return false;
+#endif
+  if (cfg.auth_state == "credential_issued") {
+    return cfg.device_secret.length() > 0U
+      && cfg.pairing_id.length() > 0U
+      && cfg.pairing_nonce.length() > 0U
+      && pairingRetryDue(cfg);
+  }
+  if (cfg.auth_state != "unpaired" && cfg.auth_state != "pairing_pending"
+      && cfg.auth_state != "pairing_expired") return false;
+  const bool credentialCanBeIssued = cfg.device_secret.length() == 0U
+    && cfg.device_token.length() == 0U;
+  if (cfg.auth_state != "pairing_pending" && !credentialCanBeIssued) return false;
+  return pairingRetryDue(cfg);
 }
 
 static bool checkRepairPermission(Config &cfg) {
@@ -1662,7 +1764,7 @@ static bool checkRepairPermission(Config &cfg) {
     lastDeviceErrorMessage = transportMessage.length() ? transportMessage : "重新配對 permission URL 無法初始化";
     return false;
   }
-  if (!addDeviceAuthorization(http, cfg)) {
+  if (!addDeviceAuthorization(http, cfg, true)) {
     http.end();
     return false;
   }
@@ -1689,7 +1791,177 @@ static bool checkRepairPermission(Config &cfg) {
     lastDeviceErrorMessage = "重新配對 permission response schema 不合法";
     return false;
   }
-  return persistPairingState(cfg, "pairing_pending");
+  Config candidate = cfg;
+  candidate.auth_state = "pairing_pending";
+  candidate.pairing_id = "";
+  candidate.pairing_nonce = "";
+  candidate.pairing_expires_at_epoch = 0U;
+  candidate.pairing_retry_at_epoch = 0U;
+  candidate.pairing_retry_attempt = 0U;
+  return savePairingCandidate(cfg, candidate);
+}
+
+static bool confirmPairingCredential(Config &cfg, const String &base) {
+  if (cfg.device_secret.length() == 0U || cfg.credential_version == 0U
+      || cfg.device_id.length() == 0U || cfg.pairing_id.length() == 0U
+      || cfg.pairing_nonce.length() == 0U) return false;
+  JsonDocument confirmRequest;
+  confirmRequest["pairing_id"] = cfg.pairing_id;
+  confirmRequest["device_id"] = cfg.device_id;
+  confirmRequest["pairing_nonce"] = cfg.pairing_nonce;
+  String confirmBody;
+  serializeJson(confirmRequest, confirmBody);
+
+  inktime::DeviceHttpTransport transport(cfg.ca_pem);
+  HTTPClient http;
+  String transportCode;
+  String transportMessage;
+  if (!transport.begin(
+        http, base + String(DEVICE_PAIRING_CONFIRM_PATH), 15000,
+        transportCode, transportMessage)) {
+    (void)persistPairingRetry(cfg, "credential_issued");
+    lastDeviceErrorCode = transportCode.length() ? transportCode : "DEVICE-PAIRING-CONFIRM-URL";
+    lastDeviceErrorMessage = transportMessage.length() ? transportMessage : "配對 confirm URL 無法初始化";
+    return false;
+  }
+  const char* headers[] = {"Content-Type"};
+  http.collectHeaders(headers, 1);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Authorization", "Bearer " + cfg.device_secret);
+  http.addHeader("X-InkTime-Credential-Version", String(cfg.credential_version));
+  const int status = http.POST(confirmBody);
+  const int length = http.getSize();
+  const String contentType = http.header("Content-Type");
+  if (status == HTTP_CODE_GONE) {
+    http.end();
+    (void)persistPairingExpired(cfg);
+    lastDeviceErrorCode = "DEVICE-PAIRING-EXPIRED";
+    lastDeviceErrorMessage = "credential envelope 已過期；等待管理員明確允許 repair";
+    return false;
+  }
+  if (status != HTTP_CODE_OK || length <= 0 || length > 4096
+      || !contentType.startsWith("application/json")) {
+    http.end();
+    (void)persistPairingRetry(cfg, "credential_issued");
+    lastDeviceErrorCode = "DEVICE-PAIRING-CONFIRM";
+    lastDeviceErrorMessage = "配對 credential 尚未完成 confirm；保留暫存 credential 供下次恢復";
+    return false;
+  }
+  JsonDocument response;
+  const DeserializationError jsonError = deserializeJson(response, http.getStream());
+  http.end();
+  const String statusValue = response["status"] | "";
+  const String confirmedDeviceId = response["device_id"] | "";
+  if (jsonError || response.overflowed()
+      || (statusValue != "confirmed" && statusValue != "already_confirmed")
+      || confirmedDeviceId != cfg.device_id) {
+    (void)persistPairingRetry(cfg, "credential_issued");
+    lastDeviceErrorCode = "DEVICE-PAIRING-CONFIRM-SCHEMA";
+    lastDeviceErrorMessage = "配對 confirm response schema 不合法；保留暫存 credential";
+    return false;
+  }
+  Config candidate = cfg;
+  candidate.auth_state = "paired";
+  candidate.pairing_id = "";
+  candidate.pairing_nonce = "";
+  candidate.pairing_expires_at_epoch = 0U;
+  candidate.pairing_retry_at_epoch = 0U;
+  candidate.pairing_retry_attempt = 0U;
+  if (!savePairingCandidate(cfg, candidate)) return false;
+  deviceAuthInvalid = false;
+  lastDeviceErrorCode = "";
+  lastDeviceErrorMessage = "";
+  return true;
+}
+
+static bool claimPairingCredential(Config &cfg, const String &base) {
+  if (cfg.pairing_id.length() == 0U || cfg.pairing_nonce.length() == 0U
+      || pairingExpiryPassed(cfg)) {
+    (void)persistPairingExpired(cfg);
+    lastDeviceErrorCode = "DEVICE-PAIRING-EXPIRED";
+    lastDeviceErrorMessage = "配對請求已過期；等待 bounded backoff 後重新建立";
+    return false;
+  }
+  const uint32_t pollStarted = millis();
+  while (static_cast<uint32_t>(millis() - pollStarted) < kPairingPollWindowMs) {
+    JsonDocument claimRequest;
+    claimRequest["pairing_id"] = cfg.pairing_id;
+    claimRequest["pairing_nonce"] = cfg.pairing_nonce;
+    String claimBody;
+    serializeJson(claimRequest, claimBody);
+    inktime::DeviceHttpTransport transport(cfg.ca_pem);
+    HTTPClient http;
+    String transportCode;
+    String transportMessage;
+    if (!transport.begin(
+          http, base + String(DEVICE_PAIRING_CLAIM_PATH), 15000,
+          transportCode, transportMessage)) {
+      (void)persistPairingRetry(cfg, "pairing_pending");
+      lastDeviceErrorCode = transportCode.length() ? transportCode : "DEVICE-PAIRING-CLAIM-URL";
+      lastDeviceErrorMessage = transportMessage.length() ? transportMessage : "配對 claim URL 無法初始化";
+      return false;
+    }
+    const char* headers[] = {"Content-Type"};
+    http.collectHeaders(headers, 1);
+    http.addHeader("Content-Type", "application/json");
+    const int status = http.POST(claimBody);
+    const int length = http.getSize();
+    const String contentType = http.header("Content-Type");
+    if (status == HTTP_CODE_ACCEPTED) {
+      http.end();
+      delay(kPairingPollDelayMs);
+      continue;
+    }
+    if (status == HTTP_CODE_GONE) {
+      http.end();
+      (void)persistPairingExpired(cfg);
+      lastDeviceErrorCode = "DEVICE-PAIRING-EXPIRED";
+      lastDeviceErrorMessage = "配對請求已過期；等待 bounded backoff 後重新建立";
+      return false;
+    }
+    if (status != HTTP_CODE_OK || length <= 0 || length > 8192
+        || !contentType.startsWith("application/json")) {
+      http.end();
+      (void)persistPairingRetry(cfg, "pairing_pending");
+      lastDeviceErrorCode = "DEVICE-PAIRING-CLAIM";
+      lastDeviceErrorMessage = "配對 claim HTTP／Content-Type／長度不合法；保留 pairing state";
+      return false;
+    }
+    JsonDocument response;
+    const DeserializationError jsonError = deserializeJson(response, http.getStream());
+    http.end();
+    const String secret = response["device_secret"] | "";
+    const JsonVariantConst versionValue = response["credential_version"];
+    const String claimedDeviceId = response["device_id"] | "";
+    if (jsonError || response.overflowed() || secret.length() < 32U
+        || secret.length() > inktime::configstore::kMaxDeviceSecretBytes
+        || !versionValue.is<uint32_t>() || versionValue.is<bool>() || versionValue.as<uint32_t>() == 0U
+        || claimedDeviceId != cfg.device_id) {
+      (void)persistPairingRetry(cfg, "pairing_pending");
+      lastDeviceErrorCode = "DEVICE-PAIRING-SCHEMA";
+      lastDeviceErrorMessage = "配對 claim credential schema 不合法；保留 pairing state";
+      return false;
+    }
+    Config candidate = cfg;
+    candidate.device_secret = secret;
+    candidate.credential_version = versionValue.as<uint32_t>();
+    candidate.auth_state = "credential_issued";
+#if INKTIME_PHOTOPAINTER_ENABLED
+    JsonObject claimConfig = response["config"].as<JsonObject>();
+    const String delivery = claimConfig["delivery_mode"] | candidate.delivery_mode;
+    const String button = claimConfig["button_wake_action"] | candidate.button_wake_action;
+    if (validDeliveryMode(delivery)) candidate.delivery_mode = delivery;
+    if (validButtonWakeAction(button)) candidate.button_wake_action = button;
+#endif
+    candidate.pairing_retry_at_epoch = 0U;
+    candidate.pairing_retry_attempt = 0U;
+    if (!savePairingCandidate(cfg, candidate)) return false;
+    return confirmPairingCredential(cfg, base);
+  }
+  (void)persistPairingRetry(cfg, "pairing_pending");
+  lastDeviceErrorCode = "DEVICE-PAIRING-TIMEOUT";
+  lastDeviceErrorMessage = "管理員核准尚未完成；保留 pairing state 並等待 bounded backoff";
+  return false;
 }
 
 static bool performAutomaticPairing(Config &cfg) {
@@ -1699,17 +1971,32 @@ static bool performAutomaticPairing(Config &cfg) {
   String base;
   if (!normalizedBackendBase(cfg, base)) return false;
 
+  if (cfg.auth_state == "credential_issued") {
+    return confirmPairingCredential(cfg, base);
+  }
+  if (cfg.auth_state == "pairing_pending" && cfg.pairing_id.length() > 0U
+      && cfg.pairing_nonce.length() > 0U) {
+    return claimPairingCredential(cfg, base);
+  }
+
   Config identityCandidate = cfg;
   if (identityCandidate.device_id.length() == 0U) {
     identityCandidate.device_id = String("esp32-") + randomPortalSecret();
-    String persistError;
-    if (!saveConfig(identityCandidate, &persistError)) {
-      setConfigPersistenceError(persistError);
-      return false;
-    }
-    cfg = identityCandidate;
+    if (!savePairingCandidate(cfg, identityCandidate)) return false;
   }
-  const String pairingNonce = randomPortalSecret();
+  const String pairingNonce = cfg.pairing_nonce.length() > 0U
+    ? cfg.pairing_nonce : randomPortalSecret();
+  // Commit the nonce before the network request.  If the request reaches the
+  // server but its response is lost during a power cut, the next wake can
+  // repeat the same nonce and recover the original enrollment instead of
+  // creating a second identity or getting stuck on a nonce conflict.
+  Config requestCandidate = cfg;
+  requestCandidate.auth_state = "pairing_pending";
+  requestCandidate.pairing_id = "";
+  requestCandidate.pairing_nonce = pairingNonce;
+  requestCandidate.pairing_expires_at_epoch = 0U;
+  requestCandidate.pairing_retry_at_epoch = 0U;
+  if (!savePairingCandidate(cfg, requestCandidate)) return false;
   JsonDocument pairingRequest;
   pairingRequest["device_id"] = cfg.device_id;
   pairingRequest["pairing_nonce"] = pairingNonce;
@@ -1731,6 +2018,7 @@ static bool performAutomaticPairing(Config &cfg) {
   if (!requestTransport.begin(
         requestHttp, base + String(DEVICE_PAIRING_REQUEST_PATH), 15000,
         transportCode, transportMessage)) {
+    (void)persistPairingRetry(cfg, "pairing_pending");
     lastDeviceErrorCode = transportCode.length() ? transportCode : "DEVICE-PAIRING-URL";
     lastDeviceErrorMessage = transportMessage.length() ? transportMessage : "配對 request URL 無法初始化";
     return false;
@@ -1741,9 +2029,11 @@ static bool performAutomaticPairing(Config &cfg) {
   const int requestStatus = requestHttp.POST(requestBody);
   const int requestLength = requestHttp.getSize();
   const String requestContentType = requestHttp.header("Content-Type");
-  if (requestStatus != HTTP_CODE_CREATED || requestLength <= 0 || requestLength > 8192
+  if ((requestStatus != HTTP_CODE_CREATED && requestStatus != HTTP_CODE_OK)
+      || requestLength <= 0 || requestLength > 8192
       || !requestContentType.startsWith("application/json")) {
     requestHttp.end();
+    (void)persistPairingRetry(cfg, "pairing_pending");
     lastDeviceErrorCode = "DEVICE-PAIRING-REQUEST";
     lastDeviceErrorMessage = "配對 request HTTP／Content-Type／長度不合法";
     return false;
@@ -1753,105 +2043,47 @@ static bool performAutomaticPairing(Config &cfg) {
   requestHttp.end();
   const String pairingId = requestResponse["pairing_id"] | "";
   const String pairingCode = requestResponse["pairing_code"] | "";
+  const bool requestReused = requestResponse["request_reused"] | false;
   const JsonVariantConst expiresValue = requestResponse["expires_in_seconds"];
+  const JsonVariantConst serverEpochValue = requestResponse["server_epoch"];
+  uint64_t serverEpoch = serverEpochValue.is<uint64_t>()
+    ? serverEpochValue.as<uint64_t>() : pairingNowEpoch();
+  if (serverEpoch < kPairingMinimumEpoch) serverEpoch = pairingNowEpoch();
+  const bool validCode = pairingCode.length() == 6U
+    && pairingCode[0] >= '0' && pairingCode[0] <= '9'
+    && pairingCode[1] >= '0' && pairingCode[1] <= '9'
+    && pairingCode[2] >= '0' && pairingCode[2] <= '9'
+    && pairingCode[3] >= '0' && pairingCode[3] <= '9'
+    && pairingCode[4] >= '0' && pairingCode[4] <= '9'
+    && pairingCode[5] >= '0' && pairingCode[5] <= '9';
   if (requestJsonError || requestResponse.overflowed() || pairingId.length() == 0U
-      || pairingCode.length() != 6U || !expiresValue.is<int32_t>() || expiresValue.is<bool>()
-      || expiresValue.as<int32_t>() < 1 || expiresValue.as<int32_t>() > 600) {
+      || !expiresValue.is<int32_t>() || expiresValue.is<bool>()
+      || expiresValue.as<int32_t>() < 1 || expiresValue.as<int32_t>() > 300
+      || serverEpoch < kPairingMinimumEpoch
+      || (!requestReused && !validCode)
+      || (requestReused && cfg.pairing_nonce != pairingNonce)) {
+    (void)persistPairingRetry(cfg, "pairing_pending");
     lastDeviceErrorCode = "DEVICE-PAIRING-SCHEMA";
-    lastDeviceErrorMessage = "配對 request 回應 schema 不合法";
+    lastDeviceErrorMessage = "配對 request 回應 schema 不合法；不建立新的裝置 credential";
     return false;
   }
-  if (!persistPairingState(cfg, "pairing_pending")) return false;
+  Config candidate = cfg;
+  candidate.pairing_id = pairingId;
+  candidate.pairing_nonce = requestReused ? cfg.pairing_nonce : pairingNonce;
+  candidate.pairing_expires_at_epoch = serverEpoch + static_cast<uint64_t>(expiresValue.as<int32_t>());
+  candidate.pairing_retry_at_epoch = 0U;
+  candidate.pairing_retry_attempt = 0U;
+  candidate.auth_state = "pairing_pending";
+  if (!savePairingCandidate(cfg, candidate)) return false;
 #if INKTIME_PHOTOPAINTER_ENABLED
-  (void)photoPainter.displayPairingScreen(
-    cfg.wifi_ssid.c_str(), "", base.c_str(), pairingCode.c_str());
-#else
-  (void)displayPairingCode(cfg, pairingCode);
-#endif
-
-  const uint32_t pollWindowMs = static_cast<uint32_t>(expiresValue.as<int32_t>()) * 1000U;
-  const uint32_t pollStarted = millis();
-  while (static_cast<uint32_t>(millis() - pollStarted) < pollWindowMs) {
-    JsonDocument claimRequest;
-    claimRequest["pairing_id"] = pairingId;
-    claimRequest["pairing_nonce"] = pairingNonce;
-    String claimBody;
-    serializeJson(claimRequest, claimBody);
-    inktime::DeviceHttpTransport claimTransport(cfg.ca_pem);
-    HTTPClient claimHttp;
-    String claimTransportCode;
-    String claimTransportMessage;
-    if (!claimTransport.begin(
-          claimHttp, base + String(DEVICE_PAIRING_CLAIM_PATH), 15000,
-          claimTransportCode, claimTransportMessage)) {
-      lastDeviceErrorCode = claimTransportCode.length() ? claimTransportCode : "DEVICE-PAIRING-CLAIM-URL";
-      lastDeviceErrorMessage = claimTransportMessage.length() ? claimTransportMessage : "配對 claim URL 無法初始化";
-      return false;
-    }
-    claimHttp.collectHeaders(pairingHeaders, 1);
-    claimHttp.addHeader("Content-Type", "application/json");
-    const int claimStatus = claimHttp.POST(claimBody);
-    const int claimLength = claimHttp.getSize();
-    const String claimContentType = claimHttp.header("Content-Type");
-    if (claimStatus == HTTP_CODE_ACCEPTED) {
-      claimHttp.end();
-      delay(3000U);
-      continue;
-    }
-    if (claimStatus == HTTP_CODE_GONE) {
-      claimHttp.end();
-      (void)persistPairingState(cfg, "pairing_expired");
-      lastDeviceErrorCode = "DEVICE-PAIRING-EXPIRED";
-      lastDeviceErrorMessage = "配對碼已過期，請重新建立配對；裝置不會無限輪詢";
-      return false;
-    }
-    if (claimStatus != HTTP_CODE_OK || claimLength <= 0 || claimLength > 8192
-        || !claimContentType.startsWith("application/json")) {
-      claimHttp.end();
-      lastDeviceErrorCode = "DEVICE-PAIRING-CLAIM";
-      lastDeviceErrorMessage = "配對 claim HTTP／Content-Type／長度不合法";
-      return false;
-    }
-    JsonDocument claimResponse;
-    const DeserializationError claimJsonError = deserializeJson(claimResponse, claimHttp.getStream());
-    claimHttp.end();
-    const String secret = claimResponse["device_secret"] | "";
-    const JsonVariantConst versionValue = claimResponse["credential_version"];
-    const String claimedDeviceId = claimResponse["device_id"] | "";
-    if (claimJsonError || claimResponse.overflowed() || secret.length() < 32U
-        || secret.length() > inktime::configstore::kMaxDeviceSecretBytes
-        || !versionValue.is<uint32_t>() || versionValue.is<bool>() || versionValue.as<uint32_t>() == 0U
-        || claimedDeviceId != cfg.device_id) {
-      lastDeviceErrorCode = "DEVICE-PAIRING-SCHEMA";
-      lastDeviceErrorMessage = "配對 claim credential schema 不合法";
-      return false;
-    }
-    Config candidate = cfg;
-    candidate.device_secret = secret;
-    candidate.credential_version = versionValue.as<uint32_t>();
-    candidate.auth_state = "paired";
-#if INKTIME_PHOTOPAINTER_ENABLED
-    JsonObject claimConfig = claimResponse["config"].as<JsonObject>();
-    const String delivery = claimConfig["delivery_mode"] | candidate.delivery_mode;
-    const String button = claimConfig["button_wake_action"] | candidate.button_wake_action;
-    if (validDeliveryMode(delivery)) candidate.delivery_mode = delivery;
-    if (validButtonWakeAction(button)) candidate.button_wake_action = button;
-#endif
-    String persistError;
-    if (!saveConfig(candidate, &persistError)) {
-      setConfigPersistenceError(persistError);
-      return false;
-    }
-    cfg = candidate;
-    deviceAuthInvalid = false;
-    lastDeviceErrorCode = "";
-    lastDeviceErrorMessage = "";
-    return true;
+  if (!requestReused) {
+    (void)photoPainter.displayPairingScreen(
+      cfg.wifi_ssid.c_str(), "", base.c_str(), pairingCode.c_str());
   }
-  (void)persistPairingState(cfg, "pairing_expired");
-  lastDeviceErrorCode = "DEVICE-PAIRING-TIMEOUT";
-  lastDeviceErrorMessage = "管理員核准逾時；配對碼已失效，請重新建立配對";
-  return false;
+#else
+  if (!requestReused) (void)displayPairingCode(cfg, pairingCode);
+#endif
+  return claimPairingCredential(cfg, base);
 }
 
 static bool queueAckIdempotencyKey(const PendingQueueAck &pending, String &key) {
@@ -2494,12 +2726,6 @@ static bool commitActiveScheduleAndConfig(
     errorOut = persistError;
     return failOfflineScheduleTransaction("離線排程 Config A/B pointer 無法 commit");
   }
-  journal.phase = inktime::configstore::JournalPhase::ConfigCommitted;
-  if (!configStore.writeJournal(journal, persistError)
-      || !configStore.clearJournal(persistError)) {
-    errorOut = persistError;
-    return failOfflineScheduleTransaction("離線排程完成 journal 無法清除");
-  }
   cfg = candidate;
   serverConfigChanged = true;
   offlineScheduleTxnBlocked = false;
@@ -2956,9 +3182,6 @@ static bool reconcilePendingScheduleConfigTransaction(Config &cfg) {
     && activePresent
     && activeSlot == journal.previous_active_slot
     && activeGeneration == journal.previous_generation;
-  const bool preparedPointer = activePresent
-    && activeSlot == journal.prepared_slot
-    && activeGeneration == journal.prepared_generation;
   const bool targetScheduleActive = activeScheduleId == journal.target_schedule_id.c_str();
 
   if (journal.phase == inktime::configstore::JournalPhase::Prepared
@@ -2970,27 +3193,22 @@ static bool reconcilePendingScheduleConfigTransaction(Config &cfg) {
     }
     return true;
   }
+  if (journal.phase != inktime::configstore::JournalPhase::SchedulePromoted) {
+    return failOfflineScheduleTransaction("離線排程 transaction 未完成 promotion，已 fail-closed");
+  }
   if (activeScheduleId.length() == 0U || !targetScheduleActive) {
     return failOfflineScheduleTransaction("離線排程 active 身分與 recovery target 不一致");
   }
   if (!activePresent) {
     return failOfflineScheduleTransaction("離線排程 active schedule 存在但 Config pointer 遺失");
   }
-  if (!preparedPointer) {
-    String commitError;
-    if (!configStore.commitPreparedSlot(
-          journal.prepared_slot,
-          journal.prepared_generation,
-          preparedPayload,
-          commitError)) {
-      return failOfflineScheduleTransaction("離線排程 recovery 無法 commit prepared Config");
-    }
-  }
-  journal.phase = inktime::configstore::JournalPhase::ConfigCommitted;
-  String commitJournalError;
-  if (!configStore.writeJournal(journal, commitJournalError)
-      || !configStore.clearJournal(commitJournalError)) {
-    return failOfflineScheduleTransaction("離線排程 recovery journal 無法完成清除");
+  String commitError;
+  if (!configStore.commitPreparedSlot(
+        journal.prepared_slot,
+        journal.prepared_generation,
+        preparedPayload,
+        commitError)) {
+    return failOfflineScheduleTransaction("離線排程 recovery 無法 commit prepared Config");
   }
   applyConfigPayload(preparedPayload, cfg);
   serverConfigChanged = true;
@@ -3599,11 +3817,6 @@ static bool promoteStagedNextIfDue(Config &cfg, time_t nowEpoch) {
       || !configStore.commit(prepared, persistError)) {
     return failOfflineScheduleTransaction("離線排程 midnight Config commit 失敗");
   }
-  journal.phase = inktime::configstore::JournalPhase::ConfigCommitted;
-  if (!configStore.writeJournal(journal, persistError)
-      || !configStore.clearJournal(persistError)) {
-    return failOfflineScheduleTransaction("離線排程 midnight journal 無法清除");
-  }
   cfg = candidate;
   serverConfigChanged = true;
   offlineScheduleTxnBlocked = false;
@@ -3692,6 +3905,8 @@ void reportDeviceStatus(Config &cfg, bool displayUpdated) {
   payload["release_id"] = currentReleaseId;
   payload["error_code"] = lastDeviceErrorCode;
   payload["error_message"] = lastDeviceErrorMessage;
+  payload["warning_code"] = lastDeviceWarningCode;
+  payload["warning_message"] = lastDeviceWarningMessage;
 #if INKTIME_ALLOW_INSECURE_DEVICE_HTTP
   payload["transport_profile"] = "trusted-lan-http";
   payload["transport_security_state"] = "degraded";
@@ -4357,7 +4572,8 @@ void setup() {
 #if INKTIME_PHOTOPAINTER_ENABLED
   const esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
   const bool timerWake = wakeCause == ESP_SLEEP_WAKEUP_TIMER;
-  if (!offlineScheduleTxnBlocked && g_cfg.delivery_mode == "inktime_offline_schedule"
+  if (!offlineScheduleTxnBlocked && g_cfg.auth_state == "paired" && !deviceAuthInvalid
+      && g_cfg.delivery_mode == "inktime_offline_schedule"
       && photoPainter.wokeFromUserButton()
       && g_cfg.button_wake_action == "local_next") {
     // local_next is a strict cache-only action.  It must not connect Wi-Fi or
@@ -4365,7 +4581,8 @@ void setup() {
     runOfflineLocalCycle(true);
     return;
   }
-  if (!offlineScheduleTxnBlocked && g_cfg.delivery_mode == "inktime_offline_schedule" && timerWake
+  if (!offlineScheduleTxnBlocked && g_cfg.auth_state == "paired" && !deviceAuthInvalid
+      && g_cfg.delivery_mode == "inktime_offline_schedule" && timerWake
       && !photoPainter.forceNetworkRefresh()) {
     time_t rtcEpoch = 0;
     if (!photoPainter.readRtc(rtcEpoch)) {
@@ -4431,7 +4648,7 @@ void setup() {
   if (g_cfg.auth_state == "auth_invalid" || g_cfg.auth_state == "revoked") {
     repairPermission = checkRepairPermission(g_cfg);
     if (!repairPermission) {
-      goDeepSleepSeconds(60U);
+      goDeepSleepSeconds(pairingBackoffSeconds(g_cfg));
       return;
     }
   }
@@ -4440,13 +4657,13 @@ void setup() {
       lastDeviceErrorCode = "DEVICE-PAIRING-RECOVERY";
       lastDeviceErrorMessage = "自動配對尚未完成；本輪停止網路工作並等待 bounded recovery wake";
     }
-    goDeepSleepSeconds(60U);
+    goDeepSleepSeconds(pairingBackoffSeconds(g_cfg));
     return;
   }
-  if (!hasDeviceCredential(g_cfg)) {
+  if (g_cfg.auth_state != "paired" || !hasDeviceCredential(g_cfg)) {
     lastDeviceErrorCode = "DEVICE-AUTH-CONFIG";
-    lastDeviceErrorMessage = "裝置沒有可用 credential；不進入未授權的下載或狀態回報流程";
-    goDeepSleepSeconds(60U);
+    lastDeviceErrorMessage = "配對尚未完成；不進入未授權的下載或狀態回報流程";
+    goDeepSleepSeconds(pairingBackoffSeconds(g_cfg));
     return;
   }
 

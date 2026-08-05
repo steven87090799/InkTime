@@ -17,6 +17,8 @@ constexpr size_t kMaxDeviceTokenBytes = 1024U;
 constexpr size_t kMaxDeviceSecretBytes = 256U;
 constexpr size_t kMaxDeviceIdBytes = 128U;
 constexpr size_t kMaxAuthStateBytes = 32U;
+constexpr size_t kMaxPairingIdBytes = 128U;
+constexpr size_t kMaxPairingNonceBytes = 256U;
 constexpr size_t kMaxDeliveryModeBytes = 64U;
 constexpr size_t kMaxButtonWakeActionBytes = 64U;
 constexpr size_t kMaxScheduleIdBytes = 160U;
@@ -25,9 +27,10 @@ constexpr uint32_t kConfigSlotMagic = 0x494E4B43U;  // INKC
 constexpr uint32_t kConfigPointerMagic = 0x494E4B50U;  // INKP
 constexpr uint32_t kScheduleJournalMagic = 0x494E4B4AU;  // INKJ
 constexpr uint8_t kEnvelopeVersion = 1U;
-constexpr uint8_t kPayloadSchemaVersion = 2U;
+constexpr uint8_t kPayloadSchemaVersion = 3U;
 constexpr uint8_t kPointerVersion = 1U;
 constexpr uint8_t kJournalVersion = 1U;
+constexpr const char* kGenericCommitTargetScheduleId = "__config_commit__";
 
 struct ScheduleSlot {
   uint8_t hour = 0U;
@@ -44,6 +47,11 @@ struct ConfigPayload {
   std::string device_id;
   std::string auth_state = "unpaired";
   uint32_t credential_version = 0U;
+  std::string pairing_id;
+  std::string pairing_nonce;
+  uint64_t pairing_expires_at_epoch = 0U;
+  uint64_t pairing_retry_at_epoch = 0U;
+  uint8_t pairing_retry_attempt = 0U;
   int32_t tz_offset_minutes = 8 * 60;
   uint8_t refresh_hour = 8U;
   uint8_t refresh_minute = 0U;
@@ -61,6 +69,7 @@ enum class JournalPhase : uint8_t {
   Prepared = 1U,
   SchedulePromoted = 2U,
   ConfigCommitted = 3U,
+  Aborted = 4U,
 };
 
 struct RecoveryJournal {
@@ -86,6 +95,11 @@ inline bool operator==(const ConfigPayload& left, const ConfigPayload& right) {
       || left.device_id != right.device_id
       || left.auth_state != right.auth_state
       || left.credential_version != right.credential_version
+      || left.pairing_id != right.pairing_id
+      || left.pairing_nonce != right.pairing_nonce
+      || left.pairing_expires_at_epoch != right.pairing_expires_at_epoch
+      || left.pairing_retry_at_epoch != right.pairing_retry_at_epoch
+      || left.pairing_retry_attempt != right.pairing_retry_attempt
       || left.tz_offset_minutes != right.tz_offset_minutes
       || left.refresh_hour != right.refresh_hour
       || left.refresh_minute != right.refresh_minute
@@ -220,6 +234,8 @@ inline bool validate_payload(const ConfigPayload& payload, std::string& error) {
       || payload.device_secret.size() > kMaxDeviceSecretBytes
       || payload.device_id.size() > kMaxDeviceIdBytes
       || payload.auth_state.size() > kMaxAuthStateBytes
+      || payload.pairing_id.size() > kMaxPairingIdBytes
+      || payload.pairing_nonce.size() > kMaxPairingNonceBytes
       || payload.delivery_mode.size() > kMaxDeliveryModeBytes
       || payload.button_wake_action.size() > kMaxButtonWakeActionBytes) {
     set_error(error, "PAIRING-NVS-001");
@@ -237,9 +253,20 @@ inline bool validate_payload(const ConfigPayload& payload, std::string& error) {
       || (payload.auth_state != "unpaired"
           && payload.auth_state != "pairing_pending"
           && payload.auth_state != "paired"
+          && payload.auth_state != "credential_issued"
           && payload.auth_state != "revoked"
           && payload.auth_state != "auth_invalid"
           && payload.auth_state != "pairing_expired")) {
+    set_error(error, "PAIRING-NVS-001");
+    return false;
+  }
+  if (payload.pairing_retry_attempt > 8U
+      || (!payload.pairing_id.empty() && payload.pairing_nonce.empty())
+      || (!payload.pairing_nonce.empty() && payload.pairing_id.empty()
+          && payload.auth_state != "pairing_pending")
+      || (payload.auth_state == "credential_issued"
+          && (payload.device_secret.empty() || payload.pairing_id.empty()
+              || payload.pairing_nonce.empty()))) {
     set_error(error, "PAIRING-NVS-001");
     return false;
   }
@@ -285,12 +312,17 @@ inline bool serialize_payload(const ConfigPayload& payload, std::string& output,
       || !append_string(output, payload.button_wake_action, kMaxButtonWakeActionBytes)
       || !append_string(output, payload.device_secret, kMaxDeviceSecretBytes)
       || !append_string(output, payload.device_id, kMaxDeviceIdBytes)
-      || !append_string(output, payload.auth_state, kMaxAuthStateBytes)) {
+      || !append_string(output, payload.auth_state, kMaxAuthStateBytes)
+      || !append_string(output, payload.pairing_id, kMaxPairingIdBytes)
+      || !append_string(output, payload.pairing_nonce, kMaxPairingNonceBytes)) {
     set_error(error, "PAIRING-NVS-001");
     return false;
   }
   append_u32(output, payload.config_version);
   append_u32(output, payload.credential_version);
+  append_u64(output, payload.pairing_expires_at_epoch);
+  append_u64(output, payload.pairing_retry_at_epoch);
+  append_u8(output, payload.pairing_retry_attempt);
   for (uint8_t index = 0U; index < kMaxConfigSlots; ++index) {
     append_u8(output, payload.schedule_slots[index].hour);
     append_u8(output, payload.schedule_slots[index].minute);
@@ -305,7 +337,7 @@ inline bool serialize_payload(const ConfigPayload& payload, std::string& output,
 inline bool deserialize_payload(const std::string& input, ConfigPayload& payload, std::string& error) {
   size_t offset = 0U;
   uint8_t schema = 0U;
-  if (!take_u8(input, offset, schema) || (schema != 1U && schema != kPayloadSchemaVersion)
+  if (!take_u8(input, offset, schema) || (schema != 1U && schema != 2U && schema != kPayloadSchemaVersion)
       || !take_string(input, offset, payload.wifi_ssid, kMaxWifiSsidBytes)
       || !take_string(input, offset, payload.wifi_pass, kMaxWifiPasswordBytes)
       || !take_string(input, offset, payload.backend_hostport, kMaxBackendHostportBytes)
@@ -332,6 +364,11 @@ inline bool deserialize_payload(const std::string& input, ConfigPayload& payload
   payload.device_id.clear();
   payload.auth_state = payload.device_token.empty() ? "unpaired" : "paired";
   payload.credential_version = 0U;
+  payload.pairing_id.clear();
+  payload.pairing_nonce.clear();
+  payload.pairing_expires_at_epoch = 0U;
+  payload.pairing_retry_at_epoch = 0U;
+  payload.pairing_retry_attempt = 0U;
   if (schema >= 2U
       && (!take_string(input, offset, payload.device_secret, kMaxDeviceSecretBytes)
           || !take_string(input, offset, payload.device_id, kMaxDeviceIdBytes)
@@ -339,8 +376,21 @@ inline bool deserialize_payload(const std::string& input, ConfigPayload& payload
     set_error(error, "PAIRING-NVS-004");
     return false;
   }
+  if (schema >= 3U
+      && (!take_string(input, offset, payload.pairing_id, kMaxPairingIdBytes)
+          || !take_string(input, offset, payload.pairing_nonce, kMaxPairingNonceBytes))) {
+    set_error(error, "PAIRING-NVS-004");
+    return false;
+  }
   if (!take_u32(input, offset, payload.config_version)
       || (schema >= 2U && !take_u32(input, offset, payload.credential_version))) {
+    set_error(error, "PAIRING-NVS-004");
+    return false;
+  }
+  if (schema >= 3U
+      && (!take_u64(input, offset, payload.pairing_expires_at_epoch)
+          || !take_u64(input, offset, payload.pairing_retry_at_epoch)
+          || !take_u8(input, offset, payload.pairing_retry_attempt))) {
     set_error(error, "PAIRING-NVS-004");
     return false;
   }
@@ -393,7 +443,7 @@ inline bool decode_slot(
       || !take_u8(input, offset, schema) || !take_u64(input, offset, generation)
       || !take_u32(input, offset, length) || !take_u32(input, offset, expected_crc)
       || magic != kConfigSlotMagic || envelope != kEnvelopeVersion
-      || (schema != 1U && schema != kPayloadSchemaVersion) || length > kMaxConfigPayloadBytes
+      || (schema != 1U && schema != 2U && schema != kPayloadSchemaVersion) || length > kMaxConfigPayloadBytes
       || length != input.size() - offset) {
     set_error(error, "PAIRING-NVS-004");
     return false;
@@ -453,7 +503,8 @@ inline bool decode_pointer(
 }
 
 inline bool encode_journal(const RecoveryJournal& journal, std::string& output, std::string& error) {
-  if (journal.phase == JournalPhase::None) {
+  if (static_cast<uint8_t>(journal.phase) < static_cast<uint8_t>(JournalPhase::Prepared)
+      || static_cast<uint8_t>(journal.phase) > static_cast<uint8_t>(JournalPhase::Aborted)) {
     set_error(error, "PAIRING-NVS-005");
     return false;
   }
@@ -498,7 +549,7 @@ inline bool decode_journal(const std::string& input, RecoveryJournal& journal, s
       || !take_u32(input, offset, actual_crc)
       || offset != input.size() || magic != kScheduleJournalMagic
       || version != kJournalVersion || phase < static_cast<uint8_t>(JournalPhase::Prepared)
-      || phase > static_cast<uint8_t>(JournalPhase::ConfigCommitted)
+      || phase > static_cast<uint8_t>(JournalPhase::Aborted)
       || (previous_slot != 0U && !valid_slot_name(static_cast<char>(previous_slot)))
       || !valid_slot_name(static_cast<char>(prepared_slot)) || actual_crc != expected_crc) {
     set_error(error, "PAIRING-NVS-005");

@@ -85,13 +85,13 @@ Board 選 ESP32-S3，啟用 OPI PSRAM。正式版 `INKTIME_DEBUG_LOG=0`；短期
 1. 首次開機或按住 GPIO38 再上電，裝置建立 `InkTime-XXXXXX` AP；5 分鐘未儲存會睡眠。
 2. AP 密碼為每次啟動重新產生的隨機值，不由 SSID 尾碼推導；請以裝置畫面或 AP 設定頁顯示值為準，不使用共用密碼。
 3. 連到 AP，瀏覽 `192.168.4.1`，只填 Wi-Fi SSID／密碼與 InkTime URL（例如 `http://192.168.1.20:8765`），不要填 Token。
-4. 儲存後裝置連 Wi-Fi，向 `/api/device/v1/pairing/request` 取得短期配對碼，並在面板顯示配對碼。
-5. 管理員在 InkTime Web「裝置」頁核對裝置資訊與配對碼後按「核准配對」。裝置輪詢 claim；核准後只接收一次長效 Device Secret，寫入既有 A/B NVS 設定並立即開始受保護的 Manifest／Queue／Status 流程。
+4. 儲存後裝置連 Wi-Fi，向 `/api/device/v1/pairing/request` 取得短期配對碼，並只在面板顯示配對碼；伺服器只保存 HMAC hash。
+5. 管理員在 InkTime Web「裝置」頁輸入實體面板上的配對碼，再核對裝置資訊並按「核准配對」。裝置輪詢 claim；核准後把 credential 先寫入 A/B NVS，再以 Bearer Secret／version confirm。只有 confirm 成功才建立並啟用正式裝置，之後開始受保護的 Manifest／Queue／Status 流程。
 6. 裝置重啟或下一次喚醒時不需要登入或 Session；使用 Device Secret 加上 credential version 直接呼叫裝置 API，完成下載、驗證、刷新後 deep sleep。
 
 Wi-Fi、伺服器 URL 與裝置識別是尚未連網前的 bootstrap，無法從 InkTime Web 遠端設定。面板 Profile、時區、每日 HH:MM、0°／180°旋轉與啟停仍在 InkTime「裝置」頁管理；下一次取得 Manifest 時自動套用並寫入 NVS，再以設定版本 ACK 證明已生效。
 
-Device Secret 只在 claim 成功回應中顯示給裝置一次，server 只保存雜湊；不進 URL、HTML、序列 Log、Activity 或照片。管理員撤銷或啟用重新配對後，舊 Secret 立即失效，裝置必須完成新的核准流程。既有 Legacy 裝置仍可依相容路徑使用 Bearer Token；PhotoPainter Stock 模式維持 `/dataUP`，不參與自動配對。
+Device Secret 只在 claim 成功回應中交給裝置，短效 envelope 允許同一 pairing retry 取回相同值；confirm 後 server 只保存雜湊。完整值不進 URL、HTML、序列 Log、Activity 或照片。管理員撤銷或啟用重新配對後，舊 Secret 立即失效，裝置必須完成新的核准流程。既有 Legacy 裝置仍可依相容路徑使用 Bearer Token；PhotoPainter Stock 模式維持 `/dataUP`，不參與自動配對。
 
 ## 6. 網路協定
 

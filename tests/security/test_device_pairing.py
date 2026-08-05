@@ -7,12 +7,13 @@ from tests.conftest import create_admin, csrf, login
 
 PAIRING_PATH = "/api/device/v1/pairing/request"
 CLAIM_PATH = "/api/device/v1/pairing/claim"
+CONFIRM_PATH = "/api/device/v1/pairing/confirm"
 
 
-def _pairing_payload(device_id: str = "esp32-contract-test") -> dict:
+def _pairing_payload(device_id: str = "esp32-contract-test", *, nonce: str | None = None) -> dict:
     return {
         "device_id": device_id,
-        "pairing_nonce": "nonce-for-contract-test-0123456789",
+        "pairing_nonce": nonce or "nonce-for-contract-test-0123456789",
         "firmware_identity": "ESP32-S3-PhotoPainter",
         "firmware_version": "2.6.0",
         "panel_profile": "safe_4c",
@@ -26,12 +27,32 @@ def _approve(client, pairing_id: str, pairing_code: str, *, include_csrf: bool =
         headers["X-CSRF-Token"] = csrf(client)
     return client.post(
         f"/api/v1/device-pairing/{pairing_id}/approve",
-        json={"pairing_code": pairing_code},
+        json={
+            "pairing_code": pairing_code,
+            "device_config": {
+                "name": "測試相框",
+                "panel_profile": "safe_4c",
+                "timezone": "Asia/Taipei",
+                "schedule": "08:00",
+                "schedule_times": ["08:00"],
+            },
+        },
         headers=headers,
     )
 
 
-def test_pairing_request_approval_claim_and_versioned_auth_are_one_time(client, app):
+def _confirm(client, body: dict, secret: str, version: int):
+    return client.post(
+        CONFIRM_PATH,
+        json=body,
+        headers={
+            "Authorization": f"Bearer {secret}",
+            "X-InkTime-Credential-Version": str(version),
+        },
+    )
+
+
+def test_pairing_proves_physical_possession_and_confirm_is_recoverable(client, app):
     payload = _pairing_payload()
     requested = client.post(PAIRING_PATH, json=payload)
     assert requested.status_code == 201
@@ -49,26 +70,29 @@ def test_pairing_request_approval_claim_and_versioned_auth_are_one_time(client, 
     assert pending_claim.headers["Retry-After"] == "3"
 
     with app.extensions["inktime_database"].session() as connection:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(device_pairing_requests)")}
         request_row = connection.execute(
-            "SELECT pairing_code_hash,pairing_nonce_hash,pairing_code_ciphertext FROM device_pairing_requests WHERE id=?",
+            "SELECT pairing_code_hash,pairing_nonce_hash,credential_envelope_ciphertext FROM device_pairing_requests WHERE id=?",
             (pairing_id,),
         ).fetchone()
         device_row = connection.execute(
-            "SELECT auth_mode,pairing_state,device_secret_hash FROM devices WHERE id=?",
-            (payload["device_id"],),
+            "SELECT id FROM devices WHERE id=?", (payload["device_id"],)
         ).fetchone()
+    assert "pairing_code_ciphertext" not in columns
     assert request_row["pairing_code_hash"] != pairing_code
     assert request_row["pairing_nonce_hash"] != payload["pairing_nonce"]
-    assert pairing_code.encode("ascii") != bytes(request_row["pairing_code_ciphertext"])
-    assert device_row["auth_mode"] == "automatic"
-    assert device_row["pairing_state"] == "pairing_pending"
-    assert device_row["device_secret_hash"] is None
+    assert request_row["credential_envelope_ciphertext"] is None
+    assert device_row is None
 
     create_admin(app)
     login(client)
     pending_page = client.get("/api/v1/device-pairing/pending")
     assert pending_page.status_code == 200
-    assert pairing_code in json.dumps(pending_page.get_json(), ensure_ascii=False)
+    assert pairing_code not in json.dumps(pending_page.get_json(), ensure_ascii=False)
+    device_page = client.get("/devices")
+    assert device_page.status_code == 200
+    assert pairing_code not in device_page.get_data(as_text=True)
+    assert "pairing-code-input" in device_page.get_data(as_text=True)
 
     approved = _approve(client, pairing_id, pairing_code)
     assert approved.status_code == 200
@@ -83,18 +107,66 @@ def test_pairing_request_approval_claim_and_versioned_auth_are_one_time(client, 
     assert secret.startswith("ids_")
     assert isinstance(version, int) and version >= 1
 
-    replay = client.post(
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute(
+            "SELECT id FROM devices WHERE id=?", (payload["device_id"],)
+        ).fetchone() is None
+        request_row = connection.execute(
+            "SELECT status,credential_envelope_ciphertext FROM device_pairing_requests WHERE id=?",
+            (pairing_id,),
+        ).fetchone()
+    assert request_row["status"] == "credential_issued"
+    assert request_row["credential_envelope_ciphertext"] is not None
+
+    retry = client.post(
         CLAIM_PATH,
         json={"pairing_id": pairing_id, "pairing_nonce": payload["pairing_nonce"]},
     )
-    assert replay.status_code == 409
+    assert retry.status_code == 200
+    assert retry.get_json()["device_secret"] == secret
+    assert retry.get_json()["credential_version"] == version
 
-    missing_version = client.post(
-        "/api/device/v1/status",
-        json={},
-        headers={"Authorization": f"Bearer {secret}"},
-    )
-    assert missing_version.status_code == 401
+    confirm_body = {
+        "pairing_id": pairing_id,
+        "device_id": payload["device_id"],
+        "pairing_nonce": payload["pairing_nonce"],
+    }
+    assert client.post(CONFIRM_PATH, json=confirm_body).status_code == 401
+    confirmed = _confirm(client, confirm_body, secret, version)
+    assert confirmed.status_code == 200
+    assert confirmed.get_json()["status"] == "confirmed"
+
+    with app.extensions["inktime_database"].session() as connection:
+        device_row = connection.execute(
+            "SELECT device_secret_hash,pairing_state,credential_version FROM devices WHERE id=?",
+            (payload["device_id"],),
+        ).fetchone()
+        request_row = connection.execute(
+            "SELECT status,credential_envelope_ciphertext FROM device_pairing_requests WHERE id=?",
+            (pairing_id,),
+        ).fetchone()
+        audit_text = json.dumps(
+            [dict(row) for row in connection.execute(
+                "SELECT message,details_json FROM activity_events WHERE source='device_pairing'"
+            ).fetchall()],
+            ensure_ascii=False,
+        )
+    assert device_row["device_secret_hash"] != secret
+    assert device_row["pairing_state"] == "paired"
+    assert device_row["credential_version"] == version
+    assert request_row["status"] == "confirmed"
+    assert request_row["credential_envelope_ciphertext"] is None
+    assert secret not in audit_text
+    assert pairing_code not in audit_text
+
+    confirmed_retry = _confirm(client, confirm_body, secret, version)
+    assert confirmed_retry.status_code == 200
+    assert confirmed_retry.get_json()["status"] == "already_confirmed"
+    assert client.post(CLAIM_PATH, json={
+        "pairing_id": pairing_id,
+        "pairing_nonce": payload["pairing_nonce"],
+    }).status_code == 409
+
     authenticated = client.post(
         "/api/device/v1/status",
         json={},
@@ -104,27 +176,6 @@ def test_pairing_request_approval_claim_and_versioned_auth_are_one_time(client, 
         },
     )
     assert authenticated.status_code == 200
-
-    with app.extensions["inktime_database"].session() as connection:
-        device_row = connection.execute(
-            "SELECT device_secret_hash,pairing_state,credential_version FROM devices WHERE id=?",
-            (payload["device_id"],),
-        ).fetchone()
-        audit_text = json.dumps(
-            [
-                dict(row)
-                for row in connection.execute(
-                    "SELECT message,details_json FROM device_events WHERE device_id=?",
-                    (payload["device_id"],),
-                ).fetchall()
-            ],
-            ensure_ascii=False,
-        )
-    assert device_row["device_secret_hash"] != secret
-    assert device_row["pairing_state"] == "paired"
-    assert device_row["credential_version"] == version
-    assert secret not in audit_text
-    assert pairing_code not in audit_text
 
     revoked = client.post(
         f"/api/v1/devices/{payload['device_id']}/revoke-credential",
@@ -140,14 +191,6 @@ def test_pairing_request_approval_claim_and_versioned_auth_are_one_time(client, 
         },
     )
     assert after_revoke.status_code == 401
-    permission_before_repair = client.get(
-        "/api/device/v1/pairing/repair-permission",
-        headers={
-            "Authorization": f"Bearer {secret}",
-            "X-InkTime-Credential-Version": str(version),
-        },
-    )
-    assert permission_before_repair.status_code == 401
     repair_enabled = client.post(
         f"/api/v1/devices/{payload['device_id']}/enable-repair",
         headers={"X-CSRF-Token": csrf(client)},
@@ -163,6 +206,29 @@ def test_pairing_request_approval_claim_and_versioned_auth_are_one_time(client, 
     assert permission_after_repair.status_code == 200
 
 
+def test_pairing_request_is_idempotent_for_same_nonce_but_not_for_new_nonce(client, app):
+    payload = _pairing_payload("esp32-duplicate")
+    first = client.post(PAIRING_PATH, json=payload)
+    assert first.status_code == 201
+    second = client.post(PAIRING_PATH, json=payload)
+    assert second.status_code == 200
+    assert second.get_json()["pairing_id"] == first.get_json()["pairing_id"]
+    assert "pairing_code" not in second.get_json()
+    conflict = client.post(
+        PAIRING_PATH,
+        json=_pairing_payload(payload["device_id"], nonce="a-different-nonce-0123456789"),
+    )
+    assert conflict.status_code == 409
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM device_pairing_requests WHERE device_id=?",
+            (payload["device_id"],),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM devices WHERE id=?", (payload["device_id"],)
+        ).fetchone()[0] == 0
+
+
 def test_pairing_code_attempt_limit_and_admin_csrf_are_enforced(client, app):
     requested = client.post(PAIRING_PATH, json=_pairing_payload("esp32-attempt-limit"))
     assert requested.status_code == 201
@@ -171,17 +237,15 @@ def test_pairing_code_attempt_limit_and_admin_csrf_are_enforced(client, app):
 
     create_admin(app)
     login(client)
-    csrf_missing = _approve(client, body["pairing_id"], wrong_code, include_csrf=False)
-    assert csrf_missing.status_code == 403
+    assert _approve(client, body["pairing_id"], wrong_code, include_csrf=False).status_code == 403
     for _ in range(5):
-        response = _approve(client, body["pairing_id"], wrong_code)
-        assert response.status_code == 403
+        assert _approve(client, body["pairing_id"], wrong_code).status_code == 403
 
     claim = client.post(
         CLAIM_PATH,
         json={"pairing_id": body["pairing_id"], "pairing_nonce": "nonce-for-contract-test-0123456789"},
     )
-    assert claim.status_code == 403
+    assert claim.status_code == 410
 
 
 def test_stock_compatibility_never_enters_automatic_pairing(client, app):

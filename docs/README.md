@@ -91,7 +91,7 @@
 ### 裝置與電子紙
 
 - [`devices/ESP32_GUIDE_ZH_TW.md`](devices/ESP32_GUIDE_ZH_TW.md)：ESP32-S3、配網、Manifest、低功耗與燒錄。
-- [`devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md`](devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md)：自動配對 request／approve／claim、Device Secret、版本 credential、撤銷、重新配對與 Stock 隔離。
+- [`devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md`](devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md)：實體 possession 配對、pending enrollment、可恢復 claim／confirm、Device Secret、撤銷、repair 與 Stock 隔離。
 - [`devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md`](devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)：六／七色、抖動、ACK、通知與 Webhook。
 - [`devices/DEVICE_PROTOCOL_ZH_TW.md`](devices/DEVICE_PROTOCOL_ZH_TW.md)：離線 Queue Manifest、下載與 ACK 協定。
 - [`devices/DEVICE_TRANSPORT_SECURITY_ZH_TW.md`](devices/DEVICE_TRANSPORT_SECURITY_ZH_TW.md)：Device Secret／Legacy Token、HTTP/HTTPS 與傳輸限制。
