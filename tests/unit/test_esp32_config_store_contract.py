@@ -111,7 +111,7 @@ def test_canonical_config_survives_legacy_cleanup_failure_and_records_warning():
 
 def test_firmware_current_version_is_bumped_for_recovery_semantics():
     firmware = FIRMWARE.read_text(encoding="utf-8")
-    assert '#define INKTIME_FIRMWARE_VERSION "2.7.0"' in firmware
+    assert '#define INKTIME_FIRMWARE_VERSION "2.7.1"' in firmware
 
 
 def test_pairing_lifecycle_persists_resume_state_and_uses_confirm_header():
@@ -122,6 +122,12 @@ def test_pairing_lifecycle_persists_resume_state_and_uses_confirm_header():
         "pairing_retry_at_epoch",
         "pairingBackoffForAttempt",
         "pairingBackoffSeconds",
+        "pairing_recovery_core.h",
+        "PairingRetryMetadataStore",
+        "pairingRetryNowEpoch",
+        "PAIRING-NVS-008",
+        "persistRepairPermissionRetry",
+        "pairingRetryDue(g_cfg)",
         "X-InkTime-Credential-Version",
         "Authorization\", \"Bearer \" + cfg.device_secret",
         "kPairingPollWindowMs = 30000U",

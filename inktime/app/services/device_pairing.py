@@ -738,6 +738,8 @@ class DevicePairingService:
                     raise DevicePairingError("confirm credential 驗證失敗", status_code=401, error_code="PAIR-008")
                 register_secret(device_secret)
                 return 200, {"status": "already_confirmed", "device_id": device_id, "credential_version": credential_version}
+            if status in {"rejected", "expired"}:
+                raise DevicePairingError("配對請求已終止，必須重新取得管理員 permission", status_code=410, error_code="PAIR-007")
             if status != "credential_issued":
                 if status == "pending":
                     return 202, {"status": "pairing_pending", "poll_after_seconds": PAIRING_POLL_SECONDS}
@@ -770,14 +772,14 @@ class DevicePairingService:
             row = connection.execute("SELECT device_id,status FROM device_pairing_requests WHERE id=?", (pairing_id,)).fetchone()
             if row is None:
                 raise KeyError(pairing_id)
-            if str(row["status"]) not in {"pending", "approved"}:
+            if str(row["status"]) not in {"pending", "approved", "credential_issued"}:
                 raise DevicePairingError("配對請求不存在或已失效", status_code=410, error_code="PAIR-007")
             connection.execute(
                 "UPDATE device_pairing_requests SET status='rejected',credential_envelope_ciphertext=NULL,credential_envelope_expires_at=NULL WHERE id=?",
                 (pairing_id,),
             )
             connection.execute(
-                "UPDATE devices SET pairing_state=CASE WHEN auth_revoked_at IS NULL THEN 'unpaired' ELSE 'revoked' END,enabled=CASE WHEN auth_revoked_at IS NULL THEN 0 ELSE enabled END,pairing_code_hash=NULL,pairing_expires_at=NULL,updated_at=? WHERE id=? AND pairing_state='pairing_pending'",
+                "UPDATE devices SET pairing_state=CASE WHEN auth_revoked_at IS NULL THEN 'unpaired' ELSE 'revoked' END,enabled=CASE WHEN auth_revoked_at IS NULL THEN 0 ELSE enabled END,pairing_code_hash=NULL,pairing_expires_at=NULL,repair_allowed_until=NULL,updated_at=? WHERE id=? AND pairing_state='pairing_pending'",
                 (self._iso(now), row["device_id"]),
             )
             self._activity(
