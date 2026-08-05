@@ -4,16 +4,62 @@ on:
   pull_request:
     branches:
       - main
+      - fix/final-production-openrouter-and-runtime-hardening
+    # PR metadata edits (including base retargeting) need a fresh merge-ref validation.
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled, edited]
   push:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      full_suite:
+        description: Run every hosted validation tier
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: inktime-container-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Classify changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      docker: ${{ steps.route.outputs.docker }}
+      tls_security: ${{ steps.route.outputs.tls_security }}
+      provider_ai: ${{ steps.route.outputs.provider_ai }}
+      benchmark: ${{ steps.route.outputs.benchmark }}
+      dependencies: ${{ steps.route.outputs.dependencies }}
+      ci_config: ${{ steps.route.outputs.ci_config }}
+      full_suite: ${{ steps.route.outputs.full_suite }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with: {fetch-depth: 0}
+      - id: route
+        name: Emit source-owned routing flags
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          FORCE_FULL_SUITE: ${{ inputs.full_suite || github.ref == 'refs/heads/main' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+        run: |
+          set -euo pipefail
+          base_sha="${BASE_SHA:-}"
+          if [ -z "${base_sha}" ]; then base_sha="$(git rev-parse HEAD^)"; fi
+          full_suite_arg=""
+          if [ "${FORCE_FULL_SUITE}" = "true" ]; then full_suite_arg="--full-suite"; fi
+          python scripts/ci/changed_paths.py \
+            --base "${base_sha}" \
+            --head "${HEAD_SHA}" \
+            ${full_suite_arg} >> "${GITHUB_OUTPUT}"
+
   container-security:
+    if: ${{ needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.docker == 'true' || needs.changes.outputs.dependencies == 'true' || needs.changes.outputs.ci_config == 'true' }}
+    needs: changes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
@@ -67,6 +113,8 @@ jobs:
           retention-days: 14
 
   benchmark-contract:
+    if: ${{ needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.benchmark == 'true' || needs.changes.outputs.provider_ai == 'true' }}
+    needs: changes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
@@ -88,3 +136,21 @@ jobs:
           path: artifacts/
           if-no-files-found: error
           retention-days: 14
+
+  container-security-gate:
+    name: Container security gate
+    if: ${{ always() }}
+    needs:
+      - changes
+      - container-security
+      - benchmark-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail when a routed container check failed or was cancelled
+        if: ${{ needs.changes.result != 'success' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          echo "A routed container or benchmark check failed or was cancelled." >&2
+          exit 1
+      - name: Accept skipped checks as intentional routing
+        run: echo "Container and benchmark routing completed."
