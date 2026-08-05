@@ -1,4 +1,29 @@
-from scripts.ci.changed_paths import classify_paths
+import pytest
+
+from scripts.ci.changed_paths import _validate_commit_sha, classify_paths
+
+
+def test_commit_sha_validator_accepts_lowercase_and_uppercase_hex():
+    lowercase = "0123456789abcdef" * 2 + "01234567"
+    uppercase = "ABCDEF" * 6 + "ABCD"
+
+    assert _validate_commit_sha(lowercase, "base") == lowercase
+    assert _validate_commit_sha(uppercase, "head") == uppercase
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "a" * 39,
+        "HEAD",
+        "fix/ci-routing-and-nonblocking-delivery",
+        "g" * 40,
+        "a" * 39 + "!",
+    ],
+)
+def test_commit_sha_validator_rejects_non_complete_hex_sha(value):
+    with pytest.raises(ValueError):
+        _validate_commit_sha(value, "head")
 
 
 def test_readme_changes_are_docs_only():

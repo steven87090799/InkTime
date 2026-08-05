@@ -66,7 +66,7 @@ jobs:
 
   python-quality:
     name: Python 3.12 fast quality
-    if: ${{ needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.web_ui == 'true' || needs.changes.outputs.runtime == 'true' || needs.changes.outputs.persistence == 'true' || needs.changes.outputs.docker == 'true' || needs.changes.outputs.tls_security == 'true' || needs.changes.outputs.provider_ai == 'true' || needs.changes.outputs.benchmark == 'true' }}
+    if: ${{ needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.runtime == 'true' || needs.changes.outputs.persistence == 'true' || needs.changes.outputs.docker == 'true' || needs.changes.outputs.tls_security == 'true' || needs.changes.outputs.provider_ai == 'true' || needs.changes.outputs.benchmark == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -108,7 +108,7 @@ jobs:
 
   migration-contract:
     name: Migration contract
-    if: ${{ needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.dependencies == 'true' }}
+    if: ${{ needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.persistence == 'true' || needs.changes.outputs.dependencies == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -128,7 +128,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   compose-lan-production-persistence:
-    if: ${{ needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.persistence == 'true' || needs.changes.outputs.docker == 'true' || needs.changes.outputs.runtime == 'true' }}
+    if: ${{ needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.persistence == 'true' || needs.changes.outputs.docker == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
