@@ -292,6 +292,23 @@ const char*  DEFAULT_HOSTPORT = "";
 const int32_t DEFAULT_TZ_MINUTES = 8 * 60;
 const uint8_t DEFAULT_HOUR    = 8;
 const uint8_t DEFAULT_MINUTE  = 0;
+
+static void applyFixedTimezoneWithoutNtp(int32_t offsetMinutes) {
+  const int32_t absoluteMinutes = offsetMinutes < 0 ? -offsetMinutes : offsetMinutes;
+  const char sign = offsetMinutes >= 0 ? '-' : '+';  // POSIX TZ signs are reversed.
+  char timezone[24] = {0};
+  snprintf(
+    timezone,
+    sizeof(timezone),
+    "UTC%c%02ld:%02ld",
+    sign,
+    static_cast<long>(absoluteMinutes / 60),
+    static_cast<long>(absoluteMinutes % 60)
+  );
+  setenv("TZ", timezone, 1);
+  tzset();
+}
+
 #if INKTIME_PHOTOPAINTER_ENABLED
 const uint16_t DEFAULT_PREFETCH_LEAD_MINUTES = 5;
 
@@ -359,22 +376,6 @@ static bool validSyncStrategy(const String &strategy, const String &syncTime) {
   if (strategy != "first_display_lead" && strategy != "fixed_daily") return false;
   if (strategy == "first_display_lead") return syncTime.isEmpty();
   return !syncTime.isEmpty() && validSyncTime(syncTime);
-}
-
-static void applyFixedTimezoneWithoutNtp(int32_t offsetMinutes) {
-  const int32_t absoluteMinutes = offsetMinutes < 0 ? -offsetMinutes : offsetMinutes;
-  const char sign = offsetMinutes >= 0 ? '-' : '+';  // POSIX TZ signs are reversed.
-  char timezone[24] = {0};
-  snprintf(
-    timezone,
-    sizeof(timezone),
-    "UTC%c%02ld:%02ld",
-    sign,
-    static_cast<long>(absoluteMinutes / 60),
-    static_cast<long>(absoluteMinutes % 60)
-  );
-  setenv("TZ", timezone, 1);
-  tzset();
 }
 
 static bool applyRemoteSchedule(JsonObject remoteConfig, int schemaVersion, Config &candidate) {
@@ -4120,6 +4121,8 @@ static bool offlineFixedDailySyncDue(const Config& cfg, time_t nowEpoch) {
   return strategy == "fixed_daily" && fixedDailySyncDue(syncTime, nowEpoch);
 }
 
+#endif
+
 static void nextRuntimeEpochs(
     const Config& cfg,
     time_t nowEpoch,
@@ -4199,6 +4202,7 @@ static String wakeReasonDetail() {
   }
 }
 
+#if INKTIME_PHOTOPAINTER_ENABLED
 static bool activeHasDueFormalSlot(time_t nowEpoch) {
   if (nowEpoch <= 0) return false;
   String activeJson;
