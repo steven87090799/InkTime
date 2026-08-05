@@ -280,6 +280,155 @@ def test_pairing_proves_physical_possession_and_confirm_is_recoverable(client, a
     )
     assert permission_after_repair.status_code == 200
 
+    repair_payload = _pairing_payload(
+        payload["device_id"], nonce="nonce-for-existing-repair-reject-0123456789"
+    )
+    repair_requested = client.post(PAIRING_PATH, json=repair_payload)
+    assert repair_requested.status_code == 201
+    repair_body = repair_requested.get_json()
+    assert _approve(client, repair_body["pairing_id"], repair_body["pairing_code"]).status_code == 200
+    repair_claimed = client.post(
+        CLAIM_PATH,
+        json={
+            "pairing_id": repair_body["pairing_id"],
+            "pairing_nonce": repair_payload["pairing_nonce"],
+        },
+    )
+    assert repair_claimed.status_code == 200
+    repair_secret = repair_claimed.get_json()["device_secret"]
+    repair_version = repair_claimed.get_json()["credential_version"]
+    repair_rejected = client.post(
+        f"/api/v1/device-pairing/{repair_body['pairing_id']}/reject",
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert repair_rejected.status_code == 200
+
+    with app.extensions["inktime_database"].session() as connection:
+        repaired_device = connection.execute(
+            "SELECT pairing_state,repair_allowed_until FROM devices WHERE id=?",
+            (payload["device_id"],),
+        ).fetchone()
+        repair_request = connection.execute(
+            "SELECT status,credential_envelope_ciphertext FROM device_pairing_requests WHERE id=?",
+            (repair_body["pairing_id"],),
+        ).fetchone()
+    assert repaired_device["pairing_state"] == "revoked"
+    assert repaired_device["repair_allowed_until"] is None
+    assert repair_request["status"] == "rejected"
+    assert repair_request["credential_envelope_ciphertext"] is None
+
+    old_after_repair_reject = client.post(
+        "/api/device/v1/status",
+        json={},
+        headers={
+            "Authorization": f"Bearer {secret}",
+            "X-InkTime-Credential-Version": str(version),
+        },
+    )
+    assert old_after_repair_reject.status_code == 401
+    issued_after_repair_reject = client.post(
+        "/api/device/v1/status",
+        json={},
+        headers={
+            "Authorization": f"Bearer {repair_secret}",
+            "X-InkTime-Credential-Version": str(repair_version),
+        },
+    )
+    assert issued_after_repair_reject.status_code == 401
+    permission_after_reject = client.get(
+        "/api/device/v1/pairing/repair-permission",
+        headers={
+            "Authorization": f"Bearer {secret}",
+            "X-InkTime-Credential-Version": str(version),
+        },
+    )
+    assert permission_after_reject.status_code == 401
+    blocked_request = client.post(
+        PAIRING_PATH,
+        json=_pairing_payload(
+            payload["device_id"], nonce="nonce-before-second-repair-0123456789"
+        ),
+    )
+    assert blocked_request.status_code == 409
+    repair_enabled_again = client.post(
+        f"/api/v1/devices/{payload['device_id']}/enable-repair",
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert repair_enabled_again.status_code == 200
+    permission_after_again = client.get(
+        "/api/device/v1/pairing/repair-permission",
+        headers={
+            "Authorization": f"Bearer {secret}",
+            "X-InkTime-Credential-Version": str(version),
+        },
+    )
+    assert permission_after_again.status_code == 200
+
+
+def test_admin_can_reject_issued_credential_before_confirm(client, app):
+    payload = _pairing_payload("esp32-admin-reject")
+    requested = client.post(PAIRING_PATH, json=payload)
+    assert requested.status_code == 201
+    response_body = requested.get_json()
+    pairing_id = response_body["pairing_id"]
+    pairing_code = response_body["pairing_code"]
+
+    create_admin(app)
+    login(client)
+    assert _approve(client, pairing_id, pairing_code).status_code == 200
+    approved_page = client.get("/devices")
+    assert approved_page.status_code == 200
+    approved_page_html = approved_page.get_data(as_text=True)
+    assert '已核准，等待裝置領取</span><button class="secondary reject-pairing"' in approved_page_html
+    claimed = client.post(
+        CLAIM_PATH,
+        json={"pairing_id": pairing_id, "pairing_nonce": payload["pairing_nonce"]},
+    )
+    assert claimed.status_code == 200
+    claim_body = claimed.get_json()
+    secret = claim_body["device_secret"]
+    version = claim_body["credential_version"]
+
+    device_page = client.get("/devices")
+    assert device_page.status_code == 200
+    device_page_html = device_page.get_data(as_text=True)
+    assert "等待裝置確認" in device_page_html
+    assert "reject-pairing" in device_page_html
+
+    rejected = client.post(
+        f"/api/v1/device-pairing/{pairing_id}/reject",
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert rejected.status_code == 200
+
+    with app.extensions["inktime_database"].session() as connection:
+        request_row = connection.execute(
+            "SELECT status,credential_envelope_ciphertext FROM device_pairing_requests WHERE id=?",
+            (pairing_id,),
+        ).fetchone()
+        device_row = connection.execute(
+            "SELECT id FROM devices WHERE id=?", (payload["device_id"],)
+        ).fetchone()
+    assert request_row["status"] == "rejected"
+    assert request_row["credential_envelope_ciphertext"] is None
+    assert device_row is None
+
+    confirm_body = {
+        "pairing_id": pairing_id,
+        "device_id": payload["device_id"],
+        "pairing_nonce": payload["pairing_nonce"],
+    }
+    assert _confirm(client, confirm_body, secret, version).status_code == 410
+    authenticated = client.post(
+        "/api/device/v1/status",
+        json={},
+        headers={
+            "Authorization": f"Bearer {secret}",
+            "X-InkTime-Credential-Version": str(version),
+        },
+    )
+    assert authenticated.status_code == 401
+
 
 def test_pairing_request_is_idempotent_for_same_nonce_but_not_for_new_nonce(client, app):
     payload = _pairing_payload("esp32-duplicate")

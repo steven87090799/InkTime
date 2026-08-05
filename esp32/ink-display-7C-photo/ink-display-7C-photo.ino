@@ -13,6 +13,7 @@
 #include "photopainter_core.h"
 #include "offline_schedule_core.h"
 #include "device_config_store.h"
+#include "pairing_recovery_core.h"
 #include "queue_client_core.h"
 #include "queue_runtime_types.h"
 #include "device_http_transport.h"
@@ -98,7 +99,7 @@ GxEPD2_7C<
 #define DEVICE_PAIRING_CLAIM_PATH "/api/device/v1/pairing/claim"
 #define DEVICE_PAIRING_CONFIRM_PATH "/api/device/v1/pairing/confirm"
 #define DEVICE_PAIRING_REPAIR_PERMISSION_PATH "/api/device/v1/pairing/repair-permission"
-#define INKTIME_FIRMWARE_VERSION "2.7.0"
+#define INKTIME_FIRMWARE_VERSION "2.7.1"
 
 // Secure builds require a compile-time or portal-provisioned trust anchor;
 // isolated LAN HTTP remains available only in an explicit development build.
@@ -141,6 +142,99 @@ struct Config {
 #endif
   uint32_t config_version;
   bool    valid;
+};
+
+static constexpr const char* kPairingRetryNamespace = "pairing_retry";
+static constexpr const char* kPairingRetryAttemptKey = "attempt";
+static constexpr const char* kPairingRetryDeadlineKey = "deadline";
+
+class PairingRetryMetadataStore final {
+ public:
+  bool load(
+      inktime::pairing::RetryState& state,
+      bool& present,
+      String& error) const {
+    state = inktime::pairing::RetryState{};
+    present = false;
+    error = "";
+    Preferences storage;
+    if (!storage.begin(kPairingRetryNamespace, true)) {
+      error = "PAIRING-NVS-008";
+      return false;
+    }
+    const bool has_attempt = storage.isKey(kPairingRetryAttemptKey);
+    const bool has_deadline = storage.isKey(kPairingRetryDeadlineKey);
+    if (!has_attempt && !has_deadline) {
+      storage.end();
+      return true;
+    }
+    if (!has_attempt || !has_deadline) {
+      storage.end();
+      error = "PAIRING-NVS-008";
+      return false;
+    }
+    state.attempt = storage.getUChar(kPairingRetryAttemptKey, 0U);
+    uint64_t deadline = 0U;
+    const size_t read_size = storage.getBytes(
+      kPairingRetryDeadlineKey, &deadline, sizeof(deadline));
+    storage.end();
+    if (read_size != sizeof(deadline)
+        || state.attempt > inktime::pairing::kMaximumRetryAttempt) {
+      error = "PAIRING-NVS-008";
+      return false;
+    }
+    state.retry_at_epoch = deadline;
+    present = true;
+    return true;
+  }
+
+  bool save(const inktime::pairing::RetryState& state, String& error) const {
+    error = "";
+    Preferences storage;
+    if (!storage.begin(kPairingRetryNamespace, false)) {
+      error = "PAIRING-NVS-008";
+      return false;
+    }
+    const size_t attempt_size = storage.putUChar(kPairingRetryAttemptKey, state.attempt);
+    const size_t deadline_size = storage.putBytes(
+      kPairingRetryDeadlineKey, &state.retry_at_epoch, sizeof(state.retry_at_epoch));
+    const uint8_t read_attempt = storage.getUChar(kPairingRetryAttemptKey, 0U);
+    uint64_t read_deadline = 0U;
+    const size_t read_size = storage.getBytes(
+      kPairingRetryDeadlineKey, &read_deadline, sizeof(read_deadline));
+    storage.end();
+    if (attempt_size != sizeof(state.attempt)
+        || deadline_size != sizeof(state.retry_at_epoch)
+        || read_size != sizeof(read_deadline)
+        || read_attempt != state.attempt
+        || read_deadline != state.retry_at_epoch) {
+      error = "PAIRING-NVS-008";
+      return false;
+    }
+    return true;
+  }
+
+  bool clear(String& error) const {
+    error = "";
+    Preferences storage;
+    if (!storage.begin(kPairingRetryNamespace, false)) {
+      error = "PAIRING-NVS-008";
+      return false;
+    }
+    bool ok = true;
+    if (storage.isKey(kPairingRetryAttemptKey)
+        && !storage.remove(kPairingRetryAttemptKey)) ok = false;
+    if (storage.isKey(kPairingRetryDeadlineKey)
+        && !storage.remove(kPairingRetryDeadlineKey)) ok = false;
+    const bool empty = !storage.isKey(kPairingRetryAttemptKey)
+      && !storage.isKey(kPairingRetryDeadlineKey);
+    storage.end();
+    if (!ok || !empty) {
+      error = "PAIRING-NVS-008";
+      return false;
+    }
+    return true;
+  }
 };
 
 const char*  DEFAULT_HOSTPORT = "";
@@ -338,7 +432,13 @@ static void clearConfigNVS() {
   DBG_PRINTLN("[NVS] clearConfigNVS()");
 #endif
   String storeError;
-  const bool storeCleared = configStore.clearAll(storeError);
+  bool storeCleared = configStore.clearAll(storeError);
+  PairingRetryMetadataStore retryStore;
+  String retryError;
+  if (!retryStore.clear(retryError)) {
+    storeCleared = false;
+    if (storeError.length() == 0U) storeError = retryError;
+  }
   bool legacyCleared = false;
   if (prefs.begin("dashcfg", false)) {
     legacyCleared = prefs.clear();
@@ -863,6 +963,39 @@ static void setConfigDefaults(Config &cfg) {
 #endif
 }
 
+static bool isRepairAuthState(const Config &cfg) {
+  return cfg.auth_state == "auth_invalid" || cfg.auth_state == "revoked";
+}
+
+static inktime::pairing::RetryState retryStateFromConfig(const Config &cfg) {
+  return {
+    cfg.pairing_retry_at_epoch,
+    cfg.pairing_retry_attempt,
+  };
+}
+
+static void applyRetryStateToConfig(
+    const inktime::pairing::RetryState& state,
+    Config& cfg) {
+  cfg.pairing_retry_at_epoch = state.retry_at_epoch;
+  cfg.pairing_retry_attempt = state.attempt;
+}
+
+static void loadPairingRetryMetadata(Config& cfg) {
+  if (!isRepairAuthState(cfg)) return;
+  PairingRetryMetadataStore retryStore;
+  inktime::pairing::RetryState state;
+  bool present = false;
+  String error;
+  if (!retryStore.load(state, present, error)) {
+    applyRetryStateToConfig(
+      {0U, inktime::pairing::kMaximumRetryAttempt}, cfg);
+    setConfigPersistenceError(error);
+    return;
+  }
+  if (present) applyRetryStateToConfig(state, cfg);
+}
+
 void loadConfig(Config &cfg) {
   setConfigDefaults(cfg);
   inktime::configstore::ConfigPayload payload;
@@ -879,6 +1012,7 @@ void loadConfig(Config &cfg) {
     setConfigPersistenceError(loadError);
   }
   cfg.valid = (cfg.wifi_ssid.length() > 0);
+  loadPairingRetryMetadata(cfg);
 
 #if DEBUG_LOG
   DBG_PRINTLN("---- loadConfig ----");
@@ -1656,26 +1790,24 @@ static uint64_t pairingNowEpoch() {
   return 0U;
 }
 
+static uint64_t pairingRetryNowEpoch() {
+  const time_t now = time(nullptr);
+  return now >= static_cast<time_t>(kPairingMinimumEpoch)
+    ? static_cast<uint64_t>(now) : 0U;
+}
+
 static uint32_t pairingBackoffForAttempt(uint8_t attempt) {
-  if (attempt == 0U) return 60U;
-  if (attempt == 1U) return 5U * 60U;
-  if (attempt == 2U) return 15U * 60U;
-  return 60U * 60U;
+  return inktime::pairing::backoffSeconds(attempt);
 }
 
 static bool pairingRetryDue(const Config &cfg) {
-  if (cfg.pairing_retry_at_epoch == 0U) return true;
-  const uint64_t now = pairingNowEpoch();
-  return now != 0U && now >= cfg.pairing_retry_at_epoch;
+  return inktime::pairing::retryDue(
+    retryStateFromConfig(cfg), pairingRetryNowEpoch());
 }
 
 static uint32_t pairingBackoffSeconds(const Config &cfg) {
-  const uint64_t now = pairingNowEpoch();
-  if (now != 0U && cfg.pairing_retry_at_epoch > now) {
-    const uint64_t remaining = cfg.pairing_retry_at_epoch - now;
-    return remaining > 3600U ? 3600U : static_cast<uint32_t>(remaining);
-  }
-  return pairingBackoffForAttempt(cfg.pairing_retry_attempt);
+  return inktime::pairing::sleepSeconds(
+    retryStateFromConfig(cfg), pairingRetryNowEpoch());
 }
 
 static bool pairingExpiryPassed(const Config &cfg) {
@@ -1705,6 +1837,32 @@ static bool persistPairingRetry(Config &cfg, const String &state) {
   candidate.pairing_retry_at_epoch = now == 0U
     ? 0U : now + pairingBackoffForAttempt(previousAttempt);
   return savePairingCandidate(cfg, candidate);
+}
+
+static bool persistRepairPermissionRetry(Config &cfg) {
+  PairingRetryMetadataStore retryStore;
+  const inktime::pairing::RetryState current = retryStateFromConfig(cfg);
+  const inktime::pairing::RetryState next = inktime::pairing::nextRetryState(
+    current, pairingRetryNowEpoch());
+  applyRetryStateToConfig(next, cfg);
+  if (!(next == current)) {
+    String error;
+    if (!retryStore.save(next, error)) {
+      setConfigPersistenceError(error);
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool clearRepairPermissionRetry() {
+  PairingRetryMetadataStore retryStore;
+  String error;
+  if (!retryStore.clear(error)) {
+    setConfigPersistenceError(error);
+    return false;
+  }
+  return true;
 }
 
 static bool persistPairingExpired(Config &cfg) {
@@ -1749,9 +1907,17 @@ static bool automaticPairingAllowed(const Config &cfg) {
 
 static bool checkRepairPermission(Config &cfg) {
   if (cfg.auth_state != "auth_invalid" && cfg.auth_state != "revoked") return false;
-  if (deviceCredential(cfg).length() == 0U) return false;
+  if (deviceCredential(cfg).length() == 0U) {
+    lastDeviceErrorCode = "DEVICE-PAIRING-PERMISSION-CREDENTIAL";
+    lastDeviceErrorMessage = "重新配對 permission 缺少現有 credential；本輪停止網路工作";
+    if (!persistRepairPermissionRetry(cfg)) return false;
+    return false;
+  }
   String base;
-  if (!normalizedBackendBase(cfg, base)) return false;
+  if (!normalizedBackendBase(cfg, base)) {
+    if (!persistRepairPermissionRetry(cfg)) return false;
+    return false;
+  }
 
   inktime::DeviceHttpTransport transport(cfg.ca_pem);
   HTTPClient http;
@@ -1762,10 +1928,12 @@ static bool checkRepairPermission(Config &cfg) {
         transportCode, transportMessage)) {
     lastDeviceErrorCode = transportCode.length() ? transportCode : "DEVICE-PAIRING-PERMISSION-URL";
     lastDeviceErrorMessage = transportMessage.length() ? transportMessage : "重新配對 permission URL 無法初始化";
+    if (!persistRepairPermissionRetry(cfg)) return false;
     return false;
   }
   if (!addDeviceAuthorization(http, cfg, true)) {
     http.end();
+    if (!persistRepairPermissionRetry(cfg)) return false;
     return false;
   }
   const char* headers[] = {"Content-Type"};
@@ -1778,6 +1946,7 @@ static bool checkRepairPermission(Config &cfg) {
     http.end();
     lastDeviceErrorCode = "DEVICE-PAIRING-PERMISSION";
     lastDeviceErrorMessage = "管理員尚未允許重新配對；本輪不建立 pairing request";
+    if (!persistRepairPermissionRetry(cfg)) return false;
     return false;
   }
   JsonDocument response;
@@ -1789,6 +1958,7 @@ static bool checkRepairPermission(Config &cfg) {
       || authorizedDeviceId != cfg.device_id) {
     lastDeviceErrorCode = "DEVICE-PAIRING-PERMISSION-SCHEMA";
     lastDeviceErrorMessage = "重新配對 permission response schema 不合法";
+    if (!persistRepairPermissionRetry(cfg)) return false;
     return false;
   }
   Config candidate = cfg;
@@ -1798,7 +1968,8 @@ static bool checkRepairPermission(Config &cfg) {
   candidate.pairing_expires_at_epoch = 0U;
   candidate.pairing_retry_at_epoch = 0U;
   candidate.pairing_retry_attempt = 0U;
-  return savePairingCandidate(cfg, candidate);
+  if (!savePairingCandidate(cfg, candidate)) return false;
+  return clearRepairPermissionRetry();
 }
 
 static bool confirmPairingCredential(Config &cfg, const String &base) {
@@ -4607,6 +4778,12 @@ void setup() {
   }
 #endif
 
+  if ((g_cfg.auth_state == "auth_invalid" || g_cfg.auth_state == "revoked")
+      && !pairingRetryDue(g_cfg)) {
+    goDeepSleepSeconds(pairingBackoffSeconds(g_cfg));
+    return;
+  }
+
 #if DEBUG_LOG
   DBG_PRINTLN("[BOOT] have config -> connect WiFi");
 #endif
@@ -4649,7 +4826,8 @@ void setup() {
   // backend has enabled repair; the backend still requires a fresh
   // short-lived pairing code and administrator approval.
   bool repairPermission = false;
-  if (g_cfg.auth_state == "auth_invalid" || g_cfg.auth_state == "revoked") {
+  if ((g_cfg.auth_state == "auth_invalid" || g_cfg.auth_state == "revoked")
+      && pairingRetryDue(g_cfg)) {
     repairPermission = checkRepairPermission(g_cfg);
     if (!repairPermission) {
       goDeepSleepSeconds(pairingBackoffSeconds(g_cfg));
