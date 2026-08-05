@@ -86,6 +86,7 @@ def test_device_runtime_summary_polling_aborts_a_hung_request(client, app):
     assert response.status_code == 200
     assert "const requestTimeout=setTimeout(()=>controller.abort(),Math.max(0,deadline-Date.now()))" in body
     assert "clearTimeout(requestTimeout)" in body
+    assert "runtimeSummaryControllers.forEach(controller=>controller.abort())" in body
 
 
 def test_stock_photopainter_display_controls_are_scoped_and_server_side(client, app):
