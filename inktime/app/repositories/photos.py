@@ -1990,7 +1990,8 @@ class PhotoRepository:
                 SELECT p.*,l.name AS library_name,a.caption,a.types_json,a.memory_score,a.beauty_score,a.ranking_score,a.side_caption,
                        a.provider,a.model,a.raw_json,a.created_at AS analyzed_at,
                        (SELECT COALESCE(SUM(input_tokens+output_tokens),0) FROM api_usage u WHERE u.photo_id=p.id) AS tokens,
-                       (SELECT COALESCE(SUM(COALESCE(actual_cost,estimated_cost)),0) FROM api_usage u WHERE u.photo_id=p.id) AS cost
+                       (SELECT COALESCE(SUM(CASE WHEN u.cost_source<>'unknown' THEN COALESCE(u.actual_cost,u.estimated_cost) ELSE 0 END),0) FROM api_usage u WHERE u.photo_id=p.id) AS cost,
+                       (SELECT COUNT(*) FROM api_usage u WHERE u.photo_id=p.id AND u.cost_source='unknown') AS unknown_cost_count
                 FROM photos p JOIN libraries l ON l.id=p.library_id
                 LEFT JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id ORDER BY created_at DESC LIMIT 1)
                 WHERE {where} ORDER BY COALESCE(p.captured_at,p.created_at) DESC,p.id LIMIT ? OFFSET ?

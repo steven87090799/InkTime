@@ -6,7 +6,6 @@ import json
 import os
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urlparse
 
 from flask import Blueprint, abort, current_app, g, make_response, render_template, request
 
@@ -22,6 +21,13 @@ from inktime.app.core.json_values import (
 )
 from inktime.app.core.logging import configure_logging
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
+from inktime.app.providers.config import (
+    PROVIDER_KINDS,
+    capabilities_for,
+    effective_provider_kind,
+    normalize_options,
+    validate_base_url,
+)
 from inktime.app.repositories.settings import (
     RANKING_WEIGHT_KEYS,
     SENSITIVE_STATUS_KEYS,
@@ -30,6 +36,7 @@ from inktime.app.repositories.settings import (
 )
 from inktime.app.web.access import administrator_required, login_required
 from inktime.app.domain.rendering.system_presets import SYSTEM_PRESETS
+from inktime.app.services.provider_contracts import run_provider_contract
 
 bp = Blueprint("settings", __name__)
 
@@ -552,11 +559,55 @@ def providers_page():
 @administrator_required
 def save_provider():
     payload = _payload("SET-003")
+    try:
+        reject_unknown_fields(
+            payload,
+            {
+                "id",
+                "name",
+                "kind",
+                "base_url",
+                "api_key",
+                "enabled",
+                "priority",
+                "supports_vision",
+                "supports_batch",
+                "supports_json_schema",
+                "rate_limit_rpm",
+                "token_limit_tpm",
+                "max_concurrency",
+                "timeout_seconds",
+                "cooldown_seconds",
+                "options",
+            },
+            error_prefix="SET-003",
+        )
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
+    for field in ("id", "name", "kind", "base_url", "api_key"):
+        if field in payload and type(payload[field]) is not str:
+            abort(400, description=f"SET-003 {field} 必須是字串")
     if not payload.get("base_url") or not payload.get("name"):
         abort(400, description="SET-003 Provider 名稱與 URL 不可空白")
-    parsed = urlparse(str(payload["base_url"]))
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        abort(400, description="SET-003 Provider URL 必須是完整的 http:// 或 https:// 位址")
+    if type(payload["name"]) is not str or not payload["name"].strip() or len(payload["name"].strip()) > 120:
+        abort(400, description="SET-003 Provider 名稱必須是 1 至 120 字元")
+    requested_kind = (payload.get("kind") or "openai_compatible").strip().lower()
+    if requested_kind not in PROVIDER_KINDS:
+        abort(400, description=f"SET-003 不支援的 Provider kind：{requested_kind}")
+    try:
+        kind = effective_provider_kind(requested_kind, str(payload["base_url"]))
+        options = normalize_options(kind, payload.get("options") or {})
+        payload["options"] = options
+        payload["kind"] = kind
+        payload["base_url"] = validate_base_url(kind, str(payload["base_url"]), options)
+        payload["enabled"] = json_bool(payload, "enabled", default=True, error_prefix="SET-003")
+        payload["supports_vision"] = json_bool(payload, "supports_vision", default=True, error_prefix="SET-003")
+        payload["supports_batch"] = json_bool(payload, "supports_batch", default=False, error_prefix="SET-003")
+        payload["supports_json_schema"] = json_bool(
+            payload, "supports_json_schema", default=True, error_prefix="SET-003"
+        )
+    except (ValueError, JsonScalarError) as exc:
+        abort(400, description=f"SET-003 {exc}")
     try:
         for field, default, minimum, maximum in (
             ("priority", 100, 1, 10_000),
@@ -582,25 +633,54 @@ def save_provider():
             )
     except JsonScalarError as exc:
         abort(400, description=str(exc))
-    provider_id = current_app.extensions["inktime_provider_repository"].save(payload, g.user["id"])
+    try:
+        provider_id = current_app.extensions["inktime_provider_repository"].save(payload, g.user["id"])
+    except (ValueError, KeyError) as exc:
+        abort(400, description=f"SET-003 {exc}")
     return {"id": provider_id}, 201
 
 
 @bp.post("/api/v1/providers/<provider_id>/test")
 @administrator_required
 def test_provider(provider_id: str):
+    payload = _payload("SET-005")
+    try:
+        reject_unknown_fields(payload, {"level"}, error_prefix="SET-005")
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
+    level = payload.get("level", 1)
+    if type(level) is not int or level not in {1, 2, 3}:
+        abort(400, description="SET-005 level 必須是 1、2 或 3")
     config = current_app.extensions["inktime_provider_repository"].get(provider_id, include_secret=True)
     if config is None:
         abort(404)
+    kind = effective_provider_kind(
+        str(config.get("kind") or "openai_compatible"), str(config.get("base_url") or "")
+    )
     provider = OpenAICompatibleProvider(
         name=config["name"],
         base_url=config["base_url"],
         api_key=config.get("api_key", ""),
+        kind=kind,
+        provider_id=str(config["id"]),
+        options=config.get("options") or {},
+        pricing=current_app.extensions["inktime_provider_repository"].pricing(config["id"]),
         timeout=min(15, config["timeout_seconds"]),
         supports_json_schema=bool(config["supports_json_schema"]),
+        supports_reasoning_effort=capabilities_for(
+            kind, supports_json_schema=bool(config["supports_json_schema"])
+        ).reasoning,
     )
-    ok, message = provider.validate_config()
-    return {"ok": ok, "message": message}, 200 if ok else 502
+    try:
+        model = str(
+            current_app.extensions["inktime_settings_repository"].get("model.analysis_model", "gpt-4o")
+        )
+        result = run_provider_contract(provider, level=level, model=model)
+    except (ValueError, KeyError) as exc:
+        abort(400, description=f"SET-005 {exc}")
+    finally:
+        provider.close()
+    return result, 200 if result["ok"] else 502
 
 
 @bp.post("/api/v1/providers/<provider_id>/pricing")
@@ -623,8 +703,14 @@ def save_provider_pricing(provider_id: str):
             },
             error_prefix="SET-004",
         )
-        if type(payload.get("model")) is not str or not payload["model"].strip():
-            abort(400, description="SET-004 model 不可空白")
+        if (
+            type(payload.get("model")) is not str
+            or not payload["model"].strip()
+            or len(payload["model"].strip()) > 200
+            or any(ord(char) < 0x20 or ord(char) == 0x7f for char in payload["model"])
+        ):
+            abort(400, description="SET-004 model 必須是 1 至 200 字元")
+        payload["model"] = payload["model"].strip()
         for field in ("input_per_million", "cached_input_per_million", "output_per_million"):
             payload[field] = json_float(
                 payload,
@@ -654,12 +740,12 @@ def save_provider_pricing(provider_id: str):
                 error_prefix="SET-004",
             )
         payload["enabled"] = json_bool(payload, "enabled", default=True, error_prefix="SET-004")
-        current_app.extensions["inktime_provider_repository"].save_pricing(provider_id, payload)
+        reconciliation = current_app.extensions["inktime_provider_repository"].save_pricing(provider_id, payload)
     except (JsonScalarError, ValueError) as exc:
         abort(400, description=f"SET-004 {exc}")
     except KeyError:
         abort(404)
-    return {"status": "ok", "provider_id": provider_id, "model": payload["model"]}
+    return {"status": "ok", "provider_id": provider_id, "model": payload["model"], **reconciliation}
 
 
 @bp.get("/costs")
@@ -669,14 +755,42 @@ def costs_page():
     with database.session() as connection:
         summary = connection.execute(
             """
-            SELECT COALESCE(SUM(CASE WHEN date(started_at)=date('now') THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) today,
-                   COALESCE(SUM(CASE WHEN started_at>=datetime('now','-7 day') THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) week,
-                   COALESCE(SUM(CASE WHEN strftime('%Y-%m',started_at)=strftime('%Y-%m','now') THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) month,
+            SELECT COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND date(started_at)=date('now') THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) today,
+                   COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND started_at>=datetime('now','-7 day') THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) week,
+                   COALESCE(SUM(CASE WHEN cost_source<>'unknown' AND strftime('%Y-%m',started_at)=strftime('%Y-%m','now') THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END),0) month,
+                   COALESCE(SUM(CASE WHEN cost_source='unknown' AND (
+                       COALESCE(input_tokens,0)>0 OR COALESCE(output_tokens,0)>0 OR COALESCE(cached_tokens,0)>0
+                       OR COALESCE(reasoning_tokens,0)>0 OR COALESCE(cache_write_tokens,0)>0
+                       OR COALESCE(request_body_bytes,0)>0 OR COALESCE(image_bytes,0)>0
+                       OR COALESCE(actual_cost,0)>0 OR COALESCE(estimated_cost,0)>0
+                   ) THEN 1 ELSE 0 END),0) unknown_count,
+                   COALESCE(SUM(CASE WHEN cost_source='unknown' AND date(started_at)=date('now') AND (
+                       COALESCE(input_tokens,0)>0 OR COALESCE(output_tokens,0)>0 OR COALESCE(cached_tokens,0)>0
+                       OR COALESCE(reasoning_tokens,0)>0 OR COALESCE(cache_write_tokens,0)>0
+                       OR COALESCE(request_body_bytes,0)>0 OR COALESCE(image_bytes,0)>0
+                       OR COALESCE(actual_cost,0)>0 OR COALESCE(estimated_cost,0)>0
+                   ) THEN 1 ELSE 0 END),0) today_unknown_count,
                    COALESCE(SUM(input_tokens),0) input_tokens,COALESCE(SUM(output_tokens),0) output_tokens
             FROM api_usage
             """
         ).fetchone()
         by_model = connection.execute(
-            "SELECT provider,model,SUM(input_tokens) input_tokens,SUM(output_tokens) output_tokens,SUM(COALESCE(actual_cost,estimated_cost)) cost,COUNT(*) requests FROM api_usage GROUP BY provider,model ORDER BY cost DESC"
+            """SELECT provider,model,SUM(input_tokens) input_tokens,SUM(output_tokens) output_tokens,
+                      SUM(CASE WHEN cost_source<>'unknown' THEN COALESCE(actual_cost,estimated_cost) ELSE 0 END) cost,
+                      SUM(CASE WHEN cost_source='unknown' AND (
+                          COALESCE(input_tokens,0)>0 OR COALESCE(output_tokens,0)>0 OR COALESCE(cached_tokens,0)>0
+                          OR COALESCE(reasoning_tokens,0)>0 OR COALESCE(cache_write_tokens,0)>0
+                          OR COALESCE(request_body_bytes,0)>0 OR COALESCE(image_bytes,0)>0
+                          OR COALESCE(actual_cost,0)>0 OR COALESCE(estimated_cost,0)>0
+                      ) THEN 1 ELSE 0 END) unknown_count,
+                      COUNT(*) requests
+               FROM api_usage GROUP BY provider,model ORDER BY cost DESC"""
         ).fetchall()
+    reserve = float(
+        current_app.extensions["inktime_settings_repository"].get("budget.unknown_request_reserve", 0.25)
+    )
+    summary = dict(summary)
+    summary["unknown_reserve"] = reserve
+    summary["reserved_today"] = int(summary["today_unknown_count"]) * reserve
+    summary["cost_complete"] = int(summary["unknown_count"]) == 0
     return render_template("costs.html", summary=summary, by_model=by_model)

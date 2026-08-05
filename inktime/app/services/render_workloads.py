@@ -623,7 +623,7 @@ class RenderWorkloadService:
 
     @staticmethod
     def _palette_statistics(image: Image.Image, colors) -> list[dict]:
-        counts = Counter(image.convert("RGB").getdata())
+        counts = Counter(image.convert("RGB").get_flattened_data())
         total = image.width * image.height
         return [
             {

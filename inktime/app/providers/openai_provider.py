@@ -11,7 +11,10 @@ class OpenAIProvider(OpenAICompatibleProvider):
             name="OpenAI",
             base_url="https://api.openai.com/v1",
             api_key=api_key,
+            kind="openai",
+            provider_id="openai",
             pricing=pricing,
             timeout=timeout,
             supports_json_schema=True,
+            supports_reasoning_effort=True,
         )

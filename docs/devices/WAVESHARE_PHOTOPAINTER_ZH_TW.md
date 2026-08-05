@@ -2,7 +2,7 @@
 
 ## 支援狀態
 
-InkTime 2.5.0 可用單一 compile-time Profile 切換既有 PCB 與 Waveshare
+InkTime 2.6.0 可用單一 compile-time Profile 切換既有 PCB 與 Waveshare
 ESP32-S3-PhotoPainter。這是可編譯、可靜態測試的硬體 adapter；目前沒有連接
 真實 PhotoPainter、面板、SD、電池或量測儀器，因此不得視為實機驗證完成。
 
@@ -104,16 +104,20 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   模式永久保持喚醒。
 - Manifest 必須是有限 Content-Length 的 JSON；圖片必須是精確長度的
   `application/octet-stream` 且 SHA-256 相符。
-- 尚未提供可信 CA 配置，因此預設會在建立連線前明確拒絕 HTTPS，不會進入 Arduino
-  core 的 insecure TLS 路徑。只有明確編譯 `INKTIME_ALLOW_UNVERIFIED_HTTPS=1`
-  才允許開發用例外；隔離 LAN 可使用 HTTP，跨網路應先使用 VPN／IoT VLAN 或加入
-  CA provisioning。
+- Backend transport 預設只接受有 compile-time 或 AP portal provisioning trust anchor
+  的 HTTPS；沒有 CA 會在建立連線前明確拒絕，不會進入 Arduino core 的 insecure TLS
+  路徑，也沒有 `setInsecure()` fallback。HTTP 只有在明確編譯
+  `INKTIME_ALLOW_INSECURE_DEVICE_HTTP=1` 且目標是私有 LAN host 時才允許；跨網路應
+  使用 HTTPS、VPN／IoT VLAN 與可驗證的 CA。首次配網的 AP SSID、隨機密碼與 URL 會
+  顯示在 portal 與 PhotoPainter 配對畫面，不會把密碼寫進 Serial log。
+- CA provisioning 的 build、portal 欄位、錯誤碼與人工驗收步驟見
+  [ESP32 TLS／配網信任根配置](ESP32_TLS_PROVISIONING_ZH_TW.md)。
 - 韌體目前沒有 MQTT／Home Assistant client，因此沒有 Topic、Discovery entity 或
   callback 可遷移；既有 Bearer Token Manifest／Status API 保持不變。
 
 ## 能源遙測與續航儀表板
 
-- 韌體 2.5.0 在低頻 Status API 回報電池電壓、估算百分比、USB 狀態、刷新耗時與
+- 韌體 2.6.0 在低頻 Status API 回報電池電壓、估算百分比、USB 狀態、刷新耗時與
   從開機到狀態上傳前的完整喚醒週期耗時；既有 Profile 也會回報刷新與喚醒耗時。
 - Web「能源」頁保存最近 400 天樣本，提供 7／30／90／365 天電量、電壓與刷新耗時
   SVG 曲線，不引入第三方圖表服務或外部 CDN。
@@ -190,6 +194,10 @@ slot 仍有足夠餘裕，但 OTA 簽章、rollback 與實際燒錄流程尚未�
     會停止服務並睡眠。
 19. 下載、cache write、rename 各階段斷電，重啟後只能使用完整正式檔或 `.bak`。
 20. 低於暫定門檻時禁止刷新；USB 接入時可診斷，並據實校正安全門檻。
+21. 以正式或測試 CA provisioning HTTPS backend；確認缺 CA、hostname mismatch、過期
+    certificate 與 redirect 都在下載前 fail closed，且不會退回 insecure TLS。
+22. 首次配網確認 AP credentials 只在受保護的 portal／裝置畫面顯示，隨機密碼可用且
+    不會出現在 Serial log 或持久化診斷輸出。
 
 ## 尚待實機決定
 
@@ -207,3 +215,6 @@ slot 仍有足夠餘裕，但 OTA 簽章、rollback 與實際燒錄流程尚未�
 12. 無 SD 時從 RAM 顯示的連續穩定性與峰值記憶體。
 13. 面板 driver／waveform 與出貨批次的授權及供應商版本。
 14. 長期電池、弱 Wi-Fi、低溫與重複 full-refresh 壽命。
+
+以上實機 smoke、trust-anchor provisioning、BUSY／GPIO5／deep-sleep、整板功耗與
+PhotoPainter 面板驗收在本輪均為 `NOT RUN`；CI compile 或 simulator 不能替代這些證據。

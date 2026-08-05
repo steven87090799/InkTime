@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import math
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -28,8 +29,10 @@ from inktime.app.domain.analysis import (
     normalize_reasoning_effort,
     validate_analysis_result,
 )
-from inktime.app.domain.analysis.plan import SCHEMA_VERSION
+from inktime.app.domain.analysis.plan import SCHEMA_VERSION, provider_prompt_contract_sha256
+from inktime.app.services.analysis import CAPTION_VARIANTS_TOKEN_CAP, FULL_ANALYSIS_TOKEN_CAP
 from inktime.app.providers.base import Usage
+from inktime.app.providers.openai_compatible import calculate_usage_cost
 from inktime.app.repositories.analysis_batches import (
     ACTIVE_BATCH_STATUSES,
     TERMINAL_BATCH_STATUSES,
@@ -220,7 +223,9 @@ class BatchAnalysisService:
         rows = [
             row
             for row in self.providers.list()
-            if bool(row.get("enabled")) and bool(row.get("supports_batch"))
+            if bool(row.get("enabled"))
+            and bool(row.get("supports_batch"))
+            and str(row.get("kind") or "").lower() != "openrouter"
         ]
         rows.sort(key=lambda row: (int(row.get("priority") or 100), str(row.get("name") or row["id"])))
         if not rows:
@@ -265,6 +270,15 @@ class BatchAnalysisService:
         plan["batch_completion_window"] = "24h"
         plan["reasoning_effort"] = normalize_reasoning_effort(
             self.settings.get("batch.reasoning_effort", "none")
+        )
+        plan["provider_prompt_contract_sha256"] = provider_prompt_contract_sha256(
+            prompt_version=str(plan.get("prompt_version") or ""),
+            scoring_rules_sha256=str(plan.get("scoring_rules_sha256") or ""),
+            schema_version=int(plan.get("schema_version", SCHEMA_VERSION)),
+            schema_kind=str(plan.get("schema_kind") or "full"),
+            caption_generation_controls=dict(plan.get("caption_controls") or {}),
+            reasoning_effort=str(plan["reasoning_effort"]),
+            provider_behavior_revision=str(plan.get("provider_behavior_revision") or ""),
         )
         return plan, fingerprint(plan), model
 
@@ -366,6 +380,7 @@ class BatchAnalysisService:
                     "schema_version": SCHEMA_VERSION,
                     "schema_kind": "full",
                     "reasoning_effort": str(plan["reasoning_effort"]),
+                    "provider_prompt_contract_sha256": str(plan.get("provider_prompt_contract_sha256") or ""),
                     **vision_input,
                 }
             )
@@ -456,18 +471,12 @@ class BatchAnalysisService:
         estimated_output_tokens = len(candidates) * int(
             self.settings.get("batch.estimated_output_tokens", 500)
         )
-        pricing = self.providers.pricing(provider_id).get(model, {})
-        input_price = float(
-            pricing.get("batch_input_per_million")
-            or pricing.get("input_per_million", 0) * float(pricing.get("batch_multiplier", 0.5) or 0.5)
+        pricing = self.providers.pricing(provider_id).get(model)
+        estimated_cost = calculate_usage_cost(
+            pricing,
+            Usage(input_tokens=estimated_input_tokens, output_tokens=estimated_output_tokens),
+            batch=True,
         )
-        output_price = float(
-            pricing.get("batch_output_per_million")
-            or pricing.get("output_per_million", 0) * float(pricing.get("batch_multiplier", 0.5) or 0.5)
-        )
-        estimated_cost = (
-            estimated_input_tokens * input_price + estimated_output_tokens * output_price
-        ) / 1_000_000
         return {
             "scope": scope,
             "sample_seed": sample_seed,
@@ -480,7 +489,9 @@ class BatchAnalysisService:
             "estimated_shard_count": max(0, (len(candidates) + max_items - 1) // max_items),
             "estimated_input_tokens": estimated_input_tokens,
             "estimated_output_tokens": estimated_output_tokens,
-            "estimated_cost": round(estimated_cost, 6),
+            "estimated_cost": round(estimated_cost, 6) if estimated_cost is not None else None,
+            "cost_source": "estimated" if estimated_cost is not None else "unknown",
+            "cost_complete": estimated_cost is not None,
             "model": model,
             "analysis_fingerprint": analysis_fingerprint,
             "max_items_per_shard": max_items,
@@ -488,6 +499,9 @@ class BatchAnalysisService:
         }
 
     def _provider(self, provider_id: str, plan: dict[str, Any]):
+        configured = self.providers.get(provider_id)
+        if configured is not None and str(configured.get("kind") or "").lower() == "openrouter":
+            raise BatchLifecycleError("OpenRouter 僅支援即時 Chat Completions，不可進入 Batch", "BATCH-OPENROUTER-001")
         route = [item for item in plan["provider_route"] if str(item["provider_id"]) == provider_id]
         if not route:
             raise BatchLifecycleError("Frozen Batch Provider 不存在", "BATCH-PROVIDER-003")
@@ -697,7 +711,21 @@ class BatchAnalysisService:
                 provider.close()
 
     def _line_factory(self, provider, plan: dict[str, Any]) -> Callable[[dict[str, Any]], bytes]:
-        max_tokens = int(self.settings.get("budget.max_tokens", 8000))
+        global_cap = int(self.settings.get("budget.max_tokens", 8000))
+        requested_cap = int(
+            self.settings.get(
+                "budget.caption_variants_max_tokens"
+                if (plan.get("caption_controls") or {}).get("caption_variants_enabled")
+                else "budget.full_analysis_max_tokens",
+                3072 if (plan.get("caption_controls") or {}).get("caption_variants_enabled") else 2048,
+            )
+        )
+        hard_cap = (
+            CAPTION_VARIANTS_TOKEN_CAP
+            if (plan.get("caption_controls") or {}).get("caption_variants_enabled")
+            else FULL_ANALYSIS_TOKEN_CAP
+        )
+        max_tokens = max(256, min(global_cap, requested_cap, hard_cap))
 
         def make_line(item: dict[str, Any]) -> bytes:
             body = provider.build_analysis_request_body(
@@ -967,6 +995,8 @@ class BatchAnalysisService:
             analysis_fingerprint=analysis_fp,
             provider_id=provider_id,
         )
+        if estimate["estimated_cost"] is None:
+            raise BatchLifecycleError("Batch 模型價格不完整，無法安全估算成本；請先補齊 input/cached/output 定價", "BATCH-COST-UNKNOWN")
         if budget_limit is not None and estimate["estimated_cost"] > float(budget_limit):
             raise BatchLifecycleError("整批估算成本超過 Job Budget，未提交任何分片", "BATCH-BUDGET-001")
         job_id = self.jobs.create(
@@ -1852,14 +1882,42 @@ class BatchAnalysisService:
 
     @staticmethod
     def _usage_from_body(body: dict[str, Any]) -> Usage:
-        usage = body.get("usage") or {}
-        prompt_details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
-        completion_details = usage.get("completion_tokens_details") or {}
+        usage_value: Any = body.get("usage")
+        usage: dict[str, Any] = usage_value if isinstance(usage_value, dict) else {}
+        prompt_details_value = usage.get("prompt_tokens_details") or usage.get("input_tokens_details")
+        prompt_details = prompt_details_value if isinstance(prompt_details_value, dict) else {}
+        completion_details_value = usage.get("completion_tokens_details")
+        completion_details = completion_details_value if isinstance(completion_details_value, dict) else {}
+        def bounded_int(value: Any) -> int:
+            if isinstance(value, bool):
+                return 0
+            try:
+                return max(0, int(value or 0))
+            except (TypeError, ValueError, OverflowError):
+                return 0
+
+        reported_cost = usage.get("cost")
+        if reported_cost is None:
+            reported_cost = body.get("cost")
+        try:
+            reported_cost = (
+                float(reported_cost)
+                if reported_cost is not None and not isinstance(reported_cost, bool)
+                else None
+            )
+        except (TypeError, ValueError, OverflowError):
+            reported_cost = None
+        if reported_cost is not None and (not math.isfinite(reported_cost) or reported_cost < 0):
+            reported_cost = None
         return Usage(
-            int(usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0),
-            int(usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0),
-            int(prompt_details.get("cached_tokens", 0) or 0),
-            int(completion_details.get("reasoning_tokens", 0) or 0),
+            bounded_int(usage.get("prompt_tokens", usage.get("input_tokens", 0))),
+            bounded_int(usage.get("completion_tokens", usage.get("output_tokens", 0))),
+            bounded_int(prompt_details.get("cached_tokens", usage.get("cached_tokens", 0))),
+            bounded_int(completion_details.get("reasoning_tokens", usage.get("reasoning_tokens", 0))),
+            bounded_int(
+                prompt_details.get("cache_write_tokens", usage.get("cache_write_tokens", 0))
+            ),
+            reported_cost,
         )
 
     @staticmethod
@@ -1938,6 +1996,7 @@ class BatchAnalysisService:
                 "prompt_version": str(plan["prompt_version"]),
                 "schema_version": SCHEMA_VERSION,
                 "schema_kind": "full",
+                "provider_prompt_contract_sha256": str(plan.get("provider_prompt_contract_sha256") or ""),
                 **vision_input,
             }
         )
@@ -1976,9 +2035,14 @@ class BatchAnalysisService:
                 item, "schema_invalid", str(exc), "schema_invalid", job_id=str(batch["job_id"])
             )
             return "schema_invalid"
-        result = self.analysis._apply_caption_variant(result, plan.get("caption_controls") or None)
+        caption_controls = dict(plan.get("caption_controls") or {})
+        caption_controls.update(dict(plan.get("caption_display_controls") or {}))
+        result = self.analysis._apply_caption_variant(result, caption_controls or None)
         weights = dict(plan.get("ranking_weights") or {})
-        actual_cost = float(provider.estimate_batch_cost(str(batch["model"]), usage))
+        estimated_cost = provider.estimate_batch_cost(str(batch["model"]), usage)
+        actual_cost = usage.provider_reported_cost
+        cost_source = "provider_reported" if actual_cost is not None else "estimated" if estimated_cost is not None else "unknown"
+        recorded_cost = actual_cost if actual_cost is not None else estimated_cost
         raw_line = json.dumps(line, ensure_ascii=False, separators=(",", ":"))
         with self.database.transaction(operation="analysis_batch_import") as connection:
             current_item = connection.execute(
@@ -2026,7 +2090,7 @@ class BatchAnalysisService:
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,
                 cached_tokens=usage.cached_tokens,
-                estimated_cost=actual_cost,
+                estimated_cost=recorded_cost or 0.0,
                 latency_ms=0,
                 vision_request_fingerprint=str(item["vision_request_fingerprint"]),
                 vision_input_spec_json=str(item["vision_input_spec_json"]),
@@ -2034,6 +2098,7 @@ class BatchAnalysisService:
             )
             self.usage.record_batch_once(
                 provider=str(batch["provider_id"]),
+                provider_id=str(batch["provider_id"]),
                 model=str(batch["model"]),
                 job_id=str(batch["job_id"]) if batch["job_id"] else None,
                 photo_id=str(item["photo_id"]),
@@ -2044,10 +2109,12 @@ class BatchAnalysisService:
                 cached_tokens=usage.cached_tokens,
                 output_tokens=usage.output_tokens,
                 reasoning_tokens=usage.reasoning_tokens,
-                estimated_cost=actual_cost,
+                estimated_cost=recorded_cost or 0.0,
                 actual_cost=actual_cost,
                 request_id=str(request_id) if request_id else None,
                 started_at=str(batch["submitted_at"] or utc_now()),
+                cache_write_tokens=usage.cache_write_tokens,
+                cost_source=cost_source,
                 connection=connection,
             )
             self.batches.update_item(
@@ -2060,7 +2127,7 @@ class BatchAnalysisService:
                 cached_tokens=usage.cached_tokens,
                 output_tokens=usage.output_tokens,
                 reasoning_tokens=usage.reasoning_tokens,
-                actual_cost=actual_cost,
+                actual_cost=recorded_cost or 0.0,
                 raw_response_json=raw_line,
                 imported_at=utc_now(),
             )
@@ -2069,7 +2136,7 @@ class BatchAnalysisService:
                     str(batch["job_id"]),
                     str(item["job_item_id"]),
                     {"stage": "single", "processing_mode": "batch", "analysis": ranked},
-                    actual_cost,
+                    recorded_cost or 0.0,
                     connection=connection,
                 )
 
@@ -2171,6 +2238,12 @@ class BatchAnalysisService:
     def _cleanup_remote(self, batch: dict[str, Any], plan: dict[str, Any]) -> bool:
         batch = dict(batch)
 
+        files = (
+            ("input", "input_file_id", "input_file_deleted"),
+            ("output", "output_file_id", "output_file_deleted"),
+            ("error", "error_file_id", "error_file_deleted"),
+        )
+
         def complete_cleanup() -> None:
             current = self.batches.get(str(batch["id"]))
             if current is None:
@@ -2185,11 +2258,28 @@ class BatchAnalysisService:
             else:
                 self._finish(str(batch["id"]))
 
-        files = (
-            ("input", "input_file_id", "input_file_deleted"),
-            ("output", "output_file_id", "output_file_deleted"),
-            ("error", "error_file_id", "error_file_deleted"),
-        )
+        def complete_if_converged() -> bool:
+            current = self.batches.get(str(batch["id"]))
+            if current is None:
+                return False
+            current = dict(current)
+            if any(
+                current[file_key] and not bool(current[deleted_key])
+                for _, file_key, deleted_key in files
+            ):
+                return False
+            self.batches.update_batch(
+                str(batch["id"]),
+                cleanup_status="completed",
+                cleanup_completed_at=utc_now(),
+                cleanup_final_action=self._cleanup_action_for(current),
+                cleanup_error_code=None,
+                cleanup_error_message=None,
+            )
+            complete_cleanup()
+            self._cleanup_local(current)
+            return True
+
         if not any(batch[file_key] for _, file_key, _ in files):
             if str(batch.get("status")) in {"upload_unknown", "submission_unknown"}:
                 self.batches.update_batch(
@@ -2234,13 +2324,18 @@ class BatchAnalysisService:
             )
             return False
         failed = False
+        contended = False
         try:
             for file_kind, _file_key, _ in pending:
                 owner = f"cleanup:{file_kind}:{uuid4()}"
                 lease_until = self._side_effect_lease_until(str(batch["provider_id"]))
                 claim = self.batches.claim_cleanup_file(batch["id"], file_kind, owner, lease_until)
                 if claim is None:
-                    failed = True
+                    # Another worker may own this file, or may have completed it
+                    # after this worker's initial snapshot.  Neither is a cleanup
+                    # failure and neither may regress a converging cleanup to
+                    # partial.
+                    contended = True
                     continue
                 file_id, uncertain_delete = claim
                 try:
@@ -2260,15 +2355,21 @@ class BatchAnalysisService:
                                     marker in code.casefold()
                                     for marker in ("not_found", "not-found", "expired")
                                 ):
-                                    self.batches.complete_cleanup_file(batch["id"], file_kind, owner)
+                                    if not self.batches.complete_cleanup_file(
+                                        batch["id"], file_kind, owner
+                                    ):
+                                        contended = True
                                     continue
-                                self.batches.fail_cleanup_file(
+                                recorded = self.batches.fail_cleanup_file(
                                     batch["id"],
                                     owner,
                                     code or "BATCH-CLEANUP-RECONCILE",
                                     str(exc),
                                 )
-                                failed = True
+                                if recorded:
+                                    failed = True
+                                else:
+                                    contended = True
                                 continue
                     provider.delete_remote_file(file_id)
                 except Exception as exc:
@@ -2279,26 +2380,33 @@ class BatchAnalysisService:
                     if status not in {404, 410} and not any(
                         marker in code.casefold() for marker in ("not_found", "not-found", "expired")
                     ):
-                        failed = True
-                        self.batches.fail_cleanup_file(
+                        recorded = self.batches.fail_cleanup_file(
                             str(batch["id"]),
                             owner,
                             code,
                             str(exc),
                         )
+                        if recorded:
+                            failed = True
+                        else:
+                            contended = True
                         continue
                 if not self.batches.complete_cleanup_file(str(batch["id"]), file_kind, owner):
-                    failed = True
+                    contended = True
         finally:
             close = getattr(provider, "close", None)
             if callable(close):
                 close()
+        if complete_if_converged():
+            return True
         if failed:
             current = dict(self.batches.get(str(batch["id"])) or batch)
             cleanup_changes: dict[str, Any] = {"cleanup_status": "partial"}
             if str(current["status"]) not in TERMINAL_BATCH_STATUSES:
                 cleanup_changes["status"] = "cleanup_pending"
             self.batches.update_batch(str(batch["id"]), **cleanup_changes)
+            return False
+        if contended:
             return False
         self.batches.update_batch(
             str(batch["id"]),

@@ -271,7 +271,11 @@ class PhotoScanner:
                 cancelled = True
                 break
             errors: list[dict] = []
+            # Presence is a census fact. Processing eligibility is separate so
+            # safety-skipped files cannot be falsely reconciled as missing.
+            presence_entries: list[DiskPhoto] = []
             disk_entries: list[DiskPhoto] = []
+            safety_skipped: set[str] = set()
             for path, media_type in media_batch:
                 if cancel_requested():
                     cancelled = True
@@ -286,7 +290,10 @@ class PhotoScanner:
                 try:
                     relative_path = path.relative_to(root).as_posix()
                     stat = path.stat()
+                    entry = DiskPhoto(path, relative_path, int(stat.st_size), float(stat.st_mtime))
+                    presence_entries.append(entry)
                     if int(stat.st_size) > max_file_bytes:
+                        safety_skipped.add(relative_path)
                         counts["skipped"] += 1
                         errors.append(
                             _scan_error(
@@ -298,9 +305,7 @@ class PhotoScanner:
                             )
                         )
                         continue
-                    disk_entries.append(
-                        DiskPhoto(path, relative_path, int(stat.st_size), float(stat.st_mtime))
-                    )
+                    disk_entries.append(entry)
                 except (OSError, ValueError) as exc:
                     # 無法 stat 的既有路徑不能被當作「完整且成功的磁碟 census」。
                     # 保留單張錯誤並繼續掃描，但整次 reconciliation 必須停用。
@@ -320,12 +325,17 @@ class PhotoScanner:
                     self.repository.record_scan_errors(scan_id, errors)
                 break
             signatures = self.repository.signatures_for_paths(
-                library_id, [entry.relative_path for entry in disk_entries]
+                library_id, [entry.relative_path for entry in presence_entries]
             )
             prepared: list[PreparedScanPhoto] = []
             classifications: dict[str, str] = {}
             seen_without_write: list[str] = []
             processing_failures: list[tuple[str, bool, bool]] = []
+
+            for relative_path in safety_skipped:
+                stored = signatures.get(relative_path)
+                if stored is not None:
+                    seen_without_write.append(stored.id)
 
             for entry in disk_entries:
                 stored = signatures.get(entry.relative_path)

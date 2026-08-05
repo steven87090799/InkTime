@@ -84,14 +84,14 @@ def _bits_to_hex(bits: list[bool]) -> str:
 
 def _dhash(image: Image.Image) -> str:
     sample = image.convert("L").resize((9, 8), Image.Resampling.LANCZOS)
-    pixels = list(sample.getdata())
+    pixels = list(sample.tobytes())
     bits = [pixels[y * 9 + x] > pixels[y * 9 + x + 1] for y in range(8) for x in range(8)]
     return _bits_to_hex(bits)
 
 
 def _phash(image: Image.Image) -> str:
     sample = image.convert("L").resize((32, 32), Image.Resampling.LANCZOS)
-    pixels = [float(value) for value in sample.getdata()]  # type: ignore[attr-defined]
+    pixels = [float(value) for value in sample.tobytes()]
     coefficients: list[float] = []
     # 以可分離 DCT 取代每個係數重算 32×32 次三角函數；結果等價但 CPU 工作量更低。
     x_projection = [

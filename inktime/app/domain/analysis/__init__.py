@@ -1,6 +1,7 @@
 from .schema import AnalysisValidationError, validate_analysis_result
 from .plan import (
     SCHEMA_VERSION,
+    REPAIR_TOKEN_CAP,
     build_analysis_plan,
     canonical_json,
     fingerprint,
@@ -12,6 +13,7 @@ from .plan import (
 __all__ = [
     "AnalysisValidationError",
     "SCHEMA_VERSION",
+    "REPAIR_TOKEN_CAP",
     "validate_analysis_result",
     "build_analysis_plan",
     "canonical_json",

@@ -372,7 +372,10 @@ class WorkerRunner:
                     return {"scan": scan, "release": release}
                 if job["kind"] == "backup":
                     path = self.app.extensions["inktime_backup_service"].create()
-                    return {"backup": path.name}
+                    removed = self.app.extensions["inktime_backup_service"].enforce_retention(
+                        max(0, int(settings.get("retention_days", 14)))
+                    )
+                    return {"backup": path.name, "removed": removed}
                 if job["kind"] == "cleanup":
                     cache = self.app.extensions["inktime_thumbnail_cache"]
                     inventory = cache.inventory()

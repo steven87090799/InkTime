@@ -272,6 +272,7 @@ def test_four_parent_threads_use_spawned_provider_children_without_inheriting_se
         name="spawn-test",
         base_url=f"http://127.0.0.1:{server.server_port}",
         api_key="",
+        options={"allow_private_http": True},
         timeout=5,
         session=_ForbiddenParentSession(),
     )
@@ -313,6 +314,7 @@ def test_isolated_vision_failure_preserves_no_failover_metadata(tmp_path: Path):
         name="isolated-invalid",
         base_url=f"http://127.0.0.1:{server.server_port}",
         api_key="",
+        options={"allow_private_http": True},
         timeout=5,
         session=_ForbiddenParentSession(),
     )
@@ -338,7 +340,7 @@ def test_isolated_vision_failure_preserves_no_failover_metadata(tmp_path: Path):
 def test_provider_without_serializable_spec_uses_cooperative_timeout():
     provider = _CooperativeProvider(
         name="cooperative",
-        base_url="http://unused.invalid",
+        base_url="https://unused.invalid",
         api_key="",
     )
     router = FailoverVisionProvider([ProviderChannel(provider=provider)])

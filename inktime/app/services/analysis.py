@@ -11,6 +11,7 @@ from typing import Any, Callable
 from inktime.app.core.paths import safe_join
 from inktime.app.domain.analysis import (
     AnalysisValidationError,
+    REPAIR_TOKEN_CAP,
     SCHEMA_VERSION,
     build_analysis_plan,
     canonical_json,
@@ -47,7 +48,9 @@ class AnalysisDisabledError(RuntimeError):
     code = "ANALYSIS-DISABLED"
 
 
-PROMPT_VERSION = "photo-quality-v4-visual-orientation"
+PROMPT_VERSION = "photo-quality-v5-grade-anchors"
+FULL_ANALYSIS_TOKEN_CAP = 2048
+CAPTION_VARIANTS_TOKEN_CAP = 3072
 
 
 class ProviderUnavailableError(ValueError):
@@ -119,13 +122,27 @@ class PhotoAnalysisService:
             "caption_variants_enabled": bool(self.settings.get("analysis.caption_variants_enabled", False)),
         }
 
+    @staticmethod
+    def _caption_generation_controls(controls: dict | None) -> dict | None:
+        if not controls:
+            return None
+        return {key: value for key, value in controls.items() if key != "copy_default_style"}
+
+    @staticmethod
+    def _caption_display_controls(controls: dict | None) -> dict | None:
+        if not controls:
+            return None
+        return {"copy_default_style": str(controls.get("copy_default_style", "natural"))}
+
     def build_plan(self, *, strategy: str, provider_route: list[dict], scoring_profile: dict) -> dict:
         """Build the sole server-authoritative non-secret Analysis Plan."""
         if self.settings is None:
             raise RuntimeError("分析設定尚未初始化")
         settings = self.settings
         controls = self._caption_controls()
-        prompt_version = self._prompt_version(controls)
+        generation_controls = self._caption_generation_controls(controls)
+        display_controls = self._caption_display_controls(controls)
+        prompt_version = self._prompt_version(generation_controls)
         prefilter = {
             "enabled": bool(settings.get("analysis.prefilter_enabled", True)),
             "screenshots_enabled": bool(settings.get("analysis.prefilter_screenshots", True)),
@@ -168,6 +185,16 @@ class PhotoAnalysisService:
             or legacy_model_value
             or settings.get("model.low_model", "high-quality-vision")
         )
+        repair_policy = {
+            "enabled": True,
+            "model": str(settings.get("model.repair_model", analysis_model) or analysis_model),
+            "max_tokens": max(
+                256,
+                min(REPAIR_TOKEN_CAP, int(settings.get("budget.repair_max_tokens", REPAIR_TOKEN_CAP))),
+            ),
+            "max_attempts": 1,
+            "text_only": True,
+        }
         return build_analysis_plan(
             strategy=strategy,
             provider_route=provider_route,
@@ -176,24 +203,29 @@ class PhotoAnalysisService:
             stage_two_threshold=float(settings.get("analysis.stage_two_threshold", 65)),
             favorite_override=bool(settings.get("analysis.favorite_override", True)),
             scoring_profile=scoring_profile,
-            caption_controls=controls,
+            caption_controls=generation_controls,
             prompt_version=prompt_version,
             high_image_max_side=int(
                 settings.get("analysis.image_max_side", settings.get("analysis.high_image_max_side", 1024))
             ),
+            caption_display_controls=display_controls,
             prefilter=prefilter,
             execution_policy=execution_policy,
             travel_policy=travel_policy,
             scoring_rules=str(settings.get("analysis.scoring_rules", "")),
             reasoning_effort=normalize_reasoning_effort(settings.get("batch.reasoning_effort", "none")),
+            repair_policy=repair_policy,
         )
 
     @staticmethod
     def _prompt_version(caption_controls: dict | None) -> str:
         if not caption_controls:
             return PROMPT_VERSION
+        generation_controls = {
+            key: value for key, value in caption_controls.items() if key != "copy_default_style"
+        }
         fingerprint = hashlib.sha256(
-            json.dumps(caption_controls, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+            json.dumps(generation_controls, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()[:16]
         return f"{PROMPT_VERSION}-caption-{fingerprint}"
 
@@ -534,9 +566,28 @@ class PhotoAnalysisService:
         started_perf: float,
         retry_count: int = 0,
     ) -> float:
-        cost = provider.estimate_cost(model, response.usage)
+        estimated_cost = provider.estimate_cost(model, response.usage)
+        provider_cost = response.usage.provider_reported_cost
+        if provider_cost is not None:
+            actual_cost = max(0.0, float(provider_cost))
+            cost_source = "provider_reported"
+        elif estimated_cost is not None:
+            actual_cost = None
+            cost_source = "estimated"
+        else:
+            actual_cost = None
+            cost_source = "unknown"
+        effective_cost = (
+            max(0.0, float(provider_cost))
+            if provider_cost is not None
+            else max(0.0, float(estimated_cost))
+            if estimated_cost is not None
+            else 0.0
+        )
+        metrics = dict(response.request_metrics or getattr(provider, "last_request_metrics", {}) or {})
         self.usage.record(
             provider=provider.name,
+            provider_id=str(getattr(provider, "provider_id", provider.name)),
             model=model,
             job_id=job_id,
             photo_id=photo_id,
@@ -544,15 +595,21 @@ class PhotoAnalysisService:
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
             cached_tokens=response.usage.cached_tokens,
-            estimated_cost=cost,
-            actual_cost=cost,
+            estimated_cost=estimated_cost,
+            actual_cost=actual_cost,
             started_at=started_at,
             latency_ms=int((time.perf_counter() - started_perf) * 1000),
             status="completed",
             retry_count=retry_count,
             reasoning_tokens=response.usage.reasoning_tokens,
+            cache_write_tokens=response.usage.cache_write_tokens,
+            cost_source=cost_source,
+            prompt_chars=metrics.get("prompt_chars", 0),
+            schema_chars=metrics.get("schema_chars", 0),
+            request_body_bytes=metrics.get("request_body_bytes", 0),
+            image_bytes=metrics.get("image_bytes", 0),
         )
-        return cost
+        return effective_cost
 
     def _model_call(
         self,
@@ -568,13 +625,14 @@ class PhotoAnalysisService:
         schema_kind: str,
         reasoning_effort: str = "none",
         caption_controls: dict | None,
+        repair_policy: dict | None,
         prompt_version: str,
         vision_input: dict,
+        provider_prompt_contract_sha256: str | None = None,
         force_recompute: bool = False,
         _excluded_providers: set[str] | None = None,
     ) -> tuple[dict, str, float, bool, str, str, str, str, Usage, int]:
         selected_channel = None
-        network_permit = False
         selected_provider = provider
         # Enumerate Frozen Route identities before consulting network state.
         # A cache hit is valid even while its provider is circuit-open or rate
@@ -590,11 +648,6 @@ class PhotoAnalysisService:
             selected_provider = selected_channel.provider
         actual_provider = str(getattr(selected_provider, "provider_id", selected_provider.name))
 
-        def release_selected(*, usage: Usage | None = None, error: Exception | None = None) -> None:
-            if selected_channel is not None and network_permit:
-                router: Any = provider
-                router.release_channel(selected_channel, usage=usage, error=error)
-
         fingerprint_material = {
             "content_sha256": content_sha256,
             "actual_provider": actual_provider,
@@ -604,6 +657,8 @@ class PhotoAnalysisService:
             "reasoning_effort": reasoning_effort,
             **vision_input,
         }
+        if provider_prompt_contract_sha256:
+            fingerprint_material["provider_prompt_contract_sha256"] = str(provider_prompt_contract_sha256)
         request_fingerprint = fingerprint(
             {
                 **fingerprint_material,
@@ -617,15 +672,21 @@ class PhotoAnalysisService:
         # Legacy schema constrains this column to basic/full; the v4 Vision
         # Request Fingerprint is the authoritative additional cache dimension.
         cache_schema_kind = schema_kind
-        cache_schema_versions = (SCHEMA_VERSION, 2) if schema_kind == "full" else (2,)
+        has_prompt_contract = bool(provider_prompt_contract_sha256)
+        cache_schema_versions: tuple[int, ...]
+        if has_prompt_contract:
+            cache_schema_versions = (SCHEMA_VERSION,) if schema_kind == "full" else (2,)
+        else:
+            cache_schema_versions = (SCHEMA_VERSION, 2) if schema_kind == "full" else (2,)
+        cache_schema_version = SCHEMA_VERSION if has_prompt_contract and schema_kind == "full" else None
         vision_json = canonical_json(vision_input)
 
         def get_cache() -> dict | None:
             for cache_schema_version in cache_schema_versions:
                 fingerprints = (
-                    (request_fingerprint, legacy_v2_fingerprint)
-                    if cache_schema_version == 2
-                    else (request_fingerprint,)
+                    (request_fingerprint,)
+                    if has_prompt_contract or cache_schema_version != 2
+                    else (request_fingerprint, legacy_v2_fingerprint)
                 )
                 for cache_fingerprint in fingerprints:
                     cached_row = self.photos.get_ai_cache(
@@ -659,7 +720,6 @@ class PhotoAnalysisService:
                         stage=stage,
                         trace_id=request_fingerprint,
                     )
-                    release_selected()
                     return (
                         validate_analysis_result(cached["result"]),
                         str(cached["raw_json"]),
@@ -704,7 +764,6 @@ class PhotoAnalysisService:
         ):
             waited_for_owner = True
             if time.monotonic() >= deadline:
-                release_selected(error=TimeoutError("AI-CACHE-001 等待相同分析結果逾時"))
                 raise TimeoutError("AI-CACHE-001 等待相同分析結果逾時")
             time.sleep(0.05)
             # A forced request ignores a pre-existing entry, but once another
@@ -720,7 +779,6 @@ class PhotoAnalysisService:
                     stage=stage,
                     trace_id=prompt_version,
                 )
-                release_selected()
                 return (
                     validate_analysis_result(cached["result"]),
                     str(cached["raw_json"]),
@@ -737,7 +795,6 @@ class PhotoAnalysisService:
             cached = get_cache()
             if cached is not None and is_force_generation(cached):
                 self.photos.finish_ai_cache_reservation(cache_key, owner_id)
-                release_selected()
                 return (
                     validate_analysis_result(cached["result"]),
                     str(cached["raw_json"]),
@@ -752,15 +809,11 @@ class PhotoAnalysisService:
                 )
         try:
             vision_attempt = VisionAttemptState()
-            if selected_channel is not None:
-                router: Any = provider
-                if not router.acquire_channel(selected_channel):
-                    raise TimeoutError("VLM-005 Provider Network Permit 暫時不可用")
-                network_permit = True
             # The only owner generates a JPEG, after both cache checks.
             with image_factory() as image:
                 result, raw, cost, usage, latency = self._perform_uncached_model_call(
-                    provider=selected_provider,
+                    provider=provider,
+                    selected_channel=selected_channel,
                     image=image,
                     model=model,
                     detail=detail,
@@ -771,16 +824,21 @@ class PhotoAnalysisService:
                     schema_kind=schema_kind,
                     reasoning_effort=reasoning_effort,
                     caption_controls=caption_controls,
+                    repair_policy=repair_policy,
                     prompt_version=prompt_version,
                     cache_schema_kind=cache_schema_kind,
+                    cache_schema_version=cache_schema_version,
                     vision_request_fingerprint=request_fingerprint,
                     vision_input_spec_json=vision_json,
                     cache_provider_identity=actual_provider,
                     vision_attempt=vision_attempt,
+                    provider_request_context_id=(
+                        f"{stage}|{job_id or 'manual'}|{photo_id}|{request_fingerprint}|"
+                        f"{hashlib.sha256(owner_id.encode('utf-8')).hexdigest()[:16]}"
+                    ),
                 )
         except Exception as exc:
             self.photos.finish_ai_cache_reservation(cache_key, owner_id, error=str(exc))
-            release_selected(error=exc)
             record_outcome = getattr(self.photos, "record_analysis_request_outcome", None)
             if callable(record_outcome):
                 ambiguous = bool(getattr(exc, "ambiguous", False))
@@ -829,14 +887,15 @@ class PhotoAnalysisService:
                     schema_kind=schema_kind,
                     reasoning_effort=reasoning_effort,
                     caption_controls=caption_controls,
+                    repair_policy=repair_policy,
                     prompt_version=prompt_version,
                     vision_input=vision_input,
+                    provider_prompt_contract_sha256=provider_prompt_contract_sha256,
                     force_recompute=force_recompute,
                     _excluded_providers=excluded,
                 )
             raise
         self.photos.finish_ai_cache_reservation(cache_key, owner_id)
-        release_selected(usage=usage)
         return (
             result,
             raw,
@@ -854,6 +913,7 @@ class PhotoAnalysisService:
         self,
         *,
         provider: VisionProvider,
+        selected_channel=None,
         image: Path,
         model: str,
         detail: str,
@@ -864,18 +924,36 @@ class PhotoAnalysisService:
         schema_kind: str,
         reasoning_effort: str,
         caption_controls: dict | None,
+        repair_policy: dict | None,
         prompt_version: str,
         cache_schema_kind: str,
+        cache_schema_version: int | None,
         vision_request_fingerprint: str,
         vision_input_spec_json: str,
         cache_provider_identity: str,
         vision_attempt: VisionAttemptState,
+        provider_request_context_id: str,
     ) -> tuple[dict, str, float, Usage, int]:
         if self.budgets:
             self.budgets.assert_request_allowed(job_id, photo_id)
         started_at = datetime.now(timezone.utc).isoformat()
         started_perf = time.perf_counter()
-        max_tokens = int(self.budgets.settings.get("budget.max_tokens", 8000)) if self.budgets else None
+        settings = self.budgets.settings if self.budgets else self.settings
+        global_token_cap = int(settings.get("budget.max_tokens", 8000)) if settings else 8000
+        requested_token_cap = int(
+            settings.get(
+                "budget.caption_variants_max_tokens"
+                if caption_controls and caption_controls.get("caption_variants_enabled")
+                else "budget.full_analysis_max_tokens",
+                3072 if caption_controls and caption_controls.get("caption_variants_enabled") else 2048,
+            )
+        ) if settings else 2048
+        hard_cap = (
+            CAPTION_VARIANTS_TOKEN_CAP
+            if caption_controls and caption_controls.get("caption_variants_enabled")
+            else FULL_ANALYSIS_TOKEN_CAP
+        )
+        max_tokens = max(256, min(global_token_cap, requested_token_cap, hard_cap))
         self._activity(
             "DEBUG",
             "provider_request_started",
@@ -896,13 +974,21 @@ class PhotoAnalysisService:
                 "max_tokens": max_tokens,
                 "reasoning_effort": reasoning_effort,
                 "caption_controls": caption_controls,
+                "provider_request_context_id": provider_request_context_id,
             }
             if self.process_boundary is None:
                 # Cooperative providers may use this mutable marker to tell
                 # the caller exactly when their transport has been handed the
                 # image.  It is deliberately not sent into a child process.
                 call["vision_attempt"] = vision_attempt
-            if self.process_boundary is not None and hasattr(provider, "analyze_isolated"):
+            if selected_channel is not None and hasattr(provider, "_execute_sticky"):
+                response = provider._execute_sticky(
+                    selected_channel,
+                    "analyze",
+                    boundary=self.process_boundary,
+                    **call,
+                )
+            elif self.process_boundary is not None and hasattr(provider, "analyze_isolated"):
                 response = provider.analyze_isolated(self.process_boundary, **call)
             elif self.process_boundary is not None:
                 specification = provider.process_spec()
@@ -917,6 +1003,7 @@ class PhotoAnalysisService:
                         reasoning_effort=reasoning_effort,
                         caption_controls=caption_controls,
                         vision_attempt=vision_attempt,
+                        provider_request_context_id=provider_request_context_id,
                     )
                 else:
                     response = self.process_boundary.call_provider(
@@ -935,6 +1022,7 @@ class PhotoAnalysisService:
                     reasoning_effort=reasoning_effort,
                     caption_controls=caption_controls,
                     vision_attempt=vision_attempt,
+                    provider_request_context_id=provider_request_context_id,
                 )
             vision_attempt.vision_started = True
             vision_attempt.vision_completed = True
@@ -995,15 +1083,31 @@ class PhotoAnalysisService:
             )
             repair_started_at = datetime.now(timezone.utc).isoformat()
             repair_perf = time.perf_counter()
+            frozen_repair_policy = dict(repair_policy or {})
+            if not bool(frozen_repair_policy.get("enabled", True)):
+                raise first_error
+            repair_model = str(frozen_repair_policy.get("model") or model).strip() or model
+            try:
+                repair_cap = int(frozen_repair_policy.get("max_tokens", REPAIR_TOKEN_CAP))
+            except (TypeError, ValueError):
+                repair_cap = REPAIR_TOKEN_CAP
             repair_call = {
                 "invalid_content": response.content,
                 "validation_error": str(first_error),
-                "model": model,
-                "max_tokens": max_tokens,
+                "model": repair_model,
+                "max_tokens": max(256, min(repair_cap, REPAIR_TOKEN_CAP)),
                 "stage": stage,
                 "caption_controls": caption_controls,
+                "provider_request_context_id": provider_request_context_id,
             }
-            if self.process_boundary is not None and hasattr(provider, "repair_json_isolated"):
+            if selected_channel is not None and hasattr(provider, "_execute_sticky"):
+                repaired = provider._execute_sticky(
+                    selected_channel,
+                    "repair_json",
+                    boundary=self.process_boundary,
+                    **repair_call,
+                )
+            elif self.process_boundary is not None and hasattr(provider, "repair_json_isolated"):
                 repaired = provider.repair_json_isolated(self.process_boundary, **repair_call)
             elif self.process_boundary is not None:
                 specification = provider.process_spec()
@@ -1021,7 +1125,7 @@ class PhotoAnalysisService:
                 repaired = provider.repair_json(**repair_call)
             total_cost += self._record(
                 provider,
-                model,
+                repair_model,
                 job_id,
                 photo_id,
                 "json_repair",
@@ -1042,7 +1146,10 @@ class PhotoAnalysisService:
             provider=cache_provider_identity,
             model_name=model,
             prompt_version=prompt_version,
-            schema_version=int(result["schema_version"]),
+            # A frozen v3 plan owns a v3 cache identity even when a
+            # compatibility provider still returns the accepted v2 payload.
+            # Legacy plans retain the result's historical schema version.
+            schema_version=int(cache_schema_version or result["schema_version"]),
             schema_kind=cache_schema_kind,
             result=result,
             raw_json=raw,
@@ -1111,8 +1218,10 @@ class PhotoAnalysisService:
                     "emotion_weight": (ranking_weights or DEFAULT_RANKING_WEIGHTS)["emotion"],
                     "favorite_bonus": favorite_bonus,
                 },
-                caption_controls=self._caption_controls(),
-                prompt_version=self._prompt_version(self._caption_controls()),
+                caption_controls=self._caption_generation_controls(self._caption_controls()),
+                prompt_version=self._prompt_version(
+                    self._caption_generation_controls(self._caption_controls())
+                ),
                 high_image_max_side=int(
                     self.settings.get(
                         "analysis.image_max_side", self.settings.get("analysis.high_image_max_side", 1024)
@@ -1120,6 +1229,26 @@ class PhotoAnalysisService:
                 )
                 if self.settings
                 else 1024,
+                caption_display_controls=self._caption_display_controls(self._caption_controls()),
+                repair_policy={
+                    "enabled": True,
+                    "model": str(
+                        self.settings.get("model.repair_model", high_model) if self.settings else high_model
+                    ),
+                    "max_tokens": max(
+                        256,
+                        min(
+                            REPAIR_TOKEN_CAP,
+                            int(
+                                self.settings.get("budget.repair_max_tokens", REPAIR_TOKEN_CAP)
+                                if self.settings
+                                else REPAIR_TOKEN_CAP
+                            ),
+                        ),
+                    ),
+                    "max_attempts": 1,
+                    "text_only": True,
+                },
             )
         analysis_spec = normalize_analysis_plan(analysis_spec)
         analysis_spec["reasoning_effort"] = normalize_reasoning_effort(
@@ -1128,7 +1257,13 @@ class PhotoAnalysisService:
         strategy = str(analysis_spec["strategy"])
         model = str(analysis_spec.get("model") or analysis_spec.get("high_model") or "")
         favorite_override = bool(analysis_spec["favorite_override"])
-        caption_controls = dict(analysis_spec["caption_controls"]) or None
+        caption_controls = dict(analysis_spec.get("caption_controls") or {}) or None
+        display_controls = dict(analysis_spec.get("caption_display_controls") or {})
+        repair_policy = dict(analysis_spec.get("repair_policy") or {})
+        if caption_controls:
+            # Display style is frozen for the job but excluded from the
+            # provider prompt and Vision request identity.
+            caption_controls = dict(caption_controls) | display_controls
         prompt_version = str(analysis_spec["prompt_version"])
         vision_input = dict(analysis_spec["vision_input"])
         image_max_side = int(vision_input["max_side"])
@@ -1136,7 +1271,10 @@ class PhotoAnalysisService:
         favorite_bonus = float(analysis_spec["favorite_bonus"])
         scoring_version_id = str(analysis_spec["scoring_profile_id"]) or scoring_version_id
         analysis_spec_json = canonical_json(analysis_spec)
-        analysis_fingerprint = fingerprint(analysis_spec)
+        identity_spec = dict(analysis_spec)
+        identity_spec.pop("caption_display_controls", None)
+        identity_spec.pop("repair_policy", None)
+        analysis_fingerprint = fingerprint(identity_spec)
         content_sha = str(photo["sha256"] or "")
         plan_prefilter = {
             "analysis.prefilter_enabled": bool(analysis_spec.get("prefilter", {}).get("enabled", True)),
@@ -1340,8 +1478,10 @@ class PhotoAnalysisService:
             schema_kind="full",
             reasoning_effort=str(analysis_spec["reasoning_effort"]),
             caption_controls=caption_controls,
+            repair_policy=repair_policy,
             prompt_version=prompt_version,
             vision_input=vision_input,
+            provider_prompt_contract_sha256=str(analysis_spec.get("provider_prompt_contract_sha256") or "") or None,
             force_recompute=force_recompute,
         )
         total_cost = cost

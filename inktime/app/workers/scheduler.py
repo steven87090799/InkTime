@@ -21,9 +21,49 @@ class SchedulerRunner:
     def __init__(self, app) -> None:
         self.app = app
         self.stop = threading.Event()
-        self.last_backup_date: str | None = None
         self.last_notification_scan_at = 0.0
         self.last_batch_poll_at = 0.0
+
+    def _safe_step(self, name: str, action) -> None:
+        try:
+            action()
+        except Exception as exc:
+            log_event(
+                LOGGER,
+                logging.ERROR,
+                "Scheduler 子步驟失敗；其他步驟持續執行",
+                event="scheduler_step_failed",
+                error_code="SCHEDULE-002",
+                details={"step": name, "error_type": exc.__class__.__name__},
+            )
+
+    def _enqueue_backup(self, now: datetime, settings) -> None:
+        repository = self.app.extensions["inktime_job_repository"]
+        service = self.app.extensions["inktime_job_service"]
+        today = now.date().isoformat()
+        job_id = repository.create_maintenance(
+            kind="backup",
+            name=f"排程備份：{today}",
+            priority=6,
+            dedupe_key=f"scheduled-backup:{today}",
+            created_by=None,
+            settings={
+                "scheduled_backup": True,
+                "retention_days": int(settings.get("backup.retention", 14)),
+                "trigger_source": "scheduler",
+            },
+        )
+        job = repository.get(job_id)
+        if job is not None and str(job["status"]) == "pending":
+            service.start(job_id)
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "已建立排程備份工作",
+            event="backup_enqueued",
+            job_id=job_id,
+            details={"date": today},
+        )
 
     def request_stop(self, *_args) -> None:
         self.stop.set()
@@ -31,9 +71,15 @@ class SchedulerRunner:
     def tick(self) -> None:
         settings = self.app.extensions["inktime_settings_repository"]
         observability = self.app.extensions["inktime_observability_service"]
-        observability.heartbeat("scheduler")
-        observability.tick()
-        self.app.extensions["inktime_job_repository"].recover_stale()
+        self._safe_step(
+            "observability_heartbeat",
+            lambda: observability.heartbeat("scheduler"),
+        )
+        self._safe_step("observability_tick", observability.tick)
+        self._safe_step(
+            "recover_stale",
+            self.app.extensions["inktime_job_repository"].recover_stale,
+        )
         batch_poll_seconds = int(settings.get("batch.poll_seconds", 300))
         if time.monotonic() - self.last_batch_poll_at >= max(60, batch_poll_seconds):
             try:
@@ -51,14 +97,17 @@ class SchedulerRunner:
         notification_service = self.app.extensions["inktime_notification_service"]
         scan_seconds = int(settings.get("notification.scan_seconds", 300))
         if time.monotonic() - self.last_notification_scan_at >= scan_seconds:
-            notification_service.scan()
+            self._safe_step("notification_scan", notification_service.scan)
             self.last_notification_scan_at = time.monotonic()
         # Scheduler 只做有界 Claim；實際 HTTP 由既有 Job Queue 處理，慢端點
         # 不會卡住排程掃描與備份。
-        notification_service.enqueue_pending(
-            self.app.extensions["inktime_job_repository"],
-            self.app.extensions["inktime_job_service"],
-            limit=10,
+        self._safe_step(
+            "notification_enqueue",
+            lambda: notification_service.enqueue_pending(
+                self.app.extensions["inktime_job_repository"],
+                self.app.extensions["inktime_job_service"],
+                limit=10,
+            ),
         )
         zone = ZoneInfo(str(settings.get("general.timezone", "Asia/Taipei")))
         now = datetime.now(zone)
@@ -76,23 +125,14 @@ class SchedulerRunner:
                     error_code="SCHEDULE-001",
                     details={"task": task["key"]},
                 )
-        self._prepare_due_offline_devices(datetime.now(timezone.utc))
+        self._safe_step(
+            "offline_prefetch",
+            lambda: self._prepare_due_offline_devices(datetime.now(timezone.utc)),
+        )
         if not settings.get("backup.schedule_enabled", True):
             return
-        today = now.date().isoformat()
-        if now.hour == int(settings.get("backup.hour", 3)) and self.last_backup_date != today:
-            path = self.app.extensions["inktime_backup_service"].create()
-            removed = self.app.extensions["inktime_backup_service"].enforce_retention(
-                int(settings.get("backup.retention", 14))
-            )
-            self.last_backup_date = today
-            log_event(
-                LOGGER,
-                logging.INFO,
-                "排程備份完成",
-                event="backup_completed",
-                details={"filename": path.name, "removed": removed},
-            )
+        if now.hour == int(settings.get("backup.hour", 3)):
+            self._safe_step("backup_enqueue", lambda: self._enqueue_backup(now, settings))
 
     @staticmethod
     def _offline_prefetch_target_date(
@@ -394,7 +434,18 @@ class SchedulerRunner:
         configure_logging(settings_repository=settings)
         log_event(LOGGER, logging.INFO, "排程器已啟動", event="scheduler_started")
         while not self.stop.is_set():
-            self.tick()
+            try:
+                self.tick()
+            except Exception as exc:
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "Scheduler 主迴圈發生未預期錯誤；將以有界延遲恢復",
+                    event="scheduler_tick_failed",
+                    error_code="SCHEDULE-003",
+                    details={"error_type": exc.__class__.__name__},
+                )
+                self.stop.wait(30)
             configure_logging(settings_repository=settings)
             poll_seconds = int(settings.get("scheduler.poll_seconds", 60))
             self.stop.wait(max(30, min(poll_seconds, 3600)))

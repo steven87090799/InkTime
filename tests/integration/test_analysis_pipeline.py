@@ -13,7 +13,7 @@ from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.analysis import PhotoAnalysisService
-from inktime.app.domain.analysis.plan import fingerprint
+from inktime.app.domain.analysis.plan import build_analysis_plan, fingerprint
 from inktime.app.domain.analysis.schema import AnalysisValidationError
 from inktime.app.workers.scanner import PhotoScanner
 from tests.conftest import create_admin
@@ -27,6 +27,7 @@ class MockProvider(VisionProvider):
         self.responses = list(responses)
         self.analyze_calls = 0
         self.repair_calls = 0
+        self.repair_kwargs: list[dict] = []
 
     def analyze(self, **kwargs):
         self.analyze_calls += 1
@@ -37,6 +38,7 @@ class MockProvider(VisionProvider):
 
     def repair_json(self, **kwargs):
         self.repair_calls += 1
+        self.repair_kwargs.append(kwargs)
         value = self.responses.pop(0)
         return ProviderResponse(
             value if isinstance(value, str) else json.dumps(value, ensure_ascii=False), Usage(200, 100, 0)
@@ -188,6 +190,8 @@ def test_invalid_json_is_repaired_only_once_without_second_image_call(app, tmp_p
     )
     assert provider.analyze_calls == 1
     assert provider.repair_calls == 1
+    assert provider.repair_kwargs[0]["max_tokens"] == 1200
+    assert "image_path" not in provider.repair_kwargs[0]
 
 
 def test_invalid_repair_container_fails_without_a_second_vision_request(app, tmp_path):
@@ -199,6 +203,8 @@ def test_invalid_repair_container_fails_without_a_second_vision_request(app, tmp
         )
     assert provider.analyze_calls == 1
     assert provider.repair_calls == 1
+    assert provider.repair_kwargs[0]["max_tokens"] == 1200
+    assert "image_path" not in provider.repair_kwargs[0]
 
 
 def test_router_does_not_fail_over_after_initial_vision_and_repair_failure(app, tmp_path):
@@ -224,13 +230,42 @@ def test_router_does_not_fail_over_after_initial_vision_and_repair_failure(app, 
 
 def test_full_analysis_hits_historical_v2_cache_without_an_image_call(app, tmp_path):
     _, ids, service = prepare(app, tmp_path)
+    # This fixture intentionally models a pre-contract frozen plan.  New
+    # plans include the v3 provider contract and must not fall back to v2.
+    legacy_plan = build_analysis_plan(
+        strategy="high_quality",
+        provider_route=[],
+        low_model="mock",
+        high_model="mock",
+        stage_two_threshold=65,
+        favorite_override=True,
+        scoring_profile={
+            "id": "",
+            "memory_weight": 25,
+            "beauty_weight": 25,
+            "technical_weight": 25,
+            "emotion_weight": 25,
+            "favorite_bonus": 0,
+        },
+        caption_controls=None,
+        prompt_version="legacy-test-prompt",
+        high_image_max_side=1024,
+        repair_policy={"model": "mock", "max_tokens": 1200},
+    )
+    for key in (
+        "scoring_rules",
+        "scoring_rules_sha256",
+        "provider_behavior_revision",
+        "provider_prompt_contract_sha256",
+    ):
+        legacy_plan.pop(key, None)
     first = MockProvider([valid_result()])
     service.analyze_photo(
         photo_id=ids[0],
         job_id=None,
         provider=first,
         strategy="high_quality",
-        high_model="mock",
+        analysis_plan=legacy_plan,
         force_ai=True,
     )
     repository = app.extensions["inktime_photo_repository"]
@@ -286,7 +321,7 @@ def test_full_analysis_hits_historical_v2_cache_without_an_image_call(app, tmp_p
         job_id=None,
         provider=second,
         strategy="high_quality",
-        high_model="mock",
+        analysis_plan=legacy_plan,
         force_ai=True,
     )
     assert result["stage"] == "cache"
@@ -396,7 +431,10 @@ def test_worker_context_inherits_only_the_same_frozen_plan_and_keeps_source_trac
             (ids[1],),
         ).fetchone()
     assert copied["stage"] == "inherited"
-    assert copied["analysis_fingerprint"] == fingerprint(plan) == source["analysis_fingerprint"]
+    identity_plan = dict(plan)
+    identity_plan.pop("caption_display_controls", None)
+    identity_plan.pop("repair_policy", None)
+    assert copied["analysis_fingerprint"] == fingerprint(identity_plan) == source["analysis_fingerprint"]
     assert copied["vision_request_fingerprint"] == source["vision_request_fingerprint"]
     assert copied["vision_input_spec_json"] == source["vision_input_spec_json"]
     assert json.loads(copied["semantic_json"])["inherited_from"]["analysis_id"] == source["id"]

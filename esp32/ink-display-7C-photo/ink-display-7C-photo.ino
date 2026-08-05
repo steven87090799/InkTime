@@ -12,8 +12,10 @@
 #include "hardware_profile.h"
 #include "photopainter_core.h"
 #include "offline_schedule_core.h"
+#include "device_config_store.h"
 #include "queue_client_core.h"
 #include "queue_runtime_types.h"
+#include "device_http_transport.h"
 #if INKTIME_PHOTOPAINTER_ENABLED
 #include "photopainter_support.h"
 #include "power_manager.h"
@@ -92,11 +94,10 @@ GxEPD2_7C<
 #define DEVICE_QUEUE_MANIFEST_PATH "/api/device/v1/queue/manifest"
 #define DEVICE_QUEUE_ACK_PATH "/api/device/v1/queue/ack"
 #define DEVICE_OFFLINE_SCHEDULE_PATH "/api/device/v1/offline-schedule"
-#define INKTIME_FIRMWARE_VERSION "2.5.0"
+#define INKTIME_FIRMWARE_VERSION "2.6.0"
 
-// No trusted CA provisioning exists yet. HTTPS is rejected by default instead
-// of silently downgrading certificate verification. Isolated LAN HTTP remains
-// supported; an explicit development override prints a warning.
+// Secure builds require a compile-time or portal-provisioned trust anchor;
+// isolated LAN HTTP remains available only in an explicit development build.
 #ifndef INKTIME_ALLOW_INSECURE_DEVICE_HTTP
 #define INKTIME_ALLOW_INSECURE_DEVICE_HTTP 0
 #endif
@@ -106,11 +107,13 @@ GxEPD2_7C<
 // =======================
 Preferences prefs;
 WebServer  server(80);
+inktime::DeviceConfigStore configStore;
 
 struct Config {
   String  wifi_ssid;
   String  wifi_pass;
   String  backend_hostport;
+  String  ca_pem;
   String  device_token;
   int32_t tz_offset_minutes;
   uint8_t refresh_hour;
@@ -141,12 +144,6 @@ static bool parseOfflineClock(const String &value, inktime::OfflineSlot &slot) {
   slot.hour = static_cast<uint8_t>((value[0] - '0') * 10 + value[1] - '0');
   slot.minute = static_cast<uint8_t>((value[3] - '0') * 10 + value[4] - '0');
   return inktime::validOfflineSlot(slot);
-}
-
-static String offlineClock(const inktime::OfflineSlot &slot) {
-  char value[6] = {0};
-  snprintf(value, sizeof(value), "%02u:%02u", slot.hour, slot.minute);
-  return String(value);
 }
 
 static bool nextIsoLocalDate(const String &value, String &output) {
@@ -239,36 +236,6 @@ static bool applyRemoteSchedule(JsonObject remoteConfig, int schemaVersion, Conf
   return true;
 }
 
-static void setLegacySchedule(Config &cfg) {
-  cfg.schedule_count = 1;
-  cfg.schedule_slots[0] = {cfg.refresh_hour, cfg.refresh_minute};
-  for (uint8_t index = 1; index < inktime::kMaxOfflineSlots; ++index) {
-    cfg.schedule_slots[index] = {0, 0};
-  }
-}
-
-static bool loadStoredSchedule(Config &cfg) {
-  const uint8_t count = prefs.getUChar("scnt", 0);
-  if (count == 0) {
-    setLegacySchedule(cfg);
-    return true;
-  }
-  if (count > inktime::kMaxOfflineSlots) return false;
-  inktime::OfflineSlot slots[inktime::kMaxOfflineSlots] = {};
-  for (uint8_t index = 0; index < count; ++index) {
-    const String key = String("s") + String(index);
-    if (!parseOfflineClock(prefs.getString(key.c_str(), ""), slots[index])) return false;
-  }
-  if (!inktime::validateOfflineSlots(slots, count)) return false;
-  cfg.schedule_count = count;
-  for (uint8_t index = 0; index < count; ++index) cfg.schedule_slots[index] = slots[index];
-  for (uint8_t index = count; index < inktime::kMaxOfflineSlots; ++index) {
-    cfg.schedule_slots[index] = {0, 0};
-  }
-  cfg.refresh_hour = slots[0].hour;
-  cfg.refresh_minute = slots[0].minute;
-  return true;
-}
 #endif
 
 Config g_cfg;
@@ -283,8 +250,13 @@ bool currentFromQueue = false;
 bool currentPrefetchOnly = false;
 bool enhancedNetworkWakeRequested = false;
 bool currentPayloadIntegrityTrusted = false;
+#if INKTIME_PHOTOPAINTER_ENABLED
+bool offlineScheduleTxnBlocked = false;
+#endif
 String portalSetupSecret;
 String portalNonce;
+String portalApSsid;
+String portalApPassword;
 uint8_t portalSaveAttempts = 0;
 bool portalSaveAllowed = false;
 String currentReleaseId;
@@ -294,7 +266,23 @@ String currentQueueItemId;
 int64_t currentQueueVersion = -1;
 String lastDeviceErrorCode;
 String lastDeviceErrorMessage;
+String lastDeviceWarningCode;
+String lastDeviceWarningMessage;
 uint32_t lastRefreshDurationMs = 0;
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+static bool reconcilePendingScheduleConfigTransaction(Config &cfg);
+#endif
+
+static void setConfigPersistenceError(const String &persistError) {
+  lastDeviceErrorCode = "DEVICE-CONFIG-PERSIST";
+  lastDeviceErrorMessage = "遠端設定持久化失敗：";
+  if (persistError.length() > 0U) {
+    lastDeviceErrorMessage += persistError;
+  } else {
+    lastDeviceErrorMessage += "PAIRING-NVS-UNKNOWN";
+  }
+}
 
 static int calculateSha256(const unsigned char* input, size_t length, unsigned char output[32]) {
 #if MBEDTLS_VERSION_MAJOR >= 3
@@ -304,26 +292,17 @@ static int calculateSha256(const unsigned char* input, size_t length, unsigned c
 #endif
 }
 
-static bool backendTransportAllowed(const String &base) {
-  if (base.startsWith("https://")) return true;
-#if INKTIME_ALLOW_INSECURE_DEVICE_HTTP
-  return true;
-#else
-  lastDeviceErrorCode = "DEVICE-HTTP-DISALLOWED";
-  lastDeviceErrorMessage = "正式裝置 Backend 必須使用 HTTPS";
+static bool backendTransportAllowed(const String &base, const String &ca_pem) {
+  String errorCode;
+  if (inktime::DeviceHttpTransport::backendUrlAllowed(base, ca_pem, errorCode)) return true;
+  lastDeviceErrorCode = errorCode;
+  lastDeviceErrorMessage = "Backend URL 或 TLS trust anchor 不符合安全政策";
   return false;
-#endif
-}
-
-static void configureHttpClient(HTTPClient &client, uint32_t timeoutMs) {
-  client.setConnectTimeout(10000);
-  client.setTimeout(timeoutMs);
-  client.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
 }
 
 static String randomPortalSecret() {
   char value[25];
-  for (uint8_t i = 0; i < 12; ++i) snprintf(value + i * 2, 3, "%02x", static_cast<unsigned>(esp_random() & 0xff));
+  for (uint8_t i = 0; i < 12; ++i) snprintf(value + i * 2, 3, "%02X", static_cast<unsigned>(esp_random() & 0xff));
   return String(value);
 }
 
@@ -341,9 +320,34 @@ static void clearConfigNVS() {
 #if DEBUG_LOG
   DBG_PRINTLN("[NVS] clearConfigNVS()");
 #endif
-  prefs.begin("dashcfg", false);
-  prefs.clear();
-  prefs.end();
+  String storeError;
+  const bool storeCleared = configStore.clearAll(storeError);
+  bool legacyCleared = false;
+  if (prefs.begin("dashcfg", false)) {
+    legacyCleared = prefs.clear();
+    prefs.end();
+    if (legacyCleared && prefs.begin("dashcfg", true)) {
+      const char* keys[] = {
+        "last_epoch", "offretry_attempt", "offretry_epoch", "offretry_next",
+        "ack_item", "ack_version", "ack_event", "ack_attempt", "ack_next",
+        "ssid", "pass", "hostport", "ca_pem", "devtoken", "tzmin", "tz",
+        "hour", "minute", "rot180", "prefetch", "delivery", "button", "cfgver", "scnt",
+      };
+      for (const char* key : keys) {
+        if (prefs.isKey(key)) {
+          legacyCleared = false;
+          break;
+        }
+      }
+      prefs.end();
+    } else {
+      legacyCleared = false;
+    }
+  }
+  if (!storeCleared || !legacyCleared) {
+    lastDeviceErrorCode = "PAIRING-NVS-006";
+    lastDeviceErrorMessage = storeError.length() > 0U ? storeError : "NVS clear/readback 失敗";
+  }
 }
 
 static bool isFactoryResetRequestedAtBoot() {
@@ -740,28 +744,99 @@ static uint32_t minutesToNextRefreshFromLastEpoch(const Config &cfg) {
 // =======================
 //  配置读写
 // =======================
-void loadConfig(Config &cfg) {
-  prefs.begin("dashcfg", true); // read-only
-  cfg.wifi_ssid        = prefs.getString("ssid", "");
-  cfg.wifi_pass        = prefs.getString("pass", "");
-  cfg.backend_hostport = prefs.getString("hostport", DEFAULT_HOSTPORT);
-  cfg.device_token     = prefs.getString("devtoken", "");
-  cfg.tz_offset_minutes = prefs.getInt("tzmin", prefs.getInt("tz", 8) * 60);
-  cfg.refresh_hour     = (uint8_t)prefs.getUChar("hour", DEFAULT_HOUR);
-  cfg.refresh_minute   = (uint8_t)prefs.getUChar("minute", DEFAULT_MINUTE);
-  cfg.rotate180        = prefs.getBool("rot180", false);
+static inktime::configstore::ConfigPayload configPayload(const Config &cfg) {
+  inktime::configstore::ConfigPayload payload;
+  payload.wifi_ssid = cfg.wifi_ssid.c_str();
+  payload.wifi_pass = cfg.wifi_pass.c_str();
+  payload.backend_hostport = cfg.backend_hostport.c_str();
+  payload.ca_pem = cfg.ca_pem.c_str();
+  payload.device_token = cfg.device_token.c_str();
+  payload.tz_offset_minutes = cfg.tz_offset_minutes;
+  payload.refresh_hour = cfg.refresh_hour;
+  payload.refresh_minute = cfg.refresh_minute;
+  payload.rotate180 = cfg.rotate180;
+  payload.config_version = cfg.config_version;
 #if INKTIME_PHOTOPAINTER_ENABLED
-  cfg.prefetch_lead_minutes = prefs.getUShort("prefetch", DEFAULT_PREFETCH_LEAD_MINUTES);
-  cfg.delivery_mode     = prefs.getString("delivery", "legacy_online");
-  cfg.button_wake_action = prefs.getString("button", "check_new");
-  cfg.config_version   = prefs.getULong("cfgver", 0);
-  if (!validDeliveryMode(cfg.delivery_mode)) cfg.delivery_mode = "legacy_online";
-  if (!validButtonWakeAction(cfg.button_wake_action)) cfg.button_wake_action = "check_new";
-  if (cfg.prefetch_lead_minutes > 120U) cfg.prefetch_lead_minutes = DEFAULT_PREFETCH_LEAD_MINUTES;
-  if (!loadStoredSchedule(cfg)) setLegacySchedule(cfg);
+  payload.schedule_count = cfg.schedule_count;
+  payload.prefetch_lead_minutes = cfg.prefetch_lead_minutes;
+  payload.delivery_mode = cfg.delivery_mode.c_str();
+  payload.button_wake_action = cfg.button_wake_action.c_str();
+  for (uint8_t index = 0U; index < inktime::configstore::kMaxConfigSlots; ++index) {
+    payload.schedule_slots[index] = {
+      cfg.schedule_slots[index].hour,
+      cfg.schedule_slots[index].minute,
+    };
+  }
+#else
+  payload.schedule_count = 1U;
+  payload.schedule_slots[0] = {cfg.refresh_hour, cfg.refresh_minute};
+  payload.delivery_mode = "legacy_online";
+  payload.button_wake_action = "check_new";
 #endif
-  prefs.end();
+  return payload;
+}
 
+static void applyConfigPayload(const inktime::configstore::ConfigPayload &payload, Config &cfg) {
+  cfg.wifi_ssid = payload.wifi_ssid.c_str();
+  cfg.wifi_pass = payload.wifi_pass.c_str();
+  cfg.backend_hostport = payload.backend_hostport.c_str();
+  cfg.ca_pem = payload.ca_pem.c_str();
+  cfg.device_token = payload.device_token.c_str();
+  cfg.tz_offset_minutes = payload.tz_offset_minutes;
+  cfg.refresh_hour = payload.refresh_hour;
+  cfg.refresh_minute = payload.refresh_minute;
+  cfg.rotate180 = payload.rotate180;
+  cfg.config_version = payload.config_version;
+#if INKTIME_PHOTOPAINTER_ENABLED
+  cfg.schedule_count = payload.schedule_count;
+  cfg.prefetch_lead_minutes = payload.prefetch_lead_minutes;
+  cfg.delivery_mode = payload.delivery_mode.c_str();
+  cfg.button_wake_action = payload.button_wake_action.c_str();
+  for (uint8_t index = 0U; index < inktime::kMaxOfflineSlots; ++index) {
+    cfg.schedule_slots[index] = {
+      payload.schedule_slots[index].hour,
+      payload.schedule_slots[index].minute,
+    };
+  }
+#endif
+  cfg.valid = cfg.wifi_ssid.length() > 0U;
+}
+
+static void setConfigDefaults(Config &cfg) {
+  cfg = Config{};
+  cfg.backend_hostport = DEFAULT_HOSTPORT;
+  cfg.tz_offset_minutes = DEFAULT_TZ_MINUTES;
+  cfg.refresh_hour = DEFAULT_HOUR;
+  cfg.refresh_minute = DEFAULT_MINUTE;
+  cfg.rotate180 = false;
+  cfg.config_version = 0U;
+#if INKTIME_PHOTOPAINTER_ENABLED
+  cfg.schedule_count = 1U;
+  cfg.schedule_slots[0] = {DEFAULT_HOUR, DEFAULT_MINUTE};
+  for (uint8_t index = 1U; index < inktime::kMaxOfflineSlots; ++index) {
+    cfg.schedule_slots[index] = {0U, 0U};
+  }
+  cfg.prefetch_lead_minutes = DEFAULT_PREFETCH_LEAD_MINUTES;
+  cfg.delivery_mode = "legacy_online";
+  cfg.button_wake_action = "check_new";
+#endif
+}
+
+void loadConfig(Config &cfg) {
+  setConfigDefaults(cfg);
+  inktime::configstore::ConfigPayload payload;
+  String loadError;
+  String loadWarning;
+  if (configStore.load(payload, loadError, &loadWarning)) {
+    applyConfigPayload(payload, cfg);
+    if (loadWarning.length() > 0U) {
+      lastDeviceWarningCode = "DEVICE-CONFIG-CLEANUP-PENDING";
+      lastDeviceWarningMessage = "Canonical 設定已套用；舊設定清理待下次啟動重試：";
+      lastDeviceWarningMessage += loadWarning;
+    }
+  } else if (loadError.length() > 0U) {
+    setConfigPersistenceError(loadError);
+  }
   cfg.valid = (cfg.wifi_ssid.length() > 0);
 
 #if DEBUG_LOG
@@ -776,32 +851,83 @@ void loadConfig(Config &cfg) {
 #endif
 }
 
-void saveConfig(const Config &cfg) {
-  prefs.begin("dashcfg", false);
-  prefs.putString("ssid", cfg.wifi_ssid);
-  prefs.putString("pass", cfg.wifi_pass);
-  prefs.putString("hostport", cfg.backend_hostport);
-  prefs.putString("devtoken", cfg.device_token);
-  prefs.putInt("tzmin", cfg.tz_offset_minutes);
-  prefs.putUChar("hour", cfg.refresh_hour);
-  prefs.putUChar("minute", cfg.refresh_minute);
-  prefs.putBool("rot180", cfg.rotate180);
-#if INKTIME_PHOTOPAINTER_ENABLED
-  prefs.putUShort("prefetch", cfg.prefetch_lead_minutes);
-  prefs.putString("delivery", cfg.delivery_mode);
-  prefs.putString("button", cfg.button_wake_action);
-  prefs.putUChar("scnt", cfg.schedule_count);
-  for (uint8_t index = 0; index < cfg.schedule_count && index < inktime::kMaxOfflineSlots; ++index) {
-    const String key = String("s") + String(index);
-    prefs.putString(key.c_str(), offlineClock(cfg.schedule_slots[index]));
+static bool verifyLegacyConfigReadback(const Config &cfg, String &error) {
+  error = "";
+  Preferences verify;
+  if (!verify.begin("dashcfg", true)) {
+    error = "PAIRING-NVS-002";
+    return false;
   }
-#endif
-  prefs.putULong("cfgver", cfg.config_version);
-  prefs.end();
+  const String verifiedCaPem = verify.getString("ca_pem", "");
+  const String verifiedHostport = verify.getString("hostport", "");
+  const String verifiedSsid = verify.getString("ssid", "");
+  const bool legacyPresent = verifiedCaPem.length() > 0U
+    || verifiedHostport.length() > 0U
+    || verifiedSsid.length() > 0U;
+  const bool matches = !legacyPresent
+    || (verifiedCaPem == cfg.ca_pem
+      && verifiedHostport == cfg.backend_hostport
+      && verifiedSsid == cfg.wifi_ssid);
+  verify.end();
+  if (!matches) {
+    error = "PAIRING-NVS-003";
+    return false;
+  }
+  return true;
+}
+
+bool saveConfig(const Config &cfg, String *errorCodeOut = nullptr) {
+  if (errorCodeOut != nullptr) *errorCodeOut = "";
+  auto setError = [errorCodeOut](const char *code) {
+    if (errorCodeOut != nullptr) *errorCodeOut = code;
+  };
+  if (cfg.ca_pem.length() > inktime::kMaxDeviceCaPemBytes
+      || (cfg.ca_pem.length() > 0 && !inktime::DeviceHttpTransport::trustAnchorValid(cfg.ca_pem))) {
+    setError("DEVICE-TLS-CA-INVALID");
+    return false;
+  }
+  String transportError;
+  String transportBase = cfg.backend_hostport;
+  transportBase.trim();
+  if (!transportBase.startsWith("http://") && !transportBase.startsWith("https://")) {
+    transportBase = "https://" + transportBase;
+  }
+  if (!inktime::DeviceHttpTransport::backendUrlAllowed(
+        transportBase, cfg.ca_pem, transportError)) {
+    setError(transportError.length() > 0U ? transportError.c_str() : "DEVICE-URL-INVALID");
+    return false;
+  }
+  const inktime::configstore::ConfigPayload payload = configPayload(cfg);
+  String storeError;
+  if (!configStore.save(payload, storeError)) {
+    if (storeError == "PAIRING-NVS-002") {
+      setError("PAIRING-NVS-002");
+    } else if (storeError == "PAIRING-NVS-003") {
+      setError("PAIRING-NVS-003");
+    } else if (storeError == "PAIRING-NVS-004") {
+      setError("PAIRING-NVS-004");
+    } else if (storeError == "PAIRING-NVS-005") {
+      setError("PAIRING-NVS-005");
+    } else if (storeError == "PAIRING-NVS-006") {
+      setError("PAIRING-NVS-006");
+    } else if (storeError == "PAIRING-NVS-007") {
+      setError("PAIRING-NVS-007");
+    } else {
+      setError(storeError.length() > 0U ? storeError.c_str() : "PAIRING-NVS-001");
+    }
+    return false;
+  }
+  // cfgstore has already completed the formal A/B commit and full read-back.
+  // Old dashcfg formal keys are migration-only; stale legacy values must not
+  // turn a committed config into a reported failure.
+  String legacyReadbackError;
+  (void)verifyLegacyConfigReadback(cfg, legacyReadbackError);
 
 #if DEBUG_LOG
   DBG_PRINTLN("[CFG] saved");
 #endif
+  setError("");
+  return true;
 }
 
 // =======================
@@ -851,6 +977,7 @@ String buildConfigPage() {
 
   String curSsid = g_cfg.wifi_ssid;
   String host    = htmlEscape(g_cfg.backend_hostport);
+  String caPem   = htmlEscape(g_cfg.ca_pem);
   int32_t tz     = g_cfg.tz_offset_minutes / 60;
   if (tz < -12 || tz > 14) tz = DEFAULT_TZ_MINUTES / 60;
   uint8_t hour   = g_cfg.refresh_hour;
@@ -866,6 +993,13 @@ String buildConfigPage() {
   html += F("<meta name='viewport' content='width=device-width,initial-scale=1'>");
   html += F("<title>InkTime 設定</title></head><body>");
   html += F("<h2>InkTime 首次配對</h2>");
+  if (portalApSsid.length() > 0 && portalApPassword.length() > 0) {
+    html += F("<p><strong>本次 AP 配對資訊（5 分鐘有效）</strong><br>SSID: <code>");
+    html += htmlEscape(portalApSsid);
+    html += F("</code><br>密碼: <code>");
+    html += htmlEscape(portalApPassword);
+    html += F("</code><br>設定網址: <code>http://192.168.4.1/</code></p>");
+  }
   html += F("<form method='POST' action='/save'><input type='hidden' name='setup_secret' value='"); html += portalSetupSecret; html += F("'><input type='hidden' name='nonce' value='"); html += portalNonce; html += F("'>");
 
   html += F("WiFi SSID:<br>");
@@ -901,6 +1035,12 @@ String buildConfigPage() {
 #endif
   html += host;
   html += F("'><br><br>");
+
+  html += F("TLS Root CA PEM（HTTPS 必填；可由編譯 provisioning 或此頁寫入）：<br><textarea name='ca_pem' rows='8' cols='60' maxlength='");
+  html += String(inktime::kMaxDeviceCaPemBytes);
+  html += F("'>");
+  html += caPem;
+  html += F("</textarea><br><small>只接受 -----BEGIN CERTIFICATE----- 至 -----END CERTIFICATE-----；CA 不是 secret，但不會寫入狀態回報。</small><br><br>");
 
   html += F("裝置 Token（留空會保留現有 Token）：<br><input name='device_token' type='password' size='48' autocomplete='off'><br>");
   html += F("<small>請從 InkTime 裝置管理頁配對；Token 不會顯示在網址或序列埠。</small><br><br>");
@@ -982,6 +1122,7 @@ void handleSave() {
   String ssid     = server.arg("ssid");
   String pass     = server.arg("pass");
   String host     = server.arg("hostport");
+  String caPem    = server.arg("ca_pem");
   String deviceToken = server.arg("device_token");
   String hourStr  = server.arg("hour");
   String minuteStr = server.arg("minute");
@@ -990,6 +1131,7 @@ void handleSave() {
 
   ssid.trim();
   host.trim();
+  caPem.trim();
   deviceToken.trim();
   const int schemeEnd = host.indexOf("://");
   const String hostOrigin = schemeEnd >= 0 ? host.substring(schemeEnd + 3) : String("");
@@ -1000,6 +1142,19 @@ void handleSave() {
 #else
   const bool allowedScheme = host.startsWith("https://");
 #endif
+  const bool caProvided = caPem.length() > 0;
+  if (caPem.length() > inktime::kMaxDeviceCaPemBytes) {
+    server.send(
+      400,
+      "text/plain; charset=utf-8",
+      String("PAIRING-002 Root CA PEM 超過 ") + String(inktime::kMaxDeviceCaPemBytes) + " bytes"
+    );
+    return;
+  }
+  if (caProvided && !inktime::DeviceHttpTransport::trustAnchorValid(caPem)) {
+    server.send(400, "text/plain; charset=utf-8", "DEVICE-TLS-CA-INVALID Root CA PEM 格式不合法");
+    return;
+  }
   if (ssid.length() > 32 || pass.length() > 63 || host.length() > 240 || deviceToken.length() > 256
       || host.indexOf('@') >= 0 || !allowedScheme || unsafeOrigin) {
     server.send(400, "text/plain; charset=utf-8", "PAIRING-002 設定格式或長度不合法");
@@ -1012,6 +1167,7 @@ void handleSave() {
   if (pass.length() > 0) newCfg.wifi_pass = pass;
 
   newCfg.backend_hostport = host;
+  if (caProvided) newCfg.ca_pem = caPem;
   if (deviceToken.length() > 0) newCfg.device_token = deviceToken;
 
   int32_t tz = tzStr.toInt();
@@ -1031,7 +1187,27 @@ void handleSave() {
   newCfg.rotate180 = rot180Req;
   newCfg.valid     = (newCfg.wifi_ssid.length() > 0);
 
-  saveConfig(newCfg);
+  String transportError;
+  if (!inktime::DeviceHttpTransport::backendUrlAllowed(
+        newCfg.backend_hostport, newCfg.ca_pem, transportError)) {
+    server.send(
+      400,
+      "text/plain; charset=utf-8",
+      String(transportError.length() > 0U ? transportError : "DEVICE-URL-INVALID")
+        + " Backend Origin 或 TLS 設定不合法"
+    );
+    return;
+  }
+
+  String saveError;
+  if (!saveConfig(newCfg, &saveError)) {
+    server.send(
+      500,
+      "text/plain; charset=utf-8",
+      String(saveError.length() > 0 ? saveError : "PAIRING-NVS-001") + " 設定未寫入，裝置不會重新啟動"
+    );
+    return;
+  }
   portalSaveAllowed = false; portalSetupSecret = ""; portalNonce = "";
 
   server.send(
@@ -1179,6 +1355,8 @@ void startConfigPortal() {
   String shortId = chipHex.substring(chipHex.length() - 6);
   String apSsid = "InkTime-" + shortId;
   String apPassword = randomPortalSecret(); // never derived from SSID, MAC, or chip ID
+  portalApSsid = apSsid;
+  portalApPassword = apPassword;
 
   bool apOk = WiFi.softAP(apSsid.c_str(), apPassword.c_str());
   (void)apOk;
@@ -1187,6 +1365,13 @@ void startConfigPortal() {
   DBG_PRINT("[CFG] softAP result = "); DBG_PRINTLN(apOk ? "OK" : "FAIL");
   DBG_PRINT("[CFG] AP SSID = "); DBG_PRINTLN(apSsid);
   DBG_PRINT("[CFG] AP IP   = "); DBG_PRINTLN(WiFi.softAPIP());
+#endif
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+  if (apOk) {
+    (void)photoPainter.displayPairingScreen(
+      apSsid.c_str(), apPassword.c_str(), "http://192.168.4.1");
+  }
 #endif
 
   server.on("/", HTTP_GET, handleRoot);
@@ -1368,7 +1553,7 @@ static bool normalizedBackendBase(const Config &cfg, String &base) {
     lastDeviceErrorMessage = "Backend 必須是不含帳密、路徑、Query 或 Fragment 的 Origin";
     return false;
   }
-  return backendTransportAllowed(base);
+  return backendTransportAllowed(base, cfg.ca_pem);
 }
 
 static bool queueAckIdempotencyKey(const PendingQueueAck &pending, String &key) {
@@ -1421,9 +1606,15 @@ static bool sendQueueAck(const Config &cfg, const PendingQueueAck &pending, bool
   serializeJson(payload, body);
 
   for (uint8_t attempt = 0; attempt <= inktime::kQueueRetryLimit; ++attempt) {
+    inktime::DeviceHttpTransport transport(cfg.ca_pem);
     HTTPClient ackHttp;
-    configureHttpClient(ackHttp, 15000);
-    if (!ackHttp.begin(base + String(DEVICE_QUEUE_ACK_PATH))) break;
+    String transportCode;
+    String transportMessage;
+    if (!transport.begin(ackHttp, base + String(DEVICE_QUEUE_ACK_PATH), 15000, transportCode, transportMessage)) {
+      lastDeviceErrorCode = transportCode;
+      lastDeviceErrorMessage = transportMessage;
+      break;
+    }
     ackHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
     ackHttp.addHeader("Content-Type", "application/json");
     const int status = ackHttp.POST(body);
@@ -1523,13 +1714,15 @@ bool downloadLatestPhotoBin(Config &cfg) {
   DBG_PRINTLN("[HTTP] 取得版本 Manifest（Authorization 已遮蔽）");
 #endif
 
+  inktime::DeviceHttpTransport transport(cfg.ca_pem);
   HTTPClient manifestHttp;
-  configureHttpClient(manifestHttp, 30000);
+  String transportCode;
+  String transportMessage;
   const char* manifestHeaders[] = {"Content-Type"};
   manifestHttp.collectHeaders(manifestHeaders, 1);
-  if (!manifestHttp.begin(manifestUrl)) {
-    lastDeviceErrorCode = "DEVICE-MANIFEST-URL";
-    lastDeviceErrorMessage = "Manifest URL 無法初始化";
+  if (!transport.begin(manifestHttp, manifestUrl, 30000, transportCode, transportMessage)) {
+    lastDeviceErrorCode = transportCode.length() ? transportCode : "DEVICE-MANIFEST-URL";
+    lastDeviceErrorMessage = transportMessage.length() ? transportMessage : "Manifest URL 無法初始化";
     return false;
   }
   manifestHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
@@ -1578,8 +1771,8 @@ bool downloadLatestPhotoBin(Config &cfg) {
     String desiredPanelProfile = remoteConfig["panel_profile"] | "safe_4c";
     bool compatiblePanel = desiredPanelProfile == "safe_4c"
       || desiredPanelProfile == String(INKTIME_PANEL_PROFILE);
-#if INKTIME_PHOTOPAINTER_ENABLED
     Config candidate = cfg;
+#if INKTIME_PHOTOPAINTER_ENABLED
     bool validSchedule = applyRemoteSchedule(
       remoteConfig,
       remoteConfig["schema_version"] | 0,
@@ -1597,11 +1790,24 @@ bool downloadLatestPhotoBin(Config &cfg) {
       lastDeviceErrorMessage = "遠端設定版本或面板 Profile 與韌體不相容";
       return false;
     }
+#if INKTIME_PHOTOPAINTER_ENABLED
+    bool scheduleChanged = cfg.schedule_count != candidate.schedule_count;
+    if (!scheduleChanged) {
+      for (uint8_t index = 0; index < candidate.schedule_count; ++index) {
+        if (cfg.schedule_slots[index].hour != candidate.schedule_slots[index].hour
+            || cfg.schedule_slots[index].minute != candidate.schedule_slots[index].minute) {
+          scheduleChanged = true;
+          break;
+        }
+      }
+    }
+#endif
     if (
         cfg.tz_offset_minutes != offsetMinutes || cfg.refresh_hour != remoteHour
         || cfg.refresh_minute != remoteMinute || cfg.rotate180 != (rotation == 180)
         || cfg.config_version != desiredConfigVersion
 #if INKTIME_PHOTOPAINTER_ENABLED
+        || scheduleChanged
         || cfg.delivery_mode != candidate.delivery_mode
         || cfg.schedule_count != candidate.schedule_count
         || cfg.prefetch_lead_minutes != candidate.prefetch_lead_minutes
@@ -1609,19 +1815,17 @@ bool downloadLatestPhotoBin(Config &cfg) {
 #else
         ) {
 #endif
-#if INKTIME_PHOTOPAINTER_ENABLED
       candidate.tz_offset_minutes = offsetMinutes;
+      candidate.refresh_hour = static_cast<uint8_t>(remoteHour);
+      candidate.refresh_minute = static_cast<uint8_t>(remoteMinute);
       candidate.rotate180 = rotation == 180;
       candidate.config_version = desiredConfigVersion;
+      String persistError;
+      if (!saveConfig(candidate, &persistError)) {
+        setConfigPersistenceError(persistError);
+        return false;
+      }
       cfg = candidate;
-#else
-      cfg.tz_offset_minutes = offsetMinutes;
-      cfg.refresh_hour = static_cast<uint8_t>(remoteHour);
-      cfg.refresh_minute = static_cast<uint8_t>(remoteMinute);
-      cfg.rotate180 = rotation == 180;
-      cfg.config_version = desiredConfigVersion;
-#endif
-      saveConfig(cfg);
       serverConfigChanged = true;
 #if DEBUG_LOG
       DBG_PRINTLN("[CFG] 已套用伺服器端裝置設定");
@@ -1703,11 +1907,17 @@ bool downloadLatestPhotoBin(Config &cfg) {
 #endif
 
     String fileUrl = base + String(downloadBaseRaw) + fileName;
+    inktime::DeviceHttpTransport fileTransport(cfg.ca_pem);
     HTTPClient fileHttp;
-    configureHttpClient(fileHttp, 60000);
+    String fileTransportCode;
+    String fileTransportMessage;
     const char* fileHeaders[] = {"Content-Type"};
     fileHttp.collectHeaders(fileHeaders, 1);
-    if (!fileHttp.begin(fileUrl)) continue;
+    if (!fileTransport.begin(fileHttp, fileUrl, 60000, fileTransportCode, fileTransportMessage)) {
+      lastDeviceErrorCode = fileTransportCode;
+      lastDeviceErrorMessage = fileTransportMessage;
+      continue;
+    }
     fileHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
     int code = fileHttp.GET();
     const String fileContentType = fileHttp.header("Content-Type");
@@ -1821,14 +2031,16 @@ static bool downloadOfflineScheduleSlot(
     lastDeviceErrorMessage = "無法配置離線排程 Slot 緩衝區";
     return false;
   }
+  inktime::DeviceHttpTransport fileTransport(cfg.ca_pem);
   HTTPClient fileHttp;
-  configureHttpClient(fileHttp, 60000);
+  String fileTransportCode;
+  String fileTransportMessage;
   const char* fileHeaders[] = {"Content-Type"};
   fileHttp.collectHeaders(fileHeaders, 1);
-  if (!fileHttp.begin(base + downloadUrl)) {
+  if (!fileTransport.begin(fileHttp, base + downloadUrl, 60000, fileTransportCode, fileTransportMessage)) {
     heap_caps_free(packed);
-    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-URL";
-    lastDeviceErrorMessage = "離線排程 Slot URL 無法初始化";
+    lastDeviceErrorCode = fileTransportCode.length() ? fileTransportCode : "DEVICE-OFFLINE-SCHEDULE-URL";
+    lastDeviceErrorMessage = fileTransportMessage.length() ? fileTransportMessage : "離線排程 Slot URL 無法初始化";
     return false;
   }
   fileHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
@@ -1908,7 +2120,63 @@ static bool downloadOfflineScheduleSlot(
   return true;
 }
 
+static bool failOfflineScheduleTransaction(const String &message) {
+  offlineScheduleTxnBlocked = true;
+  lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-TXN";
+  lastDeviceErrorMessage = message;
+  return false;
+}
+
+static bool commitActiveScheduleAndConfig(
+  Config &cfg,
+  const Config &candidate,
+  const String &scheduleId,
+  const String &scheduleJson,
+  String &errorOut
+) {
+  errorOut = "";
+  inktime::DeviceConfigStore::Prepared prepared;
+  String persistError;
+  if (!configStore.prepare(configPayload(candidate), prepared, persistError)) {
+    errorOut = persistError;
+    setConfigPersistenceError(persistError);
+    return false;
+  }
+  inktime::configstore::RecoveryJournal journal;
+  journal.phase = inktime::configstore::JournalPhase::Prepared;
+  journal.target_schedule_id = scheduleId.c_str();
+  journal.previous_active_slot = prepared.previous_active_slot;
+  journal.previous_generation = prepared.previous_generation;
+  journal.prepared_slot = prepared.prepared_slot;
+  journal.prepared_generation = prepared.prepared_generation;
+  if (!configStore.writeJournal(journal, persistError)) {
+    errorOut = persistError;
+    setConfigPersistenceError(persistError);
+    return false;
+  }
+  if (!photoPainter.writeActiveSchedule(scheduleJson.c_str(), scheduleJson.length())
+      || photoPainter.activeScheduleId() != scheduleId) {
+    return failOfflineScheduleTransaction("離線排程 active schedule 寫入或身分驗證失敗");
+  }
+  journal.phase = inktime::configstore::JournalPhase::SchedulePromoted;
+  if (!configStore.writeJournal(journal, persistError)) {
+    errorOut = persistError;
+    return failOfflineScheduleTransaction("離線排程 promotion journal 無法寫入");
+  }
+  if (!configStore.commit(prepared, persistError)) {
+    errorOut = persistError;
+    return failOfflineScheduleTransaction("離線排程 Config A/B pointer 無法 commit");
+  }
+  cfg = candidate;
+  serverConfigChanged = true;
+  offlineScheduleTxnBlocked = false;
+  return true;
+}
+
 static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = false) {
+  if (offlineScheduleTxnBlocked) {
+    return failOfflineScheduleTransaction("離線排程 transaction 尚未完成 recovery");
+  }
   String base;
   if (cfg.backend_hostport.length() == 0 || cfg.device_token.length() == 0
       || !normalizedBackendBase(cfg, base)) {
@@ -1916,15 +2184,18 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
     lastDeviceErrorMessage = "離線排程缺少 Backend 或裝置 Token";
     return false;
   }
+  inktime::DeviceHttpTransport scheduleTransport(cfg.ca_pem);
   HTTPClient scheduleHttp;
-  configureHttpClient(scheduleHttp, 30000);
+  String scheduleTransportCode;
+  String scheduleTransportMessage;
   const char* scheduleHeaders[] = {"Content-Type"};
   scheduleHttp.collectHeaders(scheduleHeaders, 1);
   String schedulePath = DEVICE_OFFLINE_SCHEDULE_PATH;
   if (targetNext) schedulePath += "?target=next";
-  if (!scheduleHttp.begin(base + schedulePath)) {
-    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-URL";
-    lastDeviceErrorMessage = "離線排程 URL 無法初始化";
+  if (!scheduleTransport.begin(
+        scheduleHttp, base + schedulePath, 30000, scheduleTransportCode, scheduleTransportMessage)) {
+    lastDeviceErrorCode = scheduleTransportCode.length() ? scheduleTransportCode : "DEVICE-OFFLINE-SCHEDULE-URL";
+    lastDeviceErrorMessage = scheduleTransportMessage.length() ? scheduleTransportMessage : "離線排程 URL 無法初始化";
     return false;
   }
   scheduleHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
@@ -2293,29 +2564,89 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
   }
   String scheduleJson;
   serializeJson(schedule, scheduleJson);
-  const bool stored = targetNext
-    ? photoPainter.writeStagedNextSchedule(scheduleJson.c_str(), scheduleJson.length())
-    : photoPainter.writeActiveSchedule(scheduleJson.c_str(), scheduleJson.length());
-  if (!stored) {
-    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-STAGE";
-    lastDeviceErrorMessage = targetNext
-      ? "離線排程 staged next 無法原子寫入"
-      : "離線排程 active schedule 無法原子切換";
-    return false;
-  }
   if (targetNext) {
+    const bool stored = photoPainter.writeStagedNextSchedule(
+      scheduleJson.c_str(), scheduleJson.length());
+    if (!stored || photoPainter.stagedNextScheduleId() != scheduleId) {
+      lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-STAGE";
+      lastDeviceErrorMessage = "離線排程 staged next 無法原子寫入或身分驗證失敗";
+      return false;
+    }
     // The future snapshot remains a staged artifact.  Its rotation, schedule,
     // lead and config version are not applied until the target local midnight.
     currentFromQueue = false;
     currentPayloadIntegrityTrusted = true;
     return true;
   }
-  cfg = scheduleCandidate;
-  saveConfig(cfg);
-  serverConfigChanged = true;
+  String persistError;
+  if (!commitActiveScheduleAndConfig(
+        cfg, scheduleCandidate, scheduleId, scheduleJson, persistError)) {
+    if (persistError.length() > 0U) setConfigPersistenceError(persistError);
+    return false;
+  }
   clearOfflineRetryState();
   currentFromQueue = false;
   currentPayloadIntegrityTrusted = true;
+  return true;
+}
+
+static bool reconcilePendingScheduleConfigTransaction(Config &cfg) {
+  inktime::configstore::RecoveryJournal journal;
+  bool present = false;
+  String journalError;
+  if (!configStore.readJournal(journal, present, journalError)) {
+    return failOfflineScheduleTransaction("離線排程 recovery journal 損壞，已 fail-closed");
+  }
+  if (!present) return true;
+
+  inktime::configstore::ConfigPayload preparedPayload;
+  String preparedError;
+  if (!configStore.readPrepared(
+        journal.prepared_slot, journal.prepared_generation, preparedPayload, preparedError)) {
+    return failOfflineScheduleTransaction("離線排程 recovery 的 prepared Config 不存在或損壞");
+  }
+  inktime::configstore::ConfigPayload activePayload;
+  char activeSlot = 0;
+  uint64_t activeGeneration = 0U;
+  String activeError;
+  const bool activePresent = configStore.readActive(
+    activePayload, activeSlot, activeGeneration, activeError);
+  const String activeScheduleId = photoPainter.activeScheduleId();
+  const bool previousPointer = journal.previous_active_slot != 0
+    && activePresent
+    && activeSlot == journal.previous_active_slot
+    && activeGeneration == journal.previous_generation;
+  const bool targetScheduleActive = activeScheduleId == journal.target_schedule_id.c_str();
+
+  if (journal.phase == inktime::configstore::JournalPhase::Prepared
+      && !targetScheduleActive
+      && (previousPointer || (!activePresent && journal.previous_active_slot == 0))) {
+    String clearError;
+    if (!configStore.clearJournal(clearError)) {
+      return failOfflineScheduleTransaction("離線排程 stale prepared journal 無法清除");
+    }
+    return true;
+  }
+  if (journal.phase != inktime::configstore::JournalPhase::SchedulePromoted) {
+    return failOfflineScheduleTransaction("離線排程 transaction 未完成 promotion，已 fail-closed");
+  }
+  if (activeScheduleId.length() == 0U || !targetScheduleActive) {
+    return failOfflineScheduleTransaction("離線排程 active 身分與 recovery target 不一致");
+  }
+  if (!activePresent) {
+    return failOfflineScheduleTransaction("離線排程 active schedule 存在但 Config pointer 遺失");
+  }
+  String commitError;
+  if (!configStore.commitPreparedSlot(
+        journal.prepared_slot,
+        journal.prepared_generation,
+        preparedPayload,
+        commitError)) {
+    return failOfflineScheduleTransaction("離線排程 recovery 無法 commit prepared Config");
+  }
+  applyConfigPayload(preparedPayload, cfg);
+  serverConfigChanged = true;
+  offlineScheduleTxnBlocked = false;
   return true;
 }
 #endif
@@ -2331,13 +2662,17 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
   String base;
   if (!normalizedBackendBase(cfg, base)) return QueueDownloadResult::Failed;
 
+  inktime::DeviceHttpTransport manifestTransport(cfg.ca_pem);
   HTTPClient manifestHttp;
-  configureHttpClient(manifestHttp, 30000);
+  String manifestTransportCode;
+  String manifestTransportMessage;
   const char* manifestHeaders[] = {"Content-Type"};
   manifestHttp.collectHeaders(manifestHeaders, 1);
-  if (!manifestHttp.begin(base + String(DEVICE_QUEUE_MANIFEST_PATH))) {
-    lastDeviceErrorCode = "DEVICE-QUEUE-URL";
-    lastDeviceErrorMessage = "Queue Manifest URL 無法初始化";
+  if (!manifestTransport.begin(
+        manifestHttp, base + String(DEVICE_QUEUE_MANIFEST_PATH), 30000,
+        manifestTransportCode, manifestTransportMessage)) {
+    lastDeviceErrorCode = manifestTransportCode.length() ? manifestTransportCode : "DEVICE-QUEUE-URL";
+    lastDeviceErrorMessage = manifestTransportMessage.length() ? manifestTransportMessage : "Queue Manifest URL 無法初始化";
     return QueueDownloadResult::Failed;
   }
   manifestHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
@@ -2500,14 +2835,17 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
     return QueueDownloadResult::Failed;
   }
 
+  inktime::DeviceHttpTransport fileTransport(cfg.ca_pem);
   HTTPClient fileHttp;
-  configureHttpClient(fileHttp, 60000);
+  String fileTransportCode;
+  String fileTransportMessage;
   const char* fileHeaders[] = {"Content-Type"};
   fileHttp.collectHeaders(fileHeaders, 1);
-  if (!fileHttp.begin(base + selectedDownloadUrl)) {
+  if (!fileTransport.begin(
+        fileHttp, base + selectedDownloadUrl, 60000, fileTransportCode, fileTransportMessage)) {
     heap_caps_free(packed);
-    lastDeviceErrorCode = "DEVICE-QUEUE-FILE-URL";
-    lastDeviceErrorMessage = "Queue download URL 無法初始化";
+    lastDeviceErrorCode = fileTransportCode.length() ? fileTransportCode : "DEVICE-QUEUE-FILE-URL";
+    lastDeviceErrorMessage = fileTransportMessage.length() ? fileTransportMessage : "Queue download URL 無法初始化";
     return QueueDownloadResult::Failed;
   }
   fileHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
@@ -2705,6 +3043,9 @@ static bool offlineNextSchedulePrefetchDue(const Config &cfg, time_t nowEpoch) {
 }
 
 static bool promoteStagedNextIfDue(Config &cfg, time_t nowEpoch) {
+  if (offlineScheduleTxnBlocked) {
+    return failOfflineScheduleTransaction("離線排程 transaction 尚未完成 recovery");
+  }
   if (nowEpoch <= 0) return false;
   String stagedJson;
   if (!photoPainter.readStagedNextSchedule(stagedJson)) return false;
@@ -2856,24 +3197,47 @@ static bool promoteStagedNextIfDue(Config &cfg, time_t nowEpoch) {
     if (epochValid) previousShowAtEpoch = rawShowAt.as<int64_t>();
   }
   if (!inktime::validOfflineNextScheduleContract(contract)) return false;
-  if (!photoPainter.promoteStagedNextSchedule()) {
-    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-PROMOTE";
-    lastDeviceErrorMessage = "離線排程 staged next 無法原子 promote 為 active";
+  Config candidate = cfg;
+  candidate.schedule_count = static_cast<uint8_t>(rawTimes.size());
+  for (uint8_t index = 0; index < candidate.schedule_count; ++index) {
+    candidate.schedule_slots[index] = scheduleSlots[index];
+  }
+  candidate.refresh_hour = scheduleSlots[0].hour;
+  candidate.refresh_minute = scheduleSlots[0].minute;
+  candidate.rotate180 = remoteRotation == 180;
+  candidate.prefetch_lead_minutes = static_cast<uint16_t>(remoteLead);
+  candidate.delivery_mode = deliveryMode;
+  candidate.button_wake_action = buttonWakeAction;
+  candidate.config_version = remoteConfigVersion;
+  String persistError;
+  inktime::DeviceConfigStore::Prepared prepared;
+  if (!configStore.prepare(configPayload(candidate), prepared, persistError)) {
+    setConfigPersistenceError(persistError);
     return false;
   }
-  cfg.schedule_count = static_cast<uint8_t>(rawTimes.size());
-  for (uint8_t index = 0; index < cfg.schedule_count; ++index) {
-    cfg.schedule_slots[index] = scheduleSlots[index];
+  inktime::configstore::RecoveryJournal journal;
+  journal.phase = inktime::configstore::JournalPhase::Prepared;
+  journal.target_schedule_id = scheduleId.c_str();
+  journal.previous_active_slot = prepared.previous_active_slot;
+  journal.previous_generation = prepared.previous_generation;
+  journal.prepared_slot = prepared.prepared_slot;
+  journal.prepared_generation = prepared.prepared_generation;
+  if (!configStore.writeJournal(journal, persistError)) {
+    setConfigPersistenceError(persistError);
+    return false;
   }
-  cfg.refresh_hour = scheduleSlots[0].hour;
-  cfg.refresh_minute = scheduleSlots[0].minute;
-  cfg.rotate180 = remoteRotation == 180;
-  cfg.prefetch_lead_minutes = static_cast<uint16_t>(remoteLead);
-  cfg.delivery_mode = deliveryMode;
-  cfg.button_wake_action = buttonWakeAction;
-  cfg.config_version = remoteConfigVersion;
-  saveConfig(cfg);
+  if (!photoPainter.promoteStagedNextSchedule()
+      || photoPainter.activeScheduleId() != scheduleId) {
+    return failOfflineScheduleTransaction("離線排程 staged next promote 或身分驗證失敗");
+  }
+  journal.phase = inktime::configstore::JournalPhase::SchedulePromoted;
+  if (!configStore.writeJournal(journal, persistError)
+      || !configStore.commit(prepared, persistError)) {
+    return failOfflineScheduleTransaction("離線排程 midnight Config commit 失敗");
+  }
+  cfg = candidate;
   serverConfigChanged = true;
+  offlineScheduleTxnBlocked = false;
   clearOfflineRetryState();
   return true;
 }
@@ -2891,6 +3255,9 @@ bool downloadDailyPhotoBin(Config &cfg) {
   const bool userButtonWake = photoPainter.wokeFromUserButton();
   const bool timerRequestedNetwork = enhancedNetworkWakeRequested;
   enhancedNetworkWakeRequested = false;
+  if (offlineScheduleTxnBlocked && cfg.delivery_mode == "inktime_offline_schedule") {
+    return failOfflineScheduleTransaction("離線排程 transaction 尚未完成 recovery");
+  }
   if (cfg.delivery_mode == "inktime_offline_schedule") {
     if (userButtonWake && cfg.button_wake_action == "check_new") {
       // A button check may replace the active schedule, but a missing or
@@ -2956,6 +3323,8 @@ void reportDeviceStatus(const Config &cfg, bool displayUpdated) {
   payload["release_id"] = currentReleaseId;
   payload["error_code"] = lastDeviceErrorCode;
   payload["error_message"] = lastDeviceErrorMessage;
+  payload["warning_code"] = lastDeviceWarningCode;
+  payload["warning_message"] = lastDeviceWarningMessage;
 #if INKTIME_ALLOW_INSECURE_DEVICE_HTTP
   payload["transport_profile"] = "trusted-lan-http";
   payload["transport_security_state"] = "degraded";
@@ -2992,9 +3361,17 @@ void reportDeviceStatus(const Config &cfg, bool displayUpdated) {
   String body;
   serializeJson(payload, body);
 
+  inktime::DeviceHttpTransport statusTransport(cfg.ca_pem);
   HTTPClient statusHttp;
-  configureHttpClient(statusHttp, 15000);
-  if (!statusHttp.begin(base + String(DEVICE_STATUS_PATH))) return;
+  String statusTransportCode;
+  String statusTransportMessage;
+  if (!statusTransport.begin(
+        statusHttp, base + String(DEVICE_STATUS_PATH), 15000,
+        statusTransportCode, statusTransportMessage)) {
+    lastDeviceErrorCode = statusTransportCode;
+    lastDeviceErrorMessage = statusTransportMessage;
+    return;
+  }
   statusHttp.addHeader("Authorization", "Bearer " + cfg.device_token);
   statusHttp.addHeader("Content-Type", "application/json");
   statusHttp.POST(body);
@@ -3092,6 +3469,10 @@ bool drawFromFrameData(const Config &cfg) {
 // =======================
 void sleepUntilNextSchedule(const Config &cfg, bool hasTime, const struct tm &now) {
 #if INKTIME_PHOTOPAINTER_ENABLED
+  if (offlineScheduleTxnBlocked) {
+    goDeepSleepSeconds(inktime::kOfflineRetryFirstSeconds);
+    return;
+  }
   if (cfg.delivery_mode == "inktime_offline_schedule") {
     if (!hasTime) {
       // Unknown time is a bounded recovery wake, never a 24-hour blind sleep.
@@ -3179,6 +3560,9 @@ void sleepUntilNextSchedule(const Config &cfg, bool hasTime, const struct tm &no
 #if INKTIME_PHOTOPAINTER_ENABLED
 static bool loadOfflineScheduledLocalFrame(
   const Config &cfg, time_t nowEpoch, bool selectNext) {
+  if (offlineScheduleTxnBlocked) {
+    return failOfflineScheduleTransaction("離線排程 transaction 尚未完成 recovery");
+  }
   // Enhanced local mode is deliberately cache-only.  It never calls Wi-Fi,
   // NTP, Manifest, or status endpoints; a missing formal frame is a safe
   // no-refresh result instead of a network fallback.
@@ -3550,7 +3934,8 @@ void setup() {
   loadConfig(g_cfg);
 
 #if INKTIME_PHOTOPAINTER_ENABLED
-  if (g_cfg.delivery_mode == "inktime_offline_schedule") {
+  const bool offlineTxnRecovered = reconcilePendingScheduleConfigTransaction(g_cfg);
+  if (offlineTxnRecovered && g_cfg.delivery_mode == "inktime_offline_schedule") {
     time_t bootRtcEpoch = 0;
     if (photoPainter.readRtc(bootRtcEpoch) && bootRtcEpoch > 0) {
       applyFixedTimezoneWithoutNtp(g_cfg.tz_offset_minutes);
@@ -3574,7 +3959,7 @@ void setup() {
 #if INKTIME_PHOTOPAINTER_ENABLED
   const esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
   const bool timerWake = wakeCause == ESP_SLEEP_WAKEUP_TIMER;
-  if (g_cfg.delivery_mode == "inktime_offline_schedule"
+  if (!offlineScheduleTxnBlocked && g_cfg.delivery_mode == "inktime_offline_schedule"
       && photoPainter.wokeFromUserButton()
       && g_cfg.button_wake_action == "local_next") {
     // local_next is a strict cache-only action.  It must not connect Wi-Fi or
@@ -3582,7 +3967,7 @@ void setup() {
     runOfflineLocalCycle(true);
     return;
   }
-  if (g_cfg.delivery_mode == "inktime_offline_schedule" && timerWake
+  if (!offlineScheduleTxnBlocked && g_cfg.delivery_mode == "inktime_offline_schedule" && timerWake
       && !photoPainter.forceNetworkRefresh()) {
     time_t rtcEpoch = 0;
     if (!photoPainter.readRtc(rtcEpoch)) {
@@ -3623,7 +4008,7 @@ void setup() {
         settimeofday(&value, nullptr);
         localtime_r(&rtcEpoch, &offlineTime);
       }
-      if (g_cfg.delivery_mode == "inktime_offline_schedule" && hasOfflineTime
+      if (!offlineScheduleTxnBlocked && g_cfg.delivery_mode == "inktime_offline_schedule" && hasOfflineTime
           && activeHasDueFormalSlot(rtcEpoch)) {
         // A due 00:00/current formal slot is serviceable from the active
         // cache even when the midnight network recovery attempt fails.
@@ -3681,7 +4066,8 @@ void setup() {
     }
   }
 #if INKTIME_PHOTOPAINTER_ENABLED
-  if (ok && !currentPrefetchOnly && g_cfg.delivery_mode == "inktime_offline_schedule"
+  if (ok && !offlineScheduleTxnBlocked && !currentPrefetchOnly
+      && g_cfg.delivery_mode == "inktime_offline_schedule"
       && (displayUpdated || currentDisplaySkipped)) {
     clearOfflineRetryState();
   }
