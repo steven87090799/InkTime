@@ -8,6 +8,7 @@ from typing import Any, Mapping, Sequence
 
 
 VISION_INPUT_VERSION = "vision-input-v2"
+PROVIDER_PROMPT_CONTRACT_VERSION = "provider-prompt-contract-v1"
 # v1/v2 remain readable for historical cache rows.  New model requests use
 # the additive v3 grade/confidence contract and are normalized to the stable
 # numeric fields before persistence.
@@ -15,6 +16,7 @@ SCHEMA_VERSION = 3
 REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 SINGLE_ANALYSIS_STRATEGIES = {"single", "single_high", "high_quality"}
 LEGACY_ANALYSIS_STRATEGIES = {"custom", "low_cost", "smart", "smart_two_stage"}
+REPAIR_TOKEN_CAP = 1200
 
 
 def normalize_analysis_strategy(value: Any) -> str:
@@ -46,6 +48,32 @@ def fingerprint(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def provider_prompt_contract_sha256(
+    *,
+    prompt_version: str,
+    scoring_rules_sha256: str,
+    schema_version: int,
+    schema_kind: str,
+    caption_generation_controls: Mapping[str, Any] | None,
+    reasoning_effort: str,
+    provider_behavior_revision: str,
+) -> str:
+    """Hash only behavior that can change the provider's Vision JSON contract."""
+
+    return fingerprint(
+        {
+            "provider_prompt_contract_version": PROVIDER_PROMPT_CONTRACT_VERSION,
+            "prompt_version": str(prompt_version),
+            "scoring_rules_sha256": str(scoring_rules_sha256),
+            "schema_version": int(schema_version),
+            "schema_kind": str(schema_kind),
+            "caption_generation_controls": dict(caption_generation_controls or {}),
+            "reasoning_effort": normalize_reasoning_effort(reasoning_effort),
+            "provider_behavior_revision": str(provider_behavior_revision),
+        }
+    )
+
+
 def build_analysis_plan(
     *,
     strategy: str,
@@ -58,11 +86,14 @@ def build_analysis_plan(
     caption_controls: Mapping[str, Any] | None,
     prompt_version: str,
     high_image_max_side: int,
+    caption_display_controls: Mapping[str, Any] | None = None,
     prefilter: Mapping[str, Any] | None = None,
     execution_policy: Mapping[str, Any] | None = None,
     travel_policy: Mapping[str, Any] | None = None,
     scoring_rules: str = "",
     reasoning_effort: str = "none",
+    repair_policy: Mapping[str, Any] | None = None,
+    provider_behavior_revision: str = "",
 ) -> dict[str, Any]:
     """Return a complete immutable single-image plan.
 
@@ -73,7 +104,7 @@ def build_analysis_plan(
     """
     normalized_strategy = normalize_analysis_strategy(strategy)
     high_side = int(high_image_max_side)
-    if high_side not in {1024, 1600}:
+    if high_side not in {512, 1024, 1600}:
         high_side = 1024
     route = [
         {
@@ -92,6 +123,25 @@ def build_analysis_plan(
         "exif_transpose": True,
         "preprocessing_version": VISION_INPUT_VERSION,
     }
+    configured_repair = dict(repair_policy or {})
+    repair_model = str(configured_repair.get("model") or high_model).strip()
+    try:
+        configured_repair_tokens = int(configured_repair.get("max_tokens", REPAIR_TOKEN_CAP))
+    except (TypeError, ValueError):
+        configured_repair_tokens = REPAIR_TOKEN_CAP
+    repair_max_tokens = max(256, min(REPAIR_TOKEN_CAP, configured_repair_tokens))
+    schema_kind = "basic" if normalized_strategy == "local" else "full"
+    normalized_effort = normalize_reasoning_effort(reasoning_effort)
+    behavior_revision = str(provider_behavior_revision or (route[0]["config_revision"] if route else ""))
+    contract_sha256 = provider_prompt_contract_sha256(
+        prompt_version=str(prompt_version),
+        scoring_rules_sha256=rules_sha256,
+        schema_version=SCHEMA_VERSION,
+        schema_kind=schema_kind,
+        caption_generation_controls=caption_controls,
+        reasoning_effort=normalized_effort,
+        provider_behavior_revision=behavior_revision,
+    )
     return {
         "strategy": normalized_strategy,
         "model": str(high_model),
@@ -107,10 +157,14 @@ def build_analysis_plan(
         "favorite_bonus": float(scoring_profile.get("favorite_bonus", 0)),
         "scoring_rules_sha256": rules_sha256,
         "scoring_rules": str(scoring_rules),
+        "provider_behavior_revision": behavior_revision,
+        "provider_prompt_contract_version": PROVIDER_PROMPT_CONTRACT_VERSION,
+        "provider_prompt_contract_sha256": contract_sha256,
         "caption_controls": dict(caption_controls or {}),
+        "caption_display_controls": dict(caption_display_controls or {}),
         "prompt_version": str(prompt_version),
         "schema_version": SCHEMA_VERSION,
-        "schema_kind": "basic" if normalized_strategy == "local" else "full",
+        "schema_kind": schema_kind,
         "analysis_call_policy": {
             "max_image_calls_per_photo": 1,
             "repair_calls_are_text_only": True,
@@ -120,7 +174,14 @@ def build_analysis_plan(
         "prefilter": dict(prefilter or {}),
         "ai_execution_policy": dict(execution_policy or {}),
         "travel_policy": dict(travel_policy or {}),
-        "reasoning_effort": normalize_reasoning_effort(reasoning_effort),
+        "reasoning_effort": normalized_effort,
+        "repair_policy": {
+            "enabled": bool(configured_repair.get("enabled", True)),
+            "model": repair_model,
+            "max_tokens": repair_max_tokens,
+            "max_attempts": 1,
+            "text_only": True,
+        },
     }
 
 
@@ -156,10 +217,59 @@ def normalize_analysis_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
         preprocessing_version=str(vision.get("preprocessing_version", VISION_INPUT_VERSION)),
     )
     raw["vision_input"] = vision
+    raw_controls = dict(raw.get("caption_controls") or {})
+    display_controls = dict(raw.get("caption_display_controls") or {})
+    if "copy_default_style" in raw_controls:
+        display_controls.setdefault("copy_default_style", raw_controls["copy_default_style"])
+        raw_controls.pop("copy_default_style", None)
+    raw["caption_controls"] = raw_controls
+    raw["caption_display_controls"] = display_controls
     raw["strategy"] = strategy
     raw["schema_kind"] = "basic" if strategy == "local" else "full"
     raw["schema_version"] = int(raw.get("schema_version", SCHEMA_VERSION))
+    has_scoring_contract = "scoring_rules" in raw or "scoring_rules_sha256" in raw
+    if has_scoring_contract:
+        scoring_rules = str(raw.get("scoring_rules", ""))
+        raw["scoring_rules_sha256"] = str(
+            raw.get("scoring_rules_sha256") or hashlib.sha256(scoring_rules.encode("utf-8")).hexdigest()
+        )
+        route = list(raw.get("provider_route") or [])
+        raw["provider_behavior_revision"] = str(
+            raw.get("provider_behavior_revision")
+            or (route[0].get("config_revision") if route and isinstance(route[0], Mapping) else "")
+            or ""
+        )
+        raw["provider_prompt_contract_version"] = PROVIDER_PROMPT_CONTRACT_VERSION
+        raw["provider_prompt_contract_sha256"] = provider_prompt_contract_sha256(
+            prompt_version=str(raw.get("prompt_version", "")),
+            scoring_rules_sha256=raw["scoring_rules_sha256"],
+            schema_version=int(raw["schema_version"]),
+            schema_kind=str(raw["schema_kind"]),
+            caption_generation_controls=raw_controls,
+            reasoning_effort=normalize_reasoning_effort(raw.get("reasoning_effort", "none")),
+            provider_behavior_revision=raw["provider_behavior_revision"],
+        )
     policy = dict(raw.get("analysis_call_policy") or {})
     policy.update(max_image_calls_per_photo=1, repair_calls_are_text_only=True, legacy_two_stage_replay=False)
     raw["analysis_call_policy"] = policy
+    configured_repair = dict(raw.get("repair_policy") or {})
+    legacy_repair_model = str(
+        configured_repair.get("model")
+        or raw.get("repair_model")
+        or raw.get("model")
+        or raw.get("high_model")
+        or raw.get("low_model")
+        or ""
+    ).strip()
+    try:
+        configured_repair_tokens = int(configured_repair.get("max_tokens", REPAIR_TOKEN_CAP))
+    except (TypeError, ValueError):
+        configured_repair_tokens = REPAIR_TOKEN_CAP
+    raw["repair_policy"] = {
+        "enabled": bool(configured_repair.get("enabled", True)),
+        "model": legacy_repair_model,
+        "max_tokens": max(256, min(REPAIR_TOKEN_CAP, configured_repair_tokens)),
+        "max_attempts": 1,
+        "text_only": True,
+    }
     return raw

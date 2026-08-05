@@ -266,11 +266,13 @@ class JobRepository:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 if dedupe_key:
+                    status_clause = (
+                        "status NOT IN ('failed','cancelled')"
+                        if kind == "backup"
+                        else "status IN ('pending','preparing','running','pausing','retrying')"
+                    )
                     existing = connection.execute(
-                        """
-                        SELECT id FROM jobs WHERE dedupe_key=?
-                        AND status IN ('pending','preparing','running','pausing','retrying')
-                        """,
+                        f"SELECT id FROM jobs WHERE dedupe_key=? AND {status_clause}",
                         (dedupe_key,),
                     ).fetchone()
                     if existing is not None:

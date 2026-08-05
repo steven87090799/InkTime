@@ -518,6 +518,13 @@ def test_cache_wait_deadline_covers_provider_and_one_json_repair(app, tmp_path, 
         content_sha256=str(photo["sha256"]),
         schema_kind="full",
         caption_controls=None,
+        repair_policy={
+            "enabled": True,
+            "model": "wait-deadline-repair",
+            "max_tokens": 1200,
+            "max_attempts": 1,
+            "text_only": True,
+        },
         prompt_version="test",
         vision_input={"mode": "test"},
     )

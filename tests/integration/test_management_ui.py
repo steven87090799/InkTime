@@ -321,7 +321,9 @@ def test_epaper_simulator_works_without_photo_database_or_model(client, app):
     assert preview.status_code == 200
     rendered = Image.open(BytesIO(preview.data))
     assert rendered.size == (480, 800)
-    assert set(rendered.getdata()).issubset({(0, 0, 0), (255, 255, 255), (220, 30, 30), (245, 190, 25)})
+    assert set(rendered.get_flattened_data()).issubset(
+        {(0, 0, 0), (255, 255, 255), (220, 30, 30), (245, 190, 25)}
+    )
     with app.extensions["inktime_database"].session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1

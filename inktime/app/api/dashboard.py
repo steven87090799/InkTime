@@ -29,7 +29,21 @@ def dashboard():
                 "SELECT COALESCE(SUM(input_tokens+output_tokens),0) FROM api_usage WHERE date(started_at)=date('now')"
             ).fetchone()[0],
             "month_cost": connection.execute(
-                "SELECT COALESCE(SUM(COALESCE(actual_cost, estimated_cost)),0) FROM api_usage WHERE strftime('%Y-%m',started_at)=strftime('%Y-%m','now')"
+                "SELECT COALESCE(SUM(CASE WHEN cost_source<>'unknown' THEN COALESCE(actual_cost, estimated_cost) ELSE 0 END),0) FROM api_usage WHERE strftime('%Y-%m',started_at)=strftime('%Y-%m','now')"
+            ).fetchone()[0],
+            "month_unknown_count": connection.execute(
+                """
+                SELECT COUNT(*) FROM api_usage
+                WHERE cost_source='unknown'
+                  AND strftime('%Y-%m',started_at)=strftime('%Y-%m','now')
+                  AND (
+                      COALESCE(input_tokens,0)>0 OR COALESCE(output_tokens,0)>0
+                      OR COALESCE(cached_tokens,0)>0 OR COALESCE(reasoning_tokens,0)>0
+                      OR COALESCE(cache_write_tokens,0)>0 OR COALESCE(request_body_bytes,0)>0
+                      OR COALESCE(image_bytes,0)>0 OR COALESCE(actual_cost,0)>0
+                      OR COALESCE(estimated_cost,0)>0
+                  )
+                """
             ).fetchone()[0],
         }
         recent_errors = connection.execute(
@@ -38,6 +52,11 @@ def dashboard():
         severities = connection.execute(
             "SELECT lower(severity) severity,COUNT(*) count FROM job_errors WHERE resolved_at IS NULL GROUP BY lower(severity)"
         ).fetchall()
+    reserve = float(
+        current_app.extensions["inktime_settings_repository"].get("budget.unknown_request_reserve", 0.25)
+    )
+    counts["month_unknown_reserve"] = int(counts["month_unknown_count"]) * reserve
+    counts["cost_complete"] = int(counts["month_unknown_count"]) == 0
     issues = {str(row["severity"]): int(row["count"]) for row in severities}
     status = (
         "嚴重故障"

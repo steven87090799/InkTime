@@ -10,8 +10,10 @@
   <article><span>執行中工作</span><strong>{{ counts.running_jobs }}</strong><a href="/activity">查看即時監控</a></article>
   <article><span>今日 Token</span><strong>{{ counts.today_tokens }}</strong></article>
   <article><span>本月成本</span><strong>US$ {{ '%.4f'|format(counts.month_cost) }}</strong></article>
+  <article><span>本月 unknown 預留</span><strong>US$ {{ '%.4f'|format(counts.month_unknown_reserve) }}</strong></article>
   <article><span>未解決警告／錯誤／嚴重</span><strong>{{ issues.get('warning', 0) }}/{{ issues.get('error', 0) }}/{{ issues.get('critical', 0) }}</strong></article>
 </section>
+{% if not counts.cost_complete %}<p class="notice warning">本月有 {{ counts.month_unknown_count }} 筆具備可計費證據但尚未完成定價的 API 使用量；上方成本未將其冒充為 US$ 0，預留金額按目前設定計算。</p>{% endif %}
 <section class="panel"><div class="panel-head"><h2>功能分類</h2><a href="/settings">所有設定</a></div>
   <div class="table-wrap"><table><thead><tr><th>分類</th><th>放置的功能</th></tr></thead><tbody>
     <tr><th>照片與分析</th><td class="category-link-list"><a href="/photos">照片庫</a><a href="/jobs">分析工作</a><a href="/providers">模型服務</a><a href="/scoring">評分規則</a><a href="/costs">成本</a></td></tr>

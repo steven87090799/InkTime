@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
+from inktime.app.providers.config import capabilities_for, effective_provider_kind, normalize_options
 from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
 from inktime.app.repositories.providers import ProviderRepository
 from inktime.app.repositories.settings import SettingsRepository
@@ -48,16 +49,25 @@ class ProviderService:
             config = self.repository.get(provider_id, include_secret=True)
             if config is None:
                 raise ValueError(f"VLM-008 找不到 Job 指定的 Provider：{provider_id}")
+            effective_kind = effective_provider_kind(
+                str(config.get("kind") or "openai_compatible"), str(config.get("base_url") or "")
+            )
             provider: Any = OpenAICompatibleProvider(
                 name=config["name"],
                 base_url=config["base_url"],
                 api_key=config.get("api_key", ""),
+                kind=effective_kind,
+                provider_id=provider_id,
+                options=normalize_options(effective_kind, config.get("options") or {}),
                 pricing=self.repository.pricing(config["id"]),
                 timeout=config["timeout_seconds"],
                 supports_json_schema=bool(config["supports_json_schema"]),
                 scoring_rules=rules,
                 caption_controls=caption_controls,
-                supports_reasoning_effort=str(config.get("kind") or "") == "openai",
+                supports_reasoning_effort=capabilities_for(
+                    effective_kind,
+                    supports_json_schema=bool(config["supports_json_schema"]),
+                ).reasoning,
             )
             provider.provider_id = provider_id
             provider.display_name = str(config["name"])
@@ -78,8 +88,16 @@ class ProviderService:
         """Fingerprint only behavior-affecting, non-secret Provider fields."""
         fields = {
             "provider_id": str(provider.get("id") or provider.get("provider_id") or ""),
-            "kind": str(provider.get("kind") or ""),
+            "kind": effective_provider_kind(
+                str(provider.get("kind") or ""), str(provider.get("base_url") or "")
+            ),
             "base_url": str(provider.get("base_url") or ""),
+            "options": normalize_options(
+                effective_provider_kind(
+                    str(provider.get("kind") or "openai_compatible"), str(provider.get("base_url") or "")
+                ),
+                provider.get("options") or {},
+            ),
             "supports_vision": bool(provider.get("supports_vision")),
             "supports_batch": bool(provider.get("supports_batch")),
             "supports_json_schema": bool(provider.get("supports_json_schema")),

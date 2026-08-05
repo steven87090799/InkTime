@@ -1,7 +1,14 @@
 [project]
 name = "inktime"
-version = "2.0.0.dev0"
+dynamic = ["version"]
 requires-python = ">=3.10"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = {attr = "inktime._version.__version__"}
 
 [tool.ruff]
 target-version = "py310"
@@ -16,7 +23,17 @@ ignore = ["S101"]
 "tests/**" = ["S105", "S106", "S107"]
 "inktime/app/repositories/jobs.py" = ["S608"]
 "inktime/app/repositories/photos.py" = ["S608"]
+"inktime/app/repositories/providers.py" = ["S608"]
+"inktime/app/services/budgets.py" = ["S608"]
 "scripts/*.py" = ["E402"]
+
+[tool.coverage.run]
+# The benchmark harness has its own offline contract job; keep the production
+# application coverage gate scoped to runtime application code.
+omit = [
+  "inktime/app/services/model_benchmark.py",
+  "*/inktime/app/services/model_benchmark.py",
+]
 
 [tool.mypy]
 python_version = "3.10"

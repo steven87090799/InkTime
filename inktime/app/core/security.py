@@ -7,6 +7,7 @@ import json
 import re
 import secrets
 import threading
+from collections import OrderedDict
 from typing import Any
 
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -24,7 +25,7 @@ SENSITIVE_TEXT = re.compile(
 PRIVATE_PATH = re.compile(r"(?:/Users/[^\s]+|/home/[^\s]+|/photos/[^\s]+)")
 GPS = re.compile(r"(?<!\d)(?:-?\d{1,2}\.\d{4,})\s*[,，]\s*(?:-?\d{1,3}\.\d{4,})(?!\d)")
 BASE64 = re.compile(r"(?:data:image/[^;]+;base64,|[A-Za-z0-9+/]{256,}={0,2})")
-_REGISTERED_SECRETS: set[str] = set()
+_REGISTERED_SECRETS: OrderedDict[str, None] = OrderedDict()
 _SECRET_LOCK = threading.RLock()
 
 
@@ -34,9 +35,10 @@ def register_secret(value: str) -> None:
     if len(value) < 4:
         return
     with _SECRET_LOCK:
-        if len(_REGISTERED_SECRETS) >= 256:
-            _REGISTERED_SECRETS.pop()
-        _REGISTERED_SECRETS.add(value)
+        _REGISTERED_SECRETS.pop(value, None)
+        _REGISTERED_SECRETS[value] = None
+        while len(_REGISTERED_SECRETS) > 256:
+            _REGISTERED_SECRETS.popitem(last=False)
 
 
 def redact_text(value: str) -> str:

@@ -1,3 +1,5 @@
 """InkTime 平台套件。"""
 
-__version__ = "2.0.0-dev"
+from ._version import __version__
+
+__all__ = ["__version__"]

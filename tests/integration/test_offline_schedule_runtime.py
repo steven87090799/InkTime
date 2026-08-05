@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from PIL import Image
@@ -18,7 +18,13 @@ def _release(app, name: str) -> dict:
     )[0]
 
 
+def _device_dates() -> tuple[str, str]:
+    today = datetime.now(ZoneInfo("Asia/Taipei")).date()
+    return today.isoformat(), (today + timedelta(days=1)).isoformat()
+
+
 def test_offline_day_preparation_is_atomic_and_device_projection_contains_full_sha(client, app):
+    today, tomorrow = _device_dates()
     devices = app.extensions["inktime_device_repository"]
     device_id, token = devices.create(
         "離線相框",
@@ -34,12 +40,12 @@ def test_offline_day_preparation_is_atomic_and_device_projection_contains_full_s
 
     prepared = repository.prepare_day(
         device_id=device_id,
-        target_date="2026-08-03",
+        target_date=today,
         release_ids=[first["release_id"], second["release_id"]],
     )
     same_day = repository.prepare_day(
         device_id=device_id,
-        target_date="2026-08-03",
+        target_date=today,
         release_ids=[first["release_id"], second["release_id"]],
     )
 
@@ -73,17 +79,17 @@ def test_offline_day_preparation_is_atomic_and_device_projection_contains_full_s
     body = response.get_json()
     assert body["schema_version"] == 1
     assert body["schedule_id"] == prepared["schedule"]["id"]
-    assert body["target_local_date"] == "2026-08-03"
+    assert body["target_local_date"] == today
     assert body["panel_profile"] == "safe_4c"
     assert body["rotation"] == 0
     assert body["target_start_epoch"] < body["slots"][0]["show_at_epoch"] < body["target_end_epoch"]
     assert body["target"] == "current"
     slot_zone = datetime.fromisoformat(body["slots"][0]["show_at"]).tzinfo
     assert body["next_target_start_epoch"] == int(
-        datetime(2026, 8, 4, 0, 0, tzinfo=slot_zone).timestamp()
+        datetime.combine(datetime.fromisoformat(tomorrow).date(), time.min, tzinfo=slot_zone).timestamp()
     )
     assert body["next_target_start_epoch"] < body["next_schedule_prefetch_epoch"] < int(
-        datetime(2026, 8, 4, 8, 0, tzinfo=slot_zone).timestamp()
+        datetime.combine(datetime.fromisoformat(tomorrow).date(), time(8, 0), tzinfo=slot_zone).timestamp()
     )
     assert body["slots"][0]["show_at_epoch"] == int(
         datetime.fromisoformat(body["slots"][0]["show_at"]).timestamp()
@@ -104,10 +110,10 @@ def test_offline_day_preparation_is_atomic_and_device_projection_contains_full_s
     fourth = _release(app, "offline-fourth")
     next_day = repository.prepare_day(
         device_id=device_id,
-        target_date="2026-08-04",
+        target_date=tomorrow,
         release_ids=[third["release_id"], fourth["release_id"]],
     )
-    assert next_day["schedule"]["target_date"] == "2026-08-04"
+    assert next_day["schedule"]["target_date"] == tomorrow
     with app.extensions["inktime_database"].session() as connection:
         statuses = connection.execute(
             "SELECT status FROM device_content_queue_items WHERE device_id=? ORDER BY position",
@@ -120,7 +126,7 @@ def test_offline_day_preparation_is_atomic_and_device_projection_contains_full_s
     )
     assert still_today.status_code == 200
     assert still_today.get_json()["schedule_id"] == prepared["schedule"]["id"]
-    assert still_today.get_json()["target_local_date"] == "2026-08-03"
+    assert still_today.get_json()["target_local_date"] == today
     next_response = client.get(
         "/api/device/v1/offline-schedule?target=next",
         headers={"Authorization": f"Bearer {token}"},
@@ -128,9 +134,10 @@ def test_offline_day_preparation_is_atomic_and_device_projection_contains_full_s
     assert next_response.status_code == 200
     next_body = next_response.get_json()
     assert next_body["target"] == "next"
-    assert next_body["target_local_date"] == "2026-08-04"
+    assert next_body["target_local_date"] == tomorrow
     assert next_body["schedule_id"] == next_day["schedule"]["id"]
-    for invalid_target in ("2026-08-05", "+1", "history"):
+    invalid_date = (datetime.fromisoformat(tomorrow).date() + timedelta(days=1)).isoformat()
+    for invalid_target in (invalid_date, "+1", "history"):
         assert client.get(
             f"/api/device/v1/offline-schedule?target={invalid_target}",
             headers={"Authorization": f"Bearer {token}"},
@@ -181,6 +188,7 @@ def test_offline_schedule_snapshot_does_not_follow_live_device_config(client, ap
 
 
 def test_missing_today_schedule_returns_bounded_server_retry_epoch(client, app):
+    today, tomorrow = _device_dates()
     _device_id, token = app.extensions["inktime_device_repository"].create(
         "離線尚未準備",
         delivery_mode="inktime_offline_schedule",
@@ -198,7 +206,7 @@ def test_missing_today_schedule_returns_bounded_server_retry_epoch(client, app):
     assert body["error"] == "schedule_not_ready"
     assert body["error_code"] == "DEVICE-008"
     assert body["target"] == "current"
-    assert body["target_date"] == "2026-08-03"
+    assert body["target_date"] == today
     assert body["retry_after_epoch"] > before
     assert "next_slot_epoch" in body
     assert int(response.headers["Retry-After"]) >= 1
@@ -209,9 +217,9 @@ def test_missing_today_schedule_returns_bounded_server_retry_epoch(client, app):
     next_body = next_response.get_json()
     assert next_response.status_code == 404
     assert next_body["target"] == "next"
-    assert next_body["target_date"] == "2026-08-04"
+    assert next_body["target_date"] == tomorrow
     assert next_body["retry_after_epoch"] < int(
-        datetime(2026, 8, 4, 8, 0, tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
+        datetime.combine(datetime.fromisoformat(tomorrow).date(), time(8, 0), tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
     )
 
 

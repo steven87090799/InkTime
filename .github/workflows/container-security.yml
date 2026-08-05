@@ -1,0 +1,90 @@
+name: InkTime Container Security and Benchmark Contracts
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  container-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with: {fetch-depth: 0}
+      - name: Build exact checkout image
+        run: docker build --pull --tag inktime:ci .
+      - name: Generate CycloneDX SBOM
+        run: |
+          mkdir -p artifacts
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${PWD}/artifacts:/artifacts" \
+            anchore/syft:v1.18.1 inktime:ci \
+            -o cyclonedx-json=/artifacts/inktime-sbom-${GITHUB_SHA}.json
+      - name: Scan image for HIGH and CRITICAL vulnerabilities
+        id: trivy
+        shell: bash
+        run: |
+          set +e
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${PWD}/artifacts:/artifacts" \
+            -v "${PWD}/.trivyignore:/trivyignore:ro" \
+            aquasec/trivy:0.60.0 image \
+            --format json \
+            --output "/artifacts/inktime-trivy-${GITHUB_SHA}.json" \
+            --ignorefile /trivyignore \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            inktime:ci
+          status=$?
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${PWD}/artifacts:/artifacts" \
+            -v "${PWD}/.trivyignore:/trivyignore:ro" \
+            aquasec/trivy:0.60.0 image \
+            --format table \
+            --output "/artifacts/inktime-trivy-${GITHUB_SHA}.txt" \
+            --ignorefile /trivyignore \
+            --severity HIGH,CRITICAL \
+            --exit-code 0 \
+            inktime:ci
+          exit "$status"
+      - name: Upload SBOM and Trivy evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
+        with:
+          name: inktime-container-security-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
+
+  benchmark-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements.txt
+      - name: Run bounded offline benchmark contract
+        run: |
+          mkdir -p artifacts
+          python scripts/benchmark_models.py \
+            --sample-count 2 \
+            --output "artifacts/model-benchmark-${GITHUB_SHA}.json" \
+            --markdown-output "artifacts/model-benchmark-${GITHUB_SHA}.md"
+      - name: Upload offline benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node 24)
+        with:
+          name: inktime-offline-benchmark-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14

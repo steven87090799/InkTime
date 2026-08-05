@@ -14,7 +14,11 @@
 | 接入 ESP32 或 PhotoPainter | [ESP32 指南](devices/ESP32_GUIDE_ZH_TW.md) → [PhotoPainter](devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) → [交付模式](devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md) |
 | 使用本機無 AI 模式 | [Local-only 選片與雙照片](guides/LOCAL_ONLY_SELECTION_ZH_TW.md) |
 | 執行 OpenAI Batch 分析 | [OpenAI Batch 照片分析](OPENAI_BATCH_ANALYSIS_ZH_TW.md) → [正式交付與安全交接](PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md) |
+| 設定 OpenRouter 或查看成本來源 | [OpenRouter Provider](providers/OPENROUTER_ZH_TW.md) → [Token 與成本指南](reference/TOKEN_COST_GUIDE_ZH_TW.md) |
+| 離線比較模型與解析度 | [Model Benchmark](providers/MODEL_BENCHMARK_ZH_TW.md) |
+| 為 ESP32 配置 HTTPS 信任根 | [ESP32 TLS／配網](devices/ESP32_TLS_PROVISIONING_ZH_TW.md) |
 | 使用 Decision Trace、Queue 或 Canary | [決策與韌性總覽](resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md) |
+| 交接 PR #53 的修復與證據 | [Final One-Shot Hardening Audit](reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md) → [Production Readiness Handoff](PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md) |
 
 ## 文件規則
 
@@ -54,6 +58,8 @@
 - [`guides/ADMIN_GUIDE_ZH_TW.md`](guides/ADMIN_GUIDE_ZH_TW.md)：設定欄位、裝置、排程與管理界面責任。
 - [`guides/USER_GUIDE_ZH_TW.md`](guides/USER_GUIDE_ZH_TW.md)：照片、工作、渲染、發布與診斷操作。
 - [`guides/API_PROVIDER_GUIDE_ZH_TW.md`](guides/API_PROVIDER_GUIDE_ZH_TW.md)：OpenAI 相容 Provider 與各廠商接入步驟。
+- [`providers/OPENROUTER_ZH_TW.md`](providers/OPENROUTER_ZH_TW.md)：正式 OpenRouter kind、routing／privacy options、reasoning、成本與 Batch 邊界。
+- [`providers/MODEL_BENCHMARK_ZH_TW.md`](providers/MODEL_BENCHMARK_ZH_TW.md)：offline-contract／live-quality、golden manifest、quality／ranking metrics、解析度／Prompt／reasoning／routing 維度與輸出契約。
 - [`guides/EPAPER_SIMULATOR_ZH_TW.md`](guides/EPAPER_SIMULATOR_ZH_TW.md)：虛擬電子紙接收端與無硬體驗收。
 - [`guides/LOCAL_ONLY_SELECTION_ZH_TW.md`](guides/LOCAL_ONLY_SELECTION_ZH_TW.md)：`analysis.execution_mode`、本機選片、雙照片與文案來源。
 
@@ -88,6 +94,7 @@
 - [`devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md`](devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)：六／七色、抖動、ACK、通知與 Webhook。
 - [`devices/DEVICE_PROTOCOL_ZH_TW.md`](devices/DEVICE_PROTOCOL_ZH_TW.md)：離線 Queue Manifest、下載與 ACK 協定。
 - [`devices/DEVICE_TRANSPORT_SECURITY_ZH_TW.md`](devices/DEVICE_TRANSPORT_SECURITY_ZH_TW.md)：Bearer Token、HTTP/HTTPS 與傳輸限制。
+- [`devices/ESP32_TLS_PROVISIONING_ZH_TW.md`](devices/ESP32_TLS_PROVISIONING_ZH_TW.md)：trust anchor、HTTPS fail-closed、私有 LAN 開發 HTTP 與隨機配網密碼。
 - [`devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md`](devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md)：PhotoPainter 板型、電源、PSRAM 與實機驗收。
 - [`devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md`](devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md)：Stock 相容、既有 Online、Enhanced 離線排程、`/dataUP` Payload 與安全邊界。
 - [`devices/PHOTOPAINTER_RECOVERY_ZH_TW.md`](devices/PHOTOPAINTER_RECOVERY_ZH_TW.md)：PhotoPainter 交付恢復、停機條件與實機驗證邊界。
@@ -117,6 +124,7 @@
 - [`archive/reports/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md`](archive/reports/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md)：2026-07-22 跨模組與硬體邊界報告。
 - [`archive/reports/N100_IMPLEMENTATION_REPORT_ZH_TW.md`](archive/reports/N100_IMPLEMENTATION_REPORT_ZH_TW.md)：2026-07-18 N100 實作／量測報告。
 - [`reports/PERFORMANCE_REPORT.md`](reports/PERFORMANCE_REPORT.md)：100,000 筆效能測試紀錄；測試腳本會更新此檔。
+- [`reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md`](reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md)：本輪 P1、Provider、AI、Release、Container、文件與 hosted CI 交接證據。
 
 ### 元件旁文件
 

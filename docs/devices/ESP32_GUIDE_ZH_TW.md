@@ -13,7 +13,7 @@ GDEY073D46 原廠資料為 800×480、7 色、3.3 V、50-pin FPC、SPI、15–35
 
 未來新採購建議 GDEP073E01＋DESPI-C73 或原廠 ESP32E6-E01。GDEP073E01 為 800×480、6 色 Spectra 6、3.3 V、50-pin SPI、0–50°C、全刷約 15–22 秒；韌體已可選用 GxEPD2 的 `GxEPD2_730c_GDEP073E01` 類別。[Good Display GDEP073E01](https://www.good-display.com/product/533.html) [DESPI-C73 adapter](https://www.good-display.com/product/522.html) [GxEPD2 支援清單](https://github.com/ZinggJM/GxEPD2)
 
-伺服器、Manifest schema v2 與韌體 2.5.0 已共同支援完整六／七色、Offline Queue ACK 與相同內容安全 skip；色盤、抖動、混合面板發布、設定 ACK 與離線通知詳見[裝置可靠性與六／七色渲染指南](DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。
+伺服器、Manifest schema v2 與韌體 2.6.0 已共同支援完整六／七色、Offline Queue ACK 與相同內容安全 skip；色盤、抖動、混合面板發布、設定 ACK 與離線通知詳見[裝置可靠性與六／七色渲染指南](DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。
 
 Waveshare 整合的中央 Profile、SD／PMIC／RTC／SHTC3、安全 BUSY timeout、授權與
 20 項實機清單見 [PhotoPainter 支援與實機驗收](WAVESHARE_PHOTOPAINTER_ZH_TW.md)。
@@ -124,7 +124,7 @@ Web 裝置頁會顯示最後狀態、下載成功／失敗、韌體、訊號、H
 - 面板脆弱，避免彎折、點壓、扭曲與 FPC 拉扯；不要撕除非原廠指示可移除的保護層。
 - 電子紙可能有 ghosting／色偏；本韌體採 full refresh，不把 GxEPD2 partial window API 當成 GDEY 可用的快速局刷。
 - 強烈建議用 SHA-256 驗證與「成功才刷新」；不要為省幾秒移除。
-- 完整六／七色 Queue 流程需 server、裝置 Profile 與 2.5.0 韌體配對；舊韌體升級期間使用 `safe_4c`。
+- 完整六／七色 Queue 流程需 server、裝置 Profile 與 2.6.0 韌體配對；舊韌體升級期間使用 `safe_4c`。
 - 目前 GDEY／GDEP app partition 已使用 93%；增加函式庫、TLS 或 OTA 前要重新量測 Flash／Heap／PSRAM，並做實機連續刷新與斷電恢復測試。
 
 ## 9. 常見錯誤

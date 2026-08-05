@@ -11,6 +11,8 @@ class Usage:
     output_tokens: int = 0
     cached_tokens: int = 0
     reasoning_tokens: int = 0
+    cache_write_tokens: int = 0
+    provider_reported_cost: float | None = None
 
 
 @dataclass(frozen=True)
@@ -18,6 +20,7 @@ class ProviderResponse:
     content: str
     usage: Usage
     request_id: str | None = None
+    request_metrics: dict[str, int] | None = None
 
 
 @dataclass
@@ -55,6 +58,7 @@ class VisionProvider(ABC):
         max_tokens: int | None = None,
         caption_controls: dict | None = None,
         reasoning_effort: str | None = None,
+        provider_request_context_id: str | None = None,
     ) -> dict:
         raise NotImplementedError("Provider 未實作共用分析 Request Body Builder")
 
@@ -83,7 +87,7 @@ class VisionProvider(ABC):
     def delete_remote_file(self, file_id: str) -> dict:
         raise NotImplementedError("Provider 不支援 Remote File Delete")
 
-    def estimate_batch_cost(self, model: str, usage: Usage) -> float:
+    def estimate_batch_cost(self, model: str, usage: Usage) -> float | None:
         """Use provider pricing when available; compatible providers may override."""
 
         return self.estimate_cost(model, usage)
@@ -100,6 +104,7 @@ class VisionProvider(ABC):
         caption_controls: dict | None = None,
         reasoning_effort: str | None = None,
         vision_attempt: VisionAttemptState | None = None,
+        provider_request_context_id: str | None = None,
     ) -> ProviderResponse:
         raise NotImplementedError
 
@@ -113,6 +118,7 @@ class VisionProvider(ABC):
         max_tokens: int | None = None,
         stage: str = "single_high",
         caption_controls: dict | None = None,
+        provider_request_context_id: str | None = None,
     ) -> ProviderResponse:
         """只傳文字修復 JSON，不得再次上傳圖片。"""
         raise NotImplementedError
@@ -130,7 +136,7 @@ class VisionProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def estimate_cost(self, model: str, usage: Usage) -> float:
+    def estimate_cost(self, model: str, usage: Usage) -> float | None:
         raise NotImplementedError
 
     @abstractmethod

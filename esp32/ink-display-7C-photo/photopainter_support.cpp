@@ -3,6 +3,7 @@
 #if INKTIME_PHOTOPAINTER_ENABLED
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <FS.h>
 #include <SD.h>
 #include <SPI.h>
@@ -49,6 +50,66 @@ constexpr uint8_t kShtc3Address = 0x70;
 constexpr uint8_t kPcf85063Address = 0x51;
 constexpr size_t kIoChunkSize = 4096;
 constexpr uint32_t kI2cTimeoutMs = 50;
+
+const uint8_t kBlankGlyph[5] = {0, 0, 0, 0, 0};
+const uint8_t kFontDigits[10][5] = {
+  {0x3E,0x51,0x49,0x45,0x3E}, {0x00,0x42,0x7F,0x40,0x00},
+  {0x62,0x51,0x49,0x49,0x46}, {0x22,0x49,0x49,0x49,0x36},
+  {0x18,0x14,0x12,0x7F,0x10}, {0x2F,0x49,0x49,0x49,0x31},
+  {0x3E,0x49,0x49,0x49,0x32}, {0x01,0x71,0x09,0x05,0x03},
+  {0x36,0x49,0x49,0x49,0x36}, {0x26,0x49,0x49,0x49,0x3E},
+};
+const uint8_t kFontUpper[26][5] = {
+  {0x7E,0x11,0x11,0x11,0x7E}, {0x7F,0x49,0x49,0x49,0x36},
+  {0x3E,0x41,0x41,0x41,0x22}, {0x7F,0x41,0x41,0x22,0x1C},
+  {0x7F,0x49,0x49,0x49,0x41}, {0x7F,0x09,0x09,0x09,0x01},
+  {0x3E,0x41,0x49,0x49,0x7A}, {0x7F,0x08,0x08,0x08,0x7F},
+  {0x00,0x41,0x7F,0x41,0x00}, {0x20,0x40,0x41,0x3F,0x01},
+  {0x7F,0x08,0x14,0x22,0x41}, {0x7F,0x40,0x40,0x40,0x40},
+  {0x7F,0x02,0x0C,0x02,0x7F}, {0x7F,0x04,0x08,0x10,0x7F},
+  {0x3E,0x41,0x41,0x41,0x3E}, {0x7F,0x09,0x09,0x09,0x06},
+  {0x3E,0x41,0x51,0x21,0x5E}, {0x7F,0x09,0x19,0x29,0x46},
+  {0x46,0x49,0x49,0x49,0x31}, {0x01,0x01,0x7F,0x01,0x01},
+  {0x3F,0x40,0x40,0x40,0x3F}, {0x1F,0x20,0x40,0x20,0x1F},
+  {0x3F,0x40,0x38,0x40,0x3F}, {0x63,0x14,0x08,0x14,0x63},
+  {0x07,0x08,0x70,0x08,0x07}, {0x61,0x51,0x49,0x45,0x43},
+};
+
+const uint8_t* pairingGlyph(char value) {
+  if (value >= '0' && value <= '9') return kFontDigits[value - '0'];
+  if (value >= 'A' && value <= 'Z') return kFontUpper[value - 'A'];
+  static const uint8_t colon[5] = {0x00,0x36,0x36,0x00,0x00};
+  static const uint8_t dash[5] = {0x08,0x08,0x08,0x08,0x08};
+  static const uint8_t slash[5] = {0x02,0x04,0x08,0x10,0x20};
+  static const uint8_t dot[5] = {0x00,0x00,0x60,0x60,0x00};
+  if (value == ':') return colon;
+  if (value == '-') return dash;
+  if (value == '/') return slash;
+  if (value == '.') return dot;
+  return kBlankGlyph;
+}
+
+void drawPairingText(uint8_t* frame, size_t length, int x, int y, const String& raw, uint8_t scale) {
+  String text = raw;
+  text.toUpperCase();
+  for (size_t index = 0; index < text.length(); ++index) {
+    const uint8_t* glyph = pairingGlyph(text[index]);
+    const int origin = x + static_cast<int>(index) * static_cast<int>(6U * scale);
+    if (origin + static_cast<int>(5U * scale) >= static_cast<int>(kPhotoPainterWidth)) break;
+    for (uint8_t column = 0; column < 5; ++column) {
+      for (uint8_t row = 0; row < 7; ++row) {
+        if ((glyph[column] & (1U << row)) == 0) continue;
+        for (uint8_t dx = 0; dx < scale; ++dx) {
+          for (uint8_t dy = 0; dy < scale; ++dy) {
+            writePacked4(frame, length, kPhotoPainterWidth,
+              static_cast<uint16_t>(origin + column * scale + dx),
+              static_cast<uint16_t>(y + row * scale + dy), 0);
+          }
+        }
+      }
+    }
+  }
+}
 
 #if INKTIME_DEBUG_LOG
 #define PP_LOG(...) DebugSerial.printf(__VA_ARGS__)
@@ -903,6 +964,26 @@ bool PhotoPainterSupport::readActiveSchedule(String& json) {
   return true;
 }
 
+namespace {
+
+String scheduleIdFromJson(const String& json) {
+  if (json.length() == 0U) return "";
+  JsonDocument document;
+  if (deserializeJson(document, json) || document.overflowed()) return "";
+  const JsonVariantConst rawScheduleId = document["schedule_id"];
+  if (!rawScheduleId.is<const char*>()) return "";
+  const String scheduleId = rawScheduleId.as<const char*>();
+  if (scheduleId.length() == 0U || scheduleId.length() > 128U) return "";
+  return scheduleId;
+}
+
+}  // namespace
+
+String PhotoPainterSupport::activeScheduleId() {
+  String json;
+  return readActiveSchedule(json) ? scheduleIdFromJson(json) : String("");
+}
+
 bool PhotoPainterSupport::writeStagedNextSchedule(const char* json, size_t length) {
   static constexpr size_t kMaxScheduleBytes = 32768U;
   if (!sdReady_ || json == nullptr || length == 0 || length > kMaxScheduleBytes) {
@@ -978,6 +1059,11 @@ bool PhotoPainterSupport::readStagedNextSchedule(String& json) {
   }
   cacheStatus_ = CacheStatus::Hit;
   return true;
+}
+
+String PhotoPainterSupport::stagedNextScheduleId() {
+  String json;
+  return readStagedNextSchedule(json) ? scheduleIdFromJson(json) : String("");
 }
 
 bool PhotoPainterSupport::clearStagedNextSchedule() {
@@ -1056,6 +1142,32 @@ bool PhotoPainterSupport::displayFrame(const uint8_t* framebuffer, size_t length
   }
   lastRefreshDurationMs_ = impl_->display.lastRefreshDurationMs();
   return true;
+}
+
+bool PhotoPainterSupport::displayPairingScreen(
+    const char* ssid,
+    const char* password,
+    const char* setup_url
+) {
+  if (!hardwareReady_ || impl_ == nullptr) {
+    lastError_ = "DEVICE-PAIRING-DISPLAY";
+    return false;
+  }
+  uint8_t* frame = allocateWireBuffer(kPhotoPainterFrameBytes);
+  if (frame == nullptr) {
+    lastError_ = "DEVICE-PAIRING-MEMORY";
+    return false;
+  }
+  memset(frame, 0x11, kPhotoPainterFrameBytes);
+  const uint8_t scale = 3;
+  drawPairingText(frame, kPhotoPainterFrameBytes, 30, 42, "INKTIME PAIRING", scale);
+  drawPairingText(frame, kPhotoPainterFrameBytes, 30, 112, String("WIFI SSID: ") + String(ssid == nullptr ? "" : ssid), scale);
+  drawPairingText(frame, kPhotoPainterFrameBytes, 30, 182, String("AP PASSWORD: ") + String(password == nullptr ? "" : password), scale);
+  drawPairingText(frame, kPhotoPainterFrameBytes, 30, 252, String("SETUP: ") + String(setup_url == nullptr ? "" : setup_url), scale);
+  drawPairingText(frame, kPhotoPainterFrameBytes, 30, 322, "VALID 5 MIN", scale);
+  const bool displayed = displayFrame(frame, kPhotoPainterFrameBytes);
+  heap_caps_free(frame);
+  return displayed;
 }
 
 bool PhotoPainterSupport::writeRtc(time_t epoch) {

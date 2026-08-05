@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import json
 import sqlite3
+from urllib.parse import urlparse
 
 from inktime.app.core.locks import fcntl
 
@@ -1665,6 +1667,44 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        32,
+        "加入 Provider 路由選項與真實成本來源",
+        (
+            "ALTER TABLE providers ADD COLUMN options_json TEXT NOT NULL DEFAULT '{}'",
+            "ALTER TABLE api_usage ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0 CHECK(cache_write_tokens >= 0)",
+            "ALTER TABLE api_usage ADD COLUMN cost_source TEXT NOT NULL DEFAULT 'unknown' CHECK(cost_source IN ('provider_reported','estimated','unknown'))",
+            "ALTER TABLE api_usage ADD COLUMN prompt_chars INTEGER NOT NULL DEFAULT 0 CHECK(prompt_chars >= 0)",
+            "ALTER TABLE api_usage ADD COLUMN schema_chars INTEGER NOT NULL DEFAULT 0 CHECK(schema_chars >= 0)",
+            "ALTER TABLE api_usage ADD COLUMN request_body_bytes INTEGER NOT NULL DEFAULT 0 CHECK(request_body_bytes >= 0)",
+            "ALTER TABLE api_usage ADD COLUMN image_bytes INTEGER NOT NULL DEFAULT 0 CHECK(image_bytes >= 0)",
+            # Before Migration 32 the synchronous recorder stored its local
+            # estimate in both estimated_cost and actual_cost.  Those legacy
+            # actual_cost values have no provider provenance and must never be
+            # relabeled as provider-reported money.
+            "UPDATE api_usage SET cost_source=CASE WHEN COALESCE(estimated_cost,0) > 0 OR COALESCE(actual_cost,0) > 0 THEN 'estimated' ELSE 'unknown' END",
+            "CREATE INDEX IF NOT EXISTS idx_api_usage_cost_source ON api_usage(cost_source,started_at)",
+        ),
+    ),
+    Migration(
+        33,
+        "修復 Provider 身分、OpenRouter 相容列與成本回溯索引",
+        (
+            "ALTER TABLE api_usage ADD COLUMN provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL",
+            """
+            UPDATE api_usage
+            SET provider_id=(
+                SELECT p.id FROM providers AS p
+                WHERE p.name=api_usage.provider
+            )
+            WHERE provider_id IS NULL
+              AND (SELECT COUNT(*) FROM providers AS p WHERE p.name=api_usage.provider)=1
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_api_usage_provider_model_cost_time ON api_usage(provider_id,model,cost_source,started_at)",
+            "CREATE INDEX IF NOT EXISTS idx_api_usage_job_cost_source ON api_usage(job_id,cost_source)",
+            "CREATE INDEX IF NOT EXISTS idx_api_usage_photo_cost_source ON api_usage(photo_id,cost_source)",
+        ),
+    ),
 )
 
 
@@ -1695,6 +1735,46 @@ def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
     return bool(
         connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
     )
+
+
+def _official_openrouter_host(base_url: str) -> bool:
+    try:
+        hostname = (urlparse(str(base_url or "").strip()).hostname or "").casefold().rstrip(".")
+    except ValueError:
+        return False
+    return hostname == "openrouter.ai" or hostname.endswith(".openrouter.ai")
+
+
+def _apply_migration_33_data_fixes(connection: sqlite3.Connection) -> None:
+    """Keep legacy rows behaviorally equivalent while the schema upgrade is atomic."""
+
+    providers = connection.execute(
+        "SELECT id,kind,base_url,options_json FROM providers"
+    ).fetchall()
+    for row in providers:
+        raw_kind = str(row["kind"] or "").strip().lower()
+        base_url = str(row["base_url"] or "")
+        if raw_kind != "openai_compatible" or not _official_openrouter_host(base_url):
+            continue
+        try:
+            options = json.loads(str(row["options_json"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            options = {}
+        if not isinstance(options, dict):
+            options = {}
+        if type(options.get("require_parameters")) is not bool:
+            options["require_parameters"] = True
+        connection.execute(
+            "UPDATE providers SET kind='openrouter',supports_batch=0,options_json=?,updated_at=datetime('now') WHERE id=?",
+            (json.dumps(options, ensure_ascii=False, sort_keys=True, separators=(",", ":")), row["id"]),
+        )
+
+    # Migration 32 cannot distinguish an old zero-activity row from an old
+    # row whose pricing evidence was unavailable: both were initialized as
+    # ``unknown``.  Migration 33 must preserve that historical uncertainty;
+    # newly-added zero-valued metric columns do not prove that a request was
+    # free.  Budget/reconciliation policy may avoid reserving a billable
+    # amount when no evidence exists, but it must not rewrite the provenance.
 
 
 def _applied_versions(database: Database) -> set[int]:
@@ -1827,6 +1907,8 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
                 with database.transaction() as connection:
                     for statement in migration.statements:
                         connection.execute(statement)
+                    if migration.version == 33:
+                        _apply_migration_33_data_fixes(connection)
                     connection.execute(
                         "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
                         (migration.version, migration.name, _utc_now()),

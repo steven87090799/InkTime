@@ -33,7 +33,7 @@ jobs:
       - run: python scripts/check_dependency_policy.py
       - run: ruff check inktime tests scripts server.py analyze_photos.py
       - run: mypy
-      - run: pytest --cov=inktime --cov-report=term-missing --cov-fail-under=80 tests/unit tests/security tests/integration
+      - run: pytest --cov=inktime --cov-config=pyproject.toml --cov-report=term-missing --cov-fail-under=80 tests/unit tests/security tests/integration
       - run: pytest tests/unit/test_migrations.py
       - run: pip-audit -r requirements.txt
 
@@ -244,6 +244,18 @@ jobs:
       - run: timeout 60 sh -c 'until curl -fsS http://127.0.0.1:8765/health/live; do sleep 1; done'
       - run: INKTIME_E2E_URL=http://127.0.0.1:8765 pytest tests/e2e
 
+  firmware-host-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+      - name: Test crash-consistent device Config core
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic \
+            -Iesp32/ink-display-7C-photo \
+            tests/firmware/test_device_config_store_core.cpp \
+            -o /tmp/inktime-device-config-store-core
+          /tmp/inktime-device-config-store-core
+
   esp32-compile:
     runs-on: ubuntu-latest
     steps:
@@ -286,6 +298,6 @@ jobs:
       - name: Trusted LAN Waveshare PhotoPainter release
         run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-photopainter-lan esp32/ink-display-7C-photo
       - name: Existing default debug
-        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3:DebugLevel=debug' --build-property 'compiler.cpp.extra_flags=-DINKTIME_DEBUG_LOG=1' --build-path /tmp/build-existing-debug esp32/ink-display-7C-photo
+        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc,DebugLevel=debug' --build-property 'compiler.cpp.extra_flags=-DINKTIME_DEBUG_LOG=1' --build-path /tmp/build-existing-debug esp32/ink-display-7C-photo
       - name: Waveshare PhotoPainter debug
         run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc,DebugLevel=debug' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -DINKTIME_DEBUG_LOG=1' --build-path /tmp/build-photopainter-debug esp32/ink-display-7C-photo

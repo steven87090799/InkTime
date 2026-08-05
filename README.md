@@ -1,6 +1,6 @@
 # InkTime｜照片分析與電子紙回憶管理平台
 
-[English legacy README](README.en.md) · [專案規格與文件入口](USER_MANUAL.html) · [完整 Markdown 文件地圖](docs/README.md) · [完整程式流程圖](#完整程式流程圖從啟動照片分析到電子紙顯示) · [快速開始](docs/getting-started/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/guides/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/operations/DOCKER_GUIDE_ZH_TW.md) · [ESP32／電子紙指南](docs/devices/ESP32_GUIDE_ZH_TW.md) · [Waveshare PhotoPainter](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) · [資源與低功耗](docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/operations/LOGGING_GUIDE_ZH_TW.md)
+[English legacy README](README.en.md) · [專案規格與文件入口](USER_MANUAL.html) · [完整 Markdown 文件地圖](docs/README.md) · [完整程式流程圖](#完整程式流程圖從啟動照片分析到電子紙顯示) · [快速開始](docs/getting-started/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/guides/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/operations/DOCKER_GUIDE_ZH_TW.md) · [ESP32／電子紙指南](docs/devices/ESP32_GUIDE_ZH_TW.md) · [Waveshare PhotoPainter](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) · [ESP32 TLS／配網信任根](docs/devices/ESP32_TLS_PROVISIONING_ZH_TW.md) · [OpenRouter Provider](docs/providers/OPENROUTER_ZH_TW.md) · [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md) · [資源與低功耗](docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/operations/LOGGING_GUIDE_ZH_TW.md)
 
 InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複與低價值照片，再以可控預算的視覺模型產生繁體中文描述、分類、分數與電子紙短文案。所有工作、模型、成本、裝置、渲染、備份與診斷都能由登入後的 Web 管理介面操作。
 
@@ -13,6 +13,9 @@ InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複
 - 以 SHA-256、pHash、dHash、EXIF、亮度、對比、模糊與曝光做本地預處理；相同內容不重複呼叫模型。
 - 512／1024／1600px 內容雜湊縮圖快取；預設不傳原始 4K／8K 圖片。
 - 單一分析請求同時回傳描述、類型、四種分數、短文案與敏感判斷；JSON 最多純文字修復一次。
+- 正式 OpenRouter Provider contract：受控 routing／privacy options、reasoning 與 session routing；OpenRouter 不進入 InkTime Batch 路徑。完整設定見 [OpenRouter Provider 文件](docs/providers/OPENROUTER_ZH_TW.md)。
+- 每筆 usage 區分 `provider_reported`／`estimated`／`unknown`；unknown 不會被當作 US$0，預算與新請求採 fail-closed。Token、cache 與 request-size 指標見 [Token 與成本指南](docs/reference/TOKEN_COST_GUIDE_ZH_TW.md)。
+- 提供預設 offline、bounded、可重現的 [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md)；不會修改 production DB、analysis、release 或 AI cache。
 - 支援同步 Vision 與 OpenAI Batch。OpenAI Files Batch lifecycle 已接入背景工作，支援 JSONL preparation、upload、submission、poll、result import 與 remote cleanup；同時支援 `upload_unknown`／`submission_unknown` 人工 Recovery、Cancel／Abandon、CAS、lease、attempt identity，以及 Job／Batch／Item transaction invariants。Fake lifecycle 與 CI 已覆蓋；真實 OpenAI API live smoke 仍為 `NOT RUN`，正式啟用前應先用 1–3 張非敏感圖片進行 gated live smoke。完整操作見 [OpenAI Batch 照片分析指南](docs/OPENAI_BATCH_ANALYSIS_ZH_TW.md)。
 - 持久化 Job、逐張狀態、有界佇列、暫停、續跑、取消、失敗重跑、重啟恢復與成本停止線。
 - administrator／viewer、Session、CSRF、登入限制與每台 ESP32 獨立 Bearer Token。
@@ -20,6 +23,8 @@ InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複
 - 裝置設定版本 ACK、離線／恢復站內通知、去重／冷卻與三次持久化 Webhook 重試。
 - 繁體中文管理介面、動態 Log 層級、節流進度、錯誤中心、程序／cgroup／SQLite／Worker 診斷與已遮蔽診斷包。
 - Intel N100 低資源預設：單 Web worker、圖片特徵最大 512px 樣本、有界 Future、15 秒閒置輪詢與容器 CPU／RAM／PID 上限。
+
+正式部署採 loopback bind、Secure cookie、HTTPS public URL 與禁止 insecure HTTP；本機開發請明確使用 [`docker-compose.dev.yml`](docker-compose.dev.yml)。ESP32 backend transport 需要 trust anchor，配網密碼為隨機且在 portal／裝置畫面顯示；實體板、正式 NAS、真實 OpenRouter／OpenAI API 驗證仍標記 `NOT RUN`，交接詳見 [Production readiness handoff](docs/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md)。
 
 ## 架構
 

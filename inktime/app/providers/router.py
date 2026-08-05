@@ -46,21 +46,38 @@ class FailoverVisionProvider(VisionProvider):
     def name(self, value: str) -> None:
         self._name = value
 
+    @staticmethod
+    def _prune_quota_events(channel: ProviderChannel, now: float) -> None:
+        while channel.request_times and channel.request_times[0] <= now - 60:
+            channel.request_times.popleft()
+        while channel.token_events and channel.token_events[0][0] <= now - 60:
+            channel.token_events.popleft()
+
+    def _can_use_channel_locked(self, channel: ProviderChannel, now: float) -> bool:
+        self._prune_quota_events(channel, now)
+        if channel.circuit_until > now:
+            return False
+        if channel.requests_per_minute and len(channel.request_times) >= channel.requests_per_minute:
+            return False
+        if (
+            channel.tokens_per_minute
+            and sum(event[1] for event in channel.token_events) >= channel.tokens_per_minute
+        ):
+            return False
+        return True
+
     def _available(self, channel: ProviderChannel) -> bool:
-        now = time.monotonic()
+        """Inspect channel state without consuming an RPM slot."""
+
         with self._lock:
-            while channel.request_times and channel.request_times[0] <= now - 60:
-                channel.request_times.popleft()
-            while channel.token_events and channel.token_events[0][0] <= now - 60:
-                channel.token_events.popleft()
-            if channel.circuit_until > now:
-                return False
-            if channel.requests_per_minute and len(channel.request_times) >= channel.requests_per_minute:
-                return False
-            if (
-                channel.tokens_per_minute
-                and sum(event[1] for event in channel.token_events) >= channel.tokens_per_minute
-            ):
+            return self._can_use_channel_locked(channel, time.monotonic())
+
+    def _reserve_request_slot(self, channel: ProviderChannel) -> bool:
+        """Consume RPM only after a semaphore permit is available."""
+
+        with self._lock:
+            now = time.monotonic()
+            if not self._can_use_channel_locked(channel, now):
                 return False
             channel.request_times.append(now)
             return True
@@ -114,7 +131,7 @@ class FailoverVisionProvider(VisionProvider):
         """Reserve RPM and network concurrency only for the cache owner."""
         if not channel.semaphore.acquire(blocking=False):
             return False
-        if self._available(channel):
+        if self._reserve_request_slot(channel):
             self._local.channel = channel
             return True
         channel.semaphore.release()
@@ -132,8 +149,7 @@ class FailoverVisionProvider(VisionProvider):
         for channel in self.channels:
             if str(getattr(channel.provider, "provider_id", channel.provider.name)) in excluded:
                 continue
-            if self._available(channel) and channel.semaphore.acquire(blocking=False):
-                self._local.channel = channel
+            if self.acquire_channel(channel):
                 return channel
         raise ProviderHTTPError("所有 Provider 暫時不可用或已達 Rate Limit", "VLM-005")
 
@@ -164,36 +180,58 @@ class FailoverVisionProvider(VisionProvider):
     def _execute(self, method: str, **kwargs) -> ProviderResponse:
         last_error: Exception | None = None
         for channel in self.channels:
-            if not self._available(channel) or not channel.semaphore.acquire(blocking=False):
+            if not self.acquire_channel(channel):
                 continue
+            self._local.channel = channel
             try:
                 response = getattr(channel.provider, method)(**kwargs)
             except Exception as exc:
                 last_error = exc
-                with self._lock:
-                    channel.failures += 1
-                    retry_after = getattr(exc, "retry_after", None)
-                    if channel.failures >= self.failure_threshold or retry_after:
-                        channel.circuit_until = time.monotonic() + max(
-                            float(retry_after or 0), channel.cooldown_seconds
-                        )
+                self.release_channel(channel, error=exc)
                 if bool(getattr(exc, "vision_started", False)) or bool(
-                    getattr(exc, "ambiguous", False)
-                ):
+                    getattr(exc, "request_started", False)
+                ) or bool(getattr(exc, "ambiguous", False)):
                     raise
                 continue
-            finally:
-                channel.semaphore.release()
-            with self._lock:
-                channel.failures = 0
-                used_tokens = response.usage.input_tokens + response.usage.output_tokens
-                if used_tokens:
-                    channel.token_events.append((time.monotonic(), used_tokens))
-            self._local.channel = channel
+            self.release_channel(channel, usage=response.usage)
             return response
         if last_error:
             raise last_error
         raise ProviderHTTPError("所有 Provider 暫時不可用或已達 Rate Limit", "VLM-005")
+
+    def _execute_sticky(
+        self,
+        channel: ProviderChannel,
+        method: str,
+        *,
+        boundary=None,
+        **kwargs,
+    ) -> ProviderResponse:
+        """Run one request on a selected channel without failover."""
+
+        if not self.acquire_channel(channel):
+            raise ProviderHTTPError("指定 Provider 暫時不可用或已達 Rate Limit", "VLM-005")
+        self._local.channel = channel
+        try:
+            if boundary is None:
+                response = getattr(channel.provider, method)(**kwargs)
+            else:
+                specification = channel.provider.process_spec()
+                if specification is None:
+                    boundary.record_cooperative()
+                    response = getattr(channel.provider, method)(**kwargs)
+                else:
+                    response = boundary.call_provider(
+                        specification,
+                        method,
+                        timeout_seconds=float(getattr(channel.provider, "timeout", 120)),
+                        kwargs=kwargs,
+                    )
+        except Exception as exc:
+            self.release_channel(channel, error=exc)
+            raise
+        self.release_channel(channel, usage=response.usage)
+        return response
 
     def analyze(self, **kwargs) -> ProviderResponse:
         return self._execute("analyze", **kwargs)
@@ -203,8 +241,9 @@ class FailoverVisionProvider(VisionProvider):
 
         last_error: Exception | None = None
         for channel in self.channels:
-            if not self._available(channel) or not channel.semaphore.acquire(blocking=False):
+            if not self.acquire_channel(channel):
                 continue
+            self._local.channel = channel
             try:
                 specification = channel.provider.process_spec()
                 if specification is None:
@@ -219,23 +258,13 @@ class FailoverVisionProvider(VisionProvider):
                     )
             except Exception as exc:
                 last_error = exc
-                with self._lock:
-                    channel.failures += 1
-                    if channel.failures >= self.failure_threshold:
-                        channel.circuit_until = time.monotonic() + channel.cooldown_seconds
+                self.release_channel(channel, error=exc)
                 if bool(getattr(exc, "vision_started", False)) or bool(
-                    getattr(exc, "ambiguous", False)
-                ):
+                    getattr(exc, "request_started", False)
+                ) or bool(getattr(exc, "ambiguous", False)):
                     raise
                 continue
-            finally:
-                channel.semaphore.release()
-            with self._lock:
-                channel.failures = 0
-                used_tokens = response.usage.input_tokens + response.usage.output_tokens
-                if used_tokens:
-                    channel.token_events.append((time.monotonic(), used_tokens))
-            self._local.channel = channel
+            self.release_channel(channel, usage=response.usage)
             return response
         if last_error:
             raise last_error
@@ -245,22 +274,13 @@ class FailoverVisionProvider(VisionProvider):
         channel = getattr(self._local, "channel", None)
         if channel is None:
             return self._execute("repair_json", **kwargs)
-        return channel.provider.repair_json(**kwargs)
+        return self._execute_sticky(channel, "repair_json", **kwargs)
 
     def repair_json_isolated(self, boundary, **kwargs) -> ProviderResponse:
         channel = getattr(self._local, "channel", None)
         if channel is None:
             return self._execute("repair_json", **kwargs)
-        specification = channel.provider.process_spec()
-        if specification is None:
-            boundary.record_cooperative()
-            return channel.provider.repair_json(**kwargs)
-        return boundary.call_provider(
-            specification,
-            "repair_json",
-            timeout_seconds=float(getattr(channel.provider, "timeout", 120)),
-            kwargs=kwargs,
-        )
+        return self._execute_sticky(channel, "repair_json", boundary=boundary, **kwargs)
 
     def submit_batch(self, requests, completion_window="24h") -> str:
         last_error: Exception | None = None
@@ -320,11 +340,11 @@ class FailoverVisionProvider(VisionProvider):
     def delete_remote_file(self, file_id: str) -> dict:
         return self._batch_provider().delete_remote_file(file_id)
 
-    def estimate_cost(self, model: str, usage: Usage) -> float:
+    def estimate_cost(self, model: str, usage: Usage) -> float | None:
         channel = getattr(self._local, "channel", self.channels[0])
         return channel.provider.estimate_cost(model, usage)
 
-    def estimate_batch_cost(self, model: str, usage: Usage) -> float:
+    def estimate_batch_cost(self, model: str, usage: Usage) -> float | None:
         channel = getattr(self._local, "channel", self.channels[0])
         return channel.provider.estimate_batch_cost(model, usage)
 

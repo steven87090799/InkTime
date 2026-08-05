@@ -1,13 +1,13 @@
 # InkTime 模型 API 接入與控制台填寫指南
 
-> 適用於目前 InkTime Web 管理介面，資料核對日期：2026-07-19。模型名稱、費率與 Rate Limit 會隨廠商調整；正式啟用前，請以各廠商控制台顯示的最新資料為準。
+> 適用於目前 InkTime Web 管理介面，資料核對日期：2026-08-04。模型名稱、費率與 Rate Limit 會隨廠商調整；正式啟用前，請以各廠商控制台顯示的最新資料為準。
 
 這份文件說明如何把雲端或本地視覺模型接入 InkTime，以及「模型」與「設定」頁的每個欄位應該怎麼填。InkTime 目前使用 **OpenAI Chat Completions 相容格式**傳送 JPEG 圖片，模型必須能同時完成：
 
 - 接收 `messages[].content[]` 內的 Base64 `image_url`。
 - 回傳 `choices[0].message.content`。
 - 最好支援 `response_format.type=json_schema`；不支援時至少要穩定輸出 JSON。
-- 最好回傳 `usage.prompt_tokens`／`usage.completion_tokens`，否則成本與 Token 統計會不完整。
+- 最好回傳 `usage.prompt_tokens`／`usage.completion_tokens` 與 provider cost；缺少真實成本且沒有模型價格時，InkTime 會標成 `unknown`，不會偽裝成 US$0。
 - 提供 `GET /models`，因為 InkTime 的「測試」按鈕目前用這個端點檢查連線。
 
 如果只想先測電子紙排版，不必先申請任何模型 API。可直接使用 InkTime「模擬器」或建立 `local` 策略工作；兩者都不會把照片傳給模型廠商。
@@ -15,10 +15,10 @@
 ## 先看：目前版本的五個重要限制
 
 1. **Base URL 要填 API 根路徑**，例如 `https://api.openai.com/v1`。不要填完整的 `/chat/completions` URL，否則「測試」按鈕可能會錯誤地組出 `/chat/completions/models`。
-2. 「類型」目前只是分類標籤。無論選 OpenAI、OpenAI 相容 API 或 Ollama，後端目前都使用同一個 OpenAI 相容轉接器；它不會把 Gemini、Claude、Bedrock 等原生格式自動轉換成 OpenAI 格式。
+2. 「類型」會影響 server-side capability 與安全政策。OpenRouter 使用正式 `kind=openrouter` request contract；Ollama 只允許本地／私有 HTTP；未知 kind 與未知 options 會被拒絕。所有相容端點仍必須自行提供 OpenAI Chat Completions 格式，InkTime 不會把 Gemini、Claude、Bedrock 等原生格式自動轉換。
 3. `model.low_model` 與 `model.high_model` 是**全系統共用**，不是每個 Provider 各自一組。若同時啟用 OpenAI 與 Gemini，InkTime 會把同一個模型 ID 傳給兩家；`gpt-4.1-mini` 在 Gemini 不存在，`gemini-...` 在 OpenAI 也不存在。因此目前建議一次只啟用一家直連廠商，或使用 OpenRouter 這類單一聚合端點。
 4. 「測試」只代表 API Key、Base URL 與 `GET /models` 可連線，不代表圖片、JSON Schema 或模型名稱一定可用。儲存後仍要到「評分」頁用單張照片測試。
-5. 資料庫已有模型價格欄位，但目前 Web 控制台尚未提供價格編輯表單。因此在控制台只能設定預算停止值，不能填每百萬 Token 單價；未另外寫入價格時，InkTime 的估計成本會是 `US$ 0`，**不代表廠商免費**。帳務仍以廠商控制台為準。
+5. Provider 頁已有模型價格表單；若 Provider response 沒有真實成本，已填價格才會產生 `estimated`，否則 usage 是 `unknown`。unknown 不會被當作免費，且新的 AI request 會 fail-closed，直到補上價格或改用能回報成本的 Provider。
 
 ## 完整操作流程
 
@@ -39,7 +39,7 @@
 | 控制台欄位 | 建議怎麼填 | 說明 |
 |---|---|---|
 | 名稱 | `OpenAI 主線`、`Gemini`、`本機 Ollama` | 只是 InkTime 顯示名稱，可自行命名。 |
-| 類型 | 直連 OpenAI 選 `OpenAI`；其他雲端選 `OpenAI 相容 API`；Ollama／LM Studio 選 `本地 Ollama 相容端點` | 目前只影響標示，不改變 HTTP 格式。 |
+| 類型 | 直連 OpenAI 選 `OpenAI`；OpenRouter 選 `OpenRouter（正式 API）`；其他雲端選 `OpenAI 相容 API`；Ollama／LM Studio 選 `本地 Ollama 相容端點` | kind 會影響 Batch、reasoning、routing 與 HTTP policy。 |
 | Base URL | 填到 `/v1` 或廠商指定的相容 API 根路徑 | 不要自行再加 `/chat/completions`。 |
 | API Key | 貼上廠商提供的完整 Key | InkTime 加密儲存且頁面只顯示遮罩。編輯既有 Provider 時留空會保留舊 Key。 |
 | 狀態 | 初次設定先選 `啟用` | 若同時設定不同廠商，先只啟用正在測試的一家。 |
@@ -49,7 +49,8 @@
 | 每分鐘 Token 上限 | 不確定就留空；知道方案限制才填 | 同上；填太低會讓工作等待，填太高仍可能收到廠商 429。 |
 | HTTP 逾時秒數 | 雲端 `120`；本地小模型 `180`；本地大模型 `300–600` | 最大可填 600。圖片分析通常比純文字慢。 |
 | 故障冷卻秒數 | `300` | 發生失敗或 429 後暫時避開此 Provider；若廠商有明確 `Retry-After`，InkTime 會尊重較長時間。 |
-| 支援 Batch API | 只有確認該端點完整支援 `/files`、`/batches`、`/files/<id>/content` 與刪除才勾選 | 勾選後可由管理員在 Batch 頁執行完整的持久化、輪詢、結果回填、部分成功重試與遠端檔案清理；CI 一律使用 Fake Provider，不會呼叫真實 OpenAI。 |
+| Provider options | OpenRouter 可填 `order`、`only`／`ignore`、`data_collection`、`zdr`、`sort`、`max_price`、`session_sticky` 等 JSON | 未知欄位、互斥 routing 組合與非 HTTPS `http_referer` 會被拒絕；細節見 [OpenRouter 正式 Provider](../providers/OPENROUTER_ZH_TW.md)。 |
+| 支援 Batch API | OpenRouter／Ollama 不可勾；generic 相容端點只有在完整支援 `/files`、`/batches`、結果／錯誤檔與刪除時才勾選 | `kind=openrouter` 有 server-side hard guard；CI 使用 Fake Provider，不會呼叫真實 OpenAI。 |
 | 支援嚴格 JSON Schema | 確定支援才勾；不確定先取消 | 勾選後 InkTime 會傳送 OpenAI 形式的 `response_format: json_schema`。不支援的端點通常回 400。取消後仍會在應用層驗證 JSON，失敗時最多做一次純文字修復。 |
 
 儲存後按「測試」。看到「連線成功」後，還不能直接跑全相簿；請繼續完成模型名稱與單張照片測試。
@@ -60,8 +61,9 @@
 
 | 欄位 | 用途 | 建議 |
 |---|---|---|
-| `model.low_model` | 512px 第一階段、低成本初篩 | 填廠商模型清單中的**完整模型 ID**，不是網頁顯示名稱。 |
-| `model.high_model` | 1600px 第二階段、高品質分析與評分測試台 | 可填較高品質模型；第一次接入可先與 low_model 填相同值，確認流程後再拆分。 |
+| `model.low_model` | 舊版設定讀取相容欄位 | 新工作 canonical 為一次完整 Vision；512／1024／1600 由 `analysis.image_max_side` 控制，不會建立 legacy 第二次圖片請求。 |
+| `model.analysis_model` | 新單次完整照片分析 | 填 Provider 能接受圖片與 Schema 的**完整模型 ID**，OpenRouter 必須包含 provider 前綴。 |
+| `model.repair_model` | 只接收文字的 JSON 修復 | 最多一次；不會收到圖片。預設 cap 1200 tokens。 |
 
 模型 ID 必須原樣複製，包含大小寫、斜線、冒號與版本尾碼。例如 OpenRouter 常見 `廠商/模型`，Ollama 常見 `模型:尺寸`。不要把模型的中文名稱或產品頁標題填進去。
 
@@ -75,7 +77,7 @@
 - 單張照片上限：`0.10`
 - 單次最大 Token：先保留 `8000`
 
-這些數值只是首次測試範例，幣別為美元。因目前尚無 Web 價格輸入欄位，InkTime 可能無法正確換算金額；同時務必在廠商控制台設定真正的消費上限與用量通知。
+這些數值只是首次測試範例，幣別為美元。Provider 頁可輸入標準 Input、Cached Input、Output 與 Batch multiplier 價格；若 Provider 沒有回報真實成本，系統只會在價格完整時標成 `estimated`，否則標成 `unknown` 並停止會增加未確認成本的工作。廠商控制台的金額上限與用量通知仍是最終帳務防線。
 
 ### 第 4 步：做真正的單張驗收
 
@@ -144,7 +146,7 @@ OpenRouter 把多家模型正規化成一個 OpenAI 相容端點，最能避開 
 | 欄位 | 值 |
 |---|---|
 | 名稱 | `OpenRouter` |
-| 類型 | `OpenAI 相容 API` |
+| 類型 | `OpenRouter（正式 API）` |
 | Base URL | `https://openrouter.ai/api/v1` |
 | API Key | `sk-or-v1-...` |
 | 優先順序 | `100` |
@@ -155,6 +157,8 @@ OpenRouter 把多家模型正規化成一個 OpenAI 相容端點，最能避開 
 | 嚴格 JSON Schema | 所選模型明確支援 structured outputs 才勾 |
 
 模型 ID 要連同廠商前綴完整貼上，例如 `openai/...`、`google/...`、`anthropic/...`；不要只填尾端名稱。若 low/high 選不同廠商也沒問題，因為兩者仍由同一個 OpenRouter Base URL 處理。
+
+OpenRouter 的 options、routing/privacy policy、reasoning、cache、成本來源與禁止 Batch 邊界，請一併閱讀 [OpenRouter 正式 Provider 與安全契約](../providers/OPENROUTER_ZH_TW.md)。離線比較模型與解析度時，使用 [Model Benchmark 規格](../providers/MODEL_BENCHMARK_ZH_TW.md)；預設模式不呼叫外部 Provider。
 
 ### 4. Together AI：OpenAI 相容的多模型平台
 
@@ -373,7 +377,7 @@ Fireworks、NVIDIA NIM、自架 vLLM、LiteLLM Proxy 或其他平台若同時滿
 | 回傳 429 | 廠商 Rate Limit／餘額限制 | 將最大並行降到 1，設定較低 RPM／TPM，提高冷卻秒數，或升級廠商方案。 |
 | 本地端點無法連線 | Docker 容器內的 localhost 指錯位置，或本地服務只監聽 loopback | Docker 改用 service name／`host.docker.internal`，並檢查防火牆與服務監聽位址。 |
 | 模型不存在 | 把顯示名稱當 ID、模型已下架、區域不提供、Provider 收到別家模型 ID | 從該 Provider 的 Models 頁重新複製 exact ID；一次只啟用一家直連廠商。 |
-| 成本永遠是 US$ 0 | Web UI 目前無模型單價輸入欄位 | 以廠商帳務為準，先在廠商端設上限；不要把 InkTime 的 0 當免費。 |
+| 成本顯示 `unknown` | Provider 沒有回報成本，且價格欄位不完整或未設定 | 不要把 unknown 當免費；補齊 Provider 價格、改用能回報成本的 Provider，或先停止會增加未確認成本的工作。 |
 | Key 編輯後仍顯示遮罩 | 正常安全行為 | 編輯時 Key 留空會保留舊 Key；只有要更換時才貼新 Key。 |
 
 ## 上線前檢查清單
@@ -385,7 +389,7 @@ Fireworks、NVIDIA NIM、自架 vLLM、LiteLLM Proxy 或其他平台若同時滿
 - [ ] low/high 都是完整、仍有效、支援圖片的模型 ID。
 - [ ] 「測試」顯示連線成功。
 - [ ] 「評分」單張照片能回繁體中文描述、分類、四項分數與短文案。
-- [ ] 「成本」頁有 Token／Provider／模型紀錄，並已了解金額可能尚未正確換算。
+- [ ] 「成本」頁有 Token／Provider／模型紀錄；`provider_reported`、`estimated`、`unknown` 已按實際情況核對。
 - [ ] 已用 5–10 張照片的小工作驗證，而不是直接跑完整相簿。
 - [ ] 免費層、本地模型或 N100 的最大並行先維持 1。
 - [ ] 僅在已完成 Base URL、模型、價格與 100 張 Sample 驗收後啟用 Batch；完整生命週期由「Batch 照片分析」管理頁執行。

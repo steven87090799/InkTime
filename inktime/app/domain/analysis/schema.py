@@ -5,6 +5,8 @@ import math
 from copy import deepcopy
 from typing import Any, cast
 
+from inktime.app.domain.analysis.scoring import GRADE_TO_SCORE
+
 
 ALLOWED_TYPES = {
     "人物",
@@ -124,6 +126,26 @@ ANALYSIS_JSON_SCHEMA = {
                         "uniqueItems": True,
                     },
                 },
+            },
+        },
+    },
+}
+
+PROVIDER_CONTRACT_JSON_SCHEMA = {
+    "name": "inktime_provider_vision_contract",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["vision_ok", "detected_shapes"],
+        "properties": {
+            "vision_ok": {"type": "boolean"},
+            "detected_shapes": {
+                "type": "array",
+                "items": {"type": "string", "enum": ["rectangle", "circle"]},
+                "minItems": 2,
+                "maxItems": 2,
+                "uniqueItems": True,
             },
         },
     },
@@ -263,6 +285,8 @@ FULL_ANALYSIS_JSON_SCHEMA = {
 
 def json_schema_for_stage(stage: str, *, caption_controls: dict[str, Any] | None = None) -> dict:
     """完整分析只在高細節單次請求使用；其餘採用成本較低的基本 Schema。"""
+    if stage == "provider_contract_level2":
+        return PROVIDER_CONTRACT_JSON_SCHEMA
     full_stage = stage in {"single", "single_high", "stage_two", "full"}
     if not caption_controls:
         return FULL_ANALYSIS_JSON_SCHEMA if full_stage else ANALYSIS_JSON_SCHEMA
@@ -303,10 +327,11 @@ def _score(value: Any, field: str) -> float:
 
 
 def _grade_score(value: Any) -> float:
-    values = {"S": 95.0, "A": 85.0, "B": 75.0, "C": 60.0, "D": 40.0, "E": 20.0, "unknown": 0.0}
-    if value not in values:
+    if value == "unknown":
+        return 0.0
+    if value not in GRADE_TO_SCORE:
         raise AnalysisValidationError("v3 等級必須是 S/A/B/C/D/E/unknown")
-    return values[value]
+    return GRADE_TO_SCORE[value]
 
 
 def _normalize_v3(value: dict) -> dict:
