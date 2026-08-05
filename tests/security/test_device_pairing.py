@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from inktime.app.services.device_pairing import DevicePairingError
 from tests.conftest import create_admin, csrf, login
 
 
@@ -19,6 +22,53 @@ def _pairing_payload(device_id: str = "esp32-contract-test", *, nonce: str | Non
         "panel_profile": "safe_4c",
         "capabilities": {"automatic_pairing": True, "ab_credential_store": True},
     }
+
+
+@pytest.mark.parametrize(
+    ("schedule_times", "expected"),
+    [
+        (["08:00"], ["08:00"]),
+        (["08:00", "12:00", "20:00"], ["08:00", "12:00", "20:00"]),
+    ],
+)
+def test_pairing_schedule_values_accept_single_and_increasing(app, schedule_times, expected):
+    service = app.extensions["inktime_device_pairing_service"]
+    config = service._normalize_config(
+        {
+            "name": "LAN Gate Device",
+            "panel_profile": "safe_4c",
+            "schedule_times": schedule_times,
+        },
+        fallback_name="LAN Gate Device",
+    )
+    assert config["schedule_times"] == expected
+
+
+def test_pairing_schedule_values_use_default_fallback(app):
+    service = app.extensions["inktime_device_pairing_service"]
+    config = service._normalize_config(
+        {"name": "LAN Gate Device", "panel_profile": "safe_4c"},
+        fallback_name="LAN Gate Device",
+    )
+    assert config["schedule_times"] == ["08:00"]
+
+
+@pytest.mark.parametrize(
+    "schedule_times",
+    [["12:00", "08:00"], ["08:00", "08:00"], []],
+)
+def test_pairing_schedule_values_reject_invalid_values(app, schedule_times):
+    service = app.extensions["inktime_device_pairing_service"]
+    with pytest.raises(DevicePairingError) as error:
+        service._normalize_config(
+            {
+                "name": "LAN Gate Device",
+                "panel_profile": "safe_4c",
+                "schedule_times": schedule_times,
+            },
+            fallback_name="LAN Gate Device",
+        )
+    assert error.value.error_code == "PAIR-004"
 
 
 def _approve(client, pairing_id: str, pairing_code: str, *, include_csrf: bool = True):

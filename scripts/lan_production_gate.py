@@ -34,6 +34,13 @@ def _read_state(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _state_int(state: dict[str, object], key: str) -> int:
+    value = state.get(key)
+    if type(value) is not int:
+        raise RuntimeError(f"invalid integer state field: {key}")
+    return value
+
+
 def _write_state(path: Path, state: dict[str, object]) -> None:
     path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
     path.chmod(0o600)
@@ -325,7 +332,7 @@ def _exercise(state_path: Path) -> None:
     state = _read_state(state_path)
     device_id = str(state["device_id"])
     secret = str(state["device_secret"])
-    credential_version = int(state["credential_version"])
+    credential_version = _state_int(state, "credential_version")
     expected_sha = str(state["release_sha256"])
     browser = Browser()
     browser.login()
@@ -421,7 +428,7 @@ def _verify(state_path: Path) -> None:
     with browser.request(
         "/api/device/v1/releases/latest",
         bearer=str(state["device_secret"]),
-        credential_version=int(state["credential_version"]),
+        credential_version=_state_int(state, "credential_version"),
     ) as response:
         if json.load(response).get("release_id") != RELEASE_ID:
             raise RuntimeError("Device Secret or Release assignment did not persist")
