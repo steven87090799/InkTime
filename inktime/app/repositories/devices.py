@@ -227,9 +227,7 @@ class DeviceRepository:
         ).fetchall()
         cancelled = 0
         for item in items:
-            if change_kind != "delivery_mode_transition" and not self._is_future_queue_slot(
-                item["display_after"], now
-            ):
+            if not self._is_future_queue_slot(item["display_after"], now):
                 # Immutable history includes a past slot even if the device
                 # never reached it.  Only a genuinely future point may be
                 # replanned by a new device configuration.
@@ -1002,6 +1000,33 @@ class DeviceRepository:
             except (TypeError, ValueError, json.JSONDecodeError, ZoneInfoNotFoundError, OverflowError):
                 planned_sync = None
 
+            next_wake = None
+            if next_display_slot is not None or planned_sync is not None:
+                display_at = None
+                if next_display_slot is not None:
+                    try:
+                        display_at = datetime.fromisoformat(str(next_display_slot["show_at"]))
+                        if display_at.tzinfo is None:
+                            display_at = display_at.replace(tzinfo=timezone.utc)
+                    except (TypeError, ValueError, OverflowError):
+                        display_at = None
+                sync_at = None
+                if planned_sync is not None:
+                    try:
+                        sync_at = datetime.fromisoformat(str(planned_sync["at"]))
+                    except (TypeError, ValueError, OverflowError):
+                        sync_at = None
+                if display_at is not None and (sync_at is None or display_at <= sync_at):
+                    next_wake = {
+                        "at": display_at.astimezone(timezone.utc).isoformat(),
+                        "epoch": int(display_at.timestamp()),
+                        "source": "prepared_schedule",
+                        "kind": "display",
+                        "slot_id": next_display_slot["slot_id"],
+                    }
+                elif planned_sync is not None:
+                    next_wake = {**planned_sync, "kind": "network_sync"}
+
             fallback_recovery = None
             event = connection.execute(
                 """
@@ -1068,7 +1093,7 @@ class DeviceRepository:
                 ),
                 "offline_schedule_ack_at": device["offline_schedule_ack_at"],
                 "next_display_slot": next_display_slot,
-                "next_wake": planned_sync,
+                "next_wake": next_wake,
                 "next_network_sync": planned_sync,
                 "today": today,
                 "today_timeline": today_timeline,

@@ -438,6 +438,12 @@ def test_mode_transition_cancels_incompatible_active_delivery_with_audit(app):
     online_release = _release(app, "mode-online")
     queue.ensure_queue(online_id)
     online_item = queue.enqueue_release(device_id=online_id, release_id=online_release["release_id"])
+    future_display = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            "UPDATE device_content_queue_items SET display_after=? WHERE id=?",
+            (future_display, online_item["id"]),
+        )
     devices.update(
         online_id,
         name="online to offline",
@@ -473,9 +479,10 @@ def test_mode_transition_cancels_incompatible_active_delivery_with_audit(app):
         schedule_times=["08:00"],
     )
     offline_release = _release(app, "mode-offline")
+    future_target_date = (datetime.now(timezone.utc).date() + timedelta(days=1)).isoformat()
     prepared = app.extensions["inktime_offline_schedule_repository"].prepare_day(
         device_id=offline_id,
-        target_date="2026-08-03",
+        target_date=future_target_date,
         release_ids=[offline_release["release_id"]],
     )
     with app.extensions["inktime_database"].session() as connection:
