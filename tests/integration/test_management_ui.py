@@ -78,6 +78,16 @@ def test_device_runtime_summary_exposes_persisted_versions_and_unknowns_as_null(
     assert body["fallback_recovery"] is None
 
 
+def test_device_runtime_summary_polling_aborts_a_hung_request(client, app):
+    create_admin(app)
+    login(client)
+    response = client.get("/devices")
+    body = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert "const requestTimeout=setTimeout(()=>controller.abort(),Math.max(0,deadline-Date.now()))" in body
+    assert "clearTimeout(requestTimeout)" in body
+
+
 def test_stock_photopainter_display_controls_are_scoped_and_server_side(client, app):
     create_admin(app)
     login(client)
