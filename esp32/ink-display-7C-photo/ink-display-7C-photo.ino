@@ -4337,7 +4337,7 @@ static bool offlinePrefetchWake(const Config &cfg, time_t nowEpoch) {
     // A zero lead is a valid first_display_lead contract: the advertised
     // network-sync epoch is the display boundary, so that boundary must take
     // the network path instead of silently becoming a local-only wake.
-    return nextDisplay > 0 && nowEpoch >= nextDisplay
+    return activeHasDueFormalSlot(nowEpoch)
       && (targetEnd <= 0 || nowEpoch < targetEnd);
   }
   if (nextDisplay <= nowEpoch) return false;
