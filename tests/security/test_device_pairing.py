@@ -25,23 +25,44 @@ def _pairing_payload(device_id: str = "esp32-contract-test", *, nonce: str | Non
 
 
 @pytest.mark.parametrize(
-    ("schedule_times", "expected"),
+    ("schedule_times", "minimum_gap_minutes", "expected"),
     [
-        (["08:00"], ["08:00"]),
-        (["08:00", "12:00", "20:00"], ["08:00", "12:00", "20:00"]),
+        (["08:00"], 60, ["08:00"]),
+        (["08:00", "12:00", "20:00"], 60, ["08:00", "12:00", "20:00"]),
+        (["08:00", "08:30"], 30, ["08:00", "08:30"]),
     ],
 )
-def test_pairing_schedule_values_accept_single_and_increasing(app, schedule_times, expected):
+def test_pairing_schedule_values_accept_configured_gap(app, schedule_times, minimum_gap_minutes, expected):
     service = app.extensions["inktime_device_pairing_service"]
     config = service._normalize_config(
         {
             "name": "LAN Gate Device",
             "panel_profile": "safe_4c",
             "schedule_times": schedule_times,
+            "minimum_schedule_gap_minutes": minimum_gap_minutes,
         },
         fallback_name="LAN Gate Device",
     )
     assert config["schedule_times"] == expected
+    assert config["minimum_schedule_gap_minutes"] == minimum_gap_minutes
+
+
+def test_pairing_schedule_values_preserve_fixed_daily_sync_policy(app):
+    service = app.extensions["inktime_device_pairing_service"]
+    config = service._normalize_config(
+        {
+            "name": "LAN Gate Device",
+            "panel_profile": "safe_4c",
+            "schedule_times": ["08:00", "20:00"],
+            "minimum_schedule_gap_minutes": 30,
+            "sync_strategy": "fixed_daily",
+            "sync_time": "07:30",
+        },
+        fallback_name="LAN Gate Device",
+    )
+    assert config["minimum_schedule_gap_minutes"] == 30
+    assert config["sync_strategy"] == "fixed_daily"
+    assert config["sync_time"] == "07:30"
 
 
 def test_pairing_schedule_values_use_default_fallback(app):
