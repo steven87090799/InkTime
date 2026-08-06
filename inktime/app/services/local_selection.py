@@ -60,6 +60,15 @@ class LocalSelectionPolicy:
         except ValueError:
             return 0 if left == right else None
 
+    @staticmethod
+    def _coordinate(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(str(value))
+        except (TypeError, ValueError):
+            return None
+
     @classmethod
     def _diversity_penalty(cls, candidate: dict[str, Any], selected: list[dict[str, Any]]) -> float:
         """Penalize local duplicates and bursts without introducing an AI call."""
@@ -96,11 +105,19 @@ class LocalSelectionPolicy:
                         other_dt = other_dt.replace(tzinfo=candidate_dt.tzinfo)
                     if abs((candidate_dt - other_dt).total_seconds()) <= 120:
                         penalty = max(penalty, 6.0)
-            try:
-                lat_delta = abs(float(candidate.get("gps_lat")) - float(other.get("gps_lat")))
-                lon_delta = abs(float(candidate.get("gps_lon")) - float(other.get("gps_lon")))
-            except (TypeError, ValueError):
+            candidate_lat = cls._coordinate(candidate.get("gps_lat"))
+            other_lat = cls._coordinate(other.get("gps_lat"))
+            candidate_lon = cls._coordinate(candidate.get("gps_lon"))
+            other_lon = cls._coordinate(other.get("gps_lon"))
+            if (
+                candidate_lat is None
+                or other_lat is None
+                or candidate_lon is None
+                or other_lon is None
+            ):
                 continue
+            lat_delta = abs(candidate_lat - other_lat)
+            lon_delta = abs(candidate_lon - other_lon)
             if lat_delta <= 0.001 and lon_delta <= 0.001:
                 penalty = max(penalty, 4.0)
         return penalty

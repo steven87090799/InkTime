@@ -4,7 +4,7 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, List
 from uuid import uuid4
 
 from inktime.app.db import Database
@@ -471,7 +471,7 @@ class JobRepository:
                 (job_id, limit, offset),
             ).fetchall()
 
-    def failure_codes(self, job_id: str) -> list[str]:
+    def failure_codes(self, job_id: str) -> List[str]:
         with self.database.session() as connection:
             rows = connection.execute(
                 "SELECT error_code FROM job_items WHERE job_id=? AND error_code IS NOT NULL AND error_code<>'' ORDER BY id",
