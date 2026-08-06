@@ -18,7 +18,7 @@
 | 離線比較模型與解析度 | [Model Benchmark](providers/MODEL_BENCHMARK_ZH_TW.md) |
 | 為 ESP32 配置 HTTPS 信任根 | [ESP32 TLS／配網](devices/ESP32_TLS_PROVISIONING_ZH_TW.md) |
 | 使用 Decision Trace、Queue 或 Canary | [決策與韌性總覽](resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md) |
-| 交接 PR #53 的修復與證據 | [Final One-Shot Hardening Audit](reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md) → [Production Readiness Handoff](PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md) |
+| 交接 PR #53 的修復與證據 | [Final One-Shot Hardening Audit](archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md) → [Production Readiness Handoff](PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md) |
 
 ## 文件規則
 
@@ -44,7 +44,7 @@
 
 - [`OPENAI_BATCH_ANALYSIS_ZH_TW.md`](OPENAI_BATCH_ANALYSIS_ZH_TW.md)：Batch 輸入快照、隱私、生命週期、成本與實際人工 smoke 邊界。
 - [`PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md`](PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md)：正式環境安全、LAN、持久化與交接檢查。
-- [`branch-consolidation-report.md`](branch-consolidation-report.md)：分支整併、Migration 26、CI 與遠端分支清理證據。
+- [`archive/reports/branch-consolidation-report.md`](archive/reports/branch-consolidation-report.md)：分支整併、Migration 26、CI 與遠端分支清理證據。
 - [`post-merge-hardware-validation.md`](post-merge-hardware-validation.md)：軟體／hosted PASS 與真實 OpenAI、NAS、ESP32 驗收的 NOT RUN 邊界。
 
 ### 開始使用
@@ -125,7 +125,7 @@
 - [`archive/reports/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md`](archive/reports/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md)：2026-07-22 跨模組與硬體邊界報告。
 - [`archive/reports/N100_IMPLEMENTATION_REPORT_ZH_TW.md`](archive/reports/N100_IMPLEMENTATION_REPORT_ZH_TW.md)：2026-07-18 N100 實作／量測報告。
 - [`reports/PERFORMANCE_REPORT.md`](reports/PERFORMANCE_REPORT.md)：100,000 筆效能測試紀錄；測試腳本會更新此檔。
-- [`reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md`](reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md)：本輪 P1、Provider、AI、Release、Container、文件與 hosted CI 交接證據。
+- [`archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md`](archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md)：本輪 P1、Provider、AI、Release、Container、文件與 hosted CI 交接證據。
 
 ### 元件旁文件
 

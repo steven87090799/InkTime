@@ -2,6 +2,13 @@
 
 本文件對應目前 `esp32/ink-display-7C-photo/ink-display-7C-photo.ino`、`device_config_store_core.h`、`DevicePairingService` 與裝置管理頁。它只描述自製 InkTime 韌體的自動配對；既有 Legacy Token 與 Stock PhotoPainter 相容模式仍保留原契約。
 
+## 0. 目前韌體與 Config Store 版本
+
+- 目前自製 InkTime 韌體版本：`2.8.0`。
+- Config Store 目前寫入 schema：`4`。
+- Config Store 相容讀取舊 schema：`1`、`2`、`3`。
+- Schema 4 新增同步策略欄位：`sync_strategy` 與 `sync_time`。`first_display_lead` 沿用既有 `prefetch_lead_minutes`，`sync_time` 必須為空；`fixed_daily` 則必須提供合法的 `HH:MM`。
+
 ## 1. 三種裝置認證模式
 
 | 模式 | 後端 `auth_mode` | 認證材料 | 是否進入自動配對 |
@@ -35,7 +42,7 @@
   "device_id": "esp32-ABC123",
   "pairing_nonce": "高熵隨機字串",
   "firmware_identity": "ESP32-S3-PhotoPainter",
-  "firmware_version": "2.6.0",
+  "firmware_version": "2.8.0",
   "panel_profile": "safe_4c",
   "capabilities": {
     "automatic_pairing": true,
@@ -101,7 +108,8 @@ Automatic credential 缺少版本、版本不符、裝置未處於 `paired`、�
 
 - `device_secret`、`device_id`、`auth_state`、`credential_version`；
 - `pairing_id`、`pairing_nonce`、`pairing_expires_at_epoch`、`pairing_retry_at_epoch`、`pairing_retry_attempt`；
-- payload schema 由 2 升為 3，deserialize 仍接受舊 schema 1、2；
+- Config Store 目前寫入 payload schema `4`；deserialize 相容讀取舊 schema `1`、`2`、`3`；
+- schema 4 的 `sync_strategy` 支援 `first_display_lead` 與 `fixed_daily`；前者使用既有 `prefetch_lead_minutes` 且 `sync_time` 為空，後者要求合法 `HH:MM` 的 `sync_time`；
 - Config Store 仍執行 slot CRC、generation、pointer recovery、prepare／commit read-back；
 - 不新增散落的明文 `Preferences` credential key；Factory Reset 會清除新的正式 A/B payload 與既有 legacy 設定。
 

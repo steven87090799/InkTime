@@ -2,10 +2,19 @@
 
 本文件把 software CI、hosted compile、simulator/mock 與真實外部環境分開。當前報告狀態如下：
 
+## 2.8 合併基線
+
+| 項目 | 值 |
+|---|---|
+| 整合 PR | PR #62 |
+| Firmware | `2.8.0` |
+| Database Migration | `36` |
+| ESP32 Config Store | 目前 schema `4`；相容讀取 schema `1`、`2`、`3` |
+
 | 項目 | 狀態 | 目前可用證據 |
 |---|---|---|
 | Python／SQLite／Batch software | PASS | local pytest、migration、Batch lifecycle／provider focused tests |
-| GitHub hosted CI | PASS | PR #32、#33、#34、#41 的 checks 全數成功 |
+| GitHub hosted CI | PASS | PR #62 exact-head routed／full checks 全數成功 |
 | Compose／TLS／runtime soak／Playwright | PASS | hosted workflow matrix |
 | ESP32 cross-compile | PASS | hosted `esp32-compile` |
 | 真實 OpenAI API / Batch | NOT RUN | 沒有使用 production key，也沒有上傳真實照片 |
@@ -42,4 +51,3 @@
 - 真實 PhotoPainter 面板上至少一次成功刷新、一次相同內容 skip、一次 forced refresh，並保存不含 secret 的測試紀錄。
 
 只有 board + panel + power measurements + functional evidence 全部完成，才能把這一欄從 `NOT RUN` 改成 PASS。Hosted `esp32-compile` 不可替代上述驗收。
-

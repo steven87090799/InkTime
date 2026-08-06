@@ -268,7 +268,7 @@ InkTime includes two offline Traditional Chinese choices in the Rendering page: 
 On startup, the device tries to read saved Wi-Fi credentials from NVS. If credentials are missing or Wi-Fi connection fails, it automatically enters AP configuration mode:
 
 - The device starts an AP hotspot: `InkTime-xxxx`
-- Default password: `12345678`
+- The current ESP32-S3 PhotoPainter firmware generates a new AP password at runtime when configuration mode starts: a 24-character uppercase hexadecimal value made from 12 bytes of `esp_random()`. It is not a fixed default and is not derived from the SSID, MAC address, or chip ID; the password is shown on the device pairing/configuration screen.
 - Connect to the AP and open the configuration page in a browser: `http://192.168.4.1/`
 - Configure Wi-Fi, server address, and scheduled update time, then save. The device will restart and enter the normal workflow.
 
