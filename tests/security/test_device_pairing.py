@@ -74,6 +74,72 @@ def test_pairing_schedule_values_use_default_fallback(app):
     assert config["schedule_times"] == ["08:00"]
 
 
+def test_pairing_approval_merges_partial_management_payload(client, app):
+    payload = _pairing_payload("esp32-partial-config")
+    requested = client.post(PAIRING_PATH, json=payload)
+    assert requested.status_code == 201
+    response_body = requested.get_json()
+    pairing_id = response_body["pairing_id"]
+    pairing_code = response_body["pairing_code"]
+
+    with app.extensions["inktime_database"].transaction() as connection:
+        stored = json.loads(
+            str(
+                connection.execute(
+                    "SELECT config_json FROM device_pairing_requests WHERE id=?",
+                    (pairing_id,),
+                ).fetchone()[0]
+            )
+        )
+        stored.update(
+            {
+                "delivery_mode": "inktime_offline_schedule",
+                "schedule_times": ["08:00", "08:30"],
+                "minimum_schedule_gap_minutes": 30,
+                "sync_strategy": "fixed_daily",
+                "sync_time": "07:30",
+            }
+        )
+        connection.execute(
+            "UPDATE device_pairing_requests SET config_json=? WHERE id=?",
+            (json.dumps(stored, ensure_ascii=False, separators=(",", ":")), pairing_id),
+        )
+
+    create_admin(app)
+    login(client)
+    approved = _approve(client, pairing_id, pairing_code)
+    assert approved.status_code == 200
+    claimed = client.post(
+        CLAIM_PATH,
+        json={"pairing_id": pairing_id, "pairing_nonce": payload["pairing_nonce"]},
+    )
+    assert claimed.status_code == 200
+    claim_body = claimed.get_json()
+    confirm_body = {
+        "pairing_id": pairing_id,
+        "device_id": payload["device_id"],
+        "pairing_nonce": payload["pairing_nonce"],
+    }
+    assert _confirm(
+        client,
+        confirm_body,
+        claim_body["device_secret"],
+        claim_body["credential_version"],
+    ).status_code == 200
+
+    with app.extensions["inktime_database"].session() as connection:
+        device = connection.execute(
+            "SELECT delivery_mode,schedule_times_json,minimum_schedule_gap_minutes,sync_strategy,sync_time "
+            "FROM devices WHERE id=?",
+            (payload["device_id"],),
+        ).fetchone()
+    assert device["delivery_mode"] == "inktime_offline_schedule"
+    assert json.loads(str(device["schedule_times_json"])) == ["08:00"]
+    assert device["minimum_schedule_gap_minutes"] == 30
+    assert device["sync_strategy"] == "fixed_daily"
+    assert device["sync_time"] == "07:30"
+
+
 @pytest.mark.parametrize(
     "schedule_times",
     [
