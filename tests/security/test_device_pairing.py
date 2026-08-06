@@ -140,6 +140,97 @@ def test_pairing_approval_merges_partial_management_payload(client, app):
     assert device["sync_time"] == "07:30"
 
 
+def test_repair_pairing_preserves_existing_schedule_policy_on_partial_approval(client, app):
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "Repair PhotoPainter",
+        auth_mode="automatic",
+        delivery_mode="inktime_offline_schedule",
+        schedule="08:00",
+        schedule_times=["08:00", "08:30", "09:30"],
+        minimum_schedule_gap_minutes=30,
+        sync_strategy="fixed_daily",
+        sync_time="07:30",
+    )
+    create_admin(app)
+    login(client)
+    repair_enabled = client.post(
+        f"/api/v1/devices/{device_id}/enable-repair",
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert repair_enabled.status_code == 200
+
+    payload = _pairing_payload(
+        device_id,
+        nonce="nonce-for-existing-repair-preservation-0123456789",
+    )
+    payload["device_name"] = "Repaired PhotoPainter"
+    requested = client.post(PAIRING_PATH, json=payload)
+    assert requested.status_code == 201
+    requested_body = requested.get_json()
+    with app.extensions["inktime_database"].session() as connection:
+        stored = json.loads(
+            str(
+                connection.execute(
+                    "SELECT config_json FROM device_pairing_requests WHERE id=?",
+                    (requested_body["pairing_id"],),
+                ).fetchone()[0]
+            )
+        )
+    assert stored["delivery_mode"] == "inktime_offline_schedule"
+    assert stored["schedule_times"] == ["08:00", "08:30", "09:30"]
+    assert stored["minimum_schedule_gap_minutes"] == 30
+    assert stored["sync_strategy"] == "fixed_daily"
+    assert stored["sync_time"] == "07:30"
+
+    approved = client.post(
+        f"/api/v1/device-pairing/{requested_body['pairing_id']}/approve",
+        json={
+            "pairing_code": requested_body["pairing_code"],
+            "device_config": {
+                "name": "Repaired PhotoPainter",
+                "panel_profile": "safe_4c",
+                "timezone": "Asia/Taipei",
+                "schedule": "08:00",
+                "schedule_times": ["08:00", "08:30", "09:30"],
+            },
+        },
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert approved.status_code == 200
+    claimed = client.post(
+        CLAIM_PATH,
+        json={
+            "pairing_id": requested_body["pairing_id"],
+            "pairing_nonce": payload["pairing_nonce"],
+        },
+    )
+    assert claimed.status_code == 200
+    claim_body = claimed.get_json()
+    confirmed = _confirm(
+        client,
+        {
+            "pairing_id": requested_body["pairing_id"],
+            "device_id": device_id,
+            "pairing_nonce": payload["pairing_nonce"],
+        },
+        claim_body["device_secret"],
+        claim_body["credential_version"],
+    )
+    assert confirmed.status_code == 200
+
+    with app.extensions["inktime_database"].session() as connection:
+        device = connection.execute(
+            "SELECT delivery_mode,schedule_times_json,minimum_schedule_gap_minutes,sync_strategy,sync_time "
+            "FROM devices WHERE id=?",
+            (device_id,),
+        ).fetchone()
+    assert device["delivery_mode"] == "inktime_offline_schedule"
+    assert json.loads(str(device["schedule_times_json"])) == ["08:00", "08:30", "09:30"]
+    assert device["minimum_schedule_gap_minutes"] == 30
+    assert device["sync_strategy"] == "fixed_daily"
+    assert device["sync_time"] == "07:30"
+
+
 @pytest.mark.parametrize(
     "schedule_times",
     [
