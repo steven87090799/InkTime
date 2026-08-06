@@ -45,6 +45,44 @@ class FrozenPlanProvider(VisionProvider):
         return True, "ok"
 
 
+def test_worker_idle_backoff_is_bounded_and_resets_after_work(monkeypatch):
+    assert WorkerRunner.IDLE_BACKOFF_SECONDS == (15.0, 30.0, 60.0)
+    assert max(WorkerRunner.IDLE_BACKOFF_SECONDS) <= 60.0
+
+    class FakeStop:
+        def __init__(self):
+            self.run_count = 0
+            self.waits = []
+
+        def is_set(self):
+            return self.run_count >= 6
+
+        def wait(self, timeout):
+            self.waits.append(timeout)
+
+    class FakeSettings:
+        def get(self, _key, default):
+            return default
+
+    class FakeApp:
+        extensions = {"inktime_settings_repository": FakeSettings()}
+
+    monkeypatch.setattr("inktime.app.workers.runner.configure_logging", lambda **_kwargs: None)
+    runner = WorkerRunner(FakeApp())
+    stop = FakeStop()
+    runner.stop = stop
+    results = iter((0, 0, 0, 0, 1, 0))
+
+    def run_once():
+        stop.run_count += 1
+        return next(results)
+
+    monkeypatch.setattr(runner, "run_once", run_once)
+    runner.run_forever()
+
+    assert stop.waits == [15.0, 30.0, 60.0, 60.0, 15.0]
+
+
 def test_worker_runner_finishes_stale_terminal_batch_import_as_a_noop(app, tmp_path, monkeypatch):
     photo_id = _prepare_photos(app, tmp_path, count=1)[0]
     fake = FakeBatchProvider()

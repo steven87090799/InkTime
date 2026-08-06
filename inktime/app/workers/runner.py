@@ -26,7 +26,7 @@ LOGGER = logging.getLogger("worker")
 
 
 class WorkerRunner:
-    IDLE_BACKOFF_SECONDS = (15.0, 30.0, 60.0, 120.0, 300.0)
+    IDLE_BACKOFF_SECONDS = (15.0, 30.0, 60.0)
 
     def __init__(self, app) -> None:
         self.app = app
@@ -525,7 +525,7 @@ class WorkerRunner:
             if processed == 0:
                 configure_logging(settings_repository=repository)
                 # Idle polling is deliberately adaptive: a quiet NAS wakes at
-                # 15s, then backs off to 30/60/120/300s.  Any completed Job
+                # 15s, then backs off to 30/60s and stays capped there.  Any completed Job
                 # resets the cursor so manual work remains responsive.
                 configured = (
                     float(poll_seconds)
