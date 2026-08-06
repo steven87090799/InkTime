@@ -385,6 +385,36 @@ def test_device_status_is_recorded_without_exposing_token(client, app):
             "last_refresh_duration_ms": 25000,
             "wake_duration_ms": 61000,
             "wake_reason": "4",
+            "wake_reason_detail": "timer",
+            "wifi_connect_ms": 1800,
+            "wifi_fast_path_attempted": True,
+            "wifi_fast_path_success": True,
+            "network_session_ms": 9200,
+            "http_request_count": 4,
+            "tls_handshake_count_unavailable": True,
+            "tls_handshake_count_unavailable_reason": (
+                "transport_api_does_not_expose_handshake_count"
+            ),
+            "ntp_sync_attempted": False,
+            "ntp_sync_succeeded": False,
+            "ntp_sync_ms": 0,
+            "download_bytes": 96000,
+            "sd_read_bytes": 192000,
+            "sd_write_bytes": 96000,
+            "sd_write_ms": 240,
+            "nvs_write_count": 3,
+            "ack_event_count": 1,
+            "ack_batch_request_count": 0,
+            "i2c_retry_count": 2,
+            "i2c_bus_reset_count": 1,
+            "i2c_fail_closed_count": 0,
+            "gc_deleted_files": 3,
+            "gc_deleted_bytes": 720000,
+            "gc_skipped_protected": 4,
+            "epd_transfer_ms": 25000,
+            "applied_offline_schedule_version": 7,
+            "next_wake_epoch": 1760000000,
+            "next_network_sync_epoch": 1759990000,
             "display_updated": False,
             "display_skipped": True,
             "display_skip_reason": "same_sha256",
@@ -408,6 +438,20 @@ def test_device_status_is_recorded_without_exposing_token(client, app):
     assert details["last_refresh_duration_ms"] == 25000
     assert details["display_skipped"] is True
     assert details["display_skip_reason"] == "same_sha256"
+    assert details["wifi_connect_ms"] == 1800
+    assert details["wifi_fast_path_success"] is True
+    assert details["download_bytes"] == 96000
+    assert details["nvs_write_count"] == 3
+    assert details["i2c_retry_count"] == 2
+    assert details["i2c_bus_reset_count"] == 1
+    assert details["i2c_fail_closed_count"] == 0
+    assert details["gc_deleted_files"] == 3
+    assert details["gc_deleted_bytes"] == 720000
+    assert details["gc_skipped_protected"] == 4
+    assert details["tls_handshake_count_unavailable_reason"] == (
+        "transport_api_does_not_expose_handshake_count"
+    )
+    assert details["next_network_sync_epoch"] == 1759990000
     with app.extensions["inktime_database"].session() as connection:
         sample = connection.execute(
             "SELECT * FROM device_power_samples WHERE device_id=?", (device_id,)
@@ -429,6 +473,37 @@ def test_device_status_rejects_malformed_numeric_telemetry(client, app):
     )
     assert response.status_code == 400
     assert "DEVICE-004" in response.get_data(as_text=True)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("wifi_connect_ms", 120_001),
+        ("http_request_count", 129),
+        ("download_bytes", 4_294_967_296),
+        ("i2c_retry_count", 4_294_967_296),
+        ("gc_deleted_bytes", 4_294_967_296),
+        ("next_wake_epoch", -1),
+        ("wifi_fast_path_success", "true"),
+        ("wake_reason_detail", "x" * 65),
+        ("tls_handshake_count_unavailable_reason", "x" * 65),
+    ],
+)
+def test_device_status_rejects_unbounded_phase_two_telemetry(client, app, field, value):
+    device_id, token = app.extensions["inktime_device_repository"].create("bounded-telemetry-device")
+    response = client.post(
+        "/api/device/v1/status",
+        json={field: value},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 400
+    with app.extensions["inktime_database"].session() as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM device_events WHERE device_id=?", (device_id,)
+            ).fetchone()[0]
+            == 0
+        )
 
 
 @pytest.mark.parametrize(
@@ -631,6 +706,69 @@ def test_device_configuration_version_is_acknowledged_only_after_report(client, 
     device = repository.list()[0]
     assert device["acked_config_version"] == desired
     assert device["config_ack_at"] is not None
+
+
+def test_offline_schedule_version_is_acknowledged_without_allowing_device_to_raise_desired(client, app):
+    repository = app.extensions["inktime_device_repository"]
+    device_id, token = repository.create(
+        "離線排程 ACK",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00", "20:00"],
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    desired = int(repository.get(device_id)["offline_schedule_version"])
+    unknown = client.post(
+        "/api/device/v1/status",
+        json={
+            "firmware_version": "2.8.0",
+            "applied_offline_schedule_version": None,
+        },
+        headers=headers,
+    )
+    assert unknown.status_code == 200
+    unknown_state = repository.get(device_id)
+    assert unknown_state["applied_offline_schedule_version"] == 0
+    assert unknown_state["offline_schedule_ack_at"] is None
+    applied = client.post(
+        "/api/device/v1/status",
+        json={
+            "firmware_version": "2.8.0",
+            "applied_offline_schedule_version": desired,
+        },
+        headers=headers,
+    )
+    assert applied.status_code == 200
+    acknowledged = repository.get(device_id)
+    assert acknowledged["applied_offline_schedule_version"] == desired
+    assert acknowledged["offline_schedule_ack_at"] is not None
+
+    repository.update(
+        device_id,
+        name="離線排程 ACK",
+        enabled=True,
+        timezone_name="Asia/Taipei",
+        schedule="09:00",
+        schedule_times=["09:00", "20:00"],
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        rotation=0,
+        panel_profile="safe_4c",
+        prefetch_lead_minutes=5,
+        button_wake_action="check_new",
+    )
+    desired_after_change = int(repository.get(device_id)["offline_schedule_version"])
+    assert desired_after_change == desired + 1
+    newer_than_desired = client.post(
+        "/api/device/v1/status",
+        json={
+            "firmware_version": "2.8.0",
+            "applied_offline_schedule_version": desired_after_change + 10,
+        },
+        headers=headers,
+    )
+    assert newer_than_desired.status_code == 200
+    assert repository.get(device_id)["applied_offline_schedule_version"] == desired
 
 
 def test_device_receives_only_its_panel_profile_release(client, app):

@@ -712,9 +712,19 @@ class ResilienceRepository:
             ).fetchone()
 
     def queue_ack(self, *, device_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        item_id, event = str(payload.get("queue_item_id", "")), str(payload.get("event", ""))
-        key = str(payload.get("idempotency_key", "")).strip()
-        if event not in QUEUE_EVENTS or not item_id or not key or len(key) > 128:
+        raw_item_id = payload.get("queue_item_id")
+        raw_event = payload.get("event")
+        raw_key = payload.get("idempotency_key")
+        item_id = raw_item_id if type(raw_item_id) is str else ""
+        event = raw_event if type(raw_event) is str else ""
+        key = raw_key.strip() if type(raw_key) is str else ""
+        if (
+            event not in QUEUE_EVENTS
+            or not item_id
+            or len(item_id) > 128
+            or not key
+            or len(key) > 128
+        ):
             raise ValueError("QUEUE-001 ACK 缺少 queue_item_id、event 或 idempotency_key")
         queue_version = json_int(
             payload,

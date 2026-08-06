@@ -8,6 +8,12 @@
 
 namespace inktime {
 
+namespace {
+
+constexpr size_t kSpiTransferChunkBytes = 4096U;
+
+}  // namespace
+
 Spectra6_73::Spectra6_73(SPIClass& spi, const BoardConfig& board)
     : spi_(spi), board_(board) {}
 
@@ -39,11 +45,21 @@ void Spectra6_73::sendData(uint8_t data) {
 }
 
 void Spectra6_73::sendData(const uint8_t* data, size_t length) {
+  if (data == nullptr || length == 0U) return;
   digitalWrite(board_.display.dc, HIGH);
   digitalWrite(board_.display.spi.cs, LOW);
-  for (size_t offset = 0; offset < length; ++offset) {
-    spi_.transfer(data[offset]);
-    if ((offset & 0x03FFU) == 0) yield();
+  size_t offset = 0;
+  while (offset < length) {
+    const size_t remaining = length - offset;
+    const size_t chunk = remaining < kSpiTransferChunkBytes
+        ? remaining
+        : kSpiTransferChunkBytes;
+    spi_.transferBytes(
+        const_cast<uint8_t*>(data + offset),
+        nullptr,
+        static_cast<uint32_t>(chunk));
+    offset += chunk;
+    yield();
   }
   digitalWrite(board_.display.spi.cs, HIGH);
 }

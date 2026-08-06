@@ -11,7 +11,11 @@ import time
 from zoneinfo import ZoneInfo
 
 from inktime.app.core.logging import configure_logging, log_event
-from inktime.app.domain.photopainter.offline_schedule import validate_offline_schedule
+from inktime.app.domain.photopainter.offline_schedule import (
+    MINIMUM_SCHEDULE_GAP_MINUTES,
+    normalize_sync_strategy,
+    validate_offline_schedule,
+)
 
 
 LOGGER = logging.getLogger("scheduler")
@@ -140,6 +144,9 @@ class SchedulerRunner:
         schedule: list[str],
         lead_minutes: int,
         server_margin_minutes: int = 0,
+        sync_strategy: str = "first_display_lead",
+        sync_time: str | None = None,
+        minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
     ) -> date | None:
         """Return the latest local day whose first slot is due for prefetch."""
 
@@ -147,7 +154,10 @@ class SchedulerRunner:
             raise ValueError("DEVICE-008 prefetch_lead_minutes 不合法")
         if type(server_margin_minutes) is not int or not 0 <= server_margin_minutes <= 60:
             raise ValueError("DEVICE-008 server_prefetch_margin_minutes 不合法")
-        slots = validate_offline_schedule(schedule, maximum=12)
+        strategy, normalized_sync_time = normalize_sync_strategy(sync_strategy, sync_time)
+        slots = validate_offline_schedule(
+            schedule, maximum=12, minimum_gap_minutes=minimum_gap_minutes
+        )
         zone = local_now.tzinfo
         if zone is None:
             raise ValueError("DEVICE-008 裝置時間必須包含時區")
@@ -157,6 +167,10 @@ class SchedulerRunner:
             return datetime.combine(target, clock_time(hour, minute), tzinfo=zone)
 
         def prefetch_at(target: date) -> datetime:
+            if strategy == "fixed_daily":
+                assert normalized_sync_time is not None
+                hour, minute = (int(part) for part in normalized_sync_time.split(":"))
+                return datetime.combine(target, clock_time(hour, minute), tzinfo=zone)
             hour, minute = (int(part) for part in slots[0].split(":"))
             return datetime.combine(target, clock_time(hour, minute), tzinfo=zone) - timedelta(
                 minutes=lead_minutes + server_margin_minutes
@@ -182,6 +196,9 @@ class SchedulerRunner:
         lead_minutes: int,
         server_margin_minutes: int,
         future_prepare_hour: int,
+        sync_strategy: str = "first_display_lead",
+        sync_time: str | None = None,
+        minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
     ) -> bool:
         """Return whether tomorrow needs technical preparation now."""
 
@@ -191,7 +208,10 @@ class SchedulerRunner:
             raise ValueError("DEVICE-008 prefetch_lead_minutes 不合法")
         if type(server_margin_minutes) is not int or not 0 <= server_margin_minutes <= 60:
             raise ValueError("DEVICE-008 server_prefetch_margin_minutes 不合法")
-        slots = validate_offline_schedule(schedule, maximum=12)
+        strategy, normalized_sync_time = normalize_sync_strategy(sync_strategy, sync_time)
+        slots = validate_offline_schedule(
+            schedule, maximum=12, minimum_gap_minutes=minimum_gap_minutes
+        )
         zone = local_now.tzinfo
         if zone is None:
             raise ValueError("DEVICE-008 裝置時間必須包含時區")
@@ -199,10 +219,15 @@ class SchedulerRunner:
         configured = datetime.combine(
             local_now.date(), clock_time(future_prepare_hour, 0), tzinfo=zone
         )
-        hour, minute = (int(part) for part in slots[0].split(":"))
-        technical = datetime.combine(
-            tomorrow, clock_time(hour, minute), tzinfo=zone
-        ) - timedelta(minutes=lead_minutes + server_margin_minutes)
+        if strategy == "fixed_daily":
+            assert normalized_sync_time is not None
+            hour, minute = (int(part) for part in normalized_sync_time.split(":"))
+            technical = datetime.combine(tomorrow, clock_time(hour, minute), tzinfo=zone)
+        else:
+            hour, minute = (int(part) for part in slots[0].split(":"))
+            technical = datetime.combine(
+                tomorrow, clock_time(hour, minute), tzinfo=zone
+            ) - timedelta(minutes=lead_minutes + server_margin_minutes)
         return local_now >= min(configured, technical)
 
     @classmethod
@@ -213,12 +238,21 @@ class SchedulerRunner:
         lead_minutes: int,
         server_margin_minutes: int = 0,
         future_prepare_hour: int = 20,
+        sync_strategy: str = "first_display_lead",
+        sync_time: str | None = None,
+        minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
     ) -> list[date]:
         """Return independent today/tomorrow preparation targets in order."""
 
         targets: list[date] = []
         today = cls._offline_prefetch_target_date(
-            local_now, schedule, lead_minutes, server_margin_minutes
+            local_now,
+            schedule,
+            lead_minutes,
+            server_margin_minutes,
+            sync_strategy,
+            sync_time,
+            minimum_gap_minutes,
         )
         if today is not None:
             targets.append(today)
@@ -228,6 +262,9 @@ class SchedulerRunner:
             lead_minutes,
             server_margin_minutes,
             future_prepare_hour,
+            sync_strategy,
+            sync_time,
+            minimum_gap_minutes,
         ):
             tomorrow = local_now.date() + timedelta(days=1)
             if tomorrow not in targets:
@@ -258,7 +295,11 @@ class SchedulerRunner:
                 timezone_name = str(device["timezone"] or "UTC")
                 local_now = now.astimezone(ZoneInfo(timezone_name))
                 schedule = validate_offline_schedule(
-                    json.loads(str(device["schedule_times_json"] or "[]")), maximum=12
+                    json.loads(str(device["schedule_times_json"] or "[]")),
+                    maximum=12,
+                    minimum_gap_minutes=int(
+                        device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
+                    ),
                 )
                 targets = self._offline_prefetch_target_dates(
                     local_now,
@@ -266,6 +307,9 @@ class SchedulerRunner:
                     int(device["prefetch_lead_minutes"] or 0),
                     server_margin,
                     future_prepare_hour,
+                    str(device["sync_strategy"] or "first_display_lead"),
+                    device["sync_time"],
+                    int(device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES),
                 )
                 for target_date in targets[:2]:
                     target_iso = target_date.isoformat()

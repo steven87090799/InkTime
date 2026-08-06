@@ -309,52 +309,132 @@ def device_queue_manifest():
     )
 
 
+def _normalize_device_queue_ack(payload: dict) -> dict:
+    """Apply the single-ACK contract to one batch member or legacy body."""
+    normalized = dict(payload)
+    normalized["queue_version"] = json_int(
+        normalized,
+        "queue_version",
+        required=True,
+        minimum=0,
+        maximum=2_147_483_647,
+        error_prefix="QUEUE-001",
+    )
+    if "display_skipped" in normalized:
+        normalized["display_skipped"] = json_bool(
+            normalized,
+            "display_skipped",
+            error_prefix="QUEUE-001",
+        )
+    skip_reason = str(normalized.get("skip_reason", "")).strip()
+    if normalized.get("display_skipped") is True and skip_reason != "same_sha256":
+        raise ValueError("QUEUE-001 skip_reason 必須是 same_sha256")
+    if normalized.get("display_skipped") is not True and skip_reason:
+        raise ValueError("QUEUE-001 未 skip 時不得提供 skip_reason")
+    if normalized.get("display_skipped") is True and normalized.get("event") != "DISPLAY_COMPLETED":
+        raise ValueError("QUEUE-001 display_skipped 僅可用於 DISPLAY_COMPLETED")
+    if len(skip_reason) > 64:
+        raise ValueError("QUEUE-001 skip_reason 過長")
+    normalized["skip_reason"] = skip_reason
+    ack_mode = str(normalized.get("ack_mode", "")).strip()
+    if ack_mode and ack_mode != "delayed_terminal":
+        raise ValueError("QUEUE-005 ack_mode 不合法")
+    if ack_mode == "delayed_terminal":
+        if normalized.get("event") not in {"DISPLAY_COMPLETED", "DISPLAY_FAILED"}:
+            raise ValueError("QUEUE-005 delayed_terminal 僅可用於終端顯示 ACK")
+        release_id = str(normalized.get("release_id", "")).strip()
+        if not release_id or len(release_id) > 128:
+            raise ValueError("QUEUE-005 delayed_terminal 必須帶合法 release_id")
+    normalized["ack_mode"] = ack_mode
+    return normalized
+
+
+def _queue_ack_error_code(message: str) -> str:
+    prefix = str(message).split(" ", 1)[0]
+    return prefix if prefix.startswith("QUEUE-") else "QUEUE-001"
+
+
 @bp.post("/api/device/queue/ack")  # legacy compatibility alias
 @bp.post("/api/device/v1/queue/ack")
 def device_queue_ack():
     device = authenticate_device_request()
     try:
-        payload = _payload(maximum_bytes=16 * 1024, error_prefix="QUEUE-001")
-        payload["queue_version"] = json_int(
-            payload,
-            "queue_version",
-            required=True,
-            minimum=0,
-            maximum=2_147_483_647,
-            error_prefix="QUEUE-001",
+        payload = _normalize_device_queue_ack(
+            _payload(maximum_bytes=16 * 1024, error_prefix="QUEUE-001")
         )
-        if "display_skipped" in payload:
-            payload["display_skipped"] = json_bool(
-                payload,
-                "display_skipped",
-                error_prefix="QUEUE-001",
-            )
-        skip_reason = str(payload.get("skip_reason", "")).strip()
-        if payload.get("display_skipped") is True and skip_reason != "same_sha256":
-            raise ValueError("QUEUE-001 skip_reason 必須是 same_sha256")
-        if payload.get("display_skipped") is not True and skip_reason:
-            raise ValueError("QUEUE-001 未 skip 時不得提供 skip_reason")
-        if payload.get("display_skipped") is True and payload.get("event") != "DISPLAY_COMPLETED":
-            raise ValueError("QUEUE-001 display_skipped 僅可用於 DISPLAY_COMPLETED")
-        if len(skip_reason) > 64:
-            raise ValueError("QUEUE-001 skip_reason 過長")
-        payload["skip_reason"] = skip_reason
-        ack_mode = str(payload.get("ack_mode", "")).strip()
-        if ack_mode and ack_mode != "delayed_terminal":
-            raise ValueError("QUEUE-005 ack_mode 不合法")
-        if ack_mode == "delayed_terminal":
-            if payload.get("event") not in {"DISPLAY_COMPLETED", "DISPLAY_FAILED"}:
-                raise ValueError("QUEUE-005 delayed_terminal 僅可用於終端顯示 ACK")
-            release_id = str(payload.get("release_id", "")).strip()
-            if not release_id or len(release_id) > 128:
-                raise ValueError("QUEUE-005 delayed_terminal 必須帶合法 release_id")
-        payload["ack_mode"] = ack_mode
         return _repo().queue_ack(device_id=str(device["id"]), payload=payload)
     except PermissionError as exc:
         abort(403, description=str(exc))
     except ValueError as exc:
         status = 409 if str(exc).startswith("QUEUE-003") else 400
         abort(status, description=str(exc))
+
+
+@bp.post("/api/device/v1/queue/acks")
+def device_queue_acks():
+    """Accept bounded, independently validated ACK events in wire order."""
+    device = authenticate_device_request()
+    try:
+        payload = _payload(maximum_bytes=16 * 1024, error_prefix="QUEUE-001")
+        events = payload.get("events")
+        if type(events) is not list or not 1 <= len(events) <= 16:
+            raise ValueError("QUEUE-001 events 必須是 1 到 16 筆 JSON 陣列")
+    except ValueError as exc:
+        abort(400, description=str(exc))
+
+    results = []
+    for index, raw_event in enumerate(events):
+        result = {"index": index, "status": "rejected"}
+        if type(raw_event) is not dict:
+            result.update(
+                {
+                    "http_status": 400,
+                    "error_code": "QUEUE-001",
+                    "error": "QUEUE-001 batch event 必須是 JSON 物件",
+                }
+            )
+            results.append(result)
+            continue
+        result["queue_item_id"] = str(raw_event.get("queue_item_id", ""))
+        result["event"] = str(raw_event.get("event", ""))
+        try:
+            normalized = _normalize_device_queue_ack(raw_event)
+            accepted = _repo().queue_ack(device_id=str(device["id"]), payload=normalized)
+        except PermissionError as exc:
+            message = str(exc)
+            result.update(
+                {
+                    "http_status": 403,
+                    "error_code": _queue_ack_error_code(message),
+                    "error": message,
+                }
+            )
+        except ValueError as exc:
+            message = str(exc)
+            result.update(
+                {
+                    "http_status": 409 if message.startswith("QUEUE-003") else 400,
+                    "error_code": _queue_ack_error_code(message),
+                    "error": message,
+                }
+            )
+        else:
+            result.update(
+                {
+                    "status": "accepted",
+                    "http_status": 200,
+                    "idempotent": bool(accepted.get("idempotent", False)),
+                }
+            )
+        results.append(result)
+
+    accepted_count = sum(1 for result in results if result["status"] == "accepted")
+    return {
+        "status": "ok",
+        "accepted": accepted_count,
+        "rejected": len(results) - accepted_count,
+        "results": results,
+    }
 
 
 @bp.get("/api/device/v1/queue/items/<item_id>/files/<path:filename>")

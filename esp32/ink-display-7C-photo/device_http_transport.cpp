@@ -21,11 +21,24 @@
 
 namespace {
 
+String authorityFromUrl(const String &url) {
+  const int scheme = url.indexOf("://");
+  if (scheme < 0) return String("");
+  const int start = scheme + 3;
+  const String remainder = url.substring(start);
+  int end = remainder.length();
+  const char separators[] = {'/', '?', '#'};
+  for (size_t index = 0U; index < sizeof(separators); ++index) {
+    const int found = remainder.indexOf(separators[index]);
+    if (found >= 0 && found < end) end = found;
+  }
+  return remainder.substring(0, end);
+}
+
 String hostFromUrl(const String &url) {
   const int scheme = url.indexOf("://");
   if (scheme < 0) return String("");
-  int start = scheme + 3;
-  String authority = url.substring(start);
+  String authority = authorityFromUrl(url);
   const int at = authority.indexOf('@');
   if (at >= 0) return String("");
   if (authority.startsWith("[")) {
@@ -122,16 +135,50 @@ String effectiveCa(const String &configured) {
 
 namespace inktime {
 
+void DeviceHttpTransport::configure(const String &ca_pem) {
+  if (ca_pem_ == ca_pem) return;
+  closeSession();
+  ca_pem_ = ca_pem;
+}
+
+bool DeviceHttpTransport::beginSession(
+    const String &origin,
+    String &error_code,
+    String &error_message
+) {
+  if (session_active_ && session_origin_ == origin) return true;
+  closeSession();
+  if (!backendUrlAllowed(origin, ca_pem_, error_code)) {
+    error_message = "Backend Origin 或 TLS trust anchor 不符合裝置安全政策";
+    return false;
+  }
+  session_origin_ = origin;
+  session_active_ = true;
+  if (origin.startsWith("https://")) {
+    const String ca = effectiveCa(ca_pem_);
+    secure_client_.setCACert(ca.c_str());
+  }
+  return true;
+}
+
+void DeviceHttpTransport::closeSession() {
+  secure_client_.stop();
+  plain_client_.stop();
+  session_origin_ = "";
+  session_active_ = false;
+}
+
 bool DeviceHttpTransport::backendUrlAllowed(const String &url, const String &ca_pem, String &error_code) {
   error_code = "";
   const bool https = url.startsWith("https://");
   const bool http = url.startsWith("http://");
   const String host = hostFromUrl(url);
-  const int authority_start = url.indexOf("://") + 3;
-  const String authority = authority_start >= 3 ? url.substring(authority_start) : String("");
+  const String authority = authorityFromUrl(url);
   if ((!https && !http) || host.length() == 0 || authority.indexOf('/') >= 0
       || authority.indexOf('?') >= 0 || authority.indexOf('#') >= 0
-      || authority.indexOf('\\') >= 0 || !validAuthorityPort(authority)) {
+      || authority.indexOf('\\') >= 0 || authority.indexOf('@') >= 0
+      || url.indexOf('\\') >= 0 || url.indexOf('#') >= 0
+      || !validAuthorityPort(authority)) {
     error_code = "DEVICE-URL-INVALID";
     return false;
   }
@@ -175,6 +222,21 @@ bool DeviceHttpTransport::begin(
   if (!backendUrlAllowed(url, ca_pem_, error_code)) {
     error_message = "Backend URL 或 TLS trust anchor 不符合裝置安全政策";
     return false;
+  }
+  if (session_active_) {
+    const int scheme_end = url.indexOf("://");
+    int origin_end = url.length();
+    const char separators[] = {'/', '?', '#'};
+    for (size_t index = 0U; index < sizeof(separators); ++index) {
+      const int found = scheme_end >= 0 ? url.indexOf(separators[index], scheme_end + 3) : -1;
+      if (found >= 0 && found < origin_end) origin_end = found;
+    }
+    const String request_origin = url.substring(0, origin_end);
+    if (request_origin != session_origin_) {
+      error_code = "DEVICE-SESSION-ORIGIN";
+      error_message = "Wake HTTP session 不得跨越 Backend Origin";
+      return false;
+    }
   }
   http.setConnectTimeout(10000);
   http.setTimeout(timeout_ms);

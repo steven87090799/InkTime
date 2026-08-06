@@ -50,6 +50,8 @@ constexpr uint8_t kShtc3Address = 0x70;
 constexpr uint8_t kPcf85063Address = 0x51;
 constexpr size_t kIoChunkSize = 4096;
 constexpr uint32_t kI2cTimeoutMs = 50;
+constexpr uint8_t kI2cMaximumAttempts = 3U;
+constexpr uint32_t kI2cRetryDelayMs = 2U;
 
 const uint8_t kBlankGlyph[5] = {0, 0, 0, 0, 0};
 const uint8_t kFontDigits[10][5] = {
@@ -117,51 +119,126 @@ void drawPairingText(uint8_t* frame, size_t length, int x, int y, const String& 
 #define PP_LOG(...) do { } while (0)
 #endif
 
-bool i2cWriteCommand(TwoWire& wire, uint8_t address, uint16_t command) {
-  wire.beginTransmission(address);
-  wire.write(static_cast<uint8_t>(command >> 8U));
-  wire.write(static_cast<uint8_t>(command & 0xFFU));
-  return wire.endTransmission() == 0;
-}
+struct I2cRetryTelemetry {
+  uint32_t retry_count = 0;
+  uint32_t bus_reset_count = 0;
+  uint32_t fail_closed_count = 0;
+};
 
-bool i2cReadRegister(
-  TwoWire& wire,
-  uint8_t address,
-  uint8_t reg,
-  uint8_t* data,
-  size_t length
-) {
-  if (data == nullptr || length == 0 || length > 32) return false;
-  wire.beginTransmission(address);
-  wire.write(reg);
-  if (wire.endTransmission(false) != 0) return false;
-  const size_t received = wire.requestFrom(address, static_cast<uint8_t>(length), true);
-  if (received != length) return false;
-  for (size_t index = 0; index < length; ++index) {
-    if (!wire.available()) return false;
-    data[index] = static_cast<uint8_t>(wire.read());
+class BoundedI2cBus final {
+ public:
+  BoundedI2cBus(TwoWire& wire, const I2cConfig& config, I2cRetryTelemetry& telemetry)
+      : wire_(wire), config_(config), telemetry_(telemetry) {}
+
+  bool probe(uint8_t address) {
+    return run(true, [&]() {
+      wire_.beginTransmission(address);
+      return wire_.endTransmission() == 0;
+    });
   }
-  return true;
-}
 
-bool i2cWriteRegisters(
-  TwoWire& wire,
-  uint8_t address,
-  uint8_t firstRegister,
-  const uint8_t* data,
-  size_t length
-) {
-  if (data == nullptr || length == 0 || length > 24) return false;
-  wire.beginTransmission(address);
-  wire.write(firstRegister);
-  wire.write(data, length);
-  return wire.endTransmission() == 0;
-}
+  bool writeCommand(uint8_t address, uint16_t command, bool replaySafe) {
+    return run(replaySafe, [&]() {
+      wire_.beginTransmission(address);
+      if (wire_.write(static_cast<uint8_t>(command >> 8U)) != 1U
+          || wire_.write(static_cast<uint8_t>(command & 0xFFU)) != 1U) {
+        return false;
+      }
+      return wire_.endTransmission() == 0;
+    });
+  }
 
-bool i2cProbe(TwoWire& wire, uint8_t address) {
-  wire.beginTransmission(address);
-  return wire.endTransmission() == 0;
-}
+  bool readRegister(
+    uint8_t address,
+    uint8_t reg,
+    uint8_t* data,
+    size_t length
+  ) {
+    if (data == nullptr || length == 0 || length > 32) return false;
+    return run(true, [&]() {
+      wire_.beginTransmission(address);
+      if (wire_.write(reg) != 1U || wire_.endTransmission(false) != 0) return false;
+      const size_t received = wire_.requestFrom(address, static_cast<uint8_t>(length), true);
+      if (received != length) return false;
+      for (size_t index = 0; index < length; ++index) {
+        if (!wire_.available()) return false;
+        data[index] = static_cast<uint8_t>(wire_.read());
+      }
+      return true;
+    });
+  }
+
+  bool readBytes(uint8_t address, uint8_t* data, size_t length) {
+    if (data == nullptr || length == 0 || length > 32) return false;
+    return run(true, [&]() {
+      const size_t received = wire_.requestFrom(address, static_cast<uint8_t>(length), true);
+      if (received != length) return false;
+      for (size_t index = 0; index < length; ++index) {
+        if (!wire_.available()) return false;
+        data[index] = static_cast<uint8_t>(wire_.read());
+      }
+      return true;
+    });
+  }
+
+  bool writeRegisters(
+    uint8_t address,
+    uint8_t firstRegister,
+    const uint8_t* data,
+    size_t length,
+    bool replaySafe
+  ) {
+    if (data == nullptr || length == 0 || length > 24) return false;
+    return run(replaySafe, [&]() {
+      wire_.beginTransmission(address);
+      if (wire_.write(firstRegister) != 1U || wire_.write(data, length) != length) {
+        return false;
+      }
+      return wire_.endTransmission() == 0;
+    });
+  }
+
+ private:
+  static void increment(uint32_t& value) {
+    if (value < UINT32_MAX) ++value;
+  }
+
+  template <typename Operation>
+  bool run(bool replaySafe, Operation operation) {
+    for (uint8_t attempt = 0; attempt < kI2cMaximumAttempts; ++attempt) {
+      if (operation()) return true;
+      if (!replaySafe || attempt + 1U >= kI2cMaximumAttempts) {
+        increment(telemetry_.fail_closed_count);
+        return false;
+      }
+      increment(telemetry_.retry_count);
+      if (attempt == 0U) {
+        delay(kI2cRetryDelayMs);
+      } else {
+        // Reset/re-init is deliberately allowed only once, between attempts 2 and 3.
+        increment(telemetry_.bus_reset_count);
+        if (!resetBus()) {
+          increment(telemetry_.fail_closed_count);
+          return false;
+        }
+      }
+    }
+    increment(telemetry_.fail_closed_count);
+    return false;
+  }
+
+  bool resetBus() {
+    wire_.end();
+    delay(kI2cRetryDelayMs);
+    const bool ready = wire_.begin(config_.sda, config_.scl, config_.clockHz);
+    if (ready) wire_.setTimeOut(kI2cTimeoutMs);
+    return ready;
+  }
+
+  TwoWire& wire_;
+  const I2cConfig& config_;
+  I2cRetryTelemetry& telemetry_;
+};
 
 uint8_t toBcd(uint8_t value) {
   return static_cast<uint8_t>(((value / 10U) << 4U) | (value % 10U));
@@ -185,14 +262,14 @@ int64_t daysFromCivil(int year, unsigned month, unsigned day) {
 
 class ProbePowerManager final : public PowerManager {
  public:
-  explicit ProbePowerManager(TwoWire& wire) : wire_(wire) {}
+  explicit ProbePowerManager(BoundedI2cBus& bus) : bus_(bus) {}
 
   bool begin() override {
     type_ = PmicType::None;
     powerSourceKnown_ = false;
-    if (!i2cProbe(wire_, kAxp2101Address)) return false;
+    if (!bus_.probe(kAxp2101Address)) return false;
     uint8_t chipId = 0;
-    if (!i2cReadRegister(wire_, kAxp2101Address, kAxp2101ChipIdRegister, &chipId, 1)) {
+    if (!bus_.readRegister(kAxp2101Address, kAxp2101ChipIdRegister, &chipId, 1)) {
       type_ = PmicType::Unknown;
       return false;
     }
@@ -212,20 +289,19 @@ class ProbePowerManager final : public PowerManager {
     batteryPercent_ = -1;
     if (type_ != PmicType::AXP2101) return;
     uint8_t status[2] = {0, 0};
-    if (!i2cReadRegister(wire_, kAxp2101Address, kAxp2101Status1, status, 2)) return;
+    if (!bus_.readRegister(kAxp2101Address, kAxp2101Status1, status, 2)) return;
     const bool batteryConnected = (status[0] & (1U << 3U)) != 0;
     const bool vbusGood = (status[0] & (1U << 5U)) != 0;
     const bool vbusOverVoltage = (status[1] & (1U << 3U)) != 0;
     usbConnected_ = vbusGood && !vbusOverVoltage;
     if (!batteryConnected) return;
     uint8_t voltage[2] = {0, 0};
-    if (i2cReadRegister(
-          wire_, kAxp2101Address, kAxp2101BatteryVoltageHigh, voltage, 2)) {
+    if (bus_.readRegister(kAxp2101Address, kAxp2101BatteryVoltageHigh, voltage, 2)) {
       batteryMillivolts_ = static_cast<uint16_t>((voltage[0] & 0x1FU) << 8U)
                          | voltage[1];
     }
     uint8_t percent = 0;
-    if (i2cReadRegister(wire_, kAxp2101Address, kAxp2101BatteryPercent, &percent, 1)
+    if (bus_.readRegister(kAxp2101Address, kAxp2101BatteryPercent, &percent, 1)
         && percent <= 100) {
       batteryPercent_ = percent;
     }
@@ -247,7 +323,7 @@ class ProbePowerManager final : public PowerManager {
   }
 
  private:
-  TwoWire& wire_;
+  BoundedI2cBus& bus_;
   PmicType type_ = PmicType::None;
   bool powerSourceKnown_ = false;
   bool usbConnected_ = false;
@@ -257,26 +333,24 @@ class ProbePowerManager final : public PowerManager {
 
 class Shtc3Adapter {
  public:
-  explicit Shtc3Adapter(TwoWire& wire) : wire_(wire) {}
+  explicit Shtc3Adapter(BoundedI2cBus& bus) : bus_(bus) {}
 
   bool begin() {
     ready_ = false;
-    if (!i2cProbe(wire_, kShtc3Address) || !i2cWriteCommand(wire_, kShtc3Address, 0x3517)) {
+    if (!bus_.probe(kShtc3Address) || !bus_.writeCommand(kShtc3Address, 0x3517, true)) {
       return false;
     }
     delay(1);
-    if (!i2cWriteCommand(wire_, kShtc3Address, 0xEFC8)) {
+    if (!bus_.writeCommand(kShtc3Address, 0xEFC8, true)) {
       sleep();
       return false;
     }
     delay(2);
-    const size_t received = wire_.requestFrom(kShtc3Address, static_cast<uint8_t>(3), true);
     uint8_t id[3] = {0, 0, 0};
-    if (received != 3) {
+    if (!bus_.readBytes(kShtc3Address, id, sizeof(id))) {
       sleep();
       return false;
     }
-    for (uint8_t index = 0; index < 3; ++index) id[index] = wire_.read();
     ready_ = shtc3Crc8(id, 2) == id[2]
           && ((static_cast<uint16_t>(id[0]) << 8U | id[1]) & 0x083FU) == 0x0807U;
     sleep();
@@ -284,21 +358,19 @@ class Shtc3Adapter {
   }
 
   bool read(float& temperatureC, float& humidityPercent) {
-    if (!ready_ || !i2cWriteCommand(wire_, kShtc3Address, 0x3517)) return false;
+    if (!ready_ || !bus_.writeCommand(kShtc3Address, 0x3517, true)) return false;
     delay(1);
-    if (!i2cWriteCommand(wire_, kShtc3Address, 0x7CA2)) {
+    if (!bus_.writeCommand(kShtc3Address, 0x7CA2, true)) {
       sleep();
       return false;
     }
     const uint32_t started = millis();
     while (millis() - started < 15) delay(1);
-    const size_t received = wire_.requestFrom(kShtc3Address, static_cast<uint8_t>(6), true);
     uint8_t bytes[6] = {0, 0, 0, 0, 0, 0};
-    if (received != 6) {
+    if (!bus_.readBytes(kShtc3Address, bytes, sizeof(bytes))) {
       sleep();
       return false;
     }
-    for (uint8_t index = 0; index < 6; ++index) bytes[index] = wire_.read();
     sleep();
     if (shtc3Crc8(bytes, 2) != bytes[2] || shtc3Crc8(bytes + 3, 2) != bytes[5]) {
       return false;
@@ -311,17 +383,17 @@ class Shtc3Adapter {
   }
 
  private:
-  void sleep() { i2cWriteCommand(wire_, kShtc3Address, 0xB098); }
-  TwoWire& wire_;
+  void sleep() { (void)bus_.writeCommand(kShtc3Address, 0xB098, true); }
+  BoundedI2cBus& bus_;
   bool ready_ = false;
 };
 
 class Pcf85063Adapter {
  public:
-  explicit Pcf85063Adapter(TwoWire& wire) : wire_(wire) {}
+  explicit Pcf85063Adapter(BoundedI2cBus& bus) : bus_(bus) {}
 
   bool begin() {
-    ready_ = i2cProbe(wire_, kPcf85063Address);
+    ready_ = bus_.probe(kPcf85063Address);
     return ready_;
   }
 
@@ -339,14 +411,17 @@ class Pcf85063Adapter {
       toBcd(static_cast<uint8_t>(utc.tm_mon + 1)),
       toBcd(static_cast<uint8_t>(utc.tm_year - 100)),
     };
-    return i2cWriteRegisters(wire_, kPcf85063Address, 0x04, registers, sizeof(registers));
+    // Setting the complete RTC register bank is deterministic; replaying the
+    // same value after an I2C transport failure cannot increment or toggle state.
+    return bus_.writeRegisters(
+      kPcf85063Address, 0x04, registers, sizeof(registers), true);
   }
 
   bool readEpoch(time_t& epoch) {
     epoch = 0;
     if (!ready_) return false;
     uint8_t registers[7] = {0};
-    if (!i2cReadRegister(wire_, kPcf85063Address, 0x04, registers, sizeof(registers))
+    if (!bus_.readRegister(kPcf85063Address, 0x04, registers, sizeof(registers))
         || (registers[0] & 0x80U) != 0) {
       return false;
     }
@@ -370,7 +445,7 @@ class Pcf85063Adapter {
   }
 
  private:
-  TwoWire& wire_;
+  BoundedI2cBus& bus_;
   bool ready_ = false;
 };
 
@@ -464,13 +539,16 @@ struct PhotoPainterSupport::Impl {
       : epdSpi(FSPI),
         sdSpi(HSPI),
         display(epdSpi, board),
-        power(Wire),
-        sensor(Wire),
-        rtc(Wire) {}
+        i2c(Wire, board.i2c, i2cTelemetry),
+        power(i2c),
+        sensor(i2c),
+        rtc(i2c) {}
 
   SPIClass epdSpi;
   SPIClass sdSpi;
   Spectra6_73 display;
+  I2cRetryTelemetry i2cTelemetry;
+  BoundedI2cBus i2c;
   ProbePowerManager power;
   Shtc3Adapter sensor;
   Pcf85063Adapter rtc;
@@ -627,14 +705,18 @@ bool PhotoPainterSupport::loadCachedFrame(
       && static_cast<size_t>(file.size()) == sizeof(CacheHeaderV2) + kPhotoPainterFrameBytes;
   CacheValidation headerValidation = CacheValidation::BadLength;
   if (useFullHeader) {
-    if (file.read(reinterpret_cast<uint8_t*>(&fullHeader), sizeof(fullHeader)) != sizeof(fullHeader)) {
+    const size_t received = file.read(reinterpret_cast<uint8_t*>(&fullHeader), sizeof(fullHeader));
+    sdReadBytes_ += static_cast<uint32_t>(received);
+    if (received != sizeof(fullHeader)) {
       file.close();
       SD.remove(finalPath);
       cacheStatus_ = CacheStatus::Invalid;
       return false;
     }
   } else if (static_cast<size_t>(file.size()) == sizeof(CacheHeader) + kPhotoPainterFrameBytes) {
-    if (file.read(reinterpret_cast<uint8_t*>(&legacyHeader), sizeof(legacyHeader)) != sizeof(legacyHeader)) {
+    const size_t received = file.read(reinterpret_cast<uint8_t*>(&legacyHeader), sizeof(legacyHeader));
+    sdReadBytes_ += static_cast<uint32_t>(received);
+    if (received != sizeof(legacyHeader)) {
       file.close();
       SD.remove(finalPath);
       cacheStatus_ = CacheStatus::Invalid;
@@ -658,6 +740,7 @@ bool PhotoPainterSupport::loadCachedFrame(
   while (total < kPhotoPainterFrameBytes) {
     const size_t requested = min(kIoChunkSize, kPhotoPainterFrameBytes - total);
     const size_t received = file.read(impl_->ioBuffer, requested);
+    sdReadBytes_ += static_cast<uint32_t>(received);
     if (received != requested) break;
     memcpy(framebuffer + total, impl_->ioBuffer, received);
     total += received;
@@ -709,7 +792,9 @@ bool PhotoPainterSupport::loadFormalFrame(
     return false;
   }
   FormalFrameHeader header = {};
-  if (file.read(reinterpret_cast<uint8_t*>(&header), sizeof(header)) != sizeof(header)) {
+  const size_t headerReceived = file.read(reinterpret_cast<uint8_t*>(&header), sizeof(header));
+  sdReadBytes_ += static_cast<uint32_t>(headerReceived);
+  if (headerReceived != sizeof(header)) {
     file.close();
     SD.remove(finalPath);
     if (SD.exists(backupPath)) SD.rename(backupPath, finalPath);
@@ -727,6 +812,7 @@ bool PhotoPainterSupport::loadFormalFrame(
   while (total < kPhotoPainterFrameBytes) {
     const size_t requested = min(kIoChunkSize, kPhotoPainterFrameBytes - total);
     const size_t received = file.read(impl_->ioBuffer, requested);
+    sdReadBytes_ += static_cast<uint32_t>(received);
     if (received != requested) break;
     memcpy(framebuffer + total, impl_->ioBuffer, received);
     total += received;
@@ -746,14 +832,12 @@ bool PhotoPainterSupport::loadFormalFrame(
   return true;
 }
 
-bool PhotoPainterSupport::convertAndCache(
+bool PhotoPainterSupport::convertFrame(
   const uint8_t* wire,
   size_t wireLength,
   bool indexed4,
-  uint32_t sourceHash,
   DisplayRotation rotation,
-  uint8_t** output,
-  const char* sourceSha256
+  uint8_t** output
 ) {
   if (output == nullptr) return false;
   *output = nullptr;
@@ -769,6 +853,20 @@ bool PhotoPainterSupport::convertAndCache(
     return false;
   }
   *output = framebuffer;
+  return true;
+}
+
+bool PhotoPainterSupport::convertAndCache(
+  const uint8_t* wire,
+  size_t wireLength,
+  bool indexed4,
+  uint32_t sourceHash,
+  DisplayRotation rotation,
+  uint8_t** output,
+  const char* sourceSha256
+) {
+  if (!convertFrame(wire, wireLength, indexed4, rotation, output)) return false;
+  uint8_t* framebuffer = *output;
 
   if (!sdReady_ || impl_->ioBuffer == nullptr || sourceHash == 0) {
     cacheStatus_ = CacheStatus::Disabled;
@@ -788,6 +886,7 @@ bool PhotoPainterSupport::convertAndCache(
     cacheStatus_ = CacheStatus::Error;
     return true;
   }
+  const uint32_t writeStarted = millis();
   const bool useFullHeader = isSha256Hex(sourceSha256);
   CacheHeader legacyHeader = makeCacheHeader(
     sourceHash, rotation, framebuffer, kPhotoPainterFrameBytes);
@@ -797,17 +896,21 @@ bool PhotoPainterSupport::convertAndCache(
     ? reinterpret_cast<const uint8_t*>(&fullHeader)
     : reinterpret_cast<const uint8_t*>(&legacyHeader);
   const size_t headerSize = useFullHeader ? sizeof(fullHeader) : sizeof(legacyHeader);
-  bool writeOk = file.write(headerBytes, headerSize) == headerSize;
+  const size_t headerWritten = file.write(headerBytes, headerSize);
+  sdWriteBytes_ += static_cast<uint32_t>(headerWritten);
+  bool writeOk = headerWritten == headerSize;
   size_t total = 0;
   while (writeOk && total < kPhotoPainterFrameBytes) {
     const size_t requested = min(kIoChunkSize, kPhotoPainterFrameBytes - total);
     memcpy(impl_->ioBuffer, framebuffer + total, requested);
     const size_t written = file.write(impl_->ioBuffer, requested);
+    sdWriteBytes_ += static_cast<uint32_t>(written);
     writeOk = written == requested;
     total += written;
   }
   file.flush();
   file.close();
+  sdWriteDurationMs_ += millis() - writeStarted;
   if (!writeOk || total != kPhotoPainterFrameBytes) {
     SD.remove(temporaryPath);
     cacheStatus_ = CacheStatus::Error;
@@ -839,6 +942,12 @@ bool PhotoPainterSupport::writeFormalFrame(
     cacheStatus_ = sdReady_ ? CacheStatus::Error : CacheStatus::Disabled;
     return false;
   }
+  struct FormalFrameInFlightGuard final {
+    String& value;
+    explicit FormalFrameInFlightGuard(String& target, const char* source)
+        : value(target) { value = source; }
+    ~FormalFrameInFlightGuard() { value = ""; }
+  } inFlight(formalFrameInFlightSha256_, sourceSha256);
   char finalPath[128] = {0};
   char temporaryPath[128] = {0};
   char backupPath[128] = {0};
@@ -853,20 +962,25 @@ bool PhotoPainterSupport::writeFormalFrame(
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
+  const uint32_t writeStarted = millis();
   const FormalFrameHeader header = makeFormalFrameHeader(
     sourceSha256, rotation, framebuffer, length);
-  bool writeOk = file.write(
-    reinterpret_cast<const uint8_t*>(&header), sizeof(header)) == sizeof(header);
+  const size_t headerWritten = file.write(
+    reinterpret_cast<const uint8_t*>(&header), sizeof(header));
+  sdWriteBytes_ += static_cast<uint32_t>(headerWritten);
+  bool writeOk = headerWritten == sizeof(header);
   size_t total = 0;
   while (writeOk && total < length) {
     const size_t requested = min(kIoChunkSize, length - total);
     memcpy(impl_->ioBuffer, framebuffer + total, requested);
     const size_t written = file.write(impl_->ioBuffer, requested);
+    sdWriteBytes_ += static_cast<uint32_t>(written);
     writeOk = written == requested;
     total += written;
   }
   file.flush();
   file.close();
+  sdWriteDurationMs_ += millis() - writeStarted;
   if (!writeOk || total != length) {
     SD.remove(temporaryPath);
     cacheStatus_ = CacheStatus::Error;
@@ -883,6 +997,175 @@ bool PhotoPainterSupport::writeFormalFrame(
   }
   SD.remove(backupPath);
   cacheStatus_ = CacheStatus::Written;
+  return true;
+}
+
+namespace {
+
+constexpr uint64_t kFormalFrameFreeSpaceFloorBytes = 8ULL * 1024ULL * 1024ULL;
+constexpr size_t kFormalFrameMaximumFiles = 24U;
+constexpr uint8_t kFormalFrameGcMaxDeletesPerWake = 4U;
+constexpr uint8_t kFormalFrameGcMaxScansPerWake = 32U;
+constexpr size_t kFormalFrameReferenceLimit = 64U;
+
+class ProtectedFormalFrames final {
+ public:
+  void add(const char* sourceSha256) {
+    if (!isSha256Hex(sourceSha256)) return;
+    for (size_t index = 0; index < count_; ++index) {
+      if (values_[index].equalsIgnoreCase(sourceSha256)) return;
+    }
+    if (count_ < kFormalFrameReferenceLimit) values_[count_++] = sourceSha256;
+  }
+
+  bool contains(const String& sourceSha256) const {
+    for (size_t index = 0; index < count_; ++index) {
+      if (values_[index].equalsIgnoreCase(sourceSha256)) return true;
+    }
+    return false;
+  }
+
+ private:
+  String values_[kFormalFrameReferenceLimit];
+  size_t count_ = 0;
+};
+
+bool addScheduleFrameReferences(
+  const char* scheduleJson,
+  ProtectedFormalFrames& protectedFrames
+) {
+  if (scheduleJson == nullptr || scheduleJson[0] == '\0') return true;
+  JsonDocument document;
+  if (deserializeJson(document, scheduleJson) || document.overflowed()) return false;
+  const JsonVariantConst rawSlots = document["slots"];
+  if (!rawSlots.is<JsonArrayConst>()) return false;
+  const JsonArrayConst slots = rawSlots.as<JsonArrayConst>();
+  if (slots.size() > kFormalFrameReferenceLimit) return false;
+  for (size_t index = 0; index < slots.size(); ++index) {
+    const JsonVariantConst rawSlot = slots[index];
+    if (!rawSlot.is<JsonObjectConst>()) continue;
+    const String sourceSha256 = rawSlot["sha256"] | "";
+    protectedFrames.add(sourceSha256.c_str());
+  }
+  return true;
+}
+
+bool scheduleJsonSafeForGc(
+  const char* scheduleJson,
+  const char* finalPath,
+  const char* backupPath
+) {
+  if (!SD.exists(finalPath) && !SD.exists(backupPath)) return true;
+  if (scheduleJson == nullptr || scheduleJson[0] == '\0') return false;
+  JsonDocument document;
+  if (deserializeJson(document, scheduleJson) || document.overflowed()) return false;
+  return document["slots"].is<JsonArrayConst>();
+}
+
+bool formalFrameShaFromPath(const String& path, String& sourceSha256) {
+  const int slash = path.lastIndexOf('/');
+  const String filename = slash >= 0 ? path.substring(slash + 1) : path;
+  if (filename.length() != 71U && filename.length() != 73U) return false;
+  if (!filename.endsWith(".itf")) return false;
+  const String suffix = filename.substring(64U);
+  if (suffix != "-r0.itf" && suffix != "-r180.itf") return false;
+  sourceSha256 = filename.substring(0, 64U);
+  return isSha256Hex(sourceSha256.c_str());
+}
+
+size_t countFormalFrameFiles() {
+  File directory = SD.open("/inktime/frames");
+  if (!directory || !directory.isDirectory()) {
+    if (directory) directory.close();
+    return 0U;
+  }
+  size_t count = 0U;
+  size_t scanned = 0U;
+  File file = directory.openNextFile();
+  while (file && count <= kFormalFrameMaximumFiles
+      && scanned < kFormalFrameGcMaxScansPerWake) {
+    ++scanned;
+    String sourceSha256;
+    if (!file.isDirectory() && formalFrameShaFromPath(file.name(), sourceSha256)) ++count;
+    file.close();
+    file = directory.openNextFile();
+  }
+  directory.close();
+  return count;
+}
+
+}  // namespace
+
+bool PhotoPainterSupport::runFormalFrameGc(
+  const char* activeScheduleJson,
+  const char* stagedNextScheduleJson,
+  const char* currentFrameSha256,
+  const char* lastGoodFrameSha256,
+  const char* inFlightFrameSha256,
+  const char* recoveryFrameSha256
+) {
+  if (!sdReady_) return false;
+  if (!scheduleJsonSafeForGc(
+        activeScheduleJson, "/inktime/schedule/active.json", "/inktime/schedule/active.bak")
+      || !scheduleJsonSafeForGc(
+        stagedNextScheduleJson,
+        "/inktime/schedule/staged_next.json",
+        "/inktime/schedule/staged_next.bak")) {
+    return false;
+  }
+
+  ProtectedFormalFrames protectedFrames;
+  if (!addScheduleFrameReferences(activeScheduleJson, protectedFrames)
+      || !addScheduleFrameReferences(stagedNextScheduleJson, protectedFrames)) {
+    return false;
+  }
+  protectedFrames.add(currentFrameSha256);
+  protectedFrames.add(lastGoodFrameSha256);
+  protectedFrames.add(inFlightFrameSha256);
+  protectedFrames.add(recoveryFrameSha256);
+  // The internal guard covers a formal write that is in progress even if the
+  // caller did not pass the optional in-flight reference explicitly.
+  protectedFrames.add(formalFrameInFlightSha256_.c_str());
+
+  const size_t formalFrameFiles = countFormalFrameFiles();
+  const uint64_t totalBytes = SD.totalBytes();
+  const uint64_t usedBytes = SD.usedBytes();
+  const uint64_t freeBytes = totalBytes > usedBytes ? totalBytes - usedBytes : 0U;
+  const bool pressure = freeBytes < kFormalFrameFreeSpaceFloorBytes;
+  if (!pressure && formalFrameFiles <= kFormalFrameMaximumFiles) return true;
+
+  File directory = SD.open("/inktime/frames");
+  if (!directory || !directory.isDirectory()) {
+    if (directory) directory.close();
+    return false;
+  }
+  uint8_t deletedThisWake = 0U;
+  uint8_t scannedThisWake = 0U;
+  File file = directory.openNextFile();
+  while (file && deletedThisWake < kFormalFrameGcMaxDeletesPerWake
+      && scannedThisWake < kFormalFrameGcMaxScansPerWake) {
+    ++scannedThisWake;
+    String sourceSha256;
+    const String entryName = file.name();
+    const String path = entryName.startsWith("/")
+      ? entryName
+      : String("/inktime/frames/") + entryName;
+    const uint32_t fileBytes = static_cast<uint32_t>(file.size());
+    const bool candidate = !file.isDirectory()
+      && formalFrameShaFromPath(path, sourceSha256);
+    const bool protectedReference = candidate && protectedFrames.contains(sourceSha256);
+    file.close();
+    if (protectedReference) {
+      if (gcSkippedProtected_ < UINT32_MAX) ++gcSkippedProtected_;
+    } else if (candidate && SD.remove(path.c_str())) {
+      if (gcDeletedFiles_ < UINT32_MAX) ++gcDeletedFiles_;
+      if (UINT32_MAX - gcDeletedBytes_ < fileBytes) gcDeletedBytes_ = UINT32_MAX;
+      else gcDeletedBytes_ += fileBytes;
+      ++deletedThisWake;
+    }
+    file = directory.openNextFile();
+  }
+  directory.close();
   return true;
 }
 
@@ -906,10 +1189,13 @@ bool PhotoPainterSupport::writeActiveSchedule(const char* json, size_t length) {
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
+  const uint32_t writeStarted = millis();
   const size_t written = file.write(
     reinterpret_cast<const uint8_t*>(json), length);
+  sdWriteBytes_ += static_cast<uint32_t>(written);
   file.flush();
   file.close();
+  sdWriteDurationMs_ += millis() - writeStarted;
   if (written != length) {
     SD.remove(temporaryPath);
     cacheStatus_ = CacheStatus::Error;
@@ -953,7 +1239,13 @@ bool PhotoPainterSupport::readActiveSchedule(String& json) {
   }
   const size_t length = static_cast<size_t>(file.size());
   json.reserve(length + 1U);
-  while (file.available()) json += static_cast<char>(file.read());
+  while (file.available()) {
+    const int value = file.read();
+    if (value >= 0) {
+      ++sdReadBytes_;
+      json += static_cast<char>(value);
+    }
+  }
   file.close();
   if (json.length() != length) {
     json = "";
@@ -1004,9 +1296,12 @@ bool PhotoPainterSupport::writeStagedNextSchedule(const char* json, size_t lengt
     cacheStatus_ = CacheStatus::Error;
     return false;
   }
+  const uint32_t writeStarted = millis();
   const size_t written = file.write(reinterpret_cast<const uint8_t*>(json), length);
+  sdWriteBytes_ += static_cast<uint32_t>(written);
   file.flush();
   file.close();
+  sdWriteDurationMs_ += millis() - writeStarted;
   if (written != length) {
     SD.remove(temporaryPath);
     cacheStatus_ = CacheStatus::Error;
@@ -1050,7 +1345,13 @@ bool PhotoPainterSupport::readStagedNextSchedule(String& json) {
   }
   const size_t length = static_cast<size_t>(file.size());
   json.reserve(length + 1U);
-  while (file.available()) json += static_cast<char>(file.read());
+  while (file.available()) {
+    const int value = file.read();
+    if (value >= 0) {
+      ++sdReadBytes_;
+      json += static_cast<char>(value);
+    }
+  }
   file.close();
   if (json.length() != length) {
     json = "";
@@ -1178,6 +1479,18 @@ bool PhotoPainterSupport::writeRtc(time_t epoch) {
 
 bool PhotoPainterSupport::readRtc(time_t& epoch) {
   return impl_ != nullptr && rtcReady_ && impl_->rtc.readEpoch(epoch);
+}
+
+uint32_t PhotoPainterSupport::i2cRetryCount() const {
+  return impl_ == nullptr ? 0U : impl_->i2cTelemetry.retry_count;
+}
+
+uint32_t PhotoPainterSupport::i2cBusResetCount() const {
+  return impl_ == nullptr ? 0U : impl_->i2cTelemetry.bus_reset_count;
+}
+
+uint32_t PhotoPainterSupport::i2cFailClosedCount() const {
+  return impl_ == nullptr ? 0U : impl_->i2cTelemetry.fail_closed_count;
 }
 
 void PhotoPainterSupport::refreshPowerState() {

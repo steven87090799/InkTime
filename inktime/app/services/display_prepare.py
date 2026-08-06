@@ -7,7 +7,10 @@ import re
 from typing import Any
 
 from inktime.app.db import Database
-from inktime.app.domain.photopainter.offline_schedule import validate_offline_schedule
+from inktime.app.domain.photopainter.offline_schedule import (
+    MINIMUM_SCHEDULE_GAP_MINUTES,
+    validate_offline_schedule,
+)
 from inktime.app.domain.rendering.system_presets import DEFAULT_RENDER_PROFILE
 
 
@@ -235,7 +238,11 @@ class DisplayPreparationService:
             raise ValueError("QUEUE-005 裝置未啟用離線排程或 Prefetch")
         try:
             schedule_times = validate_offline_schedule(
-                json.loads(str(device["schedule_times_json"] or "[]")), maximum=12
+                json.loads(str(device["schedule_times_json"] or "[]")),
+                maximum=12,
+                minimum_gap_minutes=int(
+                    device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
+                ),
             )
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("DISPLAY-006 裝置 schedule_times 不可解析") from exc

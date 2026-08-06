@@ -13,7 +13,12 @@ from zoneinfo import ZoneInfo
 
 from inktime.app.core.paths import UnsafePathError
 from inktime.app.db import Database
-from inktime.app.domain.photopainter.offline_schedule import slot_deadlines, validate_offline_schedule
+from inktime.app.domain.photopainter.offline_schedule import (
+    MINIMUM_SCHEDULE_GAP_MINUTES,
+    normalize_sync_strategy,
+    slot_deadlines,
+    validate_offline_schedule,
+)
 from inktime.app.services.device_releases import payload_entry_from_manifest
 
 
@@ -52,6 +57,9 @@ class OfflineScheduleRepository:
         schedule_times: Sequence[str],
         prefetch_lead_minutes: int,
         server_margin_minutes: int,
+        sync_strategy: str = "first_display_lead",
+        sync_time: str | None = None,
+        minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
     ) -> int:
         """Return the retry epoch while retaining the legacy scalar API."""
 
@@ -61,6 +69,9 @@ class OfflineScheduleRepository:
             schedule_times=schedule_times,
             prefetch_lead_minutes=prefetch_lead_minutes,
             server_margin_minutes=server_margin_minutes,
+            sync_strategy=sync_strategy,
+            sync_time=sync_time,
+            minimum_gap_minutes=minimum_gap_minutes,
         ).retry_after_epoch
 
     @staticmethod
@@ -71,6 +82,9 @@ class OfflineScheduleRepository:
         schedule_times: Sequence[str],
         prefetch_lead_minutes: int,
         server_margin_minutes: int,
+        sync_strategy: str = "first_display_lead",
+        sync_time: str | None = None,
+        minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
     ) -> RetryAfterDetails:
         """Choose a bounded retry without skipping a remaining local slot."""
 
@@ -86,7 +100,12 @@ class OfflineScheduleRepository:
         if local_now.tzinfo is None:
             local_now = local_now.replace(tzinfo=timezone.utc)
         local_now = local_now.astimezone(zone)
-        slots = validate_offline_schedule(schedule_times, maximum=MAX_PREPARED_SLOTS)
+        strategy, normalized_sync_time = normalize_sync_strategy(sync_strategy, sync_time)
+        slots = validate_offline_schedule(
+            schedule_times,
+            maximum=MAX_PREPARED_SLOTS,
+            minimum_gap_minutes=minimum_gap_minutes,
+        )
         lead = int(prefetch_lead_minutes)
         margin = int(server_margin_minutes)
 
@@ -116,7 +135,14 @@ class OfflineScheduleRepository:
         def retry_for_day(target: date, *, allow_prepare_point: bool) -> RetryAfterDetails | None:
             slot_epochs = [epoch(slot_at(target, slot)) for slot in slots]
             if allow_prepare_point:
-                prepare_epoch = slot_epochs[0] - (lead + margin) * 60
+                if strategy == "fixed_daily":
+                    assert normalized_sync_time is not None
+                    sync_hour, sync_minute = (int(part) for part in normalized_sync_time.split(":"))
+                    prepare_epoch = epoch(
+                        datetime.combine(target, time(sync_hour, sync_minute), tzinfo=zone)
+                    )
+                else:
+                    prepare_epoch = slot_epochs[0] - (lead + margin) * 60
                 if now_epoch < prepare_epoch < slot_epochs[0]:
                     return RetryAfterDetails(prepare_epoch, slot_epochs[0])
             return retry_before_slots(slot_epochs)
@@ -136,7 +162,14 @@ class OfflineScheduleRepository:
         # null next_slot_epoch for this normal cross-day transition.
         tomorrow = today + timedelta(days=1)
         tomorrow_slots = [epoch(slot_at(tomorrow, slot)) for slot in slots]
-        tomorrow_prepare = tomorrow_slots[0] - (lead + margin) * 60
+        if strategy == "fixed_daily":
+            assert normalized_sync_time is not None
+            sync_hour, sync_minute = (int(part) for part in normalized_sync_time.split(":"))
+            tomorrow_prepare = epoch(
+                datetime.combine(tomorrow, time(sync_hour, sync_minute), tzinfo=zone)
+            )
+        else:
+            tomorrow_prepare = tomorrow_slots[0] - (lead + margin) * 60
         if now_epoch < tomorrow_prepare < tomorrow_slots[0]:
             return RetryAfterDetails(tomorrow_prepare, None)
         tomorrow_details = retry_before_slots(tomorrow_slots)
@@ -156,6 +189,9 @@ class OfflineScheduleRepository:
         schedule_times: Sequence[str],
         prefetch_lead_minutes: int,
         server_margin_minutes: int,
+        sync_strategy: str = "first_display_lead",
+        sync_time: str | None = None,
+        minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
     ) -> RetryAfterDetails:
         """Return a bounded retry for the explicitly bounded next target day."""
 
@@ -172,7 +208,12 @@ class OfflineScheduleRepository:
         if local_now.tzinfo is None:
             local_now = local_now.replace(tzinfo=timezone.utc)
         local_now = local_now.astimezone(zone)
-        slots = validate_offline_schedule(schedule_times, maximum=MAX_PREPARED_SLOTS)
+        strategy, normalized_sync_time = normalize_sync_strategy(sync_strategy, sync_time)
+        slots = validate_offline_schedule(
+            schedule_times,
+            maximum=MAX_PREPARED_SLOTS,
+            minimum_gap_minutes=minimum_gap_minutes,
+        )
         lead = int(prefetch_lead_minutes)
         margin = int(server_margin_minutes)
         now_epoch = int(local_now.astimezone(timezone.utc).timestamp())
@@ -186,7 +227,16 @@ class OfflineScheduleRepository:
             )
 
         epochs = [slot_epoch(target, slot) for slot in slots]
-        prepare_epoch = epochs[0] - (lead + margin) * 60
+        if strategy == "fixed_daily":
+            assert normalized_sync_time is not None
+            sync_hour, sync_minute = (int(part) for part in normalized_sync_time.split(":"))
+            prepare_epoch = int(
+                datetime.combine(target, time(sync_hour, sync_minute), tzinfo=zone)
+                .astimezone(timezone.utc)
+                .timestamp()
+            )
+        else:
+            prepare_epoch = epochs[0] - (lead + margin) * 60
         if now_epoch < prepare_epoch < epochs[0]:
             return RetryAfterDetails(prepare_epoch, epochs[0])
         for candidate_slot in epochs:
@@ -279,6 +329,11 @@ class OfflineScheduleRepository:
             "prefetch_lead_minutes": int(schedule["prefetch_lead_minutes"]),
             "button_wake_action": str(schedule["button_wake_action"]),
             "offline_schedule_version": int(schedule["offline_schedule_version"]),
+            "minimum_schedule_gap_minutes": int(
+                schedule["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
+            ),
+            "sync_strategy": str(schedule["sync_strategy"] or "first_display_lead"),
+            "sync_time": schedule["sync_time"],
             "snapshot_json": snapshot_json if isinstance(snapshot_json, dict) else {},
         }
         return {
@@ -327,6 +382,80 @@ class OfflineScheduleRepository:
             ).fetchone()
             return self._row(connection, str(row["id"])) if row else None
 
+    @staticmethod
+    def _is_future_item(value: object, now: str) -> bool:
+        if not value:
+            return False
+        try:
+            item_time = datetime.fromisoformat(str(value))
+            current_time = datetime.fromisoformat(str(now))
+        except (TypeError, ValueError):
+            return False
+        if item_time.tzinfo is None:
+            item_time = item_time.replace(tzinfo=timezone.utc)
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=timezone.utc)
+        return item_time.astimezone(timezone.utc) > current_time.astimezone(timezone.utc)
+
+    def _supersede_previous_schedule_items(
+        self, connection, *, device_id: str, target_date: str, schedule_id: str, now: str
+    ) -> int:
+        old_schedules = connection.execute(
+            """
+            SELECT id FROM device_offline_schedules
+            WHERE device_id=? AND target_date=? AND id<>? AND status IN ('preparing','ready')
+            """,
+            (device_id, target_date, schedule_id),
+        ).fetchall()
+        if not old_schedules:
+            return 0
+        old_ids = [str(row["id"]) for row in old_schedules]
+        placeholders = ",".join("?" for _ in old_ids)
+        connection.execute(
+            f"UPDATE device_offline_schedules SET status='cancelled',updated_at=? "  # noqa: S608
+            f"WHERE id IN ({placeholders})",
+            (now, *old_ids),
+        )
+        items = connection.execute(
+            f"SELECT id,status,display_after,delivery_mode,offline_slot,offline_schedule_id "  # noqa: S608
+            f"FROM device_content_queue_items WHERE device_id=? AND offline_schedule_id IN ({placeholders}) "
+            "AND status NOT IN ('DISPLAYED','FAILED','EXPIRED','CANCELLED') ORDER BY id",
+            (device_id, *old_ids),
+        ).fetchall()
+        cancelled = 0
+        for item in items:
+            if not self._is_future_item(item["display_after"], now):
+                continue
+            item_id = str(item["id"])
+            connection.execute(
+                "UPDATE device_content_queue_items SET status='CANCELLED',last_error_code='QUEUE-005',updated_at=? WHERE id=?",
+                (now, item_id),
+            )
+            payload = {
+                "reason": "device_schedule_changed",
+                "change_kind": "offline_schedule_reprepared",
+                "offline_slot": item["offline_slot"],
+                "offline_schedule_id": item["offline_schedule_id"],
+                "target_date": target_date,
+            }
+            connection.execute(
+                "INSERT OR IGNORE INTO device_content_queue_events(queue_item_id,device_id,event_type,idempotency_key,payload_json,created_at) VALUES (?,?,?,?,?,?)",
+                (
+                    item_id,
+                    device_id,
+                    "FUTURE_SLOT_SUPERSEDED",
+                    f"FUTURE_SLOT_SUPERSEDED:{device_id}:{item_id}",
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                    now,
+                ),
+            )
+            connection.execute(
+                "UPDATE rollout_targets SET status='cancelled_future_schedule',last_error_code='QUEUE-005',updated_at=? WHERE queue_item_id=?",
+                (now, item_id),
+            )
+            cancelled += 1
+        return cancelled
+
     def prepare_day(
         self,
         *,
@@ -351,7 +480,8 @@ class OfflineScheduleRepository:
                     """
                     SELECT timezone,config_version,delivery_mode,offline_prefetch_allowed,
                            panel_profile,rotation,schedule_times_json,prefetch_lead_minutes,
-                           button_wake_action,offline_schedule_version
+                           button_wake_action,offline_schedule_version,
+                           minimum_schedule_gap_minutes,sync_strategy,sync_time
                     FROM devices WHERE id=? AND enabled=1
                     """,
                     (device_id,),
@@ -371,7 +501,17 @@ class OfflineScheduleRepository:
                     configured_times = json.loads(str(device["schedule_times_json"] or "[]"))
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:
                     raise ValueError("DEVICE-008 裝置 schedule_times 不可解析") from exc
-                configured_times = validate_offline_schedule(configured_times, maximum=MAX_PREPARED_SLOTS)
+                minimum_gap_minutes = int(
+                    device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
+                )
+                sync_strategy, sync_time = normalize_sync_strategy(
+                    str(device["sync_strategy"] or "first_display_lead"), device["sync_time"]
+                )
+                configured_times = validate_offline_schedule(
+                    configured_times,
+                    maximum=MAX_PREPARED_SLOTS,
+                    minimum_gap_minutes=minimum_gap_minutes,
+                )
                 if len(normalized_release_ids) != len(configured_times):
                     raise ValueError("DEVICE-008 Release 數量必須等於裝置 schedule_times 數量")
                 existing = connection.execute(
@@ -392,6 +532,9 @@ class OfflineScheduleRepository:
                     "prefetch_lead_minutes": int(device["prefetch_lead_minutes"]),
                     "button_wake_action": str(device["button_wake_action"]),
                     "offline_schedule_version": int(device["offline_schedule_version"]),
+                    "minimum_schedule_gap_minutes": minimum_gap_minutes,
+                    "sync_strategy": sync_strategy,
+                    "sync_time": sync_time,
                     "config_version": current_config_version,
                 }
                 connection.execute(
@@ -399,8 +542,9 @@ class OfflineScheduleRepository:
                     INSERT INTO device_offline_schedules(
                         id,device_id,target_date,config_version,timezone,status,created_at,updated_at,
                         panel_profile,rotation,schedule_times_json,prefetch_lead_minutes,
-                        button_wake_action,offline_schedule_version,snapshot_json
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        button_wake_action,offline_schedule_version,minimum_schedule_gap_minutes,
+                        sync_strategy,sync_time,snapshot_json
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(device_id,target_date,config_version) DO UPDATE SET
                         status='preparing',updated_at=excluded.updated_at,
                         panel_profile=excluded.panel_profile,rotation=excluded.rotation,
@@ -408,6 +552,9 @@ class OfflineScheduleRepository:
                         prefetch_lead_minutes=excluded.prefetch_lead_minutes,
                         button_wake_action=excluded.button_wake_action,
                         offline_schedule_version=excluded.offline_schedule_version,
+                        minimum_schedule_gap_minutes=excluded.minimum_schedule_gap_minutes,
+                        sync_strategy=excluded.sync_strategy,
+                        sync_time=excluded.sync_time,
                         snapshot_json=excluded.snapshot_json
                     """,
                     (
@@ -425,6 +572,9 @@ class OfflineScheduleRepository:
                         int(device["prefetch_lead_minutes"]),
                         str(device["button_wake_action"]),
                         int(device["offline_schedule_version"]),
+                        minimum_gap_minutes,
+                        sync_strategy,
+                        sync_time,
                         json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
                     ),
                 )
@@ -432,25 +582,15 @@ class OfflineScheduleRepository:
                     "DELETE FROM device_offline_schedule_slots WHERE schedule_id=?", (schedule_id,)
                 )
                 # Current and future dates are independent queue owners.  A
-                # retry may supersede only an earlier preparation for this
-                # same local date.
-                connection.execute(
-                    """
-                    UPDATE device_offline_schedules SET status='cancelled',updated_at=?
-                    WHERE device_id=? AND target_date=? AND id<>? AND status IN ('preparing','ready')
-                    """,
-                    (now, device_id, day.isoformat(), schedule_id),
+                # retry may supersede only genuinely future items; displayed,
+                # failed, and past items remain immutable history.
+                cancelled = self._supersede_previous_schedule_items(
+                    connection,
+                    device_id=device_id,
+                    target_date=day.isoformat(),
+                    schedule_id=schedule_id,
+                    now=now,
                 )
-                cancelled = connection.execute(
-                    """
-                    UPDATE device_content_queue_items SET status='CANCELLED',updated_at=?
-                    WHERE device_id=? AND offline_schedule_id IN (
-                        SELECT id FROM device_offline_schedules
-                        WHERE device_id=? AND target_date=? AND id<>? AND status='cancelled'
-                    ) AND status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')
-                    """,
-                    (now, device_id, device_id, day.isoformat(), schedule_id),
-                ).rowcount
                 queue = connection.execute(
                     "SELECT depth,queue_version FROM device_content_queues WHERE device_id=?",
                     (device_id,),
@@ -478,6 +618,7 @@ class OfflineScheduleRepository:
                     configured_times,
                     str(device["timezone"]),
                     grace_minutes=15,
+                    minimum_gap_minutes=minimum_gap_minutes,
                 )
                 for slot_index, slot in enumerate(configured_times):
                     release_id = normalized_release_ids[slot_index]
@@ -567,7 +708,8 @@ class OfflineScheduleRepository:
                 current = connection.execute(
                     """
                     SELECT config_version,panel_profile,rotation,timezone,schedule_times_json,
-                           prefetch_lead_minutes,button_wake_action,offline_schedule_version
+                           prefetch_lead_minutes,button_wake_action,offline_schedule_version,
+                           minimum_schedule_gap_minutes,sync_strategy,sync_time
                     FROM devices WHERE id=? AND enabled=1
                     """,
                     (device_id,),
@@ -582,6 +724,10 @@ class OfflineScheduleRepository:
                     or str(current["button_wake_action"]) != str(device["button_wake_action"])
                     or int(current["offline_schedule_version"])
                     != int(device["offline_schedule_version"])
+                    or int(current["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES)
+                    != minimum_gap_minutes
+                    or str(current["sync_strategy"] or "first_display_lead") != sync_strategy
+                    or (current["sync_time"] or None) != (sync_time or None)
                 ):
                     raise ValueError("DISPLAY-CONFIG-RACE 裝置設定在離線排程提交前已變更")
                 connection.execute("COMMIT")
@@ -601,7 +747,8 @@ class OfflineScheduleRepository:
             after = str(after_device_id or "")
             rows = connection.execute(
                 """
-                SELECT id,name,timezone,schedule_times_json,prefetch_lead_minutes,config_version
+                SELECT id,name,timezone,schedule_times_json,prefetch_lead_minutes,config_version,
+                       minimum_schedule_gap_minutes,sync_strategy,sync_time
                 FROM devices
                 WHERE enabled=1 AND delivery_mode='inktime_offline_schedule'
                   AND offline_prefetch_allowed=1
@@ -613,7 +760,8 @@ class OfflineScheduleRepository:
             if not rows and after:
                 rows = connection.execute(
                     """
-                    SELECT id,name,timezone,schedule_times_json,prefetch_lead_minutes,config_version
+                    SELECT id,name,timezone,schedule_times_json,prefetch_lead_minutes,config_version,
+                           minimum_schedule_gap_minutes,sync_strategy,sync_time
                     FROM devices
                     WHERE enabled=1 AND delivery_mode='inktime_offline_schedule'
                       AND offline_prefetch_allowed=1

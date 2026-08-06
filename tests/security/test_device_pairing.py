@@ -25,23 +25,44 @@ def _pairing_payload(device_id: str = "esp32-contract-test", *, nonce: str | Non
 
 
 @pytest.mark.parametrize(
-    ("schedule_times", "expected"),
+    ("schedule_times", "minimum_gap_minutes", "expected"),
     [
-        (["08:00"], ["08:00"]),
-        (["08:00", "12:00", "20:00"], ["08:00", "12:00", "20:00"]),
+        (["08:00"], 60, ["08:00"]),
+        (["08:00", "12:00", "20:00"], 60, ["08:00", "12:00", "20:00"]),
+        (["08:00", "08:30"], 30, ["08:00", "08:30"]),
     ],
 )
-def test_pairing_schedule_values_accept_single_and_increasing(app, schedule_times, expected):
+def test_pairing_schedule_values_accept_configured_gap(app, schedule_times, minimum_gap_minutes, expected):
     service = app.extensions["inktime_device_pairing_service"]
     config = service._normalize_config(
         {
             "name": "LAN Gate Device",
             "panel_profile": "safe_4c",
             "schedule_times": schedule_times,
+            "minimum_schedule_gap_minutes": minimum_gap_minutes,
         },
         fallback_name="LAN Gate Device",
     )
     assert config["schedule_times"] == expected
+    assert config["minimum_schedule_gap_minutes"] == minimum_gap_minutes
+
+
+def test_pairing_schedule_values_preserve_fixed_daily_sync_policy(app):
+    service = app.extensions["inktime_device_pairing_service"]
+    config = service._normalize_config(
+        {
+            "name": "LAN Gate Device",
+            "panel_profile": "safe_4c",
+            "schedule_times": ["08:00", "20:00"],
+            "minimum_schedule_gap_minutes": 30,
+            "sync_strategy": "fixed_daily",
+            "sync_time": "07:30",
+        },
+        fallback_name="LAN Gate Device",
+    )
+    assert config["minimum_schedule_gap_minutes"] == 30
+    assert config["sync_strategy"] == "fixed_daily"
+    assert config["sync_time"] == "07:30"
 
 
 def test_pairing_schedule_values_use_default_fallback(app):
@@ -51,6 +72,163 @@ def test_pairing_schedule_values_use_default_fallback(app):
         fallback_name="LAN Gate Device",
     )
     assert config["schedule_times"] == ["08:00"]
+
+
+def test_pairing_approval_merges_partial_management_payload(client, app):
+    payload = _pairing_payload("esp32-partial-config")
+    requested = client.post(PAIRING_PATH, json=payload)
+    assert requested.status_code == 201
+    response_body = requested.get_json()
+    pairing_id = response_body["pairing_id"]
+    pairing_code = response_body["pairing_code"]
+
+    with app.extensions["inktime_database"].transaction() as connection:
+        stored = json.loads(
+            str(
+                connection.execute(
+                    "SELECT config_json FROM device_pairing_requests WHERE id=?",
+                    (pairing_id,),
+                ).fetchone()[0]
+            )
+        )
+        stored.update(
+            {
+                "delivery_mode": "inktime_offline_schedule",
+                "schedule_times": ["08:00", "08:30"],
+                "minimum_schedule_gap_minutes": 30,
+                "sync_strategy": "fixed_daily",
+                "sync_time": "07:30",
+            }
+        )
+        connection.execute(
+            "UPDATE device_pairing_requests SET config_json=? WHERE id=?",
+            (json.dumps(stored, ensure_ascii=False, separators=(",", ":")), pairing_id),
+        )
+
+    create_admin(app)
+    login(client)
+    approved = _approve(client, pairing_id, pairing_code)
+    assert approved.status_code == 200
+    claimed = client.post(
+        CLAIM_PATH,
+        json={"pairing_id": pairing_id, "pairing_nonce": payload["pairing_nonce"]},
+    )
+    assert claimed.status_code == 200
+    claim_body = claimed.get_json()
+    confirm_body = {
+        "pairing_id": pairing_id,
+        "device_id": payload["device_id"],
+        "pairing_nonce": payload["pairing_nonce"],
+    }
+    assert _confirm(
+        client,
+        confirm_body,
+        claim_body["device_secret"],
+        claim_body["credential_version"],
+    ).status_code == 200
+
+    with app.extensions["inktime_database"].session() as connection:
+        device = connection.execute(
+            "SELECT delivery_mode,schedule_times_json,minimum_schedule_gap_minutes,sync_strategy,sync_time "
+            "FROM devices WHERE id=?",
+            (payload["device_id"],),
+        ).fetchone()
+    assert device["delivery_mode"] == "inktime_offline_schedule"
+    assert json.loads(str(device["schedule_times_json"])) == ["08:00"]
+    assert device["minimum_schedule_gap_minutes"] == 30
+    assert device["sync_strategy"] == "fixed_daily"
+    assert device["sync_time"] == "07:30"
+
+
+def test_repair_pairing_preserves_existing_schedule_policy_on_partial_approval(client, app):
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "Repair PhotoPainter",
+        auth_mode="automatic",
+        delivery_mode="inktime_offline_schedule",
+        schedule="08:00",
+        schedule_times=["08:00", "08:30", "09:30"],
+        minimum_schedule_gap_minutes=30,
+        sync_strategy="fixed_daily",
+        sync_time="07:30",
+    )
+    create_admin(app)
+    login(client)
+    repair_enabled = client.post(
+        f"/api/v1/devices/{device_id}/enable-repair",
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert repair_enabled.status_code == 200
+
+    payload = _pairing_payload(
+        device_id,
+        nonce="nonce-for-existing-repair-preservation-0123456789",
+    )
+    payload["device_name"] = "Repaired PhotoPainter"
+    requested = client.post(PAIRING_PATH, json=payload)
+    assert requested.status_code == 201
+    requested_body = requested.get_json()
+    with app.extensions["inktime_database"].session() as connection:
+        stored = json.loads(
+            str(
+                connection.execute(
+                    "SELECT config_json FROM device_pairing_requests WHERE id=?",
+                    (requested_body["pairing_id"],),
+                ).fetchone()[0]
+            )
+        )
+    assert stored["delivery_mode"] == "inktime_offline_schedule"
+    assert stored["schedule_times"] == ["08:00", "08:30", "09:30"]
+    assert stored["minimum_schedule_gap_minutes"] == 30
+    assert stored["sync_strategy"] == "fixed_daily"
+    assert stored["sync_time"] == "07:30"
+
+    approved = client.post(
+        f"/api/v1/device-pairing/{requested_body['pairing_id']}/approve",
+        json={
+            "pairing_code": requested_body["pairing_code"],
+            "device_config": {
+                "name": "Repaired PhotoPainter",
+                "panel_profile": "safe_4c",
+                "timezone": "Asia/Taipei",
+                "schedule": "08:00",
+                "schedule_times": ["08:00", "08:30", "09:30"],
+            },
+        },
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert approved.status_code == 200
+    claimed = client.post(
+        CLAIM_PATH,
+        json={
+            "pairing_id": requested_body["pairing_id"],
+            "pairing_nonce": payload["pairing_nonce"],
+        },
+    )
+    assert claimed.status_code == 200
+    claim_body = claimed.get_json()
+    confirmed = _confirm(
+        client,
+        {
+            "pairing_id": requested_body["pairing_id"],
+            "device_id": device_id,
+            "pairing_nonce": payload["pairing_nonce"],
+        },
+        claim_body["device_secret"],
+        claim_body["credential_version"],
+    )
+    assert confirmed.status_code == 200
+
+    with app.extensions["inktime_database"].session() as connection:
+        device = connection.execute(
+            "SELECT delivery_mode,schedule_times_json,minimum_schedule_gap_minutes,sync_strategy,sync_time "
+            "FROM devices WHERE id=?",
+            (device_id,),
+        ).fetchone()
+    assert device["delivery_mode"] == "inktime_offline_schedule"
+    assert json.loads(str(device["schedule_times_json"])) == ["08:00", "08:30", "09:30"]
+    assert device["minimum_schedule_gap_minutes"] == 30
+    assert device["sync_strategy"] == "fixed_daily"
+    assert device["sync_time"] == "07:30"
 
 
 @pytest.mark.parametrize(

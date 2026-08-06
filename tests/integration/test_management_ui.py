@@ -52,6 +52,43 @@ def test_primary_management_pages_render(client, app):
     assert "照片平滑（減少色塊／雜點）" in settings
 
 
+def test_device_runtime_summary_exposes_persisted_versions_and_unknowns_as_null(client, app):
+    create_admin(app)
+    login(client)
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "Runtime Summary",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00", "20:00"],
+        sync_strategy="fixed_daily",
+        sync_time="07:30",
+    )
+    response = client.get(f"/api/v1/devices/{device_id}/runtime-summary")
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["desired_config_version"] == 1
+    assert body["applied_config_version"] == 0
+    assert body["desired_offline_schedule_version"] == 1
+    assert body["applied_offline_schedule_version"] == 0
+    assert body["today_timeline"] == []
+    assert body["next_display_slot"] is None
+    assert body["active_schedule"] is None
+    assert body["staged_schedule"] is None
+    assert body["last_known"]["firmware_version"] is None
+    assert body["fallback_recovery"] is None
+
+
+def test_device_runtime_summary_polling_aborts_a_hung_request(client, app):
+    create_admin(app)
+    login(client)
+    response = client.get("/devices")
+    body = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert "const requestTimeout=setTimeout(()=>controller.abort(),Math.max(0,deadline-Date.now()))" in body
+    assert "clearTimeout(requestTimeout)" in body
+    assert "runtimeSummaryControllers.forEach(controller=>controller.abort())" in body
+
+
 def test_stock_photopainter_display_controls_are_scoped_and_server_side(client, app):
     create_admin(app)
     login(client)
