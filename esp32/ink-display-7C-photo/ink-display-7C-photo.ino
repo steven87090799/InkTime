@@ -132,6 +132,12 @@ struct RuntimeTelemetry {
   uint32_t nvs_write_count = 0;
   uint32_t ack_event_count = 0;
   uint32_t ack_batch_request_count = 0;
+  uint32_t i2c_retry_count = 0;
+  uint32_t i2c_bus_reset_count = 0;
+  uint32_t i2c_fail_closed_count = 0;
+  uint32_t gc_deleted_files = 0;
+  uint32_t gc_deleted_bytes = 0;
+  uint32_t gc_skipped_protected = 0;
   uint32_t epd_transfer_ms = 0;
   uint32_t applied_offline_schedule_version = 0;
   int64_t next_wake_epoch = 0;
@@ -716,6 +722,33 @@ static StoredDisplayRecord loadDisplayRecord() {
     && (record.rotation == 0 || record.rotation == 180);
   return record;
 }
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+static void runFormalFrameGcForWake() {
+  String activeScheduleJson;
+  String stagedNextScheduleJson;
+  (void)photoPainter.readActiveSchedule(activeScheduleJson);
+  (void)photoPainter.readStagedNextSchedule(stagedNextScheduleJson);
+  const StoredDisplayRecord lastGood = loadDisplayRecord();
+  const char* lastGoodSha256 = lastGood.valid && lastGood.succeeded
+    ? lastGood.sha256.c_str()
+    : nullptr;
+  const char* recoverySha256 = offlineScheduleTxnBlocked
+    && inktime::isSha256Hex(currentPayloadSha256.c_str())
+    ? currentPayloadSha256.c_str()
+    : nullptr;
+  // Formal Frame GC is best-effort.  Transactional .tmp/.bak artifacts remain
+  // outside the candidate set, while the active/staged/current/last-good and
+  // recovery references are explicit protection fences.
+  (void)photoPainter.runFormalFrameGc(
+    activeScheduleJson.c_str(),
+    stagedNextScheduleJson.c_str(),
+    currentPayloadSha256.c_str(),
+    lastGoodSha256,
+    photoPainter.inFlightFormalFrameSha256(),
+    recoverySha256);
+}
+#endif
 
 static void saveDisplayRecord(const Config &cfg, bool succeeded) {
   if (!inktime::isSha256HexValue(currentPayloadSha256.c_str())
@@ -3303,15 +3336,12 @@ static bool downloadOfflineScheduleSlot(
     return false;
   }
   uint8_t* nativeFrame = nullptr;
-  const uint32_t sourceHash = inktime::sourceHash32(expectedSha.c_str());
-  const bool converted = photoPainter.convertAndCache(
+  const bool converted = photoPainter.convertFrame(
     packed,
     packedSize,
     indexed4,
-    sourceHash,
     rotation,
-    &nativeFrame,
-    expectedSha.c_str());
+    &nativeFrame);
   heap_caps_free(packed);
   if (!converted || nativeFrame == nullptr) {
     lastDeviceErrorCode = "DEVICE-OFFLINE-FRAME";
@@ -4858,6 +4888,12 @@ void reportDeviceStatus(Config &cfg, bool displayUpdated) {
     runtimeTelemetry.applied_offline_schedule_version = validatedScheduleVersion;
   }
   runtimeTelemetry.epd_transfer_ms = photoPainter.lastRefreshDurationMs();
+  runtimeTelemetry.i2c_retry_count = photoPainter.i2cRetryCount();
+  runtimeTelemetry.i2c_bus_reset_count = photoPainter.i2cBusResetCount();
+  runtimeTelemetry.i2c_fail_closed_count = photoPainter.i2cFailClosedCount();
+  runtimeTelemetry.gc_deleted_files = photoPainter.gcDeletedFiles();
+  runtimeTelemetry.gc_deleted_bytes = photoPainter.gcDeletedBytes();
+  runtimeTelemetry.gc_skipped_protected = photoPainter.gcSkippedProtected();
 #endif
   JsonDocument payload;
   payload["firmware_version"] = INKTIME_FIRMWARE_VERSION;
@@ -4879,6 +4915,12 @@ void reportDeviceStatus(Config &cfg, bool displayUpdated) {
   payload["nvs_write_count"] = runtimeTelemetry.nvs_write_count;
   payload["ack_event_count"] = runtimeTelemetry.ack_event_count;
   payload["ack_batch_request_count"] = runtimeTelemetry.ack_batch_request_count;
+  payload["i2c_retry_count"] = runtimeTelemetry.i2c_retry_count;
+  payload["i2c_bus_reset_count"] = runtimeTelemetry.i2c_bus_reset_count;
+  payload["i2c_fail_closed_count"] = runtimeTelemetry.i2c_fail_closed_count;
+  payload["gc_deleted_files"] = runtimeTelemetry.gc_deleted_files;
+  payload["gc_deleted_bytes"] = runtimeTelemetry.gc_deleted_bytes;
+  payload["gc_skipped_protected"] = runtimeTelemetry.gc_skipped_protected;
   payload["tls_handshake_count_unavailable"] = runtimeTelemetry.tls_handshake_count_unavailable;
   payload["tls_handshake_count_unavailable_reason"] =
       runtimeTelemetry.tls_handshake_count_unavailable_reason;
@@ -5586,6 +5628,10 @@ void setup() {
       (void)promoteStagedNextIfDue(g_cfg, bootRtcEpoch);
     }
   }
+#endif
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+  runFormalFrameGcForWake();
 #endif
 
   if (!g_cfg.valid) {

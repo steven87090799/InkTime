@@ -40,6 +40,13 @@ class PhotoPainterSupport {
     DisplayRotation rotation,
     uint8_t** output
   );
+  bool convertFrame(
+    const uint8_t* wire,
+    size_t wireLength,
+    bool indexed4,
+    DisplayRotation rotation,
+    uint8_t** output
+  );
   bool convertAndCache(
     const uint8_t* wire,
     size_t wireLength,
@@ -54,6 +61,14 @@ class PhotoPainterSupport {
     DisplayRotation rotation,
     const uint8_t* framebuffer,
     size_t length
+  );
+  bool runFormalFrameGc(
+    const char* activeScheduleJson,
+    const char* stagedNextScheduleJson,
+    const char* currentFrameSha256,
+    const char* lastGoodFrameSha256,
+    const char* inFlightFrameSha256,
+    const char* recoveryFrameSha256
   );
   bool writeActiveSchedule(const char* json, size_t length);
   bool readActiveSchedule(String& json);
@@ -98,6 +113,15 @@ class PhotoPainterSupport {
   uint32_t sdReadBytes() const { return sdReadBytes_; }
   uint32_t sdWriteBytes() const { return sdWriteBytes_; }
   uint32_t sdWriteDurationMs() const { return sdWriteDurationMs_; }
+  uint32_t i2cRetryCount() const;
+  uint32_t i2cBusResetCount() const;
+  uint32_t i2cFailClosedCount() const;
+  uint32_t gcDeletedFiles() const { return gcDeletedFiles_; }
+  uint32_t gcDeletedBytes() const { return gcDeletedBytes_; }
+  uint32_t gcSkippedProtected() const { return gcSkippedProtected_; }
+  const char* inFlightFormalFrameSha256() const {
+    return formalFrameInFlightSha256_.c_str();
+  }
   CacheStatus cacheStatus() const { return cacheStatus_; }
   const char* lastError() const { return lastError_; }
 
@@ -120,6 +144,10 @@ class PhotoPainterSupport {
   uint32_t sdReadBytes_ = 0;
   uint32_t sdWriteBytes_ = 0;
   uint32_t sdWriteDurationMs_ = 0;
+  uint32_t gcDeletedFiles_ = 0;
+  uint32_t gcDeletedBytes_ = 0;
+  uint32_t gcSkippedProtected_ = 0;
+  String formalFrameInFlightSha256_;
   CacheStatus cacheStatus_ = CacheStatus::Disabled;
   const char* lastError_ = "";
 };

@@ -405,6 +405,12 @@ def test_device_status_is_recorded_without_exposing_token(client, app):
             "nvs_write_count": 3,
             "ack_event_count": 1,
             "ack_batch_request_count": 0,
+            "i2c_retry_count": 2,
+            "i2c_bus_reset_count": 1,
+            "i2c_fail_closed_count": 0,
+            "gc_deleted_files": 3,
+            "gc_deleted_bytes": 720000,
+            "gc_skipped_protected": 4,
             "epd_transfer_ms": 25000,
             "applied_offline_schedule_version": 7,
             "next_wake_epoch": 1760000000,
@@ -436,6 +442,12 @@ def test_device_status_is_recorded_without_exposing_token(client, app):
     assert details["wifi_fast_path_success"] is True
     assert details["download_bytes"] == 96000
     assert details["nvs_write_count"] == 3
+    assert details["i2c_retry_count"] == 2
+    assert details["i2c_bus_reset_count"] == 1
+    assert details["i2c_fail_closed_count"] == 0
+    assert details["gc_deleted_files"] == 3
+    assert details["gc_deleted_bytes"] == 720000
+    assert details["gc_skipped_protected"] == 4
     assert details["tls_handshake_count_unavailable_reason"] == (
         "transport_api_does_not_expose_handshake_count"
     )
@@ -469,6 +481,8 @@ def test_device_status_rejects_malformed_numeric_telemetry(client, app):
         ("wifi_connect_ms", 120_001),
         ("http_request_count", 129),
         ("download_bytes", 4_294_967_296),
+        ("i2c_retry_count", 4_294_967_296),
+        ("gc_deleted_bytes", 4_294_967_296),
         ("next_wake_epoch", -1),
         ("wifi_fast_path_success", "true"),
         ("wake_reason_detail", "x" * 65),
