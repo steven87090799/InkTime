@@ -37,6 +37,8 @@ def test_config_payload_and_envelopes_are_complete_and_bounded():
         "prefetch_lead_minutes",
         "delivery_mode",
         "button_wake_action",
+        "sync_strategy",
+        "sync_time",
         "config_version",
     ):
         assert field in core
@@ -54,7 +56,22 @@ def test_config_payload_and_envelopes_are_complete_and_bounded():
     assert "std::string" in core
     assert "memcpy" not in core
     assert "schema >= 3U" in core
+    assert "schema >= 4U" in core
+    assert "kMaxSyncStrategyBytes" in core
+    assert "valid_sync_policy" in core
     assert "kMaxPairingNonceBytes" in core
+
+
+def test_firmware_persists_sync_policy_with_config_version_and_maps_legacy_defaults():
+    core = CORE.read_text(encoding="utf-8")
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    assert "constexpr uint8_t kPayloadSchemaVersion = 4U" in core
+    assert "schema != 3U" in core
+    assert "payload.sync_strategy = cfg.sync_strategy.c_str();" in firmware
+    assert "payload.sync_time = cfg.sync_time.c_str();" in firmware
+    assert "cfg.sync_strategy = payload.sync_strategy.c_str();" in firmware
+    assert "cfg.sync_time = payload.sync_time.c_str();" in firmware
+    assert 'payload.sync_strategy = "first_display_lead"' in core
 
 
 def test_config_store_reopens_read_only_and_restores_pointer_on_commit_failure():

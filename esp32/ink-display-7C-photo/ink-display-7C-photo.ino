@@ -993,6 +993,8 @@ static inktime::configstore::ConfigPayload configPayload(const Config &cfg) {
   payload.refresh_hour = cfg.refresh_hour;
   payload.refresh_minute = cfg.refresh_minute;
   payload.rotate180 = cfg.rotate180;
+  payload.sync_strategy = cfg.sync_strategy.c_str();
+  payload.sync_time = cfg.sync_time.c_str();
   payload.config_version = cfg.config_version;
 #if INKTIME_PHOTOPAINTER_ENABLED
   payload.schedule_count = cfg.schedule_count;
@@ -1037,8 +1039,8 @@ static void applyConfigPayload(const inktime::configstore::ConfigPayload &payloa
   cfg.refresh_hour = payload.refresh_hour;
   cfg.refresh_minute = payload.refresh_minute;
   cfg.rotate180 = payload.rotate180;
-  cfg.sync_strategy = "first_display_lead";
-  cfg.sync_time = "";
+  cfg.sync_strategy = payload.sync_strategy.c_str();
+  cfg.sync_time = payload.sync_time.c_str();
   cfg.config_version = payload.config_version;
 #if INKTIME_PHOTOPAINTER_ENABLED
   cfg.schedule_count = payload.schedule_count;
