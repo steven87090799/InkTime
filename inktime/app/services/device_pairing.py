@@ -388,8 +388,51 @@ class DevicePairingService:
                     raise DevicePairingError("目前無法建立此配對請求", status_code=409, error_code="PAIR-003")
                 if state == "pairing_pending" and device["auth_revoked_at"] and not self._is_future(device["repair_allowed_until"], now):
                     raise DevicePairingError("目前無法建立此配對請求", status_code=409, error_code="PAIR-003")
+            config_source: dict[str, Any] = {}
+            if device is not None:
+                config_source = {
+                    "name": device["name"],
+                    "timezone": device["timezone"] or "Asia/Taipei",
+                    "schedule": device["schedule"] or "08:00",
+                    "rotation": device["rotation"] if device["rotation"] is not None else 0,
+                    "panel_profile": device["panel_profile"] or "safe_4c",
+                    "delivery_mode": device["delivery_mode"] or "legacy_online",
+                    "prefetch_lead_minutes": (
+                        device["prefetch_lead_minutes"]
+                        if device["prefetch_lead_minutes"] is not None
+                        else 5
+                    ),
+                    "button_wake_action": device["button_wake_action"] or "check_new",
+                    "minimum_schedule_gap_minutes": (
+                        device["minimum_schedule_gap_minutes"]
+                        if device["minimum_schedule_gap_minutes"] is not None
+                        else MINIMUM_SCHEDULE_GAP_MINUTES
+                    ),
+                    "sync_strategy": device["sync_strategy"] or "first_display_lead",
+                    "sync_time": device["sync_time"],
+                    "frame_orientation": device["frame_orientation"],
+                    "layout_mode": device["layout_mode"],
+                    "fit_mode": device["fit_mode"],
+                }
+                schedule_values = None
+                for field in ("schedule_times_json", "offline_schedule_json"):
+                    try:
+                        candidate = json.loads(str(device[field] or "[]"))
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        candidate = None
+                    if isinstance(candidate, list) and candidate:
+                        schedule_values = candidate
+                        break
+                if schedule_values is not None:
+                    config_source["schedule_times"] = schedule_values
+            config_source.update(
+                {
+                    "name": device_name or config_source.get("name"),
+                    "panel_profile": panel_profile or config_source.get("panel_profile", "safe_4c"),
+                }
+            )
             config = self._normalize_config(
-                {"name": device_name, "panel_profile": panel_profile or "safe_4c"},
+                config_source,
                 fallback_name=device_name or f"待配對裝置 {device_id[-6:]}",
             )
             pairing_id = secrets.token_urlsafe(24)
