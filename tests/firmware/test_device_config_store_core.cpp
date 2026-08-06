@@ -38,8 +38,49 @@ ConfigPayload payload(const std::string& suffix) {
   value.prefetch_lead_minutes = 17;
   value.delivery_mode = "inktime_offline_schedule";
   value.button_wake_action = "local_next";
+  value.sync_strategy = "fixed_daily";
+  value.sync_time = "07:30";
   value.config_version = 42;
   return value;
+}
+
+std::string legacySchema3Payload(const ConfigPayload& value) {
+  std::string output;
+  using inktime::configstore::append_i32;
+  using inktime::configstore::append_string;
+  using inktime::configstore::append_u16;
+  using inktime::configstore::append_u32;
+  using inktime::configstore::append_u64;
+  using inktime::configstore::append_u8;
+  append_u8(output, 3U);
+  assert(append_string(output, value.wifi_ssid, inktime::configstore::kMaxWifiSsidBytes));
+  assert(append_string(output, value.wifi_pass, inktime::configstore::kMaxWifiPasswordBytes));
+  assert(append_string(output, value.backend_hostport, inktime::configstore::kMaxBackendHostportBytes));
+  assert(append_string(output, value.ca_pem, inktime::configstore::kMaxCaPemBytes));
+  assert(append_string(output, value.device_token, inktime::configstore::kMaxDeviceTokenBytes));
+  append_i32(output, value.tz_offset_minutes);
+  append_u8(output, value.refresh_hour);
+  append_u8(output, value.refresh_minute);
+  append_u8(output, value.rotate180 ? 1U : 0U);
+  append_u8(output, value.schedule_count);
+  append_u16(output, value.prefetch_lead_minutes);
+  assert(append_string(output, value.delivery_mode, inktime::configstore::kMaxDeliveryModeBytes));
+  assert(append_string(output, value.button_wake_action, inktime::configstore::kMaxButtonWakeActionBytes));
+  assert(append_string(output, value.device_secret, inktime::configstore::kMaxDeviceSecretBytes));
+  assert(append_string(output, value.device_id, inktime::configstore::kMaxDeviceIdBytes));
+  assert(append_string(output, value.auth_state, inktime::configstore::kMaxAuthStateBytes));
+  assert(append_string(output, value.pairing_id, inktime::configstore::kMaxPairingIdBytes));
+  assert(append_string(output, value.pairing_nonce, inktime::configstore::kMaxPairingNonceBytes));
+  append_u32(output, value.config_version);
+  append_u32(output, value.credential_version);
+  append_u64(output, value.pairing_expires_at_epoch);
+  append_u64(output, value.pairing_retry_at_epoch);
+  append_u8(output, value.pairing_retry_attempt);
+  for (uint8_t index = 0U; index < inktime::configstore::kMaxConfigSlots; ++index) {
+    append_u8(output, value.schedule_slots[index].hour);
+    append_u8(output, value.schedule_slots[index].minute);
+  }
+  return output;
 }
 
 bool decodeSlot(
@@ -195,6 +236,18 @@ void test_payload_roundtrip_and_empty_overwrite() {
   assert(inktime::configstore::serialize_payload(empty, encoded, error));
   assert(inktime::configstore::deserialize_payload(encoded, decoded, error));
   assert(decoded == empty);
+}
+
+void test_legacy_schema_defaults_new_sync_policy_fields() {
+  const ConfigPayload original = payload("legacy");
+  const std::string encoded = legacySchema3Payload(original);
+  ConfigPayload decoded;
+  std::string error;
+  assert(inktime::configstore::deserialize_payload(encoded, decoded, error));
+  ConfigPayload expected = original;
+  expected.sync_strategy = "first_display_lead";
+  expected.sync_time.clear();
+  assert(decoded == expected);
 }
 
 void test_envelope_rejects_corruption_and_shape_changes() {
@@ -354,6 +407,7 @@ void test_pointer_and_journal_roundtrip() {
 
 int main() {
   test_payload_roundtrip_and_empty_overwrite();
+  test_legacy_schema_defaults_new_sync_policy_fields();
   test_envelope_rejects_corruption_and_shape_changes();
   test_ab_pointer_and_write_failure_injection();
   test_pointer_selection_prefers_pointer_and_falls_back_to_oldest_safe_slot();
