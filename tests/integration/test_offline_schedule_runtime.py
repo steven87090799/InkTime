@@ -324,7 +324,7 @@ def test_offline_prepare_rejects_invalid_dates_config_and_snapshot_inputs(app):
 
     with pytest.raises(ValueError, match="YYYY-MM-DD"):
         repository.prepare_day(device_id=device_id, target_date="bad-date", release_ids=[first["release_id"]])
-    with pytest.raises(ValueError, match="最多 12"):
+    with pytest.raises(ValueError, match="最多 24"):
         repository.prepare_day(device_id=device_id, target_date="2026-08-03", release_ids=[])
     with pytest.raises(ValueError, match="Release ID"):
         repository.prepare_day(device_id=device_id, target_date="2026-08-03", release_ids=["bad/id"])

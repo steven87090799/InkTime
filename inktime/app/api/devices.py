@@ -111,7 +111,7 @@ def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
         )
         schedule_values = validate_offline_schedule(
             schedule_values,
-            maximum=12,
+            maximum=24,
             minimum_gap_minutes=minimum_schedule_gap_minutes,
         )
     except ValueError as exc:
@@ -663,6 +663,32 @@ def prepare_offline_schedule(device_id: str):
         abort(400, description=str(exc))
 
 
+@bp.post("/api/v1/devices/<device_id>/offline-schedule/<schedule_id>/slots/<int:slot_index>")
+@administrator_required
+def replace_offline_schedule_slot(device_id: str, schedule_id: str, slot_index: int):
+    payload = _json_payload("DEVICE-008", maximum_bytes=32 * 1024)
+    release_id = str(payload.get("release_id", "")).strip()
+    expected = payload.get("expected_config_version")
+    try:
+        expected_version = None if expected is None else int(expected)
+    except (TypeError, ValueError):
+        abort(400, description="DEVICE-008 expected_config_version 必須是整數")
+    try:
+        return _offline_schedules().replace_slot(
+            device_id=device_id,
+            schedule_id=schedule_id,
+            slot_index=slot_index,
+            release_id=release_id,
+            expected_config_version=expected_version,
+        )
+    except KeyError:
+        abort(404, description="DEVICE-002 找不到或停用的離線排程")
+    except IndexError:
+        abort(404, description="DEVICE-008 找不到指定 Slot")
+    except ValueError as exc:
+        abort(409, description=str(exc))
+
+
 @bp.get("/api/device/v1/offline-schedule")
 def device_offline_schedule():
     device = authenticate_device_request()
@@ -750,7 +776,7 @@ def device_offline_schedule():
             result["schedule"]["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
         )
         schedule_times = validate_offline_schedule(
-            schedule_times, maximum=12, minimum_gap_minutes=minimum_gap_minutes
+            schedule_times, maximum=24, minimum_gap_minutes=minimum_gap_minutes
         )
     except (TypeError, ValueError, json.JSONDecodeError):
         abort(409, description="DEVICE-008 離線排程快照 schedule_times 不可解析")
@@ -824,6 +850,12 @@ def device_offline_schedule():
         # the field present so firmware can fail closed without guessing.
         next_prefetch_epoch = 0
     queue_version = max((int(slot.get("queue_version") or 0) for slot in slots), default=0)
+    snapshot_json = device_projection.get("snapshot_json")
+    playlist_version = str(
+        result.get("playlist_version")
+        or (snapshot_json.get("playlist_version") if isinstance(snapshot_json, dict) else "")
+        or ""
+    )
     return {
         "schema_version": 1,
         "device_id": str(device["id"]),
@@ -850,6 +882,7 @@ def device_offline_schedule():
         "sync_strategy": normalized_sync_strategy,
         "sync_time": normalized_sync_time,
         "queue_version": queue_version,
+        "playlist_version": playlist_version,
         "status": str(schedule["status"]),
         "slots": slots,
     }

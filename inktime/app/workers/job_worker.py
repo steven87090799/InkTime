@@ -8,6 +8,11 @@ import time
 from typing import Any, Callable
 from uuid import uuid4
 
+from inktime.app.domain.jobs.failure_policy import (
+    FailureClass,
+    classify_failure,
+    failure_code,
+)
 from inktime.app.repositories.jobs import JobRepository
 
 
@@ -105,7 +110,7 @@ class BoundedJobWorker:
 
     def _record_failure(self, job_id: str, item_id: str, exc: Exception) -> None:
         self.failure_count += 1
-        code = str(getattr(exc, "code", "JOB-003"))
+        code = failure_code(exc)
         if code.startswith("BUDGET-"):
             self.repository.defer_item(item_id)
             self.repository.transition(
@@ -117,9 +122,10 @@ class BoundedJobWorker:
             if self.error_callback:
                 self.error_callback(job_id, item_id, exc, self.failure_count)
             return
-        # Frozen Provider configuration is deterministic for this Job. Retrying
-        # cannot make an empty, deleted, disabled, or revised route valid.
-        attempts = 1 if code in {"VLM-008", "ANALYSIS-DISABLED"} else self.max_attempts
+        # Deterministic business/configuration outcomes are dead-lettered on
+        # their first claim.  Only the central policy may decide that a code is
+        # terminal; transient failures retain the bounded exponential retry.
+        attempts = 1 if classify_failure(exc) == FailureClass.TERMINAL_NO_RETRY else self.max_attempts
         self.repository.fail_item(job_id, item_id, code, str(exc), max_attempts=attempts)
         if self.error_callback and (
             self.failure_count <= 3 or self.failure_count % self.progress_interval_items == 0

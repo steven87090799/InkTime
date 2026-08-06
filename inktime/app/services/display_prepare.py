@@ -7,6 +7,12 @@ import re
 from typing import Any
 
 from inktime.app.db import Database
+from inktime.app.domain.jobs.failure_policy import (
+    JobConfigurationError,
+    NoContentError,
+    NoEligibleCandidatesError,
+    JobFailure,
+)
 from inktime.app.domain.photopainter.offline_schedule import (
     MINIMUM_SCHEDULE_GAP_MINUTES,
     validate_offline_schedule,
@@ -42,50 +48,52 @@ class DisplayPrepareConfig:
     @classmethod
     def from_mapping(cls, value: Any) -> "DisplayPrepareConfig":
         if not isinstance(value, dict):
-            raise ValueError("DISPLAY-001 display_prepare 必須是 JSON 物件")
+            raise JobConfigurationError("DISPLAY-001 display_prepare 必須是 JSON 物件")
         unknown = sorted(set(value) - cls.ALLOWED_KEYS)
         if unknown:
-            raise ValueError(f"DISPLAY-001 不支援的 display_prepare 欄位：{', '.join(unknown)}")
+            raise JobConfigurationError(
+                f"DISPLAY-001 不支援的 display_prepare 欄位：{', '.join(unknown)}"
+            )
 
         def bounded_int(key: str, default: int, lower: int, upper: int) -> int:
             raw = value.get(key, default)
             if type(raw) is not int:
-                raise ValueError(f"DISPLAY-001 {key} 必須是整數")
+                raise JobConfigurationError(f"DISPLAY-001 {key} 必須是整數")
             if not lower <= raw <= upper:
-                raise ValueError(f"DISPLAY-001 {key} 必須介於 {lower} 到 {upper}")
+                raise JobConfigurationError(f"DISPLAY-001 {key} 必須介於 {lower} 到 {upper}")
             return raw
 
         display_times_raw = value.get("display_times", ["08:00"])
         if not isinstance(display_times_raw, list) or not display_times_raw:
-            raise ValueError("DISPLAY-001 display_times 必須是非空陣列")
+            raise JobConfigurationError("DISPLAY-001 display_times 必須是非空陣列")
         display_times = tuple(dict.fromkeys(str(item) for item in display_times_raw))
         if any(not _CLOCK.fullmatch(item) for item in display_times):
-            raise ValueError("DISPLAY-001 display_times 必須使用 HH:MM")
-        daily_count = bounded_int("daily_count", 1, 1, 20)
+            raise JobConfigurationError("DISPLAY-001 display_times 必須使用 HH:MM")
+        daily_count = bounded_int("daily_count", 1, 1, 24)
         if len(display_times) < daily_count:
-            raise ValueError("DISPLAY-001 display_times 不得少於 daily_count")
+            raise JobConfigurationError("DISPLAY-001 display_times 不得少於 daily_count")
 
         device_ids_raw = value.get("device_ids", [])
         if not isinstance(device_ids_raw, list) or any(
             not isinstance(item, str) or not item.strip() for item in device_ids_raw
         ):
-            raise ValueError("DISPLAY-001 device_ids 必須是裝置 ID 陣列")
+            raise JobConfigurationError("DISPLAY-001 device_ids 必須是裝置 ID 陣列")
         years_raw = value.get("candidate_years", [])
         if not isinstance(years_raw, list):
-            raise ValueError("DISPLAY-001 candidate_years 必須是年份陣列")
+            raise JobConfigurationError("DISPLAY-001 candidate_years 必須是年份陣列")
         years: list[int] = []
         for raw in years_raw:
             if type(raw) is not int:
-                raise ValueError("DISPLAY-001 candidate_years 必須是年份陣列")
+                raise JobConfigurationError("DISPLAY-001 candidate_years 必須是年份陣列")
             if not 1900 <= raw <= 2200:
-                raise ValueError("DISPLAY-001 candidate_years 超出 1900 到 2200")
+                raise JobConfigurationError("DISPLAY-001 candidate_years 超出 1900 到 2200")
             years.append(raw)
         ai_fallback = str(value.get("ai_fallback", "use_existing"))
         if ai_fallback not in {"use_existing", "skip", "fail"}:
-            raise ValueError("DISPLAY-001 ai_fallback 不支援")
+            raise JobConfigurationError("DISPLAY-001 ai_fallback 不支援")
         render_fallback = str(value.get("render_fallback", "keep_current"))
         if render_fallback not in {"keep_current", "fail"}:
-            raise ValueError("DISPLAY-001 render_fallback 不支援")
+            raise JobConfigurationError("DISPLAY-001 render_fallback 不支援")
         return cls(
             display_times=display_times,
             lead_minutes=bounded_int("lead_minutes", 30, 0, 1440),
@@ -127,6 +135,41 @@ class DisplayPreparationService:
         self.resilience = resilience_repository
         self.offline_schedules = offline_schedule_repository
 
+    def preview(self, raw_config: Any, *, target_date: date | None = None) -> dict[str, Any]:
+        """Return the exact deterministic candidate order without publishing."""
+
+        config = DisplayPrepareConfig.from_mapping(raw_config)
+        target = target_date or self.render_service._today()
+        candidates = self.render_service.select_candidates_details(
+            config.output_count,
+            target_date=target,
+            candidate_years=list(config.candidate_years),
+        )
+        target_times = config.target_times(target)
+        playlist = [
+            {
+                "slot_index": index,
+                "display_time": target_times[index % len(target_times)],
+                "photo_id": str(row["id"]),
+                "captured_at": row.get("captured_at"),
+                "match_type": row.get("match_type"),
+                "score": row.get("combined_score", row.get("local_display_score")),
+                "score_components": row.get("score_components", {}),
+            }
+            for index, row in enumerate(candidates)
+        ]
+        return {
+            "status": "preview",
+            "outcome": "ready" if playlist else "no_content",
+            "error_code": None if playlist else "NO_CONTENT",
+            "message": None if playlist else "目前沒有可顯示照片，請加入照片後重新執行。",
+            "target_display_times": list(target_times),
+            "preparation_times": list(config.preparation_times(target)),
+            "photo_ids": [entry["photo_id"] for entry in playlist],
+            "playlist": playlist,
+            "output_count": len(playlist),
+        }
+
     def _profiles(self, config: DisplayPrepareConfig) -> list[str]:
         if not config.device_ids:
             return [str(self.render_service.settings.get("render.profile", DEFAULT_RENDER_PROFILE))]
@@ -139,7 +182,7 @@ class DisplayPreparationService:
         found = {str(row["id"]): str(row["panel_profile"]) for row in rows}
         missing = [device_id for device_id in config.device_ids if device_id not in found]
         if missing:
-            raise ValueError("DISPLAY-004 指定裝置不存在或已停用")
+            raise JobConfigurationError("DISPLAY-004 指定裝置不存在或已停用")
         return list(dict.fromkeys(found[device_id] for device_id in config.device_ids))
 
     def prepare(self, raw_config: Any, *, created_by: str) -> dict:
@@ -150,10 +193,21 @@ class DisplayPreparationService:
         )
         if not candidates:
             if config.ai_fallback == "skip":
-                raise ValueError("DISPLAY-002 AI 尚未完成，排程依設定跳過且未更新成功狀態")
+                raise NoContentError("DISPLAY-002 AI 尚未完成，排程依設定跳過且未更新成功狀態")
             if config.ai_fallback == "fail":
-                raise ValueError("DISPLAY-003 AI 尚未完成，排程依設定失敗")
-            raise ValueError("DISPLAY-003 沒有既有且符合資格的分析結果")
+                raise NoContentError("DISPLAY-003 AI 尚未完成，排程依設定失敗")
+            target = self.render_service._today()
+            return {
+                "status": "completed",
+                "outcome": "no_content",
+                "error_code": "NO_CONTENT",
+                "message": "目前沒有可顯示照片，請加入照片後重新執行。",
+                "stage": "no_content",
+                "photo_ids": [],
+                "target_display_times": config.target_times(target),
+                "preparation_times": config.preparation_times(target),
+                "output_count": 0,
+            }
         photo_ids = [str(row["id"]) for row in candidates]
         target = self.render_service._today()
         try:
@@ -170,7 +224,10 @@ class DisplayPreparationService:
             result = self.render_service.publish(photo_ids, created_by, **publish_kwargs)
         except Exception as exc:
             if config.render_fallback == "keep_current":
-                raise ValueError("DISPLAY-005 渲染失敗；已保留目前正式 Release，排程未標記成功") from exc
+                raise JobFailure(
+                    "DISPLAY-005 渲染失敗；已保留目前正式 Release，排程未標記成功",
+                    code="DISPLAY-005",
+                ) from exc
             raise
         return {
             "release": result,
@@ -212,11 +269,11 @@ class DisplayPreparationService:
         """
 
         if self.offline_schedules is None or self.resilience is None:
-            raise RuntimeError("DISPLAY-006 Enhanced offline schedule services 未配置")
+            raise JobConfigurationError("DISPLAY-006 Enhanced offline schedule services 未配置")
         try:
             target = date.fromisoformat(str(target_date))
         except ValueError as exc:
-            raise ValueError("DISPLAY-006 target_date 必須是 YYYY-MM-DD") from exc
+            raise JobConfigurationError("DISPLAY-006 target_date 必須是 YYYY-MM-DD") from exc
         with self.database.session() as connection:
             device = connection.execute(
                 """
@@ -226,26 +283,26 @@ class DisplayPreparationService:
                 (device_id,),
             ).fetchone()
         if device is None:
-            raise ValueError("DISPLAY-004 指定裝置不存在或已停用")
+            raise JobConfigurationError("DISPLAY-004 指定裝置不存在或已停用")
         if expected_config_version is not None and int(device["config_version"]) != int(
             expected_config_version
         ):
-            raise ValueError("DISPLAY-CONFIG-RACE 裝置設定已變更，拒絕使用舊排程工作")
+            raise JobConfigurationError("DISPLAY-CONFIG-RACE 裝置設定已變更，拒絕使用舊排程工作")
         snapshot_config_version = int(device["config_version"])
         if str(device["delivery_mode"]) != "inktime_offline_schedule" or not bool(
             device["offline_prefetch_allowed"]
         ):
-            raise ValueError("QUEUE-005 裝置未啟用離線排程或 Prefetch")
+            raise JobConfigurationError("QUEUE-005 裝置未啟用離線排程或 Prefetch")
         try:
             schedule_times = validate_offline_schedule(
                 json.loads(str(device["schedule_times_json"] or "[]")),
-                maximum=12,
+                maximum=24,
                 minimum_gap_minutes=int(
                     device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
                 ),
             )
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise ValueError("DISPLAY-006 裝置 schedule_times 不可解析") from exc
+            raise JobConfigurationError("DISPLAY-006 裝置 schedule_times 不可解析") from exc
 
         existing = self.offline_schedules.ready_for_device(
             device_id=device_id,
@@ -256,6 +313,7 @@ class DisplayPreparationService:
             return {
                 "status": "ready",
                 "idempotent": True,
+                "playlist_version": existing.get("playlist_version", ""),
                 "schedule": existing["schedule"],
                 "slots": existing["slots"],
             }
@@ -267,7 +325,7 @@ class DisplayPreparationService:
             dict((str(row["id"]), row) for row in candidates).values()
         )
         if len(unique_candidates) < len(schedule_times):
-            raise ValueError("DISPLAY-003 沒有足夠的既有且符合資格的分析結果")
+            raise NoEligibleCandidatesError("DISPLAY-003 沒有足夠的既有且符合資格的分析結果")
         self.resilience.ensure_queue(device_id, depth=max(3, len(schedule_times)))
 
         release_ids: list[str] = []
@@ -303,6 +361,7 @@ class DisplayPreparationService:
         return {
             "status": "ready",
             "idempotent": False,
+            "playlist_version": prepared.get("playlist_version", ""),
             "schedule": prepared["schedule"],
             "slots": prepared["slots"],
             "target_display_times": [

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
 from dataclasses import dataclass
+import hashlib
 import json
 import re
 from typing import Any, Sequence
@@ -23,7 +24,7 @@ from inktime.app.services.device_releases import payload_entry_from_manifest
 
 
 _RELEASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-MAX_PREPARED_SLOTS = 12
+MAX_PREPARED_SLOTS = 24
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,27 @@ class RetryAfterDetails:
 class OfflineScheduleRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
+
+    @staticmethod
+    def playlist_version(
+        *,
+        device_id: str,
+        target_date: str,
+        config_version: int,
+        schedule_times: Sequence[str],
+        release_ids: Sequence[str],
+    ) -> str:
+        """Return the immutable identity of one prepared device-day playlist."""
+
+        material = {
+            "device_id": str(device_id),
+            "target_date": str(target_date),
+            "config_version": int(config_version),
+            "schedule_times": [str(value) for value in schedule_times],
+            "release_ids": [str(value) for value in release_ids],
+        }
+        encoded = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _date(value: str) -> date:
@@ -320,6 +342,23 @@ class OfflineScheduleRepository:
             snapshot_json = json.loads(str(schedule["snapshot_json"] or "{}"))
         except (TypeError, ValueError, json.JSONDecodeError):
             snapshot_json = {}
+        playlist_version = str(
+            snapshot_json.get("playlist_version") if isinstance(snapshot_json, dict) else ""
+        )
+        if not playlist_version:
+            try:
+                schedule_times = json.loads(str(schedule["schedule_times_json"] or "[]"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                schedule_times = []
+            release_ids = [str(slot["release_id"]) for slot in normalized_slots]
+            if isinstance(schedule_times, list) and len(schedule_times) == len(release_ids) and release_ids:
+                playlist_version = self.playlist_version(
+                    device_id=str(schedule["device_id"]),
+                    target_date=str(schedule["target_date"]),
+                    config_version=int(schedule["config_version"]),
+                    schedule_times=schedule_times,
+                    release_ids=release_ids,
+                )
         device_snapshot = {
             "id": str(schedule["device_id"]),
             "panel_profile": str(schedule["panel_profile"]),
@@ -339,6 +378,7 @@ class OfflineScheduleRepository:
         return {
             "schedule": dict(schedule),
             "device": device_snapshot,
+            "playlist_version": playlist_version,
             "slots": normalized_slots,
         }
 
@@ -466,7 +506,7 @@ class OfflineScheduleRepository:
     ) -> dict[str, Any]:
         day = self._date(target_date)
         if not 1 <= len(release_ids) <= MAX_PREPARED_SLOTS:
-            raise ValueError("DEVICE-008 一日離線排程最多 12 個 Slot")
+            raise ValueError("DEVICE-008 一日離線排程最多 24 個 Slot")
         normalized_release_ids = [str(value).strip() for value in release_ids]
         if any(_RELEASE_ID.fullmatch(value) is None for value in normalized_release_ids):
             raise ValueError("QUEUE-002 Release ID 不合法")
@@ -514,6 +554,13 @@ class OfflineScheduleRepository:
                 )
                 if len(normalized_release_ids) != len(configured_times):
                     raise ValueError("DEVICE-008 Release 數量必須等於裝置 schedule_times 數量")
+                playlist_version = self.playlist_version(
+                    device_id=device_id,
+                    target_date=day.isoformat(),
+                    config_version=current_config_version,
+                    schedule_times=configured_times,
+                    release_ids=normalized_release_ids,
+                )
                 existing = connection.execute(
                     """
                     SELECT id,status FROM device_offline_schedules
@@ -522,7 +569,12 @@ class OfflineScheduleRepository:
                     (device_id, day.isoformat(), current_config_version),
                 ).fetchone()
                 if existing is not None and str(existing["status"]) == "ready":
-                    return self._row(connection, str(existing["id"])) or {}
+                    existing_row = self._row(connection, str(existing["id"])) or {}
+                    if str(existing_row.get("playlist_version") or "") == playlist_version:
+                        return existing_row
+                    raise ValueError(
+                        "QUEUE-005 相同裝置、日期與設定版本已有不同 Playlist；請只替換指定 Slot"
+                    )
                 schedule_id = str(existing["id"]) if existing is not None else str(uuid4())
                 snapshot = {
                     "panel_profile": str(device["panel_profile"]),
@@ -536,6 +588,7 @@ class OfflineScheduleRepository:
                     "sync_strategy": sync_strategy,
                     "sync_time": sync_time,
                     "config_version": current_config_version,
+                    "playlist_version": playlist_version,
                 }
                 connection.execute(
                     """
@@ -737,7 +790,155 @@ class OfflineScheduleRepository:
             result = self._row(connection, schedule_id)
             if result is None:
                 raise RuntimeError("DEVICE-008 離線排程準備結果不存在")
+            result["playlist_version"] = playlist_version
             return result
+
+    def replace_slot(
+        self,
+        *,
+        device_id: str,
+        schedule_id: str,
+        slot_index: int,
+        release_id: str,
+        expected_config_version: int | None = None,
+    ) -> dict[str, Any]:
+        """Replace one future playlist slot without reselecting its siblings."""
+
+        if type(slot_index) is not int or slot_index < 0:
+            raise ValueError("DEVICE-008 slot_index 不合法")
+        normalized_release_id = str(release_id).strip()
+        if _RELEASE_ID.fullmatch(normalized_release_id) is None:
+            raise ValueError("QUEUE-002 Release ID 不合法")
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                schedule = connection.execute(
+                    """
+                    SELECT * FROM device_offline_schedules
+                    WHERE id=? AND device_id=? AND status='ready'
+                    """,
+                    (schedule_id, device_id),
+                ).fetchone()
+                if schedule is None:
+                    raise KeyError(schedule_id)
+                device = connection.execute(
+                    "SELECT enabled,delivery_mode,offline_prefetch_allowed,config_version FROM devices WHERE id=?",
+                    (device_id,),
+                ).fetchone()
+                if device is None or not bool(device["enabled"]):
+                    raise KeyError(device_id)
+                if (
+                    str(device["delivery_mode"]) != "inktime_offline_schedule"
+                    or not bool(device["offline_prefetch_allowed"])
+                    or int(device["config_version"]) != int(schedule["config_version"])
+                ):
+                    raise ValueError("DISPLAY-CONFIG-RACE 裝置設定已變更，拒絕替換舊排程 Slot")
+                if expected_config_version is not None and int(schedule["config_version"]) != int(
+                    expected_config_version
+                ):
+                    raise ValueError("DISPLAY-CONFIG-RACE 裝置設定已變更，拒絕替換舊排程 Slot")
+                slot = connection.execute(
+                    """
+                    SELECT * FROM device_offline_schedule_slots
+                    WHERE schedule_id=? AND slot_index=?
+                    """,
+                    (schedule_id, slot_index),
+                ).fetchone()
+                if slot is None:
+                    raise IndexError(slot_index)
+                queue_item = connection.execute(
+                    "SELECT * FROM device_content_queue_items WHERE id=? AND device_id=?",
+                    (slot["queue_item_id"], device_id),
+                ).fetchone()
+                if queue_item is None or str(queue_item["status"]) not in {"PENDING", "READY"}:
+                    raise ValueError("QUEUE-005 已下載或已顯示的 Slot 不可替換")
+                if not self._is_future_item(queue_item["display_after"], now):
+                    raise ValueError("QUEUE-005 已到期或目前 Slot 不可替換")
+                if str(slot["release_id"]) == normalized_release_id:
+                    connection.execute("COMMIT")
+                    return self._row(connection, schedule_id) or {}
+                release = connection.execute(
+                    """
+                    SELECT id,manifest_json FROM releases
+                    WHERE id=? AND status='published' AND render_profile=?
+                    """,
+                    (normalized_release_id, str(schedule["panel_profile"])),
+                ).fetchone()
+                if release is None:
+                    raise ValueError("QUEUE-002 Release 不存在、未發布或 Profile 不相容")
+                duplicate = connection.execute(
+                    """
+                    SELECT 1 FROM device_content_queue_items
+                    WHERE device_id=? AND release_id=? AND id<>?
+                      AND status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')
+                    LIMIT 1
+                    """,
+                    (device_id, normalized_release_id, slot["queue_item_id"]),
+                ).fetchone()
+                if duplicate is not None:
+                    raise ValueError("QUEUE-005 Release 已在活動 Queue 中，不可重複佔用 Slot")
+                entry = self._manifest_entry(str(release["manifest_json"]))
+                connection.execute(
+                    """
+                    UPDATE device_content_queue_items
+                    SET release_id=?,last_error_code=NULL,retry_count=0,updated_at=?
+                    WHERE id=? AND device_id=? AND status IN ('PENDING','READY')
+                    """,
+                    (normalized_release_id, now, slot["queue_item_id"], device_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE device_offline_schedule_slots
+                    SET release_id=?,sha256=? WHERE id=? AND schedule_id=?
+                    """,
+                    (
+                        normalized_release_id,
+                        str(entry["sha256"]).lower(),
+                        slot["id"],
+                        schedule_id,
+                    ),
+                )
+                release_rows = connection.execute(
+                    """
+                    SELECT release_id FROM device_offline_schedule_slots
+                    WHERE schedule_id=? ORDER BY slot_index
+                    """,
+                    (schedule_id,),
+                ).fetchall()
+                configured_times = json.loads(str(schedule["schedule_times_json"] or "[]"))
+                playlist_version = self.playlist_version(
+                    device_id=device_id,
+                    target_date=str(schedule["target_date"]),
+                    config_version=int(schedule["config_version"]),
+                    schedule_times=configured_times,
+                    release_ids=[str(row["release_id"]) for row in release_rows],
+                )
+                snapshot = json.loads(str(schedule["snapshot_json"] or "{}"))
+                if not isinstance(snapshot, dict):
+                    snapshot = {}
+                snapshot["playlist_version"] = playlist_version
+                snapshot["playlist_revision"] = int(snapshot.get("playlist_revision") or 0) + 1
+                connection.execute(
+                    """
+                    UPDATE device_offline_schedules SET snapshot_json=?,updated_at=? WHERE id=?
+                    """,
+                    (json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")), now, schedule_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE device_content_queues
+                    SET queue_version=queue_version+1,next_queued_release_id=CASE WHEN ?=0 THEN ? ELSE next_queued_release_id END,updated_at=?
+                    WHERE device_id=?
+                    """,
+                    (slot_index, normalized_release_id, now, device_id),
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        with self.database.session() as connection:
+            return self._row(connection, schedule_id) or {}
 
     def due_prefetch_devices(
         self, *, limit: int = 32, after_device_id: str | None = None

@@ -160,7 +160,7 @@ class DevicePairingService:
         try:
             validate_offline_schedule(
                 values,
-                maximum=12,
+                maximum=24,
                 minimum_gap_minutes=minimum_gap_minutes,
             )
         except ValueError as exc:

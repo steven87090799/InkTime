@@ -17,8 +17,8 @@ TASK_DEFAULTS: dict[str, dict[str, Any]] = {
     "incremental_scan": {
         "name": "增量掃描",
         "kind": "scan",
-        "cron": "0 2 * * *",
-        "start_time": "02:00",
+        "cron": "0 3 1 * *",
+        "start_time": "03:00",
         "window_start": "00:00",
         "window_end": "06:00",
         "timeout_seconds": 14400,
@@ -38,8 +38,8 @@ TASK_DEFAULTS: dict[str, dict[str, Any]] = {
     "full_reconcile": {
         "name": "完整一致性掃描",
         "kind": "scan",
-        "cron": "0 3 * * 0",
-        "start_time": "03:00",
+        "cron": "0 4 1 1 *",
+        "start_time": "04:00",
         "window_start": "00:00",
         "window_end": "08:00",
         "timeout_seconds": 28800,
@@ -230,6 +230,22 @@ class ScheduledTaskRepository:
                 (utc_now(), message[:1000], retry_at.isoformat(), utc_now(), task["key"]),
             )
 
+    def record_terminal(self, task: dict[str, Any], message: str, now: datetime) -> None:
+        """Record a deterministic stop while advancing to the next normal cron slot.
+
+        A missing-content/configuration result is useful operator context, but
+        it is not a reason to wake the scheduler again after the short retry
+        interval.  Keep the error visible and let the normal schedule decide
+        when the task is next eligible.
+        """
+
+        next_run = self._next_run(task["cron"], now, task["weekdays"]).isoformat()
+        with self.database.session() as connection:
+            connection.execute(
+                "UPDATE scheduled_tasks SET last_failure=?,error_status=?,next_run=?,updated_at=? WHERE key=?",
+                (utc_now(), message[:1000], next_run, utc_now(), task["key"]),
+            )
+
     @staticmethod
     def _row(row) -> dict[str, Any]:
         result = dict(row)
@@ -278,7 +294,7 @@ class ScheduledTaskRepository:
             "concurrency": (1, 32),
             "missing_safe_percent": (0, 100),
             "lead_minutes": (0, 1440),
-            "daily_count": (1, 20),
+            "daily_count": (1, 24),
             "prefetch_count": (1, 10),
             "new_photo_delay_minutes": (0, 43_200),
             "max_bytes": (1, 10 * 1024 * 1024 * 1024 * 1024),

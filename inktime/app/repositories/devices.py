@@ -117,7 +117,7 @@ class DeviceRepository:
             raise ValueError("DEVICE-008 minimum_schedule_gap_minutes 必須介於 30 到 360")
         schedule_values = validate_offline_schedule(
             schedule_times or offline_schedule or [schedule],
-            maximum=12,
+            maximum=24,
             minimum_gap_minutes=minimum_schedule_gap_minutes,
         )
         if not 0 <= int(prefetch_lead_minutes) <= 120:
@@ -410,7 +410,7 @@ class DeviceRepository:
                     raise ValueError("DEVICE-008 minimum_schedule_gap_minutes 必須介於 30 到 360")
                 schedule_values = validate_offline_schedule(
                     selected_schedule,
-                    maximum=12,
+                    maximum=24,
                     minimum_gap_minutes=minimum_schedule_gap_minutes,
                 )
                 if not 0 <= int(prefetch_lead_minutes) <= 120:
@@ -973,7 +973,7 @@ class DeviceRepository:
                 schedule_values = json.loads(str(device["schedule_times_json"] or "[]"))
                 schedule_values = validate_offline_schedule(
                     schedule_values,
-                    maximum=12,
+                    maximum=24,
                     minimum_gap_minutes=int(
                         device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
                     ),

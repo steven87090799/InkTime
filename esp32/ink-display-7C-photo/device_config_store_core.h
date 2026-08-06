@@ -7,7 +7,7 @@
 namespace inktime {
 namespace configstore {
 
-constexpr uint8_t kMaxConfigSlots = 12U;
+constexpr uint8_t kMaxConfigSlots = 24U;
 constexpr size_t kMaxConfigPayloadBytes = 8192U;
 constexpr size_t kMaxWifiSsidBytes = 64U;
 constexpr size_t kMaxWifiPasswordBytes = 128U;

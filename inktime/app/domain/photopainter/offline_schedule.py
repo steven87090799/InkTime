@@ -127,7 +127,7 @@ def slot_deadlines(
     if type(grace_minutes) is not int or not 0 <= grace_minutes <= 1440:
         raise ValueError("DEVICE-008 slot deadline 寬限分鐘必須介於 0 到 1440")
     schedule = validate_offline_schedule(
-        values, maximum=12, minimum_gap_minutes=minimum_gap_minutes
+        values, maximum=24, minimum_gap_minutes=minimum_gap_minutes
     )
     zone = ZoneInfo(timezone_name)
     starts: list[datetime] = []

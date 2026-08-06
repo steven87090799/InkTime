@@ -238,6 +238,22 @@ class JobRepository:
         with self.database.session() as connection:
             return connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
 
+    def has_active_dedupe(self, dedupe_key: str) -> bool:
+        """Return whether a scheduler-owned identity is already in flight."""
+
+        with self.database.session() as connection:
+            return bool(
+                connection.execute(
+                    """
+                    SELECT 1 FROM jobs
+                    WHERE dedupe_key=?
+                      AND status IN ('pending','preparing','running','pausing','retrying')
+                    LIMIT 1
+                    """,
+                    (dedupe_key,),
+                ).fetchone()
+            )
+
     def create_maintenance(
         self,
         *,
@@ -455,6 +471,14 @@ class JobRepository:
                 (job_id, limit, offset),
             ).fetchall()
 
+    def failure_codes(self, job_id: str) -> list[str]:
+        with self.database.session() as connection:
+            rows = connection.execute(
+                "SELECT error_code FROM job_items WHERE job_id=? AND error_code IS NOT NULL AND error_code<>'' ORDER BY id",
+                (job_id,),
+            ).fetchall()
+        return [str(row["error_code"] or "JOB-003") for row in rows]
+
     def can_access(self, job_id: str, user_id: str, *, administrator: bool) -> bool:
         with self.database.session() as connection:
             row = connection.execute("SELECT created_by FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -644,10 +668,17 @@ class JobRepository:
                     cursor = connection.execute(
                         """
                         UPDATE job_items SET status='completed', completed_at=?, result_json=?,
-                                             lease_until=NULL, estimated_cost=?, stage=?
+                                             lease_until=NULL, estimated_cost=?, stage=?, error_code=?
                         WHERE id=? AND status='running'
                         """,
-                        (now, json.dumps(result, ensure_ascii=False), actual_cost, stage, item_id),
+                        (
+                            now,
+                            json.dumps(result, ensure_ascii=False),
+                            actual_cost,
+                            stage,
+                            str(result.get("error_code") or "") or None,
+                            item_id,
+                        ),
                     )
                     if cursor.rowcount:
                         connection.execute(

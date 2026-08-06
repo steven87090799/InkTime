@@ -28,6 +28,7 @@ class LocalSelectionPolicy:
             rows = connection.execute(
                 """
                 SELECT p.*,l.root_path,
+                  (SELECT count(*) FROM display_history dh WHERE dh.photo_id=p.id) AS display_count,
                   (SELECT max(displayed_at) FROM display_history dh WHERE dh.photo_id=p.id) AS last_displayed_at
                 FROM photos p JOIN libraries l ON l.id=p.library_id
                 WHERE p.lifecycle_status='active' AND p.eligible=1 AND l.enabled=1
@@ -47,6 +48,86 @@ class LocalSelectionPolicy:
             except (UnsafePathError, OSError, ValueError):
                 continue
         return result
+
+    @staticmethod
+    def _hash_distance(first: Any, second: Any) -> int | None:
+        """Return a deterministic Hamming distance for local image hashes."""
+        left, right = str(first or "").strip().lower(), str(second or "").strip().lower()
+        if not left or not right or len(left) != len(right):
+            return None
+        try:
+            return (int(left, 16) ^ int(right, 16)).bit_count()
+        except ValueError:
+            return 0 if left == right else None
+
+    @classmethod
+    def _diversity_penalty(cls, candidate: dict[str, Any], selected: list[dict[str, Any]]) -> float:
+        """Penalize local duplicates and bursts without introducing an AI call."""
+        penalty = 0.0
+        candidate_group = str(candidate.get("duplicate_group_id") or candidate.get("burst_group_id") or "")
+        candidate_time = str(candidate.get("captured_at") or "")
+        try:
+            candidate_dt = datetime.fromisoformat(candidate_time.replace("Z", "+00:00"))
+        except ValueError:
+            candidate_dt = None
+        for other in selected:
+            other_group = str(other.get("duplicate_group_id") or other.get("burst_group_id") or "")
+            if candidate_group and candidate_group == other_group:
+                penalty = max(penalty, 18.0)
+            candidate_sha = str(candidate.get("sha256") or "").strip().lower()
+            other_sha = str(other.get("sha256") or "").strip().lower()
+            if candidate_sha and candidate_sha == other_sha:
+                penalty = max(penalty, 20.0)
+            phash_distance = cls._hash_distance(candidate.get("perceptual_hash"), other.get("perceptual_hash"))
+            if phash_distance is not None and phash_distance <= 4:
+                penalty = max(penalty, 16.0)
+            dhash_distance = cls._hash_distance(candidate.get("difference_hash"), other.get("difference_hash"))
+            if dhash_distance is not None and dhash_distance <= 4:
+                penalty = max(penalty, 12.0)
+            if candidate_dt is not None:
+                try:
+                    other_dt = datetime.fromisoformat(str(other.get("captured_at") or "").replace("Z", "+00:00"))
+                except ValueError:
+                    other_dt = None
+                if other_dt is not None:
+                    if candidate_dt.tzinfo is None and other_dt.tzinfo is not None:
+                        candidate_dt = candidate_dt.replace(tzinfo=other_dt.tzinfo)
+                    if other_dt.tzinfo is None and candidate_dt.tzinfo is not None:
+                        other_dt = other_dt.replace(tzinfo=candidate_dt.tzinfo)
+                    if abs((candidate_dt - other_dt).total_seconds()) <= 120:
+                        penalty = max(penalty, 6.0)
+            try:
+                lat_delta = abs(float(candidate.get("gps_lat")) - float(other.get("gps_lat")))
+                lon_delta = abs(float(candidate.get("gps_lon")) - float(other.get("gps_lon")))
+            except (TypeError, ValueError):
+                continue
+            if lat_delta <= 0.001 and lon_delta <= 0.001:
+                penalty = max(penalty, 4.0)
+        return penalty
+
+    @staticmethod
+    def _diverse_stage_selection(
+        rows: list[dict[str, Any]], needed: int, already_selected: list[dict[str, Any]] | None = None
+    ) -> list[dict[str, Any]]:
+        selected: list[dict[str, Any]] = []
+        context = list(already_selected or [])
+        remaining = list(rows)
+        while remaining and len(selected) < needed:
+            ranked = [
+                (
+                    float(row.get("local_display_score") or 0.0)
+                    - LocalSelectionPolicy._diversity_penalty(row, context),
+                    -index,
+                    str(row["id"]),
+                    row,
+                )
+                for index, row in enumerate(remaining)
+            ]
+            _, _, _, chosen = max(ranked, key=lambda item: (item[0], item[1], item[2]))
+            selected.append(chosen)
+            context.append(chosen)
+            remaining.remove(chosen)
+        return selected
 
     @staticmethod
     def _recent(value: Any, *, now: datetime) -> tuple[float, float]:
@@ -85,6 +166,10 @@ class LocalSelectionPolicy:
             if quality["decision"] == "auto_excluded":
                 continue
             not_recent, recent_penalty = self._recent(item.get("last_displayed_at"), now=now)
+            try:
+                display_count = max(0, int(item.get("display_count") or 0))
+            except (TypeError, ValueError):
+                display_count = 0
             captured = str(item.get("captured_month_day") or "")
             orientation_fit = (
                 3.0
@@ -100,6 +185,9 @@ class LocalSelectionPolicy:
                 "favorite_bonus": 8.0 if bool(item.get("favorite")) else 0.0,
                 "historical_today_bonus": 24.0 if captured == target.strftime("%m-%d") else 0.0,
                 "not_recently_displayed_bonus": not_recent,
+                "display_history_count": float(display_count),
+                "never_displayed_bonus": 10.0 if display_count == 0 else 0.0,
+                "display_count_penalty": -min(display_count, 8) * 1.5,
                 "orientation_fit_bonus": orientation_fit,
                 "pair_compatibility_bonus": 0.0,
                 "manual_feedback_adjustment": float(feedback.get(photo_id, 0.0)),
@@ -108,7 +196,9 @@ class LocalSelectionPolicy:
                 "epaper_risk_penalty": -10.0 if risk == "high" else -4.0 if risk == "medium" else 0.0,
             }
             item["score_components"] = components
-            item["local_display_score"] = round(sum(components.values()), 3)
+            item["local_display_score"] = round(
+                sum(value for key, value in components.items() if key != "display_history_count"), 3
+            )
             item["epaper_contrast_risk"] = risk
             item["local_quality_decision"] = quality["decision"]
             # The resolver is offline and returns a coarse display city only.
@@ -260,17 +350,31 @@ class LocalSelectionPolicy:
             else "ranked"
             for row in allowed
         }
-        selected = allowed[:needed]
+        selected: list[dict[str, Any]] = []
+        for stage in ("exact", "nearby", "ranked"):
+            if len(selected) >= needed:
+                break
+            stage_rows = [row for row in allowed if stage_by_id[str(row["id"])] == stage]
+            selected.extend(self._diverse_stage_selection(stage_rows, needed - len(selected), selected))
         pair_candidate_count = 0
         if layout in {"photo_pair", "photo_pair_caption"} and selected:
             primary = selected[0]
             peers = [row for row in allowed[:50] if str(row["id"]) != str(primary["id"])]
             pair_candidate_count = len(peers)
             if peers:
-                pairs = [(self._pair_score(primary, peer, orientation=orientation), peer) for peer in peers]
-                (pair_score, pair_components), secondary = sorted(
-                    pairs, key=lambda item: (-item[0][0], str(item[1]["id"]))
+                pairs = [
+                    (
+                        self._pair_score(primary, peer, orientation=orientation),
+                        self._diversity_penalty(peer, [primary]),
+                        peer,
+                    )
+                    for peer in peers
+                ]
+                (pair_score, pair_components), diversity_penalty, secondary = sorted(
+                    pairs, key=lambda item: (-(item[0][0] - item[1]), str(item[2]["id"]))
                 )[0]
+                pair_components["diversity_penalty"] = -diversity_penalty
+                pair_score = round(pair_score - diversity_penalty, 3)
                 primary["score_components"]["pair_compatibility_bonus"] = pair_components[
                     "orientation_compatibility"
                 ]

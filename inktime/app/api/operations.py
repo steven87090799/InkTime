@@ -323,8 +323,8 @@ def maintenance_page():
 def schedules_page():
     tasks = current_app.extensions["inktime_schedule_repository"].list()
     labels = {
-        "incremental_scan": "沿用既有 Scanner 的增量入口；不重新走訪已完成的分析。",
-        "full_reconcile": "完整掃描仍受 Missing 安全比例與人工確認機制保護。",
+        "incremental_scan": "新安裝預設每月執行一次；沿用既有 Scanner 的增量入口，不重新走訪已完成的分析。既有自訂 cron 會保留。",
+        "full_reconcile": "新安裝預設低頻年度 reconcile；完整掃描仍受 Missing 安全比例與人工確認機制保護。既有自訂 cron 會保留。",
         "display_prepare": "僅建立背景換圖／渲染工作；ESP32 下載不會等待掃描、AI 或渲染。",
         "ai_schedule": "只安排既有 AI 工作入口，不改變分析內容與 Schema。",
         "cache_cleanup": "只處理縮圖快取，不會刪除原始照片、正式 Release 或目前使用的 Release。",
@@ -336,6 +336,20 @@ def schedules_page():
 @administrator_required
 def list_schedules():
     return {"tasks": current_app.extensions["inktime_schedule_repository"].list()}
+
+
+@bp.post("/api/v1/schedules/<key>/preview")
+@administrator_required
+def preview_schedule(key: str):
+    task = current_app.extensions["inktime_schedule_repository"].get(key)
+    if task is None:
+        abort(404)
+    if str(task["kind"]) != "render":
+        abort(400, description="SCHEDULE-003 只有換圖排程支援候選 Playlist 預覽")
+    try:
+        return current_app.extensions["inktime_display_preparation_service"].preview(task["config"])
+    except ValueError as exc:
+        abort(409, description=f"SCHEDULE-003 {exc}")
 
 
 @bp.patch("/api/v1/schedules/<key>")
@@ -368,9 +382,10 @@ def run_schedule_now(key: str):
         ZoneInfo(str(current_app.extensions["inktime_settings_repository"].get("general.timezone")))
     )
     try:
-        SchedulerRunner(current_app)._enqueue_task(task, now, force=True)
+        SchedulerRunner(current_app)._enqueue_task(
+            task, now, force=True, trigger_source="manual"
+        )
     except Exception as exc:
-        current_app.extensions["inktime_schedule_repository"].record_failure(task, str(exc), now)
         abort(409, description=f"SCHEDULE-003 {exc}")
     return {"status": "enqueued"}, 202
 
