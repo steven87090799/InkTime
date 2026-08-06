@@ -25,6 +25,7 @@ from inktime.app.services.device_releases import payload_entry_from_manifest
 
 _RELEASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 MAX_PREPARED_SLOTS = 24
+TERMINAL_PREPARATION_OUTCOMES = frozenset({"NO_CONTENT", "NO_ELIGIBLE_CANDIDATES"})
 
 
 @dataclass(frozen=True)
@@ -323,6 +324,7 @@ class OfflineScheduleRepository:
             slot.update(
                 {
                     "sha256": str(entry["sha256"]).lower(),
+                    "source_photo_id": str(entry.get("source_photo_id") or "") or None,
                     "show_at_epoch": show_at_epoch,
                     "size": int(entry["size"]),
                     "width": int(slot["width"]),
@@ -394,6 +396,118 @@ class OfflineScheduleRepository:
                 (device_id,),
             ).fetchone()
             return self._row(connection, str(row["id"])) if row else None
+
+    def terminal_outcome_for_device(
+        self,
+        *,
+        device_id: str,
+        target_date: str,
+        config_version: int,
+    ) -> dict[str, Any] | None:
+        """Return a terminal no-content result for one exact device-day config."""
+
+        with self.database.session() as connection:
+            row = connection.execute(
+                """
+                SELECT id,status,terminal_outcome_code,updated_at
+                FROM device_offline_schedules
+                WHERE device_id=?
+                  AND target_date=?
+                  AND config_version=?
+                  AND status='failed'
+                  AND terminal_outcome_code IN ('NO_CONTENT','NO_ELIGIBLE_CANDIDATES')
+                ORDER BY updated_at DESC,id DESC LIMIT 1
+                """,
+                (device_id, self._date(target_date).isoformat(), int(config_version)),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def record_terminal_outcome(
+        self,
+        *,
+        device_id: str,
+        target_date: str,
+        config_version: int,
+        outcome_code: str,
+        message: str,
+    ) -> dict[str, Any]:
+        """Persist deterministic shortage without creating a partial playlist."""
+
+        normalized_code = str(outcome_code).strip()
+        if normalized_code not in TERMINAL_PREPARATION_OUTCOMES:
+            raise ValueError("DEVICE-008 terminal preparation outcome 不合法")
+        day = self._date(target_date).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.transaction() as connection:
+            device = connection.execute(
+                """
+                SELECT id,config_version,timezone,panel_profile,rotation,schedule_times_json,
+                       prefetch_lead_minutes,button_wake_action,offline_schedule_version,
+                       minimum_schedule_gap_minutes,sync_strategy,sync_time
+                FROM devices WHERE id=? AND enabled=1
+                """,
+                (device_id,),
+            ).fetchone()
+            if device is None:
+                raise KeyError(device_id)
+            if int(device["config_version"]) != int(config_version):
+                raise ValueError("DISPLAY-CONFIG-RACE 裝置設定已變更，拒絕記錄離線結果")
+            existing = connection.execute(
+                """
+                SELECT id,status FROM device_offline_schedules
+                WHERE device_id=? AND target_date=? AND config_version=?
+                """,
+                (device_id, day, int(config_version)),
+            ).fetchone()
+            if existing is not None and str(existing["status"]) == "ready":
+                return {"status": "ready", "idempotent": True, "id": str(existing["id"])}
+            schedule_id = str(existing["id"]) if existing is not None else str(uuid4())
+            snapshot = {
+                "config_version": int(config_version),
+                "outcome_code": normalized_code,
+                "message": str(message)[:500],
+            }
+            connection.execute(
+                """
+                INSERT INTO device_offline_schedules(
+                    id,device_id,target_date,config_version,timezone,status,created_at,updated_at,
+                    panel_profile,rotation,schedule_times_json,prefetch_lead_minutes,
+                    button_wake_action,offline_schedule_version,minimum_schedule_gap_minutes,
+                    sync_strategy,sync_time,snapshot_json,terminal_outcome_code
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(device_id,target_date,config_version) DO UPDATE SET
+                    status='failed',updated_at=excluded.updated_at,
+                    snapshot_json=excluded.snapshot_json,
+                    terminal_outcome_code=excluded.terminal_outcome_code
+                """,
+                (
+                    schedule_id,
+                    device_id,
+                    day,
+                    int(config_version),
+                    str(device["timezone"]),
+                    "failed",
+                    now,
+                    now,
+                    str(device["panel_profile"]),
+                    int(device["rotation"]),
+                    str(device["schedule_times_json"] or "[]"),
+                    int(device["prefetch_lead_minutes"]),
+                    str(device["button_wake_action"]),
+                    int(device["offline_schedule_version"]),
+                    int(device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES),
+                    str(device["sync_strategy"] or "first_display_lead"),
+                    device["sync_time"],
+                    json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                    normalized_code,
+                ),
+            )
+        return {
+            "status": "completed",
+            "outcome": "no_content",
+            "outcome_code": normalized_code,
+            "idempotent": existing is not None,
+        }
 
     def ready_for_device(
         self,
@@ -596,8 +710,8 @@ class OfflineScheduleRepository:
                         id,device_id,target_date,config_version,timezone,status,created_at,updated_at,
                         panel_profile,rotation,schedule_times_json,prefetch_lead_minutes,
                         button_wake_action,offline_schedule_version,minimum_schedule_gap_minutes,
-                        sync_strategy,sync_time,snapshot_json
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        sync_strategy,sync_time,snapshot_json,terminal_outcome_code
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(device_id,target_date,config_version) DO UPDATE SET
                         status='preparing',updated_at=excluded.updated_at,
                         panel_profile=excluded.panel_profile,rotation=excluded.rotation,
@@ -608,7 +722,8 @@ class OfflineScheduleRepository:
                         minimum_schedule_gap_minutes=excluded.minimum_schedule_gap_minutes,
                         sync_strategy=excluded.sync_strategy,
                         sync_time=excluded.sync_time,
-                        snapshot_json=excluded.snapshot_json
+                        snapshot_json=excluded.snapshot_json,
+                        terminal_outcome_code=NULL
                     """,
                     (
                         schedule_id,
@@ -629,6 +744,7 @@ class OfflineScheduleRepository:
                         sync_strategy,
                         sync_time,
                         json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                        None,
                     ),
                 )
                 connection.execute(
@@ -755,7 +871,7 @@ class OfflineScheduleRepository:
                     (queue_version, normalized_release_ids[0], now, device_id),
                 )
                 connection.execute(
-                    "UPDATE device_offline_schedules SET status='ready',updated_at=? WHERE id=?",
+                    "UPDATE device_offline_schedules SET status='ready',terminal_outcome_code=NULL,updated_at=? WHERE id=?",
                     (now, schedule_id),
                 )
                 current = connection.execute(

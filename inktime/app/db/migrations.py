@@ -1850,6 +1850,14 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_offline_schedules_runtime ON device_offline_schedules(device_id,target_date,status,config_version,updated_at)",
         ),
     ),
+    Migration(
+        37,
+        "記錄離線排程終端內容結果",
+        (
+            "ALTER TABLE device_offline_schedules ADD COLUMN terminal_outcome_code TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_offline_schedules_terminal_outcome ON device_offline_schedules(device_id,target_date,config_version,terminal_outcome_code)",
+        ),
+    ),
 )
 
 

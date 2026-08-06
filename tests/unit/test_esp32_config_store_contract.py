@@ -65,8 +65,10 @@ def test_config_payload_and_envelopes_are_complete_and_bounded():
 def test_firmware_persists_sync_policy_with_config_version_and_maps_legacy_defaults():
     core = CORE.read_text(encoding="utf-8")
     firmware = FIRMWARE.read_text(encoding="utf-8")
-    assert "constexpr uint8_t kPayloadSchemaVersion = 4U" in core
-    assert "schema != 3U" in core
+    assert "constexpr uint8_t kPayloadSchemaVersion = 5U" in core
+    assert "constexpr uint8_t kLegacyConfigSlots = 12U" in core
+    assert "valid_payload_schema" in core
+    assert "config_slot_count_for_schema" in core
     assert "payload.sync_strategy = cfg.sync_strategy.c_str();" in firmware
     assert "payload.sync_time = cfg.sync_time.c_str();" in firmware
     assert "cfg.sync_strategy = payload.sync_strategy.c_str();" in firmware

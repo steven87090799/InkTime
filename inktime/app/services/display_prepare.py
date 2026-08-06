@@ -134,37 +134,115 @@ class DisplayPreparationService:
         self.resilience = resilience_repository
         self.offline_schedules = offline_schedule_repository
 
-    def preview(self, raw_config: Any, *, target_date: date | None = None) -> dict[str, Any]:
-        """Return the exact deterministic candidate order without publishing."""
+    def preview(
+        self,
+        raw_config: Any,
+        *,
+        target_date: date | None = None,
+        device_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Read one committed offline playlist without re-running selection."""
 
         config = DisplayPrepareConfig.from_mapping(raw_config)
         target = target_date or self.render_service._today()
-        candidates = self.render_service.select_candidates_details(
-            config.output_count,
-            target_date=target,
-            candidate_years=list(config.candidate_years),
+        requested_device_id = str(device_id or "").strip()
+        configured_devices = [str(value).strip() for value in config.device_ids if str(value).strip()]
+        device_ids = [requested_device_id] if requested_device_id else configured_devices
+        if len(device_ids) != 1 or self.offline_schedules is None or self.database is None:
+            return {
+                "status": "not_prepared",
+                "outcome": "not_prepared",
+                "error_code": "NOT_PREPARED",
+                "message": "實際 Playlist 預覽需要指定一台 Enhanced offline 裝置。",
+                "device_id": device_ids[0] if len(device_ids) == 1 else None,
+                "target_date": target.isoformat(),
+                "config_version": None,
+                "playlist_version": None,
+                "target_display_times": [],
+                "preparation_times": [],
+                "photo_ids": [],
+                "playlist": [],
+                "output_count": 0,
+            }
+        selected_device_id = device_ids[0]
+        with self.database.session() as connection:
+            device = connection.execute(
+                """
+                SELECT id,config_version,delivery_mode,offline_prefetch_allowed
+                FROM devices WHERE id=? AND enabled=1
+                """,
+                (selected_device_id,),
+            ).fetchone()
+        if device is None or str(device["delivery_mode"]) != "inktime_offline_schedule" or not bool(
+            device["offline_prefetch_allowed"]
+        ):
+            return {
+                "status": "not_prepared",
+                "outcome": "not_prepared",
+                "error_code": "NOT_PREPARED",
+                "message": "指定裝置不是已啟用 Prefetch 的 Enhanced offline 裝置。",
+                "device_id": selected_device_id,
+                "target_date": target.isoformat(),
+                "config_version": int(device["config_version"]) if device is not None else None,
+                "playlist_version": None,
+                "target_display_times": [],
+                "preparation_times": [],
+                "photo_ids": [],
+                "playlist": [],
+                "output_count": 0,
+            }
+        committed = self.offline_schedules.ready_for_device(
+            device_id=selected_device_id,
+            target_date=target.isoformat(),
+            config_version=int(device["config_version"]),
         )
-        target_times = config.target_times(target)
+        if committed is None:
+            return {
+                "status": "not_prepared",
+                "outcome": "not_prepared",
+                "error_code": "NOT_PREPARED",
+                "message": "此裝置與日期尚未準備 committed Playlist。",
+                "device_id": selected_device_id,
+                "target_date": target.isoformat(),
+                "config_version": int(device["config_version"]),
+                "playlist_version": None,
+                "target_display_times": [],
+                "preparation_times": [],
+                "photo_ids": [],
+                "playlist": [],
+                "output_count": 0,
+            }
         playlist = [
             {
-                "slot_index": index,
-                "display_time": target_times[index % len(target_times)],
-                "photo_id": str(row["id"]),
-                "captured_at": row.get("captured_at"),
-                "match_type": row.get("match_type"),
-                "score": row.get("combined_score", row.get("local_display_score")),
-                "score_components": row.get("score_components", {}),
+                "slot_index": int(slot["slot_index"]),
+                "display_time": str(slot["show_at"]),
+                "show_at": str(slot["show_at"]),
+                "photo_id": slot.get("source_photo_id"),
+                "release_id": str(slot["release_id"]),
+                "release_metadata": {
+                    "sha256": str(slot["sha256"]),
+                    "size": int(slot["size"]),
+                    "width": int(slot["width"]),
+                    "height": int(slot["height"]),
+                    "pixel_format": str(slot["pixel_format"]),
+                    "render_profile": str(slot["render_profile"]),
+                },
+                "download_url": str(slot["download_url"]),
             }
-            for index, row in enumerate(candidates)
+            for slot in committed["slots"]
         ]
         return {
             "status": "preview",
-            "outcome": "ready" if playlist else "no_content",
-            "error_code": None if playlist else "NO_CONTENT",
-            "message": None if playlist else "目前沒有可顯示照片，請加入照片後重新執行。",
-            "target_display_times": list(target_times),
-            "preparation_times": list(config.preparation_times(target)),
-            "photo_ids": [entry["photo_id"] for entry in playlist],
+            "outcome": "ready",
+            "error_code": None,
+            "message": None,
+            "device_id": selected_device_id,
+            "target_date": target.isoformat(),
+            "config_version": int(device["config_version"]),
+            "playlist_version": committed["playlist_version"],
+            "target_display_times": [entry["show_at"] for entry in playlist],
+            "preparation_times": [],
+            "photo_ids": [entry["photo_id"] for entry in playlist if entry["photo_id"]],
             "playlist": playlist,
             "output_count": len(playlist),
         }
@@ -327,6 +405,13 @@ class DisplayPreparationService:
             dict((str(row["id"]), row) for row in candidates).values()
         )
         if len(unique_candidates) < len(schedule_times):
+            outcome = self.offline_schedules.record_terminal_outcome(
+                device_id=device_id,
+                target_date=target.isoformat(),
+                config_version=snapshot_config_version,
+                outcome_code="NO_ELIGIBLE_CANDIDATES",
+                message="沒有足夠的既有且符合資格的分析結果，保留現有離線播放清單。",
+            )
             return {
                 "status": "completed",
                 "outcome": "no_content",
@@ -340,6 +425,7 @@ class DisplayPreparationService:
                 "output_count": 0,
                 "requested_slots": len(schedule_times),
                 "available_candidates": len(unique_candidates),
+                "idempotent": bool(outcome.get("idempotent")),
             }
         self.resilience.ensure_queue(device_id, depth=max(3, len(schedule_times)))
 

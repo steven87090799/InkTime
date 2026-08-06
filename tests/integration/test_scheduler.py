@@ -147,6 +147,55 @@ def test_offline_prefetch_creates_one_deduplicated_render_job(app):
     )
 
 
+def test_offline_shortage_is_terminal_for_one_device_day_config(app):
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "離線內容不足相框",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00", "20:00"],
+        prefetch_lead_minutes=5,
+    )
+    scheduler = SchedulerRunner(app)
+    now = datetime(2026, 8, 3, 7, 55, tzinfo=timezone.utc)
+    scheduler._prepare_due_offline_devices(now)
+    repository = app.extensions["inktime_job_repository"]
+    offline_jobs = [
+        job
+        for job in repository.list()
+        if '"offline_prepare"' in str(job["settings_json"])
+        and device_id in str(job["settings_json"])
+    ]
+    assert len(offline_jobs) == 1
+
+    assert WorkerRunner(app).run_once() == 1
+    completed = repository.get(offline_jobs[0]["id"])
+    assert completed["status"] == "completed"
+    with app.extensions["inktime_database"].session() as connection:
+        result = connection.execute(
+            "SELECT result_json,error_code FROM job_items WHERE job_id=?",
+            (offline_jobs[0]["id"],),
+        ).fetchone()
+    assert json.loads(result["result_json"])["outcome_code"] == "NO_ELIGIBLE_CANDIDATES"
+    assert result["error_code"] is None
+
+    scheduler._prepare_due_offline_devices(now)
+    scheduler._prepare_due_offline_devices(now)
+    assert len(
+        [
+            job
+            for job in repository.list()
+            if '"offline_prepare"' in str(job["settings_json"])
+            and device_id in str(job["settings_json"])
+        ]
+    ) == 1
+    terminal = app.extensions["inktime_offline_schedule_repository"].terminal_outcome_for_device(
+        device_id=device_id,
+        target_date="2026-08-03",
+        config_version=1,
+    )
+    assert terminal["terminal_outcome_code"] == "NO_ELIGIBLE_CANDIDATES"
+
+
 def test_offline_scheduler_prepares_only_tomorrow_after_expired_today(app):
     device_id, _token = app.extensions["inktime_device_repository"].create(
         "預先準備明日的離線相框",

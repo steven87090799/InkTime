@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+
 from flask import Blueprint, abort, current_app, g, render_template, request, send_file
 
 from inktime.app.core.json_values import JsonScalarError, json_bool, json_int, json_object_payload
@@ -345,9 +347,23 @@ def preview_schedule(key: str):
     if task is None:
         abort(404)
     if str(task["kind"]) != "render":
-        abort(400, description="SCHEDULE-003 只有換圖排程支援候選 Playlist 預覽")
+        abort(400, description="SCHEDULE-003 只有換圖排程支援實際 Playlist 預覽")
+    payload = request.get_json(silent=True) if request.is_json else {}
+    if not isinstance(payload, dict):
+        abort(400, description="SCHEDULE-003 Preview Payload 必須是 JSON 物件")
+    target_date = None
+    if payload.get("target_date") is not None:
+        try:
+            target_date = date.fromisoformat(str(payload["target_date"]))
+        except ValueError:
+            abort(400, description="SCHEDULE-003 target_date 必須是 YYYY-MM-DD")
+    device_id = payload.get("device_id")
+    if device_id is not None and not isinstance(device_id, str):
+        abort(400, description="SCHEDULE-003 device_id 必須是字串")
     try:
-        return current_app.extensions["inktime_display_preparation_service"].preview(task["config"])
+        return current_app.extensions["inktime_display_preparation_service"].preview(
+            task["config"], target_date=target_date, device_id=device_id
+        )
     except ValueError as exc:
         abort(409, description=f"SCHEDULE-003 {exc}")
 

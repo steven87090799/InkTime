@@ -106,6 +106,50 @@ def test_offline_day_preparation_is_atomic_and_device_projection_contains_full_s
     ).get_json()
     assert generic_manifest["items"] == []
 
+
+def test_actual_playlist_preview_reads_committed_schedule_without_reselection(app, monkeypatch):
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "離線實際 Playlist 預覽",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00"],
+    )
+    release = _release(app, "offline-preview-committed")
+    target = datetime(2026, 8, 3).date()
+    prepared = app.extensions["inktime_offline_schedule_repository"].prepare_day(
+        device_id=device_id,
+        target_date=target.isoformat(),
+        release_ids=[release["release_id"]],
+    )
+
+    def fail_if_selection_runs(*_args, **_kwargs):
+        raise AssertionError("committed playlist preview must not re-run selection")
+
+    monkeypatch.setattr(
+        app.extensions["inktime_render_service"],
+        "select_candidates_details",
+        fail_if_selection_runs,
+    )
+    preview = app.extensions["inktime_display_preparation_service"].preview(
+        {
+            "display_times": ["08:00"],
+            "daily_count": 1,
+            "device_ids": [device_id],
+            "candidate_years": [],
+            "prefetch_count": 1,
+            "ai_fallback": "use_existing",
+            "render_fallback": "keep_current",
+        },
+        target_date=target,
+    )
+    assert preview["outcome"] == "ready"
+    assert preview["device_id"] == device_id
+    assert preview["target_date"] == target.isoformat()
+    assert preview["config_version"] == prepared["schedule"]["config_version"]
+    assert preview["playlist_version"] == prepared["playlist_version"]
+    assert preview["playlist"][0]["release_id"] == release["release_id"]
+    assert preview["playlist"][0]["show_at"] == prepared["slots"][0]["show_at"]
+
     third = _release(app, "offline-third")
     fourth = _release(app, "offline-fourth")
     next_day = repository.prepare_day(
