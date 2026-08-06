@@ -64,6 +64,7 @@ class BoundedJobWorker:
         concurrency: int = 2,
         queue_multiplier: int = 2,
         max_attempts: int = 3,
+        retry_interval_seconds: int | None = None,
         progress_interval_items: int = 50,
         progress_interval_seconds: int = 300,
         progress_callback: ProgressCallback | None = None,
@@ -80,7 +81,10 @@ class BoundedJobWorker:
         if requested_hard_timeout:
             self.concurrency = min(self.concurrency, self.MAX_CHILD_PROCESSES)
         self.queue_size = self.concurrency * max(1, queue_multiplier)
-        self.max_attempts = max_attempts
+        self.max_attempts = max(1, int(max_attempts))
+        self.retry_interval_seconds = (
+            max(1, int(retry_interval_seconds)) if retry_interval_seconds is not None else None
+        )
         self.progress_interval_items = max(1, progress_interval_items)
         self.progress_interval_seconds = max(1, progress_interval_seconds)
         self.progress_callback = progress_callback
@@ -123,10 +127,18 @@ class BoundedJobWorker:
                 self.error_callback(job_id, item_id, exc, self.failure_count)
             return
         # Deterministic business/configuration outcomes are dead-lettered on
-        # their first claim.  Only the central policy may decide that a code is
-        # terminal; transient failures retain the bounded exponential retry.
+        # their first claim. Transient failures retain the bounded retry budget
+        # and use a scheduled interval when one was persisted with the Job;
+        # older/manual Jobs keep exponential backoff.
         attempts = 1 if classify_failure(exc) == FailureClass.TERMINAL_NO_RETRY else self.max_attempts
-        self.repository.fail_item(job_id, item_id, code, str(exc), max_attempts=attempts)
+        self.repository.fail_item(
+            job_id,
+            item_id,
+            code,
+            str(exc),
+            max_attempts=attempts,
+            retry_interval_seconds=self.retry_interval_seconds,
+        )
         if self.error_callback and (
             self.failure_count <= 3 or self.failure_count % self.progress_interval_items == 0
         ):

@@ -222,6 +222,30 @@ class ScheduledTaskRepository:
                 (utc_now(), utc_now(), key),
             )
 
+    def record_terminal_outcome(
+        self, task: dict[str, Any], _outcome_code: str, now: datetime
+    ) -> None:
+        """Advance a successful business outcome without recording a failure."""
+
+        next_run = self._next_run(task["cron"], now, task["weekdays"]).isoformat()
+        with self.database.session() as connection:
+            connection.execute(
+                """UPDATE scheduled_tasks
+                   SET last_failure=NULL,error_status=NULL,next_run=?,updated_at=?
+                   WHERE key=?""",
+                (next_run, utc_now(), task["key"]),
+            )
+
+    def record_retry_exhausted(self, task: dict[str, Any], message: str, now: datetime) -> None:
+        """Record an exhausted Job budget while preserving the normal cron cursor."""
+
+        next_run = self._next_run(task["cron"], now, task["weekdays"]).isoformat()
+        with self.database.session() as connection:
+            connection.execute(
+                "UPDATE scheduled_tasks SET last_failure=?,error_status=?,next_run=?,updated_at=? WHERE key=?",
+                (utc_now(), message[:1000], next_run, utc_now(), task["key"]),
+            )
+
     def record_failure(self, task: dict[str, Any], message: str, now: datetime) -> None:
         retry_at = now + timedelta(seconds=int(task["retry_interval_seconds"]))
         with self.database.session() as connection:

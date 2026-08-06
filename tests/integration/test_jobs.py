@@ -120,6 +120,56 @@ def test_failed_items_can_be_retried(app):
     assert repository.get(job_id)["status"] == "completed"
 
 
+def test_scheduled_retry_wait_is_persisted_and_not_claimed_early(app):
+    service, repository, job_id = create_job(app, 1)
+    service.start(job_id)
+    claimed = repository.claim(job_id, "scheduled-worker", 1)
+    assert claimed
+
+    repository.fail_item(
+        job_id,
+        str(claimed[0]["id"]),
+        "NETWORK_TIMEOUT",
+        "temporary outage",
+        max_attempts=2,
+        retry_interval_seconds=600,
+    )
+
+    item = repository.list_items(job_id)[0]
+    assert item["status"] == "pending"
+    available_at = datetime.fromisoformat(str(item["available_at"]))
+    assert (available_at - datetime.now(timezone.utc)).total_seconds() > 590
+    assert list(repository.iter_runnable()) == []
+
+
+def test_structured_no_content_is_completed_without_failure_code(app):
+    service, repository, job_id = create_job(app, 1)
+    service.start(job_id)
+    claimed = repository.claim(job_id, "worker", 1)
+    assert claimed
+
+    repository.complete_item(
+        job_id,
+        str(claimed[0]["id"]),
+        {
+            "status": "completed",
+            "outcome": "no_content",
+            "outcome_code": "NO_CONTENT",
+            "error_code": "NO_CONTENT",
+            "output_count": 0,
+        },
+    )
+    assert repository.finalize_if_done(job_id)
+
+    item = repository.list_items(job_id)[0]
+    job = repository.get(job_id)
+    assert item["status"] == "completed"
+    assert item["error_code"] is None
+    assert repository.outcome_codes(job_id) == ["NO_CONTENT"]
+    assert job["status"] == "completed"
+    assert job["failed_items"] == 0
+
+
 def test_budget_block_returns_item_and_pauses_new_work(app):
     class BudgetBlocked(RuntimeError):
         code = "BUDGET-001"

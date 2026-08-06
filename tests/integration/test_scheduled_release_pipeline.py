@@ -196,6 +196,32 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
     assert history_after == 0
 
 
+def test_enhanced_prepare_shortage_returns_no_content_without_partial_activation(app):
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "沒有候選照片的離線相框",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00", "20:00"],
+    )
+
+    result = app.extensions["inktime_display_preparation_service"].prepare_device_day(
+        device_id=device_id,
+        target_date="2026-08-03",
+        created_by="offline-shortage-test",
+    )
+
+    assert result["status"] == "completed"
+    assert result["outcome_code"] == "NO_ELIGIBLE_CANDIDATES"
+    assert result["output_count"] == 0
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM device_offline_schedules WHERE device_id=?", (device_id,)
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM device_content_queue_items WHERE device_id=?", (device_id,)
+        ).fetchone()[0] == 0
+
+
 def test_enhanced_prepare_fails_closed_when_device_config_changes_before_commit(app, tmp_path, monkeypatch):
     app.extensions["inktime_settings_repository"].update(
         "analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="127.0.0.1"

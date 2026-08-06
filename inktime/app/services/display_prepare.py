@@ -10,7 +10,6 @@ from inktime.app.db import Database
 from inktime.app.domain.jobs.failure_policy import (
     JobConfigurationError,
     NoContentError,
-    NoEligibleCandidatesError,
     JobFailure,
 )
 from inktime.app.domain.photopainter.offline_schedule import (
@@ -192,16 +191,19 @@ class DisplayPreparationService:
             candidate_years=list(config.candidate_years),
         )
         if not candidates:
-            if config.ai_fallback == "skip":
-                raise NoContentError("DISPLAY-002 AI 尚未完成，排程依設定跳過且未更新成功狀態")
             if config.ai_fallback == "fail":
                 raise NoContentError("DISPLAY-003 AI 尚未完成，排程依設定失敗")
             target = self.render_service._today()
             return {
                 "status": "completed",
                 "outcome": "no_content",
+                "outcome_code": "NO_CONTENT",
                 "error_code": "NO_CONTENT",
-                "message": "目前沒有可顯示照片，請加入照片後重新執行。",
+                "message": (
+                    "AI 尚未完成，排程依設定跳過。"
+                    if config.ai_fallback == "skip"
+                    else "目前沒有可顯示照片，請加入照片後重新執行。"
+                ),
                 "stage": "no_content",
                 "photo_ids": [],
                 "target_display_times": config.target_times(target),
@@ -325,7 +327,20 @@ class DisplayPreparationService:
             dict((str(row["id"]), row) for row in candidates).values()
         )
         if len(unique_candidates) < len(schedule_times):
-            raise NoEligibleCandidatesError("DISPLAY-003 沒有足夠的既有且符合資格的分析結果")
+            return {
+                "status": "completed",
+                "outcome": "no_content",
+                "outcome_code": "NO_ELIGIBLE_CANDIDATES",
+                "message": "沒有足夠的既有且符合資格的分析結果，保留現有離線播放清單。",
+                "photo_ids": [],
+                "target_display_times": [
+                    f"{target.isoformat()}T{slot}:00" for slot in schedule_times
+                ],
+                "preparation_times": [],
+                "output_count": 0,
+                "requested_slots": len(schedule_times),
+                "available_candidates": len(unique_candidates),
+            }
         self.resilience.ensure_queue(device_id, depth=max(3, len(schedule_times)))
 
         release_ids: list[str] = []

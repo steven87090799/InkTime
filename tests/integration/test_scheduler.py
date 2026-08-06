@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from inktime.app.workers.scheduler import SchedulerRunner
+from inktime.app.workers.runner import WorkerRunner
 
 
 def _due_task(app, key: str, **config):
@@ -45,6 +47,7 @@ def test_due_incremental_schedule_enqueues_existing_scanner_entry(app, tmp_path)
     job = next(job for job in jobs if job["settings_json"].find('"scheduled_task": "incremental_scan"') >= 0)
     assert job["kind"] == "scan"
     assert job["status"] == "running"
+    assert json.loads(job["settings_json"])["max_attempts"] == 2
 
 
 def test_one_scheduled_task_failure_does_not_stop_the_next_task(app, monkeypatch):
@@ -64,6 +67,58 @@ def test_one_scheduled_task_failure_does_not_stop_the_next_task(app, monkeypatch
     assert "incremental_scan" in seen
     assert "cache_cleanup" in seen
     assert app.extensions["inktime_schedule_repository"].get("incremental_scan")["error_status"] == "預期失敗"
+
+
+def test_scheduled_retry_exhaustion_returns_to_normal_cron_without_replacement(app, monkeypatch):
+    schedules = app.extensions["inktime_schedule_repository"]
+    database = app.extensions["inktime_database"]
+    with database.session() as connection:
+        connection.execute(
+            """UPDATE scheduled_tasks
+               SET cron='0 0 1 1 *',retry_count=1,retry_interval_seconds=600
+               WHERE key='display_prepare'"""
+        )
+
+    repository = app.extensions["inktime_job_repository"]
+    job_id = repository.create_maintenance(
+        kind="render",
+        name="排程重試耗盡測試",
+        settings={
+            "scheduled_task": "display_prepare",
+            "trigger_source": "scheduler",
+            "max_retries": 1,
+            "max_attempts": 2,
+            "retry_interval_seconds": 600,
+            "display_prepare": {},
+        },
+        created_by=None,
+        dedupe_key="scheduled:display_prepare",
+    )
+    app.extensions["inktime_job_service"].start(job_id)
+
+    def fail_prepare(*_args, **_kwargs):
+        raise RuntimeError("temporary outage")
+
+    monkeypatch.setattr(
+        app.extensions["inktime_display_preparation_service"], "prepare", fail_prepare
+    )
+    runner = WorkerRunner(app)
+    assert runner.run_once() == 1
+    with database.session() as connection:
+        connection.execute(
+            "UPDATE job_items SET available_at=? WHERE job_id=?",
+            (datetime.now(timezone.utc).isoformat(), job_id),
+        )
+    assert runner.run_once() == 1
+
+    job = repository.get(job_id)
+    assert job["status"] == "completed_with_errors"
+    assert len(repository.list()) == 1
+    task = schedules.get("display_prepare")
+    assert task is not None
+    assert task["error_status"].startswith("JOB-003")
+    next_run = datetime.fromisoformat(str(task["next_run"]))
+    assert next_run > datetime.now(next_run.tzinfo) + timedelta(seconds=600)
 
 
 def test_offline_prefetch_creates_one_deduplicated_render_job(app):

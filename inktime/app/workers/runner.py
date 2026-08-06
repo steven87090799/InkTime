@@ -434,9 +434,17 @@ class WorkerRunner:
                 queue_multiplier=int(runtime_settings.get("worker.queue_multiplier", 1)),
                 max_attempts=int(
                     settings.get(
-                        "max_retries",
-                        self.app.extensions["inktime_settings_repository"].get("analysis.max_retries"),
+                        "max_attempts",
+                        settings.get(
+                            "max_retries",
+                            self.app.extensions["inktime_settings_repository"].get("analysis.max_retries"),
+                        ),
                     )
+                ),
+                retry_interval_seconds=(
+                    int(settings["retry_interval_seconds"])
+                    if settings.get("retry_interval_seconds") is not None
+                    else None
                 ),
                 progress_interval_items=progress_items,
                 progress_interval_seconds=progress_seconds,
@@ -466,14 +474,20 @@ class WorkerRunner:
                 if scheduled_task:
                     schedules = self.app.extensions["inktime_schedule_repository"]
                     codes = repository.failure_codes(str(job["id"]))
+                    outcomes = repository.outcome_codes(str(job["id"]))
+                    now = datetime.now().astimezone()
                     if str(finished["status"]) == "completed":
-                        if codes and classify_codes(codes) == FailureClass.TERMINAL_NO_RETRY:
+                        if outcomes and classify_codes(outcomes) == FailureClass.TERMINAL_NO_RETRY:
+                            task = schedules.get(str(scheduled_task))
+                            if task:
+                                schedules.record_terminal_outcome(task, ",".join(outcomes), now)
+                        elif codes and classify_codes(codes) == FailureClass.TERMINAL_NO_RETRY:
                             task = schedules.get(str(scheduled_task))
                             if task:
                                 schedules.record_terminal(
                                     task,
                                     f"{','.join(codes)} 工作狀態：completed",
-                                    datetime.now().astimezone(),
+                                    now,
                                 )
                         else:
                             schedules.record_success(str(scheduled_task))
@@ -486,13 +500,9 @@ class WorkerRunner:
                                 f"工作狀態：{finished['status']}"
                             )
                             if classification == FailureClass.TERMINAL_NO_RETRY:
-                                schedules.record_terminal(
-                                    task, message, datetime.now().astimezone()
-                                )
+                                schedules.record_terminal(task, message, now)
                             else:
-                                schedules.record_failure(
-                                    task, message, datetime.now().astimezone()
-                                )
+                                schedules.record_retry_exhausted(task, message, now)
                 level = logging.WARNING if int(finished["failed_items"]) else logging.INFO
                 log_event(
                     LOGGER,

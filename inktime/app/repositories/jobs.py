@@ -446,9 +446,25 @@ class JobRepository:
     def iter_runnable(self, page_size: int = 100):
         """以 keyset 走訪所有可執行 Job，避免舊工作被最新 100 筆遮蔽。"""
         last: tuple[int, str, str] | None = None
+        now = utc_now()
         while True:
-            where = "status IN ('running','retrying')"
-            params: list[object] = []
+            where = """
+                status IN ('running','retrying')
+                AND (
+                    EXISTS (
+                        SELECT 1 FROM job_items due_items
+                        WHERE due_items.job_id=jobs.id
+                          AND due_items.status='pending'
+                          AND due_items.available_at<=?
+                    )
+                    OR NOT EXISTS (
+                        SELECT 1 FROM job_items active_items
+                        WHERE active_items.job_id=jobs.id
+                          AND active_items.status IN ('pending','running','retrying')
+                    )
+                )
+            """
+            params: list[object] = [now]
             if last is not None:
                 where += " AND (priority>? OR (priority=? AND (created_at>? OR (created_at=? AND id>?))))"
                 params.extend([last[0], last[0], last[1], last[1], last[2]])
@@ -478,6 +494,29 @@ class JobRepository:
                 (job_id,),
             ).fetchall()
         return [str(row["error_code"] or "JOB-003") for row in rows]
+
+    def outcome_codes(self, job_id: str) -> List[str]:
+        """Return structured business outcomes without treating them as errors."""
+
+        with self.database.session() as connection:
+            rows = connection.execute(
+                "SELECT result_json FROM job_items WHERE job_id=? AND status='completed' AND result_json IS NOT NULL ORDER BY id",
+                (job_id,),
+            ).fetchall()
+        outcomes: list[str] = []
+        for row in rows:
+            try:
+                result = json.loads(str(row["result_json"]))
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(result, dict):
+                continue
+            code = result.get("outcome_code")
+            if code is None and result.get("outcome") == "no_content":
+                code = "NO_CONTENT"
+            if code:
+                outcomes.append(str(code))
+        return outcomes
 
     def can_access(self, job_id: str, user_id: str, *, administrator: bool) -> bool:
         with self.database.session() as connection:
@@ -676,7 +715,12 @@ class JobRepository:
                             json.dumps(result, ensure_ascii=False),
                             actual_cost,
                             stage,
-                            str(result.get("error_code") or "") or None,
+                            (
+                                None
+                                if result.get("outcome_code")
+                                or result.get("outcome") == "no_content"
+                                else str(result.get("error_code") or "") or None
+                            ),
                             item_id,
                         ),
                     )
@@ -732,7 +776,14 @@ class JobRepository:
             )
 
     def fail_item(
-        self, job_id: str, item_id: str, error_code: str, message: str, *, max_attempts: int = 3
+        self,
+        job_id: str,
+        item_id: str,
+        error_code: str,
+        message: str,
+        *,
+        max_attempts: int = 3,
+        retry_interval_seconds: int | None = None,
     ) -> None:
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
@@ -746,14 +797,19 @@ class JobRepository:
                 if terminal:
                     connection.execute(
                         """
-                        UPDATE job_items SET status='failed', completed_at=?, error_code=?, lease_until=NULL,
+                        UPDATE job_items SET status='failed', completed_at=?, error_code=?, available_at=NULL,
+                                             lease_until=NULL,
                                              dead_lettered_at=? WHERE id=?
                         """,
                         (now, error_code, now, item_id),
                     )
                     connection.execute("UPDATE jobs SET failed_items=failed_items+1 WHERE id=?", (job_id,))
                 else:
-                    delay = min(300, 2 ** int(item["attempts"]))
+                    delay = (
+                        max(1, int(retry_interval_seconds))
+                        if retry_interval_seconds is not None
+                        else min(300, 2 ** int(item["attempts"]))
+                    )
                     available = (now_dt + timedelta(seconds=delay)).isoformat()
                     connection.execute(
                         "UPDATE job_items SET status='pending', available_at=?, error_code=?, lease_until=NULL WHERE id=?",

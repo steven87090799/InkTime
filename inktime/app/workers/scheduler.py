@@ -436,6 +436,7 @@ class SchedulerRunner:
             common.update(
                 scheduled_task=task["key"],
                 max_retries=int(task["retry_count"]),
+                max_attempts=int(task["retry_count"]) + 1,
                 retry_interval_seconds=int(task["retry_interval_seconds"]),
             )
         if task["kind"] == "scan":
