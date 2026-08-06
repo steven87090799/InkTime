@@ -21,13 +21,15 @@ constexpr size_t kMaxPairingIdBytes = 128U;
 constexpr size_t kMaxPairingNonceBytes = 256U;
 constexpr size_t kMaxDeliveryModeBytes = 64U;
 constexpr size_t kMaxButtonWakeActionBytes = 64U;
+constexpr size_t kMaxSyncStrategyBytes = 32U;
+constexpr size_t kMaxSyncTimeBytes = 8U;
 constexpr size_t kMaxScheduleIdBytes = 160U;
 
 constexpr uint32_t kConfigSlotMagic = 0x494E4B43U;  // INKC
 constexpr uint32_t kConfigPointerMagic = 0x494E4B50U;  // INKP
 constexpr uint32_t kScheduleJournalMagic = 0x494E4B4AU;  // INKJ
 constexpr uint8_t kEnvelopeVersion = 1U;
-constexpr uint8_t kPayloadSchemaVersion = 3U;
+constexpr uint8_t kPayloadSchemaVersion = 4U;
 constexpr uint8_t kPointerVersion = 1U;
 constexpr uint8_t kJournalVersion = 1U;
 constexpr const char* kGenericCommitTargetScheduleId = "__config_commit__";
@@ -61,6 +63,8 @@ struct ConfigPayload {
   uint16_t prefetch_lead_minutes = 5U;
   std::string delivery_mode = "legacy_online";
   std::string button_wake_action = "check_new";
+  std::string sync_strategy = "first_display_lead";
+  std::string sync_time;
   uint32_t config_version = 0U;
 };
 
@@ -108,6 +112,8 @@ inline bool operator==(const ConfigPayload& left, const ConfigPayload& right) {
       || left.prefetch_lead_minutes != right.prefetch_lead_minutes
       || left.delivery_mode != right.delivery_mode
       || left.button_wake_action != right.button_wake_action
+      || left.sync_strategy != right.sync_strategy
+      || left.sync_time != right.sync_time
       || left.config_version != right.config_version) {
     return false;
   }
@@ -225,6 +231,25 @@ inline bool valid_slot(const ScheduleSlot& slot) {
   return slot.hour < 24U && slot.minute < 60U;
 }
 
+inline bool valid_sync_time(const std::string& value) {
+  if (value.empty()) return true;
+  if (value.size() != 5U || value[2] != ':') return false;
+  if (value[0] < '0' || value[0] > '9' || value[1] < '0' || value[1] > '9'
+      || value[3] < '0' || value[3] > '9' || value[4] < '0' || value[4] > '9') {
+    return false;
+  }
+  const uint8_t hour = static_cast<uint8_t>((value[0] - '0') * 10 + value[1] - '0');
+  const uint8_t minute = static_cast<uint8_t>((value[3] - '0') * 10 + value[4] - '0');
+  return hour < 24U && minute < 60U;
+}
+
+inline bool valid_sync_policy(const ConfigPayload& payload) {
+  if (payload.sync_strategy == "first_display_lead") return payload.sync_time.empty();
+  return payload.sync_strategy == "fixed_daily"
+      && !payload.sync_time.empty()
+      && valid_sync_time(payload.sync_time);
+}
+
 inline bool validate_payload(const ConfigPayload& payload, std::string& error) {
   if (payload.wifi_ssid.size() > kMaxWifiSsidBytes
       || payload.wifi_pass.size() > kMaxWifiPasswordBytes
@@ -237,7 +262,9 @@ inline bool validate_payload(const ConfigPayload& payload, std::string& error) {
       || payload.pairing_id.size() > kMaxPairingIdBytes
       || payload.pairing_nonce.size() > kMaxPairingNonceBytes
       || payload.delivery_mode.size() > kMaxDeliveryModeBytes
-      || payload.button_wake_action.size() > kMaxButtonWakeActionBytes) {
+      || payload.button_wake_action.size() > kMaxButtonWakeActionBytes
+      || payload.sync_strategy.size() > kMaxSyncStrategyBytes
+      || payload.sync_time.size() > kMaxSyncTimeBytes) {
     set_error(error, "PAIRING-NVS-001");
     return false;
   }
@@ -250,6 +277,7 @@ inline bool validate_payload(const ConfigPayload& payload, std::string& error) {
           && payload.delivery_mode != "inktime_offline_schedule")
       || (payload.button_wake_action != "check_new"
           && payload.button_wake_action != "local_next")
+      || !valid_sync_policy(payload)
       || (payload.auth_state != "unpaired"
           && payload.auth_state != "pairing_pending"
           && payload.auth_state != "paired"
@@ -310,6 +338,8 @@ inline bool serialize_payload(const ConfigPayload& payload, std::string& output,
   append_u16(output, payload.prefetch_lead_minutes);
   if (!append_string(output, payload.delivery_mode, kMaxDeliveryModeBytes)
       || !append_string(output, payload.button_wake_action, kMaxButtonWakeActionBytes)
+      || !append_string(output, payload.sync_strategy, kMaxSyncStrategyBytes)
+      || !append_string(output, payload.sync_time, kMaxSyncTimeBytes)
       || !append_string(output, payload.device_secret, kMaxDeviceSecretBytes)
       || !append_string(output, payload.device_id, kMaxDeviceIdBytes)
       || !append_string(output, payload.auth_state, kMaxAuthStateBytes)
@@ -337,7 +367,8 @@ inline bool serialize_payload(const ConfigPayload& payload, std::string& output,
 inline bool deserialize_payload(const std::string& input, ConfigPayload& payload, std::string& error) {
   size_t offset = 0U;
   uint8_t schema = 0U;
-  if (!take_u8(input, offset, schema) || (schema != 1U && schema != 2U && schema != kPayloadSchemaVersion)
+  if (!take_u8(input, offset, schema)
+      || (schema != 1U && schema != 2U && schema != 3U && schema != kPayloadSchemaVersion)
       || !take_string(input, offset, payload.wifi_ssid, kMaxWifiSsidBytes)
       || !take_string(input, offset, payload.wifi_pass, kMaxWifiPasswordBytes)
       || !take_string(input, offset, payload.backend_hostport, kMaxBackendHostportBytes)
@@ -369,6 +400,14 @@ inline bool deserialize_payload(const std::string& input, ConfigPayload& payload
   payload.pairing_expires_at_epoch = 0U;
   payload.pairing_retry_at_epoch = 0U;
   payload.pairing_retry_attempt = 0U;
+  payload.sync_strategy = "first_display_lead";
+  payload.sync_time.clear();
+  if (schema >= 4U
+      && (!take_string(input, offset, payload.sync_strategy, kMaxSyncStrategyBytes)
+          || !take_string(input, offset, payload.sync_time, kMaxSyncTimeBytes))) {
+    set_error(error, "PAIRING-NVS-004");
+    return false;
+  }
   if (schema >= 2U
       && (!take_string(input, offset, payload.device_secret, kMaxDeviceSecretBytes)
           || !take_string(input, offset, payload.device_id, kMaxDeviceIdBytes)
@@ -443,7 +482,8 @@ inline bool decode_slot(
       || !take_u8(input, offset, schema) || !take_u64(input, offset, generation)
       || !take_u32(input, offset, length) || !take_u32(input, offset, expected_crc)
       || magic != kConfigSlotMagic || envelope != kEnvelopeVersion
-      || (schema != 1U && schema != 2U && schema != kPayloadSchemaVersion) || length > kMaxConfigPayloadBytes
+      || (schema != 1U && schema != 2U && schema != 3U && schema != kPayloadSchemaVersion)
+      || length > kMaxConfigPayloadBytes
       || length != input.size() - offset) {
     set_error(error, "PAIRING-NVS-004");
     return false;

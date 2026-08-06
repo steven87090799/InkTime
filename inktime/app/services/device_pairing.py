@@ -22,7 +22,11 @@ from inktime.app.core.security import (
     register_secret,
 )
 from inktime.app.db import Database
-from inktime.app.domain.photopainter.offline_schedule import validate_offline_schedule
+from inktime.app.domain.photopainter.offline_schedule import (
+    MINIMUM_SCHEDULE_GAP_MINUTES,
+    normalize_sync_strategy,
+    validate_offline_schedule,
+)
 
 
 PAIRING_TTL = timedelta(minutes=5)
@@ -132,7 +136,12 @@ class DevicePairingService:
         return json.dumps(safe, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
     @staticmethod
-    def _schedule_values(raw: Any, fallback: str = "08:00") -> list[str]:
+    def _schedule_values(
+        raw: Any,
+        fallback: str = "08:00",
+        *,
+        minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
+    ) -> list[str]:
         if raw is None:
             values = [fallback]
         elif isinstance(raw, str):
@@ -149,7 +158,11 @@ class DevicePairingService:
         if any(right <= left for left, right in zip(minutes, minutes[1:], strict=False)):
             raise DevicePairingError("schedule_times 必須嚴格遞增", error_code="PAIR-004")
         try:
-            validate_offline_schedule(values, maximum=12)
+            validate_offline_schedule(
+                values,
+                maximum=12,
+                minimum_gap_minutes=minimum_gap_minutes,
+            )
         except ValueError as exc:
             raise DevicePairingError(str(exc), error_code="PAIR-004") from exc
         return values
@@ -166,7 +179,25 @@ class DevicePairingService:
         schedule = cls._validate_text(source.get("schedule", "08:00"), "schedule", 5, required=True)
         if not TIME_PATTERN.fullmatch(schedule):
             raise DevicePairingError("schedule 格式不合法", error_code="PAIR-004")
-        schedule_times = cls._schedule_values(source.get("schedule_times"), schedule)
+        minimum_gap_minutes = source.get(
+            "minimum_schedule_gap_minutes", MINIMUM_SCHEDULE_GAP_MINUTES
+        )
+        if type(minimum_gap_minutes) is not int or not 30 <= minimum_gap_minutes <= 360:
+            raise DevicePairingError(
+                "minimum_schedule_gap_minutes 必須介於 30 到 360", error_code="PAIR-004"
+            )
+        try:
+            sync_strategy, sync_time = normalize_sync_strategy(
+                source.get("sync_strategy", "first_display_lead"),
+                source.get("sync_time"),
+            )
+        except ValueError as exc:
+            raise DevicePairingError(str(exc), error_code="PAIR-004") from exc
+        schedule_times = cls._schedule_values(
+            source.get("schedule_times"),
+            schedule,
+            minimum_gap_minutes=minimum_gap_minutes,
+        )
         rotation = source.get("rotation", 0)
         if type(rotation) is not int or rotation not in {0, 180}:
             raise DevicePairingError("rotation 只支援 0 或 180", error_code="PAIR-004")
@@ -203,6 +234,9 @@ class DevicePairingService:
             "delivery_mode": delivery_mode,
             "prefetch_lead_minutes": prefetch,
             "button_wake_action": button,
+            "minimum_schedule_gap_minutes": minimum_gap_minutes,
+            "sync_strategy": sync_strategy,
+            "sync_time": sync_time,
             "stock_endpoint_host": None,
             "frame_orientation": frame_orientation or None,
             "layout_mode": layout_mode or None,
@@ -638,10 +672,11 @@ class DevicePairingService:
                 id,name,token_hash,enabled,timezone,schedule,rotation,panel_profile,
                 frame_orientation,layout_mode,fit_mode,delivery_mode,offline_prefetch_allowed,
                 offline_schedule_json,offline_schedule_version,schedule_times_json,prefetch_lead_minutes,
-                button_wake_action,stock_endpoint_host,auth_mode,pairing_state,credential_version,
+                button_wake_action,minimum_schedule_gap_minutes,sync_strategy,sync_time,
+                stock_endpoint_host,auth_mode,pairing_state,credential_version,
                 device_secret_hash,paired_at,auth_revoked_at,repair_allowed_until,firmware_version,
                 firmware_identity,created_at,updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 device_id,
@@ -662,6 +697,9 @@ class DevicePairingService:
                 schedule_json,
                 config["prefetch_lead_minutes"],
                 config["button_wake_action"],
+                config["minimum_schedule_gap_minutes"],
+                config["sync_strategy"],
+                config["sync_time"],
                 None,
                 "automatic",
                 "paired",
@@ -692,7 +730,8 @@ class DevicePairingService:
             UPDATE devices SET name=?,enabled=1,timezone=?,schedule=?,rotation=?,panel_profile=?,
                 frame_orientation=?,layout_mode=?,fit_mode=?,delivery_mode=?,offline_prefetch_allowed=?,
                 offline_schedule_json=?,offline_schedule_version=offline_schedule_version+1,
-                schedule_times_json=?,prefetch_lead_minutes=?,button_wake_action=?,stock_endpoint_host=NULL,
+                schedule_times_json=?,prefetch_lead_minutes=?,button_wake_action=?,minimum_schedule_gap_minutes=?,
+                sync_strategy=?,sync_time=?,stock_endpoint_host=NULL,
                 auth_mode='automatic',pairing_state='paired',credential_version=?,device_secret_hash=?,
                 paired_at=?,last_auth_at=NULL,auth_revoked_at=NULL,repair_allowed_until=NULL,
                 previous_device_secret_hash=NULL,previous_credential_version=NULL,previous_credential_expires_at=NULL,
@@ -705,7 +744,9 @@ class DevicePairingService:
                 config["name"], config["timezone"], config["schedule"], config["rotation"], config["panel_profile"],
                 config["frame_orientation"], config["layout_mode"], config["fit_mode"], delivery_mode,
                 int(delivery_mode == "inktime_offline_schedule"), schedule_json, schedule_json,
-                config["prefetch_lead_minutes"], config["button_wake_action"], int(envelope["credential_version"]),
+                config["prefetch_lead_minutes"], config["button_wake_action"],
+                config["minimum_schedule_gap_minutes"], config["sync_strategy"], config["sync_time"],
+                int(envelope["credential_version"]),
                 hash_device_secret(str(envelope["device_secret"]), self.pepper), self._iso(now),
                 str(envelope.get("firmware_version") or ""), str(envelope.get("firmware_identity") or ""),
                 self._iso(now), device_id,
