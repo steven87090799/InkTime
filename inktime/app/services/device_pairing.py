@@ -534,7 +534,12 @@ class DevicePairingService:
                     existing_config = json.loads(str(row["config_json"] or "{}"))
                 except (TypeError, ValueError, json.JSONDecodeError):
                     existing_config = {}
-                config = self._normalize_config(device_config or existing_config, fallback_name=f"待配對裝置 {str(row['device_id'])[-6:]}")
+                merged_config = dict(existing_config)
+                merged_config.update(device_config or {})
+                config = self._normalize_config(
+                    merged_config,
+                    fallback_name=f"待配對裝置 {str(row['device_id'])[-6:]}",
+                )
                 connection.execute(
                     "UPDATE device_pairing_requests SET status='approved',approved_at=?,approved_by=?,config_json=? WHERE id=?",
                     (self._iso(now), administrator_id[:128], json.dumps(config, ensure_ascii=False, separators=(",", ":")), pairing_id),
