@@ -797,7 +797,7 @@ class JobRepository:
                 if terminal:
                     connection.execute(
                         """
-                        UPDATE job_items SET status='failed', completed_at=?, error_code=?, available_at=NULL,
+                        UPDATE job_items SET status='failed', completed_at=?, error_code=?,
                                              lease_until=NULL,
                                              dead_lettered_at=? WHERE id=?
                         """,
