@@ -418,14 +418,21 @@ class SchedulerRunner:
                         target_date=target_iso,
                         config_version=int(device["config_version"]),
                     )
-                    def claim_shortage_recovery(connection, *, terminal_outcome=terminal_outcome):
+                    def claim_shortage_recovery(
+                        connection,
+                        *,
+                        terminal_outcome=terminal_outcome,
+                        device_id=str(device["id"]),
+                        target_date=target_iso,
+                        config_version=int(device["config_version"]),
+                    ):
                         if terminal_outcome is None:
                             return True
                         return offline_schedules.claim_terminal_outcome_retry(
                             terminal_outcome=terminal_outcome,
-                            device_id=str(device["id"]),
-                            target_date=target_iso,
-                            config_version=int(device["config_version"]),
+                            device_id=device_id,
+                            target_date=target_date,
+                            config_version=config_version,
                             now=now,
                             connection=connection,
                         )
