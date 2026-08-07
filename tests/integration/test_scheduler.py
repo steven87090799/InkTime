@@ -209,6 +209,14 @@ def test_offline_shortage_retries_after_bounded_cooldown_and_keeps_active_dedupe
     first_now = datetime(2026, 8, 3, 7, 55, tzinfo=timezone.utc)
     scheduler._prepare_due_offline_devices(first_now)
     repository = app.extensions["inktime_job_repository"]
+    first_jobs = [
+        job
+        for job in repository.list()
+        if '"offline_prepare"' in str(job["settings_json"])
+        and device_id in str(job["settings_json"])
+    ]
+    assert len(first_jobs) == 1
+    first_job_id = first_jobs[0]["id"]
     assert WorkerRunner(app).run_once() == 1
 
     with app.extensions["inktime_database"].session() as connection:
@@ -244,6 +252,10 @@ def test_offline_shortage_retries_after_bounded_cooldown_and_keeps_active_dedupe
         and device_id in str(job["settings_json"])
     ]
     assert len(offline_jobs) == 2
+    retry_jobs = [job for job in offline_jobs if job["id"] != first_job_id]
+    assert len(retry_jobs) == 1
+    retry_job = retry_jobs[0]
+    assert retry_job["status"] == "pending"
     terminal = app.extensions["inktime_offline_schedule_repository"].terminal_outcome_for_device(
         device_id=device_id,
         target_date="2026-08-03",
@@ -251,7 +263,21 @@ def test_offline_shortage_retries_after_bounded_cooldown_and_keeps_active_dedupe
     )
     assert terminal["updated_at"] == retry_now.isoformat()
 
-    assert repository.transition(offline_jobs[1]["id"], {"running"}, "failed", "test_transient_failure")
+    scheduler._prepare_due_offline_devices(retry_now)
+    assert len(
+        [
+            job
+            for job in repository.list()
+            if '"offline_prepare"' in str(job["settings_json"])
+            and device_id in str(job["settings_json"])
+        ]
+    ) == 2
+    assert repository.transition(
+        retry_job["id"], {"pending"}, "running", "test_recovery_started"
+    )
+    assert repository.transition(
+        retry_job["id"], {"running"}, "failed", "test_transient_failure"
+    )
     scheduler._prepare_due_offline_devices(retry_now + timedelta(minutes=1))
     scheduler._prepare_due_offline_devices(retry_now + timedelta(minutes=5))
     assert len(

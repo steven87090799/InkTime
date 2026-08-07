@@ -348,9 +348,7 @@ def preview_schedule(key: str):
         abort(404)
     if str(task["kind"]) != "render":
         abort(400, description="SCHEDULE-003 只有換圖排程支援實際 Playlist 預覽")
-    payload = request.get_json(silent=True) if request.is_json else {}
-    if not isinstance(payload, dict):
-        abort(400, description="SCHEDULE-003 Preview Payload 必須是 JSON 物件")
+    payload = _payload("SCHEDULE-003")
     target_date = None
     if payload.get("target_date") is not None:
         try:
