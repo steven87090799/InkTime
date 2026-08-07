@@ -215,11 +215,35 @@ class ScheduledTaskRepository:
                 (next_run, utc_now(), task["key"]),
             )
 
-    def record_success(self, key: str) -> None:
+    def record_success(
+        self,
+        task: dict[str, Any],
+        now: datetime,
+        *,
+        scheduled_occurrence_at: str,
+    ) -> None:
+        """Record success and repair only an unadvanced scheduled cursor."""
+
+        del now
+        occurrence = datetime.fromisoformat(scheduled_occurrence_at)
+        repaired_next_run = self._next_run(
+            task["cron"], occurrence, task["weekdays"]
+        ).isoformat()
+        completed_at = utc_now()
         with self.database.session() as connection:
             connection.execute(
-                "UPDATE scheduled_tasks SET last_success=?,error_status=NULL,updated_at=? WHERE key=?",
-                (utc_now(), utc_now(), key),
+                """UPDATE scheduled_tasks
+                   SET last_success=?,error_status=NULL,
+                       next_run=CASE WHEN next_run=? THEN ? ELSE next_run END,
+                       updated_at=?
+                   WHERE key=?""",
+                (
+                    completed_at,
+                    scheduled_occurrence_at,
+                    repaired_next_run,
+                    completed_at,
+                    task["key"],
+                ),
             )
 
     def record_terminal_outcome(

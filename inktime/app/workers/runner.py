@@ -490,7 +490,14 @@ class WorkerRunner:
                                     now,
                                 )
                         else:
-                            schedules.record_success(str(scheduled_task))
+                            task = schedules.get(str(scheduled_task))
+                            occurrence_at = settings.get("scheduled_occurrence_at")
+                            if task and occurrence_at:
+                                schedules.record_success(
+                                    task,
+                                    now,
+                                    scheduled_occurrence_at=str(occurrence_at),
+                                )
                     elif str(finished["status"]) not in {"running", "retrying"}:
                         task = schedules.get(str(scheduled_task))
                         if task:

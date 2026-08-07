@@ -119,6 +119,92 @@ def test_due_scheduled_pending_job_restarts_without_duplicate(app, monkeypatch):
     assert len([job for job in repository.list() if job["dedupe_key"] == dedupe_key]) == 1
 
 
+def test_scheduled_success_repairs_cursor_after_start_before_mark_enqueued(app):
+    task_key = "cache_cleanup"
+    dedupe_key = f"scheduled:{task_key}"
+    _due_task(app, task_key)
+    schedules = app.extensions["inktime_schedule_repository"]
+    database = app.extensions["inktime_database"]
+    repository = app.extensions["inktime_job_repository"]
+    job_service = app.extensions["inktime_job_service"]
+
+    old_next_run = (datetime.now(ZoneInfo("Asia/Taipei")) - timedelta(minutes=1)).isoformat()
+    with database.session() as connection:
+        connection.execute(
+            "UPDATE scheduled_tasks SET cron='0 * * * *',next_run=? WHERE key=?",
+            (old_next_run, task_key),
+        )
+    task_before_start = schedules.get(task_key)
+    assert task_before_start is not None
+    old_next_run_dt = datetime.fromisoformat(str(task_before_start["next_run"]))
+
+    job_id = repository.create_maintenance(
+        kind="cleanup",
+        name="排程成功游標恢復測試",
+        settings={
+            "scheduled_task": task_key,
+            "scheduled_occurrence_at": task_before_start["next_run"],
+            "trigger_source": "scheduler",
+            "max_retries": 1,
+            "max_attempts": 2,
+            "retry_interval_seconds": 30,
+        },
+        created_by=None,
+        dedupe_key=dedupe_key,
+    )
+    job_service.start(job_id)
+    assert repository.get(job_id)["status"] == "running"
+    assert schedules.get(task_key)["next_run"] == task_before_start["next_run"]
+
+    # Simulate Scheduler crashing after start() and before mark_enqueued().
+    assert WorkerRunner(app).run_once() == 1
+
+    assert repository.get(job_id)["status"] == "completed"
+    task_after_success = schedules.get(task_key)
+    assert task_after_success is not None
+    assert task_after_success["last_success"] is not None
+    next_run = datetime.fromisoformat(str(task_after_success["next_run"]))
+    assert next_run > old_next_run_dt
+
+    SchedulerRunner(app).tick()
+    assert len([job for job in repository.list() if job["dedupe_key"] == dedupe_key]) == 1
+
+
+def test_scheduled_success_preserves_cursor_after_mark_enqueued(app):
+    task_key = "cache_cleanup"
+    _due_task(app, task_key)
+    schedules = app.extensions["inktime_schedule_repository"]
+    database = app.extensions["inktime_database"]
+
+    old_next_run = (datetime.now(ZoneInfo("Asia/Taipei")) - timedelta(minutes=1)).isoformat()
+    with database.session() as connection:
+        connection.execute(
+            "UPDATE scheduled_tasks SET cron='0 * * * *',next_run=? WHERE key=?",
+            (old_next_run, task_key),
+        )
+    task_before_enqueue = schedules.get(task_key)
+    assert task_before_enqueue is not None
+    occurrence_at = str(task_before_enqueue["next_run"])
+
+    schedules.mark_enqueued(task_before_enqueue, datetime.now(ZoneInfo("Asia/Taipei")))
+    task_after_enqueue = schedules.get(task_key)
+    assert task_after_enqueue is not None
+    marked_next_run = str(task_after_enqueue["next_run"])
+
+    # Simulate a slow Worker completion after the next normal occurrence.
+    completion_now = datetime.fromisoformat(marked_next_run) + timedelta(minutes=30)
+    schedules.record_success(
+        task_after_enqueue,
+        completion_now,
+        scheduled_occurrence_at=occurrence_at,
+    )
+
+    completed_task = schedules.get(task_key)
+    assert completed_task is not None
+    assert completed_task["last_success"] is not None
+    assert completed_task["next_run"] == marked_next_run
+
+
 def test_one_scheduled_task_failure_does_not_stop_the_next_task(app, monkeypatch):
     _due_task(app, "incremental_scan", delay_high_load=False)
     _due_task(app, "cache_cleanup")

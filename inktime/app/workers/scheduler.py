@@ -473,6 +473,7 @@ class SchedulerRunner:
         if is_scheduled:
             common.update(
                 scheduled_task=task["key"],
+                scheduled_occurrence_at=str(task["next_run"]),
                 max_retries=int(task["retry_count"]),
                 max_attempts=int(task["retry_count"]) + 1,
                 retry_interval_seconds=int(task["retry_interval_seconds"]),
