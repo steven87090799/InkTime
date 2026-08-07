@@ -420,7 +420,14 @@ class WorkerRunner:
                         bool(result.get("cache_hit"))
                     )
 
-            def finalize_job(connection, finalized_job_id: str, target: str, *, settings=settings) -> None:
+            def finalize_job(
+                connection,
+                finalized_job_id: str,
+                target: str,
+                *,
+                settings=settings,
+                runtime_settings=runtime_settings,
+            ) -> None:
                 offline_prepare = settings.get("offline_prepare")
                 offline_schedules = self.app.extensions["inktime_offline_schedule_repository"]
                 scheduled_task = settings.get("scheduled_task")
