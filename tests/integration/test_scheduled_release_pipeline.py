@@ -203,6 +203,12 @@ def test_enhanced_prepare_shortage_returns_no_content_without_partial_activation
         offline_prefetch_allowed=True,
         schedule_times=["08:00", "20:00"],
     )
+    with app.extensions["inktime_database"].session() as connection:
+        config_version = int(
+            connection.execute(
+                "SELECT config_version FROM devices WHERE id=?", (device_id,)
+            ).fetchone()[0]
+        )
 
     result = app.extensions["inktime_display_preparation_service"].prepare_device_day(
         device_id=device_id,
@@ -214,11 +220,27 @@ def test_enhanced_prepare_shortage_returns_no_content_without_partial_activation
     assert result["outcome_code"] == "NO_ELIGIBLE_CANDIDATES"
     assert result["output_count"] == 0
     with app.extensions["inktime_database"].session() as connection:
+        schedules = connection.execute(
+            """
+            SELECT id,status,terminal_outcome_code,target_date,config_version
+            FROM device_offline_schedules
+            WHERE device_id=? AND target_date=? AND config_version=?
+            """,
+            (device_id, "2026-08-03", config_version),
+        ).fetchall()
+        assert len(schedules) == 1
+        schedule = schedules[0]
+        assert schedule["status"] == "failed"
+        assert schedule["terminal_outcome_code"] == "NO_ELIGIBLE_CANDIDATES"
+        assert schedule["target_date"] == "2026-08-03"
+        assert schedule["config_version"] == config_version
         assert connection.execute(
-            "SELECT COUNT(*) FROM device_offline_schedules WHERE device_id=?", (device_id,)
+            "SELECT COUNT(*) FROM device_offline_schedule_slots WHERE schedule_id=?",
+            (schedule["id"],),
         ).fetchone()[0] == 0
         assert connection.execute(
-            "SELECT COUNT(*) FROM device_content_queue_items WHERE device_id=?", (device_id,)
+            "SELECT COUNT(*) FROM device_content_queue_items WHERE device_id=?",
+            (device_id,),
         ).fetchone()[0] == 0
 
 
