@@ -28,6 +28,8 @@ MAX_PREPARED_SLOTS = 24
 TERMINAL_PREPARATION_OUTCOMES = frozenset({"NO_CONTENT", "NO_ELIGIBLE_CANDIDATES"})
 RECOVERABLE_SHORTAGE_CODES = frozenset({"NO_CONTENT", "NO_ELIGIBLE_CANDIDATES"})
 SHORTAGE_RETRY_COOLDOWN_SECONDS = 3600
+TRANSIENT_RETRY_BASE_SECONDS = 1800
+TRANSIENT_RETRY_CAP_SECONDS = 14_400
 
 
 @dataclass(frozen=True)
@@ -386,6 +388,14 @@ class OfflineScheduleRepository:
             "slots": normalized_slots,
         }
 
+    @staticmethod
+    def _snapshot_dict(raw: object) -> dict[str, Any]:
+        try:
+            snapshot = json.loads(str(raw or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return snapshot if isinstance(snapshot, dict) else {}
+
     def latest_for_device(self, device_id: str) -> dict[str, Any] | None:
         with self.database.session() as connection:
             row = connection.execute(
@@ -423,6 +433,192 @@ class OfflineScheduleRepository:
                 (device_id, self._date(target_date).isoformat(), int(config_version)),
             ).fetchone()
         return dict(row) if row else None
+
+    def transient_recovery_for_device(
+        self,
+        *,
+        device_id: str,
+        target_date: str,
+        config_version: int,
+    ) -> dict[str, Any] | None:
+        """Return durable cross-Job transient state for one exact identity."""
+
+        with self.database.session() as connection:
+            row = connection.execute(
+                """
+                SELECT status,snapshot_json
+                FROM device_offline_schedules
+                WHERE device_id=? AND target_date=? AND config_version=?
+                LIMIT 1
+                """,
+                (device_id, self._date(target_date).isoformat(), int(config_version)),
+            ).fetchone()
+        if row is None or str(row["status"]) == "ready":
+            return None
+        state = self._snapshot_dict(row["snapshot_json"]).get("transient_recovery")
+        return dict(state) if isinstance(state, dict) else None
+
+    def transient_recovery_blocks_retry(
+        self,
+        *,
+        device_id: str,
+        target_date: str,
+        config_version: int,
+        now: datetime,
+    ) -> bool:
+        """Return whether the durable cross-Job transient cooldown is active."""
+
+        state = self.transient_recovery_for_device(
+            device_id=device_id,
+            target_date=target_date,
+            config_version=config_version,
+        )
+        if state is None:
+            return False
+        try:
+            retry_at = datetime.fromisoformat(str(state["next_retry_at"]))
+        except (KeyError, TypeError, ValueError):
+            return False
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        current = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+        return current.astimezone(timezone.utc) < retry_at.astimezone(timezone.utc)
+
+    def record_transient_exhausted(
+        self,
+        *,
+        device_id: str,
+        target_date: str,
+        config_version: int,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Persist bounded cross-Job recovery after an offline Job exhausts."""
+
+        current = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+        exhausted_at = current.astimezone(timezone.utc)
+        exhausted_iso = exhausted_at.isoformat()
+        day = self._date(target_date).isoformat()
+        with self.database.transaction() as connection:
+            existing = connection.execute(
+                """
+                SELECT id,snapshot_json FROM device_offline_schedules
+                WHERE device_id=? AND target_date=? AND config_version=?
+                """,
+                (device_id, day, int(config_version)),
+            ).fetchone()
+            if existing is None:
+                device = connection.execute(
+                    """
+                    SELECT id,config_version,timezone,panel_profile,rotation,schedule_times_json,
+                           prefetch_lead_minutes,button_wake_action,offline_schedule_version,
+                           minimum_schedule_gap_minutes,sync_strategy,sync_time
+                    FROM devices WHERE id=? AND enabled=1
+                    """,
+                    (device_id,),
+                ).fetchone()
+                if device is None:
+                    raise KeyError(device_id)
+                if int(device["config_version"]) != int(config_version):
+                    raise ValueError("DISPLAY-CONFIG-RACE 裝置設定已變更，拒絕記錄離線重試")
+                schedule_id = str(uuid4())
+                snapshot = {}
+                created_at = exhausted_iso
+                device_values = device
+            else:
+                schedule_id = str(existing["id"])
+                snapshot = self._snapshot_dict(existing["snapshot_json"])
+                created_at = None
+                device_values = None
+            previous = snapshot.get("transient_recovery")
+            try:
+                previous_count = int(previous.get("failure_count", 0)) if isinstance(previous, dict) else 0
+            except (TypeError, ValueError):
+                previous_count = 0
+            failure_count = max(0, previous_count) + 1
+            backoff_seconds = min(
+                TRANSIENT_RETRY_CAP_SECONDS,
+                TRANSIENT_RETRY_BASE_SECONDS * (2 ** min(failure_count - 1, 3)),
+            )
+            next_retry_at = exhausted_at + timedelta(seconds=backoff_seconds)
+            state = {
+                "failure_count": failure_count,
+                "last_exhausted_at": exhausted_iso,
+                "next_retry_at": next_retry_at.isoformat(),
+                "backoff_seconds": backoff_seconds,
+            }
+            snapshot["transient_recovery"] = state
+            snapshot_json = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if existing is None:
+                connection.execute(
+                    """
+                    INSERT INTO device_offline_schedules(
+                        id,device_id,target_date,config_version,timezone,status,created_at,updated_at,
+                        panel_profile,rotation,schedule_times_json,prefetch_lead_minutes,
+                        button_wake_action,offline_schedule_version,minimum_schedule_gap_minutes,
+                        sync_strategy,sync_time,snapshot_json,terminal_outcome_code
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        schedule_id,
+                        device_id,
+                        day,
+                        int(config_version),
+                        str(device_values["timezone"]),
+                        "failed",
+                        created_at,
+                        exhausted_iso,
+                        str(device_values["panel_profile"]),
+                        int(device_values["rotation"]),
+                        str(device_values["schedule_times_json"] or "[]"),
+                        int(device_values["prefetch_lead_minutes"]),
+                        str(device_values["button_wake_action"]),
+                        int(device_values["offline_schedule_version"]),
+                        int(device_values["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES),
+                        str(device_values["sync_strategy"] or "first_display_lead"),
+                        device_values["sync_time"],
+                        snapshot_json,
+                        None,
+                    ),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE device_offline_schedules
+                    SET status='failed',updated_at=?,snapshot_json=?,terminal_outcome_code=NULL
+                    WHERE id=?
+                    """,
+                    (exhausted_iso, snapshot_json, schedule_id),
+                )
+        return state
+
+    def clear_transient_recovery(
+        self,
+        *,
+        device_id: str,
+        target_date: str,
+        config_version: int,
+    ) -> None:
+        """Clear cross-Job transient history after a successful preparation."""
+
+        day = self._date(target_date).isoformat()
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT id,snapshot_json FROM device_offline_schedules
+                WHERE device_id=? AND target_date=? AND config_version=?
+                """,
+                (device_id, day, int(config_version)),
+            ).fetchone()
+            if row is None:
+                return
+            snapshot = self._snapshot_dict(row["snapshot_json"])
+            if "transient_recovery" not in snapshot:
+                return
+            snapshot.pop("transient_recovery", None)
+            connection.execute(
+                "UPDATE device_offline_schedules SET snapshot_json=? WHERE id=?",
+                (json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")), str(row["id"])),
+            )
 
     def claim_terminal_outcome_retry(
         self,

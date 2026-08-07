@@ -1720,6 +1720,8 @@ class RenderService:
         offset = 0
         # 檔案存在性無法安全地交給 SQLite；用固定批次掃描 SQL 已排序結果，
         # 每次只保留真正可用的候選，避免把大型照片庫 materialize 成 Dict。
+        # photos has no durable burst_group_id column; captured_at is the
+        # existing burst-proximity signal consumed by LocalSelectionPolicy.
         while len(result) < max(limit, 1):
             with self.database.session() as connection:
                 rows = connection.execute(

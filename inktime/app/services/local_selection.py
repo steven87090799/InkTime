@@ -71,18 +71,28 @@ class LocalSelectionPolicy:
 
     @classmethod
     def _diversity_penalty(cls, candidate: dict[str, Any], selected: list[dict[str, Any]]) -> float:
-        """Penalize local duplicates and bursts without introducing an AI call."""
+        """Penalize local duplicates and bursts without introducing an AI call.
+
+        ``captured_at`` proximity is the durable burst signal currently
+        available in the photos schema.  Callers that already have an
+        explicit ``burst_group_id`` may provide it, but it must remain
+        independent from ``duplicate_group_id``.
+        """
         penalty = 0.0
-        candidate_group = str(candidate.get("duplicate_group_id") or candidate.get("burst_group_id") or "")
+        candidate_duplicate_group = str(candidate.get("duplicate_group_id") or "")
+        candidate_burst_group = str(candidate.get("burst_group_id") or "")
         candidate_time = str(candidate.get("captured_at") or "")
         try:
             candidate_dt = datetime.fromisoformat(candidate_time.replace("Z", "+00:00"))
         except ValueError:
             candidate_dt = None
         for other in selected:
-            other_group = str(other.get("duplicate_group_id") or other.get("burst_group_id") or "")
-            if candidate_group and candidate_group == other_group:
+            other_duplicate_group = str(other.get("duplicate_group_id") or "")
+            other_burst_group = str(other.get("burst_group_id") or "")
+            if candidate_duplicate_group and candidate_duplicate_group == other_duplicate_group:
                 penalty = max(penalty, 18.0)
+            if candidate_burst_group and candidate_burst_group == other_burst_group:
+                penalty = max(penalty, 14.0)
             candidate_sha = str(candidate.get("sha256") or "").strip().lower()
             other_sha = str(other.get("sha256") or "").strip().lower()
             if candidate_sha and candidate_sha == other_sha:

@@ -371,11 +371,47 @@ class SchedulerRunner:
                 )
                 for target_date in targets[:2]:
                     target_iso = target_date.isoformat()
+                    dedupe_key = (
+                        f"offline-prepare:{device['id']}:{target_iso}:{int(device['config_version'])}"
+                    )
                     if offline_schedules.ready_for_device(
                         device_id=str(device["id"]),
                         target_date=target_iso,
                         config_version=int(device["config_version"]),
                     ) is not None:
+                        continue
+                    active_job = job_repository.active_dedupe_job(dedupe_key)
+                    if active_job is not None:
+                        if str(active_job["status"]) == "pending":
+                            try:
+                                job_service.start(str(active_job["id"]))
+                            except Exception as exc:
+                                job_repository.add_event(
+                                    str(active_job["id"]),
+                                    "offline_prepare_start_failed",
+                                    "離線排程準備工作啟動失敗；保留 pending Job 供下次 Scheduler 重試",
+                                    {"error_code": failure_code(exc)},
+                                )
+                                log_event(
+                                    LOGGER,
+                                    logging.ERROR,
+                                    "離線排程 pending 工作啟動失敗；下次排程會重試同一 Job",
+                                    event="offline_prepare_pending_start_failed",
+                                    error_code=failure_code(exc),
+                                    details={
+                                        "device_id": str(device["id"]),
+                                        "target_date": target_iso,
+                                        "config_version": int(device["config_version"]),
+                                        "job_id": str(active_job["id"]),
+                                    },
+                                )
+                        continue
+                    if offline_schedules.transient_recovery_blocks_retry(
+                        device_id=str(device["id"]),
+                        target_date=target_iso,
+                        config_version=int(device["config_version"]),
+                        now=now,
+                    ):
                         continue
                     terminal_outcome = offline_schedules.terminal_outcome_for_device(
                         device_id=str(device["id"]),
@@ -390,7 +426,6 @@ class SchedulerRunner:
                         now=now,
                     ):
                         continue
-                    dedupe_key = f"offline-prepare:{device['id']}:{target_iso}:{int(device['config_version'])}"
                     job_id = job_repository.create_maintenance(
                         kind="render",
                         name=f"離線排程準備：{str(device['name'])} {target_iso}",
@@ -469,14 +504,14 @@ class SchedulerRunner:
         common = {
             "timeout_seconds": int(task["timeout_seconds"]),
             "trigger_source": trigger_source,
+            "max_retries": int(task["retry_count"]),
+            "max_attempts": int(task["retry_count"]) + 1,
+            "retry_interval_seconds": int(task["retry_interval_seconds"]),
         }
         if is_scheduled:
             common.update(
                 scheduled_task=task["key"],
                 scheduled_occurrence_at=str(task["next_run"]),
-                max_retries=int(task["retry_count"]),
-                max_attempts=int(task["retry_count"]) + 1,
-                retry_interval_seconds=int(task["retry_interval_seconds"]),
             )
         if task["kind"] == "scan":
             root_path = str(
