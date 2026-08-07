@@ -124,6 +124,20 @@ def test_generic_queue_manifest_is_bounded_and_excludes_offline_schedule_rows(cl
     assert all(item["delivery_mode"] == "online_queue" for item in manifest["items"])
 
 
+def test_enhanced_offline_queue_accepts_24_slot_depth(app):
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "24-slot offline queue",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=[f"{hour:02d}:00" for hour in range(24)],
+    )
+    queue = app.extensions["inktime_resilience_repository"]
+
+    result = queue.ensure_queue(device_id, depth=24)
+
+    assert result["queue"]["depth"] == 24
+
+
 def test_queue_rejects_stale_version_and_illegal_transition(client, app):
     create_admin(app)
     login(client)

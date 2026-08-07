@@ -16,6 +16,7 @@ from inktime.app.domain.photopainter.offline_schedule import (
     MINIMUM_SCHEDULE_GAP_MINUTES,
     validate_offline_schedule,
 )
+from inktime.app.domain.rendering import current_local_date
 from inktime.app.domain.rendering.system_presets import DEFAULT_RENDER_PROFILE
 
 
@@ -168,7 +169,7 @@ class DisplayPreparationService:
         with self.database.session() as connection:
             device = connection.execute(
                 """
-                SELECT id,config_version,delivery_mode,offline_prefetch_allowed
+                SELECT id,config_version,delivery_mode,offline_prefetch_allowed,timezone
                 FROM devices WHERE id=? AND enabled=1
                 """,
                 (selected_device_id,),
@@ -191,6 +192,7 @@ class DisplayPreparationService:
                 "playlist": [],
                 "output_count": 0,
             }
+        target = target_date or current_local_date(str(device["timezone"] or "UTC"))
         committed = self.offline_schedules.ready_for_device(
             device_id=selected_device_id,
             target_date=target.isoformat(),

@@ -24,6 +24,7 @@ from inktime.app.domain.photopainter.offline_schedule import (
 
 
 LOGGER = logging.getLogger("scheduler")
+OFFLINE_PREPARE_RETRY_INTERVAL_SECONDS = 600
 
 
 class SchedulerRunner:
@@ -383,6 +384,8 @@ class SchedulerRunner:
                             "trigger_source": "offline-scheduler",
                             "timeout_seconds": 1800,
                             "max_retries": 1,
+                            "max_attempts": 2,
+                            "retry_interval_seconds": OFFLINE_PREPARE_RETRY_INTERVAL_SECONDS,
                         },
                     )
                     current = job_repository.get(job_id)

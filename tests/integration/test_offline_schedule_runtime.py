@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from PIL import Image
@@ -230,6 +230,52 @@ def test_actual_playlist_preview_reads_committed_schedule_without_reselection(ap
     assert preview["playlist_version"] == prepared["playlist_version"]
     assert preview["playlist"][0]["release_id"] == release["release_id"]
     assert preview["playlist"][0]["show_at"] == prepared["slots"][0]["show_at"]
+
+
+def test_actual_playlist_preview_defaults_to_device_local_date(app, monkeypatch):
+    app.extensions["inktime_settings_repository"].update(
+        "general.timezone", "Pacific/Honolulu", changed_by="test", source_ip="127.0.0.1"
+    )
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "跨時區離線實際 Playlist 預覽",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00"],
+        timezone_name="Pacific/Kiritimati",
+    )
+    release = _release(app, "offline-preview-device-local-date")
+    target = "2026-08-04"
+    prepared = app.extensions["inktime_offline_schedule_repository"].prepare_day(
+        device_id=device_id,
+        target_date=target,
+        release_ids=[release["release_id"]],
+    )
+    seen_timezones = []
+
+    def device_local_date(timezone_name: str) -> date:
+        seen_timezones.append(timezone_name)
+        return date(2026, 8, 4)
+
+    monkeypatch.setattr(
+        "inktime.app.services.display_prepare.current_local_date", device_local_date
+    )
+    preview = app.extensions["inktime_display_preparation_service"].preview(
+        {
+            "display_times": ["08:00"],
+            "daily_count": 1,
+            "device_ids": [device_id],
+            "candidate_years": [],
+            "prefetch_count": 1,
+            "ai_fallback": "use_existing",
+            "render_fallback": "keep_current",
+        }
+    )
+
+    assert preview["outcome"] == "ready"
+    assert preview["target_date"] == target
+    assert preview["playlist_version"] == prepared["playlist_version"]
+    assert preview["playlist"][0]["release_id"] == release["release_id"]
+    assert seen_timezones == ["Pacific/Kiritimati"]
 
 
 def test_offline_schedule_snapshot_does_not_follow_live_device_config(client, app):

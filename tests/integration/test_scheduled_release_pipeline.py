@@ -102,10 +102,10 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
     photos = app.extensions["inktime_photo_repository"]
     library_id = photos.ensure_library("離線排程照片", root)
     now = "2026-07-22T00:00:00+00:00"
-    for index in (1, 2):
+    for index in range(1, 25):
         photo_id = f"offline-scheduled-{index}"
         filename = f"{photo_id}.jpg"
-        Image.new("RGB", (480, 800), (index * 40, 80, 120)).save(root / filename)
+        Image.new("RGB", (480, 800), ((index * 10) % 256, 80, 120)).save(root / filename)
         with app.extensions["inktime_database"].session() as connection:
             connection.execute(
                 """
@@ -156,7 +156,7 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
         panel_profile="safe_4c",
         delivery_mode="inktime_offline_schedule",
         offline_prefetch_allowed=True,
-        schedule_times=["08:00", "20:00"],
+        schedule_times=[f"{hour:02d}:00" for hour in range(24)],
         prefetch_lead_minutes=5,
     )
     service = app.extensions["inktime_display_preparation_service"]
@@ -177,7 +177,7 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
 
     assert prepared["status"] == "ready"
     assert prepared["idempotent"] is False
-    assert len(prepared["slots"]) == 2
+    assert len(prepared["slots"]) == 24
     assert repeated["idempotent"] is True
     with app.extensions["inktime_database"].session() as connection:
         release_count = connection.execute(
@@ -190,8 +190,8 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
         history_after = connection.execute(
             "SELECT COUNT(*) FROM display_history WHERE selection_method='offline_schedule_prepare'"
         ).fetchone()[0]
-    assert release_count == 2
-    assert queue_count == 2
+    assert release_count == 24
+    assert queue_count == 24
     assert history_before == 0
     assert history_after == 0
 

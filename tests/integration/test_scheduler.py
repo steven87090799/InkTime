@@ -6,8 +6,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from inktime.app.domain.jobs.failure_policy import JobFailure
 from inktime.app.repositories.offline_schedules import SHORTAGE_RETRY_COOLDOWN_SECONDS
-from inktime.app.workers.scheduler import SchedulerRunner
+from inktime.app.workers.scheduler import (
+    OFFLINE_PREPARE_RETRY_INTERVAL_SECONDS,
+    SchedulerRunner,
+)
 from inktime.app.workers.runner import WorkerRunner
 
 
@@ -146,6 +150,71 @@ def test_offline_prefetch_creates_one_deduplicated_render_job(app):
     assert offline_jobs[0]["dedupe_key"] == (
         f"offline-prepare:{device_id}:2026-08-03:1"
     )
+    settings = json.loads(offline_jobs[0]["settings_json"])
+    assert settings["max_retries"] == 1
+    assert settings["max_attempts"] == 2
+    assert settings["retry_interval_seconds"] == OFFLINE_PREPARE_RETRY_INTERVAL_SECONDS
+
+
+def test_offline_prepare_transient_failure_keeps_active_retry_bounded(app, monkeypatch):
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "離線 transient retry 相框",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00", "20:00"],
+        prefetch_lead_minutes=5,
+    )
+    scheduler = SchedulerRunner(app)
+    now = datetime(2026, 8, 3, 7, 55, tzinfo=timezone.utc)
+    scheduler._prepare_due_offline_devices(now)
+    repository = app.extensions["inktime_job_repository"]
+
+    def offline_jobs():
+        return [
+            job
+            for job in repository.list()
+            if '"offline_prepare"' in str(job["settings_json"])
+            and device_id in str(job["settings_json"])
+        ]
+
+    jobs = offline_jobs()
+    assert len(jobs) == 1
+    job_id = str(jobs[0]["id"])
+    settings = json.loads(jobs[0]["settings_json"])
+    assert settings["max_attempts"] == 2
+    assert settings["retry_interval_seconds"] == 600
+
+    def fail_prepare(**_kwargs):
+        raise JobFailure("temporary display outage", code="DISPLAY-005")
+
+    monkeypatch.setattr(
+        app.extensions["inktime_display_preparation_service"],
+        "prepare_device_day",
+        fail_prepare,
+    )
+    worker = WorkerRunner(app)
+    assert worker.run_once() == 1
+
+    item = repository.list_items(job_id)[0]
+    assert item["status"] == "pending"
+    available_at = datetime.fromisoformat(str(item["available_at"]))
+    assert available_at - datetime.now(timezone.utc) > timedelta(seconds=590)
+    assert repository.get(job_id)["status"] in {"running", "retrying"}
+
+    scheduler._prepare_due_offline_devices(now + timedelta(minutes=1))
+    scheduler._prepare_due_offline_devices(now + timedelta(minutes=5))
+    assert len(offline_jobs()) == 1
+
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE job_items SET available_at=? WHERE job_id=?",
+            (datetime.now(timezone.utc).isoformat(), job_id),
+        )
+    assert worker.run_once() == 1
+    assert repository.get(job_id)["status"] == "completed_with_errors"
+
+    scheduler._prepare_due_offline_devices(now + timedelta(minutes=6))
+    assert len(offline_jobs()) == 2
 
 
 def test_offline_shortage_is_terminal_for_one_device_day_config(app):
