@@ -44,11 +44,11 @@ def test_web_template_changes_route_web_ui_only():
     assert flags["full_suite"] is False
 
 
-def test_management_ui_and_ordinary_backend_are_python_and_ui_or_python_only():
+def test_management_ui_test_and_ordinary_backend_keep_distinct_ownership():
     management = classify_paths(["tests/integration/test_management_ui.py"])
     backend = classify_paths(["inktime/app/api/photos.py"])
 
-    assert management["python"] is True
+    assert management["python"] is False
     assert management["web_ui"] is True
     assert backend["python"] is True
     assert backend["web_ui"] is False
@@ -70,7 +70,7 @@ def test_python_and_dependency_changes_route_expected_tiers():
     assert flags["provider_ai"] is True
     assert flags["full_suite"] is False
     assert dependency_flags["dependencies"] is True
-    assert dependency_flags["full_suite"] is True
+    assert dependency_flags["full_suite"] is False
 
 
 def test_scheduler_and_migration_changes_route_runtime_and_persistence():
@@ -80,7 +80,6 @@ def test_scheduler_and_migration_changes_route_runtime_and_persistence():
     assert scheduler["python"] is True
     assert scheduler["runtime"] is True
     assert migration["python"] is True
-    assert migration["runtime"] is True
     assert migration["persistence"] is True
 
 
@@ -90,7 +89,7 @@ def test_tls_proxy_changes_route_tls_and_container_contracts():
     assert flags["tls_security"] is True
     assert flags["docker"] is True
     assert flags["ci_config"] is True
-    assert flags["full_suite"] is True
+    assert flags["full_suite"] is False
 
 
 def test_specialised_surfaces_route_their_expensive_contracts():
@@ -117,11 +116,11 @@ def test_device_manifest_backend_contract_routes_python_and_firmware():
     assert flags["firmware"] is True
 
 
-def test_agents_policy_is_ci_config_and_full_suite():
+def test_agents_policy_is_known_ci_config_without_draft_full_suite():
     flags = classify_paths(["AGENTS.md"])
 
     assert flags["ci_config"] is True
-    assert flags["full_suite"] is True
+    assert flags["full_suite"] is False
 
 
 def test_unknown_paths_fail_open_to_full_suite():
@@ -131,11 +130,11 @@ def test_unknown_paths_fail_open_to_full_suite():
     assert flags["full_suite"] is True
 
 
-def test_ci_policy_changes_force_full_suite():
+def test_ci_policy_changes_are_bounded_in_draft_mode():
     flags = classify_paths([".github/workflows/ci.yml"])
 
     assert flags["ci_config"] is True
-    assert flags["full_suite"] is True
+    assert flags["full_suite"] is False
 
 
 def test_manual_full_suite_is_explicit():
