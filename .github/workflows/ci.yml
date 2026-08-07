@@ -37,7 +37,7 @@ jobs:
       plan_json: ${{ steps.route.outputs.plan_json }}
       run_python_quality: ${{ steps.route.outputs.run_python_quality }}
       run_dependency_policy: ${{ steps.route.outputs.run_dependency_policy }}
-      run_ci_routing_contracts: ${{ steps.route.outputs.run_ci_routing_contracts }}
+      selected_owner_suites: ${{ steps.route.outputs.selected_owner_suites }}
       run_python312_full: ${{ steps.route.outputs.run_python312_full }}
       run_python310: ${{ steps.route.outputs.run_python310 }}
       run_dependency_audit: ${{ steps.route.outputs.run_dependency_audit }}
@@ -103,11 +103,7 @@ jobs:
             echo "plan_json=${plan_json}"
             echo "run_python_quality=true"
             echo "run_dependency_policy=$(has_suite dependency_policy)"
-            ci_routing_contracts=false
-            if [ "$(jq -r .ci_mode <<<"${plan_json}")" = "impact" ] && [ "$(has_suite ci_routing_contracts)" = "true" ]; then
-              ci_routing_contracts=true
-            fi
-            echo "run_ci_routing_contracts=${ci_routing_contracts}"
+            echo "selected_owner_suites=$(jq -c .selected_owner_suites <<<"${plan_json}")"
             echo "run_python312_full=$(has_gate python312_full)"
             echo "run_python310=$(has_gate python310_compatibility)"
             echo "run_dependency_audit=$(has_gate dependency_audit)"
@@ -221,9 +217,9 @@ jobs:
             -w /repo \
             rhysd/actionlint@sha256:1d74bfc9fd1963af8f89a7c22afaaafd42f49aad711a09951d02cb996398f61d
 
-  ci-routing-contracts:
-    name: CI planner contracts
-    if: ${{ needs.changes.outputs.run_ci_routing_contracts == 'true' }}
+  selected-owner-suites:
+    name: Selected owner suites
+    if: ${{ needs.changes.outputs.ci_mode == 'impact' && needs.changes.outputs.selected_owner_suites != '[]' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -231,7 +227,10 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
         with: {python-version: "3.12", cache: pip}
       - run: pip install -r requirements-dev.txt
-      - run: pytest tests/unit/test_ci_changed_paths.py tests/unit/test_ci_test_plan.py
+      - name: Run planner-selected owner regressions
+        env:
+          SELECTED_TEST_SUITES: ${{ needs.changes.outputs.selected_test_suites }}
+        run: python scripts/ci/run_selected_suites.py --suites-json "${SELECTED_TEST_SUITES}"
 
   compose-lan-production-persistence:
     if: ${{ needs.changes.outputs.run_lan_persistence == 'true' }}
@@ -544,7 +543,7 @@ jobs:
       - changes
       - secret-scan
       - actionlint
-      - ci-routing-contracts
+      - selected-owner-suites
       - python-quality
       - python-compatibility
       - dependency-audit

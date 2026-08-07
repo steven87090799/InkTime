@@ -1,6 +1,6 @@
 # InkTime CI policy
 
-InkTime CI uses the source-owned planner in [`scripts/ci/test_plan.py`](../scripts/ci/test_plan.py). The workflows only execute the suites and gates selected by that planner; the compatibility adapter [`scripts/ci/changed_paths.py`](../scripts/ci/changed_paths.py) remains for older boolean consumers.
+InkTime CI uses the source-owned planner in [`scripts/ci/test_plan.py`](../scripts/ci/test_plan.py). The workflows only execute the suites and gates selected by that planner; Tier 1/2 owner suites are executed by [`scripts/ci/run_selected_suites.py`](../scripts/ci/run_selected_suites.py), while heavy gates retain their dedicated jobs. The compatibility adapter [`scripts/ci/changed_paths.py`](../scripts/ci/changed_paths.py) remains for older boolean consumers.
 
 ## Impact mode and full mode
 

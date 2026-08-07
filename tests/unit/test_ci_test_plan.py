@@ -9,6 +9,7 @@ from scripts.ci.test_plan import (
     FULL_TEST_SUITES,
     IMPACT_MODE,
     PRODUCTION_DOMAINS,
+    SUITE_EXECUTION_OWNERS,
     build_test_plan,
     resolve_ci_mode,
 )
@@ -32,6 +33,7 @@ def test_docs_only_is_bounded_and_has_a_non_empty_tier_zero_plan():
     assert plan["docs_only"] is True
     assert plan["production_domains"] == []
     assert plan["selected_test_suites"]
+    assert "ci_planner_contracts" in plan["selected_owner_suites"]
     assert plan["expensive_gates"] == []
     assert plan["selected_gates"] == ["secret_scan"]
     assert plan["skipped_gates"]
@@ -42,6 +44,7 @@ def test_ordinary_python_change_routes_its_owner_without_python_full_suite():
 
     assert "python" in plan["changed_domains"]
     assert "python_application_owner" in plan["selected_test_suites"]
+    assert "python_application_owner" in plan["selected_owner_suites"]
     assert plan["production_owner_invariant"] is True
     assert plan["ci_mode"] == IMPACT_MODE
     assert "secret_scan" in plan["selected_gates"]
@@ -109,6 +112,17 @@ def test_device_api_is_also_a_server_firmware_host_contract():
     assert "firmware_host_contract_tests" in plan["selected_test_suites"]
     assert "firmware_host_contract" in plan["expensive_gates"]
     assert "firmware_quick" in plan["expensive_gates"]
+    assert "firmware_affected" in plan["expensive_gates"]
+    assert plan["firmware_execution_profiles"] == {
+        "quick": ["photopainter_release"],
+        "affected": [
+            profile
+            for profile in FULL_FIRMWARE_PROFILES
+            if profile != "photopainter_release"
+        ],
+        "full_matrix": [],
+    }
+    assert plan["no_heavy_impact_duplicates"] is True
 
 
 def test_queue_and_persistence_paths_preserve_both_owners():
@@ -293,6 +307,8 @@ def test_full_mode_replaces_impact_heavy_gates_without_duplicate_impact_jobs():
 
     assert plan["ci_mode"] == FULL_MODE
     assert plan["selected_test_suites"] == list(FULL_PLAN_SUITES)
+    assert plan["selected_owner_suites"] == []
+    assert plan["suite_execution_gaps"] == []
     assert plan["expensive_gates"] == list(FULL_EXPENSIVE_GATES)
     assert "secret_scan" in plan["selected_gates"]
     assert "mypy" in plan["selected_test_suites"]
@@ -415,6 +431,14 @@ def test_full_ci_config_mode_requires_actionlint_for_completeness():
     plan = build_test_plan([".github/workflows/ci.yml"], draft_context(draft=False))
 
     assert "actionlint" in plan["selected_gates"]
+    assert plan["full_plan_complete"] is True
+
+
+def test_full_plan_suite_registry_is_execution_complete():
+    plan = build_test_plan(["README.md"], draft_context(draft=False))
+
+    assert set(FULL_PLAN_SUITES) <= set(SUITE_EXECUTION_OWNERS)
+    assert plan["suite_execution_gaps"] == []
     assert plan["full_plan_complete"] is True
 
 

@@ -112,6 +112,44 @@ FULL_TEST_SUITES = (
 FULL_REQUIRED_STATIC_SUITES = ("dependency_policy",)
 FULL_PLAN_SUITES = TIER_0_SUITES + FULL_REQUIRED_STATIC_SUITES + FULL_TEST_SUITES
 
+SELECTED_SUITE_RUNNER = "selected_owner_suites"
+SUITE_EXECUTION_OWNERS = {
+    "changed_path_classification": "changes",
+    "ci_planner_contracts": SELECTED_SUITE_RUNNER,
+    "ruff": "python_quality",
+    "mypy": "python_quality",
+    "dependency_policy": "python_quality",
+    "python312_unit_security_integration_coverage": "python_quality",
+    "python310_compatibility_tests": "python_compatibility",
+    "ci_routing_contracts": SELECTED_SUITE_RUNNER,
+    "python_application_owner": SELECTED_SUITE_RUNNER,
+    "python_dependency_owner": "dependency_audit",
+    "web_ui_owner": SELECTED_SUITE_RUNNER,
+    "web_api_owner": SELECTED_SUITE_RUNNER,
+    "web_e2e": "playwright",
+    "auth_security_owner": SELECTED_SUITE_RUNNER,
+    "runtime_scheduler_owner": SELECTED_SUITE_RUNNER,
+    "queue_resilience_owner": SELECTED_SUITE_RUNNER,
+    "persistence_owner": SELECTED_SUITE_RUNNER,
+    "migration_owner": "migration_contract",
+    "backup_restore_owner": "docker_lan_persistence",
+    "device_api_contract_owner": SELECTED_SUITE_RUNNER,
+    "device_delivery_owner": SELECTED_SUITE_RUNNER,
+    "render_release_owner": SELECTED_SUITE_RUNNER,
+    "scanner_photos_owner": SELECTED_SUITE_RUNNER,
+    "notifications_observability_owner": SELECTED_SUITE_RUNNER,
+    "settings_governance_owner": SELECTED_SUITE_RUNNER,
+    "provider_analysis_owner": SELECTED_SUITE_RUNNER,
+    "docker_runtime_owner": "container_security",
+    "container_configuration_owner": "container_security",
+    "tls_configuration_owner": "tls_smoke",
+    "firmware_host_contract_tests": "firmware_host_contract",
+    "benchmark_contract": "benchmark",
+    "docs_contract": "docs",
+    "unit_owner": SELECTED_SUITE_RUNNER,
+    "integration_owner": SELECTED_SUITE_RUNNER,
+}
+
 FULL_EXPENSIVE_GATES = (
     "python312_full",
     "python310_compatibility",
@@ -375,7 +413,11 @@ def _test_path_plan(path: str) -> tuple[set[str], set[str], set[str]]:
         domains.add("firmware")
         suites.add("firmware_host_contract_tests")
         gates.add("firmware_host_contract")
-    if "ci_changed_paths" in filename or "ci_test_plan" in filename:
+    if (
+        "ci_changed_paths" in filename
+        or "ci_test_plan" in filename
+        or "ci_selected_suites" in filename
+    ):
         domains.add("ci_config")
         suites.add("ci_routing_contracts")
     if "migration" in lower_path:
@@ -693,6 +735,9 @@ def _classify_path(path: str) -> tuple[set[str], set[str], set[str], bool]:
                 domains.add("firmware")
                 suites.add("firmware_host_contract_tests")
                 gates.update({"firmware_host_contract", "firmware_quick"})
+                profiles, _reason = _firmware_profiles_for_path(path)
+                if profiles - {PRIMARY_FIRMWARE_PROFILE}:
+                    gates.add("firmware_affected")
 
         if path.startswith(
             (
@@ -951,6 +996,18 @@ def build_test_plan(
     suite_gate_name_collisions = sorted(
         set(selected_suites) & set(selected_gates_with_tier_zero)
     )
+    suite_execution_gaps = sorted(
+        set(selected_suites) - set(SUITE_EXECUTION_OWNERS)
+    )
+    selected_owner_suites = (
+        []
+        if mode == FULL_MODE
+        else [
+            suite
+            for suite in selected_suites
+            if SUITE_EXECUTION_OWNERS.get(suite) == SELECTED_SUITE_RUNNER
+        ]
+    )
     full_gate_set = set(FULL_EXPENSIVE_GATES) | set(TIER_0_GATES)
     if "ci_config" in classification["domains"]:
         full_gate_set.add("actionlint")
@@ -961,6 +1018,8 @@ def build_test_plan(
         "changed_domains": classification["domains"],
         "production_domains": classification["production_domains"],
         "selected_test_suites": selected_suites,
+        "selected_owner_suites": selected_owner_suites,
+        "suite_execution_gaps": suite_execution_gaps,
         "expensive_gates": selected_gates,
         "selected_gates": selected_gates_with_tier_zero,
         "skipped_gates": skipped_gates,
@@ -980,6 +1039,8 @@ def build_test_plan(
         ),
         "full_plan_complete": mode == FULL_MODE
         and set(FULL_PLAN_SUITES) <= set(selected_suites)
+        and not (set(FULL_PLAN_SUITES) - set(SUITE_EXECUTION_OWNERS))
+        and not suite_execution_gaps
         and full_gate_set <= set(selected_gates_with_tier_zero)
         and not suite_gate_name_collisions,
         "selected_execution_ids": selected_execution_ids,
