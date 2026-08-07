@@ -255,7 +255,7 @@ def test_offline_shortage_retries_after_bounded_cooldown_and_keeps_active_dedupe
     retry_jobs = [job for job in offline_jobs if job["id"] != first_job_id]
     assert len(retry_jobs) == 1
     retry_job = retry_jobs[0]
-    assert retry_job["status"] == "pending"
+    assert retry_job["status"] == "running"
     terminal = app.extensions["inktime_offline_schedule_repository"].terminal_outcome_for_device(
         device_id=device_id,
         target_date="2026-08-03",
@@ -272,9 +272,6 @@ def test_offline_shortage_retries_after_bounded_cooldown_and_keeps_active_dedupe
             and device_id in str(job["settings_json"])
         ]
     ) == 2
-    assert repository.transition(
-        retry_job["id"], {"pending"}, "running", "test_recovery_started"
-    )
     assert repository.transition(
         retry_job["id"], {"running"}, "failed", "test_transient_failure"
     )
