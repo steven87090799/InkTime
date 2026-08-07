@@ -122,7 +122,7 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
                     "2020-07-22T10:00:00",
                     "2020-07-22",
                     "07-22",
-                    90 - index,
+                    100 - index,
                     now,
                     now,
                 ),
@@ -137,7 +137,7 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
                 "schema_version": 1,
                 "caption": "離線測試",
                 "types": ["日常"],
-                "memory_score": 90 - index,
+                "memory_score": 100 - index,
                 "beauty_score": 80,
                 "technical_quality_score": 80,
                 "emotion_score": 80,
@@ -147,8 +147,8 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
                 "reason": "測試",
             },
             "{}",
-            ranking_score=90 - index,
-            final_ranking_score=90 - index,
+            ranking_score=100 - index,
+            final_ranking_score=100 - index,
         )
 
     device_id, _token = app.extensions["inktime_device_repository"].create(
