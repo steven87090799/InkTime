@@ -184,7 +184,10 @@ def main() -> int:
 
     print(f"Selected owner suites: {', '.join(runner_suites)}")
     print(f"Selected pytest paths: {', '.join(test_paths)}")
-    return subprocess.run([sys.executable, "-m", "pytest", *test_paths], check=False).returncode
+    # Every pytest path comes from the source-owned mapping and was validated above.
+    return subprocess.run(  # noqa: S603
+        [sys.executable, "-m", "pytest", *test_paths], check=False
+    ).returncode
 
 
 if __name__ == "__main__":
