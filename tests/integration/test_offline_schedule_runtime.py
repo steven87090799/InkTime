@@ -466,7 +466,9 @@ def test_offline_prepare_rejects_historical_release_and_preserves_state(client, 
         headers={"X-CSRF-Token": csrf(client)},
     )
     assert response.status_code == 400
-    assert "QUEUE-005" in response.get_json()["message"]
+    body = response.get_json()
+    assert body["error_code"] == "QUEUE-005"
+    assert body["message"] == "Release 已存在於裝置 Queue 歷史，不可重複使用"
 
     with app.extensions["inktime_database"].session() as connection:
         assert connection.execute(
