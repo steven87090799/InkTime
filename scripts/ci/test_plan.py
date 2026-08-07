@@ -113,17 +113,22 @@ FULL_REQUIRED_STATIC_SUITES = ("dependency_policy",)
 FULL_PLAN_SUITES = TIER_0_SUITES + FULL_REQUIRED_STATIC_SUITES + FULL_TEST_SUITES
 
 SELECTED_SUITE_RUNNER = "selected_owner_suites"
+NON_EXECUTABLE_SUITES = frozenset({"docs_contract"})
+
+# Impact-mode owner suites are executed by the selected-suite runner or by the
+# dedicated job named here.  These names deliberately match workflow job IDs so
+# the planner's ownership contract cannot silently point at a non-existent job.
 SUITE_EXECUTION_OWNERS = {
     "changed_path_classification": "changes",
     "ci_planner_contracts": SELECTED_SUITE_RUNNER,
-    "ruff": "python_quality",
-    "mypy": "python_quality",
-    "dependency_policy": "python_quality",
-    "python312_unit_security_integration_coverage": "python_quality",
-    "python310_compatibility_tests": "python_compatibility",
+    "ruff": "python-quality",
+    "mypy": "python-quality",
+    "dependency_policy": "python-quality",
+    "python312_unit_security_integration_coverage": "python-quality",
+    "python310_compatibility_tests": "python-compatibility",
     "ci_routing_contracts": SELECTED_SUITE_RUNNER,
     "python_application_owner": SELECTED_SUITE_RUNNER,
-    "python_dependency_owner": "dependency_audit",
+    "python_dependency_owner": "dependency-audit",
     "web_ui_owner": SELECTED_SUITE_RUNNER,
     "web_api_owner": SELECTED_SUITE_RUNNER,
     "web_e2e": "playwright",
@@ -131,8 +136,8 @@ SUITE_EXECUTION_OWNERS = {
     "runtime_scheduler_owner": SELECTED_SUITE_RUNNER,
     "queue_resilience_owner": SELECTED_SUITE_RUNNER,
     "persistence_owner": SELECTED_SUITE_RUNNER,
-    "migration_owner": "migration_contract",
-    "backup_restore_owner": "docker_lan_persistence",
+    "migration_owner": "migration-contract",
+    "backup_restore_owner": "compose-lan-production-persistence",
     "device_api_contract_owner": SELECTED_SUITE_RUNNER,
     "device_delivery_owner": SELECTED_SUITE_RUNNER,
     "render_release_owner": SELECTED_SUITE_RUNNER,
@@ -140,15 +145,82 @@ SUITE_EXECUTION_OWNERS = {
     "notifications_observability_owner": SELECTED_SUITE_RUNNER,
     "settings_governance_owner": SELECTED_SUITE_RUNNER,
     "provider_analysis_owner": SELECTED_SUITE_RUNNER,
-    "docker_runtime_owner": "container_security",
-    "container_configuration_owner": "container_security",
-    "tls_configuration_owner": "tls_smoke",
-    "firmware_host_contract_tests": "firmware_host_contract",
-    "benchmark_contract": "benchmark",
-    "docs_contract": "docs",
+    "docker_runtime_owner": "container-security",
+    "container_configuration_owner": "container-security",
+    "tls_configuration_owner": "compose-production-tls-smoke",
+    "firmware_host_contract_tests": "firmware-host-contract",
+    "benchmark_contract": "benchmark-contract",
     "unit_owner": SELECTED_SUITE_RUNNER,
     "integration_owner": SELECTED_SUITE_RUNNER,
 }
+
+# Full mode does not start selected-owner-suites: the ordinary full jobs own
+# the same regressions without duplicating their impact-mode execution.  Keep
+# this registry separate from impact mode so full_plan_complete proves the
+# selected suites have a real, unconditional full-mode job owner.
+FULL_SUITE_EXECUTION_OWNERS = {
+    "changed_path_classification": "changes",
+    "ci_planner_contracts": "python-quality",
+    "ruff": "python-quality",
+    "mypy": "python-quality",
+    "dependency_policy": "python-quality",
+    "python312_unit_security_integration_coverage": "python-quality",
+    "python310_compatibility_tests": "python-compatibility",
+    "ci_routing_contracts": "python-quality",
+    "python_application_owner": "python-quality",
+    "python_dependency_owner": "dependency-audit",
+    "web_ui_owner": "python-quality",
+    "web_api_owner": "python-quality",
+    "web_e2e": "playwright",
+    "auth_security_owner": "python-quality",
+    "runtime_scheduler_owner": "python-quality",
+    "queue_resilience_owner": "python-quality",
+    "persistence_owner": "python-quality",
+    "migration_owner": "migration-contract",
+    "backup_restore_owner": "compose-lan-production-persistence",
+    "device_api_contract_owner": "python-quality",
+    "device_delivery_owner": "python-quality",
+    "render_release_owner": "python-quality",
+    "scanner_photos_owner": "python-quality",
+    "notifications_observability_owner": "python-quality",
+    "settings_governance_owner": "python-quality",
+    "provider_analysis_owner": "python-quality",
+    "docker_runtime_owner": "container-security",
+    "container_configuration_owner": "container-security",
+    "tls_configuration_owner": "compose-production-tls-smoke",
+    "firmware_host_contract_tests": "firmware-host-contract",
+    "benchmark_contract": "benchmark-contract",
+}
+
+IMPACT_EXECUTION_OWNERS = frozenset(
+    {"changes", "python-quality", "python-compatibility", "dependency-audit"}
+    | {
+        "migration-contract",
+        "compose-lan-production-persistence",
+        "compose-production-tls-smoke",
+        "playwright",
+        "firmware-host-contract",
+        "container-security",
+        "benchmark-contract",
+        SELECTED_SUITE_RUNNER,
+    }
+)
+FULL_EXECUTION_OWNERS = frozenset(
+    {
+        "changes",
+        "python-quality",
+        "python-compatibility",
+        "dependency-audit",
+        "migration-contract",
+        "compose-lan-production-persistence",
+        "compose-production-tls-smoke",
+        "playwright",
+        "firmware-host-contract",
+        "esp32-compile",
+        "container-security",
+        "benchmark-contract",
+    }
+)
 
 FULL_EXPENSIVE_GATES = (
     "python312_full",
@@ -884,6 +956,23 @@ def resolve_ci_mode(event_context: Mapping[str, object] | None = None) -> str:
     return FULL_MODE if _mode_reasons(context) else IMPACT_MODE
 
 
+def _suite_execution_gaps(suites: Iterable[str], mode: str) -> list[str]:
+    registry = (
+        FULL_SUITE_EXECUTION_OWNERS
+        if mode == FULL_MODE
+        else SUITE_EXECUTION_OWNERS
+    )
+    allowed_owners = (
+        FULL_EXECUTION_OWNERS if mode == FULL_MODE else IMPACT_EXECUTION_OWNERS
+    )
+    return sorted(
+        suite
+        for suite in set(suites)
+        if suite not in NON_EXECUTABLE_SUITES
+        and registry.get(suite) not in allowed_owners
+    )
+
+
 def build_test_plan(
     paths: Iterable[str], event_context: Mapping[str, object] | None = None
 ) -> dict[str, Any]:
@@ -996,9 +1085,8 @@ def build_test_plan(
     suite_gate_name_collisions = sorted(
         set(selected_suites) & set(selected_gates_with_tier_zero)
     )
-    suite_execution_gaps = sorted(
-        set(selected_suites) - set(SUITE_EXECUTION_OWNERS)
-    )
+    suite_execution_gaps = _suite_execution_gaps(selected_suites, mode)
+    full_suite_execution_gaps = _suite_execution_gaps(FULL_PLAN_SUITES, FULL_MODE)
     selected_owner_suites = (
         []
         if mode == FULL_MODE
@@ -1020,6 +1108,7 @@ def build_test_plan(
         "selected_test_suites": selected_suites,
         "selected_owner_suites": selected_owner_suites,
         "suite_execution_gaps": suite_execution_gaps,
+        "full_suite_execution_gaps": full_suite_execution_gaps,
         "expensive_gates": selected_gates,
         "selected_gates": selected_gates_with_tier_zero,
         "skipped_gates": skipped_gates,
@@ -1039,7 +1128,7 @@ def build_test_plan(
         ),
         "full_plan_complete": mode == FULL_MODE
         and set(FULL_PLAN_SUITES) <= set(selected_suites)
-        and not (set(FULL_PLAN_SUITES) - set(SUITE_EXECUTION_OWNERS))
+        and not full_suite_execution_gaps
         and not suite_execution_gaps
         and full_gate_set <= set(selected_gates_with_tier_zero)
         and not suite_gate_name_collisions,

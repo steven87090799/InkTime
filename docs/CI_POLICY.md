@@ -15,6 +15,8 @@ Full mode is selected when any of these are true:
 
 Full mode includes Tier 0, the complete owner-suite plan, Python 3.12 coverage at 80%, Python 3.10 compatibility, migration, dependency audit, runtime soak, Playwright, Docker LAN persistence, TLS smoke, firmware host contracts and the complete firmware profile matrix, container security, benchmark, and both aggregate gates. Equivalent impact-only heavy jobs are not run again in full mode.
 
+The planner's full-mode execution registry maps every `FULL_PLAN_SUITES` entry to a real full-mode job; `docs_contract` is a documentation classification marker and is intentionally non-executable.
+
 ## Validation tiers
 
 - **Tier 0:** changed-path classification, planner contracts, secret scan, Ruff, and mypy. Dependency-policy validation runs when dependency tooling is relevant. Actionlint runs when CI/workflow configuration is relevant.
@@ -33,6 +35,6 @@ python3 scripts/ci/test_plan.py --help
 python3 scripts/ci/test_plan.py --event-name pull_request --ref refs/pull/1/merge --draft true README.md
 ```
 
-Check `ci_mode`, `unknown_paths`, `owner_suite_gaps`, `selected_test_suites`, `selected_gates`, `full_plan_complete`, and `no_heavy_impact_duplicates`. A selected job failure or cancellation fails its aggregate gate; an intentionally skipped conditional job is accepted by the aggregate gate. A full run must be judged only from the exact pushed HEAD, not an older successful run.
+Check `ci_mode`, `unknown_paths`, `owner_suite_gaps`, `selected_test_suites`, `selected_gates`, `suite_execution_gaps`, `full_suite_execution_gaps`, `full_plan_complete`, and `no_heavy_impact_duplicates`. A selected job failure or cancellation fails its aggregate gate; an intentionally skipped conditional job is accepted by the aggregate gate. A full run must be judged only from the exact pushed HEAD, not an older successful run.
 
 The full suite is not run on every Draft push because Draft validation is intended to give fast, affected feedback while retaining secret, quality, routing, and relevant production-boundary checks. Use `full-ci`, mark the PR ready, dispatch `full_suite=true`, or push to `main` when the complete pre-merge set is required.

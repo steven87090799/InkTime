@@ -4,14 +4,24 @@ from scripts.ci.run_selected_suites import (
     selected_test_paths,
 )
 from scripts.ci.test_plan import (
+    FULL_EXECUTION_OWNERS,
     FULL_PLAN_SUITES,
+    FULL_SUITE_EXECUTION_OWNERS,
+    IMPACT_EXECUTION_OWNERS,
+    NON_EXECUTABLE_SUITES,
     SELECTED_SUITE_RUNNER,
     SUITE_EXECUTION_OWNERS,
 )
 
 
 def test_every_full_plan_suite_has_an_execution_owner():
-    assert set(FULL_PLAN_SUITES) <= set(SUITE_EXECUTION_OWNERS)
+    assert set(FULL_PLAN_SUITES) <= set(FULL_SUITE_EXECUTION_OWNERS)
+    assert set(FULL_SUITE_EXECUTION_OWNERS.values()) <= FULL_EXECUTION_OWNERS
+    assert "docs_contract" in NON_EXECUTABLE_SUITES
+
+
+def test_impact_execution_registry_points_at_real_jobs_or_selected_runner():
+    assert set(SUITE_EXECUTION_OWNERS.values()) <= IMPACT_EXECUTION_OWNERS
 
 
 def test_every_selected_runner_suite_has_executable_paths():
@@ -51,3 +61,7 @@ def test_unknown_suite_fails_closed():
         assert "Unknown planner suite" in str(exc)
     else:
         raise AssertionError("unknown planner suite must fail closed")
+
+
+def test_non_executable_classification_suite_is_not_silently_run():
+    assert selected_runner_suites(["docs_contract"]) == []

@@ -3,13 +3,14 @@ import json
 from scripts.ci.test_plan import (
     DOMAIN_OWNER_SUITES,
     FULL_EXPENSIVE_GATES,
+    FULL_EXECUTION_OWNERS,
     FULL_FIRMWARE_PROFILES,
     FULL_MODE,
     FULL_PLAN_SUITES,
+    FULL_SUITE_EXECUTION_OWNERS,
     FULL_TEST_SUITES,
     IMPACT_MODE,
     PRODUCTION_DOMAINS,
-    SUITE_EXECUTION_OWNERS,
     build_test_plan,
     resolve_ci_mode,
 )
@@ -34,6 +35,8 @@ def test_docs_only_is_bounded_and_has_a_non_empty_tier_zero_plan():
     assert plan["production_domains"] == []
     assert plan["selected_test_suites"]
     assert "ci_planner_contracts" in plan["selected_owner_suites"]
+    assert "docs_contract" in plan["selected_test_suites"]
+    assert plan["suite_execution_gaps"] == []
     assert plan["expensive_gates"] == []
     assert plan["selected_gates"] == ["secret_scan"]
     assert plan["skipped_gates"]
@@ -309,6 +312,7 @@ def test_full_mode_replaces_impact_heavy_gates_without_duplicate_impact_jobs():
     assert plan["selected_test_suites"] == list(FULL_PLAN_SUITES)
     assert plan["selected_owner_suites"] == []
     assert plan["suite_execution_gaps"] == []
+    assert plan["full_suite_execution_gaps"] == []
     assert plan["expensive_gates"] == list(FULL_EXPENSIVE_GATES)
     assert "secret_scan" in plan["selected_gates"]
     assert "mypy" in plan["selected_test_suites"]
@@ -437,8 +441,10 @@ def test_full_ci_config_mode_requires_actionlint_for_completeness():
 def test_full_plan_suite_registry_is_execution_complete():
     plan = build_test_plan(["README.md"], draft_context(draft=False))
 
-    assert set(FULL_PLAN_SUITES) <= set(SUITE_EXECUTION_OWNERS)
+    assert set(FULL_PLAN_SUITES) <= set(FULL_SUITE_EXECUTION_OWNERS)
+    assert set(FULL_SUITE_EXECUTION_OWNERS.values()) <= FULL_EXECUTION_OWNERS
     assert plan["suite_execution_gaps"] == []
+    assert plan["full_suite_execution_gaps"] == []
     assert plan["full_plan_complete"] is True
 
 

@@ -19,7 +19,11 @@ from typing import Iterable
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from scripts.ci.test_plan import SELECTED_SUITE_RUNNER, SUITE_EXECUTION_OWNERS
+from scripts.ci.test_plan import (
+    NON_EXECUTABLE_SUITES,
+    SELECTED_SUITE_RUNNER,
+    SUITE_EXECUTION_OWNERS,
+)
 
 RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
     "ci_planner_contracts": (
@@ -122,14 +126,16 @@ def _ordered_unique(values: Iterable[str]) -> list[str]:
 
 def selected_runner_suites(selected_suites: Iterable[str]) -> list[str]:
     selected = list(selected_suites)
-    unknown = sorted(set(selected) - set(SUITE_EXECUTION_OWNERS))
+    known_suites = set(SUITE_EXECUTION_OWNERS) | NON_EXECUTABLE_SUITES
+    unknown = sorted(set(selected) - known_suites)
     if unknown:
         raise ValueError(f"Unknown planner suite(s): {', '.join(unknown)}")
 
     runner_suites = [
         suite
         for suite in selected
-        if SUITE_EXECUTION_OWNERS[suite] == SELECTED_SUITE_RUNNER
+        if suite not in NON_EXECUTABLE_SUITES
+        and SUITE_EXECUTION_OWNERS[suite] == SELECTED_SUITE_RUNNER
     ]
     missing = sorted(set(runner_suites) - set(RUNNER_SUITE_TEST_PATHS))
     if missing:
