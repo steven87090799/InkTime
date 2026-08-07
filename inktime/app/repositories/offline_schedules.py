@@ -1039,13 +1039,12 @@ class OfflineScheduleRepository:
                     """
                     SELECT 1 FROM device_content_queue_items
                     WHERE device_id=? AND release_id=? AND id<>?
-                      AND status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')
                     LIMIT 1
                     """,
                     (device_id, normalized_release_id, slot["queue_item_id"]),
                 ).fetchone()
                 if duplicate is not None:
-                    raise ValueError("QUEUE-005 Release 已在活動 Queue 中，不可重複佔用 Slot")
+                    raise ValueError("QUEUE-005 Release 已存在於裝置 Queue 歷史，不可重複使用")
                 entry = self._manifest_entry(str(release["manifest_json"]))
                 connection.execute(
                     """

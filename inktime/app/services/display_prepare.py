@@ -148,6 +148,8 @@ class DisplayPreparationService:
         target = target_date or self.render_service._today()
         requested_device_id = str(device_id or "").strip()
         configured_devices = [str(value).strip() for value in config.device_ids if str(value).strip()]
+        if requested_device_id and requested_device_id not in configured_devices:
+            raise ValueError("指定裝置不屬於此 display_prepare 排程")
         device_ids = [requested_device_id] if requested_device_id else configured_devices
         if len(device_ids) != 1 or self.offline_schedules is None or self.database is None:
             return {
