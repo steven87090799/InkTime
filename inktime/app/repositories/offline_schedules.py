@@ -26,6 +26,8 @@ from inktime.app.services.device_releases import payload_entry_from_manifest
 _RELEASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 MAX_PREPARED_SLOTS = 24
 TERMINAL_PREPARATION_OUTCOMES = frozenset({"NO_CONTENT", "NO_ELIGIBLE_CANDIDATES"})
+RECOVERABLE_SHORTAGE_CODES = frozenset({"NO_CONTENT", "NO_ELIGIBLE_CANDIDATES"})
+SHORTAGE_RETRY_COOLDOWN_SECONDS = 3600
 
 
 @dataclass(frozen=True)
@@ -421,6 +423,56 @@ class OfflineScheduleRepository:
                 (device_id, self._date(target_date).isoformat(), int(config_version)),
             ).fetchone()
         return dict(row) if row else None
+
+    def claim_terminal_outcome_retry(
+        self,
+        *,
+        terminal_outcome: dict[str, Any] | None,
+        device_id: str,
+        target_date: str,
+        config_version: int,
+        now: datetime,
+        retry_after_seconds: int = SHORTAGE_RETRY_COOLDOWN_SECONDS,
+    ) -> bool:
+        """Atomically claim one recovery window after a shortage cooldown."""
+
+        if terminal_outcome is None:
+            return False
+        outcome_code = str(terminal_outcome.get("terminal_outcome_code"))
+        if outcome_code not in RECOVERABLE_SHORTAGE_CODES:
+            return False
+        try:
+            updated_at = datetime.fromisoformat(str(terminal_outcome["updated_at"]))
+            schedule_id = str(terminal_outcome["id"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        current = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+        cooldown = max(0, int(retry_after_seconds))
+        cooldown_expires_at = updated_at.astimezone(timezone.utc) + timedelta(seconds=cooldown)
+        if current.astimezone(timezone.utc) < cooldown_expires_at:
+            return False
+        claimed_at = current.astimezone(timezone.utc).isoformat()
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE device_offline_schedules
+                SET updated_at=?
+                WHERE id=? AND device_id=? AND target_date=? AND config_version=?
+                  AND status='failed' AND terminal_outcome_code=? AND updated_at=?
+                """,
+                (
+                    claimed_at,
+                    schedule_id,
+                    device_id,
+                    self._date(target_date).isoformat(),
+                    int(config_version),
+                    outcome_code,
+                    str(terminal_outcome["updated_at"]),
+                ),
+            )
+        return bool(cursor.rowcount)
 
     def record_terminal_outcome(
         self,

@@ -354,11 +354,18 @@ class SchedulerRunner:
                         config_version=int(device["config_version"]),
                     ) is not None:
                         continue
-                    if offline_schedules.terminal_outcome_for_device(
+                    terminal_outcome = offline_schedules.terminal_outcome_for_device(
                         device_id=str(device["id"]),
                         target_date=target_iso,
                         config_version=int(device["config_version"]),
-                    ) is not None:
+                    )
+                    if terminal_outcome is not None and not offline_schedules.claim_terminal_outcome_retry(
+                        terminal_outcome=terminal_outcome,
+                        device_id=str(device["id"]),
+                        target_date=target_iso,
+                        config_version=int(device["config_version"]),
+                        now=now,
+                    ):
                         continue
                     dedupe_key = f"offline-prepare:{device['id']}:{target_iso}:{int(device['config_version'])}"
                     job_id = job_repository.create_maintenance(

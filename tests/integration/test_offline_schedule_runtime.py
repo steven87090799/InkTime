@@ -107,6 +107,50 @@ def test_offline_day_preparation_is_atomic_and_device_projection_contains_full_s
     assert generic_manifest["items"] == []
 
 
+def test_prepare_day_recovers_terminal_shortage_and_clears_outcome(app):
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "恢復離線終端結果的相框",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00"],
+    )
+    release = _release(app, "offline-recovered-shortage")
+    with app.extensions["inktime_database"].session() as connection:
+        config_version = int(
+            connection.execute(
+                "SELECT config_version FROM devices WHERE id=?", (device_id,)
+            ).fetchone()[0]
+        )
+    repository = app.extensions["inktime_offline_schedule_repository"]
+    terminal = repository.record_terminal_outcome(
+        device_id=device_id,
+        target_date="2026-08-03",
+        config_version=config_version,
+        outcome_code="NO_ELIGIBLE_CANDIDATES",
+        message="測試中的候選不足",
+    )
+    assert terminal["status"] == "completed"
+
+    prepared = repository.prepare_day(
+        device_id=device_id,
+        target_date="2026-08-03",
+        release_ids=[release["release_id"]],
+    )
+
+    assert prepared["schedule"]["status"] == "ready"
+    with app.extensions["inktime_database"].session() as connection:
+        schedule = connection.execute(
+            """
+            SELECT status,terminal_outcome_code
+            FROM device_offline_schedules
+            WHERE device_id=? AND target_date=? AND config_version=?
+            """,
+            (device_id, "2026-08-03", config_version),
+        ).fetchone()
+    assert schedule["status"] == "ready"
+    assert schedule["terminal_outcome_code"] is None
+
+
 def test_actual_playlist_preview_reads_committed_schedule_without_reselection(app, monkeypatch):
     device_id, _token = app.extensions["inktime_device_repository"].create(
         "離線實際 Playlist 預覽",

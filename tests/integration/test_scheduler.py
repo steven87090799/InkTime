@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from inktime.app.repositories.offline_schedules import SHORTAGE_RETRY_COOLDOWN_SECONDS
 from inktime.app.workers.scheduler import SchedulerRunner
 from inktime.app.workers.runner import WorkerRunner
 
@@ -179,7 +180,7 @@ def test_offline_shortage_is_terminal_for_one_device_day_config(app):
     assert result["error_code"] is None
 
     scheduler._prepare_due_offline_devices(now)
-    scheduler._prepare_due_offline_devices(now)
+    scheduler._prepare_due_offline_devices(now + timedelta(minutes=1))
     assert len(
         [
             job
@@ -194,6 +195,85 @@ def test_offline_shortage_is_terminal_for_one_device_day_config(app):
         config_version=1,
     )
     assert terminal["terminal_outcome_code"] == "NO_ELIGIBLE_CANDIDATES"
+
+
+def test_offline_shortage_retries_after_bounded_cooldown_and_keeps_active_dedupe(app):
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "冷卻後恢復的離線相框",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00", "20:00"],
+        prefetch_lead_minutes=5,
+    )
+    scheduler = SchedulerRunner(app)
+    first_now = datetime(2026, 8, 3, 7, 55, tzinfo=timezone.utc)
+    scheduler._prepare_due_offline_devices(first_now)
+    repository = app.extensions["inktime_job_repository"]
+    assert WorkerRunner(app).run_once() == 1
+
+    with app.extensions["inktime_database"].session() as connection:
+        config_version = int(
+            connection.execute(
+                "SELECT config_version FROM devices WHERE id=?", (device_id,)
+            ).fetchone()[0]
+        )
+
+    retry_now = first_now + timedelta(hours=1)
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            """
+            UPDATE device_offline_schedules
+            SET updated_at=?
+            WHERE device_id=? AND target_date=? AND config_version=?
+            """,
+            (
+                (
+                    retry_now - timedelta(seconds=SHORTAGE_RETRY_COOLDOWN_SECONDS + 1)
+                ).isoformat(),
+                device_id,
+                "2026-08-03",
+                config_version,
+            ),
+        )
+
+    scheduler._prepare_due_offline_devices(retry_now)
+    offline_jobs = [
+        job
+        for job in repository.list()
+        if '"offline_prepare"' in str(job["settings_json"])
+        and device_id in str(job["settings_json"])
+    ]
+    assert len(offline_jobs) == 2
+    terminal = app.extensions["inktime_offline_schedule_repository"].terminal_outcome_for_device(
+        device_id=device_id,
+        target_date="2026-08-03",
+        config_version=config_version,
+    )
+    assert terminal["updated_at"] == retry_now.isoformat()
+
+    assert repository.transition(offline_jobs[1]["id"], {"running"}, "failed", "test_transient_failure")
+    scheduler._prepare_due_offline_devices(retry_now + timedelta(minutes=1))
+    scheduler._prepare_due_offline_devices(retry_now + timedelta(minutes=5))
+    assert len(
+        [
+            job
+            for job in repository.list()
+            if '"offline_prepare"' in str(job["settings_json"])
+            and device_id in str(job["settings_json"])
+        ]
+    ) == 2
+
+    scheduler._prepare_due_offline_devices(
+        retry_now + timedelta(seconds=SHORTAGE_RETRY_COOLDOWN_SECONDS + 1)
+    )
+    assert len(
+        [
+            job
+            for job in repository.list()
+            if '"offline_prepare"' in str(job["settings_json"])
+            and device_id in str(job["settings_json"])
+        ]
+    ) == 3
 
 
 def test_offline_scheduler_prepares_only_tomorrow_after_expired_today(app):
