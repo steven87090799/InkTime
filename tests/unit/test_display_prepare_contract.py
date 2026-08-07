@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -25,6 +26,17 @@ def test_display_prepare_consumes_every_supported_field():
     assert config.device_ids == ("one", "two")
     assert config.candidate_years == (2018, 2020)
     assert config.preparation_times(__import__("datetime").date(2026, 7, 22))[0].endswith("07:15:00")
+
+
+def test_schedule_preview_template_selects_multi_device_without_reselection():
+    template = (
+        Path(__file__).resolve().parents[2] / "inktime/app/web/templates/schedules.html"
+    ).read_text(encoding="utf-8")
+
+    assert "choosePreviewDevice" in template
+    assert "window.prompt" in template
+    assert "device_id:selectedDeviceId" in template
+    assert "playlistPreviewText" in template
 
 
 class EmptyRenderService:
