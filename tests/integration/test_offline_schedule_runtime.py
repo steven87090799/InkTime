@@ -424,6 +424,85 @@ def test_offline_slot_replacement_rejects_historical_release_and_preserves_state
         ) == before_queue_version + 1
 
 
+def test_offline_prepare_rejects_historical_release_and_preserves_state(client, app):
+    create_admin(app)
+    login(client)
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "離線 prepare historical Release 邊界",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00"],
+    )
+    historical = _release(app, "offline-prepare-historical-release")
+    fresh = _release(app, "offline-prepare-fresh-release")
+    repository = app.extensions["inktime_offline_schedule_repository"]
+
+    repository.prepare_day(
+        device_id=device_id,
+        target_date="2026-08-02",
+        release_ids=[historical["release_id"]],
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        historical_item = connection.execute(
+            """
+            SELECT id FROM device_content_queue_items
+            WHERE device_id=? AND release_id=?
+            """,
+            (device_id, historical["release_id"]),
+        ).fetchone()
+        connection.execute(
+            "UPDATE device_content_queue_items SET status='DISPLAYED' WHERE id=?",
+            (historical_item["id"],),
+        )
+        before_queue_version = int(
+            connection.execute(
+                "SELECT queue_version FROM device_content_queues WHERE device_id=?", (device_id,)
+            ).fetchone()["queue_version"]
+        )
+
+    response = client.post(
+        f"/api/v1/devices/{device_id}/offline-schedule/prepare",
+        json={"target_date": "2026-08-03", "release_ids": [historical["release_id"]]},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert response.status_code == 400
+    assert "QUEUE-005" in response.get_json()["message"]
+
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM device_offline_schedules WHERE device_id=? AND target_date=?",
+            (device_id, "2026-08-03"),
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            """
+            SELECT COUNT(*) FROM device_offline_schedule_slots s
+            JOIN device_offline_schedules d ON d.id=s.schedule_id
+            WHERE d.device_id=? AND d.target_date=?
+            """,
+            (device_id, "2026-08-03"),
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM device_content_queue_items WHERE device_id=?", (device_id,)
+        ).fetchone()[0] == 1
+        assert int(
+            connection.execute(
+                "SELECT queue_version FROM device_content_queues WHERE device_id=?", (device_id,)
+            ).fetchone()["queue_version"]
+        ) == before_queue_version
+
+    recovered = repository.prepare_day(
+        device_id=device_id,
+        target_date="2026-08-03",
+        release_ids=[fresh["release_id"]],
+    )
+    assert recovered["schedule"]["status"] == "ready"
+    assert len(recovered["slots"]) == 1
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM device_content_queue_items WHERE device_id=?", (device_id,)
+        ).fetchone()[0] == 2
+
+
 def test_offline_schedule_snapshot_does_not_follow_live_device_config(client, app):
     device_id, token = app.extensions["inktime_device_repository"].create(
         "離線快照",

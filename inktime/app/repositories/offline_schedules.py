@@ -858,12 +858,12 @@ class OfflineScheduleRepository:
                         """
                         SELECT 1 FROM device_content_queue_items
                         WHERE device_id=? AND release_id=?
-                          AND status IN ('PENDING','READY','AVAILABLE','DOWNLOADED','ACKNOWLEDGED')
+                        LIMIT 1
                         """,
                         (device_id, release_id),
                     ).fetchone()
                     if duplicate:
-                        raise ValueError("QUEUE-005 Release 已在活動 Queue 中，不可重複佔用 Slot")
+                        raise ValueError("QUEUE-005 Release 已存在於裝置 Queue 歷史，不可重複使用")
                     show_at = self._show_at(day, slot, str(device["timezone"]))
                     deadline = deadlines[slot_index]
                     queue_item_id = str(uuid4())
