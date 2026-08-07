@@ -106,6 +106,43 @@ def test_offline_day_preparation_is_atomic_and_device_projection_contains_full_s
     ).get_json()
     assert generic_manifest["items"] == []
 
+    third = _release(app, "offline-third")
+    fourth = _release(app, "offline-fourth")
+    next_day = repository.prepare_day(
+        device_id=device_id,
+        target_date=tomorrow,
+        release_ids=[third["release_id"], fourth["release_id"]],
+    )
+    assert next_day["schedule"]["target_date"] == tomorrow
+    with app.extensions["inktime_database"].session() as connection:
+        statuses = connection.execute(
+            "SELECT status FROM device_content_queue_items WHERE device_id=? ORDER BY position",
+            (device_id,),
+        ).fetchall()
+    assert [row["status"] for row in statuses] == ["READY", "READY", "READY", "READY"]
+    still_today = client.get(
+        "/api/device/v1/offline-schedule",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert still_today.status_code == 200
+    assert still_today.get_json()["schedule_id"] == prepared["schedule"]["id"]
+    assert still_today.get_json()["target_local_date"] == today
+    next_response = client.get(
+        "/api/device/v1/offline-schedule?target=next",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert next_response.status_code == 200
+    next_body = next_response.get_json()
+    assert next_body["target"] == "next"
+    assert next_body["target_local_date"] == tomorrow
+    assert next_body["schedule_id"] == next_day["schedule"]["id"]
+    invalid_date = (datetime.fromisoformat(tomorrow).date() + timedelta(days=1)).isoformat()
+    for invalid_target in (invalid_date, "+1", "history"):
+        assert client.get(
+            f"/api/device/v1/offline-schedule?target={invalid_target}",
+            headers={"Authorization": f"Bearer {token}"},
+        ).status_code == 400
+
 
 def test_prepare_day_recovers_terminal_shortage_and_clears_outcome(app):
     device_id, _token = app.extensions["inktime_device_repository"].create(
@@ -193,43 +230,6 @@ def test_actual_playlist_preview_reads_committed_schedule_without_reselection(ap
     assert preview["playlist_version"] == prepared["playlist_version"]
     assert preview["playlist"][0]["release_id"] == release["release_id"]
     assert preview["playlist"][0]["show_at"] == prepared["slots"][0]["show_at"]
-
-    third = _release(app, "offline-third")
-    fourth = _release(app, "offline-fourth")
-    next_day = repository.prepare_day(
-        device_id=device_id,
-        target_date=tomorrow,
-        release_ids=[third["release_id"], fourth["release_id"]],
-    )
-    assert next_day["schedule"]["target_date"] == tomorrow
-    with app.extensions["inktime_database"].session() as connection:
-        statuses = connection.execute(
-            "SELECT status FROM device_content_queue_items WHERE device_id=? ORDER BY position",
-            (device_id,),
-        ).fetchall()
-    assert [row["status"] for row in statuses] == ["READY", "READY", "READY", "READY"]
-    still_today = client.get(
-        "/api/device/v1/offline-schedule",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert still_today.status_code == 200
-    assert still_today.get_json()["schedule_id"] == prepared["schedule"]["id"]
-    assert still_today.get_json()["target_local_date"] == today
-    next_response = client.get(
-        "/api/device/v1/offline-schedule?target=next",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert next_response.status_code == 200
-    next_body = next_response.get_json()
-    assert next_body["target"] == "next"
-    assert next_body["target_local_date"] == tomorrow
-    assert next_body["schedule_id"] == next_day["schedule"]["id"]
-    invalid_date = (datetime.fromisoformat(tomorrow).date() + timedelta(days=1)).isoformat()
-    for invalid_target in (invalid_date, "+1", "history"):
-        assert client.get(
-            f"/api/device/v1/offline-schedule?target={invalid_target}",
-            headers={"Authorization": f"Bearer {token}"},
-        ).status_code == 400
 
 
 def test_offline_schedule_snapshot_does_not_follow_live_device_config(client, app):
