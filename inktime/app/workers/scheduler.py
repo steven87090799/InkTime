@@ -139,10 +139,32 @@ class SchedulerRunner:
         schedule_repository = self.app.extensions["inktime_schedule_repository"]
         job_repository = self.app.extensions["inktime_job_repository"]
         for task in schedule_repository.due(now):
-            if job_repository.has_active_dedupe(f"scheduled:{task['key']}"):
+            active_job = job_repository.active_dedupe_job(f"scheduled:{task['key']}")
+            if active_job is not None:
+                if str(active_job["status"]) == "pending":
+                    try:
+                        self.app.extensions["inktime_job_service"].start(str(active_job["id"]))
+                    except Exception as exc:
+                        current = job_repository.get(str(active_job["id"]))
+                        if current is None or str(current["status"]) not in {
+                            "running",
+                            "preparing",
+                            "pausing",
+                            "retrying",
+                        }:
+                            self._record_schedule_exception(task, exc, now)
+                            log_event(
+                                LOGGER,
+                                logging.ERROR,
+                                "排程待處理工作啟動失敗；保留 bounded retry",
+                                event="scheduled_pending_start_failed",
+                                error_code=failure_code(exc),
+                                details={"task": task["key"], "job_id": str(active_job["id"])},
+                            )
+                            continue
                 # The scheduled identity is already owned by a live Job.  Move
-                # the cron cursor once and let that Job finish; do not create a
-                # second queue entry on every scheduler tick.
+                # the cron cursor once after confirming the existing Job is
+                # active; do not create a second queue entry on every tick.
                 schedule_repository.mark_enqueued(task, now)
                 log_event(
                     LOGGER,

@@ -55,6 +55,70 @@ def test_due_incremental_schedule_enqueues_existing_scanner_entry(app, tmp_path)
     assert json.loads(job["settings_json"])["max_attempts"] == 2
 
 
+def test_due_scheduled_pending_job_restarts_without_duplicate(app, monkeypatch):
+    task_key = "cache_cleanup"
+    dedupe_key = f"scheduled:{task_key}"
+    _due_task(app, task_key)
+    schedules = app.extensions["inktime_schedule_repository"]
+    database = app.extensions["inktime_database"]
+    repository = app.extensions["inktime_job_repository"]
+    job_service = app.extensions["inktime_job_service"]
+    job_id = repository.create_maintenance(
+        kind="cleanup",
+        name="排程待處理恢復測試",
+        settings={
+            "scheduled_task": task_key,
+            "trigger_source": "scheduler",
+            "max_retries": 1,
+            "max_attempts": 2,
+            "retry_interval_seconds": 30,
+        },
+        created_by=None,
+        dedupe_key=dedupe_key,
+    )
+
+    original_start = job_service.start
+    start_calls = 0
+
+    def fail_once_then_start(existing_job_id):
+        nonlocal start_calls
+        start_calls += 1
+        if start_calls == 1:
+            raise JobFailure("temporary scheduler start failure", code="JOB-004")
+        original_start(existing_job_id)
+
+    monkeypatch.setattr(job_service, "start", fail_once_then_start)
+    runner = SchedulerRunner(app)
+
+    runner.tick()
+    assert repository.get(job_id)["status"] == "pending"
+    assert len([job for job in repository.list() if job["dedupe_key"] == dedupe_key]) == 1
+    failed_task = schedules.get(task_key)
+    assert failed_task["error_status"] == "temporary scheduler start failure"
+    assert datetime.fromisoformat(str(failed_task["next_run"])) > datetime.now(
+        ZoneInfo("Asia/Taipei")
+    )
+
+    with database.session() as connection:
+        connection.execute(
+            "UPDATE scheduled_tasks SET next_run=? WHERE key=?",
+            ((datetime.now(ZoneInfo("Asia/Taipei")) - timedelta(minutes=1)).isoformat(), task_key),
+        )
+    runner.tick()
+    assert repository.get(job_id)["status"] == "running"
+    assert schedules.get(task_key)["error_status"] is None
+    assert len([job for job in repository.list() if job["dedupe_key"] == dedupe_key]) == 1
+
+    with database.session() as connection:
+        connection.execute(
+            "UPDATE scheduled_tasks SET next_run=? WHERE key=?",
+            ((datetime.now(ZoneInfo("Asia/Taipei")) - timedelta(minutes=1)).isoformat(), task_key),
+        )
+    runner.tick()
+    assert repository.get(job_id)["status"] == "running"
+    assert len([job for job in repository.list() if job["dedupe_key"] == dedupe_key]) == 1
+
+
 def test_one_scheduled_task_failure_does_not_stop_the_next_task(app, monkeypatch):
     _due_task(app, "incremental_scan", delay_high_load=False)
     _due_task(app, "cache_cleanup")

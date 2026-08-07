@@ -238,21 +238,25 @@ class JobRepository:
         with self.database.session() as connection:
             return connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
 
+    def active_dedupe_job(self, dedupe_key: str):
+        """Return the newest in-flight Job for a scheduler-owned identity."""
+
+        with self.database.session() as connection:
+            return connection.execute(
+                """
+                SELECT id,status FROM jobs
+                WHERE dedupe_key=?
+                  AND status IN ('pending','preparing','running','pausing','retrying')
+                ORDER BY created_at DESC,id DESC
+                LIMIT 1
+                """,
+                (dedupe_key,),
+            ).fetchone()
+
     def has_active_dedupe(self, dedupe_key: str) -> bool:
         """Return whether a scheduler-owned identity is already in flight."""
 
-        with self.database.session() as connection:
-            return bool(
-                connection.execute(
-                    """
-                    SELECT 1 FROM jobs
-                    WHERE dedupe_key=?
-                      AND status IN ('pending','preparing','running','pausing','retrying')
-                    LIMIT 1
-                    """,
-                    (dedupe_key,),
-                ).fetchone()
-            )
+        return self.active_dedupe_job(dedupe_key) is not None
 
     def create_maintenance(
         self,
