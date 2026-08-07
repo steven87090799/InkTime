@@ -8,6 +8,7 @@ import signal
 import threading
 import time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from inktime.app.core.logging import configure_logging, log_event
 from inktime.app.domain.jobs.failure_policy import (
@@ -421,29 +422,78 @@ class WorkerRunner:
 
             def finalize_job(connection, finalized_job_id: str, target: str, *, settings=settings) -> None:
                 offline_prepare = settings.get("offline_prepare")
-                if not isinstance(offline_prepare, dict):
-                    return
                 offline_schedules = self.app.extensions["inktime_offline_schedule_repository"]
-                offline_codes = repository.failure_codes(finalized_job_id, connection=connection)
-                offline_identity = {
-                    "device_id": str(offline_prepare["device_id"]),
-                    "target_date": str(offline_prepare["target_date"]),
-                    "config_version": int(offline_prepare["config_version"]),
-                }
-                if (
-                    target == "completed_with_errors"
-                    and classify_codes(offline_codes) == FailureClass.RETRYABLE
-                ):
-                    offline_schedules.record_transient_exhausted(
-                        **offline_identity,
-                        now=datetime.now(timezone.utc),
-                        connection=connection,
+                scheduled_task = settings.get("scheduled_task")
+                if not isinstance(offline_prepare, dict) and not scheduled_task:
+                    return
+                codes = repository.failure_codes(finalized_job_id, connection=connection)
+                outcomes = repository.outcome_codes(finalized_job_id, connection=connection)
+
+                if isinstance(offline_prepare, dict):
+                    offline_identity = {
+                        "device_id": str(offline_prepare["device_id"]),
+                        "target_date": str(offline_prepare["target_date"]),
+                        "config_version": int(offline_prepare["config_version"]),
+                    }
+                    if (
+                        target == "completed_with_errors"
+                        and classify_codes(codes) == FailureClass.RETRYABLE
+                    ):
+                        offline_schedules.record_transient_exhausted(
+                            **offline_identity,
+                            now=datetime.now(timezone.utc),
+                            connection=connection,
+                        )
+                    elif target == "completed":
+                        offline_schedules.clear_transient_recovery(
+                            **offline_identity,
+                            connection=connection,
+                        )
+
+                if scheduled_task:
+                    schedules = self.app.extensions["inktime_schedule_repository"]
+                    task = schedules.get(str(scheduled_task), connection=connection)
+                    if task is None:
+                        return
+                    schedule_zone = ZoneInfo(
+                        str(runtime_settings.get("general.timezone", "Asia/Taipei"))
                     )
-                elif target == "completed":
-                    offline_schedules.clear_transient_recovery(
-                        **offline_identity,
-                        connection=connection,
-                    )
+                    schedule_now = datetime.now(schedule_zone)
+                    if target == "completed":
+                        if outcomes and classify_codes(outcomes) == FailureClass.TERMINAL_NO_RETRY:
+                            schedules.record_terminal_outcome(
+                                task,
+                                ",".join(outcomes),
+                                schedule_now,
+                                connection=connection,
+                            )
+                        elif codes and classify_codes(codes) == FailureClass.TERMINAL_NO_RETRY:
+                            schedules.record_terminal(
+                                task,
+                                f"{','.join(codes)} 工作狀態：completed",
+                                schedule_now,
+                                connection=connection,
+                            )
+                        else:
+                            occurrence_at = settings.get("scheduled_occurrence_at")
+                            if occurrence_at:
+                                schedules.record_success(
+                                    task,
+                                    schedule_now,
+                                    scheduled_occurrence_at=str(occurrence_at),
+                                    connection=connection,
+                                )
+                    elif target == "completed_with_errors":
+                        classification = classify_codes(codes)
+                        message = f"{','.join(codes) or target} 工作狀態：{target}"
+                        if classification == FailureClass.TERMINAL_NO_RETRY:
+                            schedules.record_terminal(
+                                task, message, schedule_now, connection=connection
+                            )
+                        else:
+                            schedules.record_retry_exhausted(
+                                task, message, schedule_now, connection=connection
+                            )
 
             self.current = BoundedJobWorker(
                 repository,
@@ -497,46 +547,6 @@ class WorkerRunner:
                     close_provider()
             finished = repository.get(job["id"])
             if finished is not None:
-                scheduled_task = settings.get("scheduled_task")
-                if scheduled_task:
-                    schedules = self.app.extensions["inktime_schedule_repository"]
-                    codes = repository.failure_codes(str(job["id"]))
-                    outcomes = repository.outcome_codes(str(job["id"]))
-                    now = datetime.now().astimezone()
-                    if str(finished["status"]) == "completed":
-                        if outcomes and classify_codes(outcomes) == FailureClass.TERMINAL_NO_RETRY:
-                            task = schedules.get(str(scheduled_task))
-                            if task:
-                                schedules.record_terminal_outcome(task, ",".join(outcomes), now)
-                        elif codes and classify_codes(codes) == FailureClass.TERMINAL_NO_RETRY:
-                            task = schedules.get(str(scheduled_task))
-                            if task:
-                                schedules.record_terminal(
-                                    task,
-                                    f"{','.join(codes)} 工作狀態：completed",
-                                    now,
-                                )
-                        else:
-                            task = schedules.get(str(scheduled_task))
-                            occurrence_at = settings.get("scheduled_occurrence_at")
-                            if task and occurrence_at:
-                                schedules.record_success(
-                                    task,
-                                    now,
-                                    scheduled_occurrence_at=str(occurrence_at),
-                                )
-                    elif str(finished["status"]) not in {"running", "retrying"}:
-                        task = schedules.get(str(scheduled_task))
-                        if task:
-                            classification = classify_codes(codes)
-                            message = (
-                                f"{','.join(codes) or str(finished['status'])} "
-                                f"工作狀態：{finished['status']}"
-                            )
-                            if classification == FailureClass.TERMINAL_NO_RETRY:
-                                schedules.record_terminal(task, message, now)
-                            else:
-                                schedules.record_retry_exhausted(task, message, now)
                 level = logging.WARNING if int(finished["failed_items"]) else logging.INFO
                 log_event(
                     LOGGER,

@@ -389,6 +389,110 @@ def test_scheduled_success_repairs_cursor_after_start_before_mark_enqueued(app):
     assert len([job for job in repository.list() if job["dedupe_key"] == dedupe_key]) == 1
 
 
+def test_scheduled_finalize_cursor_repair_is_atomic_with_job_terminalization(app, monkeypatch):
+    task_key = "cache_cleanup"
+    dedupe_key = f"scheduled:{task_key}"
+    _due_task(app, task_key)
+    schedules = app.extensions["inktime_schedule_repository"]
+    database = app.extensions["inktime_database"]
+    repository = app.extensions["inktime_job_repository"]
+    job_service = app.extensions["inktime_job_service"]
+
+    old_next_run = (datetime.now(ZoneInfo("Asia/Taipei")) - timedelta(minutes=1)).isoformat()
+    with database.session() as connection:
+        connection.execute(
+            "UPDATE scheduled_tasks SET cron='0 * * * *',next_run=? WHERE key=?",
+            (old_next_run, task_key),
+        )
+    task_before_start = schedules.get(task_key)
+    assert task_before_start is not None
+    occurrence_at = str(task_before_start["next_run"])
+
+    job_id = repository.create_maintenance(
+        kind="cleanup",
+        name="排程游標原子完成測試",
+        settings={
+            "scheduled_task": task_key,
+            "scheduled_occurrence_at": occurrence_at,
+            "trigger_source": "scheduler",
+        },
+        created_by=None,
+        dedupe_key=dedupe_key,
+    )
+    job_service.start(job_id)
+    original_record_success = schedules.record_success
+
+    def fail_cursor_repair(*_args, **_kwargs):
+        raise RuntimeError("injected scheduled cursor failure")
+
+    monkeypatch.setattr(schedules, "record_success", fail_cursor_repair)
+    with pytest.raises(RuntimeError, match="injected scheduled cursor failure"):
+        WorkerRunner(app).run_once()
+
+    assert repository.get(job_id)["status"] == "running"
+    assert schedules.get(task_key)["next_run"] == occurrence_at
+
+    monkeypatch.setattr(schedules, "record_success", original_record_success)
+    assert WorkerRunner(app).run_once() == 1
+    assert repository.get(job_id)["status"] == "completed"
+    assert schedules.get(task_key)["last_success"] is not None
+
+    SchedulerRunner(app).tick()
+    assert len([job for job in repository.list() if job["dedupe_key"] == dedupe_key]) == 1
+
+
+def test_worker_terminal_schedule_cursor_uses_general_timezone(app, monkeypatch):
+    task_key = "cache_cleanup"
+    schedules = app.extensions["inktime_schedule_repository"]
+    database = app.extensions["inktime_database"]
+    repository = app.extensions["inktime_job_repository"]
+    job_service = app.extensions["inktime_job_service"]
+    cache = app.extensions["inktime_thumbnail_cache"]
+
+    occurrence_at = "2026-08-08T07:30:00+08:00"
+    with database.session() as connection:
+        connection.execute(
+            "UPDATE scheduled_tasks SET cron='30 7 * * *',next_run=? WHERE key=?",
+            (occurrence_at, task_key),
+        )
+    task_before_start = schedules.get(task_key)
+    assert task_before_start is not None
+
+    job_id = repository.create_maintenance(
+        kind="cleanup",
+        name="排程時區終止結果測試",
+        settings={
+            "scheduled_task": task_key,
+            "scheduled_occurrence_at": occurrence_at,
+            "trigger_source": "scheduler",
+            "max_retries": 0,
+            "max_attempts": 1,
+            "retry_interval_seconds": 600,
+        },
+        created_by=None,
+        dedupe_key="scheduled:cache_cleanup",
+    )
+    job_service.start(job_id)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            instant = datetime(2026, 8, 8, 0, 0, tzinfo=timezone.utc)
+            return instant.astimezone(tz) if tz is not None else instant.replace(tzinfo=None)
+
+    monkeypatch.setattr("inktime.app.workers.runner.datetime", FrozenDateTime)
+
+    def fail_cleanup(*_args, **_kwargs):
+        raise JobFailure("no content", code="NO_CONTENT")
+
+    monkeypatch.setattr(cache, "cleanup", fail_cleanup)
+    assert WorkerRunner(app).run_once() == 1
+
+    task_after = schedules.get(task_key)
+    assert task_after is not None
+    assert task_after["next_run"] == "2026-08-09T07:30:00+08:00"
+
+
 def test_scheduled_success_preserves_cursor_after_mark_enqueued(app):
     task_key = "cache_cleanup"
     _due_task(app, task_key)

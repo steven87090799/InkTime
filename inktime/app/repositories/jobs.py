@@ -549,11 +549,12 @@ class JobRepository:
             ).fetchall()
         return [str(row["error_code"] or "JOB-003") for row in rows]
 
-    def outcome_codes(self, job_id: str) -> List[str]:
+    def outcome_codes(self, job_id: str, *, connection=None) -> List[str]:
         """Return structured business outcomes without treating them as errors."""
 
-        with self.database.session() as connection:
-            rows = connection.execute(
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            rows = active_connection.execute(
                 "SELECT result_json FROM job_items WHERE job_id=? AND status='completed' AND result_json IS NOT NULL ORDER BY id",
                 (job_id,),
             ).fetchall()
