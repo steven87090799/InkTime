@@ -4,7 +4,7 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
-from typing import Iterable, Iterator, List
+from typing import Any, Callable, Iterable, Iterator, List
 from uuid import uuid4
 
 from inktime.app.db import Database
@@ -268,6 +268,52 @@ class JobRepository:
         priority: int | None = None,
         dedupe_key: str | None = None,
     ) -> str:
+        job_id = self._create_maintenance(
+            kind=kind,
+            name=name,
+            settings=settings,
+            created_by=created_by,
+            priority=priority,
+            dedupe_key=dedupe_key,
+            transaction_guard=None,
+        )
+        assert job_id is not None
+        return job_id
+
+    def create_maintenance_atomic(
+        self,
+        *,
+        kind: str,
+        name: str,
+        settings: dict,
+        created_by: str | None,
+        priority: int | None = None,
+        dedupe_key: str | None = None,
+        transaction_guard: Callable[[Any], bool],
+    ) -> str | None:
+        """Create a maintenance Job under a caller-owned transaction guard."""
+
+        return self._create_maintenance(
+            kind=kind,
+            name=name,
+            settings=settings,
+            created_by=created_by,
+            priority=priority,
+            dedupe_key=dedupe_key,
+            transaction_guard=transaction_guard,
+        )
+
+    def _create_maintenance(
+        self,
+        *,
+        kind: str,
+        name: str,
+        settings: dict,
+        created_by: str | None,
+        priority: int | None = None,
+        dedupe_key: str | None = None,
+        transaction_guard: Callable[[Any], bool] | None,
+    ) -> str | None:
         if kind not in {
             "scan",
             "backup",
@@ -298,6 +344,9 @@ class JobRepository:
                     if existing is not None:
                         connection.execute("COMMIT")
                         return str(existing["id"])
+                if transaction_guard is not None and not transaction_guard(connection):
+                    connection.execute("COMMIT")
+                    return None
                 connection.execute(
                     """
                     INSERT INTO jobs(id,kind,name,status,strategy,settings_json,total_items,created_by,created_at,priority,dedupe_key)
@@ -491,9 +540,10 @@ class JobRepository:
                 (job_id, limit, offset),
             ).fetchall()
 
-    def failure_codes(self, job_id: str) -> List[str]:
-        with self.database.session() as connection:
-            rows = connection.execute(
+    def failure_codes(self, job_id: str, *, connection=None) -> List[str]:
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            rows = active_connection.execute(
                 "SELECT error_code FROM job_items WHERE job_id=? AND error_code IS NOT NULL AND error_code<>'' ORDER BY id",
                 (job_id,),
             ).fetchall()
@@ -852,9 +902,22 @@ class JobRepository:
                 connection.execute("ROLLBACK")
                 raise
 
-    def finalize_if_done(self, job_id: str) -> bool:
+    def finalize_if_done(
+        self,
+        job_id: str,
+        *,
+        finalizer: Callable[[Any, str, str], None] | None = None,
+    ) -> bool:
+        """Finalize a completed Job and any caller-owned durable state atomically."""
+
         now = utc_now()
-        with self.database.session() as connection:
+        with self.database.transaction() as connection:
+            job = connection.execute(
+                "SELECT status FROM jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+            if job is None or str(job["status"]) not in {"running", "retrying"}:
+                return False
             counts = connection.execute(
                 """
                 SELECT SUM(status IN ('pending','running','retrying')) AS active,
@@ -866,6 +929,8 @@ class JobRepository:
             if counts is None or int(counts["active"] or 0) > 0:
                 return False
             target = "completed_with_errors" if int(counts["failed"] or 0) else "completed"
+            if finalizer is not None:
+                finalizer(connection, job_id, target)
             cursor = connection.execute(
                 "UPDATE jobs SET status=?, completed_at=?, heartbeat_at=? WHERE id=? AND status IN ('running','retrying')",
                 (target, now, now, job_id),

@@ -418,15 +418,19 @@ class SchedulerRunner:
                         target_date=target_iso,
                         config_version=int(device["config_version"]),
                     )
-                    if terminal_outcome is not None and not offline_schedules.claim_terminal_outcome_retry(
-                        terminal_outcome=terminal_outcome,
-                        device_id=str(device["id"]),
-                        target_date=target_iso,
-                        config_version=int(device["config_version"]),
-                        now=now,
-                    ):
-                        continue
-                    job_id = job_repository.create_maintenance(
+                    def claim_shortage_recovery(connection, *, terminal_outcome=terminal_outcome):
+                        if terminal_outcome is None:
+                            return True
+                        return offline_schedules.claim_terminal_outcome_retry(
+                            terminal_outcome=terminal_outcome,
+                            device_id=str(device["id"]),
+                            target_date=target_iso,
+                            config_version=int(device["config_version"]),
+                            now=now,
+                            connection=connection,
+                        )
+
+                    job_id = job_repository.create_maintenance_atomic(
                         kind="render",
                         name=f"離線排程準備：{str(device['name'])} {target_iso}",
                         priority=2,
@@ -444,7 +448,10 @@ class SchedulerRunner:
                             "max_attempts": 2,
                             "retry_interval_seconds": OFFLINE_PREPARE_RETRY_INTERVAL_SECONDS,
                         },
+                        transaction_guard=claim_shortage_recovery,
                     )
+                    if job_id is None:
+                        continue
                     current = job_repository.get(job_id)
                     if current is not None and str(current["status"]) == "pending":
                         job_service.start(job_id)

@@ -20,6 +20,7 @@ Processor = Callable[[dict], dict]
 ProgressCallback = Callable[[int], None]
 ErrorCallback = Callable[[str, str, Exception, int], None]
 ResultCallback = Callable[[dict], None]
+FinalizeCallback = Callable[[Any, str, str], None]
 
 
 class JobHardTimeoutError(TimeoutError):
@@ -70,6 +71,7 @@ class BoundedJobWorker:
         progress_callback: ProgressCallback | None = None,
         error_callback: ErrorCallback | None = None,
         result_callback: ResultCallback | None = None,
+        finalize_callback: FinalizeCallback | None = None,
         timeout_seconds: float = 0,
         hard_timeout: bool = False,
         terminate_grace_seconds: float = 0.5,
@@ -90,6 +92,7 @@ class BoundedJobWorker:
         self.progress_callback = progress_callback
         self.error_callback = error_callback
         self.result_callback = result_callback
+        self.finalize_callback = finalize_callback
         self.timeout_seconds = max(0.0, float(timeout_seconds))
         self.hard_timeout = requested_hard_timeout
         self.terminate_grace_seconds = max(0.05, float(terminate_grace_seconds))
@@ -111,6 +114,9 @@ class BoundedJobWorker:
         result = self.processor(dict(item))
         cost = float(result.pop("_actual_cost", 0) or 0)
         return str(item["id"]), result, cost
+
+    def _finalize_if_done(self, job_id: str) -> bool:
+        return self.repository.finalize_if_done(job_id, finalizer=self.finalize_callback)
 
     def _record_failure(self, job_id: str, item_id: str, exc: Exception) -> None:
         self.failure_count += 1
@@ -256,7 +262,7 @@ class BoundedJobWorker:
                     self.repository.renew_leases(job_id, self.worker_id)
                     last_lease_renewal = now
                 if not tasks:
-                    if self.repository.finalize_if_done(job_id):
+                    if self._finalize_if_done(job_id):
                         break
                     if not progressed:
                         # Retry backoff is persisted; return control to Scheduler.
@@ -272,7 +278,7 @@ class BoundedJobWorker:
             job = self.repository.get(job_id)
             if job is not None and job["status"] == "pausing":
                 self.repository.acknowledge_pause(job_id)
-            self.repository.finalize_if_done(job_id)
+            self._finalize_if_done(job_id)
 
     def run_job(self, job_id: str) -> None:
         if self.hard_timeout:
@@ -317,7 +323,7 @@ class BoundedJobWorker:
                     self.max_observed_futures = max(self.max_observed_futures, len(futures))
 
                 if not futures:
-                    if self.repository.finalize_if_done(job_id):
+                    if self._finalize_if_done(job_id):
                         break
                     # 可能正在等待指數退避；單次執行先交還 Scheduler。
                     break
@@ -373,4 +379,4 @@ class BoundedJobWorker:
             job = self.repository.get(job_id)
             if job is not None and job["status"] == "pausing":
                 self.repository.acknowledge_pause(job_id)
-            self.repository.finalize_if_done(job_id)
+            self._finalize_if_done(job_id)

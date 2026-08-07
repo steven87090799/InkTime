@@ -202,6 +202,100 @@ def test_offline_shortage_pending_restart_does_not_claim_new_cooldown(app, monke
     assert terminal_after_restart["updated_at"] == claimed_at
 
 
+def test_offline_shortage_claim_crash_before_job_insert_is_restartable(app):
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "離線 shortage claim crash 相框",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00", "20:00"],
+        prefetch_lead_minutes=5,
+    )
+    scheduler = SchedulerRunner(app)
+    repository = app.extensions["inktime_job_repository"]
+    offline_schedules = app.extensions["inktime_offline_schedule_repository"]
+    first_now = datetime(2026, 8, 3, 7, 55, tzinfo=timezone.utc)
+    scheduler._prepare_due_offline_devices(first_now)
+    assert WorkerRunner(app).run_once() == 1
+
+    offline_jobs = [
+        job
+        for job in repository.list()
+        if '"offline_prepare"' in str(job["settings_json"]) and device_id in str(job["settings_json"])
+    ]
+    assert len(offline_jobs) == 1
+    first_job = offline_jobs[0]
+    settings = json.loads(first_job["settings_json"])
+    terminal_before_retry = offline_schedules.terminal_outcome_for_device(
+        device_id=device_id,
+        target_date="2026-08-03",
+        config_version=1,
+    )
+    assert terminal_before_retry is not None
+    retry_now = first_now + timedelta(hours=1)
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE device_offline_schedules SET updated_at=? WHERE id=?",
+            (
+                (retry_now - timedelta(seconds=SHORTAGE_RETRY_COOLDOWN_SECONDS + 1)).isoformat(),
+                terminal_before_retry["id"],
+            ),
+        )
+    terminal_before_crash = offline_schedules.terminal_outcome_for_device(
+        device_id=device_id,
+        target_date="2026-08-03",
+        config_version=1,
+    )
+    assert terminal_before_crash is not None
+    claimed_updated_at = terminal_before_crash["updated_at"]
+
+    def claim_then_crash(connection):
+        assert offline_schedules.claim_terminal_outcome_retry(
+            terminal_outcome=terminal_before_crash,
+            device_id=device_id,
+            target_date="2026-08-03",
+            config_version=1,
+            now=retry_now,
+            connection=connection,
+        )
+        raise RuntimeError("simulated crash before offline Job insert")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        repository.create_maintenance_atomic(
+            kind="render",
+            name=str(first_job["name"]),
+            priority=2,
+            dedupe_key=str(first_job["dedupe_key"]),
+            created_by=None,
+            settings=settings,
+            transaction_guard=claim_then_crash,
+        )
+
+    terminal_after_crash = offline_schedules.terminal_outcome_for_device(
+        device_id=device_id,
+        target_date="2026-08-03",
+        config_version=1,
+    )
+    assert terminal_after_crash is not None
+    assert terminal_after_crash["updated_at"] == claimed_updated_at
+
+    restarted = SchedulerRunner(app)
+    restarted._prepare_due_offline_devices(retry_now)
+    offline_jobs = [
+        job
+        for job in repository.list()
+        if '"offline_prepare"' in str(job["settings_json"]) and device_id in str(job["settings_json"])
+    ]
+    assert len(offline_jobs) == 2
+    restarted._prepare_due_offline_devices(retry_now)
+    assert len(
+        [
+            job
+            for job in repository.list()
+            if '"offline_prepare"' in str(job["settings_json"]) and device_id in str(job["settings_json"])
+        ]
+    ) == 2
+
+
 def test_manual_schedule_run_inherits_retry_policy_without_cursor_ownership(app):
     task_key = "cache_cleanup"
     _due_task(app, task_key)
@@ -565,6 +659,139 @@ def test_offline_transient_cross_job_backoff_is_durable_bounded_and_reset(app):
         target_date="2026-08-03",
         config_version=1,
     ) is None
+
+
+def test_offline_transient_finalize_crash_preserves_backoff(app):
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "離線 transient finalize crash 相框",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00"],
+        prefetch_lead_minutes=5,
+    )
+    database = app.extensions["inktime_database"]
+    repository = app.extensions["inktime_job_repository"]
+    offline_schedules = app.extensions["inktime_offline_schedule_repository"]
+    job_id = repository.create_maintenance(
+        kind="render",
+        name="離線 transient finalize crash 測試",
+        settings={
+            "offline_prepare": {
+                "device_id": device_id,
+                "target_date": "2026-08-03",
+                "config_version": 1,
+            },
+            "trigger_source": "offline-scheduler",
+        },
+        created_by=None,
+        dedupe_key=f"offline-prepare:{device_id}:2026-08-03:1",
+    )
+    app.extensions["inktime_job_service"].start(job_id)
+    with database.session() as connection:
+        connection.execute(
+            "UPDATE job_items SET status='failed',error_code='DISPLAY-005' WHERE job_id=?",
+            (job_id,),
+        )
+
+    exhausted_at = datetime(2026, 8, 3, 7, 55, tzinfo=timezone.utc)
+
+    def persist_then_crash(connection, finalized_job_id, target):
+        assert finalized_job_id == job_id
+        assert target == "completed_with_errors"
+        offline_schedules.record_transient_exhausted(
+            device_id=device_id,
+            target_date="2026-08-03",
+            config_version=1,
+            now=exhausted_at,
+            connection=connection,
+        )
+        raise RuntimeError("simulated transient finalization crash")
+
+    with pytest.raises(RuntimeError, match="simulated transient"):
+        repository.finalize_if_done(job_id, finalizer=persist_then_crash)
+
+    assert repository.get(job_id)["status"] == "running"
+    assert offline_schedules.transient_recovery_for_device(
+        device_id=device_id,
+        target_date="2026-08-03",
+        config_version=1,
+    ) is None
+
+    def persist_recovery(connection, _finalized_job_id, _target):
+        offline_schedules.record_transient_exhausted(
+            device_id=device_id,
+            target_date="2026-08-03",
+            config_version=1,
+            now=exhausted_at,
+            connection=connection,
+        )
+
+    assert repository.finalize_if_done(job_id, finalizer=persist_recovery)
+    assert repository.get(job_id)["status"] == "completed_with_errors"
+    state = offline_schedules.transient_recovery_for_device(
+        device_id=device_id,
+        target_date="2026-08-03",
+        config_version=1,
+    )
+    assert state is not None
+    assert state["backoff_seconds"] == 1800
+
+    SchedulerRunner(app)._prepare_due_offline_devices(exhausted_at + timedelta(seconds=1))
+    assert len(
+        [
+            job
+            for job in repository.list()
+            if '"offline_prepare"' in str(job["settings_json"]) and device_id in str(job["settings_json"])
+        ]
+    ) == 1
+
+
+def test_stale_offline_failure_cannot_demote_concurrent_ready_playlist(app):
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "離線 ready guard 相框",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00"],
+    )
+    database = app.extensions["inktime_database"]
+    repository = app.extensions["inktime_offline_schedule_repository"]
+    exhausted_at = datetime(2026, 8, 3, 7, 55, tzinfo=timezone.utc)
+    repository.record_transient_exhausted(
+        device_id=device_id,
+        target_date="2026-08-03",
+        config_version=1,
+        now=exhausted_at,
+    )
+    preserved_snapshot = {
+        "playlist_version": "playlist-kept",
+        "slots": ["slot-kept"],
+    }
+    with database.session() as connection:
+        before = connection.execute(
+            "SELECT id,updated_at FROM device_offline_schedules WHERE device_id=? AND target_date=? AND config_version=1",
+            (device_id, "2026-08-03"),
+        ).fetchone()
+        assert before is not None
+        connection.execute(
+            "UPDATE device_offline_schedules SET status='ready',terminal_outcome_code=NULL,snapshot_json=? WHERE id=?",
+            (json.dumps(preserved_snapshot, sort_keys=True), before["id"]),
+        )
+
+    assert repository.record_transient_exhausted(
+        device_id=device_id,
+        target_date="2026-08-03",
+        config_version=1,
+        now=exhausted_at + timedelta(seconds=1),
+    ) == {}
+    with database.session() as connection:
+        after = connection.execute(
+            "SELECT status,updated_at,snapshot_json,terminal_outcome_code FROM device_offline_schedules WHERE device_id=? AND target_date=? AND config_version=1",
+            (device_id, "2026-08-03"),
+        ).fetchone()
+    assert after["status"] == "ready"
+    assert after["updated_at"] == before["updated_at"]
+    assert json.loads(after["snapshot_json"]) == preserved_snapshot
+    assert after["terminal_outcome_code"] is None
 
 
 def test_offline_shortage_is_terminal_for_one_device_day_config(app):

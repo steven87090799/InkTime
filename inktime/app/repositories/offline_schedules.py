@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
 from dataclasses import dataclass
+from contextlib import nullcontext
 import hashlib
 import json
 import re
@@ -491,6 +492,7 @@ class OfflineScheduleRepository:
         target_date: str,
         config_version: int,
         now: datetime,
+        connection=None,
     ) -> dict[str, Any]:
         """Persist bounded cross-Job recovery after an offline Job exhausts."""
 
@@ -498,16 +500,19 @@ class OfflineScheduleRepository:
         exhausted_at = current.astimezone(timezone.utc)
         exhausted_iso = exhausted_at.isoformat()
         day = self._date(target_date).isoformat()
-        with self.database.transaction() as connection:
-            existing = connection.execute(
+        context = nullcontext(connection) if connection is not None else self.database.transaction()
+        with context as active_connection:
+            existing = active_connection.execute(
                 """
-                SELECT id,snapshot_json FROM device_offline_schedules
+                SELECT id,status,snapshot_json FROM device_offline_schedules
                 WHERE device_id=? AND target_date=? AND config_version=?
                 """,
                 (device_id, day, int(config_version)),
             ).fetchone()
+            if existing is not None and str(existing["status"]) == "ready":
+                return {}
             if existing is None:
-                device = connection.execute(
+                device = active_connection.execute(
                     """
                     SELECT id,config_version,timezone,panel_profile,rotation,schedule_times_json,
                            prefetch_lead_minutes,button_wake_action,offline_schedule_version,
@@ -549,7 +554,7 @@ class OfflineScheduleRepository:
             snapshot["transient_recovery"] = state
             snapshot_json = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             if existing is None:
-                connection.execute(
+                active_connection.execute(
                     """
                     INSERT INTO device_offline_schedules(
                         id,device_id,target_date,config_version,timezone,status,created_at,updated_at,
@@ -581,14 +586,16 @@ class OfflineScheduleRepository:
                     ),
                 )
             else:
-                connection.execute(
+                cursor = active_connection.execute(
                     """
                     UPDATE device_offline_schedules
                     SET status='failed',updated_at=?,snapshot_json=?,terminal_outcome_code=NULL
-                    WHERE id=?
+                    WHERE id=? AND status IN ('preparing','failed')
                     """,
                     (exhausted_iso, snapshot_json, schedule_id),
                 )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("OFFLINE-002 離線排程狀態已變更，拒絕覆寫 transient recovery")
         return state
 
     def clear_transient_recovery(
@@ -597,12 +604,14 @@ class OfflineScheduleRepository:
         device_id: str,
         target_date: str,
         config_version: int,
+        connection=None,
     ) -> None:
         """Clear cross-Job transient history after a successful preparation."""
 
         day = self._date(target_date).isoformat()
-        with self.database.transaction() as connection:
-            row = connection.execute(
+        context = nullcontext(connection) if connection is not None else self.database.transaction()
+        with context as active_connection:
+            row = active_connection.execute(
                 """
                 SELECT id,snapshot_json FROM device_offline_schedules
                 WHERE device_id=? AND target_date=? AND config_version=?
@@ -615,7 +624,7 @@ class OfflineScheduleRepository:
             if "transient_recovery" not in snapshot:
                 return
             snapshot.pop("transient_recovery", None)
-            connection.execute(
+            active_connection.execute(
                 "UPDATE device_offline_schedules SET snapshot_json=? WHERE id=?",
                 (json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")), str(row["id"])),
             )
@@ -629,6 +638,7 @@ class OfflineScheduleRepository:
         config_version: int,
         now: datetime,
         retry_after_seconds: int = SHORTAGE_RETRY_COOLDOWN_SECONDS,
+        connection=None,
     ) -> bool:
         """Atomically claim one recovery window after a shortage cooldown."""
 
@@ -650,8 +660,9 @@ class OfflineScheduleRepository:
         if current.astimezone(timezone.utc) < cooldown_expires_at:
             return False
         claimed_at = current.astimezone(timezone.utc).isoformat()
-        with self.database.transaction() as connection:
-            cursor = connection.execute(
+        context = nullcontext(connection) if connection is not None else self.database.transaction()
+        with context as active_connection:
+            cursor = active_connection.execute(
                 """
                 UPDATE device_offline_schedules
                 SET updated_at=?

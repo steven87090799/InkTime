@@ -419,6 +419,32 @@ class WorkerRunner:
                         bool(result.get("cache_hit"))
                     )
 
+            def finalize_job(connection, finalized_job_id: str, target: str, *, settings=settings) -> None:
+                offline_prepare = settings.get("offline_prepare")
+                if not isinstance(offline_prepare, dict):
+                    return
+                offline_schedules = self.app.extensions["inktime_offline_schedule_repository"]
+                offline_codes = repository.failure_codes(finalized_job_id, connection=connection)
+                offline_identity = {
+                    "device_id": str(offline_prepare["device_id"]),
+                    "target_date": str(offline_prepare["target_date"]),
+                    "config_version": int(offline_prepare["config_version"]),
+                }
+                if (
+                    target == "completed_with_errors"
+                    and classify_codes(offline_codes) == FailureClass.RETRYABLE
+                ):
+                    offline_schedules.record_transient_exhausted(
+                        **offline_identity,
+                        now=datetime.now(timezone.utc),
+                        connection=connection,
+                    )
+                elif target == "completed":
+                    offline_schedules.clear_transient_recovery(
+                        **offline_identity,
+                        connection=connection,
+                    )
+
             self.current = BoundedJobWorker(
                 repository,
                 processor,
@@ -451,6 +477,7 @@ class WorkerRunner:
                 progress_callback=log_progress,
                 error_callback=log_failure,
                 result_callback=record_result,
+                finalize_callback=finalize_job,
                 timeout_seconds=int(settings.get("timeout_seconds", 0) or 0),
                 hard_timeout=False,
             )
@@ -470,37 +497,6 @@ class WorkerRunner:
                     close_provider()
             finished = repository.get(job["id"])
             if finished is not None:
-                offline_prepare = settings.get("offline_prepare")
-                if isinstance(offline_prepare, dict):
-                    try:
-                        offline_schedules = self.app.extensions["inktime_offline_schedule_repository"]
-                        offline_codes = repository.failure_codes(str(job["id"]))
-                        offline_now = datetime.now(timezone.utc)
-                        offline_identity = {
-                            "device_id": str(offline_prepare["device_id"]),
-                            "target_date": str(offline_prepare["target_date"]),
-                            "config_version": int(offline_prepare["config_version"]),
-                        }
-                        if (
-                            str(finished["status"]) == "completed_with_errors"
-                            and classify_codes(offline_codes) == FailureClass.RETRYABLE
-                        ):
-                            offline_schedules.record_transient_exhausted(
-                                **offline_identity,
-                                now=offline_now,
-                            )
-                        elif str(finished["status"]) == "completed":
-                            offline_schedules.clear_transient_recovery(**offline_identity)
-                    except Exception as exc:
-                        log_event(
-                            LOGGER,
-                            logging.ERROR,
-                            "離線排程跨工作重試狀態寫入失敗",
-                            event="offline_prepare_recovery_state_failed",
-                            error_code="OFFLINE-002",
-                            job_id=str(job["id"]),
-                            details={"error_type": exc.__class__.__name__},
-                        )
                 scheduled_task = settings.get("scheduled_task")
                 if scheduled_task:
                     schedules = self.app.extensions["inktime_schedule_repository"]
