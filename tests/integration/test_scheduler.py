@@ -1297,8 +1297,9 @@ def test_offline_prefetch_active_due_page_advances_and_reaches_tail(app):
     assert offline_jobs(tail) == []
 
     # Simulate the first page remaining due while its Jobs are still active.
-    # The scheduler must advance those committed targets before the next page
-    # can be selected; it must not enqueue duplicates for them.
+    # The scheduler must keep those committed targets from producing
+    # duplicates, while the earlier-deadline tail can enter the next bounded
+    # page.
     with app.extensions["inktime_database"].session() as connection:
         connection.executemany(
             "UPDATE devices SET next_offline_prepare_at=? WHERE id=?",
@@ -1307,7 +1308,7 @@ def test_offline_prefetch_active_due_page_advances_and_reaches_tail(app):
 
     runner._prepare_due_offline_devices(now)
     assert all(len(offline_jobs(device_id)) == 1 for device_id in first_page)
-    assert offline_jobs(tail) == []
+    assert len(offline_jobs(tail)) == 1
 
     runner._prepare_due_offline_devices(now)
     assert len(offline_jobs(tail)) == 1
