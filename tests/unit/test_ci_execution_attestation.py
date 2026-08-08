@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from scripts.ci.test_plan import build_test_plan
+from scripts.ci.canonical_plan import build_canonical_plan
 from scripts.ci.verify_execution import (
     CONTAINER_WORKFLOW,
     REPOSITORY_WORKFLOW,
@@ -21,6 +21,10 @@ def _context(*, draft: bool = True) -> dict[str, object]:
     }
 
 
+def _plan(path: str, *, draft: bool = True) -> dict[str, object]:
+    return build_canonical_plan([path], _context(draft=draft))
+
+
 def _needs_for(plan: dict[str, object], workflow: str) -> dict[str, dict[str, str]]:
     jobs, errors = expected_execution_jobs(plan, workflow)
     assert errors == []
@@ -28,14 +32,15 @@ def _needs_for(plan: dict[str, object], workflow: str) -> dict[str, dict[str, st
 
 
 def test_selected_success_passes():
-    plan = build_test_plan(["inktime/app/workers/scheduler.py"], _context())
+    plan = _plan("inktime/app/workers/scheduler.py")
     needs = _needs_for(plan, REPOSITORY_WORKFLOW)
 
+    assert "selected-owner-suites" in needs
     assert verify_execution(plan, needs, REPOSITORY_WORKFLOW) == []
 
 
 def test_selected_skipped_fails_closed():
-    plan = build_test_plan(["inktime/app/workers/scheduler.py"], _context())
+    plan = _plan("inktime/app/workers/scheduler.py")
     needs = _needs_for(plan, REPOSITORY_WORKFLOW)
     needs["bounded-runtime-soak"]["result"] = "skipped"
 
@@ -44,7 +49,7 @@ def test_selected_skipped_fails_closed():
 
 
 def test_selected_failure_fails_closed():
-    plan = build_test_plan(["inktime/app/workers/scheduler.py"], _context())
+    plan = _plan("inktime/app/workers/scheduler.py")
     needs = _needs_for(plan, REPOSITORY_WORKFLOW)
     needs["bounded-runtime-soak"]["result"] = "failure"
 
@@ -53,7 +58,7 @@ def test_selected_failure_fails_closed():
 
 
 def test_unselected_skipped_job_is_accepted_in_impact_mode():
-    plan = build_test_plan(["README.md"], _context())
+    plan = _plan("README.md")
     needs = _needs_for(plan, REPOSITORY_WORKFLOW)
     needs["playwright"] = {"result": "skipped"}
     needs["esp32-compile"] = {"result": "skipped"}
@@ -62,7 +67,7 @@ def test_unselected_skipped_job_is_accepted_in_impact_mode():
 
 
 def test_full_mode_missing_required_job_fails_closed():
-    plan = build_test_plan(["README.md"], _context(draft=False))
+    plan = _plan("README.md", draft=False)
     needs = _needs_for(plan, REPOSITORY_WORKFLOW)
     missing_job = "python-compatibility"
     assert missing_job in needs
@@ -73,7 +78,7 @@ def test_full_mode_missing_required_job_fails_closed():
 
 
 def test_unknown_selected_execution_fails_closed():
-    plan = build_test_plan(["README.md"], _context())
+    plan = _plan("README.md")
     tampered = deepcopy(plan)
     tampered["selected_test_suites"] = [*plan["selected_test_suites"], "unknown_selected_suite"]
     needs = _needs_for(plan, REPOSITORY_WORKFLOW)
@@ -83,7 +88,7 @@ def test_unknown_selected_execution_fails_closed():
 
 
 def test_impact_container_workflow_accepts_unrelated_skipped_jobs():
-    plan = build_test_plan(["Dockerfile"], _context())
+    plan = _plan("Dockerfile")
     needs = _needs_for(plan, CONTAINER_WORKFLOW)
     needs["benchmark-contract"] = {"result": "skipped"}
 
@@ -91,11 +96,11 @@ def test_impact_container_workflow_accepts_unrelated_skipped_jobs():
 
 
 def test_full_mode_accepts_only_intentionally_non_applicable_impact_runner_skip():
-    plan = build_test_plan(["README.md"], _context(draft=False))
+    plan = _plan("README.md", draft=False)
     needs = _needs_for(plan, REPOSITORY_WORKFLOW)
-    needs["selected_owner_suites"] = {"result": "skipped"}
+    needs["selected-owner-suites"] = {"result": "skipped"}
 
-    assert "selected_owner_suites" not in expected_execution_jobs(
+    assert "selected-owner-suites" not in expected_execution_jobs(
         plan, REPOSITORY_WORKFLOW
     )[0]
     assert verify_execution(plan, needs, REPOSITORY_WORKFLOW) == []
