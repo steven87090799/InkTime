@@ -1,4 +1,9 @@
-"""Fail-closed verification of planner-selected GitHub job execution."""
+"""Fail-closed attestation for planner-selected GitHub Actions execution.
+
+The planner owns what must run. This module owns the source-level mapping from
+selected suites/gates to workflow jobs, so aggregate YAML only supplies the
+canonical plan and ``toJSON(needs)``.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +19,7 @@ if __package__ in {None, ""}:
 
 from scripts.ci.provenance import provenance_errors
 from scripts.ci.test_plan import (
+    FULL_MODE,
     FULL_SUITE_EXECUTION_OWNERS,
     GATE_EXECUTION_OWNERS,
     NON_EXECUTABLE_SUITES,
@@ -22,22 +28,14 @@ from scripts.ci.test_plan import (
     WORKFLOW_EXECUTION_JOB_IDS,
 )
 
-WORKFLOW_ALIASES = {
-    "ci": "ci",
-    "container": "container",
-    "container-security": "container",
+REPOSITORY_WORKFLOW = "repository"
+CONTAINER_WORKFLOW = "container"
+WORKFLOW_IDENTITIES = frozenset({REPOSITORY_WORKFLOW, CONTAINER_WORKFLOW})
+WORKFLOW_ALIASES = {"ci": REPOSITORY_WORKFLOW, "repository": REPOSITORY_WORKFLOW, "container": CONTAINER_WORKFLOW}
+AGGREGATE_JOB_BY_WORKFLOW = {
+    REPOSITORY_WORKFLOW: "repository-gate",
+    CONTAINER_WORKFLOW: "container-security-gate",
 }
-AGGREGATE_JOBS = {
-    "ci": "repository-gate",
-    "container": "container-security-gate",
-}
-ALL_EXECUTION_JOB_IDS = frozenset(
-    job_id for jobs in WORKFLOW_EXECUTION_JOB_IDS.values() for job_id in jobs
-)
-
-
-def _execution_job_id(owner: str) -> str:
-    return SUITE_EXECUTION_OWNER_JOB_IDS.get(owner, owner)
 
 
 def _error(
@@ -54,170 +52,238 @@ def _error(
     )
 
 
-def _result(value: object) -> str:
-    if isinstance(value, Mapping):
-        raw_result = value.get("result")
-    else:
-        raw_result = None
-    return str(raw_result) if raw_result is not None else "unknown"
+def _workflow_jobs(workflow: str) -> frozenset[str]:
+    registry_key = "ci" if workflow == REPOSITORY_WORKFLOW else workflow
+    return WORKFLOW_EXECUTION_JOB_IDS[registry_key]
 
 
-def expected_execution_jobs(plan: Mapping[str, Any], workflow: str) -> dict[str, str]:
-    """Return selected execution job IDs for one aggregate workflow."""
-
-    canonical_workflow = WORKFLOW_ALIASES.get(workflow)
-    if canonical_workflow is None:
-        raise ValueError(f"unknown workflow identity: {workflow}")
-
-    selected_suites = plan.get("selected_test_suites", [])
-    selected_gates = plan.get("selected_gates", [])
-    if not isinstance(selected_suites, list) or not all(
-        isinstance(value, str) for value in selected_suites
-    ):
-        raise ValueError("selected_test_suites must be a JSON array of strings")
-    if not isinstance(selected_gates, list) or not all(
-        isinstance(value, str) for value in selected_gates
-    ):
-        raise ValueError("selected_gates must be a JSON array of strings")
-
-    mode = plan.get("ci_mode")
-    suite_registry = (
-        FULL_SUITE_EXECUTION_OWNERS
-        if mode == "full"
-        else SUITE_EXECUTION_OWNERS
-    )
-    workflow_jobs = WORKFLOW_EXECUTION_JOB_IDS[canonical_workflow]
-    aggregate_job = AGGREGATE_JOBS[canonical_workflow]
-    expected: dict[str, str] = {"changes": "canonical planner"}
-
-    if plan.get("event_name") == "pull_request":
-        expected["source-head-validation"] = "source-head provenance"
-
-    for suite in selected_suites:
-        if suite in NON_EXECUTABLE_SUITES:
-            continue
-        owner = suite_registry.get(suite)
-        if owner is None:
-            continue
-        job_id = _execution_job_id(owner)
-        if job_id in workflow_jobs and job_id != aggregate_job:
-            expected.setdefault(job_id, f"suite:{suite}")
-
-    for gate in selected_gates:
-        owner = GATE_EXECUTION_OWNERS.get(gate)
-        if owner in workflow_jobs and owner != aggregate_job:
-            expected.setdefault(owner, f"gate:{gate}")
-
-    return expected
+def _job_workflow(job_id: str, current_workflow: str | None = None) -> str | None:
+    if job_id == "changes":
+        return current_workflow
+    if job_id == "source-head-contract":
+        return REPOSITORY_WORKFLOW
+    if job_id in WORKFLOW_EXECUTION_JOB_IDS["ci"]:
+        return REPOSITORY_WORKFLOW
+    if job_id in WORKFLOW_EXECUTION_JOB_IDS["container"]:
+        return CONTAINER_WORKFLOW
+    return None
 
 
-def _validate_planner_registry(
-    plan: Mapping[str, Any], workflow: str
-) -> list[str]:
-    errors: list[str] = []
-    canonical_workflow = WORKFLOW_ALIASES.get(workflow)
-    if canonical_workflow is None:
-        return [
+def _workflow_job_id(owner_id: str) -> str:
+    return SUITE_EXECUTION_OWNER_JOB_IDS.get(owner_id, owner_id)
+
+
+def _string_list(plan: Mapping[str, object], key: str) -> tuple[list[str], list[str]]:
+    raw = plan.get(key)
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        return [], [
             _error(
-                f"workflow:{workflow}",
-                workflow,
+                f"plan.{key}",
+                "changes",
+                "JSON array of strings",
+                "invalid",
+                f"plan.{key} must be a JSON array of strings",
+            )
+        ]
+    return list(raw), []
+
+
+def expected_execution_jobs(
+    plan: Mapping[str, object], workflow_identity: str
+) -> tuple[list[str], list[str]]:
+    """Return jobs that must be ``success`` plus source-registry errors."""
+
+    workflow = WORKFLOW_ALIASES.get(workflow_identity)
+    if workflow is None:
+        return [], [
+            _error(
+                f"workflow:{workflow_identity}",
+                workflow_identity,
                 "known workflow identity",
                 "unknown",
             )
         ]
 
+    errors: list[str] = []
     mode = plan.get("ci_mode")
+    if mode not in {"impact", FULL_MODE}:
+        errors.append(
+            _error("planner", "changes", "impact-or-full", str(mode), "unknown ci_mode")
+        )
+        return [], errors
+    if mode == FULL_MODE and plan.get("full_plan_complete") is not True:
+        errors.append(
+            _error(
+                "planner",
+                "changes",
+                "full_plan_complete=true",
+                str(plan.get("full_plan_complete")),
+            )
+        )
+
+    selected_suites, suite_errors = _string_list(plan, "selected_test_suites")
+    selected_gates, gate_errors = _string_list(plan, "selected_gates")
+    errors.extend(suite_errors)
+    errors.extend(gate_errors)
     suite_registry = (
-        FULL_SUITE_EXECUTION_OWNERS
-        if mode == "full"
-        else SUITE_EXECUTION_OWNERS
+        FULL_SUITE_EXECUTION_OWNERS if mode == FULL_MODE else SUITE_EXECUTION_OWNERS
     )
-    for suite in plan.get("selected_test_suites", []):
+    expected: set[str] = {"changes"}
+
+    requires_source = plan.get("requires_source_head_contract")
+    if requires_source is True and workflow == REPOSITORY_WORKFLOW:
+        expected.add("source-head-contract")
+    elif plan.get("event_name") == "pull_request" and "requires_source_head_contract" not in plan:
+        errors.append(
+            _error(
+                "provenance",
+                "source-head-contract",
+                "requires_source_head_contract=true",
+                "missing",
+            )
+        )
+
+    current_aggregate = AGGREGATE_JOB_BY_WORKFLOW[workflow]
+    for suite in selected_suites:
         if suite in NON_EXECUTABLE_SUITES:
             continue
-        owner = suite_registry.get(suite)
-        if owner is None:
+        owner_id = suite_registry.get(suite)
+        if owner_id is None:
             errors.append(
                 _error(
                     f"suite:{suite}",
                     suite,
                     "registered execution owner",
                     "missing",
-                    "planner selected a suite without an execution owner",
+                    "selected suite has no execution owner",
                 )
             )
-        elif _execution_job_id(owner) not in ALL_EXECUTION_JOB_IDS:
+            continue
+        job_id = _workflow_job_id(owner_id)
+        owner_workflow = _job_workflow(job_id, workflow)
+        if owner_workflow is None:
             errors.append(
                 _error(
                     f"suite:{suite}",
-                    _execution_job_id(owner),
+                    job_id,
                     "known execution job",
                     "unknown",
                     "suite registry points outside the execution registry",
                 )
             )
+        elif owner_workflow == workflow and job_id != current_aggregate:
+            expected.add(job_id)
 
-    for gate in plan.get("selected_gates", []):
-        owner = GATE_EXECUTION_OWNERS.get(gate)
-        if owner is None:
+    for gate in selected_gates:
+        job_id = GATE_EXECUTION_OWNERS.get(gate)
+        if job_id is None:
             errors.append(
                 _error(
                     f"gate:{gate}",
                     gate,
                     "registered execution owner",
                     "missing",
-                    "planner selected a gate without an execution owner",
+                    "selected gate has no execution owner",
                 )
             )
-        elif owner not in ALL_EXECUTION_JOB_IDS:
+            continue
+        owner_workflow = _job_workflow(job_id, workflow)
+        if gate in {"repository_gate", "container_security_gate"}:
+            owner_workflow = workflow if job_id == current_aggregate else owner_workflow
+        if owner_workflow is None:
             errors.append(
                 _error(
                     f"gate:{gate}",
-                    owner,
+                    job_id,
                     "known execution job",
                     "unknown",
                     "gate registry points outside the execution registry",
                 )
             )
-    return errors
+        elif owner_workflow == workflow and job_id != current_aggregate:
+            expected.add(job_id)
+
+    return sorted(expected), errors
+
+
+def _result(value: object) -> str:
+    if isinstance(value, Mapping):
+        raw = value.get("result")
+        return str(raw) if raw is not None else "unknown"
+    return "unknown"
+
+
+def _execution_id_for_job(
+    plan: Mapping[str, object], workflow: str, job_id: str
+) -> str:
+    if job_id == "changes":
+        return "changes"
+    if job_id == "source-head-contract":
+        return "source-head-contract"
+    mode = plan.get("ci_mode")
+    suite_registry = (
+        FULL_SUITE_EXECUTION_OWNERS if mode == FULL_MODE else SUITE_EXECUTION_OWNERS
+    )
+    suites = plan.get("selected_test_suites")
+    if isinstance(suites, list):
+        for suite in suites:
+            if not isinstance(suite, str) or suite in NON_EXECUTABLE_SUITES:
+                continue
+            owner_id = suite_registry.get(suite)
+            if owner_id is None:
+                continue
+            owner_job = _workflow_job_id(owner_id)
+            if owner_job == job_id and _job_workflow(owner_job, workflow) == workflow:
+                return f"suite:{suite}"
+    gates = plan.get("selected_gates")
+    if isinstance(gates, list):
+        for gate in gates:
+            if not isinstance(gate, str):
+                continue
+            owner_job = GATE_EXECUTION_OWNERS.get(gate)
+            if owner_job == job_id:
+                return f"gate:{gate}"
+    return job_id
 
 
 def verify_execution(
-    plan: Mapping[str, Any], needs: Mapping[str, Any], workflow: str
+    plan: Mapping[str, object],
+    needs: Mapping[str, object],
+    workflow_identity: str,
 ) -> list[str]:
-    """Return fail-closed execution errors for a canonical plan and needs map."""
+    """Return fail-closed attestation errors; an empty list means PASS."""
 
-    canonical_workflow = WORKFLOW_ALIASES.get(workflow)
-    if canonical_workflow is None:
-        return _validate_planner_registry(plan, workflow)
+    workflow = WORKFLOW_ALIASES.get(workflow_identity)
+    expected_jobs, errors = expected_execution_jobs(plan, workflow_identity)
+    if workflow is None:
+        return errors
 
-    errors = _validate_planner_registry(plan, canonical_workflow)
-    for provenance_error in provenance_errors(
-        {
-            key: str(plan.get(key) or "")
-            for key in (
-                "event_name",
-                "ref",
-                "source_head_sha",
-                "base_sha",
-                "tested_sha",
-                "tested_ref_kind",
-            )
-        }
-    ):
-        errors.append(
-            _error(
-                "provenance",
-                "changes",
-                "valid canonical provenance",
-                "invalid",
-                provenance_error,
-            )
+    provenance_values = {
+        key: str(plan.get(key) or "")
+        for key in (
+            "event_name",
+            "ref",
+            "source_head_sha",
+            "base_sha",
+            "tested_sha",
+            "tested_ref_kind",
         )
+    }
+    if all(provenance_values.values()):
+        for provenance_error in provenance_errors(provenance_values):
+            errors.append(
+                _error(
+                    "provenance",
+                    "changes",
+                    "valid canonical provenance",
+                    "invalid",
+                    provenance_error,
+                )
+            )
 
-    known_needs_jobs = set(WORKFLOW_EXECUTION_JOB_IDS[canonical_workflow])
-    known_needs_jobs.discard(AGGREGATE_JOBS[canonical_workflow])
-    for job_name in sorted(set(needs) - known_needs_jobs):
+    known_needs = set(_workflow_jobs(workflow))
+    known_needs.discard(AGGREGATE_JOB_BY_WORKFLOW[workflow])
+    for job_name in sorted(set(needs) - known_needs):
         errors.append(
             _error(
                 f"unknown:{job_name}",
@@ -228,33 +294,16 @@ def verify_execution(
             )
         )
 
-    try:
-        expected = expected_execution_jobs(plan, canonical_workflow)
-    except ValueError as exc:
-        errors.append(
-            _error(
-                "planner",
-                "changes",
-                "valid canonical planner JSON",
-                "invalid",
-                str(exc),
-            )
-        )
-        return errors
-
-    for job_name, execution_id in sorted(expected.items()):
-        if job_name not in needs:
-            errors.append(
-                _error(execution_id, job_name, "success", "missing")
-            )
+    for job_id in expected_jobs:
+        execution_id = _execution_id_for_job(plan, workflow, job_id)
+        if job_id not in needs:
+            errors.append(_error(execution_id, job_id, "success", "missing"))
             continue
-        actual = _result(needs[job_name])
+        actual = _result(needs[job_id])
         if actual != "success":
-            errors.append(
-                _error(execution_id, job_name, "success", actual)
-            )
+            errors.append(_error(execution_id, job_id, "success", actual))
 
-    for job_name in sorted(set(needs) - set(expected) - {AGGREGATE_JOBS[canonical_workflow]}):
+    for job_name in sorted(set(needs) - set(expected_jobs) - {AGGREGATE_JOB_BY_WORKFLOW[workflow]}):
         actual = _result(needs[job_name])
         if actual not in {"success", "skipped"}:
             errors.append(
@@ -269,41 +318,39 @@ def verify_execution(
     return errors
 
 
-def _parse_json(raw: str, label: str) -> Mapping[str, Any]:
+def _json_object(raw: str, label: str) -> dict[str, Any]:
     try:
         value = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"{label} must be valid JSON: {exc}") from exc
-    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be valid JSON") from exc
+    if not isinstance(value, dict):
         raise ValueError(f"{label} must be a JSON object")
     return value
 
 
-def _parse_args() -> argparse.Namespace:
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan-json", required=True)
     parser.add_argument("--needs-json", required=True)
-    parser.add_argument("--workflow", required=True, choices=sorted(WORKFLOW_ALIASES))
-    return parser.parse_args()
-
-
-def main() -> int:
-    args = _parse_args()
+    parser.add_argument("--workflow", required=True, choices=["ci", "repository", "container"])
+    args = parser.parse_args()
     try:
-        plan = _parse_json(args.plan_json, "--plan-json")
-        needs = _parse_json(args.needs_json, "--needs-json")
+        plan = _json_object(args.plan_json, "--plan-json")
+        needs = _json_object(args.needs_json, "--needs-json")
     except ValueError as exc:
-        print(
-            _error("input", args.workflow, "valid JSON objects", "invalid", str(exc))
-        )
-        return 1
+        print(_error("input", args.workflow, "valid JSON objects", "invalid", str(exc)))
+        return 2
 
     errors = verify_execution(plan, needs, args.workflow)
     if errors:
-        print("Execution verification FAILED")
+        print("execution attestation: FAIL")
         print("\n".join(errors))
         return 1
-    print(f"Execution verification PASS: workflow={WORKFLOW_ALIASES[args.workflow]}")
+    expected, _ = expected_execution_jobs(plan, args.workflow)
+    print(
+        "execution attestation: PASS: "
+        + (", ".join(expected) if expected else "no predecessor jobs selected")
+    )
     return 0
 
 

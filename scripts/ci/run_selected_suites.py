@@ -20,6 +20,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.ci.test_plan import (
+    FULL_ONLY_TEST_PATH_REASONS,
     NON_EXECUTABLE_SUITES,
     SELECTED_SUITE_RUNNER,
     SUITE_EXECUTION_OWNERS,
@@ -30,11 +31,15 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/unit/test_ci_changed_paths.py",
         "tests/unit/test_ci_test_plan.py",
         "tests/unit/test_ci_selected_suites.py",
+        "tests/unit/test_ci_execution_attestation.py",
+        "tests/unit/test_ci_planner_hardening.py",
     ),
     "ci_routing_contracts": (
         "tests/unit/test_ci_changed_paths.py",
         "tests/unit/test_ci_test_plan.py",
         "tests/unit/test_ci_selected_suites.py",
+        "tests/unit/test_ci_execution_attestation.py",
+        "tests/unit/test_ci_planner_hardening.py",
     ),
     "python_application_owner": (
         "tests/unit",
@@ -140,6 +145,12 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
     "unit_owner": ("tests/unit",),
 }
 
+# Integration tests omitted from a focused owner mapping must have an explicit
+# full-only reason before they are intentionally treated that way.  The current
+# hardening maps all known high-value provider/render cross-layer regressions,
+# so this allowlist starts empty rather than silently blessing omissions.
+FULL_ONLY_INTEGRATION_TESTS: dict[str, str] = dict(FULL_ONLY_TEST_PATH_REASONS)
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -196,6 +207,13 @@ def validate_runner_suite_test_paths(
     for suite in sorted(mapping):
         for path in mapping[suite]:
             errors.extend(f"{suite}: {error}" for error in _test_target_errors(path, repository_root))
+    for path, reason in sorted(FULL_ONLY_INTEGRATION_TESTS.items()):
+        errors.extend(
+            f"full-only integration: {error}"
+            for error in _test_target_errors(path, repository_root)
+        )
+        if not reason.strip():
+            errors.append(f"full-only integration: {path}: reason must not be empty")
     return errors
 
 

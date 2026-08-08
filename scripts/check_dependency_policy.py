@@ -31,6 +31,18 @@ def requirement_errors(path: Path) -> list[str]:
     return errors
 
 
+def requires_python_accepts_310(value: object) -> bool:
+    """Return whether a PEP 440 ``requires-python`` specifier accepts Python 3.10."""
+
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        specifier = SpecifierSet(value)
+    except InvalidSpecifier:
+        return False
+    return specifier.contains(PYTHON_310, prereleases=True)
+
+
 def pyproject_errors(path: Path) -> list[str]:
     errors: list[str] = []
     try:
@@ -43,16 +55,9 @@ def pyproject_errors(path: Path) -> list[str]:
         return ["pyproject.toml: [project] metadata is required"]
 
     requires_python = project.get("requires-python")
-    supports_python_310 = False
-    if isinstance(requires_python, str):
-        try:
-            supports_python_310 = PYTHON_310 in SpecifierSet(requires_python)
-        except InvalidSpecifier:
-            supports_python_310 = False
-    if not supports_python_310:
+    if not requires_python_accepts_310(requires_python):
         errors.append(
-            "pyproject.toml: [project].requires-python must be a valid PEP 440 "
-            "specifier accepting Python 3.10"
+            "pyproject.toml: [project].requires-python must semantically allow Python 3.10"
         )
 
     dynamic = project.get("dynamic")

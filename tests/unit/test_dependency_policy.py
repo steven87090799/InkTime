@@ -4,7 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from scripts.check_dependency_policy import pyproject_errors
+from scripts.check_dependency_policy import (
+    pyproject_errors,
+    requires_python_accepts_310,
+)
 
 
 VALID_PYPROJECT = """
@@ -32,6 +35,31 @@ def test_pyproject_metadata_contract_accepts_current_shape(tmp_path):
     assert pyproject_errors(_write_pyproject(tmp_path, VALID_PYPROJECT)) == []
 
 
+@pytest.mark.parametrize(
+    "specifier",
+    [
+        ">=3.10",
+        ">=3.10,<4",
+    ],
+)
+def test_requires_python_semantically_accepts_python_310(specifier):
+    assert requires_python_accepts_310(specifier) is True
+
+
+@pytest.mark.parametrize(
+    "specifier",
+    [
+        ">=3.11",
+        ">=3.100",
+        ">=3.10,<3.10",
+        ">=3.10,!=3.10.*",
+        ">=3.10, definitely-not-a-specifier",
+    ],
+)
+def test_requires_python_semantically_rejects_non_310_or_malformed_specifiers(specifier):
+    assert requires_python_accepts_310(specifier) is False
+
+
 def test_pyproject_metadata_contract_rejects_malformed_runtime_and_build_fields(tmp_path):
     malformed = (
         (
@@ -40,6 +68,25 @@ def test_pyproject_metadata_contract_rejects_malformed_runtime_and_build_fields(
         ),
         (
             VALID_PYPROJECT.replace('requires-python = ">=3.10"', 'requires-python = ">=3.11"'),
+            "requires-python",
+        ),
+        (
+            VALID_PYPROJECT.replace('requires-python = ">=3.10"', 'requires-python = ">=3.100"'),
+            "requires-python",
+        ),
+        (
+            VALID_PYPROJECT.replace('requires-python = ">=3.10"', 'requires-python = ">=3.10,<3.10"'),
+            "requires-python",
+        ),
+        (
+            VALID_PYPROJECT.replace('requires-python = ">=3.10"', 'requires-python = ">=3.10,!=3.10.*"'),
+            "requires-python",
+        ),
+        (
+            VALID_PYPROJECT.replace(
+                'requires-python = ">=3.10"',
+                'requires-python = ">=3.10, definitely-not-a-specifier"',
+            ),
             "requires-python",
         ),
         (
@@ -84,7 +131,7 @@ def test_pyproject_metadata_contract_rejects_malformed_runtime_and_build_fields(
 
 
 @pytest.mark.parametrize("specifier", [">=3.10", ">=3.10,<4"])
-def test_requires_python_semantically_accepts_python_310(tmp_path, specifier):
+def test_pyproject_metadata_contract_accepts_semantic_python_310(tmp_path, specifier):
     content = VALID_PYPROJECT.replace('requires-python = ">=3.10"', f'requires-python = "{specifier}"')
     assert pyproject_errors(_write_pyproject(tmp_path, content)) == []
 

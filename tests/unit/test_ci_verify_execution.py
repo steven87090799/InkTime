@@ -2,7 +2,7 @@ import pytest
 
 from scripts.ci.test_plan import WORKFLOW_EXECUTION_JOB_IDS, build_test_plan
 from scripts.ci.verify_execution import (
-    AGGREGATE_JOBS,
+    AGGREGATE_JOB_BY_WORKFLOW,
     expected_execution_jobs,
     verify_execution,
 )
@@ -22,19 +22,24 @@ def _context(*, full: bool = False) -> dict[str, object]:
 
 
 def _plan(*, full: bool = False):
-    return build_test_plan(
+    plan = build_test_plan(
         ["README.md" if full else "inktime/app/providers/openrouter.py"],
         _context(full=full),
     )
+    plan["requires_source_head_contract"] = True
+    return plan
 
 
 def _needs(plan, workflow: str) -> dict[str, dict[str, str]]:
+    workflow_identity = "repository" if workflow == "ci" else workflow
+    expected, errors = expected_execution_jobs(plan, workflow_identity)
+    assert errors == []
     needs = {
         job: {"result": "skipped"}
         for job in WORKFLOW_EXECUTION_JOB_IDS[workflow]
-        if job != AGGREGATE_JOBS[workflow]
+        if job != AGGREGATE_JOB_BY_WORKFLOW[workflow_identity]
     }
-    for job in expected_execution_jobs(plan, workflow):
+    for job in expected:
         needs[job] = {"result": "success"}
     return needs
 
@@ -91,7 +96,7 @@ def test_unknown_execution_fails_closed():
 
 
 def test_unselected_skipped_is_allowed_in_impact_mode():
-    plan = build_test_plan(["README.md"], _context())
+    plan = _plan()
     needs = _needs(plan, "ci")
 
     assert needs["python-compatibility"]["result"] == "skipped"
@@ -99,7 +104,7 @@ def test_unselected_skipped_is_allowed_in_impact_mode():
 
 
 def test_unrelated_container_jobs_skipped_are_allowed_in_impact_mode():
-    plan = build_test_plan(["README.md"], _context())
+    plan = _plan()
     needs = _needs(plan, "container")
 
     assert needs["container-security"]["result"] == "skipped"
@@ -118,7 +123,7 @@ def test_full_mode_all_required_jobs_success(workflow):
 def test_full_mode_required_job_skipped_fails(workflow):
     plan = _plan(full=True)
     needs = _needs(plan, workflow)
-    required_job = next(iter(expected_execution_jobs(plan, workflow)))
+    required_job = expected_execution_jobs(plan, workflow)[0][0]
     needs[required_job] = {"result": "skipped"}
 
     errors = verify_execution(plan, needs, workflow)
@@ -136,5 +141,5 @@ def test_selected_owner_suites_is_intentionally_skipped_in_full_mode():
     needs = _needs(plan, "ci")
     needs["selected-owner-suites"] = {"result": "skipped"}
 
-    assert "selected-owner-suites" not in expected_execution_jobs(plan, "ci")
+    assert "selected-owner-suites" not in expected_execution_jobs(plan, "ci")[0]
     assert verify_execution(plan, needs, "ci") == []

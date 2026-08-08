@@ -413,7 +413,7 @@ WORKFLOW_EXECUTION_JOB_IDS = {
     "ci": frozenset(
         {
             "changes",
-            "source-head-validation",
+            "source-head-contract",
             "python-quality",
             "python-compatibility",
             "dependency-audit",
@@ -433,7 +433,6 @@ WORKFLOW_EXECUTION_JOB_IDS = {
     "container": frozenset(
         {
             "changes",
-            "source-head-validation",
             "container-security",
             "benchmark-contract",
             "container-security-gate",

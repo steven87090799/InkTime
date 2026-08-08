@@ -27,7 +27,7 @@ permissions:
 
 jobs:
   changes:
-    name: Classify changed paths
+    name: Classify changed paths and validation provenance
     runs-on: ubuntu-latest
     outputs:
       ci_mode: ${{ steps.route.outputs.ci_mode }}
@@ -52,12 +52,14 @@ jobs:
       run_firmware_compile: ${{ steps.route.outputs.run_firmware_compile }}
       run_benchmark: ${{ steps.route.outputs.run_benchmark }}
       run_container_security: ${{ steps.route.outputs.run_container_security }}
+      run_source_head_contract: ${{ steps.route.outputs.run_source_head_contract }}
       firmware_execution_profiles: ${{ steps.route.outputs.firmware_execution_profiles }}
       full_plan_complete: ${{ steps.route.outputs.full_plan_complete }}
       no_heavy_impact_duplicates: ${{ steps.route.outputs.no_heavy_impact_duplicates }}
       source_head_sha: ${{ steps.route.outputs.source_head_sha }}
       base_sha: ${{ steps.route.outputs.base_sha }}
       tested_sha: ${{ steps.route.outputs.tested_sha }}
+      tested_ref: ${{ steps.route.outputs.tested_ref }}
       tested_ref_kind: ${{ steps.route.outputs.tested_ref_kind }}
     steps:
       # pull_request intentionally retains GitHub's merge-ref checkout for
@@ -65,7 +67,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 0}
       - id: route
-        name: Emit canonical source-owned test plan
+        name: Emit canonical source-owned plan and tested checkout provenance
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           SOURCE_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -80,6 +82,7 @@ jobs:
           fi
           source_head_sha="${SOURCE_HEAD_SHA:-${GITHUB_SHA}}"
           tested_sha="$(git rev-parse HEAD)"
+          tested_ref="${GITHUB_REF}"
           case "${GITHUB_EVENT_NAME}" in
             pull_request) tested_ref_kind="merge-ref" ;;
             push)
@@ -107,7 +110,7 @@ jobs:
           if [ "${FULL_SUITE_INPUT}" = "true" ]; then full_suite_args+=(--full-suite); fi
           label_args=()
           if [ "${FULL_CI_LABEL}" = "true" ]; then label_args+=(--label full-ci); fi
-          plan_json="$(python scripts/ci/test_plan.py \
+          plan_json="$(python scripts/ci/canonical_plan.py \
             --paths-file .ci-changed-paths.txt \
             --event-name "${GITHUB_EVENT_NAME}" \
             --ref "${GITHUB_REF}" \
@@ -115,6 +118,7 @@ jobs:
             --head-sha "${head_sha}" \
             --source-head-sha "${source_head_sha}" \
             --tested-sha "${tested_sha}" \
+            --tested-ref "${tested_ref}" \
             --tested-ref-kind "${tested_ref_kind}" \
             "${draft_args[@]}" "${full_suite_args[@]}" "${label_args[@]}")"
           has_suite() { jq -r --arg name "$1" '((.selected_test_suites | index($name)) != null)' <<<"${plan_json}"; }
@@ -124,6 +128,7 @@ jobs:
           test "$(jq -r .no_heavy_impact_duplicates <<<"${plan_json}")" = "true"
           if [ "$(jq -r .ci_mode <<<"${plan_json}")" = "full" ]; then
             test "$(jq -r .full_plan_complete <<<"${plan_json}")" = "true"
+            test "$(has_gate actionlint)" = "true"
           fi
           {
             echo "ci_mode=$(jq -r .ci_mode <<<"${plan_json}")"
@@ -134,6 +139,7 @@ jobs:
             echo "source_head_sha=${source_head_sha}"
             echo "base_sha=${base_sha}"
             echo "tested_sha=${tested_sha}"
+            echo "tested_ref=${tested_ref}"
             echo "tested_ref_kind=${tested_ref_kind}"
             echo "run_python_quality=true"
             echo "run_dependency_policy=$(has_suite dependency_policy)"
@@ -152,12 +158,13 @@ jobs:
             echo "run_firmware_compile=${firmware_compile}"
             echo "run_benchmark=$(has_gate benchmark)"
             echo "run_container_security=$(has_gate container_security)"
+            echo "run_source_head_contract=$(jq -r .requires_source_head_contract <<<"${plan_json}")"
             echo "firmware_execution_profiles=$(jq -c .firmware_execution_profiles <<<"${plan_json}")"
             echo "full_plan_complete=$(jq -r .full_plan_complete <<<"${plan_json}")"
             echo "no_heavy_impact_duplicates=$(jq -r .no_heavy_impact_duplicates <<<"${plan_json}")"
           } >> "${GITHUB_OUTPUT}"
           mkdir -p artifacts
-          jq '{event_name, ref, source_head_sha, base_sha, tested_sha, tested_ref_kind}' \
+          jq '{event_name, ref, source_head_sha, base_sha, tested_sha, tested_ref, tested_ref_kind}' \
             <<<"${plan_json}" > "artifacts/ci-provenance-${GITHUB_RUN_ID}.json"
           {
             echo "### Canonical CI test plan"
@@ -170,6 +177,9 @@ jobs:
             echo "- No heavy impact duplicates: $(jq -r .no_heavy_impact_duplicates <<<"${plan_json}")"
             echo "- Selected gates: $(jq -c .selected_gates <<<"${plan_json}")"
             echo "- Skipped gates: $(jq -c .skipped_gates <<<"${plan_json}")"
+            if [ "${tested_ref_kind}" = "merge-ref" ]; then
+              echo "- Validation semantics: this workflow tests the PR merge result; SOURCE_HEAD_SHA is recorded separately."
+            fi
             echo '```json'
             jq . <<<"${plan_json}"
             echo '```'
@@ -182,21 +192,21 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  source-head-validation:
-    name: Source-head provenance contract
-    if: ${{ github.event_name == 'pull_request' }}
+  source-head-contract:
+    name: PR source-head provenance contract
+    if: ${{ needs.changes.outputs.run_source_head_contract == 'true' }}
+    needs: changes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
+          fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 1
-      - name: Verify source-head checkout and emit provenance
+      - name: Verify declared PR source HEAD provenance
         env:
-          SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          REF_NAME: ${{ github.ref }}
+          SOURCE_HEAD_SHA: ${{ needs.changes.outputs.source_head_sha }}
+          BASE_SHA: ${{ needs.changes.outputs.base_sha }}
         run: |
           set -euo pipefail
           tested_sha="$(git rev-parse HEAD)"
@@ -204,19 +214,21 @@ jobs:
           mkdir -p artifacts
           jq -n \
             --arg event_name "pull_request" \
-            --arg ref "${REF_NAME}" \
+            --arg ref "${GITHUB_REF}" \
+            --arg tested_ref "${GITHUB_REF}" \
             --arg source_head_sha "${SOURCE_HEAD_SHA}" \
             --arg base_sha "${BASE_SHA}" \
             --arg tested_sha "${tested_sha}" \
             --arg tested_ref_kind "head" \
-            '{event_name, ref, source_head_sha, base_sha, tested_sha, tested_ref_kind}' \
+            '{event_name, ref, tested_ref, source_head_sha, base_sha, tested_sha, tested_ref_kind}' \
             > "artifacts/source-head-provenance-${GITHUB_RUN_ID}.json"
           {
-            echo "### Source-head validation"
+            echo "### PR source-head evidence"
             echo "- SOURCE_HEAD_SHA: ${SOURCE_HEAD_SHA}"
             echo "- BASE_SHA: ${BASE_SHA}"
             echo "- TESTED_SHA: ${tested_sha}"
             echo "- TESTED_REF_KIND: head"
+            echo "- Scope: lightweight source-head provenance only; expensive PR validation remains on merge-ref."
           } >> "${GITHUB_STEP_SUMMARY}"
       - name: Upload source-head provenance
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -237,11 +249,25 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
         with: {python-version: "3.12", cache: pip}
       - run: pip install -r requirements-dev.txt
-      - if: ${{ needs.changes.outputs.run_dependency_policy == 'true' }}
+      - name: Dependency policy
         run: python scripts/check_dependency_policy.py
-      - run: ruff check inktime tests scripts server.py analyze_photos.py
-      - run: mypy
-      - if: ${{ needs.changes.outputs.run_python312_full == 'true' }}
+      - name: Planner hardening contracts
+        run: >-
+          pytest
+          tests/unit/test_ci_changed_paths.py
+          tests/unit/test_ci_test_plan.py
+          tests/unit/test_ci_selected_suites.py
+          tests/unit/test_dependency_policy.py
+          tests/unit/test_ci_execution_attestation.py
+          tests/unit/test_ci_planner_hardening.py
+      - name: Ruff
+        run: ruff check inktime tests scripts server.py analyze_photos.py
+      - name: Mypy
+        run: mypy
+      - name: Git diff check
+        run: git diff --check
+      - name: Python 3.12 full coverage >= 80%
+        if: ${{ needs.changes.outputs.run_python312_full == 'true' }}
         run: pytest --cov=inktime --cov-config=pyproject.toml --cov-report=term-missing --cov-fail-under=80 tests/unit tests/security tests/integration
 
   python-compatibility:
@@ -633,7 +659,7 @@ jobs:
     if: ${{ always() }}
     needs:
       - changes
-      - source-head-validation
+      - source-head-contract
       - secret-scan
       - actionlint
       - selected-owner-suites
@@ -652,7 +678,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 1}
-      - name: Verify source-owned execution registry
+      - name: Verify planner-selected execution attestation
         env:
           PLAN_JSON: ${{ needs.changes.outputs.plan_json }}
           NEEDS_JSON: ${{ toJSON(needs) }}
@@ -661,4 +687,4 @@ jobs:
           python scripts/ci/verify_execution.py \
             --plan-json "${PLAN_JSON}" \
             --needs-json "${NEEDS_JSON}" \
-            --workflow ci
+            --workflow repository

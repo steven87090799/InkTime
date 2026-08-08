@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   changes:
-    name: Classify changed paths
+    name: Classify changed paths and validation provenance
     runs-on: ubuntu-latest
     outputs:
       ci_mode: ${{ steps.route.outputs.ci_mode }}
@@ -41,6 +41,7 @@ jobs:
       source_head_sha: ${{ steps.route.outputs.source_head_sha }}
       base_sha: ${{ steps.route.outputs.base_sha }}
       tested_sha: ${{ steps.route.outputs.tested_sha }}
+      tested_ref: ${{ steps.route.outputs.tested_ref }}
       tested_ref_kind: ${{ steps.route.outputs.tested_ref_kind }}
     steps:
       # pull_request intentionally retains GitHub's merge-ref checkout for
@@ -48,7 +49,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 0}
       - id: route
-        name: Emit canonical source-owned test plan
+        name: Emit canonical source-owned plan and tested checkout provenance
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           SOURCE_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -63,6 +64,7 @@ jobs:
           fi
           source_head_sha="${SOURCE_HEAD_SHA:-${GITHUB_SHA}}"
           tested_sha="$(git rev-parse HEAD)"
+          tested_ref="${GITHUB_REF}"
           case "${GITHUB_EVENT_NAME}" in
             pull_request) tested_ref_kind="merge-ref" ;;
             push)
@@ -90,7 +92,7 @@ jobs:
           if [ "${FULL_SUITE_INPUT}" = "true" ]; then full_suite_args+=(--full-suite); fi
           label_args=()
           if [ "${FULL_CI_LABEL}" = "true" ]; then label_args+=(--label full-ci); fi
-          plan_json="$(python scripts/ci/test_plan.py \
+          plan_json="$(python scripts/ci/canonical_plan.py \
             --paths-file .ci-changed-paths.txt \
             --event-name "${GITHUB_EVENT_NAME}" \
             --ref "${GITHUB_REF}" \
@@ -98,6 +100,7 @@ jobs:
             --head-sha "${head_sha}" \
             --source-head-sha "${source_head_sha}" \
             --tested-sha "${tested_sha}" \
+            --tested-ref "${tested_ref}" \
             --tested-ref-kind "${tested_ref_kind}" \
             "${draft_args[@]}" "${full_suite_args[@]}" "${label_args[@]}")"
           has_gate() { jq -r --arg name "$1" '((.selected_gates | index($name)) != null)' <<<"${plan_json}"; }
@@ -105,6 +108,7 @@ jobs:
           test "$(jq -r .no_heavy_impact_duplicates <<<"${plan_json}")" = "true"
           if [ "$(jq -r .ci_mode <<<"${plan_json}")" = "full" ]; then
             test "$(jq -r .full_plan_complete <<<"${plan_json}")" = "true"
+            test "$(has_gate actionlint)" = "true"
           fi
           {
             echo "ci_mode=$(jq -r .ci_mode <<<"${plan_json}")"
@@ -115,6 +119,7 @@ jobs:
             echo "source_head_sha=${source_head_sha}"
             echo "base_sha=${base_sha}"
             echo "tested_sha=${tested_sha}"
+            echo "tested_ref=${tested_ref}"
             echo "tested_ref_kind=${tested_ref_kind}"
             echo "run_benchmark=$(has_gate benchmark)"
             echo "run_container_security=$(has_gate container_security)"
@@ -132,62 +137,21 @@ jobs:
             echo "- No heavy impact duplicates: $(jq -r .no_heavy_impact_duplicates <<<"${plan_json}")"
             echo "- Selected gates: $(jq -c .selected_gates <<<"${plan_json}")"
             echo "- Skipped gates: $(jq -c .skipped_gates <<<"${plan_json}")"
+            if [ "${tested_ref_kind}" = "merge-ref" ]; then
+              echo "- Validation semantics: this workflow tests the PR merge result; SOURCE_HEAD_SHA is recorded separately."
+            fi
             echo '```json'
             jq . <<<"${plan_json}"
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
           mkdir -p artifacts
-          jq '{event_name, ref, source_head_sha, base_sha, tested_sha, tested_ref_kind}' \
+          jq '{event_name, ref, source_head_sha, base_sha, tested_sha, tested_ref, tested_ref_kind}' \
             <<<"${plan_json}" > "artifacts/container-provenance-${GITHUB_RUN_ID}.json"
       - name: Upload provenance metadata
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: inktime-container-provenance-${{ github.run_id }}
           path: artifacts/container-provenance-${{ github.run_id }}.json
-          if-no-files-found: error
-          retention-days: 14
-
-  source-head-validation:
-    name: Source-head provenance contract
-    if: ${{ github.event_name == 'pull_request' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
-        with:
-          repository: ${{ github.event.pull_request.head.repo.full_name }}
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 1
-      - name: Verify source-head checkout and emit provenance
-        env:
-          SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          REF_NAME: ${{ github.ref }}
-        run: |
-          set -euo pipefail
-          tested_sha="$(git rev-parse HEAD)"
-          test "${tested_sha}" = "${SOURCE_HEAD_SHA}"
-          mkdir -p artifacts
-          jq -n \
-            --arg event_name "pull_request" \
-            --arg ref "${REF_NAME}" \
-            --arg source_head_sha "${SOURCE_HEAD_SHA}" \
-            --arg base_sha "${BASE_SHA}" \
-            --arg tested_sha "${tested_sha}" \
-            --arg tested_ref_kind "head" \
-            '{event_name, ref, source_head_sha, base_sha, tested_sha, tested_ref_kind}' \
-            > "artifacts/source-head-provenance-${GITHUB_RUN_ID}.json"
-          {
-            echo "### Source-head validation"
-            echo "- SOURCE_HEAD_SHA: ${SOURCE_HEAD_SHA}"
-            echo "- BASE_SHA: ${BASE_SHA}"
-            echo "- TESTED_SHA: ${tested_sha}"
-            echo "- TESTED_REF_KIND: head"
-          } >> "${GITHUB_STEP_SUMMARY}"
-      - name: Upload source-head provenance
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: inktime-container-source-head-provenance-${{ github.run_id }}
-          path: artifacts/source-head-provenance-${{ github.run_id }}.json
           if-no-files-found: error
           retention-days: 14
 
@@ -198,7 +162,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 0}
-      - name: Build merge-ref validation image
+      - name: Build validation image from workflow checkout
         run: docker build --pull --tag inktime:ci .
       - name: Generate CycloneDX SBOM
         run: |
@@ -276,7 +240,6 @@ jobs:
     if: ${{ always() }}
     needs:
       - changes
-      - source-head-validation
       - container-security
       - benchmark-contract
     runs-on: ubuntu-latest
@@ -284,7 +247,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 1}
-      - name: Verify source-owned execution registry
+      - name: Verify planner-selected execution attestation
         env:
           PLAN_JSON: ${{ needs.changes.outputs.plan_json }}
           NEEDS_JSON: ${{ toJSON(needs) }}
