@@ -64,7 +64,7 @@ def test_worker_idle_backoff_is_bounded_and_resets_after_work(monkeypatch):
     class FakeSettings:
         def get(self, _key, default):
             if _key == "worker.poll_seconds":
-                return 300
+                return 15
             return default
 
     class FakeApp:
@@ -84,6 +84,36 @@ def test_worker_idle_backoff_is_bounded_and_resets_after_work(monkeypatch):
     runner.run_forever()
 
     assert stop.waits == [15.0, 30.0, 60.0, 60.0, 15.0]
+
+
+def test_worker_legacy_poll_value_never_exceeds_idle_cap(monkeypatch):
+    class FakeStop:
+        def __init__(self):
+            self.run_count = 0
+            self.waits = []
+
+        def is_set(self):
+            return self.run_count >= 2
+
+        def wait(self, timeout):
+            self.waits.append(timeout)
+
+    class FakeApp:
+        extensions = {"inktime_settings_repository": object()}
+
+    monkeypatch.setattr("inktime.app.workers.runner.configure_logging", lambda **_kwargs: None)
+    runner = WorkerRunner(FakeApp())
+    stop = FakeStop()
+    runner.stop = stop
+
+    def run_once():
+        stop.run_count += 1
+        return 0
+
+    monkeypatch.setattr(runner, "run_once", run_once)
+    runner.run_forever(poll_seconds=300)
+
+    assert stop.waits == [60.0, 60.0]
 
 
 def test_worker_poll_setting_matches_the_runtime_backoff_ceiling():

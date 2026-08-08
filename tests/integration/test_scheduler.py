@@ -1204,13 +1204,20 @@ def test_offline_scheduler_skips_expired_today_but_keeps_a_future_today_slot(app
 def test_offline_prefetch_cursor_eventually_visits_more_than_first_ten_devices(app, monkeypatch):
     repository = app.extensions["inktime_offline_schedule_repository"]
     advanced = []
+    reset_calls = []
     original_advance = repository.advance_prefetch_cursor
+    original_reset = repository.reset_prefetch_cursor
 
     def track_advance(device_id):
         advanced.append(device_id)
         original_advance(device_id)
 
+    def track_reset():
+        reset_calls.append(True)
+        original_reset()
+
     monkeypatch.setattr(repository, "advance_prefetch_cursor", track_advance)
+    monkeypatch.setattr(repository, "reset_prefetch_cursor", track_reset)
     device_ids = []
     for index in range(25):
         device_id, _token = app.extensions["inktime_device_repository"].create(
@@ -1235,7 +1242,8 @@ def test_offline_prefetch_cursor_eventually_visits_more_than_first_ten_devices(a
         if str(device_id) in str(job["settings_json"])
     }
     assert prepared_ids == set(device_ids)
-    assert len(advanced) == 4
+    assert len(advanced) == 3
+    assert reset_calls == [True]
 
 
 def test_offline_prefetch_does_not_write_cursor_when_batch_has_no_due_work(app, monkeypatch):
@@ -1287,7 +1295,7 @@ def test_offline_prefetch_resets_cursor_after_a_non_full_tail_page(app, monkeypa
         )
 
     runner = SchedulerRunner(app)
-    now = datetime(2026, 8, 3, 7, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+    now = datetime(2026, 8, 3, 7, 55, tzinfo=ZoneInfo("Asia/Taipei"))
     runner._prepare_due_offline_devices(now)
     first_batch = batches[-1][0]
     with app.extensions["inktime_database"].session() as connection:

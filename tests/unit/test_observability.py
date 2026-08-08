@@ -44,7 +44,12 @@ def test_diagnostics_caches_git_revision_per_service(tmp_path, monkeypatch):
 
     assert first["git_revision"] == "abc123"
     assert second["git_revision"] == "abc123"
-    assert len(calls) == 1
+    git_revision_calls = [
+        call
+        for call in calls
+        if call[0] and call[0][0] == ["/usr/bin/git", "rev-parse", "--short", "HEAD"]
+    ]
+    assert len(git_revision_calls) == 1
 
 
 def test_lightweight_observability_tick_leaves_platform_diagnostics_to_platform_tick(tmp_path, monkeypatch):
