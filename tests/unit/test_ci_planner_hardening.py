@@ -4,8 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from scripts.ci.canonical_plan import build_canonical_plan
 from scripts.ci.run_selected_suites import RUNNER_SUITE_TEST_PATHS, selected_test_paths
-from scripts.ci.test_plan import FULL_MODE, IMPACT_MODE, build_test_plan
+from scripts.ci.test_plan import FULL_MODE, IMPACT_MODE
 from scripts.ci.verify_execution import (
     CONTAINER_WORKFLOW,
     REPOSITORY_WORKFLOW,
@@ -100,7 +101,7 @@ def _pr_context(*, draft: bool = True, labels: list[str] | None = None) -> dict[
             _pr_context(),
             FULL_MODE,
             {"python312_unit_security_integration_coverage"},
-            {"repository_gate", "container_security_gate"},
+            {"repository_gate", "container_security_gate", "actionlint"},
         ),
         (
             "ready PR full",
@@ -150,7 +151,7 @@ def _pr_context(*, draft: bool = True, labels: list[str] | None = None) -> dict[
 def test_planner_hardening_matrix(
     name, paths, context, mode, required_suites, required_gates
 ):
-    plan = build_test_plan(paths, context)
+    plan = build_canonical_plan(paths, context)
 
     assert plan["ci_mode"] == mode, name
     assert required_suites <= set(plan["selected_test_suites"]), name
