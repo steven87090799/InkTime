@@ -176,7 +176,7 @@ def test_migration_39_quarantines_legacy_ambiguous_offline_slot_rows(monkeypatch
             (
                 "legacy-ambiguous",
                 "Legacy ambiguous",
-                "token",
+                "token-ambiguous",
                 1,
                 "Asia/Taipei",
                 "08:00",
@@ -244,7 +244,7 @@ def test_migration_39_quarantines_legacy_ambiguous_offline_slot_rows(monkeypatch
             (
                 "legacy-safe",
                 "Legacy safe",
-                "token",
+                "token-safe",
                 1,
                 "Asia/Taipei",
                 "08:00",
@@ -267,7 +267,7 @@ def test_migration_39_quarantines_legacy_ambiguous_offline_slot_rows(monkeypatch
             (
                 "legacy-confirmed-24",
                 "Legacy confirmed 24",
-                "token",
+                "token-confirmed-24",
                 1,
                 "Asia/Taipei",
                 "08:00",
