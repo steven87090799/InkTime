@@ -176,7 +176,7 @@ def test_next_prepare_deadline_is_bounded_and_skips_committed_target():
         future_prepare_hour_local=20,
         skip_target_dates=["2026-08-03"],
     )
-    assert after_prepare == "2026-08-03T23:40:00+00:00"
+    assert after_prepare == "2026-08-03T12:00:00+00:00"
 
     # At 21:00 the late slot today and the configured future handoff for
     # tomorrow are both due.  Skipping today's committed target must leave

@@ -191,6 +191,7 @@ class ScoringProfileRepository:
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+        self.settings.invalidate_runtime_cache()
         return self.get(version_id)
 
     def get(self, version_id: str) -> dict:

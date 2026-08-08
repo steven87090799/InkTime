@@ -1865,6 +1865,10 @@ class SettingsRepository:
     def get(self, key: str, default=None):
         return self.get_many([key], defaults={key: default})[str(key)]
 
+    def invalidate_runtime_cache(self) -> None:
+        self._runtime_cache.clear()
+        self._runtime_cache_at = 0.0
+
     def get_many(self, keys, *, defaults: dict[str, Any] | None = None) -> dict[str, Any]:
         normalized = tuple(dict.fromkeys(str(key) for key in keys))
         if not normalized:

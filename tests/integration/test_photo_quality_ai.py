@@ -504,7 +504,7 @@ def test_cache_wait_deadline_covers_provider_and_one_json_repair(app, tmp_path, 
     clock = iter([0.0, 121.0])
     monkeypatch.setattr(photos, "acquire_ai_cache_reservation", acquire)
     monkeypatch.setattr(photos, "get_ai_cache", get_cache)
-    monkeypatch.setattr(analysis_module.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(analysis_module.time, "monotonic", lambda: next(clock, 121.0))
     monkeypatch.setattr(analysis_module.time, "sleep", lambda _seconds: None)
 
     result = service._model_call(

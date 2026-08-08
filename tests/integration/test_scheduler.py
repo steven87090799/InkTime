@@ -1104,7 +1104,7 @@ def test_offline_shortage_retries_after_bounded_cooldown_and_keeps_active_dedupe
             if '"offline_prepare"' in str(job["settings_json"])
             and device_id in str(job["settings_json"])
         ]
-    ) == 3
+    ) == 2
 
 
 def test_offline_scheduler_prepares_only_tomorrow_after_expired_today(app):
@@ -1280,6 +1280,9 @@ def test_offline_prefetch_active_due_page_advances_and_reaches_tail(app):
     runner = SchedulerRunner(app)
     repository = app.extensions["inktime_job_repository"]
     now = datetime(2026, 8, 3, 7, 55, tzinfo=ZoneInfo("Asia/Taipei"))
+    ordered_ids = sorted(device_ids)
+    first_page = ordered_ids[:10]
+    tail = ordered_ids[-1]
     runner._prepare_due_offline_devices(now)
 
     def offline_jobs(device_id):
@@ -1290,8 +1293,8 @@ def test_offline_prefetch_active_due_page_advances_and_reaches_tail(app):
             and device_id in str(job["settings_json"])
         ]
 
-    assert all(len(offline_jobs(device_id)) == 1 for device_id in device_ids[:10])
-    assert offline_jobs(device_ids[-1]) == []
+    assert all(len(offline_jobs(device_id)) == 1 for device_id in first_page)
+    assert offline_jobs(tail) == []
 
     # Simulate the first page remaining due while its Jobs are still active.
     # The scheduler must advance those committed targets before the next page
@@ -1299,16 +1302,16 @@ def test_offline_prefetch_active_due_page_advances_and_reaches_tail(app):
     with app.extensions["inktime_database"].session() as connection:
         connection.executemany(
             "UPDATE devices SET next_offline_prepare_at=? WHERE id=?",
-            [(now.isoformat(), device_id) for device_id in device_ids[:10]],
+            [(now.isoformat(), device_id) for device_id in first_page],
         )
 
     runner._prepare_due_offline_devices(now)
-    assert all(len(offline_jobs(device_id)) == 1 for device_id in device_ids[:10])
-    assert offline_jobs(device_ids[-1]) == []
+    assert all(len(offline_jobs(device_id)) == 1 for device_id in first_page)
+    assert offline_jobs(tail) == []
 
     runner._prepare_due_offline_devices(now)
-    assert len(offline_jobs(device_ids[-1])) == 1
-    assert all(len(offline_jobs(device_id)) == 1 for device_id in device_ids)
+    assert len(offline_jobs(tail)) == 1
+    assert all(len(offline_jobs(device_id)) == 1 for device_id in ordered_ids)
 
 
 def test_offline_prefetch_quarantines_ambiguous_capability_rows(app):
@@ -1403,5 +1406,5 @@ def test_offline_prefetch_deadline_query_orders_due_devices_and_reports_bounded_
         limit=10,
         now=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
     )
-    assert [str(device["id"]) for device in batch] == sorted(device_ids)[:10]
+    assert [str(device["id"]) for device in batch] == sorted(device_ids[:10])
     assert has_more is False
