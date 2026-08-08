@@ -488,6 +488,13 @@ def update_device(device_id: str):
 @bp.get("/api/device/v1/releases/latest")
 def latest_release():
     device = authenticate_device_request()
+    if (
+        str(device["delivery_mode"] or "legacy_online") == "inktime_offline_schedule"
+        and not offline_schedule_capability_is_usable(
+            device["offline_schedule_capability_state"]
+        )
+    ):
+        abort(409, description="DEVICE-008 裝置離線 Slot 能力尚未確認，暫停離線設定傳送")
     profile_key = str(device["panel_profile"] or DEFAULT_DEVICE_PANEL_PROFILE)
     authorization = current_app.extensions["inktime_device_release_service"].latest_for_device(
         device_id=str(device["id"]),

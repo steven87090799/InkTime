@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from inktime.app.core.security import redact
 from inktime.app.db import Database, migrate
+from inktime.app.repositories import settings as settings_module
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.services.diagnostics import DiagnosticsService
 from inktime.app.services.observability import ObservabilityService
@@ -85,6 +86,34 @@ def test_settings_runtime_cache_does_not_capture_caller_fallbacks(tmp_path):
 
     assert settings.get("missing.runtime.key", "first") == "first"
     assert settings.get("missing.runtime.key", "second") == "second"
+
+
+def test_settings_runtime_cache_replaces_generation_after_partial_miss(tmp_path, monkeypatch):
+    database = Database(tmp_path / "db.sqlite")
+    migrate(database)
+    cached_settings = SettingsRepository(database)
+    cached_settings.ensure_defaults()
+    writer_settings = SettingsRepository(database)
+    writer_settings.ensure_defaults()
+    clock = [0.0]
+    monkeypatch.setattr(settings_module.time, "monotonic", lambda: clock[0])
+
+    assert cached_settings.get("worker.poll_seconds") == 15
+    writer_settings.update(
+        "worker.poll_seconds",
+        30,
+        changed_by="cache-test",
+        source_ip="127.0.0.1",
+    )
+    clock[0] = 1.0
+    assert cached_settings.get("worker.poll_seconds") == 15
+    clock[0] = 4.0
+    assert cached_settings.get("worker.progress_items") == 50
+    clock[0] = 8.0
+    assert cached_settings.get("worker.progress_seconds") == 300
+    clock[0] = 12.0
+
+    assert cached_settings.get("worker.poll_seconds") == 30
 
 
 def test_lightweight_observability_tick_leaves_platform_diagnostics_to_platform_tick(tmp_path, monkeypatch):

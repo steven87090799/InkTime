@@ -1885,6 +1885,7 @@ class SettingsRepository:
             ).fetchall()
         values = {str(row["key"]): json.loads(row["value_json"]) for row in rows}
         fallback = defaults or {}
+        self._runtime_cache.clear()
         self._runtime_cache.update(values)
         self._runtime_cache_at = now
         return {key: values.get(key, fallback.get(key)) for key in normalized}
