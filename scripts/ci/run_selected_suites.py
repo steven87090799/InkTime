@@ -30,11 +30,15 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/unit/test_ci_changed_paths.py",
         "tests/unit/test_ci_test_plan.py",
         "tests/unit/test_ci_selected_suites.py",
+        "tests/unit/test_ci_execution_attestation.py",
+        "tests/unit/test_ci_planner_hardening.py",
     ),
     "ci_routing_contracts": (
         "tests/unit/test_ci_changed_paths.py",
         "tests/unit/test_ci_test_plan.py",
         "tests/unit/test_ci_selected_suites.py",
+        "tests/unit/test_ci_execution_attestation.py",
+        "tests/unit/test_ci_planner_hardening.py",
     ),
     "python_application_owner": ("tests/unit",),
     "web_ui_owner": ("tests/integration/test_management_ui.py",),
@@ -82,6 +86,9 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/unit/test_releases.py",
         "tests/integration/test_release_recovery.py",
         "tests/integration/test_renderer_device_test.py",
+        "tests/integration/test_adaptive_frame_renderer.py",
+        "tests/integration/test_dual_photo_caption_layout.py",
+        "tests/integration/test_render_candidate_contract.py",
     ),
     "scanner_photos_owner": (
         "tests/unit/test_local_selection.py",
@@ -108,11 +115,20 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/unit/test_provider_router.py",
         "tests/unit/test_scoring.py",
         "tests/unit/test_scoring_rules.py",
+        "tests/integration/test_analysis_pipeline.py",
+        "tests/integration/test_ai_cache_singleflight.py",
+        "tests/integration/test_photo_quality_ai.py",
     ),
     "backup_restore_owner": ("tests/unit/test_backups.py",),
     "unit_owner": ("tests/unit",),
     "integration_owner": ("tests/integration",),
 }
+
+# Integration tests omitted from a focused owner mapping must have an explicit
+# full-only reason before they are intentionally treated that way.  The current
+# hardening maps all known high-value provider/render cross-layer regressions,
+# so this allowlist starts empty rather than silently blessing omissions.
+FULL_ONLY_INTEGRATION_TESTS: dict[str, str] = {}
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
@@ -170,6 +186,13 @@ def validate_runner_suite_test_paths(
     for suite in sorted(mapping):
         for path in mapping[suite]:
             errors.extend(f"{suite}: {error}" for error in _test_target_errors(path, repository_root))
+    for path, reason in sorted(FULL_ONLY_INTEGRATION_TESTS.items()):
+        errors.extend(
+            f"full-only integration: {error}"
+            for error in _test_target_errors(path, repository_root)
+        )
+        if not reason.strip():
+            errors.append(f"full-only integration: {path}: reason must not be empty")
     return errors
 
 
