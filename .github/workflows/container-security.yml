@@ -82,6 +82,7 @@ jobs:
             --source-head-sha "${source_head_sha}" \
             --base-sha "${base_sha}" \
             --tested-sha "${tested_sha}" \
+            --tested-ref "${tested_ref}" \
             --tested-ref-kind "${tested_ref_kind}")"
           jq -e . >/dev/null <<<"${provenance_json}"
           head_sha="${source_head_sha}"
@@ -132,6 +133,7 @@ jobs:
             echo "- SOURCE_HEAD_SHA: $(jq -r .source_head_sha <<<"${plan_json}")"
             echo "- BASE_SHA: $(jq -r .base_sha <<<"${plan_json}")"
             echo "- TESTED_SHA: $(jq -r .tested_sha <<<"${plan_json}")"
+            echo "- TESTED_REF: $(jq -r .tested_ref <<<"${plan_json}")"
             echo "- TESTED_REF_KIND: $(jq -r .tested_ref_kind <<<"${plan_json}")"
             echo "- Full plan complete: $(jq -r .full_plan_complete <<<"${plan_json}")"
             echo "- No heavy impact duplicates: $(jq -r .no_heavy_impact_duplicates <<<"${plan_json}")"
