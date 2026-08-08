@@ -41,6 +41,7 @@ DOMAIN_ORDER = (
     "e2e_tooling",
     "ci_config",
     "test_surface",
+    "full_only_test",
     "docs",
     "unknown",
 )
@@ -131,6 +132,62 @@ BENCHMARK_CONTRACT_PATHS = frozenset(
 
 SELECTED_SUITE_RUNNER = "selected_owner_suites"
 NON_EXECUTABLE_SUITES = frozenset({"docs_contract"})
+SUITE_EXECUTION_OWNER_JOB_IDS = {
+    SELECTED_SUITE_RUNNER: "selected-owner-suites",
+}
+
+# Cross-layer integration regressions are source-owned instead of relying on a
+# catch-all ``tests/integration`` runner.  This keeps Draft impact mode
+# bounded while ensuring production changes still select the relevant
+# integration contract.
+INTEGRATION_TEST_OWNER_SUITES: dict[str, tuple[str, ...]] = {
+    "tests/integration/test_activity_console.py": (
+        "web_api_owner",
+        "notifications_observability_owner",
+    ),
+    "tests/integration/test_adaptive_frame_devices.py": (
+        "device_api_contract_owner",
+    ),
+    "tests/integration/test_adaptive_frame_renderer.py": ("render_release_owner",),
+    "tests/integration/test_ai_cache_singleflight.py": ("provider_analysis_owner",),
+    "tests/integration/test_analysis_pipeline.py": ("provider_analysis_owner",),
+    "tests/integration/test_application_factory.py": (
+        "python_application_owner",
+        "runtime_scheduler_owner",
+    ),
+    "tests/integration/test_deployment_modes.py": (
+        "auth_security_owner",
+        "web_api_owner",
+    ),
+    "tests/integration/test_dual_photo_caption_layout.py": ("render_release_owner",),
+    "tests/integration/test_final_review_history.py": ("persistence_owner",),
+    "tests/integration/test_local_only_mode.py": ("provider_analysis_owner",),
+    "tests/integration/test_photo_quality_ai.py": (
+        "provider_analysis_owner",
+        "scanner_photos_owner",
+    ),
+    "tests/integration/test_photopainter_stock_api.py": (
+        "device_api_contract_owner",
+        "web_api_owner",
+    ),
+    "tests/integration/test_render_candidate_contract.py": ("render_release_owner",),
+    "tests/integration/test_review_workbench.py": (
+        "provider_analysis_owner",
+        "web_api_owner",
+    ),
+    "tests/integration/test_runtime_soak_cli.py": ("runtime_scheduler_owner",),
+}
+
+# This intentionally remains outside the bounded impact runner.  It spans
+# scheduled release, persistence, queue, device, and rendering contracts and
+# is covered by the complete full-mode validation rather than making every
+# unrelated Draft production change run the whole multi-device pipeline.
+FULL_ONLY_TEST_PATH_REASONS = {
+    "tests/integration/test_scheduled_release_pipeline.py": (
+        "multi-domain scheduled-release pipeline is reserved for full-mode "
+        "pre-merge validation"
+    ),
+}
 
 # Impact-mode owner suites are executed by the selected-suite runner or by the
 # dedicated job named here.  These names deliberately match workflow job IDs so
@@ -168,7 +225,6 @@ SUITE_EXECUTION_OWNERS = {
     "firmware_host_contract_tests": "firmware-host-contract",
     "benchmark_contract": "benchmark-contract",
     "unit_owner": SELECTED_SUITE_RUNNER,
-    "integration_owner": SELECTED_SUITE_RUNNER,
 }
 
 # Full mode does not start selected-owner-suites: the ordinary full jobs own
@@ -328,6 +384,61 @@ FULL_GATE_EXECUTION = {
     "benchmark": "full:benchmark",
     "repository_gate": "full:repository_gate",
     "container_security_gate": "full:container_security_gate",
+}
+
+# Canonical job IDs consumed by the aggregate execution verifier.  Workflows
+# invoke the verifier; they do not maintain a second routing policy.
+GATE_EXECUTION_OWNERS = {
+    "secret_scan": "secret-scan",
+    "actionlint": "actionlint",
+    "python312_full": "python-quality",
+    "python310_compatibility": "python-compatibility",
+    "dependency_audit": "dependency-audit",
+    "migration": "migration-contract",
+    "runtime_soak": "bounded-runtime-soak",
+    "playwright": "playwright",
+    "docker_lan_persistence": "compose-lan-production-persistence",
+    "tls_smoke": "compose-production-tls-smoke",
+    "firmware_host_contract": "firmware-host-contract",
+    "firmware_full_matrix": "esp32-compile",
+    "firmware_quick": "esp32-compile",
+    "firmware_affected": "esp32-compile",
+    "container_security": "container-security",
+    "benchmark": "benchmark-contract",
+    "repository_gate": "repository-gate",
+    "container_security_gate": "container-security-gate",
+}
+
+WORKFLOW_EXECUTION_JOB_IDS = {
+    "ci": frozenset(
+        {
+            "changes",
+            "source-head-validation",
+            "python-quality",
+            "python-compatibility",
+            "dependency-audit",
+            "migration-contract",
+            "secret-scan",
+            "actionlint",
+            "selected-owner-suites",
+            "compose-lan-production-persistence",
+            "compose-production-tls-smoke",
+            "bounded-runtime-soak",
+            "playwright",
+            "firmware-host-contract",
+            "esp32-compile",
+            "repository-gate",
+        }
+    ),
+    "container": frozenset(
+        {
+            "changes",
+            "source-head-validation",
+            "container-security",
+            "benchmark-contract",
+            "container-security-gate",
+        }
+    ),
 }
 
 IMPACT_TO_FULL_EXECUTION = {
@@ -550,8 +661,9 @@ def _test_path_plan(path: str) -> tuple[set[str], set[str], set[str]]:
     if path.startswith("tests/security/"):
         domains.add("auth_security")
         suites.add("auth_security_owner")
-    if path.startswith("tests/integration/"):
-        suites.add("integration_owner")
+    suites.update(INTEGRATION_TEST_OWNER_SUITES.get(path, ()))
+    if path in FULL_ONLY_TEST_PATH_REASONS:
+        domains.add("full_only_test")
 
     if not suites:
         suites.add("unit_owner")
@@ -917,6 +1029,7 @@ def classify_paths(paths: Iterable[str]) -> dict[str, Any]:
     unknown_paths: list[str] = []
     firmware_profiles: set[str] = set()
     firmware_profile_reasons: set[str] = set()
+    full_only_test_paths: list[str] = []
 
     for path in normalised_paths:
         path_domains, path_suites, path_gates, unknown = _classify_path(path)
@@ -932,6 +1045,8 @@ def classify_paths(paths: Iterable[str]) -> dict[str, Any]:
             production_domains.update(path_domains & PRODUCTION_DOMAINS)
         if unknown:
             unknown_paths.append(path)
+        if path in FULL_ONLY_TEST_PATH_REASONS:
+            full_only_test_paths.append(path)
 
     owner_suite_gaps: dict[str, list[str]] = {}
     for domain in _ordered(production_domains, DOMAIN_ORDER):
@@ -945,6 +1060,7 @@ def classify_paths(paths: Iterable[str]) -> dict[str, Any]:
         "domains": _ordered(domains, DOMAIN_ORDER),
         "production_domains": _ordered(production_domains, DOMAIN_ORDER),
         "unknown_paths": sorted(unknown_paths),
+        "full_only_test_paths": sorted(full_only_test_paths),
         "owner_suite_gaps": owner_suite_gaps,
         "selected_test_suites": _ordered(suites, TIER_0_SUITES + FULL_TEST_SUITES),
         "expensive_gates": _ordered(gates, FULL_EXPENSIVE_GATES),
@@ -1019,6 +1135,10 @@ def build_test_plan(
     if classification["owner_suite_gaps"]:
         mode = FULL_MODE
         reasons.append("production_owner_suite_missing")
+
+    if classification["full_only_test_paths"]:
+        mode = FULL_MODE
+        reasons.append("full_only_integration_regression")
 
     if mode == FULL_MODE:
         selected_suites = list(FULL_PLAN_SUITES)
@@ -1142,10 +1262,16 @@ def build_test_plan(
         "selected_gates": selected_gates_with_tier_zero,
         "skipped_gates": skipped_gates,
         "unknown_paths": classification["unknown_paths"],
+        "full_only_test_paths": classification["full_only_test_paths"],
         "owner_suite_gaps": classification["owner_suite_gaps"],
         "why_full_suite": why_full_suite,
         "base_sha": _optional_text(context.get("base_sha")),
         "head_sha": _optional_text(context.get("head_sha")),
+        "event_name": _optional_text(context.get("event_name")),
+        "ref": _optional_text(context.get("ref")),
+        "source_head_sha": _optional_text(context.get("source_head_sha")),
+        "tested_sha": _optional_text(context.get("tested_sha")),
+        "tested_ref_kind": _optional_text(context.get("tested_ref_kind")),
         "affected_firmware_profiles": affected_firmware_profiles,
         "firmware_profile_mode": firmware_profile_mode,
         "firmware_profile_reasons": firmware_profile_reasons,
@@ -1188,6 +1314,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--ref", default="")
     parser.add_argument("--base-sha")
     parser.add_argument("--head-sha")
+    parser.add_argument("--source-head-sha")
+    parser.add_argument("--tested-sha")
+    parser.add_argument("--tested-ref-kind")
     parser.add_argument("--draft", choices=("true", "false"))
     parser.add_argument("--full-suite", action="store_true")
     parser.add_argument("--label", action="append", default=[])
@@ -1206,6 +1335,9 @@ def main() -> int:
         "ref": args.ref,
         "base_sha": args.base_sha,
         "head_sha": args.head_sha,
+        "source_head_sha": args.source_head_sha,
+        "tested_sha": args.tested_sha,
+        "tested_ref_kind": args.tested_ref_kind,
         "full_suite": args.full_suite,
         "labels": args.label,
     }

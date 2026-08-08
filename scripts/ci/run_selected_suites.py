@@ -36,10 +36,22 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/unit/test_ci_test_plan.py",
         "tests/unit/test_ci_selected_suites.py",
     ),
-    "python_application_owner": ("tests/unit",),
+    "python_application_owner": (
+        "tests/unit",
+        "tests/integration/test_application_factory.py",
+    ),
     "web_ui_owner": ("tests/integration/test_management_ui.py",),
-    "web_api_owner": ("tests/integration/test_management_ui.py",),
-    "auth_security_owner": ("tests/security",),
+    "web_api_owner": (
+        "tests/integration/test_management_ui.py",
+        "tests/integration/test_activity_console.py",
+        "tests/integration/test_deployment_modes.py",
+        "tests/integration/test_photopainter_stock_api.py",
+        "tests/integration/test_review_workbench.py",
+    ),
+    "auth_security_owner": (
+        "tests/security",
+        "tests/integration/test_deployment_modes.py",
+    ),
     "runtime_scheduler_owner": (
         "tests/unit/test_runtime_concurrency.py",
         "tests/unit/test_runtime_config.py",
@@ -48,6 +60,8 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_worker_runner.py",
         "tests/integration/test_worker_timeout.py",
         "tests/integration/test_offline_schedule_runtime.py",
+        "tests/integration/test_application_factory.py",
+        "tests/integration/test_runtime_soak_cli.py",
     ),
     "queue_resilience_owner": (
         "tests/unit/test_device_delivery_contract.py",
@@ -60,6 +74,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
     "persistence_owner": (
         "tests/unit/test_backups.py",
         "tests/integration/test_sqlite_concurrency.py",
+        "tests/integration/test_final_review_history.py",
     ),
     "device_api_contract_owner": (
         "tests/unit/test_device_delivery_contract.py",
@@ -68,6 +83,8 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/security/test_device_tokens.py",
         "tests/integration/test_device_notifications.py",
         "tests/integration/test_device_test_ack.py",
+        "tests/integration/test_adaptive_frame_devices.py",
+        "tests/integration/test_photopainter_stock_api.py",
     ),
     "device_delivery_owner": (
         "tests/unit/test_device_delivery_contract.py",
@@ -82,6 +99,9 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/unit/test_releases.py",
         "tests/integration/test_release_recovery.py",
         "tests/integration/test_renderer_device_test.py",
+        "tests/integration/test_adaptive_frame_renderer.py",
+        "tests/integration/test_dual_photo_caption_layout.py",
+        "tests/integration/test_render_candidate_contract.py",
     ),
     "scanner_photos_owner": (
         "tests/unit/test_local_selection.py",
@@ -89,11 +109,13 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/unit/test_preprocessing.py",
         "tests/integration/test_incremental_scan.py",
         "tests/integration/test_safe_scanner.py",
+        "tests/integration/test_photo_quality_ai.py",
     ),
     "notifications_observability_owner": (
         "tests/unit/test_observability.py",
         "tests/unit/test_webhook_retry.py",
         "tests/integration/test_device_notifications.py",
+        "tests/integration/test_activity_console.py",
     ),
     "settings_governance_owner": (
         "tests/unit/test_settings_repository_governance.py",
@@ -108,10 +130,14 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/unit/test_provider_router.py",
         "tests/unit/test_scoring.py",
         "tests/unit/test_scoring_rules.py",
+        "tests/integration/test_ai_cache_singleflight.py",
+        "tests/integration/test_analysis_pipeline.py",
+        "tests/integration/test_local_only_mode.py",
+        "tests/integration/test_photo_quality_ai.py",
+        "tests/integration/test_review_workbench.py",
     ),
     "backup_restore_owner": ("tests/unit/test_backups.py",),
     "unit_owner": ("tests/unit",),
-    "integration_owner": ("tests/integration",),
 }
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]

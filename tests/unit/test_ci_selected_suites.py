@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from scripts.ci.run_selected_suites import (
     RUNNER_SUITE_TEST_PATHS,
     validate_runner_suite_test_paths,
@@ -8,6 +10,8 @@ from scripts.ci.test_plan import (
     FULL_EXECUTION_OWNERS,
     FULL_PLAN_SUITES,
     FULL_SUITE_EXECUTION_OWNERS,
+    FULL_ONLY_TEST_PATH_REASONS,
+    INTEGRATION_TEST_OWNER_SUITES,
     IMPACT_EXECUTION_OWNERS,
     NON_EXECUTABLE_SUITES,
     SELECTED_SUITE_RUNNER,
@@ -70,3 +74,26 @@ def test_unknown_suite_fails_closed():
 
 def test_non_executable_classification_suite_is_not_silently_run():
     assert selected_runner_suites(["docs_contract"]) == []
+
+
+def test_every_integration_test_is_explicitly_owned_or_full_only():
+    integration_paths = {
+        str(path)
+        for path in Path("tests/integration").glob("test_*.py")
+    }
+    mapped_paths = {
+        path
+        for paths in RUNNER_SUITE_TEST_PATHS.values()
+        for path in paths
+        if path.startswith("tests/integration/") and Path(path).is_file()
+    }
+
+    assert integration_paths <= mapped_paths | set(FULL_ONLY_TEST_PATH_REASONS)
+    assert set(INTEGRATION_TEST_OWNER_SUITES) <= mapped_paths
+    assert set(FULL_ONLY_TEST_PATH_REASONS) - mapped_paths
+
+
+def test_cross_layer_integration_owner_mapping_is_executable():
+    for path, owners in INTEGRATION_TEST_OWNER_SUITES.items():
+        for owner in owners:
+            assert path in RUNNER_SUITE_TEST_PATHS[owner], (path, owner)

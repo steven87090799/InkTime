@@ -55,14 +55,20 @@ jobs:
       firmware_execution_profiles: ${{ steps.route.outputs.firmware_execution_profiles }}
       full_plan_complete: ${{ steps.route.outputs.full_plan_complete }}
       no_heavy_impact_duplicates: ${{ steps.route.outputs.no_heavy_impact_duplicates }}
+      source_head_sha: ${{ steps.route.outputs.source_head_sha }}
+      base_sha: ${{ steps.route.outputs.base_sha }}
+      tested_sha: ${{ steps.route.outputs.tested_sha }}
+      tested_ref_kind: ${{ steps.route.outputs.tested_ref_kind }}
     steps:
+      # pull_request intentionally retains GitHub's merge-ref checkout for
+      # pre-merge compatibility validation; provenance is emitted separately.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 0}
       - id: route
         name: Emit canonical source-owned test plan
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          SOURCE_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           PR_DRAFT: ${{ github.event_name == 'pull_request' && toJSON(github.event.pull_request.draft) || '' }}
           FULL_SUITE_INPUT: ${{ inputs.full_suite || '' }}
           FULL_CI_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
@@ -72,7 +78,28 @@ jobs:
           if [ -z "${base_sha}" ] || [ "${base_sha}" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
             base_sha="$(git rev-parse HEAD^)"
           fi
-          head_sha="${HEAD_SHA:-${GITHUB_SHA}}"
+          source_head_sha="${SOURCE_HEAD_SHA:-${GITHUB_SHA}}"
+          tested_sha="$(git rev-parse HEAD)"
+          case "${GITHUB_EVENT_NAME}" in
+            pull_request) tested_ref_kind="merge-ref" ;;
+            push)
+              if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+                tested_ref_kind="main"
+              else
+                tested_ref_kind="head"
+              fi
+              ;;
+            *) tested_ref_kind="head" ;;
+          esac
+          provenance_json="$(python scripts/ci/provenance.py \
+            --event-name "${GITHUB_EVENT_NAME}" \
+            --ref "${GITHUB_REF}" \
+            --source-head-sha "${source_head_sha}" \
+            --base-sha "${base_sha}" \
+            --tested-sha "${tested_sha}" \
+            --tested-ref-kind "${tested_ref_kind}")"
+          jq -e . >/dev/null <<<"${provenance_json}"
+          head_sha="${source_head_sha}"
           git diff --name-only "${base_sha}...${head_sha}" -- > .ci-changed-paths.txt
           draft_args=()
           if [ -n "${PR_DRAFT}" ]; then draft_args+=(--draft "${PR_DRAFT}"); fi
@@ -86,6 +113,9 @@ jobs:
             --ref "${GITHUB_REF}" \
             --base-sha "${base_sha}" \
             --head-sha "${head_sha}" \
+            --source-head-sha "${source_head_sha}" \
+            --tested-sha "${tested_sha}" \
+            --tested-ref-kind "${tested_ref_kind}" \
             "${draft_args[@]}" "${full_suite_args[@]}" "${label_args[@]}")"
           has_suite() { jq -r --arg name "$1" '((.selected_test_suites | index($name)) != null)' <<<"${plan_json}"; }
           has_gate() { jq -r --arg name "$1" '((.selected_gates | index($name)) != null)' <<<"${plan_json}"; }
@@ -101,6 +131,10 @@ jobs:
             echo "selected_gates=$(jq -c .selected_gates <<<"${plan_json}")"
             echo "skipped_gates=$(jq -c .skipped_gates <<<"${plan_json}")"
             echo "plan_json=${plan_json}"
+            echo "source_head_sha=${source_head_sha}"
+            echo "base_sha=${base_sha}"
+            echo "tested_sha=${tested_sha}"
+            echo "tested_ref_kind=${tested_ref_kind}"
             echo "run_python_quality=true"
             echo "run_dependency_policy=$(has_suite dependency_policy)"
             echo "selected_owner_suites=$(jq -c .selected_owner_suites <<<"${plan_json}")"
@@ -122,9 +156,16 @@ jobs:
             echo "full_plan_complete=$(jq -r .full_plan_complete <<<"${plan_json}")"
             echo "no_heavy_impact_duplicates=$(jq -r .no_heavy_impact_duplicates <<<"${plan_json}")"
           } >> "${GITHUB_OUTPUT}"
+          mkdir -p artifacts
+          jq '{event_name, ref, source_head_sha, base_sha, tested_sha, tested_ref_kind}' \
+            <<<"${plan_json}" > "artifacts/ci-provenance-${GITHUB_RUN_ID}.json"
           {
             echo "### Canonical CI test plan"
             echo "- Mode: $(jq -r .ci_mode <<<"${plan_json}")"
+            echo "- SOURCE_HEAD_SHA: $(jq -r .source_head_sha <<<"${plan_json}")"
+            echo "- BASE_SHA: $(jq -r .base_sha <<<"${plan_json}")"
+            echo "- TESTED_SHA: $(jq -r .tested_sha <<<"${plan_json}")"
+            echo "- TESTED_REF_KIND: $(jq -r .tested_ref_kind <<<"${plan_json}")"
             echo "- Full plan complete: $(jq -r .full_plan_complete <<<"${plan_json}")"
             echo "- No heavy impact duplicates: $(jq -r .no_heavy_impact_duplicates <<<"${plan_json}")"
             echo "- Selected gates: $(jq -c .selected_gates <<<"${plan_json}")"
@@ -133,6 +174,57 @@ jobs:
             jq . <<<"${plan_json}"
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Upload provenance metadata
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: inktime-ci-provenance-${{ github.run_id }}
+          path: artifacts/ci-provenance-${{ github.run_id }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+  source-head-validation:
+    name: Source-head provenance contract
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+      - name: Verify source-head checkout and emit provenance
+        env:
+          SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REF_NAME: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          tested_sha="$(git rev-parse HEAD)"
+          test "${tested_sha}" = "${SOURCE_HEAD_SHA}"
+          mkdir -p artifacts
+          jq -n \
+            --arg event_name "pull_request" \
+            --arg ref "${REF_NAME}" \
+            --arg source_head_sha "${SOURCE_HEAD_SHA}" \
+            --arg base_sha "${BASE_SHA}" \
+            --arg tested_sha "${tested_sha}" \
+            --arg tested_ref_kind "head" \
+            '{event_name, ref, source_head_sha, base_sha, tested_sha, tested_ref_kind}' \
+            > "artifacts/source-head-provenance-${GITHUB_RUN_ID}.json"
+          {
+            echo "### Source-head validation"
+            echo "- SOURCE_HEAD_SHA: ${SOURCE_HEAD_SHA}"
+            echo "- BASE_SHA: ${BASE_SHA}"
+            echo "- TESTED_SHA: ${tested_sha}"
+            echo "- TESTED_REF_KIND: head"
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Upload source-head provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: inktime-source-head-provenance-${{ github.run_id }}
+          path: artifacts/source-head-provenance-${{ github.run_id }}.json
+          if-no-files-found: error
+          retention-days: 14
 
   python-quality:
     name: Python 3.12 T0 and full coverage
@@ -541,6 +633,7 @@ jobs:
     if: ${{ always() }}
     needs:
       - changes
+      - source-head-validation
       - secret-scan
       - actionlint
       - selected-owner-suites
@@ -557,10 +650,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Fail when a routed check failed or was cancelled
-        if: ${{ needs.changes.result != 'success' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with: {fetch-depth: 1}
+      - name: Verify source-owned execution registry
+        env:
+          PLAN_JSON: ${{ needs.changes.outputs.plan_json }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
-          echo "One or more hosted checks failed or were cancelled." >&2
-          exit 1
-      - name: Accept skipped checks as intentional routing
-        run: echo "Routed checks completed; skipped tiers were intentional for this diff."
+          set -euo pipefail
+          python scripts/ci/verify_execution.py \
+            --plan-json "${PLAN_JSON}" \
+            --needs-json "${NEEDS_JSON}" \
+            --workflow ci

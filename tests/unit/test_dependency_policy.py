@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from scripts.check_dependency_policy import pyproject_errors
 
 
@@ -79,3 +81,19 @@ def test_pyproject_metadata_contract_rejects_malformed_runtime_and_build_fields(
     for content, expected_error in malformed:
         errors = pyproject_errors(_write_pyproject(tmp_path, content))
         assert any(expected_error in error for error in errors), (expected_error, errors)
+
+
+@pytest.mark.parametrize("specifier", [">=3.10", ">=3.10,<4"])
+def test_requires_python_semantically_accepts_python_310(tmp_path, specifier):
+    content = VALID_PYPROJECT.replace('requires-python = ">=3.10"', f'requires-python = "{specifier}"')
+    assert pyproject_errors(_write_pyproject(tmp_path, content)) == []
+
+
+@pytest.mark.parametrize(
+    "specifier",
+    [">=3.11", ">=3.100", ">=3.10,<3.10", ">=3.10,!=3.10.*", ">=>3.10"],
+)
+def test_requires_python_rejects_specifiers_that_do_not_accept_python_310(tmp_path, specifier):
+    content = VALID_PYPROJECT.replace('requires-python = ">=3.10"', f'requires-python = "{specifier}"')
+    errors = pyproject_errors(_write_pyproject(tmp_path, content))
+    assert any("requires-python" in error for error in errors)

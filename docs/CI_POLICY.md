@@ -15,7 +15,7 @@ Full mode is selected when any of these are true:
 
 Full mode includes Tier 0, the complete owner-suite plan, Python 3.12 coverage at 80%, Python 3.10 compatibility, migration, dependency audit, runtime soak, Playwright, Docker LAN persistence, TLS smoke, firmware host contracts and the complete firmware profile matrix, container security, benchmark, and both aggregate gates. Equivalent impact-only heavy jobs are not run again in full mode.
 
-The planner's full-mode execution registry maps every `FULL_PLAN_SUITES` entry to a real full-mode job; `docs_contract` is a documentation classification marker and is intentionally non-executable.
+The planner's full-mode execution registry maps every `FULL_PLAN_SUITES` entry to a real full-mode job; `docs_contract` is a documentation classification marker and is intentionally non-executable. Cross-layer integration regressions are mapped to their domain owner in [`scripts/ci/test_plan.py`](../scripts/ci/test_plan.py) and [`scripts/ci/run_selected_suites.py`](../scripts/ci/run_selected_suites.py); there is no catch-all integration-directory runner. The explicit full-only allowlist is reserved for the multi-domain scheduled-release pipeline and records its reason in source.
 
 ## Validation tiers
 
@@ -32,13 +32,15 @@ The deployment preflight script is a cross-boundary surface: `scripts/production
 
 ## Routing and debugging
 
-Both [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) and [`.github/workflows/container-security.yml`](../.github/workflows/container-security.yml) emit the compact plan in the job summary, including mode, selected suites, selected gates, skipped gates, firmware profiles, and the no-duplicate invariant. To inspect a plan locally without running heavy validation:
+Both [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) and [`.github/workflows/container-security.yml`](../.github/workflows/container-security.yml) emit the compact plan in the job summary, including mode, selected suites, selected gates, skipped gates, firmware profiles, no-duplicate invariant, and truthful provenance fields: `SOURCE_HEAD_SHA`, `BASE_SHA`, `TESTED_SHA`, and `TESTED_REF_KIND`. Pull-request heavy jobs intentionally validate the GitHub merge ref (`TESTED_REF_KIND=merge-ref`); the lightweight source-head contract checks `github.event.pull_request.head.sha` separately. `scripts/ci/verify_execution.py` is the shared source-owned aggregate verifier: every planner-selected execution must report `success`, while an unselected conditional job may report `skipped`.
+
+To inspect a plan locally without running heavy validation:
 
 ```bash
 python3 scripts/ci/test_plan.py --help
 python3 scripts/ci/test_plan.py --event-name pull_request --ref refs/pull/1/merge --draft true README.md
 ```
 
-Check `ci_mode`, `unknown_paths`, `owner_suite_gaps`, `selected_test_suites`, `selected_gates`, `suite_execution_gaps`, `full_suite_execution_gaps`, `full_plan_complete`, and `no_heavy_impact_duplicates`. A selected job failure or cancellation fails its aggregate gate; an intentionally skipped conditional job is accepted by the aggregate gate. A full run must be judged only from the exact pushed HEAD, not an older successful run.
+Check `ci_mode`, `unknown_paths`, `owner_suite_gaps`, `full_only_test_paths`, `selected_test_suites`, `selected_gates`, `suite_execution_gaps`, `full_suite_execution_gaps`, `full_plan_complete`, `no_heavy_impact_duplicates`, and provenance. A selected job that is skipped, failed, cancelled, missing, or unknown fails its aggregate gate with the execution ID and job name; only unselected skipped jobs are accepted. A full PR run is merge-ref validation and must be judged from the current PR event and its reported provenance, not described as direct source-head execution.
 
 The full suite is not run on every Draft push because Draft validation is intended to give fast, affected feedback while retaining secret, quality, routing, and relevant production-boundary checks. Use `full-ci`, mark the PR ready, dispatch `full_suite=true`, or push to `main` when the complete pre-merge set is required.

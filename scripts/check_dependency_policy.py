@@ -4,6 +4,9 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import Version
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10 compatibility via requirements-dev.txt.
@@ -14,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 EXACT_REQUIREMENT = re.compile(r"^[A-Za-z0-9_.-]+(?:\[[A-Za-z0-9_,.-]+\])?==[^\s;]+(?:\s*;.+)?$")
 ACTION_SHA = re.compile(r"\buses:\s*[^\s]+@([0-9a-fA-F]+)")
 PINNED_PYTHON = re.compile(r"^FROM python:3\.12-slim@sha256:[0-9a-f]{64}(?:\s+AS\s+\w+)?$")
+PYTHON_310 = Version("3.10")
 
 
 def requirement_errors(path: Path) -> list[str]:
@@ -39,8 +43,17 @@ def pyproject_errors(path: Path) -> list[str]:
         return ["pyproject.toml: [project] metadata is required"]
 
     requires_python = project.get("requires-python")
-    if not isinstance(requires_python, str) or not requires_python.replace(" ", "").startswith(">=3.10"):
-        errors.append("pyproject.toml: [project].requires-python must include Python 3.10")
+    supports_python_310 = False
+    if isinstance(requires_python, str):
+        try:
+            supports_python_310 = PYTHON_310 in SpecifierSet(requires_python)
+        except InvalidSpecifier:
+            supports_python_310 = False
+    if not supports_python_310:
+        errors.append(
+            "pyproject.toml: [project].requires-python must be a valid PEP 440 "
+            "specifier accepting Python 3.10"
+        )
 
     dynamic = project.get("dynamic")
     if not isinstance(dynamic, list) or "version" not in dynamic:

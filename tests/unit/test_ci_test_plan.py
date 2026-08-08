@@ -22,6 +22,10 @@ def draft_context(**overrides):
         "draft": True,
         "base_sha": "a" * 40,
         "head_sha": "b" * 40,
+        "source_head_sha": "b" * 40,
+        "tested_sha": "c" * 40,
+        "tested_ref_kind": "merge-ref",
+        "ref": "refs/pull/64/merge",
     }
     context.update(overrides)
     return context
@@ -592,3 +596,49 @@ def test_every_production_domain_has_an_owner_or_conservative_full_fallback():
 
 def test_canonical_owner_registry_covers_every_production_domain():
     assert set(PRODUCTION_DOMAINS) == set(DOMAIN_OWNER_SUITES)
+
+
+def test_provenance_fields_are_preserved_in_canonical_plan():
+    plan = build_test_plan(["README.md"], draft_context())
+
+    assert plan["source_head_sha"] == "b" * 40
+    assert plan["base_sha"] == "a" * 40
+    assert plan["tested_sha"] == "c" * 40
+    assert plan["tested_ref_kind"] == "merge-ref"
+
+
+def test_missing_production_owner_fails_open_to_full(monkeypatch):
+    monkeypatch.setitem(DOMAIN_OWNER_SUITES, "python", ())
+
+    plan = build_test_plan(["inktime/app/api/photos.py"], draft_context())
+
+    assert plan["ci_mode"] == FULL_MODE
+    assert "production_owner_suite_missing" in plan["why_full_suite"]
+    assert plan["full_plan_complete"] is True
+
+
+def test_cross_layer_integration_regressions_have_explicit_owner_suites():
+    expected = {
+        "tests/integration/test_analysis_pipeline.py": "provider_analysis_owner",
+        "tests/integration/test_ai_cache_singleflight.py": "provider_analysis_owner",
+        "tests/integration/test_photo_quality_ai.py": "provider_analysis_owner",
+        "tests/integration/test_adaptive_frame_renderer.py": "render_release_owner",
+        "tests/integration/test_dual_photo_caption_layout.py": "render_release_owner",
+        "tests/integration/test_render_candidate_contract.py": "render_release_owner",
+    }
+
+    for path, owner in expected.items():
+        plan = build_test_plan([path], draft_context())
+        assert owner in plan["selected_test_suites"], path
+
+
+def test_explicit_full_only_integration_regression_is_documented_and_full():
+    plan = build_test_plan(
+        ["tests/integration/test_scheduled_release_pipeline.py"], draft_context()
+    )
+
+    assert plan["ci_mode"] == FULL_MODE
+    assert plan["full_only_test_paths"] == [
+        "tests/integration/test_scheduled_release_pipeline.py"
+    ]
+    assert "full_only_integration_regression" in plan["why_full_suite"]
