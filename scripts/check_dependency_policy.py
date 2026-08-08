@@ -4,6 +4,9 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import Version
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10 compatibility via requirements-dev.txt.
@@ -14,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 EXACT_REQUIREMENT = re.compile(r"^[A-Za-z0-9_.-]+(?:\[[A-Za-z0-9_,.-]+\])?==[^\s;]+(?:\s*;.+)?$")
 ACTION_SHA = re.compile(r"\buses:\s*[^\s]+@([0-9a-fA-F]+)")
 PINNED_PYTHON = re.compile(r"^FROM python:3\.12-slim@sha256:[0-9a-f]{64}(?:\s+AS\s+\w+)?$")
+PYTHON_310 = Version("3.10")
 
 
 def requirement_errors(path: Path) -> list[str]:
@@ -25,6 +29,18 @@ def requirement_errors(path: Path) -> list[str]:
         if not EXACT_REQUIREMENT.fullmatch(line):
             errors.append(f"{path.name}:{number}: dependency 必須使用 exact == pin: {line}")
     return errors
+
+
+def requires_python_accepts_310(value: object) -> bool:
+    """Return whether a PEP 440 ``requires-python`` specifier accepts Python 3.10."""
+
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        specifier = SpecifierSet(value)
+    except InvalidSpecifier:
+        return False
+    return specifier.contains(PYTHON_310, prereleases=True)
 
 
 def pyproject_errors(path: Path) -> list[str]:
@@ -39,8 +55,10 @@ def pyproject_errors(path: Path) -> list[str]:
         return ["pyproject.toml: [project] metadata is required"]
 
     requires_python = project.get("requires-python")
-    if not isinstance(requires_python, str) or not requires_python.replace(" ", "").startswith(">=3.10"):
-        errors.append("pyproject.toml: [project].requires-python must include Python 3.10")
+    if not requires_python_accepts_310(requires_python):
+        errors.append(
+            "pyproject.toml: [project].requires-python must semantically allow Python 3.10"
+        )
 
     dynamic = project.get("dynamic")
     if not isinstance(dynamic, list) or "version" not in dynamic:
