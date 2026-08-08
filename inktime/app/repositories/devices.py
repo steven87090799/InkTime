@@ -11,7 +11,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from inktime.app.core.security import hash_device_secret, hash_device_token, issue_device_token
 from inktime.app.db import Database
 from inktime.app.domain.photopainter.offline_schedule import (
+    LEGACY_MAX_OFFLINE_SLOTS,
     MINIMUM_SCHEDULE_GAP_MINUTES,
+    OFFLINE_PREPARE_BOOTSTRAP_AT,
+    offline_schedule_capability_state,
+    resolve_offline_schedule_max_slots,
     normalize_delivery_contract,
     normalize_sync_strategy,
     next_sync_epoch,
@@ -52,6 +56,8 @@ class DeviceRepository:
                        refreshes_per_day, battery_reserve_percent, energy_profile_updated_at,
                        delivery_mode, offline_prefetch_allowed, offline_schedule_json,
                        offline_schedule_version, applied_offline_schedule_version,
+                       offline_schedule_max_slots, offline_schedule_capability_state,
+                       next_offline_prepare_at,
                        offline_schedule_ack_at, last_offline_slot, schedule_times_json,
                        prefetch_lead_minutes, button_wake_action, minimum_schedule_gap_minutes,
                        sync_strategy, sync_time, stock_endpoint_host,
@@ -78,6 +84,7 @@ class DeviceRepository:
         offline_prefetch_allowed: bool | None = None,
         offline_schedule: Sequence[str] | None = None,
         schedule_times: Sequence[str] | None = None,
+        offline_schedule_max_slots: int = LEGACY_MAX_OFFLINE_SLOTS,
         prefetch_lead_minutes: int = 5,
         button_wake_action: str = "check_new",
         minimum_schedule_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
@@ -115,9 +122,12 @@ class DeviceRepository:
         )
         if type(minimum_schedule_gap_minutes) is not int or not 30 <= minimum_schedule_gap_minutes <= 360:
             raise ValueError("DEVICE-008 minimum_schedule_gap_minutes 必須介於 30 到 360")
+        maximum_slots = resolve_offline_schedule_max_slots(
+            {"offline_schedule_max_slots": offline_schedule_max_slots}
+        )
         schedule_values = validate_offline_schedule(
             schedule_times or offline_schedule or [schedule],
-            maximum=12,
+            maximum=maximum_slots,
             minimum_gap_minutes=minimum_schedule_gap_minutes,
         )
         if not 0 <= int(prefetch_lead_minutes) <= 120:
@@ -132,12 +142,18 @@ class DeviceRepository:
                     id, name, token_hash, enabled, timezone, schedule, rotation, panel_profile,
                     frame_orientation, layout_mode, fit_mode, delivery_mode,
                     offline_prefetch_allowed, offline_schedule_json, offline_schedule_version,
+                    offline_schedule_max_slots, offline_schedule_capability_state, next_offline_prepare_at,
                     schedule_times_json, prefetch_lead_minutes, button_wake_action,
                     minimum_schedule_gap_minutes, sync_strategy, sync_time, stock_endpoint_host,
                     auth_mode, pairing_state, credential_version,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?
+                )
                 """,
                 (
                     device_id,
@@ -155,6 +171,9 @@ class DeviceRepository:
                     int(offline_prefetch_allowed),
                     json.dumps(schedule_values, ensure_ascii=False),
                     1 if delivery_mode == "inktime_offline_schedule" else 0,
+                    maximum_slots,
+                    offline_schedule_capability_state(maximum_slots),
+                    OFFLINE_PREPARE_BOOTSTRAP_AT if offline_prefetch_allowed and enabled else None,
                     json.dumps(schedule_values, ensure_ascii=False),
                     int(prefetch_lead_minutes),
                     button_wake_action,
@@ -362,8 +381,10 @@ class DeviceRepository:
             try:
                 current = connection.execute(
                     """
-                    SELECT timezone,schedule,rotation,panel_profile,delivery_mode,offline_prefetch_allowed,
+                    SELECT enabled,timezone,schedule,rotation,panel_profile,delivery_mode,offline_prefetch_allowed,
                            offline_schedule_json,schedule_times_json,prefetch_lead_minutes,
+                           offline_schedule_max_slots,offline_schedule_capability_state,
+                           next_offline_prepare_at,
                            button_wake_action,minimum_schedule_gap_minutes,sync_strategy,sync_time,
                            stock_endpoint_host,frame_orientation,layout_mode,fit_mode,
                            auth_mode,pairing_state,config_version
@@ -408,9 +429,12 @@ class DeviceRepository:
                     selected_schedule = [schedule]
                 if type(minimum_schedule_gap_minutes) is not int or not 30 <= minimum_schedule_gap_minutes <= 360:
                     raise ValueError("DEVICE-008 minimum_schedule_gap_minutes 必須介於 30 到 360")
+                maximum_slots = resolve_offline_schedule_max_slots(
+                    {"offline_schedule_max_slots": current["offline_schedule_max_slots"]}
+                )
                 schedule_values = validate_offline_schedule(
                     selected_schedule,
-                    maximum=12,
+                    maximum=maximum_slots,
                     minimum_gap_minutes=minimum_schedule_gap_minutes,
                 )
                 if not 0 <= int(prefetch_lead_minutes) <= 120:
@@ -426,6 +450,7 @@ class DeviceRepository:
                         str(current["panel_profile"]) != panel_profile,
                         str(current["delivery_mode"]) != delivery_mode,
                         bool(current["offline_prefetch_allowed"]) != bool(offline_prefetch_allowed),
+                        bool(current["enabled"]) != bool(enabled),
                         existing_schedule != schedule_values,
                         int(current["prefetch_lead_minutes"]) != int(prefetch_lead_minutes),
                         str(current["button_wake_action"]) != button_wake_action,
@@ -444,6 +469,11 @@ class DeviceRepository:
                         prefetch_lead_minutes=?,button_wake_action=?,minimum_schedule_gap_minutes=?,
                         sync_strategy=?,sync_time=?,stock_endpoint_host=?,
                         offline_schedule_version=offline_schedule_version+CASE WHEN ? THEN 1 ELSE 0 END,
+                        next_offline_prepare_at=CASE
+                            WHEN ?=0 OR ?=0 THEN NULL
+                            WHEN ?=1 THEN ?
+                            ELSE next_offline_prepare_at
+                        END,
                         frame_orientation=?,layout_mode=?,fit_mode=?,auth_mode=?,pairing_state=?,
                         config_version=config_version+?,updated_at=?
                     WHERE id=?
@@ -466,6 +496,10 @@ class DeviceRepository:
                         sync_time,
                         stock_endpoint_host,
                         int(remote_changed),
+                        int(delivery_mode == "inktime_offline_schedule"),
+                        int(enabled),
+                        int(remote_changed),
+                        OFFLINE_PREPARE_BOOTSTRAP_AT,
                         selected_orientation,
                         selected_layout,
                         selected_fit,
@@ -973,7 +1007,9 @@ class DeviceRepository:
                 schedule_values = json.loads(str(device["schedule_times_json"] or "[]"))
                 schedule_values = validate_offline_schedule(
                     schedule_values,
-                    maximum=12,
+                    maximum=resolve_offline_schedule_max_slots(
+                        {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
+                    ),
                     minimum_gap_minutes=int(
                         device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
                     ),
@@ -987,6 +1023,9 @@ class DeviceRepository:
                     sync_time=device["sync_time"],
                     minimum_gap_minutes=int(
                         device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
+                    ),
+                    maximum_slots=resolve_offline_schedule_max_slots(
+                        {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
                     ),
                 )
                 planned_at = datetime.fromtimestamp(sync_epoch, timezone.utc).isoformat()

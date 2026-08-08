@@ -126,6 +126,8 @@ def test_stock_photopainter_display_controls_are_scoped_and_server_side(client, 
     assert f'data-stock-display-device="{missing_host_id}"' in body
     assert f'data-stock-display-device="{legacy_id}"' not in body
     assert f'data-stock-display-device="{offline_id}"' not in body
+    assert "支援 24-slot 裝置最多 24 個" in body
+    assert "Legacy／未知裝置最多 12 個" in body
     assert "Stock Host：10.23.45.67" in body
     assert 'data-stock-host="10.23.45.67"' in body
     assert 'placeholder="192.168.1.50"' in body

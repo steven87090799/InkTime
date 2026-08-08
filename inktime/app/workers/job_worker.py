@@ -8,6 +8,11 @@ import time
 from typing import Any, Callable
 from uuid import uuid4
 
+from inktime.app.domain.jobs.failure_policy import (
+    FailureClass,
+    classify_failure,
+    failure_code,
+)
 from inktime.app.repositories.jobs import JobRepository
 
 
@@ -15,6 +20,7 @@ Processor = Callable[[dict], dict]
 ProgressCallback = Callable[[int], None]
 ErrorCallback = Callable[[str, str, Exception, int], None]
 ResultCallback = Callable[[dict], None]
+FinalizeCallback = Callable[[Any, str, str], None]
 
 
 class JobHardTimeoutError(TimeoutError):
@@ -59,11 +65,13 @@ class BoundedJobWorker:
         concurrency: int = 2,
         queue_multiplier: int = 2,
         max_attempts: int = 3,
+        retry_interval_seconds: int | None = None,
         progress_interval_items: int = 50,
         progress_interval_seconds: int = 300,
         progress_callback: ProgressCallback | None = None,
         error_callback: ErrorCallback | None = None,
         result_callback: ResultCallback | None = None,
+        finalize_callback: FinalizeCallback | None = None,
         timeout_seconds: float = 0,
         hard_timeout: bool = False,
         terminate_grace_seconds: float = 0.5,
@@ -75,12 +83,16 @@ class BoundedJobWorker:
         if requested_hard_timeout:
             self.concurrency = min(self.concurrency, self.MAX_CHILD_PROCESSES)
         self.queue_size = self.concurrency * max(1, queue_multiplier)
-        self.max_attempts = max_attempts
+        self.max_attempts = max(1, int(max_attempts))
+        self.retry_interval_seconds = (
+            max(1, int(retry_interval_seconds)) if retry_interval_seconds is not None else None
+        )
         self.progress_interval_items = max(1, progress_interval_items)
         self.progress_interval_seconds = max(1, progress_interval_seconds)
         self.progress_callback = progress_callback
         self.error_callback = error_callback
         self.result_callback = result_callback
+        self.finalize_callback = finalize_callback
         self.timeout_seconds = max(0.0, float(timeout_seconds))
         self.hard_timeout = requested_hard_timeout
         self.terminate_grace_seconds = max(0.05, float(terminate_grace_seconds))
@@ -103,9 +115,12 @@ class BoundedJobWorker:
         cost = float(result.pop("_actual_cost", 0) or 0)
         return str(item["id"]), result, cost
 
+    def _finalize_if_done(self, job_id: str) -> bool:
+        return self.repository.finalize_if_done(job_id, finalizer=self.finalize_callback)
+
     def _record_failure(self, job_id: str, item_id: str, exc: Exception) -> None:
         self.failure_count += 1
-        code = str(getattr(exc, "code", "JOB-003"))
+        code = failure_code(exc)
         if code.startswith("BUDGET-"):
             self.repository.defer_item(item_id)
             self.repository.transition(
@@ -117,10 +132,19 @@ class BoundedJobWorker:
             if self.error_callback:
                 self.error_callback(job_id, item_id, exc, self.failure_count)
             return
-        # Frozen Provider configuration is deterministic for this Job. Retrying
-        # cannot make an empty, deleted, disabled, or revised route valid.
-        attempts = 1 if code in {"VLM-008", "ANALYSIS-DISABLED"} else self.max_attempts
-        self.repository.fail_item(job_id, item_id, code, str(exc), max_attempts=attempts)
+        # Deterministic business/configuration outcomes are dead-lettered on
+        # their first claim. Transient failures retain the bounded retry budget
+        # and use a scheduled interval when one was persisted with the Job;
+        # older/manual Jobs keep exponential backoff.
+        attempts = 1 if classify_failure(exc) == FailureClass.TERMINAL_NO_RETRY else self.max_attempts
+        self.repository.fail_item(
+            job_id,
+            item_id,
+            code,
+            str(exc),
+            max_attempts=attempts,
+            retry_interval_seconds=self.retry_interval_seconds,
+        )
         if self.error_callback and (
             self.failure_count <= 3 or self.failure_count % self.progress_interval_items == 0
         ):
@@ -238,7 +262,7 @@ class BoundedJobWorker:
                     self.repository.renew_leases(job_id, self.worker_id)
                     last_lease_renewal = now
                 if not tasks:
-                    if self.repository.finalize_if_done(job_id):
+                    if self._finalize_if_done(job_id):
                         break
                     if not progressed:
                         # Retry backoff is persisted; return control to Scheduler.
@@ -254,7 +278,7 @@ class BoundedJobWorker:
             job = self.repository.get(job_id)
             if job is not None and job["status"] == "pausing":
                 self.repository.acknowledge_pause(job_id)
-            self.repository.finalize_if_done(job_id)
+            self._finalize_if_done(job_id)
 
     def run_job(self, job_id: str) -> None:
         if self.hard_timeout:
@@ -299,7 +323,7 @@ class BoundedJobWorker:
                     self.max_observed_futures = max(self.max_observed_futures, len(futures))
 
                 if not futures:
-                    if self.repository.finalize_if_done(job_id):
+                    if self._finalize_if_done(job_id):
                         break
                     # 可能正在等待指數退避；單次執行先交還 Scheduler。
                     break
@@ -355,4 +379,4 @@ class BoundedJobWorker:
             job = self.repository.get(job_id)
             if job is not None and job["status"] == "pausing":
                 self.repository.acknowledge_pause(job_id)
-            self.repository.finalize_if_done(job_id)
+            self._finalize_if_done(job_id)

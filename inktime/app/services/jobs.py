@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from inktime.app.domain.analysis.plan import normalize_analysis_strategy
+from inktime.app.domain.jobs.failure_policy import NoEligibleCandidatesError
 from inktime.app.repositories.jobs import JobRepository
 
 
@@ -41,7 +42,7 @@ class JobService:
                 analysis_fingerprint=analysis_fingerprint, selection_mode=selection_mode, limit=limit
             )
             if not preview["limited_to"]:
-                raise ValueError("目前沒有符合條件的待分析照片")
+                raise NoEligibleCandidatesError("目前沒有符合條件的待分析照片")
             selected = self.repository.iter_pending_photo_ids(
                 analysis_fingerprint=analysis_fingerprint, selection_mode=selection_mode, limit=limit
             )

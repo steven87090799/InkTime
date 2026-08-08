@@ -184,6 +184,43 @@ def test_profile_latest_requires_published_release_row(client, app):
     assert response.status_code == 404
 
 
+def test_latest_release_quarantines_ambiguous_offline_slot_capability(client, app, monkeypatch):
+    schedule_times = [f"{hour:02d}:00" for hour in range(13)]
+    device_id, token = app.extensions["inktime_device_repository"].create(
+        "ambiguous-offline-release",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=schedule_times,
+        offline_schedule_max_slots=24,
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            """
+            UPDATE devices
+            SET offline_schedule_max_slots=12,
+                offline_schedule_capability_state='legacy_ambiguous'
+            WHERE id=?
+            """,
+            (device_id,),
+        )
+        row = connection.execute(
+            "SELECT schedule_times_json FROM devices WHERE id=?",
+            (device_id,),
+        ).fetchone()
+    assert json.loads(row["schedule_times_json"]) == schedule_times
+
+    service = app.extensions["inktime_device_release_service"]
+    monkeypatch.setattr(
+        service,
+        "latest_for_device",
+        lambda **_kwargs: pytest.fail("ambiguous offline device must be quarantined first"),
+    )
+
+    response = client.get("/api/device/v1/releases/latest", headers=_headers(token))
+
+    assert response.status_code == 409
+    assert "DEVICE-008" in response.get_data(as_text=True)
+
+
 def test_device_assignment_rejects_missing_release_row(client, app):
     device_id, token = app.extensions["inktime_device_repository"].create("stale-assignment")
     release = app.extensions["inktime_release_publisher"].publish(

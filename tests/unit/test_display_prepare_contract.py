@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from datetime import date
+from pathlib import Path
+
 import pytest
 
+from inktime.app.domain.jobs.failure_policy import NoContentError
 from inktime.app.services.display_prepare import DisplayPrepareConfig, DisplayPreparationService
 
 
@@ -22,6 +26,47 @@ def test_display_prepare_consumes_every_supported_field():
     assert config.device_ids == ("one", "two")
     assert config.candidate_years == (2018, 2020)
     assert config.preparation_times(__import__("datetime").date(2026, 7, 22))[0].endswith("07:15:00")
+
+
+def test_schedule_preview_template_selects_multi_device_without_reselection():
+    template = (
+        Path(__file__).resolve().parents[2] / "inktime/app/web/templates/schedules.html"
+    ).read_text(encoding="utf-8")
+
+    assert "choosePreviewDevice" in template
+    assert "window.prompt" in template
+    assert "device_id:selectedDeviceId" in template
+    assert "playlistPreviewText" in template
+
+
+class EmptyRenderService:
+    settings = {}
+
+    @staticmethod
+    def _today():
+        return date(2026, 8, 6)
+
+    @staticmethod
+    def select_candidates_details(*_args, **_kwargs):
+        return []
+
+
+@pytest.mark.parametrize("fallback", ["use_existing", "skip"])
+def test_empty_display_prepare_returns_structured_no_content(fallback):
+    service = DisplayPreparationService(None, EmptyRenderService())
+
+    result = service.prepare({"ai_fallback": fallback}, created_by="tester")
+
+    assert result["status"] == "completed"
+    assert result["outcome_code"] == "NO_CONTENT"
+    assert result["output_count"] == 0
+
+
+def test_empty_display_prepare_fail_fallback_remains_explicit_terminal_error():
+    service = DisplayPreparationService(None, EmptyRenderService())
+
+    with pytest.raises(NoContentError):
+        service.prepare({"ai_fallback": "fail"}, created_by="tester")
 
 
 def test_display_prepare_rejects_unknown_or_silently_ignored_fields():

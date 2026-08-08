@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
 import re
+from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 
@@ -14,16 +15,53 @@ _SYNC_STRATEGIES = {"first_display_lead", "fixed_daily"}
 MINIMUM_SCHEDULE_GAP_MINUTES = 60
 MINIMUM_ALLOWED_GAP_MINUTES = 30
 MAXIMUM_ALLOWED_GAP_MINUTES = 360
+LEGACY_MAX_OFFLINE_SLOTS = 12
+MAX_OFFLINE_SLOTS = 24
+OFFLINE_CAPABILITY_UNKNOWN_12 = "unknown_12"
+OFFLINE_CAPABILITY_CONFIRMED_24 = "confirmed_24"
+OFFLINE_CAPABILITY_LEGACY_AMBIGUOUS = "legacy_ambiguous"
+OFFLINE_CAPABILITY_USABLE_STATES = frozenset(
+    {OFFLINE_CAPABILITY_UNKNOWN_12, OFFLINE_CAPABILITY_CONFIRMED_24}
+)
+OFFLINE_PREPARE_BOOTSTRAP_AT = "1970-01-01T00:00:00+00:00"
+
+
+def resolve_offline_schedule_max_slots(capabilities: Mapping[str, Any] | None) -> int:
+    """Resolve the device capability without granting unknown firmware 24 slots."""
+
+    if not isinstance(capabilities, Mapping):
+        return LEGACY_MAX_OFFLINE_SLOTS
+    value = capabilities.get("offline_schedule_max_slots")
+    if type(value) is int and value == MAX_OFFLINE_SLOTS:
+        return MAX_OFFLINE_SLOTS
+    return LEGACY_MAX_OFFLINE_SLOTS
+
+
+def offline_schedule_capability_state(maximum_slots: int) -> str:
+    """Return the persisted state for a safely resolved numeric capability."""
+
+    return (
+        OFFLINE_CAPABILITY_CONFIRMED_24
+        if resolve_offline_schedule_max_slots({"offline_schedule_max_slots": maximum_slots})
+        == MAX_OFFLINE_SLOTS
+        else OFFLINE_CAPABILITY_UNKNOWN_12
+    )
+
+
+def offline_schedule_capability_is_usable(state: Any) -> bool:
+    """Allow only known-safe states to stage or deliver offline playlists."""
+
+    return str(state or "") in OFFLINE_CAPABILITY_USABLE_STATES
 
 
 def validate_offline_schedule(
     values,
     *,
-    maximum: int = 24,
+    maximum: int = MAX_OFFLINE_SLOTS,
     minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
 ) -> list[str]:
     if not isinstance(values, list) or not 1 <= len(values) <= maximum:
-        raise ValueError("DEVICE-008 offline_schedule 必須包含 1 到 24 個時刻")
+        raise ValueError(f"DEVICE-008 offline_schedule 必須包含 1 到 {maximum} 個時刻")
     if type(minimum_gap_minutes) is not int or not MINIMUM_ALLOWED_GAP_MINUTES <= minimum_gap_minutes <= MAXIMUM_ALLOWED_GAP_MINUTES:
         raise ValueError("DEVICE-008 minimum_schedule_gap_minutes 必須介於 30 到 360")
     normalized = [str(value).strip() for value in values]
@@ -96,7 +134,7 @@ def schedule_minutes(value: str) -> int:
 def prefetch_slots(
     values: list[str], *, lead_minutes: int = 5, minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES
 ) -> list[tuple[str, str]]:
-    schedule = validate_offline_schedule(values, minimum_gap_minutes=minimum_gap_minutes)
+    schedule = validate_offline_schedule(values, maximum=MAX_OFFLINE_SLOTS, minimum_gap_minutes=minimum_gap_minutes)
     if type(lead_minutes) is not int or not 0 <= lead_minutes <= 120:
         raise ValueError("DEVICE-008 prefetch 提前分鐘必須介於 0 到 120")
     result = []
@@ -115,6 +153,7 @@ def slot_deadlines(
     *,
     grace_minutes: int = 15,
     minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
+    maximum_slots: int = MAX_OFFLINE_SLOTS,
 ) -> list[str]:
     """Return UTC deadlines after the following slot, not after this slot.
 
@@ -127,7 +166,9 @@ def slot_deadlines(
     if type(grace_minutes) is not int or not 0 <= grace_minutes <= 1440:
         raise ValueError("DEVICE-008 slot deadline 寬限分鐘必須介於 0 到 1440")
     schedule = validate_offline_schedule(
-        values, maximum=12, minimum_gap_minutes=minimum_gap_minutes
+        values,
+        maximum=resolve_offline_schedule_max_slots({"offline_schedule_max_slots": maximum_slots}),
+        minimum_gap_minutes=minimum_gap_minutes,
     )
     zone = ZoneInfo(timezone_name)
     starts: list[datetime] = []
@@ -155,6 +196,7 @@ def next_sync_epoch(
     sync_strategy: str = "first_display_lead",
     sync_time: str | None = None,
     minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
+    maximum_slots: int = MAX_OFFLINE_SLOTS,
 ) -> int:
     """Return the next configured network-sync epoch in the device timezone."""
     if type(lead_minutes) is not int or not 0 <= lead_minutes <= 120:
@@ -163,7 +205,9 @@ def next_sync_epoch(
     zone = ZoneInfo(timezone_name)
     local = now.astimezone(zone)
     slots = validate_offline_schedule(
-        schedule, minimum_gap_minutes=minimum_gap_minutes
+        schedule,
+        maximum=resolve_offline_schedule_max_slots({"offline_schedule_max_slots": maximum_slots}),
+        minimum_gap_minutes=minimum_gap_minutes,
     )
     candidates: list[datetime] = []
     for day_offset in (0, 1):
@@ -200,6 +244,7 @@ def next_sleep_epoch(
     sync_strategy: str = "first_display_lead",
     sync_time: str | None = None,
     minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
+    maximum_slots: int = MAX_OFFLINE_SLOTS,
 ) -> int:
     """Backward-compatible alias for the configured next network wake."""
     return next_sync_epoch(
@@ -210,4 +255,5 @@ def next_sleep_epoch(
         sync_strategy=sync_strategy,
         sync_time=sync_time,
         minimum_gap_minutes=minimum_gap_minutes,
+        maximum_slots=maximum_slots,
     )

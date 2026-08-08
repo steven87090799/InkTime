@@ -69,8 +69,16 @@ def configure_logging(
     """設定單一 stdout handler；資料庫設定在啟動後優先於 bootstrap 環境變數。"""
 
     global _ACTIVE_CONFIGURATION
-    repository_format = settings_repository.get("system.log_format", None) if settings_repository else None
-    repository_level = settings_repository.get("system.log_level", None) if settings_repository else None
+    repository_values = (
+        settings_repository.get_many(
+            ["system.log_format", "system.log_level"],
+            defaults={"system.log_format": None, "system.log_level": None},
+        )
+        if settings_repository
+        else {}
+    )
+    repository_format = repository_values.get("system.log_format")
+    repository_level = repository_values.get("system.log_level")
     selected = str(
         format_name or repository_format or os.environ.get("INKTIME_LOG_FORMAT") or "human"
     ).lower()

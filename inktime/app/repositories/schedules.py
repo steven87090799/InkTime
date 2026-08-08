@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from builtins import list as builtin_list
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 import json
 from typing import Any
@@ -17,8 +18,8 @@ TASK_DEFAULTS: dict[str, dict[str, Any]] = {
     "incremental_scan": {
         "name": "增量掃描",
         "kind": "scan",
-        "cron": "0 2 * * *",
-        "start_time": "02:00",
+        "cron": "0 3 1 * *",
+        "start_time": "03:00",
         "window_start": "00:00",
         "window_end": "06:00",
         "timeout_seconds": 14400,
@@ -38,8 +39,8 @@ TASK_DEFAULTS: dict[str, dict[str, Any]] = {
     "full_reconcile": {
         "name": "完整一致性掃描",
         "kind": "scan",
-        "cron": "0 3 * * 0",
-        "start_time": "03:00",
+        "cron": "0 4 1 1 *",
+        "start_time": "04:00",
         "window_start": "00:00",
         "window_end": "08:00",
         "timeout_seconds": 28800,
@@ -151,9 +152,10 @@ class ScheduledTaskRepository:
             rows = connection.execute("SELECT * FROM scheduled_tasks ORDER BY key").fetchall()
         return [self._row(row) for row in rows]
 
-    def get(self, key: str) -> dict[str, Any] | None:
-        with self.database.session() as connection:
-            row = connection.execute("SELECT * FROM scheduled_tasks WHERE key=?", (key,)).fetchone()
+    def get(self, key: str, *, connection=None) -> dict[str, Any] | None:
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            row = active_connection.execute("SELECT * FROM scheduled_tasks WHERE key=?", (key,)).fetchone()
         return self._row(row) if row else None
 
     def update(self, key: str, payload: dict[str, Any], timezone: str) -> dict[str, Any]:
@@ -215,11 +217,65 @@ class ScheduledTaskRepository:
                 (next_run, utc_now(), task["key"]),
             )
 
-    def record_success(self, key: str) -> None:
-        with self.database.session() as connection:
-            connection.execute(
-                "UPDATE scheduled_tasks SET last_success=?,error_status=NULL,updated_at=? WHERE key=?",
-                (utc_now(), utc_now(), key),
+    def record_success(
+        self,
+        task: dict[str, Any],
+        now: datetime,
+        *,
+        scheduled_occurrence_at: str,
+        connection=None,
+    ) -> None:
+        """Record success and repair only an unadvanced scheduled cursor."""
+
+        del now
+        occurrence = datetime.fromisoformat(scheduled_occurrence_at)
+        repaired_next_run = self._next_run(
+            task["cron"], occurrence, task["weekdays"]
+        ).isoformat()
+        completed_at = utc_now()
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            active_connection.execute(
+                """UPDATE scheduled_tasks
+                   SET last_success=?,error_status=NULL,
+                       next_run=CASE WHEN next_run=? THEN ? ELSE next_run END,
+                       updated_at=?
+                   WHERE key=?""",
+                (
+                    completed_at,
+                    scheduled_occurrence_at,
+                    repaired_next_run,
+                    completed_at,
+                    task["key"],
+                ),
+            )
+
+    def record_terminal_outcome(
+        self, task: dict[str, Any], _outcome_code: str, now: datetime, *, connection=None
+    ) -> None:
+        """Advance a successful business outcome without recording a failure."""
+
+        next_run = self._next_run(task["cron"], now, task["weekdays"]).isoformat()
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            active_connection.execute(
+                """UPDATE scheduled_tasks
+                   SET last_failure=NULL,error_status=NULL,next_run=?,updated_at=?
+                   WHERE key=?""",
+                (next_run, utc_now(), task["key"]),
+            )
+
+    def record_retry_exhausted(
+        self, task: dict[str, Any], message: str, now: datetime, *, connection=None
+    ) -> None:
+        """Record an exhausted Job budget while preserving the normal cron cursor."""
+
+        next_run = self._next_run(task["cron"], now, task["weekdays"]).isoformat()
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            active_connection.execute(
+                "UPDATE scheduled_tasks SET last_failure=?,error_status=?,next_run=?,updated_at=? WHERE key=?",
+                (utc_now(), message[:1000], next_run, utc_now(), task["key"]),
             )
 
     def record_failure(self, task: dict[str, Any], message: str, now: datetime) -> None:
@@ -228,6 +284,25 @@ class ScheduledTaskRepository:
             connection.execute(
                 "UPDATE scheduled_tasks SET last_failure=?,error_status=?,next_run=?,updated_at=? WHERE key=?",
                 (utc_now(), message[:1000], retry_at.isoformat(), utc_now(), task["key"]),
+            )
+
+    def record_terminal(
+        self, task: dict[str, Any], message: str, now: datetime, *, connection=None
+    ) -> None:
+        """Record a deterministic stop while advancing to the next normal cron slot.
+
+        A missing-content/configuration result is useful operator context, but
+        it is not a reason to wake the scheduler again after the short retry
+        interval.  Keep the error visible and let the normal schedule decide
+        when the task is next eligible.
+        """
+
+        next_run = self._next_run(task["cron"], now, task["weekdays"]).isoformat()
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            active_connection.execute(
+                "UPDATE scheduled_tasks SET last_failure=?,error_status=?,next_run=?,updated_at=? WHERE key=?",
+                (utc_now(), message[:1000], next_run, utc_now(), task["key"]),
             )
 
     @staticmethod
@@ -278,7 +353,7 @@ class ScheduledTaskRepository:
             "concurrency": (1, 32),
             "missing_safe_percent": (0, 100),
             "lead_minutes": (0, 1440),
-            "daily_count": (1, 20),
+            "daily_count": (1, 24),
             "prefetch_count": (1, 10),
             "new_photo_delay_minutes": (0, 43_200),
             "max_bytes": (1, 10 * 1024 * 1024 * 1024 * 1024),

@@ -173,3 +173,28 @@ def test_pair_score_uses_only_offline_resolved_city(app, tmp_path):
     result = policy.select(target=date(2026, 7, 28), orientation="portrait", quantity=2, layout="photo_pair")
     assert result["selected"][0]["pair_score_components"]["known_location_match"] == 3.0
     assert "gps_lat" not in result["selected"][0]["pair_score_components"]
+
+
+def test_diversity_penalty_keeps_duplicate_and_burst_groups_separate():
+    candidate = {"duplicate_group_id": "dup-A", "burst_group_id": "burst-1"}
+    different_duplicate_same_burst = {
+        "duplicate_group_id": "dup-B",
+        "burst_group_id": "burst-1",
+    }
+    same_duplicate_different_burst = {
+        "duplicate_group_id": "dup-A",
+        "burst_group_id": "burst-2",
+    }
+
+    burst_penalty = LocalSelectionPolicy._diversity_penalty(
+        candidate, [different_duplicate_same_burst]
+    )
+    duplicate_penalty = LocalSelectionPolicy._diversity_penalty(
+        candidate, [same_duplicate_different_burst]
+    )
+    assert burst_penalty == 14.0
+    assert duplicate_penalty == 18.0
+    assert LocalSelectionPolicy._diversity_penalty(
+        {"captured_at": "2020-07-28T10:00:00+00:00"},
+        [{"captured_at": "2020-07-28T10:01:00+00:00"}],
+    ) == 6.0

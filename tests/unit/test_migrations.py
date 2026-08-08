@@ -31,7 +31,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 36
+    assert CURRENT_SCHEMA_VERSION == 39
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -88,6 +88,9 @@ def test_fresh_database_is_migrated(tmp_path):
         "previous_device_secret_hash",
         "previous_credential_expires_at",
         "repair_allowed_until",
+        "offline_schedule_max_slots",
+        "offline_schedule_capability_state",
+        "next_offline_prepare_at",
     } <= device_columns
     assert {"device_pairing_requests", "device_pairing_rate_limits"} <= pairing_tables
     assert {
@@ -158,6 +161,194 @@ def test_fresh_database_is_migrated(tmp_path):
     }
 
 
+def test_migration_39_quarantines_legacy_ambiguous_offline_slot_rows(monkeypatch, tmp_path):
+    database = Database(tmp_path / "migration-39-legacy-slots.db")
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:38])
+    assert migrate(database) == list(range(1, 39))
+    with database.transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO devices(
+                id,name,token_hash,enabled,timezone,schedule,delivery_mode,
+                offline_prefetch_allowed,schedule_times_json,created_at,updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "legacy-ambiguous",
+                "Legacy ambiguous",
+                "token-ambiguous",
+                1,
+                "Asia/Taipei",
+                "08:00",
+                "inktime_offline_schedule",
+                1,
+                json.dumps([f"{hour:02d}:00" for hour in range(8, 21)]),
+                "2026-08-08T00:00:00+00:00",
+                "2026-08-08T00:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO devices(
+                id,name,token_hash,enabled,timezone,schedule,delivery_mode,
+                offline_prefetch_allowed,schedule_times_json,offline_schedule_json,
+                created_at,updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "legacy-fallback-ambiguous",
+                "Legacy fallback ambiguous",
+                "token-fallback",
+                1,
+                "Asia/Taipei",
+                "08:00",
+                "inktime_offline_schedule",
+                1,
+                "[]",
+                json.dumps([f"{hour:02d}:00" for hour in range(8, 21)]),
+                "2026-08-08T00:00:00+00:00",
+                "2026-08-08T00:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO devices(
+                id,name,token_hash,enabled,timezone,schedule,delivery_mode,
+                offline_prefetch_allowed,schedule_times_json,offline_schedule_json,
+                created_at,updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "legacy-mirror-ambiguous",
+                "Legacy mirror ambiguous",
+                "token-mirror",
+                1,
+                "Asia/Taipei",
+                "08:00",
+                "inktime_offline_schedule",
+                1,
+                json.dumps([f"{hour:02d}:00" for hour in range(8, 20)]),
+                json.dumps([f"{hour:02d}:00" for hour in range(8, 21)]),
+                "2026-08-08T00:00:00+00:00",
+                "2026-08-08T00:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO devices(
+                id,name,token_hash,enabled,timezone,schedule,delivery_mode,
+                offline_prefetch_allowed,schedule_times_json,offline_schedule_max_slots,
+                created_at,updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "legacy-safe",
+                "Legacy safe",
+                "token-safe",
+                1,
+                "Asia/Taipei",
+                "08:00",
+                "inktime_offline_schedule",
+                1,
+                json.dumps([f"{hour:02d}:00" for hour in range(8, 20)]),
+                12,
+                "2026-08-08T00:00:00+00:00",
+                "2026-08-08T00:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO devices(
+                id,name,token_hash,enabled,timezone,schedule,delivery_mode,
+                offline_prefetch_allowed,schedule_times_json,offline_schedule_max_slots,
+                created_at,updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "legacy-confirmed-24",
+                "Legacy confirmed 24",
+                "token-confirmed-24",
+                1,
+                "Asia/Taipei",
+                "08:00",
+                "inktime_offline_schedule",
+                1,
+                json.dumps([f"{hour:02d}:00" for hour in range(0, 24)]),
+                24,
+                "2026-08-08T00:00:00+00:00",
+                "2026-08-08T00:00:00+00:00",
+            ),
+        )
+
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
+    assert migrate(database) == [39]
+    with database.session() as connection:
+        row = connection.execute(
+            "SELECT offline_schedule_max_slots,offline_schedule_capability_state,next_offline_prepare_at,schedule_times_json "
+            "FROM devices WHERE id='legacy-ambiguous'"
+        ).fetchone()
+        with pytest.raises(sqlite3.IntegrityError, match="DEVICE-008"):
+            connection.execute(
+                "UPDATE devices SET offline_schedule_max_slots=13 WHERE id='legacy-ambiguous'"
+            )
+        states = connection.execute(
+            "SELECT id,offline_schedule_max_slots,offline_schedule_capability_state,next_offline_prepare_at FROM devices WHERE id IN ('legacy-safe','legacy-confirmed-24') ORDER BY id"
+        ).fetchall()
+        with pytest.raises(sqlite3.IntegrityError, match="DEVICE-008"):
+            connection.execute(
+                "UPDATE devices SET offline_schedule_capability_state='confirmed_24' WHERE id='legacy-safe'"
+            )
+    assert (
+        row["offline_schedule_max_slots"],
+        row["offline_schedule_capability_state"],
+        row["next_offline_prepare_at"],
+    ) == (12, "legacy_ambiguous", None)
+    assert len(json.loads(str(row[3]))) == 13
+    assert [tuple(item) for item in states] == [
+        ("legacy-confirmed-24", 24, "confirmed_24", "1970-01-01T00:00:00+00:00"),
+        ("legacy-safe", 12, "unknown_12", "1970-01-01T00:00:00+00:00"),
+    ]
+    with database.session() as connection:
+        ambiguous_rows = connection.execute(
+            """
+            SELECT id,offline_schedule_max_slots,offline_schedule_capability_state,
+                   next_offline_prepare_at,schedule_times_json,offline_schedule_json
+            FROM devices
+            WHERE id IN ('legacy-fallback-ambiguous','legacy-mirror-ambiguous')
+            ORDER BY id
+            """
+        ).fetchall()
+    assert [
+        (
+            row["id"],
+            row["offline_schedule_max_slots"],
+            row["offline_schedule_capability_state"],
+            row["next_offline_prepare_at"],
+            row["schedule_times_json"],
+            row["offline_schedule_json"],
+        )
+        for row in ambiguous_rows
+    ] == [
+        (
+            "legacy-fallback-ambiguous",
+            12,
+            "legacy_ambiguous",
+            None,
+            "[]",
+            json.dumps([f"{hour:02d}:00" for hour in range(8, 21)]),
+        ),
+        (
+            "legacy-mirror-ambiguous",
+            12,
+            "legacy_ambiguous",
+            None,
+            json.dumps([f"{hour:02d}:00" for hour in range(8, 20)]),
+            json.dumps([f"{hour:02d}:00" for hour in range(8, 21)]),
+        ),
+    ]
+    assert migrate(database) == []
+
+
 def test_batch_unknown_states_and_reservations_are_persistent(tmp_path):
     database = Database(tmp_path / "states.db")
     migrate(database)
@@ -205,7 +396,7 @@ def test_migration_25_to_batch_lifecycle_is_idempotent(monkeypatch, tmp_path):
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:25])
     migrate(database)
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36]
+    assert migrate(database, tmp_path / "backups") == [26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39]
     assert migrate(database, tmp_path / "backups") == []
     assert database.integrity_check() == "ok"
 
@@ -225,7 +416,7 @@ def test_migration_32_preserves_legacy_cost_provenance_and_allows_new_reported_c
             ],
         )
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database) == [32, 33, 34, 35, 36]
+    assert migrate(database) == [32, 33, 34, 35, 36, 37, 38, 39]
     with database.transaction() as connection:
         connection.execute(
             "INSERT INTO api_usage(provider,model,request_type,estimated_cost,actual_cost,started_at,status,cost_source) "
@@ -271,7 +462,7 @@ def test_migration_33_backfills_provider_identity_and_keeps_billable_unknown(mon
             ],
         )
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database) == [33, 34, 35, 36]
+    assert migrate(database) == [33, 34, 35, 36, 37, 38, 39]
     with database.transaction() as connection:
         provider = connection.execute(
             "SELECT id,kind,supports_batch,options_json FROM providers WHERE name=?",
@@ -355,7 +546,7 @@ def test_migration_27_to_30_freezes_ownership_and_invalidates_legacy_ready_rows(
         )
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [28, 29, 30, 31, 32, 33, 34, 35, 36]
+    assert migrate(database, tmp_path / "backups") == [28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39]
     with database.session() as connection:
         schedule = connection.execute(
             "SELECT status,panel_profile,rotation,snapshot_json FROM device_offline_schedules WHERE id='legacy-schedule'"
@@ -416,7 +607,7 @@ def test_migration_29_to_30_adds_pointer_times_and_mode_guards_with_backup_resta
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
     backups = tmp_path / "backups"
-    assert migrate(database, backups) == [30, 31, 32, 33, 34, 35, 36]
+    assert migrate(database, backups) == [30, 31, 32, 33, 34, 35, 36, 37, 38, 39]
     backup_files = list(backups.glob("*.sqlite3"))
     assert len(backup_files) == 1
     with sqlite3.connect(backup_files[0]) as backup:
@@ -791,7 +982,7 @@ def test_migration_21_upgrades_v20_webhooks_idempotently(monkeypatch, tmp_path):
         notification_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36]
+    assert migrate(database, tmp_path / "backups") == [21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39]
     assert migrate(database, tmp_path / "backups") == []
     assert database.integrity_check() == "ok"
     with database.session() as connection:

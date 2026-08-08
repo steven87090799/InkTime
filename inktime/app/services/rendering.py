@@ -1638,6 +1638,73 @@ class RenderService:
                 trace, str(releases[0].get("release_id") or releases[0].get("id") or "")
             )
 
+    @staticmethod
+    def _month_day_distance(target: date, month_day: Any) -> int | None:
+        value = str(month_day or "")
+        try:
+            target_anchor = date(2000, target.month, target.day)
+            candidate_anchor = date(2000, int(value[:2]), int(value[3:]))
+        except (TypeError, ValueError):
+            return None
+        distance = abs((candidate_anchor - target_anchor).days)
+        return min(distance, 366 - distance)
+
+    @classmethod
+    def _selection_adjustments(cls, row: dict[str, Any], *, target: date, now: datetime) -> dict[str, float]:
+        try:
+            display_count = max(0, int(row.get("display_count") or 0))
+        except (TypeError, ValueError):
+            display_count = 0
+        day_distance = cls._month_day_distance(target, row.get("captured_month_day"))
+        date_bonus = 0.0 if day_distance is None else 24.0 if day_distance == 0 else max(0.0, 8.0 - day_distance)
+        recent_penalty = 0.0
+        not_recent_bonus = 0.0
+        if row.get("last_displayed_at"):
+            try:
+                seen = datetime.fromisoformat(str(row["last_displayed_at"]).replace("Z", "+00:00"))
+                if seen.tzinfo is None:
+                    seen = seen.replace(tzinfo=timezone.utc)
+                days = max(0.0, (now - seen).total_seconds() / 86400)
+                recent_penalty = 12.0 if days < 7 else 5.0 if days < 30 else 0.0
+                not_recent_bonus = 8.0 if days >= 30 else 0.0
+            except ValueError:
+                pass
+        return {
+            "date_proximity_bonus": date_bonus,
+            "display_history_count": float(display_count),
+            "never_displayed_bonus": 10.0 if display_count == 0 else 0.0,
+            "display_count_penalty": -min(display_count, 8) * 1.5,
+            "not_recently_displayed_bonus": not_recent_bonus,
+            "recent_display_penalty": -recent_penalty,
+        }
+
+    @classmethod
+    def _pick_diverse_candidates(
+        cls,
+        rows: list[dict[str, Any]],
+        *,
+        limit: int,
+        distances: dict[str, int] | None = None,
+        already_selected: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        context = list(already_selected or [])
+        picked: list[dict[str, Any]] = []
+        remaining = list(rows)
+        while remaining and len(picked) < limit:
+            def sort_key(item: tuple[int, dict[str, Any]]) -> tuple[Any, ...]:
+                index, row = item
+                distance = distances.get(str(row.get("captured_month_day")), 999) if distances else 0
+                adjusted = float(row.get("combined_score") or 0.0) - LocalSelectionPolicy._diversity_penalty(
+                    row, context
+                )
+                return distance, -adjusted, index, str(row.get("id") or "")
+
+            _, chosen = min(enumerate(remaining), key=sort_key)
+            picked.append(chosen)
+            context.append(chosen)
+            remaining.remove(chosen)
+        return picked
+
     def _candidate_query(
         self,
         *,
@@ -1653,17 +1720,22 @@ class RenderService:
         offset = 0
         # 檔案存在性無法安全地交給 SQLite；用固定批次掃描 SQL 已排序結果，
         # 每次只保留真正可用的候選，避免把大型照片庫 materialize 成 Dict。
+        # photos has no durable burst_group_id column; captured_at is the
+        # existing burst-proximity signal consumed by LocalSelectionPolicy.
         while len(result) < max(limit, 1):
             with self.database.session() as connection:
                 rows = connection.execute(
                     f"""
                     SELECT p.id,p.relative_path,p.captured_at,p.captured_date,p.captured_month_day,
+                           p.sha256,p.perceptual_hash,p.difference_hash,p.duplicate_group_id,p.gps_lat,p.gps_lon,
                            p.e6_score,p.e6_contrast_score,
                            p.e6_subject_score,p.e6_skin_score,p.e6_text_score,
                            p.crop_focus_x,p.crop_focus_y,p.crop_manual_x,p.crop_manual_y,
                            p.crop_method,p.crop_face_count,l.root_path,
                            COALESCE(a.final_ranking_score,a.ranking_score,a.memory_score,0) ranking_score,
                            a.memory_score,
+                           (SELECT count(*) FROM display_history dh WHERE dh.photo_id=p.id) display_count,
+                           (SELECT max(displayed_at) FROM display_history dh WHERE dh.photo_id=p.id) last_displayed_at,
                            (COALESCE(a.final_ranking_score,a.ranking_score,a.memory_score,0) * ?
                             + COALESCE(p.e6_score,50) * ?) combined_score
                     FROM photos p
@@ -1733,14 +1805,30 @@ class RenderService:
                 "crop_face_count",
             ):
                 row[key] = refreshed[key]
+        now = datetime.now(timezone.utc)
         for row in result:
             stored_ranking = row.get("ranking_score")
             ranking = float(stored_ranking) if isinstance(stored_ranking, (int, float, str)) else 0.0
             row["raw_ranking_score"] = ranking
             row["ranking_percentile"] = None
             row["distinguishing_score"] = ranking
-            row["combined_score"] = round(float(row["combined_score"]), 2)
-        return result
+            raw_combined = float(row["combined_score"])
+            adjustments = self._selection_adjustments(row, target=target, now=now)
+            row["raw_combined_score"] = round(raw_combined, 2)
+            row["score_components"] = {"base_combined_score": round(raw_combined, 2), **adjustments}
+            row["combined_score"] = round(
+                raw_combined
+                + sum(value for key, value in adjustments.items() if key != "display_history_count"),
+                2,
+            )
+        return sorted(
+            result,
+            key=lambda row: (
+                -float(row["combined_score"]),
+                str(row.get("captured_at") or ""),
+                str(row.get("id") or ""),
+            ),
+        )
 
     def select_candidates_details(
         self,
@@ -1767,16 +1855,23 @@ class RenderService:
             rows = self._candidate_query(
                 target=target, month_days=None, older_only=False, limit=500, candidate_years=candidate_years
             )
-            for row in rows:
+            selected_top = self._pick_diverse_candidates(rows, limit=limit)
+            for row in selected_top:
                 row["match_type"] = "top_ranked"
                 row["day_distance"] = None
-            return rows[:limit]
+            return selected_top
 
         selected: list[dict[str, Any]] = []
         selected_ids: set[str] = set()
 
         def append(rows: list[dict[str, Any]], match_type: str, distances=None) -> None:
-            for row in rows:
+            available = [row for row in rows if str(row["id"]) not in selected_ids]
+            for row in self._pick_diverse_candidates(
+                available,
+                limit=limit - len(selected),
+                distances=distances,
+                already_selected=selected,
+            ):
                 photo_id = str(row["id"])
                 if photo_id in selected_ids or len(selected) >= limit:
                     continue
