@@ -22,6 +22,7 @@ from scripts.ci.test_plan import (
     FULL_MODE,
     FULL_SUITE_EXECUTION_OWNERS,
     NON_EXECUTABLE_SUITES,
+    SELECTED_SUITE_RUNNER,
     SUITE_EXECUTION_OWNERS,
 )
 
@@ -40,7 +41,7 @@ JOB_WORKFLOW = {
     "migration-contract": REPOSITORY_WORKFLOW,
     "secret-scan": REPOSITORY_WORKFLOW,
     "actionlint": REPOSITORY_WORKFLOW,
-    "selected_owner_suites": REPOSITORY_WORKFLOW,
+    SELECTED_SUITE_RUNNER: REPOSITORY_WORKFLOW,
     "compose-lan-production-persistence": REPOSITORY_WORKFLOW,
     "compose-production-tls-smoke": REPOSITORY_WORKFLOW,
     "bounded-runtime-soak": REPOSITORY_WORKFLOW,
@@ -49,6 +50,13 @@ JOB_WORKFLOW = {
     "esp32-compile": REPOSITORY_WORKFLOW,
     "container-security": CONTAINER_WORKFLOW,
     "benchmark-contract": CONTAINER_WORKFLOW,
+}
+
+# Planner execution-owner names are logical source identifiers. Most equal the
+# GitHub job id; the selected-suite runner predates this contract and uses an
+# underscore logically while the workflow job id uses a hyphen.
+WORKFLOW_JOB_ID = {
+    SELECTED_SUITE_RUNNER: "selected-owner-suites",
 }
 
 # Gate -> (workflow identity, workflow job id). Aggregate gates point at their
@@ -88,10 +96,14 @@ def _string_list(plan: Mapping[str, object], key: str) -> tuple[list[str], list[
     return list(raw), []
 
 
-def _job_workflow(job_id: str, workflow_identity: str) -> str | None:
-    if job_id in WORKFLOW_LOCAL_JOBS:
+def _job_workflow(owner_id: str, workflow_identity: str) -> str | None:
+    if owner_id in WORKFLOW_LOCAL_JOBS:
         return workflow_identity
-    return JOB_WORKFLOW.get(job_id)
+    return JOB_WORKFLOW.get(owner_id)
+
+
+def _workflow_job_id(owner_id: str) -> str:
+    return WORKFLOW_JOB_ID.get(owner_id, owner_id)
 
 
 def expected_execution_jobs(
@@ -123,18 +135,18 @@ def expected_execution_jobs(
     for suite in selected_suites:
         if suite in NON_EXECUTABLE_SUITES:
             continue
-        owner_job = suite_registry.get(suite)
-        if owner_job is None:
+        owner_id = suite_registry.get(suite)
+        if owner_id is None:
             errors.append(f"selected suite has no execution owner: {suite}")
             continue
-        owner_workflow = _job_workflow(owner_job, workflow_identity)
+        owner_workflow = _job_workflow(owner_id, workflow_identity)
         if owner_workflow is None:
             errors.append(
-                f"selected suite execution owner is unknown: {suite} -> {owner_job}"
+                f"selected suite execution owner is unknown: {suite} -> {owner_id}"
             )
             continue
         if owner_workflow == workflow_identity:
-            expected.add(owner_job)
+            expected.add(_workflow_job_id(owner_id))
 
     current_aggregate = AGGREGATE_JOB_BY_WORKFLOW[workflow_identity]
     for gate in selected_gates:
