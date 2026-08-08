@@ -396,17 +396,41 @@ class ObservabilityService:
             rows = c.execute(
                 "SELECT d.id,d.enabled,d.schedule,d.timezone,d.last_download_at,d.last_seen_at,d.last_release_id,d.download_failure_count,d.config_version,d.acked_config_version,r.release_id,r.assigned_at FROM device_render_releases r JOIN devices d ON d.id=r.device_id WHERE d.enabled=1 LIMIT 200"
             ).fetchall()
-        for row in rows:
+            due_rows = [
+                row
+                for row in rows
+                if self._device_due(str(row["assigned_at"]), str(row["schedule"]), str(row["timezone"]), now)
+            ]
+            reports_by_device: dict[str, list] = {}
+            if due_rows:
+                device_ids = tuple(dict.fromkeys(str(row["id"]) for row in due_rows))
+                placeholders = ",".join("?" for _ in device_ids)
+                earliest_assignment = min(str(row["assigned_at"]) for row in due_rows)
+                reports = c.execute(
+                    f"""
+                    WITH ranked AS (
+                        SELECT device_id,event,error_code,details_json,created_at,
+                               ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY id DESC) AS row_number
+                        FROM device_events
+                        WHERE device_id IN ({placeholders}) AND created_at>=?
+                    )
+                    SELECT device_id,event,error_code,details_json,created_at
+                    FROM ranked WHERE row_number<=20
+                    ORDER BY device_id,created_at DESC
+                    """,  # noqa: S608 -- placeholders are generated from device ids
+                    (*device_ids, earliest_assignment),
+                ).fetchall()
+                for report in reports:
+                    reports_by_device.setdefault(str(report["device_id"]), []).append(report)
+        for row in due_rows:
             device, release = str(row["id"]), str(row["release_id"])
-            if not self._device_due(str(row["assigned_at"]), str(row["schedule"]), str(row["timezone"]), now):
-                continue
             assigned = self._parse(row["assigned_at"])
             downloaded = self._parse(row["last_download_at"])
-            with self.database.session() as c:
-                reports = c.execute(
-                    "SELECT event,error_code,details_json,created_at FROM device_events WHERE device_id=? AND created_at>=? ORDER BY id DESC LIMIT 20",
-                    (device, row["assigned_at"]),
-                ).fetchall()
+            reports = [
+                report
+                for report in reports_by_device.get(device, [])
+                if str(report["created_at"]) >= str(row["assigned_at"])
+            ][:20]
             verified = displayed = False
             for report in reports:
                 try:

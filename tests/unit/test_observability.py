@@ -52,6 +52,41 @@ def test_diagnostics_caches_git_revision_per_service(tmp_path, monkeypatch):
     assert len(git_revision_calls) == 1
 
 
+def test_diagnostics_quick_check_and_inventory_are_cached_between_snapshots(tmp_path, monkeypatch):
+    database = Database(tmp_path / "db.sqlite")
+    migrate(database)
+    settings = SettingsRepository(database)
+    settings.ensure_defaults()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    thumbnail_dir = tmp_path / "thumbnails"
+    thumbnail_dir.mkdir()
+    service = DiagnosticsService(database, data_dir, thumbnail_dir, settings_repository=settings)
+    quick_checks = []
+    monkeypatch.setattr(
+        database,
+        "integrity_check",
+        lambda: quick_checks.append("quick") or "ok",
+    )
+
+    service.snapshot()
+    service.snapshot()
+    service.snapshot(force_integrity=True)
+    service.bundle()
+
+    assert quick_checks == ["quick", "quick", "quick"]
+
+
+def test_settings_runtime_cache_does_not_capture_caller_fallbacks(tmp_path):
+    database = Database(tmp_path / "db.sqlite")
+    migrate(database)
+    settings = SettingsRepository(database)
+    settings.ensure_defaults()
+
+    assert settings.get("missing.runtime.key", "first") == "first"
+    assert settings.get("missing.runtime.key", "second") == "second"
+
+
 def test_lightweight_observability_tick_leaves_platform_diagnostics_to_platform_tick(tmp_path, monkeypatch):
     _database, _settings, service = _service(tmp_path)
     platform_calls = []

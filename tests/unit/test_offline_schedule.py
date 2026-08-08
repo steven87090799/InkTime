@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -10,6 +11,8 @@ from inktime.app.domain.photopainter.offline_schedule import (
     normalize_sync_strategy,
     next_sync_epoch,
     next_sleep_epoch,
+    offline_schedule_capability_is_usable,
+    offline_schedule_capability_state,
     prefetch_slots,
     resolve_offline_schedule_max_slots,
     slot_deadlines,
@@ -30,6 +33,14 @@ from inktime.app.repositories.offline_schedules import OfflineScheduleRepository
 )
 def test_offline_schedule_capability_resolver_defaults_unknown_to_legacy(capabilities, expected):
     assert resolve_offline_schedule_max_slots(capabilities) == expected
+
+
+def test_offline_schedule_capability_state_distinguishes_safe_unknown_and_explicit_24():
+    assert offline_schedule_capability_state(12) == "unknown_12"
+    assert offline_schedule_capability_state(24) == "confirmed_24"
+    assert offline_schedule_capability_is_usable("unknown_12")
+    assert offline_schedule_capability_is_usable("confirmed_24")
+    assert not offline_schedule_capability_is_usable("legacy_ambiguous")
 
 
 def test_offline_schedule_capability_boundary_rejects_legacy_13th_slot():
@@ -142,3 +153,41 @@ def test_server_show_at_epoch_is_iana_timezone_authoritative(target_date, expect
     show_at = OfflineScheduleRepository._show_at(target_date, "08:00", "America/New_York")
 
     assert int(datetime.fromisoformat(show_at).timestamp()) == expected_epoch
+
+
+def test_next_prepare_deadline_is_bounded_and_skips_committed_target():
+    zone = ZoneInfo("Asia/Taipei")
+    before_first = OfflineScheduleRepository.next_prepare_deadline(
+        now=datetime(2026, 8, 3, 7, 0, tzinfo=zone),
+        timezone_name="Asia/Taipei",
+        schedule_times=["08:00", "20:00"],
+        prefetch_lead_minutes=5,
+        server_margin_minutes=15,
+        future_prepare_hour_local=20,
+    )
+    assert before_first == "2026-08-02T23:40:00+00:00"
+
+    after_prepare = OfflineScheduleRepository.next_prepare_deadline(
+        now=datetime(2026, 8, 3, 10, 0, tzinfo=zone),
+        timezone_name="Asia/Taipei",
+        schedule_times=["08:00", "20:00"],
+        prefetch_lead_minutes=5,
+        server_margin_minutes=15,
+        future_prepare_hour_local=20,
+        skip_target_dates=["2026-08-03"],
+    )
+    assert after_prepare == "2026-08-03T23:40:00+00:00"
+
+    # At 21:00 the late slot today and the configured future handoff for
+    # tomorrow are both due.  Skipping today's committed target must leave
+    # tomorrow immediately due instead of pushing it into the future.
+    both_due = OfflineScheduleRepository.next_prepare_deadline(
+        now=datetime(2026, 8, 3, 21, 0, tzinfo=zone),
+        timezone_name="Asia/Taipei",
+        schedule_times=["08:00", "22:00"],
+        prefetch_lead_minutes=5,
+        server_margin_minutes=15,
+        future_prepare_hour_local=20,
+        skip_target_dates=["2026-08-03"],
+    )
+    assert both_due == "2026-08-03T13:00:00+00:00"

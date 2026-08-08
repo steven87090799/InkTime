@@ -23,6 +23,7 @@ from inktime.app.domain.photopainter.offline_schedule import (
     resolve_offline_schedule_max_slots,
     validate_offline_schedule,
 )
+from inktime.app.repositories.offline_schedules import SHORTAGE_RETRY_COOLDOWN_SECONDS
 
 
 LOGGER = logging.getLogger("scheduler")
@@ -375,12 +376,20 @@ class SchedulerRunner:
         except (TypeError, ValueError):
             future_prepare_hour = 20
         future_prepare_hour = max(0, min(future_prepare_hour, 23))
-        cursor = offline_schedules.prefetch_cursor()
-        devices, has_more = offline_schedules.due_prefetch_devices(limit=10, after_device_id=cursor)
+        authoritative_now = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+        devices, _has_more = offline_schedules.due_prefetch_devices(
+            limit=10,
+            now=authoritative_now,
+        )
         for device in devices:
+            device_id = str(device.get("id", ""))
+            timezone_name = str(device.get("timezone") or "UTC")
+            schedule: list[str] | None = None
+            retry_deadline: datetime | None = None
+            skip_target_dates: set[str] = set()
+            keep_deadline_due = False
             try:
-                timezone_name = str(device["timezone"] or "UTC")
-                local_now = now.astimezone(ZoneInfo(timezone_name))
+                local_now = authoritative_now.astimezone(ZoneInfo(timezone_name))
                 schedule = validate_offline_schedule(
                     json.loads(str(device["schedule_times_json"] or "[]")),
                     maximum=resolve_offline_schedule_max_slots(
@@ -413,9 +422,11 @@ class SchedulerRunner:
                         target_date=target_iso,
                         config_version=int(device["config_version"]),
                     ) is not None:
+                        skip_target_dates.add(target_iso)
                         continue
                     active_job = job_repository.active_dedupe_job(dedupe_key)
                     if active_job is not None:
+                        skip_target_dates.add(target_iso)
                         if str(active_job["status"]) == "pending":
                             try:
                                 job_service.start(str(active_job["id"]))
@@ -439,19 +450,51 @@ class SchedulerRunner:
                                         "job_id": str(active_job["id"]),
                                     },
                                 )
+                                keep_deadline_due = True
                         continue
-                    if offline_schedules.transient_recovery_blocks_retry(
+                    transient_state = offline_schedules.transient_recovery_for_device(
                         device_id=str(device["id"]),
                         target_date=target_iso,
                         config_version=int(device["config_version"]),
-                        now=now,
-                    ):
-                        continue
+                    )
+                    if transient_state is not None:
+                        try:
+                            transient_deadline = datetime.fromisoformat(
+                                str(transient_state["next_retry_at"])
+                            )
+                            if transient_deadline.tzinfo is None:
+                                transient_deadline = transient_deadline.replace(tzinfo=timezone.utc)
+                        except (KeyError, TypeError, ValueError):
+                            transient_deadline = authoritative_now + timedelta(
+                                seconds=OFFLINE_PREPARE_RETRY_INTERVAL_SECONDS
+                            )
+                        if authoritative_now < transient_deadline.astimezone(timezone.utc):
+                            skip_target_dates.add(target_iso)
+                            retry_deadline = min(retry_deadline, transient_deadline) if retry_deadline else transient_deadline
+                            continue
                     terminal_outcome = offline_schedules.terminal_outcome_for_device(
                         device_id=str(device["id"]),
                         target_date=target_iso,
                         config_version=int(device["config_version"]),
                     )
+                    if terminal_outcome is not None:
+                        try:
+                            terminal_updated_at = datetime.fromisoformat(
+                                str(terminal_outcome["updated_at"])
+                            )
+                            if terminal_updated_at.tzinfo is None:
+                                terminal_updated_at = terminal_updated_at.replace(tzinfo=timezone.utc)
+                            terminal_deadline = terminal_updated_at.astimezone(timezone.utc) + timedelta(
+                                seconds=SHORTAGE_RETRY_COOLDOWN_SECONDS
+                            )
+                        except (KeyError, TypeError, ValueError):
+                            terminal_deadline = authoritative_now + timedelta(
+                                seconds=SHORTAGE_RETRY_COOLDOWN_SECONDS
+                            )
+                        if authoritative_now < terminal_deadline:
+                            skip_target_dates.add(target_iso)
+                            retry_deadline = min(retry_deadline, terminal_deadline) if retry_deadline else terminal_deadline
+                            continue
                     def claim_shortage_recovery(
                         connection,
                         *,
@@ -467,7 +510,7 @@ class SchedulerRunner:
                             device_id=device_id,
                             target_date=target_date,
                             config_version=config_version,
-                            now=now,
+                            now=authoritative_now,
                             connection=connection,
                         )
 
@@ -492,10 +535,35 @@ class SchedulerRunner:
                         transaction_guard=claim_shortage_recovery,
                     )
                     if job_id is None:
+                        candidate = authoritative_now + timedelta(seconds=60)
+                        retry_deadline = min(retry_deadline, candidate) if retry_deadline else candidate
                         continue
+                    skip_target_dates.add(target_iso)
                     current = job_repository.get(job_id)
                     if current is not None and str(current["status"]) == "pending":
-                        job_service.start(job_id)
+                        try:
+                            job_service.start(job_id)
+                        except Exception as exc:
+                            job_repository.add_event(
+                                job_id,
+                                "offline_prepare_start_failed",
+                                "離線排程準備工作啟動失敗；保留 pending Job 供下次 Scheduler 重試",
+                                {"error_code": failure_code(exc)},
+                            )
+                            log_event(
+                                LOGGER,
+                                logging.ERROR,
+                                "離線排程新建 pending 工作啟動失敗；保持 deadline 到期",
+                                event="offline_prepare_pending_start_failed",
+                                error_code=failure_code(exc),
+                                details={
+                                    "device_id": str(device["id"]),
+                                    "target_date": target_iso,
+                                    "config_version": int(device["config_version"]),
+                                    "job_id": job_id,
+                                },
+                            )
+                            keep_deadline_due = True
                     log_event(
                         LOGGER,
                         logging.INFO,
@@ -520,11 +588,62 @@ class SchedulerRunner:
                         "error_type": exc.__class__.__name__,
                     },
                 )
-        if devices:
-            if has_more:
-                offline_schedules.advance_prefetch_cursor(str(devices[-1]["id"]))
-            elif cursor:
-                offline_schedules.reset_prefetch_cursor()
+                retry_deadline = authoritative_now + timedelta(
+                    seconds=OFFLINE_PREPARE_RETRY_INTERVAL_SECONDS
+                )
+            if schedule is None:
+                offline_schedules.set_next_prepare_deadline(
+                    device_id,
+                    retry_deadline,
+                    config_version=int(device["config_version"]),
+                )
+                continue
+            if keep_deadline_due:
+                offline_schedules.set_next_prepare_deadline(
+                    device_id,
+                    authoritative_now,
+                    config_version=int(device["config_version"]),
+                )
+                continue
+            try:
+                if retry_deadline is None:
+                    retry_deadline = datetime.fromisoformat(
+                        offline_schedules.next_prepare_deadline(
+                            now=authoritative_now,
+                            timezone_name=timezone_name,
+                            schedule_times=schedule,
+                            prefetch_lead_minutes=int(device["prefetch_lead_minutes"] or 0),
+                            server_margin_minutes=server_margin,
+                            future_prepare_hour_local=future_prepare_hour,
+                            sync_strategy=str(device["sync_strategy"] or "first_display_lead"),
+                            sync_time=device["sync_time"],
+                            minimum_gap_minutes=int(
+                                device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
+                            ),
+                            maximum_slots=resolve_offline_schedule_max_slots(
+                                {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
+                            ),
+                            skip_target_dates=tuple(skip_target_dates),
+                        )
+                    )
+                if retry_deadline.tzinfo is None:
+                    retry_deadline = retry_deadline.replace(tzinfo=timezone.utc)
+                if retry_deadline <= authoritative_now:
+                    retry_deadline = authoritative_now + timedelta(seconds=60)
+                offline_schedules.set_next_prepare_deadline(
+                    device_id,
+                    retry_deadline,
+                    config_version=int(device["config_version"]),
+                )
+            except Exception as exc:
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "離線排程下一次截止時間計算失敗；下次排程會重試",
+                    event="offline_schedule_deadline_failed",
+                    error_code="OFFLINE-002",
+                    details={"device_id": device_id, "error_type": exc.__class__.__name__},
+                )
 
     def _enqueue_task(
         self,

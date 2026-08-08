@@ -14,6 +14,7 @@ from inktime.app.domain.jobs.failure_policy import (
 )
 from inktime.app.domain.photopainter.offline_schedule import (
     MINIMUM_SCHEDULE_GAP_MINUTES,
+    offline_schedule_capability_is_usable,
     resolve_offline_schedule_max_slots,
     validate_offline_schedule,
 )
@@ -172,14 +173,15 @@ class DisplayPreparationService:
         with self.database.session() as connection:
             device = connection.execute(
                 """
-                SELECT id,config_version,delivery_mode,offline_prefetch_allowed,timezone
+                SELECT id,config_version,delivery_mode,offline_prefetch_allowed,
+                       offline_schedule_capability_state,timezone
                 FROM devices WHERE id=? AND enabled=1
                 """,
                 (selected_device_id,),
             ).fetchone()
         if device is None or str(device["delivery_mode"]) != "inktime_offline_schedule" or not bool(
             device["offline_prefetch_allowed"]
-        ):
+        ) or not offline_schedule_capability_is_usable(device["offline_schedule_capability_state"]):
             return {
                 "status": "not_prepared",
                 "outcome": "not_prepared",
@@ -378,6 +380,8 @@ class DisplayPreparationService:
             device["offline_prefetch_allowed"]
         ):
             raise JobConfigurationError("QUEUE-005 裝置未啟用離線排程或 Prefetch")
+        if not offline_schedule_capability_is_usable(device["offline_schedule_capability_state"]):
+            raise JobConfigurationError("DEVICE-008 裝置離線 Slot 能力尚未確認，拒絕建立 Playlist")
         try:
             schedule_times = validate_offline_schedule(
                 json.loads(str(device["schedule_times_json"] or "[]")),

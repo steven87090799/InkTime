@@ -25,7 +25,9 @@ from inktime.app.db import Database
 from inktime.app.domain.photopainter.offline_schedule import (
     LEGACY_MAX_OFFLINE_SLOTS,
     MINIMUM_SCHEDULE_GAP_MINUTES,
+    OFFLINE_PREPARE_BOOTSTRAP_AT,
     normalize_sync_strategy,
+    offline_schedule_capability_state,
     resolve_offline_schedule_max_slots,
     validate_offline_schedule,
 )
@@ -807,8 +809,19 @@ class DevicePairingService:
             ),
         )
         connection.execute(
-            "UPDATE devices SET offline_schedule_max_slots=? WHERE id=?",
-            (maximum_slots, device_id),
+            """
+            UPDATE devices
+            SET offline_schedule_max_slots=?,offline_schedule_capability_state=?,
+                next_offline_prepare_at=CASE WHEN ?=1 THEN ? ELSE NULL END
+            WHERE id=?
+            """,
+            (
+                maximum_slots,
+                offline_schedule_capability_state(maximum_slots),
+                int(config["delivery_mode"] == "inktime_offline_schedule"),
+                OFFLINE_PREPARE_BOOTSTRAP_AT,
+                device_id,
+            ),
         )
 
     def _update_confirmed_device(self, connection, *, device_id: str, envelope: dict[str, Any], now: datetime) -> None:
@@ -838,7 +851,9 @@ class DevicePairingService:
                 previous_device_secret_hash=NULL,previous_credential_version=NULL,previous_credential_expires_at=NULL,
                 pairing_code_hash=NULL,pairing_expires_at=NULL,pairing_attempts=0,pairing_claim_attempts=0,
                 pairing_requested_at=NULL,firmware_version=COALESCE(NULLIF(?,''),firmware_version),
-                firmware_identity=COALESCE(NULLIF(?,''),firmware_identity),offline_schedule_max_slots=?,config_version=config_version+1,updated_at=?
+                firmware_identity=COALESCE(NULLIF(?,''),firmware_identity),offline_schedule_max_slots=?,
+                offline_schedule_capability_state=?,next_offline_prepare_at=CASE WHEN ?=1 THEN ? ELSE NULL END,
+                config_version=config_version+1,updated_at=?
             WHERE id=?
             """,
             (
@@ -850,7 +865,8 @@ class DevicePairingService:
                 int(envelope["credential_version"]),
                 hash_device_secret(str(envelope["device_secret"]), self.pepper), self._iso(now),
                 str(envelope.get("firmware_version") or ""), str(envelope.get("firmware_identity") or ""),
-                maximum_slots,
+                maximum_slots, offline_schedule_capability_state(maximum_slots),
+                int(delivery_mode == "inktime_offline_schedule"), OFFLINE_PREPARE_BOOTSTRAP_AT,
                 self._iso(now), device_id,
             ),
         )

@@ -19,6 +19,7 @@ from inktime.app.domain.photopainter.offline_schedule import (
     MAX_OFFLINE_SLOTS,
     MINIMUM_SCHEDULE_GAP_MINUTES,
     normalize_sync_strategy,
+    offline_schedule_capability_is_usable,
     resolve_offline_schedule_max_slots,
     slot_deadlines,
     validate_offline_schedule,
@@ -78,6 +79,94 @@ class OfflineScheduleRepository:
         hour, minute = (int(part) for part in slot.split(":"))
         local = datetime.combine(target_date, time(hour, minute), tzinfo=ZoneInfo(timezone_name))
         return local.astimezone(timezone.utc).isoformat()
+
+    @staticmethod
+    def next_prepare_deadline(
+        *,
+        now: datetime,
+        timezone_name: str,
+        schedule_times: Sequence[str],
+        prefetch_lead_minutes: int,
+        server_margin_minutes: int,
+        future_prepare_hour_local: int,
+        sync_strategy: str = "first_display_lead",
+        sync_time: str | None = None,
+        minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
+        maximum_slots: int = MAX_PREPARED_SLOTS,
+        skip_target_dates: Sequence[str] = (),
+    ) -> str:
+        """Return the next bounded, timezone-aware offline prepare deadline.
+
+        The scheduler prepares only today and tomorrow.  A due target is
+        represented by ``now``; callers can then skip the target after they
+        enqueue it, observe an active Job, or find a committed Playlist.  A
+        future target uses the earlier of its technical deadline and the
+        configured local future-schedule handoff hour.
+        """
+
+        if type(prefetch_lead_minutes) is not int or not 0 <= prefetch_lead_minutes <= 120:
+            raise ValueError("DEVICE-008 prefetch_lead_minutes 不合法")
+        if type(server_margin_minutes) is not int or not 0 <= server_margin_minutes <= 60:
+            raise ValueError("DEVICE-008 server_prefetch_margin_minutes 不合法")
+        if type(future_prepare_hour_local) is not int or not 0 <= future_prepare_hour_local <= 23:
+            raise ValueError("DEVICE-008 future_schedule_prepare_hour_local 不合法")
+        try:
+            zone = ZoneInfo(str(timezone_name))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("DEVICE-008 裝置 IANA 時區不合法") from exc
+        current = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+        local_now = current.astimezone(zone)
+        strategy, normalized_sync_time = normalize_sync_strategy(sync_strategy, sync_time)
+        slots = validate_offline_schedule(
+            schedule_times,
+            maximum=resolve_offline_schedule_max_slots(
+                {"offline_schedule_max_slots": maximum_slots}
+            ),
+            minimum_gap_minutes=minimum_gap_minutes,
+        )
+        skip = {str(value) for value in skip_target_dates}
+        lead_and_margin = timedelta(minutes=prefetch_lead_minutes + server_margin_minutes)
+
+        def slot_at(target: date, slot: str) -> datetime:
+            hour, minute = (int(part) for part in slot.split(":"))
+            return datetime.combine(target, time(hour, minute), tzinfo=zone)
+
+        def technical_deadline(target: date) -> datetime:
+            if strategy == "fixed_daily":
+                assert normalized_sync_time is not None
+                hour, minute = (int(part) for part in normalized_sync_time.split(":"))
+                return datetime.combine(target, time(hour, minute), tzinfo=zone)
+            return slot_at(target, slots[0]) - lead_and_margin
+
+        def emit(value: datetime) -> str:
+            return value.astimezone(timezone.utc).isoformat()
+
+        today = local_now.date()
+        for offset in range(3):
+            target = today + timedelta(days=offset)
+            if target.isoformat() in skip:
+                continue
+            technical = technical_deadline(target)
+            if offset == 0:
+                if local_now < technical:
+                    return emit(technical)
+                if any(slot_at(target, slot) > local_now for slot in slots):
+                    return emit(local_now)
+                continue
+            handoff = datetime.combine(
+                target - timedelta(days=1),
+                time(future_prepare_hour_local, 0),
+                tzinfo=zone,
+            )
+            candidate = min(technical, handoff)
+            if local_now >= candidate:
+                return emit(local_now)
+            return emit(candidate)
+
+        # A valid configuration always has a future target, but retain a
+        # bounded fallback if a clock/DST edge makes all three candidates
+        # unrepresentable.
+        return emit(local_now + timedelta(minutes=15))
 
     @staticmethod
     def retry_after_epoch(
@@ -606,6 +695,10 @@ class OfflineScheduleRepository:
                 )
                 if cursor.rowcount != 1:
                     raise RuntimeError("OFFLINE-002 離線排程狀態已變更，拒絕覆寫 transient recovery")
+            active_connection.execute(
+                "UPDATE devices SET next_offline_prepare_at=? WHERE id=? AND config_version=?",
+                (next_retry_at.isoformat(), device_id, int(config_version)),
+            )
         return state
 
     def clear_transient_recovery(
@@ -689,6 +782,12 @@ class OfflineScheduleRepository:
                     str(terminal_outcome["updated_at"]),
                 ),
             )
+            if cursor.rowcount:
+                next_deadline = (current.astimezone(timezone.utc) + timedelta(seconds=cooldown)).isoformat()
+                active_connection.execute(
+                    "UPDATE devices SET next_offline_prepare_at=? WHERE id=? AND config_version=?",
+                    (next_deadline, device_id, int(config_version)),
+                )
         return bool(cursor.rowcount)
 
     def record_terminal_outcome(
@@ -770,6 +869,13 @@ class OfflineScheduleRepository:
                     json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
                     normalized_code,
                 ),
+            )
+            next_deadline = (
+                datetime.fromisoformat(now) + timedelta(seconds=SHORTAGE_RETRY_COOLDOWN_SECONDS)
+            ).isoformat()
+            connection.execute(
+                "UPDATE devices SET next_offline_prepare_at=? WHERE id=? AND config_version=?",
+                (next_deadline, device_id, int(config_version)),
             )
         return {
             "status": "completed",
@@ -905,7 +1011,7 @@ class OfflineScheduleRepository:
                            panel_profile,rotation,schedule_times_json,prefetch_lead_minutes,
                            button_wake_action,offline_schedule_version,
                            minimum_schedule_gap_minutes,sync_strategy,sync_time,
-                           offline_schedule_max_slots
+                           offline_schedule_max_slots,offline_schedule_capability_state
                     FROM devices WHERE id=? AND enabled=1
                     """,
                     (device_id,),
@@ -921,6 +1027,8 @@ class OfflineScheduleRepository:
                     device["offline_prefetch_allowed"]
                 ):
                     raise ValueError("QUEUE-005 裝置未啟用離線排程或 Prefetch")
+                if not offline_schedule_capability_is_usable(device["offline_schedule_capability_state"]):
+                    raise ValueError("DEVICE-008 裝置離線 Slot 能力尚未確認，拒絕建立 Playlist")
                 try:
                     configured_times = json.loads(str(device["schedule_times_json"] or "[]"))
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -1152,7 +1260,8 @@ class OfflineScheduleRepository:
                     """
                     SELECT config_version,panel_profile,rotation,timezone,schedule_times_json,
                            prefetch_lead_minutes,button_wake_action,offline_schedule_version,
-                           minimum_schedule_gap_minutes,sync_strategy,sync_time
+                           minimum_schedule_gap_minutes,sync_strategy,sync_time,
+                           next_offline_prepare_at
                     FROM devices WHERE id=? AND enabled=1
                     """,
                     (device_id,),
@@ -1173,6 +1282,24 @@ class OfflineScheduleRepository:
                     or (current["sync_time"] or None) != (sync_time or None)
                 ):
                     raise ValueError("DISPLAY-CONFIG-RACE 裝置設定在離線排程提交前已變更")
+                current_deadline = current["next_offline_prepare_at"]
+                try:
+                    deadline_is_future = (
+                        current_deadline is not None
+                        and datetime.fromisoformat(str(current_deadline)).astimezone(timezone.utc)
+                        > datetime.fromisoformat(now)
+                    )
+                except (TypeError, ValueError):
+                    deadline_is_future = False
+                if not deadline_is_future:
+                    connection.execute(
+                        "UPDATE devices SET next_offline_prepare_at=? WHERE id=? AND config_version=?",
+                        (
+                            (datetime.fromisoformat(now) + timedelta(minutes=15)).isoformat(),
+                            device_id,
+                            current_config_version,
+                        ),
+                    )
                 connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")
@@ -1213,7 +1340,7 @@ class OfflineScheduleRepository:
                 if schedule is None:
                     raise KeyError(schedule_id)
                 device = connection.execute(
-                    "SELECT enabled,delivery_mode,offline_prefetch_allowed,config_version,offline_schedule_max_slots FROM devices WHERE id=?",
+                    "SELECT enabled,delivery_mode,offline_prefetch_allowed,config_version,offline_schedule_max_slots,offline_schedule_capability_state FROM devices WHERE id=?",
                     (device_id,),
                 ).fetchone()
                 if device is None or not bool(device["enabled"]):
@@ -1221,6 +1348,7 @@ class OfflineScheduleRepository:
                 if (
                     str(device["delivery_mode"]) != "inktime_offline_schedule"
                     or not bool(device["offline_prefetch_allowed"])
+                    or not offline_schedule_capability_is_usable(device["offline_schedule_capability_state"])
                     or int(device["config_version"]) != int(schedule["config_version"])
                 ):
                     raise ValueError("DISPLAY-CONFIG-RACE 裝置設定已變更，拒絕替換舊排程 Slot")
@@ -1339,38 +1467,86 @@ class OfflineScheduleRepository:
             return self._row(connection, schedule_id) or {}
 
     def due_prefetch_devices(
-        self, *, limit: int = 32, after_device_id: str | None = None
+        self, *, limit: int = 32, now: datetime | str | None = None
     ) -> tuple[list[dict[str, Any]], bool]:
+        """Return only devices whose persisted prepare deadline has arrived.
+
+        The legacy cursor table remains readable for migration compatibility,
+        but it is deliberately not part of the runtime ownership path.  A
+        bounded deadline query avoids scanning or writing every enabled
+        offline device on every Scheduler tick.
+        """
+
         bounded = max(1, min(int(limit), 128))
         fetch_limit = bounded + 1
+        if now is None:
+            current = datetime.now(timezone.utc)
+        elif isinstance(now, datetime):
+            current = now
+        else:
+            current = datetime.fromisoformat(str(now))
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        now_iso = current.astimezone(timezone.utc).isoformat()
         with self.database.session() as connection:
-            after = str(after_device_id or "")
             rows = connection.execute(
                 """
                 SELECT id,name,timezone,schedule_times_json,prefetch_lead_minutes,config_version,
-                       minimum_schedule_gap_minutes,sync_strategy,sync_time,offline_schedule_max_slots
+                       minimum_schedule_gap_minutes,sync_strategy,sync_time,offline_schedule_max_slots,
+                       offline_schedule_capability_state,next_offline_prepare_at
                 FROM devices
                 WHERE enabled=1 AND delivery_mode='inktime_offline_schedule'
                   AND offline_prefetch_allowed=1
-                  AND id>?
-                ORDER BY id LIMIT ?
+                  AND offline_schedule_capability_state IN ('unknown_12','confirmed_24')
+                  AND next_offline_prepare_at<=?
+                ORDER BY next_offline_prepare_at,id LIMIT ?
                 """,
-                (after, fetch_limit),
+                (now_iso, fetch_limit),
             ).fetchall()
-            if not rows and after:
-                rows = connection.execute(
-                    """
-                    SELECT id,name,timezone,schedule_times_json,prefetch_lead_minutes,config_version,
-                           minimum_schedule_gap_minutes,sync_strategy,sync_time,offline_schedule_max_slots
-                    FROM devices
-                    WHERE enabled=1 AND delivery_mode='inktime_offline_schedule'
-                      AND offline_prefetch_allowed=1
-                    ORDER BY id LIMIT ?
-                    """,
-                    (fetch_limit,),
-                ).fetchall()
         has_more = len(rows) > bounded
         return [dict(row) for row in rows[:bounded]], has_more
+
+    def set_next_prepare_deadline(
+        self,
+        device_id: str,
+        deadline: datetime | str | None,
+        *,
+        config_version: int | None = None,
+        connection=None,
+    ) -> bool:
+        """Persist a deadline only when it actually changes."""
+
+        normalized: str | None
+        if deadline is None:
+            normalized = None
+        elif isinstance(deadline, datetime):
+            current = deadline if deadline.tzinfo is not None else deadline.replace(tzinfo=timezone.utc)
+            normalized = current.astimezone(timezone.utc).isoformat()
+        else:
+            current = datetime.fromisoformat(str(deadline))
+            if current.tzinfo is None:
+                current = current.replace(tzinfo=timezone.utc)
+            normalized = current.astimezone(timezone.utc).isoformat()
+        context = nullcontext(connection) if connection is not None else self.database.transaction()
+        with context as active_connection:
+            if config_version is None:
+                cursor = active_connection.execute(
+                    """
+                    UPDATE devices SET next_offline_prepare_at=?
+                    WHERE id=? AND COALESCE(next_offline_prepare_at,'')<>COALESCE(?,'')
+                    """,
+                    (normalized, str(device_id), normalized),
+                )
+            else:
+                cursor = active_connection.execute(
+                    """
+                    UPDATE devices SET next_offline_prepare_at=?
+                    WHERE id=? AND config_version=?
+                      AND COALESCE(next_offline_prepare_at,'')<>COALESCE(?,'')
+                    """,
+                    (normalized, str(device_id), int(config_version), normalized),
+                )
+        return bool(cursor.rowcount)
 
     def prefetch_cursor(self) -> str | None:
         with self.database.session() as connection:

@@ -392,10 +392,11 @@ def test_explicit_24_slot_capability_survives_pairing_confirm(client, app):
 
     with app.extensions["inktime_database"].session() as connection:
         device = connection.execute(
-            "SELECT offline_schedule_max_slots,schedule_times_json FROM devices WHERE id=?",
+            "SELECT offline_schedule_max_slots,offline_schedule_capability_state,schedule_times_json FROM devices WHERE id=?",
             (payload["device_id"],),
         ).fetchone()
     assert device["offline_schedule_max_slots"] == 24
+    assert device["offline_schedule_capability_state"] == "confirmed_24"
     assert len(json.loads(str(device["schedule_times_json"]))) == 24
 
 

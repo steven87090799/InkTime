@@ -6,6 +6,7 @@ from hashlib import sha256
 import json
 import math
 import re
+import time
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -1456,9 +1457,9 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "system.diagnostics_cache_seconds": {
         "category": "Log 與診斷",
-        "default": 300,
+        "default": 21600,
         "type": "integer",
-        "description": "診斷頁重算縮圖目錄大小前的快取秒數",
+        "description": "診斷頁重算縮圖目錄大小前的快取秒數；預設 6 小時",
         "risk": "數值太小會在大型快取目錄產生頻繁磁碟掃描",
         "min": 30,
         "max": 86400,
@@ -1751,8 +1752,12 @@ for _setting_key, _setting_definition in SETTING_DEFINITIONS.items():
 
 
 class SettingsRepository:
+    _RUNTIME_CACHE_TTL_SECONDS = 5.0
+
     def __init__(self, database: Database) -> None:
         self.database = database
+        self._runtime_cache: dict[str, Any] = {}
+        self._runtime_cache_at = 0.0
 
     def ensure_defaults(self) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -1814,6 +1819,8 @@ class SettingsRepository:
                     for key, definition in SETTING_DEFINITIONS.items()
                 ],
             )
+        self._runtime_cache.clear()
+        self._runtime_cache_at = 0.0
 
     def all(self, *, redact_sensitive: bool = False):
         with self.database.session() as connection:
@@ -1856,9 +1863,27 @@ class SettingsRepository:
         return result
 
     def get(self, key: str, default=None):
+        return self.get_many([key], defaults={key: default})[str(key)]
+
+    def get_many(self, keys, *, defaults: dict[str, Any] | None = None) -> dict[str, Any]:
+        normalized = tuple(dict.fromkeys(str(key) for key in keys))
+        if not normalized:
+            return {}
+        now = time.monotonic()
+        cache_fresh = now - self._runtime_cache_at < self._RUNTIME_CACHE_TTL_SECONDS
+        if cache_fresh and all(key in self._runtime_cache for key in normalized):
+            return {key: self._runtime_cache[key] for key in normalized}
+        placeholders = ",".join("?" for _ in normalized)
         with self.database.session() as connection:
-            row = connection.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()
-        return json.loads(row["value_json"]) if row else default
+            rows = connection.execute(
+                f"SELECT key,value_json FROM settings WHERE key IN ({placeholders})",  # noqa: S608 -- placeholders are generated from keys
+                normalized,
+            ).fetchall()
+        values = {str(row["key"]): json.loads(row["value_json"]) for row in rows}
+        fallback = defaults or {}
+        self._runtime_cache.update(values)
+        self._runtime_cache_at = now
+        return {key: values.get(key, fallback.get(key)) for key in normalized}
 
     def is_explicit(self, key: str) -> bool:
         """Whether an operator has stored a non-default value for ``key``."""
@@ -2403,6 +2428,8 @@ class SettingsRepository:
                         int(definition.get("restart_required", False)),
                     ),
                 )
+        self._runtime_cache.clear()
+        self._runtime_cache_at = 0.0
         return {
             "updated": len(actual),
             "changed_keys": sorted(actual),

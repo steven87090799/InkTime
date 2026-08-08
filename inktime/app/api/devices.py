@@ -30,6 +30,7 @@ from inktime.app.domain.photopainter.offline_schedule import (
     MINIMUM_SCHEDULE_GAP_MINUTES,
     normalize_delivery_contract,
     normalize_sync_strategy,
+    offline_schedule_capability_is_usable,
     resolve_offline_schedule_max_slots,
     validate_offline_schedule,
 )
@@ -514,6 +515,10 @@ def latest_release():
                 "schema_version": 3,
                 "delivery_mode": "inktime_offline_schedule",
                 "offline_prefetch_allowed": bool(device["offline_prefetch_allowed"]),
+                "offline_schedule_max_slots": int(device["offline_schedule_max_slots"] or LEGACY_MAX_OFFLINE_SLOTS),
+                "offline_schedule_capability_state": str(
+                    device["offline_schedule_capability_state"] or "unknown_12"
+                ),
                 "schedule_times": json.loads(str(device["schedule_times_json"] or "[]")),
                 "prefetch_lead_minutes": int(device["prefetch_lead_minutes"] or 0),
                 "button_wake_action": str(device["button_wake_action"] or "check_new"),
@@ -706,6 +711,8 @@ def device_offline_schedule():
     device = authenticate_device_request()
     if str(device["delivery_mode"] or "legacy_online") != "inktime_offline_schedule":
         abort(409, description="DEVICE-008 裝置目前不是 enhanced offline schedule 模式")
+    if not offline_schedule_capability_is_usable(device["offline_schedule_capability_state"]):
+        abort(409, description="DEVICE-008 裝置離線 Slot 能力尚未確認，暫停離線排程傳送")
     requested_targets = request.args.getlist("target")
     if len(requested_targets) > 1:
         abort(400, description="DEVICE-008 target 只允許單一 current 或 next")

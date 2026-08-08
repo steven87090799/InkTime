@@ -193,6 +193,10 @@ def test_offline_shortage_pending_restart_does_not_claim_new_cooldown(app, monke
                 config_version,
             ),
         )
+        connection.execute(
+            "UPDATE devices SET next_offline_prepare_at=? WHERE id=?",
+            (retry_now.isoformat(), device_id),
+        )
 
     job_service = app.extensions["inktime_job_service"]
     original_start = job_service.start
@@ -209,6 +213,11 @@ def test_offline_shortage_pending_restart_does_not_claim_new_cooldown(app, monke
     scheduler._prepare_due_offline_devices(retry_now)
     assert failed_job_id is not None
     assert repository.get(failed_job_id)["status"] == "pending"
+    with app.extensions["inktime_database"].session() as connection:
+        deadline_after_start_failure = connection.execute(
+            "SELECT next_offline_prepare_at FROM devices WHERE id=?", (device_id,)
+        ).fetchone()["next_offline_prepare_at"]
+    assert datetime.fromisoformat(deadline_after_start_failure) <= retry_now
     terminal_after_claim = offline_schedules.terminal_outcome_for_device(
         device_id=device_id,
         target_date="2026-08-03",
@@ -271,6 +280,10 @@ def test_offline_shortage_claim_crash_before_job_insert_is_restartable(app):
                 (retry_now - timedelta(seconds=SHORTAGE_RETRY_COOLDOWN_SECONDS + 1)).isoformat(),
                 terminal_before_retry["id"],
             ),
+        )
+        connection.execute(
+            "UPDATE devices SET next_offline_prepare_at=? WHERE id=?",
+            (retry_now.isoformat(), device_id),
         )
     terminal_before_crash = offline_schedules.terminal_outcome_for_device(
         device_id=device_id,
@@ -744,6 +757,10 @@ def test_offline_prepare_transient_failure_keeps_active_retry_bounded(app, monke
             "UPDATE device_offline_schedules SET snapshot_json=? WHERE device_id=? AND target_date=? AND config_version=1",
             (json.dumps(snapshot), device_id, "2026-08-03"),
         )
+        connection.execute(
+            "UPDATE devices SET next_offline_prepare_at=? WHERE id=?",
+            ((now + timedelta(minutes=30)).isoformat(), device_id),
+        )
     scheduler._prepare_due_offline_devices(now + timedelta(minutes=29))
     assert len(offline_jobs()) == 1
     scheduler._prepare_due_offline_devices(now + timedelta(minutes=30, seconds=1))
@@ -961,6 +978,11 @@ def test_offline_shortage_is_terminal_for_one_device_day_config(app):
     assert json.loads(result["result_json"])["outcome_code"] == "NO_ELIGIBLE_CANDIDATES"
     assert result["error_code"] is None
 
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE devices SET next_offline_prepare_at=? WHERE id=?",
+            (now.isoformat(), device_id),
+        )
     scheduler._prepare_due_offline_devices(now)
     scheduler._prepare_due_offline_devices(now + timedelta(minutes=1))
     assert len(
@@ -1024,6 +1046,10 @@ def test_offline_shortage_retries_after_bounded_cooldown_and_keeps_active_dedupe
                 "2026-08-03",
                 config_version,
             ),
+        )
+        connection.execute(
+            "UPDATE devices SET next_offline_prepare_at=? WHERE id=?",
+            (retry_now.isoformat(), device_id),
         )
 
     scheduler._prepare_due_offline_devices(retry_now)
@@ -1201,23 +1227,18 @@ def test_offline_scheduler_skips_expired_today_but_keeps_a_future_today_slot(app
     }
 
 
-def test_offline_prefetch_cursor_eventually_visits_more_than_first_ten_devices(app, monkeypatch):
+def test_offline_prefetch_deadline_query_processes_a_bounded_batch_without_cursor(app, monkeypatch):
     repository = app.extensions["inktime_offline_schedule_repository"]
-    advanced = []
-    reset_calls = []
-    original_advance = repository.advance_prefetch_cursor
-    original_reset = repository.reset_prefetch_cursor
-
-    def track_advance(device_id):
-        advanced.append(device_id)
-        original_advance(device_id)
-
-    def track_reset():
-        reset_calls.append(True)
-        original_reset()
-
-    monkeypatch.setattr(repository, "advance_prefetch_cursor", track_advance)
-    monkeypatch.setattr(repository, "reset_prefetch_cursor", track_reset)
+    monkeypatch.setattr(
+        repository,
+        "advance_prefetch_cursor",
+        lambda *_args, **_kwargs: pytest.fail("runtime must not advance the legacy prefetch cursor"),
+    )
+    monkeypatch.setattr(
+        repository,
+        "reset_prefetch_cursor",
+        lambda *_args, **_kwargs: pytest.fail("runtime must not reset the legacy prefetch cursor"),
+    )
     device_ids = []
     for index in range(25):
         device_id, _token = app.extensions["inktime_device_repository"].create(
@@ -1230,7 +1251,7 @@ def test_offline_prefetch_cursor_eventually_visits_more_than_first_ten_devices(a
         device_ids.append(device_id)
     runner = SchedulerRunner(app)
     now = datetime(2026, 8, 3, 7, 55, tzinfo=ZoneInfo("Asia/Taipei"))
-    for _index in range(4):
+    for _index in range(3):
         runner._prepare_due_offline_devices(now)
 
     jobs = app.extensions["inktime_job_repository"].list()
@@ -1242,77 +1263,145 @@ def test_offline_prefetch_cursor_eventually_visits_more_than_first_ten_devices(a
         if str(device_id) in str(job["settings_json"])
     }
     assert prepared_ids == set(device_ids)
-    assert len(advanced) == 3
-    assert reset_calls == [True]
 
 
-def test_offline_prefetch_does_not_write_cursor_when_batch_has_no_due_work(app, monkeypatch):
+def test_offline_prefetch_active_due_page_advances_and_reaches_tail(app):
+    device_ids = []
+    for index in range(11):
+        device_id, _token = app.extensions["inktime_device_repository"].create(
+            f"活動工作頁尾裝置 {index:02d}",
+            delivery_mode="inktime_offline_schedule",
+            offline_prefetch_allowed=True,
+            schedule_times=["08:00"],
+            prefetch_lead_minutes=5,
+        )
+        device_ids.append(device_id)
+
+    runner = SchedulerRunner(app)
+    repository = app.extensions["inktime_job_repository"]
+    now = datetime(2026, 8, 3, 7, 55, tzinfo=ZoneInfo("Asia/Taipei"))
+    runner._prepare_due_offline_devices(now)
+
+    def offline_jobs(device_id):
+        return [
+            job
+            for job in repository.list()
+            if '"offline_prepare"' in str(job["settings_json"])
+            and device_id in str(job["settings_json"])
+        ]
+
+    assert all(len(offline_jobs(device_id)) == 1 for device_id in device_ids[:10])
+    assert offline_jobs(device_ids[-1]) == []
+
+    # Simulate the first page remaining due while its Jobs are still active.
+    # The scheduler must advance those committed targets before the next page
+    # can be selected; it must not enqueue duplicates for them.
+    with app.extensions["inktime_database"].session() as connection:
+        connection.executemany(
+            "UPDATE devices SET next_offline_prepare_at=? WHERE id=?",
+            [(now.isoformat(), device_id) for device_id in device_ids[:10]],
+        )
+
+    runner._prepare_due_offline_devices(now)
+    assert all(len(offline_jobs(device_id)) == 1 for device_id in device_ids[:10])
+    assert offline_jobs(device_ids[-1]) == []
+
+    runner._prepare_due_offline_devices(now)
+    assert len(offline_jobs(device_ids[-1])) == 1
+    assert all(len(offline_jobs(device_id)) == 1 for device_id in device_ids)
+
+
+def test_offline_prefetch_quarantines_ambiguous_capability_rows(app):
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "能力未確認的離線裝置",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00", "20:00"],
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE devices SET offline_schedule_capability_state='legacy_ambiguous' WHERE id=?",
+            (device_id,),
+        )
+
+    SchedulerRunner(app)._prepare_due_offline_devices(
+        datetime(2026, 8, 3, 7, 55, tzinfo=ZoneInfo("Asia/Taipei"))
+    )
+
+    assert not [
+        job
+        for job in app.extensions["inktime_job_repository"].list()
+        if '"offline_prepare"' in str(job["settings_json"]) and device_id in str(job["settings_json"])
+    ]
+
+
+def test_offline_prefetch_does_not_write_when_deadline_is_in_the_future(app, monkeypatch):
     repository = app.extensions["inktime_offline_schedule_repository"]
-    advanced = []
-    monkeypatch.setattr(repository, "advance_prefetch_cursor", advanced.append)
+    monkeypatch.setattr(
+        repository,
+        "advance_prefetch_cursor",
+        lambda *_args, **_kwargs: pytest.fail("runtime must not advance the legacy prefetch cursor"),
+    )
+    monkeypatch.setattr(
+        repository,
+        "reset_prefetch_cursor",
+        lambda *_args, **_kwargs: pytest.fail("runtime must not reset the legacy prefetch cursor"),
+    )
+    device_ids = []
     for index in range(3):
-        app.extensions["inktime_device_repository"].create(
+        device_id, _token = app.extensions["inktime_device_repository"].create(
             f"未到期離線裝置 {index:02d}",
             delivery_mode="inktime_offline_schedule",
             offline_prefetch_allowed=True,
             schedule_times=["08:00"],
             prefetch_lead_minutes=5,
         )
+        device_ids.append(device_id)
+    with app.extensions["inktime_database"].session() as connection:
+        connection.executemany(
+            "UPDATE devices SET next_offline_prepare_at=? WHERE id=?",
+            [("2026-08-04T00:00:00+00:00", device_id) for device_id in device_ids],
+        )
 
     runner = SchedulerRunner(app)
-    now = datetime(2026, 8, 3, 7, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+    now = datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc)
     for _index in range(3):
         runner._prepare_due_offline_devices(now)
 
-    assert advanced == []
+    assert not [
+        job
+        for job in app.extensions["inktime_job_repository"].list()
+        if '"offline_prepare"' in str(job["settings_json"])
+    ]
+    with app.extensions["inktime_database"].session() as connection:
+        cursor = connection.execute(
+            "SELECT last_device_id FROM device_offline_prefetch_cursors WHERE id=1"
+        ).fetchone()
+    assert cursor["last_device_id"] is None
 
 
-def test_offline_prefetch_resets_cursor_after_a_non_full_tail_page(app, monkeypatch):
+def test_offline_prefetch_deadline_query_orders_due_devices_and_reports_bounded_tail(app):
     repository = app.extensions["inktime_offline_schedule_repository"]
-    batches = []
-    reset_calls = []
-    original_due = repository.due_prefetch_devices
-    original_reset = repository.reset_prefetch_cursor
-
-    def capture_batch(**kwargs):
-        devices, has_more = original_due(**kwargs)
-        batches.append(([str(device["id"]) for device in devices], has_more))
-        return devices, has_more
-
-    def capture_reset():
-        reset_calls.append(True)
-        original_reset()
-
-    monkeypatch.setattr(repository, "due_prefetch_devices", capture_batch)
-    monkeypatch.setattr(repository, "reset_prefetch_cursor", capture_reset)
+    device_ids = []
     for index in range(11):
-        app.extensions["inktime_device_repository"].create(
+        device_id, _token = app.extensions["inktime_device_repository"].create(
             f"尾頁輪轉裝置 {index:02d}",
             delivery_mode="inktime_offline_schedule",
             offline_prefetch_allowed=True,
             schedule_times=["20:00"],
             prefetch_lead_minutes=5,
         )
-
-    runner = SchedulerRunner(app)
-    now = datetime(2026, 8, 3, 7, 55, tzinfo=ZoneInfo("Asia/Taipei"))
-    runner._prepare_due_offline_devices(now)
-    first_batch = batches[-1][0]
+        device_ids.append(device_id)
     with app.extensions["inktime_database"].session() as connection:
-        connection.execute(
-            "UPDATE devices SET schedule='08:00',schedule_times_json='[\"08:00\"]' WHERE id=?",
-            (first_batch[0],),
+        connection.executemany(
+            "UPDATE devices SET next_offline_prepare_at=? WHERE id=?",
+            [("2026-08-03T00:00:00+00:00", device_id) for device_id in device_ids[:10]]
+            + [("2026-08-04T00:00:00+00:00", device_ids[-1])],
         )
-    runner._prepare_due_offline_devices(now)
-    tail_batch = batches[-1][0]
-    runner._prepare_due_offline_devices(now)
-    wrapped_batch = batches[-1][0]
 
-    assert len(first_batch) == 10
-    assert len(tail_batch) == 1
-    assert wrapped_batch == first_batch
-    assert reset_calls == [True]
-    assert any(
-        json.loads(str(job["settings_json"])).get("offline_prepare", {}).get("device_id") == first_batch[0]
-        for job in app.extensions["inktime_job_repository"].list()
+    batch, has_more = repository.due_prefetch_devices(
+        limit=10,
+        now=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
     )
+    assert [str(device["id"]) for device in batch] == sorted(device_ids)[:10]
+    assert has_more is False
