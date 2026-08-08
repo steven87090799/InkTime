@@ -106,6 +106,16 @@ def test_stale_running_items_are_recovered_after_restart(app):
     assert repository.get(job_id)["status"] == "completed"
 
 
+def test_recover_stale_does_not_take_writer_lock_without_candidates(app):
+    database = app.extensions["inktime_database"]
+    before = int(database.observability()["writer_lock_acquisitions"])
+
+    assert app.extensions["inktime_job_repository"].recover_stale() == 0
+
+    after = int(database.observability()["writer_lock_acquisitions"])
+    assert after == before
+
+
 def test_failed_items_can_be_retried(app):
     service, repository, job_id = create_job(app, 1)
     service.start(job_id)

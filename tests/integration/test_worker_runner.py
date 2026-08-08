@@ -9,6 +9,7 @@ from inktime.app.domain.photos import PhotoPreprocessor
 from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
 from inktime.app.repositories.analysis_batches import AnalysisBatchRepository
 from inktime.app.repositories.photos import PhotoRepository
+from inktime.app.repositories.settings import SETTING_DEFINITIONS
 from inktime.app.workers.runner import WorkerRunner
 from inktime.app.workers.scanner import PhotoScanner
 from tests.unit.test_batch_analysis_lifecycle import FakeBatchProvider, _prepare_photos, _wire_fake
@@ -62,6 +63,8 @@ def test_worker_idle_backoff_is_bounded_and_resets_after_work(monkeypatch):
 
     class FakeSettings:
         def get(self, _key, default):
+            if _key == "worker.poll_seconds":
+                return 300
             return default
 
     class FakeApp:
@@ -81,6 +84,12 @@ def test_worker_idle_backoff_is_bounded_and_resets_after_work(monkeypatch):
     runner.run_forever()
 
     assert stop.waits == [15.0, 30.0, 60.0, 60.0, 15.0]
+
+
+def test_worker_poll_setting_matches_the_runtime_backoff_ceiling():
+    definition = SETTING_DEFINITIONS["worker.poll_seconds"]
+    assert definition["max"] == 60
+    assert "15→30→60" in definition["description"]
 
 
 def test_worker_runner_finishes_stale_terminal_batch_import_as_a_noop(app, tmp_path, monkeypatch):

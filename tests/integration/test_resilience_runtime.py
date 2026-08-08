@@ -130,6 +130,7 @@ def test_enhanced_offline_queue_accepts_24_slot_depth(app):
         delivery_mode="inktime_offline_schedule",
         offline_prefetch_allowed=True,
         schedule_times=[f"{hour:02d}:00" for hour in range(24)],
+        offline_schedule_max_slots=24,
     )
     queue = app.extensions["inktime_resilience_repository"]
 

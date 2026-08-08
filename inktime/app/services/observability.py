@@ -70,15 +70,22 @@ class ObservabilityService:
                 (f"heartbeat:{component}", now),
             )
 
-    def tick(self):
+    def tick(self, *, include_platform: bool = True, include_cleanup: bool = True):
         now = self._now()
         self._disable_expired_debug(now)
         self._check_jobs(now)
-        self._check_platform(now)
         self._check_providers(now)
         self._check_releases(now)
         self._check_schedules(now)
         self._check_devices(now)
+        if include_platform:
+            self._check_platform(now)
+        if include_cleanup:
+            self.cleanup(now)
+
+    def platform_tick(self) -> None:
+        now = self._now()
+        self._check_platform(now)
         self.cleanup(now)
 
     def _disable_expired_debug(self, now: datetime) -> None:

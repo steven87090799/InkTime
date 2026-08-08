@@ -89,3 +89,21 @@ def test_repository_create_normalizes_omitted_value_and_rejects_bypass(app):
             offline_prefetch_allowed=True,
             schedule_times=["08:00"],
         )
+
+
+def test_repository_uses_persisted_offline_slot_capability(app):
+    repository = app.extensions["inktime_device_repository"]
+    schedule_times = [f"{hour:02d}:00" for hour in range(13)]
+    with pytest.raises(ValueError, match="1 到 12"):
+        repository.create(
+            "Legacy 13 Slot Device",
+            delivery_mode="inktime_offline_schedule",
+            schedule_times=schedule_times,
+        )
+    device_id, _token = repository.create(
+        "New 24 Slot Device",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=schedule_times,
+        offline_schedule_max_slots=24,
+    )
+    assert repository.get(device_id)["offline_schedule_max_slots"] == 24

@@ -119,6 +119,38 @@ def test_due_scheduled_pending_job_restarts_without_duplicate(app, monkeypatch):
     assert len([job for job in repository.list() if job["dedupe_key"] == dedupe_key]) == 1
 
 
+def test_scheduler_observability_is_deadline_gated(app):
+    class FakeObservability:
+        def __init__(self):
+            self.heartbeats = []
+            self.lightweight_ticks = 0
+            self.platform_ticks = 0
+
+        def heartbeat(self, source):
+            self.heartbeats.append(source)
+
+        def tick(self, *, include_platform, include_cleanup):
+            assert include_platform is False
+            assert include_cleanup is False
+            self.lightweight_ticks += 1
+
+        def platform_tick(self):
+            self.platform_ticks += 1
+
+    runner = SchedulerRunner(app)
+    observability = FakeObservability()
+    runner._run_observability(observability, 100.0)
+    runner._run_observability(observability, 159.0)
+    runner._run_observability(observability, 160.0)
+    runner._run_observability(observability, 399.0)
+    runner._run_observability(observability, 400.0)
+    runner._run_observability(observability, 1000.0)
+
+    assert observability.heartbeats == ["scheduler", "scheduler", "scheduler"]
+    assert observability.lightweight_ticks == 4
+    assert observability.platform_ticks == 2
+
+
 def test_offline_shortage_pending_restart_does_not_claim_new_cooldown(app, monkeypatch):
     device_id, _token = app.extensions["inktime_device_repository"].create(
         "離線 pending restart 相框",
@@ -1169,7 +1201,16 @@ def test_offline_scheduler_skips_expired_today_but_keeps_a_future_today_slot(app
     }
 
 
-def test_offline_prefetch_cursor_eventually_visits_more_than_first_ten_devices(app):
+def test_offline_prefetch_cursor_eventually_visits_more_than_first_ten_devices(app, monkeypatch):
+    repository = app.extensions["inktime_offline_schedule_repository"]
+    advanced = []
+    original_advance = repository.advance_prefetch_cursor
+
+    def track_advance(device_id):
+        advanced.append(device_id)
+        original_advance(device_id)
+
+    monkeypatch.setattr(repository, "advance_prefetch_cursor", track_advance)
     device_ids = []
     for index in range(25):
         device_id, _token = app.extensions["inktime_device_repository"].create(
@@ -1194,3 +1235,76 @@ def test_offline_prefetch_cursor_eventually_visits_more_than_first_ten_devices(a
         if str(device_id) in str(job["settings_json"])
     }
     assert prepared_ids == set(device_ids)
+    assert len(advanced) == 4
+
+
+def test_offline_prefetch_does_not_write_cursor_when_batch_has_no_due_work(app, monkeypatch):
+    repository = app.extensions["inktime_offline_schedule_repository"]
+    advanced = []
+    monkeypatch.setattr(repository, "advance_prefetch_cursor", advanced.append)
+    for index in range(3):
+        app.extensions["inktime_device_repository"].create(
+            f"未到期離線裝置 {index:02d}",
+            delivery_mode="inktime_offline_schedule",
+            offline_prefetch_allowed=True,
+            schedule_times=["08:00"],
+            prefetch_lead_minutes=5,
+        )
+
+    runner = SchedulerRunner(app)
+    now = datetime(2026, 8, 3, 7, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+    for _index in range(3):
+        runner._prepare_due_offline_devices(now)
+
+    assert advanced == []
+
+
+def test_offline_prefetch_resets_cursor_after_a_non_full_tail_page(app, monkeypatch):
+    repository = app.extensions["inktime_offline_schedule_repository"]
+    batches = []
+    reset_calls = []
+    original_due = repository.due_prefetch_devices
+    original_reset = repository.reset_prefetch_cursor
+
+    def capture_batch(**kwargs):
+        devices, has_more = original_due(**kwargs)
+        batches.append(([str(device["id"]) for device in devices], has_more))
+        return devices, has_more
+
+    def capture_reset():
+        reset_calls.append(True)
+        original_reset()
+
+    monkeypatch.setattr(repository, "due_prefetch_devices", capture_batch)
+    monkeypatch.setattr(repository, "reset_prefetch_cursor", capture_reset)
+    for index in range(11):
+        app.extensions["inktime_device_repository"].create(
+            f"尾頁輪轉裝置 {index:02d}",
+            delivery_mode="inktime_offline_schedule",
+            offline_prefetch_allowed=True,
+            schedule_times=["20:00"],
+            prefetch_lead_minutes=5,
+        )
+
+    runner = SchedulerRunner(app)
+    now = datetime(2026, 8, 3, 7, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+    runner._prepare_due_offline_devices(now)
+    first_batch = batches[-1][0]
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE devices SET schedule='08:00',schedule_times_json='[\"08:00\"]' WHERE id=?",
+            (first_batch[0],),
+        )
+    runner._prepare_due_offline_devices(now)
+    tail_batch = batches[-1][0]
+    runner._prepare_due_offline_devices(now)
+    wrapped_batch = batches[-1][0]
+
+    assert len(first_batch) == 10
+    assert len(tail_batch) == 1
+    assert wrapped_batch == first_batch
+    assert reset_calls == [True]
+    assert any(
+        json.loads(str(job["settings_json"])).get("offline_prepare", {}).get("device_id") == first_batch[0]
+        for job in app.extensions["inktime_job_repository"].list()
+    )

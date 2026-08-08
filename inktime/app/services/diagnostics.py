@@ -25,6 +25,8 @@ from inktime.app.domain.rendering.fonts import (
 
 
 class DiagnosticsService:
+    _WORKER_IDLE_POLL_CAP_SECONDS = 60.0
+
     def __init__(
         self,
         database: Database,
@@ -43,6 +45,7 @@ class DiagnosticsService:
         psutil.cpu_percent(interval=None)
         self._cache_bytes_value = 0
         self._cache_bytes_at = 0.0
+        self._resolved_git_revision: str | None = None
 
     @staticmethod
     def _directory_size(root: Path) -> int:
@@ -118,7 +121,7 @@ class DiagnosticsService:
             libraries = connection.execute("SELECT root_path FROM libraries WHERE enabled=1").fetchall()
             providers = connection.execute("SELECT COUNT(*) FROM providers WHERE enabled=1").fetchone()[0]
         revision = os.environ.get("INKTIME_GIT_REVISION", "unknown")
-        if revision == "unknown":
+        if revision == "unknown" and self._resolved_git_revision is None:
             git = shutil.which("git")
             try:
                 if git:
@@ -131,6 +134,9 @@ class DiagnosticsService:
                     ).stdout.strip()
             except Exception:
                 revision = "unknown"
+            self._resolved_git_revision = revision
+        elif revision == "unknown":
+            revision = self._resolved_git_revision
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "cpu_percent": psutil.cpu_percent(interval=None),
@@ -194,9 +200,15 @@ class DiagnosticsService:
                     else 1
                 ),
                 "worker_poll_seconds": float(
-                    self.settings_repository.get("worker.poll_seconds", 15)
-                    if self.settings_repository
-                    else 15
+                    min(
+                        self._WORKER_IDLE_POLL_CAP_SECONDS,
+                        max(
+                            1.0,
+                            float(self.settings_repository.get("worker.poll_seconds", 15))
+                            if self.settings_repository
+                            else 15.0,
+                        ),
+                    )
                 ),
             },
         }

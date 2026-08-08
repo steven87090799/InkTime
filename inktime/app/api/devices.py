@@ -26,9 +26,11 @@ from inktime.app.core.paths import UnsafePathError
 from inktime.app.domain.rendering import DISPLAY_PROFILES, DeviceTestReleaseStore
 from inktime.app.domain.rendering.system_presets import DEFAULT_DEVICE_PANEL_PROFILE
 from inktime.app.domain.photopainter.offline_schedule import (
+    LEGACY_MAX_OFFLINE_SLOTS,
     MINIMUM_SCHEDULE_GAP_MINUTES,
     normalize_delivery_contract,
     normalize_sync_strategy,
+    resolve_offline_schedule_max_slots,
     validate_offline_schedule,
 )
 from inktime.app.services.rendering import FIT_MODES, FRAME_ORIENTATIONS, LAYOUTS
@@ -64,7 +66,12 @@ def optional_bool(payload: dict, field: str, *, default: bool | None = None) -> 
         abort(400, description=str(exc))
 
 
-def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
+def _validated_device_fields(
+    payload,
+    *,
+    defaults: dict | None = None,
+    maximum_slots: int = LEGACY_MAX_OFFLINE_SLOTS,
+) -> dict:
     defaults = defaults or {}
     timezone_name = str(payload.get("timezone", defaults.get("timezone", "Asia/Taipei")))
     try:
@@ -111,7 +118,9 @@ def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
         )
         schedule_values = validate_offline_schedule(
             schedule_values,
-            maximum=24,
+            maximum=resolve_offline_schedule_max_slots(
+                {"offline_schedule_max_slots": maximum_slots}
+            ),
             minimum_gap_minutes=minimum_schedule_gap_minutes,
         )
     except ValueError as exc:
@@ -445,6 +454,9 @@ def update_device(device_id: str):
             "layout_mode": existing["layout_mode"],
             "fit_mode": existing["fit_mode"],
         },
+        maximum_slots=resolve_offline_schedule_max_slots(
+            {"offline_schedule_max_slots": existing["offline_schedule_max_slots"]}
+        ),
     )
     try:
         _repository().update(device_id, **fields)
@@ -735,6 +747,9 @@ def device_offline_schedule():
                     minimum_gap_minutes=int(
                         device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
                     ),
+                    maximum_slots=resolve_offline_schedule_max_slots(
+                        {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
+                    ),
                 )
             else:
                 retry_details = OfflineScheduleRepository.retry_after_details(
@@ -747,6 +762,9 @@ def device_offline_schedule():
                     sync_time=device["sync_time"],
                     minimum_gap_minutes=int(
                         device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
+                    ),
+                    maximum_slots=resolve_offline_schedule_max_slots(
+                        {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
                     ),
                 )
             retry_after_epoch = retry_details.retry_after_epoch
@@ -776,7 +794,11 @@ def device_offline_schedule():
             result["schedule"]["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
         )
         schedule_times = validate_offline_schedule(
-            schedule_times, maximum=24, minimum_gap_minutes=minimum_gap_minutes
+            schedule_times,
+            maximum=resolve_offline_schedule_max_slots(
+                {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
+            ),
+            minimum_gap_minutes=minimum_gap_minutes,
         )
     except (TypeError, ValueError, json.JSONDecodeError):
         abort(409, description="DEVICE-008 離線排程快照 schedule_times 不可解析")

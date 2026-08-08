@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from inktime.app.core.security import redact
 from inktime.app.db import Database, migrate
 from inktime.app.repositories.settings import SettingsRepository
+from inktime.app.services.diagnostics import DiagnosticsService
 from inktime.app.services.observability import ObservabilityService
 
 
@@ -14,6 +16,47 @@ def _service(tmp_path):
     settings = SettingsRepository(database)
     settings.ensure_defaults()
     return database, settings, ObservabilityService(database, settings, None)
+
+
+def test_diagnostics_caches_git_revision_per_service(tmp_path, monkeypatch):
+    database = Database(tmp_path / "db.sqlite")
+    migrate(database)
+    settings = SettingsRepository(database)
+    settings.ensure_defaults()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    thumbnail_dir = tmp_path / "thumbnails"
+    thumbnail_dir.mkdir()
+    service = DiagnosticsService(database, data_dir, thumbnail_dir, settings_repository=settings)
+    calls = []
+
+    monkeypatch.delenv("INKTIME_GIT_REVISION", raising=False)
+    monkeypatch.setattr("inktime.app.services.diagnostics.shutil.which", lambda _name: "/usr/bin/git")
+
+    def fake_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(stdout="abc123\n")
+
+    monkeypatch.setattr("inktime.app.services.diagnostics.subprocess.run", fake_run)
+
+    first = service.snapshot()
+    second = service.snapshot()
+
+    assert first["git_revision"] == "abc123"
+    assert second["git_revision"] == "abc123"
+    assert len(calls) == 1
+
+
+def test_lightweight_observability_tick_leaves_platform_diagnostics_to_platform_tick(tmp_path, monkeypatch):
+    _database, _settings, service = _service(tmp_path)
+    platform_calls = []
+    monkeypatch.setattr(service, "_check_platform", lambda now: platform_calls.append(now))
+
+    service.tick(include_platform=False, include_cleanup=False)
+    assert platform_calls == []
+
+    service.platform_tick()
+    assert len(platform_calls) == 1
 
 
 def test_debug_is_off_by_default_and_sensitive_values_are_redacted(tmp_path):

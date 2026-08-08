@@ -647,10 +647,10 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "category": "效能與待機",
         "default": 15,
         "type": "number",
-        "description": "沒有工作時 Worker 檢查新工作的秒數",
-        "risk": "數值越小反應越快，但會增加待機喚醒與 SQLite 讀取",
+        "description": "沒有工作時 Worker 的自適應檢查基準秒數（15→30→60，上限 60）",
+        "risk": "數值越小反應越快，但會增加待機喚醒與 SQLite 讀取；沒有跨程序 wake signal 時不可超過 60 秒",
         "min": 1,
-        "max": 300,
+        "max": 60,
         "restart": False,
     },
     "worker.progress_items": {

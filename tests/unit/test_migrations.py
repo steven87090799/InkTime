@@ -31,7 +31,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 37
+    assert CURRENT_SCHEMA_VERSION == 38
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -88,6 +88,7 @@ def test_fresh_database_is_migrated(tmp_path):
         "previous_device_secret_hash",
         "previous_credential_expires_at",
         "repair_allowed_until",
+        "offline_schedule_max_slots",
     } <= device_columns
     assert {"device_pairing_requests", "device_pairing_rate_limits"} <= pairing_tables
     assert {
@@ -205,7 +206,7 @@ def test_migration_25_to_batch_lifecycle_is_idempotent(monkeypatch, tmp_path):
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:25])
     migrate(database)
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37]
+    assert migrate(database, tmp_path / "backups") == [26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38]
     assert migrate(database, tmp_path / "backups") == []
     assert database.integrity_check() == "ok"
 
@@ -225,7 +226,7 @@ def test_migration_32_preserves_legacy_cost_provenance_and_allows_new_reported_c
             ],
         )
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database) == [32, 33, 34, 35, 36, 37]
+    assert migrate(database) == [32, 33, 34, 35, 36, 37, 38]
     with database.transaction() as connection:
         connection.execute(
             "INSERT INTO api_usage(provider,model,request_type,estimated_cost,actual_cost,started_at,status,cost_source) "
@@ -271,7 +272,7 @@ def test_migration_33_backfills_provider_identity_and_keeps_billable_unknown(mon
             ],
         )
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database) == [33, 34, 35, 36, 37]
+    assert migrate(database) == [33, 34, 35, 36, 37, 38]
     with database.transaction() as connection:
         provider = connection.execute(
             "SELECT id,kind,supports_batch,options_json FROM providers WHERE name=?",
@@ -355,7 +356,7 @@ def test_migration_27_to_30_freezes_ownership_and_invalidates_legacy_ready_rows(
         )
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [28, 29, 30, 31, 32, 33, 34, 35, 36, 37]
+    assert migrate(database, tmp_path / "backups") == [28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38]
     with database.session() as connection:
         schedule = connection.execute(
             "SELECT status,panel_profile,rotation,snapshot_json FROM device_offline_schedules WHERE id='legacy-schedule'"
@@ -416,7 +417,7 @@ def test_migration_29_to_30_adds_pointer_times_and_mode_guards_with_backup_resta
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
     backups = tmp_path / "backups"
-    assert migrate(database, backups) == [30, 31, 32, 33, 34, 35, 36, 37]
+    assert migrate(database, backups) == [30, 31, 32, 33, 34, 35, 36, 37, 38]
     backup_files = list(backups.glob("*.sqlite3"))
     assert len(backup_files) == 1
     with sqlite3.connect(backup_files[0]) as backup:
@@ -791,7 +792,7 @@ def test_migration_21_upgrades_v20_webhooks_idempotently(monkeypatch, tmp_path):
         notification_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database, tmp_path / "backups") == [21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37]
+    assert migrate(database, tmp_path / "backups") == [21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38]
     assert migrate(database, tmp_path / "backups") == []
     assert database.integrity_check() == "ok"
     with database.session() as connection:

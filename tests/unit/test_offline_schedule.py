@@ -5,13 +5,62 @@ from datetime import date, datetime, timezone
 import pytest
 
 from inktime.app.domain.photopainter.offline_schedule import (
+    LEGACY_MAX_OFFLINE_SLOTS,
+    MAX_OFFLINE_SLOTS,
     normalize_sync_strategy,
+    next_sync_epoch,
     next_sleep_epoch,
     prefetch_slots,
+    resolve_offline_schedule_max_slots,
     slot_deadlines,
     validate_offline_schedule,
 )
 from inktime.app.repositories.offline_schedules import OfflineScheduleRepository
+
+
+@pytest.mark.parametrize(
+    ("capabilities", "expected"),
+    [
+        ({}, LEGACY_MAX_OFFLINE_SLOTS),
+        ({"offline_schedule_max_slots": 12}, LEGACY_MAX_OFFLINE_SLOTS),
+        ({"offline_schedule_max_slots": 24}, MAX_OFFLINE_SLOTS),
+        ({"offline_schedule_max_slots": 13}, LEGACY_MAX_OFFLINE_SLOTS),
+        ({"offline_schedule_max_slots": "24"}, LEGACY_MAX_OFFLINE_SLOTS),
+    ],
+)
+def test_offline_schedule_capability_resolver_defaults_unknown_to_legacy(capabilities, expected):
+    assert resolve_offline_schedule_max_slots(capabilities) == expected
+
+
+def test_offline_schedule_capability_boundary_rejects_legacy_13th_slot():
+    schedule = [f"{hour:02d}:00" for hour in range(13)]
+    with pytest.raises(ValueError, match="1 到 12"):
+        validate_offline_schedule(schedule, maximum=LEGACY_MAX_OFFLINE_SLOTS)
+    assert len(validate_offline_schedule(schedule, maximum=MAX_OFFLINE_SLOTS)) == 13
+
+
+def test_device_capability_limits_deadlines_and_next_sync():
+    schedule = [f"{hour:02d}:00" for hour in range(13)]
+    with pytest.raises(ValueError, match="1 到 12"):
+        slot_deadlines(
+            date(2026, 8, 3),
+            schedule,
+            "Asia/Taipei",
+            maximum_slots=LEGACY_MAX_OFFLINE_SLOTS,
+        )
+    assert slot_deadlines(
+        date(2026, 8, 3),
+        schedule,
+        "Asia/Taipei",
+        maximum_slots=MAX_OFFLINE_SLOTS,
+    )
+    with pytest.raises(ValueError, match="1 到 12"):
+        next_sync_epoch(
+            now=datetime(2026, 8, 3, 7, 0, tzinfo=timezone.utc),
+            schedule=schedule,
+            timezone_name="Asia/Taipei",
+            maximum_slots=LEGACY_MAX_OFFLINE_SLOTS,
+        )
 
 
 def test_offline_schedule_is_sorted_unique_and_has_five_minute_prefetch_slots():

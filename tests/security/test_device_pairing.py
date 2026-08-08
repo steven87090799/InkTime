@@ -13,14 +13,20 @@ CLAIM_PATH = "/api/device/v1/pairing/claim"
 CONFIRM_PATH = "/api/device/v1/pairing/confirm"
 
 
-def _pairing_payload(device_id: str = "esp32-contract-test", *, nonce: str | None = None) -> dict:
+def _pairing_payload(
+    device_id: str = "esp32-contract-test",
+    *,
+    nonce: str | None = None,
+    capabilities: dict | None = None,
+) -> dict:
     return {
         "device_id": device_id,
         "pairing_nonce": nonce or "nonce-for-contract-test-0123456789",
         "firmware_identity": "ESP32-S3-PhotoPainter",
         "firmware_version": "2.6.0",
         "panel_profile": "safe_4c",
-        "capabilities": {"automatic_pairing": True, "ab_credential_store": True},
+        "capabilities": capabilities
+        or {"automatic_pairing": True, "ab_credential_store": True},
     }
 
 
@@ -45,6 +51,30 @@ def test_pairing_schedule_values_accept_configured_gap(app, schedule_times, mini
     )
     assert config["schedule_times"] == expected
     assert config["minimum_schedule_gap_minutes"] == minimum_gap_minutes
+
+
+def test_pairing_unknown_capability_keeps_legacy_12_slot_boundary(app):
+    service = app.extensions["inktime_device_pairing_service"]
+    schedule_times = [f"{hour:02d}:00" for hour in range(13)]
+    with pytest.raises(DevicePairingError):
+        service._normalize_config(
+            {
+                "name": "Legacy PhotoPainter",
+                "panel_profile": "safe_4c",
+                "schedule_times": schedule_times,
+            },
+            fallback_name="Legacy PhotoPainter",
+        )
+    config = service._normalize_config(
+        {
+            "name": "New PhotoPainter",
+            "panel_profile": "safe_4c",
+            "schedule_times": schedule_times,
+        },
+        fallback_name="New PhotoPainter",
+        offline_schedule_max_slots=24,
+    )
+    assert len(config["schedule_times"]) == 13
 
 
 def test_pairing_schedule_values_preserve_fixed_daily_sync_policy(app):
@@ -274,7 +304,14 @@ def test_pairing_schedule_values_reject_invalid_values(app, schedule_times):
     assert error.value.error_code == "PAIR-004"
 
 
-def _approve(client, pairing_id: str, pairing_code: str, *, include_csrf: bool = True):
+def _approve(
+    client,
+    pairing_id: str,
+    pairing_code: str,
+    *,
+    include_csrf: bool = True,
+    device_config: dict | None = None,
+):
     headers = {"Content-Type": "application/json"}
     if include_csrf:
         headers["X-CSRF-Token"] = csrf(client)
@@ -282,7 +319,8 @@ def _approve(client, pairing_id: str, pairing_code: str, *, include_csrf: bool =
         f"/api/v1/device-pairing/{pairing_id}/approve",
         json={
             "pairing_code": pairing_code,
-            "device_config": {
+            "device_config": device_config
+            or {
                 "name": "測試相框",
                 "panel_profile": "safe_4c",
                 "timezone": "Asia/Taipei",
@@ -303,6 +341,62 @@ def _confirm(client, body: dict, secret: str, version: int):
             "X-InkTime-Credential-Version": str(version),
         },
     )
+
+
+def test_explicit_24_slot_capability_survives_pairing_confirm(client, app):
+    schedule_times = [f"{hour:02d}:00" for hour in range(24)]
+    payload = _pairing_payload(
+        "esp32-24-slot-contract",
+        capabilities={
+            "automatic_pairing": True,
+            "ab_credential_store": True,
+            "offline_schedule_max_slots": 24,
+        },
+    )
+    requested = client.post(PAIRING_PATH, json=payload)
+    assert requested.status_code == 201
+    requested_body = requested.get_json()
+    create_admin(app)
+    login(client)
+    approved = _approve(
+        client,
+        requested_body["pairing_id"],
+        requested_body["pairing_code"],
+        device_config={
+            "name": "24 Slot PhotoPainter",
+            "panel_profile": "safe_4c",
+            "timezone": "Asia/Taipei",
+            "schedule": "00:00",
+            "schedule_times": schedule_times,
+            "delivery_mode": "inktime_offline_schedule",
+        },
+    )
+    assert approved.status_code == 200
+    claimed = client.post(
+        CLAIM_PATH,
+        json={"pairing_id": requested_body["pairing_id"], "pairing_nonce": payload["pairing_nonce"]},
+    )
+    assert claimed.status_code == 200
+    claim_body = claimed.get_json()
+    confirmed = _confirm(
+        client,
+        {
+            "pairing_id": requested_body["pairing_id"],
+            "device_id": payload["device_id"],
+            "pairing_nonce": payload["pairing_nonce"],
+        },
+        claim_body["device_secret"],
+        claim_body["credential_version"],
+    )
+    assert confirmed.status_code == 200
+
+    with app.extensions["inktime_database"].session() as connection:
+        device = connection.execute(
+            "SELECT offline_schedule_max_slots,schedule_times_json FROM devices WHERE id=?",
+            (payload["device_id"],),
+        ).fetchone()
+    assert device["offline_schedule_max_slots"] == 24
+    assert len(json.loads(str(device["schedule_times_json"]))) == 24
 
 
 def test_pairing_proves_physical_possession_and_confirm_is_recoverable(client, app):

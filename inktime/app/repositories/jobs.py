@@ -943,6 +943,18 @@ class JobRepository:
     def recover_stale(self) -> int:
         now = utc_now()
         with self.database.session() as connection:
+            candidate = connection.execute(
+                """
+                SELECT 1 FROM job_items
+                WHERE status='running' AND (lease_until IS NULL OR lease_until<?)
+                UNION ALL
+                SELECT 1 FROM jobs WHERE status='pausing'
+                LIMIT 1
+                """,
+                (now,),
+            ).fetchone()
+            if candidate is None:
+                return 0
             connection.execute("BEGIN IMMEDIATE")
             try:
                 cursor = connection.execute(

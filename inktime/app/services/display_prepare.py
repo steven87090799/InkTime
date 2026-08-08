@@ -14,6 +14,7 @@ from inktime.app.domain.jobs.failure_policy import (
 )
 from inktime.app.domain.photopainter.offline_schedule import (
     MINIMUM_SCHEDULE_GAP_MINUTES,
+    resolve_offline_schedule_max_slots,
     validate_offline_schedule,
 )
 from inktime.app.domain.rendering import current_local_date
@@ -380,7 +381,9 @@ class DisplayPreparationService:
         try:
             schedule_times = validate_offline_schedule(
                 json.loads(str(device["schedule_times_json"] or "[]")),
-                maximum=24,
+                maximum=resolve_offline_schedule_max_slots(
+                    {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
+                ),
                 minimum_gap_minutes=int(
                     device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
                 ),

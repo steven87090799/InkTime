@@ -1858,6 +1858,13 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_offline_schedules_terminal_outcome ON device_offline_schedules(device_id,target_date,config_version,terminal_outcome_code)",
         ),
     ),
+    Migration(
+        38,
+        "記錄裝置離線排程 Slot 能力",
+        (
+            "ALTER TABLE devices ADD COLUMN offline_schedule_max_slots INTEGER NOT NULL DEFAULT 12 CHECK(offline_schedule_max_slots BETWEEN 1 AND 24)",
+        ),
+    ),
 )
 
 

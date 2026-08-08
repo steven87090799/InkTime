@@ -157,6 +157,7 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
         delivery_mode="inktime_offline_schedule",
         offline_prefetch_allowed=True,
         schedule_times=[f"{hour:02d}:00" for hour in range(24)],
+        offline_schedule_max_slots=24,
         prefetch_lead_minutes=5,
     )
     service = app.extensions["inktime_display_preparation_service"]

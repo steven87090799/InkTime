@@ -16,8 +16,10 @@ from zoneinfo import ZoneInfo
 from inktime.app.core.paths import UnsafePathError
 from inktime.app.db import Database
 from inktime.app.domain.photopainter.offline_schedule import (
+    MAX_OFFLINE_SLOTS,
     MINIMUM_SCHEDULE_GAP_MINUTES,
     normalize_sync_strategy,
+    resolve_offline_schedule_max_slots,
     slot_deadlines,
     validate_offline_schedule,
 )
@@ -25,7 +27,7 @@ from inktime.app.services.device_releases import payload_entry_from_manifest
 
 
 _RELEASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-MAX_PREPARED_SLOTS = 24
+MAX_PREPARED_SLOTS = MAX_OFFLINE_SLOTS
 TERMINAL_PREPARATION_OUTCOMES = frozenset({"NO_CONTENT", "NO_ELIGIBLE_CANDIDATES"})
 RECOVERABLE_SHORTAGE_CODES = frozenset({"NO_CONTENT", "NO_ELIGIBLE_CANDIDATES"})
 SHORTAGE_RETRY_COOLDOWN_SECONDS = 3600
@@ -88,6 +90,7 @@ class OfflineScheduleRepository:
         sync_strategy: str = "first_display_lead",
         sync_time: str | None = None,
         minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
+        maximum_slots: int = MAX_PREPARED_SLOTS,
     ) -> int:
         """Return the retry epoch while retaining the legacy scalar API."""
 
@@ -100,6 +103,7 @@ class OfflineScheduleRepository:
             sync_strategy=sync_strategy,
             sync_time=sync_time,
             minimum_gap_minutes=minimum_gap_minutes,
+            maximum_slots=maximum_slots,
         ).retry_after_epoch
 
     @staticmethod
@@ -113,6 +117,7 @@ class OfflineScheduleRepository:
         sync_strategy: str = "first_display_lead",
         sync_time: str | None = None,
         minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
+        maximum_slots: int = MAX_PREPARED_SLOTS,
     ) -> RetryAfterDetails:
         """Choose a bounded retry without skipping a remaining local slot."""
 
@@ -131,7 +136,9 @@ class OfflineScheduleRepository:
         strategy, normalized_sync_time = normalize_sync_strategy(sync_strategy, sync_time)
         slots = validate_offline_schedule(
             schedule_times,
-            maximum=MAX_PREPARED_SLOTS,
+            maximum=resolve_offline_schedule_max_slots(
+                {"offline_schedule_max_slots": maximum_slots}
+            ),
             minimum_gap_minutes=minimum_gap_minutes,
         )
         lead = int(prefetch_lead_minutes)
@@ -220,6 +227,7 @@ class OfflineScheduleRepository:
         sync_strategy: str = "first_display_lead",
         sync_time: str | None = None,
         minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
+        maximum_slots: int = MAX_PREPARED_SLOTS,
     ) -> RetryAfterDetails:
         """Return a bounded retry for the explicitly bounded next target day."""
 
@@ -239,7 +247,9 @@ class OfflineScheduleRepository:
         strategy, normalized_sync_time = normalize_sync_strategy(sync_strategy, sync_time)
         slots = validate_offline_schedule(
             schedule_times,
-            maximum=MAX_PREPARED_SLOTS,
+            maximum=resolve_offline_schedule_max_slots(
+                {"offline_schedule_max_slots": maximum_slots}
+            ),
             minimum_gap_minutes=minimum_gap_minutes,
         )
         lead = int(prefetch_lead_minutes)
@@ -894,7 +904,8 @@ class OfflineScheduleRepository:
                     SELECT timezone,config_version,delivery_mode,offline_prefetch_allowed,
                            panel_profile,rotation,schedule_times_json,prefetch_lead_minutes,
                            button_wake_action,offline_schedule_version,
-                           minimum_schedule_gap_minutes,sync_strategy,sync_time
+                           minimum_schedule_gap_minutes,sync_strategy,sync_time,
+                           offline_schedule_max_slots
                     FROM devices WHERE id=? AND enabled=1
                     """,
                     (device_id,),
@@ -917,12 +928,15 @@ class OfflineScheduleRepository:
                 minimum_gap_minutes = int(
                     device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
                 )
+                maximum_slots = resolve_offline_schedule_max_slots(
+                    {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
+                )
                 sync_strategy, sync_time = normalize_sync_strategy(
                     str(device["sync_strategy"] or "first_display_lead"), device["sync_time"]
                 )
                 configured_times = validate_offline_schedule(
                     configured_times,
-                    maximum=MAX_PREPARED_SLOTS,
+                    maximum=maximum_slots,
                     minimum_gap_minutes=minimum_gap_minutes,
                 )
                 if len(normalized_release_ids) != len(configured_times):
@@ -1047,6 +1061,7 @@ class OfflineScheduleRepository:
                     str(device["timezone"]),
                     grace_minutes=15,
                     minimum_gap_minutes=minimum_gap_minutes,
+                    maximum_slots=maximum_slots,
                 )
                 for slot_index, slot in enumerate(configured_times):
                     release_id = normalized_release_ids[slot_index]
@@ -1198,7 +1213,7 @@ class OfflineScheduleRepository:
                 if schedule is None:
                     raise KeyError(schedule_id)
                 device = connection.execute(
-                    "SELECT enabled,delivery_mode,offline_prefetch_allowed,config_version FROM devices WHERE id=?",
+                    "SELECT enabled,delivery_mode,offline_prefetch_allowed,config_version,offline_schedule_max_slots FROM devices WHERE id=?",
                     (device_id,),
                 ).fetchone()
                 if device is None or not bool(device["enabled"]):
@@ -1281,6 +1296,15 @@ class OfflineScheduleRepository:
                     (schedule_id,),
                 ).fetchall()
                 configured_times = json.loads(str(schedule["schedule_times_json"] or "[]"))
+                configured_times = validate_offline_schedule(
+                    configured_times,
+                    maximum=resolve_offline_schedule_max_slots(
+                        {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
+                    ),
+                    minimum_gap_minutes=int(
+                        schedule["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
+                    ),
+                )
                 playlist_version = self.playlist_version(
                     device_id=device_id,
                     target_date=str(schedule["target_date"]),
@@ -1316,35 +1340,37 @@ class OfflineScheduleRepository:
 
     def due_prefetch_devices(
         self, *, limit: int = 32, after_device_id: str | None = None
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], bool]:
         bounded = max(1, min(int(limit), 128))
+        fetch_limit = bounded + 1
         with self.database.session() as connection:
             after = str(after_device_id or "")
             rows = connection.execute(
                 """
                 SELECT id,name,timezone,schedule_times_json,prefetch_lead_minutes,config_version,
-                       minimum_schedule_gap_minutes,sync_strategy,sync_time
+                       minimum_schedule_gap_minutes,sync_strategy,sync_time,offline_schedule_max_slots
                 FROM devices
                 WHERE enabled=1 AND delivery_mode='inktime_offline_schedule'
                   AND offline_prefetch_allowed=1
                   AND id>?
                 ORDER BY id LIMIT ?
                 """,
-                (after, bounded),
+                (after, fetch_limit),
             ).fetchall()
             if not rows and after:
                 rows = connection.execute(
                     """
                     SELECT id,name,timezone,schedule_times_json,prefetch_lead_minutes,config_version,
-                           minimum_schedule_gap_minutes,sync_strategy,sync_time
+                           minimum_schedule_gap_minutes,sync_strategy,sync_time,offline_schedule_max_slots
                     FROM devices
                     WHERE enabled=1 AND delivery_mode='inktime_offline_schedule'
                       AND offline_prefetch_allowed=1
                     ORDER BY id LIMIT ?
                     """,
-                    (bounded,),
+                    (fetch_limit,),
                 ).fetchall()
-        return [dict(row) for row in rows]
+        has_more = len(rows) > bounded
+        return [dict(row) for row in rows[:bounded]], has_more
 
     def prefetch_cursor(self) -> str | None:
         with self.database.session() as connection:
@@ -1364,3 +1390,7 @@ class OfflineScheduleRepository:
                 """,
                 (str(device_id), datetime.now(timezone.utc).isoformat()),
             )
+
+    def reset_prefetch_cursor(self) -> None:
+        with self.database.transaction() as connection:
+            connection.execute("DELETE FROM device_offline_prefetch_cursors WHERE id=1")

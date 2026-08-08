@@ -17,14 +17,19 @@ from inktime.app.domain.jobs.failure_policy import (
     failure_code,
 )
 from inktime.app.domain.photopainter.offline_schedule import (
+    MAX_OFFLINE_SLOTS,
     MINIMUM_SCHEDULE_GAP_MINUTES,
     normalize_sync_strategy,
+    resolve_offline_schedule_max_slots,
     validate_offline_schedule,
 )
 
 
 LOGGER = logging.getLogger("scheduler")
 OFFLINE_PREPARE_RETRY_INTERVAL_SECONDS = 600
+OBSERVABILITY_HEARTBEAT_INTERVAL_SECONDS = 5 * 60
+OBSERVABILITY_TICK_INTERVAL_SECONDS = 60
+OBSERVABILITY_PLATFORM_INTERVAL_SECONDS = 15 * 60
 
 
 class SchedulerRunner:
@@ -35,6 +40,9 @@ class SchedulerRunner:
         self.last_notification_enqueue_at = 0.0
         self.last_batch_poll_at = 0.0
         self.last_backup_date: str | None = None
+        self.last_observability_heartbeat_at = -OBSERVABILITY_HEARTBEAT_INTERVAL_SECONDS
+        self.last_observability_tick_at = -OBSERVABILITY_TICK_INTERVAL_SECONDS
+        self.last_observability_platform_at = -OBSERVABILITY_PLATFORM_INTERVAL_SECONDS
 
     def _record_schedule_exception(self, task: dict, exc: Exception, now: datetime) -> None:
         schedules = self.app.extensions["inktime_schedule_repository"]
@@ -88,17 +96,33 @@ class SchedulerRunner:
             details={"date": today},
         )
 
+    def _run_observability(self, observability, monotonic_now: float) -> None:
+        """Run observability work only when its own deadline is due."""
+
+        if monotonic_now - self.last_observability_heartbeat_at >= OBSERVABILITY_HEARTBEAT_INTERVAL_SECONDS:
+            self._safe_step(
+                "observability_heartbeat",
+                lambda: observability.heartbeat("scheduler"),
+            )
+            self.last_observability_heartbeat_at = monotonic_now
+        if monotonic_now - self.last_observability_tick_at >= OBSERVABILITY_TICK_INTERVAL_SECONDS:
+            self._safe_step(
+                "observability_tick",
+                lambda: observability.tick(include_platform=False, include_cleanup=False),
+            )
+            self.last_observability_tick_at = monotonic_now
+        if monotonic_now - self.last_observability_platform_at >= OBSERVABILITY_PLATFORM_INTERVAL_SECONDS:
+            self._safe_step("observability_platform", observability.platform_tick)
+            self.last_observability_platform_at = monotonic_now
+
     def request_stop(self, *_args) -> None:
         self.stop.set()
 
     def tick(self) -> None:
         settings = self.app.extensions["inktime_settings_repository"]
         observability = self.app.extensions["inktime_observability_service"]
-        self._safe_step(
-            "observability_heartbeat",
-            lambda: observability.heartbeat("scheduler"),
-        )
-        self._safe_step("observability_tick", observability.tick)
+        monotonic_now = time.monotonic()
+        self._run_observability(observability, monotonic_now)
         self._safe_step(
             "recover_stale",
             self.app.extensions["inktime_job_repository"].recover_stale,
@@ -205,6 +229,7 @@ class SchedulerRunner:
         sync_strategy: str = "first_display_lead",
         sync_time: str | None = None,
         minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
+        maximum_slots: int = MAX_OFFLINE_SLOTS,
     ) -> date | None:
         """Return the latest local day whose first slot is due for prefetch."""
 
@@ -214,7 +239,7 @@ class SchedulerRunner:
             raise ValueError("DEVICE-008 server_prefetch_margin_minutes 不合法")
         strategy, normalized_sync_time = normalize_sync_strategy(sync_strategy, sync_time)
         slots = validate_offline_schedule(
-            schedule, maximum=24, minimum_gap_minutes=minimum_gap_minutes
+            schedule, maximum=maximum_slots, minimum_gap_minutes=minimum_gap_minutes
         )
         zone = local_now.tzinfo
         if zone is None:
@@ -257,6 +282,7 @@ class SchedulerRunner:
         sync_strategy: str = "first_display_lead",
         sync_time: str | None = None,
         minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
+        maximum_slots: int = MAX_OFFLINE_SLOTS,
     ) -> bool:
         """Return whether tomorrow needs technical preparation now."""
 
@@ -268,7 +294,7 @@ class SchedulerRunner:
             raise ValueError("DEVICE-008 server_prefetch_margin_minutes 不合法")
         strategy, normalized_sync_time = normalize_sync_strategy(sync_strategy, sync_time)
         slots = validate_offline_schedule(
-            schedule, maximum=24, minimum_gap_minutes=minimum_gap_minutes
+            schedule, maximum=maximum_slots, minimum_gap_minutes=minimum_gap_minutes
         )
         zone = local_now.tzinfo
         if zone is None:
@@ -299,6 +325,7 @@ class SchedulerRunner:
         sync_strategy: str = "first_display_lead",
         sync_time: str | None = None,
         minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
+        maximum_slots: int = MAX_OFFLINE_SLOTS,
     ) -> list[date]:
         """Return independent today/tomorrow preparation targets in order."""
 
@@ -311,6 +338,7 @@ class SchedulerRunner:
             sync_strategy,
             sync_time,
             minimum_gap_minutes,
+            maximum_slots,
         )
         if today is not None:
             targets.append(today)
@@ -323,6 +351,7 @@ class SchedulerRunner:
             sync_strategy,
             sync_time,
             minimum_gap_minutes,
+            maximum_slots,
         ):
             tomorrow = local_now.date() + timedelta(days=1)
             if tomorrow not in targets:
@@ -347,14 +376,16 @@ class SchedulerRunner:
             future_prepare_hour = 20
         future_prepare_hour = max(0, min(future_prepare_hour, 23))
         cursor = offline_schedules.prefetch_cursor()
-        devices = offline_schedules.due_prefetch_devices(limit=10, after_device_id=cursor)
+        devices, has_more = offline_schedules.due_prefetch_devices(limit=10, after_device_id=cursor)
         for device in devices:
             try:
                 timezone_name = str(device["timezone"] or "UTC")
                 local_now = now.astimezone(ZoneInfo(timezone_name))
                 schedule = validate_offline_schedule(
                     json.loads(str(device["schedule_times_json"] or "[]")),
-                    maximum=24,
+                    maximum=resolve_offline_schedule_max_slots(
+                        {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
+                    ),
                     minimum_gap_minutes=int(
                         device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
                     ),
@@ -368,6 +399,9 @@ class SchedulerRunner:
                     str(device["sync_strategy"] or "first_display_lead"),
                     device["sync_time"],
                     int(device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES),
+                    resolve_offline_schedule_max_slots(
+                        {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
+                    ),
                 )
                 for target_date in targets[:2]:
                     target_iso = target_date.isoformat()
@@ -486,8 +520,11 @@ class SchedulerRunner:
                         "error_type": exc.__class__.__name__,
                     },
                 )
-            finally:
-                offline_schedules.advance_prefetch_cursor(str(device["id"]))
+        if devices:
+            if has_more:
+                offline_schedules.advance_prefetch_cursor(str(devices[-1]["id"]))
+            elif cursor:
+                offline_schedules.reset_prefetch_cursor()
 
     def _enqueue_task(
         self,
