@@ -17,6 +17,7 @@
   --code-bg: #edf1ed;
   --media-bg: #dde3dd;
   --shadow: 0 18px 45px rgba(29, 49, 37, .08);
+  --focus-ring: #276749;
 }
 
 :root[data-theme="dark"] {
@@ -38,6 +39,7 @@
   --code-bg: #101611;
   --media-bg: #202a23;
   --shadow: 0 18px 45px rgba(0, 0, 0, .25);
+  --focus-ring: #a6efc0;
 }
 
 * { box-sizing: border-box; }
@@ -125,8 +127,31 @@ dialog {
 .theme-icon { font-size: 16px; line-height: 1; }
 
 :focus-visible {
-  outline: 3px solid color-mix(in srgb, var(--accent) 70%, white);
-  outline-offset: 3px;
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid transparent;
+  outline-offset: 0;
+  box-shadow: inset 0 0 0 2px var(--focus-ring);
+}
+
+@media (forced-colors: active) {
+  :focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+    box-shadow: inset 0 0 0 2px Highlight;
+  }
 }
 
 .shell { max-width: 1180px; margin: 0 auto; padding: 38px 24px 72px; }

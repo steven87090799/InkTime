@@ -250,6 +250,68 @@ class DeviceReleaseService:
             release_dir_identity=release_dir_identity,
         )
 
+    def authorize_stock_test_release_for_device(
+        self,
+        *,
+        device_id: str,
+        profile_key: str,
+        release_id: str,
+    ) -> DeviceReleaseAuthorization:
+        """Authorize only an ephemeral Stock test release for one device.
+
+        Stock test releases intentionally do not use the Custom firmware test
+        assignment or queue.  Their manifest carries an exact device binding;
+        this separate method keeps the generic release authorization contract
+        unchanged.
+        """
+        if _RELEASE_ID.fullmatch(release_id) is None:
+            return DeviceReleaseAuthorization(False, None, "invalid_release_id", release_id)
+        with self.database.session() as connection:
+            device = connection.execute(
+                "SELECT enabled,delivery_mode,panel_profile FROM devices WHERE id=?",
+                (device_id,),
+            ).fetchone()
+            release = connection.execute(
+                "SELECT status FROM releases WHERE id=?",
+                (release_id,),
+            ).fetchone()
+        if device is None:
+            return DeviceReleaseAuthorization(False, None, "device_not_found", release_id)
+        if not bool(device["enabled"]):
+            return DeviceReleaseAuthorization(False, None, "device_disabled", release_id)
+        if str(device["delivery_mode"] or "") != "stock_compat":
+            return DeviceReleaseAuthorization(False, None, "not_stock_compatible", release_id)
+        if str(device["panel_profile"] or "") != profile_key:
+            return DeviceReleaseAuthorization(False, None, "profile_mismatch", release_id)
+        if release is not None and str(release["status"]) not in _DOWNLOADABLE_RELEASE_STATES:
+            return DeviceReleaseAuthorization(False, None, "release_not_downloadable", release_id)
+        try:
+            release_dir, release_dir_identity, manifest = self._load_manifest(release_id)
+        except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            return DeviceReleaseAuthorization(False, None, "invalid_manifest", release_id)
+        except UnsafePathError:
+            return DeviceReleaseAuthorization(False, None, "unsafe_release_path", release_id)
+        options = manifest.get("render_options")
+        if (
+            manifest.get("release_kind") != "device_test"
+            or str(manifest.get("render_profile")) != profile_key
+            or not isinstance(options, dict)
+            or options.get("transport") != "stock_direct"
+            or options.get("stock_direct") is not True
+            or str(options.get("stock_direct_device_id")) != device_id
+        ):
+            return DeviceReleaseAuthorization(False, None, "not_stock_test_release", release_id)
+        return DeviceReleaseAuthorization(
+            allowed=True,
+            source="stock_direct_test",
+            reason=None,
+            release_id=release_id,
+            release_dir=release_dir,
+            manifest=manifest,
+            test_assignment=None,
+            release_dir_identity=release_dir_identity,
+        )
+
     def latest_for_device(
         self,
         *,

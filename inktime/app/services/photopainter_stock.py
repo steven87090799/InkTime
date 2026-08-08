@@ -36,6 +36,43 @@ class StockCompatibilityService:
         authorization = self.device_releases.authorize_release_for_device(
             device_id=device_id, profile_key=profile_key, release_id=release_id
         )
+        return self._payload_from_authorization(
+            authorization,
+            profile_key=profile_key,
+            file_name=file_name,
+            rotate180=rotate180,
+        )
+
+    def payload_for_stock_test_release(
+        self,
+        *,
+        device_id: str,
+        profile_key: str,
+        release_id: str,
+        file_name: str | None = None,
+        rotate180: bool = False,
+    ) -> tuple[bytes, dict[str, Any]]:
+        """Read an exact ephemeral Stock test release without Custom assignment."""
+        authorization = self.device_releases.authorize_stock_test_release_for_device(
+            device_id=device_id, profile_key=profile_key, release_id=release_id
+        )
+        if not authorization.allowed or authorization.manifest is None:
+            raise PermissionError("PHOTOPAINTER-006 Stock 測試 Release 未授權")
+        return self._payload_from_authorization(
+            authorization,
+            profile_key=profile_key,
+            file_name=file_name,
+            rotate180=rotate180,
+        )
+
+    def _payload_from_authorization(
+        self,
+        authorization,
+        *,
+        profile_key: str,
+        file_name: str | None,
+        rotate180: bool,
+    ) -> tuple[bytes, dict[str, Any]]:
         if not authorization.allowed or authorization.manifest is None:
             raise PermissionError("PHOTOPAINTER-006 Release 未授權")
         entry = self.device_releases.payload_entry_for_authorization(authorization)
@@ -50,7 +87,7 @@ class StockCompatibilityService:
             rotate180=rotate180,
         )
         return converted, {
-            "release_id": release_id,
+            "release_id": authorization.release_id,
             "file_name": selected_name,
             "source_sha256": str(entry["sha256"]),
             "stock_sha256": sha256(converted).hexdigest(),
@@ -109,4 +146,31 @@ class StockCompatibilityService:
             "upload_accepted": 200 <= response.status_code < 300,
             "display_completed": False,
             "http_status": response.status_code,
+        }
+
+    def display_stock_test_release(
+        self,
+        *,
+        device_id: str,
+        profile_key: str,
+        release_id: str,
+        file_name: str,
+        host: str,
+        rotate180: bool = False,
+    ) -> dict[str, Any]:
+        """Upload one exact Stock test release without Custom queue ownership."""
+        payload, metadata = self.payload_for_stock_test_release(
+            device_id=device_id,
+            profile_key=profile_key,
+            release_id=release_id,
+            file_name=file_name,
+            rotate180=rotate180,
+        )
+        response = self.transport.upload(host, payload)
+        return {
+            **metadata,
+            "upload_accepted": 200 <= response.status_code < 300,
+            "display_completed": False,
+            "http_status": response.status_code,
+            "transport": "stock_direct",
         }

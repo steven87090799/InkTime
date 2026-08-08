@@ -22,6 +22,7 @@ from inktime.app.domain.rendering import (
     FONT_PREVIEW_TEXT,
     FontCoverageError,
     profile_summaries,
+    resolve_layout_geometry,
 )
 from inktime.app.repositories.jobs import PreviewCapacityError
 from inktime.app.services.rendering import (
@@ -53,6 +54,16 @@ def _payload() -> dict:
 def rendering_page():
     settings = current_app.extensions["inktime_settings_repository"]
     render_service = current_app.extensions["inktime_render_service"]
+    current_layout = str(settings.get("render.layout", "photo_info"))
+    current_orientation = str(settings.get("render.frame_orientation", "portrait"))
+    current_fit_mode = str(settings.get("render.fit_mode", "stretch_fill"))
+    frame_geometries = {
+        f"{layout}:{orientation}": resolve_layout_geometry(
+            layout, orientation, 480, 800
+        ).as_dict()
+        for layout in LAYOUTS
+        for orientation in ("portrait", "landscape")
+    }
     current_font_reference = str(settings.get("render.font_path", ""))
     fonts = current_app.extensions["inktime_font_manager"].options(current_font_reference)
     return render_template(
@@ -67,11 +78,12 @@ def rendering_page():
         color_distance=str(settings.get("render.color_distance", "oklab")),
         show_location=bool(settings.get("render.show_location", True)),
         layouts=LAYOUTS,
-        current_layout=str(settings.get("render.layout", "photo_info")),
+        current_layout=current_layout,
         frame_orientations=FRAME_ORIENTATIONS,
-        current_orientation=str(settings.get("render.frame_orientation", "portrait")),
+        current_orientation=current_orientation,
         fit_modes=FIT_MODES,
-        current_fit_mode=str(settings.get("render.fit_mode", "contain")),
+        current_fit_mode=current_fit_mode,
+        frame_geometries=frame_geometries,
         selection_mode=str(settings.get("render.selection_mode", "history_today")),
         candidate_photos=render_service.select_candidates_details(12),
         devices=[dict(device) for device in current_app.extensions["inktime_device_repository"].list()],
@@ -83,6 +95,8 @@ def rendering_page():
 def simulator_page():
     settings = current_app.extensions["inktime_settings_repository"]
     custom_presets = _custom_photo_presets(settings)
+    current_font_reference = str(settings.get("render.font_path", ""))
+    fonts = current_app.extensions["inktime_font_manager"].options(current_font_reference)
     return render_template(
         "simulator.html",
         profiles=profile_summaries(),
@@ -92,6 +106,9 @@ def simulator_page():
         color_distance=str(settings.get("render.color_distance", "oklab")),
         photo_presets=BUILTIN_PHOTO_PRESETS,
         custom_photo_presets=custom_presets,
+        fonts=[font for font in fonts if font.compatible],
+        current_font=next((font for font in fonts if font.active and font.compatible), None),
+        simulator_caption_max_chars=_simulator_caption_max_chars(settings),
         devices=[dict(device) for device in current_app.extensions["inktime_device_repository"].list()],
     )
 
@@ -147,6 +164,38 @@ def _renderer_request() -> dict:
         "palette_version": str(palette.get("palette_version", "custom-1")),
         "text_regions": _json_form("text_regions", []),
         "face_regions": _json_form("face_regions", []),
+    }
+
+
+def _simulator_caption_max_chars(settings=None) -> int:
+    repository = settings or current_app.extensions["inktime_settings_repository"]
+    try:
+        maximum = int(repository.get("analysis.side_caption_max_chars", 16))
+    except (TypeError, ValueError):
+        maximum = 16
+    return max(1, min(maximum, 120))
+
+
+def _simulator_preview_options() -> dict[str, str]:
+    """Validate preview-only caption/font inputs without changing settings."""
+    caption = str(request.form.get("caption", "")).strip()
+    settings = current_app.extensions["inktime_settings_repository"]
+    maximum = _simulator_caption_max_chars(settings)
+    if len(caption) > maximum:
+        abort(400, description=f"RENDER-007 模擬器短文案最多 {maximum} 字")
+    font_reference = str(
+        request.form.get("font_reference") or settings.get("render.font_path", "")
+    ).strip()
+    manager = current_app.extensions["inktime_font_manager"]
+    try:
+        manager.validate_reference(font_reference, f"{FONT_COMPATIBILITY_TEXT}{caption}")
+    except (OSError, ValueError) as exc:
+        abort(422, description=f"IMG-002 模擬器字型無法顯示短文案：{exc}")
+    return {
+        "caption": caption,
+        "font_reference": font_reference,
+        "font_root": str(manager.root),
+        "font_builtin_root": str(manager.builtin_root),
     }
 
 
@@ -220,6 +269,8 @@ def _queue_upload_workload(operation: str, settings: dict) -> tuple[dict, int]:
         "dither": dict(configuration.get("overrides", {})).get("dither"),
         "strength": dict(configuration.get("overrides", {})).get("error_strength", 1.0),
         "preset": configuration.get("requested_preset"),
+        "caption": settings.get("caption", ""),
+        "font_reference": settings.get("font_reference", ""),
         "renderer_version": RENDERER_VERSION,
         "font_version": None,
         "output_dimensions": [480, 800],
@@ -355,14 +406,14 @@ def simulate():
     profile_key = str(request.form.get("profile", "safe_4c"))
     dither = str(request.form.get("dither", "floyd_steinberg"))
     color_distance = str(request.form.get("color_distance", "oklab"))
-    fit = str(request.form.get("fit", "cover"))
+    fit = str(request.form.get("fit", "stretch_fill"))
     try:
         strength = float(request.form.get("strength", "1"))
     except (TypeError, ValueError):
         abort(400, description="RENDER-004 抖動強度格式不合法")
     if profile_key not in DISPLAY_PROFILES or dither not in DITHER_ALGORITHMS:
         abort(400, description="RENDER-004 模擬 Profile 或抖動算法不合法")
-    if fit not in {"cover", "contain"}:
+    if fit not in FIT_MODES:
         abort(400, description="RENDER-004 圖片縮放模式不合法")
 
     return _queue_upload_workload(
@@ -373,6 +424,7 @@ def simulate():
             "color_distance": color_distance,
             "fit": fit,
             "strength": strength,
+            **_simulator_preview_options(),
         },
     )
 
@@ -381,9 +433,11 @@ def simulate():
 @login_required
 def compare_renderer():
     profile_key = str(request.form.get("profile", "gdep073e01_6c"))
-    fit = str(request.form.get("fit", "cover"))
+    fit = str(request.form.get("fit", "stretch_fill"))
     if profile_key not in DISPLAY_PROFILES:
         abort(400, description="RENDER-003 A/B 預覽 Profile 不合法")
+    if fit not in FIT_MODES:
+        abort(400, description="RENDER-004 圖片縮放模式不合法")
     configuration = _renderer_request()
     return _queue_upload_workload(
         "compare",
@@ -391,6 +445,7 @@ def compare_renderer():
             "profile": profile_key,
             "fit": fit,
             "configuration": configuration,
+            **_simulator_preview_options(),
         },
     )
 
@@ -458,7 +513,14 @@ def publish_test_release():
     if profile_key != str(device.get("panel_profile")):
         abort(409, description="DEVICE-006 測試色盤與裝置面板 Profile 不相容")
     configuration = _renderer_request()
-    fit = str(request.form.get("fit", "cover"))
+    fit = str(request.form.get("fit", "stretch_fill"))
+    if fit not in FIT_MODES:
+        abort(400, description="RENDER-004 圖片縮放模式不合法")
+    transport = str(request.form.get("transport", "custom")).strip()
+    if transport not in {"custom", "stock_direct"}:
+        abort(400, description="DEVICE-006 測試傳送邊界不合法")
+    if transport == "stock_direct" and str(device.get("delivery_mode") or "") != "stock_compat":
+        abort(409, description="DEVICE-008 Stock 測試只能選擇 Stock 相容裝置")
     delivery = str(request.form.get("delivery", "next_wake"))
     if delivery not in {"immediate", "next_wake"}:
         abort(400, description="DEVICE-006 測試傳送時機不合法")
@@ -479,10 +541,13 @@ def publish_test_release():
             "delivery": delivery,
             "one_time": one_time,
             "restore_formal": restore_formal,
-            "save_preset": str(request.form.get("save_preset", "false")).lower()
+            "save_preset": transport == "custom"
+            and str(request.form.get("save_preset", "false")).lower()
             in {"1", "true", "yes", "on"},
             "preset_label": str(request.form.get("preset_label", "測試後儲存")),
             "created_by": str(g.user["id"]),
+            "transport": transport,
+            **_simulator_preview_options(),
         },
     )
 
@@ -495,7 +560,7 @@ def dual_pair_compare_preview():
     primary = str(payload.get("primary_photo_id", "")).strip()
     secondary = str(payload.get("secondary_photo_id", "")).strip()
     profile = str(payload.get("profile", "gdep073e01_6c"))
-    fit_mode = str(payload.get("fit_mode", "contain"))
+    fit_mode = str(payload.get("fit_mode", "stretch_fill"))
     if not primary or not secondary or primary == secondary:
         abort(400, description="RENDER-005 雙照片比較需要兩張不同照片")
     if profile not in DISPLAY_PROFILES or fit_mode not in FIT_MODES:
@@ -781,7 +846,7 @@ def publish_history_test_release():
         "source_photo_id": photo_id,
         "device_id": device_id,
         "profile": profile_key,
-        "fit": str(settings.get("render.fit_mode", "contain")),
+        "fit": str(settings.get("render.fit_mode", "stretch_fill")),
         "delivery": str(payload.get("delivery", "next_wake")),
         "one_time": True,
         "restore_formal": True,

@@ -30,7 +30,9 @@
           {% for key, preset in photo_presets.items() %}<option value="{{ key }}">{{ preset.label }}</option>{% endfor %}
           {% for key, preset in custom_photo_presets.items() %}<option value="{{ key }}">{{ preset.label }}（自訂）</option>{% endfor %}
         </select></label>
-        <label><span>縮放</span><select id="fit"><option value="cover">填滿裁切</option><option value="contain">完整留白</option></select></label>
+        <label><span>縮放</span><select id="fit"><option value="stretch_fill" selected>填滿照片區（不裁切，可微變形）</option><option value="contain">完整顯示（保留留白）</option><option value="cover">填滿並裁切</option></select></label>
+        <label class="field-wide"><span>預覽短文案（只套用本次模擬，不寫入設定）</span><textarea id="simulator-caption" maxlength="{{ simulator_caption_max_chars }}" rows="2" placeholder="例如：那年今日的臺北午後"></textarea></label>
+        <label><span>預覽字型（只套用本次模擬）</span><select id="simulator-font-reference">{% for font in fonts|default([]) %}<option value="{{ font.reference }}" {% if current_font and font.reference==current_font.reference %}selected{% endif %}>{{ font.display_name }}／{{ font.style }}</option>{% else %}<option value="">目前沒有可用繁中字型</option>{% endfor %}</select></label>
         <label><span>抖動算法</span><select id="dither">
           <option value="serpentine_floyd_steinberg">蛇形 Floyd–Steinberg</option>
           <option value="nearest">Nearest Color</option>
@@ -70,7 +72,7 @@
         <button class="primary simulate-button" id="compare-button" type="submit" disabled>產生 A/B 預覽</button>
         {% if g.user.role=='administrator' %}<button class="secondary" id="save-preset" type="button" disabled>儲存自訂 Preset</button>{% endif %}
       </div>
-      <p class="simulator-status" id="simulator-status" role="status" aria-live="polite">請先選擇原始照片。</p>
+      <p class="simulator-status" id="simulator-status" role="status" aria-live="polite">正在建立 deterministic 預設樣本…</p>
     </form>
   </aside>
 
@@ -106,13 +108,15 @@
     <section class="test-release-panel">
       <div class="panel-head"><div><h2>傳送到墨水屏測試</h2><p>建立獨立測試 Release；預設不覆寫正式排程。</p></div></div>
       <div class="test-release-grid">
-        <label><span>裝置</span><select id="test-device"><option value="">選擇裝置</option>{% for device in devices %}<option value="{{ device.id }}" data-profile="{{ device.panel_profile }}" {% if not device.enabled %}disabled{% endif %}>{{ device.name }}／{{ device.panel_profile }}{% if not device.enabled %}（停用）{% endif %}</option>{% endfor %}</select></label>
+        <label><span>裝置</span><select id="test-device"><option value="">選擇裝置</option>{% for device in devices %}<option value="{{ device.id }}" data-profile="{{ device.panel_profile }}" data-delivery-mode="{{ device.delivery_mode or '' }}" {% if not device.enabled %}disabled{% endif %}>{{ device.name }}／{{ device.panel_profile }}{% if not device.enabled %}（停用）{% endif %}</option>{% endfor %}</select></label>
+        <label class="field-wide"><span>韌體／傳送邊界</span><select id="test-firmware-mode"><option value="custom">InkTime 自訂韌體（建立本次測試 Release）</option><option value="stock">微雪官方韌體（既有 Stock／/dataUP）</option></select><small id="test-firmware-note">瀏覽器只送到 InkTime 後端；自訂韌體保留 queue／delivery／一次性／恢復正式排程與 ACK 流程。</small></label>
         <label><span>傳送時機</span><select id="test-delivery"><option value="next_wake">等待下一次喚醒</option><option value="immediate">立即顯示（下次輪詢）</option></select></label>
         <label class="toggle-row"><input id="one-time" type="checkbox" checked><span>只傳送一次</span></label>
         <label class="toggle-row"><input id="restore-formal" type="checkbox" checked><span>測試後恢復正式排程</span></label>
         <label class="toggle-row"><input id="save-and-send" type="checkbox"><span>儲存自訂 Preset 並傳送</span></label>
         <button class="primary" id="send-test" type="button" disabled>傳送到墨水屏測試</button>
       </div>
+      <p class="simulator-status" id="test-transport-status" role="status" aria-live="polite" hidden></p>
     </section>
     {% endif %}
   </section>
@@ -131,14 +135,54 @@
   const compareButton = document.getElementById('compare-button');
   const profile = document.getElementById('profile');
   const preset = document.getElementById('preset');
+  const fit = document.getElementById('fit');
+  const caption = document.getElementById('simulator-caption');
+  const fontReference = document.getElementById('simulator-font-reference');
   const dither = document.getElementById('dither');
   const errorStrength = document.getElementById('error-strength');
   const paletteMode = document.getElementById('palette-mode');
   const paletteValues = document.getElementById('palette-values');
   const zoom = document.getElementById('zoom');
+  let currentSource = null;
   let lastResult = null;
+  let lastResultRevision = null;
+  let compareRunning = false;
+  let compareRevision = 0;
+  let pendingCompare = false;
+  let compareTimer = null;
 
   function setStatus(message, type='') { status.textContent = message; status.className = `simulator-status ${type}`.trim(); }
+  function clearPreviewCards() {
+    for (const key of ['original','legacy','new']) {
+      const image = document.getElementById(`${key}-image`);
+      image.removeAttribute('src'); image.hidden = true; document.getElementById(`${key}-empty`).hidden = false;
+    }
+    document.getElementById('simulator-meta').hidden = true;
+    document.getElementById('palette-statistics').hidden = true;
+    document.getElementById('save-preset')?.setAttribute('disabled','disabled');
+    document.getElementById('send-test')?.setAttribute('disabled','disabled');
+    lastResult = null;
+    lastResultRevision = null;
+  }
+  function setCurrentSource(file, kind) {
+    currentSource = {kind, file, name: file.name};
+    compareButton.disabled = false;
+    clearPreviewCards();
+  }
+  function makeDefaultSampleFile() {
+    const canvas = document.createElement('canvas'); canvas.width = 1200; canvas.height = 1600;
+    const context = canvas.getContext('2d');
+    const gradient = context.createLinearGradient(0, 0, canvas.width, canvas.height);
+    gradient.addColorStop(0, '#173d35'); gradient.addColorStop(.42, '#d5a53b'); gradient.addColorStop(.7, '#a43b2e'); gradient.addColorStop(1, '#f1ead8');
+    context.fillStyle = gradient; context.fillRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = 'rgba(255,255,255,.34)'; context.beginPath(); context.arc(930, 280, 140, 0, Math.PI * 2); context.fill();
+    context.fillStyle = '#203b31'; context.beginPath(); context.moveTo(0, 1070); context.lineTo(410, 650); context.lineTo(760, 1080); context.lineTo(1040, 760); context.lineTo(1200, 980); context.lineTo(1200, 1600); context.lineTo(0, 1600); context.closePath(); context.fill();
+    context.strokeStyle = 'rgba(255,255,255,.5)'; context.lineWidth = 8;
+    for (let index = 0; index < 9; index += 1) { context.beginPath(); context.moveTo(50 + index * 138, 1140); context.lineTo(170 + index * 138, 1540); context.stroke(); }
+    context.fillStyle = '#fff8df'; context.font = '800 92px sans-serif'; context.fillText('INKTIME', 78, 210);
+    context.font = '34px sans-serif'; context.fillText('DETERMINISTIC SAMPLE／A·B PREVIEW', 82, 270);
+    return new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(new File([blob], 'inktime-default-sample.png', {type:'image/png'})) : reject(new Error('無法建立預設樣本')), 'image/png'));
+  }
   function setRangeOutput(id) { document.getElementById(`${id}-output`).value = Number(document.getElementById(`${id}-strength`).value).toFixed(2); }
   function applyPreset() {
     const selected = customPresets[preset.value];
@@ -180,10 +224,11 @@
     return {mode:paletteMode.value, palette_version:document.getElementById('palette-version').value, [paletteMode.value === 'custom_lab' ? 'lab' : 'rgb']:values};
   }
   function formData() {
-    if (!photo.files[0]) throw new Error('請先選擇原始照片');
+    if (!currentSource?.file) throw new Error('請先選擇或建立原始照片');
     const data = new FormData();
-    data.set('photo', photo.files[0], photo.files[0].name);
-    data.set('profile', profile.value); data.set('preset', preset.value); data.set('fit', document.getElementById('fit').value);
+    data.set('photo', currentSource.file, currentSource.name);
+    data.set('profile', profile.value); data.set('preset', preset.value); data.set('fit', fit.value);
+    data.set('caption', caption.value.trim()); data.set('font_reference', fontReference.value);
     data.set('options', JSON.stringify(options())); data.set('palette', JSON.stringify(palette()));
     data.set('text_regions', document.getElementById('protect-text').checked ? JSON.stringify([[0,0.86,1,1]]) : '[]');
     data.set('face_regions', '[]');
@@ -209,35 +254,110 @@
     const useLab = paletteMode.value === 'custom_lab';
     const values = Object.fromEntries(item.colors.map(color => [color.name, useLab ? item[`${color.name}_lab`] : color.rgb]));
     paletteMode.value = useLab ? 'custom_lab' : 'custom_rgb'; paletteValues.value = JSON.stringify(values, null, 2);
+    refreshPreviewFromControls();
   }
-  async function compare(event) {
-    event.preventDefault(); compareButton.disabled=true; setStatus('Server 正在產生原圖、舊算法與新算法…');
+  function scheduleCompare(event) {
+    event?.preventDefault();
+    if (compareTimer) { clearTimeout(compareTimer); compareTimer = null; }
+    compareRevision += 1;
+    if (compareRunning) { pendingCompare = true; return; }
+    compare();
+  }
+  function refreshPreviewFromControls(debounce=false) {
+    if (compareTimer) { clearTimeout(compareTimer); compareTimer = null; }
+    compareRevision += 1;
+    clearPreviewCards();
+    if (!currentSource) return;
+    setStatus('預覽設定已變更；正在重新產生 A/B 預覽…', 'ready');
+    if (compareRunning) { pendingCompare = true; return; }
+    if (debounce) {
+      compareTimer = window.setTimeout(() => { compareTimer = null; compare(); }, 350);
+      return;
+    }
+    compare();
+  }
+  function ensureCurrentPreview() {
+    if (lastResult && lastResultRevision === compareRevision) return true;
+    setStatus('目前設定尚未完成新的 A/B 預覽，請稍候。', 'error');
+    return false;
+  }
+  async function compare() {
+    if (compareRunning || !currentSource) return;
+    compareRunning=true; pendingCompare=false; const revision=compareRevision, sourceAtStart=currentSource;
+    compareButton.disabled=true; clearPreviewCards(); setStatus('Server 正在產生原圖、舊算法與新算法…');
     try {
       const response=await window.inktimeFetch('/api/v1/rendering/compare',{method:'POST',body:formData()}); const created=await response.json();
-      if(!response.ok) throw new Error(created.message||'A/B 預覽失敗'); const body=await waitForJob(created); lastResult=body;
+      if(!response.ok) throw new Error(created.message||'A/B 預覽失敗'); const body=await waitForJob(created);
+      if(revision!==compareRevision||sourceAtStart!==currentSource)return;
+      lastResult=body;
+      lastResultRevision=revision;
       for(const key of ['original','legacy','new']) { const image=document.getElementById(`${key}-image`); image.src=body[key]; image.hidden=false; document.getElementById(`${key}-empty`).hidden=true; }
-      document.getElementById('simulator-meta').hidden=false; document.getElementById('meta-source').textContent=body.source_size; document.getElementById('meta-bytes').textContent=`${body.payload_bytes.toLocaleString()} bytes`; document.getElementById('meta-time').textContent=`${body.render_ms} / ${body.legacy_render_ms} ms`; document.getElementById('meta-renderer').textContent=`${body.preset}／${body.dither}`; document.getElementById('download-result').href=body.new;
+      document.getElementById('simulator-meta').hidden=false; document.getElementById('meta-source').textContent=`${currentSource.kind==='generated_default_sample'?'內建 deterministic sample':'使用者上傳'}／${body.source_size}`; document.getElementById('meta-bytes').textContent=`${body.payload_bytes.toLocaleString()} bytes`; document.getElementById('meta-time').textContent=`${body.render_ms} / ${body.legacy_render_ms} ms`; document.getElementById('meta-renderer').textContent=`${body.preset}／${body.dither}`; document.getElementById('download-result').href=body.new;
       const rows=document.getElementById('palette-stat-body'); rows.replaceChildren(...body.palette.map(item=>{const row=document.createElement('tr');const color=document.createElement('td');const swatch=document.createElement('i');swatch.style.backgroundColor=`rgb(${item.rgb.join(',')})`;color.append(swatch,document.createTextNode(item.name));const pixels=document.createElement('td');pixels.textContent=item.pixels.toLocaleString();const ratio=document.createElement('td');ratio.textContent=`${(item.ratio*100).toFixed(2)}%`;row.append(color,pixels,ratio);return row;})); document.getElementById('palette-statistics').hidden=false;
       document.getElementById('save-preset')?.removeAttribute('disabled'); document.getElementById('send-test')?.removeAttribute('disabled'); setStatus('A/B 預覽完成；下載檔為 Server 新算法結果。','success');
-    } catch(error) { setStatus(error.message||'A/B 預覽失敗','error'); } finally { compareButton.disabled=!photo.files[0]; }
+    } catch(error) {
+      if(revision===compareRevision&&sourceAtStart===currentSource)setStatus(error.message||'A/B 預覽失敗','error');
+    } finally {
+      compareRunning=false; compareButton.disabled=!currentSource;
+      if(pendingCompare){pendingCompare=false;queueMicrotask(compare);}
+    }
   }
   async function savePreset() {
     const label=window.prompt('自訂 Preset 名稱','六色照片自訂'); if(!label) return;
     const source=customPresets[preset.value]?.source_preset || preset.value; const response=await window.inktimeFetch('/api/v1/rendering/presets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label,source_preset:source,options:options(),palette:palette()})}); const body=await response.json(); if(!response.ok){setStatus(body.message||'儲存失敗','error');return;} setStatus(`已建立自訂副本：${body.label}`,'success');
   }
-  async function sendTest() {
-    const select=document.getElementById('test-device'); if(!select.value){setStatus('請選擇測試裝置','error');return;} if(select.selectedOptions[0].dataset.profile!==profile.value){setStatus('裝置 Profile 與目前面板不相容','error');return;}
-    const button=document.getElementById('send-test'); button.disabled=true; setStatus('Server 正式渲染並建立獨立測試 Release…');
-    try { const data=formData(); data.set('device_id',select.value); data.set('delivery',document.getElementById('test-delivery').value); data.set('one_time',document.getElementById('one-time').checked); data.set('restore_formal',document.getElementById('restore-formal').checked); data.set('save_preset',document.getElementById('save-and-send').checked); data.set('preset_label','測試後儲存'); const response=await window.inktimeFetch('/api/v1/rendering/test-release',{method:'POST',body:data}); const created=await response.json(); if(!response.ok)throw new Error(created.message||'測試 Release 建立失敗'); const body=await waitForJob(created); const preset=body.preset_saved===false?` Preset 未儲存（${body.preset_error||'RENDER-PRESET-WRITE'}）。`:body.preset_saved?' Preset 已儲存。':''; setStatus(`測試 Release ${body.release_id} 已指派；正式排程未覆寫。${preset}`,'success'); } catch(error){setStatus(error.message||'測試傳送失敗','error');} finally{button.disabled=!lastResult;}
+  async function sendStockTest() {
+    if (!ensureCurrentPreview()) return;
+    const select=document.getElementById('test-device'); if(!select.value){setStatus('請選擇 Stock 測試裝置','error');return;} if(select.selectedOptions[0].dataset.deliveryMode!=='stock_compat'){setStatus('官方韌體模式只能選擇 Stock PhotoPainter 裝置','error');return;} if(select.selectedOptions[0].dataset.profile!==profile.value){setStatus('裝置 Profile 與目前面板不相容','error');return;}
+    if(!window.confirm(`微雪官方韌體模式會先以目前來源、Preset、縮放、短文案與字型建立獨立測試 Release，再透過既有 Stock /dataUP 邊界傳送到「${select.selectedOptions[0].textContent.trim()}」。瀏覽器不會直連裝置；Stock 端無法回報持久完成狀態。確定？`))return;
+    const button=document.getElementById('send-test'),transportStatus=document.getElementById('test-transport-status'); button.disabled=true; transportStatus.hidden=false; transportStatus.className='simulator-status'; transportStatus.textContent='正在以目前來源建立獨立 Stock 測試 Release…';
+    try {
+      const data=formData(); data.set('device_id',select.value); data.set('transport','stock_direct'); data.set('delivery','next_wake'); data.set('one_time','false'); data.set('restore_formal','false'); data.set('save_preset','false');
+      const releaseResponse=await window.inktimeFetch('/api/v1/rendering/test-release',{method:'POST',body:data}); let created={}; try{created=await releaseResponse.json();}catch{}
+      if(!releaseResponse.ok)throw new Error(created.message||'Stock 測試 Release 建立失敗。');
+      const body=await waitForJob(created); if(!body.release_id||!body.file_name)throw new Error('Stock 測試 Release Manifest 不完整，已停止傳送。');
+      transportStatus.textContent=`目前來源已建立 Release ${body.release_id}；後端正在轉換並送往 Stock /dataUP…`;
+      const response=await window.inktimeFetch(`/api/v1/devices/${encodeURIComponent(select.value)}/stock-photopainter/display`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({release_id:body.release_id,file_name:body.file_name,transport:'stock_direct'})}); let result={}; try{result=await response.json();}catch{}
+      if(!response.ok)throw new Error(result.message||'Stock PhotoPainter 傳送失敗。');
+      if(result.upload_accepted!==true)throw new Error('Stock PhotoPainter 未接受圖片，未判定為完成。');
+      if(String(result.release_id)!==String(body.release_id))throw new Error('Stock 回應的 Release 與本次來源不一致，已停止判定。');
+      const completion=result.display_completed===true?'裝置已回報完成刷新。':'裝置已接受圖片；Stock 韌體沒有持久完成回報，請查看實體相框。'; transportStatus.className='simulator-status success'; transportStatus.textContent=`${completion} Release：${body.release_id}／HTTP ${result.http_status||'—'}`; setStatus('Stock 官方韌體傳送已由後端接受。','success');
+    } catch(error) { transportStatus.className='simulator-status error'; transportStatus.textContent=error.message||'Stock 傳送失敗。'; setStatus(transportStatus.textContent,'error'); } finally { button.disabled=!lastResult||lastResultRevision!==compareRevision; }
   }
-  photo.addEventListener('change',()=>{compareButton.disabled=!photo.files[0];setStatus(photo.files[0]?`已選擇 ${photo.files[0].name}`:'請先選擇原始照片。','ready');});
-  document.getElementById('drop-zone').addEventListener('drop',event=>{event.preventDefault(); if(event.dataTransfer.files[0]){const transfer=new DataTransfer();transfer.items.add(event.dataTransfer.files[0]);photo.files=transfer.files;photo.dispatchEvent(new Event('change'));}}); document.getElementById('drop-zone').addEventListener('dragover',event=>event.preventDefault());
-  form.addEventListener('submit',compare); preset.addEventListener('change',applyPreset); profile.addEventListener('change',updatePaletteMeta); errorStrength.addEventListener('input',()=>document.getElementById('error-output').value=Number(errorStrength.value).toFixed(2));
-  for(const key of ['denoise','tone','contrast','sharpen']) document.getElementById(`${key}-strength`).addEventListener('input',()=>setRangeOutput(key));
-  document.getElementById('legacy-button').addEventListener('click',()=>{dither.value='gooddisplay';document.getElementById('linear-light').checked=false;document.getElementById('color-distance').value='rgb';setStatus('已切回舊微雪算法；重新產生預覽即可比較。','ready');});
-  document.getElementById('copy-palette').addEventListener('click',copyPalette); document.getElementById('reset-palette').addEventListener('click',()=>{paletteMode.value='default';paletteValues.value='';setStatus('已恢復微雪預設 Palette。','ready');}); document.getElementById('save-preset')?.addEventListener('click',savePreset); document.getElementById('send-test')?.addEventListener('click',sendTest);
+  async function sendTest() {
+    if (!ensureCurrentPreview()) return;
+    const select=document.getElementById('test-device'); if(!select.value){setStatus('請選擇測試裝置','error');return;} if(select.selectedOptions[0].dataset.profile!==profile.value){setStatus('裝置 Profile 與目前面板不相容','error');return;}
+    if(document.getElementById('test-firmware-mode').value==='stock'){await sendStockTest();return;}
+    const button=document.getElementById('send-test'); button.disabled=true; setStatus('Server 正式渲染並建立獨立測試 Release…');
+    try { const data=formData(); data.set('device_id',select.value); data.set('transport','custom'); data.set('delivery',document.getElementById('test-delivery').value); data.set('one_time',document.getElementById('one-time').checked); data.set('restore_formal',document.getElementById('restore-formal').checked); data.set('save_preset',document.getElementById('save-and-send').checked); data.set('preset_label','測試後儲存'); const response=await window.inktimeFetch('/api/v1/rendering/test-release',{method:'POST',body:data}); const created=await response.json(); if(!response.ok)throw new Error(created.message||'測試 Release 建立失敗'); const body=await waitForJob(created); const preset=body.preset_saved===false?` Preset 未儲存（${body.preset_error||'RENDER-PRESET-WRITE'}）。`:body.preset_saved?' Preset 已儲存。':''; setStatus(`測試 Release ${body.release_id} 已指派；正式排程未覆寫。${preset}`,'success'); } catch(error){setStatus(error.message||'測試傳送失敗','error');} finally{button.disabled=!lastResult||lastResultRevision!==compareRevision;}
+  }
+  const firmwareMode=document.getElementById('test-firmware-mode'),firmwareNote=document.getElementById('test-firmware-note');
+  function updateFirmwareNote(){const stock=firmwareMode?.value==='stock',select=document.getElementById('test-device');if(select){for(const option of select.options){if(option.value)option.hidden=stock&&option.dataset.deliveryMode!=='stock_compat';}if(stock&&select.selectedOptions[0]?.dataset.deliveryMode!=='stock_compat')select.value='';}if(firmwareNote)firmwareNote.textContent=stock?'瀏覽器只呼叫 InkTime 後端的既有 Stock 邊界；後端驗證 LAN Host、轉換 /dataUP Payload，HTTP 2xx 僅代表接受，不代表實體刷新完成。':'瀏覽器只送到 InkTime 後端；自訂韌體保留 queue／delivery／一次性／恢復正式排程與 ACK 流程。';if(document.getElementById('save-and-send'))document.getElementById('save-and-send').disabled=stock;}
+  firmwareMode?.addEventListener('change',updateFirmwareNote); updateFirmwareNote();
+  photo.addEventListener('change',()=>{const file=photo.files[0];if(!file){setStatus('目前仍使用既有預覽來源。','ready');return;}setCurrentSource(file,'user_upload');setStatus(`已選擇 ${file.name}；正在重新產生 A/B 預覽…`,'ready');scheduleCompare();});
+  document.getElementById('drop-zone').addEventListener('drop',event=>{event.preventDefault();const file=event.dataTransfer.files[0];if(file){setCurrentSource(file,'user_upload');photo.value='';setStatus(`已拖放 ${file.name}；正在重新產生 A/B 預覽…`,'ready');scheduleCompare();}}); document.getElementById('drop-zone').addEventListener('dragover',event=>event.preventDefault());
+  form.addEventListener('submit',scheduleCompare);
+  preset.addEventListener('change',()=>{applyPreset();refreshPreviewFromControls();});
+  profile.addEventListener('change',()=>{updatePaletteMeta();refreshPreviewFromControls();});
+  fit.addEventListener('change',refreshPreviewFromControls);
+  dither.addEventListener('change',refreshPreviewFromControls);
+  document.getElementById('color-distance').addEventListener('change',refreshPreviewFromControls);
+  errorStrength.addEventListener('input',()=>{document.getElementById('error-output').value=Number(errorStrength.value).toFixed(2);refreshPreviewFromControls(true);});
+  caption.addEventListener('input',()=>refreshPreviewFromControls(true));
+  fontReference.addEventListener('change',refreshPreviewFromControls);
+  for(const id of ['exif-orientation','high-quality-resize','linear-light','protect-text','denoise-enabled','denoise-strength','tone-enabled','tone-strength','contrast-enabled','contrast-strength','sharpen-enabled','sharpen-strength']) {
+    const control=document.getElementById(id); const eventName=control.type==='range'?'input':'change';
+    control.addEventListener(eventName,()=>{if(id.endsWith('-strength'))setRangeOutput(id.replace('-strength',''));refreshPreviewFromControls(control.type==='range');});
+  }
+  document.getElementById('palette-mode').addEventListener('change',refreshPreviewFromControls);
+  document.getElementById('palette-version').addEventListener('input',()=>refreshPreviewFromControls(true));
+  paletteValues.addEventListener('input',()=>refreshPreviewFromControls(true));
+  document.getElementById('legacy-button').addEventListener('click',()=>{dither.value='gooddisplay';document.getElementById('linear-light').checked=false;document.getElementById('color-distance').value='rgb';refreshPreviewFromControls();});
+  document.getElementById('copy-palette').addEventListener('click',copyPalette); document.getElementById('reset-palette').addEventListener('click',()=>{paletteMode.value='default';paletteValues.value='';refreshPreviewFromControls();}); document.getElementById('save-preset')?.addEventListener('click',savePreset); document.getElementById('send-test')?.addEventListener('click',sendTest);
+  for(const key of ['original','legacy','new']) document.getElementById(`${key}-image`).addEventListener('error',()=>{const image=document.getElementById(`${key}-image`);image.hidden=true;document.getElementById(`${key}-empty`).hidden=false;if(!compareRunning)setStatus(`${key} 預覽讀取失敗，請重新產生。`,'error');});
   zoom.addEventListener('input',()=>{const value=Number(zoom.value);document.getElementById('zoom-output').value=value.toFixed(1);document.querySelectorAll('.zoom-frame img').forEach(image=>image.style.transform=`scale(${value})`);}); document.querySelectorAll('.zoom-frame').forEach(frame=>frame.addEventListener('click',event=>{const rect=frame.getBoundingClientRect();const origin=`${((event.clientX-rect.left)/rect.width)*100}% ${((event.clientY-rect.top)/rect.height)*100}%`;document.querySelectorAll('.zoom-frame img').forEach(image=>image.style.transformOrigin=origin);}));
-  applyPreset(); updatePaletteMeta();
+  async function initializeSource(){try{setStatus('正在建立 deterministic 預設樣本…','ready');const file=await makeDefaultSampleFile();setCurrentSource(file,'generated_default_sample');setStatus('預設樣本已建立；Server 正在產生 A/B 預覽…','ready');scheduleCompare();}catch(error){setStatus(error.message||'無法建立預設樣本','error');}}
+  applyPreset(); updatePaletteMeta(); initializeSource();
 })();
 </script>
 {% endblock %}

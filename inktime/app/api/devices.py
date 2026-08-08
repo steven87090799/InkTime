@@ -605,6 +605,9 @@ def stock_photopainter_display(device_id: str):
     payload = _json_payload("DEVICE-009", maximum_bytes=16 * 1024)
     release_id = str(payload.get("release_id", "")).strip()
     file_name = str(payload.get("file_name", "")).strip()
+    transport = str(payload.get("transport", "formal")).strip()
+    if transport not in {"formal", "stock_direct"}:
+        abort(400, description="DEVICE-009 Stock 傳送邊界不合法")
     if (
         not release_id
         or not file_name
@@ -615,13 +618,18 @@ def stock_photopainter_display(device_id: str):
         abort(400, description="DEVICE-009 release_id 與 file_name 必須是合法單一檔名")
     service = current_app.extensions["inktime_stock_compatibility_service"]
     try:
-        result = service.display_release(
-            device_id=device_id,
-            profile_key=str(device["panel_profile"] or DEFAULT_DEVICE_PANEL_PROFILE),
-            release_id=release_id,
-            file_name=file_name,
-            host=host,
-            rotate180=int(device["rotation"] or 0) == 180,
+        display_arguments = {
+            "device_id": device_id,
+            "profile_key": str(device["panel_profile"] or DEFAULT_DEVICE_PANEL_PROFILE),
+            "release_id": release_id,
+            "file_name": file_name,
+            "host": host,
+            "rotate180": int(device["rotation"] or 0) == 180,
+        }
+        result = (
+            service.display_stock_test_release(**display_arguments)
+            if transport == "stock_direct"
+            else service.display_release(**display_arguments)
         )
     except PermissionError as exc:
         _repository().record_stock_upload_event(

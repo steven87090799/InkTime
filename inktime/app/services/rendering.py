@@ -26,6 +26,7 @@ from inktime.app.domain.rendering import (
     evaluate_e6_suitability,
     fit_with_focus,
     build_local_caption,
+    resolve_layout_geometry,
 )
 from inktime.app.domain.analysis.execution_mode import execution_mode
 from inktime.app.services.local_selection import LocalSelectionPolicy
@@ -58,8 +59,84 @@ LAYOUTS = {
     "weather_sensor": "天氣＋室內溫溼度",
 }
 FRAME_ORIENTATIONS = {"portrait": "直向", "landscape": "橫向"}
-FIT_MODES = {"contain": "完整顯示（建議）", "cover": "填滿並裁切"}
+FIT_MODES = {
+    "stretch_fill": "填滿照片區（不裁切，可微變形）",
+    "contain": "完整顯示（建議）",
+    "cover": "填滿並裁切",
+}
 PORTRAIT_ONLY_LAYOUTS = {"calendar", "weather_sensor"}
+
+
+def _fit_caption_line(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, width: int) -> str:
+    if draw.textlength(text, font=font) <= width:
+        return text
+    suffix = "..."
+    fitted = text
+    while fitted and draw.textlength(fitted + suffix, font=font) > width:
+        fitted = fitted[:-1]
+    return fitted.rstrip() + suffix
+
+
+def _postcard_caption_bounds(info_rect) -> tuple[int, int, int, int]:
+    """Keep the historical postcard caption baseline inside its footer."""
+    return info_rect.x + 4, info_rect.y + 16, info_rect.bottom - 48, info_rect.width - 8
+
+
+def _calendar_metadata_origin(caption_rect) -> tuple[int, int]:
+    """Return the historical calendar metadata anchor."""
+    return caption_rect.x, caption_rect.y
+
+
+def _weather_metadata_origin(caption_rect) -> tuple[int, int]:
+    """Return the historical weather metadata anchor."""
+    return caption_rect.x, caption_rect.y
+
+
+def draw_caption_footer(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    *,
+    font_path: Path,
+    x: int,
+    top: int,
+    bottom: int,
+    width: int,
+    fill: str = "black",
+    wrap_enabled: bool = False,
+    maximum_lines: int = 2,
+    minimum_font_size: int = 17,
+) -> tuple[int, int] | None:
+    """Draw a short caption using the same server renderer text contract."""
+    body = ImageFont.truetype(str(font_path), 24)
+    if not wrap_enabled:
+        draw.text((x, top), _fit_caption_line(draw, text, body, width), font=body, fill=fill)
+        return None
+    maximum = min(2, int(maximum_lines))
+    minimum = int(minimum_font_size)
+    for size in range(24, minimum - 1, -1):
+        font = ImageFont.truetype(str(font_path), size)
+        line_height = draw.textbbox((0, 0), "國", font=font)[3] + 2
+        if line_height * maximum > bottom - top:
+            continue
+        lines: list[str] = []
+        remaining = text.strip()
+        while remaining and len(lines) < maximum:
+            line = ""
+            for char in remaining:
+                if draw.textlength(line + char, font=font) > width:
+                    break
+                line += char
+            if not line:
+                break
+            lines.append(line)
+            remaining = remaining[len(line) :]
+        if remaining and lines:
+            lines[-1] = _fit_caption_line(draw, lines[-1] + remaining, font, width)
+        if lines:
+            draw.multiline_text((x, top), "\n".join(lines), font=font, fill=fill, spacing=2)
+            return len(lines), size
+    draw.text((x, top), _fit_caption_line(draw, text, body, width), font=body, fill=fill)
+    return None
 
 
 class RenderService:
@@ -155,7 +232,9 @@ class RenderService:
             device.get("frame_orientation") or self.settings.get("render.frame_orientation", "portrait")
         )
         effective_orientation = "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
-        fit_key = fit_mode or str(device.get("fit_mode") or self.settings.get("render.fit_mode", "contain"))
+        fit_key = fit_mode or str(
+            device.get("fit_mode") or self.settings.get("render.fit_mode", "stretch_fill")
+        )
         if (
             layout_key not in LAYOUTS
             or effective_orientation not in FRAME_ORIENTATIONS
@@ -457,7 +536,7 @@ class RenderService:
                 "caption_min_font_size": int(self.settings.get("render.caption_min_font_size", 17)),
             },
             "render_settings": {
-                "fit_mode": fit_mode or str(self.settings.get("render.fit_mode", "contain")),
+                "fit_mode": fit_mode or str(self.settings.get("render.fit_mode", "stretch_fill")),
                 "layout": layout_key,
                 "frame_orientation": effective_frame,
                 "profile": profile_key,
@@ -497,13 +576,7 @@ class RenderService:
 
     @staticmethod
     def _fit_line(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, width: int) -> str:
-        if draw.textlength(text, font=font) <= width:
-            return text
-        suffix = "..."
-        fitted = text
-        while fitted and draw.textlength(fitted + suffix, font=font) > width:
-            fitted = fitted[:-1]
-        return fitted.rstrip() + suffix
+        return _fit_caption_line(draw, text, font, width)
 
     @staticmethod
     def _captured_date(value: Any) -> date | None:
@@ -543,8 +616,10 @@ class RenderService:
         size: tuple[int, int],
         crop_x: float | None,
         crop_y: float | None,
-        fit_mode: str = "cover",
+        fit_mode: str = "stretch_fill",
     ) -> Image.Image:
+        if fit_mode == "stretch_fill":
+            return source.resize(size, Image.Resampling.LANCZOS)
         if fit_mode == "contain":
             contained = ImageOps.contain(source, size, Image.Resampling.LANCZOS)
             canvas = Image.new("RGB", size, "white")
@@ -645,7 +720,33 @@ class RenderService:
         return selected
 
     def _caption(self, photo_id: str) -> str:
+        override = self._photo_level_caption_override(photo_id)
+        if override is not None:
+            return override["text"]
         return self._caption_text(photo_id, self._caption_analyses([photo_id]).get(photo_id))
+
+    def _photo_level_caption_override(self, photo_id: str) -> dict[str, str] | None:
+        """Read the durable photo-level review caption, if it is non-empty."""
+        with self.database.session() as connection:
+            row = connection.execute(
+                """
+                SELECT caption_override,updated_at,updated_by
+                FROM photo_reviews
+                WHERE photo_id=? AND analysis_id IS NULL
+                ORDER BY id DESC LIMIT 1
+                """,
+                (str(photo_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        text = str(row["caption_override"] or "").strip()
+        if not text:
+            return None
+        return {
+            "text": text,
+            "updated_at": str(row["updated_at"] or ""),
+            "updated_by": str(row["updated_by"] or ""),
+        }
 
     def _caption_records(self, photos: list[Any], display_date: date) -> dict[str, dict[str, Any]]:
         analyses = self._caption_analyses([str(photo["id"]) for photo in photos])
@@ -660,7 +761,8 @@ class RenderService:
         photo_id = str(photo["id"])
         if analysis is None:
             analysis = self._caption_analyses([photo_id]).get(photo_id)
-        caption = self._caption_text(photo_id, analysis)
+        override = self._photo_level_caption_override(photo_id)
+        caption = "" if override is not None else self._caption_text(photo_id, analysis)
         provider = str((analysis or {}).get("provider") or "").strip()
         is_ai_caption = bool(caption and provider and provider != "local")
         source_detail = (
@@ -674,12 +776,13 @@ class RenderService:
             if is_ai_caption
             else {}
         )
-        return build_local_caption(
+        record = build_local_caption(
             photo_id=photo_id,
             captured_at=photo["captured_at"],
             display_date=display_date,
             timezone=str(self.settings.get("general.timezone", "Asia/Taipei")),
             known_location=self.location_name(photo),
+            manual_caption=override["text"] if override is not None else None,
             existing_side_caption=caption,
             existing_caption_source="ai_side_caption" if is_ai_caption else None,
             existing_caption_is_ai_generated=is_ai_caption if caption else None,
@@ -687,6 +790,23 @@ class RenderService:
             source_updated_at=str((analysis or {}).get("created_at") or "") or None,
             maximum_characters=int(self.settings.get("analysis.side_caption_max_chars", 16)),
         )
+        if override is not None:
+            record.update(
+                {
+                    "source": "manual_override",
+                    "is_ai_generated": False,
+                    "source_detail": {
+                        key: value
+                        for key, value in {
+                            "updated_by": override["updated_by"],
+                            "updated_at": override["updated_at"],
+                        }.items()
+                        if value
+                    },
+                    "source_updated_at": override["updated_at"] or None,
+                }
+            )
+        return record
 
     def _caption_legacy(self, photo_id: str) -> str:
         """Compatibility implementation retained for old call sites during migration."""
@@ -722,43 +842,42 @@ class RenderService:
         self, draw, text: str, *, x: int, top: int, bottom: int, width: int, fill: str = "black"
     ) -> None:
         font_path = self.fonts.resolve(str(self.settings.get("render.font_path", "")))
-        body = ImageFont.truetype(str(font_path), 24)
-        if not bool(self.settings.get("render.caption_wrap_enabled", False)):
+        wrap_enabled = bool(self.settings.get("render.caption_wrap_enabled", False))
+        if not wrap_enabled:
             self._activity("caption_footer_single_line", "Footer Caption 維持單行截斷", wrap_enabled=False)
-            draw.text((x, top), self._fit_line(draw, text, body, width), font=body, fill=fill)
+            draw_caption_footer(
+                draw,
+                text,
+                font_path=font_path,
+                x=x,
+                top=top,
+                bottom=bottom,
+                width=width,
+                fill=fill,
+            )
             return
-        maximum = min(2, int(self.settings.get("render.caption_max_lines", 2)))
-        minimum = int(self.settings.get("render.caption_min_font_size", 17))
-        for size in range(24, minimum - 1, -1):
-            font = ImageFont.truetype(str(font_path), size)
-            line_height = draw.textbbox((0, 0), "國", font=font)[3] + 2
-            if line_height * maximum > bottom - top:
-                continue
-            lines: list[str] = []
-            remaining = text.strip()
-            while remaining and len(lines) < maximum:
-                line = ""
-                for char in remaining:
-                    if draw.textlength(line + char, font=font) > width:
-                        break
-                    line += char
-                if not line:
-                    break
-                lines.append(line)
-                remaining = remaining[len(line) :]
-            if remaining and lines:
-                lines[-1] = self._fit_line(draw, lines[-1] + remaining, font, width)
-            if lines:
-                self._activity(
-                    "caption_footer_wrapped",
-                    "Footer Caption 已套用多行換行",
-                    wrap_enabled=True,
-                    lines=len(lines),
-                    font_size=size,
-                )
-                draw.multiline_text((x, top), "\n".join(lines), font=font, fill=fill, spacing=2)
-                return
-        draw.text((x, top), self._fit_line(draw, text, body, width), font=body, fill=fill)
+        rendered = draw_caption_footer(
+            draw,
+            text,
+            font_path=font_path,
+            x=x,
+            top=top,
+            bottom=bottom,
+            width=width,
+            fill=fill,
+            wrap_enabled=True,
+            maximum_lines=int(self.settings.get("render.caption_max_lines", 2)),
+            minimum_font_size=int(self.settings.get("render.caption_min_font_size", 17)),
+        )
+        if rendered is not None:
+            lines, font_size = rendered
+            self._activity(
+                "caption_footer_wrapped",
+                "Footer Caption 已套用多行換行",
+                wrap_enabled=True,
+                lines=lines,
+                font_size=font_size,
+            )
 
     def _adaptive_pair_candidates(self, primary: dict[str, Any]) -> list[dict[str, Any]]:
         """Use only existing analyzed/eligible rows; this is intentionally model-free."""
@@ -812,19 +931,27 @@ class RenderService:
         draw: ImageDraw.ImageDraw,
         fonts: dict[str, ImageFont.FreeTypeFont],
         *,
-        frame_width: int,
-        frame_height: int,
-        footer_height: int,
+        footer_rect,
         primary,
         secondary=None,
         caption: str,
     ) -> None:
-        photo_height = frame_height - footer_height
-        draw.rectangle((0, photo_height, frame_width, frame_height), fill="white")
-        draw.line((20, photo_height + 4, frame_width - 20, photo_height + 4), fill="black", width=2)
+        draw.rectangle(
+            (footer_rect.x, footer_rect.y, footer_rect.right, footer_rect.bottom), fill="white"
+        )
+        draw.line(
+            (footer_rect.x + 20, footer_rect.y + 4, footer_rect.right - 20, footer_rect.y + 4),
+            fill="black",
+            width=2,
+        )
         text = caption or "這一天留下了兩個值得記住的片段。"
         self._draw_footer_caption(
-            draw, text, x=22, top=photo_height + 12, bottom=frame_height - 38, width=frame_width - 44
+            draw,
+            text,
+            x=footer_rect.x + 22,
+            top=footer_rect.y + 12,
+            bottom=footer_rect.bottom - 38,
+            width=footer_rect.width - 44,
         )
         primary_date = self._captured_date(primary["captured_at"])
         second_date = self._captured_date(secondary["captured_at"]) if secondary is not None else None
@@ -840,8 +967,8 @@ class RenderService:
         location = first_location if first_location == second_location else ""
         meta = "・".join(dates + ([location] if location else []))
         draw.text(
-            (22, frame_height - 32),
-            self._fit_line(draw, meta, fonts["meta"], frame_width - 44),
+            (footer_rect.x + 22, footer_rect.bottom - 32),
+            self._fit_line(draw, meta, fonts["meta"], footer_rect.width - 44),
             font=fonts["meta"],
             fill="black",
         )
@@ -1005,13 +1132,17 @@ class RenderService:
         if orientation_key not in FRAME_ORIENTATIONS:
             raise ValueError("RENDER-005 不支援的相框方向")
         fit_mode_key = fit_mode or str(
-            device_config.get("fit_mode") or self.settings.get("render.fit_mode", "contain")
+            device_config.get("fit_mode") or self.settings.get("render.fit_mode", "stretch_fill")
         )
         if fit_mode_key not in FIT_MODES:
             raise ValueError("RENDER-005 不支援的照片縮放方式")
         effective_orientation = "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
+        normalized_dimensions = resolve_layout_geometry(
+            layout_key, effective_orientation, width, height
+        )
         frame_width, frame_height = (
-            (height, width) if effective_orientation == "landscape" else (width, height)
+            normalized_dimensions.canvas_width,
+            normalized_dimensions.canvas_height,
         )
 
         def finish(canvas: Image.Image) -> Image.Image:
@@ -1022,7 +1153,6 @@ class RenderService:
             orientation_metadata.append({"photo_id": photo_id, "orientation": orientation_info.as_dict()})
         with source:
             if layout_key == "adaptive_memory":
-                footer_height = 76 if effective_orientation == "landscape" else 96
                 source_orientation = photo_orientation(source.size)
                 if source_orientation in {"square", effective_orientation}:
                     layout_key = "photo_info"
@@ -1047,16 +1177,23 @@ class RenderService:
                         ]
                         fonts = self._fonts("\n".join(part for part in text_parts if part))
                         canvas = Image.new("RGB", (frame_width, frame_height), "white")
-                        gutter = 8
-                        if effective_orientation == "landscape":
-                            slot_size = ((frame_width - gutter) // 2, frame_height - footer_height)
-                            second_position = (slot_size[0] + gutter, 0)
-                        else:
-                            slot_size = (frame_width, (frame_height - footer_height - gutter) // 2)
-                            second_position = (0, slot_size[1] + gutter)
+                        footer_geometry = resolve_layout_geometry(
+                            "photo_info", effective_orientation, frame_width, frame_height
+                        )
+                        footer_rect = footer_geometry.info_rects[0]
+                        pair_geometry = resolve_layout_geometry(
+                            "photo_pair",
+                            effective_orientation,
+                            frame_width,
+                            footer_rect.y,
+                        )
+                        primary_rect = pair_geometry.primary_photo
+                        secondary_rect = pair_geometry.secondary_photo
+                        slot_size = (primary_rect.width, primary_rect.height)
+                        second_position = (secondary_rect.x, secondary_rect.y)
                         canvas.paste(
                             self._fit_photo(source, photo, slot_size, crop_x, crop_y, fit_mode_key),
-                            (0, 0),
+                            (primary_rect.x, primary_rect.y),
                         )
                         second_path = safe_join(Path(second_row["root_path"]), second_row["relative_path"])
                         second_source, second_orientation = self._load_oriented_photo(second_row, second_path)
@@ -1082,20 +1219,21 @@ class RenderService:
                         self._adaptive_footer(
                             ImageDraw.Draw(canvas),
                             fonts,
-                            frame_width=frame_width,
-                            frame_height=frame_height,
-                            footer_height=footer_height,
+                            footer_rect=footer_rect,
                             primary=photo,
                             secondary=second_row,
                             caption=caption,
                         )
                         return finish(canvas)
+            geometry = resolve_layout_geometry(
+                layout_key, effective_orientation, frame_width, frame_height
+            )
             if layout_key == "full":
                 return finish(
                     self._fit_photo(
                         source,
                         photo,
-                        (frame_width, frame_height),
+                        (geometry.primary_photo.width, geometry.primary_photo.height),
                         crop_x,
                         crop_y,
                         fit_mode_key,
@@ -1146,15 +1284,13 @@ class RenderService:
             draw = ImageDraw.Draw(canvas)
 
             if layout_key == "photo_pair":
-                gutter = 8
-                if effective_orientation == "landscape":
-                    first_size = ((frame_width - gutter) // 2, frame_height)
-                    second_position = (first_size[0] + gutter, 0)
-                else:
-                    first_size = (frame_width, (frame_height - gutter) // 2)
-                    second_position = (0, first_size[1] + gutter)
+                primary_rect = geometry.primary_photo
+                secondary_rect = geometry.secondary_photo
+                first_size = (primary_rect.width, primary_rect.height)
+                second_size = (secondary_rect.width, secondary_rect.height)
+                second_position = (secondary_rect.x, secondary_rect.y)
                 first = self._fit_photo(source, photo, first_size, crop_x, crop_y, fit_mode_key)
-                canvas.paste(first, (0, 0))
+                canvas.paste(first, (primary_rect.x, primary_rect.y))
                 if secondary_photo_id:
                     second_photo = self.ensure_photo_features(secondary_photo_id)
                     second_path = safe_join(Path(second_photo["root_path"]), second_photo["relative_path"])
@@ -1167,19 +1303,19 @@ class RenderService:
                         second = self._fit_photo(
                             second_source,
                             second_photo,
-                            first_size,
+                            second_size,
                             second_photo["crop_manual_x"],
                             second_photo["crop_manual_y"],
                             fit_mode_key,
                         )
-                    canvas.paste(second, second_position)
+                        canvas.paste(second, second_position)
                 else:
                     placeholder = "請選擇第二張照片"
                     text_width = draw.textlength(placeholder, font=fonts["body"])
                     draw.text(
                         (
-                            second_position[0] + max(18, (first_size[0] - text_width) / 2),
-                            second_position[1] + first_size[1] / 2 - 14,
+                            second_position[0] + max(18, (second_size[0] - text_width) / 2),
+                            second_position[1] + second_size[1] / 2 - 14,
                         ),
                         placeholder,
                         font=fonts["body"],
@@ -1199,31 +1335,20 @@ class RenderService:
                     )
                 first_caption = dict(primary_caption or self._caption_record(photo, self._today()))
                 second_caption = dict(secondary_caption or self._caption_record(second_photo, self._today()))
-                gutter, caption_ratio = 8, 0.20
-                if effective_orientation == "landscape":
-                    card_width = (frame_width - gutter) // 2
-                    caption_height = max(
-                        int(frame_height * 0.15),
-                        min(int(frame_height * 0.25), int(frame_height * caption_ratio)),
-                    )
-                    image_size = (card_width, frame_height - caption_height)
-                    positions = ((0, 0), (card_width + gutter, 0))
-                    caption_boxes = (
-                        (0, image_size[1], card_width, frame_height),
-                        (card_width + gutter, image_size[1], frame_width, frame_height),
-                    )
-                else:
-                    card_height = (frame_height - gutter) // 2
-                    caption_height = max(
-                        int(card_height * 0.15),
-                        min(int(card_height * 0.25), int(card_height * caption_ratio)),
-                    )
-                    image_size = (frame_width, card_height - caption_height)
-                    positions = ((0, 0), (0, card_height + gutter))
-                    caption_boxes = (
-                        (0, image_size[1], frame_width, card_height),
-                        (0, card_height + gutter + image_size[1], frame_width, frame_height),
-                    )
+                primary_rect = geometry.primary_photo
+                secondary_rect = geometry.secondary_photo
+                primary_caption_rect = geometry.primary_caption
+                secondary_caption_rect = geometry.secondary_caption
+                image_size = (primary_rect.width, primary_rect.height)
+                second_image_size = (secondary_rect.width, secondary_rect.height)
+                positions = (
+                    (primary_rect.x, primary_rect.y),
+                    (secondary_rect.x, secondary_rect.y),
+                )
+                caption_boxes = (
+                    primary_caption_rect,
+                    secondary_caption_rect,
+                )
                 canvas.paste(
                     self._fit_photo(source, photo, image_size, crop_x, crop_y, fit_mode_key), positions[0]
                 )
@@ -1232,7 +1357,7 @@ class RenderService:
                         self._fit_photo(
                             second_source,
                             second_photo,
-                            image_size,
+                            second_image_size,
                             second_photo["crop_manual_x"],
                             second_photo["crop_manual_y"],
                             fit_mode_key,
@@ -1240,8 +1365,9 @@ class RenderService:
                         positions[1],
                     )
                 for record, box in ((first_caption, caption_boxes[0]), (second_caption, caption_boxes[1])):
-                    left, top, right, bottom = box
-                    draw.rectangle(box, fill="white")
+                    left, top = box.x, box.y
+                    right, bottom = box.right, box.bottom
+                    draw.rectangle((left, top, right, bottom), fill="white")
                     draw.line((left + 8, top + 2, right - 8, top + 2), fill="#1d2822", width=1)
                     self._draw_footer_caption(
                         draw,
@@ -1255,28 +1381,37 @@ class RenderService:
                 return finish(canvas)
 
             if layout_key == "postcard":
-                footer_height = 122 if effective_orientation == "landscape" else 142
-                photo_size = (frame_width - 48, frame_height - footer_height - 24)
+                photo_rect = geometry.primary_photo
+                info_rect = geometry.info[0]
+                photo_size = (photo_rect.width, photo_rect.height)
                 fitted = self._fit_photo(source, photo, photo_size, crop_x, crop_y, fit_mode_key)
-                canvas.paste(fitted, (24, 24))
+                canvas.paste(fitted, (photo_rect.x, photo_rect.y))
                 draw.rectangle(
-                    (23, 23, frame_width - 24, frame_height - footer_height + 1),
+                    (
+                        photo_rect.x - 1,
+                        photo_rect.y - 1,
+                        photo_rect.right,
+                        photo_rect.bottom + 1,
+                    ),
                     outline="#b9afa0",
                     width=2,
                 )
                 if caption:
+                    caption_x, caption_top, caption_bottom, caption_width = _postcard_caption_bounds(
+                        info_rect
+                    )
                     self._draw_footer_caption(
                         draw,
                         caption,
-                        x=28,
-                        top=frame_height - footer_height + 16,
-                        bottom=frame_height - 48,
-                        width=frame_width - 56,
+                        x=caption_x,
+                        top=caption_top,
+                        bottom=caption_bottom,
+                        width=caption_width,
                         fill="#1b241f",
                     )
                 meta = "・".join(value for value in (date_label, location) if value)
                 draw.text(
-                    (28, frame_height - 42),
+                    (info_rect.x + 4, info_rect.bottom - 42),
                     self._fit_line(draw, meta, fonts["small"], frame_width - 56),
                     font=fonts["small"],
                     fill="#59605a",
@@ -1284,20 +1419,22 @@ class RenderService:
                 return finish(canvas)
 
             if layout_key == "photo_info":
-                info_height = 76 if effective_orientation == "landscape" else 96
-                photo_height = frame_height - info_height
+                photo_rect = geometry.primary_photo
+                info_rect = geometry.info[0]
                 fitted = self._fit_photo(
                     source,
                     photo,
-                    (frame_width, photo_height),
+                    (photo_rect.width, photo_rect.height),
                     crop_x,
                     crop_y,
                     fit_mode_key,
                 )
-                canvas.paste(fitted, (0, 0))
-                draw.rectangle((0, photo_height, frame_width, frame_height), fill="white")
+                canvas.paste(fitted, (photo_rect.x, photo_rect.y))
+                draw.rectangle(
+                    (info_rect.x, info_rect.y, info_rect.right, info_rect.bottom), fill="white"
+                )
                 draw.line(
-                    (20, photo_height + 4, frame_width - 20, photo_height + 4),
+                    (info_rect.x + 20, info_rect.y + 4, info_rect.right - 20, info_rect.y + 4),
                     fill="black",
                     width=2,
                 )
@@ -1306,15 +1443,15 @@ class RenderService:
                     self._draw_footer_caption(
                         draw,
                         footer_caption,
-                        x=22,
-                        top=photo_height + 12,
-                        bottom=frame_height - 38,
-                        width=frame_width - 44,
+                        x=info_rect.x + 22,
+                        top=info_rect.y + 12,
+                        bottom=info_rect.bottom - 38,
+                        width=info_rect.width - 44,
                     )
                 meta = "・".join(value for value in (date_label, location) if value)
                 draw.text(
-                    (22, frame_height - 32),
-                    self._fit_line(draw, meta, fonts["meta"], frame_width - 44),
+                    (info_rect.x + 22, info_rect.bottom - 32),
+                    self._fit_line(draw, meta, fonts["meta"], info_rect.width - 44),
                     font=fonts["meta"],
                     fill="black",
                 )
@@ -1324,20 +1461,32 @@ class RenderService:
                 draw.text((24, 16), f"{today.year}年 {today.month}月", font=fonts["large"], fill="#17221c")
                 draw.text((372, 25), f"{today.day}日", font=fonts["body"], fill="#d13b2f")
                 self._calendar(canvas, fonts, today)
-                fitted = self._fit_photo(source, photo, (440, 420), crop_x, crop_y, fit_mode_key)
-                canvas.paste(fitted, (20, 312))
+                photo_rect = geometry.primary_photo
+                fitted = self._fit_photo(
+                    source, photo, (photo_rect.width, photo_rect.height), crop_x, crop_y, fit_mode_key
+                )
+                canvas.paste(fitted, (photo_rect.x, photo_rect.y))
                 meta = "・".join(value for value in (caption, date_label, location) if value)
+                caption_rect = geometry.primary_caption
+                metadata_x, metadata_y = _calendar_metadata_origin(caption_rect)
                 draw.text(
-                    (22, 754),
-                    self._fit_line(draw, meta, fonts["small"], width - 44),
+                    (metadata_x, metadata_y),
+                    self._fit_line(draw, meta, fonts["small"], caption_rect.width),
                     font=fonts["small"],
                     fill="#354039",
                 )
                 return finish(canvas)
 
-            fitted = self._fit_photo(source, photo, (width, 505), crop_x, crop_y, fit_mode_key)
-            canvas.paste(fitted, (0, 0))
-            draw.line((20, 520, width - 20, 520), fill="#c9c1b2", width=2)
+            photo_rect = geometry.primary_photo
+            fitted = self._fit_photo(
+                source, photo, (photo_rect.width, photo_rect.height), crop_x, crop_y, fit_mode_key
+            )
+            canvas.paste(fitted, (photo_rect.x, photo_rect.y))
+            draw.line(
+                (20, photo_rect.bottom + 15, frame_width - 20, photo_rect.bottom + 15),
+                fill="#c9c1b2",
+                width=2,
+            )
             if weather and weather.get("available"):
                 outside = f"{weather_location}｜{weather['condition']}  {weather['temperature_c']:.0f}度"
                 range_text = f"今日 {weather['minimum_c']:.0f}–{weather['maximum_c']:.0f}度  溼度 {weather['humidity_percent']:.0f}%"
@@ -1347,13 +1496,14 @@ class RenderService:
             else:
                 outside = "天氣功能尚未啟用"
                 range_text = "請至 Web 設定天氣位置"
+            info_rect = geometry.info[0]
             draw.text(
-                (22, 542),
-                self._fit_line(draw, outside, fonts["large"], width - 44),
+                (22, info_rect.y + 37),
+                self._fit_line(draw, outside, fonts["large"], frame_width - 44),
                 font=fonts["large"],
                 fill="#17221c",
             )
-            draw.text((24, 596), range_text, font=fonts["small"], fill="#4e5a52")
+            draw.text((24, info_rect.y + 91), range_text, font=fonts["small"], fill="#4e5a52")
             if indoor:
                 temperature = indoor.get("temperature_c")
                 humidity = indoor.get("humidity_percent")
@@ -1366,15 +1516,17 @@ class RenderService:
             else:
                 indoor_text = "室內｜尚無 PhotoPainter 溫溼度回報"
             draw.text(
-                (24, 640),
-                self._fit_line(draw, indoor_text, fonts["body"], width - 48),
+                (24, info_rect.y + 135),
+                self._fit_line(draw, indoor_text, fonts["body"], frame_width - 48),
                 font=fonts["body"],
                 fill="#1f4f70",
             )
             meta = "・".join(value for value in (date_label, location, caption) if value)
+            caption_rect = geometry.primary_caption
+            metadata_x, metadata_y = _weather_metadata_origin(caption_rect)
             draw.text(
-                (24, 746),
-                self._fit_line(draw, meta, fonts["small"], width - 48),
+                (metadata_x, metadata_y),
+                self._fit_line(draw, meta, fonts["small"], frame_width - 48),
                 font=fonts["small"],
                 fill="#4e5a52",
             )
