@@ -8,11 +8,11 @@ never silently discard an unknown suite.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable, Mapping
 import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable
 
 # Make direct workflow invocation (`python scripts/ci/run_selected_suites.py`)
 # resolve the repository's namespace package as well as module invocation.
@@ -109,9 +109,68 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/unit/test_scoring.py",
         "tests/unit/test_scoring_rules.py",
     ),
+    "backup_restore_owner": ("tests/unit/test_backups.py",),
     "unit_owner": ("tests/unit",),
     "integration_owner": ("tests/integration",),
 }
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _test_target_errors(raw_path: str, repository_root: Path) -> list[str]:
+    path = Path(raw_path)
+    if path.is_absolute():
+        return [f"{raw_path}: mapping must be repository-relative"]
+
+    root = repository_root.resolve()
+    target = (root / path).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return [f"{raw_path}: mapping escapes repository root"]
+
+    if not target.exists():
+        return [f"{raw_path}: path does not exist"]
+    if target.is_file():
+        errors = []
+        if target.suffix != ".py":
+            errors.append(f"{raw_path}: mapped file must be a .py test file")
+        if not target.name.startswith("test_"):
+            errors.append(f"{raw_path}: mapped file must start with test_")
+        return errors
+    if target.is_dir():
+        if not any(
+            candidate.is_file() and candidate.name.startswith("test_") and candidate.suffix == ".py"
+            for candidate in target.rglob("test_*.py")
+        ):
+            return [f"{raw_path}: mapped directory contains no test_*.py"]
+        return []
+    return [f"{raw_path}: mapped path is neither a file nor a directory"]
+
+
+def validate_runner_test_paths(
+    paths: Iterable[str], *, repository_root: Path = REPOSITORY_ROOT
+) -> list[str]:
+    """Return deterministic validation errors for repository-owned pytest targets."""
+
+    errors: list[str] = []
+    for path in paths:
+        errors.extend(_test_target_errors(path, repository_root))
+    return errors
+
+
+def validate_runner_suite_test_paths(
+    mapping: Mapping[str, Iterable[str]] = RUNNER_SUITE_TEST_PATHS,
+    *,
+    repository_root: Path = REPOSITORY_ROOT,
+) -> list[str]:
+    """Validate every source-owned runner mapping against the repository root."""
+
+    errors: list[str] = []
+    for suite in sorted(mapping):
+        for path in mapping[suite]:
+            errors.extend(f"{suite}: {error}" for error in _test_target_errors(path, repository_root))
+    return errors
 
 
 def _ordered_unique(values: Iterable[str]) -> list[str]:
@@ -175,15 +234,23 @@ def main() -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
+    mapping_errors = validate_runner_suite_test_paths()
+    if mapping_errors:
+        print(
+            "ERROR: runner suite mapping is invalid: " + "; ".join(mapping_errors),
+            file=sys.stderr,
+        )
+        return 2
+
     if not runner_suites:
         print("No Tier 1/2 owner regression suites selected; dedicated gates own the rest.")
         return 0
 
-    missing_paths = [path for path in test_paths if not Path(path).exists()]
-    if missing_paths:
+    path_errors = validate_runner_test_paths(test_paths)
+    if path_errors:
         print(
-            "ERROR: executable suite mapping references missing path(s): "
-            + ", ".join(missing_paths),
+            "ERROR: executable suite mapping references invalid path(s): "
+            + "; ".join(path_errors),
             file=sys.stderr,
         )
         return 2

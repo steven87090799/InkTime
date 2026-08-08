@@ -155,6 +155,81 @@ def test_provider_transport_does_not_start_unrelated_benchmark():
     assert "benchmark" not in plan["expensive_gates"]
 
 
+def test_offline_benchmark_direct_dependencies_start_benchmark_contract():
+    direct_dependencies = (
+        "inktime/app/providers/base.py",
+        "inktime/app/providers/config.py",
+        "inktime/app/providers/openai_compatible.py",
+        "inktime/app/domain/analysis/__init__.py",
+        "inktime/app/domain/analysis/plan.py",
+        "inktime/app/domain/analysis/schema.py",
+        "inktime/app/domain/analysis/scoring.py",
+        "inktime/app/services/analysis.py",
+    )
+
+    for path in direct_dependencies:
+        plan = build_test_plan([path], draft_context())
+        assert "provider_analysis_owner" in plan["selected_test_suites"], path
+        assert "benchmark_contract" in plan["selected_test_suites"], path
+        assert "benchmark" in plan["expensive_gates"], path
+
+
+def test_unrelated_provider_implementation_does_not_start_benchmark():
+    plan = build_test_plan(["inktime/app/providers/openai_provider.py"], draft_context())
+
+    assert "provider_analysis_owner" in plan["selected_test_suites"]
+    assert "benchmark_contract" not in plan["selected_test_suites"]
+    assert "benchmark" not in plan["expensive_gates"]
+
+
+def test_production_preflight_routes_tls_and_lan_persistence():
+    plan = build_test_plan(["scripts/production_preflight.py"], draft_context())
+
+    assert plan["changed_domains"] == ["tls_security"]
+    assert "tls_configuration_owner" in plan["selected_test_suites"]
+    assert {"tls_smoke", "docker_lan_persistence"} <= set(plan["expensive_gates"])
+    assert "runtime_soak" not in plan["expensive_gates"]
+    assert "container_security" not in plan["expensive_gates"]
+
+
+def test_production_tls_smoke_remains_tls_only():
+    plan = build_test_plan(["scripts/production_tls_smoke.py"], draft_context())
+
+    assert plan["changed_domains"] == ["tls_security"]
+    assert "tls_configuration_owner" in plan["selected_test_suites"]
+    assert plan["expensive_gates"] == ["tls_smoke"]
+
+
+def test_pyproject_routes_python310_compatibility_without_container_security():
+    plan = build_test_plan(["pyproject.toml"], draft_context())
+
+    assert plan["changed_domains"] == ["dev_dependencies"]
+    assert {"dependency_policy", "ruff", "mypy"} <= set(plan["selected_test_suites"])
+    assert "python310_compatibility" in plan["expensive_gates"]
+    assert "container_security" not in plan["expensive_gates"]
+
+
+def test_test_only_backup_restore_uses_focused_owner_runner():
+    plan = build_test_plan(["tests/unit/test_backups.py"], draft_context())
+
+    assert plan["test_only"] is True
+    assert "backup_restore_owner" in plan["selected_test_suites"]
+    assert "backup_restore_owner" in plan["selected_owner_suites"]
+    assert "docker_lan_persistence" not in plan["expensive_gates"]
+    assert plan["suite_execution_gaps"] == []
+
+
+def test_platform_routes_auth_security_and_tls_smoke():
+    plan = build_test_plan(["inktime/app/platform.py"], draft_context())
+
+    assert {"python", "auth_security", "tls_security"} <= set(plan["changed_domains"])
+    assert {"python_application_owner", "auth_security_owner", "tls_configuration_owner"} <= set(
+        plan["selected_test_suites"]
+    )
+    assert "tls_smoke" in plan["expensive_gates"]
+    assert "playwright" not in plan["expensive_gates"]
+
+
 def test_benchmark_contract_is_bounded_to_benchmark_changes():
     plan = build_test_plan(["scripts/benchmark_models.py"], draft_context())
 

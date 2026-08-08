@@ -1,5 +1,6 @@
 from scripts.ci.run_selected_suites import (
     RUNNER_SUITE_TEST_PATHS,
+    validate_runner_suite_test_paths,
     selected_runner_suites,
     selected_test_paths,
 )
@@ -34,6 +35,10 @@ def test_every_selected_runner_suite_has_executable_paths():
     assert expected == set(RUNNER_SUITE_TEST_PATHS)
     for paths in RUNNER_SUITE_TEST_PATHS.values():
         assert paths
+
+
+def test_every_runner_mapping_path_exists_and_contains_tests():
+    assert validate_runner_suite_test_paths() == []
 
 
 def test_selected_paths_are_deduplicated_and_ordered():

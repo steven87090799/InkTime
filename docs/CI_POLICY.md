@@ -26,6 +26,10 @@ The planner's full-mode execution registry maps every `FULL_PLAN_SUITES` entry t
 
 Production changes select their owning regression boundaries even when the corresponding test file did not change. For example, scheduler changes route runtime soak, migration changes route persistence and migration owners, device manifest/ACK changes route device and firmware host contracts, and authentication/session changes route security, browser, and TLS boundaries.
 
+The deployment preflight script is a cross-boundary surface: `scripts/production_preflight.py` routes to both TLS smoke and Docker LAN persistence because the LAN job invokes its `--mode lan` path, while `scripts/production_tls_smoke.py` remains TLS-only. `pyproject.toml` is a Python 3.10/package-metadata contract in addition to a development-tooling surface; dependency policy validates its `tomllib` metadata. The offline benchmark has an explicit source seam for the provider, analysis-plan/schema/scoring, and analysis-service files it imports; unrelated provider transports remain provider-only. Test-only backup/restore changes use the focused selected-suite runner, while production backup/restore changes retain the Docker LAN gate.
+
+`inktime/app/platform.py` is the central session, CSRF, access-control, secure-cookie, proxy, and HSTS boundary, so it routes to authentication/security and TLS ownership without automatically starting Playwright. Every selected-runner mapping is resolved from the repository root and must point to an existing `test_*.py` file or a directory containing one; runtime validation remains fail-closed.
+
 ## Routing and debugging
 
 Both [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) and [`.github/workflows/container-security.yml`](../.github/workflows/container-security.yml) emit the compact plan in the job summary, including mode, selected suites, selected gates, skipped gates, firmware profiles, and the no-duplicate invariant. To inspect a plan locally without running heavy validation:

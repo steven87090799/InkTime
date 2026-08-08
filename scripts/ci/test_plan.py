@@ -112,6 +112,23 @@ FULL_TEST_SUITES = (
 FULL_REQUIRED_STATIC_SUITES = ("dependency_policy",)
 FULL_PLAN_SUITES = TIER_0_SUITES + FULL_REQUIRED_STATIC_SUITES + FULL_TEST_SUITES
 
+# These production files are imported by the offline benchmark contract.  Keep
+# the seam explicit so unrelated provider transports do not start benchmark CI.
+BENCHMARK_CONTRACT_PATHS = frozenset(
+    {
+        "inktime/app/providers/base.py",
+        "inktime/app/providers/config.py",
+        "inktime/app/providers/openai_compatible.py",
+        "inktime/app/domain/analysis/__init__.py",
+        "inktime/app/domain/analysis/plan.py",
+        "inktime/app/domain/analysis/schema.py",
+        "inktime/app/domain/analysis/scoring.py",
+        "inktime/app/services/analysis.py",
+        "inktime/app/services/model_benchmark.py",
+        "inktime/app/services/benchmark_metrics.py",
+    }
+)
+
 SELECTED_SUITE_RUNNER = "selected_owner_suites"
 NON_EXECUTABLE_SUITES = frozenset({"docs_contract"})
 
@@ -137,7 +154,7 @@ SUITE_EXECUTION_OWNERS = {
     "queue_resilience_owner": SELECTED_SUITE_RUNNER,
     "persistence_owner": SELECTED_SUITE_RUNNER,
     "migration_owner": "migration-contract",
-    "backup_restore_owner": "compose-lan-production-persistence",
+    "backup_restore_owner": SELECTED_SUITE_RUNNER,
     "device_api_contract_owner": SELECTED_SUITE_RUNNER,
     "device_delivery_owner": SELECTED_SUITE_RUNNER,
     "render_release_owner": SELECTED_SUITE_RUNNER,
@@ -281,6 +298,7 @@ GATE_ORDER = TIER_0_GATES + ("actionlint",) + FULL_EXPENSIVE_GATES
 IMPACT_GATE_EXECUTION = {
     "secret_scan": "impact:secret_scan",
     "actionlint": "impact:actionlint",
+    "python310_compatibility": "impact:python310_compatibility",
     "dependency_audit": "impact:dependency_audit",
     "runtime_soak": "impact:runtime_soak",
     "playwright": "impact:playwright",
@@ -317,6 +335,7 @@ IMPACT_TO_FULL_EXECUTION = {
     for impact_gate, full_gate in {
         "secret_scan": "secret_scan",
         "actionlint": "actionlint",
+        "python310_compatibility": "python310_compatibility",
         "dependency_audit": "dependency_audit",
         "runtime_soak": "runtime_soak",
         "playwright": "playwright",
@@ -585,6 +604,7 @@ def _classify_path(path: str) -> tuple[set[str], set[str], set[str], bool]:
     if path == "pyproject.toml":
         domains.add("dev_dependencies")
         suites.update({"dependency_policy", "ruff", "mypy"})
+        gates.add("python310_compatibility")
         return domains, suites, gates, False
 
     if path in {"Pipfile.lock", "poetry.lock", "uv.lock"}:
@@ -638,7 +658,12 @@ def _classify_path(path: str) -> tuple[set[str], set[str], set[str], bool]:
             suites.add("ci_routing_contracts")
             gates.add("actionlint")
             return domains, suites, gates, False
-        if path in {"scripts/production_preflight.py", "scripts/production_tls_smoke.py"}:
+        if path == "scripts/production_preflight.py":
+            domains.add("tls_security")
+            suites.add("tls_configuration_owner")
+            gates.update({"tls_smoke", "docker_lan_persistence"})
+            return domains, suites, gates, False
+        if path == "scripts/production_tls_smoke.py":
             domains.add("tls_security")
             suites.add("tls_configuration_owner")
             gates.add("tls_smoke")
@@ -705,6 +730,13 @@ def _classify_path(path: str) -> tuple[set[str], set[str], set[str], bool]:
             domains.add("web_ui")
             suites.add("web_api_owner")
             gates.add("playwright")
+
+        if path == "inktime/app/platform.py":
+            domains.add("auth_security")
+            suites.add("auth_security_owner")
+            domains.add("tls_security")
+            suites.add("tls_configuration_owner")
+            gates.add("tls_smoke")
 
         if path.startswith(
             (
@@ -841,10 +873,7 @@ def _classify_path(path: str) -> tuple[set[str], set[str], set[str], bool]:
             domains.add("provider_ai")
             suites.add("provider_analysis_owner")
 
-        if path in {
-            "inktime/app/services/model_benchmark.py",
-            "inktime/app/services/benchmark_metrics.py",
-        }:
+        if path in BENCHMARK_CONTRACT_PATHS:
             domains.add("benchmark")
             suites.add("benchmark_contract")
             gates.add("benchmark")
