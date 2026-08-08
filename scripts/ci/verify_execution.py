@@ -266,6 +266,7 @@ def verify_execution(
             "source_head_sha",
             "base_sha",
             "tested_sha",
+            "tested_ref",
             "tested_ref_kind",
         )
     }
