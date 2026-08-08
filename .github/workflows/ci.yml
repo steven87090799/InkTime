@@ -27,7 +27,7 @@ permissions:
 
 jobs:
   changes:
-    name: Classify changed paths
+    name: Classify changed paths and validation provenance
     runs-on: ubuntu-latest
     outputs:
       ci_mode: ${{ steps.route.outputs.ci_mode }}
@@ -52,17 +52,23 @@ jobs:
       run_firmware_compile: ${{ steps.route.outputs.run_firmware_compile }}
       run_benchmark: ${{ steps.route.outputs.run_benchmark }}
       run_container_security: ${{ steps.route.outputs.run_container_security }}
+      run_source_head_contract: ${{ steps.route.outputs.run_source_head_contract }}
       firmware_execution_profiles: ${{ steps.route.outputs.firmware_execution_profiles }}
       full_plan_complete: ${{ steps.route.outputs.full_plan_complete }}
       no_heavy_impact_duplicates: ${{ steps.route.outputs.no_heavy_impact_duplicates }}
+      source_head_sha: ${{ steps.route.outputs.source_head_sha }}
+      base_sha: ${{ steps.route.outputs.base_sha }}
+      tested_sha: ${{ steps.route.outputs.tested_sha }}
+      tested_ref: ${{ steps.route.outputs.tested_ref }}
+      tested_ref_kind: ${{ steps.route.outputs.tested_ref_kind }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 0}
       - id: route
-        name: Emit canonical source-owned test plan
+        name: Emit canonical source-owned plan and tested checkout provenance
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          SOURCE_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           PR_DRAFT: ${{ github.event_name == 'pull_request' && toJSON(github.event.pull_request.draft) || '' }}
           FULL_SUITE_INPUT: ${{ inputs.full_suite || '' }}
           FULL_CI_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
@@ -72,20 +78,29 @@ jobs:
           if [ -z "${base_sha}" ] || [ "${base_sha}" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
             base_sha="$(git rev-parse HEAD^)"
           fi
-          head_sha="${HEAD_SHA:-${GITHUB_SHA}}"
-          git diff --name-only "${base_sha}...${head_sha}" -- > .ci-changed-paths.txt
+          source_head_sha="${SOURCE_HEAD_SHA:-${GITHUB_SHA}}"
+          TESTED_SHA="$(git rev-parse HEAD)"
+          TESTED_REF="${GITHUB_REF}"
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            TESTED_REF_KIND="merge-ref"
+          elif [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            TESTED_REF_KIND="main"
+          else
+            TESTED_REF_KIND="head"
+          fi
+          git diff --name-only "${base_sha}...${source_head_sha}" -- > .ci-changed-paths.txt
           draft_args=()
           if [ -n "${PR_DRAFT}" ]; then draft_args+=(--draft "${PR_DRAFT}"); fi
           full_suite_args=()
           if [ "${FULL_SUITE_INPUT}" = "true" ]; then full_suite_args+=(--full-suite); fi
           label_args=()
           if [ "${FULL_CI_LABEL}" = "true" ]; then label_args+=(--label full-ci); fi
-          plan_json="$(python scripts/ci/test_plan.py \
+          plan_json="$(python scripts/ci/canonical_plan.py \
             --paths-file .ci-changed-paths.txt \
             --event-name "${GITHUB_EVENT_NAME}" \
             --ref "${GITHUB_REF}" \
             --base-sha "${base_sha}" \
-            --head-sha "${head_sha}" \
+            --head-sha "${source_head_sha}" \
             "${draft_args[@]}" "${full_suite_args[@]}" "${label_args[@]}")"
           has_suite() { jq -r --arg name "$1" '((.selected_test_suites | index($name)) != null)' <<<"${plan_json}"; }
           has_gate() { jq -r --arg name "$1" '((.selected_gates | index($name)) != null)' <<<"${plan_json}"; }
@@ -94,6 +109,7 @@ jobs:
           test "$(jq -r .no_heavy_impact_duplicates <<<"${plan_json}")" = "true"
           if [ "$(jq -r .ci_mode <<<"${plan_json}")" = "full" ]; then
             test "$(jq -r .full_plan_complete <<<"${plan_json}")" = "true"
+            test "$(has_gate actionlint)" = "true"
           fi
           {
             echo "ci_mode=$(jq -r .ci_mode <<<"${plan_json}")"
@@ -101,7 +117,7 @@ jobs:
             echo "selected_gates=$(jq -c .selected_gates <<<"${plan_json}")"
             echo "skipped_gates=$(jq -c .skipped_gates <<<"${plan_json}")"
             echo "plan_json=${plan_json}"
-            echo "run_python_quality=true"
+            echo "run_python_quality=$(has_suite ruff)"
             echo "run_dependency_policy=$(has_suite dependency_policy)"
             echo "selected_owner_suites=$(jq -c .selected_owner_suites <<<"${plan_json}")"
             echo "run_python312_full=$(has_gate python312_full)"
@@ -118,9 +134,15 @@ jobs:
             echo "run_firmware_compile=${firmware_compile}"
             echo "run_benchmark=$(has_gate benchmark)"
             echo "run_container_security=$(has_gate container_security)"
+            echo "run_source_head_contract=$(jq -r .requires_source_head_contract <<<"${plan_json}")"
             echo "firmware_execution_profiles=$(jq -c .firmware_execution_profiles <<<"${plan_json}")"
             echo "full_plan_complete=$(jq -r .full_plan_complete <<<"${plan_json}")"
             echo "no_heavy_impact_duplicates=$(jq -r .no_heavy_impact_duplicates <<<"${plan_json}")"
+            echo "source_head_sha=${source_head_sha}"
+            echo "base_sha=${base_sha}"
+            echo "tested_sha=${TESTED_SHA}"
+            echo "tested_ref=${TESTED_REF}"
+            echo "tested_ref_kind=${TESTED_REF_KIND}"
           } >> "${GITHUB_OUTPUT}"
           {
             echo "### Canonical CI test plan"
@@ -129,9 +151,44 @@ jobs:
             echo "- No heavy impact duplicates: $(jq -r .no_heavy_impact_duplicates <<<"${plan_json}")"
             echo "- Selected gates: $(jq -c .selected_gates <<<"${plan_json}")"
             echo "- Skipped gates: $(jq -c .skipped_gates <<<"${plan_json}")"
+            echo "- SOURCE_HEAD_SHA: ${source_head_sha}"
+            echo "- BASE_SHA: ${base_sha}"
+            echo "- TESTED_SHA: ${TESTED_SHA}"
+            echo "- TESTED_REF: ${TESTED_REF}"
+            echo "- TESTED_REF_KIND: ${TESTED_REF_KIND}"
+            if [ "${TESTED_REF_KIND}" = "merge-ref" ]; then
+              echo "- Validation semantics: this workflow tests the PR merge result; SOURCE_HEAD_SHA is recorded separately."
+            fi
             echo '```json'
             jq . <<<"${plan_json}"
             echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  source-head-contract:
+    name: PR source-head provenance contract
+    if: ${{ needs.changes.outputs.run_source_head_contract == 'true' }}
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Verify exact PR source HEAD provenance
+        env:
+          SOURCE_HEAD_SHA: ${{ needs.changes.outputs.source_head_sha }}
+          BASE_SHA: ${{ needs.changes.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          TESTED_SHA="$(git rev-parse HEAD)"
+          test "${TESTED_SHA}" = "${SOURCE_HEAD_SHA}"
+          {
+            echo "### PR source-head evidence"
+            echo "- SOURCE_HEAD_SHA: ${SOURCE_HEAD_SHA}"
+            echo "- BASE_SHA: ${BASE_SHA}"
+            echo "- TESTED_SHA: ${TESTED_SHA}"
+            echo "- TESTED_REF_KIND: head"
+            echo "- Scope: lightweight source-head provenance only; expensive PR validation remains on merge-ref."
           } >> "${GITHUB_STEP_SUMMARY}"
 
   python-quality:
@@ -145,11 +202,25 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
         with: {python-version: "3.12", cache: pip}
       - run: pip install -r requirements-dev.txt
-      - if: ${{ needs.changes.outputs.run_dependency_policy == 'true' }}
+      - name: Dependency policy
         run: python scripts/check_dependency_policy.py
-      - run: ruff check inktime tests scripts server.py analyze_photos.py
-      - run: mypy
-      - if: ${{ needs.changes.outputs.run_python312_full == 'true' }}
+      - name: Planner hardening contracts
+        run: >-
+          pytest
+          tests/unit/test_ci_changed_paths.py
+          tests/unit/test_ci_test_plan.py
+          tests/unit/test_ci_selected_suites.py
+          tests/unit/test_dependency_policy.py
+          tests/unit/test_ci_execution_attestation.py
+          tests/unit/test_ci_planner_hardening.py
+      - name: Ruff
+        run: ruff check inktime tests scripts server.py analyze_photos.py
+      - name: Mypy
+        run: mypy
+      - name: Git diff check
+        run: git diff --check
+      - name: Python 3.12 full coverage >= 80%
+        if: ${{ needs.changes.outputs.run_python312_full == 'true' }}
         run: pytest --cov=inktime --cov-config=pyproject.toml --cov-report=term-missing --cov-fail-under=80 tests/unit tests/security tests/integration
 
   python-compatibility:
@@ -541,6 +612,7 @@ jobs:
     if: ${{ always() }}
     needs:
       - changes
+      - source-head-contract
       - secret-scan
       - actionlint
       - selected-owner-suites
@@ -557,10 +629,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Fail when a routed check failed or was cancelled
-        if: ${{ needs.changes.result != 'success' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+      - name: Verify planner-selected execution attestation
+        env:
+          PLAN_JSON: ${{ needs.changes.outputs.plan_json }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
-          echo "One or more hosted checks failed or were cancelled." >&2
-          exit 1
-      - name: Accept skipped checks as intentional routing
-        run: echo "Routed checks completed; skipped tiers were intentional for this diff."
+          python scripts/ci/verify_execution.py \
+            --plan-json "${PLAN_JSON}" \
+            --needs-json "${NEEDS_JSON}" \
+            --workflow repository
