@@ -40,9 +40,9 @@ class SchedulerRunner:
         self.last_notification_enqueue_at = 0.0
         self.last_batch_poll_at = 0.0
         self.last_backup_date: str | None = None
-        self.last_observability_heartbeat_at = -OBSERVABILITY_HEARTBEAT_INTERVAL_SECONDS
-        self.last_observability_tick_at = -OBSERVABILITY_TICK_INTERVAL_SECONDS
-        self.last_observability_platform_at = -OBSERVABILITY_PLATFORM_INTERVAL_SECONDS
+        self.last_observability_heartbeat_at: float = -OBSERVABILITY_HEARTBEAT_INTERVAL_SECONDS
+        self.last_observability_tick_at: float = -OBSERVABILITY_TICK_INTERVAL_SECONDS
+        self.last_observability_platform_at: float = -OBSERVABILITY_PLATFORM_INTERVAL_SECONDS
 
     def _record_schedule_exception(self, task: dict, exc: Exception, now: datetime) -> None:
         schedules = self.app.extensions["inktime_schedule_repository"]

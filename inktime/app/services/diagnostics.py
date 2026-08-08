@@ -135,7 +135,7 @@ class DiagnosticsService:
             except Exception:
                 revision = "unknown"
             self._resolved_git_revision = revision
-        elif revision == "unknown":
+        elif revision == "unknown" and self._resolved_git_revision is not None:
             revision = self._resolved_git_revision
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
