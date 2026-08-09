@@ -172,6 +172,56 @@ def test_planner_hardening_matrix(
         assert "changes" in expected, (name, workflow, expected)
 
 
+@pytest.mark.parametrize(
+    ("path", "expected_domains", "expected_suites"),
+    [
+        (
+            "inktime/app/domain/jobs/failure_policy.py",
+            {"python", "runtime"},
+            {"python_application_owner", "runtime_scheduler_owner"},
+        ),
+        (
+            "inktime/app/api/resilience.py",
+            {"python", "runtime", "queue_resilience"},
+            {
+                "python_application_owner",
+                "runtime_scheduler_owner",
+                "queue_resilience_owner",
+            },
+        ),
+        (
+            "inktime/app/repositories/offline_schedules.py",
+            {"python", "persistence", "runtime", "queue_resilience"},
+            {
+                "python_application_owner",
+                "persistence_owner",
+                "runtime_scheduler_owner",
+                "queue_resilience_owner",
+            },
+        ),
+        (
+            "inktime/app/services/release_coordinator.py",
+            {"python", "runtime", "render_release"},
+            {
+                "python_application_owner",
+                "runtime_scheduler_owner",
+                "render_release_owner",
+            },
+        ),
+    ],
+)
+def test_production_cross_layer_paths_route_required_owners(
+    path, expected_domains, expected_suites
+):
+    plan = build_test_plan([path], _pr_context())
+
+    assert expected_domains <= set(plan["changed_domains"])
+    assert expected_suites <= set(plan["selected_test_suites"])
+    assert "runtime_soak" in plan["expensive_gates"]
+    assert plan["production_owner_invariant"] is True
+    assert plan["suite_execution_gaps"] == []
+
+
 def test_provider_and_render_owners_include_cross_layer_regressions():
     assert {
         "tests/integration/test_analysis_pipeline.py",

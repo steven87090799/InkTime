@@ -878,7 +878,13 @@ def _classify_path(path: str) -> tuple[set[str], set[str], set[str], bool]:
                 domains.add("web_ui")
                 suites.add("web_api_owner")
 
-        if path.startswith(("inktime/app/workers/", "inktime/app/services/scheduler")) or any(
+        if path.startswith(
+            (
+                "inktime/app/workers/",
+                "inktime/app/services/scheduler",
+                "inktime/app/domain/jobs/",
+            )
+        ) or any(
             token in lower_path
             for token in (
                 "/services/jobs",
