@@ -8,6 +8,7 @@
   .review-card{border:1px solid var(--border);border-radius:14px;background:var(--surface);overflow:hidden;display:grid;grid-template-rows:auto 1fr}
   .review-card.selected{outline:3px solid var(--accent)}
   .review-card img{width:100%;aspect-ratio:1.25;object-fit:cover;background:#111;display:block}
+  .review-image-error{display:grid;place-items:center;min-height:10rem;padding:1rem;background:#171b18;color:var(--muted);text-align:center}
   .review-card-body{padding:.8rem;display:grid;gap:.35rem}
   .review-card-body small{color:var(--muted)}
   .review-actions{display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.35rem}
@@ -41,6 +42,7 @@
 (() => {
   const form=document.getElementById('review-filter'), grid=document.getElementById('review-grid'), more=document.getElementById('review-more'), summary=document.getElementById('review-summary'), status=document.getElementById('review-status');
   let cursor=null, selected=-1, items=[];
+  grid.addEventListener('error',event=>{if(event.target?.tagName!=='IMG')return;const placeholder=document.createElement('div');placeholder.className='review-image-error';placeholder.setAttribute('role','status');placeholder.textContent='縮圖無法載入。';event.target.replaceWith(placeholder);},true);
   const params=()=>new URLSearchParams([...new FormData(form).entries()].filter(([,v])=>v));
   const syncUrl=()=>history.replaceState(null,'','?'+params().toString());
   const escapeHtml=value=>String(value??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));

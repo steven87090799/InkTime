@@ -1,16 +1,28 @@
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
-from datetime import date
+import shutil
 
 from PIL import Image
 import pytest
 
 from inktime.app.domain.rendering.fonts import FontCoverageError
 from inktime.app.domain.rendering.palette import encode_image
-from inktime.app.domain.rendering.release import AtomicReleasePublisher, pack_four_color_2bpp
+from inktime.app.domain.rendering.release import (
+    AtomicReleasePublisher,
+    DEVICE_TEST_INDEX_DIRECTORY,
+    DEVICE_TEST_INDEX_MIGRATION_VERSION,
+    DEVICE_TEST_INDEX_MIGRATION_DIRECTORY,
+    DEVICE_TEST_INDEX_QUARANTINE_DIRECTORY,
+    DeviceTestReleaseStore,
+    STOCK_DIRECT_TEST_DEFERRED_DIRECTORY,
+    STOCK_DIRECT_TEST_DIRECTORY,
+    pack_four_color_2bpp,
+)
 
 
 def test_four_color_480x800_is_96000_bytes():
@@ -71,6 +83,655 @@ def test_failed_release_does_not_replace_latest(tmp_path):
     with pytest.raises(ValueError):
         publisher.publish([("broken", Image.new("RGB", (100, 100), "white"))])
     assert (tmp_path / "releases" / "latest").read_text() == first["release_id"]
+
+
+def test_invalid_release_contract_does_not_leak_temporary_directory(tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    with pytest.raises(ValueError, match="Release 類型"):
+        publisher.publish(
+            [("photo", Image.new("RGB", (480, 800), "white"))],
+            release_kind="invalid",
+        )
+    assert not [path for path in root.iterdir() if path.name.endswith(".tmp")]
+
+
+def test_preencoded_stock_release_uses_direct_idempotency_index_and_ttl_marker(monkeypatch, tmp_path):
+    publisher = AtomicReleasePublisher(tmp_path / "releases")
+    payload_path = tmp_path / "payload.bin"
+    preview_path = tmp_path / "preview.png"
+    payload_path.write_bytes(bytes(96_000))
+    Image.new("RGB", (480, 800), "white").save(preview_path)
+    manifest = publisher.publish_preencoded(
+        source_photo_id="simulator-upload",
+        payload_path=payload_path,
+        preview_path=preview_path,
+        profile_key="safe_4c",
+        dither="none",
+        color_distance="rgb",
+        dither_strength=0,
+        linear_light=True,
+        palette=[],
+        palette_version="test",
+        metadata={
+            "idempotency_key": "stock-index-key",
+            "transport": "stock_direct",
+            "stock_direct": True,
+            "stock_direct_device_id": "stock-device",
+        },
+    )
+    options = manifest["render_options"]
+    assert options["stock_direct_expires_at"]
+    assert any(
+        (tmp_path / "releases" / directory / f"{manifest['release_id']}.json").is_file()
+        for directory in (STOCK_DIRECT_TEST_DIRECTORY, STOCK_DIRECT_TEST_DEFERRED_DIRECTORY)
+    )
+    monkeypatch.setattr(
+        publisher,
+        "list",
+        lambda: pytest.fail("idempotency lookup must not scan every release"),
+    )
+    assert publisher.find_device_test_by_idempotency("stock-index-key") == manifest
+
+
+def _publish_preencoded_test(
+    publisher: AtomicReleasePublisher,
+    tmp_path: Path,
+    *,
+    idempotency_key: str,
+    transport: str = "custom",
+):
+    payload_path = tmp_path / f"{idempotency_key}.bin"
+    preview_path = tmp_path / f"{idempotency_key}.png"
+    payload_path.write_bytes(bytes(96_000))
+    Image.new("RGB", (480, 800), "white").save(preview_path)
+    return publisher.publish_preencoded(
+        source_photo_id="legacy-test",
+        payload_path=payload_path,
+        preview_path=preview_path,
+        profile_key="safe_4c",
+        dither="none",
+        color_distance="rgb",
+        dither_strength=0,
+        linear_light=False,
+        palette=[],
+        palette_version="test",
+        metadata={
+            "idempotency_key": idempotency_key,
+            "transport": transport,
+            "stock_direct": transport == "stock_direct",
+            "stock_direct_device_id": "stock-device" if transport == "stock_direct" else None,
+        },
+    )
+
+
+def test_legacy_device_test_idempotency_is_backfilled_once_and_reused(monkeypatch, tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    manifest = _publish_preencoded_test(publisher, tmp_path, idempotency_key="legacy-idempotency")
+    index = publisher._device_test_index_path("legacy-idempotency")
+    index.unlink()
+    migration = root / DEVICE_TEST_INDEX_MIGRATION_DIRECTORY
+    if migration.exists():
+        migration.rmdir()
+    monkeypatch.setattr(
+        publisher,
+        "list",
+        lambda: pytest.fail("legacy recovery must stream once without list/sort"),
+    )
+
+    recovered = publisher.find_device_test_by_idempotency("legacy-idempotency")
+
+    assert recovered == manifest
+    assert json.loads(index.read_text(encoding="utf-8"))["release_id"] == manifest["release_id"]
+    assert len([path for path in root.iterdir() if (path / "manifest.json").is_file()]) == 1
+    monkeypatch.setattr(
+        publisher,
+        "_backfill_legacy_device_test_indexes",
+        lambda: pytest.fail("second lookup must use the O(1) index path"),
+    )
+    assert publisher.find_device_test_by_idempotency("legacy-idempotency") == manifest
+
+
+def test_legacy_index_recovery_skips_corrupt_wrong_key_and_formal_releases(tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    valid = _publish_preencoded_test(publisher, tmp_path, idempotency_key="other-key")
+    publisher._device_test_index_path("other-key").unlink()
+    (root / valid["release_id"] / "manifest.json").write_text("{", encoding="utf-8")
+    publisher.publish(
+        [("formal", Image.new("RGB", (480, 800), "white"))],
+        activate=False,
+        metadata={"idempotency_key": "formal-key", "transport": "custom"},
+    )
+
+    assert publisher.find_device_test_by_idempotency("missing-key") is None
+    assert not publisher._device_test_index_path("other-key").exists()
+    assert not publisher._device_test_index_path("formal-key").exists()
+
+
+def _rewrite_legacy_candidate(
+    root: Path,
+    manifest: dict,
+    *,
+    idempotency_key: str,
+    created_at: str,
+) -> dict:
+    path = root / manifest["release_id"] / "manifest.json"
+    candidate = json.loads(path.read_text(encoding="utf-8"))
+    candidate["created_at"] = created_at
+    candidate["render_options"]["idempotency_key"] = idempotency_key
+    path.write_text(json.dumps(candidate), encoding="utf-8")
+    return candidate
+
+
+def _reset_device_test_index_migration(root: Path) -> None:
+    shutil.rmtree(root / DEVICE_TEST_INDEX_DIRECTORY, ignore_errors=True)
+    shutil.rmtree(root / DEVICE_TEST_INDEX_MIGRATION_DIRECTORY, ignore_errors=True)
+
+
+def _migration_state(root: Path) -> dict:
+    return json.loads(
+        (root / DEVICE_TEST_INDEX_MIGRATION_DIRECTORY / "state.json").read_text(encoding="utf-8")
+    )
+
+
+def test_device_test_index_migration_is_versioned_and_ignores_release_root_mtime(monkeypatch, tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    manifest = _publish_preencoded_test(publisher, tmp_path, idempotency_key="legacy-v1")
+    _reset_device_test_index_migration(root)
+
+    assert publisher.find_device_test_by_idempotency("legacy-v1") == manifest
+    state = _migration_state(root)
+    assert state == {
+        "schema_version": 1,
+        "migration_version": DEVICE_TEST_INDEX_MIGRATION_VERSION,
+        "complete": True,
+        "completed_at": state["completed_at"],
+    }
+    os.utime(root, None)
+    publisher._device_test_index_path("legacy-v1").unlink()
+    monkeypatch.setattr(
+        os,
+        "scandir",
+        lambda *_args, **_kwargs: pytest.fail("completed migration must not rescan root"),
+    )
+
+    assert AtomicReleasePublisher(root).find_device_test_by_idempotency("missing-key") is None
+
+
+def test_device_test_index_migration_scans_root_exactly_once_per_version(monkeypatch, tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    legacy = _publish_preencoded_test(publisher, tmp_path, idempotency_key="legacy-once")
+    _reset_device_test_index_migration(root)
+    original_scandir = os.scandir
+    root_scans = 0
+
+    def counted_scandir(path):
+        nonlocal root_scans
+        if Path(path) == root:
+            root_scans += 1
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", counted_scandir)
+
+    assert publisher.find_device_test_by_idempotency("legacy-once") == legacy
+    assert root_scans == 1
+    _publish_preencoded_test(publisher, tmp_path, idempotency_key="new-index-a")
+    assert publisher.find_device_test_by_idempotency("new-miss-b") is None
+    _publish_preencoded_test(publisher, tmp_path, idempotency_key="new-index-c")
+    assert AtomicReleasePublisher(root).find_device_test_by_idempotency("new-miss-d") is None
+    assert root_scans == 1
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        None,
+        {"complete": True},
+        {
+            "schema_version": 1,
+            "migration_version": DEVICE_TEST_INDEX_MIGRATION_VERSION - 1,
+            "complete": True,
+            "completed_at": "2026-08-09T00:00:00+00:00",
+        },
+    ],
+)
+def test_missing_malformed_or_old_migration_state_reruns_once(state, tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    manifest = _publish_preencoded_test(publisher, tmp_path, idempotency_key="state-rerun")
+    _reset_device_test_index_migration(root)
+    if state is not None:
+        state_root = root / DEVICE_TEST_INDEX_MIGRATION_DIRECTORY
+        state_root.mkdir()
+        (state_root / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    assert publisher.find_device_test_by_idempotency("state-rerun") == manifest
+    assert _migration_state(root)["migration_version"] == DEVICE_TEST_INDEX_MIGRATION_VERSION
+
+
+def test_malformed_migration_state_reruns_and_is_replaced(tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    manifest = _publish_preencoded_test(publisher, tmp_path, idempotency_key="bad-state")
+    _reset_device_test_index_migration(root)
+    state_root = root / DEVICE_TEST_INDEX_MIGRATION_DIRECTORY
+    state_root.mkdir()
+    (state_root / "state.json").write_text("{", encoding="utf-8")
+    assert publisher.find_device_test_by_idempotency("bad-state") == manifest
+    assert _migration_state(root)["complete"] is True
+
+
+def test_transient_legacy_read_failure_does_not_mark_migration_complete(monkeypatch, tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    manifest = _publish_preencoded_test(publisher, tmp_path, idempotency_key="transient")
+    _reset_device_test_index_migration(root)
+    original_validate = publisher.validate
+
+    def fail_candidate(release_id):
+        if release_id == manifest["release_id"]:
+            raise OSError("transient read failure")
+        return original_validate(release_id)
+
+    monkeypatch.setattr(publisher, "validate", fail_candidate)
+    assert publisher.find_device_test_by_idempotency("transient") is None
+    assert not (root / DEVICE_TEST_INDEX_MIGRATION_DIRECTORY / "state.json").exists()
+
+    monkeypatch.setattr(publisher, "validate", original_validate)
+    assert publisher.find_device_test_by_idempotency("transient") == manifest
+    assert _migration_state(root)["complete"] is True
+
+
+def test_transient_index_target_read_failure_preserves_index_for_retry(monkeypatch, tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    key = "transient-index-target"
+    manifest = _publish_preencoded_test(publisher, tmp_path, idempotency_key=key)
+    index = publisher._device_test_index_path(key)
+    before = index.read_bytes()
+    original_validate = publisher.validate
+
+    def fail_target(release_id):
+        if release_id == manifest["release_id"]:
+            raise OSError("transient indexed target read failure")
+        return original_validate(release_id)
+
+    monkeypatch.setattr(publisher, "validate", fail_target)
+    assert publisher.find_device_test_by_idempotency(key) is None
+    assert index.read_bytes() == before
+    quarantine = root / DEVICE_TEST_INDEX_QUARANTINE_DIRECTORY
+    assert not quarantine.exists() or not any(quarantine.iterdir())
+
+    monkeypatch.setattr(publisher, "validate", original_validate)
+    assert publisher.find_device_test_by_idempotency(key) == manifest
+
+
+def test_migration_restart_after_state_commit_failure_is_deterministic(monkeypatch, tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    expected = _publish_preencoded_test(publisher, tmp_path, idempotency_key="crash-rerun")
+    _reset_device_test_index_migration(root)
+    original_atomic_json = publisher._atomic_json
+
+    def fail_state(path, payload):
+        if path.name == "state.json":
+            raise OSError("simulated crash before completion")
+        return original_atomic_json(path, payload)
+
+    monkeypatch.setattr(publisher, "_atomic_json", fail_state)
+    assert publisher.find_device_test_by_idempotency("crash-rerun") is None
+    assert not (root / DEVICE_TEST_INDEX_MIGRATION_DIRECTORY / "state.json").exists()
+    monkeypatch.setattr(publisher, "_atomic_json", original_atomic_json)
+    assert publisher.find_device_test_by_idempotency("force-rerun-miss") is None
+    assert _migration_state(root)["complete"] is True
+    assert publisher.find_device_test_by_idempotency("crash-rerun") == expected
+
+
+def test_legacy_migration_ignores_wrong_transport_candidate(tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    manifest = _publish_preencoded_test(publisher, tmp_path, idempotency_key="wrong-transport")
+    path = root / manifest["release_id"] / "manifest.json"
+    candidate = json.loads(path.read_text(encoding="utf-8"))
+    candidate["render_options"]["transport"] = "formal"
+    path.write_text(json.dumps(candidate), encoding="utf-8")
+    _reset_device_test_index_migration(root)
+    assert publisher.find_device_test_by_idempotency("wrong-transport") is None
+    assert not publisher._device_test_index_path("wrong-transport").exists()
+
+
+def test_new_index_after_completed_migration_uses_hot_path_without_scan(monkeypatch, tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    assert publisher.find_device_test_by_idempotency("initial-miss") is None
+    manifest = _publish_preencoded_test(publisher, tmp_path, idempotency_key="new-fast-path")
+    monkeypatch.setattr(
+        publisher,
+        "_backfill_legacy_device_test_indexes",
+        lambda: pytest.fail("normal indexed publish must remain O(1)"),
+    )
+    assert publisher.find_device_test_by_idempotency("new-fast-path") == manifest
+
+
+def test_legacy_duplicate_selection_is_newest_and_filesystem_order_independent(monkeypatch, tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    older = _publish_preencoded_test(publisher, tmp_path, idempotency_key="older-source")
+    newer = _publish_preencoded_test(publisher, tmp_path, idempotency_key="newer-source")
+    _rewrite_legacy_candidate(
+        root,
+        older,
+        idempotency_key="duplicate-key",
+        created_at="2026-08-08T00:00:00+00:00",
+    )
+    expected = _rewrite_legacy_candidate(
+        root,
+        newer,
+        idempotency_key="duplicate-key",
+        created_at="2026-08-09T00:00:00+00:00",
+    )
+    _reset_device_test_index_migration(root)
+    original_scandir = os.scandir
+
+    class ReversedEntries:
+        def __init__(self, entries):
+            self.entries = entries
+
+        def __enter__(self):
+            return iter(reversed(self.entries))
+
+        def __exit__(self, *_args):
+            return False
+
+    def reversed_root(path):
+        if Path(path) == root:
+            with original_scandir(path) as entries:
+                return ReversedEntries(list(entries))
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", reversed_root)
+    assert publisher.find_device_test_by_idempotency("duplicate-key") == expected
+
+
+def test_legacy_duplicate_skips_malformed_newest_and_uses_valid_older(tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    older = _publish_preencoded_test(publisher, tmp_path, idempotency_key="valid-source")
+    newer = _publish_preencoded_test(publisher, tmp_path, idempotency_key="broken-source")
+    expected = _rewrite_legacy_candidate(
+        root,
+        older,
+        idempotency_key="fallback-key",
+        created_at="2026-08-08T00:00:00+00:00",
+    )
+    _rewrite_legacy_candidate(
+        root,
+        newer,
+        idempotency_key="fallback-key",
+        created_at="2026-08-09T00:00:00+00:00",
+    )
+    (root / newer["release_id"] / "manifest.json").write_text("{", encoding="utf-8")
+    _reset_device_test_index_migration(root)
+    assert publisher.find_device_test_by_idempotency("fallback-key") == expected
+
+
+def test_legacy_duplicate_created_at_tie_uses_release_id_lexically(tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    first = _publish_preencoded_test(publisher, tmp_path, idempotency_key="tie-source-a")
+    second = _publish_preencoded_test(publisher, tmp_path, idempotency_key="tie-source-b")
+    candidates = [
+        _rewrite_legacy_candidate(
+            root,
+            manifest,
+            idempotency_key="tie-key",
+            created_at="2026-08-09T00:00:00+00:00",
+        )
+        for manifest in (first, second)
+    ]
+    _reset_device_test_index_migration(root)
+    expected = max(candidates, key=lambda item: item["release_id"])
+    assert publisher.find_device_test_by_idempotency("tie-key") == expected
+
+
+@pytest.mark.parametrize("corruption", ["malformed", "oversized", "symlink"])
+def test_invalid_device_test_index_is_quarantined_without_following_links(corruption, tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    index = publisher._device_test_index_path("corrupt-index")
+    index.parent.mkdir()
+    state_root = root / DEVICE_TEST_INDEX_MIGRATION_DIRECTORY
+    state_root.mkdir()
+    (state_root / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "migration_version": DEVICE_TEST_INDEX_MIGRATION_VERSION,
+                "complete": True,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside-index"
+    outside.write_text("preserve", encoding="utf-8")
+    if corruption == "malformed":
+        index.write_text("{", encoding="utf-8")
+    elif corruption == "oversized":
+        index.write_bytes(b"x" * (64 * 1024 + 1))
+    else:
+        index.symlink_to(outside)
+
+    assert publisher.find_device_test_by_idempotency("corrupt-index") is None
+    assert not index.exists()
+    assert any((root / DEVICE_TEST_INDEX_QUARANTINE_DIRECTORY).iterdir())
+    assert outside.read_text(encoding="utf-8") == "preserve"
+
+
+def test_stale_index_wrong_target_is_quarantined_then_replacement_is_usable(tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    manifest = _publish_preencoded_test(publisher, tmp_path, idempotency_key="stale-target")
+    index = publisher._device_test_index_path("stale-target")
+    (root / manifest["release_id"] / "photo_1.bin").unlink()
+    state_root = root / DEVICE_TEST_INDEX_MIGRATION_DIRECTORY
+    state_root.mkdir()
+    (state_root / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "migration_version": DEVICE_TEST_INDEX_MIGRATION_VERSION,
+                "complete": True,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert publisher.find_device_test_by_idempotency("stale-target") is None
+    assert not index.exists()
+    shutil.rmtree(root / manifest["release_id"])
+    replacement = _publish_preencoded_test(publisher, tmp_path, idempotency_key="stale-target")
+    assert publisher.find_device_test_by_idempotency("stale-target") == replacement
+
+
+@pytest.mark.parametrize("corruption", ["missing_release", "malformed_manifest"])
+def test_stale_index_missing_or_malformed_release_is_recoverable(tmp_path, corruption):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    key = f"stale-{corruption}"
+    manifest = _publish_preencoded_test(publisher, tmp_path, idempotency_key=key)
+    index = publisher._device_test_index_path(key)
+    state_root = root / DEVICE_TEST_INDEX_MIGRATION_DIRECTORY
+    state_root.mkdir()
+    (state_root / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "migration_version": DEVICE_TEST_INDEX_MIGRATION_VERSION,
+                "complete": True,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    release = root / manifest["release_id"]
+    if corruption == "missing_release":
+        shutil.rmtree(release)
+    else:
+        (release / "manifest.json").write_text("{", encoding="utf-8")
+
+    assert publisher.find_device_test_by_idempotency(key) is None
+    assert not index.exists()
+    shutil.rmtree(release, ignore_errors=True)
+    replacement = _publish_preencoded_test(publisher, tmp_path, idempotency_key=key)
+    assert publisher.find_device_test_by_idempotency(key) == replacement
+
+
+@pytest.mark.parametrize("invalid_manifest", ["[]", "null", '"manifest"', "1"])
+def test_non_object_manifest_fails_closed_and_does_not_wedge_index(tmp_path, invalid_manifest):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    key = "non-object-manifest"
+    manifest = _publish_preencoded_test(publisher, tmp_path, idempotency_key=key)
+    index = publisher._device_test_index_path(key)
+    state_root = root / DEVICE_TEST_INDEX_MIGRATION_DIRECTORY
+    state_root.mkdir()
+    (state_root / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "migration_version": DEVICE_TEST_INDEX_MIGRATION_VERSION,
+                "complete": True,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    release = root / manifest["release_id"]
+    (release / "manifest.json").write_text(invalid_manifest, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Manifest 格式"):
+        publisher.validate(manifest["release_id"])
+    assert publisher.find_device_test_by_idempotency(key) is None
+    assert not index.exists()
+    shutil.rmtree(release)
+    replacement = _publish_preencoded_test(publisher, tmp_path, idempotency_key=key)
+    assert publisher.find_device_test_by_idempotency(key) == replacement
+
+
+@pytest.mark.parametrize("target_kind", ["wrong_key", "formal"])
+def test_index_target_contract_mismatch_is_quarantined(target_kind, tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    queried_key = f"contract-{target_kind}"
+    if target_kind == "wrong_key":
+        manifest = _publish_preencoded_test(publisher, tmp_path, idempotency_key="different-key")
+    else:
+        manifest = publisher.publish(
+            [("formal", Image.new("RGB", (480, 800), "white"))],
+            activate=False,
+            metadata={"idempotency_key": queried_key, "transport": "custom"},
+        )
+    index = publisher._device_test_index_path(queried_key)
+    publisher._atomic_json(
+        index,
+        {"release_id": manifest["release_id"], "idempotency_key": queried_key},
+    )
+    state_root = root / DEVICE_TEST_INDEX_MIGRATION_DIRECTORY
+    state_root.mkdir()
+    (state_root / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "migration_version": DEVICE_TEST_INDEX_MIGRATION_VERSION,
+                "complete": True,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert publisher.find_device_test_by_idempotency(queried_key) is None
+    assert not index.exists()
+    assert any((root / DEVICE_TEST_INDEX_QUARANTINE_DIRECTORY).iterdir())
+
+
+def test_stale_index_quarantine_never_removes_concurrent_replacement(tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    index = publisher._device_test_index_path("replacement-safety")
+    index.parent.mkdir()
+    index.write_text("{", encoding="utf-8")
+    _parsed, identity, _reason = publisher._observe_device_test_index(index)
+    replacement = {"release_id": "replacement", "idempotency_key": "replacement-safety"}
+    publisher._atomic_json(index, replacement)
+
+    assert not publisher._quarantine_observed_index(index, identity, "stale observation")
+    assert json.loads(index.read_text(encoding="utf-8")) == replacement
+
+
+def test_failed_stock_marker_transaction_rolls_back_only_new_index(monkeypatch, tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    original_create = publisher._atomic_json_create
+    calls = 0
+
+    def fail_marker(path, payload):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("marker write failed")
+        return original_create(path, payload)
+
+    monkeypatch.setattr(publisher, "_atomic_json_create", fail_marker)
+    with pytest.raises(OSError, match="marker write failed"):
+        _publish_preencoded_test(
+            publisher, tmp_path, idempotency_key="transaction-key", transport="stock_direct"
+        )
+    assert not publisher._device_test_index_path("transaction-key").exists()
+    assert not any(
+        list((root / directory).glob("*.json"))
+        for directory in (STOCK_DIRECT_TEST_DIRECTORY, STOCK_DIRECT_TEST_DEFERRED_DIRECTORY)
+        if (root / directory).exists()
+    )
+    assert not [path for path in root.iterdir() if (path / "manifest.json").is_file()]
+
+
+def test_publication_failure_leaves_no_marker_and_preserves_preexisting_index(tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    original = _publish_preencoded_test(
+        publisher, tmp_path, idempotency_key="preexisting-index", transport="stock_direct"
+    )
+    index = publisher._device_test_index_path("preexisting-index")
+    before = index.read_bytes()
+
+    with pytest.raises(FileExistsError):
+        _publish_preencoded_test(
+            publisher, tmp_path, idempotency_key="preexisting-index", transport="stock_direct"
+        )
+
+    assert index.read_bytes() == before
+    assert publisher.find_device_test_by_idempotency("preexisting-index") == original
+    releases = [path for path in root.iterdir() if (path / "manifest.json").is_file()]
+    assert [path.name for path in releases] == [original["release_id"]]
+
+
+def test_custom_assignment_store_rejects_symlink_root(tmp_path):
+    release_root = tmp_path / "releases"
+    outside = tmp_path / "outside-assignments"
+    release_root.mkdir()
+    outside.mkdir()
+    (release_root / ".device-tests").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="assignment store"):
+        DeviceTestReleaseStore(release_root)
+
+    assert list(outside.iterdir()) == []
 
 
 def test_automatic_release_candidates_respect_configured_memory_threshold(app, tmp_path):

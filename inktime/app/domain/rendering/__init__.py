@@ -29,6 +29,7 @@ from .photo_renderer import BUILTIN_PHOTO_PRESETS, PhotoRenderResult, render_pho
 from .release import AtomicReleasePublisher, DeviceTestReleaseStore, pack_four_color_2bpp
 from .adaptive_layout import photo_orientation, select_pair_candidate
 from .contrast_risk import EPAPER_CONTRAST_RISK_VERSION, calculate_epaper_contrast_risk
+from .layout_geometry import LayoutGeometry, Rect, resolve_layout_geometry
 
 __all__ = [
     "current_local_date",
@@ -65,4 +66,7 @@ __all__ = [
     "select_pair_candidate",
     "EPAPER_CONTRAST_RISK_VERSION",
     "calculate_epaper_contrast_risk",
+    "LayoutGeometry",
+    "Rect",
+    "resolve_layout_geometry",
 ]

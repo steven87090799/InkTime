@@ -637,6 +637,26 @@ def test_ab_preview_is_server_rendered_and_reports_palette_statistics(client, ap
     WorkerRunner(app).run_once()
     assert app.extensions["inktime_render_workload_service"].observability()["compare_cache_hit"] == 1
 
+    changed_renderer = client.post(
+        "/api/v1/rendering/compare",
+        data={
+            "photo": _photo_upload("#c59d78"),
+            "profile": "gdep073e01_6c",
+            "preset": "photo_balanced",
+            "fit": "cover",
+            "options": '{"dither":"nearest","local_contrast":true,"contrast_strength":0.65}',
+            "palette": '{"mode":"default"}',
+        },
+        headers={"X-CSRF-Token": csrf(client)},
+        content_type="multipart/form-data",
+    )
+    assert changed_renderer.status_code == 202
+    WorkerRunner(app).run_once()
+    assert app.extensions["inktime_render_workload_service"].observability() == {
+        "compare_cache_hit": 1,
+        "compare_cache_miss": 2,
+    }
+
 
 def test_job_status_and_background_results_are_owner_scoped(app):
     auth = app.extensions["inktime_auth_repository"]

@@ -1150,12 +1150,16 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "render.fit_mode": {
         "category": "渲染設定",
-        "default": "contain",
+        "default": "stretch_fill",
         "type": "string",
         "description": "照片縮放方式",
-        "risk": "完整顯示不裁切照片；填滿畫面可能裁掉照片邊緣",
-        "choices": ["contain", "cover"],
-        "choice_labels": {"contain": "完整顯示（建議）", "cover": "填滿並裁切"},
+        "risk": "填滿照片區不裁切但可能微變形；完整顯示會保留留白；填滿裁切可能裁掉照片邊緣",
+        "choices": ["stretch_fill", "contain", "cover"],
+        "choice_labels": {
+            "stretch_fill": "填滿照片區（不裁切，可微變形）",
+            "contain": "完整顯示",
+            "cover": "填滿並裁切",
+        },
         "restart": False,
     },
     "render.show_capture_date": {

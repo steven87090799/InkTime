@@ -12,12 +12,13 @@ import tempfile
 from typing import BinaryIO, Any
 from uuid import uuid4
 
-from PIL import Image
+from PIL import Image, ImageDraw
 from PIL import ImageOps
 
 from inktime.app.domain.rendering import (
     AtomicReleasePublisher,
     DeviceTestReleaseStore,
+    FONT_COMPATIBILITY_TEXT,
     FontManager,
     encode_image,
     palette_for_profile,
@@ -28,8 +29,13 @@ from inktime.app.domain.photos import LocationResolver
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.render_candidates import RenderCandidateRepository
 from inktime.app.repositories.settings import SettingsRepository
+from inktime.app.services.device_releases import payload_entry_from_manifest
 from inktime.app.services.release_coordinator import ReleaseCoordinator
-from inktime.app.services.rendering import PORTRAIT_ONLY_LAYOUTS, RenderService
+from inktime.app.services.rendering import (
+    PORTRAIT_ONLY_LAYOUTS,
+    RenderService,
+    draw_caption_footer,
+)
 from inktime.app.services.weather import WeatherService
 from inktime.app.workers.process_boundary import ProcessCallError
 
@@ -64,6 +70,93 @@ def _open_saved_upload(path_value: str, suffix: str) -> tuple[Image.Image, str]:
     return image, source_size
 
 
+def _photo_renderer_fit(image: Image.Image, fit: str) -> tuple[Image.Image, str]:
+    """Adapt the shared fit contract to the legacy A/B renderer boundary.
+
+    ``photo_renderer.prepare_photo_canvas`` intentionally accepts only its
+    historical contain/cover modes.  Normalizing stretch_fill here keeps the
+    boundary single and gives that renderer an exact-aspect input, so its
+    existing cover operation cannot crop or letterbox any pixels.
+    """
+    if fit == "stretch_fill":
+        return image.resize((480, 800), Image.Resampling.LANCZOS), "cover"
+    return image, fit
+
+
+def _overlay_simulator_caption(
+    image: Image.Image,
+    *,
+    caption: str,
+    font_manager: FontManager,
+    font_reference: str,
+) -> Image.Image:
+    """Add the simulator-only caption through the formal footer helper."""
+    text = str(caption or "").strip()
+    if not text:
+        return image
+    font_path = font_manager.validate_reference(
+        font_reference, f"{FONT_COMPATIBILITY_TEXT}{text}"
+    )
+    preview = image.copy().convert("RGB")
+    draw = ImageDraw.Draw(preview)
+    footer_top = max(0, preview.height - 120)
+    draw.rectangle((0, footer_top, preview.width, preview.height), fill="white")
+    draw.line((20, footer_top + 4, preview.width - 20, footer_top + 4), fill="black", width=2)
+    draw_caption_footer(
+        draw,
+        text,
+        font_path=font_path,
+        x=22,
+        top=footer_top + 12,
+        bottom=preview.height - 12,
+        width=max(1, preview.width - 44),
+        fill="black",
+        wrap_enabled=True,
+        maximum_lines=2,
+        minimum_font_size=17,
+    )
+    return preview
+
+
+def _captioned_renderer_outputs(
+    result,
+    *,
+    settings: dict[str, Any],
+    profile_key: str,
+    profile,
+):
+    """Freeze one legal ephemeral caption into both preview and payload paths."""
+    caption = str(settings.get("caption", "")).strip()
+    if not caption:
+        return result.source, result.encoded
+    font_manager = FontManager(
+        Path(str(settings["font_root"])), Path(str(settings["font_builtin_root"]))
+    )
+    source = _overlay_simulator_caption(
+        result.source,
+        caption=caption,
+        font_manager=font_manager,
+        font_reference=str(settings.get("font_reference", "")),
+    )
+    processed = _overlay_simulator_caption(
+        result.processed,
+        caption=caption,
+        font_manager=font_manager,
+        font_reference=str(settings.get("font_reference", "")),
+    )
+    encoded = encode_image(
+        processed,
+        profile_key=profile_key,
+        profile=profile,
+        dither=str(result.options["dither"]),
+        color_distance=str(result.options["color_distance"]),
+        strength=float(result.options["error_strength"]),
+        linear_light=bool(result.options.get("linear_light", True)),
+        protected_mask=result.protected_mask,
+    )
+    return source, encoded
+
+
 def _prepare_compare_child(
     *, settings: dict[str, Any], input_path: str, prepared_path: str
 ) -> dict[str, Any]:
@@ -71,12 +164,13 @@ def _prepare_compare_child(
     prepared.mkdir(mode=0o700, parents=True)
     image, source_size = _open_saved_upload(input_path, str(settings["input_suffix"]))
     configuration = dict(settings["configuration"])
+    renderer_image, renderer_fit = _photo_renderer_fit(image, str(settings["fit"]))
     result = render_photo(
-        image,
+        renderer_image,
         profile_key=str(settings["profile"]),
         preset=str(configuration["preset"]),
         overrides=dict(configuration["overrides"]),
-        fit=str(settings["fit"]),
+        fit=renderer_fit,
         palette_rgb=configuration.get("palette_rgb"),
         palette_lab=configuration.get("palette_lab"),
         palette_version=str(configuration["palette_version"]),
@@ -89,24 +183,35 @@ def _prepare_compare_child(
         lab_values=configuration.get("palette_lab"),
         palette_version=str(configuration["palette_version"]),
     )
+    captioned_source, captioned_encoded = _captioned_renderer_outputs(
+        result,
+        settings=settings,
+        profile_key=str(settings["profile"]),
+        profile=profile,
+    )
     started = datetime.now(timezone.utc)
     legacy = encode_image(
-        result.source,
+        captioned_source,
         profile_key=str(settings["profile"]),
         dither="gooddisplay",
         color_distance="rgb",
         strength=1.0,
     )
     legacy_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
-    for name, output in {
-        "original": result.source,
+    outputs = {
+        "original": captioned_source,
         "legacy": legacy.preview,
-        "new": result.encoded.preview,
+        "new": captioned_encoded.preview,
+    }
+    for name, output in {
+        "original": outputs["original"],
+        "legacy": outputs["legacy"],
+        "new": outputs["new"],
     }.items():
         _atomic_png_file(prepared / f"{name}.png", output)
     return {
         "source_size": source_size,
-        "payload_bytes": len(result.encoded.payload),
+        "payload_bytes": len(captioned_encoded.payload),
         "render_ms": result.render_ms,
         "legacy_render_ms": legacy_ms,
         "preset": str(configuration["requested_preset"]),
@@ -115,7 +220,9 @@ def _prepare_compare_child(
         "color_distance": result.options["color_distance"],
         "linear_light": bool(result.options.get("linear_light")),
         "palette_version": profile.palette_version,
-        "palette": RenderWorkloadService._palette_statistics(result.encoded.preview, result.encoded.palette),
+        "palette": RenderWorkloadService._palette_statistics(
+            captioned_encoded.preview, captioned_encoded.palette
+        ),
         "publish_source": "server_original_upload_only",
         "model": "disabled",
         "cache_hit": False,
@@ -130,7 +237,10 @@ def _prepare_simulator_child(
     prepared.mkdir(mode=0o700, parents=True)
     image, source_size = _open_saved_upload(input_path, str(settings["input_suffix"]))
     size = (480, 800)
-    if str(settings["fit"]) == "cover":
+    fit = str(settings["fit"])
+    if fit == "stretch_fill":
+        canvas = image.resize(size, Image.Resampling.LANCZOS)
+    elif fit == "cover":
         canvas = ImageOps.fit(image, size, method=Image.Resampling.LANCZOS)
     else:
         fitted = ImageOps.contain(image, size, method=Image.Resampling.LANCZOS)
@@ -138,6 +248,17 @@ def _prepare_simulator_child(
         canvas.paste(
             fitted,
             ((canvas.width - fitted.width) // 2, (canvas.height - fitted.height) // 2),
+        )
+    caption = str(settings.get("caption", "")).strip()
+    if caption:
+        caption_fonts = FontManager(
+            Path(str(settings["font_root"])), Path(str(settings["font_builtin_root"]))
+        )
+        canvas = _overlay_simulator_caption(
+            canvas,
+            caption=caption,
+            font_manager=caption_fonts,
+            font_reference=str(settings.get("font_reference", "")),
         )
     encoded = encode_image(
         canvas,
@@ -163,12 +284,13 @@ def _prepare_test_release_child(
     prepared.mkdir(mode=0o700, parents=True)
     image, source_size = _open_saved_upload(input_path, str(settings["input_suffix"]))
     configuration = dict(settings["configuration"])
+    renderer_image, renderer_fit = _photo_renderer_fit(image, str(settings["fit"]))
     result = render_photo(
-        image,
+        renderer_image,
         profile_key=str(settings["profile"]),
         preset=str(configuration["preset"]),
         overrides=dict(configuration["overrides"]),
-        fit=str(settings["fit"]),
+        fit=renderer_fit,
         palette_rgb=configuration.get("palette_rgb"),
         palette_lab=configuration.get("palette_lab"),
         palette_version=str(configuration["palette_version"]),
@@ -181,8 +303,14 @@ def _prepare_test_release_child(
         lab_values=configuration.get("palette_lab"),
         palette_version=str(configuration["palette_version"]),
     )
-    (prepared / "payload.bin").write_bytes(result.encoded.payload)
-    _atomic_png_file(prepared / "preview.png", result.encoded.preview)
+    _source, encoded = _captioned_renderer_outputs(
+        result,
+        settings=settings,
+        profile_key=str(settings["profile"]),
+        profile=profile,
+    )
+    (prepared / "payload.bin").write_bytes(encoded.payload)
+    _atomic_png_file(prepared / "preview.png", encoded.preview)
     return {
         "source_size": source_size,
         "preset": configuration["requested_preset"],
@@ -195,8 +323,10 @@ def _prepare_test_release_child(
         "palette_version": profile.palette_version,
         "palette": [
             {"code": color.code, "name": color.name, "rgb": list(color.rgb)}
-            for color in result.encoded.palette
+            for color in encoded.palette
         ],
+        "caption": str(settings.get("caption", "")).strip(),
+        "font_reference": str(settings.get("font_reference", "")),
     }
 
 
@@ -623,7 +753,7 @@ class RenderWorkloadService:
 
     @staticmethod
     def _palette_statistics(image: Image.Image, colors) -> list[dict]:
-        counts = Counter(image.convert("RGB").get_flattened_data())
+        counts: Counter[Any] = Counter(image.convert("RGB").getdata())
         total = image.width * image.height
         return [
             {
@@ -717,6 +847,8 @@ class RenderWorkloadService:
         suffix = str(settings["input_suffix"])
         device_id = str(settings["device_id"])
         profile_key = str(settings["profile"])
+        transport = str(settings.get("transport", "custom"))
+        stock_direct = transport == "stock_direct"
         prepared = self.prepared_root / uuid4().hex
         context = dict(commit_context)
 
@@ -734,7 +866,26 @@ class RenderWorkloadService:
                 raise ValueError("DEVICE-006 找不到可用測試裝置")
             if profile_key != str(current["panel_profile"]):
                 raise ValueError("DEVICE-006 測試色盤與裝置面板 Profile 不相容")
+            if stock_direct and str(current.get("delivery_mode") or "") != "stock_compat":
+                raise ValueError("DEVICE-008 Stock 測試只能選擇 Stock 相容裝置")
             return dict(current)
+
+        def validate_manifest_contract(manifest: dict) -> None:
+            options = manifest.get("render_options")
+            if (
+                manifest.get("release_kind") != "device_test"
+                or str(manifest.get("render_profile") or "") != profile_key
+                or not isinstance(options, dict)
+                or str(options.get("idempotency_key") or "")
+                != context["idempotency_key"]
+                or str(options.get("transport") or "") != transport
+                or (options.get("stock_direct") is True) != stock_direct
+                or (
+                    stock_direct
+                    and str(options.get("stock_direct_device_id") or "") != device_id
+                )
+            ):
+                raise ValueError("RENDER-010 idempotent 測試 Release 與本次傳送邊界不一致")
 
         def prepare_preset() -> tuple[dict | None, str | None, bool | None, str | None]:
             """Prepare optional preset data without making the release depend on it."""
@@ -805,27 +956,47 @@ class RenderWorkloadService:
                 if cancelled():
                     raise ProcessCallError("test release commit lease is no longer valid")
                 validate_device()
-                manifest = self.publisher.publish_preencoded(
-                    source_photo_id=str(settings.get("source_photo_id", "device-test-upload")),
-                    payload_path=prepared / "payload.bin",
-                    preview_path=prepared / "preview.png",
-                    profile_key=profile_key,
-                    dither=str(prepared_result["dither"]),
-                    color_distance=str(prepared_result["color_distance"]),
-                    dither_strength=float(prepared_result["dither_strength"]),
-                    linear_light=bool(prepared_result["linear_light"]),
-                    palette=list(prepared_result["palette"]),
-                    palette_version=str(prepared_result["palette_version"]),
-                    metadata={
-                        "idempotency_key": idempotency_key,
-                        "preset": prepared_result["preset"],
-                        "source_preset": prepared_result["source_preset"],
-                        "pipeline": prepared_result["pipeline"],
-                        "source_size": prepared_result["source_size"],
-                        "server_rendered": True,
-                    },
-                )
-                created_release = True
+                try:
+                    manifest = self.publisher.publish_preencoded(
+                        source_photo_id=str(
+                            settings.get("source_photo_id", "device-test-upload")
+                        ),
+                        payload_path=prepared / "payload.bin",
+                        preview_path=prepared / "preview.png",
+                        profile_key=profile_key,
+                        dither=str(prepared_result["dither"]),
+                        color_distance=str(prepared_result["color_distance"]),
+                        dither_strength=float(prepared_result["dither_strength"]),
+                        linear_light=bool(prepared_result["linear_light"]),
+                        palette=list(prepared_result["palette"]),
+                        palette_version=str(prepared_result["palette_version"]),
+                        metadata={
+                            "idempotency_key": idempotency_key,
+                            "preset": prepared_result["preset"],
+                            "source_preset": prepared_result["source_preset"],
+                            "pipeline": prepared_result["pipeline"],
+                            "source_size": prepared_result["source_size"],
+                            "source_sha256": str(settings.get("photo_sha", "")),
+                            "caption": prepared_result.get("caption", ""),
+                            "font_reference": prepared_result.get("font_reference", ""),
+                            "transport": transport,
+                            "stock_direct": stock_direct,
+                            "stock_direct_device_id": device_id if stock_direct else None,
+                            "server_rendered": True,
+                        },
+                    )
+                    created_release = True
+                except FileExistsError:
+                    # Another process won the same idempotent publication after
+                    # our initial miss. The publisher already removed this
+                    # process's unindexed Release; reuse only the validated
+                    # winner rather than failing an otherwise successful job.
+                    manifest = self.publisher.find_device_test_by_idempotency(
+                        idempotency_key
+                    )
+                    if manifest is None:
+                        raise
+            validate_manifest_contract(manifest)
             if cancelled():
                 if created_release:
                     self.publisher.discard_unassigned_device_test(
@@ -835,14 +1006,6 @@ class RenderWorkloadService:
             if not created_release:
                 validate_device()
             preset, preset_payload, preset_saved, preset_error = prepare_preset()
-            assignment = DeviceTestReleaseStore(self.release_dir).assign(
-                device_id,
-                manifest["release_id"],
-                profile_key=profile_key,
-                delivery=str(settings["delivery"]),
-                one_time=bool(settings["one_time"]),
-                restore_formal=bool(settings["restore_formal"]),
-            )
             if preset_payload is not None:
                 try:
                     self.settings.update(
@@ -858,6 +1021,29 @@ class RenderWorkloadService:
             elif preset_error is not None:
                 record_preset_warning(preset_error, "PresetValidation")
             self.delete_input(token, suffix=suffix)
+            if stock_direct:
+                payload_entry = payload_entry_from_manifest(manifest)
+                return {
+                    "release_id": manifest["release_id"],
+                    "file_name": str(payload_entry["name"]),
+                    "release_kind": "device_test",
+                    "transport": "stock_direct",
+                    "device_id": device_id,
+                    "source_sha256": str(settings.get("photo_sha", "")),
+                    "stock_direct": True,
+                    "stock_touches_custom_queue": False,
+                    "stock_touches_custom_ack": False,
+                    "server_rendered": True,
+                    "stage": "stock_test_release_completed",
+                }
+            assignment = DeviceTestReleaseStore(self.release_dir).assign(
+                device_id,
+                manifest["release_id"],
+                profile_key=profile_key,
+                delivery=str(settings["delivery"]),
+                one_time=bool(settings["one_time"]),
+                restore_formal=bool(settings["restore_formal"]),
+            )
             return {
                 "release_id": manifest["release_id"],
                 "release_kind": "device_test",

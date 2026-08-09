@@ -52,6 +52,22 @@ def test_primary_management_pages_render(client, app):
     assert "照片平滑（減少色塊／雜點）" in settings
 
 
+def test_simulator_superseded_compare_aborts_fetch_and_poll_delay(client, app):
+    create_admin(app)
+    login(client)
+    body = client.get("/simulator").get_data(as_text=True)
+
+    assert "let compareController = null" in body
+    assert "compareController.abort()" in body
+    assert "waitForJob(created,{signal:controller.signal})" in body
+    assert "window.inktimeFetch(created.status_url,{signal})" in body
+    assert "await abortableDelay(750,signal)" in body
+    assert "clearTimeout(timer);reject(abortError())" in body
+    assert "error?.name!=='AbortError'" in body
+    assert "if(compareController===controller)" in body
+    assert "pendingCompare" not in body
+
+
 def test_device_runtime_summary_exposes_persisted_versions_and_unknowns_as_null(client, app):
     create_admin(app)
     login(client)
@@ -839,7 +855,14 @@ def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(client, ap
     assert page.status_code == 200
     assert "智慧裁切與版型預覽" in body
     assert "相框方向與空間利用" in body
-    assert "完整顯示（建議）" in body
+    assert "完整顯示" in body
+    assert "完整顯示（建議）" not in body
+    assert "背景工作未提供 Preview 結果" in body
+    assert "URL.revokeObjectURL" in body
+    assert "new AbortController" in body
+    assert "compositionPreviewController?.abort()" in body
+    assert "effectiveFit=adaptive?'contain':frameFitMode.value" in body
+    assert "fit_mode:adaptive?'contain':frameFitMode.value" in body
     assert "雙照片拼版" in body
     assert "月曆相框" in body
     assert "天氣＋室內溫溼度" in body

@@ -1,0 +1,11 @@
+[extend]
+useDefault = true
+
+# Historical PR fixture only: 17aa6ae used a fixed hexadecimal placeholder as
+# a device token. It was never a credential and the current fixture no longer
+# contains it. Keep the default rules enabled and suppress only that finding.
+[[allowlists]]
+description = "PR65 fixed device-token test fixture"
+fingerprints = [
+  "17aa6ae3bbaaa5012051683970725aac4544b8a6:tests/unit/test_layout_geometry.py:generic-api-key:326",
+]
