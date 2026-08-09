@@ -154,9 +154,11 @@ def bootstrap_services(
     schedule_repository = ScheduledTaskRepository(database)
     schedule_repository.ensure_defaults(config.timezone)
     offline_schedule_repository = OfflineScheduleRepository(database)
+    device_repository = DeviceRepository(database, secret)
     settings_mutation_service = SettingsMutationService(
         database,
         settings_repository,
+        device_repository,
         offline_schedule_repository,
         schedule_repository,
     )
@@ -188,7 +190,6 @@ def bootstrap_services(
         }
     )
 
-    device_repository = DeviceRepository(database, secret)
     device_pairing_service = DevicePairingService(database, secret, secret)
     photo_repository = PhotoRepository(database)
     provider_repository = ProviderRepository(database, secret_store)

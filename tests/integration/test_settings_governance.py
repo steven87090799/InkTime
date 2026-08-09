@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from PIL import Image
 import pytest
 
 from inktime.app.domain.photopainter.offline_schedule import OFFLINE_PREPARE_BOOTSTRAP_AT
+from inktime.app.domain.rendering.system_presets import SYSTEM_PRESETS
 from inktime.app.repositories.settings import (
     DEVICE_OVERRIDE_KEYS,
     SETTING_DEFINITIONS,
@@ -24,6 +26,71 @@ def _post(client, path: str, payload: dict, *, confirm: bool = False):
         json=payload,
         headers=headers,
     )
+
+
+def _install_atomic_test_preset(monkeypatch, *, extra_settings: dict | None = None) -> str:
+    key = "atomic_test"
+    settings = {
+        "render.color_distance": "rgb",
+        "device.default_panel_profile": "gdep073e01_6c",
+    }
+    settings.update(extra_settings or {})
+    monkeypatch.setitem(
+        SYSTEM_PRESETS,
+        key,
+        {
+            "key": key,
+            "label_zh_tw": "Atomic test",
+            "description": "Test-only preset registered by monkeypatch.",
+            "settings": settings,
+            "compatible_panel_profiles": ["safe_4c", "gdep073e01_6c"],
+            "requires_device_confirmation": True,
+            "renderer_version": "atomic-test-v1",
+        },
+    )
+    return key
+
+
+def _publish_safe_release(app, name: str) -> str:
+    staged = app.extensions["inktime_release_publisher"].publish(
+        [(name, Image.new("RGB", (480, 800), "white"))],
+        profile_key="safe_4c",
+        activate=False,
+    )
+    release = app.extensions["inktime_release_coordinator"].publish(
+        [staged], created_by="settings-atomic-test", photo_ids=[]
+    )[0]
+    return str(release["release_id"])
+
+
+def _device_mutation_state(app, device_ids: list[str]) -> dict[str, dict]:
+    with app.extensions["inktime_database"].session() as connection:
+        result = {}
+        for device_id in device_ids:
+            device = connection.execute(
+                """SELECT panel_profile,config_version,offline_schedule_version,
+                          next_offline_prepare_at,updated_at
+                   FROM devices WHERE id=?""",
+                (device_id,),
+            ).fetchone()
+            queues = connection.execute(
+                """SELECT id,status,updated_at FROM device_content_queue_items
+                   WHERE device_id=? ORDER BY id""",
+                (device_id,),
+            ).fetchall()
+            result[device_id] = {
+                "device": dict(device),
+                "queues": [dict(row) for row in queues],
+            }
+    return result
+
+
+def _audit_counts(app) -> tuple[int, int]:
+    with app.extensions["inktime_database"].session() as connection:
+        return (
+            int(connection.execute("SELECT COUNT(*) FROM setting_history").fetchone()[0]),
+            int(connection.execute("SELECT COUNT(*) FROM settings_snapshots").fetchone()[0]),
+        )
 
 
 def test_metadata_is_complete_and_uses_zh_tw_labels(client, app):
@@ -279,25 +346,438 @@ def test_import_and_rollback_share_offline_policy_invalidation(client, app):
     ] == OFFLINE_PREPARE_BOOTSTRAP_AT
 
 
-def test_preset_apply_uses_application_settings_coordinator(client, app, monkeypatch):
+def test_preset_apply_uses_atomic_application_coordinator(client, app, monkeypatch):
     create_admin(app)
     login(client)
     service = app.extensions["inktime_settings_mutation_service"]
-    original = service.update_many
-    calls: list[dict] = []
+    original = service.apply_preset_atomic
+    calls: list[tuple[dict, list[str]]] = []
 
-    def record(updates, **kwargs):
-        calls.append(dict(updates))
-        return original(updates, **kwargs)
+    def record(settings, **kwargs):
+        calls.append((dict(settings), list(kwargs["device_ids"])))
+        return original(settings, **kwargs)
 
-    monkeypatch.setattr(service, "update_many", record)
+    monkeypatch.setattr(service, "apply_preset_atomic", record)
     response = _post(
         client,
         "/api/v1/settings/presets/gooddisplay_spectra6/apply",
         {},
     )
     assert response.status_code == 200
-    assert calls and "render.profile" in calls[0]
+    assert calls and "render.profile" in calls[0][0]
+    assert calls[0][1] == []
+
+
+def test_import_applies_offline_and_timezone_effects(client, app):
+    create_admin(app)
+    login(client)
+    device_id, _ = app.extensions["inktime_device_repository"].create(
+        "import-effects",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=["08:00"],
+    )
+    future = "2099-01-01T00:00:00+00:00"
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            "UPDATE devices SET next_offline_prepare_at=? WHERE id=?",
+            (future, device_id),
+        )
+    response = _post(
+        client,
+        "/api/v1/settings/import",
+        {
+            "confirm": True,
+            "document": {
+                "format": "inktime-settings",
+                "version": 1,
+                "settings": {
+                    "offline.server_prefetch_margin_minutes": 60,
+                    "general.timezone": "America/Los_Angeles",
+                },
+            },
+        },
+    )
+    assert response.status_code == 200
+    assert response.json["runtime_effects"]["offline_prepare_deadlines_invalidated"] == 1
+    assert response.json["runtime_effects"]["scheduled_tasks_rebased"] == 5
+    assert app.extensions["inktime_device_repository"].get(device_id)[
+        "next_offline_prepare_at"
+    ] == OFFLINE_PREPARE_BOOTSTRAP_AT
+    assert app.extensions["inktime_settings_repository"].get("general.timezone") == (
+        "America/Los_Angeles"
+    )
+    enabled = [
+        task for task in app.extensions["inktime_schedule_repository"].list() if task["enabled"]
+    ]
+    assert all(
+        datetime.fromisoformat(str(task["next_run"])).utcoffset()
+        in {timedelta(hours=-7), timedelta(hours=-8)}
+        for task in enabled
+    )
+
+
+def test_import_effect_failure_rolls_back_settings_audit_deadline_cursor_and_cache(
+    client, app, monkeypatch
+):
+    create_admin(app)
+    login(client)
+    settings = app.extensions["inktime_settings_repository"]
+    service = app.extensions["inktime_settings_mutation_service"]
+    device_id, _ = app.extensions["inktime_device_repository"].create(
+        "import-rollback",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=["08:00"],
+    )
+    future = "2099-01-01T00:00:00+00:00"
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            "UPDATE devices SET next_offline_prepare_at=? WHERE id=?",
+            (future, device_id),
+        )
+    before_tasks = {
+        task["key"]: task["next_run"]
+        for task in app.extensions["inktime_schedule_repository"].list()
+    }
+    before_audit = _audit_counts(app)
+    assert settings.get("offline.server_prefetch_margin_minutes") == 15
+
+    def fail_rebase(*args, **kwargs):
+        del args, kwargs
+        raise sqlite3.IntegrityError("timezone rebase rollback")
+
+    monkeypatch.setattr(service.schedules, "rebase_enabled_next_runs", fail_rebase)
+    with pytest.raises(sqlite3.IntegrityError, match="timezone rebase rollback"):
+        _post(
+            client,
+            "/api/v1/settings/import",
+            {
+                "confirm": True,
+                "document": {
+                    "format": "inktime-settings",
+                    "version": 1,
+                    "settings": {
+                        "offline.server_prefetch_margin_minutes": 60,
+                        "general.timezone": "America/Los_Angeles",
+                    },
+                },
+            },
+        )
+    assert settings.get("offline.server_prefetch_margin_minutes") == 15
+    assert settings.get("general.timezone") == "Asia/Taipei"
+    assert app.extensions["inktime_device_repository"].get(device_id)[
+        "next_offline_prepare_at"
+    ] == future
+    assert {
+        task["key"]: task["next_run"]
+        for task in app.extensions["inktime_schedule_repository"].list()
+    } == before_tasks
+    assert _audit_counts(app) == before_audit
+
+
+def test_snapshot_rollback_reads_and_applies_inside_one_effect_transaction(app, monkeypatch):
+    settings = app.extensions["inktime_settings_repository"]
+    service = app.extensions["inktime_settings_mutation_service"]
+    device_id, _ = app.extensions["inktime_device_repository"].create(
+        "rollback-atomic",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=["08:00"],
+    )
+    source = service.update_many(
+        {
+            "offline.server_prefetch_margin_minutes": 60,
+            "general.timezone": "America/Los_Angeles",
+        },
+        changed_by="test",
+        source_ip="127.0.0.1",
+    )["snapshot_id"]
+    future = "2099-01-01T00:00:00+00:00"
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            "UPDATE devices SET next_offline_prepare_at=? WHERE id=?",
+            (future, device_id),
+        )
+    before_tasks = {
+        task["key"]: task["next_run"]
+        for task in app.extensions["inktime_schedule_repository"].list()
+    }
+    before_audit = _audit_counts(app)
+
+    def fail_rebase(*args, **kwargs):
+        del args, kwargs
+        raise sqlite3.IntegrityError("rollback cursor failure")
+
+    monkeypatch.setattr(service.schedules, "rebase_enabled_next_runs", fail_rebase)
+    with pytest.raises(sqlite3.IntegrityError, match="rollback cursor failure"):
+        service.rollback(
+            str(source),
+            changed_by="test",
+            source_ip="127.0.0.1",
+        )
+    assert settings.get("offline.server_prefetch_margin_minutes") == 60
+    assert settings.get("general.timezone") == "America/Los_Angeles"
+    assert app.extensions["inktime_device_repository"].get(device_id)[
+        "next_offline_prepare_at"
+    ] == future
+    assert {
+        task["key"]: task["next_run"]
+        for task in app.extensions["inktime_schedule_repository"].list()
+    } == before_tasks
+    assert _audit_counts(app) == before_audit
+
+
+def test_preset_device_failure_rolls_back_every_selected_device_and_settings(app, monkeypatch):
+    devices = app.extensions["inktime_device_repository"]
+    service = app.extensions["inktime_settings_mutation_service"]
+    device_ids = [devices.create(f"preset-device-{index}")[0] for index in range(3)]
+    before = _device_mutation_state(app, device_ids)
+    before_audit = _audit_counts(app)
+    original = devices.update_render_inputs_in_transaction
+    calls = 0
+
+    def fail_second(connection, device_id, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise sqlite3.IntegrityError("second device rollback")
+        return original(connection, device_id, **kwargs)
+
+    monkeypatch.setattr(devices, "update_render_inputs_in_transaction", fail_second)
+    with pytest.raises(sqlite3.IntegrityError, match="second device rollback"):
+        service.apply_preset_atomic(
+            {
+                "render.color_distance": "rgb",
+                "device.default_panel_profile": "gdep073e01_6c",
+            },
+            device_ids=device_ids,
+            compatible_panel_profiles={"safe_4c"},
+            target_panel_profile="gdep073e01_6c",
+            changed_by="test",
+            source_ip="127.0.0.1",
+            reason="preset:fault-device",
+        )
+    assert _device_mutation_state(app, device_ids) == before
+    assert app.extensions["inktime_settings_repository"].get("render.color_distance") == "oklab"
+    assert _audit_counts(app) == before_audit
+
+
+def test_preset_settings_failure_rolls_back_device_changes(app, monkeypatch):
+    devices = app.extensions["inktime_device_repository"]
+    service = app.extensions["inktime_settings_mutation_service"]
+    device_ids = [devices.create(f"preset-settings-{index}")[0] for index in range(2)]
+    before = _device_mutation_state(app, device_ids)
+    before_audit = _audit_counts(app)
+
+    def fail_settings(*args, **kwargs):
+        del args, kwargs
+        raise sqlite3.IntegrityError("settings rollback")
+
+    monkeypatch.setattr(service, "update_many_in_transaction", fail_settings)
+    with pytest.raises(sqlite3.IntegrityError, match="settings rollback"):
+        service.apply_preset_atomic(
+            {
+                "render.color_distance": "rgb",
+                "device.default_panel_profile": "gdep073e01_6c",
+            },
+            device_ids=device_ids,
+            compatible_panel_profiles={"safe_4c"},
+            target_panel_profile="gdep073e01_6c",
+            changed_by="test",
+            source_ip="127.0.0.1",
+            reason="preset:fault-settings",
+        )
+    assert _device_mutation_state(app, device_ids) == before
+    assert app.extensions["inktime_settings_repository"].get("render.color_distance") == "oklab"
+    assert _audit_counts(app) == before_audit
+
+
+def test_preset_effect_failure_rolls_back_devices_settings_history_snapshot_and_deadline(
+    app, monkeypatch
+):
+    devices = app.extensions["inktime_device_repository"]
+    service = app.extensions["inktime_settings_mutation_service"]
+    selected, _ = devices.create(
+        "preset-effect-selected",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=["08:00"],
+    )
+    untouched, _ = devices.create(
+        "preset-effect-untouched",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=["08:00"],
+    )
+    release_id = _publish_safe_release(app, "preset-effect-release")
+    target = (datetime.now(ZoneInfo("Asia/Taipei")).date() + timedelta(days=1)).isoformat()
+    app.extensions["inktime_offline_schedule_repository"].prepare_day(
+        device_id=selected,
+        target_date=target,
+        release_ids=[release_id],
+    )
+    future = "2099-01-01T00:00:00+00:00"
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            "UPDATE devices SET next_offline_prepare_at=? WHERE id IN (?,?)",
+            (future, selected, untouched),
+        )
+    before = _device_mutation_state(app, [selected, untouched])
+    before_audit = _audit_counts(app)
+
+    def fail_effect(*, connection):
+        del connection
+        raise sqlite3.IntegrityError("derived effect rollback")
+
+    monkeypatch.setattr(
+        service.offline_schedules,
+        "invalidate_prepare_deadlines_for_policy_change",
+        fail_effect,
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="derived effect rollback"):
+        service.apply_preset_atomic(
+            {
+                "render.color_distance": "rgb",
+                "device.default_panel_profile": "gdep073e01_6c",
+                "offline.server_prefetch_margin_minutes": 60,
+            },
+            device_ids=[selected],
+            compatible_panel_profiles={"safe_4c"},
+            target_panel_profile="gdep073e01_6c",
+            changed_by="test",
+            source_ip="127.0.0.1",
+            reason="preset:fault-effect",
+        )
+    assert _device_mutation_state(app, [selected, untouched]) == before
+    assert app.extensions["inktime_settings_repository"].get("render.color_distance") == "oklab"
+    assert app.extensions["inktime_settings_repository"].get(
+        "offline.server_prefetch_margin_minutes"
+    ) == 15
+    assert _audit_counts(app) == before_audit
+
+
+def test_preset_success_is_atomic_bounded_and_idempotent(client, app, monkeypatch):
+    create_admin(app)
+    login(client)
+    key = _install_atomic_test_preset(monkeypatch)
+    devices = app.extensions["inktime_device_repository"]
+    selected = [
+        devices.create(
+            f"preset-success-{index}",
+            delivery_mode="inktime_offline_schedule",
+            schedule_times=["08:00"],
+        )[0]
+        for index in range(2)
+    ]
+    unselected, _ = devices.create(
+        "preset-unselected",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=["08:00"],
+    )
+    release_id = _publish_safe_release(app, "preset-atomic-release")
+    target = (datetime.now(ZoneInfo("Asia/Taipei")).date() + timedelta(days=1)).isoformat()
+    offline = app.extensions["inktime_offline_schedule_repository"]
+    schedules = [
+        offline.prepare_day(
+            device_id=device_id,
+            target_date=target,
+            release_ids=[release_id],
+        )["schedule"]["id"]
+        for device_id in selected
+    ]
+    before = _device_mutation_state(app, selected + [unselected])
+    before_audit = _audit_counts(app)
+    response = _post(
+        client,
+        f"/api/v1/settings/presets/{key}/apply",
+        {
+            "update_existing_device_ids": selected,
+            "confirm_physical_panel": True,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json["changed_device_count"] == 2
+    assert response.json["affected_devices"] == selected
+    assert response.json["updated"] == 1
+    after = _device_mutation_state(app, selected + [unselected])
+    for device_id in selected:
+        assert after[device_id]["device"]["panel_profile"] == "gdep073e01_6c"
+        assert after[device_id]["device"]["config_version"] == (
+            before[device_id]["device"]["config_version"] + 1
+        )
+        assert after[device_id]["device"]["offline_schedule_version"] == before[device_id][
+            "device"
+        ]["offline_schedule_version"]
+        assert after[device_id]["device"]["next_offline_prepare_at"] == (
+            OFFLINE_PREPARE_BOOTSTRAP_AT
+        )
+        assert {item["status"] for item in after[device_id]["queues"]} == {"CANCELLED"}
+    assert after[unselected] == before[unselected]
+    with app.extensions["inktime_database"].session() as connection:
+        assert {
+            connection.execute(
+                "SELECT status FROM device_offline_schedules WHERE id=?", (schedule_id,)
+            ).fetchone()["status"]
+            for schedule_id in schedules
+        } == {"ready"}
+    assert app.extensions["inktime_settings_repository"].get("render.color_distance") == "rgb"
+    assert _audit_counts(app) == (before_audit[0] + 1, before_audit[1] + 1)
+
+    before_second = _device_mutation_state(app, selected + [unselected])
+    before_second_audit = _audit_counts(app)
+    repeated = _post(
+        client,
+        f"/api/v1/settings/presets/{key}/apply",
+        {
+            "update_existing_device_ids": selected,
+            "confirm_physical_panel": True,
+        },
+    )
+    assert repeated.status_code == 200
+    assert repeated.json["changed_device_count"] == 0
+    assert repeated.json["updated"] == 0
+    assert _device_mutation_state(app, selected + [unselected]) == before_second
+    assert _audit_counts(app) == before_second_audit
+
+
+def test_normal_device_update_and_atomic_preset_have_render_state_parity(
+    client, app, monkeypatch
+):
+    create_admin(app)
+    login(client)
+    key = _install_atomic_test_preset(monkeypatch)
+    devices = app.extensions["inktime_device_repository"]
+    api_device, _ = devices.create(
+        "render-parity-api",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=["08:00"],
+    )
+    preset_device, _ = devices.create(
+        "render-parity-preset",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=["08:00"],
+    )
+    response = client.patch(
+        f"/api/v1/devices/{api_device}",
+        json={"panel_profile": "gdep073e01_6c"},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert response.status_code == 200
+    preset = _post(
+        client,
+        f"/api/v1/settings/presets/{key}/apply",
+        {
+            "update_existing_device_ids": [preset_device],
+            "confirm_physical_panel": True,
+        },
+    )
+    assert preset.status_code == 200
+    states = _device_mutation_state(app, [api_device, preset_device])
+    comparable = (
+        "panel_profile",
+        "config_version",
+        "offline_schedule_version",
+        "next_offline_prepare_at",
+    )
+    assert {
+        key: states[api_device]["device"][key] for key in comparable
+    } == {key: states[preset_device]["device"][key] for key in comparable}
 
 
 def test_runtime_timezone_change_rebases_enabled_cron_without_enqueuing(app):

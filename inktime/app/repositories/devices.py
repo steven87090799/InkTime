@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 import hmac
 import json
@@ -73,9 +74,12 @@ class DeviceRepository:
                 """
             ).fetchall()
 
-    def get(self, device_id: str):
-        with self.database.session() as connection:
-            return connection.execute("SELECT * FROM devices WHERE id=?", (device_id,)).fetchone()
+    def get(self, device_id: str, *, connection=None):
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            return active_connection.execute(
+                "SELECT * FROM devices WHERE id=?", (device_id,)
+            ).fetchone()
 
     def create(
         self,
@@ -379,10 +383,16 @@ class DeviceRepository:
         frame_orientation: str | None | object = _UNSET,
         layout_mode: str | None | object = _UNSET,
         fit_mode: str | None | object = _UNSET,
-    ) -> None:
+        connection=None,
+    ) -> bool:
         now = datetime.now(timezone.utc).isoformat()
-        with self.database.session() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as connection:
+            nested = connection.in_transaction
+            if nested:
+                connection.execute("SAVEPOINT device_update")
+            else:
+                connection.execute("BEGIN IMMEDIATE")
             try:
                 current = connection.execute(
                     """
@@ -392,7 +402,7 @@ class DeviceRepository:
                            next_offline_prepare_at,
                            button_wake_action,minimum_schedule_gap_minutes,sync_strategy,sync_time,
                            stock_endpoint_host,frame_orientation,layout_mode,fit_mode,
-                           auth_mode,pairing_state,config_version
+                           auth_mode,pairing_state,config_version,name
                     FROM devices WHERE id=?
                     """,
                     (device_id,),
@@ -554,6 +564,12 @@ class DeviceRepository:
                 offline_schedule_changed = bool(
                     changes.offline_schedule_changed and not preserve_quarantined_schedule
                 )
+                if not remote_changed and str(current["name"]) == name.strip():
+                    if nested:
+                        connection.execute("RELEASE SAVEPOINT device_update")
+                    else:
+                        connection.execute("COMMIT")
+                    return False
                 cursor = connection.execute(
                     """
                     UPDATE devices
@@ -604,15 +620,16 @@ class DeviceRepository:
                     ),
                 )
                 incompatible_modes: list[str] = []
-                if delivery_mode == "inktime_offline_schedule":
-                    incompatible_modes.append("online_queue")
-                    # A changed Enhanced configuration invalidates any
-                    # already prepared slot snapshot; the next scheduler
-                    # job must prepare the new config version instead.
-                    if str(current["delivery_mode"]) == delivery_mode and remote_changed:
+                if remote_changed:
+                    if delivery_mode == "inktime_offline_schedule":
+                        incompatible_modes.append("online_queue")
+                        # A changed Enhanced configuration invalidates any
+                        # already prepared slot snapshot; the next scheduler
+                        # job must prepare the new config version instead.
+                        if str(current["delivery_mode"]) == delivery_mode:
+                            incompatible_modes.append("offline_schedule")
+                    else:
                         incompatible_modes.append("offline_schedule")
-                else:
-                    incompatible_modes.append("offline_schedule")
                 if incompatible_modes:
                     self._supersede_future_queue_items(
                         connection,
@@ -644,12 +661,20 @@ class DeviceRepository:
                         now=now,
                         config_version=int(current["config_version"]) + 1,
                     )
-                connection.execute("COMMIT")
+                if nested:
+                    connection.execute("RELEASE SAVEPOINT device_update")
+                else:
+                    connection.execute("COMMIT")
             except Exception:
-                connection.execute("ROLLBACK")
+                if nested:
+                    connection.execute("ROLLBACK TO SAVEPOINT device_update")
+                    connection.execute("RELEASE SAVEPOINT device_update")
+                else:
+                    connection.execute("ROLLBACK")
                 raise
         if cursor.rowcount != 1:
             raise KeyError(device_id)
+        return True
 
     def update_render_inputs(
         self,
@@ -659,13 +684,35 @@ class DeviceRepository:
         frame_orientation: str | None | object = _UNSET,
         layout_mode: str | None | object = _UNSET,
         fit_mode: str | None | object = _UNSET,
-    ) -> None:
+    ) -> bool:
         """Apply render inputs through the canonical versioning path."""
 
-        current = self.get(device_id)
+        with self.database.transaction() as connection:
+            return self.update_render_inputs_in_transaction(
+                connection,
+                device_id,
+                panel_profile=panel_profile,
+                frame_orientation=frame_orientation,
+                layout_mode=layout_mode,
+                fit_mode=fit_mode,
+            )
+
+    def update_render_inputs_in_transaction(
+        self,
+        connection,
+        device_id: str,
+        *,
+        panel_profile: str | object = _UNSET,
+        frame_orientation: str | None | object = _UNSET,
+        layout_mode: str | None | object = _UNSET,
+        fit_mode: str | None | object = _UNSET,
+    ) -> bool:
+        """Apply render inputs without owning the caller's transaction."""
+
+        current = self.get(device_id, connection=connection)
         if current is None:
             raise KeyError(device_id)
-        self.update(
+        return self.update(
             device_id,
             name=str(current["name"]),
             enabled=bool(current["enabled"]),
@@ -691,6 +738,7 @@ class DeviceRepository:
             frame_orientation=frame_orientation,
             layout_mode=layout_mode,
             fit_mode=fit_mode,
+            connection=connection,
         )
 
     def authenticate(
