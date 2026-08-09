@@ -4,7 +4,6 @@ on:
   pull_request:
     branches:
       - main
-      - fix/final-production-openrouter-and-runtime-hardening
     # Base retargets need validation; title/body-only edits use the metadata lane below.
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled, edited]
   push:
@@ -28,54 +27,233 @@ permissions:
 
 jobs:
   changes:
-    name: Classify changed paths
+    name: Classify changed paths and validation provenance
     runs-on: ubuntu-latest
     outputs:
       full_validation: ${{ steps.event.outputs.full_validation }}
-      changed: ${{ steps.route.outputs.changed }}
-      python: ${{ steps.route.outputs.python }}
-      web_ui: ${{ steps.route.outputs.web_ui }}
-      runtime: ${{ steps.route.outputs.runtime }}
-      persistence: ${{ steps.route.outputs.persistence }}
-      docker: ${{ steps.route.outputs.docker }}
-      tls_security: ${{ steps.route.outputs.tls_security }}
-      firmware: ${{ steps.route.outputs.firmware }}
-      provider_ai: ${{ steps.route.outputs.provider_ai }}
-      benchmark: ${{ steps.route.outputs.benchmark }}
-      docs: ${{ steps.route.outputs.docs }}
-      dependencies: ${{ steps.route.outputs.dependencies }}
-      ci_config: ${{ steps.route.outputs.ci_config }}
-      full_suite: ${{ steps.route.outputs.full_suite }}
+      ci_mode: ${{ steps.route.outputs.ci_mode }}
+      selected_test_suites: ${{ steps.route.outputs.selected_test_suites }}
+      selected_gates: ${{ steps.route.outputs.selected_gates }}
+      skipped_gates: ${{ steps.route.outputs.skipped_gates }}
+      plan_json: ${{ steps.route.outputs.plan_json }}
+      run_python_quality: ${{ steps.route.outputs.run_python_quality }}
+      run_dependency_policy: ${{ steps.route.outputs.run_dependency_policy }}
+      selected_owner_suites: ${{ steps.route.outputs.selected_owner_suites }}
+      run_python312_full: ${{ steps.route.outputs.run_python312_full }}
+      run_python310: ${{ steps.route.outputs.run_python310 }}
+      run_dependency_audit: ${{ steps.route.outputs.run_dependency_audit }}
+      run_migration: ${{ steps.route.outputs.run_migration }}
+      run_secret_scan: ${{ steps.route.outputs.run_secret_scan }}
+      run_actionlint: ${{ steps.route.outputs.run_actionlint }}
+      run_lan_persistence: ${{ steps.route.outputs.run_lan_persistence }}
+      run_tls_smoke: ${{ steps.route.outputs.run_tls_smoke }}
+      run_runtime_soak: ${{ steps.route.outputs.run_runtime_soak }}
+      run_playwright: ${{ steps.route.outputs.run_playwright }}
+      run_firmware_host_contract: ${{ steps.route.outputs.run_firmware_host_contract }}
+      run_firmware_compile: ${{ steps.route.outputs.run_firmware_compile }}
+      run_benchmark: ${{ steps.route.outputs.run_benchmark }}
+      run_container_security: ${{ steps.route.outputs.run_container_security }}
+      run_source_head_contract: ${{ steps.route.outputs.run_source_head_contract }}
+      firmware_execution_profiles: ${{ steps.route.outputs.firmware_execution_profiles }}
+      full_plan_complete: ${{ steps.route.outputs.full_plan_complete }}
+      no_heavy_impact_duplicates: ${{ steps.route.outputs.no_heavy_impact_duplicates }}
+      source_head_sha: ${{ steps.route.outputs.source_head_sha }}
+      base_sha: ${{ steps.route.outputs.base_sha }}
+      tested_sha: ${{ steps.route.outputs.tested_sha }}
+      tested_ref: ${{ steps.route.outputs.tested_ref }}
+      tested_ref_kind: ${{ steps.route.outputs.tested_ref_kind }}
     steps:
       - id: event
         name: Classify workflow event
         env:
           FULL_VALIDATION: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null }}
         run: echo "full_validation=${FULL_VALIDATION}" >> "${GITHUB_OUTPUT}"
+      # pull_request intentionally retains GitHub's merge-ref checkout for
+      # pre-merge compatibility validation; provenance is emitted separately.
       - if: ${{ steps.event.outputs.full_validation == 'true' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 0}
       - id: route
-        name: Emit source-owned routing flags
+        name: Emit canonical source-owned plan and tested checkout provenance
         if: ${{ steps.event.outputs.full_validation == 'true' }}
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          FORCE_FULL_SUITE: ${{ inputs.full_suite || github.ref == 'refs/heads/main' || contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+          SOURCE_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          PR_DRAFT: ${{ github.event_name == 'pull_request' && toJSON(github.event.pull_request.draft) || '' }}
+          FULL_SUITE_INPUT: ${{ inputs.full_suite || '' }}
+          FULL_CI_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
         run: |
           set -euo pipefail
           base_sha="${BASE_SHA:-}"
-          if [ -z "${base_sha}" ]; then base_sha="$(git rev-parse HEAD^)"; fi
-          full_suite_arg=""
-          if [ "${FORCE_FULL_SUITE}" = "true" ]; then full_suite_arg="--full-suite"; fi
-          python scripts/ci/changed_paths.py \
-            --base "${base_sha}" \
-            --head "${HEAD_SHA}" \
-            ${full_suite_arg} >> "${GITHUB_OUTPUT}"
+          if [ -z "${base_sha}" ] || [ "${base_sha}" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
+            base_sha="$(git rev-parse HEAD^)"
+          fi
+          source_head_sha="${SOURCE_HEAD_SHA:-${GITHUB_SHA}}"
+          tested_sha="$(git rev-parse HEAD)"
+          tested_ref="${GITHUB_REF}"
+          case "${GITHUB_EVENT_NAME}" in
+            pull_request) tested_ref_kind="merge-ref" ;;
+            push)
+              if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+                tested_ref_kind="main"
+              else
+                tested_ref_kind="head"
+              fi
+              ;;
+            *) tested_ref_kind="head" ;;
+          esac
+          provenance_json="$(python scripts/ci/provenance.py \
+            --event-name "${GITHUB_EVENT_NAME}" \
+            --ref "${GITHUB_REF}" \
+            --source-head-sha "${source_head_sha}" \
+            --base-sha "${base_sha}" \
+            --tested-sha "${tested_sha}" \
+            --tested-ref "${tested_ref}" \
+            --tested-ref-kind "${tested_ref_kind}")"
+          jq -e . >/dev/null <<<"${provenance_json}"
+          head_sha="${source_head_sha}"
+          git diff --name-only "${base_sha}...${head_sha}" -- > .ci-changed-paths.txt
+          draft_args=()
+          if [ -n "${PR_DRAFT}" ]; then draft_args+=(--draft "${PR_DRAFT}"); fi
+          full_suite_args=()
+          if [ "${FULL_SUITE_INPUT}" = "true" ]; then full_suite_args+=(--full-suite); fi
+          label_args=()
+          if [ "${FULL_CI_LABEL}" = "true" ]; then label_args+=(--label full-ci); fi
+          plan_json="$(python scripts/ci/canonical_plan.py \
+            --paths-file .ci-changed-paths.txt \
+            --event-name "${GITHUB_EVENT_NAME}" \
+            --ref "${GITHUB_REF}" \
+            --base-sha "${base_sha}" \
+            --head-sha "${head_sha}" \
+            --source-head-sha "${source_head_sha}" \
+            --tested-sha "${tested_sha}" \
+            --tested-ref "${tested_ref}" \
+            --tested-ref-kind "${tested_ref_kind}" \
+            "${draft_args[@]}" "${full_suite_args[@]}" "${label_args[@]}")"
+          has_suite() { jq -r --arg name "$1" '((.selected_test_suites | index($name)) != null)' <<<"${plan_json}"; }
+          has_gate() { jq -r --arg name "$1" '((.selected_gates | index($name)) != null)' <<<"${plan_json}"; }
+          firmware_compile="$(jq -r 'any(.selected_gates[]; . == "firmware_quick" or . == "firmware_affected" or . == "firmware_full_matrix")' <<<"${plan_json}")"
+          test "$(has_gate secret_scan)" = "true"
+          test "$(jq -r .no_heavy_impact_duplicates <<<"${plan_json}")" = "true"
+          if [ "$(jq -r .ci_mode <<<"${plan_json}")" = "full" ]; then
+            test "$(jq -r .full_plan_complete <<<"${plan_json}")" = "true"
+            test "$(has_gate actionlint)" = "true"
+          fi
+          {
+            echo "ci_mode=$(jq -r .ci_mode <<<"${plan_json}")"
+            echo "selected_test_suites=$(jq -c .selected_test_suites <<<"${plan_json}")"
+            echo "selected_gates=$(jq -c .selected_gates <<<"${plan_json}")"
+            echo "skipped_gates=$(jq -c .skipped_gates <<<"${plan_json}")"
+            echo "plan_json=${plan_json}"
+            echo "source_head_sha=${source_head_sha}"
+            echo "base_sha=${base_sha}"
+            echo "tested_sha=${tested_sha}"
+            echo "tested_ref=${tested_ref}"
+            echo "tested_ref_kind=${tested_ref_kind}"
+            echo "run_python_quality=$(has_suite ruff)"
+            echo "run_dependency_policy=$(has_suite dependency_policy)"
+            echo "selected_owner_suites=$(jq -c .selected_owner_suites <<<"${plan_json}")"
+            echo "run_python312_full=$(has_gate python312_full)"
+            echo "run_python310=$(has_gate python310_compatibility)"
+            echo "run_dependency_audit=$(has_gate dependency_audit)"
+            echo "run_migration=$(has_suite migration_owner)"
+            echo "run_secret_scan=$(has_gate secret_scan)"
+            echo "run_actionlint=$(has_gate actionlint)"
+            echo "run_lan_persistence=$(has_gate docker_lan_persistence)"
+            echo "run_tls_smoke=$(has_gate tls_smoke)"
+            echo "run_runtime_soak=$(has_gate runtime_soak)"
+            echo "run_playwright=$(has_gate playwright)"
+            echo "run_firmware_host_contract=$(has_gate firmware_host_contract)"
+            echo "run_firmware_compile=${firmware_compile}"
+            echo "run_benchmark=$(has_gate benchmark)"
+            echo "run_container_security=$(has_gate container_security)"
+            echo "run_source_head_contract=$(jq -r .requires_source_head_contract <<<"${plan_json}")"
+            echo "firmware_execution_profiles=$(jq -c .firmware_execution_profiles <<<"${plan_json}")"
+            echo "full_plan_complete=$(jq -r .full_plan_complete <<<"${plan_json}")"
+            echo "no_heavy_impact_duplicates=$(jq -r .no_heavy_impact_duplicates <<<"${plan_json}")"
+          } >> "${GITHUB_OUTPUT}"
+          mkdir -p artifacts
+          jq '{event_name, ref, source_head_sha, base_sha, tested_sha, tested_ref, tested_ref_kind}' \
+            <<<"${plan_json}" > "artifacts/ci-provenance-${GITHUB_RUN_ID}.json"
+          {
+            echo "### Canonical CI test plan"
+            echo "- Mode: $(jq -r .ci_mode <<<"${plan_json}")"
+            echo "- SOURCE_HEAD_SHA: $(jq -r .source_head_sha <<<"${plan_json}")"
+            echo "- BASE_SHA: $(jq -r .base_sha <<<"${plan_json}")"
+            echo "- TESTED_SHA: $(jq -r .tested_sha <<<"${plan_json}")"
+            echo "- TESTED_REF: $(jq -r .tested_ref <<<"${plan_json}")"
+            echo "- TESTED_REF_KIND: $(jq -r .tested_ref_kind <<<"${plan_json}")"
+            echo "- Full plan complete: $(jq -r .full_plan_complete <<<"${plan_json}")"
+            echo "- No heavy impact duplicates: $(jq -r .no_heavy_impact_duplicates <<<"${plan_json}")"
+            echo "- Selected gates: $(jq -c .selected_gates <<<"${plan_json}")"
+            echo "- Skipped gates: $(jq -c .skipped_gates <<<"${plan_json}")"
+            if [ "${tested_ref_kind}" = "merge-ref" ]; then
+              echo "- Validation semantics: this workflow tests the PR merge result; SOURCE_HEAD_SHA is recorded separately."
+            fi
+            echo '```json'
+            jq . <<<"${plan_json}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Upload provenance metadata
+        if: ${{ steps.event.outputs.full_validation == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: inktime-ci-provenance-${{ github.run_id }}
+          path: artifacts/ci-provenance-${{ github.run_id }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+  source-head-contract:
+    name: PR source-head provenance contract
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_source_head_contract == 'true' }}
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Verify declared PR source HEAD provenance
+        env:
+          SOURCE_HEAD_SHA: ${{ needs.changes.outputs.source_head_sha }}
+          BASE_SHA: ${{ needs.changes.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          tested_sha="$(git rev-parse HEAD)"
+          tested_ref="${SOURCE_HEAD_SHA}"
+          test "${tested_sha}" = "${SOURCE_HEAD_SHA}"
+          mkdir -p artifacts
+          jq -n \
+            --arg event_name "pull_request" \
+            --arg ref "${GITHUB_REF}" \
+            --arg tested_ref "${tested_ref}" \
+            --arg source_head_sha "${SOURCE_HEAD_SHA}" \
+            --arg base_sha "${BASE_SHA}" \
+            --arg tested_sha "${tested_sha}" \
+            --arg tested_ref_kind "head" \
+            '{event_name, ref, tested_ref, source_head_sha, base_sha, tested_sha, tested_ref_kind}' \
+            > "artifacts/source-head-provenance-${GITHUB_RUN_ID}.json"
+          {
+            echo "### PR source-head evidence"
+            echo "- SOURCE_HEAD_SHA: ${SOURCE_HEAD_SHA}"
+            echo "- BASE_SHA: ${BASE_SHA}"
+            echo "- TESTED_SHA: ${tested_sha}"
+            echo "- TESTED_REF: ${tested_ref}"
+            echo "- TESTED_REF_KIND: head"
+            echo "- Scope: lightweight source-head provenance only; expensive PR validation remains on merge-ref."
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Upload source-head provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: inktime-source-head-provenance-${{ github.run_id }}
+          path: artifacts/source-head-provenance-${{ github.run_id }}.json
+          if-no-files-found: error
+          retention-days: 14
 
   python-quality:
-    name: Python 3.12 fast quality
-    if: ${{ needs.changes.outputs.full_validation == 'true' && (needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.runtime == 'true' || needs.changes.outputs.persistence == 'true' || needs.changes.outputs.docker == 'true' || needs.changes.outputs.tls_security == 'true' || needs.changes.outputs.provider_ai == 'true' || needs.changes.outputs.benchmark == 'true') }}
+    name: Python 3.12 T0 and full coverage
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_python_quality == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -84,14 +262,32 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
         with: {python-version: "3.12", cache: pip}
       - run: pip install -r requirements-dev.txt
-      - run: python scripts/check_dependency_policy.py
-      - run: ruff check inktime tests scripts server.py analyze_photos.py
-      - run: mypy
-      - run: pytest --cov=inktime --cov-config=pyproject.toml --cov-report=term-missing --cov-fail-under=80 tests/unit tests/security tests/integration
+      - name: Dependency policy
+        run: python scripts/check_dependency_policy.py
+      - name: Planner hardening contracts
+        run: >-
+          pytest
+          tests/unit/test_ci_changed_paths.py
+          tests/unit/test_ci_test_plan.py
+          tests/unit/test_ci_selected_suites.py
+          tests/unit/test_dependency_policy.py
+          tests/unit/test_ci_execution_attestation.py
+          tests/unit/test_ci_verify_execution.py
+          tests/unit/test_ci_provenance.py
+          tests/unit/test_ci_planner_hardening.py
+      - name: Ruff
+        run: ruff check inktime tests scripts server.py analyze_photos.py
+      - name: Mypy
+        run: mypy
+      - name: Git diff check
+        run: git diff --check
+      - name: Python 3.12 full coverage >= 80%
+        if: ${{ needs.changes.outputs.run_python312_full == 'true' }}
+        run: pytest --cov=inktime --cov-config=pyproject.toml --cov-report=term-missing --cov-fail-under=80 tests/unit tests/security tests/integration
 
   python-compatibility:
     name: Python 3.10 compatibility
-    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.full_suite == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_python310 == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -104,7 +300,7 @@ jobs:
 
   dependency-audit:
     name: Dependency policy and audit
-    if: ${{ needs.changes.outputs.full_validation == 'true' && (needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.dependencies == 'true') }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_dependency_audit == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -117,7 +313,7 @@ jobs:
 
   migration-contract:
     name: Migration contract
-    if: ${{ needs.changes.outputs.full_validation == 'true' && (needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.persistence == 'true' || needs.changes.outputs.dependencies == 'true') }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_migration == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -128,7 +324,7 @@ jobs:
       - run: pytest tests/unit/test_migrations.py
 
   secret-scan:
-    if: ${{ needs.changes.outputs.full_validation == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_secret_scan == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -138,8 +334,39 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  actionlint:
+    name: Actionlint workflow contract
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_actionlint == 'true' }}
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with: {fetch-depth: 0}
+      - name: Run pinned actionlint
+        run: |
+          # actionlint v1.7.7; digest verified from the registry manifest.
+          docker run --rm \
+            -v "${PWD}:/repo:ro" \
+            -w /repo \
+            rhysd/actionlint@sha256:1d74bfc9fd1963af8f89a7c22afaaafd42f49aad711a09951d02cb996398f61d
+
+  selected-owner-suites:
+    name: Selected owner suites
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.ci_mode == 'impact' && needs.changes.outputs.selected_owner_suites != '[]' }}
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0 (Node 24)
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements-dev.txt
+      - name: Run planner-selected owner regressions
+        env:
+          SELECTED_TEST_SUITES: ${{ needs.changes.outputs.selected_test_suites }}
+        run: python scripts/ci/run_selected_suites.py --suites-json "${SELECTED_TEST_SUITES}"
+
   compose-lan-production-persistence:
-    if: ${{ needs.changes.outputs.full_validation == 'true' && (needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.persistence == 'true' || needs.changes.outputs.docker == 'true') }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_lan_persistence == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -246,7 +473,7 @@ jobs:
           sudo rm -rf .ci-data .ci-photos .ci-lan.env .ci-lan-state.json
 
   compose-production-tls-smoke:
-    if: ${{ needs.changes.outputs.full_validation == 'true' && (needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.tls_security == 'true') }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_tls_smoke == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     env:
@@ -314,7 +541,7 @@ jobs:
           sudo rm -rf .ci-tls .ci-data .ci-photos
 
   bounded-runtime-soak:
-    if: ${{ needs.changes.outputs.full_validation == 'true' && (needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.runtime == 'true') }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_runtime_soak == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -331,7 +558,7 @@ jobs:
           if-no-files-found: error
 
   playwright:
-    if: ${{ needs.changes.outputs.full_validation == 'true' && (needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.web_ui == 'true' || needs.changes.outputs.tls_security == 'true') }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_playwright == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -345,7 +572,7 @@ jobs:
       - run: INKTIME_E2E_URL=http://127.0.0.1:8765 pytest tests/e2e
 
   firmware-host-contract:
-    if: ${{ needs.changes.outputs.full_validation == 'true' && (needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.firmware == 'true') }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_firmware_host_contract == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -362,9 +589,25 @@ jobs:
             tests/firmware/test_pairing_recovery_core.cpp \
             -o /tmp/inktime-pairing-recovery-core
           /tmp/inktime-pairing-recovery-core
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic \
+            -Iesp32/ink-display-7C-photo \
+            tests/firmware/test_photopainter_core.cpp \
+            -o /tmp/inktime-photopainter-core-default
+          /tmp/inktime-photopainter-core-default
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic \
+            -DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER \
+            -Iesp32/ink-display-7C-photo \
+            tests/firmware/test_photopainter_core.cpp \
+            -o /tmp/inktime-photopainter-core-photopainter
+          /tmp/inktime-photopainter-core-photopainter
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic \
+            -Iesp32/ink-display-7C-photo \
+            tests/firmware/test_queue_client_core.cpp \
+            -o /tmp/inktime-queue-client-core
+          /tmp/inktime-queue-client-core
 
   esp32-compile:
-    if: ${{ needs.changes.outputs.full_validation == 'true' && (needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.firmware == 'true') }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_firmware_compile == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -386,37 +629,55 @@ jobs:
       - run: arduino-cli config init
       - run: arduino-cli core update-index && arduino-cli core install esp32:esp32@3.3.10
       - run: arduino-cli lib install GxEPD2@1.6.9 ArduinoJson@7.4.3
-      - name: Test profile, palette, rotation and cache primitives
+      - name: Compile planner-selected firmware profiles
+        env:
+          FIRMWARE_EXECUTION_PROFILES: ${{ needs.changes.outputs.firmware_execution_profiles }}
         run: |
-          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -Iesp32/ink-display-7C-photo tests/firmware/test_photopainter_core.cpp -o /tmp/inktime-core-default
-          /tmp/inktime-core-default
-          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -Iesp32/ink-display-7C-photo tests/firmware/test_photopainter_core.cpp -o /tmp/inktime-core-photopainter
-          /tmp/inktime-core-photopainter
-          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -Iesp32/ink-display-7C-photo tests/firmware/test_queue_client_core.cpp -o /tmp/inktime-queue-core
-          /tmp/inktime-queue-core
-      - name: Existing default GDEY release
-        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-path /tmp/build-existing-release esp32/ink-display-7C-photo
-      - name: Existing default PCB with GDEP release
-        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-property 'compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1' --build-path /tmp/build-existing-gdep-release esp32/ink-display-7C-photo
-      - name: Waveshare PhotoPainter release
-        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER' --build-path /tmp/build-photopainter-release esp32/ink-display-7C-photo
-      - name: Trusted LAN GDEY release
-        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-property 'compiler.cpp.extra_flags=-DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-existing-lan esp32/ink-display-7C-photo
-      - name: Trusted LAN GDEP release
-        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-property 'compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1 -DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-gdep-lan esp32/ink-display-7C-photo
-      - name: Trusted LAN Waveshare PhotoPainter release
-        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-photopainter-lan esp32/ink-display-7C-photo
-      - name: Existing default debug
-        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc,DebugLevel=debug' --build-property 'compiler.cpp.extra_flags=-DINKTIME_DEBUG_LOG=1' --build-path /tmp/build-existing-debug esp32/ink-display-7C-photo
-      - name: Waveshare PhotoPainter debug
-        run: arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc,DebugLevel=debug' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -DINKTIME_DEBUG_LOG=1' --build-path /tmp/build-photopainter-debug esp32/ink-display-7C-photo
+          set -euo pipefail
+          mapfile -t profiles < <(jq -r '.quick[], .affected[], .full_matrix[]' <<<"${FIRMWARE_EXECUTION_PROFILES}")
+          test "${#profiles[@]}" -gt 0
+          for profile in "${profiles[@]}"; do
+            case "${profile}" in
+              gdey_release)
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-path /tmp/build-gdey-release esp32/ink-display-7C-photo
+                ;;
+              gdep_release)
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-property 'compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1' --build-path /tmp/build-gdep-release esp32/ink-display-7C-photo
+                ;;
+              photopainter_release)
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER' --build-path /tmp/build-photopainter-release esp32/ink-display-7C-photo
+                ;;
+              trusted_lan_gdey)
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-property 'compiler.cpp.extra_flags=-DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-trusted-lan-gdey esp32/ink-display-7C-photo
+                ;;
+              trusted_lan_gdep)
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-property 'compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1 -DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-trusted-lan-gdep esp32/ink-display-7C-photo
+                ;;
+              trusted_lan_photopainter)
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-trusted-lan-photopainter esp32/ink-display-7C-photo
+                ;;
+              default_debug)
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc,DebugLevel=debug' --build-property 'compiler.cpp.extra_flags=-DINKTIME_DEBUG_LOG=1' --build-path /tmp/build-default-debug esp32/ink-display-7C-photo
+                ;;
+              photopainter_debug)
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc,DebugLevel=debug' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -DINKTIME_DEBUG_LOG=1' --build-path /tmp/build-photopainter-debug esp32/ink-display-7C-photo
+                ;;
+              *)
+                echo "Unknown planner firmware profile: ${profile}" >&2
+                exit 1
+                ;;
+            esac
+          done
 
   repository-gate:
     name: Repository gate
     if: ${{ always() }}
     needs:
       - changes
+      - source-head-contract
       - secret-scan
+      - actionlint
+      - selected-owner-suites
       - python-quality
       - python-compatibility
       - dependency-audit
@@ -430,10 +691,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Fail when a routed check failed or was cancelled
-        if: ${{ needs.changes.result != 'success' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with: {fetch-depth: 1}
+      - name: Verify planner-selected execution attestation
+        env:
+          PLAN_JSON: ${{ needs.changes.outputs.plan_json }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
-          echo "One or more hosted checks failed or were cancelled." >&2
-          exit 1
-      - name: Accept skipped checks as intentional routing
-        run: echo "Routed checks completed; skipped tiers were intentional for this diff."
+          set -euo pipefail
+          python scripts/ci/verify_execution.py \
+            --plan-json "${PLAN_JSON}" \
+            --needs-json "${NEEDS_JSON}" \
+            --workflow repository
