@@ -957,7 +957,7 @@ class AtomicReleasePublisher:
             return None
         return release_id if _RELEASE_ID.fullmatch(release_id or "") else None
 
-    def list_gc_quarantines(self, *, limit: int = 100) -> list[tuple[str, Path]]:
+    def list_gc_quarantines(self, *, limit: int = 100) -> builtin_list[tuple[str, Path]]:
         """Return bounded, path-safe Release GC quarantine entries."""
 
         entries: list[tuple[str, Path]] = []
