@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hmac
 import json
 import secrets
-from typing import Any, Sequence
+from typing import Sequence
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from inktime.app.core.security import hash_device_secret, hash_device_token, issue_device_token
 from inktime.app.db import Database
+from inktime.app.domain.photopainter.device_configuration import (
+    classify_device_configuration_changes,
+)
 from inktime.app.domain.photopainter.offline_schedule import (
     LEGACY_MAX_OFFLINE_SLOTS,
     MINIMUM_SCHEDULE_GAP_MINUTES,
@@ -20,6 +22,7 @@ from inktime.app.domain.photopainter.offline_schedule import (
     normalize_delivery_contract,
     normalize_sync_strategy,
     next_sync_epoch,
+    stored_schedule_state,
     validate_offline_schedule,
 )
 
@@ -29,24 +32,6 @@ _DEVICE_AUTH_FAILURE_LIMIT = 20
 _DEVICE_AUTH_FAILURE_WINDOW = timedelta(minutes=5)
 _DEVICE_AUTH_FAILURE_MAX_ROWS = 10_000
 _DEVICE_AUTH_TIMESTAMP_UPDATE_INTERVAL = timedelta(minutes=1)
-
-
-@dataclass(frozen=True)
-class StoredScheduleState:
-    raw: str
-    is_array: bool
-    values: list[Any]
-
-
-def stored_schedule_state(value: object) -> StoredScheduleState:
-    raw = str(value) if value is not None else "[]"
-    try:
-        parsed = json.loads(raw)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return StoredScheduleState(raw=raw, is_array=False, values=[])
-    if not isinstance(parsed, list):
-        return StoredScheduleState(raw=raw, is_array=False, values=[])
-    return StoredScheduleState(raw=raw, is_array=True, values=list(parsed))
 
 
 class DeviceRateLimitError(RuntimeError):
@@ -284,7 +269,7 @@ class DeviceRepository:
                 "reason": (
                     "delivery_mode_transition"
                     if change_kind == "delivery_mode_transition"
-                    else "device_schedule_changed"
+                    else change_kind
                 ),
                 "change_kind": change_kind,
                 "old_delivery_mode": old_delivery_mode,
@@ -525,27 +510,49 @@ class DeviceRepository:
                 if button_wake_action not in {"check_new", "local_next"}:
                     raise ValueError("DEVICE-008 button_wake_action 不合法")
                 sync_strategy, sync_time = normalize_sync_strategy(sync_strategy, sync_time)
-                remote_changed = any(
-                    (
-                        str(current["timezone"]) != timezone_name,
-                        str(current["schedule"]) != stored_schedule,
-                        int(current["rotation"]) != rotation,
-                        str(current["panel_profile"]) != panel_profile,
-                        str(current["delivery_mode"]) != delivery_mode,
-                        bool(current["offline_prefetch_allowed"]) != bool(offline_prefetch_allowed),
-                        bool(current["enabled"]) != bool(enabled),
-                        schedule_was_modified,
-                        int(current["prefetch_lead_minutes"]) != int(prefetch_lead_minutes),
-                        str(current["button_wake_action"]) != button_wake_action,
-                        int(current["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES)
-                        != int(minimum_schedule_gap_minutes),
-                        str(current["sync_strategy"] or "first_display_lead") != sync_strategy,
-                        (current["sync_time"] or None) != (sync_time or None),
-                        (current["stock_endpoint_host"] or None) != (stock_endpoint_host or None),
-                    )
+                changes = classify_device_configuration_changes(
+                    {
+                        "timezone": str(current["timezone"]),
+                        "rotation": int(current["rotation"]),
+                        "panel_profile": str(current["panel_profile"]),
+                        "delivery_mode": str(current["delivery_mode"]),
+                        "offline_prefetch_allowed": bool(current["offline_prefetch_allowed"]),
+                        "enabled": bool(current["enabled"]),
+                        "prefetch_lead_minutes": int(current["prefetch_lead_minutes"]),
+                        "button_wake_action": str(current["button_wake_action"]),
+                        "minimum_schedule_gap_minutes": int(
+                            current["minimum_schedule_gap_minutes"]
+                            or MINIMUM_SCHEDULE_GAP_MINUTES
+                        ),
+                        "sync_strategy": str(current["sync_strategy"] or "first_display_lead"),
+                        "sync_time": current["sync_time"] or None,
+                        "stock_endpoint_host": current["stock_endpoint_host"] or None,
+                        "frame_orientation": current["frame_orientation"],
+                        "layout_mode": current["layout_mode"],
+                        "fit_mode": current["fit_mode"],
+                    },
+                    {
+                        "timezone": timezone_name,
+                        "rotation": rotation,
+                        "panel_profile": panel_profile,
+                        "delivery_mode": delivery_mode,
+                        "offline_prefetch_allowed": bool(offline_prefetch_allowed),
+                        "enabled": bool(enabled),
+                        "prefetch_lead_minutes": int(prefetch_lead_minutes),
+                        "button_wake_action": button_wake_action,
+                        "minimum_schedule_gap_minutes": int(minimum_schedule_gap_minutes),
+                        "sync_strategy": sync_strategy,
+                        "sync_time": sync_time or None,
+                        "stock_endpoint_host": stock_endpoint_host or None,
+                        "frame_orientation": selected_orientation,
+                        "layout_mode": selected_layout,
+                        "fit_mode": selected_fit,
+                    },
+                    schedule_definition_changed=schedule_was_modified,
                 )
+                remote_changed = changes.remote_config_changed
                 offline_schedule_changed = bool(
-                    remote_changed and not preserve_quarantined_schedule
+                    changes.offline_schedule_changed and not preserve_quarantined_schedule
                 )
                 cursor = connection.execute(
                     """
@@ -617,6 +624,9 @@ class DeviceRepository:
                         change_kind=(
                             "delivery_mode_transition"
                             if str(current["delivery_mode"]) != delivery_mode
+                            else "device_render_changed"
+                            if changes.render_inputs_changed
+                            and not changes.offline_schedule_changed
                             else "device_schedule_changed"
                         ),
                     )
@@ -640,6 +650,48 @@ class DeviceRepository:
                 raise
         if cursor.rowcount != 1:
             raise KeyError(device_id)
+
+    def update_render_inputs(
+        self,
+        device_id: str,
+        *,
+        panel_profile: str | object = _UNSET,
+        frame_orientation: str | None | object = _UNSET,
+        layout_mode: str | None | object = _UNSET,
+        fit_mode: str | None | object = _UNSET,
+    ) -> None:
+        """Apply render inputs through the canonical versioning path."""
+
+        current = self.get(device_id)
+        if current is None:
+            raise KeyError(device_id)
+        self.update(
+            device_id,
+            name=str(current["name"]),
+            enabled=bool(current["enabled"]),
+            timezone_name=str(current["timezone"]),
+            schedule=str(current["schedule"]),
+            delivery_mode=str(current["delivery_mode"]),
+            offline_prefetch_allowed=bool(current["offline_prefetch_allowed"]),
+            explicit_schedule_replacement=False,
+            prefetch_lead_minutes=int(current["prefetch_lead_minutes"] or 0),
+            button_wake_action=str(current["button_wake_action"] or "check_new"),
+            minimum_schedule_gap_minutes=int(
+                current["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
+            ),
+            sync_strategy=str(current["sync_strategy"] or "first_display_lead"),
+            sync_time=current["sync_time"],
+            stock_endpoint_host=current["stock_endpoint_host"],
+            rotation=int(current["rotation"]),
+            panel_profile=(
+                str(current["panel_profile"])
+                if panel_profile is _UNSET
+                else str(panel_profile)
+            ),
+            frame_orientation=frame_orientation,
+            layout_mode=layout_mode,
+            fit_mode=fit_mode,
+        )
 
     def authenticate(
         self,

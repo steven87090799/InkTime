@@ -18,7 +18,9 @@ from inktime.app.db import Database
 from inktime.app.domain.photopainter.offline_schedule import (
     MAX_OFFLINE_SLOTS,
     MINIMUM_SCHEDULE_GAP_MINUTES,
+    OFFLINE_PREPARE_BOOTSTRAP_AT,
     normalize_sync_strategy,
+    offline_prepare_plan,
     offline_schedule_capability_is_usable,
     resolve_offline_schedule_max_slots,
     slot_deadlines,
@@ -95,78 +97,21 @@ class OfflineScheduleRepository:
         maximum_slots: int = MAX_PREPARED_SLOTS,
         skip_target_dates: Sequence[str] = (),
     ) -> str:
-        """Return the next bounded, timezone-aware offline prepare deadline.
+        """Return the canonical domain policy's next persisted deadline."""
 
-        The scheduler prepares only today and tomorrow.  A due target is
-        represented by ``now``; callers can then skip the target after they
-        enqueue it, observe an active Job, or find a committed Playlist.  A
-        future target uses the earlier of its technical deadline and the
-        configured local future-schedule handoff hour.
-        """
-
-        if type(prefetch_lead_minutes) is not int or not 0 <= prefetch_lead_minutes <= 120:
-            raise ValueError("DEVICE-008 prefetch_lead_minutes 不合法")
-        if type(server_margin_minutes) is not int or not 0 <= server_margin_minutes <= 60:
-            raise ValueError("DEVICE-008 server_prefetch_margin_minutes 不合法")
-        if type(future_prepare_hour_local) is not int or not 0 <= future_prepare_hour_local <= 23:
-            raise ValueError("DEVICE-008 future_schedule_prepare_hour_local 不合法")
-        try:
-            zone = ZoneInfo(str(timezone_name))
-        except (TypeError, ValueError) as exc:
-            raise ValueError("DEVICE-008 裝置 IANA 時區不合法") from exc
-        current = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
-        local_now = current.astimezone(zone)
-        strategy, normalized_sync_time = normalize_sync_strategy(sync_strategy, sync_time)
-        slots = validate_offline_schedule(
-            schedule_times,
-            maximum=resolve_offline_schedule_max_slots(
-                {"offline_schedule_max_slots": maximum_slots}
-            ),
+        return offline_prepare_plan(
+            now=now,
+            timezone_name=timezone_name,
+            schedule_times=schedule_times,
+            prefetch_lead_minutes=prefetch_lead_minutes,
+            server_margin_minutes=server_margin_minutes,
+            future_prepare_hour_local=future_prepare_hour_local,
+            sync_strategy=sync_strategy,
+            sync_time=sync_time,
             minimum_gap_minutes=minimum_gap_minutes,
-        )
-        skip = {str(value) for value in skip_target_dates}
-        lead_and_margin = timedelta(minutes=prefetch_lead_minutes + server_margin_minutes)
-
-        def slot_at(target: date, slot: str) -> datetime:
-            hour, minute = (int(part) for part in slot.split(":"))
-            return datetime.combine(target, time(hour, minute), tzinfo=zone)
-
-        def technical_deadline(target: date) -> datetime:
-            if strategy == "fixed_daily":
-                assert normalized_sync_time is not None
-                hour, minute = (int(part) for part in normalized_sync_time.split(":"))
-                return datetime.combine(target, time(hour, minute), tzinfo=zone)
-            return slot_at(target, slots[0]) - lead_and_margin
-
-        def emit(value: datetime) -> str:
-            return value.astimezone(timezone.utc).isoformat()
-
-        today = local_now.date()
-        for offset in range(3):
-            target = today + timedelta(days=offset)
-            if target.isoformat() in skip:
-                continue
-            technical = technical_deadline(target)
-            if offset == 0:
-                if local_now < technical:
-                    return emit(technical)
-                if any(slot_at(target, slot) > local_now for slot in slots):
-                    return emit(local_now)
-                continue
-            handoff = datetime.combine(
-                target - timedelta(days=1),
-                time(future_prepare_hour_local, 0),
-                tzinfo=zone,
-            )
-            candidate = min(technical, handoff)
-            if local_now >= candidate:
-                return emit(local_now)
-            return emit(candidate)
-
-        # A valid configuration always has a future target, but retain a
-        # bounded fallback if a clock/DST edge makes all three candidates
-        # unrepresentable.
-        return emit(local_now + timedelta(minutes=15))
+            maximum_slots=maximum_slots,
+            skip_target_dates=skip_target_dates,
+        ).next_deadline.isoformat()
 
     @staticmethod
     def retry_after_epoch(
@@ -1505,6 +1450,28 @@ class OfflineScheduleRepository:
             ).fetchall()
         has_more = len(rows) > bounded
         return [dict(row) for row in rows[:bounded]], has_more
+
+    def invalidate_prepare_deadlines_for_policy_change(self, *, connection) -> int:
+        """Make eligible devices due after a runtime prepare-policy change.
+
+        One guarded statement keeps the settings mutation atomic, excludes
+        quarantined/disabled/non-offline devices, and avoids writes when the
+        bootstrap deadline is already present.
+        """
+
+        cursor = connection.execute(
+            """
+            UPDATE devices
+            SET next_offline_prepare_at=?
+            WHERE enabled=1
+              AND delivery_mode='inktime_offline_schedule'
+              AND offline_prefetch_allowed=1
+              AND offline_schedule_capability_state IN ('unknown_12','confirmed_24')
+              AND COALESCE(next_offline_prepare_at,'')<>?
+            """,
+            (OFFLINE_PREPARE_BOOTSTRAP_AT, OFFLINE_PREPARE_BOOTSTRAP_AT),
+        )
+        return int(cursor.rowcount)
 
     def set_next_prepare_deadline(
         self,

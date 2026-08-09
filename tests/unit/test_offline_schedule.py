@@ -11,6 +11,7 @@ from inktime.app.domain.photopainter.offline_schedule import (
     normalize_sync_strategy,
     next_sync_epoch,
     next_sleep_epoch,
+    offline_prepare_plan,
     offline_schedule_capability_is_usable,
     offline_schedule_capability_state,
     prefetch_slots,
@@ -205,3 +206,20 @@ def test_next_prepare_deadline_is_bounded_and_skips_committed_target():
         skip_target_dates=["2026-08-03"],
     )
     assert both_due == "2026-08-03T13:00:00+00:00"
+
+
+def test_offline_prepare_plan_is_single_source_for_targets_and_deadline():
+    zone = ZoneInfo("Asia/Taipei")
+    plan = offline_prepare_plan(
+        now=datetime(2026, 8, 3, 21, 0, tzinfo=zone),
+        timezone_name="Asia/Taipei",
+        schedule_times=["08:00", "22:00"],
+        prefetch_lead_minutes=5,
+        server_margin_minutes=15,
+        future_prepare_hour_local=20,
+    )
+    assert [value.isoformat() for value in plan.due_target_dates] == [
+        "2026-08-03",
+        "2026-08-04",
+    ]
+    assert plan.next_deadline.isoformat() == "2026-08-03T13:00:00+00:00"
