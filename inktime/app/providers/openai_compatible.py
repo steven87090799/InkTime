@@ -360,16 +360,15 @@ class OpenAICompatibleProvider(VisionProvider):
 
     @staticmethod
     def _transport_failed_before_send(error: requests.RequestException) -> bool:
-        """Classify connection setup failures separately from read ambiguity."""
+        """Only classify a failure as pre-send when Requests proves it."""
 
-        return isinstance(
-            error,
-            (
-                requests.exceptions.ConnectTimeout,
-                requests.exceptions.ConnectionError,
-                requests.exceptions.SSLError,
-            ),
-        ) and not isinstance(error, requests.exceptions.ReadTimeout)
+        # A generic ConnectionError/SSLError can be raised after the remote
+        # accepted the POST (for example, when the response connection is
+        # reset).  Treating those as pre-send would permit provider failover
+        # and duplicate a billable vision request.  ConnectTimeout is the
+        # narrow Requests signal that the connection was never established;
+        # ReadTimeout remains ambiguous by definition.
+        return isinstance(error, requests.exceptions.ConnectTimeout)
 
     def _send(self, method: str, path: str, *, retry_policy: str = SAFE_READ, **kwargs):
         last_response = None

@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 
+from inktime.app.core.idempotency import request_fingerprint, scoped_idempotency_key
 from inktime.app.repositories.jobs import PreviewCapacityError
 from inktime.app.services.jobs import JobService
 from inktime.app.workers.job_worker import BoundedJobWorker
@@ -30,7 +31,13 @@ def add_photos(app, count: int) -> list[str]:
     return photo_ids
 
 
-def create_job(app, count: int = 10):
+def create_job(
+    app,
+    count: int = 10,
+    *,
+    dedupe_key: str | None = None,
+    request_fingerprint_value: str | None = None,
+):
     photo_ids = add_photos(app, count)
     service: JobService = app.extensions["inktime_job_service"]
     job_id = service.create_analysis_job(
@@ -40,6 +47,8 @@ def create_job(app, count: int = 10):
         created_by="tester",
         budget_limit=None,
         photo_ids=iter(photo_ids),
+        dedupe_key=dedupe_key,
+        request_fingerprint=request_fingerprint_value,
     )
     return service, app.extensions["inktime_job_repository"], job_id
 
@@ -180,19 +189,82 @@ def test_retry_failed_does_not_revive_running_or_cancelled_jobs(app):
 
 
 def test_explicit_analysis_idempotency_key_reuses_terminal_job(app):
-    service, repository, first_id = create_job(app, 1)
+    dedupe_key = scoped_idempotency_key("analysis", "tester", "test-key")
+    request_fp = request_fingerprint({"name": "測試工作", "strategy": "local", "settings": {}})
+    service, repository, first_id = create_job(
+        app, 1, dedupe_key=dedupe_key, request_fingerprint_value=request_fp
+    )
     with app.extensions["inktime_database"].session() as connection:
         connection.execute("UPDATE jobs SET status='completed',completed_at=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), first_id))
     replay_id = service.create_analysis_job(
-        name="重送工作",
+        name="測試工作",
         strategy="local",
-        settings={"different": True},
+        settings={},
         created_by="tester",
         budget_limit=None,
         photo_ids=[],
-        dedupe_key="idempotency:analysis:test-key",
+        dedupe_key=dedupe_key,
+        request_fingerprint=request_fp,
     )
     assert replay_id == first_id
+
+    with pytest.raises(ValueError, match="IDEMPOTENCY_CONFLICT"):
+        service.create_analysis_job(
+            name="測試工作",
+            strategy="local",
+            settings={"different": True},
+            created_by="tester",
+            budget_limit=None,
+            photo_ids=[],
+            dedupe_key=dedupe_key,
+            request_fingerprint=request_fingerprint({"different": True}),
+        )
+
+    other_actor_key = scoped_idempotency_key("analysis", "other-user", "test-key")
+    other_actor_id = service.create_analysis_job(
+        name="另一位使用者的工作",
+        strategy="local",
+        settings={},
+        created_by="other-user",
+        budget_limit=None,
+        photo_ids=[],
+        dedupe_key=other_actor_key,
+        request_fingerprint=request_fp,
+    )
+    assert other_actor_id != first_id
+
+
+def test_legacy_idempotency_row_binds_first_replay_fingerprint(app):
+    dedupe_key = scoped_idempotency_key("analysis", "legacy-tester", "legacy-key")
+    service, _repository, first_id = create_job(app, 1, dedupe_key=dedupe_key)
+    request_fp = request_fingerprint({"name": "legacy", "strategy": "local", "settings": {}})
+
+    replay_id = service.create_analysis_job(
+        name="legacy",
+        strategy="local",
+        settings={},
+        created_by="legacy-tester",
+        budget_limit=None,
+        photo_ids=[],
+        dedupe_key=dedupe_key,
+        request_fingerprint=request_fp,
+    )
+
+    assert replay_id == first_id
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute("SELECT request_fingerprint FROM jobs WHERE id=?", (first_id,)).fetchone()
+    assert row["request_fingerprint"] == request_fp
+    with pytest.raises(ValueError, match="IDEMPOTENCY_CONFLICT"):
+        service.create_analysis_job(
+            name="legacy-different",
+            strategy="local",
+            settings={},
+            created_by="legacy-tester",
+            budget_limit=None,
+            photo_ids=[],
+            dedupe_key=dedupe_key,
+            request_fingerprint=request_fingerprint({"different": True}),
+        )
 
 
 def test_scheduled_retry_wait_is_persisted_and_not_claimed_early(app):

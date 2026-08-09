@@ -12,6 +12,7 @@ from inktime.app.core.json_values import (
     nullable_json_float,
     optional_json_int,
 )
+from inktime.app.core.idempotency import request_fingerprint, scoped_idempotency_key
 from inktime.app.domain.analysis.plan import canonical_json, fingerprint, normalize_analysis_strategy
 from inktime.app.domain.analysis.execution_mode import execution_mode, permits_automatic_ai
 from inktime.app.services.jobs import InvalidJobTransition, JobService
@@ -132,6 +133,25 @@ def create_job():
         }, 409
     plan, _ = _analysis_plan(strategy)
     analysis_fingerprint = fingerprint(plan)
+    idempotency_key = scoped_idempotency_key("analysis", str(g.user["id"]), request.headers.get("Idempotency-Key"))
+    idempotency_fingerprint = (
+        request_fingerprint(
+            {
+                "name": str(payload.get("name", "分析工作")),
+                "strategy": strategy,
+                "settings": settings,
+                "budget_limit": budget,
+                "limit": limit,
+                "photo_ids": payload.get("photo_ids"),
+                "selection_mode": selection_mode,
+                "analysis_fingerprint": analysis_fingerprint,
+                "force_recompute": force_recompute,
+                "analysis_spec": plan,
+            }
+        )
+        if idempotency_key
+        else None
+    )
     try:
         job_id = _service().create_analysis_job(
             name=str(payload.get("name", "分析工作")),
@@ -145,13 +165,12 @@ def create_job():
             analysis_fingerprint=analysis_fingerprint,
             force_recompute=force_recompute,
             analysis_spec=plan,
-            dedupe_key=(
-                f"idempotency:analysis:{str(request.headers.get('Idempotency-Key') or '').strip()[:128]}"
-                if str(request.headers.get("Idempotency-Key") or "").strip()
-                else None
-            ),
+            dedupe_key=idempotency_key,
+            request_fingerprint=idempotency_fingerprint,
         )
     except ValueError as exc:
+        if str(exc) == "IDEMPOTENCY_CONFLICT":
+            return {"error_code": "IDEMPOTENCY_CONFLICT", "message": str(exc)}, 409
         return {"message": str(exc)}, 409
     return {"id": job_id, "detail_url": f"/jobs/{job_id}"}, 201
 

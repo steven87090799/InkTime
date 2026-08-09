@@ -31,6 +31,7 @@ class JobService:
         analysis_fingerprint: str | None = None,
         force_recompute: bool = False,
         analysis_spec: dict | None = None,
+        request_fingerprint: str | None = None,
     ) -> str:
         if strategy not in self.STRATEGIES:
             raise ValueError("不支援的分析策略")
@@ -38,7 +39,9 @@ class JobService:
         if budget_limit is not None and budget_limit < 0:
             raise ValueError("預算不可小於零")
         if dedupe_key:
-            existing = self.repository.get_by_dedupe_key(dedupe_key)
+            existing = self.repository.get_by_dedupe_key(
+                dedupe_key, request_fingerprint=request_fingerprint
+            )
             if existing is not None:
                 return str(existing["id"])
         if photo_ids is None:
@@ -65,6 +68,7 @@ class JobService:
             analysis_fingerprint=analysis_fingerprint,
             force_recompute=force_recompute,
             analysis_spec=analysis_spec,
+            request_fingerprint=request_fingerprint,
         )
 
     def start(self, job_id: str) -> None:

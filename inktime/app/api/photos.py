@@ -13,6 +13,7 @@ from inktime.app.core.json_values import (
     json_object_payload,
     reject_unknown_fields,
 )
+from inktime.app.core.idempotency import request_fingerprint, scoped_idempotency_key
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.domain.analysis.schema import ALLOWED_TYPES
 from inktime.app.domain.analysis.plan import fingerprint
@@ -38,6 +39,11 @@ def _payload() -> dict:
     return json_object_payload(request, maximum_bytes=256 * 1024, error_prefix="IMG-004")
 
 
+def _ai_job_error(exc: ValueError) -> dict:
+    code = "IDEMPOTENCY_CONFLICT" if str(exc) == "IDEMPOTENCY_CONFLICT" else "VLM-008"
+    return {"error_code": code, "message": str(exc)}
+
+
 def _queue_ai(
     photo_ids: list[str],
     *,
@@ -45,6 +51,7 @@ def _queue_ai(
     name: str,
     force_ai: bool = False,
     idempotency_key: str | None = None,
+    idempotency_scope: str = "photo-ai",
 ) -> dict:
     settings = current_app.extensions["inktime_settings_repository"]
     mode = execution_mode(settings)
@@ -72,6 +79,21 @@ def _queue_ai(
         provider_route=current_app.extensions["inktime_provider_service"].route_snapshot(),
         scoring_profile=dict(current_app.extensions["inktime_scoring_repository"].current()),
     )
+    idempotency_key_value = scoped_idempotency_key(idempotency_scope, created_by, idempotency_key)
+    idempotency_fingerprint = (
+        request_fingerprint(
+            {
+                "name": name,
+                "strategy": strategy,
+                "photo_ids": selected,
+                "force_ai": force_ai,
+                "analysis_fingerprint": fingerprint(plan),
+                "analysis_spec": plan,
+            }
+        )
+        if idempotency_key_value
+        else None
+    )
     job_id = current_app.extensions["inktime_job_service"].create_analysis_job(
         name=name,
         strategy=strategy,
@@ -80,7 +102,8 @@ def _queue_ai(
         budget_limit=None,
         photo_ids=selected,
         priority=2,
-        dedupe_key=(f"idempotency:manual-analysis:{idempotency_key}" if idempotency_key else None),
+        dedupe_key=idempotency_key_value,
+        request_fingerprint=idempotency_fingerprint,
         analysis_fingerprint=fingerprint(plan),
         force_recompute=force_ai,
         analysis_spec=plan,
@@ -259,10 +282,11 @@ def queue_photo_ai(photo_id: str):
             created_by=str(g.user["id"]),
             name="排除照片 AI 分析",
             force_ai=True,
+            idempotency_scope="photo-ai",
             idempotency_key=str(request.headers.get("Idempotency-Key") or "").strip()[:128] or None,
         ), 201
     except ValueError as exc:
-        return {"error_code": "VLM-008", "message": str(exc)}, 409
+        return _ai_job_error(exc), 409
 
 
 @bp.post("/api/v1/photos/exclusions/ai")
@@ -282,10 +306,11 @@ def queue_exclusions_ai():
             created_by=str(g.user["id"]),
             name="排除照片批次 AI 分析",
             force_ai=True,
+            idempotency_scope="exclusions-ai",
             idempotency_key=str(request.headers.get("Idempotency-Key") or "").strip()[:128] or None,
         ), 201
     except ValueError as exc:
-        return {"error_code": "VLM-008", "message": str(exc)}, 409
+        return _ai_job_error(exc), 409
 
 
 @bp.post("/api/v1/photos/ai/run")
@@ -331,23 +356,25 @@ def queue_ai_mode_run():
                     ids,
                     created_by=str(g.user["id"]),
                     name=f"完整照片庫 AI：{group}",
+                    idempotency_scope="ai-mode-run",
                     idempotency_key=f"{request_key}:{group}" if request_key else None,
                 )
                 for group, ids in batches
             ]
             return {"jobs": jobs, "queued": sum(job["queued"] for job in jobs), "batch_by": group_by}, 201
         except ValueError as exc:
-            return {"error_code": "VLM-008", "message": str(exc)}, 409
+            return _ai_job_error(exc), 409
     selected = _repository().eligible_photo_ids(limit=limit, include_all_active=False)
     try:
         return _queue_ai(
             selected,
             created_by=str(g.user["id"]),
             name="AI 模式批次分析",
+            idempotency_scope="ai-mode-run",
             idempotency_key=str(request.headers.get("Idempotency-Key") or "").strip()[:128] or None,
         ), 201
     except ValueError as exc:
-        return {"error_code": "VLM-008", "message": str(exc)}, 409
+        return _ai_job_error(exc), 409
 
 
 @bp.get("/photos/<photo_id>")

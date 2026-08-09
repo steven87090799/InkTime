@@ -204,6 +204,42 @@ def test_force_ai_api_is_admin_exclusion_only_and_creates_fresh_job(client, app,
     ]
 
 
+def test_manual_ai_idempotency_key_is_namespaced_per_endpoint(client, app, tmp_path):
+    create_admin(app)
+    login(client)
+    excluded_id = _scan(app, tmp_path, screenshot=True)[0]
+    _setting(app, "analysis.ai_mode", "off")
+    _setting(app, "analysis.execution_mode", "local_with_manual_ai")
+    headers = {"X-CSRF-Token": csrf(client), "Idempotency-Key": "shared-manual-key"}
+
+    single = client.post(f"/api/v1/photos/{excluded_id}/ai", headers=headers)
+    batch = client.post(
+        "/api/v1/photos/exclusions/ai",
+        json={"photo_ids": [excluded_id]},
+        headers=headers,
+    )
+
+    assert single.status_code == 201
+    assert batch.status_code == 201
+    assert single.json["id"] != batch.json["id"]
+
+
+def test_manual_ai_idempotency_conflict_has_stable_api_error_code(client, app, tmp_path):
+    create_admin(app)
+    login(client)
+    excluded_ids = _scan(app, tmp_path, screenshot=True, duplicate=True)
+    _setting(app, "analysis.ai_mode", "off")
+    _setting(app, "analysis.execution_mode", "local_with_manual_ai")
+    headers = {"X-CSRF-Token": csrf(client), "Idempotency-Key": "manual-conflict-key"}
+
+    first = client.post(f"/api/v1/photos/{excluded_ids[0]}/ai", headers=headers)
+    second = client.post(f"/api/v1/photos/{excluded_ids[1]}/ai", headers=headers)
+
+    assert first.status_code == 201
+    assert second.status_code == 409
+    assert second.json["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+
 def test_ai_cache_hit_does_not_call_provider_twice(app, tmp_path, monkeypatch):
     first_id = _scan(app, tmp_path)[0]
     _setting(app, "analysis.ai_mode", "eligible")

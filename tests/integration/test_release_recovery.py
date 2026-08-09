@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import sqlite3
+import time
 
 import pytest
 from PIL import Image
+
+from inktime.app.domain.rendering import release as release_module
 
 
 def _stage(publisher, profile: str):
@@ -13,6 +18,25 @@ def _stage(publisher, profile: str):
         profile_key=profile,
         activate=False,
     )
+
+
+def _gc_candidate(app):
+    publisher = app.extensions["inktime_release_publisher"]
+    coordinator = app.extensions["inktime_release_coordinator"]
+    manifest = _stage(publisher, "safe_4c")
+    coordinator.publish(
+        [manifest],
+        created_by="test",
+        photo_ids=[],
+        activate_pointers=False,
+    )
+    old = "2020-01-01T00:00:00+00:00"
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE releases SET status='superseded',created_at=? WHERE id=?",
+            (old, manifest["release_id"]),
+        )
+    return manifest["release_id"]
 
 
 def test_second_profile_activation_failure_restores_all_old_pointers(app, monkeypatch):
@@ -92,3 +116,78 @@ def test_reconciliation_restores_missing_profile_pointer_to_latest_complete_rele
 
     assert result["pointer_recovered"] == 1
     assert pointer.read_text(encoding="utf-8") == second["release_id"]
+
+
+def test_gc_filesystem_quarantine_runs_without_sqlite_writer_lock(app, monkeypatch):
+    publisher = app.extensions["inktime_release_publisher"]
+    coordinator = app.extensions["inktime_release_coordinator"]
+    database = app.extensions["inktime_database"]
+    release_id = _gc_candidate(app)
+    observed = []
+
+    def writer_lock_available():
+        descriptor = os.open(database.writer_lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            return True
+        finally:
+            os.close(descriptor)
+
+    original_fsync = release_module.fsync_directory
+
+    def checked_slow_fsync(path):
+        observed.append(writer_lock_available())
+        time.sleep(0.02)
+        return original_fsync(path)
+
+    monkeypatch.setattr(release_module, "fsync_directory", checked_slow_fsync)
+    result = coordinator.gc_unreferenced_releases(retention_days=1, max_items=1)
+
+    assert result["deleted"] == 1
+    assert observed == [True, True]
+    assert not (publisher.root / release_id).exists()
+
+
+def test_gc_database_rollback_restores_quarantined_payload(app):
+    publisher = app.extensions["inktime_release_publisher"]
+    coordinator = app.extensions["inktime_release_coordinator"]
+    database = app.extensions["inktime_database"]
+    release_id = _gc_candidate(app)
+    with database.session() as connection:
+        connection.execute(
+            "CREATE TRIGGER gc_test_reject_delete BEFORE DELETE ON releases "
+            "BEGIN SELECT RAISE(ABORT, 'gc rollback'); END"
+        )
+    try:
+        with pytest.raises(sqlite3.IntegrityError, match="gc rollback"):
+            coordinator.gc_unreferenced_releases(retention_days=1, max_items=1)
+    finally:
+        with database.session() as connection:
+            connection.execute("DROP TRIGGER gc_test_reject_delete")
+
+    assert (publisher.root / release_id).is_dir()
+    with database.session() as connection:
+        assert connection.execute("SELECT id FROM releases WHERE id=?", (release_id,)).fetchone() is not None
+    assert publisher.list_gc_quarantines() == []
+
+
+def test_gc_purge_failure_leaves_orphan_for_next_maintenance(app, monkeypatch):
+    publisher = app.extensions["inktime_release_publisher"]
+    coordinator = app.extensions["inktime_release_coordinator"]
+    database = app.extensions["inktime_database"]
+    release_id = _gc_candidate(app)
+    monkeypatch.setattr(publisher, "purge_gc_quarantine", lambda _path: False)
+
+    result = coordinator.gc_unreferenced_releases(retention_days=1, max_items=1)
+
+    assert result == {"deleted": 1, "skipped": 1}
+    assert (publisher.root / release_id).exists() is False
+    with database.session() as connection:
+        assert connection.execute("SELECT id FROM releases WHERE id=?", (release_id,)).fetchone() is None
+    quarantines = publisher.list_gc_quarantines()
+    assert len(quarantines) == 1
+    assert quarantines[0][0] == release_id

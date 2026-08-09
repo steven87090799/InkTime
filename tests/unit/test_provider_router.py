@@ -4,6 +4,7 @@ from pathlib import Path
 import time
 
 import pytest
+import requests
 
 from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider, ProviderHTTPError
@@ -41,6 +42,71 @@ class StubProvider(VisionProvider):
 
     def validate_config(self):
         return True, "ok"
+
+
+class TransportErrorVisionSession:
+    def __init__(self, error):
+        self.error = error
+        self.vision_attempts = 0
+
+    def post(self, url, **kwargs):
+        if url.endswith("/chat/completions"):
+            self.vision_attempts += 1
+            raise self.error
+        raise AssertionError(f"unexpected provider URL: {url}")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        requests.ConnectionError("remote disconnected after POST"),
+        requests.SSLError("TLS connection reset after POST"),
+        requests.ReadTimeout("response read timed out"),
+    ],
+    ids=["connection-error", "ssl-error", "read-timeout"],
+)
+def test_ambiguous_transport_errors_stop_router_before_failover(error, tmp_path):
+    image = tmp_path / "router-ambiguous.jpg"
+    image.write_bytes(b"jpeg-fixture")
+    session = TransportErrorVisionSession(error)
+    first = OpenAICompatibleProvider(
+        name="first", base_url="https://api.openai.com/v1", api_key="secret", session=session
+    )
+    second = StubProvider("second")
+    router = FailoverVisionProvider(
+        [ProviderChannel(first, priority=1), ProviderChannel(second, priority=2)],
+        failure_threshold=1,
+    )
+
+    with pytest.raises(ProviderHTTPError) as raised:
+        router.analyze(image_path=image, model="vision", detail="high", stage="single_high")
+
+    assert raised.value.code == "VLM-AMBIGUOUS"
+    assert raised.value.ambiguous is True
+    assert raised.value.request_started is True
+    assert raised.value.vision_started is True
+    assert session.vision_attempts == 1
+    assert second.calls == 0
+
+
+def test_connect_timeout_still_fails_over_before_vision_request(tmp_path):
+    image = tmp_path / "router-connect-timeout.jpg"
+    image.write_bytes(b"jpeg-fixture")
+    session = TransportErrorVisionSession(requests.ConnectTimeout("connection setup failed"))
+    first = OpenAICompatibleProvider(
+        name="first", base_url="https://api.openai.com/v1", api_key="secret", session=session
+    )
+    second = StubProvider("second")
+    router = FailoverVisionProvider(
+        [ProviderChannel(first, priority=1), ProviderChannel(second, priority=2)],
+        failure_threshold=1,
+    )
+
+    response = router.analyze(image_path=image, model="vision", detail="high", stage="single_high")
+
+    assert response.content == "{}"
+    assert session.vision_attempts == 1
+    assert second.calls == 1
 
 
 class CooperativeBoundary:

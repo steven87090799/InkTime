@@ -37,6 +37,7 @@ STOCK_DIRECT_TEST_DIRECTORY = ".stock-direct-tests"
 STOCK_DIRECT_TEST_DEFERRED_DIRECTORY = ".stock-direct-tests-deferred"
 STOCK_DIRECT_CLEANUP_STATE_DIRECTORY = ".stock-direct-cleanup-state"
 DEVICE_TEST_ASSIGNMENT_QUARANTINE_DIRECTORY = ".device-tests-quarantine"
+GC_QUARANTINE_PREFIX = ".gc-quarantine-"
 _RELEASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _ASSIGNMENT_LOCK = RLock()
 _RELEASE_METADATA_LOCK = RLock()
@@ -946,6 +947,132 @@ class AtomicReleasePublisher:
                 return False
             shutil.rmtree(release_dir)
             fsync_directory(self.root)
+            return True
+
+    @staticmethod
+    def _gc_quarantine_release_id(path: Path) -> str | None:
+        marker = path.name.removeprefix(GC_QUARANTINE_PREFIX)
+        token, separator, release_id = marker.partition("--")
+        if separator != "--" or len(token) != 24 or re.fullmatch(r"[0-9a-f]{24}", token) is None:
+            return None
+        return release_id if _RELEASE_ID.fullmatch(release_id or "") else None
+
+    def list_gc_quarantines(self, *, limit: int = 100) -> list[tuple[str, Path]]:
+        """Return bounded, path-safe Release GC quarantine entries."""
+
+        entries: list[tuple[str, Path]] = []
+        for path in sorted(self.root.glob(f"{GC_QUARANTINE_PREFIX}*"), key=lambda item: item.name):
+            if len(entries) >= max(1, min(int(limit), 100)):
+                break
+            if path.parent != self.root or path.is_symlink() or not path.is_dir():
+                continue
+            release_id = self._gc_quarantine_release_id(path)
+            if release_id is not None:
+                entries.append((release_id, path))
+        return entries
+
+    def _authoritative_pointer_ids_unlocked(self) -> set[str]:
+        """Read managed latest pointers while the metadata lock is held."""
+
+        pointer_ids: set[str] = set()
+        try:
+            paths = sorted(self.root.iterdir(), key=lambda item: item.name)
+        except OSError:
+            return pointer_ids
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        for path in paths:
+            name = path.name
+            if not (
+                name == "latest"
+                or name.startswith("latest.")
+                or name == ".latest"
+                or name.startswith(".latest.")
+            ):
+                continue
+            try:
+                descriptor = os.open(path, flags)
+                metadata = os.fstat(descriptor)
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 512:
+                    os.close(descriptor)
+                    continue
+                with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                    release_id = handle.read(512).strip()
+            except (OSError, UnicodeDecodeError):
+                continue
+            if _RELEASE_ID.fullmatch(release_id):
+                pointer_ids.add(release_id)
+        return pointer_ids
+
+    def authoritative_pointer_ids(self) -> set[str]:
+        """Return latest pointer targets under the shared metadata lock."""
+
+        with release_metadata_guard(self.root):
+            return self._authoritative_pointer_ids_unlocked()
+
+    def quarantine_release(self, release_id: str) -> Path | None:
+        """Atomically move a fenced Release out of its live pathname."""
+
+        if _RELEASE_ID.fullmatch(str(release_id)) is None:
+            return None
+        with release_metadata_guard(self.root):
+            if str(release_id) in self._authoritative_pointer_ids_unlocked():
+                return None
+            release_dir = self.root / str(release_id)
+            if release_dir.parent != self.root or release_dir.is_symlink() or not release_dir.is_dir():
+                return None
+            quarantine = self.root / f"{GC_QUARANTINE_PREFIX}{secrets.token_hex(12)}--{release_id}"
+            try:
+                release_dir.replace(quarantine)
+                fsync_directory(self.root)
+            except OSError:
+                return None
+            return quarantine
+
+    def restore_quarantined_release(self, quarantine: Path, release_id: str) -> bool:
+        """Restore a GC entry after its DB fence could not be committed."""
+
+        if _RELEASE_ID.fullmatch(str(release_id)) is None:
+            return False
+        with release_metadata_guard(self.root):
+            if (
+                quarantine.parent != self.root
+                or self._gc_quarantine_release_id(quarantine) != str(release_id)
+                or quarantine.is_symlink()
+                or not quarantine.is_dir()
+            ):
+                return False
+            release_dir = self.root / str(release_id)
+            if release_dir.exists() or release_dir.is_symlink():
+                return False
+            try:
+                quarantine.replace(release_dir)
+                fsync_directory(self.root)
+            except OSError:
+                return False
+            return True
+
+    def purge_gc_quarantine(self, quarantine: Path) -> bool:
+        """Delete a DB-unreferenced quarantine entry outside SQLite locks."""
+
+        with release_metadata_guard(self.root):
+            release_id = self._gc_quarantine_release_id(quarantine)
+            if (
+                quarantine.parent != self.root
+                or release_id is None
+                or quarantine.is_symlink()
+            ):
+                return False
+            if release_id in self._authoritative_pointer_ids_unlocked():
+                return False
+            if not quarantine.exists():
+                return True
+            if not quarantine.is_dir():
+                return False
+            try:
+                shutil.rmtree(quarantine)
+                fsync_directory(self.root)
+            except OSError:
+                return False
             return True
 
     def rollback(self, release_id: str) -> None:

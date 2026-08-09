@@ -53,6 +53,53 @@ def test_atomic_release_manifest_and_rollback(tmp_path):
     assert second["release_id"] != first["release_id"]
 
 
+def test_release_gc_quarantine_restore_and_purge_are_path_safe(tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    release_id = "20260809-120000-abcdef"
+    release_dir = root / release_id
+    release_dir.mkdir(parents=True)
+    (release_dir / "payload.bin").write_bytes(b"payload")
+
+    quarantine = publisher.quarantine_release(release_id)
+    assert quarantine is not None
+    assert not release_dir.exists()
+    assert publisher.list_gc_quarantines() == [(release_id, quarantine)]
+    assert publisher.restore_quarantined_release(quarantine, release_id) is True
+    assert (release_dir / "payload.bin").read_bytes() == b"payload"
+
+    quarantine = publisher.quarantine_release(release_id)
+    assert quarantine is not None
+    assert publisher.purge_gc_quarantine(quarantine) is True
+    assert not quarantine.exists()
+    assert not release_dir.exists()
+
+
+def test_release_gc_authoritative_latest_pointer_fence_is_lock_protected(tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    release_id = "20260809-120000-abcdef"
+    release_dir = root / release_id
+    release_dir.mkdir(parents=True)
+    (release_dir / "payload.bin").write_bytes(b"payload")
+    (root / "latest").write_text(release_id, encoding="utf-8")
+
+    assert publisher.authoritative_pointer_ids() == {release_id}
+    assert publisher.quarantine_release(release_id) is None
+    assert (release_dir / "payload.bin").read_bytes() == b"payload"
+
+    (root / "latest").unlink()
+    quarantine = publisher.quarantine_release(release_id)
+    assert quarantine is not None
+    (root / "latest").write_text(release_id, encoding="utf-8")
+    assert publisher.purge_gc_quarantine(quarantine) is False
+    assert quarantine.is_dir()
+
+    (root / "latest").unlink()
+    assert publisher.purge_gc_quarantine(quarantine) is True
+    assert not quarantine.exists()
+
+
 def test_gooddisplay_release_records_effective_vendor_palette(tmp_path):
     publisher = AtomicReleasePublisher(tmp_path / "releases")
     manifest = publisher.publish(

@@ -172,6 +172,7 @@ class JobRepository:
         analysis_fingerprint: str | None = None,
         force_recompute: bool = False,
         analysis_spec: dict | None = None,
+        request_fingerprint: str | None = None,
     ) -> str:
         # Selection can be backed by a generator whose database session is
         # already closed.  Materialize it before acquiring the writer lock so
@@ -185,18 +186,27 @@ class JobRepository:
             try:
                 if dedupe_key:
                     existing = connection.execute(
-                        "SELECT id FROM jobs WHERE dedupe_key=? ORDER BY created_at DESC,id DESC LIMIT 1",
+                        "SELECT id,request_fingerprint FROM jobs WHERE dedupe_key=? ORDER BY created_at DESC,id DESC LIMIT 1",
                         (dedupe_key,),
                     ).fetchone()
                     if existing is not None:
+                        stored_fingerprint = str(existing["request_fingerprint"] or "")
+                        if stored_fingerprint and request_fingerprint and stored_fingerprint != request_fingerprint:
+                            raise ValueError("IDEMPOTENCY_CONFLICT")
+                        if request_fingerprint and not stored_fingerprint:
+                            connection.execute(
+                                "UPDATE jobs SET request_fingerprint=? WHERE id=? AND request_fingerprint IS NULL",
+                                (request_fingerprint, existing["id"]),
+                            )
                         connection.execute("COMMIT")
                         return str(existing["id"])
                 connection.execute(
                     """
                     INSERT INTO jobs(id, kind, name, status, strategy, settings_json,
                                      budget_limit, created_by, created_at, priority, dedupe_key,
-                                     selection_mode,analysis_fingerprint,analysis_spec_json,force_recompute)
-                    VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?,?,?,?)
+                                     selection_mode,analysis_fingerprint,analysis_spec_json,force_recompute,
+                                     request_fingerprint)
+                    VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?,?,?,?,?)
                     """,
                     (
                         job_id,
@@ -215,6 +225,7 @@ class JobRepository:
                             analysis_spec or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")
                         ),
                         int(force_recompute),
+                        request_fingerprint,
                     ),
                 )
                 batch: list[tuple] = []
@@ -251,14 +262,42 @@ class JobRepository:
         with self.database.session() as connection:
             return connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
 
-    def get_by_dedupe_key(self, dedupe_key: str):
+    def get_by_dedupe_key(self, dedupe_key: str, *, request_fingerprint: str | None = None):
         """Return the durable identity for an explicit idempotency key."""
 
+        if request_fingerprint:
+            with self.database.session() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    row = connection.execute(
+                        "SELECT id,status,request_fingerprint FROM jobs WHERE dedupe_key=? ORDER BY created_at DESC,id DESC LIMIT 1",
+                        (dedupe_key,),
+                    ).fetchone()
+                    if row is not None:
+                        stored_fingerprint = str(row["request_fingerprint"] or "")
+                        if stored_fingerprint and stored_fingerprint != request_fingerprint:
+                            raise ValueError("IDEMPOTENCY_CONFLICT")
+                        if not stored_fingerprint:
+                            connection.execute(
+                                "UPDATE jobs SET request_fingerprint=? WHERE id=? AND request_fingerprint IS NULL",
+                                (request_fingerprint, row["id"]),
+                            )
+                            row = connection.execute(
+                                "SELECT id,status,request_fingerprint FROM jobs WHERE id=?",
+                                (row["id"],),
+                            ).fetchone()
+                    connection.execute("COMMIT")
+                    return row
+                except Exception:
+                    if connection.in_transaction:
+                        connection.execute("ROLLBACK")
+                    raise
         with self.database.session() as connection:
-            return connection.execute(
-                "SELECT id,status FROM jobs WHERE dedupe_key=? ORDER BY created_at DESC,id DESC LIMIT 1",
+            row = connection.execute(
+                "SELECT id,status,request_fingerprint FROM jobs WHERE dedupe_key=? ORDER BY created_at DESC,id DESC LIMIT 1",
                 (dedupe_key,),
             ).fetchone()
+            return row
 
     def active_dedupe_job(self, dedupe_key: str):
         """Return the newest in-flight Job for a scheduler-owned identity."""
@@ -289,6 +328,7 @@ class JobRepository:
         created_by: str | None,
         priority: int | None = None,
         dedupe_key: str | None = None,
+        request_fingerprint: str | None = None,
     ) -> str:
         job_id = self._create_maintenance(
             kind=kind,
@@ -297,6 +337,7 @@ class JobRepository:
             created_by=created_by,
             priority=priority,
             dedupe_key=dedupe_key,
+            request_fingerprint=request_fingerprint,
             transaction_guard=None,
         )
         assert job_id is not None
@@ -311,6 +352,7 @@ class JobRepository:
         created_by: str | None,
         priority: int | None = None,
         dedupe_key: str | None = None,
+        request_fingerprint: str | None = None,
         transaction_guard: Callable[[Any], bool],
     ) -> str | None:
         """Create a maintenance Job under a caller-owned transaction guard."""
@@ -322,6 +364,7 @@ class JobRepository:
             created_by=created_by,
             priority=priority,
             dedupe_key=dedupe_key,
+            request_fingerprint=request_fingerprint,
             transaction_guard=transaction_guard,
         )
 
@@ -334,6 +377,7 @@ class JobRepository:
         created_by: str | None,
         priority: int | None = None,
         dedupe_key: str | None = None,
+        request_fingerprint: str | None = None,
         transaction_guard: Callable[[Any], bool] | None,
     ) -> str | None:
         if kind not in {
@@ -364,10 +408,18 @@ class JobRepository:
                         )
                     )
                     existing = connection.execute(
-                        f"SELECT id FROM jobs WHERE dedupe_key=? AND {status_clause}",
+                        f"SELECT id,request_fingerprint FROM jobs WHERE dedupe_key=? AND {status_clause}",
                         (dedupe_key,),
                     ).fetchone()
                     if existing is not None:
+                        stored_fingerprint = str(existing["request_fingerprint"] or "")
+                        if stored_fingerprint and request_fingerprint and stored_fingerprint != request_fingerprint:
+                            raise ValueError("IDEMPOTENCY_CONFLICT")
+                        if request_fingerprint and not stored_fingerprint:
+                            connection.execute(
+                                "UPDATE jobs SET request_fingerprint=? WHERE id=? AND request_fingerprint IS NULL",
+                                (request_fingerprint, existing["id"]),
+                            )
                         connection.execute("COMMIT")
                         return str(existing["id"])
                 if transaction_guard is not None and not transaction_guard(connection):
@@ -375,8 +427,8 @@ class JobRepository:
                     return None
                 connection.execute(
                     """
-                    INSERT INTO jobs(id,kind,name,status,strategy,settings_json,total_items,created_by,created_at,priority,dedupe_key)
-                    VALUES (?,?,?,'pending','local',?,1,?,?,?,?)
+                    INSERT INTO jobs(id,kind,name,status,strategy,settings_json,total_items,created_by,created_at,priority,dedupe_key,request_fingerprint)
+                    VALUES (?,?,?,'pending','local',?,1,?,?,?,?,?)
                     """,
                     (
                         job_id,
@@ -387,6 +439,7 @@ class JobRepository:
                         now,
                         max(1, min(int(priority if priority is not None else self._priority_for(kind)), 6)),
                         dedupe_key,
+                        request_fingerprint,
                     ),
                 )
                 connection.execute(

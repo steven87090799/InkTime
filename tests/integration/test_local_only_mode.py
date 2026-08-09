@@ -47,3 +47,26 @@ def test_disabled_rejects_analysis_job_before_a_plan_or_job_item_is_created(clie
     with app.extensions["inktime_database"].session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM jobs WHERE kind='analysis'").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM job_items").fetchone()[0] == 0
+
+
+def test_analysis_idempotency_conflict_has_stable_api_error_code(client, app):
+    create_admin(app)
+    login(client)
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="test"
+    )
+    headers = {"X-CSRF-Token": csrf(client), "Idempotency-Key": "analysis-conflict-key"}
+    first = client.post(
+        "/api/v1/jobs",
+        json={"name": "first", "strategy": "local", "photo_ids": []},
+        headers=headers,
+    )
+    second = client.post(
+        "/api/v1/jobs",
+        json={"name": "different", "strategy": "local", "photo_ids": []},
+        headers=headers,
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 409
+    assert second.json["error_code"] == "IDEMPOTENCY_CONFLICT"

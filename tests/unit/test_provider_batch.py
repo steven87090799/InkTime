@@ -133,6 +133,46 @@ def test_vision_post_timeout_is_ambiguous_and_never_retried(tmp_path):
     assert session.vision_attempts == 1
 
 
+class VisionTransportErrorSession(FakeSession):
+    def __init__(self, error):
+        super().__init__()
+        self.error = error
+        self.vision_attempts = 0
+
+    def post(self, url, **kwargs):
+        if url.endswith("/chat/completions"):
+            self.vision_attempts += 1
+            raise self.error
+        return super().post(url, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        requests.ConnectionError("remote disconnected after POST"),
+        requests.SSLError("TLS connection reset after POST"),
+        requests.ReadTimeout("response read timed out"),
+    ],
+    ids=["connection-error", "ssl-error", "read-timeout"],
+)
+def test_vision_transport_errors_are_conservatively_ambiguous(error, tmp_path):
+    image = Path(tmp_path) / "vision-ambiguous-transport.jpg"
+    image.write_bytes(b"jpeg-fixture")
+    session = VisionTransportErrorSession(error)
+    provider = OpenAICompatibleProvider(
+        name="OpenAI", base_url="https://api.openai.com/v1", api_key="secret", session=session
+    )
+
+    with pytest.raises(ProviderHTTPError) as raised:
+        provider.analyze(image_path=image, model="vision", detail="high", stage="single_high")
+
+    assert raised.value.code == "VLM-AMBIGUOUS"
+    assert raised.value.ambiguous is True
+    assert raised.value.request_started is True
+    assert raised.value.vision_started is True
+    assert session.vision_attempts == 1
+
+
 class VisionConnectTimeoutSession(FakeSession):
     def post(self, url, **kwargs):
         if url.endswith("/chat/completions"):

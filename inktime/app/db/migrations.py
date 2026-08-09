@@ -1970,6 +1970,14 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_devices_status_sequence ON devices(id,last_status_sequence)",
         ),
     ),
+    Migration(
+        42,
+        "保存昂貴 POST 的 Idempotency request fingerprint",
+        (
+            "ALTER TABLE jobs ADD COLUMN request_fingerprint TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_jobs_dedupe_fingerprint ON jobs(dedupe_key,request_fingerprint)",
+        ),
+    ),
 )
 
 

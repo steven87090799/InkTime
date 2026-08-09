@@ -5,6 +5,7 @@ from datetime import date
 from flask import Blueprint, abort, current_app, g, render_template, request, send_file
 
 from inktime.app.core.json_values import JsonScalarError, json_bool, json_int, json_object_payload
+from inktime.app.core.idempotency import request_fingerprint, scoped_idempotency_key
 from inktime.app.core.security import redact
 
 from inktime.app.core.paths import safe_join
@@ -87,13 +88,19 @@ def _encode_activity_cursor(cursor: dict[str, int]) -> str:
     return ":".join(str(max(0, int(cursor[key]))) for key in ("activity", "job", "device", "error"))
 
 
+def _activity_source_order(cursor: int) -> str:
+    """Start at the newest bounded page, then drain newer rows oldest-first."""
+
+    return "DESC" if int(cursor) == 0 else "ASC"
+
+
 def _timeline_rows(connection, filters: dict, after: dict[str, int]) -> tuple[list[dict], str]:
     """Read every source with a bounded per-source incremental cursor."""
     source_limit = 50
     cursor = {key: max(0, int(value)) for key, value in after.items()}
     rows: list[dict] = []
     for row in connection.execute(
-        "SELECT id,source,source_id,severity,component,event,message,job_id,photo_id,device_id,stage,progress_done,progress_total,error_code,trace_id,details_json,created_at FROM activity_events WHERE id>? ORDER BY id DESC LIMIT ?",
+        f"SELECT id,source,source_id,severity,component,event,message,job_id,photo_id,device_id,stage,progress_done,progress_total,error_code,trace_id,details_json,created_at FROM activity_events WHERE id>? ORDER BY id {_activity_source_order(cursor['activity'])} LIMIT ?",
         (cursor["activity"], source_limit),
     ).fetchall():
         cursor["activity"] = max(cursor["activity"], int(row["id"]))
@@ -107,7 +114,7 @@ def _timeline_rows(connection, filters: dict, after: dict[str, int]) -> tuple[li
         )
         rows.append(item)
     for row in connection.execute(
-        "SELECT id,job_id,event,message,details_json,created_at FROM job_events WHERE id>? ORDER BY id DESC LIMIT ?",
+        f"SELECT id,job_id,event,message,details_json,created_at FROM job_events WHERE id>? ORDER BY id {_activity_source_order(cursor['job'])} LIMIT ?",
         (cursor["job"], source_limit),
     ).fetchall():
         cursor["job"] = max(cursor["job"], int(row["id"]))
@@ -134,7 +141,7 @@ def _timeline_rows(connection, filters: dict, after: dict[str, int]) -> tuple[li
             }
         )
     for row in connection.execute(
-        "SELECT id,device_id,level,event,error_code,message,details_json,created_at FROM device_events WHERE id>? ORDER BY id DESC LIMIT ?",
+        f"SELECT id,device_id,level,event,error_code,message,details_json,created_at FROM device_events WHERE id>? ORDER BY id {_activity_source_order(cursor['device'])} LIMIT ?",
         (cursor["device"], source_limit),
     ).fetchall():
         cursor["device"] = max(cursor["device"], int(row["id"]))
@@ -162,7 +169,7 @@ def _timeline_rows(connection, filters: dict, after: dict[str, int]) -> tuple[li
             }
         )
     for row in connection.execute(
-        "SELECT id,job_id,photo_id,component,error_code,severity,message,occurrences,first_seen_at,last_seen_at,resolved_at,resolution_note FROM job_errors WHERE id>? ORDER BY id DESC LIMIT ?",
+        f"SELECT id,job_id,photo_id,component,error_code,severity,message,occurrences,first_seen_at,last_seen_at,resolved_at,resolution_note FROM job_errors WHERE id>? ORDER BY id {_activity_source_order(cursor['error'])} LIMIT ?",
         (cursor["error"], source_limit),
     ).fetchall():
         cursor["error"] = max(cursor["error"], int(row["id"]))
@@ -477,20 +484,30 @@ def enqueue_scan():
     except JsonScalarError as exc:
         abort(400, description=str(exc))
     repository = current_app.extensions["inktime_job_repository"]
-    idempotency_key = str(request.headers.get("Idempotency-Key") or "").strip()[:128] or None
-    job_id = repository.create_maintenance(
-        kind="scan",
-        name=str(payload.get("name", "增量照片資料庫掃描")),
-        settings={
-            "root_path": root_path,
-            "library_name": str(payload.get("library_name", "主要照片庫")),
-            "build_thumbnails": build_thumbnails,
-            "mode": mode,
-            "trigger_source": "api",
-        },
-        created_by=g.user["id"],
-        dedupe_key=f"idempotency:scan:{idempotency_key}" if idempotency_key else None,
-    )
+    settings = {
+        "root_path": root_path,
+        "library_name": str(payload.get("library_name", "主要照片庫")),
+        "build_thumbnails": build_thumbnails,
+        "mode": mode,
+        "trigger_source": "api",
+    }
+    scan_name = str(payload.get("name", "增量照片資料庫掃描"))
+    idempotency_key = scoped_idempotency_key("scan", str(g.user["id"]), request.headers.get("Idempotency-Key"))
+    try:
+        job_id = repository.create_maintenance(
+            kind="scan",
+            name=scan_name,
+            settings=settings,
+            created_by=g.user["id"],
+            dedupe_key=idempotency_key,
+            request_fingerprint=(
+                request_fingerprint({"name": scan_name, "settings": settings})
+                if idempotency_key
+                else None
+            ),
+        )
+    except ValueError as exc:
+        abort(409, description=str(exc))
     current = repository.get(job_id)
     if current is not None and str(current["status"]) == "pending":
         current_app.extensions["inktime_job_service"].start(job_id)
