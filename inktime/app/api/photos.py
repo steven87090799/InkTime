@@ -13,7 +13,7 @@ from inktime.app.core.json_values import (
     json_object_payload,
     reject_unknown_fields,
 )
-from inktime.app.core.paths import safe_join
+from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.domain.analysis.schema import ALLOWED_TYPES
 from inktime.app.domain.analysis.plan import fingerprint
 from inktime.app.domain.analysis.execution_mode import execution_mode, permits_automatic_ai, permits_manual_ai
@@ -38,7 +38,14 @@ def _payload() -> dict:
     return json_object_payload(request, maximum_bytes=256 * 1024, error_prefix="IMG-004")
 
 
-def _queue_ai(photo_ids: list[str], *, created_by: str, name: str, force_ai: bool = False) -> dict:
+def _queue_ai(
+    photo_ids: list[str],
+    *,
+    created_by: str,
+    name: str,
+    force_ai: bool = False,
+    idempotency_key: str | None = None,
+) -> dict:
     settings = current_app.extensions["inktime_settings_repository"]
     mode = execution_mode(settings)
     if (force_ai and not permits_manual_ai(mode)) or (not force_ai and not permits_automatic_ai(mode)):
@@ -73,6 +80,7 @@ def _queue_ai(photo_ids: list[str], *, created_by: str, name: str, force_ai: boo
         budget_limit=None,
         photo_ids=selected,
         priority=2,
+        dedupe_key=(f"idempotency:manual-analysis:{idempotency_key}" if idempotency_key else None),
         analysis_fingerprint=fingerprint(plan),
         force_recompute=force_ai,
         analysis_spec=plan,
@@ -247,7 +255,11 @@ def queue_photo_ai(photo_id: str):
         abort(403, description="IMG-004 Force AI 僅限排除照片管理操作")
     try:
         return _queue_ai(
-            [photo_id], created_by=str(g.user["id"]), name="排除照片 AI 分析", force_ai=True
+            [photo_id],
+            created_by=str(g.user["id"]),
+            name="排除照片 AI 分析",
+            force_ai=True,
+            idempotency_key=str(request.headers.get("Idempotency-Key") or "").strip()[:128] or None,
         ), 201
     except ValueError as exc:
         return {"error_code": "VLM-008", "message": str(exc)}, 409
@@ -266,7 +278,11 @@ def queue_exclusions_ai():
     ]
     try:
         return _queue_ai(
-            photo_ids, created_by=str(g.user["id"]), name="排除照片批次 AI 分析", force_ai=True
+            photo_ids,
+            created_by=str(g.user["id"]),
+            name="排除照片批次 AI 分析",
+            force_ai=True,
+            idempotency_key=str(request.headers.get("Idempotency-Key") or "").strip()[:128] or None,
         ), 201
     except ValueError as exc:
         return {"error_code": "VLM-008", "message": str(exc)}, 409
@@ -309,8 +325,14 @@ def queue_ai_mode_run():
             group_by=group_by, limit=daily_limit, include_all_active=False
         )
         try:
+            request_key = str(request.headers.get("Idempotency-Key") or "").strip()[:128] or None
             jobs = [
-                _queue_ai(ids, created_by=str(g.user["id"]), name=f"完整照片庫 AI：{group}")
+                _queue_ai(
+                    ids,
+                    created_by=str(g.user["id"]),
+                    name=f"完整照片庫 AI：{group}",
+                    idempotency_key=f"{request_key}:{group}" if request_key else None,
+                )
                 for group, ids in batches
             ]
             return {"jobs": jobs, "queued": sum(job["queued"] for job in jobs), "batch_by": group_by}, 201
@@ -318,7 +340,12 @@ def queue_ai_mode_run():
             return {"error_code": "VLM-008", "message": str(exc)}, 409
     selected = _repository().eligible_photo_ids(limit=limit, include_all_active=False)
     try:
-        return _queue_ai(selected, created_by=str(g.user["id"]), name="AI 模式批次分析"), 201
+        return _queue_ai(
+            selected,
+            created_by=str(g.user["id"]),
+            name="AI 模式批次分析",
+            idempotency_key=str(request.headers.get("Idempotency-Key") or "").strip()[:128] or None,
+        ), 201
     except ValueError as exc:
         return {"error_code": "VLM-008", "message": str(exc)}, 409
 
@@ -515,6 +542,24 @@ def photo_image(photo_id: str):
     if not path.is_file():
         abort(404)
     return send_file(path, conditional=True, max_age=300)
+
+
+@bp.get("/api/v1/photos/<photo_id>/thumbnail")
+@login_required
+def photo_thumbnail(photo_id: str):
+    photo = _repository().get_with_path(photo_id)
+    if photo is None or not str(photo["sha256"] or ""):
+        abort(404)
+    try:
+        path = safe_join(Path(photo["root_path"]), photo["relative_path"])
+    except UnsafePathError:
+        abort(404)
+    if not path.is_file():
+        abort(404)
+    thumbnail = current_app.extensions["inktime_thumbnail_cache"].get_or_create(
+        path, str(photo["sha256"]), 512
+    )
+    return send_file(thumbnail, mimetype="image/jpeg", conditional=True, max_age=300)
 
 
 @bp.post("/api/v1/cache/clear")

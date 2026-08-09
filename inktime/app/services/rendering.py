@@ -1896,7 +1896,8 @@ class RenderService:
         memory_threshold = float(self.settings.get("render.memory_threshold", 70))
         weight = float(self.settings.get("render.e6_weight", 20)) / 100.0
         result: list[dict[str, Any]] = []
-        offset = 0
+        last_score: float | None = None
+        last_id = ""
         # 檔案存在性無法安全地交給 SQLite；用固定批次掃描 SQL 已排序結果，
         # 每次只保留真正可用的候選，避免把大型照片庫 materialize 成 Dict。
         # photos has no durable burst_group_id column; captured_at is the
@@ -1905,6 +1906,7 @@ class RenderService:
             with self.database.session() as connection:
                 rows = connection.execute(
                     f"""
+                    WITH ranked_candidates AS (
                     SELECT p.id,p.relative_path,p.captured_at,p.captured_date,p.captured_month_day,
                            p.sha256,p.perceptual_hash,p.difference_hash,p.duplicate_group_id,p.gps_lat,p.gps_lon,
                            p.e6_score,p.e6_contrast_score,
@@ -1932,7 +1934,10 @@ class RenderService:
                       ))
                       AND (?=0 OR CAST(substr(p.captured_date,1,4) AS INTEGER)
                           IN (SELECT value FROM json_each(?)))
-                    ORDER BY combined_score DESC,p.id LIMIT 250 OFFSET ?
+                    )
+                    SELECT * FROM ranked_candidates
+                    WHERE (? IS NULL OR combined_score<? OR (combined_score=? AND id>?))
+                    ORDER BY combined_score DESC,id LIMIT 250
                     """,  # noqa: S608 -- eligibility predicate is a fixed class constant
                     (
                         1.0 - weight,
@@ -1944,7 +1949,10 @@ class RenderService:
                         target.year,
                         int(bool(candidate_years)),
                         json.dumps(candidate_years or []),
-                        offset,
+                        last_score,
+                        last_score,
+                        last_score,
+                        last_id,
                     ),
                 ).fetchall()
             if not rows:
@@ -1954,7 +1962,10 @@ class RenderService:
                     result.append(dict(stored))
                     if len(result) >= max(limit, 1):
                         break
-            offset += len(rows)
+            last_score = float(rows[-1]["combined_score"])
+            last_id = str(rows[-1]["id"])
+            if len(rows) < 250:
+                break
         # 舊資料庫沒有構圖／E6 欄位值；只替最前面的候選照片做一次本機補算，
         # 避免為整個大型照片庫增加啟動延遲，也完全不會呼叫視覺模型。
         for row in result[: min(40, len(result))]:
@@ -2149,17 +2160,17 @@ class RenderService:
             clauses.append("NOT EXISTS (SELECT 1 FROM display_history dh WHERE dh.photo_id=p.id)")
         return " AND ".join(clauses), params
 
-    def _history_rows(
+    def _history_query_rows(
         self,
         filters: dict[str, Any],
         *,
         month_day: str | None = None,
         history_date: str | None = None,
         limit: int = 500,
-        offset: int = 0,
+        after: tuple[str | float, str] | None = None,
         order_by: str = "p.captured_at,p.id",
-    ) -> list[dict[str, Any]]:
-        """Fetch a bounded, indexed candidate set; never decode image contents here."""
+    ):
+        """Fetch one bounded keyset page; never decode image contents here."""
         where, params = self._history_where(filters, month_day=month_day)
         if history_date:
             where += " AND p.captured_date=?"
@@ -2170,9 +2181,26 @@ class RenderService:
         }
         if order_by not in allowed_orders:
             raise ValueError("HISTORY-001 候選排序不合法")
+        if order_by == "p.captured_at,p.id":
+            continuation = "1=1"
+            cursor_params: tuple[Any, ...] = ()
+            order_clause = "COALESCE(captured_at,''),id"
+            if after is not None:
+                captured_at = str(after[0])
+                continuation = "(COALESCE(captured_at,'')>? OR (COALESCE(captured_at,'')=? AND id>?))"
+                cursor_params = (captured_at, captured_at, str(after[1]))
+        else:
+            continuation = "1=1"
+            cursor_params = ()
+            order_clause = "final_score DESC,id"
+            if after is not None:
+                score = float(after[0])
+                continuation = "(final_score<? OR (final_score=? AND id>?))"
+                cursor_params = (score, score, str(after[1]))
         with self.database.session() as connection:
-            rows = connection.execute(
+            return connection.execute(
                 f"""
+                WITH history_rows AS (
                 SELECT p.id,p.relative_path,p.captured_at,p.captured_date,p.captured_month_day,
                        p.local_candidate_score,p.exclusion_status,
                        p.manual_override,l.root_path,p.e6_score,
@@ -2187,11 +2215,16 @@ class RenderService:
                     WHERE latest.photo_id=p.id ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1
                 )
                 WHERE {where}
-                ORDER BY {order_by}
-                LIMIT ? OFFSET ?
+                )
+                SELECT * FROM history_rows
+                WHERE {continuation}
+                ORDER BY {order_clause}
+                LIMIT ?
                 """,
-                (*params, max(1, min(limit, 500)), max(0, offset)),
+                (*params, *cursor_params, max(1, min(limit, 500))),
             ).fetchall()
+
+    def _usable_history_rows(self, rows) -> list[dict[str, Any]]:
         usable: list[dict[str, Any]] = []
         for stored in rows:
             row = dict(stored)
@@ -2209,6 +2242,27 @@ class RenderService:
                 usable.append(row)
         return usable
 
+    def _history_rows(
+        self,
+        filters: dict[str, Any],
+        *,
+        month_day: str | None = None,
+        history_date: str | None = None,
+        limit: int = 500,
+        after: tuple[str | float, str] | None = None,
+        order_by: str = "p.captured_at,p.id",
+    ) -> list[dict[str, Any]]:
+        return self._usable_history_rows(
+            self._history_query_rows(
+                filters,
+                month_day=month_day,
+                history_date=history_date,
+                limit=limit,
+                after=after,
+                order_by=order_by,
+            )
+        )
+
     def _iter_history_rows(
         self,
         filters: dict[str, Any],
@@ -2217,37 +2271,26 @@ class RenderService:
         history_date: str | None = None,
         order_by: str = "p.captured_at,p.id",
     ):
-        offset = 0
+        after: tuple[str | float, str] | None = None
         while True:
-            batch = self._history_rows(
+            raw_batch = self._history_query_rows(
                 filters,
                 month_day=month_day,
                 history_date=history_date,
                 limit=500,
-                offset=offset,
+                after=after,
                 order_by=order_by,
             )
-            # Offset 必須依 DB batch 前進；若可用列少於 500，可能只是檔案缺失。
-            with self.database.session() as connection:
-                where, params = self._history_where(filters, month_day=month_day)
-                if history_date:
-                    where += " AND p.captured_date=?"
-                    params.append(history_date)
-                raw_order = (
-                    "COALESCE(a.final_ranking_score,a.ranking_score,a.memory_score,p.local_candidate_score,0) DESC,p.id"
-                    if order_by == "final_score DESC,p.id"
-                    else order_by
-                )
-                raw_batch = connection.execute(
-                    f"SELECT p.id FROM photos p JOIN libraries l ON l.id=p.library_id "
-                    f"JOIN photo_analysis a ON a.id=(SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1) "
-                    f"WHERE {where} ORDER BY {raw_order} LIMIT 500 OFFSET ?",  # noqa: S608 -- fixed predicates and validated order
-                    (*params, offset),
-                ).fetchall()
-            yield from batch
+            if not raw_batch:
+                break
+            yield from self._usable_history_rows(raw_batch)
             if len(raw_batch) < 500:
                 break
-            offset += 500
+            last = raw_batch[-1]
+            if order_by == "p.captured_at,p.id":
+                after = (str(last["captured_at"] or ""), str(last["id"]))
+            else:
+                after = (float(last["final_score"] or 0), str(last["id"]))
 
     def _history_dates(self, filters: dict[str, Any]) -> list[str]:
         """Return dates only, so a 100,000-row library is never materialized for a random pick."""

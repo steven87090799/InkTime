@@ -50,6 +50,22 @@ class ReleaseMetadataLockTimeout(RuntimeError):
     """The shared Release metadata transaction could not start in time."""
 
 
+def fsync_directory(path: Path) -> None:
+    """Persist directory entry updates where the host filesystem supports it."""
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
 @contextmanager
 def release_metadata_guard(
     root: Path,
@@ -246,13 +262,20 @@ class AtomicReleasePublisher:
                     os.fsync(stream.fileno())
             with release_metadata_guard(self.root):
                 temporary.replace(final)
+                fsync_directory(self.root)
                 if activate:
                     pointer_tmp = self.root / ".latest.tmp"
                     pointer_tmp.write_text(release_id, encoding="utf-8")
+                    with pointer_tmp.open("rb") as stream:
+                        os.fsync(stream.fileno())
                     pointer_tmp.replace(self.root / "latest")
+                    fsync_directory(self.root)
                     profile_pointer_tmp = self.root / f".latest.{profile.key}.tmp"
                     profile_pointer_tmp.write_text(release_id, encoding="utf-8")
+                    with profile_pointer_tmp.open("rb") as stream:
+                        os.fsync(stream.fileno())
                     profile_pointer_tmp.replace(self.root / f"latest.{profile.key}")
+                    fsync_directory(self.root)
             return manifest
         except Exception:
             if temporary.exists():
@@ -911,6 +934,19 @@ class AtomicReleasePublisher:
             temporary = release_dir / ".inktime-state.tmp"
             temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
             temporary.replace(release_dir / ".inktime-state.json")
+
+    def delete_release(self, release_id: str) -> bool:
+        """Remove one formal Release directory after the DB has fenced it."""
+
+        if _RELEASE_ID.fullmatch(str(release_id)) is None:
+            return False
+        with release_metadata_guard(self.root):
+            release_dir = self.root / str(release_id)
+            if release_dir.parent != self.root or release_dir.is_symlink() or not release_dir.is_dir():
+                return False
+            shutil.rmtree(release_dir)
+            fsync_directory(self.root)
+            return True
 
     def rollback(self, release_id: str) -> None:
         with release_metadata_guard(self.root):

@@ -183,6 +183,14 @@ class JobRepository:
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                if dedupe_key:
+                    existing = connection.execute(
+                        "SELECT id FROM jobs WHERE dedupe_key=? ORDER BY created_at DESC,id DESC LIMIT 1",
+                        (dedupe_key,),
+                    ).fetchone()
+                    if existing is not None:
+                        connection.execute("COMMIT")
+                        return str(existing["id"])
                 connection.execute(
                     """
                     INSERT INTO jobs(id, kind, name, status, strategy, settings_json,
@@ -242,6 +250,15 @@ class JobRepository:
     def get(self, job_id: str):
         with self.database.session() as connection:
             return connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+
+    def get_by_dedupe_key(self, dedupe_key: str):
+        """Return the durable identity for an explicit idempotency key."""
+
+        with self.database.session() as connection:
+            return connection.execute(
+                "SELECT id,status FROM jobs WHERE dedupe_key=? ORDER BY created_at DESC,id DESC LIMIT 1",
+                (dedupe_key,),
+            ).fetchone()
 
     def active_dedupe_job(self, dedupe_key: str):
         """Return the newest in-flight Job for a scheduler-owned identity."""
@@ -338,9 +355,13 @@ class JobRepository:
             try:
                 if dedupe_key:
                     status_clause = (
+                        "1=1"
+                        if str(dedupe_key).startswith("idempotency:")
+                        else (
                         "status NOT IN ('failed','cancelled')"
                         if kind == "backup"
                         else "status IN ('pending','preparing','running','pausing','retrying')"
+                        )
                     )
                     existing = connection.execute(
                         f"SELECT id FROM jobs WHERE dedupe_key=? AND {status_clause}",
@@ -1121,6 +1142,15 @@ class JobRepository:
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                job = connection.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+                if job is None:
+                    connection.execute("COMMIT")
+                    return 0
+                if str(job["status"]) not in {"failed", "completed_with_errors"}:
+                    # A running, paused, cancelled, or already-successful Job
+                    # must never be revived by a retry endpoint.
+                    connection.execute("COMMIT")
+                    return 0
                 cursor = connection.execute(
                     """
                     UPDATE job_items SET status='pending', available_at=?, error_code=NULL, completed_at=NULL,

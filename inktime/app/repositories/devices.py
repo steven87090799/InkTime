@@ -943,9 +943,20 @@ class DeviceRepository:
         wake_reason: str,
         applied_config_version: int | None = None,
         applied_offline_schedule_version: int | None = None,
+        status_sequence: int | None = None,
+        reported_at: str | None = None,
         details: dict | None = None,
-    ) -> None:
+    ) -> bool:
         now = datetime.now(timezone.utc).isoformat()
+        status_at = now
+        if reported_at:
+            try:
+                parsed_status_at = datetime.fromisoformat(str(reported_at).replace("Z", "+00:00"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("DEVICE-004 status_reported_at 格式不合法") from exc
+            if parsed_status_at.tzinfo is None:
+                parsed_status_at = parsed_status_at.replace(tzinfo=timezone.utc)
+            status_at = parsed_status_at.astimezone(timezone.utc).isoformat()
         cutoff = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
         level = "error" if error_code else "info"
         message = error_message[:500] if error_message else "裝置狀態正常"
@@ -953,11 +964,35 @@ class DeviceRepository:
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                current = connection.execute(
+                    "SELECT last_status_at,last_status_sequence FROM devices WHERE id=?",
+                    (device_id,),
+                ).fetchone()
+                if current is None:
+                    connection.execute("ROLLBACK")
+                    raise KeyError(device_id)
+                current_at = str(current["last_status_at"] or "")
+                current_sequence = current["last_status_sequence"]
+                stale = False
+                if status_sequence is not None:
+                    stale = current_sequence is not None and int(status_sequence) <= int(current_sequence)
+                elif current_sequence is not None:
+                    # Once a device emits a sequence, legacy reports cannot
+                    # overwrite the newer monotonic stream.
+                    stale = True
+                elif current_at:
+                    try:
+                        stale = datetime.fromisoformat(status_at) <= datetime.fromisoformat(current_at)
+                    except ValueError:
+                        stale = False
+                if stale:
+                    connection.execute("COMMIT")
+                    return False
                 connection.execute(
                     """
                     UPDATE devices SET firmware_version=?,wifi_rssi=?,battery_percent=?,
                         free_heap_bytes=?,free_psram_bytes=?,last_error_code=?,last_error_message=?,
-                        last_status_at=?,wake_reason=?,
+                        last_status_at=?,last_status_sequence=COALESCE(?,last_status_sequence),wake_reason=?,
                         acked_config_version=CASE
                             WHEN ? IS NOT NULL AND ? > acked_config_version AND ? <= config_version THEN ?
                             ELSE acked_config_version END,
@@ -983,7 +1018,8 @@ class DeviceRepository:
                         free_psram_bytes,
                         error_code[:64] or None,
                         error_message[:500] or None,
-                        now,
+                        status_at,
+                        status_sequence,
                         wake_reason[:64] or None,
                         # acked_config_version CASE
                         applied_config_version,
@@ -1065,8 +1101,10 @@ class DeviceRepository:
                         (device_id, cutoff),
                     )
                 connection.execute("COMMIT")
+                return True
             except Exception:
-                connection.execute("ROLLBACK")
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
                 raise
 
     def runtime_summary(self, device_id: str) -> dict:

@@ -1210,6 +1210,26 @@ class ResilienceRepository:
                         "SELECT id FROM selection_decision_traces WHERE created_at<? AND release_id IS NULL LIMIT ?",
                         (cutoff, int(policy["cleanup_batch_size"])),
                     ).fetchall()
+                elif table == "device_content_queue_events":
+                    # A terminal offline acknowledgement remains auditable until
+                    # its per-item retention fence.  Non-terminal event history
+                    # still follows the ordinary bounded policy.
+                    ids = connection.execute(
+                        """
+                        SELECT e.id
+                        FROM device_content_queue_events e
+                        JOIN device_content_queue_items qi ON qi.id=e.queue_item_id
+                        WHERE e.created_at<?
+                          AND (
+                              qi.status NOT IN ('DISPLAYED','CANCELLED','EXPIRED','FAILED')
+                              OR qi.terminal_ack_retention IS NULL
+                              OR qi.terminal_ack_retention<?
+                          )
+                        ORDER BY e.created_at,e.id
+                        LIMIT ?
+                        """,
+                        (cutoff, now, int(policy["cleanup_batch_size"])),
+                    ).fetchall()
                 else:
                     ids = connection.execute(
                         f"SELECT {id_column} FROM {table} WHERE {time_column}<? LIMIT ?",  # noqa: S608 -- mapping is fixed above
@@ -1243,6 +1263,9 @@ class ResilienceRepository:
     def expire_operational_data(self) -> dict[str, int]:
         """供 Scheduler 使用的小型、冪等維護；不掃描檔案系統。"""
         now = utc_now()
+        queue_gc_cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=90)
+        ).isoformat()
         with self.database.transaction() as connection:
             feedback = connection.execute(
                 "DELETE FROM photo_feedback WHERE feedback_type='SKIP_TEMPORARILY' AND expires_at IS NOT NULL AND expires_at<=?",
@@ -1252,7 +1275,50 @@ class ResilienceRepository:
                 "UPDATE device_content_queue_items SET status='EXPIRED',updated_at=? WHERE status NOT IN ('DISPLAYED','EXPIRED','CANCELLED') AND expires_at IS NOT NULL AND expires_at<=?",
                 (now, now),
             ).rowcount
-        return {"expired_feedback": int(feedback), "expired_queue_items": int(queue)}
+            queue_gc = connection.execute(
+                """
+                DELETE FROM device_content_queue_items
+                WHERE id IN (
+                    SELECT qi.id
+                    FROM device_content_queue_items qi
+                    WHERE qi.status IN ('DISPLAYED','CANCELLED','EXPIRED','FAILED')
+                      AND qi.delivery_mode='online_queue'
+                      AND qi.offline_schedule_id IS NULL
+                      AND qi.updated_at<?
+                      AND (qi.terminal_ack_retention IS NULL OR qi.terminal_ack_retention<?)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM rollout_targets rt WHERE rt.queue_item_id=qi.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM device_content_queues q
+                          WHERE q.device_id=qi.device_id
+                            AND qi.release_id IN (
+                                q.current_release_id,
+                                q.last_known_good_release_id,
+                                q.next_queued_release_id,
+                                q.emergency_fallback_release_id
+                            )
+                      )
+                    ORDER BY qi.updated_at,qi.id
+                    LIMIT 200
+                )
+                """,
+                (queue_gc_cutoff, now),
+            ).rowcount
+        # SQLite's lightweight planner/statistics refresh is safe here because
+        # this method runs on the low-frequency operational maintenance cadence.
+        try:
+            with self.database.session() as connection:
+                connection.execute("PRAGMA optimize")
+        except Exception:
+            # Maintenance statistics must never turn a committed expiry into a
+            # failed scheduler step.
+            pass
+        return {
+            "expired_feedback": int(feedback),
+            "expired_queue_items": int(queue),
+            "gc_queue_items": int(queue_gc),
+        }
 
     def create_rollout(
         self, *, release_id: str, name: str, user_id: str, stages: list[dict[str, Any]] | None = None

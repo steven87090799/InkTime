@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import re
+from threading import Lock
+import time
 from typing import Any, Iterable, Sequence
 from uuid import uuid4
 
@@ -28,6 +30,17 @@ from inktime.app.domain.photos.dates import materialized_capture_fields, parse_p
 LOCAL_QUALITY_RULE = "local-quality"
 LOCAL_QUALITY_RULE_VERSION = FEATURE_VERSION
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_SCORE_POPULATION_TTL_SECONDS = 45.0
+_SCORE_POPULATION_LOCK = Lock()
+_SCORE_POPULATION_CACHE: tuple[str, float, tuple[float, ...]] | None = None
+
+
+def invalidate_score_population_cache() -> None:
+    """Invalidate the bounded process-local score distribution cache after writes."""
+
+    global _SCORE_POPULATION_CACHE
+    with _SCORE_POPULATION_LOCK:
+        _SCORE_POPULATION_CACHE = None
 
 
 def _effective_cache_version(prompt_version: str, vision_request_fingerprint: str | None) -> str:
@@ -1304,6 +1317,7 @@ class PhotoRepository:
                 )
                 result = dict(connection.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone())
                 connection.execute("COMMIT")
+                invalidate_score_population_cache()
                 return result
             except Exception:
                 connection.execute("ROLLBACK")
@@ -1865,6 +1879,7 @@ class PhotoRepository:
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+        invalidate_score_population_cache()
 
     def set_upload_privacy(self, photo_id: str, *, never_upload: bool, changed_by: str) -> dict:
         """Toggle model-upload privacy without changing display or saved analysis."""
@@ -2006,10 +2021,7 @@ class PhotoRepository:
             rows = connection.execute(
                 f"""
                 SELECT p.*,l.name AS library_name,a.caption,a.types_json,a.memory_score,a.beauty_score,a.ranking_score,a.side_caption,
-                       a.provider,a.model,a.raw_json,a.created_at AS analyzed_at,
-                       (SELECT COALESCE(SUM(input_tokens+output_tokens),0) FROM api_usage u WHERE u.photo_id=p.id) AS tokens,
-                       (SELECT COALESCE(SUM(CASE WHEN u.cost_source<>'unknown' THEN COALESCE(u.actual_cost,u.estimated_cost) ELSE 0 END),0) FROM api_usage u WHERE u.photo_id=p.id) AS cost,
-                       (SELECT COUNT(*) FROM api_usage u WHERE u.photo_id=p.id AND u.cost_source='unknown') AS unknown_cost_count
+                       a.provider,a.model,a.raw_json,a.created_at AS analyzed_at
                 FROM photos p JOIN libraries l ON l.id=p.library_id
                 LEFT JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id ORDER BY created_at DESC LIMIT 1)
                 WHERE {where} ORDER BY COALESCE(p.captured_at,p.created_at) DESC,p.id LIMIT ? OFFSET ?
@@ -2020,20 +2032,32 @@ class PhotoRepository:
 
     def score_population(self) -> list[float]:
         """回傳每張照片最新一次有效排序分，供相對鑑別校準使用。"""
-        with self.database.session() as connection:
-            rows = connection.execute(
-                """
-                SELECT a.ranking_score
-                FROM photo_analysis a
-                WHERE a.ranking_score IS NOT NULL
-                  AND a.id=(
-                    SELECT latest.id FROM photo_analysis latest
-                    WHERE latest.photo_id=a.photo_id
-                    ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1
-                  )
-                """
-            ).fetchall()
-        return [float(row["ranking_score"]) for row in rows]
+        global _SCORE_POPULATION_CACHE
+        cache_key = str(self.database.path)
+        now = time.monotonic()
+        with _SCORE_POPULATION_LOCK:
+            if (
+                _SCORE_POPULATION_CACHE is not None
+                and _SCORE_POPULATION_CACHE[0] == cache_key
+                and now - _SCORE_POPULATION_CACHE[1] < _SCORE_POPULATION_TTL_SECONDS
+            ):
+                return list(_SCORE_POPULATION_CACHE[2])
+            with self.database.session() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT a.ranking_score
+                    FROM photo_analysis a
+                    WHERE a.ranking_score IS NOT NULL
+                      AND a.id=(
+                        SELECT latest.id FROM photo_analysis latest
+                        WHERE latest.photo_id=a.photo_id
+                        ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1
+                      )
+                    """
+                ).fetchall()
+            values = tuple(float(row["ranking_score"]) for row in rows)
+            _SCORE_POPULATION_CACHE = (cache_key, time.monotonic(), values)
+            return list(values)
 
     def save_analysis(
         self,
@@ -2201,6 +2225,7 @@ class PhotoRepository:
                 if own_transaction and connection.in_transaction:
                     connection.execute("ROLLBACK")
                 raise
+        invalidate_score_population_cache()
 
     def set_manual_orientation(self, photo_id: str, rotation_cw: int | None, changed_by: str) -> dict:
         if isinstance(rotation_cw, bool) or rotation_cw not in {0, 90, 180, 270, None}:

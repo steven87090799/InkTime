@@ -778,8 +778,15 @@ def publish_release():
         name="電子紙正式發布",
         settings=job_settings,
         created_by=g.user["id"],
+        dedupe_key=(
+            f"idempotency:release:{str(request.headers.get('Idempotency-Key') or '').strip()[:128]}"
+            if str(request.headers.get("Idempotency-Key") or "").strip()
+            else None
+        ),
     )
-    current_app.extensions["inktime_job_service"].start(job_id)
+    current = repository.get(job_id)
+    if current is not None and str(current["status"]) == "pending":
+        current_app.extensions["inktime_job_service"].start(job_id)
     return {"id": job_id, "detail_url": f"/jobs/{job_id}"}, 202
 
 

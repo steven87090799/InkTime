@@ -68,15 +68,35 @@ def _matches_activity(row: dict, filters: dict) -> bool:
     )
 
 
-def _timeline_rows(connection, filters: dict, after: int) -> list[dict]:
-    """Read each existing source in a small window; old rows are never copied wholesale."""
-    activity_after = "WHERE id>?" if after else ""
-    activity_values = (after,) if after else ()
+def _activity_cursor(raw: str | int | None) -> dict[str, int]:
+    """Decode a per-source cursor; numeric cursors remain backward compatible."""
+    value = str(raw or "").strip()
+    if not value:
+        return {"activity": 0, "job": 0, "device": 0, "error": 0}
+    parts = value.split(":")
+    if len(parts) == 4 and all(part.isdigit() for part in parts):
+        return dict(zip(("activity", "job", "device", "error"), (max(0, int(part)) for part in parts)))
+    if value.isdigit():
+        # The former UI only advanced activity_events. Replaying the other
+        # bounded sources from zero avoids silently losing their first page.
+        return {"activity": max(0, int(value)), "job": 0, "device": 0, "error": 0}
+    raise ValueError("ACTIVITY-001 cursor 格式錯誤")
+
+
+def _encode_activity_cursor(cursor: dict[str, int]) -> str:
+    return ":".join(str(max(0, int(cursor[key]))) for key in ("activity", "job", "device", "error"))
+
+
+def _timeline_rows(connection, filters: dict, after: dict[str, int]) -> tuple[list[dict], str]:
+    """Read every source with a bounded per-source incremental cursor."""
+    source_limit = 50
+    cursor = {key: max(0, int(value)) for key, value in after.items()}
     rows: list[dict] = []
     for row in connection.execute(
-        f"SELECT id,source,source_id,severity,component,event,message,job_id,photo_id,device_id,stage,progress_done,progress_total,error_code,trace_id,details_json,created_at FROM activity_events {activity_after} ORDER BY id DESC LIMIT 200",  # noqa: S608 -- fixed clause selected from trusted cursor state
-        activity_values,
+        "SELECT id,source,source_id,severity,component,event,message,job_id,photo_id,device_id,stage,progress_done,progress_total,error_code,trace_id,details_json,created_at FROM activity_events WHERE id>? ORDER BY id DESC LIMIT ?",
+        (cursor["activity"], source_limit),
     ).fetchall():
+        cursor["activity"] = max(cursor["activity"], int(row["id"]))
         item = dict(row)
         item.update(
             {
@@ -86,11 +106,11 @@ def _timeline_rows(connection, filters: dict, after: int) -> list[dict]:
             }
         )
         rows.append(item)
-    if after:
-        return [redact(item) for item in rows if _matches_activity(item, filters)][:200]
     for row in connection.execute(
-        "SELECT id,job_id,event,message,details_json,created_at FROM job_events ORDER BY id DESC LIMIT 200"
+        "SELECT id,job_id,event,message,details_json,created_at FROM job_events WHERE id>? ORDER BY id DESC LIMIT ?",
+        (cursor["job"], source_limit),
     ).fetchall():
+        cursor["job"] = max(cursor["job"], int(row["id"]))
         rows.append(
             {
                 "id": f"job:{row['id']}",
@@ -114,20 +134,17 @@ def _timeline_rows(connection, filters: dict, after: int) -> list[dict]:
             }
         )
     for row in connection.execute(
-        "SELECT id,device_id,level,event,error_code,message,details_json,created_at FROM device_events ORDER BY id DESC LIMIT 200"
+        "SELECT id,device_id,level,event,error_code,message,details_json,created_at FROM device_events WHERE id>? ORDER BY id DESC LIMIT ?",
+        (cursor["device"], source_limit),
     ).fetchall():
+        cursor["device"] = max(cursor["device"], int(row["id"]))
         level = str(row["level"]).upper()
         rows.append(
             {
                 "id": f"device:{row['id']}",
                 "source": "device_events",
                 "source_id": str(row["id"]),
-                "severity": {
-                    "INFO": "INFO",
-                    "WARNING": "WARNING",
-                    "ERROR": "ERROR",
-                    "CRITICAL": "CRITICAL",
-                }.get(level, "INFO"),
+                "severity": {"INFO": "INFO", "WARNING": "WARNING", "ERROR": "ERROR", "CRITICAL": "CRITICAL"}.get(level, "INFO"),
                 "component": "device",
                 "event": row["event"],
                 "message": row["message"],
@@ -145,8 +162,10 @@ def _timeline_rows(connection, filters: dict, after: int) -> list[dict]:
             }
         )
     for row in connection.execute(
-        "SELECT id,job_id,photo_id,component,error_code,severity,message,occurrences,first_seen_at,last_seen_at,resolved_at,resolution_note FROM job_errors ORDER BY last_seen_at DESC,id DESC LIMIT 200"
+        "SELECT id,job_id,photo_id,component,error_code,severity,message,occurrences,first_seen_at,last_seen_at,resolved_at,resolution_note FROM job_errors WHERE id>? ORDER BY id DESC LIMIT ?",
+        (cursor["error"], source_limit),
     ).fetchall():
+        cursor["error"] = max(cursor["error"], int(row["id"]))
         rows.append(
             {
                 "id": f"error:{row['id']}",
@@ -164,12 +183,7 @@ def _timeline_rows(connection, filters: dict, after: int) -> list[dict]:
                 "progress_total": None,
                 "error_code": row["error_code"],
                 "trace_id": None,
-                "details_json": {
-                    "occurrences": row["occurrences"],
-                    "first_seen_at": row["first_seen_at"],
-                    "resolved_at": row["resolved_at"],
-                    "resolution_note": row["resolution_note"],
-                },
+                "details_json": {"occurrences": row["occurrences"], "first_seen_at": row["first_seen_at"], "resolved_at": row["resolved_at"], "resolution_note": row["resolution_note"]},
                 "created_at": row["last_seen_at"],
                 "occurred_at": row["last_seen_at"],
             }
@@ -180,7 +194,7 @@ def _timeline_rows(connection, filters: dict, after: int) -> list[dict]:
         key=lambda item: (str(item["occurred_at"]), str(item["source"]), str(item["source_id"])),
         reverse=True,
     )
-    return [redact(item) for item in ordered if _matches_activity(item, filters)][:200]
+    return [redact(item) for item in ordered if _matches_activity(item, filters)][:200], _encode_activity_cursor(cursor)
 
 
 @bp.get("/activity")
@@ -193,12 +207,12 @@ def activity_page():
 @login_required
 def activity_feed():
     try:
-        after = max(0, int(request.args.get("after", 0) or 0))
+        after = _activity_cursor(request.args.get("after"))
     except ValueError:
         abort(400, description="ACTIVITY-001 cursor 格式錯誤")
     filters = _activity_filters()
     with current_app.extensions["inktime_database"].session() as connection:
-        events = _timeline_rows(connection, filters, after)
+        events, next_cursor = _timeline_rows(connection, filters, after)
         summary = connection.execute(
             "SELECT COUNT(*) running_jobs FROM jobs WHERE status IN ('running','retrying','pausing')"
         ).fetchone()
@@ -220,6 +234,7 @@ def activity_feed():
     )
     return {
         "events": events,
+        "next_cursor": next_cursor,
         "summary": {
             "status": status,
             "running_jobs": int(summary["running_jobs"]),
@@ -235,7 +250,7 @@ def activity_download():
     import json
 
     with current_app.extensions["inktime_database"].session() as connection:
-        rows = _timeline_rows(connection, _activity_filters(), 0)
+        rows, _next_cursor = _timeline_rows(connection, _activity_filters(), _activity_cursor(None))
     return current_app.response_class(
         json.dumps(rows, ensure_ascii=False),
         mimetype="application/json",
@@ -462,6 +477,7 @@ def enqueue_scan():
     except JsonScalarError as exc:
         abort(400, description=str(exc))
     repository = current_app.extensions["inktime_job_repository"]
+    idempotency_key = str(request.headers.get("Idempotency-Key") or "").strip()[:128] or None
     job_id = repository.create_maintenance(
         kind="scan",
         name=str(payload.get("name", "增量照片資料庫掃描")),
@@ -473,8 +489,11 @@ def enqueue_scan():
             "trigger_source": "api",
         },
         created_by=g.user["id"],
+        dedupe_key=f"idempotency:scan:{idempotency_key}" if idempotency_key else None,
     )
-    current_app.extensions["inktime_job_service"].start(job_id)
+    current = repository.get(job_id)
+    if current is not None and str(current["status"]) == "pending":
+        current_app.extensions["inktime_job_service"].start(job_id)
     return {"id": job_id, "detail_url": f"/jobs/{job_id}"}, 202
 
 

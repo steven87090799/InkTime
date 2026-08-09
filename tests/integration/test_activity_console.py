@@ -40,9 +40,9 @@ def test_activity_is_bounded_unifies_sources_and_redacts(client, app):
     assert len(response.json["events"]) <= 200
     assert {event["source"] for event in response.json["events"]} >= {"activity", "job_events", "job_errors"}
     assert "secret-token" not in str(response.json)
-    first_id = max(int(event["id"]) for event in response.json["events"] if event["source"] == "activity")
+    first_cursor = response.json["next_cursor"]
     app.extensions["inktime_observability_service"].record("INFO", "test", "new_activity", "較新的事件")
-    new_only = client.get(f"/api/v1/activity?after={first_id}")
+    new_only = client.get(f"/api/v1/activity?after={first_cursor}")
     assert new_only.status_code == 200
     assert all(event["source"] == "activity" for event in new_only.json["events"])
     page = client.get("/activity?job_id=activity-job")
@@ -52,7 +52,8 @@ def test_activity_is_bounded_unifies_sources_and_redacts(client, app):
     assert "loadInFlight" in body
     assert "visibilitychange" in body
     assert "setInterval" not in body
-    assert "lastId=Math.max(lastId" in body
+    assert "cursor=''" in body
+    assert "next_cursor" in body
     assert "if(paused||document.hidden||!autoRefresh.checked)return" in body
     assert "if(paused){stopPoll();return;}" in body
     assert "if(!autoRefresh.checked){stopPoll();return;}" in body

@@ -1906,6 +1906,19 @@ MIGRATIONS = (
               AND offline_schedule_capability_state IN ('unknown_12','confirmed_24')
             """,
             """
+            INSERT INTO device_events(
+                device_id,level,event,error_code,message,details_json,created_at
+            )
+            SELECT id,'warning','offline_schedule_capability_quarantined','DEVICE-008',
+                   '舊離線排程能力不明；已隔離，請重新配對或 Repair 確認 24-slot capability',
+                   json_object(
+                       'offline_schedule_capability_state',offline_schedule_capability_state,
+                       'offline_schedule_max_slots',offline_schedule_max_slots
+                   ),datetime('now')
+            FROM devices
+            WHERE offline_schedule_capability_state='legacy_ambiguous'
+            """,
+            """
             CREATE TRIGGER trg_devices_offline_schedule_slots_insert
             BEFORE INSERT ON devices
             WHEN NEW.offline_schedule_max_slots NOT IN (12,24)
@@ -1940,6 +1953,21 @@ MIGRATIONS = (
               AND value_json='300'
               AND (updated_by IS NULL OR updated_by='')
             """,
+        ),
+    ),
+    Migration(
+        40,
+        "加入照片列表穩定排序索引",
+        (
+            "CREATE INDEX IF NOT EXISTS idx_photos_legacy_sort ON photos(COALESCE(captured_at,created_at) DESC,id DESC)",
+        ),
+    ),
+    Migration(
+        41,
+        "記錄裝置狀態單調序號",
+        (
+            "ALTER TABLE devices ADD COLUMN last_status_sequence INTEGER",
+            "CREATE INDEX IF NOT EXISTS idx_devices_status_sequence ON devices(id,last_status_sequence)",
         ),
     ),
 )

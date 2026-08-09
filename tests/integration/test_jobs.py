@@ -166,6 +166,35 @@ def test_failed_items_can_be_retried(app):
     assert repository.get(job_id)["status"] == "completed"
 
 
+def test_retry_failed_does_not_revive_running_or_cancelled_jobs(app):
+    service, repository, running_id = create_job(app, 1)
+    service.start(running_id)
+    assert service.retry_failed(running_id) == 0
+    assert repository.get(running_id)["status"] == "running"
+
+    _, repository, cancelled_id = create_job(app, 1)
+    service.start(cancelled_id)
+    service.cancel(cancelled_id)
+    assert service.retry_failed(cancelled_id) == 0
+    assert repository.get(cancelled_id)["status"] == "cancelled"
+
+
+def test_explicit_analysis_idempotency_key_reuses_terminal_job(app):
+    service, repository, first_id = create_job(app, 1)
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE jobs SET status='completed',completed_at=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), first_id))
+    replay_id = service.create_analysis_job(
+        name="重送工作",
+        strategy="local",
+        settings={"different": True},
+        created_by="tester",
+        budget_limit=None,
+        photo_ids=[],
+        dedupe_key="idempotency:analysis:test-key",
+    )
+    assert replay_id == first_id
+
+
 def test_scheduled_retry_wait_is_persisted_and_not_claimed_early(app):
     service, repository, job_id = create_job(app, 1)
     service.start(job_id)

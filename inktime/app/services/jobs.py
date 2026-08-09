@@ -37,6 +37,10 @@ class JobService:
         strategy = normalize_analysis_strategy(strategy)
         if budget_limit is not None and budget_limit < 0:
             raise ValueError("預算不可小於零")
+        if dedupe_key:
+            existing = self.repository.get_by_dedupe_key(dedupe_key)
+            if existing is not None:
+                return str(existing["id"])
         if photo_ids is None:
             preview = self.repository.selection_preview(
                 analysis_fingerprint=analysis_fingerprint, selection_mode=selection_mode, limit=limit

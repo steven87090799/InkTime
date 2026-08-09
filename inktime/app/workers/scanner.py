@@ -181,7 +181,7 @@ class PhotoScanner:
         max_file_bytes: int = 200 * 1024 * 1024,
         max_pixels: int = 60_000_000,
         max_edge_px: int = 12_000,
-        thumbnail_capacity_check_interval: int = 500,
+        thumbnail_capacity_check_interval: int = 5_000,
         thumbnail_max_bytes: int = 5 * 1024 * 1024 * 1024,
         thumbnail_retention_days: int = 30,
         quality_policy_settings: dict | None = None,
@@ -451,7 +451,10 @@ class PhotoScanner:
                             self.thumbnails.get_or_create(item.source, result.sha256, 512)
                             thumbnails_created += 1
                             if thumbnails_created % thumbnail_capacity_check_interval == 0:
-                                inventory = self.thumbnails.inventory()
+                                # A scan must not stat the entire thumbnail cache
+                                # on every capacity probe. The scheduled cache
+                                # task performs the full maintenance walk.
+                                inventory = self.thumbnails.inventory(limit=5_000)
                                 if sum(entry[1] for entry in inventory) > thumbnail_max_bytes * 1.10:
                                     active_hashes = self.repository.active_hashes_for(
                                         [entry[4] for entry in inventory]

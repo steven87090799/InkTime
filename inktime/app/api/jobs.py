@@ -145,6 +145,11 @@ def create_job():
             analysis_fingerprint=analysis_fingerprint,
             force_recompute=force_recompute,
             analysis_spec=plan,
+            dedupe_key=(
+                f"idempotency:analysis:{str(request.headers.get('Idempotency-Key') or '').strip()[:128]}"
+                if str(request.headers.get("Idempotency-Key") or "").strip()
+                else None
+            ),
         )
     except ValueError as exc:
         return {"message": str(exc)}, 409

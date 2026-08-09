@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
+import os
 from typing import Any
 
 from inktime.app.db import Database
 from inktime.app.domain.rendering import AtomicReleasePublisher
+from inktime.app.domain.rendering.release import fsync_directory
 
 
 class ReleaseCoordinator:
@@ -190,6 +192,75 @@ class ReleaseCoordinator:
                     fallback = max(compatible)[1]
                     temporary = self.publisher.root / f".{pointer_name}.reconcile.tmp"
                     temporary.write_text(fallback, encoding="utf-8")
+                    with temporary.open("rb") as stream:
+                        os.fsync(stream.fileno())
                     temporary.replace(pointer)
+                    fsync_directory(self.publisher.root)
                     diagnostics["pointer_recovered"] += 1
         return diagnostics
+
+    def gc_unreferenced_releases(self, *, retention_days: int = 90, max_items: int = 20) -> dict[str, int]:
+        """Delete only old superseded payloads with no durable or pointer reference."""
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, int(retention_days)))).isoformat()
+        limit = max(1, min(int(max_items), 100))
+        pointer_ids = set()
+        pointer_paths = list(self.publisher.root.glob("latest*")) + list(self.publisher.root.glob(".latest*"))
+        for pointer in pointer_paths:
+            if pointer.is_symlink() or not pointer.is_file():
+                continue
+            try:
+                value = pointer.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if value:
+                pointer_ids.add(value)
+        deleted = 0
+        skipped = 0
+        with self.database.session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                candidates = connection.execute(
+                    """
+                    SELECT r.id
+                    FROM releases r
+                    WHERE r.status IN ('published','superseded','staged','staged_failed')
+                      AND r.created_at<?
+                      AND NOT EXISTS (SELECT 1 FROM device_render_releases drr WHERE drr.release_id=r.id)
+                      AND NOT EXISTS (SELECT 1 FROM device_content_queue_items qi WHERE qi.release_id=r.id)
+                      AND NOT EXISTS (SELECT 1 FROM device_offline_schedule_slots os WHERE os.release_id=r.id)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM device_content_queues q
+                          WHERE r.id IN (q.current_release_id,q.last_known_good_release_id,
+                                          q.next_queued_release_id,q.emergency_fallback_release_id)
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM rollout_campaigns rc
+                          WHERE rc.release_id=r.id OR rc.previous_release_id=r.id
+                      )
+                      AND NOT EXISTS (SELECT 1 FROM display_history dh WHERE dh.release_id=r.id)
+                      AND NOT EXISTS (SELECT 1 FROM selection_decision_traces sdt WHERE sdt.release_id=r.id)
+                    ORDER BY r.created_at,r.id
+                    LIMIT ?
+                    """,
+                    (cutoff, limit),
+                ).fetchall()
+                for row in candidates:
+                    release_id = str(row["id"])
+                    if release_id in pointer_ids:
+                        skipped += 1
+                        continue
+                    if not self.publisher.delete_release(release_id):
+                        skipped += 1
+                        continue
+                    connection.execute(
+                        "DELETE FROM releases WHERE id=? AND status IN ('published','superseded','staged','staged_failed')",
+                        (release_id,),
+                    )
+                    deleted += 1
+                connection.execute("COMMIT")
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+        return {"deleted": deleted, "skipped": skipped}
