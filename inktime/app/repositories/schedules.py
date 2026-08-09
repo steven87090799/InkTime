@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from builtins import list as builtin_list
-from datetime import datetime, timedelta
+from contextlib import nullcontext
+from datetime import datetime, timedelta, timezone
 import json
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -17,8 +18,8 @@ TASK_DEFAULTS: dict[str, dict[str, Any]] = {
     "incremental_scan": {
         "name": "增量掃描",
         "kind": "scan",
-        "cron": "0 2 * * *",
-        "start_time": "02:00",
+        "cron": "0 3 1 * *",
+        "start_time": "03:00",
         "window_start": "00:00",
         "window_end": "06:00",
         "timeout_seconds": 14400,
@@ -38,8 +39,8 @@ TASK_DEFAULTS: dict[str, dict[str, Any]] = {
     "full_reconcile": {
         "name": "完整一致性掃描",
         "kind": "scan",
-        "cron": "0 3 * * 0",
-        "start_time": "03:00",
+        "cron": "0 4 1 1 *",
+        "start_time": "04:00",
         "window_start": "00:00",
         "window_end": "08:00",
         "timeout_seconds": 28800,
@@ -151,9 +152,10 @@ class ScheduledTaskRepository:
             rows = connection.execute("SELECT * FROM scheduled_tasks ORDER BY key").fetchall()
         return [self._row(row) for row in rows]
 
-    def get(self, key: str) -> dict[str, Any] | None:
-        with self.database.session() as connection:
-            row = connection.execute("SELECT * FROM scheduled_tasks WHERE key=?", (key,)).fetchone()
+    def get(self, key: str, *, connection=None) -> dict[str, Any] | None:
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            row = active_connection.execute("SELECT * FROM scheduled_tasks WHERE key=?", (key,)).fetchone()
         return self._row(row) if row else None
 
     def update(self, key: str, payload: dict[str, Any], timezone: str) -> dict[str, Any]:
@@ -202,10 +204,43 @@ class ScheduledTaskRepository:
     def due(self, now: datetime) -> builtin_list[dict[str, Any]]:
         with self.database.session() as connection:
             rows = connection.execute(
-                "SELECT * FROM scheduled_tasks WHERE enabled=1 AND next_run IS NOT NULL AND next_run<=? ORDER BY next_run,key",
+                """SELECT * FROM scheduled_tasks
+                   WHERE enabled=1 AND next_run IS NOT NULL
+                     AND julianday(next_run)<=julianday(?)
+                   ORDER BY julianday(next_run),key""",
                 (now.isoformat(),),
             ).fetchall()
         return [self._row(row) for row in rows]
+
+    def rebase_enabled_next_runs(
+        self,
+        timezone_name: str,
+        *,
+        now: datetime,
+        connection,
+    ) -> int:
+        """Rebase enabled cron cursors after a live system-timezone change."""
+
+        zone = ZoneInfo(str(timezone_name))
+        authoritative = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+        local_now = authoritative.astimezone(zone)
+        rows = connection.execute(
+            """SELECT key,cron,weekdays_json,next_run
+               FROM scheduled_tasks WHERE enabled=1 ORDER BY key"""
+        ).fetchall()
+        updated = 0
+        changed_at = utc_now()
+        for row in rows:
+            weekdays = json.loads(str(row["weekdays_json"] or "[]"))
+            next_run = self._next_run(str(row["cron"]), local_now, weekdays).isoformat()
+            if str(row["next_run"] or "") == next_run:
+                continue
+            connection.execute(
+                "UPDATE scheduled_tasks SET next_run=?,updated_at=? WHERE key=?",
+                (next_run, changed_at, str(row["key"])),
+            )
+            updated += 1
+        return updated
 
     def mark_enqueued(self, task: dict[str, Any], now: datetime) -> None:
         next_run = self._next_run(task["cron"], now, task["weekdays"]).isoformat()
@@ -215,11 +250,66 @@ class ScheduledTaskRepository:
                 (next_run, utc_now(), task["key"]),
             )
 
-    def record_success(self, key: str) -> None:
-        with self.database.session() as connection:
-            connection.execute(
-                "UPDATE scheduled_tasks SET last_success=?,error_status=NULL,updated_at=? WHERE key=?",
-                (utc_now(), utc_now(), key),
+    def record_success(
+        self,
+        task: dict[str, Any],
+        now: datetime,
+        *,
+        scheduled_occurrence_at: str,
+        connection=None,
+    ) -> None:
+        """Record success and repair only an unadvanced scheduled cursor."""
+
+        occurrence = datetime.fromisoformat(scheduled_occurrence_at)
+        if occurrence.tzinfo is not None and now.tzinfo is not None:
+            occurrence = occurrence.astimezone(now.tzinfo)
+        repaired_next_run = self._next_run(
+            task["cron"], occurrence, task["weekdays"]
+        ).isoformat()
+        completed_at = utc_now()
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            active_connection.execute(
+                """UPDATE scheduled_tasks
+                   SET last_success=?,error_status=NULL,
+                       next_run=CASE WHEN next_run=? THEN ? ELSE next_run END,
+                       updated_at=?
+                   WHERE key=?""",
+                (
+                    completed_at,
+                    scheduled_occurrence_at,
+                    repaired_next_run,
+                    completed_at,
+                    task["key"],
+                ),
+            )
+
+    def record_terminal_outcome(
+        self, task: dict[str, Any], _outcome_code: str, now: datetime, *, connection=None
+    ) -> None:
+        """Advance a successful business outcome without recording a failure."""
+
+        next_run = self._next_run(task["cron"], now, task["weekdays"]).isoformat()
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            active_connection.execute(
+                """UPDATE scheduled_tasks
+                   SET last_failure=NULL,error_status=NULL,next_run=?,updated_at=?
+                   WHERE key=?""",
+                (next_run, utc_now(), task["key"]),
+            )
+
+    def record_retry_exhausted(
+        self, task: dict[str, Any], message: str, now: datetime, *, connection=None
+    ) -> None:
+        """Record an exhausted Job budget while preserving the normal cron cursor."""
+
+        next_run = self._next_run(task["cron"], now, task["weekdays"]).isoformat()
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            active_connection.execute(
+                "UPDATE scheduled_tasks SET last_failure=?,error_status=?,next_run=?,updated_at=? WHERE key=?",
+                (utc_now(), message[:1000], next_run, utc_now(), task["key"]),
             )
 
     def record_failure(self, task: dict[str, Any], message: str, now: datetime) -> None:
@@ -228,6 +318,25 @@ class ScheduledTaskRepository:
             connection.execute(
                 "UPDATE scheduled_tasks SET last_failure=?,error_status=?,next_run=?,updated_at=? WHERE key=?",
                 (utc_now(), message[:1000], retry_at.isoformat(), utc_now(), task["key"]),
+            )
+
+    def record_terminal(
+        self, task: dict[str, Any], message: str, now: datetime, *, connection=None
+    ) -> None:
+        """Record a deterministic stop while advancing to the next normal cron slot.
+
+        A missing-content/configuration result is useful operator context, but
+        it is not a reason to wake the scheduler again after the short retry
+        interval.  Keep the error visible and let the normal schedule decide
+        when the task is next eligible.
+        """
+
+        next_run = self._next_run(task["cron"], now, task["weekdays"]).isoformat()
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            active_connection.execute(
+                "UPDATE scheduled_tasks SET last_failure=?,error_status=?,next_run=?,updated_at=? WHERE key=?",
+                (utc_now(), message[:1000], next_run, utc_now(), task["key"]),
             )
 
     @staticmethod
@@ -278,7 +387,7 @@ class ScheduledTaskRepository:
             "concurrency": (1, 32),
             "missing_safe_percent": (0, 100),
             "lead_minutes": (0, 1440),
-            "daily_count": (1, 20),
+            "daily_count": (1, 24),
             "prefetch_count": (1, 10),
             "new_photo_delay_minutes": (0, 43_200),
             "max_bytes": (1, 10 * 1024 * 1024 * 1024 * 1024),
@@ -372,8 +481,40 @@ class ScheduledTaskRepository:
 
     def _next_run(self, cron: str, after: datetime, weekdays: builtin_list[int]) -> datetime:
         minute, hour, day, month, weekday = cron.split()
-        candidate = after.replace(second=0, microsecond=0) + timedelta(minutes=1)
-        for _ in range(527041):
+        if after.tzinfo is None:
+            candidate = after.replace(second=0, microsecond=0) + timedelta(minutes=1)
+            candidates = (candidate + timedelta(minutes=offset) for offset in range(527041))
+        else:
+            zone = after.tzinfo
+            candidate_utc = (
+                after.astimezone(timezone.utc).replace(second=0, microsecond=0)
+                + timedelta(minutes=1)
+            )
+            candidates = (
+                (candidate_utc + timedelta(minutes=offset)).astimezone(zone)
+                for offset in range(527041)
+            )
+        max_wall_minute = (
+            after.year,
+            after.month,
+            after.day,
+            after.hour,
+            after.minute,
+        )
+        for candidate in candidates:
+            wall_minute = (
+                candidate.year,
+                candidate.month,
+                candidate.day,
+                candidate.hour,
+                candidate.minute,
+            )
+            # A fall-back fold repeats local wall minutes.  Treat one wall
+            # minute as one cron occurrence so the same task is not enqueued
+            # twice; absolute-minute iteration naturally skips spring gaps.
+            if wall_minute <= max_wall_minute:
+                continue
+            max_wall_minute = wall_minute
             cron_weekday = (candidate.weekday() + 1) % 7
             if (
                 self._matches(minute, candidate.minute)
@@ -384,5 +525,4 @@ class ScheduledTaskRepository:
                 and (not weekdays or candidate.weekday() in weekdays)
             ):
                 return candidate
-            candidate += timedelta(minutes=1)
         raise ValueError("Cron 一年內沒有可執行時間")

@@ -569,8 +569,8 @@ class ResilienceRepository:
         return {"queue": dict(head), "items": [dict(item) for item in items]}
 
     def ensure_queue(self, device_id: str, *, depth: int = 3) -> dict[str, Any]:
-        if not 1 <= int(depth) <= 14:
-            raise ValueError("QUEUE-001 Queue 深度必須介於 1 到 14")
+        if not 1 <= int(depth) <= 24:
+            raise ValueError("QUEUE-001 Queue 深度必須介於 1 到 24")
         with self.database.transaction() as connection:
             exists = connection.execute(
                 "SELECT 1 FROM devices WHERE id=? AND enabled=1", (device_id,)

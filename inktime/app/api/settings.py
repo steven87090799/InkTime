@@ -92,38 +92,25 @@ def apply_preset(key: str):
     if selected and payload.get("confirm_physical_panel") is not True:
         abort(409, description="PRESET-003 更新既有裝置需要 confirm_physical_panel=true")
     compatible_profiles = set(cast(list[str], preset["compatible_panel_profiles"]))
-    database = current_app.extensions["inktime_database"]
-    with database.transaction() as connection:
-        selected_ids = set(selected)
-        rows = [
-            row
-            for row in connection.execute("SELECT id,panel_profile FROM devices").fetchall()
-            if str(row["id"]) in selected_ids
-        ]
-        if len(rows) != len(set(selected)) or any(
-            str(row["panel_profile"]) not in compatible_profiles for row in rows
-        ):
-            abort(409, description="PRESET-004 只能明確更新相容的既有 Spectra 6 裝置")
-        if selected:
-            connection.executemany(
-                "UPDATE devices SET panel_profile=?,updated_at=datetime('now') WHERE id=?",
-                [(preset_settings["device.default_panel_profile"], identifier) for identifier in selected],
-            )
-    repository = current_app.extensions["inktime_settings_repository"]
-    result = repository.update_many(
-        preset_settings,
-        changed_by=str(g.user["id"]),
-        source_ip=request.remote_addr or "unknown",
-        reason=f"preset:{key}",
-    )
+    try:
+        result = current_app.extensions["inktime_settings_mutation_service"].apply_preset_atomic(
+            preset_settings,
+            device_ids=selected,
+            compatible_panel_profiles=compatible_profiles,
+            target_panel_profile=str(preset_settings["device.default_panel_profile"]),
+            changed_by=str(g.user["id"]),
+            source_ip=request.remote_addr or "unknown",
+            reason=f"preset:{key}",
+        )
+    except ValueError as exc:
+        abort(409, description=str(exc))
     changed = result["changed_keys"]
-    return {
+    return result | {
         "preset": key,
         "changed_keys": changed,
         "unchanged_keys": [name for name in preset_settings if name not in changed],
-        "affected_devices": selected,
         "incompatible_devices": [],
-        "requires_new_release": bool(changed),
+        "requires_new_release": bool(changed or result["changed_device_count"]),
     }
 
 
@@ -178,7 +165,7 @@ def update_settings():
                 409,
                 description="SET-007 高風險變更需要先預覽並明確確認：" + "、".join(high_risk),
             )
-        result = repository.update_many(
+        result = current_app.extensions["inktime_settings_mutation_service"].update_many(
             payload,
             changed_by=g.user["id"],
             source_ip=request.remote_addr or "unknown",
@@ -396,7 +383,7 @@ def rollback_settings(snapshot_id: str):
     if payload.get("confirm") is not True:
         abort(400, description="SET-005 Rollback 需要明確確認")
     try:
-        result = current_app.extensions["inktime_settings_repository"].rollback(
+        result = current_app.extensions["inktime_settings_mutation_service"].rollback(
             snapshot_id,
             changed_by=g.user["id"],
             source_ip=request.remote_addr or "unknown",
@@ -535,7 +522,7 @@ def import_settings():
         abort(400, description="SET-006 匯入需要明確確認")
     try:
         preview = _import_preview(payload.get("document"))
-        result = current_app.extensions["inktime_settings_repository"].update_many(
+        result = current_app.extensions["inktime_settings_mutation_service"].update_many(
             preview["changes"],
             changed_by=g.user["id"],
             source_ip=request.remote_addr or "unknown",

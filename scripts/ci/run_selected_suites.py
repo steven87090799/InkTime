@@ -33,6 +33,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/unit/test_ci_selected_suites.py",
         "tests/unit/test_ci_execution_attestation.py",
         "tests/unit/test_ci_planner_hardening.py",
+        "tests/unit/test_ci_workflow_events.py",
     ),
     "ci_routing_contracts": (
         "tests/unit/test_ci_changed_paths.py",
@@ -40,6 +41,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/unit/test_ci_selected_suites.py",
         "tests/unit/test_ci_execution_attestation.py",
         "tests/unit/test_ci_planner_hardening.py",
+        "tests/unit/test_ci_workflow_events.py",
     ),
     "python_application_owner": (
         "tests/unit",

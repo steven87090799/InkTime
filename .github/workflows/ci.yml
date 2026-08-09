@@ -1,10 +1,10 @@
 name: InkTime CI
 
-on:
+"on":
   pull_request:
     branches:
       - main
-    # PR metadata edits (including base retargeting) need a fresh merge-ref validation.
+    # Base retargets need validation; title/body-only edits use the metadata lane below.
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled, edited]
   push:
     branches:
@@ -18,7 +18,7 @@ on:
         type: boolean
 
 concurrency:
-  group: inktime-ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: inktime-ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata-only' || 'validation' }}
   cancel-in-progress: true
 
 permissions:
@@ -30,6 +30,7 @@ jobs:
     name: Classify changed paths and validation provenance
     runs-on: ubuntu-latest
     outputs:
+      full_validation: ${{ steps.event.outputs.full_validation }}
       ci_mode: ${{ steps.route.outputs.ci_mode }}
       selected_test_suites: ${{ steps.route.outputs.selected_test_suites }}
       selected_gates: ${{ steps.route.outputs.selected_gates }}
@@ -62,12 +63,19 @@ jobs:
       tested_ref: ${{ steps.route.outputs.tested_ref }}
       tested_ref_kind: ${{ steps.route.outputs.tested_ref_kind }}
     steps:
+      - id: event
+        name: Classify workflow event
+        env:
+          FULL_VALIDATION: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null }}
+        run: echo "full_validation=${FULL_VALIDATION}" >> "${GITHUB_OUTPUT}"
       # pull_request intentionally retains GitHub's merge-ref checkout for
       # pre-merge compatibility validation; provenance is emitted separately.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+      - if: ${{ steps.event.outputs.full_validation == 'true' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 0}
       - id: route
         name: Emit canonical source-owned plan and tested checkout provenance
+        if: ${{ steps.event.outputs.full_validation == 'true' }}
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           SOURCE_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -187,6 +195,7 @@ jobs:
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
       - name: Upload provenance metadata
+        if: ${{ steps.event.outputs.full_validation == 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: inktime-ci-provenance-${{ github.run_id }}
@@ -196,7 +205,7 @@ jobs:
 
   source-head-contract:
     name: PR source-head provenance contract
-    if: ${{ needs.changes.outputs.run_source_head_contract == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_source_head_contract == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -223,7 +232,7 @@ jobs:
             --arg base_sha "${BASE_SHA}" \
             --arg tested_sha "${tested_sha}" \
             --arg tested_ref_kind "head" \
-            '{event_name, ref, tested_ref, source_head_sha, base_sha, tested_sha, tested_ref_kind}' \
+            '$ARGS.named' \
             > "artifacts/source-head-provenance-${GITHUB_RUN_ID}.json"
           {
             echo "### PR source-head evidence"
@@ -244,7 +253,7 @@ jobs:
 
   python-quality:
     name: Python 3.12 T0 and full coverage
-    if: ${{ needs.changes.outputs.run_python_quality == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_python_quality == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -266,6 +275,7 @@ jobs:
           tests/unit/test_ci_verify_execution.py
           tests/unit/test_ci_provenance.py
           tests/unit/test_ci_planner_hardening.py
+          tests/unit/test_ci_workflow_events.py
       - name: Ruff
         run: ruff check inktime tests scripts server.py analyze_photos.py
       - name: Mypy
@@ -278,7 +288,7 @@ jobs:
 
   python-compatibility:
     name: Python 3.10 compatibility
-    if: ${{ needs.changes.outputs.run_python310 == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_python310 == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -291,7 +301,7 @@ jobs:
 
   dependency-audit:
     name: Dependency policy and audit
-    if: ${{ needs.changes.outputs.run_dependency_audit == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_dependency_audit == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -304,7 +314,7 @@ jobs:
 
   migration-contract:
     name: Migration contract
-    if: ${{ needs.changes.outputs.run_migration == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_migration == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -315,7 +325,7 @@ jobs:
       - run: pytest tests/unit/test_migrations.py
 
   secret-scan:
-    if: ${{ needs.changes.outputs.run_secret_scan == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_secret_scan == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -327,7 +337,7 @@ jobs:
 
   actionlint:
     name: Actionlint workflow contract
-    if: ${{ needs.changes.outputs.run_actionlint == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_actionlint == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -343,7 +353,7 @@ jobs:
 
   selected-owner-suites:
     name: Selected owner suites
-    if: ${{ needs.changes.outputs.ci_mode == 'impact' && needs.changes.outputs.selected_owner_suites != '[]' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.ci_mode == 'impact' && needs.changes.outputs.selected_owner_suites != '[]' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -357,7 +367,7 @@ jobs:
         run: python scripts/ci/run_selected_suites.py --suites-json "${SELECTED_TEST_SUITES}"
 
   compose-lan-production-persistence:
-    if: ${{ needs.changes.outputs.run_lan_persistence == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_lan_persistence == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -464,7 +474,7 @@ jobs:
           sudo rm -rf .ci-data .ci-photos .ci-lan.env .ci-lan-state.json
 
   compose-production-tls-smoke:
-    if: ${{ needs.changes.outputs.run_tls_smoke == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_tls_smoke == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     env:
@@ -532,7 +542,7 @@ jobs:
           sudo rm -rf .ci-tls .ci-data .ci-photos
 
   bounded-runtime-soak:
-    if: ${{ needs.changes.outputs.run_runtime_soak == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_runtime_soak == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -549,7 +559,7 @@ jobs:
           if-no-files-found: error
 
   playwright:
-    if: ${{ needs.changes.outputs.run_playwright == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_playwright == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -563,7 +573,7 @@ jobs:
       - run: INKTIME_E2E_URL=http://127.0.0.1:8765 pytest tests/e2e
 
   firmware-host-contract:
-    if: ${{ needs.changes.outputs.run_firmware_host_contract == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_firmware_host_contract == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -598,7 +608,7 @@ jobs:
           /tmp/inktime-queue-client-core
 
   esp32-compile:
-    if: ${{ needs.changes.outputs.run_firmware_compile == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_firmware_compile == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -661,7 +671,7 @@ jobs:
           done
 
   repository-gate:
-    name: Repository gate
+    name: ${{ needs.changes.outputs.full_validation == 'true' && 'Repository gate' || 'Metadata event gate' }}
     if: ${{ always() }}
     needs:
       - changes
@@ -682,9 +692,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+      - name: Fail when event classification failed
+        if: ${{ needs.changes.result != 'success' }}
+        run: exit 1
+      - if: ${{ needs.changes.outputs.full_validation == 'true' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 1}
       - name: Verify planner-selected execution attestation
+        if: ${{ needs.changes.outputs.full_validation == 'true' }}
         env:
           PLAN_JSON: ${{ needs.changes.outputs.plan_json }}
           NEEDS_JSON: ${{ toJSON(needs) }}
@@ -694,3 +709,6 @@ jobs:
             --plan-json "${PLAN_JSON}" \
             --needs-json "${NEEDS_JSON}" \
             --workflow repository
+      - name: Accept metadata-only pull request edit
+        if: ${{ needs.changes.outputs.full_validation != 'true' && needs.changes.result == 'success' }}
+        run: echo "Metadata-only edit classified without creating Repository gate validation evidence."

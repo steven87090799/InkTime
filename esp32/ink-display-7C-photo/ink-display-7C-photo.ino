@@ -2530,6 +2530,7 @@ static bool performAutomaticPairing(Config &cfg) {
   JsonObject capabilities = pairingRequest["capabilities"].to<JsonObject>();
   capabilities["automatic_pairing"] = true;
   capabilities["ab_credential_store"] = true;
+  capabilities["offline_schedule_max_slots"] = 24;
   capabilities["stock_compatibility"] = true;
   capabilities["deep_sleep"] = true;
   String requestBody;

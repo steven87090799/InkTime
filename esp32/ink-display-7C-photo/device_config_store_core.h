@@ -7,7 +7,8 @@
 namespace inktime {
 namespace configstore {
 
-constexpr uint8_t kMaxConfigSlots = 12U;
+constexpr uint8_t kMaxConfigSlots = 24U;
+constexpr uint8_t kLegacyConfigSlots = 12U;
 constexpr size_t kMaxConfigPayloadBytes = 8192U;
 constexpr size_t kMaxWifiSsidBytes = 64U;
 constexpr size_t kMaxWifiPasswordBytes = 128U;
@@ -29,7 +30,7 @@ constexpr uint32_t kConfigSlotMagic = 0x494E4B43U;  // INKC
 constexpr uint32_t kConfigPointerMagic = 0x494E4B50U;  // INKP
 constexpr uint32_t kScheduleJournalMagic = 0x494E4B4AU;  // INKJ
 constexpr uint8_t kEnvelopeVersion = 1U;
-constexpr uint8_t kPayloadSchemaVersion = 4U;
+constexpr uint8_t kPayloadSchemaVersion = 5U;
 constexpr uint8_t kPointerVersion = 1U;
 constexpr uint8_t kJournalVersion = 1U;
 constexpr const char* kGenericCommitTargetScheduleId = "__config_commit__";
@@ -250,6 +251,14 @@ inline bool valid_sync_policy(const ConfigPayload& payload) {
       && valid_sync_time(payload.sync_time);
 }
 
+inline bool valid_payload_schema(uint8_t schema) {
+  return schema >= 1U && schema <= kPayloadSchemaVersion;
+}
+
+inline uint8_t config_slot_count_for_schema(uint8_t schema) {
+  return schema <= 4U ? kLegacyConfigSlots : kMaxConfigSlots;
+}
+
 inline bool validate_payload(const ConfigPayload& payload, std::string& error) {
   if (payload.wifi_ssid.size() > kMaxWifiSsidBytes
       || payload.wifi_pass.size() > kMaxWifiPasswordBytes
@@ -368,7 +377,7 @@ inline bool deserialize_payload(const std::string& input, ConfigPayload& payload
   size_t offset = 0U;
   uint8_t schema = 0U;
   if (!take_u8(input, offset, schema)
-      || (schema != 1U && schema != 2U && schema != 3U && schema != kPayloadSchemaVersion)
+      || !valid_payload_schema(schema)
       || !take_string(input, offset, payload.wifi_ssid, kMaxWifiSsidBytes)
       || !take_string(input, offset, payload.wifi_pass, kMaxWifiPasswordBytes)
       || !take_string(input, offset, payload.backend_hostport, kMaxBackendHostportBytes)
@@ -433,7 +442,15 @@ inline bool deserialize_payload(const std::string& input, ConfigPayload& payload
     set_error(error, "PAIRING-NVS-004");
     return false;
   }
+  const uint8_t slot_count = config_slot_count_for_schema(schema);
+  if (payload.schedule_count == 0U || payload.schedule_count > slot_count) {
+    set_error(error, "PAIRING-NVS-004");
+    return false;
+  }
   for (uint8_t index = 0U; index < kMaxConfigSlots; ++index) {
+    payload.schedule_slots[index] = {};
+  }
+  for (uint8_t index = 0U; index < slot_count; ++index) {
     if (!take_u8(input, offset, payload.schedule_slots[index].hour)
         || !take_u8(input, offset, payload.schedule_slots[index].minute)) {
       set_error(error, "PAIRING-NVS-004");
@@ -482,7 +499,7 @@ inline bool decode_slot(
       || !take_u8(input, offset, schema) || !take_u64(input, offset, generation)
       || !take_u32(input, offset, length) || !take_u32(input, offset, expected_crc)
       || magic != kConfigSlotMagic || envelope != kEnvelopeVersion
-      || (schema != 1U && schema != 2U && schema != 3U && schema != kPayloadSchemaVersion)
+      || !valid_payload_schema(schema)
       || length > kMaxConfigPayloadBytes
       || length != input.size() - offset) {
     set_error(error, "PAIRING-NVS-004");

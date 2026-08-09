@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from inktime.app.core.security import redact
 from inktime.app.db import Database, migrate
+from inktime.app.repositories import settings as settings_module
 from inktime.app.repositories.settings import SettingsRepository
+from inktime.app.services.diagnostics import DiagnosticsService
 from inktime.app.services.observability import ObservabilityService
 
 
@@ -14,6 +17,115 @@ def _service(tmp_path):
     settings = SettingsRepository(database)
     settings.ensure_defaults()
     return database, settings, ObservabilityService(database, settings, None)
+
+
+def test_diagnostics_caches_git_revision_per_service(tmp_path, monkeypatch):
+    database = Database(tmp_path / "db.sqlite")
+    migrate(database)
+    settings = SettingsRepository(database)
+    settings.ensure_defaults()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    thumbnail_dir = tmp_path / "thumbnails"
+    thumbnail_dir.mkdir()
+    service = DiagnosticsService(database, data_dir, thumbnail_dir, settings_repository=settings)
+    calls = []
+
+    monkeypatch.delenv("INKTIME_GIT_REVISION", raising=False)
+    monkeypatch.setattr("inktime.app.services.diagnostics.shutil.which", lambda _name: "/usr/bin/git")
+
+    def fake_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(stdout="abc123\n")
+
+    monkeypatch.setattr("inktime.app.services.diagnostics.subprocess.run", fake_run)
+
+    first = service.snapshot()
+    second = service.snapshot()
+
+    assert first["git_revision"] == "abc123"
+    assert second["git_revision"] == "abc123"
+    git_revision_calls = [
+        call
+        for call in calls
+        if call[0] and call[0][0] == ["/usr/bin/git", "rev-parse", "--short", "HEAD"]
+    ]
+    assert len(git_revision_calls) == 1
+
+
+def test_diagnostics_quick_check_and_inventory_are_cached_between_snapshots(tmp_path, monkeypatch):
+    database = Database(tmp_path / "db.sqlite")
+    migrate(database)
+    settings = SettingsRepository(database)
+    settings.ensure_defaults()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    thumbnail_dir = tmp_path / "thumbnails"
+    thumbnail_dir.mkdir()
+    service = DiagnosticsService(database, data_dir, thumbnail_dir, settings_repository=settings)
+    quick_checks = []
+    monkeypatch.setattr(
+        database,
+        "integrity_check",
+        lambda: quick_checks.append("quick") or "ok",
+    )
+
+    service.snapshot()
+    service.snapshot()
+    service.snapshot(force_integrity=True)
+    service.bundle()
+
+    assert quick_checks == ["quick", "quick", "quick"]
+
+
+def test_settings_runtime_cache_does_not_capture_caller_fallbacks(tmp_path):
+    database = Database(tmp_path / "db.sqlite")
+    migrate(database)
+    settings = SettingsRepository(database)
+    settings.ensure_defaults()
+
+    assert settings.get("missing.runtime.key", "first") == "first"
+    assert settings.get("missing.runtime.key", "second") == "second"
+
+
+def test_settings_runtime_cache_replaces_generation_after_partial_miss(tmp_path, monkeypatch):
+    database = Database(tmp_path / "db.sqlite")
+    migrate(database)
+    cached_settings = SettingsRepository(database)
+    cached_settings.ensure_defaults()
+    writer_settings = SettingsRepository(database)
+    writer_settings.ensure_defaults()
+    clock = [0.0]
+    monkeypatch.setattr(settings_module.time, "monotonic", lambda: clock[0])
+
+    assert cached_settings.get("worker.poll_seconds") == 15
+    writer_settings.update(
+        "worker.poll_seconds",
+        30,
+        changed_by="cache-test",
+        source_ip="127.0.0.1",
+    )
+    clock[0] = 1.0
+    assert cached_settings.get("worker.poll_seconds") == 15
+    clock[0] = 4.0
+    assert cached_settings.get("worker.progress_items") == 50
+    clock[0] = 8.0
+    assert cached_settings.get("worker.progress_seconds") == 300
+    clock[0] = 12.0
+
+    assert cached_settings.get("worker.poll_seconds") == 30
+
+
+def test_lightweight_observability_tick_leaves_platform_diagnostics_to_platform_tick(tmp_path, monkeypatch):
+    _database, _settings, service = _service(tmp_path)
+    platform_calls = []
+    monkeypatch.setattr(service, "_check_platform", lambda now: platform_calls.append(now))
+
+    service.tick(include_platform=False, include_cleanup=False)
+    assert platform_calls == []
+
+    service.platform_tick()
+    assert len(platform_calls) == 1
 
 
 def test_debug_is_off_by_default_and_sensitive_values_are_redacted(tmp_path):

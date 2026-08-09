@@ -7,8 +7,8 @@
 namespace inktime {
 
 // The compact firmware configuration is intentionally bounded.  The server
-// may retain more history, but a device only stages twelve formal slots.
-constexpr uint8_t kMaxOfflineSlots = 12;
+// may retain more history, but a device only stages twenty-four formal slots.
+constexpr uint8_t kMaxOfflineSlots = 24;
 constexpr uint8_t kMaxAckJournalEntries = 32;
 constexpr int32_t kOfflineScheduleSchemaVersion = 1;
 

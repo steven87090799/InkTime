@@ -1850,6 +1850,98 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_offline_schedules_runtime ON device_offline_schedules(device_id,target_date,status,config_version,updated_at)",
         ),
     ),
+    Migration(
+        37,
+        "記錄離線排程終端內容結果",
+        (
+            "ALTER TABLE device_offline_schedules ADD COLUMN terminal_outcome_code TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_offline_schedules_terminal_outcome ON device_offline_schedules(device_id,target_date,config_version,terminal_outcome_code)",
+        ),
+    ),
+    Migration(
+        38,
+        "記錄裝置離線排程 Slot 能力",
+        (
+            "ALTER TABLE devices ADD COLUMN offline_schedule_max_slots INTEGER NOT NULL DEFAULT 12 CHECK(offline_schedule_max_slots BETWEEN 1 AND 24)",
+        ),
+    ),
+    Migration(
+        39,
+        "收斂離線 Slot 能力並建立預取截止時間",
+        (
+            # Existing schema 37 rows may already contain 13--24 schedule
+            # values without a persisted hardware capability.  Preserve the
+            # configuration, but quarantine it until a new pairing/repair
+            # explicitly confirms the 24-slot capability.
+            "ALTER TABLE devices ADD COLUMN offline_schedule_capability_state TEXT NOT NULL DEFAULT 'unknown_12' CHECK(offline_schedule_capability_state IN ('unknown_12','confirmed_24','legacy_ambiguous'))",
+            "ALTER TABLE devices ADD COLUMN next_offline_prepare_at TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_devices_offline_prepare_due ON devices(next_offline_prepare_at,id) WHERE enabled=1 AND delivery_mode='inktime_offline_schedule' AND offline_prefetch_allowed=1 AND offline_schedule_capability_state IN ('unknown_12','confirmed_24') AND next_offline_prepare_at IS NOT NULL",
+            """
+            UPDATE devices
+            SET offline_schedule_capability_state=CASE
+                    WHEN offline_schedule_max_slots=24 THEN 'confirmed_24'
+                    WHEN offline_schedule_max_slots<>12 THEN 'legacy_ambiguous'
+                    WHEN json_valid(schedule_times_json)=0 THEN 'legacy_ambiguous'
+                    WHEN json_type(schedule_times_json)<>'array' THEN 'legacy_ambiguous'
+                    WHEN json_array_length(schedule_times_json)>12 THEN 'legacy_ambiguous'
+                    WHEN json_valid(offline_schedule_json)=0 THEN 'legacy_ambiguous'
+                    WHEN json_type(offline_schedule_json)<>'array' THEN 'legacy_ambiguous'
+                    WHEN json_array_length(offline_schedule_json)>12 THEN 'legacy_ambiguous'
+                    ELSE 'unknown_12'
+                END,
+                offline_schedule_max_slots=CASE
+                    WHEN offline_schedule_max_slots=24 THEN 24
+                    ELSE 12
+                END
+            """,
+            # A Unix-epoch deadline is a bounded one-time initialization probe.
+            # The running scheduler replaces it with a local timezone/DST-aware
+            # deadline before the next normal poll.
+            """
+            UPDATE devices
+            SET next_offline_prepare_at='1970-01-01T00:00:00+00:00'
+            WHERE enabled=1
+              AND delivery_mode='inktime_offline_schedule'
+              AND offline_prefetch_allowed=1
+              AND offline_schedule_capability_state IN ('unknown_12','confirmed_24')
+            """,
+            """
+            CREATE TRIGGER trg_devices_offline_schedule_slots_insert
+            BEFORE INSERT ON devices
+            WHEN NEW.offline_schedule_max_slots NOT IN (12,24)
+              OR NOT (
+                    (NEW.offline_schedule_capability_state IN ('unknown_12','legacy_ambiguous')
+                     AND NEW.offline_schedule_max_slots=12)
+                 OR (NEW.offline_schedule_capability_state='confirmed_24'
+                     AND NEW.offline_schedule_max_slots=24)
+              )
+            BEGIN
+                SELECT RAISE(ABORT,'DEVICE-008 offline slot capability state is inconsistent');
+            END
+            """,
+            """
+            CREATE TRIGGER trg_devices_offline_schedule_slots_update
+            BEFORE UPDATE OF offline_schedule_max_slots,offline_schedule_capability_state ON devices
+            WHEN NEW.offline_schedule_max_slots NOT IN (12,24)
+              OR NOT (
+                    (NEW.offline_schedule_capability_state IN ('unknown_12','legacy_ambiguous')
+                     AND NEW.offline_schedule_max_slots=12)
+                 OR (NEW.offline_schedule_capability_state='confirmed_24'
+                     AND NEW.offline_schedule_max_slots=24)
+              )
+            BEGIN
+                SELECT RAISE(ABORT,'DEVICE-008 offline slot capability state is inconsistent');
+            END
+            """,
+            """
+            UPDATE settings
+            SET value_json='21600',value_type='integer',updated_at=datetime('now')
+            WHERE key='system.diagnostics_cache_seconds'
+              AND value_json='300'
+              AND (updated_by IS NULL OR updated_by='')
+            """,
+        ),
+    ),
 )
 
 

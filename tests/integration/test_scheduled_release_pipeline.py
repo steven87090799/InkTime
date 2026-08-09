@@ -102,10 +102,10 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
     photos = app.extensions["inktime_photo_repository"]
     library_id = photos.ensure_library("離線排程照片", root)
     now = "2026-07-22T00:00:00+00:00"
-    for index in (1, 2):
+    for index in range(1, 25):
         photo_id = f"offline-scheduled-{index}"
         filename = f"{photo_id}.jpg"
-        Image.new("RGB", (480, 800), (index * 40, 80, 120)).save(root / filename)
+        Image.new("RGB", (480, 800), ((index * 10) % 256, 80, 120)).save(root / filename)
         with app.extensions["inktime_database"].session() as connection:
             connection.execute(
                 """
@@ -122,7 +122,7 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
                     "2020-07-22T10:00:00",
                     "2020-07-22",
                     "07-22",
-                    90 - index,
+                    100 - index,
                     now,
                     now,
                 ),
@@ -137,7 +137,7 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
                 "schema_version": 1,
                 "caption": "離線測試",
                 "types": ["日常"],
-                "memory_score": 90 - index,
+                "memory_score": 100 - index,
                 "beauty_score": 80,
                 "technical_quality_score": 80,
                 "emotion_score": 80,
@@ -147,8 +147,8 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
                 "reason": "測試",
             },
             "{}",
-            ranking_score=90 - index,
-            final_ranking_score=90 - index,
+            ranking_score=100 - index,
+            final_ranking_score=100 - index,
         )
 
     device_id, _token = app.extensions["inktime_device_repository"].create(
@@ -156,7 +156,8 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
         panel_profile="safe_4c",
         delivery_mode="inktime_offline_schedule",
         offline_prefetch_allowed=True,
-        schedule_times=["08:00", "20:00"],
+        schedule_times=[f"{hour:02d}:00" for hour in range(24)],
+        offline_schedule_max_slots=24,
         prefetch_lead_minutes=5,
     )
     service = app.extensions["inktime_display_preparation_service"]
@@ -177,7 +178,7 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
 
     assert prepared["status"] == "ready"
     assert prepared["idempotent"] is False
-    assert len(prepared["slots"]) == 2
+    assert len(prepared["slots"]) == 24
     assert repeated["idempotent"] is True
     with app.extensions["inktime_database"].session() as connection:
         release_count = connection.execute(
@@ -190,10 +191,58 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
         history_after = connection.execute(
             "SELECT COUNT(*) FROM display_history WHERE selection_method='offline_schedule_prepare'"
         ).fetchone()[0]
-    assert release_count == 2
-    assert queue_count == 2
+    assert release_count == 24
+    assert queue_count == 24
     assert history_before == 0
     assert history_after == 0
+
+
+def test_enhanced_prepare_shortage_returns_no_content_without_partial_activation(app):
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "沒有候選照片的離線相框",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00", "20:00"],
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        config_version = int(
+            connection.execute(
+                "SELECT config_version FROM devices WHERE id=?", (device_id,)
+            ).fetchone()[0]
+        )
+
+    result = app.extensions["inktime_display_preparation_service"].prepare_device_day(
+        device_id=device_id,
+        target_date="2026-08-03",
+        created_by="offline-shortage-test",
+    )
+
+    assert result["status"] == "completed"
+    assert result["outcome_code"] == "NO_ELIGIBLE_CANDIDATES"
+    assert result["output_count"] == 0
+    with app.extensions["inktime_database"].session() as connection:
+        schedules = connection.execute(
+            """
+            SELECT id,status,terminal_outcome_code,target_date,config_version
+            FROM device_offline_schedules
+            WHERE device_id=? AND target_date=? AND config_version=?
+            """,
+            (device_id, "2026-08-03", config_version),
+        ).fetchall()
+        assert len(schedules) == 1
+        schedule = schedules[0]
+        assert schedule["status"] == "failed"
+        assert schedule["terminal_outcome_code"] == "NO_ELIGIBLE_CANDIDATES"
+        assert schedule["target_date"] == "2026-08-03"
+        assert schedule["config_version"] == config_version
+        assert connection.execute(
+            "SELECT COUNT(*) FROM device_offline_schedule_slots WHERE schedule_id=?",
+            (schedule["id"],),
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM device_content_queue_items WHERE device_id=?",
+            (device_id,),
+        ).fetchone()[0] == 0
 
 
 def test_enhanced_prepare_fails_closed_when_device_config_changes_before_commit(app, tmp_path, monkeypatch):

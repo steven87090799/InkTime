@@ -23,8 +23,12 @@ from inktime.app.core.security import (
 )
 from inktime.app.db import Database
 from inktime.app.domain.photopainter.offline_schedule import (
+    LEGACY_MAX_OFFLINE_SLOTS,
     MINIMUM_SCHEDULE_GAP_MINUTES,
+    OFFLINE_PREPARE_BOOTSTRAP_AT,
     normalize_sync_strategy,
+    offline_schedule_capability_state,
+    resolve_offline_schedule_max_slots,
     validate_offline_schedule,
 )
 
@@ -136,11 +140,26 @@ class DevicePairingService:
         return json.dumps(safe, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
     @staticmethod
+    def _capability_max_slots(capabilities_json: Any) -> int:
+        try:
+            capabilities = json.loads(str(capabilities_json or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            capabilities = {}
+        return resolve_offline_schedule_max_slots(capabilities)
+
+    @staticmethod
+    def _envelope_max_slots(envelope: dict[str, Any]) -> int:
+        return resolve_offline_schedule_max_slots(
+            {"offline_schedule_max_slots": envelope.get("offline_schedule_max_slots")}
+        )
+
+    @staticmethod
     def _schedule_values(
         raw: Any,
         fallback: str = "08:00",
         *,
         minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
+        maximum: int = LEGACY_MAX_OFFLINE_SLOTS,
     ) -> list[str]:
         if raw is None:
             values = [fallback]
@@ -152,7 +171,7 @@ class DevicePairingService:
             values = [item.strip() for item in raw if isinstance(item, str) and item.strip()]
         else:
             raise DevicePairingError("schedule_times 格式不合法", error_code="PAIR-004")
-        if not values or len(values) > 12 or any(not TIME_PATTERN.fullmatch(item) for item in values):
+        if not values or len(values) > maximum or any(not TIME_PATTERN.fullmatch(item) for item in values):
             raise DevicePairingError("schedule_times 格式不合法", error_code="PAIR-004")
         minutes = [int(item[:2]) * 60 + int(item[3:]) for item in values]
         if any(right <= left for left, right in zip(minutes, minutes[1:], strict=False)):
@@ -160,7 +179,7 @@ class DevicePairingService:
         try:
             validate_offline_schedule(
                 values,
-                maximum=12,
+                maximum=maximum,
                 minimum_gap_minutes=minimum_gap_minutes,
             )
         except ValueError as exc:
@@ -168,7 +187,16 @@ class DevicePairingService:
         return values
 
     @classmethod
-    def _normalize_config(cls, raw: dict[str, Any] | None, *, fallback_name: str) -> dict[str, Any]:
+    def _normalize_config(
+        cls,
+        raw: dict[str, Any] | None,
+        *,
+        fallback_name: str,
+        offline_schedule_max_slots: int = LEGACY_MAX_OFFLINE_SLOTS,
+    ) -> dict[str, Any]:
+        maximum_slots = resolve_offline_schedule_max_slots(
+            {"offline_schedule_max_slots": offline_schedule_max_slots}
+        )
         source = dict(raw or {})
         name = cls._validate_text(source.get("name"), "name", 100) or fallback_name
         timezone_name = cls._validate_text(source.get("timezone", "Asia/Taipei"), "timezone", 64)
@@ -197,6 +225,7 @@ class DevicePairingService:
             source.get("schedule_times"),
             schedule,
             minimum_gap_minutes=minimum_gap_minutes,
+            maximum=maximum_slots,
         )
         rotation = source.get("rotation", 0)
         if type(rotation) is not int or rotation not in {0, 180}:
@@ -241,6 +270,7 @@ class DevicePairingService:
             "frame_orientation": frame_orientation or None,
             "layout_mode": layout_mode or None,
             "fit_mode": fit_mode or None,
+            "offline_schedule_max_slots": maximum_slots,
         }
 
     @staticmethod
@@ -353,6 +383,7 @@ class DevicePairingService:
         panel_profile = self._validate_text(payload.get("panel_profile"), "panel_profile", 128)
         device_name = self._validate_text(payload.get("device_name"), "device_name", 100)
         capabilities_json = self._capabilities(payload.get("capabilities", {}))
+        maximum_slots = self._capability_max_slots(capabilities_json)
         now = self._now()
         expires = now + PAIRING_TTL
         nonce_hash = self._nonce_hash(pairing_nonce)
@@ -434,6 +465,7 @@ class DevicePairingService:
             config = self._normalize_config(
                 config_source,
                 fallback_name=device_name or f"待配對裝置 {device_id[-6:]}",
+                offline_schedule_max_slots=maximum_slots,
             )
             pairing_id = secrets.token_urlsafe(24)
             pairing_code = self._pairing_display_code(pairing_nonce)
@@ -579,9 +611,11 @@ class DevicePairingService:
                     existing_config = {}
                 merged_config = dict(existing_config)
                 merged_config.update(device_config or {})
+                maximum_slots = self._capability_max_slots(row["capabilities_json"])
                 config = self._normalize_config(
                     merged_config,
                     fallback_name=f"待配對裝置 {str(row['device_id'])[-6:]}",
+                    offline_schedule_max_slots=maximum_slots,
                 )
                 connection.execute(
                     "UPDATE device_pairing_requests SET status='approved',approved_at=?,approved_by=?,config_json=? WHERE id=?",
@@ -667,6 +701,12 @@ class DevicePairingService:
                     config = json.loads(str(row["config_json"] or "{}"))
                 except (TypeError, ValueError, json.JSONDecodeError):
                     config = {}
+                maximum_slots = self._capability_max_slots(row["capabilities_json"])
+                config = self._normalize_config(
+                    config,
+                    fallback_name=f"待配對裝置 {str(row['device_id'])[-6:]}",
+                    offline_schedule_max_slots=maximum_slots,
+                )
                 secret = issue_device_secret()
                 envelope = {
                     "device_id": str(row["device_id"]),
@@ -675,6 +715,7 @@ class DevicePairingService:
                     "config": config,
                     "firmware_version": str(row["firmware_version"] or ""),
                     "firmware_identity": str(row["firmware_identity"] or ""),
+                    "offline_schedule_max_slots": maximum_slots,
                 }
                 envelope_expires = min(datetime.fromisoformat(str(row["expires_at"])), now + PAIRING_TTL)
                 encrypted = self._credential_envelope_cipher.encrypt(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
@@ -710,7 +751,12 @@ class DevicePairingService:
         return hmac.compare_digest(str(stored_hash), new_digest) or hmac.compare_digest(str(stored_hash), legacy_digest)
 
     def _insert_confirmed_device(self, connection, *, device_id: str, envelope: dict[str, Any], now: datetime) -> None:
-        config = self._normalize_config(dict(envelope.get("config") or {}), fallback_name=f"待配對裝置 {device_id[-6:]}")
+        maximum_slots = self._envelope_max_slots(envelope)
+        config = self._normalize_config(
+            dict(envelope.get("config") or {}),
+            fallback_name=f"待配對裝置 {device_id[-6:]}",
+            offline_schedule_max_slots=maximum_slots,
+        )
         delivery_mode = str(config["delivery_mode"])
         schedule_json = json.dumps(config["schedule_times"], ensure_ascii=False, separators=(",", ":"))
         placeholder = hash_device_token("auto-placeholder-" + secrets.token_urlsafe(32), self.pepper)
@@ -762,6 +808,21 @@ class DevicePairingService:
                 self._iso(now),
             ),
         )
+        connection.execute(
+            """
+            UPDATE devices
+            SET offline_schedule_max_slots=?,offline_schedule_capability_state=?,
+                next_offline_prepare_at=CASE WHEN ?=1 THEN ? ELSE NULL END
+            WHERE id=?
+            """,
+            (
+                maximum_slots,
+                offline_schedule_capability_state(maximum_slots),
+                int(config["delivery_mode"] == "inktime_offline_schedule"),
+                OFFLINE_PREPARE_BOOTSTRAP_AT,
+                device_id,
+            ),
+        )
 
     def _update_confirmed_device(self, connection, *, device_id: str, envelope: dict[str, Any], now: datetime) -> None:
         device = connection.execute("SELECT auth_mode,delivery_mode FROM devices WHERE id=?", (device_id,)).fetchone()
@@ -770,7 +831,12 @@ class DevicePairingService:
             return
         if str(device["auth_mode"] or "legacy_token") != "automatic" or str(device["delivery_mode"] or "legacy_online") == "stock_compat":
             raise DevicePairingError("Legacy 與 Stock 裝置不可使用自動 credential", status_code=409, error_code="PAIR-003")
-        config = self._normalize_config(dict(envelope.get("config") or {}), fallback_name=f"待配對裝置 {device_id[-6:]}")
+        maximum_slots = self._envelope_max_slots(envelope)
+        config = self._normalize_config(
+            dict(envelope.get("config") or {}),
+            fallback_name=f"待配對裝置 {device_id[-6:]}",
+            offline_schedule_max_slots=maximum_slots,
+        )
         delivery_mode = str(config["delivery_mode"])
         schedule_json = json.dumps(config["schedule_times"], ensure_ascii=False, separators=(",", ":"))
         connection.execute(
@@ -785,7 +851,9 @@ class DevicePairingService:
                 previous_device_secret_hash=NULL,previous_credential_version=NULL,previous_credential_expires_at=NULL,
                 pairing_code_hash=NULL,pairing_expires_at=NULL,pairing_attempts=0,pairing_claim_attempts=0,
                 pairing_requested_at=NULL,firmware_version=COALESCE(NULLIF(?,''),firmware_version),
-                firmware_identity=COALESCE(NULLIF(?,''),firmware_identity),config_version=config_version+1,updated_at=?
+                firmware_identity=COALESCE(NULLIF(?,''),firmware_identity),offline_schedule_max_slots=?,
+                offline_schedule_capability_state=?,next_offline_prepare_at=CASE WHEN ?=1 THEN ? ELSE NULL END,
+                config_version=config_version+1,updated_at=?
             WHERE id=?
             """,
             (
@@ -797,6 +865,8 @@ class DevicePairingService:
                 int(envelope["credential_version"]),
                 hash_device_secret(str(envelope["device_secret"]), self.pepper), self._iso(now),
                 str(envelope.get("firmware_version") or ""), str(envelope.get("firmware_identity") or ""),
+                maximum_slots, offline_schedule_capability_state(maximum_slots),
+                int(delivery_mode == "inktime_offline_schedule"), OFFLINE_PREPARE_BOOTSTRAP_AT,
                 self._iso(now), device_id,
             ),
         )

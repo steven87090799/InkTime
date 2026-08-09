@@ -1,10 +1,10 @@
 name: InkTime Container Security and Benchmark Contracts
 
-on:
+"on":
   pull_request:
     branches:
       - main
-    # PR metadata edits (including base retargeting) need a fresh merge-ref validation.
+    # Base retargets need validation; title/body-only edits use the metadata lane below.
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled, edited]
   push:
     branches:
@@ -18,7 +18,7 @@ on:
         type: boolean
 
 concurrency:
-  group: inktime-container-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: inktime-container-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata-only' || 'validation' }}
   cancel-in-progress: true
 
 permissions:
@@ -29,6 +29,7 @@ jobs:
     name: Classify changed paths and validation provenance
     runs-on: ubuntu-latest
     outputs:
+      full_validation: ${{ steps.event.outputs.full_validation }}
       ci_mode: ${{ steps.route.outputs.ci_mode }}
       selected_test_suites: ${{ steps.route.outputs.selected_test_suites }}
       selected_gates: ${{ steps.route.outputs.selected_gates }}
@@ -44,12 +45,19 @@ jobs:
       tested_ref: ${{ steps.route.outputs.tested_ref }}
       tested_ref_kind: ${{ steps.route.outputs.tested_ref_kind }}
     steps:
+      - id: event
+        name: Classify workflow event
+        env:
+          FULL_VALIDATION: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null }}
+        run: echo "full_validation=${FULL_VALIDATION}" >> "${GITHUB_OUTPUT}"
       # pull_request intentionally retains GitHub's merge-ref checkout for
       # pre-merge compatibility validation; provenance is emitted separately.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+      - if: ${{ steps.event.outputs.full_validation == 'true' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 0}
       - id: route
         name: Emit canonical source-owned plan and tested checkout provenance
+        if: ${{ steps.event.outputs.full_validation == 'true' }}
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           SOURCE_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -150,6 +158,7 @@ jobs:
           jq '{event_name, ref, source_head_sha, base_sha, tested_sha, tested_ref, tested_ref_kind}' \
             <<<"${plan_json}" > "artifacts/container-provenance-${GITHUB_RUN_ID}.json"
       - name: Upload provenance metadata
+        if: ${{ steps.event.outputs.full_validation == 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: inktime-container-provenance-${{ github.run_id }}
@@ -158,7 +167,7 @@ jobs:
           retention-days: 14
 
   container-security:
-    if: ${{ needs.changes.outputs.run_container_security == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_container_security == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -213,7 +222,7 @@ jobs:
           retention-days: 14
 
   benchmark-contract:
-    if: ${{ needs.changes.outputs.run_benchmark == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_benchmark == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -238,7 +247,7 @@ jobs:
           retention-days: 14
 
   container-security-gate:
-    name: Container security gate
+    name: ${{ needs.changes.outputs.full_validation == 'true' && 'Container security gate' || 'Container metadata event gate' }}
     if: ${{ always() }}
     needs:
       - changes
@@ -247,9 +256,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+      - name: Fail when event classification failed
+        if: ${{ needs.changes.result != 'success' }}
+        run: exit 1
+      - if: ${{ needs.changes.outputs.full_validation == 'true' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 1}
       - name: Verify planner-selected execution attestation
+        if: ${{ needs.changes.outputs.full_validation == 'true' }}
         env:
           PLAN_JSON: ${{ needs.changes.outputs.plan_json }}
           NEEDS_JSON: ${{ toJSON(needs) }}
@@ -259,3 +273,6 @@ jobs:
             --plan-json "${PLAN_JSON}" \
             --needs-json "${NEEDS_JSON}" \
             --workflow container
+      - name: Accept metadata-only pull request edit
+        if: ${{ needs.changes.outputs.full_validation != 'true' && needs.changes.result == 'success' }}
+        run: echo "Metadata-only edit classified without creating Container security gate validation evidence."

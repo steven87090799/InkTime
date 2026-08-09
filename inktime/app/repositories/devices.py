@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 import hmac
 import json
@@ -10,11 +11,19 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from inktime.app.core.security import hash_device_secret, hash_device_token, issue_device_token
 from inktime.app.db import Database
+from inktime.app.domain.photopainter.device_configuration import (
+    classify_device_configuration_changes,
+)
 from inktime.app.domain.photopainter.offline_schedule import (
+    LEGACY_MAX_OFFLINE_SLOTS,
     MINIMUM_SCHEDULE_GAP_MINUTES,
+    OFFLINE_PREPARE_BOOTSTRAP_AT,
+    offline_schedule_capability_state,
+    resolve_offline_schedule_max_slots,
     normalize_delivery_contract,
     normalize_sync_strategy,
     next_sync_epoch,
+    stored_schedule_state,
     validate_offline_schedule,
 )
 
@@ -52,6 +61,8 @@ class DeviceRepository:
                        refreshes_per_day, battery_reserve_percent, energy_profile_updated_at,
                        delivery_mode, offline_prefetch_allowed, offline_schedule_json,
                        offline_schedule_version, applied_offline_schedule_version,
+                       offline_schedule_max_slots, offline_schedule_capability_state,
+                       next_offline_prepare_at,
                        offline_schedule_ack_at, last_offline_slot, schedule_times_json,
                        prefetch_lead_minutes, button_wake_action, minimum_schedule_gap_minutes,
                        sync_strategy, sync_time, stock_endpoint_host,
@@ -63,9 +74,12 @@ class DeviceRepository:
                 """
             ).fetchall()
 
-    def get(self, device_id: str):
-        with self.database.session() as connection:
-            return connection.execute("SELECT * FROM devices WHERE id=?", (device_id,)).fetchone()
+    def get(self, device_id: str, *, connection=None):
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            return active_connection.execute(
+                "SELECT * FROM devices WHERE id=?", (device_id,)
+            ).fetchone()
 
     def create(
         self,
@@ -78,6 +92,7 @@ class DeviceRepository:
         offline_prefetch_allowed: bool | None = None,
         offline_schedule: Sequence[str] | None = None,
         schedule_times: Sequence[str] | None = None,
+        offline_schedule_max_slots: int = LEGACY_MAX_OFFLINE_SLOTS,
         prefetch_lead_minutes: int = 5,
         button_wake_action: str = "check_new",
         minimum_schedule_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
@@ -115,9 +130,12 @@ class DeviceRepository:
         )
         if type(minimum_schedule_gap_minutes) is not int or not 30 <= minimum_schedule_gap_minutes <= 360:
             raise ValueError("DEVICE-008 minimum_schedule_gap_minutes 必須介於 30 到 360")
+        maximum_slots = resolve_offline_schedule_max_slots(
+            {"offline_schedule_max_slots": offline_schedule_max_slots}
+        )
         schedule_values = validate_offline_schedule(
             schedule_times or offline_schedule or [schedule],
-            maximum=12,
+            maximum=maximum_slots,
             minimum_gap_minutes=minimum_schedule_gap_minutes,
         )
         if not 0 <= int(prefetch_lead_minutes) <= 120:
@@ -132,12 +150,18 @@ class DeviceRepository:
                     id, name, token_hash, enabled, timezone, schedule, rotation, panel_profile,
                     frame_orientation, layout_mode, fit_mode, delivery_mode,
                     offline_prefetch_allowed, offline_schedule_json, offline_schedule_version,
+                    offline_schedule_max_slots, offline_schedule_capability_state, next_offline_prepare_at,
                     schedule_times_json, prefetch_lead_minutes, button_wake_action,
                     minimum_schedule_gap_minutes, sync_strategy, sync_time, stock_endpoint_host,
                     auth_mode, pairing_state, credential_version,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?
+                )
                 """,
                 (
                     device_id,
@@ -155,6 +179,9 @@ class DeviceRepository:
                     int(offline_prefetch_allowed),
                     json.dumps(schedule_values, ensure_ascii=False),
                     1 if delivery_mode == "inktime_offline_schedule" else 0,
+                    maximum_slots,
+                    offline_schedule_capability_state(maximum_slots),
+                    OFFLINE_PREPARE_BOOTSTRAP_AT if offline_prefetch_allowed and enabled else None,
                     json.dumps(schedule_values, ensure_ascii=False),
                     int(prefetch_lead_minutes),
                     button_wake_action,
@@ -246,7 +273,7 @@ class DeviceRepository:
                 "reason": (
                     "delivery_mode_transition"
                     if change_kind == "delivery_mode_transition"
-                    else "device_schedule_changed"
+                    else change_kind
                 ),
                 "change_kind": change_kind,
                 "old_delivery_mode": old_delivery_mode,
@@ -344,6 +371,7 @@ class DeviceRepository:
         offline_prefetch_allowed: bool | None = None,
         offline_schedule: Sequence[str] | None = None,
         schedule_times: Sequence[str] | None = None,
+        explicit_schedule_replacement: bool | None = None,
         prefetch_lead_minutes: int = 5,
         button_wake_action: str = "check_new",
         minimum_schedule_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
@@ -355,18 +383,26 @@ class DeviceRepository:
         frame_orientation: str | None | object = _UNSET,
         layout_mode: str | None | object = _UNSET,
         fit_mode: str | None | object = _UNSET,
-    ) -> None:
+        connection=None,
+    ) -> bool:
         now = datetime.now(timezone.utc).isoformat()
-        with self.database.session() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as connection:
+            nested = connection.in_transaction
+            if nested:
+                connection.execute("SAVEPOINT device_update")
+            else:
+                connection.execute("BEGIN IMMEDIATE")
             try:
                 current = connection.execute(
                     """
-                    SELECT timezone,schedule,rotation,panel_profile,delivery_mode,offline_prefetch_allowed,
+                    SELECT enabled,timezone,schedule,rotation,panel_profile,delivery_mode,offline_prefetch_allowed,
                            offline_schedule_json,schedule_times_json,prefetch_lead_minutes,
+                           offline_schedule_max_slots,offline_schedule_capability_state,
+                           next_offline_prepare_at,
                            button_wake_action,minimum_schedule_gap_minutes,sync_strategy,sync_time,
                            stock_endpoint_host,frame_orientation,layout_mode,fit_mode,
-                           auth_mode,pairing_state,config_version
+                           auth_mode,pairing_state,config_version,name
                     FROM devices WHERE id=?
                     """,
                     (device_id,),
@@ -394,48 +430,146 @@ class DeviceRepository:
                 selected_pairing_state = "paired" if selected_auth_mode != "automatic" else str(
                     current["pairing_state"] or "unpaired"
                 )
-                try:
-                    existing_schedule = json.loads(str(current["schedule_times_json"] or "[]"))
-                except (TypeError, ValueError, json.JSONDecodeError):
+                schedule_times_state = stored_schedule_state(current["schedule_times_json"])
+                offline_schedule_state = stored_schedule_state(current["offline_schedule_json"])
+                if schedule_times_state.is_array and schedule_times_state.values:
+                    existing_schedule = schedule_times_state.values
+                elif offline_schedule_state.is_array and offline_schedule_state.values:
+                    existing_schedule = offline_schedule_state.values
+                else:
                     existing_schedule = []
-                if not isinstance(existing_schedule, list) or not existing_schedule:
-                    try:
-                        existing_schedule = json.loads(str(current["offline_schedule_json"] or "[]"))
-                    except (TypeError, ValueError, json.JSONDecodeError):
-                        existing_schedule = []
-                selected_schedule = schedule_times or offline_schedule or existing_schedule or [schedule]
-                if schedule_times is None and offline_schedule is None and len(existing_schedule) == 1:
+                explicit_schedule = (
+                    schedule_times if schedule_times is not None else offline_schedule
+                )
+                inferred_schedule_replacement = bool(
+                    (
+                        schedule_times is not None
+                        and (
+                            not schedule_times_state.is_array
+                            or list(schedule_times) != schedule_times_state.values
+                        )
+                    )
+                    or (
+                        schedule_times is None
+                        and offline_schedule is not None
+                        and (
+                            not offline_schedule_state.is_array
+                            or list(offline_schedule) != offline_schedule_state.values
+                        )
+                    )
+                )
+                explicit_schedule_changed = (
+                    inferred_schedule_replacement
+                    if explicit_schedule_replacement is None
+                    else bool(explicit_schedule_replacement)
+                )
+                if explicit_schedule is not None:
+                    selected_schedule = explicit_schedule
+                else:
+                    selected_schedule = existing_schedule or [schedule]
+                if explicit_schedule is None and len(existing_schedule) == 1:
                     selected_schedule = [schedule]
                 if type(minimum_schedule_gap_minutes) is not int or not 30 <= minimum_schedule_gap_minutes <= 360:
                     raise ValueError("DEVICE-008 minimum_schedule_gap_minutes 必須介於 30 到 360")
-                schedule_values = validate_offline_schedule(
-                    selected_schedule,
-                    maximum=12,
-                    minimum_gap_minutes=minimum_schedule_gap_minutes,
+                maximum_slots = resolve_offline_schedule_max_slots(
+                    {"offline_schedule_max_slots": current["offline_schedule_max_slots"]}
                 )
+                schedule_was_modified = bool(
+                    explicit_schedule_changed
+                    or str(current["schedule"]) != schedule
+                    or int(
+                        current["minimum_schedule_gap_minutes"]
+                        or MINIMUM_SCHEDULE_GAP_MINUTES
+                    )
+                    != int(minimum_schedule_gap_minutes)
+                )
+                preserve_quarantined_schedule = bool(
+                    str(current["offline_schedule_capability_state"] or "")
+                    == "legacy_ambiguous"
+                    and not schedule_was_modified
+                    and (
+                        not enabled
+                        or delivery_mode != "inktime_offline_schedule"
+                    )
+                )
+                if (
+                    str(current["offline_schedule_capability_state"] or "")
+                    == "legacy_ambiguous"
+                    and not schedule_was_modified
+                    and not preserve_quarantined_schedule
+                ):
+                    raise ValueError(
+                        "DEVICE-008 隔離中的離線排程必須先停用、切離離線模式，或明確提交有效替代排程"
+                    )
+                if preserve_quarantined_schedule:
+                    schedule_values = existing_schedule
+                    stored_schedule = str(current["schedule"])
+                    stored_offline_schedule = offline_schedule_state.raw
+                    stored_schedule_times = schedule_times_state.raw
+                else:
+                    schedule_values = validate_offline_schedule(
+                        selected_schedule,
+                        maximum=maximum_slots,
+                        minimum_gap_minutes=minimum_schedule_gap_minutes,
+                    )
+                    stored_schedule = schedule_values[0]
+                    stored_offline_schedule = json.dumps(schedule_values, ensure_ascii=False)
+                    stored_schedule_times = json.dumps(schedule_values, ensure_ascii=False)
                 if not 0 <= int(prefetch_lead_minutes) <= 120:
                     raise ValueError("DEVICE-008 prefetch_lead_minutes 必須介於 0 到 120")
                 if button_wake_action not in {"check_new", "local_next"}:
                     raise ValueError("DEVICE-008 button_wake_action 不合法")
                 sync_strategy, sync_time = normalize_sync_strategy(sync_strategy, sync_time)
-                remote_changed = any(
-                    (
-                        str(current["timezone"]) != timezone_name,
-                        str(current["schedule"]) != schedule_values[0],
-                        int(current["rotation"]) != rotation,
-                        str(current["panel_profile"]) != panel_profile,
-                        str(current["delivery_mode"]) != delivery_mode,
-                        bool(current["offline_prefetch_allowed"]) != bool(offline_prefetch_allowed),
-                        existing_schedule != schedule_values,
-                        int(current["prefetch_lead_minutes"]) != int(prefetch_lead_minutes),
-                        str(current["button_wake_action"]) != button_wake_action,
-                        int(current["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES)
-                        != int(minimum_schedule_gap_minutes),
-                        str(current["sync_strategy"] or "first_display_lead") != sync_strategy,
-                        (current["sync_time"] or None) != (sync_time or None),
-                        (current["stock_endpoint_host"] or None) != (stock_endpoint_host or None),
-                    )
+                changes = classify_device_configuration_changes(
+                    {
+                        "timezone": str(current["timezone"]),
+                        "rotation": int(current["rotation"]),
+                        "panel_profile": str(current["panel_profile"]),
+                        "delivery_mode": str(current["delivery_mode"]),
+                        "offline_prefetch_allowed": bool(current["offline_prefetch_allowed"]),
+                        "enabled": bool(current["enabled"]),
+                        "prefetch_lead_minutes": int(current["prefetch_lead_minutes"]),
+                        "button_wake_action": str(current["button_wake_action"]),
+                        "minimum_schedule_gap_minutes": int(
+                            current["minimum_schedule_gap_minutes"]
+                            or MINIMUM_SCHEDULE_GAP_MINUTES
+                        ),
+                        "sync_strategy": str(current["sync_strategy"] or "first_display_lead"),
+                        "sync_time": current["sync_time"] or None,
+                        "stock_endpoint_host": current["stock_endpoint_host"] or None,
+                        "frame_orientation": current["frame_orientation"],
+                        "layout_mode": current["layout_mode"],
+                        "fit_mode": current["fit_mode"],
+                    },
+                    {
+                        "timezone": timezone_name,
+                        "rotation": rotation,
+                        "panel_profile": panel_profile,
+                        "delivery_mode": delivery_mode,
+                        "offline_prefetch_allowed": bool(offline_prefetch_allowed),
+                        "enabled": bool(enabled),
+                        "prefetch_lead_minutes": int(prefetch_lead_minutes),
+                        "button_wake_action": button_wake_action,
+                        "minimum_schedule_gap_minutes": int(minimum_schedule_gap_minutes),
+                        "sync_strategy": sync_strategy,
+                        "sync_time": sync_time or None,
+                        "stock_endpoint_host": stock_endpoint_host or None,
+                        "frame_orientation": selected_orientation,
+                        "layout_mode": selected_layout,
+                        "fit_mode": selected_fit,
+                    },
+                    schedule_definition_changed=schedule_was_modified,
                 )
+                remote_changed = changes.remote_config_changed
+                offline_schedule_changed = bool(
+                    changes.offline_schedule_changed and not preserve_quarantined_schedule
+                )
+                if not remote_changed and str(current["name"]) == name.strip():
+                    if nested:
+                        connection.execute("RELEASE SAVEPOINT device_update")
+                    else:
+                        connection.execute("COMMIT")
+                    return False
                 cursor = connection.execute(
                     """
                     UPDATE devices
@@ -444,6 +578,11 @@ class DeviceRepository:
                         prefetch_lead_minutes=?,button_wake_action=?,minimum_schedule_gap_minutes=?,
                         sync_strategy=?,sync_time=?,stock_endpoint_host=?,
                         offline_schedule_version=offline_schedule_version+CASE WHEN ? THEN 1 ELSE 0 END,
+                        next_offline_prepare_at=CASE
+                            WHEN ?=0 OR ?=0 THEN NULL
+                            WHEN ?=1 THEN ?
+                            ELSE next_offline_prepare_at
+                        END,
                         frame_orientation=?,layout_mode=?,fit_mode=?,auth_mode=?,pairing_state=?,
                         config_version=config_version+?,updated_at=?
                     WHERE id=?
@@ -452,20 +591,24 @@ class DeviceRepository:
                         name.strip(),
                         int(enabled),
                         timezone_name,
-                        schedule_values[0],
+                        stored_schedule,
                         rotation,
                         panel_profile,
                         delivery_mode,
                         int(offline_prefetch_allowed),
-                        json.dumps(schedule_values, ensure_ascii=False),
-                        json.dumps(schedule_values, ensure_ascii=False),
+                        stored_offline_schedule,
+                        stored_schedule_times,
                         int(prefetch_lead_minutes),
                         button_wake_action,
                         int(minimum_schedule_gap_minutes),
                         sync_strategy,
                         sync_time,
                         stock_endpoint_host,
+                        int(offline_schedule_changed),
+                        int(delivery_mode == "inktime_offline_schedule"),
+                        int(enabled),
                         int(remote_changed),
+                        OFFLINE_PREPARE_BOOTSTRAP_AT,
                         selected_orientation,
                         selected_layout,
                         selected_fit,
@@ -477,15 +620,16 @@ class DeviceRepository:
                     ),
                 )
                 incompatible_modes: list[str] = []
-                if delivery_mode == "inktime_offline_schedule":
-                    incompatible_modes.append("online_queue")
-                    # A changed Enhanced configuration invalidates any
-                    # already prepared slot snapshot; the next scheduler
-                    # job must prepare the new config version instead.
-                    if str(current["delivery_mode"]) == delivery_mode and remote_changed:
+                if remote_changed:
+                    if delivery_mode == "inktime_offline_schedule":
+                        incompatible_modes.append("online_queue")
+                        # A changed Enhanced configuration invalidates any
+                        # already prepared slot snapshot; the next scheduler
+                        # job must prepare the new config version instead.
+                        if str(current["delivery_mode"]) == delivery_mode:
+                            incompatible_modes.append("offline_schedule")
+                    else:
                         incompatible_modes.append("offline_schedule")
-                else:
-                    incompatible_modes.append("offline_schedule")
                 if incompatible_modes:
                     self._supersede_future_queue_items(
                         connection,
@@ -497,13 +641,16 @@ class DeviceRepository:
                         change_kind=(
                             "delivery_mode_transition"
                             if str(current["delivery_mode"]) != delivery_mode
+                            else "device_render_changed"
+                            if changes.render_inputs_changed
+                            and not changes.offline_schedule_changed
                             else "device_schedule_changed"
                         ),
                     )
                 if (
                     delivery_mode == "inktime_offline_schedule"
                     and remote_changed
-                    and existing_schedule != schedule_values
+                    and schedule_was_modified
                 ):
                     self._record_past_schedule_slots(
                         connection,
@@ -514,12 +661,85 @@ class DeviceRepository:
                         now=now,
                         config_version=int(current["config_version"]) + 1,
                     )
-                connection.execute("COMMIT")
+                if nested:
+                    connection.execute("RELEASE SAVEPOINT device_update")
+                else:
+                    connection.execute("COMMIT")
             except Exception:
-                connection.execute("ROLLBACK")
+                if nested:
+                    connection.execute("ROLLBACK TO SAVEPOINT device_update")
+                    connection.execute("RELEASE SAVEPOINT device_update")
+                else:
+                    connection.execute("ROLLBACK")
                 raise
         if cursor.rowcount != 1:
             raise KeyError(device_id)
+        return True
+
+    def update_render_inputs(
+        self,
+        device_id: str,
+        *,
+        panel_profile: str | object = _UNSET,
+        frame_orientation: str | None | object = _UNSET,
+        layout_mode: str | None | object = _UNSET,
+        fit_mode: str | None | object = _UNSET,
+    ) -> bool:
+        """Apply render inputs through the canonical versioning path."""
+
+        with self.database.transaction() as connection:
+            return self.update_render_inputs_in_transaction(
+                connection,
+                device_id,
+                panel_profile=panel_profile,
+                frame_orientation=frame_orientation,
+                layout_mode=layout_mode,
+                fit_mode=fit_mode,
+            )
+
+    def update_render_inputs_in_transaction(
+        self,
+        connection,
+        device_id: str,
+        *,
+        panel_profile: str | object = _UNSET,
+        frame_orientation: str | None | object = _UNSET,
+        layout_mode: str | None | object = _UNSET,
+        fit_mode: str | None | object = _UNSET,
+    ) -> bool:
+        """Apply render inputs without owning the caller's transaction."""
+
+        current = self.get(device_id, connection=connection)
+        if current is None:
+            raise KeyError(device_id)
+        return self.update(
+            device_id,
+            name=str(current["name"]),
+            enabled=bool(current["enabled"]),
+            timezone_name=str(current["timezone"]),
+            schedule=str(current["schedule"]),
+            delivery_mode=str(current["delivery_mode"]),
+            offline_prefetch_allowed=bool(current["offline_prefetch_allowed"]),
+            explicit_schedule_replacement=False,
+            prefetch_lead_minutes=int(current["prefetch_lead_minutes"] or 0),
+            button_wake_action=str(current["button_wake_action"] or "check_new"),
+            minimum_schedule_gap_minutes=int(
+                current["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
+            ),
+            sync_strategy=str(current["sync_strategy"] or "first_display_lead"),
+            sync_time=current["sync_time"],
+            stock_endpoint_host=current["stock_endpoint_host"],
+            rotation=int(current["rotation"]),
+            panel_profile=(
+                str(current["panel_profile"])
+                if panel_profile is _UNSET
+                else str(panel_profile)
+            ),
+            frame_orientation=frame_orientation,
+            layout_mode=layout_mode,
+            fit_mode=fit_mode,
+            connection=connection,
+        )
 
     def authenticate(
         self,
@@ -973,7 +1193,9 @@ class DeviceRepository:
                 schedule_values = json.loads(str(device["schedule_times_json"] or "[]"))
                 schedule_values = validate_offline_schedule(
                     schedule_values,
-                    maximum=12,
+                    maximum=resolve_offline_schedule_max_slots(
+                        {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
+                    ),
                     minimum_gap_minutes=int(
                         device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
                     ),
@@ -987,6 +1209,9 @@ class DeviceRepository:
                     sync_time=device["sync_time"],
                     minimum_gap_minutes=int(
                         device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
+                    ),
+                    maximum_slots=resolve_offline_schedule_max_slots(
+                        {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
                     ),
                 )
                 planned_at = datetime.fromtimestamp(sync_epoch, timezone.utc).isoformat()

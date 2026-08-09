@@ -1,17 +1,92 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from inktime.app.domain.photopainter.offline_schedule import (
+    LEGACY_MAX_OFFLINE_SLOTS,
+    MAX_OFFLINE_SLOTS,
     normalize_sync_strategy,
+    next_sync_epoch,
     next_sleep_epoch,
+    offline_prepare_plan,
+    offline_schedule_capability_is_usable,
+    offline_schedule_capability_state,
     prefetch_slots,
+    resolve_offline_schedule_max_slots,
     slot_deadlines,
     validate_offline_schedule,
 )
 from inktime.app.repositories.offline_schedules import OfflineScheduleRepository
+
+
+@pytest.mark.parametrize(
+    ("capabilities", "expected"),
+    [
+        ({}, LEGACY_MAX_OFFLINE_SLOTS),
+        ({"offline_schedule_max_slots": 12}, LEGACY_MAX_OFFLINE_SLOTS),
+        ({"offline_schedule_max_slots": 24}, MAX_OFFLINE_SLOTS),
+        ({"offline_schedule_max_slots": 13}, LEGACY_MAX_OFFLINE_SLOTS),
+        ({"offline_schedule_max_slots": "24"}, LEGACY_MAX_OFFLINE_SLOTS),
+    ],
+)
+def test_offline_schedule_capability_resolver_defaults_unknown_to_legacy(capabilities, expected):
+    assert resolve_offline_schedule_max_slots(capabilities) == expected
+
+
+def test_offline_schedule_capability_state_distinguishes_safe_unknown_and_explicit_24():
+    assert offline_schedule_capability_state(12) == "unknown_12"
+    assert offline_schedule_capability_state(24) == "confirmed_24"
+    assert offline_schedule_capability_is_usable("unknown_12")
+    assert offline_schedule_capability_is_usable("confirmed_24")
+    assert not offline_schedule_capability_is_usable("legacy_ambiguous")
+
+
+def test_offline_schedule_capability_boundary_rejects_legacy_13th_slot():
+    schedule = [f"{hour:02d}:00" for hour in range(13)]
+    with pytest.raises(ValueError, match="1 到 12"):
+        validate_offline_schedule(schedule, maximum=LEGACY_MAX_OFFLINE_SLOTS)
+    assert len(validate_offline_schedule(schedule, maximum=MAX_OFFLINE_SLOTS)) == 13
+
+
+def test_offline_schedule_capability_boundaries_accept_legacy_12_and_confirmed_24():
+    legacy_schedule = [f"{hour:02d}:00" for hour in range(12)]
+    confirmed_schedule = [f"{hour:02d}:00" for hour in range(24)]
+
+    assert validate_offline_schedule(
+        legacy_schedule,
+        maximum=LEGACY_MAX_OFFLINE_SLOTS,
+    ) == legacy_schedule
+    assert validate_offline_schedule(
+        confirmed_schedule,
+        maximum=MAX_OFFLINE_SLOTS,
+    ) == confirmed_schedule
+
+
+def test_device_capability_limits_deadlines_and_next_sync():
+    schedule = [f"{hour:02d}:00" for hour in range(13)]
+    with pytest.raises(ValueError, match="1 到 12"):
+        slot_deadlines(
+            date(2026, 8, 3),
+            schedule,
+            "Asia/Taipei",
+            maximum_slots=LEGACY_MAX_OFFLINE_SLOTS,
+        )
+    assert slot_deadlines(
+        date(2026, 8, 3),
+        schedule,
+        "Asia/Taipei",
+        maximum_slots=MAX_OFFLINE_SLOTS,
+    )
+    with pytest.raises(ValueError, match="1 到 12"):
+        next_sync_epoch(
+            now=datetime(2026, 8, 3, 7, 0, tzinfo=timezone.utc),
+            schedule=schedule,
+            timezone_name="Asia/Taipei",
+            maximum_slots=LEGACY_MAX_OFFLINE_SLOTS,
+        )
 
 
 def test_offline_schedule_is_sorted_unique_and_has_five_minute_prefetch_slots():
@@ -93,3 +168,58 @@ def test_server_show_at_epoch_is_iana_timezone_authoritative(target_date, expect
     show_at = OfflineScheduleRepository._show_at(target_date, "08:00", "America/New_York")
 
     assert int(datetime.fromisoformat(show_at).timestamp()) == expected_epoch
+
+
+def test_next_prepare_deadline_is_bounded_and_skips_committed_target():
+    zone = ZoneInfo("Asia/Taipei")
+    before_first = OfflineScheduleRepository.next_prepare_deadline(
+        now=datetime(2026, 8, 3, 7, 0, tzinfo=zone),
+        timezone_name="Asia/Taipei",
+        schedule_times=["08:00", "20:00"],
+        prefetch_lead_minutes=5,
+        server_margin_minutes=15,
+        future_prepare_hour_local=20,
+    )
+    assert before_first == "2026-08-02T23:40:00+00:00"
+
+    after_prepare = OfflineScheduleRepository.next_prepare_deadline(
+        now=datetime(2026, 8, 3, 10, 0, tzinfo=zone),
+        timezone_name="Asia/Taipei",
+        schedule_times=["08:00", "20:00"],
+        prefetch_lead_minutes=5,
+        server_margin_minutes=15,
+        future_prepare_hour_local=20,
+        skip_target_dates=["2026-08-03"],
+    )
+    assert after_prepare == "2026-08-03T12:00:00+00:00"
+
+    # At 21:00 the late slot today and the configured future handoff for
+    # tomorrow are both due.  Skipping today's committed target must leave
+    # tomorrow immediately due instead of pushing it into the future.
+    both_due = OfflineScheduleRepository.next_prepare_deadline(
+        now=datetime(2026, 8, 3, 21, 0, tzinfo=zone),
+        timezone_name="Asia/Taipei",
+        schedule_times=["08:00", "22:00"],
+        prefetch_lead_minutes=5,
+        server_margin_minutes=15,
+        future_prepare_hour_local=20,
+        skip_target_dates=["2026-08-03"],
+    )
+    assert both_due == "2026-08-03T13:00:00+00:00"
+
+
+def test_offline_prepare_plan_is_single_source_for_targets_and_deadline():
+    zone = ZoneInfo("Asia/Taipei")
+    plan = offline_prepare_plan(
+        now=datetime(2026, 8, 3, 21, 0, tzinfo=zone),
+        timezone_name="Asia/Taipei",
+        schedule_times=["08:00", "22:00"],
+        prefetch_lead_minutes=5,
+        server_margin_minutes=15,
+        future_prepare_hour_local=20,
+    )
+    assert [value.isoformat() for value in plan.due_target_dates] == [
+        "2026-08-03",
+        "2026-08-04",
+    ]
+    assert plan.next_deadline.isoformat() == "2026-08-03T13:00:00+00:00"

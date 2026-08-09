@@ -46,6 +46,7 @@ from inktime.app.services.render_cache import BoundedRenderCache
 from inktime.app.services.render_workloads import RenderWorkloadService
 from inktime.app.services.rendering import RenderService
 from inktime.app.services.scoring_lab import ScoringLabService
+from inktime.app.services.settings_mutation import SettingsMutationService
 from inktime.app.services.weather import WeatherService
 from inktime.app.workers.process_boundary import KillableProcessBoundary
 
@@ -152,6 +153,15 @@ def bootstrap_services(
     settings_repository.ensure_defaults()
     schedule_repository = ScheduledTaskRepository(database)
     schedule_repository.ensure_defaults(config.timezone)
+    offline_schedule_repository = OfflineScheduleRepository(database)
+    device_repository = DeviceRepository(database, secret)
+    settings_mutation_service = SettingsMutationService(
+        database,
+        settings_repository,
+        device_repository,
+        offline_schedule_repository,
+        schedule_repository,
+    )
     configure_logging(settings_repository=settings_repository)
 
     job_repository = JobRepository(database)
@@ -168,6 +178,7 @@ def bootstrap_services(
     extensions.update(
         {
             "inktime_settings_repository": settings_repository,
+            "inktime_settings_mutation_service": settings_mutation_service,
             "inktime_schedule_repository": schedule_repository,
             "inktime_job_repository": job_repository,
             "inktime_job_service": job_service,
@@ -179,7 +190,6 @@ def bootstrap_services(
         }
     )
 
-    device_repository = DeviceRepository(database, secret)
     device_pairing_service = DevicePairingService(database, secret, secret)
     photo_repository = PhotoRepository(database)
     provider_repository = ProviderRepository(database, secret_store)
@@ -249,7 +259,6 @@ def bootstrap_services(
         observability_service,
         resilience_repository,
     )
-    offline_schedule_repository = OfflineScheduleRepository(database)
     extensions.update(
         {
             "inktime_device_repository": device_repository,

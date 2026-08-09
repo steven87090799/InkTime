@@ -9,6 +9,7 @@ from inktime.app.domain.photos import PhotoPreprocessor
 from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
 from inktime.app.repositories.analysis_batches import AnalysisBatchRepository
 from inktime.app.repositories.photos import PhotoRepository
+from inktime.app.repositories.settings import SETTING_DEFINITIONS
 from inktime.app.workers.runner import WorkerRunner
 from inktime.app.workers.scanner import PhotoScanner
 from tests.unit.test_batch_analysis_lifecycle import FakeBatchProvider, _prepare_photos, _wire_fake
@@ -43,6 +44,82 @@ class FrozenPlanProvider(VisionProvider):
 
     def validate_config(self):
         return True, "ok"
+
+
+def test_worker_idle_backoff_is_bounded_and_resets_after_work(monkeypatch):
+    assert WorkerRunner.IDLE_BACKOFF_SECONDS == (15.0, 30.0, 60.0)
+    assert max(WorkerRunner.IDLE_BACKOFF_SECONDS) <= 60.0
+
+    class FakeStop:
+        def __init__(self):
+            self.run_count = 0
+            self.waits = []
+
+        def is_set(self):
+            return self.run_count >= 6
+
+        def wait(self, timeout):
+            self.waits.append(timeout)
+
+    class FakeSettings:
+        def get(self, _key, default):
+            if _key == "worker.poll_seconds":
+                return 15
+            return default
+
+    class FakeApp:
+        extensions = {"inktime_settings_repository": FakeSettings()}
+
+    monkeypatch.setattr("inktime.app.workers.runner.configure_logging", lambda **_kwargs: None)
+    runner = WorkerRunner(FakeApp())
+    stop = FakeStop()
+    runner.stop = stop
+    results = iter((0, 0, 0, 0, 1, 0))
+
+    def run_once():
+        stop.run_count += 1
+        return next(results)
+
+    monkeypatch.setattr(runner, "run_once", run_once)
+    runner.run_forever()
+
+    assert stop.waits == [15.0, 30.0, 60.0, 60.0, 15.0]
+
+
+def test_worker_legacy_poll_value_never_exceeds_idle_cap(monkeypatch):
+    class FakeStop:
+        def __init__(self):
+            self.run_count = 0
+            self.waits = []
+
+        def is_set(self):
+            return self.run_count >= 2
+
+        def wait(self, timeout):
+            self.waits.append(timeout)
+
+    class FakeApp:
+        extensions = {"inktime_settings_repository": object()}
+
+    monkeypatch.setattr("inktime.app.workers.runner.configure_logging", lambda **_kwargs: None)
+    runner = WorkerRunner(FakeApp())
+    stop = FakeStop()
+    runner.stop = stop
+
+    def run_once():
+        stop.run_count += 1
+        return 0
+
+    monkeypatch.setattr(runner, "run_once", run_once)
+    runner.run_forever(poll_seconds=300)
+
+    assert stop.waits == [60.0, 60.0]
+
+
+def test_worker_poll_setting_matches_the_runtime_backoff_ceiling():
+    definition = SETTING_DEFINITIONS["worker.poll_seconds"]
+    assert definition["max"] == 60
+    assert "15→30→60" in definition["description"]
 
 
 def test_worker_runner_finishes_stale_terminal_batch_import_as_a_noop(app, tmp_path, monkeypatch):

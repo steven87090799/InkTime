@@ -126,6 +126,8 @@ def test_stock_photopainter_display_controls_are_scoped_and_server_side(client, 
     assert f'data-stock-display-device="{missing_host_id}"' in body
     assert f'data-stock-display-device="{legacy_id}"' not in body
     assert f'data-stock-display-device="{offline_id}"' not in body
+    assert "支援 24-slot 裝置最多 24 個" in body
+    assert "Legacy／未知裝置最多 12 個" in body
     assert "Stock Host：10.23.45.67" in body
     assert 'data-stock-host="10.23.45.67"' in body
     assert 'placeholder="192.168.1.50"' in body
@@ -203,6 +205,80 @@ def test_device_management_preserves_legacy_automatic_and_stock_controls(client,
     assert 'id="device-dialog"' not in viewer_body
     assert 'id="token-dialog"' not in viewer_body
     assert "Stock PhotoPainter 模式" in viewer_body
+
+
+def test_device_management_shows_offline_capability_without_secret_or_viewer_controls(client, app):
+    create_admin(app)
+    login(client)
+    repository = app.extensions["inktime_device_repository"]
+    repository.create("未知能力相框")
+    repository.create(
+        "確認 24-slot 相框",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=[f"{hour:02d}:00" for hour in range(24)],
+        offline_schedule_max_slots=24,
+    )
+    ambiguous_id, ambiguous_token = repository.create(
+        "隔離中的舊相框",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=[f"{hour:02d}:00" for hour in range(13)],
+        offline_schedule_max_slots=24,
+    )
+    malformed_id, malformed_token = repository.create(
+        "格式損壞的舊相框",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=["08:00"],
+        offline_schedule_max_slots=24,
+    )
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            """
+            UPDATE devices
+            SET offline_schedule_max_slots=12,
+                offline_schedule_capability_state='legacy_ambiguous',
+                next_offline_prepare_at=NULL
+            WHERE id=?
+            """,
+            (ambiguous_id,),
+        )
+        connection.execute(
+            """
+            UPDATE devices
+            SET offline_schedule_max_slots=12,
+                offline_schedule_capability_state='legacy_ambiguous',
+                schedule_times_json='["08:00",',
+                offline_schedule_json='{"legacy":"08:00"}',
+                next_offline_prepare_at=NULL
+            WHERE id=?
+            """,
+            (malformed_id,),
+        )
+
+    body = client.get("/devices").get_data(as_text=True)
+    assert "離線能力：unknown_12／Legacy／尚未確認，最多 12 slots" in body
+    assert "離線能力：confirmed_24／已確認 24-slot capability（最多 24 slots）" in body
+    assert "離線能力：legacy_ambiguous／最大 12 slots" in body
+    assert "舊資料能力不明，已隔離；請重新配對或 Repair 以確認 capability。" in body
+    assert ambiguous_token not in body
+    assert malformed_token not in body
+    assert 'data-offline-capability-state="legacy_ambiguous"' in body
+    assert "deviceForm.dataset.scheduleSourceValid='false'" in body
+    assert "const safeQuarantinedRemediation=" in body
+    assert "if(!safeQuarantinedRemediation||deviceForm.dataset.scheduleSourceValid==='true'||scheduleEdited)" in body
+
+    app.extensions["inktime_auth_repository"].create_user(
+        "capability-viewer", "capability-viewer-password", "viewer"
+    )
+    viewer = app.test_client()
+    login(viewer, "capability-viewer", "capability-viewer-password")
+    viewer_body = viewer.get("/devices").get_data(as_text=True)
+    assert "離線能力：" not in viewer_body
+    assert "legacy_ambiguous" not in viewer_body
+    assert "舊資料能力不明，已隔離" not in viewer_body
+    assert ambiguous_token not in viewer_body
+    assert malformed_token not in viewer_body
+    assert "data-offline-capability-state" not in viewer_body
+    assert 'id="device-dialog"' not in viewer_body
 
 
 def test_batch_management_api_is_admin_only_and_strict_json(client, app):

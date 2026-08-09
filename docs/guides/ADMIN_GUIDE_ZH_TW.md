@@ -73,6 +73,8 @@
 
 所有修改寫入 `setting_history`，最近 100 筆直接顯示在設定頁；Secret 永不寫入摘要。Web、Worker、排程、Log 與 Session 的新設定均動態生效。只有舊版裝置 API 這類啟動時安全邊界仍需重啟。
 
+新安裝的照片庫 `incremental_scan` 預設在每月 1 日 03:00 執行；`full_reconcile` 預設在每年 1 月 1 日 04:00 執行。這是為大型 NAS 照片庫降低 traversal、磁碟喚醒與 SQLite 活動的低頻政策，不是每日即時相簿。升級不會覆蓋既有管理員自訂 cron；需要立即納入照片或人工核對時，仍可從維護頁建立增量掃描或完整掃描工作。
+
 新工作只有 `local` 與 `single` 兩個正式策略。`low_cost`、`smart`、`smart_two_stage`、`high_quality` 與 `single_high` 仍可讀取舊工作或舊 API payload，但會正規化為單次完整分析；不會再執行低成本→高品質的第二次圖片上傳。`analysis.caption_variants_enabled` 仍可讀取舊設定，但已移到進階設定，新的基本設定頁不再突出顯示五種候選文案。
 
 ## Web 與部署設定的邊界

@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import logging
 import signal
 import threading
 import time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from inktime.app.core.logging import configure_logging, log_event
+from inktime.app.domain.jobs.failure_policy import (
+    FailureClass,
+    classify_codes,
+    failure_code,
+)
 from inktime.app.workers.job_worker import BoundedJobWorker
 from inktime.app.workers.scanner import PhotoScanner
 from inktime.app.domain.photos import PhotoPreprocessor
@@ -21,11 +27,12 @@ LOGGER = logging.getLogger("worker")
 
 
 class WorkerRunner:
+    IDLE_BACKOFF_SECONDS = (15.0, 30.0, 60.0)
+
     def __init__(self, app) -> None:
         self.app = app
         self.stop = threading.Event()
         self.current: BoundedJobWorker | None = None
-        self._last_recovery_at = 0.0
 
     def request_stop(self, *_args) -> None:
         self.stop.set()
@@ -35,10 +42,10 @@ class WorkerRunner:
 
     def run_once(self) -> int:
         repository = self.app.extensions["inktime_job_repository"]
+        # Stale lease recovery has one owner: SchedulerRunner.  A Worker only
+        # claims work that Scheduler has made runnable, avoiding two processes
+        # racing to requeue the same expired item.
         recovered = 0
-        if time.monotonic() - self._last_recovery_at >= 60:
-            recovered = repository.recover_stale()
-            self._last_recovery_at = time.monotonic()
         processed_jobs = 0
         for job in repository.iter_runnable():
             if self.stop.is_set() or job["status"] not in {"running", "retrying"}:
@@ -128,7 +135,7 @@ class WorkerRunner:
                     logging.ERROR,
                     "工作項目處理失敗；詳細內容已寫入錯誤中心",
                     event="job_item_failed",
-                    error_code=str(getattr(exc, "code", "JOB-003")),
+                    error_code=failure_code(exc),
                     job_id=failed_job_id,
                     details={"item_id": item_id, "sampled_failure_count": failure_count},
                 )
@@ -413,6 +420,88 @@ class WorkerRunner:
                         bool(result.get("cache_hit"))
                     )
 
+            def finalize_job(
+                connection,
+                finalized_job_id: str,
+                target: str,
+                *,
+                settings=settings,
+                runtime_settings=runtime_settings,
+            ) -> None:
+                offline_prepare = settings.get("offline_prepare")
+                offline_schedules = self.app.extensions["inktime_offline_schedule_repository"]
+                scheduled_task = settings.get("scheduled_task")
+                if not isinstance(offline_prepare, dict) and not scheduled_task:
+                    return
+                codes = repository.failure_codes(finalized_job_id, connection=connection)
+                outcomes = repository.outcome_codes(finalized_job_id, connection=connection)
+
+                if isinstance(offline_prepare, dict):
+                    offline_identity = {
+                        "device_id": str(offline_prepare["device_id"]),
+                        "target_date": str(offline_prepare["target_date"]),
+                        "config_version": int(offline_prepare["config_version"]),
+                    }
+                    if (
+                        target == "completed_with_errors"
+                        and classify_codes(codes) == FailureClass.RETRYABLE
+                    ):
+                        offline_schedules.record_transient_exhausted(
+                            **offline_identity,
+                            now=datetime.now(timezone.utc),
+                            connection=connection,
+                        )
+                    elif target == "completed":
+                        offline_schedules.clear_transient_recovery(
+                            **offline_identity,
+                            connection=connection,
+                        )
+
+                if scheduled_task:
+                    schedules = self.app.extensions["inktime_schedule_repository"]
+                    task = schedules.get(str(scheduled_task), connection=connection)
+                    if task is None:
+                        return
+                    schedule_zone = ZoneInfo(
+                        str(runtime_settings.get("general.timezone", "Asia/Taipei"))
+                    )
+                    schedule_now = datetime.now(schedule_zone)
+                    if target == "completed":
+                        if outcomes and classify_codes(outcomes) == FailureClass.TERMINAL_NO_RETRY:
+                            schedules.record_terminal_outcome(
+                                task,
+                                ",".join(outcomes),
+                                schedule_now,
+                                connection=connection,
+                            )
+                        elif codes and classify_codes(codes) == FailureClass.TERMINAL_NO_RETRY:
+                            schedules.record_terminal(
+                                task,
+                                f"{','.join(codes)} 工作狀態：completed",
+                                schedule_now,
+                                connection=connection,
+                            )
+                        else:
+                            occurrence_at = settings.get("scheduled_occurrence_at")
+                            if occurrence_at:
+                                schedules.record_success(
+                                    task,
+                                    schedule_now,
+                                    scheduled_occurrence_at=str(occurrence_at),
+                                    connection=connection,
+                                )
+                    elif target == "completed_with_errors":
+                        classification = classify_codes(codes)
+                        message = f"{','.join(codes) or target} 工作狀態：{target}"
+                        if classification == FailureClass.TERMINAL_NO_RETRY:
+                            schedules.record_terminal(
+                                task, message, schedule_now, connection=connection
+                            )
+                        else:
+                            schedules.record_retry_exhausted(
+                                task, message, schedule_now, connection=connection
+                            )
+
             self.current = BoundedJobWorker(
                 repository,
                 processor,
@@ -428,15 +517,24 @@ class WorkerRunner:
                 queue_multiplier=int(runtime_settings.get("worker.queue_multiplier", 1)),
                 max_attempts=int(
                     settings.get(
-                        "max_retries",
-                        self.app.extensions["inktime_settings_repository"].get("analysis.max_retries"),
+                        "max_attempts",
+                        settings.get(
+                            "max_retries",
+                            self.app.extensions["inktime_settings_repository"].get("analysis.max_retries"),
+                        ),
                     )
+                ),
+                retry_interval_seconds=(
+                    int(settings["retry_interval_seconds"])
+                    if settings.get("retry_interval_seconds") is not None
+                    else None
                 ),
                 progress_interval_items=progress_items,
                 progress_interval_seconds=progress_seconds,
                 progress_callback=log_progress,
                 error_callback=log_failure,
                 result_callback=record_result,
+                finalize_callback=finalize_job,
                 timeout_seconds=int(settings.get("timeout_seconds", 0) or 0),
                 hard_timeout=False,
             )
@@ -456,17 +554,6 @@ class WorkerRunner:
                     close_provider()
             finished = repository.get(job["id"])
             if finished is not None:
-                scheduled_task = settings.get("scheduled_task")
-                if scheduled_task:
-                    schedules = self.app.extensions["inktime_schedule_repository"]
-                    if str(finished["status"]) == "completed":
-                        schedules.record_success(str(scheduled_task))
-                    elif str(finished["status"]) not in {"running", "retrying"}:
-                        task = schedules.get(str(scheduled_task))
-                        if task:
-                            schedules.record_failure(
-                                task, str(finished["status"]), datetime.now().astimezone()
-                            )
                 level = logging.WARNING if int(finished["failed_items"]) else logging.INFO
                 log_event(
                     LOGGER,
@@ -493,15 +580,27 @@ class WorkerRunner:
         repository = self.app.extensions["inktime_settings_repository"]
         configure_logging(settings_repository=repository)
         log_event(LOGGER, logging.INFO, "背景 Worker 已啟動", event="worker_started")
+        idle_index = 0
         while not self.stop.is_set():
-            if self.run_once() == 0:
+            processed = self.run_once()
+            if processed == 0:
                 configure_logging(settings_repository=repository)
-                wait_seconds = (
+                # Idle polling is deliberately adaptive: a quiet NAS wakes at
+                # 15s, then backs off to 30/60s and stays capped there.  Any completed Job
+                # resets the cursor so manual work remains responsive.
+                configured = (
                     float(poll_seconds)
                     if poll_seconds is not None
                     else float(repository.get("worker.poll_seconds", 15))
                 )
-                self.stop.wait(max(1.0, min(wait_seconds, 300.0)))
+                wait_seconds = max(
+                    self.IDLE_BACKOFF_SECONDS[idle_index],
+                    min(max(1.0, configured), self.IDLE_BACKOFF_SECONDS[-1]),
+                )
+                self.stop.wait(wait_seconds)
+                idle_index = min(idle_index + 1, len(self.IDLE_BACKOFF_SECONDS) - 1)
+            else:
+                idle_index = 0
         log_event(LOGGER, logging.INFO, "背景 Worker 已停止", event="worker_stopped")
 
     def run_drain(self) -> int:

@@ -26,9 +26,14 @@ from inktime.app.core.paths import UnsafePathError
 from inktime.app.domain.rendering import DISPLAY_PROFILES, DeviceTestReleaseStore
 from inktime.app.domain.rendering.system_presets import DEFAULT_DEVICE_PANEL_PROFILE
 from inktime.app.domain.photopainter.offline_schedule import (
+    LEGACY_MAX_OFFLINE_SLOTS,
     MINIMUM_SCHEDULE_GAP_MINUTES,
+    StoredScheduleState,
     normalize_delivery_contract,
     normalize_sync_strategy,
+    offline_schedule_capability_is_usable,
+    resolve_offline_schedule_max_slots,
+    stored_schedule_state,
     validate_offline_schedule,
 )
 from inktime.app.services.rendering import FIT_MODES, FRAME_ORIENTATIONS, LAYOUTS
@@ -64,7 +69,42 @@ def optional_bool(payload: dict, field: str, *, default: bool | None = None) -> 
         abort(400, description=str(exc))
 
 
-def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
+_DEVICE_FULL_FORM_FIELDS = frozenset(
+    {
+        "name",
+        "enabled",
+        "timezone",
+        "schedule",
+        "delivery_mode",
+        "schedule_times",
+        "minimum_schedule_gap_minutes",
+        "prefetch_lead_minutes",
+        "rotation",
+        "panel_profile",
+    }
+)
+
+
+def _synthetic_full_form_schedule(
+    payload: dict,
+    *,
+    existing_schedule: str,
+    stored: StoredScheduleState,
+) -> bool:
+    return (
+        not stored.is_array
+        and _DEVICE_FULL_FORM_FIELDS <= payload.keys()
+        and payload.get("schedule_times") == [existing_schedule]
+    )
+
+
+def _validated_device_fields(
+    payload,
+    *,
+    defaults: dict | None = None,
+    maximum_slots: int = LEGACY_MAX_OFFLINE_SLOTS,
+    preserve_quarantined_schedule: bool = False,
+) -> dict:
     defaults = defaults or {}
     timezone_name = str(payload.get("timezone", defaults.get("timezone", "Asia/Taipei")))
     try:
@@ -109,11 +149,16 @@ def _validated_device_fields(payload, *, defaults: dict | None = None) -> dict:
             maximum=360,
             error_prefix="DEVICE-008",
         )
-        schedule_values = validate_offline_schedule(
-            schedule_values,
-            maximum=12,
-            minimum_gap_minutes=minimum_schedule_gap_minutes,
-        )
+        if preserve_quarantined_schedule:
+            schedule_values = None
+        else:
+            schedule_values = validate_offline_schedule(
+                schedule_values,
+                maximum=resolve_offline_schedule_max_slots(
+                    {"offline_schedule_max_slots": maximum_slots}
+                ),
+                minimum_gap_minutes=minimum_schedule_gap_minutes,
+            )
     except ValueError as exc:
         abort(400, description=str(exc))
     except JsonScalarError as exc:
@@ -417,10 +462,76 @@ def update_device(device_id: str):
     existing = _repository().get(device_id)
     if existing is None:
         abort(404)
-    try:
-        existing_schedule = json.loads(str(existing["schedule_times_json"] or "[]"))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        existing_schedule = [str(existing["schedule"] or "08:00")]
+    stored_schedule_times = stored_schedule_state(existing["schedule_times_json"])
+    stored_offline_schedule = stored_schedule_state(existing["offline_schedule_json"])
+    existing_schedule = (
+        (stored_schedule_times.values if stored_schedule_times.is_array else [])
+        or (stored_offline_schedule.values if stored_offline_schedule.is_array else [])
+        or [str(existing["schedule"] or "08:00")]
+    )
+    effective_delivery_mode = str(
+        payload.get("delivery_mode", existing["delivery_mode"] or "legacy_online")
+    ).strip()
+    requested_enabled = payload.get("enabled", bool(existing["enabled"]))
+    effective_enabled = (
+        requested_enabled if type(requested_enabled) is bool else bool(existing["enabled"])
+    )
+    safe_remediation = not effective_enabled or effective_delivery_mode != "inktime_offline_schedule"
+    synthetic_schedule = _synthetic_full_form_schedule(
+        payload,
+        existing_schedule=str(existing["schedule"]),
+        stored=stored_schedule_times,
+    )
+    full_form_payload = _DEVICE_FULL_FORM_FIELDS <= payload.keys()
+    explicit_schedule_replacement = (
+        (
+            "schedule_times" in payload
+            and not synthetic_schedule
+            and (
+                not full_form_payload
+                or not stored_schedule_times.is_array
+                or payload.get("schedule_times") != stored_schedule_times.values
+            )
+        )
+        or "offline_schedule" in payload
+    )
+    schedule_unchanged = all(
+        (
+            "schedule_times" not in payload
+            or (
+                stored_schedule_times.is_array
+                and payload.get("schedule_times") == stored_schedule_times.values
+            )
+            or synthetic_schedule,
+            "offline_schedule" not in payload
+            or (
+                stored_offline_schedule.is_array
+                and payload.get("offline_schedule") == stored_offline_schedule.values
+            ),
+            "schedule" not in payload
+            or str(payload.get("schedule")) == str(existing["schedule"]),
+            "minimum_schedule_gap_minutes" not in payload
+            or payload.get("minimum_schedule_gap_minutes")
+            == int(existing["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES),
+        )
+    )
+    preserve_quarantined_schedule = (
+        str(existing["offline_schedule_capability_state"] or "") == "legacy_ambiguous"
+        and schedule_unchanged
+        and safe_remediation
+        and not explicit_schedule_replacement
+    )
+    if (
+        str(existing["offline_schedule_capability_state"] or "") == "legacy_ambiguous"
+        and not safe_remediation
+        and not explicit_schedule_replacement
+    ):
+        abort(
+            409,
+            description=(
+                "DEVICE-008 隔離中的離線排程必須先停用、切離離線模式，或明確提交有效替代排程"
+            ),
+        )
     fields = _validated_device_fields(
         payload,
         defaults={
@@ -445,7 +556,12 @@ def update_device(device_id: str):
             "layout_mode": existing["layout_mode"],
             "fit_mode": existing["fit_mode"],
         },
+        maximum_slots=resolve_offline_schedule_max_slots(
+            {"offline_schedule_max_slots": existing["offline_schedule_max_slots"]}
+        ),
+        preserve_quarantined_schedule=preserve_quarantined_schedule,
     )
+    fields["explicit_schedule_replacement"] = explicit_schedule_replacement
     try:
         _repository().update(device_id, **fields)
     except KeyError:
@@ -475,6 +591,13 @@ def update_device(device_id: str):
 @bp.get("/api/device/v1/releases/latest")
 def latest_release():
     device = authenticate_device_request()
+    if (
+        str(device["delivery_mode"] or "legacy_online") == "inktime_offline_schedule"
+        and not offline_schedule_capability_is_usable(
+            device["offline_schedule_capability_state"]
+        )
+    ):
+        abort(409, description="DEVICE-008 裝置離線 Slot 能力尚未確認，暫停離線設定傳送")
     profile_key = str(device["panel_profile"] or DEFAULT_DEVICE_PANEL_PROFILE)
     authorization = current_app.extensions["inktime_device_release_service"].latest_for_device(
         device_id=str(device["id"]),
@@ -502,6 +625,10 @@ def latest_release():
                 "schema_version": 3,
                 "delivery_mode": "inktime_offline_schedule",
                 "offline_prefetch_allowed": bool(device["offline_prefetch_allowed"]),
+                "offline_schedule_max_slots": int(device["offline_schedule_max_slots"] or LEGACY_MAX_OFFLINE_SLOTS),
+                "offline_schedule_capability_state": str(
+                    device["offline_schedule_capability_state"] or "unknown_12"
+                ),
                 "schedule_times": json.loads(str(device["schedule_times_json"] or "[]")),
                 "prefetch_lead_minutes": int(device["prefetch_lead_minutes"] or 0),
                 "button_wake_action": str(device["button_wake_action"] or "check_new"),
@@ -663,11 +790,39 @@ def prepare_offline_schedule(device_id: str):
         abort(400, description=str(exc))
 
 
+@bp.post("/api/v1/devices/<device_id>/offline-schedule/<schedule_id>/slots/<int:slot_index>")
+@administrator_required
+def replace_offline_schedule_slot(device_id: str, schedule_id: str, slot_index: int):
+    payload = _json_payload("DEVICE-008", maximum_bytes=32 * 1024)
+    release_id = str(payload.get("release_id", "")).strip()
+    expected = payload.get("expected_config_version")
+    try:
+        expected_version = None if expected is None else int(expected)
+    except (TypeError, ValueError):
+        abort(400, description="DEVICE-008 expected_config_version 必須是整數")
+    try:
+        return _offline_schedules().replace_slot(
+            device_id=device_id,
+            schedule_id=schedule_id,
+            slot_index=slot_index,
+            release_id=release_id,
+            expected_config_version=expected_version,
+        )
+    except KeyError:
+        abort(404, description="DEVICE-002 找不到或停用的離線排程")
+    except IndexError:
+        abort(404, description="DEVICE-008 找不到指定 Slot")
+    except ValueError as exc:
+        abort(409, description=str(exc))
+
+
 @bp.get("/api/device/v1/offline-schedule")
 def device_offline_schedule():
     device = authenticate_device_request()
     if str(device["delivery_mode"] or "legacy_online") != "inktime_offline_schedule":
         abort(409, description="DEVICE-008 裝置目前不是 enhanced offline schedule 模式")
+    if not offline_schedule_capability_is_usable(device["offline_schedule_capability_state"]):
+        abort(409, description="DEVICE-008 裝置離線 Slot 能力尚未確認，暫停離線排程傳送")
     requested_targets = request.args.getlist("target")
     if len(requested_targets) > 1:
         abort(400, description="DEVICE-008 target 只允許單一 current 或 next")
@@ -709,6 +864,9 @@ def device_offline_schedule():
                     minimum_gap_minutes=int(
                         device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
                     ),
+                    maximum_slots=resolve_offline_schedule_max_slots(
+                        {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
+                    ),
                 )
             else:
                 retry_details = OfflineScheduleRepository.retry_after_details(
@@ -721,6 +879,9 @@ def device_offline_schedule():
                     sync_time=device["sync_time"],
                     minimum_gap_minutes=int(
                         device["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
+                    ),
+                    maximum_slots=resolve_offline_schedule_max_slots(
+                        {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
                     ),
                 )
             retry_after_epoch = retry_details.retry_after_epoch
@@ -750,7 +911,11 @@ def device_offline_schedule():
             result["schedule"]["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES
         )
         schedule_times = validate_offline_schedule(
-            schedule_times, maximum=12, minimum_gap_minutes=minimum_gap_minutes
+            schedule_times,
+            maximum=resolve_offline_schedule_max_slots(
+                {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
+            ),
+            minimum_gap_minutes=minimum_gap_minutes,
         )
     except (TypeError, ValueError, json.JSONDecodeError):
         abort(409, description="DEVICE-008 離線排程快照 schedule_times 不可解析")
@@ -824,6 +989,12 @@ def device_offline_schedule():
         # the field present so firmware can fail closed without guessing.
         next_prefetch_epoch = 0
     queue_version = max((int(slot.get("queue_version") or 0) for slot in slots), default=0)
+    snapshot_json = device_projection.get("snapshot_json")
+    playlist_version = str(
+        result.get("playlist_version")
+        or (snapshot_json.get("playlist_version") if isinstance(snapshot_json, dict) else "")
+        or ""
+    )
     return {
         "schema_version": 1,
         "device_id": str(device["id"]),
@@ -850,6 +1021,7 @@ def device_offline_schedule():
         "sync_strategy": normalized_sync_strategy,
         "sync_time": normalized_sync_time,
         "queue_version": queue_version,
+        "playlist_version": playlist_version,
         "status": str(schedule["status"]),
         "slots": slots,
     }

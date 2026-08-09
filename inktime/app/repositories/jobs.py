@@ -4,7 +4,7 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
-from typing import Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator, List
 from uuid import uuid4
 
 from inktime.app.db import Database
@@ -238,6 +238,26 @@ class JobRepository:
         with self.database.session() as connection:
             return connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
 
+    def active_dedupe_job(self, dedupe_key: str):
+        """Return the newest in-flight Job for a scheduler-owned identity."""
+
+        with self.database.session() as connection:
+            return connection.execute(
+                """
+                SELECT id,status FROM jobs
+                WHERE dedupe_key=?
+                  AND status IN ('pending','preparing','running','pausing','retrying')
+                ORDER BY created_at DESC,id DESC
+                LIMIT 1
+                """,
+                (dedupe_key,),
+            ).fetchone()
+
+    def has_active_dedupe(self, dedupe_key: str) -> bool:
+        """Return whether a scheduler-owned identity is already in flight."""
+
+        return self.active_dedupe_job(dedupe_key) is not None
+
     def create_maintenance(
         self,
         *,
@@ -248,6 +268,52 @@ class JobRepository:
         priority: int | None = None,
         dedupe_key: str | None = None,
     ) -> str:
+        job_id = self._create_maintenance(
+            kind=kind,
+            name=name,
+            settings=settings,
+            created_by=created_by,
+            priority=priority,
+            dedupe_key=dedupe_key,
+            transaction_guard=None,
+        )
+        assert job_id is not None
+        return job_id
+
+    def create_maintenance_atomic(
+        self,
+        *,
+        kind: str,
+        name: str,
+        settings: dict,
+        created_by: str | None,
+        priority: int | None = None,
+        dedupe_key: str | None = None,
+        transaction_guard: Callable[[Any], bool],
+    ) -> str | None:
+        """Create a maintenance Job under a caller-owned transaction guard."""
+
+        return self._create_maintenance(
+            kind=kind,
+            name=name,
+            settings=settings,
+            created_by=created_by,
+            priority=priority,
+            dedupe_key=dedupe_key,
+            transaction_guard=transaction_guard,
+        )
+
+    def _create_maintenance(
+        self,
+        *,
+        kind: str,
+        name: str,
+        settings: dict,
+        created_by: str | None,
+        priority: int | None = None,
+        dedupe_key: str | None = None,
+        transaction_guard: Callable[[Any], bool] | None,
+    ) -> str | None:
         if kind not in {
             "scan",
             "backup",
@@ -278,6 +344,9 @@ class JobRepository:
                     if existing is not None:
                         connection.execute("COMMIT")
                         return str(existing["id"])
+                if transaction_guard is not None and not transaction_guard(connection):
+                    connection.execute("COMMIT")
+                    return None
                 connection.execute(
                     """
                     INSERT INTO jobs(id,kind,name,status,strategy,settings_json,total_items,created_by,created_at,priority,dedupe_key)
@@ -430,9 +499,25 @@ class JobRepository:
     def iter_runnable(self, page_size: int = 100):
         """以 keyset 走訪所有可執行 Job，避免舊工作被最新 100 筆遮蔽。"""
         last: tuple[int, str, str] | None = None
+        now = utc_now()
         while True:
-            where = "status IN ('running','retrying')"
-            params: list[object] = []
+            where = """
+                status IN ('running','retrying')
+                AND (
+                    EXISTS (
+                        SELECT 1 FROM job_items due_items
+                        WHERE due_items.job_id=jobs.id
+                          AND due_items.status='pending'
+                          AND due_items.available_at<=?
+                    )
+                    OR NOT EXISTS (
+                        SELECT 1 FROM job_items active_items
+                        WHERE active_items.job_id=jobs.id
+                          AND active_items.status IN ('pending','running','retrying')
+                    )
+                )
+            """
+            params: list[object] = [now]
             if last is not None:
                 where += " AND (priority>? OR (priority=? AND (created_at>? OR (created_at=? AND id>?))))"
                 params.extend([last[0], last[0], last[1], last[1], last[2]])
@@ -454,6 +539,39 @@ class JobRepository:
                 "SELECT * FROM job_items WHERE job_id=? ORDER BY id LIMIT ? OFFSET ?",
                 (job_id, limit, offset),
             ).fetchall()
+
+    def failure_codes(self, job_id: str, *, connection=None) -> List[str]:
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            rows = active_connection.execute(
+                "SELECT error_code FROM job_items WHERE job_id=? AND error_code IS NOT NULL AND error_code<>'' ORDER BY id",
+                (job_id,),
+            ).fetchall()
+        return [str(row["error_code"] or "JOB-003") for row in rows]
+
+    def outcome_codes(self, job_id: str, *, connection=None) -> List[str]:
+        """Return structured business outcomes without treating them as errors."""
+
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            rows = active_connection.execute(
+                "SELECT result_json FROM job_items WHERE job_id=? AND status='completed' AND result_json IS NOT NULL ORDER BY id",
+                (job_id,),
+            ).fetchall()
+        outcomes: list[str] = []
+        for row in rows:
+            try:
+                result = json.loads(str(row["result_json"]))
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(result, dict):
+                continue
+            code = result.get("outcome_code")
+            if code is None and result.get("outcome") == "no_content":
+                code = "NO_CONTENT"
+            if code:
+                outcomes.append(str(code))
+        return outcomes
 
     def can_access(self, job_id: str, user_id: str, *, administrator: bool) -> bool:
         with self.database.session() as connection:
@@ -644,10 +762,22 @@ class JobRepository:
                     cursor = connection.execute(
                         """
                         UPDATE job_items SET status='completed', completed_at=?, result_json=?,
-                                             lease_until=NULL, estimated_cost=?, stage=?
+                                             lease_until=NULL, estimated_cost=?, stage=?, error_code=?
                         WHERE id=? AND status='running'
                         """,
-                        (now, json.dumps(result, ensure_ascii=False), actual_cost, stage, item_id),
+                        (
+                            now,
+                            json.dumps(result, ensure_ascii=False),
+                            actual_cost,
+                            stage,
+                            (
+                                None
+                                if result.get("outcome_code")
+                                or result.get("outcome") == "no_content"
+                                else str(result.get("error_code") or "") or None
+                            ),
+                            item_id,
+                        ),
                     )
                     if cursor.rowcount:
                         connection.execute(
@@ -701,7 +831,14 @@ class JobRepository:
             )
 
     def fail_item(
-        self, job_id: str, item_id: str, error_code: str, message: str, *, max_attempts: int = 3
+        self,
+        job_id: str,
+        item_id: str,
+        error_code: str,
+        message: str,
+        *,
+        max_attempts: int = 3,
+        retry_interval_seconds: int | None = None,
     ) -> None:
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
@@ -715,14 +852,19 @@ class JobRepository:
                 if terminal:
                     connection.execute(
                         """
-                        UPDATE job_items SET status='failed', completed_at=?, error_code=?, lease_until=NULL,
+                        UPDATE job_items SET status='failed', completed_at=?, error_code=?,
+                                             lease_until=NULL,
                                              dead_lettered_at=? WHERE id=?
                         """,
                         (now, error_code, now, item_id),
                     )
                     connection.execute("UPDATE jobs SET failed_items=failed_items+1 WHERE id=?", (job_id,))
                 else:
-                    delay = min(300, 2 ** int(item["attempts"]))
+                    delay = (
+                        max(1, int(retry_interval_seconds))
+                        if retry_interval_seconds is not None
+                        else min(300, 2 ** int(item["attempts"]))
+                    )
                     available = (now_dt + timedelta(seconds=delay)).isoformat()
                     connection.execute(
                         "UPDATE job_items SET status='pending', available_at=?, error_code=?, lease_until=NULL WHERE id=?",
@@ -761,9 +903,22 @@ class JobRepository:
                 connection.execute("ROLLBACK")
                 raise
 
-    def finalize_if_done(self, job_id: str) -> bool:
+    def finalize_if_done(
+        self,
+        job_id: str,
+        *,
+        finalizer: Callable[[Any, str, str], None] | None = None,
+    ) -> bool:
+        """Finalize a completed Job and any caller-owned durable state atomically."""
+
         now = utc_now()
-        with self.database.session() as connection:
+        with self.database.transaction() as connection:
+            job = connection.execute(
+                "SELECT status FROM jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+            if job is None or str(job["status"]) not in {"running", "retrying"}:
+                return False
             counts = connection.execute(
                 """
                 SELECT SUM(status IN ('pending','running','retrying')) AS active,
@@ -775,6 +930,8 @@ class JobRepository:
             if counts is None or int(counts["active"] or 0) > 0:
                 return False
             target = "completed_with_errors" if int(counts["failed"] or 0) else "completed"
+            if finalizer is not None:
+                finalizer(connection, job_id, target)
             cursor = connection.execute(
                 "UPDATE jobs SET status=?, completed_at=?, heartbeat_at=? WHERE id=? AND status IN ('running','retrying')",
                 (target, now, now, job_id),
@@ -786,6 +943,18 @@ class JobRepository:
     def recover_stale(self) -> int:
         now = utc_now()
         with self.database.session() as connection:
+            candidate = connection.execute(
+                """
+                SELECT 1 FROM job_items
+                WHERE status='running' AND (lease_until IS NULL OR lease_until<?)
+                UNION ALL
+                SELECT 1 FROM jobs WHERE status='pausing'
+                LIMIT 1
+                """,
+                (now,),
+            ).fetchone()
+            if candidate is None:
+                return 0
             connection.execute("BEGIN IMMEDIATE")
             try:
                 cursor = connection.execute(

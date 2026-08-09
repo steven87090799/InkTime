@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime, timezone
 import base64
 from hashlib import sha256
 import json
 import math
 import re
+import time
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -647,10 +649,10 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "category": "效能與待機",
         "default": 15,
         "type": "number",
-        "description": "沒有工作時 Worker 檢查新工作的秒數",
-        "risk": "數值越小反應越快，但會增加待機喚醒與 SQLite 讀取",
+        "description": "沒有工作時 Worker 的自適應檢查基準秒數（15→30→60，上限 60）",
+        "risk": "數值越小反應越快，但會增加待機喚醒與 SQLite 讀取；沒有跨程序 wake signal 時不可超過 60 秒",
         "min": 1,
-        "max": 300,
+        "max": 60,
         "restart": False,
     },
     "worker.progress_items": {
@@ -1456,9 +1458,9 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "system.diagnostics_cache_seconds": {
         "category": "Log 與診斷",
-        "default": 300,
+        "default": 21600,
         "type": "integer",
-        "description": "診斷頁重算縮圖目錄大小前的快取秒數",
+        "description": "診斷頁重算縮圖目錄大小前的快取秒數；預設 6 小時",
         "risk": "數值太小會在大型快取目錄產生頻繁磁碟掃描",
         "min": 30,
         "max": 86400,
@@ -1751,8 +1753,12 @@ for _setting_key, _setting_definition in SETTING_DEFINITIONS.items():
 
 
 class SettingsRepository:
+    _RUNTIME_CACHE_TTL_SECONDS = 5.0
+
     def __init__(self, database: Database) -> None:
         self.database = database
+        self._runtime_cache: dict[str, Any] = {}
+        self._runtime_cache_at = 0.0
 
     def ensure_defaults(self) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -1814,6 +1820,8 @@ class SettingsRepository:
                     for key, definition in SETTING_DEFINITIONS.items()
                 ],
             )
+        self._runtime_cache.clear()
+        self._runtime_cache_at = 0.0
 
     def all(self, *, redact_sensitive: bool = False):
         with self.database.session() as connection:
@@ -1856,9 +1864,32 @@ class SettingsRepository:
         return result
 
     def get(self, key: str, default=None):
+        return self.get_many([key], defaults={key: default})[str(key)]
+
+    def invalidate_runtime_cache(self) -> None:
+        self._runtime_cache.clear()
+        self._runtime_cache_at = 0.0
+
+    def get_many(self, keys, *, defaults: dict[str, Any] | None = None) -> dict[str, Any]:
+        normalized = tuple(dict.fromkeys(str(key) for key in keys))
+        if not normalized:
+            return {}
+        now = time.monotonic()
+        cache_fresh = now - self._runtime_cache_at < self._RUNTIME_CACHE_TTL_SECONDS
+        if cache_fresh and all(key in self._runtime_cache for key in normalized):
+            return {key: self._runtime_cache[key] for key in normalized}
+        placeholders = ",".join("?" for _ in normalized)
         with self.database.session() as connection:
-            row = connection.execute("SELECT value_json FROM settings WHERE key=?", (key,)).fetchone()
-        return json.loads(row["value_json"]) if row else default
+            rows = connection.execute(
+                f"SELECT key,value_json FROM settings WHERE key IN ({placeholders})",  # noqa: S608 -- placeholders are generated from keys
+                normalized,
+            ).fetchall()
+        values = {str(row["key"]): json.loads(row["value_json"]) for row in rows}
+        fallback = defaults or {}
+        self._runtime_cache.clear()
+        self._runtime_cache.update(values)
+        self._runtime_cache_at = now
+        return {key: values.get(key, fallback.get(key)) for key in normalized}
 
     def is_explicit(self, key: str) -> bool:
         """Whether an operator has stored a non-default value for ``key``."""
@@ -1888,12 +1919,15 @@ class SettingsRepository:
             ).fetchall()
         return [dict(row) | {"changed_keys_count": len(json.loads(row["changed_keys_json"]))} for row in rows]
 
-    def _snapshot_record(self, snapshot_id: str) -> dict[str, Any]:
-        with self.database.session() as connection:
-            row = connection.execute("SELECT * FROM settings_snapshots WHERE id=?", (snapshot_id,)).fetchone()
+    def _snapshot_record(self, snapshot_id: str, *, connection=None) -> dict[str, Any]:
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            row = active_connection.execute(
+                "SELECT * FROM settings_snapshots WHERE id=?", (snapshot_id,)
+            ).fetchone()
             if row is None:
                 raise KeyError(snapshot_id)
-            items = connection.execute(
+            items = active_connection.execute(
                 """
                 SELECT key,old_value_json,new_value_json,restored_default
                 FROM settings_snapshot_items WHERE snapshot_id=? ORDER BY key
@@ -2144,7 +2178,11 @@ class SettingsRepository:
         return values
 
     def prepare_updates(
-        self, updates: dict[str, Any], *, reject_control_center: bool = False
+        self,
+        updates: dict[str, Any],
+        *,
+        reject_control_center: bool = False,
+        connection=None,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         if not isinstance(updates, dict):
             raise ValueError("設定更新必須是 JSON 物件")
@@ -2169,8 +2207,9 @@ class SettingsRepository:
                 normalized["analysis.ai_mode"],
                 local_processing_enabled=bool(normalized.get("analysis.prefilter_enabled", True)),
             )
-        with self.database.session() as connection:
-            current = self._values_from_connection(connection)
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            current = self._values_from_connection(active_connection)
         merged = current | normalized
         self._validate_all(merged)
         changed = {key: value for key, value in normalized.items() if current.get(key) != value}
@@ -2345,72 +2384,96 @@ class SettingsRepository:
         )
         if not changed:
             return {"updated": 0, "changed_keys": [], "snapshot_id": None}
-        now = datetime.now(timezone.utc).isoformat()
         with self.database.transaction() as connection:
-            before = self._values_from_connection(connection)
-            normalized = {key: self._coerce(key, value) for key, value in changed.items()}
-            after = before | normalized
-            self._validate_all(after)
-            actual = {key: value for key, value in normalized.items() if before.get(key) != value}
-            if not actual:
-                return {"updated": 0, "changed_keys": [], "snapshot_id": None}
-            snapshot_id = self._create_snapshot(
+            result = self.update_many_in_transaction(
                 connection,
-                before=before,
-                after=after,
-                changed=actual,
-                actor_id=changed_by,
+                changed,
+                changed_by=changed_by,
                 source_ip=source_ip,
                 reason=reason,
                 rollback_source_snapshot_id=rollback_source_snapshot_id,
             )
-            for key, value in actual.items():
-                definition = SETTING_DEFINITIONS[key]
-                encoded = json.dumps(value, ensure_ascii=False, allow_nan=False)
-                previous_summary = json.dumps(
-                    self._snapshot_value(key, before[key]),
-                    ensure_ascii=False,
-                    allow_nan=False,
-                )
-                new_summary = json.dumps(
-                    self._snapshot_value(key, value, changed=True),
-                    ensure_ascii=False,
-                    allow_nan=False,
-                )
-                connection.execute(
-                    "UPDATE settings SET value_json=?,updated_by=?,updated_at=? WHERE key=?",
-                    (
-                        encoded,
-                        None if value == definition["default"] else changed_by,
-                        now,
-                        key,
-                    ),
-                )
-                connection.execute(
-                    """
-                    INSERT INTO setting_history(
-                        key,changed_at,changed_by,old_value_summary,new_value_summary,source_ip,
-                        requires_restart
-                    ) VALUES (?,?,?,?,?,?,?)
-                    """,
-                    (
-                        key,
-                        now,
-                        changed_by,
-                        previous_summary[:500],
-                        new_summary[:500],
-                        source_ip[:64],
-                        int(definition.get("restart_required", False)),
-                    ),
-                )
+        if result["updated"]:
+            self.invalidate_runtime_cache()
+        return result
+
+    def update_many_in_transaction(
+        self,
+        connection,
+        updates: dict[str, Any],
+        *,
+        changed_by: str,
+        source_ip: str,
+        reason: str | None = None,
+        rollback_source_snapshot_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist validated settings inside a caller-owned atomic transaction."""
+
+        before = self._values_from_connection(connection)
+        normalized = {key: self._coerce(key, value) for key, value in updates.items()}
+        after = before | normalized
+        self._validate_all(after)
+        actual = {key: value for key, value in normalized.items() if before.get(key) != value}
+        if not actual:
+            return {"updated": 0, "changed_keys": [], "snapshot_id": None}
+        now = datetime.now(timezone.utc).isoformat()
+        snapshot_id = self._create_snapshot(
+            connection,
+            before=before,
+            after=after,
+            changed=actual,
+            actor_id=changed_by,
+            source_ip=source_ip,
+            reason=reason,
+            rollback_source_snapshot_id=rollback_source_snapshot_id,
+        )
+        for key, value in actual.items():
+            definition = SETTING_DEFINITIONS[key]
+            encoded = json.dumps(value, ensure_ascii=False, allow_nan=False)
+            previous_summary = json.dumps(
+                self._snapshot_value(key, before[key]),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            new_summary = json.dumps(
+                self._snapshot_value(key, value, changed=True),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            connection.execute(
+                "UPDATE settings SET value_json=?,updated_by=?,updated_at=? WHERE key=?",
+                (
+                    encoded,
+                    None if value == definition["default"] else changed_by,
+                    now,
+                    key,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO setting_history(
+                    key,changed_at,changed_by,old_value_summary,new_value_summary,source_ip,
+                    requires_restart
+                ) VALUES (?,?,?,?,?,?,?)
+                """,
+                (
+                    key,
+                    now,
+                    changed_by,
+                    previous_summary[:500],
+                    new_summary[:500],
+                    source_ip[:64],
+                    int(definition.get("restart_required", False)),
+                ),
+            )
         return {
             "updated": len(actual),
             "changed_keys": sorted(actual),
             "snapshot_id": snapshot_id,
         }
 
-    def rollback_preview(self, snapshot_id: str) -> dict[str, Any]:
-        target = self._snapshot_record(snapshot_id)
+    def rollback_preview(self, snapshot_id: str, *, connection=None) -> dict[str, Any]:
+        target = self._snapshot_record(snapshot_id, connection=connection)
         target_values = target["before"]
         target_after = target["after"]
         snapshot_changed_keys = list(dict.fromkeys(map(str, target["changed_keys"])))
@@ -2420,8 +2483,9 @@ class SettingsRepository:
             | set(map(str, target_after))
             | {str(item["key"]) for item in target["items"]}
         )
-        with self.database.session() as connection:
-            current = self._values_from_connection(connection)
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            current = self._values_from_connection(active_connection)
         unknown_keys = sorted(key for key in recorded_keys if key not in SETTING_DEFINITIONS)
         sensitive_unrestorable_keys = sorted(
             key
@@ -2446,7 +2510,7 @@ class SettingsRepository:
             and key not in sensitive_unrestorable_keys
             and current.get(key) != value
         }
-        changed, _before, merged = self.prepare_updates(updates)
+        changed, _before, merged = self.prepare_updates(updates, connection=connection)
         diff = [
             {
                 "key": key,

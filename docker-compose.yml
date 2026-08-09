@@ -86,7 +86,7 @@ services:
     command: ["python", "-m", "inktime.app.workers.runner"]
     healthcheck:
       test: ["CMD", "python", "scripts/container_health.py", "worker"]
-      interval: 30s
+      interval: 2m
       timeout: 5s
       start_period: 20s
       retries: 3
@@ -106,7 +106,7 @@ services:
     command: ["python", "-m", "inktime.app.workers.scheduler"]
     healthcheck:
       test: ["CMD", "python", "scripts/container_health.py", "scheduler"]
-      interval: 30s
+      interval: 2m
       timeout: 5s
       start_period: 20s
       retries: 3

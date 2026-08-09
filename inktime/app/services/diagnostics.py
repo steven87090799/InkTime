@@ -25,6 +25,10 @@ from inktime.app.domain.rendering.fonts import (
 
 
 class DiagnosticsService:
+    _WORKER_IDLE_POLL_CAP_SECONDS = 60.0
+    _DATABASE_QUICK_CHECK_TTL_SECONDS = 24 * 60 * 60
+    _BACKUP_INVENTORY_TTL_SECONDS = 6 * 60 * 60
+
     def __init__(
         self,
         database: Database,
@@ -43,6 +47,13 @@ class DiagnosticsService:
         psutil.cpu_percent(interval=None)
         self._cache_bytes_value = 0
         self._cache_bytes_at = 0.0
+        self._database_integrity_value = "unknown"
+        self._database_integrity_at = 0.0
+        self._backup_inventory_value: str | None = None
+        self._backup_inventory_at = 0.0
+        self._font_inventory_value = 0
+        self._font_inventory_at = 0.0
+        self._resolved_git_revision: str | None = None
 
     @staticmethod
     def _directory_size(root: Path) -> int:
@@ -90,9 +101,9 @@ class DiagnosticsService:
 
     def _cached_directory_size(self) -> tuple[int, bool]:
         ttl = (
-            int(self.settings_repository.get("system.diagnostics_cache_seconds", 300))
+            int(self.settings_repository.get("system.diagnostics_cache_seconds", 21600))
             if self.settings_repository
-            else 300
+            else 21600
         )
         now = time.monotonic()
         refreshed = self._cache_bytes_at == 0 or now - self._cache_bytes_at >= max(30, ttl)
@@ -101,7 +112,68 @@ class DiagnosticsService:
             self._cache_bytes_at = now
         return self._cache_bytes_value, not refreshed
 
-    def snapshot(self) -> dict:
+    def _cached_database_quick_check(self, *, force: bool = False) -> str:
+        now = time.monotonic()
+        if (
+            force
+            or
+            self._database_integrity_at == 0
+            or now - self._database_integrity_at >= self._DATABASE_QUICK_CHECK_TTL_SECONDS
+        ):
+            self._database_integrity_value = self.database.integrity_check()
+            self._database_integrity_at = now
+        return self._database_integrity_value
+
+    def _cached_backup_inventory(self) -> str | None:
+        now = time.monotonic()
+        if (
+            self._backup_inventory_at == 0
+            or now - self._backup_inventory_at >= self._BACKUP_INVENTORY_TTL_SECONDS
+        ):
+            backup_dir = self.data_dir / "backups"
+            try:
+                candidates = sorted(
+                    backup_dir.glob("inktime-backup-*.zip"),
+                    key=lambda item: item.stat().st_mtime,
+                    reverse=True,
+                )
+            except OSError:
+                candidates = []
+            self._backup_inventory_value = candidates[0].name if candidates else None
+            self._backup_inventory_at = now
+        return self._backup_inventory_value
+
+    def _cached_font_inventory(self) -> int:
+        now = time.monotonic()
+        if self._font_inventory_at == 0 or now - self._font_inventory_at >= self._BACKUP_INVENTORY_TTL_SECONDS:
+            self._font_inventory_value = sum(
+                (DEFAULT_FONT_ASSET_ROOT / font.filename).is_file() for font in BUILTIN_FONTS
+            ) + sum(
+                path.is_file() and path.suffix.lower() in SUPPORTED_FONT_SUFFIXES
+                for path in (self.data_dir / "fonts").glob("*")
+            )
+            self._font_inventory_at = now
+        return self._font_inventory_value
+
+    def snapshot(self, *, force_integrity: bool = False) -> dict:
+        runtime_settings = (
+            self.settings_repository.get_many(
+                [
+                    "system.diagnostics_cache_seconds",
+                    "analysis.concurrency",
+                    "worker.queue_multiplier",
+                    "worker.poll_seconds",
+                ],
+                defaults={
+                    "system.diagnostics_cache_seconds": 21600,
+                    "analysis.concurrency": 1,
+                    "worker.queue_multiplier": 1,
+                    "worker.poll_seconds": 15,
+                },
+            )
+            if self.settings_repository
+            else {}
+        )
         memory = psutil.virtual_memory()
         swap = psutil.swap_memory()
         disk = psutil.disk_usage(self.data_dir)
@@ -118,7 +190,7 @@ class DiagnosticsService:
             libraries = connection.execute("SELECT root_path FROM libraries WHERE enabled=1").fetchall()
             providers = connection.execute("SELECT COUNT(*) FROM providers WHERE enabled=1").fetchone()[0]
         revision = os.environ.get("INKTIME_GIT_REVISION", "unknown")
-        if revision == "unknown":
+        if revision == "unknown" and self._resolved_git_revision is None:
             git = shutil.which("git")
             try:
                 if git:
@@ -131,6 +203,9 @@ class DiagnosticsService:
                     ).stdout.strip()
             except Exception:
                 revision = "unknown"
+            self._resolved_git_revision = revision
+        elif revision == "unknown" and self._resolved_git_revision is not None:
+            revision = self._resolved_git_revision
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "cpu_percent": psutil.cpu_percent(interval=None),
@@ -149,7 +224,7 @@ class DiagnosticsService:
             "database": {
                 "bytes": self._file_size(self.database.path),
                 "wal_bytes": self._file_size(wal),
-                "integrity": self.database.integrity_check(),
+                "integrity": self._cached_database_quick_check(force=force_integrity),
             },
             "cache_bytes": cache_bytes,
             "cache_size_cached": cache_cached,
@@ -158,23 +233,9 @@ class DiagnosticsService:
                 "readable": sum(Path(row["root_path"]).is_dir() for row in libraries),
             },
             "providers_enabled": int(providers),
-            "fonts": sum((DEFAULT_FONT_ASSET_ROOT / font.filename).is_file() for font in BUILTIN_FONTS)
-            + sum(
-                path.is_file() and path.suffix.lower() in SUPPORTED_FONT_SUFFIXES
-                for path in (self.data_dir / "fonts").glob("*")
-            ),
+            "fonts": self._cached_font_inventory(),
             "release_latest": (self.data_dir / "releases" / "latest").exists(),
-            "last_backup": next(
-                (
-                    path.name
-                    for path in sorted(
-                        (self.data_dir / "backups").glob("inktime-backup-*.zip"),
-                        key=lambda item: item.stat().st_mtime,
-                        reverse=True,
-                    )
-                ),
-                None,
-            ),
+            "last_backup": self._cached_backup_inventory(),
             "docker": Path("/.dockerenv").exists(),
             "worker_count": workers,
             "queue_length": queue,
@@ -186,24 +247,26 @@ class DiagnosticsService:
             "uptime_seconds": int(time.time() - self.started_at),
             "runtime_profile": {
                 "analysis_concurrency": int(
-                    self.settings_repository.get("analysis.concurrency", 1) if self.settings_repository else 1
+                    runtime_settings.get("analysis.concurrency", 1)
                 ),
                 "queue_multiplier": int(
-                    self.settings_repository.get("worker.queue_multiplier", 1)
-                    if self.settings_repository
-                    else 1
+                    runtime_settings.get("worker.queue_multiplier", 1)
                 ),
                 "worker_poll_seconds": float(
-                    self.settings_repository.get("worker.poll_seconds", 15)
-                    if self.settings_repository
-                    else 15
+                    min(
+                        self._WORKER_IDLE_POLL_CAP_SECONDS,
+                        max(
+                            1.0,
+                            float(runtime_settings.get("worker.poll_seconds", 15)),
+                        ),
+                    )
                 ),
             },
         }
 
     def bundle(self) -> BytesIO:
         output = BytesIO()
-        snapshot = redact(self.snapshot())
+        snapshot = redact(self.snapshot(force_integrity=True))
         # 診斷包不包含設定值、照片路徑、GPS、Cookie、Session 或任何 Secret。
         with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
             bundle.writestr("diagnostics.json", json.dumps(snapshot, ensure_ascii=False, indent=2))
