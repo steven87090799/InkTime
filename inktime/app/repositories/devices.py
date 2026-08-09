@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hmac
 import json
 import secrets
-from typing import Sequence
+from typing import Any, Sequence
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -28,6 +29,24 @@ _DEVICE_AUTH_FAILURE_LIMIT = 20
 _DEVICE_AUTH_FAILURE_WINDOW = timedelta(minutes=5)
 _DEVICE_AUTH_FAILURE_MAX_ROWS = 10_000
 _DEVICE_AUTH_TIMESTAMP_UPDATE_INTERVAL = timedelta(minutes=1)
+
+
+@dataclass(frozen=True)
+class StoredScheduleState:
+    raw: str
+    is_array: bool
+    values: list[Any]
+
+
+def stored_schedule_state(value: object) -> StoredScheduleState:
+    raw = str(value) if value is not None else "[]"
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return StoredScheduleState(raw=raw, is_array=False, values=[])
+    if not isinstance(parsed, list):
+        return StoredScheduleState(raw=raw, is_array=False, values=[])
+    return StoredScheduleState(raw=raw, is_array=True, values=list(parsed))
 
 
 class DeviceRateLimitError(RuntimeError):
@@ -363,6 +382,7 @@ class DeviceRepository:
         offline_prefetch_allowed: bool | None = None,
         offline_schedule: Sequence[str] | None = None,
         schedule_times: Sequence[str] | None = None,
+        explicit_schedule_replacement: bool | None = None,
         prefetch_lead_minutes: int = 5,
         button_wake_action: str = "check_new",
         minimum_schedule_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
@@ -415,17 +435,38 @@ class DeviceRepository:
                 selected_pairing_state = "paired" if selected_auth_mode != "automatic" else str(
                     current["pairing_state"] or "unpaired"
                 )
-                try:
-                    existing_schedule = json.loads(str(current["schedule_times_json"] or "[]"))
-                except (TypeError, ValueError, json.JSONDecodeError):
+                schedule_times_state = stored_schedule_state(current["schedule_times_json"])
+                offline_schedule_state = stored_schedule_state(current["offline_schedule_json"])
+                if schedule_times_state.is_array and schedule_times_state.values:
+                    existing_schedule = schedule_times_state.values
+                elif offline_schedule_state.is_array and offline_schedule_state.values:
+                    existing_schedule = offline_schedule_state.values
+                else:
                     existing_schedule = []
-                if not isinstance(existing_schedule, list) or not existing_schedule:
-                    try:
-                        existing_schedule = json.loads(str(current["offline_schedule_json"] or "[]"))
-                    except (TypeError, ValueError, json.JSONDecodeError):
-                        existing_schedule = []
                 explicit_schedule = (
                     schedule_times if schedule_times is not None else offline_schedule
+                )
+                inferred_schedule_replacement = bool(
+                    (
+                        schedule_times is not None
+                        and (
+                            not schedule_times_state.is_array
+                            or list(schedule_times) != schedule_times_state.values
+                        )
+                    )
+                    or (
+                        schedule_times is None
+                        and offline_schedule is not None
+                        and (
+                            not offline_schedule_state.is_array
+                            or list(offline_schedule) != offline_schedule_state.values
+                        )
+                    )
+                )
+                explicit_schedule_changed = (
+                    inferred_schedule_replacement
+                    if explicit_schedule_replacement is None
+                    else bool(explicit_schedule_replacement)
                 )
                 if explicit_schedule is not None:
                     selected_schedule = explicit_schedule
@@ -439,7 +480,7 @@ class DeviceRepository:
                     {"offline_schedule_max_slots": current["offline_schedule_max_slots"]}
                 )
                 schedule_was_modified = bool(
-                    (explicit_schedule is not None and list(explicit_schedule) != existing_schedule)
+                    explicit_schedule_changed
                     or str(current["schedule"]) != schedule
                     or int(
                         current["minimum_schedule_gap_minutes"]
@@ -456,11 +497,20 @@ class DeviceRepository:
                         or delivery_mode != "inktime_offline_schedule"
                     )
                 )
+                if (
+                    str(current["offline_schedule_capability_state"] or "")
+                    == "legacy_ambiguous"
+                    and not schedule_was_modified
+                    and not preserve_quarantined_schedule
+                ):
+                    raise ValueError(
+                        "DEVICE-008 隔離中的離線排程必須先停用、切離離線模式，或明確提交有效替代排程"
+                    )
                 if preserve_quarantined_schedule:
-                    schedule_values = existing_schedule or [str(current["schedule"])]
+                    schedule_values = existing_schedule
                     stored_schedule = str(current["schedule"])
-                    stored_offline_schedule = str(current["offline_schedule_json"] or "[]")
-                    stored_schedule_times = str(current["schedule_times_json"] or "[]")
+                    stored_offline_schedule = offline_schedule_state.raw
+                    stored_schedule_times = schedule_times_state.raw
                 else:
                     schedule_values = validate_offline_schedule(
                         selected_schedule,
@@ -484,7 +534,7 @@ class DeviceRepository:
                         str(current["delivery_mode"]) != delivery_mode,
                         bool(current["offline_prefetch_allowed"]) != bool(offline_prefetch_allowed),
                         bool(current["enabled"]) != bool(enabled),
-                        existing_schedule != schedule_values,
+                        schedule_was_modified,
                         int(current["prefetch_lead_minutes"]) != int(prefetch_lead_minutes),
                         str(current["button_wake_action"]) != button_wake_action,
                         int(current["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES)
@@ -493,6 +543,9 @@ class DeviceRepository:
                         (current["sync_time"] or None) != (sync_time or None),
                         (current["stock_endpoint_host"] or None) != (stock_endpoint_host or None),
                     )
+                )
+                offline_schedule_changed = bool(
+                    remote_changed and not preserve_quarantined_schedule
                 )
                 cursor = connection.execute(
                     """
@@ -528,7 +581,7 @@ class DeviceRepository:
                         sync_strategy,
                         sync_time,
                         stock_endpoint_host,
-                        int(remote_changed),
+                        int(offline_schedule_changed),
                         int(delivery_mode == "inktime_offline_schedule"),
                         int(enabled),
                         int(remote_changed),
@@ -570,7 +623,7 @@ class DeviceRepository:
                 if (
                     delivery_mode == "inktime_offline_schedule"
                     and remote_changed
-                    and existing_schedule != schedule_values
+                    and schedule_was_modified
                 ):
                     self._record_past_schedule_slots(
                         connection,

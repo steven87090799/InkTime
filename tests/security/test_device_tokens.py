@@ -34,6 +34,34 @@ def _legacy_ambiguous_offline_device(app):
     return device_id, token, schedule_times
 
 
+def _legacy_ambiguous_raw_schedule_device(
+    app,
+    *,
+    schedule_times_raw: str,
+    offline_schedule_raw: str,
+):
+    repository = app.extensions["inktime_device_repository"]
+    device_id, token = repository.create(
+        "Malformed legacy remediation",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=["08:00"],
+        offline_schedule_max_slots=24,
+    )
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            """
+            UPDATE devices
+            SET offline_schedule_max_slots=12,
+                offline_schedule_capability_state='legacy_ambiguous',
+                schedule_times_json=?,offline_schedule_json=?,
+                next_offline_prepare_at=NULL
+            WHERE id=?
+            """,
+            (schedule_times_raw, offline_schedule_raw, device_id),
+        )
+    return device_id, token
+
+
 def _device_form_payload(device, schedule_times, *, enabled: bool, delivery_mode: str) -> dict:
     return {
         "name": device["name"],
@@ -505,6 +533,214 @@ def test_quarantined_device_rejects_explicit_oversized_schedule_mutation(client,
     assert after["offline_schedule_max_slots"] == 12
     assert after["schedule_times_json"] == before["schedule_times_json"]
     assert json.loads(str(after["schedule_times_json"])) == schedule_times
+
+
+@pytest.mark.parametrize(
+    ("schedule_times_raw", "offline_schedule_raw"),
+    [
+        ('["08:00",', '["08:00"]'),
+        ('{"legacy":"08:00"}', '"08:00"'),
+    ],
+)
+@pytest.mark.parametrize("full_form", [False, True])
+def test_administrator_can_disable_malformed_quarantine_without_normalizing_history(
+    client,
+    app,
+    schedule_times_raw,
+    offline_schedule_raw,
+    full_form,
+):
+    create_admin(app)
+    login(client)
+    device_id, _token = _legacy_ambiguous_raw_schedule_device(
+        app,
+        schedule_times_raw=schedule_times_raw,
+        offline_schedule_raw=offline_schedule_raw,
+    )
+    repository = app.extensions["inktime_device_repository"]
+    before = repository.get(device_id)
+    payload = (
+        _device_form_payload(
+            before,
+            [str(before["schedule"])],
+            enabled=False,
+            delivery_mode="inktime_offline_schedule",
+        )
+        if full_form
+        else {"enabled": False}
+    )
+
+    response = client.patch(
+        f"/api/v1/devices/{device_id}",
+        json=payload,
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+
+    assert response.status_code == 200
+    after = repository.get(device_id)
+    assert after["enabled"] == 0
+    assert after["offline_schedule_capability_state"] == "legacy_ambiguous"
+    assert after["offline_schedule_max_slots"] == 12
+    assert after["next_offline_prepare_at"] is None
+    assert after["schedule_times_json"] == schedule_times_raw
+    assert after["offline_schedule_json"] == offline_schedule_raw
+    assert after["offline_schedule_version"] == before["offline_schedule_version"]
+
+
+def test_malformed_quarantine_mode_exit_is_exact_and_repeated_disable_has_no_version_churn(
+    client,
+    app,
+):
+    create_admin(app)
+    login(client)
+    schedule_times_raw = '["08:00",'
+    offline_schedule_raw = '{"legacy":"08:00"}'
+    device_id, _token = _legacy_ambiguous_raw_schedule_device(
+        app,
+        schedule_times_raw=schedule_times_raw,
+        offline_schedule_raw=offline_schedule_raw,
+    )
+    repository = app.extensions["inktime_device_repository"]
+    before = repository.get(device_id)
+    switch_payload = _device_form_payload(
+        before,
+        [str(before["schedule"])],
+        enabled=True,
+        delivery_mode="legacy_online",
+    )
+
+    switched = client.patch(
+        f"/api/v1/devices/{device_id}",
+        json=switch_payload,
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+
+    assert switched.status_code == 200
+    after_switch = repository.get(device_id)
+    assert after_switch["delivery_mode"] == "legacy_online"
+    assert after_switch["offline_prefetch_allowed"] == 0
+    assert after_switch["next_offline_prepare_at"] is None
+    assert after_switch["offline_schedule_capability_state"] == "legacy_ambiguous"
+    assert after_switch["schedule_times_json"] == schedule_times_raw
+    assert after_switch["offline_schedule_json"] == offline_schedule_raw
+    assert after_switch["offline_schedule_version"] == before["offline_schedule_version"]
+
+    disable_payload = _device_form_payload(
+        after_switch,
+        [str(after_switch["schedule"])],
+        enabled=False,
+        delivery_mode="legacy_online",
+    )
+    first_disable = client.patch(
+        f"/api/v1/devices/{device_id}",
+        json=disable_payload,
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert first_disable.status_code == 200
+    after_disable = repository.get(device_id)
+    versions_after_disable = (
+        int(after_disable["config_version"]),
+        int(after_disable["offline_schedule_version"]),
+    )
+
+    repeated = client.patch(
+        f"/api/v1/devices/{device_id}",
+        json=disable_payload,
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+
+    assert repeated.status_code == 200
+    after_repeated = repository.get(device_id)
+    assert (
+        int(after_repeated["config_version"]),
+        int(after_repeated["offline_schedule_version"]),
+    ) == versions_after_disable
+    assert after_repeated["schedule_times_json"] == schedule_times_raw
+    assert after_repeated["offline_schedule_json"] == offline_schedule_raw
+
+
+def test_malformed_quarantine_active_full_form_remains_fail_closed(client, app):
+    create_admin(app)
+    login(client)
+    device_id, _token = _legacy_ambiguous_raw_schedule_device(
+        app,
+        schedule_times_raw='["08:00",',
+        offline_schedule_raw='["08:00"]',
+    )
+    repository = app.extensions["inktime_device_repository"]
+    before = repository.get(device_id)
+    payload = _device_form_payload(
+        before,
+        [str(before["schedule"])],
+        enabled=True,
+        delivery_mode="inktime_offline_schedule",
+    )
+
+    response = client.patch(
+        f"/api/v1/devices/{device_id}",
+        json=payload,
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["error_code"] == "DEVICE-008"
+    after = repository.get(device_id)
+    assert after["schedule_times_json"] == before["schedule_times_json"]
+    assert after["offline_schedule_json"] == before["offline_schedule_json"]
+    assert after["config_version"] == before["config_version"]
+    assert after["offline_schedule_version"] == before["offline_schedule_version"]
+
+
+def test_malformed_quarantine_explicit_schedule_replacement_remains_capability_strict(
+    client,
+    app,
+):
+    create_admin(app)
+    login(client)
+    repository = app.extensions["inktime_device_repository"]
+    rejected_id, _token = _legacy_ambiguous_raw_schedule_device(
+        app,
+        schedule_times_raw='["08:00",',
+        offline_schedule_raw='{"legacy":"08:00"}',
+    )
+    oversized = [f"{hour:02d}:00" for hour in range(13)]
+
+    rejected = client.patch(
+        f"/api/v1/devices/{rejected_id}",
+        json={"schedule_times": oversized},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+
+    assert rejected.status_code == 400
+    rejected_row = repository.get(rejected_id)
+    assert rejected_row["schedule_times_json"] == '["08:00",'
+    assert rejected_row["offline_schedule_json"] == '{"legacy":"08:00"}'
+    assert rejected_row["offline_schedule_capability_state"] == "legacy_ambiguous"
+
+    replaced_id, _token = _legacy_ambiguous_raw_schedule_device(
+        app,
+        schedule_times_raw='["08:00",',
+        offline_schedule_raw='["08:00"]',
+    )
+    before_replacement = repository.get(replaced_id)
+    replacement = ["08:00"]
+    accepted = client.patch(
+        f"/api/v1/devices/{replaced_id}",
+        json={"schedule_times": replacement},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+
+    assert accepted.status_code == 200
+    accepted_row = repository.get(replaced_id)
+    assert json.loads(str(accepted_row["schedule_times_json"])) == replacement
+    assert json.loads(str(accepted_row["offline_schedule_json"])) == replacement
+    assert accepted_row["offline_schedule_capability_state"] == "legacy_ambiguous"
+    assert accepted_row["offline_schedule_max_slots"] == 12
+    assert accepted_row["config_version"] == before_replacement["config_version"] + 1
+    assert (
+        accepted_row["offline_schedule_version"]
+        == before_replacement["offline_schedule_version"] + 1
+    )
 
 
 def test_device_status_is_recorded_without_exposing_token(client, app):

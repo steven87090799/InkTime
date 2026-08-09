@@ -107,3 +107,60 @@ def test_repository_uses_persisted_offline_slot_capability(app):
         offline_schedule_max_slots=24,
     )
     assert repository.get(device_id)["offline_schedule_max_slots"] == 24
+
+
+def test_repository_preserves_malformed_quarantine_and_avoids_idempotent_version_churn(app):
+    repository = app.extensions["inktime_device_repository"]
+    device_id, _token = repository.create(
+        "Malformed repository quarantine",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=["08:00"],
+        offline_schedule_max_slots=24,
+    )
+    schedule_times_raw = '["08:00",'
+    offline_schedule_raw = '{"legacy":"08:00"}'
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            """
+            UPDATE devices
+            SET offline_schedule_max_slots=12,
+                offline_schedule_capability_state='legacy_ambiguous',
+                schedule_times_json=?,offline_schedule_json=?,
+                next_offline_prepare_at=NULL
+            WHERE id=?
+            """,
+            (schedule_times_raw, offline_schedule_raw, device_id),
+        )
+
+    def disable() -> None:
+        current = repository.get(device_id)
+        repository.update(
+            device_id,
+            name=str(current["name"]),
+            enabled=False,
+            timezone_name=str(current["timezone"]),
+            schedule=str(current["schedule"]),
+            delivery_mode="inktime_offline_schedule",
+            offline_prefetch_allowed=True,
+            rotation=int(current["rotation"]),
+            panel_profile=str(current["panel_profile"]),
+        )
+
+    before = repository.get(device_id)
+    disable()
+    after_disable = repository.get(device_id)
+    assert after_disable["offline_schedule_version"] == before["offline_schedule_version"]
+    versions = (
+        int(after_disable["config_version"]),
+        int(after_disable["offline_schedule_version"]),
+    )
+    disable()
+    after_repeated = repository.get(device_id)
+
+    assert after_repeated["schedule_times_json"] == schedule_times_raw
+    assert after_repeated["offline_schedule_json"] == offline_schedule_raw
+    assert after_repeated["offline_schedule_capability_state"] == "legacy_ambiguous"
+    assert (
+        int(after_repeated["config_version"]),
+        int(after_repeated["offline_schedule_version"]),
+    ) == versions
