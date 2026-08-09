@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime, timezone
 import base64
 from hashlib import sha256
@@ -1918,12 +1919,15 @@ class SettingsRepository:
             ).fetchall()
         return [dict(row) | {"changed_keys_count": len(json.loads(row["changed_keys_json"]))} for row in rows]
 
-    def _snapshot_record(self, snapshot_id: str) -> dict[str, Any]:
-        with self.database.session() as connection:
-            row = connection.execute("SELECT * FROM settings_snapshots WHERE id=?", (snapshot_id,)).fetchone()
+    def _snapshot_record(self, snapshot_id: str, *, connection=None) -> dict[str, Any]:
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            row = active_connection.execute(
+                "SELECT * FROM settings_snapshots WHERE id=?", (snapshot_id,)
+            ).fetchone()
             if row is None:
                 raise KeyError(snapshot_id)
-            items = connection.execute(
+            items = active_connection.execute(
                 """
                 SELECT key,old_value_json,new_value_json,restored_default
                 FROM settings_snapshot_items WHERE snapshot_id=? ORDER BY key
@@ -2174,7 +2178,11 @@ class SettingsRepository:
         return values
 
     def prepare_updates(
-        self, updates: dict[str, Any], *, reject_control_center: bool = False
+        self,
+        updates: dict[str, Any],
+        *,
+        reject_control_center: bool = False,
+        connection=None,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         if not isinstance(updates, dict):
             raise ValueError("設定更新必須是 JSON 物件")
@@ -2199,8 +2207,9 @@ class SettingsRepository:
                 normalized["analysis.ai_mode"],
                 local_processing_enabled=bool(normalized.get("analysis.prefilter_enabled", True)),
             )
-        with self.database.session() as connection:
-            current = self._values_from_connection(connection)
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            current = self._values_from_connection(active_connection)
         merged = current | normalized
         self._validate_all(merged)
         changed = {key: value for key, value in normalized.items() if current.get(key) != value}
@@ -2463,8 +2472,8 @@ class SettingsRepository:
             "snapshot_id": snapshot_id,
         }
 
-    def rollback_preview(self, snapshot_id: str) -> dict[str, Any]:
-        target = self._snapshot_record(snapshot_id)
+    def rollback_preview(self, snapshot_id: str, *, connection=None) -> dict[str, Any]:
+        target = self._snapshot_record(snapshot_id, connection=connection)
         target_values = target["before"]
         target_after = target["after"]
         snapshot_changed_keys = list(dict.fromkeys(map(str, target["changed_keys"])))
@@ -2474,8 +2483,9 @@ class SettingsRepository:
             | set(map(str, target_after))
             | {str(item["key"]) for item in target["items"]}
         )
-        with self.database.session() as connection:
-            current = self._values_from_connection(connection)
+        context = nullcontext(connection) if connection is not None else self.database.session()
+        with context as active_connection:
+            current = self._values_from_connection(active_connection)
         unknown_keys = sorted(key for key in recorded_keys if key not in SETTING_DEFINITIONS)
         sensitive_unrestorable_keys = sorted(
             key
@@ -2500,7 +2510,7 @@ class SettingsRepository:
             and key not in sensitive_unrestorable_keys
             and current.get(key) != value
         }
-        changed, _before, merged = self.prepare_updates(updates)
+        changed, _before, merged = self.prepare_updates(updates, connection=connection)
         diff = [
             {
                 "key": key,
