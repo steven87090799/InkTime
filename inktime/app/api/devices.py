@@ -93,7 +93,7 @@ def _synthetic_full_form_schedule(
     existing_schedule: str,
     stored: StoredScheduleState,
 ) -> bool:
-    return bool(
+    return (
         not stored.is_array
         and _DEVICE_FULL_FORM_FIELDS <= payload.keys()
         and payload.get("schedule_times") == [existing_schedule]
@@ -487,7 +487,7 @@ def update_device(device_id: str):
         stored=stored_schedule_times,
     )
     full_form_payload = _DEVICE_FULL_FORM_FIELDS <= payload.keys()
-    explicit_schedule_replacement = bool(
+    explicit_schedule_replacement = (
         (
             "schedule_times" in payload
             and not synthetic_schedule
