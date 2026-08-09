@@ -1,6 +1,6 @@
 name: InkTime Container Security and Benchmark Contracts
 
-on:
+"on":
   pull_request:
     branches:
       - main
@@ -247,7 +247,7 @@ jobs:
           retention-days: 14
 
   container-security-gate:
-    name: Container security gate
+    name: ${{ needs.changes.outputs.full_validation == 'true' && 'Container security gate' || 'Container metadata event gate' }}
     if: ${{ always() }}
     needs:
       - changes
@@ -256,9 +256,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+      - name: Fail when event classification failed
+        if: ${{ needs.changes.result != 'success' }}
+        run: exit 1
+      - if: ${{ needs.changes.outputs.full_validation == 'true' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 1}
       - name: Verify planner-selected execution attestation
+        if: ${{ needs.changes.outputs.full_validation == 'true' }}
         env:
           PLAN_JSON: ${{ needs.changes.outputs.plan_json }}
           NEEDS_JSON: ${{ toJSON(needs) }}
@@ -268,3 +273,6 @@ jobs:
             --plan-json "${PLAN_JSON}" \
             --needs-json "${NEEDS_JSON}" \
             --workflow container
+      - name: Accept metadata-only pull request edit
+        if: ${{ needs.changes.outputs.full_validation != 'true' && needs.changes.result == 'success' }}
+        run: echo "Metadata-only edit classified without creating Container security gate validation evidence."
