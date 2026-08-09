@@ -31,7 +31,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 42
+    assert CURRENT_SCHEMA_VERSION == 43
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -824,8 +824,296 @@ def test_history_completion_failure_keeps_running_marker_and_stops_restart(monke
             ).fetchone()[0]
             == "running"
         )
+    assert migrate(database, tmp_path / "backups") == []
+    with database.session() as connection:
+        recovered = connection.execute(
+            "SELECT migration_status,migration_completed_at FROM migration_history WHERE schema_version=999"
+        ).fetchone()
+    assert recovered["migration_status"] == "completed"
+    assert recovered["migration_completed_at"]
+
+
+def test_known_unfinished_migration_name_mismatch_stays_fail_closed(tmp_path):
+    database = Database(tmp_path / "inktime.db")
+    migrate(database)
+    with database.session() as connection:
+        connection.execute(
+            """
+            INSERT INTO migration_history(
+                schema_version,migration_name,migration_started_at,migration_status
+            ) VALUES (42,'錯誤名稱',datetime('now'),'running')
+            """
+        )
+
     with pytest.raises(MigrationError, match="MIGRATION-002"):
-        migrate(database, tmp_path / "backups")
+        migrate(database)
+    with database.session() as connection:
+        assert (
+            connection.execute(
+                "SELECT migration_status FROM migration_history WHERE migration_name='錯誤名稱'"
+            ).fetchone()[0]
+            == "running"
+        )
+
+
+def test_consistent_unfinished_migration_with_failed_integrity_check_stays_blocked(monkeypatch, tmp_path):
+    database = Database(tmp_path / "inktime.db")
+    migrate(database)
+    with database.session() as connection:
+        connection.execute(
+            """
+            INSERT INTO migration_history(
+                schema_version,migration_name,migration_started_at,migration_status
+            ) VALUES (42,'保存昂貴 POST 的 Idempotency request fingerprint',datetime('now'),'running')
+            """
+        )
+    monkeypatch.setattr(migrations_module, "_migration_integrity_is_ok", lambda _connection: False)
+
+    with pytest.raises(MigrationError, match="MIGRATION-002"):
+        migrate(database)
+    with database.session() as connection:
+        assert (
+            connection.execute(
+                "SELECT migration_status FROM migration_history WHERE migration_name='保存昂貴 POST 的 Idempotency request fingerprint'"
+            ).fetchone()[0]
+            == "running"
+        )
+
+
+def test_unfinished_migration_recovery_write_failure_stays_running(tmp_path):
+    database = Database(tmp_path / "inktime.db")
+    migrate(database)
+    migration_name = "保存昂貴 POST 的 Idempotency request fingerprint"
+    with database.session() as connection:
+        connection.execute(
+            """
+            INSERT INTO migration_history(
+                schema_version,migration_name,migration_started_at,migration_status
+            ) VALUES (42,?,datetime('now'),'running')
+            """,
+            (migration_name,),
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER fail_migration_recovery
+            BEFORE UPDATE OF migration_status ON migration_history
+            WHEN OLD.migration_status='running' AND NEW.migration_status='completed'
+            BEGIN
+                SELECT RAISE(ABORT,'forced recovery update failure');
+            END
+            """
+        )
+
+    with pytest.raises(MigrationError, match="MIGRATION-002"):
+        migrate(database)
+    with database.session() as connection:
+        assert (
+            connection.execute(
+                "SELECT migration_status FROM migration_history WHERE schema_version=42 AND migration_name=? ORDER BY id DESC LIMIT 1",
+                (migration_name,),
+            ).fetchone()[0]
+            == "running"
+        )
+
+
+def test_unknown_unfinished_migration_stays_fail_closed(tmp_path):
+    database = Database(tmp_path / "inktime.db")
+    migrate(database)
+    with database.session() as connection:
+        connection.execute(
+            """
+            INSERT INTO migration_history(
+                schema_version,migration_name,migration_started_at,migration_status
+            ) VALUES (999,'未知 Migration',datetime('now'),'running')
+            """
+        )
+
+    with pytest.raises(MigrationError, match="MIGRATION-002"):
+        migrate(database)
+    with database.session() as connection:
+        assert (
+            connection.execute(
+                "SELECT migration_status FROM migration_history WHERE schema_version=999 ORDER BY id DESC LIMIT 1"
+            ).fetchone()[0]
+            == "running"
+        )
+
+
+def test_known_unfinished_migration_without_schema_row_stays_fail_closed(tmp_path):
+    database = Database(tmp_path / "inktime.db")
+    migrate(database)
+    migration_name = "保存昂貴 POST 的 Idempotency request fingerprint"
+    with database.session() as connection:
+        connection.execute(
+            """
+            INSERT INTO migration_history(
+                schema_version,migration_name,migration_started_at,migration_status
+            ) VALUES (42,?,datetime('now'),'running')
+            """,
+            (migration_name,),
+        )
+        connection.execute("DELETE FROM schema_migrations WHERE version=42")
+
+    with pytest.raises(MigrationError, match="MIGRATION-002"):
+        migrate(database)
+    with database.session() as connection:
+        assert (
+            connection.execute(
+                "SELECT migration_status FROM migration_history WHERE schema_version=42 AND migration_name=? ORDER BY id DESC LIMIT 1",
+                (migration_name,),
+            ).fetchone()[0]
+            == "running"
+        )
+
+
+@pytest.mark.parametrize(
+    ("provenance", "initial_value", "initial_updated_by", "expected_value", "expected_updated_by"),
+    [
+        ("history_300", 300, None, 300, "operator-300"),
+        ("snapshot_300", 300, None, 300, "operator-300"),
+        ("history_300_then_21600", 300, None, 21600, None),
+        ("history_600", 600, "operator-600", 600, "operator-600"),
+        ("none", 300, None, 21600, None),
+        ("fresh_default", 21600, None, 21600, None),
+        ("conflicting", 300, None, 21600, None),
+        ("malformed", 300, None, 21600, None),
+    ],
+)
+def test_migration_43_preserves_diagnostics_cache_provenance(
+    monkeypatch,
+    tmp_path,
+    provenance,
+    initial_value,
+    initial_updated_by,
+    expected_value,
+    expected_updated_by,
+):
+    database = Database(tmp_path / f"{provenance}.db")
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:38])
+    migrate(database)
+    key = "system.diagnostics_cache_seconds"
+
+    with database.session() as connection:
+        connection.execute(
+            """
+            INSERT INTO settings(key,category,value_json,value_type,updated_by,updated_at)
+            VALUES (?,?,?,?,?,?)
+            """,
+            (
+                key,
+                "Log 與診斷",
+                json.dumps(initial_value),
+                "integer",
+                initial_updated_by,
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+
+        if provenance == "history_300":
+            connection.execute(
+                """
+                INSERT INTO setting_history(
+                    key,changed_at,changed_by,old_value_summary,new_value_summary,source_ip,requires_restart
+                ) VALUES (?,?,?,?,?,?,0)
+                """,
+                (key, "2026-01-01T00:00:00+00:00", "operator-300", "21600", "300", "127.0.0.1"),
+            )
+        elif provenance == "snapshot_300":
+            connection.execute(
+                """
+                INSERT INTO settings_snapshots(
+                    id,created_at,actor_id,source_ip,reason,before_json,after_json,changed_keys_json,
+                    schema_version,application_version
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    "snapshot-300",
+                    "2026-01-01T00:00:00+00:00",
+                    "operator-300",
+                    "127.0.0.1",
+                    "legacy explicit default",
+                    json.dumps({key: 21600}),
+                    json.dumps({key: 300}),
+                    json.dumps([key]),
+                    38,
+                    "test",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO settings_snapshot_items(snapshot_id,key,old_value_json,new_value_json,restored_default)
+                VALUES (?,?,?,?,0)
+                """,
+                ("snapshot-300", key, "21600", "300"),
+            )
+        elif provenance == "history_300_then_21600":
+            connection.executemany(
+                """
+                INSERT INTO setting_history(
+                    key,changed_at,changed_by,old_value_summary,new_value_summary,source_ip,requires_restart
+                ) VALUES (?,?,?,?,?,?,0)
+                """,
+                [
+                    (key, "2026-01-01T00:00:00+00:00", "operator-300", "21600", "300", "127.0.0.1"),
+                    (key, "2026-01-02T00:00:00+00:00", "operator-21600", "300", "21600", "127.0.0.1"),
+                ],
+            )
+        elif provenance == "conflicting":
+            connection.execute(
+                """
+                INSERT INTO setting_history(
+                    key,changed_at,changed_by,old_value_summary,new_value_summary,source_ip,requires_restart
+                ) VALUES (?,?,?,?,?,?,0)
+                """,
+                (key, "2026-01-01T00:00:00+00:00", "operator-300", "21600", "300", "127.0.0.1"),
+            )
+            connection.execute(
+                """
+                INSERT INTO settings_snapshots(
+                    id,created_at,actor_id,source_ip,reason,before_json,after_json,changed_keys_json,
+                    schema_version,application_version
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    "snapshot-conflict",
+                    "2026-01-01T00:00:00+00:00",
+                    "operator-21600",
+                    "127.0.0.1",
+                    "conflict",
+                    json.dumps({key: 300}),
+                    json.dumps({key: 21600}),
+                    json.dumps([key]),
+                    38,
+                    "test",
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO settings_snapshot_items(snapshot_id,key,old_value_json,new_value_json,restored_default)
+                VALUES (?,?,?,?,0)
+                """,
+                ("snapshot-conflict", key, "300", "21600"),
+            )
+        elif provenance == "malformed":
+            connection.execute(
+                """
+                INSERT INTO setting_history(
+                    key,changed_at,changed_by,old_value_summary,new_value_summary,source_ip,requires_restart
+                ) VALUES (?,?,?,?,?,?,0)
+                """,
+                (key, "2026-01-01T00:00:00+00:00", "operator-unknown", "21600", "not-json", "127.0.0.1"),
+            )
+
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
+    assert migrate(database) == list(range(39, CURRENT_SCHEMA_VERSION + 1))
+    with database.session() as connection:
+        row = connection.execute(
+            "SELECT value_json,updated_by FROM settings WHERE key=?", (key,)
+        ).fetchone()
+    assert json.loads(row["value_json"]) == expected_value
+    assert row["updated_by"] == expected_updated_by
+    assert database.schema_version() == CURRENT_SCHEMA_VERSION
+    assert database.integrity_check() == "ok"
 
 
 def test_concurrent_migrations_are_serialized(tmp_path):

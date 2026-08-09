@@ -1978,6 +1978,11 @@ MIGRATIONS = (
             "CREATE INDEX IF NOT EXISTS idx_jobs_dedupe_fingerprint ON jobs(dedupe_key,request_fingerprint)",
         ),
     ),
+    Migration(
+        43,
+        "修復診斷快取歷史來源",
+        (),
+    ),
 )
 
 
@@ -2050,6 +2055,113 @@ def _apply_migration_33_data_fixes(connection: sqlite3.Connection) -> None:
     # amount when no evidence exists, but it must not rewrite the provenance.
 
 
+def _migration_integrity_is_ok(connection: sqlite3.Connection) -> bool:
+    result = connection.execute("PRAGMA integrity_check").fetchone()
+    return result is not None and str(result[0]) == "ok"
+
+
+def _setting_provenance_value(raw_value: object) -> int | None:
+    try:
+        value = json.loads(str(raw_value))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    return value
+
+
+def _setting_provenance_time(raw_value: object) -> datetime | None:
+    value = str(raw_value or "").strip()
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _latest_explicit_setting_provenance(
+    connection: sqlite3.Connection, key: str
+) -> tuple[int, str] | None:
+    events: list[tuple[datetime, int, str]] = []
+    ambiguous = False
+    history_rows = connection.execute(
+        """
+        SELECT id,changed_at,changed_by,new_value_summary
+        FROM setting_history
+        WHERE key=?
+        ORDER BY id
+        """,
+        (key,),
+    ).fetchall()
+    for row in history_rows:
+        value = _setting_provenance_value(row["new_value_summary"])
+        timestamp = _setting_provenance_time(row["changed_at"])
+        actor = str(row["changed_by"] or "").strip()
+        if value is None or timestamp is None or not actor:
+            ambiguous = True
+            continue
+        events.append((timestamp, value, actor))
+
+    snapshot_rows = connection.execute(
+        """
+        SELECT s.created_at,s.actor_id,i.new_value_json
+        FROM settings_snapshot_items AS i
+        JOIN settings_snapshots AS s ON s.id=i.snapshot_id
+        WHERE i.key=?
+        ORDER BY s.created_at,s.id
+        """,
+        (key,),
+    ).fetchall()
+    for row in snapshot_rows:
+        value = _setting_provenance_value(row["new_value_json"])
+        timestamp = _setting_provenance_time(row["created_at"])
+        actor = str(row["actor_id"] or "").strip()
+        if value is None or timestamp is None or not actor:
+            ambiguous = True
+            continue
+        events.append((timestamp, value, actor))
+
+    if ambiguous or not events:
+        return None
+
+    unique_events = sorted(set(events))
+    for event in unique_events:
+        same_time = [candidate for candidate in unique_events if candidate[0] == event[0]]
+        if {candidate[1:] for candidate in same_time} != {event[1:]}:
+            return None
+    latest = unique_events[-1]
+    return latest[1], latest[2]
+
+
+def _apply_migration_43_data_fixes(connection: sqlite3.Connection) -> None:
+    key = "system.diagnostics_cache_seconds"
+    setting = connection.execute(
+        "SELECT value_json,updated_by FROM settings WHERE key=?",
+        (key,),
+    ).fetchone()
+    if setting is None:
+        return
+    if _setting_provenance_value(setting["value_json"]) != 21600:
+        return
+    if str(setting["updated_by"] or "").strip():
+        return
+    provenance = _latest_explicit_setting_provenance(connection, key)
+    if provenance is None or provenance[0] != 300:
+        return
+    connection.execute(
+        """
+        UPDATE settings
+        SET value_json='300',value_type='integer',updated_by=?,updated_at=datetime('now')
+        WHERE key=? AND value_json='21600' AND (updated_by IS NULL OR updated_by='')
+        """,
+        (provenance[1], key),
+    )
+
+
 def _applied_versions(database: Database) -> set[int]:
     with database.session() as connection:
         if not _table_exists(connection, "schema_migrations"):
@@ -2058,19 +2170,61 @@ def _applied_versions(database: Database) -> set[int]:
 
 
 def _assert_no_unfinished_migration(database: Database) -> None:
-    with database.session() as connection:
-        if not _table_exists(connection, "migration_history"):
-            return
-        unfinished = connection.execute(
-            """
-            SELECT schema_version,migration_name,backup_path
-            FROM migration_history
-            WHERE migration_status='running'
-            ORDER BY id DESC LIMIT 1
-            """
-        ).fetchone()
-    if unfinished is None:
-        return
+    unfinished = None
+    try:
+        with database.transaction(operation="migration_recovery") as connection:
+            if not _table_exists(connection, "migration_history"):
+                return
+            unfinished = connection.execute(
+                """
+                SELECT id,schema_version,migration_name,backup_path
+                FROM migration_history
+                WHERE migration_status='running'
+                ORDER BY id DESC LIMIT 1
+                """
+            ).fetchone()
+            if unfinished is None:
+                return
+            migration = next(
+                (
+                    candidate
+                    for candidate in MIGRATIONS
+                    if candidate.version == int(unfinished["schema_version"])
+                ),
+                None,
+            )
+            committed = connection.execute(
+                "SELECT name FROM schema_migrations WHERE version=?",
+                (unfinished["schema_version"],),
+            ).fetchone()
+            if (
+                migration is not None
+                and str(unfinished["migration_name"]) == migration.name
+                and committed is not None
+                and str(committed["name"]) == migration.name
+                and _migration_integrity_is_ok(connection)
+            ):
+                updated = connection.execute(
+                    """
+                    UPDATE migration_history
+                    SET migration_completed_at=?,migration_status='completed',error_message=NULL
+                    WHERE id=? AND migration_status='running'
+                    """,
+                    (_utc_now(), unfinished["id"]),
+                )
+                if updated.rowcount == 1:
+                    return
+    except MigrationError:
+        raise
+    except sqlite3.Error as exc:
+        context = (
+            "未完成 Migration"
+            if unfinished is None
+            else f"Migration {unfinished['schema_version']}（{unfinished['migration_name']}）"
+        )
+        raise MigrationError(
+            f"MIGRATION-002 無法安全復原{context}；SQLite recovery transaction 失敗"
+        ) from exc
     recovery = str(unfinished["backup_path"] or "最近一次 pre-migration SQLite 備份")
     raise MigrationError(
         "MIGRATION-002 偵測到未完成 Migration "
@@ -2182,6 +2336,8 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
                         connection.execute(statement)
                     if migration.version == 33:
                         _apply_migration_33_data_fixes(connection)
+                    if migration.version == 43:
+                        _apply_migration_43_data_fixes(connection)
                     connection.execute(
                         "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
                         (migration.version, migration.name, _utc_now()),
