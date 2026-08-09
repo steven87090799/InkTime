@@ -1,6 +1,9 @@
 -r requirements.txt
 pytest==9.1.1
 pytest-cov==6.2.1
+packaging==25.0
+tomli==2.4.1
+PyYAML==6.0.2
 ruff==0.12.12
 mypy==1.17.0
 types-requests==2.33.0.20260712
