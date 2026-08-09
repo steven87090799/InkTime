@@ -1316,15 +1316,23 @@ def test_offline_prefetch_active_due_page_advances_and_reaches_tail(app):
 
 
 def test_offline_prefetch_quarantines_ambiguous_capability_rows(app):
+    schedule_times = [f"{hour:02d}:00" for hour in range(13)]
     device_id, _token = app.extensions["inktime_device_repository"].create(
         "能力未確認的離線裝置",
         delivery_mode="inktime_offline_schedule",
         offline_prefetch_allowed=True,
-        schedule_times=["08:00", "20:00"],
+        schedule_times=schedule_times,
+        offline_schedule_max_slots=24,
     )
     with app.extensions["inktime_database"].session() as connection:
         connection.execute(
-            "UPDATE devices SET offline_schedule_capability_state='legacy_ambiguous' WHERE id=?",
+            """
+            UPDATE devices
+            SET offline_schedule_max_slots=12,
+                offline_schedule_capability_state='legacy_ambiguous',
+                next_offline_prepare_at='1970-01-01T00:00:00+00:00'
+            WHERE id=?
+            """,
             (device_id,),
         )
 
@@ -1337,6 +1345,9 @@ def test_offline_prefetch_quarantines_ambiguous_capability_rows(app):
         for job in app.extensions["inktime_job_repository"].list()
         if '"offline_prepare"' in str(job["settings_json"]) and device_id in str(job["settings_json"])
     ]
+    assert json.loads(
+        str(app.extensions["inktime_device_repository"].get(device_id)["schedule_times_json"])
+    ) == schedule_times
 
 
 def test_offline_prefetch_does_not_write_when_deadline_is_in_the_future(app, monkeypatch):

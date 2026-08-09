@@ -196,6 +196,52 @@ def test_migration_39_quarantines_legacy_ambiguous_offline_slot_rows(monkeypatch
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
+                "legacy-malformed-ambiguous",
+                "Legacy malformed ambiguous",
+                "token-malformed",
+                1,
+                "Asia/Taipei",
+                "08:00",
+                "inktime_offline_schedule",
+                1,
+                '["08:00",',
+                '["08:00"]',
+                "2026-08-08T00:00:00+00:00",
+                "2026-08-08T00:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO devices(
+                id,name,token_hash,enabled,timezone,schedule,delivery_mode,
+                offline_prefetch_allowed,schedule_times_json,offline_schedule_json,
+                created_at,updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "legacy-non-array-ambiguous",
+                "Legacy non-array ambiguous",
+                "token-non-array",
+                1,
+                "Asia/Taipei",
+                "08:00",
+                "inktime_offline_schedule",
+                1,
+                '{"legacy":"08:00"}',
+                '"08:00"',
+                "2026-08-08T00:00:00+00:00",
+                "2026-08-08T00:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO devices(
+                id,name,token_hash,enabled,timezone,schedule,delivery_mode,
+                offline_prefetch_allowed,schedule_times_json,offline_schedule_json,
+                created_at,updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
                 "legacy-fallback-ambiguous",
                 "Legacy fallback ambiguous",
                 "token-fallback",
@@ -303,7 +349,7 @@ def test_migration_39_quarantines_legacy_ambiguous_offline_slot_rows(monkeypatch
         row["offline_schedule_capability_state"],
         row["next_offline_prepare_at"],
     ) == (12, "legacy_ambiguous", None)
-    assert len(json.loads(str(row[3]))) == 13
+    assert json.loads(str(row[3])) == [f"{hour:02d}:00" for hour in range(8, 21)]
     assert [tuple(item) for item in states] == [
         ("legacy-confirmed-24", 24, "confirmed_24", "1970-01-01T00:00:00+00:00"),
         ("legacy-safe", 12, "unknown_12", "1970-01-01T00:00:00+00:00"),
@@ -314,7 +360,12 @@ def test_migration_39_quarantines_legacy_ambiguous_offline_slot_rows(monkeypatch
             SELECT id,offline_schedule_max_slots,offline_schedule_capability_state,
                    next_offline_prepare_at,schedule_times_json,offline_schedule_json
             FROM devices
-            WHERE id IN ('legacy-fallback-ambiguous','legacy-mirror-ambiguous')
+            WHERE id IN (
+                'legacy-fallback-ambiguous',
+                'legacy-malformed-ambiguous',
+                'legacy-mirror-ambiguous',
+                'legacy-non-array-ambiguous'
+            )
             ORDER BY id
             """
         ).fetchall()
@@ -338,12 +389,28 @@ def test_migration_39_quarantines_legacy_ambiguous_offline_slot_rows(monkeypatch
             json.dumps([f"{hour:02d}:00" for hour in range(8, 21)]),
         ),
         (
+            "legacy-malformed-ambiguous",
+            12,
+            "legacy_ambiguous",
+            None,
+            '["08:00",',
+            '["08:00"]',
+        ),
+        (
             "legacy-mirror-ambiguous",
             12,
             "legacy_ambiguous",
             None,
             json.dumps([f"{hour:02d}:00" for hour in range(8, 20)]),
             json.dumps([f"{hour:02d}:00" for hour in range(8, 21)]),
+        ),
+        (
+            "legacy-non-array-ambiguous",
+            12,
+            "legacy_ambiguous",
+            None,
+            '{"legacy":"08:00"}',
+            '"08:00"',
         ),
     ]
     assert migrate(database) == []
