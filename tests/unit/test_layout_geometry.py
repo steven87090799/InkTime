@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
 
 from PIL import Image, ImageChops
@@ -869,6 +870,36 @@ def test_stock_2xx_cleanup_failure_is_deferred_without_masking_acceptance(monkey
     assert result["upload_accepted"] is True
     assert result["ephemeral_release_consumed"] is False
     assert (service.release_root / release_id).is_dir()
+
+
+def test_stock_tombstone_delete_failure_restores_release_and_retry_metadata(monkeypatch, tmp_path):
+    service = _real_stock_release_service(tmp_path)
+    release_id = "stock-tombstone-restore"
+    _write_stock_release(service.release_root, release_id)
+    marker = service.release_root / ".stock-direct-tests" / f"{release_id}.json"
+    original_rmtree = shutil.rmtree
+
+    def fail_delete(_path):
+        raise OSError("simulated tombstone deletion failure")
+
+    monkeypatch.setattr("inktime.app.services.device_releases.shutil.rmtree", fail_delete)
+    assert service.consume_stock_test_release(
+        device_id="stock-device",
+        profile_key="safe_4c",
+        release_id=release_id,
+    ) is False
+    assert (service.release_root / release_id).is_dir()
+    assert marker.is_file()
+    assert not list(service.release_root.glob(f".stock-consumed-{release_id}-*"))
+
+    monkeypatch.setattr("inktime.app.services.device_releases.shutil.rmtree", original_rmtree)
+    assert service.consume_stock_test_release(
+        device_id="stock-device",
+        profile_key="safe_4c",
+        release_id=release_id,
+    ) is True
+    assert not (service.release_root / release_id).exists()
+    assert not marker.exists()
 
 
 def test_opportunistic_stock_cleanup_unexpected_failure_is_deferred(monkeypatch, tmp_path):

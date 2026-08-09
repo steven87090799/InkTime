@@ -492,6 +492,32 @@ class DeviceReleaseService:
                 )
         except (FileNotFoundError, OSError, UnsafePathError):
             return False
+        try:
+            shutil.rmtree(tombstone)
+        except OSError:
+            restored = False
+            try:
+                with self._open_directory(self.release_root) as (root_fd, _root_identity):
+                    metadata = os.stat(tombstone_name, dir_fd=root_fd, follow_symlinks=False)
+                    tombstone_identity = (int(metadata.st_dev), int(metadata.st_ino))
+                    if stat.S_ISDIR(metadata.st_mode) and tombstone_identity == identity:
+                        try:
+                            os.stat(release_id, dir_fd=root_fd, follow_symlinks=False)
+                        except FileNotFoundError:
+                            os.rename(
+                                tombstone_name,
+                                release_id,
+                                src_dir_fd=root_fd,
+                                dst_dir_fd=root_fd,
+                            )
+                            restored = True
+            except (FileNotFoundError, OSError, UnsafePathError):
+                pass
+            _LOGGER.exception(
+                "Stock release tombstone deletion failed; release restored=%s",
+                restored,
+            )
+            return False
         options = manifest.get("render_options") or {}
         idempotency_key = str(options.get("idempotency_key") or "") if isinstance(options, dict) else ""
         if idempotency_key:
@@ -503,7 +529,6 @@ class DeviceReleaseService:
             )
         for directory_name in _STOCK_MARKER_DIRECTORIES:
             self._unlink_managed_file(directory_name, f"{release_id}.json")
-        shutil.rmtree(tombstone, ignore_errors=True)
         return True
 
     def consume_stock_test_release(
