@@ -14,6 +14,7 @@ from inktime.app.domain.photopainter.offline_schedule import (
     offline_prepare_plan,
     offline_schedule_capability_is_usable,
     offline_schedule_capability_state,
+    local_slot_datetime,
     prefetch_slots,
     resolve_offline_schedule_max_slots,
     slot_deadlines,
@@ -168,6 +169,28 @@ def test_server_show_at_epoch_is_iana_timezone_authoritative(target_date, expect
     show_at = OfflineScheduleRepository._show_at(target_date, "08:00", "America/New_York")
 
     assert int(datetime.fromisoformat(show_at).timestamp()) == expected_epoch
+
+
+def test_dst_slot_epochs_are_deterministic_for_fold_and_gap():
+    folded = local_slot_datetime(date(2026, 11, 1), "01:30", "America/New_York")
+    assert folded.utcoffset().total_seconds() == -4 * 60 * 60
+    assert int(folded.timestamp()) == int(datetime(2026, 11, 1, 5, 30, tzinfo=timezone.utc).timestamp())
+
+    gapped = local_slot_datetime(date(2026, 3, 8), "02:30", "America/New_York")
+    assert gapped.strftime("%H:%M") == "03:30"
+    assert gapped.tzname() == "EDT"
+
+    deadlines = slot_deadlines(
+        date(2026, 3, 8),
+        ["01:30", "03:30"],
+        "America/New_York",
+        grace_minutes=15,
+        minimum_gap_minutes=30,
+    )
+    assert deadlines == [
+        "2026-03-08T07:45:00+00:00",
+        "2026-03-09T07:45:00+00:00",
+    ]
 
 
 def test_next_prepare_deadline_is_bounded_and_skips_committed_target():

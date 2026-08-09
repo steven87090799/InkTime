@@ -186,6 +186,17 @@ def test_delayed_terminal_ack_is_only_allowed_for_prefetched_offline_item(client
             ),
         )
 
+    stale_progress = _ack(
+        client,
+        token,
+        item["id"],
+        version - 1,
+        "DISPLAY_STARTED",
+        "stale-progress",
+        release_id=release["release_id"],
+    )
+    assert stale_progress.status_code == 200
+
     delayed_started = _ack(
         client,
         token,
@@ -337,6 +348,114 @@ def test_delayed_terminal_ack_is_only_allowed_for_prefetched_offline_item(client
         release_id=ordinary_release["release_id"],
     )
     assert ordinary_delayed.status_code == 409
+
+
+def test_cancelled_offline_item_requires_download_evidence_for_delayed_terminal(client, app):
+    repository = app.extensions["inktime_offline_schedule_repository"]
+    no_evidence_device, no_evidence_token = app.extensions["inktime_device_repository"].create(
+        "取消但未下載 ACK",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00"],
+    )
+    no_evidence_release = _release(app, "cancelled-without-evidence")
+    repository.prepare_day(
+        device_id=no_evidence_device,
+        target_date="2026-08-03",
+        release_ids=[no_evidence_release["release_id"]],
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        no_evidence_item = dict(
+            connection.execute(
+                "SELECT * FROM device_content_queue_items WHERE device_id=?",
+                (no_evidence_device,),
+            ).fetchone()
+        )
+        no_evidence_version = int(
+            connection.execute(
+                "SELECT queue_version FROM device_content_queues WHERE device_id=?",
+                (no_evidence_device,),
+            ).fetchone()[0]
+        )
+        connection.execute(
+            "UPDATE device_content_queue_items SET status='CANCELLED',terminal_ack_retention=? WHERE id=?",
+            (
+                (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                no_evidence_item["id"],
+            ),
+        )
+    rejected = _ack(
+        client,
+        no_evidence_token,
+        no_evidence_item["id"],
+        no_evidence_version - 1,
+        "DISPLAY_COMPLETED",
+        "cancelled-without-evidence-terminal",
+        ack_mode="delayed_terminal",
+        release_id=no_evidence_release["release_id"],
+        event_epoch=int(datetime.now(timezone.utc).timestamp()),
+    )
+    assert rejected.status_code == 400
+
+    evidence_device, evidence_token = app.extensions["inktime_device_repository"].create(
+        "取消但已下載 ACK",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00"],
+    )
+    evidence_release = _release(app, "cancelled-with-evidence")
+    repository.prepare_day(
+        device_id=evidence_device,
+        target_date="2026-08-03",
+        release_ids=[evidence_release["release_id"]],
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        evidence_item = dict(
+            connection.execute(
+                "SELECT * FROM device_content_queue_items WHERE device_id=?",
+                (evidence_device,),
+            ).fetchone()
+        )
+        evidence_version = int(
+            connection.execute(
+                "SELECT queue_version FROM device_content_queues WHERE device_id=?",
+                (evidence_device,),
+            ).fetchone()[0]
+        )
+    for index, event in enumerate(("MANIFEST_RECEIVED", "DOWNLOAD_COMPLETED", "HASH_VERIFIED")):
+        assert _ack(
+            client,
+            evidence_token,
+            evidence_item["id"],
+            evidence_version,
+            event,
+            f"cancelled-evidence-{index}",
+        ).status_code == 200
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE device_content_queue_items SET status='CANCELLED',terminal_ack_retention=? WHERE id=?",
+            (
+                (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                evidence_item["id"],
+            ),
+        )
+    accepted = _ack(
+        client,
+        evidence_token,
+        evidence_item["id"],
+        evidence_version - 1,
+        "DISPLAY_COMPLETED",
+        "cancelled-with-evidence-terminal",
+        ack_mode="delayed_terminal",
+        release_id=evidence_release["release_id"],
+        event_epoch=int(datetime.now(timezone.utc).timestamp()),
+    )
+    assert accepted.status_code == 200
+    with app.extensions["inktime_database"].session() as connection:
+        state = connection.execute(
+            "SELECT status FROM device_content_queue_items WHERE id=?", (evidence_item["id"],)
+        ).fetchone()
+    assert state["status"] == "CANCELLED"
 
 
 def test_queue_enqueue_requires_explicit_offline_schedule_ownership(app):

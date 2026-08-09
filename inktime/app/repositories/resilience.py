@@ -762,24 +762,58 @@ class ResilienceRepository:
                 "SELECT queue_version,current_release_id,current_displayed_at,last_known_good_release_id,last_known_good_displayed_at FROM device_content_queues WHERE device_id=?",
                 (device_id,),
             ).fetchone()
+            prior_download_evidence = bool(item["downloaded_at"])
+            if not prior_download_evidence:
+                prior_download_evidence = bool(
+                    connection.execute(
+                        """
+                        SELECT 1 FROM device_content_queue_events
+                        WHERE queue_item_id=? AND event_type IN ('DOWNLOAD_COMPLETED','HASH_VERIFIED')
+                        LIMIT 1
+                        """,
+                        (item_id,),
+                    ).fetchone()
+                )
             delayed_terminal = (
                 event in {"DISPLAY_COMPLETED", "DISPLAY_FAILED"}
                 and str(payload.get("ack_mode", "")) == "delayed_terminal"
                 and str(item["delivery_mode"]) == "offline_schedule"
                 and bool(item["offline_prefetch_allowed"])
                 and bool(item["offline_schedule_id"])
-                and str(item["status"]) in {"ACKNOWLEDGED", "DISPLAYED"}
+                and (
+                    str(item["status"]) in {"ACKNOWLEDGED", "DISPLAYED"}
+                    or (str(item["status"]) == "CANCELLED" and prior_download_evidence)
+                )
                 and "release_id" in payload
                 and str(payload.get("release_id")) == str(item["release_id"])
                 and item["terminal_ack_retention"] is not None
                 and str(item["terminal_ack_retention"]) >= now
             )
+            stale_progress_ack = False
+            if (
+                queue is not None
+                and queue_version < int(queue["queue_version"])
+                and not delayed_terminal
+                and str(payload.get("ack_mode", "")) != "delayed_terminal"
+            ):
+                stale_progress_ack = bool(
+                    prior_download_evidence
+                    and event
+                    in {
+                        "DOWNLOAD_COMPLETED",
+                        "HASH_VERIFIED",
+                        "DISPLAY_STARTED",
+                        "DISPLAY_COMPLETED",
+                        "DISPLAY_FAILED",
+                    }
+                )
             if queue is None or (
                 int(queue["queue_version"]) != queue_version
                 and not (delayed_terminal and queue_version <= int(queue["queue_version"]))
+                and not stale_progress_ack
             ):
                 raise ValueError("QUEUE-003 ACK Queue 版本已過期")
-            if event not in QUEUE_ALLOWED_EVENTS.get(str(item["status"]), set()):
+            if not delayed_terminal and event not in QUEUE_ALLOWED_EVENTS.get(str(item["status"]), set()):
                 raise ValueError("QUEUE-004 ACK 狀態轉移不合法")
             if payload.get("event_epoch") is not None and not delayed_terminal:
                 raise ValueError("QUEUE-005 event_epoch 僅可用於 delayed_terminal ACK")
@@ -836,7 +870,7 @@ class ResilienceRepository:
                     now,
                 ),
             )
-            status = QUEUE_STATUS_FOR_EVENT[event]
+            status = str(item["status"]) if str(item["status"]) == "CANCELLED" and delayed_terminal else QUEUE_STATUS_FOR_EVENT[event]
             displayed_at = event_at if event == "DISPLAY_COMPLETED" else None
             connection.execute(
                 "UPDATE device_content_queue_items SET status=?,downloaded_at=CASE WHEN ? IN ('DOWNLOAD_COMPLETED','HASH_VERIFIED') THEN ? ELSE downloaded_at END,displayed_at=COALESCE(displayed_at,?),retry_count=retry_count+CASE WHEN ?='DISPLAY_FAILED' THEN 1 ELSE 0 END,last_error_code=?,updated_at=? WHERE id=?",

@@ -190,6 +190,31 @@ def test_prepare_day_recovers_terminal_shortage_and_clears_outcome(app):
     assert schedule["terminal_outcome_code"] is None
 
 
+def test_midday_prepare_keeps_expired_slot_downloadable_for_bounded_recovery(app):
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "午間恢復離線排程",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["08:00", "12:00", "16:00", "20:00"],
+    )
+    releases = [_release(app, f"offline-midday-recovery-{index}") for index in range(4)]
+    repository = app.extensions["inktime_offline_schedule_repository"]
+    repository.prepare_day(
+        device_id=device_id,
+        target_date="2026-08-03",
+        release_ids=[release["release_id"] for release in releases],
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        items = connection.execute(
+            "SELECT expires_at,ack_deadline FROM device_content_queue_items WHERE device_id=? ORDER BY position",
+            (device_id,),
+        ).fetchall()
+    now = datetime.now(timezone.utc)
+    assert len(items) == 4
+    assert all(datetime.fromisoformat(item["ack_deadline"]) < now for item in items)
+    assert all(datetime.fromisoformat(item["expires_at"]) > now + timedelta(minutes=50) for item in items)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

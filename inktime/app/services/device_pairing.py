@@ -456,12 +456,16 @@ class DevicePairingService:
                         break
                 if schedule_values is not None:
                     config_source["schedule_times"] = schedule_values
-            config_source.update(
-                {
-                    "name": device_name or config_source.get("name"),
-                    "panel_profile": panel_profile or config_source.get("panel_profile", "safe_4c"),
-                }
-            )
+            if device is None:
+                config_source.update(
+                    {
+                        "name": device_name or config_source.get("name"),
+                        "panel_profile": panel_profile or config_source.get("panel_profile", "safe_4c"),
+                    }
+                )
+            # Re-pairing is a credential lifecycle operation.  Firmware
+            # identity/panel claims are evidence for the request, not an
+            # authorization to overwrite administrator-owned device settings.
             config = self._normalize_config(
                 config_source,
                 fallback_name=device_name or f"待配對裝置 {device_id[-6:]}",

@@ -150,7 +150,7 @@ inline QueueManifestDecision queueManifestDecision(
   bool schemaValid,
   size_t itemCount
 ) {
-  if (statusCode == 404) return QueueManifestDecision::FallbackLatest;
+  if (statusCode == 404 || statusCode == 409) return QueueManifestDecision::FallbackLatest;
   if (statusCode != 200 || !jsonContentType || bodySize <= 0
       || bodySize > static_cast<int64_t>(kQueueManifestMaxBytes) || !schemaValid) {
     return QueueManifestDecision::Reject;

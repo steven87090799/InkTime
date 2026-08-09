@@ -128,3 +128,26 @@ def test_status_api_validates_and_persists_phase_four_telemetry():
     ):
         assert f'"{field}": optional_int("{field}"' in api
         assert f'"{field}": telemetry["{field}"]' in api
+
+
+def test_queue_ack_journal_is_compact_bounded_crc_checked_and_failure_visible():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    for marker in (
+        "AckJournalBlob",
+        "kAckJournalBlobMagic",
+        "ackJournalCrc",
+        "kMaxAckJournalEntries",
+        "journal.putBytes",
+        "journal.getBytes",
+        'journal.putUChar("count"',
+        'lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL"',
+        "ACK journal NVS blob readback／CRC 失敗",
+        "ACK journal count 寫入失敗",
+        "terminalAckEvidence",
+        "DEVICE-QUEUE-ACK-JOURNAL-OVERFLOW",
+        "DEVICE-QUEUE-ACK-PERMANENT",
+        "事件已 quarantine，本輪繼續後續工作",
+        "已跳過 AP portal 並等待 bounded recovery wake",
+    ):
+        assert marker in firmware
+    assert "journal.putString(ackJournalKey" not in firmware

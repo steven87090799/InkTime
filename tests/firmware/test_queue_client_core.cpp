@@ -27,6 +27,7 @@ int main() {
   const char embeddedNul[] = "/api/device/v1/queue/items/item\0/files/photo.bin";
   assert(!isSafeQueueDownloadPath(embeddedNul, sizeof(embeddedNul) - 1U));
   assert(queueManifestDecision(404, false, 0, false, 0) == QueueManifestDecision::FallbackLatest);
+  assert(queueManifestDecision(409, false, 0, false, 0) == QueueManifestDecision::FallbackLatest);
   assert(queueManifestDecision(200, true, 100, true, 0) == QueueManifestDecision::FallbackLatest);
   assert(queueManifestDecision(200, true, 100, true, 1) == QueueManifestDecision::UseQueue);
   assert(queueManifestDecision(200, true, 100, false, 1) == QueueManifestDecision::Reject);

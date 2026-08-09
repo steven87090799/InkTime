@@ -227,6 +227,25 @@ def test_latest_release_quarantines_ambiguous_offline_slot_capability(client, ap
     assert "DEVICE-008" in offline_response.get_data(as_text=True)
 
 
+def test_offline_schedule_mode_mismatch_has_stable_convergence_contract(client, app):
+    _device_id, token = app.extensions["inktime_device_repository"].create(
+        "legacy mode device",
+        delivery_mode="legacy_online",
+    )
+
+    response = client.get(
+        "/api/device/v1/offline-schedule",
+        headers=_headers(token),
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "error": "delivery_mode_mismatch",
+        "error_code": "DEVICE-008",
+        "delivery_mode": "legacy_online",
+    }
+
+
 def test_device_assignment_rejects_missing_release_row(client, app):
     device_id, token = app.extensions["inktime_device_repository"].create("stale-assignment")
     release = app.extensions["inktime_release_publisher"].publish(

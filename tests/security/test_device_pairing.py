@@ -194,6 +194,7 @@ def test_repair_pairing_preserves_existing_schedule_policy_on_partial_approval(c
         nonce="nonce-for-existing-repair-preservation-0123456789",
     )
     payload["device_name"] = "Repaired PhotoPainter"
+    payload["panel_profile"] = "gdep073e01_6c"
     requested = client.post(PAIRING_PATH, json=payload)
     assert requested.status_code == 201
     requested_body = requested.get_json()
@@ -206,11 +207,16 @@ def test_repair_pairing_preserves_existing_schedule_policy_on_partial_approval(c
                 ).fetchone()[0]
             )
         )
+        before_repair = connection.execute(
+            "SELECT name,panel_profile FROM devices WHERE id=?", (device_id,)
+        ).fetchone()
     assert stored["delivery_mode"] == "inktime_offline_schedule"
     assert stored["schedule_times"] == ["08:00", "08:30", "09:30"]
     assert stored["minimum_schedule_gap_minutes"] == 30
     assert stored["sync_strategy"] == "fixed_daily"
     assert stored["sync_time"] == "07:30"
+    assert before_repair["name"] == "Repair PhotoPainter"
+    assert before_repair["panel_profile"] == "safe_4c"
 
     approved = client.post(
         f"/api/v1/device-pairing/{requested_body['pairing_id']}/approve",
@@ -250,10 +256,12 @@ def test_repair_pairing_preserves_existing_schedule_policy_on_partial_approval(c
 
     with app.extensions["inktime_database"].session() as connection:
         device = connection.execute(
-            "SELECT delivery_mode,schedule_times_json,minimum_schedule_gap_minutes,sync_strategy,sync_time "
+            "SELECT name,panel_profile,delivery_mode,schedule_times_json,minimum_schedule_gap_minutes,sync_strategy,sync_time "
             "FROM devices WHERE id=?",
             (device_id,),
         ).fetchone()
+    assert device["name"] == "Repair PhotoPainter"
+    assert device["panel_profile"] == "safe_4c"
     assert device["delivery_mode"] == "inktime_offline_schedule"
     assert json.loads(str(device["schedule_times_json"])) == ["08:00", "08:30", "09:30"]
     assert device["minimum_schedule_gap_minutes"] == 30

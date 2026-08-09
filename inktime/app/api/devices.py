@@ -828,7 +828,13 @@ def replace_offline_schedule_slot(device_id: str, schedule_id: str, slot_index: 
 def device_offline_schedule():
     device = authenticate_device_request()
     if str(device["delivery_mode"] or "legacy_online") != "inktime_offline_schedule":
-        abort(409, description="DEVICE-008 裝置目前不是 enhanced offline schedule 模式")
+        return jsonify(
+            {
+                "error": "delivery_mode_mismatch",
+                "error_code": "DEVICE-008",
+                "delivery_mode": str(device["delivery_mode"] or "legacy_online"),
+            }
+        ), 409
     if not offline_schedule_capability_is_usable(device["offline_schedule_capability_state"]):
         abort(409, description="DEVICE-008 裝置離線 Slot 能力尚未確認，暫停離線排程傳送")
     requested_targets = request.args.getlist("target")
