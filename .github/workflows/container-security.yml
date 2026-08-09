@@ -6,7 +6,7 @@ on:
       - main
       - fix/final-production-openrouter-and-runtime-hardening
       - fix/quiet-runtime-offline-playlist
-    # PR metadata edits (including base retargeting) need a fresh merge-ref validation.
+    # Base retargets need validation; title/body-only edits use the metadata lane below.
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled, edited]
   push:
     branches:
@@ -20,7 +20,7 @@ on:
         type: boolean
 
 concurrency:
-  group: inktime-container-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: inktime-container-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata-only' || 'validation' }}
   cancel-in-progress: true
 
 permissions:
@@ -31,6 +31,7 @@ jobs:
     name: Classify changed paths
     runs-on: ubuntu-latest
     outputs:
+      full_validation: ${{ steps.event.outputs.full_validation }}
       docker: ${{ steps.route.outputs.docker }}
       tls_security: ${{ steps.route.outputs.tls_security }}
       provider_ai: ${{ steps.route.outputs.provider_ai }}
@@ -39,10 +40,17 @@ jobs:
       ci_config: ${{ steps.route.outputs.ci_config }}
       full_suite: ${{ steps.route.outputs.full_suite }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+      - id: event
+        name: Classify workflow event
+        env:
+          FULL_VALIDATION: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null }}
+        run: echo "full_validation=${FULL_VALIDATION}" >> "${GITHUB_OUTPUT}"
+      - if: ${{ steps.event.outputs.full_validation == 'true' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 0}
       - id: route
         name: Emit source-owned routing flags
+        if: ${{ steps.event.outputs.full_validation == 'true' }}
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -59,7 +67,7 @@ jobs:
             ${full_suite_arg} >> "${GITHUB_OUTPUT}"
 
   container-security:
-    if: ${{ needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.docker == 'true' || needs.changes.outputs.dependencies == 'true' || needs.changes.outputs.ci_config == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && (needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.docker == 'true' || needs.changes.outputs.dependencies == 'true' || needs.changes.outputs.ci_config == 'true') }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -114,7 +122,7 @@ jobs:
           retention-days: 14
 
   benchmark-contract:
-    if: ${{ needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.benchmark == 'true' || needs.changes.outputs.provider_ai == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && (needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.benchmark == 'true' || needs.changes.outputs.provider_ai == 'true') }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
