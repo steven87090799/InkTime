@@ -1,0 +1,5 @@
+# CI planner and workflow ownership is documented here without requiring
+# CODEOWNERS approval, so a single-maintainer repository does not deadlock.
+/.github/workflows/ @steven87090799
+/scripts/ci/ @steven87090799
+/.github/CODEOWNERS @steven87090799

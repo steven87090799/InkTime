@@ -248,6 +248,33 @@ def test_main_canonical_planner_and_provenance_contracts_are_preserved():
     assert workflow_contract in RUNNER_SUITE_TEST_PATHS["ci_routing_contracts"]
 
 
+@pytest.mark.parametrize("workflow_path", WORKFLOW_PATHS)
+def test_base_provenance_is_event_specific_and_fail_closed(workflow_path):
+    workflow = _load_workflow(workflow_path)
+    route = _step_by_id(workflow["jobs"]["changes"], "route")
+    run = route["run"]
+
+    assert "github.event.pull_request.base.sha" in route["env"]["BASE_SHA"]
+    assert "github.event.before" in route["env"]["BASE_SHA"]
+    assert "BASE_SHA_INPUT" in route["env"]
+    assert "pull_request|push)" in run
+    assert "workflow_dispatch)" in run
+    assert "refs/remotes/origin/main" in run
+    assert "git merge-base --is-ancestor" in run
+    assert "git cat-file -e" in run
+    assert "git rev-parse HEAD^" not in run
+    assert "origin/${base_ref}" not in run
+
+
+def test_ci_codeowners_documents_ownership_without_approval_gate():
+    codeowners = (REPOSITORY_ROOT / ".github/CODEOWNERS").read_text(encoding="utf-8")
+
+    assert "/.github/workflows/ @steven87090799" in codeowners
+    assert "/scripts/ci/ @steven87090799" in codeowners
+    assert "/.github/CODEOWNERS @steven87090799" in codeowners
+    assert "require_code_owner_review" not in codeowners
+
+
 def test_source_head_artifact_serializes_named_jq_arguments():
     ci = _load_workflow(WORKFLOW_PATHS[0])
     source_head = ci["jobs"]["source-head-contract"]
