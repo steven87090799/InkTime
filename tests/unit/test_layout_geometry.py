@@ -1131,6 +1131,8 @@ def test_stock_cleanup_cursor_recovers_and_new_or_aging_markers_progress(tmp_pat
     )
     service.cleanup_expired_stock_test_releases(maximum=4, now=now)
     assert (service.release_root / fresh_id).is_dir()
+    assert not (marker_root / f"{stale_id}.json").exists()
+    assert list((service.release_root / ".stock-direct-tests-quarantine").iterdir())
 
     added_id = "stock-added-later"
     _write_stock_release(
@@ -1144,7 +1146,6 @@ def test_stock_cleanup_cursor_recovers_and_new_or_aging_markers_progress(tmp_pat
         )
     assert not (service.release_root / fresh_id).exists()
     assert not (service.release_root / added_id).exists()
-    assert list((service.release_root / ".stock-direct-tests-quarantine").iterdir())
 
 
 def test_stock_cleanup_transient_marker_read_failure_retains_retry_metadata(

@@ -668,8 +668,19 @@ class DeviceReleaseService:
                                             removed += 1
                                             retained = False
                         except FileNotFoundError:
-                            # A concurrent consumer may have removed the marker.
-                            retained = False
+                            # A missing Release leaves an otherwise valid marker
+                            # permanently at the head of this generation unless
+                            # it is removed from the active queue. Quarantine the
+                            # exact observed marker for diagnosis; if that cannot
+                            # be done, keep it in the fair two-generation queue so
+                            # a transient filesystem failure cannot poison
+                            # liveness or silently discard retry metadata.
+                            if self._quarantine_marker(
+                                entry.name,
+                                active,
+                                "release or marker missing",
+                            ):
+                                retained = False
                         except OSError as exc:
                             # EIO, a temporary mount outage, or a permission
                             # transition is not a permanent marker defect. Keep
