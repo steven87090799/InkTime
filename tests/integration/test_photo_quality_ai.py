@@ -231,7 +231,10 @@ def test_manual_ai_idempotency_conflict_has_stable_api_error_code(client, app, t
     second_root = tmp_path / "second-excluded"
     first_root.mkdir()
     second_root.mkdir()
-    excluded_ids = _scan(app, first_root, screenshot=True) + _scan(app, second_root, screenshot=True)
+    first_ids = _scan(app, first_root, screenshot=True)
+    second_ids = _scan(app, second_root, screenshot=True)
+    second_id = next(photo_id for photo_id in second_ids if photo_id not in first_ids)
+    excluded_ids = [first_ids[0], second_id]
     _setting(app, "analysis.ai_mode", "off")
     _setting(app, "analysis.execution_mode", "local_with_manual_ai")
     headers = {"X-CSRF-Token": csrf(client), "Idempotency-Key": "manual-conflict-key"}
