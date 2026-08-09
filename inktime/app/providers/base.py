@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -20,7 +21,8 @@ class ProviderResponse:
     content: str
     usage: Usage
     request_id: str | None = None
-    request_metrics: dict[str, int] | None = None
+    request_metrics: dict[str, Any] | None = None
+    served_model: str | None = None
 
 
 @dataclass

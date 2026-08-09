@@ -40,6 +40,7 @@ from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.budgets import BudgetService
+from inktime.app.services.usage_tracking import record_failed_unknown_usage
 
 
 class AnalysisDisabledError(RuntimeError):
@@ -566,7 +567,8 @@ class PhotoAnalysisService:
         started_perf: float,
         retry_count: int = 0,
     ) -> float:
-        estimated_cost = provider.estimate_cost(model, response.usage)
+        recorded_model = str(response.served_model or model)
+        estimated_cost = provider.estimate_cost(recorded_model, response.usage)
         provider_cost = response.usage.provider_reported_cost
         if provider_cost is not None:
             actual_cost = max(0.0, float(provider_cost))
@@ -588,7 +590,7 @@ class PhotoAnalysisService:
         self.usage.record(
             provider=provider.name,
             provider_id=str(getattr(provider, "provider_id", provider.name)),
-            model=model,
+            model=recorded_model,
             job_id=job_id,
             photo_id=photo_id,
             request_type=request_type,
@@ -601,6 +603,7 @@ class PhotoAnalysisService:
             latency_ms=int((time.perf_counter() - started_perf) * 1000),
             status="completed",
             retry_count=retry_count,
+            request_id=response.request_id,
             reasoning_tokens=response.usage.reasoning_tokens,
             cache_write_tokens=response.usage.cache_write_tokens,
             cost_source=cost_source,
@@ -699,6 +702,12 @@ class PhotoAnalysisService:
                         vision_request_fingerprint=cache_fingerprint,
                     )
                     if cached_row is not None:
+                        try:
+                            validate_analysis_result(cached_row["result"])
+                        except (AnalysisValidationError, KeyError, TypeError, ValueError):
+                            # A corrupt/old cache entry is a miss, never a
+                            # worker-fatal exception or an infinite retry.
+                            continue
                         return cached_row
             return None
 
@@ -1027,6 +1036,34 @@ class PhotoAnalysisService:
             vision_attempt.vision_started = True
             vision_attempt.vision_completed = True
         except TimeoutError:
+            if vision_attempt.vision_started:
+                try:
+                    record_failed_unknown_usage(
+                        self.usage,
+                        provider=selected_channel.provider if selected_channel is not None else provider,
+                        model=model,
+                        job_id=job_id,
+                        photo_id=photo_id,
+                        request_type=stage,
+                        started_at=started_at,
+                        started_perf=started_perf,
+                        error=TimeoutError("AI-PROVIDER-TIMEOUT"),
+                        error_code="AI-PROVIDER-TIMEOUT",
+                        request_metrics=getattr(
+                            selected_channel.provider if selected_channel is not None else provider,
+                            "last_request_metrics",
+                            {},
+                        ),
+                    )
+                except Exception as usage_error:
+                    self._activity(
+                        "ERROR",
+                        "provider_failed_usage_persist_failed",
+                        "Provider 未知成本記錄失敗",
+                        job_id=job_id,
+                        photo_id=photo_id,
+                        error=str(usage_error)[:500],
+                    )
             self._activity(
                 "WARNING",
                 "provider_timeout",
@@ -1037,7 +1074,36 @@ class PhotoAnalysisService:
                 error_code="AI-PROVIDER-TIMEOUT",
             )
             raise
-        except Exception:
+        except Exception as error:
+            if vision_attempt.vision_started or bool(getattr(error, "request_started", False)) or bool(
+                getattr(error, "ambiguous", False)
+            ):
+                try:
+                    record_failed_unknown_usage(
+                        self.usage,
+                        provider=selected_channel.provider if selected_channel is not None else provider,
+                        model=model,
+                        job_id=job_id,
+                        photo_id=photo_id,
+                        request_type=stage,
+                        started_at=started_at,
+                        started_perf=started_perf,
+                        error=error,
+                        request_metrics=getattr(
+                            selected_channel.provider if selected_channel is not None else provider,
+                            "last_request_metrics",
+                            {},
+                        ),
+                    )
+                except Exception as usage_error:
+                    self._activity(
+                        "ERROR",
+                        "provider_failed_usage_persist_failed",
+                        "Provider 未知成本記錄失敗",
+                        job_id=job_id,
+                        photo_id=photo_id,
+                        error=str(usage_error)[:500],
+                    )
             self._activity(
                 "ERROR",
                 "provider_request_failed",
@@ -1100,29 +1166,59 @@ class PhotoAnalysisService:
                 "caption_controls": caption_controls,
                 "provider_request_context_id": provider_request_context_id,
             }
-            if selected_channel is not None and hasattr(provider, "_execute_sticky"):
-                repaired = provider._execute_sticky(
-                    selected_channel,
-                    "repair_json",
-                    boundary=self.process_boundary,
-                    **repair_call,
-                )
-            elif self.process_boundary is not None and hasattr(provider, "repair_json_isolated"):
-                repaired = provider.repair_json_isolated(self.process_boundary, **repair_call)
-            elif self.process_boundary is not None:
-                specification = provider.process_spec()
-                if specification is None:
-                    self.process_boundary.record_cooperative()
-                    repaired = provider.repair_json(**repair_call)
-                else:
-                    repaired = self.process_boundary.call_provider(
-                        specification,
+            try:
+                if selected_channel is not None and hasattr(provider, "_execute_sticky"):
+                    repaired = provider._execute_sticky(
+                        selected_channel,
                         "repair_json",
-                        timeout_seconds=float(getattr(provider, "timeout", 120)),
-                        kwargs=repair_call,
+                        boundary=self.process_boundary,
+                        **repair_call,
                     )
-            else:
-                repaired = provider.repair_json(**repair_call)
+                elif self.process_boundary is not None and hasattr(provider, "repair_json_isolated"):
+                    repaired = provider.repair_json_isolated(self.process_boundary, **repair_call)
+                elif self.process_boundary is not None:
+                    specification = provider.process_spec()
+                    if specification is None:
+                        self.process_boundary.record_cooperative()
+                        repaired = provider.repair_json(**repair_call)
+                    else:
+                        repaired = self.process_boundary.call_provider(
+                            specification,
+                            "repair_json",
+                            timeout_seconds=float(getattr(provider, "timeout", 120)),
+                            kwargs=repair_call,
+                        )
+                else:
+                    repaired = provider.repair_json(**repair_call)
+            except Exception as repair_error:
+                if bool(getattr(repair_error, "request_started", False)) or bool(
+                    getattr(repair_error, "ambiguous", False)
+                ):
+                    try:
+                        repair_provider = selected_channel.provider if selected_channel is not None else provider
+                        record_failed_unknown_usage(
+                            self.usage,
+                            provider=repair_provider,
+                            model=repair_model,
+                            job_id=job_id,
+                            photo_id=photo_id,
+                            request_type="json_repair",
+                            started_at=repair_started_at,
+                            started_perf=repair_perf,
+                            error=repair_error,
+                            request_metrics=getattr(repair_provider, "last_request_metrics", {}),
+                            retry_count=1,
+                        )
+                    except Exception as usage_error:
+                        self._activity(
+                            "ERROR",
+                            "provider_failed_usage_persist_failed",
+                            "Provider JSON 修復未知成本記錄失敗",
+                            job_id=job_id,
+                            photo_id=photo_id,
+                            error=str(usage_error)[:500],
+                        )
+                raise
             total_cost += self._record(
                 provider,
                 repair_model,

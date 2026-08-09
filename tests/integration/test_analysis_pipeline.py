@@ -121,7 +121,12 @@ def test_ambiguous_vision_failure_is_persisted_without_provider_failover(app, tm
             "WHERE photo_id=? ORDER BY id DESC LIMIT 1",
             (ids[0],),
         ).fetchone()
+        usage = connection.execute(
+            "SELECT status,cost_source,error_code FROM api_usage WHERE photo_id=? ORDER BY id DESC LIMIT 1",
+            (ids[0],),
+        ).fetchone()
     assert tuple(outcome) == ("ambiguous_failed", 1, "VLM-AMBIGUOUS")
+    assert tuple(usage) == ("failed", "unknown", "VLM-AMBIGUOUS")
 
 
 def test_provider_and_local_results_persist_a_complete_analysis_context(app, tmp_path):

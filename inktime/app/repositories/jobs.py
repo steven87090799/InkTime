@@ -12,6 +12,7 @@ from inktime.app.db import Database
 
 ACTIVE_STATUSES = {"preparing", "running", "pausing", "retrying"}
 TERMINAL_STATUSES = {"completed", "completed_with_errors", "failed", "cancelled"}
+MAX_STALE_RECOVERY_ATTEMPTS = 5
 
 
 class PreviewCapacityError(RuntimeError):
@@ -172,6 +173,10 @@ class JobRepository:
         force_recompute: bool = False,
         analysis_spec: dict | None = None,
     ) -> str:
+        # Selection can be backed by a generator whose database session is
+        # already closed.  Materialize it before acquiring the writer lock so
+        # NAS/SQLite iteration cannot run inside the insert transaction.
+        photo_ids = [str(photo_id) for photo_id in photo_ids]
         job_id = str(uuid4())
         now = utc_now()
         total = 0
@@ -206,7 +211,7 @@ class JobRepository:
                 )
                 batch: list[tuple] = []
                 for photo_id in photo_ids:
-                    batch.append((str(uuid4()), job_id, str(photo_id), now))
+                    batch.append((str(uuid4()), job_id, photo_id, now))
                     if len(batch) == 500:
                         connection.executemany(
                             "INSERT OR IGNORE INTO job_items(id, job_id, photo_id, available_at) VALUES (?, ?, ?, ?)",
@@ -746,25 +751,35 @@ class JobRepository:
             connection.execute("UPDATE jobs SET heartbeat_at=? WHERE id=?", (now, job_id))
         return int(cursor.rowcount)
 
-    def complete_item(self, job_id: str, item_id: str, result: dict, actual_cost: float = 0) -> None:
+    def complete_item(
+        self,
+        job_id: str,
+        item_id: str,
+        result: dict,
+        actual_cost: float = 0,
+        worker_id: str | None = None,
+    ) -> bool:
         now = utc_now()
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 status = connection.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+                ownership = " AND worker_id=?" if worker_id is not None else ""
+                ownership_params = (worker_id,) if worker_id is not None else ()
                 if status is None or status["status"] == "cancelled":
-                    connection.execute(
-                        "UPDATE job_items SET status='cancelled', completed_at=?, lease_until=NULL WHERE id=?",
-                        (now, item_id),
+                    cursor = connection.execute(
+                        f"UPDATE job_items SET status='cancelled', completed_at=?, lease_until=NULL, worker_id=NULL "
+                        f"WHERE id=? AND job_id=? AND status='running'{ownership}",  # noqa: S608
+                        (now, item_id, job_id, *ownership_params),
                     )
                 else:
                     stage = str(result.get("stage") or "completed")[:64]
                     cursor = connection.execute(
-                        """
+                        f"""
                         UPDATE job_items SET status='completed', completed_at=?, result_json=?,
-                                             lease_until=NULL, estimated_cost=?, stage=?, error_code=?
-                        WHERE id=? AND status='running'
-                        """,
+                                             lease_until=NULL, worker_id=NULL, estimated_cost=?, stage=?, error_code=?
+                        WHERE id=? AND job_id=? AND status='running'{ownership}
+                        """,  # noqa: S608
                         (
                             now,
                             json.dumps(result, ensure_ascii=False),
@@ -777,6 +792,8 @@ class JobRepository:
                                 else str(result.get("error_code") or "") or None
                             ),
                             item_id,
+                            job_id,
+                            *ownership_params,
                         ),
                     )
                     if cursor.rowcount:
@@ -788,19 +805,30 @@ class JobRepository:
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+        return bool(cursor.rowcount)
 
-    def record_late_completion(self, job_id: str, item_id: str, result: dict, actual_cost: float = 0) -> None:
+    def record_late_completion(
+        self,
+        job_id: str,
+        item_id: str,
+        result: dict,
+        actual_cost: float = 0,
+        worker_id: str | None = None,
+    ) -> bool:
         """Timeout 後底層 Thread 才結束：只記錄一次診斷，不可轉成正式成功。"""
         now = utc_now()
         with self.database.transaction() as connection:
+            ownership = " AND worker_id=?" if worker_id is not None else ""
+            ownership_params = (worker_id,) if worker_id is not None else ()
             cursor = connection.execute(
-                """
+                f"""
                 UPDATE job_items
                 SET status='failed',completed_at=?,result_json=?,error_code='JOB-004',
-                    lease_until=NULL,completion_state='timed_out_completed',dead_lettered_at=?
+                    lease_until=NULL,worker_id=NULL,completion_state='timed_out_completed',dead_lettered_at=?
                 WHERE id=? AND job_id=? AND status='running'
-                """,
-                (now, json.dumps(result, ensure_ascii=False), now, item_id, job_id),
+                {ownership}
+                """,  # noqa: S608
+                (now, json.dumps(result, ensure_ascii=False), now, item_id, job_id, *ownership_params),
             )
             if cursor.rowcount:
                 connection.execute(
@@ -817,18 +845,22 @@ class JobRepository:
                 "工作逾時後才結束；結果僅保留診斷，不會重試或重複套用",
                 {"item_id": item_id},
             )
+        return bool(cursor.rowcount)
 
-    def defer_item(self, item_id: str) -> None:
+    def defer_item(self, item_id: str, worker_id: str | None = None) -> bool:
         """預算阻擋時歸還租約，不把尚未送出的項目記成分析失敗。"""
         with self.database.session() as connection:
-            connection.execute(
-                """
+            ownership = " AND worker_id=?" if worker_id is not None else ""
+            ownership_params = (worker_id,) if worker_id is not None else ()
+            cursor = connection.execute(
+                f"""
                 UPDATE job_items
                 SET status='pending',worker_id=NULL,lease_until=NULL,available_at=?,attempts=MAX(0,attempts-1)
-                WHERE id=? AND status='running'
-                """,
-                (utc_now(), item_id),
+                WHERE id=? AND status='running'{ownership}
+                """,  # noqa: S608
+                (utc_now(), item_id, *ownership_params),
             )
+        return bool(cursor.rowcount)
 
     def fail_item(
         self,
@@ -839,26 +871,33 @@ class JobRepository:
         *,
         max_attempts: int = 3,
         retry_interval_seconds: int | None = None,
-    ) -> None:
+        worker_id: str | None = None,
+    ) -> bool:
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 item = connection.execute(
-                    "SELECT attempts, photo_id FROM job_items WHERE id=?", (item_id,)
+                    "SELECT attempts, photo_id FROM job_items WHERE id=? AND job_id=? AND status='running'"
+                    + (" AND worker_id=?" if worker_id is not None else ""),
+                    (item_id, job_id, *((worker_id,) if worker_id is not None else ())),
                 ).fetchone()
-                terminal = item is None or int(item["attempts"]) >= max_attempts
+                if item is None:
+                    connection.execute("COMMIT")
+                    return False
+                terminal = int(item["attempts"]) >= max_attempts
                 if terminal:
-                    connection.execute(
+                    cursor = connection.execute(
                         """
                         UPDATE job_items SET status='failed', completed_at=?, error_code=?,
-                                             lease_until=NULL,
+                                             lease_until=NULL, worker_id=NULL,
                                              dead_lettered_at=? WHERE id=?
                         """,
                         (now, error_code, now, item_id),
                     )
-                    connection.execute("UPDATE jobs SET failed_items=failed_items+1 WHERE id=?", (job_id,))
+                    if cursor.rowcount:
+                        connection.execute("UPDATE jobs SET failed_items=failed_items+1 WHERE id=?", (job_id,))
                 else:
                     delay = (
                         max(1, int(retry_interval_seconds))
@@ -866,10 +905,13 @@ class JobRepository:
                         else min(300, 2 ** int(item["attempts"]))
                     )
                     available = (now_dt + timedelta(seconds=delay)).isoformat()
-                    connection.execute(
-                        "UPDATE job_items SET status='pending', available_at=?, error_code=?, lease_until=NULL WHERE id=?",
+                    cursor = connection.execute(
+                        "UPDATE job_items SET status='pending', available_at=?, error_code=?, lease_until=NULL, worker_id=NULL WHERE id=?",
                         (available, error_code, item_id),
                     )
+                if not cursor.rowcount:
+                    connection.execute("COMMIT")
+                    return False
                 fingerprint = hashlib.sha256(f"{job_id}:{item_id}:{error_code}".encode()).hexdigest()
                 existing_error = connection.execute(
                     "SELECT id FROM job_errors WHERE fingerprint=? AND resolved_at IS NULL",
@@ -902,6 +944,7 @@ class JobRepository:
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+        return True
 
     def finalize_if_done(
         self,
@@ -931,7 +974,41 @@ class JobRepository:
                 return False
             target = "completed_with_errors" if int(counts["failed"] or 0) else "completed"
             if finalizer is not None:
-                finalizer(connection, job_id, target)
+                connection.execute("SAVEPOINT job_finalizer")
+                try:
+                    finalizer(connection, job_id, target)
+                except Exception as error:
+                    connection.execute("ROLLBACK TO job_finalizer")
+                    connection.execute("RELEASE job_finalizer")
+                    target = "completed_with_errors"
+                    message = str(error)[:1000] or error.__class__.__name__
+                    fingerprint = hashlib.sha256(
+                        f"{job_id}:finalizer:{error.__class__.__name__}:{message}".encode("utf-8")
+                    ).hexdigest()
+                    connection.execute(
+                        """
+                        INSERT INTO job_errors(
+                            job_id,job_item_id,photo_id,component,error_code,fingerprint,severity,message,
+                            first_seen_at,last_seen_at
+                        ) VALUES (?,?,NULL,'finalizer','JOB-FINALIZER-001',?,?,?, ?,?)
+                        """,
+                        (job_id, None, fingerprint, "error", message, now, now),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO job_events(job_id,event,message,details_json,created_at)
+                        VALUES (?,?,?,?,?)
+                        """,
+                        (
+                            job_id,
+                            "finalizer_failed",
+                            "工作 finalizer 失敗；已隔離並以 completed_with_errors 結束",
+                            json.dumps({"error": message}, ensure_ascii=False),
+                            now,
+                        ),
+                    )
+                else:
+                    connection.execute("RELEASE job_finalizer")
             cursor = connection.execute(
                 "UPDATE jobs SET status=?, completed_at=?, heartbeat_at=? WHERE id=? AND status IN ('running','retrying')",
                 (target, now, now, job_id),
@@ -957,16 +1034,84 @@ class JobRepository:
                 return 0
             connection.execute("BEGIN IMMEDIATE")
             try:
-                cursor = connection.execute(
+                rows = connection.execute(
                     """
-                    UPDATE job_items SET status='pending', worker_id=NULL, lease_until=NULL, available_at=?
+                    SELECT id,job_id,photo_id,attempts FROM job_items
                     WHERE status='running' AND (lease_until IS NULL OR lease_until<?)
+                    ORDER BY job_id,id
                     """,
-                    (now, now),
-                )
+                    (now,),
+                ).fetchall()
+                recovered = 0
+                for row in rows:
+                    item_id = str(row["id"])
+                    job_id = str(row["job_id"])
+                    attempts = int(row["attempts"] or 0)
+                    if attempts >= MAX_STALE_RECOVERY_ATTEMPTS:
+                        cursor = connection.execute(
+                            """
+                            UPDATE job_items
+                            SET status='failed',completed_at=?,worker_id=NULL,lease_until=NULL,
+                                error_code='WORKER_CRASH',dead_lettered_at=?,completion_state='worker_crash'
+                            WHERE id=? AND status='running' AND (lease_until IS NULL OR lease_until<?)
+                            """,
+                            (now, now, item_id, now),
+                        )
+                        if cursor.rowcount:
+                            recovered += 1
+                            connection.execute(
+                                "UPDATE jobs SET failed_items=failed_items+1,heartbeat_at=? WHERE id=?",
+                                (now, job_id),
+                            )
+                            fingerprint = hashlib.sha256(
+                                f"{job_id}:{item_id}:WORKER_CRASH".encode("utf-8")
+                            ).hexdigest()
+                            connection.execute(
+                                """
+                                INSERT INTO job_errors(
+                                    job_id,job_item_id,photo_id,component,error_code,fingerprint,severity,message,
+                                    first_seen_at,last_seen_at
+                                ) VALUES (?,?,?,'worker','WORKER_CRASH',?,'error',?,?,?)
+                                """,
+                                (
+                                    job_id,
+                                    item_id,
+                                    row["photo_id"],
+                                    fingerprint,
+                                    "Worker lease expired after bounded recovery attempts",
+                                    now,
+                                    now,
+                                ),
+                            )
+                            connection.execute(
+                                """
+                                INSERT INTO job_events(job_id,event,message,details_json,created_at)
+                                VALUES (?,?,?,?,?)
+                                """,
+                                (
+                                    job_id,
+                                    "worker_crash",
+                                    "Worker lease 超過上限，工作項目已終止",
+                                    json.dumps(
+                                        {"item_id": item_id, "attempts": attempts, "error_code": "WORKER_CRASH"},
+                                        ensure_ascii=False,
+                                    ),
+                                    now,
+                                ),
+                            )
+                    else:
+                        cursor = connection.execute(
+                            """
+                            UPDATE job_items
+                            SET status='pending',worker_id=NULL,lease_until=NULL,available_at=?
+                            WHERE id=? AND status='running' AND (lease_until IS NULL OR lease_until<?)
+                            """,
+                            (now, item_id, now),
+                        )
+                        recovered += int(cursor.rowcount)
                 connection.execute("UPDATE jobs SET status='paused' WHERE status='pausing'")
                 connection.execute("COMMIT")
-                return int(cursor.rowcount)
+                return recovered
             except Exception:
                 connection.execute("ROLLBACK")
                 raise

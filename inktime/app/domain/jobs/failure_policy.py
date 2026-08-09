@@ -31,6 +31,9 @@ TERMINAL_NO_RETRY_CODES = frozenset(
         "UNSUPPORTED_CONFIGURATION",
         "ANALYSIS-DISABLED",
         "VLM-008",
+        "VLM-004",
+        "VLM-006",
+        "VLM-AMBIGUOUS",
     }
 )
 

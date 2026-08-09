@@ -133,6 +133,57 @@ def test_vision_post_timeout_is_ambiguous_and_never_retried(tmp_path):
     assert session.vision_attempts == 1
 
 
+class VisionConnectTimeoutSession(FakeSession):
+    def post(self, url, **kwargs):
+        if url.endswith("/chat/completions"):
+            self.calls.append((url, kwargs))
+            raise requests.ConnectTimeout("connection setup failed")
+        return super().post(url, **kwargs)
+
+
+def test_vision_connect_timeout_is_pre_send_and_can_fail_over(tmp_path):
+    image = Path(tmp_path) / "vision-connect-timeout.jpg"
+    image.write_bytes(b"jpeg-fixture")
+    session = VisionConnectTimeoutSession()
+    provider = OpenAICompatibleProvider(
+        name="OpenAI", base_url="https://api.openai.com/v1", api_key="secret", session=session
+    )
+
+    with pytest.raises(ProviderHTTPError) as raised:
+        provider.analyze(image_path=image, model="vision", detail="high", stage="single_high")
+
+    assert raised.value.code == "VLM-001"
+    assert raised.value.ambiguous is False
+    assert raised.value.vision_started is False
+    assert session.calls
+
+
+class VisionServerErrorSession(FakeSession):
+    def post(self, url, **kwargs):
+        if url.endswith("/chat/completions"):
+            self.calls.append((url, kwargs))
+            return FakeResponse({"error": {"type": "server_error"}}, status_code=500)
+        return super().post(url, **kwargs)
+
+
+def test_vision_http_5xx_is_stable_retryable_failure_not_ambiguous(tmp_path):
+    image = Path(tmp_path) / "vision-server-error.jpg"
+    image.write_bytes(b"jpeg-fixture")
+    provider = OpenAICompatibleProvider(
+        name="OpenAI",
+        base_url="https://api.openai.com/v1",
+        api_key="secret",
+        session=VisionServerErrorSession(),
+    )
+
+    with pytest.raises(ProviderHTTPError) as raised:
+        provider.analyze(image_path=image, model="vision", detail="high", stage="single_high")
+
+    assert raised.value.code == "VLM-007"
+    assert raised.value.ambiguous is False
+    assert raised.value.http_status == 500
+
+
 def test_reasoning_effort_is_capability_gated_and_sync_uses_same_builder(tmp_path):
     image = Path(tmp_path) / "provider-test.jpg"
     image.write_bytes(b"jpeg-fixture")

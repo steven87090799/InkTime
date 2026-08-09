@@ -814,7 +814,7 @@ def test_offline_transient_cross_job_backoff_is_durable_bounded_and_reset(app):
     ) is None
 
 
-def test_offline_transient_finalize_crash_preserves_backoff(app):
+def test_offline_transient_finalize_crash_isolated_and_terminal(app):
     device_id, _token = app.extensions["inktime_device_repository"].create(
         "離線 transient finalize crash 相框",
         delivery_mode="inktime_offline_schedule",
@@ -860,34 +860,19 @@ def test_offline_transient_finalize_crash_preserves_backoff(app):
         )
         raise RuntimeError("simulated transient finalization crash")
 
-    with pytest.raises(RuntimeError, match="simulated transient"):
-        repository.finalize_if_done(job_id, finalizer=persist_then_crash)
-
-    assert repository.get(job_id)["status"] == "running"
+    assert repository.finalize_if_done(job_id, finalizer=persist_then_crash)
+    assert repository.get(job_id)["status"] == "completed_with_errors"
     assert offline_schedules.transient_recovery_for_device(
         device_id=device_id,
         target_date="2026-08-03",
         config_version=1,
     ) is None
-
-    def persist_recovery(connection, _finalized_job_id, _target):
-        offline_schedules.record_transient_exhausted(
-            device_id=device_id,
-            target_date="2026-08-03",
-            config_version=1,
-            now=exhausted_at,
-            connection=connection,
-        )
-
-    assert repository.finalize_if_done(job_id, finalizer=persist_recovery)
-    assert repository.get(job_id)["status"] == "completed_with_errors"
-    state = offline_schedules.transient_recovery_for_device(
-        device_id=device_id,
-        target_date="2026-08-03",
-        config_version=1,
-    )
-    assert state is not None
-    assert state["backoff_seconds"] == 1800
+    with database.session() as connection:
+        error = connection.execute(
+            "SELECT error_code FROM job_errors WHERE job_id=? ORDER BY id DESC LIMIT 1",
+            (job_id,),
+        ).fetchone()
+    assert error["error_code"] == "JOB-FINALIZER-001"
 
     SchedulerRunner(app)._prepare_due_offline_devices(exhausted_at + timedelta(seconds=1))
     assert len(

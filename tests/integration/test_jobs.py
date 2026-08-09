@@ -106,6 +106,42 @@ def test_stale_running_items_are_recovered_after_restart(app):
     assert repository.get(job_id)["status"] == "completed"
 
 
+def test_item_completion_and_failure_require_current_worker_ownership(app):
+    service, repository, job_id = create_job(app, 1)
+    service.start(job_id)
+    claimed = repository.claim(job_id, "worker-a", 1)
+    item_id = str(claimed[0]["id"])
+
+    assert not repository.complete_item(job_id, item_id, {"wrong": True}, worker_id="worker-b")
+    assert not repository.fail_item(
+        job_id,
+        item_id,
+        "JOB-003",
+        "stale worker",
+        max_attempts=1,
+        worker_id="worker-b",
+    )
+    assert repository.list_items(job_id)[0]["status"] == "running"
+    assert repository.complete_item(job_id, item_id, {"ok": True}, worker_id="worker-a")
+
+
+def test_stale_recovery_dead_letters_after_bounded_attempts(app):
+    service, repository, job_id = create_job(app, 1)
+    service.start(job_id)
+    claimed = repository.claim(job_id, "dead-worker", 1)
+    expired = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE job_items SET attempts=5,lease_until=? WHERE id=?",
+            (expired, claimed[0]["id"]),
+        )
+
+    assert repository.recover_stale() == 1
+    item = repository.list_items(job_id)[0]
+    assert item["status"] == "failed"
+    assert item["error_code"] == "WORKER_CRASH"
+
+
 def test_recover_stale_does_not_take_writer_lock_without_candidates(app):
     database = app.extensions["inktime_database"]
     before = int(database.observability()["writer_lock_acquisitions"])

@@ -56,6 +56,7 @@ class BoundedJobWorker:
     """只維持固定數量 Future；照片總數不會放大 Worker 記憶體。"""
 
     MAX_CHILD_PROCESSES = 4
+    LEASE_RENEWAL_INTERVAL_SECONDS = 30.0
 
     def __init__(
         self,
@@ -122,7 +123,8 @@ class BoundedJobWorker:
         self.failure_count += 1
         code = failure_code(exc)
         if code.startswith("BUDGET-"):
-            self.repository.defer_item(item_id)
+            if not self.repository.defer_item(item_id, self.worker_id):
+                return
             self.repository.transition(
                 job_id,
                 {"running", "retrying"},
@@ -144,6 +146,7 @@ class BoundedJobWorker:
             str(exc),
             max_attempts=attempts,
             retry_interval_seconds=self.retry_interval_seconds,
+            worker_id=self.worker_id,
         )
         if self.error_callback and (
             self.failure_count <= 3 or self.failure_count % self.progress_interval_items == 0
@@ -243,7 +246,7 @@ class BoundedJobWorker:
                             if self.result_callback:
                                 self.result_callback(result)
                             self.repository.complete_item(
-                                job_id, str(completed_id), dict(result), float(cost)
+                                job_id, str(completed_id), dict(result), float(cost), self.worker_id
                             )
                         else:
                             self._record_failure(job_id, item_id, JobChildError(str(message[1])))
@@ -258,7 +261,10 @@ class BoundedJobWorker:
                         self._record_processed()
                         progressed = True
 
-                if now - last_lease_renewal >= min(30.0, self.timeout_seconds / 2):
+                if now - last_lease_renewal >= min(
+                    self.LEASE_RENEWAL_INTERVAL_SECONDS,
+                    max(1.0, self.timeout_seconds / 2) if self.timeout_seconds else self.LEASE_RENEWAL_INTERVAL_SECONDS,
+                ):
                     self.repository.renew_leases(job_id, self.worker_id)
                     last_lease_renewal = now
                 if not tasks:
@@ -267,6 +273,9 @@ class BoundedJobWorker:
                     if not progressed:
                         # Retry backoff is persisted; return control to Scheduler.
                         break
+                if time.monotonic() - last_lease_renewal >= self.LEASE_RENEWAL_INTERVAL_SECONDS:
+                    self.repository.renew_leases(job_id, self.worker_id)
+                    last_lease_renewal = time.monotonic()
                 if not progressed:
                     self.stop_event.wait(0.02)
         finally:
@@ -287,6 +296,7 @@ class BoundedJobWorker:
         futures: dict[Future, tuple[str, float]] = {}
         timed_out: set[Future] = set()
         timeout_triggered = False
+        last_lease_renewal = time.monotonic()
         with ThreadPoolExecutor(max_workers=self.concurrency, thread_name_prefix="inktime") as executor:
             while not self.stop_event.is_set() or futures:
                 job = self.repository.get(job_id)
@@ -333,6 +343,7 @@ class BoundedJobWorker:
                 )
                 if not done:
                     self.repository.renew_leases(job_id, self.worker_id)
+                    last_lease_renewal = time.monotonic()
                     if self.timeout_seconds:
                         expired = [
                             future
@@ -354,12 +365,17 @@ class BoundedJobWorker:
                         self._record_failure(job_id, item_id, exc)
                     else:
                         if future in timed_out:
-                            self.repository.record_late_completion(job_id, completed_id, result, cost)
+                            self.repository.record_late_completion(
+                                job_id, completed_id, result, cost, self.worker_id
+                            )
                         else:
                             if self.result_callback:
                                 self.result_callback(result)
-                            self.repository.complete_item(job_id, completed_id, result, cost)
+                            self.repository.complete_item(job_id, completed_id, result, cost, self.worker_id)
                     self._record_processed()
+                if time.monotonic() - last_lease_renewal >= self.LEASE_RENEWAL_INTERVAL_SECONDS:
+                    self.repository.renew_leases(job_id, self.worker_id)
+                    last_lease_renewal = time.monotonic()
 
             # 優雅停止：已送出的工作完成並記錄；不再 claim 新項目。
             for future in list(futures):
@@ -370,11 +386,13 @@ class BoundedJobWorker:
                     self._record_failure(job_id, item_id, exc)
                 else:
                     if future in timed_out:
-                        self.repository.record_late_completion(job_id, completed_id, result, cost)
+                        self.repository.record_late_completion(
+                            job_id, completed_id, result, cost, self.worker_id
+                        )
                     else:
                         if self.result_callback:
                             self.result_callback(result)
-                        self.repository.complete_item(job_id, completed_id, result, cost)
+                        self.repository.complete_item(job_id, completed_id, result, cost, self.worker_id)
                 self._record_processed()
             job = self.repository.get(job_id)
             if job is not None and job["status"] == "pausing":

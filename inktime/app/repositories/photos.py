@@ -248,6 +248,24 @@ class PhotoRepository:
                 item.features.perceptual_hash for item in items if item.features.perceptual_hash is not None
             )
         )
+        # Resolve possible move sources before acquiring the writer
+        # transaction.  A NAS/filesystem stat must never extend the SQLite
+        # writer lock or make unrelated scans wait on remote I/O.
+        candidate_paths: list[str] = []
+        with self.database.session() as read_connection:
+            for chunk in _chunks(hashes):
+                placeholders = ",".join("?" for _ in chunk)
+                candidate_paths.extend(
+                    str(row["relative_path"])
+                    for row in read_connection.execute(
+                        f"SELECT relative_path FROM photos WHERE library_id=? AND sha256 IN ({placeholders})",  # noqa: S608
+                        (library_id, *chunk),
+                    ).fetchall()
+                )
+        present_candidate_paths = {
+            relative_path: self._path_is_still_present(root, relative_path)
+            for relative_path in dict.fromkeys(candidate_paths)
+        }
         results: list[BatchPhotoResult] = []
         with self.database.transaction() as connection:
             path_rows: list[dict] = []
@@ -329,7 +347,7 @@ class PhotoRepository:
                         for row in exact
                         if str(row["id"]) not in reserved_move_ids
                         and str(row["id"]) not in plans_by_id
-                        and not self._path_is_still_present(root, str(row["relative_path"]))
+                        and not present_candidate_paths.get(str(row["relative_path"]), False)
                     ]
                     if len(movable) == 1:
                         source = movable[0]
