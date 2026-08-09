@@ -149,9 +149,9 @@ class VisionTransportErrorSession(FakeSession):
 @pytest.mark.parametrize(
     "error",
     [
-        requests.ConnectionError("remote disconnected after POST"),
-        requests.SSLError("TLS connection reset after POST"),
-        requests.ReadTimeout("response read timed out"),
+        requests.exceptions.ConnectionError("remote disconnected after POST"),
+        requests.exceptions.SSLError("TLS connection reset after POST"),
+        requests.exceptions.ReadTimeout("response read timed out"),
     ],
     ids=["connection-error", "ssl-error", "read-timeout"],
 )
@@ -177,7 +177,7 @@ class VisionConnectTimeoutSession(FakeSession):
     def post(self, url, **kwargs):
         if url.endswith("/chat/completions"):
             self.calls.append((url, kwargs))
-            raise requests.ConnectTimeout("connection setup failed")
+            raise requests.exceptions.ConnectTimeout("connection setup failed")
         return super().post(url, **kwargs)
 
 
@@ -342,7 +342,7 @@ def test_create_batch_invalid_json_or_missing_id_is_ambiguous():
     ("outcome", "expected_ambiguous"),
     [
         (requests.Timeout("after remote create"), True),
-        (requests.ConnectionError("connection reset"), True),
+        (requests.exceptions.ConnectionError("connection reset"), True),
         ("500", True),
         ("429", False),
         ("400", False),

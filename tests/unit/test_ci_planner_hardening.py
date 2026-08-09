@@ -6,7 +6,7 @@ import pytest
 
 from scripts.ci.canonical_plan import build_canonical_plan
 from scripts.ci.run_selected_suites import RUNNER_SUITE_TEST_PATHS, selected_test_paths
-from scripts.ci.test_plan import FULL_MODE, IMPACT_MODE
+from scripts.ci.test_plan import FULL_MODE, IMPACT_MODE, build_test_plan
 from scripts.ci.verify_execution import (
     CONTAINER_WORKFLOW,
     REPOSITORY_WORKFLOW,

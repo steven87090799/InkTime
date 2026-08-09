@@ -18,6 +18,9 @@ def _context(*, draft: bool = True) -> dict[str, object]:
         "draft": draft,
         "base_sha": "a" * 40,
         "head_sha": "b" * 40,
+        "tested_ref": "refs/pull/64/merge",
+        "tested_sha": "c" * 40,
+        "tested_ref_kind": "merge-ref",
     }
 
 

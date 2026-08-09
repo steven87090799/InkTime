@@ -59,9 +59,9 @@ class TransportErrorVisionSession:
 @pytest.mark.parametrize(
     "error",
     [
-        requests.ConnectionError("remote disconnected after POST"),
-        requests.SSLError("TLS connection reset after POST"),
-        requests.ReadTimeout("response read timed out"),
+        requests.exceptions.ConnectionError("remote disconnected after POST"),
+        requests.exceptions.SSLError("TLS connection reset after POST"),
+        requests.exceptions.ReadTimeout("response read timed out"),
     ],
     ids=["connection-error", "ssl-error", "read-timeout"],
 )
@@ -92,7 +92,9 @@ def test_ambiguous_transport_errors_stop_router_before_failover(error, tmp_path)
 def test_connect_timeout_still_fails_over_before_vision_request(tmp_path):
     image = tmp_path / "router-connect-timeout.jpg"
     image.write_bytes(b"jpeg-fixture")
-    session = TransportErrorVisionSession(requests.ConnectTimeout("connection setup failed"))
+    session = TransportErrorVisionSession(
+        requests.exceptions.ConnectTimeout("connection setup failed")
+    )
     first = OpenAICompatibleProvider(
         name="first", base_url="https://api.openai.com/v1", api_key="secret", session=session
     )
