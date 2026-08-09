@@ -667,17 +667,26 @@ class DeviceReleaseService:
                                         ):
                                             removed += 1
                                             retained = False
+                        except FileNotFoundError:
+                            # A concurrent consumer may have removed the marker.
+                            retained = False
+                        except OSError as exc:
+                            # EIO, a temporary mount outage, or a permission
+                            # transition is not a permanent marker defect. Keep
+                            # the marker in the fair two-generation queue.
+                            _LOGGER.warning(
+                                "Deferred Stock cleanup marker %s after transient %s",
+                                entry.name,
+                                type(exc).__name__,
+                            )
                         except (
-                            FileNotFoundError,
-                            OSError,
                             UnicodeDecodeError,
                             json.JSONDecodeError,
-                            PermissionError,
                             UnsafePathError,
                             ValueError,
                         ) as exc:
-                            self._quarantine_marker(entry.name, active, type(exc).__name__)
-                            retained = False
+                            if self._quarantine_marker(entry.name, active, type(exc).__name__):
+                                retained = False
                         if retained:
                             self._move_marker(entry.name, active, inactive)
                 if examined >= limit or saw_entry:

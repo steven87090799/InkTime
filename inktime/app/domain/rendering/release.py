@@ -551,9 +551,14 @@ class AtomicReleasePublisher:
             return None
         try:
             manifest = self.validate(str(indexed["release_id"]))
-        except (OSError, ValueError):
+        except (FileNotFoundError, NotADirectoryError, ValueError):
             self._quarantine_observed_index(index_path, identity, "invalid_target")
             return None
+        except OSError:
+            # A transient storage failure is not proof that the indexed target
+            # is stale. Preserve the exact observed index and fail this lookup
+            # closed so a later retry cannot create a duplicate Release.
+            raise
         if (
             self._device_test_index_payload(manifest) != indexed
             or self._legacy_candidate_order(manifest) is None

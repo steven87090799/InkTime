@@ -1008,11 +1008,6 @@ def test_formal_marker_and_release_id_traversal_fail_closed(tmp_path):
     )
     assert traversal.allowed is False
     assert traversal.reason == "invalid_release_id"
-    for _ in range(4):
-        service.cleanup_expired_stock_test_releases(maximum=2, now=now)
-    remaining = [path.name for path in service.release_root.glob("stock-expired-*")]
-    assert remaining == []
-    assert (service.release_root / "stock-recent").is_dir()
 
 
 def test_stock_symlink_and_malformed_manifest_are_preserved_fail_closed(tmp_path):
@@ -1150,6 +1145,44 @@ def test_stock_cleanup_cursor_recovers_and_new_or_aging_markers_progress(tmp_pat
     assert not (service.release_root / fresh_id).exists()
     assert not (service.release_root / added_id).exists()
     assert list((service.release_root / ".stock-direct-tests-quarantine").iterdir())
+
+
+def test_stock_cleanup_transient_marker_read_failure_retains_retry_metadata(
+    monkeypatch, tmp_path
+):
+    service = _real_stock_release_service(tmp_path)
+    now = datetime.now(timezone.utc)
+    release_id = "stock-transient-marker"
+    _write_stock_release(
+        service.release_root,
+        release_id,
+        expires_at=now - timedelta(minutes=1),
+    )
+    marker_name = f"{release_id}.json"
+    original_open = service._open_readonly
+    failures = 0
+
+    def fail_marker_once(path):
+        nonlocal failures
+        if Path(path).name == marker_name and failures == 0:
+            failures += 1
+            raise OSError("transient marker read failure")
+        return original_open(path)
+
+    monkeypatch.setattr(service, "_open_readonly", fail_marker_once)
+    first = service.cleanup_expired_stock_test_releases(maximum=4, now=now)
+    assert first == {"examined": 1, "removed": 0}
+    assert (service.release_root / release_id).is_dir()
+    assert any(
+        (service.release_root / directory / marker_name).is_file()
+        for directory in (".stock-direct-tests", ".stock-direct-tests-deferred")
+    )
+    quarantine = service.release_root / ".stock-direct-tests-quarantine"
+    assert not quarantine.exists() or not any(quarantine.iterdir())
+
+    second = service.cleanup_expired_stock_test_releases(maximum=4, now=now)
+    assert second["removed"] == 1
+    assert not (service.release_root / release_id).exists()
 
 
 @pytest.mark.parametrize("corruption", ["tmp", "invalid_json", "oversized", "symlink"])

@@ -341,6 +341,34 @@ def test_transient_legacy_read_failure_does_not_mark_migration_complete(monkeypa
     assert publisher.find_device_test_by_idempotency("transient") is None
     assert not (root / DEVICE_TEST_INDEX_MIGRATION_DIRECTORY / "state.json").exists()
 
+    monkeypatch.setattr(publisher, "validate", original_validate)
+    assert publisher.find_device_test_by_idempotency("transient") == manifest
+    assert _migration_state(root)["complete"] is True
+
+
+def test_transient_index_target_read_failure_preserves_index_for_retry(monkeypatch, tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    key = "transient-index-target"
+    manifest = _publish_preencoded_test(publisher, tmp_path, idempotency_key=key)
+    index = publisher._device_test_index_path(key)
+    before = index.read_bytes()
+    original_validate = publisher.validate
+
+    def fail_target(release_id):
+        if release_id == manifest["release_id"]:
+            raise OSError("transient indexed target read failure")
+        return original_validate(release_id)
+
+    monkeypatch.setattr(publisher, "validate", fail_target)
+    assert publisher.find_device_test_by_idempotency(key) is None
+    assert index.read_bytes() == before
+    quarantine = root / DEVICE_TEST_INDEX_QUARANTINE_DIRECTORY
+    assert not quarantine.exists() or not any(quarantine.iterdir())
+
+    monkeypatch.setattr(publisher, "validate", original_validate)
+    assert publisher.find_device_test_by_idempotency(key) == manifest
+
 
 def test_migration_restart_after_state_commit_failure_is_deterministic(monkeypatch, tmp_path):
     root = tmp_path / "releases"
