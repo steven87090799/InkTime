@@ -835,6 +835,57 @@ def test_stock_2xx_consumes_exact_ephemeral_release_after_revalidation(monkeypat
     ).exists()
 
 
+def test_stock_2xx_cleanup_failure_is_deferred_without_masking_acceptance(monkeypatch, tmp_path):
+    from inktime.app.services.photopainter_stock import StockCompatibilityService
+
+    service = _real_stock_release_service(tmp_path)
+    release_id = "stock-success-cleanup-deferred"
+    _write_stock_release(service.release_root, release_id)
+    original_authorize = service.authorize_stock_test_release_for_device
+    authorization_calls = 0
+
+    def authorize_then_fail(**kwargs):
+        nonlocal authorization_calls
+        authorization_calls += 1
+        if authorization_calls > 1:
+            raise RuntimeError("simulated cleanup dependency failure")
+        return original_authorize(**kwargs)
+
+    monkeypatch.setattr(service, "authorize_stock_test_release_for_device", authorize_then_fail)
+    monkeypatch.setattr(
+        "inktime.app.services.photopainter_stock.packed_frame_to_stock_payload",
+        lambda *_args, **_kwargs: b"stock-payload",
+    )
+    transport = SimpleNamespace(upload=lambda *_args: SimpleNamespace(status_code=204))
+
+    result = StockCompatibilityService(service, transport).display_stock_test_release(
+        device_id="stock-device",
+        profile_key="safe_4c",
+        release_id=release_id,
+        file_name="photo_1.bin",
+        host="stock-host",
+    )
+
+    assert result["upload_accepted"] is True
+    assert result["ephemeral_release_consumed"] is False
+    assert (service.release_root / release_id).is_dir()
+
+
+def test_opportunistic_stock_cleanup_unexpected_failure_is_deferred(monkeypatch, tmp_path):
+    service = _real_stock_release_service(tmp_path)
+
+    def fail_cleanup(**_kwargs):
+        raise RuntimeError("simulated cleanup failure")
+
+    monkeypatch.setattr(
+        service,
+        "_cleanup_expired_stock_test_releases_locked",
+        fail_cleanup,
+    )
+
+    assert service.cleanup_expired_stock_test_releases() == {"examined": 0, "removed": 0}
+
+
 @pytest.mark.parametrize(
     "protection",
     ["database", "latest", "legacy_latest", "custom_assignment", "other_assignment"],

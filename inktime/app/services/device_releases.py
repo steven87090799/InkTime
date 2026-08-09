@@ -535,6 +535,9 @@ class DeviceReleaseService:
         except ReleaseMetadataLockTimeout:
             _LOGGER.warning("Deferred Stock release consumption because metadata lock timed out")
             return False
+        except Exception:  # noqa: BLE001 -- post-upload cleanup must not trigger a duplicate send.
+            _LOGGER.exception("Deferred Stock release consumption after an unexpected cleanup failure")
+            return False
 
     def _cleanup_expired_stock_test_releases_locked(
         self,
@@ -667,6 +670,9 @@ class DeviceReleaseService:
                 )
         except ReleaseMetadataLockTimeout:
             _LOGGER.warning("Deferred Stock cleanup because metadata lock timed out")
+            return {"examined": 0, "removed": 0}
+        except Exception:  # noqa: BLE001 -- opportunistic cleanup cannot block the primary request.
+            _LOGGER.exception("Deferred Stock cleanup after an unexpected failure")
             return {"examined": 0, "removed": 0}
 
     def _cleanup_state_path(self) -> Path:
