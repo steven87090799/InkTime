@@ -564,6 +564,38 @@ def test_stale_index_missing_or_malformed_release_is_recoverable(tmp_path, corru
     assert publisher.find_device_test_by_idempotency(key) == replacement
 
 
+@pytest.mark.parametrize("invalid_manifest", ["[]", "null", '"manifest"', "1"])
+def test_non_object_manifest_fails_closed_and_does_not_wedge_index(tmp_path, invalid_manifest):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    key = "non-object-manifest"
+    manifest = _publish_preencoded_test(publisher, tmp_path, idempotency_key=key)
+    index = publisher._device_test_index_path(key)
+    state_root = root / DEVICE_TEST_INDEX_MIGRATION_DIRECTORY
+    state_root.mkdir()
+    (state_root / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "migration_version": DEVICE_TEST_INDEX_MIGRATION_VERSION,
+                "complete": True,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    release = root / manifest["release_id"]
+    (release / "manifest.json").write_text(invalid_manifest, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Manifest 格式"):
+        publisher.validate(manifest["release_id"])
+    assert publisher.find_device_test_by_idempotency(key) is None
+    assert not index.exists()
+    shutil.rmtree(release)
+    replacement = _publish_preencoded_test(publisher, tmp_path, idempotency_key=key)
+    assert publisher.find_device_test_by_idempotency(key) == replacement
+
+
 @pytest.mark.parametrize("target_kind", ["wrong_key", "formal"])
 def test_index_target_contract_mismatch_is_quarantined(target_kind, tmp_path):
     root = tmp_path / "releases"

@@ -818,6 +818,8 @@ class AtomicReleasePublisher:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise ValueError("RENDER-010 Release Manifest 無法解析") from exc
+        if not isinstance(manifest, dict):
+            raise ValueError("RENDER-010 Release Manifest 格式不合法")
         if str(manifest.get("release_id")) != release_id:
             raise ValueError("RENDER-010 Release ID 與 Manifest 不一致")
         get_display_profile(str(manifest.get("render_profile", "")))
