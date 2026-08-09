@@ -421,6 +421,62 @@ def test_explicit_24_slot_capability_survives_pairing_confirm(client, app):
     assert len(json.loads(str(device["schedule_times_json"]))) == 24
 
 
+def test_capability_downgrade_is_pending_and_admin_visible_without_mutating_schedule(client, app):
+    schedule_times = [f"{hour:02d}:00" for hour in range(24)]
+    device_id, _token = app.extensions["inktime_device_repository"].create(
+        "24 Slot Repair",
+        auth_mode="automatic",
+        delivery_mode="inktime_offline_schedule",
+        schedule="00:00",
+        schedule_times=schedule_times,
+        offline_schedule_max_slots=24,
+    )
+    payload = _pairing_payload(
+        device_id,
+        nonce="nonce-for-capability-downgrade-0123456789",
+        capabilities={"automatic_pairing": True, "ab_credential_store": True},
+    )
+
+    response = client.post(PAIRING_PATH, json=payload)
+    assert response.status_code == 201
+    body = response.get_json()
+    assert body["status"] == "pending"
+    assert body["error_code"] == "PAIR-CAPABILITY-CONFLICT"
+    assert body["pairing_id"]
+    assert len(body["pairing_code"]) == 6
+
+    with app.extensions["inktime_database"].session() as connection:
+        device = connection.execute(
+            "SELECT offline_schedule_max_slots,schedule_times_json FROM devices WHERE id=?",
+            (device_id,),
+        ).fetchone()
+        request = connection.execute(
+            "SELECT status,config_json FROM device_pairing_requests WHERE id=?",
+            (body["pairing_id"],),
+        ).fetchone()
+        event = connection.execute(
+            "SELECT error_code FROM device_events WHERE device_id=? ORDER BY id DESC LIMIT 1",
+            (device_id,),
+        ).fetchone()
+    assert device["offline_schedule_max_slots"] == 24
+    assert len(json.loads(str(device["schedule_times_json"]))) == 24
+    assert request["status"] == "pending"
+    assert json.loads(str(request["config_json"]))["capability_conflict"]["error_code"] == "PAIR-CAPABILITY-CONFLICT"
+    assert event["error_code"] == "PAIR-CAPABILITY-CONFLICT"
+
+    create_admin(app)
+    login(client)
+    pending = client.get("/api/v1/device-pairing/pending")
+    assert pending.status_code == 200
+    pairing = next(item for item in pending.get_json()["pairings"] if item["pairing_id"] == body["pairing_id"])
+    assert pairing["capability_conflict"]["error_code"] == "PAIR-CAPABILITY-CONFLICT"
+    assert "PAIR-CAPABILITY-CONFLICT" in client.get("/devices").get_data(as_text=True)
+
+    replay = client.post(PAIRING_PATH, json=payload)
+    assert replay.status_code == 200
+    assert replay.get_json()["error_code"] == "PAIR-CAPABILITY-CONFLICT"
+
+
 def test_pairing_proves_physical_possession_and_confirm_is_recoverable(client, app):
     payload = _pairing_payload()
     requested = client.post(PAIRING_PATH, json=payload)

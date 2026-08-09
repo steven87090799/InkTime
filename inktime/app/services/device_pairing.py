@@ -154,6 +154,40 @@ class DevicePairingService:
         )
 
     @staticmethod
+    def _capability_conflict(
+        stored_max_slots: Any,
+        advertised_max_slots: Any,
+        schedule_values: Any,
+    ) -> dict[str, Any] | None:
+        stored = resolve_offline_schedule_max_slots({"offline_schedule_max_slots": stored_max_slots})
+        advertised = resolve_offline_schedule_max_slots(
+            {"offline_schedule_max_slots": advertised_max_slots}
+        )
+        if stored <= advertised or not isinstance(schedule_values, list) or len(schedule_values) <= advertised:
+            return None
+        return {
+            "error_code": "PAIR-CAPABILITY-CONFLICT",
+            "stored_max_slots": stored,
+            "advertised_max_slots": advertised,
+            "schedule_count": len(schedule_values),
+            "message": (
+                f"裝置目前保留 {stored}-slot 排程，但本次配對只宣告 {advertised}-slot capability；"
+                "已保留設定並等待管理員處理"
+            ),
+        }
+
+    @staticmethod
+    def _stored_capability_conflict(config_json: Any) -> dict[str, Any] | None:
+        try:
+            config = json.loads(str(config_json or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        conflict = config.get("capability_conflict") if isinstance(config, dict) else None
+        if not isinstance(conflict, dict) or conflict.get("error_code") != "PAIR-CAPABILITY-CONFLICT":
+            return None
+        return dict(conflict)
+
+    @staticmethod
     def _schedule_values(
         raw: Any,
         fallback: str = "08:00",
@@ -290,24 +324,26 @@ class DevicePairingService:
         source_id: str,
         event: str,
         message: str,
+        error_code: str | None = None,
+        level: str = "info",
     ) -> None:
         """Write state-only audit data; no code, nonce, or credential material."""
         now = self._iso(self._now())
         connection.execute(
             """
             INSERT OR IGNORE INTO activity_events(
-                source,source_id,severity,component,event,message,device_id,details_json,created_at
-            ) VALUES ('device_pairing',?,'INFO','device_pairing',?,?,?,'{}',?)
+                source,source_id,severity,component,event,message,device_id,error_code,details_json,created_at
+            ) VALUES ('device_pairing',?,'INFO','device_pairing',?,?,?,?, '{}',?)
             """,
-            (source_id[:128], event[:128], message[:500], device_id, now),
+            (source_id[:128], event[:128], message[:500], device_id, error_code[:64] if error_code else None, now),
         )
         if device_id is not None:
             connection.execute(
                 """
-                INSERT INTO device_events(device_id,level,event,message,details_json,created_at)
-                VALUES (?, 'info', ?, ?, '{}', ?)
+                INSERT INTO device_events(device_id,level,event,error_code,message,details_json,created_at)
+                VALUES (?, ?, ?, ?, ?, '{}', ?)
                 """,
-                (device_id, event[:128], message[:500], now),
+                (device_id, level[:16], event[:128], error_code[:64] if error_code else None, message[:500], now),
             )
 
     def _rate_limit(self, connection, *, ip_address: str, device_id: str, now: datetime) -> None:
@@ -393,7 +429,8 @@ class DevicePairingService:
             if existing_request is not None:
                 if hmac.compare_digest(str(existing_request["pairing_nonce_hash"]), nonce_hash):
                     remaining = max(1, int((datetime.fromisoformat(str(existing_request["expires_at"])) - now).total_seconds()))
-                    return 200, {
+                    conflict = self._stored_capability_conflict(existing_request["config_json"])
+                    result = {
                         "status": str(existing_request["status"]),
                         "pairing_id": str(existing_request["id"]),
                         "device_id": device_id,
@@ -403,6 +440,9 @@ class DevicePairingService:
                         "poll_after_seconds": PAIRING_POLL_SECONDS,
                         "request_reused": True,
                     }
+                    if conflict is not None:
+                        result.update(conflict)
+                    return 200, result
                 raise DevicePairingError("此裝置已有待處理配對請求", status_code=409, error_code="PAIR-003")
             if int(connection.execute(
                 "SELECT COUNT(*) FROM device_pairing_requests WHERE status IN ('pending','approved','credential_issued')"
@@ -420,6 +460,7 @@ class DevicePairingService:
                 if state == "pairing_pending" and device["auth_revoked_at"] and not self._is_future(device["repair_allowed_until"], now):
                     raise DevicePairingError("目前無法建立此配對請求", status_code=409, error_code="PAIR-003")
             config_source: dict[str, Any] = {}
+            schedule_values: list[Any] | None = None
             if device is not None:
                 config_source = {
                     "name": device["name"],
@@ -445,7 +486,6 @@ class DevicePairingService:
                     "layout_mode": device["layout_mode"],
                     "fit_mode": device["fit_mode"],
                 }
-                schedule_values = None
                 for field in ("schedule_times_json", "offline_schedule_json"):
                     try:
                         candidate = json.loads(str(device[field] or "[]"))
@@ -463,6 +503,67 @@ class DevicePairingService:
                         "panel_profile": panel_profile or config_source.get("panel_profile", "safe_4c"),
                     }
                 )
+            stored_maximum_slots = (
+                resolve_offline_schedule_max_slots(
+                    {"offline_schedule_max_slots": device["offline_schedule_max_slots"]}
+                )
+                if device is not None
+                else maximum_slots
+            )
+            conflict = self._capability_conflict(
+                stored_maximum_slots,
+                maximum_slots,
+                schedule_values,
+            )
+            if conflict is not None:
+                conflict_config = dict(config_source)
+                if schedule_values is not None:
+                    conflict_config["schedule_times"] = list(schedule_values)
+                conflict_config["offline_schedule_max_slots"] = stored_maximum_slots
+                conflict_config["capability_conflict"] = conflict
+                pairing_id = secrets.token_urlsafe(24)
+                pairing_code = self._pairing_display_code(pairing_nonce)
+                connection.execute(
+                    """
+                    INSERT INTO device_pairing_requests(
+                        id,device_id,pairing_nonce_hash,pairing_code_hash,firmware_identity,
+                        firmware_version,panel_profile,capabilities_json,config_json,expires_at,requested_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        pairing_id,
+                        device_id,
+                        nonce_hash,
+                        self._code_hash(pairing_code),
+                        firmware_identity,
+                        firmware_version or None,
+                        panel_profile or None,
+                        capabilities_json,
+                        json.dumps(conflict_config, ensure_ascii=False, separators=(",", ":")),
+                        self._iso(expires),
+                        self._iso(now),
+                    ),
+                )
+                self._activity(
+                    connection,
+                    device_id=device_id,
+                    source_id=f"{pairing_id}:capability-conflict",
+                    event="pairing_capability_conflict",
+                    error_code=str(conflict["error_code"]),
+                    message=str(conflict["message"]),
+                    level="warning",
+                )
+                return 201, {
+                    "status": "pending",
+                    "error_code": conflict["error_code"],
+                    "message": conflict["message"],
+                    "pairing_id": pairing_id,
+                    "device_id": device_id,
+                    "pairing_code": pairing_code,
+                    "expires_in_seconds": int(PAIRING_TTL.total_seconds()),
+                    "server_epoch": int(now.timestamp()),
+                    "poll_after_seconds": PAIRING_POLL_SECONDS,
+                }
             # Re-pairing is a credential lifecycle operation.  Firmware
             # identity/panel claims are evidence for the request, not an
             # authorization to overwrite administrator-owned device settings.
@@ -558,11 +659,16 @@ class DevicePairingService:
                     "expires_at": str(row["expires_at"]),
                     "attempts": int(row["attempts"] or 0),
                     "claim_attempts": int(row["claim_attempts"] or 0),
-                    "status": str(row["status"]),
-                    "pairing_state": str(row["pairing_state"] or "pending_enrollment"),
-                    "capabilities": capabilities,
-                    "config": config,
-                }
+                "status": str(row["status"]),
+                "pairing_state": str(row["pairing_state"] or "pending_enrollment"),
+                "capabilities": capabilities,
+                "config": config,
+                "capability_conflict": (
+                    config.get("capability_conflict")
+                    if isinstance(config.get("capability_conflict"), dict)
+                    else None
+                ),
+            }
             )
         return result
 
@@ -621,6 +727,17 @@ class DevicePairingService:
                         device["panel_profile"] or merged_config.get("panel_profile") or "safe_4c"
                     )
                 maximum_slots = self._capability_max_slots(row["capabilities_json"])
+                conflict = self._capability_conflict(
+                    device["offline_schedule_max_slots"] if device is not None else maximum_slots,
+                    maximum_slots,
+                    merged_config.get("schedule_times"),
+                )
+                if conflict is not None:
+                    raise DevicePairingError(
+                        str(conflict["message"]),
+                        status_code=409,
+                        error_code=str(conflict["error_code"]),
+                    )
                 config = self._normalize_config(
                     merged_config,
                     fallback_name=f"待配對裝置 {str(row['device_id'])[-6:]}",

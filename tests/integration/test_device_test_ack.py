@@ -74,3 +74,31 @@ def test_one_time_device_release_remains_retryable_until_verified_display_ack(cl
         client.get("/api/device/v1/releases/latest", headers=headers).get_json()["release_id"]
         == formal["release_id"]
     )
+
+
+def test_device_status_ignores_delayed_older_reported_at(client, app):
+    repository = app.extensions["inktime_device_repository"]
+    device_id, token = repository.create("狀態單調性測試", panel_profile="safe_4c")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    newer = client.post(
+        "/api/device/v1/status",
+        headers=headers,
+        json={"status_reported_at": "2026-08-10T10:00:00Z", "error_message": "newer"},
+    )
+    older = client.post(
+        "/api/device/v1/status",
+        headers=headers,
+        json={"status_reported_at": "2026-08-10T09:00:00Z", "error_message": "older"},
+    )
+
+    assert newer.status_code == 200
+    assert newer.get_json() == {"status": "ok", "reason": None}
+    assert older.status_code == 200
+    assert older.get_json() == {"status": "ignored", "reason": "stale_status"}
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute(
+            "SELECT last_status_at,last_error_message FROM devices WHERE id=?", (device_id,)
+        ).fetchone()
+    assert row["last_status_at"] == "2026-08-10T10:00:00+00:00"
+    assert row["last_error_message"] == "newer"

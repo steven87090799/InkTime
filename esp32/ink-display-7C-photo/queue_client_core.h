@@ -178,7 +178,7 @@ inline AckDecision ackDecision(int statusCode, uint8_t attempts) {
   if (statusCode >= 200 && statusCode < 300) return AckDecision::Accepted;
   if (statusCode == 409) return AckDecision::StaleManifest;
   if (statusCode == 401 || statusCode == 403) return AckDecision::AuthorizationFailed;
-  if ((statusCode <= 0 || statusCode >= 500) && attempts < kQueueRetryLimit) {
+  if ((statusCode <= 0 || statusCode == 429 || statusCode >= 500) && attempts < kQueueRetryLimit) {
     return AckDecision::Retry;
   }
   return AckDecision::Stop;

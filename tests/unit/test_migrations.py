@@ -31,7 +31,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 43
+    assert CURRENT_SCHEMA_VERSION == 44
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -423,6 +423,62 @@ def test_migration_39_quarantines_legacy_ambiguous_offline_slot_rows(monkeypatch
         ),
     ]
     assert migrate(database) == []
+
+
+def test_migration_44_backfills_missing_device_008_warning_idempotently(monkeypatch, tmp_path):
+    database = Database(tmp_path / "migration-44-missing-device-warning.db")
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:39])
+    assert migrate(database) == list(range(1, 40))
+    with database.transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO devices(
+                id,name,token_hash,enabled,timezone,schedule,delivery_mode,
+                offline_prefetch_allowed,schedule_times_json,offline_schedule_json,
+                offline_schedule_max_slots,created_at,updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "migration-44-ambiguous",
+                "Migration 44 ambiguous",
+                "token-migration-44",
+                1,
+                "Asia/Taipei",
+                "08:00",
+                "inktime_offline_schedule",
+                1,
+                json.dumps([f"{hour:02d}:00" for hour in range(8, 21)]),
+                "[]",
+                12,
+                "2026-08-08T00:00:00+00:00",
+                "2026-08-08T00:00:00+00:00",
+            ),
+        )
+        connection.execute(
+            "UPDATE devices SET offline_schedule_capability_state='legacy_ambiguous' WHERE id=?",
+            ("migration-44-ambiguous",),
+        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM device_events WHERE device_id=? AND error_code='DEVICE-008'",
+            ("migration-44-ambiguous",),
+        ).fetchone()[0] == 0
+
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
+    assert migrate(database) == list(range(40, CURRENT_SCHEMA_VERSION + 1))
+    with database.session() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM device_events WHERE device_id=? AND error_code='DEVICE-008'",
+            ("migration-44-ambiguous",),
+        ).fetchone()[0] == 1
+
+    with database.transaction() as connection:
+        connection.execute("DELETE FROM schema_migrations WHERE version=44")
+    assert migrate(database) == [44]
+    with database.session() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM device_events WHERE device_id=? AND error_code='DEVICE-008'",
+            ("migration-44-ambiguous",),
+        ).fetchone()[0] == 1
 
 
 def test_batch_unknown_states_and_reservations_are_persistent(tmp_path):

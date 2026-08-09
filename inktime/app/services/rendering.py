@@ -66,6 +66,9 @@ FIT_MODES = {
     "cover": "填滿並裁切",
 }
 PORTRAIT_ONLY_LAYOUTS = {"calendar", "weather_sensor"}
+# Formal rendering accepts the same default source-pixel budget as the scanner
+# and reduces accepted originals before EXIF/RGB normalization.
+MAX_RENDER_INPUT_PIXELS = 60_000_000
 
 
 def _fit_caption_line(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, width: int) -> str:
@@ -251,7 +254,7 @@ class RenderService:
         secondary_id = secondary_photo_id
         if layout_key == "adaptive_memory" and secondary_id is None:
             source_path = safe_join(Path(primary["root_path"]), str(primary["relative_path"]))
-            source, _info = self._load_oriented_photo(primary, source_path)
+            source, _info = self._load_oriented_photo(primary, source_path, target_size=(512, 512))
             with source:
                 source_orientation = photo_orientation(source.size)
             if source_orientation in {"square", effective_orientation}:
@@ -1032,10 +1035,32 @@ class RenderService:
             else True,
         )
 
-    def _load_oriented_photo(self, photo, path: Path) -> tuple[Image.Image, EffectiveOrientation]:
-        """Apply EXIF exactly once, then the resolver's extra clockwise rotation."""
+    def _load_oriented_photo(
+        self,
+        photo,
+        path: Path,
+        *,
+        target_size: tuple[int, int] | None = None,
+    ) -> tuple[Image.Image, EffectiveOrientation]:
+        """Bound source decoding before EXIF normalization and final fitting."""
+        decode_size = None
+        if target_size is not None:
+            decode_size = (
+                max(1, int(target_size[0])) * 2,
+                max(1, int(target_size[1])) * 2,
+            )
         with Image.open(path) as opened:
+            if opened.width * opened.height > MAX_RENDER_INPUT_PIXELS:
+                raise OSError("RENDER-006 原始照片像素超過正式渲染安全上限")
+            if opened.format == "JPEG":
+                opened.draft("RGB", decode_size or (1600, 1600))
+            if decode_size is not None and (
+                opened.width > decode_size[0] or opened.height > decode_size[1]
+            ):
+                opened.thumbnail(decode_size, Image.Resampling.BOX)
             image = ImageOps.exif_transpose(opened).convert("RGB")
+        if decode_size is not None:
+            image.thumbnail(decode_size, Image.Resampling.LANCZOS)
         effective = self._orientation_for(photo)
         if effective.rotation_degrees:
             image = image.rotate(-effective.rotation_degrees, expand=True)
@@ -1159,7 +1184,9 @@ class RenderService:
         def finish(canvas: Image.Image) -> Image.Image:
             return self._physical_frame(canvas, effective_orientation)
 
-        source, orientation_info = self._load_oriented_photo(photo, path)
+        source, orientation_info = self._load_oriented_photo(
+            photo, path, target_size=(frame_width, frame_height)
+        )
         if orientation_metadata is not None:
             orientation_metadata.append({"photo_id": photo_id, "orientation": orientation_info.as_dict()})
         with source:
@@ -1218,7 +1245,9 @@ class RenderService:
                             (primary_rect.x, primary_rect.y),
                         )
                         second_path = safe_join(Path(second_row["root_path"]), second_row["relative_path"])
-                        second_source, second_orientation = self._load_oriented_photo(second_row, second_path)
+                        second_source, second_orientation = self._load_oriented_photo(
+                            second_row, second_path, target_size=slot_size
+                        )
                         if orientation_metadata is not None:
                             orientation_metadata.append(
                                 {
@@ -1317,7 +1346,9 @@ class RenderService:
                 if secondary_photo_id:
                     second_photo = self.ensure_photo_features(secondary_photo_id)
                     second_path = safe_join(Path(second_photo["root_path"]), second_photo["relative_path"])
-                    second_source, second_orientation = self._load_oriented_photo(second_photo, second_path)
+                    second_source, second_orientation = self._load_oriented_photo(
+                        second_photo, second_path, target_size=second_size
+                    )
                     if orientation_metadata is not None:
                         orientation_metadata.append(
                             {"photo_id": secondary_photo_id, "orientation": second_orientation.as_dict()}
@@ -1351,7 +1382,9 @@ class RenderService:
                     raise ValueError("RENDER-005 雙照片各自一句話需要第二張照片")
                 second_photo = self.ensure_photo_features(secondary_photo_id)
                 second_path = safe_join(Path(second_photo["root_path"]), second_photo["relative_path"])
-                second_source, second_orientation = self._load_oriented_photo(second_photo, second_path)
+                second_source, second_orientation = self._load_oriented_photo(
+                    second_photo, second_path, target_size=(frame_width, frame_height)
+                )
                 if orientation_metadata is not None:
                     orientation_metadata.append(
                         {"photo_id": secondary_photo_id, "orientation": second_orientation.as_dict()}

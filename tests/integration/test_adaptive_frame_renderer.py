@@ -4,6 +4,8 @@ from pathlib import Path
 
 from PIL import Image
 
+from inktime.app.services import rendering as rendering_service
+
 
 def _analyzed_photo(app, root: Path, photo_id: str, size: tuple[int, int], captured_at: str):
     Image.new("RGB", size, "#4271a4").save(root / f"{photo_id}.jpg")
@@ -135,6 +137,94 @@ def test_all_formal_frame_layouts_render_with_the_resolved_photos(app, tmp_path)
         fit_mode="cover",
     )
     assert paired.size == (480, 800)
+
+
+def test_formal_render_bounds_decoded_source_to_render_target(app, tmp_path, monkeypatch):
+    root = tmp_path / "photos"
+    root.mkdir()
+    _analyzed_photo(app, root, "large", (2400, 1600), "2024-07-01T10:00:00+00:00")
+    service = app.extensions["inktime_render_service"]
+    observed: list[tuple[int, int]] = []
+    original_loader = service._load_oriented_photo
+
+    def capture_loader(photo, path, *, target_size=None):
+        source, orientation = original_loader(photo, path, target_size=target_size)
+        observed.append(source.size)
+        return source, orientation
+
+    monkeypatch.setattr(service, "_load_oriented_photo", capture_loader)
+    image = service.render_photo("large", layout="full", fit_mode="cover")
+
+    assert image.size == (480, 800)
+    assert observed
+    assert observed[0][0] <= 960
+    assert observed[0][1] <= 1600
+
+
+def test_formal_render_accepts_48mp_jpeg_and_bounds_before_exif(app, tmp_path, monkeypatch):
+    service = app.extensions["inktime_render_service"]
+    before_exif: list[tuple[int, int]] = []
+
+    class VirtualLargeJpeg:
+        format = "JPEG"
+
+        def __init__(self):
+            self._image = Image.new("RGB", (120, 90), "#4271a4")
+            self._reported_size = (8_000, 6_000)  # 48MP virtual JPEG fixture.
+            self.draft_calls: list[tuple[str, tuple[int, int]]] = []
+
+        @property
+        def size(self):
+            return self._reported_size
+
+        @property
+        def width(self):
+            return self._reported_size[0]
+
+        @property
+        def height(self):
+            return self._reported_size[1]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            self._image.close()
+
+        def draft(self, mode, size):
+            self.draft_calls.append((mode, size))
+            self._image = self._image.resize((1_200, 900), Image.Resampling.BOX)
+            self._reported_size = self._image.size
+
+        def thumbnail(self, size, resample):
+            self._image.thumbnail(size, resample)
+            self._reported_size = self._image.size
+
+        def __getattr__(self, name):
+            return getattr(self._image, name)
+
+    virtual = VirtualLargeJpeg()
+    original_exif_transpose = rendering_service.ImageOps.exif_transpose
+
+    def open_virtual(_path):
+        return virtual
+
+    def observe_before_exif(image, *args, **kwargs):
+        before_exif.append(image.size)
+        return original_exif_transpose(image, *args, **kwargs)
+
+    monkeypatch.setattr(rendering_service.Image, "open", open_virtual)
+    monkeypatch.setattr(rendering_service.ImageOps, "exif_transpose", observe_before_exif)
+    source, _orientation = service._load_oriented_photo(
+        {}, tmp_path / "virtual-48mp.jpg", target_size=(480, 800)
+    )
+    try:
+        assert virtual.width * virtual.height <= 60_000_000
+        assert virtual.draft_calls == [("RGB", (960, 1_600))]
+        assert before_exif == [(960, 720)]
+        assert source.size == (960, 720)
+    finally:
+        source.close()
 
 
 def test_device_releases_keep_profile_manifest_and_independent_layouts(app, tmp_path):

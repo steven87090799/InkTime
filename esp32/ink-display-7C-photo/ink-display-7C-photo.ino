@@ -3000,6 +3000,16 @@ static bool postQueueAckBatch(
       lastDeviceErrorMessage = "Queue ACK Token／authorization 被拒絕";
       return false;
     }
+    if (status == 429) {
+      // Rate limiting is transient.  Keep the complete batch durable even
+      // after the bounded retry budget is exhausted; it must never enter the
+      // permanent-4xx quarantine path below.
+      if (decision == inktime::AckDecision::Retry) {
+        delay(250U * (attempt + 1U));
+        continue;
+      }
+      break;
+    }
     if (status >= 400 && status < 500 && status != HTTP_CODE_CONFLICT) {
       queueAckPermanentReject = true;
       for (uint8_t index = 0U; index < count; ++index) {
@@ -5110,6 +5120,18 @@ bool downloadDailyPhotoBin(Config &cfg) {
   return latest;
 }
 
+static void appendStatusReportedAt(JsonDocument &payload, time_t epoch) {
+  // time(nullptr) is the device RTC/NTP authority used by the offline
+  // schedule contract.  Do not emit an uninitialized epoch: the server must
+  // keep its normal receive-time fallback until the clock is trustworthy.
+  if (epoch < static_cast<time_t>(1600000000)) return;
+  struct tm utcTime = {};
+  if (gmtime_r(&epoch, &utcTime) == nullptr) return;
+  char reportedAt[25] = {};
+  if (strftime(reportedAt, sizeof(reportedAt), "%Y-%m-%dT%H:%M:%SZ", &utcTime) == 0) return;
+  payload["status_reported_at"] = reportedAt;
+}
+
 void reportDeviceStatus(Config &cfg, bool displayUpdated) {
   if (WiFi.status() != WL_CONNECTED || cfg.backend_hostport.length() == 0 || !hasDeviceCredential(cfg)) return;
   String base;
@@ -5144,6 +5166,7 @@ void reportDeviceStatus(Config &cfg, bool displayUpdated) {
   payload["free_psram_bytes"] = ESP.getFreePsram();
   payload["wake_reason"] = String((int)esp_sleep_get_wakeup_cause());
   payload["wake_reason_detail"] = wakeReasonDetail();
+  appendStatusReportedAt(payload, telemetryNow);
   payload["wifi_connect_ms"] = runtimeTelemetry.wifi_connect_ms;
   payload["wifi_fast_path_attempted"] = runtimeTelemetry.wifi_fast_path_attempted;
   payload["wifi_fast_path_success"] = runtimeTelemetry.wifi_fast_path_success;

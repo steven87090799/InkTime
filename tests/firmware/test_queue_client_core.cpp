@@ -43,6 +43,8 @@ int main() {
   assert(ackDecision(401, 0) == AckDecision::AuthorizationFailed);
   assert(ackDecision(503, 0) == AckDecision::Retry);
   assert(ackDecision(503, kQueueRetryLimit) == AckDecision::Stop);
+  assert(ackDecision(429, 0) == AckDecision::Retry);
+  assert(ackDecision(429, kQueueRetryLimit) == AckDecision::Stop);
 
   char first[256] = {};
   char restarted[256] = {};

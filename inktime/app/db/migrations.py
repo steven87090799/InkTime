@@ -1983,6 +1983,31 @@ MIGRATIONS = (
         "修復診斷快取歷史來源",
         (),
     ),
+    Migration(
+        44,
+        "補回既有 legacy ambiguous 裝置的 DEVICE-008 可見警告",
+        (
+            """
+            INSERT INTO device_events(
+                device_id,level,event,error_code,message,details_json,created_at
+            )
+            SELECT d.id,'warning','offline_schedule_capability_quarantined','DEVICE-008',
+                   '舊離線排程能力不明；已隔離，請重新配對或 Repair 確認 24-slot capability',
+                   json_object(
+                       'offline_schedule_capability_state',d.offline_schedule_capability_state,
+                       'offline_schedule_max_slots',d.offline_schedule_max_slots
+                   ),datetime('now')
+            FROM devices AS d
+            WHERE d.offline_schedule_capability_state='legacy_ambiguous'
+              AND NOT EXISTS (
+                  SELECT 1 FROM device_events AS e
+                  WHERE e.device_id=d.id
+                    AND e.event='offline_schedule_capability_quarantined'
+                    AND e.error_code='DEVICE-008'
+              )
+            """,
+        ),
+    ),
 )
 
 

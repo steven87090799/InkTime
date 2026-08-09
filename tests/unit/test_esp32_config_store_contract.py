@@ -133,6 +133,16 @@ def test_firmware_current_version_is_bumped_for_recovery_semantics():
     assert '#define INKTIME_FIRMWARE_VERSION "2.8.0"' in firmware
 
 
+def test_firmware_status_reports_trusted_device_time_for_replay_ordering():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    assert "appendStatusReportedAt" in firmware
+    assert "time(nullptr)" in firmware
+    assert "gmtime_r" in firmware
+    assert 'strftime(reportedAt, sizeof(reportedAt), "%Y-%m-%dT%H:%M:%SZ"' in firmware
+    assert 'payload["status_reported_at"] = reportedAt' in firmware
+    assert "epoch < static_cast<time_t>(1600000000)" in firmware
+
+
 def test_pairing_lifecycle_persists_resume_state_and_uses_confirm_header():
     firmware = FIRMWARE.read_text(encoding="utf-8")
     for marker in (
