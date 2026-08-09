@@ -5,7 +5,7 @@ on:
     branches:
       - main
       - fix/final-production-openrouter-and-runtime-hardening
-    # PR metadata edits (including base retargeting) need a fresh merge-ref validation.
+    # Base retargets need validation; title/body-only edits use the metadata lane below.
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled, edited]
   push:
     branches:
@@ -19,7 +19,7 @@ on:
         type: boolean
 
 concurrency:
-  group: inktime-ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  group: inktime-ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base == null && 'metadata-only' || 'validation' }}
   cancel-in-progress: true
 
 permissions:
@@ -31,6 +31,7 @@ jobs:
     name: Classify changed paths
     runs-on: ubuntu-latest
     outputs:
+      full_validation: ${{ steps.event.outputs.full_validation }}
       changed: ${{ steps.route.outputs.changed }}
       python: ${{ steps.route.outputs.python }}
       web_ui: ${{ steps.route.outputs.web_ui }}
@@ -46,10 +47,17 @@ jobs:
       ci_config: ${{ steps.route.outputs.ci_config }}
       full_suite: ${{ steps.route.outputs.full_suite }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+      - id: event
+        name: Classify workflow event
+        env:
+          FULL_VALIDATION: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base != null }}
+        run: echo "full_validation=${FULL_VALIDATION}" >> "${GITHUB_OUTPUT}"
+      - if: ${{ steps.event.outputs.full_validation == 'true' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with: {fetch-depth: 0}
       - id: route
         name: Emit source-owned routing flags
+        if: ${{ steps.event.outputs.full_validation == 'true' }}
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -67,7 +75,7 @@ jobs:
 
   python-quality:
     name: Python 3.12 fast quality
-    if: ${{ needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.runtime == 'true' || needs.changes.outputs.persistence == 'true' || needs.changes.outputs.docker == 'true' || needs.changes.outputs.tls_security == 'true' || needs.changes.outputs.provider_ai == 'true' || needs.changes.outputs.benchmark == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && (needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.python == 'true' || needs.changes.outputs.runtime == 'true' || needs.changes.outputs.persistence == 'true' || needs.changes.outputs.docker == 'true' || needs.changes.outputs.tls_security == 'true' || needs.changes.outputs.provider_ai == 'true' || needs.changes.outputs.benchmark == 'true') }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -83,7 +91,7 @@ jobs:
 
   python-compatibility:
     name: Python 3.10 compatibility
-    if: ${{ needs.changes.outputs.full_suite == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.full_suite == 'true' }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -96,7 +104,7 @@ jobs:
 
   dependency-audit:
     name: Dependency policy and audit
-    if: ${{ needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.dependencies == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && (needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.dependencies == 'true') }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -109,7 +117,7 @@ jobs:
 
   migration-contract:
     name: Migration contract
-    if: ${{ needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.persistence == 'true' || needs.changes.outputs.dependencies == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && (needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.persistence == 'true' || needs.changes.outputs.dependencies == 'true') }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -120,6 +128,8 @@ jobs:
       - run: pytest tests/unit/test_migrations.py
 
   secret-scan:
+    if: ${{ needs.changes.outputs.full_validation == 'true' }}
+    needs: changes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
@@ -129,7 +139,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   compose-lan-production-persistence:
-    if: ${{ needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.persistence == 'true' || needs.changes.outputs.docker == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && (needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.persistence == 'true' || needs.changes.outputs.docker == 'true') }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -236,7 +246,7 @@ jobs:
           sudo rm -rf .ci-data .ci-photos .ci-lan.env .ci-lan-state.json
 
   compose-production-tls-smoke:
-    if: ${{ needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.tls_security == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && (needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.tls_security == 'true') }}
     needs: changes
     runs-on: ubuntu-latest
     env:
@@ -304,7 +314,7 @@ jobs:
           sudo rm -rf .ci-tls .ci-data .ci-photos
 
   bounded-runtime-soak:
-    if: ${{ needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.runtime == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && (needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.runtime == 'true') }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -321,7 +331,7 @@ jobs:
           if-no-files-found: error
 
   playwright:
-    if: ${{ needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.web_ui == 'true' || needs.changes.outputs.tls_security == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && (needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.web_ui == 'true' || needs.changes.outputs.tls_security == 'true') }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -335,7 +345,7 @@ jobs:
       - run: INKTIME_E2E_URL=http://127.0.0.1:8765 pytest tests/e2e
 
   firmware-host-contract:
-    if: ${{ needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.firmware == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && (needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.firmware == 'true') }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
@@ -354,7 +364,7 @@ jobs:
           /tmp/inktime-pairing-recovery-core
 
   esp32-compile:
-    if: ${{ needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.firmware == 'true' }}
+    if: ${{ needs.changes.outputs.full_validation == 'true' && (needs.changes.outputs.full_suite == 'true' || needs.changes.outputs.firmware == 'true') }}
     needs: changes
     runs-on: ubuntu-latest
     steps:
