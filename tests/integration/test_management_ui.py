@@ -765,7 +765,14 @@ def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(client, ap
     assert page.status_code == 200
     assert "智慧裁切與版型預覽" in body
     assert "相框方向與空間利用" in body
-    assert "完整顯示（建議）" in body
+    assert "完整顯示" in body
+    assert "完整顯示（建議）" not in body
+    assert "背景工作未提供 Preview 結果" in body
+    assert "URL.revokeObjectURL" in body
+    assert "new AbortController" in body
+    assert "compositionPreviewController?.abort()" in body
+    assert "effectiveFit=adaptive?'contain':frameFitMode.value" in body
+    assert "fit_mode:adaptive?'contain':frameFitMode.value" in body
     assert "雙照片拼版" in body
     assert "月曆相框" in body
     assert "天氣＋室內溫溼度" in body

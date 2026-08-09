@@ -304,6 +304,19 @@ def test_pairing_schedule_values_reject_invalid_values(app, schedule_times):
     assert error.value.error_code == "PAIR-004"
 
 
+def test_pairing_accepts_stretch_fill_fit_contract(app):
+    service = app.extensions["inktime_device_pairing_service"]
+    normalized = service._normalize_config(
+        {
+            "name": "Stretch Fill Device",
+            "panel_profile": "safe_4c",
+            "fit_mode": "stretch_fill",
+        },
+        fallback_name="Stretch Fill Device",
+    )
+    assert normalized["fit_mode"] == "stretch_fill"
+
+
 def _approve(
     client,
     pairing_id: str,

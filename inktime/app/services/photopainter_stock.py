@@ -159,6 +159,7 @@ class StockCompatibilityService:
         rotate180: bool = False,
     ) -> dict[str, Any]:
         """Upload one exact Stock test release without Custom queue ownership."""
+        cleanup = self.device_releases.cleanup_expired_stock_test_releases()
         payload, metadata = self.payload_for_stock_test_release(
             device_id=device_id,
             profile_key=profile_key,
@@ -167,10 +168,21 @@ class StockCompatibilityService:
             rotate180=rotate180,
         )
         response = self.transport.upload(host, payload)
+        accepted = 200 <= response.status_code < 300
+        consumed = False
+        if accepted:
+            consumed = self.device_releases.consume_stock_test_release(
+                device_id=device_id,
+                profile_key=profile_key,
+                release_id=release_id,
+            )
         return {
             **metadata,
-            "upload_accepted": 200 <= response.status_code < 300,
+            "upload_accepted": accepted,
             "display_completed": False,
             "http_status": response.status_code,
             "transport": "stock_direct",
+            "ephemeral_release_consumed": consumed,
+            "expired_cleanup_examined": cleanup["examined"],
+            "expired_cleanup_removed": cleanup["removed"],
         }

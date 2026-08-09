@@ -91,6 +91,10 @@ class LayoutGeometry:
         return self.secondary_caption
 
     @property
+    def info_rect(self) -> Rect | None:
+        return self.info[0] if self.info else None
+
+    @property
     def photo_rects(self) -> tuple[Rect, ...]:
         return tuple(rect for rect in (self.primary_photo, self.secondary_photo) if rect is not None)
 
@@ -124,8 +128,8 @@ class LayoutGeometry:
 def _normalized_canvas(orientation: str, width: int, height: int) -> tuple[int, int]:
     if orientation not in {"portrait", "landscape"}:
         raise ValueError("orientation must be portrait or landscape")
-    if width < 1 or height < 1:
-        raise ValueError("canvas dimensions must be positive")
+    if sorted((width, height)) != [480, 800]:
+        raise ValueError("canvas dimensions must be 480x800 or 800x480")
     if orientation == "portrait" and width > height:
         return height, width
     if orientation == "landscape" and height > width:
@@ -176,10 +180,11 @@ def resolve_layout_geometry(
 ) -> LayoutGeometry:
     """Resolve all layout slots in one normalized logical coordinate system.
 
-    The supplied dimensions may be physical 480x800 in either orientation;
-    they are swapped when necessary so landscape is wide and portrait is
-    tall.  The returned rectangles are therefore directly usable by the
-    formal renderer and can be scaled proportionally by a browser preview.
+    The supplied dimensions must be the canonical physical 480x800 canvas in
+    either order.  They are swapped when necessary so landscape is wide and
+    portrait is tall.  Rejecting other sizes keeps the historical fixed-pixel
+    calendar and weather contracts in bounds; browser previews scale the
+    canonical rectangles proportionally.
     """
 
     if layout not in SUPPORTED_LAYOUTS:

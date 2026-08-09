@@ -249,7 +249,7 @@ class DevicePairingService:
         }:
             raise DevicePairingError("layout_mode 不合法", error_code="PAIR-004")
         fit_mode = cls._validate_text(source.get("fit_mode"), "fit_mode", 32)
-        if fit_mode and fit_mode not in {"contain", "cover"}:
+        if fit_mode and fit_mode not in {"stretch_fill", "contain", "cover"}:
             raise DevicePairingError("fit_mode 不合法", error_code="PAIR-004")
         if schedule not in schedule_times:
             schedule = schedule_times[0]

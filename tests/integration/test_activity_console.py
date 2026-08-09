@@ -46,7 +46,13 @@ def test_activity_is_bounded_unifies_sources_and_redacts(client, app):
     assert new_only.status_code == 200
     assert all(event["source"] == "activity" for event in new_only.json["events"])
     page = client.get("/activity?job_id=activity-job")
-    assert page.status_code == 200 and 'name="job_id" value="activity-job"' in page.get_data(as_text=True)
+    body = page.get_data(as_text=True)
+    assert page.status_code == 200 and 'name="job_id" value="activity-job"' in body
+    assert "MAX_ACTIVITY_EVENTS=200" in body
+    assert "loadInFlight" in body
+    assert "visibilitychange" in body
+    assert "setInterval" not in body
+    assert "lastId=Math.max(lastId" in body
 
 
 def test_activity_access_is_read_only_for_viewer(client, app):

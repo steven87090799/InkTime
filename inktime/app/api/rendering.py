@@ -236,6 +236,7 @@ def _queue_upload_workload(operation: str, settings: dict) -> tuple[dict, int]:
     if suffix not in SIMULATOR_IMAGE_SUFFIXES:
         abort(400, description="IMG-002 照片格式不支援")
     workload = current_app.extensions["inktime_render_workload_service"]
+    workload.cleanup()
     try:
         token, photo_sha = workload.save_upload(
             uploaded.stream,
@@ -266,6 +267,7 @@ def _queue_upload_workload(operation: str, settings: dict) -> tuple[dict, int]:
         "profile": settings.get("profile"),
         "panel_profile": settings.get("profile"),
         "palette": configuration.get("palette"),
+        "configuration": configuration,
         "dither": dict(configuration.get("overrides", {})).get("dither"),
         "strength": dict(configuration.get("overrides", {})).get("error_strength", 1.0),
         "preset": configuration.get("requested_preset"),
@@ -521,6 +523,10 @@ def publish_test_release():
         abort(400, description="DEVICE-006 測試傳送邊界不合法")
     if transport == "stock_direct" and str(device.get("delivery_mode") or "") != "stock_compat":
         abort(409, description="DEVICE-008 Stock 測試只能選擇 Stock 相容裝置")
+    if transport == "stock_direct":
+        current_app.extensions[
+            "inktime_device_release_service"
+        ].cleanup_expired_stock_test_releases()
     delivery = str(request.form.get("delivery", "next_wake"))
     if delivery not in {"immediate", "next_wake"}:
         abort(400, description="DEVICE-006 測試傳送時機不合法")

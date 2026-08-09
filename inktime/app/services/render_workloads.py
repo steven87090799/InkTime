@@ -29,6 +29,7 @@ from inktime.app.domain.photos import LocationResolver
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.render_candidates import RenderCandidateRepository
 from inktime.app.repositories.settings import SettingsRepository
+from inktime.app.services.device_releases import payload_entry_from_manifest
 from inktime.app.services.release_coordinator import ReleaseCoordinator
 from inktime.app.services.rendering import (
     PORTRAIT_ONLY_LAYOUTS,
@@ -752,7 +753,7 @@ class RenderWorkloadService:
 
     @staticmethod
     def _palette_statistics(image: Image.Image, colors) -> list[dict]:
-        counts = Counter(image.convert("RGB").get_flattened_data())
+        counts: Counter[Any] = Counter(image.convert("RGB").getdata())
         total = image.width * image.height
         return [
             {
@@ -990,12 +991,7 @@ class RenderWorkloadService:
                 record_preset_warning(preset_error, "PresetValidation")
             self.delete_input(token, suffix=suffix)
             if stock_direct:
-                payload_entry = next(
-                    entry
-                    for entry in manifest.get("files", [])
-                    if isinstance(entry, dict)
-                    and str(entry.get("name", "")).lower().endswith(".bin")
-                )
+                payload_entry = payload_entry_from_manifest(manifest)
                 return {
                     "release_id": manifest["release_id"],
                     "file_name": str(payload_entry["name"]),

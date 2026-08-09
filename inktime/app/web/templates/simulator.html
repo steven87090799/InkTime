@@ -72,7 +72,7 @@
         <button class="primary simulate-button" id="compare-button" type="submit" disabled>產生 A/B 預覽</button>
         {% if g.user.role=='administrator' %}<button class="secondary" id="save-preset" type="button" disabled>儲存自訂 Preset</button>{% endif %}
       </div>
-      <p class="simulator-status" id="simulator-status" role="status" aria-live="polite">正在建立 deterministic 預設樣本…</p>
+      <p class="simulator-status" id="simulator-status" role="status" aria-live="polite">正在建立內建預設樣本…</p>
     </form>
   </aside>
 
@@ -180,7 +180,7 @@
     context.strokeStyle = 'rgba(255,255,255,.5)'; context.lineWidth = 8;
     for (let index = 0; index < 9; index += 1) { context.beginPath(); context.moveTo(50 + index * 138, 1140); context.lineTo(170 + index * 138, 1540); context.stroke(); }
     context.fillStyle = '#fff8df'; context.font = '800 92px sans-serif'; context.fillText('INKTIME', 78, 210);
-    context.font = '34px sans-serif'; context.fillText('DETERMINISTIC SAMPLE／A·B PREVIEW', 82, 270);
+    context.font = '34px sans-serif'; context.fillText('BUILT-IN SAMPLE／A·B PREVIEW', 82, 270);
     return new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(new File([blob], 'inktime-default-sample.png', {type:'image/png'})) : reject(new Error('無法建立預設樣本')), 'image/png'));
   }
   function setRangeOutput(id) { document.getElementById(`${id}-output`).value = Number(document.getElementById(`${id}-strength`).value).toFixed(2); }
@@ -292,7 +292,7 @@
       lastResult=body;
       lastResultRevision=revision;
       for(const key of ['original','legacy','new']) { const image=document.getElementById(`${key}-image`); image.src=body[key]; image.hidden=false; document.getElementById(`${key}-empty`).hidden=true; }
-      document.getElementById('simulator-meta').hidden=false; document.getElementById('meta-source').textContent=`${currentSource.kind==='generated_default_sample'?'內建 deterministic sample':'使用者上傳'}／${body.source_size}`; document.getElementById('meta-bytes').textContent=`${body.payload_bytes.toLocaleString()} bytes`; document.getElementById('meta-time').textContent=`${body.render_ms} / ${body.legacy_render_ms} ms`; document.getElementById('meta-renderer').textContent=`${body.preset}／${body.dither}`; document.getElementById('download-result').href=body.new;
+      document.getElementById('simulator-meta').hidden=false; document.getElementById('meta-source').textContent=`${currentSource.kind==='generated_default_sample'?'內建預設樣本':'使用者上傳'}／${body.source_size}`; document.getElementById('meta-bytes').textContent=`${body.payload_bytes.toLocaleString()} bytes`; document.getElementById('meta-time').textContent=`${body.render_ms} / ${body.legacy_render_ms} ms`; document.getElementById('meta-renderer').textContent=`${body.preset}／${body.dither}`; document.getElementById('download-result').href=body.new;
       const rows=document.getElementById('palette-stat-body'); rows.replaceChildren(...body.palette.map(item=>{const row=document.createElement('tr');const color=document.createElement('td');const swatch=document.createElement('i');swatch.style.backgroundColor=`rgb(${item.rgb.join(',')})`;color.append(swatch,document.createTextNode(item.name));const pixels=document.createElement('td');pixels.textContent=item.pixels.toLocaleString();const ratio=document.createElement('td');ratio.textContent=`${(item.ratio*100).toFixed(2)}%`;row.append(color,pixels,ratio);return row;})); document.getElementById('palette-statistics').hidden=false;
       document.getElementById('save-preset')?.removeAttribute('disabled'); document.getElementById('send-test')?.removeAttribute('disabled'); setStatus('A/B 預覽完成；下載檔為 Server 新算法結果。','success');
     } catch(error) {
@@ -309,20 +309,21 @@
   async function sendStockTest() {
     if (!ensureCurrentPreview()) return;
     const select=document.getElementById('test-device'); if(!select.value){setStatus('請選擇 Stock 測試裝置','error');return;} if(select.selectedOptions[0].dataset.deliveryMode!=='stock_compat'){setStatus('官方韌體模式只能選擇 Stock PhotoPainter 裝置','error');return;} if(select.selectedOptions[0].dataset.profile!==profile.value){setStatus('裝置 Profile 與目前面板不相容','error');return;}
-    if(!window.confirm(`微雪官方韌體模式會先以目前來源、Preset、縮放、短文案與字型建立獨立測試 Release，再透過既有 Stock /dataUP 邊界傳送到「${select.selectedOptions[0].textContent.trim()}」。瀏覽器不會直連裝置；Stock 端無法回報持久完成狀態。確定？`))return;
-    const button=document.getElementById('send-test'),transportStatus=document.getElementById('test-transport-status'); button.disabled=true; transportStatus.hidden=false; transportStatus.className='simulator-status'; transportStatus.textContent='正在以目前來源建立獨立 Stock 測試 Release…';
+    const target=Object.freeze({deviceId:select.value,profileKey:profile.value,deliveryMode:select.selectedOptions[0].dataset.deliveryMode,deviceLabel:select.selectedOptions[0].textContent.trim()});
+    if(!window.confirm(`微雪官方韌體模式會先以目前來源、Preset、縮放、短文案與字型建立獨立測試 Release，再透過既有 Stock /dataUP 邊界傳送到「${target.deviceLabel}」。瀏覽器不會直連裝置；Stock 端無法回報持久完成狀態。確定？`))return;
+    const button=document.getElementById('send-test'),firmware=document.getElementById('test-firmware-mode'),transportStatus=document.getElementById('test-transport-status'),lockedControls=[select,firmware,profile,button],disabledBefore=lockedControls.map(control=>control.disabled); for(const control of lockedControls)control.disabled=true; transportStatus.hidden=false; transportStatus.className='simulator-status'; transportStatus.textContent='正在以目前來源建立獨立 Stock 測試 Release…';
     try {
-      const data=formData(); data.set('device_id',select.value); data.set('transport','stock_direct'); data.set('delivery','next_wake'); data.set('one_time','false'); data.set('restore_formal','false'); data.set('save_preset','false');
+      const data=formData(); data.set('device_id',target.deviceId); data.set('profile',target.profileKey); data.set('transport','stock_direct'); data.set('delivery','next_wake'); data.set('one_time','false'); data.set('restore_formal','false'); data.set('save_preset','false');
       const releaseResponse=await window.inktimeFetch('/api/v1/rendering/test-release',{method:'POST',body:data}); let created={}; try{created=await releaseResponse.json();}catch{}
       if(!releaseResponse.ok)throw new Error(created.message||'Stock 測試 Release 建立失敗。');
       const body=await waitForJob(created); if(!body.release_id||!body.file_name)throw new Error('Stock 測試 Release Manifest 不完整，已停止傳送。');
       transportStatus.textContent=`目前來源已建立 Release ${body.release_id}；後端正在轉換並送往 Stock /dataUP…`;
-      const response=await window.inktimeFetch(`/api/v1/devices/${encodeURIComponent(select.value)}/stock-photopainter/display`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({release_id:body.release_id,file_name:body.file_name,transport:'stock_direct'})}); let result={}; try{result=await response.json();}catch{}
+      const response=await window.inktimeFetch(`/api/v1/devices/${encodeURIComponent(target.deviceId)}/stock-photopainter/display`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({release_id:body.release_id,file_name:body.file_name,transport:'stock_direct'})}); let result={}; try{result=await response.json();}catch{}
       if(!response.ok)throw new Error(result.message||'Stock PhotoPainter 傳送失敗。');
       if(result.upload_accepted!==true)throw new Error('Stock PhotoPainter 未接受圖片，未判定為完成。');
       if(String(result.release_id)!==String(body.release_id))throw new Error('Stock 回應的 Release 與本次來源不一致，已停止判定。');
       const completion=result.display_completed===true?'裝置已回報完成刷新。':'裝置已接受圖片；Stock 韌體沒有持久完成回報，請查看實體相框。'; transportStatus.className='simulator-status success'; transportStatus.textContent=`${completion} Release：${body.release_id}／HTTP ${result.http_status||'—'}`; setStatus('Stock 官方韌體傳送已由後端接受。','success');
-    } catch(error) { transportStatus.className='simulator-status error'; transportStatus.textContent=error.message||'Stock 傳送失敗。'; setStatus(transportStatus.textContent,'error'); } finally { button.disabled=!lastResult||lastResultRevision!==compareRevision; }
+    } catch(error) { transportStatus.className='simulator-status error'; transportStatus.textContent=error.message||'Stock 傳送失敗。'; setStatus(transportStatus.textContent,'error'); } finally { lockedControls.forEach((control,index)=>{control.disabled=disabledBefore[index];}); button.disabled=!lastResult||lastResultRevision!==compareRevision; }
   }
   async function sendTest() {
     if (!ensureCurrentPreview()) return;
@@ -356,7 +357,7 @@
   document.getElementById('copy-palette').addEventListener('click',copyPalette); document.getElementById('reset-palette').addEventListener('click',()=>{paletteMode.value='default';paletteValues.value='';refreshPreviewFromControls();}); document.getElementById('save-preset')?.addEventListener('click',savePreset); document.getElementById('send-test')?.addEventListener('click',sendTest);
   for(const key of ['original','legacy','new']) document.getElementById(`${key}-image`).addEventListener('error',()=>{const image=document.getElementById(`${key}-image`);image.hidden=true;document.getElementById(`${key}-empty`).hidden=false;if(!compareRunning)setStatus(`${key} 預覽讀取失敗，請重新產生。`,'error');});
   zoom.addEventListener('input',()=>{const value=Number(zoom.value);document.getElementById('zoom-output').value=value.toFixed(1);document.querySelectorAll('.zoom-frame img').forEach(image=>image.style.transform=`scale(${value})`);}); document.querySelectorAll('.zoom-frame').forEach(frame=>frame.addEventListener('click',event=>{const rect=frame.getBoundingClientRect();const origin=`${((event.clientX-rect.left)/rect.width)*100}% ${((event.clientY-rect.top)/rect.height)*100}%`;document.querySelectorAll('.zoom-frame img').forEach(image=>image.style.transformOrigin=origin);}));
-  async function initializeSource(){try{setStatus('正在建立 deterministic 預設樣本…','ready');const file=await makeDefaultSampleFile();setCurrentSource(file,'generated_default_sample');setStatus('預設樣本已建立；Server 正在產生 A/B 預覽…','ready');scheduleCompare();}catch(error){setStatus(error.message||'無法建立預設樣本','error');}}
+  async function initializeSource(){try{setStatus('正在建立內建預設樣本…','ready');const file=await makeDefaultSampleFile();setCurrentSource(file,'generated_default_sample');setStatus('預設樣本已建立；Server 正在產生 A/B 預覽…','ready');scheduleCompare();}catch(error){setStatus(error.message||'無法建立預設樣本','error');}}
   applyPreset(); updatePaletteMeta(); initializeSource();
 })();
 </script>

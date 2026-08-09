@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from builtins import list as builtin_list
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 import os
@@ -9,6 +9,8 @@ from pathlib import Path
 import secrets
 import shutil
 import re
+import stat
+import tempfile
 from typing import Any
 
 from PIL import Image
@@ -17,6 +19,10 @@ from .palette import DisplayProfile, encode_image, get_display_profile
 
 
 FOUR_COLORS = ((0, 0, 0), (255, 255, 255), (220, 30, 30), (245, 190, 25))
+STOCK_DIRECT_TEST_TTL_SECONDS = 45 * 60
+DEVICE_TEST_INDEX_DIRECTORY = ".device-test-index"
+STOCK_DIRECT_TEST_DIRECTORY = ".stock-direct-tests"
+_RELEASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def _nearest_color(pixel) -> int:
@@ -167,31 +173,122 @@ class AtomicReleasePublisher:
         releases = []
         for manifest_path in self.root.glob("*/manifest.json"):
             try:
-                releases.append(json.loads(manifest_path.read_text(encoding="utf-8")))
-            except (OSError, json.JSONDecodeError):
+                if manifest_path.parent.is_symlink() or manifest_path.is_symlink():
+                    continue
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if (
+                    not isinstance(manifest, dict)
+                    or str(manifest.get("release_id") or "") != manifest_path.parent.name
+                    or not isinstance(manifest.get("created_at"), str)
+                ):
+                    continue
+                releases.append(manifest)
+            except (OSError, json.JSONDecodeError, ValueError):
                 continue
         return sorted(releases, key=lambda item: item["created_at"], reverse=True)
 
+    def _device_test_index_path(self, idempotency_key: str) -> Path:
+        digest = sha256(idempotency_key.encode("utf-8")).hexdigest()
+        return self.root / DEVICE_TEST_INDEX_DIRECTORY / f"{digest}.json"
+
+    def _unlink_managed_index(self, directory_name: str, filename: str) -> None:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            descriptor = os.open(self.root / directory_name, flags)
+            try:
+                metadata = os.stat(filename, dir_fd=descriptor, follow_symlinks=False)
+                if stat.S_ISREG(metadata.st_mode):
+                    os.unlink(filename, dir_fd=descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError:
+            return
+
+    def _atomic_json(self, path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+        if path.parent.is_symlink() or path.parent.resolve().parent != self.root:
+            raise ValueError("RENDER-010 Release 索引路徑不安全")
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _write_device_test_indexes(self, manifest: dict[str, Any]) -> None:
+        options = manifest.get("render_options") or {}
+        if not isinstance(options, dict):
+            return
+        idempotency_key = str(options.get("idempotency_key") or "")
+        if not idempotency_key:
+            return
+        index_path = self._device_test_index_path(idempotency_key)
+        self._atomic_json(
+            index_path,
+            {
+                "release_id": manifest["release_id"],
+                "idempotency_key": idempotency_key,
+            },
+        )
+        if options.get("stock_direct") is not True:
+            return
+        marker_root = self.root / STOCK_DIRECT_TEST_DIRECTORY
+        marker = marker_root / f"{manifest['release_id']}.json"
+        self._atomic_json(
+            marker,
+            {
+                "release_id": manifest["release_id"],
+                "device_id": str(options.get("stock_direct_device_id") or ""),
+                "profile_key": str(manifest.get("render_profile") or ""),
+                "expires_at": str(options.get("stock_direct_expires_at") or ""),
+            },
+        )
+
     def find_device_test_by_idempotency(self, idempotency_key: str) -> dict | None:
-        for manifest in self.list():
-            options = manifest.get("render_options") or {}
+        try:
+            index_path = self._device_test_index_path(idempotency_key)
             if (
-                manifest.get("release_kind") == "device_test"
-                and isinstance(options, dict)
-                and str(options.get("idempotency_key") or "") == idempotency_key
+                index_path.parent.is_symlink()
+                or index_path.parent.resolve().parent != self.root
+                or index_path.is_symlink()
             ):
-                try:
-                    return self.validate(str(manifest["release_id"]))
-                except ValueError:
-                    continue
-        return None
+                return None
+            indexed = json.loads(
+                index_path.read_text(encoding="utf-8")
+            )
+            if (
+                not isinstance(indexed, dict)
+                or str(indexed.get("idempotency_key") or "") != idempotency_key
+            ):
+                return None
+            manifest = self.validate(str(indexed.get("release_id") or ""))
+        except (OSError, json.JSONDecodeError, ValueError):
+            return None
+        options = manifest.get("render_options") or {}
+        if (
+            manifest.get("release_kind") != "device_test"
+            or not isinstance(options, dict)
+            or str(options.get("idempotency_key") or "") != idempotency_key
+        ):
+            return None
+        return manifest
 
     def discard_unassigned_device_test(self, release_id: str, idempotency_key: str) -> None:
         release = self.root / release_id
-        manifest_path = release / "manifest.json"
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            manifest = self.validate(release_id)
+        except (OSError, ValueError):
             return
         options = manifest.get("render_options") or {}
         if (
@@ -201,6 +298,15 @@ class AtomicReleasePublisher:
             and str(options.get("idempotency_key") or "") == idempotency_key
         ):
             shutil.rmtree(release, ignore_errors=True)
+            digest = sha256(idempotency_key.encode("utf-8")).hexdigest()
+            self._unlink_managed_index(
+                DEVICE_TEST_INDEX_DIRECTORY,
+                f"{digest}.json",
+            )
+            self._unlink_managed_index(
+                STOCK_DIRECT_TEST_DIRECTORY,
+                f"{release_id}.json",
+            )
 
     def publish_preencoded(
         self,
@@ -220,6 +326,12 @@ class AtomicReleasePublisher:
         """Commit verified child output without re-running Pillow/NumPy rendering."""
 
         profile = get_display_profile(profile_key)
+        metadata = dict(metadata)
+        if metadata.get("stock_direct") is True:
+            metadata["stock_direct_expires_at"] = (
+                datetime.now(timezone.utc)
+                + timedelta(seconds=STOCK_DIRECT_TEST_TTL_SECONDS)
+            ).isoformat()
         payload = payload_path.read_bytes()
         expected = 480 * 800 // (4 if profile.pixel_format == "2bpp" else 2)
         if len(payload) != expected:
@@ -278,15 +390,25 @@ class AtomicReleasePublisher:
                 with path.open("rb") as stream:
                     os.fsync(stream.fileno())
             temporary.replace(final)
+            self._write_device_test_indexes(manifest)
             return manifest
         except Exception:
             shutil.rmtree(temporary, ignore_errors=True)
+            if final.exists():
+                shutil.rmtree(final, ignore_errors=True)
             raise
 
     def validate(self, release_id: str) -> dict:
+        if _RELEASE_ID.fullmatch(release_id) is None:
+            raise ValueError("RENDER-010 Release ID 不合法")
         release_dir = self.root / release_id
         manifest_path = release_dir / "manifest.json"
-        if release_dir.parent != self.root or not manifest_path.is_file():
+        if (
+            release_dir.parent != self.root
+            or release_dir.is_symlink()
+            or manifest_path.is_symlink()
+            or not manifest_path.is_file()
+        ):
             raise ValueError("RENDER-010 Release Manifest 不存在")
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -303,12 +425,26 @@ class AtomicReleasePublisher:
                 raise ValueError("RENDER-010 Release 檔案描述不合法")
             name = str(entry.get("name", ""))
             path = release_dir / name
-            if not name or path.parent != release_dir or not path.is_file():
+            size = entry.get("size")
+            digest = entry.get("sha256")
+            if (
+                not name
+                or name in {".", ".."}
+                or "\x00" in name
+                or "/" in name
+                or "\\" in name
+                or path.parent != release_dir
+                or path.is_symlink()
+                or not path.is_file()
+                or type(size) is not int
+                or size < 0
+                or not isinstance(digest, str)
+            ):
                 raise ValueError("RENDER-010 Release Payload 不存在")
             payload = path.read_bytes()
-            if len(payload) != int(entry.get("size", -1)):
+            if len(payload) != size:
                 raise ValueError("RENDER-010 Release Payload 大小不一致")
-            if sha256(payload).hexdigest() != str(entry.get("sha256", "")):
+            if sha256(payload).hexdigest() != digest:
                 raise ValueError("RENDER-010 Release Payload SHA-256 不一致")
         return manifest
 
@@ -456,6 +592,49 @@ class DeviceTestReleaseStore:
             assignment["manifest_fetched_at"] = datetime.now(timezone.utc).isoformat()
             self._write(path, assignment)
         return assignment
+
+    def references_release(self, device_id: str, release_id: str) -> bool:
+        """Check one exact device assignment without advancing its lifecycle."""
+        path = self._path(device_id)
+        try:
+            assignment = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return False
+        return isinstance(assignment, dict) and str(assignment.get("release_id") or "") == release_id
+
+    def references_release_any(self, release_id: str, *, maximum: int = 1024) -> bool:
+        """Fail closed if any bounded Custom assignment may reference a release."""
+        if self.root.is_symlink() or self.root.resolve().parent != self.release_root:
+            return True
+        try:
+            entries = os.scandir(self.root)
+        except OSError:
+            return True
+        examined = 0
+        with entries:
+            for entry in entries:
+                if not entry.name.endswith((".json", ".tmp")):
+                    continue
+                examined += 1
+                if examined > max(1, int(maximum)):
+                    return True
+                if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                    return True
+                flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+                try:
+                    descriptor = os.open(entry.path, flags)
+                    with os.fdopen(descriptor, "rb") as handle:
+                        raw = handle.read(64 * 1024 + 1)
+                    if len(raw) > 64 * 1024:
+                        return True
+                    assignment = json.loads(raw.decode("utf-8"))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                    return True
+                if not isinstance(assignment, dict):
+                    return True
+                if str(assignment.get("release_id") or "") == release_id:
+                    return True
+        return False
 
     def mark_downloaded(self, device_id: str, release_id: str) -> None:
         path = self._path(device_id)

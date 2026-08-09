@@ -20,6 +20,7 @@ from inktime.app.domain.rendering import (
     AtomicReleasePublisher,
     DISPLAY_PROFILES,
     FontManager,
+    Rect,
     analyze_crop_focus,
     calculate_epaper_contrast_risk,
     current_local_date,
@@ -61,7 +62,7 @@ LAYOUTS = {
 FRAME_ORIENTATIONS = {"portrait": "直向", "landscape": "橫向"}
 FIT_MODES = {
     "stretch_fill": "填滿照片區（不裁切，可微變形）",
-    "contain": "完整顯示（建議）",
+    "contain": "完整顯示",
     "cover": "填滿並裁切",
 }
 PORTRAIT_ONLY_LAYOUTS = {"calendar", "weather_sensor"}
@@ -77,17 +78,23 @@ def _fit_caption_line(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.Free
     return fitted.rstrip() + suffix
 
 
-def _postcard_caption_bounds(info_rect) -> tuple[int, int, int, int]:
+def _required_rect(rect: Rect | None, slot: str) -> Rect:
+    if rect is None:
+        raise ValueError(f"RENDER-005 版型缺少必要區域：{slot}")
+    return rect
+
+
+def _postcard_caption_bounds(info_rect: Rect) -> tuple[int, int, int, int]:
     """Keep the historical postcard caption baseline inside its footer."""
     return info_rect.x + 4, info_rect.y + 16, info_rect.bottom - 48, info_rect.width - 8
 
 
-def _calendar_metadata_origin(caption_rect) -> tuple[int, int]:
+def _calendar_metadata_origin(caption_rect: Rect) -> tuple[int, int]:
     """Return the historical calendar metadata anchor."""
     return caption_rect.x, caption_rect.y
 
 
-def _weather_metadata_origin(caption_rect) -> tuple[int, int]:
+def _weather_metadata_origin(caption_rect: Rect) -> tuple[int, int]:
     """Return the historical weather metadata anchor."""
     return caption_rect.x, caption_rect.y
 
@@ -1136,6 +1143,10 @@ class RenderService:
         )
         if fit_mode_key not in FIT_MODES:
             raise ValueError("RENDER-005 不支援的照片縮放方式")
+        if adaptive_requested:
+            # Adaptive memory deliberately owns its composition and keeps
+            # mismatched source orientations complete inside each slot.
+            fit_mode_key = "contain"
         effective_orientation = "portrait" if layout_key in PORTRAIT_ONLY_LAYOUTS else orientation_key
         normalized_dimensions = resolve_layout_geometry(
             layout_key, effective_orientation, width, height
@@ -1181,14 +1192,25 @@ class RenderService:
                             "photo_info", effective_orientation, frame_width, frame_height
                         )
                         footer_rect = footer_geometry.info_rects[0]
-                        pair_geometry = resolve_layout_geometry(
-                            "photo_pair",
-                            effective_orientation,
-                            frame_width,
-                            footer_rect.y,
-                        )
-                        primary_rect = pair_geometry.primary_photo
-                        secondary_rect = pair_geometry.secondary_photo
+                        gutter = 8
+                        if effective_orientation == "landscape":
+                            primary_width = (frame_width - gutter) // 2
+                            primary_rect = Rect(0, 0, primary_width, footer_rect.y)
+                            secondary_rect = Rect(
+                                primary_width + gutter,
+                                0,
+                                frame_width - primary_width - gutter,
+                                footer_rect.y,
+                            )
+                        else:
+                            primary_height = (footer_rect.y - gutter) // 2
+                            primary_rect = Rect(0, 0, frame_width, primary_height)
+                            secondary_rect = Rect(
+                                0,
+                                primary_height + gutter,
+                                frame_width,
+                                footer_rect.y - primary_height - gutter,
+                            )
                         slot_size = (primary_rect.width, primary_rect.height)
                         second_position = (secondary_rect.x, secondary_rect.y)
                         canvas.paste(
@@ -1229,11 +1251,12 @@ class RenderService:
                 layout_key, effective_orientation, frame_width, frame_height
             )
             if layout_key == "full":
+                photo_rect = _required_rect(geometry.primary_photo, "primary_photo")
                 return finish(
                     self._fit_photo(
                         source,
                         photo,
-                        (geometry.primary_photo.width, geometry.primary_photo.height),
+                        (photo_rect.width, photo_rect.height),
                         crop_x,
                         crop_y,
                         fit_mode_key,
@@ -1284,8 +1307,8 @@ class RenderService:
             draw = ImageDraw.Draw(canvas)
 
             if layout_key == "photo_pair":
-                primary_rect = geometry.primary_photo
-                secondary_rect = geometry.secondary_photo
+                primary_rect = _required_rect(geometry.primary_photo, "primary_photo")
+                secondary_rect = _required_rect(geometry.secondary_photo, "secondary_photo")
                 first_size = (primary_rect.width, primary_rect.height)
                 second_size = (secondary_rect.width, secondary_rect.height)
                 second_position = (secondary_rect.x, secondary_rect.y)
@@ -1335,10 +1358,14 @@ class RenderService:
                     )
                 first_caption = dict(primary_caption or self._caption_record(photo, self._today()))
                 second_caption = dict(secondary_caption or self._caption_record(second_photo, self._today()))
-                primary_rect = geometry.primary_photo
-                secondary_rect = geometry.secondary_photo
-                primary_caption_rect = geometry.primary_caption
-                secondary_caption_rect = geometry.secondary_caption
+                primary_rect = _required_rect(geometry.primary_photo, "primary_photo")
+                secondary_rect = _required_rect(geometry.secondary_photo, "secondary_photo")
+                primary_caption_rect = _required_rect(
+                    geometry.primary_caption, "primary_caption"
+                )
+                secondary_caption_rect = _required_rect(
+                    geometry.secondary_caption, "secondary_caption"
+                )
                 image_size = (primary_rect.width, primary_rect.height)
                 second_image_size = (secondary_rect.width, secondary_rect.height)
                 positions = (
@@ -1381,7 +1408,7 @@ class RenderService:
                 return finish(canvas)
 
             if layout_key == "postcard":
-                photo_rect = geometry.primary_photo
+                photo_rect = _required_rect(geometry.primary_photo, "primary_photo")
                 info_rect = geometry.info[0]
                 photo_size = (photo_rect.width, photo_rect.height)
                 fitted = self._fit_photo(source, photo, photo_size, crop_x, crop_y, fit_mode_key)
@@ -1419,7 +1446,7 @@ class RenderService:
                 return finish(canvas)
 
             if layout_key == "photo_info":
-                photo_rect = geometry.primary_photo
+                photo_rect = _required_rect(geometry.primary_photo, "primary_photo")
                 info_rect = geometry.info[0]
                 fitted = self._fit_photo(
                     source,
@@ -1461,13 +1488,13 @@ class RenderService:
                 draw.text((24, 16), f"{today.year}年 {today.month}月", font=fonts["large"], fill="#17221c")
                 draw.text((372, 25), f"{today.day}日", font=fonts["body"], fill="#d13b2f")
                 self._calendar(canvas, fonts, today)
-                photo_rect = geometry.primary_photo
+                photo_rect = _required_rect(geometry.primary_photo, "primary_photo")
                 fitted = self._fit_photo(
                     source, photo, (photo_rect.width, photo_rect.height), crop_x, crop_y, fit_mode_key
                 )
                 canvas.paste(fitted, (photo_rect.x, photo_rect.y))
                 meta = "・".join(value for value in (caption, date_label, location) if value)
-                caption_rect = geometry.primary_caption
+                caption_rect = _required_rect(geometry.primary_caption, "primary_caption")
                 metadata_x, metadata_y = _calendar_metadata_origin(caption_rect)
                 draw.text(
                     (metadata_x, metadata_y),
@@ -1477,7 +1504,7 @@ class RenderService:
                 )
                 return finish(canvas)
 
-            photo_rect = geometry.primary_photo
+            photo_rect = _required_rect(geometry.primary_photo, "primary_photo")
             fitted = self._fit_photo(
                 source, photo, (photo_rect.width, photo_rect.height), crop_x, crop_y, fit_mode_key
             )
@@ -1522,7 +1549,7 @@ class RenderService:
                 fill="#1f4f70",
             )
             meta = "・".join(value for value in (date_label, location, caption) if value)
-            caption_rect = geometry.primary_caption
+            caption_rect = _required_rect(geometry.primary_caption, "primary_caption")
             metadata_x, metadata_y = _weather_metadata_origin(caption_rect)
             draw.text(
                 (metadata_x, metadata_y),

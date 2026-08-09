@@ -1156,7 +1156,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "choices": ["stretch_fill", "contain", "cover"],
         "choice_labels": {
             "stretch_fill": "填滿照片區（不裁切，可微變形）",
-            "contain": "完整顯示（建議）",
+            "contain": "完整顯示",
             "cover": "填滿並裁切",
         },
         "restart": False,

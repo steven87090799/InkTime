@@ -73,6 +73,48 @@ def test_failed_release_does_not_replace_latest(tmp_path):
     assert (tmp_path / "releases" / "latest").read_text() == first["release_id"]
 
 
+def test_preencoded_stock_release_uses_direct_idempotency_index_and_ttl_marker(
+    monkeypatch, tmp_path
+):
+    publisher = AtomicReleasePublisher(tmp_path / "releases")
+    payload_path = tmp_path / "payload.bin"
+    preview_path = tmp_path / "preview.png"
+    payload_path.write_bytes(bytes(96_000))
+    Image.new("RGB", (480, 800), "white").save(preview_path)
+    manifest = publisher.publish_preencoded(
+        source_photo_id="simulator-upload",
+        payload_path=payload_path,
+        preview_path=preview_path,
+        profile_key="safe_4c",
+        dither="none",
+        color_distance="rgb",
+        dither_strength=0,
+        linear_light=True,
+        palette=[],
+        palette_version="test",
+        metadata={
+            "idempotency_key": "stock-index-key",
+            "transport": "stock_direct",
+            "stock_direct": True,
+            "stock_direct_device_id": "stock-device",
+        },
+    )
+    options = manifest["render_options"]
+    assert options["stock_direct_expires_at"]
+    assert (
+        tmp_path
+        / "releases"
+        / ".stock-direct-tests"
+        / f"{manifest['release_id']}.json"
+    ).is_file()
+    monkeypatch.setattr(
+        publisher,
+        "list",
+        lambda: pytest.fail("idempotency lookup must not scan every release"),
+    )
+    assert publisher.find_device_test_by_idempotency("stock-index-key") == manifest
+
+
 def test_automatic_release_candidates_respect_configured_memory_threshold(app, tmp_path):
     app.extensions["inktime_settings_repository"].update(
         "analysis.execution_mode", "automatic_ai", changed_by="tester", source_ip="127.0.0.1"

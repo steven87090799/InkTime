@@ -1,11 +1,16 @@
+from __future__ import annotations
+
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 from PIL import Image, ImageChops
 import pytest
 
-from inktime.app.domain.rendering.layout_geometry import resolve_layout_geometry
+from inktime.app.domain.rendering.layout_geometry import SUPPORTED_LAYOUTS, resolve_layout_geometry
 
 
 def _rect(geometry, name):
@@ -104,6 +109,28 @@ def test_geometry_normalizes_both_physical_dimension_orders():
             geometry = resolve_layout_geometry("photo_info", orientation, *dimensions)
             expected = (480, 800) if orientation == "portrait" else (800, 480)
             assert (geometry.canvas_width, geometry.canvas_height) == expected
+
+
+def test_every_layout_rectangle_stays_inside_the_canonical_canvas():
+    for layout in SUPPORTED_LAYOUTS:
+        for orientation, dimensions in (
+            ("portrait", (480, 800)),
+            ("portrait", (800, 480)),
+            ("landscape", (480, 800)),
+            ("landscape", (800, 480)),
+        ):
+            geometry = resolve_layout_geometry(layout, orientation, *dimensions)
+            for rectangle in (*geometry.photo_rects, *geometry.caption_rects, *geometry.info):
+                assert rectangle.x >= 0 and rectangle.y >= 0
+                assert rectangle.width > 0 and rectangle.height > 0
+                assert rectangle.right <= geometry.canvas_width
+                assert rectangle.bottom <= geometry.canvas_height
+
+
+@pytest.mark.parametrize("dimensions", [(1, 1), (480, 799), (600, 1000), (0, 800)])
+def test_geometry_rejects_noncanonical_dimensions(dimensions):
+    with pytest.raises(ValueError, match="480x800"):
+        resolve_layout_geometry("full", "portrait", *dimensions)
 
 
 def test_caption_regions_are_independent_and_keep_text_anchor_pixels():
@@ -258,6 +285,12 @@ def test_stock_test_authorization_is_exactly_bound_and_generic_auth_stays_closed
         service = object.__new__(DeviceReleaseService)
         service.database = FakeDatabase(device)
         service._load_manifest = lambda _release_id: (tmp_path, (1, 2), dict(manifest))
+        service.payload_entry_for_authorization = lambda _authorization: {
+            "name": "payload.bin",
+            "size": 1,
+            "sha256": "0" * 64,
+        }
+        service.read_payload = lambda _authorization, _filename: (b"x", {})
         return service
 
     exact = service_for(
@@ -426,6 +459,10 @@ def test_stock_display_uploads_the_same_authorized_release_without_completion_cl
     calls = []
 
     class Releases:
+        def cleanup_expired_stock_test_releases(self):
+            calls.append("cleanup")
+            return {"examined": 2, "removed": 1}
+
         def authorize_stock_test_release_for_device(self, **kwargs):
             calls.append(kwargs)
             return SimpleNamespace(
@@ -439,6 +476,10 @@ def test_stock_display_uploads_the_same_authorized_release_without_completion_cl
 
         def read_payload(self, _authorization, _file_name):
             return b"packed", {"size": 6, "sha256": "source-sha-exact"}
+
+        def consume_stock_test_release(self, **kwargs):
+            calls.append(("consume", kwargs))
+            return True
 
     class Transport:
         def upload(self, host, payload):
@@ -457,14 +498,476 @@ def test_stock_display_uploads_the_same_authorized_release_without_completion_cl
         host="configured-stock-host",
     )
 
-    assert calls[0] == {
+    assert calls[0] == "cleanup"
+    assert calls[1] == {
         "device_id": "stock-device",
         "profile_key": "safe_4c",
         "release_id": release_id,
     }
-    assert calls[1] == ("configured-stock-host", b"stock-payload")
+    assert calls[2] == ("configured-stock-host", b"stock-payload")
+    assert calls[3] == (
+        "consume",
+        {
+            "device_id": "stock-device",
+            "profile_key": "safe_4c",
+            "release_id": release_id,
+        },
+    )
     assert result["release_id"] == release_id
     assert result["file_name"] == "payload.bin"
     assert result["upload_accepted"] is True
     assert result["display_completed"] is False
     assert result["transport"] == "stock_direct"
+    assert result["ephemeral_release_consumed"] is True
+    assert result["expired_cleanup_examined"] == 2
+    assert result["expired_cleanup_removed"] == 1
+
+
+class _StockConnection:
+    def __init__(self, devices, release_statuses=None, referenced=None):
+        self.devices = devices
+        self.release_statuses = release_statuses or {}
+        self.referenced = set(referenced or ())
+
+    def execute(self, query, params):
+        if "SELECT enabled,delivery_mode,panel_profile" in query:
+            return SimpleNamespace(fetchone=lambda: self.devices.get(params[0]))
+        if "SELECT status FROM releases" in query:
+            status = self.release_statuses.get(params[0])
+            return SimpleNamespace(
+                fetchone=lambda: None if status is None else {"status": status}
+            )
+        if "SELECT 1 FROM (" in query:
+            return SimpleNamespace(
+                fetchone=lambda: {"referenced": 1} if params[0] in self.referenced else None
+            )
+        raise AssertionError(f"unexpected query: {query}")
+
+
+class _StockDatabase:
+    def __init__(self, devices, release_statuses=None, referenced=None):
+        self.connection = _StockConnection(devices, release_statuses, referenced)
+
+    @contextmanager
+    def session(self):
+        yield self.connection
+
+
+def _write_stock_release(
+    release_root: Path,
+    release_id: str,
+    *,
+    device_id: str = "stock-device",
+    profile_key: str = "safe_4c",
+    expires_at: datetime | None = None,
+    manifest_overrides: dict | None = None,
+    payload: bytes = b"packed-frame",
+    write_payload: bool = True,
+    write_marker: bool = True,
+):
+    expiry = expires_at or datetime.now(timezone.utc) + timedelta(minutes=45)
+    release_dir = release_root / release_id
+    release_dir.mkdir(parents=True)
+    if write_payload:
+        (release_dir / "photo_1.bin").write_bytes(payload)
+    manifest = {
+        "release_id": release_id,
+        "release_kind": "device_test",
+        "render_profile": profile_key,
+        "files": [
+            {
+                "name": "photo_1.bin",
+                "size": len(payload),
+                "sha256": sha256(payload).hexdigest(),
+            }
+        ],
+        "render_options": {
+            "idempotency_key": f"key-{release_id}",
+            "transport": "stock_direct",
+            "stock_direct": True,
+            "stock_direct_device_id": device_id,
+            "stock_direct_expires_at": expiry.isoformat(),
+        },
+    }
+    if manifest_overrides:
+        manifest.update(manifest_overrides)
+    (release_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    if write_marker:
+        marker_root = release_root / ".stock-direct-tests"
+        marker_root.mkdir(exist_ok=True)
+        (marker_root / f"{release_id}.json").write_text(
+            json.dumps(
+                {
+                    "release_id": release_id,
+                    "device_id": device_id,
+                    "profile_key": profile_key,
+                    "expires_at": expiry.isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+    return manifest
+
+
+def _real_stock_release_service(tmp_path: Path, *, statuses=None, referenced=None):
+    from inktime.app.services.device_releases import DeviceReleaseService
+
+    devices = {
+        "stock-device": {
+            "enabled": 1,
+            "delivery_mode": "stock_compat",
+            "panel_profile": "safe_4c",
+        },
+        "other-device": {
+            "enabled": 1,
+            "delivery_mode": "stock_compat",
+            "panel_profile": "safe_4c",
+        },
+        "disabled-device": {
+            "enabled": 0,
+            "delivery_mode": "stock_compat",
+            "panel_profile": "safe_4c",
+        },
+        "custom-device": {
+            "enabled": 1,
+            "delivery_mode": "legacy_online",
+            "panel_profile": "safe_4c",
+        },
+    }
+    root = tmp_path / "releases"
+    root.mkdir(parents=True, exist_ok=True)
+    return DeviceReleaseService(
+        _StockDatabase(devices, statuses, referenced),
+        root,
+    )
+
+
+def test_stock_authorization_allows_filesystem_only_release_and_denies_bad_db_state(tmp_path):
+    release_id = "stock-auth-none"
+    service = _real_stock_release_service(tmp_path)
+    _write_stock_release(service.release_root, release_id)
+    allowed = service.authorize_stock_test_release_for_device(
+        device_id="stock-device", profile_key="safe_4c", release_id=release_id
+    )
+    assert allowed.allowed is True
+
+    denied_service = _real_stock_release_service(
+        tmp_path / "denied", statuses={release_id: "rendering"}
+    )
+    _write_stock_release(denied_service.release_root, release_id)
+    denied = denied_service.authorize_stock_test_release_for_device(
+        device_id="stock-device", profile_key="safe_4c", release_id=release_id
+    )
+    assert denied.allowed is False
+    assert denied.reason == "release_not_downloadable"
+
+
+@pytest.mark.parametrize(
+    ("device_id", "profile_key"),
+    [
+        ("other-device", "safe_4c"),
+        ("stock-device", "gdep073e01_6c"),
+        ("disabled-device", "safe_4c"),
+        ("custom-device", "safe_4c"),
+    ],
+)
+def test_stock_authorization_denies_wrong_binding_profile_disabled_and_non_stock(
+    tmp_path, device_id, profile_key
+):
+    service = _real_stock_release_service(tmp_path)
+    release_id = "stock-auth-denied"
+    _write_stock_release(service.release_root, release_id)
+    authorization = service.authorize_stock_test_release_for_device(
+        device_id=device_id, profile_key=profile_key, release_id=release_id
+    )
+    assert authorization.allowed is False
+
+
+@pytest.mark.parametrize(
+    "manifest_overrides",
+    [
+        {"release_kind": "formal"},
+        {"render_options": {"transport": "custom", "stock_direct": False}},
+        {"render_options": {"transport": "stock_direct", "stock_direct": True}},
+    ],
+)
+def test_stock_authorization_denies_formal_custom_and_missing_binding(
+    tmp_path, manifest_overrides
+):
+    service = _real_stock_release_service(tmp_path)
+    release_id = "stock-manifest-denied"
+    _write_stock_release(
+        service.release_root, release_id, manifest_overrides=manifest_overrides
+    )
+    authorization = service.authorize_stock_test_release_for_device(
+        device_id="stock-device", profile_key="safe_4c", release_id=release_id
+    )
+    assert authorization.allowed is False
+
+
+@pytest.mark.parametrize("payload_case", ["missing", "wrong_size", "wrong_sha", "malformed_files"])
+def test_stock_payload_integrity_failures_deny_safely_without_iterator_errors(
+    tmp_path, payload_case
+):
+    from inktime.app.services.photopainter_stock import StockCompatibilityService
+
+    service = _real_stock_release_service(tmp_path)
+    release_id = f"stock-payload-{payload_case}"
+    manifest = _write_stock_release(
+        service.release_root,
+        release_id,
+        write_payload=payload_case != "missing",
+    )
+    if payload_case == "wrong_size":
+        manifest["files"][0]["size"] += 1
+    elif payload_case == "wrong_sha":
+        manifest["files"][0]["sha256"] = "0" * 64
+    elif payload_case == "malformed_files":
+        manifest["files"] = [{"name": "photo_1.bin"}]
+    (service.release_root / release_id / "manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    authorization = service.authorize_stock_test_release_for_device(
+        device_id="stock-device",
+        profile_key="safe_4c",
+        release_id=release_id,
+    )
+    assert authorization.allowed is False
+    assert authorization.reason == "invalid_payload"
+    with pytest.raises(PermissionError):
+        StockCompatibilityService(service).payload_for_stock_test_release(
+            device_id="stock-device",
+            profile_key="safe_4c",
+            release_id=release_id,
+        )
+
+
+@pytest.mark.parametrize("status_code", [400, 500])
+def test_stock_non_2xx_retains_ephemeral_release(monkeypatch, tmp_path, status_code):
+    from inktime.app.services.photopainter_stock import StockCompatibilityService
+
+    service = _real_stock_release_service(tmp_path)
+    release_id = f"stock-http-{status_code}"
+    _write_stock_release(service.release_root, release_id)
+    monkeypatch.setattr(
+        "inktime.app.services.photopainter_stock.packed_frame_to_stock_payload",
+        lambda *_args, **_kwargs: b"stock-payload",
+    )
+    transport = SimpleNamespace(
+        upload=lambda _host, _payload: SimpleNamespace(status_code=status_code)
+    )
+    result = StockCompatibilityService(service, transport).display_stock_test_release(
+        device_id="stock-device",
+        profile_key="safe_4c",
+        release_id=release_id,
+        file_name="photo_1.bin",
+        host="stock-host",
+    )
+    assert result["upload_accepted"] is False
+    assert result["ephemeral_release_consumed"] is False
+    assert (service.release_root / release_id).is_dir()
+
+
+def test_stock_transport_timeout_retains_ephemeral_release(monkeypatch, tmp_path):
+    from inktime.app.services.photopainter_stock import StockCompatibilityService
+
+    service = _real_stock_release_service(tmp_path)
+    release_id = "stock-timeout"
+    _write_stock_release(service.release_root, release_id)
+    monkeypatch.setattr(
+        "inktime.app.services.photopainter_stock.packed_frame_to_stock_payload",
+        lambda *_args, **_kwargs: b"stock-payload",
+    )
+
+    class TimeoutTransport:
+        def upload(self, _host, _payload):
+            raise TimeoutError("timed out")
+
+    with pytest.raises(TimeoutError):
+        StockCompatibilityService(service, TimeoutTransport()).display_stock_test_release(
+            device_id="stock-device",
+            profile_key="safe_4c",
+            release_id=release_id,
+            file_name="photo_1.bin",
+            host="stock-host",
+        )
+    assert (service.release_root / release_id).is_dir()
+
+
+def test_stock_2xx_consumes_exact_ephemeral_release_after_revalidation(monkeypatch, tmp_path):
+    from inktime.app.services.photopainter_stock import StockCompatibilityService
+
+    service = _real_stock_release_service(tmp_path)
+    release_id = "stock-success"
+    _write_stock_release(service.release_root, release_id)
+    monkeypatch.setattr(
+        "inktime.app.services.photopainter_stock.packed_frame_to_stock_payload",
+        lambda *_args, **_kwargs: b"stock-payload",
+    )
+    transport = SimpleNamespace(upload=lambda *_args: SimpleNamespace(status_code=204))
+    result = StockCompatibilityService(service, transport).display_stock_test_release(
+        device_id="stock-device",
+        profile_key="safe_4c",
+        release_id=release_id,
+        file_name="photo_1.bin",
+        host="stock-host",
+    )
+    assert result["upload_accepted"] is True
+    assert result["ephemeral_release_consumed"] is True
+    assert not (service.release_root / release_id).exists()
+    assert not (
+        service.release_root / ".stock-direct-tests" / f"{release_id}.json"
+    ).exists()
+
+
+@pytest.mark.parametrize(
+    "protection",
+    ["database", "latest", "legacy_latest", "custom_assignment", "other_assignment"],
+)
+def test_stock_consume_preserves_any_managed_release_reference(tmp_path, protection):
+    release_id = f"stock-protected-{protection}"
+    service = _real_stock_release_service(
+        tmp_path, referenced={release_id} if protection == "database" else None
+    )
+    _write_stock_release(service.release_root, release_id)
+    if protection == "latest":
+        (service.release_root / "latest.safe_4c").write_text(release_id, encoding="utf-8")
+    elif protection == "legacy_latest":
+        (service.release_root / "latest").write_text(release_id, encoding="utf-8")
+    elif protection in {"custom_assignment", "other_assignment"}:
+        service.test_store.assign(
+            "other-device" if protection == "other_assignment" else "stock-device",
+            release_id,
+            profile_key="safe_4c",
+            delivery="next_wake",
+            one_time=True,
+            restore_formal=True,
+        )
+    assert service.consume_stock_test_release(
+        device_id="stock-device", profile_key="safe_4c", release_id=release_id
+    ) is False
+    assert (service.release_root / release_id).is_dir()
+
+
+def test_stock_cleanup_is_ttl_based_bounded_and_drains_repeated_failures(tmp_path):
+    service = _real_stock_release_service(tmp_path)
+    now = datetime.now(timezone.utc)
+    for index in range(5):
+        _write_stock_release(
+            service.release_root,
+            f"stock-expired-{index}",
+            expires_at=now - timedelta(minutes=1),
+        )
+    _write_stock_release(
+        service.release_root,
+        "stock-recent",
+        expires_at=now + timedelta(minutes=30),
+    )
+    first = service.cleanup_expired_stock_test_releases(maximum=2, now=now)
+    assert first == {"examined": 2, "removed": 2}
+    assert (service.release_root / "stock-recent").is_dir()
+
+
+def test_repeated_expired_stock_tests_are_drained_in_bounded_batches(tmp_path):
+    service = _real_stock_release_service(tmp_path)
+    now = datetime.now(timezone.utc)
+    for index in range(64):
+        _write_stock_release(
+            service.release_root,
+            f"stock-repeated-{index:02d}",
+            expires_at=now - timedelta(seconds=1),
+        )
+    results = [
+        service.cleanup_expired_stock_test_releases(maximum=16, now=now)
+        for _ in range(4)
+    ]
+    assert all(result["examined"] <= 16 for result in results)
+    assert sum(result["removed"] for result in results) == 64
+    assert list(service.release_root.glob("stock-repeated-*")) == []
+
+
+def test_formal_marker_and_release_id_traversal_fail_closed(tmp_path):
+    service = _real_stock_release_service(tmp_path)
+    now = datetime.now(timezone.utc)
+    formal_id = "formal-preserved"
+    _write_stock_release(
+        service.release_root,
+        formal_id,
+        expires_at=now - timedelta(minutes=1),
+        manifest_overrides={"release_kind": "formal"},
+    )
+    result = service.cleanup_expired_stock_test_releases(maximum=8, now=now)
+    assert result == {"examined": 1, "removed": 0}
+    assert (service.release_root / formal_id).is_dir()
+
+    traversal = service.authorize_stock_test_release_for_device(
+        device_id="stock-device",
+        profile_key="safe_4c",
+        release_id="../outside",
+    )
+    assert traversal.allowed is False
+    assert traversal.reason == "invalid_release_id"
+    for _ in range(4):
+        service.cleanup_expired_stock_test_releases(maximum=2, now=now)
+    remaining = [path.name for path in service.release_root.glob("stock-expired-*")]
+    assert remaining == []
+    assert (service.release_root / "stock-recent").is_dir()
+
+
+def test_stock_symlink_and_malformed_manifest_are_preserved_fail_closed(tmp_path):
+    service = _real_stock_release_service(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "manifest.json").write_text("{}", encoding="utf-8")
+    (service.release_root / "stock-symlink").symlink_to(outside, target_is_directory=True)
+    symlink_auth = service.authorize_stock_test_release_for_device(
+        device_id="stock-device", profile_key="safe_4c", release_id="stock-symlink"
+    )
+    assert symlink_auth.allowed is False
+    assert outside.is_dir()
+
+    malformed = service.release_root / "stock-malformed"
+    malformed.mkdir()
+    (malformed / "manifest.json").write_text("{", encoding="utf-8")
+    malformed_auth = service.authorize_stock_test_release_for_device(
+        device_id="stock-device", profile_key="safe_4c", release_id="stock-malformed"
+    )
+    assert malformed_auth.allowed is False
+    assert malformed.is_dir()
+
+    marker_root = service.release_root / ".stock-direct-tests"
+    marker_root.mkdir(exist_ok=True)
+    marker_root.rmdir()
+    outside_marker_root = tmp_path / "outside-markers"
+    outside_marker_root.mkdir()
+    outside_marker = outside_marker_root / "do-not-delete.json"
+    outside_marker.write_text("{}", encoding="utf-8")
+    marker_root.symlink_to(outside_marker_root, target_is_directory=True)
+    assert service.cleanup_expired_stock_test_releases() == {
+        "examined": 0,
+        "removed": 0,
+    }
+    assert outside_marker.is_file()
+
+
+def test_stock_device_target_is_frozen_before_await_and_labels_match_contract():
+    template = (
+        Path(__file__).parents[2] / "inktime/app/web/templates/simulator.html"
+    ).read_text(encoding="utf-8")
+    function = template.split("async function sendStockTest()", 1)[1].split(
+        "async function sendTest()", 1
+    )[0]
+    before_first_await, after_first_await = function.split("await", 1)
+    assert "Object.freeze" in before_first_await
+    assert "deviceId:select.value" in before_first_await
+    assert "lockedControls=[select,firmware,profile,button]" in before_first_await
+    assert "select.value" not in after_first_await
+    assert "target.deviceId" in after_first_await
+    assert "deterministic sample" not in template.lower()
+    assert "deterministic 預設樣本" not in template.lower()
+    assert "built-in sample" in template.lower()
+
+    from inktime.app.services.rendering import FIT_MODES
+
+    assert FIT_MODES["stretch_fill"] == "填滿照片區（不裁切，可微變形）"
+    assert FIT_MODES["contain"] == "完整顯示"

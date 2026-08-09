@@ -8,12 +8,18 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
+import shutil
 import stat
 from typing import Any, Mapping
 
 from inktime.app.core.paths import UnsafePathError
 from inktime.app.db import Database
 from inktime.app.domain.rendering import DeviceTestReleaseStore
+from inktime.app.domain.rendering.release import (
+    DEVICE_TEST_INDEX_DIRECTORY,
+    STOCK_DIRECT_TEST_DIRECTORY,
+)
 
 
 _RELEASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -21,6 +27,8 @@ _ACTIVE_QUEUE_STATES = ("READY", "AVAILABLE", "DOWNLOADED", "ACKNOWLEDGED")
 _DOWNLOADABLE_RELEASE_STATES = {"published"}
 _PAYLOAD_SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 MAX_DEVICE_PAYLOAD_BYTES = 64 * 1024 * 1024
+MAX_STOCK_CLEANUP_MARKERS = 32
+MAX_STOCK_CLEANUP_PAYLOAD_BYTES = 8 * 1024 * 1024
 
 
 def payload_entry_from_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
@@ -146,12 +154,36 @@ class DeviceReleaseService:
         pointer = self.release_root / f"latest.{profile_key}"
         if not pointer.exists() and profile_key == "safe_4c":
             pointer = self.release_root / "latest"
+        return self._read_pointer(pointer)
+
+    def _read_pointer(self, pointer: Path) -> str | None:
         try:
             with self._open_readonly(pointer) as handle:
                 value = handle.read(256).decode("utf-8").strip()
         except (FileNotFoundError, OSError, UnicodeDecodeError, UnsafePathError):
             return None
         return value if _RELEASE_ID.fullmatch(value) else None
+
+    def _unlink_managed_file(self, directory_name: str, filename: str) -> None:
+        if (
+            not directory_name.startswith(".")
+            or "/" in directory_name
+            or "\\" in directory_name
+            or not filename
+            or "/" in filename
+            or "\\" in filename
+        ):
+            return
+        try:
+            with self._open_directory(self.release_root / directory_name) as (
+                directory_fd,
+                _identity,
+            ):
+                metadata = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
+                if stat.S_ISREG(metadata.st_mode):
+                    os.unlink(filename, dir_fd=directory_fd)
+        except (FileNotFoundError, OSError, UnsafePathError):
+            return
 
     def _load_manifest(
         self,
@@ -301,7 +333,7 @@ class DeviceReleaseService:
             or str(options.get("stock_direct_device_id")) != device_id
         ):
             return DeviceReleaseAuthorization(False, None, "not_stock_test_release", release_id)
-        return DeviceReleaseAuthorization(
+        authorization = DeviceReleaseAuthorization(
             allowed=True,
             source="stock_direct_test",
             reason=None,
@@ -311,6 +343,240 @@ class DeviceReleaseService:
             test_assignment=None,
             release_dir_identity=release_dir_identity,
         )
+        try:
+            entry = self.payload_entry_for_authorization(authorization)
+            self.read_payload(authorization, str(entry["name"]))
+        except (FileNotFoundError, OSError, PermissionError, UnsafePathError, ValueError):
+            return DeviceReleaseAuthorization(False, None, "invalid_payload", release_id)
+        return authorization
+
+    @staticmethod
+    def _stock_manifest_matches(
+        manifest: Mapping[str, Any],
+        *,
+        device_id: str,
+        profile_key: str,
+        expires_at: str | None = None,
+    ) -> bool:
+        options = manifest.get("render_options")
+        return bool(
+            manifest.get("release_kind") == "device_test"
+            and str(manifest.get("render_profile") or "") == profile_key
+            and isinstance(options, dict)
+            and options.get("transport") == "stock_direct"
+            and options.get("stock_direct") is True
+            and str(options.get("stock_direct_device_id") or "") == device_id
+            and (
+                expires_at is None
+                or str(options.get("stock_direct_expires_at") or "") == expires_at
+            )
+        )
+
+    def _stock_release_has_managed_reference(
+        self,
+        *,
+        device_id: str,
+        profile_key: str,
+        release_id: str,
+    ) -> bool:
+        if self.test_store.references_release_any(release_id):
+            return True
+        if any(
+            self._read_pointer(pointer) == release_id
+            for pointer in (
+                self.release_root / "latest",
+                self.release_root / f"latest.{profile_key}",
+            )
+        ):
+            return True
+        with self.database.session() as connection:
+            referenced = connection.execute(
+                """
+                SELECT 1 FROM (
+                    SELECT release_id AS value FROM device_render_releases WHERE release_id=?
+                    UNION ALL
+                    SELECT id AS value FROM releases WHERE id=?
+                    UNION ALL
+                    SELECT release_id AS value FROM device_content_queue_items WHERE release_id=?
+                ) LIMIT 1
+                """,
+                (release_id, release_id, release_id),
+            ).fetchone()
+        return referenced is not None
+
+    def _remove_stock_release(
+        self,
+        authorization: DeviceReleaseAuthorization,
+        *,
+        device_id: str,
+        profile_key: str,
+        expires_at: str | None = None,
+    ) -> bool:
+        if authorization.release_dir_identity is None:
+            return False
+        release_id = authorization.release_id
+        try:
+            release_dir, identity, manifest = self._load_manifest(release_id)
+            if (
+                identity != authorization.release_dir_identity
+                or not self._stock_manifest_matches(
+                    manifest,
+                    device_id=device_id,
+                    profile_key=profile_key,
+                    expires_at=expires_at,
+                )
+            ):
+                return False
+            current = DeviceReleaseAuthorization(
+                allowed=True,
+                source=authorization.source,
+                reason=None,
+                release_id=release_id,
+                release_dir=release_dir,
+                manifest=manifest,
+                release_dir_identity=identity,
+            )
+            entry = self.payload_entry_for_authorization(current)
+            self.read_payload(current, str(entry["name"]))
+        except (FileNotFoundError, OSError, PermissionError, UnsafePathError, ValueError):
+            return False
+        if self._stock_release_has_managed_reference(
+            device_id=device_id,
+            profile_key=profile_key,
+            release_id=release_id,
+        ):
+            return False
+        tombstone_name = f".stock-consumed-{release_id}-{secrets.token_hex(4)}"
+        tombstone = self.release_root / tombstone_name
+        try:
+            with self._open_directory(self.release_root) as (root_fd, _root_identity):
+                metadata = os.stat(release_id, dir_fd=root_fd, follow_symlinks=False)
+                identity = (int(metadata.st_dev), int(metadata.st_ino))
+                if not stat.S_ISDIR(metadata.st_mode) or identity != authorization.release_dir_identity:
+                    raise UnsafePathError("Release 目錄在清理前已被替換")
+                os.rename(
+                    release_id,
+                    tombstone_name,
+                    src_dir_fd=root_fd,
+                    dst_dir_fd=root_fd,
+                )
+        except (FileNotFoundError, OSError, UnsafePathError):
+            return False
+        options = manifest.get("render_options") or {}
+        idempotency_key = str(options.get("idempotency_key") or "") if isinstance(options, dict) else ""
+        if idempotency_key:
+            digest = sha256(idempotency_key.encode("utf-8")).hexdigest()
+            self._unlink_managed_file(
+                DEVICE_TEST_INDEX_DIRECTORY,
+                f"{digest}.json",
+            )
+        self._unlink_managed_file(
+            STOCK_DIRECT_TEST_DIRECTORY,
+            f"{release_id}.json",
+        )
+        shutil.rmtree(tombstone, ignore_errors=True)
+        return True
+
+    def consume_stock_test_release(
+        self,
+        *,
+        device_id: str,
+        profile_key: str,
+        release_id: str,
+    ) -> bool:
+        """Revalidate and consume one unreferenced ephemeral Stock release."""
+        authorization = self.authorize_stock_test_release_for_device(
+            device_id=device_id,
+            profile_key=profile_key,
+            release_id=release_id,
+        )
+        if not authorization.allowed or authorization.manifest is None:
+            return False
+        return self._remove_stock_release(
+            authorization,
+            device_id=device_id,
+            profile_key=profile_key,
+        )
+
+    def cleanup_expired_stock_test_releases(
+        self,
+        *,
+        maximum: int = MAX_STOCK_CLEANUP_MARKERS,
+        now: datetime | None = None,
+    ) -> dict[str, int]:
+        """Bounded opportunistic cleanup for expired Stock-direct markers."""
+        limit = max(1, min(int(maximum), MAX_STOCK_CLEANUP_MARKERS))
+        marker_root = self.release_root / STOCK_DIRECT_TEST_DIRECTORY
+        if marker_root.is_symlink() or marker_root.resolve().parent != self.release_root:
+            return {"examined": 0, "removed": 0}
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        examined = removed = validated_bytes = 0
+        try:
+            entries = os.scandir(marker_root)
+        except (FileNotFoundError, NotADirectoryError, OSError):
+            return {"examined": 0, "removed": 0}
+        with entries:
+            for entry in entries:
+                if examined >= limit:
+                    break
+                examined += 1
+                if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                    continue
+                try:
+                    with self._open_readonly(Path(entry.path)) as handle:
+                        raw = handle.read(16 * 1024 + 1)
+                    marker = json.loads(raw.decode("utf-8"))
+                    if len(raw) > 16 * 1024 or not isinstance(marker, dict):
+                        continue
+                    release_id = str(marker.get("release_id") or "")
+                    device_id = str(marker.get("device_id") or "")
+                    profile_key = str(marker.get("profile_key") or "")
+                    expires_at = str(marker.get("expires_at") or "")
+                    expiry = datetime.fromisoformat(expires_at)
+                    if expiry.tzinfo is None or expiry > current:
+                        continue
+                    release_dir, identity, manifest = self._load_manifest(release_id)
+                    if not self._stock_manifest_matches(
+                        manifest,
+                        device_id=device_id,
+                        profile_key=profile_key,
+                        expires_at=expires_at,
+                    ):
+                        continue
+                    authorization = DeviceReleaseAuthorization(
+                        allowed=True,
+                        source="stock_direct_test_expired",
+                        reason=None,
+                        release_id=release_id,
+                        release_dir=release_dir,
+                        manifest=manifest,
+                        release_dir_identity=identity,
+                    )
+                    payload_entry = self.payload_entry_for_authorization(authorization)
+                    payload_size = int(payload_entry["size"])
+                    if validated_bytes + payload_size > MAX_STOCK_CLEANUP_PAYLOAD_BYTES:
+                        continue
+                    validated_bytes += payload_size
+                    if self._remove_stock_release(
+                        authorization,
+                        device_id=device_id,
+                        profile_key=profile_key,
+                        expires_at=expires_at,
+                    ):
+                        removed += 1
+                except (
+                    FileNotFoundError,
+                    OSError,
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                    PermissionError,
+                    UnsafePathError,
+                    ValueError,
+                ):
+                    continue
+        return {"examined": examined, "removed": removed}
 
     def latest_for_device(
         self,
