@@ -481,7 +481,7 @@ def _persist_custom_preset(payload: dict) -> dict:
     encoded = json.dumps(existing, ensure_ascii=False, separators=(",", ":"))
     if len(encoded) > 50_000:
         raise ValueError("RENDER-007 自訂 Preset 總資料量超過 50000 字元")
-    current_app.extensions["inktime_settings_repository"].update(
+    current_app.extensions["inktime_settings_mutation_service"].update(
         "render.custom_photo_presets",
         encoded,
         changed_by=str(g.user["id"]),
@@ -930,7 +930,7 @@ def preview_font():
 
 
 def _set_current_font(reference: str) -> None:
-    current_app.extensions["inktime_settings_repository"].update(
+    current_app.extensions["inktime_settings_mutation_service"].update(
         "render.font_path",
         reference,
         changed_by=g.user["id"],

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, timezone
+import json
 import re
-from typing import Any, Mapping
-from zoneinfo import ZoneInfo
+from typing import Any, Mapping, Sequence
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 _TIME = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
@@ -24,6 +26,36 @@ OFFLINE_CAPABILITY_USABLE_STATES = frozenset(
     {OFFLINE_CAPABILITY_UNKNOWN_12, OFFLINE_CAPABILITY_CONFIRMED_24}
 )
 OFFLINE_PREPARE_BOOTSTRAP_AT = "1970-01-01T00:00:00+00:00"
+
+
+@dataclass(frozen=True)
+class StoredScheduleState:
+    """Lossless view of a stored schedule used by quarantine remediation."""
+
+    raw: str
+    is_array: bool
+    values: list[Any]
+
+
+@dataclass(frozen=True)
+class OfflinePreparePlan:
+    """Pure, timezone-aware decision shared by Scheduler and persistence."""
+
+    due_target_dates: tuple[date, ...]
+    next_deadline: datetime
+
+
+def stored_schedule_state(value: object) -> StoredScheduleState:
+    """Decode a schedule without destroying malformed or non-array history."""
+
+    raw = str(value) if value is not None else "[]"
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return StoredScheduleState(raw=raw, is_array=False, values=[])
+    if not isinstance(parsed, list):
+        return StoredScheduleState(raw=raw, is_array=False, values=[])
+    return StoredScheduleState(raw=raw, is_array=True, values=list(parsed))
 
 
 def resolve_offline_schedule_max_slots(capabilities: Mapping[str, Any] | None) -> int:
@@ -122,6 +154,110 @@ def normalize_delivery_contract(
     if offline_prefetch_allowed != expected:
         raise ValueError("DEVICE-008 delivery_mode 與 offline_prefetch_allowed 不一致")
     return mode, expected
+
+
+def offline_prepare_plan(
+    *,
+    now: datetime,
+    timezone_name: str,
+    schedule_times: Sequence[str],
+    prefetch_lead_minutes: int,
+    server_margin_minutes: int,
+    future_prepare_hour_local: int,
+    sync_strategy: str = "first_display_lead",
+    sync_time: str | None = None,
+    minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
+    maximum_slots: int = MAX_OFFLINE_SLOTS,
+    skip_target_dates: Sequence[str] = (),
+) -> OfflinePreparePlan:
+    """Resolve due local dates and the next persisted deadline once.
+
+    This is the canonical server preparation policy.  The Scheduler consumes
+    ``due_target_dates`` while the repository persists ``next_deadline``;
+    keeping both projections here prevents their today/tomorrow semantics from
+    drifting apart.
+    """
+
+    if type(prefetch_lead_minutes) is not int or not 0 <= prefetch_lead_minutes <= 120:
+        raise ValueError("DEVICE-008 prefetch_lead_minutes 不合法")
+    if type(server_margin_minutes) is not int or not 0 <= server_margin_minutes <= 60:
+        raise ValueError("DEVICE-008 server_prefetch_margin_minutes 不合法")
+    if type(future_prepare_hour_local) is not int or not 0 <= future_prepare_hour_local <= 23:
+        raise ValueError("DEVICE-008 future_schedule_prepare_hour_local 不合法")
+    try:
+        zone = ZoneInfo(str(timezone_name))
+    except (TypeError, ValueError, ZoneInfoNotFoundError) as exc:
+        raise ValueError("DEVICE-008 裝置 IANA 時區不合法") from exc
+    current = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    local_now = current.astimezone(zone)
+    strategy, normalized_sync_time = normalize_sync_strategy(sync_strategy, sync_time)
+    slots = validate_offline_schedule(
+        list(schedule_times),
+        maximum=resolve_offline_schedule_max_slots(
+            {"offline_schedule_max_slots": maximum_slots}
+        ),
+        minimum_gap_minutes=minimum_gap_minutes,
+    )
+    skipped = {str(value) for value in skip_target_dates}
+    lead_and_margin = timedelta(minutes=prefetch_lead_minutes + server_margin_minutes)
+
+    def slot_at(target: date, slot: str) -> datetime:
+        hour, minute = (int(part) for part in slot.split(":"))
+        return datetime.combine(target, time(hour, minute), tzinfo=zone)
+
+    def technical_deadline(target: date) -> datetime:
+        if strategy == "fixed_daily":
+            assert normalized_sync_time is not None
+            hour, minute = (int(part) for part in normalized_sync_time.split(":"))
+            return datetime.combine(target, time(hour, minute), tzinfo=zone)
+        return slot_at(target, slots[0]) - lead_and_margin
+
+    today = local_now.date()
+    due: list[date] = []
+    if today.isoformat() not in skipped:
+        today_technical = technical_deadline(today)
+        if local_now >= today_technical and any(
+            slot_at(today, slot) > local_now for slot in slots
+        ):
+            due.append(today)
+    tomorrow = today + timedelta(days=1)
+    if tomorrow.isoformat() not in skipped:
+        handoff = datetime.combine(
+            today,
+            time(future_prepare_hour_local, 0),
+            tzinfo=zone,
+        )
+        if local_now >= min(technical_deadline(tomorrow), handoff):
+            due.append(tomorrow)
+
+    next_deadline: datetime | None = None
+    for offset in range(3):
+        target = today + timedelta(days=offset)
+        if target.isoformat() in skipped:
+            continue
+        technical = technical_deadline(target)
+        if offset == 0:
+            if local_now < technical:
+                next_deadline = technical
+                break
+            if any(slot_at(target, slot) > local_now for slot in slots):
+                next_deadline = local_now
+                break
+            continue
+        handoff = datetime.combine(
+            target - timedelta(days=1),
+            time(future_prepare_hour_local, 0),
+            tzinfo=zone,
+        )
+        candidate = min(technical, handoff)
+        next_deadline = local_now if local_now >= candidate else candidate
+        break
+    if next_deadline is None:
+        next_deadline = local_now + timedelta(minutes=15)
+    return OfflinePreparePlan(
+        due_target_dates=tuple(due),
+        next_deadline=next_deadline.astimezone(timezone.utc),
+    )
 
 
 def schedule_minutes(value: str) -> int:

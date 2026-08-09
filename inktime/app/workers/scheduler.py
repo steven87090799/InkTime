@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, time as clock_time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import logging
 import os
@@ -19,7 +19,7 @@ from inktime.app.domain.jobs.failure_policy import (
 from inktime.app.domain.photopainter.offline_schedule import (
     MAX_OFFLINE_SLOTS,
     MINIMUM_SCHEDULE_GAP_MINUTES,
-    normalize_sync_strategy,
+    offline_prepare_plan,
     resolve_offline_schedule_max_slots,
     validate_offline_schedule,
 )
@@ -232,46 +232,25 @@ class SchedulerRunner:
         minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
         maximum_slots: int = MAX_OFFLINE_SLOTS,
     ) -> date | None:
-        """Return the latest local day whose first slot is due for prefetch."""
+        """Return today's target from the canonical domain policy."""
 
-        if type(lead_minutes) is not int or not 0 <= lead_minutes <= 120:
-            raise ValueError("DEVICE-008 prefetch_lead_minutes 不合法")
-        if type(server_margin_minutes) is not int or not 0 <= server_margin_minutes <= 60:
-            raise ValueError("DEVICE-008 server_prefetch_margin_minutes 不合法")
-        strategy, normalized_sync_time = normalize_sync_strategy(sync_strategy, sync_time)
-        slots = validate_offline_schedule(
-            schedule, maximum=maximum_slots, minimum_gap_minutes=minimum_gap_minutes
-        )
         zone = local_now.tzinfo
         if zone is None:
             raise ValueError("DEVICE-008 裝置時間必須包含時區")
-
-        def slot_at(target: date, slot: str) -> datetime:
-            hour, minute = (int(part) for part in slot.split(":"))
-            return datetime.combine(target, clock_time(hour, minute), tzinfo=zone)
-
-        def prefetch_at(target: date) -> datetime:
-            if strategy == "fixed_daily":
-                assert normalized_sync_time is not None
-                hour, minute = (int(part) for part in normalized_sync_time.split(":"))
-                return datetime.combine(target, clock_time(hour, minute), tzinfo=zone)
-            hour, minute = (int(part) for part in slots[0].split(":"))
-            return datetime.combine(target, clock_time(hour, minute), tzinfo=zone) - timedelta(
-                minutes=lead_minutes + server_margin_minutes
-            )
-
-        target = local_now.date()
-        if local_now < prefetch_at(target):
-            return None
-        # A day whose every display point has passed is no longer a useful
-        # today preparation target.  The caller may still add tomorrow after
-        # the configured local preparation hour.
-        if not any(slot_at(target, slot) > local_now for slot in slots):
-            return None
-        # This helper is intentionally today-only.  A separate tomorrow
-        # decision below prevents a due tomorrow preparation point from
-        # replacing a still-serviceable later slot today.
-        return target
+        plan = offline_prepare_plan(
+            now=local_now,
+            timezone_name=str(getattr(zone, "key", zone)),
+            schedule_times=schedule,
+            prefetch_lead_minutes=lead_minutes,
+            server_margin_minutes=server_margin_minutes,
+            future_prepare_hour_local=23,
+            sync_strategy=sync_strategy,
+            sync_time=sync_time,
+            minimum_gap_minutes=minimum_gap_minutes,
+            maximum_slots=maximum_slots,
+        )
+        today = local_now.date()
+        return today if today in plan.due_target_dates else None
 
     @staticmethod
     def _offline_tomorrow_prefetch_due(
@@ -285,39 +264,27 @@ class SchedulerRunner:
         minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
         maximum_slots: int = MAX_OFFLINE_SLOTS,
     ) -> bool:
-        """Return whether tomorrow needs technical preparation now."""
+        """Return tomorrow's target from the canonical domain policy."""
 
-        if type(future_prepare_hour) is not int or not 0 <= future_prepare_hour <= 23:
-            raise ValueError("DEVICE-008 future_schedule_prepare_hour_local 不合法")
-        if type(lead_minutes) is not int or not 0 <= lead_minutes <= 120:
-            raise ValueError("DEVICE-008 prefetch_lead_minutes 不合法")
-        if type(server_margin_minutes) is not int or not 0 <= server_margin_minutes <= 60:
-            raise ValueError("DEVICE-008 server_prefetch_margin_minutes 不合法")
-        strategy, normalized_sync_time = normalize_sync_strategy(sync_strategy, sync_time)
-        slots = validate_offline_schedule(
-            schedule, maximum=maximum_slots, minimum_gap_minutes=minimum_gap_minutes
-        )
         zone = local_now.tzinfo
         if zone is None:
             raise ValueError("DEVICE-008 裝置時間必須包含時區")
-        tomorrow = local_now.date() + timedelta(days=1)
-        configured = datetime.combine(
-            local_now.date(), clock_time(future_prepare_hour, 0), tzinfo=zone
+        plan = offline_prepare_plan(
+            now=local_now,
+            timezone_name=str(getattr(zone, "key", zone)),
+            schedule_times=schedule,
+            prefetch_lead_minutes=lead_minutes,
+            server_margin_minutes=server_margin_minutes,
+            future_prepare_hour_local=future_prepare_hour,
+            sync_strategy=sync_strategy,
+            sync_time=sync_time,
+            minimum_gap_minutes=minimum_gap_minutes,
+            maximum_slots=maximum_slots,
         )
-        if strategy == "fixed_daily":
-            assert normalized_sync_time is not None
-            hour, minute = (int(part) for part in normalized_sync_time.split(":"))
-            technical = datetime.combine(tomorrow, clock_time(hour, minute), tzinfo=zone)
-        else:
-            hour, minute = (int(part) for part in slots[0].split(":"))
-            technical = datetime.combine(
-                tomorrow, clock_time(hour, minute), tzinfo=zone
-            ) - timedelta(minutes=lead_minutes + server_margin_minutes)
-        return local_now >= min(configured, technical)
+        return local_now.date() + timedelta(days=1) in plan.due_target_dates
 
-    @classmethod
+    @staticmethod
     def _offline_prefetch_target_dates(
-        cls,
         local_now: datetime,
         schedule: list[str],
         lead_minutes: int,
@@ -328,36 +295,25 @@ class SchedulerRunner:
         minimum_gap_minutes: int = MINIMUM_SCHEDULE_GAP_MINUTES,
         maximum_slots: int = MAX_OFFLINE_SLOTS,
     ) -> list[date]:
-        """Return independent today/tomorrow preparation targets in order."""
+        """Return independent today/tomorrow targets from one domain policy."""
 
-        targets: list[date] = []
-        today = cls._offline_prefetch_target_date(
-            local_now,
-            schedule,
-            lead_minutes,
-            server_margin_minutes,
-            sync_strategy,
-            sync_time,
-            minimum_gap_minutes,
-            maximum_slots,
+        zone = local_now.tzinfo
+        if zone is None:
+            raise ValueError("DEVICE-008 裝置時間必須包含時區")
+        return list(
+            offline_prepare_plan(
+                now=local_now,
+                timezone_name=str(getattr(zone, "key", zone)),
+                schedule_times=schedule,
+                prefetch_lead_minutes=lead_minutes,
+                server_margin_minutes=server_margin_minutes,
+                future_prepare_hour_local=future_prepare_hour,
+                sync_strategy=sync_strategy,
+                sync_time=sync_time,
+                minimum_gap_minutes=minimum_gap_minutes,
+                maximum_slots=maximum_slots,
+            ).due_target_dates
         )
-        if today is not None:
-            targets.append(today)
-        if cls._offline_tomorrow_prefetch_due(
-            local_now,
-            schedule,
-            lead_minutes,
-            server_margin_minutes,
-            future_prepare_hour,
-            sync_strategy,
-            sync_time,
-            minimum_gap_minutes,
-            maximum_slots,
-        ):
-            tomorrow = local_now.date() + timedelta(days=1)
-            if tomorrow not in targets:
-                targets.append(tomorrow)
-        return targets
 
     def _prepare_due_offline_devices(self, now: datetime) -> None:
         offline_schedules = self.app.extensions.get("inktime_offline_schedule_repository")

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
+from inktime.app.domain.photopainter.offline_schedule import OFFLINE_PREPARE_BOOTSTRAP_AT
 from inktime.app.repositories.settings import (
     DEVICE_OVERRIDE_KEYS,
     SETTING_DEFINITIONS,
@@ -80,6 +83,327 @@ def test_partial_update_only_writes_changed_keys_and_creates_one_snapshot(client
         snapshots = connection.execute("SELECT changed_keys_json FROM settings_snapshots").fetchall()
     assert [row["key"] for row in history] == ["analysis.concurrency"]
     assert json.loads(snapshots[0]["changed_keys_json"]) == ["analysis.concurrency"]
+
+
+def test_offline_policy_change_invalidates_only_eligible_device_deadlines(client, app):
+    create_admin(app)
+    login(client)
+    devices = app.extensions["inktime_device_repository"]
+    eligible_12, _ = devices.create(
+        "eligible-12",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=["08:00"],
+    )
+    eligible_24, _ = devices.create(
+        "eligible-24",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=["08:00"],
+        offline_schedule_max_slots=24,
+    )
+    disabled, _ = devices.create(
+        "disabled",
+        enabled=False,
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=["08:00"],
+    )
+    online, _ = devices.create("online")
+    ambiguous, _ = devices.create(
+        "ambiguous",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=["08:00"],
+    )
+    future = "2099-01-01T00:00:00+00:00"
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            "UPDATE devices SET next_offline_prepare_at=? WHERE id IN (?,?,?,?,?)",
+            (future, eligible_12, eligible_24, disabled, online, ambiguous),
+        )
+        connection.execute(
+            """UPDATE devices
+               SET offline_schedule_capability_state='legacy_ambiguous'
+               WHERE id=?""",
+            (ambiguous,),
+        )
+
+    response = _post(
+        client,
+        "/api/v1/settings",
+        {"offline.server_prefetch_margin_minutes": 20},
+    )
+
+    assert response.status_code == 200
+    assert response.json["runtime_effects"]["offline_prepare_deadlines_invalidated"] == 2
+    with app.extensions["inktime_database"].session() as connection:
+        rows = connection.execute(
+            "SELECT id,next_offline_prepare_at FROM devices ORDER BY id"
+        ).fetchall()
+    deadlines = {str(row["id"]): row["next_offline_prepare_at"] for row in rows}
+    assert deadlines[eligible_12] == OFFLINE_PREPARE_BOOTSTRAP_AT
+    assert deadlines[eligible_24] == OFFLINE_PREPARE_BOOTSTRAP_AT
+    assert deadlines[disabled] == future
+    assert deadlines[online] == future
+    assert deadlines[ambiguous] == future
+
+    unchanged = _post(
+        client,
+        "/api/v1/settings",
+        {"offline.server_prefetch_margin_minutes": 20},
+    )
+    assert unchanged.json["updated"] == 0
+    assert unchanged.json["runtime_effects"] == {}
+
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            "UPDATE devices SET next_offline_prepare_at=? WHERE id=?",
+            (future, eligible_12),
+        )
+    unrelated = _post(
+        client,
+        "/api/v1/settings",
+        {"backup.retention": 15},
+    )
+    assert unrelated.status_code == 200
+    assert unrelated.json["runtime_effects"] == {}
+    assert devices.get(eligible_12)["next_offline_prepare_at"] == future
+
+
+@pytest.mark.parametrize(
+    ("key", "values"),
+    [
+        ("offline.server_prefetch_margin_minutes", (60, 15)),
+        ("offline.future_schedule_prepare_hour_local", (18, 20)),
+    ],
+)
+def test_offline_policy_changes_in_both_directions_rebootstrap_deadline(
+    app, key, values
+):
+    devices = app.extensions["inktime_device_repository"]
+    service = app.extensions["inktime_settings_mutation_service"]
+    device_id, _ = devices.create(
+        f"policy-{key}",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=["08:00"],
+    )
+    for value in values:
+        with app.extensions["inktime_database"].transaction() as connection:
+            connection.execute(
+                "UPDATE devices SET next_offline_prepare_at=? WHERE id=?",
+                ("2099-01-01T00:00:00+00:00", device_id),
+            )
+        result = service.update_many(
+            {key: value},
+            changed_by="test",
+            source_ip="127.0.0.1",
+        )
+        assert result["runtime_effects"]["offline_prepare_deadlines_invalidated"] == 1
+        assert devices.get(device_id)["next_offline_prepare_at"] == OFFLINE_PREPARE_BOOTSTRAP_AT
+
+
+def test_settings_side_effect_failure_rolls_back_setting_and_audit(app, monkeypatch):
+    service = app.extensions["inktime_settings_mutation_service"]
+
+    def fail_effect(*, connection):
+        del connection
+        raise sqlite3.IntegrityError("effect rollback")
+
+    monkeypatch.setattr(
+        app.extensions["inktime_offline_schedule_repository"],
+        "invalidate_prepare_deadlines_for_policy_change",
+        fail_effect,
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="effect rollback"):
+        service.update_many(
+            {"offline.future_schedule_prepare_hour_local": 21},
+            changed_by="test",
+            source_ip="127.0.0.1",
+        )
+    assert (
+        app.extensions["inktime_settings_repository"].get(
+            "offline.future_schedule_prepare_hour_local"
+        )
+        == 20
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM setting_history").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM settings_snapshots").fetchone()[0] == 0
+
+
+def test_import_and_rollback_share_offline_policy_invalidation(client, app):
+    create_admin(app)
+    login(client)
+    device_id, _ = app.extensions["inktime_device_repository"].create(
+        "policy-paths",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=["08:00"],
+    )
+    changed = _post(
+        client,
+        "/api/v1/settings",
+        {"offline.future_schedule_prepare_hour_local": 21},
+    )
+    snapshot_id = changed.json["snapshot_id"]
+
+    def set_future() -> None:
+        with app.extensions["inktime_database"].transaction() as connection:
+            connection.execute(
+                "UPDATE devices SET next_offline_prepare_at=? WHERE id=?",
+                ("2099-01-01T00:00:00+00:00", device_id),
+            )
+
+    set_future()
+    rolled_back = _post(
+        client,
+        f"/api/v1/settings/snapshots/{snapshot_id}/rollback",
+        {"confirm": True},
+    )
+    assert rolled_back.status_code == 200
+    assert rolled_back.json["runtime_effects"]["offline_prepare_deadlines_invalidated"] == 1
+
+    set_future()
+    imported = _post(
+        client,
+        "/api/v1/settings/import",
+        {
+            "confirm": True,
+            "document": {
+                "format": "inktime-settings",
+                "version": 1,
+                "settings": {"offline.future_schedule_prepare_hour_local": 22},
+            },
+        },
+    )
+    assert imported.status_code == 200
+    assert imported.json["runtime_effects"]["offline_prepare_deadlines_invalidated"] == 1
+    assert app.extensions["inktime_device_repository"].get(device_id)[
+        "next_offline_prepare_at"
+    ] == OFFLINE_PREPARE_BOOTSTRAP_AT
+
+
+def test_preset_apply_uses_application_settings_coordinator(client, app, monkeypatch):
+    create_admin(app)
+    login(client)
+    service = app.extensions["inktime_settings_mutation_service"]
+    original = service.update_many
+    calls: list[dict] = []
+
+    def record(updates, **kwargs):
+        calls.append(dict(updates))
+        return original(updates, **kwargs)
+
+    monkeypatch.setattr(service, "update_many", record)
+    response = _post(
+        client,
+        "/api/v1/settings/presets/gooddisplay_spectra6/apply",
+        {},
+    )
+    assert response.status_code == 200
+    assert calls and "render.profile" in calls[0]
+
+
+def test_runtime_timezone_change_rebases_enabled_cron_without_enqueuing(app):
+    assert SETTING_DEFINITIONS["general.timezone"]["restart"] is False
+    database = app.extensions["inktime_database"]
+    service = app.extensions["inktime_settings_mutation_service"]
+    fixed_now = datetime(2026, 3, 7, 12, 0, tzinfo=timezone.utc)
+
+    def fixed_clock() -> datetime:
+        return fixed_now
+
+    service.clock = fixed_clock
+    with database.transaction() as connection:
+        connection.execute(
+            """UPDATE scheduled_tasks
+               SET cron='30 7 * * *',weekdays_json='[]',
+                   last_success='enabled-success',last_failure='enabled-failure',
+                   error_status='enabled-retry'
+            """
+            "WHERE key='incremental_scan'"
+        )
+        connection.execute(
+            "UPDATE scheduled_tasks SET cron='0 4 1 * *',weekdays_json='[]' "
+            "WHERE key='full_reconcile'"
+        )
+        connection.execute(
+            "UPDATE scheduled_tasks SET cron='0 1 1 1 *',weekdays_json='[]' "
+            "WHERE key='ai_schedule'"
+        )
+        connection.execute(
+            "UPDATE scheduled_tasks SET cron='0 9 * * *',weekdays_json='[0,2]' "
+            "WHERE key='display_prepare'"
+        )
+        connection.execute(
+            """UPDATE scheduled_tasks
+               SET enabled=0,next_run=NULL,last_success='success-marker',
+                   last_failure='failure-marker',error_status='retry-marker'
+               WHERE key='cache_cleanup'"""
+        )
+    before_jobs = len(app.extensions["inktime_job_repository"].list())
+
+    result = service.update_many(
+        {"general.timezone": "America/Los_Angeles"},
+        changed_by="test",
+        source_ip="127.0.0.1",
+    )
+
+    assert result["runtime_effects"]["scheduled_tasks_rebased"] == 4
+    tasks = {
+        task["key"]: task for task in app.extensions["inktime_schedule_repository"].list()
+    }
+    local_runs = {
+        key: datetime.fromisoformat(str(tasks[key]["next_run"])).astimezone(
+            ZoneInfo("America/Los_Angeles")
+        )
+        for key in ("incremental_scan", "full_reconcile", "ai_schedule", "display_prepare")
+    }
+    assert (local_runs["incremental_scan"].month, local_runs["incremental_scan"].day) == (3, 7)
+    assert (local_runs["incremental_scan"].hour, local_runs["incremental_scan"].minute) == (7, 30)
+    assert (
+        tasks["incremental_scan"]["last_success"],
+        tasks["incremental_scan"]["last_failure"],
+        tasks["incremental_scan"]["error_status"],
+    ) == ("enabled-success", "enabled-failure", "enabled-retry")
+    assert (local_runs["full_reconcile"].month, local_runs["full_reconcile"].day) == (4, 1)
+    assert (local_runs["ai_schedule"].year, local_runs["ai_schedule"].month) == (2027, 1)
+    assert local_runs["display_prepare"].weekday() == 0
+    assert local_runs["display_prepare"].hour == 9
+    disabled = tasks["cache_cleanup"]
+    assert disabled["next_run"] is None
+    assert (
+        disabled["last_success"],
+        disabled["last_failure"],
+        disabled["error_status"],
+    ) == ("success-marker", "failure-marker", "retry-marker")
+    assert len(app.extensions["inktime_job_repository"].list()) == before_jobs
+
+    reversed_result = service.update_many(
+        {"general.timezone": "Asia/Taipei"},
+        changed_by="test",
+        source_ip="127.0.0.1",
+    )
+    assert reversed_result["runtime_effects"]["scheduled_tasks_rebased"] == 4
+    taipei_run = datetime.fromisoformat(
+        str(app.extensions["inktime_schedule_repository"].get("incremental_scan")["next_run"])
+    ).astimezone(ZoneInfo("Asia/Taipei"))
+    assert (taipei_run.hour, taipei_run.minute) == (7, 30)
+    assert len(app.extensions["inktime_job_repository"].list()) == before_jobs
+
+
+def test_schedule_due_comparison_and_dst_are_absolute_and_nonduplicating(app):
+    schedules = app.extensions["inktime_schedule_repository"]
+    zone = ZoneInfo("America/Los_Angeles")
+    spring = schedules._next_run("30 2 * * *", datetime(2026, 3, 8, 1, 59, tzinfo=zone), [])
+    assert spring == datetime(2026, 3, 9, 2, 30, tzinfo=zone)
+    first_fall = datetime(2026, 11, 1, 1, 30, tzinfo=zone, fold=0)
+    fall = schedules._next_run("30 1 * * *", first_fall, [])
+    assert fall == datetime(2026, 11, 2, 1, 30, tzinfo=zone)
+
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            "UPDATE scheduled_tasks SET enabled=1,next_run=? WHERE key='cache_cleanup'",
+            ("2026-01-01T00:30:00+14:00",),
+        )
+    due = schedules.due(datetime(2025, 12, 31, 11, 0, tzinfo=timezone.utc))
+    assert "cache_cleanup" in {task["key"] for task in due}
 
 
 def test_unknown_key_rejects_entire_partial_update(client, app):

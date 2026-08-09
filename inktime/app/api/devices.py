@@ -28,19 +28,17 @@ from inktime.app.domain.rendering.system_presets import DEFAULT_DEVICE_PANEL_PRO
 from inktime.app.domain.photopainter.offline_schedule import (
     LEGACY_MAX_OFFLINE_SLOTS,
     MINIMUM_SCHEDULE_GAP_MINUTES,
+    StoredScheduleState,
     normalize_delivery_contract,
     normalize_sync_strategy,
     offline_schedule_capability_is_usable,
     resolve_offline_schedule_max_slots,
+    stored_schedule_state,
     validate_offline_schedule,
 )
 from inktime.app.services.rendering import FIT_MODES, FRAME_ORIENTATIONS, LAYOUTS
 from inktime.app.services.stock_transport import UnsafeStockEndpoint, StockTransportError, validate_stock_endpoint_host
-from inktime.app.repositories.devices import (
-    DeviceRepository,
-    StoredScheduleState,
-    stored_schedule_state,
-)
+from inktime.app.repositories.devices import DeviceRepository
 from inktime.app.repositories.offline_schedules import OfflineScheduleRepository
 from inktime.app.web.access import administrator_required, login_required
 
@@ -478,9 +476,7 @@ def update_device(device_id: str):
     effective_enabled = (
         requested_enabled if type(requested_enabled) is bool else bool(existing["enabled"])
     )
-    safe_remediation = bool(
-        not effective_enabled or effective_delivery_mode != "inktime_offline_schedule"
-    )
+    safe_remediation = not effective_enabled or effective_delivery_mode != "inktime_offline_schedule"
     synthetic_schedule = _synthetic_full_form_schedule(
         payload,
         existing_schedule=str(existing["schedule"]),
@@ -519,7 +515,7 @@ def update_device(device_id: str):
             == int(existing["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES),
         )
     )
-    preserve_quarantined_schedule = bool(
+    preserve_quarantined_schedule = (
         str(existing["offline_schedule_capability_state"] or "") == "legacy_ambiguous"
         and schedule_unchanged
         and safe_remediation

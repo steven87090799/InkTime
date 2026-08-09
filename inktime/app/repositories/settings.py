@@ -2379,66 +2379,88 @@ class SettingsRepository:
         )
         if not changed:
             return {"updated": 0, "changed_keys": [], "snapshot_id": None}
-        now = datetime.now(timezone.utc).isoformat()
         with self.database.transaction() as connection:
-            before = self._values_from_connection(connection)
-            normalized = {key: self._coerce(key, value) for key, value in changed.items()}
-            after = before | normalized
-            self._validate_all(after)
-            actual = {key: value for key, value in normalized.items() if before.get(key) != value}
-            if not actual:
-                return {"updated": 0, "changed_keys": [], "snapshot_id": None}
-            snapshot_id = self._create_snapshot(
+            result = self.update_many_in_transaction(
                 connection,
-                before=before,
-                after=after,
-                changed=actual,
-                actor_id=changed_by,
+                changed,
+                changed_by=changed_by,
                 source_ip=source_ip,
                 reason=reason,
                 rollback_source_snapshot_id=rollback_source_snapshot_id,
             )
-            for key, value in actual.items():
-                definition = SETTING_DEFINITIONS[key]
-                encoded = json.dumps(value, ensure_ascii=False, allow_nan=False)
-                previous_summary = json.dumps(
-                    self._snapshot_value(key, before[key]),
-                    ensure_ascii=False,
-                    allow_nan=False,
-                )
-                new_summary = json.dumps(
-                    self._snapshot_value(key, value, changed=True),
-                    ensure_ascii=False,
-                    allow_nan=False,
-                )
-                connection.execute(
-                    "UPDATE settings SET value_json=?,updated_by=?,updated_at=? WHERE key=?",
-                    (
-                        encoded,
-                        None if value == definition["default"] else changed_by,
-                        now,
-                        key,
-                    ),
-                )
-                connection.execute(
-                    """
-                    INSERT INTO setting_history(
-                        key,changed_at,changed_by,old_value_summary,new_value_summary,source_ip,
-                        requires_restart
-                    ) VALUES (?,?,?,?,?,?,?)
-                    """,
-                    (
-                        key,
-                        now,
-                        changed_by,
-                        previous_summary[:500],
-                        new_summary[:500],
-                        source_ip[:64],
-                        int(definition.get("restart_required", False)),
-                    ),
-                )
-        self._runtime_cache.clear()
-        self._runtime_cache_at = 0.0
+        if result["updated"]:
+            self.invalidate_runtime_cache()
+        return result
+
+    def update_many_in_transaction(
+        self,
+        connection,
+        updates: dict[str, Any],
+        *,
+        changed_by: str,
+        source_ip: str,
+        reason: str | None = None,
+        rollback_source_snapshot_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist validated settings inside a caller-owned atomic transaction."""
+
+        before = self._values_from_connection(connection)
+        normalized = {key: self._coerce(key, value) for key, value in updates.items()}
+        after = before | normalized
+        self._validate_all(after)
+        actual = {key: value for key, value in normalized.items() if before.get(key) != value}
+        if not actual:
+            return {"updated": 0, "changed_keys": [], "snapshot_id": None}
+        now = datetime.now(timezone.utc).isoformat()
+        snapshot_id = self._create_snapshot(
+            connection,
+            before=before,
+            after=after,
+            changed=actual,
+            actor_id=changed_by,
+            source_ip=source_ip,
+            reason=reason,
+            rollback_source_snapshot_id=rollback_source_snapshot_id,
+        )
+        for key, value in actual.items():
+            definition = SETTING_DEFINITIONS[key]
+            encoded = json.dumps(value, ensure_ascii=False, allow_nan=False)
+            previous_summary = json.dumps(
+                self._snapshot_value(key, before[key]),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            new_summary = json.dumps(
+                self._snapshot_value(key, value, changed=True),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            connection.execute(
+                "UPDATE settings SET value_json=?,updated_by=?,updated_at=? WHERE key=?",
+                (
+                    encoded,
+                    None if value == definition["default"] else changed_by,
+                    now,
+                    key,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO setting_history(
+                    key,changed_at,changed_by,old_value_summary,new_value_summary,source_ip,
+                    requires_restart
+                ) VALUES (?,?,?,?,?,?,?)
+                """,
+                (
+                    key,
+                    now,
+                    changed_by,
+                    previous_summary[:500],
+                    new_summary[:500],
+                    source_ip[:64],
+                    int(definition.get("restart_required", False)),
+                ),
+            )
         return {
             "updated": len(actual),
             "changed_keys": sorted(actual),

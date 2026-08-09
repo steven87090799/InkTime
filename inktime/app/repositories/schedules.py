@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from builtins import list as builtin_list
 from contextlib import nullcontext
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -204,10 +204,43 @@ class ScheduledTaskRepository:
     def due(self, now: datetime) -> builtin_list[dict[str, Any]]:
         with self.database.session() as connection:
             rows = connection.execute(
-                "SELECT * FROM scheduled_tasks WHERE enabled=1 AND next_run IS NOT NULL AND next_run<=? ORDER BY next_run,key",
+                """SELECT * FROM scheduled_tasks
+                   WHERE enabled=1 AND next_run IS NOT NULL
+                     AND julianday(next_run)<=julianday(?)
+                   ORDER BY julianday(next_run),key""",
                 (now.isoformat(),),
             ).fetchall()
         return [self._row(row) for row in rows]
+
+    def rebase_enabled_next_runs(
+        self,
+        timezone_name: str,
+        *,
+        now: datetime,
+        connection,
+    ) -> int:
+        """Rebase enabled cron cursors after a live system-timezone change."""
+
+        zone = ZoneInfo(str(timezone_name))
+        authoritative = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+        local_now = authoritative.astimezone(zone)
+        rows = connection.execute(
+            """SELECT key,cron,weekdays_json,next_run
+               FROM scheduled_tasks WHERE enabled=1 ORDER BY key"""
+        ).fetchall()
+        updated = 0
+        changed_at = utc_now()
+        for row in rows:
+            weekdays = json.loads(str(row["weekdays_json"] or "[]"))
+            next_run = self._next_run(str(row["cron"]), local_now, weekdays).isoformat()
+            if str(row["next_run"] or "") == next_run:
+                continue
+            connection.execute(
+                "UPDATE scheduled_tasks SET next_run=?,updated_at=? WHERE key=?",
+                (next_run, changed_at, str(row["key"])),
+            )
+            updated += 1
+        return updated
 
     def mark_enqueued(self, task: dict[str, Any], now: datetime) -> None:
         next_run = self._next_run(task["cron"], now, task["weekdays"]).isoformat()
@@ -227,8 +260,9 @@ class ScheduledTaskRepository:
     ) -> None:
         """Record success and repair only an unadvanced scheduled cursor."""
 
-        del now
         occurrence = datetime.fromisoformat(scheduled_occurrence_at)
+        if occurrence.tzinfo is not None and now.tzinfo is not None:
+            occurrence = occurrence.astimezone(now.tzinfo)
         repaired_next_run = self._next_run(
             task["cron"], occurrence, task["weekdays"]
         ).isoformat()
@@ -447,8 +481,40 @@ class ScheduledTaskRepository:
 
     def _next_run(self, cron: str, after: datetime, weekdays: builtin_list[int]) -> datetime:
         minute, hour, day, month, weekday = cron.split()
-        candidate = after.replace(second=0, microsecond=0) + timedelta(minutes=1)
-        for _ in range(527041):
+        if after.tzinfo is None:
+            candidate = after.replace(second=0, microsecond=0) + timedelta(minutes=1)
+            candidates = (candidate + timedelta(minutes=offset) for offset in range(527041))
+        else:
+            zone = after.tzinfo
+            candidate_utc = (
+                after.astimezone(timezone.utc).replace(second=0, microsecond=0)
+                + timedelta(minutes=1)
+            )
+            candidates = (
+                (candidate_utc + timedelta(minutes=offset)).astimezone(zone)
+                for offset in range(527041)
+            )
+        max_wall_minute = (
+            after.year,
+            after.month,
+            after.day,
+            after.hour,
+            after.minute,
+        )
+        for candidate in candidates:
+            wall_minute = (
+                candidate.year,
+                candidate.month,
+                candidate.day,
+                candidate.hour,
+                candidate.minute,
+            )
+            # A fall-back fold repeats local wall minutes.  Treat one wall
+            # minute as one cron occurrence so the same task is not enqueued
+            # twice; absolute-minute iteration naturally skips spring gaps.
+            if wall_minute <= max_wall_minute:
+                continue
+            max_wall_minute = wall_minute
             cron_weekday = (candidate.weekday() + 1) % 7
             if (
                 self._matches(minute, candidate.minute)
@@ -459,5 +525,4 @@ class ScheduledTaskRepository:
                 and (not weekdays or candidate.weekday() in weekdays)
             ):
                 return candidate
-            candidate += timedelta(minutes=1)
         raise ValueError("Cron 一年內沒有可執行時間")

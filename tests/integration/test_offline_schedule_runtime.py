@@ -190,6 +190,66 @@ def test_prepare_day_recovers_terminal_shortage_and_clears_outcome(app):
     assert schedule["terminal_outcome_code"] is None
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("frame_orientation", "landscape"),
+        ("layout_mode", "adaptive_memory"),
+        ("fit_mode", "cover"),
+        ("panel_profile", "gdep073e01_6c"),
+    ],
+)
+def test_render_input_change_supersedes_future_playlist_and_rejects_stale_prepare(
+    app, field, value
+):
+    devices = app.extensions["inktime_device_repository"]
+    device_id, _token = devices.create(
+        "render version guard",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=["08:00"],
+    )
+    release = _release(app, f"render-version-old-{field}")
+    target = (datetime.now(ZoneInfo("Asia/Taipei")).date() + timedelta(days=1)).isoformat()
+    repository = app.extensions["inktime_offline_schedule_repository"]
+    prepared = repository.prepare_day(
+        device_id=device_id,
+        target_date=target,
+        release_ids=[release["release_id"]],
+    )
+    old_config_version = int(prepared["schedule"]["config_version"])
+    old_offline_version = int(devices.get(device_id)["offline_schedule_version"])
+
+    devices.update_render_inputs(device_id, **{field: value})
+
+    updated = devices.get(device_id)
+    assert int(updated["config_version"]) == old_config_version + 1
+    assert int(updated["offline_schedule_version"]) == old_offline_version
+    assert updated[field] == value
+    assert repository.ready_for_device(
+        device_id=device_id,
+        target_date=target,
+        config_version=int(updated["config_version"]),
+    ) is None
+    with app.extensions["inktime_database"].session() as connection:
+        queue_status = connection.execute(
+            "SELECT status FROM device_content_queue_items WHERE device_id=?",
+            (device_id,),
+        ).fetchone()["status"]
+        historical = connection.execute(
+            "SELECT status FROM device_offline_schedules WHERE id=?",
+            (prepared["schedule"]["id"],),
+        ).fetchone()["status"]
+    assert queue_status == "CANCELLED"
+    assert historical == "ready"
+    with pytest.raises(ValueError, match="設定已變更"):
+        repository.prepare_day(
+            device_id=device_id,
+            target_date=target,
+            release_ids=[release["release_id"]],
+            expected_config_version=old_config_version,
+        )
+
+
 def test_actual_playlist_preview_reads_committed_schedule_without_reselection(app, monkeypatch):
     device_id, _token = app.extensions["inktime_device_repository"].create(
         "離線實際 Playlist 預覽",
