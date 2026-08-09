@@ -219,6 +219,12 @@ def test_latest_release_quarantines_ambiguous_offline_slot_capability(client, ap
 
     assert response.status_code == 409
     assert "DEVICE-008" in response.get_data(as_text=True)
+    offline_response = client.get(
+        "/api/device/v1/offline-schedule",
+        headers=_headers(token),
+    )
+    assert offline_response.status_code == 409
+    assert "DEVICE-008" in offline_response.get_data(as_text=True)
 
 
 def test_device_assignment_rejects_missing_release_row(client, app):

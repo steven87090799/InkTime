@@ -67,11 +67,20 @@ def optional_bool(payload: dict, field: str, *, default: bool | None = None) -> 
         abort(400, description=str(exc))
 
 
+def _stored_schedule_array(value: object) -> list:
+    try:
+        parsed = json.loads(str(value or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
 def _validated_device_fields(
     payload,
     *,
     defaults: dict | None = None,
     maximum_slots: int = LEGACY_MAX_OFFLINE_SLOTS,
+    preserve_quarantined_schedule: bool = False,
 ) -> dict:
     defaults = defaults or {}
     timezone_name = str(payload.get("timezone", defaults.get("timezone", "Asia/Taipei")))
@@ -117,13 +126,16 @@ def _validated_device_fields(
             maximum=360,
             error_prefix="DEVICE-008",
         )
-        schedule_values = validate_offline_schedule(
-            schedule_values,
-            maximum=resolve_offline_schedule_max_slots(
-                {"offline_schedule_max_slots": maximum_slots}
-            ),
-            minimum_gap_minutes=minimum_schedule_gap_minutes,
-        )
+        if preserve_quarantined_schedule:
+            schedule_values = None
+        else:
+            schedule_values = validate_offline_schedule(
+                schedule_values,
+                maximum=resolve_offline_schedule_max_slots(
+                    {"offline_schedule_max_slots": maximum_slots}
+                ),
+                minimum_gap_minutes=minimum_schedule_gap_minutes,
+            )
     except ValueError as exc:
         abort(400, description=str(exc))
     except JsonScalarError as exc:
@@ -427,10 +439,41 @@ def update_device(device_id: str):
     existing = _repository().get(device_id)
     if existing is None:
         abort(404)
-    try:
-        existing_schedule = json.loads(str(existing["schedule_times_json"] or "[]"))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        existing_schedule = [str(existing["schedule"] or "08:00")]
+    stored_schedule_times = _stored_schedule_array(existing["schedule_times_json"])
+    stored_offline_schedule = _stored_schedule_array(existing["offline_schedule_json"])
+    existing_schedule = (
+        stored_schedule_times
+        or stored_offline_schedule
+        or [str(existing["schedule"] or "08:00")]
+    )
+    schedule_unchanged = all(
+        (
+            "schedule_times" not in payload
+            or payload.get("schedule_times") == stored_schedule_times,
+            "offline_schedule" not in payload
+            or payload.get("offline_schedule") == stored_offline_schedule,
+            "schedule" not in payload
+            or str(payload.get("schedule")) == str(existing["schedule"]),
+            "minimum_schedule_gap_minutes" not in payload
+            or payload.get("minimum_schedule_gap_minutes")
+            == int(existing["minimum_schedule_gap_minutes"] or MINIMUM_SCHEDULE_GAP_MINUTES),
+        )
+    )
+    effective_delivery_mode = str(
+        payload.get("delivery_mode", existing["delivery_mode"] or "legacy_online")
+    ).strip()
+    requested_enabled = payload.get("enabled", bool(existing["enabled"]))
+    effective_enabled = (
+        requested_enabled if type(requested_enabled) is bool else bool(existing["enabled"])
+    )
+    preserve_quarantined_schedule = bool(
+        str(existing["offline_schedule_capability_state"] or "") == "legacy_ambiguous"
+        and schedule_unchanged
+        and (
+            not effective_enabled
+            or effective_delivery_mode != "inktime_offline_schedule"
+        )
+    )
     fields = _validated_device_fields(
         payload,
         defaults={
@@ -458,6 +501,7 @@ def update_device(device_id: str):
         maximum_slots=resolve_offline_schedule_max_slots(
             {"offline_schedule_max_slots": existing["offline_schedule_max_slots"]}
         ),
+        preserve_quarantined_schedule=preserve_quarantined_schedule,
     )
     try:
         _repository().update(device_id, **fields)

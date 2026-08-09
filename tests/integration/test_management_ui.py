@@ -207,6 +207,55 @@ def test_device_management_preserves_legacy_automatic_and_stock_controls(client,
     assert "Stock PhotoPainter 模式" in viewer_body
 
 
+def test_device_management_shows_offline_capability_without_secret_or_viewer_controls(client, app):
+    create_admin(app)
+    login(client)
+    repository = app.extensions["inktime_device_repository"]
+    repository.create("未知能力相框")
+    repository.create(
+        "確認 24-slot 相框",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=[f"{hour:02d}:00" for hour in range(24)],
+        offline_schedule_max_slots=24,
+    )
+    ambiguous_id, ambiguous_token = repository.create(
+        "隔離中的舊相框",
+        delivery_mode="inktime_offline_schedule",
+        schedule_times=[f"{hour:02d}:00" for hour in range(13)],
+        offline_schedule_max_slots=24,
+    )
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            """
+            UPDATE devices
+            SET offline_schedule_max_slots=12,
+                offline_schedule_capability_state='legacy_ambiguous',
+                next_offline_prepare_at=NULL
+            WHERE id=?
+            """,
+            (ambiguous_id,),
+        )
+
+    body = client.get("/devices").get_data(as_text=True)
+    assert "離線能力：unknown_12／Legacy／尚未確認，最多 12 slots" in body
+    assert "離線能力：confirmed_24／已確認 24-slot capability（最多 24 slots）" in body
+    assert "離線能力：legacy_ambiguous／最大 12 slots" in body
+    assert "舊資料能力不明，已隔離；請重新配對或 Repair 以確認 capability。" in body
+    assert ambiguous_token not in body
+
+    app.extensions["inktime_auth_repository"].create_user(
+        "capability-viewer", "capability-viewer-password", "viewer"
+    )
+    viewer = app.test_client()
+    login(viewer, "capability-viewer", "capability-viewer-password")
+    viewer_body = viewer.get("/devices").get_data(as_text=True)
+    assert "離線能力：" not in viewer_body
+    assert "legacy_ambiguous" not in viewer_body
+    assert "舊資料能力不明，已隔離" not in viewer_body
+    assert ambiguous_token not in viewer_body
+    assert 'id="device-dialog"' not in viewer_body
+
+
 def test_batch_management_api_is_admin_only_and_strict_json(client, app):
     create_admin(app)
     login(client)

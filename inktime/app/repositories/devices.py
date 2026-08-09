@@ -424,19 +424,52 @@ class DeviceRepository:
                         existing_schedule = json.loads(str(current["offline_schedule_json"] or "[]"))
                     except (TypeError, ValueError, json.JSONDecodeError):
                         existing_schedule = []
-                selected_schedule = schedule_times or offline_schedule or existing_schedule or [schedule]
-                if schedule_times is None and offline_schedule is None and len(existing_schedule) == 1:
+                explicit_schedule = (
+                    schedule_times if schedule_times is not None else offline_schedule
+                )
+                if explicit_schedule is not None:
+                    selected_schedule = explicit_schedule
+                else:
+                    selected_schedule = existing_schedule or [schedule]
+                if explicit_schedule is None and len(existing_schedule) == 1:
                     selected_schedule = [schedule]
                 if type(minimum_schedule_gap_minutes) is not int or not 30 <= minimum_schedule_gap_minutes <= 360:
                     raise ValueError("DEVICE-008 minimum_schedule_gap_minutes 必須介於 30 到 360")
                 maximum_slots = resolve_offline_schedule_max_slots(
                     {"offline_schedule_max_slots": current["offline_schedule_max_slots"]}
                 )
-                schedule_values = validate_offline_schedule(
-                    selected_schedule,
-                    maximum=maximum_slots,
-                    minimum_gap_minutes=minimum_schedule_gap_minutes,
+                schedule_was_modified = bool(
+                    (explicit_schedule is not None and list(explicit_schedule) != existing_schedule)
+                    or str(current["schedule"]) != schedule
+                    or int(
+                        current["minimum_schedule_gap_minutes"]
+                        or MINIMUM_SCHEDULE_GAP_MINUTES
+                    )
+                    != int(minimum_schedule_gap_minutes)
                 )
+                preserve_quarantined_schedule = bool(
+                    str(current["offline_schedule_capability_state"] or "")
+                    == "legacy_ambiguous"
+                    and not schedule_was_modified
+                    and (
+                        not enabled
+                        or delivery_mode != "inktime_offline_schedule"
+                    )
+                )
+                if preserve_quarantined_schedule:
+                    schedule_values = existing_schedule or [str(current["schedule"])]
+                    stored_schedule = str(current["schedule"])
+                    stored_offline_schedule = str(current["offline_schedule_json"] or "[]")
+                    stored_schedule_times = str(current["schedule_times_json"] or "[]")
+                else:
+                    schedule_values = validate_offline_schedule(
+                        selected_schedule,
+                        maximum=maximum_slots,
+                        minimum_gap_minutes=minimum_schedule_gap_minutes,
+                    )
+                    stored_schedule = schedule_values[0]
+                    stored_offline_schedule = json.dumps(schedule_values, ensure_ascii=False)
+                    stored_schedule_times = json.dumps(schedule_values, ensure_ascii=False)
                 if not 0 <= int(prefetch_lead_minutes) <= 120:
                     raise ValueError("DEVICE-008 prefetch_lead_minutes 必須介於 0 到 120")
                 if button_wake_action not in {"check_new", "local_next"}:
@@ -445,7 +478,7 @@ class DeviceRepository:
                 remote_changed = any(
                     (
                         str(current["timezone"]) != timezone_name,
-                        str(current["schedule"]) != schedule_values[0],
+                        str(current["schedule"]) != stored_schedule,
                         int(current["rotation"]) != rotation,
                         str(current["panel_profile"]) != panel_profile,
                         str(current["delivery_mode"]) != delivery_mode,
@@ -482,13 +515,13 @@ class DeviceRepository:
                         name.strip(),
                         int(enabled),
                         timezone_name,
-                        schedule_values[0],
+                        stored_schedule,
                         rotation,
                         panel_profile,
                         delivery_mode,
                         int(offline_prefetch_allowed),
-                        json.dumps(schedule_values, ensure_ascii=False),
-                        json.dumps(schedule_values, ensure_ascii=False),
+                        stored_offline_schedule,
+                        stored_schedule_times,
                         int(prefetch_lead_minutes),
                         button_wake_action,
                         int(minimum_schedule_gap_minutes),

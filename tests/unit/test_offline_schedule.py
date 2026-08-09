@@ -50,6 +50,20 @@ def test_offline_schedule_capability_boundary_rejects_legacy_13th_slot():
     assert len(validate_offline_schedule(schedule, maximum=MAX_OFFLINE_SLOTS)) == 13
 
 
+def test_offline_schedule_capability_boundaries_accept_legacy_12_and_confirmed_24():
+    legacy_schedule = [f"{hour:02d}:00" for hour in range(12)]
+    confirmed_schedule = [f"{hour:02d}:00" for hour in range(24)]
+
+    assert validate_offline_schedule(
+        legacy_schedule,
+        maximum=LEGACY_MAX_OFFLINE_SLOTS,
+    ) == legacy_schedule
+    assert validate_offline_schedule(
+        confirmed_schedule,
+        maximum=MAX_OFFLINE_SLOTS,
+    ) == confirmed_schedule
+
+
 def test_device_capability_limits_deadlines_and_next_sync():
     schedule = [f"{hour:02d}:00" for hour in range(13)]
     with pytest.raises(ValueError, match="1 到 12"):

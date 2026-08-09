@@ -303,7 +303,7 @@ def test_migration_39_quarantines_legacy_ambiguous_offline_slot_rows(monkeypatch
         row["offline_schedule_capability_state"],
         row["next_offline_prepare_at"],
     ) == (12, "legacy_ambiguous", None)
-    assert len(json.loads(str(row[3]))) == 13
+    assert json.loads(str(row[3])) == [f"{hour:02d}:00" for hour in range(8, 21)]
     assert [tuple(item) for item in states] == [
         ("legacy-confirmed-24", 24, "confirmed_24", "1970-01-01T00:00:00+00:00"),
         ("legacy-safe", 12, "unknown_12", "1970-01-01T00:00:00+00:00"),
