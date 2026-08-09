@@ -870,6 +870,23 @@ class RenderWorkloadService:
                 raise ValueError("DEVICE-008 Stock 測試只能選擇 Stock 相容裝置")
             return dict(current)
 
+        def validate_manifest_contract(manifest: dict) -> None:
+            options = manifest.get("render_options")
+            if (
+                manifest.get("release_kind") != "device_test"
+                or str(manifest.get("render_profile") or "") != profile_key
+                or not isinstance(options, dict)
+                or str(options.get("idempotency_key") or "")
+                != context["idempotency_key"]
+                or str(options.get("transport") or "") != transport
+                or (options.get("stock_direct") is True) != stock_direct
+                or (
+                    stock_direct
+                    and str(options.get("stock_direct_device_id") or "") != device_id
+                )
+            ):
+                raise ValueError("RENDER-010 idempotent 測試 Release 與本次傳送邊界不一致")
+
         def prepare_preset() -> tuple[dict | None, str | None, bool | None, str | None]:
             """Prepare optional preset data without making the release depend on it."""
 
@@ -939,33 +956,47 @@ class RenderWorkloadService:
                 if cancelled():
                     raise ProcessCallError("test release commit lease is no longer valid")
                 validate_device()
-                manifest = self.publisher.publish_preencoded(
-                    source_photo_id=str(settings.get("source_photo_id", "device-test-upload")),
-                    payload_path=prepared / "payload.bin",
-                    preview_path=prepared / "preview.png",
-                    profile_key=profile_key,
-                    dither=str(prepared_result["dither"]),
-                    color_distance=str(prepared_result["color_distance"]),
-                    dither_strength=float(prepared_result["dither_strength"]),
-                    linear_light=bool(prepared_result["linear_light"]),
-                    palette=list(prepared_result["palette"]),
-                    palette_version=str(prepared_result["palette_version"]),
-                    metadata={
-                        "idempotency_key": idempotency_key,
-                        "preset": prepared_result["preset"],
-                        "source_preset": prepared_result["source_preset"],
-                        "pipeline": prepared_result["pipeline"],
-                        "source_size": prepared_result["source_size"],
-                        "source_sha256": str(settings.get("photo_sha", "")),
-                        "caption": prepared_result.get("caption", ""),
-                        "font_reference": prepared_result.get("font_reference", ""),
-                        "transport": transport,
-                        "stock_direct": stock_direct,
-                        "stock_direct_device_id": device_id if stock_direct else None,
-                        "server_rendered": True,
-                    },
-                )
-                created_release = True
+                try:
+                    manifest = self.publisher.publish_preencoded(
+                        source_photo_id=str(
+                            settings.get("source_photo_id", "device-test-upload")
+                        ),
+                        payload_path=prepared / "payload.bin",
+                        preview_path=prepared / "preview.png",
+                        profile_key=profile_key,
+                        dither=str(prepared_result["dither"]),
+                        color_distance=str(prepared_result["color_distance"]),
+                        dither_strength=float(prepared_result["dither_strength"]),
+                        linear_light=bool(prepared_result["linear_light"]),
+                        palette=list(prepared_result["palette"]),
+                        palette_version=str(prepared_result["palette_version"]),
+                        metadata={
+                            "idempotency_key": idempotency_key,
+                            "preset": prepared_result["preset"],
+                            "source_preset": prepared_result["source_preset"],
+                            "pipeline": prepared_result["pipeline"],
+                            "source_size": prepared_result["source_size"],
+                            "source_sha256": str(settings.get("photo_sha", "")),
+                            "caption": prepared_result.get("caption", ""),
+                            "font_reference": prepared_result.get("font_reference", ""),
+                            "transport": transport,
+                            "stock_direct": stock_direct,
+                            "stock_direct_device_id": device_id if stock_direct else None,
+                            "server_rendered": True,
+                        },
+                    )
+                    created_release = True
+                except FileExistsError:
+                    # Another process won the same idempotent publication after
+                    # our initial miss. The publisher already removed this
+                    # process's unindexed Release; reuse only the validated
+                    # winner rather than failing an otherwise successful job.
+                    manifest = self.publisher.find_device_test_by_idempotency(
+                        idempotency_key
+                    )
+                    if manifest is None:
+                        raise
+            validate_manifest_contract(manifest)
             if cancelled():
                 if created_release:
                     self.publisher.discard_unassigned_device_test(

@@ -356,7 +356,7 @@ def test_stock_test_release_keeps_exact_source_identity_and_skips_custom_assignm
 ):
     from inktime.app.services import render_workloads
 
-    token = "0123456789abcdef0123456789abcdef"
+    token = "0" * 32
     observed = {}
 
     class Jobs:
@@ -368,15 +368,29 @@ def test_stock_test_release_keeps_exact_source_identity_and_skips_custom_assignm
             return {"enabled": 1, "panel_profile": "safe_4c", "delivery_mode": "stock_compat"}
 
     class Publisher:
+        find_calls = 0
+
         def find_device_test_by_idempotency(self, _key):
-            return None
+            self.find_calls += 1
+            if self.find_calls == 1:
+                return None
+            return {
+                "release_id": "release-exact-stock",
+                "release_kind": "device_test",
+                "render_profile": "safe_4c",
+                "files": [
+                    {
+                        "name": "payload.bin",
+                        "size": 96_000,
+                        "sha256": "0" * 64,
+                    }
+                ],
+                "render_options": observed["metadata"],
+            }
 
         def publish_preencoded(self, **kwargs):
             observed["metadata"] = kwargs["metadata"]
-            return {
-                "release_id": "release-exact-stock",
-                "files": [{"name": "payload.bin"}],
-            }
+            raise FileExistsError("another process won")
 
     class Boundary:
         def call(self, _function, **kwargs):
@@ -447,6 +461,7 @@ def test_stock_test_release_keeps_exact_source_identity_and_skips_custom_assignm
     assert result["file_name"] == "payload.bin"
     assert result["stock_touches_custom_queue"] is False
     assert result["stock_touches_custom_ack"] is False
+    assert service.publisher.find_calls == 2
     assert deleted == [(token, ".png")]
 
 

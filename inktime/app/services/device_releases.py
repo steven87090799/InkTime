@@ -20,9 +20,11 @@ from inktime.app.db import Database
 from inktime.app.domain.rendering import DeviceTestReleaseStore
 from inktime.app.domain.rendering.release import (
     DEVICE_TEST_INDEX_DIRECTORY,
+    ReleaseMetadataLockTimeout,
     STOCK_DIRECT_CLEANUP_STATE_DIRECTORY,
     STOCK_DIRECT_TEST_DEFERRED_DIRECTORY,
     STOCK_DIRECT_TEST_DIRECTORY,
+    release_metadata_guard,
 )
 
 
@@ -397,10 +399,7 @@ class DeviceReleaseService:
             and options.get("transport") == "stock_direct"
             and options.get("stock_direct") is True
             and str(options.get("stock_direct_device_id") or "") == device_id
-            and (
-                expires_at is None
-                or str(options.get("stock_direct_expires_at") or "") == expires_at
-            )
+            and (expires_at is None or str(options.get("stock_direct_expires_at") or "") == expires_at)
         )
 
     def _stock_release_has_managed_reference(
@@ -450,14 +449,11 @@ class DeviceReleaseService:
         release_id = authorization.release_id
         try:
             release_dir, identity, manifest = self._load_manifest(release_id)
-            if (
-                identity != authorization.release_dir_identity
-                or not self._stock_manifest_matches(
-                    manifest,
-                    device_id=device_id,
-                    profile_key=profile_key,
-                    expires_at=expires_at,
-                )
+            if identity != authorization.release_dir_identity or not self._stock_manifest_matches(
+                manifest,
+                device_id=device_id,
+                profile_key=profile_key,
+                expires_at=expires_at,
             ):
                 return False
             current = DeviceReleaseAuthorization(
@@ -518,22 +514,160 @@ class DeviceReleaseService:
         release_id: str,
     ) -> bool:
         """Revalidate and consume one unreferenced ephemeral Stock release."""
-        authorization = self.authorize_stock_test_release_for_device(
-            device_id=device_id,
-            profile_key=profile_key,
-            release_id=release_id,
-        )
-        if not authorization.allowed or authorization.manifest is None:
+        try:
+            with release_metadata_guard(self.release_root):
+                authorization = self.authorize_stock_test_release_for_device(
+                    device_id=device_id,
+                    profile_key=profile_key,
+                    release_id=release_id,
+                )
+                if not authorization.allowed or authorization.manifest is None:
+                    return False
+                with self.test_store.reference_snapshot() as (references, complete, _examined):
+                    if not complete:
+                        return False
+                    return self._remove_stock_release(
+                        authorization,
+                        device_id=device_id,
+                        profile_key=profile_key,
+                        custom_reference_ids=references,
+                    )
+        except ReleaseMetadataLockTimeout:
+            _LOGGER.warning("Deferred Stock release consumption because metadata lock timed out")
             return False
-        with self.test_store.reference_snapshot() as (references, complete, _examined):
-            if not complete:
-                return False
-            return self._remove_stock_release(
-                authorization,
-                device_id=device_id,
-                profile_key=profile_key,
-                custom_reference_ids=references,
-            )
+
+    def _cleanup_expired_stock_test_releases_locked(
+        self,
+        *,
+        maximum: int = MAX_STOCK_CLEANUP_MARKERS,
+        now: datetime | None = None,
+    ) -> dict[str, int]:
+        """Run one cleanup batch while the shared metadata guard is held."""
+        limit = max(1, min(int(maximum), MAX_STOCK_CLEANUP_MARKERS))
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        examined = removed = validated_bytes = 0
+        with self.test_store.reference_snapshot() as (
+            custom_references,
+            assignment_snapshot_complete,
+            _assignment_examined,
+        ):
+            if not assignment_snapshot_complete:
+                return {"examined": 0, "removed": 0}
+            active = self._read_cleanup_active()
+            for _pass_index in range(2):
+                inactive = (
+                    STOCK_DIRECT_TEST_DEFERRED_DIRECTORY
+                    if active == STOCK_DIRECT_TEST_DIRECTORY
+                    else STOCK_DIRECT_TEST_DIRECTORY
+                )
+                marker_root = self._marker_directory(active)
+                if marker_root is None:
+                    return {"examined": examined, "removed": removed}
+                try:
+                    entries = os.scandir(marker_root)
+                except (FileNotFoundError, NotADirectoryError, OSError):
+                    return {"examined": examined, "removed": removed}
+                saw_entry = False
+                with entries:
+                    for entry in entries:
+                        if examined >= limit:
+                            break
+                        saw_entry = True
+                        examined += 1
+                        if (
+                            not entry.name.endswith(".json")
+                            or _RELEASE_ID.fullmatch(entry.name[:-5]) is None
+                            or entry.is_symlink()
+                            or not entry.is_file(follow_symlinks=False)
+                        ):
+                            self._quarantine_marker(entry.name, active, "unsafe marker entry")
+                            continue
+                        retained = True
+                        try:
+                            with self._open_readonly(Path(entry.path)) as handle:
+                                raw = handle.read(16 * 1024 + 1)
+                            if len(raw) > 16 * 1024:
+                                raise ValueError("Stock marker 過大")
+                            marker = json.loads(raw.decode("utf-8"))
+                            if not isinstance(marker, dict):
+                                raise ValueError("Stock marker 格式不合法")
+                            release_id = str(marker.get("release_id") or "")
+                            device_id = str(marker.get("device_id") or "")
+                            profile_key = str(marker.get("profile_key") or "")
+                            expires_at = str(marker.get("expires_at") or "")
+                            if release_id != entry.name[:-5]:
+                                raise ValueError("Stock marker 身分不一致")
+                            expiry = datetime.fromisoformat(expires_at)
+                            if expiry.tzinfo is None:
+                                raise ValueError("Stock marker 時區不合法")
+                            if expiry <= current:
+                                release_dir, identity, manifest = self._load_manifest(release_id)
+                                if self._stock_manifest_matches(
+                                    manifest,
+                                    device_id=device_id,
+                                    profile_key=profile_key,
+                                    expires_at=expires_at,
+                                ):
+                                    authorization = DeviceReleaseAuthorization(
+                                        allowed=True,
+                                        source="stock_direct_test_expired",
+                                        reason=None,
+                                        release_id=release_id,
+                                        release_dir=release_dir,
+                                        manifest=manifest,
+                                        release_dir_identity=identity,
+                                    )
+                                    payload_entry = self.payload_entry_for_authorization(authorization)
+                                    payload_size = int(payload_entry["size"])
+                                    if validated_bytes + payload_size <= MAX_STOCK_CLEANUP_PAYLOAD_BYTES:
+                                        validated_bytes += payload_size
+                                        if self._remove_stock_release(
+                                            authorization,
+                                            device_id=device_id,
+                                            profile_key=profile_key,
+                                            expires_at=expires_at,
+                                            custom_reference_ids=custom_references,
+                                        ):
+                                            removed += 1
+                                            retained = False
+                        except (
+                            FileNotFoundError,
+                            OSError,
+                            UnicodeDecodeError,
+                            json.JSONDecodeError,
+                            PermissionError,
+                            UnsafePathError,
+                            ValueError,
+                        ) as exc:
+                            self._quarantine_marker(entry.name, active, type(exc).__name__)
+                            retained = False
+                        if retained:
+                            self._move_marker(entry.name, active, inactive)
+                if examined >= limit or saw_entry:
+                    break
+                active = inactive
+                if not self._write_cleanup_active(active):
+                    break
+        return {"examined": examined, "removed": removed}
+
+    def cleanup_expired_stock_test_releases(
+        self,
+        *,
+        maximum: int = MAX_STOCK_CLEANUP_MARKERS,
+        now: datetime | None = None,
+    ) -> dict[str, int]:
+        """Bounded fair cleanup serialized with publishers in every process."""
+        try:
+            with release_metadata_guard(self.release_root):
+                return self._cleanup_expired_stock_test_releases_locked(
+                    maximum=maximum,
+                    now=now,
+                )
+        except ReleaseMetadataLockTimeout:
+            _LOGGER.warning("Deferred Stock cleanup because metadata lock timed out")
+            return {"examined": 0, "removed": 0}
 
     def _cleanup_state_path(self) -> Path:
         return self.release_root / STOCK_DIRECT_CLEANUP_STATE_DIRECTORY / "state.json"
@@ -544,17 +678,13 @@ class DeviceReleaseService:
         root = self.release_root / STOCK_DIRECT_CLEANUP_STATE_DIRECTORY
         try:
             if root.is_symlink() or (root.exists() and not root.is_dir()):
-                quarantined = self.release_root / (
-                    f".stock-cleanup-state-quarantine-{secrets.token_hex(6)}"
-                )
+                quarantined = self.release_root / (f".stock-cleanup-state-quarantine-{secrets.token_hex(6)}")
                 os.rename(root, quarantined)
                 _LOGGER.warning("Quarantined unsafe Stock cleanup state path")
             root.mkdir(mode=0o750, parents=True, exist_ok=True)
             if root.is_symlink() or root.resolve().parent != self.release_root:
                 return False
-            descriptor, temporary_name = tempfile.mkstemp(
-                prefix=".state-", suffix=".tmp", dir=root
-            )
+            descriptor, temporary_name = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=root)
             temporary = Path(temporary_name)
             try:
                 with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -692,127 +822,6 @@ class DeviceReleaseService:
             return False
         _LOGGER.warning("Quarantined invalid Stock cleanup marker %s: %s", filename, reason)
         return True
-
-    def cleanup_expired_stock_test_releases(
-        self,
-        *,
-        maximum: int = MAX_STOCK_CLEANUP_MARKERS,
-        now: datetime | None = None,
-    ) -> dict[str, int]:
-        """Bounded fair cleanup using two persisted marker generations."""
-        limit = max(1, min(int(maximum), MAX_STOCK_CLEANUP_MARKERS))
-        current = now or datetime.now(timezone.utc)
-        if current.tzinfo is None:
-            current = current.replace(tzinfo=timezone.utc)
-        examined = removed = validated_bytes = 0
-        with self.test_store.reference_snapshot() as (
-            custom_references,
-            assignment_snapshot_complete,
-            _assignment_examined,
-        ):
-            if not assignment_snapshot_complete:
-                return {"examined": 0, "removed": 0}
-            active = self._read_cleanup_active()
-            for _pass_index in range(2):
-                inactive = (
-                    STOCK_DIRECT_TEST_DEFERRED_DIRECTORY
-                    if active == STOCK_DIRECT_TEST_DIRECTORY
-                    else STOCK_DIRECT_TEST_DIRECTORY
-                )
-                marker_root = self._marker_directory(active)
-                if marker_root is None:
-                    return {"examined": examined, "removed": removed}
-                try:
-                    entries = os.scandir(marker_root)
-                except (FileNotFoundError, NotADirectoryError, OSError):
-                    return {"examined": examined, "removed": removed}
-                saw_entry = False
-                with entries:
-                    for entry in entries:
-                        if examined >= limit:
-                            break
-                        saw_entry = True
-                        examined += 1
-                        if (
-                            not entry.name.endswith(".json")
-                            or _RELEASE_ID.fullmatch(entry.name[:-5]) is None
-                            or entry.is_symlink()
-                            or not entry.is_file(follow_symlinks=False)
-                        ):
-                            self._quarantine_marker(entry.name, active, "unsafe marker entry")
-                            continue
-                        retained = True
-                        try:
-                            with self._open_readonly(Path(entry.path)) as handle:
-                                raw = handle.read(16 * 1024 + 1)
-                            if len(raw) > 16 * 1024:
-                                raise ValueError("Stock marker 過大")
-                            marker = json.loads(raw.decode("utf-8"))
-                            if not isinstance(marker, dict):
-                                raise ValueError("Stock marker 格式不合法")
-                            release_id = str(marker.get("release_id") or "")
-                            device_id = str(marker.get("device_id") or "")
-                            profile_key = str(marker.get("profile_key") or "")
-                            expires_at = str(marker.get("expires_at") or "")
-                            if release_id != entry.name[:-5]:
-                                raise ValueError("Stock marker 身分不一致")
-                            expiry = datetime.fromisoformat(expires_at)
-                            if expiry.tzinfo is None:
-                                raise ValueError("Stock marker 時區不合法")
-                            if expiry <= current:
-                                release_dir, identity, manifest = self._load_manifest(release_id)
-                                if self._stock_manifest_matches(
-                                    manifest,
-                                    device_id=device_id,
-                                    profile_key=profile_key,
-                                    expires_at=expires_at,
-                                ):
-                                    authorization = DeviceReleaseAuthorization(
-                                        allowed=True,
-                                        source="stock_direct_test_expired",
-                                        reason=None,
-                                        release_id=release_id,
-                                        release_dir=release_dir,
-                                        manifest=manifest,
-                                        release_dir_identity=identity,
-                                    )
-                                    payload_entry = self.payload_entry_for_authorization(
-                                        authorization
-                                    )
-                                    payload_size = int(payload_entry["size"])
-                                    if (
-                                        validated_bytes + payload_size
-                                        <= MAX_STOCK_CLEANUP_PAYLOAD_BYTES
-                                    ):
-                                        validated_bytes += payload_size
-                                        if self._remove_stock_release(
-                                            authorization,
-                                            device_id=device_id,
-                                            profile_key=profile_key,
-                                            expires_at=expires_at,
-                                            custom_reference_ids=custom_references,
-                                        ):
-                                            removed += 1
-                                            retained = False
-                        except (
-                            FileNotFoundError,
-                            OSError,
-                            UnicodeDecodeError,
-                            json.JSONDecodeError,
-                            PermissionError,
-                            UnsafePathError,
-                            ValueError,
-                        ) as exc:
-                            self._quarantine_marker(entry.name, active, type(exc).__name__)
-                            retained = False
-                        if retained:
-                            self._move_marker(entry.name, active, inactive)
-                if examined >= limit or saw_entry:
-                    break
-                active = inactive
-                if not self._write_cleanup_active(active):
-                    break
-        return {"examined": examined, "removed": removed}
 
     def latest_for_device(
         self,

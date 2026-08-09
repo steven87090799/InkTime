@@ -13,8 +13,14 @@ import shutil
 import re
 import stat
 import tempfile
-from threading import RLock
+from threading import RLock, local
+import time
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - production containers are Linux/POSIX.
+    fcntl = None  # type: ignore[assignment]
 
 from PIL import Image
 
@@ -25,6 +31,8 @@ FOUR_COLORS = ((0, 0, 0), (255, 255, 255), (220, 30, 30), (245, 190, 25))
 STOCK_DIRECT_TEST_TTL_SECONDS = 45 * 60
 DEVICE_TEST_INDEX_DIRECTORY = ".device-test-index"
 DEVICE_TEST_INDEX_MIGRATION_DIRECTORY = ".device-test-index-migration"
+DEVICE_TEST_INDEX_QUARANTINE_DIRECTORY = ".device-test-index-quarantine"
+DEVICE_TEST_INDEX_MIGRATION_VERSION = 1
 STOCK_DIRECT_TEST_DIRECTORY = ".stock-direct-tests"
 STOCK_DIRECT_TEST_DEFERRED_DIRECTORY = ".stock-direct-tests-deferred"
 STOCK_DIRECT_CLEANUP_STATE_DIRECTORY = ".stock-direct-cleanup-state"
@@ -32,7 +40,78 @@ DEVICE_TEST_ASSIGNMENT_QUARANTINE_DIRECTORY = ".device-tests-quarantine"
 _RELEASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _ASSIGNMENT_LOCK = RLock()
 _RELEASE_METADATA_LOCK = RLock()
+_RELEASE_METADATA_LOCAL = local()
+RELEASE_METADATA_LOCK_TIMEOUT_SECONDS = 5.0
+RELEASE_METADATA_LOCK_POLL_SECONDS = 0.05
 _LOGGER = logging.getLogger(__name__)
+
+
+class ReleaseMetadataLockTimeout(RuntimeError):
+    """The shared Release metadata transaction could not start in time."""
+
+
+@contextmanager
+def release_metadata_guard(
+    root: Path,
+    *,
+    timeout: float = RELEASE_METADATA_LOCK_TIMEOUT_SECONDS,
+):
+    """Serialize short Release metadata transactions across processes.
+
+    Linux production uses an advisory ``flock`` whose ownership is released by
+    the OS if a process exits.  The process-local RLock makes the guard safely
+    reentrant for helper calls in the same thread.  Non-POSIX development hosts
+    retain only the explicitly weaker process-local guarantee.
+    """
+
+    resolved = root.resolve()
+    key = str(resolved)
+    with _RELEASE_METADATA_LOCK:
+        held = getattr(_RELEASE_METADATA_LOCAL, "held", None)
+        if held is None:
+            held = {}
+            _RELEASE_METADATA_LOCAL.held = held
+        current = held.get(key)
+        if current is not None:
+            descriptor, depth = current
+            held[key] = (descriptor, depth + 1)
+            try:
+                yield
+            finally:
+                descriptor, depth = held[key]
+                held[key] = (descriptor, depth - 1)
+            return
+
+        descriptor = -1
+        try:
+            if fcntl is not None:
+                flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+                descriptor = os.open(resolved / ".release-metadata.lock", flags, 0o600)
+                metadata = os.fstat(descriptor)
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                    raise ValueError("RENDER-010 Release metadata lock 不是一般檔案")
+                os.fchmod(descriptor, 0o600)
+                deadline = time.monotonic() + max(0.0, float(timeout))
+                while True:
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError as exc:
+                        if time.monotonic() >= deadline:
+                            raise ReleaseMetadataLockTimeout("RENDER-011 Release metadata lock 逾時") from exc
+                        time.sleep(
+                            min(RELEASE_METADATA_LOCK_POLL_SECONDS, max(0.0, deadline - time.monotonic()))
+                        )
+            held[key] = (descriptor, 1)
+            yield
+        finally:
+            held.pop(key, None)
+            if descriptor >= 0:
+                try:
+                    if fcntl is not None:
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                finally:
+                    os.close(descriptor)
 
 
 def _nearest_color(pixel) -> int:
@@ -81,15 +160,15 @@ class AtomicReleasePublisher:
             raise ValueError("RENDER-001 至少需要一張圖片")
         if orientation not in {"portrait", "landscape"}:
             raise ValueError("RENDER-005 不支援的相框方向")
-        release_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(3)
-        temporary = self.root / f".{release_id}.tmp"
-        final = self.root / release_id
-        temporary.mkdir(mode=0o750)
         profile = profile_override or get_display_profile(profile_key)
         if profile.key != profile_key:
             raise ValueError("RENDER-006 自訂色盤與面板 Profile 不一致")
         if release_kind not in {"formal", "device_test"}:
             raise ValueError("RENDER-008 Release 類型不合法")
+        release_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(3)
+        temporary = self.root / f".{release_id}.tmp"
+        final = self.root / release_id
+        temporary.mkdir(mode=0o750)
         effective_strength = 1.0 if dither in {"gooddisplay", "photo_smooth"} else float(dither_strength)
         effective_color_distance = "rgb" if dither in {"gooddisplay", "photo_smooth"} else color_distance
         files = []
@@ -165,14 +244,15 @@ class AtomicReleasePublisher:
             for path in temporary.iterdir():
                 with path.open("rb") as stream:
                     os.fsync(stream.fileno())
-            temporary.replace(final)
-            if activate:
-                pointer_tmp = self.root / ".latest.tmp"
-                pointer_tmp.write_text(release_id, encoding="utf-8")
-                pointer_tmp.replace(self.root / "latest")
-                profile_pointer_tmp = self.root / f".latest.{profile.key}.tmp"
-                profile_pointer_tmp.write_text(release_id, encoding="utf-8")
-                profile_pointer_tmp.replace(self.root / f"latest.{profile.key}")
+            with release_metadata_guard(self.root):
+                temporary.replace(final)
+                if activate:
+                    pointer_tmp = self.root / ".latest.tmp"
+                    pointer_tmp.write_text(release_id, encoding="utf-8")
+                    pointer_tmp.replace(self.root / "latest")
+                    profile_pointer_tmp = self.root / f".latest.{profile.key}.tmp"
+                    profile_pointer_tmp.write_text(release_id, encoding="utf-8")
+                    profile_pointer_tmp.replace(self.root / f"latest.{profile.key}")
             return manifest
         except Exception:
             if temporary.exists():
@@ -201,6 +281,102 @@ class AtomicReleasePublisher:
         digest = sha256(idempotency_key.encode("utf-8")).hexdigest()
         return self.root / DEVICE_TEST_INDEX_DIRECTORY / f"{digest}.json"
 
+    @staticmethod
+    def _metadata_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+        return (
+            int(metadata.st_dev),
+            int(metadata.st_ino),
+            int(metadata.st_mode),
+            int(metadata.st_size),
+            int(metadata.st_mtime_ns),
+        )
+
+    def _observe_device_test_index(
+        self, path: Path
+    ) -> tuple[dict[str, Any] | None, tuple[int, int, int, int, int] | None, str]:
+        """Read one index without following links and retain replacement identity."""
+
+        parent = path.parent
+        if parent.is_symlink() or (parent.exists() and parent.resolve().parent != self.root):
+            return None, None, "unsafe_directory"
+        try:
+            metadata = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError:
+            return None, None, "missing"
+        identity = self._metadata_identity(metadata)
+        if not stat.S_ISREG(metadata.st_mode):
+            return None, identity, "unsafe_file_type"
+        if metadata.st_size > 64 * 1024:
+            return None, identity, "oversized"
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if self._metadata_identity(opened) != identity:
+                return None, identity, "replaced_during_read"
+            with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                raw = handle.read(64 * 1024 + 1)
+        finally:
+            os.close(descriptor)
+        if len(raw) > 64 * 1024:
+            return None, identity, "oversized"
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None, identity, "malformed_json"
+        if not isinstance(parsed, dict):
+            return None, identity, "invalid_contract"
+        return parsed, identity, "valid_json"
+
+    def _quarantine_observed_index(
+        self,
+        path: Path,
+        identity: tuple[int, int, int, int, int] | None,
+        reason: str,
+    ) -> bool:
+        """Atomically preserve an invalid index only if it is the observed object."""
+
+        if identity is None or path.parent != self.root / DEVICE_TEST_INDEX_DIRECTORY:
+            return False
+        quarantine = self.root / DEVICE_TEST_INDEX_QUARANTINE_DIRECTORY
+        try:
+            if path.parent.is_symlink() or path.parent.resolve().parent != self.root:
+                return False
+            quarantine.mkdir(mode=0o750, parents=True, exist_ok=True)
+            if quarantine.is_symlink() or quarantine.resolve().parent != self.root:
+                return False
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            source_fd = os.open(path.parent, flags)
+            try:
+                current = os.stat(path.name, dir_fd=source_fd, follow_symlinks=False)
+                if self._metadata_identity(current) != identity:
+                    return False
+                destination_fd = os.open(quarantine, flags)
+                try:
+                    destination = (
+                        f"{path.stem}.{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+                        f".{secrets.token_hex(4)}.quarantine"
+                    )
+                    os.rename(
+                        path.name,
+                        destination,
+                        src_dir_fd=source_fd,
+                        dst_dir_fd=destination_fd,
+                    )
+                finally:
+                    os.close(destination_fd)
+            finally:
+                os.close(source_fd)
+        except (FileNotFoundError, OSError):
+            return False
+        _LOGGER.warning("Quarantined invalid device-test index %s: %s", path.name, reason)
+        return True
+
     def _unlink_managed_index(
         self,
         directory_name: str,
@@ -221,11 +397,7 @@ class AtomicReleasePublisher:
                 if not stat.S_ISREG(metadata.st_mode):
                     return
                 if expected is not None:
-                    flags = (
-                        os.O_RDONLY
-                        | getattr(os, "O_CLOEXEC", 0)
-                        | getattr(os, "O_NOFOLLOW", 0)
-                    )
+                    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
                     file_descriptor = os.open(filename, flags, dir_fd=descriptor)
                     with os.fdopen(file_descriptor, "rb") as handle:
                         raw = handle.read(64 * 1024 + 1)
@@ -247,9 +419,7 @@ class AtomicReleasePublisher:
         path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
         if path.parent.is_symlink() or path.parent.resolve().parent != self.root:
             raise ValueError("RENDER-010 Release 索引路徑不安全")
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent
-        )
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent)
         temporary = Path(temporary_name)
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -265,9 +435,7 @@ class AtomicReleasePublisher:
         path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
         if path.parent.is_symlink() or path.parent.resolve().parent != self.root:
             raise ValueError("RENDER-010 Release 索引路徑不安全")
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent
-        )
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent)
         temporary = Path(temporary_name)
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -349,20 +517,75 @@ class AtomicReleasePublisher:
             return None
         return {"release_id": release_id, "idempotency_key": idempotency_key}
 
-    def _backfill_legacy_device_test_indexes(self) -> None:
-        """Stream the pre-index store once, then persist completion atomically."""
-        state_path = self.root / DEVICE_TEST_INDEX_MIGRATION_DIRECTORY / "state.json"
+    @staticmethod
+    def _legacy_candidate_order(manifest: dict[str, Any]) -> tuple[datetime, str] | None:
+        created_at = manifest.get("created_at")
+        release_id = manifest.get("release_id")
+        if not isinstance(created_at, str) or not isinstance(release_id, str):
+            return None
         try:
-            if state_path.parent.is_symlink() or state_path.parent.resolve().parent != self.root:
-                raise ValueError("RENDER-010 index migration state 路徑不安全")
+            created = datetime.fromisoformat(created_at)
+        except ValueError:
+            return None
+        if created.tzinfo is None:
+            return None
+        return created.astimezone(timezone.utc), release_id
+
+    def _validated_index_manifest(
+        self,
+        index_path: Path,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        indexed, identity, observation = self._observe_device_test_index(index_path)
+        if observation == "missing":
+            return None
+        if indexed is None:
+            self._quarantine_observed_index(index_path, identity, observation)
+            return None
+        if (
+            str(indexed.get("idempotency_key") or "") != idempotency_key
+            or not isinstance(indexed.get("release_id"), str)
+            or _RELEASE_ID.fullmatch(str(indexed["release_id"])) is None
+        ):
+            self._quarantine_observed_index(index_path, identity, "identity_mismatch")
+            return None
+        try:
+            manifest = self.validate(str(indexed["release_id"]))
+        except (OSError, ValueError):
+            self._quarantine_observed_index(index_path, identity, "invalid_target")
+            return None
+        if (
+            self._device_test_index_payload(manifest) != indexed
+            or self._legacy_candidate_order(manifest) is None
+        ):
+            self._quarantine_observed_index(index_path, identity, "target_contract_mismatch")
+            return None
+        return manifest
+
+    def _device_test_index_migration_complete(self) -> bool:
+        state_path = self.root / DEVICE_TEST_INDEX_MIGRATION_DIRECTORY / "state.json"
+        if state_path.parent.is_symlink() or (
+            state_path.parent.exists() and state_path.parent.resolve().parent != self.root
+        ):
+            raise ValueError("RENDER-010 index migration state 路徑不安全")
+        try:
             state = self._read_regular_json(state_path, maximum_bytes=4096)
-            if (
-                state.get("complete") is True
-                and state.get("release_root_mtime_ns") == self.root.stat().st_mtime_ns
-            ):
-                return
-        except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
-            pass
+        except (FileNotFoundError, NotADirectoryError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
+        except ValueError:
+            return False
+        return bool(
+            state.get("schema_version") == 1
+            and state.get("migration_version") == DEVICE_TEST_INDEX_MIGRATION_VERSION
+            and state.get("complete") is True
+            and isinstance(state.get("completed_at"), str)
+        )
+
+    def _backfill_legacy_device_test_indexes(self) -> None:
+        """Stream the legacy store once per version with deterministic winners."""
+        state_path = self.root / DEVICE_TEST_INDEX_MIGRATION_DIRECTORY / "state.json"
+        if self._device_test_index_migration_complete():
+            return
         with os.scandir(self.root) as entries:
             for entry in entries:
                 if (
@@ -371,34 +594,31 @@ class AtomicReleasePublisher:
                     or not entry.is_dir(follow_symlinks=False)
                 ):
                     continue
-                manifest_path = Path(entry.path) / "manifest.json"
                 try:
-                    manifest = self._read_regular_json(manifest_path, maximum_bytes=1024 * 1024)
-                    if str(manifest.get("release_id") or "") != entry.name:
-                        continue
+                    manifest = self.validate(entry.name)
                     payload = self._device_test_index_payload(manifest)
-                except (
-                    FileNotFoundError,
-                    OSError,
-                    UnicodeDecodeError,
-                    json.JSONDecodeError,
-                    ValueError,
-                ):
+                    candidate_order = self._legacy_candidate_order(manifest)
+                except (FileNotFoundError, NotADirectoryError, ValueError):
                     continue
-                if payload is None:
+                if payload is None or candidate_order is None:
                     continue
-                self._atomic_json_create(
-                    self._device_test_index_path(payload["idempotency_key"]), payload
-                )
+                index_path = self._device_test_index_path(payload["idempotency_key"])
+                current = self._validated_index_manifest(index_path, payload["idempotency_key"])
+                current_order = self._legacy_candidate_order(current) if current else None
+                if current_order is not None and current_order >= candidate_order:
+                    continue
+                if not self._atomic_json_create(index_path, payload):
+                    self._atomic_json(index_path, payload)
         state_path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
         if state_path.parent.is_symlink() or state_path.parent.resolve().parent != self.root:
             raise ValueError("RENDER-010 index migration state 路徑不安全")
         self._atomic_json(
             state_path,
             {
+                "schema_version": 1,
+                "migration_version": DEVICE_TEST_INDEX_MIGRATION_VERSION,
                 "complete": True,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
-                "release_root_mtime_ns": self.root.stat().st_mtime_ns,
             },
         )
 
@@ -418,8 +638,14 @@ class AtomicReleasePublisher:
         try:
             if self._atomic_json_create(index_path, index_payload):
                 created.append((DEVICE_TEST_INDEX_DIRECTORY, index_path.name, index_payload))
-            elif self._read_regular_json(index_path) != index_payload:
-                raise FileExistsError("RENDER-010 idempotency index 已由其他 Release 使用")
+            else:
+                existing = self._validated_index_manifest(index_path, idempotency_key)
+                if existing is None:
+                    if not self._atomic_json_create(index_path, index_payload):
+                        raise FileExistsError("RENDER-010 idempotency index 正在被更新")
+                    created.append((DEVICE_TEST_INDEX_DIRECTORY, index_path.name, index_payload))
+                elif self._device_test_index_payload(existing) != index_payload:
+                    raise FileExistsError("RENDER-010 idempotency index 已由其他 Release 使用")
             if options.get("stock_direct") is not True:
                 return
             marker_directory = self._stock_marker_directory_for_write()
@@ -441,68 +667,46 @@ class AtomicReleasePublisher:
             raise
 
     def find_device_test_by_idempotency(self, idempotency_key: str) -> dict | None:
-        with _RELEASE_METADATA_LOCK:
+        with release_metadata_guard(self.root):
             return self._find_device_test_by_idempotency(idempotency_key)
 
     def _find_device_test_by_idempotency(self, idempotency_key: str) -> dict | None:
         index_path = self._device_test_index_path(idempotency_key)
-        if not index_path.exists():
-            try:
-                self._backfill_legacy_device_test_indexes()
-            except (OSError, ValueError):
-                return None
         try:
-            if (
-                index_path.parent.is_symlink()
-                or index_path.parent.resolve().parent != self.root
-                or index_path.is_symlink()
-            ):
-                return None
-            indexed = json.loads(
-                index_path.read_text(encoding="utf-8")
-            )
-            if (
-                not isinstance(indexed, dict)
-                or str(indexed.get("idempotency_key") or "") != idempotency_key
-            ):
-                return None
-            manifest = self.validate(str(indexed.get("release_id") or ""))
-        except (OSError, json.JSONDecodeError, ValueError):
+            manifest = self._validated_index_manifest(index_path, idempotency_key)
+            if manifest is not None:
+                return manifest
+            self._backfill_legacy_device_test_indexes()
+            return self._validated_index_manifest(index_path, idempotency_key)
+        except (OSError, ValueError, ReleaseMetadataLockTimeout):
             return None
-        options = manifest.get("render_options") or {}
-        if (
-            manifest.get("release_kind") != "device_test"
-            or not isinstance(options, dict)
-            or str(options.get("idempotency_key") or "") != idempotency_key
-        ):
-            return None
-        return manifest
 
     def discard_unassigned_device_test(self, release_id: str, idempotency_key: str) -> None:
-        release = self.root / release_id
-        try:
-            manifest = self.validate(release_id)
-        except (OSError, ValueError):
-            return
-        options = manifest.get("render_options") or {}
-        if (
-            release.parent == self.root
-            and manifest.get("release_kind") == "device_test"
-            and isinstance(options, dict)
-            and str(options.get("idempotency_key") or "") == idempotency_key
-        ):
-            shutil.rmtree(release, ignore_errors=True)
-            digest = sha256(idempotency_key.encode("utf-8")).hexdigest()
-            self._unlink_managed_index(
-                DEVICE_TEST_INDEX_DIRECTORY,
-                f"{digest}.json",
-                expected={"release_id": release_id, "idempotency_key": idempotency_key},
-            )
-            for directory_name in (
-                STOCK_DIRECT_TEST_DIRECTORY,
-                STOCK_DIRECT_TEST_DEFERRED_DIRECTORY,
+        with release_metadata_guard(self.root):
+            release = self.root / release_id
+            try:
+                manifest = self.validate(release_id)
+            except (OSError, ValueError):
+                return
+            options = manifest.get("render_options") or {}
+            if (
+                release.parent == self.root
+                and manifest.get("release_kind") == "device_test"
+                and isinstance(options, dict)
+                and str(options.get("idempotency_key") or "") == idempotency_key
             ):
-                self._unlink_managed_index(directory_name, f"{release_id}.json")
+                shutil.rmtree(release, ignore_errors=True)
+                digest = sha256(idempotency_key.encode("utf-8")).hexdigest()
+                self._unlink_managed_index(
+                    DEVICE_TEST_INDEX_DIRECTORY,
+                    f"{digest}.json",
+                    expected={"release_id": release_id, "idempotency_key": idempotency_key},
+                )
+                for directory_name in (
+                    STOCK_DIRECT_TEST_DIRECTORY,
+                    STOCK_DIRECT_TEST_DEFERRED_DIRECTORY,
+                ):
+                    self._unlink_managed_index(directory_name, f"{release_id}.json")
 
     def publish_preencoded(
         self,
@@ -525,8 +729,7 @@ class AtomicReleasePublisher:
         metadata = dict(metadata)
         if metadata.get("stock_direct") is True:
             metadata["stock_direct_expires_at"] = (
-                datetime.now(timezone.utc)
-                + timedelta(seconds=STOCK_DIRECT_TEST_TTL_SECONDS)
+                datetime.now(timezone.utc) + timedelta(seconds=STOCK_DIRECT_TEST_TTL_SECONDS)
             ).isoformat()
         payload = payload_path.read_bytes()
         expected = 480 * 800 // (4 if profile.pixel_format == "2bpp" else 2)
@@ -585,9 +788,13 @@ class AtomicReleasePublisher:
             for path in temporary.iterdir():
                 with path.open("rb") as stream:
                     os.fsync(stream.fileno())
-            with _RELEASE_METADATA_LOCK:
+            with release_metadata_guard(self.root):
                 temporary.replace(final)
-                self._write_device_test_indexes(manifest)
+                try:
+                    self._write_device_test_indexes(manifest)
+                except Exception:
+                    shutil.rmtree(final, ignore_errors=True)
+                    raise
             return manifest
         except Exception:
             shutil.rmtree(temporary, ignore_errors=True)
@@ -609,7 +816,7 @@ class AtomicReleasePublisher:
             raise ValueError("RENDER-010 Release Manifest 不存在")
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except json.JSONDecodeError as exc:
             raise ValueError("RENDER-010 Release Manifest 無法解析") from exc
         if str(manifest.get("release_id")) != release_id:
             raise ValueError("RENDER-010 Release ID 與 Manifest 不一致")
@@ -657,57 +864,61 @@ class AtomicReleasePublisher:
         return snapshot
 
     def restore_pointers(self, snapshot: dict[str, str | None]) -> None:
-        for name, release_id in snapshot.items():
-            path = self.root / name
-            if release_id is None:
-                path.unlink(missing_ok=True)
-                continue
-            temporary = self.root / f".{name}.restore.tmp"
-            temporary.write_text(release_id, encoding="utf-8")
-            temporary.replace(path)
+        with release_metadata_guard(self.root):
+            for name, release_id in snapshot.items():
+                path = self.root / name
+                if release_id is None:
+                    path.unlink(missing_ok=True)
+                    continue
+                temporary = self.root / f".{name}.restore.tmp"
+                temporary.write_text(release_id, encoding="utf-8")
+                temporary.replace(path)
 
     def activate_manifests(self, manifests: builtin_list[dict]) -> None:
         if not manifests:
             raise ValueError("RENDER-010 沒有可啟用的 Release")
-        for manifest in manifests:
-            release_id = str(manifest["release_id"])
-            profile_key = str(manifest["render_profile"])
-            self.validate(release_id)
-            temporary = self.root / f".latest.{profile_key}.tmp"
+        with release_metadata_guard(self.root):
+            for manifest in manifests:
+                release_id = str(manifest["release_id"])
+                profile_key = str(manifest["render_profile"])
+                self.validate(release_id)
+                temporary = self.root / f".latest.{profile_key}.tmp"
+                temporary.write_text(release_id, encoding="utf-8")
+                temporary.replace(self.root / f"latest.{profile_key}")
+            # 保留舊版只讀取 latest 的相容契約；以第一個 Profile 為正式預設。
+            release_id = str(manifests[0]["release_id"])
+            temporary = self.root / ".latest.tmp"
             temporary.write_text(release_id, encoding="utf-8")
-            temporary.replace(self.root / f"latest.{profile_key}")
-        # 保留舊版只讀取 latest 的相容契約；以第一個 Profile 為正式預設。
-        release_id = str(manifests[0]["release_id"])
-        temporary = self.root / ".latest.tmp"
-        temporary.write_text(release_id, encoding="utf-8")
-        temporary.replace(self.root / "latest")
+            temporary.replace(self.root / "latest")
 
     def mark_orphan(self, release_id: str, reason: str) -> None:
-        release_dir = self.root / release_id
-        if release_dir.parent != self.root or not release_dir.is_dir():
-            return
-        state = {
-            "status": "orphan",
-            "reason": reason[:500],
-            "recorded_at": datetime.now(timezone.utc).isoformat(),
-        }
-        temporary = release_dir / ".inktime-state.tmp"
-        temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
-        temporary.replace(release_dir / ".inktime-state.json")
+        with release_metadata_guard(self.root):
+            release_dir = self.root / release_id
+            if release_dir.parent != self.root or not release_dir.is_dir():
+                return
+            state = {
+                "status": "orphan",
+                "reason": reason[:500],
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+            }
+            temporary = release_dir / ".inktime-state.tmp"
+            temporary.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            temporary.replace(release_dir / ".inktime-state.json")
 
     def rollback(self, release_id: str) -> None:
-        target = self.root / release_id / "manifest.json"
-        if not target.is_file() or target.parent.parent != self.root:
-            raise KeyError(release_id)
-        temporary = self.root / ".latest.tmp"
-        temporary.write_text(release_id, encoding="utf-8")
-        temporary.replace(self.root / "latest")
-        manifest = json.loads(target.read_text(encoding="utf-8"))
-        profile_key = str(manifest.get("render_profile", "safe_4c"))
-        get_display_profile(profile_key)
-        profile_temporary = self.root / f".latest.{profile_key}.tmp"
-        profile_temporary.write_text(release_id, encoding="utf-8")
-        profile_temporary.replace(self.root / f"latest.{profile_key}")
+        with release_metadata_guard(self.root):
+            target = self.root / release_id / "manifest.json"
+            if not target.is_file() or target.parent.parent != self.root:
+                raise KeyError(release_id)
+            temporary = self.root / ".latest.tmp"
+            temporary.write_text(release_id, encoding="utf-8")
+            temporary.replace(self.root / "latest")
+            manifest = json.loads(target.read_text(encoding="utf-8"))
+            profile_key = str(manifest.get("render_profile", "safe_4c"))
+            get_display_profile(profile_key)
+            profile_temporary = self.root / f".latest.{profile_key}.tmp"
+            profile_temporary.write_text(release_id, encoding="utf-8")
+            profile_temporary.replace(self.root / f"latest.{profile_key}")
 
 
 class DeviceTestReleaseStore:
@@ -718,9 +929,11 @@ class DeviceTestReleaseStore:
     def __init__(self, release_root: Path) -> None:
         self.release_root = release_root.resolve()
         self.root = self.release_root / ".device-tests"
-        self.root.mkdir(mode=0o750, parents=True, exist_ok=True)
-        if self.root.is_symlink() or self.root.resolve().parent != self.release_root:
-            raise ValueError("DEVICE-006 Custom assignment store 路徑不安全")
+        self.release_root.mkdir(mode=0o750, parents=True, exist_ok=True)
+        with release_metadata_guard(self.release_root):
+            self.root.mkdir(mode=0o750, parents=True, exist_ok=True)
+            if self.root.is_symlink() or self.root.resolve().parent != self.release_root:
+                raise ValueError("DEVICE-006 Custom assignment store 路徑不安全")
 
     def _path(self, device_id: str) -> Path:
         if not self._DEVICE_ID.fullmatch(device_id):
@@ -755,7 +968,7 @@ class DeviceTestReleaseStore:
         }
         path = self._path(device_id)
         temporary = path.with_suffix(".tmp")
-        with _ASSIGNMENT_LOCK:
+        with release_metadata_guard(self.release_root), _ASSIGNMENT_LOCK:
             manifest_path = self.release_root / release_id / "manifest.json"
             if (
                 not manifest_path.is_file()
@@ -764,59 +977,58 @@ class DeviceTestReleaseStore:
                 or manifest_path.parent.parent != self.release_root
             ):
                 raise ValueError("DEVICE-006 測試 Release 不存在")
-            temporary.write_text(
-                json.dumps(assignment, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            temporary.write_text(json.dumps(assignment, ensure_ascii=False, indent=2), encoding="utf-8")
             temporary.replace(path)
         return assignment
 
     def active(self, device_id: str, profile_key: str) -> dict | None:
-        path = self._path(device_id)
-        try:
-            assignment = json.loads(path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
-            return None
-        if not isinstance(assignment, dict):
-            return None
-        allowed = {
-            "assigned",
-            "manifest_fetched",
-            "payload_downloaded",
-            "payload_verified",
-            "display_confirmed",
-        }
-        if assignment.get("status") not in allowed or assignment.get("profile_key") != profile_key:
-            return None
-        try:
-            expired = (
-                float(assignment.get("expires_at", 0))
-                <= datetime.now(timezone.utc).timestamp()
-                or int(assignment.get("retry_count", 0)) >= 5
-            )
-        except (TypeError, ValueError):
-            return None
-        if expired:
-            assignment["status"] = "expired"
-            assignment["expired_at"] = datetime.now(timezone.utc).isoformat()
-            self._write(path, assignment)
-            return None
-        manifest_path = self.release_root / str(assignment.get("release_id", "")) / "manifest.json"
-        if not manifest_path.is_file() or manifest_path.parent.parent != self.release_root:
-            return None
-        if assignment.get("status") == "assigned":
-            assignment["status"] = "manifest_fetched"
-            assignment["manifest_fetched_at"] = datetime.now(timezone.utc).isoformat()
-            self._write(path, assignment)
-        return assignment
+        with release_metadata_guard(self.release_root), _ASSIGNMENT_LOCK:
+            path = self._path(device_id)
+            try:
+                assignment = json.loads(path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, OSError, json.JSONDecodeError):
+                return None
+            if not isinstance(assignment, dict):
+                return None
+            allowed = {
+                "assigned",
+                "manifest_fetched",
+                "payload_downloaded",
+                "payload_verified",
+                "display_confirmed",
+            }
+            if assignment.get("status") not in allowed or assignment.get("profile_key") != profile_key:
+                return None
+            try:
+                expired = (
+                    float(assignment.get("expires_at", 0)) <= datetime.now(timezone.utc).timestamp()
+                    or int(assignment.get("retry_count", 0)) >= 5
+                )
+            except (TypeError, ValueError):
+                return None
+            if expired:
+                assignment["status"] = "expired"
+                assignment["expired_at"] = datetime.now(timezone.utc).isoformat()
+                self._write(path, assignment)
+                return None
+            manifest_path = self.release_root / str(assignment.get("release_id", "")) / "manifest.json"
+            if not manifest_path.is_file() or manifest_path.parent.parent != self.release_root:
+                return None
+            if assignment.get("status") == "assigned":
+                assignment["status"] = "manifest_fetched"
+                assignment["manifest_fetched_at"] = datetime.now(timezone.utc).isoformat()
+                self._write(path, assignment)
+            return assignment
 
     def references_release(self, device_id: str, release_id: str) -> bool:
         """Check one exact device assignment without advancing its lifecycle."""
-        path = self._path(device_id)
-        try:
-            assignment = json.loads(path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
-            return False
-        return isinstance(assignment, dict) and str(assignment.get("release_id") or "") == release_id
+        with release_metadata_guard(self.release_root), _ASSIGNMENT_LOCK:
+            path = self._path(device_id)
+            try:
+                assignment = json.loads(path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, OSError, json.JSONDecodeError):
+                return False
+            return isinstance(assignment, dict) and str(assignment.get("release_id") or "") == release_id
 
     def _quarantine_assignment(self, entry_name: str, reason: str) -> bool:
         quarantine = self.release_root / DEVICE_TEST_ASSIGNMENT_QUARANTINE_DIRECTORY
@@ -854,9 +1066,7 @@ class DeviceTestReleaseStore:
         _LOGGER.warning("Quarantined invalid Custom assignment %s: %s", entry_name, reason)
         return True
 
-    def _reference_snapshot_locked(
-        self, *, maximum: int
-    ) -> tuple[frozenset[str], bool, int]:
+    def _reference_snapshot_locked(self, *, maximum: int) -> tuple[frozenset[str], bool, int]:
         if self.root.is_symlink() or self.root.resolve().parent != self.release_root:
             return frozenset(), False, 0
         limit = max(1, int(maximum))
@@ -871,9 +1081,7 @@ class DeviceTestReleaseStore:
                 if entry.name.endswith(".tmp") or not entry.name.endswith(".json"):
                     continue
                 if examined >= limit:
-                    _LOGGER.error(
-                        "Custom assignment snapshot exceeded the %d-entry safety limit", limit
-                    )
+                    _LOGGER.error("Custom assignment snapshot exceeded the %d-entry safety limit", limit)
                     return frozenset(), False, examined
                 examined += 1
                 match = re.fullmatch(r"([A-Za-z0-9_-]{1,100})\.json", entry.name)
@@ -886,11 +1094,7 @@ class DeviceTestReleaseStore:
                     if not self._quarantine_assignment(entry.name, "unsafe file type"):
                         return frozenset(), False, examined
                     continue
-                flags = (
-                    os.O_RDONLY
-                    | getattr(os, "O_CLOEXEC", 0)
-                    | getattr(os, "O_NOFOLLOW", 0)
-                )
+                flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
                 try:
                     descriptor = os.open(entry.path, flags)
                     with os.fdopen(descriptor, "rb") as handle:
@@ -914,11 +1118,9 @@ class DeviceTestReleaseStore:
         return frozenset(referenced), True, examined
 
     @contextmanager
-    def reference_snapshot(
-        self, *, maximum: int = 1024
-    ):
-        """Yield one bounded reference snapshot while blocking in-process assignment writers."""
-        with _ASSIGNMENT_LOCK:
+    def reference_snapshot(self, *, maximum: int = 1024):
+        """Yield one bounded snapshot while blocking every compliant writer."""
+        with release_metadata_guard(self.release_root), _ASSIGNMENT_LOCK:
             yield self._reference_snapshot_locked(maximum=maximum)
 
     def references_release_any(self, release_id: str, *, maximum: int = 1024) -> bool:
@@ -927,22 +1129,23 @@ class DeviceTestReleaseStore:
             return not complete or release_id in referenced
 
     def mark_downloaded(self, device_id: str, release_id: str) -> None:
-        path = self._path(device_id)
-        try:
-            assignment = json.loads(path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
-            return
-        if not isinstance(assignment, dict):
-            return
-        if assignment.get("release_id") != release_id or assignment.get("status") not in {
-            "manifest_fetched",
-            "payload_downloaded",
-        }:
-            return
-        assignment["status"] = "payload_downloaded"
-        assignment["payload_downloaded_at"] = datetime.now(timezone.utc).isoformat()
-        assignment["retry_count"] = int(assignment.get("retry_count", 0)) + 1
-        self._write(path, assignment)
+        with release_metadata_guard(self.release_root), _ASSIGNMENT_LOCK:
+            path = self._path(device_id)
+            try:
+                assignment = json.loads(path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, OSError, json.JSONDecodeError):
+                return
+            if not isinstance(assignment, dict):
+                return
+            if assignment.get("release_id") != release_id or assignment.get("status") not in {
+                "manifest_fetched",
+                "payload_downloaded",
+            }:
+                return
+            assignment["status"] = "payload_downloaded"
+            assignment["payload_downloaded_at"] = datetime.now(timezone.utc).isoformat()
+            assignment["retry_count"] = int(assignment.get("retry_count", 0)) + 1
+            self._write(path, assignment)
 
     def confirm_display(
         self,
@@ -954,31 +1157,32 @@ class DeviceTestReleaseStore:
         display_updated: bool,
         error_code: str,
     ) -> bool:
-        path = self._path(device_id)
-        try:
-            assignment = json.loads(path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
-            return False
-        if not isinstance(assignment, dict):
-            return False
-        if (
-            assignment.get("release_id") != release_id
-            or assignment.get("profile_key") != profile_key
-            or assignment.get("status") not in {"payload_downloaded", "payload_verified"}
-            or not payload_verified
-            or not display_updated
-            or bool(error_code)
-        ):
-            return False
-        assignment["status"] = "payload_verified"
-        assignment["payload_verified_at"] = datetime.now(timezone.utc).isoformat()
-        assignment["status"] = "display_confirmed"
-        assignment["display_confirmed_at"] = datetime.now(timezone.utc).isoformat()
-        if assignment.get("one_time") or assignment.get("restore_formal"):
-            assignment["status"] = "consumed"
-            assignment["consumed_at"] = datetime.now(timezone.utc).isoformat()
-        self._write(path, assignment)
-        return True
+        with release_metadata_guard(self.release_root), _ASSIGNMENT_LOCK:
+            path = self._path(device_id)
+            try:
+                assignment = json.loads(path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, OSError, json.JSONDecodeError):
+                return False
+            if not isinstance(assignment, dict):
+                return False
+            if (
+                assignment.get("release_id") != release_id
+                or assignment.get("profile_key") != profile_key
+                or assignment.get("status") not in {"payload_downloaded", "payload_verified"}
+                or not payload_verified
+                or not display_updated
+                or bool(error_code)
+            ):
+                return False
+            assignment["status"] = "payload_verified"
+            assignment["payload_verified_at"] = datetime.now(timezone.utc).isoformat()
+            assignment["status"] = "display_confirmed"
+            assignment["display_confirmed_at"] = datetime.now(timezone.utc).isoformat()
+            if assignment.get("one_time") or assignment.get("restore_formal"):
+                assignment["status"] = "consumed"
+                assignment["consumed_at"] = datetime.now(timezone.utc).isoformat()
+            self._write(path, assignment)
+            return True
 
     @staticmethod
     def _write(path: Path, assignment: dict) -> None:
