@@ -261,6 +261,31 @@ def test_device_test_index_migration_is_versioned_and_ignores_release_root_mtime
     assert AtomicReleasePublisher(root).find_device_test_by_idempotency("missing-key") is None
 
 
+def test_device_test_index_migration_scans_root_exactly_once_per_version(monkeypatch, tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    legacy = _publish_preencoded_test(publisher, tmp_path, idempotency_key="legacy-once")
+    _reset_device_test_index_migration(root)
+    original_scandir = os.scandir
+    root_scans = 0
+
+    def counted_scandir(path):
+        nonlocal root_scans
+        if Path(path) == root:
+            root_scans += 1
+        return original_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", counted_scandir)
+
+    assert publisher.find_device_test_by_idempotency("legacy-once") == legacy
+    assert root_scans == 1
+    _publish_preencoded_test(publisher, tmp_path, idempotency_key="new-index-a")
+    assert publisher.find_device_test_by_idempotency("new-miss-b") is None
+    _publish_preencoded_test(publisher, tmp_path, idempotency_key="new-index-c")
+    assert AtomicReleasePublisher(root).find_device_test_by_idempotency("new-miss-d") is None
+    assert root_scans == 1
+
+
 @pytest.mark.parametrize(
     "state",
     [
