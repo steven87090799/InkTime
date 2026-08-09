@@ -632,12 +632,19 @@ class DeviceReleaseService:
                                 raise ValueError("Stock marker 時區不合法")
                             if expiry <= current:
                                 release_dir, identity, manifest = self._load_manifest(release_id)
-                                if self._stock_manifest_matches(
+                                if not self._stock_manifest_matches(
                                     manifest,
                                     device_id=device_id,
                                     profile_key=profile_key,
                                     expires_at=expires_at,
                                 ):
+                                    if self._quarantine_marker(
+                                        entry.name,
+                                        active,
+                                        "manifest contract mismatch",
+                                    ):
+                                        retained = False
+                                else:
                                     authorization = DeviceReleaseAuthorization(
                                         allowed=True,
                                         source="stock_direct_test_expired",

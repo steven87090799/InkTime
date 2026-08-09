@@ -996,6 +996,10 @@ def test_formal_marker_and_release_id_traversal_fail_closed(tmp_path):
     result = service.cleanup_expired_stock_test_releases(maximum=8, now=now)
     assert result == {"examined": 1, "removed": 0}
     assert (service.release_root / formal_id).is_dir()
+    assert not (
+        service.release_root / ".stock-direct-tests" / f"{formal_id}.json"
+    ).exists()
+    assert list((service.release_root / ".stock-direct-tests-quarantine").iterdir())
 
     traversal = service.authorize_stock_test_release_for_device(
         device_id="stock-device",
