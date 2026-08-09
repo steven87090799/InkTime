@@ -232,7 +232,7 @@ jobs:
             --arg base_sha "${BASE_SHA}" \
             --arg tested_sha "${tested_sha}" \
             --arg tested_ref_kind "head" \
-            '{event_name, ref, tested_ref, source_head_sha, base_sha, tested_sha, tested_ref_kind}' \
+            '$ARGS.named' \
             > "artifacts/source-head-provenance-${GITHUB_RUN_ID}.json"
           {
             echo "### PR source-head evidence"

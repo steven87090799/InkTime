@@ -246,3 +246,12 @@ def test_main_canonical_planner_and_provenance_contracts_are_preserved():
     workflow_contract = "tests/unit/test_ci_workflow_events.py"
     assert workflow_contract in RUNNER_SUITE_TEST_PATHS["ci_planner_contracts"]
     assert workflow_contract in RUNNER_SUITE_TEST_PATHS["ci_routing_contracts"]
+
+
+def test_source_head_artifact_serializes_named_jq_arguments():
+    ci = _load_workflow(WORKFLOW_PATHS[0])
+    source_head = ci["jobs"]["source-head-contract"]
+    verify = _step_by_name(source_head, "Verify declared PR source HEAD provenance")
+
+    assert "jq -n" in verify["run"]
+    assert "'$ARGS.named'" in verify["run"]
