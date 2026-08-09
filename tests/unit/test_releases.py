@@ -531,6 +531,39 @@ def test_stale_index_wrong_target_is_quarantined_then_replacement_is_usable(tmp_
     assert publisher.find_device_test_by_idempotency("stale-target") == replacement
 
 
+@pytest.mark.parametrize("corruption", ["missing_release", "malformed_manifest"])
+def test_stale_index_missing_or_malformed_release_is_recoverable(tmp_path, corruption):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    key = f"stale-{corruption}"
+    manifest = _publish_preencoded_test(publisher, tmp_path, idempotency_key=key)
+    index = publisher._device_test_index_path(key)
+    state_root = root / DEVICE_TEST_INDEX_MIGRATION_DIRECTORY
+    state_root.mkdir()
+    (state_root / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "migration_version": DEVICE_TEST_INDEX_MIGRATION_VERSION,
+                "complete": True,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    release = root / manifest["release_id"]
+    if corruption == "missing_release":
+        shutil.rmtree(release)
+    else:
+        (release / "manifest.json").write_text("{", encoding="utf-8")
+
+    assert publisher.find_device_test_by_idempotency(key) is None
+    assert not index.exists()
+    shutil.rmtree(release, ignore_errors=True)
+    replacement = _publish_preencoded_test(publisher, tmp_path, idempotency_key=key)
+    assert publisher.find_device_test_by_idempotency(key) == replacement
+
+
 @pytest.mark.parametrize("target_kind", ["wrong_key", "formal"])
 def test_index_target_contract_mismatch_is_quarantined(target_kind, tmp_path):
     root = tmp_path / "releases"
