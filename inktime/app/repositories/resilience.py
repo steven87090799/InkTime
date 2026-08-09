@@ -1310,7 +1310,7 @@ class ResilienceRepository:
         try:
             with self.database.session() as connection:
                 connection.execute("PRAGMA optimize")
-        except Exception:
+        except Exception:  # noqa: S110
             # Maintenance statistics must never turn a committed expiry into a
             # failed scheduler step.
             pass

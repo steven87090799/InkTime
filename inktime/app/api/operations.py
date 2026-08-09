@@ -76,7 +76,7 @@ def _activity_cursor(raw: str | int | None) -> dict[str, int]:
         return {"activity": 0, "job": 0, "device": 0, "error": 0}
     parts = value.split(":")
     if len(parts) == 4 and all(part.isdigit() for part in parts):
-        return dict(zip(("activity", "job", "device", "error"), (max(0, int(part)) for part in parts)))
+        return dict(zip(("activity", "job", "device", "error"), (max(0, int(part)) for part in parts), strict=False))
     if value.isdigit():
         # The former UI only advanced activity_events. Replaying the other
         # bounded sources from zero avoids silently losing their first page.
@@ -100,7 +100,7 @@ def _timeline_rows(connection, filters: dict, after: dict[str, int]) -> tuple[li
     cursor = {key: max(0, int(value)) for key, value in after.items()}
     rows: list[dict] = []
     for row in connection.execute(
-        f"SELECT id,source,source_id,severity,component,event,message,job_id,photo_id,device_id,stage,progress_done,progress_total,error_code,trace_id,details_json,created_at FROM activity_events WHERE id>? ORDER BY id {_activity_source_order(cursor['activity'])} LIMIT ?",
+        f"SELECT id,source,source_id,severity,component,event,message,job_id,photo_id,device_id,stage,progress_done,progress_total,error_code,trace_id,details_json,created_at FROM activity_events WHERE id>? ORDER BY id {_activity_source_order(cursor['activity'])} LIMIT ?",  # noqa: S608
         (cursor["activity"], source_limit),
     ).fetchall():
         cursor["activity"] = max(cursor["activity"], int(row["id"]))
@@ -114,7 +114,7 @@ def _timeline_rows(connection, filters: dict, after: dict[str, int]) -> tuple[li
         )
         rows.append(item)
     for row in connection.execute(
-        f"SELECT id,job_id,event,message,details_json,created_at FROM job_events WHERE id>? ORDER BY id {_activity_source_order(cursor['job'])} LIMIT ?",
+        f"SELECT id,job_id,event,message,details_json,created_at FROM job_events WHERE id>? ORDER BY id {_activity_source_order(cursor['job'])} LIMIT ?",  # noqa: S608
         (cursor["job"], source_limit),
     ).fetchall():
         cursor["job"] = max(cursor["job"], int(row["id"]))
@@ -141,7 +141,7 @@ def _timeline_rows(connection, filters: dict, after: dict[str, int]) -> tuple[li
             }
         )
     for row in connection.execute(
-        f"SELECT id,device_id,level,event,error_code,message,details_json,created_at FROM device_events WHERE id>? ORDER BY id {_activity_source_order(cursor['device'])} LIMIT ?",
+        f"SELECT id,device_id,level,event,error_code,message,details_json,created_at FROM device_events WHERE id>? ORDER BY id {_activity_source_order(cursor['device'])} LIMIT ?",  # noqa: S608
         (cursor["device"], source_limit),
     ).fetchall():
         cursor["device"] = max(cursor["device"], int(row["id"]))
@@ -169,7 +169,7 @@ def _timeline_rows(connection, filters: dict, after: dict[str, int]) -> tuple[li
             }
         )
     for row in connection.execute(
-        f"SELECT id,job_id,photo_id,component,error_code,severity,message,occurrences,first_seen_at,last_seen_at,resolved_at,resolution_note FROM job_errors WHERE id>? ORDER BY id {_activity_source_order(cursor['error'])} LIMIT ?",
+        f"SELECT id,job_id,photo_id,component,error_code,severity,message,occurrences,first_seen_at,last_seen_at,resolved_at,resolution_note FROM job_errors WHERE id>? ORDER BY id {_activity_source_order(cursor['error'])} LIMIT ?",  # noqa: S608
         (cursor["error"], source_limit),
     ).fetchall():
         cursor["error"] = max(cursor["error"], int(row["id"]))

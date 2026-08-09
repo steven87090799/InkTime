@@ -321,12 +321,12 @@ class ReleaseCoordinator:
                     if quarantine is not None and not committed and quarantine.exists():
                         if not self.publisher.restore_quarantined_release(quarantine, release_id):
                             raise RuntimeError(f"RENDER-GC quarantine restore failed for {release_id}")
-                except Exception:
+                except Exception as error:
                     # Restore before releasing the authoritative pointer
                     # fence.  A pointer writer must never observe the release
                     # in quarantine while its DB row still exists.
                     if quarantine is not None and not committed and quarantine.exists():
                         if not self.publisher.restore_quarantined_release(quarantine, release_id):
-                            raise RuntimeError(f"RENDER-GC quarantine restore failed for {release_id}")
+                            raise RuntimeError(f"RENDER-GC quarantine restore failed for {release_id}") from error
                     raise
         return {"deleted": deleted, "skipped": skipped}
