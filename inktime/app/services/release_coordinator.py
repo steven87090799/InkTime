@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 from inktime.app.db import Database
@@ -214,6 +215,7 @@ class ReleaseCoordinator:
         # failed while purging the quarantine directory.  Reconcile those
         # entries before selecting new candidates; rows still present in the
         # DB are restored instead of being purged.
+        quarantine: Path | None
         for release_id, quarantine in self.publisher.list_gc_quarantines(limit=limit):
             with self.database.session() as connection:
                 row = connection.execute("SELECT 1 FROM releases WHERE id=?", (release_id,)).fetchone()
