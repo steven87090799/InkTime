@@ -227,7 +227,11 @@ def test_manual_ai_idempotency_key_is_namespaced_per_endpoint(client, app, tmp_p
 def test_manual_ai_idempotency_conflict_has_stable_api_error_code(client, app, tmp_path):
     create_admin(app)
     login(client)
-    excluded_ids = _scan(app, tmp_path, screenshot=True, duplicate=True)
+    first_root = tmp_path / "first-excluded"
+    second_root = tmp_path / "second-excluded"
+    first_root.mkdir()
+    second_root.mkdir()
+    excluded_ids = _scan(app, first_root, screenshot=True) + _scan(app, second_root, screenshot=True)
     _setting(app, "analysis.ai_mode", "off")
     _setting(app, "analysis.execution_mode", "local_with_manual_ai")
     headers = {"X-CSRF-Token": csrf(client), "Idempotency-Key": "manual-conflict-key"}

@@ -615,6 +615,11 @@ class DevicePairingService:
                     existing_config = {}
                 merged_config = dict(existing_config)
                 merged_config.update(device_config or {})
+                if device is not None:
+                    merged_config["name"] = device["name"] or merged_config.get("name")
+                    merged_config["panel_profile"] = (
+                        device["panel_profile"] or merged_config.get("panel_profile") or "safe_4c"
+                    )
                 maximum_slots = self._capability_max_slots(row["capabilities_json"])
                 config = self._normalize_config(
                     merged_config,

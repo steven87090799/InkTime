@@ -388,7 +388,7 @@ def test_cancelled_offline_item_requires_download_evidence_for_delayed_terminal(
         client,
         no_evidence_token,
         no_evidence_item["id"],
-        no_evidence_version - 1,
+        no_evidence_version,
         "DISPLAY_COMPLETED",
         "cancelled-without-evidence-terminal",
         ack_mode="delayed_terminal",

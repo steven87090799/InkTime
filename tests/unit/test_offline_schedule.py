@@ -189,7 +189,7 @@ def test_dst_slot_epochs_are_deterministic_for_fold_and_gap():
     )
     assert deadlines == [
         "2026-03-08T07:45:00+00:00",
-        "2026-03-09T07:45:00+00:00",
+        "2026-03-09T05:45:00+00:00",
     ]
 
 

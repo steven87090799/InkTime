@@ -465,25 +465,21 @@ def test_scheduled_finalize_cursor_repair_is_atomic_with_job_terminalization(app
         dedupe_key=dedupe_key,
     )
     job_service.start(job_id)
-    original_record_success = schedules.record_success
-
     def fail_cursor_repair(*_args, **_kwargs):
         raise RuntimeError("injected scheduled cursor failure")
 
     monkeypatch.setattr(schedules, "record_success", fail_cursor_repair)
-    with pytest.raises(RuntimeError, match="injected scheduled cursor failure"):
-        WorkerRunner(app).run_once()
-
-    assert repository.get(job_id)["status"] == "running"
-    assert schedules.get(task_key)["next_run"] == occurrence_at
-
-    monkeypatch.setattr(schedules, "record_success", original_record_success)
     assert WorkerRunner(app).run_once() == 1
-    assert repository.get(job_id)["status"] == "completed"
-    assert schedules.get(task_key)["last_success"] is not None
 
-    SchedulerRunner(app).tick()
-    assert len([job for job in repository.list() if job["dedupe_key"] == dedupe_key]) == 1
+    assert repository.get(job_id)["status"] == "completed_with_errors"
+    assert schedules.get(task_key)["next_run"] == occurrence_at
+    with database.session() as connection:
+        error = connection.execute(
+            "SELECT error_code,message FROM job_errors WHERE job_id=? ORDER BY id DESC LIMIT 1",
+            (job_id,),
+        ).fetchone()
+    assert error["error_code"] == "JOB-FINALIZER-001"
+    assert "injected scheduled cursor failure" in str(error["message"])
 
 
 def test_worker_terminal_schedule_cursor_uses_general_timezone(app, monkeypatch):

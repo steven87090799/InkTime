@@ -429,14 +429,6 @@ class OpenAICompatibleProvider(VisionProvider):
                     "VLM-003",
                     http_status=status,
                 )
-            if status in {401, 403}:
-                raise ProviderHTTPError(
-                    self._redact(f"Provider 回應 HTTP {status}"),
-                    "AUTH_REQUIRED",
-                    http_status=status,
-                    request_started=retry_policy == AMBIGUOUS_VISION_ANALYSIS,
-                    vision_started=retry_policy == AMBIGUOUS_VISION_ANALYSIS,
-                )
             if status in {400, 404, 413, 422} and retry_policy == AMBIGUOUS_VISION_ANALYSIS:
                 raise ProviderHTTPError(
                     self._redact(f"Provider 回應 HTTP {status}"),
