@@ -52,6 +52,22 @@ def test_primary_management_pages_render(client, app):
     assert "照片平滑（減少色塊／雜點）" in settings
 
 
+def test_simulator_superseded_compare_aborts_fetch_and_poll_delay(client, app):
+    create_admin(app)
+    login(client)
+    body = client.get("/simulator").get_data(as_text=True)
+
+    assert "let compareController = null" in body
+    assert "compareController.abort()" in body
+    assert "waitForJob(created,{signal:controller.signal})" in body
+    assert "window.inktimeFetch(created.status_url,{signal})" in body
+    assert "await abortableDelay(750,signal)" in body
+    assert "clearTimeout(timer);reject(abortError())" in body
+    assert "error?.name!=='AbortError'" in body
+    assert "if(compareController===controller)" in body
+    assert "pendingCompare" not in body
+
+
 def test_device_runtime_summary_exposes_persisted_versions_and_unknowns_as_null(client, app):
     create_admin(app)
     login(client)

@@ -148,7 +148,7 @@
   let lastResultRevision = null;
   let compareRunning = false;
   let compareRevision = 0;
-  let pendingCompare = false;
+  let compareController = null;
   let compareTimer = null;
 
   function setStatus(message, type='') { status.textContent = message; status.className = `simulator-status ${type}`.trim(); }
@@ -234,13 +234,16 @@
     data.set('face_regions', '[]');
     return data;
   }
-  async function waitForJob(created) {
+  function abortError(){return new DOMException('A/B preview superseded','AbortError');}
+  function abortableDelay(milliseconds,signal){return new Promise((resolve,reject)=>{if(signal?.aborted){reject(abortError());return;}const timer=window.setTimeout(()=>{signal?.removeEventListener('abort',onAbort);resolve();},milliseconds);function onAbort(){clearTimeout(timer);reject(abortError());}signal?.addEventListener('abort',onAbort,{once:true});});}
+  async function waitForJob(created,{signal}={}) {
     for(let attempt=0;attempt<120;attempt+=1){
-      const response=await window.inktimeFetch(created.status_url); const body=await response.json();
+      if(signal?.aborted)throw abortError();
+      const response=await window.inktimeFetch(created.status_url,{signal}); const body=await response.json();
       if(!response.ok) throw new Error(body.message||'無法取得背景工作狀態');
       if(body.status==='completed') return body.result;
       if(['completed_with_errors','failed','cancelled','budget_exceeded'].includes(body.status)) throw new Error(body.error_code||'背景工作未完成');
-      await new Promise(resolve=>setTimeout(resolve,750));
+      await abortableDelay(750,signal);
     }
     throw new Error('背景工作仍在執行，請稍後至工作中心查看');
   }
@@ -259,17 +262,17 @@
   function scheduleCompare(event) {
     event?.preventDefault();
     if (compareTimer) { clearTimeout(compareTimer); compareTimer = null; }
+    if(compareController){compareController.abort();compareController=null;compareRunning=false;}
     compareRevision += 1;
-    if (compareRunning) { pendingCompare = true; return; }
     compare();
   }
   function refreshPreviewFromControls(debounce=false) {
     if (compareTimer) { clearTimeout(compareTimer); compareTimer = null; }
+    if(compareController){compareController.abort();compareController=null;compareRunning=false;}
     compareRevision += 1;
     clearPreviewCards();
     if (!currentSource) return;
     setStatus('預覽設定已變更；正在重新產生 A/B 預覽…', 'ready');
-    if (compareRunning) { pendingCompare = true; return; }
     if (debounce) {
       compareTimer = window.setTimeout(() => { compareTimer = null; compare(); }, 350);
       return;
@@ -282,12 +285,13 @@
     return false;
   }
   async function compare() {
-    if (compareRunning || !currentSource) return;
-    compareRunning=true; pendingCompare=false; const revision=compareRevision, sourceAtStart=currentSource;
+    if (!currentSource) return;
+    if(compareController)compareController.abort();
+    const controller=new AbortController();compareController=controller;compareRunning=true;const revision=compareRevision,sourceAtStart=currentSource;
     compareButton.disabled=true; clearPreviewCards(); setStatus('Server 正在產生原圖、舊算法與新算法…');
     try {
-      const response=await window.inktimeFetch('/api/v1/rendering/compare',{method:'POST',body:formData()}); const created=await response.json();
-      if(!response.ok) throw new Error(created.message||'A/B 預覽失敗'); const body=await waitForJob(created);
+      const response=await window.inktimeFetch('/api/v1/rendering/compare',{method:'POST',body:formData(),signal:controller.signal}); const created=await response.json();
+      if(!response.ok) throw new Error(created.message||'A/B 預覽失敗'); const body=await waitForJob(created,{signal:controller.signal});
       if(revision!==compareRevision||sourceAtStart!==currentSource)return;
       lastResult=body;
       lastResultRevision=revision;
@@ -296,10 +300,9 @@
       const rows=document.getElementById('palette-stat-body'); rows.replaceChildren(...body.palette.map(item=>{const row=document.createElement('tr');const color=document.createElement('td');const swatch=document.createElement('i');swatch.style.backgroundColor=`rgb(${item.rgb.join(',')})`;color.append(swatch,document.createTextNode(item.name));const pixels=document.createElement('td');pixels.textContent=item.pixels.toLocaleString();const ratio=document.createElement('td');ratio.textContent=`${(item.ratio*100).toFixed(2)}%`;row.append(color,pixels,ratio);return row;})); document.getElementById('palette-statistics').hidden=false;
       document.getElementById('save-preset')?.removeAttribute('disabled'); document.getElementById('send-test')?.removeAttribute('disabled'); setStatus('A/B 預覽完成；下載檔為 Server 新算法結果。','success');
     } catch(error) {
-      if(revision===compareRevision&&sourceAtStart===currentSource)setStatus(error.message||'A/B 預覽失敗','error');
+      if(error?.name!=='AbortError'&&revision===compareRevision&&sourceAtStart===currentSource)setStatus(error.message||'A/B 預覽失敗','error');
     } finally {
-      compareRunning=false; compareButton.disabled=!currentSource;
-      if(pendingCompare){pendingCompare=false;queueMicrotask(compare);}
+      if(compareController===controller){compareController=null;compareRunning=false;compareButton.disabled=!currentSource;}
     }
   }
   async function savePreset() {
@@ -353,6 +356,7 @@
   document.getElementById('palette-mode').addEventListener('change',refreshPreviewFromControls);
   document.getElementById('palette-version').addEventListener('input',()=>refreshPreviewFromControls(true));
   paletteValues.addEventListener('input',()=>refreshPreviewFromControls(true));
+  window.addEventListener('beforeunload',()=>{if(compareController)compareController.abort();if(compareTimer)clearTimeout(compareTimer);});
   document.getElementById('legacy-button').addEventListener('click',()=>{dither.value='gooddisplay';document.getElementById('linear-light').checked=false;document.getElementById('color-distance').value='rgb';refreshPreviewFromControls();});
   document.getElementById('copy-palette').addEventListener('click',copyPalette); document.getElementById('reset-palette').addEventListener('click',()=>{paletteMode.value='default';paletteValues.value='';refreshPreviewFromControls();}); document.getElementById('save-preset')?.addEventListener('click',savePreset); document.getElementById('send-test')?.addEventListener('click',sendTest);
   for(const key of ['original','legacy','new']) document.getElementById(`${key}-image`).addEventListener('error',()=>{const image=document.getElementById(`${key}-image`);image.hidden=true;document.getElementById(`${key}-empty`).hidden=false;if(!compareRunning)setStatus(`${key} 預覽讀取失敗，請重新產生。`,'error');});

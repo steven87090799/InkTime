@@ -10,7 +10,14 @@ import pytest
 
 from inktime.app.domain.rendering.fonts import FontCoverageError
 from inktime.app.domain.rendering.palette import encode_image
-from inktime.app.domain.rendering.release import AtomicReleasePublisher, pack_four_color_2bpp
+from inktime.app.domain.rendering.release import (
+    AtomicReleasePublisher,
+    DEVICE_TEST_INDEX_MIGRATION_DIRECTORY,
+    DeviceTestReleaseStore,
+    STOCK_DIRECT_TEST_DEFERRED_DIRECTORY,
+    STOCK_DIRECT_TEST_DIRECTORY,
+    pack_four_color_2bpp,
+)
 
 
 def test_four_color_480x800_is_96000_bytes():
@@ -101,18 +108,159 @@ def test_preencoded_stock_release_uses_direct_idempotency_index_and_ttl_marker(
     )
     options = manifest["render_options"]
     assert options["stock_direct_expires_at"]
-    assert (
-        tmp_path
-        / "releases"
-        / ".stock-direct-tests"
-        / f"{manifest['release_id']}.json"
-    ).is_file()
+    assert any(
+        (
+            tmp_path
+            / "releases"
+            / directory
+            / f"{manifest['release_id']}.json"
+        ).is_file()
+        for directory in (STOCK_DIRECT_TEST_DIRECTORY, STOCK_DIRECT_TEST_DEFERRED_DIRECTORY)
+    )
     monkeypatch.setattr(
         publisher,
         "list",
         lambda: pytest.fail("idempotency lookup must not scan every release"),
     )
     assert publisher.find_device_test_by_idempotency("stock-index-key") == manifest
+
+
+def _publish_preencoded_test(
+    publisher: AtomicReleasePublisher,
+    tmp_path: Path,
+    *,
+    idempotency_key: str,
+    transport: str = "custom",
+):
+    payload_path = tmp_path / f"{idempotency_key}.bin"
+    preview_path = tmp_path / f"{idempotency_key}.png"
+    payload_path.write_bytes(bytes(96_000))
+    Image.new("RGB", (480, 800), "white").save(preview_path)
+    return publisher.publish_preencoded(
+        source_photo_id="legacy-test",
+        payload_path=payload_path,
+        preview_path=preview_path,
+        profile_key="safe_4c",
+        dither="none",
+        color_distance="rgb",
+        dither_strength=0,
+        linear_light=False,
+        palette=[],
+        palette_version="test",
+        metadata={
+            "idempotency_key": idempotency_key,
+            "transport": transport,
+            "stock_direct": transport == "stock_direct",
+            "stock_direct_device_id": "stock-device" if transport == "stock_direct" else None,
+        },
+    )
+
+
+def test_legacy_device_test_idempotency_is_backfilled_once_and_reused(monkeypatch, tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    manifest = _publish_preencoded_test(
+        publisher, tmp_path, idempotency_key="legacy-idempotency"
+    )
+    index = publisher._device_test_index_path("legacy-idempotency")
+    index.unlink()
+    migration = root / DEVICE_TEST_INDEX_MIGRATION_DIRECTORY
+    if migration.exists():
+        migration.rmdir()
+    monkeypatch.setattr(
+        publisher,
+        "list",
+        lambda: pytest.fail("legacy recovery must stream once without list/sort"),
+    )
+
+    recovered = publisher.find_device_test_by_idempotency("legacy-idempotency")
+
+    assert recovered == manifest
+    assert json.loads(index.read_text(encoding="utf-8"))["release_id"] == manifest["release_id"]
+    assert len([path for path in root.iterdir() if (path / "manifest.json").is_file()]) == 1
+    monkeypatch.setattr(
+        publisher,
+        "_backfill_legacy_device_test_indexes",
+        lambda: pytest.fail("second lookup must use the O(1) index path"),
+    )
+    assert publisher.find_device_test_by_idempotency("legacy-idempotency") == manifest
+
+
+def test_legacy_index_recovery_skips_corrupt_wrong_key_and_formal_releases(tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    valid = _publish_preencoded_test(publisher, tmp_path, idempotency_key="other-key")
+    publisher._device_test_index_path("other-key").unlink()
+    (root / valid["release_id"] / "manifest.json").write_text("{", encoding="utf-8")
+    publisher.publish(
+        [("formal", Image.new("RGB", (480, 800), "white"))],
+        activate=False,
+        metadata={"idempotency_key": "formal-key", "transport": "custom"},
+    )
+
+    assert publisher.find_device_test_by_idempotency("missing-key") is None
+    assert not publisher._device_test_index_path("other-key").exists()
+    assert not publisher._device_test_index_path("formal-key").exists()
+
+
+def test_failed_stock_marker_transaction_rolls_back_only_new_index(monkeypatch, tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    original_create = publisher._atomic_json_create
+    calls = 0
+
+    def fail_marker(path, payload):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("marker write failed")
+        return original_create(path, payload)
+
+    monkeypatch.setattr(publisher, "_atomic_json_create", fail_marker)
+    with pytest.raises(OSError, match="marker write failed"):
+        _publish_preencoded_test(
+            publisher, tmp_path, idempotency_key="transaction-key", transport="stock_direct"
+        )
+    assert not publisher._device_test_index_path("transaction-key").exists()
+    assert not any(
+        list((root / directory).glob("*.json"))
+        for directory in (STOCK_DIRECT_TEST_DIRECTORY, STOCK_DIRECT_TEST_DEFERRED_DIRECTORY)
+        if (root / directory).exists()
+    )
+    assert not [path for path in root.iterdir() if (path / "manifest.json").is_file()]
+
+
+def test_publication_failure_leaves_no_marker_and_preserves_preexisting_index(tmp_path):
+    root = tmp_path / "releases"
+    publisher = AtomicReleasePublisher(root)
+    original = _publish_preencoded_test(
+        publisher, tmp_path, idempotency_key="preexisting-index", transport="stock_direct"
+    )
+    index = publisher._device_test_index_path("preexisting-index")
+    before = index.read_bytes()
+
+    with pytest.raises(FileExistsError):
+        _publish_preencoded_test(
+            publisher, tmp_path, idempotency_key="preexisting-index", transport="stock_direct"
+        )
+
+    assert index.read_bytes() == before
+    assert publisher.find_device_test_by_idempotency("preexisting-index") == original
+    releases = [path for path in root.iterdir() if (path / "manifest.json").is_file()]
+    assert [path.name for path in releases] == [original["release_id"]]
+
+
+def test_custom_assignment_store_rejects_symlink_root(tmp_path):
+    release_root = tmp_path / "releases"
+    outside = tmp_path / "outside-assignments"
+    release_root.mkdir()
+    outside.mkdir()
+    (release_root / ".device-tests").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="assignment store"):
+        DeviceTestReleaseStore(release_root)
+
+    assert list(outside.iterdir()) == []
 
 
 def test_automatic_release_candidates_respect_configured_memory_threshold(app, tmp_path):

@@ -53,6 +53,11 @@ def test_activity_is_bounded_unifies_sources_and_redacts(client, app):
     assert "visibilitychange" in body
     assert "setInterval" not in body
     assert "lastId=Math.max(lastId" in body
+    assert "if(paused||document.hidden||!autoRefresh.checked)return" in body
+    assert "if(paused){stopPoll();return;}" in body
+    assert "if(!autoRefresh.checked){stopPoll();return;}" in body
+    assert "function stopPoll(){if(pollTimer)clearTimeout(pollTimer);pollTimer=null;}" in body
+    assert "loadInFlight=true" in body
 
 
 def test_activity_access_is_read_only_for_viewer(client, app):

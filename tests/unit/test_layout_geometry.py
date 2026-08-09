@@ -971,3 +971,181 @@ def test_stock_device_target_is_frozen_before_await_and_labels_match_contract():
 
     assert FIT_MODES["stretch_fill"] == "填滿照片區（不裁切，可微變形）"
     assert FIT_MODES["contain"] == "完整顯示"
+
+
+def test_stock_cleanup_round_robin_eventually_passes_protected_prefix(tmp_path):
+    service = _real_stock_release_service(tmp_path)
+    now = datetime.now(timezone.utc)
+    protected = [f"stock-protected-{index:02d}" for index in range(40)]
+    eligible = [f"stock-eligible-{index:02d}" for index in range(20)]
+    for release_id in protected:
+        _write_stock_release(
+            service.release_root,
+            release_id,
+            expires_at=now + timedelta(hours=1),
+        )
+    for release_id in eligible:
+        _write_stock_release(
+            service.release_root,
+            release_id,
+            expires_at=now - timedelta(minutes=1),
+        )
+
+    results = [
+        service.cleanup_expired_stock_test_releases(maximum=32, now=now)
+        for _ in range(6)
+    ]
+
+    assert all(result["examined"] <= 32 for result in results)
+    assert all((service.release_root / release_id).is_dir() for release_id in protected)
+    assert all(not (service.release_root / release_id).exists() for release_id in eligible)
+    state = json.loads(
+        (
+            service.release_root / ".stock-direct-cleanup-state" / "state.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert state["active"] in {".stock-direct-tests", ".stock-direct-tests-deferred"}
+
+
+def test_stock_cleanup_cursor_recovers_and_new_or_aging_markers_progress(tmp_path):
+    service = _real_stock_release_service(tmp_path)
+    now = datetime.now(timezone.utc)
+    state_root = service.release_root / ".stock-direct-cleanup-state"
+    state_root.mkdir()
+    (state_root / "state.json").write_text("{", encoding="utf-8")
+    stale_id = "stock-missing-release"
+    marker_root = service.release_root / ".stock-direct-tests"
+    marker_root.mkdir(exist_ok=True)
+    (marker_root / f"{stale_id}.json").write_text(
+        json.dumps(
+            {
+                "release_id": stale_id,
+                "device_id": "stock-device",
+                "profile_key": "safe_4c",
+                "expires_at": (now - timedelta(minutes=1)).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    fresh_id = "stock-aging"
+    _write_stock_release(
+        service.release_root,
+        fresh_id,
+        expires_at=now + timedelta(minutes=1),
+    )
+    service.cleanup_expired_stock_test_releases(maximum=4, now=now)
+    assert (service.release_root / fresh_id).is_dir()
+
+    added_id = "stock-added-later"
+    _write_stock_release(
+        service.release_root,
+        added_id,
+        expires_at=now - timedelta(seconds=1),
+    )
+    for _ in range(6):
+        service.cleanup_expired_stock_test_releases(
+            maximum=4, now=now + timedelta(minutes=2)
+        )
+    assert not (service.release_root / fresh_id).exists()
+    assert not (service.release_root / added_id).exists()
+    assert list((service.release_root / ".stock-direct-tests-quarantine").iterdir())
+
+
+@pytest.mark.parametrize("corruption", ["tmp", "invalid_json", "oversized", "symlink"])
+def test_corrupt_custom_assignment_is_quarantined_without_global_cleanup_poison(
+    tmp_path, corruption
+):
+    service = _real_stock_release_service(tmp_path)
+    now = datetime.now(timezone.utc)
+    release_id = f"stock-assignment-{corruption}"
+    _write_stock_release(
+        service.release_root,
+        release_id,
+        expires_at=now - timedelta(minutes=1),
+    )
+    assignment_root = service.test_store.root
+    outside = tmp_path / "outside-assignment"
+    outside.write_text('{"release_id":"outside"}', encoding="utf-8")
+    if corruption == "tmp":
+        (assignment_root / "unrelated.tmp").write_text("{", encoding="utf-8")
+    elif corruption == "invalid_json":
+        (assignment_root / "broken.json").write_text("{", encoding="utf-8")
+    elif corruption == "oversized":
+        (assignment_root / "broken.json").write_bytes(b"x" * (64 * 1024 + 1))
+    else:
+        (assignment_root / "broken.json").symlink_to(outside)
+
+    for _ in range(3):
+        service.cleanup_expired_stock_test_releases(maximum=4, now=now)
+
+    assert not (service.release_root / release_id).exists()
+    assert outside.read_text(encoding="utf-8") == '{"release_id":"outside"}'
+    if corruption != "tmp":
+        assert list((service.release_root / ".device-tests-quarantine").iterdir())
+
+
+def test_custom_assignment_snapshot_is_once_per_batch_and_preserves_only_referenced_release(
+    monkeypatch, tmp_path
+):
+    service = _real_stock_release_service(tmp_path)
+    now = datetime.now(timezone.utc)
+    protected_id = "stock-custom-protected"
+    eligible_ids = [f"stock-snapshot-{index:02d}" for index in range(31)]
+    for release_id in [protected_id, *eligible_ids]:
+        _write_stock_release(
+            service.release_root,
+            release_id,
+            expires_at=now - timedelta(minutes=1),
+        )
+    service.test_store.assign(
+        "other-device",
+        protected_id,
+        profile_key="safe_4c",
+        delivery="next_wake",
+        one_time=True,
+        restore_formal=True,
+    )
+    original = service.test_store.reference_snapshot
+    scans = 0
+
+    @contextmanager
+    def counted_snapshot(*, maximum=1024):
+        nonlocal scans
+        scans += 1
+        with original(maximum=maximum) as snapshot:
+            yield snapshot
+
+    monkeypatch.setattr(service.test_store, "reference_snapshot", counted_snapshot)
+    result = service.cleanup_expired_stock_test_releases(maximum=32, now=now)
+
+    assert scans == 1
+    assert result["examined"] == 32
+    assert (service.release_root / protected_id).is_dir()
+    assert all(not (service.release_root / release_id).exists() for release_id in eligible_ids)
+
+
+def test_assignment_snapshot_over_capacity_defers_batch_explicitly(tmp_path):
+    service = _real_stock_release_service(tmp_path)
+    release_id = "stock-capacity-deferred"
+    now = datetime.now(timezone.utc)
+    _write_stock_release(
+        service.release_root,
+        release_id,
+        expires_at=now - timedelta(minutes=1),
+    )
+    for index in range(1025):
+        (service.test_store.root / f"device-{index}.json").write_text(
+            json.dumps(
+                {
+                    "device_id": f"device-{index}",
+                    "release_id": f"custom-{index}",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    assert service.cleanup_expired_stock_test_releases(now=now) == {
+        "examined": 0,
+        "removed": 0,
+    }
+    assert (service.release_root / release_id).is_dir()

@@ -5,12 +5,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import logging
 import os
 from pathlib import Path
 import re
 import secrets
 import shutil
 import stat
+import tempfile
 from typing import Any, Mapping
 
 from inktime.app.core.paths import UnsafePathError
@@ -18,6 +20,8 @@ from inktime.app.db import Database
 from inktime.app.domain.rendering import DeviceTestReleaseStore
 from inktime.app.domain.rendering.release import (
     DEVICE_TEST_INDEX_DIRECTORY,
+    STOCK_DIRECT_CLEANUP_STATE_DIRECTORY,
+    STOCK_DIRECT_TEST_DEFERRED_DIRECTORY,
     STOCK_DIRECT_TEST_DIRECTORY,
 )
 
@@ -29,6 +33,12 @@ _PAYLOAD_SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 MAX_DEVICE_PAYLOAD_BYTES = 64 * 1024 * 1024
 MAX_STOCK_CLEANUP_MARKERS = 32
 MAX_STOCK_CLEANUP_PAYLOAD_BYTES = 8 * 1024 * 1024
+STOCK_DIRECT_TEST_QUARANTINE_DIRECTORY = ".stock-direct-tests-quarantine"
+_STOCK_MARKER_DIRECTORIES = (
+    STOCK_DIRECT_TEST_DIRECTORY,
+    STOCK_DIRECT_TEST_DEFERRED_DIRECTORY,
+)
+_LOGGER = logging.getLogger(__name__)
 
 
 def payload_entry_from_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
@@ -164,7 +174,13 @@ class DeviceReleaseService:
             return None
         return value if _RELEASE_ID.fullmatch(value) else None
 
-    def _unlink_managed_file(self, directory_name: str, filename: str) -> None:
+    def _unlink_managed_file(
+        self,
+        directory_name: str,
+        filename: str,
+        *,
+        expected: Mapping[str, Any] | None = None,
+    ) -> None:
         if (
             not directory_name.startswith(".")
             or "/" in directory_name
@@ -180,9 +196,24 @@ class DeviceReleaseService:
                 _identity,
             ):
                 metadata = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
-                if stat.S_ISREG(metadata.st_mode):
-                    os.unlink(filename, dir_fd=directory_fd)
-        except (FileNotFoundError, OSError, UnsafePathError):
+                if not stat.S_ISREG(metadata.st_mode):
+                    return
+                if expected is not None:
+                    with self._open_file_at(directory_fd, filename) as handle:
+                        raw = handle.read(64 * 1024 + 1)
+                    if len(raw) > 64 * 1024:
+                        return
+                    current = json.loads(raw.decode("utf-8"))
+                    if current != expected:
+                        return
+                os.unlink(filename, dir_fd=directory_fd)
+        except (
+            FileNotFoundError,
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            UnsafePathError,
+        ):
             return
 
     def _load_manifest(
@@ -378,8 +409,9 @@ class DeviceReleaseService:
         device_id: str,
         profile_key: str,
         release_id: str,
+        custom_reference_ids: frozenset[str],
     ) -> bool:
-        if self.test_store.references_release_any(release_id):
+        if release_id in custom_reference_ids:
             return True
         if any(
             self._read_pointer(pointer) == release_id
@@ -411,6 +443,7 @@ class DeviceReleaseService:
         device_id: str,
         profile_key: str,
         expires_at: str | None = None,
+        custom_reference_ids: frozenset[str],
     ) -> bool:
         if authorization.release_dir_identity is None:
             return False
@@ -444,6 +477,7 @@ class DeviceReleaseService:
             device_id=device_id,
             profile_key=profile_key,
             release_id=release_id,
+            custom_reference_ids=custom_reference_ids,
         ):
             return False
         tombstone_name = f".stock-consumed-{release_id}-{secrets.token_hex(4)}"
@@ -469,11 +503,10 @@ class DeviceReleaseService:
             self._unlink_managed_file(
                 DEVICE_TEST_INDEX_DIRECTORY,
                 f"{digest}.json",
+                expected={"release_id": release_id, "idempotency_key": idempotency_key},
             )
-        self._unlink_managed_file(
-            STOCK_DIRECT_TEST_DIRECTORY,
-            f"{release_id}.json",
-        )
+        for directory_name in _STOCK_MARKER_DIRECTORIES:
+            self._unlink_managed_file(directory_name, f"{release_id}.json")
         shutil.rmtree(tombstone, ignore_errors=True)
         return True
 
@@ -492,11 +525,173 @@ class DeviceReleaseService:
         )
         if not authorization.allowed or authorization.manifest is None:
             return False
-        return self._remove_stock_release(
-            authorization,
-            device_id=device_id,
-            profile_key=profile_key,
+        with self.test_store.reference_snapshot() as (references, complete, _examined):
+            if not complete:
+                return False
+            return self._remove_stock_release(
+                authorization,
+                device_id=device_id,
+                profile_key=profile_key,
+                custom_reference_ids=references,
+            )
+
+    def _cleanup_state_path(self) -> Path:
+        return self.release_root / STOCK_DIRECT_CLEANUP_STATE_DIRECTORY / "state.json"
+
+    def _write_cleanup_active(self, active: str) -> bool:
+        if active not in _STOCK_MARKER_DIRECTORIES:
+            return False
+        root = self.release_root / STOCK_DIRECT_CLEANUP_STATE_DIRECTORY
+        try:
+            if root.is_symlink() or (root.exists() and not root.is_dir()):
+                quarantined = self.release_root / (
+                    f".stock-cleanup-state-quarantine-{secrets.token_hex(6)}"
+                )
+                os.rename(root, quarantined)
+                _LOGGER.warning("Quarantined unsafe Stock cleanup state path")
+            root.mkdir(mode=0o750, parents=True, exist_ok=True)
+            if root.is_symlink() or root.resolve().parent != self.release_root:
+                return False
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".state-", suffix=".tmp", dir=root
+            )
+            temporary = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    json.dump({"active": active}, handle)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, root / "state.json")
+            finally:
+                temporary.unlink(missing_ok=True)
+        except OSError:
+            return False
+        return True
+
+    def _read_cleanup_active(self) -> str:
+        path = self._cleanup_state_path()
+        try:
+            if path.parent.is_symlink() or path.parent.resolve().parent != self.release_root:
+                raise UnsafePathError("Stock cleanup state 路徑不安全")
+            with self._open_readonly(path) as handle:
+                raw = handle.read(4096 + 1)
+            if len(raw) > 4096:
+                raise ValueError("cleanup state oversized")
+            state = json.loads(raw.decode("utf-8"))
+            active = state.get("active") if isinstance(state, dict) else None
+            if active in _STOCK_MARKER_DIRECTORIES:
+                return str(active)
+        except (
+            FileNotFoundError,
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            UnsafePathError,
+            ValueError,
+        ):
+            pass
+        active = STOCK_DIRECT_TEST_DIRECTORY
+        self._write_cleanup_active(active)
+        return active
+
+    def _marker_directory(self, directory_name: str) -> Path | None:
+        if directory_name not in _STOCK_MARKER_DIRECTORIES:
+            return None
+        path = self.release_root / directory_name
+        try:
+            path.mkdir(mode=0o750, parents=True, exist_ok=True)
+        except OSError:
+            return None
+        if path.is_symlink() or path.resolve().parent != self.release_root:
+            return None
+        return path
+
+    def _move_marker(self, filename: str, source_name: str, destination_name: str) -> bool:
+        source = self._marker_directory(source_name)
+        destination = self._marker_directory(destination_name)
+        if source is None or destination is None:
+            return False
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
         )
+        try:
+            source_fd = os.open(source, flags)
+            try:
+                destination_fd = os.open(destination, flags)
+                try:
+                    os.link(
+                        filename,
+                        filename,
+                        src_dir_fd=source_fd,
+                        dst_dir_fd=destination_fd,
+                        follow_symlinks=False,
+                    )
+                    os.unlink(filename, dir_fd=source_fd)
+                finally:
+                    os.close(destination_fd)
+            finally:
+                os.close(source_fd)
+        except FileExistsError:
+            try:
+                source_path = source / filename
+                destination_path = destination / filename
+                with self._open_readonly(source_path) as source_handle:
+                    source_raw = source_handle.read(16 * 1024 + 1)
+                with self._open_readonly(destination_path) as destination_handle:
+                    destination_raw = destination_handle.read(16 * 1024 + 1)
+                if source_raw != destination_raw or len(source_raw) > 16 * 1024:
+                    return False
+                with self._open_directory(source) as (source_fd, _identity):
+                    metadata = os.stat(filename, dir_fd=source_fd, follow_symlinks=False)
+                    if stat.S_ISREG(metadata.st_mode):
+                        os.unlink(filename, dir_fd=source_fd)
+                return True
+            except (FileNotFoundError, OSError, UnsafePathError):
+                return False
+        except OSError:
+            return False
+        return True
+
+    def _quarantine_marker(self, filename: str, source_name: str, reason: str) -> bool:
+        source = self._marker_directory(source_name)
+        quarantine = self.release_root / STOCK_DIRECT_TEST_QUARANTINE_DIRECTORY
+        if source is None:
+            return False
+        try:
+            quarantine.mkdir(mode=0o750, parents=True, exist_ok=True)
+            if quarantine.is_symlink() or quarantine.resolve().parent != self.release_root:
+                return False
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            source_fd = os.open(source, flags)
+            try:
+                destination_fd = os.open(quarantine, flags)
+                try:
+                    destination = (
+                        f"{filename}.{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+                        f".{secrets.token_hex(4)}.quarantine"
+                    )
+                    os.rename(
+                        filename,
+                        destination,
+                        src_dir_fd=source_fd,
+                        dst_dir_fd=destination_fd,
+                    )
+                finally:
+                    os.close(destination_fd)
+            finally:
+                os.close(source_fd)
+        except OSError:
+            return False
+        _LOGGER.warning("Quarantined invalid Stock cleanup marker %s: %s", filename, reason)
+        return True
 
     def cleanup_expired_stock_test_releases(
         self,
@@ -504,78 +699,119 @@ class DeviceReleaseService:
         maximum: int = MAX_STOCK_CLEANUP_MARKERS,
         now: datetime | None = None,
     ) -> dict[str, int]:
-        """Bounded opportunistic cleanup for expired Stock-direct markers."""
+        """Bounded fair cleanup using two persisted marker generations."""
         limit = max(1, min(int(maximum), MAX_STOCK_CLEANUP_MARKERS))
-        marker_root = self.release_root / STOCK_DIRECT_TEST_DIRECTORY
-        if marker_root.is_symlink() or marker_root.resolve().parent != self.release_root:
-            return {"examined": 0, "removed": 0}
         current = now or datetime.now(timezone.utc)
         if current.tzinfo is None:
             current = current.replace(tzinfo=timezone.utc)
         examined = removed = validated_bytes = 0
-        try:
-            entries = os.scandir(marker_root)
-        except (FileNotFoundError, NotADirectoryError, OSError):
-            return {"examined": 0, "removed": 0}
-        with entries:
-            for entry in entries:
-                if examined >= limit:
-                    break
-                examined += 1
-                if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
-                    continue
+        with self.test_store.reference_snapshot() as (
+            custom_references,
+            assignment_snapshot_complete,
+            _assignment_examined,
+        ):
+            if not assignment_snapshot_complete:
+                return {"examined": 0, "removed": 0}
+            active = self._read_cleanup_active()
+            for _pass_index in range(2):
+                inactive = (
+                    STOCK_DIRECT_TEST_DEFERRED_DIRECTORY
+                    if active == STOCK_DIRECT_TEST_DIRECTORY
+                    else STOCK_DIRECT_TEST_DIRECTORY
+                )
+                marker_root = self._marker_directory(active)
+                if marker_root is None:
+                    return {"examined": examined, "removed": removed}
                 try:
-                    with self._open_readonly(Path(entry.path)) as handle:
-                        raw = handle.read(16 * 1024 + 1)
-                    marker = json.loads(raw.decode("utf-8"))
-                    if len(raw) > 16 * 1024 or not isinstance(marker, dict):
-                        continue
-                    release_id = str(marker.get("release_id") or "")
-                    device_id = str(marker.get("device_id") or "")
-                    profile_key = str(marker.get("profile_key") or "")
-                    expires_at = str(marker.get("expires_at") or "")
-                    expiry = datetime.fromisoformat(expires_at)
-                    if expiry.tzinfo is None or expiry > current:
-                        continue
-                    release_dir, identity, manifest = self._load_manifest(release_id)
-                    if not self._stock_manifest_matches(
-                        manifest,
-                        device_id=device_id,
-                        profile_key=profile_key,
-                        expires_at=expires_at,
-                    ):
-                        continue
-                    authorization = DeviceReleaseAuthorization(
-                        allowed=True,
-                        source="stock_direct_test_expired",
-                        reason=None,
-                        release_id=release_id,
-                        release_dir=release_dir,
-                        manifest=manifest,
-                        release_dir_identity=identity,
-                    )
-                    payload_entry = self.payload_entry_for_authorization(authorization)
-                    payload_size = int(payload_entry["size"])
-                    if validated_bytes + payload_size > MAX_STOCK_CLEANUP_PAYLOAD_BYTES:
-                        continue
-                    validated_bytes += payload_size
-                    if self._remove_stock_release(
-                        authorization,
-                        device_id=device_id,
-                        profile_key=profile_key,
-                        expires_at=expires_at,
-                    ):
-                        removed += 1
-                except (
-                    FileNotFoundError,
-                    OSError,
-                    UnicodeDecodeError,
-                    json.JSONDecodeError,
-                    PermissionError,
-                    UnsafePathError,
-                    ValueError,
-                ):
-                    continue
+                    entries = os.scandir(marker_root)
+                except (FileNotFoundError, NotADirectoryError, OSError):
+                    return {"examined": examined, "removed": removed}
+                saw_entry = False
+                with entries:
+                    for entry in entries:
+                        if examined >= limit:
+                            break
+                        saw_entry = True
+                        examined += 1
+                        if (
+                            not entry.name.endswith(".json")
+                            or _RELEASE_ID.fullmatch(entry.name[:-5]) is None
+                            or entry.is_symlink()
+                            or not entry.is_file(follow_symlinks=False)
+                        ):
+                            self._quarantine_marker(entry.name, active, "unsafe marker entry")
+                            continue
+                        retained = True
+                        try:
+                            with self._open_readonly(Path(entry.path)) as handle:
+                                raw = handle.read(16 * 1024 + 1)
+                            if len(raw) > 16 * 1024:
+                                raise ValueError("Stock marker 過大")
+                            marker = json.loads(raw.decode("utf-8"))
+                            if not isinstance(marker, dict):
+                                raise ValueError("Stock marker 格式不合法")
+                            release_id = str(marker.get("release_id") or "")
+                            device_id = str(marker.get("device_id") or "")
+                            profile_key = str(marker.get("profile_key") or "")
+                            expires_at = str(marker.get("expires_at") or "")
+                            if release_id != entry.name[:-5]:
+                                raise ValueError("Stock marker 身分不一致")
+                            expiry = datetime.fromisoformat(expires_at)
+                            if expiry.tzinfo is None:
+                                raise ValueError("Stock marker 時區不合法")
+                            if expiry <= current:
+                                release_dir, identity, manifest = self._load_manifest(release_id)
+                                if self._stock_manifest_matches(
+                                    manifest,
+                                    device_id=device_id,
+                                    profile_key=profile_key,
+                                    expires_at=expires_at,
+                                ):
+                                    authorization = DeviceReleaseAuthorization(
+                                        allowed=True,
+                                        source="stock_direct_test_expired",
+                                        reason=None,
+                                        release_id=release_id,
+                                        release_dir=release_dir,
+                                        manifest=manifest,
+                                        release_dir_identity=identity,
+                                    )
+                                    payload_entry = self.payload_entry_for_authorization(
+                                        authorization
+                                    )
+                                    payload_size = int(payload_entry["size"])
+                                    if (
+                                        validated_bytes + payload_size
+                                        <= MAX_STOCK_CLEANUP_PAYLOAD_BYTES
+                                    ):
+                                        validated_bytes += payload_size
+                                        if self._remove_stock_release(
+                                            authorization,
+                                            device_id=device_id,
+                                            profile_key=profile_key,
+                                            expires_at=expires_at,
+                                            custom_reference_ids=custom_references,
+                                        ):
+                                            removed += 1
+                                            retained = False
+                        except (
+                            FileNotFoundError,
+                            OSError,
+                            UnicodeDecodeError,
+                            json.JSONDecodeError,
+                            PermissionError,
+                            UnsafePathError,
+                            ValueError,
+                        ) as exc:
+                            self._quarantine_marker(entry.name, active, type(exc).__name__)
+                            retained = False
+                        if retained:
+                            self._move_marker(entry.name, active, inactive)
+                if examined >= limit or saw_entry:
+                    break
+                active = inactive
+                if not self._write_cleanup_active(active):
+                    break
         return {"examined": examined, "removed": removed}
 
     def latest_for_device(

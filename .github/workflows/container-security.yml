@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - fix/final-production-openrouter-and-runtime-hardening
+      - fix/quiet-runtime-offline-playlist
     # PR metadata edits (including base retargeting) need a fresh merge-ref validation.
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled, edited]
   push:
