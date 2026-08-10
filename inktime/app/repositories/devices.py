@@ -33,6 +33,7 @@ _DEVICE_AUTH_FAILURE_LIMIT = 20
 _DEVICE_AUTH_FAILURE_WINDOW = timedelta(minutes=5)
 _DEVICE_AUTH_FAILURE_MAX_ROWS = 10_000
 _DEVICE_AUTH_TIMESTAMP_UPDATE_INTERVAL = timedelta(minutes=1)
+_MAX_STATUS_FUTURE_SKEW = timedelta(minutes=5)
 
 
 class DeviceRateLimitError(RuntimeError):
@@ -947,7 +948,8 @@ class DeviceRepository:
         reported_at: str | None = None,
         details: dict | None = None,
     ) -> bool:
-        now = datetime.now(timezone.utc).isoformat()
+        received_at = datetime.now(timezone.utc)
+        now = received_at.isoformat()
         status_at = now
         if reported_at:
             try:
@@ -956,8 +958,11 @@ class DeviceRepository:
                 raise ValueError("DEVICE-004 status_reported_at 格式不合法") from exc
             if parsed_status_at.tzinfo is None:
                 parsed_status_at = parsed_status_at.replace(tzinfo=timezone.utc)
-            status_at = parsed_status_at.astimezone(timezone.utc).isoformat()
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+            parsed_status_at = parsed_status_at.astimezone(timezone.utc)
+            if parsed_status_at > received_at + _MAX_STATUS_FUTURE_SKEW:
+                return False
+            status_at = min(parsed_status_at, received_at).isoformat()
+        cutoff = (received_at - timedelta(days=400)).isoformat()
         level = "error" if error_code else "info"
         message = error_message[:500] if error_message else "裝置狀態正常"
         details = details or {}
