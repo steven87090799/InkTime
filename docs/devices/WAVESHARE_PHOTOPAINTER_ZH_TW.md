@@ -145,6 +145,7 @@ cp esp32/ink-display-7C-photo/inktime_default_4M.csv \
 # 既有 PCB（Release）
 arduino-cli compile \
   --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' \
+  --build-property 'upload.maximum_size=1376256' \
   esp32/ink-display-7C-photo
 
 # Waveshare PhotoPainter（Release）

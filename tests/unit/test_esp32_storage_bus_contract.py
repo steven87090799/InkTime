@@ -249,6 +249,9 @@ def test_queue_ack_journal_partition_budget_is_source_owned_and_selected_by_ci()
     assert "automatically selects `partitions.csv`" in guide
     assert "FlashSize=4M" in workflow
     assert "FlashSize=16M,PSRAM=opi,CDCOnBoot=cdc" in workflow
+    assert workflow.count("upload.maximum_size=1376256") == 5
+    assert guide.count("upload.maximum_size=1376256") == 3
+    assert docs.count("upload.maximum_size=1376256") == 1
     assert "PartitionScheme=app3M_fat9M_16MB" not in workflow
     assert "PartitionScheme=app3M_fat9M_16MB" not in docs
     assert "PartitionScheme=inktime_default_4M" not in workflow

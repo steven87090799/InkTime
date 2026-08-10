@@ -59,24 +59,29 @@ arduino-cli core install esp32:esp32@3.3.10
 arduino-cli lib install GxEPD2@1.6.9 ArduinoJson@7.4.3
 
 # The repository-owned 512 KiB NVS table is sketch-local.  Arduino-ESP32
-# automatically selects `partitions.csv` from the sketch directory.
+# automatically selects `partitions.csv` from the sketch directory.  Arduino
+# CLI still uses the board's default size guard unless the custom app size is
+# supplied explicitly below.
 cp esp32/ink-display-7C-photo/inktime_default_4M.csv \
   esp32/ink-display-7C-photo/partitions.csv
 
 # 既有 GDEY073D46
 arduino-cli compile \
   --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' \
+  --build-property 'upload.maximum_size=1376256' \
   esp32/ink-display-7C-photo
 
 # 新 GDEP073E01
 arduino-cli compile \
   --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' \
+  --build-property 'upload.maximum_size=1376256' \
   --build-property "compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1" \
   esp32/ink-display-7C-photo
 
 # 可信任 LAN Production；secure build 的預設值仍是 0
 arduino-cli compile \
   --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' \
+  --build-property 'upload.maximum_size=1376256' \
   --build-property "compiler.cpp.extra_flags=-DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1" \
   esp32/ink-display-7C-photo
 
