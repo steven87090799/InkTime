@@ -555,6 +555,153 @@ class PhotoAnalysisService:
         )
         return ranked
 
+    @staticmethod
+    def _request_was_consumed(
+        error: Exception,
+        *,
+        vision_attempt: VisionAttemptState | None = None,
+    ) -> bool:
+        """Return whether this specific provider request may have been sent.
+
+        A completed earlier Vision request must not be used as evidence that a
+        later text-only repair request was consumed.  Callers therefore pass
+        the relevant attempt state explicitly: the Vision path includes its
+        parent marker; the repair path relies only on exception metadata.
+        """
+
+        return bool(
+            (vision_attempt is not None and vision_attempt.vision_started)
+            or getattr(error, "vision_started", False)
+            or getattr(error, "request_started", False)
+            or getattr(error, "ambiguous", False)
+        )
+
+    @staticmethod
+    def _normalize_consumed_error(error: Exception, *, consumed: bool, request_kind: str) -> None:
+        """Make only ambiguous boundary failures terminal/manual.
+
+        Deterministic provider/business codes remain unchanged.  A timeout or
+        unavailable process boundary after possible request consumption must
+        not reach the worker as the retryable ``AI-PROVIDER-TIMEOUT`` path.
+        """
+
+        if not consumed:
+            return
+        code = str(getattr(error, "code", "") or "")
+        preserved_terminal_codes = {"CONFIG_INVALID", "AUTH_REQUIRED", "VLM-004", "VLM-006"}
+        boundary_codes = {"AI-PROVIDER-TIMEOUT", "AI-PROVIDER-UNAVAILABLE", "VLM-001"}
+        boundary_timeout = isinstance(error, TimeoutError) or code in boundary_codes
+        if code in preserved_terminal_codes:
+            return
+        if not boundary_timeout and not bool(getattr(error, "ambiguous", False)):
+            return
+        error.code = "VLM-AMBIGUOUS"
+        error.ambiguous = True
+        error.request_started = True
+        if request_kind == "vision":
+            error.vision_started = True
+
+    @staticmethod
+    def _failure_metrics(
+        provider: VisionProvider,
+        *,
+        image_path: Path | None = None,
+        image_request: bool,
+        request_metrics: dict[str, Any] | None = None,
+        request_body_bytes: int = 0,
+    ) -> dict[str, Any]:
+        """Retain parent-known billable evidence when a child is killed."""
+
+        metrics = dict(request_metrics or getattr(provider, "last_request_metrics", {}) or {})
+        if image_request:
+            try:
+                local_image_bytes = image_path.stat().st_size if image_path is not None else 0
+            except OSError:
+                local_image_bytes = 0
+            try:
+                reported_image_bytes = max(0, int(metrics.get("image_bytes", 0) or 0))
+            except (TypeError, ValueError):
+                reported_image_bytes = 0
+            metrics["image_bytes"] = max(reported_image_bytes, local_image_bytes)
+        else:
+            # A provider object can retain the previous Vision metrics after a
+            # child-side repair timeout.  Do not label that image as part of
+            # the text-only repair request; retain only the parent-known
+            # repair context/body size as positive evidence.
+            metrics["image_bytes"] = 0
+            try:
+                reported_body_bytes = max(0, int(metrics.get("request_body_bytes", 0) or 0))
+            except (TypeError, ValueError):
+                reported_body_bytes = 0
+            metrics["request_body_bytes"] = max(reported_body_bytes, max(0, int(request_body_bytes or 0)))
+        return metrics
+
+    @staticmethod
+    def _requires_unknown_usage(error: Exception) -> bool:
+        """Only ambiguous provider outcomes need fail-closed unknown billing."""
+
+        return bool(getattr(error, "ambiguous", False))
+
+    def _record_failed_unknown_request(
+        self,
+        *,
+        provider: VisionProvider,
+        model: str,
+        job_id: str | None,
+        photo_id: str,
+        request_type: str,
+        started_at: str,
+        started_perf: float,
+        error: Exception,
+        request_kind: str,
+        image_path: Path | None = None,
+        request_metrics: dict[str, Any] | None = None,
+        request_body_bytes: int = 0,
+        retry_count: int = 0,
+    ) -> None:
+        metrics = self._failure_metrics(
+            provider,
+            image_path=image_path,
+            image_request=request_kind == "vision",
+            request_metrics=request_metrics,
+            request_body_bytes=request_body_bytes,
+        )
+        record_failed_unknown_usage(
+            self.usage,
+            provider=provider,
+            model=model,
+            job_id=job_id,
+            photo_id=photo_id,
+            request_type=request_type,
+            started_at=started_at,
+            started_perf=started_perf,
+            error=error,
+            request_metrics=metrics,
+            retry_count=retry_count,
+            image_bytes=metrics.get("image_bytes", 0),
+            error_code=str(getattr(error, "code", "") or "")[:128] or None,
+        )
+
+    @staticmethod
+    def _terminalize_post_vision_repair_failure(error: Exception, *, vision_completed: bool) -> None:
+        """Prevent any failed repair after Vision from replaying the Vision POST."""
+
+        if not vision_completed:
+            return
+        code = str(getattr(error, "code", "") or "")
+        if code in {"CONFIG_INVALID", "AUTH_REQUIRED", "VLM-004", "VLM-006", "VLM-AMBIGUOUS"}:
+            return
+        if isinstance(error, TimeoutError) or code in {
+            "AI-PROVIDER-TIMEOUT",
+            "AI-PROVIDER-UNAVAILABLE",
+            "VLM-001",
+            "VLM-002",
+            "VLM-003",
+            "VLM-005",
+            "VLM-007",
+        }:
+            error.code = "VLM-004"
+
     def _record(
         self,
         provider: VisionProvider,
@@ -1035,35 +1182,38 @@ class PhotoAnalysisService:
                 )
             vision_attempt.vision_started = True
             vision_attempt.vision_completed = True
-        except TimeoutError:
-            if vision_attempt.vision_started:
-                try:
-                    record_failed_unknown_usage(
-                        self.usage,
-                        provider=selected_channel.provider if selected_channel is not None else provider,
-                        model=model,
-                        job_id=job_id,
-                        photo_id=photo_id,
-                        request_type=stage,
-                        started_at=started_at,
-                        started_perf=started_perf,
-                        error=TimeoutError("AI-PROVIDER-TIMEOUT"),
-                        error_code="AI-PROVIDER-TIMEOUT",
-                        request_metrics=getattr(
-                            selected_channel.provider if selected_channel is not None else provider,
-                            "last_request_metrics",
-                            {},
-                        ),
-                    )
-                except Exception as usage_error:
-                    self._activity(
-                        "ERROR",
-                        "provider_failed_usage_persist_failed",
-                        "Provider 未知成本記錄失敗",
-                        job_id=job_id,
-                        photo_id=photo_id,
-                        error=str(usage_error)[:500],
-                    )
+        except TimeoutError as timeout_error:
+            consumed = self._request_was_consumed(timeout_error, vision_attempt=vision_attempt)
+            if consumed:
+                self._normalize_consumed_error(timeout_error, consumed=True, request_kind="vision")
+                if self._requires_unknown_usage(timeout_error):
+                    try:
+                        self._record_failed_unknown_request(
+                            provider=selected_channel.provider if selected_channel is not None else provider,
+                            model=model,
+                            job_id=job_id,
+                            photo_id=photo_id,
+                            request_type=stage,
+                            started_at=started_at,
+                            started_perf=started_perf,
+                            error=timeout_error,
+                            request_kind="vision",
+                            image_path=image,
+                            request_metrics=getattr(
+                                selected_channel.provider if selected_channel is not None else provider,
+                                "last_request_metrics",
+                                {},
+                            ),
+                        )
+                    except Exception as usage_error:
+                        self._activity(
+                            "ERROR",
+                            "provider_failed_usage_persist_failed",
+                            "Provider 未知成本記錄失敗",
+                            job_id=job_id,
+                            photo_id=photo_id,
+                            error=str(usage_error)[:500],
+                        )
             self._activity(
                 "WARNING",
                 "provider_timeout",
@@ -1071,39 +1221,41 @@ class PhotoAnalysisService:
                 job_id=job_id,
                 photo_id=photo_id,
                 stage=stage,
-                error_code="AI-PROVIDER-TIMEOUT",
+                error_code=str(getattr(timeout_error, "code", "") or "AI-PROVIDER-TIMEOUT"),
             )
             raise
         except Exception as error:
-            if vision_attempt.vision_started or bool(getattr(error, "request_started", False)) or bool(
-                getattr(error, "ambiguous", False)
-            ):
-                try:
-                    record_failed_unknown_usage(
-                        self.usage,
-                        provider=selected_channel.provider if selected_channel is not None else provider,
-                        model=model,
-                        job_id=job_id,
-                        photo_id=photo_id,
-                        request_type=stage,
-                        started_at=started_at,
-                        started_perf=started_perf,
-                        error=error,
-                        request_metrics=getattr(
-                            selected_channel.provider if selected_channel is not None else provider,
-                            "last_request_metrics",
-                            {},
-                        ),
-                    )
-                except Exception as usage_error:
-                    self._activity(
-                        "ERROR",
-                        "provider_failed_usage_persist_failed",
-                        "Provider 未知成本記錄失敗",
-                        job_id=job_id,
-                        photo_id=photo_id,
-                        error=str(usage_error)[:500],
-                    )
+            consumed = self._request_was_consumed(error, vision_attempt=vision_attempt)
+            if consumed:
+                self._normalize_consumed_error(error, consumed=True, request_kind="vision")
+                if self._requires_unknown_usage(error):
+                    try:
+                        self._record_failed_unknown_request(
+                            provider=selected_channel.provider if selected_channel is not None else provider,
+                            model=model,
+                            job_id=job_id,
+                            photo_id=photo_id,
+                            request_type=stage,
+                            started_at=started_at,
+                            started_perf=started_perf,
+                            error=error,
+                            request_kind="vision",
+                            image_path=image,
+                            request_metrics=getattr(
+                                selected_channel.provider if selected_channel is not None else provider,
+                                "last_request_metrics",
+                                {},
+                            ),
+                        )
+                    except Exception as usage_error:
+                        self._activity(
+                            "ERROR",
+                            "provider_failed_usage_persist_failed",
+                            "Provider 未知成本記錄失敗",
+                            job_id=job_id,
+                            photo_id=photo_id,
+                            error=str(usage_error)[:500],
+                        )
             self._activity(
                 "ERROR",
                 "provider_request_failed",
@@ -1191,33 +1343,64 @@ class PhotoAnalysisService:
                 else:
                     repaired = provider.repair_json(**repair_call)
             except Exception as repair_error:
-                if bool(getattr(repair_error, "request_started", False)) or bool(
-                    getattr(repair_error, "ambiguous", False)
-                ):
-                    try:
-                        repair_provider = selected_channel.provider if selected_channel is not None else provider
-                        record_failed_unknown_usage(
-                            self.usage,
-                            provider=repair_provider,
-                            model=repair_model,
-                            job_id=job_id,
-                            photo_id=photo_id,
-                            request_type="json_repair",
-                            started_at=repair_started_at,
-                            started_perf=repair_perf,
-                            error=repair_error,
-                            request_metrics=getattr(repair_provider, "last_request_metrics", {}),
-                            retry_count=1,
-                        )
-                    except Exception as usage_error:
-                        self._activity(
-                            "ERROR",
-                            "provider_failed_usage_persist_failed",
-                            "Provider JSON 修復未知成本記錄失敗",
-                            job_id=job_id,
-                            photo_id=photo_id,
-                            error=str(usage_error)[:500],
-                        )
+                # The repair request is a distinct, text-only operation.  Do
+                # not use the already-completed Vision marker as evidence that
+                # this later request was consumed; doing so would create a
+                # false json_repair charge and could misclassify a capacity
+                # timeout.  Process-boundary metadata is authoritative here.
+                repair_consumed = self._request_was_consumed(repair_error)
+                if repair_consumed:
+                    self._normalize_consumed_error(
+                        repair_error,
+                        consumed=True,
+                        request_kind="repair",
+                    )
+                    if self._requires_unknown_usage(repair_error):
+                        try:
+                            repair_provider = selected_channel.provider if selected_channel is not None else provider
+                            repair_context_bytes = len(
+                                json.dumps(
+                                    repair_call,
+                                    ensure_ascii=False,
+                                    sort_keys=True,
+                                    default=str,
+                                ).encode("utf-8")
+                            )
+                            self._record_failed_unknown_request(
+                                provider=repair_provider,
+                                model=repair_model,
+                                job_id=job_id,
+                                photo_id=photo_id,
+                                request_type="json_repair",
+                                started_at=repair_started_at,
+                                started_perf=repair_perf,
+                                error=repair_error,
+                                request_kind="repair",
+                                request_metrics=getattr(repair_provider, "last_request_metrics", {}),
+                                request_body_bytes=repair_context_bytes,
+                                retry_count=1,
+                            )
+                        except Exception as usage_error:
+                            self._activity(
+                                "ERROR",
+                                "provider_failed_usage_persist_failed",
+                                "Provider JSON 修復未知成本記錄失敗",
+                                job_id=job_id,
+                                photo_id=photo_id,
+                                error=str(usage_error)[:500],
+                            )
+                if vision_attempt.vision_completed:
+                    # A repair capacity/pre-start failure cannot be safely
+                    # retried at the worker boundary: that would replay the
+                    # already-consumed Vision POST.  Keep the existing
+                    # validation/repair terminal semantics.  For a consumed
+                    # repair, unknown billing has already been recorded above
+                    # with its original provider code before this queue-level
+                    # terminal normalization.
+                    self._terminalize_post_vision_repair_failure(
+                        repair_error,
+                        vision_completed=True,
+                    )
                 raise
             total_cost += self._record(
                 provider,

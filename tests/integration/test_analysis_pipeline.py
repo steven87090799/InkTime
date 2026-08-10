@@ -2,20 +2,27 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
+import time
 from PIL import Image
 
 import pytest
 
 from inktime.app.domain.photos import PhotoPreprocessor, ThumbnailCache
+from inktime.app.domain.jobs.failure_policy import FailureClass, classify_failure
 from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
-from inktime.app.providers.openai_compatible import ProviderHTTPError
+from inktime.app.providers.openai_compatible import OpenAICompatibleProvider, ProviderHTTPError
 from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.analysis import PhotoAnalysisService
+from inktime.app.services.budgets import BudgetExceeded, BudgetService
 from inktime.app.domain.analysis.plan import build_analysis_plan, fingerprint
 from inktime.app.domain.analysis.schema import AnalysisValidationError
+from inktime.app.workers.job_worker import BoundedJobWorker
 from inktime.app.workers.scanner import PhotoScanner
+from inktime.app.workers.process_boundary import KillableProcessBoundary, ProcessCallError
 from tests.conftest import create_admin
 from tests.unit.test_analysis_schema import valid_result
 
@@ -76,6 +83,182 @@ class AmbiguousProvider(MockProvider):
         raise ProviderHTTPError("response lost after vision POST", "VLM-AMBIGUOUS", ambiguous=True)
 
 
+class _BoundaryHTTPState:
+    def __init__(self, mode: str):
+        self.mode = mode
+        self.lock = threading.Lock()
+        self.vision_requests = 0
+        self.repair_requests = 0
+
+    def record(self, *, image_request: bool) -> None:
+        with self.lock:
+            if image_request:
+                self.vision_requests += 1
+            else:
+                self.repair_requests += 1
+
+
+class _BoundaryHTTPHandler(BaseHTTPRequestHandler):
+    def do_POST(self):  # noqa: N802 - stdlib callback name
+        state: _BoundaryHTTPState = self.server.state
+        request_body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        request = json.loads(request_body)
+        messages = request.get("messages") if isinstance(request, dict) else None
+        user_message = messages[1] if isinstance(messages, list) and len(messages) > 1 else {}
+        content = user_message.get("content") if isinstance(user_message, dict) else None
+        image_request = isinstance(content, list) and any(
+            isinstance(part, dict) and part.get("type") == "image_url" for part in content
+        )
+        state.record(image_request=image_request)
+
+        if state.mode == "vision_timeout" and image_request:
+            time.sleep(1.0)
+        elif state.mode == "invalid_then_repair_timeout" and not image_request:
+            time.sleep(1.0)
+
+        status_code = 200
+        if state.mode == "vision_429" and image_request:
+            status_code = 429
+        elif state.mode == "invalid_then_repair_429" and not image_request:
+            status_code = 429
+        elif state.mode == "invalid_then_repair_redirect" and not image_request:
+            status_code = 307
+        elif state.mode == "invalid_then_repair_5xx" and not image_request:
+            status_code = 503
+
+        if state.mode.startswith("invalid_then_repair") and image_request:
+            response_content = "not-json"
+        else:
+            response_content = json.dumps(valid_result(), ensure_ascii=False)
+        if status_code >= 400:
+            response_content = json.dumps({"error": {"type": "test-provider-error"}}, ensure_ascii=False)
+        response_body = json.dumps(
+            {
+                "choices": [{"message": {"content": response_content}}],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        try:
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body)
+        except OSError:
+            # The parent intentionally kills the child during timeout tests;
+            # the server may then be writing to the closed child socket.
+            pass
+
+    def log_message(self, _format, *_args):
+        return None
+
+
+class _ShortProviderBoundary(KillableProcessBoundary):
+    def __init__(self, *, timeout_seconds: float = 0.15):
+        super().__init__(max_processes=1, terminate_grace_seconds=0.05)
+        self.timeout_seconds = timeout_seconds
+
+    def call_provider(self, specification, method, *, timeout_seconds, kwargs):
+        return super().call_provider(
+            specification,
+            method,
+            timeout_seconds=min(float(timeout_seconds), self.timeout_seconds),
+            kwargs=kwargs,
+        )
+
+
+class _RepairCapacityBoundary(_ShortProviderBoundary):
+    def call_provider(self, specification, method, *, timeout_seconds, kwargs):
+        if method != "repair_json":
+            return super().call_provider(
+                specification,
+                method,
+                timeout_seconds=timeout_seconds,
+                kwargs=kwargs,
+            )
+        assert self._slots.acquire(blocking=False)
+        try:
+            return super().call_provider(
+                specification,
+                method,
+                timeout_seconds=timeout_seconds,
+                kwargs=kwargs,
+            )
+        finally:
+            self._slots.release()
+
+
+class _PostVisionRepairCapacityRouter(FailoverVisionProvider):
+    """Make the selected channel unavailable only for the text repair call."""
+
+    def __init__(self, channels):
+        super().__init__(channels)
+        self.repair_capacity_failures = 0
+
+    def _execute_sticky(self, channel, method, *, boundary=None, **kwargs):
+        held = False
+        if method == "repair_json":
+            held = channel.semaphore.acquire(blocking=False)
+            assert held
+            self.repair_capacity_failures += 1
+        try:
+            return super()._execute_sticky(channel, method, boundary=boundary, **kwargs)
+        finally:
+            if held:
+                channel.semaphore.release()
+
+
+def _start_boundary_server(mode: str):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _BoundaryHTTPHandler)
+    server.daemon_threads = True
+    state = _BoundaryHTTPState(mode)
+    server.state = state
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, state
+
+
+def _isolated_service(app, tmp_path, boundary):
+    _, ids, prepared = prepare(app, tmp_path)
+    settings = app.extensions["inktime_settings_repository"]
+    settings.update(
+        "analysis.execution_mode",
+        "local_with_manual_ai",
+        changed_by="test",
+        source_ip="127.0.0.1",
+    )
+    service = PhotoAnalysisService(
+        prepared.photos,
+        prepared.usage,
+        prepared.thumbnails,
+        budgets=BudgetService(app.extensions["inktime_database"], settings),
+        settings=settings,
+        process_boundary=boundary,
+    )
+    return ids[0], service
+
+
+def _isolated_provider(server, name: str = "boundary-provider"):
+    return OpenAICompatibleProvider(
+        name=name,
+        base_url=f"http://127.0.0.1:{server.server_port}",
+        api_key="",
+        options={"allow_private_http": True},
+        pricing={"test-model": {"input_per_million": 1.0, "output_per_million": 1.0}},
+        timeout=5,
+    )
+
+
+def _test_job(app, name: str) -> str:
+    return app.extensions["inktime_job_repository"].create_maintenance(
+        kind="cleanup",
+        name=name,
+        settings={},
+        created_by="test",
+    )
+
+
 def prepare(app, tmp_path, duplicate=False):
     root = tmp_path / "photos"
     root.mkdir()
@@ -127,6 +310,350 @@ def test_ambiguous_vision_failure_is_persisted_without_provider_failover(app, tm
         ).fetchone()
     assert tuple(outcome) == ("ambiguous_failed", 1, "VLM-AMBIGUOUS")
     assert tuple(usage) == ("failed", "unknown", "VLM-AMBIGUOUS")
+
+
+def test_spawned_consumed_vision_timeout_is_terminal_and_billed_once(app, tmp_path):
+    server, state = _start_boundary_server("vision_timeout")
+    boundary = _ShortProviderBoundary()
+    provider = _isolated_provider(server)
+    photo_id, service = _isolated_service(app, tmp_path, boundary)
+    job_id = _test_job(app, "consumed vision timeout")
+    budgets = service.budgets
+    try:
+        with pytest.raises(TimeoutError) as raised:
+            service.analyze_photo(
+                photo_id=photo_id,
+                job_id=job_id,
+                provider=provider,
+                strategy="high_quality",
+                high_model="test-model",
+                force_ai=True,
+            )
+        assert raised.value.code == "VLM-AMBIGUOUS"
+        assert raised.value.ambiguous is True
+        assert classify_failure(raised.value) == FailureClass.TERMINAL_NO_RETRY
+        assert state.vision_requests == 1
+        assert state.repair_requests == 0
+        with app.extensions["inktime_database"].session() as connection:
+            usage_rows = connection.execute(
+                "SELECT status,cost_source,error_code,image_bytes,request_body_bytes "
+                "FROM api_usage WHERE photo_id=? AND status='failed'",
+                (photo_id,),
+            ).fetchall()
+            outcome = connection.execute(
+                "SELECT outcome,requires_manual_confirmation,error_code "
+                "FROM analysis_request_outcomes WHERE photo_id=? ORDER BY id DESC LIMIT 1",
+                (photo_id,),
+            ).fetchone()
+        assert len(usage_rows) == 1
+        assert tuple(usage_rows[0][:3]) == ("failed", "unknown", "VLM-AMBIGUOUS")
+        assert usage_rows[0][3] > 0
+        assert tuple(outcome) == ("ambiguous_failed", 1, "VLM-AMBIGUOUS")
+        snapshot = budgets.snapshot(job_id=job_id, photo_id=photo_id)
+        assert snapshot["photo_unknown_count"] == 1
+        assert snapshot["job_unknown_count"] == 1
+        with pytest.raises(BudgetExceeded):
+            budgets.assert_request_allowed(job_id, photo_id)
+    finally:
+        boundary.shutdown()
+        provider.close()
+        server.shutdown()
+        server.server_close()
+
+
+def test_spawned_deterministic_vision_http_failure_does_not_create_unknown_budget(app, tmp_path):
+    server, state = _start_boundary_server("vision_429")
+    boundary = _ShortProviderBoundary()
+    provider = _isolated_provider(server, "vision-rate-limit-provider")
+    photo_id, service = _isolated_service(app, tmp_path, boundary)
+    job_id = _test_job(app, "deterministic vision rate limit")
+    try:
+        with pytest.raises(ProcessCallError) as raised:
+            service.analyze_photo(
+                photo_id=photo_id,
+                job_id=job_id,
+                provider=provider,
+                strategy="high_quality",
+                high_model="test-model",
+                force_ai=True,
+            )
+        assert raised.value.code == "VLM-002"
+        assert raised.value.ambiguous is False
+        assert classify_failure(raised.value) == FailureClass.RETRYABLE
+        assert state.vision_requests == 1
+        assert state.repair_requests == 0
+        with app.extensions["inktime_database"].session() as connection:
+            failed_count = connection.execute(
+                "SELECT COUNT(*) FROM api_usage WHERE photo_id=? AND status='failed'",
+                (photo_id,),
+            ).fetchone()[0]
+        assert failed_count == 0
+        snapshot = service.budgets.snapshot(job_id=job_id, photo_id=photo_id)
+        assert snapshot["photo_unknown_count"] == 0
+        assert snapshot["job_unknown_count"] == 0
+    finally:
+        boundary.shutdown()
+        provider.close()
+        server.shutdown()
+        server.server_close()
+
+
+def test_spawned_vision_capacity_timeout_is_pre_execution_and_retryable(app, tmp_path):
+    server, state = _start_boundary_server("vision_timeout")
+    boundary = _ShortProviderBoundary()
+    provider = _isolated_provider(server, "capacity-provider")
+    photo_id, service = _isolated_service(app, tmp_path, boundary)
+    job_id = _test_job(app, "vision capacity timeout")
+    assert boundary._slots.acquire(timeout=1.0)
+    try:
+        with pytest.raises(TimeoutError) as raised:
+            service.analyze_photo(
+                photo_id=photo_id,
+                job_id=job_id,
+                provider=provider,
+                strategy="high_quality",
+                high_model="test-model",
+                force_ai=True,
+            )
+        assert raised.value.code == "AI-PROVIDER-TIMEOUT"
+        assert classify_failure(raised.value) == FailureClass.RETRYABLE
+        assert state.vision_requests == 0
+        assert state.repair_requests == 0
+        with app.extensions["inktime_database"].session() as connection:
+            failed_count = connection.execute(
+                "SELECT COUNT(*) FROM api_usage WHERE photo_id=? AND status='failed'",
+                (photo_id,),
+            ).fetchone()[0]
+        assert failed_count == 0
+    finally:
+        boundary._slots.release()
+        boundary.shutdown()
+        provider.close()
+        server.shutdown()
+        server.server_close()
+
+
+def test_spawned_consumed_repair_timeout_records_repair_unknown_without_second_vision(
+    app, tmp_path
+):
+    server, state = _start_boundary_server("invalid_then_repair_timeout")
+    boundary = _ShortProviderBoundary()
+    provider = _isolated_provider(server, "repair-timeout-provider")
+    photo_id, service = _isolated_service(app, tmp_path, boundary)
+    job_id = _test_job(app, "consumed repair timeout")
+    try:
+        with pytest.raises(TimeoutError) as raised:
+            service.analyze_photo(
+                photo_id=photo_id,
+                job_id=job_id,
+                provider=provider,
+                strategy="high_quality",
+                high_model="test-model",
+                force_ai=True,
+            )
+        assert raised.value.code == "VLM-AMBIGUOUS"
+        assert raised.value.ambiguous is True
+        assert classify_failure(raised.value) == FailureClass.TERMINAL_NO_RETRY
+        assert state.vision_requests == 1
+        assert state.repair_requests == 1
+        with app.extensions["inktime_database"].session() as connection:
+            usage_rows = connection.execute(
+                "SELECT request_type,status,cost_source,error_code,image_bytes,request_body_bytes "
+                "FROM api_usage WHERE photo_id=? AND status='failed'",
+                (photo_id,),
+            ).fetchall()
+            outcome = connection.execute(
+                "SELECT outcome,requires_manual_confirmation,error_code "
+                "FROM analysis_request_outcomes WHERE photo_id=? ORDER BY id DESC LIMIT 1",
+                (photo_id,),
+            ).fetchone()
+        assert len(usage_rows) == 1
+        assert tuple(usage_rows[0][:4]) == (
+            "json_repair",
+            "failed",
+            "unknown",
+            "VLM-AMBIGUOUS",
+        )
+        assert usage_rows[0][4] == 0
+        assert usage_rows[0][5] > 0
+        assert tuple(outcome) == ("ambiguous_failed", 1, "VLM-AMBIGUOUS")
+        snapshot = service.budgets.snapshot(job_id=job_id, photo_id=photo_id)
+        assert snapshot["photo_unknown_count"] == 1
+        assert snapshot["job_unknown_count"] == 1
+    finally:
+        boundary.shutdown()
+        provider.close()
+        server.shutdown()
+        server.server_close()
+
+
+def test_repair_capacity_timeout_after_vision_is_terminal_without_repair_unknown_or_second_vision(
+    app, tmp_path
+):
+    server, state = _start_boundary_server("invalid_then_repair_capacity")
+    boundary = _RepairCapacityBoundary()
+    provider = _isolated_provider(server, "repair-capacity-provider")
+    photo_id, service = _isolated_service(app, tmp_path, boundary)
+    job_id = _test_job(app, "repair capacity timeout")
+    try:
+        with pytest.raises(TimeoutError) as raised:
+            service.analyze_photo(
+                photo_id=photo_id,
+                job_id=job_id,
+                provider=provider,
+                strategy="high_quality",
+                high_model="test-model",
+                force_ai=True,
+            )
+        assert raised.value.code == "VLM-004"
+        assert classify_failure(raised.value) == FailureClass.TERMINAL_NO_RETRY
+        assert state.vision_requests == 1
+        assert state.repair_requests == 0
+        with app.extensions["inktime_database"].session() as connection:
+            failed_count = connection.execute(
+                "SELECT COUNT(*) FROM api_usage WHERE photo_id=? AND status='failed'",
+                (photo_id,),
+            ).fetchone()[0]
+        assert failed_count == 0
+    finally:
+        boundary.shutdown()
+        provider.close()
+        server.shutdown()
+        server.server_close()
+
+
+def test_router_repair_capacity_is_terminal_to_worker_without_second_vision(app, tmp_path):
+    boundary = KillableProcessBoundary(max_processes=1, terminate_grace_seconds=0.05)
+    provider = MockProvider(["not-json"])
+    router = _PostVisionRepairCapacityRouter([ProviderChannel(provider, max_concurrency=1)])
+    photo_id, service = _isolated_service(app, tmp_path, boundary)
+    jobs = app.extensions["inktime_job_service"]
+    repository = app.extensions["inktime_job_repository"]
+    job_id = jobs.create_analysis_job(
+        name="router repair capacity",
+        strategy="high_quality",
+        settings={},
+        created_by="test",
+        budget_limit=None,
+        photo_ids=[photo_id],
+    )
+    jobs.start(job_id)
+    processor_calls = 0
+    errors = []
+
+    def process(item):
+        nonlocal processor_calls
+        processor_calls += 1
+        try:
+            return service.analyze_photo(
+                photo_id=item["photo_id"],
+                job_id=item["job_id"],
+                provider=router,
+                strategy="high_quality",
+                high_model="mock",
+                force_ai=True,
+            )
+        except Exception as error:
+            errors.append(error)
+            raise
+
+    try:
+        BoundedJobWorker(repository, process, max_attempts=3).run_job(job_id)
+    finally:
+        boundary.shutdown()
+
+    assert processor_calls == 1
+    assert provider.analyze_calls == 1
+    assert provider.repair_calls == 0
+    assert router.repair_capacity_failures == 1
+    assert len(errors) == 1
+    assert errors[0].code == "VLM-004"
+    assert classify_failure(errors[0]) == FailureClass.TERMINAL_NO_RETRY
+    item = repository.list_items(job_id)[0]
+    assert item["status"] == "failed"
+    assert item["error_code"] == "VLM-004"
+    assert item["attempts"] == 1
+    assert repository.get(job_id)["status"] == "completed_with_errors"
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "invalid_then_repair_429",
+        "invalid_then_repair_redirect",
+        "invalid_then_repair_5xx",
+    ],
+)
+def test_router_worker_repair_http_errors_are_terminal_without_second_vision(
+    app, tmp_path, mode
+):
+    server, state = _start_boundary_server(mode)
+    boundary = _ShortProviderBoundary()
+    provider = _isolated_provider(server, f"{mode}-provider")
+    router = FailoverVisionProvider([ProviderChannel(provider, max_concurrency=1)])
+    photo_id, service = _isolated_service(app, tmp_path, boundary)
+    jobs = app.extensions["inktime_job_service"]
+    repository = app.extensions["inktime_job_repository"]
+    job_id = jobs.create_analysis_job(
+        name=f"{mode} router repair",
+        strategy="high_quality",
+        settings={},
+        created_by="test",
+        budget_limit=None,
+        photo_ids=[photo_id],
+    )
+    jobs.start(job_id)
+    processor_calls = 0
+    errors = []
+
+    def process(item):
+        nonlocal processor_calls
+        processor_calls += 1
+        try:
+            return service.analyze_photo(
+                photo_id=item["photo_id"],
+                job_id=item["job_id"],
+                provider=router,
+                strategy="high_quality",
+                high_model="test-model",
+                force_ai=True,
+            )
+        except Exception as error:
+            errors.append(error)
+            raise
+
+    try:
+        BoundedJobWorker(repository, process, max_attempts=3).run_job(job_id)
+    finally:
+        boundary.shutdown()
+        provider.close()
+        server.shutdown()
+        server.server_close()
+
+    assert processor_calls == 1
+    assert len(errors) == 1
+    assert errors[0].code == "VLM-004"
+    assert classify_failure(errors[0]) == FailureClass.TERMINAL_NO_RETRY
+    assert state.vision_requests == 1
+    assert state.repair_requests == 1
+    with app.extensions["inktime_database"].session() as connection:
+        usage = connection.execute(
+            "SELECT request_type,status,cost_source,error_code FROM api_usage "
+            "WHERE photo_id=? AND status='failed'",
+            (photo_id,),
+        ).fetchall()
+        outcome = connection.execute(
+            "SELECT outcome,requires_manual_confirmation,error_code "
+            "FROM analysis_request_outcomes WHERE photo_id=? ORDER BY id DESC LIMIT 1",
+            (photo_id,),
+        ).fetchone()
+    assert len(usage) == 0
+    assert tuple(outcome) == ("failed", 0, "VLM-004")
+    item = repository.list_items(job_id)[0]
+    assert item["status"] == "failed"
+    assert item["error_code"] == "VLM-004"
+    assert item["attempts"] == 1
+    assert repository.get(job_id)["status"] == "completed_with_errors"
 
 
 def test_provider_and_local_results_persist_a_complete_analysis_context(app, tmp_path):

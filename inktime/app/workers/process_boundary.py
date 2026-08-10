@@ -14,6 +14,7 @@ class ProcessCallTimeout(TimeoutError):
     child_started: bool = False
     ambiguous: bool | None = None
     vision_started: bool | None = None
+    request_started: bool | None = None
 
 
 class ProcessCallError(RuntimeError):
@@ -21,6 +22,7 @@ class ProcessCallError(RuntimeError):
     child_started: bool = False
     ambiguous: bool | None = None
     vision_started: bool | None = None
+    request_started: bool | None = None
 
 
 def _call_child(function: Callable[..., Any], kwargs: dict[str, Any], sender) -> None:
@@ -53,6 +55,7 @@ def _provider_child(specification: dict[str, Any], method: str, kwargs: dict[str
                     "code": getattr(exc, "code", None),
                     "ambiguous": bool(getattr(exc, "ambiguous", False)),
                     "vision_started": bool(getattr(exc, "vision_started", False)),
+                    "request_started": bool(getattr(exc, "request_started", False)),
                 },
             )
         )
@@ -176,6 +179,7 @@ class KillableProcessBoundary:
                         error.code = child_code
                     error.ambiguous = bool(value.get("ambiguous", False))
                     error.vision_started = bool(value.get("vision_started", False))
+                    error.request_started = bool(value.get("request_started", False))
                     raise error
                 raise ProcessCallError(str(value))
             return value
@@ -249,13 +253,21 @@ class KillableProcessBoundary:
             # never accepted.  Fail closed instead of sending the image to a
             # second Provider.  Serialization failures happen before _run and
             # therefore do not reach this branch.
-            if method == "analyze":
-                child_metadata = exc.vision_started is not None
-                consumed = bool(exc.vision_started) if child_metadata else exc.child_started
-                if consumed:
-                    exc.vision_started = True
-                    if not child_metadata:
-                        exc.ambiguous = True
+            if method in {"analyze", "repair_json"}:
+                # A structured provider exception is authoritative, including
+                # explicit False values that prove the request was not handed
+                # to the transport.  A killed/EOF child has no such metadata;
+                # once that child started, fail closed because its request
+                # state is unknowable.
+                child_metadata = any(
+                    value is not None
+                    for value in (exc.vision_started, exc.request_started, exc.ambiguous)
+                )
+                if not child_metadata and exc.child_started:
+                    exc.request_started = True
+                    exc.ambiguous = True
+                    if method == "analyze":
+                        exc.vision_started = True
             raise
 
     @property

@@ -330,6 +330,7 @@ def test_isolated_vision_failure_preserves_no_failover_metadata(tmp_path: Path):
                 stage="stage_one",
             )
         assert raised.value.vision_started is True
+        assert raised.value.request_started is True
         assert raised.value.ambiguous is True
     finally:
         boundary.shutdown()
