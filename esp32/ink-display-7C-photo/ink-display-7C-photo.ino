@@ -3393,11 +3393,19 @@ static bool postQueueAckBatch(
           const JsonObjectConst result = results[index].as<JsonObjectConst>();
           const String responseItem = result["queue_item_id"] | "";
           const String responseEvent = result["event"] | "";
+          const int responseHttpStatus = result["http_status"] | 0;
           const String outcome = result["status"] | "";
           const String errorCode = result["error_code"] | "";
-          const bool identityMatches = responseItem == pending[index].queueItemId
-            && responseEvent == inktime::queueEventName(pending[index].event);
-          if (identityMatches && outcome == "accepted") {
+          const inktime::QueueAckResultDisposition disposition =
+            inktime::queueAckResultDisposition(
+              pending[index].queueItemId,
+              inktime::queueEventName(pending[index].event),
+              responseItem.c_str(),
+              responseEvent.c_str(),
+              responseHttpStatus,
+              outcome.c_str(),
+              errorCode.c_str());
+          if (disposition == inktime::QueueAckResultDisposition::Accepted) {
             const bool removed = removePendingQueueAck(pending[index]);
             if (inktime::ackjournal::retainDuplicateEvidence(true, removed)) {
               lastDeviceWarningCode = "DEVICE-QUEUE-ACK-CLEANUP";
@@ -3405,7 +3413,7 @@ static bool postQueueAckBatch(
             }
             continue;
           }
-          if (identityMatches && errorCode == "QUEUE-003") {
+          if (disposition == inktime::QueueAckResultDisposition::Stale) {
             // A terminal event is crash-safe evidence, even when the queue
             // version has moved on before the next wake.  Keep it durable so
             // delayed-terminal recovery can still be accepted; dropping it
@@ -3426,11 +3434,9 @@ static bool postQueueAckBatch(
               lastDeviceWarningMessage = "QUEUE-003 rejected ACK cleanup 失敗；保留 duplicate-safe evidence";
             }
             stale = true;
-            permanentRejected = true;
-            queueAckPermanentReject = true;
             continue;
           }
-          if (identityMatches && errorCode.length() > 0U) {
+          if (disposition == inktime::QueueAckResultDisposition::AuthoritativePermanentReject) {
             // A per-event 4xx result is authoritative for this item.  Do not
             // keep retrying it or strand later config/schedule work in this
             // wake; quarantine the event and expose the rejection.
@@ -3440,7 +3446,6 @@ static bool postQueueAckBatch(
               lastDeviceWarningMessage = "permanent ACK cleanup 失敗；保留 duplicate-safe evidence";
             }
             permanentRejected = true;
-            queueAckPermanentReject = true;
             continue;
           }
           if (!persistPendingQueueAck(pending[index])) {
@@ -3450,9 +3455,10 @@ static bool postQueueAckBatch(
           }
           allResolved = false;
           unresolvedOther = true;
-          queueAckPermanentReject = true;
         }
         ackHttp.end();
+        queueAckPermanentReject = inktime::queueAckMayUnlockDisplay(
+          permanentRejected, allResolved, unresolvedOther, durabilityFailure);
         if (stale) {
           lastDeviceErrorCode = "DEVICE-QUEUE-STALE";
           lastDeviceErrorMessage = "QUEUE-003 Queue version 已過期；下次重新取得 Manifest";

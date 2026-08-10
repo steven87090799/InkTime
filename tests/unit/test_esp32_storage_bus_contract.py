@@ -162,6 +162,10 @@ def test_queue_ack_journal_is_compact_bounded_crc_checked_and_failure_visible():
         "DEVICE-QUEUE-ACK-JOURNAL-OVERFLOW",
         "DEVICE-QUEUE-ACK-PERMANENT",
         "事件已 quarantine，本輪繼續後續工作",
+        "QueueAckResultDisposition",
+        "queueAckResultDisposition",
+        "queueAckMayUnlockDisplay",
+        "queueAckPermanentReject = inktime::queueAckMayUnlockDisplay",
         "已跳過 AP portal 並等待 bounded recovery wake",
     ):
         assert marker in firmware

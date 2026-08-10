@@ -45,6 +45,35 @@ int main() {
   assert(ackDecision(503, kQueueRetryLimit) == AckDecision::Stop);
   assert(ackDecision(429, 0) == AckDecision::Retry);
   assert(ackDecision(429, kQueueRetryLimit) == AckDecision::Stop);
+  assert(queueAckResultDisposition(
+           "item-1", "DISPLAY_COMPLETED", "item-1", "DISPLAY_COMPLETED",
+           200, "accepted", "") == QueueAckResultDisposition::Accepted);
+  assert(queueAckResultDisposition(
+           "item-1", "DISPLAY_COMPLETED", "item-1", "DISPLAY_COMPLETED",
+           409, "rejected", "QUEUE-003") == QueueAckResultDisposition::Stale);
+  assert(queueAckResultDisposition(
+           "item-1", "DISPLAY_COMPLETED", "item-1", "DISPLAY_COMPLETED",
+           403, "rejected", "QUEUE-002")
+         == QueueAckResultDisposition::AuthoritativePermanentReject);
+  assert(queueAckResultDisposition(
+           "item-1", "DISPLAY_COMPLETED", "other-item", "DISPLAY_COMPLETED",
+           403, "rejected", "QUEUE-002") == QueueAckResultDisposition::RetainPending);
+  assert(queueAckResultDisposition(
+           "item-1", "DISPLAY_COMPLETED", "item-1", "DISPLAY_COMPLETED",
+           0, "rejected", "QUEUE-002") == QueueAckResultDisposition::RetainPending);
+  assert(queueAckResultDisposition(
+           "item-1", "DISPLAY_COMPLETED", "item-1", "DISPLAY_COMPLETED",
+           429, "rejected", "RATE-LIMIT") == QueueAckResultDisposition::RetainPending);
+  assert(queueAckResultDisposition(
+           "item-1", "DISPLAY_COMPLETED", "item-1", "DISPLAY_COMPLETED",
+           500, "rejected", "SERVER-ERROR") == QueueAckResultDisposition::RetainPending);
+  assert(queueAckResultDisposition(
+           "item-1", "DISPLAY_COMPLETED", "item-1", "DISPLAY_COMPLETED",
+           403, "rejected", "") == QueueAckResultDisposition::RetainPending);
+  assert(!queueAckMayUnlockDisplay(false, true, false, false));
+  assert(queueAckMayUnlockDisplay(true, true, false, false));
+  assert(!queueAckMayUnlockDisplay(true, false, true, false));
+  assert(!queueAckMayUnlockDisplay(true, true, false, true));
 
   char first[256] = {};
   char restarted[256] = {};

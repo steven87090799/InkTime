@@ -30,6 +30,13 @@ enum class AckDecision : uint8_t {
   Stop,
 };
 
+enum class QueueAckResultDisposition : uint8_t {
+  RetainPending,
+  Accepted,
+  Stale,
+  AuthoritativePermanentReject,
+};
+
 enum class QueueManifestDecision : uint8_t {
   UseQueue,
   FallbackLatest,
@@ -182,6 +189,45 @@ inline AckDecision ackDecision(int statusCode, uint8_t attempts) {
     return AckDecision::Retry;
   }
   return AckDecision::Stop;
+}
+
+inline QueueAckResultDisposition queueAckResultDisposition(
+  const char* expectedQueueItemId,
+  const char* expectedEvent,
+  const char* responseQueueItemId,
+  const char* responseEvent,
+  int httpStatus,
+  const char* outcome,
+  const char* errorCode
+) {
+  const bool identityMatches = boundedText(expectedQueueItemId, kQueueIdentifierMaxBytes)
+    && boundedText(expectedEvent, kQueueIdentifierMaxBytes)
+    && boundedText(responseQueueItemId, kQueueIdentifierMaxBytes)
+    && boundedText(responseEvent, kQueueIdentifierMaxBytes)
+    && strcmp(expectedQueueItemId, responseQueueItemId) == 0
+    && strcmp(expectedEvent, responseEvent) == 0;
+  if (!identityMatches || !boundedText(outcome, 32U)) return QueueAckResultDisposition::RetainPending;
+  if (strcmp(outcome, "accepted") == 0 && httpStatus >= 200 && httpStatus < 300) {
+    return QueueAckResultDisposition::Accepted;
+  }
+  if (strcmp(outcome, "rejected") == 0 && httpStatus == 409
+      && boundedText(errorCode, 64U) && strcmp(errorCode, "QUEUE-003") == 0) {
+    return QueueAckResultDisposition::Stale;
+  }
+  if (strcmp(outcome, "rejected") == 0 && httpStatus >= 400 && httpStatus < 500
+      && httpStatus != 409 && httpStatus != 429 && boundedText(errorCode, 64U)) {
+    return QueueAckResultDisposition::AuthoritativePermanentReject;
+  }
+  return QueueAckResultDisposition::RetainPending;
+}
+
+inline bool queueAckMayUnlockDisplay(
+  bool authoritativePermanentReject,
+  bool allResolved,
+  bool unresolvedOther,
+  bool durabilityFailure
+) {
+  return authoritativePermanentReject && allResolved && !unresolvedOther && !durabilityFailure;
 }
 
 inline bool idempotencyMaterial(
