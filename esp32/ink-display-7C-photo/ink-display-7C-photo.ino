@@ -3398,7 +3398,7 @@ static bool postQueueAckBatch(
           const String errorCode = result["error_code"] | "";
           const inktime::QueueAckResultDisposition disposition =
             inktime::queueAckResultDisposition(
-              pending[index].queueItemId,
+              pending[index].queueItemId.c_str(),
               inktime::queueEventName(pending[index].event),
               responseItem.c_str(),
               responseEvent.c_str(),
