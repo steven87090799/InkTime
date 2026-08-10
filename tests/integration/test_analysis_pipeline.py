@@ -155,7 +155,7 @@ class _BoundaryHTTPHandler(BaseHTTPRequestHandler):
 
 
 class _ShortProviderBoundary(KillableProcessBoundary):
-    def __init__(self, *, timeout_seconds: float = 0.15):
+    def __init__(self, *, timeout_seconds: float = 0.5):
         super().__init__(max_processes=1, terminate_grace_seconds=0.05)
         self.timeout_seconds = timeout_seconds
 
