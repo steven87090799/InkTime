@@ -1327,6 +1327,10 @@ class ResilienceRepository:
                       AND qi.updated_at<?
                       AND (qi.terminal_ack_retention IS NULL OR qi.terminal_ack_retention<?)
                       AND NOT EXISTS (
+                          SELECT 1 FROM device_content_queue_events e
+                          WHERE e.queue_item_id=qi.id
+                      )
+                      AND NOT EXISTS (
                           SELECT 1 FROM rollout_targets rt WHERE rt.queue_item_id=qi.id
                       )
                       AND NOT EXISTS (

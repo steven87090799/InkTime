@@ -7,7 +7,113 @@ from pathlib import Path
 import pytest
 
 from inktime.app.db import Database, migrate
+from inktime.app.repositories.devices import DeviceRepository
 from inktime.app.repositories.resilience import ResilienceRepository
+
+
+def _seed_old_queue_item(
+    database: Database,
+    repository: ResilienceRepository,
+    device_id: str,
+    suffix: str,
+    old_at: str,
+) -> str:
+    release_id = f"retention-release-{suffix}"
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO releases(id,display_type,width,height,pixel_format,manifest_json,status,created_at,published_at,created_by,render_profile) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                release_id,
+                "image",
+                480,
+                800,
+                "RGB",
+                "{}",
+                "published",
+                old_at,
+                old_at,
+                "test",
+                "safe_4c",
+            ),
+        )
+    repository.ensure_queue(device_id)
+    item = repository.enqueue_release(device_id=device_id, release_id=release_id)
+    item_id = str(item["id"])
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE device_content_queue_items SET status='DISPLAYED',updated_at=?,terminal_ack_retention=? WHERE id=?",
+            (old_at, old_at, item_id),
+        )
+        connection.execute(
+            "UPDATE device_content_queues SET current_release_id=NULL,last_known_good_release_id=NULL,next_queued_release_id=NULL,emergency_fallback_release_id=NULL WHERE device_id=?",
+            (device_id,),
+        )
+    return item_id
+
+
+def _seed_queue_event(database: Database, item_id: str, device_id: str, old_at: str, suffix: str) -> None:
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO device_content_queue_events(queue_item_id,device_id,event_type,idempotency_key,payload_json,created_at) VALUES (?,?,?,?,?,?)",
+            (item_id, device_id, "DISPLAY_COMPLETED", f"retention-event-{suffix}", "{}", old_at),
+        )
+
+
+def test_queue_event_retention_fences_parent_gc_until_child_cleanup(tmp_path: Path):
+    database = Database(tmp_path / "queue-event-retention.sqlite3")
+    migrate(database)
+    repository = ResilienceRepository(database)
+    device_id, _token = DeviceRepository(database, "test-pepper").create("Queue retention")
+    old_at = (datetime.now(timezone.utc) - timedelta(days=100)).isoformat()
+    retained_item = _seed_old_queue_item(database, repository, device_id, "retained", old_at)
+    _seed_queue_event(database, retained_item, device_id, old_at, "retained")
+
+    repository.update_retention(
+        "queue_event", {"retention_days": 180, "cleanup_batch_size": 200, "dry_run": False}
+    )
+    before_policy = repository.expire_operational_data()
+    assert before_policy["gc_queue_items"] == 0
+    with database.session() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM device_content_queue_items WHERE id=?", (retained_item,)
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM device_content_queue_events WHERE queue_item_id=?", (retained_item,)
+        ).fetchone()[0] == 1
+
+    repository.update_retention(
+        "queue_event", {"retention_days": 1, "cleanup_batch_size": 200, "dry_run": True}
+    )
+    dry_run = repository.cleanup(dry_run=False)
+    assert dry_run["summary"]["queue_event"] == 1
+    assert repository.expire_operational_data()["gc_queue_items"] == 0
+
+    repository.update_retention(
+        "queue_event", {"enabled": False, "retention_days": 1, "cleanup_batch_size": 200, "dry_run": False}
+    )
+    disabled = repository.cleanup(dry_run=False)
+    assert disabled["summary"].get("queue_event", 0) == 0
+    assert repository.expire_operational_data()["gc_queue_items"] == 0
+
+    repository.update_retention(
+        "queue_event", {"enabled": True, "retention_days": 1, "cleanup_batch_size": 200, "dry_run": False}
+    )
+    cleaned = repository.cleanup(dry_run=False)
+    assert cleaned["summary"]["queue_event"] == 1
+    with database.session() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM device_content_queue_events WHERE queue_item_id=?", (retained_item,)
+        ).fetchone()[0] == 0
+
+    no_child_item = _seed_old_queue_item(database, repository, device_id, "no-child", old_at)
+    after_cleanup = repository.expire_operational_data()
+    assert after_cleanup["gc_queue_items"] == 2
+    with database.session() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM device_content_queue_items WHERE id IN (?,?)",
+            (retained_item, no_child_item),
+        ).fetchone()[0] == 0
 
 
 def test_decision_trace_caps_candidate_detail_at_fifty(tmp_path: Path):
