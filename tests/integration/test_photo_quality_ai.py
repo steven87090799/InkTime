@@ -641,6 +641,89 @@ def test_full_library_confirmation_and_queue_count_only_active_eligible_photos(c
     assert excluded_id not in photo_ids
 
 
+def test_full_library_group_idempotency_is_bounded_replayable_and_conflict_safe(client, app):
+    create_admin(app)
+    login(client)
+    now = datetime.now(timezone.utc).isoformat()
+    library_id = str(uuid4())
+    initial_ids = [str(uuid4()), str(uuid4())]
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "INSERT INTO libraries(id,name,root_path,created_at,updated_at) VALUES (?,?,?,?,?)",
+            (library_id, "分組冪等測試", "/photos", now, now),
+        )
+        connection.executemany(
+            """
+            INSERT INTO photos(id,library_id,relative_path,status,eligible,lifecycle_status,
+                               local_candidate_score,created_at,updated_at)
+            VALUES (?,?,?,'preprocessed',1,'active',?,?,?)
+            """,
+            [
+                (initial_ids[0], library_id, "group-a/first.jpg", 10.0, now, now),
+                (initial_ids[1], library_id, "group-b/second.jpg", 9.0, now, now),
+            ],
+        )
+    _setting(app, "analysis.ai_mode", "full_library")
+    _setting(app, "analysis.ai_daily_photo_limit", 10)
+    client_key = "K" * 128
+    headers = {
+        "X-CSRF-Token": csrf(client),
+        "Idempotency-Key": client_key,
+    }
+
+    first = client.post(
+        "/api/v1/photos/ai/run",
+        json={"confirm": True, "batch_by": "folder"},
+        headers=headers,
+    )
+    assert first.status_code == 201
+    first_job_ids = [job["id"] for job in first.json["jobs"]]
+    assert len(first_job_ids) == 2
+    with app.extensions["inktime_database"].session() as connection:
+        first_rows = connection.execute(
+            "SELECT id,dedupe_key FROM jobs WHERE kind='analysis' ORDER BY created_at,id"
+        ).fetchall()
+    assert [str(row["id"]) for row in first_rows] == first_job_ids
+    assert len({str(row["dedupe_key"]) for row in first_rows}) == 2
+
+    replay = client.post(
+        "/api/v1/photos/ai/run",
+        json={"confirm": True, "batch_by": "folder"},
+        headers={**headers, "Idempotency-Key": f"  {client_key}  "},
+    )
+    assert replay.status_code == 201
+    assert [job["id"] for job in replay.json["jobs"]] == first_job_ids
+
+    long_key_replay = client.post(
+        "/api/v1/photos/ai/run",
+        json={"confirm": True, "batch_by": "folder"},
+        headers={**headers, "Idempotency-Key": f"{client_key}tail"},
+    )
+    assert long_key_replay.status_code == 201
+    assert [job["id"] for job in long_key_replay.json["jobs"]] == first_job_ids
+
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            """
+            INSERT INTO photos(id,library_id,relative_path,status,eligible,lifecycle_status,
+                               local_candidate_score,created_at,updated_at)
+            VALUES (?,?,?,'preprocessed',1,'active',?,?,?)
+            """,
+            (str(uuid4()), library_id, "group-a/new.jpg", 8.0, now, now),
+        )
+        before_conflict_count = connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+
+    changed_payload = client.post(
+        "/api/v1/photos/ai/run",
+        json={"confirm": True, "batch_by": "folder"},
+        headers=headers,
+    )
+    assert changed_payload.status_code == 409
+    assert changed_payload.json["error_code"] == "IDEMPOTENCY_CONFLICT"
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == before_conflict_count
+
+
 def test_thumbnail_cleanup_only_queries_hashes_visible_in_cache(app, tmp_path):
     photo_ids = _scan(app, tmp_path, duplicate=True)
     repository = app.extensions["inktime_photo_repository"]

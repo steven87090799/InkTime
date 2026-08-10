@@ -13,7 +13,11 @@ from inktime.app.core.json_values import (
     json_object_payload,
     reject_unknown_fields,
 )
-from inktime.app.core.idempotency import request_fingerprint, scoped_idempotency_key
+from inktime.app.core.idempotency import (
+    grouped_idempotency_key,
+    request_fingerprint,
+    scoped_idempotency_key,
+)
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.domain.analysis.schema import ALLOWED_TYPES
 from inktime.app.domain.analysis.plan import fingerprint
@@ -350,14 +354,14 @@ def queue_ai_mode_run():
             group_by=group_by, limit=daily_limit, include_all_active=False
         )
         try:
-            request_key = str(request.headers.get("Idempotency-Key") or "").strip()[:128] or None
+            request_key = request.headers.get("Idempotency-Key")
             jobs = [
                 _queue_ai(
                     ids,
                     created_by=str(g.user["id"]),
                     name=f"完整照片庫 AI：{group}",
                     idempotency_scope="ai-mode-run",
-                    idempotency_key=f"{request_key}:{group}" if request_key else None,
+                    idempotency_key=grouped_idempotency_key(request_key, str(group)),
                 )
                 for group, ids in batches
             ]
