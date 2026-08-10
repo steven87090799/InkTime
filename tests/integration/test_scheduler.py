@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from inktime.app.bootstrap import bootstrap_services
 from inktime.app.domain.jobs.failure_policy import JobFailure
 from inktime.app.repositories.offline_schedules import SHORTAGE_RETRY_COOLDOWN_SECONDS
 from inktime.app.workers.scheduler import (
@@ -149,6 +151,45 @@ def test_scheduler_retention_honors_policy_dry_run(app):
             (cleanup["id"],),
         ).fetchone()
     assert item["result"] == "planned"
+
+
+def test_scheduler_role_keeps_and_runs_maintenance_extensions(app, monkeypatch):
+    scheduler = bootstrap_services(app.extensions["inktime_runtime_config"], role="scheduler")
+    try:
+        release_coordinator = scheduler.extensions["inktime_release_coordinator"]
+        resilience_repository = scheduler.extensions["inktime_resilience_repository"]
+        release_reconcile = Mock()
+        release_gc = Mock()
+        operational_expire = Mock()
+        operational_cleanup = Mock()
+        monkeypatch.setattr(release_coordinator, "reconcile", release_reconcile)
+        monkeypatch.setattr(release_coordinator, "gc_unreferenced_releases", release_gc)
+        monkeypatch.setattr(resilience_repository, "expire_operational_data", operational_expire)
+        monkeypatch.setattr(resilience_repository, "cleanup", operational_cleanup)
+
+        monkeypatch.setattr(SchedulerRunner, "_run_observability", lambda _self, _service, _now: None)
+        monkeypatch.setattr(scheduler.extensions["inktime_job_repository"], "recover_stale", lambda: None)
+        monkeypatch.setattr(scheduler.extensions["inktime_batch_analysis_service"], "poll_due", lambda limit: None)
+        monkeypatch.setattr(scheduler.extensions["inktime_notification_service"], "scan", lambda: None)
+        monkeypatch.setattr(
+            scheduler.extensions["inktime_notification_service"],
+            "enqueue_pending",
+            lambda job_repository, job_service, limit: None,
+        )
+        monkeypatch.setattr(scheduler.extensions["inktime_schedule_repository"], "due", lambda _now: [])
+        monkeypatch.setattr(SchedulerRunner, "_prepare_due_offline_devices", lambda _self, _now: None)
+        scheduler.extensions["inktime_settings_repository"].update(
+            "backup.schedule_enabled", False, changed_by="scheduler-role-test", source_ip="127.0.0.1"
+        )
+
+        SchedulerRunner(scheduler).tick()
+
+        release_reconcile.assert_called_once_with()
+        release_gc.assert_called_once_with()
+        operational_expire.assert_called_once_with()
+        operational_cleanup.assert_called_once_with(dry_run=False)
+    finally:
+        scheduler.close()
 
 
 def test_scheduler_observability_is_deadline_gated(app):
