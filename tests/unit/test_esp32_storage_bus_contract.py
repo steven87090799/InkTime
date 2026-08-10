@@ -213,17 +213,29 @@ def test_queue_ack_journal_transaction_core_is_host_tested_and_compiled_by_ci():
 
 
 def test_queue_ack_journal_partition_budget_is_source_owned_and_selected_by_ci():
-    def partition_size(path: Path, name: str) -> int:
+    def partition_row(path: Path, name: str) -> list[str]:
         for line in path.read_text(encoding="utf-8").splitlines():
             if line.strip().startswith("#") or not line.strip():
                 continue
             fields = [field.strip() for field in line.split(",")]
             if fields[0] == name:
-                return int(fields[4], 16)
+                return fields
         raise AssertionError(f"missing partition {name} in {path}")
+
+    def partition_size(path: Path, name: str) -> int:
+        return int(partition_row(path, name)[4], 16)
+
+    def partition_offset(path: Path, name: str) -> int:
+        return int(partition_row(path, name)[3], 16)
 
     assert partition_size(PARTITION_DEFAULT, "nvs") == 0x80000
     assert partition_size(PARTITION_PHOTOPAINTER, "nvs") == 0x80000
+    assert partition_offset(PARTITION_DEFAULT, "app0") == 0x90000
+    assert partition_size(PARTITION_DEFAULT, "app0") == 0x150000
+    assert partition_offset(PARTITION_DEFAULT, "app1") == 0x1E0000
+    assert partition_size(PARTITION_DEFAULT, "app1") == 0x150000
+    assert partition_offset(PARTITION_DEFAULT, "spiffs") == 0x330000
+    assert partition_size(PARTITION_DEFAULT, "spiffs") == 0xD0000
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     docs = (ROOT / "docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md").read_text(encoding="utf-8")
     guide = (ROOT / "docs/devices/ESP32_GUIDE_ZH_TW.md").read_text(encoding="utf-8")
