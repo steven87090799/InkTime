@@ -201,7 +201,7 @@ def test_migration_45_adds_api_usage_policy_idempotently_without_overwriting_ope
             "VALUES ('api_usage',1,777,3,17,0,datetime('now'))"
         )
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", previous_migrations)
-    assert migrate(database) == [45, 46]
+    assert migrate(database) == [45, 46, 47]
     with database.session() as connection:
         policy = connection.execute(
             "SELECT enabled,retention_days,minimum_items_to_keep,cleanup_batch_size,dry_run "
