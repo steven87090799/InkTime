@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from PIL import Image
 
+from inktime.app.api import photos as photos_api
 from inktime.app.domain.analysis.plan import fingerprint
 from inktime.app.domain.photos import PhotoPreprocessor
 from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
@@ -713,15 +714,90 @@ def test_full_library_group_idempotency_is_bounded_replayable_and_conflict_safe(
         )
         before_conflict_count = connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
 
-    changed_payload = client.post(
+    same_request_after_library_change = client.post(
         "/api/v1/photos/ai/run",
         json={"confirm": True, "batch_by": "folder"},
         headers=headers,
     )
-    assert changed_payload.status_code == 409
-    assert changed_payload.json["error_code"] == "IDEMPOTENCY_CONFLICT"
+    assert same_request_after_library_change.status_code == 201
+    assert [job["id"] for job in same_request_after_library_change.json["jobs"]] == first_job_ids
     with app.extensions["inktime_database"].session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == before_conflict_count
+
+    changed_batch = client.post(
+        "/api/v1/photos/ai/run",
+        json={"confirm": True, "batch_by": "year"},
+        headers=headers,
+    )
+    assert changed_batch.status_code == 409
+    assert changed_batch.json["error_code"] == "IDEMPOTENCY_CONFLICT"
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == before_conflict_count
+
+    _setting(app, "analysis.strategy", "local")
+    changed_plan = client.post(
+        "/api/v1/photos/ai/run",
+        json={"confirm": True, "batch_by": "folder"},
+        headers=headers,
+    )
+    assert changed_plan.status_code == 409
+    assert changed_plan.json["error_code"] == "IDEMPOTENCY_CONFLICT"
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == before_conflict_count
+
+
+def test_full_library_in_progress_ledger_resumes_partial_group_creation(client, app, monkeypatch):
+    create_admin(app)
+    login(client)
+    now = datetime.now(timezone.utc).isoformat()
+    library_id = str(uuid4())
+    photo_ids = [str(uuid4()), str(uuid4())]
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "INSERT INTO libraries(id,name,root_path,created_at,updated_at) VALUES (?,?,?,?,?)",
+            (library_id, "部分恢復", "/photos", now, now),
+        )
+        connection.executemany(
+            """
+            INSERT INTO photos(id,library_id,relative_path,status,eligible,lifecycle_status,
+                               local_candidate_score,created_at,updated_at)
+            VALUES (?,?,?,'preprocessed',1,'active',?,?,?)
+            """,
+            [
+                (photo_ids[0], library_id, "group-a/first.jpg", 10.0, now, now),
+                (photo_ids[1], library_id, "group-b/second.jpg", 9.0, now, now),
+            ],
+        )
+    _setting(app, "analysis.ai_mode", "full_library")
+    _setting(app, "analysis.ai_daily_photo_limit", 10)
+    headers = {"X-CSRF-Token": csrf(client), "Idempotency-Key": "partial-resume-key"}
+    original_queue_ai = photos_api._queue_ai
+    calls = 0
+
+    def fail_after_first(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise ValueError("simulated partial group failure")
+        return original_queue_ai(*args, **kwargs)
+
+    monkeypatch.setattr(photos_api, "_queue_ai", fail_after_first)
+    interrupted = client.post(
+        "/api/v1/photos/ai/run", json={"confirm": True, "batch_by": "folder"}, headers=headers
+    )
+    assert interrupted.status_code == 409
+    monkeypatch.setattr(photos_api, "_queue_ai", original_queue_ai)
+    resumed = client.post(
+        "/api/v1/photos/ai/run", json={"confirm": True, "batch_by": "folder"}, headers=headers
+    )
+    assert resumed.status_code == 201
+    assert len(resumed.json["jobs"]) == 2
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM jobs WHERE kind='analysis'").fetchone()[0] == 2
+        ledger = connection.execute(
+            "SELECT status FROM idempotency_requests WHERE scope_key LIKE 'idempotency:ai-mode-run/full-library-request:%'"
+        ).fetchone()
+    assert ledger["status"] == "completed"
 
 
 def test_thumbnail_cleanup_only_queries_hashes_visible_in_cache(app, tmp_path):

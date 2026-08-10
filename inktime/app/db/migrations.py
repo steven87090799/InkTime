@@ -2015,6 +2015,24 @@ MIGRATIONS = (
             "INSERT OR IGNORE INTO data_retention_policies(data_type,enabled,retention_days,minimum_items_to_keep,cleanup_batch_size,dry_run,updated_at) VALUES ('api_usage',1,400,0,200,1,datetime('now'))",
         ),
     ),
+    Migration(
+        46,
+        "加入完整照片庫 request-level Idempotency ledger",
+        (
+            """
+            CREATE TABLE idempotency_requests (
+                scope_key TEXT PRIMARY KEY,
+                request_fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('in_progress','completed')),
+                request_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                response_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX idx_idempotency_requests_status_updated ON idempotency_requests(status,updated_at)",
+        ),
+    ),
 )
 
 

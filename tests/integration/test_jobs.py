@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -51,6 +52,46 @@ def create_job(
         request_fingerprint=request_fingerprint_value,
     )
     return service, app.extensions["inktime_job_repository"], job_id
+
+
+def test_request_level_idempotency_ledger_is_atomic_replayable_and_conflict_safe(app):
+    repository = app.extensions["inktime_job_repository"]
+    scope = scoped_idempotency_key("test-ledger", "tester", "same-key")
+    first = repository.reserve_idempotent_request(
+        scope, "fingerprint-a", {"batches": [{"group": "a", "photo_ids": ["photo-a"]}]}
+    )
+    assert first["status"] == "in_progress"
+
+    concurrent_scope = scoped_idempotency_key("test-ledger", "tester", "concurrent-key")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        concurrent = list(
+            pool.map(
+                lambda _index: repository.reserve_idempotent_request(
+                    concurrent_scope, "fingerprint-c", {"batches": []}
+                ),
+                range(2),
+            )
+        )
+    assert {row["status"] for row in concurrent} == {"in_progress"}
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM idempotency_requests WHERE scope_key=?", (concurrent_scope,)
+        ).fetchone()[0] == 1
+
+    completed = repository.complete_idempotent_request(
+        scope,
+        "fingerprint-a",
+        {"jobs": [{"id": "job-a"}], "queued": 1, "batch_by": "folder"},
+    )
+    assert completed["status"] == "completed"
+    replay = repository.reserve_idempotent_request(scope, "fingerprint-a", {"batches": []})
+    assert replay["response_json"] == completed["response_json"]
+    with pytest.raises(ValueError, match="IDEMPOTENCY_CONFLICT"):
+        repository.reserve_idempotent_request(scope, "fingerprint-b", {"batches": []})
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM idempotency_requests WHERE scope_key=?", (scope,)
+        ).fetchone()[0] == 1
 
 
 def test_pause_resume_cancel_state_machine(app):

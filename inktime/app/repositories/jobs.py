@@ -262,6 +262,88 @@ class JobRepository:
         with self.database.session() as connection:
             return connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
 
+    def get_idempotent_request(self, scope_key: str, request_fingerprint: str) -> dict[str, Any] | None:
+        with self.database.session() as connection:
+            row = connection.execute(
+                "SELECT * FROM idempotency_requests WHERE scope_key=?", (scope_key,)
+            ).fetchone()
+        if row is None:
+            return None
+        if str(row["request_fingerprint"]) != str(request_fingerprint):
+            raise ValueError("IDEMPOTENCY_CONFLICT")
+        return dict(row)
+
+    def reserve_idempotent_request(
+        self,
+        scope_key: str,
+        request_fingerprint: str,
+        request_snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = utc_now()
+        snapshot_json = json.dumps(request_snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        with self.database.session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT * FROM idempotency_requests WHERE scope_key=?", (scope_key,)
+                ).fetchone()
+                if row is not None:
+                    if str(row["request_fingerprint"]) != str(request_fingerprint):
+                        raise ValueError("IDEMPOTENCY_CONFLICT")
+                    connection.execute("COMMIT")
+                    return dict(row)
+                connection.execute(
+                    "INSERT INTO idempotency_requests(scope_key,request_fingerprint,status,request_snapshot_json,response_json,created_at,updated_at) VALUES (?,?, 'in_progress',?,NULL,?,?)",
+                    (scope_key, request_fingerprint, snapshot_json, now, now),
+                )
+                connection.execute("COMMIT")
+                return {
+                    "scope_key": scope_key,
+                    "request_fingerprint": request_fingerprint,
+                    "status": "in_progress",
+                    "request_snapshot_json": snapshot_json,
+                    "response_json": None,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+
+    def complete_idempotent_request(
+        self,
+        scope_key: str,
+        request_fingerprint: str,
+        response: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = utc_now()
+        response_json = json.dumps(response, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        with self.database.session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT * FROM idempotency_requests WHERE scope_key=?", (scope_key,)
+                ).fetchone()
+                if row is None:
+                    raise KeyError(scope_key)
+                if str(row["request_fingerprint"]) != str(request_fingerprint):
+                    raise ValueError("IDEMPOTENCY_CONFLICT")
+                if str(row["status"]) == "in_progress":
+                    connection.execute(
+                        "UPDATE idempotency_requests SET status='completed',response_json=?,updated_at=? WHERE scope_key=? AND status='in_progress'",
+                        (response_json, now, scope_key),
+                    )
+                row = connection.execute(
+                    "SELECT * FROM idempotency_requests WHERE scope_key=?", (scope_key,)
+                ).fetchone()
+                connection.execute("COMMIT")
+                return dict(row)
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+
     def get_by_dedupe_key(self, dedupe_key: str, *, request_fingerprint: str | None = None):
         """Return the durable identity for an explicit idempotency key."""
 

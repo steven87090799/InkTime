@@ -48,6 +48,14 @@ def _ai_job_error(exc: ValueError) -> dict:
     return {"error_code": code, "message": str(exc)}
 
 
+def _build_analysis_plan(settings, strategy: str) -> dict:
+    return current_app.extensions["inktime_analysis_service"].build_plan(
+        strategy=strategy,
+        provider_route=current_app.extensions["inktime_provider_service"].route_snapshot(),
+        scoring_profile=dict(current_app.extensions["inktime_scoring_repository"].current()),
+    )
+
+
 def _queue_ai(
     photo_ids: list[str],
     *,
@@ -56,6 +64,8 @@ def _queue_ai(
     force_ai: bool = False,
     idempotency_key: str | None = None,
     idempotency_scope: str = "photo-ai",
+    analysis_plan: dict | None = None,
+    frozen_photo_ids: bool = False,
 ) -> dict:
     settings = current_app.extensions["inktime_settings_repository"]
     mode = execution_mode(settings)
@@ -71,18 +81,13 @@ def _queue_ai(
         raise ValueError("已達 AI 每日或每月照片上限；目前會保留本機選片結果")
     selected = (
         list(dict.fromkeys(photo_ids))[:500]
-        if force_ai
+        if force_ai or frozen_photo_ids
         else _repository().active_eligible_requested_ids(photo_ids, limit=daily_limit)
     )
     if not selected:
         raise ValueError("沒有符合資格且可送入 AI 的照片")
     strategy = str(settings.get("analysis.strategy", "single"))
-    analysis = current_app.extensions["inktime_analysis_service"]
-    plan = analysis.build_plan(
-        strategy=strategy,
-        provider_route=current_app.extensions["inktime_provider_service"].route_snapshot(),
-        scoring_profile=dict(current_app.extensions["inktime_scoring_repository"].current()),
-    )
+    plan = analysis_plan if analysis_plan is not None else _build_analysis_plan(settings, strategy)
     idempotency_key_value = scoped_idempotency_key(idempotency_scope, created_by, idempotency_key)
     idempotency_fingerprint = (
         request_fingerprint(
@@ -350,6 +355,83 @@ def queue_ai_mode_run():
         group_by = str(payload.get("batch_by", "year"))
         if group_by not in {"year", "folder"}:
             abort(400, description="IMG-004 完整照片庫分批方式不合法")
+        request_key = request.headers.get("Idempotency-Key")
+        if request_key and str(request_key).strip():
+            actor = str(g.user["id"])
+            strategy = str(settings.get("analysis.strategy", "single"))
+            analysis_plan = _build_analysis_plan(settings, strategy)
+            analysis_fingerprint = fingerprint(analysis_plan)
+            request_material = {
+                "analysis_fingerprint": analysis_fingerprint,
+                "analysis_spec": analysis_plan,
+                "batch_by": group_by,
+                "confirm": bool(confirmed),
+                "daily_limit": daily_limit,
+                "mode": mode,
+                "strategy": strategy,
+            }
+            request_scope = scoped_idempotency_key(
+                "ai-mode-run/full-library-request", actor, request_key
+            )
+            request_fp = request_fingerprint(request_material)
+            job_repository = current_app.extensions["inktime_job_repository"]
+            try:
+                existing = job_repository.get_idempotent_request(request_scope, request_fp)
+            except ValueError as exc:
+                return _ai_job_error(exc), 409
+            if existing is not None and str(existing["status"]) == "completed":
+                return json.loads(str(existing["response_json"] or "{}")), 201
+            if existing is None:
+                batches = _repository().eligible_photo_batches(
+                    group_by=group_by, limit=daily_limit, include_all_active=False
+                )
+                snapshot = {
+                    "analysis_fingerprint": analysis_fingerprint,
+                    "analysis_spec": analysis_plan,
+                    "batch_by": group_by,
+                    "batches": [
+                        {"group": str(group), "photo_ids": [str(photo_id) for photo_id in ids]}
+                        for group, ids in batches
+                    ],
+                }
+                try:
+                    existing = job_repository.reserve_idempotent_request(
+                        request_scope, request_fp, snapshot
+                    )
+                except ValueError as exc:
+                    return _ai_job_error(exc), 409
+            if str(existing["status"]) == "completed":
+                return json.loads(str(existing["response_json"] or "{}")), 201
+            snapshot = json.loads(str(existing["request_snapshot_json"] or "{}"))
+            frozen_batches = snapshot.get("batches") if isinstance(snapshot, dict) else None
+            stored_plan = snapshot.get("analysis_spec") if isinstance(snapshot, dict) else None
+            if not isinstance(frozen_batches, list) or not isinstance(stored_plan, dict):
+                raise ValueError("IDEMPOTENCY_LEDGER_INVALID")
+            try:
+                jobs = [
+                    _queue_ai(
+                        [str(photo_id) for photo_id in batch.get("photo_ids", [])],
+                        created_by=actor,
+                        name=f"完整照片庫 AI：{str(batch.get('group', '未知'))}",
+                        idempotency_scope="ai-mode-run",
+                        idempotency_key=grouped_idempotency_key(request_key, str(batch.get("group", "未知"))),
+                        analysis_plan=stored_plan,
+                        frozen_photo_ids=True,
+                    )
+                    for batch in frozen_batches
+                ]
+                response = {
+                    "jobs": jobs,
+                    "queued": sum(job["queued"] for job in jobs),
+                    "batch_by": group_by,
+                }
+                completed = job_repository.complete_idempotent_request(
+                    request_scope, request_fp, response
+                )
+                return json.loads(str(completed["response_json"] or "{}")), 201
+            except ValueError as exc:
+                return _ai_job_error(exc), 409
+
         batches = _repository().eligible_photo_batches(
             group_by=group_by, limit=daily_limit, include_all_active=False
         )

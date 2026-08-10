@@ -31,7 +31,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 45
+    assert CURRENT_SCHEMA_VERSION == 46
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -58,6 +58,7 @@ def test_fresh_database_is_migrated(tmp_path):
         "settings_snapshot_items",
         "analysis_batches",
         "analysis_batch_items",
+        "idempotency_requests",
     } <= tables
     assert tuple(history) == (CURRENT_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION)
     with database.session() as connection:
@@ -112,6 +113,19 @@ def test_fresh_database_is_migrated(tmp_path):
     } <= pairing_columns
     assert "pairing_code_ciphertext" not in pairing_columns
     assert tuple(api_usage_policy) == (1, 400, 0, 200, 1)
+    with database.session() as connection:
+        idempotency_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(idempotency_requests)").fetchall()
+        }
+    assert {
+        "scope_key",
+        "request_fingerprint",
+        "status",
+        "request_snapshot_json",
+        "response_json",
+        "created_at",
+        "updated_at",
+    } <= idempotency_columns
     with database.session() as connection:
         batch_columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(analysis_batches)").fetchall()
@@ -176,7 +190,8 @@ def test_migration_45_adds_api_usage_policy_idempotently_without_overwriting_ope
 ):
     database = Database(tmp_path / "migration-45-retention.db")
     previous_migrations = migrations_module.MIGRATIONS
-    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", previous_migrations[:-1])
+    before_45 = tuple(migration for migration in previous_migrations if migration.version < 45)
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", before_45)
     assert migrate(database) == list(range(1, 45))
     with database.transaction() as connection:
         connection.execute(
@@ -184,13 +199,29 @@ def test_migration_45_adds_api_usage_policy_idempotently_without_overwriting_ope
             "VALUES ('api_usage',1,777,3,17,0,datetime('now'))"
         )
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", previous_migrations)
-    assert migrate(database) == [45]
+    assert migrate(database) == [45, 46]
     with database.session() as connection:
         policy = connection.execute(
             "SELECT enabled,retention_days,minimum_items_to_keep,cleanup_batch_size,dry_run "
             "FROM data_retention_policies WHERE data_type='api_usage'"
         ).fetchone()
     assert tuple(policy) == (1, 777, 3, 17, 0)
+    assert migrate(database) == []
+
+
+def test_migration_46_idempotency_ledger_is_upgrade_safe(monkeypatch, tmp_path):
+    database = Database(tmp_path / "migration-46-ledger.db")
+    all_migrations = migrations_module.MIGRATIONS
+    before_46 = tuple(migration for migration in all_migrations if migration.version < 46)
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", before_46)
+    assert migrate(database) == list(range(1, 46))
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", all_migrations)
+    assert migrate(database) == [46]
+    with database.session() as connection:
+        connection.execute(
+            "INSERT INTO idempotency_requests(scope_key,request_fingerprint,status,request_snapshot_json,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+            ("scope", "fingerprint", "in_progress", "{}", "now", "now"),
+        )
     assert migrate(database) == []
 
 
