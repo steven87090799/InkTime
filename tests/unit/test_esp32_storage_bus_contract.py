@@ -5,6 +5,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 FIRMWARE = ROOT / "esp32/ink-display-7C-photo/ink-display-7C-photo.ino"
+PARTITION_DEFAULT = ROOT / "esp32/ink-display-7C-photo/inktime_default_4M.csv"
+PARTITION_PHOTOPAINTER = ROOT / "esp32/ink-display-7C-photo/inktime_photopainter_3M_16MB.csv"
 SUPPORT = ROOT / "esp32/ink-display-7C-photo/photopainter_support.cpp"
 SUPPORT_HEADER = ROOT / "esp32/ink-display-7C-photo/photopainter_support.h"
 SPECTRA = ROOT / "esp32/ink-display-7C-photo/spectra6_73.cpp"
@@ -134,15 +136,28 @@ def test_queue_ack_journal_is_compact_bounded_crc_checked_and_failure_visible():
     firmware = FIRMWARE.read_text(encoding="utf-8")
     for marker in (
         "AckJournalBlob",
+        "AckJournalSnapshotMeta",
+        "AckJournalActivePointer",
+        "ack_journal_transaction_core.h",
+        "AckJournalPreferencesStorage",
+        "kAckJournalSnapshotMagic",
+        "kAckJournalPointerMagic",
         "kAckJournalBlobMagic",
         "ackJournalCrc",
+        "ackJournalSnapshotContentCrc",
         "kMaxAckJournalEntries",
-        "journal.putBytes",
-        "journal.getBytes",
-        'journal.putUChar("count"',
+        "ackjournal::commitSnapshot",
+        "replacement blob exact readback",
+        "snapshot metadata exact readback",
+        "active pointer exact readback",
+        "legacyAckJournalPresent",
+        "removeLegacyAckJournalKeys",
+        "server 已接受 ACK，但 local cleanup 失敗",
+        "DEVICE-QUEUE-ACK-DURABILITY",
+        "journal_.putBytes",
+        "journal_.getBytes",
         'lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL"',
-        "ACK journal NVS blob readback／CRC 失敗",
-        "ACK journal count 寫入失敗",
+        "ACK journal compact blob CRC／readback 驗證失敗",
         "terminalAckEvidence",
         "DEVICE-QUEUE-ACK-JOURNAL-OVERFLOW",
         "DEVICE-QUEUE-ACK-PERMANENT",
@@ -151,3 +166,78 @@ def test_queue_ack_journal_is_compact_bounded_crc_checked_and_failure_visible():
     ):
         assert marker in firmware
     assert "journal.putString(ackJournalKey" not in firmware
+    assert 'journal.putUChar("count"' not in firmware
+
+
+def test_queue_ack_journal_transaction_core_is_host_tested_and_compiled_by_ci():
+    core = ROOT / "esp32/ink-display-7C-photo/ack_journal_transaction_core.h"
+    budget = ROOT / "esp32/ink-display-7C-photo/ack_journal_storage_budget.h"
+    test = ROOT / "tests/firmware/test_ack_journal_transaction_core.cpp"
+    budget_test = ROOT / "tests/firmware/test_ack_journal_storage_budget.cpp"
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "class Storage" in core.read_text(encoding="utf-8")
+    core_test_text = test.read_text(encoding="utf-8")
+    assert "FakeNvs" in core_test_text
+    assert "PointerTorn" in core_test_text
+    assert "RecordReadbackMismatch" in core_test_text
+    assert "expected_count = 3U" in core_test_text
+    assert "assertInvalidPointerChoosesOlderCompleteGeneration" in core_test_text
+    assert "assertCleanupFailureKeepsPromotedGenerationAuthoritative" in core_test_text
+    assert "assertFullJournalFailurePreservesEveryOldRecord" in core_test_text
+    assert "assertLegacyBatchAndDuplicateFailureWindows" in core_test_text
+    for marker in (
+        "LegacyJournalModel",
+        "DashCfgModel",
+        "BatchPersistenceModel",
+        "AuthoritativeCallerModel",
+        "durable_claim",
+        "retry_requested",
+    ):
+        assert marker in core_test_text
+    assert "empty" in core_test_text.lower()
+    budget_text = budget.read_text(encoding="utf-8")
+    assert "kTargetNvsPartitionBytes = 0x80000U" in budget_text
+    assert "kWorstCaseNvsBytes" in budget_text
+    assert "kNvsSafetyMarginBytes" in budget_text
+    assert "kMaximumEntries == kMaxAckJournalEntries" in budget_text
+    for marker in (
+        "cleanupPrevious",
+        "allPersistenceSucceeded",
+        "legacyCleanupAllowed",
+        "retainDuplicateEvidence",
+    ):
+        assert marker in core.read_text(encoding="utf-8") or marker in FIRMWARE.read_text(encoding="utf-8")
+    assert "kTargetNvsPartitionBytes" in budget_test.read_text(encoding="utf-8")
+    assert "test_ack_journal_transaction_core.cpp" in workflow
+    assert "test_ack_journal_storage_budget.cpp" in workflow
+
+
+def test_queue_ack_journal_partition_budget_is_source_owned_and_selected_by_ci():
+    def partition_size(path: Path, name: str) -> int:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith("#") or not line.strip():
+                continue
+            fields = [field.strip() for field in line.split(",")]
+            if fields[0] == name:
+                return int(fields[4], 16)
+        raise AssertionError(f"missing partition {name} in {path}")
+
+    assert partition_size(PARTITION_DEFAULT, "nvs") == 0x80000
+    assert partition_size(PARTITION_PHOTOPAINTER, "nvs") == 0x80000
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    docs = (ROOT / "docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md").read_text(encoding="utf-8")
+    guide = (ROOT / "docs/devices/ESP32_GUIDE_ZH_TW.md").read_text(encoding="utf-8")
+    for marker in (
+        "inktime_default_4M.csv",
+        "inktime_photopainter_3M_16MB.csv",
+        "partitions.csv",
+    ):
+        assert marker in workflow or marker in docs
+    assert "select_partition()" in workflow
+    assert "automatically selects `partitions.csv`" in guide
+    assert "FlashSize=4M" in workflow
+    assert "FlashSize=16M,PSRAM=opi,CDCOnBoot=cdc" in workflow
+    assert "PartitionScheme=app3M_fat9M_16MB" not in workflow
+    assert "PartitionScheme=app3M_fat9M_16MB" not in docs
+    assert "PartitionScheme=inktime_default_4M" not in workflow
+    assert "PartitionScheme=inktime_photopainter_3M_16MB" not in workflow

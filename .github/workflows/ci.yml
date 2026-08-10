@@ -653,6 +653,16 @@ jobs:
             tests/firmware/test_queue_client_core.cpp \
             -o /tmp/inktime-queue-client-core
           /tmp/inktime-queue-client-core
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic \
+            -Iesp32/ink-display-7C-photo \
+            tests/firmware/test_ack_journal_transaction_core.cpp \
+            -o /tmp/inktime-ack-journal-transaction-core
+          /tmp/inktime-ack-journal-transaction-core
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic \
+            -Iesp32/ink-display-7C-photo \
+            tests/firmware/test_ack_journal_storage_budget.cpp \
+            -o /tmp/inktime-ack-journal-storage-budget
+          /tmp/inktime-ack-journal-storage-budget
 
   esp32-compile:
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_firmware_compile == 'true' }}
@@ -682,33 +692,46 @@ jobs:
           FIRMWARE_EXECUTION_PROFILES: ${{ needs.changes.outputs.firmware_execution_profiles }}
         run: |
           set -euo pipefail
+          sketch_dir="esp32/ink-display-7C-photo"
+          trap 'rm -f "${sketch_dir}/partitions.csv"' EXIT
+          select_partition() {
+            cp "${sketch_dir}/$1" "${sketch_dir}/partitions.csv"
+          }
           mapfile -t profiles < <(jq -r '.quick[], .affected[], .full_matrix[]' <<<"${FIRMWARE_EXECUTION_PROFILES}")
           test "${#profiles[@]}" -gt 0
           for profile in "${profiles[@]}"; do
             case "${profile}" in
               gdey_release)
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-path /tmp/build-gdey-release esp32/ink-display-7C-photo
+                select_partition inktime_default_4M.csv
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' --build-path /tmp/build-gdey-release esp32/ink-display-7C-photo
                 ;;
               gdep_release)
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-property 'compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1' --build-path /tmp/build-gdep-release esp32/ink-display-7C-photo
+                select_partition inktime_default_4M.csv
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' --build-property 'compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1' --build-path /tmp/build-gdep-release esp32/ink-display-7C-photo
                 ;;
               photopainter_release)
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER' --build-path /tmp/build-photopainter-release esp32/ink-display-7C-photo
+                select_partition inktime_photopainter_3M_16MB.csv
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,CDCOnBoot=cdc' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER' --build-path /tmp/build-photopainter-release esp32/ink-display-7C-photo
                 ;;
               trusted_lan_gdey)
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-property 'compiler.cpp.extra_flags=-DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-trusted-lan-gdey esp32/ink-display-7C-photo
+                select_partition inktime_default_4M.csv
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' --build-property 'compiler.cpp.extra_flags=-DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-trusted-lan-gdey esp32/ink-display-7C-photo
                 ;;
               trusted_lan_gdep)
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3' --build-property 'compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1 -DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-trusted-lan-gdep esp32/ink-display-7C-photo
+                select_partition inktime_default_4M.csv
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' --build-property 'compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1 -DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-trusted-lan-gdep esp32/ink-display-7C-photo
                 ;;
               trusted_lan_photopainter)
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-trusted-lan-photopainter esp32/ink-display-7C-photo
+                select_partition inktime_photopainter_3M_16MB.csv
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,CDCOnBoot=cdc' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-trusted-lan-photopainter esp32/ink-display-7C-photo
                 ;;
               default_debug)
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc,DebugLevel=debug' --build-property 'compiler.cpp.extra_flags=-DINKTIME_DEBUG_LOG=1' --build-path /tmp/build-default-debug esp32/ink-display-7C-photo
+                select_partition inktime_default_4M.csv
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=4M,DebugLevel=debug' --build-property 'compiler.cpp.extra_flags=-DINKTIME_DEBUG_LOG=1' --build-path /tmp/build-default-debug esp32/ink-display-7C-photo
                 ;;
               photopainter_debug)
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc,DebugLevel=debug' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -DINKTIME_DEBUG_LOG=1' --build-path /tmp/build-photopainter-debug esp32/ink-display-7C-photo
+                select_partition inktime_photopainter_3M_16MB.csv
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,CDCOnBoot=cdc,DebugLevel=debug' --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -DINKTIME_DEBUG_LOG=1' --build-path /tmp/build-photopainter-debug esp32/ink-display-7C-photo
                 ;;
               *)
                 echo "Unknown planner firmware profile: ${profile}" >&2

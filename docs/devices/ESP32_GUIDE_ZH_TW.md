@@ -58,18 +58,29 @@ arduino-cli core update-index
 arduino-cli core install esp32:esp32@3.3.10
 arduino-cli lib install GxEPD2@1.6.9 ArduinoJson@7.4.3
 
+# The repository-owned 512 KiB NVS table is sketch-local.  Arduino-ESP32
+# automatically selects `partitions.csv` from the sketch directory.
+cp esp32/ink-display-7C-photo/inktime_default_4M.csv \
+  esp32/ink-display-7C-photo/partitions.csv
+
 # 既有 GDEY073D46
-arduino-cli compile --fqbn esp32:esp32:esp32s3 esp32/ink-display-7C-photo
+arduino-cli compile \
+  --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' \
+  esp32/ink-display-7C-photo
 
 # 新 GDEP073E01
-arduino-cli compile --fqbn esp32:esp32:esp32s3 \
+arduino-cli compile \
+  --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' \
   --build-property "compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1" \
   esp32/ink-display-7C-photo
 
 # 可信任 LAN Production；secure build 的預設值仍是 0
-arduino-cli compile --fqbn esp32:esp32:esp32s3 \
+arduino-cli compile \
+  --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' \
   --build-property "compiler.cpp.extra_flags=-DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1" \
   esp32/ink-display-7C-photo
+
+rm -f esp32/ink-display-7C-photo/partitions.csv
 ```
 
 Board 選 ESP32-S3，啟用 OPI PSRAM。正式版 `INKTIME_DEBUG_LOG=0`；短期硬體除錯才加入 `-DINKTIME_DEBUG_LOG=1`。序列 Log 不輸出 Device Secret、配對碼或 Legacy Token，但正式環境仍不應長期開啟。PhotoPainter 必須使用 16 MiB Flash／OPI PSRAM 與中央 `DEVICE_PROFILE`，完整命令見上方專用指南。
