@@ -2008,6 +2008,13 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        45,
+        "加入 API 用量保留生命週期",
+        (
+            "INSERT OR IGNORE INTO data_retention_policies(data_type,enabled,retention_days,minimum_items_to_keep,cleanup_batch_size,dry_run,updated_at) VALUES ('api_usage',1,400,0,200,1,datetime('now'))",
+        ),
+    ),
 )
 
 

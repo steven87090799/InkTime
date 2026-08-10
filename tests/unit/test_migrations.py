@@ -31,7 +31,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 44
+    assert CURRENT_SCHEMA_VERSION == 45
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -81,6 +81,10 @@ def test_fresh_database_is_migrated(tmp_path):
             row["name"]
             for row in connection.execute("PRAGMA table_info(device_pairing_requests)").fetchall()
         }
+        api_usage_policy = connection.execute(
+            "SELECT enabled,retention_days,minimum_items_to_keep,cleanup_batch_size,dry_run "
+            "FROM data_retention_policies WHERE data_type='api_usage'"
+        ).fetchone()
     assert {"normalized_username", "session_version", "disabled_at"} <= columns
     assert "request_fingerprint" in job_columns
     assert {"current_displayed_at", "last_known_good_displayed_at"} <= queue_columns
@@ -107,6 +111,7 @@ def test_fresh_database_is_migrated(tmp_path):
         "confirmed_at",
     } <= pairing_columns
     assert "pairing_code_ciphertext" not in pairing_columns
+    assert tuple(api_usage_policy) == (1, 400, 0, 200, 1)
     with database.session() as connection:
         batch_columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(analysis_batches)").fetchall()
@@ -164,6 +169,29 @@ def test_fresh_database_is_migrated(tmp_path):
         "idx_batch_items_active_content_request",
         "idx_analysis_batches_remote_id",
     }
+
+
+def test_migration_45_adds_api_usage_policy_idempotently_without_overwriting_operator_values(
+    monkeypatch, tmp_path
+):
+    database = Database(tmp_path / "migration-45-retention.db")
+    previous_migrations = migrations_module.MIGRATIONS
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", previous_migrations[:-1])
+    assert migrate(database) == list(range(1, 45))
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO data_retention_policies(data_type,enabled,retention_days,minimum_items_to_keep,cleanup_batch_size,dry_run,updated_at) "
+            "VALUES ('api_usage',1,777,3,17,0,datetime('now'))"
+        )
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", previous_migrations)
+    assert migrate(database) == [45]
+    with database.session() as connection:
+        policy = connection.execute(
+            "SELECT enabled,retention_days,minimum_items_to_keep,cleanup_batch_size,dry_run "
+            "FROM data_retention_policies WHERE data_type='api_usage'"
+        ).fetchone()
+    assert tuple(policy) == (1, 777, 3, 17, 0)
+    assert migrate(database) == []
 
 
 def test_migration_39_quarantines_legacy_ambiguous_offline_slot_rows(monkeypatch, tmp_path):

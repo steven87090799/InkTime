@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from PIL import Image
+import pytest
 
 from tests.conftest import create_admin, csrf, login
+from inktime.app.services.budgets import BudgetExceeded
 
 
 def _seed_photo(app, photo_id: str = "photo") -> None:
@@ -210,6 +214,77 @@ def test_same_content_queue_ack_is_strict_and_idempotent(client, app):
     )
     assert first.status_code == 200
     assert duplicate.status_code == 200 and duplicate.get_json()["idempotent"] is True
+
+
+def test_api_usage_retention_policy_is_exposed_and_preserves_current_budget_evidence(client, app):
+    create_admin(app)
+    login(client)
+    _seed_photo(app, "retention-photo")
+    database = app.extensions["inktime_database"]
+    initial = client.get("/api/retention/policies")
+    assert initial.status_code == 200
+    api_usage = next(item for item in initial.get_json()["items"] if item["data_type"] == "api_usage")
+    assert api_usage["retention_days"] == 400
+
+    updated = client.put(
+        "/api/retention/policies/api_usage",
+        json={"retention_days": 1, "cleanup_batch_size": 2},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert updated.status_code == 200
+    assert updated.get_json()["retention_days"] == 1
+    costs_page = client.get("/costs")
+    assert costs_page.status_code == 200
+    assert "目前 API 用量保留期間（1 天）".encode() in costs_page.data
+
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    with database.transaction() as connection:
+        connection.executemany(
+            "INSERT INTO api_usage(provider,model,photo_id,request_type,estimated_cost,started_at,status,cost_source,image_bytes) "
+            "VALUES ('remote','model',?,'analysis',?,?,?,?,1)",
+            [
+                (
+                    "retention-photo",
+                    0.10,
+                    (month_start - timedelta(days=3)).isoformat(),
+                    "failed",
+                    "unknown",
+                ),
+                (
+                    "retention-photo",
+                    0.20,
+                    (now - timedelta(hours=1)).isoformat(),
+                    "completed",
+                    "unknown",
+                ),
+            ],
+        )
+        before_analysis = connection.execute("SELECT COUNT(*) FROM photo_analysis").fetchone()[0]
+        before_queue_events = connection.execute("SELECT COUNT(*) FROM device_content_queue_events").fetchone()[0]
+
+    budget = app.extensions["inktime_budget_service"]
+    photos = app.extensions["inktime_photo_repository"]
+    before = budget.snapshot(photo_id="retention-photo")
+    assert before["photo_unknown_count"] == 2
+    assert photos.ai_limit_reached(daily_limit=1, monthly_limit=1) is True
+
+    run = client.post(
+        "/api/retention/run",
+        json={"dry_run": False},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert run.status_code == 200
+    assert run.get_json()["summary"]["api_usage"] == 1
+
+    after = budget.snapshot(photo_id="retention-photo")
+    assert after["photo_unknown_count"] == 1
+    assert photos.ai_limit_reached(daily_limit=1, monthly_limit=1) is True
+    with pytest.raises(BudgetExceeded):
+        budget.assert_request_allowed(None, "retention-photo")
+    with database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM photo_analysis").fetchone()[0] == before_analysis
+        assert connection.execute("SELECT COUNT(*) FROM device_content_queue_events").fetchone()[0] == before_queue_events
 
 
 def test_queue_ack_rejects_string_skip_boolean(client, app):
