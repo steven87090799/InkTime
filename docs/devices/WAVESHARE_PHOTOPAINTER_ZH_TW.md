@@ -153,12 +153,14 @@ cp esp32/ink-display-7C-photo/inktime_photopainter_3M_16MB.csv \
   esp32/ink-display-7C-photo/partitions.csv
 arduino-cli compile \
   --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,CDCOnBoot=cdc' \
+  --build-property 'upload.maximum_size=3145728' \
   --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER' \
   esp32/ink-display-7C-photo
 
 # Waveshare PhotoPainter（Debug）
 arduino-cli compile \
   --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,CDCOnBoot=cdc,DebugLevel=debug' \
+  --build-property 'upload.maximum_size=3145728' \
   --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -DINKTIME_DEBUG_LOG=1' \
   esp32/ink-display-7C-photo
 ```
