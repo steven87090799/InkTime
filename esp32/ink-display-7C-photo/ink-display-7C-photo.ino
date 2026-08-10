@@ -20,6 +20,12 @@
 #include "queue_runtime_types.h"
 #include "ack_journal_transaction_core.h"
 #include "ack_journal_storage_budget.h"
+
+// Arduino's prototype generator runs before later .ino declarations.  Keep
+// these metadata types visible to generated CRC helper prototypes.
+struct AckJournalSnapshotMeta;
+struct AckJournalActivePointer;
+
 #include "device_http_transport.h"
 #if INKTIME_PHOTOPAINTER_ENABLED
 #include "photopainter_support.h"

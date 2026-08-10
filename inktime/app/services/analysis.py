@@ -595,11 +595,12 @@ class PhotoAnalysisService:
             return
         if not boundary_timeout and not bool(getattr(error, "ambiguous", False)):
             return
-        error.code = "VLM-AMBIGUOUS"
-        error.ambiguous = True
-        error.request_started = True
+        error_metadata: Any = error
+        error_metadata.code = "VLM-AMBIGUOUS"
+        error_metadata.ambiguous = True
+        error_metadata.request_started = True
         if request_kind == "vision":
-            error.vision_started = True
+            error_metadata.vision_started = True
 
     @staticmethod
     def _failure_metrics(
@@ -700,7 +701,8 @@ class PhotoAnalysisService:
             "VLM-005",
             "VLM-007",
         }:
-            error.code = "VLM-004"
+            error_metadata: Any = error
+            error_metadata.code = "VLM-004"
 
     def _record(
         self,

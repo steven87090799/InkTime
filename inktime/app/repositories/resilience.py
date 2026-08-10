@@ -1176,7 +1176,8 @@ class ResilienceRepository:
         return next(row for row in self.retention_policies() if row["data_type"] == data_type)
 
     def cleanup(self, *, dry_run: bool = True) -> dict[str, Any]:
-        run_id, now, summary = str(uuid4()), utc_now(), {}
+        run_id, now = str(uuid4()), utc_now()
+        summary: dict[str, int] = {}
         mapping = {
             "decision_trace": ("selection_decision_traces", "created_at", "id"),
             "decision_candidate": ("selection_decision_candidates", "id", "id"),
