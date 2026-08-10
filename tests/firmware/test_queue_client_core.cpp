@@ -72,6 +72,10 @@ int main() {
            403, "rejected", "") == QueueAckResultDisposition::RetainPending);
   assert(!queueAckMayUnlockDisplay(false, true, false, false));
   assert(queueAckMayUnlockDisplay(true, true, false, false));
+  // QUEUE-003 stale evidence is retained, but stale-only and
+  // stale-plus-permanent-reject batches must not unlock this wake.
+  assert(!queueAckMayUnlockDisplay(false, false, false, false));
+  assert(!queueAckMayUnlockDisplay(true, false, false, false));
   assert(!queueAckMayUnlockDisplay(true, false, true, false));
   assert(!queueAckMayUnlockDisplay(true, true, false, true));
 

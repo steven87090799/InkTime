@@ -173,6 +173,20 @@ def test_queue_ack_journal_is_compact_bounded_crc_checked_and_failure_visible():
     assert 'journal.putUChar("count"' not in firmware
 
 
+def test_queue_ack_stale_aggregation_is_fail_closed_for_this_wake():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    stale_start = firmware.index(
+        "if (disposition == inktime::QueueAckResultDisposition::Stale)"
+    )
+    permanent_start = firmware.index(
+        "if (disposition == inktime::QueueAckResultDisposition::AuthoritativePermanentReject)",
+        stale_start,
+    )
+    stale_block = firmware[stale_start:permanent_start]
+    assert "allResolved = false;" in stale_block
+    assert stale_block.index("allResolved = false;") < stale_block.index("if (terminalQueueAck")
+
+
 def test_queue_ack_journal_transaction_core_is_host_tested_and_compiled_by_ci():
     core = ROOT / "esp32/ink-display-7C-photo/ack_journal_transaction_core.h"
     budget = ROOT / "esp32/ink-display-7C-photo/ack_journal_storage_budget.h"

@@ -5,6 +5,7 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import threading
 from uuid import uuid4
 
 from PIL import Image
@@ -642,7 +643,7 @@ def test_full_library_confirmation_and_queue_count_only_active_eligible_photos(c
     assert excluded_id not in photo_ids
 
 
-def test_full_library_group_idempotency_is_bounded_replayable_and_conflict_safe(client, app):
+def test_full_library_group_idempotency_is_bounded_replayable_and_conflict_safe(client, app, monkeypatch):
     create_admin(app)
     login(client)
     now = datetime.now(timezone.utc).isoformat()
@@ -671,6 +672,22 @@ def test_full_library_group_idempotency_is_bounded_replayable_and_conflict_safe(
         "X-CSRF-Token": csrf(client),
         "Idempotency-Key": client_key,
     }
+    reservation_events = []
+    job_repository = app.extensions["inktime_job_repository"]
+    photo_repository = app.extensions["inktime_photo_repository"]
+    original_reserve = job_repository.reserve_idempotent_request
+    original_enumerate = photo_repository.eligible_photo_batches
+
+    def tracked_reserve(*args, **kwargs):
+        reservation_events.append("reserve")
+        return original_reserve(*args, **kwargs)
+
+    def tracked_enumerate(*args, **kwargs):
+        reservation_events.append("enumerate")
+        return original_enumerate(*args, **kwargs)
+
+    monkeypatch.setattr(job_repository, "reserve_idempotent_request", tracked_reserve)
+    monkeypatch.setattr(photo_repository, "eligible_photo_batches", tracked_enumerate)
 
     first = client.post(
         "/api/v1/photos/ai/run",
@@ -678,6 +695,7 @@ def test_full_library_group_idempotency_is_bounded_replayable_and_conflict_safe(
         headers=headers,
     )
     assert first.status_code == 201
+    assert reservation_events[:2] == ["reserve", "enumerate"]
     first_job_ids = [job["id"] for job in first.json["jobs"]]
     assert len(first_job_ids) == 2
     with app.extensions["inktime_database"].session() as connection:
@@ -744,6 +762,71 @@ def test_full_library_group_idempotency_is_bounded_replayable_and_conflict_safe(
     assert changed_plan.json["error_code"] == "IDEMPOTENCY_CONFLICT"
     with app.extensions["inktime_database"].session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == before_conflict_count
+
+
+def test_full_library_concurrent_request_has_single_enumeration_owner(app, tmp_path, monkeypatch):
+    create_admin(app)
+    now = datetime.now(timezone.utc).isoformat()
+    library_id = str(uuid4())
+    photo_id = str(uuid4())
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "INSERT INTO libraries(id,name,root_path,created_at,updated_at) VALUES (?,?,?,?,?)",
+            (library_id, "並行預約", "/photos", now, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO photos(id,library_id,relative_path,status,eligible,lifecycle_status,
+                               local_candidate_score,created_at,updated_at)
+            VALUES (?,?,?,'preprocessed',1,'active',?,?,?)
+            """,
+            (photo_id, library_id, "single.jpg", 10.0, now, now),
+        )
+    _setting(app, "analysis.ai_mode", "full_library")
+    _setting(app, "analysis.ai_daily_photo_limit", 10)
+    monkeypatch.setattr(photos_api, "IDEMPOTENCY_RESERVATION_LEASE_SECONDS", 1)
+    monkeypatch.setattr(photos_api, "IDEMPOTENCY_RESERVATION_HEARTBEAT_SECONDS", 0.05)
+    photo_repository = app.extensions["inktime_photo_repository"]
+    original_enumerate = photo_repository.eligible_photo_batches
+    enumeration_started = threading.Event()
+    release_enumeration = threading.Event()
+    enumeration_calls = 0
+    calls_lock = threading.Lock()
+
+    def blocked_enumerate(*args, **kwargs):
+        nonlocal enumeration_calls
+        with calls_lock:
+            enumeration_calls += 1
+        enumeration_started.set()
+        assert release_enumeration.wait(5)
+        return original_enumerate(*args, **kwargs)
+
+    monkeypatch.setattr(photo_repository, "eligible_photo_batches", blocked_enumerate)
+
+    def submit_request():
+        with app.test_client() as concurrent_client:
+            login(concurrent_client)
+            return concurrent_client.post(
+                "/api/v1/photos/ai/run",
+                json={"confirm": True, "batch_by": "folder"},
+                headers={
+                    "X-CSRF-Token": csrf(concurrent_client),
+                    "Idempotency-Key": "concurrent-full-library-key",
+                },
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(submit_request)
+        assert enumeration_started.wait(5)
+        time.sleep(1.5)
+        second_response = pool.submit(submit_request).result(timeout=5)
+        assert second_response.status_code == 409
+        assert second_response.json["error_code"] == "IDEMPOTENCY_IN_PROGRESS"
+        release_enumeration.set()
+        first_response = first_future.result(timeout=10)
+
+    assert first_response.status_code == 201
+    assert enumeration_calls == 1
 
 
 def test_full_library_in_progress_ledger_resumes_partial_group_creation(client, app, monkeypatch):

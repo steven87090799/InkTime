@@ -73,10 +73,38 @@ def test_request_level_idempotency_ledger_is_atomic_replayable_and_conflict_safe
             )
         )
     assert {row["status"] for row in concurrent} == {"in_progress"}
+    assert sum(bool(row["reservation_owner"]) for row in concurrent) == 1
     with app.extensions["inktime_database"].session() as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM idempotency_requests WHERE scope_key=?", (concurrent_scope,)
         ).fetchone()[0] == 1
+
+    empty_scope = scoped_idempotency_key("test-ledger", "tester", "empty-reservation")
+    owner = repository.reserve_idempotent_request(empty_scope, "fingerprint-empty")
+    follower = repository.reserve_idempotent_request(empty_scope, "fingerprint-empty")
+    assert owner["reservation_owner"] is True
+    assert follower["reservation_owner"] is False
+    assert follower["request_snapshot_json"] == "{}"
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE idempotency_requests SET reservation_expires_at=? WHERE scope_key=?",
+            ("2000-01-01T00:00:00+00:00", empty_scope),
+        )
+    takeover = repository.reserve_idempotent_request(empty_scope, "fingerprint-empty")
+    assert takeover["reservation_owner"] is True
+    assert takeover["reservation_token"] != owner["reservation_token"]
+    assert not repository.renew_idempotent_request(
+        empty_scope,
+        "fingerprint-empty",
+        owner["reservation_token"],
+    )
+    with pytest.raises(ValueError, match="IDEMPOTENCY_RESERVATION_LOST"):
+        repository.freeze_idempotent_request(
+            empty_scope,
+            "fingerprint-empty",
+            owner["reservation_token"],
+            {"analysis_spec": {}, "batches": []},
+        )
 
     completed = repository.complete_idempotent_request(
         scope,

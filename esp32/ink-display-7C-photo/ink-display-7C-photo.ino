@@ -3414,6 +3414,9 @@ static bool postQueueAckBatch(
             continue;
           }
           if (disposition == inktime::QueueAckResultDisposition::Stale) {
+            // Stale evidence is retained for recovery, but it can never
+            // authorize this wake's display/config progression.
+            allResolved = false;
             // A terminal event is crash-safe evidence, even when the queue
             // version has moved on before the next wake.  Keep it durable so
             // delayed-terminal recovery can still be accepted; dropping it

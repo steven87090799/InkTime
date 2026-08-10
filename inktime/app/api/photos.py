@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -33,6 +34,8 @@ from inktime.app.domain.photos.orientation import original_exif_orientation, res
 
 bp = Blueprint("photos", __name__)
 PHOTO_PAGE_SIZE = 200
+IDEMPOTENCY_RESERVATION_LEASE_SECONDS = 60
+IDEMPOTENCY_RESERVATION_HEARTBEAT_SECONDS = 10.0
 
 
 def _repository():
@@ -376,30 +379,92 @@ def queue_ai_mode_run():
             request_fp = request_fingerprint(request_material)
             job_repository = current_app.extensions["inktime_job_repository"]
             try:
-                existing = job_repository.get_idempotent_request(request_scope, request_fp)
+                # Reserve the request before touching the potentially expensive
+                # library enumeration.  Only the durable reservation owner may
+                # freeze the snapshot; concurrent callers either reuse a frozen
+                # snapshot or retry while the owner is still enumerating.
+                existing = job_repository.reserve_idempotent_request(
+                    request_scope,
+                    request_fp,
+                    lease_seconds=IDEMPOTENCY_RESERVATION_LEASE_SECONDS,
+                )
             except ValueError as exc:
                 return _ai_job_error(exc), 409
             if existing is not None and str(existing["status"]) == "completed":
                 return json.loads(str(existing["response_json"] or "{}")), 201
-            if existing is None:
-                batches = _repository().eligible_photo_batches(
-                    group_by=group_by, limit=daily_limit, include_all_active=False
+
+            try:
+                snapshot = json.loads(str(existing["request_snapshot_json"] or "{}"))
+            except json.JSONDecodeError as exc:
+                raise ValueError("IDEMPOTENCY_LEDGER_INVALID") from exc
+            has_frozen_snapshot = (
+                isinstance(snapshot, dict)
+                and isinstance(snapshot.get("batches"), list)
+                and isinstance(snapshot.get("analysis_spec"), dict)
+            )
+            if not has_frozen_snapshot:
+                if not bool(existing.get("reservation_owner")):
+                    return {
+                        "error_code": "IDEMPOTENCY_IN_PROGRESS",
+                        "message": "相同 Idempotency-Key 的完整照片庫請求正在建立固定選片；請稍後重試",
+                    }, 409
+                reservation_token = str(existing.get("reservation_token") or "")
+                heartbeat_stop = threading.Event()
+                heartbeat_lost = threading.Event()
+
+                def renew_reservation() -> None:
+                    while not heartbeat_stop.wait(IDEMPOTENCY_RESERVATION_HEARTBEAT_SECONDS):
+                        try:
+                            renewed = job_repository.renew_idempotent_request(
+                                request_scope,
+                                request_fp,
+                                reservation_token,
+                                lease_seconds=IDEMPOTENCY_RESERVATION_LEASE_SECONDS,
+                            )
+                        except Exception:
+                            renewed = False
+                        if not renewed:
+                            heartbeat_lost.set()
+                            return
+
+                heartbeat = threading.Thread(
+                    target=renew_reservation,
+                    name="inktime-idempotency-reservation-heartbeat",
+                    daemon=True,
                 )
-                snapshot = {
-                    "analysis_fingerprint": analysis_fingerprint,
-                    "analysis_spec": analysis_plan,
-                    "batch_by": group_by,
-                    "batches": [
-                        {"group": str(group), "photo_ids": [str(photo_id) for photo_id in ids]}
-                        for group, ids in batches
-                    ],
-                }
+                heartbeat.start()
                 try:
-                    existing = job_repository.reserve_idempotent_request(
-                        request_scope, request_fp, snapshot
+                    batches = _repository().eligible_photo_batches(
+                        group_by=group_by, limit=daily_limit, include_all_active=False
+                    )
+                    snapshot = {
+                        "analysis_fingerprint": analysis_fingerprint,
+                        "analysis_spec": analysis_plan,
+                        "batch_by": group_by,
+                        "batches": [
+                            {"group": str(group), "photo_ids": [str(photo_id) for photo_id in ids]}
+                            for group, ids in batches
+                        ],
+                    }
+                    if heartbeat_lost.is_set() or not job_repository.renew_idempotent_request(
+                        request_scope,
+                        request_fp,
+                        reservation_token,
+                        lease_seconds=IDEMPOTENCY_RESERVATION_LEASE_SECONDS,
+                    ):
+                        raise ValueError("IDEMPOTENCY_RESERVATION_LOST")
+                    existing = job_repository.freeze_idempotent_request(
+                        request_scope,
+                        request_fp,
+                        reservation_token,
+                        snapshot,
+                        lease_seconds=IDEMPOTENCY_RESERVATION_LEASE_SECONDS,
                     )
                 except ValueError as exc:
                     return _ai_job_error(exc), 409
+                finally:
+                    heartbeat_stop.set()
+                    heartbeat.join(timeout=max(1.0, IDEMPOTENCY_RESERVATION_HEARTBEAT_SECONDS * 2))
             if str(existing["status"]) == "completed":
                 return json.loads(str(existing["response_json"] or "{}")), 201
             snapshot = json.loads(str(existing["request_snapshot_json"] or "{}"))

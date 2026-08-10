@@ -277,10 +277,21 @@ class JobRepository:
         self,
         scope_key: str,
         request_fingerprint: str,
-        request_snapshot: dict[str, Any],
+        request_snapshot: dict[str, Any] | None = None,
+        *,
+        lease_seconds: int = 60,
     ) -> dict[str, Any]:
-        now = utc_now()
-        snapshot_json = json.dumps(request_snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        lease_seconds = max(1, int(lease_seconds))
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        lease_expires_at = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+        snapshot_json = json.dumps(
+            request_snapshot if request_snapshot is not None else {},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        reservation_token = str(uuid4())
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -290,11 +301,43 @@ class JobRepository:
                 if row is not None:
                     if str(row["request_fingerprint"]) != str(request_fingerprint):
                         raise ValueError("IDEMPOTENCY_CONFLICT")
+                    if str(row["status"]) == "completed":
+                        connection.execute("COMMIT")
+                        result = dict(row)
+                        result["reservation_owner"] = False
+                        return result
+                    connection.execute(
+                        """
+                        UPDATE idempotency_requests
+                        SET reservation_token=?,reservation_expires_at=?,updated_at=?
+                        WHERE scope_key=? AND status='in_progress'
+                          AND (reservation_token IS NULL OR reservation_expires_at IS NULL OR reservation_expires_at<=?)
+                        """,
+                        (reservation_token, lease_expires_at, now, scope_key, now),
+                    )
+                    row = connection.execute(
+                        "SELECT * FROM idempotency_requests WHERE scope_key=?", (scope_key,)
+                    ).fetchone()
                     connection.execute("COMMIT")
-                    return dict(row)
+                    result = dict(row)
+                    result["reservation_owner"] = str(row["reservation_token"] or "") == reservation_token
+                    return result
                 connection.execute(
-                    "INSERT INTO idempotency_requests(scope_key,request_fingerprint,status,request_snapshot_json,response_json,created_at,updated_at) VALUES (?,?, 'in_progress',?,NULL,?,?)",
-                    (scope_key, request_fingerprint, snapshot_json, now, now),
+                    """
+                    INSERT INTO idempotency_requests(
+                        scope_key,request_fingerprint,status,request_snapshot_json,response_json,
+                        reservation_token,reservation_expires_at,created_at,updated_at
+                    ) VALUES (?,?, 'in_progress',?,NULL,?,?,?,?)
+                    """,
+                    (
+                        scope_key,
+                        request_fingerprint,
+                        snapshot_json,
+                        reservation_token,
+                        lease_expires_at,
+                        now,
+                        now,
+                    ),
                 )
                 connection.execute("COMMIT")
                 return {
@@ -303,9 +346,99 @@ class JobRepository:
                     "status": "in_progress",
                     "request_snapshot_json": snapshot_json,
                     "response_json": None,
+                    "reservation_token": reservation_token,
+                    "reservation_expires_at": lease_expires_at,
+                    "reservation_owner": True,
                     "created_at": now,
                     "updated_at": now,
                 }
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+
+    def freeze_idempotent_request(
+        self,
+        scope_key: str,
+        request_fingerprint: str,
+        reservation_token: str,
+        request_snapshot: dict[str, Any],
+        *,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any]:
+        """Persist the frozen request snapshot under the reservation owner."""
+
+        lease_seconds = max(1, int(lease_seconds))
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        lease_expires_at = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+        snapshot_json = json.dumps(request_snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        with self.database.session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT * FROM idempotency_requests WHERE scope_key=?", (scope_key,)
+                ).fetchone()
+                if row is None:
+                    raise KeyError(scope_key)
+                if str(row["request_fingerprint"]) != str(request_fingerprint):
+                    raise ValueError("IDEMPOTENCY_CONFLICT")
+                if str(row["status"]) == "completed":
+                    connection.execute("COMMIT")
+                    result = dict(row)
+                    result["reservation_owner"] = False
+                    return result
+                updated = connection.execute(
+                    """
+                    UPDATE idempotency_requests
+                    SET request_snapshot_json=?,reservation_expires_at=?,updated_at=?
+                    WHERE scope_key=? AND status='in_progress' AND reservation_token=?
+                      AND reservation_expires_at>?
+                    """,
+                    (snapshot_json, lease_expires_at, now, scope_key, reservation_token, now),
+                ).rowcount
+                if updated != 1:
+                    raise ValueError("IDEMPOTENCY_RESERVATION_LOST")
+                row = connection.execute(
+                    "SELECT * FROM idempotency_requests WHERE scope_key=?", (scope_key,)
+                ).fetchone()
+                connection.execute("COMMIT")
+                result = dict(row)
+                result["reservation_owner"] = True
+                return result
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+
+    def renew_idempotent_request(
+        self,
+        scope_key: str,
+        request_fingerprint: str,
+        reservation_token: str,
+        *,
+        lease_seconds: int = 60,
+    ) -> bool:
+        """Renew a live reservation without changing its durable owner token."""
+
+        lease_seconds = max(1, int(lease_seconds))
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        lease_expires_at = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+        with self.database.session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                updated = connection.execute(
+                    """
+                    UPDATE idempotency_requests
+                    SET reservation_expires_at=?,updated_at=?
+                    WHERE scope_key=? AND request_fingerprint=? AND status='in_progress'
+                      AND reservation_token=? AND reservation_expires_at>?
+                    """,
+                    (lease_expires_at, now, scope_key, request_fingerprint, reservation_token, now),
+                ).rowcount
+                connection.execute("COMMIT")
+                return updated == 1
             except Exception:
                 if connection.in_transaction:
                     connection.execute("ROLLBACK")

@@ -31,7 +31,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 46
+    assert CURRENT_SCHEMA_VERSION == 47
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -123,6 +123,8 @@ def test_fresh_database_is_migrated(tmp_path):
         "status",
         "request_snapshot_json",
         "response_json",
+        "reservation_token",
+        "reservation_expires_at",
         "created_at",
         "updated_at",
     } <= idempotency_columns
@@ -216,7 +218,7 @@ def test_migration_46_idempotency_ledger_is_upgrade_safe(monkeypatch, tmp_path):
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", before_46)
     assert migrate(database) == list(range(1, 46))
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", all_migrations)
-    assert migrate(database) == [46]
+    assert migrate(database) == [46, 47]
     with database.session() as connection:
         connection.execute(
             "INSERT INTO idempotency_requests(scope_key,request_fingerprint,status,request_snapshot_json,created_at,updated_at) VALUES (?,?,?,?,?,?)",

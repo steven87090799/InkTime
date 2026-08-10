@@ -2033,6 +2033,14 @@ MIGRATIONS = (
             "CREATE INDEX idx_idempotency_requests_status_updated ON idempotency_requests(status,updated_at)",
         ),
     ),
+    Migration(
+        47,
+        "加入完整照片庫 reservation ownership lease",
+        (
+            "ALTER TABLE idempotency_requests ADD COLUMN reservation_token TEXT",
+            "ALTER TABLE idempotency_requests ADD COLUMN reservation_expires_at TEXT",
+        ),
+    ),
 )
 
 
