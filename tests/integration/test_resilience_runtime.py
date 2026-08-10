@@ -233,7 +233,7 @@ def test_api_usage_retention_policy_is_exposed_and_preserves_current_budget_evid
     )
     assert updated.status_code == 200
     assert updated.get_json()["retention_days"] == 1
-    assert updated.get_json()["dry_run"] is False
+    assert updated.get_json()["dry_run"] == 0
     costs_page = client.get("/costs")
     assert costs_page.status_code == 200
     assert "目前 API 用量保留期間（1 天）".encode() in costs_page.data
