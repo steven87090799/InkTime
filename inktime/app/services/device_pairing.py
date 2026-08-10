@@ -329,13 +329,24 @@ class DevicePairingService:
     ) -> None:
         """Write state-only audit data; no code, nonce, or credential material."""
         now = self._iso(self._now())
+        normalized_level = str(level or "info").strip().upper()
+        if normalized_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            normalized_level = "INFO"
         connection.execute(
             """
             INSERT OR IGNORE INTO activity_events(
                 source,source_id,severity,component,event,message,device_id,error_code,details_json,created_at
-            ) VALUES ('device_pairing',?,'INFO','device_pairing',?,?,?,?, '{}',?)
+            ) VALUES ('device_pairing',?,?,'device_pairing',?,?,?,?, '{}',?)
             """,
-            (source_id[:128], event[:128], message[:500], device_id, error_code[:64] if error_code else None, now),
+            (
+                source_id[:128],
+                normalized_level,
+                event[:128],
+                message[:500],
+                device_id,
+                error_code[:64] if error_code else None,
+                now,
+            ),
         )
         if device_id is not None:
             connection.execute(
@@ -343,7 +354,14 @@ class DevicePairingService:
                 INSERT INTO device_events(device_id,level,event,error_code,message,details_json,created_at)
                 VALUES (?, ?, ?, ?, ?, '{}', ?)
                 """,
-                (device_id, level[:16], event[:128], error_code[:64] if error_code else None, message[:500], now),
+                (
+                    device_id,
+                    normalized_level.lower()[:16],
+                    event[:128],
+                    error_code[:64] if error_code else None,
+                    message[:500],
+                    now,
+                ),
             )
 
     def _rate_limit(self, connection, *, ip_address: str, device_id: str, now: datetime) -> None:

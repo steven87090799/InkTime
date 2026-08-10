@@ -19,6 +19,7 @@ def test_terminal_business_outcomes_never_use_retry_policy():
     assert classify_failure(JobConfigurationError("bad")) == FailureClass.TERMINAL_NO_RETRY
     assert classify_codes(["NO_CONTENT", "CONFIG_INVALID"]) == FailureClass.TERMINAL_NO_RETRY
     assert classify_codes(["VLM-004", "VLM-006", "VLM-AMBIGUOUS"]) == FailureClass.TERMINAL_NO_RETRY
+    assert classify_failure("JOB-SHUTDOWN-AMBIGUOUS") == FailureClass.TERMINAL_NO_RETRY
 
 
 def test_transient_and_stale_outcomes_remain_distinct():

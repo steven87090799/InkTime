@@ -119,6 +119,38 @@ def test_due_scheduled_pending_job_restarts_without_duplicate(app, monkeypatch):
     assert len([job for job in repository.list() if job["dedupe_key"] == dedupe_key]) == 1
 
 
+def test_scheduler_retention_honors_policy_dry_run(app):
+    database = app.extensions["inktime_database"]
+    resilience = app.extensions["inktime_resilience_repository"]
+    month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    resilience.update_retention(
+        "api_usage",
+        {"retention_days": 1, "cleanup_batch_size": 1, "dry_run": True},
+    )
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO api_usage(provider,model,request_type,estimated_cost,started_at,status,cost_source,image_bytes) "
+            "VALUES ('provider','model','scheduler-retention',0.25,?,'failed','unknown',1)",
+            ((month_start - timedelta(days=2)).isoformat(),),
+        )
+    app.extensions["inktime_settings_repository"].update(
+        "backup.schedule_enabled", False, changed_by="test", source_ip="127.0.0.1"
+    )
+
+    SchedulerRunner(app).tick()
+
+    with database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 1
+        cleanup = connection.execute(
+            "SELECT id FROM data_cleanup_runs ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        item = connection.execute(
+            "SELECT result FROM data_cleanup_items WHERE cleanup_run_id=? AND data_type='api_usage'",
+            (cleanup["id"],),
+        ).fetchone()
+    assert item["result"] == "planned"
+
+
 def test_scheduler_observability_is_deadline_gated(app):
     class FakeObservability:
         def __init__(self):

@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from inktime.app.domain.jobs.failure_policy import (
     FailureClass,
+    JobShutdownAmbiguousError,
     classify_failure,
     failure_code,
 )
@@ -401,8 +402,9 @@ class BoundedJobWorker:
                     last_lease_renewal = time.monotonic()
 
             # Graceful stop drains in-flight work only until the SIGTERM budget.
-            # Running threads cannot be killed safely; their claimed rows are
-            # released as retryable failures and the executor is detached.
+            # A queued Future can be cancelled and retried.  A running Future
+            # cannot be killed safely; fence it as terminal/ambiguous so its
+            # late side effects cannot be followed by a duplicate retry.
             if futures:
                 remaining = (
                     None
@@ -416,12 +418,20 @@ class BoundedJobWorker:
                 if futures:
                     forced_shutdown = True
                     for future, (item_id, _started) in list(futures.items()):
-                        future.cancel()
+                        if future.done():
+                            futures.pop(future, None)
+                            consume(future, item_id)
+                            continue
+                        cancelled = future.cancel()
                         futures.pop(future, None)
                         self._record_failure(
                             job_id,
                             item_id,
-                            RuntimeError("worker shutdown drain deadline exceeded"),
+                            RuntimeError("worker shutdown drain deadline exceeded")
+                            if cancelled
+                            else JobShutdownAmbiguousError(
+                                "worker shutdown reached a running item before it completed"
+                            ),
                         )
                         self._record_processed()
             job = self.repository.get(job_id)

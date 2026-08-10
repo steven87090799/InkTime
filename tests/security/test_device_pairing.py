@@ -454,15 +454,22 @@ def test_capability_downgrade_is_pending_and_admin_visible_without_mutating_sche
             "SELECT status,config_json FROM device_pairing_requests WHERE id=?",
             (body["pairing_id"],),
         ).fetchone()
-        event = connection.execute(
-            "SELECT error_code FROM device_events WHERE device_id=? ORDER BY id DESC LIMIT 1",
+        device_event = connection.execute(
+            "SELECT level,error_code FROM device_events WHERE device_id=? ORDER BY id DESC LIMIT 1",
+            (device_id,),
+        ).fetchone()
+        activity_event = connection.execute(
+            "SELECT severity,error_code FROM activity_events WHERE device_id=? ORDER BY id DESC LIMIT 1",
             (device_id,),
         ).fetchone()
     assert device["offline_schedule_max_slots"] == 24
     assert len(json.loads(str(device["schedule_times_json"]))) == 24
     assert request["status"] == "pending"
     assert json.loads(str(request["config_json"]))["capability_conflict"]["error_code"] == "PAIR-CAPABILITY-CONFLICT"
-    assert event["error_code"] == "PAIR-CAPABILITY-CONFLICT"
+    assert device_event["level"] == "warning"
+    assert device_event["error_code"] == "PAIR-CAPABILITY-CONFLICT"
+    assert activity_event["severity"] == "WARNING"
+    assert activity_event["error_code"] == "PAIR-CAPABILITY-CONFLICT"
 
     create_admin(app)
     login(client)

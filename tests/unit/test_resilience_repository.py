@@ -61,6 +61,35 @@ def test_algorithm_version_uses_stable_configuration_hash(tmp_path: Path):
     assert first == second
 
 
+def test_cleanup_honors_policy_dry_run_fence(tmp_path: Path):
+    database = Database(tmp_path / "policy-dry-run.sqlite3")
+    migrate(database)
+    repository = ResilienceRepository(database)
+    month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    repository.update_retention(
+        "api_usage",
+        {"retention_days": 1, "cleanup_batch_size": 1, "dry_run": True},
+    )
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO api_usage(provider,model,request_type,estimated_cost,started_at,status,cost_source,image_bytes) "
+            "VALUES ('provider','model','analysis',0.25,?,'failed','unknown',1)",
+            ((month_start - timedelta(days=2)).isoformat(),),
+        )
+
+    result = repository.cleanup(dry_run=False)
+
+    with database.session() as connection:
+        remaining = connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0]
+        item = connection.execute(
+            "SELECT result FROM data_cleanup_items WHERE cleanup_run_id=? AND data_type='api_usage'",
+            (result["id"],),
+        ).fetchone()
+    assert result["summary"]["api_usage"] == 1
+    assert remaining == 1
+    assert item["result"] == "planned"
+
+
 def test_api_usage_cleanup_is_bounded_restart_safe_and_observable(tmp_path: Path):
     database = Database(tmp_path / "api-usage-retention.sqlite3")
     migrate(database)
@@ -75,7 +104,9 @@ def test_api_usage_cleanup_is_bounded_restart_safe_and_observable(tmp_path: Path
     ]
     current_month_old = (month_start + timedelta(hours=1), "completed", "unknown", 0.75)
     recent = (now - timedelta(hours=1)).isoformat()
-    repository.update_retention("api_usage", {"retention_days": 1, "cleanup_batch_size": 2})
+    repository.update_retention(
+        "api_usage", {"retention_days": 1, "cleanup_batch_size": 2, "dry_run": False}
+    )
     with database.transaction() as connection:
         connection.executemany(
             "INSERT INTO api_usage(provider,model,request_type,estimated_cost,started_at,status,cost_source,image_bytes) "
@@ -145,7 +176,9 @@ def test_cleanup_failure_after_first_policy_commit_is_observable_and_retryable(t
     migrate(database)
     repository = ResilienceRepository(database)
     month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    repository.update_retention("api_usage", {"retention_days": 1, "cleanup_batch_size": 2})
+    repository.update_retention(
+        "api_usage", {"retention_days": 1, "cleanup_batch_size": 2, "dry_run": False}
+    )
     with database.transaction() as connection:
         connection.execute(
             "INSERT INTO api_usage(provider,model,request_type,estimated_cost,started_at,status,cost_source,image_bytes) "

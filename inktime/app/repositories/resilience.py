@@ -1211,6 +1211,7 @@ class ResilienceRepository:
                     ).fetchone()
                     if policy is None:
                         continue
+                    effective_dry_run = bool(dry_run or policy["dry_run"])
                     cutoff = (
                         datetime.now(timezone.utc) - timedelta(days=int(policy["retention_days"]))
                     ).isoformat()
@@ -1267,11 +1268,11 @@ class ResilienceRepository:
                                 policy["data_type"],
                                 identifier,
                                 "delete",
-                                "planned" if dry_run else "deleted",
+                                "planned" if effective_dry_run else "deleted",
                                 now,
                             ),
                         )
-                        if not dry_run:
+                        if not effective_dry_run:
                             connection.execute(  # noqa: S608 -- mapping is fixed above
                                 f"DELETE FROM {table} WHERE {id_column}=?",  # noqa: S608 -- mapping is fixed above
                                 (identifier,),

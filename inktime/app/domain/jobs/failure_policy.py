@@ -34,6 +34,7 @@ TERMINAL_NO_RETRY_CODES = frozenset(
         "VLM-004",
         "VLM-006",
         "VLM-AMBIGUOUS",
+        "JOB-SHUTDOWN-AMBIGUOUS",
     }
 )
 
@@ -69,6 +70,13 @@ class JobFailure(RuntimeError):
         if code:
             self.code = str(code)
         super().__init__(message)
+
+
+class JobShutdownAmbiguousError(JobFailure):
+    """A running item outlived the worker shutdown fence; never retry it."""
+
+    code = "JOB-SHUTDOWN-AMBIGUOUS"
+    failure_class = FailureClass.TERMINAL_NO_RETRY
 
 
 class JobConfigurationError(ValueError):
