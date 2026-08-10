@@ -703,11 +703,11 @@ jobs:
             case "${profile}" in
               gdey_release)
                 select_partition inktime_default_4M.csv
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' --build-property 'upload.maximum_size=1376256' --build-path /tmp/build-gdey-release esp32/ink-display-7C-photo
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' --build-property 'upload.maximum_size=1441792' --build-path /tmp/build-gdey-release esp32/ink-display-7C-photo
                 ;;
               gdep_release)
                 select_partition inktime_default_4M.csv
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' --build-property 'upload.maximum_size=1376256' --build-property 'compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1' --build-path /tmp/build-gdep-release esp32/ink-display-7C-photo
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' --build-property 'upload.maximum_size=1441792' --build-property 'compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1' --build-path /tmp/build-gdep-release esp32/ink-display-7C-photo
                 ;;
               photopainter_release)
                 select_partition inktime_photopainter_3M_16MB.csv
@@ -715,11 +715,11 @@ jobs:
                 ;;
               trusted_lan_gdey)
                 select_partition inktime_default_4M.csv
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' --build-property 'upload.maximum_size=1376256' --build-property 'compiler.cpp.extra_flags=-DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-trusted-lan-gdey esp32/ink-display-7C-photo
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' --build-property 'upload.maximum_size=1441792' --build-property 'compiler.cpp.extra_flags=-DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-trusted-lan-gdey esp32/ink-display-7C-photo
                 ;;
               trusted_lan_gdep)
                 select_partition inktime_default_4M.csv
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' --build-property 'upload.maximum_size=1376256' --build-property 'compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1 -DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-trusted-lan-gdep esp32/ink-display-7C-photo
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' --build-property 'upload.maximum_size=1441792' --build-property 'compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1 -DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1' --build-path /tmp/build-trusted-lan-gdep esp32/ink-display-7C-photo
                 ;;
               trusted_lan_photopainter)
                 select_partition inktime_photopainter_3M_16MB.csv
@@ -727,7 +727,7 @@ jobs:
                 ;;
               default_debug)
                 select_partition inktime_default_4M.csv
-                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=4M,DebugLevel=debug' --build-property 'upload.maximum_size=1376256' --build-property 'compiler.cpp.extra_flags=-DINKTIME_DEBUG_LOG=1' --build-path /tmp/build-default-debug esp32/ink-display-7C-photo
+                arduino-cli compile --fqbn 'esp32:esp32:esp32s3:FlashSize=4M,DebugLevel=debug' --build-property 'upload.maximum_size=1441792' --build-property 'compiler.cpp.extra_flags=-DINKTIME_DEBUG_LOG=1' --build-path /tmp/build-default-debug esp32/ink-display-7C-photo
                 ;;
               photopainter_debug)
                 select_partition inktime_photopainter_3M_16MB.csv
