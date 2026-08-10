@@ -228,11 +228,12 @@ def test_api_usage_retention_policy_is_exposed_and_preserves_current_budget_evid
 
     updated = client.put(
         "/api/retention/policies/api_usage",
-        json={"retention_days": 1, "cleanup_batch_size": 2},
+        json={"retention_days": 1, "cleanup_batch_size": 2, "dry_run": False},
         headers={"X-CSRF-Token": csrf(client)},
     )
     assert updated.status_code == 200
     assert updated.get_json()["retention_days"] == 1
+    assert updated.get_json()["dry_run"] is False
     costs_page = client.get("/costs")
     assert costs_page.status_code == 200
     assert "目前 API 用量保留期間（1 天）".encode() in costs_page.data

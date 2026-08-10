@@ -184,24 +184,28 @@ def test_shutdown_fences_running_future_and_only_retries_queued_work(app):
     )
     app.extensions["inktime_job_service"].start(job_id)
     database = app.extensions["inktime_database"]
-    first_item_id = str(repository.list_items(job_id)[0]["id"])
     second_item_id = str(uuid4())
     with database.transaction() as connection:
         connection.execute(
             "INSERT INTO job_items(id,job_id,photo_id,available_at) VALUES (?,?,NULL,?)",
             (second_item_id, job_id, datetime.now(timezone.utc).isoformat()),
         )
+    item_ids = {str(item["id"]) for item in repository.list_items(job_id)}
 
     started = threading.Event()
     release = threading.Event()
     finished = threading.Event()
     calls: dict[str, int] = {}
     worker_holder = {}
+    running_item_id: dict[str, str] = {}
 
     def processor(item):
         item_id = str(item["id"])
         calls[item_id] = calls.get(item_id, 0) + 1
-        if item_id == first_item_id:
+        if "id" not in running_item_id:
+            # Claim re-fetches rows by ID without preserving SELECT order; the
+            # processor is the authoritative observation of the running Future.
+            running_item_id["id"] = item_id
             started.set()
             worker_holder["worker"].request_stop(deadline=time.monotonic() + 0.01)
             release.wait(timeout=2)
@@ -225,19 +229,21 @@ def test_shutdown_fences_running_future_and_only_retries_queued_work(app):
     release.set()
     assert finished.wait(timeout=1)
 
+    actual_running_item_id = running_item_id["id"]
+    queued_item_id = next(item_id for item_id in item_ids if item_id != actual_running_item_id)
     items = {str(item["id"]): item for item in repository.list_items(job_id)}
-    assert items[first_item_id]["status"] == "failed"
-    assert items[first_item_id]["error_code"] == "JOB-SHUTDOWN-AMBIGUOUS"
-    assert items[first_item_id]["attempts"] == 1
-    assert items[second_item_id]["status"] == "pending"
-    assert items[second_item_id]["error_code"] == "JOB-003"
-    assert items[second_item_id]["worker_id"] is None
-    assert calls == {first_item_id: 1}
+    assert items[actual_running_item_id]["status"] == "failed"
+    assert items[actual_running_item_id]["error_code"] == "JOB-SHUTDOWN-AMBIGUOUS"
+    assert items[actual_running_item_id]["attempts"] == 1
+    assert items[queued_item_id]["status"] == "pending"
+    assert items[queued_item_id]["error_code"] == "JOB-003"
+    assert items[queued_item_id]["worker_id"] is None
+    assert calls == {actual_running_item_id: 1}
 
     with database.transaction() as connection:
         connection.execute(
             "UPDATE job_items SET available_at=? WHERE id=?",
-            (datetime.now(timezone.utc).isoformat(), second_item_id),
+            (datetime.now(timezone.utc).isoformat(), queued_item_id),
         )
     retry_worker = BoundedJobWorker(
         repository,
@@ -248,7 +254,7 @@ def test_shutdown_fences_running_future_and_only_retries_queued_work(app):
     )
     worker_holder["worker"] = retry_worker
     retry_worker.run_job(job_id)
-    assert calls == {first_item_id: 1, second_item_id: 1}
+    assert calls == {actual_running_item_id: 1, queued_item_id: 1}
 
 
 def test_provider_call_process_boundary_has_hard_cap_and_shutdown_cleanup():
