@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
+import hashlib
 from zoneinfo import ZoneInfo
 
 from PIL import Image
 import pytest
 
+import inktime.app.repositories.offline_schedules as offline_schedules_module
 from tests.conftest import csrf, create_admin, login
 
 
@@ -190,29 +192,73 @@ def test_prepare_day_recovers_terminal_shortage_and_clears_outcome(app):
     assert schedule["terminal_outcome_code"] is None
 
 
-def test_midday_prepare_keeps_expired_slot_downloadable_for_bounded_recovery(app):
+def test_fixed_daily_midday_prepare_authorizes_every_payload_until_target_day_end(
+    client, app, monkeypatch
+):
+    target_day = datetime.now(ZoneInfo("Asia/Taipei")).date()
+    target_date = target_day.isoformat()
     device_id, _token = app.extensions["inktime_device_repository"].create(
-        "午間恢復離線排程",
+        "固定每日同步離線排程",
         delivery_mode="inktime_offline_schedule",
         offline_prefetch_allowed=True,
         schedule_times=["08:00", "12:00", "16:00", "20:00"],
+        sync_strategy="fixed_daily",
+        sync_time="20:00",
     )
     releases = [_release(app, f"offline-midday-recovery-{index}") for index in range(4)]
     repository = app.extensions["inktime_offline_schedule_repository"]
-    repository.prepare_day(
-        device_id=device_id,
-        target_date="2026-08-03",
-        release_ids=[release["release_id"] for release in releases],
+
+    target_zone = ZoneInfo("Asia/Taipei")
+    prepare_at = datetime.combine(target_day, time(16, 30), tzinfo=target_zone)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return prepare_at.replace(tzinfo=None)
+            return prepare_at.astimezone(tz)
+
+    with monkeypatch.context() as frozen_clock:
+        frozen_clock.setattr(offline_schedules_module, "datetime", FrozenDateTime)
+        repository.prepare_day(
+            device_id=device_id,
+            target_date=target_date,
+            release_ids=[release["release_id"] for release in releases],
+        )
+
+    response = client.get(
+        "/api/device/v1/offline-schedule",
+        headers={"Authorization": f"Bearer {_token}"},
     )
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["target_local_date"] == target_date
+    assert body["sync_strategy"] == "fixed_daily"
+    assert body["sync_time"] == "20:00"
+    target_end_utc = datetime.fromtimestamp(body["target_end_epoch"], timezone.utc)
+
     with app.extensions["inktime_database"].session() as connection:
         items = connection.execute(
-            "SELECT expires_at,ack_deadline FROM device_content_queue_items WHERE device_id=? ORDER BY position",
+            "SELECT expires_at,ack_deadline,terminal_ack_retention FROM device_content_queue_items WHERE device_id=? ORDER BY position",
             (device_id,),
         ).fetchall()
-    now = datetime.now(timezone.utc)
     assert len(items) == 4
-    assert all(datetime.fromisoformat(item["ack_deadline"]) < now for item in items)
-    assert all(datetime.fromisoformat(item["expires_at"]) > now + timedelta(minutes=50) for item in items)
+    for item in items:
+        deadline = datetime.fromisoformat(item["ack_deadline"])
+        expires_at = datetime.fromisoformat(item["expires_at"])
+        retention = datetime.fromisoformat(item["terminal_ack_retention"])
+        assert expires_at == max(deadline, target_end_utc)
+        assert retention == deadline + timedelta(days=7)
+        assert expires_at >= target_end_utc
+
+    for slot in body["slots"]:
+        payload = client.get(
+            slot["download_url"],
+            headers={"Authorization": f"Bearer {_token}"},
+        )
+        assert payload.status_code == 200
+        assert len(payload.data) == slot["size"]
+        assert hashlib.sha256(payload.data).hexdigest() == slot["sha256"]
 
 
 @pytest.mark.parametrize(

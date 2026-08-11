@@ -1312,8 +1312,20 @@ class ResilienceRepository:
                 (now,),
             ).rowcount
             queue = connection.execute(
-                "UPDATE device_content_queue_items SET status='EXPIRED',updated_at=? WHERE status NOT IN ('DISPLAYED','EXPIRED','CANCELLED') AND expires_at IS NOT NULL AND expires_at<=?",
-                (now, now),
+                """
+                UPDATE device_content_queue_items
+                SET status='EXPIRED',updated_at=?
+                WHERE status NOT IN ('DISPLAYED','EXPIRED','CANCELLED')
+                  AND expires_at IS NOT NULL
+                  AND expires_at<=?
+                  AND NOT (
+                      status='ACKNOWLEDGED'
+                      AND delivery_mode='offline_schedule'
+                      AND terminal_ack_retention IS NOT NULL
+                      AND terminal_ack_retention>?
+                  )
+                """,
+                (now, now, now),
             ).rowcount
             queue_gc = connection.execute(
                 """

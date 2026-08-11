@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from dataclasses import dataclass
 from contextlib import nullcontext
 import hashlib
@@ -37,9 +37,6 @@ RECOVERABLE_SHORTAGE_CODES = frozenset({"NO_CONTENT", "NO_ELIGIBLE_CANDIDATES"})
 SHORTAGE_RETRY_COOLDOWN_SECONDS = 3600
 TRANSIENT_RETRY_BASE_SECONDS = 1800
 TRANSIENT_RETRY_CAP_SECONDS = 14_400
-DOWNLOAD_RECOVERY_MARGIN_MINUTES = 60
-
-
 @dataclass(frozen=True)
 class RetryAfterDetails:
     retry_after_epoch: int
@@ -1104,6 +1101,11 @@ class OfflineScheduleRepository:
                     minimum_gap_minutes=minimum_gap_minutes,
                     maximum_slots=maximum_slots,
                 )
+                target_end_utc = datetime.combine(
+                    day + timedelta(days=1),
+                    time.min,
+                    tzinfo=ZoneInfo(str(device["timezone"])),
+                ).astimezone(timezone.utc)
                 for slot_index, slot in enumerate(configured_times):
                     release_id = normalized_release_ids[slot_index]
                     release = connection.execute(
@@ -1129,20 +1131,19 @@ class OfflineScheduleRepository:
                         raise ValueError("QUEUE-005 Release 已存在於裝置 Queue 歷史，不可重複使用")
                     show_at = self._show_at(day, slot, str(device["timezone"]))
                     deadline = deadlines[slot_index]
-                    # A midday preparation must still be downloadable for
-                    # every slot that was already scheduled today. Preserve
-                    # the original deadline as the ACK history boundary, but
-                    # give an already-expired item one bounded recovery
-                    # window instead of silently publishing an unusable slot.
-                    try:
-                        deadline_dt = datetime.fromisoformat(deadline)
-                        now_dt = datetime.fromisoformat(now)
-                        expires_at = max(
-                            deadline_dt,
-                            now_dt + timedelta(minutes=DOWNLOAD_RECOVERY_MARGIN_MINUTES),
-                        ).isoformat()
-                    except (TypeError, ValueError):
-                        expires_at = deadline
+                    # Download authorization must cover every payload in a
+                    # current authoritative day schedule through the device's
+                    # next legal sync. ACK/display deadlines remain the
+                    # per-slot contract below; this separate queue expiry is
+                    # bounded by the canonical local target-day end shared by
+                    # the offline schedule API.
+                    deadline_dt = datetime.fromisoformat(deadline)
+                    if deadline_dt.tzinfo is None:
+                        raise ValueError("QUEUE-005 離線排程 deadline 必須包含 timezone")
+                    expires_at = max(
+                        deadline_dt.astimezone(timezone.utc),
+                        target_end_utc,
+                    ).isoformat()
                     queue_item_id = str(uuid4())
                     position = next_position + slot_index + 1
                     connection.execute(

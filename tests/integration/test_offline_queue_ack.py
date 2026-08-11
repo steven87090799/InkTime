@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import json
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from PIL import Image
 import pytest
@@ -348,6 +349,79 @@ def test_delayed_terminal_ack_is_only_allowed_for_prefetched_offline_item(client
         release_id=ordinary_release["release_id"],
     )
     assert ordinary_delayed.status_code == 409
+
+
+def test_acknowledged_offline_item_survives_expiry_maintenance_until_retention(client, app):
+    target_date = datetime.now(ZoneInfo("Asia/Taipei")).date().isoformat()
+    device_id, token = app.extensions["inktime_device_repository"].create(
+        "維持延遲終端 ACK 的離線相框",
+        delivery_mode="inktime_offline_schedule",
+        offline_prefetch_allowed=True,
+        schedule_times=["00:00"],
+    )
+    release = _release(app, "offline-ack-maintenance")
+    schedule_repository = app.extensions["inktime_offline_schedule_repository"]
+    schedule_repository.prepare_day(
+        device_id=device_id,
+        target_date=target_date,
+        release_ids=[release["release_id"]],
+    )
+    future_retention = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    with app.extensions["inktime_database"].session() as connection:
+        item = dict(
+            connection.execute(
+                "SELECT * FROM device_content_queue_items WHERE device_id=?",
+                (device_id,),
+            ).fetchone()
+        )
+        version = int(
+            connection.execute(
+                "SELECT queue_version FROM device_content_queues WHERE device_id=?",
+                (device_id,),
+            ).fetchone()[0]
+        )
+        connection.execute(
+            "UPDATE device_content_queue_items SET ack_deadline=?,terminal_ack_retention=? WHERE id=?",
+            (
+                (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+                future_retention,
+                item["id"],
+            ),
+        )
+
+    for index, event in enumerate(("MANIFEST_RECEIVED", "DOWNLOAD_COMPLETED", "HASH_VERIFIED")):
+        assert _ack(client, token, item["id"], version, event, f"maintenance-{index}").status_code == 200
+
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE device_content_queue_items SET expires_at=? WHERE id=?",
+            ((datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(), item["id"]),
+        )
+        before = connection.execute(
+            "SELECT status FROM device_content_queue_items WHERE id=?", (item["id"],)
+        ).fetchone()
+    assert before["status"] == "ACKNOWLEDGED"
+
+    maintenance = app.extensions["inktime_resilience_repository"].expire_operational_data()
+    assert maintenance["expired_queue_items"] == 0
+    with app.extensions["inktime_database"].session() as connection:
+        after = connection.execute(
+            "SELECT status FROM device_content_queue_items WHERE id=?", (item["id"],)
+        ).fetchone()
+    assert after["status"] == "ACKNOWLEDGED"
+
+    delayed = _ack(
+        client,
+        token,
+        item["id"],
+        version,
+        "DISPLAY_COMPLETED",
+        "maintenance-delayed-terminal",
+        ack_mode="delayed_terminal",
+        release_id=release["release_id"],
+        event_epoch=int(datetime.now(timezone.utc).timestamp()),
+    )
+    assert delayed.status_code == 200
 
 
 def test_cancelled_offline_item_requires_download_evidence_for_delayed_terminal(client, app):
