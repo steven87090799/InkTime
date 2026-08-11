@@ -1,6 +1,6 @@
-# InkTime · E-Ink Memory Frame (Legacy Overview)
+# InkTime · Photo Analysis and E-Ink Memory Platform
 
-> This English document describes the original project flow and is retained for compatibility. For the current Web/Worker/Scheduler platform, local-only selection, device queue, resilience features, and the complete document map, start with the [Chinese README](README.md), the [documentation portal](USER_MANUAL.html), and [docs/README.md](docs/README.md).
+> This file now starts with the current platform contract. The original single-process instructions and hardware notes remain below as a clearly marked legacy migration reference, so existing information is not removed. For the most detailed Traditional Chinese documentation, use the [Chinese README](README.md), [current implementation status](docs/reference/CURRENT_STATE_ZH_TW.md), [documentation portal](USER_MANUAL.html), and [docs/README.md](docs/README.md).
 
 [中文](README.md) | **English**
 
@@ -18,8 +18,66 @@ It does not show random photos, and it is not a simple chronological slideshow. 
 - Picks the most meaningful photo from "on this day" every day
 - Pushes it to an ESP32-powered e-ink display
 
+## Current implementation status
+
+The current source is the `2.0.0.dev0` Python platform with Database Migration 50, Analysis Schema v3, and ESP32 firmware 2.8.0 with Config Store v5. It provides:
+
+- Three services built from one image: `inktime-web`, `inktime-worker`, and `inktime-scheduler`.
+- A read-only `/photos` library and a persistent `/data` volume for SQLite WAL, thumbnails, fonts, backups, Batch files, and versioned releases.
+- `local_only` as the safe default. Current analysis jobs are `local` or one complete `single` vision request; old two-stage strategy names are normalized for compatibility and do not upload a second image.
+- Eight layouts, three display profiles, ten dithering algorithms, frozen render plans, staged releases, compensation, and startup reconciliation.
+- Administrator/viewer RBAC, CSRF, encrypted provider secrets, possession-verified device pairing, Device Secret versions, Legacy Bearer compatibility, and a separate Stock PhotoPainter `/dataUP` path.
+- Safe 12-slot behavior for unconfirmed devices and 24 slots only after firmware pairing/repair explicitly confirms that capability.
+- A crash-consistent ESP32 ACK journal. A queue item advances only after the server accepts the authoritative item/version/release/event identity; timeouts, stale replies, or mismatches remain pending.
+- Scoped idempotency keys and request fingerprints for expensive writes. Full-library operations use a durable reservation lease before enumeration, persist one owner and frozen snapshot, and can replay or resume without duplicating work.
+- Unknown synchronous provider cost can remain `NULL` instead of pretending to be zero. The untouched default API-usage policy automatically deletes bounded batches older than 400 days and older than the current month; cleanup audit history is itself bounded.
+- Source-owned impact CI, separate source-head provenance and PR merge-ref validation, and full hosted gates for ready/full/main runs.
+
+Physical PhotoPainter flashing, panel color/orientation/BUSY behavior, GPIO5, deep-sleep power, a real NAS, and paid providers are separate acceptance work; CI and simulators do not prove them.
+
+## Current architecture
+
+```text
+Browser / ESP32
+       |
+       v
+inktime-web (Gunicorn + Flask, auth, API, device transport)
+       |
+       +---- service/domain/repository/provider layers ---- SQLite WAL
+       |                                                     /data
+       +---- inktime-worker (scan, local/single analysis, render)
+       +---- inktime-scheduler (leases, schedules, retention, backup)
+
+/photos is read-only; rendered releases and caches live under /data.
+```
+
+## Current quick start
+
+Python 3.10+ is supported; the production image uses Python 3.12. Docker Compose is the recommended deployment:
+
+```bash
+# Trusted private-LAN production HTTP:
+cp .env.lan.production.example .env
+# Or use .env.production.example behind a real HTTPS reverse proxy.
+
+# Replace every placeholder with the real public/LAN origin,
+# separate absolute data/photos paths, and an immutable Git SHA.
+python scripts/production_preflight.py --mode lan --env-file .env
+scripts/build_release_image.sh
+docker compose up -d
+curl -fsS http://127.0.0.1:8765/health/ready
+```
+
+Create the first administrator at `/setup`. You may scan, select, and render locally without configuring a provider. Configure and test a provider only when you intentionally enable manual or automatic AI. New custom devices show a short-lived pairing code on the physical screen; approve it in `/devices`. Legacy and Stock devices retain their separate compatibility modes.
+
 ---
-## Project Structure
+
+# Legacy single-process and hardware reference
+
+The sections below preserve the original project layout, `config.py`, cron, URL-key, and early hardware guidance for migration and comparison. They are not the current production deployment contract. Do not re-enable path keys, public HTTP, or the legacy Web UI based only on these examples; use the current guides linked above.
+
+---
+## Legacy Project Structure
 
 InkTime has three main parts:
 
@@ -33,7 +91,7 @@ InkTime has three main parts:
    The ESP32 periodically downloads the `.bin` file from the server -> refreshes the e-ink screen -> enters deep sleep until the next wake-up
 
 ---
-## Setup
+## Legacy Setup
 
 ### 1. Python
 
@@ -47,16 +105,16 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Install exiftool (optional)
+### 2. Install exiftool (legacy optional path)
 
-InkTime can run without exiftool, but it may not be able to extract complete GPS information from EXIF metadata.
+The current scanner uses Pillow for EXIF/GPS and does not require ExifTool. The following package was optional for the original script only.
 
 exiftool is recommended for GPS metadata:
 
 macOS (Homebrew): ```brew install exiftool```  
 Linux: ```sudo apt-get install -y libimage-exiftool-perl```
 
-### 3. Configure `config.py`
+### 3. Configure `config.py` (legacy only)
 
 ```bash
 cp config-example.py config.py
@@ -70,12 +128,12 @@ Required fields:
 
 InkTime uses an OpenAI-compatible API endpoint. LM Studio and other compatible services are supported.
 
-To reduce the risk of exposing private photos, change ```DOWNLOAD_KEY``` and use it as a random prefix in the ESP32 download path.  
+The current platform does not import `DOWNLOAD_KEY` into Device Secret or Legacy Token authentication. The following path-key design is preserved only to explain the old firmware. To reduce the risk of exposing private photos, change ```DOWNLOAD_KEY``` and use it as a random prefix in the ESP32 download path.
 Also update the ```DAILY_PHOTO_PATH_PREFIX``` field in ```esp32/ink-display-7C-photo/ink-display-7C-photo.ino```.
 
-This is not encryption. It is only a simple path-based access token. For public deployment, use HTTPS, reverse-proxy authentication, or restrict access to your local network.
+This is not encryption or current authentication. Do not expose it publicly; migrate devices to the current Device Secret or explicit Legacy Bearer flow.
 
-## Analyze Photos
+## Analyze Photos (legacy CLI)
 
 Before analyzing photos, make sure:
 
@@ -115,7 +173,7 @@ python3 analyze_photos.py --cache
 - ```--debug```: Print request and response bodies when a request fails, useful for debugging API compatibility or response format issues.
 - ```--cache```: Reuse the previously cached photo file list. This avoids rescanning the photo library every time. Use it only during the initial full-library analysis; do not use it in production, otherwise newly added photos will not be discovered and deleted photos will not be removed from the database.
 
-## Render the Daily "On This Day" Photo for ESP32
+## Render the Daily "On This Day" Photo for ESP32 (legacy CLI)
 
 Run:
 
@@ -123,7 +181,7 @@ Run:
 python3 render_daily_photo.py
 ```
 
-## Start the ESP32 Download Server and Web UI
+## Start the ESP32 Download Server and Web UI (legacy mode)
 
 Run:
 
@@ -143,7 +201,7 @@ http://127.0.0.1:8765/review
 
 After the project is working, it is recommended to disable the Web UI in ```config.py``` and keep only the ESP32 download endpoint enabled.
 
-## Server Deployment and Scheduled Task Example (optional)
+## Legacy Server Deployment and Scheduled Task Example
 
 Create a systemd service:
 

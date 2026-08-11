@@ -1,5 +1,7 @@
 # InkTime 分支整併與驗證報告
 
+> 歷史快照：保留當時分支整併證據，不代表目前行為；現行基準見[目前實作狀態](../../reference/CURRENT_STATE_ZH_TW.md)。
+
 ## 基準與範圍
 
 - 本次 `main` worktree：`/Users/steven/Desktop/inktime/InkTime-caption-controls`
@@ -98,7 +100,7 @@
 - 真實 NAS：未連接 production NAS 或真實 volume；Compose persistence 是軟體環境證據，不是 NAS 實機證據。
 - 真實 ESP32 / PhotoPainter：未接板、PMIC、面板或電流量測設備；ESP32 compile 成功不代表 BUSY、方向、六色、殘影、GPIO5 或 deep sleep 通過。
 
-詳細手順與 gate 見 [`post-merge-hardware-validation.md`](post-merge-hardware-validation.md)。
+詳細手順與 gate 見 [`post-merge-hardware-validation.md`](../../post-merge-hardware-validation.md)。
 
 ## Dependency alert
 

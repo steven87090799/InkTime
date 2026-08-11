@@ -65,6 +65,37 @@ Migration 33 為 `api_usage` 增加可為 null 的 `provider_id` 外鍵，只有
 
 Migration 33 不會把 `cost_source='unknown'` 的 historical row 推論成 `estimated_cost=0`；Migration 32 之後新增的零值 token、prompt／schema／request／image bytes 欄位不能證明 request 免費。無 billable evidence 的 unknown 可由 budget policy 避免計入 billable reserve，但 provenance 仍保持 `unknown`；有 evidence 的 unknown 等待完整價格後 reconciliation。它不會把缺乏 Provider provenance 的歷史 `actual_cost` 改標為 `provider_reported`。升級前仍必須建立 SQLite backup，並由 hosted CI 驗證 32→33、fresh、idempotency、foreign-key／integrity check 與 rollback；本機不執行測試或建置。
 
-## PR #52 跨日修復的資料相容性
+## Migration 34、35：自動配對與 possession-verified credential
 
-本次跨日 staged-next 修復不新增 SQLite schema，也不修改既有 Migration；`MIGRATION=none`。明日 schedule 以 PhotoPainter SD 上 bounded 的 `staged_next.json`、`.tmp` 與 `.bak` 保存，active schedule 仍由既有 snapshot／Queue schema 管理。部署時不需重跑資料遷移；需確認韌體版本同時支援 `target=current|next`、future rotation、午夜 promote 與 non-terminal prefetch ACK。
+Migration 34 加入 automatic／legacy／stock 認證模式、配對狀態、版本化 Device Secret、pending request 與 credential lifecycle；Migration 35 收斂為實體六位數 possession proof、可恢復 claim／confirm、repair permission 與 confirm 後才建立正式裝置列。舊 credential-less automatic row 會停用；不會把 Legacy／Stock 強制轉成 automatic。
+
+## Migration 36～39：Enhanced 離線排程、ACK 與 12／24 Slot capability
+
+- Migration 36 加入 offline schedule version ACK、最小 Slot 間隔與 `first_display_lead`／`fixed_daily` 同步策略。
+- Migration 37 保存離線排程 terminal outcome；Migration 38 保存裝置宣告的 Slot 上限。
+- Migration 39 將能力收斂為安全的 `unknown_12`、明確 `confirmed_24` 或隔離的 `legacy_ambiguous`，並建立下一次預取截止與 SQLite triggers。舊資料超過 12 Slots 但沒有可信 capability 時不會被猜成 24，必須重新配對或 Repair。
+
+## Migration 40～43：穩定分頁、單調狀態與 request fingerprint
+
+- Migration 40 為照片列表建立穩定排序索引；Migration 41 加入裝置狀態單調 sequence，避免晚到狀態倒退。
+- Migration 42 為昂貴 POST 的 Job 保存 `request_fingerprint`，相同 Idempotency Key 的不同 payload 必須衝突。
+- Migration 43 修復診斷快取歷史來源。它沒有 SQL statement，而是在同一 Migration transaction 執行有界資料修復；不可因 statements 為空就刪除或重新編號。
+
+## Migration 44～46：可見警告、用量保留與全庫 Idempotency ledger
+
+- Migration 44 為既有 `legacy_ambiguous` 裝置補上可見 `DEVICE-008` 隔離事件，且以 `NOT EXISTS` 保持重入安全。
+- Migration 45 為 `api_usage` 加入預設 400 天、batch 200、先 dry-run 的保留政策。
+- Migration 46 建立 `idempotency_requests`，保存 scope、request fingerprint、frozen request snapshot、進度與 replay response，讓完整照片庫工作可 conflict／resume／replay 而不重複副作用。
+
+## Migration 47～50：Reservation ownership、unknown cost 與有界 retention
+
+- Migration 47 為 `idempotency_requests` 加入 `reservation_token` 與 `reservation_expires_at`。完整照片庫操作必須先取得 60 秒 lease 並以 10 秒 heartbeat 續租；只有 owner 能列舉並 freeze snapshot，並行 caller 只可 replay／稍後重試，失去 lease 必須停止。
+- Migration 48 以交易內 table rebuild 允許同步 `api_usage.estimated_cost` 保存 `NULL`，保留既有 rows、sequence、indexes、triggers 與 FK；unknown 不再被 schema 強迫冒充 0。
+- Migration 49 只把 Migration 45 建立、仍完全未修改的 `api_usage` 預設政策由 dry-run 改為自動執行；保留 400 天、每批 200，且不刪除本月資料。管理員改過的政策或仍標 dry-run 的政策不會被強制切換。
+- Migration 50 為 `data_cleanup_runs`／`data_cleanup_items` 建立 GC 索引。Scheduler 對完成／失敗的 cleanup audit 保留 90 天、每輪最多刪 10 個 run，且 GC 本身不再新增 audit，避免稽核紀錄無界成長。
+
+目前最高 Schema 是 50。升級工具會鎖定 Migration、只在既有資料庫確有待套用版本時建立 pre-migration backup，並在同一交易內寫 Schema 與完成 history。若啟動看見 running history，只有「Schema 列、名稱與完整性都證明已提交」時才可原子補完 history；其餘狀態以 `MIGRATION-002` 停止並要求離線還原。未知較新 Schema 以 `MIGRATION-003` 停止，history 收尾失敗以 `MIGRATION-004` 停止。
+
+## 歷史 PR #52 跨日修復的資料相容性
+
+該次 staged-next 修復本身沒有新增 SQLite schema；這是歷史提交範圍，不代表目前最高 Schema。明日 schedule 仍以 PhotoPainter SD 上 bounded 的 `staged_next.json`、`.tmp` 與 `.bak` 保存，active schedule 由 snapshot／Queue schema 管理；目前部署仍必須先套用至 Migration 50，並確認韌體 2.8.0 同時支援 `target=current|next`、future rotation、午夜 promote 與 non-terminal prefetch ACK。

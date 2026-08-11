@@ -10,7 +10,7 @@ Manifest 與 BIN 必須符合 credential 所屬裝置 Profile。BIN endpoint 重
 
 Device Secret／Legacy Bearer Token 是身分驗證，不是加密。HTTP 會讓 credential 以明文經過網路，只允許在隔離 IoT VLAN 使用，並應啟用 client isolation、防火牆限制裝置只能連 InkTime Server，禁止跨網路路由。
 
-目前正式韌體沒有完整 Web CA provisioning；因此未配置可信 CA 的 HTTPS 預設拒絕，且沒有 `WiFiClientSecure::setInsecure()`。`INKTIME_ALLOW_UNVERIFIED_HTTPS` 只供開發編譯、預設關閉並輸出警告，不能作正式部署。加入 `WiFiClientSecure` 可信 CA／憑證輪替前，跨網路部署使用 VPN 或 TLS 終端內的受控 IoT 網段。
+目前 2.8.0 韌體可由 compile-time CA 或受保護 AP portal provisioning trust anchor；Config Store 以 A/B generation、CRC、active pointer 與 full-payload read-back 保存 CA。未配置可信 CA 的 HTTPS 會在連線前拒絕，hostname／chain 不符、redirect 或過期憑證均 fail closed，且沒有 `WiFiClientSecure::setInsecure()` fallback。HTTP 只有明確編譯 `INKTIME_ALLOW_INSECURE_DEVICE_HTTP=1` 且目標被分類為私有 LAN 時才允許；跨網路仍應使用可驗證 HTTPS、VPN 或隔離 IoT VLAN。
 
 ## 裝置測試 ACK
 

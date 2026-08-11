@@ -1,6 +1,6 @@
 # Token 與成本指南
 
-成本節省順序：掃描時排除影片／動畫 → SHA-256 相同內容繼承 → pHash 近似群組 → 本機截圖／明顯品質缺陷預篩選 → E6 六色適合度模擬 → 512px 第一階段 → 規則門檻 → 1600px 第二階段。主要分析一次輸出所有欄位，不再另傳圖片產生短文案。
+成本節省順序：預設 `local_only` → 掃描時排除影片／動畫 → SHA-256 相同內容繼承 → pHash 近似群組 → 本機截圖／明顯品質缺陷預篩選 → E6 六色適合度模擬 → Analysis／Vision Fingerprint 與 AI Cache → 需要 AI 時才執行單次完整 `single`。主要分析以一次圖片請求輸出所有欄位，不再做 512px 第一階段→1600px 第二階段，也不另傳圖片產生短文案。
 
 本機預篩選預設採 `conservative`：截圖達門檻即可排除，一般照片需同時符合至少兩項模糊、低對比、極端曝光或低解析度訊號。排除結果以 `prefilter / local-prefilter` 保存，`api_usage` 不會新增紀錄，因此是 0 Token、0 API 成本；原檔不會刪除。若誤判，可先標記最愛再重新建立分析工作，或在「設定」降低敏感度／停用對應規則。
 
@@ -23,6 +23,8 @@ E6 預篩選同樣完全在本機執行：以正式六色色盤量測量化後�
 Model Benchmark 另以 `attempted_photos` 作為平均成本分母；`known_cost_total` 只累計已知 usage。任何 attempted call 的 cost unknown 都使 `cost_complete=false`，平均與每 1000 張成本回報 `null`，不以零填補未確認帳務。
 
 Migration 33 不會依照完全為零的 token、prompt／schema／request／image bytes 與成本欄位，把 historical `unknown` row 改標為 `estimated=0`；這些欄位是在舊 request 後新增的，零值不等於免費。無 billable evidence 的 row 可由 budget policy 不計 billable reserve，但 provenance 仍維持 `unknown`；任何 evidence 仍等待 reconciliation，不可用零成本掩蓋。
+
+Migration 45 對 `api_usage` 加入 400 天、batch size 200 的保留策略；Migration 49 只把未被管理員修改的原始預設切成自動清理，並保護本月資料，明確 dry-run 的政策仍不刪除。Migration 48 允許同步 unknown usage 把 `estimated_cost` 保存為 `NULL`，不再冒充 0。Migration 46／47 的完整照片庫 Idempotency ledger 保存 request snapshot、fingerprint、進度、回應與 owner lease；網路 timeout 後使用同一 Key replay／resume，不要用新 Key 重建整庫工作。
 
 ## 請求大小、快取與 Token 上限
 

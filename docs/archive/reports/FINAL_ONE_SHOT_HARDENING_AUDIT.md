@@ -1,5 +1,7 @@
 # InkTime PR #53 Final One-Shot Hardening Audit
 
+> 歷史快照：保留 PR #53 當時的交付證據，不代表目前行為；現行基準見[目前實作狀態](../../reference/CURRENT_STATE_ZH_TW.md)。
+
 ## 基線與範圍
 
 | 項目 | 值 |

@@ -5,9 +5,9 @@
 ## 0. 目前韌體與 Config Store 版本
 
 - 目前自製 InkTime 韌體版本：`2.8.0`。
-- Config Store 目前寫入 schema：`4`。
-- Config Store 相容讀取舊 schema：`1`、`2`、`3`。
-- Schema 4 新增同步策略欄位：`sync_strategy` 與 `sync_time`。`first_display_lead` 沿用既有 `prefetch_lead_minutes`，`sync_time` 必須為空；`fixed_daily` 則必須提供合法的 `HH:MM`。
+- Config Store 目前寫入 schema：`5`。
+- Config Store 相容讀取 schema：`1`～`5`；schema 1～4 的持久化排程固定按 legacy 12 Slots 解讀。
+- Schema 4 新增同步策略欄位：`sync_strategy` 與 `sync_time`。`first_display_lead` 沿用既有 `prefetch_lead_minutes`，`sync_time` 必須為空；`fixed_daily` 則必須提供合法的 `HH:MM`。Schema 5 把持久化 `schedule_slots` 擴到 24，與韌體宣告的 24-slot capability 一致。
 
 ## 1. 三種裝置認證模式
 
@@ -46,12 +46,15 @@
   "panel_profile": "safe_4c",
   "capabilities": {
     "automatic_pairing": true,
-    "ab_credential_store": true
+    "ab_credential_store": true,
+    "offline_schedule_max_slots": 24
   }
 }
 ```
 
 成功回 `201`，只在這個 ESP32 request response 包含 `pairing_id`、`device_id`、`pairing_code`、`expires_in_seconds=300` 與 `poll_after_seconds=3`。不包含 Device Secret；重試同一 request 只回相同 enrollment metadata，不再回配對碼。未知欄位、非 object JSON、非 JSON Content-Type、過大 Body、非法 ID／型別都拒絕。
+
+`offline_schedule_max_slots=24` 必須由目前韌體在 pairing／repair capability 中明確宣告；缺少或其他值安全解析為 12。既有資料若曾配置超過 12 Slots 卻沒有可信 capability，會標成 `legacy_ambiguous` 並隔離，不能由管理 UI 或舊資料推論為 24。
 
 `POST /api/device/v1/pairing/claim`
 
@@ -108,8 +111,8 @@ Automatic credential 缺少版本、版本不符、裝置未處於 `paired`、�
 
 - `device_secret`、`device_id`、`auth_state`、`credential_version`；
 - `pairing_id`、`pairing_nonce`、`pairing_expires_at_epoch`、`pairing_retry_at_epoch`、`pairing_retry_attempt`；
-- Config Store 目前寫入 payload schema `4`；deserialize 相容讀取舊 schema `1`、`2`、`3`；
-- schema 4 的 `sync_strategy` 支援 `first_display_lead` 與 `fixed_daily`；前者使用既有 `prefetch_lead_minutes` 且 `sync_time` 為空，後者要求合法 `HH:MM` 的 `sync_time`；
+- Config Store 目前寫入 payload schema `5`；deserialize 相容讀取 schema `1`～`5`，其中 v1～v4 固定讀取 12 個 legacy slots，v5 才保存最多 24 個 slots；
+- schema 4 起的 `sync_strategy` 支援 `first_display_lead` 與 `fixed_daily`；前者使用既有 `prefetch_lead_minutes` 且 `sync_time` 為空，後者要求合法 `HH:MM` 的 `sync_time`；
 - Config Store 仍執行 slot CRC、generation、pointer recovery、prepare／commit read-back；
 - 不新增散落的明文 `Preferences` credential key；Factory Reset 會清除新的正式 A/B payload 與既有 legacy 設定。
 

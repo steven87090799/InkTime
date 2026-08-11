@@ -30,17 +30,22 @@
 | `BUDGET-002` | 每日或每月預算超限 | 調整預算或等候下一週期 |
 | `JOB-001` | 工作狀態轉換不合法 | 重新整理工作狀態後再操作 |
 | `JOB-002` | Worker 租約逾時 | 系統會安全地回收項目並重試 |
+| `IDEMPOTENCY-CONFLICT`／HTTP 409 | 同一 scoped Idempotency Key 搭配不同 request fingerprint | 不要換 Key 重送；先取回原工作／回應，確認 payload 後才建立新操作 |
+| `IDEMPOTENCY_IN_PROGRESS`／HTTP 409 | 相同完整照片庫請求正由 reservation owner 建立 frozen snapshot | 保留並重用同一 Key，稍後重試；不要並行換 Key 重掃整庫 |
+| `VLM-008`／`IDEMPOTENCY_RESERVATION_LOST` | 完整照片庫 owner 在 freeze snapshot 前失去 lease，或冪等 ledger 狀態不合法 | 停止本次副作用，使用同一 Key 重新取得狀態；若持續發生，保留診斷資料並檢查 SQLite／Worker 延遲 |
 | `RENDER-001` | 渲染失敗 | 檢查來源照片、字型、版型與輸出權限 |
 | `RENDER-002` | 發布校驗失敗 | 不會更新 latest；舊版本仍可使用 |
 | `RENDER-003` | 顯示 Profile 不支援 | 從 Web 選擇內建四色／GDEP 六色／GDEY 七色 Profile |
 | `RENDER-004` | 抖動、色差或強度不合法 | 檢查 Web 渲染設定範圍 |
 | `DEVICE-001` | 裝置驗證失敗 | 自動模式確認 Device Secret／credential version 與啟用狀態；Legacy 模式才確認 Bearer Token，必要時重新配對 |
 | `DEVICE-002` | 發布檔案校驗失敗 | 裝置應保留舊畫面並回報失敗 |
+| `DEVICE-008` | delivery mode／offline prefetch、12／24 Slot capability 或離線快照契約矛盾 | 未確認裝置維持 12 Slots；`legacy_ambiguous` 重新配對或 Repair，不要手改 DB／放寬 guard |
 | `DEVICE-CONFIG-PROFILE` | 設定版本倒退或面板 Profile 不相容 | 核對面板、韌體 compile flag 與 Web 裝置設定 |
 | `DEVICE-QUEUE-SCHEMA`／`DEVICE-QUEUE-INTEGER`／`DEVICE-QUEUE-ITEM` | Queue Manifest schema、JSON 型別、Item 歸屬或 URL 不合法 | 核對 Server／Firmware 版本；不得放寬 strict parser |
 | `DEVICE-QUEUE-DOWNLOAD`／`DEVICE-QUEUE-HASH` | Queue body、Content-Type／Length 或 SHA-256 不符 | 保留舊畫面，檢查 Release、代理與檔案完整性 |
 | `DEVICE-QUEUE-ACK-KEY`／`DEVICE-QUEUE-ACK-RETRY` | 無法持久化 idempotency key，或 ACK timeout／5xx 等待重送 | 檢查 NVS 與網路；不得清除未獲 2xx 的 pending event |
 | `DEVICE-QUEUE-STALE` | ACK 回 409，Queue version 已失效 | 重新取得 Manifest，不顯示或完成舊 Item |
+| `DEVICE-QUEUE-ACK-IDENTITY` | ACK 的 Item／version／Release／event identity 非目前權威值 | 保留 NVS pending journal 與 Server Queue；重新取得 Manifest，不可清除或解鎖下一張 |
 | `DEVICE-QUEUE-AUTH` | Queue／ACK 回 401 或 403 | 自動模式由管理員啟用重新配對；Legacy 模式才更新相容 Token；不可匿名 fallback |
 | `DEVICE-OFFLINE` | 裝置超過門檻未連線 | 檢查電源、Wi-Fi、對應 credential、刷新週期與 N100 可達性 |
 | `NOTIFY-WEBHOOK` | Webhook 暫時或永久失敗 | 查看裝置頁嘗試次數、HTTP 狀態與端點 Log |

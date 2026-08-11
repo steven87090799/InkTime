@@ -1,8 +1,10 @@
 # InkTime｜照片分析與電子紙回憶管理平台
 
-[English legacy README](README.en.md) · [專案規格與文件入口](USER_MANUAL.html) · [完整 Markdown 文件地圖](docs/README.md) · [完整程式流程圖](#完整程式流程圖從啟動照片分析到電子紙顯示) · [快速開始](docs/getting-started/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/guides/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/operations/DOCKER_GUIDE_ZH_TW.md) · [ESP32／電子紙指南](docs/devices/ESP32_GUIDE_ZH_TW.md) · [ESP32 自動配對與憑證](docs/devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) · [Waveshare PhotoPainter](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) · [ESP32 TLS／配網信任根](docs/devices/ESP32_TLS_PROVISIONING_ZH_TW.md) · [OpenRouter Provider](docs/providers/OPENROUTER_ZH_TW.md) · [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md) · [資源與低功耗](docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/operations/LOGGING_GUIDE_ZH_TW.md)
+[English README](README.en.md) · [目前實作狀態](docs/reference/CURRENT_STATE_ZH_TW.md) · [專案規格與文件入口](USER_MANUAL.html) · [完整 Markdown 文件地圖](docs/README.md) · [完整程式流程圖](#完整程式流程圖從啟動照片分析到電子紙顯示) · [快速開始](docs/getting-started/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/guides/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/operations/DOCKER_GUIDE_ZH_TW.md) · [ESP32／電子紙指南](docs/devices/ESP32_GUIDE_ZH_TW.md) · [ESP32 自動配對與憑證](docs/devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) · [Waveshare PhotoPainter](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) · [ESP32 TLS／配網信任根](docs/devices/ESP32_TLS_PROVISIONING_ZH_TW.md) · [OpenRouter Provider](docs/providers/OPENROUTER_ZH_TW.md) · [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md) · [資源與低功耗](docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/operations/LOGGING_GUIDE_ZH_TW.md)
 
 InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複與低價值照片，再以可控預算的視覺模型產生繁體中文描述、分類、分數與電子紙短文案。所有工作、模型、成本、裝置、渲染、備份與診斷都能由登入後的 Web 管理介面操作。
+
+目前來源碼基準為 Python 套件 `2.0.0.dev0`、Database Migration 50、Analysis Schema v3、ESP32 韌體 2.8.0／Config Store v5；正式 Renderer 提供 8 種版型、3 種面板 Profile 與 10 種抖動。完整可核對清單見[目前實作狀態](docs/reference/CURRENT_STATE_ZH_TW.md)。
 
 決策追蹤、回饋閉環、Shadow Mode、離線內容 Queue、資料保留與 Canary 發布皆為可選功能，預設不會改變既有配對裝置、正式 Release 或選片。啟用與故障處理請見 [實作計畫](docs/resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md)、[決策追蹤](docs/resilience/DECISION_TRACE_ZH_TW.md)、[Shadow Mode](docs/resilience/SHADOW_MODE_ZH_TW.md)、[離線 Queue](docs/resilience/OFFLINE_QUEUE_ZH_TW.md)、[資料保留](docs/resilience/DATA_RETENTION_ZH_TW.md)、[Canary](docs/resilience/CANARY_ROLLOUT_ZH_TW.md)。
 
@@ -19,7 +21,9 @@ InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複
 - 支援同步 Vision 與 OpenAI Batch。OpenAI Files Batch lifecycle 已接入背景工作，支援 JSONL preparation、upload、submission、poll、result import 與 remote cleanup；同時支援 `upload_unknown`／`submission_unknown` 人工 Recovery、Cancel／Abandon、CAS、lease、attempt identity，以及 Job／Batch／Item transaction invariants。Fake lifecycle 與 CI 已覆蓋；真實 OpenAI API live smoke 仍為 `NOT RUN`，正式啟用前應先用 1–3 張非敏感圖片進行 gated live smoke。完整操作見 [OpenAI Batch 照片分析指南](docs/OPENAI_BATCH_ANALYSIS_ZH_TW.md)。
 - 持久化 Job、逐張狀態、有界佇列、暫停、續跑、取消、失敗重跑、重啟恢復與成本停止線。
 - administrator／viewer、Session、CSRF、登入限制與每台 ESP32 的自動配對 Device Secret；既有 Legacy Bearer Token 與 PhotoPainter Stock 相容模式分流保留。
-- 480×800 四色 2bpp 與完整六／七色 indexed4 版本化發布；OKLab／RGB 色差、五種抖動、Profile 獨立 latest、SHA-256 與回滾。
+- 480×800 四色 2bpp 與完整六／七色 indexed4 版本化發布；OKLab／RGB 色差、10 種抖動、8 種固定版型、Profile 獨立 latest、SHA-256 與回滾。
+- 昂貴 POST 使用 scoped Idempotency Key／request fingerprint；完整照片庫由 Migration 46–47 ledger 與 reservation lease 保存唯一 owner、frozen snapshot、replay、conflict 與 partial resume，避免並行或重送重複建立工作、掃描整庫或重複計費。
+- Enhanced PhotoPainter 由配對 capability 決定安全的 12／24 Slot 上限；韌體 2.8.0 使用 crash-consistent NVS ACK journal，只有伺服器接受權威 Queue 身分的 `DISPLAY_COMPLETED` 才推進 current／Last Known Good。
 - 裝置設定版本 ACK、離線／恢復站內通知、去重／冷卻與三次持久化 Webhook 重試。
 - 繁體中文管理介面、動態 Log 層級、節流進度、錯誤中心、程序／cgroup／SQLite／Worker 診斷與已遮蔽診斷包。
 - Intel N100 低資源預設：單 Web worker、圖片特徵最大 512px 樣本、有界 Future、15 秒閒置輪詢與容器 CPU／RAM／PID 上限。
@@ -80,6 +84,8 @@ flowchart TB
 | `inktime/app/domain/` | 不依賴 Flask 的圖片、Schema、日期與多色量化／抖動邏輯 |
 | `inktime/app/workers/` | 背景 Worker、Scheduler 與掃描器 |
 | `inktime/app/web/` | 繁中管理介面的模板與 CSS |
+| `scripts/ci/` | Hosted CI 的影響範圍判斷、來源 HEAD 證據與驗證輔助腳本 |
+| `.github/workflows/` | PR／main 的分層 hosted CI、文件與安全檢查 |
 | `esp32/` | 電子紙裝置韌體 |
 | `docs/` | 安裝、架構、管理、成本、安全與維運文件 |
 
@@ -127,15 +133,15 @@ flowchart TD
 |---:|---|---|---|---|
 | 1 | 管理員指定 Library Root | 建立可恢復的掃描 Job | `jobs`／`job_items` | `api/operations.py`、`repositories/jobs.py` |
 | 2 | 唯讀照片檔案 | Pillow metadata、雜湊、本地品質與安全預篩 | `photos` 本地特徵與縮圖 Cache | `workers/scanner.py`、`domain/photos/preprocessing.py` |
-| 3 | Photo ID、策略、預算與 Provider | 繼承、local、兩階段 AI、single-flight 與 Schema 驗證 | `photo_analysis`、AI Cache、用量 | `services/analysis.py` |
-| 4 | 已分析照片 | 統一檢查 eligible、active、Library、最新分析、安全路徑與檔案存在 | 合格 Photo ID；明確指定失敗為 `RENDER-009` | `repositories/render_candidates.py` |
+| 3 | Photo ID、策略、預算與 Provider | 繼承、`local`／單次完整 `single`、single-flight、Schema v3 與用量記帳 | `photo_analysis`、AI Cache、用量 | `services/analysis.py` |
+| 4 | 已掃描或已分析照片 | 依 execution mode 統一檢查 eligible、active、Library、Analysis／Local Features、安全路徑與檔案存在 | 合格 Photo ID；明確指定失敗為 `RENDER-009` | `repositories/render_candidates.py` |
 | 5 | 手動選片、歷史模式或 `display_prepare` | 年份、數量、Profile、偏好、fallback 與同日重抽 | 有序候選清單 | `services/display_prepare.py`、`services/rendering.py` |
 | 6 | 照片、文案、版型與 Profile | Server 端 composition、字型覆蓋、調色盤、抖動與打包 | 480×800 BIN、Preview、Manifest | `domain/rendering/` |
 | 7 | 一個或多個 staged Manifest | Validate、DB staged、pointer snapshot/activate、published/history、失敗補償 | Profile 專屬正式 Release ID | `services/release_coordinator.py` |
 | 8 | ESP32 自動配對／Legacy Bearer 與面板 Profile | 驗證 Device Secret 版本或 Legacy Token、裝置、Assignment、Profile 與 latest pointer | 裝置專屬 Manifest | `api/device_pairing.py`、`api/devices.py` |
 | 9 | Manifest 指定檔名 | Server 驗路徑／Manifest／size／SHA；ESP32 再驗長度／SHA | 已驗證的靜態 Payload | `api/devices.py`、`esp32/ink-display-7C-photo/` |
 | 10 | 已驗證 Payload、電源與面板狀態 | 六／七色完整刷新、BUSY timeout、失敗保留舊畫面 | 電子紙顯示結果 | `spectra6_73.cpp`、`.ino` |
-| 11 | Release ID、SHA 驗證、display_updated、錯誤碼 | 保存裝置狀態；測試 Release 依 ACK 推進狀態機 | Device event／power sample／consumed assignment | `api/devices.py`、`domain/rendering/release.py` |
+| 11 | Queue／Release／事件身分、SHA 驗證、display_updated、錯誤碼 | 先由 NVS journal 保存待送事件；Server 只接受權威 ACK 並以單調 sequence／時間保存狀態 | Device event／power sample／consumed assignment／current 與 LKG | `api/devices.py`、`repositories/resilience.py`、`domain/rendering/release.py` |
 | 12 | Release 與裝置狀態 | Web 查詢歷史、診斷、成本、裝置與通知 | 可稽核的管理介面 | `api/`、`web/templates/` |
 
 ### 1. 三程序啟動、Migration 與健康檢查
@@ -159,7 +165,7 @@ sequenceDiagram
     D->>D: busy_timeout、journal_mode=WAL
     D->>D: synchronous=NORMAL、writer lock
     F->>D: 以共用安全路徑執行缺少的 Migration
-    alt Migration 成功
+    alt Migration 成功或可證明 Schema 已提交且完整
         D-->>F: schema version 與 integrity 正常
         F->>F: 依 Web role 組裝 Repository、Service、Provider、Blueprint
         F->>R: reconcile()
@@ -169,8 +175,8 @@ sequenceDiagram
         H-->>C: checks 全部 true
         C->>B: Web healthy 後啟動 Worker
         C->>S: Web healthy 後啟動 Scheduler
-    else Migration 或必要目錄失敗
-        D-->>F: rollback／錯誤
+    else 未完成 Migration、未知較新 Schema 或必要目錄失敗
+        D-->>F: rollback／MIGRATION-002～004／錯誤
         F-->>H: 尚未 ready
         H-->>C: readiness 失敗
         C--xB: 不開始處理正式工作
@@ -223,15 +229,15 @@ flowchart TD
     INHERIT -->|是| COPY["♻️ 繼承結果；成本 0"]
     INHERIT -->|否| STRATEGY{"分析策略"}
     STRATEGY -->|local| LOCAL["🧮 本地固定公式"]
-    STRATEGY -->|low_cost / smart| LOW["512px 第一階段"]
-    STRATEGY -->|high_quality| HIGH["1600px 高品質階段"]
+    STRATEGY -->|single| SINGLE["🧠 單次完整 Vision 請求"]
+    STRATEGY -->|舊策略名稱| NORMALIZE["正規化為 single；不再做第二次圖片上傳"]
+    NORMALIZE --> SINGLE
 
-    LOW --> PREFILTER{"照片已被本地安全規則排除？"}
-    HIGH --> PREFILTER
+    SINGLE --> PREFILTER{"照片已被本地安全規則排除？"}
     PREFILTER -->|是| LOCAL_ONLY["🚫 保存本地排除結果；不送 AI"]
     PREFILTER -->|否| BUDGET{"💰 每日／每月／工作／單張預算允許？"}
     BUDGET -->|否| BUDGET_STOP["⏸️ 本地 fallback 或 budget_exceeded"]
-    BUDGET -->|是| KEY["建立 Cache Key：內容 SHA、Provider、Model、Prompt、Schema、Stage"]
+    BUDGET -->|是| KEY["建立 Cache Key：內容 SHA、Provider、Model、Prompt、Schema、Plan"]
     KEY --> HIT{"🗃️ AI Cache 命中？"}
     HIT -->|是| CACHE["✅ 回傳 Cache；不重複請求、不重複計費"]
     HIT -->|否| RESERVE{"取得 ai_cache_reservations lease？"}
@@ -248,9 +254,6 @@ flowchart TD
     VALID2 -->|是| PUT_CACHE["保存 AI Cache 與一次用量"]
     VALID -->|是| PUT_CACHE
     PUT_CACHE --> SCORE["保存四項原始分數、ranking_score、規則版本"]
-    LOW --> GATE{"smart：回憶分達門檻，或人物／最愛？"}
-    GATE -->|是| HIGH
-    GATE -->|否| SCORE
     LOCAL --> SCORE
     LOCAL_ONLY --> SCORE
     COPY --> DONE["✅ Item 完成"]
@@ -258,7 +261,7 @@ flowchart TD
     SCORE --> DONE
 ```
 
-程式入口：`services/analysis.py` → `repositories/photos.py` → `providers/router.py`、`openai_compatible.py` → `domain/analysis/schema.py`、`scoring.py`。同一 Cache Key 的並行請求只有 Reservation Owner 能呼叫 Provider。
+程式入口：`services/analysis.py` → `repositories/photos.py` → `providers/router.py`、`openai_compatible.py` → `domain/analysis/plan.py`、`schema.py`、`scoring.py`。同一 Cache Key 的並行請求只有 Reservation Owner 能呼叫 Provider；HTTP request 已開始送出後若結果不明，不會在同一次執行盲目切換路由重送。
 
 ### 4. 統一候選照片資格判斷
 
@@ -266,7 +269,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    CANDIDATE["🖼️ 候選 Photo ID"] --> S1{"status = analyzed？"}
+    CANDIDATE["🖼️ 候選 Photo ID"] --> S1{"依 execution mode<br/>有有效 Analysis 或完成 Local Features？"}
     S1 -->|否| REJECT["🚫 不可發布"]
     S1 -->|是| S2{"eligible = 1？"}
     S2 -->|否| REJECT
@@ -274,7 +277,7 @@ flowchart TD
     S3 -->|否：Missing／Archived| REJECT
     S3 -->|是| S4{"所屬 Library enabled？"}
     S4 -->|否| REJECT
-    S4 -->|是| S5{"最新一筆 photo_analysis 存在？"}
+    S4 -->|是| S5{"Analysis／Local provenance<br/>符合目前模式？"}
     S5 -->|否| REJECT
     S5 -->|是| S6{"safe_join 後仍位於 Library Root？"}
     S6 -->|否：越界／非法路徑| REJECT
@@ -414,7 +417,7 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
     [*] --> Pending: 工作建立
-    Pending --> Running: claim + lease + idempotency_key
+    Pending --> Running: claim + lease + idempotency_key + request fingerprint
     Running --> Completed: Future 期限內完成
     Running --> Retrying: 可重試錯誤且未達上限
     Retrying --> Running: available_at 到期後重新 claim
@@ -470,8 +473,9 @@ sequenceDiagram
         E->>P: 目前主流程執行六／七色完整刷新
         P-->>E: BUSY 在 Timeout 內完成
         E->>E: 保存有效 Cache 狀態、power off／hibernate
-        E->>A: POST /status + release_id + payload_verified + display_updated=true
-        A->>T: 驗證 Release ID、Profile、SHA、display_updated、error_code
+        E->>E: 先以 COW journal 保存 Queue／Release／事件身分與穩定 Key
+        E->>A: POST /queue/ack + 權威 identity；再 POST /status + 單調 sequence
+        A->>T: 驗證 Queue Item、Release、event、Profile、SHA、display_updated、error_code
         T->>T: payload_verified → display_confirmed → consumed
     end
     E->>E: 關閉網路／SPI／EPD GPIO，進入 💤 Deep Sleep
@@ -523,6 +527,7 @@ erDiagram
     DEVICES ||--o{ DEVICE_POWER_SAMPLES : measures
     SCHEDULED_TASKS ||--o{ JOBS : creates
     SCORING_RULE_VERSIONS ||--o{ PHOTO_ANALYSIS : explains
+    JOBS ||--o{ IDEMPOTENCY_REQUESTS : resumes
 
     LIBRARIES {
         string id PK
@@ -575,9 +580,16 @@ erDiagram
     }
     DEVICES {
         string id PK
-        string token_hash
+        string device_secret_hash
         string panel_profile
+        int last_status_sequence
         boolean enabled
+    }
+    IDEMPOTENCY_REQUESTS {
+        string scope_key PK
+        string request_fingerprint
+        string status
+        string request_snapshot_json
     }
 ```
 
@@ -629,6 +641,8 @@ flowchart TD
     KIND -->|Renderer| KEEP_RELEASE["保留目前正式 Release 與電子紙舊畫面"]
     KIND -->|多 Profile pointer／DB history| COMPENSATE["還原全部舊 pointer；標記 staged_failed"]
     KIND -->|裝置下載／SHA／BUSY| KEEP_DISPLAY["不覆寫最後成功顯示狀態；測試 Assignment 可重試"]
+    KIND -->|ACK timeout／5xx／stale／identity mismatch| KEEP_ACK["保留 NVS pending journal 與 Server Queue；不提前解鎖下一張"]
+    KIND -->|昂貴 POST 重送| KEEP_REQUEST["相同 fingerprint replay／resume；同 Key 不同 payload 回衝突"]
     KIND -->|Backup restore| KEEP_DB["未通過驗證前不替換正式 DB"]
     KIND -->|未知 Release 檔案| KEEP_ORPHAN["只標記 orphan；不自動刪除"]
 ```
@@ -675,7 +689,7 @@ Production 預設且建議使用 `INKTIME_COOKIE_SECURE=1`、`INKTIME_ALLOW_INSE
 2. 尚未準備模型或電子紙時，可將照片放進 `simulation_photos/`，到「維護」按「掃描並送到虛擬墨水屏」，再用獨立的 `/virtual-display` 接收正式 Manifest 與 BIN；這個流程不會呼叫模型。
 3. 要啟用智慧選片時，到「模型」新增 OpenAI、OpenAI 相容或本地端點；API Key 加密儲存且只顯示遮罩。
 4. 到「維護」輸入容器內照片路徑（Compose 預設 `/photos`），建立背景掃描工作。
-5. 到「工作」建立兩階段智慧分析，確認照片數、Token、費用範圍與工作預算後啟動。
+5. 預設 `local_only` 不呼叫模型；要使用 AI 時先明確改成 `automatic_ai` 或人工 AI 模式，再到「工作」建立單次完整 `single` 分析，確認照片數、Token、費用範圍與工作預算後啟動。
 6. 到「渲染」預覽並選擇內建的手寫／文青繁中字型，測試渲染後發布 2bpp 版本；需要時仍可上傳其他字型。
 7. 新自製板不必先在「裝置」建立資料列：AP 設定頁只填 Wi-Fi／InkTime URL，裝置首次連線會取得短期配對碼並顯示在實體面板，管理員在 Web 輸入該碼核准；裝置以可恢復 claim／confirm 取得 Device Secret，confirm 後才建立正式資料列。既有 Legacy 或 Stock 裝置依相容模式操作。
 8. 到「備份」建立並下載第一份備份。
@@ -694,20 +708,20 @@ Production 預設且建議使用 `INKTIME_COOKIE_SECURE=1`、`INKTIME_ALLOW_INSE
 
 管理介面的「設定」與「評分」頁可調整：
 
-- `model.low_model`、`model.high_model`：第一、第二階段使用哪個模型。
+- `model.analysis_model`：目前單次完整分析使用的模型；`model.low_model`／`model.high_model` 只保留舊設定讀取相容。
 - 「評分」頁：照片高低分規則、四項綜合排序權重、最愛加分、版本歷史與單張測試台。
-- `analysis.stage_two_threshold`：第一階段的回憶分達到多少才升級到高品質分析；人物或最愛照片也會升級。
+- `analysis.stage_two_threshold`：只保留舊設定讀取相容，不會恢復第二次圖片請求。
 - `render.memory_threshold`：電子紙歷史今日選片的最低回憶分門檻。
 
 四項模型原始分數 `memory_score`、`beauty_score`、`technical_quality_score`、`emotion_score` 永遠保留；系統另以版本化權重計算 `ranking_score`，預設為回憶 50%、美觀 20%、技術 10%、情緒 20%，最愛照片再加 5 分（最高 100）。新規則只影響之後的分析；每筆分析會記住使用的規則版本。測試台照片只在暫存目錄停留，但模型 Token 與費用仍會記入成本頁。完整資料流見 [專案架構與評分流程](docs/architecture/ARCHITECTURE_ZH_TW.md)。
 
 ## Token 與成本控制
 
-建議預設使用「兩階段智慧分析」：512px 低成本初篩，只有回憶分數達門檻、人物或最愛照片才使用 1600px 高品質模型。相同 SHA-256 繼承既有結果；短文案與所有分數在同一階段圖片請求輸出。管理介面提供每日、每月、單工作與單張照片停止值。詳見 [Token 成本指南](docs/reference/TOKEN_COST_GUIDE_ZH_TW.md)。
+成本最低且最安全的預設是 `local_only`。需要 AI 時，正式 `single` 以一個凍結 Analysis Plan、一次圖片請求同時輸出描述、短文案與所有分數；相同 SHA-256、Analysis Fingerprint 與 AI Cache 命中時不重複請求。管理介面提供每日、每月、單工作與單張照片停止值，`unknown` 成本不會冒充 US$0；同步 unknown usage 可保存 `NULL` estimated cost。未被管理員修改的 `api_usage` 政策預設自動分批清理 400 天以前且早於本月的資料，手動 Dry Run 端點仍只預覽。詳見 [Token 成本指南](docs/reference/TOKEN_COST_GUIDE_ZH_TW.md)。
 
 ## ESP32 配對與可靠性
 
-新版韌體不再把金鑰放在 URL。新自製裝置以自動配對取得一次性領取的 Device Secret 與 credential version；既有裝置仍可用 Legacy Bearer Token，PhotoPainter Stock 維持 `/dataUP` 並不進入配對流程。裝置以對應憑證取得專屬面板 Profile 的 Manifest，優先讀取 Offline Queue，嚴格驗證 Item 綁定的相對下載 URL、尺寸、格式、長度與 SHA-256；只有 Queue 404／空白才回退 Latest Release。顯示事件先持久化 NVS，再以 canonical `/api/device/v1/queue/ack` 重送穩定 idempotency key；成功顯示的 SHA／Release／Profile／rotation／board 完全相同時可安全跳過刷新，forced refresh 與狀態損壞會 fail closed。裝置也會回報設定 ACK、firmware、RSSI、Heap／PSRAM 與最後錯誤。既有 EOL GDEY073D46 與新 GDEP073E01 有不同 compile profile；Scheduler 以低頻掃描建立離線／恢復通知，可選去重 Webhook。完整設定見[裝置可靠性與六／七色渲染指南](docs/devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)與[ESP32 自動配對與憑證生命週期](docs/devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md)。
+韌體 2.8.0 不再把金鑰放在 URL。新自製裝置以自動配對取得一次性領取的 Device Secret 與 credential version；既有裝置仍可用 Legacy Bearer Token，PhotoPainter Stock 維持 `/dataUP` 並不進入配對流程。裝置以對應憑證取得專屬面板 Profile 的 Manifest，優先讀取 Offline Queue，嚴格驗證 Item 綁定的相對下載 URL、尺寸、格式、長度與 SHA-256；只有 Queue 404／空白才回退 Latest Release。顯示事件先寫入 crash-consistent NVS journal，再以 canonical `/api/device/v1/queue/ack` 重送穩定 idempotency key；只有 Server 接受符合目前 Queue／Item／Release／event identity 的終端 ACK 才清除 pending 並推進 LKG。成功顯示的 SHA／Release／Profile／rotation／board 完全相同時可安全跳過實體刷新，forced refresh 與狀態損壞會 fail closed。Enhanced pairing 明確宣告 24-slot capability；未確認裝置只允許 12，`legacy_ambiguous` 必須重新配對或 Repair。裝置也會回報設定 ACK、firmware、RSSI、Heap／PSRAM、單調狀態序號與最後錯誤。完整設定見[裝置可靠性與六／七色渲染指南](docs/devices/DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)與[ESP32 自動配對與憑證生命週期](docs/devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md)。
 
 ## 原生安裝與相容 CLI
 
@@ -752,7 +766,7 @@ python -m inktime.app.workers.runner
 
 ## 正式發布與裝置安全邊界
 
-- 一般發布、歷史選片與排程共用同一候選資格：已分析、可選、active、最新分析存在，而且原始檔仍位於啟用的 Library Root。
+- 一般發布、歷史選片與排程共用同一候選資格：依 execution mode 具有有效 Analysis 或已完成 Local Features、可選、active，而且原始檔仍位於啟用的 Library Root。
 - Release 先產生 staged 檔案並驗證 Manifest／大小／SHA-256，再以補償式流程切換 Profile pointer、提交 DB 與 `display_history`。啟動時標記漂移，失效 pointer 可回復到同 Profile 最新完整版本，但不自動刪除未知 Release。
 - 裝置仍使用 `Authorization: Bearer`；自動模式另帶 `X-InkTime-Credential-Version`，Legacy 模式維持相容 Token。Device Secret／Bearer Token 不會加密 HTTP；HTTP 只適合隔離 IoT VLAN，跨網路必須使用已驗證 CA 的 HTTPS 或 VPN。
 - 六／七色 Profile 明確宣告不支援 Partial Refresh；正式韌體已實作經驗證的相同內容跳過刷新，但真實面板的 BUSY、方向、殘影、色彩與功耗仍須實體驗收。

@@ -1,6 +1,6 @@
 # InkTime 專案架構與照片評分流程
 
-> 決策與韌性擴充：Migration 22 加入 Decision Trace、回饋、Shadow、Queue、Retention 與 Canary 資料；Migration 23 補強決策關聯，Migration 24 補上分析／Vision Input 指紋。正式發布仍由 `RenderService → ReleaseCoordinator` 管理；追蹤或 Shadow 寫入失敗不會中斷正式 Release。
+> 目前 Database Schema 為 Migration 50。Migration 22–24 建立 Decision Trace／回饋／Shadow／Queue／Retention／Canary 與分析指紋；Migration 34–39 建立自動配對與 12／24 Slot 離線排程能力；Migration 40–50 補上穩定分頁、單調裝置狀態、昂貴 POST fingerprint、全庫 reservation lease／Idempotency ledger、nullable unknown cost、預設 API usage retention 與有界 cleanup audit GC。正式發布仍由 `RenderService → ReleaseCoordinator` 管理；追蹤或 Shadow 寫入失敗不會中斷正式 Release。
 
 這份文件是閱讀程式碼的入口。先看「執行架構」，再依要修改的功能查「模組地圖」；照片評分、模型與門檻集中在後半段。
 
@@ -35,7 +35,7 @@ flowchart TB
     end
 
     BROWSER --> WEB
-    DEVICE -->|"Bearer Token"| WEB
+    DEVICE -->|"Device Secret＋版本／Legacy Bearer／Stock 分流"| WEB
     WEB --> ROUTE --> SERVICE
     WORKER --> SERVICE
     SCHEDULER --> SERVICE
@@ -56,11 +56,12 @@ flowchart TB
 | 照片掃描與本地特徵 | `workers/scanner.py` | `domain/photos/preprocessing.py`、`repositories/photos.py` |
 | 單次模型分析與舊策略正規化 | `services/analysis.py`、`domain/analysis/plan.py` | `providers/openai_compatible.py`、`domain/analysis/schema.py` |
 | 評分規則、權重、測試與還原 | `api/scoring.py`、`services/scoring_lab.py` | `repositories/scoring.py`、`domain/analysis/scoring.py` |
-| 背景工作、暫停與恢復 | `workers/runner.py`、`workers/job_worker.py` | `repositories/jobs.py` |
+| 背景工作、暫停、冪等與恢復 | `workers/runner.py`、`workers/job_worker.py` | `repositories/jobs.py`、`core/idempotency.py` |
 | 模型路由、限流與熔斷 | `providers/router.py` | `services/providers.py`、`repositories/providers.py` |
-| Token、成本與停止線 | `services/budgets.py` | `repositories/usage.py`、`repositories/settings.py` |
+| Token、成本、usage 保留與停止線 | `services/budgets.py`、`services/usage_tracking.py` | `repositories/usage.py`、`repositories/settings.py`、`repositories/resilience.py` |
 | 電子紙渲染與發布 | `services/rendering.py` | `domain/rendering/`、`api/rendering.py` |
-| 裝置自動配對／Legacy Token 與下載 | `api/devices.py`、`api/device_pairing.py` | `repositories/devices.py`、`services/device_pairing.py`、`esp32/` |
+| 裝置自動配對、Queue ACK、離線排程與下載 | `api/devices.py`、`api/device_pairing.py`、`api/resilience.py` | `repositories/devices.py`、`repositories/offline_schedules.py`、`services/device_pairing.py`、`esp32/` |
+| CI 影響判定與執行證明 | `scripts/ci/test_plan.py`、`canonical_plan.py` | `run_selected_suites.py`、`verify_execution.py`、`.github/CODEOWNERS` |
 | 管理介面 | `web/templates/` | `web/static/`、對應的 `api/*.py` |
 | Docker 與啟動 | `docker-compose.yml`、`Dockerfile` | `server.py`、`platform.py` |
 
@@ -73,13 +74,13 @@ flowchart LR
     DUP -->|"是"| INHERIT["繼承結果<br/>不呼叫模型"]
     DUP -->|"否"| STRATEGY{"分析策略"}
     STRATEGY -->|"local"| LOCAL_SCORE["本地固定公式"]
-    STRATEGY -->|"single"| VISION["一次高細節 Vision 模型"]
-    STRATEGY -->|"local"| LOCAL_SCORE["本地固定公式"]
+    STRATEGY -->|"single"| VISION["一次完整 Vision 模型"]
+    STRATEGY -->|"舊策略名稱"| NORMALIZE["正規化為 single"]
+    NORMALIZE --> VISION
     VISION --> SAVE["保存四項原始分數、綜合分與規則版本"]
-    STAGE2 --> SAVE
     LOCAL_SCORE --> SAVE
     INHERIT --> SAVE
-    SAVE --> PICK["回憶分通過門檻<br/>依綜合分排序"] --> RELEASE["480×800 四色／六色／七色 Release<br/>Profile + 抖動 + SHA-256"]
+    SAVE --> PICK["依模式驗證 Analysis／Local provenance<br/>再依綜合分排序"] --> RELEASE["480×800 四色／六色／七色 Release<br/>8 版型 + 10 抖動 + SHA-256"]
     RELEASE --> DEVICE["ESP32 驗證 SHA-256 後顯示"]
 ```
 
@@ -130,6 +131,8 @@ flowchart LR
 
 一般設定保存在 SQLite 的 `settings`／`setting_history`，定義與驗證位於 `repositories/settings.py`；API Key 等敏感值保存在加密的 `secrets`。`.env` 只放部署層路徑、Cookie 與 Log 等啟動參數，不是日常模型評分設定。
 
+目前共有 150 個設定定義，其中 143 個可由 runtime 動態讀取；`observability.debug_level`、`observability.debug_components`、`observability.activity_poll_seconds`、三個 warning／job 預算相容鍵與 `device.legacy_api_enabled` 仍是明確的非 runtime-wired／部署相容邊界，設定 API 會提示而不假裝即時生效。
+
 ```mermaid
 flowchart LR
     SETTINGS_UI["評分控制中心<br/>規則、權重、版本"] --> SETTINGS_API["POST /api/v1/scoring/profiles"]
@@ -156,3 +159,10 @@ flowchart LR
 `ReleaseCoordinator` 將檔案系統與 SQLite 組成可補償的兩階段流程：Renderer 以 `activate=False` 建立 staged Release，驗證 Manifest／Payload，DB 寫 staged，切換所有 Profile pointer，最後在同一 DB transaction 寫 published 與 `display_history`。pointer 或 DB 最終提交失敗時回復舊 pointer 並標記 `staged_failed`；啟動 reconciliation 會標記 `payload_missing`／orphan，並將失效 pointer 回復到同 Profile 最新的完整 published Release，但不刪除未知檔案。
 
 共用 `Database` 另提供不含 SQL、Secret 或照片路徑的 writer lock wait、busy timeout count、WAL bytes 與長交易指標；一般 Web、Worker 與 Scheduler Runtime 不得繞過此連線層。
+
+## 目前的冪等與裝置一致性邊界
+
+- HTTP `Idempotency-Key` 先以操作種類與管理員身分做 scope，再以 canonical request fingerprint 判斷 replay 或 conflict；完整照片庫工作在列舉前先取得具 heartbeat 的 reservation lease，只有 owner 能保存 frozen snapshot 與 partial-resume 狀態。
+- AI Cache single-flight 只允許 reservation owner 呼叫 Provider；請求可能已送達後的未知結果不會盲目切換 Provider 重送。
+- Queue ACK 必須同時符合裝置、Queue Item、Queue version、Release、事件與穩定 Key。韌體先把事件寫入 crash-consistent NVS journal；Server 未接受前不能清除或解鎖下一張。
+- 裝置狀態以單調 sequence 與 server-fenced timestamp 更新；未來時間、舊 sequence 與晚到資料只保留稽核，不得覆寫權威 current state。

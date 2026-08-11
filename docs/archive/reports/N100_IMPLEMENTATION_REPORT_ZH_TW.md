@@ -1,5 +1,7 @@
 # Docker／N100／ESP32 最終實作與驗收報告
 
+> 歷史快照：保留當時交付與驗證證據，不代表目前行為；現行基準見[目前實作狀態](../../reference/CURRENT_STATE_ZH_TW.md)。
+
 > **歷史報告（2026-07-18）**：本文件保存當時的量測與交付邊界，不代表目前功能或實機驗證狀態。現行部署請改讀 [Docker 部署規格](../../operations/DOCKER_GUIDE_ZH_TW.md) 與 [N100 資源指南](../../operations/N100_RESOURCE_GUIDE_ZH_TW.md)。
 
 日期：2026-07-18

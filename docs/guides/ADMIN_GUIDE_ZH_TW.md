@@ -84,6 +84,7 @@
 ### PhotoPainter Enhanced 排程操作邊界
 
 - `inktime_offline_schedule` 一律搭配 `offline_prefetch_allowed=true`；`legacy_online` 與 `stock_compat` 一律是 `false`。建立或 PATCH 省略 prefetch 欄位時由模式自動正規化；明確矛盾值回 `400 DEVICE-008`。
+- 未確認或舊裝置最多 12 個離線 Slots；只有 pairing／repair capability 明確回報 `offline_schedule_max_slots=24` 才可使用 24。`legacy_ambiguous` 會隔離排程並顯示 `DEVICE-008`，必須重新配對或 Repair，不可由 UI 猜測解鎖。
 - `schedule_not_ready` 的 `retry_after_epoch` 會留在今日剩餘 Slot 之前；`next_slot_epoch` 可供韌體再次驗證。今日沒有剩餘 Slot 才會回明日第一個 prepare point，不能把 07:50 的今日 08:00／12:00 排程直接跳到明日。
 - 本地 20:00 後，今日若沒有 `slot.show_at > local_now`，Scheduler 只建立 tomorrow；今日仍有未來 Slot 才同時確保 today + tomorrow。重複 tick 依 dedupe key 不新增重複工作。
 - `local_next` 是無網路的本地預覽；每按一次依 NVS 的 `preview_schedule_id`／`preview_slot_index` 循環下一張，重複 SHA 會跳過。它不消耗正式 Slot、不改 Queue／current/LKG、不寫 terminal ACK 或 ACK journal；正式 timer wake 不受此 cursor 影響。
@@ -107,7 +108,9 @@
 
 E6 適合度會在任何模型請求前，以正式 `gdep073e01_6c` 色盤、OKLab 色差與 Bayer 抖動建立 112 px 本機樣本，量測量化後對比保留、主體細節、膚色偏差與強邊緣／文字可讀性。總分低於 `analysis.e6_min_score` 時可直接排除，因此不新增 Token；最愛照片仍會略過排除。舊照片第一次進入候選或渲染時會自動補算，仍不呼叫模型。
 
-五種版型為全版照片、明信片、照片＋日期地點、月曆相框、天氣＋室內溫溼度。預覽可暫時切換版型，按「設為預設版型」才會改正式發布設定。天氣資料為選用功能，從 Open-Meteo 取得目前天氣、溼度與當日高低溫並快取 30 分鐘；外部服務失敗時照片仍正常發布。室內資料來自 PhotoPainter 裝置狀態回報；沒有感測值時畫面會明確顯示尚無回報。
+八種版型為全版照片、明信片、照片＋日期地點、雙照片拼版、雙照片各自一句話、智慧自適應回憶、月曆相框、天氣＋室內溫溼度。智慧自適應版型依照片方向與內容使用 canonical slot geometry；Preview 與正式 Release 共用同一 frozen Render Plan，不會在背景工作重選照片或文字。預覽可暫時切換版型，按「設為預設版型」才會改正式發布設定。天氣資料為選用功能，從 Open-Meteo 取得目前天氣、溼度與當日高低溫並快取 30 分鐘；外部服務失敗時照片仍正常發布。室內資料來自 PhotoPainter 裝置狀態回報；沒有感測值時畫面會明確顯示尚無回報。
+
+`render.dither` 目前有 10 種：`none`、`floyd_steinberg`、`gooddisplay`、`photo_smooth`、`atkinson`、`bayer4`、`bayer8`、`nearest`、`bayer_ordered`、`serpentine_floyd_steinberg`。Profile 為四色 `safe_4c`、六色 `gdep073e01_6c` 與七色 `gdey073d46_7c`；實際面板色彩仍需實機 A/B，Browser 預覽不等於硬體校色。
 
 ## 歷年今日選片
 
@@ -152,7 +155,9 @@ deep-sleep 待機電流、完整喚醒週期平均電流、每日刷新次數及
 
 `display_prepare` 支援且只支援 `display_times`、`lead_minutes`、`daily_count`、`device_ids`、`candidate_years`、`prefetch_count`、`ai_fallback`、`render_fallback`。未知欄位不會被靜默忽略。`device_ids` 解析為實際啟用裝置的 Profile；`daily_count × prefetch_count` 決定候選數量；年份會直接限制 SQL 候選。
 
-人工排除、自動排除、Missing、deleted、路徑逃逸、原始檔缺失或沒有最新分析的照片均不能正式發布。管理員明確指定這類照片會收到 `RENDER-009`，系統不會換成另一張照片。
+人工排除、自動排除、Missing、deleted、路徑逃逸、原始檔缺失，或缺少目前 `analysis.execution_mode` 所要求之 Analysis／Local Features 的照片，均不能正式發布。管理員明確指定這類照片會收到 `RENDER-009`，系統不會換成另一張照片。
+
+昂貴的建立工作、全庫掃描／渲染與其他支援端點會接受 scoped `Idempotency-Key`。相同 Key 與相同 request fingerprint 可安全 replay／resume；同 Key 搭配不同 payload 會回 409。完整照片庫工作會凍結候選 snapshot 並保存 partial progress，瀏覽器 timeout 後不要換 Key 盲目重送。
 
 ## PhotoPainter 跨日操作檢查
 

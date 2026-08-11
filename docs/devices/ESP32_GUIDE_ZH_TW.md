@@ -13,7 +13,7 @@ GDEY073D46 原廠資料為 800×480、7 色、3.3 V、50-pin FPC、SPI、15–35
 
 未來新採購建議 GDEP073E01＋DESPI-C73 或原廠 ESP32E6-E01。GDEP073E01 為 800×480、6 色 Spectra 6、3.3 V、50-pin SPI、0–50°C、全刷約 15–22 秒；韌體已可選用 GxEPD2 的 `GxEPD2_730c_GDEP073E01` 類別。[Good Display GDEP073E01](https://www.good-display.com/product/533.html) [DESPI-C73 adapter](https://www.good-display.com/product/522.html) [GxEPD2 支援清單](https://github.com/ZinggJM/GxEPD2)
 
-伺服器、Manifest schema v2 與韌體 2.6.0 已共同支援完整六／七色、Offline Queue ACK 與相同內容安全 skip；色盤、抖動、混合面板發布、設定 ACK 與離線通知詳見[裝置可靠性與六／七色渲染指南](DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。韌體 2.6.0 的新自製裝置使用自動配對；既有 Legacy Token 與 PhotoPainter Stock 相容路徑仍分流保留，完整流程見[ESP32 自動配對與憑證生命週期](ESP32_AUTOMATIC_PAIRING_ZH_TW.md)。
+伺服器、Release Manifest schema v1／v2 與韌體 2.8.0 已共同支援完整六／七色、Offline Queue ACK、12／24 Slot capability 與相同內容安全 skip；色盤、10 種抖動、混合面板發布、設定 ACK 與離線通知詳見[裝置可靠性與六／七色渲染指南](DEVICE_COLOR_NOTIFICATION_GUIDE_ZH_TW.md)。韌體 2.8.0 的新自製裝置使用自動配對；既有 Legacy Token 與 PhotoPainter Stock 相容路徑仍分流保留，完整流程見[ESP32 自動配對與憑證生命週期](ESP32_AUTOMATIC_PAIRING_ZH_TW.md)。
 
 Waveshare 整合的中央 Profile、SD／PMIC／RTC／SHTC3、安全 BUSY timeout、授權與
 20 項實機清單見 [PhotoPainter 支援與實機驗收](WAVESHARE_PHOTOPAINTER_ZH_TW.md)。
@@ -118,7 +118,7 @@ Device Secret 只在 claim 成功回應中交給裝置，短效 envelope 允許�
 3. 驗證 Manifest schema、`pixel_format=2bpp`／`indexed4`、Profile、`width=480`、`height=800`。
 4. 套用 `device_config` schema v2：設定版本、面板 Profile、IANA 時區換算後的 UTC offset、`HH:MM`、rotation。
 5. 四色檔必須剛好 96,000 bytes、六／七色必須 192,000 bytes；Content-Type、Content-Length、實際長度與 SHA-256 都須相符。
-6. Queue 事件先持久化 NVS，再送 canonical `POST /api/device/v1/queue/ack`；timeout／5xx／restart 重用同一 idempotency key，2xx 才清除，409 重新取得 Manifest。
+6. Queue 事件先寫入 32-entry、copy-on-write、crash-consistent NVS journal，再送 canonical `POST /api/device/v1/queue/ack`；timeout／5xx／restart 重用同一 idempotency key，只有 Server 2xx 接受權威 Item／Release／event identity 才清除，409 重新取得 Manifest且保留未完成狀態。
 7. 只有已驗證的 SHA、Release、render profile、rotation、board profile 與先前成功狀態完全相同才 skip；forced refresh 或 NVS 損壞不可 skip。
 8. 完整成功才刷新面板；全部失敗保留舊畫面並回報 `DISPLAY_FAILED`。
 9. `POST /api/device/v1/status` 回報 firmware、transport、Queue、面板／渲染 Profile、release、設定 ACK、RSSI、free heap／PSRAM、wake reason、`display_skipped` 與錯誤碼。
@@ -144,7 +144,7 @@ Web 裝置頁會顯示最後狀態、下載成功／失敗、韌體、訊號、H
 - 面板脆弱，避免彎折、點壓、扭曲與 FPC 拉扯；不要撕除非原廠指示可移除的保護層。
 - 電子紙可能有 ghosting／色偏；本韌體採 full refresh，不把 GxEPD2 partial window API 當成 GDEY 可用的快速局刷。
 - 強烈建議用 SHA-256 驗證與「成功才刷新」；不要為省幾秒移除。
-- 完整六／七色 Queue 流程需 server、裝置 Profile 與 2.6.0 韌體配對；舊韌體升級期間使用 `safe_4c`。
+- 完整六／七色 Queue 流程需 server、裝置 Profile 與 2.8.0 韌體配對；舊韌體升級期間使用 `safe_4c`。Enhanced 排程未確認 capability 時最多 12 Slots，只有 pairing／repair 明確確認才可使用 24。
 - 目前 GDEY／GDEP release image 約使用 92%、debug image 約使用 96% 的 repository-owned app partition；增加函式庫、TLS 或 OTA 前要重新量測 Flash／Heap／PSRAM，並做實機連續刷新與斷電恢復測試。
 
 ## 9. 常見錯誤

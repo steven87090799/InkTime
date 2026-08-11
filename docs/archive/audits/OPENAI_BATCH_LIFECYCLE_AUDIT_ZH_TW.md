@@ -1,5 +1,7 @@
 # OpenAI Batch 照片分析生命週期稽核
 
+> 歷史快照：保留當時稽核證據，不代表目前行為；現行基準見[目前實作狀態](../../reference/CURRENT_STATE_ZH_TW.md)。
+
 稽核基準：`fix/lan-production-finalization`（PR #33，`faeb3c9`）。本文件先記錄
 現況，再作為本次持久化 Batch 生命週期實作的邊界。稽核日期：2026-08-01。
 

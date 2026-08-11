@@ -38,3 +38,5 @@ gunicorn --config gunicorn.conf.py server:app
 ## 首次啟動
 
 瀏覽 `/setup` 建立 administrator。新帳號需 3–64 個 ASCII 識別字元，密碼需 12–128 字元且不會裁切前後空白。LAN Production 保持 environment=production，使用 `COOKIE_SECURE=0`／`ALLOW_INSECURE_HTTP=1`，Health／Preflight 明確顯示 trusted-lan-http／degraded；不可公開至公網。HTTPS Production 使用 `COOKIE_SECURE=1`／`ALLOW_INSECURE_HTTP=0`。反向代理只可傳入可信任的 Host、Proto 與來源 IP 標頭。安裝後立即建立備份並測試下載。
+
+新安裝預設為 `analysis.execution_mode=local_only`，掃描、Local Features、本機選片與渲染都不需要 Provider。只有要啟用人工或自動 AI 時才設定 API Key；正式 AI 工作使用單次完整 `single`，舊兩階段策略名稱只做相容讀取。

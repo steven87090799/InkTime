@@ -1,5 +1,9 @@
-## 说明
-该固件适用于 13.3 寸 6 色 E6 屏，分辨率为1600*1200，使用 ESP32-D0WD-V3 驱动。  
-该屏幕的渲染逻辑、显示逻辑均与7.3寸不同。  
-请在根目录执行 ```render_daily_photo_133c.py```，与该固件配合使用。  
-目前仅为 beta 版本，未经长期测试，功耗亦尚待优化。
+# 13.3 吋 E6 六色韌體元件
+
+此目錄保留 13.3 吋、1600×1200 E6 六色面板的 ESP32-D0WD-V3 韌體元件。它的渲染與顯示流程不同於目前主要的 7.3 吋 PhotoPainter／ESP32-S3 路徑。
+
+## 現行邊界
+
+- 根目錄舊腳本 `render_daily_photo_133c.py` 只屬於此 legacy 133C 流程，不是 InkTime Web／Worker／Scheduler 的正式 Release Coordinator。
+- 此韌體仍為 beta，尚無本輪長期功耗、深度睡眠、BUSY timing 或實體面板驗收證據。
+- 現行正式架構、面板 Profile 與裝置協定請讀 [`../../docs/reference/CURRENT_STATE_ZH_TW.md`](../../docs/reference/CURRENT_STATE_ZH_TW.md) 與 [`../../docs/devices/ESP32_GUIDE_ZH_TW.md`](../../docs/devices/ESP32_GUIDE_ZH_TW.md)。

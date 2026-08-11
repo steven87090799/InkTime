@@ -23,10 +23,15 @@ SQLite `settings` 的動態業務設定不參與這個優先序。
 | `worker_concurrency` | `int` | `INKTIME_WORKER_CONCURRENCY` | `2` | 否 | 否 |
 | `scheduler_identity` | `str` | `INKTIME_SCHEDULER_IDENTITY` | `inktime-scheduler` | 否 | 否 |
 | `cookie_secure` | `bool` | `INKTIME_COOKIE_SECURE` | production 為 `true` | 否 | 否 |
+| `public_url` | Origin `str` | `INKTIME_PUBLIC_URL` | development `http://127.0.0.1`；production `https://localhost` | 否 | 否 |
+| `allow_insecure_http` | `bool` | `INKTIME_ALLOW_INSECURE_HTTP` | `false` | 否 | 否 |
+| `allow_unsafe_network_database` | `bool` | `INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE` | `false` | 否 | 否 |
 
 所有相對路徑都相對同一 `base_dir` 解析，再固定為絕對路徑。Port、boolean、timezone、
 proxy trust、worker concurrency 與空白 identity 都 fail closed；production 禁止 testing、
 development 與 repo 內的預設資料目錄。
+
+Production 的 `public_url`、`cookie_secure`、`allow_insecure_http` 與 `proxy_trust` 是同一個安全契約：HTTPS 必須使用 Secure Cookie；可信任 LAN HTTP 只能明確降級為 `allow_insecure_http=true`／`cookie_secure=false` 並由 Health／Preflight 標示 `degraded`，不可公開至 Internet。SQLite 預設必須位於本機支援 POSIX lock／fsync 的資料 Volume；`allow_unsafe_network_database` 只是一個明確 break-glass，不會讓 SMB／NFS 自動變安全。
 
 API Key、Device Secret／Legacy Device Token、Session Secret 與 Credential 不屬於 RuntimeConfig。它們分別由
 `SecretStore`、Device Repository／DevicePairingService 與啟動期持久化 Session Secret 管理；RuntimeConfig 的

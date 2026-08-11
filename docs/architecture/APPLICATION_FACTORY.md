@@ -47,9 +47,11 @@ Auth、CSRF 與 HTTP error handler 只由 Modern Root 註冊。Device Bearer API
 ## Migration、測試與 Rollback
 
 三個 process role 都呼叫既有 `migrate()`；Docker 仍讓 Worker／Scheduler 等待 Web
-readiness，Migration lock、交易 rollback、pre-migration backup 與 integrity check 不變。
-本重構不新增 Schema migration。
+readiness。Migration 50 是目前最高版本；Migration lock、交易 rollback、pre-migration
+backup、`foreign_key_check`／`integrity_check` 與未完成 migration history 的 fail-closed
+recovery 契約由同一路徑執行。若資料庫含程式不認得的較新 Schema，必須停止啟動，
+不能由舊映像降級寫入。
 
-回滾方式是停止三個 process、回復本 PR 的程式 commit，再以相同 Database 與 Release
-目錄啟動舊版。因未刪表、未改 Device API、未反向寫入 `photo_scores`，資料層不需要
-Down Migration。
+回滾方式是停止三個 process，以升級前 SQLite backup 搭配與該 Schema 相容的舊映像
+離線恢復，再啟動三服務。不可只切回程式 commit 卻沿用較新的正式資料庫；專案不提供
+Down Migration。Release 目錄與 Metadata DB 的一致性由啟動 reconciliation 驗證。

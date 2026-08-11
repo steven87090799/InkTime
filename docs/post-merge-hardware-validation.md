@@ -1,15 +1,15 @@
 # 合併後實機與外部服務驗收邊界
 
-本文件把 software CI、hosted compile、simulator/mock 與真實外部環境分開。當前報告狀態如下：
+本文件把 software CI、hosted compile、simulator/mock 與真實外部環境分開。下表保存 PR #62 當時的合併基線；目前版本／Schema 請以[目前實作狀態](reference/CURRENT_STATE_ZH_TW.md)為準，實機項目在真正執行前仍維持 `NOT RUN`。
 
-## 2.8 合併基線
+## 2.8／PR #62 歷史合併基線
 
 | 項目 | 值 |
 |---|---|
 | 整合 PR | PR #62 |
 | Firmware | `2.8.0` |
 | Database Migration | `36` |
-| ESP32 Config Store | 目前 schema `4`；相容讀取 schema `1`、`2`、`3` |
+| ESP32 Config Store | 當時 schema `4`；目前已為 schema `5`，相容讀取 `1`～`5` |
 
 | 項目 | 狀態 | 目前可用證據 |
 |---|---|---|

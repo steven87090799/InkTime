@@ -1,5 +1,7 @@
 # 舊架構基線
 
+> 歷史快照：保留當時架構基線，不代表目前行為；現行基準見[目前實作狀態](../../reference/CURRENT_STATE_ZH_TW.md)。
+
 > **歷史基線（2026-07-17）**：本文件描述重構前的腳本式架構，不是目前架構。請改讀 [`../../architecture/ARCHITECTURE_ZH_TW.md`](../../architecture/ARCHITECTURE_ZH_TW.md)。
 
 ```text

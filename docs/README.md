@@ -8,6 +8,7 @@
 |---|---|
 | 第一次啟動 Docker | [快速開始](getting-started/QUICK_START_ZH_TW.md) → [安裝指南](getting-started/INSTALLATION_ZH_TW.md) |
 | 了解程式如何運作 | [現行架構與流程](architecture/ARCHITECTURE_ZH_TW.md) → [Application Factory](architecture/APPLICATION_FACTORY.md) |
+| 核對目前版本、Schema 與功能數量 | [目前實作狀態](reference/CURRENT_STATE_ZH_TW.md) |
 | 管理照片、模型、裝置與設定 | [管理員指南](guides/ADMIN_GUIDE_ZH_TW.md) → [使用者指南](guides/USER_GUIDE_ZH_TW.md) |
 | 部署、備份或故障排除 | [Docker 部署](operations/DOCKER_GUIDE_ZH_TW.md) → [備份還原](operations/BACKUP_RESTORE_ZH_TW.md) → [疑難排解](operations/TROUBLESHOOTING_ZH_TW.md) |
 | 開發或修改系統 | [開發指南](getting-started/DEVELOPMENT_GUIDE_ZH_TW.md) → [架構文件](architecture/ARCHITECTURE_ZH_TW.md) |
@@ -37,8 +38,11 @@
 ### 根目錄與入口
 
 - [`../README.md`](../README.md)：中文專案首頁、完整資料流與快速入口。
-- [`../README.en.md`](../README.en.md)：英文 legacy README；僅供舊使用方式參考。
+- [`../README.en.md`](../README.en.md)：英文現行摘要，並保留明確標示的 legacy 使用方式。
+- [`../AGENTS.md`](../AGENTS.md)：本 Repository 的開發、驗證與交付規則。
 - [`../USER_MANUAL.html`](../USER_MANUAL.html)：可瀏覽的專案規格與所有 Markdown 文件索引。
+- [`README.md`](README.md)：本頁；Markdown 文件地圖與維護規則。
+- [`CI_POLICY.md`](CI_POLICY.md)：hosted CI 分層、來源 HEAD 與 PR merge-ref 證據邊界。
 
 ### Batch 與交付專項
 
@@ -113,6 +117,7 @@
 
 ### 參考資料與歷史紀錄
 
+- [`reference/CURRENT_STATE_ZH_TW.md`](reference/CURRENT_STATE_ZH_TW.md)：目前版本、Migration 50、Schema、版型、抖動、冪等、裝置與 CI 邊界的來源碼基準。
 - [`reference/TOKEN_COST_GUIDE_ZH_TW.md`](reference/TOKEN_COST_GUIDE_ZH_TW.md)：Token、預篩選、預算與成本邊界。
 - [`reference/CHANGELOG.md`](reference/CHANGELOG.md)：版本變更記錄。
 - [`archive/baselines/ARCHITECTURE_CURRENT.md`](archive/baselines/ARCHITECTURE_CURRENT.md)：2026-07-17 前的舊架構基線，非目前架構。

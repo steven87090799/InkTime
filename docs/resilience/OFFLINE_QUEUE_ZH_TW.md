@@ -8,7 +8,9 @@
 
 一般 Online 韌體先讀取 Queue；只有 Queue endpoint 回 404 或 Queue 為空時，才回退既有 Latest Release。Manifest 必須是 bounded JSON object，Queue version、尺寸與大小必須是真正 JSON integer；下載 URL 必須是 Item 綁定的同源相對路徑。Content-Type、Content-Length、實際長度、Profile、尺寸與 SHA-256 任一不符都會 fail closed，保留舊畫面。
 
-裝置以 canonical `POST /api/device/v1/queue/ack` 回報 Manifest、下載、雜湊與顯示事件。每個事件先把穩定 idempotency key 與 payload 寫入 NVS；只有 HTTP 2xx 才清除，timeout／5xx／重新開機會重送同一 Key，409 視為 stale Queue version。401／403 不會降級成匿名或 Latest 成功。只有 `DISPLAY_COMPLETED` 才更新 current／Last Known Good；指標依實際 `displayed_at` 時間排序，晚到的舊 ACK 仍寫歷史但不得把 current/LKG 倒退；相同時間綁定不同 Release 會 fail closed。下載成功不等於已顯示。舊 `/api/device/queue/ack` 僅保留相容路由，不應用於新韌體或新文件。
+裝置以 canonical `POST /api/device/v1/queue/ack` 回報 Manifest、下載、雜湊與顯示事件。每個事件先把穩定 idempotency key、Queue Item／version、Release 與 event identity 寫入 crash-consistent NVS journal；只有 Server HTTP 2xx 接受權威 identity 才清除，timeout／5xx／重新開機、stale 或 mismatch 會保留並重送同一 Key，不能提前解鎖下一張。401／403 不會降級成匿名或 Latest 成功。只有被接受的 `DISPLAY_COMPLETED` 才更新 current／Last Known Good；指標依實際 `displayed_at` 時間排序，晚到的舊 ACK 仍寫歷史但不得把 current/LKG 倒退；相同時間綁定不同 Release 會 fail closed。下載成功不等於已顯示。舊 `/api/device/queue/ack` 僅保留相容路由，不應用於新韌體或新文件。
+
+Enhanced schedule 上限依 capability 而不是 UI 猜測：未確認為 12，明確 `confirmed_24` 才能使用 24，`legacy_ambiguous` 隔離並要求重新配對／Repair。Queue Event retention 會先保護仍引用 parent Queue Item 的 child event，不會為了過期清理破壞 parent identity。
 
 Enhanced `local_next` 是人工 cache-only 預覽；NVS cursor 讓每次按鍵依 active schedule 前進並 wrap，schedule id 改變時 reset，重複 SHA 會跳過。它不連 Wi-Fi、不發 terminal ACK／journal、不改 queue status 或 server current/LKG；正式 timer wake 不受 cursor 影響，即使同 SHA 只略過物理刷新，仍回報正式 terminal event。
 

@@ -63,6 +63,8 @@ That job proves the checked-out commit equals `SOURCE_HEAD_SHA`. It does not dup
 
 Production changes select their owning regression boundaries even when the corresponding test file did not change. Scheduler changes route runtime soak; migration changes route persistence and migration owners; device manifest/ACK changes route device and firmware host contracts; authentication/session changes route security, browser, and TLS boundaries.
 
+`.github/CODEOWNERS` 是 production boundary 的 reviewer ownership 契約；CI／firmware／device／migration 等受保護路徑的 owner 變更必須與 planner domain 一起審查。純 Markdown 變更仍經 Tier 0、Secret／patch-format 與 docs classification，不應因為是文件就偽造 heavy exact-head 證據；未知或同時碰觸 production path 時照常 fail open 到對應完整 owner。
+
 Provider/analysis impact coverage includes the direct cross-layer regressions in `test_analysis_pipeline.py`, `test_ai_cache_singleflight.py`, and `test_photo_quality_ai.py`. Render/release impact coverage includes `test_adaptive_frame_renderer.py`, `test_dual_photo_caption_layout.py`, and `test_render_candidate_contract.py`. Other owner mappings remain focused rather than indiscriminately running all of `tests/integration`. If an integration regression is intentionally full-only, it must be listed in `FULL_ONLY_INTEGRATION_TESTS` with a non-empty reason instead of being omitted accidentally.
 
 The deployment preflight script is a cross-boundary surface: `scripts/production_preflight.py` routes to both TLS smoke and Docker LAN persistence because the LAN job invokes its `--mode lan` path, while `scripts/production_tls_smoke.py` remains TLS-only. Test-only backup/restore changes use the focused selected-suite runner, while production backup/restore changes retain the Docker LAN gate.

@@ -1,5 +1,7 @@
 # InkTime Legacy 記憶體與資料安全稽核
 
+> 歷史快照：保留當時稽核證據，不代表目前行為；現行基準見[目前實作狀態](../../reference/CURRENT_STATE_ZH_TW.md)。
+
 > **歷史稽核（Migration 20）**：這是 Legacy 相容期的修正證據，不是目前功能總覽。現行架構請見 [`../../architecture/ARCHITECTURE_ZH_TW.md`](../../architecture/ARCHITECTURE_ZH_TW.md)。
 
 稽核基準：`origin/main` `7386e11ce36b091e4fde9d3449701b583ca89f5d`。本文件記錄修正前的真實程式狀態；Legacy 僅為相容期維護來源，不是正式權威資料來源。

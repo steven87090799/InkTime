@@ -3,9 +3,10 @@
 ## 原則
 
 1. 不修改或刪除舊 `photo_scores` 表；新平台先建立並行 Schema。
-2. 每次正式 Migration 在交易前，以 SQLite backup API 建立一致備份並執行 `quick_check`。
+2. 既有資料庫有待執行 Migration 時，在交易前以 SQLite backup API 建立一致備份，並執行 `foreign_key_check` 與完整 `integrity_check`。
 3. Migration 依 `schema_migrations.version` 單向套用；任何 SQL 失敗立即回滾該版本並停止應用程式啟動。
 4. 內容匯入採可重入批次，以相片庫 ID、相對路徑與 SHA-256 保持冪等。
+5. 目前最高 Schema 為 Migration 50；已發布 Migration 永遠不修改、不刪除、不重新編號。
 
 ## 升級步驟
 
@@ -28,7 +29,7 @@
 ## 回滾
 
 1. 停止 InkTime 2.x 的 Web、Worker 與 Scheduler。
-2. 將升級前備份複製到另一個路徑並執行 `PRAGMA quick_check`。
+2. 將升級前備份複製到另一個路徑並執行 `PRAGMA foreign_key_check` 與 `PRAGMA integrity_check`。
 3. 以備份替換服務使用的資料庫，恢復舊 `config.py` 與舊映像檔／Git Commit。
 4. 將 ESP32 Server URL 暫時切回舊 API；此舉會恢復 URL 金鑰風險，僅限隔離網路與短期處置。
 5. 不刪除新版 `releases/`、快取或診斷資料，直到確認回滾穩定；它們不影響舊版資料庫。
