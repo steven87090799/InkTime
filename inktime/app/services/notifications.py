@@ -3,10 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import json
 import logging
+import time
 
 import requests
 
 from inktime.app.core.logging import log_event
+from inktime.app.core.security import redact_text
 from inktime.app.db import Database
 from inktime.app.repositories.settings import SecretStore, SettingsRepository
 
@@ -279,13 +281,24 @@ class DeviceNotificationService:
             }
             error = ""
             delivered = False
+            response = None
+            started = time.monotonic()
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "Notification webhook request started",
+                event="notification_webhook_request_started",
+                operation="notification_webhook",
+                attempt=int(row["webhook_attempts"]) + 1,
+                details={"notification_id": int(row["id"])},
+            )
             try:
                 response = self.session.post(url, json=payload, headers=headers, timeout=timeout)
                 delivered = 200 <= response.status_code < 300
                 if not delivered:
                     error = f"HTTP {response.status_code}"
             except requests.RequestException as exc:
-                error = f"{type(exc).__name__}: {exc}"[:500]
+                error = redact_text(f"{type(exc).__name__}: {exc}")[:500]
             attempts = int(row["webhook_attempts"]) + 1
             if delivered:
                 status = "delivered"
@@ -322,6 +335,25 @@ class DeviceNotificationService:
                 "裝置通知 Webhook 已送達" if delivered else "裝置通知 Webhook 傳送失敗",
                 event="notification_webhook_delivered" if delivered else "notification_webhook_failed",
                 error_code="" if delivered else "NOTIFY-WEBHOOK",
-                details={"notification_id": int(row["id"]), "attempts": attempts, "status": status},
+                attempt=attempts,
+                retry_count=max(0, attempts - 1),
+                duration_ms=int((time.monotonic() - started) * 1000),
+                http_status=int(response.status_code) if response is not None else 0,
+                failure_class=error.partition(":")[0] if error else "",
+                retryable=status == "retrying",
+                details={"notification_id": int(row["id"]), "status": status},
             )
+            if status == "retrying":
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Notification webhook retry scheduled",
+                    event="notification_webhook_retry",
+                    error_code="NOTIFY-WEBHOOK",
+                    operation="notification_webhook",
+                    attempt=attempts,
+                    retry_count=max(0, attempts - 1),
+                    retryable=True,
+                    details={"notification_id": int(row["id"]), "delay_seconds": delay_seconds},
+                )
         return result

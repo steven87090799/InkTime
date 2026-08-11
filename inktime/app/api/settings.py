@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import logging
 import os
 from pathlib import Path
 from urllib.parse import urlparse
 
 from flask import Blueprint, abort, current_app, g, render_template, request
 
-from inktime.app.core.logging import configure_logging
+from inktime.app.core.logging import configure_logging, log_event
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
 from inktime.app.repositories.settings import SETTING_DEFINITIONS
 from inktime.app.web.access import administrator_required, login_required
 
 
 bp = Blueprint("settings", __name__)
+LOGGER = logging.getLogger("settings")
 
 
 @bp.get("/settings")
@@ -53,21 +55,88 @@ def settings_page():
 def update_settings():
     payload = request.get_json(silent=True) or {}
     repository = current_app.extensions["inktime_settings_repository"]
+    log_changes = {
+        key: {"old": repository.get(key), "new": payload[key]}
+        for key in ("system.log_level", "system.log_format")
+        if key in payload
+    }
+    log_event(
+        LOGGER,
+        logging.DEBUG,
+        "Settings update started",
+        event="settings_update_started",
+        operation="settings_update",
+        details={"keys": sorted(str(key) for key in payload), "count": len(payload)},
+    )
     for key, value in payload.items():
         if SETTING_DEFINITIONS.get(str(key), {}).get("control_center"):
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "Settings update rejected",
+                event="settings_update_rejected",
+                error_code="SET-001",
+                operation="settings_update",
+                details={"key": str(key), "reason": "control_center_owned"},
+            )
             abort(400, description=f"SET-001 請從評分控制中心修改：{key}")
         try:
             repository.update(
                 str(key), value, changed_by=g.user["id"], source_ip=request.remote_addr or "unknown"
             )
         except KeyError:
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "Settings update rejected",
+                event="settings_update_rejected",
+                error_code="SET-001",
+                operation="settings_update",
+                details={"key": str(key), "reason": "unknown_key"},
+            )
             abort(400, description=f"SET-001 未知設定：{key}")
         except ValueError as exc:
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "Settings update rejected",
+                event="settings_update_rejected",
+                error_code="SET-002",
+                operation="settings_update",
+                failure_class=type(exc).__name__,
+                details={"key": str(key), "reason": "validation"},
+            )
             abort(400, description=f"SET-002 {exc}")
     configure_logging(settings_repository=repository)
     current_app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(
         minutes=int(repository.get("security.session_minutes", 30))
     )
+    restart_keys = [
+        str(key)
+        for key in payload
+        if SETTING_DEFINITIONS.get(str(key), {}).get("restart", False)
+    ]
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "Settings updated",
+        event="settings_updated",
+        operation="settings_update",
+        details={
+            "keys": sorted(str(key) for key in payload),
+            "count": len(payload),
+            "log_changes": log_changes,
+        },
+    )
+    if restart_keys:
+        log_event(
+            LOGGER,
+            logging.WARNING,
+            "Settings changes require restart",
+            event="settings_restart_required",
+            operation="settings_update",
+            details={"keys": restart_keys},
+        )
     return {"status": "ok", "updated": len(payload)}
 
 

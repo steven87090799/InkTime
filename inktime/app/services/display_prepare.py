@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+import logging
+import time
 import re
 from typing import Any
 
 from inktime.app.db import Database
+from inktime.app.core.logging import log_event
+
+
+LOGGER = logging.getLogger("display_prepare")
 
 
 _CLOCK = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
@@ -138,6 +144,14 @@ class DisplayPreparationService:
         return list(dict.fromkeys(found[device_id] for device_id in config.device_ids))
 
     def prepare(self, raw_config: Any, *, created_by: str) -> dict:
+        started = time.monotonic()
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Display preparation started",
+            event="display_prepare_started",
+            operation="display_prepare",
+        )
         config = DisplayPrepareConfig.from_mapping(raw_config)
         candidates = self.render_service.select_candidates_details(
             config.output_count,
@@ -150,6 +164,18 @@ class DisplayPreparationService:
                 raise ValueError("DISPLAY-003 AI 尚未完成，排程依設定失敗")
             raise ValueError("DISPLAY-003 沒有既有且符合資格的分析結果")
         photo_ids = [str(row["id"]) for row in candidates]
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "Display preparation selection completed",
+            event="display_prepare_selection_completed",
+            operation="display_prepare",
+            details={
+                "photo_count": len(photo_ids),
+                "device_count": len(config.device_ids),
+                "output_count": config.output_count,
+            },
+        )
         target = self.render_service._today()
         try:
             publish_kwargs: dict[str, Any] = {
@@ -164,15 +190,42 @@ class DisplayPreparationService:
                 publish_kwargs["profile_keys"] = self._profiles(config)
             result = self.render_service.publish(photo_ids, created_by, **publish_kwargs)
         except Exception as exc:
+            log_event(
+                LOGGER,
+                logging.ERROR,
+                "Display preparation failed",
+                event="display_prepare_failed",
+                error_code=str(getattr(exc, "code", "DISPLAY-005")),
+                operation="display_prepare",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                failure_class=type(exc).__name__,
+                retryable=False,
+                details={"fallback": config.render_fallback},
+            )
             if config.render_fallback == "keep_current":
                 raise ValueError(
                     "DISPLAY-005 渲染失敗；已保留目前正式 Release，排程未標記成功"
                 ) from exc
             raise
-        return {
+        prepared = {
             "release": result,
             "photo_ids": photo_ids,
             "target_display_times": config.target_times(target),
             "preparation_times": config.preparation_times(target),
             "output_count": len(photo_ids),
         }
+        release = result if isinstance(result, dict) else {}
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Display preparation release is ready",
+            event="display_prepare_release_ready",
+            release_id=str(
+                release.get("release_id")
+                or next(iter(release.get("device_releases", {}).values()), "")
+            ),
+            operation="display_prepare",
+            duration_ms=int((time.monotonic() - started) * 1000),
+            details={"photo_count": len(photo_ids), "output_count": config.output_count},
+        )
+        return prepared

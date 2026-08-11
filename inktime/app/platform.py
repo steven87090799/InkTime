@@ -5,7 +5,10 @@ import fcntl
 import logging
 from pathlib import Path
 import os
+import re
 import secrets
+import time
+from uuid import uuid4
 
 from flask import Flask, flash, g, redirect, request, session, url_for
 from jinja2 import BaseLoader, ChoiceLoader, FileSystemLoader
@@ -53,11 +56,19 @@ from inktime.app.services.scoring_lab import ScoringLabService
 from inktime.app.services.notifications import DeviceNotificationService
 from inktime.app.services.device_energy import DeviceEnergyService
 from inktime.app.services.weather import WeatherService
-from inktime.app.core.logging import configure_logging, log_event
+from inktime.app.core.logging import (
+    bind_log_context,
+    clear_log_context,
+    configure_logging,
+    log_event,
+    should_log_rate_limited,
+)
 from inktime.app.web.access import csrf_token, verify_csrf
 
 
 LOGGER = logging.getLogger("platform")
+REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+QUIET_REQUEST_ENDPOINTS = {"health.live", "health.ready", "static"}
 
 
 def _persistent_secret(path: Path) -> str:
@@ -78,7 +89,7 @@ def _persistent_secret(path: Path) -> str:
         return value
 
 
-def initialize_platform(
+def _initialize_platform(
     app: Flask,
     *,
     database_path: Path,
@@ -88,10 +99,36 @@ def initialize_platform(
     testing: bool = False,
 ) -> Flask:
     configure_logging()
+    bootstrap_started = time.perf_counter()
+    log_event(
+        LOGGER,
+        logging.DEBUG,
+        "InkTime 平台初始化開始",
+        event="bootstrap_started",
+        phase="bootstrap",
+        details={"testing": testing},
+    )
     data_dir.mkdir(parents=True, exist_ok=True)
     release_dir.mkdir(parents=True, exist_ok=True)
     database = Database(database_path)
+    migration_started = time.perf_counter()
+    log_event(
+        LOGGER,
+        logging.DEBUG,
+        "資料庫 migration 檢查開始",
+        event="migration_check_started",
+        phase="migration",
+    )
     migrate(database, None if testing else data_dir / "backups")
+    log_event(
+        LOGGER,
+        logging.DEBUG,
+        "資料庫 migration 檢查完成",
+        event="migration_check_completed",
+        phase="migration",
+        duration_ms=int((time.perf_counter() - migration_started) * 1000),
+        details={"schema_version": database.schema_version()},
+    )
     if not testing:
         # 每個正式程序持有 shared runtime lock；離線還原必須等所有程序停止。
         app.extensions["inktime_runtime_lock"] = database.acquire_runtime_lock(exclusive=False)
@@ -121,6 +158,18 @@ def initialize_platform(
     schedule_repository = ScheduledTaskRepository(database)
     schedule_repository.ensure_defaults(str(settings_repository.get("general.timezone", "Asia/Taipei")))
     configure_logging(settings_repository=settings_repository)
+    log_event(
+        LOGGER,
+        logging.DEBUG,
+        "Runtime 設定已解析",
+        event="runtime_config_resolved",
+        phase="configuration",
+        details={
+            "log_format": str(settings_repository.get("system.log_format", "human")),
+            "log_level": str(settings_repository.get("system.log_level", "INFO")),
+            "timezone": str(settings_repository.get("general.timezone", "Asia/Taipei")),
+        },
+    )
     app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(
         minutes=int(settings_repository.get("security.session_minutes", 30))
     )
@@ -191,7 +240,29 @@ def initialize_platform(
     app.extensions["inktime_display_preparation_service"] = DisplayPreparationService(
         database, app.extensions["inktime_render_service"]
     )
+    log_event(
+        LOGGER,
+        logging.DEBUG,
+        "Runtime service graph is ready",
+        event="service_graph_ready",
+        phase="bootstrap",
+        details={"registered_extensions": len(app.extensions)},
+    )
+    reconciliation_started = time.perf_counter()
     app.extensions["inktime_release_reconciliation"] = release_coordinator.reconcile()
+    reconciliation = app.extensions["inktime_release_reconciliation"]
+    reconciliation_actions = sum(
+        int(value) for value in reconciliation.values() if isinstance(value, (int, bool))
+    ) if isinstance(reconciliation, dict) else 0
+    log_event(
+        LOGGER,
+        logging.INFO if reconciliation_actions else logging.DEBUG,
+        "Release 一致性檢查完成",
+        event="release_reconciliation_completed",
+        phase="reconciliation",
+        duration_ms=int((time.perf_counter() - reconciliation_started) * 1000),
+        details={"actions": reconciliation_actions},
+    )
 
     web_root = Path(__file__).resolve().parent / "web"
     loaders: list[BaseLoader] = [FileSystemLoader(str(web_root / "templates"))]
@@ -227,6 +298,27 @@ def initialize_platform(
         "resilience.queue_item_file",
         "static",
     }
+
+    @app.before_request
+    def establish_request_context():
+        supplied = request.headers.get("X-Request-ID", "").strip()
+        request_id = supplied if REQUEST_ID_PATTERN.fullmatch(supplied) else uuid4().hex
+        g.inktime_request_started = time.perf_counter()
+        g.inktime_request_id = request_id
+        g.inktime_log_context_token = bind_log_context(
+            request_id=request_id,
+            trace_id=request_id,
+            operation="http_request",
+            http_method=request.method,
+        )
+        if request.endpoint not in QUIET_REQUEST_ENDPOINTS:
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "HTTP request received",
+                event="request_received",
+                details={"endpoint": request.endpoint or "unmatched"},
+            )
 
     @app.before_request
     def enforce_access():
@@ -271,11 +363,98 @@ def initialize_platform(
         message = remainder if separator else description
         return {"error_code": error_code, "message": message}, exc.code or 500
 
+    @app.after_request
+    def complete_request(response):
+        request_id = getattr(g, "inktime_request_id", uuid4().hex)
+        response.headers["X-Request-ID"] = request_id
+        endpoint = request.endpoint or "unmatched"
+        if endpoint not in QUIET_REQUEST_ENDPOINTS:
+            status = int(response.status_code)
+            level = logging.ERROR if status >= 500 else logging.DEBUG
+            event = "request_rejected" if status >= 400 else "request_completed"
+            if status >= 500 or LOGGER.isEnabledFor(logging.DEBUG) or (
+                status in {401, 403, 429}
+                and should_log_rate_limited(f"http:{endpoint}:{status}", interval_seconds=60)
+            ):
+                log_event(
+                    LOGGER,
+                    level,
+                    "HTTP request completed" if status < 400 else "HTTP request rejected",
+                    event=event,
+                    http_status=status,
+                    duration_ms=int(
+                        (time.perf_counter() - getattr(g, "inktime_request_started", time.perf_counter()))
+                        * 1000
+                    ),
+                    details={
+                        "endpoint": endpoint,
+                        "actor_type": "user" if getattr(g, "user", None) is not None else "anonymous",
+                    },
+                )
+        return response
+
+    @app.teardown_request
+    def clear_request_context(exc):
+        try:
+            if exc is not None:
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "HTTP request raised an unexpected exception",
+                    event="request_failed",
+                    error_code="HTTP-500",
+                    failure_class=type(exc).__name__,
+                    retryable=False,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+        finally:
+            token = getattr(g, "inktime_log_context_token", None)
+            if token is not None:
+                g.inktime_log_context_token = None
+                clear_log_context(token)
+
     log_event(
         LOGGER,
         logging.INFO,
         "InkTime 平台已完成初始化",
         event="platform_ready",
+        phase="bootstrap",
+        duration_ms=int((time.perf_counter() - bootstrap_started) * 1000),
         details={"version": __version__, "testing": testing},
     )
     return app
+
+
+def initialize_platform(
+    app: Flask,
+    *,
+    database_path: Path,
+    data_dir: Path,
+    release_dir: Path,
+    photo_dir: Path | None = None,
+    testing: bool = False,
+) -> Flask:
+    """Initialize the platform with a stable terminal failure boundary."""
+
+    try:
+        return _initialize_platform(
+            app,
+            database_path=database_path,
+            data_dir=data_dir,
+            release_dir=release_dir,
+            photo_dir=photo_dir,
+            testing=testing,
+        )
+    except Exception as exc:
+        log_event(
+            LOGGER,
+            logging.CRITICAL,
+            "InkTime 平台初始化失敗",
+            event="bootstrap_failed",
+            error_code="BOOTSTRAP-001",
+            phase="bootstrap",
+            failure_class=type(exc).__name__,
+            retryable=False,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        raise

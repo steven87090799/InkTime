@@ -8,13 +8,21 @@ import re
 import secrets
 import threading
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
-SENSITIVE_KEY = re.compile(r"(api[_-]?key|token|password|secret|authorization|cookie|session)", re.IGNORECASE)
+SENSITIVE_KEY = re.compile(
+    r"(api[_-]?key|apikey|token|password|secret|authorization|cookie|session|csrf|pairing[_-]?code|device[_-]?secret)",
+    re.IGNORECASE,
+)
 SENSITIVE_TEXT = re.compile(
-    r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]{8,}|\b(?:sk-|itd_)[A-Za-z0-9._~-]{8,}|\b(?:api[_-]?key|token|authorization)=([^\s&]+)"
+    r"(?i)(\b(?:Bearer|Basic)\s+)[A-Za-z0-9._~+/=-]{4,}|\b(?:sk-|itd_)[A-Za-z0-9._~-]{8,}|\b(?:api[_-]?key|apikey|token|password|secret|authorization|cookie|session|csrf|pairing[_-]?code|device[_-]?secret)=([^\s&]+)"
+)
+SENSITIVE_QUERY_KEY = re.compile(
+    r"^(?:api[_-]?key|apikey|key|token|secret|signature|sig|authorization|password)$",
+    re.IGNORECASE,
 )
 _REGISTERED_SECRETS: set[str] = set()
 _SECRET_LOCK = threading.RLock()
@@ -37,10 +45,25 @@ def redact_text(value: str) -> str:
         registered = sorted(_REGISTERED_SECRETS, key=len, reverse=True)
     for secret in registered:
         result = result.replace(secret, "[已遮蔽]")
-    return SENSITIVE_TEXT.sub(
+    result = SENSITIVE_TEXT.sub(
         lambda match: f"{match.group(1)}[已遮蔽]" if match.group(1) else "[已遮蔽]",
         result,
     )
+    # Redact credential-like URL query parameters while preserving the host and
+    # path category needed for transport diagnostics.
+    def redact_url(match: re.Match[str]) -> str:
+        candidate = match.group(0)
+        try:
+            parts = urlsplit(candidate)
+            query = [
+                (key, "[已遮蔽]" if SENSITIVE_QUERY_KEY.fullmatch(key) else item)
+                for key, item in parse_qsl(parts.query, keep_blank_values=True)
+            ]
+            return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+        except (TypeError, ValueError):
+            return "[已遮蔽 URL]"
+
+    return re.sub(r"https?://[^\s<>'\"]+", redact_url, result)
 
 
 def hash_password(password: str) -> str:

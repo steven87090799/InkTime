@@ -10,6 +10,8 @@ import threading
 import time
 from typing import IO, Iterator
 
+from inktime.app.core.logging import log_event, should_log_rate_limited
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -76,12 +78,35 @@ class ManagedConnection(sqlite3.Connection):
                     self._writer_metrics["writer_lock_wait_max_ms"] = max(
                         float(self._writer_metrics["writer_lock_wait_max_ms"]), waited_ms
                     )
+                if waited_ms >= 250 and should_log_rate_limited(
+                    "db-writer-wait-slow", interval_seconds=30
+                ):
+                    log_event(
+                        LOGGER,
+                        logging.WARNING,
+                        "SQLite writer lock wait was slow",
+                        event="db_writer_wait_slow",
+                        operation="writer_lock",
+                        duration_ms=int(waited_ms),
+                        details={"wait_ms": round(waited_ms, 1)},
+                    )
                 return
             except BlockingIOError as exc:
                 if time.monotonic() >= deadline:
                     lock.close()
                     with self._writer_metrics_lock:
                         self._writer_metrics["busy_timeout_count"] += 1
+                    log_event(
+                        LOGGER,
+                        logging.ERROR,
+                        "SQLite writer lock timed out",
+                        event="db_writer_lock_timeout",
+                        error_code="DB-LOCK-001",
+                        operation="writer_lock",
+                        duration_ms=int((time.monotonic() - started) * 1000),
+                        failure_class=type(exc).__name__,
+                        retryable=True,
+                    )
                     raise sqlite3.OperationalError("database writer lock timeout") from exc
                 time.sleep(0.01)
 
@@ -202,9 +227,24 @@ class Database:
             connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
             try:
                 yield connection
-            except Exception:
+            except Exception as exc:
                 if connection.in_transaction:
                     connection.execute("ROLLBACK")
+                if should_log_rate_limited(
+                    f"db-transaction-failed:{type(exc).__name__}", interval_seconds=10
+                ):
+                    log_event(
+                        LOGGER,
+                        logging.ERROR,
+                        "SQLite transaction failed and was rolled back",
+                        event="db_transaction_failed",
+                        error_code="DB-TX-001",
+                        operation="transaction",
+                        duration_ms=int((time.monotonic() - started) * 1000),
+                        failure_class=type(exc).__name__,
+                        retryable=isinstance(exc, sqlite3.OperationalError),
+                        details={"immediate": immediate},
+                    )
                 raise
             else:
                 connection.execute("COMMIT")
@@ -216,7 +256,15 @@ class Database:
                         self._metrics["long_transaction_max_ms"] = max(
                             float(self._metrics["long_transaction_max_ms"]), duration_ms
                         )
-                    LOGGER.warning("SQLite long transaction duration_ms=%.1f", duration_ms)
+                    log_event(
+                        LOGGER,
+                        logging.WARNING,
+                        "SQLite transaction was slow",
+                        event="db_transaction_slow",
+                        operation="transaction",
+                        duration_ms=int(duration_ms),
+                        details={"immediate": immediate},
+                    )
 
     def observability(self) -> dict[str, float | int]:
         """回傳不含 SQL、Secret 或照片路徑的 SQLite 執行指標。"""
@@ -251,7 +299,18 @@ class Database:
         pragma = "PRAGMA integrity_check" if full else "PRAGMA quick_check"
         with self.session() as connection:
             row = connection.execute(pragma).fetchone()
-            return str(row[0]) if row else "unknown"
+            result = str(row[0]) if row else "unknown"
+        if result != "ok":
+            log_event(
+                LOGGER,
+                logging.CRITICAL,
+                "SQLite integrity check failed",
+                event="db_integrity_failed",
+                error_code="DB-INTEGRITY-001",
+                operation="integrity_check",
+                details={"full": full, "result": result[:256]},
+            )
+        return result
 
     def schema_version(self) -> int:
         with self.session() as connection:

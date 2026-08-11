@@ -9,7 +9,11 @@ import threading
 import time
 from pathlib import Path
 
-from inktime.app.core.logging import configure_logging, log_event
+from inktime.app.core.logging import (
+    configure_logging,
+    log_event,
+    should_log_rate_limited,
+)
 from inktime.app.workers.job_worker import BoundedJobWorker
 from inktime.app.workers.scanner import PhotoScanner
 from inktime.app.domain.photos import PhotoPreprocessor
@@ -27,6 +31,12 @@ class WorkerRunner:
 
     def request_stop(self, *_args) -> None:
         self.stop.set()
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Worker runner shutdown requested",
+            event="worker_shutdown_requested",
+        )
         if self.current:
             self.current.request_stop()
 
@@ -36,6 +46,15 @@ class WorkerRunner:
         if time.monotonic() - self._last_recovery_at >= 60:
             recovered = repository.recover_stale()
             self._last_recovery_at = time.monotonic()
+            if recovered:
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Recovered stale worker leases",
+                    event="worker_stale_lease_recovered",
+                    error_code="JOB-002",
+                    details={"recovered_items": recovered},
+                )
         processed_jobs = 0
         for job in repository.iter_runnable():
             if self.stop.is_set() or job["status"] not in {"running", "retrying"}:
@@ -87,7 +106,8 @@ class WorkerRunner:
                     event="job_item_failed",
                     error_code=str(getattr(exc, "code", "JOB-003")),
                     job_id=failed_job_id,
-                    details={"item_id": item_id, "sampled_failure_count": failure_count},
+                    job_item_id=item_id,
+                    details={"sampled_failure_count": failure_count},
                 )
 
             def log_scan_progress(scan: dict, *, job_id=str(job["id"])) -> None:
@@ -132,6 +152,21 @@ class WorkerRunner:
                 scanner_write_batch_size=scanner_write_batch_size,
                 scanner_missing_threshold_ratio=scanner_missing_threshold_ratio,
             ):
+                if should_log_rate_limited(
+                    f"job-processor:{job['id']}", interval_seconds=86_400
+                ):
+                    log_event(
+                        LOGGER,
+                        logging.DEBUG,
+                        "Job processor branch selected",
+                        event="job_processor_branch_selected",
+                        job_id=str(job["id"]),
+                        details={
+                            "job_kind": str(job["kind"]),
+                            "strategy": str(job["strategy"] or ""),
+                            "trigger": str(settings.get("trigger_source", "api")),
+                        },
+                    )
                 if job["kind"] == "scan":
                     scanner = PhotoScanner(
                         self.app.extensions["inktime_photo_repository"],
@@ -237,6 +272,15 @@ class WorkerRunner:
                     path = self.app.extensions["inktime_backup_service"].create()
                     return {"backup": path.name}
                 if job["kind"] == "cleanup":
+                    cleanup_started = time.monotonic()
+                    log_event(
+                        LOGGER,
+                        logging.INFO,
+                        "Thumbnail cache cleanup started",
+                        event="cleanup_started",
+                        job_id=str(job["id"]),
+                        phase="thumbnail_cache",
+                    )
                     with self.app.extensions["inktime_database"].session() as connection:
                         hashes = {
                             str(row[0]).casefold()
@@ -245,11 +289,22 @@ class WorkerRunner:
                             )
                         }
                     cache = self.app.extensions["inktime_thumbnail_cache"]
-                    return cache.cleanup(
+                    result = cache.cleanup(
                         max_bytes=int(settings.get("max_bytes", 5 * 1024 * 1024 * 1024)),
                         retention_days=int(settings.get("retention_days", 30)),
                         active_hashes=hashes,
                     )
+                    log_event(
+                        LOGGER,
+                        logging.INFO,
+                        "Thumbnail cache cleanup completed",
+                        event="cleanup_completed",
+                        job_id=str(job["id"]),
+                        phase="thumbnail_cache",
+                        duration_ms=int((time.monotonic() - cleanup_started) * 1000),
+                        details=result,
+                    )
+                    return result
                 return analysis.analyze_photo(
                     photo_id=item["photo_id"],
                     job_id=job["id"],
@@ -303,6 +358,23 @@ class WorkerRunner:
                 error_callback=log_failure,
                 timeout_seconds=int(settings.get("timeout_seconds", 0) or 0),
             )
+            job_started = time.monotonic()
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "Job dispatch selected",
+                event="job_dispatch_selected",
+                job_id=job["id"],
+                worker_id=self.current.worker_id,
+                details={
+                    "job_kind": str(job["kind"]),
+                    "strategy": str(job["strategy"] or ""),
+                    "execution_mode": "thread",
+                    "concurrency": self.current.concurrency,
+                    "timeout_seconds": self.current.timeout_seconds,
+                    "trigger": str(settings.get("trigger_source", "api")),
+                },
+            )
             log_event(
                 LOGGER,
                 logging.INFO,
@@ -311,7 +383,23 @@ class WorkerRunner:
                 job_id=job["id"],
                 details={"recovered_items": recovered},
             )
-            self.current.run_job(job["id"])
+            try:
+                self.current.run_job(job["id"])
+            except Exception as exc:
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "Worker job execution failed",
+                    event="job_execution_failed",
+                    error_code=str(getattr(exc, "code", "JOB-003")),
+                    job_id=job["id"],
+                    worker_id=self.current.worker_id,
+                    failure_class=type(exc).__name__,
+                    retryable=True,
+                    duration_ms=int((time.monotonic() - job_started) * 1000),
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+                raise
             finished = repository.get(job["id"])
             if finished is not None:
                 scheduled_task = settings.get("scheduled_task")
@@ -330,6 +418,8 @@ class WorkerRunner:
                     "工作處理告一段落",
                     event="job_finished",
                     job_id=job["id"],
+                    worker_id=self.current.worker_id,
+                    duration_ms=int((time.monotonic() - job_started) * 1000),
                     details={
                         "status": str(finished["status"]),
                         "completed": int(finished["completed_items"]),

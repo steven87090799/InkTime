@@ -1,36 +1,201 @@
 from __future__ import annotations
 
+from collections import OrderedDict
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from datetime import datetime, timezone
+from itertools import islice
 import json
 import logging
 import os
+import re
 import sys
-from typing import Any
+import threading
+import time
+import traceback
+from typing import Any, Iterator, Mapping
 
-from inktime.app.core.security import redact, redact_text
+from inktime.app.core.security import SENSITIVE_KEY, redact_text
 
 
+SCHEMA_VERSION = 1
+MAX_STRING_LENGTH = 2_048
+MAX_EXCEPTION_LENGTH = 2_048
+MAX_STACK_TRACE_LENGTH = 12_000
+MAX_DETAILS_ITEMS = 64
+MAX_DETAILS_DEPTH = 5
+
+# Keep every historic field and append new fields so existing consumers remain
+# compatible. Empty values are intentional: JSON has a stable query contract.
 STANDARD_FIELDS = {
+    "schema_version": SCHEMA_VERSION,
     "timestamp": "",
     "level": "",
     "component": "",
     "event": "",
-    "error_code": "",
     "message": "",
+    "error_code": "",
+    "trace_id": "",
+    "request_id": "",
+    "operation_id": "",
     "job_id": "",
+    "job_item_id": "",
+    "worker_id": "",
     "photo_id": "",
+    "batch_id": "",
+    "batch_item_id": "",
+    "release_id": "",
+    "device_id": "",
+    "queue_id": "",
+    "queue_item_id": "",
     "provider": "",
+    "provider_id": "",
     "model": "",
-    "duration_ms": 0,
+    "provider_request_id": "",
+    "task_key": "",
+    "schedule_id": "",
+    "stage": "",
+    "phase": "",
+    "operation": "",
+    "attempt": 0,
     "retry_count": 0,
+    "duration_ms": 0,
+    "http_method": "",
+    "http_status": 0,
+    "failure_class": "",
+    "retryable": False,
+    "ambiguous": False,
+    "process_role": "",
+    "pid": 0,
+    "thread_name": "",
+    "exception_type": "",
+    "exception_message": "",
+    "stack_trace": "",
     "details": {},
 }
 
 _ACTIVE_CONFIGURATION: tuple[str, str] | None = None
+_LOG_CONTEXT: ContextVar[dict[str, Any] | None] = ContextVar(
+    "inktime_log_context", default=None
+)
+_RATE_LIMIT_LOCK = threading.Lock()
+_RATE_LIMIT_STATE: OrderedDict[str, float] = OrderedDict()
+_MAX_RATE_LIMIT_KEYS = 256
+_SAFE_CONTEXT_KEY = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
+def _bounded(value: Any, *, depth: int = 0) -> Any:
+    """Return a JSON-safe, redacted and bounded diagnostic value."""
+
+    if depth >= MAX_DETAILS_DEPTH:
+        return "[truncated]"
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= MAX_DETAILS_ITEMS:
+                result["_truncated"] = True
+                break
+            safe_key = str(key)[:128]
+            result[safe_key] = (
+                "[已遮蔽]"
+                if SENSITIVE_KEY.search(safe_key)
+                else _bounded(item, depth=depth + 1)
+            )
+        return result
+    if isinstance(value, (list, tuple, set)):
+        values = list(islice(iter(value), MAX_DETAILS_ITEMS + 1))
+        result = [_bounded(item, depth=depth + 1) for item in values[:MAX_DETAILS_ITEMS]]
+        if len(values) > MAX_DETAILS_ITEMS:
+            result.append("[truncated]")
+        return result
+    if isinstance(value, str):
+        return redact_text(value)[:MAX_STRING_LENGTH]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return redact_text(str(value))[:MAX_STRING_LENGTH]
+
+
+def bind_log_context(**fields: Any) -> Token:
+    """Bind correlation fields for the current thread/async context.
+
+    The returned token should normally be passed to ``clear_log_context`` in a
+    ``finally`` block. Explicit fields supplied to ``log_event`` override these
+    defaults. Unknown keys are ignored to prevent accidental payload expansion.
+    """
+
+    current = dict(_LOG_CONTEXT.get() or {})
+    for key, value in fields.items():
+        if key in STANDARD_FIELDS and _SAFE_CONTEXT_KEY.fullmatch(key):
+            current[key] = _bounded(value)
+    return _LOG_CONTEXT.set(current)
+
+
+def get_log_context() -> dict[str, Any]:
+    return dict(_LOG_CONTEXT.get() or {})
+
+
+def clear_log_context(token: Token | None = None) -> None:
+    if token is not None:
+        _LOG_CONTEXT.reset(token)
+    else:
+        _LOG_CONTEXT.set({})
+
+
+@contextmanager
+def log_context(**fields: Any) -> Iterator[None]:
+    token = bind_log_context(**fields)
+    try:
+        yield
+    finally:
+        clear_log_context(token)
+
+
+def should_log_sample(index: int, *, first: int = 3, every: int = 100) -> bool:
+    """Bound high-cardinality loop logs without retaining per-entity state."""
+
+    normalized = max(0, int(index))
+    return normalized < max(0, int(first)) or (
+        every > 0 and normalized > 0 and normalized % int(every) == 0
+    )
+
+
+def should_log_rate_limited(
+    key: str,
+    *,
+    interval_seconds: float = 60.0,
+    now: float | None = None,
+) -> bool:
+    """Allow one event per bounded key/interval, evicting oldest keys."""
+
+    current = time.monotonic() if now is None else float(now)
+    safe_key = redact_text(str(key))[:128]
+    with _RATE_LIMIT_LOCK:
+        last = _RATE_LIMIT_STATE.get(safe_key)
+        if last is not None and current - last < max(0.0, float(interval_seconds)):
+            return False
+        _RATE_LIMIT_STATE[safe_key] = current
+        _RATE_LIMIT_STATE.move_to_end(safe_key)
+        while len(_RATE_LIMIT_STATE) > _MAX_RATE_LIMIT_KEYS:
+            _RATE_LIMIT_STATE.popitem(last=False)
+    return True
+
+
+def _safe_exception(record: logging.LogRecord) -> tuple[str, str, str]:
+    if not record.exc_info:
+        return "", "", ""
+    exc_type, exc, _tb = record.exc_info
+    type_name = getattr(exc_type, "__name__", type(exc).__name__ if exc else "Exception")
+    message = redact_text(str(exc or ""))[:MAX_EXCEPTION_LENGTH]
+    try:
+        rendered = "".join(traceback.format_exception(*record.exc_info))
+    except Exception:
+        rendered = f"{type_name}: {message}"
+    return type_name[:256], message, redact_text(rendered)[:MAX_STACK_TRACE_LENGTH]
 
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
+        exception_type, exception_message, stack_trace = _safe_exception(record)
         payload = dict(STANDARD_FIELDS)
         payload.update(
             {
@@ -38,25 +203,59 @@ class JsonFormatter(logging.Formatter):
                 "level": record.levelname.lower(),
                 "component": getattr(record, "component", record.name),
                 "event": getattr(record, "event", "log"),
-                "error_code": getattr(record, "error_code", ""),
-                "message": redact_text(record.getMessage()),
-                "job_id": getattr(record, "job_id", ""),
-                "photo_id": getattr(record, "photo_id", ""),
-                "provider": getattr(record, "provider", ""),
-                "model": getattr(record, "model", ""),
-                "duration_ms": getattr(record, "duration_ms", 0),
-                "retry_count": getattr(record, "retry_count", 0),
-                "details": getattr(record, "details", {}),
+                "message": redact_text(record.getMessage())[:MAX_STRING_LENGTH],
+                "process_role": getattr(
+                    record, "process_role", os.environ.get("INKTIME_PROCESS_ROLE", "")
+                ),
+                "pid": getattr(record, "pid", record.process),
+                "thread_name": getattr(record, "thread_name", record.threadName),
+                "exception_type": getattr(record, "exception_type", exception_type),
+                "exception_message": getattr(record, "exception_message", exception_message),
+                "stack_trace": getattr(record, "stack_trace", stack_trace),
             }
         )
-        return json.dumps(redact(payload), ensure_ascii=False, default=str)
+        for key in STANDARD_FIELDS:
+            if key in {"schema_version", "timestamp", "level", "component", "message"}:
+                continue
+            if hasattr(record, key):
+                payload[key] = getattr(record, key)
+        return json.dumps(_bounded(payload), ensure_ascii=False, default=str)
 
 
 class HumanFormatter(logging.Formatter):
+    _IDENTIFIERS = (
+        ("event", "event"),
+        ("error_code", "code"),
+        ("request_id", "request"),
+        ("job_id", "job"),
+        ("job_item_id", "item"),
+        ("photo_id", "photo"),
+        ("batch_id", "batch"),
+        ("release_id", "release"),
+        ("device_id", "device"),
+        ("provider", "provider"),
+        ("stage", "stage"),
+        ("attempt", "attempt"),
+        ("duration_ms", "duration_ms"),
+    )
+
     def format(self, record: logging.LogRecord) -> str:
-        error_code = getattr(record, "error_code", "")
-        prefix = f"[{record.levelname}] [{record.name}]"
-        return f"{prefix}{f' [{error_code}]' if error_code else ''} {redact_text(record.getMessage())}"
+        component = getattr(record, "component", record.name)
+        prefix = f"[{record.levelname}] [{component}]"
+        parts = []
+        for field, label in self._IDENTIFIERS:
+            value = getattr(record, field, "")
+            if value is not None and value != "" and value != 0 and value is not False:
+                if field in {"event", "error_code"}:
+                    parts.append(f"[{redact_text(str(value))[:128]}]")
+                else:
+                    parts.append(f"{label}={redact_text(str(value))[:256]}")
+        _type, _message, stack_trace = _safe_exception(record)
+        rendered = f"{prefix}{(' ' + ' '.join(parts)) if parts else ''} "
+        rendered += redact_text(record.getMessage())[:MAX_STRING_LENGTH]
+        if stack_trace and record.levelno >= logging.ERROR:
+            rendered += "\n" + stack_trace
+        return rendered
 
 
 def configure_logging(
@@ -96,4 +295,22 @@ def configure_logging(
 
 
 def log_event(logger: logging.Logger, level: int, message: str, **fields: Any) -> None:
-    logger.log(level, message, extra=redact(fields))
+    """Emit one structured event; diagnostics must never break the operation."""
+
+    if not logger.isEnabledFor(level):
+        return
+    exc_info = fields.pop("exc_info", None)
+    merged = get_log_context()
+    merged.update(fields)
+    safe_fields = {
+        key: _bounded(value)
+        for key, value in merged.items()
+        if key in STANDARD_FIELDS and key not in {"timestamp", "level", "message"}
+    }
+    safe_fields.setdefault("component", logger.name)
+    try:
+        logger.log(level, redact_text(message)[:MAX_STRING_LENGTH], extra=safe_fields, exc_info=exc_info)
+    except Exception:
+        # Logging is intentionally best-effort. Never turn diagnostics into a
+        # production failure or recursively log a formatter failure.
+        return

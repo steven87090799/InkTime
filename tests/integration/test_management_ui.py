@@ -39,6 +39,7 @@ def test_primary_management_pages_render(client, app):
     ):
         response = client.get(path)
         assert response.status_code == 200, path
+        assert response.headers["X-Request-ID"]
         assert "zh-Hant-TW" in response.get_data(as_text=True)
 
     simulator = client.get("/simulator").get_data(as_text=True)
@@ -47,6 +48,15 @@ def test_primary_management_pages_render(client, app):
     settings = client.get("/settings").get_data(as_text=True)
     assert "Good Display 原廠相容" in settings
     assert "照片平滑（減少色塊／雜點）" in settings
+
+
+def test_request_id_accepts_only_bounded_trusted_format(client):
+    accepted = client.get("/health/live", headers={"X-Request-ID": "edge.req-123:abc"})
+    rejected = client.get("/health/live", headers={"X-Request-ID": "secret value/" + "x" * 200})
+
+    assert accepted.headers["X-Request-ID"] == "edge.req-123:abc"
+    assert rejected.headers["X-Request-ID"] != "secret value/" + "x" * 200
+    assert len(rejected.headers["X-Request-ID"]) == 32
 
 
 def test_device_energy_dashboard_uses_telemetry_and_audited_measurements(client, app):

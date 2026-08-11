@@ -1,5 +1,17 @@
 name: inktime
 
+x-common-environment: &common-environment
+  # 所有排程、歷史今日與 Log 時間使用的時區。
+  TZ: ${TZ:-Asia/Taipei}
+  # 只有經 HTTPS 反向代理時設為 1，讓 Session Cookie 僅透過 HTTPS 傳送。
+  INKTIME_COOKIE_SECURE: ${INKTIME_COOKIE_SECURE:-0}
+  # 容器預設輸出 JSON Log，方便 NAS 或集中式 Log 系統收集。
+  INKTIME_LOG_FORMAT: ${INKTIME_LOG_FORMAT:-json}
+  # 應用 Log 啟動預設；服務啟動後可在 Web 設定頁動態調整。
+  INKTIME_LOG_LEVEL: ${INKTIME_LOG_LEVEL:-INFO}
+  # Gunicorn HTTP access log 預設關閉，避免健康檢查與裝置輪詢寫滿 Log。
+  INKTIME_ACCESS_LOG: ${INKTIME_ACCESS_LOG:-0}
+
 # 三個服務共用同一套映像、環境變數、資料掛載與安全設定。
 # YAML anchor 只減少重複內容，不會另外建立名為 common 的容器。
 x-common: &common
@@ -9,17 +21,7 @@ x-common: &common
   restart: unless-stopped
   init: true
   stop_grace_period: 45s
-  environment:
-    # 所有排程、歷史今日與 Log 時間使用的時區。
-    TZ: ${TZ:-Asia/Taipei}
-    # 只有經 HTTPS 反向代理時設為 1，讓 Session Cookie 僅透過 HTTPS 傳送。
-    INKTIME_COOKIE_SECURE: ${INKTIME_COOKIE_SECURE:-0}
-    # 容器預設輸出 JSON Log，方便 NAS 或集中式 Log 系統收集。
-    INKTIME_LOG_FORMAT: ${INKTIME_LOG_FORMAT:-json}
-    # 應用 Log 啟動預設；服務啟動後可在 Web 設定頁動態調整。
-    INKTIME_LOG_LEVEL: ${INKTIME_LOG_LEVEL:-INFO}
-    # Gunicorn HTTP access log 預設關閉，避免健康檢查與裝置輪詢寫滿 Log。
-    INKTIME_ACCESS_LOG: ${INKTIME_ACCESS_LOG:-0}
+  environment: *common-environment
   volumes:
     # 可寫資料：SQLite、Session Key、縮圖、字型、備份與發布版本。
     - ${INKTIME_DATA_PATH:-./data}:/data
@@ -43,6 +45,9 @@ services:
   # Web 管理介面、健康檢查與 ESP32 下載 API；不執行長時間照片分析。
   inktime-web:
     <<: *common
+    environment:
+      <<: *common-environment
+      INKTIME_PROCESS_ROLE: web
     # 只建置一次；Worker 與 Scheduler 直接重用完全相同的映像。
     build:
       context: .
@@ -62,6 +67,9 @@ services:
   # 背景 Worker：照片掃描、預處理、模型分析、重試與渲染工作。
   inktime-worker:
     <<: *common
+    environment:
+      <<: *common-environment
+      INKTIME_PROCESS_ROLE: worker
     command: ["python", "-m", "inktime.app.workers.runner"]
     healthcheck:
       test: ["CMD", "python", "scripts/container_health.py", "worker"]
@@ -82,6 +90,9 @@ services:
   # Scheduler：週期性工作、逾期租約回收、自動備份與保留策略。
   inktime-scheduler:
     <<: *common
+    environment:
+      <<: *common-environment
+      INKTIME_PROCESS_ROLE: scheduler
     command: ["python", "-m", "inktime.app.workers.scheduler"]
     healthcheck:
       test: ["CMD", "python", "scripts/container_health.py", "scheduler"]

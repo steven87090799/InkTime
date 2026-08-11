@@ -5,8 +5,10 @@ import calendar
 from hashlib import sha256
 from datetime import date, datetime, timedelta, timezone
 import json
+import logging
 from pathlib import Path
 import random
+import time
 from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -32,6 +34,7 @@ from inktime.app.repositories.render_candidates import RenderCandidateRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.services.weather import WeatherService
 from inktime.app.services.release_coordinator import ReleaseCoordinator
+from inktime.app.core.logging import log_event, should_log_rate_limited
 
 
 LAYOUTS = {
@@ -46,6 +49,7 @@ LAYOUTS = {
 FRAME_ORIENTATIONS = {"portrait": "直向", "landscape": "橫向"}
 FIT_MODES = {"contain": "完整顯示（建議）", "cover": "填滿並裁切"}
 PORTRAIT_ONLY_LAYOUTS = {"calendar", "weather_sensor"}
+LOGGER = logging.getLogger("render")
 
 
 class RenderService:
@@ -210,8 +214,18 @@ class RenderService:
                 values = semantic.get("values", {}) if isinstance(semantic, dict) else {}
                 primary["city"] = values.get("city_candidate")
                 primary["types"] = json.loads(str(primary_analysis["types_json"] or "[]"))
-            except (TypeError, ValueError, json.JSONDecodeError):
-                pass
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                if should_log_rate_limited("render-primary-metadata-invalid", interval_seconds=60):
+                    log_event(
+                        LOGGER,
+                        logging.WARNING,
+                        "Invalid primary analysis metadata was ignored during pairing",
+                        event="render_metadata_fallback",
+                        error_code="RENDER-METADATA-001",
+                        photo_id=str(primary["id"]),
+                        failure_class=type(exc).__name__,
+                        retryable=False,
+                    )
         candidates: list[dict[str, Any]] = []
         for stored in rows:
             row = dict(stored)
@@ -222,8 +236,21 @@ class RenderService:
                 values = semantic.get("values", {}) if isinstance(semantic, dict) else {}
                 row["city"] = values.get("city_candidate")
                 row["types"] = json.loads(str(row.get("types_json") or "[]"))
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
                 row["city"], row["types"] = None, []
+                if should_log_rate_limited(
+                    "render-candidate-metadata-invalid", interval_seconds=60
+                ):
+                    log_event(
+                        LOGGER,
+                        logging.WARNING,
+                        "Invalid candidate analysis metadata was ignored during pairing",
+                        event="render_metadata_fallback",
+                        error_code="RENDER-METADATA-001",
+                        photo_id=str(row["id"]),
+                        failure_class=type(exc).__name__,
+                        retryable=False,
+                    )
             candidates.append(row)
         return candidates
 
@@ -366,6 +393,7 @@ class RenderService:
         fit_mode: str | None = None,
         device_config: dict[str, Any] | None = None,
     ) -> Image.Image:
+        started = time.monotonic()
         photo = self.ensure_photo_features(photo_id)
         path = safe_join(Path(photo["root_path"]), photo["relative_path"])
         caption = self._caption(photo_id)
@@ -396,8 +424,44 @@ class RenderService:
             (height, width) if effective_orientation == "landscape" else (width, height)
         )
 
+        debug_sampled = LOGGER.isEnabledFor(logging.DEBUG) and should_log_rate_limited(
+            f"render-photo:{layout_key}:{effective_orientation}", interval_seconds=1
+        )
+        if debug_sampled:
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "Photo render started",
+                event="render_started",
+                photo_id=photo_id,
+                operation="render_photo",
+                details={
+                    "dimensions": [frame_width, frame_height],
+                    "layout": layout_key,
+                    "fit_mode": fit_mode_key,
+                    "orientation": effective_orientation,
+                },
+            )
+
         def finish(canvas: Image.Image) -> Image.Image:
-            return self._physical_frame(canvas, effective_orientation)
+            result = self._physical_frame(canvas, effective_orientation)
+            if debug_sampled:
+                log_event(
+                    LOGGER,
+                    logging.DEBUG,
+                    "Photo render completed",
+                    event="render_completed",
+                    photo_id=photo_id,
+                    operation="render_photo",
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    details={
+                        "dimensions": list(result.size),
+                        "layout": layout_key,
+                        "fit_mode": fit_mode_key,
+                        "orientation": effective_orientation,
+                    },
+                )
+            return result
 
         with Image.open(path) as opened:
             source = ImageOps.exif_transpose(opened).convert("RGB")
@@ -656,6 +720,68 @@ class RenderService:
         history: dict[str, str] | None = None,
         device_ids: list[str] | None = None,
     ) -> dict:
+        started = time.monotonic()
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Render publication started",
+            event="render_publish_started",
+            operation="render_publish",
+            details={
+                "requested_photo_count": len(photo_ids),
+                "profile_count": len(profile_keys or []),
+                "device_count": len(device_ids or []),
+                "selection_mode": "explicit" if photo_ids else "automatic",
+            },
+        )
+        try:
+            result = self._publish(
+                photo_ids,
+                created_by,
+                profile_keys=profile_keys,
+                history=history,
+                device_ids=device_ids,
+            )
+        except Exception as exc:
+            log_event(
+                LOGGER,
+                logging.ERROR,
+                "Render publication failed",
+                event="render_failed",
+                error_code=str(getattr(exc, "code", "RENDER-010")),
+                operation="render_publish",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                failure_class=type(exc).__name__,
+                retryable=False,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            raise
+        release_id = ""
+        if isinstance(result, dict):
+            release_id = str(
+                result.get("release_id")
+                or next(iter(result.get("device_releases", {}).values()), "")
+            )
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Render publication completed",
+            event="render_completed",
+            release_id=release_id,
+            operation="render_publish",
+            duration_ms=int((time.monotonic() - started) * 1000),
+            details={"requested_photo_count": len(photo_ids)},
+        )
+        return result
+
+    def _publish(
+        self,
+        photo_ids: list[str],
+        created_by: str,
+        profile_keys: list[str] | None = None,
+        history: dict[str, str] | None = None,
+        device_ids: list[str] | None = None,
+    ) -> dict:
         started_at = datetime.now(timezone.utc)
         quantity = int(self.settings.get("render.quantity", 5))
         layout_key = str(self.settings.get("render.layout", "photo_info"))
@@ -668,6 +794,18 @@ class RenderService:
         else:
             # 明確指定不合格照片必須穩定失敗；不得靜默改選其他照片。
             selected = [str(row["id"]) for row in self.candidates.require(selected)]
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "Render candidates selected",
+            event="render_candidate_selected",
+            operation="render_publish",
+            details={
+                "selected_count": len(selected),
+                "selection_mode": "explicit" if photo_ids else "automatic",
+                "layout": layout_key,
+            },
+        )
         if device_ids:
             unique_device_ids = list(dict.fromkeys(str(value) for value in device_ids if str(value)))
             placeholders = ",".join("?" for _ in unique_device_ids)
@@ -871,7 +1009,22 @@ class RenderService:
                 release_id=release_id,
             )
             result["selection_trace_id"] = trace_id
-        except Exception:
+        except Exception as exc:
+            if should_log_rate_limited(
+                f"selection-trace-persistence:{type(exc).__name__}",
+                interval_seconds=30,
+            ):
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Selection trace persistence failed; publication result is unchanged",
+                    event="selection_trace_persistence_failed",
+                    error_code="TRACE-001",
+                    operation="selection_trace",
+                    failure_class=type(exc).__name__,
+                    retryable=True,
+                    details={"fallback": "publish_without_trace"},
+                )
             return
 
     def run_shadow_selection(self) -> dict[str, int]:
@@ -1039,7 +1192,20 @@ class RenderService:
                 if not path.is_file():
                     continue
                 refreshed = self._ensure_render_features(photo, path)
-            except (OSError, ValueError):
+            except (OSError, ValueError) as exc:
+                if should_log_rate_limited(
+                    "render-legacy-feature-refresh-failed", interval_seconds=30
+                ):
+                    log_event(
+                        LOGGER,
+                        logging.WARNING,
+                        "Legacy render feature refresh failed; candidate was skipped",
+                        event="render_feature_refresh_failed",
+                        error_code="IMG-LOCAL-001",
+                        photo_id=str(row["id"]),
+                        failure_class=type(exc).__name__,
+                        retryable=True,
+                    )
                 continue
             for key in (
                 "e6_score",

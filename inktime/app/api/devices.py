@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from flask import Blueprint, abort, current_app, render_template, request
 
 from inktime.app.core.paths import UnsafePathError, safe_join
-from inktime.app.core.logging import log_event
+from inktime.app.core.logging import log_event, should_log_rate_limited
 from inktime.app.domain.rendering import DISPLAY_PROFILES, DeviceTestReleaseStore
 from inktime.app.services.rendering import FIT_MODES, FRAME_ORIENTATIONS, LAYOUTS
 from inktime.app.repositories.devices import DeviceRateLimitError, DeviceRepository
@@ -28,6 +28,16 @@ def _repository() -> DeviceRepository:
 def _bearer_token() -> str:
     value = request.headers.get("Authorization", "")
     if not value.startswith("Bearer "):
+        if should_log_rate_limited("device-auth-missing", interval_seconds=30):
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "Device authentication credential was missing",
+                event="device_auth_failed",
+                error_code="DEVICE-001",
+                retryable=False,
+                details={"reason": "missing_bearer"},
+            )
         abort(401, description="DEVICE-001 裝置驗證失敗")
     return value[7:].strip()
 
@@ -36,9 +46,36 @@ def _authenticated_device():
     try:
         device = _repository().authenticate(_bearer_token(), request.remote_addr or "unknown")
     except DeviceRateLimitError:
+        if should_log_rate_limited("device-auth-rate-limited", interval_seconds=60):
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "Device authentication was rate limited",
+                event="device_auth_failed",
+                error_code="DEVICE-007",
+                retryable=True,
+                details={"reason": "rate_limited"},
+            )
         abort(429, description="DEVICE-007 裝置驗證嘗試過多，請稍後再試")
     if device is None:
+        if should_log_rate_limited("device-auth-failed", interval_seconds=30):
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "Device authentication failed",
+                event="device_auth_failed",
+                error_code="DEVICE-001",
+                retryable=False,
+                details={"reason": "invalid_credential"},
+            )
         abort(401, description="DEVICE-001 裝置驗證失敗")
+    log_event(
+        LOGGER,
+        logging.DEBUG,
+        "Device request authenticated",
+        event="device_request_authenticated",
+        device_id=str(device["id"]),
+    )
     return device
 
 
@@ -287,6 +324,14 @@ def latest_release():
     device = _authenticated_device()
     release_root = current_app.config["INKTIME_RELEASE_DIR"]
     profile_key = str(device["panel_profile"] or "safe_4c")
+    log_event(
+        LOGGER,
+        logging.DEBUG,
+        "Device requested its current release",
+        event="device_release_requested",
+        device_id=str(device["id"]),
+        details={"render_profile": profile_key},
+    )
     assignment = DeviceTestReleaseStore(release_root).active(str(device["id"]), profile_key)
     if assignment is not None:
         release_id = str(assignment["release_id"])
@@ -337,12 +382,21 @@ def latest_release():
         logging.DEBUG,
         "裝置取得發布 Manifest",
         event="device_manifest",
+        device_id=str(device["id"]),
+        release_id=release_id,
         details={
-            "device_id": str(device["id"]),
-            "release_id": release_id,
             "render_profile": profile_key,
             "config_version": int(device["config_version"]),
         },
+    )
+    log_event(
+        LOGGER,
+        logging.DEBUG,
+        "Device release manifest served",
+        event="device_release_served",
+        device_id=str(device["id"]),
+        release_id=release_id,
+        details={"render_profile": profile_key, "payload_count": len(manifest.get("files", []))},
     )
     return manifest
 
@@ -395,7 +449,9 @@ def release_file(release_id: str, filename: str):
         logging.DEBUG,
         "裝置下載發布檔案",
         event="device_download",
-        details={"device_id": str(device["id"]), "release_id": release_id, "filename": path.name},
+        device_id=str(device["id"]),
+        release_id=release_id,
+        details={"file_category": "payload" if filename.endswith(".bin") else "preview"},
     )
     return send_file(path, mimetype="application/octet-stream", conditional=True)
 
@@ -490,6 +546,8 @@ def report_status():
         "ESP32 回報異常" if error_code else "ESP32 狀態回報正常",
         event="device_status",
         error_code=error_code,
-        details={"device_id": str(device["id"]), "wifi_rssi": payload.get("wifi_rssi")},
+        device_id=str(device["id"]),
+        release_id=str(payload.get("release_id", ""))[:100],
+        details={"wifi_rssi": payload.get("wifi_rssi")},
     )
     return {"status": "ok"}

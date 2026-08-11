@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 from pathlib import Path
 from urllib.parse import urlencode
@@ -8,6 +9,7 @@ from urllib.parse import urlencode
 from flask import Blueprint, abort, current_app, g, render_template, request, send_file
 
 from inktime.app.core.paths import safe_join
+from inktime.app.core.logging import log_event, should_log_rate_limited
 from inktime.app.domain.analysis.schema import ALLOWED_TYPES
 from inktime.app.domain.analysis.scoring import (
     calculate_distinguishing_score,
@@ -19,6 +21,7 @@ from inktime.app.web.access import administrator_required, login_required
 
 bp = Blueprint("photos", __name__)
 PHOTO_PAGE_SIZE = 200
+LOGGER = logging.getLogger("photos")
 
 
 def _repository():
@@ -247,9 +250,20 @@ def photo_detail(photo_id: str):
         abort(404)
     try:
         photo = current_app.extensions["inktime_render_service"].ensure_photo_features(photo_id)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
         # 原檔暫時離線時仍允許查看既有中繼資料與模型結果。
-        pass
+        if should_log_rate_limited("photo-detail-feature-fallback", interval_seconds=30):
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "Photo detail used stored metadata because local feature refresh failed",
+                event="photo_feature_fallback",
+                error_code="IMG-LOCAL-001",
+                photo_id=photo_id,
+                failure_class=type(exc).__name__,
+                retryable=True,
+                details={"fallback": "stored_metadata"},
+            )
     location_name = current_app.extensions["inktime_location_resolver"].resolve(
         photo["gps_lat"],
         photo["gps_lon"],

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
+import logging
 import os
 from pathlib import Path
 import time
 from typing import Callable, Iterable, Iterator, Sequence
 
 from inktime.app.domain.photos import PhotoPreprocessor, ThumbnailCache
+from inktime.app.core.logging import log_event, should_log_sample
 from inktime.app.repositories.photos import (
     BatchPhotoResult,
     PhotoRepository,
@@ -32,6 +34,7 @@ VIDEO_EXTENSIONS = {
 }
 SCAN_MODES = {"incremental", "full", "metadata-only", "local-features-only", "manual"}
 TRIGGER_SOURCES = {"manual", "api", "scheduler", "virtual-display", "test"}
+LOGGER = logging.getLogger("scanner")
 
 
 @dataclass(frozen=True)
@@ -162,18 +165,63 @@ class PhotoScanner:
         progress_interval_items: int = 50,
         progress_interval_seconds: int = 300,
     ) -> dict:
+        started = time.monotonic()
         if mode not in SCAN_MODES:
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "Scan mode rejected",
+                event="scan_mode_rejected",
+                error_code="SCAN-003",
+                details={"mode": mode, "trigger_source": trigger_source},
+            )
             raise ValueError("SCAN-003 不支援的掃描模式")
         if trigger_source not in TRIGGER_SOURCES:
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "Scan trigger source rejected",
+                event="scan_trigger_rejected",
+                error_code="SCAN-004",
+                details={"mode": mode, "trigger_source": trigger_source},
+            )
             raise ValueError("SCAN-004 不支援的掃描來源")
         root = root.expanduser().resolve()
         if not root.is_dir():
+            log_event(
+                LOGGER,
+                logging.ERROR,
+                "Scan root validation failed",
+                event="scan_root_validation_failed",
+                error_code="SCAN-001",
+                stage="root_validation",
+                retryable=False,
+            )
             raise FileNotFoundError("SCAN-001 照片資料夾不存在或無法讀取")
         try:
             with os.scandir(root) as entries:
                 next(entries, None)
         except OSError as exc:
+            log_event(
+                LOGGER,
+                logging.ERROR,
+                "Scan root is not readable",
+                event="scan_root_validation_failed",
+                error_code="SCAN-002",
+                stage="root_validation",
+                retryable=True,
+                failure_class=type(exc).__name__,
+            )
             raise OSError("SCAN-002 照片資料夾無法讀取") from exc
+
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "Scan root validated",
+            event="scan_root_validated",
+            stage="root_validation",
+            details={"mode": mode, "trigger_source": trigger_source},
+        )
 
         disk_batch_size = max(100, min(int(disk_batch_size), 10_000))
         write_batch_size = max(100, min(int(write_batch_size), 2_000))
@@ -185,6 +233,30 @@ class PhotoScanner:
             mode=mode,
             trigger_source=trigger_source,
             missing_threshold_ratio=missing_threshold_ratio,
+        )
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Photo scan started",
+            event="scan_started",
+            operation_id=scan_id,
+            operation="photo_scan",
+            details={
+                "mode": mode,
+                "trigger_source": trigger_source,
+                "build_thumbnails": build_thumbnails,
+                "disk_batch_size": disk_batch_size,
+                "write_batch_size": write_batch_size,
+                "bounded_limit": limit,
+            },
+        )
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "Photo scan mode selected",
+            event="scan_mode_selected",
+            operation_id=scan_id,
+            details={"mode": mode, "trigger_source": trigger_source},
         )
         counts = {
             "checked": 0,
@@ -218,6 +290,21 @@ class PhotoScanner:
                     retryable=True,
                 )
             )
+            if should_log_sample(
+                major_io_errors - 1, first=3, every=progress_interval_items
+            ):
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Scan directory walk failed",
+                    event="scan_file_metadata_failed",
+                    error_code="SCAN-IO-002",
+                    operation_id=scan_id,
+                    stage="walk",
+                    failure_class=type(exc).__name__,
+                    retryable=True,
+                    details={"sample_index": major_io_errors},
+                )
 
         def report_progress(force: bool = False) -> None:
             nonlocal last_progress_at
@@ -272,6 +359,21 @@ class PhotoScanner:
                             retryable=isinstance(exc, OSError),
                         )
                     )
+                    if should_log_sample(
+                        counts["failed"] - 1, first=3, every=progress_interval_items
+                    ):
+                        log_event(
+                            LOGGER,
+                            logging.WARNING,
+                            "Scan file metadata failed",
+                            event="scan_file_metadata_failed",
+                            error_code="SCAN-IO-001",
+                            operation_id=scan_id,
+                            stage="stat",
+                            failure_class=type(exc).__name__,
+                            retryable=isinstance(exc, OSError),
+                            details={"sample_index": counts["failed"]},
+                        )
             if cancelled:
                 if errors:
                     self.repository.record_scan_errors(scan_id, errors)
@@ -338,6 +440,22 @@ class PhotoScanner:
                             photo_id=stored.id if stored else None,
                         )
                     )
+                    if should_log_sample(
+                        counts["failed"] - 1, first=3, every=progress_interval_items
+                    ):
+                        log_event(
+                            LOGGER,
+                            logging.WARNING,
+                            "Scan file decode or preprocessing failed",
+                            event="scan_file_decode_failed",
+                            error_code="SCAN-PHOTO-001",
+                            operation_id=scan_id,
+                            photo_id=stored.id if stored else "",
+                            stage="preprocess",
+                            failure_class=type(exc).__name__,
+                            retryable=isinstance(exc, OSError),
+                            details={"sample_index": counts["failed"]},
+                        )
 
             for seen_chunk in _slices(seen_without_write, write_batch_size):
                 self.repository.mark_seen_batch(scan_id, seen_chunk)
@@ -374,6 +492,23 @@ class PhotoScanner:
                         )
                         for item in prepared_chunk
                     )
+                    if should_log_sample(
+                        counts["failed"] - 1,
+                        first=3,
+                        every=progress_interval_items,
+                    ):
+                        log_event(
+                            LOGGER,
+                            logging.ERROR,
+                            "Scan database batch commit failed",
+                            event="scan_batch_commit_failed",
+                            error_code="SCAN-DB-001",
+                            operation_id=scan_id,
+                            stage="database",
+                            failure_class=type(exc).__name__,
+                            retryable=True,
+                            details={"batch_count": len(prepared_chunk)},
+                        )
                     continue
                 by_path: dict[str, BatchPhotoResult] = {
                     result.relative_path: result for result in batch_results
@@ -407,6 +542,39 @@ class PhotoScanner:
                                     photo_id=result.photo_id,
                                 )
                             )
+                            if should_log_sample(
+                                counts["failed"] - 1,
+                                first=3,
+                                every=progress_interval_items,
+                            ):
+                                log_event(
+                                    LOGGER,
+                                    logging.WARNING,
+                                    "Scan thumbnail generation failed",
+                                    event="scan_thumbnail_failed",
+                                    error_code="THUMB-001",
+                                    operation_id=scan_id,
+                                    photo_id=result.photo_id,
+                                    stage="thumbnail",
+                                    failure_class=type(exc).__name__,
+                                    retryable=isinstance(exc, OSError),
+                                    details={"sample_index": counts["failed"]},
+                                )
+                if prepared_chunk and should_log_sample(
+                    counts["processed"], first=1, every=max(write_batch_size, progress_interval_items)
+                ):
+                    log_event(
+                        LOGGER,
+                        logging.DEBUG,
+                        "Scan batch committed",
+                        event="scan_batch_committed",
+                        operation_id=scan_id,
+                        details={
+                            "batch_count": len(prepared_chunk),
+                            "processed": counts["processed"],
+                            "failed": counts["failed"],
+                        },
+                    )
             if errors:
                 self.repository.record_scan_errors(scan_id, errors)
             if walk_errors:
@@ -430,7 +598,7 @@ class PhotoScanner:
             major_io_errors=major_io_errors,
         )
         report_progress(force=True)
-        return {
+        result = {
             "library_id": library_id,
             "scan_id": scan_id,
             "mode": mode,
@@ -441,3 +609,33 @@ class PhotoScanner:
             "warning_code": scan["warning_code"],
             "cancelled": bool(scan["cancelled"]),
         }
+        warning_code = str(scan["warning_code"] or "")
+        if warning_code:
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "Scan missing-photo safety threshold triggered",
+                event="scan_missing_safety_triggered",
+                error_code=warning_code,
+                operation_id=scan_id,
+                stage="reconciliation",
+                details={
+                    "candidate_missing": int(scan["candidate_missing_count"]),
+                    "missing_marked": int(scan["missing_marked_count"]),
+                },
+            )
+        log_event(
+            LOGGER,
+            logging.WARNING if cancelled or counts["failed"] else logging.INFO,
+            "Photo scan cancelled" if cancelled else "Photo scan completed",
+            event="scan_cancelled" if cancelled else "scan_completed",
+            operation_id=scan_id,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            details={
+                **counts,
+                "candidate_missing": int(scan["candidate_missing_count"]),
+                "missing_marked": int(scan["missing_marked_count"]),
+                "reconciliation_status": str(scan["reconciliation_status"]),
+            },
+        )
+        return result

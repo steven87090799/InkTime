@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 from hashlib import sha256
+import logging
 import os
 from pathlib import Path
 import re
@@ -10,8 +11,11 @@ import time
 
 from PIL import Image, ImageOps
 
+from inktime.app.core.logging import log_event, should_log_rate_limited
+
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+LOGGER = logging.getLogger("thumbnail_cache")
 
 
 class ThumbnailCache:
@@ -68,6 +72,17 @@ class ThumbnailCache:
                 os.utime(destination, ns=(time.time_ns(), cached_stat.st_mtime_ns))
                 return destination
             if destination.exists():
+                if should_log_rate_limited("thumbnail-cache-invalid", interval_seconds=60):
+                    log_event(
+                        LOGGER,
+                        logging.WARNING,
+                        "Invalid thumbnail cache entry will be rebuilt",
+                        event="thumbnail_cache_rebuild",
+                        error_code="THUMB-003",
+                        operation="thumbnail_create",
+                        retryable=True,
+                        details={"size": size},
+                    )
                 destination.unlink()
             handle = tempfile.NamedTemporaryFile(
                 dir=self.root,

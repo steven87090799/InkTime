@@ -3,20 +3,24 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
 import sqlite3
 import tempfile
+import time
 from typing import IO
 import zipfile
 
 from inktime import __version__
 from inktime.app.db import Database
 from inktime.app.db.migrations import MIGRATIONS, migrate
+from inktime.app.core.logging import log_event
 
 
 BACKUP_FORMAT_VERSION = 2
+LOGGER = logging.getLogger("backup")
 IMPORTANT_TABLES = (
     "photos",
     "photo_analysis",
@@ -132,6 +136,15 @@ class BackupService:
     def create(self, *, include_secrets: bool = False) -> Path:
         """建立原子、可驗證備份；預設不納入 API Key／Webhook Token。"""
 
+        started = time.monotonic()
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Backup started",
+            event="backup_started",
+            operation="backup_create",
+            details={"credential_policy": "included" if include_secrets else "excluded"},
+        )
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         archive = self.backup_dir / f"inktime-backup-{stamp}.zip"
         db_handle = tempfile.NamedTemporaryFile(
@@ -206,7 +219,34 @@ class BackupService:
                 os.fsync(stream.fileno())
             os.replace(temporary_archive, archive)
             _fsync_directory(self.backup_dir)
+            log_event(
+                LOGGER,
+                logging.INFO,
+                "Backup completed",
+                event="backup_completed",
+                operation="backup_create",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                details={
+                    "schema_version": manifest["database_schema_version"],
+                    "database_size": database_size,
+                    "credential_policy": manifest["secrets_policy"],
+                },
+            )
             return archive
+        except Exception as exc:
+            log_event(
+                LOGGER,
+                logging.ERROR,
+                "Backup failed",
+                event="backup_failed",
+                error_code="BACKUP-001",
+                operation="backup_create",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                failure_class=type(exc).__name__,
+                retryable=False,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            raise
         finally:
             temporary_db.unlink(missing_ok=True)
             temporary_archive.unlink(missing_ok=True)
@@ -384,6 +424,14 @@ class BackupService:
     def restore(self, archive: Path) -> dict:
         """離線原子還原；任一步失敗均保持或自動回復原資料庫。"""
 
+        started = time.monotonic()
+        log_event(
+            LOGGER,
+            logging.WARNING,
+            "Backup restore started",
+            event="backup_restore_started",
+            operation="backup_restore",
+        )
         handle = tempfile.NamedTemporaryFile(
             dir=self.database.path.parent,
             prefix=".inktime-restore-",
@@ -395,12 +443,36 @@ class BackupService:
         try:
             manifest = self._extract_database(archive, staged)
             safety_copy, counts = self._replace_offline(staged, manifest=manifest)
-            return {
+            result = {
                 "status": "restored",
                 "safety_copy": str(safety_copy),
                 "schema_version": Database(self.database.path).schema_version(),
                 "important_table_counts": counts,
             }
+            log_event(
+                LOGGER,
+                logging.INFO,
+                "Backup restore completed",
+                event="backup_restore_completed",
+                operation="backup_restore",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                details={"schema_version": result["schema_version"]},
+            )
+            return result
+        except Exception as exc:
+            log_event(
+                LOGGER,
+                logging.ERROR,
+                "Backup restore failed",
+                event="backup_restore_failed",
+                error_code="RESTORE-001",
+                operation="backup_restore",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                failure_class=type(exc).__name__,
+                retryable=False,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            raise
         finally:
             staged.unlink(missing_ok=True)
             _cleanup_database_sidecars(staged)
@@ -434,4 +506,13 @@ class BackupService:
         for path in self.list()[max(1, keep) :]:
             path.unlink()
             removed += 1
+        if removed:
+            log_event(
+                LOGGER,
+                logging.INFO,
+                "Old backups pruned",
+                event="backup_pruned",
+                operation="backup_retention",
+                details={"removed": removed, "keep": max(1, keep)},
+            )
         return removed

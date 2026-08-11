@@ -4,19 +4,23 @@ from builtins import list as builtin_list
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import logging
 import os
 from pathlib import Path
 import secrets
 import shutil
 import re
+import time
 from typing import Any
 
 from PIL import Image
 
 from .palette import DisplayProfile, encode_image, get_display_profile
+from inktime.app.core.logging import log_event, should_log_rate_limited
 
 
 FOUR_COLORS = ((0, 0, 0), (255, 255, 255), (220, 30, 30), (245, 190, 25))
+LOGGER = logging.getLogger("release_payload")
 
 
 def _nearest_color(pixel) -> int:
@@ -61,6 +65,7 @@ class AtomicReleasePublisher:
         release_kind: str = "formal",
         metadata: dict | None = None,
     ) -> dict:
+        started = time.monotonic()
         if not images:
             raise ValueError("RENDER-001 至少需要一張圖片")
         if orientation not in {"portrait", "landscape"}:
@@ -82,6 +87,37 @@ class AtomicReleasePublisher:
         )
         files = []
         output_palette = profile.colors
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "Release payload render started",
+            event="render_started",
+            release_id=release_id,
+            phase="payload_render",
+            details={
+                "photo_count": len(images),
+                "render_profile": profile.key,
+                "panel_profile": profile.panel_profile,
+                "dimensions": [width, height],
+                "orientation": orientation,
+                "dither": dither,
+                "color_distance": effective_color_distance,
+                "release_kind": release_kind,
+            },
+        )
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "Release render profile selected",
+            event="render_profile_selected",
+            release_id=release_id,
+            details={
+                "render_profile": profile.key,
+                "panel_profile": profile.panel_profile,
+                "pixel_format": profile.pixel_format,
+                "orientation": orientation,
+            },
+        )
         try:
             for index, (photo_id, source) in enumerate(images, 1):
                 rendered = source.convert("RGB")
@@ -158,10 +194,38 @@ class AtomicReleasePublisher:
                 profile_pointer_tmp = self.root / f".latest.{profile.key}.tmp"
                 profile_pointer_tmp.write_text(release_id, encoding="utf-8")
                 profile_pointer_tmp.replace(self.root / f"latest.{profile.key}")
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "Release payload render completed",
+                event="render_completed",
+                release_id=release_id,
+                phase="payload_render",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                details={
+                    "photo_count": len(images),
+                    "payload_count": len(files),
+                    "render_profile": profile.key,
+                    "activated": activate,
+                },
+            )
             return manifest
-        except Exception:
+        except Exception as exc:
             if temporary.exists():
                 shutil.rmtree(temporary)
+            log_event(
+                LOGGER,
+                logging.ERROR,
+                "Release payload render failed",
+                event="render_failed",
+                error_code=str(getattr(exc, "code", "RENDER-002")),
+                release_id=release_id,
+                phase="payload_render",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                failure_class=type(exc).__name__,
+                retryable=False,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
             raise
 
     def list(self) -> list[dict]:
@@ -169,7 +233,18 @@ class AtomicReleasePublisher:
         for manifest_path in self.root.glob("*/manifest.json"):
             try:
                 releases.append(json.loads(manifest_path.read_text(encoding="utf-8")))
-            except (OSError, json.JSONDecodeError):
+            except (OSError, json.JSONDecodeError) as exc:
+                if should_log_rate_limited("release-manifest-invalid", interval_seconds=60):
+                    log_event(
+                        LOGGER,
+                        logging.WARNING,
+                        "Invalid release manifest skipped",
+                        event="release_manifest_invalid",
+                        error_code="RENDER-010",
+                        phase="list",
+                        failure_class=type(exc).__name__,
+                        retryable=False,
+                    )
                 continue
         return sorted(releases, key=lambda item: item["created_at"], reverse=True)
 
@@ -319,7 +394,20 @@ class DeviceTestReleaseStore:
         path = self._path(device_id)
         try:
             assignment = json.loads(path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
+        except (FileNotFoundError, OSError, json.JSONDecodeError) as exc:
+            if not isinstance(exc, FileNotFoundError) and should_log_rate_limited(
+                f"device-test-assignment-invalid:{device_id}", interval_seconds=60
+            ):
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Device test assignment could not be read",
+                    event="device_test_assignment_invalid",
+                    error_code="DEVICE-TEST-001",
+                    device_id=device_id,
+                    failure_class=type(exc).__name__,
+                    retryable=True,
+                )
             return None
         allowed = {
             "assigned",
@@ -336,6 +424,14 @@ class DeviceTestReleaseStore:
             assignment["status"] = "expired"
             assignment["expired_at"] = datetime.now(timezone.utc).isoformat()
             self._write(path, assignment)
+            log_event(
+                LOGGER,
+                logging.INFO,
+                "Device test assignment expired",
+                event="device_test_assignment_expired",
+                device_id=device_id,
+                release_id=str(assignment.get("release_id") or ""),
+            )
             return None
         manifest_path = self.release_root / str(assignment.get("release_id", "")) / "manifest.json"
         if not manifest_path.is_file() or manifest_path.parent.parent != self.release_root:
@@ -350,7 +446,21 @@ class DeviceTestReleaseStore:
         path = self._path(device_id)
         try:
             assignment = json.loads(path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
+        except (FileNotFoundError, OSError, json.JSONDecodeError) as exc:
+            if not isinstance(exc, FileNotFoundError) and should_log_rate_limited(
+                f"device-test-download-invalid:{device_id}", interval_seconds=60
+            ):
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Device test download state could not be read",
+                    event="device_test_assignment_invalid",
+                    error_code="DEVICE-TEST-001",
+                    device_id=device_id,
+                    release_id=release_id,
+                    failure_class=type(exc).__name__,
+                    retryable=True,
+                )
             return
         if assignment.get("release_id") != release_id or assignment.get("status") not in {
             "manifest_fetched",
@@ -375,7 +485,21 @@ class DeviceTestReleaseStore:
         path = self._path(device_id)
         try:
             assignment = json.loads(path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
+        except (FileNotFoundError, OSError, json.JSONDecodeError) as exc:
+            if not isinstance(exc, FileNotFoundError) and should_log_rate_limited(
+                f"device-test-confirm-invalid:{device_id}", interval_seconds=60
+            ):
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Device test confirmation state could not be read",
+                    event="device_test_assignment_invalid",
+                    error_code="DEVICE-TEST-001",
+                    device_id=device_id,
+                    release_id=release_id,
+                    failure_class=type(exc).__name__,
+                    retryable=True,
+                )
             return False
         if (
             assignment.get("release_id") != release_id

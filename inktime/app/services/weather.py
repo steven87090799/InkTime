@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import logging
 from threading import Lock
 from typing import Any
 
 import requests
 
+from inktime.app.core.logging import log_event
 from inktime.app.repositories.settings import SettingsRepository
 
 
@@ -39,6 +41,7 @@ WEATHER_LABELS = {
     96: "雷雨伴小冰雹",
     99: "雷雨伴大冰雹",
 }
+LOGGER = logging.getLogger("weather")
 
 
 class WeatherService:
@@ -64,7 +67,21 @@ class WeatherService:
         now = datetime.now(timezone.utc)
         with self._lock:
             if self._cached_location == location and now < self._cached_until:
+                log_event(
+                    LOGGER,
+                    logging.DEBUG,
+                    "Weather cache hit",
+                    event="weather_cache_hit",
+                    operation="weather_fetch",
+                )
                 return dict(self._cached or {})
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "Weather request started",
+            event="weather_request_started",
+            operation="weather_fetch",
+        )
         try:
             params: dict[str, str | int | float] = {
                 "latitude": latitude,
@@ -97,6 +114,14 @@ class WeatherService:
                 "observed_at": str(current.get("time", "")),
             }
             ttl = timedelta(minutes=30)
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "Weather request completed",
+                event="weather_request_completed",
+                operation="weather_fetch",
+                http_status=int(response.status_code),
+            )
         except (requests.RequestException, KeyError, TypeError, ValueError) as exc:
             result = {
                 "available": False,
@@ -104,6 +129,17 @@ class WeatherService:
                 "error": type(exc).__name__,
             }
             ttl = timedelta(minutes=5)
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "Weather request failed; rendering will use fallback",
+                event="weather_request_failed",
+                error_code="WEATHER-001",
+                operation="weather_fetch",
+                failure_class=type(exc).__name__,
+                retryable=True,
+                details={"fallback": "weather_unavailable"},
+            )
         with self._lock:
             self._cached = result
             self._cached_location = location

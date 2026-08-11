@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import logging
+
+from inktime.app.core.logging import log_event
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
 from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
 from inktime.app.repositories.providers import ProviderRepository
 from inktime.app.repositories.settings import SettingsRepository
+
+
+LOGGER = logging.getLogger("provider_service")
 
 
 class ProviderService:
@@ -16,6 +22,16 @@ class ProviderService:
         scoring_rules = str(self.settings.get("analysis.scoring_rules", ""))
         for summary in self.repository.list():
             if not summary["enabled"]:
+                log_event(
+                    LOGGER,
+                    logging.DEBUG,
+                    "Disabled provider candidate skipped",
+                    event="provider_candidate_skipped",
+                    provider=str(summary["name"]),
+                    provider_id=str(summary["id"]),
+                    operation="router_build",
+                    details={"reason": "disabled"},
+                )
                 continue
             config = self.repository.get(summary["id"], include_secret=True)
             provider = OpenAICompatibleProvider(
@@ -37,4 +53,26 @@ class ProviderService:
                     cooldown_seconds=config["cooldown_seconds"],
                 )
             )
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "Provider candidate configured",
+                event="provider_candidate_configured",
+                provider=str(config["name"]),
+                provider_id=str(config["id"]),
+                operation="router_build",
+                details={
+                    "priority": config["priority"],
+                    "max_concurrency": config["max_concurrency"],
+                    "supports_json_schema": bool(config["supports_json_schema"]),
+                },
+            )
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "Provider router build completed",
+            event="provider_router_ready" if channels else "provider_router_unavailable",
+            operation="router_build",
+            details={"candidate_count": len(channels)},
+        )
         return FailoverVisionProvider(channels) if channels else None

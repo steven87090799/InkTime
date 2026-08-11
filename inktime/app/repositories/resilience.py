@@ -10,10 +10,16 @@ from datetime import datetime, timedelta, timezone
 from math import ceil
 from hashlib import sha256
 import json
+import logging
+import time
 from typing import Any, Iterable
 from uuid import uuid4
 
 from inktime.app.db import Database
+from inktime.app.core.logging import log_event, should_log_rate_limited
+
+
+LOGGER = logging.getLogger("resilience")
 
 
 FEEDBACK_TYPES = {
@@ -506,7 +512,18 @@ class ResilienceRepository:
                 "UPDATE device_content_queues SET depth=?,updated_at=? WHERE device_id=?",
                 (int(depth), utc_now(), device_id),
             )
-        return self.queue(device_id) or {}
+        result = self.queue(device_id) or {}
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "Device queue ensured",
+            event="queue_ensured",
+            device_id=device_id,
+            queue_id=device_id,
+            operation="queue_ensure",
+            details={"depth": int(depth)},
+        )
+        return result
 
     def enqueue_release(
         self,
@@ -538,6 +555,17 @@ class ResilienceRepository:
                 (device_id, release_id),
             ).fetchone()
             if duplicate:
+                log_event(
+                    LOGGER,
+                    logging.DEBUG,
+                    "Queue enqueue replay returned existing item",
+                    event="queue_enqueue_idempotent",
+                    device_id=device_id,
+                    queue_id=device_id,
+                    queue_item_id=str(duplicate["id"]),
+                    release_id=release_id,
+                    operation="queue_enqueue",
+                )
                 return dict(duplicate)
             active = int(
                 connection.execute(
@@ -576,7 +604,20 @@ class ResilienceRepository:
                 "UPDATE device_content_queues SET queue_version=queue_version+1,next_queued_release_id=?,updated_at=? WHERE device_id=?",
                 (release_id, now, device_id),
             )
-        return dict(self._queue_item(item_id))
+        result = dict(self._queue_item(item_id))
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "Release enqueued for device",
+            event="queue_item_enqueued",
+            device_id=device_id,
+            queue_id=device_id,
+            queue_item_id=item_id,
+            release_id=release_id,
+            operation="queue_enqueue",
+            details={"priority": max(1, min(int(priority), 1000))},
+        )
+        return result
 
     def _queue_item(self, item_id: str):
         with self.database.session() as connection:
@@ -585,6 +626,7 @@ class ResilienceRepository:
             ).fetchone()
 
     def manifest(self, device_id: str, *, release_root) -> dict[str, Any]:
+        started = time.monotonic()
         queue = self.queue(device_id)
         if not queue:
             self.ensure_queue(device_id)
@@ -603,7 +645,23 @@ class ResilienceRepository:
                 file_item = next(
                     item for item in release.get("files", []) if str(item.get("name", "")).endswith(".bin")
                 )
-            except (OSError, ValueError, StopIteration, json.JSONDecodeError):
+            except (OSError, ValueError, StopIteration, json.JSONDecodeError) as exc:
+                if should_log_rate_limited(
+                    f"queue-manifest-invalid:{device_id}", interval_seconds=60
+                ):
+                    log_event(
+                        LOGGER,
+                        logging.WARNING,
+                        "Queue manifest skipped an invalid release",
+                        event="queue_manifest_release_skipped",
+                        error_code="QUEUE-002",
+                        device_id=device_id,
+                        queue_id=device_id,
+                        queue_item_id=str(row["id"]),
+                        release_id=str(row["release_id"]),
+                        failure_class=type(exc).__name__,
+                        retryable=False,
+                    )
                 continue
             items.append(
                 {
@@ -617,7 +675,7 @@ class ResilienceRepository:
                     "download_url": f"/api/device/v1/queue/items/{row['id']}/files/{file_item.get('name')}",
                 }
             )
-        return {
+        result = {
             "schema_version": 1,
             "queue_version": queue["queue"]["queue_version"],
             "device_id": device_id,
@@ -625,11 +683,49 @@ class ResilienceRepository:
             "items": items,
             "last_known_good_release_id": queue["queue"]["last_known_good_release_id"],
         }
+        if should_log_rate_limited(
+            f"queue-manifest-generated:{device_id}", interval_seconds=60
+        ):
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "Device queue manifest generated",
+                event="queue_manifest_generated",
+                device_id=device_id,
+                queue_id=device_id,
+                operation="queue_manifest",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                details={"queue_version": result["queue_version"], "item_count": len(items)},
+            )
+        return result
 
     def queue_ack(self, *, device_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         item_id, event = str(payload.get("queue_item_id", "")), str(payload.get("event", ""))
         key = str(payload.get("idempotency_key", "")).strip()
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "Device queue ACK received",
+            event="queue_ack_received",
+            device_id=device_id,
+            queue_id=device_id,
+            queue_item_id=item_id,
+            operation="queue_ack",
+            details={"ack_event": event},
+        )
         if event not in QUEUE_EVENTS or not item_id or not key:
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "Device queue ACK was malformed",
+                event="queue_ack_non_authoritative",
+                error_code="QUEUE-001",
+                device_id=device_id,
+                queue_id=device_id,
+                queue_item_id=item_id,
+                operation="queue_ack",
+                retryable=False,
+            )
             raise ValueError("QUEUE-001 ACK 缺少 queue_item_id、event 或 idempotency_key")
         try:
             queue_version = int(str(payload.get("queue_version")))
@@ -641,19 +737,70 @@ class ResilienceRepository:
                 "SELECT * FROM device_content_queue_items WHERE id=? AND device_id=?", (item_id, device_id)
             ).fetchone()
             if not item:
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Queue ACK item identity did not match the device",
+                    event="queue_ack_identity_mismatch",
+                    error_code="QUEUE-002",
+                    device_id=device_id,
+                    queue_id=device_id,
+                    queue_item_id=item_id,
+                    operation="queue_ack",
+                    retryable=False,
+                )
                 raise PermissionError("QUEUE-002 Queue Item 不屬於此裝置")
             queue = connection.execute(
                 "SELECT queue_version FROM device_content_queues WHERE device_id=?", (device_id,)
             ).fetchone()
             if queue is None or int(queue["queue_version"]) != queue_version:
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Queue ACK used a stale queue version",
+                    event="queue_ack_non_authoritative",
+                    error_code="QUEUE-003",
+                    device_id=device_id,
+                    queue_id=device_id,
+                    queue_item_id=item_id,
+                    operation="queue_ack",
+                    retryable=True,
+                    details={"received_queue_version": queue_version},
+                )
                 raise ValueError("QUEUE-003 ACK Queue 版本已過期")
             existing_event = connection.execute(
                 "SELECT 1 FROM device_content_queue_events WHERE queue_item_id=? AND event_type=? AND idempotency_key=?",
                 (item_id, event, key),
             ).fetchone()
             if existing_event:
+                log_event(
+                    LOGGER,
+                    logging.DEBUG,
+                    "Duplicate queue ACK replayed idempotently",
+                    event="queue_ack_duplicate",
+                    device_id=device_id,
+                    queue_id=device_id,
+                    queue_item_id=item_id,
+                    release_id=str(item["release_id"]),
+                    operation="queue_ack",
+                    details={"ack_event": event},
+                )
                 return {"status": "ok", "queue_item_id": item_id, "event": event, "idempotent": True}
             if event not in QUEUE_ALLOWED_EVENTS.get(str(item["status"]), set()):
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Queue ACK state transition was rejected",
+                    event="queue_ack_non_authoritative",
+                    error_code="QUEUE-004",
+                    device_id=device_id,
+                    queue_id=device_id,
+                    queue_item_id=item_id,
+                    release_id=str(item["release_id"]),
+                    operation="queue_ack",
+                    retryable=False,
+                    details={"ack_event": event, "current_status": str(item["status"])},
+                )
                 raise ValueError("QUEUE-004 ACK 狀態轉移不合法")
             connection.execute(
                 "INSERT INTO device_content_queue_events(queue_item_id,device_id,event_type,idempotency_key,payload_json,created_at) VALUES (?,?,?,?,?,?)",
@@ -832,6 +979,19 @@ class ResilienceRepository:
                             (now, rollout_id),
                         )
                         self._action(connection, rollout_id, None, "rollback_completed", None)
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "Queue ACK committed",
+            event="queue_ack_committed",
+            error_code=str(payload.get("error_code", ""))[:64],
+            device_id=device_id,
+            queue_id=device_id,
+            queue_item_id=item_id,
+            release_id=str(item["release_id"]),
+            operation="queue_ack",
+            details={"ack_event": event, "status": status},
+        )
         return {"status": "ok", "queue_item_id": item_id, "event": event}
 
     def retention_policies(self) -> list[dict[str, Any]]:
@@ -873,6 +1033,16 @@ class ResilienceRepository:
 
     def cleanup(self, *, dry_run: bool = True) -> dict[str, Any]:
         run_id, now, summary = str(uuid4()), utc_now(), {}
+        started = time.monotonic()
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Retention cleanup started",
+            event="cleanup_started",
+            operation_id=run_id,
+            operation="retention_cleanup",
+            details={"dry_run": dry_run},
+        )
         mapping = {
             "decision_trace": ("selection_decision_traces", "created_at", "id"),
             "decision_candidate": ("selection_decision_candidates", "id", "id"),
@@ -934,6 +1104,22 @@ class ResilienceRepository:
                 "UPDATE data_cleanup_runs SET completed_at=?,status='completed',summary_json=? WHERE id=?",
                 (utc_now(), _json(summary), run_id),
             )
+        candidate_count = sum(summary.values())
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Retention cleanup completed",
+            event="cleanup_completed",
+            operation_id=run_id,
+            operation="retention_cleanup",
+            duration_ms=int((time.monotonic() - started) * 1000),
+            details={
+                "dry_run": dry_run,
+                "candidate_count": candidate_count,
+                "deleted": 0 if dry_run else candidate_count,
+                "categories": summary,
+            },
+        )
         return {"id": run_id, "dry_run": dry_run, "summary": summary}
 
     def expire_operational_data(self) -> dict[str, int]:

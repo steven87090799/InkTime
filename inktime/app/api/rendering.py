@@ -6,6 +6,7 @@ import base64
 from hashlib import sha256
 from io import BytesIO
 import json
+import logging
 from pathlib import Path
 import tempfile
 import time
@@ -15,6 +16,7 @@ from flask import Blueprint, abort, current_app, g, jsonify, render_template, re
 from PIL import Image, ImageDraw, ImageFont, ImageOps, UnidentifiedImageError
 
 from inktime.app.web.access import administrator_required, login_required
+from inktime.app.core.logging import log_event, should_log_rate_limited
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.domain.rendering import (
     BUILTIN_PHOTO_PRESETS,
@@ -35,6 +37,9 @@ from inktime.app.services.rendering import (
     LAYOUTS,
     PORTRAIT_ONLY_LAYOUTS,
 )
+
+
+LOGGER = logging.getLogger("render_api")
 
 
 bp = Blueprint("rendering", __name__)
@@ -99,7 +104,18 @@ def _custom_photo_presets(settings=None) -> dict:
     repository = settings or current_app.extensions["inktime_settings_repository"]
     try:
         value = json.loads(str(repository.get("render.custom_photo_presets", "{}")))
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        if should_log_rate_limited("custom-photo-presets-invalid", interval_seconds=60):
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "Invalid custom photo presets were ignored",
+                event="render_config_fallback",
+                error_code="RENDER-CONFIG-001",
+                failure_class=type(exc).__name__,
+                retryable=False,
+                details={"fallback": "empty_custom_presets"},
+            )
         return {}
     return value if isinstance(value, dict) else {}
 

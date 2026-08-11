@@ -3,11 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 from uuid import uuid4
 
 from inktime.app.core.paths import UnsafePathError, safe_join
+from inktime.app.core.logging import log_event, should_log_rate_limited
 from inktime.app.db import Database
 from inktime.app.domain.analysis.scoring import (
     DEFAULT_FAVORITE_BONUS,
@@ -19,6 +21,7 @@ from inktime.app.domain.photos.preprocessing import LocalPhotoFeatures
 
 LOCAL_QUALITY_RULE = "local-quality"
 LOCAL_QUALITY_RULE_VERSION = "local-quality-v3"
+LOGGER = logging.getLogger("photo_repository")
 
 
 def _local_candidate_score(features: LocalPhotoFeatures) -> float:
@@ -1342,7 +1345,22 @@ class PhotoRepository:
         cached = dict(row)
         try:
             cached["result"] = json.loads(str(cached["result_json"]))
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            if should_log_rate_limited(
+                f"analysis-cache-json-invalid:{provider}:{model_name}",
+                interval_seconds=60,
+            ):
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Corrupt analysis cache JSON was ignored and will be rebuilt",
+                    event="analysis_cache_invalid",
+                    error_code="AI-CACHE-002",
+                    provider=provider,
+                    model=model_name,
+                    failure_class=type(exc).__name__,
+                    retryable=True,
+                )
             return None
         return cached
 

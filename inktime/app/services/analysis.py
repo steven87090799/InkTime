@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 from pathlib import Path
 import time
 from uuid import uuid4
@@ -25,6 +26,7 @@ from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.budgets import BudgetService
+from inktime.app.core.logging import log_event, should_log_rate_limited
 
 
 PREFILTER_PROFILES = {
@@ -51,6 +53,25 @@ PREFILTER_PROFILES = {
     },
 }
 PROMPT_VERSION = "photo-quality-v3"
+LOGGER = logging.getLogger("analysis")
+
+
+def _log_debug(message: str, *, event: str, **fields) -> None:
+    """Emit bounded high-cardinality analysis diagnostics."""
+
+    if not LOGGER.isEnabledFor(logging.DEBUG):
+        return
+    key = ":".join(
+        (
+            "analysis",
+            event,
+            str(fields.get("provider") or "local")[:64],
+            str(fields.get("model") or "default")[:64],
+            str(fields.get("stage") or "default")[:64],
+        )
+    )
+    if should_log_rate_limited(key, interval_seconds=1):
+        log_event(LOGGER, logging.DEBUG, message, event=event, **fields)
 
 
 class PhotoAnalysisService:
@@ -385,26 +406,78 @@ class PhotoAnalysisService:
         scoring_version_id: str | None,
         schema_kind: str,
     ) -> dict:
+        started = time.monotonic()
         ranked = self._score_result(
             result, photo, ranking_weights=ranking_weights, favorite_bonus=favorite_bonus
         )
-        self.photos.save_analysis(
-            photo_id,
-            job_id,
-            stage,
-            provider,
-            model,
-            ranked,
-            raw,
-            ranking_score=ranked["ranking_score"],
-            scoring_version_id=scoring_version_id,
-            schema_kind=schema_kind,
-            local_score=ranked["local_score"],
-            semantic_score=ranked["semantic_score"],
-            base_ranking_score=ranked["base_ranking_score"],
-            final_ranking_score=ranked["final_ranking_score"],
-            travel_bonus=ranked["travel_bonus"],
-            location_rule_version=ranked["location_rule_version"],
+        _log_debug(
+            "Analysis persistence started",
+            event="analysis_persistence_started",
+            job_id=job_id or "",
+            photo_id=photo_id,
+            provider=provider,
+            model=model,
+            stage=stage,
+        )
+        try:
+            self.photos.save_analysis(
+                photo_id,
+                job_id,
+                stage,
+                provider,
+                model,
+                ranked,
+                raw,
+                ranking_score=ranked["ranking_score"],
+                scoring_version_id=scoring_version_id,
+                schema_kind=schema_kind,
+                local_score=ranked["local_score"],
+                semantic_score=ranked["semantic_score"],
+                base_ranking_score=ranked["base_ranking_score"],
+                final_ranking_score=ranked["final_ranking_score"],
+                travel_bonus=ranked["travel_bonus"],
+                location_rule_version=ranked["location_rule_version"],
+            )
+        except Exception as exc:
+            if should_log_rate_limited(
+                f"analysis-persistence-failed:{type(exc).__name__}",
+                interval_seconds=5,
+            ):
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "Analysis persistence failed",
+                    event="analysis_persistence_failed",
+                    error_code="ANALYSIS-DB-001",
+                    job_id=job_id or "",
+                    photo_id=photo_id,
+                    provider=provider,
+                    model=model,
+                    stage=stage,
+                    failure_class=type(exc).__name__,
+                    retryable=True,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+            raise
+        duration_ms = int((time.monotonic() - started) * 1000)
+        _log_debug(
+            "Analysis persistence completed",
+            event="analysis_persistence_completed",
+            job_id=job_id or "",
+            photo_id=photo_id,
+            provider=provider,
+            model=model,
+            stage=stage,
+            duration_ms=duration_ms,
+        )
+        _log_debug(
+            "Photo analysis completed",
+            event="analysis_completed",
+            job_id=job_id or "",
+            photo_id=photo_id,
+            provider=provider,
+            model=model,
+            stage=stage,
         )
         return ranked
 
@@ -462,10 +535,47 @@ class PhotoAnalysisService:
         )
         if cached is not None:
             try:
+                _log_debug(
+                    "Analysis cache hit",
+                    event="analysis_cache_hit",
+                    job_id=job_id or "",
+                    photo_id=photo_id,
+                    provider=provider.name,
+                    model=model,
+                    stage=stage,
+                    details={"prompt_version": PROMPT_VERSION, "schema_kind": schema_kind},
+                )
                 return validate_analysis_result(cached["result"]), str(cached["raw_json"]), 0.0, True
-            except AnalysisValidationError:
+            except AnalysisValidationError as exc:
                 # 損壞或舊版快取不可阻斷新分析，直接重新取得並覆寫。
-                pass
+                if should_log_rate_limited(
+                    f"analysis-cache-invalid:{provider.name}:{model}", interval_seconds=60
+                ):
+                    log_event(
+                        LOGGER,
+                        logging.WARNING,
+                        "Analysis cache entry was invalid and will be refreshed",
+                        event="analysis_cache_invalid",
+                        error_code="AI-CACHE-002",
+                        job_id=job_id or "",
+                        photo_id=photo_id,
+                        provider=provider.name,
+                        model=model,
+                        stage=stage,
+                        failure_class=type(exc).__name__,
+                        retryable=True,
+                    )
+        else:
+            _log_debug(
+                "Analysis cache miss",
+                event="analysis_cache_miss",
+                job_id=job_id or "",
+                photo_id=photo_id,
+                provider=provider.name,
+                model=model,
+                stage=stage,
+                details={"prompt_version": PROMPT_VERSION, "schema_kind": schema_kind},
+            )
         cache_key = hashlib.sha256(
             json.dumps(
                 [content_sha256, provider.name, model, PROMPT_VERSION, 1, schema_kind],
@@ -474,9 +584,39 @@ class PhotoAnalysisService:
         ).hexdigest()
         owner_id = str(uuid4())
         deadline = time.monotonic() + 120
+        wait_started = time.monotonic()
+        wait_logged = False
         while not self.photos.acquire_ai_cache_reservation(cache_key, owner_id):
+            if not wait_logged:
+                _log_debug(
+                    "Analysis cache reservation wait started",
+                    event="analysis_cache_reservation_wait_started",
+                    job_id=job_id or "",
+                    photo_id=photo_id,
+                    provider=provider.name,
+                    model=model,
+                    stage=stage,
+                )
+                wait_logged = True
             if time.monotonic() >= deadline:
                 raise TimeoutError("AI-CACHE-001 等待相同分析結果逾時")
+            if time.monotonic() - wait_started >= 5 and should_log_rate_limited(
+                f"analysis-cache-long-wait:{cache_key[:16]}", interval_seconds=30
+            ):
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Analysis cache reservation wait is unusually long",
+                    event="analysis_cache_reservation_long_wait",
+                    error_code="AI-CACHE-001",
+                    job_id=job_id or "",
+                    photo_id=photo_id,
+                    provider=provider.name,
+                    model=model,
+                    stage=stage,
+                    duration_ms=int((time.monotonic() - wait_started) * 1000),
+                    retryable=True,
+                )
             time.sleep(0.05)
             cached = self.photos.get_ai_cache(
                 content_sha256=content_sha256,
@@ -488,6 +628,17 @@ class PhotoAnalysisService:
             )
             if cached is not None:
                 return validate_analysis_result(cached["result"]), str(cached["raw_json"]), 0.0, True
+        if wait_logged:
+            _log_debug(
+                "Analysis cache reservation acquired",
+                event="analysis_cache_reservation_acquired",
+                job_id=job_id or "",
+                photo_id=photo_id,
+                provider=provider.name,
+                model=model,
+                stage=stage,
+                duration_ms=int((time.monotonic() - wait_started) * 1000),
+            )
         try:
             result, raw, cost = self._perform_uncached_model_call(
                 provider=provider,
@@ -524,12 +675,59 @@ class PhotoAnalysisService:
         started_at = datetime.now(timezone.utc).isoformat()
         started_perf = time.perf_counter()
         max_tokens = int(self.budgets.settings.get("budget.max_tokens", 8000)) if self.budgets else None
-        response = provider.analyze(
-            image_path=image,
+        _log_debug(
+            "Analysis provider request started",
+            event="analysis_provider_request_started",
+            job_id=job_id or "",
+            photo_id=photo_id,
+            provider=provider.name,
             model=model,
-            detail=detail,
             stage=stage,
-            max_tokens=max_tokens,
+        )
+        try:
+            response = provider.analyze(
+                image_path=image,
+                model=model,
+                detail=detail,
+                stage=stage,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            if should_log_rate_limited(
+                f"analysis-provider-failed:{provider.name}:{model}:{stage}",
+                interval_seconds=5,
+            ):
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "Analysis provider request failed",
+                    event="analysis_provider_request_failed",
+                    error_code=str(getattr(exc, "code", "VLM-001")),
+                    job_id=job_id or "",
+                    photo_id=photo_id,
+                    provider=provider.name,
+                    model=model,
+                    stage=stage,
+                    duration_ms=int((time.perf_counter() - started_perf) * 1000),
+                    failure_class=type(exc).__name__,
+                    retryable=True,
+                )
+            raise
+        _log_debug(
+            "Analysis provider request completed",
+            event="analysis_provider_request_completed",
+            job_id=job_id or "",
+            photo_id=photo_id,
+            provider=provider.name,
+            model=model,
+            provider_request_id=str(response.request_id or ""),
+            stage=stage,
+            duration_ms=int((time.perf_counter() - started_perf) * 1000),
+            details={
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens,
+                "cached_tokens": response.usage.cached_tokens,
+            },
         )
         total_cost = self._record(
             provider, model, job_id, photo_id, stage, response, started_at, started_perf
@@ -541,14 +739,45 @@ class PhotoAnalysisService:
             result = validate_analysis_result(response.content)
             raw = response.content
         except AnalysisValidationError as first_error:
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "Analysis JSON repair started",
+                event="analysis_json_repair_started",
+                error_code="VLM-SCHEMA-001",
+                job_id=job_id or "",
+                photo_id=photo_id,
+                provider=provider.name,
+                model=model,
+                stage="json_repair",
+                failure_class=type(first_error).__name__,
+                retryable=True,
+            )
             repair_started_at = datetime.now(timezone.utc).isoformat()
             repair_perf = time.perf_counter()
-            repaired = provider.repair_json(
-                invalid_content=response.content,
-                validation_error=str(first_error),
-                model=model,
-                max_tokens=max_tokens,
-            )
+            try:
+                repaired = provider.repair_json(
+                    invalid_content=response.content,
+                    validation_error=str(first_error),
+                    model=model,
+                    max_tokens=max_tokens,
+                )
+            except Exception as exc:
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "Analysis JSON repair failed",
+                    event="analysis_json_repair_failed",
+                    error_code=str(getattr(exc, "code", "VLM-SCHEMA-001")),
+                    job_id=job_id or "",
+                    photo_id=photo_id,
+                    provider=provider.name,
+                    model=model,
+                    stage="json_repair",
+                    failure_class=type(exc).__name__,
+                    retryable=False,
+                )
+                raise
             total_cost += self._record(
                 provider,
                 model,
@@ -561,7 +790,35 @@ class PhotoAnalysisService:
                 retry_count=1,
             )
             # 第二次驗證失敗直接拋出；不得無限修復。
-            result = validate_analysis_result(repaired.content)
+            try:
+                result = validate_analysis_result(repaired.content)
+            except AnalysisValidationError as exc:
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "Analysis validation failed after bounded JSON repair",
+                    event="analysis_validation_failed",
+                    error_code="VLM-SCHEMA-002",
+                    job_id=job_id or "",
+                    photo_id=photo_id,
+                    provider=provider.name,
+                    model=model,
+                    stage="json_repair",
+                    failure_class=type(exc).__name__,
+                    retryable=False,
+                )
+                raise
+            _log_debug(
+                "Analysis JSON repair completed",
+                event="analysis_json_repair_completed",
+                job_id=job_id or "",
+                photo_id=photo_id,
+                provider=provider.name,
+                model=model,
+                provider_request_id=str(repaired.request_id or ""),
+                stage="json_repair",
+                duration_ms=int((time.perf_counter() - repair_perf) * 1000),
+            )
             raw = repaired.content
             total_input_tokens += repaired.usage.input_tokens
             total_output_tokens += repaired.usage.output_tokens
@@ -599,6 +856,14 @@ class PhotoAnalysisService:
         scoring_version_id: str | None = None,
         force_ai: bool = False,
     ) -> dict:
+        _log_debug(
+            "Photo analysis started",
+            event="analysis_started",
+            job_id=job_id or "",
+            photo_id=photo_id,
+            operation="photo_analysis",
+            details={"strategy": strategy, "force_ai": force_ai},
+        )
         photo = self.photos.get_with_path(photo_id)
         if photo is None:
             raise FileNotFoundError("SCAN-001 找不到照片資料")

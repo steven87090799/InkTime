@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from io import BytesIO
 import json
+import logging
 import os
 from pathlib import Path
 import platform
@@ -16,12 +17,16 @@ import psutil
 
 from inktime import __version__
 from inktime.app.core.security import redact
+from inktime.app.core.logging import log_event, should_log_rate_limited
 from inktime.app.db import Database
 from inktime.app.domain.rendering.fonts import (
     BUILTIN_FONTS,
     DEFAULT_FONT_ASSET_ROOT,
     SUPPORTED_FONT_SUFFIXES,
 )
+
+
+LOGGER = logging.getLogger("diagnostics")
 
 
 class DiagnosticsService:
@@ -113,7 +118,17 @@ class DiagnosticsService:
                         timeout=2,
                         check=True,
                     ).stdout.strip()
-            except Exception:
+            except Exception as exc:
+                if should_log_rate_limited("diagnostics-git-probe", interval_seconds=300):
+                    log_event(
+                        LOGGER,
+                        logging.DEBUG,
+                        "Optional revision probe failed",
+                        event="diagnostics_probe_failed",
+                        operation="git_revision",
+                        failure_class=type(exc).__name__,
+                        retryable=True,
+                    )
                 revision = "unknown"
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),

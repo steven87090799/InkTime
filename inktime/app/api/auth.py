@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import logging
 from flask import Blueprint, current_app, flash, g, redirect, render_template, request, session, url_for
 
+from inktime.app.core.logging import log_event, should_log_rate_limited
 from inktime.app.repositories.auth import AuthRepository
 from inktime.app.web.access import administrator_required, login_required
 
 
 bp = Blueprint("auth", __name__)
+LOGGER = logging.getLogger("auth")
 
 
 def _repository() -> AuthRepository:
@@ -49,16 +52,41 @@ def login():
         ip_address = request.remote_addr or "unknown"
         username = request.form.get("username", "")
         if repository.ip_blocked(ip_address):
+            if should_log_rate_limited("login-account-locked", interval_seconds=60):
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Login blocked after repeated failures",
+                    event="account_locked",
+                    error_code="AUTH-005",
+                    retryable=True,
+                )
             flash("登入失敗次數過多，請 15 分鐘後再試。", "error")
             return render_template("login.html"), 429
         user = repository.authenticate(username, request.form.get("password", ""))
         repository.record_login(username, ip_address, user is not None, user["id"] if user else None)
         if user is None:
+            if should_log_rate_limited("login-failed", interval_seconds=10):
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Login failed",
+                    event="login_failed",
+                    error_code="AUTH-001",
+                    retryable=True,
+                )
             flash("帳號或密碼錯誤。", "error")
         else:
             session.clear()
             session["user_id"] = user["id"]
             session.permanent = True
+            log_event(
+                LOGGER,
+                logging.INFO,
+                "Login succeeded",
+                event="login_success",
+                details={"actor_type": str(user["role"])},
+            )
             next_path = request.args.get("next", "")
             if not next_path.startswith("/") or next_path.startswith("//"):
                 next_path = url_for("dashboard.dashboard")
@@ -70,6 +98,13 @@ def login():
 @login_required
 def logout():
     session.clear()
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "Session invalidated by logout",
+        event="session_invalidated",
+        details={"reason": "logout"},
+    )
     return redirect(url_for("auth.login"))
 
 

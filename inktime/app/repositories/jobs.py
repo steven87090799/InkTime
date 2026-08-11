@@ -397,7 +397,7 @@ class JobRepository:
 
     def fail_item(
         self, job_id: str, item_id: str, error_code: str, message: str, *, max_attempts: int = 3
-    ) -> None:
+    ) -> dict[str, int | bool]:
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
         with self.database.session() as connection:
@@ -455,6 +455,10 @@ class JobRepository:
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+        return {
+            "terminal": terminal,
+            "attempt": int(item["attempts"]) if item is not None else max_attempts,
+        }
 
     def finalize_if_done(self, job_id: str) -> bool:
         now = utc_now()

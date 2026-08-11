@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import logging
+import time
 from typing import Any
 
 from inktime.app.db import Database
 from inktime.app.domain.rendering import AtomicReleasePublisher
+from inktime.app.core.logging import log_event
+
+
+LOGGER = logging.getLogger("release")
 
 
 class ReleaseCoordinator:
@@ -24,11 +30,47 @@ class ReleaseCoordinator:
         history: dict[str, str] | None = None,
         device_assignments: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
+        started = time.monotonic()
         if not manifests:
             raise ValueError("RENDER-010 沒有可發布的 Release")
+        release_id = str(manifests[0].get("release_id") or "")
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Release publish started",
+            event="release_publish_started",
+            release_id=release_id,
+            phase="validation",
+            details={
+                "release_count": len(manifests),
+                "photo_count": len(photo_ids),
+                "device_count": len(device_assignments or {}),
+            },
+        )
         verified = [self.publisher.validate(str(item["release_id"])) for item in manifests]
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "Release validation completed",
+            event="release_validation_completed",
+            release_id=release_id,
+            phase="validation",
+            details={
+                "release_count": len(verified),
+                "render_profiles": [str(item["render_profile"]) for item in verified],
+                "payload_count": sum(len(item.get("files") or []) for item in verified),
+            },
+        )
         now = datetime.now(timezone.utc).isoformat()
         try:
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "Release database staging started",
+                event="release_db_stage_started",
+                release_id=release_id,
+                phase="db_stage",
+            )
             with self.database.transaction() as connection:
                 for manifest in verified:
                     connection.execute(
@@ -51,17 +93,71 @@ class ReleaseCoordinator:
                             now,
                         ),
                     )
-        except Exception:
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "Release database staging completed",
+                event="release_db_staged",
+                release_id=release_id,
+                phase="db_stage",
+            )
+        except Exception as exc:
             for manifest in verified:
                 self.publisher.mark_orphan(str(manifest["release_id"]), "database_stage_failed")
+            log_event(
+                LOGGER,
+                logging.ERROR,
+                "Release database staging failed",
+                event="release_publish_failed",
+                error_code="RELEASE-DB-001",
+                release_id=release_id,
+                phase="db_stage",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                failure_class=type(exc).__name__,
+                retryable=True,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
             raise
 
         snapshot = self.publisher.pointer_snapshot(
             [str(item["render_profile"]) for item in verified]
         )
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "Release pointer snapshot created",
+            event="release_pointer_snapshot_created",
+            release_id=release_id,
+            phase="pointer_snapshot",
+            details={"pointer_count": len(snapshot)},
+        )
         try:
             if not device_assignments:
+                log_event(
+                    LOGGER,
+                    logging.DEBUG,
+                    "Release pointer activation started",
+                    event="release_pointer_activation_started",
+                    release_id=release_id,
+                    phase="pointer_activation",
+                )
                 self.publisher.activate_manifests(verified)
+                log_event(
+                    LOGGER,
+                    logging.DEBUG,
+                    "Release pointers activated",
+                    event="release_pointer_activated",
+                    release_id=release_id,
+                    phase="pointer_activation",
+                )
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "Release database publish started",
+                event="release_db_publish_started",
+                release_id=release_id,
+                phase="db_publish",
+            )
             with self.database.transaction() as connection:
                 for manifest in verified:
                     connection.execute(
@@ -106,17 +202,97 @@ class ReleaseCoordinator:
                         rows,
                     )
         except Exception as exc:
+            log_event(
+                LOGGER,
+                logging.ERROR,
+                "Release publish failed; compensation started",
+                event="release_publish_failed",
+                error_code="RELEASE-PUBLISH-001",
+                release_id=release_id,
+                phase="publish",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                failure_class=type(exc).__name__,
+                retryable=False,
+                ambiguous=True,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "Release compensation started",
+                event="release_compensation_started",
+                release_id=release_id,
+                phase="compensation",
+            )
             if not device_assignments:
-                self.publisher.restore_pointers(snapshot)
+                try:
+                    self.publisher.restore_pointers(snapshot)
+                except Exception as compensation_exc:
+                    log_event(
+                        LOGGER,
+                        logging.CRITICAL,
+                        "Release pointer compensation failed",
+                        event="release_compensation_failed",
+                        error_code="RELEASE-COMPENSATE-001",
+                        release_id=release_id,
+                        phase="compensation",
+                        failure_class=type(compensation_exc).__name__,
+                        retryable=False,
+                        ambiguous=True,
+                        exc_info=(
+                            type(compensation_exc),
+                            compensation_exc,
+                            compensation_exc.__traceback__,
+                        ),
+                    )
+                    raise
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Release pointers restored",
+                    event="release_pointer_restored",
+                    release_id=release_id,
+                    phase="compensation",
+                )
             with self.database.transaction() as connection:
                 connection.executemany(
                     "UPDATE releases SET status='staged_failed',failure_reason=? WHERE id=?",
                     [(str(exc)[:500], item["release_id"]) for item in verified],
                 )
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "Release compensation completed",
+                event="release_compensation_completed",
+                release_id=release_id,
+                phase="compensation",
+            )
             raise
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Release published",
+            event="release_published",
+            release_id=release_id,
+            phase="completed",
+            duration_ms=int((time.monotonic() - started) * 1000),
+            details={
+                "release_count": len(verified),
+                "photo_count": len(photo_ids),
+                "device_count": len(device_assignments or {}),
+            },
+        )
         return verified
 
     def reconcile(self) -> dict[str, int]:
+        started = time.monotonic()
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "Release reconciliation started",
+            event="release_reconcile_started",
+            phase="reconciliation",
+        )
         diagnostics = {
             "staged": 0,
             "payload_missing": 0,
@@ -136,6 +312,15 @@ class ReleaseCoordinator:
                 self.publisher.validate(release_id)
             except ValueError:
                 diagnostics["payload_missing"] += 1
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Published release payload is missing or invalid",
+                    event="release_payload_missing",
+                    error_code="RENDER-010",
+                    release_id=release_id,
+                    phase="reconciliation",
+                )
                 with self.database.session() as connection:
                     connection.execute(
                         "UPDATE releases SET reconciliation_status='payload_missing' WHERE id=?",
@@ -153,6 +338,14 @@ class ReleaseCoordinator:
             if release_id and release_id not in known:
                 diagnostics["orphan"] += 1
                 self.publisher.mark_orphan(release_id, "filesystem_release_without_database_row")
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Orphan filesystem release detected",
+                    event="release_orphan_detected",
+                    release_id=release_id,
+                    phase="reconciliation",
+                )
         expected_pointers = {"latest", *(f"latest.{profile}" for profile in valid)}
         expected_pointers.update(path.name for path in self.publisher.root.glob("latest*"))
         for pointer_name in sorted(expected_pointers):
@@ -170,10 +363,37 @@ class ReleaseCoordinator:
             valid_ids = {item[1] for item in compatible}
             if release_id not in valid_ids:
                 diagnostics["pointer_missing"] += 1
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Release pointer is missing or invalid",
+                    event="release_pointer_invalid",
+                    phase="reconciliation",
+                    details={"pointer_category": pointer_name},
+                )
                 if compatible:
                     fallback = max(compatible)[1]
                     temporary = self.publisher.root / f".{pointer_name}.reconcile.tmp"
                     temporary.write_text(fallback, encoding="utf-8")
                     temporary.replace(pointer)
                     diagnostics["pointer_recovered"] += 1
+                    log_event(
+                        LOGGER,
+                        logging.WARNING,
+                        "Release pointer recovered",
+                        event="release_pointer_recovered",
+                        release_id=fallback,
+                        phase="reconciliation",
+                        details={"pointer_category": pointer_name},
+                    )
+        actions = sum(diagnostics.values())
+        log_event(
+            LOGGER,
+            logging.INFO if actions else logging.DEBUG,
+            "Release reconciliation completed",
+            event="release_reconcile_completed",
+            phase="reconciliation",
+            duration_ms=int((time.monotonic() - started) * 1000),
+            details=diagnostics,
+        )
         return diagnostics

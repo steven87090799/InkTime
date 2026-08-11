@@ -9,7 +9,7 @@ import time
 
 from zoneinfo import ZoneInfo
 
-from inktime.app.core.logging import configure_logging, log_event
+from inktime.app.core.logging import configure_logging, log_context, log_event
 
 
 LOGGER = logging.getLogger("scheduler")
@@ -25,6 +25,12 @@ class SchedulerRunner:
 
     def request_stop(self, *_args) -> None:
         self.stop.set()
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Scheduler shutdown requested",
+            event="scheduler_shutdown_requested",
+        )
 
     def tick(self) -> None:
         settings = self.app.extensions["inktime_settings_repository"]
@@ -40,35 +46,97 @@ class SchedulerRunner:
         if time.monotonic() - self.last_resilience_maintenance_at >= 300:
             # Scheduler 與 Web 分離；失敗僅記錄，不能阻塞既有正式發布工作。
             try:
-                self.app.extensions["inktime_resilience_repository"].expire_operational_data()
-                self.app.extensions["inktime_render_service"].run_shadow_selection()
+                expired = self.app.extensions[
+                    "inktime_resilience_repository"
+                ].expire_operational_data()
+                shadow = self.app.extensions["inktime_render_service"].run_shadow_selection()
+                if any(int(value) for value in expired.values()) or any(
+                    int(value) for value in shadow.values()
+                ):
+                    log_event(
+                        LOGGER,
+                        logging.INFO,
+                        "Scheduled resilience maintenance completed",
+                        event="scheduler_maintenance_completed",
+                        operation="resilience_maintenance",
+                        details={"expired": expired, "shadow": shadow},
+                    )
             except Exception as exc:
-                log_event(LOGGER, logging.ERROR, "決策韌性維護失敗；正式流程不受影響", event="resilience_maintenance_failed", error_code="SHADOW-001", details={"error_type": type(exc).__name__})
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "決策韌性維護失敗；正式流程不受影響",
+                    event="resilience_maintenance_failed",
+                    error_code="SHADOW-001",
+                    operation="resilience_maintenance",
+                    failure_class=type(exc).__name__,
+                    retryable=True,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
             self.last_resilience_maintenance_at = time.monotonic()
         zone = ZoneInfo(str(settings.get("general.timezone", "Asia/Taipei")))
         now = datetime.now(zone)
         schedule_repository = self.app.extensions["inktime_schedule_repository"]
         for task in schedule_repository.due(now):
-            try:
-                self._enqueue_task(task, now)
-            except Exception as exc:  # 一項排程失敗絕不可帶倒 Scheduler。
-                schedule_repository.record_failure(task, str(exc), now)
+            operation_id = f"schedule:{task['key']}:{now.isoformat()}"[:256]
+            with log_context(
+                trace_id=operation_id,
+                operation_id=operation_id,
+                task_key=str(task["key"]),
+                schedule_id=str(task.get("id") or ""),
+                operation="scheduled_task",
+            ):
                 log_event(
                     LOGGER,
-                    logging.ERROR,
-                    "排程工作建立失敗；其他排程持續執行",
-                    event="scheduled_task_failed",
-                    error_code="SCHEDULE-001",
-                    details={"task": task["key"]},
+                    logging.DEBUG,
+                    "Scheduled task evaluated",
+                    event="scheduler_task_evaluated",
+                    operation="schedule_evaluation",
+                    details={"kind": str(task["kind"])},
                 )
+                try:
+                    self._enqueue_task(task, now)
+                except Exception as exc:  # 一項排程失敗絕不可帶倒 Scheduler。
+                    schedule_repository.record_failure(task, str(exc), now)
+                    log_event(
+                        LOGGER,
+                        logging.ERROR,
+                        "排程工作建立失敗；其他排程持續執行",
+                        event="scheduled_task_failed",
+                        error_code="SCHEDULE-001",
+                        failure_class=type(exc).__name__,
+                        retryable=True,
+                        details={"kind": str(task["kind"])},
+                    )
         if not settings.get("backup.schedule_enabled", True):
             return
         today = now.date().isoformat()
         if now.hour == int(settings.get("backup.hour", 3)) and self.last_backup_date != today:
-            path = self.app.extensions["inktime_backup_service"].create()
-            removed = self.app.extensions["inktime_backup_service"].enforce_retention(
-                int(settings.get("backup.retention", 14))
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "Scheduled backup is due",
+                event="backup_due",
+                operation="scheduled_backup",
             )
+            try:
+                path = self.app.extensions["inktime_backup_service"].create()
+                removed = self.app.extensions["inktime_backup_service"].enforce_retention(
+                    int(settings.get("backup.retention", 14))
+                )
+            except Exception as exc:
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "Scheduled backup failed",
+                    event="scheduler_step_failed",
+                    error_code="BACKUP-001",
+                    operation="scheduled_backup",
+                    failure_class=type(exc).__name__,
+                    retryable=True,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+                raise
             self.last_backup_date = today
             log_event(
                 LOGGER,
@@ -84,14 +152,41 @@ class SchedulerRunner:
             self.app.extensions["inktime_schedule_repository"].record_failure(
                 task, "目前不在允許執行時段，已延後", now
             )
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "Scheduled task is outside its execution window",
+                event="scheduler_task_not_due",
+                task_key=str(task["key"]),
+                schedule_id=str(task.get("id") or ""),
+                details={"reason": "outside_window"},
+            )
             return
         scheduled_at = datetime.fromisoformat(str(task["next_run"])) if task.get("next_run") else now
         if not force and not config.get("catch_up", True) and (now - scheduled_at).total_seconds() > 300:
             self.app.extensions["inktime_schedule_repository"].mark_enqueued(task, now)
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "Scheduled task catch-up was skipped",
+                event="scheduler_task_catchup_decision",
+                task_key=str(task["key"]),
+                schedule_id=str(task.get("id") or ""),
+                details={"decision": "skip", "reason": "catch_up_disabled"},
+            )
             return
         if not force and config.get("delay_high_load") and self._high_load():
             self.app.extensions["inktime_schedule_repository"].record_failure(
                 task, "NAS 目前負載偏高，已延後執行", now
+            )
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "Scheduled task deferred because system load is high",
+                event="scheduler_task_high_load_deferred",
+                task_key=str(task["key"]),
+                schedule_id=str(task.get("id") or ""),
+                retryable=True,
             )
             return
         repository = self.app.extensions["inktime_job_repository"]
@@ -143,8 +238,26 @@ class SchedulerRunner:
         if str(repository.get(job_id)["status"]) == "pending":
             self.app.extensions["inktime_job_service"].start(job_id)
         self.app.extensions["inktime_schedule_repository"].mark_enqueued(task, now)
-        log_event(LOGGER, logging.INFO, "已建立排程背景工作", event="scheduled_task_enqueued", job_id=job_id,
-                  details={"task": task["key"], "priority": repository.get(job_id)["priority"]})
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "已建立排程背景工作",
+            event="scheduled_task_enqueued",
+            job_id=job_id,
+            task_key=str(task["key"]),
+            schedule_id=str(task.get("id") or ""),
+            details={"priority": repository.get(job_id)["priority"]},
+        )
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "Scheduled task enqueued",
+            event="scheduler_task_enqueued",
+            job_id=job_id,
+            task_key=str(task["key"]),
+            schedule_id=str(task.get("id") or ""),
+            details={"kind": str(task["kind"])},
+        )
 
     @staticmethod
     def _high_load() -> bool:
