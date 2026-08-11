@@ -281,6 +281,10 @@ def test_delayed_terminal_ack_is_only_allowed_for_prefetched_offline_item(client
                 (failed_device,),
             ).fetchone()[0]
         )
+        connection.execute(
+            "UPDATE device_content_queue_items SET terminal_ack_retention=? WHERE id=?",
+            ((datetime.now(timezone.utc) + timedelta(days=7)).isoformat(), failed_item["id"]),
+        )
     failed_token_epoch = int(datetime.now(timezone.utc).timestamp())
     for index, event in enumerate(("MANIFEST_RECEIVED", "DOWNLOAD_COMPLETED", "HASH_VERIFIED")):
         assert _ack(

@@ -31,7 +31,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 47
+    assert CURRENT_SCHEMA_VERSION == 48
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -201,7 +201,7 @@ def test_migration_45_adds_api_usage_policy_idempotently_without_overwriting_ope
             "VALUES ('api_usage',1,777,3,17,0,datetime('now'))"
         )
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", previous_migrations)
-    assert migrate(database) == [45, 46, 47]
+    assert migrate(database) == [45, 46, 47, 48]
     with database.session() as connection:
         policy = connection.execute(
             "SELECT enabled,retention_days,minimum_items_to_keep,cleanup_batch_size,dry_run "
@@ -218,12 +218,87 @@ def test_migration_46_idempotency_ledger_is_upgrade_safe(monkeypatch, tmp_path):
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", before_46)
     assert migrate(database) == list(range(1, 46))
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", all_migrations)
-    assert migrate(database) == [46, 47]
+    assert migrate(database) == [46, 47, 48]
     with database.session() as connection:
         connection.execute(
             "INSERT INTO idempotency_requests(scope_key,request_fingerprint,status,request_snapshot_json,created_at,updated_at) VALUES (?,?,?,?,?,?)",
             ("scope", "fingerprint", "in_progress", "{}", "now", "now"),
         )
+    assert migrate(database) == []
+
+
+def test_migration_48_makes_unknown_cost_nullable_and_preserves_api_usage_contract(
+    monkeypatch, tmp_path
+):
+    database = Database(tmp_path / "migration-48-nullable-cost.db")
+    all_migrations = migrations_module.MIGRATIONS
+    before_48 = tuple(migration for migration in all_migrations if migration.version < 48)
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", before_48)
+    assert migrate(database) == list(range(1, 48))
+    with database.transaction() as connection:
+        connection.execute(
+            "CREATE INDEX idx_api_usage_migration_custom ON api_usage(provider,status)"
+        )
+        connection.execute(
+            """
+            INSERT INTO api_usage(
+                id,provider,model,request_type,input_tokens,estimated_cost,actual_cost,
+                started_at,status,cost_source
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)
+            """,
+            (17, "legacy", "model", "analysis", 3, 0.125, None, "now", "completed", "estimated"),
+        )
+        connection.execute(
+            """
+            INSERT INTO api_usage(
+                id,provider,model,request_type,started_at,status
+            ) VALUES (900,"sequence","model","analysis","now","completed")
+            """
+        )
+        connection.execute("DELETE FROM api_usage WHERE id=900")
+        foreign_keys_before = {
+            tuple(row)
+            for row in connection.execute("PRAGMA foreign_key_list(api_usage)").fetchall()
+        }
+
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", all_migrations)
+    assert migrate(database) == [48]
+    with database.transaction() as connection:
+        estimated_column = next(
+            row for row in connection.execute("PRAGMA table_info(api_usage)").fetchall()
+            if row["name"] == "estimated_cost"
+        )
+        foreign_keys_after = {
+            tuple(row)
+            for row in connection.execute("PRAGMA foreign_key_list(api_usage)").fetchall()
+        }
+        index_names = {
+            str(row["name"])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='api_usage'"
+            ).fetchall()
+        }
+        legacy = connection.execute(
+            "SELECT id,provider,input_tokens,estimated_cost,actual_cost,cost_source FROM api_usage WHERE id=17"
+        ).fetchone()
+        connection.execute(
+            """
+            INSERT INTO api_usage(provider,model,request_type,estimated_cost,actual_cost,started_at,status)
+            VALUES (?,?,?,?,?,?,?)
+            """,
+            ("unknown", "model", "analysis", None, None, "now", "failed"),
+        )
+        auto_id = connection.execute(
+            "SELECT id FROM api_usage WHERE provider='unknown'"
+        ).fetchone()[0]
+
+    assert estimated_column[3] == 0
+    assert estimated_column[4] == "0"
+    assert foreign_keys_after == foreign_keys_before
+    assert "idx_api_usage_migration_custom" in index_names
+    assert "idx_api_usage_batch_item_once" in index_names
+    assert tuple(legacy) == (17, "legacy", 3, 0.125, None, "estimated")
+    assert auto_id > 900
     assert migrate(database) == []
 
 

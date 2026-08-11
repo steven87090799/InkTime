@@ -71,7 +71,7 @@ class UsageRepository:
                     input_tokens,
                     output_tokens,
                     cached_tokens,
-                    max(0.0, float(estimated_cost)) if estimated_cost is not None else 0.0,
+                    max(0.0, float(estimated_cost)) if estimated_cost is not None else None,
                     actual_cost,
                     started_at,
                     completed_at,

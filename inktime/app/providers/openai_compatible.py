@@ -537,18 +537,24 @@ class OpenAICompatibleProvider(VisionProvider):
         return payload
 
     def _post_completion(
-        self, body: dict, *, vision_attempt: VisionAttemptState | None = None
+        self,
+        body: dict,
+        *,
+        vision_attempt: VisionAttemptState | None = None,
+        retry_policy: str = AMBIGUOUS_VISION_ANALYSIS,
     ) -> ProviderResponse:
         try:
             response = self._send(
                 "POST",
                 "/chat/completions",
-                retry_policy=AMBIGUOUS_VISION_ANALYSIS,
+                retry_policy=retry_policy,
                 headers=self._headers(),
                 json=body,
                 timeout=self.request_timeout,
             )
         except ProviderHTTPError as exc:
+            if retry_policy == NO_RETRY_SIDE_EFFECT and exc.code == "BATCH-SIDE-EFFECT-5XX":
+                exc.code = "VLM-007"
             if exc.ambiguous or exc.http_status is not None:
                 exc.vision_started = True
                 exc.request_started = True
@@ -789,7 +795,7 @@ class OpenAICompatibleProvider(VisionProvider):
             "request_body_bytes": len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")),
             "image_bytes": 0,
         }
-        return self._post_completion(body)
+        return self._post_completion(body, retry_policy=NO_RETRY_SIDE_EFFECT)
 
     def submit_batch(self, requests: list[dict], *, completion_window: str = "24h") -> str:
         if self.kind == "openrouter":

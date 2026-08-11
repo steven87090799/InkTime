@@ -2041,6 +2041,11 @@ MIGRATIONS = (
             "ALTER TABLE idempotency_requests ADD COLUMN reservation_expires_at TEXT",
         ),
     ),
+    Migration(
+        48,
+        "允許未知 API 成本保留 NULL",
+        (),
+    ),
 )
 
 
@@ -2220,6 +2225,108 @@ def _apply_migration_43_data_fixes(connection: sqlite3.Connection) -> None:
     )
 
 
+def _apply_migration_48_data_fixes(connection: sqlite3.Connection) -> None:
+    """Make unknown synchronous costs nullable without losing SQLite contracts.
+
+    SQLite cannot drop a column's NOT NULL constraint in place.  Rebuild the
+    table inside the migration transaction, carry every current row and
+    sequence value across, and restore all user-visible indexes/triggers after
+    the table is renamed.  The explicit schema below mirrors the cumulative
+    api_usage schema produced by migrations 1, 26, 32, and 33.
+    """
+
+    indexes = [
+        str(row["sql"])
+        for row in connection.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type='index' AND tbl_name='api_usage' AND sql IS NOT NULL
+            ORDER BY name
+            """
+        ).fetchall()
+    ]
+    triggers = [
+        str(row["sql"])
+        for row in connection.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type='trigger' AND tbl_name='api_usage' AND sql IS NOT NULL
+            ORDER BY name
+            """
+        ).fetchall()
+    ]
+    sequence = connection.execute(
+        "SELECT seq FROM sqlite_sequence WHERE name='api_usage'"
+    ).fetchone()
+
+    connection.execute(
+        """
+        CREATE TABLE api_usage_nullable_estimated_cost (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+            photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,
+            request_type TEXT NOT NULL,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cached_tokens INTEGER NOT NULL DEFAULT 0,
+            estimated_cost REAL DEFAULT 0,
+            actual_cost REAL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            latency_ms INTEGER,
+            status TEXT NOT NULL,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            error_code TEXT,
+            batch_id TEXT REFERENCES analysis_batches(id) ON DELETE SET NULL,
+            batch_item_id TEXT REFERENCES analysis_batch_items(id) ON DELETE SET NULL,
+            processing_mode TEXT NOT NULL DEFAULT 'sync' CHECK(processing_mode IN ('sync','batch')),
+            request_id TEXT,
+            reasoning_tokens INTEGER NOT NULL DEFAULT 0 CHECK(reasoning_tokens >= 0),
+            cache_write_tokens INTEGER NOT NULL DEFAULT 0 CHECK(cache_write_tokens >= 0),
+            cost_source TEXT NOT NULL DEFAULT 'unknown' CHECK(cost_source IN ('provider_reported','estimated','unknown')),
+            prompt_chars INTEGER NOT NULL DEFAULT 0 CHECK(prompt_chars >= 0),
+            schema_chars INTEGER NOT NULL DEFAULT 0 CHECK(schema_chars >= 0),
+            request_body_bytes INTEGER NOT NULL DEFAULT 0 CHECK(request_body_bytes >= 0),
+            image_bytes INTEGER NOT NULL DEFAULT 0 CHECK(image_bytes >= 0),
+            provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO api_usage_nullable_estimated_cost(
+            id,provider,model,job_id,photo_id,request_type,input_tokens,output_tokens,
+            cached_tokens,estimated_cost,actual_cost,started_at,completed_at,latency_ms,status,
+            retry_count,error_code,batch_id,batch_item_id,processing_mode,request_id,
+            reasoning_tokens,cache_write_tokens,cost_source,prompt_chars,schema_chars,
+            request_body_bytes,image_bytes,provider_id
+        )
+        SELECT
+            id,provider,model,job_id,photo_id,request_type,input_tokens,output_tokens,
+            cached_tokens,estimated_cost,actual_cost,started_at,completed_at,latency_ms,status,
+            retry_count,error_code,batch_id,batch_item_id,processing_mode,request_id,
+            reasoning_tokens,cache_write_tokens,cost_source,prompt_chars,schema_chars,
+            request_body_bytes,image_bytes,provider_id
+        FROM api_usage
+        """
+    )
+    connection.execute("DROP TABLE api_usage")
+    connection.execute(
+        "ALTER TABLE api_usage_nullable_estimated_cost RENAME TO api_usage"
+    )
+    if sequence is not None:
+        connection.execute(
+            "UPDATE sqlite_sequence SET seq=? WHERE name='api_usage'",
+            (int(sequence[0]),),
+        )
+    for statement in indexes + triggers:
+        connection.execute(statement)
+
+
 def _applied_versions(database: Database) -> set[int]:
     with database.session() as connection:
         if not _table_exists(connection, "schema_migrations"):
@@ -2396,6 +2503,8 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
                         _apply_migration_33_data_fixes(connection)
                     if migration.version == 43:
                         _apply_migration_43_data_fixes(connection)
+                    if migration.version == 48:
+                        _apply_migration_48_data_fixes(connection)
                     connection.execute(
                         "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
                         (migration.version, migration.name, _utc_now()),
