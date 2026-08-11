@@ -1942,6 +1942,79 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        40,
+        "加入有界 AI API Trace 與 Provider Attempt",
+        (
+            """
+            CREATE TABLE IF NOT EXISTS model_call_traces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trace_id TEXT NOT NULL UNIQUE,
+                job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+                photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+                provider TEXT,
+                model TEXT,
+                stage TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('RUNNING','SUCCESS','FAILED','TIMEOUT')),
+                prompt_version TEXT,
+                analysis_fingerprint TEXT,
+                final_result_json TEXT,
+                started_at TEXT NOT NULL,
+                response_received_at TEXT,
+                completed_at TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_model_call_traces_created ON model_call_traces(id DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_model_call_traces_photo ON model_call_traces(photo_id,id DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_model_call_traces_job ON model_call_traces(job_id,id DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_model_call_traces_status ON model_call_traces(status,id DESC)",
+            """
+            CREATE TABLE IF NOT EXISTS model_call_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trace_id TEXT NOT NULL REFERENCES model_call_traces(trace_id) ON DELETE CASCADE,
+                attempt_number INTEGER NOT NULL CHECK(attempt_number > 0),
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                endpoint TEXT,
+                api_mode TEXT,
+                status TEXT NOT NULL CHECK(status IN ('RUNNING','SUCCESS','FAILED','TIMEOUT')),
+                result TEXT,
+                request_json_sanitized TEXT,
+                response_raw TEXT,
+                response_parsed_json TEXT,
+                request_built_at TEXT,
+                started_at TEXT NOT NULL,
+                response_received_at TEXT,
+                completed_at TEXT,
+                http_status INTEGER,
+                latency_ms INTEGER,
+                provider_request_id TEXT,
+                api_usage_id INTEGER REFERENCES api_usage(id) ON DELETE SET NULL,
+                error_code TEXT,
+                error_message TEXT,
+                retry_reason TEXT,
+                retry_delay_ms INTEGER,
+                UNIQUE(trace_id,attempt_number)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_model_call_attempts_trace ON model_call_attempts(trace_id,attempt_number)",
+            "CREATE INDEX IF NOT EXISTS idx_model_call_attempts_usage ON model_call_attempts(api_usage_id) WHERE api_usage_id IS NOT NULL",
+            """
+            CREATE TABLE IF NOT EXISTS model_call_trace_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trace_id TEXT NOT NULL REFERENCES model_call_traces(trace_id) ON DELETE CASCADE,
+                attempt_id INTEGER REFERENCES model_call_attempts(id) ON DELETE SET NULL,
+                event_type TEXT NOT NULL,
+                details_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_model_call_trace_events_trace ON model_call_trace_events(trace_id,id)",
+        ),
+    ),
 )
 
 

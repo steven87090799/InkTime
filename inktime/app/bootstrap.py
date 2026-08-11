@@ -13,6 +13,7 @@ from inktime.app.db import Database, backfill_photo_capture_dates, migrate
 from inktime.app.domain.photos import LocationResolver, ThumbnailCache
 from inktime.app.domain.rendering import AtomicReleasePublisher, FontManager
 from inktime.app.repositories.auth import AuthRepository
+from inktime.app.repositories.ai_traces import AITraceRepository
 from inktime.app.repositories.analysis_batches import AnalysisBatchRepository
 from inktime.app.repositories.devices import DeviceRepository
 from inktime.app.repositories.offline_schedules import OfflineScheduleRepository
@@ -196,6 +197,7 @@ def bootstrap_services(
     scoring_repository = ScoringProfileRepository(database, settings_repository)
     scoring_repository.ensure_initial()
     usage_repository = UsageRepository(database)
+    ai_trace_repository = AITraceRepository(database)
     thumbnail_cache = ThumbnailCache(config.cache_dir / "thumbnails")
     budget_service = BudgetService(database, settings_repository)
     provider_service = ProviderService(provider_repository, settings_repository)
@@ -208,6 +210,7 @@ def bootstrap_services(
         settings_repository,
         observability_service,
         process_boundary,
+        ai_trace_repository,
     )
     analysis_batch_repository = AnalysisBatchRepository(database)
     batch_analysis_service = BatchAnalysisService(
@@ -275,6 +278,7 @@ def bootstrap_services(
             "inktime_provider_repository": provider_repository,
             "inktime_scoring_repository": scoring_repository,
             "inktime_usage_repository": usage_repository,
+            "inktime_ai_trace_repository": ai_trace_repository,
             "inktime_thumbnail_cache": thumbnail_cache,
             "inktime_budget_service": budget_service,
             "inktime_provider_service": provider_service,

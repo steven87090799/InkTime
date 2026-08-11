@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,12 @@ class ProviderResponse:
     usage: Usage
     request_id: str | None = None
     request_metrics: dict[str, int] | None = None
+    endpoint: str | None = None
+    http_status: int | None = None
+    request_json_sanitized: dict[str, Any] | None = None
+    raw_response: str | None = None
+    request_built_at: str | None = None
+    response_received_at: str | None = None
 
 
 @dataclass

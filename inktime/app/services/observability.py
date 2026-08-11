@@ -14,6 +14,7 @@ class ObservabilityService:
     _ALERT_INTERVAL = timedelta(minutes=5)
     _PROVIDER_WINDOW = timedelta(minutes=15)
     _BATCH_SIZE = 500
+    _TRACE_BATCH_SIZE = 250
 
     def __init__(self, database, settings, diagnostics, publisher=None):
         self.database, self.settings, self.diagnostics = database, settings, diagnostics
@@ -600,6 +601,40 @@ class ObservabilityService:
                 (cutoff, self._BATCH_SIZE),
             )
             c.execute("DELETE FROM job_errors WHERE resolved_at IS NOT NULL AND last_seen_at<?", (cutoff,))
+            c.execute(
+                """
+                UPDATE model_call_traces
+                SET status='TIMEOUT',completed_at=?,error_code='AI-TRACE-STALE',
+                    error_message='Trace 超過保留視窗仍未完成'
+                WHERE id IN (
+                    SELECT id FROM model_call_traces
+                    WHERE status='RUNNING' AND started_at<? ORDER BY id LIMIT ?
+                )
+                """,
+                (now.isoformat(), cutoff, self._TRACE_BATCH_SIZE),
+            )
+            c.execute(
+                """
+                DELETE FROM model_call_traces WHERE id IN (
+                    SELECT id FROM model_call_traces
+                    WHERE status<>'RUNNING' AND COALESCE(completed_at,started_at)<?
+                    ORDER BY id LIMIT ?
+                )
+                """,
+                (cutoff, self._TRACE_BATCH_SIZE),
+            )
+            trace_max_rows = min(10_000, max_rows)
+            trace_count = int(c.execute("SELECT COUNT(*) FROM model_call_traces").fetchone()[0])
+            if trace_count > trace_max_rows:
+                c.execute(
+                    """
+                    DELETE FROM model_call_traces WHERE id IN (
+                        SELECT id FROM model_call_traces WHERE status<>'RUNNING'
+                        ORDER BY id LIMIT ?
+                    )
+                    """,
+                    (min(self._TRACE_BATCH_SIZE, trace_count - trace_max_rows),),
+                )
             count = int(c.execute("SELECT COUNT(*) FROM activity_events").fetchone()[0])
             if count > max_rows:
                 budget = min(self._BATCH_SIZE, count - max_rows)

@@ -7,7 +7,7 @@
     <h1>{{ photo.relative_path }}</h1>
     <p>{{ photo.library_id }} · {{ photo.status }}</p>
   </div>
-  <a href="/photos">返回照片庫</a>
+  <div class="actions-row"><a href="/photos">返回照片庫</a><a class="secondary" href="/ai/traces?photo_id={{ photo.id }}">AI 分析追蹤</a></div>
 </div>
 
 {% if g.user.role == 'administrator' %}

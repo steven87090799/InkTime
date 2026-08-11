@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timezone
 import hashlib
 from io import BytesIO
 import json
@@ -14,6 +15,7 @@ from uuid import uuid4
 import requests
 
 from inktime.app.domain.analysis.plan import SCHEMA_VERSION, normalize_reasoning_effort
+from inktime.app.core.ai_trace import sanitize_ai_payload, sanitized_response_text
 from inktime.app.domain.analysis.schema import json_schema_for_stage
 from inktime.app.domain.analysis.scoring import DEFAULT_SCORING_RULES
 from inktime.app.providers.config import (
@@ -497,6 +499,8 @@ class OpenAICompatibleProvider(VisionProvider):
         # The request body is fully built before this marker.  A transport
         # failure after this point is therefore a consumed image attempt even
         # when no response reaches the caller.
+        request_built_at = datetime.now(timezone.utc).isoformat()
+        sanitized_request = sanitize_ai_payload(body)
         if vision_attempt is not None:
             vision_attempt.vision_started = True
         try:
@@ -514,19 +518,39 @@ class OpenAICompatibleProvider(VisionProvider):
             # provider in this analysis attempt.
             exc.vision_started = True
             exc.request_started = True
+            exc.trace_request_json = sanitized_request
+            exc.trace_endpoint = "/chat/completions"
+            exc.trace_request_built_at = request_built_at
+            exc.trace_http_status = getattr(exc, "http_status", None)
             raise
+        response_received_at = datetime.now(timezone.utc).isoformat()
         try:
             payload = self._json_response(response, error_code="VLM-006", ambiguous_on_invalid=True)
         except ProviderHTTPError as exc:
             exc.vision_started = True
             exc.request_started = True
+            exc.trace_request_json = sanitized_request
+            exc.trace_endpoint = "/chat/completions"
+            exc.trace_request_built_at = request_built_at
+            exc.trace_response_received_at = response_received_at
+            exc.trace_http_status = int(getattr(response, "status_code", 0) or 0) or None
+            exc.trace_response_raw = sanitized_response_text(getattr(response, "text", ""))
             raise
         try:
             content = payload["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise ProviderHTTPError(
+            error = ProviderHTTPError(
                 "Provider 回應缺少有效 Response Body", "VLM-006", ambiguous=True
-            ) from exc
+            )
+            error.vision_started = True
+            error.request_started = True
+            error.trace_request_json = sanitized_request
+            error.trace_endpoint = "/chat/completions"
+            error.trace_request_built_at = request_built_at
+            error.trace_response_received_at = response_received_at
+            error.trace_http_status = int(getattr(response, "status_code", 0) or 0) or None
+            error.trace_response_raw = sanitized_response_text(payload)
+            raise error from exc
         if isinstance(content, list):
             content = "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
         headers = getattr(response, "headers", {}) or {}
@@ -535,6 +559,12 @@ class OpenAICompatibleProvider(VisionProvider):
             self._usage(payload),
             headers.get("x-request-id") or headers.get("x-openrouter-request-id"),
             dict(self.last_request_metrics),
+            "/chat/completions",
+            int(getattr(response, "status_code", 0) or 0) or None,
+            sanitized_request,
+            sanitized_response_text(payload),
+            request_built_at,
+            response_received_at,
         )
 
     def build_analysis_request_body(

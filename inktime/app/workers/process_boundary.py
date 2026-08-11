@@ -43,8 +43,8 @@ def _provider_child(specification: dict[str, Any], method: str, kwargs: dict[str
         provider = OpenAICompatibleProvider.from_process_spec(specification)
         sender.send(("ok", getattr(provider, method)(**kwargs)))
     except BaseException as exc:
-        # Keep only structured control metadata; never serialize provider
-        # messages, URLs, request data, or credentials across the boundary.
+        # Keep only structured control metadata plus the provider's already
+        # sanitized, bounded trace representation. Never serialize credentials.
         sender.send(
             (
                 "error",
@@ -53,6 +53,12 @@ def _provider_child(specification: dict[str, Any], method: str, kwargs: dict[str
                     "code": getattr(exc, "code", None),
                     "ambiguous": bool(getattr(exc, "ambiguous", False)),
                     "vision_started": bool(getattr(exc, "vision_started", False)),
+                    "trace_request_json": getattr(exc, "trace_request_json", None),
+                    "trace_endpoint": getattr(exc, "trace_endpoint", None),
+                    "trace_request_built_at": getattr(exc, "trace_request_built_at", None),
+                    "trace_response_received_at": getattr(exc, "trace_response_received_at", None),
+                    "trace_http_status": getattr(exc, "trace_http_status", None),
+                    "trace_response_raw": getattr(exc, "trace_response_raw", None),
                 },
             )
         )
@@ -176,6 +182,15 @@ class KillableProcessBoundary:
                         error.code = child_code
                     error.ambiguous = bool(value.get("ambiguous", False))
                     error.vision_started = bool(value.get("vision_started", False))
+                    for key in (
+                        "trace_request_json",
+                        "trace_endpoint",
+                        "trace_request_built_at",
+                        "trace_response_received_at",
+                        "trace_http_status",
+                        "trace_response_raw",
+                    ):
+                        setattr(error, key, value.get(key))
                     raise error
                 raise ProcessCallError(str(value))
             return value

@@ -9,6 +9,7 @@ from uuid import uuid4
 from typing import Any, Callable
 
 from inktime.app.core.paths import safe_join
+from inktime.app.core.ai_trace import sanitize_ai_payload
 from inktime.app.domain.analysis import (
     AnalysisValidationError,
     REPAIR_TOKEN_CAP,
@@ -37,6 +38,7 @@ from inktime.app.domain.photos import ThumbnailCache
 from inktime.app.domain.photos.quality_policy import FEATURE_VERSION, evaluate_local_quality
 from inktime.app.providers.base import ProviderResponse, Usage, VisionAttemptState, VisionProvider
 from inktime.app.repositories.photos import PhotoRepository
+from inktime.app.repositories.ai_traces import AITraceRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.budgets import BudgetService
@@ -77,6 +79,7 @@ class PhotoAnalysisService:
         settings: SettingsRepository | None = None,
         observability=None,
         process_boundary=None,
+        traces: AITraceRepository | None = None,
     ) -> None:
         self.photos = photos
         self.usage = usage
@@ -85,10 +88,40 @@ class PhotoAnalysisService:
         self.settings = settings or (budgets.settings if budgets else None)
         self.observability = observability
         self.process_boundary = process_boundary
+        self.traces = traces
 
     def _activity(self, severity: str, event: str, message: str, **fields) -> None:
         if self.observability is not None:
             self.observability.record(severity, "analysis", event, message, **fields)
+
+    def _trace_write(self, method: str, *args, **kwargs):
+        """Trace persistence is fail-open and never owns provider retry behavior."""
+
+        if self.traces is None:
+            return None
+        try:
+            return getattr(self.traces, method)(*args, **kwargs)
+        except Exception as exc:
+            try:
+                self._activity(
+                    "WARNING",
+                    "ai_trace_persist_failed",
+                    "AI Trace 寫入失敗；分析流程不受影響",
+                    error_code="AI-TRACE-PERSIST",
+                    operation=method,
+                    error=str(exc)[:500],
+                )
+            except Exception:  # noqa: S110 -- diagnostics must not affect analysis ownership
+                pass
+            return None
+
+    @staticmethod
+    def _trace_retry_delay_ms(exc: Exception) -> int | None:
+        try:
+            value = getattr(exc, "retry_after", None)
+            return max(0, int(float(value) * 1000)) if value is not None else None
+        except (TypeError, ValueError, OverflowError):
+            return None
 
     def _caption_controls(self) -> dict | None:
         if self.settings is None or not bool(self.settings.get("analysis.advanced_caption_enabled", False)):
@@ -509,6 +542,7 @@ class PhotoAnalysisService:
         travel_policy: dict | None = None,
         analysis_source: str = "direct",
         connection=None,
+        trace_id: str | None = None,
     ) -> dict:
         ranked = self._score_result(
             result,
@@ -517,6 +551,8 @@ class PhotoAnalysisService:
             favorite_bonus=favorite_bonus,
             travel_policy=travel_policy,
         )
+        if trace_id:
+            self._trace_write("add_event", trace_id, "SCORE_CALIBRATED")
         self.photos.save_analysis(
             photo_id,
             job_id,
@@ -565,7 +601,7 @@ class PhotoAnalysisService:
         started_at: str,
         started_perf: float,
         retry_count: int = 0,
-    ) -> float:
+    ) -> tuple[float, int]:
         estimated_cost = provider.estimate_cost(model, response.usage)
         provider_cost = response.usage.provider_reported_cost
         if provider_cost is not None:
@@ -585,7 +621,7 @@ class PhotoAnalysisService:
             else 0.0
         )
         metrics = dict(response.request_metrics or getattr(provider, "last_request_metrics", {}) or {})
-        self.usage.record(
+        usage_id = self.usage.record(
             provider=provider.name,
             provider_id=str(getattr(provider, "provider_id", provider.name)),
             model=model,
@@ -601,6 +637,7 @@ class PhotoAnalysisService:
             latency_ms=int((time.perf_counter() - started_perf) * 1000),
             status="completed",
             retry_count=retry_count,
+            request_id=response.request_id,
             reasoning_tokens=response.usage.reasoning_tokens,
             cache_write_tokens=response.usage.cache_write_tokens,
             cost_source=cost_source,
@@ -609,7 +646,7 @@ class PhotoAnalysisService:
             request_body_bytes=metrics.get("request_body_bytes", 0),
             image_bytes=metrics.get("image_bytes", 0),
         )
-        return effective_cost
+        return effective_cost, usage_id
 
     def _model_call(
         self,
@@ -628,10 +665,13 @@ class PhotoAnalysisService:
         repair_policy: dict | None,
         prompt_version: str,
         vision_input: dict,
+        analysis_fingerprint: str | None = None,
+        photo_metadata: dict[str, Any] | None = None,
         provider_prompt_contract_sha256: str | None = None,
         force_recompute: bool = False,
         _excluded_providers: set[str] | None = None,
-    ) -> tuple[dict, str, float, bool, str, str, str, str, Usage, int]:
+        _trace_id: str | None = None,
+    ) -> tuple[dict, str, float, bool, str, str, str, str, Usage, int, str | None]:
         selected_channel = None
         selected_provider = provider
         # Enumerate Frozen Route identities before consulting network state.
@@ -731,6 +771,7 @@ class PhotoAnalysisService:
                         vision_json,
                         Usage(),
                         0,
+                        None,
                     )
                 except AnalysisValidationError:
                     pass
@@ -790,6 +831,7 @@ class PhotoAnalysisService:
                     vision_json,
                     Usage(),
                     0,
+                    None,
                 )
         if not force_recompute or waited_for_owner:
             cached = get_cache()
@@ -806,9 +848,11 @@ class PhotoAnalysisService:
                     vision_json,
                     Usage(),
                     0,
+                    None,
                 )
         try:
             vision_attempt = VisionAttemptState()
+            trace_id = _trace_id or str(uuid4())
             # The only owner generates a JPEG, after both cache checks.
             with image_factory() as image:
                 result, raw, cost, usage, latency = self._perform_uncached_model_call(
@@ -836,6 +880,9 @@ class PhotoAnalysisService:
                         f"{stage}|{job_id or 'manual'}|{photo_id}|{request_fingerprint}|"
                         f"{hashlib.sha256(owner_id.encode('utf-8')).hexdigest()[:16]}"
                     ),
+                    trace_id=trace_id,
+                    analysis_fingerprint=analysis_fingerprint,
+                    photo_metadata=photo_metadata,
                 )
         except Exception as exc:
             self.photos.finish_ai_cache_reservation(cache_key, owner_id, error=str(exc))
@@ -865,6 +912,13 @@ class PhotoAnalysisService:
                         photo_id=photo_id,
                         error=str(persist_error)[:500],
                     )
+            self._trace_write(
+                "mark_trace",
+                trace_id,
+                status="TIMEOUT" if isinstance(exc, TimeoutError) else "FAILED",
+                error_code=str(getattr(exc, "code", "AI-PROVIDER-UNAVAILABLE")),
+                error_message=str(exc),
+            )
             # A timeout/connection failure after a vision POST may have
             # completed remotely.  Keep the reservation error visible and
             # never send the same image to another Provider automatically.
@@ -892,7 +946,10 @@ class PhotoAnalysisService:
                     vision_input=vision_input,
                     provider_prompt_contract_sha256=provider_prompt_contract_sha256,
                     force_recompute=force_recompute,
+                    analysis_fingerprint=analysis_fingerprint,
+                    photo_metadata=photo_metadata,
                     _excluded_providers=excluded,
+                    _trace_id=trace_id,
                 )
             raise
         self.photos.finish_ai_cache_reservation(cache_key, owner_id)
@@ -907,6 +964,7 @@ class PhotoAnalysisService:
             vision_json,
             usage,
             latency,
+            trace_id,
         )
 
     def _perform_uncached_model_call(
@@ -933,6 +991,9 @@ class PhotoAnalysisService:
         cache_provider_identity: str,
         vision_attempt: VisionAttemptState,
         provider_request_context_id: str,
+        trace_id: str,
+        analysis_fingerprint: str | None,
+        photo_metadata: dict[str, Any] | None,
     ) -> tuple[dict, str, float, Usage, int]:
         if self.budgets:
             self.budgets.assert_request_allowed(job_id, photo_id)
@@ -954,6 +1015,27 @@ class PhotoAnalysisService:
             else FULL_ANALYSIS_TOKEN_CAP
         )
         max_tokens = max(256, min(global_token_cap, requested_token_cap, hard_cap))
+        concrete_provider = selected_channel.provider if selected_channel is not None else provider
+        provider_identity = str(getattr(concrete_provider, "provider_id", concrete_provider.name))
+        self._trace_write(
+            "start_trace",
+            trace_id=trace_id,
+            job_id=job_id,
+            photo_id=photo_id,
+            provider=provider_identity,
+            model=model,
+            stage=stage,
+            prompt_version=prompt_version,
+            analysis_fingerprint=analysis_fingerprint,
+            started_at=started_at,
+        )
+        attempt_id = self._trace_write(
+            "start_attempt",
+            trace_id=trace_id,
+            provider=provider_identity,
+            model=model,
+            started_at=started_at,
+        )
         self._activity(
             "DEBUG",
             "provider_request_started",
@@ -961,8 +1043,8 @@ class PhotoAnalysisService:
             job_id=job_id,
             photo_id=photo_id,
             stage=stage,
-            trace_id=prompt_version,
-            provider=provider.name,
+            trace_id=trace_id,
+            provider=provider_identity,
             model=model,
         )
         try:
@@ -1026,7 +1108,34 @@ class PhotoAnalysisService:
                 )
             vision_attempt.vision_started = True
             vision_attempt.vision_completed = True
-        except TimeoutError:
+        except TimeoutError as exc:
+            if attempt_id is not None:
+                self._trace_write(
+                    "finish_attempt",
+                    attempt_id,
+                    status="TIMEOUT",
+                    result="TIMEOUT",
+                    request_json=sanitize_ai_payload(
+                        getattr(exc, "trace_request_json", None), photo=photo_metadata
+                    ),
+                    response_raw=getattr(exc, "trace_response_raw", None),
+                    request_built_at=getattr(exc, "trace_request_built_at", None),
+                    response_received_at=getattr(exc, "trace_response_received_at", None),
+                    endpoint=getattr(exc, "trace_endpoint", None),
+                    api_mode="chat_completions",
+                    http_status=getattr(exc, "trace_http_status", None),
+                    latency_ms=int((time.perf_counter() - started_perf) * 1000),
+                    error_code=str(getattr(exc, "code", "AI-PROVIDER-TIMEOUT")),
+                    error_message=str(exc),
+                    retry_delay_ms=self._trace_retry_delay_ms(exc),
+                )
+            self._trace_write(
+                "mark_trace",
+                trace_id,
+                status="TIMEOUT",
+                error_code=str(getattr(exc, "code", "AI-PROVIDER-TIMEOUT")),
+                error_message=str(exc),
+            )
             self._activity(
                 "WARNING",
                 "provider_timeout",
@@ -1037,7 +1146,35 @@ class PhotoAnalysisService:
                 error_code="AI-PROVIDER-TIMEOUT",
             )
             raise
-        except Exception:
+        except Exception as exc:
+            error_code = str(getattr(exc, "code", "AI-PROVIDER-UNAVAILABLE"))
+            if attempt_id is not None:
+                self._trace_write(
+                    "finish_attempt",
+                    attempt_id,
+                    status="FAILED",
+                    result="FAILED",
+                    request_json=sanitize_ai_payload(
+                        getattr(exc, "trace_request_json", None), photo=photo_metadata
+                    ),
+                    response_raw=getattr(exc, "trace_response_raw", None),
+                    request_built_at=getattr(exc, "trace_request_built_at", None),
+                    response_received_at=getattr(exc, "trace_response_received_at", None),
+                    endpoint=getattr(exc, "trace_endpoint", None),
+                    api_mode="chat_completions",
+                    http_status=getattr(exc, "trace_http_status", getattr(exc, "http_status", None)),
+                    latency_ms=int((time.perf_counter() - started_perf) * 1000),
+                    error_code=error_code,
+                    error_message=str(exc),
+                    retry_delay_ms=self._trace_retry_delay_ms(exc),
+                )
+            self._trace_write(
+                "mark_trace",
+                trace_id,
+                status="FAILED",
+                error_code=error_code,
+                error_message=str(exc),
+            )
             self._activity(
                 "ERROR",
                 "provider_request_failed",
@@ -1045,11 +1182,20 @@ class PhotoAnalysisService:
                 job_id=job_id,
                 photo_id=photo_id,
                 stage=stage,
-                error_code="AI-PROVIDER-UNAVAILABLE",
+                error_code=error_code,
             )
             raise
-        total_cost = self._record(
-            provider, model, job_id, photo_id, stage, response, started_at, started_perf
+        total_cost, usage_id = self._record(
+            concrete_provider, model, job_id, photo_id, stage, response, started_at, started_perf
+        )
+        request_payload = sanitize_ai_payload(response.request_json_sanitized, photo=photo_metadata)
+        response_received_at = response.response_received_at or datetime.now(timezone.utc).isoformat()
+        trace_response_received_at = response_received_at
+        self._trace_write(
+            "add_event",
+            trace_id,
+            "RESPONSE_PARSE_STARTED",
+            attempt_id=attempt_id,
         )
         total_input_tokens = response.usage.input_tokens
         total_output_tokens = response.usage.output_tokens
@@ -1060,6 +1206,32 @@ class PhotoAnalysisService:
             candidate = local_json if isinstance(local_json, dict) else response.content
             result = self._apply_caption_variant(validate_analysis_result(candidate), caption_controls)
             raw = response.content
+            if attempt_id is not None:
+                self._trace_write(
+                    "finish_attempt",
+                    attempt_id,
+                    status="SUCCESS",
+                    result="VALIDATED",
+                    request_json=request_payload,
+                    response_raw=response.raw_response or response.content,
+                    response_parsed=result,
+                    request_built_at=response.request_built_at,
+                    response_received_at=response_received_at,
+                    endpoint=response.endpoint,
+                    api_mode="chat_completions",
+                    http_status=response.http_status,
+                    latency_ms=int((time.perf_counter() - started_perf) * 1000),
+                    provider_request_id=response.request_id,
+                    api_usage_id=usage_id,
+                )
+            self._trace_write(
+                "add_event",
+                trace_id,
+                "RESPONSE_PARSED",
+                attempt_id=attempt_id,
+                created_at=response_received_at,
+            )
+            self._trace_write("add_event", trace_id, "SCHEMA_VALIDATED", attempt_id=attempt_id)
             if caption_controls and caption_controls["caption_variants_enabled"]:
                 self._activity(
                     "DEBUG",
@@ -1068,9 +1240,28 @@ class PhotoAnalysisService:
                     job_id=job_id,
                     photo_id=photo_id,
                     stage=stage,
-                    trace_id=prompt_version,
+                    trace_id=trace_id,
                 )
         except AnalysisValidationError as first_error:
+            if attempt_id is not None:
+                self._trace_write(
+                    "finish_attempt",
+                    attempt_id,
+                    status="FAILED",
+                    result="INVALID_RESPONSE",
+                    request_json=request_payload,
+                    response_raw=response.raw_response or response.content,
+                    request_built_at=response.request_built_at,
+                    response_received_at=response_received_at,
+                    endpoint=response.endpoint,
+                    api_mode="chat_completions",
+                    http_status=response.http_status,
+                    latency_ms=int((time.perf_counter() - started_perf) * 1000),
+                    provider_request_id=response.request_id,
+                    api_usage_id=usage_id,
+                    error_code="SCHEMA_VALIDATION_FAILED",
+                    error_message=str(first_error),
+                )
             vision_attempt.repair_attempted = True
             self._activity(
                 "DEBUG",
@@ -1079,18 +1270,33 @@ class PhotoAnalysisService:
                 job_id=job_id,
                 photo_id=photo_id,
                 stage=stage,
-                trace_id=prompt_version,
+                trace_id=trace_id,
             )
             repair_started_at = datetime.now(timezone.utc).isoformat()
             repair_perf = time.perf_counter()
             frozen_repair_policy = dict(repair_policy or {})
             if not bool(frozen_repair_policy.get("enabled", True)):
+                self._trace_write(
+                    "mark_trace",
+                    trace_id,
+                    status="FAILED",
+                    error_code="SCHEMA_VALIDATION_FAILED",
+                    error_message=str(first_error),
+                )
                 raise first_error
             repair_model = str(frozen_repair_policy.get("model") or model).strip() or model
             try:
                 repair_cap = int(frozen_repair_policy.get("max_tokens", REPAIR_TOKEN_CAP))
             except (TypeError, ValueError):
                 repair_cap = REPAIR_TOKEN_CAP
+            repair_attempt_id = self._trace_write(
+                "start_attempt",
+                trace_id=trace_id,
+                provider=provider_identity,
+                model=repair_model,
+                started_at=repair_started_at,
+                retry_reason="schema_validation_failed",
+            )
             repair_call = {
                 "invalid_content": response.content,
                 "validation_error": str(first_error),
@@ -1100,31 +1306,71 @@ class PhotoAnalysisService:
                 "caption_controls": caption_controls,
                 "provider_request_context_id": provider_request_context_id,
             }
-            if selected_channel is not None and hasattr(provider, "_execute_sticky"):
-                repaired = provider._execute_sticky(
-                    selected_channel,
-                    "repair_json",
-                    boundary=self.process_boundary,
-                    **repair_call,
-                )
-            elif self.process_boundary is not None and hasattr(provider, "repair_json_isolated"):
-                repaired = provider.repair_json_isolated(self.process_boundary, **repair_call)
-            elif self.process_boundary is not None:
-                specification = provider.process_spec()
-                if specification is None:
-                    self.process_boundary.record_cooperative()
-                    repaired = provider.repair_json(**repair_call)
-                else:
-                    repaired = self.process_boundary.call_provider(
-                        specification,
+            try:
+                if selected_channel is not None and hasattr(provider, "_execute_sticky"):
+                    repaired = provider._execute_sticky(
+                        selected_channel,
                         "repair_json",
-                        timeout_seconds=float(getattr(provider, "timeout", 120)),
-                        kwargs=repair_call,
+                        boundary=self.process_boundary,
+                        **repair_call,
                     )
-            else:
-                repaired = provider.repair_json(**repair_call)
-            total_cost += self._record(
-                provider,
+                elif self.process_boundary is not None and hasattr(provider, "repair_json_isolated"):
+                    repaired = provider.repair_json_isolated(self.process_boundary, **repair_call)
+                elif self.process_boundary is not None:
+                    specification = provider.process_spec()
+                    if specification is None:
+                        self.process_boundary.record_cooperative()
+                        repaired = provider.repair_json(**repair_call)
+                    else:
+                        repaired = self.process_boundary.call_provider(
+                            specification,
+                            "repair_json",
+                            timeout_seconds=float(getattr(provider, "timeout", 120)),
+                            kwargs=repair_call,
+                        )
+                else:
+                    repaired = provider.repair_json(**repair_call)
+            except Exception as exc:
+                repair_status = "TIMEOUT" if isinstance(exc, TimeoutError) else "FAILED"
+                repair_error_code = str(
+                    getattr(
+                        exc,
+                        "code",
+                        "AI-PROVIDER-TIMEOUT"
+                        if repair_status == "TIMEOUT"
+                        else "AI-PROVIDER-UNAVAILABLE",
+                    )
+                )
+                if repair_attempt_id is not None:
+                    self._trace_write(
+                        "finish_attempt",
+                        repair_attempt_id,
+                        status=repair_status,
+                        result="REPAIR_FAILED",
+                        request_json=sanitize_ai_payload(
+                            getattr(exc, "trace_request_json", None), photo=photo_metadata
+                        ),
+                        response_raw=getattr(exc, "trace_response_raw", None),
+                        request_built_at=getattr(exc, "trace_request_built_at", None),
+                        response_received_at=getattr(exc, "trace_response_received_at", None),
+                        endpoint=getattr(exc, "trace_endpoint", None),
+                        api_mode="chat_completions",
+                        http_status=getattr(exc, "trace_http_status", getattr(exc, "http_status", None)),
+                        latency_ms=int((time.perf_counter() - repair_perf) * 1000),
+                        error_code=repair_error_code,
+                        error_message=str(exc),
+                        retry_delay_ms=self._trace_retry_delay_ms(exc),
+                    )
+                self._trace_write(
+                    "mark_trace",
+                    trace_id,
+                    status=repair_status,
+                    error_code=repair_error_code,
+                    error_message=str(exc),
+                )
+                raise
+            repair_cost, repair_usage_id = self._record(
+                concrete_provider,
                 repair_model,
                 job_id,
                 photo_id,
@@ -1134,13 +1380,87 @@ class PhotoAnalysisService:
                 repair_perf,
                 retry_count=1,
             )
-            # 第二次驗證失敗直接拋出；不得無限修復。
-            result = self._apply_caption_variant(validate_analysis_result(repaired.content), caption_controls)
+            total_cost += repair_cost
+            self._trace_write(
+                "add_event",
+                trace_id,
+                "RESPONSE_PARSE_STARTED",
+                attempt_id=repair_attempt_id,
+            )
+            try:
+                # 第二次驗證失敗直接拋出；不得無限修復。
+                result = self._apply_caption_variant(
+                    validate_analysis_result(repaired.content), caption_controls
+                )
+            except AnalysisValidationError as repair_error:
+                if repair_attempt_id is not None:
+                    self._trace_write(
+                        "finish_attempt",
+                        repair_attempt_id,
+                        status="FAILED",
+                        result="INVALID_RESPONSE",
+                        request_json=sanitize_ai_payload(
+                            repaired.request_json_sanitized, photo=photo_metadata
+                        ),
+                        response_raw=repaired.raw_response or repaired.content,
+                        request_built_at=repaired.request_built_at,
+                        response_received_at=repaired.response_received_at,
+                        endpoint=repaired.endpoint,
+                        api_mode="chat_completions",
+                        http_status=repaired.http_status,
+                        latency_ms=int((time.perf_counter() - repair_perf) * 1000),
+                        provider_request_id=repaired.request_id,
+                        api_usage_id=repair_usage_id,
+                        error_code="SCHEMA_VALIDATION_FAILED",
+                        error_message=str(repair_error),
+                    )
+                self._trace_write(
+                    "mark_trace",
+                    trace_id,
+                    status="FAILED",
+                    error_code="SCHEMA_VALIDATION_FAILED",
+                    error_message=str(repair_error),
+                )
+                raise
             raw = repaired.content
+            repair_received_at = repaired.response_received_at or datetime.now(timezone.utc).isoformat()
+            trace_response_received_at = repair_received_at
+            if repair_attempt_id is not None:
+                self._trace_write(
+                    "finish_attempt",
+                    repair_attempt_id,
+                    status="SUCCESS",
+                    result="VALIDATED",
+                    request_json=sanitize_ai_payload(repaired.request_json_sanitized, photo=photo_metadata),
+                    response_raw=repaired.raw_response or repaired.content,
+                    response_parsed=result,
+                    request_built_at=repaired.request_built_at,
+                    response_received_at=repair_received_at,
+                    endpoint=repaired.endpoint,
+                    api_mode="chat_completions",
+                    http_status=repaired.http_status,
+                    latency_ms=int((time.perf_counter() - repair_perf) * 1000),
+                    provider_request_id=repaired.request_id,
+                    api_usage_id=repair_usage_id,
+                )
+            self._trace_write(
+                "add_event",
+                trace_id,
+                "RESPONSE_PARSED",
+                attempt_id=repair_attempt_id,
+                created_at=repair_received_at,
+            )
+            self._trace_write("add_event", trace_id, "SCHEMA_VALIDATED", attempt_id=repair_attempt_id)
             total_input_tokens += repaired.usage.input_tokens
             total_output_tokens += repaired.usage.output_tokens
             total_cached_tokens += repaired.usage.cached_tokens
             total_reasoning_tokens += repaired.usage.reasoning_tokens
+        self._trace_write(
+            "mark_trace",
+            trace_id,
+            status="RUNNING",
+            response_received_at=trace_response_received_at,
+        )
         self.photos.put_ai_cache(
             content_sha256=content_sha256,
             provider=cache_provider_identity,
@@ -1466,6 +1786,7 @@ class PhotoAnalysisService:
             input_spec_json,
             _usage,
             _latency,
+            ai_trace_id,
         ) = self._model_call(
             provider=provider,
             image_factory=lambda: self.thumbnails.acquire_for_use(source, sha, image_max_side),
@@ -1481,30 +1802,58 @@ class PhotoAnalysisService:
             repair_policy=repair_policy,
             prompt_version=prompt_version,
             vision_input=vision_input,
+            analysis_fingerprint=analysis_fingerprint,
+            photo_metadata={
+                "id": photo_id,
+                "sha256": sha,
+                "width": photo["width"],
+                "height": photo["height"],
+                "mime_type": {
+                    "JPEG": "image/jpeg",
+                    "JPG": "image/jpeg",
+                    "PNG": "image/png",
+                    "WEBP": "image/webp",
+                    "HEIC": "image/heic",
+                }.get(str(photo["format"] or "").upper()),
+            },
             provider_prompt_contract_sha256=str(analysis_spec.get("provider_prompt_contract_sha256") or "") or None,
             force_recompute=force_recompute,
         )
         total_cost = cost
-        result = self._save_result(
-            photo_id=photo_id,
-            job_id=job_id,
-            stage="single",
-            provider=actual_provider,
-            model=actual_model,
-            result=result,
-            raw=raw,
-            photo=photo,
-            ranking_weights=weights,
-            favorite_bonus=favorite_bonus,
-            scoring_version_id=scoring_version_id,
-            schema_kind="full",
-            prompt_version=prompt_version,
-            analysis_fingerprint=analysis_fingerprint,
-            analysis_spec_json=analysis_spec_json,
-            vision_request_fingerprint=request_fingerprint,
-            vision_input_spec_json=input_spec_json,
-            travel_policy=travel_policy,
-        )
+        try:
+            result = self._save_result(
+                photo_id=photo_id,
+                job_id=job_id,
+                stage="single",
+                provider=actual_provider,
+                model=actual_model,
+                result=result,
+                raw=raw,
+                photo=photo,
+                ranking_weights=weights,
+                favorite_bonus=favorite_bonus,
+                scoring_version_id=scoring_version_id,
+                schema_kind="full",
+                prompt_version=prompt_version,
+                analysis_fingerprint=analysis_fingerprint,
+                analysis_spec_json=analysis_spec_json,
+                vision_request_fingerprint=request_fingerprint,
+                vision_input_spec_json=input_spec_json,
+                travel_policy=travel_policy,
+                trace_id=ai_trace_id,
+            )
+        except Exception as exc:
+            if ai_trace_id:
+                self._trace_write(
+                    "mark_trace",
+                    ai_trace_id,
+                    status="FAILED",
+                    error_code="RESULT_PERSIST_FAILED",
+                    error_message=str(exc),
+                )
+            raise
+        if ai_trace_id:
+            self._trace_write("persist_final_result", ai_trace_id, result)
         record_force(actual_provider, actual_model)
         return {
             "analysis": result,

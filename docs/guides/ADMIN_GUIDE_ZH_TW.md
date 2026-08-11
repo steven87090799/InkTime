@@ -5,6 +5,10 @@
 - administrator：設定、工作控制、Provider、裝置、發布、備份與錯誤處理。
 - viewer：只讀照片、成本、工作、診斷與匯出。
 
+## AI API Trace Viewer
+
+從主選單依序點「AI 分析」→「AI 即時追蹤」，再點照片或 Trace，即可依序比較 INPUT、Raw Model Output、Parsed Output、Final Stored Result、USAGE 與 EVENTS。照片詳情與分析工作頁也有篩選後的 Trace 入口。頁面只顯示已遮蔽 Request，絕不保存 API Secret 或圖片 Base64；完整 Prompt、Raw Request 與 Raw Response 僅限 administrator，viewer 只能查看中繼資料、解析與最終結果。Trace 採近期有界保存，不取代 `photo_analysis` 或 `api_usage` 的正式資料。
+
 ## 設定欄位
 
 | 欄位 | 預設 | 合法範圍／建議 | 風險 | 重啟 |
