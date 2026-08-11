@@ -13,6 +13,7 @@ import inktime.app.db.migrations as migrations_module
 from inktime.app.db import Database, MigrationError, migrate
 from inktime.app.db.migrations import Migration, MIGRATIONS
 from inktime.app.repositories.analysis_batches import TERMINAL_BATCH_STATUSES
+from inktime.app.repositories.resilience import ResilienceRepository
 
 
 CURRENT_SCHEMA_VERSION = max(migration.version for migration in MIGRATIONS)
@@ -31,7 +32,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 48
+    assert CURRENT_SCHEMA_VERSION == 49
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -86,6 +87,12 @@ def test_fresh_database_is_migrated(tmp_path):
             "SELECT enabled,retention_days,minimum_items_to_keep,cleanup_batch_size,dry_run "
             "FROM data_retention_policies WHERE data_type='api_usage'"
         ).fetchone()
+        retention_dry_run_defaults = {
+            str(row["data_type"]): int(row["dry_run"])
+            for row in connection.execute(
+                "SELECT data_type,dry_run FROM data_retention_policies ORDER BY data_type"
+            ).fetchall()
+        }
     assert {"normalized_username", "session_version", "disabled_at"} <= columns
     assert "request_fingerprint" in job_columns
     assert {"current_displayed_at", "last_known_good_displayed_at"} <= queue_columns
@@ -112,7 +119,16 @@ def test_fresh_database_is_migrated(tmp_path):
         "confirmed_at",
     } <= pairing_columns
     assert "pairing_code_ciphertext" not in pairing_columns
-    assert tuple(api_usage_policy) == (1, 400, 0, 200, 1)
+    assert tuple(api_usage_policy) == (1, 400, 0, 200, 0)
+    assert retention_dry_run_defaults == {
+        "api_usage": 0,
+        "decision_candidate": 1,
+        "decision_trace": 1,
+        "device_event": 1,
+        "job_log": 1,
+        "queue_event": 1,
+        "shadow_preview": 1,
+    }
     with database.session() as connection:
         idempotency_columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(idempotency_requests)").fetchall()
@@ -201,7 +217,7 @@ def test_migration_45_adds_api_usage_policy_idempotently_without_overwriting_ope
             "VALUES ('api_usage',1,777,3,17,0,datetime('now'))"
         )
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", previous_migrations)
-    assert migrate(database) == [45, 46, 47, 48]
+    assert migrate(database) == [45, 46, 47, 48, 49]
     with database.session() as connection:
         policy = connection.execute(
             "SELECT enabled,retention_days,minimum_items_to_keep,cleanup_batch_size,dry_run "
@@ -211,6 +227,37 @@ def test_migration_45_adds_api_usage_policy_idempotently_without_overwriting_ope
     assert migrate(database) == []
 
 
+def test_migration_49_enables_only_untouched_api_usage_default(monkeypatch, tmp_path):
+    all_migrations = migrations_module.MIGRATIONS
+    before_49 = tuple(migration for migration in all_migrations if migration.version < 49)
+    untouched = Database(tmp_path / "migration-49-untouched.db")
+    administrator_dry_run = Database(tmp_path / "migration-49-administrator.db")
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", before_49)
+    assert migrate(untouched) == list(range(1, 49))
+    assert migrate(administrator_dry_run) == list(range(1, 49))
+    ResilienceRepository(administrator_dry_run).update_retention(
+        "api_usage", {"dry_run": True}
+    )
+
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", all_migrations)
+    assert migrate(untouched) == [49]
+    assert migrate(administrator_dry_run) == [49]
+    with untouched.session() as connection:
+        untouched_policy = connection.execute(
+            "SELECT enabled,retention_days,cleanup_batch_size,dry_run "
+            "FROM data_retention_policies WHERE data_type='api_usage'"
+        ).fetchone()
+    with administrator_dry_run.session() as connection:
+        administrator_policy = connection.execute(
+            "SELECT enabled,retention_days,cleanup_batch_size,dry_run "
+            "FROM data_retention_policies WHERE data_type='api_usage'"
+        ).fetchone()
+    assert tuple(untouched_policy) == (1, 400, 200, 0)
+    assert tuple(administrator_policy) == (1, 400, 200, 1)
+    assert migrate(untouched) == []
+    assert migrate(administrator_dry_run) == []
+
+
 def test_migration_46_idempotency_ledger_is_upgrade_safe(monkeypatch, tmp_path):
     database = Database(tmp_path / "migration-46-ledger.db")
     all_migrations = migrations_module.MIGRATIONS
@@ -218,7 +265,7 @@ def test_migration_46_idempotency_ledger_is_upgrade_safe(monkeypatch, tmp_path):
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", before_46)
     assert migrate(database) == list(range(1, 46))
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", all_migrations)
-    assert migrate(database) == [46, 47, 48]
+    assert migrate(database) == [46, 47, 48, 49]
     with database.session() as connection:
         connection.execute(
             "INSERT INTO idempotency_requests(scope_key,request_fingerprint,status,request_snapshot_json,created_at,updated_at) VALUES (?,?,?,?,?,?)",
@@ -262,7 +309,7 @@ def test_migration_48_makes_unknown_cost_nullable_and_preserves_api_usage_contra
         }
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", all_migrations)
-    assert migrate(database) == [48]
+    assert migrate(database) == [48, 49]
     with database.transaction() as connection:
         estimated_column = next(
             row for row in connection.execute("PRAGMA table_info(api_usage)").fetchall()

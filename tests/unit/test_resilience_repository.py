@@ -6,9 +6,12 @@ from pathlib import Path
 
 import pytest
 
+import inktime.app.repositories.resilience as resilience_module
 from inktime.app.db import Database, migrate
 from inktime.app.repositories.devices import DeviceRepository
 from inktime.app.repositories.resilience import ResilienceRepository
+from inktime.app.repositories.settings import SettingsRepository
+from inktime.app.services.budgets import BudgetService
 
 
 def _seed_old_queue_item(
@@ -194,6 +197,90 @@ def test_cleanup_honors_policy_dry_run_fence(tmp_path: Path):
     assert result["summary"]["api_usage"] == 1
     assert remaining == 1
     assert item["result"] == "planned"
+
+
+def test_fresh_api_usage_default_deletes_in_bounded_restart_safe_batches(
+    monkeypatch, tmp_path: Path
+):
+    database = Database(tmp_path / "fresh-api-usage-retention.sqlite3")
+    migrate(database)
+    repository = ResilienceRepository(database)
+    fixed_now = datetime.now(timezone.utc)
+    month_start = fixed_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz is not None else fixed_now.replace(tzinfo=None)
+
+    monkeypatch.setattr(resilience_module, "datetime", FixedDateTime)
+    stale = (fixed_now - timedelta(days=401)).isoformat()
+    exact_cutoff = (fixed_now - timedelta(days=400)).isoformat()
+    current_month = month_start.isoformat()
+    today = fixed_now.isoformat()
+    with database.transaction() as connection:
+        policy = connection.execute(
+            "SELECT enabled,retention_days,cleanup_batch_size,dry_run "
+            "FROM data_retention_policies WHERE data_type='api_usage'"
+        ).fetchone()
+        connection.executemany(
+            "INSERT INTO api_usage(provider,model,request_type,estimated_cost,started_at,status,cost_source,image_bytes) "
+            "VALUES ('provider','model','stale',0.01,?,'completed','estimated',1)",
+            [(stale,)] * 201,
+        )
+        connection.executemany(
+            "INSERT INTO api_usage(provider,model,request_type,estimated_cost,started_at,status,cost_source,image_bytes) "
+            "VALUES ('provider','model',?,?,?,'completed','estimated',1)",
+            [
+                ("exact-cutoff", 0.10, exact_cutoff),
+                ("current-month", 0.20, current_month),
+                ("today", 0.30, today),
+            ],
+        )
+        query_plan = connection.execute(
+            "EXPLAIN QUERY PLAN SELECT id FROM api_usage "
+            "WHERE started_at<? AND date(started_at)<date('now','start of month') "
+            "ORDER BY started_at,id LIMIT ?",
+            (exact_cutoff, 200),
+        ).fetchall()
+    assert tuple(policy) == (1, 400, 200, 0)
+    assert any("idx_api_usage_time" in str(row["detail"]) for row in query_plan)
+
+    budget = BudgetService(database, SettingsRepository(database))
+    budget_before = budget.snapshot()
+    first = repository.cleanup(dry_run=False)
+    budget_after_first = budget.snapshot()
+    second = repository.cleanup(dry_run=False)
+    third = repository.cleanup(dry_run=False)
+
+    assert first["summary"]["api_usage"] == 200
+    assert second["summary"]["api_usage"] == 1
+    assert third["summary"]["api_usage"] == 0
+    assert budget_after_first["daily_known"] == budget_before["daily_known"]
+    assert budget_after_first["monthly_known"] == budget_before["monthly_known"]
+    with database.session() as connection:
+        remaining = connection.execute(
+            "SELECT request_type,started_at FROM api_usage ORDER BY id"
+        ).fetchall()
+        deleted_first = connection.execute(
+            "SELECT COUNT(*) FROM data_cleanup_items "
+            "WHERE cleanup_run_id=? AND data_type='api_usage' AND result='deleted'",
+            (first["id"],),
+        ).fetchone()[0]
+        statuses = [
+            str(row["status"])
+            for row in connection.execute(
+                "SELECT status FROM data_cleanup_runs WHERE id IN (?,?,?) ORDER BY started_at,id",
+                (first["id"], second["id"], third["id"]),
+            ).fetchall()
+        ]
+    assert deleted_first == 200
+    assert [(str(row["request_type"]), str(row["started_at"])) for row in remaining] == [
+        ("exact-cutoff", exact_cutoff),
+        ("current-month", current_month),
+        ("today", today),
+    ]
+    assert statuses == ["completed", "completed", "completed"]
 
 
 def test_api_usage_cleanup_is_bounded_restart_safe_and_observable(tmp_path: Path):

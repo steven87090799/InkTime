@@ -153,6 +153,36 @@ def test_scheduler_retention_honors_policy_dry_run(app):
     assert item["result"] == "planned"
 
 
+def test_scheduler_retention_deletes_with_fresh_production_default(app):
+    database = app.extensions["inktime_database"]
+    with database.transaction() as connection:
+        policy = connection.execute(
+            "SELECT enabled,retention_days,cleanup_batch_size,dry_run "
+            "FROM data_retention_policies WHERE data_type='api_usage'"
+        ).fetchone()
+        connection.execute(
+            "INSERT INTO api_usage(provider,model,request_type,estimated_cost,started_at,status,cost_source,image_bytes) "
+            "VALUES ('provider','model','scheduler-production-retention',0.25,?,'failed','unknown',1)",
+            ((datetime.now(timezone.utc) - timedelta(days=401)).isoformat(),),
+        )
+    assert tuple(policy) == (1, 400, 200, 0)
+    app.extensions["inktime_settings_repository"].update(
+        "backup.schedule_enabled", False, changed_by="test", source_ip="127.0.0.1"
+    )
+
+    SchedulerRunner(app).tick()
+
+    with database.session() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM api_usage WHERE request_type='scheduler-production-retention'"
+        ).fetchone()[0] == 0
+        item = connection.execute(
+            "SELECT result FROM data_cleanup_items "
+            "WHERE data_type='api_usage' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert item["result"] == "deleted"
+
+
 def test_scheduler_role_keeps_and_runs_maintenance_extensions(app, monkeypatch):
     scheduler = bootstrap_services(app.extensions["inktime_runtime_config"], role="scheduler")
     try:

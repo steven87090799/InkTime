@@ -2046,6 +2046,35 @@ MIGRATIONS = (
         "允許未知 API 成本保留 NULL",
         (),
     ),
+    Migration(
+        49,
+        "啟用未修改的 API 用量自動保留",
+        (
+            """
+            UPDATE data_retention_policies
+            SET dry_run=0,updated_at=datetime('now')
+            WHERE data_type='api_usage'
+              AND enabled=1
+              AND retention_days=400
+              AND maximum_items IS NULL
+              AND maximum_bytes IS NULL
+              AND minimum_items_to_keep=0
+              AND cleanup_batch_size=200
+              AND dry_run=1
+              AND updated_at NOT LIKE '%T%'
+              AND EXISTS (
+                  SELECT 1
+                  FROM schema_migrations AS migration_45
+                  WHERE migration_45.version=45
+                    AND migration_45.name='加入 API 用量保留生命週期'
+                    AND ABS(
+                        (julianday(data_retention_policies.updated_at)
+                         - julianday(migration_45.applied_at)) * 86400.0
+                    ) <= 5.0
+              )
+            """,
+        ),
+    ),
 )
 
 
