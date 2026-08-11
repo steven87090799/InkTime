@@ -457,6 +457,7 @@ class OpenAICompatibleProvider(VisionProvider):
                         self._redact(f"Provider 回應 HTTP {status}"),
                         "VLM-007",
                         self._retry_after(response),
+                        ambiguous=True,
                         http_status=status,
                         request_started=True,
                         vision_started=True,

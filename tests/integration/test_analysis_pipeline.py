@@ -119,6 +119,8 @@ class _BoundaryHTTPHandler(BaseHTTPRequestHandler):
         status_code = 200
         if state.mode == "vision_429" and image_request:
             status_code = 429
+        elif state.mode == "vision_5xx" and image_request:
+            status_code = 503
         elif state.mode == "invalid_then_repair_429" and not image_request:
             status_code = 429
         elif state.mode == "invalid_then_repair_redirect" and not image_request:
@@ -359,6 +361,76 @@ def test_spawned_consumed_vision_timeout_is_terminal_and_billed_once(app, tmp_pa
         provider.close()
         server.shutdown()
         server.server_close()
+
+
+def test_spawned_vision_5xx_is_terminal_once_without_failover_or_worker_retry(app, tmp_path):
+    server, state = _start_boundary_server("vision_5xx")
+    fallback_server, fallback_state = _start_boundary_server("normal")
+    boundary = _ShortProviderBoundary()
+    failing = _isolated_provider(server, "vision-5xx-provider")
+    fallback = _isolated_provider(fallback_server, "vision-fallback-provider")
+    router = FailoverVisionProvider(
+        [
+            ProviderChannel(failing, priority=1),
+            ProviderChannel(fallback, priority=2),
+        ]
+    )
+    photo_id, service = _isolated_service(app, tmp_path, boundary)
+    job_id = _test_job(app, "consumed vision 5xx")
+    try:
+        with pytest.raises(ProcessCallError) as raised:
+            service.analyze_photo(
+                photo_id=photo_id,
+                job_id=job_id,
+                provider=router,
+                strategy="high_quality",
+                high_model="test-model",
+                force_ai=True,
+            )
+        assert raised.value.code == "VLM-AMBIGUOUS"
+        assert raised.value.ambiguous is True
+        assert classify_failure(raised.value) == FailureClass.TERMINAL_NO_RETRY
+        assert state.vision_requests == 1
+        assert state.repair_requests == 0
+        assert fallback_state.vision_requests == 0
+
+        with app.extensions["inktime_database"].session() as connection:
+            usage_rows = connection.execute(
+                "SELECT status,cost_source,estimated_cost,actual_cost,error_code "
+                "FROM api_usage WHERE photo_id=? AND status='failed'",
+                (photo_id,),
+            ).fetchall()
+            outcome = connection.execute(
+                "SELECT outcome,requires_manual_confirmation,error_code "
+                "FROM analysis_request_outcomes WHERE photo_id=? ORDER BY id DESC LIMIT 1",
+                (photo_id,),
+            ).fetchone()
+        assert len(usage_rows) == 1
+        assert tuple(usage_rows[0]) == ("failed", "unknown", None, None, "VLM-AMBIGUOUS")
+        assert tuple(outcome) == ("ambiguous_failed", 1, "VLM-AMBIGUOUS")
+        assert service.budgets.snapshot(job_id=job_id, photo_id=photo_id)["photo_unknown_count"] == 1
+
+        job_service = app.extensions["inktime_job_service"]
+        job_repository = app.extensions["inktime_job_repository"]
+        job_service.start(job_id)
+        worker_calls = []
+
+        def retrying_processor(_item):
+            worker_calls.append(True)
+            raise raised.value
+
+        BoundedJobWorker(job_repository, retrying_processor, max_attempts=3).run_job(job_id)
+        assert len(worker_calls) == 1
+        assert job_repository.list_items(job_id)[0]["status"] == "failed"
+        assert job_repository.list_items(job_id)[0]["attempts"] == 1
+    finally:
+        boundary.shutdown()
+        failing.close()
+        fallback.close()
+        server.shutdown()
+        server.server_close()
+        fallback_server.shutdown()
+        fallback_server.server_close()
 
 
 def test_spawned_deterministic_vision_http_failure_does_not_create_unknown_budget(app, tmp_path):

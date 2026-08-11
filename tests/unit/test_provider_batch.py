@@ -199,29 +199,38 @@ def test_vision_connect_timeout_is_pre_send_and_can_fail_over(tmp_path):
 
 
 class VisionServerErrorSession(FakeSession):
+    def __init__(self, status_code=500):
+        super().__init__()
+        self.status_code = status_code
+
     def post(self, url, **kwargs):
         if url.endswith("/chat/completions"):
             self.calls.append((url, kwargs))
-            return FakeResponse({"error": {"type": "server_error"}}, status_code=500)
+            return FakeResponse({"error": {"type": "server_error"}}, status_code=self.status_code)
         return super().post(url, **kwargs)
 
 
-def test_vision_http_5xx_is_stable_retryable_failure_not_ambiguous(tmp_path):
+@pytest.mark.parametrize("status_code", [500, 502, 503, 504])
+def test_vision_http_5xx_is_ambiguous_after_single_dispatch(status_code, tmp_path):
     image = Path(tmp_path) / "vision-server-error.jpg"
     image.write_bytes(b"jpeg-fixture")
+    session = VisionServerErrorSession(status_code)
     provider = OpenAICompatibleProvider(
         name="OpenAI",
         base_url="https://api.openai.com/v1",
         api_key="secret",
-        session=VisionServerErrorSession(),
+        session=session,
     )
 
     with pytest.raises(ProviderHTTPError) as raised:
         provider.analyze(image_path=image, model="vision", detail="high", stage="single_high")
 
     assert raised.value.code == "VLM-007"
-    assert raised.value.ambiguous is False
-    assert raised.value.http_status == 500
+    assert raised.value.ambiguous is True
+    assert raised.value.request_started is True
+    assert raised.value.vision_started is True
+    assert raised.value.http_status == status_code
+    assert len(session.calls) == 1
 
 
 def test_reasoning_effort_is_capability_gated_and_sync_uses_same_builder(tmp_path):
