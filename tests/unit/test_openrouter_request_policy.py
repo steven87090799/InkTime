@@ -10,7 +10,7 @@ from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
 
 
 class CaptureProvider(OpenAICompatibleProvider):
-    def _post_completion(self, body, *, vision_attempt=None):
+    def _post_completion(self, body, *, vision_attempt=None, retry_policy=None):
         self.captured_body = body
         return ProviderResponse("{}", Usage())
 
