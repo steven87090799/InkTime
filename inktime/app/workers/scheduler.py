@@ -231,6 +231,7 @@ class SchedulerRunner:
             resilience = self.app.extensions.get("inktime_resilience_repository")
             if resilience is not None:
                 self._safe_step("operational_expire", resilience.expire_operational_data)
+                self._safe_step("cleanup_audit_gc", resilience.cleanup_audit_history)
                 self._safe_step("operational_cleanup", lambda: resilience.cleanup(dry_run=False))
             self.last_operational_retention_at = monotonic_now
         if not settings.get("backup.schedule_enabled", True):

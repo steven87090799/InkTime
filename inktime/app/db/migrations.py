@@ -2075,6 +2075,14 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        50,
+        "為保留清理稽核建立有界 GC 索引",
+        (
+            "CREATE INDEX IF NOT EXISTS idx_data_cleanup_runs_completed ON data_cleanup_runs(completed_at,id)",
+            "CREATE INDEX IF NOT EXISTS idx_data_cleanup_items_cleanup_run ON data_cleanup_items(cleanup_run_id)",
+        ),
+    ),
 )
 
 

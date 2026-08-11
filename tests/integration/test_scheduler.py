@@ -121,7 +121,7 @@ def test_due_scheduled_pending_job_restarts_without_duplicate(app, monkeypatch):
     assert len([job for job in repository.list() if job["dedupe_key"] == dedupe_key]) == 1
 
 
-def test_scheduler_retention_honors_policy_dry_run(app):
+def test_scheduler_retention_skips_observation_policy_without_planned_items(app):
     database = app.extensions["inktime_database"]
     resilience = app.extensions["inktime_resilience_repository"]
     month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -139,18 +139,27 @@ def test_scheduler_retention_honors_policy_dry_run(app):
         "backup.schedule_enabled", False, changed_by="test", source_ip="127.0.0.1"
     )
 
-    SchedulerRunner(app).tick()
+    for _ in range(3):
+        SchedulerRunner(app).tick()
 
     with database.session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 1
-        cleanup = connection.execute(
-            "SELECT id FROM data_cleanup_runs ORDER BY started_at DESC LIMIT 1"
-        ).fetchone()
-        item = connection.execute(
-            "SELECT result FROM data_cleanup_items WHERE cleanup_run_id=? AND data_type='api_usage'",
-            (cleanup["id"],),
-        ).fetchone()
-    assert item["result"] == "planned"
+        cleanup_runs = connection.execute(
+            "SELECT id,summary_json FROM data_cleanup_runs ORDER BY started_at,id"
+        ).fetchall()
+        item_count = connection.execute(
+            "SELECT COUNT(*) FROM data_cleanup_items WHERE data_type='api_usage'"
+        ).fetchone()[0]
+        last_run_at = connection.execute(
+            "SELECT last_run_at FROM data_retention_policies WHERE data_type='api_usage'"
+        ).fetchone()[0]
+    assert len(cleanup_runs) == 3
+    assert all(
+        json.loads(run["summary_json"])["_outcomes"]["api_usage"] == "skipped"
+        for run in cleanup_runs
+    )
+    assert item_count == 0
+    assert last_run_at is not None
 
 
 def test_scheduler_retention_deletes_with_fresh_production_default(app):
@@ -191,10 +200,12 @@ def test_scheduler_role_keeps_and_runs_maintenance_extensions(app, monkeypatch):
         release_reconcile = Mock()
         release_gc = Mock()
         operational_expire = Mock()
+        cleanup_audit_gc = Mock()
         operational_cleanup = Mock()
         monkeypatch.setattr(release_coordinator, "reconcile", release_reconcile)
         monkeypatch.setattr(release_coordinator, "gc_unreferenced_releases", release_gc)
         monkeypatch.setattr(resilience_repository, "expire_operational_data", operational_expire)
+        monkeypatch.setattr(resilience_repository, "cleanup_audit_history", cleanup_audit_gc)
         monkeypatch.setattr(resilience_repository, "cleanup", operational_cleanup)
 
         monkeypatch.setattr(SchedulerRunner, "_run_observability", lambda _self, _service, _now: None)
@@ -217,6 +228,7 @@ def test_scheduler_role_keeps_and_runs_maintenance_extensions(app, monkeypatch):
         release_reconcile.assert_called_once_with()
         release_gc.assert_called_once_with()
         operational_expire.assert_called_once_with()
+        cleanup_audit_gc.assert_called_once_with()
         operational_cleanup.assert_called_once_with(dry_run=False)
     finally:
         scheduler.close()

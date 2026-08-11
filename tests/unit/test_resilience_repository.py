@@ -88,8 +88,9 @@ def test_queue_event_retention_fences_parent_gc_until_child_cleanup(tmp_path: Pa
     repository.update_retention(
         "queue_event", {"retention_days": 1, "cleanup_batch_size": 200, "dry_run": True}
     )
-    dry_run = repository.cleanup(dry_run=False)
-    assert dry_run["summary"]["queue_event"] == 1
+    skipped = repository.cleanup(dry_run=False)
+    assert skipped["summary"]["queue_event"] == 0
+    assert skipped["outcomes"]["queue_event"] == "skipped"
     assert repository.expire_operational_data()["gc_queue_items"] == 0
 
     repository.update_retention(
@@ -170,7 +171,7 @@ def test_algorithm_version_uses_stable_configuration_hash(tmp_path: Path):
     assert first == second
 
 
-def test_cleanup_honors_policy_dry_run_fence(tmp_path: Path):
+def test_automatic_cleanup_skips_observation_policy_without_audit_amplification(tmp_path: Path):
     database = Database(tmp_path / "policy-dry-run.sqlite3")
     migrate(database)
     repository = ResilienceRepository(database)
@@ -186,17 +187,123 @@ def test_cleanup_honors_policy_dry_run_fence(tmp_path: Path):
             ((month_start - timedelta(days=2)).isoformat(),),
         )
 
-    result = repository.cleanup(dry_run=False)
+    automatic_runs = [repository.cleanup(dry_run=False) for _ in range(3)]
 
     with database.session() as connection:
         remaining = connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0]
-        item = connection.execute(
-            "SELECT result FROM data_cleanup_items WHERE cleanup_run_id=? AND data_type='api_usage'",
-            (result["id"],),
-        ).fetchone()
-    assert result["summary"]["api_usage"] == 1
+        automatic_items = connection.execute(
+            "SELECT COUNT(*) FROM data_cleanup_items WHERE data_type='api_usage'"
+        ).fetchone()[0]
+        last_run_at = connection.execute(
+            "SELECT last_run_at FROM data_retention_policies WHERE data_type='api_usage'"
+        ).fetchone()[0]
+        run_summaries = [
+            json.loads(str(row["summary_json"]))
+            for row in connection.execute(
+                "SELECT summary_json FROM data_cleanup_runs ORDER BY started_at,id"
+            ).fetchall()
+        ]
+    assert all(run["summary"]["api_usage"] == 0 for run in automatic_runs)
+    assert all(run["outcomes"]["api_usage"] == "skipped" for run in automatic_runs)
     assert remaining == 1
-    assert item["result"] == "planned"
+    assert automatic_items == 0
+    assert last_run_at is not None
+    assert all(summary["_outcomes"]["api_usage"] == "skipped" for summary in run_summaries)
+
+    preview = repository.cleanup(dry_run=True)
+
+    with database.session() as connection:
+        remaining_after_preview = connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0]
+        planned = connection.execute(
+            "SELECT result FROM data_cleanup_items "
+            "WHERE cleanup_run_id=? AND data_type='api_usage'",
+            (preview["id"],),
+        ).fetchone()
+    assert preview["summary"]["api_usage"] == 1
+    assert preview["outcomes"]["api_usage"] == "planned"
+    assert remaining_after_preview == 1
+    assert planned["result"] == "planned"
+
+
+def test_cleanup_audit_history_is_bounded_cascading_and_protects_active_runs(tmp_path: Path):
+    database = Database(tmp_path / "cleanup-audit-retention.sqlite3")
+    migrate(database)
+    repository = ResilienceRepository(database)
+    old = (datetime.now(timezone.utc) - timedelta(days=91)).isoformat()
+    recent = datetime.now(timezone.utc).isoformat()
+    old_terminal_ids = [f"old-terminal-{index:02d}" for index in range(12)]
+    with database.transaction() as connection:
+        connection.executemany(
+            "INSERT INTO data_cleanup_runs(id,started_at,completed_at,dry_run,status,summary_json) "
+            "VALUES (?,?,?,?,?, '{}')",
+            [
+                (run_id, old, old, 0, "completed" if index % 2 == 0 else "failed")
+                for index, run_id in enumerate(old_terminal_ids)
+            ],
+        )
+        connection.executemany(
+            "INSERT INTO data_cleanup_items(cleanup_run_id,data_type,reference_id,action,result,created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            [
+                (run_id, "api_usage", f"{run_id}-item-{item}", "delete", "deleted", old)
+                for run_id in old_terminal_ids
+                for item in range(2)
+            ],
+        )
+        connection.execute(
+            "INSERT INTO data_cleanup_runs(id,started_at,completed_at,dry_run,status,summary_json) "
+            "VALUES ('old-active',?,NULL,0,'running','{}')",
+            (old,),
+        )
+        connection.execute(
+            "INSERT INTO data_cleanup_runs(id,started_at,completed_at,dry_run,status,summary_json) "
+            "VALUES ('recent-completed',?,?,0,'completed','{}')",
+            (recent, recent),
+        )
+        query_plan = connection.execute(
+            "EXPLAIN QUERY PLAN SELECT id FROM data_cleanup_runs "
+            "WHERE completed_at<? AND completed_at IS NOT NULL "
+            "AND status IN ('completed','failed') ORDER BY completed_at,id LIMIT ?",
+            (old, 10),
+        ).fetchall()
+
+    assert any("idx_data_cleanup_runs_completed" in str(row["detail"]) for row in query_plan)
+
+    first = repository.cleanup_audit_history()
+
+    assert first == {"deleted_runs": 10, "retention_days": 90, "batch_size": 10}
+    with database.session() as connection:
+        remaining_old = connection.execute(
+            "SELECT COUNT(*) FROM data_cleanup_runs WHERE id LIKE 'old-terminal-%'"
+        ).fetchone()[0]
+        remaining_old_items = connection.execute(
+            "SELECT COUNT(*) FROM data_cleanup_items WHERE cleanup_run_id LIKE 'old-terminal-%'"
+        ).fetchone()[0]
+        protected = {
+            str(row["id"])
+            for row in connection.execute(
+                "SELECT id FROM data_cleanup_runs WHERE id IN ('old-active','recent-completed')"
+            ).fetchall()
+        }
+        total_runs = connection.execute("SELECT COUNT(*) FROM data_cleanup_runs").fetchone()[0]
+    assert remaining_old == 2
+    assert remaining_old_items == 4
+    assert protected == {"old-active", "recent-completed"}
+    assert total_runs == 4
+
+    second = repository.cleanup_audit_history()
+    third = repository.cleanup_audit_history()
+
+    assert second["deleted_runs"] == 2
+    assert third["deleted_runs"] == 0
+    with database.session() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM data_cleanup_items WHERE cleanup_run_id LIKE 'old-terminal-%'"
+        ).fetchone()[0] == 0
+        assert {
+            str(row["id"])
+            for row in connection.execute("SELECT id FROM data_cleanup_runs ORDER BY id").fetchall()
+        } == {"old-active", "recent-completed"}
 
 
 def test_fresh_api_usage_default_deletes_in_bounded_restart_safe_batches(

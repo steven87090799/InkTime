@@ -32,7 +32,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 49
+    assert CURRENT_SCHEMA_VERSION == 50
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -201,6 +201,18 @@ def test_fresh_database_is_migrated(tmp_path):
         "idx_batch_items_active_content_request",
         "idx_analysis_batches_remote_id",
     }
+    with database.session() as connection:
+        cleanup_index_names = {
+            str(row["name"])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND name IN ('idx_data_cleanup_runs_completed','idx_data_cleanup_items_cleanup_run')"
+            ).fetchall()
+        }
+    assert cleanup_index_names == {
+        "idx_data_cleanup_runs_completed",
+        "idx_data_cleanup_items_cleanup_run",
+    }
 
 
 def test_migration_45_adds_api_usage_policy_idempotently_without_overwriting_operator_values(
@@ -217,7 +229,7 @@ def test_migration_45_adds_api_usage_policy_idempotently_without_overwriting_ope
             "VALUES ('api_usage',1,777,3,17,0,datetime('now'))"
         )
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", previous_migrations)
-    assert migrate(database) == [45, 46, 47, 48, 49]
+    assert migrate(database) == [45, 46, 47, 48, 49, 50]
     with database.session() as connection:
         policy = connection.execute(
             "SELECT enabled,retention_days,minimum_items_to_keep,cleanup_batch_size,dry_run "
@@ -240,8 +252,8 @@ def test_migration_49_enables_only_untouched_api_usage_default(monkeypatch, tmp_
     )
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", all_migrations)
-    assert migrate(untouched) == [49]
-    assert migrate(administrator_dry_run) == [49]
+    assert migrate(untouched) == [49, 50]
+    assert migrate(administrator_dry_run) == [49, 50]
     with untouched.session() as connection:
         untouched_policy = connection.execute(
             "SELECT enabled,retention_days,cleanup_batch_size,dry_run "
@@ -258,6 +270,30 @@ def test_migration_49_enables_only_untouched_api_usage_default(monkeypatch, tmp_
     assert migrate(administrator_dry_run) == []
 
 
+def test_migration_50_adds_cleanup_audit_gc_indexes_idempotently(monkeypatch, tmp_path):
+    database = Database(tmp_path / "migration-50-cleanup-audit-indexes.db")
+    all_migrations = migrations_module.MIGRATIONS
+    before_50 = tuple(migration for migration in all_migrations if migration.version < 50)
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", before_50)
+    assert migrate(database) == list(range(1, 50))
+
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", all_migrations)
+    assert migrate(database) == [50]
+    with database.session() as connection:
+        indexes = {
+            str(row["name"])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND name IN ('idx_data_cleanup_runs_completed','idx_data_cleanup_items_cleanup_run')"
+            ).fetchall()
+        }
+    assert indexes == {
+        "idx_data_cleanup_runs_completed",
+        "idx_data_cleanup_items_cleanup_run",
+    }
+    assert migrate(database) == []
+
+
 def test_migration_46_idempotency_ledger_is_upgrade_safe(monkeypatch, tmp_path):
     database = Database(tmp_path / "migration-46-ledger.db")
     all_migrations = migrations_module.MIGRATIONS
@@ -265,7 +301,7 @@ def test_migration_46_idempotency_ledger_is_upgrade_safe(monkeypatch, tmp_path):
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", before_46)
     assert migrate(database) == list(range(1, 46))
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", all_migrations)
-    assert migrate(database) == [46, 47, 48, 49]
+    assert migrate(database) == [46, 47, 48, 49, 50]
     with database.session() as connection:
         connection.execute(
             "INSERT INTO idempotency_requests(scope_key,request_fingerprint,status,request_snapshot_json,created_at,updated_at) VALUES (?,?,?,?,?,?)",
@@ -309,7 +345,7 @@ def test_migration_48_makes_unknown_cost_nullable_and_preserves_api_usage_contra
         }
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", all_migrations)
-    assert migrate(database) == [48, 49]
+    assert migrate(database) == [48, 49, 50]
     with database.transaction() as connection:
         estimated_column = next(
             row for row in connection.execute("PRAGMA table_info(api_usage)").fetchall()

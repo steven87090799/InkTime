@@ -74,6 +74,8 @@ ROLL_OUT_STATES = {
     "FAILED": set(),
     "CANCELLED": set(),
 }
+CLEANUP_AUDIT_RETENTION_DAYS = 90
+CLEANUP_AUDIT_BATCH_SIZE = 10
 
 
 def utc_now() -> str:
@@ -1178,6 +1180,7 @@ class ResilienceRepository:
     def cleanup(self, *, dry_run: bool = True) -> dict[str, Any]:
         run_id, now = str(uuid4()), utc_now()
         summary: dict[str, int] = {}
+        outcomes: dict[str, str] = {}
         mapping = {
             "decision_trace": ("selection_decision_traces", "created_at", "id"),
             "decision_candidate": ("selection_decision_candidates", "id", "id"),
@@ -1211,7 +1214,21 @@ class ResilienceRepository:
                     ).fetchone()
                     if policy is None:
                         continue
-                    effective_dry_run = bool(dry_run or policy["dry_run"])
+                    if not dry_run and bool(policy["dry_run"]):
+                        next_summary = {**summary, policy["data_type"]: 0}
+                        next_outcomes = {**outcomes, policy["data_type"]: "skipped"}
+                        # last_run_at means the policy was evaluated successfully;
+                        # automatic observation-only skips are evaluations, not deletes.
+                        connection.execute(
+                            "UPDATE data_retention_policies SET last_run_at=? WHERE data_type=? AND enabled=1",
+                            (now, policy["data_type"]),
+                        )
+                        connection.execute(
+                            "UPDATE data_cleanup_runs SET summary_json=? WHERE id=? AND status='running'",
+                            (_json({**next_summary, "_outcomes": next_outcomes}), run_id),
+                        )
+                        summary, outcomes = next_summary, next_outcomes
+                        continue
                     cutoff = (
                         datetime.now(timezone.utc) - timedelta(days=int(policy["retention_days"]))
                     ).isoformat()
@@ -1268,37 +1285,83 @@ class ResilienceRepository:
                                 policy["data_type"],
                                 identifier,
                                 "delete",
-                                "planned" if effective_dry_run else "deleted",
+                                "planned" if dry_run else "deleted",
                                 now,
                             ),
                         )
-                        if not effective_dry_run:
+                        if not dry_run:
                             connection.execute(  # noqa: S608 -- mapping is fixed above
                                 f"DELETE FROM {table} WHERE {id_column}=?",  # noqa: S608 -- mapping is fixed above
                                 (identifier,),
                             )
                     next_summary = {**summary, policy["data_type"]: len(ids)}
+                    next_outcomes = {
+                        **outcomes,
+                        policy["data_type"]: "planned" if dry_run else "deleted",
+                    }
+                    connection.execute(
+                        "UPDATE data_retention_policies SET last_run_at=? WHERE data_type=? AND enabled=1",
+                        (now, policy["data_type"]),
+                    )
                     connection.execute(
                         "UPDATE data_cleanup_runs SET summary_json=? WHERE id=? AND status='running'",
-                        (_json(next_summary), run_id),
+                        (_json({**next_summary, "_outcomes": next_outcomes}), run_id),
                     )
-                summary = next_summary
+                summary, outcomes = next_summary, next_outcomes
             with self.database.transaction(operation="retention_cleanup_summary") as connection:
                 connection.execute(
                     "UPDATE data_cleanup_runs SET completed_at=?,status='completed',summary_json=? WHERE id=?",
-                    (utc_now(), _json(summary), run_id),
+                    (utc_now(), _json({**summary, "_outcomes": outcomes}), run_id),
                 )
         except Exception:
             try:
                 with self.database.transaction(operation="retention_cleanup_summary") as connection:
                     connection.execute(
                         "UPDATE data_cleanup_runs SET completed_at=?,status='failed',summary_json=?,error_code=? WHERE id=?",
-                        (utc_now(), _json(summary), "RETENTION-CLEANUP-FAILED", run_id),
+                        (
+                            utc_now(),
+                            _json({**summary, "_outcomes": outcomes}),
+                            "RETENTION-CLEANUP-FAILED",
+                            run_id,
+                        ),
                     )
             except Exception:  # noqa: S110 - preserve the original cleanup failure
                 pass
             raise
-        return {"id": run_id, "dry_run": dry_run, "summary": summary}
+        return {
+            "id": run_id,
+            "dry_run": dry_run,
+            "summary": summary,
+            "outcomes": outcomes,
+        }
+
+    def cleanup_audit_history(self) -> dict[str, int]:
+        """Delete a bounded batch of terminal cleanup audits without auditing the GC itself."""
+
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=CLEANUP_AUDIT_RETENTION_DAYS)
+        ).isoformat()
+        with self.database.transaction(operation="cleanup_audit_gc") as connection:
+            deleted = connection.execute(
+                """
+                DELETE FROM data_cleanup_runs
+                WHERE id IN (
+                    SELECT id
+                    FROM data_cleanup_runs
+                    WHERE completed_at<?
+                      AND completed_at IS NOT NULL
+                      AND status IN ('completed','failed')
+                    ORDER BY completed_at,id
+                    LIMIT ?
+                )
+                """,
+                (cutoff, CLEANUP_AUDIT_BATCH_SIZE),
+            ).rowcount
+        return {
+            "deleted_runs": max(0, int(deleted)),
+            "retention_days": CLEANUP_AUDIT_RETENTION_DAYS,
+            "batch_size": CLEANUP_AUDIT_BATCH_SIZE,
+        }
 
     def expire_operational_data(self) -> dict[str, int]:
         """供 Scheduler 使用的小型、冪等維護；不掃描檔案系統。"""
