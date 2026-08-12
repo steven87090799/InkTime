@@ -5,11 +5,14 @@ import calendar
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
+import logging
 from pathlib import Path
 import random
+import time
 from typing import Any
 
 from inktime.app.core.json_values import json_bool, json_int
+from inktime.app.core.logging import log_event, should_log_rate_limited
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
@@ -69,6 +72,7 @@ PORTRAIT_ONLY_LAYOUTS = {"calendar", "weather_sensor"}
 # Formal rendering accepts the same default source-pixel budget as the scanner
 # and reduces accepted originals before EXIF/RGB normalization.
 MAX_RENDER_INPUT_PIXELS = 60_000_000
+LOGGER = logging.getLogger("render")
 
 
 def _fit_caption_line(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, width: int) -> str:
@@ -340,20 +344,66 @@ class RenderService:
         device_config: dict[str, Any] | None = None,
         orientation_metadata: list[dict[str, Any]] | None = None,
     ) -> Image.Image:
+        started = time.monotonic()
         crop_x, crop_y = plan["manual_crop"]
-        return self.render_photo(
-            str(plan["primary_photo_id"]),
-            layout=str(plan["layout"]),
-            crop_x=crop_x,
-            crop_y=crop_y,
-            secondary_photo_id=plan["secondary_photo_id"],
-            orientation=str(plan["orientation"]),
-            fit_mode=str(plan["fit_mode"]),
-            primary_caption=dict(plan["primary_caption"]),
-            secondary_caption=dict(plan["secondary_caption"]) if plan.get("secondary_caption") else None,
-            device_config=device_config,
-            orientation_metadata=orientation_metadata,
-        )
+        photo_id = str(plan["primary_photo_id"])
+        layout = str(plan["layout"])
+        if should_log_rate_limited(f"render-start:{layout}", interval_seconds=1):
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "Render started",
+                event="render_start",
+                photo_id=photo_id,
+                operation="render_photo",
+                details={"layout": layout, "orientation": str(plan["orientation"])},
+            )
+        try:
+            result = self.render_photo(
+                photo_id,
+                layout=layout,
+                crop_x=crop_x,
+                crop_y=crop_y,
+                secondary_photo_id=plan["secondary_photo_id"],
+                orientation=str(plan["orientation"]),
+                fit_mode=str(plan["fit_mode"]),
+                primary_caption=dict(plan["primary_caption"]),
+                secondary_caption=(
+                    dict(plan["secondary_caption"]) if plan.get("secondary_caption") else None
+                ),
+                device_config=device_config,
+                orientation_metadata=orientation_metadata,
+            )
+        except Exception as exc:
+            if should_log_rate_limited(
+                f"render-failure:{layout}:{type(exc).__name__}", interval_seconds=5
+            ):
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "Render failed",
+                    event="render_failure",
+                    error_code=str(getattr(exc, "code", "RENDER-005")),
+                    photo_id=photo_id,
+                    operation="render_photo",
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    failure_class=type(exc).__name__,
+                    retryable=False,
+                    details={"layout": layout},
+                )
+            raise
+        if should_log_rate_limited(f"render-success:{layout}", interval_seconds=1):
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "Render completed",
+                event="render_success",
+                photo_id=photo_id,
+                operation="render_photo",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                details={"layout": layout},
+            )
+        return result
 
     def _render_plan_rows(self, plans: list[dict[str, Any]]) -> list[Any]:
         ids = self._render_plan_photo_ids(plans)
@@ -1604,6 +1654,19 @@ class RenderService:
         activate_pointers: bool = True,
         assign_device_releases: bool = True,
     ) -> dict:
+        publish_started = time.monotonic()
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Render publish started",
+            event="render_publish_started",
+            operation="render_publish",
+            details={
+                "requested_photo_count": len(photo_ids),
+                "profile_count": len(profile_keys or []),
+                "device_count": len(device_ids or []),
+            },
+        )
         if quantity_override is None:
             quantity = int(self.settings.get("render.quantity", 5))
         else:
@@ -1730,6 +1793,15 @@ class RenderService:
                 activate_pointers=activate_pointers,
             )
             self._record_production_trace(list(dict.fromkeys(release_photo_ids)), published, layout_key)
+            log_event(
+                LOGGER,
+                logging.INFO,
+                "Render publish completed",
+                event="render_publish_completed",
+                operation="render_publish",
+                duration_ms=int((time.monotonic() - publish_started) * 1000),
+                details={"release_count": len(published), "device_count": len(assignments)},
+            )
             return {"releases": published, "device_releases": assignments}
         release_orientation_metadata: list[dict[str, Any]] = []
         if layout_key in {"photo_pair", "photo_pair_caption"}:
@@ -1812,6 +1884,15 @@ class RenderService:
             history=history,
         )
         self._record_production_trace(release_photo_ids, published, layout_key)
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Render publish completed",
+            event="render_publish_completed",
+            operation="render_publish",
+            duration_ms=int((time.monotonic() - publish_started) * 1000),
+            details={"release_count": len(published), "photo_count": len(release_photo_ids)},
+        )
         return published[0] if len(published) == 1 else {"releases": published}
 
     def _record_production_trace(

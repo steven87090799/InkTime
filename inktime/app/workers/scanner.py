@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
+import logging
 import os
 from pathlib import Path
 import time
@@ -9,6 +10,7 @@ from typing import Callable, Iterable, Iterator, Sequence
 
 from PIL import Image
 
+from inktime.app.core.logging import log_event, should_log_sample
 from inktime.app.domain.photos import PhotoPreprocessor, ThumbnailCache
 from inktime.app.repositories.photos import (
     BatchPhotoResult,
@@ -34,6 +36,7 @@ VIDEO_EXTENSIONS = {
 }
 SCAN_MODES = {"incremental", "full", "metadata-only", "local-features-only", "manual"}
 TRIGGER_SOURCES = {"manual", "api", "scheduler", "virtual-display", "test"}
+LOGGER = logging.getLogger("scanner")
 
 
 @dataclass(frozen=True)
@@ -186,6 +189,7 @@ class PhotoScanner:
         thumbnail_retention_days: int = 30,
         quality_policy_settings: dict | None = None,
     ) -> dict:
+        scan_started = time.monotonic()
         if mode not in SCAN_MODES:
             raise ValueError("SCAN-003 不支援的掃描模式")
         if trigger_source not in TRIGGER_SOURCES:
@@ -216,6 +220,15 @@ class PhotoScanner:
             mode=mode,
             trigger_source=trigger_source,
             missing_threshold_ratio=missing_threshold_ratio,
+        )
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Photo scan started",
+            event="scan_started",
+            operation_id=str(scan_id),
+            operation="photo_scan",
+            details={"mode": mode, "trigger_source": trigger_source},
         )
         counts = {
             "checked": 0,
@@ -406,6 +419,19 @@ class PhotoScanner:
                 except Exception as exc:
                     major_io_errors += 1
                     counts["failed"] += len(prepared_chunk)
+                    if should_log_sample(counts["failed"], first=3, every=500):
+                        log_event(
+                            LOGGER,
+                            logging.ERROR,
+                            "Photo scan database batch failed",
+                            event="scan_batch_commit_failed",
+                            error_code="SCAN-DB-001",
+                            operation_id=str(scan_id),
+                            operation="photo_scan",
+                            failure_class=type(exc).__name__,
+                            retryable=True,
+                            details={"batch_items": len(prepared_chunk)},
+                        )
                     existing_ids = [
                         signatures[item.relative_path].id
                         for item in prepared_chunk
@@ -430,13 +456,13 @@ class PhotoScanner:
                     )
                     continue
                 by_path: dict[str, BatchPhotoResult] = {
-                    result.relative_path: result for result in batch_results
+                    batch_result.relative_path: batch_result for batch_result in batch_results
                 }
                 for item in prepared_chunk:
-                    result = by_path[item.relative_path]
+                    batch_result = by_path[item.relative_path]
                     classification = classifications[item.relative_path]
                     counts["processed"] += 1
-                    if result.action == "moved":
+                    if batch_result.action == "moved":
                         counts["moved"] += 1
                     elif classification == "new":
                         counts["new"] += 1
@@ -444,11 +470,13 @@ class PhotoScanner:
                         counts["changed"] += 1
                     elif classification == "restored":
                         counts["restored"] += 1
-                    counts["inherited"] += int(result.inherited)
-                    counts["duplicates"] += int(result.inherited and result.action != "moved")
-                    if build_thumbnails and result.action != "moved":
+                    counts["inherited"] += int(batch_result.inherited)
+                    counts["duplicates"] += int(
+                        batch_result.inherited and batch_result.action != "moved"
+                    )
+                    if build_thumbnails and batch_result.action != "moved":
                         try:
-                            self.thumbnails.get_or_create(item.source, result.sha256, 512)
+                            self.thumbnails.get_or_create(item.source, batch_result.sha256, 512)
                             thumbnails_created += 1
                             if thumbnails_created % thumbnail_capacity_check_interval == 0:
                                 # A scan must not stat the entire thumbnail cache
@@ -474,7 +502,7 @@ class PhotoScanner:
                                     error_code="THUMB-001",
                                     exc=exc,
                                     retryable=isinstance(exc, OSError),
-                                    photo_id=result.photo_id,
+                                    photo_id=batch_result.photo_id,
                                 )
                             )
             if errors:
@@ -500,7 +528,7 @@ class PhotoScanner:
             major_io_errors=major_io_errors,
         )
         report_progress(force=True)
-        return {
+        scan_result = {
             "library_id": library_id,
             "scan_id": scan_id,
             "mode": mode,
@@ -511,3 +539,35 @@ class PhotoScanner:
             "warning_code": scan["warning_code"],
             "cancelled": bool(scan["cancelled"]),
         }
+        log_event(
+            LOGGER,
+            logging.WARNING
+            if scan_result["failed"] or scan_result["cancelled"]
+            else logging.INFO,
+            "Photo scan completed",
+            event="scan_cancelled" if scan_result["cancelled"] else "scan_completed",
+            operation_id=str(scan_id),
+            operation="photo_scan",
+            duration_ms=int((time.monotonic() - scan_started) * 1000),
+            details={
+                key: scan_result[key]
+                for key in (
+                    "mode",
+                    "checked",
+                    "processed",
+                    "skipped",
+                    "failed",
+                    "new",
+                    "changed",
+                    "moved",
+                    "restored",
+                    "duplicates",
+                    "reconciliation_status",
+                    "candidate_missing",
+                    "missing_marked",
+                    "warning_code",
+                    "cancelled",
+                )
+            },
+        )
+        return scan_result

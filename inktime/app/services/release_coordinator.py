@@ -2,13 +2,19 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 import os
 from pathlib import Path
+import time
 from typing import Any
 
 from inktime.app.db import Database
+from inktime.app.core.logging import log_event
 from inktime.app.domain.rendering import AtomicReleasePublisher
 from inktime.app.domain.rendering.release import fsync_directory, release_metadata_guard
+
+
+LOGGER = logging.getLogger("release")
 
 
 class ReleaseCoordinator:
@@ -28,8 +34,22 @@ class ReleaseCoordinator:
         device_assignments: dict[str, str] | None = None,
         activate_pointers: bool = True,
     ) -> list[dict[str, Any]]:
+        started = time.monotonic()
         if not manifests:
             raise ValueError("RENDER-010 沒有可發布的 Release")
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Release publish started",
+            event="release_publish_started",
+            operation="release_publish",
+            details={
+                "manifest_count": len(manifests),
+                "photo_count": len(photo_ids),
+                "device_assignment_count": len(device_assignments or {}),
+                "activate_pointers": bool(activate_pointers),
+            },
+        )
         verified = [self.publisher.validate(str(item["release_id"])) for item in manifests]
         now = datetime.now(timezone.utc).isoformat()
         try:
@@ -55,9 +75,21 @@ class ReleaseCoordinator:
                             now,
                         ),
                     )
-        except Exception:
+        except Exception as exc:
             for manifest in verified:
                 self.publisher.mark_orphan(str(manifest["release_id"]), "database_stage_failed")
+            log_event(
+                LOGGER,
+                logging.ERROR,
+                "Release database staging failed",
+                event="release_publish_failed",
+                error_code="RENDER-RELEASE-STAGE",
+                operation="release_publish",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                failure_class=type(exc).__name__,
+                retryable=False,
+                details={"phase": "database_stage", "release_count": len(verified)},
+            )
             raise
 
         snapshot = (
@@ -115,6 +147,18 @@ class ReleaseCoordinator:
                         rows,
                     )
         except Exception as exc:
+            log_event(
+                LOGGER,
+                logging.ERROR,
+                "Release activation failed; compensation started",
+                event="release_compensation_started",
+                error_code="RENDER-RELEASE-ACTIVATE",
+                operation="release_publish",
+                duration_ms=int((time.monotonic() - started) * 1000),
+                failure_class=type(exc).__name__,
+                retryable=False,
+                details={"release_count": len(verified)},
+            )
             if activate_pointers and snapshot is not None:
                 self.publisher.restore_pointers(snapshot)
             with self.database.transaction() as connection:
@@ -123,6 +167,16 @@ class ReleaseCoordinator:
                     [(str(exc)[:500], item["release_id"]) for item in verified],
                 )
             raise
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Release published",
+            event="release_published",
+            release_id=str(verified[0]["release_id"]) if len(verified) == 1 else "",
+            operation="release_publish",
+            duration_ms=int((time.monotonic() - started) * 1000),
+            details={"release_count": len(verified), "photo_count": len(photo_ids)},
+        )
         return verified
 
     def abort_staged(self, release_ids: list[str], reason: str) -> None:
@@ -140,6 +194,14 @@ class ReleaseCoordinator:
             self.publisher.mark_orphan(release_id, "offline_prepare_aborted")
 
     def reconcile(self) -> dict[str, int]:
+        started = time.monotonic()
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "Release reconciliation started",
+            event="release_reconcile_started",
+            operation="release_reconcile",
+        )
         diagnostics = {
             "staged": 0,
             "payload_missing": 0,
@@ -198,6 +260,16 @@ class ReleaseCoordinator:
                     temporary.replace(pointer)
                     fsync_directory(self.publisher.root)
                     diagnostics["pointer_recovered"] += 1
+        actions = sum(int(value) for value in diagnostics.values())
+        log_event(
+            LOGGER,
+            logging.INFO if actions else logging.DEBUG,
+            "Release reconciliation completed",
+            event="release_reconcile_completed",
+            operation="release_reconcile",
+            duration_ms=int((time.monotonic() - started) * 1000),
+            details=diagnostics,
+        )
         return diagnostics
 
     def gc_unreferenced_releases(self, *, retention_days: int = 90, max_items: int = 20) -> dict[str, int]:

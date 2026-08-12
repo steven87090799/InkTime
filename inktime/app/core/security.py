@@ -9,6 +9,7 @@ import secrets
 import threading
 from collections import OrderedDict
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -16,11 +17,15 @@ from inktime.app.domain.auth import validate_password
 
 
 SENSITIVE_KEY = re.compile(
-    r"^(?:api[_-]?key|token|password|secret|authorization|cookie|session|bearer|(?:previous[_-]?)?device[_-]?(?:credential|token|secret)(?:[_-]?(?:hash|ciphertext))?|pairing[_-]?(?:code|nonce)(?:[_-]?(?:hash|ciphertext))?)$",
+    r"(?:api[_-]?key|apikey|token|password|passwd|secret|authorization|cookie|session|bearer|csrf|credential|pairing|wifi|wi[_-]?fi|headers?|payload|body|url|(?:previous[_-]?)?device[_-]?(?:credential|token|secret)(?:[_-]?(?:hash|ciphertext))?)",
     re.IGNORECASE,
 )
 SENSITIVE_TEXT = re.compile(
-    r"(?i)(\bBearer\s+)[A-Za-z0-9._~+/=-]{8,}|\b(?:sk-|itd_|ids_)[A-Za-z0-9._~-]{8,}|\b(?:api[_-]?key|token|authorization|pairing[_-]?(?:code|nonce))=([^\s&]+)"
+    r"(?i)(\b(?:Bearer|Basic)\s+)[A-Za-z0-9._~+/=-]{4,}|\b(?:sk-|itd_|ids_)[A-Za-z0-9._~-]{8,}|\b(?:api[_-]?key|apikey|token|password|passwd|secret|authorization|cookie|session|csrf|pairing[_-]?(?:code|nonce)|device[_-]?secret)=([^\s&]+)"
+)
+SENSITIVE_QUERY_KEY = re.compile(
+    r"^(?:api[_-]?key|apikey|key|token|secret|signature|sig|authorization|password|passwd)$",
+    re.IGNORECASE,
 )
 PRIVATE_PATH = re.compile(r"(?:/Users/[^\s]+|/home/[^\s]+|/photos/[^\s]+)")
 GPS = re.compile(r"(?<!\d)(?:-?\d{1,2}\.\d{4,})\s*[,，]\s*(?:-?\d{1,3}\.\d{4,})(?!\d)")
@@ -51,6 +56,27 @@ def redact_text(value: str) -> str:
         lambda match: f"{match.group(1)}[已遮蔽]" if match.group(1) else "[已遮蔽]",
         result,
     )
+
+    def redact_url(match: re.Match[str]) -> str:
+        candidate = match.group(0)
+        try:
+            parts = urlsplit(candidate)
+            netloc = parts.netloc
+            if parts.username is not None or parts.password is not None:
+                hostname = parts.hostname
+                if not hostname:
+                    return "[已遮蔽 URL]"
+                safe_host = f"[{hostname}]" if ":" in hostname else hostname
+                netloc = f"{safe_host}:{parts.port}" if parts.port is not None else safe_host
+            query = [
+                (key, "[已遮蔽]" if SENSITIVE_QUERY_KEY.fullmatch(key) else item)
+                for key, item in parse_qsl(parts.query, keep_blank_values=True)
+            ]
+            return urlunsplit((parts.scheme, netloc, parts.path, urlencode(query), parts.fragment))
+        except (TypeError, ValueError):
+            return "[已遮蔽 URL]"
+
+    result = re.sub(r"https?://[^\s<>'\"]+", redact_url, result)
     return BASE64.sub("[已遮蔽圖片資料]", GPS.sub("[已遮蔽 GPS]", PRIVATE_PATH.sub("[已遮蔽路徑]", result)))
 
 
