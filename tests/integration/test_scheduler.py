@@ -498,6 +498,69 @@ def test_manual_schedule_run_inherits_retry_policy_without_cursor_ownership(app)
     assert task_after["last_success"] == last_success_before
 
 
+def test_scheduled_success_repairs_cursor_past_crossed_cron_boundary(app):
+    task_key = "cache_cleanup"
+    schedules = app.extensions["inktime_schedule_repository"]
+    database = app.extensions["inktime_database"]
+    occurrence_at = "2026-08-12T11:59:05+08:00"
+    completion_now = datetime.fromisoformat("2026-08-12T12:00:05+08:00")
+
+    with database.session() as connection:
+        connection.execute(
+            "UPDATE scheduled_tasks SET cron='0 * * * *',next_run=? WHERE key=?",
+            (occurrence_at, task_key),
+        )
+    task = schedules.get(task_key)
+    assert task is not None
+
+    schedules.record_success(
+        task,
+        completion_now,
+        scheduled_occurrence_at=occurrence_at,
+    )
+
+    completed_task = schedules.get(task_key)
+    assert completed_task is not None
+    assert completed_task["next_run"] == "2026-08-12T13:00:00+08:00"
+    assert datetime.fromisoformat(str(completed_task["next_run"])) > completion_now
+
+
+def test_scheduled_success_repairs_cursor_past_dst_fallback_fold(app):
+    task_key = "cache_cleanup"
+    schedules = app.extensions["inktime_schedule_repository"]
+    database = app.extensions["inktime_database"]
+    occurrence_at = "2026-11-01T00:59:05-04:00"
+    completion_now = datetime(
+        2026,
+        11,
+        1,
+        1,
+        15,
+        tzinfo=ZoneInfo("America/New_York"),
+        fold=1,
+    )
+
+    with database.session() as connection:
+        connection.execute(
+            "UPDATE scheduled_tasks SET cron='30 1 * * *',next_run=? WHERE key=?",
+            (occurrence_at, task_key),
+        )
+    task = schedules.get(task_key)
+    assert task is not None
+
+    schedules.record_success(
+        task,
+        completion_now,
+        scheduled_occurrence_at=occurrence_at,
+    )
+
+    completed_task = schedules.get(task_key)
+    assert completed_task is not None
+    repaired_next_run = datetime.fromisoformat(str(completed_task["next_run"]))
+    assert completed_task["next_run"] == "2026-11-01T01:30:00-05:00"
+    assert repaired_next_run.astimezone(timezone.utc) > completion_now.astimezone(timezone.utc)
+
+
 def test_scheduled_success_repairs_cursor_after_start_before_mark_enqueued(app):
     task_key = "cache_cleanup"
     dedupe_key = f"scheduled:{task_key}"
@@ -651,27 +714,25 @@ def test_worker_terminal_schedule_cursor_uses_general_timezone(app, monkeypatch)
 
 def test_scheduled_success_preserves_cursor_after_mark_enqueued(app):
     task_key = "cache_cleanup"
-    _due_task(app, task_key)
     schedules = app.extensions["inktime_schedule_repository"]
     database = app.extensions["inktime_database"]
+    occurrence_at = "2026-08-12T11:59:05+08:00"
+    completion_now = datetime.fromisoformat("2026-08-12T12:00:05+08:00")
 
-    old_next_run = (datetime.now(ZoneInfo("Asia/Taipei")) - timedelta(minutes=1)).isoformat()
     with database.session() as connection:
         connection.execute(
             "UPDATE scheduled_tasks SET cron='0 * * * *',next_run=? WHERE key=?",
-            (old_next_run, task_key),
+            (occurrence_at, task_key),
         )
     task_before_enqueue = schedules.get(task_key)
     assert task_before_enqueue is not None
-    occurrence_at = str(task_before_enqueue["next_run"])
 
-    schedules.mark_enqueued(task_before_enqueue, datetime.now(ZoneInfo("Asia/Taipei")))
+    schedules.mark_enqueued(task_before_enqueue, completion_now)
     task_after_enqueue = schedules.get(task_key)
     assert task_after_enqueue is not None
     marked_next_run = str(task_after_enqueue["next_run"])
+    assert marked_next_run == "2026-08-12T13:00:00+08:00"
 
-    # Simulate a slow Worker completion after the next normal occurrence.
-    completion_now = datetime.fromisoformat(marked_next_run) + timedelta(minutes=30)
     schedules.record_success(
         task_after_enqueue,
         completion_now,
