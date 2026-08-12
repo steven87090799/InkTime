@@ -36,6 +36,13 @@ class WorkerRunner:
 
     def request_stop(self, *_args) -> None:
         self.stop.set()
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Worker runner shutdown requested",
+            event="worker_runner_shutdown_requested",
+            process_role="worker",
+        )
         self.app.extensions["inktime_process_boundary"].shutdown()
         if self.current:
             self.current.request_stop(

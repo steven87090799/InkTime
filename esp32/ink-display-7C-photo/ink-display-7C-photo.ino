@@ -52,6 +52,7 @@ struct AckJournalActivePointer;
 #define DEBUG_LOG INKTIME_DEBUG_LOG
 
 HardwareSerial DebugSerial(0);
+#include "firmware_observability.h"
 
 using inktime::kBoardConfig;
 
@@ -60,11 +61,11 @@ inktime::PhotoPainterSupport photoPainter(kBoardConfig);
 #endif
 
 #if DEBUG_LOG
-  #define DBG_BEGIN()    DebugSerial.begin(115200)
+  #define DBG_BEGIN()    INK_LOG_BEGIN()
   #define DBG_PRINT(x)   DebugSerial.print(x)
   #define DBG_PRINTLN(x) DebugSerial.println(x)
 #else
-  #define DBG_BEGIN()
+  #define DBG_BEGIN()    INK_LOG_BEGIN()
   #define DBG_PRINT(x)
   #define DBG_PRINTLN(x)
 #endif
@@ -1816,8 +1817,8 @@ void loadConfig(Config &cfg) {
 
 #if DEBUG_LOG
   DBG_PRINTLN("---- loadConfig ----");
-  DBG_PRINT("[CFG] ssid="); DBG_PRINTLN(cfg.wifi_ssid);
-  DBG_PRINT("[CFG] hostport="); DBG_PRINTLN(cfg.backend_hostport);
+  DBG_PRINTLN("[CFG] WiFi SSID configured (value redacted)");
+  DBG_PRINTLN("[CFG] backend endpoint configured (value redacted)");
   DBG_PRINT("[CFG] tz_offset_minutes="); DBG_PRINTLN(cfg.tz_offset_minutes);
   DBG_PRINT("[CFG] refresh_hour="); DBG_PRINTLN((int)cfg.refresh_hour);
   DBG_PRINT("[CFG] refresh_minute="); DBG_PRINTLN((int)cfg.refresh_minute);
@@ -2313,6 +2314,7 @@ static void deepSleepHoldOnlyEpdPins() {
 // =======================
 static void goDeepSleepSeconds(uint64_t seconds) {
   if (seconds < 1U) seconds = 1U;
+  INK_LOG_INFO("sleep_preparation", "Deep sleep preparation started");
 
   uint64_t us = seconds * 1000000ULL;
 
@@ -2389,7 +2391,7 @@ void startConfigPortal() {
 
 #if DEBUG_LOG
   DBG_PRINT("[CFG] softAP result = "); DBG_PRINTLN(apOk ? "OK" : "FAIL");
-  DBG_PRINT("[CFG] AP SSID = "); DBG_PRINTLN(apSsid);
+  DBG_PRINTLN("[CFG] provisioning AP started (SSID redacted)");
   DBG_PRINT("[CFG] AP IP   = "); DBG_PRINTLN(WiFi.softAPIP());
 #endif
 
@@ -2528,9 +2530,9 @@ static bool waitForWiFi(uint32_t timeout_ms) {
 }
 
 bool connectWiFi(const Config &cfg, uint32_t timeout_ms = 12000) {
+  INK_LOG_DEBUG("wifi_connect_started", "Wi-Fi connection attempt started");
 #if DEBUG_LOG
   DBG_PRINTLN("[WIFI] connectWiFi()");
-  DBG_PRINT("[WIFI] target ssid="); DBG_PRINTLN(cfg.wifi_ssid);
 #endif
 
   const uint32_t started = millis();
@@ -2567,6 +2569,8 @@ bool connectWiFi(const Config &cfg, uint32_t timeout_ms = 12000) {
 
   runtimeTelemetry.wifi_connect_ms = millis() - started;
   if (ok) saveWiFiFastPathHint();
+  if (ok) INK_LOG_INFO("wifi_connected", "Wi-Fi connected");
+  else INK_LOG_WARN("wifi_connect_timeout", "Wi-Fi connection timed out");
 
 #if DEBUG_LOG
   if (ok) {
@@ -3553,6 +3557,11 @@ static bool sendQueueEvent(
   const String &errorCode = String(""),
   bool delayedTerminal = false
 ) {
+  if (terminalQueueAck(event)) {
+    INK_LOG_INFO("queue_ack_terminal", inktime::queueEventName(event));
+  } else {
+    INK_LOG_DEBUG("queue_ack_queued", inktime::queueEventName(event));
+  }
   const time_t eventNow = time(nullptr);
   PendingQueueAck pending = {
     currentQueueItemId,
@@ -6352,6 +6361,7 @@ void setup() {
 
   DBG_BEGIN();
   delay(200);
+  INK_LOG_INFO("firmware_boot", "InkTime firmware boot started");
 
 #if DEBUG_LOG
   DBG_PRINTLN();
@@ -6461,6 +6471,7 @@ void setup() {
 #endif
   networkSessionStartedMs = millis();
   if (!connectWiFi(g_cfg)) {
+    INK_LOG_WARN("wifi_degraded_mode", "Wi-Fi unavailable; selecting bounded recovery path");
 #if DEBUG_LOG
     DBG_PRINTLN("[BOOT] connect failed");
 #endif
@@ -6549,6 +6560,8 @@ void setup() {
   bool hasTime = syncTime(g_cfg, timeinfo);
 
   bool ok = downloadDailyPhotoBin(g_cfg);
+  if (ok) INK_LOG_INFO("payload_ready", "Display payload is ready");
+  else INK_LOG_ERROR("payload_download_failed", "Display payload pipeline failed");
   if (serverConfigChanged) hasTime = syncTime(g_cfg, timeinfo);
   bool displayUpdated = false;
   if (ok) {
@@ -6583,16 +6596,19 @@ void setup() {
       sendQueueEvent(g_cfg, inktime::QueueEvent::DisplayFailed, false, ackFailure);
     }
     if (mayDisplay && !currentDisplaySkipped) {
+      INK_LOG_INFO("display_refresh_started", "Display refresh started");
       stopNetworkBeforeDisplay();
       initDisplay(g_cfg);
       displayUpdated = drawFromFrameData(g_cfg);
     }
     if (displayUpdated) {
+      INK_LOG_INFO("display_refresh_completed", "Display refresh completed");
       saveDisplayRecord(g_cfg, true);
       if (currentFromQueue) {
         sendQueueEvent(g_cfg, inktime::QueueEvent::DisplayCompleted);
       }
     } else if (!currentDisplaySkipped && mayDisplay) {
+      INK_LOG_ERROR("display_refresh_failed", "Display refresh failed or timed out");
 #if INKTIME_PHOTOPAINTER_ENABLED
       lastDeviceErrorCode = photoPainter.lastError();
 #else

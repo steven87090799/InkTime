@@ -122,6 +122,13 @@ class SchedulerRunner:
 
     def request_stop(self, *_args) -> None:
         self.stop.set()
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Scheduler shutdown requested",
+            event="scheduler_shutdown_requested",
+            process_role="scheduler",
+        )
 
     def tick(self) -> None:
         settings = self.app.extensions["inktime_settings_repository"]

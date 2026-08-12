@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import logging
 import multiprocessing
 from pathlib import Path
 import sqlite3
@@ -24,6 +25,26 @@ from inktime.app.services.render_cache import BoundedRenderCache
 from inktime.app.services.weather import WeatherService
 from inktime.app.workers.job_worker import BoundedJobWorker
 from inktime.app.workers.process_boundary import KillableProcessBoundary, ProcessCallError, ProcessCallTimeout
+
+
+@pytest.fixture
+def boundary_log_records():
+    logger = logging.getLogger("process_boundary")
+    original_level = logger.level
+    records: list[logging.LogRecord] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = Capture()
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(original_level)
 
 
 def _hang(_item):
@@ -276,6 +297,101 @@ def test_provider_call_process_boundary_has_hard_cap_and_shutdown_cleanup():
     assert not [
         child for child in multiprocessing.active_children() if child.name == "inktime-provider-child"
     ]
+
+
+def test_provider_capacity_timeout_logs_prestart_retryable_truth(boundary_log_records):
+    boundary = KillableProcessBoundary(max_processes=1, terminate_grace_seconds=0.1)
+    assert boundary._slots.acquire(timeout=0.1)
+    try:
+        with pytest.raises(ProcessCallTimeout) as raised:
+            boundary.call_provider(
+                {"provider_kind": "openai_compatible"},
+                "analyze",
+                timeout_seconds=0.05,
+                kwargs={},
+            )
+    finally:
+        boundary._slots.release()
+
+    assert raised.value.child_started is False
+    assert raised.value.request_started is not True
+    assert raised.value.ambiguous is not True
+    failure = next(
+        record
+        for record in reversed(boundary_log_records)
+        if getattr(record, "event", "") == "boundary_call_timeout"
+    )
+    assert failure.retryable is True
+    assert failure.ambiguous is False
+    assert failure.details["child_started"] is False
+    assert failure.details["request_started"] is False
+
+
+def test_started_provider_timeout_logs_final_ambiguous_truth(monkeypatch, boundary_log_records):
+    boundary = KillableProcessBoundary(max_processes=1)
+
+    def raise_unknown_outcome(*_args, **_kwargs):
+        error = ProcessCallTimeout("provider child process timeout")
+        error.child_started = True
+        raise error
+
+    monkeypatch.setattr(boundary, "_run", raise_unknown_outcome)
+    with pytest.raises(ProcessCallTimeout) as raised:
+        boundary.call_provider(
+            {"provider_kind": "openai_compatible"},
+            "analyze",
+            timeout_seconds=0.1,
+            kwargs={},
+        )
+
+    assert raised.value.child_started is True
+    assert raised.value.request_started is True
+    assert raised.value.vision_started is True
+    assert raised.value.ambiguous is True
+    failure = next(
+        record
+        for record in reversed(boundary_log_records)
+        if getattr(record, "event", "") == "boundary_call_timeout"
+    )
+    assert failure.retryable is False
+    assert failure.ambiguous is True
+    assert failure.details["child_started"] is True
+    assert failure.details["request_started"] is True
+    assert failure.details["vision_started"] is True
+
+
+def test_authoritative_child_false_metadata_is_preserved(monkeypatch, boundary_log_records):
+    boundary = KillableProcessBoundary(max_processes=1)
+
+    def raise_authoritative_failure(*_args, **_kwargs):
+        error = ProcessCallError("provider rejected request before transport")
+        error.child_started = True
+        error.request_started = False
+        error.vision_started = False
+        error.ambiguous = False
+        raise error
+
+    monkeypatch.setattr(boundary, "_run", raise_authoritative_failure)
+    with pytest.raises(ProcessCallError) as raised:
+        boundary.call_provider(
+            {"provider_kind": "openai_compatible"},
+            "analyze",
+            timeout_seconds=0.1,
+            kwargs={},
+        )
+
+    assert raised.value.child_started is True
+    assert raised.value.request_started is False
+    assert raised.value.vision_started is False
+    assert raised.value.ambiguous is False
+    failure = next(
+        record
+        for record in reversed(boundary_log_records)
+        if getattr(record, "event", "") == "boundary_call_error"
+    )
+    assert failure.ambiguous is False
+    assert failure.details["request_started"] is False
+    assert failure.details["vision_started"] is False
 
 
 def test_parent_cancel_callback_exception_still_reaps_child_and_releases_slot():

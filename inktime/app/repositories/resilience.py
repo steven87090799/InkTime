@@ -10,11 +10,16 @@ from datetime import datetime, timedelta, timezone
 from math import ceil
 from hashlib import sha256
 import json
+import logging
 from typing import Any, Iterable
 from uuid import uuid4
 
 from inktime.app.core.json_values import json_bool, json_int, nullable_json_int
+from inktime.app.core.logging import log_event, should_log_rate_limited
 from inktime.app.db import Database
+
+
+LOGGER = logging.getLogger("resilience")
 
 
 FEEDBACK_TYPES = {
@@ -587,7 +592,18 @@ class ResilienceRepository:
                 "UPDATE device_content_queues SET depth=?,updated_at=? WHERE device_id=?",
                 (int(depth), utc_now(), device_id),
             )
-        return self.queue(device_id) or {}
+        result = self.queue(device_id) or {}
+        if should_log_rate_limited(f"queue-ensured:{device_id}", interval_seconds=30):
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "Device content queue ensured",
+                event="queue_ensured",
+                device_id=device_id,
+                operation="device_queue",
+                details={"depth": int(depth)},
+            )
+        return result
 
     def enqueue_release(
         self,
@@ -705,7 +721,19 @@ class ResilienceRepository:
                 "UPDATE device_content_queues SET queue_version=queue_version+1,next_queued_release_id=?,updated_at=? WHERE device_id=?",
                 (release_id, now, device_id),
             )
-        return dict(self._queue_item(item_id))
+        result = dict(self._queue_item(item_id))
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Release enqueued for device",
+            event="queue_item_enqueued",
+            device_id=device_id,
+            queue_item_id=item_id,
+            release_id=release_id,
+            operation="device_queue",
+            details={"priority": int(priority), "delivery_mode": delivery_mode},
+        )
+        return result
 
     def _queue_item(self, item_id: str):
         with self.database.session() as connection:
@@ -759,6 +787,19 @@ class ResilienceRepository:
                     raise ValueError("QUEUE-005 ACK replay release_id 身分不一致")
                 if str(existing_event["device_id"]) != device_id:
                     raise PermissionError("QUEUE-002 ACK replay 裝置身分不一致")
+                if should_log_rate_limited(
+                    f"queue-ack-duplicate:{device_id}:{event}", interval_seconds=30
+                ):
+                    log_event(
+                        LOGGER,
+                        logging.DEBUG,
+                        "Duplicate queue ACK accepted idempotently",
+                        event="queue_ack_duplicate",
+                        device_id=device_id,
+                        queue_item_id=item_id,
+                        operation="queue_ack",
+                        details={"ack_event": event},
+                    )
                 return {"status": "ok", "queue_item_id": item_id, "event": event, "idempotent": True}
             queue = connection.execute(
                 "SELECT queue_version,current_release_id,current_displayed_at,last_known_good_release_id,last_known_good_displayed_at FROM device_content_queues WHERE device_id=?",
@@ -1091,6 +1132,16 @@ class ResilienceRepository:
                             (now, rollout_id),
                         )
                         self._action(connection, rollout_id, None, "rollback_completed", None)
+        log_event(
+            LOGGER,
+            logging.INFO if event in {"DISPLAY_COMPLETED", "DISPLAY_FAILED"} else logging.DEBUG,
+            "Device queue ACK committed",
+            event="queue_ack_committed",
+            device_id=device_id,
+            queue_item_id=item_id,
+            operation="queue_ack",
+            details={"ack_event": event, "delayed_terminal": delayed_terminal},
+        )
         return {"status": "ok", "queue_item_id": item_id, "event": event, "delayed_terminal": delayed_terminal}
 
     def retention_policies(self) -> list[dict[str, Any]]:

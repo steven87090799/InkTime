@@ -3,11 +3,31 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
+import logging
 import threading
 import time
 
+from inktime.app.core.logging import log_event, should_log_rate_limited
 from .base import ProviderResponse, Usage, VisionProvider
 from .openai_compatible import ProviderHTTPError
+
+
+LOGGER = logging.getLogger("provider_router")
+
+
+def _log_debug(message: str, *, event: str, **fields) -> None:
+    if not LOGGER.isEnabledFor(logging.DEBUG):
+        return
+    key = ":".join(
+        (
+            "provider-router",
+            event,
+            str(fields.get("provider") or "route")[:64],
+            str(fields.get("operation") or "unknown")[:64],
+        )
+    )
+    if should_log_rate_limited(key, interval_seconds=1):
+        log_event(LOGGER, logging.DEBUG, message, event=event, **fields)
 
 
 @dataclass
@@ -179,6 +199,14 @@ class FailoverVisionProvider(VisionProvider):
 
     def _execute(self, method: str, **kwargs) -> ProviderResponse:
         last_error: Exception | None = None
+        _log_debug(
+            "Provider route started",
+            event="provider_route_started",
+            operation=method,
+            model=str(kwargs.get("model") or ""),
+            stage=str(kwargs.get("stage") or ""),
+            details={"candidate_count": len(self.channels)},
+        )
         for channel in self.channels:
             if not self.acquire_channel(channel):
                 continue
@@ -192,11 +220,60 @@ class FailoverVisionProvider(VisionProvider):
                     getattr(exc, "request_started", False)
                 ) or bool(getattr(exc, "ambiguous", False)):
                     raise
+                if should_log_rate_limited(
+                    f"provider-failover:{channel.provider.name}:{method}",
+                    interval_seconds=5,
+                ):
+                    log_event(
+                        LOGGER,
+                        logging.WARNING,
+                        "Provider candidate failed; failover will continue",
+                        event="provider_failover_started",
+                        error_code=str(getattr(exc, "code", "VLM-005")),
+                        provider=channel.provider.name,
+                        provider_id=str(
+                            getattr(channel.provider, "provider_id", channel.provider.name)
+                        ),
+                        operation=method,
+                        failure_class=type(exc).__name__,
+                        retryable=True,
+                        ambiguous=False,
+                    )
                 continue
             self.release_channel(channel, usage=response.usage)
+            _log_debug(
+                "Provider candidate selected",
+                event="provider_candidate_selected",
+                provider=channel.provider.name,
+                provider_id=str(getattr(channel.provider, "provider_id", channel.provider.name)),
+                operation=method,
+                model=str(kwargs.get("model") or ""),
+                details={"priority": channel.priority},
+            )
             return response
         if last_error:
+            if should_log_rate_limited(f"provider-route-exhausted:{method}", interval_seconds=5):
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "Provider route exhausted",
+                    event="provider_route_exhausted",
+                    error_code=str(getattr(last_error, "code", "VLM-005")),
+                    operation=method,
+                    failure_class=type(last_error).__name__,
+                    retryable=False,
+                )
             raise last_error
+        if should_log_rate_limited(f"provider-route-unavailable:{method}", interval_seconds=5):
+            log_event(
+                LOGGER,
+                logging.ERROR,
+                "Provider route exhausted without an available candidate",
+                event="provider_route_exhausted",
+                error_code="VLM-005",
+                operation=method,
+                retryable=True,
+            )
         raise ProviderHTTPError("所有 Provider 暫時不可用或已達 Rate Limit", "VLM-005")
 
     def _execute_sticky(
@@ -282,15 +359,35 @@ class FailoverVisionProvider(VisionProvider):
             return self._execute("repair_json", **kwargs)
         return self._execute_sticky(channel, "repair_json", boundary=boundary, **kwargs)
 
-    def submit_batch(self, requests, completion_window="24h") -> str:
+    def submit_batch(self, batch_requests, completion_window="24h") -> str:
         last_error: Exception | None = None
         for channel in self.channels:
             try:
-                result = channel.provider.submit_batch(requests, completion_window=completion_window)
+                result = channel.provider.submit_batch(
+                    batch_requests, completion_window=completion_window
+                )
                 self._local.channel = channel
                 return result
             except Exception as exc:
                 last_error = exc
+                if should_log_rate_limited(
+                    f"batch-provider-failover:{channel.provider.name}", interval_seconds=5
+                ):
+                    log_event(
+                        LOGGER,
+                        logging.WARNING,
+                        "Batch provider submission failed; failover will continue",
+                        event="batch_provider_failover",
+                        error_code=str(getattr(exc, "code", "VLM-007")),
+                        provider=channel.provider.name,
+                        provider_id=str(
+                            getattr(channel.provider, "provider_id", channel.provider.name)
+                        ),
+                        operation="batch_submit",
+                        failure_class=type(exc).__name__,
+                        retryable=True,
+                        ambiguous=bool(getattr(exc, "ambiguous", False)),
+                    )
                 continue
         error = ProviderHTTPError("所有 Provider 的 Batch 提交均失敗", "VLM-007")
         raise error from last_error
