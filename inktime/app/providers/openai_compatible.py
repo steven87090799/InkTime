@@ -510,7 +510,7 @@ class OpenAICompatibleProvider(VisionProvider):
                     # request, but preserve its structured provider error for
                     # the caller instead of classifying it as unknown.
                     return response
-                if ambiguous and status >= 500 and retry_policy != AMBIGUOUS_VISION_ANALYSIS:
+                if retry_policy in {AMBIGUOUS_CREATE, AMBIGUOUS_UPLOAD} and status >= 500:
                     raise ProviderHTTPError(
                         self._redact(f"Provider side effect HTTP {status} 結果未知"),
                         unknown_code,
