@@ -8,7 +8,7 @@ Draft pull requests without the `full-ci` label use impact mode. The planner cla
 
 Full mode is selected when any of these are true:
 
-- a pull request is ready for review (`draft == false`);
+- a triggered pull request event reports that the pull request is ready for review (`draft == false`);
 - the pull request has the `full-ci` label;
 - `workflow_dispatch` uses `full_suite=true`;
 - a push targets `refs/heads/main`.
@@ -86,4 +86,6 @@ python3 scripts/ci/canonical_plan.py --event-name pull_request --ref refs/pull/1
 
 Check `ci_mode`, `unknown_paths`, `owner_suite_gaps`, `full_only_test_paths`, `selected_test_suites`, `selected_owner_suites`, `selected_gates`, `skipped_gates`, `suite_execution_gaps`, `full_suite_execution_gaps`, `full_plan_complete`, `no_heavy_impact_duplicates`, `requires_source_head_contract`, and provenance. A selected job that is skipped, failed, cancelled, missing, or unknown fails its aggregate gate with the execution ID and job name; only unselected skipped jobs are accepted. A full PR run is merge-ref validation and must be judged from the current PR event and its reported provenance, not described as direct source-head execution.
 
-The full suite is not run on every Draft push because Draft validation is intended to give fast, affected feedback while retaining secret, quality, routing, and relevant production-boundary checks. Use `full-ci`, mark the PR ready, dispatch `full_suite=true`, or push to `main` when the complete validation set is required.
+The full suite is not run on every Draft push because Draft validation is intended to give fast, affected feedback while retaining secret, quality, routing, and relevant production-boundary checks. Use `full-ci`, dispatch `full_suite=true`, or push to `main` when the complete validation set is required.
+
+Every source commit pushed to a pull request branch triggers validation through `synchronize`. Changing an unchanged Draft pull request to Ready for review does not trigger either expensive workflow again; its existing checks remain associated with the same source HEAD. A later source commit triggers a new run, and because the pull request is then ready (`draft == false`), the planner selects full mode for that new HEAD. Base retargets remain covered by `edited`. Required aggregate gates, strict branch protection, and fail-closed revalidation remain unchanged.
