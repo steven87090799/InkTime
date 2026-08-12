@@ -4,12 +4,18 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import json
+import logging
 import sqlite3
+import time
 from urllib.parse import urlparse
 
 from inktime.app.core.locks import fcntl
+from inktime.app.core.logging import log_event
 
 from .connection import Database
+
+
+LOGGER = logging.getLogger("migration")
 
 
 class MigrationError(RuntimeError):
@@ -2166,6 +2172,14 @@ def backup_database(database: Database, backup_dir: Path) -> Path | None:
     backup_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     destination = backup_dir / f"{database.path.stem}-pre-migration-{stamp}.sqlite3"
+    started = time.monotonic()
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "Pre-migration backup started",
+        event="migration_backup_started",
+        phase="backup",
+    )
     source = sqlite3.connect(database.path)
     target = sqlite3.connect(destination)
     try:
@@ -2175,6 +2189,14 @@ def backup_database(database: Database, backup_dir: Path) -> Path | None:
     finally:
         target.close()
         source.close()
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "Pre-migration backup completed",
+        event="migration_backup_completed",
+        phase="backup",
+        duration_ms=int((time.monotonic() - started) * 1000),
+    )
     return destination
 
 
@@ -2574,21 +2596,55 @@ def _finish_history(
 
 def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
     """依版本安全升級；schema、版本列與完整性檢查位於同一交易。"""
+    migration_check_started = time.monotonic()
+    log_event(
+        LOGGER,
+        logging.DEBUG,
+        "Migration check started",
+        event="migration_check_started",
+        phase="preflight",
+    )
     had_database = database.path.exists() and database.path.stat().st_size > 0
     database.path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = Path(f"{database.path}.migration.lock")
     with lock_path.open("a", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "Migration lock acquired",
+            event="migration_lock_acquired",
+            phase="preflight",
+        )
         _assert_no_unfinished_migration(database)
         applied_versions = _applied_versions(database)
         known_versions = {migration.version for migration in MIGRATIONS}
         unknown_versions = applied_versions - known_versions
         if unknown_versions:
             newest = max(unknown_versions)
+            log_event(
+                LOGGER,
+                logging.CRITICAL,
+                "Database schema is newer than this InkTime build",
+                event="migration_unknown_schema",
+                error_code="MIGRATION-003",
+                phase="preflight",
+                details={"schema_version": newest},
+            )
             raise MigrationError(
                 f"MIGRATION-003 資料庫 Schema Version {newest} 高於本程式可支援版本；停止啟動以避免降級寫入"
             )
         has_pending_migrations = any(migration.version not in applied_versions for migration in MIGRATIONS)
+        if not has_pending_migrations:
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "No database migration is required",
+                event="migration_noop",
+                phase="preflight",
+                duration_ms=int((time.monotonic() - migration_check_started) * 1000),
+                details={"schema_version": max(applied_versions, default=0)},
+            )
         # 只有真的要升級既有資料庫才建立備份；三個容器每次重啟不再各複製一次。
         backup_path = None
         if backup_dir is not None and had_database and has_pending_migrations:
@@ -2599,6 +2655,18 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
             if migration.version in applied_versions:
                 continue
             started_at = _utc_now()
+            started_perf = time.monotonic()
+            log_event(
+                LOGGER,
+                logging.INFO,
+                "Database migration started",
+                event="migration_started",
+                phase="apply",
+                details={
+                    "schema_version": migration.version,
+                    "migration_name": migration.name,
+                },
+            )
             history_id = _start_history(database, migration, backup_path, started_at=started_at)
             history_completed_in_transaction = False
             try:
@@ -2637,6 +2705,14 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
                         raise MigrationError(
                             f"Migration {migration.version} 完整性檢查失敗：{integrity[0] if integrity else 'unknown'}"
                         )
+                    log_event(
+                        LOGGER,
+                        logging.DEBUG,
+                        "Migration integrity check completed",
+                        event="migration_integrity_check_completed",
+                        phase="integrity",
+                        details={"schema_version": migration.version, "result": "ok"},
+                    )
             except Exception as exc:
                 _finish_history(
                     database,
@@ -2646,6 +2722,19 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
                     status="rolled_back",
                     backup_path=backup_path,
                     error=str(exc),
+                )
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "Database migration rolled back",
+                    event="migration_rolled_back",
+                    error_code="MIGRATION-001",
+                    phase="rollback",
+                    duration_ms=int((time.monotonic() - started_perf) * 1000),
+                    failure_class=type(exc).__name__,
+                    retryable=False,
+                    details={"schema_version": migration.version},
+                    exc_info=(type(exc), exc, exc.__traceback__),
                 )
                 raise MigrationError(
                     f"Migration {migration.version}（{migration.name}）失敗；Schema 已完整 Rollback"
@@ -2661,12 +2750,36 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
                         backup_path=backup_path,
                     )
                 except Exception as exc:
+                    log_event(
+                        LOGGER,
+                        logging.CRITICAL,
+                        "Migration history could not be committed safely",
+                        event="migration_history_failed",
+                        error_code="MIGRATION-004",
+                        phase="history",
+                        failure_class=type(exc).__name__,
+                        retryable=False,
+                        details={"schema_version": migration.version},
+                        exc_info=(type(exc), exc, exc.__traceback__),
+                    )
                     raise MigrationError(
                         "MIGRATION-004 Schema 已提交但 Migration 歷史無法完成；"
                         "平台必須停止，請由升級前備份回復，不得繼續寫入"
                     ) from exc
             applied.append(migration.version)
             applied_versions.add(migration.version)
+            log_event(
+                LOGGER,
+                logging.INFO,
+                "Database migration completed",
+                event="migration_completed",
+                phase="apply",
+                duration_ms=int((time.monotonic() - started_perf) * 1000),
+                details={
+                    "schema_version": migration.version,
+                    "migration_name": migration.name,
+                },
+            )
         return applied
 
 

@@ -3,13 +3,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 from pathlib import Path
 import time
 from uuid import uuid4
 from typing import Any, Callable
-import logging
 
 from inktime.app.core.paths import safe_join
+from inktime.app.core.logging import log_event
 from inktime.app.domain.analysis import (
     AnalysisValidationError,
     REPAIR_TOKEN_CAP,
@@ -56,6 +57,7 @@ class AnalysisDisabledError(RuntimeError):
 PROMPT_VERSION = "photo-quality-v5-grade-anchors"
 FULL_ANALYSIS_TOKEN_CAP = 2048
 CAPTION_VARIANTS_TOKEN_CAP = 3072
+LOGGER = logging.getLogger("analysis")
 
 
 class ProviderUnavailableError(ValueError):
@@ -109,6 +111,48 @@ class PhotoAnalysisService:
             return None
 
     def _activity(self, severity: str, event: str, message: str, **fields) -> None:
+        level = {
+            "DEBUG": logging.DEBUG,
+            "INFO": logging.INFO,
+            "WARNING": logging.WARNING,
+            "ERROR": logging.ERROR,
+            "CRITICAL": logging.CRITICAL,
+        }.get(str(severity).upper(), logging.INFO)
+        safe_details = {
+            key: fields[key]
+            for key in (
+                "cache_hit",
+                "count",
+                "schema_kind",
+                "status",
+                "strategy",
+                "vision_started",
+                "request_started",
+                "ambiguous",
+            )
+            if key in fields
+        }
+        # Pass raw values into the fail-open logging boundary. Converting a
+        # provider-supplied diagnostic value here must not affect persistence.
+        log_event(
+            LOGGER,
+            level,
+            message,
+            event=event,
+            trace_id=fields.get("trace_id", ""),
+            job_id=fields.get("job_id", ""),
+            photo_id=fields.get("photo_id", ""),
+            provider=fields.get("provider", ""),
+            provider_id=fields.get("provider_id", ""),
+            model=fields.get("model", ""),
+            stage=fields.get("stage", ""),
+            error_code=fields.get("error_code", ""),
+            failure_class=fields.get("failure_class", ""),
+            retryable=fields.get("retryable", False),
+            ambiguous=fields.get("ambiguous", False),
+            duration_ms=fields.get("duration_ms", 0),
+            details=safe_details,
+        )
         if self.observability is not None:
             self.observability.record(severity, "analysis", event, message, **fields)
 

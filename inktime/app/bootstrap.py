@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import logging
 import secrets
+import time
 from typing import Literal
 
 from inktime.app.core.locks import FcntlLockProvider, LockProvider
-from inktime.app.core.logging import configure_logging
+from inktime.app.core.logging import bind_log_context, configure_logging, log_event
 from inktime.app.core.runtime_config import RuntimeConfig, resolve_runtime_config
 from inktime.app.core.preflight import run_production_preflight
 from inktime.app.db import Database, backfill_photo_capture_dates, migrate
@@ -53,6 +55,7 @@ from inktime.app.workers.process_boundary import KillableProcessBoundary
 
 
 RuntimeRole = Literal["web", "worker", "scheduler"]
+LOGGER = logging.getLogger("bootstrap")
 
 
 @dataclass
@@ -132,6 +135,16 @@ def bootstrap_services(
     config = resolve_runtime_config(runtime_config)
     locks = lock_provider or FcntlLockProvider()
     configure_logging()
+    bind_log_context(process_role=role)
+    started = time.perf_counter()
+    log_event(
+        LOGGER,
+        logging.DEBUG,
+        "Runtime bootstrap started",
+        event="bootstrap_started",
+        phase="bootstrap",
+        process_role=role,
+    )
     preflight = run_production_preflight(config)
 
     # Filesystem creation is an explicit bootstrap step, never an import side effect.
@@ -338,4 +351,15 @@ def bootstrap_services(
             "inktime_device_queue_manifest_service",
         ):
             extensions.pop(key, None)
-    return ServiceContainer(config, role, extensions, secret)
+    container = ServiceContainer(config, role, extensions, secret)
+    log_event(
+        LOGGER,
+        logging.INFO,
+        "Runtime service graph is ready",
+        event="bootstrap_completed",
+        phase="bootstrap",
+        process_role=role,
+        duration_ms=int((time.perf_counter() - started) * 1000),
+        details={"registered_extensions": len(extensions)},
+    )
+    return container

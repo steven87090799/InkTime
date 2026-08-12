@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 from typing import Any
 from urllib.parse import quote
 
 from inktime.app.core.paths import UnsafePathError
+from inktime.app.core.logging import log_event, should_log_rate_limited
 from inktime.app.repositories.resilience import ResilienceRepository
 from inktime.app.services.device_releases import DeviceReleaseService
 
 
 _ADVERTISED_QUEUE_STATES = {"READY", "AVAILABLE", "DOWNLOADED", "ACKNOWLEDGED"}
 _GENERIC_QUEUE_MAX_ITEMS = 14
+LOGGER = logging.getLogger("device_queue")
 
 
 class DeviceQueueManifestService:
@@ -131,7 +134,7 @@ class DeviceQueueManifestService:
                     ),
                 }
             )
-        return {
+        result = {
             "schema_version": 1,
             "queue_version": queue["queue"]["queue_version"],
             "device_id": device_id,
@@ -139,3 +142,17 @@ class DeviceQueueManifestService:
             "items": items,
             "last_known_good_release_id": queue["queue"]["last_known_good_release_id"],
         }
+        if should_log_rate_limited(f"queue-manifest:{device_id}", interval_seconds=60):
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "Device queue manifest generated",
+                event="queue_manifest_generated",
+                device_id=device_id,
+                operation="device_queue_manifest",
+                details={
+                    "queue_version": int(result["queue_version"]),
+                    "item_count": len(items),
+                },
+            )
+        return result

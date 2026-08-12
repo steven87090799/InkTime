@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import timedelta
 import logging
 from pathlib import Path
+import re
 import secrets
+import time
 
 from flask import Flask, flash, g, jsonify, redirect, request, session, url_for
 from jinja2 import FileSystemLoader
@@ -29,7 +31,12 @@ from inktime.app.api import (
     settings,
 )
 from inktime.app.bootstrap import ServiceContainer, bootstrap_services
-from inktime.app.core.logging import log_event
+from inktime.app.core.logging import (
+    bind_log_context,
+    clear_log_context,
+    log_event,
+    should_log_rate_limited,
+)
 from inktime.app.core.errors import ApplicationError
 from inktime.app.core.redirects import safe_local_redirect_target
 from inktime.app.core.runtime_config import RuntimeConfig
@@ -39,6 +46,8 @@ from inktime.app.web.access import csrf_token, verify_csrf
 
 
 LOGGER = logging.getLogger("platform")
+REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+QUIET_REQUEST_ENDPOINTS = {"health.live", "health.ready", "static"}
 
 
 def configure_web_application(
@@ -154,6 +163,28 @@ def configure_web_application(
     }
 
     @app.before_request
+    def establish_request_context():
+        supplied = request.headers.get("X-Request-ID", "").strip()
+        request_id = supplied if REQUEST_ID_PATTERN.fullmatch(supplied) else secrets.token_hex(16)
+        g.inktime_request_started = time.perf_counter()
+        g.inktime_request_id = request_id
+        g.inktime_log_context_token = bind_log_context(
+            request_id=request_id,
+            trace_id=request_id,
+            operation="http_request",
+            http_method=request.method,
+            process_role=container.role,
+        )
+        if request.endpoint not in QUIET_REQUEST_ENDPOINTS:
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "HTTP request received",
+                event="request_received",
+                details={"endpoint": request.endpoint or "unmatched"},
+            )
+
+    @app.before_request
     def enforce_access():
         g.csp_nonce = secrets.token_urlsafe(24)
         endpoint = request.endpoint or ""
@@ -199,6 +230,77 @@ def configure_web_application(
             )
         return response
 
+    @app.after_request
+    def complete_request(response):
+        request_id = getattr(g, "inktime_request_id", secrets.token_hex(16))
+        response.headers["X-Request-ID"] = request_id
+        endpoint = request.endpoint or "unmatched"
+        if endpoint not in QUIET_REQUEST_ENDPOINTS:
+            status = int(response.status_code)
+            level = (
+                logging.ERROR
+                if status >= 500
+                else logging.WARNING
+                if status in {401, 403, 429}
+                else logging.DEBUG
+            )
+            event = (
+                "request_failed"
+                if status >= 500
+                else "request_rejected"
+                if status >= 400
+                else "request_completed"
+            )
+            if status >= 500 or LOGGER.isEnabledFor(logging.DEBUG) or (
+                status in {401, 403, 429}
+                and should_log_rate_limited(f"http:{endpoint}:{status}", interval_seconds=60)
+            ):
+                log_event(
+                    LOGGER,
+                    level,
+                    "HTTP request failed"
+                    if status >= 500
+                    else "HTTP request rejected"
+                    if status >= 400
+                    else "HTTP request completed",
+                    event=event,
+                    http_status=status,
+                    duration_ms=int(
+                        (
+                            time.perf_counter()
+                            - getattr(g, "inktime_request_started", time.perf_counter())
+                        )
+                        * 1000
+                    ),
+                    details={
+                        "endpoint": endpoint,
+                        "actor_type": (
+                            "user" if getattr(g, "user", None) is not None else "anonymous"
+                        ),
+                    },
+                )
+        return response
+
+    @app.teardown_request
+    def clear_request_context(exc):
+        try:
+            if exc is not None:
+                log_event(
+                    LOGGER,
+                    logging.ERROR,
+                    "HTTP request raised an unexpected exception",
+                    event="request_failed",
+                    error_code="HTTP-500",
+                    failure_class=type(exc).__name__,
+                    retryable=False,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+        finally:
+            token = getattr(g, "inktime_log_context_token", None)
+            if token is not None:
+                g.inktime_log_context_token = None
+                clear_log_context(token)
+
     @app.errorhandler(HTTPException)
     def stable_error(exc: HTTPException):
         if (
@@ -239,6 +341,7 @@ def configure_web_application(
         logging.INFO,
         "InkTime 平台已完成初始化",
         event="platform_ready",
+        process_role=container.role,
         details={
             "version": __version__,
             "role": container.role,

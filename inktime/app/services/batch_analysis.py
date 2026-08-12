@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import logging
 import math
 import os
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,7 @@ from typing import Any, Callable, Iterable, Literal, Mapping
 from uuid import uuid4
 
 from inktime.app.core.paths import safe_join
+from inktime.app.core.logging import log_event
 from inktime.app.domain.analysis import (
     AnalysisValidationError,
     canonical_json,
@@ -47,6 +49,7 @@ DEFAULT_MAX_ITEMS = 500
 DEFAULT_MAX_BYTES = 150 * 1024 * 1024
 CUSTOM_ID_RE = re.compile(r"^ibt:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 REMOTE_BATCH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$")
+LOGGER = logging.getLogger("batch_analysis")
 
 
 class BatchLifecycleError(RuntimeError):
@@ -194,12 +197,30 @@ class BatchAnalysisService:
         self.scoring_repository = scoring_repository
 
     def _activity(self, severity: str, event: str, message: str, **fields: Any) -> None:
+        safe_fields = {
+            key: fields[key]
+            for key in ("batch_id", "batch_item_id", "job_id", "count", "status", "error_code")
+            if key in fields
+        }
+        level = {
+            "DEBUG": logging.DEBUG,
+            "INFO": logging.INFO,
+            "WARNING": logging.WARNING,
+            "ERROR": logging.ERROR,
+            "CRITICAL": logging.CRITICAL,
+        }.get(str(severity).upper(), logging.INFO)
+        log_event(
+            LOGGER,
+            level,
+            message,
+            event=event,
+            batch_id=str(fields.get("batch_id") or ""),
+            batch_item_id=str(fields.get("batch_item_id") or ""),
+            job_id=str(fields.get("job_id") or ""),
+            error_code=str(fields.get("error_code") or ""),
+            details=safe_fields,
+        )
         if self.observability is not None:
-            safe_fields = {
-                key: fields[key]
-                for key in ("batch_id", "batch_item_id", "job_id", "count", "status", "error_code")
-                if key in fields
-            }
             self.observability.record(severity, "analysis_batch", event, message, **safe_fields)
 
     def _batch_limits(self) -> tuple[int, int]:
@@ -972,6 +993,7 @@ class BatchAnalysisService:
         created_by: str | None = None,
         budget_limit: float | None = None,
     ) -> dict[str, Any]:
+        submit_started = time.monotonic()
         plan, analysis_fp, model = self._plan()
         provider_id = str(plan["provider_route"][0]["provider_id"])
         provider_identity = self._provider_identity(provider_id)
@@ -1068,8 +1090,24 @@ class BatchAnalysisService:
             raise
         provider = None
         try:
+            self._activity(
+                "INFO",
+                "batch_prepare",
+                "Batch JSONL preparation started",
+                batch_id=batch_id,
+                job_id=job_id,
+                count=len(candidates),
+            )
             provider = self._provider(provider_id, plan)
             batch_ids = self._prepare_shards(batch_id, candidates, plan, provider)
+            self._activity(
+                "INFO",
+                "batch_prepared",
+                "Batch JSONL preparation completed",
+                batch_id=batch_id,
+                job_id=job_id,
+                count=len(batch_ids),
+            )
         except Exception as exc:
             code = str(getattr(exc, "code", "BATCH-INPUT-001"))
             self.batches.fail_local_batch(batch_id, code, str(exc), include_job_siblings=True)
@@ -1097,6 +1135,18 @@ class BatchAnalysisService:
                     error_code=str(getattr(exc, "code", "BATCH-SUBMIT-001")),
                 )
                 continue
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Batch submission pass completed",
+            event="batch_submit_completed",
+            batch_id=batch_id,
+            job_id=job_id,
+            provider_id=provider_id,
+            model=model,
+            duration_ms=int((time.monotonic() - submit_started) * 1000),
+            details={"prepared_shards": len(batch_ids), "submitted_shards": len(submitted)},
+        )
         return {
             "job_id": job_id,
             "batch_ids": submitted,
@@ -1138,6 +1188,13 @@ class BatchAnalysisService:
         if str(batch["status"]) in TERMINAL_BATCH_STATUSES:
             return
         state = "upload_unknown" if upload else "submission_unknown"
+        self._activity(
+            "WARNING",
+            "batch_restart_recovery",
+            "Batch external side effect entered restart recovery hold",
+            batch_id=str(batch["id"]),
+            status=state,
+        )
         self.batches.update_batch(
             str(batch["id"]),
             status=state,
@@ -1220,6 +1277,15 @@ class BatchAnalysisService:
 
     def poll_due(self, *, limit: int = 20) -> dict[str, int]:
         rows = self.batches.list_pollable_due(limit=limit)
+        poll_started = time.monotonic()
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "Batch poll pass started",
+            event="batch_poll",
+            operation="batch_poll",
+            details={"candidate_count": len(rows), "limit": int(limit)},
+        )
         polled = 0
         enqueued = 0
         for batch in rows:
@@ -1389,6 +1455,15 @@ class BatchAnalysisService:
                 )
             finally:
                 self.batches.release_side_effect_claim(batch_id, owner)
+        log_event(
+            LOGGER,
+            logging.DEBUG,
+            "Batch poll pass completed",
+            event="batch_poll_completed",
+            operation="batch_poll",
+            duration_ms=int((time.monotonic() - poll_started) * 1000),
+            details={"polled": polled, "enqueued": enqueued},
+        )
         return {"polled": polled, "enqueued": enqueued}
 
     def cancel(self, batch_id: str) -> dict[str, Any]:
@@ -2474,6 +2549,14 @@ class BatchAnalysisService:
             ),
             cleanup_status=cleanup_status if cleanup_status in {"completed", "not_required"} else None,
         )
+        self._activity(
+            "INFO" if final_status == "completed" else "WARNING",
+            "batch_completed" if final_status.startswith("completed") else "batch_failed",
+            "Batch lifecycle reached a terminal result",
+            batch_id=batch_id,
+            job_id=str(batch["job_id"] or ""),
+            status=final_status,
+        )
 
     def _fail_closed_frozen_plan(
         self, batch_id: str, batch: dict[str, Any], message: str
@@ -2567,6 +2650,7 @@ class BatchAnalysisService:
         return "cleanup_only"
 
     def import_batch(self, batch_id: str, *, cleanup_only: bool = False) -> dict[str, Any]:
+        import_started = time.monotonic()
         batch = self.batches.get(batch_id)
         if batch is None:
             raise KeyError(batch_id)
@@ -2575,6 +2659,14 @@ class BatchAnalysisService:
             return {"batch_id": batch_id, "already_imported": True}
         if terminal_mode == "cleanup_only":
             cleanup_only = True
+        self._activity(
+            "INFO",
+            "batch_result_ingest",
+            "Batch result ingest started",
+            batch_id=batch_id,
+            job_id=str(batch["job_id"] or ""),
+            status=str(batch["status"] or ""),
+        )
         plan_row = self.jobs.get(str(batch["job_id"])) if batch["job_id"] else None
         plan_error: str | None = None
         try:
@@ -2727,12 +2819,27 @@ class BatchAnalysisService:
         current = self.batches.get(batch_id)
         if current is not None and str(current["cleanup_status"]) == "completed":
             self._finish(batch_id)
-        return {
+        result = {
             "batch_id": batch_id,
             "success": len(successes),
             "errors": len(errors),
             "missing": len(set(expected) - seen),
         }
+        log_event(
+            LOGGER,
+            logging.INFO if not errors else logging.WARNING,
+            "Batch result ingest completed",
+            event="batch_result_ingest_completed",
+            batch_id=batch_id,
+            job_id=str(batch["job_id"] or ""),
+            duration_ms=int((time.monotonic() - import_started) * 1000),
+            details={
+                "success": result["success"],
+                "errors": result["errors"],
+                "missing": result["missing"],
+            },
+        )
+        return result
 
     def get_detail(self, batch_id: str) -> dict[str, Any] | None:
         batch = self.batches.get(batch_id)
