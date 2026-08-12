@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 from datetime import datetime, timezone
 from hashlib import sha256
 from http.cookiejar import CookieJar
@@ -11,23 +12,48 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
-import sys
 import time
 from urllib.parse import urlencode
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-from inktime.app.db.migrations import MIGRATIONS
 
 BASE_URL = os.environ.get("INKTIME_LAN_GATE_URL", "http://127.0.0.1:8765").rstrip("/")
 USERNAME = "lan-gate-admin"
 PASSWORD = "lan-gate-passphrase"  # noqa: S105 - isolated disposable CI account
 CSRF = re.compile(r'<meta name="csrf-token" content="([^"]+)"')
 RELEASE_ID = "lan-gate-release-v1"
-EXPECTED_MIGRATION_VERSION = max(migration.version for migration in MIGRATIONS)
+
+
+def _expected_migration_version() -> int:
+    """Read the source-owned migration tuple without importing the application."""
+
+    migration_path = ROOT_DIR / "inktime" / "app" / "db" / "migrations.py"
+    tree = ast.parse(migration_path.read_text(encoding="utf-8"), filename=str(migration_path))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or not any(
+            isinstance(target, ast.Name) and target.id == "MIGRATIONS" for target in node.targets
+        ):
+            continue
+        if not isinstance(node.value, (ast.List, ast.Tuple)):
+            break
+        versions: list[int] = []
+        for migration in node.value.elts:
+            if (
+                not isinstance(migration, ast.Call)
+                or not migration.args
+                or not isinstance(migration.args[0], ast.Constant)
+                or type(migration.args[0].value) is not int
+            ):
+                raise RuntimeError("migration source contains a non-literal version")
+            versions.append(migration.args[0].value)
+        if versions:
+            return max(versions)
+        break
+    raise RuntimeError("unable to read MIGRATIONS from migration source")
+
+
+EXPECTED_MIGRATION_VERSION = _expected_migration_version()
 
 
 def _read_state(path: Path) -> dict[str, object]:
