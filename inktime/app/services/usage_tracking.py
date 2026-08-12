@@ -22,7 +22,7 @@ def record_failed_unknown_usage(
     error_code: str | None = None,
     retry_count: int = 0,
     image_bytes: int = 0,
-) -> None:
+) -> int:
     """Persist one sent/ambiguous request as unknown-cost evidence.
 
     The caller decides whether the transport was actually handed the request
@@ -43,7 +43,7 @@ def record_failed_unknown_usage(
     response_info = getattr(error, "response_info", None)
     if not effective_request_id and isinstance(response_info, dict):
         effective_request_id = response_info.get("request_id")
-    usage_repository.record(
+    return usage_repository.record(
         provider=provider_name,
         provider_id=provider_id,
         model=model,

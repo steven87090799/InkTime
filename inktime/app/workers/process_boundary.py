@@ -8,6 +8,8 @@ import time
 from typing import Any, Callable
 from uuid import uuid4
 
+from inktime.app.providers.base import ProviderCallTrace
+
 
 class ProcessCallTimeout(TimeoutError):
     code = "AI-PROVIDER-TIMEOUT"
@@ -15,6 +17,7 @@ class ProcessCallTimeout(TimeoutError):
     ambiguous: bool | None = None
     vision_started: bool | None = None
     request_started: bool | None = None
+    call_trace: ProviderCallTrace | None = None
 
 
 class ProcessCallError(RuntimeError):
@@ -23,6 +26,7 @@ class ProcessCallError(RuntimeError):
     ambiguous: bool | None = None
     vision_started: bool | None = None
     request_started: bool | None = None
+    call_trace: ProviderCallTrace | None = None
 
 
 def _call_child(function: Callable[..., Any], kwargs: dict[str, Any], sender) -> None:
@@ -43,6 +47,7 @@ def _provider_child(specification: dict[str, Any], method: str, kwargs: dict[str
         from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
 
         provider = OpenAICompatibleProvider.from_process_spec(specification)
+        provider._trace_sender = sender
         sender.send(("ok", getattr(provider, method)(**kwargs)))
     except BaseException as exc:
         # Keep only structured control metadata; never serialize provider
@@ -56,6 +61,7 @@ def _provider_child(specification: dict[str, Any], method: str, kwargs: dict[str
                     "ambiguous": bool(getattr(exc, "ambiguous", False)),
                     "vision_started": bool(getattr(exc, "vision_started", False)),
                     "request_started": bool(getattr(exc, "request_started", False)),
+                    "call_trace": getattr(exc, "call_trace", None),
                 },
             )
         )
@@ -136,6 +142,7 @@ class KillableProcessBoundary:
         process = None
         started = False
         registered = False
+        latest_call_trace = None
         try:
             receiver, sender = self._context.Pipe(duplex=False)
             process = self._context.Process(
@@ -153,19 +160,25 @@ class KillableProcessBoundary:
                 self._metrics["active_max"] = max(self._metrics["active_max"], self._metrics["active"])
                 registered = True
             deadline = time.monotonic() + timeout
-            while not receiver.poll(min(0.1, max(0.0, deadline - time.monotonic()))):
-                if cancel_requested is not None and cancel_requested():
-                    self._terminate(process)
-                    raise ProcessCallError("child process cancelled")
-                if time.monotonic() >= deadline:
-                    with self._lock:
-                        self._metrics["timeout"] += 1
-                    self._terminate(process)
-                    raise ProcessCallTimeout("provider child process timeout")
-            try:
-                state, value = receiver.recv()
-            except EOFError as exc:
-                raise ProcessCallError("provider child exited") from exc
+            while True:
+                while not receiver.poll(min(0.1, max(0.0, deadline - time.monotonic()))):
+                    if cancel_requested is not None and cancel_requested():
+                        self._terminate(process)
+                        raise ProcessCallError("child process cancelled")
+                    if time.monotonic() >= deadline:
+                        with self._lock:
+                            self._metrics["timeout"] += 1
+                        self._terminate(process)
+                        raise ProcessCallTimeout("provider child process timeout")
+                try:
+                    state, value = receiver.recv()
+                except EOFError as exc:
+                    raise ProcessCallError("provider child exited") from exc
+                if state == "trace":
+                    if isinstance(value, ProviderCallTrace):
+                        latest_call_trace = value
+                    continue
+                break
             process.join(self.terminate_grace_seconds)
             if process.is_alive():
                 self._terminate(process)
@@ -180,6 +193,11 @@ class KillableProcessBoundary:
                     error.ambiguous = bool(value.get("ambiguous", False))
                     error.vision_started = bool(value.get("vision_started", False))
                     error.request_started = bool(value.get("request_started", False))
+                    child_trace = value.get("call_trace")
+                    if isinstance(child_trace, ProviderCallTrace):
+                        error.call_trace = child_trace
+                    elif isinstance(latest_call_trace, ProviderCallTrace):
+                        error.call_trace = latest_call_trace
                     raise error
                 raise ProcessCallError(str(value))
             return value
@@ -188,6 +206,8 @@ class KillableProcessBoundary:
             # ran.  Once the child is running, however, timeout/pipe failure
             # makes a remote Vision POST outcome unknowable.
             exc.child_started = bool(started)
+            if exc.call_trace is None and isinstance(latest_call_trace, ProviderCallTrace):
+                exc.call_trace = latest_call_trace
             raise
         finally:
             # Reap before closing IPC, removing observability state, or releasing

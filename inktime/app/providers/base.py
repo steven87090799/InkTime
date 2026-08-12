@@ -17,12 +17,31 @@ class Usage:
 
 
 @dataclass(frozen=True)
+class ProviderCallTrace:
+    """Sanitized, bounded evidence captured at the transport boundary."""
+
+    endpoint: str | None = None
+    api_mode: str | None = None
+    http_status: int | None = None
+    request_json_sanitized: dict[str, Any] | None = None
+    response_raw_sanitized: str | None = None
+    request_built_at: str | None = None
+    request_started_at: str | None = None
+    response_received_at: str | None = None
+    completed_at: str | None = None
+    provider_request_id: str | None = None
+    served_model: str | None = None
+    latency_ms: int | None = None
+
+
+@dataclass(frozen=True)
 class ProviderResponse:
     content: str
     usage: Usage
     request_id: str | None = None
     request_metrics: dict[str, Any] | None = None
     served_model: str | None = None
+    call_trace: ProviderCallTrace | None = None
 
 
 @dataclass

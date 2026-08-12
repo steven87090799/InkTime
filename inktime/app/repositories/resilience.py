@@ -1188,6 +1188,7 @@ class ResilienceRepository:
             "device_event": ("device_events", "created_at", "id"),
             "job_log": ("job_events", "created_at", "id"),
             "api_usage": ("api_usage", "started_at", "id"),
+            "ai_trace": ("ai_trace_runs", "created_at", "trace_id"),
         }
         with self.database.transaction(operation="retention_cleanup_run") as connection:
             connection.execute(

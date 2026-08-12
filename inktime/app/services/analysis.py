@@ -7,6 +7,7 @@ from pathlib import Path
 import time
 from uuid import uuid4
 from typing import Any, Callable
+import logging
 
 from inktime.app.core.paths import safe_join
 from inktime.app.domain.analysis import (
@@ -41,6 +42,9 @@ from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.budgets import BudgetService
 from inktime.app.services.usage_tracking import record_failed_unknown_usage
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class AnalysisDisabledError(RuntimeError):
@@ -78,6 +82,7 @@ class PhotoAnalysisService:
         settings: SettingsRepository | None = None,
         observability=None,
         process_boundary=None,
+        ai_traces=None,
     ) -> None:
         self.photos = photos
         self.usage = usage
@@ -86,6 +91,22 @@ class PhotoAnalysisService:
         self.settings = settings or (budgets.settings if budgets else None)
         self.observability = observability
         self.process_boundary = process_boundary
+        self.ai_traces = ai_traces
+
+    def _trace_write(self, method: str, *args, **kwargs):
+        """Trace persistence is never allowed to alter production control flow."""
+
+        if self.ai_traces is None:
+            return None
+        try:
+            if self.settings is not None and not bool(
+                self.settings.get("observability.ai_trace_enabled", True)
+            ):
+                return None
+            return getattr(self.ai_traces, method)(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 -- intentionally fail-open telemetry
+            LOGGER.warning("AI Trace 寫入失敗，production 分析維持原結果：%s", type(exc).__name__)
+            return None
 
     def _activity(self, severity: str, event: str, message: str, **fields) -> None:
         if self.observability is not None:
@@ -659,7 +680,7 @@ class PhotoAnalysisService:
         request_metrics: dict[str, Any] | None = None,
         request_body_bytes: int = 0,
         retry_count: int = 0,
-    ) -> None:
+    ) -> int:
         metrics = self._failure_metrics(
             provider,
             image_path=image_path,
@@ -667,7 +688,7 @@ class PhotoAnalysisService:
             request_metrics=request_metrics,
             request_body_bytes=request_body_bytes,
         )
-        record_failed_unknown_usage(
+        return record_failed_unknown_usage(
             self.usage,
             provider=provider,
             model=model,
@@ -715,7 +736,7 @@ class PhotoAnalysisService:
         started_at: str,
         started_perf: float,
         retry_count: int = 0,
-    ) -> float:
+    ) -> tuple[float, int]:
         recorded_model = str(response.served_model or model)
         estimated_cost = provider.estimate_cost(recorded_model, response.usage)
         provider_cost = response.usage.provider_reported_cost
@@ -736,7 +757,7 @@ class PhotoAnalysisService:
             else 0.0
         )
         metrics = dict(response.request_metrics or getattr(provider, "last_request_metrics", {}) or {})
-        self.usage.record(
+        usage_id = self.usage.record(
             provider=provider.name,
             provider_id=str(getattr(provider, "provider_id", provider.name)),
             model=recorded_model,
@@ -761,7 +782,7 @@ class PhotoAnalysisService:
             request_body_bytes=metrics.get("request_body_bytes", 0),
             image_bytes=metrics.get("image_bytes", 0),
         )
-        return effective_cost
+        return effective_cost, usage_id
 
     def _model_call(
         self,
@@ -779,11 +800,13 @@ class PhotoAnalysisService:
         caption_controls: dict | None,
         repair_policy: dict | None,
         prompt_version: str,
+        analysis_fingerprint: str | None,
         vision_input: dict,
         provider_prompt_contract_sha256: str | None = None,
         force_recompute: bool = False,
         _excluded_providers: set[str] | None = None,
-    ) -> tuple[dict, str, float, bool, str, str, str, str, Usage, int]:
+        _trace_id: str | None = None,
+    ) -> tuple[dict, str, float, bool, str, str, str, str, Usage, int, str | None]:
         selected_channel = None
         selected_provider = provider
         # Enumerate Frozen Route identities before consulting network state.
@@ -889,6 +912,7 @@ class PhotoAnalysisService:
                         vision_json,
                         Usage(),
                         0,
+                        None,
                     )
                 except AnalysisValidationError:
                     pass
@@ -948,6 +972,7 @@ class PhotoAnalysisService:
                     vision_json,
                     Usage(),
                     0,
+                    None,
                 )
         if not force_recompute or waited_for_owner:
             cached = get_cache()
@@ -964,8 +989,23 @@ class PhotoAnalysisService:
                     vision_json,
                     Usage(),
                     0,
+                    None,
                 )
+        trace_id = _trace_id
         try:
+            # A rejected budget has not entered the model-call lifecycle and
+            # therefore must not create an empty observational Trace.
+            if trace_id is None and self.budgets:
+                self.budgets.assert_request_allowed(job_id, photo_id)
+            trace_id = trace_id or self._trace_write(
+                "start_run",
+                job_id=job_id,
+                photo_id=photo_id,
+                stage=stage,
+                prompt_version=prompt_version,
+                analysis_fingerprint=analysis_fingerprint,
+                vision_request_fingerprint=request_fingerprint,
+            )
             vision_attempt = VisionAttemptState()
             # The only owner generates a JPEG, after both cache checks.
             with image_factory() as image:
@@ -994,6 +1034,7 @@ class PhotoAnalysisService:
                         f"{stage}|{job_id or 'manual'}|{photo_id}|{request_fingerprint}|"
                         f"{hashlib.sha256(owner_id.encode('utf-8')).hexdigest()[:16]}"
                     ),
+                    trace_id=trace_id,
                 )
         except Exception as exc:
             self.photos.finish_ai_cache_reservation(cache_key, owner_id, error=str(exc))
@@ -1029,6 +1070,19 @@ class PhotoAnalysisService:
             if vision_attempt.vision_started or bool(getattr(exc, "vision_started", False)) or bool(
                 getattr(exc, "ambiguous", False)
             ):
+                self._trace_write(
+                    "complete_run",
+                    trace_id,
+                    status=(
+                        "AMBIGUOUS"
+                        if bool(getattr(exc, "ambiguous", False))
+                        else "TIMEOUT"
+                        if isinstance(exc, TimeoutError)
+                        else "FAILED"
+                    ),
+                    error_code=str(getattr(exc, "code", "") or "") or None,
+                    error_message=str(exc),
+                )
                 raise
             channels = getattr(provider, "channels", ())
             excluded = set(_excluded_providers or ()) | {actual_provider}
@@ -1047,11 +1101,26 @@ class PhotoAnalysisService:
                     caption_controls=caption_controls,
                     repair_policy=repair_policy,
                     prompt_version=prompt_version,
+                    analysis_fingerprint=analysis_fingerprint,
                     vision_input=vision_input,
                     provider_prompt_contract_sha256=provider_prompt_contract_sha256,
                     force_recompute=force_recompute,
                     _excluded_providers=excluded,
+                    _trace_id=trace_id,
                 )
+            self._trace_write(
+                "complete_run",
+                trace_id,
+                status=(
+                    "AMBIGUOUS"
+                    if bool(getattr(exc, "ambiguous", False))
+                    else "TIMEOUT"
+                    if isinstance(exc, TimeoutError)
+                    else "FAILED"
+                ),
+                error_code=str(getattr(exc, "code", "") or "") or None,
+                error_message=str(exc),
+            )
             raise
         self.photos.finish_ai_cache_reservation(cache_key, owner_id)
         return (
@@ -1065,6 +1134,7 @@ class PhotoAnalysisService:
             vision_json,
             usage,
             latency,
+            trace_id,
         )
 
     def _perform_uncached_model_call(
@@ -1091,6 +1161,7 @@ class PhotoAnalysisService:
         cache_provider_identity: str,
         vision_attempt: VisionAttemptState,
         provider_request_context_id: str,
+        trace_id: str | None,
     ) -> tuple[dict, str, float, Usage, int]:
         if self.budgets:
             self.budgets.assert_request_allowed(job_id, photo_id)
@@ -1112,16 +1183,14 @@ class PhotoAnalysisService:
             else FULL_ANALYSIS_TOKEN_CAP
         )
         max_tokens = max(256, min(global_token_cap, requested_token_cap, hard_cap))
-        self._activity(
-            "DEBUG",
-            "provider_request_started",
-            "Caption Provider 請求開始",
-            job_id=job_id,
-            photo_id=photo_id,
-            stage=stage,
-            trace_id=prompt_version,
-            provider=provider.name,
-            model=model,
+        actual_call_provider = selected_channel.provider if selected_channel is not None else provider
+        vision_attempt_id = self._trace_write(
+            "start_attempt",
+            trace_id,
+            attempt_kind="vision",
+            provider=actual_call_provider.name,
+            provider_id=str(getattr(actual_call_provider, "provider_id", actual_call_provider.name)),
+            requested_model=model,
         )
         try:
             call = {
@@ -1185,12 +1254,22 @@ class PhotoAnalysisService:
             vision_attempt.vision_started = True
             vision_attempt.vision_completed = True
         except TimeoutError as timeout_error:
+            self._trace_write(
+                "update_attempt_from_call",
+                vision_attempt_id,
+                getattr(timeout_error, "call_trace", None),
+                status="AMBIGUOUS" if bool(getattr(timeout_error, "ambiguous", False)) else "TIMEOUT",
+                error_code=str(getattr(timeout_error, "code", "") or "AI-PROVIDER-TIMEOUT"),
+                error_message=str(timeout_error),
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
             consumed = self._request_was_consumed(timeout_error, vision_attempt=vision_attempt)
+            unknown_usage_id = None
             if consumed:
                 self._normalize_consumed_error(timeout_error, consumed=True, request_kind="vision")
                 if self._requires_unknown_usage(timeout_error):
                     try:
-                        self._record_failed_unknown_request(
+                        unknown_usage_id = self._record_failed_unknown_request(
                             provider=selected_channel.provider if selected_channel is not None else provider,
                             model=model,
                             job_id=job_id,
@@ -1216,6 +1295,13 @@ class PhotoAnalysisService:
                             photo_id=photo_id,
                             error=str(usage_error)[:500],
                         )
+            if unknown_usage_id is not None:
+                self._trace_write(
+                    "update_attempt_from_call",
+                    vision_attempt_id,
+                    getattr(timeout_error, "call_trace", None),
+                    api_usage_id=unknown_usage_id,
+                )
             self._activity(
                 "WARNING",
                 "provider_timeout",
@@ -1227,12 +1313,22 @@ class PhotoAnalysisService:
             )
             raise
         except Exception as error:
+            self._trace_write(
+                "update_attempt_from_call",
+                vision_attempt_id,
+                getattr(error, "call_trace", None),
+                status="AMBIGUOUS" if bool(getattr(error, "ambiguous", False)) else "FAILED",
+                error_code=str(getattr(error, "code", "") or "AI-PROVIDER-UNAVAILABLE"),
+                error_message=str(error),
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
             consumed = self._request_was_consumed(error, vision_attempt=vision_attempt)
+            unknown_usage_id = None
             if consumed:
                 self._normalize_consumed_error(error, consumed=True, request_kind="vision")
                 if self._requires_unknown_usage(error):
                     try:
-                        self._record_failed_unknown_request(
+                        unknown_usage_id = self._record_failed_unknown_request(
                             provider=selected_channel.provider if selected_channel is not None else provider,
                             model=model,
                             job_id=job_id,
@@ -1258,6 +1354,13 @@ class PhotoAnalysisService:
                             photo_id=photo_id,
                             error=str(usage_error)[:500],
                         )
+            if unknown_usage_id is not None:
+                self._trace_write(
+                    "update_attempt_from_call",
+                    vision_attempt_id,
+                    getattr(error, "call_trace", None),
+                    api_usage_id=unknown_usage_id,
+                )
             self._activity(
                 "ERROR",
                 "provider_request_failed",
@@ -1268,18 +1371,39 @@ class PhotoAnalysisService:
                 error_code="AI-PROVIDER-UNAVAILABLE",
             )
             raise
-        total_cost = self._record(
+        total_cost, vision_usage_id = self._record(
             provider, model, job_id, photo_id, stage, response, started_at, started_perf
+        )
+        self._trace_write(
+            "update_run_progress",
+            trace_id,
+            response_received_at=(
+                response.call_trace.response_received_at if response.call_trace is not None else None
+            ),
         )
         total_input_tokens = response.usage.input_tokens
         total_output_tokens = response.usage.output_tokens
         total_cached_tokens = response.usage.cached_tokens
         total_reasoning_tokens = response.usage.reasoning_tokens
+        parse_started_at = datetime.now(timezone.utc).isoformat()
         try:
             local_json = extract_json_value(response.content)
             candidate = local_json if isinstance(local_json, dict) else response.content
             result = self._apply_caption_variant(validate_analysis_result(candidate), caption_controls)
             raw = response.content
+            parsed_at = datetime.now(timezone.utc).isoformat()
+            self._trace_write(
+                "update_attempt_from_call",
+                vision_attempt_id,
+                response.call_trace,
+                status="SUCCESS",
+                served_model=response.served_model,
+                api_usage_id=vision_usage_id,
+                response_parsed=candidate,
+                parse_started_at=parse_started_at,
+                parsed_at=parsed_at,
+                completed_at=parsed_at,
+            )
             if caption_controls and caption_controls["caption_variants_enabled"]:
                 self._activity(
                     "DEBUG",
@@ -1291,6 +1415,20 @@ class PhotoAnalysisService:
                     trace_id=prompt_version,
                 )
         except AnalysisValidationError as first_error:
+            self._trace_write(
+                "update_attempt_from_call",
+                vision_attempt_id,
+                response.call_trace,
+                status="VALIDATION_FAILED",
+                served_model=response.served_model,
+                api_usage_id=vision_usage_id,
+                response_parsed=locals().get("candidate"),
+                parse_started_at=parse_started_at,
+                parsed_at=datetime.now(timezone.utc).isoformat(),
+                error_code="ANALYSIS-SCHEMA-INVALID",
+                error_message=str(first_error),
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
             vision_attempt.repair_attempted = True
             self._activity(
                 "DEBUG",
@@ -1307,6 +1445,14 @@ class PhotoAnalysisService:
             if not bool(frozen_repair_policy.get("enabled", True)):
                 raise first_error
             repair_model = str(frozen_repair_policy.get("model") or model).strip() or model
+            repair_attempt_id = self._trace_write(
+                "start_attempt",
+                trace_id,
+                attempt_kind="json_repair",
+                provider=actual_call_provider.name,
+                provider_id=str(getattr(actual_call_provider, "provider_id", actual_call_provider.name)),
+                requested_model=repair_model,
+            )
             try:
                 repair_cap = int(frozen_repair_policy.get("max_tokens", REPAIR_TOKEN_CAP))
             except (TypeError, ValueError):
@@ -1345,12 +1491,28 @@ class PhotoAnalysisService:
                 else:
                     repaired = provider.repair_json(**repair_call)
             except Exception as repair_error:
+                self._trace_write(
+                    "update_attempt_from_call",
+                    repair_attempt_id,
+                    getattr(repair_error, "call_trace", None),
+                    status=(
+                        "AMBIGUOUS"
+                        if bool(getattr(repair_error, "ambiguous", False))
+                        else "TIMEOUT"
+                        if isinstance(repair_error, TimeoutError)
+                        else "FAILED"
+                    ),
+                    error_code=str(getattr(repair_error, "code", "") or "VLM-004"),
+                    error_message=str(repair_error),
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                )
                 # The repair request is a distinct, text-only operation.  Do
                 # not use the already-completed Vision marker as evidence that
                 # this later request was consumed; doing so would create a
                 # false json_repair charge and could misclassify a capacity
                 # timeout.  Process-boundary metadata is authoritative here.
                 repair_consumed = self._request_was_consumed(repair_error)
+                repair_unknown_usage_id = None
                 if repair_consumed:
                     self._normalize_consumed_error(
                         repair_error,
@@ -1368,7 +1530,7 @@ class PhotoAnalysisService:
                                     default=str,
                                 ).encode("utf-8")
                             )
-                            self._record_failed_unknown_request(
+                            repair_unknown_usage_id = self._record_failed_unknown_request(
                                 provider=repair_provider,
                                 model=repair_model,
                                 job_id=job_id,
@@ -1391,6 +1553,13 @@ class PhotoAnalysisService:
                                 photo_id=photo_id,
                                 error=str(usage_error)[:500],
                             )
+                if repair_unknown_usage_id is not None:
+                    self._trace_write(
+                        "update_attempt_from_call",
+                        repair_attempt_id,
+                        getattr(repair_error, "call_trace", None),
+                        api_usage_id=repair_unknown_usage_id,
+                    )
                 if vision_attempt.vision_completed:
                     # A repair capacity/pre-start failure cannot be safely
                     # retried at the worker boundary: that would replay the
@@ -1404,7 +1573,7 @@ class PhotoAnalysisService:
                         vision_completed=True,
                     )
                 raise
-            total_cost += self._record(
+            repair_cost, repair_usage_id = self._record(
                 provider,
                 repair_model,
                 job_id,
@@ -1415,8 +1584,48 @@ class PhotoAnalysisService:
                 repair_perf,
                 retry_count=1,
             )
+            total_cost += repair_cost
             # 第二次驗證失敗直接拋出；不得無限修復。
-            result = self._apply_caption_variant(validate_analysis_result(repaired.content), caption_controls)
+            repair_parse_started_at = datetime.now(timezone.utc).isoformat()
+            repaired_candidate = extract_json_value(repaired.content)
+            try:
+                result = self._apply_caption_variant(
+                    validate_analysis_result(
+                        repaired_candidate
+                        if isinstance(repaired_candidate, dict)
+                        else repaired.content
+                    ),
+                    caption_controls,
+                )
+            except AnalysisValidationError as repair_validation_error:
+                self._trace_write(
+                    "update_attempt_from_call",
+                    repair_attempt_id,
+                    repaired.call_trace,
+                    status="VALIDATION_FAILED",
+                    served_model=repaired.served_model,
+                    api_usage_id=repair_usage_id,
+                    response_parsed=repaired_candidate,
+                    parse_started_at=repair_parse_started_at,
+                    parsed_at=datetime.now(timezone.utc).isoformat(),
+                    error_code="ANALYSIS-SCHEMA-INVALID",
+                    error_message=str(repair_validation_error),
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                )
+                raise
+            repair_parsed_at = datetime.now(timezone.utc).isoformat()
+            self._trace_write(
+                "update_attempt_from_call",
+                repair_attempt_id,
+                repaired.call_trace,
+                status="SUCCESS",
+                served_model=repaired.served_model,
+                api_usage_id=repair_usage_id,
+                response_parsed=repaired_candidate,
+                parse_started_at=repair_parse_started_at,
+                parsed_at=repair_parsed_at,
+                completed_at=repair_parsed_at,
+            )
             raw = repaired.content
             total_input_tokens += repaired.usage.input_tokens
             total_output_tokens += repaired.usage.output_tokens
@@ -1747,6 +1956,7 @@ class PhotoAnalysisService:
             input_spec_json,
             _usage,
             _latency,
+            ai_trace_id,
         ) = self._model_call(
             provider=provider,
             image_factory=lambda: self.thumbnails.acquire_for_use(source, sha, image_max_side),
@@ -1761,30 +1971,50 @@ class PhotoAnalysisService:
             caption_controls=caption_controls,
             repair_policy=repair_policy,
             prompt_version=prompt_version,
+            analysis_fingerprint=analysis_fingerprint,
             vision_input=vision_input,
             provider_prompt_contract_sha256=str(analysis_spec.get("provider_prompt_contract_sha256") or "") or None,
             force_recompute=force_recompute,
         )
         total_cost = cost
-        result = self._save_result(
-            photo_id=photo_id,
-            job_id=job_id,
-            stage="single",
-            provider=actual_provider,
-            model=actual_model,
-            result=result,
-            raw=raw,
-            photo=photo,
-            ranking_weights=weights,
-            favorite_bonus=favorite_bonus,
-            scoring_version_id=scoring_version_id,
-            schema_kind="full",
-            prompt_version=prompt_version,
-            analysis_fingerprint=analysis_fingerprint,
-            analysis_spec_json=analysis_spec_json,
-            vision_request_fingerprint=request_fingerprint,
-            vision_input_spec_json=input_spec_json,
-            travel_policy=travel_policy,
+        try:
+            result = self._save_result(
+                photo_id=photo_id,
+                job_id=job_id,
+                stage="single",
+                provider=actual_provider,
+                model=actual_model,
+                result=result,
+                raw=raw,
+                photo=photo,
+                ranking_weights=weights,
+                favorite_bonus=favorite_bonus,
+                scoring_version_id=scoring_version_id,
+                schema_kind="full",
+                prompt_version=prompt_version,
+                analysis_fingerprint=analysis_fingerprint,
+                analysis_spec_json=analysis_spec_json,
+                vision_request_fingerprint=request_fingerprint,
+                vision_input_spec_json=input_spec_json,
+                travel_policy=travel_policy,
+            )
+        except Exception as persist_error:
+            self._trace_write(
+                "complete_run",
+                ai_trace_id,
+                status="FAILED",
+                error_code="ANALYSIS-PERSIST-FAILED",
+                error_message=str(persist_error),
+            )
+            raise
+        persisted_at = datetime.now(timezone.utc).isoformat()
+        self._trace_write(
+            "complete_run",
+            ai_trace_id,
+            status="SUCCESS",
+            final_result=result,
+            scoring_completed_at=persisted_at,
+            result_persisted_at=persisted_at,
         )
         record_force(actual_provider, actual_model)
         return {

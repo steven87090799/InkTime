@@ -32,7 +32,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 50
+    assert CURRENT_SCHEMA_VERSION == 51
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -60,6 +60,8 @@ def test_fresh_database_is_migrated(tmp_path):
         "analysis_batches",
         "analysis_batch_items",
         "idempotency_requests",
+        "ai_trace_runs",
+        "ai_trace_attempts",
     } <= tables
     assert tuple(history) == (CURRENT_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION)
     with database.session() as connection:
@@ -121,6 +123,7 @@ def test_fresh_database_is_migrated(tmp_path):
     assert "pairing_code_ciphertext" not in pairing_columns
     assert tuple(api_usage_policy) == (1, 400, 0, 200, 0)
     assert retention_dry_run_defaults == {
+        "ai_trace": 0,
         "api_usage": 0,
         "decision_candidate": 1,
         "decision_trace": 1,

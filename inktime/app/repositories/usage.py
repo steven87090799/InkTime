@@ -49,11 +49,11 @@ class UsageRepository:
         schema_chars: int = 0,
         request_body_bytes: int = 0,
         image_bytes: int = 0,
-    ) -> None:
+    ) -> int:
         completed_at = datetime.now(timezone.utc).isoformat()
         with self.database.session() as connection:
             registered_provider_id = self._registered_provider_id(connection, provider_id)
-            connection.execute(
+            cursor = connection.execute(
                 """
                 INSERT INTO api_usage(provider,provider_id,model,job_id,photo_id,request_type,input_tokens,output_tokens,
                     cached_tokens,estimated_cost,actual_cost,started_at,completed_at,latency_ms,status,retry_count,error_code,
@@ -92,6 +92,9 @@ class UsageRepository:
                     max(0, int(image_bytes)),
                 ),
             )
+        if cursor.lastrowid is None:
+            raise RuntimeError("USAGE-001 inserted usage id unavailable")
+        return int(cursor.lastrowid)
 
     def record_batch_once(
         self,
