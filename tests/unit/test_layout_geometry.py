@@ -955,13 +955,16 @@ def test_stock_cleanup_is_ttl_based_bounded_and_drains_repeated_failures(tmp_pat
             f"stock-expired-{index}",
             expires_at=now - timedelta(minutes=1),
         )
+    first = service.cleanup_expired_stock_test_releases(maximum=2, now=now)
+    assert first == {"examined": 2, "removed": 2}
+
     _write_stock_release(
         service.release_root,
         "stock-recent",
         expires_at=now + timedelta(minutes=30),
     )
-    first = service.cleanup_expired_stock_test_releases(maximum=2, now=now)
-    assert first == {"examined": 2, "removed": 2}
+    second = service.cleanup_expired_stock_test_releases(maximum=16, now=now)
+    assert second == {"examined": 4, "removed": 3}
     assert (service.release_root / "stock-recent").is_dir()
 
 
