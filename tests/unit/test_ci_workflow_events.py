@@ -12,6 +12,14 @@ WORKFLOW_PATHS = (
     REPOSITORY_ROOT / ".github/workflows/ci.yml",
     REPOSITORY_ROOT / ".github/workflows/container-security.yml",
 )
+EXPECTED_PULL_REQUEST_TYPES = (
+    "opened",
+    "synchronize",
+    "reopened",
+    "labeled",
+    "unlabeled",
+    "edited",
+)
 FULL_VALIDATION_EXPRESSION = (
     "${{ github.event_name != 'pull_request' || github.event.action != 'edited' || "
     "github.event.changes.base != null }}"
@@ -108,7 +116,6 @@ def test_base_retarget_requires_full_validation():
         ("pull_request", "opened"),
         ("pull_request", "synchronize"),
         ("pull_request", "reopened"),
-        ("pull_request", "ready_for_review"),
         ("pull_request", "labeled"),
         ("pull_request", "unlabeled"),
         ("push", ""),
@@ -127,15 +134,10 @@ def test_workflows_parse_and_isolate_metadata_concurrency(workflow_path):
     concurrency = workflow["concurrency"]
 
     assert pull_request["branches"] == ["main"]
-    assert pull_request["types"] == [
-        "opened",
-        "synchronize",
-        "reopened",
-        "ready_for_review",
-        "labeled",
-        "unlabeled",
-        "edited",
-    ]
+    assert pull_request["types"] == list(EXPECTED_PULL_REQUEST_TYPES)
+    assert "ready_for_review" not in pull_request["types"]
+    assert workflow["on"]["push"]["branches"] == ["main"]
+    assert "workflow_dispatch" in workflow["on"]
     assert METADATA_LANE_EXPRESSION in concurrency["group"]
     assert concurrency["cancel-in-progress"] is True
     assert "pull_request_target" not in workflow["on"]
