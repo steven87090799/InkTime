@@ -156,7 +156,7 @@ constexpr BoardConfig kBoardConfig = {
   kNoPin,
   {{9, 10, kNoPin, 11}, 8, 12, 13, 800, 480, 4000000, true},
   {38, 39, 40, 41},
-  {47, 48, 400000},
+  {47, 48, 100000},
   {kNoPin, 0, 4, 5, true, true},
   {14, 16, 15, 18, 17, 7, 24000},
   {true, true, true, true, true, true},
@@ -217,6 +217,28 @@ static_assert(
 );
 
 #if INKTIME_PHOTOPAINTER_ENABLED
+// Waveshare ESP32-S3-PhotoPainter official baseline (a5e8f757): keep every
+// board-facing signal pinned to the factory wiring. The SD card is used in
+// conservative SPI mode, where SDMMC D3/D0/CMD map to CS/MISO/MOSI.
+static_assert(kBoardConfig.display.dc == 8 && kBoardConfig.display.spi.cs == 9
+              && kBoardConfig.display.spi.sck == 10
+              && kBoardConfig.display.spi.mosi == 11
+              && kBoardConfig.display.reset == 12 && kBoardConfig.display.busy == 13,
+              "PhotoPainter EPD pins must match the Waveshare board");
+static_assert(kBoardConfig.sd.cs == 38 && kBoardConfig.sd.sck == 39
+              && kBoardConfig.sd.miso == 40 && kBoardConfig.sd.mosi == 41,
+              "PhotoPainter SD pins must match Waveshare SDMMC D3/CLK/D0/CMD");
+static_assert(kBoardConfig.i2c.sda == 47 && kBoardConfig.i2c.scl == 48,
+              "PhotoPainter I2C pins must match the Waveshare board");
+static_assert(kBoardConfig.i2c.clockHz == 100000,
+              "PhotoPainter shared I2C bus must use the conservative official device rate");
+static_assert(kBoardConfig.buttons.boot == 0 && kBoardConfig.buttons.user == 4
+              && kBoardConfig.buttons.power == 5,
+              "PhotoPainter button pins must match the Waveshare board");
+static_assert(kBoardConfig.audio.mclk == 14 && kBoardConfig.audio.ws == 16
+              && kBoardConfig.audio.bclk == 15 && kBoardConfig.audio.din == 18
+              && kBoardConfig.audio.dout == 17 && kBoardConfig.audio.paEnable == 7,
+              "PhotoPainter audio pins must match the Waveshare board");
 static_assert(!spiPinsOverlap(kBoardConfig.display.spi, kBoardConfig.sd),
               "PhotoPainter display and SD must use distinct pins and SPI buses");
 static_assert(kBoardConfig.buttons.user != kBoardConfig.buttons.power,

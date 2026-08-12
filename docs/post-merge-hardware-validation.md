@@ -19,7 +19,7 @@
 | ESP32 cross-compile | PASS | hosted `esp32-compile` |
 | 真實 OpenAI API / Batch | NOT RUN | 沒有使用 production key，也沒有上傳真實照片 |
 | 真實 NAS volume | NOT RUN | 未連接 production NAS；Compose 只驗證容器邊界 |
-| 真實 ESP32／PhotoPainter／電子紙 | NOT RUN | 沒有板、PMIC、面板、電流表與 BUSY/GPIO5 實測 |
+| 真實 ESP32／PhotoPainter／電子紙 | NOT RUN | 已對照官方原始碼；沒有實際裝置畫面結果 |
 
 ## 真實 OpenAI Batch 人工 smoke
 
@@ -39,15 +39,9 @@
 
 在上述步驟完成前，Compose persistence 只能標記為 software PASS，NAS production acceptance 必須保持 `NOT RUN`。
 
-## ESP32／PhotoPainter 實機驗收
+## ESP32／PhotoPainter 證據邊界
 
-實機測試要記錄 board revision、panel model、firmware SHA、電源來源、環境溫度與量測儀器。至少完成：
-
-- PMIC／供電板差異與 idle、render、Wi-Fi、deep-sleep 電流；
-- BUSY assertion/deassertion timing、timeout、reset/retry 與 queue ACK 的實測波形或 timestamp；
-- 六／七色 palette、orientation、EXIF 旋轉、文字位置、殘影與多次刷新；
-- GPIO5 boot/wake 行為、上拉下拉、brownout 與 deep-sleep wake；
-- 大圖、部分下載、checksum mismatch、rotation/profile mismatch 與 power loss recovery；
-- 真實 PhotoPainter 面板上至少一次成功刷新、一次相同內容 skip、一次 forced refresh，並保存不含 secret 的測試紀錄。
-
-只有 board + panel + power measurements + functional evidence 全部完成，才能把這一欄從 `NOT RUN` 改成 PASS。Hosted `esp32-compile` 不可替代上述驗收。
+PhotoPainter Profile 的 GPIO、I²C、SD、音訊與面板命令以 Waveshare 官方原始碼固定，
+Hosted `esp32-compile` 負責阻止接線或建置設定漂移。能源遙測只供診斷，不需要使用者
+量測電流或電壓，也不會成為刷新條件。沒有實際裝置時，真實畫面仍保持 `NOT RUN`；
+燒錄後只需確認配對、正式圖片顯示、方向與下一次排程喚醒，不要求外接量測儀器。

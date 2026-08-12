@@ -15,35 +15,6 @@ struct NetworkBudget {
   uint32_t statusMs;
 };
 
-enum class DisplayRefreshPowerDecision : uint8_t {
-  AllowUsb,
-  AllowSafeBattery,
-  DenyLowBattery,
-  DenyPowerUnknown,
-  DenyBatteryUnavailable,
-};
-
-constexpr DisplayRefreshPowerDecision displayRefreshPowerDecision(
-    bool usbConfirmed,
-    bool supportedPmic,
-    bool batteryVoltageAvailable,
-    uint16_t batteryMillivolts,
-    uint16_t minimumMillivolts) {
-  if (usbConfirmed) return DisplayRefreshPowerDecision::AllowUsb;
-  if (!supportedPmic) return DisplayRefreshPowerDecision::DenyPowerUnknown;
-  if (!batteryVoltageAvailable) {
-    return DisplayRefreshPowerDecision::DenyBatteryUnavailable;
-  }
-  return batteryMillivolts >= minimumMillivolts
-    ? DisplayRefreshPowerDecision::AllowSafeBattery
-    : DisplayRefreshPowerDecision::DenyLowBattery;
-}
-
-constexpr bool displayRefreshAllowed(DisplayRefreshPowerDecision decision) {
-  return decision == DisplayRefreshPowerDecision::AllowUsb
-      || decision == DisplayRefreshPowerDecision::AllowSafeBattery;
-}
-
 constexpr NetworkBudget networkBudget(bool usbPower) {
   return usbPower
     ? NetworkBudget{5000, 15000, 20000, 10000, 30000, 10000, 90000, 15000}

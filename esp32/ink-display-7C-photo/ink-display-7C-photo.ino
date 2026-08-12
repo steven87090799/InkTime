@@ -40,7 +40,6 @@ struct AckJournalActivePointer;
 #include "mbedtls/version.h"
 
 #include "driver/gpio.h"
-#include "driver/rtc_io.h"
 #include "soc/soc_caps.h"
 
 // =======================
@@ -501,16 +500,6 @@ static String randomPortalSecret() {
   char value[25];
   for (uint8_t i = 0; i < 12; ++i) snprintf(value + i * 2, 3, "%02X", static_cast<unsigned>(esp_random() & 0xff));
   return String(value);
-}
-
-static void releaseAllGpioHoldsAtBoot() {
-  gpio_deep_sleep_hold_dis();
-  for (int gpio = 0; gpio <= 48; ++gpio) {
-    gpio_num_t gn = (gpio_num_t)gpio;
-    if (!GPIO_IS_VALID_GPIO(gn)) continue;
-    gpio_hold_dis(gn);
-    if (rtc_gpio_is_valid_gpio(gn)) rtc_gpio_hold_dis(gn);
-  }
 }
 
 static void clearConfigNVS() {
@@ -2244,50 +2233,6 @@ void prepareDeepSleepDomains() {
 }
 
 // =======================
-//  关闭墨水屏相关引脚，提升续航表现
-// =======================
-static void powerDownEPD() {
-  const int epdPins[] = {
-    kBoardConfig.display.busy,
-    kBoardConfig.display.reset,
-    kBoardConfig.display.dc,
-    kBoardConfig.display.spi.cs,
-    kBoardConfig.display.spi.sck,
-    kBoardConfig.display.spi.mosi,
-  };
-  for (size_t i = 0; i < sizeof(epdPins)/sizeof(epdPins[0]); ++i) {
-    int p = epdPins[i];
-    if (p == inktime::kNoPin) continue;
-    pinMode(p, INPUT);
-    pinMode(p, INPUT_PULLDOWN);
-  }
-}
-
-static void deepSleepHoldOnlyEpdPins() {
-  const int epdPins[] = {
-    kBoardConfig.display.busy,
-    kBoardConfig.display.reset,
-    kBoardConfig.display.dc,
-    kBoardConfig.display.spi.cs,
-    kBoardConfig.display.spi.sck,
-    kBoardConfig.display.spi.mosi,
-  };
-  for (size_t i = 0; i < sizeof(epdPins)/sizeof(epdPins[0]); ++i) {
-    if (epdPins[i] == inktime::kNoPin) continue;
-    gpio_num_t gn = (gpio_num_t)epdPins[i];
-    if (!GPIO_IS_VALID_GPIO(gn)) continue;
-
-    gpio_set_direction(gn, GPIO_MODE_INPUT);
-    gpio_pulldown_en(gn);
-    gpio_pullup_dis(gn);
-    gpio_hold_en(gn);
-
-    if (rtc_gpio_is_valid_gpio(gn)) rtc_gpio_isolate(gn);
-  }
-  gpio_deep_sleep_hold_en();
-}
-
-// =======================
 //  Deep Sleep
 // =======================
 static void goDeepSleepSeconds(uint64_t seconds) {
@@ -2307,8 +2252,6 @@ static void goDeepSleepSeconds(uint64_t seconds) {
     frameDataSize = 0;
   }
 
-  powerDownEPD();
-
   closeWakeHttpSession();
   WiFi.disconnect(false, false);
   WiFi.mode(WIFI_OFF);
@@ -2317,8 +2260,6 @@ static void goDeepSleepSeconds(uint64_t seconds) {
 #if defined(CONFIG_BT_ENABLED)
   esp_bt_controller_disable();
 #endif
-
-  deepSleepHoldOnlyEpdPins();
 
   prepareDeepSleepDomains();
   esp_sleep_enable_timer_wakeup(us);
@@ -6333,7 +6274,6 @@ static void runOfflineLocalCycle(bool selectNext = false) {
 //  setup / loop
 // =======================
 void setup() {
-  releaseAllGpioHoldsAtBoot();
   runtimeTelemetry = RuntimeTelemetry{};
   networkSessionStartedMs = 0;
   networkClosedForDisplay = false;
@@ -6461,36 +6401,21 @@ void setup() {
     DBG_PRINTLN("[BOOT] connect failed");
 #endif
 #if INKTIME_PHOTOPAINTER_ENABLED
-    // Known battery power must not remain in a network retry/configuration loop.
-    // USB keeps the bounded service path available; an unidentified PMIC must
-    // not fall through into a long AP portal on every unattended wake.
-    photoPainter.refreshPowerState();
-    if (!photoPainter.powerSourceKnown() && !photoPainter.usbConnected()) {
-      lastDeviceErrorCode = "DEVICE-POWER-UNKNOWN";
-      lastDeviceErrorMessage = "PMIC／電池來源未知，已跳過 AP portal 並等待 bounded recovery wake";
-      goDeepSleepSeconds(300U);
-      return;
+    applyFixedTimezoneWithoutNtp(g_cfg.tz_offset_minutes);
+    time_t rtcEpoch = 0;
+    struct tm offlineTime = {};
+    bool hasOfflineTime = photoPainter.readRtc(rtcEpoch);
+    if (hasOfflineTime) {
+      struct timeval value = {rtcEpoch, 0};
+      settimeofday(&value, nullptr);
+      localtime_r(&rtcEpoch, &offlineTime);
     }
-    if (photoPainter.powerSourceKnown() && !photoPainter.usbConnected()) {
-      applyFixedTimezoneWithoutNtp(g_cfg.tz_offset_minutes);
-      time_t rtcEpoch = 0;
-      struct tm offlineTime = {};
-      bool hasOfflineTime = photoPainter.readRtc(rtcEpoch);
-      if (hasOfflineTime) {
-        struct timeval value = {rtcEpoch, 0};
-        settimeofday(&value, nullptr);
-        localtime_r(&rtcEpoch, &offlineTime);
-      }
-      if (!offlineScheduleTxnBlocked && g_cfg.delivery_mode == "inktime_offline_schedule" && hasOfflineTime
-          && activeHasDueFormalSlot(rtcEpoch)) {
-        // A due 00:00/current formal slot is serviceable from the active
-        // cache even when the midnight network recovery attempt fails.
-        runOfflineLocalCycle();
-        return;
-      }
-      lastDeviceErrorCode = "DEVICE-WIFI-TIMEOUT";
-      lastDeviceErrorMessage = "電池模式 Wi-Fi 逾時，已停止重試";
-      sleepUntilNextSchedule(g_cfg, hasOfflineTime, offlineTime);
+    if (!offlineScheduleTxnBlocked && g_cfg.delivery_mode == "inktime_offline_schedule" && hasOfflineTime
+        && activeHasDueFormalSlot(rtcEpoch)) {
+      // A due 00:00/current formal slot is serviceable from the active
+      // cache even when the network recovery attempt fails.
+      runOfflineLocalCycle();
+      return;
     }
 #endif
     DBG_PRINTLN("[BOOT] enter bounded AP portal");
@@ -6525,19 +6450,6 @@ void setup() {
     goDeepSleepSeconds(pairingBackoffSeconds(g_cfg));
     return;
   }
-
-#if INKTIME_PHOTOPAINTER_ENABLED
-  photoPainter.refreshPowerState();
-  if (!photoPainter.powerSourceKnown() && !photoPainter.usbConnected()) {
-    // Unknown PMIC/battery identity is not permission to enter the AP portal
-    // or perform a full-refresh wake.  Keep the recovery bounded until a
-    // supported board/power source is identified.
-    lastDeviceErrorCode = "DEVICE-POWER-UNKNOWN";
-    lastDeviceErrorMessage = "PMIC／電池來源未知，已停止網路刷新並等待 bounded recovery wake";
-    goDeepSleepSeconds(300U);
-    return;
-  }
-#endif
 
   struct tm timeinfo;
   String wakeOrigin;

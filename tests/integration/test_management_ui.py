@@ -413,7 +413,7 @@ def test_batch_management_api_dispatches_lifecycle_actions(client, app, monkeypa
     )
 
 
-def test_device_energy_dashboard_uses_telemetry_and_audited_measurements(client, app):
+def test_device_energy_dashboard_uses_automatic_telemetry_only(client, app):
     create_admin(app)
     login(client)
     repository = app.extensions["inktime_device_repository"]
@@ -434,25 +434,12 @@ def test_device_energy_dashboard_uses_telemetry_and_audited_measurements(client,
     )
     assert status.status_code == 200
 
-    profile = client.patch(
+    removed_profile = client.patch(
         f"/api/v1/devices/{device_id}/energy-profile",
-        json={
-            "battery_capacity_mah": 5000,
-            "standby_current_ma": 0.12,
-            "active_current_ma": 210,
-            "refreshes_per_day": 1,
-            "battery_reserve_percent": 10,
-        },
+        json={"standby_current_ma": 0.12},
         headers={"X-CSRF-Token": csrf(client)},
     )
-    assert profile.status_code == 200
-
-    invalid_profile = client.patch(
-        f"/api/v1/devices/{device_id}/energy-profile",
-        json={"standby_current_ma": -0.1},
-        headers={"X-CSRF-Token": csrf(client)},
-    )
-    assert invalid_profile.status_code == 400
+    assert removed_profile.status_code == 404
 
     page = client.get(f"/energy?device_id={device_id}&days=30")
     body = page.get_data(as_text=True)
@@ -460,13 +447,16 @@ def test_device_energy_dashboard_uses_telemetry_and_audited_measurements(client,
     assert "裝置能源儀表板" in body
     assert "82.0%" in body
     assert "25.0 秒" in body
-    assert "0.120 mA" in body
-    assert "容量／電流模型" in body
+    assert "61.0 秒" in body
+    assert "能源模型參數" not in body
+    assert "待機電流" not in body
 
     api = client.get(f"/api/v1/devices/{device_id}/energy?days=30")
     assert api.status_code == 200
-    assert api.json["summary"]["modeled"]["duration_source"] == "wake_cycle"
+    assert api.json["summary"]["wake"]["average_seconds"] == 61.0
     assert api.json["summary"]["sample_count"] == 1
+    assert "modeled" not in api.json["summary"]
+    assert "standby_current_ma" not in api.json["device"]
     assert "token_hash" not in api.json["device"]
 
 

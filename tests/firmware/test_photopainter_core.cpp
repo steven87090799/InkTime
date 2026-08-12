@@ -297,16 +297,6 @@ int main() {
   const uint8_t oldBssid[6] = {1, 2, 3, 4, 5, 6};
   const uint8_t sameBssid[6] = {1, 2, 3, 4, 5, 6};
   assert(!connectionHintChanged(true, 6, 6, oldBssid, sameBssid));
-  assert(displayRefreshPowerDecision(true, false, false, 0, 3500)
-    == DisplayRefreshPowerDecision::AllowUsb);
-  assert(displayRefreshPowerDecision(false, true, true, 3600, 3500)
-    == DisplayRefreshPowerDecision::AllowSafeBattery);
-  assert(displayRefreshPowerDecision(false, true, true, 3400, 3500)
-    == DisplayRefreshPowerDecision::DenyLowBattery);
-  assert(displayRefreshPowerDecision(false, false, false, 0, 3500)
-    == DisplayRefreshPowerDecision::DenyPowerUnknown);
-  assert(displayRefreshPowerDecision(false, true, false, 0, 3500)
-    == DisplayRefreshPowerDecision::DenyBatteryUnavailable);
 
   return 0;
 }

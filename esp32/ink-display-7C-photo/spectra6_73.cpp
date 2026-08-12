@@ -4,7 +4,7 @@
 
 // The controller initialization values are derived from Waveshare's
 // ESP32-S3-PhotoPainter xiaozhi subtree (MIT). InkTime adds bounded BUSY waits,
-// failure propagation, conservative 4 MHz SPI, power-off, and deep sleep.
+// failure propagation, conservative 4 MHz SPI, and the official power-off sequence.
 
 namespace inktime {
 
@@ -97,6 +97,7 @@ bool Spectra6_73::begin() {
     safeShutdown();
     return false;
   }
+  delay(50);
 
   sendCommand(0xAA);
   const uint8_t commandHeader[] = {0x49, 0x55, 0x20, 0x08, 0x09, 0x18};
@@ -133,12 +134,6 @@ bool Spectra6_73::powerOff() {
   return waitUntilReady();
 }
 
-void Spectra6_73::deepSleep() {
-  if (!sessionActive_) return;
-  sendCommand(0x07);
-  sendData(0xA5);
-}
-
 bool Spectra6_73::displayFrame(const uint8_t* framebuffer, size_t length) {
   if (!initialized_ || framebuffer == nullptr || length != frameBufferBytes(board_)) {
     lastError_ = "EPD-FRAMEBUFFER";
@@ -169,7 +164,6 @@ bool Spectra6_73::displayFrame(const uint8_t* framebuffer, size_t length) {
     safeShutdown();
     return false;
   }
-  deepSleep();
   spi_.endTransaction();
   spi_.end();
   sessionActive_ = false;
@@ -183,7 +177,6 @@ void Spectra6_73::safeShutdown() {
     if (digitalRead(board_.display.busy) != busyLevel) {
       sendCommand(0x02);
       sendData(0x00);
-      deepSleep();
     }
     digitalWrite(board_.display.spi.cs, HIGH);
     digitalWrite(board_.display.reset, LOW);
