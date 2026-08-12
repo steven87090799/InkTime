@@ -353,30 +353,8 @@ static bool parseOfflineClock(const String &value, inktime::OfflineSlot &slot) {
 
 static bool nextIsoLocalDate(const String &value, String &output) {
   output = "";
-  if (value.length() != 10U || value[4] != '-' || value[7] != '-') return false;
-  for (uint8_t index = 0; index < 10U; ++index) {
-    if (index == 4U || index == 7U) continue;
-    if (value[index] < '0' || value[index] > '9') return false;
-  }
-  int year = value.substring(0, 4).toInt();
-  int month = value.substring(5, 7).toInt();
-  int day = value.substring(8, 10).toInt();
-  if (year < 2000 || month < 1 || month > 12 || day < 1) return false;
-  const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-  const uint8_t days[] = {0, 31, static_cast<uint8_t>(leap ? 29 : 28), 31, 30, 31, 30,
-    31, 31, 30, 31, 30, 31};
-  if (day > days[month]) return false;
-  ++day;
-  if (day > days[month]) {
-    day = 1;
-    ++month;
-    if (month > 12) {
-      month = 1;
-      ++year;
-    }
-  }
   char next[11] = {0};
-  snprintf(next, sizeof(next), "%04d-%02d-%02d", year, month, day);
+  if (!inktime::nextIsoLocalDateValue(value.c_str(), next, sizeof(next))) return false;
   output = String(next);
   return true;
 }
@@ -3916,6 +3894,10 @@ bool downloadLatestPhotoBin(Config &cfg) {
       frameData = nullptr;
       lastDeviceErrorCode = photoPainter.lastError();
       lastDeviceErrorMessage = "PhotoPainter framebuffer 轉換失敗";
+      if (lastDeviceErrorCode == "FRAME_INVALID_PALETTE_INDEX") {
+        heap_caps_free(packed);
+        return false;
+      }
       continue;
     }
     heap_caps_free(packed);
@@ -4075,7 +4057,8 @@ static bool downloadOfflineScheduleSlot(
     &nativeFrame);
   heap_caps_free(packed);
   if (!converted || nativeFrame == nullptr) {
-    lastDeviceErrorCode = "DEVICE-OFFLINE-FRAME";
+    lastDeviceErrorCode = photoPainter.lastError();
+    if (lastDeviceErrorCode.length() == 0U) lastDeviceErrorCode = "DEVICE-OFFLINE-FRAME";
     lastDeviceErrorMessage = "離線排程正式 Frame 轉換失敗";
     return false;
   }
@@ -5763,7 +5746,9 @@ void reportDeviceStatus(Config &cfg, bool displayUpdated) {
 #endif
   payload["last_refresh_duration_ms"] = lastRefreshDurationMs;
   payload["epd_transfer_ms"] = runtimeTelemetry.epd_transfer_ms;
-  payload["wake_duration_ms"] = millis();
+  const uint32_t awakeTotalMs = millis();
+  payload["awake_total_ms"] = awakeTotalMs;
+  payload["wake_duration_ms"] = awakeTotalMs;
   String body;
   serializeJson(payload, body);
 

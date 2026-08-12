@@ -42,7 +42,7 @@ int main() {
   assert(nativeColorFromIndexed4(3) == 5);
   assert(nativeColorFromIndexed4(4) == 3);
   assert(nativeColorFromIndexed4(5) == 2);
-  assert(nativeColorFromIndexed4(6) == 1);
+  assert(nativeColorFromIndexed4(6) == 0xFF);
   assert(nativeColorFrom2bpp(0) == 0);
   assert(nativeColorFrom2bpp(1) == 1);
   assert(nativeColorFrom2bpp(2) == 3);
@@ -50,6 +50,8 @@ int main() {
 
   std::vector<uint8_t> wire(kPhotoPainterFrameBytes, 0x11);
   assert(writePacked4(wire.data(), wire.size(), kPayloadWidth, 0, 0, 0));
+  assert(writePacked4(wire.data(), wire.size(), kPayloadWidth, 1, 0, 5));
+  assert(writePacked4(wire.data(), wire.size(), kPayloadWidth, 2, 0, 2));
   assert(writePacked4(
     wire.data(), wire.size(), kPayloadWidth, kPayloadWidth - 1,
     kPayloadHeight - 1, 4));
@@ -58,7 +60,25 @@ int main() {
     wire.data(), wire.size(), true, DisplayRotation::Rotate0,
     nativeFrame.data(), nativeFrame.size()));
   assert(nativePixel(nativeFrame, 799, 0) == 0);
+  assert(nativePixel(nativeFrame, 799, 1) == 2);
+  assert(nativePixel(nativeFrame, 799, 2) == 6);
   assert(nativePixel(nativeFrame, 0, 479) == 3);
+
+  bool invalidLogicalPalette = false;
+  std::vector<uint8_t> invalidPaletteWire(kPhotoPainterFrameBytes, 0x11);
+  invalidPaletteWire[0] = 0x61;
+  assert(!convertWireFrameToNative(
+    invalidPaletteWire.data(), invalidPaletteWire.size(), true,
+    DisplayRotation::Rotate0, nativeFrame.data(), nativeFrame.size(),
+    &invalidLogicalPalette));
+  assert(invalidLogicalPalette);
+  invalidPaletteWire[0] = 0xF1;
+  invalidLogicalPalette = false;
+  assert(!convertWireFrameToNative(
+    invalidPaletteWire.data(), invalidPaletteWire.size(), true,
+    DisplayRotation::Rotate0, nativeFrame.data(), nativeFrame.size(),
+    &invalidLogicalPalette));
+  assert(invalidLogicalPalette);
 
   assert(convertWireFrameToNative(
     wire.data(), wire.size(), true, DisplayRotation::Rotate180,
@@ -147,6 +167,20 @@ int main() {
   OfflineScheduleContract malformedDate = validSchedule;
   malformedDate.targetDate = "2026-99-99";
   assert(!validOfflineScheduleContract(malformedDate));
+  assert(validIsoLocalDate("2024-02-29"));
+  assert(validIsoLocalDate("2000-02-29"));
+  assert(!validIsoLocalDate("2026-02-29"));
+  assert(!validIsoLocalDate("2026-02-30"));
+  assert(!validIsoLocalDate("2026-02-31"));
+  assert(!validIsoLocalDate("2026-04-31"));
+  assert(!validIsoLocalDate("2026-06-31"));
+  assert(!validIsoLocalDate("2026-09-31"));
+  assert(!validIsoLocalDate("2026-11-31"));
+  assert(!validIsoLocalDate("2100-02-29"));
+  assert(validIsoLocalDate("2026-12-31"));
+  char nextDate[11] = {};
+  assert(nextIsoLocalDateValue("2026-12-31", nextDate, sizeof(nextDate)));
+  assert(std::strcmp(nextDate, "2027-01-01") == 0);
   OfflineScheduleContract invalidIdentity = validSchedule;
   invalidIdentity.queueIdentityValid = false;
   assert(!validOfflineScheduleContract(invalidIdentity));
@@ -263,6 +297,16 @@ int main() {
   const uint8_t oldBssid[6] = {1, 2, 3, 4, 5, 6};
   const uint8_t sameBssid[6] = {1, 2, 3, 4, 5, 6};
   assert(!connectionHintChanged(true, 6, 6, oldBssid, sameBssid));
+  assert(displayRefreshPowerDecision(true, false, false, 0, 3500)
+    == DisplayRefreshPowerDecision::AllowUsb);
+  assert(displayRefreshPowerDecision(false, true, true, 3600, 3500)
+    == DisplayRefreshPowerDecision::AllowSafeBattery);
+  assert(displayRefreshPowerDecision(false, true, true, 3400, 3500)
+    == DisplayRefreshPowerDecision::DenyLowBattery);
+  assert(displayRefreshPowerDecision(false, false, false, 0, 3500)
+    == DisplayRefreshPowerDecision::DenyPowerUnknown);
+  assert(displayRefreshPowerDecision(false, true, false, 0, 3500)
+    == DisplayRefreshPowerDecision::DenyBatteryUnavailable);
 
   return 0;
 }
