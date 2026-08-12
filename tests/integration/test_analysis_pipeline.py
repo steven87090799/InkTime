@@ -4,7 +4,6 @@ import json
 import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
-import time
 from PIL import Image
 
 import pytest
@@ -89,6 +88,7 @@ class _BoundaryHTTPState:
         self.lock = threading.Lock()
         self.vision_requests = 0
         self.repair_requests = 0
+        self.release_blocked_response = threading.Event()
 
     def record(self, *, image_request: bool) -> None:
         with self.lock:
@@ -111,10 +111,12 @@ class _BoundaryHTTPHandler(BaseHTTPRequestHandler):
         )
         state.record(image_request=image_request)
 
-        if state.mode == "vision_timeout" and image_request:
-            time.sleep(1.0)
-        elif state.mode == "invalid_then_repair_timeout" and not image_request:
-            time.sleep(1.0)
+        if (
+            state.mode == "vision_timeout" and image_request
+        ) or (
+            state.mode == "invalid_then_repair_timeout" and not image_request
+        ):
+            state.release_blocked_response.wait()
 
         status_code = 200
         if state.mode == "vision_429" and image_request:
@@ -157,7 +159,7 @@ class _BoundaryHTTPHandler(BaseHTTPRequestHandler):
 
 
 class _ShortProviderBoundary(KillableProcessBoundary):
-    def __init__(self, *, timeout_seconds: float = 0.5):
+    def __init__(self, *, timeout_seconds: float = 2.0):
         super().__init__(max_processes=1, terminate_grace_seconds=0.05)
         self.timeout_seconds = timeout_seconds
 
@@ -359,6 +361,7 @@ def test_spawned_consumed_vision_timeout_is_terminal_and_billed_once(app, tmp_pa
     finally:
         boundary.shutdown()
         provider.close()
+        state.release_blocked_response.set()
         server.shutdown()
         server.server_close()
 
@@ -472,7 +475,7 @@ def test_spawned_deterministic_vision_http_failure_does_not_create_unknown_budge
 
 def test_spawned_vision_capacity_timeout_is_pre_execution_and_retryable(app, tmp_path):
     server, state = _start_boundary_server("vision_timeout")
-    boundary = _ShortProviderBoundary()
+    boundary = _ShortProviderBoundary(timeout_seconds=0.2)
     provider = _isolated_provider(server, "capacity-provider")
     photo_id, service = _isolated_service(app, tmp_path, boundary)
     job_id = _test_job(app, "vision capacity timeout")
@@ -555,6 +558,7 @@ def test_spawned_consumed_repair_timeout_records_repair_unknown_without_second_v
     finally:
         boundary.shutdown()
         provider.close()
+        state.release_blocked_response.set()
         server.shutdown()
         server.server_close()
 
