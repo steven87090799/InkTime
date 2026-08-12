@@ -15,16 +15,20 @@
 // =======================
 //  调试开关
 // =======================
-#define DEBUG_LOG 1
+#ifndef INKTIME_DEBUG_LOG
+#define INKTIME_DEBUG_LOG 0
+#endif
+#define DEBUG_LOG INKTIME_DEBUG_LOG
 
 HardwareSerial DebugSerial(0);
+#include "firmware_observability.h"
 
 #if DEBUG_LOG
-  #define DBG_BEGIN()    DebugSerial.begin(115200)
+  #define DBG_BEGIN()    INK_LOG_BEGIN()
   #define DBG_PRINT(x)   DebugSerial.print(x)
   #define DBG_PRINTLN(x) DebugSerial.println(x)
 #else
-  #define DBG_BEGIN()
+  #define DBG_BEGIN()    INK_LOG_BEGIN()
   #define DBG_PRINT(x)
   #define DBG_PRINTLN(x)
 #endif
@@ -194,8 +198,8 @@ void loadConfig(Config &cfg) {
 
 #if DEBUG_LOG
   DBG_PRINTLN("---- loadConfig ----");
-  DBG_PRINT("[CFG] ssid="); DBG_PRINTLN(cfg.wifi_ssid);
-  DBG_PRINT("[CFG] hostport="); DBG_PRINTLN(cfg.backend_hostport);
+  DBG_PRINTLN("[CFG] WiFi SSID configured (value redacted)");
+  DBG_PRINTLN("[CFG] backend endpoint configured (value redacted)");
   DBG_PRINT("[CFG] tz_offset_hours="); DBG_PRINTLN(cfg.tz_offset_hours);
   DBG_PRINT("[CFG] refresh_hour="); DBG_PRINTLN((int)cfg.refresh_hour);
   DBG_PRINT("[CFG] rotate180="); DBG_PRINTLN(cfg.rotate180 ? "true" : "false");
@@ -495,7 +499,7 @@ void startConfigPortal() {
 
 #if DEBUG_LOG
   DBG_PRINT("[CFG] softAP result = "); DBG_PRINTLN(apOk ? "OK" : "FAIL");
-  DBG_PRINT("[CFG] AP SSID = "); DBG_PRINTLN(apSsid);
+  DBG_PRINTLN("[CFG] provisioning AP started (SSID redacted)");
   DBG_PRINT("[CFG] AP IP   = "); DBG_PRINTLN(WiFi.softAPIP());
 #endif
 
@@ -528,9 +532,9 @@ void startConfigPortal() {
 //  WiFi 连接
 // =======================
 bool connectWiFi(const Config &cfg, uint32_t timeout_ms = 15000) {
+  INK_LOG_DEBUG("wifi_connect_started", "Wi-Fi connection attempt started");
 #if DEBUG_LOG
   DBG_PRINTLN("[WIFI] connectWiFi()");
-  DBG_PRINT("[WIFI] target ssid="); DBG_PRINTLN(cfg.wifi_ssid);
 #endif
 
   if (cfg.wifi_ssid.isEmpty()) return false;
@@ -555,6 +559,8 @@ bool connectWiFi(const Config &cfg, uint32_t timeout_ms = 15000) {
 #endif
 
   bool ok = (WiFi.status() == WL_CONNECTED);
+  if (ok) INK_LOG_INFO("wifi_connected", "Wi-Fi connected");
+  else INK_LOG_WARN("wifi_connect_timeout", "Wi-Fi connection timed out");
 
 #if DEBUG_LOG
   if (ok) {
@@ -693,8 +699,7 @@ static void initEpd13in3e() {
 // =======================
 static bool streamHttpHalfToEpd(const String& url, bool isLeftHalf) {
 #if DEBUG_LOG
-  DBG_PRINT("[HTTP] GET ");
-  DBG_PRINTLN(url);
+  DBG_PRINTLN("[HTTP] payload URL redacted");
 #endif
 
   HTTPClient http;
@@ -703,6 +708,7 @@ static bool streamHttpHalfToEpd(const String& url, bool isLeftHalf) {
 
   int code = http.GET();
   if (code != HTTP_CODE_OK) {
+    INK_LOG_ERROR("payload_transport_failed", "Payload request returned a non-success status");
 #if DEBUG_LOG
     DBG_PRINT("[HTTP] code=");
     DBG_PRINTLN(code);
@@ -719,6 +725,7 @@ static bool streamHttpHalfToEpd(const String& url, bool isLeftHalf) {
 
   const int expected = (int)HALF_BYTES; // 480000
   if (len > 0 && len != expected) {
+    INK_LOG_ERROR("payload_validation_failed", "Payload length did not match display contract");
 #if DEBUG_LOG
     DBG_PRINT("[HTTP] length mismatch expect=");
     DBG_PRINT(expected);
@@ -752,6 +759,7 @@ static bool streamHttpHalfToEpd(const String& url, bool isLeftHalf) {
     size_t got = 0;
     while (got < ROW_BYTES_HALF) {
       if (millis() - startMs > DOWNLOAD_TIMEOUT_MS) {
+        INK_LOG_ERROR("payload_transport_timeout", "Payload stream exceeded bounded deadline");
 #if DEBUG_LOG
         DBG_PRINTLN("[HTTP] download timeout");
 #endif
@@ -832,11 +840,13 @@ static bool downloadAndShowDaily(const Config &cfg) {
 #endif
 
   initEpd13in3e();
+  INK_LOG_INFO("payload_download_started", "Bounded display payload download started");
 
 #if DEBUG_LOG
   DBG_PRINTLN("[EPD] Streaming LEFT half (CS_M) ...");
 #endif
   if (!streamHttpHalfToEpd(urlL, true)) {
+    INK_LOG_ERROR("payload_download_failed", "Left display payload failed validation");
 #if DEBUG_LOG
     DBG_PRINTLN("[EPD] LEFT half download/stream FAILED");
 #endif
@@ -847,6 +857,7 @@ static bool downloadAndShowDaily(const Config &cfg) {
   DBG_PRINTLN("[EPD] Streaming RIGHT half (CS_S) ...");
 #endif
   if (!streamHttpHalfToEpd(urlR, false)) {
+    INK_LOG_ERROR("payload_download_failed", "Right display payload failed validation");
 #if DEBUG_LOG
     DBG_PRINTLN("[EPD] RIGHT half download/stream FAILED");
 #endif
@@ -856,6 +867,9 @@ static bool downloadAndShowDaily(const Config &cfg) {
 #if DEBUG_LOG
   DBG_PRINTLN("[EPD] SHOW (refresh) ...");
 #endif
+
+  INK_LOG_INFO("payload_download_completed", "Display payload passed bounded validation");
+  INK_LOG_INFO("display_refresh_started", "Electronic paper refresh started");
 
   // Shut down WiFi/BT before refresh to reduce power/EMI spikes during waveform drive
   WiFi.disconnect(true, true);
@@ -867,6 +881,7 @@ static bool downloadAndShowDaily(const Config &cfg) {
   delay(200);
 
   EPD_dispMass[EPD_dispIndex].show();
+  INK_LOG_INFO("display_refresh_completed", "Electronic paper refresh completed");
 
 #if DEBUG_LOG
   DBG_PRINTLN("[EPD] Done.");
@@ -877,6 +892,7 @@ static bool downloadAndShowDaily(const Config &cfg) {
 
 void sleepUntilNextSchedule(const Config &cfg, bool hasTime, const struct tm &now) {
   if (!hasTime) {
+    INK_LOG_WARN("sleep_time_fallback", "Clock unavailable; using bounded fallback sleep");
     goDeepSleepMinutes(1440);
     return;
   }
@@ -889,6 +905,7 @@ void sleepUntilNextSchedule(const Config &cfg, bool hasTime, const struct tm &no
   else                         delta = 24 * 60 - (curMinOfDay - targetMin);
 
   if (delta < 1) delta = 24 * 60;
+  INK_LOG_INFO("sleep_scheduled", "Deep sleep scheduled for next refresh window");
 
 #if DEBUG_LOG
   DBG_PRINT("[SLEEP] nowMin="); DBG_PRINT(curMinOfDay);
@@ -914,6 +931,7 @@ void setup() {
 
   DBG_BEGIN();
   delay(200);
+  INK_LOG_INFO("firmware_boot", "InkTime 13.3 firmware boot started");
 
 #if DEBUG_LOG
   DBG_PRINTLN();
@@ -946,6 +964,7 @@ void setup() {
   DBG_PRINTLN("[BOOT] have config -> connect WiFi");
 #endif
   if (!connectWiFi(g_cfg)) {
+    INK_LOG_WARN("wifi_degraded_mode", "Wi-Fi unavailable; entering bounded recovery path");
 #if DEBUG_LOG
     DBG_PRINTLN("[BOOT] connect failed -> AP portal");
 #endif
@@ -957,6 +976,7 @@ void setup() {
 
   bool ok = downloadAndShowDaily(g_cfg);
   if (!ok) {
+    INK_LOG_ERROR("display_pipeline_failed", "Payload download or display pipeline failed");
 #if DEBUG_LOG
     DBG_PRINTLN("[BOOT] downloadAndShowDaily FAILED");
 #endif
