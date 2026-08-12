@@ -263,9 +263,16 @@ class ScheduledTaskRepository:
         occurrence = datetime.fromisoformat(scheduled_occurrence_at)
         if occurrence.tzinfo is not None and now.tzinfo is not None:
             occurrence = occurrence.astimezone(now.tzinfo)
-        repaired_next_run = self._next_run(
-            task["cron"], occurrence, task["weekdays"]
-        ).isoformat()
+        repaired_next_run = self._next_run(task["cron"], occurrence, task["weekdays"])
+        if repaired_next_run.tzinfo is not None and now.tzinfo is not None:
+            repair_is_due = repaired_next_run.astimezone(timezone.utc) <= now.astimezone(
+                timezone.utc
+            )
+        else:
+            repair_is_due = repaired_next_run <= now
+        if repair_is_due:
+            repaired_next_run = self._next_run(task["cron"], now, task["weekdays"])
+        repaired_next_run_iso = repaired_next_run.isoformat()
         completed_at = utc_now()
         context = nullcontext(connection) if connection is not None else self.database.session()
         with context as active_connection:
@@ -278,7 +285,7 @@ class ScheduledTaskRepository:
                 (
                     completed_at,
                     scheduled_occurrence_at,
-                    repaired_next_run,
+                    repaired_next_run_iso,
                     completed_at,
                     task["key"],
                 ),
