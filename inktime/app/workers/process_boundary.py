@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import multiprocessing
 import pickle
 import threading
 import time
 from typing import Any, Callable
 from uuid import uuid4
+
+from inktime.app.core.logging import log_event
+
+
+LOGGER = logging.getLogger("process_boundary")
 
 
 class ProcessCallTimeout(TimeoutError):
@@ -109,6 +115,14 @@ class KillableProcessBoundary:
                 process.terminate()
                 with self._lock:
                     self._metrics["terminated"] += 1
+                log_event(
+                    LOGGER,
+                    logging.WARNING,
+                    "Isolated child process was terminated",
+                    event="boundary_process_terminated",
+                    operation="process_boundary",
+                    details={"process_name": str(getattr(process, "name", "isolated-child"))[:128]},
+                )
             process.join(self.terminate_grace_seconds)
             if process.is_alive():
                 process.kill()
@@ -129,14 +143,34 @@ class KillableProcessBoundary:
         if self._context is None:
             raise ProcessCallError("spawn process boundary unavailable")
         if not self._slots.acquire(timeout=timeout):
+            log_event(
+                LOGGER,
+                logging.WARNING,
+                "Isolated process capacity timed out",
+                event="boundary_call_timeout",
+                operation="process_boundary",
+                duration_ms=int(timeout * 1000),
+                retryable=True,
+                details={"stage": "capacity", "process_name": process_name[:128]},
+            )
             raise ProcessCallTimeout("provider process capacity timeout")
         token = uuid4().hex
+        call_started = time.monotonic()
         receiver = None
         sender = None
         process = None
         started = False
         registered = False
         try:
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "Isolated process call started",
+                event="boundary_call_start",
+                operation_id=token,
+                operation="process_boundary",
+                details={"process_name": process_name[:128]},
+            )
             receiver, sender = self._context.Pipe(duplex=False)
             process = self._context.Process(
                 target=target,
@@ -182,12 +216,40 @@ class KillableProcessBoundary:
                     error.request_started = bool(value.get("request_started", False))
                     raise error
                 raise ProcessCallError(str(value))
+            log_event(
+                LOGGER,
+                logging.DEBUG,
+                "Isolated process call completed",
+                event="boundary_call_success",
+                operation_id=token,
+                operation="process_boundary",
+                duration_ms=int((time.monotonic() - call_started) * 1000),
+                details={"process_name": process_name[:128]},
+            )
             return value
         except (ProcessCallTimeout, ProcessCallError) as exc:
             # A failed process start proves that the provider method never
             # ran.  Once the child is running, however, timeout/pipe failure
             # makes a remote Vision POST outcome unknowable.
             exc.child_started = bool(started)
+            is_timeout = isinstance(exc, ProcessCallTimeout)
+            log_event(
+                LOGGER,
+                logging.WARNING if is_timeout else logging.ERROR,
+                "Isolated process call timed out" if is_timeout else "Isolated process call failed",
+                event="boundary_call_timeout" if is_timeout else "boundary_call_error",
+                error_code=str(getattr(exc, "code", "AI-PROVIDER-UNAVAILABLE")),
+                operation_id=token,
+                operation="process_boundary",
+                duration_ms=int((time.monotonic() - call_started) * 1000),
+                failure_class=type(exc).__name__,
+                retryable=is_timeout,
+                ambiguous=bool(getattr(exc, "ambiguous", False)),
+                details={
+                    "child_started": bool(started),
+                    "process_name": process_name[:128],
+                },
+            )
             raise
         finally:
             # Reap before closing IPC, removing observability state, or releasing
@@ -280,6 +342,14 @@ class KillableProcessBoundary:
         for process, receiver in active:
             self._terminate(process)
             self._safe_close(receiver)
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Process boundary shutdown completed",
+            event="boundary_shutdown_completed",
+            operation="process_boundary",
+            details={"active_processes": len(active)},
+        )
 
     def record_cooperative(self) -> None:
         with self._lock:

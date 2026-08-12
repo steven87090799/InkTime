@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
+import logging
 import multiprocessing
 import threading
 import time
 from typing import Any, Callable
 from uuid import uuid4
 
+from inktime.app.core.logging import log_event
 from inktime.app.domain.jobs.failure_policy import (
     FailureClass,
     JobShutdownAmbiguousError,
@@ -15,6 +17,9 @@ from inktime.app.domain.jobs.failure_policy import (
     failure_code,
 )
 from inktime.app.repositories.jobs import JobRepository
+
+
+LOGGER = logging.getLogger("job_worker")
 
 
 Processor = Callable[[dict], dict]
@@ -115,6 +120,14 @@ class BoundedJobWorker:
         self.stop_event.set()
         if self.shutdown_deadline is None:
             self.shutdown_deadline = deadline or (time.monotonic() + self.SHUTDOWN_DRAIN_SECONDS)
+        log_event(
+            LOGGER,
+            logging.INFO,
+            "Worker shutdown requested",
+            event="worker_shutdown_requested",
+            worker_id=self.worker_id,
+            details={"drain_seconds": self.SHUTDOWN_DRAIN_SECONDS},
+        )
 
     def _process(self, item) -> tuple[str, dict, float]:
         result = self.processor(dict(item))
