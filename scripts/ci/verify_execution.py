@@ -270,17 +270,16 @@ def verify_execution(
             "tested_ref_kind",
         )
     }
-    if all(provenance_values.values()):
-        for provenance_error in provenance_errors(provenance_values):
-            errors.append(
-                _error(
-                    "provenance",
-                    "changes",
-                    "valid canonical provenance",
-                    "invalid",
-                    provenance_error,
-                )
+    for provenance_error in provenance_errors(provenance_values):
+        errors.append(
+            _error(
+                "provenance",
+                "changes",
+                "valid canonical provenance",
+                "invalid",
+                provenance_error,
             )
+        )
 
     known_needs = set(_workflow_jobs(workflow))
     known_needs.discard(AGGREGATE_JOB_BY_WORKFLOW[workflow])

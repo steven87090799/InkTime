@@ -1906,6 +1906,19 @@ MIGRATIONS = (
               AND offline_schedule_capability_state IN ('unknown_12','confirmed_24')
             """,
             """
+            INSERT INTO device_events(
+                device_id,level,event,error_code,message,details_json,created_at
+            )
+            SELECT id,'warning','offline_schedule_capability_quarantined','DEVICE-008',
+                   '舊離線排程能力不明；已隔離，請重新配對或 Repair 確認 24-slot capability',
+                   json_object(
+                       'offline_schedule_capability_state',offline_schedule_capability_state,
+                       'offline_schedule_max_slots',offline_schedule_max_slots
+                   ),datetime('now')
+            FROM devices
+            WHERE offline_schedule_capability_state='legacy_ambiguous'
+            """,
+            """
             CREATE TRIGGER trg_devices_offline_schedule_slots_insert
             BEFORE INSERT ON devices
             WHEN NEW.offline_schedule_max_slots NOT IN (12,24)
@@ -1940,6 +1953,134 @@ MIGRATIONS = (
               AND value_json='300'
               AND (updated_by IS NULL OR updated_by='')
             """,
+        ),
+    ),
+    Migration(
+        40,
+        "加入照片列表穩定排序索引",
+        (
+            "CREATE INDEX IF NOT EXISTS idx_photos_legacy_sort ON photos(COALESCE(captured_at,created_at) DESC,id DESC)",
+        ),
+    ),
+    Migration(
+        41,
+        "記錄裝置狀態單調序號",
+        (
+            "ALTER TABLE devices ADD COLUMN last_status_sequence INTEGER",
+            "CREATE INDEX IF NOT EXISTS idx_devices_status_sequence ON devices(id,last_status_sequence)",
+        ),
+    ),
+    Migration(
+        42,
+        "保存昂貴 POST 的 Idempotency request fingerprint",
+        (
+            "ALTER TABLE jobs ADD COLUMN request_fingerprint TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_jobs_dedupe_fingerprint ON jobs(dedupe_key,request_fingerprint)",
+        ),
+    ),
+    Migration(
+        43,
+        "修復診斷快取歷史來源",
+        (),
+    ),
+    Migration(
+        44,
+        "補回既有 legacy ambiguous 裝置的 DEVICE-008 可見警告",
+        (
+            """
+            INSERT INTO device_events(
+                device_id,level,event,error_code,message,details_json,created_at
+            )
+            SELECT d.id,'warning','offline_schedule_capability_quarantined','DEVICE-008',
+                   '舊離線排程能力不明；已隔離，請重新配對或 Repair 確認 24-slot capability',
+                   json_object(
+                       'offline_schedule_capability_state',d.offline_schedule_capability_state,
+                       'offline_schedule_max_slots',d.offline_schedule_max_slots
+                   ),datetime('now')
+            FROM devices AS d
+            WHERE d.offline_schedule_capability_state='legacy_ambiguous'
+              AND NOT EXISTS (
+                  SELECT 1 FROM device_events AS e
+                  WHERE e.device_id=d.id
+                    AND e.event='offline_schedule_capability_quarantined'
+                    AND e.error_code='DEVICE-008'
+              )
+            """,
+        ),
+    ),
+    Migration(
+        45,
+        "加入 API 用量保留生命週期",
+        (
+            "INSERT OR IGNORE INTO data_retention_policies(data_type,enabled,retention_days,minimum_items_to_keep,cleanup_batch_size,dry_run,updated_at) VALUES ('api_usage',1,400,0,200,1,datetime('now'))",
+        ),
+    ),
+    Migration(
+        46,
+        "加入完整照片庫 request-level Idempotency ledger",
+        (
+            """
+            CREATE TABLE idempotency_requests (
+                scope_key TEXT PRIMARY KEY,
+                request_fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('in_progress','completed')),
+                request_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                response_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX idx_idempotency_requests_status_updated ON idempotency_requests(status,updated_at)",
+        ),
+    ),
+    Migration(
+        47,
+        "加入完整照片庫 reservation ownership lease",
+        (
+            "ALTER TABLE idempotency_requests ADD COLUMN reservation_token TEXT",
+            "ALTER TABLE idempotency_requests ADD COLUMN reservation_expires_at TEXT",
+        ),
+    ),
+    Migration(
+        48,
+        "允許未知 API 成本保留 NULL",
+        (),
+    ),
+    Migration(
+        49,
+        "啟用未修改的 API 用量自動保留",
+        (
+            """
+            UPDATE data_retention_policies
+            SET dry_run=0,updated_at=datetime('now')
+            WHERE data_type='api_usage'
+              AND enabled=1
+              AND retention_days=400
+              AND maximum_items IS NULL
+              AND maximum_bytes IS NULL
+              AND minimum_items_to_keep=0
+              AND cleanup_batch_size=200
+              AND dry_run=1
+              AND updated_at NOT LIKE '%T%'
+              AND EXISTS (
+                  SELECT 1
+                  FROM schema_migrations AS migration_45
+                  WHERE migration_45.version=45
+                    AND migration_45.name='加入 API 用量保留生命週期'
+                    AND ABS(
+                        (julianday(data_retention_policies.updated_at)
+                         - julianday(migration_45.applied_at)) * 86400.0
+                    ) <= 5.0
+              )
+            """,
+        ),
+    ),
+    Migration(
+        50,
+        "為保留清理稽核建立有界 GC 索引",
+        (
+            "CREATE INDEX IF NOT EXISTS idx_data_cleanup_runs_completed ON data_cleanup_runs(completed_at,id)",
+            "CREATE INDEX IF NOT EXISTS idx_data_cleanup_items_cleanup_run ON data_cleanup_items(cleanup_run_id)",
         ),
     ),
 )
@@ -2014,6 +2155,215 @@ def _apply_migration_33_data_fixes(connection: sqlite3.Connection) -> None:
     # amount when no evidence exists, but it must not rewrite the provenance.
 
 
+def _migration_integrity_is_ok(connection: sqlite3.Connection) -> bool:
+    result = connection.execute("PRAGMA integrity_check").fetchone()
+    return result is not None and str(result[0]) == "ok"
+
+
+def _setting_provenance_value(raw_value: object) -> int | None:
+    try:
+        value = json.loads(str(raw_value))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    return value
+
+
+def _setting_provenance_time(raw_value: object) -> datetime | None:
+    value = str(raw_value or "").strip()
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _latest_explicit_setting_provenance(
+    connection: sqlite3.Connection, key: str
+) -> tuple[int, str] | None:
+    events: list[tuple[datetime, int, str]] = []
+    ambiguous = False
+    history_rows = connection.execute(
+        """
+        SELECT id,changed_at,changed_by,new_value_summary
+        FROM setting_history
+        WHERE key=?
+        ORDER BY id
+        """,
+        (key,),
+    ).fetchall()
+    for row in history_rows:
+        value = _setting_provenance_value(row["new_value_summary"])
+        timestamp = _setting_provenance_time(row["changed_at"])
+        actor = str(row["changed_by"] or "").strip()
+        if value is None or timestamp is None or not actor:
+            ambiguous = True
+            continue
+        events.append((timestamp, value, actor))
+
+    snapshot_rows = connection.execute(
+        """
+        SELECT s.created_at,s.actor_id,i.new_value_json
+        FROM settings_snapshot_items AS i
+        JOIN settings_snapshots AS s ON s.id=i.snapshot_id
+        WHERE i.key=?
+        ORDER BY s.created_at,s.id
+        """,
+        (key,),
+    ).fetchall()
+    for row in snapshot_rows:
+        value = _setting_provenance_value(row["new_value_json"])
+        timestamp = _setting_provenance_time(row["created_at"])
+        actor = str(row["actor_id"] or "").strip()
+        if value is None or timestamp is None or not actor:
+            ambiguous = True
+            continue
+        events.append((timestamp, value, actor))
+
+    if ambiguous or not events:
+        return None
+
+    unique_events = sorted(set(events))
+    for event in unique_events:
+        same_time = [candidate for candidate in unique_events if candidate[0] == event[0]]
+        if {candidate[1:] for candidate in same_time} != {event[1:]}:
+            return None
+    latest = unique_events[-1]
+    return latest[1], latest[2]
+
+
+def _apply_migration_43_data_fixes(connection: sqlite3.Connection) -> None:
+    key = "system.diagnostics_cache_seconds"
+    setting = connection.execute(
+        "SELECT value_json,updated_by FROM settings WHERE key=?",
+        (key,),
+    ).fetchone()
+    if setting is None:
+        return
+    if _setting_provenance_value(setting["value_json"]) != 21600:
+        return
+    if str(setting["updated_by"] or "").strip():
+        return
+    provenance = _latest_explicit_setting_provenance(connection, key)
+    if provenance is None or provenance[0] != 300:
+        return
+    connection.execute(
+        """
+        UPDATE settings
+        SET value_json='300',value_type='integer',updated_by=?,updated_at=datetime('now')
+        WHERE key=? AND value_json='21600' AND (updated_by IS NULL OR updated_by='')
+        """,
+        (provenance[1], key),
+    )
+
+
+def _apply_migration_48_data_fixes(connection: sqlite3.Connection) -> None:
+    """Make unknown synchronous costs nullable without losing SQLite contracts.
+
+    SQLite cannot drop a column's NOT NULL constraint in place.  Rebuild the
+    table inside the migration transaction, carry every current row and
+    sequence value across, and restore all user-visible indexes/triggers after
+    the table is renamed.  The explicit schema below mirrors the cumulative
+    api_usage schema produced by migrations 1, 26, 32, and 33.
+    """
+
+    indexes = [
+        str(row["sql"])
+        for row in connection.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type='index' AND tbl_name='api_usage' AND sql IS NOT NULL
+            ORDER BY name
+            """
+        ).fetchall()
+    ]
+    triggers = [
+        str(row["sql"])
+        for row in connection.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type='trigger' AND tbl_name='api_usage' AND sql IS NOT NULL
+            ORDER BY name
+            """
+        ).fetchall()
+    ]
+    sequence = connection.execute(
+        "SELECT seq FROM sqlite_sequence WHERE name='api_usage'"
+    ).fetchone()
+
+    connection.execute(
+        """
+        CREATE TABLE api_usage_nullable_estimated_cost (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+            photo_id TEXT REFERENCES photos(id) ON DELETE SET NULL,
+            request_type TEXT NOT NULL,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cached_tokens INTEGER NOT NULL DEFAULT 0,
+            estimated_cost REAL DEFAULT 0,
+            actual_cost REAL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            latency_ms INTEGER,
+            status TEXT NOT NULL,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            error_code TEXT,
+            batch_id TEXT REFERENCES analysis_batches(id) ON DELETE SET NULL,
+            batch_item_id TEXT REFERENCES analysis_batch_items(id) ON DELETE SET NULL,
+            processing_mode TEXT NOT NULL DEFAULT 'sync' CHECK(processing_mode IN ('sync','batch')),
+            request_id TEXT,
+            reasoning_tokens INTEGER NOT NULL DEFAULT 0 CHECK(reasoning_tokens >= 0),
+            cache_write_tokens INTEGER NOT NULL DEFAULT 0 CHECK(cache_write_tokens >= 0),
+            cost_source TEXT NOT NULL DEFAULT 'unknown' CHECK(cost_source IN ('provider_reported','estimated','unknown')),
+            prompt_chars INTEGER NOT NULL DEFAULT 0 CHECK(prompt_chars >= 0),
+            schema_chars INTEGER NOT NULL DEFAULT 0 CHECK(schema_chars >= 0),
+            request_body_bytes INTEGER NOT NULL DEFAULT 0 CHECK(request_body_bytes >= 0),
+            image_bytes INTEGER NOT NULL DEFAULT 0 CHECK(image_bytes >= 0),
+            provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO api_usage_nullable_estimated_cost(
+            id,provider,model,job_id,photo_id,request_type,input_tokens,output_tokens,
+            cached_tokens,estimated_cost,actual_cost,started_at,completed_at,latency_ms,status,
+            retry_count,error_code,batch_id,batch_item_id,processing_mode,request_id,
+            reasoning_tokens,cache_write_tokens,cost_source,prompt_chars,schema_chars,
+            request_body_bytes,image_bytes,provider_id
+        )
+        SELECT
+            id,provider,model,job_id,photo_id,request_type,input_tokens,output_tokens,
+            cached_tokens,estimated_cost,actual_cost,started_at,completed_at,latency_ms,status,
+            retry_count,error_code,batch_id,batch_item_id,processing_mode,request_id,
+            reasoning_tokens,cache_write_tokens,cost_source,prompt_chars,schema_chars,
+            request_body_bytes,image_bytes,provider_id
+        FROM api_usage
+        """
+    )
+    connection.execute("DROP TABLE api_usage")
+    connection.execute(
+        "ALTER TABLE api_usage_nullable_estimated_cost RENAME TO api_usage"
+    )
+    if sequence is not None:
+        connection.execute(
+            "UPDATE sqlite_sequence SET seq=? WHERE name='api_usage'",
+            (int(sequence[0]),),
+        )
+    for statement in indexes + triggers:
+        connection.execute(statement)
+
+
 def _applied_versions(database: Database) -> set[int]:
     with database.session() as connection:
         if not _table_exists(connection, "schema_migrations"):
@@ -2022,19 +2372,61 @@ def _applied_versions(database: Database) -> set[int]:
 
 
 def _assert_no_unfinished_migration(database: Database) -> None:
-    with database.session() as connection:
-        if not _table_exists(connection, "migration_history"):
-            return
-        unfinished = connection.execute(
-            """
-            SELECT schema_version,migration_name,backup_path
-            FROM migration_history
-            WHERE migration_status='running'
-            ORDER BY id DESC LIMIT 1
-            """
-        ).fetchone()
-    if unfinished is None:
-        return
+    unfinished = None
+    try:
+        with database.transaction(operation="migration_recovery") as connection:
+            if not _table_exists(connection, "migration_history"):
+                return
+            unfinished = connection.execute(
+                """
+                SELECT id,schema_version,migration_name,backup_path
+                FROM migration_history
+                WHERE migration_status='running'
+                ORDER BY id DESC LIMIT 1
+                """
+            ).fetchone()
+            if unfinished is None:
+                return
+            migration = next(
+                (
+                    candidate
+                    for candidate in MIGRATIONS
+                    if candidate.version == int(unfinished["schema_version"])
+                ),
+                None,
+            )
+            committed = connection.execute(
+                "SELECT name FROM schema_migrations WHERE version=?",
+                (unfinished["schema_version"],),
+            ).fetchone()
+            if (
+                migration is not None
+                and str(unfinished["migration_name"]) == migration.name
+                and committed is not None
+                and str(committed["name"]) == migration.name
+                and _migration_integrity_is_ok(connection)
+            ):
+                updated = connection.execute(
+                    """
+                    UPDATE migration_history
+                    SET migration_completed_at=?,migration_status='completed',error_message=NULL
+                    WHERE id=? AND migration_status='running'
+                    """,
+                    (_utc_now(), unfinished["id"]),
+                )
+                if updated.rowcount == 1:
+                    return
+    except MigrationError:
+        raise
+    except sqlite3.Error as exc:
+        context = (
+            "未完成 Migration"
+            if unfinished is None
+            else f"Migration {unfinished['schema_version']}（{unfinished['migration_name']}）"
+        )
+        raise MigrationError(
+            f"MIGRATION-002 無法安全復原{context}；SQLite recovery transaction 失敗"
+        ) from exc
     recovery = str(unfinished["backup_path"] or "最近一次 pre-migration SQLite 備份")
     raise MigrationError(
         "MIGRATION-002 偵測到未完成 Migration "
@@ -2146,6 +2538,10 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
                         connection.execute(statement)
                     if migration.version == 33:
                         _apply_migration_33_data_fixes(connection)
+                    if migration.version == 43:
+                        _apply_migration_43_data_fixes(connection)
+                    if migration.version == 48:
+                        _apply_migration_48_data_fixes(connection)
                     connection.execute(
                         "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
                         (migration.version, migration.name, _utc_now()),

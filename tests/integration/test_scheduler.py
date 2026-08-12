@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from inktime.app.bootstrap import bootstrap_services
 from inktime.app.domain.jobs.failure_policy import JobFailure
 from inktime.app.repositories.offline_schedules import SHORTAGE_RETRY_COOLDOWN_SECONDS
 from inktime.app.workers.scheduler import (
@@ -117,6 +119,119 @@ def test_due_scheduled_pending_job_restarts_without_duplicate(app, monkeypatch):
     runner.tick()
     assert repository.get(job_id)["status"] == "running"
     assert len([job for job in repository.list() if job["dedupe_key"] == dedupe_key]) == 1
+
+
+def test_scheduler_retention_skips_observation_policy_without_planned_items(app):
+    database = app.extensions["inktime_database"]
+    resilience = app.extensions["inktime_resilience_repository"]
+    month_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    resilience.update_retention(
+        "api_usage",
+        {"retention_days": 1, "cleanup_batch_size": 1, "dry_run": True},
+    )
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO api_usage(provider,model,request_type,estimated_cost,started_at,status,cost_source,image_bytes) "
+            "VALUES ('provider','model','scheduler-retention',0.25,?,'failed','unknown',1)",
+            ((month_start - timedelta(days=2)).isoformat(),),
+        )
+    app.extensions["inktime_settings_repository"].update(
+        "backup.schedule_enabled", False, changed_by="test", source_ip="127.0.0.1"
+    )
+
+    for _ in range(3):
+        SchedulerRunner(app).tick()
+
+    with database.session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 1
+        cleanup_runs = connection.execute(
+            "SELECT id,summary_json FROM data_cleanup_runs ORDER BY started_at,id"
+        ).fetchall()
+        item_count = connection.execute(
+            "SELECT COUNT(*) FROM data_cleanup_items WHERE data_type='api_usage'"
+        ).fetchone()[0]
+        last_run_at = connection.execute(
+            "SELECT last_run_at FROM data_retention_policies WHERE data_type='api_usage'"
+        ).fetchone()[0]
+    assert len(cleanup_runs) == 3
+    assert all(
+        json.loads(run["summary_json"])["_outcomes"]["api_usage"] == "skipped"
+        for run in cleanup_runs
+    )
+    assert item_count == 0
+    assert last_run_at is not None
+
+
+def test_scheduler_retention_deletes_with_fresh_production_default(app):
+    database = app.extensions["inktime_database"]
+    with database.transaction() as connection:
+        policy = connection.execute(
+            "SELECT enabled,retention_days,cleanup_batch_size,dry_run "
+            "FROM data_retention_policies WHERE data_type='api_usage'"
+        ).fetchone()
+        connection.execute(
+            "INSERT INTO api_usage(provider,model,request_type,estimated_cost,started_at,status,cost_source,image_bytes) "
+            "VALUES ('provider','model','scheduler-production-retention',0.25,?,'failed','unknown',1)",
+            ((datetime.now(timezone.utc) - timedelta(days=401)).isoformat(),),
+        )
+    assert tuple(policy) == (1, 400, 200, 0)
+    app.extensions["inktime_settings_repository"].update(
+        "backup.schedule_enabled", False, changed_by="test", source_ip="127.0.0.1"
+    )
+
+    SchedulerRunner(app).tick()
+
+    with database.session() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM api_usage WHERE request_type='scheduler-production-retention'"
+        ).fetchone()[0] == 0
+        item = connection.execute(
+            "SELECT result FROM data_cleanup_items "
+            "WHERE data_type='api_usage' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert item["result"] == "deleted"
+
+
+def test_scheduler_role_keeps_and_runs_maintenance_extensions(app, monkeypatch):
+    scheduler = bootstrap_services(app.extensions["inktime_runtime_config"], role="scheduler")
+    try:
+        release_coordinator = scheduler.extensions["inktime_release_coordinator"]
+        resilience_repository = scheduler.extensions["inktime_resilience_repository"]
+        release_reconcile = Mock()
+        release_gc = Mock()
+        operational_expire = Mock()
+        cleanup_audit_gc = Mock()
+        operational_cleanup = Mock()
+        monkeypatch.setattr(release_coordinator, "reconcile", release_reconcile)
+        monkeypatch.setattr(release_coordinator, "gc_unreferenced_releases", release_gc)
+        monkeypatch.setattr(resilience_repository, "expire_operational_data", operational_expire)
+        monkeypatch.setattr(resilience_repository, "cleanup_audit_history", cleanup_audit_gc)
+        monkeypatch.setattr(resilience_repository, "cleanup", operational_cleanup)
+
+        monkeypatch.setattr(SchedulerRunner, "_run_observability", lambda _self, _service, _now: None)
+        monkeypatch.setattr(scheduler.extensions["inktime_job_repository"], "recover_stale", lambda: None)
+        monkeypatch.setattr(scheduler.extensions["inktime_batch_analysis_service"], "poll_due", lambda limit: None)
+        monkeypatch.setattr(scheduler.extensions["inktime_notification_service"], "scan", lambda: None)
+        monkeypatch.setattr(
+            scheduler.extensions["inktime_notification_service"],
+            "enqueue_pending",
+            lambda job_repository, job_service, limit: None,
+        )
+        monkeypatch.setattr(scheduler.extensions["inktime_schedule_repository"], "due", lambda _now: [])
+        monkeypatch.setattr(SchedulerRunner, "_prepare_due_offline_devices", lambda _self, _now: None)
+        scheduler.extensions["inktime_settings_repository"].update(
+            "backup.schedule_enabled", False, changed_by="scheduler-role-test", source_ip="127.0.0.1"
+        )
+
+        SchedulerRunner(scheduler).tick()
+
+        release_reconcile.assert_called_once_with()
+        release_gc.assert_called_once_with()
+        operational_expire.assert_called_once_with()
+        cleanup_audit_gc.assert_called_once_with()
+        operational_cleanup.assert_called_once_with(dry_run=False)
+    finally:
+        scheduler.close()
 
 
 def test_scheduler_observability_is_deadline_gated(app):
@@ -465,25 +580,21 @@ def test_scheduled_finalize_cursor_repair_is_atomic_with_job_terminalization(app
         dedupe_key=dedupe_key,
     )
     job_service.start(job_id)
-    original_record_success = schedules.record_success
-
     def fail_cursor_repair(*_args, **_kwargs):
         raise RuntimeError("injected scheduled cursor failure")
 
     monkeypatch.setattr(schedules, "record_success", fail_cursor_repair)
-    with pytest.raises(RuntimeError, match="injected scheduled cursor failure"):
-        WorkerRunner(app).run_once()
-
-    assert repository.get(job_id)["status"] == "running"
-    assert schedules.get(task_key)["next_run"] == occurrence_at
-
-    monkeypatch.setattr(schedules, "record_success", original_record_success)
     assert WorkerRunner(app).run_once() == 1
-    assert repository.get(job_id)["status"] == "completed"
-    assert schedules.get(task_key)["last_success"] is not None
 
-    SchedulerRunner(app).tick()
-    assert len([job for job in repository.list() if job["dedupe_key"] == dedupe_key]) == 1
+    assert repository.get(job_id)["status"] == "completed_with_errors"
+    assert schedules.get(task_key)["next_run"] == occurrence_at
+    with database.session() as connection:
+        error = connection.execute(
+            "SELECT error_code,message FROM job_errors WHERE job_id=? ORDER BY id DESC LIMIT 1",
+            (job_id,),
+        ).fetchone()
+    assert error["error_code"] == "JOB-FINALIZER-001"
+    assert "injected scheduled cursor failure" in str(error["message"])
 
 
 def test_worker_terminal_schedule_cursor_uses_general_timezone(app, monkeypatch):
@@ -814,7 +925,7 @@ def test_offline_transient_cross_job_backoff_is_durable_bounded_and_reset(app):
     ) is None
 
 
-def test_offline_transient_finalize_crash_preserves_backoff(app):
+def test_offline_transient_finalize_crash_isolated_and_terminal(app):
     device_id, _token = app.extensions["inktime_device_repository"].create(
         "離線 transient finalize crash 相框",
         delivery_mode="inktime_offline_schedule",
@@ -860,34 +971,19 @@ def test_offline_transient_finalize_crash_preserves_backoff(app):
         )
         raise RuntimeError("simulated transient finalization crash")
 
-    with pytest.raises(RuntimeError, match="simulated transient"):
-        repository.finalize_if_done(job_id, finalizer=persist_then_crash)
-
-    assert repository.get(job_id)["status"] == "running"
+    assert repository.finalize_if_done(job_id, finalizer=persist_then_crash)
+    assert repository.get(job_id)["status"] == "completed_with_errors"
     assert offline_schedules.transient_recovery_for_device(
         device_id=device_id,
         target_date="2026-08-03",
         config_version=1,
     ) is None
-
-    def persist_recovery(connection, _finalized_job_id, _target):
-        offline_schedules.record_transient_exhausted(
-            device_id=device_id,
-            target_date="2026-08-03",
-            config_version=1,
-            now=exhausted_at,
-            connection=connection,
-        )
-
-    assert repository.finalize_if_done(job_id, finalizer=persist_recovery)
-    assert repository.get(job_id)["status"] == "completed_with_errors"
-    state = offline_schedules.transient_recovery_for_device(
-        device_id=device_id,
-        target_date="2026-08-03",
-        config_version=1,
-    )
-    assert state is not None
-    assert state["backoff_seconds"] == 1800
+    with database.session() as connection:
+        error = connection.execute(
+            "SELECT error_code FROM job_errors WHERE job_id=? ORDER BY id DESC LIMIT 1",
+            (job_id,),
+        ).fetchone()
+    assert error["error_code"] == "JOB-FINALIZER-001"
 
     SchedulerRunner(app)._prepare_due_offline_devices(exhausted_at + timedelta(seconds=1))
     assert len(

@@ -12,6 +12,7 @@ from inktime.app.db import Database
 
 ACTIVE_STATUSES = {"preparing", "running", "pausing", "retrying"}
 TERMINAL_STATUSES = {"completed", "completed_with_errors", "failed", "cancelled"}
+MAX_STALE_RECOVERY_ATTEMPTS = 5
 
 
 class PreviewCapacityError(RuntimeError):
@@ -171,19 +172,41 @@ class JobRepository:
         analysis_fingerprint: str | None = None,
         force_recompute: bool = False,
         analysis_spec: dict | None = None,
+        request_fingerprint: str | None = None,
     ) -> str:
+        # Selection can be backed by a generator whose database session is
+        # already closed.  Materialize it before acquiring the writer lock so
+        # NAS/SQLite iteration cannot run inside the insert transaction.
+        photo_ids = [str(photo_id) for photo_id in photo_ids]
         job_id = str(uuid4())
         now = utc_now()
         total = 0
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                if dedupe_key:
+                    existing = connection.execute(
+                        "SELECT id,request_fingerprint FROM jobs WHERE dedupe_key=? ORDER BY created_at DESC,id DESC LIMIT 1",
+                        (dedupe_key,),
+                    ).fetchone()
+                    if existing is not None:
+                        stored_fingerprint = str(existing["request_fingerprint"] or "")
+                        if stored_fingerprint and request_fingerprint and stored_fingerprint != request_fingerprint:
+                            raise ValueError("IDEMPOTENCY_CONFLICT")
+                        if request_fingerprint and not stored_fingerprint:
+                            connection.execute(
+                                "UPDATE jobs SET request_fingerprint=? WHERE id=? AND request_fingerprint IS NULL",
+                                (request_fingerprint, existing["id"]),
+                            )
+                        connection.execute("COMMIT")
+                        return str(existing["id"])
                 connection.execute(
                     """
                     INSERT INTO jobs(id, kind, name, status, strategy, settings_json,
                                      budget_limit, created_by, created_at, priority, dedupe_key,
-                                     selection_mode,analysis_fingerprint,analysis_spec_json,force_recompute)
-                    VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?,?,?,?)
+                                     selection_mode,analysis_fingerprint,analysis_spec_json,force_recompute,
+                                     request_fingerprint)
+                    VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?,?,?,?,?)
                     """,
                     (
                         job_id,
@@ -202,11 +225,12 @@ class JobRepository:
                             analysis_spec or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":")
                         ),
                         int(force_recompute),
+                        request_fingerprint,
                     ),
                 )
                 batch: list[tuple] = []
                 for photo_id in photo_ids:
-                    batch.append((str(uuid4()), job_id, str(photo_id), now))
+                    batch.append((str(uuid4()), job_id, photo_id, now))
                     if len(batch) == 500:
                         connection.executemany(
                             "INSERT OR IGNORE INTO job_items(id, job_id, photo_id, available_at) VALUES (?, ?, ?, ?)",
@@ -238,6 +262,258 @@ class JobRepository:
         with self.database.session() as connection:
             return connection.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
 
+    def get_idempotent_request(self, scope_key: str, request_fingerprint: str) -> dict[str, Any] | None:
+        with self.database.session() as connection:
+            row = connection.execute(
+                "SELECT * FROM idempotency_requests WHERE scope_key=?", (scope_key,)
+            ).fetchone()
+        if row is None:
+            return None
+        if str(row["request_fingerprint"]) != str(request_fingerprint):
+            raise ValueError("IDEMPOTENCY_CONFLICT")
+        return dict(row)
+
+    def reserve_idempotent_request(
+        self,
+        scope_key: str,
+        request_fingerprint: str,
+        request_snapshot: dict[str, Any] | None = None,
+        *,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any]:
+        lease_seconds = max(1, int(lease_seconds))
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        lease_expires_at = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+        snapshot_json = json.dumps(
+            request_snapshot if request_snapshot is not None else {},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        reservation_token = str(uuid4())
+        with self.database.session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT * FROM idempotency_requests WHERE scope_key=?", (scope_key,)
+                ).fetchone()
+                if row is not None:
+                    if str(row["request_fingerprint"]) != str(request_fingerprint):
+                        raise ValueError("IDEMPOTENCY_CONFLICT")
+                    if str(row["status"]) == "completed":
+                        connection.execute("COMMIT")
+                        result = dict(row)
+                        result["reservation_owner"] = False
+                        return result
+                    connection.execute(
+                        """
+                        UPDATE idempotency_requests
+                        SET reservation_token=?,reservation_expires_at=?,updated_at=?
+                        WHERE scope_key=? AND status='in_progress'
+                          AND (reservation_token IS NULL OR reservation_expires_at IS NULL OR reservation_expires_at<=?)
+                        """,
+                        (reservation_token, lease_expires_at, now, scope_key, now),
+                    )
+                    row = connection.execute(
+                        "SELECT * FROM idempotency_requests WHERE scope_key=?", (scope_key,)
+                    ).fetchone()
+                    connection.execute("COMMIT")
+                    result = dict(row)
+                    result["reservation_owner"] = str(row["reservation_token"] or "") == reservation_token
+                    return result
+                connection.execute(
+                    """
+                    INSERT INTO idempotency_requests(
+                        scope_key,request_fingerprint,status,request_snapshot_json,response_json,
+                        reservation_token,reservation_expires_at,created_at,updated_at
+                    ) VALUES (?,?, 'in_progress',?,NULL,?,?,?,?)
+                    """,
+                    (
+                        scope_key,
+                        request_fingerprint,
+                        snapshot_json,
+                        reservation_token,
+                        lease_expires_at,
+                        now,
+                        now,
+                    ),
+                )
+                connection.execute("COMMIT")
+                return {
+                    "scope_key": scope_key,
+                    "request_fingerprint": request_fingerprint,
+                    "status": "in_progress",
+                    "request_snapshot_json": snapshot_json,
+                    "response_json": None,
+                    "reservation_token": reservation_token,
+                    "reservation_expires_at": lease_expires_at,
+                    "reservation_owner": True,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+
+    def freeze_idempotent_request(
+        self,
+        scope_key: str,
+        request_fingerprint: str,
+        reservation_token: str,
+        request_snapshot: dict[str, Any],
+        *,
+        lease_seconds: int = 60,
+    ) -> dict[str, Any]:
+        """Persist the frozen request snapshot under the reservation owner."""
+
+        lease_seconds = max(1, int(lease_seconds))
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        lease_expires_at = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+        snapshot_json = json.dumps(request_snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        with self.database.session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT * FROM idempotency_requests WHERE scope_key=?", (scope_key,)
+                ).fetchone()
+                if row is None:
+                    raise KeyError(scope_key)
+                if str(row["request_fingerprint"]) != str(request_fingerprint):
+                    raise ValueError("IDEMPOTENCY_CONFLICT")
+                if str(row["status"]) == "completed":
+                    connection.execute("COMMIT")
+                    result = dict(row)
+                    result["reservation_owner"] = False
+                    return result
+                updated = connection.execute(
+                    """
+                    UPDATE idempotency_requests
+                    SET request_snapshot_json=?,reservation_expires_at=?,updated_at=?
+                    WHERE scope_key=? AND status='in_progress' AND reservation_token=?
+                      AND reservation_expires_at>?
+                    """,
+                    (snapshot_json, lease_expires_at, now, scope_key, reservation_token, now),
+                ).rowcount
+                if updated != 1:
+                    raise ValueError("IDEMPOTENCY_RESERVATION_LOST")
+                row = connection.execute(
+                    "SELECT * FROM idempotency_requests WHERE scope_key=?", (scope_key,)
+                ).fetchone()
+                connection.execute("COMMIT")
+                result = dict(row)
+                result["reservation_owner"] = True
+                return result
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+
+    def renew_idempotent_request(
+        self,
+        scope_key: str,
+        request_fingerprint: str,
+        reservation_token: str,
+        *,
+        lease_seconds: int = 60,
+    ) -> bool:
+        """Renew a live reservation without changing its durable owner token."""
+
+        lease_seconds = max(1, int(lease_seconds))
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        lease_expires_at = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+        with self.database.session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                updated = connection.execute(
+                    """
+                    UPDATE idempotency_requests
+                    SET reservation_expires_at=?,updated_at=?
+                    WHERE scope_key=? AND request_fingerprint=? AND status='in_progress'
+                      AND reservation_token=? AND reservation_expires_at>?
+                    """,
+                    (lease_expires_at, now, scope_key, request_fingerprint, reservation_token, now),
+                ).rowcount
+                connection.execute("COMMIT")
+                return updated == 1
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+
+    def complete_idempotent_request(
+        self,
+        scope_key: str,
+        request_fingerprint: str,
+        response: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = utc_now()
+        response_json = json.dumps(response, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        with self.database.session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT * FROM idempotency_requests WHERE scope_key=?", (scope_key,)
+                ).fetchone()
+                if row is None:
+                    raise KeyError(scope_key)
+                if str(row["request_fingerprint"]) != str(request_fingerprint):
+                    raise ValueError("IDEMPOTENCY_CONFLICT")
+                if str(row["status"]) == "in_progress":
+                    connection.execute(
+                        "UPDATE idempotency_requests SET status='completed',response_json=?,updated_at=? WHERE scope_key=? AND status='in_progress'",
+                        (response_json, now, scope_key),
+                    )
+                row = connection.execute(
+                    "SELECT * FROM idempotency_requests WHERE scope_key=?", (scope_key,)
+                ).fetchone()
+                connection.execute("COMMIT")
+                return dict(row)
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+
+    def get_by_dedupe_key(self, dedupe_key: str, *, request_fingerprint: str | None = None):
+        """Return the durable identity for an explicit idempotency key."""
+
+        if request_fingerprint:
+            with self.database.session() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    row = connection.execute(
+                        "SELECT id,status,request_fingerprint FROM jobs WHERE dedupe_key=? ORDER BY created_at DESC,id DESC LIMIT 1",
+                        (dedupe_key,),
+                    ).fetchone()
+                    if row is not None:
+                        stored_fingerprint = str(row["request_fingerprint"] or "")
+                        if stored_fingerprint and stored_fingerprint != request_fingerprint:
+                            raise ValueError("IDEMPOTENCY_CONFLICT")
+                        if not stored_fingerprint:
+                            connection.execute(
+                                "UPDATE jobs SET request_fingerprint=? WHERE id=? AND request_fingerprint IS NULL",
+                                (request_fingerprint, row["id"]),
+                            )
+                            row = connection.execute(
+                                "SELECT id,status,request_fingerprint FROM jobs WHERE id=?",
+                                (row["id"],),
+                            ).fetchone()
+                    connection.execute("COMMIT")
+                    return row
+                except Exception:
+                    if connection.in_transaction:
+                        connection.execute("ROLLBACK")
+                    raise
+        with self.database.session() as connection:
+            row = connection.execute(
+                "SELECT id,status,request_fingerprint FROM jobs WHERE dedupe_key=? ORDER BY created_at DESC,id DESC LIMIT 1",
+                (dedupe_key,),
+            ).fetchone()
+            return row
+
     def active_dedupe_job(self, dedupe_key: str):
         """Return the newest in-flight Job for a scheduler-owned identity."""
 
@@ -267,6 +543,7 @@ class JobRepository:
         created_by: str | None,
         priority: int | None = None,
         dedupe_key: str | None = None,
+        request_fingerprint: str | None = None,
     ) -> str:
         job_id = self._create_maintenance(
             kind=kind,
@@ -275,6 +552,7 @@ class JobRepository:
             created_by=created_by,
             priority=priority,
             dedupe_key=dedupe_key,
+            request_fingerprint=request_fingerprint,
             transaction_guard=None,
         )
         assert job_id is not None
@@ -289,6 +567,7 @@ class JobRepository:
         created_by: str | None,
         priority: int | None = None,
         dedupe_key: str | None = None,
+        request_fingerprint: str | None = None,
         transaction_guard: Callable[[Any], bool],
     ) -> str | None:
         """Create a maintenance Job under a caller-owned transaction guard."""
@@ -300,6 +579,7 @@ class JobRepository:
             created_by=created_by,
             priority=priority,
             dedupe_key=dedupe_key,
+            request_fingerprint=request_fingerprint,
             transaction_guard=transaction_guard,
         )
 
@@ -312,6 +592,7 @@ class JobRepository:
         created_by: str | None,
         priority: int | None = None,
         dedupe_key: str | None = None,
+        request_fingerprint: str | None = None,
         transaction_guard: Callable[[Any], bool] | None,
     ) -> str | None:
         if kind not in {
@@ -333,15 +614,27 @@ class JobRepository:
             try:
                 if dedupe_key:
                     status_clause = (
+                        "1=1"
+                        if str(dedupe_key).startswith("idempotency:")
+                        else (
                         "status NOT IN ('failed','cancelled')"
                         if kind == "backup"
                         else "status IN ('pending','preparing','running','pausing','retrying')"
+                        )
                     )
                     existing = connection.execute(
-                        f"SELECT id FROM jobs WHERE dedupe_key=? AND {status_clause}",
+                        f"SELECT id,request_fingerprint FROM jobs WHERE dedupe_key=? AND {status_clause}",
                         (dedupe_key,),
                     ).fetchone()
                     if existing is not None:
+                        stored_fingerprint = str(existing["request_fingerprint"] or "")
+                        if stored_fingerprint and request_fingerprint and stored_fingerprint != request_fingerprint:
+                            raise ValueError("IDEMPOTENCY_CONFLICT")
+                        if request_fingerprint and not stored_fingerprint:
+                            connection.execute(
+                                "UPDATE jobs SET request_fingerprint=? WHERE id=? AND request_fingerprint IS NULL",
+                                (request_fingerprint, existing["id"]),
+                            )
                         connection.execute("COMMIT")
                         return str(existing["id"])
                 if transaction_guard is not None and not transaction_guard(connection):
@@ -349,8 +642,8 @@ class JobRepository:
                     return None
                 connection.execute(
                     """
-                    INSERT INTO jobs(id,kind,name,status,strategy,settings_json,total_items,created_by,created_at,priority,dedupe_key)
-                    VALUES (?,?,?,'pending','local',?,1,?,?,?,?)
+                    INSERT INTO jobs(id,kind,name,status,strategy,settings_json,total_items,created_by,created_at,priority,dedupe_key,request_fingerprint)
+                    VALUES (?,?,?,'pending','local',?,1,?,?,?,?,?)
                     """,
                     (
                         job_id,
@@ -361,6 +654,7 @@ class JobRepository:
                         now,
                         max(1, min(int(priority if priority is not None else self._priority_for(kind)), 6)),
                         dedupe_key,
+                        request_fingerprint,
                     ),
                 )
                 connection.execute(
@@ -746,25 +1040,35 @@ class JobRepository:
             connection.execute("UPDATE jobs SET heartbeat_at=? WHERE id=?", (now, job_id))
         return int(cursor.rowcount)
 
-    def complete_item(self, job_id: str, item_id: str, result: dict, actual_cost: float = 0) -> None:
+    def complete_item(
+        self,
+        job_id: str,
+        item_id: str,
+        result: dict,
+        actual_cost: float = 0,
+        worker_id: str | None = None,
+    ) -> bool:
         now = utc_now()
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 status = connection.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+                ownership = " AND worker_id=?" if worker_id is not None else ""
+                ownership_params = (worker_id,) if worker_id is not None else ()
                 if status is None or status["status"] == "cancelled":
-                    connection.execute(
-                        "UPDATE job_items SET status='cancelled', completed_at=?, lease_until=NULL WHERE id=?",
-                        (now, item_id),
+                    cursor = connection.execute(
+                        f"UPDATE job_items SET status='cancelled', completed_at=?, lease_until=NULL, worker_id=NULL "
+                        f"WHERE id=? AND job_id=? AND status='running'{ownership}",  # noqa: S608
+                        (now, item_id, job_id, *ownership_params),
                     )
                 else:
                     stage = str(result.get("stage") or "completed")[:64]
                     cursor = connection.execute(
-                        """
+                        f"""
                         UPDATE job_items SET status='completed', completed_at=?, result_json=?,
-                                             lease_until=NULL, estimated_cost=?, stage=?, error_code=?
-                        WHERE id=? AND status='running'
-                        """,
+                                             lease_until=NULL, worker_id=NULL, estimated_cost=?, stage=?, error_code=?
+                        WHERE id=? AND job_id=? AND status='running'{ownership}
+                        """,  # noqa: S608
                         (
                             now,
                             json.dumps(result, ensure_ascii=False),
@@ -777,6 +1081,8 @@ class JobRepository:
                                 else str(result.get("error_code") or "") or None
                             ),
                             item_id,
+                            job_id,
+                            *ownership_params,
                         ),
                     )
                     if cursor.rowcount:
@@ -788,19 +1094,30 @@ class JobRepository:
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+        return bool(cursor.rowcount)
 
-    def record_late_completion(self, job_id: str, item_id: str, result: dict, actual_cost: float = 0) -> None:
+    def record_late_completion(
+        self,
+        job_id: str,
+        item_id: str,
+        result: dict,
+        actual_cost: float = 0,
+        worker_id: str | None = None,
+    ) -> bool:
         """Timeout 後底層 Thread 才結束：只記錄一次診斷，不可轉成正式成功。"""
         now = utc_now()
         with self.database.transaction() as connection:
+            ownership = " AND worker_id=?" if worker_id is not None else ""
+            ownership_params = (worker_id,) if worker_id is not None else ()
             cursor = connection.execute(
-                """
+                f"""
                 UPDATE job_items
                 SET status='failed',completed_at=?,result_json=?,error_code='JOB-004',
-                    lease_until=NULL,completion_state='timed_out_completed',dead_lettered_at=?
+                    lease_until=NULL,worker_id=NULL,completion_state='timed_out_completed',dead_lettered_at=?
                 WHERE id=? AND job_id=? AND status='running'
-                """,
-                (now, json.dumps(result, ensure_ascii=False), now, item_id, job_id),
+                {ownership}
+                """,  # noqa: S608
+                (now, json.dumps(result, ensure_ascii=False), now, item_id, job_id, *ownership_params),
             )
             if cursor.rowcount:
                 connection.execute(
@@ -817,18 +1134,22 @@ class JobRepository:
                 "工作逾時後才結束；結果僅保留診斷，不會重試或重複套用",
                 {"item_id": item_id},
             )
+        return bool(cursor.rowcount)
 
-    def defer_item(self, item_id: str) -> None:
+    def defer_item(self, item_id: str, worker_id: str | None = None) -> bool:
         """預算阻擋時歸還租約，不把尚未送出的項目記成分析失敗。"""
         with self.database.session() as connection:
-            connection.execute(
-                """
+            ownership = " AND worker_id=?" if worker_id is not None else ""
+            ownership_params = (worker_id,) if worker_id is not None else ()
+            cursor = connection.execute(
+                f"""
                 UPDATE job_items
                 SET status='pending',worker_id=NULL,lease_until=NULL,available_at=?,attempts=MAX(0,attempts-1)
-                WHERE id=? AND status='running'
-                """,
-                (utc_now(), item_id),
+                WHERE id=? AND status='running'{ownership}
+                """,  # noqa: S608
+                (utc_now(), item_id, *ownership_params),
             )
+        return bool(cursor.rowcount)
 
     def fail_item(
         self,
@@ -839,26 +1160,33 @@ class JobRepository:
         *,
         max_attempts: int = 3,
         retry_interval_seconds: int | None = None,
-    ) -> None:
+        worker_id: str | None = None,
+    ) -> bool:
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 item = connection.execute(
-                    "SELECT attempts, photo_id FROM job_items WHERE id=?", (item_id,)
+                    "SELECT attempts, photo_id FROM job_items WHERE id=? AND job_id=? AND status='running'"
+                    + (" AND worker_id=?" if worker_id is not None else ""),
+                    (item_id, job_id, *((worker_id,) if worker_id is not None else ())),
                 ).fetchone()
-                terminal = item is None or int(item["attempts"]) >= max_attempts
+                if item is None:
+                    connection.execute("COMMIT")
+                    return False
+                terminal = int(item["attempts"]) >= max_attempts
                 if terminal:
-                    connection.execute(
+                    cursor = connection.execute(
                         """
                         UPDATE job_items SET status='failed', completed_at=?, error_code=?,
-                                             lease_until=NULL,
+                                             lease_until=NULL, worker_id=NULL,
                                              dead_lettered_at=? WHERE id=?
                         """,
                         (now, error_code, now, item_id),
                     )
-                    connection.execute("UPDATE jobs SET failed_items=failed_items+1 WHERE id=?", (job_id,))
+                    if cursor.rowcount:
+                        connection.execute("UPDATE jobs SET failed_items=failed_items+1 WHERE id=?", (job_id,))
                 else:
                     delay = (
                         max(1, int(retry_interval_seconds))
@@ -866,10 +1194,13 @@ class JobRepository:
                         else min(300, 2 ** int(item["attempts"]))
                     )
                     available = (now_dt + timedelta(seconds=delay)).isoformat()
-                    connection.execute(
-                        "UPDATE job_items SET status='pending', available_at=?, error_code=?, lease_until=NULL WHERE id=?",
+                    cursor = connection.execute(
+                        "UPDATE job_items SET status='pending', available_at=?, error_code=?, lease_until=NULL, worker_id=NULL WHERE id=?",
                         (available, error_code, item_id),
                     )
+                if not cursor.rowcount:
+                    connection.execute("COMMIT")
+                    return False
                 fingerprint = hashlib.sha256(f"{job_id}:{item_id}:{error_code}".encode()).hexdigest()
                 existing_error = connection.execute(
                     "SELECT id FROM job_errors WHERE fingerprint=? AND resolved_at IS NULL",
@@ -902,6 +1233,7 @@ class JobRepository:
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+        return True
 
     def finalize_if_done(
         self,
@@ -931,7 +1263,41 @@ class JobRepository:
                 return False
             target = "completed_with_errors" if int(counts["failed"] or 0) else "completed"
             if finalizer is not None:
-                finalizer(connection, job_id, target)
+                connection.execute("SAVEPOINT job_finalizer")
+                try:
+                    finalizer(connection, job_id, target)
+                except Exception as error:
+                    connection.execute("ROLLBACK TO job_finalizer")
+                    connection.execute("RELEASE job_finalizer")
+                    target = "completed_with_errors"
+                    message = str(error)[:1000] or error.__class__.__name__
+                    fingerprint = hashlib.sha256(
+                        f"{job_id}:finalizer:{error.__class__.__name__}:{message}".encode("utf-8")
+                    ).hexdigest()
+                    connection.execute(
+                        """
+                        INSERT INTO job_errors(
+                            job_id,job_item_id,photo_id,component,error_code,fingerprint,severity,message,
+                            first_seen_at,last_seen_at
+                        ) VALUES (?,?,NULL,'finalizer','JOB-FINALIZER-001',?,?,?, ?,?)
+                        """,
+                        (job_id, None, fingerprint, "error", message, now, now),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO job_events(job_id,event,message,details_json,created_at)
+                        VALUES (?,?,?,?,?)
+                        """,
+                        (
+                            job_id,
+                            "finalizer_failed",
+                            "工作 finalizer 失敗；已隔離並以 completed_with_errors 結束",
+                            json.dumps({"error": message}, ensure_ascii=False),
+                            now,
+                        ),
+                    )
+                else:
+                    connection.execute("RELEASE job_finalizer")
             cursor = connection.execute(
                 "UPDATE jobs SET status=?, completed_at=?, heartbeat_at=? WHERE id=? AND status IN ('running','retrying')",
                 (target, now, now, job_id),
@@ -957,16 +1323,84 @@ class JobRepository:
                 return 0
             connection.execute("BEGIN IMMEDIATE")
             try:
-                cursor = connection.execute(
+                rows = connection.execute(
                     """
-                    UPDATE job_items SET status='pending', worker_id=NULL, lease_until=NULL, available_at=?
+                    SELECT id,job_id,photo_id,attempts FROM job_items
                     WHERE status='running' AND (lease_until IS NULL OR lease_until<?)
+                    ORDER BY job_id,id
                     """,
-                    (now, now),
-                )
+                    (now,),
+                ).fetchall()
+                recovered = 0
+                for row in rows:
+                    item_id = str(row["id"])
+                    job_id = str(row["job_id"])
+                    attempts = int(row["attempts"] or 0)
+                    if attempts >= MAX_STALE_RECOVERY_ATTEMPTS:
+                        cursor = connection.execute(
+                            """
+                            UPDATE job_items
+                            SET status='failed',completed_at=?,worker_id=NULL,lease_until=NULL,
+                                error_code='WORKER_CRASH',dead_lettered_at=?,completion_state='worker_crash'
+                            WHERE id=? AND status='running' AND (lease_until IS NULL OR lease_until<?)
+                            """,
+                            (now, now, item_id, now),
+                        )
+                        if cursor.rowcount:
+                            recovered += 1
+                            connection.execute(
+                                "UPDATE jobs SET failed_items=failed_items+1,heartbeat_at=? WHERE id=?",
+                                (now, job_id),
+                            )
+                            fingerprint = hashlib.sha256(
+                                f"{job_id}:{item_id}:WORKER_CRASH".encode("utf-8")
+                            ).hexdigest()
+                            connection.execute(
+                                """
+                                INSERT INTO job_errors(
+                                    job_id,job_item_id,photo_id,component,error_code,fingerprint,severity,message,
+                                    first_seen_at,last_seen_at
+                                ) VALUES (?,?,?,'worker','WORKER_CRASH',?,'error',?,?,?)
+                                """,
+                                (
+                                    job_id,
+                                    item_id,
+                                    row["photo_id"],
+                                    fingerprint,
+                                    "Worker lease expired after bounded recovery attempts",
+                                    now,
+                                    now,
+                                ),
+                            )
+                            connection.execute(
+                                """
+                                INSERT INTO job_events(job_id,event,message,details_json,created_at)
+                                VALUES (?,?,?,?,?)
+                                """,
+                                (
+                                    job_id,
+                                    "worker_crash",
+                                    "Worker lease 超過上限，工作項目已終止",
+                                    json.dumps(
+                                        {"item_id": item_id, "attempts": attempts, "error_code": "WORKER_CRASH"},
+                                        ensure_ascii=False,
+                                    ),
+                                    now,
+                                ),
+                            )
+                    else:
+                        cursor = connection.execute(
+                            """
+                            UPDATE job_items
+                            SET status='pending',worker_id=NULL,lease_until=NULL,available_at=?
+                            WHERE id=? AND status='running' AND (lease_until IS NULL OR lease_until<?)
+                            """,
+                            (now, item_id, now),
+                        )
+                        recovered += int(cursor.rowcount)
                 connection.execute("UPDATE jobs SET status='paused' WHERE status='pausing'")
                 connection.execute("COMMIT")
-                return int(cursor.rowcount)
+                return recovered
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
@@ -976,6 +1410,15 @@ class JobRepository:
         with self.database.session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                job = connection.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+                if job is None:
+                    connection.execute("COMMIT")
+                    return 0
+                if str(job["status"]) not in {"failed", "completed_with_errors"}:
+                    # A running, paused, cancelled, or already-successful Job
+                    # must never be revived by a retry endpoint.
+                    connection.execute("COMMIT")
+                    return 0
                 cursor = connection.execute(
                     """
                     UPDATE job_items SET status='pending', available_at=?, error_code=NULL, completed_at=NULL,

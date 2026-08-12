@@ -5,10 +5,12 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import threading
 from uuid import uuid4
 
 from PIL import Image
 
+from inktime.app.api import photos as photos_api
 from inktime.app.domain.analysis.plan import fingerprint
 from inktime.app.domain.photos import PhotoPreprocessor
 from inktime.app.providers.base import ProviderResponse, Usage, VisionProvider
@@ -202,6 +204,49 @@ def test_force_ai_api_is_admin_exclusion_only_and_creates_fresh_job(client, app,
     assert [item["photo_id"] for item in app.extensions["inktime_job_repository"].list_items(job["id"])] == [
         excluded_id
     ]
+
+
+def test_manual_ai_idempotency_key_is_namespaced_per_endpoint(client, app, tmp_path):
+    create_admin(app)
+    login(client)
+    excluded_id = _scan(app, tmp_path, screenshot=True)[0]
+    _setting(app, "analysis.ai_mode", "off")
+    _setting(app, "analysis.execution_mode", "local_with_manual_ai")
+    headers = {"X-CSRF-Token": csrf(client), "Idempotency-Key": "shared-manual-key"}
+
+    single = client.post(f"/api/v1/photos/{excluded_id}/ai", headers=headers)
+    batch = client.post(
+        "/api/v1/photos/exclusions/ai",
+        json={"photo_ids": [excluded_id]},
+        headers=headers,
+    )
+
+    assert single.status_code == 201
+    assert batch.status_code == 201
+    assert single.json["id"] != batch.json["id"]
+
+
+def test_manual_ai_idempotency_conflict_has_stable_api_error_code(client, app, tmp_path):
+    create_admin(app)
+    login(client)
+    first_root = tmp_path / "first-excluded"
+    second_root = tmp_path / "second-excluded"
+    first_root.mkdir()
+    second_root.mkdir()
+    first_ids = _scan(app, first_root, screenshot=True)
+    second_ids = _scan(app, second_root, screenshot=True)
+    second_id = next(photo_id for photo_id in second_ids if photo_id not in first_ids)
+    excluded_ids = [first_ids[0], second_id]
+    _setting(app, "analysis.ai_mode", "off")
+    _setting(app, "analysis.execution_mode", "local_with_manual_ai")
+    headers = {"X-CSRF-Token": csrf(client), "Idempotency-Key": "manual-conflict-key"}
+
+    first = client.post(f"/api/v1/photos/{excluded_ids[0]}/ai", headers=headers)
+    second = client.post(f"/api/v1/photos/{excluded_ids[1]}/ai", headers=headers)
+
+    assert first.status_code == 201
+    assert second.status_code == 409
+    assert second.json["error_code"] == "IDEMPOTENCY_CONFLICT"
 
 
 def test_ai_cache_hit_does_not_call_provider_twice(app, tmp_path, monkeypatch):
@@ -596,6 +641,246 @@ def test_full_library_confirmation_and_queue_count_only_active_eligible_photos(c
         }
     assert photo_ids <= set(eligible_ids)
     assert excluded_id not in photo_ids
+
+
+def test_full_library_group_idempotency_is_bounded_replayable_and_conflict_safe(client, app, monkeypatch):
+    create_admin(app)
+    login(client)
+    now = datetime.now(timezone.utc).isoformat()
+    library_id = str(uuid4())
+    initial_ids = [str(uuid4()), str(uuid4())]
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "INSERT INTO libraries(id,name,root_path,created_at,updated_at) VALUES (?,?,?,?,?)",
+            (library_id, "分組冪等測試", "/photos", now, now),
+        )
+        connection.executemany(
+            """
+            INSERT INTO photos(id,library_id,relative_path,status,eligible,lifecycle_status,
+                               local_candidate_score,created_at,updated_at)
+            VALUES (?,?,?,'preprocessed',1,'active',?,?,?)
+            """,
+            [
+                (initial_ids[0], library_id, "group-a/first.jpg", 10.0, now, now),
+                (initial_ids[1], library_id, "group-b/second.jpg", 9.0, now, now),
+            ],
+        )
+    _setting(app, "analysis.ai_mode", "full_library")
+    _setting(app, "analysis.ai_daily_photo_limit", 10)
+    client_key = "K" * 128
+    headers = {
+        "X-CSRF-Token": csrf(client),
+        "Idempotency-Key": client_key,
+    }
+    reservation_events = []
+    job_repository = app.extensions["inktime_job_repository"]
+    photo_repository = app.extensions["inktime_photo_repository"]
+    original_reserve = job_repository.reserve_idempotent_request
+    original_enumerate = photo_repository.eligible_photo_batches
+
+    def tracked_reserve(*args, **kwargs):
+        reservation_events.append("reserve")
+        return original_reserve(*args, **kwargs)
+
+    def tracked_enumerate(*args, **kwargs):
+        reservation_events.append("enumerate")
+        return original_enumerate(*args, **kwargs)
+
+    monkeypatch.setattr(job_repository, "reserve_idempotent_request", tracked_reserve)
+    monkeypatch.setattr(photo_repository, "eligible_photo_batches", tracked_enumerate)
+
+    first = client.post(
+        "/api/v1/photos/ai/run",
+        json={"confirm": True, "batch_by": "folder"},
+        headers=headers,
+    )
+    assert first.status_code == 201
+    assert reservation_events[:2] == ["reserve", "enumerate"]
+    first_job_ids = [job["id"] for job in first.json["jobs"]]
+    assert len(first_job_ids) == 2
+    with app.extensions["inktime_database"].session() as connection:
+        first_rows = connection.execute(
+            "SELECT id,dedupe_key FROM jobs WHERE kind='analysis' ORDER BY created_at,id"
+        ).fetchall()
+    assert [str(row["id"]) for row in first_rows] == first_job_ids
+    assert len({str(row["dedupe_key"]) for row in first_rows}) == 2
+
+    replay = client.post(
+        "/api/v1/photos/ai/run",
+        json={"confirm": True, "batch_by": "folder"},
+        headers={**headers, "Idempotency-Key": f"  {client_key}  "},
+    )
+    assert replay.status_code == 201
+    assert [job["id"] for job in replay.json["jobs"]] == first_job_ids
+
+    long_key_replay = client.post(
+        "/api/v1/photos/ai/run",
+        json={"confirm": True, "batch_by": "folder"},
+        headers={**headers, "Idempotency-Key": f"{client_key}tail"},
+    )
+    assert long_key_replay.status_code == 201
+    assert [job["id"] for job in long_key_replay.json["jobs"]] == first_job_ids
+
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            """
+            INSERT INTO photos(id,library_id,relative_path,status,eligible,lifecycle_status,
+                               local_candidate_score,created_at,updated_at)
+            VALUES (?,?,?,'preprocessed',1,'active',?,?,?)
+            """,
+            (str(uuid4()), library_id, "group-a/new.jpg", 8.0, now, now),
+        )
+        before_conflict_count = connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+
+    same_request_after_library_change = client.post(
+        "/api/v1/photos/ai/run",
+        json={"confirm": True, "batch_by": "folder"},
+        headers=headers,
+    )
+    assert same_request_after_library_change.status_code == 201
+    assert [job["id"] for job in same_request_after_library_change.json["jobs"]] == first_job_ids
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == before_conflict_count
+
+    changed_batch = client.post(
+        "/api/v1/photos/ai/run",
+        json={"confirm": True, "batch_by": "year"},
+        headers=headers,
+    )
+    assert changed_batch.status_code == 409
+    assert changed_batch.json["error_code"] == "IDEMPOTENCY_CONFLICT"
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == before_conflict_count
+
+    _setting(app, "analysis.strategy", "local")
+    changed_plan = client.post(
+        "/api/v1/photos/ai/run",
+        json={"confirm": True, "batch_by": "folder"},
+        headers=headers,
+    )
+    assert changed_plan.status_code == 409
+    assert changed_plan.json["error_code"] == "IDEMPOTENCY_CONFLICT"
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == before_conflict_count
+
+
+def test_full_library_concurrent_request_has_single_enumeration_owner(app, tmp_path, monkeypatch):
+    create_admin(app)
+    now = datetime.now(timezone.utc).isoformat()
+    library_id = str(uuid4())
+    photo_id = str(uuid4())
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "INSERT INTO libraries(id,name,root_path,created_at,updated_at) VALUES (?,?,?,?,?)",
+            (library_id, "並行預約", "/photos", now, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO photos(id,library_id,relative_path,status,eligible,lifecycle_status,
+                               local_candidate_score,created_at,updated_at)
+            VALUES (?,?,?,'preprocessed',1,'active',?,?,?)
+            """,
+            (photo_id, library_id, "single.jpg", 10.0, now, now),
+        )
+    _setting(app, "analysis.ai_mode", "full_library")
+    _setting(app, "analysis.ai_daily_photo_limit", 10)
+    monkeypatch.setattr(photos_api, "IDEMPOTENCY_RESERVATION_LEASE_SECONDS", 1)
+    monkeypatch.setattr(photos_api, "IDEMPOTENCY_RESERVATION_HEARTBEAT_SECONDS", 0.05)
+    photo_repository = app.extensions["inktime_photo_repository"]
+    original_enumerate = photo_repository.eligible_photo_batches
+    enumeration_started = threading.Event()
+    release_enumeration = threading.Event()
+    enumeration_calls = 0
+    calls_lock = threading.Lock()
+
+    def blocked_enumerate(*args, **kwargs):
+        nonlocal enumeration_calls
+        with calls_lock:
+            enumeration_calls += 1
+        enumeration_started.set()
+        assert release_enumeration.wait(5)
+        return original_enumerate(*args, **kwargs)
+
+    monkeypatch.setattr(photo_repository, "eligible_photo_batches", blocked_enumerate)
+
+    def submit_request():
+        with app.test_client() as concurrent_client:
+            login(concurrent_client)
+            return concurrent_client.post(
+                "/api/v1/photos/ai/run",
+                json={"confirm": True, "batch_by": "folder"},
+                headers={
+                    "X-CSRF-Token": csrf(concurrent_client),
+                    "Idempotency-Key": "concurrent-full-library-key",
+                },
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(submit_request)
+        assert enumeration_started.wait(5)
+        time.sleep(1.5)
+        second_response = pool.submit(submit_request).result(timeout=5)
+        assert second_response.status_code == 409
+        assert second_response.json["error_code"] == "IDEMPOTENCY_IN_PROGRESS"
+        release_enumeration.set()
+        first_response = first_future.result(timeout=10)
+
+    assert first_response.status_code == 201
+    assert enumeration_calls == 1
+
+
+def test_full_library_in_progress_ledger_resumes_partial_group_creation(client, app, monkeypatch):
+    create_admin(app)
+    login(client)
+    now = datetime.now(timezone.utc).isoformat()
+    library_id = str(uuid4())
+    photo_ids = [str(uuid4()), str(uuid4())]
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "INSERT INTO libraries(id,name,root_path,created_at,updated_at) VALUES (?,?,?,?,?)",
+            (library_id, "部分恢復", "/photos", now, now),
+        )
+        connection.executemany(
+            """
+            INSERT INTO photos(id,library_id,relative_path,status,eligible,lifecycle_status,
+                               local_candidate_score,created_at,updated_at)
+            VALUES (?,?,?,'preprocessed',1,'active',?,?,?)
+            """,
+            [
+                (photo_ids[0], library_id, "group-a/first.jpg", 10.0, now, now),
+                (photo_ids[1], library_id, "group-b/second.jpg", 9.0, now, now),
+            ],
+        )
+    _setting(app, "analysis.ai_mode", "full_library")
+    _setting(app, "analysis.ai_daily_photo_limit", 10)
+    headers = {"X-CSRF-Token": csrf(client), "Idempotency-Key": "partial-resume-key"}
+    original_queue_ai = photos_api._queue_ai
+    calls = 0
+
+    def fail_after_first(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise ValueError("simulated partial group failure")
+        return original_queue_ai(*args, **kwargs)
+
+    monkeypatch.setattr(photos_api, "_queue_ai", fail_after_first)
+    interrupted = client.post(
+        "/api/v1/photos/ai/run", json={"confirm": True, "batch_by": "folder"}, headers=headers
+    )
+    assert interrupted.status_code == 409
+    monkeypatch.setattr(photos_api, "_queue_ai", original_queue_ai)
+    resumed = client.post(
+        "/api/v1/photos/ai/run", json={"confirm": True, "batch_by": "folder"}, headers=headers
+    )
+    assert resumed.status_code == 201
+    assert len(resumed.json["jobs"]) == 2
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM jobs WHERE kind='analysis'").fetchone()[0] == 2
+        ledger = connection.execute(
+            "SELECT status FROM idempotency_requests WHERE scope_key LIKE 'idempotency:ai-mode-run/full-library-request:%'"
+        ).fetchone()
+    assert ledger["status"] == "completed"
 
 
 def test_thumbnail_cleanup_only_queries_hashes_visible_in_cache(app, tmp_path):

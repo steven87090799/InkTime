@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from inktime.app.domain.jobs.failure_policy import (
     FailureClass,
+    JobShutdownAmbiguousError,
     classify_failure,
     failure_code,
 )
@@ -56,6 +57,8 @@ class BoundedJobWorker:
     """只維持固定數量 Future；照片總數不會放大 Worker 記憶體。"""
 
     MAX_CHILD_PROCESSES = 4
+    LEASE_RENEWAL_INTERVAL_SECONDS = 30.0
+    SHUTDOWN_DRAIN_SECONDS = 20.0
 
     def __init__(
         self,
@@ -98,6 +101,7 @@ class BoundedJobWorker:
         self.terminate_grace_seconds = max(0.05, float(terminate_grace_seconds))
         self.worker_id = str(uuid4())
         self.stop_event = threading.Event()
+        self.shutdown_deadline: float | None = None
         self.max_observed_futures = 0
         self.processed_items = 0
         self.failure_count = 0
@@ -107,8 +111,10 @@ class BoundedJobWorker:
         self.child_active_max = 0
         self._last_progress_at = time.monotonic()
 
-    def request_stop(self) -> None:
+    def request_stop(self, *, deadline: float | None = None) -> None:
         self.stop_event.set()
+        if self.shutdown_deadline is None:
+            self.shutdown_deadline = deadline or (time.monotonic() + self.SHUTDOWN_DRAIN_SECONDS)
 
     def _process(self, item) -> tuple[str, dict, float]:
         result = self.processor(dict(item))
@@ -122,7 +128,8 @@ class BoundedJobWorker:
         self.failure_count += 1
         code = failure_code(exc)
         if code.startswith("BUDGET-"):
-            self.repository.defer_item(item_id)
+            if not self.repository.defer_item(item_id, self.worker_id):
+                return
             self.repository.transition(
                 job_id,
                 {"running", "retrying"},
@@ -144,6 +151,7 @@ class BoundedJobWorker:
             str(exc),
             max_attempts=attempts,
             retry_interval_seconds=self.retry_interval_seconds,
+            worker_id=self.worker_id,
         )
         if self.error_callback and (
             self.failure_count <= 3 or self.failure_count % self.progress_interval_items == 0
@@ -201,6 +209,8 @@ class BoundedJobWorker:
         last_lease_renewal = time.monotonic()
         try:
             while not self.stop_event.is_set() or tasks:
+                if self.shutdown_deadline is not None and time.monotonic() >= self.shutdown_deadline:
+                    break
                 job = self.repository.get(job_id)
                 if job is None or job["status"] not in {"running", "retrying", "pausing"}:
                     break
@@ -243,7 +253,7 @@ class BoundedJobWorker:
                             if self.result_callback:
                                 self.result_callback(result)
                             self.repository.complete_item(
-                                job_id, str(completed_id), dict(result), float(cost)
+                                job_id, str(completed_id), dict(result), float(cost), self.worker_id
                             )
                         else:
                             self._record_failure(job_id, item_id, JobChildError(str(message[1])))
@@ -258,7 +268,10 @@ class BoundedJobWorker:
                         self._record_processed()
                         progressed = True
 
-                if now - last_lease_renewal >= min(30.0, self.timeout_seconds / 2):
+                if now - last_lease_renewal >= min(
+                    self.LEASE_RENEWAL_INTERVAL_SECONDS,
+                    max(1.0, self.timeout_seconds / 2) if self.timeout_seconds else self.LEASE_RENEWAL_INTERVAL_SECONDS,
+                ):
                     self.repository.renew_leases(job_id, self.worker_id)
                     last_lease_renewal = now
                 if not tasks:
@@ -267,8 +280,14 @@ class BoundedJobWorker:
                     if not progressed:
                         # Retry backoff is persisted; return control to Scheduler.
                         break
+                if time.monotonic() - last_lease_renewal >= self.LEASE_RENEWAL_INTERVAL_SECONDS:
+                    self.repository.renew_leases(job_id, self.worker_id)
+                    last_lease_renewal = time.monotonic()
                 if not progressed:
-                    self.stop_event.wait(0.02)
+                    wait_seconds = 0.02
+                    if self.shutdown_deadline is not None:
+                        wait_seconds = min(wait_seconds, max(0.0, self.shutdown_deadline - time.monotonic()))
+                    self.stop_event.wait(wait_seconds)
         finally:
             # Shutdown and every exceptional path terminate, join and reap all
             # children. Their late pipe results are deliberately never consumed.
@@ -287,8 +306,31 @@ class BoundedJobWorker:
         futures: dict[Future, tuple[str, float]] = {}
         timed_out: set[Future] = set()
         timeout_triggered = False
-        with ThreadPoolExecutor(max_workers=self.concurrency, thread_name_prefix="inktime") as executor:
+        last_lease_renewal = time.monotonic()
+        executor = ThreadPoolExecutor(max_workers=self.concurrency, thread_name_prefix="inktime")
+        forced_shutdown = False
+
+        def consume(future: Future, item_id: str) -> None:
+            try:
+                completed_id, result, cost = future.result()
+            except Exception as exc:
+                self._record_failure(job_id, item_id, exc)
+            else:
+                if future in timed_out:
+                    self.repository.record_late_completion(
+                        job_id, completed_id, result, cost, self.worker_id
+                    )
+                else:
+                    if self.result_callback:
+                        self.result_callback(result)
+                    self.repository.complete_item(job_id, completed_id, result, cost, self.worker_id)
+            self._record_processed()
+
+        try:
             while not self.stop_event.is_set() or futures:
+                if self.shutdown_deadline is not None and time.monotonic() >= self.shutdown_deadline:
+                    forced_shutdown = bool(futures)
+                    break
                 job = self.repository.get(job_id)
                 if job is None or job["status"] in {
                     "cancelled",
@@ -313,6 +355,7 @@ class BoundedJobWorker:
 
                 if (
                     not timeout_triggered
+                    and not self.stop_event.is_set()
                     and job["status"] in {"running", "retrying"}
                     and len(futures) < self.queue_size
                 ):
@@ -328,11 +371,16 @@ class BoundedJobWorker:
                     # 可能正在等待指數退避；單次執行先交還 Scheduler。
                     break
 
-                done, _ = wait(
-                    futures, timeout=min(30, self.timeout_seconds or 30), return_when=FIRST_COMPLETED
-                )
+                wait_timeout = min(30, self.timeout_seconds or 30)
+                if self.shutdown_deadline is not None:
+                    wait_timeout = min(wait_timeout, max(0.0, self.shutdown_deadline - time.monotonic()))
+                done, _ = wait(futures, timeout=wait_timeout, return_when=FIRST_COMPLETED)
                 if not done:
+                    if self.shutdown_deadline is not None and time.monotonic() >= self.shutdown_deadline:
+                        forced_shutdown = bool(futures)
+                        break
                     self.repository.renew_leases(job_id, self.worker_id)
+                    last_lease_renewal = time.monotonic()
                     if self.timeout_seconds:
                         expired = [
                             future
@@ -348,35 +396,47 @@ class BoundedJobWorker:
                     continue
                 for future in done:
                     item_id, _started = futures.pop(future)
-                    try:
-                        completed_id, result, cost = future.result()
-                    except Exception as exc:
-                        self._record_failure(job_id, item_id, exc)
-                    else:
-                        if future in timed_out:
-                            self.repository.record_late_completion(job_id, completed_id, result, cost)
-                        else:
-                            if self.result_callback:
-                                self.result_callback(result)
-                            self.repository.complete_item(job_id, completed_id, result, cost)
-                    self._record_processed()
+                    consume(future, item_id)
+                if time.monotonic() - last_lease_renewal >= self.LEASE_RENEWAL_INTERVAL_SECONDS:
+                    self.repository.renew_leases(job_id, self.worker_id)
+                    last_lease_renewal = time.monotonic()
 
-            # 優雅停止：已送出的工作完成並記錄；不再 claim 新項目。
-            for future in list(futures):
-                item_id, _started = futures[future]
-                try:
-                    completed_id, result, cost = future.result()
-                except Exception as exc:
-                    self._record_failure(job_id, item_id, exc)
-                else:
-                    if future in timed_out:
-                        self.repository.record_late_completion(job_id, completed_id, result, cost)
-                    else:
-                        if self.result_callback:
-                            self.result_callback(result)
-                        self.repository.complete_item(job_id, completed_id, result, cost)
-                self._record_processed()
+            # Graceful stop drains in-flight work only until the SIGTERM budget.
+            # A queued Future can be cancelled and retried.  A running Future
+            # cannot be killed safely; fence it as terminal/ambiguous so its
+            # late side effects cannot be followed by a duplicate retry.
+            if futures:
+                remaining = (
+                    None
+                    if self.shutdown_deadline is None
+                    else max(0.0, self.shutdown_deadline - time.monotonic())
+                )
+                done, _pending = wait(futures, timeout=remaining)
+                for future in done:
+                    item_id, _started = futures.pop(future)
+                    consume(future, item_id)
+                if futures:
+                    forced_shutdown = True
+                    for future, (item_id, _started) in list(futures.items()):
+                        if future.done():
+                            futures.pop(future, None)
+                            consume(future, item_id)
+                            continue
+                        cancelled = future.cancel()
+                        futures.pop(future, None)
+                        self._record_failure(
+                            job_id,
+                            item_id,
+                            RuntimeError("worker shutdown drain deadline exceeded")
+                            if cancelled
+                            else JobShutdownAmbiguousError(
+                                "worker shutdown reached a running item before it completed"
+                            ),
+                        )
+                        self._record_processed()
             job = self.repository.get(job_id)
             if job is not None and job["status"] == "pausing":
                 self.repository.acknowledge_pause(job_id)
             self._finalize_if_done(job_id)
+        finally:
+            executor.shutdown(wait=not forced_shutdown, cancel_futures=forced_shutdown)

@@ -27,6 +27,7 @@ int main() {
   const char embeddedNul[] = "/api/device/v1/queue/items/item\0/files/photo.bin";
   assert(!isSafeQueueDownloadPath(embeddedNul, sizeof(embeddedNul) - 1U));
   assert(queueManifestDecision(404, false, 0, false, 0) == QueueManifestDecision::FallbackLatest);
+  assert(queueManifestDecision(409, false, 0, false, 0) == QueueManifestDecision::FallbackLatest);
   assert(queueManifestDecision(200, true, 100, true, 0) == QueueManifestDecision::FallbackLatest);
   assert(queueManifestDecision(200, true, 100, true, 1) == QueueManifestDecision::UseQueue);
   assert(queueManifestDecision(200, true, 100, false, 1) == QueueManifestDecision::Reject);
@@ -42,6 +43,41 @@ int main() {
   assert(ackDecision(401, 0) == AckDecision::AuthorizationFailed);
   assert(ackDecision(503, 0) == AckDecision::Retry);
   assert(ackDecision(503, kQueueRetryLimit) == AckDecision::Stop);
+  assert(ackDecision(429, 0) == AckDecision::Retry);
+  assert(ackDecision(429, kQueueRetryLimit) == AckDecision::Stop);
+  assert(queueAckResultDisposition(
+           "item-1", "DISPLAY_COMPLETED", "item-1", "DISPLAY_COMPLETED",
+           200, "accepted", "") == QueueAckResultDisposition::Accepted);
+  assert(queueAckResultDisposition(
+           "item-1", "DISPLAY_COMPLETED", "item-1", "DISPLAY_COMPLETED",
+           409, "rejected", "QUEUE-003") == QueueAckResultDisposition::Stale);
+  assert(queueAckResultDisposition(
+           "item-1", "DISPLAY_COMPLETED", "item-1", "DISPLAY_COMPLETED",
+           403, "rejected", "QUEUE-002")
+         == QueueAckResultDisposition::AuthoritativePermanentReject);
+  assert(queueAckResultDisposition(
+           "item-1", "DISPLAY_COMPLETED", "other-item", "DISPLAY_COMPLETED",
+           403, "rejected", "QUEUE-002") == QueueAckResultDisposition::RetainPending);
+  assert(queueAckResultDisposition(
+           "item-1", "DISPLAY_COMPLETED", "item-1", "DISPLAY_COMPLETED",
+           0, "rejected", "QUEUE-002") == QueueAckResultDisposition::RetainPending);
+  assert(queueAckResultDisposition(
+           "item-1", "DISPLAY_COMPLETED", "item-1", "DISPLAY_COMPLETED",
+           429, "rejected", "RATE-LIMIT") == QueueAckResultDisposition::RetainPending);
+  assert(queueAckResultDisposition(
+           "item-1", "DISPLAY_COMPLETED", "item-1", "DISPLAY_COMPLETED",
+           500, "rejected", "SERVER-ERROR") == QueueAckResultDisposition::RetainPending);
+  assert(queueAckResultDisposition(
+           "item-1", "DISPLAY_COMPLETED", "item-1", "DISPLAY_COMPLETED",
+           403, "rejected", "") == QueueAckResultDisposition::RetainPending);
+  assert(!queueAckMayUnlockDisplay(false, true, false, false));
+  assert(queueAckMayUnlockDisplay(true, true, false, false));
+  // QUEUE-003 stale evidence is retained, but stale-only and
+  // stale-plus-permanent-reject batches must not unlock this wake.
+  assert(!queueAckMayUnlockDisplay(false, false, false, false));
+  assert(!queueAckMayUnlockDisplay(true, false, false, false));
+  assert(!queueAckMayUnlockDisplay(true, false, true, false));
+  assert(!queueAckMayUnlockDisplay(true, true, false, true));
 
   char first[256] = {};
   char restarted[256] = {};

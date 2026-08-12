@@ -12,6 +12,7 @@ from flask import Blueprint, abort, current_app, g, jsonify, render_template, re
 from PIL import Image, ImageDraw, ImageFont
 
 from inktime.app.core.json_values import json_object_payload
+from inktime.app.core.idempotency import request_fingerprint, scoped_idempotency_key
 from inktime.app.web.access import administrator_required, login_required
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.domain.rendering import (
@@ -773,13 +774,25 @@ def publish_release():
         job_settings["profile_keys"] = profile_keys
     if device_ids:
         job_settings["device_ids"] = device_ids
-    job_id = repository.create_maintenance(
-        kind="render",
-        name="電子紙正式發布",
-        settings=job_settings,
-        created_by=g.user["id"],
-    )
-    current_app.extensions["inktime_job_service"].start(job_id)
+    idempotency_key = scoped_idempotency_key("release", str(g.user["id"]), request.headers.get("Idempotency-Key"))
+    try:
+        job_id = repository.create_maintenance(
+            kind="render",
+            name="電子紙正式發布",
+            settings=job_settings,
+            created_by=g.user["id"],
+            dedupe_key=idempotency_key,
+            request_fingerprint=(
+                request_fingerprint({"name": "電子紙正式發布", "settings": job_settings})
+                if idempotency_key
+                else None
+            ),
+        )
+    except ValueError as exc:
+        abort(409, description=str(exc))
+    current = repository.get(job_id)
+    if current is not None and str(current["status"]) == "pending":
+        current_app.extensions["inktime_job_service"].start(job_id)
     return {"id": job_id, "detail_url": f"/jobs/{job_id}"}, 202
 
 

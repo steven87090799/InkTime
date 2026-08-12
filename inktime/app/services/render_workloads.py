@@ -64,8 +64,11 @@ def _open_saved_upload(path_value: str, suffix: str) -> tuple[Image.Image, str]:
     with Image.open(path) as opened:
         if opened.width * opened.height > MAX_INPUT_PIXELS:
             raise ValueError("IMG-002 照片像素不可超過 4000 萬")
-        opened.load()
         source_size = f"{opened.width}x{opened.height}"
+        if opened.format == "JPEG":
+            opened.draft("RGB", (1600, 1600))
+        else:
+            opened.thumbnail((1600, 1600), Image.Resampling.BOX)
         image = ImageOps.exif_transpose(opened).convert("RGB")
     return image, source_size
 
@@ -753,7 +756,13 @@ class RenderWorkloadService:
 
     @staticmethod
     def _palette_statistics(image: Image.Image, colors) -> list[dict]:
-        counts: Counter[Any] = Counter(image.convert("RGB").getdata())
+        rgb = image.convert("RGB")
+        pixels = (
+            list(rgb.get_flattened_data())
+            if hasattr(rgb, "get_flattened_data")
+            else list(rgb.getdata())
+        )
+        counts: Counter[Any] = Counter(pixels)
         total = image.width * image.height
         return [
             {

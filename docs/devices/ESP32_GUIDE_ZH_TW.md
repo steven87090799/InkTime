@@ -58,23 +58,41 @@ arduino-cli core update-index
 arduino-cli core install esp32:esp32@3.3.10
 arduino-cli lib install GxEPD2@1.6.9 ArduinoJson@7.4.3
 
+# The repository-owned 512 KiB NVS table is sketch-local.  Arduino-ESP32
+# automatically selects `partitions.csv` from the sketch directory.  Arduino
+# CLI still uses the board's default size guard unless the custom app size is
+# supplied explicitly below.
+cp esp32/ink-display-7C-photo/inktime_default_4M.csv \
+  esp32/ink-display-7C-photo/partitions.csv
+
 # 既有 GDEY073D46
-arduino-cli compile --fqbn esp32:esp32:esp32s3 esp32/ink-display-7C-photo
+arduino-cli compile \
+  --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' \
+  --build-property 'upload.maximum_size=1441792' \
+  esp32/ink-display-7C-photo
 
 # 新 GDEP073E01
-arduino-cli compile --fqbn esp32:esp32:esp32s3 \
+arduino-cli compile \
+  --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' \
+  --build-property 'upload.maximum_size=1441792' \
   --build-property "compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1" \
   esp32/ink-display-7C-photo
 
 # 可信任 LAN Production；secure build 的預設值仍是 0
-arduino-cli compile --fqbn esp32:esp32:esp32s3 \
+arduino-cli compile \
+  --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' \
+  --build-property 'upload.maximum_size=1441792' \
   --build-property "compiler.cpp.extra_flags=-DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1" \
   esp32/ink-display-7C-photo
+
+rm -f esp32/ink-display-7C-photo/partitions.csv
 ```
 
 Board 選 ESP32-S3，啟用 OPI PSRAM。正式版 `INKTIME_DEBUG_LOG=0`；短期硬體除錯才加入 `-DINKTIME_DEBUG_LOG=1`。序列 Log 不輸出 Device Secret、配對碼或 Legacy Token，但正式環境仍不應長期開啟。PhotoPainter 必須使用 16 MiB Flash／OPI PSRAM 與中央 `DEVICE_PROFILE`，完整命令見上方專用指南。
 
 2026-07-30 以 Arduino CLI 1.5.1、ESP32 core 3.3.10、GxEPD2 1.6.9、ArduinoJson 7.4.3 實際編譯 2.5.0：secure GDEY 使用 1,228,261 bytes，LAN GDEY 1,228,545 bytes，LAN GDEP 1,228,645 bytes，均為預設 1,310,720-byte app partition 的 93%；LAN PhotoPainter 使用 1,177,311 bytes（其 3 MiB app partition 的 37%）。GDEY／GDEP 全域變數約 96.6 KiB，PhotoPainter 約 49.2 KiB。這表示目前可編譯，但不是實體燒錄、Heap、PSRAM、BUSY 或功耗證據；新增 OTA、TLS certificate 或大型 Web UI 前仍須重新檢查 partition 與實板餘裕。
+
+2026-08-10 exact Hosted CI 以 ESP32 core 3.3.10 編譯目前分支時，GDEY release image 為 1,319,629 bytes、default debug image 為 1,382,925 bytes；因此 repository-owned 4 MiB table 已將雙 OTA app slot 擴為 1,441,792 bytes（0x160000），debug image 約使用 96%，保留 58,867 bytes headroom。這是 compile/partition evidence，不是實體燒錄、Heap、PSRAM、BUSY 或功耗證據。
 
 上傳前先用原廠 sample／GxEPD2 Example 驗證「面板型號＋adapter＋供電＋引腳」能完整刷新，再燒 InkTime 韌體。不同面板 driver class 不可混用。
 
@@ -127,7 +145,7 @@ Web 裝置頁會顯示最後狀態、下載成功／失敗、韌體、訊號、H
 - 電子紙可能有 ghosting／色偏；本韌體採 full refresh，不把 GxEPD2 partial window API 當成 GDEY 可用的快速局刷。
 - 強烈建議用 SHA-256 驗證與「成功才刷新」；不要為省幾秒移除。
 - 完整六／七色 Queue 流程需 server、裝置 Profile 與 2.6.0 韌體配對；舊韌體升級期間使用 `safe_4c`。
-- 目前 GDEY／GDEP app partition 已使用 93%；增加函式庫、TLS 或 OTA 前要重新量測 Flash／Heap／PSRAM，並做實機連續刷新與斷電恢復測試。
+- 目前 GDEY／GDEP release image 約使用 92%、debug image 約使用 96% 的 repository-owned app partition；增加函式庫、TLS 或 OTA 前要重新量測 Flash／Heap／PSRAM，並做實機連續刷新與斷電恢復測試。
 
 ## 9. 常見錯誤
 

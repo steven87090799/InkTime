@@ -15,6 +15,7 @@ from inktime.app.repositories.usage import UsageRepository
 from inktime.app.providers.base import VisionAttemptState
 from inktime.app.services.budgets import BudgetService
 from inktime.app.services.providers import ProviderService
+from inktime.app.services.usage_tracking import record_failed_unknown_usage
 
 
 MAX_TEST_PHOTO_PIXELS = 40_000_000
@@ -52,10 +53,18 @@ class ScoringLabService:
         provider = self.providers.build_router()
         if provider is None:
             raise ValueError("VLM-008 尚未設定可用 Provider")
+        try:
+            return self._analyze_with_provider(image_path, provider)
+        finally:
+            close_provider = getattr(provider, "close", None)
+            if callable(close_provider):
+                close_provider()
+
+    def _analyze_with_provider(self, image_path: Path, provider) -> dict:
         self.budgets.assert_request_allowed(None, None)
         profile = self.profiles.current()
         model = str(self.settings.get("model.high_model", "gpt-4o"))
-        max_tokens = int(self.settings.get("budget.max_tokens", 8000))
+        max_tokens = max(256, min(int(self.settings.get("budget.max_tokens", 8000)), 2048))
         provider_request_context_id = f"scoring_test|{uuid4()}"
         selected_provider = provider
         provider_id = ""
@@ -83,7 +92,8 @@ class ScoringLabService:
             image_bytes: bool,
         ) -> dict:
             usage = response.usage
-            estimated = provider.estimate_cost(model, usage)
+            recorded_model = str(response.served_model or model)
+            estimated = provider.estimate_cost(recorded_model, usage)
             reported = usage.provider_reported_cost
             source = "provider_reported" if reported is not None else "estimated" if estimated is not None else "unknown"
             metrics = dict(response.request_metrics or getattr(selected_provider, "last_request_metrics", {}) or {})
@@ -114,7 +124,7 @@ class ScoringLabService:
             self.usage.record(
                 provider=provider_name,
                 provider_id=provider_id,
-                model=model,
+                model=recorded_model,
                 job_id=None,
                 photo_id=None,
                 request_type=request_type,
@@ -127,6 +137,7 @@ class ScoringLabService:
                 latency_ms=int((time.perf_counter() - started_perf) * 1000),
                 status="completed",
                 retry_count=retry_count,
+                request_id=response.request_id,
                 reasoning_tokens=usage.reasoning_tokens,
                 cache_write_tokens=usage.cache_write_tokens,
                 cost_source=source,
@@ -175,30 +186,20 @@ class ScoringLabService:
             else:
                 metrics["image_bytes"] = 0
             error_code = str(getattr(error, "code", "") or error.__class__.__name__)
-            self.usage.record(
-                provider=provider_name,
-                provider_id=provider_id,
+            record_failed_unknown_usage(
+                self.usage,
+                provider=selected_provider,
                 model=model_name,
                 job_id=None,
                 photo_id=None,
                 request_type=request_type,
-                input_tokens=0,
-                output_tokens=0,
-                cached_tokens=0,
-                estimated_cost=None,
-                actual_cost=None,
                 started_at=started_at,
-                latency_ms=int((time.perf_counter() - started_perf) * 1000),
-                status="failed",
+                started_perf=started_perf,
+                error=error,
+                request_metrics=metrics,
                 retry_count=retry_count,
-                error_code=error_code,
-                reasoning_tokens=0,
-                cache_write_tokens=0,
-                cost_source="unknown",
-                prompt_chars=metrics.get("prompt_chars", 0),
-                schema_chars=metrics.get("schema_chars", 0),
-                request_body_bytes=metrics.get("request_body_bytes", 0),
                 image_bytes=metrics.get("image_bytes", 0),
+                error_code=error_code,
             )
             attempt_summary.append(
                 {

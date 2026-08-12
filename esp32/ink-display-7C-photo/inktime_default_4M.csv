@@ -1,0 +1,10 @@
+# InkTime 7C default ESP32-S3 partition table.
+# The enlarged NVS partition is required by the bounded 32-entry ACK journal
+# COW/migration peak.  App slots are 1,441,792 bytes so release and debug
+# images have OTA headroom; the remaining 0xB0000 bytes are unused SPIFFS.
+# Name,   Type, SubType, Offset,  Size,    Flags
+nvs,      data, nvs,     0x9000,  0x80000,
+otadata,  data, ota,     0x89000, 0x2000,
+app0,     app,  ota_0,   0x90000, 0x160000,
+app1,     app,  ota_1,   0x1F0000,0x160000,
+spiffs,   data, spiffs,  0x350000,0xB0000,

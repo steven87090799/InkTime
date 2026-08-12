@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import multiprocessing
@@ -9,6 +9,7 @@ from pathlib import Path
 import sqlite3
 import threading
 import time
+from uuid import uuid4
 
 from PIL import Image
 import pytest
@@ -176,6 +177,86 @@ def test_hard_timeout_terminates_joins_and_rejects_late_result(app):
     assert not [child for child in multiprocessing.active_children() if child.name == "inktime-bounded-child"]
 
 
+def test_shutdown_fences_running_future_and_only_retries_queued_work(app):
+    repository = app.extensions["inktime_job_repository"]
+    job_id = repository.create_maintenance(
+        kind="cleanup", name="shutdown fence", settings={}, created_by="test"
+    )
+    app.extensions["inktime_job_service"].start(job_id)
+    database = app.extensions["inktime_database"]
+    second_item_id = str(uuid4())
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO job_items(id,job_id,photo_id,available_at) VALUES (?,?,NULL,?)",
+            (second_item_id, job_id, datetime.now(timezone.utc).isoformat()),
+        )
+    item_ids = {str(item["id"]) for item in repository.list_items(job_id)}
+
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    calls: dict[str, int] = {}
+    worker_holder = {}
+    running_item_id: dict[str, str] = {}
+
+    def processor(item):
+        item_id = str(item["id"])
+        calls[item_id] = calls.get(item_id, 0) + 1
+        if "id" not in running_item_id:
+            # Claim re-fetches rows by ID without preserving SELECT order; the
+            # processor is the authoritative observation of the running Future.
+            running_item_id["id"] = item_id
+            started.set()
+            worker_holder["worker"].request_stop(deadline=time.monotonic() + 0.01)
+            release.wait(timeout=2)
+        finished.set()
+        return {"stage": "shutdown-fence", "_actual_cost": 0}
+
+    worker = BoundedJobWorker(
+        repository,
+        processor,
+        concurrency=1,
+        queue_multiplier=2,
+        timeout_seconds=0.05,
+        max_attempts=2,
+    )
+    worker_holder["worker"] = worker
+    runner = threading.Thread(target=worker.run_job, args=(job_id,))
+    runner.start()
+    assert started.wait(timeout=1)
+    runner.join(timeout=2)
+    assert not runner.is_alive()
+    release.set()
+    assert finished.wait(timeout=1)
+
+    actual_running_item_id = running_item_id["id"]
+    queued_item_id = next(item_id for item_id in item_ids if item_id != actual_running_item_id)
+    items = {str(item["id"]): item for item in repository.list_items(job_id)}
+    assert items[actual_running_item_id]["status"] == "failed"
+    assert items[actual_running_item_id]["error_code"] == "JOB-SHUTDOWN-AMBIGUOUS"
+    assert items[actual_running_item_id]["attempts"] == 1
+    assert items[queued_item_id]["status"] == "pending"
+    assert items[queued_item_id]["error_code"] == "JOB-003"
+    assert items[queued_item_id]["worker_id"] is None
+    assert calls == {actual_running_item_id: 1}
+
+    with database.transaction() as connection:
+        connection.execute(
+            "UPDATE job_items SET available_at=? WHERE id=?",
+            (datetime.now(timezone.utc).isoformat(), queued_item_id),
+        )
+    retry_worker = BoundedJobWorker(
+        repository,
+        processor,
+        concurrency=1,
+        queue_multiplier=1,
+        max_attempts=2,
+    )
+    worker_holder["worker"] = retry_worker
+    retry_worker.run_job(job_id)
+    assert calls == {actual_running_item_id: 1, queued_item_id: 1}
+
+
 def test_provider_call_process_boundary_has_hard_cap_and_shutdown_cleanup():
     boundary = KillableProcessBoundary(max_processes=1, terminate_grace_seconds=0.1)
     try:
@@ -330,6 +411,7 @@ def test_isolated_vision_failure_preserves_no_failover_metadata(tmp_path: Path):
                 stage="stage_one",
             )
         assert raised.value.vision_started is True
+        assert raised.value.request_started is True
         assert raised.value.ambiguous is True
     finally:
         boundary.shutdown()

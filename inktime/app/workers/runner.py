@@ -38,7 +38,9 @@ class WorkerRunner:
         self.stop.set()
         self.app.extensions["inktime_process_boundary"].shutdown()
         if self.current:
-            self.current.request_stop()
+            self.current.request_stop(
+                deadline=time.monotonic() + BoundedJobWorker.SHUTDOWN_DRAIN_SECONDS
+            )
 
     def run_once(self) -> int:
         repository = self.app.extensions["inktime_job_repository"]
@@ -88,7 +90,7 @@ class WorkerRunner:
                 "max_pixels": int(runtime_settings.get("scanner.max_pixels", 60_000_000)),
                 "max_edge_px": int(runtime_settings.get("scanner.max_edge_px", 12_000)),
                 "thumbnail_capacity_check_interval": int(
-                    runtime_settings.get("scanner.thumbnail_capacity_check_interval", 500)
+                    runtime_settings.get("scanner.thumbnail_capacity_check_interval", 5_000)
                 ),
                 "thumbnail_max_bytes": int(
                     runtime_settings.get("thumbnail_cache.max_bytes", 5 * 1024 * 1024 * 1024)

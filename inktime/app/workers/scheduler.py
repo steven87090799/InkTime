@@ -31,6 +31,8 @@ OFFLINE_PREPARE_RETRY_INTERVAL_SECONDS = 600
 OBSERVABILITY_HEARTBEAT_INTERVAL_SECONDS = 5 * 60
 OBSERVABILITY_TICK_INTERVAL_SECONDS = 60
 OBSERVABILITY_PLATFORM_INTERVAL_SECONDS = 15 * 60
+RELEASE_RECONCILE_INTERVAL_SECONDS = 30 * 60
+OPERATIONAL_RETENTION_INTERVAL_SECONDS = 60 * 60
 
 
 class SchedulerRunner:
@@ -44,6 +46,8 @@ class SchedulerRunner:
         self.last_observability_heartbeat_at: float = -OBSERVABILITY_HEARTBEAT_INTERVAL_SECONDS
         self.last_observability_tick_at: float = -OBSERVABILITY_TICK_INTERVAL_SECONDS
         self.last_observability_platform_at: float = -OBSERVABILITY_PLATFORM_INTERVAL_SECONDS
+        self.last_release_reconcile_at: float = -RELEASE_RECONCILE_INTERVAL_SECONDS
+        self.last_operational_retention_at: float = -OPERATIONAL_RETENTION_INTERVAL_SECONDS
 
     def _record_schedule_exception(self, task: dict, exc: Exception, now: datetime) -> None:
         schedules = self.app.extensions["inktime_schedule_repository"]
@@ -215,6 +219,21 @@ class SchedulerRunner:
             "offline_prefetch",
             lambda: self._prepare_due_offline_devices(datetime.now(timezone.utc)),
         )
+        if monotonic_now - self.last_release_reconcile_at >= RELEASE_RECONCILE_INTERVAL_SECONDS:
+            coordinator = self.app.extensions.get("inktime_release_coordinator")
+            if coordinator is not None:
+                self._safe_step("release_reconcile", coordinator.reconcile)
+                release_gc = getattr(coordinator, "gc_unreferenced_releases", None)
+                if release_gc is not None:
+                    self._safe_step("release_gc", release_gc)
+            self.last_release_reconcile_at = monotonic_now
+        if monotonic_now - self.last_operational_retention_at >= OPERATIONAL_RETENTION_INTERVAL_SECONDS:
+            resilience = self.app.extensions.get("inktime_resilience_repository")
+            if resilience is not None:
+                self._safe_step("operational_expire", resilience.expire_operational_data)
+                self._safe_step("cleanup_audit_gc", resilience.cleanup_audit_history)
+                self._safe_step("operational_cleanup", lambda: resilience.cleanup(dry_run=False))
+            self.last_operational_retention_at = monotonic_now
         if not settings.get("backup.schedule_enabled", True):
             return
         if now.hour == int(settings.get("backup.hour", 3)) and self.last_backup_date != now.date().isoformat():

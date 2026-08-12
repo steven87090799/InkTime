@@ -133,6 +133,106 @@ def test_vision_post_timeout_is_ambiguous_and_never_retried(tmp_path):
     assert session.vision_attempts == 1
 
 
+class VisionTransportErrorSession(FakeSession):
+    def __init__(self, error):
+        super().__init__()
+        self.error = error
+        self.vision_attempts = 0
+
+    def post(self, url, **kwargs):
+        if url.endswith("/chat/completions"):
+            self.vision_attempts += 1
+            raise self.error
+        return super().post(url, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        requests.exceptions.ConnectionError("remote disconnected after POST"),
+        requests.exceptions.SSLError("TLS connection reset after POST"),
+        requests.exceptions.ReadTimeout("response read timed out"),
+    ],
+    ids=["connection-error", "ssl-error", "read-timeout"],
+)
+def test_vision_transport_errors_are_conservatively_ambiguous(error, tmp_path):
+    image = Path(tmp_path) / "vision-ambiguous-transport.jpg"
+    image.write_bytes(b"jpeg-fixture")
+    session = VisionTransportErrorSession(error)
+    provider = OpenAICompatibleProvider(
+        name="OpenAI", base_url="https://api.openai.com/v1", api_key="secret", session=session
+    )
+
+    with pytest.raises(ProviderHTTPError) as raised:
+        provider.analyze(image_path=image, model="vision", detail="high", stage="single_high")
+
+    assert raised.value.code == "VLM-AMBIGUOUS"
+    assert raised.value.ambiguous is True
+    assert raised.value.request_started is True
+    assert raised.value.vision_started is True
+    assert session.vision_attempts == 1
+
+
+class VisionConnectTimeoutSession(FakeSession):
+    def post(self, url, **kwargs):
+        if url.endswith("/chat/completions"):
+            self.calls.append((url, kwargs))
+            raise requests.exceptions.ConnectTimeout("connection setup failed")
+        return super().post(url, **kwargs)
+
+
+def test_vision_connect_timeout_is_pre_send_and_can_fail_over(tmp_path):
+    image = Path(tmp_path) / "vision-connect-timeout.jpg"
+    image.write_bytes(b"jpeg-fixture")
+    session = VisionConnectTimeoutSession()
+    provider = OpenAICompatibleProvider(
+        name="OpenAI", base_url="https://api.openai.com/v1", api_key="secret", session=session
+    )
+
+    with pytest.raises(ProviderHTTPError) as raised:
+        provider.analyze(image_path=image, model="vision", detail="high", stage="single_high")
+
+    assert raised.value.code == "VLM-001"
+    assert raised.value.ambiguous is False
+    assert raised.value.vision_started is False
+    assert session.calls
+
+
+class VisionServerErrorSession(FakeSession):
+    def __init__(self, status_code=500):
+        super().__init__()
+        self.status_code = status_code
+
+    def post(self, url, **kwargs):
+        if url.endswith("/chat/completions"):
+            self.calls.append((url, kwargs))
+            return FakeResponse({"error": {"type": "server_error"}}, status_code=self.status_code)
+        return super().post(url, **kwargs)
+
+
+@pytest.mark.parametrize("status_code", [500, 502, 503, 504])
+def test_vision_http_5xx_is_ambiguous_after_single_dispatch(status_code, tmp_path):
+    image = Path(tmp_path) / "vision-server-error.jpg"
+    image.write_bytes(b"jpeg-fixture")
+    session = VisionServerErrorSession(status_code)
+    provider = OpenAICompatibleProvider(
+        name="OpenAI",
+        base_url="https://api.openai.com/v1",
+        api_key="secret",
+        session=session,
+    )
+
+    with pytest.raises(ProviderHTTPError) as raised:
+        provider.analyze(image_path=image, model="vision", detail="high", stage="single_high")
+
+    assert raised.value.code == "VLM-007"
+    assert raised.value.ambiguous is True
+    assert raised.value.request_started is True
+    assert raised.value.vision_started is True
+    assert raised.value.http_status == status_code
+    assert len(session.calls) == 1
+
+
 def test_reasoning_effort_is_capability_gated_and_sync_uses_same_builder(tmp_path):
     image = Path(tmp_path) / "provider-test.jpg"
     image.write_bytes(b"jpeg-fixture")
@@ -251,7 +351,7 @@ def test_create_batch_invalid_json_or_missing_id_is_ambiguous():
     ("outcome", "expected_ambiguous"),
     [
         (requests.Timeout("after remote create"), True),
-        (requests.ConnectionError("connection reset"), True),
+        (requests.exceptions.ConnectionError("connection reset"), True),
         ("500", True),
         ("429", False),
         ("400", False),

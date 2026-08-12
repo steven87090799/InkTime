@@ -234,6 +234,7 @@ class PhotoPreprocessor:
             crop_subject_right = crop_subject_bottom = None
             crop_method = None
             crop_face_count = None
+            e6_metrics = None
             if include_local_features:
                 # 所有品質特徵只需要小樣本。先要求 JPEG decoder 降採樣，再限制到 512px，
                 # 避免 24MP／48MP 原始圖在每個並行槽展開成數十至數百 MiB。
@@ -305,13 +306,11 @@ class PhotoPreprocessor:
                 crop_subject_bottom = crop.subject_bottom
                 crop_method = crop.method
                 crop_face_count = crop.face_count
-                e6_metrics = None
-                if include_local_features:
-                    # Reuse the already decoded/oriented image and bound the
-                    # E6 calculation to the same 512px working sample.
-                    e6_sample = image.copy()
-                    e6_sample.thumbnail((512, 512), Image.Resampling.LANCZOS)
-                    e6_metrics = evaluate_e6_suitability(e6_sample.convert("RGB"))
+                # Reuse the already decoded/oriented image and bound the E6
+                # calculation to the same 512px working sample.
+                e6_sample = image.copy()
+                e6_sample.thumbnail((512, 512), Image.Resampling.LANCZOS)
+                e6_metrics = evaluate_e6_suitability(e6_sample.convert("RGB"))
             return LocalPhotoFeatures(
                 sha256=digest.hexdigest(),
                 perceptual_hash=perceptual_hash,

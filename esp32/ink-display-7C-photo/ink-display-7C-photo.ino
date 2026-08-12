@@ -1,4 +1,5 @@
 #include <WiFi.h>
+#include <stddef.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
@@ -17,6 +18,14 @@
 #include "pairing_recovery_core.h"
 #include "queue_client_core.h"
 #include "queue_runtime_types.h"
+#include "ack_journal_transaction_core.h"
+#include "ack_journal_storage_budget.h"
+
+// Arduino's prototype generator runs before later .ino declarations.  Keep
+// these metadata types visible to generated CRC helper prototypes.
+struct AckJournalSnapshotMeta;
+struct AckJournalActivePointer;
+
 #include "device_http_transport.h"
 #if INKTIME_PHOTOPAINTER_ENABLED
 #include "photopainter_support.h"
@@ -454,6 +463,7 @@ bool currentPrefetchOnly = false;
 bool enhancedNetworkWakeRequested = false;
 bool currentPayloadIntegrityTrusted = false;
 bool deviceAuthInvalid = false;
+bool offlineDeliveryModeMismatchDetected = false;
 #if !INKTIME_PHOTOPAINTER_ENABLED
 static bool displayPairingCode(const Config &cfg, const String &pairingCode);
 #endif
@@ -475,6 +485,7 @@ String lastDeviceErrorCode;
 String lastDeviceErrorMessage;
 String lastDeviceWarningCode;
 String lastDeviceWarningMessage;
+bool queueAckPermanentReject = false;
 uint32_t lastRefreshDurationMs = 0;
 
 #if INKTIME_PHOTOPAINTER_ENABLED
@@ -824,8 +835,203 @@ static String ackJournalKey(char prefix, uint8_t index) {
   return String(prefix) + String(index);
 }
 
+static String ackJournalBlobKey(uint8_t index) {
+  return String("b") + String(index);
+}
+
+static String ackJournalBankKey(char bank, uint8_t index) {
+  return String(bank) + String(index);
+}
+
+static String ackJournalSnapshotMetaKey(char bank) {
+  return String("meta_") + String(bank);
+}
+
+struct __attribute__((packed)) AckJournalBlob {
+  uint32_t magic;
+  uint8_t version;
+  uint8_t flags;
+  int32_t queue_version;
+  uint8_t event;
+  uint8_t reserved;
+  int64_t event_epoch;
+  uint16_t item_length;
+  uint16_t error_length;
+  uint16_t release_length;
+  char queue_item_id[inktime::kQueueIdentifierMaxBytes + 1U];
+  char error_code[65U];
+  char release_id[inktime::kQueueIdentifierMaxBytes + 1U];
+  uint32_t crc32;
+};
+
+struct __attribute__((packed)) AckJournalSnapshotMeta {
+  uint32_t magic;
+  uint8_t version;
+  uint8_t bank;
+  uint8_t count;
+  uint8_t reserved;
+  uint64_t generation;
+  uint32_t content_crc32;
+  uint32_t crc32;
+};
+
+struct __attribute__((packed)) AckJournalActivePointer {
+  uint32_t magic;
+  uint8_t version;
+  uint8_t bank;
+  uint8_t count;
+  uint8_t reserved;
+  uint64_t generation;
+  uint32_t crc32;
+};
+
+// The ACK namespace keeps two copy-on-write banks (G/H), one active pointer,
+// and the legacy b0..b31/count representation during forward migration.
+// Each bank is at most 32 compact blobs, so the worst-case peak is two banks
+// plus one legacy generation.  The bounded blob size is intentionally kept
+// below the ESP32 Preferences value limit; the repository-owned partition
+// tables reserve 512 KiB of NVS and the shared budget header proves the peak
+// including ConfigStore A/B, large-CA, retry/config metadata, migration, and
+// safety margin.  The stock 20 KiB app3M_fat9M_16MB table is not valid for
+// this firmware and must not be selected.
+
+static constexpr uint32_t kAckJournalBlobMagic = 0x49544A31U;
+static constexpr uint8_t kAckJournalBlobVersion = 1U;
+static constexpr uint32_t kAckJournalSnapshotMagic = 0x49544A32U;
+static constexpr uint8_t kAckJournalSnapshotVersion = 1U;
+static constexpr uint32_t kAckJournalPointerMagic = 0x49544A33U;
+static constexpr uint8_t kAckJournalPointerVersion = 1U;
+static constexpr size_t kAckJournalPreferencesValueLimitBytes = 1984U;
+static constexpr size_t kAckJournalPeakRecordBytes =
+  inktime::ackjournal::kAckJournalPeakRecordBytes;
+static constexpr size_t kAckJournalWorstCaseNvsBytes =
+  inktime::ackjournal::kWorstCaseNvsBytes;
+static_assert(
+  sizeof(AckJournalBlob) == inktime::ackjournal::kAckJournalBlobBytes,
+  "ACK journal budget must track the packed firmware blob");
+static_assert(
+  sizeof(AckJournalSnapshotMeta) == inktime::ackjournal::kAckJournalSnapshotMetaBytes,
+  "ACK journal budget must track snapshot metadata");
+static_assert(
+  sizeof(AckJournalActivePointer) == inktime::ackjournal::kAckJournalActivePointerBytes,
+  "ACK journal budget must track the active pointer");
+static_assert(
+  sizeof(AckJournalBlob) <= kAckJournalPreferencesValueLimitBytes,
+  "ACK journal blob must remain within one Preferences/NVS value");
+static_assert(
+  kAckJournalWorstCaseNvsBytes <= inktime::ackjournal::kTargetNvsPartitionBytes,
+  "ACK journal/config migration peak must fit the target NVS partition");
+
+static uint32_t ackJournalCrcUpdate(
+  uint32_t crc, const uint8_t *bytes, size_t length) {
+  for (size_t index = 0; index < length; ++index) {
+    crc ^= bytes[index];
+    for (uint8_t bit = 0; bit < 8U; ++bit) {
+      crc = (crc & 1U) != 0U ? (crc >> 1U) ^ 0xEDB88320U : crc >> 1U;
+    }
+  }
+  return crc;
+}
+
+static uint32_t ackJournalCrcBytes(const uint8_t *bytes, size_t length) {
+  return ackJournalCrcUpdate(0xFFFFFFFFU, bytes, length) ^ 0xFFFFFFFFU;
+}
+
+static uint32_t ackJournalCrc(const AckJournalBlob &blob) {
+  return ackJournalCrcBytes(
+    reinterpret_cast<const uint8_t *>(&blob), offsetof(AckJournalBlob, crc32));
+}
+
+static uint32_t ackJournalMetaCrc(const AckJournalSnapshotMeta &meta) {
+  return ackJournalCrcBytes(
+    reinterpret_cast<const uint8_t *>(&meta), offsetof(AckJournalSnapshotMeta, crc32));
+}
+
+static uint32_t ackJournalPointerCrc(const AckJournalActivePointer &pointer) {
+  return ackJournalCrcBytes(
+    reinterpret_cast<const uint8_t *>(&pointer), offsetof(AckJournalActivePointer, crc32));
+}
+
+static bool copyAckJournalText(char *destination, size_t capacity, const String &value) {
+  if (destination == nullptr || value.length() >= capacity) return false;
+  memcpy(destination, value.c_str(), value.length());
+  destination[value.length()] = '\0';
+  return true;
+}
+
+static bool encodeAckJournalBlob(
+  const PendingQueueAck &pending,
+  AckJournalBlob &blob
+) {
+  blob = {};
+  blob.magic = kAckJournalBlobMagic;
+  blob.version = kAckJournalBlobVersion;
+  blob.flags = (pending.displaySkipped ? 0x01U : 0U)
+    | (pending.delayedTerminal ? 0x02U : 0U);
+  blob.queue_version = pending.queueVersion;
+  blob.event = static_cast<uint8_t>(pending.event);
+  blob.event_epoch = pending.eventEpoch;
+  blob.item_length = static_cast<uint16_t>(pending.queueItemId.length());
+  blob.error_length = static_cast<uint16_t>(pending.errorCode.length());
+  blob.release_length = static_cast<uint16_t>(pending.releaseId.length());
+  if (!pending.valid
+      || !copyAckJournalText(blob.queue_item_id, sizeof(blob.queue_item_id), pending.queueItemId)
+      || !copyAckJournalText(blob.error_code, sizeof(blob.error_code), pending.errorCode)
+      || !copyAckJournalText(blob.release_id, sizeof(blob.release_id), pending.releaseId)) {
+    lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL";
+    lastDeviceErrorMessage = "ACK journal compact blob 欄位超出安全容量";
+    return false;
+  }
+  blob.crc32 = ackJournalCrc(blob);
+  return true;
+}
+
+static bool decodeAckJournalBlob(
+  const AckJournalBlob &blob,
+  PendingQueueAck &pending
+) {
+  if (blob.magic != kAckJournalBlobMagic
+      || blob.version != kAckJournalBlobVersion
+      || blob.crc32 != ackJournalCrc(blob)
+      || blob.item_length >= sizeof(blob.queue_item_id)
+      || blob.error_length >= sizeof(blob.error_code)
+      || blob.release_length >= sizeof(blob.release_id)
+      || blob.queue_item_id[blob.item_length] != '\0'
+      || blob.error_code[blob.error_length] != '\0'
+      || blob.release_id[blob.release_length] != '\0') {
+    return false;
+  }
+  pending = {
+    String(blob.queue_item_id),
+    blob.queue_version,
+    static_cast<inktime::QueueEvent>(blob.event),
+    (blob.flags & 0x01U) != 0U,
+    String(blob.error_code),
+    (blob.flags & 0x02U) != 0U,
+    String(blob.release_id),
+    blob.event_epoch,
+    false,
+  };
+  return validPendingQueueAck(pending);
+}
+
 static PendingQueueAck readAckJournalEntry(Preferences &journal, uint8_t index) {
-  PendingQueueAck pending = {
+  PendingQueueAck pending = {};
+  const String blobKey = ackJournalBlobKey(index);
+  const size_t blobLength = journal.getBytesLength(blobKey.c_str());
+  if (blobLength > 0U) {
+    AckJournalBlob blob = {};
+    if (blobLength == sizeof(blob)
+        && journal.getBytes(blobKey.c_str(), &blob, sizeof(blob)) == sizeof(blob)
+        && decodeAckJournalBlob(blob, pending)) {
+      return pending;
+    }
+    lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL";
+    lastDeviceErrorMessage = "ACK journal compact blob CRC／readback 驗證失敗";
+    return pending;
+  }
+  // Read the pre-blob per-field representation for one-time migration.
+  pending = {
     journal.getString(ackJournalKey('i', index).c_str(), ""),
     journal.getInt(ackJournalKey('v', index).c_str(), -1),
     static_cast<inktime::QueueEvent>(
@@ -841,37 +1047,6 @@ static PendingQueueAck readAckJournalEntry(Preferences &journal, uint8_t index) 
   return pending;
 }
 
-static void writeAckJournalEntry(
-  Preferences &journal,
-  uint8_t index,
-  const PendingQueueAck &pending
-) {
-  const size_t itemWritten = journal.putString(
-    ackJournalKey('i', index).c_str(), pending.queueItemId);
-  const size_t versionWritten = journal.putInt(
-    ackJournalKey('v', index).c_str(), pending.queueVersion);
-  const size_t eventWritten = journal.putUChar(
-    ackJournalKey('e', index).c_str(), static_cast<uint8_t>(pending.event));
-  const size_t skippedWritten = journal.putBool(
-    ackJournalKey('s', index).c_str(), pending.displaySkipped);
-  const size_t errorWritten = journal.putString(
-    ackJournalKey('r', index).c_str(), pending.errorCode);
-  const size_t delayedWritten = journal.putBool(
-    ackJournalKey('d', index).c_str(), pending.delayedTerminal);
-  const size_t releaseWritten = journal.putString(
-    ackJournalKey('l', index).c_str(), pending.releaseId);
-  const size_t epochWritten = journal.putLong64(
-    ackJournalKey('t', index).c_str(), pending.eventEpoch);
-  if (itemWritten > 0U) recordNvsWrite();
-  if (versionWritten > 0U) recordNvsWrite();
-  if (eventWritten > 0U) recordNvsWrite();
-  if (skippedWritten > 0U) recordNvsWrite();
-  if (errorWritten > 0U) recordNvsWrite();
-  if (delayedWritten > 0U) recordNvsWrite();
-  if (releaseWritten > 0U) recordNvsWrite();
-  if (epochWritten > 0U) recordNvsWrite();
-}
-
 static bool samePendingQueueAck(
   const PendingQueueAck &left,
   const PendingQueueAck &right
@@ -881,10 +1056,382 @@ static bool samePendingQueueAck(
     && left.event == right.event;
 }
 
-static uint8_t ackJournalCount(Preferences &journal) {
-  return min(
+static bool terminalAckEvidence(const PendingQueueAck &pending) {
+  return pending.delayedTerminal
+    && (pending.event == inktime::QueueEvent::DisplayCompleted
+      || pending.event == inktime::QueueEvent::DisplayFailed);
+}
+
+static bool readAckJournalBytes(
+  Preferences &journal,
+  const String &key,
+  std::string &bytes
+) {
+  const size_t length = journal.getBytesLength(key.c_str());
+  if (length == 0U) return false;
+  bytes.assign(length, '\0');
+  return journal.getBytes(key.c_str(), &bytes[0], length) == length;
+}
+
+static uint32_t ackJournalSnapshotContentCrc(
+  char bank,
+  uint64_t generation,
+  const std::vector<std::string> &records
+) {
+  struct __attribute__((packed)) ContentHeader {
+    uint8_t bank;
+    uint8_t count;
+    uint64_t generation;
+  };
+  const ContentHeader header = {
+    static_cast<uint8_t>(bank),
+    static_cast<uint8_t>(records.size()),
+    generation,
+  };
+  uint32_t crc = 0xFFFFFFFFU;
+  crc = ackJournalCrcUpdate(
+    crc, reinterpret_cast<const uint8_t *>(&header), sizeof(header));
+  for (const std::string &record : records) {
+    crc = ackJournalCrcUpdate(
+      crc, reinterpret_cast<const uint8_t *>(record.data()), record.size());
+  }
+  return crc ^ 0xFFFFFFFFU;
+}
+
+class AckJournalPreferencesStorage final : public inktime::ackjournal::Storage {
+ public:
+  explicit AckJournalPreferencesStorage(Preferences &journal) : journal_(journal) {}
+
+  bool writeRecord(
+    char bank,
+    uint8_t index,
+    const std::string &bytes
+  ) override {
+    if ((bank != 'G' && bank != 'H')
+        || index >= inktime::kMaxAckJournalEntries
+        || bytes.size() != sizeof(AckJournalBlob)) return false;
+    const String key = ackJournalBankKey(bank, index);
+    if (journal_.putBytes(key.c_str(), bytes.data(), bytes.size()) != bytes.size()) {
+      lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL";
+      lastDeviceErrorMessage = "ACK journal replacement blob 寫入失敗";
+      return false;
+    }
+    std::string readback;
+    const bool exact = readAckJournalBytes(journal_, key, readback) && readback == bytes;
+    if (!exact) {
+      lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL";
+      lastDeviceErrorMessage = "ACK journal replacement blob exact readback 失敗";
+      return false;
+    }
+    recordNvsWrite();
+    return true;
+  }
+
+  bool writeSnapshotMetadata(
+    char bank,
+    uint64_t generation,
+    const std::vector<std::string> &records
+  ) override {
+    if ((bank != 'G' && bank != 'H') || generation == 0U
+        || records.size() > inktime::kMaxAckJournalEntries) return false;
+    AckJournalSnapshotMeta meta = {};
+    meta.magic = kAckJournalSnapshotMagic;
+    meta.version = kAckJournalSnapshotVersion;
+    meta.bank = static_cast<uint8_t>(bank);
+    meta.count = static_cast<uint8_t>(records.size());
+    meta.generation = generation;
+    meta.content_crc32 = ackJournalSnapshotContentCrc(bank, generation, records);
+    meta.crc32 = ackJournalMetaCrc(meta);
+    const String key = ackJournalSnapshotMetaKey(bank);
+    if (journal_.putBytes(key.c_str(), &meta, sizeof(meta)) != sizeof(meta)) {
+      lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL";
+      lastDeviceErrorMessage = "ACK journal snapshot metadata 寫入失敗";
+      return false;
+    }
+    AckJournalSnapshotMeta readback = {};
+    const bool exact = journal_.getBytesLength(key.c_str()) == sizeof(readback)
+      && journal_.getBytes(key.c_str(), &readback, sizeof(readback)) == sizeof(readback)
+      && memcmp(&readback, &meta, sizeof(meta)) == 0
+      && readback.crc32 == ackJournalMetaCrc(readback);
+    if (!exact) {
+      lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL";
+      lastDeviceErrorMessage = "ACK journal snapshot metadata exact readback 失敗";
+      return false;
+    }
+    recordNvsWrite();
+    return true;
+  }
+
+  bool writeActivePointer(char bank, uint64_t generation, uint8_t count) override {
+    if ((bank != 'G' && bank != 'H') || generation == 0U
+        || count > inktime::kMaxAckJournalEntries) return false;
+    AckJournalActivePointer pointer = {};
+    pointer.magic = kAckJournalPointerMagic;
+    pointer.version = kAckJournalPointerVersion;
+    pointer.bank = static_cast<uint8_t>(bank);
+    pointer.count = count;
+    pointer.generation = generation;
+    pointer.crc32 = ackJournalPointerCrc(pointer);
+    if (journal_.putBytes("active", &pointer, sizeof(pointer)) != sizeof(pointer)) {
+      lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL";
+      lastDeviceErrorMessage = "ACK journal active pointer 寫入失敗";
+      return false;
+    }
+    AckJournalActivePointer readback = {};
+    const bool exact = journal_.getBytesLength("active") == sizeof(readback)
+      && journal_.getBytes("active", &readback, sizeof(readback)) == sizeof(readback)
+      && memcmp(&readback, &pointer, sizeof(pointer)) == 0
+      && readback.crc32 == ackJournalPointerCrc(readback);
+    if (!exact) {
+      lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL";
+      lastDeviceErrorMessage = "ACK journal active pointer exact readback 失敗";
+      return false;
+    }
+    recordNvsWrite();
+    return true;
+  }
+
+  bool readSnapshot(
+    char bank,
+    inktime::ackjournal::Snapshot &snapshot,
+    bool &present
+  ) {
+    present = false;
+    const String metaKey = ackJournalSnapshotMetaKey(bank);
+    if (journal_.getBytesLength(metaKey.c_str()) == 0U) return true;
+    present = true;
+    std::string metadata;
+    if (!readAckJournalBytes(journal_, metaKey, metadata)
+        || metadata.size() != sizeof(AckJournalSnapshotMeta)) return false;
+    AckJournalSnapshotMeta meta = {};
+    memcpy(&meta, metadata.data(), sizeof(meta));
+    if (meta.magic != kAckJournalSnapshotMagic
+        || meta.version != kAckJournalSnapshotVersion
+        || meta.bank != static_cast<uint8_t>(bank)
+        || meta.count > inktime::kMaxAckJournalEntries
+        || meta.generation == 0U
+        || meta.crc32 != ackJournalMetaCrc(meta)) return false;
+    snapshot = {};
+    snapshot.bank = bank;
+    snapshot.generation = meta.generation;
+    for (uint8_t index = 0U; index < meta.count; ++index) {
+      std::string record;
+      const String key = ackJournalBankKey(bank, index);
+      if (!readAckJournalBytes(journal_, key, record)
+          || record.size() != sizeof(AckJournalBlob)) return false;
+      AckJournalBlob blob = {};
+      memcpy(&blob, record.data(), sizeof(blob));
+      if (blob.magic != kAckJournalBlobMagic
+          || blob.version != kAckJournalBlobVersion
+          || blob.crc32 != ackJournalCrc(blob)) return false;
+      snapshot.records.push_back(record);
+    }
+    return ackJournalSnapshotContentCrc(
+      bank, meta.generation, snapshot.records) == meta.content_crc32;
+  }
+
+  bool readActiveSnapshot(inktime::ackjournal::Snapshot &snapshot) {
+    AckJournalActivePointer pointer = {};
+    const bool pointerValid = journal_.getBytesLength("active") == sizeof(pointer)
+      && journal_.getBytes("active", &pointer, sizeof(pointer)) == sizeof(pointer)
+      && (pointer.bank == static_cast<uint8_t>('G')
+        || pointer.bank == static_cast<uint8_t>('H'))
+      && pointer.count <= inktime::kMaxAckJournalEntries
+      && pointer.generation > 0U
+      && pointer.magic == kAckJournalPointerMagic
+      && pointer.version == kAckJournalPointerVersion
+      && pointer.crc32 == ackJournalPointerCrc(pointer);
+    if (pointerValid) {
+      bool present = false;
+      inktime::ackjournal::Snapshot pointed;
+      if (readSnapshot(static_cast<char>(pointer.bank), pointed, present)
+          && present && pointed.generation == pointer.generation
+          && pointed.records.size() == pointer.count) {
+        snapshot = pointed;
+        return true;
+      }
+    }
+    bool presentG = false;
+    bool presentH = false;
+    inktime::ackjournal::Snapshot candidateG;
+    inktime::ackjournal::Snapshot candidateH;
+    const bool validG = readSnapshot('G', candidateG, presentG) && presentG;
+    const bool validH = readSnapshot('H', candidateH, presentH) && presentH;
+    if (validG && validH) {
+      // An invalid pointer can mean that the newer bank was fully prepared
+      // but its authoritative pointer promotion tore.  The older complete
+      // generation is the only fail-safe choice; replay is acceptable, ACK
+      // evidence loss is not.  A successfully promoted bank remains safe
+      // after cleanup because the previous bank is then no longer complete.
+      snapshot = candidateG.generation <= candidateH.generation ? candidateG : candidateH;
+      lastDeviceWarningCode = "DEVICE-QUEUE-ACK-RECOVERY";
+      lastDeviceWarningMessage =
+        "ACK journal active pointer 無效；已選擇較舊完整 generation 保留 at-least-once evidence";
+      return true;
+    }
+    if (validG) {
+      snapshot = candidateG;
+      return true;
+    }
+    if (validH) {
+      snapshot = candidateH;
+      return true;
+    }
+    return false;
+  }
+
+  bool verifyActiveSnapshot(const inktime::ackjournal::Snapshot &expected) override {
+    AckJournalActivePointer pointer = {};
+    if (journal_.getBytesLength("active") != sizeof(pointer)
+        || journal_.getBytes("active", &pointer, sizeof(pointer)) != sizeof(pointer)
+        || pointer.bank != static_cast<uint8_t>(expected.bank)
+        || pointer.generation != expected.generation
+        || pointer.count != expected.records.size()
+        || pointer.crc32 != ackJournalPointerCrc(pointer)) return false;
+    inktime::ackjournal::Snapshot actual;
+    bool present = false;
+    if (!readSnapshot(expected.bank, actual, present) || !present) return false;
+    return actual.bank == expected.bank
+      && actual.generation == expected.generation
+      && actual.records == expected.records;
+  }
+
+  bool cleanupBank(char bank) {
+    bool ok = true;
+    for (uint8_t index = 0U; index < inktime::kMaxAckJournalEntries; ++index) {
+      const String key = ackJournalBankKey(bank, index);
+      if (journal_.isKey(key.c_str())
+          && !journal_.remove(key.c_str())) ok = false;
+    }
+    const String metaKey = ackJournalSnapshotMetaKey(bank);
+    if (journal_.isKey(metaKey.c_str())
+        && !journal_.remove(metaKey.c_str())) ok = false;
+    return ok;
+  }
+
+  bool cleanupPrevious(char bank) override {
+    if (bank != 'G' && bank != 'H') return true;
+    const bool ok = cleanupBank(bank);
+    if (!ok) {
+      lastDeviceWarningCode = "DEVICE-QUEUE-ACK-CLEANUP";
+      lastDeviceWarningMessage =
+        "ACK journal 舊 generation cleanup 失敗；新 active snapshot 已保留";
+    }
+    return ok;
+  }
+
+ private:
+  Preferences &journal_;
+};
+
+static bool legacyAckJournalPresent(Preferences &journal) {
+  if (journal.getUChar("count", 0U) > 0U) return true;
+  for (uint8_t index = 0U; index < inktime::kMaxAckJournalEntries; ++index) {
+    if (journal.isKey(ackJournalBlobKey(index).c_str())
+        || journal.getString(ackJournalKey('i', index).c_str(), "").length() > 0U) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool removeLegacyAckJournalKeys(Preferences &journal) {
+  bool ok = true;
+  if (journal.isKey("count") && !journal.remove("count")) ok = false;
+  const char legacyPrefixes[] = {'i', 'v', 'e', 's', 'r', 'd', 'l', 't'};
+  for (uint8_t index = 0U; index < inktime::kMaxAckJournalEntries; ++index) {
+    const String blobKey = ackJournalBlobKey(index);
+    if (journal.isKey(blobKey.c_str()) && !journal.remove(blobKey.c_str())) ok = false;
+    for (const char prefix : legacyPrefixes) {
+      const String key = ackJournalKey(prefix, index);
+      if (journal.isKey(key.c_str()) && !journal.remove(key.c_str())) ok = false;
+    }
+  }
+  return ok && journal.getUChar("count", 0U) == 0U;
+}
+
+static bool loadAckJournalState(
+  Preferences &journal,
+  PendingQueueAck *entries,
+  uint8_t &count,
+  char &activeBank,
+  uint64_t &generation,
+  bool &legacyPresent
+) {
+  count = 0U;
+  activeBank = 0;
+  generation = 0U;
+  legacyPresent = legacyAckJournalPresent(journal);
+  AckJournalPreferencesStorage storage(journal);
+  inktime::ackjournal::Snapshot snapshot;
+  if (storage.readActiveSnapshot(snapshot)) {
+    if (snapshot.records.size() > inktime::kMaxAckJournalEntries) return false;
+    for (const std::string &record : snapshot.records) {
+      AckJournalBlob blob = {};
+      PendingQueueAck pending = {};
+      if (record.size() != sizeof(blob)) return false;
+      memcpy(&blob, record.data(), sizeof(blob));
+      if (!decodeAckJournalBlob(blob, pending) || !pending.valid) return false;
+      if (entries != nullptr) entries[count++] = pending;
+    }
+    activeBank = snapshot.bank;
+    generation = snapshot.generation;
+    return true;
+  }
+  uint8_t legacyCount = min(
     journal.getUChar("count", 0U),
     static_cast<uint8_t>(inktime::kMaxAckJournalEntries));
+  if (legacyCount == 0U && legacyPresent) {
+    for (uint8_t index = 0U; index < inktime::kMaxAckJournalEntries; ++index) {
+      if (journal.isKey(ackJournalBlobKey(index).c_str())
+          || journal.isKey(ackJournalKey('i', index).c_str())) {
+        legacyCount = index + 1U;
+      }
+    }
+  }
+  for (uint8_t index = 0U; index < legacyCount; ++index) {
+    PendingQueueAck pending = readAckJournalEntry(journal, index);
+    if (pending.valid && entries != nullptr) entries[count++] = pending;
+  }
+  return true;
+}
+
+static bool commitAckJournalEntries(
+  Preferences &journal,
+  const PendingQueueAck *entries,
+  uint8_t count,
+  char previousBank,
+  uint64_t previousGeneration,
+  bool legacyPresent
+) {
+  if (entries == nullptr || count > inktime::kMaxAckJournalEntries
+      || previousGeneration == UINT64_MAX) {
+    lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL";
+    lastDeviceErrorMessage = "ACK journal snapshot state 無效";
+    return false;
+  }
+  inktime::ackjournal::Snapshot next;
+  next.bank = previousBank == 'G' ? 'H' : 'G';
+  next.generation = previousGeneration == 0U ? 1U : previousGeneration + 1U;
+  for (uint8_t index = 0U; index < count; ++index) {
+    AckJournalBlob blob = {};
+    if (!encodeAckJournalBlob(entries[index], blob)) return false;
+    next.records.emplace_back(reinterpret_cast<const char *>(&blob), sizeof(blob));
+  }
+  AckJournalPreferencesStorage storage(journal);
+  std::string error;
+  if (!inktime::ackjournal::commitSnapshot(storage, previousBank, next, error)) {
+    lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL";
+    lastDeviceErrorMessage = error.c_str();
+    return false;
+  }
+  if (legacyPresent
+      && inktime::ackjournal::legacyCleanupAllowed(true)
+      && !removeLegacyAckJournalKeys(journal)) {
+    lastDeviceWarningCode = "DEVICE-QUEUE-ACK-CLEANUP";
+    lastDeviceWarningMessage = "ACK journal legacy cleanup 失敗；canonical snapshot 已保留";
+  }
+  return true;
 }
 
 static uint8_t loadAckJournalEntries(
@@ -893,18 +1440,28 @@ static uint8_t loadAckJournalEntries(
 ) {
   if (entries == nullptr || capacity == 0U) return 0U;
   Preferences journal;
-  journal.begin("acklog", true);
-  const uint8_t count = min(ackJournalCount(journal), capacity);
-  uint8_t loaded = 0U;
-  for (uint8_t index = 0; index < count; ++index) {
-    PendingQueueAck pending = readAckJournalEntry(journal, index);
-    if (pending.valid) entries[loaded++] = pending;
+  if (!journal.begin("acklog", true)) return 0U;
+  PendingQueueAck loadedEntries[inktime::kMaxAckJournalEntries] = {};
+  uint8_t count = 0U;
+  char activeBank = 0;
+  uint64_t generation = 0U;
+  bool legacyPresent = false;
+  const bool loaded = loadAckJournalState(
+    journal, loadedEntries, count, activeBank, generation, legacyPresent);
+  (void)activeBank;
+  (void)generation;
+  (void)legacyPresent;
+  if (!loaded) {
+    journal.end();
+    return 0U;
   }
+  const uint8_t copied = min(count, capacity);
+  for (uint8_t index = 0U; index < copied; ++index) entries[index] = loadedEntries[index];
   journal.end();
-  return loaded;
+  return copied;
 }
 
-static void removeLegacyPendingQueueAck() {
+static bool removeLegacyPendingQueueAck() {
   prefs.begin("dashcfg", false);
   if (prefs.remove("ack_item")) recordNvsWrite();
   if (prefs.remove("ack_ver")) recordNvsWrite();
@@ -912,79 +1469,131 @@ static void removeLegacyPendingQueueAck() {
   if (prefs.remove("ack_skip")) recordNvsWrite();
   if (prefs.remove("ack_error")) recordNvsWrite();
   prefs.end();
+  prefs.begin("dashcfg", true);
+  const char *legacyKeys[] = {
+    "ack_item", "ack_ver", "ack_event", "ack_skip", "ack_error"};
+  bool absent = true;
+  for (const char *key : legacyKeys) {
+    if (prefs.isKey(key)) absent = false;
+  }
+  prefs.end();
+  return absent;
 }
 
-static void persistPendingQueueAck(const PendingQueueAck &pending) {
-  if (!pending.valid) return;
+static bool persistPendingQueueAck(const PendingQueueAck &pending) {
+  if (!pending.valid) return false;
   Preferences journal;
-  journal.begin("acklog", false);
-  uint8_t count = ackJournalCount(journal);
+  if (!journal.begin("acklog", false)) {
+    lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL";
+    lastDeviceErrorMessage = "ACK journal NVS namespace 無法開啟";
+    return false;
+  }
+  PendingQueueAck current[inktime::kMaxAckJournalEntries] = {};
+  uint8_t count = 0U;
+  char activeBank = 0;
+  uint64_t generation = 0U;
+  bool legacyPresent = false;
+  if (!loadAckJournalState(
+        journal, current, count, activeBank, generation, legacyPresent)) {
+    journal.end();
+    lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL";
+    lastDeviceErrorMessage = "ACK journal active snapshot 無法驗證";
+    return false;
+  }
   for (uint8_t index = 0; index < count; ++index) {
-    const PendingQueueAck existing = readAckJournalEntry(journal, index);
+    const PendingQueueAck &existing = current[index];
     if (existing.valid && samePendingQueueAck(existing, pending)) {
       journal.end();
-      return;
+      return true;
     }
   }
-  uint8_t insertAt = count;
+  PendingQueueAck next[inktime::kMaxAckJournalEntries] = {};
+  uint8_t nextCount = count;
   if (count >= inktime::kMaxAckJournalEntries) {
-    for (uint8_t index = 1; index < inktime::kMaxAckJournalEntries; ++index) {
-      const PendingQueueAck shifted = readAckJournalEntry(journal, index);
-      if (shifted.valid) writeAckJournalEntry(journal, index - 1U, shifted);
+    uint8_t evictionIndex = count;
+    for (uint8_t index = 0; index < count; ++index) {
+      const PendingQueueAck &existing = current[index];
+      if (existing.valid && !terminalAckEvidence(existing)) {
+        evictionIndex = index;
+        break;
+      }
     }
-    insertAt = inktime::kMaxAckJournalEntries - 1U;
-  } else {
-    ++count;
+    if (evictionIndex >= count) {
+      // Terminal display evidence is the last class allowed to leave the
+      // bounded journal.  If every entry is terminal, retain a visible
+      // diagnostic while making the bounded forward-progress decision.
+      evictionIndex = 0U;
+      lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL-OVERFLOW";
+      lastDeviceErrorMessage = "ACK journal 已滿，最舊 terminal display evidence 已淘汰";
+    } else {
+      lastDeviceWarningCode = "DEVICE-QUEUE-ACK-JOURNAL-COMPACTED";
+      lastDeviceWarningMessage = "ACK journal 已滿，已優先淘汰可重建的 non-terminal ACK";
+    }
+    nextCount = 0U;
+    for (uint8_t index = 0U; index < count; ++index) {
+      if (index != evictionIndex) next[nextCount++] = current[index];
+    }
   }
-  writeAckJournalEntry(journal, insertAt, pending);
-  const size_t countWritten = journal.putUChar("count", count);
-  if (countWritten > 0U) recordNvsWrite();
+  if (nextCount >= inktime::kMaxAckJournalEntries) {
+    journal.end();
+    lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL";
+    lastDeviceErrorMessage = "ACK journal replacement state 超過 bounded capacity";
+    return false;
+  }
+  next[nextCount++] = pending;
+  const bool committed = commitAckJournalEntries(
+    journal, next, nextCount, activeBank, generation, legacyPresent);
   journal.end();
+  return committed;
 }
 
-static void removePendingQueueAck(const PendingQueueAck &pending) {
+static bool removePendingQueueAck(const PendingQueueAck &pending) {
   Preferences journal;
-  journal.begin("acklog", false);
-  const uint8_t count = ackJournalCount(journal);
+  if (!journal.begin("acklog", false)) {
+    lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL";
+    lastDeviceErrorMessage = "ACK journal NVS namespace 無法開啟，無法移除已送出事件";
+    return false;
+  }
+  PendingQueueAck current[inktime::kMaxAckJournalEntries] = {};
+  uint8_t count = 0U;
+  char activeBank = 0;
+  uint64_t generation = 0U;
+  bool legacyPresent = false;
+  if (!loadAckJournalState(
+        journal, current, count, activeBank, generation, legacyPresent)) {
+    journal.end();
+    lastDeviceErrorCode = "DEVICE-QUEUE-ACK-JOURNAL";
+    lastDeviceErrorMessage = "ACK journal active snapshot 無法驗證，保留舊 generation";
+    return false;
+  }
   uint8_t found = count;
   for (uint8_t index = 0; index < count; ++index) {
-    const PendingQueueAck existing = readAckJournalEntry(journal, index);
+    const PendingQueueAck &existing = current[index];
     if (existing.valid && samePendingQueueAck(existing, pending)) {
       found = index;
       break;
     }
   }
   if (found < count) {
-    for (uint8_t index = found + 1U; index < count; ++index) {
-      const PendingQueueAck shifted = readAckJournalEntry(journal, index);
-      if (shifted.valid) writeAckJournalEntry(journal, index - 1U, shifted);
+    PendingQueueAck next[inktime::kMaxAckJournalEntries] = {};
+    uint8_t nextCount = 0U;
+    for (uint8_t index = 0U; index < count; ++index) {
+      if (index != found) next[nextCount++] = current[index];
     }
-    const uint8_t last = count - 1U;
-    if (journal.remove(ackJournalKey('i', last).c_str())) recordNvsWrite();
-    if (journal.remove(ackJournalKey('v', last).c_str())) recordNvsWrite();
-    if (journal.remove(ackJournalKey('e', last).c_str())) recordNvsWrite();
-    if (journal.remove(ackJournalKey('s', last).c_str())) recordNvsWrite();
-    if (journal.remove(ackJournalKey('r', last).c_str())) recordNvsWrite();
-    if (journal.remove(ackJournalKey('d', last).c_str())) recordNvsWrite();
-    if (journal.remove(ackJournalKey('l', last).c_str())) recordNvsWrite();
-    if (journal.remove(ackJournalKey('t', last).c_str())) recordNvsWrite();
-    if (journal.putUChar("count", last) > 0U) recordNvsWrite();
+    const bool committed = commitAckJournalEntries(
+      journal, next, nextCount, activeBank, generation, legacyPresent);
+    journal.end();
+    return committed;
   }
   journal.end();
+  return true;
 }
 
 static PendingQueueAck loadPendingQueueAck() {
-  Preferences journal;
-  journal.begin("acklog", true);
-  const uint8_t count = ackJournalCount(journal);
-  for (uint8_t index = 0; index < count; ++index) {
-    PendingQueueAck pending = readAckJournalEntry(journal, index);
-    if (pending.valid) {
-      journal.end();
-      return pending;
-    }
-  }
-  journal.end();
+  PendingQueueAck entries[inktime::kMaxAckJournalEntries] = {};
+  const uint8_t count = loadAckJournalEntries(
+    entries, inktime::kMaxAckJournalEntries);
+  if (count > 0U) return entries[0];
 
   // Migrate the pre-journal single pending record without losing an event
   // after an upgrade from the previous firmware.
@@ -1002,8 +1611,13 @@ static PendingQueueAck loadPendingQueueAck() {
   };
   prefs.end();
   if (validPendingQueueAck(legacy)) {
-    persistPendingQueueAck(legacy);
-    removeLegacyPendingQueueAck();
+    const bool canonicalCommitted = persistPendingQueueAck(legacy);
+    if (inktime::ackjournal::legacyCleanupAllowed(canonicalCommitted)) {
+      if (!removeLegacyPendingQueueAck()) {
+        lastDeviceWarningCode = "DEVICE-QUEUE-ACK-CLEANUP";
+        lastDeviceWarningMessage = "legacy single ACK cleanup 失敗；canonical snapshot 已保留";
+      }
+    }
     return legacy;
   }
   return legacy;
@@ -1011,7 +1625,10 @@ static PendingQueueAck loadPendingQueueAck() {
 
 static void clearPendingQueueAck() {
   const PendingQueueAck pending = loadPendingQueueAck();
-  if (pending.valid) removePendingQueueAck(pending);
+  if (pending.valid && !removePendingQueueAck(pending)) {
+    lastDeviceWarningCode = "DEVICE-QUEUE-ACK-CLEANUP";
+    lastDeviceWarningMessage = "ACK cleanup 未完成；duplicate idempotency ACK 將保留重送";
+  }
 }
 
 static uint32_t minutesToNextRefreshFromLastEpoch(const Config &cfg) {
@@ -2643,14 +3260,21 @@ static bool terminalQueueAck(inktime::QueueEvent event) {
     || event == inktime::QueueEvent::DisplayFailed;
 }
 
-static void persistQueueAckBatch(
+static bool persistQueueAckBatch(
   const PendingQueueAck *pending,
   uint8_t count
 ) {
-  if (pending == nullptr) return;
+  if (pending == nullptr || count == 0U) return false;
+  bool ok = true;
   for (uint8_t index = 0U; index < count; ++index) {
-    persistPendingQueueAck(pending[index]);
+    ok = inktime::ackjournal::allPersistenceSucceeded(
+      ok, persistPendingQueueAck(pending[index]));
   }
+  if (!ok) {
+    lastDeviceErrorCode = "DEVICE-QUEUE-ACK-DURABILITY";
+    lastDeviceErrorMessage = "Queue ACK pending persistence failed; no durable-retention claim";
+  }
+  return ok;
 }
 
 static bool serializeQueueAckBatch(
@@ -2694,13 +3318,16 @@ static bool postQueueAckBatch(
   bool allowRetainedTerminal = false
 ) {
   if (pending == nullptr || count == 0U) return true;
+  queueAckPermanentReject = false;
   if (deviceAuthInvalid) {
-    persistQueueAckBatch(pending, count);
+    const bool retained = persistQueueAckBatch(pending, count);
+    if (!retained) lastDeviceWarningMessage = "device auth invalid 且 pending ACK 未能 durable 保留";
     return false;
   }
   String body;
   if (!serializeQueueAckBatch(pending, count, body)) {
-    persistQueueAckBatch(pending, count);
+    const bool retained = persistQueueAckBatch(pending, count);
+    if (!retained) lastDeviceWarningMessage = "ACK schema failure 且 pending ACK 未能 durable 保留";
     lastDeviceErrorCode = "DEVICE-QUEUE-ACK-SCHEMA";
     lastDeviceErrorMessage = "Queue ACK batch body 超過有界 schema 或 idempotency 建立失敗";
     return false;
@@ -2708,7 +3335,8 @@ static bool postQueueAckBatch(
 
   String base;
   if (!ensureWakeHttpSession(cfg, base) || WiFi.status() != WL_CONNECTED) {
-    persistQueueAckBatch(pending, count);
+    const bool retained = persistQueueAckBatch(pending, count);
+    if (!retained) lastDeviceWarningMessage = "network unavailable 且 pending ACK 未能 durable 保留";
     return false;
   }
 
@@ -2725,7 +3353,8 @@ static bool postQueueAckBatch(
     }
     if (!addDeviceAuthorization(ackHttp, cfg)) {
       ackHttp.end();
-      persistQueueAckBatch(pending, count);
+      const bool retained = persistQueueAckBatch(pending, count);
+      if (!retained) lastDeviceWarningMessage = "authorization unavailable 且 pending ACK 未能 durable 保留";
       return false;
     }
     const char* responseHeaders[] = {"Content-Type"};
@@ -2740,7 +3369,8 @@ static bool postQueueAckBatch(
     const String responseContentType = ackHttp.header("Content-Type");
     if (authFailed) {
       ackHttp.end();
-      persistQueueAckBatch(pending, count);
+      const bool retained = persistQueueAckBatch(pending, count);
+      if (!retained) lastDeviceWarningMessage = "authorization failure 且 pending ACK 未能 durable 保留";
       return false;
     }
 
@@ -2757,49 +3387,100 @@ static bool postQueueAckBatch(
         bool stale = false;
         bool retainedTerminal = false;
         bool unresolvedOther = false;
+        bool permanentRejected = false;
+        bool durabilityFailure = false;
         for (uint8_t index = 0U; index < count; ++index) {
           const JsonObjectConst result = results[index].as<JsonObjectConst>();
           const String responseItem = result["queue_item_id"] | "";
           const String responseEvent = result["event"] | "";
+          const int responseHttpStatus = result["http_status"] | 0;
           const String outcome = result["status"] | "";
           const String errorCode = result["error_code"] | "";
-          const bool identityMatches = responseItem == pending[index].queueItemId
-            && responseEvent == inktime::queueEventName(pending[index].event);
-          if (identityMatches && outcome == "accepted") {
-            removePendingQueueAck(pending[index]);
+          const inktime::QueueAckResultDisposition disposition =
+            inktime::queueAckResultDisposition(
+              pending[index].queueItemId.c_str(),
+              inktime::queueEventName(pending[index].event),
+              responseItem.c_str(),
+              responseEvent.c_str(),
+              responseHttpStatus,
+              outcome.c_str(),
+              errorCode.c_str());
+          if (disposition == inktime::QueueAckResultDisposition::Accepted) {
+            const bool removed = removePendingQueueAck(pending[index]);
+            if (inktime::ackjournal::retainDuplicateEvidence(true, removed)) {
+              lastDeviceWarningCode = "DEVICE-QUEUE-ACK-CLEANUP";
+              lastDeviceWarningMessage = "server 已接受 ACK，但 local cleanup 失敗；保留 duplicate-safe evidence";
+            }
             continue;
           }
-          if (identityMatches && errorCode == "QUEUE-003") {
+          if (disposition == inktime::QueueAckResultDisposition::Stale) {
+            // Stale evidence is retained for recovery, but it can never
+            // authorize this wake's display/config progression.
+            allResolved = false;
             // A terminal event is crash-safe evidence, even when the queue
             // version has moved on before the next wake.  Keep it durable so
             // delayed-terminal recovery can still be accepted; dropping it
             // here would turn a transient stale response into lost history.
             if (terminalQueueAck(pending[index].event)) {
-              persistPendingQueueAck(pending[index]);
+              if (!persistPendingQueueAck(pending[index])) {
+                unresolvedOther = true;
+                durabilityFailure = true;
+              }
               allResolved = false;
               stale = true;
               retainedTerminal = true;
               continue;
             }
-            removePendingQueueAck(pending[index]);
+            const bool removed = removePendingQueueAck(pending[index]);
+            if (inktime::ackjournal::retainDuplicateEvidence(true, removed)) {
+              lastDeviceWarningCode = "DEVICE-QUEUE-ACK-CLEANUP";
+              lastDeviceWarningMessage = "QUEUE-003 rejected ACK cleanup 失敗；保留 duplicate-safe evidence";
+            }
             stale = true;
             continue;
           }
-          persistPendingQueueAck(pending[index]);
+          if (disposition == inktime::QueueAckResultDisposition::AuthoritativePermanentReject) {
+            // A per-event 4xx result is authoritative for this item.  Do not
+            // keep retrying it or strand later config/schedule work in this
+            // wake; quarantine the event and expose the rejection.
+            const bool removed = removePendingQueueAck(pending[index]);
+            if (inktime::ackjournal::retainDuplicateEvidence(true, removed)) {
+              lastDeviceWarningCode = "DEVICE-QUEUE-ACK-CLEANUP";
+              lastDeviceWarningMessage = "permanent ACK cleanup 失敗；保留 duplicate-safe evidence";
+            }
+            permanentRejected = true;
+            continue;
+          }
+          if (!persistPendingQueueAck(pending[index])) {
+            lastDeviceErrorCode = "DEVICE-QUEUE-ACK-DURABILITY";
+            lastDeviceErrorMessage = "Queue ACK rejected event 無法 durable 保留";
+            durabilityFailure = true;
+          }
           allResolved = false;
           unresolvedOther = true;
         }
         ackHttp.end();
+        queueAckPermanentReject = inktime::queueAckMayUnlockDisplay(
+          permanentRejected, allResolved, unresolvedOther, durabilityFailure);
         if (stale) {
           lastDeviceErrorCode = "DEVICE-QUEUE-STALE";
           lastDeviceErrorMessage = "QUEUE-003 Queue version 已過期；下次重新取得 Manifest";
         }
+        if (permanentRejected) {
+          lastDeviceErrorCode = "DEVICE-QUEUE-ACK-PERMANENT";
+          lastDeviceErrorMessage = "Queue ACK 已被伺服器永久拒絕；事件已 quarantine，本輪繼續後續工作";
+        }
         if (allResolved) return true;
         if (allowRetainedTerminal && retainedTerminal && !unresolvedOther) return true;
-        lastDeviceErrorCode = stale ? lastDeviceErrorCode : "DEVICE-QUEUE-ACK-REJECTED";
-        lastDeviceErrorMessage = stale
-          ? lastDeviceErrorMessage
-          : "Queue ACK batch 含有拒絕事件；拒絕項目已 durable 保留";
+        if (durabilityFailure) {
+          lastDeviceErrorCode = "DEVICE-QUEUE-ACK-DURABILITY";
+          lastDeviceErrorMessage = "Queue ACK batch rejected events 未能 durable 保留";
+        } else {
+          lastDeviceErrorCode = stale ? lastDeviceErrorCode : "DEVICE-QUEUE-ACK-REJECTED";
+          lastDeviceErrorMessage = stale
+            ? lastDeviceErrorMessage
+            : "Queue ACK batch 含有拒絕事件；拒絕項目已 durable 保留";
+        }
         return false;
       }
     }
@@ -2807,23 +3488,52 @@ static bool postQueueAckBatch(
     ackHttp.end();
     const inktime::AckDecision decision = inktime::ackDecision(status, attempt);
     if (decision == inktime::AckDecision::StaleManifest) {
-      persistQueueAckBatch(pending, count);
+      const bool retained = persistQueueAckBatch(pending, count);
       lastDeviceErrorCode = "DEVICE-QUEUE-STALE";
-      lastDeviceErrorMessage = "Queue ACK batch HTTP 409；pending events 已 durable 保留";
+      lastDeviceErrorMessage = retained
+        ? "Queue ACK batch HTTP 409；pending events 已 durable 保留"
+        : "Queue ACK batch HTTP 409；pending events 未能 durable 保留";
       return false;
     }
     if (decision == inktime::AckDecision::AuthorizationFailed) {
-      persistQueueAckBatch(pending, count);
+      const bool retained = persistQueueAckBatch(pending, count);
       lastDeviceErrorCode = "DEVICE-QUEUE-AUTH";
-      lastDeviceErrorMessage = "Queue ACK Token／authorization 被拒絕";
+      lastDeviceErrorMessage = retained
+        ? "Queue ACK Token／authorization 被拒絕；pending events 已 durable 保留"
+        : "Queue ACK Token／authorization 被拒絕；pending events 未能 durable 保留";
       return false;
+    }
+    if (status == 429) {
+      // Rate limiting is transient.  Keep the complete batch durable even
+      // after the bounded retry budget is exhausted; it must never enter the
+      // permanent-4xx quarantine path below.
+      if (decision == inktime::AckDecision::Retry) {
+        delay(250U * (attempt + 1U));
+        continue;
+      }
+      break;
+    }
+    if (status >= 400 && status < 500 && status != HTTP_CODE_CONFLICT) {
+      queueAckPermanentReject = true;
+      for (uint8_t index = 0U; index < count; ++index) {
+        const bool removed = removePendingQueueAck(pending[index]);
+        if (inktime::ackjournal::retainDuplicateEvidence(true, removed)) {
+          lastDeviceWarningCode = "DEVICE-QUEUE-ACK-CLEANUP";
+          lastDeviceWarningMessage = "permanent HTTP ACK cleanup 失敗；保留 duplicate-safe evidence";
+        }
+      }
+      lastDeviceErrorCode = "DEVICE-QUEUE-ACK-PERMANENT";
+      lastDeviceErrorMessage = "Queue ACK HTTP 4xx 已永久拒絕；事件已 quarantine，本輪繼續後續工作";
+      return true;
     }
     if (decision != inktime::AckDecision::Retry) break;
     delay(250U * (attempt + 1U));
   }
-  persistQueueAckBatch(pending, count);
+  const bool retained = persistQueueAckBatch(pending, count);
   lastDeviceErrorCode = "DEVICE-QUEUE-ACK-RETRY";
-  lastDeviceErrorMessage = "Queue ACK batch 已達有界 retry 上限；pending events 已 durable 保留";
+  lastDeviceErrorMessage = retained
+    ? "Queue ACK batch 已達有界 retry 上限；pending events 已 durable 保留"
+    : "Queue ACK batch 已達有界 retry 上限；pending events 未能 durable 保留";
   return false;
 }
 
@@ -2857,11 +3567,14 @@ static bool sendQueueEvent(
   };
   if (!pending.valid) return false;
   if (runtimeTelemetry.ack_event_count < UINT32_MAX) ++runtimeTelemetry.ack_event_count;
-  if (terminalQueueAck(event)) persistPendingQueueAck(pending);
+  if (terminalQueueAck(event) && !persistPendingQueueAck(pending)) return false;
   if (deviceAuthInvalid) return false;
   if (WiFi.status() != WL_CONNECTED) return false;
   if (ramQueueAckBatchCount >= kQueueAckBatchMaxEvents && !flushRamQueueAckBatch(cfg)) {
-    if (!terminalQueueAck(event)) persistPendingQueueAck(pending);
+    if (!terminalQueueAck(event) && !persistPendingQueueAck(pending)) {
+      lastDeviceWarningCode = "DEVICE-QUEUE-ACK-DURABILITY";
+      lastDeviceWarningMessage = "RAM ACK batch flush failure 且 non-terminal ACK 未能 durable 保留";
+    }
     return false;
   }
   ramQueueAckBatch[ramQueueAckBatchCount++] = pending;
@@ -2989,6 +3702,13 @@ bool downloadLatestPhotoBin(Config &cfg) {
       || desiredPanelProfile == String(INKTIME_PANEL_PROFILE);
     Config candidate = cfg;
 #if INKTIME_PHOTOPAINTER_ENABLED
+    if (cfg.delivery_mode == "inktime_offline_schedule"
+        && (remoteConfig["schema_version"] | 0) < 3) {
+      // A legacy/schema-2 latest manifest is the authoritative convergence
+      // response after the server has moved this device out of enhanced
+      // offline mode.  Do not leave the stale offline mode in NVS.
+      candidate.delivery_mode = "legacy_online";
+    }
     bool validSchedule = applyRemoteSchedule(
       remoteConfig,
       remoteConfig["schema_version"] | 0,
@@ -3252,6 +3972,14 @@ static bool downloadOfflineScheduleSlot(
     lastDeviceErrorMessage = "離線排程 Slot size 與 pixel format 不一致";
     return false;
   }
+  // A verified formal frame is content-addressed by SHA and rotation.  Reuse
+  // it for a later schedule instead of downloading and converting the same
+  // release again; the caller still emits the normal queue download/hash ACKs.
+  uint8_t* cachedFormalFrame = nullptr;
+  if (photoPainter.loadFormalFrame(expectedSha.c_str(), rotation, &cachedFormalFrame)) {
+    if (cachedFormalFrame != nullptr) heap_caps_free(cachedFormalFrame);
+    return true;
+  }
   String sessionBase;
   if (!ensureWakeHttpSession(cfg, sessionBase) || sessionBase != base) {
     lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-SESSION";
@@ -3456,6 +4184,25 @@ static bool downloadOfflineScheduleAndFrames(Config &cfg, bool targetNext = fals
   }
   const int length = scheduleHttp.getSize();
   const String contentType = scheduleHttp.header("Content-Type");
+  if (status == HTTP_CODE_CONFLICT && length > 0 && length <= 4096
+      && contentType.startsWith("application/json")) {
+    JsonDocument mismatch;
+    const DeserializationError mismatchError = deserializeJson(mismatch, scheduleHttp.getStream());
+    const String mismatchName = mismatch["error"] | "";
+    const String mismatchCode = mismatch["error_code"] | "";
+    scheduleHttp.end();
+    if (!mismatchError && !mismatch.overflowed()
+        && mismatchName == "delivery_mode_mismatch"
+        && mismatchCode == "DEVICE-008") {
+      offlineDeliveryModeMismatchDetected = true;
+      lastDeviceErrorCode = "DEVICE-DELIVERY-MODE-MISMATCH";
+      lastDeviceErrorMessage = "伺服器已切換 delivery_mode；本輪只執行一次 latest config convergence";
+      return false;
+    }
+    lastDeviceErrorCode = "DEVICE-OFFLINE-SCHEDULE-HTTP";
+    lastDeviceErrorMessage = "離線排程 409 body 不是受信任的 delivery_mode_mismatch contract";
+    return false;
+  }
   if (status == HTTP_CODE_NOT_FOUND && length > 0 && length <= 4096
       && contentType.startsWith("application/json")) {
     JsonDocument notReady;
@@ -3946,7 +4693,7 @@ static QueueDownloadResult downloadQueuePhotoBin(Config &cfg) {
     manifestHttp.end();
     return QueueDownloadResult::Failed;
   }
-  if (status == HTTP_CODE_NOT_FOUND) {
+  if (status == HTTP_CODE_NOT_FOUND || status == HTTP_CODE_CONFLICT) {
     manifestHttp.end();
     return QueueDownloadResult::EmptyOrUnsupported;
   }
@@ -4824,6 +5571,7 @@ static bool loadOfflineScheduledLocalFrame(
 
 bool downloadDailyPhotoBin(Config &cfg) {
   currentPrefetchOnly = false;
+  offlineDeliveryModeMismatchDetected = false;
   if (!resumePendingQueueAck(cfg)) return false;
 #if INKTIME_PHOTOPAINTER_ENABLED
   const bool userButtonWake = photoPainter.wokeFromUserButton();
@@ -4837,6 +5585,12 @@ bool downloadDailyPhotoBin(Config &cfg) {
       // A button check may replace the active schedule, but a missing or
       // unavailable remote schedule must leave the cached formal day usable.
       (void)downloadOfflineScheduleAndFrames(cfg);
+      if (offlineDeliveryModeMismatchDetected) {
+        currentPrefetchOnly = false;
+        const bool latest = downloadLatestPhotoBin(cfg);
+        if (latest) currentDisplaySkipped = shouldSkipCurrentDisplay(cfg);
+        return latest;
+      }
       currentPrefetchOnly = false;
       return loadOfflineScheduledLocalFrame(cfg, time(nullptr), false);
     }
@@ -4848,6 +5602,12 @@ bool downloadDailyPhotoBin(Config &cfg) {
       const bool displayAtThisWake = formalSlotDue;
       currentPrefetchOnly = stageTomorrow || !displayAtThisWake;
       const bool prefetched = downloadOfflineScheduleAndFrames(cfg, stageTomorrow);
+      if (offlineDeliveryModeMismatchDetected) {
+        currentPrefetchOnly = false;
+        const bool latest = downloadLatestPhotoBin(cfg);
+        if (latest) currentDisplaySkipped = shouldSkipCurrentDisplay(cfg);
+        return latest;
+      }
       if (prefetched && displayAtThisWake && !stageTomorrow) {
         currentPrefetchOnly = false;
         return loadOfflineScheduledLocalFrame(cfg, time(nullptr), false);
@@ -4870,6 +5630,18 @@ bool downloadDailyPhotoBin(Config &cfg) {
   const bool latest = downloadLatestPhotoBin(cfg);
   if (latest) currentDisplaySkipped = shouldSkipCurrentDisplay(cfg);
   return latest;
+}
+
+static void appendStatusReportedAt(JsonDocument &payload, time_t epoch) {
+  // time(nullptr) is the device RTC/NTP authority used by the offline
+  // schedule contract.  Do not emit an uninitialized epoch: the server must
+  // keep its normal receive-time fallback until the clock is trustworthy.
+  if (epoch < static_cast<time_t>(1600000000)) return;
+  struct tm utcTime = {};
+  if (gmtime_r(&epoch, &utcTime) == nullptr) return;
+  char reportedAt[25] = {};
+  if (strftime(reportedAt, sizeof(reportedAt), "%Y-%m-%dT%H:%M:%SZ", &utcTime) == 0) return;
+  payload["status_reported_at"] = reportedAt;
 }
 
 void reportDeviceStatus(Config &cfg, bool displayUpdated) {
@@ -4906,6 +5678,7 @@ void reportDeviceStatus(Config &cfg, bool displayUpdated) {
   payload["free_psram_bytes"] = ESP.getFreePsram();
   payload["wake_reason"] = String((int)esp_sleep_get_wakeup_cause());
   payload["wake_reason_detail"] = wakeReasonDetail();
+  appendStatusReportedAt(payload, telemetryNow);
   payload["wifi_connect_ms"] = runtimeTelemetry.wifi_connect_ms;
   payload["wifi_fast_path_attempted"] = runtimeTelemetry.wifi_fast_path_attempted;
   payload["wifi_fast_path_success"] = runtimeTelemetry.wifi_fast_path_success;
@@ -5693,7 +6466,15 @@ void setup() {
 #endif
 #if INKTIME_PHOTOPAINTER_ENABLED
     // Known battery power must not remain in a network retry/configuration loop.
-    // USB or an unidentified PMIC keeps the bounded AP diagnostics path available.
+    // USB keeps the bounded service path available; an unidentified PMIC must
+    // not fall through into a long AP portal on every unattended wake.
+    photoPainter.refreshPowerState();
+    if (!photoPainter.powerSourceKnown() && !photoPainter.usbConnected()) {
+      lastDeviceErrorCode = "DEVICE-POWER-UNKNOWN";
+      lastDeviceErrorMessage = "PMIC／電池來源未知，已跳過 AP portal 並等待 bounded recovery wake";
+      goDeepSleepSeconds(300U);
+      return;
+    }
     if (photoPainter.powerSourceKnown() && !photoPainter.usbConnected()) {
       applyFixedTimezoneWithoutNtp(g_cfg.tz_offset_minutes);
       time_t rtcEpoch = 0;
@@ -5749,6 +6530,19 @@ void setup() {
     return;
   }
 
+#if INKTIME_PHOTOPAINTER_ENABLED
+  photoPainter.refreshPowerState();
+  if (!photoPainter.powerSourceKnown() && !photoPainter.usbConnected()) {
+    // Unknown PMIC/battery identity is not permission to enter the AP portal
+    // or perform a full-refresh wake.  Keep the recovery bounded until a
+    // supported board/power source is identified.
+    lastDeviceErrorCode = "DEVICE-POWER-UNKNOWN";
+    lastDeviceErrorMessage = "PMIC／電池來源未知，已停止網路刷新並等待 bounded recovery wake";
+    goDeepSleepSeconds(300U);
+    return;
+  }
+#endif
+
   struct tm timeinfo;
   String wakeOrigin;
   (void)ensureWakeHttpSession(g_cfg, wakeOrigin);
@@ -5775,6 +6569,13 @@ void setup() {
       // Download/hash events and DISPLAY_STARTED are RAM-first, but all
       // required ACK work must be attempted before radio shutdown.
       mayDisplay = flushRamQueueAckBatch(g_cfg);
+    }
+    if (!mayDisplay && currentFromQueue && queueAckPermanentReject) {
+      // A stable server-side rejection is durable evidence that retrying this
+      // ACK cannot repair the response in the current wake. It must not
+      // prevent a verified frame from being displayed; the terminal event is
+      // retained for the next delayed-terminal recovery.
+      mayDisplay = true;
     }
     if (!mayDisplay && currentFromQueue && !currentDisplaySkipped) {
       const String ackFailure = lastDeviceErrorCode.length() > 0U

@@ -14,6 +14,7 @@ from inktime.app.core.locks import fcntl
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+MAX_THUMBNAIL_INPUT_PIXELS = 40_000_000
 
 
 class ThumbnailCache:
@@ -147,6 +148,12 @@ class ThumbnailCache:
         handle.close()
         try:
             with Image.open(source) as opened:
+                if opened.width * opened.height > MAX_THUMBNAIL_INPUT_PIXELS:
+                    raise OSError("THUMB-005 原始照片像素超過縮圖安全上限")
+                if opened.format == "JPEG":
+                    opened.draft("RGB", (size, size))
+                else:
+                    opened.thumbnail((size * 2, size * 2), Image.Resampling.BOX)
                 image = ImageOps.exif_transpose(opened).convert("RGB")
                 image.thumbnail((size, size), Image.Resampling.LANCZOS)
                 image.save(temporary, format="JPEG", quality=88, optimize=True)
@@ -190,9 +197,10 @@ class ThumbnailCache:
                 removed += 1
         return removed
 
-    def inventory(self) -> list[tuple[Path, int, float, int, str]]:
+    def inventory(self, *, limit: int | None = None) -> list[tuple[Path, int, float, int, str]]:
         """Read cache metadata once so callers can bound their DB lookup."""
         entries: list[tuple[Path, int, float, int, str]] = []
+        maximum = None if limit is None else max(1, int(limit))
         for path in self.root.glob("*.jpg"):
             if not path.is_file():
                 continue
@@ -201,6 +209,8 @@ class ThumbnailCache:
             size_text = path.stem.rsplit("-", 1)[-1]
             size = int(size_text) if size_text.isdigit() else 0
             entries.append((path, stat.st_size, stat.st_atime, size, stem))
+            if maximum is not None and len(entries) >= maximum:
+                break
         return entries
 
     def estimate_cleanup(self, *, max_bytes: int, retention_days: int, active_hashes: set[str]) -> dict:

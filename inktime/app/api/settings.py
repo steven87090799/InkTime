@@ -773,6 +773,9 @@ def costs_page():
                       COUNT(*) requests
                FROM api_usage GROUP BY provider,model ORDER BY cost DESC"""
         ).fetchall()
+        usage_retention = connection.execute(
+            "SELECT retention_days FROM data_retention_policies WHERE data_type='api_usage'"
+        ).fetchone()
     reserve = float(
         current_app.extensions["inktime_settings_repository"].get("budget.unknown_request_reserve", 0.25)
     )
@@ -780,4 +783,7 @@ def costs_page():
     summary["unknown_reserve"] = reserve
     summary["reserved_today"] = int(summary["today_unknown_count"]) * reserve
     summary["cost_complete"] = int(summary["unknown_count"]) == 0
+    summary["usage_retention_days"] = (
+        int(usage_retention["retention_days"]) if usage_retention is not None else None
+    )
     return render_template("costs.html", summary=summary, by_model=by_model)

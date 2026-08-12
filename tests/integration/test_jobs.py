@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
 
+from inktime.app.core.idempotency import request_fingerprint, scoped_idempotency_key
 from inktime.app.repositories.jobs import PreviewCapacityError
 from inktime.app.services.jobs import JobService
 from inktime.app.workers.job_worker import BoundedJobWorker
@@ -30,7 +32,13 @@ def add_photos(app, count: int) -> list[str]:
     return photo_ids
 
 
-def create_job(app, count: int = 10):
+def create_job(
+    app,
+    count: int = 10,
+    *,
+    dedupe_key: str | None = None,
+    request_fingerprint_value: str | None = None,
+):
     photo_ids = add_photos(app, count)
     service: JobService = app.extensions["inktime_job_service"]
     job_id = service.create_analysis_job(
@@ -40,8 +48,78 @@ def create_job(app, count: int = 10):
         created_by="tester",
         budget_limit=None,
         photo_ids=iter(photo_ids),
+        dedupe_key=dedupe_key,
+        request_fingerprint=request_fingerprint_value,
     )
     return service, app.extensions["inktime_job_repository"], job_id
+
+
+def test_request_level_idempotency_ledger_is_atomic_replayable_and_conflict_safe(app):
+    repository = app.extensions["inktime_job_repository"]
+    scope = scoped_idempotency_key("test-ledger", "tester", "same-key")
+    first = repository.reserve_idempotent_request(
+        scope, "fingerprint-a", {"batches": [{"group": "a", "photo_ids": ["photo-a"]}]}
+    )
+    assert first["status"] == "in_progress"
+
+    concurrent_scope = scoped_idempotency_key("test-ledger", "tester", "concurrent-key")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        concurrent = list(
+            pool.map(
+                lambda _index: repository.reserve_idempotent_request(
+                    concurrent_scope, "fingerprint-c", {"batches": []}
+                ),
+                range(2),
+            )
+        )
+    assert {row["status"] for row in concurrent} == {"in_progress"}
+    assert sum(bool(row["reservation_owner"]) for row in concurrent) == 1
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM idempotency_requests WHERE scope_key=?", (concurrent_scope,)
+        ).fetchone()[0] == 1
+
+    empty_scope = scoped_idempotency_key("test-ledger", "tester", "empty-reservation")
+    owner = repository.reserve_idempotent_request(empty_scope, "fingerprint-empty")
+    follower = repository.reserve_idempotent_request(empty_scope, "fingerprint-empty")
+    assert owner["reservation_owner"] is True
+    assert follower["reservation_owner"] is False
+    assert follower["request_snapshot_json"] == "{}"
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE idempotency_requests SET reservation_expires_at=? WHERE scope_key=?",
+            ("2000-01-01T00:00:00+00:00", empty_scope),
+        )
+    takeover = repository.reserve_idempotent_request(empty_scope, "fingerprint-empty")
+    assert takeover["reservation_owner"] is True
+    assert takeover["reservation_token"] != owner["reservation_token"]
+    assert not repository.renew_idempotent_request(
+        empty_scope,
+        "fingerprint-empty",
+        owner["reservation_token"],
+    )
+    with pytest.raises(ValueError, match="IDEMPOTENCY_RESERVATION_LOST"):
+        repository.freeze_idempotent_request(
+            empty_scope,
+            "fingerprint-empty",
+            owner["reservation_token"],
+            {"analysis_spec": {}, "batches": []},
+        )
+
+    completed = repository.complete_idempotent_request(
+        scope,
+        "fingerprint-a",
+        {"jobs": [{"id": "job-a"}], "queued": 1, "batch_by": "folder"},
+    )
+    assert completed["status"] == "completed"
+    replay = repository.reserve_idempotent_request(scope, "fingerprint-a", {"batches": []})
+    assert replay["response_json"] == completed["response_json"]
+    with pytest.raises(ValueError, match="IDEMPOTENCY_CONFLICT"):
+        repository.reserve_idempotent_request(scope, "fingerprint-b", {"batches": []})
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM idempotency_requests WHERE scope_key=?", (scope,)
+        ).fetchone()[0] == 1
 
 
 def test_pause_resume_cancel_state_machine(app):
@@ -106,6 +184,42 @@ def test_stale_running_items_are_recovered_after_restart(app):
     assert repository.get(job_id)["status"] == "completed"
 
 
+def test_item_completion_and_failure_require_current_worker_ownership(app):
+    service, repository, job_id = create_job(app, 1)
+    service.start(job_id)
+    claimed = repository.claim(job_id, "worker-a", 1)
+    item_id = str(claimed[0]["id"])
+
+    assert not repository.complete_item(job_id, item_id, {"wrong": True}, worker_id="worker-b")
+    assert not repository.fail_item(
+        job_id,
+        item_id,
+        "JOB-003",
+        "stale worker",
+        max_attempts=1,
+        worker_id="worker-b",
+    )
+    assert repository.list_items(job_id)[0]["status"] == "running"
+    assert repository.complete_item(job_id, item_id, {"ok": True}, worker_id="worker-a")
+
+
+def test_stale_recovery_dead_letters_after_bounded_attempts(app):
+    service, repository, job_id = create_job(app, 1)
+    service.start(job_id)
+    claimed = repository.claim(job_id, "dead-worker", 1)
+    expired = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE job_items SET attempts=5,lease_until=? WHERE id=?",
+            (expired, claimed[0]["id"]),
+        )
+
+    assert repository.recover_stale() == 1
+    item = repository.list_items(job_id)[0]
+    assert item["status"] == "failed"
+    assert item["error_code"] == "WORKER_CRASH"
+
+
 def test_recover_stale_does_not_take_writer_lock_without_candidates(app):
     database = app.extensions["inktime_database"]
     before = int(database.observability()["writer_lock_acquisitions"])
@@ -128,6 +242,98 @@ def test_failed_items_can_be_retried(app):
     service.start(job_id)
     BoundedJobWorker(repository, lambda item: {"ok": True}).run_job(job_id)
     assert repository.get(job_id)["status"] == "completed"
+
+
+def test_retry_failed_does_not_revive_running_or_cancelled_jobs(app):
+    service, repository, running_id = create_job(app, 1)
+    service.start(running_id)
+    assert service.retry_failed(running_id) == 0
+    assert repository.get(running_id)["status"] == "running"
+
+    _, repository, cancelled_id = create_job(app, 1)
+    service.start(cancelled_id)
+    service.cancel(cancelled_id)
+    assert service.retry_failed(cancelled_id) == 0
+    assert repository.get(cancelled_id)["status"] == "cancelled"
+
+
+def test_explicit_analysis_idempotency_key_reuses_terminal_job(app):
+    dedupe_key = scoped_idempotency_key("analysis", "tester", "test-key")
+    request_fp = request_fingerprint({"name": "測試工作", "strategy": "local", "settings": {}})
+    service, repository, first_id = create_job(
+        app, 1, dedupe_key=dedupe_key, request_fingerprint_value=request_fp
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE jobs SET status='completed',completed_at=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), first_id))
+    replay_id = service.create_analysis_job(
+        name="測試工作",
+        strategy="local",
+        settings={},
+        created_by="tester",
+        budget_limit=None,
+        photo_ids=[],
+        dedupe_key=dedupe_key,
+        request_fingerprint=request_fp,
+    )
+    assert replay_id == first_id
+
+    with pytest.raises(ValueError, match="IDEMPOTENCY_CONFLICT"):
+        service.create_analysis_job(
+            name="測試工作",
+            strategy="local",
+            settings={"different": True},
+            created_by="tester",
+            budget_limit=None,
+            photo_ids=[],
+            dedupe_key=dedupe_key,
+            request_fingerprint=request_fingerprint({"different": True}),
+        )
+
+    other_actor_key = scoped_idempotency_key("analysis", "other-user", "test-key")
+    other_actor_id = service.create_analysis_job(
+        name="另一位使用者的工作",
+        strategy="local",
+        settings={},
+        created_by="other-user",
+        budget_limit=None,
+        photo_ids=[],
+        dedupe_key=other_actor_key,
+        request_fingerprint=request_fp,
+    )
+    assert other_actor_id != first_id
+
+
+def test_legacy_idempotency_row_binds_first_replay_fingerprint(app):
+    dedupe_key = scoped_idempotency_key("analysis", "legacy-tester", "legacy-key")
+    service, _repository, first_id = create_job(app, 1, dedupe_key=dedupe_key)
+    request_fp = request_fingerprint({"name": "legacy", "strategy": "local", "settings": {}})
+
+    replay_id = service.create_analysis_job(
+        name="legacy",
+        strategy="local",
+        settings={},
+        created_by="legacy-tester",
+        budget_limit=None,
+        photo_ids=[],
+        dedupe_key=dedupe_key,
+        request_fingerprint=request_fp,
+    )
+
+    assert replay_id == first_id
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute("SELECT request_fingerprint FROM jobs WHERE id=?", (first_id,)).fetchone()
+    assert row["request_fingerprint"] == request_fp
+    with pytest.raises(ValueError, match="IDEMPOTENCY_CONFLICT"):
+        service.create_analysis_job(
+            name="legacy-different",
+            strategy="local",
+            settings={},
+            created_by="legacy-tester",
+            budget_limit=None,
+            photo_ids=[],
+            dedupe_key=dedupe_key,
+            request_fingerprint=request_fingerprint({"different": True}),
+        )
 
 
 def test_scheduled_retry_wait_is_persisted_and_not_claimed_early(app):

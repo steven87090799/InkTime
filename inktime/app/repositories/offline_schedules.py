@@ -20,6 +20,7 @@ from inktime.app.domain.photopainter.offline_schedule import (
     MINIMUM_SCHEDULE_GAP_MINUTES,
     OFFLINE_PREPARE_BOOTSTRAP_AT,
     normalize_sync_strategy,
+    local_slot_datetime,
     offline_prepare_plan,
     offline_schedule_capability_is_usable,
     resolve_offline_schedule_max_slots,
@@ -78,8 +79,7 @@ class OfflineScheduleRepository:
 
     @staticmethod
     def _show_at(target_date: date, slot: str, timezone_name: str) -> str:
-        hour, minute = (int(part) for part in slot.split(":"))
-        local = datetime.combine(target_date, time(hour, minute), tzinfo=ZoneInfo(timezone_name))
+        local = local_slot_datetime(target_date, slot, timezone_name)
         return local.astimezone(timezone.utc).isoformat()
 
     @staticmethod
@@ -179,8 +179,7 @@ class OfflineScheduleRepository:
         margin = int(server_margin_minutes)
 
         def slot_at(target: date, slot: str) -> datetime:
-            hour, minute = (int(part) for part in slot.split(":"))
-            return datetime.combine(target, time(hour, minute), tzinfo=zone)
+            return local_slot_datetime(target, slot, zone)
 
         def epoch(value: datetime) -> int:
             return int(value.astimezone(timezone.utc).timestamp())
@@ -206,10 +205,7 @@ class OfflineScheduleRepository:
             if allow_prepare_point:
                 if strategy == "fixed_daily":
                     assert normalized_sync_time is not None
-                    sync_hour, sync_minute = (int(part) for part in normalized_sync_time.split(":"))
-                    prepare_epoch = epoch(
-                        datetime.combine(target, time(sync_hour, sync_minute), tzinfo=zone)
-                    )
+                    prepare_epoch = epoch(local_slot_datetime(target, normalized_sync_time, zone))
                 else:
                     prepare_epoch = slot_epochs[0] - (lead + margin) * 60
                 if now_epoch < prepare_epoch < slot_epochs[0]:
@@ -233,10 +229,7 @@ class OfflineScheduleRepository:
         tomorrow_slots = [epoch(slot_at(tomorrow, slot)) for slot in slots]
         if strategy == "fixed_daily":
             assert normalized_sync_time is not None
-            sync_hour, sync_minute = (int(part) for part in normalized_sync_time.split(":"))
-            tomorrow_prepare = epoch(
-                datetime.combine(tomorrow, time(sync_hour, sync_minute), tzinfo=zone)
-            )
+            tomorrow_prepare = epoch(local_slot_datetime(tomorrow, normalized_sync_time, zone))
         else:
             tomorrow_prepare = tomorrow_slots[0] - (lead + margin) * 60
         if now_epoch < tomorrow_prepare < tomorrow_slots[0]:
@@ -291,19 +284,13 @@ class OfflineScheduleRepository:
         now_epoch = int(local_now.astimezone(timezone.utc).timestamp())
 
         def slot_epoch(day: date, slot: str) -> int:
-            hour, minute = (int(part) for part in slot.split(":"))
-            return int(
-                datetime.combine(day, time(hour, minute), tzinfo=zone)
-                .astimezone(timezone.utc)
-                .timestamp()
-            )
+            return int(local_slot_datetime(day, slot, zone).astimezone(timezone.utc).timestamp())
 
         epochs = [slot_epoch(target, slot) for slot in slots]
         if strategy == "fixed_daily":
             assert normalized_sync_time is not None
-            sync_hour, sync_minute = (int(part) for part in normalized_sync_time.split(":"))
             prepare_epoch = int(
-                datetime.combine(target, time(sync_hour, sync_minute), tzinfo=zone)
+                local_slot_datetime(target, normalized_sync_time, zone)
                 .astimezone(timezone.utc)
                 .timestamp()
             )
@@ -1116,6 +1103,11 @@ class OfflineScheduleRepository:
                     minimum_gap_minutes=minimum_gap_minutes,
                     maximum_slots=maximum_slots,
                 )
+                target_end_utc = datetime.combine(
+                    day + timedelta(days=1),
+                    time.min,
+                    tzinfo=ZoneInfo(str(device["timezone"])),
+                ).astimezone(timezone.utc)
                 for slot_index, slot in enumerate(configured_times):
                     release_id = normalized_release_ids[slot_index]
                     release = connection.execute(
@@ -1141,6 +1133,19 @@ class OfflineScheduleRepository:
                         raise ValueError("QUEUE-005 Release 已存在於裝置 Queue 歷史，不可重複使用")
                     show_at = self._show_at(day, slot, str(device["timezone"]))
                     deadline = deadlines[slot_index]
+                    # Download authorization must cover every payload in a
+                    # current authoritative day schedule through the device's
+                    # next legal sync. ACK/display deadlines remain the
+                    # per-slot contract below; this separate queue expiry is
+                    # bounded by the canonical local target-day end shared by
+                    # the offline schedule API.
+                    deadline_dt = datetime.fromisoformat(deadline)
+                    if deadline_dt.tzinfo is None:
+                        raise ValueError("QUEUE-005 離線排程 deadline 必須包含 timezone")
+                    expires_at = max(
+                        deadline_dt.astimezone(timezone.utc),
+                        target_end_utc,
+                    ).isoformat()
                     queue_item_id = str(uuid4())
                     position = next_position + slot_index + 1
                     connection.execute(
@@ -1158,7 +1163,7 @@ class OfflineScheduleRepository:
                             position,
                             100,
                             show_at,
-                            deadline,
+                            expires_at,
                             "READY",
                             f"offline:{schedule_id}:{slot_index}",
                             "offline_schedule",

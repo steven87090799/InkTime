@@ -42,6 +42,17 @@ def build_provenance(
 
 def provenance_errors(provenance: dict[str, str]) -> list[str]:
     errors: list[str] = []
+    for field in (
+        "event_name",
+        "ref",
+        "source_head_sha",
+        "base_sha",
+        "tested_sha",
+        "tested_ref",
+        "tested_ref_kind",
+    ):
+        if not str(provenance.get(field, "")).strip():
+            errors.append(f"{field} must not be empty")
     for field in ("source_head_sha", "base_sha", "tested_sha"):
         value = provenance.get(field, "")
         if COMMIT_SHA.fullmatch(value) is None:

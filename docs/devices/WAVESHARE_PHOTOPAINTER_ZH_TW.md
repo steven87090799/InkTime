@@ -132,26 +132,47 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
 
 先安裝 Arduino CLI 1.5.1、ESP32 core 3.3.10、GxEPD2 1.6.9、ArduinoJson 7.4.3。
 
+本專案必須使用 repository-owned partition table；stock `app3M_fat9M_16MB` 的 20 KiB
+NVS 無法容納 32-entry ACK journal 的 COW／migration peak。Arduino-ESP32 支援在
+sketch 目錄使用 `partitions.csv`，因此每次編譯前先把對應 CSV 複製成該檔名：
+
+```bash
+cp esp32/ink-display-7C-photo/inktime_default_4M.csv \
+  esp32/ink-display-7C-photo/partitions.csv
+```
+
 ```bash
 # 既有 PCB（Release）
 arduino-cli compile \
-  --fqbn 'esp32:esp32:esp32s3' \
+  --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' \
+  --build-property 'upload.maximum_size=1441792' \
   esp32/ink-display-7C-photo
 
 # Waveshare PhotoPainter（Release）
+cp esp32/ink-display-7C-photo/inktime_photopainter_3M_16MB.csv \
+  esp32/ink-display-7C-photo/partitions.csv
 arduino-cli compile \
-  --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc' \
+  --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,CDCOnBoot=cdc' \
+  --build-property 'upload.maximum_size=3145728' \
   --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER' \
   esp32/ink-display-7C-photo
 
 # Waveshare PhotoPainter（Debug）
 arduino-cli compile \
-  --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc,DebugLevel=debug' \
+  --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,CDCOnBoot=cdc,DebugLevel=debug' \
+  --build-property 'upload.maximum_size=3145728' \
   --build-property 'compiler.cpp.extra_flags=-DDEVICE_PROFILE=DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER -DINKTIME_DEBUG_LOG=1' \
   esp32/ink-display-7C-photo
 ```
 
-`app3M_fat9M_16MB` 提供 3 MiB 雙 OTA app slot 與約 9.9 MiB FAT partition；本韌體的
+完成 PhotoPainter 編譯後移除 sketch-local partition override：
+
+```bash
+rm -f esp32/ink-display-7C-photo/partitions.csv
+```
+
+`inktime_photopainter_3M_16MB` 提供 512 KiB NVS、3 MiB 雙 OTA app slot 與約 9.4 MiB
+FAT partition；本韌體的
 圖片快取使用外接 SD，不會自動使用 Flash FAT partition。OTA 尚未實作，但分割區先
 保留 rollback 空間。
 

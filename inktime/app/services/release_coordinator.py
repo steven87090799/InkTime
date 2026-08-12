@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
+import os
+from pathlib import Path
 from typing import Any
 
 from inktime.app.db import Database
 from inktime.app.domain.rendering import AtomicReleasePublisher
+from inktime.app.domain.rendering.release import fsync_directory, release_metadata_guard
 
 
 class ReleaseCoordinator:
@@ -190,6 +193,142 @@ class ReleaseCoordinator:
                     fallback = max(compatible)[1]
                     temporary = self.publisher.root / f".{pointer_name}.reconcile.tmp"
                     temporary.write_text(fallback, encoding="utf-8")
+                    with temporary.open("rb") as stream:
+                        os.fsync(stream.fileno())
                     temporary.replace(pointer)
+                    fsync_directory(self.publisher.root)
                     diagnostics["pointer_recovered"] += 1
         return diagnostics
+
+    def gc_unreferenced_releases(self, *, retention_days: int = 90, max_items: int = 20) -> dict[str, int]:
+        """Delete only old superseded payloads with no durable or pointer reference."""
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, int(retention_days)))).isoformat()
+        limit = max(1, min(int(max_items), 100))
+        # This snapshot is only a cheap candidate prefilter.  The publisher
+        # rechecks authoritative pointers while holding the metadata lock
+        # immediately before rename and purge.
+        pointer_ids = self.publisher.authoritative_pointer_ids()
+        deleted = 0
+        skipped = 0
+        # A previous maintenance run may have committed the DB delete but
+        # failed while purging the quarantine directory.  Reconcile those
+        # entries before selecting new candidates; rows still present in the
+        # DB are restored instead of being purged.
+        quarantine: Path | None
+        for release_id, quarantine in self.publisher.list_gc_quarantines(limit=limit):
+            with self.database.session() as connection:
+                row = connection.execute("SELECT 1 FROM releases WHERE id=?", (release_id,)).fetchone()
+            if row is not None:
+                if not self.publisher.restore_quarantined_release(quarantine, release_id):
+                    skipped += 1
+            elif not self.publisher.purge_gc_quarantine(quarantine):
+                skipped += 1
+
+        with self.database.session() as connection:
+            candidates = connection.execute(
+                """
+                SELECT r.id
+                FROM releases r
+                WHERE r.status IN ('published','superseded','staged','staged_failed')
+                  AND r.created_at<?
+                  AND NOT EXISTS (SELECT 1 FROM device_render_releases drr WHERE drr.release_id=r.id)
+                  AND NOT EXISTS (SELECT 1 FROM device_content_queue_items qi WHERE qi.release_id=r.id)
+                  AND NOT EXISTS (SELECT 1 FROM device_offline_schedule_slots os WHERE os.release_id=r.id)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM device_content_queues q
+                      WHERE r.id IN (q.current_release_id,q.last_known_good_release_id,
+                                      q.next_queued_release_id,q.emergency_fallback_release_id)
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM rollout_campaigns rc
+                      WHERE rc.release_id=r.id OR rc.previous_release_id=r.id
+                  )
+                  AND NOT EXISTS (SELECT 1 FROM display_history dh WHERE dh.release_id=r.id)
+                  AND NOT EXISTS (SELECT 1 FROM selection_decision_traces sdt WHERE sdt.release_id=r.id)
+                ORDER BY r.created_at,r.id
+                LIMIT ?
+                """,
+                (cutoff, limit),
+            ).fetchall()
+
+        for row in candidates:
+            release_id = str(row["id"])
+            if release_id in pointer_ids:
+                skipped += 1
+                continue
+            quarantine = None
+            committed = False
+            # Keep the authoritative pointer fence held across the DB
+            # recheck and commit.  All pointer writers use this same metadata
+            # guard, so a new active pointer cannot appear after quarantine
+            # and before the row is deleted or restored.
+            with release_metadata_guard(self.publisher.root):
+                try:
+                    quarantine = self.publisher.quarantine_release(release_id)
+                    if quarantine is None:
+                        skipped += 1
+                    else:
+                        with self.database.session() as connection:
+                            connection.execute("BEGIN IMMEDIATE")
+                            try:
+                                still_unreferenced = connection.execute(
+                                    """
+                                    SELECT 1
+                                    FROM releases r
+                                    WHERE r.id=?
+                                      AND r.status IN ('published','superseded','staged','staged_failed')
+                                      AND NOT EXISTS (SELECT 1 FROM device_render_releases drr WHERE drr.release_id=r.id)
+                                      AND NOT EXISTS (SELECT 1 FROM device_content_queue_items qi WHERE qi.release_id=r.id)
+                                      AND NOT EXISTS (SELECT 1 FROM device_offline_schedule_slots os WHERE os.release_id=r.id)
+                                      AND NOT EXISTS (
+                                          SELECT 1 FROM device_content_queues q
+                                          WHERE r.id IN (q.current_release_id,q.last_known_good_release_id,
+                                                          q.next_queued_release_id,q.emergency_fallback_release_id)
+                                      )
+                                      AND NOT EXISTS (
+                                          SELECT 1 FROM rollout_campaigns rc
+                                          WHERE rc.release_id=r.id OR rc.previous_release_id=r.id
+                                      )
+                                      AND NOT EXISTS (SELECT 1 FROM display_history dh WHERE dh.release_id=r.id)
+                                      AND NOT EXISTS (SELECT 1 FROM selection_decision_traces sdt WHERE sdt.release_id=r.id)
+                                    """,
+                                    (release_id,),
+                                ).fetchone()
+                                if still_unreferenced is None:
+                                    connection.execute("ROLLBACK")
+                                else:
+                                    cursor = connection.execute(
+                                        "DELETE FROM releases WHERE id=? AND status IN ('published','superseded','staged','staged_failed')",
+                                        (release_id,),
+                                    )
+                                    if cursor.rowcount != 1:
+                                        connection.execute("ROLLBACK")
+                                    else:
+                                        connection.execute("COMMIT")
+                                        committed = True
+                            except Exception:
+                                if connection.in_transaction:
+                                    connection.execute("ROLLBACK")
+                                raise
+                        if committed:
+                            deleted += 1
+                            # A failed purge is intentionally left as an orphan
+                            # for the next bounded maintenance pass.  The DB row
+                            # is gone, so it cannot be a live release reference.
+                            if not self.publisher.purge_gc_quarantine(quarantine):
+                                skipped += 1
+                    # Restore before releasing the authoritative pointer fence
+                    # whenever the DB delete did not commit.
+                    if quarantine is not None and not committed and quarantine.exists():
+                        if not self.publisher.restore_quarantined_release(quarantine, release_id):
+                            raise RuntimeError(f"RENDER-GC quarantine restore failed for {release_id}")
+                except Exception as error:
+                    # Restore before releasing the authoritative pointer
+                    # fence.  A pointer writer must never observe the release
+                    # in quarantine while its DB row still exists.
+                    if quarantine is not None and not committed and quarantine.exists():
+                        if not self.publisher.restore_quarantined_release(quarantine, release_id):
+                            raise RuntimeError(f"RENDER-GC quarantine restore failed for {release_id}") from error
+                    raise
+        return {"deleted": deleted, "skipped": skipped}

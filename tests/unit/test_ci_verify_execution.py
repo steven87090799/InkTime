@@ -17,6 +17,7 @@ def _context(*, full: bool = False) -> dict[str, object]:
         "head_sha": "b" * 40,
         "source_head_sha": "b" * 40,
         "tested_sha": "c" * 40,
+        "tested_ref": "refs/pull/64/merge",
         "tested_ref_kind": "merge-ref",
     }
 
@@ -27,7 +28,27 @@ def _plan(*, full: bool = False):
         _context(full=full),
     )
     plan["requires_source_head_contract"] = True
+    plan["tested_ref"] = "refs/pull/64/merge"
     return plan
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "event_name",
+        "ref",
+        "source_head_sha",
+        "base_sha",
+        "tested_sha",
+        "tested_ref",
+        "tested_ref_kind",
+    ],
+)
+def test_missing_provenance_field_fails_closed(field):
+    plan = _plan()
+    plan[field] = ""
+    errors = verify_execution(plan, _needs(plan, "ci"), "ci")
+    assert any("execution_id=provenance" in error and field in error for error in errors)
 
 
 def _needs(plan, workflow: str) -> dict[str, dict[str, str]]:

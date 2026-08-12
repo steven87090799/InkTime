@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -13,7 +14,12 @@ from inktime.app.core.json_values import (
     json_object_payload,
     reject_unknown_fields,
 )
-from inktime.app.core.paths import safe_join
+from inktime.app.core.idempotency import (
+    grouped_idempotency_key,
+    request_fingerprint,
+    scoped_idempotency_key,
+)
+from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.domain.analysis.schema import ALLOWED_TYPES
 from inktime.app.domain.analysis.plan import fingerprint
 from inktime.app.domain.analysis.execution_mode import execution_mode, permits_automatic_ai, permits_manual_ai
@@ -28,6 +34,8 @@ from inktime.app.domain.photos.orientation import original_exif_orientation, res
 
 bp = Blueprint("photos", __name__)
 PHOTO_PAGE_SIZE = 200
+IDEMPOTENCY_RESERVATION_LEASE_SECONDS = 60
+IDEMPOTENCY_RESERVATION_HEARTBEAT_SECONDS = 10.0
 
 
 def _repository():
@@ -38,7 +46,30 @@ def _payload() -> dict:
     return json_object_payload(request, maximum_bytes=256 * 1024, error_prefix="IMG-004")
 
 
-def _queue_ai(photo_ids: list[str], *, created_by: str, name: str, force_ai: bool = False) -> dict:
+def _ai_job_error(exc: ValueError) -> dict:
+    code = "IDEMPOTENCY_CONFLICT" if str(exc) == "IDEMPOTENCY_CONFLICT" else "VLM-008"
+    return {"error_code": code, "message": str(exc)}
+
+
+def _build_analysis_plan(settings, strategy: str) -> dict:
+    return current_app.extensions["inktime_analysis_service"].build_plan(
+        strategy=strategy,
+        provider_route=current_app.extensions["inktime_provider_service"].route_snapshot(),
+        scoring_profile=dict(current_app.extensions["inktime_scoring_repository"].current()),
+    )
+
+
+def _queue_ai(
+    photo_ids: list[str],
+    *,
+    created_by: str,
+    name: str,
+    force_ai: bool = False,
+    idempotency_key: str | None = None,
+    idempotency_scope: str = "photo-ai",
+    analysis_plan: dict | None = None,
+    frozen_photo_ids: bool = False,
+) -> dict:
     settings = current_app.extensions["inktime_settings_repository"]
     mode = execution_mode(settings)
     if (force_ai and not permits_manual_ai(mode)) or (not force_ai and not permits_automatic_ai(mode)):
@@ -53,17 +84,27 @@ def _queue_ai(photo_ids: list[str], *, created_by: str, name: str, force_ai: boo
         raise ValueError("已達 AI 每日或每月照片上限；目前會保留本機選片結果")
     selected = (
         list(dict.fromkeys(photo_ids))[:500]
-        if force_ai
+        if force_ai or frozen_photo_ids
         else _repository().active_eligible_requested_ids(photo_ids, limit=daily_limit)
     )
     if not selected:
         raise ValueError("沒有符合資格且可送入 AI 的照片")
     strategy = str(settings.get("analysis.strategy", "single"))
-    analysis = current_app.extensions["inktime_analysis_service"]
-    plan = analysis.build_plan(
-        strategy=strategy,
-        provider_route=current_app.extensions["inktime_provider_service"].route_snapshot(),
-        scoring_profile=dict(current_app.extensions["inktime_scoring_repository"].current()),
+    plan = analysis_plan if analysis_plan is not None else _build_analysis_plan(settings, strategy)
+    idempotency_key_value = scoped_idempotency_key(idempotency_scope, created_by, idempotency_key)
+    idempotency_fingerprint = (
+        request_fingerprint(
+            {
+                "name": name,
+                "strategy": strategy,
+                "photo_ids": selected,
+                "force_ai": force_ai,
+                "analysis_fingerprint": fingerprint(plan),
+                "analysis_spec": plan,
+            }
+        )
+        if idempotency_key_value
+        else None
     )
     job_id = current_app.extensions["inktime_job_service"].create_analysis_job(
         name=name,
@@ -73,6 +114,8 @@ def _queue_ai(photo_ids: list[str], *, created_by: str, name: str, force_ai: boo
         budget_limit=None,
         photo_ids=selected,
         priority=2,
+        dedupe_key=idempotency_key_value,
+        request_fingerprint=idempotency_fingerprint,
         analysis_fingerprint=fingerprint(plan),
         force_recompute=force_ai,
         analysis_spec=plan,
@@ -247,10 +290,15 @@ def queue_photo_ai(photo_id: str):
         abort(403, description="IMG-004 Force AI 僅限排除照片管理操作")
     try:
         return _queue_ai(
-            [photo_id], created_by=str(g.user["id"]), name="排除照片 AI 分析", force_ai=True
+            [photo_id],
+            created_by=str(g.user["id"]),
+            name="排除照片 AI 分析",
+            force_ai=True,
+            idempotency_scope="photo-ai",
+            idempotency_key=str(request.headers.get("Idempotency-Key") or "").strip()[:128] or None,
         ), 201
     except ValueError as exc:
-        return {"error_code": "VLM-008", "message": str(exc)}, 409
+        return _ai_job_error(exc), 409
 
 
 @bp.post("/api/v1/photos/exclusions/ai")
@@ -266,10 +314,15 @@ def queue_exclusions_ai():
     ]
     try:
         return _queue_ai(
-            photo_ids, created_by=str(g.user["id"]), name="排除照片批次 AI 分析", force_ai=True
+            photo_ids,
+            created_by=str(g.user["id"]),
+            name="排除照片批次 AI 分析",
+            force_ai=True,
+            idempotency_scope="exclusions-ai",
+            idempotency_key=str(request.headers.get("Idempotency-Key") or "").strip()[:128] or None,
         ), 201
     except ValueError as exc:
-        return {"error_code": "VLM-008", "message": str(exc)}, 409
+        return _ai_job_error(exc), 409
 
 
 @bp.post("/api/v1/photos/ai/run")
@@ -305,22 +358,174 @@ def queue_ai_mode_run():
         group_by = str(payload.get("batch_by", "year"))
         if group_by not in {"year", "folder"}:
             abort(400, description="IMG-004 完整照片庫分批方式不合法")
+        request_key = request.headers.get("Idempotency-Key")
+        if request_key and str(request_key).strip():
+            actor = str(g.user["id"])
+            strategy = str(settings.get("analysis.strategy", "single"))
+            analysis_plan = _build_analysis_plan(settings, strategy)
+            analysis_fingerprint = fingerprint(analysis_plan)
+            request_material = {
+                "analysis_fingerprint": analysis_fingerprint,
+                "analysis_spec": analysis_plan,
+                "batch_by": group_by,
+                "confirm": bool(confirmed),
+                "daily_limit": daily_limit,
+                "mode": mode,
+                "strategy": strategy,
+            }
+            request_scope = scoped_idempotency_key(
+                "ai-mode-run/full-library-request", actor, request_key
+            )
+            request_fp = request_fingerprint(request_material)
+            job_repository = current_app.extensions["inktime_job_repository"]
+            try:
+                # Reserve the request before touching the potentially expensive
+                # library enumeration.  Only the durable reservation owner may
+                # freeze the snapshot; concurrent callers either reuse a frozen
+                # snapshot or retry while the owner is still enumerating.
+                existing = job_repository.reserve_idempotent_request(
+                    request_scope,
+                    request_fp,
+                    lease_seconds=IDEMPOTENCY_RESERVATION_LEASE_SECONDS,
+                )
+            except ValueError as exc:
+                return _ai_job_error(exc), 409
+            if existing is not None and str(existing["status"]) == "completed":
+                return json.loads(str(existing["response_json"] or "{}")), 201
+
+            try:
+                snapshot = json.loads(str(existing["request_snapshot_json"] or "{}"))
+            except json.JSONDecodeError as exc:
+                raise ValueError("IDEMPOTENCY_LEDGER_INVALID") from exc
+            has_frozen_snapshot = (
+                isinstance(snapshot, dict)
+                and isinstance(snapshot.get("batches"), list)
+                and isinstance(snapshot.get("analysis_spec"), dict)
+            )
+            if not has_frozen_snapshot:
+                if not bool(existing.get("reservation_owner")):
+                    return {
+                        "error_code": "IDEMPOTENCY_IN_PROGRESS",
+                        "message": "相同 Idempotency-Key 的完整照片庫請求正在建立固定選片；請稍後重試",
+                    }, 409
+                reservation_token = str(existing.get("reservation_token") or "")
+                heartbeat_stop = threading.Event()
+                heartbeat_lost = threading.Event()
+
+                def renew_reservation() -> None:
+                    while not heartbeat_stop.wait(IDEMPOTENCY_RESERVATION_HEARTBEAT_SECONDS):
+                        try:
+                            renewed = job_repository.renew_idempotent_request(
+                                request_scope,
+                                request_fp,
+                                reservation_token,
+                                lease_seconds=IDEMPOTENCY_RESERVATION_LEASE_SECONDS,
+                            )
+                        except Exception:
+                            renewed = False
+                        if not renewed:
+                            heartbeat_lost.set()
+                            return
+
+                heartbeat = threading.Thread(
+                    target=renew_reservation,
+                    name="inktime-idempotency-reservation-heartbeat",
+                    daemon=True,
+                )
+                heartbeat.start()
+                try:
+                    batches = _repository().eligible_photo_batches(
+                        group_by=group_by, limit=daily_limit, include_all_active=False
+                    )
+                    snapshot = {
+                        "analysis_fingerprint": analysis_fingerprint,
+                        "analysis_spec": analysis_plan,
+                        "batch_by": group_by,
+                        "batches": [
+                            {"group": str(group), "photo_ids": [str(photo_id) for photo_id in ids]}
+                            for group, ids in batches
+                        ],
+                    }
+                    if heartbeat_lost.is_set() or not job_repository.renew_idempotent_request(
+                        request_scope,
+                        request_fp,
+                        reservation_token,
+                        lease_seconds=IDEMPOTENCY_RESERVATION_LEASE_SECONDS,
+                    ):
+                        raise ValueError("IDEMPOTENCY_RESERVATION_LOST")
+                    existing = job_repository.freeze_idempotent_request(
+                        request_scope,
+                        request_fp,
+                        reservation_token,
+                        snapshot,
+                        lease_seconds=IDEMPOTENCY_RESERVATION_LEASE_SECONDS,
+                    )
+                except ValueError as exc:
+                    return _ai_job_error(exc), 409
+                finally:
+                    heartbeat_stop.set()
+                    heartbeat.join(timeout=max(1.0, IDEMPOTENCY_RESERVATION_HEARTBEAT_SECONDS * 2))
+            if str(existing["status"]) == "completed":
+                return json.loads(str(existing["response_json"] or "{}")), 201
+            snapshot = json.loads(str(existing["request_snapshot_json"] or "{}"))
+            frozen_batches = snapshot.get("batches") if isinstance(snapshot, dict) else None
+            stored_plan = snapshot.get("analysis_spec") if isinstance(snapshot, dict) else None
+            if not isinstance(frozen_batches, list) or not isinstance(stored_plan, dict):
+                raise ValueError("IDEMPOTENCY_LEDGER_INVALID")
+            try:
+                jobs = [
+                    _queue_ai(
+                        [str(photo_id) for photo_id in batch.get("photo_ids", [])],
+                        created_by=actor,
+                        name=f"完整照片庫 AI：{str(batch.get('group', '未知'))}",
+                        idempotency_scope="ai-mode-run",
+                        idempotency_key=grouped_idempotency_key(request_key, str(batch.get("group", "未知"))),
+                        analysis_plan=stored_plan,
+                        frozen_photo_ids=True,
+                    )
+                    for batch in frozen_batches
+                ]
+                response = {
+                    "jobs": jobs,
+                    "queued": sum(job["queued"] for job in jobs),
+                    "batch_by": group_by,
+                }
+                completed = job_repository.complete_idempotent_request(
+                    request_scope, request_fp, response
+                )
+                return json.loads(str(completed["response_json"] or "{}")), 201
+            except ValueError as exc:
+                return _ai_job_error(exc), 409
+
         batches = _repository().eligible_photo_batches(
             group_by=group_by, limit=daily_limit, include_all_active=False
         )
         try:
+            request_key = request.headers.get("Idempotency-Key")
             jobs = [
-                _queue_ai(ids, created_by=str(g.user["id"]), name=f"完整照片庫 AI：{group}")
+                _queue_ai(
+                    ids,
+                    created_by=str(g.user["id"]),
+                    name=f"完整照片庫 AI：{group}",
+                    idempotency_scope="ai-mode-run",
+                    idempotency_key=grouped_idempotency_key(request_key, str(group)),
+                )
                 for group, ids in batches
             ]
             return {"jobs": jobs, "queued": sum(job["queued"] for job in jobs), "batch_by": group_by}, 201
         except ValueError as exc:
-            return {"error_code": "VLM-008", "message": str(exc)}, 409
+            return _ai_job_error(exc), 409
     selected = _repository().eligible_photo_ids(limit=limit, include_all_active=False)
     try:
-        return _queue_ai(selected, created_by=str(g.user["id"]), name="AI 模式批次分析"), 201
+        return _queue_ai(
+            selected,
+            created_by=str(g.user["id"]),
+            name="AI 模式批次分析",
+            idempotency_scope="ai-mode-run",
+            idempotency_key=str(request.headers.get("Idempotency-Key") or "").strip()[:128] or None,
+        ), 201
     except ValueError as exc:
-        return {"error_code": "VLM-008", "message": str(exc)}, 409
+        return _ai_job_error(exc), 409
 
 
 @bp.get("/photos/<photo_id>")
@@ -515,6 +720,24 @@ def photo_image(photo_id: str):
     if not path.is_file():
         abort(404)
     return send_file(path, conditional=True, max_age=300)
+
+
+@bp.get("/api/v1/photos/<photo_id>/thumbnail")
+@login_required
+def photo_thumbnail(photo_id: str):
+    photo = _repository().get_with_path(photo_id)
+    if photo is None or not str(photo["sha256"] or ""):
+        abort(404)
+    try:
+        path = safe_join(Path(photo["root_path"]), photo["relative_path"])
+    except UnsafePathError:
+        abort(404)
+    if not path.is_file():
+        abort(404)
+    thumbnail = current_app.extensions["inktime_thumbnail_cache"].get_or_create(
+        path, str(photo["sha256"]), 512
+    )
+    return send_file(thumbnail, mimetype="image/jpeg", conditional=True, max_age=300)
 
 
 @bp.post("/api/v1/cache/clear")

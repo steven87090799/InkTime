@@ -4,6 +4,8 @@
 
 #include "queue_client_core.h"
 
+struct AckJournalBlob;
+
 struct StoredDisplayRecord {
   String sha256;
   String releaseId;

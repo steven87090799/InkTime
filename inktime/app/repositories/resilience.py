@@ -74,6 +74,8 @@ ROLL_OUT_STATES = {
     "FAILED": set(),
     "CANCELLED": set(),
 }
+CLEANUP_AUDIT_RETENTION_DAYS = 90
+CLEANUP_AUDIT_BATCH_SIZE = 10
 
 
 def utc_now() -> str:
@@ -762,24 +764,58 @@ class ResilienceRepository:
                 "SELECT queue_version,current_release_id,current_displayed_at,last_known_good_release_id,last_known_good_displayed_at FROM device_content_queues WHERE device_id=?",
                 (device_id,),
             ).fetchone()
+            prior_download_evidence = bool(item["downloaded_at"])
+            if not prior_download_evidence:
+                prior_download_evidence = bool(
+                    connection.execute(
+                        """
+                        SELECT 1 FROM device_content_queue_events
+                        WHERE queue_item_id=? AND event_type IN ('DOWNLOAD_COMPLETED','HASH_VERIFIED')
+                        LIMIT 1
+                        """,
+                        (item_id,),
+                    ).fetchone()
+                )
             delayed_terminal = (
                 event in {"DISPLAY_COMPLETED", "DISPLAY_FAILED"}
                 and str(payload.get("ack_mode", "")) == "delayed_terminal"
                 and str(item["delivery_mode"]) == "offline_schedule"
                 and bool(item["offline_prefetch_allowed"])
                 and bool(item["offline_schedule_id"])
-                and str(item["status"]) in {"ACKNOWLEDGED", "DISPLAYED"}
+                and (
+                    str(item["status"]) in {"ACKNOWLEDGED", "DISPLAYED"}
+                    or (str(item["status"]) == "CANCELLED" and prior_download_evidence)
+                )
                 and "release_id" in payload
                 and str(payload.get("release_id")) == str(item["release_id"])
                 and item["terminal_ack_retention"] is not None
                 and str(item["terminal_ack_retention"]) >= now
             )
+            stale_progress_ack = False
+            if (
+                queue is not None
+                and queue_version < int(queue["queue_version"])
+                and not delayed_terminal
+                and str(payload.get("ack_mode", "")) != "delayed_terminal"
+            ):
+                stale_progress_ack = bool(
+                    prior_download_evidence
+                    and event
+                    in {
+                        "DOWNLOAD_COMPLETED",
+                        "HASH_VERIFIED",
+                        "DISPLAY_STARTED",
+                        "DISPLAY_COMPLETED",
+                        "DISPLAY_FAILED",
+                    }
+                )
             if queue is None or (
                 int(queue["queue_version"]) != queue_version
                 and not (delayed_terminal and queue_version <= int(queue["queue_version"]))
+                and not stale_progress_ack
             ):
                 raise ValueError("QUEUE-003 ACK Queue 版本已過期")
-            if event not in QUEUE_ALLOWED_EVENTS.get(str(item["status"]), set()):
+            if not delayed_terminal and event not in QUEUE_ALLOWED_EVENTS.get(str(item["status"]), set()):
                 raise ValueError("QUEUE-004 ACK 狀態轉移不合法")
             if payload.get("event_epoch") is not None and not delayed_terminal:
                 raise ValueError("QUEUE-005 event_epoch 僅可用於 delayed_terminal ACK")
@@ -836,7 +872,7 @@ class ResilienceRepository:
                     now,
                 ),
             )
-            status = QUEUE_STATUS_FOR_EVENT[event]
+            status = str(item["status"]) if str(item["status"]) == "CANCELLED" and delayed_terminal else QUEUE_STATUS_FOR_EVENT[event]
             displayed_at = event_at if event == "DISPLAY_COMPLETED" else None
             connection.execute(
                 "UPDATE device_content_queue_items SET status=?,downloaded_at=CASE WHEN ? IN ('DOWNLOAD_COMPLETED','HASH_VERIFIED') THEN ? ELSE downloaded_at END,displayed_at=COALESCE(displayed_at,?),retry_count=retry_count+CASE WHEN ?='DISPLAY_FAILED' THEN 1 ELSE 0 END,last_error_code=?,updated_at=? WHERE id=?",
@@ -1142,83 +1178,266 @@ class ResilienceRepository:
         return next(row for row in self.retention_policies() if row["data_type"] == data_type)
 
     def cleanup(self, *, dry_run: bool = True) -> dict[str, Any]:
-        run_id, now, summary = str(uuid4()), utc_now(), {}
+        run_id, now = str(uuid4()), utc_now()
+        summary: dict[str, int] = {}
+        outcomes: dict[str, str] = {}
         mapping = {
             "decision_trace": ("selection_decision_traces", "created_at", "id"),
             "decision_candidate": ("selection_decision_candidates", "id", "id"),
             "queue_event": ("device_content_queue_events", "created_at", "id"),
             "device_event": ("device_events", "created_at", "id"),
             "job_log": ("job_events", "created_at", "id"),
+            "api_usage": ("api_usage", "started_at", "id"),
         }
-        with self.database.transaction() as connection:
+        with self.database.transaction(operation="retention_cleanup_run") as connection:
             connection.execute(
                 "INSERT INTO data_cleanup_runs(id,started_at,dry_run,status) VALUES (?,?,?,?)",
                 (run_id, now, int(dry_run), "running"),
             )
-            for policy in connection.execute(
-                "SELECT * FROM data_retention_policies WHERE enabled=1"
-            ).fetchall():
-                spec = mapping.get(policy["data_type"])
+        try:
+            with self.database.session() as connection:
+                policies = [
+                    dict(row)
+                    for row in connection.execute(
+                        "SELECT * FROM data_retention_policies WHERE enabled=1 ORDER BY data_type"
+                    ).fetchall()
+                ]
+            for selected_policy in policies:
+                spec = mapping.get(selected_policy["data_type"])
                 if not spec:
                     continue
                 table, time_column, id_column = spec
-                cutoff = (
-                    datetime.now(timezone.utc) - timedelta(days=int(policy["retention_days"]))
-                ).isoformat()
-                if table == "selection_decision_candidates":
-                    # 候選明細僅在其 Trace 已過保留期後才刪除。
-                    ids = connection.execute(
-                        "SELECT c.id FROM selection_decision_candidates c JOIN selection_decision_traces t ON t.trace_id=c.trace_id WHERE t.created_at<? LIMIT ?",
-                        (cutoff, int(policy["cleanup_batch_size"])),
-                    ).fetchall()
-                elif table == "selection_decision_traces":
-                    ids = connection.execute(
-                        "SELECT id FROM selection_decision_traces WHERE created_at<? AND release_id IS NULL LIMIT ?",
-                        (cutoff, int(policy["cleanup_batch_size"])),
-                    ).fetchall()
-                else:
-                    ids = connection.execute(
-                        f"SELECT {id_column} FROM {table} WHERE {time_column}<? LIMIT ?",  # noqa: S608 -- mapping is fixed above
-                        (cutoff, int(policy["cleanup_batch_size"])),
-                    ).fetchall()
-                summary[policy["data_type"]] = len(ids)
-                for row in ids:
-                    identifier = str(row[0])
+                with self.database.transaction(operation="retention_cleanup_policy") as connection:
+                    policy = connection.execute(
+                        "SELECT * FROM data_retention_policies WHERE data_type=? AND enabled=1",
+                        (selected_policy["data_type"],),
+                    ).fetchone()
+                    if policy is None:
+                        continue
+                    if not dry_run and bool(policy["dry_run"]):
+                        next_summary = {**summary, policy["data_type"]: 0}
+                        next_outcomes = {**outcomes, policy["data_type"]: "skipped"}
+                        # last_run_at means the policy was evaluated successfully;
+                        # automatic observation-only skips are evaluations, not deletes.
+                        connection.execute(
+                            "UPDATE data_retention_policies SET last_run_at=? WHERE data_type=? AND enabled=1",
+                            (now, policy["data_type"]),
+                        )
+                        connection.execute(
+                            "UPDATE data_cleanup_runs SET summary_json=? WHERE id=? AND status='running'",
+                            (_json({**next_summary, "_outcomes": next_outcomes}), run_id),
+                        )
+                        summary, outcomes = next_summary, next_outcomes
+                        continue
+                    cutoff = (
+                        datetime.now(timezone.utc) - timedelta(days=int(policy["retention_days"]))
+                    ).isoformat()
+                    if table == "selection_decision_candidates":
+                        # 候選明細僅在其 Trace 已過保留期後才刪除。
+                        ids = connection.execute(
+                            "SELECT c.id FROM selection_decision_candidates c JOIN selection_decision_traces t ON t.trace_id=c.trace_id WHERE t.created_at<? ORDER BY t.created_at,c.id LIMIT ?",
+                            (cutoff, int(policy["cleanup_batch_size"])),
+                        ).fetchall()
+                    elif table == "selection_decision_traces":
+                        ids = connection.execute(
+                            "SELECT id FROM selection_decision_traces WHERE created_at<? AND release_id IS NULL ORDER BY created_at,id LIMIT ?",
+                            (cutoff, int(policy["cleanup_batch_size"])),
+                        ).fetchall()
+                    elif table == "device_content_queue_events":
+                        # A terminal offline acknowledgement remains auditable until
+                        # its per-item retention fence.  Non-terminal event history
+                        # still follows the ordinary bounded policy.
+                        ids = connection.execute(
+                            """
+                            SELECT e.id
+                            FROM device_content_queue_events e
+                            JOIN device_content_queue_items qi ON qi.id=e.queue_item_id
+                            WHERE e.created_at<?
+                              AND (
+                                  qi.status NOT IN ('DISPLAYED','CANCELLED','EXPIRED','FAILED')
+                                  OR qi.terminal_ack_retention IS NULL
+                                  OR qi.terminal_ack_retention<?
+                              )
+                            ORDER BY e.created_at,e.id
+                            LIMIT ?
+                            """,
+                            (cutoff, now, int(policy["cleanup_batch_size"])),
+                        ).fetchall()
+                    elif table == "api_usage":
+                        # BudgetService and AI-limit both use the current calendar
+                        # month.  A shorter operator retention value must not erase
+                        # that in-window evidence before the month closes.
+                        ids = connection.execute(
+                            "SELECT id FROM api_usage WHERE started_at<? AND date(started_at)<date('now','start of month') ORDER BY started_at,id LIMIT ?",
+                            (cutoff, int(policy["cleanup_batch_size"])),
+                        ).fetchall()
+                    else:
+                        ids = connection.execute(
+                            f"SELECT {id_column} FROM {table} WHERE {time_column}<? ORDER BY {time_column},{id_column} LIMIT ?",  # noqa: S608 -- mapping is fixed above
+                            (cutoff, int(policy["cleanup_batch_size"])),
+                        ).fetchall()
+                    for row in ids:
+                        identifier = str(row[0])
+                        connection.execute(
+                            "INSERT INTO data_cleanup_items(cleanup_run_id,data_type,reference_id,action,result,created_at) VALUES (?,?,?,?,?,?)",
+                            (
+                                run_id,
+                                policy["data_type"],
+                                identifier,
+                                "delete",
+                                "planned" if dry_run else "deleted",
+                                now,
+                            ),
+                        )
+                        if not dry_run:
+                            connection.execute(  # noqa: S608 -- mapping is fixed above
+                                f"DELETE FROM {table} WHERE {id_column}=?",  # noqa: S608 -- mapping is fixed above
+                                (identifier,),
+                            )
+                    next_summary = {**summary, policy["data_type"]: len(ids)}
+                    next_outcomes = {
+                        **outcomes,
+                        policy["data_type"]: "planned" if dry_run else "deleted",
+                    }
                     connection.execute(
-                        "INSERT INTO data_cleanup_items(cleanup_run_id,data_type,reference_id,action,result,created_at) VALUES (?,?,?,?,?,?)",
+                        "UPDATE data_retention_policies SET last_run_at=? WHERE data_type=? AND enabled=1",
+                        (now, policy["data_type"]),
+                    )
+                    connection.execute(
+                        "UPDATE data_cleanup_runs SET summary_json=? WHERE id=? AND status='running'",
+                        (_json({**next_summary, "_outcomes": next_outcomes}), run_id),
+                    )
+                summary, outcomes = next_summary, next_outcomes
+            with self.database.transaction(operation="retention_cleanup_summary") as connection:
+                connection.execute(
+                    "UPDATE data_cleanup_runs SET completed_at=?,status='completed',summary_json=? WHERE id=?",
+                    (utc_now(), _json({**summary, "_outcomes": outcomes}), run_id),
+                )
+        except Exception:
+            try:
+                with self.database.transaction(operation="retention_cleanup_summary") as connection:
+                    connection.execute(
+                        "UPDATE data_cleanup_runs SET completed_at=?,status='failed',summary_json=?,error_code=? WHERE id=?",
                         (
+                            utc_now(),
+                            _json({**summary, "_outcomes": outcomes}),
+                            "RETENTION-CLEANUP-FAILED",
                             run_id,
-                            policy["data_type"],
-                            identifier,
-                            "delete",
-                            "planned" if dry_run else "deleted",
-                            now,
                         ),
                     )
-                    if not dry_run:
-                        connection.execute(  # noqa: S608 -- mapping is fixed above
-                            f"DELETE FROM {table} WHERE {id_column}=?",  # noqa: S608 -- mapping is fixed above
-                            (identifier,),
-                        )
-            connection.execute(
-                "UPDATE data_cleanup_runs SET completed_at=?,status='completed',summary_json=? WHERE id=?",
-                (utc_now(), _json(summary), run_id),
-            )
-        return {"id": run_id, "dry_run": dry_run, "summary": summary}
+            except Exception:  # noqa: S110 - preserve the original cleanup failure
+                pass
+            raise
+        return {
+            "id": run_id,
+            "dry_run": dry_run,
+            "summary": summary,
+            "outcomes": outcomes,
+        }
+
+    def cleanup_audit_history(self) -> dict[str, int]:
+        """Delete a bounded batch of terminal cleanup audits without auditing the GC itself."""
+
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=CLEANUP_AUDIT_RETENTION_DAYS)
+        ).isoformat()
+        with self.database.transaction(operation="cleanup_audit_gc") as connection:
+            deleted = connection.execute(
+                """
+                DELETE FROM data_cleanup_runs
+                WHERE id IN (
+                    SELECT id
+                    FROM data_cleanup_runs
+                    WHERE completed_at<?
+                      AND completed_at IS NOT NULL
+                      AND status IN ('completed','failed')
+                    ORDER BY completed_at,id
+                    LIMIT ?
+                )
+                """,
+                (cutoff, CLEANUP_AUDIT_BATCH_SIZE),
+            ).rowcount
+        return {
+            "deleted_runs": max(0, int(deleted)),
+            "retention_days": CLEANUP_AUDIT_RETENTION_DAYS,
+            "batch_size": CLEANUP_AUDIT_BATCH_SIZE,
+        }
 
     def expire_operational_data(self) -> dict[str, int]:
         """供 Scheduler 使用的小型、冪等維護；不掃描檔案系統。"""
         now = utc_now()
+        queue_gc_cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=90)
+        ).isoformat()
         with self.database.transaction() as connection:
             feedback = connection.execute(
                 "DELETE FROM photo_feedback WHERE feedback_type='SKIP_TEMPORARILY' AND expires_at IS NOT NULL AND expires_at<=?",
                 (now,),
             ).rowcount
             queue = connection.execute(
-                "UPDATE device_content_queue_items SET status='EXPIRED',updated_at=? WHERE status NOT IN ('DISPLAYED','EXPIRED','CANCELLED') AND expires_at IS NOT NULL AND expires_at<=?",
-                (now, now),
+                """
+                UPDATE device_content_queue_items
+                SET status='EXPIRED',updated_at=?
+                WHERE status NOT IN ('DISPLAYED','EXPIRED','CANCELLED')
+                  AND expires_at IS NOT NULL
+                  AND expires_at<=?
+                  AND NOT (
+                      status='ACKNOWLEDGED'
+                      AND delivery_mode='offline_schedule'
+                      AND terminal_ack_retention IS NOT NULL
+                      AND terminal_ack_retention>?
+                  )
+                """,
+                (now, now, now),
             ).rowcount
-        return {"expired_feedback": int(feedback), "expired_queue_items": int(queue)}
+            queue_gc = connection.execute(
+                """
+                DELETE FROM device_content_queue_items
+                WHERE id IN (
+                    SELECT qi.id
+                    FROM device_content_queue_items qi
+                    WHERE qi.status IN ('DISPLAYED','CANCELLED','EXPIRED','FAILED')
+                      AND qi.delivery_mode='online_queue'
+                      AND qi.offline_schedule_id IS NULL
+                      AND qi.updated_at<?
+                      AND (qi.terminal_ack_retention IS NULL OR qi.terminal_ack_retention<?)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM device_content_queue_events e
+                          WHERE e.queue_item_id=qi.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM rollout_targets rt WHERE rt.queue_item_id=qi.id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM device_content_queues q
+                          WHERE q.device_id=qi.device_id
+                            AND qi.release_id IN (
+                                q.current_release_id,
+                                q.last_known_good_release_id,
+                                q.next_queued_release_id,
+                                q.emergency_fallback_release_id
+                            )
+                      )
+                    ORDER BY qi.updated_at,qi.id
+                    LIMIT 200
+                )
+                """,
+                (queue_gc_cutoff, now),
+            ).rowcount
+        # SQLite's lightweight planner/statistics refresh is safe here because
+        # this method runs on the low-frequency operational maintenance cadence.
+        try:
+            with self.database.session() as connection:
+                connection.execute("PRAGMA optimize")
+        except Exception:  # noqa: S110
+            # Maintenance statistics must never turn a committed expiry into a
+            # failed scheduler step.
+            pass
+        return {
+            "expired_feedback": int(feedback),
+            "expired_queue_items": int(queue),
+            "gc_queue_items": int(queue_gc),
+        }
 
     def create_rollout(
         self, *, release_id: str, name: str, user_id: str, stages: list[dict[str, Any]] | None = None

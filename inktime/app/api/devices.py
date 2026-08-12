@@ -828,7 +828,13 @@ def replace_offline_schedule_slot(device_id: str, schedule_id: str, slot_index: 
 def device_offline_schedule():
     device = authenticate_device_request()
     if str(device["delivery_mode"] or "legacy_online") != "inktime_offline_schedule":
-        abort(409, description="DEVICE-008 裝置目前不是 enhanced offline schedule 模式")
+        return jsonify(
+            {
+                "error": "delivery_mode_mismatch",
+                "error_code": "DEVICE-008",
+                "delivery_mode": str(device["delivery_mode"] or "legacy_online"),
+            }
+        ), 409
     if not offline_schedule_capability_is_usable(device["offline_schedule_capability_state"]):
         abort(409, description="DEVICE-008 裝置離線 Slot 能力尚未確認，暫停離線排程傳送")
     requested_targets = request.args.getlist("target")
@@ -1144,6 +1150,8 @@ def report_status():
     applied_offline_schedule_version = nullable_int(
         "applied_offline_schedule_version", 0, 2_147_483_647
     )
+    status_sequence = optional_int("status_sequence", 0, 2_147_483_647)
+    status_reported_at = optional_text("status_reported_at", 64)
     telemetry = {
         "wifi_connect_ms": optional_int("wifi_connect_ms", 0, 120_000),
         "network_session_ms": optional_int("network_session_ms", 0, 600_000),
@@ -1214,85 +1222,89 @@ def report_status():
         )
     }
     wake_reason_detail = optional_text("wake_reason_detail", 64)
-    _repository().record_status(
-        str(device["id"]),
-        firmware_version=str(payload.get("firmware_version", "unknown")),
-        wifi_rssi=optional_int("wifi_rssi", -127, 0),
-        battery_percent=battery_percent,
-        free_heap_bytes=optional_int("free_heap_bytes", 0, 2_147_483_647),
-        free_psram_bytes=optional_int("free_psram_bytes", 0, 2_147_483_647),
-        error_code=error_code,
-        error_message=error_message,
-        wake_reason=str(payload.get("wake_reason", "")),
-        applied_config_version=optional_int("applied_config_version", 0, 2_147_483_647),
-        applied_offline_schedule_version=applied_offline_schedule_version,
-        details={
-            "display_updated": display_updated,
-            "display_skipped": display_skipped,
-            "display_skip_reason": display_skip_reason,
-            "payload_sha256_verified": payload_verified,
-            "release_id": str(payload.get("release_id", ""))[:100],
-            "render_profile": str(payload.get("render_profile", ""))[:100],
-            "reported_panel_profile": str(payload.get("panel_profile", ""))[:100],
-            "applied_config_version": payload.get("applied_config_version"),
-            "applied_offline_schedule_version": applied_offline_schedule_version,
-            "board_profile": str(payload.get("board_profile", ""))[:100],
-            "flash_bytes": optional_int("flash_bytes", 0, 2_147_483_647),
-            "psram_bytes": optional_int("psram_bytes", 0, 2_147_483_647),
-            "flash_ready": boolean_details["flash_ready"],
-            "psram_ready": boolean_details["psram_ready"],
-            "sd_card": boolean_details["sd_card"],
-            "rtc": boolean_details["rtc"],
-            "cache_status": str(payload.get("cache_status", ""))[:32],
-            "pmic_type": str(payload.get("pmic_type", ""))[:32],
-            "usb_power": boolean_details["usb_power"],
-            "battery_voltage": optional_float("battery_voltage", 0.0, 10.0),
-            "battery_percent_estimated": boolean_details["battery_percent_estimated"],
-            "temperature_c": optional_float("temperature_c", -100.0, 150.0),
-            "humidity_percent": optional_float("humidity_percent", 0.0, 100.0),
-            "last_refresh_duration_ms": optional_int("last_refresh_duration_ms", 0, 600_000),
-            "wake_duration_ms": optional_int("wake_duration_ms", 0, 86_400_000),
-            "button_wakeup": boolean_details["button_wakeup"],
-            "wifi_connect_ms": telemetry["wifi_connect_ms"],
-            "wifi_fast_path_attempted": boolean_details["wifi_fast_path_attempted"],
-            "wifi_fast_path_success": boolean_details["wifi_fast_path_success"],
-            "network_session_ms": telemetry["network_session_ms"],
-            "http_request_count": telemetry["http_request_count"],
-            "tls_handshake_count": telemetry["tls_handshake_count"],
-            "tls_handshake_count_unavailable": tls_handshake_count_unavailable,
-            "tls_handshake_count_unavailable_reason": (
-                tls_handshake_count_unavailable_reason
-            ),
-            "ntp_sync_attempted": boolean_details["ntp_sync_attempted"],
-            "ntp_sync_succeeded": boolean_details["ntp_sync_succeeded"],
-            "ntp_sync_ms": telemetry["ntp_sync_ms"],
-            "download_bytes": telemetry["download_bytes"],
-            "sd_read_bytes": telemetry["sd_read_bytes"],
-            "sd_write_bytes": telemetry["sd_write_bytes"],
-            "sd_write_ms": telemetry["sd_write_ms"],
-            "nvs_write_count": telemetry["nvs_write_count"],
-            "ack_event_count": telemetry["ack_event_count"],
-            "ack_batch_request_count": telemetry["ack_batch_request_count"],
-            "i2c_retry_count": telemetry["i2c_retry_count"],
-            "i2c_bus_reset_count": telemetry["i2c_bus_reset_count"],
-            "i2c_fail_closed_count": telemetry["i2c_fail_closed_count"],
-            "gc_deleted_files": telemetry["gc_deleted_files"],
-            "gc_deleted_bytes": telemetry["gc_deleted_bytes"],
-            "gc_skipped_protected": telemetry["gc_skipped_protected"],
-            "epd_transfer_ms": telemetry["epd_transfer_ms"],
-            "next_wake_epoch": telemetry["next_wake_epoch"],
-            "next_network_sync_epoch": telemetry["next_network_sync_epoch"],
-            "wake_reason_detail": wake_reason_detail,
-        },
-    )
-    DeviceTestReleaseStore(current_app.config["INKTIME_RELEASE_DIR"]).confirm_display(
-        str(device["id"]),
-        str(payload.get("release_id", ""))[:100],
-        profile_key=str(device["panel_profile"]),
-        payload_verified=payload_verified,
-        display_updated=display_updated or display_skipped,
-        error_code=error_code,
-    )
+    try:
+        status_applied = _repository().record_status(
+            str(device["id"]),
+            firmware_version=str(payload.get("firmware_version", "unknown")),
+            wifi_rssi=optional_int("wifi_rssi", -127, 0),
+            battery_percent=battery_percent,
+            free_heap_bytes=optional_int("free_heap_bytes", 0, 2_147_483_647),
+            free_psram_bytes=optional_int("free_psram_bytes", 0, 2_147_483_647),
+            error_code=error_code,
+            error_message=error_message,
+            wake_reason=str(payload.get("wake_reason", "")),
+            applied_config_version=optional_int("applied_config_version", 0, 2_147_483_647),
+            applied_offline_schedule_version=applied_offline_schedule_version,
+            status_sequence=status_sequence,
+            reported_at=status_reported_at,
+            details={
+                "display_updated": display_updated,
+                "display_skipped": display_skipped,
+                "display_skip_reason": display_skip_reason,
+                "payload_sha256_verified": payload_verified,
+                "release_id": str(payload.get("release_id", ""))[:100],
+                "render_profile": str(payload.get("render_profile", ""))[:100],
+                "reported_panel_profile": str(payload.get("panel_profile", ""))[:100],
+                "applied_config_version": payload.get("applied_config_version"),
+                "applied_offline_schedule_version": applied_offline_schedule_version,
+                "board_profile": str(payload.get("board_profile", ""))[:100],
+                "flash_bytes": optional_int("flash_bytes", 0, 2_147_483_647),
+                "psram_bytes": optional_int("psram_bytes", 0, 2_147_483_647),
+                "flash_ready": boolean_details["flash_ready"],
+                "psram_ready": boolean_details["psram_ready"],
+                "sd_card": boolean_details["sd_card"],
+                "rtc": boolean_details["rtc"],
+                "cache_status": str(payload.get("cache_status", ""))[:32],
+                "pmic_type": str(payload.get("pmic_type", ""))[:32],
+                "usb_power": boolean_details["usb_power"],
+                "battery_voltage": optional_float("battery_voltage", 0.0, 10.0),
+                "battery_percent_estimated": boolean_details["battery_percent_estimated"],
+                "temperature_c": optional_float("temperature_c", -100.0, 150.0),
+                "humidity_percent": optional_float("humidity_percent", 0.0, 100.0),
+                "last_refresh_duration_ms": optional_int("last_refresh_duration_ms", 0, 600_000),
+                "wake_duration_ms": optional_int("wake_duration_ms", 0, 86_400_000),
+                "button_wakeup": boolean_details["button_wakeup"],
+                "wifi_connect_ms": telemetry["wifi_connect_ms"],
+                "wifi_fast_path_attempted": boolean_details["wifi_fast_path_attempted"],
+                "wifi_fast_path_success": boolean_details["wifi_fast_path_success"],
+                "network_session_ms": telemetry["network_session_ms"],
+                "http_request_count": telemetry["http_request_count"],
+                "tls_handshake_count": telemetry["tls_handshake_count"],
+                "tls_handshake_count_unavailable": tls_handshake_count_unavailable,
+                "tls_handshake_count_unavailable_reason": tls_handshake_count_unavailable_reason,
+                "ntp_sync_attempted": boolean_details["ntp_sync_attempted"],
+                "ntp_sync_succeeded": boolean_details["ntp_sync_succeeded"],
+                "ntp_sync_ms": telemetry["ntp_sync_ms"],
+                "download_bytes": telemetry["download_bytes"],
+                "sd_read_bytes": telemetry["sd_read_bytes"],
+                "sd_write_bytes": telemetry["sd_write_bytes"],
+                "sd_write_ms": telemetry["sd_write_ms"],
+                "nvs_write_count": telemetry["nvs_write_count"],
+                "ack_event_count": telemetry["ack_event_count"],
+                "ack_batch_request_count": telemetry["ack_batch_request_count"],
+                "i2c_retry_count": telemetry["i2c_retry_count"],
+                "i2c_bus_reset_count": telemetry["i2c_bus_reset_count"],
+                "i2c_fail_closed_count": telemetry["i2c_fail_closed_count"],
+                "gc_deleted_files": telemetry["gc_deleted_files"],
+                "gc_deleted_bytes": telemetry["gc_deleted_bytes"],
+                "gc_skipped_protected": telemetry["gc_skipped_protected"],
+                "epd_transfer_ms": telemetry["epd_transfer_ms"],
+                "next_wake_epoch": telemetry["next_wake_epoch"],
+                "next_network_sync_epoch": telemetry["next_network_sync_epoch"],
+                "wake_reason_detail": wake_reason_detail,
+            },
+        )
+    except ValueError as exc:
+        abort(400, description=str(exc))
+    if status_applied:
+        DeviceTestReleaseStore(current_app.config["INKTIME_RELEASE_DIR"]).confirm_display(
+            str(device["id"]),
+            str(payload.get("release_id", ""))[:100],
+            profile_key=str(device["panel_profile"]),
+            payload_verified=payload_verified,
+            display_updated=display_updated or display_skipped,
+            error_code=error_code,
+        )
     log_event(
         LOGGER,
         logging.WARNING if error_code else logging.INFO,
@@ -1301,4 +1313,4 @@ def report_status():
         error_code=error_code,
         details={"device_id": str(device["id"]), "wifi_rssi": payload.get("wifi_rssi")},
     )
-    return {"status": "ok"}
+    return {"status": "ok" if status_applied else "ignored", "reason": None if status_applied else "stale_status"}
