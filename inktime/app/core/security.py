@@ -61,11 +61,18 @@ def redact_text(value: str) -> str:
         candidate = match.group(0)
         try:
             parts = urlsplit(candidate)
+            netloc = parts.netloc
+            if parts.username is not None or parts.password is not None:
+                hostname = parts.hostname
+                if not hostname:
+                    return "[已遮蔽 URL]"
+                safe_host = f"[{hostname}]" if ":" in hostname else hostname
+                netloc = f"{safe_host}:{parts.port}" if parts.port is not None else safe_host
             query = [
                 (key, "[已遮蔽]" if SENSITIVE_QUERY_KEY.fullmatch(key) else item)
                 for key, item in parse_qsl(parts.query, keep_blank_values=True)
             ]
-            return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+            return urlunsplit((parts.scheme, netloc, parts.path, urlencode(query), parts.fragment))
         except (TypeError, ValueError):
             return "[已遮蔽 URL]"
 

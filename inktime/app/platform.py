@@ -242,7 +242,13 @@ def configure_web_application(
                 if status in {401, 403, 429}
                 else logging.DEBUG
             )
-            event = "request_rejected" if status >= 400 else "request_completed"
+            event = (
+                "request_failed"
+                if status >= 500
+                else "request_rejected"
+                if status >= 400
+                else "request_completed"
+            )
             if status >= 500 or LOGGER.isEnabledFor(logging.DEBUG) or (
                 status in {401, 403, 429}
                 and should_log_rate_limited(f"http:{endpoint}:{status}", interval_seconds=60)
@@ -250,7 +256,11 @@ def configure_web_application(
                 log_event(
                     LOGGER,
                     level,
-                    "HTTP request completed" if status < 400 else "HTTP request rejected",
+                    "HTTP request failed"
+                    if status >= 500
+                    else "HTTP request rejected"
+                    if status >= 400
+                    else "HTTP request completed",
                     event=event,
                     http_status=status,
                     duration_ms=int(

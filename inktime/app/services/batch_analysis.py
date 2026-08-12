@@ -2554,7 +2554,7 @@ class BatchAnalysisService:
             "batch_completed" if final_status.startswith("completed") else "batch_failed",
             "Batch lifecycle reached a terminal result",
             batch_id=batch_id,
-            job_id=str(batch.get("job_id") or ""),
+            job_id=str(batch["job_id"] or ""),
             status=final_status,
         )
 
@@ -2664,8 +2664,8 @@ class BatchAnalysisService:
             "batch_result_ingest",
             "Batch result ingest started",
             batch_id=batch_id,
-            job_id=str(batch.get("job_id") or ""),
-            status=str(batch.get("status") or ""),
+            job_id=str(batch["job_id"] or ""),
+            status=str(batch["status"] or ""),
         )
         plan_row = self.jobs.get(str(batch["job_id"])) if batch["job_id"] else None
         plan_error: str | None = None
@@ -2831,7 +2831,7 @@ class BatchAnalysisService:
             "Batch result ingest completed",
             event="batch_result_ingest_completed",
             batch_id=batch_id,
-            job_id=str(batch.get("job_id") or ""),
+            job_id=str(batch["job_id"] or ""),
             duration_ms=int((time.monotonic() - import_started) * 1000),
             details={
                 "success": result["success"],

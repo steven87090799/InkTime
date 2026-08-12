@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import logging
 from pathlib import Path
 
 from inktime.app.core.logging import get_log_context
@@ -43,6 +44,52 @@ def test_request_id_validation_response_header_and_context_cleanup(client):
     assert rejected.headers["X-Request-ID"] != "Bearer private token"
     assert len(rejected.headers["X-Request-ID"]) == 32
     assert get_log_context() == baseline
+    assert "request_id" not in get_log_context()
+
+
+def test_http_observability_uses_completed_rejected_and_failed_taxonomy(client):
+    app = client.application
+    logger = logging.getLogger("platform")
+    original_level = logger.level
+    records: list[logging.LogRecord] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = Capture()
+    original_view = app.view_functions["auth.login"]
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    try:
+        for status in (200, 404, 503):
+            app.view_functions["auth.login"] = lambda status=status: ("contract", status)
+            response = client.get("/login")
+            assert response.status_code == status
+        records_before_health = len(records)
+        assert client.get("/health/live").status_code == 200
+        health_records = records[records_before_health:]
+    finally:
+        app.view_functions["auth.login"] = original_view
+        logger.removeHandler(handler)
+        logger.setLevel(original_level)
+
+    lifecycle = [
+        (record.event, record.http_status)
+        for record in records
+        if getattr(record, "event", "")
+        in {"request_completed", "request_rejected", "request_failed"}
+    ]
+    assert lifecycle == [
+        ("request_completed", 200),
+        ("request_rejected", 404),
+        ("request_failed", 503),
+    ]
+    assert not [
+        record
+        for record in health_records
+        if getattr(record, "event", "") in {"request_received", "request_completed"}
+    ]
     assert "request_id" not in get_log_context()
 
 

@@ -24,6 +24,8 @@ MAX_EXCEPTION_LENGTH = 2_048
 MAX_STACK_TRACE_LENGTH = 12_000
 MAX_DETAILS_ITEMS = 64
 MAX_DETAILS_DEPTH = 5
+MAX_PRE_REDACTION_LENGTH = 48_000
+PRE_REDACTION_MARGIN = 4_096
 
 # Existing fields remain present while correlation and lifecycle fields extend
 # the schema. Empty defaults give JSON consumers a stable query contract.
@@ -86,7 +88,14 @@ _SAFE_CONTEXT_KEY = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 def _safe_text(value: Any, limit: int = MAX_STRING_LENGTH) -> str:
     try:
-        return redact_text(str(value))[:limit]
+        normalized_limit = max(0, int(limit))
+        source = value if isinstance(value, str) else str(value)
+        source_limit = min(
+            MAX_PRE_REDACTION_LENGTH,
+            max(normalized_limit * 2, normalized_limit + PRE_REDACTION_MARGIN),
+        )
+        bounded_source = source[:source_limit]
+        return redact_text(bounded_source)[:normalized_limit]
     except Exception:
         return "[unavailable]"
 
@@ -190,11 +199,13 @@ def should_log_rate_limited(
 def _safe_exception(record: logging.LogRecord) -> tuple[str, str, str]:
     if not record.exc_info:
         return "", "", ""
-    exc_type, exc, _tb = record.exc_info
+    exc_type, exc, tb = record.exc_info
     type_name = getattr(exc_type, "__name__", type(exc).__name__ if exc else "Exception")
     message = _safe_text(exc or "", MAX_EXCEPTION_LENGTH)
     try:
-        rendered = "".join(traceback.format_exception(*record.exc_info))
+        frames = traceback.extract_tb(tb, limit=50) if tb is not None else []
+        rendered = "".join(traceback.format_list(frames))
+        rendered += f"{type_name}: {message}"
     except Exception:
         rendered = f"{type_name}: {message}"
     return _safe_text(type_name, 256), message, _safe_text(rendered, MAX_STACK_TRACE_LENGTH)

@@ -21,6 +21,7 @@ class ProcessCallTimeout(TimeoutError):
     ambiguous: bool | None = None
     vision_started: bool | None = None
     request_started: bool | None = None
+    operation_id: str = ""
 
 
 class ProcessCallError(RuntimeError):
@@ -29,6 +30,46 @@ class ProcessCallError(RuntimeError):
     ambiguous: bool | None = None
     vision_started: bool | None = None
     request_started: bool | None = None
+    operation_id: str = ""
+
+
+def _log_boundary_failure(
+    exc: ProcessCallTimeout | ProcessCallError,
+    *,
+    call_started: float,
+    process_name: str,
+    provider_call: bool,
+) -> None:
+    """Log final failure semantics after provider normalization, if any."""
+
+    is_timeout = isinstance(exc, ProcessCallTimeout)
+    ambiguous = bool(exc.ambiguous)
+    request_started = bool(exc.request_started)
+    retryable_codes = {"VLM-001", "VLM-002", "VLM-005", "VLM-007"}
+    retryable = not ambiguous and (
+        is_timeout
+        or not request_started
+        or (provider_call and str(getattr(exc, "code", "")) in retryable_codes)
+    )
+    log_event(
+        LOGGER,
+        logging.WARNING if is_timeout else logging.ERROR,
+        "Isolated process call timed out" if is_timeout else "Isolated process call failed",
+        event="boundary_call_timeout" if is_timeout else "boundary_call_error",
+        error_code=str(getattr(exc, "code", "AI-PROVIDER-UNAVAILABLE")),
+        operation_id=str(getattr(exc, "operation_id", "")),
+        operation="process_boundary",
+        duration_ms=int((time.monotonic() - call_started) * 1000),
+        failure_class=type(exc).__name__,
+        retryable=retryable,
+        ambiguous=ambiguous,
+        details={
+            "child_started": bool(exc.child_started),
+            "request_started": request_started,
+            "vision_started": bool(exc.vision_started),
+            "process_name": process_name[:128],
+        },
+    )
 
 
 def _call_child(function: Callable[..., Any], kwargs: dict[str, Any], sender) -> None:
@@ -143,16 +184,6 @@ class KillableProcessBoundary:
         if self._context is None:
             raise ProcessCallError("spawn process boundary unavailable")
         if not self._slots.acquire(timeout=timeout):
-            log_event(
-                LOGGER,
-                logging.WARNING,
-                "Isolated process capacity timed out",
-                event="boundary_call_timeout",
-                operation="process_boundary",
-                duration_ms=int(timeout * 1000),
-                retryable=True,
-                details={"stage": "capacity", "process_name": process_name[:128]},
-            )
             raise ProcessCallTimeout("provider process capacity timeout")
         token = uuid4().hex
         call_started = time.monotonic()
@@ -232,24 +263,7 @@ class KillableProcessBoundary:
             # ran.  Once the child is running, however, timeout/pipe failure
             # makes a remote Vision POST outcome unknowable.
             exc.child_started = bool(started)
-            is_timeout = isinstance(exc, ProcessCallTimeout)
-            log_event(
-                LOGGER,
-                logging.WARNING if is_timeout else logging.ERROR,
-                "Isolated process call timed out" if is_timeout else "Isolated process call failed",
-                event="boundary_call_timeout" if is_timeout else "boundary_call_error",
-                error_code=str(getattr(exc, "code", "AI-PROVIDER-UNAVAILABLE")),
-                operation_id=token,
-                operation="process_boundary",
-                duration_ms=int((time.monotonic() - call_started) * 1000),
-                failure_class=type(exc).__name__,
-                retryable=is_timeout,
-                ambiguous=bool(getattr(exc, "ambiguous", False)),
-                details={
-                    "child_started": bool(started),
-                    "process_name": process_name[:128],
-                },
-            )
+            exc.operation_id = token
             raise
         finally:
             # Reap before closing IPC, removing observability state, or releasing
@@ -280,13 +294,23 @@ class KillableProcessBoundary:
             pickle.dumps((function, kwargs))
         except (pickle.PickleError, TypeError, AttributeError) as exc:
             raise ProcessCallError("spawn boundary arguments are not serializable") from exc
-        return self._run(
-            _call_child,
-            (function, kwargs),
-            timeout_seconds=timeout_seconds,
-            process_name=process_name,
-            cancel_requested=cancel_requested,
-        )
+        call_started = time.monotonic()
+        try:
+            return self._run(
+                _call_child,
+                (function, kwargs),
+                timeout_seconds=timeout_seconds,
+                process_name=process_name,
+                cancel_requested=cancel_requested,
+            )
+        except (ProcessCallTimeout, ProcessCallError) as exc:
+            _log_boundary_failure(
+                exc,
+                call_started=call_started,
+                process_name=process_name,
+                provider_call=False,
+            )
+            raise
 
     def call_provider(
         self,
@@ -302,6 +326,7 @@ class KillableProcessBoundary:
             pickle.dumps((specification, method, kwargs))
         except (pickle.PickleError, TypeError, AttributeError) as exc:
             raise ProcessCallError("provider request is not serializable") from exc
+        call_started = time.monotonic()
         try:
             return self._run(
                 _provider_child,
@@ -330,6 +355,12 @@ class KillableProcessBoundary:
                     exc.ambiguous = True
                     if method == "analyze":
                         exc.vision_started = True
+            _log_boundary_failure(
+                exc,
+                call_started=call_started,
+                process_name="inktime-provider-child",
+                provider_call=True,
+            )
             raise
 
     @property

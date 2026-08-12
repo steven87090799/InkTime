@@ -4,6 +4,7 @@ import json
 import logging
 from uuid import uuid4
 
+from inktime.app.core import logging as logging_core
 from inktime.app.core.logging import (
     STANDARD_FIELDS,
     HumanFormatter,
@@ -75,6 +76,22 @@ def test_nested_redaction_covers_headers_payloads_and_url_queries():
     assert "view=summary" in rendered
 
 
+def test_url_redaction_removes_userinfo_and_preserves_safe_query_metadata():
+    basic = redact_text("https://user:password@example.test/path")
+    query = redact_text(
+        "https://user:password@example.test/path?token=private&view=summary"
+    )
+    ipv6 = redact_text("https://user:password@[2001:db8::1]:8443/path")
+
+    assert "password" not in basic
+    assert "user:password" not in basic
+    assert "example.test" in basic
+    assert "password" not in query
+    assert "private" not in query
+    assert "view=summary" in query
+    assert ipv6 == "https://[2001:db8::1]:8443/path"
+
+
 def test_exception_metadata_is_redacted_and_bounded():
     secret = "sk-" + "s" * 40
     register_secret(secret)
@@ -95,7 +112,37 @@ def test_exception_metadata_is_redacted_and_bounded():
     assert len(payload["stack_trace"]) <= 12000
 
 
+def test_large_string_is_bounded_before_redaction_and_secret_remains_hidden(monkeypatch):
+    secret = "registered-provider-secret-0123456789"
+    register_secret(secret)
+    observed_lengths: list[int] = []
+    real_redact_text = logging_core.redact_text
+
+    def capture_redaction_input(value: str) -> str:
+        observed_lengths.append(len(value))
+        return real_redact_text(value)
+
+    monkeypatch.setattr(logging_core, "redact_text", capture_redaction_input)
+    record = logging.LogRecord(
+        "provider",
+        logging.ERROR,
+        __file__,
+        1,
+        f"Authorization Bearer {secret} " + "x" * 100_000,
+        (),
+        None,
+    )
+
+    payload = json.loads(JsonFormatter().format(record))
+
+    assert secret not in json.dumps(payload)
+    assert len(payload["message"]) <= logging_core.MAX_STRING_LENGTH
+    assert observed_lengths
+    assert max(observed_lengths) <= logging_core.MAX_PRE_REDACTION_LENGTH
+
+
 def test_context_propagates_explicit_override_and_cleanup():
+    baseline = get_log_context()
     token = bind_log_context(request_id="req-123", job_id="job-context", trace_id="trace-123")
     logger = logging.getLogger(f"test-context-{uuid4()}")
     logger.setLevel(logging.DEBUG)
@@ -116,7 +163,7 @@ def test_context_propagates_explicit_override_and_cleanup():
     assert payload["request_id"] == "req-123"
     assert payload["trace_id"] == "trace-123"
     assert payload["job_id"] == "job-explicit"
-    assert get_log_context() == {}
+    assert get_log_context() == baseline
 
 
 def test_sampling_and_rate_limit_are_bounded_and_deterministic():
