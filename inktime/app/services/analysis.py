@@ -35,6 +35,7 @@ from inktime.app.domain.analysis.scoring import (
     calculate_travel_bonus,
     grade_to_score,
 )
+from inktime.app.domain.analysis.schema import normalize_caption_controls
 from inktime.app.domain.photos import ThumbnailCache
 from inktime.app.domain.photos.quality_policy import FEATURE_VERSION, evaluate_local_quality
 from inktime.app.providers.base import ProviderResponse, Usage, VisionAttemptState, VisionProvider
@@ -51,7 +52,7 @@ class AnalysisDisabledError(RuntimeError):
     code = "ANALYSIS-DISABLED"
 
 
-PROMPT_VERSION = "photo-quality-v5-grade-anchors"
+PROMPT_VERSION = "photo-quality-v6-caption-rubric"
 FULL_ANALYSIS_TOKEN_CAP = 2048
 CAPTION_VARIANTS_TOKEN_CAP = 3072
 LOGGER = logging.getLogger("analysis")
@@ -137,23 +138,23 @@ class PhotoAnalysisService:
             self.observability.record(severity, "analysis", event, message, **fields)
 
     def _caption_controls(self) -> dict | None:
-        if self.settings is None or not bool(self.settings.get("analysis.advanced_caption_enabled", False)):
+        if self.settings is None or not bool(self.settings.get("analysis.advanced_caption_enabled", True)):
             return None
         settings = self.settings
 
         def lines(key: str) -> list[str]:
             return [line.strip() for line in str(settings.get(key, "")).splitlines() if line.strip()]
 
-        return {
+        return normalize_caption_controls({
             "caption_min_chars": int(settings.get("analysis.caption_min_chars", 120)),
             "caption_target_chars": int(settings.get("analysis.caption_target_chars", 160)),
-            "caption_max_chars": int(settings.get("analysis.caption_max_chars", 220)),
+            "caption_max_chars": int(settings.get("analysis.caption_max_chars", 200)),
             "side_caption_min_chars": int(settings.get("analysis.side_caption_min_chars", 8)),
             "side_caption_target_chars": int(settings.get("analysis.side_caption_target_chars", 12)),
             "side_caption_max_chars": int(settings.get("analysis.side_caption_max_chars", 16)),
-            "copy_default_style": str(settings.get("analysis.copy_default_style", "natural")),
+            "copy_default_style": str(settings.get("analysis.copy_default_style", "literary")),
             "copy_humor_level": int(settings.get("analysis.copy_humor_level", 1)),
-            "copy_poetic_level": int(settings.get("analysis.copy_poetic_level", 1)),
+            "copy_poetic_level": int(settings.get("analysis.copy_poetic_level", 2)),
             "copy_avoid_cliche": bool(settings.get("analysis.copy_avoid_cliche", True)),
             "copy_avoid_direct_description": bool(
                 settings.get("analysis.copy_avoid_direct_description", True)
@@ -165,20 +166,22 @@ class PhotoAnalysisService:
             "copy_banned_words": lines("analysis.copy_banned_words"),
             "copy_banned_patterns": lines("analysis.copy_banned_patterns"),
             "copy_custom_rules": str(self.settings.get("analysis.copy_custom_rules", "")),
-            "caption_variants_enabled": bool(self.settings.get("analysis.caption_variants_enabled", False)),
-        }
+            # New plans generate one side_caption. Historical cached variants
+            # remain readable and selectable by the render path.
+            "caption_variants_enabled": False,
+        })
 
     @staticmethod
     def _caption_generation_controls(controls: dict | None) -> dict | None:
         if not controls:
             return None
-        return {key: value for key, value in controls.items() if key != "copy_default_style"}
+        return dict(controls)
 
     @staticmethod
     def _caption_display_controls(controls: dict | None) -> dict | None:
         if not controls:
             return None
-        return {"copy_default_style": str(controls.get("copy_default_style", "natural"))}
+        return {"copy_default_style": str(controls.get("copy_default_style", "literary"))}
 
     def build_plan(self, *, strategy: str, provider_route: list[dict], scoring_profile: dict) -> dict:
         """Build the sole server-authoritative non-secret Analysis Plan."""
@@ -259,7 +262,7 @@ class PhotoAnalysisService:
             execution_policy=execution_policy,
             travel_policy=travel_policy,
             scoring_rules=str(settings.get("analysis.scoring_rules", "")),
-            reasoning_effort=normalize_reasoning_effort(settings.get("batch.reasoning_effort", "none")),
+            reasoning_effort="none",
             repair_policy=repair_policy,
         )
 
@@ -267,11 +270,8 @@ class PhotoAnalysisService:
     def _prompt_version(caption_controls: dict | None) -> str:
         if not caption_controls:
             return PROMPT_VERSION
-        generation_controls = {
-            key: value for key, value in caption_controls.items() if key != "copy_default_style"
-        }
         fingerprint = hashlib.sha256(
-            json.dumps(generation_controls, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+            json.dumps(caption_controls, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()[:16]
         return f"{PROMPT_VERSION}-caption-{fingerprint}"
 
@@ -1587,8 +1587,8 @@ class PhotoAnalysisService:
         display_controls = dict(analysis_spec.get("caption_display_controls") or {})
         repair_policy = dict(analysis_spec.get("repair_policy") or {})
         if caption_controls:
-            # Display style is frozen for the job but excluded from the
-            # provider prompt and Vision request identity.
+            # The style controls both single-caption generation and legacy
+            # cached-variant display selection, so it stays frozen in both.
             caption_controls = dict(caption_controls) | display_controls
         prompt_version = str(analysis_spec["prompt_version"])
         vision_input = dict(analysis_spec["vision_input"])

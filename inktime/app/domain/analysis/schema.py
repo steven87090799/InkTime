@@ -71,6 +71,9 @@ V3_GRADE_ALIASES = {
     "emotion": "emotion_grade",
 }
 V3_TOP_LEVEL_OPTIONAL_FIELDS = {"reason_codes"}
+CAPTION_MAX_CHARS = 200
+SIDE_CAPTION_MIN_CHARS = 8
+SIDE_CAPTION_MAX_CHARS = 16
 
 
 def _nullable(schema: dict) -> dict:
@@ -79,6 +82,36 @@ def _nullable(schema: dict) -> dict:
 
 def _detail_property(schema: dict) -> dict:
     return _nullable(schema)
+
+
+def normalize_caption_controls(controls: dict[str, Any]) -> dict[str, Any]:
+    """Bound persisted caption settings to the v3 schema/validator contract."""
+    normalized = dict(controls)
+    caption_upper = max(
+        0, min(CAPTION_MAX_CHARS, int(controls.get("caption_max_chars", CAPTION_MAX_CHARS)))
+    )
+    caption_target = max(0, min(caption_upper, int(controls.get("caption_target_chars", 160))))
+    caption_minimum = max(0, min(caption_target, int(controls.get("caption_min_chars", 120))))
+    side_upper = max(
+        SIDE_CAPTION_MIN_CHARS,
+        min(SIDE_CAPTION_MAX_CHARS, int(controls.get("side_caption_max_chars", SIDE_CAPTION_MAX_CHARS))),
+    )
+    side_target = max(
+        SIDE_CAPTION_MIN_CHARS, min(side_upper, int(controls.get("side_caption_target_chars", 12)))
+    )
+    side_minimum = max(
+        SIDE_CAPTION_MIN_CHARS,
+        min(side_target, int(controls.get("side_caption_min_chars", SIDE_CAPTION_MIN_CHARS))),
+    )
+    normalized.update(
+        caption_min_chars=caption_minimum,
+        caption_target_chars=caption_target,
+        caption_max_chars=caption_upper,
+        side_caption_min_chars=side_minimum,
+        side_caption_target_chars=side_target,
+        side_caption_max_chars=side_upper,
+    )
+    return normalized
 
 
 class AnalysisValidationError(ValueError):
@@ -235,8 +268,12 @@ FULL_ANALYSIS_JSON_SCHEMA = {
         "properties": {
             **cast(dict[str, Any], ANALYSIS_JSON_SCHEMA["schema"])["properties"],
             "schema_version": {"type": "integer", "const": 3},
-            "caption": {"type": "string", "minLength": 1, "maxLength": 200},
-            "side_caption": {"type": "string", "minLength": 8, "maxLength": 16},
+            "caption": {"type": "string", "minLength": 1, "maxLength": CAPTION_MAX_CHARS},
+            "side_caption": {
+                "type": "string",
+                "minLength": SIDE_CAPTION_MIN_CHARS,
+                "maxLength": SIDE_CAPTION_MAX_CHARS,
+            },
             "types": {
                 "type": "array",
                 "items": {"type": "string", "enum": sorted(ALLOWED_TYPES)},
@@ -290,17 +327,18 @@ def json_schema_for_stage(stage: str, *, caption_controls: dict[str, Any] | None
     full_stage = stage in {"single", "single_high", "stage_two", "full"}
     if not caption_controls:
         return FULL_ANALYSIS_JSON_SCHEMA if full_stage else ANALYSIS_JSON_SCHEMA
+    controls = normalize_caption_controls(caption_controls)
     schema = deepcopy(FULL_ANALYSIS_JSON_SCHEMA if full_stage else ANALYSIS_JSON_SCHEMA)
     properties = cast(dict[str, Any], cast(dict[str, Any], schema["schema"])["properties"])
     properties["caption"].update(
-        minLength=int(caption_controls["caption_min_chars"]),
-        maxLength=int(caption_controls["caption_max_chars"]),
+        minLength=int(controls["caption_min_chars"]),
+        maxLength=int(controls["caption_max_chars"]),
     )
     properties["side_caption"].update(
-        minLength=int(caption_controls["side_caption_min_chars"]),
-        maxLength=int(caption_controls["side_caption_max_chars"]),
+        minLength=int(controls["side_caption_min_chars"]),
+        maxLength=int(controls["side_caption_max_chars"]),
     )
-    if full_stage and bool(caption_controls.get("caption_variants_enabled")):
+    if full_stage and bool(controls.get("caption_variants_enabled")):
         properties["details"]["properties"]["caption_variants"] = {
             "type": "object",
             "additionalProperties": False,
@@ -308,8 +346,8 @@ def json_schema_for_stage(stage: str, *, caption_controls: dict[str, Any] | None
             "properties": {
                 style: {
                     "type": "string",
-                    "minLength": int(caption_controls["side_caption_min_chars"]),
-                    "maxLength": int(caption_controls["side_caption_max_chars"]),
+                    "minLength": int(controls["side_caption_min_chars"]),
+                    "maxLength": int(controls["side_caption_max_chars"]),
                 }
                 for style in CAPTION_VARIANT_STYLES
             },
@@ -468,7 +506,9 @@ def validate_analysis_result(raw: str | dict) -> dict:
     if not isinstance(value["reason"], str) or not value["reason"].strip() or len(value["reason"]) > 240:
         raise AnalysisValidationError("reason 格式不合法")
     if value.get("schema_version") == 3:
-        if len(value["caption"]) > 200 or not 8 <= len(value["side_caption"]) <= 16:
+        if len(value["caption"]) > CAPTION_MAX_CHARS or not (
+            SIDE_CAPTION_MIN_CHARS <= len(value["side_caption"]) <= SIDE_CAPTION_MAX_CHARS
+        ):
             raise AnalysisValidationError("v3 caption／side_caption 長度不合法")
         if len(value["reason"]) > 100 or len(value["types"]) > 5:
             raise AnalysisValidationError("v3 reason／types 長度不合法")

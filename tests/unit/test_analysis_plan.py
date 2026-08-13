@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from inktime.app.domain.analysis.plan import (
+    AI_IMAGE_JPEG_QUALITY,
     build_analysis_plan,
     canonical_json,
     fingerprint,
@@ -67,3 +68,23 @@ def test_repair_policy_does_not_change_vision_input_contract():
     first = _plan(repair_policy={"model": "repair-a", "max_tokens": 256})
     second = _plan(repair_policy={"model": "repair-b", "max_tokens": 1200})
     assert first["vision_input"] == second["vision_input"]
+
+
+def test_default_production_vision_input_is_1024_high_jpeg88_and_single_call():
+    plan = _plan(high_image_max_side=1024, caption_controls={"caption_variants_enabled": False})
+
+    assert plan["vision_input"] == {
+        "detail": "high",
+        "max_side": 1024,
+        "jpeg_quality": AI_IMAGE_JPEG_QUALITY,
+        "exif_transpose": True,
+        "preprocessing_version": "vision-input-v2",
+    }
+    assert AI_IMAGE_JPEG_QUALITY == 88
+    assert plan["analysis_call_policy"] == {
+        "max_image_calls_per_photo": 1,
+        "repair_calls_are_text_only": True,
+        "legacy_two_stage_replay": False,
+    }
+    assert plan["repair_policy"]["max_attempts"] == 1
+    assert plan["repair_policy"]["text_only"] is True

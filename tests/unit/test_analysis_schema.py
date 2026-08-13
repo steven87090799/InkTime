@@ -4,7 +4,11 @@ import json
 
 import pytest
 
-from inktime.app.domain.analysis.schema import AnalysisValidationError, validate_analysis_result
+from inktime.app.domain.analysis.schema import (
+    AnalysisValidationError,
+    FULL_ANALYSIS_JSON_SCHEMA,
+    validate_analysis_result,
+)
 
 
 def valid_result(**updates):
@@ -128,6 +132,34 @@ def test_schema_v3_normalized_cache_is_readable_and_explicit_unknown_is_zero():
     reread = validate_analysis_result(normalized)
     assert reread["memory_score"] == 0.0
     assert reread["details"]["confidence"]["overall"] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("length", "accepted"),
+    [(7, False), (8, True), (12, True), (16, True), (17, False)],
+)
+def test_side_caption_schema_and_validator_share_boundaries(length, accepted):
+    property_schema = FULL_ANALYSIS_JSON_SCHEMA["schema"]["properties"]["side_caption"]
+    assert property_schema["minLength"] == 8
+    assert property_schema["maxLength"] == 16
+    candidate = _v3_result(side_caption="字" * length)
+    if accepted:
+        assert len(validate_analysis_result(candidate)["side_caption"]) == length
+    else:
+        with pytest.raises(AnalysisValidationError, match="caption／side_caption"):
+            validate_analysis_result(candidate)
+
+
+@pytest.mark.parametrize(("length", "accepted"), [(200, True), (201, False)])
+def test_caption_schema_and_validator_share_maximum(length, accepted):
+    property_schema = FULL_ANALYSIS_JSON_SCHEMA["schema"]["properties"]["caption"]
+    assert property_schema["maxLength"] == 200
+    candidate = _v3_result(caption="字" * length)
+    if accepted:
+        assert len(validate_analysis_result(candidate)["caption"]) == length
+    else:
+        with pytest.raises(AnalysisValidationError, match="caption／side_caption"):
+            validate_analysis_result(candidate)
 
 
 @pytest.mark.parametrize(

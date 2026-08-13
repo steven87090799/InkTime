@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
@@ -32,11 +33,13 @@ class MockProvider(VisionProvider):
     def __init__(self, responses):
         self.responses = list(responses)
         self.analyze_calls = 0
+        self.analyze_kwargs: list[dict] = []
         self.repair_calls = 0
         self.repair_kwargs: list[dict] = []
 
     def analyze(self, **kwargs):
         self.analyze_calls += 1
+        self.analyze_kwargs.append(kwargs)
         value = self.responses.pop(0)
         return ProviderResponse(
             value if isinstance(value, str) else json.dumps(value, ensure_ascii=False), Usage(1000, 100, 0)
@@ -286,6 +289,16 @@ def test_single_model_call_returns_all_fields_and_usage(app, tmp_path):
     )
     assert provider.analyze_calls == 1
     assert provider.repair_calls == 0
+    thumbnail_path = Path(provider.analyze_kwargs[0]["image_path"])
+    photo = service.photos.get_with_path(ids[0])
+    original_path = Path(photo["root_path"]) / str(photo["relative_path"])
+    assert thumbnail_path != original_path
+    assert thumbnail_path.name.endswith("-1024.jpg")
+    assert thumbnail_path.read_bytes() != original_path.read_bytes()
+    assert provider.analyze_kwargs[0]["detail"] == "high"
+    with Image.open(thumbnail_path) as thumbnail:
+        assert thumbnail.format == "JPEG"
+        assert max(thumbnail.size) <= 1024
     assert result["analysis"]["side_caption"]
     with app.extensions["inktime_database"].session() as connection:
         usage = connection.execute("SELECT input_tokens,output_tokens FROM api_usage").fetchone()
@@ -983,6 +996,31 @@ def test_failover_rebuilds_cache_identity_for_the_next_provider(app, tmp_path):
     with app.extensions["inktime_database"].session() as connection:
         cache = connection.execute("SELECT provider FROM ai_analysis_cache").fetchone()
     assert cache["provider"] == "second-provider"
+
+
+def test_new_analysis_plan_forces_single_literary_caption_and_no_reasoning(app):
+    settings = app.extensions["inktime_settings_repository"]
+    settings.update(
+        "analysis.caption_variants_enabled",
+        True,
+        changed_by="legacy-operator",
+        source_ip="127.0.0.1",
+    )
+    settings.update(
+        "batch.reasoning_effort",
+        "high",
+        changed_by="legacy-operator",
+        source_ip="127.0.0.1",
+    )
+    service = app.extensions["inktime_analysis_service"]
+    plan = service.build_plan(
+        strategy="high_quality",
+        provider_route=[],
+        scoring_profile=dict(app.extensions["inktime_scoring_repository"].current()),
+    )
+    assert plan["caption_controls"]["caption_variants_enabled"] is False
+    assert plan["caption_controls"]["copy_default_style"] == "literary"
+    assert plan["reasoning_effort"] == "none"
 
 
 def test_identical_photo_inherits_without_model_call(app, tmp_path):
