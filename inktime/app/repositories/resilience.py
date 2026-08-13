@@ -1239,6 +1239,7 @@ class ResilienceRepository:
             "device_event": ("device_events", "created_at", "id"),
             "job_log": ("job_events", "created_at", "id"),
             "api_usage": ("api_usage", "started_at", "id"),
+            "ai_trace": ("ai_trace_runs", "created_at", "trace_id"),
         }
         with self.database.transaction(operation="retention_cleanup_run") as connection:
             connection.execute(
@@ -1250,7 +1251,8 @@ class ResilienceRepository:
                 policies = [
                     dict(row)
                     for row in connection.execute(
-                        "SELECT * FROM data_retention_policies WHERE enabled=1 ORDER BY data_type"
+                        "SELECT * FROM data_retention_policies WHERE enabled=1 "
+                        "ORDER BY CASE WHEN data_type='api_usage' THEN 0 ELSE 1 END,data_type"
                     ).fetchall()
                 ]
             for selected_policy in policies:
