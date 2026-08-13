@@ -21,10 +21,6 @@
 #define INKTIME_DEBUG_LOG 0
 #endif
 
-#ifndef INKTIME_MIN_REFRESH_MV
-#define INKTIME_MIN_REFRESH_MV 3500
-#endif
-
 // Arduino-ESP32 3.x names the ESP32-S3 SPI2/SPI3 hosts FSPI/HSPI. Older
 // compatible cores may expose the IDF host constants only.
 #ifndef FSPI
@@ -266,7 +262,6 @@ class ProbePowerManager final : public PowerManager {
 
   bool begin() override {
     type_ = PmicType::None;
-    powerSourceKnown_ = false;
     if (!bus_.probe(kAxp2101Address)) return false;
     uint8_t chipId = 0;
     if (!bus_.readRegister(kAxp2101Address, kAxp2101ChipIdRegister, &chipId, 1)) {
@@ -278,7 +273,6 @@ class ProbePowerManager final : public PowerManager {
       return false;
     }
     type_ = PmicType::AXP2101;
-    powerSourceKnown_ = true;
     refreshMeasurements();
     return true;
   }
@@ -309,14 +303,8 @@ class ProbePowerManager final : public PowerManager {
 
   PmicType type() const override { return type_; }
   bool isUsbConnected() const override { return usbConnected_; }
-  bool isPowerSourceKnown() const override { return powerSourceKnown_; }
   float batteryVoltage() const override { return batteryMillivolts_ / 1000.0f; }
   int batteryPercent() const override { return batteryPercent_; }
-  bool allowDisplayRefresh(uint16_t minimumMillivolts) const override {
-    if (usbConnected_) return true;
-    if (type_ == PmicType::AXP2101) return batteryMillivolts_ >= minimumMillivolts;
-    return true;
-  }
   void prepareForDeepSleep() override {
     // Deliberately read-only: board revisions must be identified before any
     // PMIC rail voltage or shutdown-register writes are enabled.
@@ -325,7 +313,6 @@ class ProbePowerManager final : public PowerManager {
  private:
   BoundedI2cBus& bus_;
   PmicType type_ = PmicType::None;
-  bool powerSourceKnown_ = false;
   bool usbConnected_ = false;
   uint16_t batteryMillivolts_ = 0;
   int batteryPercent_ = -1;
@@ -846,10 +833,14 @@ bool PhotoPainterSupport::convertFrame(
     lastError_ = "DEVICE-PSRAM-ALLOC";
     return false;
   }
+  bool invalidLogicalPalette = false;
   if (!convertWireFrameToNative(
-        wire, wireLength, indexed4, rotation, framebuffer, kPhotoPainterFrameBytes)) {
+        wire, wireLength, indexed4, rotation, framebuffer, kPhotoPainterFrameBytes,
+        &invalidLogicalPalette)) {
     heap_caps_free(framebuffer);
-    lastError_ = "DEVICE-FRAME-CONVERT";
+    lastError_ = invalidLogicalPalette
+      ? "FRAME_INVALID_PALETTE_INDEX"
+      : "DEVICE-FRAME-CONVERT";
     return false;
   }
   *output = framebuffer;
@@ -1432,11 +1423,6 @@ bool PhotoPainterSupport::displayFrame(const uint8_t* framebuffer, size_t length
     lastError_ = "DEVICE-FRAMEBUFFER";
     return false;
   }
-  impl_->power.refreshMeasurements();
-  if (!impl_->power.allowDisplayRefresh(INKTIME_MIN_REFRESH_MV)) {
-    lastError_ = "DEVICE-LOW-BATTERY";
-    return false;
-  }
   if (!impl_->display.begin() || !impl_->display.displayFrame(framebuffer, length)) {
     lastError_ = impl_->display.lastError();
     return false;
@@ -1508,10 +1494,6 @@ void PhotoPainterSupport::readEnvironment() {
 
 bool PhotoPainterSupport::usbConnected() const {
   return impl_ != nullptr && impl_->power.isUsbConnected();
-}
-
-bool PhotoPainterSupport::powerSourceKnown() const {
-  return impl_ != nullptr && impl_->power.isPowerSourceKnown();
 }
 
 PmicType PhotoPainterSupport::pmicType() const {

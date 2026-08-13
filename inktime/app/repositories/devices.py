@@ -58,8 +58,6 @@ class DeviceRepository:
                        free_heap_bytes, free_psram_bytes, last_error_code, last_error_message,
                        last_status_at, wake_reason, offline_alert_active,
                        last_offline_alert_at, last_recovery_alert_at,
-                       battery_capacity_mah, standby_current_ma, active_current_ma,
-                       refreshes_per_day, battery_reserve_percent, energy_profile_updated_at,
                        delivery_mode, offline_prefetch_allowed, offline_schedule_json,
                        offline_schedule_version, applied_offline_schedule_version,
                        offline_schedule_max_slots, offline_schedule_capability_state,
@@ -1371,59 +1369,6 @@ class DeviceRepository:
                 "staged_schedule": schedule_identity(staged_row),
                 "fallback_recovery": fallback_recovery,
             }
-
-    def update_energy_profile(
-        self,
-        device_id: str,
-        *,
-        battery_capacity_mah: float | None,
-        standby_current_ma: float | None,
-        active_current_ma: float | None,
-        refreshes_per_day: float,
-        battery_reserve_percent: float,
-    ) -> None:
-        now = datetime.now(timezone.utc).isoformat()
-        details = {
-            "battery_capacity_mah": battery_capacity_mah,
-            "standby_current_ma": standby_current_ma,
-            "active_current_ma": active_current_ma,
-            "refreshes_per_day": refreshes_per_day,
-            "battery_reserve_percent": battery_reserve_percent,
-        }
-        with self.database.session() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                cursor = connection.execute(
-                    """
-                    UPDATE devices SET battery_capacity_mah=?,standby_current_ma=?,
-                        active_current_ma=?,refreshes_per_day=?,battery_reserve_percent=?,
-                        energy_profile_updated_at=?,updated_at=?
-                    WHERE id=?
-                    """,
-                    (
-                        battery_capacity_mah,
-                        standby_current_ma,
-                        active_current_ma,
-                        refreshes_per_day,
-                        battery_reserve_percent,
-                        now,
-                        now,
-                        device_id,
-                    ),
-                )
-                if cursor.rowcount != 1:
-                    raise KeyError(device_id)
-                connection.execute(
-                    """
-                    INSERT INTO device_events(device_id,level,event,message,details_json,created_at)
-                    VALUES (?,'info','energy_profile_updated','能源估算參數已更新',?,?)
-                    """,
-                    (device_id, json.dumps(details, ensure_ascii=False), now),
-                )
-                connection.execute("COMMIT")
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
 
     def list_energy_samples(self, device_id: str, *, days: int = 30, limit: int = 5000):
         cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, min(days, 3650)))).isoformat()

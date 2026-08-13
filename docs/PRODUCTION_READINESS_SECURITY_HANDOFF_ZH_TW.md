@@ -38,7 +38,6 @@
 | 同上 | `weekdays` | `isinstance(day,int)` | JSON integer array，每項 0–6，Boolean 不算 integer | 400 |
 | 同上 | nested `config` | kind-specific parser 仍可 coercion | kind-specific schema；integer/Boolean 精確型別與各欄位範圍 | 400 |
 | `POST /api/v1/maintenance/cache/{estimate,cleanup}` | `max_bytes`／`retention_days` | `int()` | JSON integer；1–10 TiB／0–3650 days | 400 |
-| `PATCH /api/v1/devices/{id}/energy-profile` | battery/current/refresh/reserve | `float()` 接受字串 | JSON number，finite；各欄位依能源 domain 範圍，可 nullable 欄位只接受 null | 400 |
 | `POST /api/device/v1/status` | telemetry integer／float／Boolean | 部分 strict | JSON integer／finite number／Boolean；沿用既有 telemetry 範圍，64 KiB | 400／413 |
 | `POST/PATCH /api/feedback` | `days`／`value` | `int()`／`float()` | days JSON integer 1–3650；value finite number -1–1 | 400 |
 | `POST /api/devices/{id}/queue/generate` | `depth`／`priority` | `int()`／clamp | JSON integer；1–14／1–1000 | 400 |

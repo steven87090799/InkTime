@@ -102,7 +102,6 @@ class PhotoPainterSupport {
   bool forceNetworkRefresh() const { return forceNetworkRefresh_; }
   bool wokeFromUserButton() const { return wokeFromUserButton_; }
   bool usbConnected() const;
-  bool powerSourceKnown() const;
   PmicType pmicType() const;
   float batteryVoltage() const;
   int batteryPercent() const;

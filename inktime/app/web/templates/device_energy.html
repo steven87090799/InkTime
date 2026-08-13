@@ -6,7 +6,7 @@
   <div>
     <p class="eyebrow">Battery intelligence</p>
     <h1>裝置能源儀表板</h1>
-    <p>追蹤電池曲線與刷新耗時，並把實際放電趨勢和人工量測模型分開呈現。</p>
+    <p>自動彙整裝置回報的電池、電源與執行時間；不需要手動量測，也不會影響下載或刷新。</p>
   </div>
   <a href="/devices">返回裝置管理</a>
 </div>
@@ -29,7 +29,6 @@
 
 {% if energy %}
 {% set summary = energy.summary %}
-{% set device = energy.device %}
 {% set latest = summary.latest %}
 <section class="metrics energy-metrics" aria-label="能源摘要">
   <article>
@@ -43,14 +42,14 @@
     <small>{% if summary.refresh.p95_seconds is not none %}P95 {{ '%.1f'|format(summary.refresh.p95_seconds) }} 秒／{{ summary.refresh.count }} 次{% else %}等待新版韌體回報{% endif %}</small>
   </article>
   <article>
-    <span>待機電流</span>
-    <strong>{% if device.standby_current_ma is not none %}{{ '%.3f'|format(device.standby_current_ma) }} mA{% else %}待量測{% endif %}</strong>
-    <small>外接功率計實測後由管理員填入</small>
+    <span>平均喚醒時間</span>
+    <strong>{% if summary.wake.average_seconds is not none %}{{ '%.1f'|format(summary.wake.average_seconds) }} 秒{% else %}資料不足{% endif %}</strong>
+    <small>{% if summary.wake.p95_seconds is not none %}P95 {{ '%.1f'|format(summary.wake.p95_seconds) }} 秒／{{ summary.wake.count }} 次{% else %}等待裝置自動回報{% endif %}</small>
   </article>
-  <article class="estimate-card">
-    <span>預估剩餘續航</span>
-    <strong>{% if summary.preferred and summary.preferred.remaining_days is not none %}{{ '%.1f'|format(summary.preferred.remaining_days) }} 天{% else %}資料不足{% endif %}</strong>
-    <small>{% if summary.preferred %}{{ '放電趨勢' if summary.preferred.method == 'empirical' else '容量／電流模型' }}；保留 {{ '%.0f'|format(device.battery_reserve_percent) }}%{% else %}需補齊量測或累積放電樣本{% endif %}</small>
+  <article>
+    <span>能源樣本</span>
+    <strong>{{ summary.sample_count }} 筆</strong>
+    <small>全部由裝置自動回報，僅供診斷觀察</small>
   </article>
 </section>
 
@@ -69,43 +68,6 @@
     <div class="panel-head"><h2>刷新耗時</h2><span>秒</span></div>
     <svg id="refresh-duration-chart" class="energy-chart refresh-chart" role="img" aria-label="每次電子紙刷新耗時"></svg>
   </article>
-</section>
-
-<section class="panel">
-  <div class="panel-head"><h2>續航估算交叉檢查</h2><span class="status {{ 'ok' if summary.preferred else '' }}">{{ '可估算' if summary.preferred else '待補資料' }}</span></div>
-  <div class="estimate-grid">
-    <article>
-      <p class="eyebrow">Observed trend</p><h3>實際放電趨勢</h3>
-      {% if summary.empirical %}
-      <strong>{{ '%.2f'|format(summary.empirical.daily_percent_drop) }}%／日</strong>
-      <p>剩餘約 {{ '%.1f'|format(summary.empirical.remaining_days) }} 天；觀察 {{ '%.1f'|format(summary.empirical.observed_days) }} 天、{{ summary.empirical.intervals }} 個有效區間，信心 {{ {'low':'低','medium':'中','high':'高'}[summary.empirical.confidence] }}。</p>
-      {% else %}<strong>尚無可靠斜率</strong><p>至少需要兩筆相隔六小時、明確為電池模式且電量下降的樣本。</p>{% endif %}
-    </article>
-    <article>
-      <p class="eyebrow">Measured model</p><h3>容量／電流模型</h3>
-      {% if summary.modeled %}
-      <strong>{{ '%.2f'|format(summary.modeled.daily_mah) }} mAh／日</strong>
-      <p>滿電可用區間約 {{ '%.1f'|format(summary.modeled.full_days) }} 天；採用{{ '完整喚醒週期' if summary.modeled.duration_source == 'wake_cycle' else '刷新耗時替代值' }} {{ '%.1f'|format(summary.modeled.active_seconds) }} 秒。</p>
-      {% else %}<strong>參數未完成</strong><p>{{ summary.missing_model_inputs|join('、') if summary.missing_model_inputs else '目前資料無法建立合理模型' }}。</p>{% endif %}
-    </article>
-  </div>
-</section>
-
-<section class="panel">
-  <div class="panel-head"><h2>能源模型參數</h2><span>最後更新 {{ device.energy_profile_updated_at or '尚未設定' }}</span></div>
-  <p>這些值必須來自電池規格或整板量測。待機電流請量測完成 deep sleep 後的整板電流；喚醒週期平均電流應包含 Wi-Fi、下載、刷新與關機流程。</p>
-  {% if g.user.role == 'administrator' %}
-  <form id="energy-profile-form" class="energy-profile-form">
-    <label><span>電池容量</span><small>mAh；留空代表未知</small><input name="battery_capacity_mah" type="number" min="10" max="100000" step="1" value="{{ device.battery_capacity_mah if device.battery_capacity_mah is not none else '' }}"></label>
-    <label><span>待機電流</span><small>mA；整板 deep sleep 實測</small><input name="standby_current_ma" type="number" min="0.001" max="10000" step="0.001" value="{{ device.standby_current_ma if device.standby_current_ma is not none else '' }}"></label>
-    <label><span>喚醒平均電流</span><small>mA；完整喚醒週期平均</small><input name="active_current_ma" type="number" min="0.001" max="10000" step="0.001" value="{{ device.active_current_ma if device.active_current_ma is not none else '' }}"></label>
-    <label><span>每日刷新次數</span><small>排程與預期人工刷新合計</small><input name="refreshes_per_day" type="number" min="0.01" max="96" step="0.01" required value="{{ device.refreshes_per_day }}"></label>
-    <label><span>安全保留電量</span><small>低於此百分比視為不可用</small><input name="battery_reserve_percent" type="number" min="0" max="50" step="1" required value="{{ device.battery_reserve_percent }}"></label>
-    <button class="primary">儲存並重算</button>
-  </form>
-  {% else %}
-  <dl><dt>電池容量</dt><dd>{{ device.battery_capacity_mah or '未設定' }} mAh</dd><dt>待機電流</dt><dd>{{ device.standby_current_ma or '未設定' }} mA</dd><dt>喚醒平均電流</dt><dd>{{ device.active_current_ma or '未設定' }} mA</dd><dt>每日刷新</dt><dd>{{ device.refreshes_per_day }} 次</dd><dt>安全保留</dt><dd>{{ device.battery_reserve_percent }}%</dd></dl>
-  {% endif %}
 </section>
 
 <section class="panel">
@@ -160,13 +122,4 @@ drawEnergyChart('battery-percent-chart','battery_percent',{minimum:0,maximum:100
 drawEnergyChart('battery-voltage-chart','battery_voltage',{unit:' V'});
 drawEnergyChart('refresh-duration-chart','refresh_seconds',{minimum:0,unit:' 秒'});
 document.getElementById('energy-device-select').addEventListener('change',event=>event.target.form.submit());
-{% if g.user.role == 'administrator' %}document.getElementById('energy-profile-form').addEventListener('submit',async event=>{
-  event.preventDefault();
-  const body={};
-  new FormData(event.target).forEach((value,key)=>body[key]=value===''?null:Number(value));
-  const response=await window.inktimeFetch('/api/v1/devices/{{ energy.device.id }}/energy-profile',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  const data=await response.json();
-  alert(response.ok?'能源參數已儲存並重新計算':data.message||'儲存失敗');
-  if(response.ok)location.reload();
-});{% endif %}
 </script>{% endif %}{% endblock %}

@@ -65,9 +65,52 @@ inline bool validIsoLocalDate(const char* value) {
       return false;
     }
   }
+  const int year = (value[0] - '0') * 1000 + (value[1] - '0') * 100
+                 + (value[2] - '0') * 10 + (value[3] - '0');
   const int month = (value[5] - '0') * 10 + (value[6] - '0');
   const int day = (value[8] - '0') * 10 + (value[9] - '0');
-  return month >= 1 && month <= 12 && day >= 1 && day <= 31;
+  if (year < 2000 || month < 1 || month > 12 || day < 1) return false;
+  const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+  const uint8_t days[] = {
+    0, 31, static_cast<uint8_t>(leap ? 29 : 28), 31, 30, 31, 30,
+    31, 31, 30, 31, 30, 31,
+  };
+  return day <= days[month];
+}
+
+inline bool nextIsoLocalDateValue(const char* value, char* output, size_t outputSize) {
+  if (!validIsoLocalDate(value) || output == nullptr || outputSize < 11U) return false;
+  int year = (value[0] - '0') * 1000 + (value[1] - '0') * 100
+           + (value[2] - '0') * 10 + (value[3] - '0');
+  int month = (value[5] - '0') * 10 + (value[6] - '0');
+  int day = (value[8] - '0') * 10 + (value[9] - '0');
+  const bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+  const uint8_t days[] = {
+    0, 31, static_cast<uint8_t>(leap ? 29 : 28), 31, 30, 31, 30,
+    31, 31, 30, 31, 30, 31,
+  };
+  ++day;
+  if (day > days[month]) {
+    day = 1;
+    ++month;
+    if (month > 12) {
+      if (year == 9999) return false;
+      month = 1;
+      ++year;
+    }
+  }
+  output[0] = static_cast<char>('0' + year / 1000);
+  output[1] = static_cast<char>('0' + (year / 100) % 10);
+  output[2] = static_cast<char>('0' + (year / 10) % 10);
+  output[3] = static_cast<char>('0' + year % 10);
+  output[4] = '-';
+  output[5] = static_cast<char>('0' + month / 10);
+  output[6] = static_cast<char>('0' + month % 10);
+  output[7] = '-';
+  output[8] = static_cast<char>('0' + day / 10);
+  output[9] = static_cast<char>('0' + day % 10);
+  output[10] = '\0';
+  return true;
 }
 
 inline bool validOfflineScheduleContract(const OfflineScheduleContract& contract) {

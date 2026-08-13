@@ -129,12 +129,14 @@ Web 裝置頁會顯示最後狀態、下載成功／失敗、韌體、訊號、H
 
 - 開機 CPU 設為 80 MHz；Wi-Fi TX power 降低並啟用 Wi-Fi sleep。
 - 只有下載與刷新期間保持清醒；之後關閉 Wi-Fi／Bluetooth、釋放 96,000／192,000-byte 壓縮索引。
-- 面板 `hibernate()`，EPD GPIO 轉 pulldown／hold，ESP32 timer deep sleep 到下一次 HH:MM。
+- 既有面板依 driver 執行 `hibernate()`；PhotoPainter 嚴格依原廠流程完成 `POWER_OFF`
+  與 BUSY 後進入 ESP32 timer deep sleep，不另加原廠未使用的 GPIO pulldown／hold。
 - NTP 失敗時最多睡 24 小時，不進入高頻重試迴圈。
 - AP 配對 5 分鐘逾時後睡眠，避免未配置裝置永久開 AP。
 - 電子紙為 bistable，斷電仍保留畫面；不要為「維持畫面」保持 ESP32 清醒。
 
-實際電池續航必須量測整板平均電流：至少包含一次 Wi-Fi 連線、HTTP 下載、15～32 秒面板刷新、23 小時以上 deep sleep，以及弱訊號重試。每日刷一次通常比每小時刷一次省電得多。
+能源頁只顯示裝置自動回報的診斷資料，不要求使用者量測整板電流，也不以未校正的
+電流／電壓推算續航或阻擋刷新。較少的排程刷新通常會減少喚醒與網路工作時間。
 
 ## 8. 電子紙注意事項
 
@@ -145,7 +147,7 @@ Web 裝置頁會顯示最後狀態、下載成功／失敗、韌體、訊號、H
 - 電子紙可能有 ghosting／色偏；本韌體採 full refresh，不把 GxEPD2 partial window API 當成 GDEY 可用的快速局刷。
 - 強烈建議用 SHA-256 驗證與「成功才刷新」；不要為省幾秒移除。
 - 完整六／七色 Queue 流程需 server、裝置 Profile 與 2.6.0 韌體配對；舊韌體升級期間使用 `safe_4c`。
-- 目前 GDEY／GDEP release image 約使用 92%、debug image 約使用 96% 的 repository-owned app partition；增加函式庫、TLS 或 OTA 前要重新量測 Flash／Heap／PSRAM，並做實機連續刷新與斷電恢復測試。
+- 目前 GDEY／GDEP release image 約使用 92%、debug image 約使用 96% 的 repository-owned app partition；增加函式庫、TLS 或 OTA 前須重新執行 Hosted compile 與記憶體邊界檢查。
 
 ## 9. 常見錯誤
 
