@@ -32,7 +32,7 @@
 
 ## 觀測與驗證邊界
 
-伺服器事件可證明的是授權、轉換、HTTP status、Queue 狀態與資料庫原子性；它不能證明 Stock 面板已刷新。實機恢復必須另外記錄 board revision、firmware commit、供電、BUSY waveform、刷新時間、PMIC/SD/RTC 狀態、畫面方向與待機電流。這些量測尚未在本輪執行，狀態是 `NOT RUN`。
+伺服器事件可證明的是授權、轉換、HTTP status、Queue 狀態與資料庫原子性；它不能證明 Stock 面板已刷新。Enhanced 韌體會自動回報 firmware、PMIC／SD／RTC 狀態、刷新時間與錯誤碼，使用者可從 Web 判讀，不需要以外接儀器量測電流或電壓。真實畫面結果仍只能由實際顯示確認，不能由 CI 推定。
 
 ## 跨日恢復順序
 

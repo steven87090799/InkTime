@@ -26,7 +26,6 @@ class Spectra6_73 {
   void sendData(uint8_t data);
   void sendData(const uint8_t* data, size_t length);
   bool powerOff();
-  void deepSleep();
 
   SPIClass& spi_;
   const BoardConfig& board_;

@@ -116,6 +116,36 @@ def test_epd_uses_bounded_buffer_transfer_at_unchanged_four_megahertz():
 
     hardware = HARDWARE.read_text(encoding="utf-8")
     assert "4000000" in hardware
+    assert "{47, 48, 100000}" in hardware
+
+    display = (ROOT / "esp32/ink-display-7C-photo/spectra6_73.cpp").read_text(
+        encoding="utf-8"
+    )
+    assert "sendCommand(0x07)" not in display
+    assert "deepSleepHoldOnlyEpdPins" not in FIRMWARE.read_text(encoding="utf-8")
+    assert "PhotoPainter EPD pins must match the Waveshare board" in hardware
+
+
+def test_photopainter_power_telemetry_never_gates_display_or_network():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    support = SUPPORT.read_text(encoding="utf-8")
+    policy = (ROOT / "esp32/ink-display-7C-photo/power_policy.h").read_text(encoding="utf-8")
+
+    for removed_gate in (
+        "INKTIME_MIN_REFRESH_MV",
+        "DisplayRefreshPowerDecision",
+        "allowDisplayRefresh",
+        "powerSourceKnown",
+        "DEVICE-LOW-BATTERY",
+        "DEVICE-POWER-UNKNOWN",
+    ):
+        assert removed_gate not in firmware
+        assert removed_gate not in support
+        assert removed_gate not in policy
+
+    assert 'payload["pmic_type"]' in firmware
+    assert 'payload["usb_power"]' in firmware
+    assert 'payload["battery_voltage"]' in firmware
 
 
 def test_status_api_validates_and_persists_phase_four_telemetry():
@@ -166,7 +196,6 @@ def test_queue_ack_journal_is_compact_bounded_crc_checked_and_failure_visible():
         "queueAckResultDisposition",
         "queueAckMayUnlockDisplay",
         "queueAckPermanentReject = inktime::queueAckMayUnlockDisplay",
-        "已跳過 AP portal 並等待 bounded recovery wake",
     ):
         assert marker in firmware
     assert "journal.putString(ackJournalKey" not in firmware

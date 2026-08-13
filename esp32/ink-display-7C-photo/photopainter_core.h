@@ -122,6 +122,10 @@ inline uint8_t readPacked2(const uint8_t* data, size_t pixel) {
   return static_cast<uint8_t>((packed >> (6U - (pixel & 3U) * 2U)) & 0x03U);
 }
 
+inline bool validLogicalIndexed4Color(uint8_t color) {
+  return color <= 5U;
+}
+
 inline bool writePacked4(
   uint8_t* data,
   size_t dataSize,
@@ -149,7 +153,7 @@ inline uint8_t nativeColorFromIndexed4(uint8_t color) {
     case 3: return 5;  // blue
     case 4: return 3;  // red
     case 5: return 2;  // yellow
-    default: return 1; // orange/undefined are not valid Spectra 6 colors
+    default: return 0xFF; // invalid logical input; callers must fail closed
   }
 }
 
@@ -186,8 +190,10 @@ inline bool convertWireFrameToNative(
   bool indexed4,
   DisplayRotation rotation,
   uint8_t* nativeFrame,
-  size_t nativeSize
+  size_t nativeSize,
+  bool* invalidLogicalPalette = nullptr
 ) {
+  if (invalidLogicalPalette != nullptr) *invalidLogicalPalette = false;
   const size_t pixelCount = static_cast<size_t>(kPayloadWidth) * kPayloadHeight;
   const size_t expectedWireSize = pixelCount / (indexed4 ? 2U : 4U);
   if (wire == nullptr || nativeFrame == nullptr || wireSize != expectedWireSize
@@ -199,6 +205,10 @@ inline bool convertWireFrameToNative(
     for (uint16_t x = 0; x < kPayloadWidth; ++x) {
       const size_t pixel = static_cast<size_t>(y) * kPayloadWidth + x;
       const uint8_t logical = indexed4 ? readPacked4(wire, pixel) : readPacked2(wire, pixel);
+      if (indexed4 && !validLogicalIndexed4Color(logical)) {
+        if (invalidLogicalPalette != nullptr) *invalidLogicalPalette = true;
+        return false;
+      }
       const uint8_t nativeColor = indexed4 ? nativeColorFromIndexed4(logical)
                                            : nativeColorFrom2bpp(logical);
       PhysicalCoordinate physical = {0, 0};

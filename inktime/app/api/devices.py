@@ -12,10 +12,8 @@ from inktime.app.api.device_auth import authenticate_device_request
 from inktime.app.core.json_values import (
     JsonScalarError,
     json_bool,
-    json_float,
     json_int,
     json_object_payload,
-    nullable_json_float,
     nullable_json_int,
     optional_json_bool,
     optional_json_float,
@@ -343,67 +341,6 @@ def device_runtime_summary(device_id: str):
         return _repository().runtime_summary(device_id)
     except KeyError:
         abort(404, description="DEVICE-002 找不到裝置")
-
-
-@bp.patch("/api/v1/devices/<device_id>/energy-profile")
-@administrator_required
-def update_energy_profile(device_id: str):
-    repository = _repository()
-    device = repository.get(device_id)
-    if device is None:
-        abort(404)
-    payload = _json_payload("DEVICE-005")
-    try:
-        refreshes_per_day = json_float(
-            payload,
-            "refreshes_per_day",
-            default=device["refreshes_per_day"],
-            minimum=0.01,
-            maximum=96,
-            error_prefix="DEVICE-005",
-        )
-        battery_reserve_percent = json_float(
-            payload,
-            "battery_reserve_percent",
-            default=device["battery_reserve_percent"],
-            minimum=0,
-            maximum=50,
-            error_prefix="DEVICE-005",
-        )
-        repository.update_energy_profile(
-            device_id,
-            battery_capacity_mah=nullable_json_float(
-                payload,
-                "battery_capacity_mah",
-                default=device["battery_capacity_mah"],
-                minimum=10,
-                maximum=100_000,
-                error_prefix="DEVICE-005",
-            ),
-            standby_current_ma=nullable_json_float(
-                payload,
-                "standby_current_ma",
-                default=device["standby_current_ma"],
-                minimum=0.001,
-                maximum=10_000,
-                error_prefix="DEVICE-005",
-            ),
-            active_current_ma=nullable_json_float(
-                payload,
-                "active_current_ma",
-                default=device["active_current_ma"],
-                minimum=0.001,
-                maximum=10_000,
-                error_prefix="DEVICE-005",
-            ),
-            refreshes_per_day=refreshes_per_day,
-            battery_reserve_percent=battery_reserve_percent,
-        )
-    except JsonScalarError as exc:
-        abort(400, description=str(exc))
-    except KeyError:
-        abort(404)
-    return {"status": "ok"}
 
 
 @bp.post("/api/v1/devices")

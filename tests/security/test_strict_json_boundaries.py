@@ -101,17 +101,6 @@ def test_cache_cleanup_and_estimate_reject_ambiguous_numbers(client, administrat
     assert response.status_code == 400
 
 
-@pytest.mark.parametrize("value", [True, "1000", float("nan"), float("inf")])
-def test_device_energy_profile_rejects_ambiguous_numbers(client, app, administrator, value):
-    device_id, _token = app.extensions["inktime_device_repository"].create("energy-strict")
-    response = client.patch(
-        f"/api/v1/devices/{device_id}/energy-profile",
-        json={"battery_capacity_mah": value},
-        headers=administrator,
-    )
-    assert response.status_code == 400
-
-
 @pytest.mark.parametrize("value", INVALID_INTEGERS)
 def test_feedback_days_requires_json_integer(client, administrator, value):
     response = client.post(
