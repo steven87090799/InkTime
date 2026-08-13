@@ -906,7 +906,7 @@ def test_cross_field_validation_uses_current_plus_partial_update(client, app):
     invalid = _post(
         client,
         "/api/v1/settings/preview",
-        {"analysis.caption_min_chars": 201},
+        {"analysis.caption_min_chars": 199},
     )
     assert invalid.status_code == 200
     assert invalid.json["valid"] is False

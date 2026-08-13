@@ -284,11 +284,12 @@ class OpenAICompatibleProvider(VisionProvider):
         full_stage = stage in {"single", "single_high", "stage_two", "full"}
         prompt = f"{COMMON_PROMPT}\n\n{FULL_PROMPT if full_stage else BASIC_PROMPT}"
         prompt += f"\n\n【精簡評分基準】\n{COMPACT_SCORING_RUBRIC}"
-        if self.scoring_rules != DEFAULT_SCORING_RULES:
+        has_custom_scoring_rules = self.scoring_rules != DEFAULT_SCORING_RULES
+        if has_custom_scoring_rules:
             prompt += f"\n\n【管理員自訂評分規則】\n{self.scoring_rules}"
-        prompt += (
-            "\n\n優先順序：JSON Schema／固定安全規則 > 管理員自訂評分規則 > 精簡預設基準。"
-        )
+            prompt += (
+                "\n\n優先順序：JSON Schema／固定安全規則 > 管理員自訂評分規則 > 精簡預設基準。"
+            )
         prompt += f"\n\n【分析階段】\n{STAGE_INSTRUCTIONS.get(stage, STAGE_INSTRUCTIONS['single'])}"
         if not caption_controls:
             return prompt

@@ -222,7 +222,6 @@ def normalize_analysis_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
     display_controls = dict(raw.get("caption_display_controls") or {})
     if "copy_default_style" in raw_controls:
         display_controls.setdefault("copy_default_style", raw_controls["copy_default_style"])
-        raw_controls.pop("copy_default_style", None)
     raw["caption_controls"] = raw_controls
     raw["caption_display_controls"] = display_controls
     raw["strategy"] = strategy
