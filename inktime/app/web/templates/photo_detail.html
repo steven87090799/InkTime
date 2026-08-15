@@ -5,7 +5,7 @@
   <div>
     <p class="eyebrow">照片詳細資訊</p>
     <h1>{{ photo.relative_path }}</h1>
-    <p>{{ photo.library_id }} · {{ photo.status }}</p>
+    <p>{{ photo.library_id }} · {{ photo.status }} · <a href="/ai/traces?photo_id={{ photo.id|urlencode }}">AI 分析追蹤</a></p>
   </div>
   <a href="/photos">返回照片庫</a>
 </div>

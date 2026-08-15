@@ -13,6 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 from inktime import __version__
 from inktime.app.api import (
+    ai_traces,
     auth,
     batches,
     dashboard,
@@ -86,6 +87,7 @@ def configure_web_application(
     app.static_url_path = "/static"
 
     for blueprint in (
+        ai_traces.bp,
         auth.bp,
         batches.bp,
         dashboard.bp,

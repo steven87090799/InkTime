@@ -128,6 +128,14 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "max": 120,
         "restart": False,
     },
+    "observability.ai_trace_enabled": {
+        "category": "系統監控與除錯",
+        "default": True,
+        "type": "boolean",
+        "description": "保存已遮蔽且有界的 AI 實際請求與回應追蹤",
+        "risk": "停用後不影響模型、帳務、快取、重試或分析結果",
+        "restart": False,
+    },
     "analysis.strategy": {
         "category": "分析設定",
         "default": "single",
