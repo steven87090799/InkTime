@@ -6,6 +6,7 @@ from hashlib import sha256
 from PIL import Image
 import pytest
 
+from inktime.app.domain.analysis.plan import AI_IMAGE_JPEG_QUALITY
 from inktime.app.domain.photos import PhotoPreprocessor, ThumbnailCache
 
 
@@ -54,6 +55,24 @@ def test_thumbnail_generation_is_single_flight_atomic_and_validated(tmp_path):
     with Image.open(destination) as image:
         assert image.format == "JPEG"
         image.verify()
+
+
+def test_ai_thumbnail_preserves_1024_exif_rgb_jpeg88_policy(tmp_path):
+    source = tmp_path / "rotated.jpg"
+    image = Image.new("RGB", (1600, 800), "navy")
+    exif = image.getexif()
+    exif[274] = 6
+    image.save(source, format="JPEG", exif=exif)
+    digest = sha256(source.read_bytes()).hexdigest()
+
+    thumbnail = ThumbnailCache(tmp_path / "cache").get_or_create(source, digest, 1024)
+
+    assert AI_IMAGE_JPEG_QUALITY == 88
+    with Image.open(thumbnail) as encoded:
+        assert encoded.format == "JPEG"
+        assert encoded.mode == "RGB"
+        assert encoded.size == (512, 1024)
+        assert encoded.getexif().get(274) is None
 
 
 def test_thumbnail_failure_cleans_unique_temporary_file(tmp_path):

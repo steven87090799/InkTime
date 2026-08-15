@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 
 VISION_INPUT_VERSION = "vision-input-v2"
 PROVIDER_PROMPT_CONTRACT_VERSION = "provider-prompt-contract-v1"
+AI_IMAGE_JPEG_QUALITY = 88
 # v1/v2 remain readable for historical cache rows.  New model requests use
 # the additive v3 grade/confidence contract and are normalized to the stable
 # numeric fields before persistence.
@@ -119,7 +120,7 @@ def build_analysis_plan(
     high_input = {
         "detail": "high",
         "max_side": high_side,
-        "jpeg_quality": 88,
+        "jpeg_quality": AI_IMAGE_JPEG_QUALITY,
         "exif_transpose": True,
         "preprocessing_version": VISION_INPUT_VERSION,
     }
@@ -200,7 +201,7 @@ def normalize_analysis_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
             or {
                 "detail": "high",
                 "max_side": 1024,
-                "jpeg_quality": 88,
+                "jpeg_quality": AI_IMAGE_JPEG_QUALITY,
                 "exif_transpose": True,
                 "preprocessing_version": VISION_INPUT_VERSION,
             }
@@ -212,7 +213,7 @@ def normalize_analysis_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
     vision.update(
         detail=str(vision.get("detail", "high")),
         max_side=max_side,
-        jpeg_quality=int(vision.get("jpeg_quality", 88)),
+        jpeg_quality=int(vision.get("jpeg_quality", AI_IMAGE_JPEG_QUALITY)),
         exif_transpose=bool(vision.get("exif_transpose", True)),
         preprocessing_version=str(vision.get("preprocessing_version", VISION_INPUT_VERSION)),
     )
@@ -221,7 +222,6 @@ def normalize_analysis_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
     display_controls = dict(raw.get("caption_display_controls") or {})
     if "copy_default_style" in raw_controls:
         display_controls.setdefault("copy_default_style", raw_controls["copy_default_style"])
-        raw_controls.pop("copy_default_style", None)
     raw["caption_controls"] = raw_controls
     raw["caption_display_controls"] = display_controls
     raw["strategy"] = strategy

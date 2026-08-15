@@ -11,6 +11,7 @@ import time
 from PIL import Image, ImageOps
 
 from inktime.app.core.locks import fcntl
+from inktime.app.domain.analysis.plan import AI_IMAGE_JPEG_QUALITY
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -156,7 +157,12 @@ class ThumbnailCache:
                     opened.thumbnail((size * 2, size * 2), Image.Resampling.BOX)
                 image = ImageOps.exif_transpose(opened).convert("RGB")
                 image.thumbnail((size, size), Image.Resampling.LANCZOS)
-                image.save(temporary, format="JPEG", quality=88, optimize=True)
+                image.save(
+                    temporary,
+                    format="JPEG",
+                    quality=AI_IMAGE_JPEG_QUALITY,
+                    optimize=True,
+                )
             if self._content_sha256(source) != normalized_hash:
                 raise OSError("THUMB-004 原始照片內容已在縮圖建立期間改變")
             if not self._validate(temporary, size):

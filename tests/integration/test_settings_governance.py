@@ -906,7 +906,7 @@ def test_cross_field_validation_uses_current_plus_partial_update(client, app):
     invalid = _post(
         client,
         "/api/v1/settings/preview",
-        {"analysis.caption_min_chars": 221},
+        {"analysis.caption_min_chars": 199},
     )
     assert invalid.status_code == 200
     assert invalid.json["valid"] is False
@@ -917,8 +917,8 @@ def test_cross_field_validation_uses_current_plus_partial_update(client, app):
         "/api/v1/settings",
         json={
             "analysis.caption_min_chars": 180,
-            "analysis.caption_target_chars": 200,
-            "analysis.caption_max_chars": 240,
+            "analysis.caption_target_chars": 190,
+            "analysis.caption_max_chars": 200,
         },
         headers={
             "X-CSRF-Token": csrf(client),
@@ -926,7 +926,30 @@ def test_cross_field_validation_uses_current_plus_partial_update(client, app):
         },
     )
     assert valid.status_code == 200
-    assert valid.json["updated"] == 3
+    assert valid.json["updated"] == 2
+
+
+def test_legacy_ai_limits_normalize_and_explicit_advanced_disable_is_preserved(app):
+    settings = app.extensions["inktime_settings_repository"]
+    settings.update(
+        "analysis.advanced_caption_enabled",
+        False,
+        changed_by="operator",
+        source_ip="127.0.0.1",
+    )
+    with app.extensions["inktime_database"].transaction() as connection:
+        connection.execute(
+            "UPDATE settings SET value_json='220' WHERE key='analysis.caption_max_chars'"
+        )
+        connection.execute(
+            "UPDATE settings SET value_json='512' WHERE key='analysis.image_max_side'"
+        )
+
+    settings.ensure_defaults()
+
+    assert settings.get("analysis.caption_max_chars") == 200
+    assert settings.get("analysis.image_max_side") == 1024
+    assert settings.get("analysis.advanced_caption_enabled") is False
 
 
 def test_high_risk_change_requires_preview_confirmation(client, app):

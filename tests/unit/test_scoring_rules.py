@@ -3,7 +3,10 @@ from __future__ import annotations
 from PIL import Image
 
 from inktime.app.domain.analysis.scoring import DEFAULT_SCORING_RULES
-from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
+from inktime.app.providers.openai_compatible import (
+    COMPACT_SCORING_RUBRIC,
+    OpenAICompatibleProvider,
+)
 from inktime.app.services.providers import ProviderService
 
 
@@ -82,7 +85,25 @@ def test_provider_includes_configured_scoring_rules_in_system_prompt(tmp_path):
     assert session.body is not None
     system_prompt = session.body["messages"][0]["content"]
     assert custom_rules in system_prompt
-    assert "只輸出符合指定 JSON Schema" in system_prompt
+    assert COMPACT_SCORING_RUBRIC in system_prompt
+    assert "人物互動或合照，大幅提高評分" not in system_prompt
+    assert "JSON Schema／固定安全規則 > 管理員自訂評分規則 > 精簡預設基準" in system_prompt
+    assert "只輸出符合 JSON Schema" in system_prompt
+
+
+def test_provider_sends_compact_baseline_when_default_rules_are_configured():
+    provider = OpenAICompatibleProvider(
+        name="test",
+        base_url="https://example.test/v1",
+        api_key="",
+        scoring_rules=DEFAULT_SCORING_RULES,
+    )
+
+    prompt = provider.system_prompt
+
+    assert COMPACT_SCORING_RUBRIC in prompt
+    assert DEFAULT_SCORING_RULES not in prompt
+    assert "管理員自訂評分規則" not in prompt
 
 
 def test_provider_router_reads_latest_scoring_rules_from_settings():
