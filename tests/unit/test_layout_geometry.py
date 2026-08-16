@@ -11,7 +11,11 @@ from types import SimpleNamespace
 from PIL import Image, ImageChops
 import pytest
 
-from inktime.app.domain.rendering.layout_geometry import SUPPORTED_LAYOUTS, resolve_layout_geometry
+from inktime.app.domain.rendering.layout_geometry import (
+    SUPPORTED_LAYOUTS,
+    resolve_adaptive_pair_geometry,
+    resolve_layout_geometry,
+)
 
 
 def _rect(geometry, name):
@@ -147,6 +151,22 @@ def test_caption_regions_are_independent_and_keep_text_anchor_pixels():
     assert calendar.primary_caption.y == 754  # historical metadata y
     weather = resolve_layout_geometry("weather_sensor", "portrait", 480, 800)
     assert weather.primary_caption.y == 746  # historical metadata y
+
+
+def test_adaptive_landscape_pair_places_each_caption_left_of_its_portrait_photo():
+    geometry = resolve_adaptive_pair_geometry("landscape", 800, 480)
+    assert geometry.primary_caption.right <= geometry.primary_photo.x
+    assert geometry.secondary_caption.right <= geometry.secondary_photo.x
+    assert geometry.primary_photo.right <= geometry.secondary_caption.x
+    assert geometry.primary_caption.width / 396 == pytest.approx(0.20, abs=0.01)
+
+
+def test_adaptive_portrait_pair_places_independent_captions_below_stacked_photos():
+    geometry = resolve_adaptive_pair_geometry("portrait", 480, 800)
+    assert geometry.primary_caption.y >= geometry.primary_photo.bottom
+    assert geometry.secondary_caption.y >= geometry.secondary_photo.bottom
+    assert geometry.primary_caption.bottom < geometry.secondary_photo.y
+    assert geometry.primary_photo.y < geometry.secondary_photo.y
 
 
 def test_portrait_only_layouts_use_portrait_geometry_even_when_requested_landscape():

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from math import radians, cos, sin, asin, sqrt
 from typing import Any
+
+from inktime.app.domain.photos.orientation import (
+    original_exif_orientation,
+    resolve_effective_orientation,
+)
 
 
 def dimensions_after_exif(width: int, height: int, orientation: int | None) -> tuple[int, int]:
@@ -27,6 +32,33 @@ def orientation_matches(size: tuple[int, int], desired: str) -> bool:
     return photo_orientation(size) == desired
 
 
+def effective_dimensions(photo: dict[str, Any]) -> tuple[int, int]:
+    """Resolve metadata dimensions through EXIF plus the existing visual override contract."""
+    width, height = dimensions_after_exif(
+        int(photo.get("width") or 0),
+        int(photo.get("height") or 0),
+        original_exif_orientation(photo),
+    )
+    effective = resolve_effective_orientation(
+        exif_orientation=original_exif_orientation(photo),
+        manual_rotation_cw=photo.get("manual_orientation_rotation_cw"),
+        ai_rotation_cw=photo.get("visual_orientation_rotation_cw"),
+        ai_confidence=photo.get("visual_orientation_confidence"),
+        ai_ambiguous=bool(photo.get("visual_orientation_ambiguous", True)),
+    )
+    return (height, width) if effective.rotation_degrees in {90, 270} else (width, height)
+
+
+def _captured(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
 def _distance_km(first: dict[str, Any], second: dict[str, Any]) -> float | None:
     try:
         lat1, lon1 = float(first["gps_lat"]), float(first["gps_lon"])
@@ -39,54 +71,57 @@ def _distance_km(first: dict[str, Any], second: dict[str, Any]) -> float | None:
 
 
 def pair_score(primary: dict[str, Any], candidate: dict[str, Any], *, desired_orientation: str) -> int | None:
-    """Score existing metadata only; None means the candidate is not safe to pair."""
+    """Rank safe metadata-only candidates; relevance is never an acceptance gate."""
     if str(candidate.get("id")) == str(primary.get("id")):
         return None
-    if candidate.get("recently_displayed"):
+    if (
+        primary.get("library_id")
+        and primary.get("library_id") == candidate.get("library_id")
+        and primary.get("relative_path")
+        and primary.get("relative_path") == candidate.get("relative_path")
+    ):
         return None
     duplicate_keys = ("sha256", "duplicate_group_id", "perceptual_hash", "difference_hash")
     if any(primary.get(key) and primary.get(key) == candidate.get(key) for key in duplicate_keys):
         return None
-    width, height = dimensions_after_exif(
-        int(candidate.get("width") or 0), int(candidate.get("height") or 0), candidate.get("orientation")
-    )
+    width, height = effective_dimensions(candidate)
     if width <= 0 or height <= 0 or not orientation_matches((width, height), desired_orientation):
         return None
-    score = 10  # 方向適合
-    related = False
-    primary_date = str(primary.get("captured_at") or "")[:10]
-    candidate_date = str(candidate.get("captured_at") or "")[:10]
-    if primary_date and primary_date == candidate_date:
-        score += 30
-        related = True
-    try:
-        delta = abs(
-            (
-                datetime.fromisoformat(str(primary["captured_at"]).replace("Z", "+00:00"))
-                - datetime.fromisoformat(str(candidate["captured_at"]).replace("Z", "+00:00"))
-            ).total_seconds()
-        )
-        if delta <= 2 * 3600:
-            score += 25
-            related = True
-    except (KeyError, TypeError, ValueError):
-        pass
+
+    primary_captured = _captured(primary.get("captured_at"))
+    candidate_captured = _captured(candidate.get("captured_at"))
+    delta = (
+        abs((primary_captured - candidate_captured).total_seconds())
+        if primary_captured is not None and candidate_captured is not None
+        else None
+    )
+    if primary_captured and candidate_captured and primary_captured.date() == candidate_captured.date():
+        priority = 4
+    elif delta is not None and delta <= 3 * 24 * 3600:
+        priority = 3
+    elif delta is not None and delta <= 7 * 24 * 3600:
+        priority = 2
+    else:
+        priority = 1
+
+    # Large bands make the four date phases authoritative.  Relevance and
+    # display history only order otherwise-safe photos inside one phase.
+    score = priority * 1_000_000_000_000_000
+    if not candidate.get("recently_displayed"):
+        score += 100_000_000_000_000
+    if delta is not None:
+        score -= int(delta)
+    if not candidate.get("ever_displayed"):
+        score += 1_000_000
     if (
         primary.get("city")
         and str(primary.get("city")).casefold() == str(candidate.get("city") or "").casefold()
     ):
-        score += 20
-        related = True
+        score += 200_000
     elif (distance := _distance_km(primary, candidate)) is not None and distance <= 25:
-        score += 20
-        related = True
+        score += 200_000
     if set(primary.get("types") or []) & set(candidate.get("types") or []):
-        score += 10
-        related = True
-    if not related:
-        return None
-    if not candidate.get("ever_displayed"):
-        score += 10
+        score += 100_000
     return score
 
 

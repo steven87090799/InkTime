@@ -30,6 +30,7 @@ from inktime.app.domain.rendering import (
     evaluate_e6_suitability,
     fit_with_focus,
     build_local_caption,
+    resolve_adaptive_pair_geometry,
     resolve_layout_geometry,
 )
 from inktime.app.domain.analysis.execution_mode import execution_mode
@@ -41,6 +42,8 @@ from inktime.app.domain.photos.orientation import (
     resolve_effective_orientation,
 )
 from inktime.app.domain.rendering.adaptive_layout import (
+    pair_orientation,
+    pair_score,
     photo_orientation,
     select_pair_candidate,
 )
@@ -242,6 +245,7 @@ class RenderService:
         layout_key = layout or str(
             device.get("layout_mode") or self.settings.get("render.layout", "photo_info")
         )
+        adaptive_requested = layout_key == "adaptive_memory"
         orientation_key = orientation or str(
             device.get("frame_orientation") or self.settings.get("render.frame_orientation", "portrait")
         )
@@ -255,19 +259,20 @@ class RenderService:
             or fit_key not in FIT_MODES
         ):
             raise ValueError("RENDER-005 無法建立有效的 Render Plan")
+        if adaptive_requested:
+            fit_key = "contain"
         secondary_id = secondary_photo_id
-        if layout_key == "adaptive_memory" and secondary_id is None:
+        if layout_key == "adaptive_memory":
             source_path = safe_join(Path(primary["root_path"]), str(primary["relative_path"]))
             source, _info = self._load_oriented_photo(primary, source_path, target_size=(512, 512))
             with source:
                 source_orientation = photo_orientation(source.size)
             if source_orientation in {"square", effective_orientation}:
                 layout_key = "photo_info"
-            else:
-                candidate = select_pair_candidate(
-                    dict(primary),
-                    self._adaptive_pair_candidates(dict(primary)),
-                    frame_orientation=effective_orientation,
+                secondary_id = None
+            elif secondary_id is None:
+                candidate = self._select_adaptive_pair_candidate(
+                    dict(primary), frame_orientation=effective_orientation
                 )
                 if candidate is None:
                     layout_key = "photo_info"
@@ -276,6 +281,14 @@ class RenderService:
         secondary = self.photos.get_with_path(secondary_id) if secondary_id else None
         if secondary_id and secondary is None:
             raise KeyError(secondary_id)
+        if layout_key == "adaptive_memory" and secondary is not None:
+            production_secondary = self.candidates.get(str(secondary["id"]))
+            desired = pair_orientation(effective_orientation)
+            if production_secondary is None or pair_score(
+                dict(primary), production_secondary, desired_orientation=desired
+            ) is None:
+                raise ValueError("RENDER-005 Adaptive Memory 第二張照片不符合安全方向契約")
+            secondary = production_secondary
         dither_plan = self.resolve_effective_dither(
             primary, secondary, requested=dither, device_config=device
         )
@@ -283,11 +296,33 @@ class RenderService:
         caption_records = self._caption_records(
             [photo for photo in (primary, secondary) if photo is not None], display_date
         )
-        primary_caption = dict(primary_caption or caption_records[str(primary["id"])])
+        primary_caption = self._bound_caption_record(
+            primary_caption or caption_records[str(primary["id"])], str(primary["id"])
+        )
         resolved_secondary_caption = (
-            dict(secondary_caption or caption_records[str(secondary["id"])])
+            self._bound_caption_record(
+                secondary_caption or caption_records[str(secondary["id"])], str(secondary["id"])
+            )
             if secondary is not None
             else None
+        )
+        geometry = (
+            resolve_adaptive_pair_geometry(
+                effective_orientation,
+                800 if effective_orientation == "landscape" else 480,
+                480 if effective_orientation == "landscape" else 800,
+            )
+            if layout_key == "adaptive_memory" and secondary is not None
+            else resolve_layout_geometry(
+                layout_key,
+                effective_orientation,
+                800 if effective_orientation == "landscape" else 480,
+                480 if effective_orientation == "landscape" else 800,
+            )
+        )
+        pair_caption_region = (
+            "card_left" if layout_key == "adaptive_memory" and effective_orientation == "landscape"
+            else "card_footer"
         )
         return {
             "version": "render-plan-v1",
@@ -310,10 +345,11 @@ class RenderService:
             else [],
             "primary_caption": primary_caption,
             "secondary_caption": resolved_secondary_caption,
+            "geometry": geometry.as_dict(),
             "primary_caption_text_hash": primary_caption["text_hash"],
             "primary_caption_source": primary_caption["source"],
             "primary_caption_version": primary_caption["version"],
-            "primary_caption_region": "primary_card_footer",
+            "primary_caption_region": f"primary_{pair_caption_region}",
             "primary_caption_ratio": 0.20,
             "secondary_caption_text_hash": resolved_secondary_caption["text_hash"]
             if resolved_secondary_caption
@@ -324,7 +360,9 @@ class RenderService:
             "secondary_caption_version": resolved_secondary_caption["version"]
             if resolved_secondary_caption
             else None,
-            "secondary_caption_region": "secondary_card_footer" if resolved_secondary_caption else None,
+            "secondary_caption_region": (
+                f"secondary_{pair_caption_region}" if resolved_secondary_caption else None
+            ),
             "secondary_caption_ratio": 0.20 if resolved_secondary_caption else None,
             "orientation": effective_orientation,
             "profile": profile
@@ -868,6 +906,13 @@ class RenderService:
             )
         return record
 
+    @staticmethod
+    def _bound_caption_record(record: Any, photo_id: str) -> dict[str, Any]:
+        bound = dict(record)
+        if str(bound.get("photo_id") or "") != str(photo_id):
+            raise ValueError("RENDER-005 Caption 與照片識別不一致")
+        return bound
+
     def _caption_legacy(self, photo_id: str) -> str:
         """Compatibility implementation retained for old call sites during migration."""
         with self.database.session() as connection:
@@ -939,13 +984,39 @@ class RenderService:
                 font_size=font_size,
             )
 
-    def _adaptive_pair_candidates(self, primary: dict[str, Any]) -> list[dict[str, Any]]:
-        """Use only existing analyzed/eligible rows; this is intentionally model-free."""
+    @staticmethod
+    def _adaptive_orientation_sql(frame_orientation: str) -> str:
+        """Return a metadata-only opposite-orientation predicate for bounded SQL phases."""
+        desired = pair_orientation(frame_orientation)
+        exif_swap = "CASE WHEN COALESCE(p.exif_orientation_original,p.orientation) IN (5,6,7,8) THEN 1 ELSE 0 END"
+        override_swap = """
+            CASE
+              WHEN p.manual_orientation_rotation_cw IN (90,270) THEN 1
+              WHEN p.manual_orientation_rotation_cw IN (0,180) THEN 0
+              WHEN p.visual_orientation_rotation_cw IN (90,270)
+                   AND p.visual_orientation_ambiguous=0
+                   AND p.visual_orientation_confidence>=0.95 THEN 1
+              ELSE 0
+            END
+        """
+        swap = f"(({exif_swap}) + ({override_swap})) % 2"
+        effective_width = f"CASE WHEN ({swap})=1 THEN p.height ELSE p.width END"
+        effective_height = f"CASE WHEN ({swap})=1 THEN p.width ELSE p.height END"
+        if desired == "portrait":
+            return f"p.width>0 AND p.height>0 AND ({effective_height})*10>({effective_width})*11"
+        return f"p.width>0 AND p.height>0 AND ({effective_width})*10>({effective_height})*11"
+
+    def _adaptive_candidate_rows(
+        self,
+        *,
+        frame_orientation: str,
+        where_sql: str,
+        parameters: tuple[Any, ...],
+        order_sql: str,
+        limit: int,
+    ) -> list[Any]:
+        orientation_sql = self._adaptive_orientation_sql(frame_orientation)
         with self.database.session() as connection:
-            primary_analysis = connection.execute(
-                "SELECT types_json,semantic_json FROM photo_analysis WHERE photo_id=? ORDER BY created_at DESC,id DESC LIMIT 1",
-                (str(primary["id"]),),
-            ).fetchone()
             rows = connection.execute(
                 f"""
                 SELECT p.*,l.root_path,a.types_json,a.semantic_json,
@@ -957,12 +1028,20 @@ class RenderService:
                     SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id
                     ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1
                 )
-                WHERE {RenderCandidateRepository.SQL_PREDICATE} AND p.id<>?
-                ORDER BY CASE WHEN p.captured_date=? THEN 0 ELSE 1 END,
-                         p.captured_at DESC,p.id DESC LIMIT 300
+                WHERE {RenderCandidateRepository.SQL_PREDICATE}
+                  AND p.id<>? AND ({orientation_sql}) AND ({where_sql})
+                ORDER BY {order_sql} LIMIT ?
                 """,
-                (str(primary["id"]), str(primary.get("captured_date") or "")),
+                (*parameters, int(limit)),
             ).fetchall()
+        return list(rows)
+
+    def _adaptive_pair_metadata(self, primary: dict[str, Any]) -> None:
+        with self.database.session() as connection:
+            primary_analysis = connection.execute(
+                "SELECT types_json,semantic_json FROM photo_analysis WHERE photo_id=? ORDER BY created_at DESC,id DESC LIMIT 1",
+                (str(primary["id"]),),
+            ).fetchone()
         if primary_analysis is not None:
             try:
                 semantic = json.loads(str(primary_analysis["semantic_json"] or "{}"))
@@ -971,6 +1050,8 @@ class RenderService:
                 primary["types"] = json.loads(str(primary_analysis["types_json"] or "[]"))
             except (TypeError, ValueError, json.JSONDecodeError):
                 pass
+
+    def _available_adaptive_candidates(self, rows: list[Any]) -> list[dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
         for stored in rows:
             row = dict(stored)
@@ -986,51 +1067,129 @@ class RenderService:
             candidates.append(row)
         return candidates
 
-    def _adaptive_footer(
-        self,
-        draw: ImageDraw.ImageDraw,
-        fonts: dict[str, ImageFont.FreeTypeFont],
-        *,
-        footer_rect,
-        primary,
-        secondary=None,
-        caption: str,
+    def _select_adaptive_pair_candidate(
+        self, primary: dict[str, Any], *, frame_orientation: str
+    ) -> dict[str, Any] | None:
+        """Select through bounded date-window and nearest-any-date SQL phases."""
+        self._adaptive_pair_metadata(primary)
+        primary_date_text = str(primary.get("captured_date") or primary.get("captured_at") or "")[:10]
+        try:
+            primary_date = date.fromisoformat(primary_date_text)
+        except ValueError:
+            primary_date = None
+
+        def select(rows: list[Any]) -> dict[str, Any] | None:
+            return select_pair_candidate(
+                primary,
+                self._available_adaptive_candidates(rows),
+                frame_orientation=frame_orientation,
+            )
+
+        if primary_date is not None:
+            lower = (primary_date - timedelta(days=7)).isoformat()
+            upper = (primary_date + timedelta(days=7)).isoformat()
+            captured_date_sql = "COALESCE(p.captured_date,substr(p.captured_at,1,10))"
+            nearby = self._adaptive_candidate_rows(
+                frame_orientation=frame_orientation,
+                where_sql=(
+                    "(p.captured_date BETWEEN ? AND ? OR "
+                    "(p.captured_date IS NULL AND substr(p.captured_at,1,10) BETWEEN ? AND ?))"
+                ),
+                parameters=(
+                    str(primary["id"]),
+                    lower,
+                    upper,
+                    lower,
+                    upper,
+                    primary_date.isoformat(),
+                    str(primary.get("captured_at") or primary_date.isoformat()),
+                ),
+                order_sql=(
+                    f"CASE WHEN {captured_date_sql}=? THEN 0 ELSE 1 END,"
+                    " ABS(julianday(p.captured_at)-julianday(?)),"
+                    " recently_displayed ASC,p.captured_at DESC,p.id DESC"
+                ),
+                limit=300,
+            )
+            if candidate := select(nearby):
+                return candidate
+
+            older = self._adaptive_candidate_rows(
+                frame_orientation=frame_orientation,
+                where_sql=(
+                    "(p.captured_date<? OR "
+                    "(p.captured_date IS NULL AND substr(p.captured_at,1,10)<?))"
+                ),
+                parameters=(str(primary["id"]), lower, lower),
+                order_sql=f"{captured_date_sql} DESC,recently_displayed ASC,p.id DESC",
+                limit=300,
+            )
+            newer = self._adaptive_candidate_rows(
+                frame_orientation=frame_orientation,
+                where_sql=(
+                    "(p.captured_date>? OR "
+                    "(p.captured_date IS NULL AND substr(p.captured_at,1,10)>?))"
+                ),
+                parameters=(str(primary["id"]), upper, upper),
+                order_sql=f"{captured_date_sql} ASC,recently_displayed ASC,p.id DESC",
+                limit=300,
+            )
+            if candidate := select([*older, *newer]):
+                return candidate
+
+            undated = self._adaptive_candidate_rows(
+                frame_orientation=frame_orientation,
+                where_sql="p.captured_date IS NULL AND p.captured_at IS NULL",
+                parameters=(str(primary["id"]),),
+                order_sql="recently_displayed ASC,p.id DESC",
+                limit=100,
+            )
+            return select(undated)
+
+        rows = self._adaptive_candidate_rows(
+            frame_orientation=frame_orientation,
+            where_sql="1=1",
+            parameters=(str(primary["id"]),),
+            order_sql="recently_displayed ASC,p.captured_at DESC,p.id DESC",
+            limit=300,
+        )
+        return select(rows)
+
+    def _draw_adaptive_pair_caption(
+        self, canvas: Image.Image, record: dict[str, Any], box: Rect, *, left_side: bool
     ) -> None:
-        draw.rectangle(
-            (footer_rect.x, footer_rect.y, footer_rect.right, footer_rect.bottom), fill="white"
-        )
-        draw.line(
-            (footer_rect.x + 20, footer_rect.y + 4, footer_rect.right - 20, footer_rect.y + 4),
-            fill="black",
-            width=2,
-        )
-        text = caption or "這一天留下了兩個值得記住的片段。"
+        """Draw one frozen caption only inside its photo's authoritative region."""
+        text = str(record["text"])
+        if left_side:
+            strip = Image.new("RGB", (box.height, box.width), "white")
+            self._draw_footer_caption(
+                ImageDraw.Draw(strip),
+                text,
+                x=12,
+                top=max(4, (box.width - 28) // 2),
+                bottom=box.width - 4,
+                width=max(1, box.height - 24),
+                fill="#17221c",
+            )
+            canvas.paste(strip.transpose(Image.Transpose.ROTATE_270), (box.x, box.y))
+            ImageDraw.Draw(canvas).line(
+                (box.right - 2, box.y + 12, box.right - 2, box.bottom - 12),
+                fill="#1d2822",
+                width=1,
+            )
+            return
+
+        draw = ImageDraw.Draw(canvas)
+        draw.rectangle((box.x, box.y, box.right, box.bottom), fill="white")
+        draw.line((box.x + 8, box.y + 2, box.right - 8, box.y + 2), fill="#1d2822", width=1)
         self._draw_footer_caption(
             draw,
             text,
-            x=footer_rect.x + 22,
-            top=footer_rect.y + 12,
-            bottom=footer_rect.bottom - 38,
-            width=footer_rect.width - 44,
-        )
-        primary_date = self._captured_date(primary["captured_at"])
-        second_date = self._captured_date(secondary["captured_at"]) if secondary is not None else None
-        dates = (
-            [self._date_label(primary_date)]
-            if bool(self.settings.get("render.show_capture_date", True))
-            else []
-        )
-        if second_date and second_date != primary_date:
-            dates.append(self._date_label(second_date))
-        first_location = self.location_name(primary)
-        second_location = self.location_name(secondary) if secondary is not None else ""
-        location = first_location if first_location == second_location else ""
-        meta = "・".join(dates + ([location] if location else []))
-        draw.text(
-            (footer_rect.x + 22, footer_rect.bottom - 32),
-            self._fit_line(draw, meta, fonts["meta"], footer_rect.width - 44),
-            font=fonts["meta"],
-            fill="black",
+            x=box.x + 12,
+            top=box.y + 8,
+            bottom=box.bottom - 6,
+            width=max(1, box.width - 24),
+            fill="#17221c",
         )
 
     @staticmethod
@@ -1246,57 +1405,67 @@ class RenderService:
                     layout_key = "photo_info"
                 else:
                     primary = dict(photo)
-                    primary.update({"id": photo_id, "city": "", "types": []})
-                    second_row = (
-                        dict(self.photos.get_with_path(secondary_photo_id))
-                        if secondary_photo_id and self.photos.get_with_path(secondary_photo_id) is not None
-                        else select_pair_candidate(
+                    primary["id"] = photo_id
+                    second_row = None
+                    if secondary_photo_id:
+                        requested = self.candidates.get(secondary_photo_id)
+                        if requested is not None and pair_score(
                             primary,
-                            self._adaptive_pair_candidates(primary),
-                            frame_orientation=effective_orientation,
+                            requested,
+                            desired_orientation=pair_orientation(effective_orientation),
+                        ) is not None:
+                            second_row = requested
+                        else:
+                            raise ValueError(
+                                "RENDER-005 Adaptive Memory 第二張照片不符合安全方向契約"
+                            )
+                    else:
+                        second_row = self._select_adaptive_pair_candidate(
+                            primary, frame_orientation=effective_orientation
                         )
-                    )
                     if second_row is None:
                         layout_key = "photo_info"
                     else:
-                        text_parts = [
-                            caption or "這一天留下了兩個值得記住的片段。",
-                            self.location_name(photo),
-                        ]
-                        fonts = self._fonts("\n".join(part for part in text_parts if part))
-                        canvas = Image.new("RGB", (frame_width, frame_height), "white")
-                        footer_geometry = resolve_layout_geometry(
-                            "photo_info", effective_orientation, frame_width, frame_height
+                        today = self._today()
+                        caption_records = self._caption_records([photo, second_row], today)
+                        first_record = self._bound_caption_record(
+                            primary_caption or caption_records[photo_id], photo_id
                         )
-                        footer_rect = footer_geometry.info_rects[0]
-                        gutter = 8
-                        if effective_orientation == "landscape":
-                            primary_width = (frame_width - gutter) // 2
-                            primary_rect = Rect(0, 0, primary_width, footer_rect.y)
-                            secondary_rect = Rect(
-                                primary_width + gutter,
-                                0,
-                                frame_width - primary_width - gutter,
-                                footer_rect.y,
-                            )
-                        else:
-                            primary_height = (footer_rect.y - gutter) // 2
-                            primary_rect = Rect(0, 0, frame_width, primary_height)
-                            secondary_rect = Rect(
-                                0,
-                                primary_height + gutter,
-                                frame_width,
-                                footer_rect.y - primary_height - gutter,
-                            )
-                        slot_size = (primary_rect.width, primary_rect.height)
-                        second_position = (secondary_rect.x, secondary_rect.y)
+                        second_record = self._bound_caption_record(
+                            secondary_caption or caption_records[str(second_row["id"])],
+                            str(second_row["id"]),
+                        )
+                        self._fonts(f"{first_record['text']}\n{second_record['text']}")
+                        canvas = Image.new("RGB", (frame_width, frame_height), "white")
+                        pair_geometry = resolve_adaptive_pair_geometry(
+                            effective_orientation, frame_width, frame_height
+                        )
+                        primary_rect = _required_rect(pair_geometry.primary_photo, "primary_photo")
+                        secondary_rect = _required_rect(
+                            pair_geometry.secondary_photo, "secondary_photo"
+                        )
+                        primary_caption_rect = _required_rect(
+                            pair_geometry.primary_caption, "primary_caption"
+                        )
+                        secondary_caption_rect = _required_rect(
+                            pair_geometry.secondary_caption, "secondary_caption"
+                        )
                         canvas.paste(
-                            self._fit_photo(source, photo, slot_size, crop_x, crop_y, fit_mode_key),
+                            self._fit_photo(
+                                source,
+                                photo,
+                                (primary_rect.width, primary_rect.height),
+                                crop_x,
+                                crop_y,
+                                fit_mode_key,
+                            ),
                             (primary_rect.x, primary_rect.y),
                         )
                         second_path = safe_join(Path(second_row["root_path"]), second_row["relative_path"])
                         second_source, second_orientation = self._load_oriented_photo(
-                            second_row, second_path, target_size=slot_size
+                            second_row,
+                            second_path,
+                            target_size=(secondary_rect.width, secondary_rect.height),
                         )
                         if orientation_metadata is not None:
                             orientation_metadata.append(
@@ -1310,20 +1479,25 @@ class RenderService:
                                 self._fit_photo(
                                     second_source,
                                     second_row,
-                                    slot_size,
+                                    (secondary_rect.width, secondary_rect.height),
                                     second_row["crop_manual_x"],
                                     second_row["crop_manual_y"],
                                     fit_mode_key,
                                 ),
-                                second_position,
+                                (secondary_rect.x, secondary_rect.y),
                             )
-                        self._adaptive_footer(
-                            ImageDraw.Draw(canvas),
-                            fonts,
-                            footer_rect=footer_rect,
-                            primary=photo,
-                            secondary=second_row,
-                            caption=caption,
+                        captions_are_left = effective_orientation == "landscape"
+                        self._draw_adaptive_pair_caption(
+                            canvas,
+                            first_record,
+                            primary_caption_rect,
+                            left_side=captions_are_left,
+                        )
+                        self._draw_adaptive_pair_caption(
+                            canvas,
+                            second_record,
+                            secondary_caption_rect,
+                            left_side=captions_are_left,
                         )
                         return finish(canvas)
             geometry = resolve_layout_geometry(
