@@ -252,3 +252,64 @@ def resolve_layout_geometry(
         info=(primary_caption, secondary_caption),
         gutter=gutter,
     )
+
+
+def resolve_adaptive_pair_geometry(
+    orientation: str,
+    canvas_width: int,
+    canvas_height: int,
+    caption_ratio: float = 0.20,
+) -> LayoutGeometry:
+    """Resolve the orientation-aware two-photo Adaptive Memory contract."""
+    width, height = _normalized_canvas(orientation, int(canvas_width), int(canvas_height))
+    ratio = float(caption_ratio)
+    if not 0.18 <= ratio <= 0.25:
+        ratio = 0.20
+    gutter = 8
+
+    if orientation == "portrait":
+        paired = resolve_layout_geometry(
+            "photo_pair_caption", orientation, width, height, caption_ratio=ratio
+        )
+        return LayoutGeometry(
+            "adaptive_memory",
+            orientation,
+            width,
+            height,
+            primary_photo=paired.primary_photo,
+            secondary_photo=paired.secondary_photo,
+            primary_caption=paired.primary_caption,
+            secondary_caption=paired.secondary_caption,
+            info=paired.info,
+            gutter=paired.gutter,
+        )
+
+    card_width = (width - gutter) // 2
+    caption_width = max(int(card_width * 0.18), min(int(card_width * 0.25), int(card_width * ratio)))
+    primary_caption = Rect(0, 0, caption_width, height)
+    primary_photo = Rect(
+        primary_caption.right + gutter,
+        0,
+        card_width - caption_width - gutter,
+        height,
+    )
+    secondary_x = card_width + gutter
+    secondary_caption = Rect(secondary_x, 0, caption_width, height)
+    secondary_photo = Rect(
+        secondary_caption.right + gutter,
+        0,
+        width - secondary_caption.right - gutter,
+        height,
+    )
+    return LayoutGeometry(
+        "adaptive_memory",
+        orientation,
+        width,
+        height,
+        primary_photo=primary_photo,
+        secondary_photo=secondary_photo,
+        primary_caption=primary_caption,
+        secondary_caption=secondary_caption,
+        info=(primary_caption, secondary_caption),
+        gutter=gutter,
+    )
