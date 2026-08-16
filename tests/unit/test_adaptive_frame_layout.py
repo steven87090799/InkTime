@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import sqlite3
+
 from inktime.app.domain.rendering.adaptive_layout import (
     dimensions_after_exif,
     photo_orientation,
     select_pair_candidate,
 )
+from inktime.app.services.rendering import RenderService
 
 
 def test_orientation_classification_uses_square_band_and_exif_rotation():
@@ -13,6 +16,73 @@ def test_orientation_classification_uses_square_band_and_exif_rotation():
     assert photo_orientation((900, 1600)) == "portrait"
     assert photo_orientation((1000, 1050)) == "square"
     assert photo_orientation((900, 1000)) == "square"
+    assert photo_orientation((905, 1000)) == "square"
+    assert photo_orientation((899, 1000)) == "portrait"
+    assert photo_orientation((1100, 1000)) == "square"
+    assert photo_orientation((1101, 1000)) == "landscape"
+
+
+def _sql_orientation_matches(
+    frame_orientation: str,
+    *,
+    width: int,
+    height: int,
+    exif_orientation: int | None = None,
+    manual_rotation: int | None = None,
+    ai_rotation: int | None = None,
+    ai_confidence: float | None = None,
+    ai_ambiguous: bool = True,
+) -> bool:
+    predicate = RenderService._adaptive_orientation_sql(frame_orientation)
+    with sqlite3.connect(":memory:") as connection:
+        value = connection.execute(
+            f"""
+            SELECT ({predicate})
+            FROM (
+                SELECT ? AS width, ? AS height,
+                       ? AS exif_orientation_original, ? AS orientation,
+                       ? AS manual_orientation_rotation_cw,
+                       ? AS visual_orientation_rotation_cw,
+                       ? AS visual_orientation_confidence,
+                       ? AS visual_orientation_ambiguous
+            ) p
+            """,  # noqa: S608 -- the predicate is the fixed production helper under test.
+            (
+                width,
+                height,
+                exif_orientation,
+                exif_orientation,
+                manual_rotation,
+                ai_rotation,
+                ai_confidence,
+                int(ai_ambiguous),
+            ),
+        ).fetchone()[0]
+    return bool(value)
+
+
+def test_sql_orientation_boundaries_exactly_exclude_the_square_band():
+    assert not _sql_orientation_matches("landscape", width=900, height=1000)
+    assert not _sql_orientation_matches("landscape", width=905, height=1000)
+    assert _sql_orientation_matches("landscape", width=899, height=1000)
+
+    assert not _sql_orientation_matches("portrait", width=1100, height=1000)
+    assert _sql_orientation_matches("portrait", width=1101, height=1000)
+
+
+def test_sql_orientation_keeps_exif_manual_and_accepted_ai_rotation_contract():
+    overrides = (
+        {"exif_orientation": 6},
+        {"manual_rotation": 90},
+        {"ai_rotation": 270, "ai_confidence": 0.99, "ai_ambiguous": False},
+    )
+    for override in overrides:
+        assert _sql_orientation_matches(
+            "landscape", width=1600, height=900, **override
+        )
+        assert not _sql_orientation_matches(
+            "portrait", width=1600, height=900, **override
+        )
 
 
 def _photo(photo_id: str, **extra):
@@ -106,10 +176,14 @@ def test_pairing_date_priorities_cover_same_day_three_days_seven_days_and_any_da
     assert select_pair_candidate(primary, [any_date], frame_orientation="landscape") == any_date
 
 
-def test_recently_displayed_is_allowed_last_and_fresh_candidate_wins_inside_priority():
-    primary = _photo("primary")
-    recent = _photo("recent", captured_at="2024-07-01T10:05:00+00:00", recently_displayed=True)
-    fresh = _photo("fresh", captured_at="2024-07-01T11:00:00+00:00")
+def test_recently_displayed_is_allowed_only_after_every_safe_fresh_candidate():
+    primary = _photo("primary", captured_at="2026-08-10T10:00:00+00:00")
+    recent = _photo(
+        "recent",
+        captured_at="2026-08-10T10:05:00+00:00",
+        recently_displayed=True,
+    )
+    fresh = _photo("fresh", captured_at="2026-08-12T10:00:00+00:00")
 
     assert select_pair_candidate(primary, [recent], frame_orientation="landscape") == recent
     assert select_pair_candidate(primary, [recent, fresh], frame_orientation="landscape") == fresh
