@@ -9,6 +9,7 @@ from typing import Sequence
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from inktime.app.core.errors import ApplicationError
 from inktime.app.core.security import hash_device_secret, hash_device_token, issue_device_token
 from inktime.app.db import Database
 from inktime.app.domain.photopainter.device_configuration import (
@@ -36,7 +37,7 @@ _DEVICE_AUTH_TIMESTAMP_UPDATE_INTERVAL = timedelta(minutes=1)
 _MAX_STATUS_FUTURE_SKEW = timedelta(minutes=5)
 
 
-class DeviceRateLimitError(RuntimeError):
+class DeviceRateLimitError(ApplicationError, RuntimeError):
     def __init__(self, message: str, *, retry_after_seconds: int = 300) -> None:
         super().__init__(message)
         self.retry_after_seconds = max(1, min(int(retry_after_seconds), 300))
