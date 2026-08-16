@@ -17,7 +17,10 @@ from inktime.app.domain.auth import validate_password
 
 
 SENSITIVE_KEY = re.compile(
-    r"(?:api[_-]?key|apikey|token|password|passwd|secret|authorization|cookie|session|bearer|csrf|credential|pairing|wifi|wi[_-]?fi|headers?|payload|body|url|(?:previous[_-]?)?device[_-]?(?:credential|token|secret)(?:[_-]?(?:hash|ciphertext))?)",
+    r"(?:^|[._-])(?:api[_-]?key|apikey|password|passwd|secret|token|credentials?|"
+    r"authorization|cookies?|bearer|csrf|private[_-]?key)(?:$|[._-](?:hash|ciphertext|value|key))"
+    r"|(?:^|[._-])session(?:$|[._-](?:id|key|cookie|token))"
+    r"|(?:^|[._-])pairing[._-](?:code|nonce|secret|token|credential)(?:$|[._-](?:hash|ciphertext))",
     re.IGNORECASE,
 )
 SENSITIVE_TEXT = re.compile(
@@ -152,6 +155,8 @@ def redact(value: Any) -> Any:
         return [redact(item) for item in value]
     if isinstance(value, tuple):
         return tuple(redact(item) for item in value)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return "[已遮蔽二進位資料]"
     if isinstance(value, str):
         return redact_text(value)
     return value
