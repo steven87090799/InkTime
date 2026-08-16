@@ -1003,7 +1003,7 @@ class RenderService:
         effective_width = f"CASE WHEN ({swap})=1 THEN p.height ELSE p.width END"
         effective_height = f"CASE WHEN ({swap})=1 THEN p.width ELSE p.height END"
         if desired == "portrait":
-            return f"p.width>0 AND p.height>0 AND ({effective_height})*10>({effective_width})*11"
+            return f"p.width>0 AND p.height>0 AND ({effective_width})*10<({effective_height})*9"
         return f"p.width>0 AND p.height>0 AND ({effective_width})*10>({effective_height})*11"
 
     def _adaptive_candidate_rows(
@@ -1014,8 +1014,19 @@ class RenderService:
         parameters: tuple[Any, ...],
         order_sql: str,
         limit: int,
+        recent_mode: str,
     ) -> list[Any]:
         orientation_sql = self._adaptive_orientation_sql(frame_orientation)
+        recent_exists_sql = """
+            EXISTS(SELECT 1 FROM display_history recent_dh WHERE recent_dh.photo_id=p.id
+                   AND recent_dh.displayed_at>=datetime('now','-14 days'))
+        """
+        if recent_mode == "fresh":
+            recent_sql = f"NOT ({recent_exists_sql})"
+        elif recent_mode == "recent":
+            recent_sql = recent_exists_sql
+        else:
+            raise ValueError(f"Unsupported adaptive recent mode: {recent_mode}")
         with self.database.session() as connection:
             rows = connection.execute(
                 f"""
@@ -1029,7 +1040,7 @@ class RenderService:
                     ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1
                 )
                 WHERE {RenderCandidateRepository.SQL_PREDICATE}
-                  AND p.id<>? AND ({orientation_sql}) AND ({where_sql})
+                  AND p.id<>? AND ({orientation_sql}) AND ({recent_sql}) AND ({where_sql})
                 ORDER BY {order_sql} LIMIT ?
                 """,
                 (*parameters, int(limit)),
@@ -1070,7 +1081,7 @@ class RenderService:
     def _select_adaptive_pair_candidate(
         self, primary: dict[str, Any], *, frame_orientation: str
     ) -> dict[str, Any] | None:
-        """Select through bounded date-window and nearest-any-date SQL phases."""
+        """Select fresh first through bounded date and nearest-any-date SQL phases."""
         self._adaptive_pair_metadata(primary)
         primary_date_text = str(primary.get("captured_date") or primary.get("captured_at") or "")[:10]
         try:
@@ -1085,54 +1096,83 @@ class RenderService:
                 frame_orientation=frame_orientation,
             )
 
-        if primary_date is not None:
-            lower = (primary_date - timedelta(days=7)).isoformat()
-            upper = (primary_date + timedelta(days=7)).isoformat()
-            captured_date_sql = "COALESCE(p.captured_date,substr(p.captured_at,1,10))"
-            nearby = self._adaptive_candidate_rows(
-                frame_orientation=frame_orientation,
-                where_sql=(
-                    "(p.captured_date BETWEEN ? AND ? OR "
-                    "(p.captured_date IS NULL AND substr(p.captured_at,1,10) BETWEEN ? AND ?))"
-                ),
-                parameters=(
-                    str(primary["id"]),
-                    lower,
-                    upper,
-                    lower,
-                    upper,
-                    primary_date.isoformat(),
-                    str(primary.get("captured_at") or primary_date.isoformat()),
-                ),
-                order_sql=(
-                    f"CASE WHEN {captured_date_sql}=? THEN 0 ELSE 1 END,"
-                    " ABS(julianday(p.captured_at)-julianday(?)),"
-                    " recently_displayed ASC,p.captured_at DESC,p.id DESC"
-                ),
-                limit=300,
+        captured_date_sql = "COALESCE(p.captured_date,substr(p.captured_at,1,10))"
+        primary_id = str(primary["id"])
+        primary_timestamp = str(primary.get("captured_at") or primary_date_text)
+
+        def select_pass(recent_mode: str) -> dict[str, Any] | None:
+            if primary_date is None:
+                rows = self._adaptive_candidate_rows(
+                    frame_orientation=frame_orientation,
+                    where_sql="1=1",
+                    parameters=(primary_id,),
+                    order_sql="p.captured_at DESC,p.id DESC",
+                    limit=300,
+                    recent_mode=recent_mode,
+                )
+                return select(rows)
+
+            day = primary_date.isoformat()
+            lower_three = (primary_date - timedelta(days=3)).isoformat()
+            upper_three = (primary_date + timedelta(days=3)).isoformat()
+            lower_seven = (primary_date - timedelta(days=7)).isoformat()
+            upper_seven = (primary_date + timedelta(days=7)).isoformat()
+            distance_order = (
+                f"ABS(julianday(COALESCE(p.captured_at,{captured_date_sql}))-julianday(?)),"
+                "p.id DESC"
             )
-            if candidate := select(nearby):
-                return candidate
+            phases = (
+                (
+                    f"{captured_date_sql}=?",
+                    (primary_id, day, primary_timestamp),
+                    distance_order,
+                ),
+                (
+                    f"{captured_date_sql} BETWEEN ? AND ? AND {captured_date_sql}<>?",
+                    (primary_id, lower_three, upper_three, day, primary_timestamp),
+                    distance_order,
+                ),
+                (
+                    f"{captured_date_sql} BETWEEN ? AND ? "
+                    f"AND {captured_date_sql} NOT BETWEEN ? AND ?",
+                    (
+                        primary_id,
+                        lower_seven,
+                        upper_seven,
+                        lower_three,
+                        upper_three,
+                        primary_timestamp,
+                    ),
+                    distance_order,
+                ),
+            )
+            for where_sql, parameters, order_sql in phases:
+                rows = self._adaptive_candidate_rows(
+                    frame_orientation=frame_orientation,
+                    where_sql=where_sql,
+                    parameters=parameters,
+                    order_sql=order_sql,
+                    limit=300,
+                    recent_mode=recent_mode,
+                )
+                if candidate := select(rows):
+                    return candidate
 
             older = self._adaptive_candidate_rows(
                 frame_orientation=frame_orientation,
-                where_sql=(
-                    "(p.captured_date<? OR "
-                    "(p.captured_date IS NULL AND substr(p.captured_at,1,10)<?))"
-                ),
-                parameters=(str(primary["id"]), lower, lower),
-                order_sql=f"{captured_date_sql} DESC,recently_displayed ASC,p.id DESC",
+                where_sql=f"{captured_date_sql}<?",
+                parameters=(primary_id, lower_seven),
+                order_sql=f"{captured_date_sql} DESC,p.id DESC",
                 limit=300,
+                recent_mode=recent_mode,
             )
             newer = self._adaptive_candidate_rows(
                 frame_orientation=frame_orientation,
-                where_sql=(
-                    "(p.captured_date>? OR "
-                    "(p.captured_date IS NULL AND substr(p.captured_at,1,10)>?))"
-                ),
-                parameters=(str(primary["id"]), upper, upper),
-                order_sql=f"{captured_date_sql} ASC,recently_displayed ASC,p.id DESC",
+                where_sql=f"{captured_date_sql}>?",
+                parameters=(primary_id, upper_seven),
+                order_sql=f"{captured_date_sql} ASC,p.id DESC",
                 limit=300,
+                recent_mode=recent_mode,
             )
             if candidate := select([*older, *newer]):
                 return candidate
@@ -1140,20 +1180,17 @@ class RenderService:
             undated = self._adaptive_candidate_rows(
                 frame_orientation=frame_orientation,
                 where_sql="p.captured_date IS NULL AND p.captured_at IS NULL",
-                parameters=(str(primary["id"]),),
-                order_sql="recently_displayed ASC,p.id DESC",
+                parameters=(primary_id,),
+                order_sql="p.id DESC",
                 limit=100,
+                recent_mode=recent_mode,
             )
             return select(undated)
 
-        rows = self._adaptive_candidate_rows(
-            frame_orientation=frame_orientation,
-            where_sql="1=1",
-            parameters=(str(primary["id"]),),
-            order_sql="recently_displayed ASC,p.captured_at DESC,p.id DESC",
-            limit=300,
-        )
-        return select(rows)
+        for recent_mode in ("fresh", "recent"):
+            if candidate := select_pass(recent_mode):
+                return candidate
+        return None
 
     def _draw_adaptive_pair_caption(
         self, canvas: Image.Image, record: dict[str, Any], box: Rect, *, left_side: bool
@@ -1161,18 +1198,42 @@ class RenderService:
         """Draw one frozen caption only inside its photo's authoritative region."""
         text = str(record["text"])
         if left_side:
-            strip = Image.new("RGB", (box.height, box.width), "white")
-            self._draw_footer_caption(
-                ImageDraw.Draw(strip),
-                text,
-                x=12,
-                top=max(4, (box.width - 28) // 2),
-                bottom=box.width - 4,
-                width=max(1, box.height - 24),
-                fill="#17221c",
-            )
-            canvas.paste(strip.transpose(Image.Transpose.ROTATE_270), (box.x, box.y))
-            ImageDraw.Draw(canvas).line(
+            draw = ImageDraw.Draw(canvas)
+            draw.rectangle((box.x, box.y, box.right, box.bottom), fill="white")
+            normalized = " ".join(text.split())
+            font_path = self.fonts.resolve(str(self.settings.get("render.font_path", "")))
+            horizontal_padding = 10
+            vertical_padding = 12
+            available_width = max(1, box.width - horizontal_padding * 2)
+            available_height = max(0, box.height - vertical_padding * 2)
+            font = ImageFont.truetype(str(font_path), 18)
+            for font_size in range(24, 17, -1):
+                candidate_font = ImageFont.truetype(str(font_path), font_size)
+                if all(
+                    draw.textbbox((0, 0), character, font=candidate_font)[2]
+                    - draw.textbbox((0, 0), character, font=candidate_font)[0]
+                    <= available_width
+                    for character in normalized
+                ):
+                    font = candidate_font
+                    break
+            line_height: int = max(1, int(font.size) + 4)
+            maximum_characters: int = max(0, available_height // line_height)
+            characters = list(normalized)
+            if len(characters) > maximum_characters:
+                characters = (
+                    characters[: maximum_characters - 1] + ["…"]
+                    if maximum_characters > 0
+                    else []
+                )
+            y = box.y + vertical_padding
+            for character in characters:
+                bounds = draw.textbbox((0, 0), character, font=font)
+                glyph_width = bounds[2] - bounds[0]
+                x = box.x + horizontal_padding + (available_width - glyph_width) // 2 - bounds[0]
+                draw.text((x, y - bounds[1]), character, font=font, fill="#17221c")
+                y += line_height
+            draw.line(
                 (box.right - 2, box.y + 12, box.right - 2, box.bottom - 12),
                 fill="#1d2822",
                 width=1,

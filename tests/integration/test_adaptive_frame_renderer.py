@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw
 import pytest
 
+from inktime.app.domain.rendering import Rect
 from inktime.app.services import rendering as rendering_service
 
 
@@ -255,6 +256,47 @@ def test_adaptive_caption_draw_regions_keep_a_and_b_records_unswapped(
     assert observed[1][2] == plan["geometry"]["secondary_caption"]
 
 
+def test_landscape_side_caption_draws_upright_glyphs_without_rotating_text_strip(
+    app, monkeypatch
+):
+    service = app.extensions["inktime_render_service"]
+    canvas = Image.new("RGB", (800, 480), "white")
+    box = Rect(12, 16, 80, 440)
+    text_calls: list[tuple[str, tuple[float, float]]] = []
+    transpose_calls = []
+    original_text = ImageDraw.ImageDraw.text
+    original_transpose = Image.Image.transpose
+
+    def capture_text(draw, xy, text, *args, **kwargs):
+        text_calls.append((str(text), xy))
+        return original_text(draw, xy, text, *args, **kwargs)
+
+    def capture_transpose(image, method):
+        transpose_calls.append(method)
+        return original_transpose(image, method)
+
+    monkeypatch.setattr(ImageDraw.ImageDraw, "text", capture_text)
+    monkeypatch.setattr(Image.Image, "transpose", capture_transpose)
+
+    service._draw_adaptive_pair_caption(
+        canvas,
+        {"photo_id": "primary", "text": "A文字"},
+        box,
+        left_side=True,
+    )
+
+    assert [text for text, _xy in text_calls] == ["A", "文", "字"]
+    assert [xy[1] for _text, xy in text_calls] == sorted(
+        xy[1] for _text, xy in text_calls
+    )
+    assert all(box.x <= xy[0] < box.right for _text, xy in text_calls)
+    assert transpose_calls == []
+
+    physical = service._physical_frame(canvas, "landscape")
+    assert physical.size == (480, 800)
+    assert transpose_calls == [Image.Transpose.ROTATE_270]
+
+
 def test_adaptive_square_and_missing_pair_fall_back_to_single_contain(app, tmp_path):
     root = tmp_path / "photos"
     root.mkdir()
@@ -358,7 +400,7 @@ def test_adaptive_recently_displayed_candidate_is_fallback_but_fresh_candidate_w
     root.mkdir()
     _analyzed_photo(app, root, "primary", (900, 1600), "2026-08-10T10:00:00+00:00")
     _analyzed_photo(app, root, "recent", (900, 1600), "2026-08-10T10:05:00+00:00")
-    _analyzed_photo(app, root, "fresh", (900, 1600), "2026-08-10T11:00:00+00:00")
+    _analyzed_photo(app, root, "fresh", (900, 1600), "2026-08-12T10:00:00+00:00")
     with app.extensions["inktime_database"].session() as connection:
         connection.execute(
             """INSERT INTO display_history(
@@ -378,6 +420,54 @@ def test_adaptive_recently_displayed_candidate_is_fallback_but_fresh_candidate_w
         "primary", layout="adaptive_memory", orientation="landscape"
     )
     assert fallback["secondary_photo_id"] == "recent"
+
+
+def test_adaptive_candidate_query_filters_freshness_before_the_bounded_limit(
+    app, monkeypatch
+):
+    service = app.extensions["inktime_render_service"]
+    observed: dict[str, object] = {}
+
+    class EmptyResult:
+        @staticmethod
+        def fetchall():
+            return []
+
+    class CapturingConnection:
+        def execute(self, sql, parameters):
+            observed["sql"] = sql
+            observed["parameters"] = parameters
+            return EmptyResult()
+
+    class CapturingSession:
+        def __enter__(self):
+            return CapturingConnection()
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    class CapturingDatabase:
+        @staticmethod
+        def session():
+            return CapturingSession()
+
+    monkeypatch.setattr(service, "database", CapturingDatabase())
+    rows = service._adaptive_candidate_rows(
+        frame_orientation="landscape",
+        where_sql="1=1",
+        parameters=("primary",),
+        order_sql="p.captured_at DESC,p.id DESC",
+        limit=300,
+        recent_mode="fresh",
+    )
+
+    compact_sql = " ".join(str(observed["sql"]).split())
+    recent_filter = "NOT ( EXISTS(SELECT 1 FROM display_history recent_dh"
+    assert rows == []
+    assert recent_filter in compact_sql
+    assert compact_sql.index(recent_filter) < compact_sql.index("ORDER BY p.captured_at")
+    assert compact_sql.index("ORDER BY p.captured_at") < compact_sql.index("LIMIT ?")
+    assert observed["parameters"] == ("primary", 300)
 
 
 def test_all_formal_frame_layouts_render_with_the_resolved_photos(app, tmp_path):

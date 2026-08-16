@@ -104,11 +104,11 @@ def pair_score(primary: dict[str, Any], candidate: dict[str, Any], *, desired_or
     else:
         priority = 1
 
-    # Large bands make the four date phases authoritative.  Relevance and
-    # display history only order otherwise-safe photos inside one phase.
+    # Large bands make the four date phases authoritative inside one
+    # freshness tier.  Fresh candidates are separated before this score is
+    # compared, so a recently displayed same-day photo cannot beat any safe
+    # fresh candidate.
     score = priority * 1_000_000_000_000_000
-    if not candidate.get("recently_displayed"):
-        score += 100_000_000_000_000
     if delta is not None:
         score -= int(delta)
     if not candidate.get("ever_displayed"):
@@ -135,6 +135,8 @@ def select_pair_candidate(
     available = [(score, candidate) for score, candidate in scored if score is not None]
     if not available:
         return None
+    fresh = [item for item in available if not item[1].get("recently_displayed")]
+    pool = fresh or available
     return max(
-        available, key=lambda item: (item[0], str(item[1].get("captured_at") or ""), str(item[1].get("id")))
+        pool, key=lambda item: (item[0], str(item[1].get("captured_at") or ""), str(item[1].get("id")))
     )[1]
