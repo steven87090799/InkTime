@@ -661,7 +661,9 @@ class ResilienceRepository:
                     raise ValueError("QUEUE-005 Enhanced offline 裝置不得接收 online Queue")
             compatible = connection.execute(
                 """SELECT 1 FROM releases r JOIN devices d ON d.id=?
-                WHERE r.id=? AND r.status='published' AND r.render_profile=d.panel_profile""",
+                WHERE r.id=? AND r.status='published'
+                  AND r.reconciliation_status!='payload_pruned'
+                  AND r.render_profile=d.panel_profile""",
                 (device_id, release_id),
             ).fetchone()
             if not compatible:
@@ -1504,7 +1506,8 @@ class ResilienceRepository:
         ]
         with self.database.transaction() as connection:
             if not connection.execute(
-                "SELECT 1 FROM releases WHERE id=? AND status='published'", (release_id,)
+                "SELECT 1 FROM releases WHERE id=? AND status='published' AND reconciliation_status!='payload_pruned'",
+                (release_id,),
             ).fetchone():
                 raise ValueError("ROLLOUT-001 Release 不存在或不是已發布狀態")
             connection.execute(

@@ -2603,10 +2603,12 @@ class RenderService:
     def rollback(self, release_id: str) -> None:
         with self.database.session() as connection:
             row = connection.execute(
-                "SELECT render_profile FROM releases WHERE id=?", (release_id,)
+                "SELECT render_profile,reconciliation_status FROM releases WHERE id=?", (release_id,)
             ).fetchone()
         if row is None:
             raise KeyError(release_id)
+        if str(row["reconciliation_status"]) == "payload_pruned":
+            raise ValueError("RENDER-012 Release Payload 已依保留政策移除，不能回滾")
         self.publisher.rollback(release_id)
         with self.database.session() as connection:
             connection.execute(

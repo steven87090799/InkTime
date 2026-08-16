@@ -10,7 +10,7 @@ from typing import Any
 
 from inktime.app.db import Database
 from inktime.app.core.logging import log_event
-from inktime.app.domain.rendering import AtomicReleasePublisher
+from inktime.app.domain.rendering import AtomicReleasePublisher, DeviceTestReleaseStore
 from inktime.app.domain.rendering.release import fsync_directory, release_metadata_guard
 
 
@@ -210,11 +210,15 @@ class ReleaseCoordinator:
             "pointer_recovered": 0,
         }
         with self.database.session() as connection:
-            rows = connection.execute("SELECT id,status,render_profile,created_at FROM releases").fetchall()
+            rows = connection.execute(
+                "SELECT id,status,render_profile,created_at,reconciliation_status FROM releases"
+            ).fetchall()
             known = {str(row["id"]) for row in rows}
         valid: dict[str, list[tuple[str, str]]] = {}
         for row in rows:
             release_id = str(row["id"])
+            if str(row["reconciliation_status"]) == "payload_pruned":
+                continue
             try:
                 self.publisher.validate(release_id)
             except ValueError:
@@ -273,7 +277,7 @@ class ReleaseCoordinator:
         return diagnostics
 
     def gc_unreferenced_releases(self, *, retention_days: int = 90, max_items: int = 20) -> dict[str, int]:
-        """Delete only old superseded payloads with no durable or pointer reference."""
+        """Prune old payloads while retaining release and display-history metadata."""
 
         cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, int(retention_days)))).isoformat()
         limit = max(1, min(int(max_items), 100))
@@ -283,15 +287,19 @@ class ReleaseCoordinator:
         pointer_ids = self.publisher.authoritative_pointer_ids()
         deleted = 0
         skipped = 0
-        # A previous maintenance run may have committed the DB delete but
+        test_assignments = DeviceTestReleaseStore(self.publisher.root)
+        # A previous maintenance run may have committed the payload state but
         # failed while purging the quarantine directory.  Reconcile those
-        # entries before selecting new candidates; rows still present in the
-        # DB are restored instead of being purged.
+        # entries before selecting new candidates; rows not marked pruned are
+        # restored instead of being purged.  Missing rows retain compatibility
+        # with quarantines created by the former row-deleting GC contract.
         quarantine: Path | None
         for release_id, quarantine in self.publisher.list_gc_quarantines(limit=limit):
             with self.database.session() as connection:
-                row = connection.execute("SELECT 1 FROM releases WHERE id=?", (release_id,)).fetchone()
-            if row is not None:
+                row = connection.execute(
+                    "SELECT reconciliation_status FROM releases WHERE id=?", (release_id,)
+                ).fetchone()
+            if row is not None and str(row["reconciliation_status"]) != "payload_pruned":
                 if not self.publisher.restore_quarantined_release(quarantine, release_id):
                     skipped += 1
             elif not self.publisher.purge_gc_quarantine(quarantine):
@@ -302,7 +310,8 @@ class ReleaseCoordinator:
                 """
                 SELECT r.id
                 FROM releases r
-                WHERE r.status IN ('published','superseded','staged','staged_failed')
+                WHERE r.status IN ('published','superseded','staged_failed')
+                  AND r.reconciliation_status!='payload_pruned'
                   AND r.created_at<?
                   AND NOT EXISTS (SELECT 1 FROM device_render_releases drr WHERE drr.release_id=r.id)
                   AND NOT EXISTS (SELECT 1 FROM device_content_queue_items qi WHERE qi.release_id=r.id)
@@ -316,7 +325,6 @@ class ReleaseCoordinator:
                       SELECT 1 FROM rollout_campaigns rc
                       WHERE rc.release_id=r.id OR rc.previous_release_id=r.id
                   )
-                  AND NOT EXISTS (SELECT 1 FROM display_history dh WHERE dh.release_id=r.id)
                   AND NOT EXISTS (SELECT 1 FROM selection_decision_traces sdt WHERE sdt.release_id=r.id)
                 ORDER BY r.created_at,r.id
                 LIMIT ?
@@ -334,10 +342,18 @@ class ReleaseCoordinator:
             # Keep the authoritative pointer fence held across the DB
             # recheck and commit.  All pointer writers use this same metadata
             # guard, so a new active pointer cannot appear after quarantine
-            # and before the row is deleted or restored.
+            # and before the payload state is committed or restored.
             with release_metadata_guard(self.publisher.root):
                 try:
-                    quarantine = self.publisher.quarantine_release(release_id)
+                    with test_assignments.reference_snapshot() as (
+                        assignment_ids,
+                        assignment_snapshot_complete,
+                        _assignment_examined,
+                    ):
+                        if not assignment_snapshot_complete or release_id in assignment_ids:
+                            skipped += 1
+                            continue
+                        quarantine = self.publisher.quarantine_release(release_id)
                     if quarantine is None:
                         skipped += 1
                     else:
@@ -349,7 +365,9 @@ class ReleaseCoordinator:
                                     SELECT 1
                                     FROM releases r
                                     WHERE r.id=?
-                                      AND r.status IN ('published','superseded','staged','staged_failed')
+                                      AND r.status IN ('published','superseded','staged_failed')
+                                      AND r.reconciliation_status!='payload_pruned'
+                                      AND r.created_at<?
                                       AND NOT EXISTS (SELECT 1 FROM device_render_releases drr WHERE drr.release_id=r.id)
                                       AND NOT EXISTS (SELECT 1 FROM device_content_queue_items qi WHERE qi.release_id=r.id)
                                       AND NOT EXISTS (SELECT 1 FROM device_offline_schedule_slots os WHERE os.release_id=r.id)
@@ -362,16 +380,21 @@ class ReleaseCoordinator:
                                           SELECT 1 FROM rollout_campaigns rc
                                           WHERE rc.release_id=r.id OR rc.previous_release_id=r.id
                                       )
-                                      AND NOT EXISTS (SELECT 1 FROM display_history dh WHERE dh.release_id=r.id)
                                       AND NOT EXISTS (SELECT 1 FROM selection_decision_traces sdt WHERE sdt.release_id=r.id)
                                     """,
-                                    (release_id,),
+                                    (release_id, cutoff),
                                 ).fetchone()
                                 if still_unreferenced is None:
                                     connection.execute("ROLLBACK")
                                 else:
                                     cursor = connection.execute(
-                                        "DELETE FROM releases WHERE id=? AND status IN ('published','superseded','staged','staged_failed')",
+                                        """
+                                        UPDATE releases
+                                        SET reconciliation_status='payload_pruned'
+                                        WHERE id=?
+                                          AND status IN ('published','superseded','staged_failed')
+                                          AND reconciliation_status!='payload_pruned'
+                                        """,
                                         (release_id,),
                                     )
                                     if cursor.rowcount != 1:
@@ -385,9 +408,9 @@ class ReleaseCoordinator:
                                 raise
                         if committed:
                             deleted += 1
-                            # A failed purge is intentionally left as an orphan
+                            # A failed purge is intentionally left quarantined
                             # for the next bounded maintenance pass.  The DB row
-                            # is gone, so it cannot be a live release reference.
+                            # records that the payload was legally pruned.
                             if not self.publisher.purge_gc_quarantine(quarantine):
                                 skipped += 1
                     # Restore before releasing the authoritative pointer fence
@@ -402,5 +425,10 @@ class ReleaseCoordinator:
                     if quarantine is not None and not committed and quarantine.exists():
                         if not self.publisher.restore_quarantined_release(quarantine, release_id):
                             raise RuntimeError(f"RENDER-GC quarantine restore failed for {release_id}") from error
-                    raise
+                    LOGGER.warning(
+                        "Release payload GC skipped %s after a recoverable failure: %s",
+                        release_id,
+                        type(error).__name__,
+                    )
+                    skipped += 1
         return {"deleted": deleted, "skipped": skipped}

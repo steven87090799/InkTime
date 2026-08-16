@@ -298,6 +298,14 @@ def _virtual_display_profile() -> str:
     return profile_key
 
 
+def _release_payload_pruned(release_id: str) -> bool:
+    with current_app.extensions["inktime_database"].session() as connection:
+        row = connection.execute(
+            "SELECT reconciliation_status FROM releases WHERE id=?", (release_id,)
+        ).fetchone()
+    return row is not None and str(row["reconciliation_status"]) == "payload_pruned"
+
+
 def _latest_virtual_manifest(profile_key: str) -> dict:
     release_root = current_app.config["INKTIME_RELEASE_DIR"]
     latest_pointer = release_root / f"latest.{profile_key}"
@@ -360,6 +368,8 @@ def virtual_display_manifest():
 @bp.get("/api/v1/virtual-display/releases/<release_id>/files/<path:filename>")
 @login_required
 def virtual_display_file(release_id: str, filename: str):
+    if _release_payload_pruned(release_id):
+        abort(410, description="DEVICE-010 Release Payload 已依保留政策移除")
     release_root = current_app.config["INKTIME_RELEASE_DIR"]
     try:
         manifest_path = safe_join(release_root, f"{release_id}/manifest.json")
@@ -900,6 +910,8 @@ def publish_history_test_release():
 def release_preview(release_id: str, filename: str):
     if not filename.startswith("preview_") or not filename.endswith(".png"):
         abort(404)
+    if _release_payload_pruned(release_id):
+        abort(410, description="RENDER-012 Release Payload 已依保留政策移除")
     try:
         path = safe_join(current_app.config["INKTIME_RELEASE_DIR"], f"{release_id}/{filename}")
     except UnsafePathError:
@@ -912,6 +924,8 @@ def release_preview(release_id: str, filename: str):
 @bp.post("/api/v1/releases/<release_id>/rollback")
 @administrator_required
 def rollback_release(release_id: str):
+    if _release_payload_pruned(release_id):
+        abort(410, description="RENDER-012 Release Payload 已依保留政策移除，不能回滾")
     try:
         current_app.extensions["inktime_render_service"].rollback(release_id)
     except KeyError:

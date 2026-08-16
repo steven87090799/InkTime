@@ -289,6 +289,12 @@ class DeviceReleaseService:
     ) -> DeviceReleaseAuthorization:
         if _RELEASE_ID.fullmatch(release_id) is None:
             return DeviceReleaseAuthorization(False, None, "invalid_release_id", release_id)
+        with self.database.session() as connection:
+            payload_state = connection.execute(
+                "SELECT reconciliation_status FROM releases WHERE id=?", (release_id,)
+            ).fetchone()
+        if payload_state is not None and str(payload_state["reconciliation_status"]) == "payload_pruned":
+            return DeviceReleaseAuthorization(False, None, "payload_pruned", release_id)
         source, assignment = self._source(
             device_id=device_id,
             profile_key=profile_key,
@@ -337,7 +343,7 @@ class DeviceReleaseService:
                 (device_id,),
             ).fetchone()
             release = connection.execute(
-                "SELECT status FROM releases WHERE id=?",
+                "SELECT status,reconciliation_status FROM releases WHERE id=?",
                 (release_id,),
             ).fetchone()
         if device is None:
@@ -350,6 +356,8 @@ class DeviceReleaseService:
             return DeviceReleaseAuthorization(False, None, "profile_mismatch", release_id)
         if release is not None and str(release["status"]) not in _DOWNLOADABLE_RELEASE_STATES:
             return DeviceReleaseAuthorization(False, None, "release_not_downloadable", release_id)
+        if release is not None and str(release["reconciliation_status"]) == "payload_pruned":
+            return DeviceReleaseAuthorization(False, None, "payload_pruned", release_id)
         try:
             release_dir, release_dir_identity, manifest = self._load_manifest(release_id)
         except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):

@@ -1754,6 +1754,9 @@ def _govern_definition(key: str, definition: dict[str, Any]) -> None:
             "export_allowed": key not in SENSITIVE_STATUS_KEYS,
             "existing_release_unchanged": key.startswith("render."),
             "effective_note": (
+                "不支援且不可修改；此值不是有效的 Security Switch，Runtime 一律不讀取"
+                if key == "device.legacy_api_enabled"
+                else
                 "只影響下一次渲染；既有 Release 不會改變，必須建立新 Release"
                 if key.startswith("render.")
                 else "只套用到之後新增的裝置"

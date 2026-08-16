@@ -270,8 +270,13 @@ def test_stock_test_authorization_is_exactly_bound_and_generic_auth_stays_closed
                 return SimpleNamespace(
                     fetchone=lambda: self.device if params[0] == device_id else None
                 )
-            if "SELECT status FROM releases" in query:
-                return SimpleNamespace(fetchone=lambda: {"status": "published"})
+            if "reconciliation_status FROM releases" in query:
+                return SimpleNamespace(
+                    fetchone=lambda: {
+                        "status": "published",
+                        "reconciliation_status": None,
+                    }
+                )
             raise AssertionError(f"unexpected query: {query}")
 
     class FakeDatabase:
@@ -344,6 +349,7 @@ def test_stock_test_authorization_is_exactly_bound_and_generic_auth_stays_closed
         assert denied.allowed is False
 
     generic = object.__new__(DeviceReleaseService)
+    generic.database = FakeDatabase(None)
     generic._source = lambda **_kwargs: (None, None)
     unchanged = generic.authorize_release_for_device(
         device_id=device_id, profile_key="safe_4c", release_id=release_id
@@ -548,10 +554,14 @@ class _StockConnection:
     def execute(self, query, params):
         if "SELECT enabled,delivery_mode,panel_profile" in query:
             return SimpleNamespace(fetchone=lambda: self.devices.get(params[0]))
-        if "SELECT status FROM releases" in query:
+        if "SELECT status,reconciliation_status FROM releases" in query:
             status = self.release_statuses.get(params[0])
             return SimpleNamespace(
-                fetchone=lambda: None if status is None else {"status": status}
+                fetchone=lambda: (
+                    None
+                    if status is None
+                    else {"status": status, "reconciliation_status": None}
+                )
             )
         if "SELECT 1 FROM (" in query:
             return SimpleNamespace(

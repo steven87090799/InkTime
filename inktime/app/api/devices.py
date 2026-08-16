@@ -990,6 +990,8 @@ def release_file(release_id: str, filename: str):
     )
     if not authorization.allowed:
         _repository().record_download(device["id"], release_id[:128], False)
+        if authorization.reason == "payload_pruned":
+            abort(410, description="DEVICE-010 Release Payload 已依保留政策移除")
         abort(404, description="DEVICE-002 Release 或檔案不存在")
     try:
         payload, entry = service.read_payload(authorization, filename)
