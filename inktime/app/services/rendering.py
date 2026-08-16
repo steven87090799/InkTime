@@ -1217,8 +1217,8 @@ class RenderService:
                 ):
                     font = candidate_font
                     break
-            line_height = max(1, font.size + 4)
-            maximum_characters = available_height // line_height
+            line_height: int = max(1, int(font.size) + 4)
+            maximum_characters: int = max(0, available_height // line_height)
             characters = list(normalized)
             if len(characters) > maximum_characters:
                 characters = (
