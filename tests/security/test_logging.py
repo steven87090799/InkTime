@@ -76,6 +76,37 @@ def test_nested_redaction_covers_headers_payloads_and_url_queries():
     assert "view=summary" in rendered
 
 
+def test_structured_redaction_preserves_diagnostics_and_redacts_bounded_secret_keys():
+    safe = {
+        "wifi_rssi": -60,
+        "payload_missing": 0,
+        "payload_size": 123456,
+        "queue_depth": 5,
+        "retry_count": 2,
+    }
+    secrets = {
+        "wifi_password": "wifi-private",
+        "password": "password-private",
+        "api_key": "api-private",
+        "authorization": "Bearer auth-private",
+        "access_token": "access-private",
+        "device_secret": "device-private",
+        "cookie": "session-private",
+    }
+    record = logging.LogRecord("runtime", logging.INFO, "", 0, "diagnostics", (), None)
+    record.details = {
+        **safe,
+        **secrets,
+        "body": {"status": "ok", "credentials": "nested-private"},
+    }
+
+    details = json.loads(JsonFormatter().format(record))["details"]
+
+    assert {key: details[key] for key in safe} == safe
+    assert all(details[key] == "[已遮蔽]" for key in secrets)
+    assert details["body"] == {"status": "ok", "credentials": "[已遮蔽]"}
+
+
 def test_url_redaction_removes_userinfo_and_preserves_safe_query_metadata():
     basic = redact_text("https://user:password@example.test/path")
     query = redact_text(

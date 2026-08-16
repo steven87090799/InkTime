@@ -10,6 +10,7 @@ import threading
 import time
 from typing import IO, Iterator
 
+from inktime.app.core.errors import ApplicationError
 from inktime.app.core.locks import fcntl
 from inktime.app.core.logging import log_event, should_log_rate_limited
 
@@ -339,7 +340,7 @@ class Database:
                 category = (
                     operation if re.fullmatch(r"[a-z0-9_.-]{1,64}", operation) else "repository_write"
                 )
-                if should_log_rate_limited(
+                if not isinstance(exc, ApplicationError) and should_log_rate_limited(
                     f"db-transaction-failed:{category}:{type(exc).__name__}",
                     interval_seconds=10,
                 ):
