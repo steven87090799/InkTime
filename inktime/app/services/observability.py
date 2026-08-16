@@ -258,7 +258,7 @@ class ObservabilityService:
         staged_cutoff = (now - timedelta(minutes=20)).isoformat()
         with self.database.session() as c:
             rows = c.execute(
-                "SELECT id,status,created_at,failure_reason,reconciliation_status FROM releases WHERE status IN ('staged','staged_failed') OR reconciliation_status!='ok' ORDER BY created_at DESC LIMIT 100"
+                "SELECT id,status,created_at,failure_reason,reconciliation_status FROM releases WHERE status IN ('staged','staged_failed') OR reconciliation_status NOT IN ('ok','payload_pruned') ORDER BY created_at DESC LIMIT 100"
             ).fetchall()
             known_ids = [
                 str(row[0])
@@ -291,7 +291,12 @@ class ObservabilityService:
                     subject=release_id,
                     details={"retryable": False, "recommended_page": "/errors"},
                 )
-            if str(row["reconciliation_status"]) not in {"ok", "applied", "skipped"}:
+            if str(row["reconciliation_status"]) not in {
+                "ok",
+                "applied",
+                "skipped",
+                "payload_pruned",
+            }:
                 active.add((release_id, "RELEASE-POINTER-DRIFT"))
                 self.alert(
                     "release",

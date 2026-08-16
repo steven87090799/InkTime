@@ -125,8 +125,8 @@
           <div><dt>最終生效值</dt><dd><code>{{ row.effective_value }}</code></dd></div>
           <div><dt>來源</dt><dd>{{ '系統設定' if row.effective_source == 'System' else '程式安全預設' }}</dd></div>
           {% else %}
-          <div><dt>Runtime 狀態</dt><dd><strong>已儲存但尚未生效／尚未支援</strong></dd></div>
-          <div><dt>來源</dt><dd>僅保存既有值，不宣稱為最終生效值</dd></div>
+          <div><dt>Runtime 狀態</dt><dd><strong>不支援且不可修改</strong></dd></div>
+          <div><dt>來源</dt><dd>既有儲存值不具 Runtime 效力，不宣稱為啟用或停用</dd></div>
           {% endif %}
           {% endif %}
         </dl>

@@ -1114,6 +1114,7 @@ class OfflineScheduleRepository:
                         """
                         SELECT id,manifest_json FROM releases r
                         WHERE r.id=? AND r.status='published'
+                          AND r.reconciliation_status!='payload_pruned'
                           AND r.render_profile=?
                         """,
                         (release_id, str(device["panel_profile"])),
@@ -1329,7 +1330,9 @@ class OfflineScheduleRepository:
                 release = connection.execute(
                     """
                     SELECT id,manifest_json FROM releases
-                    WHERE id=? AND status='published' AND render_profile=?
+                    WHERE id=? AND status='published'
+                      AND reconciliation_status!='payload_pruned'
+                      AND render_profile=?
                     """,
                     (normalized_release_id, str(schedule["panel_profile"])),
                 ).fetchone()

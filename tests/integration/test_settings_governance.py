@@ -12,6 +12,7 @@ from inktime.app.domain.photopainter.offline_schedule import OFFLINE_PREPARE_BOO
 from inktime.app.domain.rendering.system_presets import SYSTEM_PRESETS
 from inktime.app.repositories.settings import (
     DEVICE_OVERRIDE_KEYS,
+    RUNTIME_UNWIRED_KEYS,
     SETTING_DEFINITIONS,
 )
 from tests.conftest import create_admin, csrf, login
@@ -1346,14 +1347,16 @@ def test_fractional_integer_is_rejected_without_truncation(client, app):
 def test_runtime_unwired_setting_is_read_only_for_api_import_and_ui(client, app):
     create_admin(app)
     login(client)
-    direct = _post(
-        client,
-        "/api/v1/settings",
-        {"observability.debug_level": "detailed"},
-        confirm=True,
-    )
-    assert direct.status_code == 400
-    assert "僅供唯讀" in direct.json["message"]
+    for key in sorted(RUNTIME_UNWIRED_KEYS):
+        direct = _post(
+            client,
+            "/api/v1/settings",
+            {key: SETTING_DEFINITIONS[key]["default"]},
+            confirm=True,
+        )
+        assert direct.status_code == 400
+        assert key in direct.json["message"]
+        assert "僅供唯讀" in direct.json["message"]
 
     document = {
         "format": "inktime-settings",
@@ -1369,8 +1372,21 @@ def test_runtime_unwired_setting_is_read_only_for_api_import_and_ui(client, app)
     body = client.get("/settings").get_data(as_text=True)
     assert 'data-key="observability.debug_level"' in body
     assert 'data-scope="not_wired"' in body
-    assert "已儲存但尚未生效／尚未支援" in body
+    assert 'data-key="device.legacy_api_enabled"' in body
+    assert "不支援且不可修改" in body
+    assert "既有儲存值不具 Runtime 效力，不宣稱為啟用或停用" in body
+    assert "此值不是有效的 Security Switch" in body
     assert 'name="observability.debug_level" disabled' in body
+    assert 'name="device.legacy_api_enabled" disabled' in body
+
+    legacy = next(
+        row
+        for row in app.extensions["inktime_settings_repository"].all()
+        if row["key"] == "device.legacy_api_enabled"
+    )
+    assert legacy["effective_value"] is None
+    assert legacy["effective_source"] == "NotWired"
+    assert legacy["definition"]["runtime_wired"] is False
 
 
 def test_device_override_and_effective_scope_metadata_use_actual_whitelists():

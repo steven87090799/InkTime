@@ -77,7 +77,7 @@ def queues_page():
         releases = [
             dict(row)
             for row in connection.execute(
-                "SELECT id,render_profile,created_at FROM releases WHERE status='published' ORDER BY created_at DESC LIMIT 100"
+                "SELECT id,render_profile,created_at FROM releases WHERE status='published' AND reconciliation_status!='payload_pruned' ORDER BY created_at DESC LIMIT 100"
             ).fetchall()
         ]
     return render_template(
@@ -110,7 +110,7 @@ def rollouts_page():
         result["releases"] = [
             dict(row)
             for row in connection.execute(
-                "SELECT id,render_profile,created_at FROM releases WHERE status='published' ORDER BY created_at DESC LIMIT 100"
+                "SELECT id,render_profile,created_at FROM releases WHERE status='published' AND reconciliation_status!='payload_pruned' ORDER BY created_at DESC LIMIT 100"
             ).fetchall()
         ]
     return render_template("resilience.html", title="Canary 發布", section="rollouts", result=result)
@@ -458,6 +458,8 @@ def queue_item_file(item_id: str, filename: str):
         release_id=str(item["release_id"]),
     )
     if not authorization.allowed:
+        if authorization.reason == "payload_pruned":
+            abort(410, description="QUEUE-010 Release Payload 已依保留政策移除")
         abort(404, description="QUEUE-002 Queue Item 不存在或已失效")
     try:
         data, entry = service.read_payload(authorization, filename)
