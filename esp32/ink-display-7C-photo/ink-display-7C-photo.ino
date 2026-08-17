@@ -25,6 +25,7 @@
 // these metadata types visible to generated CRC helper prototypes.
 struct AckJournalSnapshotMeta;
 struct AckJournalActivePointer;
+struct Config;
 
 #include "device_http_transport.h"
 #if INKTIME_PHOTOPAINTER_ENABLED

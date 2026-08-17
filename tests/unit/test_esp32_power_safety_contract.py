@@ -56,6 +56,14 @@ def test_photopainter_ext1_user_wake_validates_gpio4_and_preserves_timer_wake():
     )
 
 
+def test_config_is_forward_declared_for_arduino_generated_prototypes():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    forward = firmware.index("struct Config;")
+    definition = firmware.index("struct Config {")
+    first_config_signature = firmware.index("static bool applyRemoteSchedule")
+    assert forward < definition < first_config_signature
+
+
 def test_sleep_domains_and_pmic_remain_conservative_and_read_only():
     firmware = FIRMWARE.read_text(encoding="utf-8")
     domains = _between(firmware, "void prepareDeepSleepDomains()", "static void goDeepSleepSeconds")
@@ -76,9 +84,15 @@ def test_sleep_domains_and_pmic_remain_conservative_and_read_only():
     assert "writeRegisters(" not in pmic
     assert "PMIC rail voltage or shutdown-register writes" in pmic
 
+    hardware = HARDWARE.read_text(encoding="utf-8")
+    pmic_types = _between(hardware, "enum class PmicType", "struct SpiPins")
+    for pmic_type in ("None", "AXP2101", "TG28", "Unknown"):
+        assert pmic_type in pmic_types
+
     combined = firmware + support
     for forbidden in (
         "axp_basic_sleep_start",
+        "disableDC1",
         "disableDC2",
         "disableDC3",
         "disableDC4",
