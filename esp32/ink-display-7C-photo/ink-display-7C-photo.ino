@@ -41,6 +41,10 @@ struct AckJournalActivePointer;
 
 #include "driver/gpio.h"
 #include "soc/soc_caps.h"
+#if INKTIME_PHOTOPAINTER_ENABLED
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#endif
 
 // =======================
 //  正式版預設不輸出逐步序列 Log；需要除錯時以 -DINKTIME_DEBUG_LOG=1 編譯。
@@ -76,6 +80,66 @@ static const uint32_t FACTORY_RESET_SAMPLE_DELAY_MS = 5;
 // =======================
 static const uint32_t AP_TIMEOUT_MS = 5UL * 60UL * 1000UL; // 5 分钟
 static const uint8_t AP_MAX_SAVE_ATTEMPTS = 5;
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+static constexpr uint32_t kMaxAwakeTimeoutMs = 10UL * 60UL * 1000UL;
+static constexpr uint32_t kMaxAwakeSupervisorStackBytes = 2048U;
+static constexpr uint32_t kMaxAwakeCommandArm = 1U;
+static constexpr uint32_t kMaxAwakeCommandDisarm = 2U;
+static TaskHandle_t maxAwakeSupervisorTaskHandle = nullptr;
+static bool maxAwakeSupervisorCreated = false;
+
+static void maxAwakeSupervisorTask(void*) {
+  bool armed = true;
+  for (;;) {
+    uint32_t command = 0U;
+    const TickType_t waitTicks = armed
+        ? pdMS_TO_TICKS(kMaxAwakeTimeoutMs)
+        : portMAX_DELAY;
+    if (xTaskNotifyWait(0U, UINT32_MAX, &command, waitTicks) != pdTRUE) {
+      if (armed) esp_restart();
+      continue;
+    }
+    if (command == kMaxAwakeCommandDisarm) {
+      armed = false;
+    } else if (command == kMaxAwakeCommandArm) {
+      armed = true;
+    }
+  }
+}
+
+static void startMaxAwakeSupervisor() {
+  if (maxAwakeSupervisorCreated) return;
+  maxAwakeSupervisorCreated = true;
+  const BaseType_t created = xTaskCreate(
+    maxAwakeSupervisorTask,
+    "ink_maxawake",
+    kMaxAwakeSupervisorStackBytes,
+    nullptr,
+    tskIDLE_PRIORITY + 1U,
+    &maxAwakeSupervisorTaskHandle
+  );
+  if (created != pdPASS) maxAwakeSupervisorTaskHandle = nullptr;
+}
+
+static void disarmMaxAwakeSupervisor() {
+  if (maxAwakeSupervisorTaskHandle == nullptr) return;
+  xTaskNotify(
+    maxAwakeSupervisorTaskHandle,
+    kMaxAwakeCommandDisarm,
+    eSetValueWithOverwrite
+  );
+}
+
+static void armMaxAwakeSupervisor() {
+  if (maxAwakeSupervisorTaskHandle == nullptr) return;
+  xTaskNotify(
+    maxAwakeSupervisorTaskHandle,
+    kMaxAwakeCommandArm,
+    eSetValueWithOverwrite
+  );
+}
+#endif
 
 // 實體面板固定 800x480；既有伺服器 payload 契約維持直向 480x800。
 static constexpr int EPD_WIDTH  = kBoardConfig.display.width;
@@ -2329,6 +2393,7 @@ void startConfigPortal() {
 #if INKTIME_PHOTOPAINTER_ENABLED
   uint32_t lastPowerCheckMs = enterMs;
   bool usbServiceActive = photoPainter.usbConnected();
+  if (usbServiceActive) disarmMaxAwakeSupervisor();
 #endif
 
   for (;;) {
@@ -2338,10 +2403,14 @@ void startConfigPortal() {
     if (millis() - lastPowerCheckMs >= 5000) {
       photoPainter.refreshPowerState();
       lastPowerCheckMs = millis();
-      if (usbServiceActive && !photoPainter.usbConnected()) {
+      const bool usbConnected = photoPainter.usbConnected();
+      if (!usbServiceActive && usbConnected) {
+        disarmMaxAwakeSupervisor();
+      } else if (usbServiceActive && !usbConnected) {
+        armMaxAwakeSupervisor();
         goDeepSleepMinutes(minutesToNextRefreshFromLastEpoch(g_cfg));
       }
-      usbServiceActive = photoPainter.usbConnected();
+      usbServiceActive = usbConnected;
     }
 #else
     const bool usbServiceActive = false;
@@ -2371,6 +2440,7 @@ bool runUsbServiceMode() {
   if (!photoPainter.usbConnected()) return false;
   // USB power alone is not authorization to alter Wi-Fi or a device token.
   if (!isFactoryResetRequestedAtBoot()) return false;
+  disarmMaxAwakeSupervisor();
   portalSetupSecret = randomPortalSecret();
   portalNonce = randomPortalSecret();
   portalSaveAttempts = 0;
@@ -2393,6 +2463,7 @@ bool runUsbServiceMode() {
     delay(10);
   }
   server.stop();
+  armMaxAwakeSupervisor();
   return true;
 }
 #endif
@@ -6288,6 +6359,10 @@ void setup() {
   delay(200);
   INK_LOG_INFO("firmware_boot", "InkTime firmware boot started");
 
+#if INKTIME_PHOTOPAINTER_ENABLED
+  startMaxAwakeSupervisor();
+#endif
+
 #if DEBUG_LOG
   DBG_PRINTLN();
   DBG_PRINTLN("===== ESP32-S3 InkTime Daily Photo boot =====");
@@ -6557,4 +6632,6 @@ void setup() {
 }
 
 void loop() {
+  delay(1000);
+  goDeepSleepSeconds(60U);
 }

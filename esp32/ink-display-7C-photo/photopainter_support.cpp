@@ -8,12 +8,14 @@
 #include <SD.h>
 #include <SPI.h>
 #include <Wire.h>
+#include <driver/rtc_io.h>
 #include <esp_heap_caps.h>
 #include <esp_sleep.h>
 #include <new>
 #include <sys/time.h>
 
 #include "photopainter_core.h"
+#include "photopainter_wake_core.h"
 #include "power_manager.h"
 #include "spectra6_73.h"
 
@@ -580,12 +582,23 @@ bool PhotoPainterSupport::begin() {
   PP_LOG("[BOARD] profile=%s flash=%u psram=%u ready=%d\n",
          board_.name, flashSize, psramSize, hardwareReady_ ? 1 : 0);
 
+  const esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
+  const uint64_t ext1WakeStatus = wakeCause == ESP_SLEEP_WAKEUP_EXT1
+      ? esp_sleep_get_ext1_wakeup_status()
+      : 0ULL;
+  const bool userButtonWake = wakeCause == ESP_SLEEP_WAKEUP_EXT1
+      && ext1WakeStatusContainsUserButton(ext1WakeStatus, board_.buttons.user);
+  if (wakeCause == ESP_SLEEP_WAKEUP_EXT1) {
+    // EXT1 leaves an RTC-capable pad under RTC IO control. Restore GPIO4
+    // before applying its normal runtime input/pull-up configuration.
+    rtc_gpio_deinit(static_cast<gpio_num_t>(board_.buttons.user));
+  }
   pinMode(board_.buttons.user, INPUT_PULLUP);
   if (board_.audio.paEnable != kNoPin) {
     pinMode(board_.audio.paEnable, OUTPUT);
     digitalWrite(board_.audio.paEnable, LOW);
   }
-  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) {
+  if (userButtonWake) {
     wokeFromUserButton_ = true;
     delay(30);
     const uint32_t pressedAt = millis();
@@ -1524,14 +1537,14 @@ void PhotoPainterSupport::prepareForDeepSleep() {
 }
 
 void PhotoPainterSupport::enableWakeSources() {
-  if (board_.buttons.user == kNoPin) return;
+  if (board_.buttons.user == kNoPin || !board_.buttons.userActiveLow) return;
   const uint32_t releaseStarted = millis();
   while (digitalRead(board_.buttons.user) == LOW && millis() - releaseStarted < 2000) delay(20);
   if (digitalRead(board_.buttons.user) == LOW) return;
   pinMode(board_.buttons.user, INPUT_PULLUP);
-  esp_sleep_enable_ext0_wakeup(
-    static_cast<gpio_num_t>(board_.buttons.user),
-    board_.buttons.userActiveLow ? 0 : 1
+  esp_sleep_enable_ext1_wakeup_io(
+    gpioWakeMask(board_.buttons.user),
+    ESP_EXT1_WAKEUP_ANY_LOW
   );
 }
 

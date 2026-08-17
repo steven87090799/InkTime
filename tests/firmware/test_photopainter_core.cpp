@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "photopainter_core.h"
+#include "photopainter_wake_core.h"
 #include "offline_schedule_core.h"
 #include "power_policy.h"
 
@@ -24,6 +25,12 @@ int main() {
   assert(kBoardConfig.buttons.factoryReset == kNoPin);
   assert(kBoardConfig.buttons.boot == 0);
   assert(kBoardConfig.buttons.user == 4);
+  assert(kBoardConfig.buttons.userActiveLow);
+  assert(kBoardConfig.buttons.power == 5);
+  assert(gpioWakeMask(kBoardConfig.buttons.user) == (1ULL << 4U));
+  assert(ext1WakeStatusContainsUserButton(1ULL << 4U, kBoardConfig.buttons.user));
+  assert(!ext1WakeStatusContainsUserButton(1ULL << 5U, kBoardConfig.buttons.user));
+  assert(!ext1WakeStatusContainsUserButton(0ULL, kBoardConfig.buttons.user));
   assert(kBoardConfig.requiredFlashBytes == 16U * 1024U * 1024U);
   assert(kBoardConfig.requiredPsramBytes == 8U * 1024U * 1024U);
 #else
