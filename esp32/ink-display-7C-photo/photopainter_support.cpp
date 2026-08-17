@@ -280,7 +280,7 @@ class ProbePowerManager final : public PowerManager {
   }
 
   void refreshMeasurements() override {
-    usbConnected_ = false;
+    powerSourceState_ = PowerSourceState::Unknown;
     batteryMillivolts_ = 0;
     batteryPercent_ = -1;
     if (type_ != PmicType::AXP2101) return;
@@ -289,7 +289,9 @@ class ProbePowerManager final : public PowerManager {
     const bool batteryConnected = (status[0] & (1U << 3U)) != 0;
     const bool vbusGood = (status[0] & (1U << 5U)) != 0;
     const bool vbusOverVoltage = (status[1] & (1U << 3U)) != 0;
-    usbConnected_ = vbusGood && !vbusOverVoltage;
+    powerSourceState_ = vbusGood && !vbusOverVoltage
+        ? PowerSourceState::Usb
+        : PowerSourceState::Battery;
     if (!batteryConnected) return;
     uint8_t voltage[2] = {0, 0};
     if (bus_.readRegister(kAxp2101Address, kAxp2101BatteryVoltageHigh, voltage, 2)) {
@@ -304,7 +306,10 @@ class ProbePowerManager final : public PowerManager {
   }
 
   PmicType type() const override { return type_; }
-  bool isUsbConnected() const override { return usbConnected_; }
+  PowerSourceState powerSourceState() const override { return powerSourceState_; }
+  bool isUsbConnected() const override {
+    return powerSourceState_ == PowerSourceState::Usb;
+  }
   float batteryVoltage() const override { return batteryMillivolts_ / 1000.0f; }
   int batteryPercent() const override { return batteryPercent_; }
   void prepareForDeepSleep() override {
@@ -315,7 +320,7 @@ class ProbePowerManager final : public PowerManager {
  private:
   BoundedI2cBus& bus_;
   PmicType type_ = PmicType::None;
-  bool usbConnected_ = false;
+  PowerSourceState powerSourceState_ = PowerSourceState::Unknown;
   uint16_t batteryMillivolts_ = 0;
   int batteryPercent_ = -1;
 };
@@ -1507,6 +1512,12 @@ void PhotoPainterSupport::readEnvironment() {
 
 bool PhotoPainterSupport::usbConnected() const {
   return impl_ != nullptr && impl_->power.isUsbConnected();
+}
+
+PowerSourceState PhotoPainterSupport::powerSourceState() const {
+  return impl_ == nullptr
+      ? PowerSourceState::Unknown
+      : impl_->power.powerSourceState();
 }
 
 PmicType PhotoPainterSupport::pmicType() const {

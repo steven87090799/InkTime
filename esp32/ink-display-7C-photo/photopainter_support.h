@@ -101,6 +101,7 @@ class PhotoPainterSupport {
   bool shtc3Ready() const { return shtc3Ready_; }
   bool forceNetworkRefresh() const { return forceNetworkRefresh_; }
   bool wokeFromUserButton() const { return wokeFromUserButton_; }
+  PowerSourceState powerSourceState() const;
   bool usbConnected() const;
   PmicType pmicType() const;
   float batteryVoltage() const;

@@ -111,7 +111,6 @@ static void maxAwakeSupervisorTask(void*) {
 
 static void startMaxAwakeSupervisor() {
   if (maxAwakeSupervisorCreated) return;
-  maxAwakeSupervisorCreated = true;
   const BaseType_t created = xTaskCreate(
     maxAwakeSupervisorTask,
     "ink_maxawake",
@@ -120,7 +119,12 @@ static void startMaxAwakeSupervisor() {
     tskIDLE_PRIORITY + 1U,
     &maxAwakeSupervisorTaskHandle
   );
-  if (created != pdPASS) maxAwakeSupervisorTaskHandle = nullptr;
+  if (created == pdPASS) {
+    maxAwakeSupervisorCreated = true;
+  } else {
+    maxAwakeSupervisorTaskHandle = nullptr;
+    maxAwakeSupervisorCreated = false;
+  }
 }
 
 static void disarmMaxAwakeSupervisor() {
@@ -2393,8 +2397,8 @@ void startConfigPortal() {
   uint32_t enterMs = millis();
 #if INKTIME_PHOTOPAINTER_ENABLED
   uint32_t lastPowerCheckMs = enterMs;
-  bool usbServiceActive = photoPainter.usbConnected();
-  if (usbServiceActive) disarmMaxAwakeSupervisor();
+  inktime::PowerSourceState portalPowerSource = photoPainter.powerSourceState();
+  if (portalPowerSource == inktime::PowerSourceState::Usb) disarmMaxAwakeSupervisor();
 #endif
 
   for (;;) {
@@ -2404,20 +2408,28 @@ void startConfigPortal() {
     if (millis() - lastPowerCheckMs >= 5000) {
       photoPainter.refreshPowerState();
       lastPowerCheckMs = millis();
-      const bool usbConnected = photoPainter.usbConnected();
-      if (!usbServiceActive && usbConnected) {
+      const inktime::PowerSourceState nextPowerSource = photoPainter.powerSourceState();
+      if (portalPowerSource != inktime::PowerSourceState::Usb
+          && nextPowerSource == inktime::PowerSourceState::Usb) {
         disarmMaxAwakeSupervisor();
-      } else if (usbServiceActive && !usbConnected) {
+      } else if (portalPowerSource == inktime::PowerSourceState::Usb
+                 && nextPowerSource != inktime::PowerSourceState::Usb) {
         armMaxAwakeSupervisor();
+      }
+      if (portalPowerSource == inktime::PowerSourceState::Usb
+          && nextPowerSource == inktime::PowerSourceState::Battery) {
         goDeepSleepMinutes(minutesToNextRefreshFromLastEpoch(g_cfg));
       }
-      usbServiceActive = usbConnected;
+      portalPowerSource = nextPowerSource;
     }
 #else
-    const bool usbServiceActive = false;
+    const bool portalPowerIsUsb = false;
 #endif
 
-    if (!usbServiceActive && millis() - enterMs > AP_TIMEOUT_MS) {
+#if INKTIME_PHOTOPAINTER_ENABLED
+    const bool portalPowerIsUsb = portalPowerSource == inktime::PowerSourceState::Usb;
+#endif
+    if (!portalPowerIsUsb && millis() - enterMs > AP_TIMEOUT_MS) {
 #if DEBUG_LOG
       DBG_PRINTLN("[AP] timeout: no config saved");
 #endif
@@ -2434,14 +2446,22 @@ void startConfigPortal() {
 }
 
 #if INKTIME_PHOTOPAINTER_ENABLED
-// A confirmed USB source keeps the existing configuration WebServer available.
-// The project has no MQTT client to migrate; battery operation remains one-shot.
+// Explicit recovery stays long-lived only while USB is positively confirmed.
+// Unknown sources remain bounded; battery operation remains one-shot.
 bool runUsbServiceMode() {
   photoPainter.refreshPowerState();
-  if (!photoPainter.usbConnected()) return false;
   // USB power alone is not authorization to alter Wi-Fi or a device token.
-  if (!isFactoryResetRequestedAtBoot()) return false;
-  disarmMaxAwakeSupervisor();
+  // PhotoPainter has no runtime factory-reset pin, so a long GPIO4 wake is its
+  // explicit physical recovery request. A short wake never authorizes service.
+  const bool explicitRecoveryRequested = isFactoryResetRequestedAtBoot()
+      || (photoPainter.wokeFromUserButton() && photoPainter.forceNetworkRefresh());
+  if (!explicitRecoveryRequested) return false;
+
+  inktime::PowerSourceState servicePowerSource = photoPainter.powerSourceState();
+  if (servicePowerSource == inktime::PowerSourceState::Battery) return false;
+  if (servicePowerSource == inktime::PowerSourceState::Usb) {
+    disarmMaxAwakeSupervisor();
+  }
   portalSetupSecret = randomPortalSecret();
   portalNonce = randomPortalSecret();
   portalSaveAttempts = 0;
@@ -2451,16 +2471,29 @@ bool runUsbServiceMode() {
   server.on("/save", HTTP_POST, handleSave);
   server.begin();
 #if DEBUG_LOG
-  DBG_PRINTLN("[USB] configuration WebServer remains awake until VBUS removal");
+  DBG_PRINTLN("[USB] explicit configuration service started");
 #endif
 
+  const uint32_t serviceStartedMs = millis();
   uint32_t lastPowerCheckMs = millis();
-  while (photoPainter.usbConnected()) {
+  for (;;) {
     server.handleClient();
     if (millis() - lastPowerCheckMs >= 5000) {
       photoPainter.refreshPowerState();
       lastPowerCheckMs = millis();
+      const inktime::PowerSourceState nextPowerSource = photoPainter.powerSourceState();
+      if (servicePowerSource != inktime::PowerSourceState::Usb
+          && nextPowerSource == inktime::PowerSourceState::Usb) {
+        disarmMaxAwakeSupervisor();
+      } else if (servicePowerSource == inktime::PowerSourceState::Usb
+                 && nextPowerSource != inktime::PowerSourceState::Usb) {
+        armMaxAwakeSupervisor();
+      }
+      servicePowerSource = nextPowerSource;
     }
+    if (servicePowerSource == inktime::PowerSourceState::Battery) break;
+    if (servicePowerSource == inktime::PowerSourceState::Unknown
+        && millis() - serviceStartedMs > AP_TIMEOUT_MS) break;
     delay(10);
   }
   server.stop();
@@ -5749,7 +5782,10 @@ void reportDeviceStatus(Config &cfg, bool displayUpdated) {
   payload["rtc"] = photoPainter.rtcReady();
   payload["cache_status"] = inktime::cacheStatusName(photoPainter.cacheStatus());
   payload["pmic_type"] = inktime::pmicTypeName(photoPainter.pmicType());
-  payload["usb_power"] = photoPainter.usbConnected();
+  const inktime::PowerSourceState powerSourceState = photoPainter.powerSourceState();
+  if (powerSourceState != inktime::PowerSourceState::Unknown) {
+    payload["usb_power"] = powerSourceState == inktime::PowerSourceState::Usb;
+  }
   if (photoPainter.batteryVoltage() > 0.0f) {
     payload["battery_voltage"] = photoPainter.batteryVoltage();
   }
@@ -6434,6 +6470,7 @@ void setup() {
   if (!offlineScheduleTxnBlocked && g_cfg.auth_state == "paired" && !deviceAuthInvalid
       && g_cfg.delivery_mode == "inktime_offline_schedule"
       && photoPainter.wokeFromUserButton()
+      && !photoPainter.forceNetworkRefresh()
       && g_cfg.button_wake_action == "local_next") {
     // local_next is a strict cache-only action.  It must not connect Wi-Fi or
     // ask the generic queue for its first item.

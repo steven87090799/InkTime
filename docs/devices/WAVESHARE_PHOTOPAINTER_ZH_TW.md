@@ -3,8 +3,8 @@
 ## 支援狀態
 
 InkTime 2.6.0 可用單一 compile-time Profile 切換既有 PCB 與 Waveshare
-ESP32-S3-PhotoPainter。這是可編譯、可靜態測試的硬體 adapter；目前沒有連接
-真實 PhotoPainter、面板、SD、電池或量測儀器，因此不得視為實機驗證完成。
+ESP32-S3-PhotoPainter。使用者實際板上的 PMIC 封裝標示已確認為 TG28，但這只確認
+硬體 revision，不代表 GPIO 喚醒、面板、SD、電池或睡眠電流已完成實機驗證。
 
 ```cpp
 #define DEVICE_PROFILE DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER
@@ -88,22 +88,31 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   CRC-8 並送回 sleep；CRC 錯誤不回報溫濕度。
 - PCF85063 以 0x51 probe，RTC 只保存 UTC。NTP 成功後寫入 RTC；NTP 失敗時可由
   RTC 恢復排程，時區仍使用 InkTime 裝置設定，不硬編碼在 RTC。
-- PMIC 先在 0x34 讀取 chip ID；只有 ID 0x4A 才標為 AXP2101。實作只讀取 USB、
-  電池電壓與 fuel-gauge 百分比，不修改 LDO、充電電流或 shutdown register。
-- 無法識別的 PMIC 標為 `unknown`；USB、電壓與百分比都只作診斷遙測。PMIC 不明、
-  電壓讀取失敗或百分比未知都不會阻擋下載、設定頁或電子紙刷新，也沒有需要使用者
-  校正的低電壓門檻。
+- 使用者實際 PhotoPainter 板上的 PMIC 封裝標示為 TG28；InkTime 也保留獨立的
+  `TG28` 型別，但目前沒有可引用的官方 TG28 identity／register 契約，因此不會僅因
+  板型或「不是 AXP2101」就把 runtime identity 猜成 TG28。
+- 既有 PMIC driver 只會用已知的 0x34／chip ID register 0x03／ID 0x4A 契約正向辨識
+  AXP2101，並以唯讀 status register 提供 USB、電池電壓與 fuel-gauge 百分比。TG28
+  或其他未識別 PMIC 維持 `unknown`，電源來源狀態也維持 `Unknown`。
+- TG28／未識別 PMIC 完全不執行 PMIC register mutation；不寫 rail、充電、shutdown
+  或推測的省電 register。缺少 PMIC 遙測不會阻擋圖片下載、排程、RTC、SD 或電子紙
+  刷新，也沒有需要使用者校正的低電壓門檻。
 - 本專案不需要音訊，因此不初始化 ES7210／ES8311；PA GPIO 7 維持 LOW。
 
 ## 按鍵、喚醒與網路邊界
 
-- GPIO 4 有 debounce 且可作 EXT0 active-low wake。Stock／Online 路徑短按檢查新內容，
-  長按至少 1.2 秒要求 bounded network refresh；Enhanced timer wake 的本地排程只讀
-  正式 Frame，不呼叫 Wi-Fi、NTP 或 HTTP。睡前等待按鍵釋放以免重複喚醒。
+- GPIO 4 有 debounce，並使用 EXT1 `ANY_LOW` active-low wake；只有 EXT1 wake-status
+  mask 確實包含 GPIO 4 才視為 USER／KEY 喚醒。Stock／Online 路徑短按檢查新內容，
+  長按至少 1.2 秒要求 bounded network refresh；timer wake 仍獨立啟用，Enhanced
+  timer wake 的本地排程只讀正式 Frame，不呼叫 Wi-Fi、NTP 或 HTTP。睡前等待按鍵
+  釋放以免重複喚醒。
 - GPIO 5 完全不作一般輸出；GPIO 0 不取樣、不驅動，完整保留原廠 BOOT／下載用途。
 - Wi-Fi、HTTP、NTP、AP 與 EPD 都有有限 timeout。Wi-Fi 失敗時先嘗試由 RTC 與正式
   快取完成到期的離線 Slot；否則進入有界設定入口。PMIC 辨識與電池讀值不參與這個
   決策，因此讀不到電源資訊時仍能看見並修正網路或設定問題。
+- 長按 GPIO 4 喚醒是 PhotoPainter 的明確實體 recovery/service 授權；USB 供電本身
+  不授權設定變更。電源來源確認為 USB 時可沿用長時間 service；TG28 等 `Unknown`
+  狀態仍可進入 recovery，但不解除 max-awake supervisor，且設定服務最多五分鐘。
 - Manifest 必須是有限 Content-Length 的 JSON；圖片必須是精確長度的
   `application/octet-stream` 且 SHA-256 相符。
 - Backend transport 預設只接受有 compile-time 或 AP portal provisioning trust anchor
@@ -119,12 +128,13 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
 
 ## 自動能源遙測
 
-- 韌體 2.6.0 在低頻 Status API 回報電池電壓、估算百分比、USB 狀態、刷新耗時與
+- 韌體 2.6.0 在低頻 Status API 回報可取得的電池電壓、估算百分比、USB 狀態、刷新耗時與
   從開機到狀態上傳前的完整喚醒週期耗時；既有 Profile 也會回報刷新與喚醒耗時。
 - Web「能源」頁保存最近 400 天樣本，提供 7／30／90／365 天電量、電壓、刷新耗時、
   完整喚醒時間與最近樣本；所有資料都由裝置自動回報。
 - 頁面不再提供電池容量、待機電流、喚醒平均電流或安全保留量表單，也不計算依賴
-  人工量測的續航模型。PMIC 數值只協助診斷，不會控制裝置是否可用。
+  人工量測的續航模型。TG28 尚無文件化遙測時，電池百分比與 USB 狀態不得宣稱有效；
+  PMIC 數值只協助診斷，不會控制裝置是否可用。
 
 ## 編譯
 
