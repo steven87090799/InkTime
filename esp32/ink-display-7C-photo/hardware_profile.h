@@ -35,6 +35,12 @@ enum class PmicType : uint8_t {
   Unknown,
 };
 
+enum class PowerSourceState : uint8_t {
+  Unknown,
+  Battery,
+  Usb,
+};
+
 struct SpiPins {
   int8_t cs;
   int8_t sck;
