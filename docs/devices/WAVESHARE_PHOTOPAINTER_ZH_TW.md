@@ -102,17 +102,18 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
 ## 按鍵、喚醒與網路邊界
 
 - GPIO 4 有 debounce，並使用 EXT1 `ANY_LOW` active-low wake；只有 EXT1 wake-status
-  mask 確實包含 GPIO 4 才視為 USER／KEY 喚醒。Stock／Online 路徑短按檢查新內容，
-  長按至少 1.2 秒要求 bounded network refresh；timer wake 仍獨立啟用，Enhanced
-  timer wake 的本地排程只讀正式 Frame，不呼叫 Wi-Fi、NTP 或 HTTP。睡前等待按鍵
-  釋放以免重複喚醒。
+  mask 確實包含 GPIO 4 才視為 USER／KEY 喚醒。短按保留既有 USER 動作；持續至少
+  1.2 秒但未滿 4 秒要求 bounded forced network refresh；刻意持續至少 4 秒才授權
+  recovery/service。timer wake 仍獨立啟用，Enhanced timer wake 的本地排程只讀正式
+  Frame，不呼叫 Wi-Fi、NTP 或 HTTP。睡前等待按鍵釋放以免重複喚醒。
 - GPIO 5 完全不作一般輸出；GPIO 0 不取樣、不驅動，完整保留原廠 BOOT／下載用途。
 - Wi-Fi、HTTP、NTP、AP 與 EPD 都有有限 timeout。Wi-Fi 失敗時先嘗試由 RTC 與正式
   快取完成到期的離線 Slot；否則進入有界設定入口。PMIC 辨識與電池讀值不參與這個
   決策，因此讀不到電源資訊時仍能看見並修正網路或設定問題。
-- 長按 GPIO 4 喚醒是 PhotoPainter 的明確實體 recovery/service 授權；USB 供電本身
-  不授權設定變更。電源來源確認為 USB 時可沿用長時間 service；TG28 等 `Unknown`
-  狀態仍可進入 recovery，但不解除 max-awake supervisor，且設定服務最多五分鐘。
+- 持續至少 4 秒的 GPIO 4 喚醒才是 PhotoPainter 的明確實體 recovery/service 授權；
+  USB 供電本身與 1.2 至未滿 4 秒的 forced refresh 都不授權設定變更。電源來源確認為
+  USB 時可沿用長時間 service；TG28 等 `Unknown` 狀態仍可進入 recovery，但不解除
+  max-awake supervisor，且設定服務最多五分鐘。
 - Manifest 必須是有限 Content-Length 的 JSON；圖片必須是精確長度的
   `application/octet-stream` 且 SHA-256 相符。
 - Backend transport 預設只接受有 compile-time 或 AP portal provisioning trust anchor

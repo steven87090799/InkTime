@@ -31,6 +31,18 @@ int main() {
   assert(ext1WakeStatusContainsUserButton(1ULL << 4U, kBoardConfig.buttons.user));
   assert(!ext1WakeStatusContainsUserButton(1ULL << 5U, kBoardConfig.buttons.user));
   assert(!ext1WakeStatusContainsUserButton(0ULL, kBoardConfig.buttons.user));
+  assert(!shouldForceNetworkRefresh(0U));
+  assert(!shouldRequestRecoveryService(0U));
+  assert(!shouldForceNetworkRefresh(1199U));
+  assert(!shouldRequestRecoveryService(1199U));
+  assert(shouldForceNetworkRefresh(1200U));
+  assert(!shouldRequestRecoveryService(1200U));
+  assert(shouldForceNetworkRefresh(3999U));
+  assert(!shouldRequestRecoveryService(3999U));
+  assert(shouldForceNetworkRefresh(4000U));
+  assert(shouldRequestRecoveryService(4000U));
+  assert(shouldForceNetworkRefresh(5000U));
+  assert(shouldRequestRecoveryService(5000U));
   assert(kBoardConfig.requiredFlashBytes == 16U * 1024U * 1024U);
   assert(kBoardConfig.requiredPsramBytes == 8U * 1024U * 1024U);
 #else

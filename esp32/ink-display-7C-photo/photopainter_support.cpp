@@ -607,8 +607,13 @@ bool PhotoPainterSupport::begin() {
     wokeFromUserButton_ = true;
     delay(30);
     const uint32_t pressedAt = millis();
-    while (digitalRead(board_.buttons.user) == LOW && millis() - pressedAt < 5000) delay(20);
-    forceNetworkRefresh_ = millis() - pressedAt >= 1200;
+    while (digitalRead(board_.buttons.user) == LOW
+           && millis() - pressedAt < kUserButtonHoldMeasurementLimitMs) {
+      delay(20);
+    }
+    const uint32_t heldMs = millis() - pressedAt;
+    forceNetworkRefresh_ = shouldForceNetworkRefresh(heldMs);
+    recoveryServiceRequested_ = shouldRequestRecoveryService(heldMs);
     delay(30);
   }
 

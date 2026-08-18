@@ -6425,10 +6425,10 @@ void setup() {
     lastDeviceErrorCode = photoPainter.lastError();
     lastDeviceErrorMessage = "PhotoPainter Flash／OPI PSRAM 不存在或容量不足";
   }
-  // PhotoPainter has no runtime factory-reset pin, so a long GPIO4 wake is its
-  // explicit physical recovery request. A short wake never authorizes service.
+  // Recovery is a deliberate hold distinct from the established shorter
+  // force-network-refresh gesture. A short wake never authorizes service.
   const bool explicitRecoveryRequested = factoryResetRequested
-      || (photoPainter.wokeFromUserButton() && photoPainter.forceNetworkRefresh());
+      || photoPainter.recoveryServiceRequested();
 #endif
 
   loadConfig(g_cfg);
@@ -6471,7 +6471,7 @@ void setup() {
   if (!offlineScheduleTxnBlocked && g_cfg.auth_state == "paired" && !deviceAuthInvalid
       && g_cfg.delivery_mode == "inktime_offline_schedule"
       && photoPainter.wokeFromUserButton()
-      && !explicitRecoveryRequested
+      && !photoPainter.forceNetworkRefresh()
       && g_cfg.button_wake_action == "local_next") {
     // local_next is a strict cache-only action.  It must not connect Wi-Fi or
     // ask the generic queue for its first item.

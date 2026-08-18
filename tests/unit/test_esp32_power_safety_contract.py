@@ -7,6 +7,8 @@ ROOT = Path(__file__).resolve().parents[2]
 FIRMWARE = ROOT / "esp32/ink-display-7C-photo/ink-display-7C-photo.ino"
 HARDWARE = ROOT / "esp32/ink-display-7C-photo/hardware_profile.h"
 SUPPORT = ROOT / "esp32/ink-display-7C-photo/photopainter_support.cpp"
+SUPPORT_HEADER = ROOT / "esp32/ink-display-7C-photo/photopainter_support.h"
+WAKE_CORE = ROOT / "esp32/ink-display-7C-photo/photopainter_wake_core.h"
 POWER_MANAGER = ROOT / "esp32/ink-display-7C-photo/power_manager.h"
 DOCS = ROOT / "docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md"
 
@@ -48,6 +50,18 @@ def test_photopainter_ext1_user_wake_validates_gpio4_and_preserves_timer_wake():
     assert "ext1WakeStatusContainsUserButton(ext1WakeStatus, board_.buttons.user)" in begin
     assert begin.index("rtc_gpio_deinit") < begin.index("pinMode(board_.buttons.user, INPUT_PULLUP)")
     assert begin.index("if (userButtonWake)") < begin.index("wokeFromUserButton_ = true")
+    assert "const uint32_t heldMs = millis() - pressedAt;" in begin
+    assert "shouldForceNetworkRefresh(heldMs)" in begin
+    assert "shouldRequestRecoveryService(heldMs)" in begin
+
+    wake_core = WAKE_CORE.read_text(encoding="utf-8")
+    assert "kForceNetworkRefreshHoldMs = 1200U" in wake_core
+    assert "kRecoveryServiceHoldMs = 4000U" in wake_core
+    assert "kUserButtonHoldMeasurementLimitMs = 5000U" in wake_core
+    assert "kRecoveryServiceHoldMs < kUserButtonHoldMeasurementLimitMs" in wake_core
+    support_header = SUPPORT_HEADER.read_text(encoding="utf-8")
+    assert "bool recoveryServiceRequested() const" in support_header
+    assert "bool recoveryServiceRequested_ = false;" in support_header
 
     firmware = FIRMWARE.read_text(encoding="utf-8")
     sleep = _between(firmware, "static void goDeepSleepSeconds", "void goDeepSleepMinutes")
@@ -179,7 +193,11 @@ def test_max_awake_guard_is_independent_bounded_and_usb_exempt():
         "disarmMaxAwakeSupervisor();"
     )
     assert usb_service.index("armMaxAwakeSupervisor();") > usb_service.index("for (;;)")
-    portal = _between(firmware, "void startConfigPortal()", "bool runUsbServiceMode()")
+    portal = _between(
+        firmware,
+        "void startConfigPortal()",
+        "bool runUsbServiceMode(bool explicitRecoveryRequested)",
+    )
     assert "portalPowerSource == inktime::PowerSourceState::Usb" in portal
     assert "nextPowerSource == inktime::PowerSourceState::Battery" in portal
     assert "armMaxAwakeSupervisor();" in portal
@@ -190,7 +208,13 @@ def test_explicit_recovery_precedes_normal_display_network_shutdown():
     setup = _between(firmware, "void setup()", "void loop()")
     assert "const bool factoryResetRequested = isFactoryResetRequestedAtBoot();" in setup
     assert "const bool explicitRecoveryRequested = factoryResetRequested" in setup
-    assert "photoPainter.wokeFromUserButton() && photoPainter.forceNetworkRefresh()" in setup
+    recovery_intent = _between(
+        setup,
+        "const bool explicitRecoveryRequested = factoryResetRequested",
+        "#endif",
+    )
+    assert "photoPainter.recoveryServiceRequested()" in recovery_intent
+    assert "photoPainter.forceNetworkRefresh()" not in recovery_intent
 
     recovery = _between(
         setup,
@@ -208,6 +232,16 @@ def test_explicit_recovery_precedes_normal_display_network_shutdown():
     assert "runUsbServiceMode(" not in setup[download:]
     assert "stopNetworkBeforeDisplay();" in setup[download:]
 
+    local_key = _between(
+        setup,
+        "&& photoPainter.wokeFromUserButton()",
+        "runOfflineLocalCycle(true);",
+    )
+    assert "&& !photoPainter.forceNetworkRefresh()" in local_key
+    assert "const bool forcedRefresh = photoPainter.forceNetworkRefresh();" in firmware
+    support = SUPPORT.read_text(encoding="utf-8")
+    assert "if (forceNetworkRefresh_ ||" in support
+
     wifi_failure = _between(setup, "if (!connectWiFi(g_cfg))", "startConfigPortal();")
     offline_fallback = _between(
         wifi_failure,
@@ -222,6 +256,8 @@ def test_photopainter_docs_match_ext1_and_fail_closed_tg28_behavior():
     assert "EXT0 active-low wake" not in docs
     assert "EXT1 `ANY_LOW` active-low wake" in docs
     assert "wake-status" in docs and "GPIO 4" in docs
+    assert "1.2 秒但未滿 4 秒" in docs
+    assert "持續至少 4 秒才授權" in docs
     assert "PMIC 封裝標示為 TG28" in docs
     assert "不會僅因" in docs and "猜成 TG28" in docs
     assert "TG28／未識別 PMIC 完全不執行 PMIC register mutation" in docs
@@ -245,7 +281,7 @@ def test_existing_offline_timer_prefetch_and_key_actions_remain_routed():
         "&& photoPainter.wokeFromUserButton()",
         "runOfflineLocalCycle(true);",
     )
-    assert "&& !explicitRecoveryRequested" in local_key
+    assert "&& !photoPainter.forceNetworkRefresh()" in local_key
     for marker in (
         'g_cfg.button_wake_action == "local_next"',
         "runOfflineLocalCycle(true);",
