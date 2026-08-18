@@ -164,9 +164,12 @@ def test_max_awake_guard_is_independent_bounded_and_usb_exempt():
 
     setup = _between(firmware, "void setup()", "void loop()")
     assert setup.count("startMaxAwakeSupervisor();") == 1
-    usb_service = _between(firmware, "bool runUsbServiceMode()", "// =======================\n//  WiFi")
+    usb_service = _between(
+        firmware,
+        "bool runUsbServiceMode(bool explicitRecoveryRequested)",
+        "// =======================\n//  WiFi",
+    )
     assert "if (!photoPainter.usbConnected()) return false;" not in usb_service
-    assert "photoPainter.wokeFromUserButton() && photoPainter.forceNetworkRefresh()" in usb_service
     assert "if (!explicitRecoveryRequested) return false;" in usb_service
     assert "servicePowerSource == inktime::PowerSourceState::Battery" in usb_service
     assert "servicePowerSource == inktime::PowerSourceState::Usb" in usb_service
@@ -180,6 +183,38 @@ def test_max_awake_guard_is_independent_bounded_and_usb_exempt():
     assert "portalPowerSource == inktime::PowerSourceState::Usb" in portal
     assert "nextPowerSource == inktime::PowerSourceState::Battery" in portal
     assert "armMaxAwakeSupervisor();" in portal
+
+
+def test_explicit_recovery_precedes_normal_display_network_shutdown():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    setup = _between(firmware, "void setup()", "void loop()")
+    assert "const bool factoryResetRequested = isFactoryResetRequestedAtBoot();" in setup
+    assert "const bool explicitRecoveryRequested = factoryResetRequested" in setup
+    assert "photoPainter.wokeFromUserButton() && photoPainter.forceNetworkRefresh()" in setup
+
+    recovery = _between(
+        setup,
+        "if (explicitRecoveryRequested)",
+        "struct tm timeinfo;",
+    )
+    assert "runUsbServiceMode(explicitRecoveryRequested);" in recovery
+    assert "sleepUntilNextSchedule(g_cfg, hasRecoveryTime, recoveryTime);" in recovery
+    assert "return;" in recovery
+
+    recovery_call = setup.index("runUsbServiceMode(explicitRecoveryRequested);")
+    download = setup.index("downloadDailyPhotoBin(g_cfg)")
+    display_shutdown = setup.index("stopNetworkBeforeDisplay();")
+    assert recovery_call < download < display_shutdown
+    assert "runUsbServiceMode(" not in setup[download:]
+    assert "stopNetworkBeforeDisplay();" in setup[download:]
+
+    wifi_failure = _between(setup, "if (!connectWiFi(g_cfg))", "startConfigPortal();")
+    offline_fallback = _between(
+        wifi_failure,
+        "if (!explicitRecoveryRequested",
+        "runOfflineLocalCycle();",
+    )
+    assert "activeHasDueFormalSlot(rtcEpoch)" in offline_fallback
 
 
 def test_photopainter_docs_match_ext1_and_fail_closed_tg28_behavior():
@@ -210,7 +245,7 @@ def test_existing_offline_timer_prefetch_and_key_actions_remain_routed():
         "&& photoPainter.wokeFromUserButton()",
         "runOfflineLocalCycle(true);",
     )
-    assert "&& !photoPainter.forceNetworkRefresh()" in local_key
+    assert "&& !explicitRecoveryRequested" in local_key
     for marker in (
         'g_cfg.button_wake_action == "local_next"',
         "runOfflineLocalCycle(true);",

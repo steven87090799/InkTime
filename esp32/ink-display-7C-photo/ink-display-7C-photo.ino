@@ -2448,13 +2448,9 @@ void startConfigPortal() {
 #if INKTIME_PHOTOPAINTER_ENABLED
 // Explicit recovery stays long-lived only while USB is positively confirmed.
 // Unknown sources remain bounded; battery operation remains one-shot.
-bool runUsbServiceMode() {
+bool runUsbServiceMode(bool explicitRecoveryRequested) {
   photoPainter.refreshPowerState();
   // USB power alone is not authorization to alter Wi-Fi or a device token.
-  // PhotoPainter has no runtime factory-reset pin, so a long GPIO4 wake is its
-  // explicit physical recovery request. A short wake never authorizes service.
-  const bool explicitRecoveryRequested = isFactoryResetRequestedAtBoot()
-      || (photoPainter.wokeFromUserButton() && photoPainter.forceNetworkRefresh());
   if (!explicitRecoveryRequested) return false;
 
   inktime::PowerSourceState servicePowerSource = photoPainter.powerSourceState();
@@ -6408,7 +6404,8 @@ void setup() {
 #endif
 #endif
 
-  if (isFactoryResetRequestedAtBoot()) {
+  const bool factoryResetRequested = isFactoryResetRequestedAtBoot();
+  if (factoryResetRequested) {
 #if DEBUG_LOG
   DBG_PRINT("[BOOT] factory reset GPIO=");
   DBG_PRINTLN((int)kBoardConfig.buttons.factoryReset);
@@ -6428,6 +6425,10 @@ void setup() {
     lastDeviceErrorCode = photoPainter.lastError();
     lastDeviceErrorMessage = "PhotoPainter Flash／OPI PSRAM 不存在或容量不足";
   }
+  // PhotoPainter has no runtime factory-reset pin, so a long GPIO4 wake is its
+  // explicit physical recovery request. A short wake never authorizes service.
+  const bool explicitRecoveryRequested = factoryResetRequested
+      || (photoPainter.wokeFromUserButton() && photoPainter.forceNetworkRefresh());
 #endif
 
   loadConfig(g_cfg);
@@ -6470,7 +6471,7 @@ void setup() {
   if (!offlineScheduleTxnBlocked && g_cfg.auth_state == "paired" && !deviceAuthInvalid
       && g_cfg.delivery_mode == "inktime_offline_schedule"
       && photoPainter.wokeFromUserButton()
-      && !photoPainter.forceNetworkRefresh()
+      && !explicitRecoveryRequested
       && g_cfg.button_wake_action == "local_next") {
     // local_next is a strict cache-only action.  It must not connect Wi-Fi or
     // ask the generic queue for its first item.
@@ -6523,7 +6524,8 @@ void setup() {
       settimeofday(&value, nullptr);
       localtime_r(&rtcEpoch, &offlineTime);
     }
-    if (!offlineScheduleTxnBlocked && g_cfg.delivery_mode == "inktime_offline_schedule" && hasOfflineTime
+    if (!explicitRecoveryRequested && !offlineScheduleTxnBlocked
+        && g_cfg.delivery_mode == "inktime_offline_schedule" && hasOfflineTime
         && activeHasDueFormalSlot(rtcEpoch)) {
       // A due 00:00/current formal slot is serviceable from the active
       // cache even when the network recovery attempt fails.
@@ -6563,6 +6565,17 @@ void setup() {
     goDeepSleepSeconds(pairingBackoffSeconds(g_cfg));
     return;
   }
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+  if (explicitRecoveryRequested) {
+    (void)runUsbServiceMode(explicitRecoveryRequested);
+    struct tm recoveryTime = {};
+    bool hasRecoveryTime = getLocalTime(&recoveryTime, 1000);
+    if (!hasRecoveryTime) hasRecoveryTime = syncTime(g_cfg, recoveryTime);
+    sleepUntilNextSchedule(g_cfg, hasRecoveryTime, recoveryTime);
+    return;
+  }
+#endif
 
   struct tm timeinfo;
   String wakeOrigin;
@@ -6650,13 +6663,6 @@ void setup() {
     return;
   }
   if (!networkClosedForDisplay) reportDeviceStatus(g_cfg, displayUpdated);
-
-#if INKTIME_PHOTOPAINTER_ENABLED
-  if (runUsbServiceMode()) {
-    // The prior timestamp may be hours old after a USB service session.
-    hasTime = getLocalTime(&timeinfo, 1000);
-  }
-#endif
 
   if (!hasTime) {
     struct tm tmp;
