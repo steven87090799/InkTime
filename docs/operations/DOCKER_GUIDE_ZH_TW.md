@@ -188,6 +188,10 @@ Nginx 負責 TLS 與公開入口限流；InkTime 負責 Session／CSRF／CSP／H
 
 ## 8. 更新、備份與回滾
 
+NAS 若要避免每次 `git pull` 與本機 Build，可改用 `docker-compose.nas.yml`。版本合併到 `main` 後建立 `vX.Y.Z` Git Tag，GitHub Actions 會發布 GHCR 多架構映像；NAS 只需執行 `./scripts/update_nas.sh vX.Y.Z`。首次設定、`latest` 規則、私有 Package 登入與 Schema 回復邊界見 [NAS 以 Git Tag 更新 InkTime Docker](NAS_TAG_DEPLOYMENT_ZH_TW.md)。
+
+保留原始碼並在部署主機 Build 的既有流程如下。
+
 更新前在「備份」建立並下載一份備份，再執行：
 
 ```bash

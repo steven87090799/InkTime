@@ -1,0 +1,153 @@
+name: Publish InkTime Container Image
+
+"on":
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: inktime-container-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+  attestations: write
+  id-token: write
+
+env:
+  IMAGE_NAME: ghcr.io/steven87090799/inktime
+
+jobs:
+  publish:
+    name: Publish multi-architecture GHCR image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with:
+          fetch-depth: 0
+
+      - id: release
+        name: Validate immutable release tag and main ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if ! grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$' <<<"${tag}"; then
+            echo "Release tag must use SemVer, for example v1.2.3 or v1.2.3-rc.1." >&2
+            exit 1
+          fi
+          tagged_commit="$(git rev-parse "${GITHUB_REF}^{commit}")"
+          checked_out_commit="$(git rev-parse HEAD)"
+          test "${tagged_commit}" = "${checked_out_commit}"
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          if ! git merge-base --is-ancestor "${tagged_commit}" origin/main; then
+            echo "Release tag ${tag} does not point to a commit reachable from origin/main." >&2
+            exit 1
+          fi
+          build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if [[ "${tag}" == *-* ]]; then
+            stable=false
+          else
+            stable=true
+          fi
+          {
+            echo "tag=${tag}"
+            echo "commit=${tagged_commit}"
+            echo "build_time=${build_time}"
+            echo "stable=${stable}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to overwrite an existing version tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          set +e
+          inspect_output="$(docker buildx imagetools inspect "${IMAGE_NAME}:${RELEASE_TAG}" 2>&1)"
+          inspect_status=$?
+          set -e
+          if [ "${inspect_status}" -eq 0 ]; then
+            echo "Container tag ${IMAGE_NAME}:${RELEASE_TAG} already exists and is immutable." >&2
+            exit 1
+          fi
+          if ! grep -Eqi 'manifest unknown|not found' <<<"${inspect_output}"; then
+            echo "Unable to verify release-tag immutability against GHCR." >&2
+            printf '%s\n' "${inspect_output}" >&2
+            exit 1
+          fi
+
+      - id: metadata
+        name: Generate OCI tags and labels
+        uses: docker/metadata-action@c1e51972afc2121e065aed6d45c65596fe445f3f # v5.8.0
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.release.outputs.tag }}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ steps.release.outputs.stable == 'true' }}
+          labels: |
+            org.opencontainers.image.title=InkTime
+            org.opencontainers.image.description=InkTime photo analysis and e-paper memory platform
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.release.outputs.commit }}
+            org.opencontainers.image.version=${{ steps.release.outputs.tag }}
+            org.opencontainers.image.created=${{ steps.release.outputs.build_time }}
+
+      - id: push
+        name: Build and push linux/amd64 and linux/arm64 images
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            INKTIME_GIT_REVISION=${{ steps.release.outputs.commit }}
+            INKTIME_BUILD_TIME=${{ steps.release.outputs.build_time }}
+          cache-from: type=gha,scope=inktime-release
+          cache-to: type=gha,mode=max,scope=inktime-release
+
+      - name: Attest the published image provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Write release summary
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_COMMIT: ${{ steps.release.outputs.commit }}
+          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
+          STABLE_RELEASE: ${{ steps.release.outputs.stable }}
+        run: |
+          {
+            echo "### InkTime container published"
+            echo "- Image: \`${IMAGE_NAME}:${RELEASE_TAG}\`"
+            echo "- Commit: \`${RELEASE_COMMIT}\`"
+            echo "- Digest: \`${IMAGE_DIGEST}\`"
+            echo "- Platforms: \`linux/amd64\`, \`linux/arm64\`"
+            if [ "${STABLE_RELEASE}" = "true" ]; then
+              echo "- Stable alias: \`${IMAGE_NAME}:latest\`"
+            else
+              echo "- Stable alias: unchanged (pre-release tag)"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"

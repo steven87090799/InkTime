@@ -743,7 +743,9 @@ def _classify_path(path: str) -> tuple[set[str], set[str], set[str], bool]:
         gates.add("container_security")
         return domains, suites, gates, False
 
-    if path.startswith("docker-compose"):
+    if path.startswith("docker-compose") or (
+        path.startswith(".env") and path.endswith(".example")
+    ):
         domains.add("docker")
         suites.update({"docker_runtime_owner", "container_configuration_owner"})
         gates.update({"docker_lan_persistence", "container_security"})
@@ -790,7 +792,7 @@ def _classify_path(path: str) -> tuple[set[str], set[str], set[str], bool]:
             )
             gates.update({"docker_lan_persistence", "runtime_soak", "container_security"})
             return domains, suites, gates, False
-        if path == "scripts/build_release_image.sh":
+        if path in {"scripts/build_release_image.sh", "scripts/update_nas.sh"}:
             domains.add("docker")
             suites.update({"docker_runtime_owner", "container_configuration_owner"})
             gates.add("container_security")
