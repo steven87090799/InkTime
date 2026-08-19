@@ -540,6 +540,24 @@ def test_docker_routing_separates_image_tls_and_storage_boundaries():
     assert "docker_lan_persistence" not in tls["expensive_gates"]
 
 
+def test_nas_release_files_route_container_ownership_and_runtime_validation():
+    compose = build_test_plan(["docker-compose.nas.yml"], draft_context())
+    env = build_test_plan([".env.nas.example"], draft_context())
+    updater = build_test_plan(["scripts/update_nas.sh"], draft_context())
+
+    for plan in (compose, env):
+        assert {"docker_runtime_owner", "container_configuration_owner"} <= set(
+            plan["selected_test_suites"]
+        )
+        assert {"docker_lan_persistence", "container_security"} <= set(
+            plan["expensive_gates"]
+        )
+    assert {"docker_runtime_owner", "container_configuration_owner"} <= set(
+        updater["selected_test_suites"]
+    )
+    assert "container_security" in updater["expensive_gates"]
+
+
 def test_web_and_mixed_tooling_paths_fail_open_only_outside_known_roots():
     template = build_test_plan(["inktime/app/web/templates/login.html"], draft_context())
     unknown_html = build_test_plan(["unrelated.html"], draft_context())

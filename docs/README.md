@@ -9,7 +9,7 @@
 | 第一次啟動 Docker | [快速開始](getting-started/QUICK_START_ZH_TW.md) → [安裝指南](getting-started/INSTALLATION_ZH_TW.md) |
 | 了解程式如何運作 | [現行架構與流程](architecture/ARCHITECTURE_ZH_TW.md) → [Application Factory](architecture/APPLICATION_FACTORY.md) |
 | 管理照片、模型、裝置與設定 | [管理員指南](guides/ADMIN_GUIDE_ZH_TW.md) → [使用者指南](guides/USER_GUIDE_ZH_TW.md) |
-| 部署、備份或故障排除 | [Docker 部署](operations/DOCKER_GUIDE_ZH_TW.md) → [備份還原](operations/BACKUP_RESTORE_ZH_TW.md) → [疑難排解](operations/TROUBLESHOOTING_ZH_TW.md) |
+| 部署、以 Tag 更新 NAS、備份或故障排除 | [Docker 部署](operations/DOCKER_GUIDE_ZH_TW.md) → [NAS Tag 更新](operations/NAS_TAG_DEPLOYMENT_ZH_TW.md) → [備份還原](operations/BACKUP_RESTORE_ZH_TW.md) → [疑難排解](operations/TROUBLESHOOTING_ZH_TW.md) |
 | 開發或修改系統 | [開發指南](getting-started/DEVELOPMENT_GUIDE_ZH_TW.md) → [架構文件](architecture/ARCHITECTURE_ZH_TW.md) |
 | 接入 ESP32 或 PhotoPainter | [ESP32 指南](devices/ESP32_GUIDE_ZH_TW.md) → [自動配對](devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) → [PhotoPainter](devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) → [交付模式](devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md) |
 | 使用本機無 AI 模式 | [Local-only 選片與雙照片](guides/LOCAL_ONLY_SELECTION_ZH_TW.md) |
@@ -76,6 +76,7 @@
 ### 維運、安全與部署
 
 - [`operations/DOCKER_GUIDE_ZH_TW.md`](operations/DOCKER_GUIDE_ZH_TW.md)：N100 Docker 部署、資源、健康檢查、更新與回滾。
+- [`operations/NAS_TAG_DEPLOYMENT_ZH_TW.md`](operations/NAS_TAG_DEPLOYMENT_ZH_TW.md)：Git Tag 發布 GHCR 映像、NAS 初次設定、單一 Tag 更新與固定版本回復。
 - [`operations/N100_RESOURCE_GUIDE_ZH_TW.md`](operations/N100_RESOURCE_GUIDE_ZH_TW.md)：N100 容量與低功耗調校。
 - [`operations/LOGGING_GUIDE_ZH_TW.md`](operations/LOGGING_GUIDE_ZH_TW.md)：Log 層級、遮罩與判讀方法。
 - [`operations/TROUBLESHOOTING_ZH_TW.md`](operations/TROUBLESHOOTING_ZH_TW.md)：常見故障與處理順序。
