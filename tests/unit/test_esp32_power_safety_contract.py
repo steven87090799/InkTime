@@ -192,7 +192,12 @@ def test_max_awake_guard_is_independent_bounded_and_usb_exempt():
     assert usb_service.index("PowerSourceState::Usb) {") < usb_service.index(
         "disarmMaxAwakeSupervisor();"
     )
-    assert usb_service.index("armMaxAwakeSupervisor();") > usb_service.index("for (;;)")
+    service_loop = _between(usb_service, "for (;;)", "server.stop();")
+    loop_rearm = service_loop.index("armMaxAwakeSupervisor();")
+    assert service_loop.index("nextPowerSource != inktime::PowerSourceState::Usb") < loop_rearm
+    server_stop = usb_service.index("server.stop();")
+    final_rearm = usb_service.rindex("armMaxAwakeSupervisor();")
+    assert server_stop < final_rearm < usb_service.index("return true;", server_stop)
     portal = _between(
         firmware,
         "void startConfigPortal()",
@@ -253,6 +258,7 @@ def test_explicit_recovery_precedes_normal_display_network_shutdown():
 
 def test_photopainter_docs_match_ext1_and_fail_closed_tg28_behavior():
     docs = DOCS.read_text(encoding="utf-8")
+    normalized_docs = " ".join(docs.split())
     assert "EXT0 active-low wake" not in docs
     assert "EXT1 `ANY_LOW` active-low wake" in docs
     assert "wake-status" in docs and "GPIO 4" in docs
@@ -261,7 +267,7 @@ def test_photopainter_docs_match_ext1_and_fail_closed_tg28_behavior():
     assert "PMIC 封裝標示為 TG28" in docs
     assert "不會僅因" in docs and "猜成 TG28" in docs
     assert "TG28／未識別 PMIC 完全不執行 PMIC register mutation" in docs
-    assert "不解除 max-awake supervisor" in docs
+    assert "不解除 max-awake supervisor" in normalized_docs
 
 
 def test_unexpected_loop_entry_sleeps_without_network_or_mutation():
