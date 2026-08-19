@@ -193,10 +193,17 @@ def test_max_awake_guard_is_independent_bounded_and_usb_exempt():
         "disarmMaxAwakeSupervisor();"
     )
     service_loop = _between(usb_service, "for (;;)", "server.stop();")
-    loop_rearm = service_loop.index("armMaxAwakeSupervisor();")
-    assert service_loop.index("nextPowerSource != inktime::PowerSourceState::Usb") < loop_rearm
+    usb_to_non_usb = _between(
+        service_loop,
+        "} else if (servicePowerSource == inktime::PowerSourceState::Usb",
+        "servicePowerSource = nextPowerSource;",
+    )
+    loop_rearm = usb_to_non_usb.index("\n        armMaxAwakeSupervisor();")
+    assert usb_to_non_usb.index(
+        "nextPowerSource != inktime::PowerSourceState::Usb"
+    ) < loop_rearm
     server_stop = usb_service.index("server.stop();")
-    final_rearm = usb_service.rindex("armMaxAwakeSupervisor();")
+    final_rearm = usb_service.rindex("\n  armMaxAwakeSupervisor();")
     assert server_stop < final_rearm < usb_service.index("return true;", server_stop)
     portal = _between(
         firmware,
