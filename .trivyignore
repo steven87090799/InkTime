@@ -5,6 +5,10 @@
 #         re-evaluate the pinned base image before expiry. Unlisted findings fail CI.
 CVE-2025-69720
 CVE-2026-13221
+# CVE-2026-14456 is limited to OpenSSL QUIC server pending connections. InkTime
+# serves HTTP with Gunicorn and creates no QUIC listener; Debian 13 currently
+# reports fix_deferred with no FixedVersion. Remove after the pinned base is fixed.
+CVE-2026-14456
 CVE-2026-41992
 CVE-2026-42496
 CVE-2026-42497
