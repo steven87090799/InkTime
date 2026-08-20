@@ -35,7 +35,8 @@ RUN --mount=type=bind,from=builder,source=/wheels,target=/wheels \
     && rm -f requirements.txt
 COPY --chown=inktime:inktime inktime/ ./inktime/
 COPY --chown=inktime:inktime data/world_cities_zh.csv ./data/world_cities_zh.csv
-COPY --chown=inktime:inktime scripts/container_health.py scripts/migrate.py scripts/restore_backup.py ./scripts/
+COPY --chown=inktime:inktime scripts/container_health.py scripts/create_update_recovery.py scripts/migrate.py scripts/restore_backup.py ./scripts/
+COPY --chown=inktime:inktime nas-deployment-contract.version ./nas-deployment-contract.version
 COPY --chown=inktime:inktime server.py gunicorn.conf.py ./
 RUN mkdir -p /data /photos && chown -R inktime:inktime /data /app
 

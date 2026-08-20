@@ -48,6 +48,11 @@ jobs:
             exit 1
           fi
           build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          deployment_contract="$(tr -d '[:space:]' < nas-deployment-contract.version)"
+          if ! grep -Eq '^[1-9][0-9]*$' <<<"${deployment_contract}"; then
+            echo "nas-deployment-contract.version must contain one positive integer." >&2
+            exit 1
+          fi
           if [[ "${tag}" == *-* ]]; then
             stable=false
           else
@@ -58,6 +63,7 @@ jobs:
             echo "commit=${tagged_commit}"
             echo "build_time=${build_time}"
             echo "stable=${stable}"
+            echo "deployment_contract=${deployment_contract}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Set up QEMU
@@ -109,6 +115,7 @@ jobs:
             org.opencontainers.image.revision=${{ steps.release.outputs.commit }}
             org.opencontainers.image.version=${{ steps.release.outputs.tag }}
             org.opencontainers.image.created=${{ steps.release.outputs.build_time }}
+            io.inktime.nas-deployment-contract=${{ steps.release.outputs.deployment_contract }}
 
       - id: push
         name: Build and push linux/amd64 and linux/arm64 images

@@ -39,6 +39,7 @@ CI_HEAVY_JOBS = (
     "actionlint",
     "selected-owner-suites",
     "compose-lan-production-persistence",
+    "nas-pull-only-update-e2e",
     "compose-production-tls-smoke",
     "bounded-runtime-soak",
     "playwright",

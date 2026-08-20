@@ -29,8 +29,13 @@ image_tag=$git_revision
 if [ "$dirty" = true ]; then image_tag="${git_revision}-dirty"; fi
 image_reference="${repository}:${image_tag}"
 schema_version=$(python scripts/current_schema_version.py)
+deployment_contract=$(tr -d '[:space:]' < nas-deployment-contract.version)
+case "$deployment_contract" in
+  ''|*[!0-9]*) echo "BUILD-003 invalid NAS deployment contract" >&2; exit 2 ;;
+esac
 
 docker build --pull \
+  --label "io.inktime.nas-deployment-contract=${deployment_contract}" \
   --build-arg "INKTIME_GIT_REVISION=${git_revision}" \
   --build-arg "INKTIME_BUILD_TIME=${build_time}" \
   --tag "$image_reference" .
@@ -45,6 +50,7 @@ printf '%s\n' \
   "  \"image_reference\": \"${image_reference}\"," \
   "  \"image_id\": \"${image_id}\"," \
   "  \"migration_version\": ${schema_version}," \
+  "  \"nas_deployment_contract\": ${deployment_contract}," \
   "  \"dirty\": ${dirty}" \
   '}' > "$manifest_path"
 echo "BUILD-OK ${image_reference} manifest=${manifest_path}"

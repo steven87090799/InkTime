@@ -545,17 +545,21 @@ def test_nas_release_files_route_container_ownership_and_runtime_validation():
     env = build_test_plan([".env.nas.example"], draft_context())
     updater = build_test_plan(["scripts/update_nas.sh"], draft_context())
 
-    for plan in (compose, env):
+    contract = build_test_plan(["nas-deployment-contract.version"], draft_context())
+    publish = build_test_plan([".github/workflows/publish-container.yml"], draft_context())
+    recovery = build_test_plan(["scripts/create_update_recovery.py"], draft_context())
+    preflight = build_test_plan(["inktime/app/core/preflight.py"], draft_context())
+    backup = build_test_plan(["inktime/app/services/backups.py"], draft_context())
+    contract_test = build_test_plan(
+        ["tests/unit/test_container_release_workflow.py"], draft_context()
+    )
+
+    for plan in (compose, env, updater, contract, publish, recovery, preflight, backup):
         assert {"docker_runtime_owner", "container_configuration_owner"} <= set(
             plan["selected_test_suites"]
         )
-        assert {"docker_lan_persistence", "container_security"} <= set(
-            plan["expensive_gates"]
-        )
-    assert {"docker_runtime_owner", "container_configuration_owner"} <= set(
-        updater["selected_test_suites"]
-    )
-    assert "container_security" in updater["expensive_gates"]
+        assert {"nas_update_e2e", "container_security"} <= set(plan["expensive_gates"])
+    assert "nas_update_e2e" in contract_test["expensive_gates"]
 
 
 def test_web_and_mixed_tooling_paths_fail_open_only_outside_known_roots():
