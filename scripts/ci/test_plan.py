@@ -749,7 +749,12 @@ def _classify_path(path: str) -> tuple[set[str], set[str], set[str], bool]:
     if path.startswith("tests/"):
         return (*_test_path_plan(path), False)
 
-    is_markdown = path.startswith(("README", "LICENSE")) or path.startswith("docs/") or path.endswith(".md")
+    is_markdown = (
+        path == "USER_MANUAL.html"
+        or path.startswith(("README", "LICENSE"))
+        or path.startswith("docs/")
+        or path.endswith(".md")
+    )
     if is_markdown:
         domains.add("docs")
         suites.add("docs_contract")

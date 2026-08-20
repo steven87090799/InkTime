@@ -562,6 +562,15 @@ def test_nas_release_files_route_container_ownership_and_runtime_validation():
     assert "nas_update_e2e" in contract_test["expensive_gates"]
 
 
+def test_root_html_manual_is_documentation_not_an_unknown_full_suite_trigger():
+    plan = build_test_plan(["USER_MANUAL.html"], draft_context())
+
+    assert plan["ci_mode"] == IMPACT_MODE
+    assert plan["unknown_paths"] == []
+    assert "docs_contract" in plan["selected_test_suites"]
+    assert plan["expensive_gates"] == []
+
+
 def test_web_and_mixed_tooling_paths_fail_open_only_outside_known_roots():
     template = build_test_plan(["inktime/app/web/templates/login.html"], draft_context())
     unknown_html = build_test_plan(["unrelated.html"], draft_context())
