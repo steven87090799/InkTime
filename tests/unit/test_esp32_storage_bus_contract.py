@@ -116,7 +116,11 @@ def test_epd_uses_official_spi3_write_path_and_observed_busy_cycles():
     assert "for (size_t offset = 0; offset < length; ++offset)" not in block
     assert 'lastError_ = "EPD-BUSY-NOT-ASSERTED"' in spectra
     assert "waitForBusyAssertion() && waitUntilReady()" in spectra
-    assert spectra.count("waitForBusyCycle()") >= 4
+    assert spectra.count("waitForBusyCycle()") >= 2
+    assert "controller can complete POWER_ON before BUSY is sampled" in spectra
+    refresh = spectra[spectra.index("bool Spectra6_73::displayFrame") :]
+    assert refresh.index("sendCommand(0x04)") < refresh.index("waitUntilReady()")
+    assert refresh.index("sendCommand(0x12)") < refresh.index("waitForBusyCycle()")
 
     support = SUPPORT.read_text(encoding="utf-8")
     assert ": epdSpi(HSPI)," in support

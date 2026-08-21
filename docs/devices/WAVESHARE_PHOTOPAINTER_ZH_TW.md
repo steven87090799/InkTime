@@ -62,7 +62,8 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   16 MiB Flash／8 MiB PSRAM。不存在或不足時不退回 internal SRAM，也不開始
   大型 framebuffer 流程。
 - 所有 BUSY 等待上限 60 秒。官方現行程式顯示 BUSY low 代表忙碌，本 adapter
-  以 active-low 為安全預設；`POWER_ON`／`DISPLAY_REFRESH` 後必須先觀察到 BUSY
+  以 active-low 為安全預設。實板確認 `POWER_ON` 可能在 MCU 第一次取樣前完成，因此
+  該階段沿用官方「等待回到 ready」行為；真正的 `DISPLAY_REFRESH` 必須先觀察到 BUSY
   拉低、再回到高電位，避免面板未供電或命令未送達時被上拉電位誤判成功。未拉低或
   逾時都會停止傳輸、reset、盡力 power-off，且回報錯誤。
 - 每次 full refresh 完全沿用官方 `POWER_ON`、第二段 booster、`DISPLAY_REFRESH`、
@@ -88,6 +89,9 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
 
 - I²C 單一裝置失敗不會中止其他裝置。SHTC3 以 0x70 probe，量測後驗證兩段
   CRC-8 並送回 sleep；CRC 錯誤不回報溫濕度。
+- 開機與有界重試前先釋放 SDA／SCL；若 reset 中斷 transaction，最多以 open-drain
+  SCL 送九個 clock 再送 STOP。程式永遠不主動驅動 I²C 高電位，兩線仍為 low 時立即
+  fail-closed，等待完整斷電恢復，不繼續寫 PMIC 或驅動 EPD。
 - PCF85063 以 0x51 probe，RTC 只保存 UTC。NTP 成功後寫入 RTC；NTP 失敗時可由
   RTC 恢復排程，時區仍使用 InkTime 裝置設定，不硬編碼在 RTC。
 - Waveshare Rev2.0 原理圖確認 UP1 是 TG28、I²C 位址 0x34，且 **ALDO3 直接供應
@@ -96,8 +100,10 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   可讀性作 fail-closed 相容性檢查。
 - 每次顯示前只以 read-modify-write 將 TG28 `REG94[4:0]` 設為 `0x1C`（3.3 V），再將
   `REG90[2]` 設為 1 啟用 ALDO3；兩步都必須讀回一致，等待 10 ms 後才可初始化 EPD。
-  顯示 controller 完成 `POWER_OFF`／SPI shutdown 後清除 `REG90[2]`，保留其他七個
-  LDO enable bits 與 `REG94` 的保留位。任一步失敗都不送出電子紙更新命令。
+  顯示 controller 完成 `POWER_OFF`／SPI shutdown 後維持官方 runtime 的 ALDO3 狀態；
+  實板曾在清除該 rail 後的 ESP-only reset 觀察到共享 I²C 線持續為 low，完整斷電前
+  無法再由 ESP 存取 PMIC，因此不在一般 refresh／deep-sleep 路徑關閉它。任一步失敗
+  都不送出電子紙更新命令。
 - 韌體不寫 TG28 的 DCDC、充電、全機 shutdown、fast-power-on 或其他 LDO register。
   status、VBAT 與 fuel-gauge register 僅供遙測，也不作低電壓刷新門檻。
 - 本專案不需要音訊，因此不初始化 ES7210／ES8311；PA GPIO 7 維持 LOW。

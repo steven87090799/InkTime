@@ -8,6 +8,7 @@
 #include <SD.h>
 #include <SPI.h>
 #include <Wire.h>
+#include <driver/gpio.h>
 #include <driver/rtc_io.h>
 #include <esp_heap_caps.h>
 #include <esp_sleep.h>
@@ -125,6 +126,44 @@ struct I2cRetryTelemetry {
   uint32_t fail_closed_count = 0;
 };
 
+bool recoverI2cBusLines(const I2cConfig& config) {
+  if (config.sda == kNoPin || config.scl == kNoPin) return false;
+  if (gpio_reset_pin(static_cast<gpio_num_t>(config.sda)) != ESP_OK
+      || gpio_reset_pin(static_cast<gpio_num_t>(config.scl)) != ESP_OK) {
+    return false;
+  }
+  pinMode(config.sda, INPUT_PULLUP);
+  pinMode(config.scl, INPUT_PULLUP);
+  delayMicroseconds(10);
+  if (digitalRead(config.scl) == LOW) return false;
+
+  // A reset can interrupt a slave between data bits and leave SDA asserted.
+  // Clock at most one byte plus ACK using open-drain lows, then emit STOP.
+  pinMode(config.scl, OUTPUT_OPEN_DRAIN);
+  digitalWrite(config.scl, HIGH);
+  for (uint8_t pulse = 0; pulse < 9U && digitalRead(config.sda) == LOW; ++pulse) {
+    digitalWrite(config.scl, LOW);
+    delayMicroseconds(5);
+    digitalWrite(config.scl, HIGH);
+    delayMicroseconds(5);
+  }
+  if (digitalRead(config.scl) == LOW) {
+    pinMode(config.scl, INPUT_PULLUP);
+    return false;
+  }
+
+  pinMode(config.sda, OUTPUT_OPEN_DRAIN);
+  digitalWrite(config.sda, LOW);
+  delayMicroseconds(5);
+  digitalWrite(config.scl, HIGH);
+  delayMicroseconds(5);
+  digitalWrite(config.sda, HIGH);
+  delayMicroseconds(5);
+  pinMode(config.sda, INPUT_PULLUP);
+  pinMode(config.scl, INPUT_PULLUP);
+  return digitalRead(config.sda) == HIGH && digitalRead(config.scl) == HIGH;
+}
+
 class BoundedI2cBus final {
  public:
   BoundedI2cBus(TwoWire& wire, const I2cConfig& config, I2cRetryTelemetry& telemetry)
@@ -230,6 +269,7 @@ class BoundedI2cBus final {
   bool resetBus() {
     wire_.end();
     delay(kI2cRetryDelayMs);
+    if (!recoverI2cBusLines(config_)) return false;
     const bool ready = wire_.begin(config_.sda, config_.scl, config_.clockHz);
     if (ready) wire_.setTimeOut(kI2cTimeoutMs);
     return ready;
@@ -266,7 +306,6 @@ class ProbePowerManager final : public PowerManager {
 
   bool begin() override {
     type_ = PmicType::None;
-    displayRailPrepared_ = false;
     uint8_t ldoState = 0;
     uint8_t aldo3Voltage = 0;
     if (!bus_.probe(kPhotoPainterPmicAddress)) return false;
@@ -289,10 +328,6 @@ class ProbePowerManager final : public PowerManager {
       lastError_ = "PMIC-TG28-NOT-READY";
       return false;
     }
-    // A previous I2C/readback failure may have left ALDO3 on. Retain that
-    // state and require a verified cleanup before starting another refresh.
-    if (displayRailPrepared_ && !releaseDisplayPower()) return false;
-
     uint8_t voltage = 0;
     if (!bus_.readRegister(
           kPhotoPainterPmicAddress, kTg28Aldo3Voltage, &voltage, 1)) {
@@ -338,48 +373,14 @@ class ProbePowerManager final : public PowerManager {
       lastError_ = "PMIC-EPD-ENABLE-WRITE";
       return false;
     }
-    displayRailPrepared_ = true;
     uint8_t enableReadback = 0;
     if (!bus_.readRegister(
           kPhotoPainterPmicAddress, kTg28LdoEnable0, &enableReadback, 1)
         || (enableReadback & kTg28Aldo3EnableMask) == 0U) {
-      const char* enableError = "PMIC-EPD-ENABLE-READBACK";
-      if (releaseDisplayPower()) lastError_ = enableError;
+      lastError_ = "PMIC-EPD-ENABLE-READBACK";
       return false;
     }
     delay(kTg28Aldo3SettleMs);
-    return true;
-  }
-
-  bool releaseDisplayPower() {
-    if (!displayRailPrepared_) return true;
-    uint8_t ldoState = 0;
-    if (!bus_.readRegister(
-          kPhotoPainterPmicAddress, kTg28LdoEnable0, &ldoState, 1)) {
-      lastError_ = "PMIC-EPD-DISABLE-READ";
-      return false;
-    }
-    const uint8_t disabledState = static_cast<uint8_t>(
-      ldoState & static_cast<uint8_t>(~kTg28Aldo3EnableMask)
-    );
-    if (disabledState != ldoState
-        && !bus_.writeRegisters(
-          kPhotoPainterPmicAddress,
-          kTg28LdoEnable0,
-          &disabledState,
-          1,
-          true)) {
-      lastError_ = "PMIC-EPD-DISABLE-WRITE";
-      return false;
-    }
-    uint8_t disableReadback = 0;
-    if (!bus_.readRegister(
-          kPhotoPainterPmicAddress, kTg28LdoEnable0, &disableReadback, 1)
-        || (disableReadback & kTg28Aldo3EnableMask) != 0U) {
-      lastError_ = "PMIC-EPD-DISABLE-READBACK";
-      return false;
-    }
-    displayRailPrepared_ = false;
     return true;
   }
 
@@ -419,9 +420,9 @@ class ProbePowerManager final : public PowerManager {
   float batteryVoltage() const override { return batteryMillivolts_ / 1000.0f; }
   int batteryPercent() const override { return batteryPercent_; }
   void prepareForDeepSleep() override {
-    // EPD controller shutdown/reset is completed by the display driver before
-    // this removes only the Rev2.0 EPD_VCC rail. No other TG28 rail is changed.
-    releaseDisplayPower();
+    // The official runtime keeps ALDO3 available and powers down the EPD
+    // controller by command. Do not strand the shared board in an I2C-low
+    // state by changing PMIC rails immediately before ESP-only deep sleep.
   }
 
  private:
@@ -430,7 +431,6 @@ class ProbePowerManager final : public PowerManager {
   PowerSourceState powerSourceState_ = PowerSourceState::Unknown;
   uint16_t batteryMillivolts_ = 0;
   int batteryPercent_ = -1;
-  bool displayRailPrepared_ = false;
   const char* lastError_ = "";
 };
 
@@ -726,7 +726,12 @@ bool PhotoPainterSupport::begin() {
     delay(30);
   }
 
-  if (Wire.begin(board_.i2c.sda, board_.i2c.scl, board_.i2c.clockHz)) {
+  const bool i2cLinesReady = recoverI2cBusLines(board_.i2c);
+  PP_LOG("[I2C] recovery=%d sda=%d scl=%d\n",
+         i2cLinesReady ? 1 : 0,
+         digitalRead(board_.i2c.sda), digitalRead(board_.i2c.scl));
+  if (i2cLinesReady
+      && Wire.begin(board_.i2c.sda, board_.i2c.scl, board_.i2c.clockHz)) {
     Wire.setTimeOut(kI2cTimeoutMs);
     const bool pmicReady = impl_->power.begin();
     (void)pmicReady;
@@ -1563,13 +1568,8 @@ bool PhotoPainterSupport::displayFrame(const uint8_t* framebuffer, size_t length
       && impl_->display.displayFrame(framebuffer, length);
   const char* displayError = impl_->display.lastError();
   impl_->display.safeShutdown();
-  const bool poweredDown = impl_->power.releaseDisplayPower();
   if (!displayed) {
     lastError_ = displayError;
-    return false;
-  }
-  if (!poweredDown) {
-    lastError_ = impl_->power.lastError();
     return false;
   }
   lastRefreshDurationMs_ = impl_->display.lastRefreshDurationMs();

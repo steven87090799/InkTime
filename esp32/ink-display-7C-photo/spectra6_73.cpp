@@ -136,7 +136,10 @@ bool Spectra6_73::begin() {
   sendCommand(0x84); sendData(0x01);
   sendCommand(0xE3); sendData(0x2F);
   sendCommand(0x04);
-  if (!waitForBusyCycle()) {
+  // Waveshare's controller can complete POWER_ON before BUSY is sampled.
+  // Treat a high/ready BUSY as complete here, but require an observed BUSY
+  // cycle for DISPLAY_REFRESH below so an unpowered panel cannot pass.
+  if (!waitUntilReady()) {
     safeShutdown();
     return false;
   }
@@ -162,7 +165,7 @@ bool Spectra6_73::displayFrame(const uint8_t* framebuffer, size_t length) {
   sendData(framebuffer, length);
 
   sendCommand(0x04);
-  if (!waitForBusyCycle()) {
+  if (!waitUntilReady()) {
     safeShutdown();
     return false;
   }
