@@ -229,6 +229,7 @@ rw_recovery_source="${ci_root}/rw-recovery-source"
 rw_recovery_destination="${ci_root}/rw-recovery-destination"
 mkdir -p "$rw_recovery_source" "$rw_recovery_destination"
 touch "${rw_recovery_source}/inktime.db"
+touch "${rw_recovery_destination}/.source-snapshot.sqlite3"
 printf 'ci-recovery-session\n' > "${rw_recovery_source}/session.key"
 sudo chown -R 10001:10001 "$rw_recovery_source" "$rw_recovery_destination"
 sudo chmod 600 "${rw_recovery_source}/session.key"
@@ -240,6 +241,7 @@ if rw_recovery_output=$(docker run --rm --read-only --network none --user 10001:
   "${registry}:v1.0.0-ci-b" python scripts/create_update_recovery.py \
   --source-root /source \
   --destination-root /recovery \
+  --staged-snapshot /recovery/.source-snapshot.sqlite3 \
   --previous-image-ref "${registry}:v1.0.0-ci-a" \
   --previous-image-digest sha256:ci \
   --target-image-ref "${registry}:v1.0.0-ci-b" \

@@ -151,6 +151,9 @@ def test_nas_updater_pulls_before_no_build_recreate_and_never_deletes_volumes():
     assert 'target=/source,readonly' in updater
     assert 'source=${recovery_dir},target=/recovery' in updater
     assert 'source=${data_path},target=/data' not in updater
+    assert 'docker exec -i --user 10001:10001 "$web_container"' in updater
+    assert "source_connection.backup(target_connection)" in updater
+    assert "--staged-snapshot /recovery/.source-snapshot.sqlite3" in updater
     assert "--network none" in updater
     assert "--read-only" in updater
     assert "--security-opt no-new-privileges" in updater
@@ -166,18 +169,19 @@ def test_nas_updater_pulls_before_no_build_recreate_and_never_deletes_volumes():
     assert contract_path in RUNNER_SUITE_TEST_PATHS["ci_routing_contracts"]
 
 
-def test_update_recovery_uses_online_backup_and_excludes_payload_copies():
+def test_update_recovery_validates_staged_snapshot_and_excludes_payload_copies():
     recovery = RECOVERY_PATH.read_text(encoding="utf-8")
 
     assert 'if __package__ in {None, ""}' in recovery
     assert "sys.path.insert(0, str(Path(__file__).resolve().parents[1]))" in recovery
     assert "BackupService" in recovery
-    assert 'f"{source.as_uri()}?mode=ro"' in recovery
+    assert 'f"{path.as_uri()}?mode=ro"' in recovery
     assert "PRAGMA query_only = ON" in recovery
-    assert "source_connection.backup(target_connection)" in recovery
+    assert "source_connection.backup(target_connection)" not in recovery
     assert "BackupService(Database(staged_snapshot), destination_root)" in recovery
     assert "--source-root" in recovery
     assert "--destination-root" in recovery
+    assert "--staged-snapshot" in recovery
     assert "NAS-RECOVERY-SOURCE-RO-001" in recovery
     assert "NAS-RECOVERY-DEST-RW-001" in recovery
     assert "create(include_secrets=True)" in recovery

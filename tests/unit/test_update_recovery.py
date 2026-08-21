@@ -65,9 +65,18 @@ def _source_data(root: Path) -> tuple[Path, Path]:
 
 
 def _create(source: Path, destination: Path, *, source_read_only: bool) -> Path:
+    staged_snapshot = destination / ".source-snapshot.sqlite3"
+    source_connection = sqlite3.connect(source / "inktime.db")
+    target_connection = sqlite3.connect(staged_snapshot)
+    try:
+        source_connection.backup(target_connection)
+    finally:
+        target_connection.close()
+        source_connection.close()
     return create_recovery(
         source_root=source,
         destination_root=destination,
+        staged_snapshot=staged_snapshot,
         previous_image_ref="registry.example/inktime:v1.0.0",
         previous_image_digest="sha256:previous",
         target_image_ref="registry.example/inktime:v1.1.0",
@@ -87,7 +96,7 @@ def test_recovery_refuses_writable_source_mount(tmp_path):
     with pytest.raises(RuntimeError, match="NAS-RECOVERY-SOURCE-RO-001"):
         _create(source, destination, source_read_only=False)
 
-    assert list(destination.iterdir()) == []
+    assert [path.name for path in destination.iterdir()] == [".source-snapshot.sqlite3"]
 
 
 def test_recovery_uses_readonly_source_and_bounded_writable_destination(tmp_path):

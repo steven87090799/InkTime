@@ -127,9 +127,9 @@ sudo ./scripts/update_nas.sh latest
 
 ## 5. 更新前後檢查
 
-每次已有資料庫的更新，host updater 都會先在 `/data/backups` 新建一個空白、非 symlink、權限受限的 `update-recovery-...` 目錄。目標映像的 sandbox recovery container 只會看到 production data root 的 `/source:ro`，以及該單一新目錄的 `/recovery:rw`；它沒有網路、capability、額外 NAS 路徑或整個 `/data` 的寫入權。
+每次已有資料庫的更新，host updater 都會先在 `/data/backups` 新建一個空白、非 symlink、權限受限的 `update-recovery-...` 目錄。更新器要求目前的 `inktime-web` 容器仍在執行，並由該既有容器用 SQLite online backup API 對 live WAL database 建立一致的 staged snapshot；若沒有可用的現行 Web 容器或 snapshot 失敗，就在替換服務前 fail closed。目標映像的 sandbox recovery container 只會看到 production data root 的 `/source:ro`，以及該單一新目錄的 `/recovery:rw`；它沒有網路、capability、額外 NAS 路徑或整個 `/data` 的寫入權。
 
-Recovery 工具以 SQLite `mode=ro` 與 `query_only` 從 production DB online backup 到 `/recovery` 內的暫存 snapshot，再讓既有 `BackupService` 只處理該 recovery 副本。完成後保留含 Secrets 的可驗證資料庫備份、權限 `0600` 的 `session.key` 副本，以及前版／目標映像、digest、Schema、deployment contract 與 SHA-256 metadata；不複製原始照片、快取、整個 Release payload。若唯讀 snapshot、mount、Session Key 或 archive 驗證任一步失敗，更新立即中止且不替換既有服務；沒有把 production data 改掛 RW 的 fallback。這是更新前 recovery point，不取代異機備份政策。
+現行 Web 容器對 production DB 使用 SQLite `mode=ro`、`query_only` 與 online backup API，只把一致 snapshot 寫入本次新建的 bounded recovery 目錄。目標映像的 Recovery 工具會再次以唯讀模式驗證 live DB 身分與 staged snapshot 完整性，再讓既有 `BackupService` 只處理該 recovery 副本。完成後保留含 Secrets 的可驗證資料庫備份、權限 `0600` 的 `session.key` 副本，以及前版／目標映像、digest、Schema、deployment contract 與 SHA-256 metadata；不複製原始照片、快取、整個 Release payload。若唯讀 snapshot、mount、Session Key 或 archive 驗證任一步失敗，更新立即中止且不替換既有服務；目標映像沒有 production `/data:rw` fallback。這是更新前 recovery point，不取代異機備份政策。
 
 更新後確認：
 

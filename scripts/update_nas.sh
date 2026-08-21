@@ -284,7 +284,64 @@ if [ -f "${data_path}/inktime.db" ]; then
     echo "NAS-UPDATE-RECOVERY-003 recovery destination ownership or mode is unsafe" >&2
     exit 2
   fi
+  if [ -z "$web_container" ] ||
+    [ "$(docker inspect --format '{{.State.Running}}' "$web_container" 2>/dev/null || true)" != true ]; then
+    cleanup_new_recovery || true
+    echo "NAS-UPDATE-RECOVERY-004 a running current inktime-web container is required to snapshot the live SQLite database" >&2
+    exit 2
+  fi
+  recovery_name=$(basename -- "$recovery_dir")
+  staged_snapshot_host="${recovery_dir}/.source-snapshot.sqlite3"
+  staged_snapshot_container="/data/backups/${recovery_name}/.source-snapshot.sqlite3"
   echo "Creating verified online recovery point before container replacement..."
+  if ! docker exec -i --user 10001:10001 "$web_container" \
+    python - "$staged_snapshot_container" <<'PY'
+from pathlib import Path
+import os
+import sqlite3
+import stat
+import sys
+
+source = Path("/data/inktime.db")
+destination = Path(sys.argv[1])
+source_details = os.lstat(source)
+if stat.S_ISLNK(source_details.st_mode) or not stat.S_ISREG(source_details.st_mode):
+    raise RuntimeError("NAS-UPDATE-RECOVERY-DB-001 live SQLite source must be a regular file")
+if destination.exists() or destination.is_symlink():
+    raise RuntimeError("NAS-UPDATE-RECOVERY-DB-001 staged snapshot already exists")
+
+source_connection = sqlite3.connect(f"{source.as_uri()}?mode=ro", uri=True)
+target_connection = sqlite3.connect(destination)
+try:
+    source_connection.execute("PRAGMA query_only = ON")
+    query_only = source_connection.execute("PRAGMA query_only").fetchone()
+    if query_only is None or int(query_only[0]) != 1:
+        raise RuntimeError("NAS-UPDATE-RECOVERY-DB-001 SQLite query_only verification failed")
+    source_connection.backup(target_connection)
+    integrity = target_connection.execute("PRAGMA integrity_check").fetchone()
+    if integrity is None or str(integrity[0]) != "ok":
+        raise RuntimeError("NAS-UPDATE-RECOVERY-DB-001 staged snapshot integrity check failed")
+    target_connection.commit()
+finally:
+    target_connection.close()
+    source_connection.close()
+
+descriptor = os.open(destination, os.O_RDONLY)
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+  then
+    cleanup_new_recovery || true
+    echo "NAS-UPDATE-RECOVERY-001 live SQLite snapshot failed; existing containers and data were not replaced" >&2
+    exit 2
+  fi
+  if [ ! -f "$staged_snapshot_host" ] || [ -L "$staged_snapshot_host" ]; then
+    cleanup_new_recovery || true
+    echo "NAS-UPDATE-RECOVERY-001 live SQLite snapshot was not created safely; existing containers and data were not replaced" >&2
+    exit 2
+  fi
   recovery_output=$(docker run --rm --read-only --network none --user 10001:10001 \
     --security-opt no-new-privileges --cap-drop ALL \
     --mount "type=bind,source=${data_path},target=/source,readonly" \
@@ -293,6 +350,7 @@ if [ -f "${data_path}/inktime.db" ]; then
     "$target_image_ref" python scripts/create_update_recovery.py \
     --source-root /source \
     --destination-root /recovery \
+    --staged-snapshot /recovery/.source-snapshot.sqlite3 \
     --previous-image-ref "$previous_image_ref" \
     --previous-image-digest "$previous_image_digest" \
     --target-image-ref "$target_image_ref" \

@@ -141,7 +141,9 @@ def _lan_environ(tmp_path: Path) -> dict[str, str]:
 def test_lan_environment_requires_production_paths_identity_and_readonly_photos(tmp_path):
     validate_lan_environment(
         _lan_environ(tmp_path),
-        "target: /photos\n      read_only: true\n      bind:\n        create_host_path: false",
+        (Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text(
+            encoding="utf-8"
+        ),
     )
 
 
