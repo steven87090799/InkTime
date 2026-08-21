@@ -92,6 +92,9 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
 - 開機與有界重試前先釋放 SDA／SCL；若 reset 中斷 transaction，最多以 open-drain
   SCL 送九個 clock 再送 STOP。程式永遠不主動驅動 I²C 高電位，兩線仍為 low 時立即
   fail-closed，等待完整斷電恢復，不繼續寫 PMIC 或驅動 EPD。
+- 若 SDA／SCL 持續為 low，依 Waveshare 官方電源流程：拔除 USB、長按 PWR 5 至 6 秒
+  直到 PWR 指示燈熄滅、等待至少 10 秒，再接回 USB 並短按 PWR 開機。單純拔插 USB
+  或 ESP-only reset 不一定會清除 PMIC／共享 I²C 的鎖定狀態；不要以 GPIO 強驅兩線為高。
 - PCF85063 以 0x51 probe，RTC 只保存 UTC。NTP 成功後寫入 RTC；NTP 失敗時可由
   RTC 恢復排程，時區仍使用 InkTime 裝置設定，不硬編碼在 RTC。
 - Waveshare Rev2.0 原理圖確認 UP1 是 TG28、I²C 位址 0x34，且 **ALDO3 直接供應
@@ -225,6 +228,12 @@ slot 仍有足夠餘裕，但 OTA 簽章、rollback 與實際燒錄流程尚未�
 4. 排程後裝置能自行休眠並在下一個時間再次運作；GPIO 4 可要求本地下一張／網路更新。
 5. 若頁面回報 BUSY timeout、記憶體或儲存錯誤，保留舊畫面並從 Web 錯誤資訊處理，
    不需用電流表、萬用電表或邏輯分析儀判斷。
+
+2026-08-22 在 Waveshare Rev2.0 實板完成下列硬體 A/B：完整恢復燒錄前的官方 16 MB
+備份後，以 BOOT 雙擊成功刷新官方電池資訊畫面，確認 TG28、EPD_VCC、SPI、BUSY 與
+面板可用；再寫入 InkTime TG28 安全版後，裝置 log 回報 `pairing_display_ready`，配對
+畫面實際完成刷新，耗時 `30090 ms`。這是配對畫面的實板通過，不等同正式六色照片、
+排程喚醒、睡眠電流或電池續航已完成驗收。
 
 本輪的安全結論來自官方 commit `a5e8f757…` 原始碼比對、compile-time 腳位鎖定與
 Hosted CI 編譯，不是對實體面板壽命或電池續航的保證；這項限制不會轉成使用者必須
