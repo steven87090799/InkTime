@@ -172,10 +172,10 @@ def validate_lan_environment(environ: Mapping[str, str], compose_text: str) -> N
             )
     data_path = Path(str(environ["INKTIME_DATA_PATH"])).expanduser().resolve()
     photo_path = Path(str(environ["INKTIME_PHOTO_PATH"])).expanduser().resolve()
-    if data_path == photo_path:
+    if _paths_overlap(data_path, photo_path):
         _fail(
             "PREFLIGHT-LAN-PATH-003",
-            "Data path 與 Photo path 不得相同",
+            "Data path 與 Photo path 不得相同或互為父子路徑",
             "使用獨立可寫資料目錄與唯讀照片目錄",
         )
     image_tag = str(environ.get("INKTIME_IMAGE_TAG", "")).strip()
@@ -192,16 +192,33 @@ def validate_lan_environment(environ: Mapping[str, str], compose_text: str) -> N
             "正式 LAN build 必須提供 Git revision",
             "將 INKTIME_GIT_REVISION 設為實際完整 Git SHA",
         )
-    if ":/photos:ro" not in compose_text.replace(" ", ""):
+    compact_compose = compose_text.replace(" ", "")
+    if "target:/photos" not in compact_compose or "read_only:true" not in compact_compose:
         _fail(
             "PREFLIGHT-LAN-MOUNT-001",
             "Compose 的 /photos mount 必須唯讀",
-            "將照片 volume 設為 /photos:ro",
+            "將照片 long bind mount 設為 target: /photos 與 read_only: true",
         )
 
 
-def filesystem_for(path: Path, adapter: OSAdapter | None = None) -> str | None:
-    """Return the deepest Linux mount type; an empty result is deliberately safe.
+@dataclass(frozen=True)
+class MountInfo:
+    filesystem: str
+    mount_point: str
+    read_only: bool
+
+
+def _decode_mountinfo_path(value: str) -> str:
+    return (
+        value.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+    )
+
+
+def mount_for(path: Path, adapter: OSAdapter | None = None) -> MountInfo | None:
+    """Return the deepest component-aware Linux mount and its effective mode.
 
     macOS does not expose Linux mountinfo.  Tests can provide an adapter and
     production macOS deployments should use a local APFS data directory.
@@ -210,18 +227,42 @@ def filesystem_for(path: Path, adapter: OSAdapter | None = None) -> str | None:
     if not text:
         return None
     target = str(path.expanduser().resolve())
-    best: tuple[int, str] | None = None
+    best: tuple[int, MountInfo] | None = None
     for line in text.splitlines():
         before, marker, after = line.partition(" - ")
         fields, fs_fields = before.split(), after.split()
-        if not marker or len(fields) < 5 or not fs_fields:
+        if not marker or len(fields) < 6 or not fs_fields:
             continue
-        mount_point = fields[4].replace("\\040", " ")
+        mount_point = _decode_mountinfo_path(fields[4])
         if target == mount_point or target.startswith(mount_point.rstrip("/") + "/"):
-            candidate = (len(mount_point), fs_fields[0].casefold())
+            mount_options = {item.casefold() for item in fields[5].split(",")}
+            candidate = (
+                len(mount_point),
+                MountInfo(fs_fields[0].casefold(), mount_point, "ro" in mount_options),
+            )
             if best is None or candidate[0] > best[0]:
                 best = candidate
     return best[1] if best else None
+
+
+def filesystem_for(path: Path, adapter: OSAdapter | None = None) -> str | None:
+    mount = mount_for(path, adapter)
+    return mount.filesystem if mount else None
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    if left == right:
+        return True
+    try:
+        left.relative_to(right)
+        return True
+    except ValueError:
+        pass
+    try:
+        right.relative_to(left)
+        return True
+    except ValueError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -280,11 +321,24 @@ def run_production_preflight(
             "Production SQLite database 必須直接位於 /data 對應的 data directory",
             "設定 INKTIME_DATABASE=/data/inktime.db",
         )
-    if config.photo_dir == config.data_dir:
+    if _paths_overlap(config.photo_dir, config.data_dir):
         _fail(
-            "PREFLIGHT-PATH-001",
-            "Production photo directory 不得與 data directory 相同",
-            "使用獨立 /photos 唯讀 mount",
+            "DEPLOY-PATH-OVERLAP-001",
+            "Production photo 與 data directory 不得相同或互為父子路徑",
+            "使用彼此獨立的 /data 可寫 bind mount 與 /photos 唯讀 bind mount",
+        )
+    photo_mount = mount_for(config.photo_dir, adapter)
+    photo_read_only = photo_mount.read_only if photo_mount else False
+    if photo_mount is None and adapter is None:
+        try:
+            photo_read_only = bool(os.statvfs(config.photo_dir).f_flag & os.ST_RDONLY)
+        except OSError:
+            photo_read_only = False
+    if not photo_read_only:
+        _fail(
+            "DEPLOY-PHOTO-RO-001",
+            "Production /photos 必須是作業系統實際回報的唯讀 mount",
+            "以 Compose long bind syntax 設定 read_only: true，並確認容器 mountinfo 顯示 ro",
         )
     fs_type = filesystem_for(config.database_path.parent, adapter)
     unsafe = fs_type in UNSAFE_NETWORK_FILESYSTEMS

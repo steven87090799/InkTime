@@ -14,7 +14,18 @@ from inktime.app.core.runtime_config import RuntimeConfig
 
 class LocalFilesystem:
     def mountinfo(self) -> str:
-        return "1 0 0:1 / / rw - ext4 /dev/root rw"
+        return "1 0 0:1 / / ro - ext4 /dev/root ro"
+
+
+class WritablePhotoFilesystem:
+    def __init__(self, photo_dir: Path) -> None:
+        self.photo_dir = photo_dir
+
+    def mountinfo(self) -> str:
+        return (
+            "1 0 0:1 / / ro - ext4 /dev/root ro\n"
+            f"2 1 0:2 / {self.photo_dir} rw - ext4 /dev/photos rw"
+        )
 
 
 def _config(tmp_path: Path, **overrides) -> RuntimeConfig:
@@ -113,7 +124,10 @@ def _lan_environ(tmp_path: Path) -> dict[str, str]:
 
 
 def test_lan_environment_requires_production_paths_identity_and_readonly_photos(tmp_path):
-    validate_lan_environment(_lan_environ(tmp_path), "- ${INKTIME_PHOTO_PATH}:/photos:ro")
+    validate_lan_environment(
+        _lan_environ(tmp_path),
+        "target: /photos\n      read_only: true\n      bind:\n        create_host_path: false",
+    )
 
 
 @pytest.mark.parametrize(
@@ -129,19 +143,46 @@ def test_lan_environment_rejects_placeholders_simulation_and_unsafe_flags(tmp_pa
     environ = _lan_environ(tmp_path)
     environ[field] = value
     with pytest.raises(PreflightError, match=code):
-        validate_lan_environment(environ, "- ${INKTIME_PHOTO_PATH}:/photos:ro")
+        validate_lan_environment(environ, "target: /photos\nread_only: true")
 
 
 def test_lan_environment_rejects_same_data_and_photo_path(tmp_path):
     environ = _lan_environ(tmp_path)
     environ["INKTIME_PHOTO_PATH"] = environ["INKTIME_DATA_PATH"]
     with pytest.raises(PreflightError, match="PREFLIGHT-LAN-PATH-003"):
-        validate_lan_environment(environ, "- ${INKTIME_PHOTO_PATH}:/photos:ro")
+        validate_lan_environment(environ, "target: /photos\nread_only: true")
 
 
 def test_lan_environment_rejects_writable_photo_mount(tmp_path):
     with pytest.raises(PreflightError, match="PREFLIGHT-LAN-MOUNT-001"):
         validate_lan_environment(_lan_environ(tmp_path), "- ${INKTIME_PHOTO_PATH}:/photos")
+
+
+@pytest.mark.parametrize("photo_relative", ["runtime/photos", "runtime", "."])
+def test_production_rejects_equal_or_nested_data_and_photo_paths(tmp_path, photo_relative):
+    with pytest.raises(PreflightError, match="DEPLOY-PATH-OVERLAP-001"):
+        run_production_preflight(
+            _config(tmp_path, photo_dir=tmp_path / photo_relative),
+            adapter=LocalFilesystem(),
+        )
+
+
+def test_production_rejects_effectively_writable_photo_mount(tmp_path):
+    config = _config(tmp_path)
+    with pytest.raises(PreflightError, match="DEPLOY-PHOTO-RO-001"):
+        run_production_preflight(
+            config,
+            adapter=WritablePhotoFilesystem(config.photo_dir),
+        )
+
+
+@pytest.mark.parametrize("photo_relative", ["photos", "runtime-old"])
+def test_production_accepts_component_distinct_sibling_paths(tmp_path, photo_relative):
+    result = run_production_preflight(
+        _config(tmp_path, photo_dir=tmp_path / photo_relative),
+        adapter=LocalFilesystem(),
+    )
+    assert result.healthy
 
 
 @pytest.mark.parametrize(

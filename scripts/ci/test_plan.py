@@ -270,6 +270,7 @@ IMPACT_EXECUTION_OWNERS = frozenset(
     | {
         "migration-contract",
         "compose-lan-production-persistence",
+        "nas-pull-only-update-e2e",
         "compose-production-tls-smoke",
         "playwright",
         "firmware-host-contract",
@@ -286,6 +287,7 @@ FULL_EXECUTION_OWNERS = frozenset(
         "dependency-audit",
         "migration-contract",
         "compose-lan-production-persistence",
+        "nas-pull-only-update-e2e",
         "compose-production-tls-smoke",
         "playwright",
         "firmware-host-contract",
@@ -303,6 +305,7 @@ FULL_EXPENSIVE_GATES = (
     "runtime_soak",
     "playwright",
     "docker_lan_persistence",
+    "nas_update_e2e",
     "tls_smoke",
     "firmware_host_contract",
     "firmware_full_matrix",
@@ -359,6 +362,7 @@ IMPACT_GATE_EXECUTION = {
     "runtime_soak": "impact:runtime_soak",
     "playwright": "impact:playwright",
     "docker_lan_persistence": "impact:docker_lan_persistence",
+    "nas_update_e2e": "impact:nas_update_e2e",
     "tls_smoke": "impact:tls_smoke",
     "firmware_host_contract": "impact:firmware_host_contract",
     "firmware_quick": "impact:firmware_quick",
@@ -377,6 +381,7 @@ FULL_GATE_EXECUTION = {
     "runtime_soak": "full:runtime_soak",
     "playwright": "full:playwright",
     "docker_lan_persistence": "full:docker_lan_persistence",
+    "nas_update_e2e": "full:nas_update_e2e",
     "tls_smoke": "full:tls_smoke",
     "firmware_host_contract": "full:firmware_host_contract",
     "firmware_full_matrix": "full:firmware_full_matrix",
@@ -398,6 +403,7 @@ GATE_EXECUTION_OWNERS = {
     "runtime_soak": "bounded-runtime-soak",
     "playwright": "playwright",
     "docker_lan_persistence": "compose-lan-production-persistence",
+    "nas_update_e2e": "nas-pull-only-update-e2e",
     "tls_smoke": "compose-production-tls-smoke",
     "firmware_host_contract": "firmware-host-contract",
     "firmware_full_matrix": "esp32-compile",
@@ -422,6 +428,7 @@ WORKFLOW_EXECUTION_JOB_IDS = {
             "actionlint",
             "selected-owner-suites",
             "compose-lan-production-persistence",
+            "nas-pull-only-update-e2e",
             "compose-production-tls-smoke",
             "bounded-runtime-soak",
             "playwright",
@@ -450,6 +457,7 @@ IMPACT_TO_FULL_EXECUTION = {
         "runtime_soak": "runtime_soak",
         "playwright": "playwright",
         "docker_lan_persistence": "docker_lan_persistence",
+        "nas_update_e2e": "nas_update_e2e",
         "tls_smoke": "tls_smoke",
         "firmware_host_contract": "firmware_host_contract",
         "firmware_quick": "firmware_full_matrix",
@@ -678,6 +686,47 @@ def _classify_path(path: str) -> tuple[set[str], set[str], set[str], bool]:
     gates: set[str] = set()
     lower_path = path.casefold()
 
+    if path in {
+        "docker-compose.nas.yml",
+        ".env.nas.example",
+        "nas-deployment-contract.version",
+        ".github/workflows/publish-container.yml",
+        "scripts/build_release_image.sh",
+        "scripts/update_nas.sh",
+        "scripts/create_update_recovery.py",
+        "scripts/ci/nas_update_e2e.sh",
+        "inktime/app/core/preflight.py",
+        "inktime/app/core/runtime_config.py",
+        "inktime/app/services/backups.py",
+    }:
+        domains.update({"docker", "persistence", "backup_restore"})
+        suites.update(
+            {
+                "docker_runtime_owner",
+                "container_configuration_owner",
+                "persistence_owner",
+                "backup_restore_owner",
+            }
+        )
+        gates.update({"nas_update_e2e", "container_security"})
+        if path.endswith(".py"):
+            domains.add("python")
+            suites.add("python_application_owner")
+        if path.startswith(".github/") or path.startswith("scripts/ci/"):
+            domains.add("ci_config")
+            suites.add("ci_routing_contracts")
+            gates.add("actionlint")
+        return domains, suites, gates, False
+
+    if path in {
+        "tests/unit/test_container_release_workflow.py",
+        "tests/unit/test_preflight.py",
+    }:
+        domains.update({"test_surface", "ci_config"})
+        suites.update({"ci_planner_contracts", "ci_routing_contracts"})
+        gates.add("nas_update_e2e")
+        return domains, suites, gates, False
+
     # This path is both CI-owned and a real production TLS/container surface.
     if path.startswith(".github/tls-smoke/"):
         domains.update({"ci_config", "docker", "tls_security"})
@@ -700,7 +749,12 @@ def _classify_path(path: str) -> tuple[set[str], set[str], set[str], bool]:
     if path.startswith("tests/"):
         return (*_test_path_plan(path), False)
 
-    is_markdown = path.startswith(("README", "LICENSE")) or path.startswith("docs/") or path.endswith(".md")
+    is_markdown = (
+        path == "USER_MANUAL.html"
+        or path.startswith(("README", "LICENSE"))
+        or path.startswith("docs/")
+        or path.endswith(".md")
+    )
     if is_markdown:
         domains.add("docs")
         suites.add("docs_contract")
@@ -741,6 +795,8 @@ def _classify_path(path: str) -> tuple[set[str], set[str], set[str], bool]:
         if path.startswith("Dockerfile"):
             suites.add("docker_runtime_owner")
         gates.add("container_security")
+        if path.startswith("Dockerfile"):
+            gates.add("nas_update_e2e")
         return domains, suites, gates, False
 
     if path.startswith("docker-compose") or (
@@ -791,11 +847,6 @@ def _classify_path(path: str) -> tuple[set[str], set[str], set[str], bool]:
                 }
             )
             gates.update({"docker_lan_persistence", "runtime_soak", "container_security"})
-            return domains, suites, gates, False
-        if path in {"scripts/build_release_image.sh", "scripts/update_nas.sh"}:
-            domains.add("docker")
-            suites.update({"docker_runtime_owner", "container_configuration_owner"})
-            gates.add("container_security")
             return domains, suites, gates, False
         if path in {"scripts/restore_backup.py", "scripts/migrate.py"}:
             domains.add("persistence")

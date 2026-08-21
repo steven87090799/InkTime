@@ -2,7 +2,7 @@ name: inktime
 
 # NAS 正式部署只拉取 GitHub Container Registry 映像，不在 NAS 上建置原始碼。
 x-common: &common
-  image: ${INKTIME_IMAGE_REPOSITORY:-ghcr.io/steven87090799/inktime}:${INKTIME_IMAGE_TAG:-latest}
+  image: ${INKTIME_IMAGE_REPOSITORY:-ghcr.io/steven87090799/inktime}:${INKTIME_IMAGE_TAG:?請以 scripts/update_nas.sh 指定 immutable SemVer tag}
   pull_policy: always
   restart: unless-stopped
   init: true
@@ -30,11 +30,21 @@ x-common: &common
     INKTIME_LOG_LEVEL: ${INKTIME_LOG_LEVEL:-INFO}
     INKTIME_ACCESS_LOG: ${INKTIME_ACCESS_LOG:-0}
     INKTIME_ENABLE_LEGACY_WEBUI: ${INKTIME_ENABLE_LEGACY_WEBUI:-false}
+  user: "10001:10001"
   volumes:
     # SQLite、Session Key、快取、備份與 Release 必須持久保存。
-    - ${INKTIME_DATA_PATH:?請在 .env.nas 設定 INKTIME_DATA_PATH}:/data
+    - type: bind
+      source: ${INKTIME_DATA_PATH:?請在 .env.nas 設定 INKTIME_DATA_PATH}
+      target: /data
+      bind:
+        create_host_path: false
     # 原始照片固定唯讀，容器更新不會修改 NAS 相簿。
-    - ${INKTIME_PHOTO_PATH:?請在 .env.nas 設定 INKTIME_PHOTO_PATH}:/photos:ro
+    - type: bind
+      source: ${INKTIME_PHOTO_PATH:?請在 .env.nas 設定 INKTIME_PHOTO_PATH}
+      target: /photos
+      read_only: true
+      bind:
+        create_host_path: false
   read_only: true
   tmpfs:
     - /tmp:size=256m,mode=1777

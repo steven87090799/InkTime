@@ -10,7 +10,7 @@ main 上的程式碼
   → NAS 執行 ./scripts/update_nas.sh v1.2.3
 ```
 
-映像只包含程式。SQLite、Session Key、縮圖、備份、Release 與相簿分別保留在 NAS 的 `/data`、`/photos` Volume；更新或重建容器不會把它們包進映像或覆蓋掉。
+映像只包含程式。SQLite、Session Key、縮圖、備份與 Release 全部保留在 NAS 的 `/data`；原始相簿由另一個既有 host 目錄掛到 `/photos`。Compose 使用 long bind syntax、`create_host_path: false` 與 `read_only: true`，路徑不存在時必須失敗，不會悄悄建立空目錄。應用程式啟動時還會從實際 mount 狀態確認 `/photos` 是唯讀；只改 YAML 文字但實際可寫也會以 `DEPLOY-PHOTO-RO-001` 拒絕啟動。
 
 ## 1. 發布規則
 
@@ -21,7 +21,7 @@ main 上的程式碼
 - Tag 必須指向 `main` 歷史中的 Commit。
 - 已存在的版本 Tag 不可重新指向另一份映像；要修正內容請建立新版本。
 
-每次發布會產生 `linux/amd64` 與 `linux/arm64` 映像、Commit SHA Tag、OCI metadata 與 provenance attestation。Intel N100／一般 x86 NAS 使用 `amd64`；ARM NAS 使用 `arm64`，Docker 會自動選擇正確架構。
+每次發布會產生 `linux/amd64` 與 `linux/arm64` 映像、Commit SHA Tag、OCI metadata 與 provenance attestation。映像另帶 `io.inktime.nas-deployment-contract` 標籤；更新器會在 pull 後、重建容器前，與 Repository 內唯一的 `nas-deployment-contract.version` 比對，不相容就停止。Intel N100／一般 x86 NAS 使用 `amd64`；ARM NAS 使用 `arm64`，Docker 會自動選擇正確架構。
 
 ## 2. 維護者建立版本
 
@@ -50,7 +50,7 @@ docker login ghcr.io -u YOUR_GITHUB_USERNAME
 
 ## 3. NAS 首次設定（只做一次）
 
-NAS 需要 Docker Engine 24+ 與 Compose v2。最簡單的首次設定是取得本專案一次；之後的一般程式版本更新不需要 `git pull`，也不會在 NAS Build：
+NAS 需要 Docker Engine 24+、Compose v2、`realpath` 與 `flock`。最簡單的首次設定是取得本專案一次；之後的一般程式版本更新不需要在 NAS Build：
 
 ```bash
 git clone https://github.com/steven87090799/InkTime.git
@@ -58,12 +58,12 @@ cd InkTime
 cp .env.nas.example .env.nas
 ```
 
-NAS 實際只依賴 `docker-compose.nas.yml`、`.env.nas` 與 `scripts/update_nas.sh`；不想保留完整原始碼時，可在公開 Repository 合併此功能後，用 `curl` 下載這三份部署檔一次。未來若 Release notes 明確標示 Compose／部署契約有變，才需要同步新版部署檔；一般 Python／Web 功能更新都包含在映像內。
+NAS 主機端實際依賴 `docker-compose.nas.yml`、`.env.nas`、`scripts/update_nas.sh` 與 `nas-deployment-contract.version`。這四份檔案必須來自同一版本；Release notes 若標示部署契約有變，應一起更新後再執行。一般 Python／Web 功能仍包含在映像內。
 
 編輯 `.env.nas`，至少替換：
 
-- `INKTIME_DATA_PATH`：本機 ext4／xfs／btrfs 上的絕對路徑，供 SQLite 與 `/data` 使用。
-- `INKTIME_PHOTO_PATH`：NAS 相簿絕對路徑；Compose 固定以唯讀 `/photos:ro` 掛載。
+- `INKTIME_DATA_PATH`：本機 ext4／xfs／btrfs 上已存在、可寫、非 symlink 的 canonical 絕對路徑，供 SQLite 與 `/data` 使用。
+- `INKTIME_PHOTO_PATH`：已存在、可讀、非 symlink 的 canonical NAS 相簿絕對路徑；Compose 固定以唯讀 `/photos` 掛載。
 - `INKTIME_PUBLIC_URL`：實際 HTTPS Origin。
 - `INKTIME_BIND_ADDRESS`：同機 Reverse Proxy 可保留 `127.0.0.1`；可信任 LAN 直連才改成 NAS 的 LAN IP。
 
@@ -73,6 +73,10 @@ NAS 實際只依賴 `docker-compose.nas.yml`、`.env.nas` 與 `scripts/update_na
 sudo mkdir -p /your/local/path/inktime/data
 sudo chown -R 10001:10001 /your/local/path/inktime/data
 ```
+
+資料與照片路徑不得相同，也不得互為父子目錄。更新器不會用寫入測試探測照片目錄，不會在相簿新增暫存檔；它只確認路徑可讀，容器則用實際唯讀 mount 保護照片。
+
+持久狀態邊界如下：SQLite 主檔、WAL／SHM 與應用程式鎖在 `/data/inktime.db*`；`session.key`、備份、Settings／Secrets、使用者、裝置、排程、Queue／Jobs、照片索引與分析／留存 metadata 都在該 SQLite 與 `/data/backups`；Release 與 rendered output 在 `/data/releases`；cache 在 `/data/cache`。原始照片只在 `/photos`，不屬於 recovery archive，也不可被更新流程寫入。
 
 若只在可信任 LAN 使用 HTTP，需把同一組 Transport 設定一起改成：
 
@@ -88,37 +92,40 @@ INKTIME_PROXY_TRUST=0
 
 ## 4. 第一次啟動與日後更新
 
-使用穩定版 `latest`：
+第一次啟動必須明確建立 deployment-root marker：
 
 ```bash
+./scripts/update_nas.sh --initialize v1.2.3
+```
+
+`--initialize` 只允許 marker 尚不存在的空資料目錄，或已有 `inktime.db`、經管理者確認要納管的舊部署。日後普通更新必須找到 `/data/.inktime-deployment-root` 且路徑完全一致：
+
+```bash
+./scripts/update_nas.sh v1.2.4
+```
+
+若確實搬移了已納管的 data root 或 photo root，先人工核對新目錄內容，再執行：
+
+```bash
+./scripts/update_nas.sh --accept-path-change v1.2.4
+```
+
+更新器依序執行：canonical path／拓樸／marker 驗證 → 取得 bounded host `flock` → Compose config → pull → OCI deployment contract 比對 → recovery point → `--no-build` 重建並等待健康檢查。任何前置條件失敗都不會重建既有容器。
+
+`latest` 是可移動別名，預設拒絕。只有已接受不可重現風險時，才在 `.env.nas` 明確設定後使用：
+
+```bash
+INKTIME_ALLOW_MUTABLE_IMAGE_TAG=1
 ./scripts/update_nas.sh latest
 ```
 
-正式環境建議指定不可變版本，方便稽核與回復：
-
-```bash
-./scripts/update_nas.sh v1.2.3
-```
-
-工具依序驗證 `.env.nas`、拉取 GHCR 映像、以 `--no-build` 重建三個服務，並等待健康檢查。指定 Tag 只在本次命令覆蓋 `.env.nas` 的預設值，不會改寫 Secret 或路徑設定。主機重開後，Docker 會依已建立容器的映像與 `restart: unless-stopped` 自動恢復。
-
-手動執行同一流程時，可用：
-
-```bash
-INKTIME_IMAGE_TAG=v1.2.3 docker compose \
-  --env-file .env.nas \
-  -f docker-compose.nas.yml \
-  pull
-
-INKTIME_IMAGE_TAG=v1.2.3 docker compose \
-  --env-file .env.nas \
-  -f docker-compose.nas.yml \
-  up -d --no-build --remove-orphans --wait
-```
+不要以手動 `docker compose up` 取代更新器；那會繞過 marker、鎖、契約檢查與 recovery point。
 
 ## 5. 更新前後檢查
 
-更新前先從 Web「備份」建立並下載備份。更新後確認：
+每次已有資料庫的更新，更新器都會先透過既有 `BackupService` 的 SQLite online backup 建立 `/data/backups/update-recovery-...`。內容包含含 Secrets 的可驗證資料庫備份、權限 `0600` 的 `session.key` 副本，以及前版／目標映像、digest、Schema、deployment contract 與 SHA-256 metadata；不複製原始照片、快取、整個 Release payload。這是更新前 recovery point，不取代異機備份政策。
+
+更新後確認：
 
 ```bash
 docker compose --env-file .env.nas -f docker-compose.nas.yml ps
@@ -129,7 +136,7 @@ curl -fsS http://127.0.0.1:8765/health/ready
 
 ## 6. 固定版本與回復
 
-若新版尚未執行不可逆資料 Migration，可用上一個 Tag 重建：
+健康檢查失敗時，更新器不刪除 `/data` 或 recovery point，也不自動做可能不相容的降版。先保留診斷資料。若新版尚未執行不可逆資料 Migration，可在確認 Schema 相容後用上一個 Tag 重建：
 
 ```bash
 ./scripts/update_nas.sh v1.2.2
@@ -145,6 +152,12 @@ curl -fsS http://127.0.0.1:8765/health/ready
 | `manifest unknown` | GitHub Actions 尚未成功，或輸入不存在的 Tag；先查發布工作。 |
 | `no matching manifest` | NAS 架構不是 `amd64`／`arm64`；此映像不支援其他架構。 |
 | `NAS-UPDATE-004` | `.env.nas` 仍有 `/CHANGE_ME` 或範例網域，替換後再執行。 |
+| `NAS-UPDATE-PATH-*` | 路徑不存在、不是 canonical、使用 symlink、不可讀／寫，或 data/photos 相同或巢狀；修正 host 目錄，不要建立替身空目錄。 |
+| `NAS-UPDATE-MARKER-*` | 首次未用 `--initialize`、marker 損壞或路徑改變；先人工確認 root，只有真實搬移才使用 `--accept-path-change`。 |
+| `NAS-UPDATE-CONTRACT-001`／`NAS-UPDATE-MARKER-006` | 映像、本機部署檔或既有 marker 契約不同；同步同一 Release 的四份部署檔，人工核對後以 `--accept-path-change` 接受契約更新，或改用相容 Tag。 |
+| `NAS-UPDATE-RECOVERY-*` | SQLite online backup、Session Key 或 metadata 驗證失敗；既有容器尚未被替換。 |
+| `NAS-UPDATE-LOCK-002` | 另一個更新程序持有相同 data root 的 lock；等待該程序結束，不要刪 lock file。 |
+| `DEPLOY-PHOTO-RO-001` | 容器實際 mountinfo／statvfs 顯示 `/photos` 可寫；修正 Compose 與 runtime mount。 |
 | 容器 unhealthy | 先保留 Log 與資料，不要刪 Volume；執行 `docker compose ... logs --since=30m` 並檢查 `/data` 權限、URL／Cookie 組合與 SQLite filesystem。 |
 
 更完整的資源、安全、Log、備份與資料庫限制見 [Docker 部署規格](DOCKER_GUIDE_ZH_TW.md)。
