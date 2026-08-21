@@ -238,6 +238,8 @@ static_assert(kBoardConfig.i2c.sda == 47 && kBoardConfig.i2c.scl == 48,
               "PhotoPainter I2C pins must match the Waveshare board");
 static_assert(kBoardConfig.i2c.clockHz == 100000,
               "PhotoPainter shared I2C bus must use the conservative official device rate");
+static_assert(kBoardConfig.display.clockHz == 4000000,
+              "PhotoPainter EPD SPI must use the conservative official Arduino rate");
 static_assert(kBoardConfig.buttons.boot == 0 && kBoardConfig.buttons.user == 4
               && kBoardConfig.buttons.power == 5,
               "PhotoPainter button pins must match the Waveshare board");

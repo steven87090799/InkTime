@@ -4,7 +4,8 @@
 
 // The controller initialization values are derived from Waveshare's
 // ESP32-S3-PhotoPainter xiaozhi subtree (MIT). InkTime adds bounded BUSY waits,
-// failure propagation, conservative 4 MHz SPI, and the official power-off sequence.
+// failure propagation, official SPI3 with the conservative 4 MHz Arduino rate,
+// and power-off.
 
 namespace inktime {
 
@@ -16,6 +17,19 @@ constexpr size_t kSpiTransferChunkBytes = 4096U;
 
 Spectra6_73::Spectra6_73(SPIClass& spi, const BoardConfig& board)
     : spi_(spi), board_(board) {}
+
+bool Spectra6_73::waitForBusyAssertion(uint32_t timeoutMs) {
+  const int busyLevel = board_.display.busyActiveLow ? LOW : HIGH;
+  const uint32_t started = millis();
+  while (digitalRead(board_.display.busy) != busyLevel) {
+    if (millis() - started >= timeoutMs) {
+      lastError_ = "EPD-BUSY-NOT-ASSERTED";
+      return false;
+    }
+    delay(1);
+  }
+  return true;
+}
 
 bool Spectra6_73::waitUntilReady(uint32_t timeoutMs) {
   const int busyLevel = board_.display.busyActiveLow ? LOW : HIGH;
@@ -30,17 +44,21 @@ bool Spectra6_73::waitUntilReady(uint32_t timeoutMs) {
   return true;
 }
 
+bool Spectra6_73::waitForBusyCycle() {
+  return waitForBusyAssertion() && waitUntilReady();
+}
+
 void Spectra6_73::sendCommand(uint8_t command) {
   digitalWrite(board_.display.dc, LOW);
   digitalWrite(board_.display.spi.cs, LOW);
-  spi_.transfer(command);
+  spi_.write(command);
   digitalWrite(board_.display.spi.cs, HIGH);
 }
 
 void Spectra6_73::sendData(uint8_t data) {
   digitalWrite(board_.display.dc, HIGH);
   digitalWrite(board_.display.spi.cs, LOW);
-  spi_.transfer(data);
+  spi_.write(data);
   digitalWrite(board_.display.spi.cs, HIGH);
 }
 
@@ -54,10 +72,7 @@ void Spectra6_73::sendData(const uint8_t* data, size_t length) {
     const size_t chunk = remaining < kSpiTransferChunkBytes
         ? remaining
         : kSpiTransferChunkBytes;
-    spi_.transferBytes(
-        const_cast<uint8_t*>(data + offset),
-        nullptr,
-        static_cast<uint32_t>(chunk));
+    spi_.writeBytes(data + offset, static_cast<uint32_t>(chunk));
     offset += chunk;
     yield();
   }
@@ -83,12 +98,14 @@ bool Spectra6_73::begin() {
   digitalWrite(board_.display.spi.cs, HIGH);
   digitalWrite(board_.display.reset, HIGH);
 
-  spi_.begin(
-    board_.display.spi.sck,
-    board_.display.spi.miso,
-    board_.display.spi.mosi,
-    board_.display.spi.cs
-  );
+  if (!spi_.begin(
+        board_.display.spi.sck,
+        board_.display.spi.miso,
+        board_.display.spi.mosi,
+        board_.display.spi.cs)) {
+    lastError_ = "EPD-SPI-INIT";
+    return false;
+  }
   spi_.beginTransaction(SPISettings(board_.display.clockHz, MSBFIRST, SPI_MODE0));
   sessionActive_ = true;
 
@@ -119,6 +136,9 @@ bool Spectra6_73::begin() {
   sendCommand(0x84); sendData(0x01);
   sendCommand(0xE3); sendData(0x2F);
   sendCommand(0x04);
+  // Waveshare's controller can complete POWER_ON before BUSY is sampled.
+  // Treat a high/ready BUSY as complete here, but require an observed BUSY
+  // cycle for DISPLAY_REFRESH below so an unpowered panel cannot pass.
   if (!waitUntilReady()) {
     safeShutdown();
     return false;
@@ -154,7 +174,7 @@ bool Spectra6_73::displayFrame(const uint8_t* framebuffer, size_t length) {
   sendCommand(0x12);
   sendData(0x00);
   const uint32_t refreshStarted = millis();
-  if (!waitUntilReady()) {
+  if (!waitForBusyCycle()) {
     safeShutdown();
     return false;
   }
