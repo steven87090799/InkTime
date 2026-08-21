@@ -155,6 +155,8 @@ def test_nas_updater_pulls_before_no_build_recreate_and_never_deletes_volumes():
 def test_update_recovery_uses_online_backup_and_excludes_payload_copies():
     recovery = RECOVERY_PATH.read_text(encoding="utf-8")
 
+    assert 'if __package__ in {None, ""}' in recovery
+    assert "sys.path.insert(0, str(Path(__file__).resolve().parents[1]))" in recovery
     assert "BackupService" in recovery
     assert "create(include_secrets=True)" in recovery
     assert "service.validate(archive)" in recovery

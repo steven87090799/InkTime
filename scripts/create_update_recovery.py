@@ -11,7 +11,14 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import sys
 import tempfile
+
+# ``python scripts/create_update_recovery.py`` sets ``sys.path[0]`` to
+# ``/app/scripts`` inside the runtime image. Add the application root so the
+# direct updater invocation can import the installed-source namespace package.
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from inktime.app.db import Database
 from inktime.app.services.backups import BackupService
