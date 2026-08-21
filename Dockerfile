@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
-FROM python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36 AS builder
+FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a AS builder
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
@@ -8,7 +8,7 @@ WORKDIR /build
 COPY requirements.txt ./
 RUN python -m pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt
 
-FROM python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36 AS runtime
+FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -23,6 +23,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     INKTIME_PHOTO_DIR=/photos \
     INKTIME_HOST=0.0.0.0 \
     INKTIME_PORT=8765
+
+# The pinned Python image may lag the Debian security rebuild for util-linux.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --only-upgrade -y \
+        bsdutils \
+        libblkid1 \
+        liblastlog2-2 \
+        libmount1 \
+        libsmartcols1 \
+        libuuid1 \
+        login \
+        mount \
+        util-linux \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 10001 inktime \
     && useradd --uid 10001 --gid inktime --home-dir /app --shell /usr/sbin/nologin inktime
