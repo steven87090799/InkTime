@@ -53,7 +53,7 @@ INKTIME_ALLOW_INSECURE_HTTP=1
 INKTIME_PROXY_TRUST=0
 ```
 
-啟動前執行 `python scripts/production_preflight.py --mode lan --env-file .env`。它會檢查 transport 組合、LAN host、placeholder／相對路徑、唯讀 photos mount、SQLite `/data`、network filesystem opt-in 與 immutable image identity，失敗時輸出穩定錯誤碼及修正方式。成功後 Health／diagnostics 仍會明確顯示 `environment=production`、`transport=trusted-lan-http`、`security_state=degraded`、`tls_enabled=false`、`secure_cookie=false`。此模式不可直接公開至 Internet；`.env.local.example` 只供 development／模擬。
+啟動前執行 `python scripts/production_preflight.py --mode lan --env-file .env`。它會檢查 transport 組合、LAN host、placeholder／相對路徑、Compose 唯讀 photos 宣告、host data/photos 路徑與 immutable image identity，失敗時輸出穩定錯誤碼及修正方式；摘要會明確標示 actual runtime mount validation 延後到容器啟動。容器啟動時 application preflight 會再用實際 mountinfo 驗證精確唯讀 `/photos`、可寫 nested mount 與 SQLite filesystem，並在不符合時 fail closed。成功後 Health／diagnostics 仍會明確顯示 `environment=production`、`transport=trusted-lan-http`、`security_state=degraded`、`tls_enabled=false`、`secure_cookie=false`。此模式不可直接公開至 Internet；`.env.local.example` 只供 development／模擬。
 
 ### 3.2 正式 HTTPS Reverse Proxy
 
@@ -188,7 +188,7 @@ Nginx 負責 TLS 與公開入口限流；InkTime 負責 Session／CSRF／CSP／H
 
 ## 8. 更新、備份與回滾
 
-NAS 若要避免每次 `git pull` 與本機 Build，可改用 `docker-compose.nas.yml`。版本合併到 `main` 後建立 `vX.Y.Z` Git Tag，GitHub Actions 會發布 GHCR 多架構映像；首次部署執行 `./scripts/update_nas.sh --initialize vX.Y.Z`，日後才執行 `./scripts/update_nas.sh vX.Y.Z`。更新器會在重建前驗證 host 路徑、marker、lock、映像 deployment contract 並建立 recovery point；不要用手動 Compose 指令繞過。完整 `latest` opt-in、私有 Package 登入、資料保全與 Schema 回復邊界見 [NAS 以 Git Tag 更新 InkTime Docker](NAS_TAG_DEPLOYMENT_ZH_TW.md)。
+NAS 若要避免每次 `git pull` 與本機 Build，可改用 `docker-compose.nas.yml`。版本合併到 `main` 後建立 `vX.Y.Z` Git Tag，GitHub Actions 會發布 GHCR 多架構映像；首次部署執行 `sudo ./scripts/update_nas.sh --initialize vX.Y.Z`，日後才執行 `sudo ./scripts/update_nas.sh vX.Y.Z`。更新器會在重建前驗證 host 路徑、marker、lock、映像 deployment contract 與 Compose resolved identity，並以唯讀 production source／單一 bounded RW destination 建立 recovery point；不要用手動 Compose 指令繞過。完整 `latest` opt-in、私有 Package 登入、照片 nested mount 唯讀、資料保全與 Schema 回復邊界見 [NAS 以 Git Tag 更新 InkTime Docker](NAS_TAG_DEPLOYMENT_ZH_TW.md)。
 
 保留原始碼並在部署主機 Build 的既有流程如下。
 
