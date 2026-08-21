@@ -20,7 +20,9 @@ class Spectra6_73 {
   const char* lastError() const { return lastError_; }
 
  private:
+  bool waitForBusyAssertion(uint32_t timeoutMs = 2000);
   bool waitUntilReady(uint32_t timeoutMs = 60000);
+  bool waitForBusyCycle();
   void hardwareReset();
   void sendCommand(uint8_t command);
   void sendData(uint8_t data);

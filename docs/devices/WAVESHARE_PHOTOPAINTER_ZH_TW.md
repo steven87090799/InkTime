@@ -3,8 +3,8 @@
 ## 支援狀態
 
 InkTime 2.6.0 可用單一 compile-time Profile 切換既有 PCB 與 Waveshare
-ESP32-S3-PhotoPainter。使用者實際板上的 PMIC 封裝標示已確認為 TG28，但這只確認
-硬體 revision，不代表 GPIO 喚醒、面板、SD、電池或睡眠電流已完成實機驗證。
+ESP32-S3-PhotoPainter。使用者實際板與 Waveshare Rev2.0 原理圖都確認 PMIC 為 TG28；
+這仍不代表 GPIO 喚醒、面板、SD、電池或睡眠電流已完成 InkTime 實機驗證。
 
 ```cpp
 #define DEVICE_PROFILE DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER
@@ -37,7 +37,7 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
 | 功能 | PhotoPainter GPIO／設定 |
 |---|---|
 | EPD | DC 8、CS 9、SCK 10、MOSI 11、RST 12、BUSY 13 |
-| EPD SPI | FSPI 相容層、MODE0、初始 4 MHz |
+| EPD SPI | SPI3（Arduino-ESP32 `HSPI`）、純寫入 MODE0、保守 4 MHz |
 | SD | CS 38、SCK 39、MISO 40、MOSI 41；獨立 SPI bus |
 | I²C | SDA 47、SCL 48、100 kHz；共用總線採官方裝置設定中的保守速率，裝置個別 probe |
 | 按鍵 | BOOT 0、KEY 4 active-low、PWR 5 保留原廠電源用途 |
@@ -62,7 +62,9 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   16 MiB Flash／8 MiB PSRAM。不存在或不足時不退回 internal SRAM，也不開始
   大型 framebuffer 流程。
 - 所有 BUSY 等待上限 60 秒。官方現行程式顯示 BUSY low 代表忙碌，本 adapter
-  以 active-low 為安全預設；逾時會停止傳輸、reset、盡力 power-off，且回報錯誤。
+  以 active-low 為安全預設；`POWER_ON`／`DISPLAY_REFRESH` 後必須先觀察到 BUSY
+  拉低、再回到高電位，避免面板未供電或命令未送達時被上拉電位誤判成功。未拉低或
+  逾時都會停止傳輸、reset、盡力 power-off，且回報錯誤。
 - 每次 full refresh 完全沿用官方 `POWER_ON`、第二段 booster、`DISPLAY_REFRESH`、
   `POWER_OFF` 與 BUSY 完成順序。官方 PhotoPainter driver 未使用的額外面板 sleep command
   或 GPIO pulldown／hold 不會加入；沒有宣稱快速刷新。
@@ -88,15 +90,16 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   CRC-8 並送回 sleep；CRC 錯誤不回報溫濕度。
 - PCF85063 以 0x51 probe，RTC 只保存 UTC。NTP 成功後寫入 RTC；NTP 失敗時可由
   RTC 恢復排程，時區仍使用 InkTime 裝置設定，不硬編碼在 RTC。
-- 使用者實際 PhotoPainter 板上的 PMIC 封裝標示為 TG28；InkTime 也保留獨立的
-  `TG28` 型別，但目前沒有可引用的官方 TG28 identity／register 契約，因此不會僅因
-  板型或「不是 AXP2101」就把 runtime identity 猜成 TG28。
-- 既有 PMIC driver 只會用已知的 0x34／chip ID register 0x03／ID 0x4A 契約正向辨識
-  AXP2101，並以唯讀 status register 提供 USB、電池電壓與 fuel-gauge 百分比。TG28
-  或其他未識別 PMIC 維持 `unknown`，電源來源狀態也維持 `Unknown`。
-- TG28／未識別 PMIC 完全不執行 PMIC register mutation；不寫 rail、充電、shutdown
-  或推測的省電 register。缺少 PMIC 遙測不會阻擋圖片下載、排程、RTC、SD 或電子紙
-  刷新，也沒有需要使用者校正的低電壓門檻。
+- Waveshare Rev2.0 原理圖確認 UP1 是 TG28、I²C 位址 0x34，且 **ALDO3 直接供應
+  `EPD_VCC`**；不是舊版教學中的 AXP2101／ALDO4。TG28 資料表沒有定義 AXP2101
+  專用的 0x03 identity 契約，因此 Rev2.0 driver 以 0x34 probe 及 TG28 的 0x90／0x94
+  可讀性作 fail-closed 相容性檢查。
+- 每次顯示前只以 read-modify-write 將 TG28 `REG94[4:0]` 設為 `0x1C`（3.3 V），再將
+  `REG90[2]` 設為 1 啟用 ALDO3；兩步都必須讀回一致，等待 10 ms 後才可初始化 EPD。
+  顯示 controller 完成 `POWER_OFF`／SPI shutdown 後清除 `REG90[2]`，保留其他七個
+  LDO enable bits 與 `REG94` 的保留位。任一步失敗都不送出電子紙更新命令。
+- 韌體不寫 TG28 的 DCDC、充電、全機 shutdown、fast-power-on 或其他 LDO register。
+  status、VBAT 與 fuel-gauge register 僅供遙測，也不作低電壓刷新門檻。
 - 本專案不需要音訊，因此不初始化 ES7210／ES8311；PA GPIO 7 維持 LOW。
 
 ## 按鍵、喚醒與網路邊界
@@ -112,7 +115,7 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   決策，因此讀不到電源資訊時仍能看見並修正網路或設定問題。
 - 持續至少 4 秒的 GPIO 4 喚醒才是 PhotoPainter 的明確實體 recovery/service 授權；
   USB 供電本身與 1.2 至未滿 4 秒的 forced refresh 都不授權設定變更。電源來源確認為
-  USB 時可沿用長時間 service；TG28 等 `Unknown` 狀態仍可進入 recovery，但不解除
+  USB 時可沿用長時間 service；PMIC 無法確認時仍可進入 recovery，但不解除
   max-awake supervisor，且設定服務最多五分鐘。
 - Manifest 必須是有限 Content-Length 的 JSON；圖片必須是精確長度的
   `application/octet-stream` 且 SHA-256 相符。
@@ -134,8 +137,8 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
 - Web「能源」頁保存最近 400 天樣本，提供 7／30／90／365 天電量、電壓、刷新耗時、
   完整喚醒時間與最近樣本；所有資料都由裝置自動回報。
 - 頁面不再提供電池容量、待機電流、喚醒平均電流或安全保留量表單，也不計算依賴
-  人工量測的續航模型。TG28 尚無文件化遙測時，電池百分比與 USB 狀態不得宣稱有效；
-  PMIC 數值只協助診斷，不會控制裝置是否可用。
+  人工量測的續航模型。TG28 遙測只協助診斷，不會控制裝置是否可用；續航與睡眠電流
+  仍須以實板量測，不能由 register 讀值推導為已通過。
 
 ## 編譯
 
@@ -144,6 +147,9 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
 本專案必須使用 repository-owned partition table；stock `app3M_fat9M_16MB` 的 20 KiB
 NVS 無法容納 32-entry ACK journal 的 COW／migration peak。Arduino-ESP32 支援在
 sketch 目錄使用 `partitions.csv`，因此每次編譯前先把對應 CSV 複製成該檔名：
+表內固定保留 pinned Arduino-ESP32 upload recipe 使用的 `otadata=0xE000` 與
+`app0=0x10000`，512 KiB NVS 位於兩個 OTA slot 之後；不可把 NVS 擴張到
+`0x10000` app upload range 內。
 
 ```bash
 cp esp32/ink-display-7C-photo/inktime_default_4M.csv \
@@ -184,6 +190,10 @@ rm -f esp32/ink-display-7C-photo/partitions.csv
 FAT partition；本韌體的
 圖片快取使用外接 SD，不會自動使用 Flash FAT partition。OTA 尚未實作，但分割區先
 保留 rollback 空間。
+
+PhotoPainter 的 `CDCOnBoot=cdc` 使用 ESP32-S3 原生 USB CDC／JTAG 作為正式與除錯
+生命週期 Log；不要另建 `HardwareSerial(0)`，否則 Type-C 埠可燒錄但看不到應用程式
+開機紀錄。既有未啟用 USB CDC 的 ESP32-S3 Profile 中，Arduino `Serial` 仍映射 UART0。
 
 2026-07-19 在本機以 Arduino CLI 1.5.1、ESP32 core 3.3.10、GxEPD2 1.6.9、
 ArduinoJson 7.4.3 完成以下編譯；這些是軟體建置結果，不是實機驗證：

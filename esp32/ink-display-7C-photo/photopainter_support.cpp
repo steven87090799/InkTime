@@ -32,18 +32,20 @@
 #define HSPI SPI3_HOST
 #endif
 
-extern HardwareSerial DebugSerial;
-
 namespace inktime {
 
-constexpr uint8_t kAxp2101Address = 0x34;
-constexpr uint8_t kAxp2101ChipIdRegister = 0x03;
-constexpr uint8_t kAxp2101ChipId = 0x4A;
-constexpr uint8_t kAxp2101Status1 = 0x00;
-constexpr uint8_t kAxp2101Status2 = 0x01;
-constexpr uint8_t kAxp2101BatteryVoltageHigh = 0x34;
-constexpr uint8_t kAxp2101BatteryVoltageLow = 0x35;
-constexpr uint8_t kAxp2101BatteryPercent = 0xA4;
+// PhotoPainter Rev2.0 schematic: TG28 UP1 is at 0x34 and ALDO3 feeds EPD_VCC.
+// Only the two EPD-rail registers below may be mutated by this driver.
+constexpr uint8_t kPhotoPainterPmicAddress = 0x34;
+constexpr uint8_t kTg28Status1 = 0x00;
+constexpr uint8_t kTg28BatteryVoltageHigh = 0x34;
+constexpr uint8_t kTg28LdoEnable0 = 0x90;
+constexpr uint8_t kTg28Aldo3Voltage = 0x94;
+constexpr uint8_t kTg28BatteryPercent = 0xA4;
+constexpr uint8_t kTg28Aldo3EnableMask = 1U << 2U;
+constexpr uint8_t kTg28AldoVoltageMask = 0x1FU;
+constexpr uint8_t kTg28Aldo3_3300mV = 0x1CU;
+constexpr uint32_t kTg28Aldo3SettleMs = 10U;
 constexpr uint8_t kShtc3Address = 0x70;
 constexpr uint8_t kPcf85063Address = 0x51;
 constexpr size_t kIoChunkSize = 4096;
@@ -112,7 +114,7 @@ void drawPairingText(uint8_t* frame, size_t length, int x, int y, const String& 
 }
 
 #if INKTIME_DEBUG_LOG
-#define PP_LOG(...) DebugSerial.printf(__VA_ARGS__)
+#define PP_LOG(...) Serial.printf(__VA_ARGS__)
 #else
 #define PP_LOG(...) do { } while (0)
 #endif
@@ -264,42 +266,146 @@ class ProbePowerManager final : public PowerManager {
 
   bool begin() override {
     type_ = PmicType::None;
-    if (!bus_.probe(kAxp2101Address)) return false;
-    uint8_t chipId = 0;
-    if (!bus_.readRegister(kAxp2101Address, kAxp2101ChipIdRegister, &chipId, 1)) {
+    displayRailPrepared_ = false;
+    uint8_t ldoState = 0;
+    uint8_t aldo3Voltage = 0;
+    if (!bus_.probe(kPhotoPainterPmicAddress)) return false;
+    if (!bus_.readRegister(kPhotoPainterPmicAddress, kTg28LdoEnable0, &ldoState, 1)
+        || !bus_.readRegister(
+          kPhotoPainterPmicAddress, kTg28Aldo3Voltage, &aldo3Voltage, 1)) {
       type_ = PmicType::Unknown;
       return false;
     }
-    if (chipId != kAxp2101ChipId) {
-      type_ = PmicType::Unknown;
-      return false;
-    }
-    type_ = PmicType::AXP2101;
+    // Rev2.0 identifies UP1 as TG28. Do not use the AXP2101-only 0x03 chip-ID
+    // test: TG28 does not document that register, while 0x90/0x94 are defined.
+    type_ = PmicType::TG28;
     refreshMeasurements();
     return true;
   }
+
+  bool prepareDisplayPower() {
+    lastError_ = "";
+    if (type_ != PmicType::TG28) {
+      lastError_ = "PMIC-TG28-NOT-READY";
+      return false;
+    }
+    // A previous I2C/readback failure may have left ALDO3 on. Retain that
+    // state and require a verified cleanup before starting another refresh.
+    if (displayRailPrepared_ && !releaseDisplayPower()) return false;
+
+    uint8_t voltage = 0;
+    if (!bus_.readRegister(
+          kPhotoPainterPmicAddress, kTg28Aldo3Voltage, &voltage, 1)) {
+      lastError_ = "PMIC-EPD-VOLTAGE-READ";
+      return false;
+    }
+    const uint8_t voltage3300 = static_cast<uint8_t>(
+      (voltage & static_cast<uint8_t>(~kTg28AldoVoltageMask))
+      | kTg28Aldo3_3300mV
+    );
+    if (voltage3300 != voltage
+        && !bus_.writeRegisters(
+          kPhotoPainterPmicAddress,
+          kTg28Aldo3Voltage,
+          &voltage3300,
+          1,
+          true)) {
+      lastError_ = "PMIC-EPD-VOLTAGE-WRITE";
+      return false;
+    }
+    uint8_t voltageReadback = 0;
+    if (!bus_.readRegister(
+          kPhotoPainterPmicAddress, kTg28Aldo3Voltage, &voltageReadback, 1)
+        || (voltageReadback & kTg28AldoVoltageMask) != kTg28Aldo3_3300mV) {
+      lastError_ = "PMIC-EPD-VOLTAGE-READBACK";
+      return false;
+    }
+
+    uint8_t ldoState = 0;
+    if (!bus_.readRegister(
+          kPhotoPainterPmicAddress, kTg28LdoEnable0, &ldoState, 1)) {
+      lastError_ = "PMIC-EPD-ENABLE-READ";
+      return false;
+    }
+    const uint8_t enabledState = ldoState | kTg28Aldo3EnableMask;
+    if (enabledState != ldoState
+        && !bus_.writeRegisters(
+          kPhotoPainterPmicAddress,
+          kTg28LdoEnable0,
+          &enabledState,
+          1,
+          true)) {
+      lastError_ = "PMIC-EPD-ENABLE-WRITE";
+      return false;
+    }
+    displayRailPrepared_ = true;
+    uint8_t enableReadback = 0;
+    if (!bus_.readRegister(
+          kPhotoPainterPmicAddress, kTg28LdoEnable0, &enableReadback, 1)
+        || (enableReadback & kTg28Aldo3EnableMask) == 0U) {
+      const char* enableError = "PMIC-EPD-ENABLE-READBACK";
+      if (releaseDisplayPower()) lastError_ = enableError;
+      return false;
+    }
+    delay(kTg28Aldo3SettleMs);
+    return true;
+  }
+
+  bool releaseDisplayPower() {
+    if (!displayRailPrepared_) return true;
+    uint8_t ldoState = 0;
+    if (!bus_.readRegister(
+          kPhotoPainterPmicAddress, kTg28LdoEnable0, &ldoState, 1)) {
+      lastError_ = "PMIC-EPD-DISABLE-READ";
+      return false;
+    }
+    const uint8_t disabledState = static_cast<uint8_t>(
+      ldoState & static_cast<uint8_t>(~kTg28Aldo3EnableMask)
+    );
+    if (disabledState != ldoState
+        && !bus_.writeRegisters(
+          kPhotoPainterPmicAddress,
+          kTg28LdoEnable0,
+          &disabledState,
+          1,
+          true)) {
+      lastError_ = "PMIC-EPD-DISABLE-WRITE";
+      return false;
+    }
+    uint8_t disableReadback = 0;
+    if (!bus_.readRegister(
+          kPhotoPainterPmicAddress, kTg28LdoEnable0, &disableReadback, 1)
+        || (disableReadback & kTg28Aldo3EnableMask) != 0U) {
+      lastError_ = "PMIC-EPD-DISABLE-READBACK";
+      return false;
+    }
+    displayRailPrepared_ = false;
+    return true;
+  }
+
+  const char* lastError() const { return lastError_; }
 
   void refreshMeasurements() override {
     powerSourceState_ = PowerSourceState::Unknown;
     batteryMillivolts_ = 0;
     batteryPercent_ = -1;
-    if (type_ != PmicType::AXP2101) return;
-    uint8_t status[2] = {0, 0};
-    if (!bus_.readRegister(kAxp2101Address, kAxp2101Status1, status, 2)) return;
-    const bool batteryConnected = (status[0] & (1U << 3U)) != 0;
-    const bool vbusGood = (status[0] & (1U << 5U)) != 0;
-    const bool vbusOverVoltage = (status[1] & (1U << 3U)) != 0;
-    powerSourceState_ = vbusGood && !vbusOverVoltage
+    if (type_ != PmicType::TG28) return;
+    uint8_t status1 = 0;
+    if (!bus_.readRegister(kPhotoPainterPmicAddress, kTg28Status1, &status1, 1)) return;
+    const bool batteryConnected = (status1 & (1U << 3U)) != 0;
+    const bool vbusGood = (status1 & (1U << 5U)) != 0;
+    powerSourceState_ = vbusGood
         ? PowerSourceState::Usb
         : PowerSourceState::Battery;
     if (!batteryConnected) return;
     uint8_t voltage[2] = {0, 0};
-    if (bus_.readRegister(kAxp2101Address, kAxp2101BatteryVoltageHigh, voltage, 2)) {
+    if (bus_.readRegister(
+          kPhotoPainterPmicAddress, kTg28BatteryVoltageHigh, voltage, 2)) {
       batteryMillivolts_ = static_cast<uint16_t>((voltage[0] & 0x1FU) << 8U)
                          | voltage[1];
     }
     uint8_t percent = 0;
-    if (bus_.readRegister(kAxp2101Address, kAxp2101BatteryPercent, &percent, 1)
+    if (bus_.readRegister(kPhotoPainterPmicAddress, kTg28BatteryPercent, &percent, 1)
         && percent <= 100) {
       batteryPercent_ = percent;
     }
@@ -313,8 +419,9 @@ class ProbePowerManager final : public PowerManager {
   float batteryVoltage() const override { return batteryMillivolts_ / 1000.0f; }
   int batteryPercent() const override { return batteryPercent_; }
   void prepareForDeepSleep() override {
-    // Deliberately read-only: board revisions must be identified before any
-    // PMIC rail voltage or shutdown-register writes are enabled.
+    // EPD controller shutdown/reset is completed by the display driver before
+    // this removes only the Rev2.0 EPD_VCC rail. No other TG28 rail is changed.
+    releaseDisplayPower();
   }
 
  private:
@@ -323,6 +430,8 @@ class ProbePowerManager final : public PowerManager {
   PowerSourceState powerSourceState_ = PowerSourceState::Unknown;
   uint16_t batteryMillivolts_ = 0;
   int batteryPercent_ = -1;
+  bool displayRailPrepared_ = false;
+  const char* lastError_ = "";
 };
 
 class Shtc3Adapter {
@@ -530,8 +639,8 @@ bool makeStagedNextSchedulePaths(
 
 struct PhotoPainterSupport::Impl {
   explicit Impl(const BoardConfig& board)
-      : epdSpi(FSPI),
-        sdSpi(HSPI),
+      : epdSpi(HSPI),
+        sdSpi(FSPI),
         display(epdSpi, board),
         i2c(Wire, board.i2c, i2cTelemetry),
         power(i2c),
@@ -1446,8 +1555,21 @@ bool PhotoPainterSupport::displayFrame(const uint8_t* framebuffer, size_t length
     lastError_ = "DEVICE-FRAMEBUFFER";
     return false;
   }
-  if (!impl_->display.begin() || !impl_->display.displayFrame(framebuffer, length)) {
-    lastError_ = impl_->display.lastError();
+  if (!impl_->power.prepareDisplayPower()) {
+    lastError_ = impl_->power.lastError();
+    return false;
+  }
+  const bool displayed = impl_->display.begin()
+      && impl_->display.displayFrame(framebuffer, length);
+  const char* displayError = impl_->display.lastError();
+  impl_->display.safeShutdown();
+  const bool poweredDown = impl_->power.releaseDisplayPower();
+  if (!displayed) {
+    lastError_ = displayError;
+    return false;
+  }
+  if (!poweredDown) {
+    lastError_ = impl_->power.lastError();
     return false;
   }
   lastRefreshDurationMs_ = impl_->display.lastRefreshDurationMs();
