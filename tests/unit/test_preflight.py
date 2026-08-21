@@ -10,6 +10,7 @@ from inktime.app.core.preflight import (
     validate_lan_environment,
 )
 from inktime.app.core.runtime_config import RuntimeConfig
+from scripts.production_preflight import _lan_prestart_summary
 
 
 class LocalFilesystem:
@@ -145,6 +146,26 @@ def test_lan_environment_requires_production_paths_identity_and_readonly_photos(
             encoding="utf-8"
         ),
     )
+
+
+def test_lan_prestart_defers_actual_mount_proof_to_container_startup(tmp_path):
+    config = _config(
+        tmp_path,
+        public_url="http://inktime.local:8765",
+        cookie_secure=False,
+        allow_insecure_http=True,
+        proxy_trust=0,
+    )
+
+    assert _lan_prestart_summary(config, allow_test_host=False) == {
+        "status": "degraded",
+        "validation_scope": "prestart-config",
+        "transport": "trusted-lan-http",
+        "security_state": "degraded",
+        "tls_enabled": False,
+        "secure_cookie": False,
+        "runtime_mount_validation": "deferred-to-container-startup",
+    }
 
 
 @pytest.mark.parametrize(

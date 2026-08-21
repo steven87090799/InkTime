@@ -53,7 +53,7 @@ INKTIME_ALLOW_INSECURE_HTTP=1
 INKTIME_PROXY_TRUST=0
 ```
 
-啟動前執行 `python scripts/production_preflight.py --mode lan --env-file .env`。它會檢查 transport 組合、LAN host、placeholder／相對路徑、唯讀 photos mount、SQLite `/data`、network filesystem opt-in 與 immutable image identity，失敗時輸出穩定錯誤碼及修正方式。成功後 Health／diagnostics 仍會明確顯示 `environment=production`、`transport=trusted-lan-http`、`security_state=degraded`、`tls_enabled=false`、`secure_cookie=false`。此模式不可直接公開至 Internet；`.env.local.example` 只供 development／模擬。
+啟動前執行 `python scripts/production_preflight.py --mode lan --env-file .env`。它會檢查 transport 組合、LAN host、placeholder／相對路徑、Compose 唯讀 photos 宣告、host data/photos 路徑與 immutable image identity，失敗時輸出穩定錯誤碼及修正方式；摘要會明確標示 actual runtime mount validation 延後到容器啟動。容器啟動時 application preflight 會再用實際 mountinfo 驗證精確唯讀 `/photos`、可寫 nested mount 與 SQLite filesystem，並在不符合時 fail closed。成功後 Health／diagnostics 仍會明確顯示 `environment=production`、`transport=trusted-lan-http`、`security_state=degraded`、`tls_enabled=false`、`secure_cookie=false`。此模式不可直接公開至 Internet；`.env.local.example` 只供 development／模擬。
 
 ### 3.2 正式 HTTPS Reverse Proxy
 
