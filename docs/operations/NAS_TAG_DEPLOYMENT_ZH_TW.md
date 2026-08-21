@@ -7,10 +7,10 @@ main 上的程式碼
   → git tag v1.2.3
   → GitHub Actions 建置 amd64／arm64 映像
   → ghcr.io/steven87090799/inktime:v1.2.3
-  → NAS 執行 ./scripts/update_nas.sh v1.2.3
+  → NAS 執行 sudo ./scripts/update_nas.sh v1.2.3
 ```
 
-映像只包含程式。SQLite、Session Key、縮圖、備份與 Release 全部保留在 NAS 的 `/data`；原始相簿由另一個既有 host 目錄掛到 `/photos`。Compose 使用 long bind syntax、`create_host_path: false` 與 `read_only: true`，路徑不存在時必須失敗，不會悄悄建立空目錄。應用程式啟動時還會從實際 mount 狀態確認 `/photos` 是唯讀；只改 YAML 文字但實際可寫也會以 `DEPLOY-PHOTO-RO-001` 拒絕啟動。
+映像只包含程式。SQLite、Session Key、縮圖、備份與 Release 全部保留在 NAS 的 `/data`；原始相簿由另一個既有 host 目錄掛到 `/photos`。Compose 使用 long bind syntax、`create_host_path: false` 與 `read_only: true`，路徑不存在時必須失敗，不會悄悄建立空目錄。應用程式啟動時會從實際 mount 狀態確認 `/photos` 是精確的唯讀 mount；只改 YAML 文字但實際可寫會以 `DEPLOY-PHOTO-RO-001` 拒絕啟動，照片樹下任何可寫 nested mount 則會以 `DEPLOY-PHOTO-RO-002` 拒絕啟動。
 
 ## 1. 發布規則
 
@@ -21,7 +21,7 @@ main 上的程式碼
 - Tag 必須指向 `main` 歷史中的 Commit。
 - 已存在的版本 Tag 不可重新指向另一份映像；要修正內容請建立新版本。
 
-每次發布會產生 `linux/amd64` 與 `linux/arm64` 映像、Commit SHA Tag、OCI metadata 與 provenance attestation。映像另帶 `io.inktime.nas-deployment-contract` 標籤；更新器會在 pull 後、重建容器前，與 Repository 內唯一的 `nas-deployment-contract.version` 比對，不相容就停止。Intel N100／一般 x86 NAS 使用 `amd64`；ARM NAS 使用 `arm64`，Docker 會自動選擇正確架構。
+每次發布會產生 `linux/amd64` 與 `linux/arm64` 映像、Commit SHA Tag、OCI metadata 與 provenance attestation。映像另帶 `io.inktime.nas-deployment-contract` 標籤；更新器會在 pull 後、重建容器前，與 Repository 內唯一的 `nas-deployment-contract.version` 比對，不相容就停止。目前 NAS fail-closed mount／recovery 邊界是 deployment contract `3`，不可與 contract `2` 部署檔靜默混用。Intel N100／一般 x86 NAS 使用 `amd64`；ARM NAS 使用 `arm64`，Docker 會自動選擇正確架構。
 
 ## 2. 維護者建立版本
 
@@ -74,7 +74,9 @@ sudo mkdir -p /your/local/path/inktime/data
 sudo chown -R 10001:10001 /your/local/path/inktime/data
 ```
 
-資料與照片路徑不得相同，也不得互為父子目錄。更新器不會用寫入測試探測照片目錄，不會在相簿新增暫存檔；它只確認路徑可讀，容器則用實際唯讀 mount 保護照片。
+更新器需要操作 Docker，並且只對本次新建、已確認為空的 recovery 目錄執行 `chown 10001:10001`；請以 `sudo` 執行下列更新命令。它不會 chown／chmod 整棵 data tree、既有備份或 `session.key`。
+
+資料與照片路徑不得相同，也不得互為父子目錄。更新器不會用寫入測試探測照片目錄，不會在相簿新增暫存檔；它只確認路徑可讀，容器則用實際唯讀 mount 保護照片。`/photos` 下若另有 bind／tmpfs 等 nested mount，每一個也都必須是唯讀；`/photos/archive` 可寫會拒絕啟動，名稱相近但不在照片樹下的 `/photos-archive` 不受此規則誤判。
 
 持久狀態邊界如下：SQLite 主檔、WAL／SHM 與應用程式鎖在 `/data/inktime.db*`；`session.key`、備份、Settings／Secrets、使用者、裝置、排程、Queue／Jobs、照片索引與分析／留存 metadata 都在該 SQLite 與 `/data/backups`；Release 與 rendered output 在 `/data/releases`；cache 在 `/data/cache`。原始照片只在 `/photos`，不屬於 recovery archive，也不可被更新流程寫入。
 
@@ -95,35 +97,39 @@ INKTIME_PROXY_TRUST=0
 第一次啟動必須明確建立 deployment-root marker：
 
 ```bash
-./scripts/update_nas.sh --initialize v1.2.3
+sudo ./scripts/update_nas.sh --initialize v1.2.3
 ```
 
 `--initialize` 只允許 marker 尚不存在的空資料目錄，或已有 `inktime.db`、經管理者確認要納管的舊部署。日後普通更新必須找到 `/data/.inktime-deployment-root` 且路徑完全一致：
 
 ```bash
-./scripts/update_nas.sh v1.2.4
+sudo ./scripts/update_nas.sh v1.2.4
 ```
 
 若確實搬移了已納管的 data root 或 photo root，先人工核對新目錄內容，再執行：
 
 ```bash
-./scripts/update_nas.sh --accept-path-change v1.2.4
+sudo ./scripts/update_nas.sh --accept-path-change v1.2.4
 ```
 
-更新器依序執行：canonical path／拓樸／marker 驗證 → 取得 bounded host `flock` → Compose config → pull → OCI deployment contract 比對 → recovery point → `--no-build` 重建並等待健康檢查。任何前置條件失敗都不會重建既有容器。
+更新器依序執行：canonical path／拓樸／marker 驗證 → 取得 bounded host `flock` → Compose config 與 resolved identity 核對 → pull → OCI deployment contract 比對 → recovery point → `--no-build` 重建並等待健康檢查。任何前置條件失敗都不會重建既有容器。
+
+`.env.nas` 與命令列指定的 release Tag 是部署唯一來源。更新器會在隔離的 Compose 子程序中移除父 shell 繼承的所有 `INKTIME_*`，再明確注入本次 Tag；即使操作者的 shell 曾 export 另一組 data、photos、repository 或 `latest`，也不能覆寫已驗證的部署。重建前還會核對 Compose resolved environment 與 image identity，確保 updater 驗證、Compose 模型及執行容器使用同一組 `/data`、`/photos` 與 repository:tag。
 
 `latest` 是可移動別名，預設拒絕。只有已接受不可重現風險時，才在 `.env.nas` 明確設定後使用：
 
 ```bash
 INKTIME_ALLOW_MUTABLE_IMAGE_TAG=1
-./scripts/update_nas.sh latest
+sudo ./scripts/update_nas.sh latest
 ```
 
 不要以手動 `docker compose up` 取代更新器；那會繞過 marker、鎖、契約檢查與 recovery point。
 
 ## 5. 更新前後檢查
 
-每次已有資料庫的更新，更新器都會先透過既有 `BackupService` 的 SQLite online backup 建立 `/data/backups/update-recovery-...`。內容包含含 Secrets 的可驗證資料庫備份、權限 `0600` 的 `session.key` 副本，以及前版／目標映像、digest、Schema、deployment contract 與 SHA-256 metadata；不複製原始照片、快取、整個 Release payload。這是更新前 recovery point，不取代異機備份政策。
+每次已有資料庫的更新，host updater 都會先在 `/data/backups` 新建一個空白、非 symlink、權限受限的 `update-recovery-...` 目錄。目標映像的 sandbox recovery container 只會看到 production data root 的 `/source:ro`，以及該單一新目錄的 `/recovery:rw`；它沒有網路、capability、額外 NAS 路徑或整個 `/data` 的寫入權。
+
+Recovery 工具以 SQLite `mode=ro` 與 `query_only` 從 production DB online backup 到 `/recovery` 內的暫存 snapshot，再讓既有 `BackupService` 只處理該 recovery 副本。完成後保留含 Secrets 的可驗證資料庫備份、權限 `0600` 的 `session.key` 副本，以及前版／目標映像、digest、Schema、deployment contract 與 SHA-256 metadata；不複製原始照片、快取、整個 Release payload。若唯讀 snapshot、mount、Session Key 或 archive 驗證任一步失敗，更新立即中止且不替換既有服務；沒有把 production data 改掛 RW 的 fallback。這是更新前 recovery point，不取代異機備份政策。
 
 更新後確認：
 
@@ -139,7 +145,7 @@ curl -fsS http://127.0.0.1:8765/health/ready
 健康檢查失敗時，更新器不刪除 `/data` 或 recovery point，也不自動做可能不相容的降版。先保留診斷資料。若新版尚未執行不可逆資料 Migration，可在確認 Schema 相容後用上一個 Tag 重建：
 
 ```bash
-./scripts/update_nas.sh v1.2.2
+sudo ./scripts/update_nas.sh v1.2.2
 ```
 
 若已發生 Schema 變更，不可只換舊映像硬降版。請先停止三個服務，再依[備份還原指南](BACKUP_RESTORE_ZH_TW.md)把資料庫與 Release 一起還原。`latest` 會隨下一個穩定版移動，因此正式環境若重視可重現性，應記錄並使用明確的 `vX.Y.Z`。
@@ -155,9 +161,11 @@ curl -fsS http://127.0.0.1:8765/health/ready
 | `NAS-UPDATE-PATH-*` | 路徑不存在、不是 canonical、使用 symlink、不可讀／寫，或 data/photos 相同或巢狀；修正 host 目錄，不要建立替身空目錄。 |
 | `NAS-UPDATE-MARKER-*` | 首次未用 `--initialize`、marker 損壞或路徑改變；先人工確認 root，只有真實搬移才使用 `--accept-path-change`。 |
 | `NAS-UPDATE-CONTRACT-001`／`NAS-UPDATE-MARKER-006` | 映像、本機部署檔或既有 marker 契約不同；同步同一 Release 的四份部署檔，人工核對後以 `--accept-path-change` 接受契約更新，或改用相容 Tag。 |
-| `NAS-UPDATE-RECOVERY-*` | SQLite online backup、Session Key 或 metadata 驗證失敗；既有容器尚未被替換。 |
+| `NAS-UPDATE-IDENTITY-001` | Compose resolved data、photos、Tag 或 image identity 與 updater 已驗證值不同；檢查同版 `.env.nas`／Compose／updater，勿繞過更新器。 |
+| `NAS-UPDATE-RECOVERY-*`／`NAS-RECOVERY-*` | 唯讀 SQLite snapshot、source／destination mount、Session Key 或 metadata 驗證失敗；既有容器尚未被替換，修正安全前置條件後再更新，不可改用 RW fallback。 |
 | `NAS-UPDATE-LOCK-002` | 另一個更新程序持有相同 data root 的 lock；等待該程序結束，不要刪 lock file。 |
-| `DEPLOY-PHOTO-RO-001` | 容器實際 mountinfo／statvfs 顯示 `/photos` 可寫；修正 Compose 與 runtime mount。 |
+| `DEPLOY-PHOTO-RO-001` | 容器 mountinfo 沒有精確的唯讀 `/photos` mount；修正 Compose 與 runtime mount。 |
+| `DEPLOY-PHOTO-RO-002` | `/photos` 下至少一個 nested mount 可寫；把照片樹下所有 mount 改為唯讀，或改用沒有可寫下層 mount 的 photo root。 |
 | 容器 unhealthy | 先保留 Log 與資料，不要刪 Volume；執行 `docker compose ... logs --since=30m` 並檢查 `/data` 權限、URL／Cookie 組合與 SQLite filesystem。 |
 
 更完整的資源、安全、Log、備份與資料庫限制見 [Docker 部署規格](DOCKER_GUIDE_ZH_TW.md)。

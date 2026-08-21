@@ -78,7 +78,7 @@ def test_stable_latest_alias_and_prerelease_boundary_are_explicit():
     assert "steps.release.outputs.stable == 'true'" in tags
     labels = metadata["with"]["labels"]
     assert "io.inktime.nas-deployment-contract=${{ steps.release.outputs.deployment_contract }}" in labels
-    assert CONTRACT_PATH.read_text(encoding="utf-8").strip() == "2"
+    assert CONTRACT_PATH.read_text(encoding="utf-8").strip() == "3"
 
 
 def test_nas_compose_is_pull_only_and_keeps_data_and_photos_external():
@@ -141,6 +141,20 @@ def test_nas_updater_pulls_before_no_build_recreate_and_never_deletes_volumes():
     assert updater.index("create_update_recovery.py") < updater.index("compose up -d --no-build")
     assert "INKTIME_IMAGE_TAG" in updater
     assert "docker compose" in updater
+    assert "unset \"$compose_environment_name\"" in updater
+    assert "export INKTIME_IMAGE_TAG=\"$release_tag\"" in updater
+    assert "compose config --environment" in updater
+    assert "compose config --images" in updater
+    assert "verify_compose_environment_value INKTIME_DATA_PATH" in updater
+    assert "verify_compose_environment_value INKTIME_PHOTO_PATH" in updater
+    assert "NAS-UPDATE-IDENTITY-001" in updater
+    assert 'target=/source,readonly' in updater
+    assert 'source=${recovery_dir},target=/recovery' in updater
+    assert 'source=${data_path},target=/data' not in updater
+    assert "--network none" in updater
+    assert "--read-only" in updater
+    assert "--security-opt no-new-privileges" in updater
+    assert "--cap-drop ALL" in updater
     assert "down -v" not in updater
     assert "docker volume rm" not in updater
     assert "down " not in updater
@@ -158,6 +172,14 @@ def test_update_recovery_uses_online_backup_and_excludes_payload_copies():
     assert 'if __package__ in {None, ""}' in recovery
     assert "sys.path.insert(0, str(Path(__file__).resolve().parents[1]))" in recovery
     assert "BackupService" in recovery
+    assert 'f"{source.as_uri()}?mode=ro"' in recovery
+    assert "PRAGMA query_only = ON" in recovery
+    assert "source_connection.backup(target_connection)" in recovery
+    assert "BackupService(Database(staged_snapshot), destination_root)" in recovery
+    assert "--source-root" in recovery
+    assert "--destination-root" in recovery
+    assert "NAS-RECOVERY-SOURCE-RO-001" in recovery
+    assert "NAS-RECOVERY-DEST-RW-001" in recovery
     assert "create(include_secrets=True)" in recovery
     assert "service.validate(archive)" in recovery
     assert "session.key" in recovery
@@ -181,8 +203,8 @@ def test_hosted_ci_runs_real_nas_updater_a_to_b_and_negative_safety_cases():
     assert job["steps"][-1]["run"] == "scripts/ci/nas_update_e2e.sh"
     assert "build_push v1.0.0-ci-a" in script
     assert "build_push v1.0.0-ci-b" in script
-    assert '"$updater" --initialize v1.0.0-ci-a' in script
-    assert '"$updater" v1.0.0-ci-b' in script
+    assert "run_updater --initialize v1.0.0-ci-a" in script
+    assert "run_updater v1.0.0-ci-b" in script
     assert "NAS-UPDATE-PATH-002" in script
     assert "NAS-UPDATE-PATH-006" in script
     assert "NAS-UPDATE-PATH-003" in script
@@ -190,5 +212,8 @@ def test_hosted_ci_runs_real_nas_updater_a_to_b_and_negative_safety_cases():
     assert "NAS-UPDATE-CONTRACT-001" in script
     assert "NAS-UPDATE-TAG-001" in script
     assert "NAS-UPDATE-LOCK-002" in script
+    assert "INKTIME_IMAGE_REPOSITORY=localhost:5000/ambient-wrong" in script
+    assert "NAS-RECOVERY-SOURCE-RO-001" in script
+    assert "v1.0.0-ci-recovery-fail" in script
     assert "container_ids_before" in script
     assert "photo_state_before" in script

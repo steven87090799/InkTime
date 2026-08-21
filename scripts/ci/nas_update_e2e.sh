@@ -11,9 +11,20 @@ updater="${repository_root}/scripts/update_nas.sh"
 registry=localhost:5000/inktime
 contract=$(tr -d '[:space:]' < "${repository_root}/nas-deployment-contract.version")
 
+compose() (
+  local tag=${1:-v1.0.0-ci-a}
+  shift
+  local environment_name
+  while IFS= read -r environment_name; do
+    unset "$environment_name"
+  done < <(env | sed -n 's/^\(INKTIME_[A-Za-z0-9_]*\)=.*/\1/p')
+  export INKTIME_IMAGE_TAG="$tag"
+  docker compose --env-file "$env_file" -f "$compose_file" "$@"
+)
+
 cleanup() {
   if [ -f "$env_file" ]; then
-    INKTIME_IMAGE_TAG=v1.0.0-ci-b docker compose --env-file "$env_file" -f "$compose_file" down --remove-orphans || true
+    compose v1.0.0-ci-b down --remove-orphans || true
   fi
   if [[ "$ci_root" == "${repository_root}/.ci-nas" ]]; then
     sudo rm -rf -- "$ci_root"
@@ -64,11 +75,29 @@ build_push v1.0.0-ci-a "$contract"
 build_push v1.0.0-ci-b "$contract"
 build_push v1.0.0-ci-contract-mismatch 999
 
-"$updater" --initialize v1.0.0-ci-a "$env_file"
+docker build --tag "${registry}:v1.0.0-ci-recovery-fail" - <<EOF
+FROM ${registry}:v1.0.0-ci-b
+USER root
+RUN printf '%s\n' '#!/usr/bin/env python3' 'raise RuntimeError("CI forced recovery failure")' > /app/scripts/create_update_recovery.py
+USER 10001:10001
+EOF
+docker push "${registry}:v1.0.0-ci-recovery-fail"
 
-compose() {
-  INKTIME_IMAGE_TAG=${1:-v1.0.0-ci-a} docker compose --env-file "$env_file" -f "$compose_file" "${@:2}"
+export INKTIME_DATA_PATH="$photo_path"
+export INKTIME_PHOTO_PATH="$data_path"
+export INKTIME_IMAGE_REPOSITORY=localhost:5000/ambient-wrong
+export INKTIME_IMAGE_TAG=latest
+
+run_updater() {
+  sudo env \
+    INKTIME_DATA_PATH="$INKTIME_DATA_PATH" \
+    INKTIME_PHOTO_PATH="$INKTIME_PHOTO_PATH" \
+    INKTIME_IMAGE_REPOSITORY="$INKTIME_IMAGE_REPOSITORY" \
+    INKTIME_IMAGE_TAG="$INKTIME_IMAGE_TAG" \
+    "$updater" "$@"
 }
+
+run_updater --initialize v1.0.0-ci-a "$env_file"
 
 assert_runtime_contract() {
   local tag=$1
@@ -77,6 +106,7 @@ assert_runtime_contract() {
     container=$(compose "$tag" ps -q "$service")
     test -n "$container"
     test "$(docker inspect --format '{{.Config.User}}' "$container")" = "10001:10001"
+    test "$(docker inspect --format '{{.Config.Image}}' "$container")" = "${registry}:${tag}"
     test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$container")" = true
     docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$container" | grep -q 'no-new-privileges'
     mount_json=$(docker inspect --format '{{json .Mounts}}' "$container")
@@ -177,21 +207,48 @@ PY
 
 state_before=$(snapshot v1.0.0-ci-a)
 session_hash_before=$(compose v1.0.0-ci-a exec -T inktime-web sha256sum /data/session.key)
-marker_before=$(cat "${data_path}/.inktime-deployment-root")
+marker_before=$(sudo cat "${data_path}/.inktime-deployment-root")
 container_ids_before=$(compose v1.0.0-ci-a ps -q | sort)
 
 assert_unchanged_after_failure() {
   local expected_code=$1
   shift
   local output
-  if output=$("$updater" "$@" "$env_file" 2>&1); then
+  if output=$(run_updater "$@" "$env_file" 2>&1); then
     echo "NAS-E2E-NEGATIVE-001 expected failure ${expected_code}" >&2
     exit 1
   fi
   grep -q "$expected_code" <<<"$output"
-  test "$container_ids_before" = "$(INKTIME_IMAGE_TAG=v1.0.0-ci-a docker compose --env-file "$env_file" -f "$compose_file" ps -q | sort)"
+  test "$container_ids_before" = "$(compose v1.0.0-ci-a ps -q | sort)"
+  test "$state_before" = "$(snapshot v1.0.0-ci-a)"
+  test "$session_hash_before" = "$(compose v1.0.0-ci-a exec -T inktime-web sha256sum /data/session.key)"
   test "$photo_state_before" = "$(photo_state)"
 }
+
+rw_recovery_source="${ci_root}/rw-recovery-source"
+rw_recovery_destination="${ci_root}/rw-recovery-destination"
+mkdir -p "$rw_recovery_source" "$rw_recovery_destination"
+touch "${rw_recovery_source}/inktime.db"
+printf 'ci-recovery-session\n' > "${rw_recovery_source}/session.key"
+sudo chown -R 10001:10001 "$rw_recovery_source" "$rw_recovery_destination"
+sudo chmod 600 "${rw_recovery_source}/session.key"
+if rw_recovery_output=$(docker run --rm --read-only --network none --user 10001:10001 \
+  --security-opt no-new-privileges --cap-drop ALL \
+  --mount "type=bind,source=${rw_recovery_source},target=/source" \
+  --mount "type=bind,source=${rw_recovery_destination},target=/recovery" \
+  --tmpfs /tmp:size=64m,mode=1777 \
+  "${registry}:v1.0.0-ci-b" python scripts/create_update_recovery.py \
+  --source-root /source \
+  --destination-root /recovery \
+  --previous-image-ref "${registry}:v1.0.0-ci-a" \
+  --previous-image-digest sha256:ci \
+  --target-image-ref "${registry}:v1.0.0-ci-b" \
+  --deployment-contract "$contract" 2>&1); then
+  echo "NAS-E2E-RECOVERY-RO-001 writable recovery source was accepted" >&2
+  exit 1
+fi
+grep -q NAS-RECOVERY-SOURCE-RO-001 <<<"$rw_recovery_output"
+test "$photo_state_before" = "$(photo_state)"
 
 write_env "${ci_root}/missing-data" "$photo_path"
 assert_unchanged_after_failure NAS-UPDATE-PATH-002 v1.0.0-ci-b
@@ -214,17 +271,20 @@ assert_unchanged_after_failure NAS-UPDATE-MARKER-001 v1.0.0-ci-b
 mv "${data_path}/.inktime-deployment-root.held" "${data_path}/.inktime-deployment-root"
 assert_unchanged_after_failure NAS-UPDATE-TAG-001 latest
 assert_unchanged_after_failure NAS-UPDATE-CONTRACT-001 v1.0.0-ci-contract-mismatch
-flock "${data_path}/.inktime-update.lock" -c 'sleep 10' &
+recovery_dirs_before=$(sudo find "${data_path}/backups" -maxdepth 1 -type d -name 'update-recovery-*' | sort)
+assert_unchanged_after_failure NAS-UPDATE-RECOVERY-001 v1.0.0-ci-recovery-fail
+test "$recovery_dirs_before" = "$(sudo find "${data_path}/backups" -maxdepth 1 -type d -name 'update-recovery-*' | sort)"
+sudo flock "${data_path}/.inktime-update.lock" -c 'sleep 10' &
 lock_pid=$!
 sleep 1
 assert_unchanged_after_failure NAS-UPDATE-LOCK-002 v1.0.0-ci-b
 wait "$lock_pid"
 
-"$updater" v1.0.0-ci-b "$env_file"
+run_updater v1.0.0-ci-b "$env_file"
 assert_runtime_contract v1.0.0-ci-b
 test "$state_before" = "$(snapshot v1.0.0-ci-b)"
 test "$session_hash_before" = "$(compose v1.0.0-ci-b exec -T inktime-web sha256sum /data/session.key)"
-test "$marker_before" = "$(cat "${data_path}/.inktime-deployment-root")"
+test "$marker_before" = "$(sudo cat "${data_path}/.inktime-deployment-root")"
 test "$photo_state_before" = "$(photo_state)"
 
 recovery_dir=$(sudo find "${data_path}/backups" -maxdepth 1 -type d -name 'update-recovery-*' | sort | tail -1)
@@ -236,6 +296,8 @@ sudo jq -e --argjson contract "$contract" '
   .previous_image_ref != "none" and
   .previous_image_digest != "none" and
   .target_image_ref == "localhost:5000/inktime:v1.0.0-ci-b" and
+  .source_mount == "read-only" and
+  .destination_mount == "bounded-read-write" and
   .secrets_policy == "included" and
   .backup_scope.original_photos == false and
   .backup_scope.release_payloads == false
