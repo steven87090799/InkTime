@@ -41,6 +41,7 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
 | SD | CS 38、SCK 39、MISO 40、MOSI 41；獨立 SPI bus |
 | I²C | SDA 47、SCL 48、100 kHz；共用總線採官方裝置設定中的保守速率，裝置個別 probe |
 | 按鍵 | BOOT 0、KEY 4 active-low、PWR 5 保留原廠電源用途 |
+| 指示燈 | PWR 紅燈 GPIO 45、ACT 綠燈 GPIO 42，兩者 active-low；不等同 GPIO 5 PWR 按鍵 |
 | 音訊 | MCLK 14、WS 16、BCLK 15、DIN 18、DOUT 17、PA 7 |
 | 面板 | 800×480、4bpp、192,000 bytes、E6 六色 |
 | MCU | ESP32-S3-WROOM-1-N16R8、16 MiB Flash、8 MiB OPI PSRAM |
@@ -132,6 +133,8 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   recovery/service。timer wake 仍獨立啟用，Enhanced timer wake 的本地排程只讀正式
   Frame，不呼叫 Wi-Fi、NTP 或 HTTP。睡前等待按鍵釋放以免重複喚醒。
 - GPIO 5 完全不作一般輸出；GPIO 0 不取樣、不驅動，完整保留原廠 BOOT／下載用途。
+- 開機後 PWR 紅燈維持亮起，電子紙傳輸期間 ACT 綠燈亮起；進入 deep sleep 前兩燈
+  都會熄滅。燈號是狀態提示，不取代 BUSY cycle 與實際面板變化的刷新判定。
 - Wi-Fi、HTTP、NTP、AP 與 EPD 都有有限 timeout。Wi-Fi 失敗時先嘗試由 RTC 與正式
   快取完成到期的離線 Slot；否則進入有界設定入口。PMIC 辨識與電池讀值不參與這個
   決策，因此讀不到電源資訊時仍能看見並修正網路或設定問題。
@@ -253,6 +256,12 @@ slot 仍有足夠餘裕，但 OTA 簽章、rollback 與實際燒錄流程尚未�
 方式驗證；InkTime 配對畫面確實再次刷新，確認 ALDO4 修正通過真正 PMIC 冷啟動。
 USB CDC 在斷電期間中斷且重新接線後恢復，因此未擷取到發生於 USB 尚未連線時的早期
 boot log；本次通過依據是實體面板變化，不延伸宣稱正式照片、排程喚醒或睡眠電流已通過。
+
+同日再燒錄 PWR／ACT 指示燈版（app SHA-256
+`187cd069b554f3554248ab58c77f9e8ae4ed4028e797905c113a5652b467573a`）：暖啟動時
+log 回報 `pairing_display_ready`，耗時 `30101 ms`，實體面板與 ACT 燈均有變化；接著
+拔除 USB 讓裝置進入 deep sleep，短按 KEY1 後配對畫面再次刷新。這項結果通過 GPIO4
+EXT1 按鍵喚醒及睡眠後再次刷新，不等同尚未執行的 timer 排程喚醒或睡眠電流量測。
 
 本輪的安全結論來自官方 commit `a5e8f757…` 原始碼比對、compile-time 腳位鎖定與
 Hosted CI 編譯，不是對實體面板壽命或電池續航的保證；這項限制不會轉成使用者必須

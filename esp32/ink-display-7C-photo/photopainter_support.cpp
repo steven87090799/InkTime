@@ -49,6 +49,8 @@ constexpr uint8_t kTg28Aldo4_3300mV = 0x1CU;
 constexpr uint32_t kTg28Aldo4SettleMs = 10U;
 constexpr uint32_t kTg28Aldo4ColdStartSettleMs = 500U;
 constexpr uint32_t kEpdPostInitSettleMs = 3000U;
+constexpr gpio_num_t kPhotoPainterPowerLed = GPIO_NUM_45;
+constexpr gpio_num_t kPhotoPainterActivityLed = GPIO_NUM_42;
 constexpr uint8_t kShtc3Address = 0x70;
 constexpr uint8_t kPcf85063Address = 0x51;
 constexpr size_t kIoChunkSize = 4096;
@@ -121,6 +123,24 @@ void drawPairingText(uint8_t* frame, size_t length, int x, int y, const String& 
 #else
 #define PP_LOG(...) do { } while (0)
 #endif
+
+void setBoardIndicator(gpio_num_t pin, bool enabled) {
+  // Rev2.0 PWR/ACT LEDs are active-low and independent of GPIO5 PWR.
+  (void)gpio_set_level(pin, enabled ? 0 : 1);
+}
+
+void configureBoardIndicators() {
+  gpio_config_t outputs = {};
+  outputs.intr_type = GPIO_INTR_DISABLE;
+  outputs.mode = GPIO_MODE_OUTPUT;
+  outputs.pin_bit_mask = (1ULL << kPhotoPainterPowerLed)
+      | (1ULL << kPhotoPainterActivityLed);
+  outputs.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  outputs.pull_up_en = GPIO_PULLUP_ENABLE;
+  if (gpio_config(&outputs) != ESP_OK) return;
+  setBoardIndicator(kPhotoPainterActivityLed, false);
+  setBoardIndicator(kPhotoPainterPowerLed, true);
+}
 
 bool holdEpdPinsForColdBoot(const BoardConfig& board) {
   // Waveshare's working runtime establishes the EPD bus and reset state from
@@ -709,6 +729,7 @@ PhotoPainterSupport::PhotoPainterSupport(const BoardConfig& board) : board_(boar
   // actual transaction so the cold-boot pin matrix is never torn down.
   earlyEpdTransportReady_ = prepareSpectra6ColdBootTransport(board_);
   earlyEpdPinsReady_ = earlyEpdTransportReady_ && holdEpdPinsForColdBoot(board_);
+  configureBoardIndicators();
 }
 
 PhotoPainterSupport::~PhotoPainterSupport() {
@@ -1603,8 +1624,10 @@ bool PhotoPainterSupport::displayFrame(const uint8_t* framebuffer, size_t length
     lastError_ = "DEVICE-FRAMEBUFFER";
     return false;
   }
+  setBoardIndicator(kPhotoPainterActivityLed, true);
   if (!impl_->power.prepareDisplayPower()) {
     lastError_ = impl_->power.lastError();
+    setBoardIndicator(kPhotoPainterActivityLed, false);
     return false;
   }
   const bool initialized = impl_->display.begin();
@@ -1618,6 +1641,7 @@ bool PhotoPainterSupport::displayFrame(const uint8_t* framebuffer, size_t length
       && impl_->display.displayFrame(framebuffer, length);
   const char* displayError = impl_->display.lastError();
   impl_->display.safeShutdown();
+  setBoardIndicator(kPhotoPainterActivityLed, false);
   if (!displayed) {
     lastError_ = displayError;
     return false;
@@ -1710,18 +1734,21 @@ int PhotoPainterSupport::batteryPercent() const {
 }
 
 void PhotoPainterSupport::prepareForDeepSleep() {
-  if (impl_ == nullptr) return;
-  impl_->display.safeShutdown();
-  if (sdReady_) {
-    SD.end();
-    impl_->sdSpi.end();
+  if (impl_ != nullptr) {
+    impl_->display.safeShutdown();
+    if (sdReady_) {
+      SD.end();
+      impl_->sdSpi.end();
+    }
+    if (board_.audio.paEnable != kNoPin) {
+      pinMode(board_.audio.paEnable, OUTPUT);
+      digitalWrite(board_.audio.paEnable, LOW);
+    }
+    impl_->power.prepareForDeepSleep();
+    Wire.end();
   }
-  if (board_.audio.paEnable != kNoPin) {
-    pinMode(board_.audio.paEnable, OUTPUT);
-    digitalWrite(board_.audio.paEnable, LOW);
-  }
-  impl_->power.prepareForDeepSleep();
-  Wire.end();
+  setBoardIndicator(kPhotoPainterActivityLed, false);
+  setBoardIndicator(kPhotoPainterPowerLed, false);
 }
 
 void PhotoPainterSupport::enableWakeSources() {

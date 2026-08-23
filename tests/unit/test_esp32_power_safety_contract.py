@@ -132,6 +132,36 @@ def test_sleep_domains_and_tg28_epd_rail_remain_narrow_and_fail_closed():
         "holdEpdPinsForColdBoot(board_)"
     )
     assert "earlyEpdPinsReady_ = earlyEpdTransportReady_" in constructor
+    assert "configureBoardIndicators();" in constructor
+
+    assert "kPhotoPainterPowerLed = GPIO_NUM_45" in support
+    assert "kPhotoPainterActivityLed = GPIO_NUM_42" in support
+    indicator_setup = _between(
+        support,
+        "void configureBoardIndicators()",
+        "bool holdEpdPinsForColdBoot",
+    )
+    assert "enabled ? 0 : 1" in support
+    assert "kPhotoPainterPowerLed" in indicator_setup
+    assert "kPhotoPainterActivityLed" in indicator_setup
+    assert "board_.buttons.power" not in indicator_setup
+
+    display_frame = _between(
+        support,
+        "bool PhotoPainterSupport::displayFrame",
+        "bool PhotoPainterSupport::displayPairingScreen",
+    )
+    assert "setBoardIndicator(kPhotoPainterActivityLed, true)" in display_frame
+    assert display_frame.count("setBoardIndicator(kPhotoPainterActivityLed, false)") >= 2
+
+    sleep_prepare = _between(
+        support,
+        "void PhotoPainterSupport::prepareForDeepSleep",
+        "void PhotoPainterSupport::enableWakeSources",
+    )
+    assert "setBoardIndicator(kPhotoPainterActivityLed, false)" in sleep_prepare
+    assert "setBoardIndicator(kPhotoPainterPowerLed, false)" in sleep_prepare
+    assert "board_.buttons.power" not in sleep_prepare
 
     prepare = _between(pmic, "bool prepareDisplayPower()", "const char* lastError()")
     assert "voltage & static_cast<uint8_t>(~kTg28AldoVoltageMask)" in prepare
@@ -348,6 +378,7 @@ def test_photopainter_docs_match_ext1_and_fail_closed_tg28_behavior():
     assert "Rev2.0 原理圖都確認 PMIC 為 TG28" in docs
     assert "ALDO4 直接供應" in docs and "`EPD_VCC`" in docs
     assert "`REG95[4:0]`" in docs and "`REG90[3]`" in docs
+    assert "PWR 紅燈 GPIO 45" in docs and "ACT 綠燈 GPIO 42" in docs
     assert "韌體不寫 TG28 的 DCDC、充電、全機 shutdown" in docs
     assert "不解除 max-awake supervisor" in normalized_docs
 
