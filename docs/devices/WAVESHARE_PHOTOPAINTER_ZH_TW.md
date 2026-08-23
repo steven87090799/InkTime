@@ -15,9 +15,11 @@ ESP32-S3-PhotoPainter。使用者實際板與 Waveshare Rev2.0 原理圖都確�
 #define DEVICE_PROFILE DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER
 ```
 
-Arduino CLI 以 `compiler.cpp.extra_flags` 傳入同一個值。GPIO、能力、實體解析度、
-SPI 時脈與 payload 尺寸只定義在
-`esp32/ink-display-7C-photo/hardware_profile.h`；韌體不支援運行中改接 GPIO。
+Arduino CLI 以 `compiler.cpp.extra_flags` 傳入同一個值。EPD、SD、I²C、按鍵、音訊、
+能力、實體解析度、SPI 時脈與 payload 尺寸集中定義在
+`esp32/ink-display-7C-photo/hardware_profile.h`；PWR／ACT indicator 目前仍是
+`photopainter_support.cpp` 的 board-specific constant，已在 Rev2.0 交接紀錄列為後續應
+補上的 compile-time contract。韌體不支援運行中改接 GPIO。
 
 ## Stock-first 與 Enhanced 邊界
 
