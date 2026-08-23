@@ -1,5 +1,10 @@
 # Waveshare ESP32-S3-PhotoPainter 支援與安全基準
 
+維護或實板除錯前，必須先讀
+[PhotoPainter Rev2.0 TG28 實板除錯交接紀錄](PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md)；
+該文件保存 2026-08-22 至 2026-08-23 的官方／InkTime A/B、ALDO4 根因、安全禁區與
+尚未完成的實板驗收，避免後續維護者重做已證偽或有風險的 PMIC 實驗。
+
 ## 支援狀態
 
 InkTime 2.6.0 可用單一 compile-time Profile 切換既有 PCB 與 Waveshare
