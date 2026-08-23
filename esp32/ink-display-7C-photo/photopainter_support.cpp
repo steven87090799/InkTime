@@ -35,18 +35,20 @@
 
 namespace inktime {
 
-// PhotoPainter Rev2.0 schematic: TG28 UP1 is at 0x34 and ALDO3 feeds EPD_VCC.
+// PhotoPainter Rev2.0 schematic: TG28 UP1 is at 0x34 and ALDO4 feeds EPD_VCC.
 // Only the two EPD-rail registers below may be mutated by this driver.
 constexpr uint8_t kPhotoPainterPmicAddress = 0x34;
 constexpr uint8_t kTg28Status1 = 0x00;
 constexpr uint8_t kTg28BatteryVoltageHigh = 0x34;
 constexpr uint8_t kTg28LdoEnable0 = 0x90;
-constexpr uint8_t kTg28Aldo3Voltage = 0x94;
+constexpr uint8_t kTg28Aldo4Voltage = 0x95;
 constexpr uint8_t kTg28BatteryPercent = 0xA4;
-constexpr uint8_t kTg28Aldo3EnableMask = 1U << 2U;
+constexpr uint8_t kTg28Aldo4EnableMask = 1U << 3U;
 constexpr uint8_t kTg28AldoVoltageMask = 0x1FU;
-constexpr uint8_t kTg28Aldo3_3300mV = 0x1CU;
-constexpr uint32_t kTg28Aldo3SettleMs = 10U;
+constexpr uint8_t kTg28Aldo4_3300mV = 0x1CU;
+constexpr uint32_t kTg28Aldo4SettleMs = 10U;
+constexpr uint32_t kTg28Aldo4ColdStartSettleMs = 500U;
+constexpr uint32_t kEpdPostInitSettleMs = 3000U;
 constexpr uint8_t kShtc3Address = 0x70;
 constexpr uint8_t kPcf85063Address = 0x51;
 constexpr size_t kIoChunkSize = 4096;
@@ -119,6 +121,35 @@ void drawPairingText(uint8_t* frame, size_t length, int x, int y, const String& 
 #else
 #define PP_LOG(...) do { } while (0)
 #endif
+
+bool holdEpdPinsForColdBoot(const BoardConfig& board) {
+  // Waveshare's working runtime establishes the EPD bus and reset state from
+  // its global ePaperPort constructor, before setup() and PMIC probing.  SPI3
+  // already owns SCK/MOSI at this point, so only configure the three discrete
+  // control outputs here.  Reconfiguring SCK/MOSI as ordinary GPIO after
+  // spi_bus_initialize() would detach or override the working pin matrix.
+  // GPIO5 PWR and GPIO21 PMIC IRQ remain untouched.
+  gpio_config_t outputs = {};
+  outputs.intr_type = GPIO_INTR_DISABLE;
+  outputs.mode = GPIO_MODE_OUTPUT;
+  outputs.pin_bit_mask = (1ULL << board.display.spi.cs)
+      | (1ULL << board.display.dc)
+      | (1ULL << board.display.reset);
+  outputs.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  outputs.pull_up_en = GPIO_PULLUP_ENABLE;
+  if (gpio_config(&outputs) != ESP_OK) return false;
+  gpio_set_level(static_cast<gpio_num_t>(board.display.spi.cs), 1);
+  gpio_set_level(static_cast<gpio_num_t>(board.display.dc), 0);
+  gpio_set_level(static_cast<gpio_num_t>(board.display.reset), 1);
+
+  gpio_config_t busy = {};
+  busy.intr_type = GPIO_INTR_DISABLE;
+  busy.mode = GPIO_MODE_INPUT;
+  busy.pin_bit_mask = 1ULL << board.display.busy;
+  busy.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  busy.pull_up_en = GPIO_PULLUP_ENABLE;
+  return gpio_config(&busy) == ESP_OK;
+}
 
 struct I2cRetryTelemetry {
   uint32_t retry_count = 0;
@@ -307,16 +338,16 @@ class ProbePowerManager final : public PowerManager {
   bool begin() override {
     type_ = PmicType::None;
     uint8_t ldoState = 0;
-    uint8_t aldo3Voltage = 0;
+    uint8_t aldo4Voltage = 0;
     if (!bus_.probe(kPhotoPainterPmicAddress)) return false;
     if (!bus_.readRegister(kPhotoPainterPmicAddress, kTg28LdoEnable0, &ldoState, 1)
         || !bus_.readRegister(
-          kPhotoPainterPmicAddress, kTg28Aldo3Voltage, &aldo3Voltage, 1)) {
+          kPhotoPainterPmicAddress, kTg28Aldo4Voltage, &aldo4Voltage, 1)) {
       type_ = PmicType::Unknown;
       return false;
     }
     // Rev2.0 identifies UP1 as TG28. Do not use the AXP2101-only 0x03 chip-ID
-    // test: TG28 does not document that register, while 0x90/0x94 are defined.
+    // test: TG28 does not document that register, while 0x90/0x95 are defined.
     type_ = PmicType::TG28;
     refreshMeasurements();
     return true;
@@ -330,18 +361,18 @@ class ProbePowerManager final : public PowerManager {
     }
     uint8_t voltage = 0;
     if (!bus_.readRegister(
-          kPhotoPainterPmicAddress, kTg28Aldo3Voltage, &voltage, 1)) {
+          kPhotoPainterPmicAddress, kTg28Aldo4Voltage, &voltage, 1)) {
       lastError_ = "PMIC-EPD-VOLTAGE-READ";
       return false;
     }
     const uint8_t voltage3300 = static_cast<uint8_t>(
       (voltage & static_cast<uint8_t>(~kTg28AldoVoltageMask))
-      | kTg28Aldo3_3300mV
+      | kTg28Aldo4_3300mV
     );
     if (voltage3300 != voltage
         && !bus_.writeRegisters(
           kPhotoPainterPmicAddress,
-          kTg28Aldo3Voltage,
+          kTg28Aldo4Voltage,
           &voltage3300,
           1,
           true)) {
@@ -350,8 +381,8 @@ class ProbePowerManager final : public PowerManager {
     }
     uint8_t voltageReadback = 0;
     if (!bus_.readRegister(
-          kPhotoPainterPmicAddress, kTg28Aldo3Voltage, &voltageReadback, 1)
-        || (voltageReadback & kTg28AldoVoltageMask) != kTg28Aldo3_3300mV) {
+          kPhotoPainterPmicAddress, kTg28Aldo4Voltage, &voltageReadback, 1)
+        || (voltageReadback & kTg28AldoVoltageMask) != kTg28Aldo4_3300mV) {
       lastError_ = "PMIC-EPD-VOLTAGE-READBACK";
       return false;
     }
@@ -362,7 +393,8 @@ class ProbePowerManager final : public PowerManager {
       lastError_ = "PMIC-EPD-ENABLE-READ";
       return false;
     }
-    const uint8_t enabledState = ldoState | kTg28Aldo3EnableMask;
+    const bool aldo4AlreadyEnabled = (ldoState & kTg28Aldo4EnableMask) != 0U;
+    const uint8_t enabledState = ldoState | kTg28Aldo4EnableMask;
     if (enabledState != ldoState
         && !bus_.writeRegisters(
           kPhotoPainterPmicAddress,
@@ -376,11 +408,14 @@ class ProbePowerManager final : public PowerManager {
     uint8_t enableReadback = 0;
     if (!bus_.readRegister(
           kPhotoPainterPmicAddress, kTg28LdoEnable0, &enableReadback, 1)
-        || (enableReadback & kTg28Aldo3EnableMask) == 0U) {
+        || (enableReadback & kTg28Aldo4EnableMask) == 0U) {
       lastError_ = "PMIC-EPD-ENABLE-READBACK";
       return false;
     }
-    delay(kTg28Aldo3SettleMs);
+    // When ALDO4 was already on, retain the existing official runtime path.
+    // A true PMIC cold start needs a longer bounded interval with RESET high;
+    // 10 ms only covered register settling, not the panel controller startup.
+    delay(aldo4AlreadyEnabled ? kTg28Aldo4SettleMs : kTg28Aldo4ColdStartSettleMs);
     return true;
   }
 
@@ -420,7 +455,7 @@ class ProbePowerManager final : public PowerManager {
   float batteryVoltage() const override { return batteryMillivolts_ / 1000.0f; }
   int batteryPercent() const override { return batteryPercent_; }
   void prepareForDeepSleep() override {
-    // The official runtime keeps ALDO3 available and powers down the EPD
+    // The official runtime keeps ALDO4 available and powers down the EPD
     // controller by command. Do not strand the shared board in an I2C-low
     // state by changing PMIC rails immediately before ESP-only deep sleep.
   }
@@ -639,15 +674,13 @@ bool makeStagedNextSchedulePaths(
 
 struct PhotoPainterSupport::Impl {
   explicit Impl(const BoardConfig& board)
-      : epdSpi(HSPI),
-        sdSpi(FSPI),
-        display(epdSpi, board),
+      : sdSpi(FSPI),
+        display(board),
         i2c(Wire, board.i2c, i2cTelemetry),
         power(i2c),
         sensor(i2c),
         rtc(i2c) {}
 
-  SPIClass epdSpi;
   SPIClass sdSpi;
   Spectra6_73 display;
   I2cRetryTelemetry i2cTelemetry;
@@ -670,7 +703,13 @@ const char* cacheStatusName(CacheStatus status) {
   return "error";
 }
 
-PhotoPainterSupport::PhotoPainterSupport(const BoardConfig& board) : board_(board) {}
+PhotoPainterSupport::PhotoPainterSupport(const BoardConfig& board) : board_(board) {
+  // The official runtime initializes SPI3 before configuring RESET/BUSY in
+  // its global constructor.  Keep this object alive and reuse it for the
+  // actual transaction so the cold-boot pin matrix is never torn down.
+  earlyEpdTransportReady_ = prepareSpectra6ColdBootTransport(board_);
+  earlyEpdPinsReady_ = earlyEpdTransportReady_ && holdEpdPinsForColdBoot(board_);
+}
 
 PhotoPainterSupport::~PhotoPainterSupport() {
   if (impl_ != nullptr) {
@@ -681,6 +720,10 @@ PhotoPainterSupport::~PhotoPainterSupport() {
 
 bool PhotoPainterSupport::begin() {
   if (impl_ != nullptr) return hardwareReady_;
+  if (!earlyEpdTransportReady_ || !earlyEpdPinsReady_) {
+    lastError_ = earlyEpdTransportReady_ ? "EPD-EARLY-PINS" : "EPD-EARLY-SPI";
+    return false;
+  }
   impl_ = new (std::nothrow) Impl(board_);
   if (impl_ == nullptr) {
     lastError_ = "BOARD-MEMORY";
@@ -1564,7 +1607,14 @@ bool PhotoPainterSupport::displayFrame(const uint8_t* framebuffer, size_t length
     lastError_ = impl_->power.lastError();
     return false;
   }
-  const bool displayed = impl_->display.begin()
+  const bool initialized = impl_->display.begin();
+  if (initialized) {
+    // The validated Waveshare factory path leaves the powered controller idle
+    // before transferring the first frame.  Keep the same bounded interval on
+    // both cold boot and scheduled wake paths.
+    delay(kEpdPostInitSettleMs);
+  }
+  const bool displayed = initialized
       && impl_->display.displayFrame(framebuffer, length);
   const char* displayError = impl_->display.lastError();
   impl_->display.safeShutdown();

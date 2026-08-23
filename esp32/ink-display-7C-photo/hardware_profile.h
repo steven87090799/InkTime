@@ -160,7 +160,7 @@ constexpr BoardConfig kBoardConfig = {
   "waveshare-esp32-s3-photopainter",
   kDeviceProfile,
   kNoPin,
-  {{9, 10, kNoPin, 11}, 8, 12, 13, 800, 480, 4000000, true},
+  {{9, 10, kNoPin, 11}, 8, 12, 13, 800, 480, 10000000, true},
   {38, 39, 40, 41},
   {47, 48, 100000},
   {kNoPin, 0, 4, 5, true, true},
@@ -238,8 +238,8 @@ static_assert(kBoardConfig.i2c.sda == 47 && kBoardConfig.i2c.scl == 48,
               "PhotoPainter I2C pins must match the Waveshare board");
 static_assert(kBoardConfig.i2c.clockHz == 100000,
               "PhotoPainter shared I2C bus must use the conservative official device rate");
-static_assert(kBoardConfig.display.clockHz == 4000000,
-              "PhotoPainter EPD SPI must use the conservative official Arduino rate");
+static_assert(kBoardConfig.display.clockHz == 10000000,
+              "PhotoPainter EPD SPI must match the validated official factory rate");
 static_assert(kBoardConfig.buttons.boot == 0 && kBoardConfig.buttons.user == 4
               && kBoardConfig.buttons.power == 5,
               "PhotoPainter button pins must match the Waveshare board");

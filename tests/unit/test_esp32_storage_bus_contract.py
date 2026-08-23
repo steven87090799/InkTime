@@ -106,13 +106,27 @@ def test_formal_frame_gc_has_protection_fences_and_bounded_telemetry():
 
 def test_epd_uses_official_spi3_write_path_and_observed_busy_cycles():
     spectra = SPECTRA.read_text(encoding="utf-8")
+    cold_init = spectra[spectra.index("sendCommand(0xAA)") : spectra.index("sendCommand(0x01)")]
+    for value in ("0x49", "0x55", "0x20", "0x08", "0x09", "0x18"):
+        assert f"sendData({value});" in cold_init
+    assert "commandHeader" not in cold_init
+    assert "sendData(commandHeader" not in cold_init
     start = spectra.index("void Spectra6_73::sendData(const uint8_t* data, size_t length)")
     end = spectra.index("void Spectra6_73::hardwareReset", start)
     block = spectra[start:end]
-    assert "writeBytes(" in block
+    assert "spi_device_polling_transmit" in spectra
+    assert "SPI_DEVICE_HALFDUPLEX" in spectra
+    assert "spi_bus_initialize(SPI3_HOST" in spectra
+    assert "spi_bus_add_device(SPI3_HOST" in spectra
+    assert "spics_io_num = -1" in spectra
+    assert "writeBytes(" not in block
     assert "transferBytes(" not in block
-    assert "kSpiTransferChunkBytes = 4096U" in spectra
-    assert "yield();" in block
+    assert "kSpiTransferChunkBytes = 5000U" in spectra
+    assert "yield();" not in block
+    assert "digitalWrite(" not in spectra
+    assert "pinMode(" not in spectra
+    assert "gpio_set_level" in spectra
+    assert "gpio_get_level" in spectra
     assert "for (size_t offset = 0; offset < length; ++offset)" not in block
     assert 'lastError_ = "EPD-BUSY-NOT-ASSERTED"' in spectra
     assert "waitForBusyAssertion() && waitUntilReady()" in spectra
@@ -123,12 +137,14 @@ def test_epd_uses_official_spi3_write_path_and_observed_busy_cycles():
     assert refresh.index("sendCommand(0x12)") < refresh.index("waitForBusyCycle()")
 
     support = SUPPORT.read_text(encoding="utf-8")
-    assert ": epdSpi(HSPI)," in support
+    assert "display(board)," in support
+    assert "earlyEpdTransportReady_ = prepareSpectra6ColdBootTransport(board_)" in support
     assert "sdSpi(FSPI)," in support
     assert 'lastError_ = "EPD-SPI-INIT"' in spectra
+    assert 'lastError_ = "EPD-SPI-WRITE"' in spectra
 
     hardware = HARDWARE.read_text(encoding="utf-8")
-    assert "kBoardConfig.display.clockHz == 4000000" in hardware
+    assert "kBoardConfig.display.clockHz == 10000000" in hardware
     assert "{47, 48, 100000}" in hardware
 
     display = (ROOT / "esp32/ink-display-7C-photo/spectra6_73.cpp").read_text(

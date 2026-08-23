@@ -99,15 +99,47 @@ def test_sleep_domains_and_tg28_epd_rail_remain_narrow_and_fail_closed():
     assert "writeCommand(" not in pmic
     assert "kAxp2101ChipIdRegister" not in support
     assert "kTg28LdoEnable0 = 0x90" in support
-    assert "kTg28Aldo3Voltage = 0x94" in support
-    assert "kTg28Aldo3EnableMask = 1U << 2U" in support
-    assert "kTg28Aldo3_3300mV = 0x1CU" in support
+    assert "kTg28Aldo4Voltage = 0x95" in support
+    assert "kTg28Aldo4EnableMask = 1U << 3U" in support
+    assert "kTg28Aldo4_3300mV = 0x1CU" in support
+    assert "kTg28Aldo4ColdStartSettleMs = 500U" in support
+
+    early_pins = _between(
+        support,
+        "bool holdEpdPinsForColdBoot",
+        "class BoundedI2cBus",
+    )
+    for pin in (
+        "board.display.spi.cs",
+        "board.display.dc",
+        "board.display.reset",
+        "board.display.busy",
+    ):
+        assert pin in early_pins
+    assert "board_.buttons.power" not in early_pins
+    assert "GPIO_NUM_21" not in early_pins
+    assert "gpio_set_level(static_cast<gpio_num_t>(board.display.spi.sck)" not in early_pins
+    assert "gpio_set_level(static_cast<gpio_num_t>(board.display.spi.mosi)" not in early_pins
+    assert "gpio_set_level(static_cast<gpio_num_t>(board.display.reset), 1)" in early_pins
+
+    constructor = _between(
+        support,
+        "PhotoPainterSupport::PhotoPainterSupport",
+        "PhotoPainterSupport::~PhotoPainterSupport",
+    )
+    assert "earlyEpdTransportReady_ = prepareSpectra6ColdBootTransport(board_)" in constructor
+    assert constructor.index("prepareSpectra6ColdBootTransport(board_)") < constructor.index(
+        "holdEpdPinsForColdBoot(board_)"
+    )
+    assert "earlyEpdPinsReady_ = earlyEpdTransportReady_" in constructor
 
     prepare = _between(pmic, "bool prepareDisplayPower()", "const char* lastError()")
     assert "voltage & static_cast<uint8_t>(~kTg28AldoVoltageMask)" in prepare
-    assert "ldoState | kTg28Aldo3EnableMask" in prepare
+    assert "ldoState | kTg28Aldo4EnableMask" in prepare
     assert "PMIC-EPD-VOLTAGE-READBACK" in prepare
     assert "PMIC-EPD-ENABLE-READBACK" in prepare
+    assert "aldo4AlreadyEnabled" in prepare
+    assert "kTg28Aldo4ColdStartSettleMs" in prepare
     assert "PMIC-EPD-DISABLE" not in pmic
 
     hardware = HARDWARE.read_text(encoding="utf-8")
@@ -314,8 +346,8 @@ def test_photopainter_docs_match_ext1_and_fail_closed_tg28_behavior():
     assert "1.2 秒但未滿 4 秒" in docs
     assert "持續至少 4 秒才授權" in docs
     assert "Rev2.0 原理圖都確認 PMIC 為 TG28" in docs
-    assert "ALDO3 直接供應" in docs and "`EPD_VCC`" in docs
-    assert "`REG94[4:0]`" in docs and "`REG90[2]`" in docs
+    assert "ALDO4 直接供應" in docs and "`EPD_VCC`" in docs
+    assert "`REG95[4:0]`" in docs and "`REG90[3]`" in docs
     assert "韌體不寫 TG28 的 DCDC、充電、全機 shutdown" in docs
     assert "不解除 max-awake supervisor" in normalized_docs
 

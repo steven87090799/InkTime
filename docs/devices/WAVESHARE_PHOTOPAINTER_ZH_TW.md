@@ -37,7 +37,7 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
 | 功能 | PhotoPainter GPIO／設定 |
 |---|---|
 | EPD | DC 8、CS 9、SCK 10、MOSI 11、RST 12、BUSY 13 |
-| EPD SPI | SPI3（Arduino-ESP32 `HSPI`）、純寫入 MODE0、保守 4 MHz |
+| EPD SPI | SPI3、ESP-IDF half-duplex、手動 CS、純寫入 MODE0、實板驗證原廠 factory 10 MHz |
 | SD | CS 38、SCK 39、MISO 40、MOSI 41；獨立 SPI bus |
 | I²C | SDA 47、SCL 48、100 kHz；共用總線採官方裝置設定中的保守速率，裝置個別 probe |
 | 按鍵 | BOOT 0、KEY 4 active-low、PWR 5 保留原廠電源用途 |
@@ -97,13 +97,26 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   或 ESP-only reset 不一定會清除 PMIC／共享 I²C 的鎖定狀態；不要以 GPIO 強驅兩線為高。
 - PCF85063 以 0x51 probe，RTC 只保存 UTC。NTP 成功後寫入 RTC；NTP 失敗時可由
   RTC 恢復排程，時區仍使用 InkTime 裝置設定，不硬編碼在 RTC。
-- Waveshare Rev2.0 原理圖確認 UP1 是 TG28、I²C 位址 0x34，且 **ALDO3 直接供應
-  `EPD_VCC`**；不是舊版教學中的 AXP2101／ALDO4。TG28 資料表沒有定義 AXP2101
-  專用的 0x03 identity 契約，因此 Rev2.0 driver 以 0x34 probe 及 TG28 的 0x90／0x94
+- Waveshare Rev2.0 原理圖確認 UP1 是 TG28、I²C 位址 0x34，且 **ALDO4 直接供應
+  `EPD_VCC`**。TG28 資料表沒有定義 AXP2101 專用的 0x03 identity 契約，因此 Rev2.0
+  driver 以 0x34 probe 及 TG28 的 0x90／0x95
   可讀性作 fail-closed 相容性檢查。
-- 每次顯示前只以 read-modify-write 將 TG28 `REG94[4:0]` 設為 `0x1C`（3.3 V），再將
-  `REG90[2]` 設為 1 啟用 ALDO3；兩步都必須讀回一致，等待 10 ms 後才可初始化 EPD。
-  顯示 controller 完成 `POWER_OFF`／SPI shutdown 後維持官方 runtime 的 ALDO3 狀態；
+- 每次顯示前只以 read-modify-write 將 TG28 `REG95[4:0]` 設為 `0x1C`（3.3 V），再將
+  `REG90[3]` 設為 1 啟用 ALDO4；兩步都必須讀回一致。韌體會像官方全域
+  `ePaperPort` constructor 一樣，在 `setup()` 前啟動並保留 SPI3 pin matrix，只設定獨立的
+  CS high、DC low、RESET high 與 BUSY pull-up；SCK／MOSI 建立 SPI3 後不得再當一般 GPIO
+  重新設定。若 ALDO4 原本已開啟只等待
+  10 ms，真正從關閉轉為開啟時則在 RESET high 下等待 500 ms，再初始化 EPD。此路徑
+  不接觸 GPIO5 PWR 或 GPIO21 PMIC IRQ。
+- 冷啟動初始化的 `0xAA` 六個參數逐 byte 傳送，每個 byte 都各自完成一次 CS low／high
+  framing，與實板驗證成功的官方 factory driver 相同。
+  EPD transport 固定使用已在 Rev2.0 實板完成純白刷新的原廠 factory 10 MHz，並在
+  `EPD_Init` 完成後等待 3 秒才送第一個 framebuffer；不使用僅由另一個官方 runtime
+  原始碼推得、但尚未在此板冷啟動驗證的 40 MHz。
+  Framebuffer 以原廠的 5000-byte polling transaction 連續送出；CS low 期間不主動
+  `yield()`，控制腳使用 ESP-IDF GPIO，不讓 Arduino pin ownership 再次改寫已建立的
+  SPI3／CS 時序。
+  顯示 controller 完成 `POWER_OFF`／SPI shutdown 後維持官方 runtime 的 ALDO4 狀態；
   實板曾在清除該 rail 後的 ESP-only reset 觀察到共享 I²C 線持續為 low，完整斷電前
   無法再由 ESP 存取 PMIC，因此不在一般 refresh／deep-sleep 路徑關閉它。任一步失敗
   都不送出電子紙更新命令。
@@ -234,6 +247,12 @@ slot 仍有足夠餘裕，但 OTA 簽章、rollback 與實際燒錄流程尚未�
 面板可用；再寫入 InkTime TG28 安全版後，裝置 log 回報 `pairing_display_ready`，配對
 畫面實際完成刷新，耗時 `30090 ms`。這是配對畫面的實板通過，不等同正式六色照片、
 排程喚醒、睡眠電流或電池續航已完成驗收。
+
+2026-08-23 依 Rev2.0 原理圖與 TG28 資料表將實際 `EPD_VCC` 電源軌修正為 ALDO4
+（`REG95[4:0]`／`REG90[3]`）後，再以安裝電池、拔除 USB、完整關機等待後重新上電的
+方式驗證；InkTime 配對畫面確實再次刷新，確認 ALDO4 修正通過真正 PMIC 冷啟動。
+USB CDC 在斷電期間中斷且重新接線後恢復，因此未擷取到發生於 USB 尚未連線時的早期
+boot log；本次通過依據是實體面板變化，不延伸宣稱正式照片、排程喚醒或睡眠電流已通過。
 
 本輪的安全結論來自官方 commit `a5e8f757…` 原始碼比對、compile-time 腳位鎖定與
 Hosted CI 編譯，不是對實體面板壽命或電池續航的保證；這項限制不會轉成使用者必須
