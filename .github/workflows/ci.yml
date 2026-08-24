@@ -4,8 +4,8 @@ name: InkTime CI
   pull_request:
     branches:
       - main
-    # Base retargets need validation; title/body-only edits use the metadata lane below.
-    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+    # Ready transitions and base retargets need validation; title/body-only edits use the metadata lane below.
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled, edited]
   push:
     branches:
       - main
