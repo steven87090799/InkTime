@@ -8,12 +8,15 @@
 #include <SD.h>
 #include <SPI.h>
 #include <Wire.h>
+#include <driver/gpio.h>
+#include <driver/rtc_io.h>
 #include <esp_heap_caps.h>
 #include <esp_sleep.h>
 #include <new>
 #include <sys/time.h>
 
 #include "photopainter_core.h"
+#include "photopainter_wake_core.h"
 #include "power_manager.h"
 #include "spectra6_73.h"
 
@@ -30,18 +33,24 @@
 #define HSPI SPI3_HOST
 #endif
 
-extern HardwareSerial DebugSerial;
-
 namespace inktime {
 
-constexpr uint8_t kAxp2101Address = 0x34;
-constexpr uint8_t kAxp2101ChipIdRegister = 0x03;
-constexpr uint8_t kAxp2101ChipId = 0x4A;
-constexpr uint8_t kAxp2101Status1 = 0x00;
-constexpr uint8_t kAxp2101Status2 = 0x01;
-constexpr uint8_t kAxp2101BatteryVoltageHigh = 0x34;
-constexpr uint8_t kAxp2101BatteryVoltageLow = 0x35;
-constexpr uint8_t kAxp2101BatteryPercent = 0xA4;
+// PhotoPainter Rev2.0 schematic: TG28 UP1 is at 0x34 and ALDO4 feeds EPD_VCC.
+// Only the two EPD-rail registers below may be mutated by this driver.
+constexpr uint8_t kPhotoPainterPmicAddress = 0x34;
+constexpr uint8_t kTg28Status1 = 0x00;
+constexpr uint8_t kTg28BatteryVoltageHigh = 0x34;
+constexpr uint8_t kTg28LdoEnable0 = 0x90;
+constexpr uint8_t kTg28Aldo4Voltage = 0x95;
+constexpr uint8_t kTg28BatteryPercent = 0xA4;
+constexpr uint8_t kTg28Aldo4EnableMask = 1U << 3U;
+constexpr uint8_t kTg28AldoVoltageMask = 0x1FU;
+constexpr uint8_t kTg28Aldo4_3300mV = 0x1CU;
+constexpr uint32_t kTg28Aldo4SettleMs = 10U;
+constexpr uint32_t kTg28Aldo4ColdStartSettleMs = 500U;
+constexpr uint32_t kEpdPostInitSettleMs = 3000U;
+constexpr gpio_num_t kPhotoPainterPowerLed = GPIO_NUM_45;
+constexpr gpio_num_t kPhotoPainterActivityLed = GPIO_NUM_42;
 constexpr uint8_t kShtc3Address = 0x70;
 constexpr uint8_t kPcf85063Address = 0x51;
 constexpr size_t kIoChunkSize = 4096;
@@ -110,16 +119,101 @@ void drawPairingText(uint8_t* frame, size_t length, int x, int y, const String& 
 }
 
 #if INKTIME_DEBUG_LOG
-#define PP_LOG(...) DebugSerial.printf(__VA_ARGS__)
+#define PP_LOG(...) Serial.printf(__VA_ARGS__)
 #else
 #define PP_LOG(...) do { } while (0)
 #endif
+
+void setBoardIndicator(gpio_num_t pin, bool enabled) {
+  // Rev2.0 PWR/ACT LEDs are active-low and independent of GPIO5 PWR.
+  (void)gpio_set_level(pin, enabled ? 0 : 1);
+}
+
+void configureBoardIndicators() {
+  gpio_config_t outputs = {};
+  outputs.intr_type = GPIO_INTR_DISABLE;
+  outputs.mode = GPIO_MODE_OUTPUT;
+  outputs.pin_bit_mask = (1ULL << kPhotoPainterPowerLed)
+      | (1ULL << kPhotoPainterActivityLed);
+  outputs.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  outputs.pull_up_en = GPIO_PULLUP_ENABLE;
+  if (gpio_config(&outputs) != ESP_OK) return;
+  setBoardIndicator(kPhotoPainterActivityLed, false);
+  setBoardIndicator(kPhotoPainterPowerLed, true);
+}
+
+bool holdEpdPinsForColdBoot(const BoardConfig& board) {
+  // Waveshare's working runtime establishes the EPD bus and reset state from
+  // its global ePaperPort constructor, before setup() and PMIC probing.  SPI3
+  // already owns SCK/MOSI at this point, so only configure the three discrete
+  // control outputs here.  Reconfiguring SCK/MOSI as ordinary GPIO after
+  // spi_bus_initialize() would detach or override the working pin matrix.
+  // GPIO5 PWR and GPIO21 PMIC IRQ remain untouched.
+  gpio_config_t outputs = {};
+  outputs.intr_type = GPIO_INTR_DISABLE;
+  outputs.mode = GPIO_MODE_OUTPUT;
+  outputs.pin_bit_mask = (1ULL << board.display.spi.cs)
+      | (1ULL << board.display.dc)
+      | (1ULL << board.display.reset);
+  outputs.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  outputs.pull_up_en = GPIO_PULLUP_ENABLE;
+  if (gpio_config(&outputs) != ESP_OK) return false;
+  gpio_set_level(static_cast<gpio_num_t>(board.display.spi.cs), 1);
+  gpio_set_level(static_cast<gpio_num_t>(board.display.dc), 0);
+  gpio_set_level(static_cast<gpio_num_t>(board.display.reset), 1);
+
+  gpio_config_t busy = {};
+  busy.intr_type = GPIO_INTR_DISABLE;
+  busy.mode = GPIO_MODE_INPUT;
+  busy.pin_bit_mask = 1ULL << board.display.busy;
+  busy.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  busy.pull_up_en = GPIO_PULLUP_ENABLE;
+  return gpio_config(&busy) == ESP_OK;
+}
 
 struct I2cRetryTelemetry {
   uint32_t retry_count = 0;
   uint32_t bus_reset_count = 0;
   uint32_t fail_closed_count = 0;
 };
+
+bool recoverI2cBusLines(const I2cConfig& config) {
+  if (config.sda == kNoPin || config.scl == kNoPin) return false;
+  if (gpio_reset_pin(static_cast<gpio_num_t>(config.sda)) != ESP_OK
+      || gpio_reset_pin(static_cast<gpio_num_t>(config.scl)) != ESP_OK) {
+    return false;
+  }
+  pinMode(config.sda, INPUT_PULLUP);
+  pinMode(config.scl, INPUT_PULLUP);
+  delayMicroseconds(10);
+  if (digitalRead(config.scl) == LOW) return false;
+
+  // A reset can interrupt a slave between data bits and leave SDA asserted.
+  // Clock at most one byte plus ACK using open-drain lows, then emit STOP.
+  pinMode(config.scl, OUTPUT_OPEN_DRAIN);
+  digitalWrite(config.scl, HIGH);
+  for (uint8_t pulse = 0; pulse < 9U && digitalRead(config.sda) == LOW; ++pulse) {
+    digitalWrite(config.scl, LOW);
+    delayMicroseconds(5);
+    digitalWrite(config.scl, HIGH);
+    delayMicroseconds(5);
+  }
+  if (digitalRead(config.scl) == LOW) {
+    pinMode(config.scl, INPUT_PULLUP);
+    return false;
+  }
+
+  pinMode(config.sda, OUTPUT_OPEN_DRAIN);
+  digitalWrite(config.sda, LOW);
+  delayMicroseconds(5);
+  digitalWrite(config.scl, HIGH);
+  delayMicroseconds(5);
+  digitalWrite(config.sda, HIGH);
+  delayMicroseconds(5);
+  pinMode(config.sda, INPUT_PULLUP);
+  pinMode(config.scl, INPUT_PULLUP);
+  return digitalRead(config.sda) == HIGH && digitalRead(config.scl) == HIGH;
+}
 
 class BoundedI2cBus final {
  public:
@@ -226,6 +320,7 @@ class BoundedI2cBus final {
   bool resetBus() {
     wire_.end();
     delay(kI2cRetryDelayMs);
+    if (!recoverI2cBusLines(config_)) return false;
     const bool ready = wire_.begin(config_.sda, config_.scl, config_.clockHz);
     if (ready) wire_.setTimeOut(kI2cTimeoutMs);
     return ready;
@@ -262,60 +357,136 @@ class ProbePowerManager final : public PowerManager {
 
   bool begin() override {
     type_ = PmicType::None;
-    if (!bus_.probe(kAxp2101Address)) return false;
-    uint8_t chipId = 0;
-    if (!bus_.readRegister(kAxp2101Address, kAxp2101ChipIdRegister, &chipId, 1)) {
+    uint8_t ldoState = 0;
+    uint8_t aldo4Voltage = 0;
+    if (!bus_.probe(kPhotoPainterPmicAddress)) return false;
+    if (!bus_.readRegister(kPhotoPainterPmicAddress, kTg28LdoEnable0, &ldoState, 1)
+        || !bus_.readRegister(
+          kPhotoPainterPmicAddress, kTg28Aldo4Voltage, &aldo4Voltage, 1)) {
       type_ = PmicType::Unknown;
       return false;
     }
-    if (chipId != kAxp2101ChipId) {
-      type_ = PmicType::Unknown;
-      return false;
-    }
-    type_ = PmicType::AXP2101;
+    // Rev2.0 identifies UP1 as TG28. Do not use the AXP2101-only 0x03 chip-ID
+    // test: TG28 does not document that register, while 0x90/0x95 are defined.
+    type_ = PmicType::TG28;
     refreshMeasurements();
     return true;
   }
 
+  bool prepareDisplayPower() {
+    lastError_ = "";
+    if (type_ != PmicType::TG28) {
+      lastError_ = "PMIC-TG28-NOT-READY";
+      return false;
+    }
+    uint8_t voltage = 0;
+    if (!bus_.readRegister(
+          kPhotoPainterPmicAddress, kTg28Aldo4Voltage, &voltage, 1)) {
+      lastError_ = "PMIC-EPD-VOLTAGE-READ";
+      return false;
+    }
+    const uint8_t voltage3300 = static_cast<uint8_t>(
+      (voltage & static_cast<uint8_t>(~kTg28AldoVoltageMask))
+      | kTg28Aldo4_3300mV
+    );
+    if (voltage3300 != voltage
+        && !bus_.writeRegisters(
+          kPhotoPainterPmicAddress,
+          kTg28Aldo4Voltage,
+          &voltage3300,
+          1,
+          true)) {
+      lastError_ = "PMIC-EPD-VOLTAGE-WRITE";
+      return false;
+    }
+    uint8_t voltageReadback = 0;
+    if (!bus_.readRegister(
+          kPhotoPainterPmicAddress, kTg28Aldo4Voltage, &voltageReadback, 1)
+        || (voltageReadback & kTg28AldoVoltageMask) != kTg28Aldo4_3300mV) {
+      lastError_ = "PMIC-EPD-VOLTAGE-READBACK";
+      return false;
+    }
+
+    uint8_t ldoState = 0;
+    if (!bus_.readRegister(
+          kPhotoPainterPmicAddress, kTg28LdoEnable0, &ldoState, 1)) {
+      lastError_ = "PMIC-EPD-ENABLE-READ";
+      return false;
+    }
+    const bool aldo4AlreadyEnabled = (ldoState & kTg28Aldo4EnableMask) != 0U;
+    const uint8_t enabledState = ldoState | kTg28Aldo4EnableMask;
+    if (enabledState != ldoState
+        && !bus_.writeRegisters(
+          kPhotoPainterPmicAddress,
+          kTg28LdoEnable0,
+          &enabledState,
+          1,
+          true)) {
+      lastError_ = "PMIC-EPD-ENABLE-WRITE";
+      return false;
+    }
+    uint8_t enableReadback = 0;
+    if (!bus_.readRegister(
+          kPhotoPainterPmicAddress, kTg28LdoEnable0, &enableReadback, 1)
+        || (enableReadback & kTg28Aldo4EnableMask) == 0U) {
+      lastError_ = "PMIC-EPD-ENABLE-READBACK";
+      return false;
+    }
+    // When ALDO4 was already on, retain the existing official runtime path.
+    // A true PMIC cold start needs a longer bounded interval with RESET high;
+    // 10 ms only covered register settling, not the panel controller startup.
+    delay(aldo4AlreadyEnabled ? kTg28Aldo4SettleMs : kTg28Aldo4ColdStartSettleMs);
+    return true;
+  }
+
+  const char* lastError() const { return lastError_; }
+
   void refreshMeasurements() override {
-    usbConnected_ = false;
+    powerSourceState_ = PowerSourceState::Unknown;
     batteryMillivolts_ = 0;
     batteryPercent_ = -1;
-    if (type_ != PmicType::AXP2101) return;
-    uint8_t status[2] = {0, 0};
-    if (!bus_.readRegister(kAxp2101Address, kAxp2101Status1, status, 2)) return;
-    const bool batteryConnected = (status[0] & (1U << 3U)) != 0;
-    const bool vbusGood = (status[0] & (1U << 5U)) != 0;
-    const bool vbusOverVoltage = (status[1] & (1U << 3U)) != 0;
-    usbConnected_ = vbusGood && !vbusOverVoltage;
+    if (type_ != PmicType::TG28) return;
+    uint8_t status1 = 0;
+    if (!bus_.readRegister(kPhotoPainterPmicAddress, kTg28Status1, &status1, 1)) return;
+    const bool batteryConnected = (status1 & (1U << 3U)) != 0;
+    const bool vbusGood = (status1 & (1U << 5U)) != 0;
+    powerSourceState_ = vbusGood
+        ? PowerSourceState::Usb
+        : PowerSourceState::Battery;
     if (!batteryConnected) return;
     uint8_t voltage[2] = {0, 0};
-    if (bus_.readRegister(kAxp2101Address, kAxp2101BatteryVoltageHigh, voltage, 2)) {
+    if (bus_.readRegister(
+          kPhotoPainterPmicAddress, kTg28BatteryVoltageHigh, voltage, 2)) {
       batteryMillivolts_ = static_cast<uint16_t>((voltage[0] & 0x1FU) << 8U)
                          | voltage[1];
     }
     uint8_t percent = 0;
-    if (bus_.readRegister(kAxp2101Address, kAxp2101BatteryPercent, &percent, 1)
+    if (bus_.readRegister(kPhotoPainterPmicAddress, kTg28BatteryPercent, &percent, 1)
         && percent <= 100) {
       batteryPercent_ = percent;
     }
   }
 
   PmicType type() const override { return type_; }
-  bool isUsbConnected() const override { return usbConnected_; }
+  PowerSourceState powerSourceState() const override { return powerSourceState_; }
+  bool isUsbConnected() const override {
+    return powerSourceState_ == PowerSourceState::Usb;
+  }
   float batteryVoltage() const override { return batteryMillivolts_ / 1000.0f; }
   int batteryPercent() const override { return batteryPercent_; }
   void prepareForDeepSleep() override {
-    // Deliberately read-only: board revisions must be identified before any
-    // PMIC rail voltage or shutdown-register writes are enabled.
+    // The official runtime keeps ALDO4 available and powers down the EPD
+    // controller by command. Do not strand the shared board in an I2C-low
+    // state by changing PMIC rails immediately before ESP-only deep sleep.
   }
 
  private:
   BoundedI2cBus& bus_;
   PmicType type_ = PmicType::None;
-  bool usbConnected_ = false;
+  PowerSourceState powerSourceState_ = PowerSourceState::Unknown;
   uint16_t batteryMillivolts_ = 0;
   int batteryPercent_ = -1;
+  const char* lastError_ = "";
 };
 
 class Shtc3Adapter {
@@ -523,15 +694,13 @@ bool makeStagedNextSchedulePaths(
 
 struct PhotoPainterSupport::Impl {
   explicit Impl(const BoardConfig& board)
-      : epdSpi(FSPI),
-        sdSpi(HSPI),
-        display(epdSpi, board),
+      : sdSpi(FSPI),
+        display(board),
         i2c(Wire, board.i2c, i2cTelemetry),
         power(i2c),
         sensor(i2c),
         rtc(i2c) {}
 
-  SPIClass epdSpi;
   SPIClass sdSpi;
   Spectra6_73 display;
   I2cRetryTelemetry i2cTelemetry;
@@ -554,7 +723,14 @@ const char* cacheStatusName(CacheStatus status) {
   return "error";
 }
 
-PhotoPainterSupport::PhotoPainterSupport(const BoardConfig& board) : board_(board) {}
+PhotoPainterSupport::PhotoPainterSupport(const BoardConfig& board) : board_(board) {
+  // The official runtime initializes SPI3 before configuring RESET/BUSY in
+  // its global constructor.  Keep this object alive and reuse it for the
+  // actual transaction so the cold-boot pin matrix is never torn down.
+  earlyEpdTransportReady_ = prepareSpectra6ColdBootTransport(board_);
+  earlyEpdPinsReady_ = earlyEpdTransportReady_ && holdEpdPinsForColdBoot(board_);
+  configureBoardIndicators();
+}
 
 PhotoPainterSupport::~PhotoPainterSupport() {
   if (impl_ != nullptr) {
@@ -565,6 +741,10 @@ PhotoPainterSupport::~PhotoPainterSupport() {
 
 bool PhotoPainterSupport::begin() {
   if (impl_ != nullptr) return hardwareReady_;
+  if (!earlyEpdTransportReady_ || !earlyEpdPinsReady_) {
+    lastError_ = earlyEpdTransportReady_ ? "EPD-EARLY-PINS" : "EPD-EARLY-SPI";
+    return false;
+  }
   impl_ = new (std::nothrow) Impl(board_);
   if (impl_ == nullptr) {
     lastError_ = "BOARD-MEMORY";
@@ -580,21 +760,42 @@ bool PhotoPainterSupport::begin() {
   PP_LOG("[BOARD] profile=%s flash=%u psram=%u ready=%d\n",
          board_.name, flashSize, psramSize, hardwareReady_ ? 1 : 0);
 
+  const esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
+  const uint64_t ext1WakeStatus = wakeCause == ESP_SLEEP_WAKEUP_EXT1
+      ? esp_sleep_get_ext1_wakeup_status()
+      : 0ULL;
+  const bool userButtonWake = wakeCause == ESP_SLEEP_WAKEUP_EXT1
+      && ext1WakeStatusContainsUserButton(ext1WakeStatus, board_.buttons.user);
+  if (wakeCause == ESP_SLEEP_WAKEUP_EXT1) {
+    // EXT1 leaves an RTC-capable pad under RTC IO control. Restore GPIO4
+    // before applying its normal runtime input/pull-up configuration.
+    rtc_gpio_deinit(static_cast<gpio_num_t>(board_.buttons.user));
+  }
   pinMode(board_.buttons.user, INPUT_PULLUP);
   if (board_.audio.paEnable != kNoPin) {
     pinMode(board_.audio.paEnable, OUTPUT);
     digitalWrite(board_.audio.paEnable, LOW);
   }
-  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) {
+  if (userButtonWake) {
     wokeFromUserButton_ = true;
     delay(30);
     const uint32_t pressedAt = millis();
-    while (digitalRead(board_.buttons.user) == LOW && millis() - pressedAt < 5000) delay(20);
-    forceNetworkRefresh_ = millis() - pressedAt >= 1200;
+    while (digitalRead(board_.buttons.user) == LOW
+           && millis() - pressedAt < kUserButtonHoldMeasurementLimitMs) {
+      delay(20);
+    }
+    const uint32_t heldMs = millis() - pressedAt;
+    forceNetworkRefresh_ = shouldForceNetworkRefresh(heldMs);
+    recoveryServiceRequested_ = shouldRequestRecoveryService(heldMs);
     delay(30);
   }
 
-  if (Wire.begin(board_.i2c.sda, board_.i2c.scl, board_.i2c.clockHz)) {
+  const bool i2cLinesReady = recoverI2cBusLines(board_.i2c);
+  PP_LOG("[I2C] recovery=%d sda=%d scl=%d\n",
+         i2cLinesReady ? 1 : 0,
+         digitalRead(board_.i2c.sda), digitalRead(board_.i2c.scl));
+  if (i2cLinesReady
+      && Wire.begin(board_.i2c.sda, board_.i2c.scl, board_.i2c.clockHz)) {
     Wire.setTimeOut(kI2cTimeoutMs);
     const bool pmicReady = impl_->power.begin();
     (void)pmicReady;
@@ -1423,8 +1624,26 @@ bool PhotoPainterSupport::displayFrame(const uint8_t* framebuffer, size_t length
     lastError_ = "DEVICE-FRAMEBUFFER";
     return false;
   }
-  if (!impl_->display.begin() || !impl_->display.displayFrame(framebuffer, length)) {
-    lastError_ = impl_->display.lastError();
+  setBoardIndicator(kPhotoPainterActivityLed, true);
+  if (!impl_->power.prepareDisplayPower()) {
+    lastError_ = impl_->power.lastError();
+    setBoardIndicator(kPhotoPainterActivityLed, false);
+    return false;
+  }
+  const bool initialized = impl_->display.begin();
+  if (initialized) {
+    // The validated Waveshare factory path leaves the powered controller idle
+    // before transferring the first frame.  Keep the same bounded interval on
+    // both cold boot and scheduled wake paths.
+    delay(kEpdPostInitSettleMs);
+  }
+  const bool displayed = initialized
+      && impl_->display.displayFrame(framebuffer, length);
+  const char* displayError = impl_->display.lastError();
+  impl_->display.safeShutdown();
+  setBoardIndicator(kPhotoPainterActivityLed, false);
+  if (!displayed) {
+    lastError_ = displayError;
     return false;
   }
   lastRefreshDurationMs_ = impl_->display.lastRefreshDurationMs();
@@ -1496,6 +1715,12 @@ bool PhotoPainterSupport::usbConnected() const {
   return impl_ != nullptr && impl_->power.isUsbConnected();
 }
 
+PowerSourceState PhotoPainterSupport::powerSourceState() const {
+  return impl_ == nullptr
+      ? PowerSourceState::Unknown
+      : impl_->power.powerSourceState();
+}
+
 PmicType PhotoPainterSupport::pmicType() const {
   return impl_ == nullptr ? PmicType::None : impl_->power.type();
 }
@@ -1509,29 +1734,32 @@ int PhotoPainterSupport::batteryPercent() const {
 }
 
 void PhotoPainterSupport::prepareForDeepSleep() {
-  if (impl_ == nullptr) return;
-  impl_->display.safeShutdown();
-  if (sdReady_) {
-    SD.end();
-    impl_->sdSpi.end();
+  if (impl_ != nullptr) {
+    impl_->display.safeShutdown();
+    if (sdReady_) {
+      SD.end();
+      impl_->sdSpi.end();
+    }
+    if (board_.audio.paEnable != kNoPin) {
+      pinMode(board_.audio.paEnable, OUTPUT);
+      digitalWrite(board_.audio.paEnable, LOW);
+    }
+    impl_->power.prepareForDeepSleep();
+    Wire.end();
   }
-  if (board_.audio.paEnable != kNoPin) {
-    pinMode(board_.audio.paEnable, OUTPUT);
-    digitalWrite(board_.audio.paEnable, LOW);
-  }
-  impl_->power.prepareForDeepSleep();
-  Wire.end();
+  setBoardIndicator(kPhotoPainterActivityLed, false);
+  setBoardIndicator(kPhotoPainterPowerLed, false);
 }
 
 void PhotoPainterSupport::enableWakeSources() {
-  if (board_.buttons.user == kNoPin) return;
+  if (board_.buttons.user == kNoPin || !board_.buttons.userActiveLow) return;
   const uint32_t releaseStarted = millis();
   while (digitalRead(board_.buttons.user) == LOW && millis() - releaseStarted < 2000) delay(20);
   if (digitalRead(board_.buttons.user) == LOW) return;
   pinMode(board_.buttons.user, INPUT_PULLUP);
-  esp_sleep_enable_ext0_wakeup(
-    static_cast<gpio_num_t>(board_.buttons.user),
-    board_.buttons.userActiveLow ? 0 : 1
+  esp_sleep_enable_ext1_wakeup_io(
+    gpioWakeMask(board_.buttons.user),
+    ESP_EXT1_WAKEUP_ANY_LOW
   );
 }
 

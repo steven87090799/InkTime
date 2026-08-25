@@ -62,4 +62,4 @@ AP password 是短期配網資訊，不是後端 credential。使用者完成設
 
 ## 實機驗收邊界
 
-Hosted CI 可以 compile 多個 ESP32 profile、檢查 secure／LAN contract、redirect policy 與 pairing source contract；它不能證明真實 CA chain、板上 Wi-Fi 或實際畫面。PhotoPainter 的 GPIO 與面板命令以官方原始碼為基準鎖定，使用者不需要另做電流／電壓量測；燒錄後只需依 [PhotoPainter 指南](WAVESHARE_PHOTOPAINTER_ZH_TW.md) 確認一般配對與顯示結果。
+Hosted CI 可以 compile 多個 ESP32 profile、檢查 secure／LAN contract、redirect policy 與 pairing source contract；它不能證明真實 CA chain、板上 Wi-Fi 或實際畫面。PhotoPainter 的 GPIO 與面板命令以官方原始碼為基準鎖定，一般配對／顯示驗收不要求使用者自行探測板上電壓；但若要宣稱 sleep current、refresh peak 或電池續航達標，仍必須使用適當儀器完成實板量測。燒錄後依 [PhotoPainter 指南](WAVESHARE_PHOTOPAINTER_ZH_TW.md) 分開記錄一般功能與功耗證據。

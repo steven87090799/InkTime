@@ -20,6 +20,7 @@ resources/fonts/
 # Sensitive config
 config.py
 .env
+.env.nas
 data/*.key
 
 # Outputs

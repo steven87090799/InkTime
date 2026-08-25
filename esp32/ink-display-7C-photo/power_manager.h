@@ -12,6 +12,7 @@ class PowerManager {
   virtual bool begin() = 0;
   virtual void refreshMeasurements() = 0;
   virtual PmicType type() const = 0;
+  virtual PowerSourceState powerSourceState() const = 0;
   virtual bool isUsbConnected() const = 0;
   virtual float batteryVoltage() const = 0;
   virtual int batteryPercent() const = 0;

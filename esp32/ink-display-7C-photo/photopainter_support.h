@@ -100,7 +100,9 @@ class PhotoPainterSupport {
   bool rtcReady() const { return rtcReady_; }
   bool shtc3Ready() const { return shtc3Ready_; }
   bool forceNetworkRefresh() const { return forceNetworkRefresh_; }
+  bool recoveryServiceRequested() const { return recoveryServiceRequested_; }
   bool wokeFromUserButton() const { return wokeFromUserButton_; }
+  PowerSourceState powerSourceState() const;
   bool usbConnected() const;
   PmicType pmicType() const;
   float batteryVoltage() const;
@@ -135,7 +137,10 @@ class PhotoPainterSupport {
   bool rtcReady_ = false;
   bool shtc3Ready_ = false;
   bool forceNetworkRefresh_ = false;
+  bool recoveryServiceRequested_ = false;
   bool wokeFromUserButton_ = false;
+  bool earlyEpdTransportReady_ = false;
+  bool earlyEpdPinsReady_ = false;
   bool environmentValid_ = false;
   float temperatureC_ = 0.0f;
   float humidityPercent_ = 0.0f;

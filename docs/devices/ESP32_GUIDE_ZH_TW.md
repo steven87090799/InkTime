@@ -61,7 +61,8 @@ arduino-cli lib install GxEPD2@1.6.9 ArduinoJson@7.4.3
 # The repository-owned 512 KiB NVS table is sketch-local.  Arduino-ESP32
 # automatically selects `partitions.csv` from the sketch directory.  Arduino
 # CLI still uses the board's default size guard unless the custom app size is
-# supplied explicitly below.
+# supplied explicitly below.  The table keeps otadata/app0 at 0xE000/0x10000
+# to match the pinned Arduino-ESP32 upload recipe and places NVS after app1.
 cp esp32/ink-display-7C-photo/inktime_default_4M.csv \
   esp32/ink-display-7C-photo/partitions.csv
 
@@ -88,7 +89,7 @@ arduino-cli compile \
 rm -f esp32/ink-display-7C-photo/partitions.csv
 ```
 
-Board 選 ESP32-S3，啟用 OPI PSRAM。正式版 `INKTIME_DEBUG_LOG=0`；短期硬體除錯才加入 `-DINKTIME_DEBUG_LOG=1`。序列 Log 不輸出 Device Secret、配對碼或 Legacy Token，但正式環境仍不應長期開啟。PhotoPainter 必須使用 16 MiB Flash／OPI PSRAM 與中央 `DEVICE_PROFILE`，完整命令見上方專用指南。
+Board 選 ESP32-S3，啟用 OPI PSRAM。正式版 `INKTIME_DEBUG_LOG=0`；短期硬體除錯才加入 `-DINKTIME_DEBUG_LOG=1`。序列 Log 不輸出 Device Secret、配對碼或 Legacy Token，但正式環境仍不應長期開啟。PhotoPainter 的 `CDCOnBoot=cdc` 會讓 Arduino `Serial` 指向 Type-C 原生 USB CDC／JTAG；既有未啟用 CDC 的板則仍指向 UART0。PhotoPainter 必須使用 16 MiB Flash／OPI PSRAM 與中央 `DEVICE_PROFILE`，完整命令見上方專用指南。
 
 2026-07-30 以 Arduino CLI 1.5.1、ESP32 core 3.3.10、GxEPD2 1.6.9、ArduinoJson 7.4.3 實際編譯 2.5.0：secure GDEY 使用 1,228,261 bytes，LAN GDEY 1,228,545 bytes，LAN GDEP 1,228,645 bytes，均為預設 1,310,720-byte app partition 的 93%；LAN PhotoPainter 使用 1,177,311 bytes（其 3 MiB app partition 的 37%）。GDEY／GDEP 全域變數約 96.6 KiB，PhotoPainter 約 49.2 KiB。這表示目前可編譯，但不是實體燒錄、Heap、PSRAM、BUSY 或功耗證據；新增 OTA、TLS certificate 或大型 Web UI 前仍須重新檢查 partition 與實板餘裕。
 

@@ -4,8 +4,8 @@ name: InkTime CI
   pull_request:
     branches:
       - main
-    # Base retargets need validation; title/body-only edits use the metadata lane below.
-    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+    # Ready transitions and base retargets need validation; title/body-only edits use the metadata lane below.
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled, edited]
   push:
     branches:
       - main
@@ -51,6 +51,7 @@ jobs:
       run_secret_scan: ${{ steps.route.outputs.run_secret_scan }}
       run_actionlint: ${{ steps.route.outputs.run_actionlint }}
       run_lan_persistence: ${{ steps.route.outputs.run_lan_persistence }}
+      run_nas_update_e2e: ${{ steps.route.outputs.run_nas_update_e2e }}
       run_tls_smoke: ${{ steps.route.outputs.run_tls_smoke }}
       run_runtime_soak: ${{ steps.route.outputs.run_runtime_soak }}
       run_playwright: ${{ steps.route.outputs.run_playwright }}
@@ -207,6 +208,7 @@ jobs:
             echo "run_secret_scan=$(has_gate secret_scan)"
             echo "run_actionlint=$(has_gate actionlint)"
             echo "run_lan_persistence=$(has_gate docker_lan_persistence)"
+            echo "run_nas_update_e2e=$(has_gate nas_update_e2e)"
             echo "run_tls_smoke=$(has_gate tls_smoke)"
             echo "run_runtime_soak=$(has_gate runtime_soak)"
             echo "run_playwright=$(has_gate playwright)"
@@ -520,6 +522,23 @@ jobs:
           docker compose --env-file .ci-lan.env down -v --remove-orphans
           sudo rm -rf .ci-data .ci-photos .ci-lan.env .ci-lan-state.json
 
+  nas-pull-only-update-e2e:
+    name: NAS pull-only A to B update and data preservation
+    if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_nas_update_e2e == 'true' }}
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      registry:
+        image: registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+        ports:
+          - 5000:5000
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with: {fetch-depth: 0}
+      - name: Build and push A/B images, run the real updater, and prove preservation
+        run: scripts/ci/nas_update_e2e.sh
+
   compose-production-tls-smoke:
     if: ${{ needs.changes.outputs.full_validation == 'true' && needs.changes.outputs.run_tls_smoke == 'true' }}
     needs: changes
@@ -754,6 +773,7 @@ jobs:
       - dependency-audit
       - migration-contract
       - compose-lan-production-persistence
+      - nas-pull-only-update-e2e
       - compose-production-tls-smoke
       - bounded-runtime-soak
       - playwright

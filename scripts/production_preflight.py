@@ -15,6 +15,7 @@ from inktime.app.core.preflight import (  # noqa: E402
     PreflightError,
     run_production_preflight,
     validate_lan_environment,
+    validate_public_url,
 )
 from inktime.app.core.runtime_config import RuntimeConfig  # noqa: E402
 
@@ -30,6 +31,25 @@ def _env_file(path: Path) -> dict[str, str]:
     return values
 
 
+def _lan_prestart_summary(
+    config: RuntimeConfig,
+    *,
+    allow_test_host: bool,
+) -> dict[str, object]:
+    """Validate host-side LAN declarations without claiming a runtime mount check."""
+
+    validate_public_url(config, mode="lan", allow_test_host=allow_test_host)
+    return {
+        "status": "degraded",
+        "validation_scope": "prestart-config",
+        "transport": "trusted-lan-http",
+        "security_state": "degraded",
+        "tls_enabled": False,
+        "secure_cookie": False,
+        "runtime_mount_validation": "deferred-to-container-startup",
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="InkTime production deployment preflight")
     parser.add_argument("--mode", choices=("lan", "https"), required=True)
@@ -41,12 +61,15 @@ def main() -> int:
     try:
         config = RuntimeConfig.from_sources(environ=environ, base_dir=ROOT)
         if args.mode == "lan":
-            validate_lan_environment(environ, (ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
-        result = run_production_preflight(
-            config,
-            mode=args.mode,
-            allow_test_host=environ.get("INKTIME_LAN_TEST_MODE", "0") == "1",
-        )
+            compose_text = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+            validate_lan_environment(environ, compose_text)
+            summary = _lan_prestart_summary(
+                config,
+                allow_test_host=environ.get("INKTIME_LAN_TEST_MODE", "0") == "1",
+            )
+        else:
+            result = run_production_preflight(config, mode=args.mode)
+            summary = result.summary()
     except (PreflightError, ValueError) as exc:
         payload = {
             "status": "error",
@@ -56,7 +79,7 @@ def main() -> int:
         }
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         return 2
-    print(json.dumps(result.summary(), ensure_ascii=False, sort_keys=True))
+    print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     return 0
 
 

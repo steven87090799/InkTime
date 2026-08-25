@@ -104,18 +104,47 @@ def test_formal_frame_gc_has_protection_fences_and_bounded_telemetry():
         assert marker in firmware
 
 
-def test_epd_uses_bounded_buffer_transfer_at_unchanged_four_megahertz():
+def test_epd_uses_official_spi3_write_path_and_observed_busy_cycles():
     spectra = SPECTRA.read_text(encoding="utf-8")
+    cold_init = spectra[spectra.index("sendCommand(0xAA)") : spectra.index("sendCommand(0x01)")]
+    for value in ("0x49", "0x55", "0x20", "0x08", "0x09", "0x18"):
+        assert f"sendData({value});" in cold_init
+    assert "commandHeader" not in cold_init
+    assert "sendData(commandHeader" not in cold_init
     start = spectra.index("void Spectra6_73::sendData(const uint8_t* data, size_t length)")
     end = spectra.index("void Spectra6_73::hardwareReset", start)
     block = spectra[start:end]
-    assert "transferBytes(" in block
-    assert "kSpiTransferChunkBytes = 4096U" in spectra
-    assert "yield();" in block
+    assert "spi_device_polling_transmit" in spectra
+    assert "SPI_DEVICE_HALFDUPLEX" in spectra
+    assert "spi_bus_initialize(SPI3_HOST" in spectra
+    assert "spi_bus_add_device(SPI3_HOST" in spectra
+    assert "spics_io_num = -1" in spectra
+    assert "writeBytes(" not in block
+    assert "transferBytes(" not in block
+    assert "kSpiTransferChunkBytes = 5000U" in spectra
+    assert "yield();" not in block
+    assert "digitalWrite(" not in spectra
+    assert "pinMode(" not in spectra
+    assert "gpio_set_level" in spectra
+    assert "gpio_get_level" in spectra
     assert "for (size_t offset = 0; offset < length; ++offset)" not in block
+    assert 'lastError_ = "EPD-BUSY-NOT-ASSERTED"' in spectra
+    assert "waitForBusyAssertion() && waitUntilReady()" in spectra
+    assert spectra.count("waitForBusyCycle()") >= 2
+    assert "controller can complete POWER_ON before BUSY is sampled" in spectra
+    refresh = spectra[spectra.index("bool Spectra6_73::displayFrame") :]
+    assert refresh.index("sendCommand(0x04)") < refresh.index("waitUntilReady()")
+    assert refresh.index("sendCommand(0x12)") < refresh.index("waitForBusyCycle()")
+
+    support = SUPPORT.read_text(encoding="utf-8")
+    assert "display(board)," in support
+    assert "earlyEpdTransportReady_ = prepareSpectra6ColdBootTransport(board_)" in support
+    assert "sdSpi(FSPI)," in support
+    assert 'lastError_ = "EPD-SPI-INIT"' in spectra
+    assert 'lastError_ = "EPD-SPI-WRITE"' in spectra
 
     hardware = HARDWARE.read_text(encoding="utf-8")
-    assert "4000000" in hardware
+    assert "kBoardConfig.display.clockHz == 10000000" in hardware
     assert "{47, 48, 100000}" in hardware
 
     display = (ROOT / "esp32/ink-display-7C-photo/spectra6_73.cpp").read_text(
@@ -277,12 +306,25 @@ def test_queue_ack_journal_partition_budget_is_source_owned_and_selected_by_ci()
 
     assert partition_size(PARTITION_DEFAULT, "nvs") == 0x80000
     assert partition_size(PARTITION_PHOTOPAINTER, "nvs") == 0x80000
-    assert partition_offset(PARTITION_DEFAULT, "app0") == 0x90000
+    for path in (PARTITION_DEFAULT, PARTITION_PHOTOPAINTER):
+        assert partition_offset(path, "otadata") == 0xE000
+        assert partition_size(path, "otadata") == 0x2000
+        assert partition_offset(path, "app0") == 0x10000
+        assert partition_offset(path, "app1") == (
+            partition_offset(path, "app0") + partition_size(path, "app0")
+        )
+        assert partition_offset(path, "nvs") == (
+            partition_offset(path, "app1") + partition_size(path, "app1")
+        )
     assert partition_size(PARTITION_DEFAULT, "app0") == 0x160000
-    assert partition_offset(PARTITION_DEFAULT, "app1") == 0x1F0000
+    assert partition_offset(PARTITION_DEFAULT, "app1") == 0x170000
     assert partition_size(PARTITION_DEFAULT, "app1") == 0x160000
+    assert partition_offset(PARTITION_DEFAULT, "nvs") == 0x2D0000
     assert partition_offset(PARTITION_DEFAULT, "spiffs") == 0x350000
     assert partition_size(PARTITION_DEFAULT, "spiffs") == 0xB0000
+    assert partition_offset(PARTITION_PHOTOPAINTER, "app1") == 0x310000
+    assert partition_offset(PARTITION_PHOTOPAINTER, "nvs") == 0x610000
+    assert partition_offset(PARTITION_PHOTOPAINTER, "fat") == 0x690000
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     docs = (ROOT / "docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md").read_text(encoding="utf-8")
     guide = (ROOT / "docs/devices/ESP32_GUIDE_ZH_TW.md").read_text(encoding="utf-8")
@@ -305,3 +347,40 @@ def test_queue_ack_journal_partition_budget_is_source_owned_and_selected_by_ci()
     assert "PartitionScheme=app3M_fat9M_16MB" not in docs
     assert "PartitionScheme=inktime_default_4M" not in workflow
     assert "PartitionScheme=inktime_photopainter_3M_16MB" not in workflow
+
+
+def test_photopainter_usb_cdc_is_the_firmware_log_sink():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    support = SUPPORT.read_text(encoding="utf-8")
+    observability = (
+        ROOT / "esp32/ink-display-7C-photo/firmware_observability.h"
+    ).read_text(encoding="utf-8")
+
+    assert "HardwareSerial DebugSerial(0)" not in firmware
+    assert "extern HardwareSerial DebugSerial" not in support
+    assert "extern HardwareSerial DebugSerial" not in observability
+    assert "#define INK_LOG_BEGIN() Serial.begin(115200)" in observability
+    assert "Serial.printf(__VA_ARGS__)" in support
+
+
+def test_photopainter_boot_and_pairing_display_failures_are_release_visible():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+
+    for marker in (
+        'INK_LOG_ERROR("photopainter_init_failed", photoPainter.lastError())',
+        'INK_LOG_INFO("photopainter_ready"',
+        'INK_LOG_WARN("photopainter_sd_unavailable"',
+        'INK_LOG_WARN("photopainter_rtc_unavailable"',
+        'INK_LOG_WARN("photopainter_sensor_unavailable"',
+        'INK_LOG_INFO("pairing_display_ready"',
+        'INK_LOG_ERROR("pairing_display_failed", photoPainter.lastError())',
+    ):
+        assert marker in firmware
+
+    pairing_start = firmware.index("const bool pairingScreenReady")
+    pairing_end = firmware.index("server.on(\"/\"", pairing_start)
+    pairing_block = firmware[pairing_start:pairing_end]
+    assert "apPassword" in pairing_block
+    assert "INK_LOG_" in pairing_block
+    assert "INK_LOG_INFO(\"pairing_display_ready\", apPassword" not in pairing_block
+    assert "INK_LOG_ERROR(\"pairing_display_failed\", apPassword" not in pairing_block

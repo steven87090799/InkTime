@@ -25,6 +25,7 @@
 // these metadata types visible to generated CRC helper prototypes.
 struct AckJournalSnapshotMeta;
 struct AckJournalActivePointer;
+struct Config;
 
 #include "device_http_transport.h"
 #if INKTIME_PHOTOPAINTER_ENABLED
@@ -33,7 +34,6 @@ struct AckJournalActivePointer;
 #else
 #include <GxEPD2_7C.h>
 #endif
-#include <HardwareSerial.h>
 #include "esp_wifi.h"
 #include "esp_bt.h"
 #include "mbedtls/sha256.h"
@@ -41,6 +41,10 @@ struct AckJournalActivePointer;
 
 #include "driver/gpio.h"
 #include "soc/soc_caps.h"
+#if INKTIME_PHOTOPAINTER_ENABLED
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#endif
 
 // =======================
 //  正式版預設不輸出逐步序列 Log；需要除錯時以 -DINKTIME_DEBUG_LOG=1 編譯。
@@ -50,7 +54,6 @@ struct AckJournalActivePointer;
 #endif
 #define DEBUG_LOG INKTIME_DEBUG_LOG
 
-HardwareSerial DebugSerial(0);
 #include "firmware_observability.h"
 
 using inktime::kBoardConfig;
@@ -61,8 +64,8 @@ inktime::PhotoPainterSupport photoPainter(kBoardConfig);
 
 #if DEBUG_LOG
   #define DBG_BEGIN()    INK_LOG_BEGIN()
-  #define DBG_PRINT(x)   DebugSerial.print(x)
-  #define DBG_PRINTLN(x) DebugSerial.println(x)
+  #define DBG_PRINT(x)   Serial.print(x)
+  #define DBG_PRINTLN(x) Serial.println(x)
 #else
   #define DBG_BEGIN()    INK_LOG_BEGIN()
   #define DBG_PRINT(x)
@@ -76,6 +79,70 @@ static const uint32_t FACTORY_RESET_SAMPLE_DELAY_MS = 5;
 // =======================
 static const uint32_t AP_TIMEOUT_MS = 5UL * 60UL * 1000UL; // 5 分钟
 static const uint8_t AP_MAX_SAVE_ATTEMPTS = 5;
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+static constexpr uint32_t kMaxAwakeTimeoutMs = 10UL * 60UL * 1000UL;
+static constexpr uint32_t kMaxAwakeSupervisorStackBytes = 2048U;
+static constexpr uint32_t kMaxAwakeCommandArm = 1U;
+static constexpr uint32_t kMaxAwakeCommandDisarm = 2U;
+static TaskHandle_t maxAwakeSupervisorTaskHandle = nullptr;
+static bool maxAwakeSupervisorCreated = false;
+
+static void maxAwakeSupervisorTask(void*) {
+  bool armed = true;
+  for (;;) {
+    uint32_t command = 0U;
+    const TickType_t waitTicks = armed
+        ? pdMS_TO_TICKS(kMaxAwakeTimeoutMs)
+        : portMAX_DELAY;
+    if (xTaskNotifyWait(0U, UINT32_MAX, &command, waitTicks) != pdTRUE) {
+      if (armed) esp_restart();
+      continue;
+    }
+    if (command == kMaxAwakeCommandDisarm) {
+      armed = false;
+    } else if (command == kMaxAwakeCommandArm) {
+      armed = true;
+    }
+  }
+}
+
+static void startMaxAwakeSupervisor() {
+  if (maxAwakeSupervisorCreated) return;
+  const BaseType_t created = xTaskCreate(
+    maxAwakeSupervisorTask,
+    "ink_maxawake",
+    kMaxAwakeSupervisorStackBytes,
+    nullptr,
+    tskIDLE_PRIORITY + 1U,
+    &maxAwakeSupervisorTaskHandle
+  );
+  if (created == pdPASS) {
+    maxAwakeSupervisorCreated = true;
+  } else {
+    maxAwakeSupervisorTaskHandle = nullptr;
+    maxAwakeSupervisorCreated = false;
+  }
+}
+
+static void disarmMaxAwakeSupervisor() {
+  if (maxAwakeSupervisorTaskHandle == nullptr) return;
+  xTaskNotify(
+    maxAwakeSupervisorTaskHandle,
+    kMaxAwakeCommandDisarm,
+    eSetValueWithOverwrite
+  );
+}
+
+static void armMaxAwakeSupervisor() {
+  if (maxAwakeSupervisorTaskHandle == nullptr) return;
+  xTaskNotify(
+    maxAwakeSupervisorTaskHandle,
+    kMaxAwakeCommandArm,
+    eSetValueWithOverwrite
+  );
+}
+#endif
 
 // 實體面板固定 800x480；既有伺服器 payload 契約維持直向 480x800。
 static constexpr int EPD_WIDTH  = kBoardConfig.display.width;
@@ -2316,8 +2383,15 @@ void startConfigPortal() {
 
 #if INKTIME_PHOTOPAINTER_ENABLED
   if (apOk) {
-    (void)photoPainter.displayPairingScreen(
+    const bool pairingScreenReady = photoPainter.displayPairingScreen(
       apSsid.c_str(), apPassword.c_str(), "http://192.168.4.1");
+    if (pairingScreenReady) {
+      const String refreshMessage = String("Pairing screen refresh completed in ")
+          + String(photoPainter.lastRefreshDurationMs()) + String(" ms");
+      INK_LOG_INFO("pairing_display_ready", refreshMessage);
+    } else {
+      INK_LOG_ERROR("pairing_display_failed", photoPainter.lastError());
+    }
   }
 #endif
 
@@ -2328,7 +2402,8 @@ void startConfigPortal() {
   uint32_t enterMs = millis();
 #if INKTIME_PHOTOPAINTER_ENABLED
   uint32_t lastPowerCheckMs = enterMs;
-  bool usbServiceActive = photoPainter.usbConnected();
+  inktime::PowerSourceState portalPowerSource = photoPainter.powerSourceState();
+  if (portalPowerSource == inktime::PowerSourceState::Usb) disarmMaxAwakeSupervisor();
 #endif
 
   for (;;) {
@@ -2338,16 +2413,28 @@ void startConfigPortal() {
     if (millis() - lastPowerCheckMs >= 5000) {
       photoPainter.refreshPowerState();
       lastPowerCheckMs = millis();
-      if (usbServiceActive && !photoPainter.usbConnected()) {
+      const inktime::PowerSourceState nextPowerSource = photoPainter.powerSourceState();
+      if (portalPowerSource != inktime::PowerSourceState::Usb
+          && nextPowerSource == inktime::PowerSourceState::Usb) {
+        disarmMaxAwakeSupervisor();
+      } else if (portalPowerSource == inktime::PowerSourceState::Usb
+                 && nextPowerSource != inktime::PowerSourceState::Usb) {
+        armMaxAwakeSupervisor();
+      }
+      if (portalPowerSource == inktime::PowerSourceState::Usb
+          && nextPowerSource == inktime::PowerSourceState::Battery) {
         goDeepSleepMinutes(minutesToNextRefreshFromLastEpoch(g_cfg));
       }
-      usbServiceActive = photoPainter.usbConnected();
+      portalPowerSource = nextPowerSource;
     }
 #else
-    const bool usbServiceActive = false;
+    const bool portalPowerIsUsb = false;
 #endif
 
-    if (!usbServiceActive && millis() - enterMs > AP_TIMEOUT_MS) {
+#if INKTIME_PHOTOPAINTER_ENABLED
+    const bool portalPowerIsUsb = portalPowerSource == inktime::PowerSourceState::Usb;
+#endif
+    if (!portalPowerIsUsb && millis() - enterMs > AP_TIMEOUT_MS) {
 #if DEBUG_LOG
       DBG_PRINTLN("[AP] timeout: no config saved");
 #endif
@@ -2364,13 +2451,18 @@ void startConfigPortal() {
 }
 
 #if INKTIME_PHOTOPAINTER_ENABLED
-// A confirmed USB source keeps the existing configuration WebServer available.
-// The project has no MQTT client to migrate; battery operation remains one-shot.
-bool runUsbServiceMode() {
+// Explicit recovery stays long-lived only while USB is positively confirmed.
+// Unknown sources remain bounded; battery operation remains one-shot.
+bool runUsbServiceMode(bool explicitRecoveryRequested) {
   photoPainter.refreshPowerState();
-  if (!photoPainter.usbConnected()) return false;
   // USB power alone is not authorization to alter Wi-Fi or a device token.
-  if (!isFactoryResetRequestedAtBoot()) return false;
+  if (!explicitRecoveryRequested) return false;
+
+  inktime::PowerSourceState servicePowerSource = photoPainter.powerSourceState();
+  if (servicePowerSource == inktime::PowerSourceState::Battery) return false;
+  if (servicePowerSource == inktime::PowerSourceState::Usb) {
+    disarmMaxAwakeSupervisor();
+  }
   portalSetupSecret = randomPortalSecret();
   portalNonce = randomPortalSecret();
   portalSaveAttempts = 0;
@@ -2380,19 +2472,33 @@ bool runUsbServiceMode() {
   server.on("/save", HTTP_POST, handleSave);
   server.begin();
 #if DEBUG_LOG
-  DBG_PRINTLN("[USB] configuration WebServer remains awake until VBUS removal");
+  DBG_PRINTLN("[USB] explicit configuration service started");
 #endif
 
+  const uint32_t serviceStartedMs = millis();
   uint32_t lastPowerCheckMs = millis();
-  while (photoPainter.usbConnected()) {
+  for (;;) {
     server.handleClient();
     if (millis() - lastPowerCheckMs >= 5000) {
       photoPainter.refreshPowerState();
       lastPowerCheckMs = millis();
+      const inktime::PowerSourceState nextPowerSource = photoPainter.powerSourceState();
+      if (servicePowerSource != inktime::PowerSourceState::Usb
+          && nextPowerSource == inktime::PowerSourceState::Usb) {
+        disarmMaxAwakeSupervisor();
+      } else if (servicePowerSource == inktime::PowerSourceState::Usb
+                 && nextPowerSource != inktime::PowerSourceState::Usb) {
+        armMaxAwakeSupervisor();
+      }
+      servicePowerSource = nextPowerSource;
     }
+    if (servicePowerSource == inktime::PowerSourceState::Battery) break;
+    if (servicePowerSource == inktime::PowerSourceState::Unknown
+        && millis() - serviceStartedMs > AP_TIMEOUT_MS) break;
     delay(10);
   }
   server.stop();
+  armMaxAwakeSupervisor();
   return true;
 }
 #endif
@@ -5677,7 +5783,10 @@ void reportDeviceStatus(Config &cfg, bool displayUpdated) {
   payload["rtc"] = photoPainter.rtcReady();
   payload["cache_status"] = inktime::cacheStatusName(photoPainter.cacheStatus());
   payload["pmic_type"] = inktime::pmicTypeName(photoPainter.pmicType());
-  payload["usb_power"] = photoPainter.usbConnected();
+  const inktime::PowerSourceState powerSourceState = photoPainter.powerSourceState();
+  if (powerSourceState != inktime::PowerSourceState::Unknown) {
+    payload["usb_power"] = powerSourceState == inktime::PowerSourceState::Usb;
+  }
   if (photoPainter.batteryVoltage() > 0.0f) {
     payload["battery_voltage"] = photoPainter.batteryVoltage();
   }
@@ -6288,6 +6397,10 @@ void setup() {
   delay(200);
   INK_LOG_INFO("firmware_boot", "InkTime firmware boot started");
 
+#if INKTIME_PHOTOPAINTER_ENABLED
+  startMaxAwakeSupervisor();
+#endif
+
 #if DEBUG_LOG
   DBG_PRINTLN();
   DBG_PRINTLN("===== ESP32-S3 InkTime Daily Photo boot =====");
@@ -6296,7 +6409,8 @@ void setup() {
 #endif
 #endif
 
-  if (isFactoryResetRequestedAtBoot()) {
+  const bool factoryResetRequested = isFactoryResetRequestedAtBoot();
+  if (factoryResetRequested) {
 #if DEBUG_LOG
   DBG_PRINT("[BOOT] factory reset GPIO=");
   DBG_PRINTLN((int)kBoardConfig.buttons.factoryReset);
@@ -6315,7 +6429,23 @@ void setup() {
   if (!photoPainter.begin()) {
     lastDeviceErrorCode = photoPainter.lastError();
     lastDeviceErrorMessage = "PhotoPainter Flash／OPI PSRAM 不存在或容量不足";
+    INK_LOG_ERROR("photopainter_init_failed", photoPainter.lastError());
+  } else {
+    INK_LOG_INFO("photopainter_ready", "PhotoPainter Flash and PSRAM checks passed");
+    if (!photoPainter.sdReady()) {
+      INK_LOG_WARN("photopainter_sd_unavailable", "SD cache is unavailable; continuing without SD cache");
+    }
+    if (!photoPainter.rtcReady()) {
+      INK_LOG_WARN("photopainter_rtc_unavailable", "RTC is unavailable; network time remains required");
+    }
+    if (!photoPainter.shtc3Ready()) {
+      INK_LOG_WARN("photopainter_sensor_unavailable", "SHTC3 telemetry is unavailable");
+    }
   }
+  // Recovery is a deliberate hold distinct from the established shorter
+  // force-network-refresh gesture. A short wake never authorizes service.
+  const bool explicitRecoveryRequested = factoryResetRequested
+      || photoPainter.recoveryServiceRequested();
 #endif
 
   loadConfig(g_cfg);
@@ -6358,6 +6488,7 @@ void setup() {
   if (!offlineScheduleTxnBlocked && g_cfg.auth_state == "paired" && !deviceAuthInvalid
       && g_cfg.delivery_mode == "inktime_offline_schedule"
       && photoPainter.wokeFromUserButton()
+      && !photoPainter.forceNetworkRefresh()
       && g_cfg.button_wake_action == "local_next") {
     // local_next is a strict cache-only action.  It must not connect Wi-Fi or
     // ask the generic queue for its first item.
@@ -6410,7 +6541,8 @@ void setup() {
       settimeofday(&value, nullptr);
       localtime_r(&rtcEpoch, &offlineTime);
     }
-    if (!offlineScheduleTxnBlocked && g_cfg.delivery_mode == "inktime_offline_schedule" && hasOfflineTime
+    if (!explicitRecoveryRequested && !offlineScheduleTxnBlocked
+        && g_cfg.delivery_mode == "inktime_offline_schedule" && hasOfflineTime
         && activeHasDueFormalSlot(rtcEpoch)) {
       // A due 00:00/current formal slot is serviceable from the active
       // cache even when the network recovery attempt fails.
@@ -6450,6 +6582,17 @@ void setup() {
     goDeepSleepSeconds(pairingBackoffSeconds(g_cfg));
     return;
   }
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+  if (explicitRecoveryRequested) {
+    (void)runUsbServiceMode(explicitRecoveryRequested);
+    struct tm recoveryTime = {};
+    bool hasRecoveryTime = getLocalTime(&recoveryTime, 1000);
+    if (!hasRecoveryTime) hasRecoveryTime = syncTime(g_cfg, recoveryTime);
+    sleepUntilNextSchedule(g_cfg, hasRecoveryTime, recoveryTime);
+    return;
+  }
+#endif
 
   struct tm timeinfo;
   String wakeOrigin;
@@ -6538,13 +6681,6 @@ void setup() {
   }
   if (!networkClosedForDisplay) reportDeviceStatus(g_cfg, displayUpdated);
 
-#if INKTIME_PHOTOPAINTER_ENABLED
-  if (runUsbServiceMode()) {
-    // The prior timestamp may be hours old after a USB service session.
-    hasTime = getLocalTime(&timeinfo, 1000);
-  }
-#endif
-
   if (!hasTime) {
     struct tm tmp;
     if (!networkClosedForDisplay && syncTime(g_cfg, tmp)) {
@@ -6557,4 +6693,6 @@ void setup() {
 }
 
 void loop() {
+  delay(1000);
+  goDeepSleepSeconds(60U);
 }
