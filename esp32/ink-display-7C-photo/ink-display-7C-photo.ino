@@ -14,6 +14,7 @@
 
 #include "hardware_profile.h"
 #include "photopainter_core.h"
+#include "photopainter_wake_core.h"
 #include "offline_schedule_core.h"
 #include "device_config_store.h"
 #include "pairing_recovery_core.h"

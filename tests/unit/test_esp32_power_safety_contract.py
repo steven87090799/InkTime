@@ -31,6 +31,8 @@ def test_photopainter_runtime_key_and_reserved_pin_contracts_are_unchanged():
 
 def test_photopainter_ext1_user_wake_validates_gpio4_and_preserves_timer_wake():
     support = SUPPORT.read_text(encoding="utf-8")
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    assert '#include "photopainter_wake_core.h"' in firmware
     begin = _between(
         support,
         "bool PhotoPainterSupport::begin()",
@@ -64,7 +66,6 @@ def test_photopainter_ext1_user_wake_validates_gpio4_and_preserves_timer_wake():
     assert "bool recoveryServiceRequested() const" in support_header
     assert "bool recoveryServiceRequested_ = false;" in support_header
 
-    firmware = FIRMWARE.read_text(encoding="utf-8")
     sleep = _between(firmware, "static void enterDeepSleepSeconds", "void goDeepSleepMinutes")
     assert "photoPainter.enableWakeSources();" in sleep
     assert "esp_sleep_enable_timer_wakeup(us);" in sleep
