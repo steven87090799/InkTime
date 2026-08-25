@@ -74,21 +74,20 @@ class PhotoAnalysisRetentionRepository:
     def _classification_cte(
         fingerprints: tuple[str, ...],
         specs: tuple[str, ...],
-    ) -> tuple[str, tuple[str, ...]]:
-        identity_terms: list[str] = []
-        parameters: list[str] = []
-        if fingerprints:
-            identity_terms.append(
-                f"analysis_fingerprint IN ({','.join('?' for _ in fingerprints)})"
-            )
-            parameters.extend(fingerprints)
-        if specs:
-            identity_terms.append(f"analysis_spec_json IN ({','.join('?' for _ in specs)})")
-            parameters.extend(specs)
-        identity_match = " OR ".join(identity_terms)
+    ) -> tuple[str, tuple[Any, ...]]:
+        identities: list[tuple[str | None, str | None]] = [
+            ("fingerprint", value) for value in fingerprints
+        ]
+        identities.extend(("spec", value) for value in specs)
+        identities.extend([(None, None)] * (MAX_CURRENT_IDENTITIES - len(identities)))
+        parameters: list[Any] = [item for identity in identities for item in identity]
+        parameters.append(DEFAULT_HISTORY_PER_PHOTO)
         return (
-            f"""
-            WITH latest_rows AS (
+            """
+            WITH current_identity(kind,value) AS (
+                VALUES (?,?),(?,?),(?,?),(?,?),(?,?),(?,?),(?,?),(?,?)
+            ),
+            latest_rows AS (
                 SELECT id,
                        ROW_NUMBER() OVER (
                            PARTITION BY photo_id
@@ -103,7 +102,14 @@ class PhotoAnalysisRetentionRepository:
                            ORDER BY created_at DESC,id DESC
                        ) AS retention_rank
                 FROM photo_analysis
-                WHERE {identity_match}
+                WHERE EXISTS(
+                    SELECT 1
+                    FROM current_identity identity
+                    WHERE (identity.kind='fingerprint'
+                           AND photo_analysis.analysis_fingerprint=identity.value)
+                       OR (identity.kind='spec'
+                           AND photo_analysis.analysis_spec_json=identity.value)
+                )
             ),
             invalid_semantic_photos AS (
                 SELECT DISTINCT photo_id
@@ -167,7 +173,7 @@ class PhotoAnalysisRetentionRepository:
                            WHEN base.has_invalid_semantic=1 THEN 'invalid_semantic_json'
                            WHEN base.has_audit_reference=1 THEN 'review_or_event'
                            WHEN base.has_inherited_reference=1 THEN 'inherited_source'
-                           WHEN history.retention_rank<={DEFAULT_HISTORY_PER_PHOTO}
+                           WHEN history.retention_rank<=?
                                THEN 'historical_buffer'
                            ELSE 'candidate'
                        END AS retention_class
