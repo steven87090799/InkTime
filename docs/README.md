@@ -9,9 +9,9 @@
 | 第一次啟動 Docker | [快速開始](getting-started/QUICK_START_ZH_TW.md) → [安裝指南](getting-started/INSTALLATION_ZH_TW.md) |
 | 了解程式如何運作 | [現行架構與流程](architecture/ARCHITECTURE_ZH_TW.md) → [Application Factory](architecture/APPLICATION_FACTORY.md) |
 | 管理照片、模型、裝置與設定 | [管理員指南](guides/ADMIN_GUIDE_ZH_TW.md) → [使用者指南](guides/USER_GUIDE_ZH_TW.md) |
-| 部署、備份或故障排除 | [Docker 部署](operations/DOCKER_GUIDE_ZH_TW.md) → [備份還原](operations/BACKUP_RESTORE_ZH_TW.md) → [疑難排解](operations/TROUBLESHOOTING_ZH_TW.md) |
+| 部署、以 Tag 更新 NAS、備份或故障排除 | [Docker 部署](operations/DOCKER_GUIDE_ZH_TW.md) → [NAS Tag 更新](operations/NAS_TAG_DEPLOYMENT_ZH_TW.md) → [備份還原](operations/BACKUP_RESTORE_ZH_TW.md) → [疑難排解](operations/TROUBLESHOOTING_ZH_TW.md) |
 | 開發或修改系統 | [開發指南](getting-started/DEVELOPMENT_GUIDE_ZH_TW.md) → [架構文件](architecture/ARCHITECTURE_ZH_TW.md) |
-| 接入 ESP32 或 PhotoPainter | [ESP32 指南](devices/ESP32_GUIDE_ZH_TW.md) → [自動配對](devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) → [PhotoPainter](devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) → [交付模式](devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md) |
+| 接入 ESP32 或 PhotoPainter | [ESP32 指南](devices/ESP32_GUIDE_ZH_TW.md) → [自動配對](devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) → [PhotoPainter](devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) → [Rev2.0 TG28 實板交接](devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md) → [交付模式](devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md) |
 | 使用本機無 AI 模式 | [Local-only 選片與雙照片](guides/LOCAL_ONLY_SELECTION_ZH_TW.md) |
 | 執行 OpenAI Batch 分析 | [OpenAI Batch 照片分析](OPENAI_BATCH_ANALYSIS_ZH_TW.md) → [正式交付與安全交接](PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md) |
 | 設定 OpenRouter 或查看成本來源 | [OpenRouter Provider](providers/OPENROUTER_ZH_TW.md) → [Token 與成本指南](reference/TOKEN_COST_GUIDE_ZH_TW.md) |
@@ -76,6 +76,7 @@
 ### 維運、安全與部署
 
 - [`operations/DOCKER_GUIDE_ZH_TW.md`](operations/DOCKER_GUIDE_ZH_TW.md)：N100 Docker 部署、資源、健康檢查、更新與回滾。
+- [`operations/NAS_TAG_DEPLOYMENT_ZH_TW.md`](operations/NAS_TAG_DEPLOYMENT_ZH_TW.md)：Git Tag 發布 GHCR 映像、NAS 初次設定、單一 Tag 更新與固定版本回復。
 - [`operations/N100_RESOURCE_GUIDE_ZH_TW.md`](operations/N100_RESOURCE_GUIDE_ZH_TW.md)：N100 容量與低功耗調校。
 - [`operations/LOGGING_GUIDE_ZH_TW.md`](operations/LOGGING_GUIDE_ZH_TW.md)：Log 層級、遮罩與判讀方法。
 - [`operations/TROUBLESHOOTING_ZH_TW.md`](operations/TROUBLESHOOTING_ZH_TW.md)：常見故障與處理順序。
@@ -97,6 +98,7 @@
 - [`devices/DEVICE_TRANSPORT_SECURITY_ZH_TW.md`](devices/DEVICE_TRANSPORT_SECURITY_ZH_TW.md)：Device Secret／Legacy Token、HTTP/HTTPS 與傳輸限制。
 - [`devices/ESP32_TLS_PROVISIONING_ZH_TW.md`](devices/ESP32_TLS_PROVISIONING_ZH_TW.md)：trust anchor、HTTPS fail-closed、私有 LAN 開發 HTTP 與隨機配網密碼。
 - [`devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md`](devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md)：PhotoPainter 板型、電源、PSRAM 與實機驗收。
+- [`devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md`](devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md)：Rev2.0 TG28／ALDO4 根因、實板 A/B、安全禁區與後續 AI 起手順序。
 - [`devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md`](devices/PHOTOPAINTER_DELIVERY_MODES_ZH_TW.md)：Stock 相容、既有 Online、Enhanced 離線排程、`/dataUP` Payload 與安全邊界。
 - [`devices/PHOTOPAINTER_RECOVERY_ZH_TW.md`](devices/PHOTOPAINTER_RECOVERY_ZH_TW.md)：PhotoPainter 交付恢復、停機條件與實機驗證邊界。
 - [`devices/SECURE_OTA_DESIGN_ZH_TW.md`](devices/SECURE_OTA_DESIGN_ZH_TW.md)：尚未啟用 OTA 的安全前提。

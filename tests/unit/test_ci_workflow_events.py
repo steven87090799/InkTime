@@ -16,6 +16,7 @@ EXPECTED_PULL_REQUEST_TYPES = (
     "opened",
     "synchronize",
     "reopened",
+    "ready_for_review",
     "labeled",
     "unlabeled",
     "edited",
@@ -39,6 +40,7 @@ CI_HEAVY_JOBS = (
     "actionlint",
     "selected-owner-suites",
     "compose-lan-production-persistence",
+    "nas-pull-only-update-e2e",
     "compose-production-tls-smoke",
     "bounded-runtime-soak",
     "playwright",
@@ -116,6 +118,7 @@ def test_base_retarget_requires_full_validation():
         ("pull_request", "opened"),
         ("pull_request", "synchronize"),
         ("pull_request", "reopened"),
+        ("pull_request", "ready_for_review"),
         ("pull_request", "labeled"),
         ("pull_request", "unlabeled"),
         ("push", ""),
@@ -135,7 +138,7 @@ def test_workflows_parse_and_isolate_metadata_concurrency(workflow_path):
 
     assert pull_request["branches"] == ["main"]
     assert pull_request["types"] == list(EXPECTED_PULL_REQUEST_TYPES)
-    assert "ready_for_review" not in pull_request["types"]
+    assert "ready_for_review" in pull_request["types"]
     assert workflow["on"]["push"]["branches"] == ["main"]
     assert "workflow_dispatch" in workflow["on"]
     assert METADATA_LANE_EXPRESSION in concurrency["group"]

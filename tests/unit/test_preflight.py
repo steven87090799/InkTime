@@ -10,11 +10,35 @@ from inktime.app.core.preflight import (
     validate_lan_environment,
 )
 from inktime.app.core.runtime_config import RuntimeConfig
+from scripts.production_preflight import _lan_prestart_summary
 
 
 class LocalFilesystem:
+    def __init__(self, photo_dir: Path | None = None, *nested: tuple[Path, bool]) -> None:
+        self.photo_dir = photo_dir
+        self.nested = nested
+
     def mountinfo(self) -> str:
-        return "1 0 0:1 / / rw - ext4 /dev/root rw"
+        lines = ["1 0 0:1 / / ro - ext4 /dev/root ro"]
+        if self.photo_dir is not None:
+            lines.append(f"2 1 0:2 / {self.photo_dir} ro - ext4 /dev/photos ro")
+        for index, (mount_point, read_only) in enumerate(self.nested, start=3):
+            mode = "ro" if read_only else "rw"
+            lines.append(
+                f"{index} 2 0:{index} / {mount_point} {mode} - tmpfs tmpfs {mode}"
+            )
+        return "\n".join(lines)
+
+
+class WritablePhotoFilesystem:
+    def __init__(self, photo_dir: Path) -> None:
+        self.photo_dir = photo_dir
+
+    def mountinfo(self) -> str:
+        return (
+            "1 0 0:1 / / ro - ext4 /dev/root ro\n"
+            f"2 1 0:2 / {self.photo_dir} rw - ext4 /dev/photos rw"
+        )
 
 
 def _config(tmp_path: Path, **overrides) -> RuntimeConfig:
@@ -37,7 +61,8 @@ def _config(tmp_path: Path, **overrides) -> RuntimeConfig:
 
 
 def test_production_https_configuration_is_accepted(tmp_path):
-    result = run_production_preflight(_config(tmp_path), adapter=LocalFilesystem())
+    config = _config(tmp_path)
+    result = run_production_preflight(config, adapter=LocalFilesystem(config.photo_dir))
     assert result.healthy
     assert result.transport == "https"
     assert result.security_state == "secure"
@@ -56,15 +81,16 @@ def test_production_https_configuration_is_accepted(tmp_path):
     ],
 )
 def test_trusted_lan_production_is_explicitly_degraded(tmp_path, public_url):
+    config = _config(
+        tmp_path,
+        public_url=public_url,
+        cookie_secure=False,
+        allow_insecure_http=True,
+        proxy_trust=0,
+    )
     result = run_production_preflight(
-        _config(
-            tmp_path,
-            public_url=public_url,
-            cookie_secure=False,
-            allow_insecure_http=True,
-            proxy_trust=0,
-        ),
-        adapter=LocalFilesystem(),
+        config,
+        adapter=LocalFilesystem(config.photo_dir),
         mode="lan",
     )
     assert result.healthy is False
@@ -84,16 +110,17 @@ def test_trusted_lan_production_is_explicitly_degraded(tmp_path, public_url):
     ],
 )
 def test_lan_mode_rejects_public_http_hosts(tmp_path, public_url):
+    config = _config(
+        tmp_path,
+        public_url=public_url,
+        cookie_secure=False,
+        allow_insecure_http=True,
+        proxy_trust=0,
+    )
     with pytest.raises(PreflightError, match="PREFLIGHT-LAN-003"):
         run_production_preflight(
-            _config(
-                tmp_path,
-                public_url=public_url,
-                cookie_secure=False,
-                allow_insecure_http=True,
-                proxy_trust=0,
-            ),
-            adapter=LocalFilesystem(),
+            config,
+            adapter=LocalFilesystem(config.photo_dir),
             mode="lan",
         )
 
@@ -113,7 +140,32 @@ def _lan_environ(tmp_path: Path) -> dict[str, str]:
 
 
 def test_lan_environment_requires_production_paths_identity_and_readonly_photos(tmp_path):
-    validate_lan_environment(_lan_environ(tmp_path), "- ${INKTIME_PHOTO_PATH}:/photos:ro")
+    validate_lan_environment(
+        _lan_environ(tmp_path),
+        (Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text(
+            encoding="utf-8"
+        ),
+    )
+
+
+def test_lan_prestart_defers_actual_mount_proof_to_container_startup(tmp_path):
+    config = _config(
+        tmp_path,
+        public_url="http://inktime.local:8765",
+        cookie_secure=False,
+        allow_insecure_http=True,
+        proxy_trust=0,
+    )
+
+    assert _lan_prestart_summary(config, allow_test_host=False) == {
+        "status": "degraded",
+        "validation_scope": "prestart-config",
+        "transport": "trusted-lan-http",
+        "security_state": "degraded",
+        "tls_enabled": False,
+        "secure_cookie": False,
+        "runtime_mount_validation": "deferred-to-container-startup",
+    }
 
 
 @pytest.mark.parametrize(
@@ -129,19 +181,88 @@ def test_lan_environment_rejects_placeholders_simulation_and_unsafe_flags(tmp_pa
     environ = _lan_environ(tmp_path)
     environ[field] = value
     with pytest.raises(PreflightError, match=code):
-        validate_lan_environment(environ, "- ${INKTIME_PHOTO_PATH}:/photos:ro")
+        validate_lan_environment(environ, "target: /photos\nread_only: true")
 
 
 def test_lan_environment_rejects_same_data_and_photo_path(tmp_path):
     environ = _lan_environ(tmp_path)
     environ["INKTIME_PHOTO_PATH"] = environ["INKTIME_DATA_PATH"]
     with pytest.raises(PreflightError, match="PREFLIGHT-LAN-PATH-003"):
-        validate_lan_environment(environ, "- ${INKTIME_PHOTO_PATH}:/photos:ro")
+        validate_lan_environment(environ, "target: /photos\nread_only: true")
 
 
 def test_lan_environment_rejects_writable_photo_mount(tmp_path):
     with pytest.raises(PreflightError, match="PREFLIGHT-LAN-MOUNT-001"):
         validate_lan_environment(_lan_environ(tmp_path), "- ${INKTIME_PHOTO_PATH}:/photos")
+
+
+@pytest.mark.parametrize("photo_relative", ["runtime/photos", "runtime", "."])
+def test_production_rejects_equal_or_nested_data_and_photo_paths(tmp_path, photo_relative):
+    config = _config(tmp_path, photo_dir=tmp_path / photo_relative)
+    with pytest.raises(PreflightError, match="DEPLOY-PATH-OVERLAP-001"):
+        run_production_preflight(
+            config,
+            adapter=LocalFilesystem(),
+        )
+
+
+def test_production_rejects_effectively_writable_photo_mount(tmp_path):
+    config = _config(tmp_path)
+    with pytest.raises(PreflightError, match="DEPLOY-PHOTO-RO-001"):
+        run_production_preflight(
+            config,
+            adapter=WritablePhotoFilesystem(config.photo_dir),
+        )
+
+
+@pytest.mark.parametrize("photo_relative", ["photos", "runtime-old"])
+def test_production_accepts_component_distinct_sibling_paths(tmp_path, photo_relative):
+    config = _config(tmp_path, photo_dir=tmp_path / photo_relative)
+    result = run_production_preflight(
+        config,
+        adapter=LocalFilesystem(config.photo_dir),
+    )
+    assert result.healthy
+
+
+def test_production_rejects_writable_nested_photo_mount(tmp_path):
+    config = _config(tmp_path)
+    adapter = LocalFilesystem(config.photo_dir, (config.photo_dir / "nested", False))
+    with pytest.raises(PreflightError, match="DEPLOY-PHOTO-RO-002"):
+        run_production_preflight(config, adapter=adapter)
+
+
+def test_production_accepts_readonly_nested_photo_mount(tmp_path):
+    config = _config(tmp_path)
+    adapter = LocalFilesystem(config.photo_dir, (config.photo_dir / "nested", True))
+    assert run_production_preflight(config, adapter=adapter).healthy
+
+
+@pytest.mark.parametrize("sibling", ["photos-archive", "other"])
+def test_production_ignores_writable_mounts_outside_photo_tree(tmp_path, sibling):
+    config = _config(tmp_path)
+    adapter = LocalFilesystem(config.photo_dir, (tmp_path / sibling, False))
+    assert run_production_preflight(config, adapter=adapter).healthy
+
+
+def test_production_requires_exact_photo_mount(tmp_path):
+    config = _config(tmp_path)
+    with pytest.raises(PreflightError, match="DEPLOY-PHOTO-RO-001"):
+        run_production_preflight(config, adapter=LocalFilesystem())
+
+
+def test_production_decodes_escaped_photo_mount_path(tmp_path):
+    config = _config(tmp_path, photo_dir=tmp_path / "photo archive")
+
+    class EscapedPhotoFilesystem:
+        def mountinfo(self) -> str:
+            escaped = str(config.photo_dir).replace(" ", "\\040")
+            return (
+                "1 0 0:1 / / ro - ext4 /dev/root ro\n"
+                f"2 1 0:2 / {escaped} ro - ext4 /dev/photos ro"
+            )
+
+    assert run_production_preflight(config, adapter=EscapedPhotoFilesystem()).healthy
 
 
 @pytest.mark.parametrize(
@@ -172,8 +293,9 @@ def test_invalid_public_url_and_cookie_combinations_fail_with_diagnostics(
     overrides,
     message,
 ):
+    config = _config(tmp_path, **overrides)
     with pytest.raises(PreflightError, match=message):
         run_production_preflight(
-            _config(tmp_path, **overrides),
-            adapter=LocalFilesystem(),
+            config,
+            adapter=LocalFilesystem(config.photo_dir),
         )

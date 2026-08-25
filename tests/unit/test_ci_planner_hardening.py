@@ -85,7 +85,7 @@ def _pr_context(*, draft: bool = True, labels: list[str] | None = None) -> dict[
             _pr_context(),
             IMPACT_MODE,
             {"docker_runtime_owner", "container_configuration_owner"},
-            {"container_security"},
+            {"container_security", "nas_update_e2e"},
         ),
         (
             "firmware-specific Draft",

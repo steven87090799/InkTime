@@ -1,17 +1,14 @@
 name: inktime
 
-# 三個服務共用同一套映像、環境變數、資料掛載與安全設定。
-# YAML anchor 只減少重複內容，不會另外建立名為 common 的容器。
+# NAS 正式部署只拉取 GitHub Container Registry 映像，不在 NAS 上建置原始碼。
 x-common: &common
-  # 本機預設使用 inktime:local；正式部署可由 .env 指定固定 Tag。
-  image: inktime:${INKTIME_IMAGE_TAG:-local}
-  # 異常退出或主機重開後自動恢復，手動停止時不強制重啟。
+  image: ${INKTIME_IMAGE_REPOSITORY:-ghcr.io/steven87090799/inktime}:${INKTIME_IMAGE_TAG:?請以 scripts/update_nas.sh 指定 immutable SemVer tag}
+  pull_policy: always
   restart: unless-stopped
   init: true
   stop_grace_period: 45s
   environment:
-    # The base file is production-safe. Development uses docker-compose.dev.yml.
-    INKTIME_ENVIRONMENT: ${INKTIME_ENVIRONMENT:-production}
+    INKTIME_ENVIRONMENT: production
     INKTIME_DATA_DIR: /data
     INKTIME_DATABASE: /data/inktime.db
     INKTIME_PHOTO_DIR: /photos
@@ -24,60 +21,45 @@ x-common: &common
     INKTIME_PROXY_TRUST: ${INKTIME_PROXY_TRUST:-0}
     INKTIME_WORKER_CONCURRENCY: ${INKTIME_WORKER_CONCURRENCY:-2}
     INKTIME_SCHEDULER_IDENTITY: ${INKTIME_SCHEDULER_IDENTITY:-inktime-scheduler}
-    # 所有排程、歷史今日與 Log 時間使用的時區。
     TZ: ${TZ:-Asia/Taipei}
-    # Production defaults require an HTTPS public URL and secure cookies.
     INKTIME_COOKIE_SECURE: ${INKTIME_COOKIE_SECURE:-1}
-    INKTIME_PUBLIC_URL: ${INKTIME_PUBLIC_URL:-https://localhost}
+    INKTIME_PUBLIC_URL: ${INKTIME_PUBLIC_URL:?請在 .env.nas 設定實際 INKTIME_PUBLIC_URL}
     INKTIME_ALLOW_INSECURE_HTTP: ${INKTIME_ALLOW_INSECURE_HTTP:-0}
     INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE: ${INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE:-0}
-    # 僅供 CI 驗證保留的 .test LAN hostname；正式部署保持 0。
-    INKTIME_LAN_TEST_MODE: ${INKTIME_LAN_TEST_MODE:-0}
-    # 容器預設輸出 JSON Log，方便 NAS 或集中式 Log 系統收集。
     INKTIME_LOG_FORMAT: ${INKTIME_LOG_FORMAT:-json}
-    # 應用 Log 啟動預設；服務啟動後可在 Web 設定頁動態調整。
     INKTIME_LOG_LEVEL: ${INKTIME_LOG_LEVEL:-INFO}
-    # Gunicorn HTTP access log 預設關閉，避免健康檢查與裝置輪詢寫滿 Log。
     INKTIME_ACCESS_LOG: ${INKTIME_ACCESS_LOG:-0}
-    # Legacy Review／Simulator 只在維護時明確開啟；正式與開發預設都關閉。
     INKTIME_ENABLE_LEGACY_WEBUI: ${INKTIME_ENABLE_LEGACY_WEBUI:-false}
+  user: "10001:10001"
   volumes:
-    # 可寫資料：SQLite、Session Key、縮圖、字型、備份與發布版本。
+    # SQLite、Session Key、快取、備份與 Release 必須持久保存。
     - type: bind
-      source: ${INKTIME_DATA_PATH:-./data}
+      source: ${INKTIME_DATA_PATH:?請在 .env.nas 設定 INKTIME_DATA_PATH}
       target: /data
-    # 原始照片只讀掛載；容器內一律從 /photos 存取，避免誤刪 NAS 照片。
+      bind:
+        create_host_path: false
+    # 原始照片固定唯讀，容器更新不會修改 NAS 相簿。
     - type: bind
-      source: ${INKTIME_PHOTO_PATH:-./simulation_photos}
+      source: ${INKTIME_PHOTO_PATH:?請在 .env.nas 設定 INKTIME_PHOTO_PATH}
       target: /photos
       read_only: true
-  # 容器 Root filesystem 唯讀；需要的暫存空間另外掛在 /tmp。
+      bind:
+        create_host_path: false
   read_only: true
   tmpfs:
     - /tmp:size=256m,mode=1777
   security_opt:
-    # 即使程序遭利用，也禁止透過 setuid 等方式取得更高權限。
     - no-new-privileges:true
   logging:
-    # 限制單一 Log 檔大小與保留數量，避免填滿 NAS 磁碟。
     driver: json-file
     options:
       max-size: ${INKTIME_LOG_MAX_SIZE:-5m}
       max-file: ${INKTIME_LOG_MAX_FILES:-3}
 
 services:
-  # Web 管理介面、健康檢查與 ESP32 下載 API；不執行長時間照片分析。
   inktime-web:
     <<: *common
-    # 只建置一次；Worker 與 Scheduler 直接重用完全相同的映像。
-    build:
-      context: .
-      args:
-        # 顯示在診斷頁的版本資訊；未提供時使用 unknown。
-        INKTIME_GIT_REVISION: ${INKTIME_GIT_REVISION:-unknown}
-        INKTIME_BUILD_TIME: ${INKTIME_BUILD_TIME:-unknown}
     ports:
-      # 左側是主機對外 Port，右側 8765 是容器內 Gunicorn Port。
       - "${INKTIME_BIND_ADDRESS:-127.0.0.1}:${INKTIME_PORT:-8765}:8765"
     cpus: ${INKTIME_WEB_CPUS:-0.75}
     mem_limit: ${INKTIME_WEB_MEMORY:-384m}
@@ -85,7 +67,6 @@ services:
     tmpfs:
       - /tmp:size=128m,mode=1777
 
-  # 背景 Worker：照片掃描、預處理、模型分析、重試與渲染工作。
   inktime-worker:
     <<: *common
     command: ["python", "-m", "inktime.app.workers.runner"]
@@ -96,7 +77,6 @@ services:
       start_period: 20s
       retries: 3
     depends_on:
-      # 等 Web 完成 Migration 且健康後才開始領取工作。
       inktime-web:
         condition: service_healthy
     cpus: ${INKTIME_WORKER_CPUS:-2.0}
@@ -105,7 +85,6 @@ services:
     tmpfs:
       - /tmp:size=256m,mode=1777
 
-  # Scheduler：週期性工作、逾期租約回收、自動備份與保留策略。
   inktime-scheduler:
     <<: *common
     command: ["python", "-m", "inktime.app.workers.scheduler"]
@@ -116,7 +95,6 @@ services:
       start_period: 20s
       retries: 3
     depends_on:
-      # Migration 完成前不可執行排程或修改資料庫。
       inktime-web:
         condition: service_healthy
     cpus: ${INKTIME_SCHEDULER_CPUS:-0.25}
