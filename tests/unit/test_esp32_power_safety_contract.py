@@ -80,7 +80,7 @@ def test_config_is_forward_declared_for_arduino_generated_prototypes():
     assert forward < definition < first_config_signature
 
 
-def test_sleep_domains_and_pmic_remain_conservative_and_read_only():
+def test_sleep_domains_and_tg28_epd_rail_remain_narrow_and_fail_closed():
     firmware = FIRMWARE.read_text(encoding="utf-8")
     domains = _between(firmware, "void prepareDeepSleepDomains()", "static void goDeepSleepSeconds")
     assert "#if INKTIME_PHOTOPAINTER_ENABLED" in domains
@@ -94,13 +94,83 @@ def test_sleep_domains_and_pmic_remain_conservative_and_read_only():
 
     support = SUPPORT.read_text(encoding="utf-8")
     pmic = _between(support, "class ProbePowerManager", "class Shtc3Adapter")
-    assert "chipId != kAxp2101ChipId" in pmic
+    assert "type_ = PmicType::TG28" in pmic
     assert "type_ = PmicType::Unknown" in pmic
-    assert "type_ = PmicType::TG28" not in pmic
-    assert pmic.index("chipId != kAxp2101ChipId") < pmic.index("type_ = PmicType::AXP2101")
     assert "writeCommand(" not in pmic
-    assert "writeRegisters(" not in pmic
-    assert "PMIC rail voltage or shutdown-register writes" in pmic
+    assert "kAxp2101ChipIdRegister" not in support
+    assert "kTg28LdoEnable0 = 0x90" in support
+    assert "kTg28Aldo4Voltage = 0x95" in support
+    assert "kTg28Aldo4EnableMask = 1U << 3U" in support
+    assert "kTg28Aldo4_3300mV = 0x1CU" in support
+    assert "kTg28Aldo4ColdStartSettleMs = 500U" in support
+
+    early_pins = _between(
+        support,
+        "bool holdEpdPinsForColdBoot",
+        "class BoundedI2cBus",
+    )
+    for pin in (
+        "board.display.spi.cs",
+        "board.display.dc",
+        "board.display.reset",
+        "board.display.busy",
+    ):
+        assert pin in early_pins
+    assert "board_.buttons.power" not in early_pins
+    assert "GPIO_NUM_21" not in early_pins
+    assert "gpio_set_level(static_cast<gpio_num_t>(board.display.spi.sck)" not in early_pins
+    assert "gpio_set_level(static_cast<gpio_num_t>(board.display.spi.mosi)" not in early_pins
+    assert "gpio_set_level(static_cast<gpio_num_t>(board.display.reset), 1)" in early_pins
+
+    constructor = _between(
+        support,
+        "PhotoPainterSupport::PhotoPainterSupport",
+        "PhotoPainterSupport::~PhotoPainterSupport",
+    )
+    assert "earlyEpdTransportReady_ = prepareSpectra6ColdBootTransport(board_)" in constructor
+    assert constructor.index("prepareSpectra6ColdBootTransport(board_)") < constructor.index(
+        "holdEpdPinsForColdBoot(board_)"
+    )
+    assert "earlyEpdPinsReady_ = earlyEpdTransportReady_" in constructor
+    assert "configureBoardIndicators();" in constructor
+
+    assert "kPhotoPainterPowerLed = GPIO_NUM_45" in support
+    assert "kPhotoPainterActivityLed = GPIO_NUM_42" in support
+    indicator_setup = _between(
+        support,
+        "void configureBoardIndicators()",
+        "bool holdEpdPinsForColdBoot",
+    )
+    assert "enabled ? 0 : 1" in support
+    assert "kPhotoPainterPowerLed" in indicator_setup
+    assert "kPhotoPainterActivityLed" in indicator_setup
+    assert "board_.buttons.power" not in indicator_setup
+
+    display_frame = _between(
+        support,
+        "bool PhotoPainterSupport::displayFrame",
+        "bool PhotoPainterSupport::displayPairingScreen",
+    )
+    assert "setBoardIndicator(kPhotoPainterActivityLed, true)" in display_frame
+    assert display_frame.count("setBoardIndicator(kPhotoPainterActivityLed, false)") >= 2
+
+    sleep_prepare = _between(
+        support,
+        "void PhotoPainterSupport::prepareForDeepSleep",
+        "void PhotoPainterSupport::enableWakeSources",
+    )
+    assert "setBoardIndicator(kPhotoPainterActivityLed, false)" in sleep_prepare
+    assert "setBoardIndicator(kPhotoPainterPowerLed, false)" in sleep_prepare
+    assert "board_.buttons.power" not in sleep_prepare
+
+    prepare = _between(pmic, "bool prepareDisplayPower()", "const char* lastError()")
+    assert "voltage & static_cast<uint8_t>(~kTg28AldoVoltageMask)" in prepare
+    assert "ldoState | kTg28Aldo4EnableMask" in prepare
+    assert "PMIC-EPD-VOLTAGE-READBACK" in prepare
+    assert "PMIC-EPD-ENABLE-READBACK" in prepare
+    assert "aldo4AlreadyEnabled" in prepare
+    assert "kTg28Aldo4ColdStartSettleMs" in prepare
+    assert "PMIC-EPD-DISABLE" not in pmic
 
     hardware = HARDWARE.read_text(encoding="utf-8")
     pmic_types = _between(hardware, "enum class PmicType", "struct SpiPins")
@@ -113,9 +183,9 @@ def test_sleep_domains_and_pmic_remain_conservative_and_read_only():
 
     measurements = _between(pmic, "void refreshMeasurements()", "PmicType type()")
     assert measurements.index("powerSourceState_ = PowerSourceState::Unknown") < measurements.index(
-        "if (type_ != PmicType::AXP2101) return;"
+        "if (type_ != PmicType::TG28) return;"
     )
-    assert measurements.index("kAxp2101Status1") < measurements.index(
+    assert measurements.index("kTg28Status1") < measurements.index(
         "PowerSourceState::Usb"
     )
     assert "PowerSourceState::Battery" in measurements
@@ -123,6 +193,15 @@ def test_sleep_domains_and_pmic_remain_conservative_and_read_only():
     assert "virtual PowerSourceState powerSourceState() const = 0;" in POWER_MANAGER.read_text(
         encoding="utf-8"
     )
+
+    display = _between(
+        support,
+        "bool PhotoPainterSupport::displayFrame",
+        "bool PhotoPainterSupport::displayPairingScreen",
+    )
+    assert display.index("prepareDisplayPower()") < display.index("impl_->display.begin()")
+    assert "impl_->display.safeShutdown()" in display
+    assert "releaseDisplayPower()" not in display
 
     status = _between(firmware, "void reportDeviceStatus", "void initDisplay")
     assert "powerSourceState != inktime::PowerSourceState::Unknown" in status
@@ -146,6 +225,31 @@ def test_sleep_domains_and_pmic_remain_conservative_and_read_only():
         "setChargeVoltage",
     ):
         assert forbidden not in combined
+
+
+def test_shared_i2c_bus_uses_open_drain_recovery_before_probe_and_retry():
+    support = SUPPORT.read_text(encoding="utf-8")
+    recovery = _between(support, "bool recoverI2cBusLines", "class BoundedI2cBus")
+    assert "gpio_reset_pin" in recovery
+    assert "OUTPUT_OPEN_DRAIN" in recovery
+    assert "pulse < 9U" in recovery
+    assert "digitalWrite(config.scl, LOW)" in recovery
+    assert "digitalWrite(config.sda, LOW)" in recovery
+    assert "digitalWrite(config.sda, HIGH)" in recovery
+    assert "return digitalRead(config.sda) == HIGH" in recovery
+    assert "pinMode(config.sda, OUTPUT)" not in recovery
+    assert "pinMode(config.scl, OUTPUT)" not in recovery
+
+    reset = _between(support, "bool resetBus()", "TwoWire& wire_")
+    assert reset.index("wire_.end()") < reset.index("recoverI2cBusLines(config_)")
+    assert reset.index("recoverI2cBusLines(config_)") < reset.index("wire_.begin(")
+
+    begin = _between(
+        support,
+        "bool PhotoPainterSupport::begin()",
+        "bool PhotoPainterSupport::loadCachedFrame",
+    )
+    assert begin.index("recoverI2cBusLines(board_.i2c)") < begin.index("Wire.begin(")
 
 
 def test_max_awake_guard_is_independent_bounded_and_usb_exempt():
@@ -271,9 +375,11 @@ def test_photopainter_docs_match_ext1_and_fail_closed_tg28_behavior():
     assert "wake-status" in docs and "GPIO 4" in docs
     assert "1.2 秒但未滿 4 秒" in docs
     assert "持續至少 4 秒才授權" in docs
-    assert "PMIC 封裝標示為 TG28" in docs
-    assert "不會僅因" in docs and "猜成 TG28" in docs
-    assert "TG28／未識別 PMIC 完全不執行 PMIC register mutation" in docs
+    assert "Rev2.0 原理圖都確認 PMIC 為 TG28" in docs
+    assert "ALDO4 直接供應" in docs and "`EPD_VCC`" in docs
+    assert "`REG95[4:0]`" in docs and "`REG90[3]`" in docs
+    assert "PWR 紅燈 GPIO 45" in docs and "ACT 綠燈 GPIO 42" in docs
+    assert "韌體不寫 TG28 的 DCDC、充電、全機 shutdown" in docs
     assert "不解除 max-awake supervisor" in normalized_docs
 
 
