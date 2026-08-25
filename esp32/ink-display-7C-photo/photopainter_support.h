@@ -139,6 +139,8 @@ class PhotoPainterSupport {
   bool forceNetworkRefresh_ = false;
   bool recoveryServiceRequested_ = false;
   bool wokeFromUserButton_ = false;
+  bool earlyEpdTransportReady_ = false;
+  bool earlyEpdPinsReady_ = false;
   bool environmentValid_ = false;
   float temperatureC_ = 0.0f;
   float humidityPercent_ = 0.0f;
