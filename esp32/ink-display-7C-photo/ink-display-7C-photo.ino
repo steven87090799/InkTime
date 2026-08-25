@@ -34,7 +34,6 @@ struct Config;
 #else
 #include <GxEPD2_7C.h>
 #endif
-#include <HardwareSerial.h>
 #include "esp_wifi.h"
 #include "esp_bt.h"
 #include "mbedtls/sha256.h"
@@ -55,7 +54,6 @@ struct Config;
 #endif
 #define DEBUG_LOG INKTIME_DEBUG_LOG
 
-HardwareSerial DebugSerial(0);
 #include "firmware_observability.h"
 
 using inktime::kBoardConfig;
@@ -66,8 +64,8 @@ inktime::PhotoPainterSupport photoPainter(kBoardConfig);
 
 #if DEBUG_LOG
   #define DBG_BEGIN()    INK_LOG_BEGIN()
-  #define DBG_PRINT(x)   DebugSerial.print(x)
-  #define DBG_PRINTLN(x) DebugSerial.println(x)
+  #define DBG_PRINT(x)   Serial.print(x)
+  #define DBG_PRINTLN(x) Serial.println(x)
 #else
   #define DBG_BEGIN()    INK_LOG_BEGIN()
   #define DBG_PRINT(x)
@@ -2385,8 +2383,15 @@ void startConfigPortal() {
 
 #if INKTIME_PHOTOPAINTER_ENABLED
   if (apOk) {
-    (void)photoPainter.displayPairingScreen(
+    const bool pairingScreenReady = photoPainter.displayPairingScreen(
       apSsid.c_str(), apPassword.c_str(), "http://192.168.4.1");
+    if (pairingScreenReady) {
+      const String refreshMessage = String("Pairing screen refresh completed in ")
+          + String(photoPainter.lastRefreshDurationMs()) + String(" ms");
+      INK_LOG_INFO("pairing_display_ready", refreshMessage);
+    } else {
+      INK_LOG_ERROR("pairing_display_failed", photoPainter.lastError());
+    }
   }
 #endif
 
@@ -6424,6 +6429,18 @@ void setup() {
   if (!photoPainter.begin()) {
     lastDeviceErrorCode = photoPainter.lastError();
     lastDeviceErrorMessage = "PhotoPainter Flash／OPI PSRAM 不存在或容量不足";
+    INK_LOG_ERROR("photopainter_init_failed", photoPainter.lastError());
+  } else {
+    INK_LOG_INFO("photopainter_ready", "PhotoPainter Flash and PSRAM checks passed");
+    if (!photoPainter.sdReady()) {
+      INK_LOG_WARN("photopainter_sd_unavailable", "SD cache is unavailable; continuing without SD cache");
+    }
+    if (!photoPainter.rtcReady()) {
+      INK_LOG_WARN("photopainter_rtc_unavailable", "RTC is unavailable; network time remains required");
+    }
+    if (!photoPainter.shtc3Ready()) {
+      INK_LOG_WARN("photopainter_sensor_unavailable", "SHTC3 telemetry is unavailable");
+    }
   }
   // Recovery is a deliberate hold distinct from the established shorter
   // force-network-refresh gesture. A short wake never authorizes service.

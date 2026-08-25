@@ -1,6 +1,6 @@
 #pragma once
 
-#include <HardwareSerial.h>
+#include <Arduino.h>
 
 // 0=ERROR, 1=WARNING, 2=INFO, 3=DEBUG. Production emits only bounded
 // lifecycle transitions. Never pass credentials, passwords, payload bytes,
@@ -9,13 +9,11 @@
 #define INKTIME_LOG_LEVEL 2
 #endif
 
-extern HardwareSerial DebugSerial;
-
-#define INK_LOG_BEGIN() DebugSerial.begin(115200)
+#define INK_LOG_BEGIN() Serial.begin(115200)
 #define INK_LOG_EVENT(required, level, event, message) do { \
   if (INKTIME_LOG_LEVEL >= (required)) { \
-    DebugSerial.print("["); DebugSerial.print(level); DebugSerial.print("] [firmware] ["); \
-    DebugSerial.print(event); DebugSerial.print("] "); DebugSerial.println(message); \
+    Serial.print("["); Serial.print(level); Serial.print("] [firmware] ["); \
+    Serial.print(event); Serial.print("] "); Serial.println(message); \
   } \
 } while (0)
 #define INK_LOG_ERROR(event, message) INK_LOG_EVENT(0, "ERROR", event, message)
