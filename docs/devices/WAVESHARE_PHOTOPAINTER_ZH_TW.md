@@ -145,6 +145,11 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
 - Wi-Fi、HTTP、NTP、AP 與 EPD 都有有限 timeout。Wi-Fi 失敗時先嘗試由 RTC 與正式
   快取完成到期的離線 Slot；否則進入有界設定入口。PMIC 辨識與電池讀值不參與這個
   決策，因此讀不到電源資訊時仍能看見並修正網路或設定問題。
+- PhotoPainter 的 10 分鐘 max-awake supervisor 以 RTC no-init memory 記錄連續 timeout，
+  不會每次喚醒寫 NVS。前兩次 timeout 仍以 restart 嘗試恢復；第三次後不再持續 boot loop，
+  而是保留 GPIO4 與 timer wake、關閉網路／LED 後 deep sleep 60 分鐘。正常進入 sleep、
+  完整斷電或明確 GPIO4 recovery／factory reset 會清除計數。這是耗電失控保護；實板
+  persistent-fault、timer wake 與睡眠電流驗收仍是 `NOT RUN`。
 - 持續至少 4 秒的 GPIO 4 喚醒才是 PhotoPainter 的明確實體 recovery/service 授權；
   USB 供電本身與 1.2 至未滿 4 秒的 forced refresh 都不授權設定變更。電源來源確認為
   USB 時可沿用長時間 service；PMIC 無法確認時仍可進入 recovery，但不解除

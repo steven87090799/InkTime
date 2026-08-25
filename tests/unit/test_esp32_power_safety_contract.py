@@ -9,6 +9,7 @@ HARDWARE = ROOT / "esp32/ink-display-7C-photo/hardware_profile.h"
 SUPPORT = ROOT / "esp32/ink-display-7C-photo/photopainter_support.cpp"
 SUPPORT_HEADER = ROOT / "esp32/ink-display-7C-photo/photopainter_support.h"
 WAKE_CORE = ROOT / "esp32/ink-display-7C-photo/photopainter_wake_core.h"
+MAX_AWAKE_CORE = ROOT / "esp32/ink-display-7C-photo/max_awake_recovery_core.h"
 POWER_MANAGER = ROOT / "esp32/ink-display-7C-photo/power_manager.h"
 DOCS = ROOT / "docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md"
 
@@ -254,6 +255,7 @@ def test_shared_i2c_bus_uses_open_drain_recovery_before_probe_and_retry():
 
 def test_max_awake_guard_is_independent_bounded_and_usb_exempt():
     firmware = FIRMWARE.read_text(encoding="utf-8")
+    recovery_core = MAX_AWAKE_CORE.read_text(encoding="utf-8")
     supervisor = _between(
         firmware,
         "static constexpr uint32_t kMaxAwakeTimeoutMs",
@@ -268,6 +270,14 @@ def test_max_awake_guard_is_independent_bounded_and_usb_exempt():
     assert supervisor.count("xTaskCreate(") == 1
     assert "maxAwakeSupervisorCreated" in supervisor
     assert "esp_task_wdt" not in firmware
+    assert "RTC_NOINIT_ATTR static inktime::MaxAwakeRecoveryState" in supervisor
+    assert "recordMaxAwakeTimeout(maxAwakeRecoveryState)" in supervisor
+    assert supervisor.index("recordMaxAwakeTimeout(maxAwakeRecoveryState)") < supervisor.index(
+        "esp_restart();"
+    )
+    assert "kMaxAwakeRecoveryThreshold = 3U" in recovery_core
+    assert "kMaxAwakeSafeSleepSeconds = 60ULL * 60ULL" in recovery_core
+    assert "consecutiveTimeoutsInverse == ~state.consecutiveTimeouts" in recovery_core
 
     creation = _between(
         supervisor,
@@ -282,6 +292,22 @@ def test_max_awake_guard_is_independent_bounded_and_usb_exempt():
 
     setup = _between(firmware, "void setup()", "void loop()")
     assert setup.count("startMaxAwakeSupervisor();") == 1
+    assert "shouldEnterMaxAwakeSafeSleep(maxAwakeRecoveryState)" in setup
+    assert "&& !explicitRecoveryRequested" in setup
+    assert '"max_awake_safe_sleep"' in setup
+    assert "goDeepSleepSeconds(inktime::kMaxAwakeSafeSleepSeconds);" in setup
+    assert setup.index("photoPainter.recoveryServiceRequested()") < setup.index(
+        "shouldEnterMaxAwakeSafeSleep(maxAwakeRecoveryState)"
+    )
+    assert setup.index("shouldEnterMaxAwakeSafeSleep(maxAwakeRecoveryState)") < setup.index(
+        "loadConfig(g_cfg);"
+    )
+    sleep = _between(firmware, "static void goDeepSleepSeconds", "void goDeepSleepMinutes")
+    assert "resetMaxAwakeRecoveryState(maxAwakeRecoveryState)" in sleep
+    config_restart = _between(firmware, "void handleSave()", "void prepareDeepSleepDomains()")
+    assert config_restart.index("resetMaxAwakeRecoveryState(maxAwakeRecoveryState)") < (
+        config_restart.index("ESP.restart();")
+    )
     usb_service = _between(
         firmware,
         "bool runUsbServiceMode(bool explicitRecoveryRequested)",

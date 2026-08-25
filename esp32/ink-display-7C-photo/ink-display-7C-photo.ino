@@ -10,12 +10,14 @@
 #include "esp_heap_caps.h"
 #include "esp_sntp.h"
 #include "esp_system.h"
+#include "esp_attr.h"
 
 #include "hardware_profile.h"
 #include "photopainter_core.h"
 #include "offline_schedule_core.h"
 #include "device_config_store.h"
 #include "pairing_recovery_core.h"
+#include "max_awake_recovery_core.h"
 #include "queue_client_core.h"
 #include "queue_runtime_types.h"
 #include "ack_journal_transaction_core.h"
@@ -87,6 +89,7 @@ static constexpr uint32_t kMaxAwakeCommandArm = 1U;
 static constexpr uint32_t kMaxAwakeCommandDisarm = 2U;
 static TaskHandle_t maxAwakeSupervisorTaskHandle = nullptr;
 static bool maxAwakeSupervisorCreated = false;
+RTC_NOINIT_ATTR static inktime::MaxAwakeRecoveryState maxAwakeRecoveryState;
 
 static void maxAwakeSupervisorTask(void*) {
   bool armed = true;
@@ -96,7 +99,10 @@ static void maxAwakeSupervisorTask(void*) {
         ? pdMS_TO_TICKS(kMaxAwakeTimeoutMs)
         : portMAX_DELAY;
     if (xTaskNotifyWait(0U, UINT32_MAX, &command, waitTicks) != pdTRUE) {
-      if (armed) esp_restart();
+      if (armed) {
+        (void)inktime::recordMaxAwakeTimeout(maxAwakeRecoveryState);
+        esp_restart();
+      }
       continue;
     }
     if (command == kMaxAwakeCommandDisarm) {
@@ -177,7 +183,7 @@ GxEPD2_7C<
 #define DEVICE_PAIRING_CLAIM_PATH "/api/device/v1/pairing/claim"
 #define DEVICE_PAIRING_CONFIRM_PATH "/api/device/v1/pairing/confirm"
 #define DEVICE_PAIRING_REPAIR_PERMISSION_PATH "/api/device/v1/pairing/repair-permission"
-#define INKTIME_FIRMWARE_VERSION "2.8.0"
+#define INKTIME_FIRMWARE_VERSION "2.8.1"
 
 static constexpr uint8_t kQueueAckBatchMaxEvents = 8U;
 static constexpr size_t kQueueAckBatchMaxBodyBytes = 12U * 1024U;
@@ -2277,6 +2283,10 @@ void handleSave() {
   );
 
   delay(800);
+#if INKTIME_PHOTOPAINTER_ENABLED
+  // This is an intentional configuration restart, not a max-awake recovery.
+  inktime::resetMaxAwakeRecoveryState(maxAwakeRecoveryState);
+#endif
   ESP.restart();
 }
 
@@ -2330,6 +2340,13 @@ static void goDeepSleepSeconds(uint64_t seconds) {
 
   prepareDeepSleepDomains();
   esp_sleep_enable_timer_wakeup(us);
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+  // A normal bounded wake reached its sleep boundary. RTC slow memory is also
+  // powered down below, but clear explicitly so a future policy change cannot
+  // turn one old timeout into a false consecutive-fault sequence.
+  inktime::resetMaxAwakeRecoveryState(maxAwakeRecoveryState);
+#endif
 
 #if DEBUG_LOG
   DBG_PRINTLN("[SLEEP] go deep sleep");
@@ -6446,6 +6463,27 @@ void setup() {
   // force-network-refresh gesture. A short wake never authorizes service.
   const bool explicitRecoveryRequested = factoryResetRequested
       || photoPainter.recoveryServiceRequested();
+  const uint32_t maxAwakeRecoveryCount =
+      inktime::maxAwakeRecoveryCount(maxAwakeRecoveryState);
+  if (inktime::shouldEnterMaxAwakeSafeSleep(maxAwakeRecoveryState)
+      && !explicitRecoveryRequested) {
+    INK_LOG_WARN(
+      "max_awake_safe_sleep",
+      "Repeated max-awake recovery reached its limit; entering one-hour safe sleep"
+    );
+    goDeepSleepSeconds(inktime::kMaxAwakeSafeSleepSeconds);
+    return;
+  }
+  if (explicitRecoveryRequested && maxAwakeRecoveryCount > 0U) {
+    // A deliberate GPIO4 recovery hold or factory reset is allowed to break
+    // the automatic backoff without an NVS write.
+    inktime::resetMaxAwakeRecoveryState(maxAwakeRecoveryState);
+  } else if (maxAwakeRecoveryCount > 0U) {
+    INK_LOG_WARN(
+      "max_awake_recovery_retry",
+      "Retrying after a max-awake supervisor restart"
+    );
+  }
 #endif
 
   loadConfig(g_cfg);

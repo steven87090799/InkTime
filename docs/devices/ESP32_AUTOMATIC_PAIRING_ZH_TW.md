@@ -4,7 +4,7 @@
 
 ## 0. 目前韌體與 Config Store 版本
 
-- 目前自製 InkTime 韌體版本：`2.8.0`。
+- 目前自製 InkTime 韌體版本：`2.8.1`。
 - Config Store 目前寫入 schema：`4`。
 - Config Store 相容讀取舊 schema：`1`、`2`、`3`。
 - Schema 4 新增同步策略欄位：`sync_strategy` 與 `sync_time`。`first_display_lead` 沿用既有 `prefetch_lead_minutes`，`sync_time` 必須為空；`fixed_daily` 則必須提供合法的 `HH:MM`。
@@ -42,7 +42,7 @@
   "device_id": "esp32-ABC123",
   "pairing_nonce": "高熵隨機字串",
   "firmware_identity": "ESP32-S3-PhotoPainter",
-  "firmware_version": "2.8.0",
+  "firmware_version": "2.8.1",
   "panel_profile": "safe_4c",
   "capabilities": {
     "automatic_pairing": true,
