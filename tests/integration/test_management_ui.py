@@ -52,6 +52,73 @@ def test_primary_management_pages_render(client, app):
     assert "照片平滑（減少色塊／雜點）" in settings
 
 
+def test_job_detail_live_status_exposes_items_and_only_valid_actions(client, app):
+    administrator_id = create_admin(app)
+    login(client)
+    repository = app.extensions["inktime_job_repository"]
+    job_id = repository.create_maintenance(
+        kind="scan",
+        name="即時狀態測試",
+        settings={"root_path": "/photos"},
+        created_by=administrator_id,
+    )
+    item_id = str(repository.list_items(job_id)[0]["id"])
+
+    page = client.get(f"/jobs/{job_id}")
+    body = page.get_data(as_text=True)
+    assert page.status_code == 200
+    assert 'id="job-items"' in body
+    assert "狀態每 3 秒自動更新" in body
+    assert item_id in body
+    assert 'data-action="start"' in body
+    assert 'data-action="pause" disabled' in body
+
+    status = client.get(f"/api/v1/jobs/{job_id}")
+    assert status.status_code == 200
+    assert status.json["available_actions"] == ["start", "cancel"]
+    assert status.json["items"] == [
+        {
+            "id": item_id,
+            "photo_id": None,
+            "status": "pending",
+            "stage": "queued",
+            "attempts": 0,
+            "error_code": None,
+        }
+    ]
+
+
+def test_retry_failed_control_restarts_the_job_in_one_action(client, app):
+    administrator_id = create_admin(app)
+    login(client)
+    repository = app.extensions["inktime_job_repository"]
+    job_id = repository.create_maintenance(
+        kind="scan",
+        name="重跑測試",
+        settings={"root_path": "/photos"},
+        created_by=administrator_id,
+    )
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE jobs SET status='completed_with_errors',failed_items=1 WHERE id=?",
+            (job_id,),
+        )
+        connection.execute(
+            "UPDATE job_items SET status='failed',error_code='SCAN-TEST' WHERE job_id=?",
+            (job_id,),
+        )
+
+    response = client.post(
+        f"/api/v1/jobs/{job_id}/retry-failed",
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+
+    assert response.status_code == 200
+    assert response.json["affected"] == 1
+    assert repository.get(job_id)["status"] == "running"
+    assert repository.list_items(job_id)[0]["status"] == "pending"
+
+
 def test_simulator_superseded_compare_aborts_fetch_and_poll_delay(client, app):
     create_admin(app)
     login(client)
