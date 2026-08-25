@@ -217,32 +217,52 @@ def _decode_mountinfo_path(value: str) -> str:
     )
 
 
+def _mountinfo_entries(adapter: OSAdapter | None = None) -> tuple[MountInfo, ...]:
+    text = (adapter or NativeOSAdapter()).mountinfo()
+    entries: list[MountInfo] = []
+    for line in text.splitlines():
+        before, marker, after = line.partition(" - ")
+        fields, fs_fields = before.split(), after.split()
+        if not marker or len(fields) < 6 or not fs_fields:
+            continue
+        mount_options = {item.casefold() for item in fields[5].split(",")}
+        entries.append(
+            MountInfo(
+                fs_fields[0].casefold(),
+                _decode_mountinfo_path(fields[4]),
+                "ro" in mount_options,
+            )
+        )
+    return tuple(entries)
+
+
 def mount_for(path: Path, adapter: OSAdapter | None = None) -> MountInfo | None:
     """Return the deepest component-aware Linux mount and its effective mode.
 
     macOS does not expose Linux mountinfo.  Tests can provide an adapter and
     production macOS deployments should use a local APFS data directory.
     """
-    text = (adapter or NativeOSAdapter()).mountinfo()
-    if not text:
-        return None
     target = str(path.expanduser().resolve())
     best: tuple[int, MountInfo] | None = None
-    for line in text.splitlines():
-        before, marker, after = line.partition(" - ")
-        fields, fs_fields = before.split(), after.split()
-        if not marker or len(fields) < 6 or not fs_fields:
-            continue
-        mount_point = _decode_mountinfo_path(fields[4])
+    for entry in _mountinfo_entries(adapter):
+        mount_point = entry.mount_point
         if target == mount_point or target.startswith(mount_point.rstrip("/") + "/"):
-            mount_options = {item.casefold() for item in fields[5].split(",")}
-            candidate = (
-                len(mount_point),
-                MountInfo(fs_fields[0].casefold(), mount_point, "ro" in mount_options),
-            )
+            candidate = (len(mount_point), entry)
             if best is None or candidate[0] > best[0]:
                 best = candidate
     return best[1] if best else None
+
+
+def mounts_at_or_below(path: Path, adapter: OSAdapter | None = None) -> tuple[MountInfo, ...]:
+    """Return exact and descendant mounts using path-component boundaries."""
+
+    target = str(path.expanduser().resolve()).rstrip("/") or "/"
+    prefix = target.rstrip("/") + "/"
+    return tuple(
+        entry
+        for entry in _mountinfo_entries(adapter)
+        if entry.mount_point == target or entry.mount_point.startswith(prefix)
+    )
 
 
 def filesystem_for(path: Path, adapter: OSAdapter | None = None) -> str | None:
@@ -327,18 +347,30 @@ def run_production_preflight(
             "Production photo 與 data directory 不得相同或互為父子路徑",
             "使用彼此獨立的 /data 可寫 bind mount 與 /photos 唯讀 bind mount",
         )
-    photo_mount = mount_for(config.photo_dir, adapter)
-    photo_read_only = photo_mount.read_only if photo_mount else False
-    if photo_mount is None and adapter is None:
-        try:
-            photo_read_only = bool(os.statvfs(config.photo_dir).f_flag & os.ST_RDONLY)
-        except OSError:
-            photo_read_only = False
-    if not photo_read_only:
+    photo_target = str(config.photo_dir.expanduser().resolve())
+    photo_mounts = mounts_at_or_below(config.photo_dir, adapter)
+    exact_photo_mounts = tuple(
+        entry for entry in photo_mounts if entry.mount_point == photo_target
+    )
+    if not exact_photo_mounts or any(not entry.read_only for entry in exact_photo_mounts):
         _fail(
             "DEPLOY-PHOTO-RO-001",
-            "Production /photos 必須是作業系統實際回報的唯讀 mount",
-            "以 Compose long bind syntax 設定 read_only: true，並確認容器 mountinfo 顯示 ro",
+            "Production /photos 必須是作業系統實際回報的精確唯讀 mount",
+            "以 Compose long bind syntax 設定獨立的 /photos mount、read_only: true，並確認 mountinfo 精確顯示 ro",
+        )
+    writable_nested = next(
+        (
+            entry
+            for entry in photo_mounts
+            if entry.mount_point != photo_target and not entry.read_only
+        ),
+        None,
+    )
+    if writable_nested is not None:
+        _fail(
+            "DEPLOY-PHOTO-RO-002",
+            "Production /photos 含有可寫入的下層 mount",
+            "將照片樹下每一個 nested mount 全部改為唯讀，或改用不含可寫下層 mount 的照片根目錄",
         )
     fs_type = filesystem_for(config.database_path.parent, adapter)
     unsafe = fs_type in UNSAFE_NETWORK_FILESYSTEMS
