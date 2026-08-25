@@ -65,7 +65,7 @@ def test_photopainter_ext1_user_wake_validates_gpio4_and_preserves_timer_wake():
     assert "bool recoveryServiceRequested_ = false;" in support_header
 
     firmware = FIRMWARE.read_text(encoding="utf-8")
-    sleep = _between(firmware, "static void goDeepSleepSeconds", "void goDeepSleepMinutes")
+    sleep = _between(firmware, "static void enterDeepSleepSeconds", "void goDeepSleepMinutes")
     assert "photoPainter.enableWakeSources();" in sleep
     assert "esp_sleep_enable_timer_wakeup(us);" in sleep
     assert sleep.index("photoPainter.enableWakeSources();") < sleep.index(
@@ -83,7 +83,11 @@ def test_config_is_forward_declared_for_arduino_generated_prototypes():
 
 def test_sleep_domains_and_tg28_epd_rail_remain_narrow_and_fail_closed():
     firmware = FIRMWARE.read_text(encoding="utf-8")
-    domains = _between(firmware, "void prepareDeepSleepDomains()", "static void goDeepSleepSeconds")
+    domains = _between(
+        firmware,
+        "void prepareDeepSleepDomains(bool retainMaxAwakeRecovery)",
+        "static void enterDeepSleepSeconds",
+    )
     assert "#if INKTIME_PHOTOPAINTER_ENABLED" in domains
     assert "ESP_PD_DOMAIN_RTC_PERIPH,    ESP_PD_OPTION_AUTO" in domains
     photopainter_branch = _between(
@@ -92,6 +96,8 @@ def test_sleep_domains_and_tg28_epd_rail_remain_narrow_and_fail_closed():
         "#else",
     )
     assert "ESP_PD_OPTION_OFF" not in photopainter_branch
+    assert "retainMaxAwakeRecovery ? ESP_PD_OPTION_ON : ESP_PD_OPTION_OFF" in domains
+    assert "ESP_PD_DOMAIN_RTC_FAST_MEM,  ESP_PD_OPTION_OFF" in domains
 
     support = SUPPORT.read_text(encoding="utf-8")
     pmic = _between(support, "class ProbePowerManager", "class Shtc3Adapter")
@@ -276,35 +282,52 @@ def test_max_awake_guard_is_independent_bounded_and_usb_exempt():
         "esp_restart();"
     )
     assert "kMaxAwakeRecoveryThreshold = 3U" in recovery_core
-    assert "kMaxAwakeSafeSleepSeconds = 60ULL * 60ULL" in recovery_core
+    assert "kMaxAwakeSafeSleepFirstSeconds = 60ULL * 60ULL" in recovery_core
+    assert "kMaxAwakeSafeSleepSecondSeconds = 6ULL * 60ULL * 60ULL" in recovery_core
+    assert "kMaxAwakeSafeSleepDailySeconds = 24ULL * 60ULL * 60ULL" in recovery_core
     assert "consecutiveTimeoutsInverse == ~state.consecutiveTimeouts" in recovery_core
+    assert "backoffCompletedForCountInverse == ~state.backoffCompletedForCount" in recovery_core
+    assert "recordMaxAwakeSupervisorFailure" in recovery_core
+    assert "markMaxAwakeSafeSleepCompleted" in recovery_core
 
     creation = _between(
         supervisor,
-        "static void startMaxAwakeSupervisor()",
+        "static bool startMaxAwakeSupervisor()",
         "static void disarmMaxAwakeSupervisor()",
     )
     success = _between(creation, "if (created == pdPASS)", "} else {")
     failure = creation[creation.index("} else {") :]
     assert creation.index("xTaskCreate(") < creation.index("if (created == pdPASS)")
     assert "maxAwakeSupervisorCreated = true;" in success
+    assert "return true;" in success
     assert "maxAwakeSupervisorCreated = false;" in failure
+    assert "return false;" in failure
 
     setup = _between(firmware, "void setup()", "void loop()")
     assert setup.count("startMaxAwakeSupervisor();") == 1
+    assert "recordMaxAwakeSupervisorFailure(maxAwakeRecoveryState)" in setup
+    assert '"max_awake_supervisor_unavailable"' in setup
     assert "shouldEnterMaxAwakeSafeSleep(maxAwakeRecoveryState)" in setup
-    assert "&& !explicitRecoveryRequested" in setup
-    assert '"max_awake_safe_sleep"' in setup
-    assert "goDeepSleepSeconds(inktime::kMaxAwakeSafeSleepSeconds);" in setup
-    assert setup.index("photoPainter.recoveryServiceRequested()") < setup.index(
-        "shouldEnterMaxAwakeSafeSleep(maxAwakeRecoveryState)"
+    assert "&& !maxAwakeUserWakeRequested" in setup
+    assert '"max_awake_safe_sleep"' in firmware
+    assert setup.count("goMaxAwakeSafeSleep();") == 2
+    assert setup.index("shouldEnterMaxAwakeSafeSleep(maxAwakeRecoveryState)") < setup.index(
+        "photoPainter.begin()"
     )
     assert setup.index("shouldEnterMaxAwakeSafeSleep(maxAwakeRecoveryState)") < setup.index(
         "loadConfig(g_cfg);"
     )
-    sleep = _between(firmware, "static void goDeepSleepSeconds", "void goDeepSleepMinutes")
+    sleep = _between(firmware, "static void enterDeepSleepSeconds", "void goDeepSleepMinutes")
     assert "resetMaxAwakeRecoveryState(maxAwakeRecoveryState)" in sleep
-    config_restart = _between(firmware, "void handleSave()", "void prepareDeepSleepDomains()")
+    assert "markMaxAwakeSafeSleepCompleted(maxAwakeRecoveryState)" in sleep
+    assert "prepareDeepSleepDomains(retainMaxAwakeRecovery)" in sleep
+    assert "enterDeepSleepSeconds(seconds, false)" in sleep
+    assert "enterDeepSleepSeconds(seconds, true)" in sleep
+    config_restart = _between(
+        firmware,
+        "void handleSave()",
+        "void prepareDeepSleepDomains(bool retainMaxAwakeRecovery)",
+    )
     assert config_restart.index("resetMaxAwakeRecoveryState(maxAwakeRecoveryState)") < (
         config_restart.index("ESP.restart();")
     )

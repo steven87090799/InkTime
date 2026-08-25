@@ -130,7 +130,7 @@ def test_canonical_config_survives_legacy_cleanup_failure_and_records_warning():
 
 def test_firmware_current_version_is_bumped_for_recovery_semantics():
     firmware = FIRMWARE.read_text(encoding="utf-8")
-    assert '#define INKTIME_FIRMWARE_VERSION "2.8.1"' in firmware
+    assert '#define INKTIME_FIRMWARE_VERSION "2.8.2"' in firmware
 
 
 def test_firmware_status_reports_trusted_device_time_for_replay_ordering():

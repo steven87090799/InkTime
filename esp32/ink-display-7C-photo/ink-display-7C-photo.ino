@@ -113,8 +113,8 @@ static void maxAwakeSupervisorTask(void*) {
   }
 }
 
-static void startMaxAwakeSupervisor() {
-  if (maxAwakeSupervisorCreated) return;
+static bool startMaxAwakeSupervisor() {
+  if (maxAwakeSupervisorCreated) return true;
   const BaseType_t created = xTaskCreate(
     maxAwakeSupervisorTask,
     "ink_maxawake",
@@ -125,10 +125,20 @@ static void startMaxAwakeSupervisor() {
   );
   if (created == pdPASS) {
     maxAwakeSupervisorCreated = true;
+    return true;
   } else {
     maxAwakeSupervisorTaskHandle = nullptr;
     maxAwakeSupervisorCreated = false;
+    return false;
   }
+}
+
+static bool wokeFromMaxAwakeUserButton() {
+  if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_EXT1) return false;
+  return inktime::ext1WakeStatusContainsUserButton(
+    esp_sleep_get_ext1_wakeup_status(),
+    kBoardConfig.buttons.user
+  );
 }
 
 static void disarmMaxAwakeSupervisor() {
@@ -183,7 +193,7 @@ GxEPD2_7C<
 #define DEVICE_PAIRING_CLAIM_PATH "/api/device/v1/pairing/claim"
 #define DEVICE_PAIRING_CONFIRM_PATH "/api/device/v1/pairing/confirm"
 #define DEVICE_PAIRING_REPAIR_PERMISSION_PATH "/api/device/v1/pairing/repair-permission"
-#define INKTIME_FIRMWARE_VERSION "2.8.1"
+#define INKTIME_FIRMWARE_VERSION "2.8.2"
 
 static constexpr uint8_t kQueueAckBatchMaxEvents = 8U;
 static constexpr size_t kQueueAckBatchMaxBodyBytes = 12U * 1024U;
@@ -2293,7 +2303,7 @@ void handleSave() {
 // =======================
 //  Deep Sleep 前
 // =======================
-void prepareDeepSleepDomains() {
+void prepareDeepSleepDomains(bool retainMaxAwakeRecovery) {
 #if defined(SOC_PM_SUPPORT_RTC_PERIPH_PD) && SOC_PM_SUPPORT_RTC_PERIPH_PD
 #if INKTIME_PHOTOPAINTER_ENABLED
   esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH,    ESP_PD_OPTION_AUTO);
@@ -2302,7 +2312,10 @@ void prepareDeepSleepDomains() {
 #endif
 #endif
 #if defined(SOC_PM_SUPPORT_RTC_SLOW_MEM_PD) && SOC_PM_SUPPORT_RTC_SLOW_MEM_PD
-  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_SLOW_MEM,  ESP_PD_OPTION_OFF);
+  esp_sleep_pd_config(
+    ESP_PD_DOMAIN_RTC_SLOW_MEM,
+    retainMaxAwakeRecovery ? ESP_PD_OPTION_ON : ESP_PD_OPTION_OFF
+  );
 #endif
 #if defined(SOC_PM_SUPPORT_RTC_FAST_MEM_PD) && SOC_PM_SUPPORT_RTC_FAST_MEM_PD
   esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_FAST_MEM,  ESP_PD_OPTION_OFF);
@@ -2312,7 +2325,7 @@ void prepareDeepSleepDomains() {
 // =======================
 //  Deep Sleep
 // =======================
-static void goDeepSleepSeconds(uint64_t seconds) {
+static void enterDeepSleepSeconds(uint64_t seconds, bool retainMaxAwakeRecovery) {
   if (seconds < 1U) seconds = 1U;
   INK_LOG_INFO("sleep_preparation", "Deep sleep preparation started");
 
@@ -2338,14 +2351,17 @@ static void goDeepSleepSeconds(uint64_t seconds) {
   esp_bt_controller_disable();
 #endif
 
-  prepareDeepSleepDomains();
+  prepareDeepSleepDomains(retainMaxAwakeRecovery);
   esp_sleep_enable_timer_wakeup(us);
 
 #if INKTIME_PHOTOPAINTER_ENABLED
-  // A normal bounded wake reached its sleep boundary. RTC slow memory is also
-  // powered down below, but clear explicitly so a future policy change cannot
-  // turn one old timeout into a false consecutive-fault sequence.
-  inktime::resetMaxAwakeRecoveryState(maxAwakeRecoveryState);
+  if (retainMaxAwakeRecovery) {
+    inktime::markMaxAwakeSafeSleepCompleted(maxAwakeRecoveryState);
+  } else {
+    // Healthy sleep still powers RTC slow memory down and clears the fault
+    // state, so normal operation carries no additional retained RTC cost.
+    inktime::resetMaxAwakeRecoveryState(maxAwakeRecoveryState);
+  }
 #endif
 
 #if DEBUG_LOG
@@ -2353,6 +2369,21 @@ static void goDeepSleepSeconds(uint64_t seconds) {
 #endif
   esp_deep_sleep_start();
 }
+
+static void goDeepSleepSeconds(uint64_t seconds) {
+  enterDeepSleepSeconds(seconds, false);
+}
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+static void goMaxAwakeSafeSleep() {
+  const uint64_t seconds = inktime::maxAwakeSafeSleepSeconds(maxAwakeRecoveryState);
+  INK_LOG_WARN(
+    "max_awake_safe_sleep",
+    "Repeated max-awake recovery requires retained-state safe sleep"
+  );
+  enterDeepSleepSeconds(seconds, true);
+}
+#endif
 
 void goDeepSleepMinutes(uint32_t minutes) {
   if (minutes < 1U) minutes = 1U;
@@ -6415,7 +6446,14 @@ void setup() {
   INK_LOG_INFO("firmware_boot", "InkTime firmware boot started");
 
 #if INKTIME_PHOTOPAINTER_ENABLED
-  startMaxAwakeSupervisor();
+  const bool maxAwakeSupervisorReady = startMaxAwakeSupervisor();
+  if (!maxAwakeSupervisorReady) {
+    (void)inktime::recordMaxAwakeSupervisorFailure(maxAwakeRecoveryState);
+    INK_LOG_ERROR(
+      "max_awake_supervisor_unavailable",
+      "Max-awake supervisor task creation failed; fail-closed backoff required"
+    );
+  }
 #endif
 
 #if DEBUG_LOG
@@ -6443,6 +6481,15 @@ void setup() {
   randomSeed(esp_random());
 
 #if INKTIME_PHOTOPAINTER_ENABLED
+  const bool maxAwakeUserWakeRequested = wokeFromMaxAwakeUserButton();
+  if (inktime::shouldEnterMaxAwakeSafeSleep(maxAwakeRecoveryState)
+      && !factoryResetRequested
+      && !maxAwakeUserWakeRequested) {
+    // Gate before board initialisation: a recurring hang in begin() must not
+    // consume another full awake window before the required backoff.
+    goMaxAwakeSafeSleep();
+    return;
+  }
   if (!photoPainter.begin()) {
     lastDeviceErrorCode = photoPainter.lastError();
     lastDeviceErrorMessage = "PhotoPainter Flash／OPI PSRAM 不存在或容量不足";
@@ -6467,11 +6514,7 @@ void setup() {
       inktime::maxAwakeRecoveryCount(maxAwakeRecoveryState);
   if (inktime::shouldEnterMaxAwakeSafeSleep(maxAwakeRecoveryState)
       && !explicitRecoveryRequested) {
-    INK_LOG_WARN(
-      "max_awake_safe_sleep",
-      "Repeated max-awake recovery reached its limit; entering one-hour safe sleep"
-    );
-    goDeepSleepSeconds(inktime::kMaxAwakeSafeSleepSeconds);
+    goMaxAwakeSafeSleep();
     return;
   }
   if (explicitRecoveryRequested && maxAwakeRecoveryCount > 0U) {
