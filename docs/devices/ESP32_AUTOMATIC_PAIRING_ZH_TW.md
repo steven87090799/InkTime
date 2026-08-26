@@ -4,9 +4,10 @@
 
 ## 0. 目前韌體與 Config Store 版本
 
-- 目前自製 InkTime 韌體版本：`2.8.0`。
+- 目前自製 InkTime 韌體版本：`2.8.2`。
 - Config Store 目前寫入 schema：`4`。
 - Config Store 相容讀取舊 schema：`1`、`2`、`3`。
+- `2.8.2` 將連續 max-awake 故障退避改為 `1h → 6h → 24h → 每日一次`；每次退避後只允許一次 probation，正常完成睡眠或 GPIO4 明確 recovery 會清除故障狀態。此機制不寫 NVS，也不改 TG28／EPD 電源軌。
 - Schema 4 新增同步策略欄位：`sync_strategy` 與 `sync_time`。`first_display_lead` 沿用既有 `prefetch_lead_minutes`，`sync_time` 必須為空；`fixed_daily` 則必須提供合法的 `HH:MM`。
 
 ## 1. 三種裝置認證模式
@@ -42,7 +43,7 @@
   "device_id": "esp32-ABC123",
   "pairing_nonce": "高熵隨機字串",
   "firmware_identity": "ESP32-S3-PhotoPainter",
-  "firmware_version": "2.8.0",
+  "firmware_version": "2.8.2",
   "panel_profile": "safe_4c",
   "capabilities": {
     "automatic_pairing": true,
