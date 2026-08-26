@@ -28,6 +28,7 @@ def test_release_workflow_is_tag_only_and_uses_least_required_permissions():
     assert workflow["on"] == {"push": {"tags": ["v*"]}}
     assert workflow["permissions"] == {
         "contents": "read",
+        "checks": "read",
         "packages": "write",
         "attestations": "write",
         "id-token": "write",
@@ -49,6 +50,21 @@ def test_release_workflow_pins_actions_and_preserves_release_identity():
     assert "git merge-base --is-ancestor" in release["run"]
     assert "tagged_commit" in release["run"]
     assert "^v(0|[1-9][0-9]*)" in release["run"]
+
+    exact_head_gate = next(
+        step for step in steps if step.get("name") == "Require successful exact-commit CI gates"
+    )
+    assert exact_head_gate["env"]["RELEASE_COMMIT"] == "${{ steps.release.outputs.commit }}"
+    assert "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_COMMIT}/check-runs" in exact_head_gate[
+        "run"
+    ]
+    assert 'required_checks=("Repository gate" "Container security gate")' in exact_head_gate[
+        "run"
+    ]
+    assert "completed:success" in exact_head_gate["run"]
+    assert steps.index(exact_head_gate) < steps.index(
+        next(step for step in steps if step.get("name") == "Set up QEMU")
+    )
 
     immutable = next(
         step for step in steps if step.get("name") == "Refuse to overwrite an existing version tag"

@@ -4,6 +4,7 @@
 
 #include "photopainter_core.h"
 #include "photopainter_wake_core.h"
+#include "max_awake_recovery_core.h"
 #include "offline_schedule_core.h"
 #include "power_policy.h"
 
@@ -14,6 +15,46 @@ static uint8_t nativePixel(const std::vector<uint8_t>& frame, uint16_t x, uint16
 }
 
 int main() {
+  MaxAwakeRecoveryState maxAwakeRecovery = {};
+  assert(maxAwakeRecoveryCount(maxAwakeRecovery) == 0U);
+  assert(!shouldEnterMaxAwakeSafeSleep(maxAwakeRecovery));
+  assert(recordMaxAwakeTimeout(maxAwakeRecovery) == 1U);
+  assert(recordMaxAwakeTimeout(maxAwakeRecovery) == 2U);
+  assert(!shouldEnterMaxAwakeSafeSleep(maxAwakeRecovery));
+  assert(recordMaxAwakeTimeout(maxAwakeRecovery) == kMaxAwakeRecoveryThreshold);
+  assert(shouldEnterMaxAwakeSafeSleep(maxAwakeRecovery));
+  assert(maxAwakeSafeSleepSeconds(maxAwakeRecovery) == kMaxAwakeSafeSleepFirstSeconds);
+  markMaxAwakeSafeSleepCompleted(maxAwakeRecovery);
+  assert(!shouldEnterMaxAwakeSafeSleep(maxAwakeRecovery));
+  assert(recordMaxAwakeTimeout(maxAwakeRecovery) == 4U);
+  assert(shouldEnterMaxAwakeSafeSleep(maxAwakeRecovery));
+  assert(maxAwakeSafeSleepSeconds(maxAwakeRecovery) == kMaxAwakeSafeSleepSecondSeconds);
+  markMaxAwakeSafeSleepCompleted(maxAwakeRecovery);
+  assert(!shouldEnterMaxAwakeSafeSleep(maxAwakeRecovery));
+  assert(recordMaxAwakeTimeout(maxAwakeRecovery) == kMaxAwakeRecoveryMaximum);
+  assert(shouldEnterMaxAwakeSafeSleep(maxAwakeRecovery));
+  assert(maxAwakeSafeSleepSeconds(maxAwakeRecovery) == kMaxAwakeSafeSleepDailySeconds);
+  markMaxAwakeSafeSleepCompleted(maxAwakeRecovery);
+  assert(!shouldEnterMaxAwakeSafeSleep(maxAwakeRecovery));
+  assert(recordMaxAwakeTimeout(maxAwakeRecovery) == kMaxAwakeRecoveryMaximum);
+  assert(shouldEnterMaxAwakeSafeSleep(maxAwakeRecovery));
+  maxAwakeRecovery.consecutiveTimeoutsInverse = 0U;
+  assert(maxAwakeRecoveryCount(maxAwakeRecovery) == kMaxAwakeRecoveryMaximum);
+  assert(shouldEnterMaxAwakeSafeSleep(maxAwakeRecovery));
+  assert(maxAwakeSafeSleepSeconds(maxAwakeRecovery) == kMaxAwakeSafeSleepDailySeconds);
+  markMaxAwakeSafeSleepCompleted(maxAwakeRecovery);
+  assert(validMaxAwakeRecoveryState(maxAwakeRecovery));
+  assert(!shouldEnterMaxAwakeSafeSleep(maxAwakeRecovery));
+  resetMaxAwakeRecoveryState(maxAwakeRecovery);
+  assert(maxAwakeRecoveryCount(maxAwakeRecovery) == 0U);
+  assert(recordMaxAwakeSupervisorFailure(maxAwakeRecovery) == kMaxAwakeRecoveryThreshold);
+  assert(shouldEnterMaxAwakeSafeSleep(maxAwakeRecovery));
+  markMaxAwakeSafeSleepCompleted(maxAwakeRecovery);
+  assert(recordMaxAwakeSupervisorFailure(maxAwakeRecovery) == 4U);
+  static_assert(kMaxAwakeSafeSleepFirstSeconds == 3600ULL);
+  static_assert(kMaxAwakeSafeSleepSecondSeconds == 21600ULL);
+  static_assert(kMaxAwakeSafeSleepDailySeconds == 86400ULL);
+
   static_assert(kPhotoPainterWidth == 800);
   static_assert(kPhotoPainterHeight == 480);
   static_assert(kPhotoPainterFrameBytes == 192000);

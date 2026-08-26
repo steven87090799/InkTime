@@ -22,6 +22,54 @@ from inktime.app.repositories.photos import PhotoRepository
 
 
 PHOTO_COUNT = 100_000
+PHOTO_INSERT_BATCH_SIZE = 1_000
+
+
+def seed_photo_metadata(
+    database: Database,
+    *,
+    photo_count: int,
+    batch_size: int = PHOTO_INSERT_BATCH_SIZE,
+    process: psutil.Process | None = None,
+) -> tuple[str, int]:
+    """Insert bounded batches with one explicit SQLite transaction per batch."""
+
+    if photo_count < 0:
+        raise ValueError("photo_count must be non-negative")
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+
+    library_id = str(uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    rss_peak = process.memory_info().rss if process is not None else 0
+    with database.transaction(operation="performance_seed_library") as connection:
+        connection.execute(
+            "INSERT INTO libraries(id,name,root_path,created_at,updated_at) VALUES (?,?,?,?,?)",
+            (library_id, "壓力測試", "/photos", now, now),
+        )
+
+    for start in range(0, photo_count, batch_size):
+        stop = min(start + batch_size, photo_count)
+        rows = [
+            (
+                f"photo-{index:06d}",
+                library_id,
+                f"{index // 1000:03d}/{index:06d}.jpg",
+                f"{2000 + index % 26:04d}-07-17T10:00:00",
+                now,
+                now,
+            )
+            for index in range(start, stop)
+        ]
+        with database.transaction(operation="performance_seed_photos") as connection:
+            connection.executemany(
+                "INSERT INTO photos(id,library_id,relative_path,status,captured_at,created_at,updated_at) "
+                "VALUES (?,?,?,'preprocessed',?,?,?)",
+                rows,
+            )
+        if process is not None:
+            rss_peak = max(rss_peak, process.memory_info().rss)
+    return library_id, rss_peak
 
 
 def main() -> None:
@@ -36,31 +84,15 @@ def main() -> None:
     cpu_started = time.process_time()
     rss_before = process.memory_info().rss
     rss_peak = rss_before
-    library_id = str(uuid4())
     now = datetime.now(timezone.utc).isoformat()
 
     insert_started = time.perf_counter()
-    with database.session() as connection:
-        connection.execute(
-            "INSERT INTO libraries(id,name,root_path,created_at,updated_at) VALUES (?,?,?,?,?)",
-            (library_id, "壓力測試", "/photos", now, now),
-        )
-        for start in range(0, PHOTO_COUNT, 1000):
-            connection.executemany(
-                "INSERT INTO photos(id,library_id,relative_path,status,captured_at,created_at,updated_at) VALUES (?,?,?,'preprocessed',?,?,?)",
-                [
-                    (
-                        f"photo-{index:06d}",
-                        library_id,
-                        f"{index // 1000:03d}/{index:06d}.jpg",
-                        f"{2000 + index % 26:04d}-07-17T10:00:00",
-                        now,
-                        now,
-                    )
-                    for index in range(start, min(start + 1000, PHOTO_COUNT))
-                ],
-            )
-            rss_peak = max(rss_peak, process.memory_info().rss)
+    library_id, seed_rss_peak = seed_photo_metadata(
+        database,
+        photo_count=PHOTO_COUNT,
+        process=process,
+    )
+    rss_peak = max(rss_peak, seed_rss_peak)
     insert_seconds = time.perf_counter() - insert_started
 
     photos = PhotoRepository(database)
