@@ -12,6 +12,7 @@ from PIL import Image
 
 from inktime.app.core.logging import log_event, should_log_sample
 from inktime.app.domain.photos import PhotoPreprocessor, ThumbnailCache
+from inktime.app.domain.photos.quality_policy import FEATURE_VERSION
 from inktime.app.repositories.photos import (
     BatchPhotoResult,
     PhotoRepository,
@@ -141,7 +142,11 @@ class PhotoScanner:
             force or new_or_changed or stored is None or stored.metadata_status != "complete"
         )
         local = wants_local and (
-            force or new_or_changed or stored is None or stored.local_features_status != "complete"
+            force
+            or new_or_changed
+            or stored is None
+            or stored.local_features_status != "complete"
+            or stored.feature_version != FEATURE_VERSION
         )
         return metadata, local
 

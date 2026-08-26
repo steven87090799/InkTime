@@ -28,6 +28,7 @@ from inktime.app.domain.analysis.scoring import (
     prepare_score_distribution,
     score_band,
 )
+from inktime.app.domain.photos.quality_policy import evaluate_local_quality, local_candidate_score
 from inktime.app.web.access import administrator_required, login_required
 from inktime.app.domain.photos.orientation import original_exif_orientation, resolve_effective_orientation
 
@@ -140,12 +141,41 @@ def photos_page():
     e6_weight = (
         float(current_app.extensions["inktime_settings_repository"].get("render.e6_weight", 20)) / 100.0
     )
+    settings = current_app.extensions["inktime_settings_repository"]
+    quality_settings = {
+        key: settings.get(key, default)
+        for key, default in (
+            ("analysis.prefilter_enabled", True),
+            ("analysis.prefilter_screenshots", True),
+            ("analysis.prefilter_low_quality", True),
+            ("analysis.prefilter_sensitivity", "conservative"),
+            ("analysis.e6_prefilter_enabled", True),
+            ("analysis.e6_min_score", 25),
+        )
+    }
+    exclusion_labels = {
+        "screenshot": "截圖",
+        "document_or_receipt": "文件或收據",
+        "severe_blur": "嚴重模糊／失焦",
+        "resolution_too_low": "解析度過低",
+        "tiny_nearly_blank": "近乎空白",
+        "extreme_exposure_low_contrast": "極端曝光／低對比",
+        "e6_below_threshold": "E6 適合度過低",
+    }
     score_distribution = prepare_score_distribution(_repository().score_population())
     photos = []
     for stored_row in rows:
         photo = dict(stored_row)
         ranking_score = photo.get("ranking_score")
         e6_score = photo.get("e6_score")
+        quality = evaluate_local_quality(photo, settings=quality_settings)
+        stored_exclusion = str(photo.get("exclusion_status") or "eligible")
+        hard_excluded = quality["decision"] == "auto_excluded" or stored_exclusion in {
+            "auto_excluded",
+            "manually_excluded",
+        }
+        photo["quality_decision"] = quality["decision"]
+        photo["quality_reason"] = str(quality["primary_reason"])
         calibrated_score = None
         percentile = None
         if ranking_score is not None:
@@ -155,7 +185,12 @@ def photos_page():
             photo["raw_ranking_score"] = round(float(ranking_score), 1)
             photo["ranking_percentile"] = percentile
             photo["score_band"] = score_band(percentile, calibrated_score)
-        if ranking_score is not None and e6_score is not None:
+        if hard_excluded:
+            reason = str(photo.get("reject_reason") or quality["primary_reason"])
+            photo.pop("score_band", None)
+            photo["total_score"] = 0.0
+            photo["total_score_source"] = f"已排除：{exclusion_labels.get(reason, reason)}"
+        elif ranking_score is not None and e6_score is not None:
             photo["total_score"] = round(
                 float(calibrated_score) * (1.0 - e6_weight) + float(e6_score) * e6_weight,
                 1,
@@ -164,6 +199,17 @@ def photos_page():
         elif ranking_score is not None:
             photo["total_score"] = calibrated_score
             photo["total_score_source"] = "相對校準" if percentile is not None else "模型"
+        elif e6_score is not None and str(photo.get("local_features_status") or "") == "complete":
+            local_score = local_candidate_score(photo, evaluation=quality)
+            photo["total_score"] = round(
+                float(local_score) * (1.0 - e6_weight) + float(e6_score) * e6_weight,
+                1,
+            )
+            photo["total_score_source"] = (
+                "本機品質（低優先）＋E6 暫估"
+                if quality["decision"] == "low_priority"
+                else "本機品質＋E6 暫估"
+            )
         elif e6_score is not None:
             photo["total_score"] = round(float(e6_score), 1)
             photo["total_score_source"] = "E6 暫估"
