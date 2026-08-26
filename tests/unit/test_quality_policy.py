@@ -33,8 +33,46 @@ def test_quality_policy_document_e6_and_low_priority_score_are_deterministic():
     assert document["decision"] == "auto_excluded"
     e6 = evaluate_local_quality({"relative_path": "photo.jpg", "width": 1200, "height": 800, "e6_score": 10})
     assert e6["decision"] == "auto_excluded"
-    score = local_candidate_score({"width": 1200, "height": 800, "blur_score": 36, "contrast": 30})
     assert (
-        local_candidate_score({"width": 1200, "height": 800, "blur_score": 36, "contrast": 30}, evaluation=e6)
-        == score
+        local_candidate_score(
+            {"width": 1200, "height": 800, "blur_score": 36, "contrast": 30},
+            evaluation=e6,
+        )
+        == 0
     )
+
+
+def test_quality_policy_v5_preserves_explicit_screenshot_evidence_and_rejects_observed_blur():
+    renamed_screenshot = {
+        "relative_path": "renamed-export.png",
+        "width": 1034,
+        "height": 802,
+        "format": "png",
+        "screenshot_likelihood": 1.0,
+        "blur_score": 1638.33,
+        "contrast": 27.51,
+    }
+    screenshot = evaluate_local_quality(renamed_screenshot)
+    assert screenshot["decision"] == "auto_excluded"
+    assert screenshot["primary_reason"] == "screenshot"
+    assert local_candidate_score(renamed_screenshot, evaluation=screenshot) == 0
+
+    observed_blurry_frame = {
+        "relative_path": "_DSC0007.jpg",
+        "width": 6000,
+        "height": 4000,
+        "format": "jpeg",
+        "camera_make": "SONY",
+        "blur_score": 44.54,
+        "contrast": 11.80,
+        "e6_score": 100,
+    }
+    blurry = evaluate_local_quality(observed_blurry_frame)
+    assert blurry["decision"] == "auto_excluded"
+    assert blurry["primary_reason"] == "severe_blur"
+    assert local_candidate_score(observed_blurry_frame, evaluation=blurry) == 0
+
+    clear_frame = {**observed_blurry_frame, "blur_score": 324.05, "contrast": 26.70}
+    clear = evaluate_local_quality(clear_frame)
+    assert clear["decision"] == "pass"
+    assert local_candidate_score(clear_frame, evaluation=clear) > 0
