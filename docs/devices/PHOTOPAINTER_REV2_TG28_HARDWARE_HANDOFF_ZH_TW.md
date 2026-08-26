@@ -120,10 +120,11 @@ TG28 的 narrow write allowlist 只有 `REG95` 的 ALDO4 voltage bits 與 `REG90
    gauge；官方 repository 沒有提供這顆隨附電池的完整 model。InkTime 正確地不以 A4
    百分比決定是否刷新，但 UI／log 應把它視為估算，低電壓策略應同時看實測 VBAT、負載
    壓降與 PMIC 保護，不能猜一個門檻直接寫死。
-7. **10 分鐘 max-awake 是 restart，不是 power-off。** 它能從程式卡死恢復，但若根因在
-   每次 boot 都重現，可能形成耗電 boot loop。後續應加入 bounded restart counter：連續
-   達門檻後進入較長 deep sleep，並保留 GPIO4 recovery；實作前需先確認 RTC／NVS 寫入
-   頻率，避免為了計數增加 flash wear。
+7. **10 分鐘 max-awake 已有 persistent-fault backoff。** 前兩次 timeout 仍以 restart
+   嘗試恢復；第三次後改進入 60 分鐘 deep sleep，並保留 GPIO4 recovery 與 timer wake。
+   計數只放 RTC no-init memory，不在每輪寫 NVS；正常 sleep、完整斷電或明確 recovery
+   會清除計數。這項修補避免永久故障形成無限高耗電 boot loop，但尚未以實板 fault
+   injection 驗收，不能把 Hosted compile 當成電池續航或 safe-sleep 實證。
 8. **長時間 timer wake 尚未實測。** 現行排程使用 ESP timer wake，PCF85063 GPIO6 alarm
    尚未啟用。先做 8 小時 timer wake 的實板時間誤差與刷新驗收；只有誤差不合格時，才
    評估 GPIO6 RTC alarm。GPIO6 又透過二極體連到 PWRON，因此不可只照一般 RTC 開發板
