@@ -19,6 +19,8 @@ main 上的程式碼
 - `v1.2.3`：穩定版，同時更新 `latest`。
 - `v1.2.3-rc.1`：預發布版，不更新 `latest`。
 - Tag 必須指向 `main` 歷史中的 Commit。
+- Tag 指向的 exact Commit 必須已有成功的 `Repository gate` 與
+  `Container security gate`；缺少、執行中或失敗都會在建置／push 映像前 fail closed。
 - 已存在的版本 Tag 不可重新指向另一份映像；要修正內容請建立新版本。
 
 每次發布會產生 `linux/amd64` 與 `linux/arm64` 映像、Commit SHA Tag、OCI metadata 與 provenance attestation。映像另帶 `io.inktime.nas-deployment-contract` 標籤；更新器會在 pull 後、重建容器前，與 Repository 內唯一的 `nas-deployment-contract.version` 比對，不相容就停止。目前 NAS fail-closed mount／recovery 邊界是 deployment contract `3`，不可與 contract `2` 部署檔靜默混用。Intel N100／一般 x86 NAS 使用 `amd64`；ARM NAS 使用 `arm64`，Docker 會自動選擇正確架構。

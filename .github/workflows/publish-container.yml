@@ -11,6 +11,7 @@ concurrency:
 
 permissions:
   contents: read
+  checks: read
   packages: write
   attestations: write
   id-token: write
@@ -65,6 +66,32 @@ jobs:
             echo "stable=${stable}"
             echo "deployment_contract=${deployment_contract}"
           } >> "${GITHUB_OUTPUT}"
+
+      - name: Require successful exact-commit CI gates
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ steps.release.outputs.commit }}
+        run: |
+          set -euo pipefail
+          required_checks=("Repository gate" "Container security gate")
+          for required_check in "${required_checks[@]}"; do
+            response="$(gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_COMMIT}/check-runs" \
+              -f check_name="${required_check}" \
+              -f filter=latest \
+              -f per_page=100)"
+            result="$(jq -r --arg name "${required_check}" '
+              [.check_runs[] | select(.name == $name)]
+              | if length == 0 then "missing"
+                else (sort_by(.id) | last | "\(.status):\(.conclusion)")
+                end
+            ' <<<"${response}")"
+            if [ "${result}" != "completed:success" ]; then
+              echo "Exact commit ${RELEASE_COMMIT} requires successful ${required_check}; observed ${result}." >&2
+              exit 1
+            fi
+          done
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
