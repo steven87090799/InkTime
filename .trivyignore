@@ -5,6 +5,12 @@
 #         re-evaluate the pinned base image before expiry. Unlisted findings fail CI.
 CVE-2025-69720
 CVE-2026-13221
+# Debian forky's libsqlite3-0 3.53.4-2 contains the upstream 3.53.2 FTS5 fix,
+# but Trivy still evaluates the installed package against Debian trixie's
+# no-DSA entry. Dockerfile build-time version verification remains required;
+# remove these entries when trixie publishes a fixed package/metadata.
+CVE-2026-11822
+CVE-2026-11824
 # CVE-2026-14456 is limited to OpenSSL QUIC server pending connections. InkTime
 # serves HTTP with Gunicorn and creates no QUIC listener; Debian 13 currently
 # reports fix_deferred with no FixedVersion. Remove after the pinned base is fixed.
