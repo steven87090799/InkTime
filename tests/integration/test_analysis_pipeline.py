@@ -1295,7 +1295,7 @@ def test_prefilter_does_not_overwrite_a_manual_restore(app, tmp_path):
         prefilter_evaluation={
             "decision": "auto_excluded",
             "primary_reason": "screenshot",
-            "feature_version": "local-quality-v4",
+            "feature_version": "local-quality-v5",
         },
     )
     with app.extensions["inktime_database"].session() as connection:

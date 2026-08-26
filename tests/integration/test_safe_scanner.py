@@ -369,6 +369,22 @@ def test_unchanged_photo_skips_preprocessor_and_thumbnail_even_when_enabled(app,
     assert processor.calls == 1
 
 
+def test_incremental_scan_reapplies_changed_local_quality_policy_version(app, tmp_path):
+    root = tmp_path / "photos"
+    seed_files(root, 1)
+    scanner, processor = make_scanner(app, tmp_path)
+    scanner.scan("品質規則版本", root, build_thumbnails=False)
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE photos SET feature_version='local-quality-v4'")
+
+    result = scanner.scan("品質規則版本", root, build_thumbnails=False)
+
+    assert result["processed"] == 1
+    assert processor.calls == 2
+    with app.extensions["inktime_database"].session() as connection:
+        assert connection.execute("SELECT feature_version FROM photos").fetchone()[0] == "local-quality-v5"
+
+
 def test_newer_scan_blocks_confirmation_of_saved_old_missing_candidates(app, tmp_path):
     root = tmp_path / "photos"
     seed_files(root, 2)
