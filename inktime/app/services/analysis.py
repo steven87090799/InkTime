@@ -368,11 +368,69 @@ class PhotoAnalysisService:
             "extreme_exposure_low_contrast": "極端曝光且低對比",
             "exposure_low_priority": "曝光比例偏高",
             "social_export": "社群平台轉存",
+            "e6_low": "E6 適合度過低",
         }
+        evidence = policy["evidence"]
+        thresholds = policy["thresholds"]
+        values = {
+            "screenshot_strong": f"{evidence['screenshot_likelihood']:.2f}",
+            "screenshot_mixed_signal": (
+                f"{evidence['screenshot_likelihood']:.2f}／{evidence['screenshot_independent_signals']} 項信號"
+            ),
+            "document_token_with_evidence": "是" if evidence["checks"]["document_token_with_evidence"] else "否",
+            "severe_blur": f"模糊 {evidence['blur']:.2f}／對比 {evidence['contrast']:.2f}",
+            "suspected_blur": f"模糊 {evidence['blur']:.2f}／對比 {evidence['contrast']:.2f}",
+            "short_edge_under_240": f"{evidence['short_edge']} px",
+            "tiny_empty": f"{evidence['file_size']} bytes／對比 {evidence['contrast']:.2f}",
+            "small_compressed": f"{evidence['file_size']} bytes",
+            "extreme_exposure_low_contrast": (
+                f"{max(evidence['overexposed_ratio'], evidence['underexposed_ratio']) * 100:.2f}%／"
+                f"對比 {evidence['contrast']:.2f}"
+            ),
+            "exposure_low_priority": (
+                f"{max(evidence['overexposed_ratio'], evidence['underexposed_ratio']) * 100:.2f}%"
+            ),
+            "social_export": "是" if evidence["checks"]["social_export"] else "否",
+            "e6_low": f"{float(photo['e6_score']):.1f}" if photo["e6_score"] is not None else "無資料",
+        }
+        check_thresholds = {
+            "screenshot_strong": "明確檔名／軟體證據，或機率 ≥ 0.95",
+            "screenshot_mixed_signal": (
+                f"機率 ≥ {thresholds['screenshot_score']:.2f} 且獨立信號 ≥ "
+                f"{thresholds['screenshot_signals']}"
+            ),
+            "document_token_with_evidence": "檔名詞與掃描器／無相機資料",
+            "severe_blur": f"模糊 < {thresholds['severe_blur'][0]} 且對比 < {thresholds['severe_blur'][1]}",
+            "suspected_blur": (
+                f"模糊 < {thresholds['suspected_blur'][0]} 且對比 < {thresholds['suspected_blur'][1]}"
+            ),
+            "short_edge_under_240": f"< {thresholds['short_edge']} px",
+            "tiny_empty": "< 4096 bytes 且對比 < 8",
+            "small_compressed": "< 10240 bytes（非 PNG/BMP）",
+            "extreme_exposure_low_contrast": "曝光 ≥ 92% 且對比 < 8",
+            "exposure_low_priority": f"曝光 ≥ {thresholds['exposure_low_priority'] * 100:.0f}%",
+            "social_export": "社群軟體或常見輸出尺寸",
+            "e6_low": f"< {thresholds['e6_min_score']:.0f}",
+        }
+        screenshot_checks = {"screenshot_strong", "screenshot_mixed_signal"}
         checks = [
-            {"key": key, "label": labels.get(key, key), "hit": bool(hit)}
+            {
+                "key": key,
+                "label": labels.get(key, key),
+                "value": values.get(key, "—"),
+                "threshold": check_thresholds.get(key, "—"),
+                "hit": bool(hit),
+                "enabled": bool(
+                    policy_settings["analysis.prefilter_screenshots"]
+                    if key in screenshot_checks
+                    else policy_settings["analysis.e6_prefilter_enabled"]
+                    if key == "e6_low"
+                    else policy_settings["analysis.prefilter_low_quality"]
+                ),
+            }
             for key, hit in policy["evidence"]["checks"].items()
         ]
+        enabled_hits = [check for check in checks if check["enabled"] and check["hit"]]
         return {
             "enabled": bool(policy_settings["analysis.prefilter_enabled"]),
             "sensitivity": policy["sensitivity"],
@@ -386,6 +444,8 @@ class PhotoAnalysisService:
             "e6_feature_version": policy["e6_feature_version"],
             "evidence": policy["evidence"],
             "checks": checks,
+            "defect_count": len(enabled_hits),
+            "favorite_bypass": policy["decision"] == "protected",
             "summary": f"本機品質規則：{policy['decision']}（{policy['primary_reason']}）",
         }
 

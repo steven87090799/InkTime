@@ -844,6 +844,44 @@ def test_photo_cards_show_total_score_and_e6_estimate(client, app):
     assert "選片分 91.9（E6 暫估）" in body
 
 
+def test_photo_cards_never_present_excluded_screenshot_or_severe_blur_as_high_score(client, app):
+    create_admin(app)
+    login(client)
+    screenshot_id, blurry_id = add_photos(app, 2)
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            """
+            UPDATE photos SET relative_path='截圖 2026-06-28.png',width=1034,height=802,format='PNG',
+                camera_make=NULL,camera_model=NULL,screenshot_likelihood=1.0,blur_score=1638.33,
+                contrast=27.51,e6_score=98.6,local_features_status='complete',
+                local_candidate_score=100,eligible=1,exclusion_status='eligible'
+            WHERE id=?
+            """,
+            (screenshot_id,),
+        )
+        connection.execute(
+            """
+            UPDATE photos SET relative_path='_DSC0007.jpg',width=6000,height=4000,format='JPEG',
+                camera_make='SONY',screenshot_likelihood=0,blur_score=44.54,contrast=11.80,
+                e6_score=100,local_features_status='complete',local_candidate_score=42.8,
+                eligible=1,exclusion_status='eligible'
+            WHERE id=?
+            """,
+            (blurry_id,),
+        )
+
+    listing = client.get("/photos").get_data(as_text=True)
+    assert "選片分 0.0（已排除：截圖）" in listing
+    assert "選片分 0.0（已排除：嚴重模糊／失焦）" in listing
+    assert "本機清晰度、對比與曝光品質分" in listing
+
+    detail = client.get(f"/photos/{blurry_id}").get_data(as_text=True)
+    assert "本機品質分" in detail
+    assert "模糊 44.54／對比 11.80" in detail
+    assert "模糊 &lt; 60 且對比 &lt; 15" in detail
+    assert "明確截圖或嚴重單項缺陷會直接排除" in detail
+
+
 def test_photo_library_loads_200_per_page_and_keeps_filters(client, app):
     create_admin(app)
     login(client)
