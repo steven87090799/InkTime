@@ -13,8 +13,18 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-FEATURE_VERSION = "local-quality-v4"
-_SCREENSHOT_WORDS = {"screenshot", "screen shot", "螢幕快照", "截圖"}
+FEATURE_VERSION = "local-quality-v5"
+_SCREENSHOT_WORDS = {
+    "screenshot",
+    "screen shot",
+    "screen capture",
+    "螢幕快照",
+    "螢幕擷取",
+    "截圖",
+    "截屏",
+    "スクリーンショット",
+    "화면 캡처",
+}
 _DOCUMENT_TOKENS = {"receipt", "invoice", "document", "scan", "收據", "發票", "文件"}
 _SOCIAL_SOFTWARE = ("instagram", "line", "wechat", "facebook")
 _TOKEN_RE = re.compile(r"[_\W]+", re.UNICODE)
@@ -58,7 +68,10 @@ def local_candidate_score(row: Mapping[str, Any], *, evaluation: Mapping[str, An
     )
     short_edge = min(int(_value(row, "width", 0) or 0), int(_value(row, "height", 0) or 0))
     score = blur**0.5 * 3.2 + min(32.0, contrast * 0.8) + min(12.0, short_edge / 100.0) - exposure * 45
-    if (evaluation or {}).get("decision") == "low_priority":
+    decision = (evaluation or {}).get("decision")
+    if decision == "auto_excluded":
+        return 0.0
+    if decision == "low_priority":
         score -= 15.0
     return round(max(0.0, min(100.0, score)), 2)
 
@@ -90,8 +103,13 @@ def evaluate_local_quality(
     under = float(under_raw or 0.0)
     file_size_raw = _value(row, "file_size")
     file_size = int(file_size_raw or 0)
-    strong_screen = any(word in filename for word in _SCREENSHOT_WORDS) or any(
-        word in software for word in _SCREENSHOT_WORDS
+    strong_screen = (
+        any(word in filename for word in _SCREENSHOT_WORDS)
+        or any(word in software for word in _SCREENSHOT_WORDS)
+        # The preprocessor records explicit filename/software evidence as a
+        # near-certain probability.  Keep that evidence effective after a file
+        # is renamed or moved to a path without the original screenshot token.
+        or screenshot_score >= 0.95
     )
     screen_dimensions = (width, height) in {(1080, 1920), (1920, 1080), (1170, 2532), (2532, 1170)}
     screen_ratio = bool(width and height and abs(max(width, height) / min(width, height) - 16 / 9) < 0.035)
@@ -138,8 +156,13 @@ def evaluate_local_quality(
             not camera and family_count >= 3 and screenshot_score >= screenshot_threshold
         ),
         "document_token_with_evidence": bool(document_token and (scanner_evidence or not camera)),
-        "severe_blur": blur_raw is not None and contrast_raw is not None and blur < 5 and contrast < 8,
-        "suspected_blur": blur_raw is not None and contrast_raw is not None and blur < 12 and contrast < 14,
+        # Laplacian variance alone can be low for intentionally smooth photos,
+        # so blur is only decisive together with very low global contrast.
+        # These conservative v5 thresholds catch the observed 44.54 / 11.80
+        # out-of-focus frame while leaving the next-lowest real photo in the
+        # current library (324.05 / 26.70) well outside the exclusion boundary.
+        "severe_blur": blur_raw is not None and contrast_raw is not None and blur < 60 and contrast < 15,
+        "suspected_blur": blur_raw is not None and contrast_raw is not None and blur < 120 and contrast < 18,
         "short_edge_under_240": bool(short_edge and short_edge < 240),
         "tiny_empty": file_size_raw is not None
         and contrast_raw is not None
@@ -196,8 +219,8 @@ def evaluate_local_quality(
             "screenshot_score": screenshot_threshold,
             "screenshot_signals": 3,
             "short_edge": 240,
-            "severe_blur": [5, 8],
-            "suspected_blur": [12, 14],
+            "severe_blur": [60, 15],
+            "suspected_blur": [120, 18],
             "exposure_low_priority": 0.60,
             "e6_min_score": e6_threshold,
         },
