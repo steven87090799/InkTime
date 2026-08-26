@@ -68,6 +68,7 @@ class StoredPhotoSignature:
     lifecycle_status: str
     metadata_status: str
     local_features_status: str
+    feature_version: str
     status: str
 
     def matches(self, *, file_size: int, modified_time: float) -> bool:
@@ -129,7 +130,7 @@ class PhotoRepository:
                     connection.execute(
                         f"""
                         SELECT id,relative_path,file_size,modified_time,sha256,lifecycle_status,
-                               metadata_status,local_features_status,status
+                               metadata_status,local_features_status,feature_version,status
                         FROM photos
                         WHERE library_id=? AND relative_path IN ({placeholders})
                         """,  # noqa: S608 -- placeholders are generated; values remain bound
@@ -146,6 +147,7 @@ class PhotoRepository:
                 lifecycle_status=str(row["lifecycle_status"]),
                 metadata_status=str(row["metadata_status"]),
                 local_features_status=str(row["local_features_status"]),
+                feature_version=str(row["feature_version"] or ""),
                 status=str(row["status"]),
             )
             for row in rows
@@ -1324,7 +1326,7 @@ class PhotoRepository:
                 raise
 
     def persist_prefilter_exclusion(self, photo_id: str, evaluation: dict) -> None:
-        """Persist one v4 automatic exclusion without disturbing manual state."""
+        """Persist one automatic exclusion without disturbing manual state."""
         if evaluation.get("decision") != "auto_excluded":
             return
         now = datetime.now(timezone.utc).isoformat()

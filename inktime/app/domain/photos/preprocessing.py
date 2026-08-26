@@ -275,10 +275,19 @@ class PhotoPreprocessor:
                 screen_ratio = any(abs(ratio - candidate) < 0.004 for candidate in screen_ratios)
                 filename = path.name.casefold()
                 software = str(exif_named.get("Software", "")).casefold()
-                filename_match = any(
-                    marker in filename for marker in ("screenshot", "screen shot", "截圖", "螢幕快照")
+                screenshot_markers = (
+                    "screenshot",
+                    "screen shot",
+                    "screen capture",
+                    "螢幕快照",
+                    "螢幕擷取",
+                    "截圖",
+                    "截屏",
+                    "スクリーンショット",
+                    "화면 캡처",
                 )
-                software_match = any(marker in software for marker in ("screenshot", "screen capture"))
+                filename_match = any(marker in filename for marker in screenshot_markers)
+                software_match = any(marker in software for marker in screenshot_markers)
                 perceptual_hash = _phash(image)
                 difference_hash = _dhash(image)
                 brightness = float(stat.mean[0])
