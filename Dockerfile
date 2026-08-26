@@ -24,19 +24,39 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     INKTIME_HOST=0.0.0.0 \
     INKTIME_PORT=8765
 
-# The pinned Python image may lag the Debian security rebuild for util-linux.
-RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --only-upgrade -y \
+# The pinned Python image may lag Debian security rebuilds. Debian trixie
+# currently postpones the SQLite FTS5 fixes, so take only libsqlite3-0 from
+# Debian forky, where the fixed 3.53.x package is available. Keep the source
+# and pin temporary and verify the installed version before removing both.
+RUN set -eux; \
+    printf '%s\n' 'deb https://deb.debian.org/debian forky main' \
+        > /etc/apt/sources.list.d/inktime-sqlite-fix.list; \
+    printf '%s\n' \
+        'Package: *' \
+        'Pin: release n=forky' \
+        'Pin-Priority: 100' \
+        '' \
+        'Package: libsqlite3-0' \
+        'Pin: release n=forky' \
+        'Pin-Priority: 1001' \
+        > /etc/apt/preferences.d/inktime-sqlite-fix; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends --only-upgrade -y \
         bsdutils \
         libblkid1 \
         liblastlog2-2 \
         libmount1 \
+        libsqlite3-0 \
         libsmartcols1 \
         libuuid1 \
         login \
         mount \
-        util-linux \
-    && rm -rf /var/lib/apt/lists/*
+        util-linux; \
+    sqlite_version="$(dpkg-query -W -f='${Version}' libsqlite3-0)"; \
+    dpkg --compare-versions "${sqlite_version}" ge '3.53.2-1'; \
+    rm -f /etc/apt/sources.list.d/inktime-sqlite-fix.list \
+        /etc/apt/preferences.d/inktime-sqlite-fix; \
+    rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 10001 inktime \
     && useradd --uid 10001 --gid inktime --home-dir /app --shell /usr/sbin/nologin inktime
