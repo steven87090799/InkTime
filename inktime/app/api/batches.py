@@ -75,6 +75,12 @@ def _parameters(payload: dict) -> dict:
     }
 
 
+def _estimate_parameters(payload: dict) -> dict:
+    parameters = _parameters(payload)
+    parameters.pop("budget_limit", None)
+    return parameters
+
+
 @bp.get("/analysis/batches")
 @login_required
 def batches_page():
@@ -111,7 +117,7 @@ def batches_page_action():
                 "sample_count": int(request.form.get("sample_count", "100")),
             }
             if action == "estimate":
-                result = _service().estimate(**_parameters(payload))
+                result = _service().estimate(**_estimate_parameters(payload))
                 return render_template(
                     "analysis_batches.html",
                     batches=_repository().list(limit=100),
@@ -151,7 +157,7 @@ def batches_page_action():
 @administrator_required
 def estimate_batch():
     try:
-        return _service().estimate(**_parameters(_payload()))
+        return _service().estimate(**_estimate_parameters(_payload()))
     except (JsonScalarError, ValueError, BatchLifecycleError) as exc:
         abort(400, description=f"BATCH-API-001 {exc}")
 

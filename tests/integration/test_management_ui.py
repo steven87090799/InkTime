@@ -446,8 +446,13 @@ def test_batch_management_api_dispatches_lifecycle_actions(client, app, monkeypa
 
     monkeypatch.setitem(app.extensions, "inktime_batch_analysis_service", FakeBatchService())
     headers = {"X-CSRF-Token": csrf(client)}
-    estimate = client.post("/api/v1/analysis/batches/estimate", json={"scope": "sample"}, headers=headers)
+    estimate = client.post(
+        "/api/v1/analysis/batches/estimate",
+        json={"scope": "sample", "budget_limit": 12.5},
+        headers=headers,
+    )
     assert estimate.status_code == 200
+    assert "budget_limit" not in estimate.get_json()
     created = client.post("/api/v1/analysis/batches", json={"scope": "sample"}, headers=headers)
     assert created.status_code == 201
     assert client.get("/api/v1/analysis/batches").status_code == 200
@@ -841,7 +846,8 @@ def test_photo_cards_show_total_score_and_e6_estimate(client, app):
     body = client.get("/photos").get_data(as_text=True)
 
     assert "選片分 84.0（模型＋E6）" in body
-    assert "選片分 91.9（E6 暫估）" in body
+    assert "選片分 —（尚未正式分析）" in body
+    assert "E6 顯示適合度 91.9（暫估，未納入正式選片分）" in body
 
 
 def test_photo_cards_never_present_excluded_screenshot_or_severe_blur_as_high_score(client, app):
@@ -882,6 +888,33 @@ def test_photo_cards_never_present_excluded_screenshot_or_severe_blur_as_high_sc
     assert "明確截圖或嚴重單項缺陷會直接排除" in detail
 
 
+def test_photo_cards_force_ineligible_selection_score_to_zero_but_keep_diagnostics(client, app):
+    create_admin(app)
+    login(client)
+    photo_id = add_photos(app, 1)[0]
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE photos SET eligible=0,e6_score=99,exclusion_status='eligible' WHERE id=?",
+            (photo_id,),
+        )
+    app.extensions["inktime_photo_repository"].save_analysis(
+        photo_id,
+        None,
+        "stage_one",
+        "測試 Provider",
+        "vision-model",
+        valid_result(),
+        "{}",
+        ranking_score=98,
+    )
+
+    body = client.get("/photos").get_data(as_text=True)
+
+    assert "選片分 0.0（已排除：" in body
+    assert "模型排序 98.0" in body
+    assert "E6 顯示適合度 99.0" in body
+
+
 def test_photo_library_loads_200_per_page_and_keeps_filters(client, app):
     create_admin(app)
     login(client)
@@ -907,6 +940,53 @@ def test_photo_library_loads_200_per_page_and_keeps_filters(client, app):
     assert second_body.count('class="photo-card"') == 1
     assert "目前顯示第 201–201 張" in second_body
     assert "第 2 / 2 頁" in second_body
+
+    clamped = client.get("/photos?status=analyzed&page=999")
+    clamped_body = clamped.get_data(as_text=True)
+    assert clamped.status_code == 200
+    assert clamped_body.count('class="photo-card"') == 1
+    assert "第 2 / 2 頁" in clamped_body
+
+
+def test_review_thumbnail_accepts_string_root_and_rejects_invalid_sources(
+    client, app, tmp_path, monkeypatch
+):
+    create_admin(app)
+    login(client)
+    photo_id = add_photos(app, 1)[0]
+    root = tmp_path / "review-source"
+    root.mkdir()
+    Image.new("RGB", (80, 60), "#527f99").save(root / "photo.jpg")
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE libraries SET root_path=? WHERE id=(SELECT library_id FROM photos WHERE id=?)",
+            (str(root), photo_id),
+        )
+        connection.execute(
+            "UPDATE photos SET relative_path='photo.jpg',sha256=? WHERE id=?",
+            ("a" * 64, photo_id),
+        )
+
+    valid = client.get(f"/api/v1/review/photos/{photo_id}/thumbnail")
+    assert valid.status_code == 200
+    assert valid.mimetype == "image/jpeg"
+
+    (root / "photo.jpg").unlink()
+    assert client.get(f"/api/v1/review/photos/{photo_id}/thumbnail").status_code == 404
+
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE photos SET relative_path='../outside.jpg' WHERE id=?", (photo_id,))
+    assert client.get(f"/api/v1/review/photos/{photo_id}/thumbnail").status_code == 400
+
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE photos SET relative_path='photo.jpg' WHERE id=?", (photo_id,))
+    Image.new("RGB", (80, 60), "#527f99").save(root / "photo.jpg")
+    monkeypatch.setattr(
+        app.extensions["inktime_thumbnail_cache"],
+        "get_or_create",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("thumbnail failed")),
+    )
+    assert client.get(f"/api/v1/review/photos/{photo_id}/thumbnail").status_code == 422
 
 
 def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(client, app, tmp_path):

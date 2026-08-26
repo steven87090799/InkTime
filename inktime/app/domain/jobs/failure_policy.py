@@ -108,6 +108,11 @@ def classify_failure(value: object) -> FailureClass:
     explicit = getattr(value, "failure_class", None)
     if isinstance(explicit, FailureClass):
         return explicit
+    # A source that no longer exists cannot succeed on a later retry.  Keep
+    # the established JOB-003 public code, but dead-letter the item at once so
+    # the parent job can reach its terminal completed_with_errors state.
+    if isinstance(value, FileNotFoundError):
+        return FailureClass.TERMINAL_NO_RETRY
     code = failure_code(value)
     if code in TERMINAL_NO_RETRY_CODES:
         return FailureClass.TERMINAL_NO_RETRY

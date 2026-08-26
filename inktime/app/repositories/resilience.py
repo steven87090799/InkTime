@@ -360,6 +360,7 @@ class ResilienceRepository:
             utc_now(),
             _json(payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}),
         )
+        feedback_id: int | None = None
         with self.database.transaction() as connection:
             if table == "photo_feedback":
                 # SQLite UNIQUE treats NULL scopes as distinct.  Replace the precise
@@ -368,7 +369,7 @@ class ResilienceRepository:
                     "DELETE FROM photo_feedback WHERE user_id=? AND device_id IS ? AND photo_id=? AND feedback_type=?",
                     (user_id, device_id, photo_id, kind),
                 )
-                connection.execute(
+                inserted = connection.execute(
                     """INSERT INTO photo_feedback(user_id,device_id,photo_id,decision_trace_id,feedback_type,value,expires_at,metadata_json,created_at,updated_at)
                     VALUES (?,?,?,?,?,?,?,?,?,?)""",
                     (
@@ -384,6 +385,7 @@ class ResilienceRepository:
                         now,
                     ),
                 )
+                feedback_id = int(inserted.lastrowid)
                 if kind == "NEVER_SHOW":
                     connection.execute(
                         "UPDATE photos SET eligible=0,exclusion_status='manually_excluded',reject_reason='USER_EXCLUDED',updated_at=? WHERE id=?",
@@ -443,7 +445,14 @@ class ResilienceRepository:
                         now,
                     ),
                 )
-        return {"status": "ok", "feedback_type": kind, "expires_at": expires_at}
+        return {
+            "status": "ok",
+            "feedback_id": feedback_id,
+            "photo_id": photo_id or None,
+            "feedback_type": kind,
+            "created_at": now,
+            "expires_at": expires_at,
+        }
 
     def delete_feedback(self, feedback_id: int) -> bool:
         with self.database.transaction() as connection:

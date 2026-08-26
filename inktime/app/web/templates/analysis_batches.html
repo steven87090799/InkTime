@@ -15,7 +15,7 @@
   {% if g.user and g.user.role == 'administrator' %}
   <section class="card">
     <h2>建立 Batch</h2>
-    <form method="post" action="{{ url_for('analysis_batches.batches_page_action') }}">
+    <form method="post" action="{{ url_for('analysis_batches.batches_page_action') }}" id="batch-create-form">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <label>範圍
         <select name="scope">
@@ -28,6 +28,7 @@
       <label>Sample 數量 <input name="sample_count" type="number" min="1" max="100000" value="100"></label>
       <button name="action" value="estimate" type="submit">估算</button>
       <button name="action" value="submit" type="submit">提交</button>
+      <p id="batch-create-status" role="status" aria-live="polite"></p>
     </form>
   </section>
   {% endif %}
@@ -66,3 +67,7 @@
   </section>
 </main>
 {% endblock %}
+{% block scripts %}{% if g.user and g.user.role == 'administrator' %}<script nonce="{{ csp_nonce }}">
+const batchForm=document.getElementById('batch-create-form'),batchStatus=document.getElementById('batch-create-status');
+batchForm?.addEventListener('submit',async event=>{event.preventDefault();const action=event.submitter?.value||'estimate';let body;try{body=window.inktimeFormJson(batchForm,{sample_count:'integer'});delete body.csrf_token;delete body.action;}catch(error){window.inktimeSetStatus(batchStatus,error.message,'error');return;}window.inktimeSetStatus(batchStatus,action==='estimate'?'估算中…':'提交中…');const url=action==='estimate'?'/api/v1/analysis/batches/estimate':'/api/v1/analysis/batches';const response=await window.inktimeFetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),data=await window.inktimeDecodeJson(response);if(!response.ok){window.inktimeSetStatus(batchStatus,data.message||`操作失敗（HTTP ${response.status}）`,'error');return;}if(action==='estimate'){window.inktimeSetStatus(batchStatus,`候選 ${data.candidate_count} 張；預估 ${data.estimated_shard_count} 個分片，成本 USD ${data.estimated_cost}`,'success');return;}window.inktimeSetStatus(batchStatus,`Batch ${data.id||''} 已建立。`,'success');location.reload();});
+</script>{% endif %}{% endblock %}

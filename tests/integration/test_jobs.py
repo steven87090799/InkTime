@@ -171,6 +171,23 @@ def test_completed_item_records_actual_processing_stage(app):
     assert item["stage"] == "prefilter"
 
 
+def test_missing_source_is_dead_lettered_and_job_reaches_terminal_state(app):
+    service, repository, job_id = create_job(app, 1)
+    service.start(job_id)
+
+    def missing_source(_item):
+        raise FileNotFoundError("source missing")
+
+    BoundedJobWorker(repository, missing_source, max_attempts=5).run_job(job_id)
+
+    item = repository.list_items(job_id)[0]
+    job = repository.get(job_id)
+    assert item["status"] == "failed"
+    assert item["error_code"] == "JOB-003"
+    assert item["attempts"] == 1
+    assert job["status"] == "completed_with_errors"
+
+
 def test_stale_running_items_are_recovered_after_restart(app):
     service, repository, job_id = create_job(app, 1)
     service.start(job_id)

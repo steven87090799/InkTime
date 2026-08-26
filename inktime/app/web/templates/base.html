@@ -51,11 +51,84 @@
     {% endfor %}
     {% block content %}{% endblock %}
   </main>
+  <dialog id="inktime-confirm-dialog" aria-labelledby="inktime-confirm-title">
+    <form method="dialog" class="form-stack">
+      <h2 id="inktime-confirm-title">確認操作</h2>
+      <p id="inktime-confirm-message"></p>
+      <label id="inktime-confirm-input-label" hidden><span id="inktime-confirm-input-caption">補充內容</span>
+        <textarea id="inktime-confirm-input" rows="4" maxlength="1000"></textarea>
+      </label>
+      <div class="actions-row">
+        <button value="confirm" class="primary">確認</button>
+        <button value="cancel" class="secondary">取消</button>
+      </div>
+    </form>
+  </dialog>
   <script nonce="{{ csp_nonce }}">
     window.inktimeFetch = (url, options = {}) => {
       options.headers = Object.assign({'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]').content}, options.headers || {});
       return fetch(url, options);
     };
+    window.inktimeDecodeJson = async response => {
+      const text = await response.text();
+      if (!text) return {};
+      try { return JSON.parse(text); } catch (_error) { return {message: text.slice(0, 240)}; }
+    };
+    window.inktimeSetStatus = (target, message, kind = '') => {
+      const node = typeof target === 'string' ? document.querySelector(target) : target;
+      if (!node) return;
+      node.textContent = String(message || '');
+      node.dataset.statusKind = kind;
+      node.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+    };
+    window.inktimeFormJson = (form, schema = {}) => {
+      const data = new FormData(form), result = {};
+      const convert = (name, raw, type) => {
+        if (type === 'boolean') return form.elements[name]?.checked === true;
+        if ((type === 'nullable-integer' || type === 'nullable-float') && raw === '') return null;
+        if (type === 'integer' || type === 'nullable-integer') {
+          const value = Number(raw);
+          if (!Number.isInteger(value)) throw new Error(`${name} 必須是整數`);
+          return value;
+        }
+        if (type === 'float' || type === 'nullable-float') {
+          const value = Number(raw);
+          if (!Number.isFinite(value)) throw new Error(`${name} 必須是有效數字`);
+          return value;
+        }
+        if (type === 'json') {
+          try { return JSON.parse(String(raw)); }
+          catch (_error) { throw new Error(`${name} 必須是有效 JSON`); }
+        }
+        return String(raw);
+      };
+      for (const [name, raw] of data.entries()) result[name] = convert(name, raw, schema[name] || 'string');
+      for (const [name, type] of Object.entries(schema)) {
+        if (type === 'boolean') result[name] = convert(name, '', type);
+        else if (!(name in result) && (type === 'nullable-integer' || type === 'nullable-float')) result[name] = null;
+      }
+      return result;
+    };
+    window.inktimeConfirm = (message, options = {}) => new Promise(resolve => {
+      const dialog = document.getElementById('inktime-confirm-dialog');
+      const title = document.getElementById('inktime-confirm-title');
+      const messageNode = document.getElementById('inktime-confirm-message');
+      const inputLabel = document.getElementById('inktime-confirm-input-label');
+      const inputCaption = document.getElementById('inktime-confirm-input-caption');
+      const input = document.getElementById('inktime-confirm-input');
+      title.textContent = options.title || '確認操作';
+      messageNode.textContent = String(message || '');
+      inputLabel.hidden = !options.input;
+      inputCaption.textContent = options.inputLabel || '補充內容';
+      input.value = options.defaultValue || '';
+      const closed = () => {
+        dialog.removeEventListener('close', closed);
+        resolve(dialog.returnValue === 'confirm' ? (options.input ? input.value : true) : (options.input ? null : false));
+      };
+      dialog.addEventListener('close', closed);
+      dialog.showModal();
+      if (options.input) input.focus();
+    });
 
     (() => {
       const toggle = document.getElementById('theme-toggle');
