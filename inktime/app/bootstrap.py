@@ -19,6 +19,7 @@ from inktime.app.repositories.analysis_batches import AnalysisBatchRepository
 from inktime.app.repositories.ai_traces import AITraceRepository
 from inktime.app.repositories.devices import DeviceRepository
 from inktime.app.repositories.offline_schedules import OfflineScheduleRepository
+from inktime.app.repositories.photo_analysis_retention import PhotoAnalysisRetentionRepository
 from inktime.app.repositories.jobs import JobRepository
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.providers import ProviderRepository
@@ -247,6 +248,7 @@ def bootstrap_services(
     release_publisher = AtomicReleasePublisher(config.release_dir)
     observability_service.publisher = release_publisher
     render_candidate_repository = RenderCandidateRepository(database)
+    photo_analysis_retention_repository = PhotoAnalysisRetentionRepository(database)
     resilience_repository = ResilienceRepository(database)
     review_repository = ReviewRepository(database)
     device_release_service = DeviceReleaseService(database, config.release_dir)
@@ -310,6 +312,7 @@ def bootstrap_services(
             "inktime_location_resolver": location_resolver,
             "inktime_release_publisher": release_publisher,
             "inktime_render_candidate_repository": render_candidate_repository,
+            "inktime_photo_analysis_retention_repository": photo_analysis_retention_repository,
             "inktime_resilience_repository": resilience_repository,
             "inktime_review_repository": review_repository,
             "inktime_render_cache": render_cache,
