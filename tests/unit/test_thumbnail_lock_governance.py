@@ -10,7 +10,6 @@ import time
 from PIL import Image
 
 from inktime.app.domain.photos.thumbnails import ThumbnailCache
-from scripts.cleanup_legacy_thumbnail_locks import cleanup
 
 
 def _thumbnail_process(root: str, source: str, digest: str, output) -> None:
@@ -166,32 +165,3 @@ def test_cleanup_reuses_an_explicit_empty_inventory(tmp_path, monkeypatch):
         active_hashes=set(),
         inventory=[],
     ) == {"files": 0, "bytes": 0}
-
-
-def test_legacy_lock_cleanup_is_dry_run_explicit_and_symlink_safe(tmp_path):
-    root = tmp_path / "cache"
-    root.mkdir()
-    lock = root / f".{('a' * 64)}-512.lock"
-    thumbnail = root / f"{('a' * 64)}-512.jpg"
-    original = root / "original.jpg"
-    symlink = root / f".{('b' * 64)}-512.lock"
-    lock.write_text("")
-    thumbnail.write_bytes(b"thumbnail")
-    original.write_bytes(b"original")
-    symlink.symlink_to(original)
-
-    preview = cleanup(root, confirmed=False, services_stopped=False)
-    assert preview["matched"] == 1
-    assert lock.exists()
-    try:
-        cleanup(root, confirmed=True, services_stopped=False)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("cleanup must require stopped services")
-    result = cleanup(root, confirmed=True, services_stopped=True)
-    assert result["removed"] == 1
-    assert not lock.exists()
-    assert thumbnail.read_bytes() == b"thumbnail"
-    assert original.read_bytes() == b"original"
-    assert symlink.is_symlink()

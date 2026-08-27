@@ -1,6 +1,6 @@
-# InkTime · E-Ink Memory Frame (Legacy Overview)
+# InkTime · E-Ink Memory Frame
 
-> This English document describes the original project flow and is retained for compatibility. For the current Web/Worker/Scheduler platform, local-only selection, device queue, resilience features, and the complete document map, start with the [Chinese README](README.md), the [documentation portal](USER_MANUAL.html), and [docs/README.md](docs/README.md).
+> For complete Web/Worker/Scheduler setup, device queues, resilience features, and the document map, also see the [Chinese README](README.md), the [documentation portal](USER_MANUAL.html), and [docs/README.md](docs/README.md).
 
 [中文](README.md) | **English**
 
@@ -56,31 +56,23 @@ exiftool is recommended for GPS metadata:
 macOS (Homebrew): ```brew install exiftool```  
 Linux: ```sudo apt-get install -y libimage-exiftool-perl```
 
-### 3. Configure `config.py`
+### 3. Configure the runtime
 
 ```bash
-cp config-example.py config.py
-vi config.py
+cp .env.local.example .env
+# Set INKTIME_PHOTO_PATH and other deployment paths in .env.
 ```
 
-Required fields:
+Start InkTime, create the first administrator, then configure providers and analysis settings in the Web console. API keys are stored through the encrypted settings flow; do not put them in `.env` or source files.
 
-- Photo library path: ```IMAGE_DIR```
-- VLM API configuration: ```API_CHANNELS```
-
-InkTime uses an OpenAI-compatible API endpoint. LM Studio and other compatible services are supported.
-
-To reduce the risk of exposing private photos, change ```DOWNLOAD_KEY``` and use it as a random prefix in the ESP32 download path.  
-Also update the ```DAILY_PHOTO_PATH_PREFIX``` field in ```esp32/ink-display-7C-photo/ink-display-7C-photo.ino```.
-
-This is not encryption. It is only a simple path-based access token. For public deployment, use HTTPS, reverse-proxy authentication, or restrict access to your local network.
+InkTime supports OpenAI, OpenRouter, OpenAI-compatible endpoints, and local providers. New custom devices use the physical pairing flow to receive a one-time Device Secret; do not place credentials in URLs.
 
 ## Analyze Photos
 
 Before analyzing photos, make sure:
 
 - LM Studio, or your cloud VLM service, is running
-- `config.py` is configured correctly
+- the photo library is mounted and a provider is configured in the Web console
 
 Run:
 
@@ -95,33 +87,15 @@ The vision model will read and understand all files in your photo library, gener
 - Memory value / visual quality scores
 - One-line caption
 
-Photo data is stored in ```photos.db``` as a SQLite database.
-
-You can edit the prompts in ```analyze_photos.py``` to adjust the model's scoring criteria and caption style.
+Photo inventory and analysis results are stored in the Modern SQLite schema under the configured data directory. Use the Scoring page to adjust versioned scoring rules and caption guidance.
 
 The process is resumable. Photos that have already been processed will not be analyzed again, so you can process a large photo library across multiple runs.
 
 *Choose a model that fits your available compute. The author's qwen3-vl-30b setup already produces very solid captions.*
 
-Common options:
-
-```bash
-python3 analyze_photos.py -j 4
-python3 analyze_photos.py --debug
-python3 analyze_photos.py --cache
-```
-
-- ```-j```, ```--concurrency```: Number of concurrent worker threads. Default is `1`. Increase it if your local model or API channels have enough throughput.
-- ```--debug```: Print request and response bodies when a request fails, useful for debugging API compatibility or response format issues.
-- ```--cache```: Reuse the previously cached photo file list. This avoids rescanning the photo library every time. Use it only during the initial full-library analysis; do not use it in production, otherwise newly added photos will not be discovered and deleted photos will not be removed from the database.
-
 ## Render the Daily "On This Day" Photo for ESP32
 
-Run:
-
-```bash
-python3 render_daily_photo.py
-```
+Use the Rendering page to preview and publish a release. The Scheduler and Worker use the same Modern renderer and release flow for daily updates.
 
 ## Start the ESP32 Download Server and Web UI
 
@@ -131,17 +105,17 @@ Run:
 python3 server.py
 ```
 
-#### Web UI, if enabled:
+#### Web UI:
 
 The server provides a simple visual frontend for reviewing processed photo descriptions and captions, and for previewing the simulated e-ink rendering result.
 
 Open in your browser:
 
 ```text
-http://127.0.0.1:8765/review
+http://127.0.0.1:8765/photos
 ```
 
-After the project is working, it is recommended to disable the Web UI in ```config.py``` and keep only the ESP32 download endpoint enabled.
+Use `/simulator` for e-ink previews and `/rendering` to publish immutable releases.
 
 ## Server Deployment and Scheduled Task Example (optional)
 
@@ -179,15 +153,7 @@ sudo systemctl enable inktime-server
 sudo systemctl start inktime-server
 ```
 
-Use crontab to automatically select and render the daily photo every morning:
-
-```bash
-chmod +x scripts/daily_render.sh
-sudo -u inktime crontab -e
-0 5 * * * /path/to/InkTime/scripts/daily_render.sh
-```
-
-Logs are available at ```logs/render.log```.
+For production, deploy the Web, Worker, and Scheduler services together with Docker Compose. Configure daily schedules in the Web console; no separate rendering cron script is required.
 
 ---
 

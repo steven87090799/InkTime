@@ -64,7 +64,6 @@ class RuntimeConfig:
     port: int
     timezone: str
     proxy_trust: int
-    legacy_enabled: bool
     development: bool
     testing: bool
     worker_concurrency: int
@@ -125,7 +124,6 @@ class RuntimeConfig:
         port: int | str | None = None,
         timezone: str | None = None,
         proxy_trust: int | str | None = None,
-        legacy_enabled: bool | str | None = None,
         development: bool | str | None = None,
         testing: bool | str | None = None,
         worker_concurrency: int | str | None = None,
@@ -204,12 +202,6 @@ class RuntimeConfig:
                 minimum=0,
                 maximum=10,
             ),
-            legacy_enabled=_boolean(
-                legacy_enabled
-                if legacy_enabled is not None
-                else source.get("INKTIME_ENABLE_LEGACY_WEBUI", False),
-                name="INKTIME_ENABLE_LEGACY_WEBUI",
-            ),
             development=resolved_development,
             testing=resolved_testing,
             worker_concurrency=_integer(
@@ -267,7 +259,6 @@ class RuntimeConfig:
             "port": self.port,
             "timezone": self.timezone,
             "proxy_trust": self.proxy_trust,
-            "legacy_enabled": self.legacy_enabled,
             "development": self.development,
             "testing": self.testing,
             "worker_concurrency": self.worker_concurrency,

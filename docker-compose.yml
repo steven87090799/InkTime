@@ -39,8 +39,6 @@ x-common: &common
     INKTIME_LOG_LEVEL: ${INKTIME_LOG_LEVEL:-INFO}
     # Gunicorn HTTP access log 預設關閉，避免健康檢查與裝置輪詢寫滿 Log。
     INKTIME_ACCESS_LOG: ${INKTIME_ACCESS_LOG:-0}
-    # Legacy Review／Simulator 只在維護時明確開啟；正式與開發預設都關閉。
-    INKTIME_ENABLE_LEGACY_WEBUI: ${INKTIME_ENABLE_LEGACY_WEBUI:-false}
   volumes:
     # 可寫資料：SQLite、Session Key、縮圖、字型、備份與發布版本。
     - type: bind

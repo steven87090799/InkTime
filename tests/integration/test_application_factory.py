@@ -12,7 +12,7 @@ from inktime.app.core.runtime_config import RuntimeConfig
 from inktime.app.factory import create_app
 
 
-def _config(root: Path, *, legacy_enabled: bool = False) -> RuntimeConfig:
+def _config(root: Path) -> RuntimeConfig:
     return RuntimeConfig.from_sources(
         environ={},
         environment="test",
@@ -24,16 +24,13 @@ def _config(root: Path, *, legacy_enabled: bool = False) -> RuntimeConfig:
         release_dir=root / "releases",
         backup_dir=root / "backups",
         cache_dir=root / "cache",
-        legacy_enabled=legacy_enabled,
         cookie_secure=False,
     )
 
 
-def test_factory_module_import_has_no_filesystem_or_legacy_side_effect(tmp_path: Path):
+def test_factory_module_import_has_no_filesystem_side_effect(tmp_path: Path):
     script = (
-        "import sys; from inktime.app.factory import create_app; "
-        "assert 'legacy_server' not in sys.modules; "
-        "assert 'inktime.app.legacy.blueprint' not in sys.modules; print(create_app.__name__)"
+        "from inktime.app.factory import create_app; print(create_app.__name__)"
     )
     result = subprocess.run(  # noqa: S603 -- fixed current interpreter and constant script.
         [sys.executable, "-c", script],
@@ -105,7 +102,6 @@ def test_server_app_uses_factory_and_gunicorn_contract_in_isolated_runtime(tmp_p
     )
     assert "inktime" in result.stdout
     assert "/api/device/v1/releases/latest" in result.stdout
-    assert "legacy_server" not in result.stdout
 
 
 def test_worker_and_scheduler_bootstrap_do_not_import_web_or_server(tmp_path: Path):
