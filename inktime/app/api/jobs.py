@@ -62,6 +62,22 @@ def _job_or_404(job_id: str):
     return job
 
 
+def _available_job_actions(job) -> list[str]:
+    status = str(job["status"])
+    actions: list[str] = []
+    if status == "pending":
+        actions.append("start")
+    if status in {"running", "retrying"}:
+        actions.append("pause")
+    if status in {"paused", "budget_exceeded"}:
+        actions.append("resume")
+    if status not in {"completed", "completed_with_errors", "failed", "cancelled"}:
+        actions.append("cancel")
+    if status in {"failed", "completed_with_errors"} and int(job["failed_items"] or 0) > 0:
+        actions.append("retry-failed")
+    return actions
+
+
 @bp.get("/jobs")
 @login_required
 def jobs_page():
@@ -82,6 +98,7 @@ def job_detail(job_id: str):
         "job_detail.html",
         job=job,
         items=_repository().list_items(job_id, limit=100, offset=(page - 1) * 100),
+        available_actions=_available_job_actions(job),
         page=page,
     )
 
@@ -220,6 +237,7 @@ def selection_preview():
 @bp.post("/api/v1/jobs/<job_id>/<action>")
 @administrator_required
 def control_job(job_id: str, action: str):
+    _job_or_404(job_id)
     actions = {
         "start": _service().start,
         "pause": _service().pause,
@@ -232,6 +250,10 @@ def control_job(job_id: str, action: str):
         abort(404)
     try:
         result = function(job_id)
+        if action == "retry-failed":
+            if not isinstance(result, int) or result < 1:
+                raise InvalidJobTransition("沒有可重跑的失敗項目")
+            _service().start(job_id)
     except InvalidJobTransition as exc:
         return {"error_code": exc.code, "message": str(exc)}, 409
     return {"status": "ok", "affected": result if isinstance(result, int) else None}
@@ -241,7 +263,7 @@ def control_job(job_id: str, action: str):
 @login_required
 def job_status(job_id: str):
     job = _job_or_404(job_id)
-    items = _repository().list_items(job_id, limit=1)
+    items = _repository().list_items(job_id, limit=100)
     result = None
     error_code = None
     if items:
@@ -258,6 +280,19 @@ def job_status(job_id: str):
         "completed_items": int(job["completed_items"]),
         "failed_items": int(job["failed_items"]),
         "total_items": int(job["total_items"]),
+        "spent": float(job["spent"]),
+        "available_actions": _available_job_actions(job),
+        "items": [
+            {
+                "id": str(item["id"]),
+                "photo_id": str(item["photo_id"]) if item["photo_id"] is not None else None,
+                "status": str(item["status"]),
+                "stage": str(item["stage"]),
+                "attempts": int(item["attempts"]),
+                "error_code": str(item["error_code"]) if item["error_code"] is not None else None,
+            }
+            for item in items
+        ],
         "result": result,
         "error_code": error_code,
     }
