@@ -82,6 +82,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
     ),
     "persistence_owner": (
         "tests/unit/test_backups.py",
+        "tests/unit/test_photo_analysis_retention.py",
         "tests/integration/test_sqlite_concurrency.py",
         "tests/integration/test_final_review_history.py",
     ),
@@ -133,6 +134,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
     "provider_analysis_owner": (
         "tests/unit/test_analysis_plan.py",
         "tests/unit/test_analysis_schema.py",
+        "tests/unit/test_photo_analysis_retention.py",
         "tests/unit/test_provider_batch.py",
         "tests/unit/test_provider_config.py",
         "tests/unit/test_provider_contracts.py",
@@ -143,6 +145,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_analysis_pipeline.py",
         "tests/integration/test_local_only_mode.py",
         "tests/integration/test_photo_quality_ai.py",
+        "tests/integration/test_photo_analysis_retention_api.py",
         "tests/integration/test_review_workbench.py",
     ),
     "backup_restore_owner": ("tests/unit/test_backups.py",),
