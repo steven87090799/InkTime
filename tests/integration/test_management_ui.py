@@ -51,6 +51,30 @@ def test_primary_management_pages_render(client, app):
     assert "Good Display 原廠相容" in settings
     assert "照片平滑（減少色塊／雜點）" in settings
 
+    rendering = client.get("/rendering").get_data(as_text=True)
+    assert 'id="release-action-status"' in rendering
+    assert "inktimeSetStatus('#release-action-status',d.message||'發布失敗'" in rendering
+    assert "inktimeSetStatus('#release-action-status',d.message||'回滾失敗'" in rendering
+
+    providers = client.get("/providers").get_data(as_text=True)
+    assert 'id="provider-action-status"' in providers
+    assert "alert(" not in providers
+
+
+def test_shared_confirmation_dialog_resets_and_normalizes_cancel_state(client, app):
+    create_admin(app)
+    login(client)
+
+    body = client.get("/dashboard").get_data(as_text=True)
+
+    reset = body.index("dialog.returnValue = '';")
+    cancel_listener = body.index("dialog.addEventListener('cancel', cancelled);")
+    shown = body.index("dialog.showModal();", cancel_listener)
+    assert reset < cancel_listener < shown
+    assert "const cancelled = () => { dialog.returnValue = 'cancel'; };" in body
+    assert "dialog.removeEventListener('cancel', cancelled);" in body
+    assert "dialog.returnValue === 'confirm'" in body
+
 
 def test_job_detail_live_status_exposes_items_and_only_valid_actions(client, app):
     administrator_id = create_admin(app)

@@ -4,9 +4,17 @@ from datetime import date, datetime, timezone
 
 from flask import Blueprint, abort, current_app, g, render_template, request, send_file
 
-from inktime.app.core.json_values import JsonScalarError, json_bool, json_int, json_object_payload
+from inktime.app.core.json_values import (
+    JsonScalarError,
+    json_bool,
+    json_int,
+    json_object_payload,
+    reject_unknown_fields,
+)
 from inktime.app.core.idempotency import request_fingerprint, scoped_idempotency_key
 from inktime.app.core.security import redact
+from inktime.app.domain.analysis.plan import canonical_json, fingerprint
+from inktime.app.repositories.photo_analysis_retention import PhotoAnalysisRetentionConflictError
 
 from inktime.app.core.paths import safe_join
 from inktime.app.web.access import administrator_required, login_required
@@ -14,6 +22,7 @@ from inktime.app.workers.scanner import SCAN_MODES
 
 
 bp = Blueprint("operations", __name__)
+PHOTO_ANALYSIS_RETENTION_CONFIRMATION = "DELETE_UNREFERENCED_PHOTO_ANALYSIS"
 
 
 def _payload(error_prefix: str = "OPS-001") -> dict:
@@ -38,6 +47,22 @@ def _cache_cleanup_parameters(payload: dict) -> tuple[int, int]:
             maximum=3650,
             error_prefix="CACHE-001",
         ),
+    )
+
+
+def _current_analysis_retention_identity() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    settings = current_app.extensions["inktime_settings_repository"]
+    plan = current_app.extensions["inktime_analysis_service"].build_plan(
+        strategy=str(settings.get("analysis.strategy", "single")),
+        provider_route=current_app.extensions["inktime_provider_service"].route_snapshot(),
+        scoring_profile=dict(current_app.extensions["inktime_scoring_repository"].current()),
+    )
+    identity_plan = dict(plan)
+    identity_plan.pop("caption_display_controls", None)
+    identity_plan.pop("repair_policy", None)
+    return (
+        tuple(sorted({fingerprint(plan), fingerprint(identity_plan)})),
+        (canonical_json(plan),),
     )
 
 
@@ -520,6 +545,57 @@ def cleanup_cache():
     return cache.cleanup(
         max_bytes=max_bytes, retention_days=retention_days, active_hashes=_active_thumbnail_hashes()
     )
+
+
+@bp.post("/api/v1/maintenance/photo-analysis-retention")
+@administrator_required
+def maintain_photo_analysis_retention():
+    payload = _payload("RETENTION-001")
+    try:
+        reject_unknown_fields(
+            payload,
+            {"dry_run", "batch_size", "confirmation", "expected_inventory_digest"},
+            error_prefix="RETENTION-001",
+        )
+        dry_run = json_bool(payload, "dry_run", default=True, error_prefix="RETENTION-001")
+        batch_size = json_int(
+            payload,
+            "batch_size",
+            default=200,
+            minimum=1,
+            maximum=500,
+            error_prefix="RETENTION-001",
+        )
+    except JsonScalarError as exc:
+        abort(400, description=str(exc))
+    current_fingerprints, current_specs = _current_analysis_retention_identity()
+    repository = current_app.extensions["inktime_photo_analysis_retention_repository"]
+    if dry_run:
+        inventory = repository.inventory(
+            current_fingerprints=current_fingerprints,
+            current_specs=current_specs,
+        )
+        inventory["current_fingerprints"] = list(current_fingerprints)
+        return inventory
+    if str(payload.get("confirmation") or "") != PHOTO_ANALYSIS_RETENTION_CONFIRMATION:
+        abort(
+            409,
+            description=(
+                "RETENTION-002 apply requires confirmation="
+                f"{PHOTO_ANALYSIS_RETENTION_CONFIRMATION}"
+            ),
+        )
+    try:
+        result = repository.prune_batch(
+            current_fingerprints=current_fingerprints,
+            current_specs=current_specs,
+            batch_size=batch_size,
+            expected_inventory_digest=str(payload.get("expected_inventory_digest") or ""),
+        )
+    except PhotoAnalysisRetentionConflictError as exc:
+        abort(409, description=str(exc))
+    result["current_fingerprints"] = list(current_fingerprints)
+    return result
 
 
 @bp.post("/api/v1/maintenance/scan")

@@ -35,6 +35,7 @@ TERMINAL_NO_RETRY_CODES = frozenset(
         "VLM-006",
         "VLM-AMBIGUOUS",
         "JOB-SHUTDOWN-AMBIGUOUS",
+        "JOB-SOURCE-MISSING",
     }
 )
 
@@ -98,6 +99,8 @@ def failure_code(value: object) -> str:
     """Return only a stable code; never parse a diagnostic message."""
 
     code = getattr(value, "code", None)
+    if code is None and isinstance(value, FileNotFoundError):
+        code = "JOB-SOURCE-MISSING"
     if code is None and isinstance(value, str):
         code = value
     normalized = str(code or "JOB-003").strip()
@@ -108,11 +111,6 @@ def classify_failure(value: object) -> FailureClass:
     explicit = getattr(value, "failure_class", None)
     if isinstance(explicit, FailureClass):
         return explicit
-    # A source that no longer exists cannot succeed on a later retry.  Keep
-    # the established JOB-003 public code, but dead-letter the item at once so
-    # the parent job can reach its terminal completed_with_errors state.
-    if isinstance(value, FileNotFoundError):
-        return FailureClass.TERMINAL_NO_RETRY
     code = failure_code(value)
     if code in TERMINAL_NO_RETRY_CODES:
         return FailureClass.TERMINAL_NO_RETRY

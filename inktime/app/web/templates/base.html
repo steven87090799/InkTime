@@ -121,10 +121,14 @@
       inputLabel.hidden = !options.input;
       inputCaption.textContent = options.inputLabel || '補充內容';
       input.value = options.defaultValue || '';
+      const cancelled = () => { dialog.returnValue = 'cancel'; };
       const closed = () => {
         dialog.removeEventListener('close', closed);
+        dialog.removeEventListener('cancel', cancelled);
         resolve(dialog.returnValue === 'confirm' ? (options.input ? input.value : true) : (options.input ? null : false));
       };
+      dialog.returnValue = '';
+      dialog.addEventListener('cancel', cancelled);
       dialog.addEventListener('close', closed);
       dialog.showModal();
       if (options.input) input.focus();

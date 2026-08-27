@@ -7,7 +7,8 @@ from uuid import uuid4
 import pytest
 
 from inktime.app.core.idempotency import request_fingerprint, scoped_idempotency_key
-from inktime.app.repositories.jobs import PreviewCapacityError
+from inktime.app.domain.jobs.failure_policy import FailureClass, classify_codes
+from inktime.app.repositories.jobs import JobRepository, PreviewCapacityError
 from inktime.app.services.jobs import JobService
 from inktime.app.workers.job_worker import BoundedJobWorker
 
@@ -183,9 +184,16 @@ def test_missing_source_is_dead_lettered_and_job_reaches_terminal_state(app):
     item = repository.list_items(job_id)[0]
     job = repository.get(job_id)
     assert item["status"] == "failed"
-    assert item["error_code"] == "JOB-003"
+    assert item["error_code"] == "JOB-SOURCE-MISSING"
     assert item["attempts"] == 1
     assert job["status"] == "completed_with_errors"
+
+    reloaded = JobRepository(app.extensions["inktime_database"])
+    persisted_codes = reloaded.failure_codes(job_id)
+    assert persisted_codes == ["JOB-SOURCE-MISSING"]
+    assert classify_codes(persisted_codes) == FailureClass.TERMINAL_NO_RETRY
+    reloaded.recover_stale()
+    assert reloaded.list_items(job_id)[0]["status"] == "failed"
 
 
 def test_stale_running_items_are_recovered_after_restart(app):
