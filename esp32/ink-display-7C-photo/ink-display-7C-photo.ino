@@ -194,16 +194,14 @@ GxEPD2_7C<
 #define DEVICE_PAIRING_CLAIM_PATH "/api/device/v1/pairing/claim"
 #define DEVICE_PAIRING_CONFIRM_PATH "/api/device/v1/pairing/confirm"
 #define DEVICE_PAIRING_REPAIR_PERMISSION_PATH "/api/device/v1/pairing/repair-permission"
-#define INKTIME_FIRMWARE_VERSION "2.8.2"
+#define INKTIME_FIRMWARE_VERSION "2.8.3"
 
 static constexpr uint8_t kQueueAckBatchMaxEvents = 8U;
 static constexpr size_t kQueueAckBatchMaxBodyBytes = 12U * 1024U;
 
-// Secure builds require a compile-time or portal-provisioned trust anchor;
-// isolated LAN HTTP remains available only in an explicit development build.
-#ifndef INKTIME_ALLOW_INSECURE_DEVICE_HTTP
-#define INKTIME_ALLOW_INSECURE_DEVICE_HTTP 0
-#endif
+// Transport defaults are centralized in device_http_transport.h: PhotoPainter
+// accepts only literal RFC1918 HTTP targets, while other profiles stay
+// HTTPS-only unless an explicit build override is supplied.
 
 // =======================
 //  配置存储 / WiFi / WebServer
@@ -584,6 +582,22 @@ static String randomPortalSecret() {
   char value[25];
   for (uint8_t i = 0; i < 12; ++i) snprintf(value + i * 2, 3, "%02X", static_cast<unsigned>(esp_random() & 0xff));
   return String(value);
+}
+
+static String randomApPassword() {
+  static String previous;
+  String candidate;
+  do {
+    candidate = "";
+    candidate.reserve(8U);
+    while (candidate.length() < 8U) {
+      const uint8_t sample = static_cast<uint8_t>(esp_random() & 0xffU);
+      if (sample >= 250U) continue;
+      candidate += static_cast<char>('0' + (sample % 10U));
+    }
+  } while (candidate == previous);
+  previous = candidate;
+  return candidate;
 }
 
 static void clearConfigNVS() {
@@ -2047,7 +2061,9 @@ String buildConfigPage() {
 #endif
 
   String curSsid = g_cfg.wifi_ssid;
-  String host    = htmlEscape(g_cfg.backend_hostport);
+  String displayedHost = g_cfg.backend_hostport;
+  if (displayedHost.startsWith("http://")) displayedHost.remove(0, 7U);
+  String host    = htmlEscape(displayedHost);
   String caPem   = htmlEscape(g_cfg.ca_pem);
   int32_t tz     = g_cfg.tz_offset_minutes / 60;
   if (tz < -12 || tz > 14) tz = DEFAULT_TZ_MINUTES / 60;
@@ -2056,25 +2072,36 @@ String buildConfigPage() {
   uint8_t minute = g_cfg.refresh_minute;
   if (minute > 59) minute = DEFAULT_MINUTE;
   bool rot180    = g_cfg.rotate180;
+  String deviceState = "尚未配對";
+  if (g_cfg.auth_state == "auth_invalid" || g_cfg.auth_state == "revoked") {
+    deviceState = "需要重新配對";
+  } else if (g_cfg.device_secret.length() > 0U || g_cfg.device_token.length() > 0U) {
+    deviceState = "已配對";
+  }
 
   String html;
-  html.reserve(4096);
+  html.reserve(8192);
 
   html += F("<!DOCTYPE html><html><head><meta charset='utf-8'>");
   html += F("<meta name='viewport' content='width=device-width,initial-scale=1'>");
-  html += F("<title>InkTime 設定</title></head><body>");
-  html += F("<h2>InkTime 首次配對</h2>");
+  html += F("<title>InkTime 相框設定</title>");
+  html += F("<style>:root{color-scheme:light;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#172019;background:#f3f6f2}*{box-sizing:border-box}body{margin:0;padding:16px}main{max-width:560px;margin:0 auto}h1{font-size:1.65rem;margin:.4rem 0 1rem}h2{font-size:1.05rem;margin:0 0 .8rem}section,details{background:#fff;border:1px solid #dce4da;border-radius:14px;padding:16px;margin:12px 0;box-shadow:0 3px 12px rgba(30,55,34,.06)}label{display:block;font-weight:650;margin:.8rem 0 .35rem}input,select,textarea,button{font:inherit;width:100%;min-height:48px;border:1px solid #aebcab;border-radius:10px;padding:10px 12px;background:#fff}textarea{min-height:110px;resize:vertical}button{border:0;background:#286b3a;color:#fff;font-weight:750;margin-top:14px;cursor:pointer}.hint,.muted{color:#5f6d61;font-size:.92rem;line-height:1.45}.ap-grid{display:grid;grid-template-columns:auto 1fr;gap:6px 12px}.ap-grid strong{word-break:break-all}summary{font-weight:750;cursor:pointer;min-height:32px}.check{display:flex;gap:10px;align-items:center;font-weight:500}.check input{width:22px;min-height:22px}.time-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}@media(max-width:420px){body{padding:10px}section,details{padding:14px}h1{font-size:1.45rem}}</style>");
+  html += F("</head><body><main><h1>InkTime 相框設定</h1>");
   if (portalApSsid.length() > 0 && portalApPassword.length() > 0) {
-    html += F("<p><strong>本次 AP 配對資訊（5 分鐘有效）</strong><br>SSID: <code>");
+    html += F("<section><h2>配網資訊</h2><div class='ap-grid'><span>Wi-Fi</span><strong>");
     html += htmlEscape(portalApSsid);
-    html += F("</code><br>密碼: <code>");
+    html += F("</strong><span>密碼</span><strong>");
     html += htmlEscape(portalApPassword);
-    html += F("</code><br>設定網址: <code>http://192.168.4.1/</code></p>");
+    html += F("</strong><span>有效時間</span><strong>5 分鐘</strong></div></section>");
   }
-  html += F("<form method='POST' action='/save'><input type='hidden' name='setup_secret' value='"); html += portalSetupSecret; html += F("'><input type='hidden' name='nonce' value='"); html += portalNonce; html += F("'>");
+  html += F("<form method='POST' action='/save'><input type='hidden' name='setup_secret' value='");
+  html += portalSetupSecret;
+  html += F("'><input type='hidden' name='nonce' value='");
+  html += portalNonce;
+  html += F("'><section><h2>家用 Wi-Fi</h2>");
 
-  html += F("WiFi SSID:<br>");
-  html += F("<select id='ssid_select' style='width: 288px;' onchange=\"document.getElementById('ssid_input').value=this.value;\">");
+  html += F("<label for='ssid_select'>Wi-Fi</label>");
+  html += F("<select id='ssid_select' onchange=\"document.getElementById('ssid_input').value=this.value;\">");
   html += F("<option value=''>（手動輸入或選擇）</option>");
   if (n > 0) {
     for (int i = 0; i < n; ++i) {
@@ -2090,42 +2117,24 @@ String buildConfigPage() {
       html += F("</option>");
     }
   }
-  html += F("</select><br>");
-  html += F("<input id='ssid_input' name='ssid' style='width: 280px;' value='");
+  html += F("</select>");
+  html += F("<input id='ssid_input' name='ssid' autocomplete='username' aria-label='手動輸入 Wi-Fi' value='");
   html += htmlEscape(curSsid);
-  html += F("'><br><br>");
-
-  html += F("密碼:<br><input name='pass' type='password' style='width: 280px;'><br><br>");
-
-#if INKTIME_ALLOW_INSECURE_DEVICE_HTTP
-  html += F("<p style='color:#a33'><strong>LAN build：</strong>HTTP 僅限可信任 LAN／IoT VLAN，沒有 TLS 保護；可用 http://host:port。</p>");
-  html += F("InkTime 伺服器 (https:// 或可信任 LAN http://host:port):<br><input name='hostport' size='40' value='");
-#else
-  html += F("<p><strong>Secure build：</strong>InkTime 伺服器只允許 HTTPS。</p>");
-  html += F("InkTime 伺服器 (https://host:port):<br><input name='hostport' size='40' value='");
-#endif
-  html += host;
-  html += F("'><br><br>");
-
-  html += F("TLS Root CA PEM（HTTPS 必填；可由編譯 provisioning 或此頁寫入）：<br><textarea name='ca_pem' rows='8' cols='60' maxlength='");
-  html += String(inktime::kMaxDeviceCaPemBytes);
   html += F("'>");
-  html += caPem;
-  html += F("</textarea><br><small>只接受 -----BEGIN CERTIFICATE----- 至 -----END CERTIFICATE-----；CA 不是 secret，但不會寫入狀態回報。</small><br><br>");
 
-  html += F("<p><strong>裝置認證：</strong>");
-  if (g_cfg.device_token.length() > 0U && g_cfg.device_secret.length() == 0U) {
-    html += F("Legacy Token 相容模式（不在此頁顯示或要求重新輸入）。");
-  } else if (g_cfg.auth_state == "auth_invalid" || g_cfg.auth_state == "revoked") {
-    html += F("認證已失效，請由管理員允許重新配對後再提交設定。");
-  } else if (g_cfg.device_secret.length() > 0U) {
-    html += F("自動配對已完成；Device Secret 僅保存在裝置 NVS，不會顯示。");
-  } else {
-    html += F("尚未配對；儲存網路設定後由裝置建立短效配對請求。");
-  }
-  html += F("</p><br>");
+  html += F("<label for='wifi_pass'>密碼</label><input id='wifi_pass' name='pass' type='password' autocomplete='current-password'></section>");
 
-  html += F("備援刷新時間（連上伺服器後改由 Web 設定）：<br><select name='hour'>");
+  html += F("<section><h2>InkTime 伺服器</h2><label for='server_input'>伺服器位址</label><input id='server_input' name='hostport' inputmode='url' autocapitalize='none' spellcheck='false' placeholder='192.168.0.50:8765' value='");
+  html += host;
+  html += F("'><p class='hint'>請輸入執行 InkTime 的 Mac 或 NAS IP。<br>例如：192.168.0.50:8765</p></section>");
+
+  html += F("<section><h2>裝置狀態</h2><strong>");
+  html += htmlEscape(deviceState);
+  html += F("</strong><p class='muted'>儲存後，相框會自動連接 InkTime 並顯示配對碼。</p><label class='check'><input type='checkbox' name='rot180' value='1'");
+  if (rot180) html += F(" checked");
+  html += F("> 畫面旋轉 180°</label><button type='submit'>儲存並連線</button></section>");
+
+  html += F("<details class='advanced'><summary>進階設定</summary><div class='time-grid'><div><label for='refresh_hour'>備援刷新時間</label><select id='refresh_hour' name='hour'>");
   for (int h = 0; h < 24; ++h) {
     html += "<option value='";
     html += String(h);
@@ -2135,7 +2144,7 @@ String buildConfigPage() {
     html += String(h);
     html += F(" 時</option>");
   }
-  html += F("</select><select name='minute'>");
+  html += F("</select></div><div><label for='refresh_minute'>分鐘</label><select id='refresh_minute' name='minute'>");
   for (int m = 0; m < 60; m += 5) {
     html += "<option value='";
     html += String(m);
@@ -2146,9 +2155,9 @@ String buildConfigPage() {
     html += String(m);
     html += F(" 分</option>");
   }
-  html += F("</select><br><br>");
+  html += F("</select></div></div>");
 
-  html += F("備援 UTC 時區偏移:<br><select name='tz'>");
+  html += F("<label for='timezone'>UTC 時區偏移</label><select id='timezone' name='tz'>");
   for (int t = -12; t <= 14; ++t) {
     html += "<option value='";
     html += String(t);
@@ -2159,18 +2168,19 @@ String buildConfigPage() {
     html += String(t);
     html += F("</option>");
   }
-  html += F("</select><br><br>");
-
-  html += F("<label><input type='checkbox' name='rot180' value='1'");
-  if (rot180) html += F(" checked");
-  html += F("> 畫面旋轉 180°</label><br><br>");
+  html += F("</select><div id='tls_fields'");
+  if (!g_cfg.backend_hostport.startsWith("https://")) html += F(" hidden");
+  html += F("><label for='ca_pem'>TLS Root CA</label><textarea id='ca_pem' name='ca_pem' rows='5' maxlength='");
+  html += String(inktime::kMaxDeviceCaPemBytes);
+  html += F("' placeholder='-----BEGIN CERTIFICATE-----'>");
+  html += caPem;
+  html += F("</textarea><p class='hint'>HTTPS 可使用韌體內建 CA；只有自訂 CA 時才需要貼上 PEM。</p></div></details>");
 
   if (n <= 0) {
-    html += F("<p style='color:#c00'>未掃描到 Wi-Fi，可直接在上方輸入框手動填寫 SSID。</p>");
+    html += F("<p class='hint'>未掃描到 Wi-Fi，可直接手動輸入名稱。</p>");
   }
 
-  html += F("<input type='submit' value='儲存並重新啟動'>");
-  html += F("</form></body></html>");
+  html += F("</form><script>(()=>{const server=document.getElementById('server_input'),tls=document.getElementById('tls_fields');const toggleTls=()=>{tls.hidden=!server.value.trim().toLowerCase().startsWith('https://');};server.addEventListener('input',toggleTls);toggleTls();})();</script></main></body></html>");
 
   return html;
 }
@@ -2211,6 +2221,7 @@ void handleSave() {
   ssid.trim();
   host.trim();
   caPem.trim();
+  if (host.length() > 0U && host.indexOf("://") < 0) host = "http://" + host;
   const int schemeEnd = host.indexOf("://");
   const String hostOrigin = schemeEnd >= 0 ? host.substring(schemeEnd + 3) : String("");
   const bool unsafeOrigin = hostOrigin.length() == 0 || hostOrigin.indexOf('/') >= 0
@@ -2417,7 +2428,7 @@ void startConfigPortal() {
   while (chipHex.length() < 8) chipHex = "0" + chipHex;
   String shortId = chipHex.substring(chipHex.length() - 6);
   String apSsid = "InkTime-" + shortId;
-  String apPassword = randomPortalSecret(); // never derived from SSID, MAC, or chip ID
+  String apPassword = randomApPassword(); // hardware-random decimal value per AP session
   portalApSsid = apSsid;
   portalApPassword = apPassword;
 
@@ -2476,14 +2487,8 @@ void startConfigPortal() {
       }
       portalPowerSource = nextPowerSource;
     }
-#else
-    const bool portalPowerIsUsb = false;
 #endif
-
-#if INKTIME_PHOTOPAINTER_ENABLED
-    const bool portalPowerIsUsb = portalPowerSource == inktime::PowerSourceState::Usb;
-#endif
-    if (!portalPowerIsUsb && millis() - enterMs > AP_TIMEOUT_MS) {
+    if (millis() - enterMs > AP_TIMEOUT_MS) {
 #if DEBUG_LOG
       DBG_PRINTLN("[AP] timeout: no config saved");
 #endif
@@ -6365,6 +6370,9 @@ static bool loadOfflineScheduledLocalFrame(
 }
 
 static void runOfflineLocalCycle(bool selectNext = false) {
+  // Cache-only wakes fail closed with the radio down before touching the
+  // schedule, frame cache, display, or durable terminal ACK path.
+  stopNetworkBeforeDisplay();
   time_t rtcEpoch = 0;
   struct tm offlineTime = {};
   const bool hasOfflineTime = photoPainter.readRtc(rtcEpoch);
@@ -6381,7 +6389,6 @@ static void runOfflineLocalCycle(bool selectNext = false) {
     if (currentDisplaySkipped) {
       displayUpdated = true;
     } else {
-      stopNetworkBeforeDisplay();
       initDisplay(g_cfg);
       displayUpdated = drawFromFrameData(g_cfg);
     }

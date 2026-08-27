@@ -156,12 +156,11 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   max-awake supervisor，且設定服務最多五分鐘。
 - Manifest 必須是有限 Content-Length 的 JSON；圖片必須是精確長度的
   `application/octet-stream` 且 SHA-256 相符。
-- Backend transport 預設只接受有 compile-time 或 AP portal provisioning trust anchor
-  的 HTTPS；沒有 CA 會在建立連線前明確拒絕，不會進入 Arduino core 的 insecure TLS
-  路徑，也沒有 `setInsecure()` fallback。HTTP 只有在明確編譯
-  `INKTIME_ALLOW_INSECURE_DEVICE_HTTP=1` 且目標是私有 LAN host 時才允許；跨網路應
-  使用 HTTPS、VPN／IoT VLAN 與可驗證的 CA。首次配網的 AP SSID、隨機密碼與 URL 會
-  顯示在 portal 與 PhotoPainter 配對畫面，不會把密碼寫進 Serial log。
+- Backend transport 同時支援嚴格的 RFC1918 literal IPv4 HTTP 與有 compile-time／Portal
+  trust anchor 的 HTTPS；公開 IP、hostname、loopback、link-local、IPv6 HTTP 都拒絕。
+  HTTPS 沒有 CA 會在建立連線前明確拒絕，不會進入 Arduino core 的 insecure TLS 路徑，
+  也沒有 `setInsecure()` fallback。首次配網的 8 位隨機數字 AP 密碼會一致用於 SoftAP、
+  Portal 與 PhotoPainter 配對畫面，不會寫進 Serial log。
 - CA provisioning 的 build、portal 欄位、錯誤碼與人工驗收步驟見
   [ESP32 TLS／配網信任根配置](ESP32_TLS_PROVISIONING_ZH_TW.md)。
 - 韌體目前沒有 MQTT／Home Assistant client，因此沒有 Topic、Discovery entity 或

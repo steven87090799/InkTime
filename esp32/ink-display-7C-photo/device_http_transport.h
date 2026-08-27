@@ -5,6 +5,19 @@
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
 
+#include "hardware_profile.h"
+
+// PhotoPainter is designed for direct use with an InkTime host on a trusted
+// home LAN.  Other board profiles retain the HTTPS-only default.  Every HTTP
+// request still passes the strict RFC1918 literal-IP check in the transport.
+#ifndef INKTIME_ALLOW_INSECURE_DEVICE_HTTP
+#if DEVICE_PROFILE == DEVICE_PROFILE_WAVESHARE_PHOTOPAINTER
+#define INKTIME_ALLOW_INSECURE_DEVICE_HTTP 1
+#else
+#define INKTIME_ALLOW_INSECURE_DEVICE_HTTP 0
+#endif
+#endif
+
 namespace inktime {
 
 // Keep the portal field below the practical Preferences/NVS string budget;

@@ -79,7 +79,7 @@ arduino-cli compile \
   --build-property "compiler.cpp.extra_flags=-DINKTIME_PANEL_GDEP073E01=1" \
   esp32/ink-display-7C-photo
 
-# 可信任 LAN Production；secure build 的預設值仍是 0
+# 其他 ESP32 profile 的可信任 LAN build；PhotoPainter 已預設啟用嚴格 RFC1918 HTTP
 arduino-cli compile \
   --fqbn 'esp32:esp32:esp32s3:FlashSize=4M' \
   --build-property 'upload.maximum_size=1441792' \
@@ -102,8 +102,11 @@ Board 選 ESP32-S3，啟用 OPI PSRAM。正式版 `INKTIME_DEBUG_LOG=0`；短期
 新自製 ESP32 不再要求使用者複製或手動輸入 Device Token。流程如下：
 
 1. 首次開機或按住 GPIO38 再上電，裝置建立 `InkTime-XXXXXX` AP；5 分鐘未儲存會睡眠。
-2. AP 密碼為每次啟動重新產生的隨機值，不由 SSID 尾碼推導；請以裝置畫面或 AP 設定頁顯示值為準，不使用共用密碼。
-3. 連到 AP，瀏覽 `192.168.4.1`，只填 Wi-Fi SSID／密碼與 InkTime URL（例如 `http://192.168.1.20:8765`），不要填 Token。
+2. AP 密碼為每個 AP session 重新產生的 8 位隨機數字，不由 SSID 尾碼推導；裝置畫面、
+   SoftAP 與 Portal 顯示的是同一值，不使用共用密碼。
+3. 連到 AP，瀏覽 `192.168.4.1`，只填 Wi-Fi SSID／密碼與 InkTime Server（例如
+   `192.168.1.20:8765`）；韌體會自動補上 `http://`，不要填 Token。HTTPS 與 Root CA
+   留在進階設定。
 4. 儲存後裝置連 Wi-Fi，向 `/api/device/v1/pairing/request` 取得短期配對碼，並只在面板顯示配對碼；伺服器只保存 HMAC hash。
 5. 管理員在 InkTime Web「裝置」頁輸入實體面板上的配對碼，再核對裝置資訊並按「核准配對」。裝置輪詢 claim；核准後把 credential 先寫入 A/B NVS，再以 Bearer Secret／version confirm。只有 confirm 成功才建立並啟用正式裝置，之後開始受保護的 Manifest／Queue／Status 流程。
 6. 裝置重啟或下一次喚醒時不需要登入或 Session；使用 Device Secret 加上 credential version 直接呼叫裝置 API，完成下載、驗證、刷新後 deep sleep。
@@ -171,4 +174,7 @@ Web 裝置頁會顯示最後狀態、下載成功／失敗、韌體、訊號、H
 
 ## 10. 公網安全邊界
 
-目前韌體支援 URL 形式的 HTTP／HTTPS，但沒有在 Web 配置 CA certificate 的完整流程。隔離 LAN 可用 HTTP；跨網路請用 VPN／IoT VLAN 或在韌體加入受信任 CA／憑證釘選後才使用 HTTPS。不要使用 `setInsecure()` 當正式解法，也不要重新啟用 URL key 舊 API。
+PhotoPainter 可用 literal RFC1918 IP 的 HTTP 連接家用 Mac／NAS；公開 IP 與 hostname HTTP
+會拒絕。HTTPS 可使用 compile-time CA，或在 Portal「進階設定」貼入 Root CA。跨網路請用
+有可驗證 CA 的 HTTPS、VPN／IoT VLAN；不要使用 `setInsecure()`，也不要重新啟用 URL key
+舊 API。
