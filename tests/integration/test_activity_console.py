@@ -60,6 +60,23 @@ def test_activity_is_bounded_unifies_sources_and_redacts(client, app):
     assert "if(!autoRefresh.checked){stopPoll();return;}" in body
     assert "function stopPoll(){if(pollTimer)clearTimeout(pollTimer);pollTimer=null;}" in body
     assert "loadInFlight=true" in body
+    assert "if(newOnly){if(events.length)" in body
+    assert "button.textContent=`有 ${pending.length} 筆新事件`;}return;}" in body
+
+
+def test_activity_incremental_empty_page_keeps_the_rendered_timeline_contract(client, app):
+    create_admin(app)
+    login(client)
+    _seed_sources(app)
+
+    body = client.get("/activity?job_id=activity-job").get_data(as_text=True)
+
+    # An empty incremental response means "no new events". It must return
+    # before the full-load branch clears the already-rendered timeline.
+    incremental = body.index("if(newOnly){if(events.length)")
+    early_return = body.index("return;}summaryLast", incremental)
+    clear_existing = body.index("list.innerHTML=''", early_return)
+    assert incremental < early_return < clear_existing
 
 
 def test_activity_cursor_keeps_latest_initial_page_and_drains_each_source_without_gaps(app):
