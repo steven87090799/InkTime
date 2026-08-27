@@ -10,7 +10,10 @@ Manifest 與 BIN 必須符合 credential 所屬裝置 Profile。BIN endpoint 重
 
 Device Secret／Legacy Bearer Token 是身分驗證，不是加密。HTTP 會讓 credential 以明文經過網路，只允許在隔離 IoT VLAN 使用，並應啟用 client isolation、防火牆限制裝置只能連 InkTime Server，禁止跨網路路由。
 
-目前正式韌體沒有完整 Web CA provisioning；因此未配置可信 CA 的 HTTPS 預設拒絕，且沒有 `WiFiClientSecure::setInsecure()`。`INKTIME_ALLOW_UNVERIFIED_HTTPS` 只供開發編譯、預設關閉並輸出警告，不能作正式部署。加入 `WiFiClientSecure` 可信 CA／憑證輪替前，跨網路部署使用 VPN 或 TLS 終端內的受控 IoT 網段。
+PhotoPainter 可直接連 literal RFC1918 IPv4 HTTP；公開 IP、hostname、loopback、link-local
+與 IPv6 HTTP 都拒絕。HTTPS trust anchor 可由 compile-time CA 或 Portal「進階設定」提供，
+未配置可信 CA 時預設拒絕，且沒有 `WiFiClientSecure::setInsecure()`。跨網路部署仍須使用
+有可驗證 CA 的 HTTPS、VPN 或受控 IoT VLAN。
 
 ## 裝置測試 ACK
 

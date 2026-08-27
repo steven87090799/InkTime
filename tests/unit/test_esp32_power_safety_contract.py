@@ -445,12 +445,34 @@ def test_unexpected_loop_entry_sleeps_without_network_or_mutation():
 def test_existing_offline_timer_prefetch_and_key_actions_remain_routed():
     firmware = FIRMWARE.read_text(encoding="utf-8")
     setup = _between(firmware, "void setup()", "void loop()")
+    offline_cycle = _between(
+        firmware,
+        "static void runOfflineLocalCycle(bool selectNext = false)",
+        "void setup()",
+    )
+    assert offline_cycle.index("stopNetworkBeforeDisplay();") < offline_cycle.index(
+        "photoPainter.readRtc(rtcEpoch)"
+    )
+    for forbidden in (
+        "connectWiFi(",
+        "syncTime(",
+        "ensureWakeHttpSession(",
+        "downloadDailyPhotoBin(",
+    ):
+        assert forbidden not in offline_cycle
     local_key = _between(
         setup,
         "&& photoPainter.wokeFromUserButton()",
         "runOfflineLocalCycle(true);",
     )
     assert "&& !photoPainter.forceNetworkRefresh()" in local_key
+    for forbidden in (
+        "connectWiFi(",
+        "syncTime(",
+        "ensureWakeHttpSession(",
+        "downloadDailyPhotoBin(",
+    ):
+        assert forbidden not in local_key
     for marker in (
         'g_cfg.button_wake_action == "local_next"',
         "runOfflineLocalCycle(true);",

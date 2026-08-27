@@ -4,10 +4,13 @@
 
 ## 0. 目前韌體與 Config Store 版本
 
-- 目前自製 InkTime 韌體版本：`2.8.2`。
+- 目前自製 InkTime 韌體版本：`2.8.3`。
 - Config Store 目前寫入 schema：`4`。
 - Config Store 相容讀取舊 schema：`1`、`2`、`3`。
 - `2.8.2` 將連續 max-awake 故障退避改為 `1h → 6h → 24h → 每日一次`；每次退避後只允許一次 probation，正常完成睡眠或 GPIO4 明確 recovery 會清除故障狀態。此機制不寫 NVS，也不改 TG28／EPD 電源軌。
+- `2.8.3` 讓 PhotoPainter 可用嚴格 RFC1918 IP 的 LAN HTTP 直接配對，將 AP 密碼縮為
+  每個 session 重新產生的 8 位隨機數字，並簡化手機 Portal；HTTPS CA 驗證、Automatic
+  Pairing、Device Secret 與 A/B Config Store 不變。
 - Schema 4 新增同步策略欄位：`sync_strategy` 與 `sync_time`。`first_display_lead` 沿用既有 `prefetch_lead_minutes`，`sync_time` 必須為空；`fixed_daily` 則必須提供合法的 `HH:MM`。
 
 ## 1. 三種裝置認證模式
@@ -43,7 +46,7 @@
   "device_id": "esp32-ABC123",
   "pairing_nonce": "高熵隨機字串",
   "firmware_identity": "ESP32-S3-PhotoPainter",
-  "firmware_version": "2.8.2",
+  "firmware_version": "2.8.3",
   "panel_profile": "safe_4c",
   "capabilities": {
     "automatic_pairing": true,
@@ -84,7 +87,7 @@
 
 裝置在本地標記 `auth_invalid`／`revoked` 後，只有在下一輪先以現有 credential 呼叫 `GET /api/device/v1/pairing/repair-permission` 並取得 `pairing_allowed`，才會建立新的 pairing request；一般 paired wake 不呼叫此 probe。
 
-所有管理端點都受登入、administrator role 與 CSRF 保護；配對 response 與 error response 使用 `Cache-Control: no-store`。production pairing 只接受 HTTPS。
+所有管理端點都受登入、administrator role 與 CSRF 保護；配對 response 與 error response 使用 `Cache-Control: no-store`。production pairing 預設只接受 HTTPS；只有明確啟用 `INKTIME_ALLOW_INSECURE_HTTP=1` 的可信任 LAN production 才接受 HTTP。
 
 ## 4. Credential 生命週期
 

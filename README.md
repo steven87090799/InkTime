@@ -24,7 +24,7 @@ InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複
 - 繁體中文管理介面、動態 Log 層級、節流進度、錯誤中心、程序／cgroup／SQLite／Worker 診斷與已遮蔽診斷包。
 - Intel N100 低資源預設：單 Web worker、圖片特徵最大 512px 樣本、有界 Future、15 秒閒置輪詢與容器 CPU／RAM／PID 上限。
 
-正式部署採 loopback bind、Secure cookie、HTTPS public URL 與禁止 insecure HTTP；本機開發請明確使用 [`docker-compose.dev.yml`](docker-compose.dev.yml)。ESP32 backend transport 需要 trust anchor，配網密碼為隨機且在 portal／裝置畫面顯示；實體板、正式 NAS、真實 OpenRouter／OpenAI API 驗證仍標記 `NOT RUN`，交接詳見 [Production readiness handoff](docs/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md)。
+正式部署採 loopback bind、Secure cookie、HTTPS public URL 與禁止 insecure HTTP；本機開發請明確使用 [`docker-compose.dev.yml`](docker-compose.dev.yml)。PhotoPainter 可用嚴格 RFC1918 IP 直連家用 InkTime，HTTPS 仍要求 trust anchor；8 位隨機數字配網密碼只顯示在 portal／裝置畫面。實體板、正式 NAS、真實 OpenRouter／OpenAI API 驗證仍標記 `NOT RUN`，交接詳見 [Production readiness handoff](docs/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md)。
 
 ## 架構
 

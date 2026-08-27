@@ -38,16 +38,37 @@ mkdir -p data
 sudo chown -R 10001:10001 data
 ```
 
+### 3.0 macOS／OrbStack 開發環境連接實體 ESP32
+
+開發環境使用 `docker-compose.dev.yml` 時，Web port 預設以 `0.0.0.0:8765` 對家中 LAN
+開放，production 與 NAS Compose 的預設仍是 `127.0.0.1`。先複製本機範例並把
+`INKTIME_DEV_PUBLIC_URL` 換成 Mac 的 RFC1918 IP；若希望縮小監聽介面，也可把
+`INKTIME_DEV_BIND_ADDRESS` 設成同一個 IP：
+
+```bash
+cp .env.local.example .env
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+```
+
+```dotenv
+INKTIME_DEV_BIND_ADDRESS=192.168.0.50
+INKTIME_DEV_PUBLIC_URL=http://192.168.0.50:8765
+```
+
+相框 Portal 的 Server 欄可直接填 `192.168.0.50:8765`。這只適用可信任 LAN；不要在
+路由器做 Internet port forwarding，也不要把 production 的 loopback 安全預設改成全介面。
+
 ### 3.1 可信任 LAN Production HTTP
 
 ```bash
 cp .env.lan.production.example .env
 ```
 
-把 `INKTIME_PUBLIC_URL` 改成瀏覽器實際使用的 RFC1918 IP、`.local` 或單標籤內網主機；設定不同的絕對資料／唯讀照片路徑，並用實際 Git SHA 與 UTC build time 取代 `CHANGE_ME`。此模式固定搭配：
+把 `INKTIME_PUBLIC_URL` 與 `INKTIME_BIND_ADDRESS` 改成 NAS 實際使用的 RFC1918 IP；設定不同的絕對資料／唯讀照片路徑，並用實際 Git SHA 與 UTC build time 取代 `CHANGE_ME`。此模式固定搭配：
 
 ```dotenv
 INKTIME_ENVIRONMENT=production
+INKTIME_BIND_ADDRESS=192.168.1.100
 INKTIME_COOKIE_SECURE=0
 INKTIME_ALLOW_INSECURE_HTTP=1
 INKTIME_PROXY_TRUST=0
