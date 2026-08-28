@@ -84,6 +84,7 @@ static const uint32_t AP_TIMEOUT_MS = 5UL * 60UL * 1000UL; // 5 分钟
 static const uint8_t AP_MAX_SAVE_ATTEMPTS = 5;
 
 #if INKTIME_PHOTOPAINTER_ENABLED
+static constexpr uint32_t kPowerStatusDwellMs = 30UL * 1000UL;
 static constexpr uint32_t kMaxAwakeTimeoutMs = 10UL * 60UL * 1000UL;
 static constexpr uint32_t kMaxAwakeSupervisorStackBytes = 2048U;
 static constexpr uint32_t kMaxAwakeCommandArm = 1U;
@@ -194,7 +195,7 @@ GxEPD2_7C<
 #define DEVICE_PAIRING_CLAIM_PATH "/api/device/v1/pairing/claim"
 #define DEVICE_PAIRING_CONFIRM_PATH "/api/device/v1/pairing/confirm"
 #define DEVICE_PAIRING_REPAIR_PERMISSION_PATH "/api/device/v1/pairing/repair-permission"
-#define INKTIME_FIRMWARE_VERSION "2.8.5"
+#define INKTIME_FIRMWARE_VERSION "2.8.6"
 
 static constexpr uint8_t kQueueAckBatchMaxEvents = 8U;
 static constexpr size_t kQueueAckBatchMaxBodyBytes = 12U * 1024U;
@@ -850,6 +851,42 @@ static void saveDisplayRecord(const Config &cfg, bool succeeded) {
   if (rotationWritten > 0U) recordNvsWrite();
   if (successWritten > 0U) recordNvsWrite();
 }
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+static bool restoreLastSuccessfulPhoto() {
+  const StoredDisplayRecord stored = loadDisplayRecord();
+  if (!stored.valid || !stored.succeeded
+      || stored.boardProfile != String(kBoardConfig.name)) {
+    lastDeviceErrorCode = "DEVICE-POWER-RESTORE";
+    lastDeviceErrorMessage = "沒有可驗證的最後成功 PhotoPainter 畫面";
+    return false;
+  }
+  const inktime::DisplayRotation rotation = stored.rotation == 180
+      ? inktime::DisplayRotation::Rotate180
+      : inktime::DisplayRotation::Rotate0;
+  uint8_t* restoredFrame = nullptr;
+  if (!photoPainter.loadFormalFrame(stored.sha256.c_str(), rotation, &restoredFrame)
+      && !photoPainter.loadCachedFrame(
+        inktime::sourceHash32(stored.sha256.c_str()),
+        rotation,
+        &restoredFrame,
+        stored.sha256.c_str())) {
+    lastDeviceErrorCode = "DEVICE-POWER-RESTORE";
+    lastDeviceErrorMessage = "最後成功照片的本地 Frame 不存在或完整性驗證失敗";
+    return false;
+  }
+  const bool displayed = photoPainter.displayFrame(
+    restoredFrame,
+    inktime::kPhotoPainterFrameBytes
+  );
+  heap_caps_free(restoredFrame);
+  if (!displayed) {
+    lastDeviceErrorCode = photoPainter.lastError();
+    lastDeviceErrorMessage = "電量頁結束後恢復最後成功照片失敗";
+  }
+  return displayed;
+}
+#endif
 
 static bool shouldSkipCurrentDisplay(const Config &cfg) {
   const StoredDisplayRecord stored = loadDisplayRecord();
@@ -2469,8 +2506,10 @@ void startConfigPortal() {
   bool portalButtonStablePressed = portalButtonLastRaw;
   bool portalButtonClickArmed = portalButtonStablePressed;
   uint8_t portalButtonClickCount = 0U;
+  bool portalPowerPageVisible = false;
   uint32_t portalButtonChangedMs = enterMs;
   uint32_t portalButtonFirstReleasedMs = enterMs;
+  uint32_t portalPowerRestoreAtMs = enterMs;
 #endif
 
   for (;;) {
@@ -2505,7 +2544,10 @@ void startConfigPortal() {
             const String refreshMessage = String("Power status refresh completed in ")
                 + String(photoPainter.lastRefreshDurationMs()) + String(" ms");
             INK_LOG_INFO("power_status_refresh_ready", refreshMessage);
+            portalPowerPageVisible = true;
+            portalPowerRestoreAtMs = millis() + kPowerStatusDwellMs;
           } else {
+            portalPowerPageVisible = false;
             INK_LOG_ERROR("power_status_refresh_failed", photoPainter.lastError());
           }
         }
@@ -2537,12 +2579,37 @@ void startConfigPortal() {
           footer
         );
         if (pairingScreenReady) {
+          portalPowerPageVisible = false;
           const String refreshMessage = String("KEY1 pairing refresh completed in ")
               + String(photoPainter.lastRefreshDurationMs()) + String(" ms");
           INK_LOG_INFO("pairing_key_refresh_ready", refreshMessage);
         } else {
           INK_LOG_ERROR("pairing_key_refresh_failed", photoPainter.lastError());
         }
+      }
+    }
+    if (portalPowerPageVisible
+        && portalButtonClickCount == 0U
+        && !portalButtonClickArmed
+        && static_cast<int32_t>(millis() - portalPowerRestoreAtMs) >= 0) {
+      INK_LOG_INFO(
+        "power_status_restore_started",
+        "Power page dwell completed; restoring the pairing page"
+      );
+      const bool pairingScreenReady = photoPainter.displayPairingScreen(
+        apSsid.c_str(),
+        apPassword.c_str(),
+        "http://192.168.4.1",
+        nullptr,
+        "KEY READY"
+      );
+      portalPowerPageVisible = false;
+      if (pairingScreenReady) {
+        const String refreshMessage = String("Pairing page restored in ")
+            + String(photoPainter.lastRefreshDurationMs()) + String(" ms");
+        INK_LOG_INFO("power_status_restore_ready", refreshMessage);
+      } else {
+        INK_LOG_ERROR("power_status_restore_failed", photoPainter.lastError());
       }
     }
 
@@ -2568,6 +2635,16 @@ void startConfigPortal() {
 #if DEBUG_LOG
       DBG_PRINTLN("[AP] timeout: no config saved");
 #endif
+      if (portalPowerPageVisible && apOk) {
+        (void)photoPainter.displayPairingScreen(
+          apSsid.c_str(),
+          apPassword.c_str(),
+          "http://192.168.4.1",
+          nullptr,
+          "PAIRING READY"
+        );
+        portalPowerPageVisible = false;
+      }
       uint32_t mins = minutesToNextRefreshFromLastEpoch(g_cfg);
 #if DEBUG_LOG
       DBG_PRINT("[AP] sleep to next refresh, minutes="); DBG_PRINTLN((int)mins);
@@ -6615,6 +6692,11 @@ void setup() {
 
   loadConfig(g_cfg);
 
+  if (g_cfg.valid) {
+    struct tm bootTime = {};
+    (void)seedTimeFromRtc(g_cfg, bootTime);
+  }
+
 #if INKTIME_PHOTOPAINTER_ENABLED
   if (photoPainter.batteryStatusRequested()) {
     INK_LOG_INFO(
@@ -6626,21 +6708,41 @@ void setup() {
       const String refreshMessage = String("Power status refresh completed in ")
           + String(photoPainter.lastRefreshDurationMs()) + String(" ms");
       INK_LOG_INFO("power_status_refresh_ready", refreshMessage);
+      delay(kPowerStatusDwellMs);
+      if (!g_cfg.valid) {
+        startConfigPortal();
+        return;
+      }
+      INK_LOG_INFO(
+        "power_status_restore_started",
+        "Power page dwell completed; restoring the last successful photo"
+      );
+      if (restoreLastSuccessfulPhoto()) {
+        const String restoreMessage = String("Last successful photo restored in ")
+            + String(photoPainter.lastRefreshDurationMs()) + String(" ms");
+        INK_LOG_INFO("power_status_restore_ready", restoreMessage);
+        time_t restoreEpoch = 0;
+        struct tm restoreTime = {};
+        const bool hasRestoreTime = photoPainter.readRtc(restoreEpoch)
+            && restoreEpoch > 0;
+        if (hasRestoreTime) {
+          struct timeval value = {restoreEpoch, 0};
+          settimeofday(&value, nullptr);
+          applyFixedTimezoneWithoutNtp(g_cfg.tz_offset_minutes);
+          localtime_r(&restoreEpoch, &restoreTime);
+        }
+        sleepUntilNextSchedule(g_cfg, hasRestoreTime, restoreTime);
+        return;
+      }
+      INK_LOG_WARN(
+        "power_status_restore_fallback",
+        "Local last-photo restore unavailable; continuing through normal refresh"
+      );
     } else {
       INK_LOG_ERROR("power_status_refresh_failed", photoPainter.lastError());
     }
-    const uint32_t sleepMinutes = g_cfg.valid
-        ? minutesToNextRefreshFromLastEpoch(g_cfg)
-        : 5U;
-    goDeepSleepMinutes(sleepMinutes);
-    return;
   }
 #endif
-
-  if (g_cfg.valid) {
-    struct tm bootTime = {};
-    (void)seedTimeFromRtc(g_cfg, bootTime);
-  }
 
 #if INKTIME_PHOTOPAINTER_ENABLED
   const bool offlineTxnRecovered = reconcilePendingScheduleConfigTransaction(g_cfg);

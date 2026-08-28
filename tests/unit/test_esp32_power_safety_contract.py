@@ -420,6 +420,10 @@ def test_key_double_click_power_page_is_read_only_and_keeps_boot_reserved():
     assert "batteryStatusRequested_" in begin
     assert "photoPainter.batteryStatusRequested()" in setup
     assert "photoPainter.displayPowerStatusScreen()" in setup
+    assert "delay(kPowerStatusDwellMs);" in setup
+    assert "restoreLastSuccessfulPhoto()" in setup
+    assert "power_status_restore_ready" in setup
+    assert "power_status_restore_fallback" in setup
     assert "BATTERY: " in power_page
     assert "VOLTAGE: " in power_page
     assert "CHARGING: " in power_page
@@ -427,6 +431,35 @@ def test_key_double_click_power_page_is_read_only_and_keeps_boot_reserved():
     assert "writeRegisters(" not in power_page
     assert "board_.buttons.boot" not in begin
     assert "board_.buttons.power" not in begin
+
+
+def test_power_page_restore_uses_only_verified_local_last_successful_frame():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    restore = _between(
+        firmware,
+        "static bool restoreLastSuccessfulPhoto()",
+        "static bool shouldSkipCurrentDisplay",
+    )
+    assert "loadDisplayRecord()" in restore
+    assert "stored.valid" in restore and "stored.succeeded" in restore
+    assert "stored.boardProfile != String(kBoardConfig.name)" in restore
+    assert "photoPainter.loadFormalFrame(" in restore
+    assert "photoPainter.loadCachedFrame(" in restore
+    assert "inktime::sourceHash32(stored.sha256.c_str())" in restore
+    assert "photoPainter.displayFrame(" in restore
+    assert "WiFi" not in restore
+    assert "HTTP" not in restore
+    assert "writeRegisters(" not in restore
+
+    portal = _between(
+        firmware,
+        "void startConfigPortal()",
+        "bool runUsbServiceMode(bool explicitRecoveryRequested)",
+    )
+    assert "portalPowerPageVisible" in portal
+    assert "portalPowerRestoreAtMs = millis() + kPowerStatusDwellMs" in portal
+    assert "power_status_restore_ready" in portal
+    assert '"KEY READY"' in portal
 
 
 def test_explicit_recovery_precedes_normal_display_network_shutdown():
