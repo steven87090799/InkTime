@@ -42,7 +42,7 @@
       <label>最愛照片額外加分 <output data-output="favorite_bonus">+{{ current_profile.favorite_bonus }}</output><input type="range" name="favorite_bonus" min="0" max="30" step="1" value="{{ current_profile.favorite_bonus }}"></label>
     </div>
     <label class="rules-editor">照片高低分規則<small>高鑑別度範本會要求模型使用完整 0～100 範圍，避免不確定時一律給 75～80 分。</small><textarea name="rules" rows="28" minlength="100" maxlength="12000" required>{{ current_profile.rules }}</textarea></label>
-    <button class="primary" type="submit">儲存為新版本</button>
+    <button class="primary" type="submit">儲存為新版本</button><span id="scoring-profile-status" role="status" aria-live="polite"></span>
   </form>
   {% else %}
   <pre>{{ current_profile.rules }}</pre>
@@ -93,22 +93,25 @@
 
   profileForm.addEventListener('submit', async event => {
     event.preventDefault();
-    if (updateWeights() !== 100) return alert('四項權重合計必須等於 100%');
-    const form = new FormData(profileForm);
-    const body = Object.fromEntries(form.entries());
+    const profileStatus = document.getElementById('scoring-profile-status');
+    if (updateWeights() !== 100) return window.inktimeSetStatus(profileStatus, '四項權重合計必須等於 100%', 'error');
+    const body = window.inktimeFormJson(profileForm, {
+      memory_weight: 'integer', beauty_weight: 'integer', technical_weight: 'integer',
+      emotion_weight: 'integer', favorite_bonus: 'integer'
+    });
     const response = await window.inktimeFetch('/api/v1/scoring/profiles', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
     });
-    const data = await response.json();
-    if (!response.ok) return alert(data.message || '儲存失敗');
+    const data = await window.inktimeDecodeJson(response);
+    if (!response.ok) return window.inktimeSetStatus(profileStatus, data.message || '儲存失敗', 'error');
     location.reload();
   });
 
   document.querySelectorAll('.restore-profile').forEach(button => button.addEventListener('click', async () => {
-    if (!confirm('將以此歷史版本建立新的目前版本，確定？')) return;
+    if (!await window.inktimeConfirm('將以此歷史版本建立新的目前版本，確定？', {title: '還原評分版本'})) return;
     const response = await window.inktimeFetch(`/api/v1/scoring/profiles/${button.dataset.id}/restore`, {method: 'POST'});
-    const data = await response.json();
-    if (!response.ok) return alert(data.message || '還原失敗');
+    const data = await window.inktimeDecodeJson(response);
+    if (!response.ok) return window.inktimeSetStatus('#scoring-profile-status', data.message || '還原失敗', 'error');
     location.reload();
   }));
 
@@ -123,7 +126,7 @@
   };
   testForm.addEventListener('submit', async event => {
     event.preventDefault();
-    if (testInFlight || !confirm('這會呼叫目前高品質模型並產生費用，確定測試？')) return;
+    if (testInFlight || !await window.inktimeConfirm('這會呼叫目前高品質模型並產生費用，確定測試？', {title: '確認付費模型測試'})) return;
     const status = document.getElementById('scoring-test-status');
     const result = document.getElementById('scoring-test-result');
     testInFlight = true;
@@ -194,8 +197,8 @@
     }
   });
 
-  document.getElementById('distinctive-preset').addEventListener('click', () => {
-    if (!confirm('會將編輯器內容換成高鑑別度範本；尚未儲存的文字會被取代，確定？')) return;
+  document.getElementById('distinctive-preset').addEventListener('click', async () => {
+    if (!await window.inktimeConfirm('會將編輯器內容換成高鑑別度範本；尚未儲存的文字會被取代，確定？', {title: '套用高鑑別度範本'})) return;
     profileForm.elements.rules.value = {{ recommended_rules|tojson }};
     profileForm.elements.name.value = '高鑑別度評分規則';
     profileForm.elements.rules.focus();

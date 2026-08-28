@@ -7,7 +7,8 @@ from uuid import uuid4
 import pytest
 
 from inktime.app.core.idempotency import request_fingerprint, scoped_idempotency_key
-from inktime.app.repositories.jobs import PreviewCapacityError
+from inktime.app.domain.jobs.failure_policy import FailureClass, classify_codes
+from inktime.app.repositories.jobs import JobRepository, PreviewCapacityError
 from inktime.app.services.jobs import JobService
 from inktime.app.workers.job_worker import BoundedJobWorker
 
@@ -148,6 +149,54 @@ def test_pause_resume_cancel_state_machine(app):
     assert repository.get(cancelled_id)["status"] == "cancelled"
 
 
+def test_pause_without_claimed_item_transitions_directly_to_paused(app):
+    service, repository, job_id = create_job(app, 2)
+    service.start(job_id)
+
+    service.pause(job_id)
+
+    assert repository.get(job_id)["status"] == "paused"
+    assert repository.claim(job_id, "late-worker", 1) == []
+
+
+def test_pause_with_active_item_waits_for_completion_and_stops_new_claims(app):
+    service, repository, job_id = create_job(app, 2)
+    service.start(job_id)
+    claimed = repository.claim(job_id, "worker-a", 1)
+    assert len(claimed) == 1
+    item_id = str(claimed[0]["id"])
+
+    service.pause(job_id)
+
+    assert repository.get(job_id)["status"] == "pausing"
+    assert repository.claim(job_id, "worker-b", 1) == []
+    assert repository.can_commit_item(
+        job_id,
+        item_id,
+        "worker-a",
+        str(claimed[0]["idempotency_key"]),
+    )
+    assert repository.complete_item(job_id, item_id, {"ok": True}, worker_id="worker-a")
+    assert repository.acknowledge_pause(job_id)
+    assert repository.get(job_id)["status"] == "paused"
+
+
+def test_pause_rejects_pending_paused_and_terminal_jobs(app):
+    service, repository, job_id = create_job(app, 1)
+    with pytest.raises(ValueError, match="目前狀態無法暫停"):
+        service.pause(job_id)
+
+    service.start(job_id)
+    service.pause(job_id)
+    with pytest.raises(ValueError, match="目前狀態無法暫停"):
+        service.pause(job_id)
+
+    service.resume(job_id)
+    BoundedJobWorker(repository, lambda item: {"ok": True}).run_job(job_id)
+    with pytest.raises(ValueError, match="目前狀態無法暫停"):
+        service.pause(job_id)
+
+
 def test_worker_never_submits_all_items_at_once(app):
     service, repository, job_id = create_job(app, 250)
     service.start(job_id)
@@ -169,6 +218,30 @@ def test_completed_item_records_actual_processing_stage(app):
     item = repository.list_items(job_id)[0]
     assert item["status"] == "completed"
     assert item["stage"] == "prefilter"
+
+
+def test_missing_source_is_dead_lettered_and_job_reaches_terminal_state(app):
+    service, repository, job_id = create_job(app, 1)
+    service.start(job_id)
+
+    def missing_source(_item):
+        raise FileNotFoundError("source missing")
+
+    BoundedJobWorker(repository, missing_source, max_attempts=5).run_job(job_id)
+
+    item = repository.list_items(job_id)[0]
+    job = repository.get(job_id)
+    assert item["status"] == "failed"
+    assert item["error_code"] == "JOB-SOURCE-MISSING"
+    assert item["attempts"] == 1
+    assert job["status"] == "completed_with_errors"
+
+    reloaded = JobRepository(app.extensions["inktime_database"])
+    persisted_codes = reloaded.failure_codes(job_id)
+    assert persisted_codes == ["JOB-SOURCE-MISSING"]
+    assert classify_codes(persisted_codes) == FailureClass.TERMINAL_NO_RETRY
+    reloaded.recover_stale()
+    assert reloaded.list_items(job_id)[0]["status"] == "failed"
 
 
 def test_stale_running_items_are_recovered_after_restart(app):

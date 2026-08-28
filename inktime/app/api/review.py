@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from flask import Blueprint, abort, current_app, g, render_template, request, send_file
 
 from inktime.app.core.json_values import json_int, json_object_payload
-from inktime.app.core.paths import safe_join
+from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.repositories.reviews import ReviewConflictError
 from inktime.app.web.access import administrator_required, login_required
 
@@ -115,7 +116,10 @@ def review_thumbnail(photo_id: str):
     photo = current_app.extensions["inktime_photo_repository"].get_with_path(photo_id)
     if photo is None or not str(photo["sha256"] or ""):
         abort(404, description="REVIEW-404 找不到照片縮圖")
-    source = safe_join(photo["root_path"], str(photo["relative_path"]))
+    try:
+        source = safe_join(Path(str(photo["root_path"])), str(photo["relative_path"]))
+    except UnsafePathError:
+        abort(400, description="REVIEW-400 照片路徑不合法")
     if not source.is_file():
         abort(404, description="REVIEW-404 找不到照片縮圖")
     try:

@@ -126,6 +126,22 @@ class ProviderService:
             )
         ]
 
+    def usable_route_snapshot(self) -> list[dict]:
+        """Return enabled, configured Vision routes without making paid/network calls."""
+
+        usable_ids = {
+            str(row["id"])
+            for row in self.repository.list()
+            if bool(row.get("enabled"))
+            and bool(row.get("supports_vision"))
+            and bool(str(row.get("base_url") or "").strip())
+            and (
+                str(row.get("kind") or "").casefold() == "ollama"
+                or bool(row.get("api_key_configured"))
+            )
+        }
+        return [item for item in self.route_snapshot() if str(item["provider_id"]) in usable_ids]
+
     def identity_snapshot(self, provider_id: str) -> dict[str, str]:
         """Return the non-secret identity required for safe Batch cleanup.
 

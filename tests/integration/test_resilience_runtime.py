@@ -38,6 +38,36 @@ def _ack(client, token: str, item_id: str, version: int, event: str, key: str):
     )
 
 
+def test_feedback_success_response_matches_committed_database_record(client, app):
+    create_admin(app)
+    login(client)
+    _seed_photo(app, "feedback-photo")
+
+    response = client.post(
+        "/api/feedback",
+        json={"photo_id": "feedback-photo", "feedback_type": "LIKE"},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+
+    assert response.status_code == 201
+    result = response.get_json()
+    assert result["feedback_id"]
+    assert result["photo_id"] == "feedback-photo"
+    assert result["feedback_type"] == "LIKE"
+    assert result["created_at"]
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute(
+            "SELECT id,photo_id,feedback_type,created_at FROM photo_feedback WHERE id=?",
+            (result["feedback_id"],),
+        ).fetchone()
+    assert dict(row) == {
+        "id": result["feedback_id"],
+        "photo_id": result["photo_id"],
+        "feedback_type": result["feedback_type"],
+        "created_at": result["created_at"],
+    }
+
+
 def test_queue_manifest_download_ack_is_owned_idempotent_and_updates_history(client, app):
     create_admin(app)
     login(client)

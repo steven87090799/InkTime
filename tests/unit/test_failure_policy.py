@@ -10,6 +10,7 @@ from inktime.app.domain.jobs.failure_policy import (
     NoEligibleCandidatesError,
     classify_codes,
     classify_failure,
+    failure_code,
 )
 
 
@@ -23,6 +24,9 @@ def test_terminal_business_outcomes_never_use_retry_policy():
 
 
 def test_transient_and_stale_outcomes_remain_distinct():
+    assert failure_code(FileNotFoundError("source missing")) == "JOB-SOURCE-MISSING"
+    assert classify_failure("JOB-SOURCE-MISSING") == FailureClass.TERMINAL_NO_RETRY
+    assert classify_codes(["JOB-003"]) == FailureClass.RETRYABLE
     assert classify_codes(["JOB-004"]) == FailureClass.RETRYABLE
     assert classify_codes(["LEASE_EXPIRED"]) == FailureClass.STALE_RECOVERY
     assert classify_codes(["NO_CONTENT", "JOB-004"]) == FailureClass.RETRYABLE

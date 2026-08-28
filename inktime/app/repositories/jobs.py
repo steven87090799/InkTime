@@ -918,7 +918,7 @@ class JobRepository:
             ).fetchone()
         return bool(
             row is not None
-            and str(row["job_status"]) in {"running", "retrying"}
+            and str(row["job_status"]) in {"running", "retrying", "pausing"}
             and str(row["item_status"]) == "running"
             and str(row["worker_id"] or "") == worker_id
             and str(row["idempotency_key"] or "") == idempotency_key
@@ -947,16 +947,57 @@ class JobRepository:
     def request_pause(self, job_id: str) -> bool:
         now = utc_now()
         with self.database.session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                job = connection.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+                if job is None or str(job["status"]) not in {"running", "retrying"}:
+                    connection.execute("COMMIT")
+                    return False
+                active_items = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM job_items WHERE job_id=? AND status='running'",
+                        (job_id,),
+                    ).fetchone()[0]
+                )
+                target = "pausing" if active_items else "paused"
+                connection.execute(
+                    "UPDATE jobs SET status=?,pause_requested_at=?,heartbeat_at=? WHERE id=?",
+                    (target, now, now, job_id),
+                )
+                connection.execute(
+                    "INSERT INTO job_events(job_id,event,message,details_json,created_at) VALUES (?,?,?,?,?)",
+                    (
+                        job_id,
+                        "pause_requested" if active_items else "paused",
+                        "已要求暫停；目前處理中的項目完成後停止"
+                        if active_items
+                        else "工作尚無處理中項目，已直接暫停",
+                        json.dumps({"active_items": active_items}, ensure_ascii=False),
+                        now,
+                    ),
+                )
+                connection.execute("COMMIT")
+                return True
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    def acknowledge_pause(self, job_id: str) -> bool:
+        now = utc_now()
+        with self.database.session() as connection:
             cursor = connection.execute(
-                "UPDATE jobs SET status='pausing', pause_requested_at=? WHERE id=? AND status IN ('running','retrying')",
+                """
+                UPDATE jobs SET status='paused',heartbeat_at=?
+                WHERE id=? AND status='pausing'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM job_items WHERE job_id=jobs.id AND status='running'
+                  )
+                """,
                 (now, job_id),
             )
         if cursor.rowcount:
-            self.add_event(job_id, "pause_requested", "已要求暫停；目前處理中的項目完成後停止")
+            self.add_event(job_id, "paused", "工作狀態已變更為 paused")
         return bool(cursor.rowcount)
-
-    def acknowledge_pause(self, job_id: str) -> None:
-        self.transition(job_id, {"pausing"}, "paused", "paused")
 
     def cancel(self, job_id: str) -> bool:
         now = utc_now()
@@ -1398,7 +1439,16 @@ class JobRepository:
                             (now, item_id, now),
                         )
                         recovered += int(cursor.rowcount)
-                connection.execute("UPDATE jobs SET status='paused' WHERE status='pausing'")
+                connection.execute(
+                    """
+                    UPDATE jobs SET status='paused',heartbeat_at=?
+                    WHERE status='pausing'
+                      AND NOT EXISTS (
+                        SELECT 1 FROM job_items WHERE job_id=jobs.id AND status='running'
+                      )
+                    """,
+                    (now,),
+                )
                 connection.execute("COMMIT")
                 return recovered
             except Exception:

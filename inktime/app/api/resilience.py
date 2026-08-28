@@ -51,9 +51,13 @@ def _feedback_payload() -> dict:
 @bp.get("/decision-traces")
 @login_required
 def decision_traces_page():
-    return render_template(
-        "resilience.html", title="決策追蹤", section="traces", result=_repo().list_traces(page_size=30)
-    )
+    try:
+        result = _repo().list_traces(
+            page=request.args.get("page"), page_size=request.args.get("page_size", 30)
+        )
+    except ValueError as exc:
+        abort(400, description=str(exc))
+    return render_template("resilience.html", title="決策追蹤", section="traces", result=result)
 
 
 @bp.get("/feedback")
@@ -105,7 +109,12 @@ def retention_page():
 @bp.get("/rollouts")
 @login_required
 def rollouts_page():
-    result = _repo().list_rollouts(page_size=30)
+    try:
+        result = _repo().list_rollouts(
+            page=request.args.get("page"), page_size=request.args.get("page_size", 30)
+        )
+    except ValueError as exc:
+        abort(400, description=str(exc))
     with current_app.extensions["inktime_database"].session() as connection:
         result["releases"] = [
             dict(row)

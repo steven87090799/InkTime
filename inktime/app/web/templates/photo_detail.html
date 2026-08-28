@@ -10,6 +10,11 @@
   <a href="/photos">返回照片庫</a>
 </div>
 
+<section class="panel">
+  <h2>目前最終狀態</h2>
+  <p><strong>{% if photo.exclusion_status == 'auto_excluded' %}已自動排除{% elif photo.exclusion_status == 'manually_excluded' %}已人工排除{% elif photo.exclusion_status == 'pending_review' %}待人工確認{% else %}符合候選資格{% endif %}</strong>{% if photo.reject_reason %}；原因：{{ photo.reject_reason }}{% endif %}</p>
+</section>
+
 {% if g.user.role == 'administrator' %}
 <section class="panel">
   <h2>人工修正</h2>
@@ -96,7 +101,7 @@
       <article class="analysis-card">
         <div class="panel-head">
           <strong>{{ a.origin_label }} · {{ a.stage }}</strong>
-          <span class="status {{ 'ok' if a.should_keep else 'warning' }}">{{ '建議保留' if a.should_keep else '建議排除' }}</span>
+          <span class="status {{ 'ok' if a.should_keep else 'warning' }}">該次模型判斷：{{ '建議保留' if a.should_keep else '建議排除' }}</span>
         </div>
         <p class="analysis-meta">{{ a.provider or '未知 Provider' }} / {{ a.model or '未知模型' }} · {{ a.created_at }}</p>
         <dl>
@@ -120,11 +125,11 @@
 
     <div class="panel">
       <h2>Token 與成本</h2>
-      {% for u in usage %}<p>{{ u.request_type }} · {{ u.model }} · {{ u.input_tokens + u.output_tokens }} Token · {% if u.cost_source == 'unknown' %}成本 unknown（Provider 未回報且無價格）{% elif u.cost_source == 'provider_reported' %}Provider 成本 US$ {{ '%.6f'|format(u.actual_cost) }}{% else %}估算成本 US$ {{ '%.6f'|format(u.estimated_cost) }}{% endif %}</p>{% else %}<p class="empty">沒有 API 使用量；若被本機預篩選排除，這裡會維持 0 Token。</p>{% endfor %}
+      {% for u in usage %}<p>{{ u.request_type }} · {{ u.model }} · {{ u.input_tokens + u.output_tokens }} Token · {% if u.cost_source == 'unknown' %}未定價成本（Provider 未回報且尚未設定價格）{% elif u.cost_source == 'provider_reported' %}Provider 成本 US$ {{ '%.6f'|format(u.actual_cost) }}{% else %}估算成本 US$ {{ '%.6f'|format(u.estimated_cost) }}{% endif %}</p>{% else %}<p class="empty">沒有 API 使用量；若被本機預篩選排除，這裡會維持 0 Token。</p>{% endfor %}
     </div>
     <div class="panel"><h2>錯誤記錄</h2>{% for e in errors %}<p><code>{{ e.error_code }}</code> {{ e.message }}</p>{% else %}<p class="empty">沒有錯誤。</p>{% endfor %}</div>
     <div class="panel"><h2>處理歷史</h2>{% for event in events %}<p>{{ event.created_at }} · {{ event.event }}<br><code>{{ event.changes_json }}</code></p>{% else %}<p class="empty">尚無人工修改。</p>{% endfor %}</div>
   </section>
 </div>
 {% endblock %}
-{% block scripts %}{% if g.user.role == 'administrator' %}<script nonce="{{ csp_nonce }}">document.getElementById('photo-edit').onsubmit=async event=>{event.preventDefault();const form=new FormData(event.target);const response=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({favorite:form.has('favorite'),captured_at:form.get('captured_at'),side_caption:form.get('side_caption'),types:form.getAll('types')})});if(response.ok)location.reload();else alert((await response.json()).message||'更新失敗');};document.querySelectorAll('.orientation-set').forEach(b=>b.onclick=async()=>{const r=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}/orientation',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({rotation_cw:b.dataset.clear?null:Number(b.dataset.rotation)})});if(r.ok)location.reload();else alert((await r.json()).message||'儲存失敗')});const privacyButton=document.getElementById('save-never-upload');if(privacyButton)privacyButton.onclick=async()=>{const r=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}/upload-privacy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({never_upload:document.getElementById('never-upload').checked})});if(r.ok)location.reload();else alert((await r.json()).message||'儲存失敗')};</script>{% endif %}{% endblock %}
+{% block scripts %}{% if g.user.role == 'administrator' %}<script nonce="{{ csp_nonce }}">const photoStatus=document.createElement('p');photoStatus.setAttribute('aria-live','polite');document.getElementById('photo-edit').after(photoStatus);document.getElementById('photo-edit').onsubmit=async event=>{event.preventDefault();const form=new FormData(event.target);const response=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({favorite:form.has('favorite'),captured_at:form.get('captured_at'),side_caption:form.get('side_caption'),types:form.getAll('types')})});if(response.ok)location.reload();else window.inktimeSetStatus(photoStatus,(await window.inktimeDecodeJson(response)).message||'更新失敗','error');};document.querySelectorAll('.orientation-set').forEach(b=>b.onclick=async()=>{const r=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}/orientation',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({rotation_cw:b.dataset.clear?null:Number(b.dataset.rotation)})});if(r.ok)location.reload();else window.inktimeSetStatus(photoStatus,(await window.inktimeDecodeJson(r)).message||'儲存失敗','error')});const privacyButton=document.getElementById('save-never-upload');if(privacyButton)privacyButton.onclick=async()=>{const r=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}/upload-privacy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({never_upload:document.getElementById('never-upload').checked})});if(r.ok)location.reload();else window.inktimeSetStatus(photoStatus,(await window.inktimeDecodeJson(r)).message||'儲存失敗','error')};</script>{% endif %}{% endblock %}

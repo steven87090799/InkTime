@@ -49,6 +49,31 @@ def test_disabled_rejects_analysis_job_before_a_plan_or_job_item_is_created(clie
         assert connection.execute("SELECT COUNT(*) FROM job_items").fetchone()[0] == 0
 
 
+def test_model_job_requires_a_configured_usable_provider_but_local_job_does_not(client, app):
+    create_admin(app)
+    login(client)
+    app.extensions["inktime_settings_repository"].update(
+        "analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="test"
+    )
+    headers = {"X-CSRF-Token": csrf(client)}
+
+    blocked = client.post(
+        "/api/v1/jobs",
+        json={"strategy": "single", "photo_ids": []},
+        headers=headers,
+    )
+    local = client.post(
+        "/api/v1/jobs",
+        json={"strategy": "local", "photo_ids": []},
+        headers=headers,
+    )
+
+    assert blocked.status_code == 409
+    assert blocked.json["error_code"] == "VLM-001"
+    assert "Vision Provider" in blocked.json["message"]
+    assert local.status_code == 201
+
+
 def test_analysis_idempotency_conflict_has_stable_api_error_code(client, app):
     create_admin(app)
     login(client)

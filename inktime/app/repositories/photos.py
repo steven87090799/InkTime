@@ -29,6 +29,7 @@ from inktime.app.domain.photos.dates import materialized_capture_fields, parse_p
 
 LOCAL_QUALITY_RULE = "local-quality"
 LOCAL_QUALITY_RULE_VERSION = FEATURE_VERSION
+EXCLUDED_STATUSES = frozenset({"auto_excluded", "manually_excluded"})
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SCORE_POPULATION_TTL_SECONDS = 45.0
 _SCORE_POPULATION_LOCK = Lock()
@@ -56,6 +57,17 @@ def _stored_exclusion(photo: dict) -> tuple[str, dict] | None:
     if evaluation["decision"] != "auto_excluded":
         return None
     return str(evaluation["primary_reason"]), evaluation
+
+
+def _must_preserve_exclusion(photo: dict | None, *, reapply_rules: bool = False) -> bool:
+    """Keep exclusion state unless this write explicitly owns a permitted transition."""
+
+    if not photo:
+        return False
+    status = str(photo.get("exclusion_status") or "eligible")
+    if status == "manually_excluded":
+        return True
+    return status == "auto_excluded" and not reapply_rules
 
 
 @dataclass(frozen=True)
@@ -750,7 +762,7 @@ class PhotoRepository:
                 existing = plan["existing"]
                 # Automatic rules are never allowed to overwrite a favourite or
                 # a manual decision unless the content itself changed.
-                protected = (
+                protected = _must_preserve_exclusion(existing) or (
                     bool(existing)
                     and not plan["content_changed"]
                     and (
@@ -1263,7 +1275,9 @@ class PhotoRepository:
                     }
                 elif action == "reanalyze":
                     exclusion = _stored_exclusion(photo)
-                    protected = bool(photo.get("manual_override")) and not reapply_rules
+                    protected = _must_preserve_exclusion(
+                        photo, reapply_rules=reapply_rules
+                    ) or (bool(photo.get("manual_override")) and not reapply_rules)
                     if protected:
                         connection.execute(
                             "UPDATE photos SET local_candidate_score=?,feature_version=?,updated_at=? WHERE id=?",

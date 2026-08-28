@@ -43,7 +43,7 @@ def test_activity_is_bounded_unifies_sources_and_redacts(client, app):
     assert "secret-token" not in str(response.json)
     first_cursor = response.json["next_cursor"]
     app.extensions["inktime_observability_service"].record("INFO", "test", "new_activity", "較新的事件")
-    new_only = client.get(f"/api/v1/activity?after={first_cursor}")
+    new_only = client.get(f"/api/v1/activity?job_id=activity-job&after={first_cursor}")
     assert new_only.status_code == 200
     assert all(event["source"] == "activity" for event in new_only.json["events"])
     page = client.get("/activity?job_id=activity-job")
@@ -57,7 +57,14 @@ def test_activity_is_bounded_unifies_sources_and_redacts(client, app):
     assert "next_cursor" in body
     assert "if(paused||document.hidden||!autoRefresh.checked)return" in body
     assert "if(paused){stopPoll();return;}" in body
-    assert "if(!autoRefresh.checked){stopPoll();return;}" in body
+    auto_refresh_start = body.index("if(!autoRefresh.checked){")
+    auto_refresh_end = body.index("}", auto_refresh_start)
+    auto_refresh_block = body[auto_refresh_start:auto_refresh_end]
+    assert "stopPoll();" in auto_refresh_block
+    assert "state.textContent='輪詢已暫停'" in auto_refresh_block
+    assert "return;" in auto_refresh_block
+    assert auto_refresh_block.index("stopPoll();") < auto_refresh_block.index("state.textContent")
+    assert auto_refresh_block.index("state.textContent") < auto_refresh_block.index("return;")
     assert "function stopPoll(){if(pollTimer)clearTimeout(pollTimer);pollTimer=null;}" in body
     assert "loadInFlight=true" in body
     assert "if(newOnly){if(events.length)" in body
@@ -77,6 +84,26 @@ def test_activity_incremental_empty_page_keeps_the_rendered_timeline_contract(cl
     early_return = body.index("return;}summaryLast", incremental)
     clear_existing = body.index("list.innerHTML=''", early_return)
     assert incremental < early_return < clear_existing
+
+
+def test_activity_filters_before_source_limit_so_older_matches_are_visible(client, app):
+    create_admin(app)
+    login(client)
+    now = datetime.now(timezone.utc).isoformat()
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "INSERT INTO activity_events(source,source_id,severity,component,event,message,details_json,created_at) VALUES ('test','older-match','INFO','wanted','history','older matching event','{}',?)",
+            (now,),
+        )
+        connection.executemany(
+            "INSERT INTO activity_events(source,source_id,severity,component,event,message,details_json,created_at) VALUES ('test',?,'INFO','other','recent','nonmatch','{}',?)",
+            [(f"recent-{index}", now) for index in range(60)],
+        )
+
+    response = client.get("/api/v1/activity?component=wanted")
+
+    assert response.status_code == 200
+    assert [event["source_id"] for event in response.json["events"]] == ["older-match"]
 
 
 def test_activity_cursor_keeps_latest_initial_page_and_drains_each_source_without_gaps(app):

@@ -38,13 +38,17 @@ def _analysis_plan(strategy: str) -> tuple[dict, str]:
     analysis = current_app.extensions["inktime_analysis_service"]
     settings = current_app.extensions["inktime_settings_repository"]
     scoring = dict(current_app.extensions["inktime_scoring_repository"].current())
+    mode = execution_mode(settings)
+    provider_route = []
+    if strategy != "local":
+        if not permits_automatic_ai(mode):
+            raise ValueError("目前分析模式不允許建立模型工作")
+        provider_route = current_app.extensions["inktime_provider_service"].usable_route_snapshot()
+        if not provider_route:
+            raise ValueError("目前沒有已啟用且設定完整的 Vision Provider")
     plan = analysis.build_plan(
         strategy=strategy,
-        provider_route=(
-            current_app.extensions["inktime_provider_service"].route_snapshot()
-            if permits_automatic_ai(execution_mode(settings))
-            else []
-        ),
+        provider_route=provider_route,
         scoring_profile=scoring,
     )
     return plan, canonical_json(plan)
@@ -86,7 +90,16 @@ def jobs_page():
         if str(g.user["role"]) == "administrator"
         else _repository().list_for_user(str(g.user["id"]))
     )
-    return render_template("jobs.html", jobs=jobs)
+    mode = execution_mode(current_app.extensions["inktime_settings_repository"])
+    model_provider_available = bool(
+        permits_automatic_ai(mode)
+        and current_app.extensions["inktime_provider_service"].usable_route_snapshot()
+    )
+    return render_template(
+        "jobs.html",
+        jobs=jobs,
+        model_provider_available=model_provider_available,
+    )
 
 
 @bp.get("/jobs/<job_id>")
@@ -148,7 +161,10 @@ def create_job():
             "error_code": "ANALYSIS-DISABLED",
             "message": "目前分析執行模式為完全停用，不會建立新的分析工作。",
         }, 409
-    plan, _ = _analysis_plan(strategy)
+    try:
+        plan, _ = _analysis_plan(strategy)
+    except ValueError as exc:
+        return {"error_code": "VLM-001", "message": str(exc)}, 409
     analysis_fingerprint = fingerprint(plan)
     idempotency_key = scoped_idempotency_key("analysis", str(g.user["id"]), request.headers.get("Idempotency-Key"))
     idempotency_fingerprint = (
@@ -218,7 +234,10 @@ def selection_preview():
             "error_code": "ANALYSIS-DISABLED",
             "message": "目前分析執行模式為完全停用，不會建立新的分析工作。",
         }, 409
-    _plan, _ = _analysis_plan(strategy)
+    try:
+        _plan, _ = _analysis_plan(strategy)
+    except ValueError as exc:
+        return {"error_code": "VLM-001", "message": str(exc)}, 409
     preview = _repository().selection_preview(
         analysis_fingerprint=fingerprint(_plan),
         selection_mode=mode,

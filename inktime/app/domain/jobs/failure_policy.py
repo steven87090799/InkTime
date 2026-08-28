@@ -35,6 +35,7 @@ TERMINAL_NO_RETRY_CODES = frozenset(
         "VLM-006",
         "VLM-AMBIGUOUS",
         "JOB-SHUTDOWN-AMBIGUOUS",
+        "JOB-SOURCE-MISSING",
     }
 )
 
@@ -98,6 +99,8 @@ def failure_code(value: object) -> str:
     """Return only a stable code; never parse a diagnostic message."""
 
     code = getattr(value, "code", None)
+    if code is None and isinstance(value, FileNotFoundError):
+        code = "JOB-SOURCE-MISSING"
     if code is None and isinstance(value, str):
         code = value
     normalized = str(code or "JOB-003").strip()

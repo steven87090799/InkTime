@@ -41,6 +41,7 @@ class ProviderRepository:
             )
             secret = self.secrets.get(row["api_key_secret"]) if row["api_key_secret"] else None
             item["api_key_masked"] = mask_secret(secret or "")
+            item["api_key_configured"] = bool(secret)
             item["pricing"] = self.pricing(str(row["id"]))
             values.append(item)
         return values

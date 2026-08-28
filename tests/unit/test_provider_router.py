@@ -373,6 +373,75 @@ def test_empty_frozen_route_never_discovers_a_later_provider(app):
     assert service.build_router() is not None
 
 
+def test_usable_route_requires_remote_secret_but_allows_local_ollama(app):
+    repository = app.extensions["inktime_provider_repository"]
+    service = app.extensions["inktime_provider_service"]
+    configured_secret = "test-provider-key"
+    remote_with_secret = repository.save(
+        {
+            "name": "remote-with-secret",
+            "base_url": "https://configured.invalid/v1",
+            "api_key": configured_secret,
+            "priority": 10,
+            "enabled": True,
+        },
+        user_id="test",
+    )
+    remote = repository.save(
+        {
+            "name": "remote-without-secret",
+            "base_url": "https://example.invalid/v1",
+            "priority": 30,
+            "enabled": True,
+        },
+        user_id="test",
+    )
+    local = repository.save(
+        {
+            "name": "local-ollama",
+            "kind": "ollama",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "options": {"allow_private_http": True},
+            "priority": 20,
+            "enabled": True,
+        },
+        user_id="test",
+    )
+    disabled = repository.save(
+        {
+            "name": "disabled-with-secret",
+            "base_url": "https://disabled.invalid/v1",
+            "api_key": "disabled-test-key",
+            "priority": 40,
+            "enabled": False,
+        },
+        user_id="test",
+    )
+    non_vision = repository.save(
+        {
+            "name": "non-vision-with-secret",
+            "base_url": "https://non-vision.invalid/v1",
+            "api_key": "non-vision-test-key",
+            "priority": 50,
+            "supports_vision": False,
+            "enabled": True,
+        },
+        user_id="test",
+    )
+
+    usable = service.usable_route_snapshot()
+    summaries = {str(item["id"]): item for item in repository.list()}
+
+    assert [item["provider_id"] for item in usable] == [remote_with_secret, local]
+    assert remote not in {item["provider_id"] for item in usable}
+    assert disabled not in {item["provider_id"] for item in usable}
+    assert non_vision not in {item["provider_id"] for item in usable}
+    assert summaries[remote_with_secret]["api_key_configured"] is True
+    assert summaries[remote]["api_key_configured"] is False
+    assert summaries[remote]["api_key_masked"] == "未設定"
+    assert configured_secret not in str(summaries)
+
+
 def test_provider_config_revision_ignores_secret_rotation_and_rejects_behavior_changes(app):
     repository = app.extensions["inktime_provider_repository"]
     service = app.extensions["inktime_provider_service"]

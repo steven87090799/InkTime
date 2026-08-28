@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
+from typing import Literal, TypedDict
 
 from flask import Blueprint, abort, current_app, g, render_template, request, send_file
 
@@ -23,6 +24,24 @@ from inktime.app.workers.scanner import SCAN_MODES
 
 bp = Blueprint("operations", __name__)
 PHOTO_ANALYSIS_RETENTION_CONFIRMATION = "DELETE_UNREFERENCED_PHOTO_ANALYSIS"
+
+
+class ActivityFilter(TypedDict):
+    severity: str
+    component: str
+    job_id: str
+    photo_id: str
+    device_id: str
+    query: str
+
+
+class ActivitySourceDefinition(TypedDict):
+    severity: str
+    component: str | None
+    job_id: str | None
+    photo_id: str | None
+    device_id: str | None
+    query: str
 
 
 def _payload(error_prefix: str = "OPS-001") -> dict:
@@ -66,7 +85,7 @@ def _current_analysis_retention_identity() -> tuple[tuple[str, ...], tuple[str, 
     )
 
 
-def _activity_filters():
+def _activity_filters() -> ActivityFilter:
     return {
         "severity": request.args.get("severity", "").upper(),
         "component": request.args.get("component", "")[:80],
@@ -77,21 +96,69 @@ def _activity_filters():
     }
 
 
-def _matches_activity(row: dict, filters: dict) -> bool:
-    if (
-        filters["severity"] in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-        and row["severity"] != filters["severity"]
-    ):
-        return False
+def _activity_source_filters(
+    filters: ActivityFilter,
+    source: Literal["activity", "job", "device", "error"],
+) -> tuple[str, list[str]]:
+    """Build fixed-column filters before ordering, cursoring and LIMIT."""
+
+    source_definitions: dict[str, ActivitySourceDefinition] = {
+        "activity": {
+            "severity": "upper(severity)",
+            "component": "component",
+            "job_id": "job_id",
+            "photo_id": "photo_id",
+            "device_id": "device_id",
+            "query": "message || ' ' || event || ' ' || COALESCE(error_code,'')",
+        },
+        "job": {
+            "severity": "'INFO'",
+            "component": "'job'",
+            "job_id": "job_id",
+            "photo_id": None,
+            "device_id": None,
+            "query": "message || ' ' || event",
+        },
+        "device": {
+            "severity": "upper(level)",
+            "component": "'device'",
+            "job_id": None,
+            "photo_id": None,
+            "device_id": "device_id",
+            "query": "message || ' ' || event || ' ' || COALESCE(error_code,'')",
+        },
+        "error": {
+            "severity": "upper(severity)",
+            "component": "component",
+            "job_id": "job_id",
+            "photo_id": "photo_id",
+            "device_id": None,
+            "query": "message || ' ' || COALESCE(error_code,'')",
+        },
+    }
+    definitions = source_definitions[source]
+    clauses: list[str] = []
+    parameters: list[str] = []
+    severity = filters["severity"]
+    if severity in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+        clauses.append(f"{definitions['severity']}=?")
+        parameters.append(severity)
     for key in ("component", "job_id", "photo_id", "device_id"):
-        if filters[key] and str(row.get(key) or "") != filters[key]:
-            return False
-    needle = filters["query"].casefold()
-    return (
-        not needle
-        or needle
-        in " ".join(str(row.get(key) or "") for key in ("message", "event", "error_code")).casefold()
-    )
+        if not filters[key]:
+            continue
+        column = definitions[key]
+        if column is None:
+            clauses.append("1=0")
+        else:
+            clauses.append(f"{column}=?")
+            parameters.append(filters[key])
+    if filters["query"]:
+        escaped = (
+            filters["query"].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        clauses.append(f"lower({definitions['query']}) LIKE ? ESCAPE '\\'")
+        parameters.append(f"%{escaped.casefold()}%")
+    return (" AND " + " AND ".join(clauses) if clauses else ""), parameters
 
 
 def _activity_cursor(raw: str | int | None) -> dict[str, int]:
@@ -119,14 +186,17 @@ def _activity_source_order(cursor: int) -> str:
     return "DESC" if int(cursor) == 0 else "ASC"
 
 
-def _timeline_rows(connection, filters: dict, after: dict[str, int]) -> tuple[list[dict], str]:
+def _timeline_rows(
+    connection, filters: ActivityFilter, after: dict[str, int]
+) -> tuple[list[dict], str]:
     """Read every source with a bounded per-source incremental cursor."""
     source_limit = 50
     cursor = {key: max(0, int(value)) for key, value in after.items()}
     rows: list[dict] = []
+    activity_where, activity_parameters = _activity_source_filters(filters, "activity")
     for row in connection.execute(
-        f"SELECT id,source,source_id,severity,component,event,message,job_id,photo_id,device_id,stage,progress_done,progress_total,error_code,trace_id,details_json,created_at FROM activity_events WHERE id>? ORDER BY id {_activity_source_order(cursor['activity'])} LIMIT ?",  # noqa: S608
-        (cursor["activity"], source_limit),
+        f"SELECT id,source,source_id,severity,component,event,message,job_id,photo_id,device_id,stage,progress_done,progress_total,error_code,trace_id,details_json,created_at FROM activity_events WHERE id>?{activity_where} ORDER BY id {_activity_source_order(cursor['activity'])} LIMIT ?",  # noqa: S608
+        (cursor["activity"], *activity_parameters, source_limit),
     ).fetchall():
         cursor["activity"] = max(cursor["activity"], int(row["id"]))
         item = dict(row)
@@ -138,9 +208,10 @@ def _timeline_rows(connection, filters: dict, after: dict[str, int]) -> tuple[li
             }
         )
         rows.append(item)
+    job_where, job_parameters = _activity_source_filters(filters, "job")
     for row in connection.execute(
-        f"SELECT id,job_id,event,message,details_json,created_at FROM job_events WHERE id>? ORDER BY id {_activity_source_order(cursor['job'])} LIMIT ?",  # noqa: S608
-        (cursor["job"], source_limit),
+        f"SELECT id,job_id,event,message,details_json,created_at FROM job_events WHERE id>?{job_where} ORDER BY id {_activity_source_order(cursor['job'])} LIMIT ?",  # noqa: S608
+        (cursor["job"], *job_parameters, source_limit),
     ).fetchall():
         cursor["job"] = max(cursor["job"], int(row["id"]))
         rows.append(
@@ -165,9 +236,10 @@ def _timeline_rows(connection, filters: dict, after: dict[str, int]) -> tuple[li
                 "occurred_at": row["created_at"],
             }
         )
+    device_where, device_parameters = _activity_source_filters(filters, "device")
     for row in connection.execute(
-        f"SELECT id,device_id,level,event,error_code,message,details_json,created_at FROM device_events WHERE id>? ORDER BY id {_activity_source_order(cursor['device'])} LIMIT ?",  # noqa: S608
-        (cursor["device"], source_limit),
+        f"SELECT id,device_id,level,event,error_code,message,details_json,created_at FROM device_events WHERE id>?{device_where} ORDER BY id {_activity_source_order(cursor['device'])} LIMIT ?",  # noqa: S608
+        (cursor["device"], *device_parameters, source_limit),
     ).fetchall():
         cursor["device"] = max(cursor["device"], int(row["id"]))
         level = str(row["level"]).upper()
@@ -193,9 +265,10 @@ def _timeline_rows(connection, filters: dict, after: dict[str, int]) -> tuple[li
                 "occurred_at": row["created_at"],
             }
         )
+    error_where, error_parameters = _activity_source_filters(filters, "error")
     for row in connection.execute(
-        f"SELECT id,job_id,photo_id,component,error_code,severity,message,occurrences,first_seen_at,last_seen_at,resolved_at,resolution_note FROM job_errors WHERE id>? ORDER BY id {_activity_source_order(cursor['error'])} LIMIT ?",  # noqa: S608
-        (cursor["error"], source_limit),
+        f"SELECT id,job_id,photo_id,component,error_code,severity,message,occurrences,first_seen_at,last_seen_at,resolved_at,resolution_note FROM job_errors WHERE id>?{error_where} ORDER BY id {_activity_source_order(cursor['error'])} LIMIT ?",  # noqa: S608
+        (cursor["error"], *error_parameters, source_limit),
     ).fetchall():
         cursor["error"] = max(cursor["error"], int(row["id"]))
         rows.append(
@@ -226,7 +299,7 @@ def _timeline_rows(connection, filters: dict, after: dict[str, int]) -> tuple[li
         key=lambda item: (str(item["occurred_at"]), str(item["source"]), str(item["source_id"])),
         reverse=True,
     )
-    return [redact(item) for item in ordered if _matches_activity(item, filters)][:200], _encode_activity_cursor(cursor)
+    return [redact(item) for item in ordered][:200], _encode_activity_cursor(cursor)
 
 
 @bp.get("/activity")
@@ -338,7 +411,17 @@ def resolve_error(error_id: int):
 @bp.get("/backups")
 @login_required
 def backups_page():
-    return render_template("backups.html", backups=current_app.extensions["inktime_backup_service"].list())
+    backups = []
+    for path in current_app.extensions["inktime_backup_service"].list():
+        stat = path.stat()
+        backups.append(
+            {
+                "name": path.name,
+                "size": stat.st_size,
+                "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            }
+        )
+    return render_template("backups.html", backups=backups)
 
 
 @bp.post("/api/v1/backups")
