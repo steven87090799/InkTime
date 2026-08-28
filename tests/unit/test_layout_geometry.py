@@ -1089,9 +1089,15 @@ def test_stock_device_target_is_frozen_before_await_and_labels_match_contract():
     before_first_await, after_first_await = function.split("await", 1)
     assert "Object.freeze" in before_first_await
     assert "deviceId:select.value" in before_first_await
+    assert "firmwareMode:firmware.value" in before_first_await
+    assert "profileKey:profile.value" in before_first_await
+    assert "deliveryMode:select.selectedOptions[0].dataset.deliveryMode" in before_first_await
+    assert "deviceLabel:select.selectedOptions[0].textContent.trim()" in before_first_await
     assert "lockedControls=[select,firmware,profile,button]" in before_first_await
+    assert "for(const control of lockedControls)control.disabled=true" in before_first_await
     assert "select.value" not in after_first_await
     assert "target.deviceId" in after_first_await
+    assert "finally { lockedControls.forEach" in after_first_await
     assert "deterministic sample" not in template.lower()
     assert "deterministic 預設樣本" not in template.lower()
     assert "built-in sample" in template.lower()

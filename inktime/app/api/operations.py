@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from typing import Literal, TypedDict
 
 from flask import Blueprint, abort, current_app, g, render_template, request, send_file
 
@@ -23,6 +24,24 @@ from inktime.app.workers.scanner import SCAN_MODES
 
 bp = Blueprint("operations", __name__)
 PHOTO_ANALYSIS_RETENTION_CONFIRMATION = "DELETE_UNREFERENCED_PHOTO_ANALYSIS"
+
+
+class ActivityFilter(TypedDict):
+    severity: str
+    component: str
+    job_id: str
+    photo_id: str
+    device_id: str
+    query: str
+
+
+class ActivitySourceDefinition(TypedDict):
+    severity: str
+    component: str | None
+    job_id: str | None
+    photo_id: str | None
+    device_id: str | None
+    query: str
 
 
 def _payload(error_prefix: str = "OPS-001") -> dict:
@@ -66,7 +85,7 @@ def _current_analysis_retention_identity() -> tuple[tuple[str, ...], tuple[str, 
     )
 
 
-def _activity_filters():
+def _activity_filters() -> ActivityFilter:
     return {
         "severity": request.args.get("severity", "").upper(),
         "component": request.args.get("component", "")[:80],
@@ -77,10 +96,13 @@ def _activity_filters():
     }
 
 
-def _activity_source_filters(filters: dict, source: str) -> tuple[str, list[str]]:
+def _activity_source_filters(
+    filters: ActivityFilter,
+    source: Literal["activity", "job", "device", "error"],
+) -> tuple[str, list[str]]:
     """Build fixed-column filters before ordering, cursoring and LIMIT."""
 
-    definitions = {
+    source_definitions: dict[str, ActivitySourceDefinition] = {
         "activity": {
             "severity": "upper(severity)",
             "component": "component",
@@ -113,7 +135,8 @@ def _activity_source_filters(filters: dict, source: str) -> tuple[str, list[str]
             "device_id": None,
             "query": "message || ' ' || COALESCE(error_code,'')",
         },
-    }[source]
+    }
+    definitions = source_definitions[source]
     clauses: list[str] = []
     parameters: list[str] = []
     severity = filters["severity"]
@@ -163,7 +186,9 @@ def _activity_source_order(cursor: int) -> str:
     return "DESC" if int(cursor) == 0 else "ASC"
 
 
-def _timeline_rows(connection, filters: dict, after: dict[str, int]) -> tuple[list[dict], str]:
+def _timeline_rows(
+    connection, filters: ActivityFilter, after: dict[str, int]
+) -> tuple[list[dict], str]:
     """Read every source with a bounded per-source incremental cursor."""
     source_limit = 50
     cursor = {key: max(0, int(value)) for key, value in after.items()}

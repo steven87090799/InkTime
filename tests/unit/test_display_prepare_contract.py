@@ -34,7 +34,9 @@ def test_schedule_preview_template_selects_multi_device_without_reselection():
     ).read_text(encoding="utf-8")
 
     assert "choosePreviewDevice" in template
-    assert "window.prompt" in template
+    assert "window.inktimeConfirm" in template
+    assert "input:true" in template
+    assert "deviceIds.includes(value)" in template
     assert "device_id:selectedDeviceId" in template
     assert "playlistPreviewText" in template
 

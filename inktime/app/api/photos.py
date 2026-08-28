@@ -390,6 +390,11 @@ def queue_ai_mode_run():
         confirmed = json_bool(payload, "confirm", default=False, error_prefix="VLM-009")
     except JsonScalarError as exc:
         abort(400, description=str(exc))
+    strategy = str(settings.get("analysis.strategy", "single"))
+    try:
+        analysis_plan = _build_analysis_plan(settings, strategy)
+    except ValueError as exc:
+        return _ai_job_error(exc), 409
     if mode == "full_library" and not confirmed:
         total_eligible = _repository().count_active_eligible()
         queued_now = min(total_eligible, daily_limit)
@@ -412,8 +417,6 @@ def queue_ai_mode_run():
         request_key = request.headers.get("Idempotency-Key")
         if request_key and str(request_key).strip():
             actor = str(g.user["id"])
-            strategy = str(settings.get("analysis.strategy", "single"))
-            analysis_plan = _build_analysis_plan(settings, strategy)
             analysis_fingerprint = fingerprint(analysis_plan)
             request_material = {
                 "analysis_fingerprint": analysis_fingerprint,
@@ -560,6 +563,7 @@ def queue_ai_mode_run():
                     name=f"完整照片庫 AI：{group}",
                     idempotency_scope="ai-mode-run",
                     idempotency_key=grouped_idempotency_key(request_key, str(group)),
+                    analysis_plan=analysis_plan,
                 )
                 for group, ids in batches
             ]
@@ -574,6 +578,7 @@ def queue_ai_mode_run():
             name="AI 模式批次分析",
             idempotency_scope="ai-mode-run",
             idempotency_key=str(request.headers.get("Idempotency-Key") or "").strip()[:128] or None,
+            analysis_plan=analysis_plan,
         ), 201
     except ValueError as exc:
         return _ai_job_error(exc), 409

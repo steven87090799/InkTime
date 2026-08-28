@@ -389,6 +389,7 @@ def test_usable_route_requires_remote_secret_but_allows_local_ollama(app):
             "name": "local-ollama",
             "kind": "ollama",
             "base_url": "http://127.0.0.1:11434/v1",
+            "options": {"allow_private_http": True},
             "enabled": True,
         },
         user_id="test",

@@ -311,11 +311,11 @@
   }
   async function sendStockTest() {
     if (!ensureCurrentPreview()) return;
-    const select=document.getElementById('test-device'); if(!select.value){setStatus('請選擇 Stock 測試裝置','error');return;} if(select.selectedOptions[0].dataset.deliveryMode!=='stock_compat'){setStatus('官方韌體模式只能選擇 Stock PhotoPainter 裝置','error');return;} if(select.selectedOptions[0].dataset.profile!==profile.value){setStatus('裝置 Profile 與目前面板不相容','error');return;}
-    const target=Object.freeze({deviceId:select.value,profileKey:profile.value,deliveryMode:select.selectedOptions[0].dataset.deliveryMode,deviceLabel:select.selectedOptions[0].textContent.trim()});
-    if(!await window.inktimeConfirm(`微雪官方韌體模式會先以目前來源、Preset、縮放、短文案與字型建立獨立測試 Release，再透過既有 Stock /dataUP 邊界傳送到「${target.deviceLabel}」。瀏覽器不會直連裝置；Stock 端無法回報持久完成狀態。確定？`,{title:'確認 Stock 實機測試'}))return;
-    const button=document.getElementById('send-test'),firmware=document.getElementById('test-firmware-mode'),transportStatus=document.getElementById('test-transport-status'),lockedControls=[select,firmware,profile,button],disabledBefore=lockedControls.map(control=>control.disabled); for(const control of lockedControls)control.disabled=true; transportStatus.hidden=false; transportStatus.className='simulator-status'; transportStatus.textContent='正在以目前來源建立獨立 Stock 測試 Release…';
+    const select=document.getElementById('test-device'),button=document.getElementById('send-test'),firmware=document.getElementById('test-firmware-mode'),transportStatus=document.getElementById('test-transport-status'); if(!select.value){setStatus('請選擇 Stock 測試裝置','error');return;} if(select.selectedOptions[0].dataset.deliveryMode!=='stock_compat'){setStatus('官方韌體模式只能選擇 Stock PhotoPainter 裝置','error');return;} if(select.selectedOptions[0].dataset.profile!==profile.value){setStatus('裝置 Profile 與目前面板不相容','error');return;}
+    const target=Object.freeze({deviceId:select.value,profileKey:profile.value,firmwareMode:firmware.value,deliveryMode:select.selectedOptions[0].dataset.deliveryMode,deviceLabel:select.selectedOptions[0].textContent.trim()}),lockedControls=[select,firmware,profile,button],disabledBefore=lockedControls.map(control=>control.disabled); for(const control of lockedControls)control.disabled=true;
     try {
+      if(!await window.inktimeConfirm(`微雪官方韌體模式會先以目前來源、Preset、縮放、短文案與字型建立獨立測試 Release，再透過既有 Stock /dataUP 邊界傳送到「${target.deviceLabel}」。瀏覽器不會直連裝置；Stock 端無法回報持久完成狀態。確定？`,{title:'確認 Stock 實機測試'}))return;
+      transportStatus.hidden=false; transportStatus.className='simulator-status'; transportStatus.textContent='正在以目前來源建立獨立 Stock 測試 Release…';
       const data=formData(); data.set('device_id',target.deviceId); data.set('profile',target.profileKey); data.set('transport','stock_direct'); data.set('delivery','next_wake'); data.set('one_time','false'); data.set('restore_formal','false'); data.set('save_preset','false');
       const releaseResponse=await window.inktimeFetch('/api/v1/rendering/test-release',{method:'POST',body:data}); let created={}; try{created=await releaseResponse.json();}catch{}
       if(!releaseResponse.ok)throw new Error(created.message||'Stock 測試 Release 建立失敗。');

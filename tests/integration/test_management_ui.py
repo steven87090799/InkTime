@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
 
@@ -922,7 +923,9 @@ def test_photo_cards_never_present_excluded_screenshot_or_severe_blur_as_high_sc
     listing = client.get("/photos").get_data(as_text=True)
     assert "選片分 0.0（已排除：截圖）" in listing
     assert "選片分 0.0（已排除：嚴重模糊／失焦）" in listing
-    assert "本機清晰度、對比與曝光品質分" in listing
+    assert "本機品質" in listing
+    assert "選片分只在正式排序分析完成後產生" in listing
+    assert "E6 不會將它救回" in listing
 
     detail = client.get(f"/photos/{blurry_id}").get_data(as_text=True)
     assert "本機品質分" in detail
@@ -1000,6 +1003,7 @@ def test_review_thumbnail_accepts_string_root_and_rejects_invalid_sources(
     root = tmp_path / "review-source"
     root.mkdir()
     Image.new("RGB", (80, 60), "#527f99").save(root / "photo.jpg")
+    source_sha256 = sha256((root / "photo.jpg").read_bytes()).hexdigest()
     with app.extensions["inktime_database"].session() as connection:
         connection.execute(
             "UPDATE libraries SET root_path=? WHERE id=(SELECT library_id FROM photos WHERE id=?)",
@@ -1007,7 +1011,7 @@ def test_review_thumbnail_accepts_string_root_and_rejects_invalid_sources(
         )
         connection.execute(
             "UPDATE photos SET relative_path='photo.jpg',sha256=? WHERE id=?",
-            ("a" * 64, photo_id),
+            (source_sha256, photo_id),
         )
 
     valid = client.get(f"/api/v1/review/photos/{photo_id}/thumbnail")
