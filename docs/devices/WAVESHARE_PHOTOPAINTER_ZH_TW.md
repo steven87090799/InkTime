@@ -140,10 +140,17 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   recovery/service。timer wake 仍獨立啟用，Enhanced timer wake 的本地排程只讀正式
   Frame，不呼叫 Wi-Fi、NTP 或 HTTP。睡前等待按鍵釋放以免重複喚醒。
 - 未完成配對而停留在五分鐘 Portal 時，韌體也會以 active-low、35 ms debounce 持續
-  讀取 GPIO 4；短按並放開會重畫同一組 SSID／AP 密碼／設定網址，頁尾以
-  `KEY REFRESH n` 顯示本次動作。按鍵不會重啟 SoftAP、輪替密碼、延長五分鐘上限、
+  讀取 GPIO 4；單擊會重畫同一組 SSID／AP 密碼／設定網址，頁尾以 `KEY REFRESH n`
+  顯示本次動作；450 ms 內雙擊則顯示 TG28 唯讀取得的電量百分比、電池電壓、USB
+  供電、是否充電與充電階段。從 deep sleep 由第一次 KEY 喚醒後，在同一時間窗第二次
+  點擊也會直接顯示電源頁；完成後回到有界休眠，不下載照片。按鍵不會重啟 SoftAP、
+  輪替密碼、延長五分鐘上限、
   清除 NVS 或驅動 GPIO 0／5／21；因此醒著的 Portal 不再吞掉 KEY，也不擴大耗電與
   電源控制邊界。尚未配對時沒有正式照片可切換，完成配對後才恢復下一張／網路更新流程。
+- 原廠以 BOOT 雙擊顯示電池頁；InkTime 為完整保留 GPIO 0 的下載模式，不在 runtime
+  取樣 BOOT，而將相同唯讀功能放在 KEY1 雙擊。TG28 `REG00`、`REG01`、`REG34/35` 與
+  `REGA4` 只讀取，不照抄原廠對 `REG17` 的 fuel-gauge 寫入，也不以 AXP2101 identity
+  判斷 Rev2.0。電量百分比仍是 PMIC 估算值，不是容量校準證據。
 - GPIO 5 完全不作一般輸出；GPIO 0 不取樣、不驅動，完整保留原廠 BOOT／下載用途。
 - 開機後 PWR 紅燈維持亮起，電子紙傳輸期間 ACT 綠燈亮起；進入 deep sleep 前兩燈
   都會熄滅。燈號是狀態提示，不取代 BUSY cycle 與實際面板變化的刷新判定。

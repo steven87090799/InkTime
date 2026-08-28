@@ -86,6 +86,7 @@ class PhotoPainterSupport {
     const char* pairing_code = nullptr,
     const char* footer = "VALID 5 MIN"
   );
+  bool displayPowerStatusScreen();
 
   bool writeRtc(time_t epoch);
   bool readRtc(time_t& epoch);
@@ -103,6 +104,7 @@ class PhotoPainterSupport {
   bool forceNetworkRefresh() const { return forceNetworkRefresh_; }
   bool recoveryServiceRequested() const { return recoveryServiceRequested_; }
   bool wokeFromUserButton() const { return wokeFromUserButton_; }
+  bool batteryStatusRequested() const { return batteryStatusRequested_; }
   PowerSourceState powerSourceState() const;
   bool usbConnected() const;
   PmicType pmicType() const;
@@ -140,6 +142,7 @@ class PhotoPainterSupport {
   bool forceNetworkRefresh_ = false;
   bool recoveryServiceRequested_ = false;
   bool wokeFromUserButton_ = false;
+  bool batteryStatusRequested_ = false;
   bool earlyEpdTransportReady_ = false;
   bool earlyEpdPinsReady_ = false;
   bool environmentValid_ = false;

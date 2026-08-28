@@ -84,7 +84,6 @@ static const uint32_t AP_TIMEOUT_MS = 5UL * 60UL * 1000UL; // 5 分钟
 static const uint8_t AP_MAX_SAVE_ATTEMPTS = 5;
 
 #if INKTIME_PHOTOPAINTER_ENABLED
-static constexpr uint32_t kPortalButtonDebounceMs = 35U;
 static constexpr uint32_t kMaxAwakeTimeoutMs = 10UL * 60UL * 1000UL;
 static constexpr uint32_t kMaxAwakeSupervisorStackBytes = 2048U;
 static constexpr uint32_t kMaxAwakeCommandArm = 1U;
@@ -195,7 +194,7 @@ GxEPD2_7C<
 #define DEVICE_PAIRING_CLAIM_PATH "/api/device/v1/pairing/claim"
 #define DEVICE_PAIRING_CONFIRM_PATH "/api/device/v1/pairing/confirm"
 #define DEVICE_PAIRING_REPAIR_PERMISSION_PATH "/api/device/v1/pairing/repair-permission"
-#define INKTIME_FIRMWARE_VERSION "2.8.4"
+#define INKTIME_FIRMWARE_VERSION "2.8.5"
 
 static constexpr uint8_t kQueueAckBatchMaxEvents = 8U;
 static constexpr size_t kQueueAckBatchMaxBodyBytes = 12U * 1024U;
@@ -2469,7 +2468,9 @@ void startConfigPortal() {
   bool portalButtonLastRaw = digitalRead(kBoardConfig.buttons.user) == LOW;
   bool portalButtonStablePressed = portalButtonLastRaw;
   bool portalButtonClickArmed = portalButtonStablePressed;
+  uint8_t portalButtonClickCount = 0U;
   uint32_t portalButtonChangedMs = enterMs;
+  uint32_t portalButtonFirstReleasedMs = enterMs;
 #endif
 
   for (;;) {
@@ -2484,12 +2485,38 @@ void startConfigPortal() {
       portalButtonChangedMs = portalNowMs;
     }
     if (portalButtonRawPressed != portalButtonStablePressed
-        && portalNowMs - portalButtonChangedMs >= kPortalButtonDebounceMs) {
+        && portalNowMs - portalButtonChangedMs >= inktime::kUserButtonDebounceMs) {
       portalButtonStablePressed = portalButtonRawPressed;
       if (portalButtonStablePressed) {
         portalButtonClickArmed = true;
-      } else if (portalButtonClickArmed && apOk) {
+      } else if (portalButtonClickArmed) {
         portalButtonClickArmed = false;
+        if (portalButtonClickCount == 0U) {
+          portalButtonClickCount = 1U;
+          portalButtonFirstReleasedMs = portalNowMs;
+        } else {
+          portalButtonClickCount = 0U;
+          INK_LOG_INFO(
+            "power_status_refresh_started",
+            "Debounced KEY1 double click requested the read-only power page"
+          );
+          const bool powerScreenReady = photoPainter.displayPowerStatusScreen();
+          if (powerScreenReady) {
+            const String refreshMessage = String("Power status refresh completed in ")
+                + String(photoPainter.lastRefreshDurationMs()) + String(" ms");
+            INK_LOG_INFO("power_status_refresh_ready", refreshMessage);
+          } else {
+            INK_LOG_ERROR("power_status_refresh_failed", photoPainter.lastError());
+          }
+        }
+      }
+    }
+    if (portalButtonClickCount == 1U
+        && !portalButtonClickArmed
+        && portalNowMs - portalButtonFirstReleasedMs
+            >= inktime::kUserButtonDoubleClickWindowMs) {
+      portalButtonClickCount = 0U;
+      if (apOk) {
         portalKeyRefreshCount += 1U;
         char footer[32];
         snprintf(
@@ -2500,7 +2527,7 @@ void startConfigPortal() {
         );
         INK_LOG_INFO(
           "pairing_key_refresh_started",
-          "Debounced KEY1 release requested a pairing screen refresh"
+          "Debounced KEY1 click requested a pairing screen refresh"
         );
         const bool pairingScreenReady = photoPainter.displayPairingScreen(
           apSsid.c_str(),
@@ -6587,6 +6614,28 @@ void setup() {
 #endif
 
   loadConfig(g_cfg);
+
+#if INKTIME_PHOTOPAINTER_ENABLED
+  if (photoPainter.batteryStatusRequested()) {
+    INK_LOG_INFO(
+      "power_status_refresh_started",
+      "KEY1 double click wake requested the read-only power page"
+    );
+    const bool powerScreenReady = photoPainter.displayPowerStatusScreen();
+    if (powerScreenReady) {
+      const String refreshMessage = String("Power status refresh completed in ")
+          + String(photoPainter.lastRefreshDurationMs()) + String(" ms");
+      INK_LOG_INFO("power_status_refresh_ready", refreshMessage);
+    } else {
+      INK_LOG_ERROR("power_status_refresh_failed", photoPainter.lastError());
+    }
+    const uint32_t sleepMinutes = g_cfg.valid
+        ? minutesToNextRefreshFromLastEpoch(g_cfg)
+        : 5U;
+    goDeepSleepMinutes(sleepMinutes);
+    return;
+  }
+#endif
 
   if (g_cfg.valid) {
     struct tm bootTime = {};
