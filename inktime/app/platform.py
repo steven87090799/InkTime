@@ -72,7 +72,6 @@ def configure_web_application(
         INKTIME_RENDER_WORK_DIR=runtime_config.cache_dir / "render-workloads",
         INKTIME_PHOTO_DIR=runtime_config.photo_dir,
         INKTIME_VERSION=__version__,
-        INKTIME_ENABLE_LEGACY_WEBUI=runtime_config.legacy_enabled,
         PREFERRED_URL_SCHEME=runtime_config.public_url.split(":", 1)[0],
         TESTING=runtime_config.testing,
     )
@@ -376,7 +375,6 @@ def initialize_platform(
         photo_dir=photo_dir or data_dir.parent / "simulation_photos",
         testing=testing,
         development=not testing,
-        legacy_enabled=False,
         cookie_secure=False,
     )
     container = bootstrap_services(runtime_config, role="web")

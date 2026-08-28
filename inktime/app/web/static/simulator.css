@@ -73,6 +73,7 @@
 .source-device { background: linear-gradient(145deg, #303632, #141816); }
 .device-bezel { position: relative; overflow: hidden; aspect-ratio: 3 / 5; border: 2px solid rgba(0, 0, 0, .55); border-radius: 13px; background: #fff; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .08); }
 .device-bezel canvas, .device-bezel img { width: 100%; height: 100%; display: block; object-fit: contain; image-rendering: auto; }
+.device-bezel img[hidden] { display: none; }
 .zoom-frame { cursor: crosshair; }
 .zoom-frame img { transition: transform .18s ease; transform-origin: 50% 50%; }
 .empty-screen { position: absolute; inset: 0; display: grid; place-content: center; color: #b8b3a1; text-align: center; }

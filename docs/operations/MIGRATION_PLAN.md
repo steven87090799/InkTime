@@ -9,12 +9,12 @@
 
 ## 升級步驟
 
-1. 停止舊分析腳本與渲染 cron，保留 Web 唯讀服務。
+1. 停止舊分析腳本、渲染 cron 與舊 Web；目前 repository 不再提供這些 runtime。
 2. 備份 `photos.db`、`config.py`、輸出目錄與韌體設定；原始照片不在應用程式備份範圍。
 3. 執行 `python scripts/migrate.py --database <既有資料庫>`。
-4. 建立管理員並將舊一般設定匯入 `settings`，API Key 加密匯入 `secrets`。
-5. 背景匯入器分批讀取 `photo_scores`，計算相對路徑與內容指紋後建立 `photos`；原表保留供舊渲染器讀取。
-6. 升級 ESP32；新自製板依短效配對 request／管理員核准／claim 取得版本化 Device Secret，既有裝置保留 Legacy Token 相容路徑，再改用 `/api/device/v1/releases/latest`。確認所有裝置後才關閉舊版模式。
+4. 建立管理員並在 Modern Web 人工核對一般設定；API Key 只透過 Provider 頁加密寫入 `secrets`。
+5. 由 Modern 掃描流程建立 `photos`；`photo_scores` 原表只保留歷史資料，不由目前 runtime 讀寫。
+6. 升級 ESP32；新自製板依短效配對 request／管理員核准／claim 取得版本化 Device Secret，既有裝置保留 Device API 的相容 Token 路徑，再改用 `/api/device/v1/releases/latest`。
 7. 啟動 Web、Worker、Scheduler，先用小型 Mock Provider 工作驗證，再恢復正式排程。
 
 ## 設定對應
@@ -23,14 +23,14 @@
 - `API_CHANNELS` → Provider 設定與加密 Secret
 - `TIMEOUT`、並行數、模型 → 分析／Provider 設定
 - `MEMORY_THRESHOLD`、`DAILY_PHOTO_QUANTITY`、`FONT_PATH` → 渲染設定
-- `DOWNLOAD_KEY` → 不匯入新裝置 Device Secret 或 Legacy Token；僅在管理員明確開啟舊版不安全模式時保留
+- `DOWNLOAD_KEY` → 不匯入新裝置 Device Secret 或相容 Token
 
 ## 回滾
 
 1. 停止 InkTime 2.x 的 Web、Worker 與 Scheduler。
 2. 將升級前備份複製到另一個路徑並執行 `PRAGMA quick_check`。
-3. 以備份替換服務使用的資料庫，恢復舊 `config.py` 與舊映像檔／Git Commit。
-4. 將 ESP32 Server URL 暫時切回舊 API；此舉會恢復 URL 金鑰風險，僅限隔離網路與短期處置。
+3. 以備份替換服務使用的資料庫，回復先前已驗證的映像；目前 repository 不提供 Legacy runtime。
+4. 如需回復部署者自行保存的舊裝置端點，只能在隔離網路短期處置，並承擔 URL 金鑰風險。
 5. 不刪除新版 `releases/`、快取或診斷資料，直到確認回滾穩定；它們不影響舊版資料庫。
 
 ## 風險控制

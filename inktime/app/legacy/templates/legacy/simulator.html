@@ -1,4 +1,0 @@
-<!doctype html>
-<html lang="zh-Hant-TW">
-<head><meta charset="utf-8"><title>Legacy Simulator｜InkTime</title><link rel="stylesheet" href="{{ url_for('legacy.static', filename='legacy.css') }}"></head>
-<body><main><aside class="deprecated"><strong>已棄用的相容頁面</strong><p>Modern 替代路徑：<a href="/simulator">/simulator</a>。待相容驗收完成後移除；禁止新增 Legacy 功能。</p></aside><h1>Legacy Simulator</h1>{% if photo_id %}<img class="preview" src="{{ url_for('legacy.simulator_render', photo_id=photo_id) }}" alt="Legacy preview">{% else %}<p>請從 Legacy Review 選擇照片。</p>{% endif %}</main></body></html>

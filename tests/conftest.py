@@ -21,7 +21,6 @@ def app(tmp_path: Path):
         photo_dir=tmp_path / "photos",
         testing=True,
         development=False,
-        legacy_enabled=False,
         cookie_secure=False,
     )
     application = create_app(runtime_config)

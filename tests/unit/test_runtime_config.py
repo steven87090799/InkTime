@@ -14,7 +14,6 @@ def test_explicit_values_override_environment_and_relative_paths_share_one_base(
         environ={
             "INKTIME_PORT": "9999",
             "INKTIME_DATA_DIR": "environment-data",
-            "INKTIME_ENABLE_LEGACY_WEBUI": "true",
         },
         base_dir=tmp_path,
         environment="test",
@@ -27,7 +26,6 @@ def test_explicit_values_override_environment_and_relative_paths_share_one_base(
         release_dir="releases",
         backup_dir="backups",
         cache_dir="cache",
-        legacy_enabled=False,
         cookie_secure=False,
     )
 
@@ -35,7 +33,6 @@ def test_explicit_values_override_environment_and_relative_paths_share_one_base(
     assert config.data_dir == (tmp_path / "explicit-data").resolve()
     assert config.database_path == (tmp_path / "database/inktime.sqlite").resolve()
     assert config.photo_dir == (tmp_path / "photos").resolve()
-    assert config.legacy_enabled is False
 
 
 def test_environment_precedes_safe_defaults(tmp_path: Path):
