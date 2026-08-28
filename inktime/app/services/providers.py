@@ -137,7 +137,7 @@ class ProviderService:
             and bool(str(row.get("base_url") or "").strip())
             and (
                 str(row.get("kind") or "").casefold() == "ollama"
-                or bool(str(row.get("api_key_masked") or "").strip())
+                or bool(row.get("api_key_configured"))
             )
         }
         return [item for item in self.route_snapshot() if str(item["provider_id"]) in usable_ids]
