@@ -139,6 +139,11 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   1.2 秒但未滿 4 秒要求 bounded forced network refresh；刻意持續至少 4 秒才授權
   recovery/service。timer wake 仍獨立啟用，Enhanced timer wake 的本地排程只讀正式
   Frame，不呼叫 Wi-Fi、NTP 或 HTTP。睡前等待按鍵釋放以免重複喚醒。
+- 未完成配對而停留在五分鐘 Portal 時，韌體也會以 active-low、35 ms debounce 持續
+  讀取 GPIO 4；短按並放開會重畫同一組 SSID／AP 密碼／設定網址，頁尾以
+  `KEY REFRESH n` 顯示本次動作。按鍵不會重啟 SoftAP、輪替密碼、延長五分鐘上限、
+  清除 NVS 或驅動 GPIO 0／5／21；因此醒著的 Portal 不再吞掉 KEY，也不擴大耗電與
+  電源控制邊界。尚未配對時沒有正式照片可切換，完成配對後才恢復下一張／網路更新流程。
 - GPIO 5 完全不作一般輸出；GPIO 0 不取樣、不驅動，完整保留原廠 BOOT／下載用途。
 - 開機後 PWR 紅燈維持亮起，電子紙傳輸期間 ACT 綠燈亮起；進入 deep sleep 前兩燈
   都會熄滅。燈號是狀態提示，不取代 BUSY cycle 與實際面板變化的刷新判定。

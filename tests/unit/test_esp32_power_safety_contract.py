@@ -369,6 +369,27 @@ def test_max_awake_guard_is_independent_bounded_and_usb_exempt():
     assert "armMaxAwakeSupervisor();" in portal
 
 
+def test_pairing_portal_polls_active_low_key_without_driving_reserved_pins():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    portal = _between(
+        firmware,
+        "void startConfigPortal()",
+        "bool runUsbServiceMode(bool explicitRecoveryRequested)",
+    )
+    assert "digitalRead(kBoardConfig.buttons.user) == LOW" in portal
+    assert "kPortalButtonDebounceMs" in portal
+    assert "portalButtonClickArmed" in portal
+    assert "pairing_key_refresh_started" in portal
+    assert "pairing_key_refresh_ready" in portal
+    assert '"KEY REFRESH %lu"' in portal
+    assert "photoPainter.displayPairingScreen(" in portal
+    assert "enterMs = millis()" not in portal[portal.index("for (;;)") :]
+    assert "pinMode(kBoardConfig.buttons.user, OUTPUT)" not in portal
+    assert "digitalWrite(kBoardConfig.buttons.user" not in portal
+    assert "kBoardConfig.buttons.boot" not in portal
+    assert "kBoardConfig.buttons.power" not in portal
+
+
 def test_explicit_recovery_precedes_normal_display_network_shutdown():
     firmware = FIRMWARE.read_text(encoding="utf-8")
     setup = _between(firmware, "void setup()", "void loop()")

@@ -84,6 +84,7 @@ static const uint32_t AP_TIMEOUT_MS = 5UL * 60UL * 1000UL; // 5 分钟
 static const uint8_t AP_MAX_SAVE_ATTEMPTS = 5;
 
 #if INKTIME_PHOTOPAINTER_ENABLED
+static constexpr uint32_t kPortalButtonDebounceMs = 35U;
 static constexpr uint32_t kMaxAwakeTimeoutMs = 10UL * 60UL * 1000UL;
 static constexpr uint32_t kMaxAwakeSupervisorStackBytes = 2048U;
 static constexpr uint32_t kMaxAwakeCommandArm = 1U;
@@ -194,7 +195,7 @@ GxEPD2_7C<
 #define DEVICE_PAIRING_CLAIM_PATH "/api/device/v1/pairing/claim"
 #define DEVICE_PAIRING_CONFIRM_PATH "/api/device/v1/pairing/confirm"
 #define DEVICE_PAIRING_REPAIR_PERMISSION_PATH "/api/device/v1/pairing/repair-permission"
-#define INKTIME_FIRMWARE_VERSION "2.8.3"
+#define INKTIME_FIRMWARE_VERSION "2.8.4"
 
 static constexpr uint8_t kQueueAckBatchMaxEvents = 8U;
 static constexpr size_t kQueueAckBatchMaxBodyBytes = 12U * 1024U;
@@ -2442,6 +2443,7 @@ void startConfigPortal() {
 #endif
 
 #if INKTIME_PHOTOPAINTER_ENABLED
+  uint32_t portalKeyRefreshCount = 0U;
   if (apOk) {
     const bool pairingScreenReady = photoPainter.displayPairingScreen(
       apSsid.c_str(), apPassword.c_str(), "http://192.168.4.1");
@@ -2464,12 +2466,59 @@ void startConfigPortal() {
   uint32_t lastPowerCheckMs = enterMs;
   inktime::PowerSourceState portalPowerSource = photoPainter.powerSourceState();
   if (portalPowerSource == inktime::PowerSourceState::Usb) disarmMaxAwakeSupervisor();
+  bool portalButtonLastRaw = digitalRead(kBoardConfig.buttons.user) == LOW;
+  bool portalButtonStablePressed = portalButtonLastRaw;
+  bool portalButtonClickArmed = portalButtonStablePressed;
+  uint32_t portalButtonChangedMs = enterMs;
 #endif
 
   for (;;) {
     server.handleClient();
 
 #if INKTIME_PHOTOPAINTER_ENABLED
+    const uint32_t portalNowMs = millis();
+    const bool portalButtonRawPressed =
+        digitalRead(kBoardConfig.buttons.user) == LOW;
+    if (portalButtonRawPressed != portalButtonLastRaw) {
+      portalButtonLastRaw = portalButtonRawPressed;
+      portalButtonChangedMs = portalNowMs;
+    }
+    if (portalButtonRawPressed != portalButtonStablePressed
+        && portalNowMs - portalButtonChangedMs >= kPortalButtonDebounceMs) {
+      portalButtonStablePressed = portalButtonRawPressed;
+      if (portalButtonStablePressed) {
+        portalButtonClickArmed = true;
+      } else if (portalButtonClickArmed && apOk) {
+        portalButtonClickArmed = false;
+        portalKeyRefreshCount += 1U;
+        char footer[32];
+        snprintf(
+          footer,
+          sizeof(footer),
+          "KEY REFRESH %lu",
+          static_cast<unsigned long>(portalKeyRefreshCount)
+        );
+        INK_LOG_INFO(
+          "pairing_key_refresh_started",
+          "Debounced KEY1 release requested a pairing screen refresh"
+        );
+        const bool pairingScreenReady = photoPainter.displayPairingScreen(
+          apSsid.c_str(),
+          apPassword.c_str(),
+          "http://192.168.4.1",
+          nullptr,
+          footer
+        );
+        if (pairingScreenReady) {
+          const String refreshMessage = String("KEY1 pairing refresh completed in ")
+              + String(photoPainter.lastRefreshDurationMs()) + String(" ms");
+          INK_LOG_INFO("pairing_key_refresh_ready", refreshMessage);
+        } else {
+          INK_LOG_ERROR("pairing_key_refresh_failed", photoPainter.lastError());
+        }
+      }
+    }
+
     if (millis() - lastPowerCheckMs >= 5000) {
       photoPainter.refreshPowerState();
       lastPowerCheckMs = millis();

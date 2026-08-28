@@ -83,7 +83,8 @@ class PhotoPainterSupport {
     const char* ssid,
     const char* password,
     const char* setup_url,
-    const char* pairing_code = nullptr
+    const char* pairing_code = nullptr,
+    const char* footer = "VALID 5 MIN"
   );
 
   bool writeRtc(time_t epoch);
