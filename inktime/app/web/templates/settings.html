@@ -387,7 +387,7 @@
       } catch(error) { validation(error.message); }
     });
     document.getElementById('rollback-apply').addEventListener('click', async () => {
-      if (!confirm('Rollback 會重新驗證並建立新的 Snapshot，確定繼續？')) return;
+      if (!await window.inktimeConfirm('Rollback 會重新驗證並建立新的 Snapshot，確定繼續？', {title: '確認設定 Rollback'})) return;
       try {
         await request(`/api/v1/settings/snapshots/${selectedSnapshot}/rollback`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{"confirm":true}'});
         location.reload();
@@ -413,7 +413,7 @@
       }
     });
     document.getElementById('import-apply').addEventListener('click', async () => {
-      if (!confirm('確定套用已預覽的安全設定？')) return;
+      if (!await window.inktimeConfirm('確定套用已預覽的安全設定？', {title: '確認套用安全設定'})) return;
       try {
         await request('/api/v1/settings/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:true,document:importDocument})});
         location.reload();
@@ -424,8 +424,8 @@
   const secretForm = document.getElementById('webhook-secret-form');
   if (secretForm) {
     secretForm.addEventListener('submit',async event=>{event.preventDefault();try{const token=new FormData(event.target).get('token');await request('/api/v1/notifications/webhook-secret',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});location.reload();}catch(error){validation(error.message);}});
-    document.getElementById('clear-webhook-token').addEventListener('click',async()=>{if(!confirm('確定清除 Webhook Token？'))return;try{await request('/api/v1/notifications/webhook-secret',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"clear":true}'});location.reload();}catch(error){validation(error.message);}});
-    document.getElementById('test-webhook').addEventListener('click',async()=>{try{const data=await request('/api/v1/notifications/test',{method:'POST'});alert(`測試通知狀態：${data.webhook_status}`);}catch(error){validation(error.message);}});
+    document.getElementById('clear-webhook-token').addEventListener('click',async()=>{if(!await window.inktimeConfirm('確定清除 Webhook Token？',{title:'確認清除 Webhook Token'}))return;try{await request('/api/v1/notifications/webhook-secret',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"clear":true}'});location.reload();}catch(error){validation(error.message);}});
+    document.getElementById('test-webhook').addEventListener('click',async()=>{try{const data=await request('/api/v1/notifications/test',{method:'POST'});validation(`測試通知狀態：${data.webhook_status}`);}catch(error){validation(error.message);}});
   }
   refresh();
 })();

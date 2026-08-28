@@ -79,6 +79,26 @@ def test_activity_incremental_empty_page_keeps_the_rendered_timeline_contract(cl
     assert incremental < early_return < clear_existing
 
 
+def test_activity_filters_before_source_limit_so_older_matches_are_visible(client, app):
+    create_admin(app)
+    login(client)
+    now = datetime.now(timezone.utc).isoformat()
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "INSERT INTO activity_events(source,source_id,severity,component,event,message,details_json,created_at) VALUES ('test','older-match','INFO','wanted','history','older matching event','{}',?)",
+            (now,),
+        )
+        connection.executemany(
+            "INSERT INTO activity_events(source,source_id,severity,component,event,message,details_json,created_at) VALUES ('test',?,'INFO','other','recent','nonmatch','{}',?)",
+            [(f"recent-{index}", now) for index in range(60)],
+        )
+
+    response = client.get("/api/v1/activity?component=wanted")
+
+    assert response.status_code == 200
+    assert [event["source_id"] for event in response.json["events"]] == ["older-match"]
+
+
 def test_activity_cursor_keeps_latest_initial_page_and_drains_each_source_without_gaps(app):
     _seed_sources(app)
     database = app.extensions["inktime_database"]

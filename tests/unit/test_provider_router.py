@@ -373,6 +373,33 @@ def test_empty_frozen_route_never_discovers_a_later_provider(app):
     assert service.build_router() is not None
 
 
+def test_usable_route_requires_remote_secret_but_allows_local_ollama(app):
+    repository = app.extensions["inktime_provider_repository"]
+    service = app.extensions["inktime_provider_service"]
+    remote = repository.save(
+        {
+            "name": "remote-without-secret",
+            "base_url": "https://example.invalid/v1",
+            "enabled": True,
+        },
+        user_id="test",
+    )
+    local = repository.save(
+        {
+            "name": "local-ollama",
+            "kind": "ollama",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "enabled": True,
+        },
+        user_id="test",
+    )
+
+    usable = service.usable_route_snapshot()
+
+    assert [item["provider_id"] for item in usable] == [local]
+    assert remote not in {item["provider_id"] for item in usable}
+
+
 def test_provider_config_revision_ignores_secret_rotation_and_rejects_behavior_changes(app):
     repository = app.extensions["inktime_provider_repository"]
     service = app.extensions["inktime_provider_service"]

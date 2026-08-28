@@ -103,6 +103,39 @@ def test_manual_restore_does_not_immediately_reexclude(app, tmp_path):
     assert unchanged["manual_override"] == 1
 
 
+def test_background_reanalysis_preserves_automatic_exclusion(app, tmp_path):
+    actor = create_admin(app)
+    photo_id = _scan(app, tmp_path, screenshot=True)[0]
+    repository = app.extensions["inktime_photo_repository"]
+    before = repository.get_with_path(photo_id)
+
+    after = repository.set_exclusion(photo_id, action="reanalyze", changed_by=actor)
+
+    assert after["eligible"] == before["eligible"] == 0
+    assert after["exclusion_status"] == before["exclusion_status"] == "auto_excluded"
+    assert after["reject_reason"] == before["reject_reason"]
+    assert after["reject_details_json"] == before["reject_details_json"]
+
+
+def test_reapply_rules_never_restores_manual_exclusion(app, tmp_path):
+    actor = create_admin(app)
+    photo_id = _scan(app, tmp_path)[0]
+    repository = app.extensions["inktime_photo_repository"]
+    repository.set_exclusion(photo_id, action="exclude", changed_by=actor)
+    before = repository.get_with_path(photo_id)
+
+    after = repository.set_exclusion(
+        photo_id,
+        action="reanalyze",
+        changed_by=actor,
+        reapply_rules=True,
+    )
+
+    assert after["eligible"] == 0
+    assert after["exclusion_status"] == "manually_excluded"
+    assert after["reject_reason"] == before["reject_reason"]
+
+
 def test_ai_off_does_not_call_provider(app, tmp_path):
     photo_id = _scan(app, tmp_path)[0]
     _setting(app, "analysis.ai_mode", "off")

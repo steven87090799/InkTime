@@ -53,9 +53,12 @@ def _ai_job_error(exc: ValueError) -> dict:
 
 
 def _build_analysis_plan(settings, strategy: str) -> dict:
+    provider_route = current_app.extensions["inktime_provider_service"].usable_route_snapshot()
+    if not provider_route:
+        raise ValueError("目前沒有已啟用且設定完整的 Vision Provider")
     return current_app.extensions["inktime_analysis_service"].build_plan(
         strategy=strategy,
-        provider_route=current_app.extensions["inktime_provider_service"].route_snapshot(),
+        provider_route=provider_route,
         scoring_profile=dict(current_app.extensions["inktime_scoring_repository"].current()),
     )
 
@@ -127,14 +130,19 @@ def _queue_ai(
 @bp.get("/photos")
 @login_required
 def photos_page():
-    page = max(1, request.args.get("page", 1, type=int))
+    search_parameters = {
+        "query": request.args.get("q", "").strip(),
+        "status": request.args.get("status", "").strip(),
+        "photo_type": request.args.get("type", "").strip(),
+        "minimum_score": request.args.get("score", type=float),
+        "duplicate_only": request.args.get("duplicates") == "1",
+    }
+    _empty_rows, total = _repository().search(**search_parameters, limit=0, offset=0)
+    total_pages = max(1, math.ceil(total / PHOTO_PAGE_SIZE))
+    page = min(max(1, request.args.get("page", 1, type=int)), total_pages)
     offset = (page - 1) * PHOTO_PAGE_SIZE
-    rows, total = _repository().search(
-        query=request.args.get("q", "").strip(),
-        status=request.args.get("status", "").strip(),
-        photo_type=request.args.get("type", "").strip(),
-        minimum_score=request.args.get("score", type=float),
-        duplicate_only=request.args.get("duplicates") == "1",
+    rows, _verified_total = _repository().search(
+        **search_parameters,
         limit=PHOTO_PAGE_SIZE,
         offset=offset,
     )
@@ -170,10 +178,11 @@ def photos_page():
         e6_score = photo.get("e6_score")
         quality = evaluate_local_quality(photo, settings=quality_settings)
         stored_exclusion = str(photo.get("exclusion_status") or "eligible")
-        hard_excluded = quality["decision"] == "auto_excluded" or stored_exclusion in {
-            "auto_excluded",
-            "manually_excluded",
-        }
+        hard_excluded = (
+            not bool(photo.get("eligible", True))
+            or quality["decision"] == "auto_excluded"
+            or stored_exclusion in {"auto_excluded", "manually_excluded"}
+        )
         photo["quality_decision"] = quality["decision"]
         photo["quality_reason"] = str(quality["primary_reason"])
         calibrated_score = None
@@ -185,40 +194,36 @@ def photos_page():
             photo["raw_ranking_score"] = round(float(ranking_score), 1)
             photo["ranking_percentile"] = percentile
             photo["score_band"] = score_band(percentile, calibrated_score)
+        photo["selection_score"] = None
+        photo["model_score"] = round(float(ranking_score), 1) if ranking_score is not None else None
+        photo["e6_display_score"] = round(float(e6_score), 1) if e6_score is not None else None
         if hard_excluded:
             reason = str(photo.get("reject_reason") or quality["primary_reason"])
             photo.pop("score_band", None)
             photo["total_score"] = 0.0
+            photo["selection_score"] = 0.0
             photo["total_score_source"] = f"已排除：{exclusion_labels.get(reason, reason)}"
         elif ranking_score is not None and e6_score is not None:
             photo["total_score"] = round(
                 float(calibrated_score) * (1.0 - e6_weight) + float(e6_score) * e6_weight,
                 1,
             )
+            photo["selection_score"] = photo["total_score"]
             photo["total_score_source"] = "相對校準＋E6" if percentile is not None else "模型＋E6"
         elif ranking_score is not None:
             photo["total_score"] = calibrated_score
+            photo["selection_score"] = calibrated_score
             photo["total_score_source"] = "相對校準" if percentile is not None else "模型"
-        elif e6_score is not None and str(photo.get("local_features_status") or "") == "complete":
-            local_score = local_candidate_score(photo, evaluation=quality)
-            photo["total_score"] = round(
-                float(local_score) * (1.0 - e6_weight) + float(e6_score) * e6_weight,
-                1,
-            )
-            photo["total_score_source"] = (
-                "本機品質（低優先）＋E6 暫估"
-                if quality["decision"] == "low_priority"
-                else "本機品質＋E6 暫估"
-            )
-        elif e6_score is not None:
-            photo["total_score"] = round(float(e6_score), 1)
-            photo["total_score_source"] = "E6 暫估"
         else:
             photo["total_score"] = None
-            photo["total_score_source"] = "尚未評分"
+            photo["local_quality_score"] = (
+                local_candidate_score(photo, evaluation=quality)
+                if str(photo.get("local_features_status") or "") == "complete"
+                else None
+            )
+            photo["total_score_source"] = "尚未完成正式排序分析"
         photos.append(photo)
 
-    total_pages = max(1, math.ceil(total / PHOTO_PAGE_SIZE))
     filter_args = request.args.to_dict(flat=True)
     filter_args.pop("page", None)
 

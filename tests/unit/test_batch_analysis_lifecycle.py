@@ -246,7 +246,7 @@ def _wire_fake(app, fake):
         }
     }
     provider_config = providers.get("fake-batch", include_secret=True)
-    provider_service.route_snapshot = lambda: [
+    provider_snapshot = [
         {
             "provider_id": "fake-batch",
             "display_name": "Fake Batch",
@@ -254,6 +254,8 @@ def _wire_fake(app, fake):
             "config_revision": provider_service.config_revision(provider_config),
         }
     ]
+    provider_service.route_snapshot = lambda: provider_snapshot
+    provider_service.usable_route_snapshot = lambda: provider_snapshot
     provider_service.build_router = lambda *args, **kwargs: fake
     return service
 

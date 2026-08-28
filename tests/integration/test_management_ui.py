@@ -51,6 +51,49 @@ def test_primary_management_pages_render(client, app):
     assert "Good Display 原廠相容" in settings
     assert "照片平滑（減少色塊／雜點）" in settings
 
+    rendering = client.get("/rendering").get_data(as_text=True)
+    assert 'id="release-action-status"' in rendering
+    assert "inktimeSetStatus('#release-action-status',d.message||'發布失敗'" in rendering
+    assert "inktimeSetStatus('#release-action-status',d.message||'回滾失敗'" in rendering
+
+    providers = client.get("/providers").get_data(as_text=True)
+    assert 'id="provider-action-status"' in providers
+    assert "alert(" not in providers
+
+
+def test_shared_confirmation_dialog_resets_and_normalizes_cancel_state(client, app):
+    create_admin(app)
+    login(client)
+
+    body = client.get("/dashboard").get_data(as_text=True)
+
+    reset = body.index("dialog.returnValue = '';")
+    cancel_listener = body.index("dialog.addEventListener('cancel', cancelled);")
+    shown = body.index("dialog.showModal();", cancel_listener)
+    assert reset < cancel_listener < shown
+    assert "const cancelled = () => { dialog.returnValue = 'cancel'; };" in body
+    assert "dialog.removeEventListener('cancel', cancelled);" in body
+    assert "dialog.returnValue === 'confirm'" in body
+
+
+def test_shared_preview_retry_and_typed_job_contracts_are_rendered(client, app):
+    create_admin(app)
+    login(client)
+
+    base = client.get("/dashboard").get_data(as_text=True)
+    jobs = client.get("/jobs").get_data(as_text=True)
+    rendering = client.get("/rendering").get_data(as_text=True)
+
+    assert "window.inktimeFetchPreview" in base
+    assert "response.headers.get('Retry-After')" in base
+    assert "預覽請求過於頻繁，請稍後再試" in base
+    assert "signal?.addEventListener('abort', cancel" in base
+    assert "if(body.limit===null)delete body.limit" in jobs
+    assert "pending_total??0" in jobs
+    assert "limited_to??0" in jobs
+    assert "window.inktimeFetchPreview(statusUrl" in rendering
+    assert "window.inktimeFetchPreview(result.preview_url" in rendering
+
 
 def test_job_detail_live_status_exposes_items_and_only_valid_actions(client, app):
     administrator_id = create_admin(app)
@@ -127,7 +170,7 @@ def test_simulator_superseded_compare_aborts_fetch_and_poll_delay(client, app):
     assert "let compareController = null" in body
     assert "compareController.abort()" in body
     assert "waitForJob(created,{signal:controller.signal})" in body
-    assert "window.inktimeFetch(created.status_url,{signal})" in body
+    assert "window.inktimeFetchPreview(created.status_url,{signal})" in body
     assert "await abortableDelay(750,signal)" in body
     assert "clearTimeout(timer);reject(abortError())" in body
     assert "error?.name!=='AbortError'" in body
@@ -338,10 +381,10 @@ def test_device_management_shows_offline_capability_without_secret_or_viewer_con
         )
 
     body = client.get("/devices").get_data(as_text=True)
-    assert "離線能力：unknown_12／Legacy／尚未確認，最多 12 slots" in body
-    assert "離線能力：confirmed_24／已確認 24-slot capability（最多 24 slots）" in body
-    assert "離線能力：legacy_ambiguous／最大 12 slots" in body
-    assert "舊資料能力不明，已隔離；請重新配對或 Repair 以確認 capability。" in body
+    assert "尚未回報離線排程能力（保守上限 12 個時段）" in body
+    assert "已確認支援 24 個離線時段（目前上限 24）" in body
+    assert "離線排程能力尚未確認（保守上限 12 個時段）" in body
+    assert "請重新配對或執行修復，以確認裝置能力。" in body
     assert ambiguous_token not in body
     assert malformed_token not in body
     assert 'data-offline-capability-state="legacy_ambiguous"' in body
@@ -446,8 +489,13 @@ def test_batch_management_api_dispatches_lifecycle_actions(client, app, monkeypa
 
     monkeypatch.setitem(app.extensions, "inktime_batch_analysis_service", FakeBatchService())
     headers = {"X-CSRF-Token": csrf(client)}
-    estimate = client.post("/api/v1/analysis/batches/estimate", json={"scope": "sample"}, headers=headers)
+    estimate = client.post(
+        "/api/v1/analysis/batches/estimate",
+        json={"scope": "sample", "budget_limit": 12.5},
+        headers=headers,
+    )
     assert estimate.status_code == 200
+    assert "budget_limit" not in estimate.get_json()
     created = client.post("/api/v1/analysis/batches", json={"scope": "sample"}, headers=headers)
     assert created.status_code == 201
     assert client.get("/api/v1/analysis/batches").status_code == 200
@@ -841,7 +889,8 @@ def test_photo_cards_show_total_score_and_e6_estimate(client, app):
     body = client.get("/photos").get_data(as_text=True)
 
     assert "選片分 84.0（模型＋E6）" in body
-    assert "選片分 91.9（E6 暫估）" in body
+    assert "選片分 —（尚未正式分析）" in body
+    assert "E6 顯示適合度 91.9（暫估，未納入正式選片分）" in body
 
 
 def test_photo_cards_never_present_excluded_screenshot_or_severe_blur_as_high_score(client, app):
@@ -882,6 +931,33 @@ def test_photo_cards_never_present_excluded_screenshot_or_severe_blur_as_high_sc
     assert "明確截圖或嚴重單項缺陷會直接排除" in detail
 
 
+def test_photo_cards_force_ineligible_selection_score_to_zero_but_keep_diagnostics(client, app):
+    create_admin(app)
+    login(client)
+    photo_id = add_photos(app, 1)[0]
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE photos SET eligible=0,e6_score=99,exclusion_status='eligible' WHERE id=?",
+            (photo_id,),
+        )
+    app.extensions["inktime_photo_repository"].save_analysis(
+        photo_id,
+        None,
+        "stage_one",
+        "測試 Provider",
+        "vision-model",
+        valid_result(),
+        "{}",
+        ranking_score=98,
+    )
+
+    body = client.get("/photos").get_data(as_text=True)
+
+    assert "選片分 0.0（已排除：" in body
+    assert "模型排序 98.0" in body
+    assert "E6 顯示適合度 99.0" in body
+
+
 def test_photo_library_loads_200_per_page_and_keeps_filters(client, app):
     create_admin(app)
     login(client)
@@ -907,6 +983,53 @@ def test_photo_library_loads_200_per_page_and_keeps_filters(client, app):
     assert second_body.count('class="photo-card"') == 1
     assert "目前顯示第 201–201 張" in second_body
     assert "第 2 / 2 頁" in second_body
+
+    clamped = client.get("/photos?status=analyzed&page=999")
+    clamped_body = clamped.get_data(as_text=True)
+    assert clamped.status_code == 200
+    assert clamped_body.count('class="photo-card"') == 1
+    assert "第 2 / 2 頁" in clamped_body
+
+
+def test_review_thumbnail_accepts_string_root_and_rejects_invalid_sources(
+    client, app, tmp_path, monkeypatch
+):
+    create_admin(app)
+    login(client)
+    photo_id = add_photos(app, 1)[0]
+    root = tmp_path / "review-source"
+    root.mkdir()
+    Image.new("RGB", (80, 60), "#527f99").save(root / "photo.jpg")
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE libraries SET root_path=? WHERE id=(SELECT library_id FROM photos WHERE id=?)",
+            (str(root), photo_id),
+        )
+        connection.execute(
+            "UPDATE photos SET relative_path='photo.jpg',sha256=? WHERE id=?",
+            ("a" * 64, photo_id),
+        )
+
+    valid = client.get(f"/api/v1/review/photos/{photo_id}/thumbnail")
+    assert valid.status_code == 200
+    assert valid.mimetype == "image/jpeg"
+
+    (root / "photo.jpg").unlink()
+    assert client.get(f"/api/v1/review/photos/{photo_id}/thumbnail").status_code == 404
+
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE photos SET relative_path='../outside.jpg' WHERE id=?", (photo_id,))
+    assert client.get(f"/api/v1/review/photos/{photo_id}/thumbnail").status_code == 400
+
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute("UPDATE photos SET relative_path='photo.jpg' WHERE id=?", (photo_id,))
+    Image.new("RGB", (80, 60), "#527f99").save(root / "photo.jpg")
+    monkeypatch.setattr(
+        app.extensions["inktime_thumbnail_cache"],
+        "get_or_create",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("thumbnail failed")),
+    )
+    assert client.get(f"/api/v1/review/photos/{photo_id}/thumbnail").status_code == 422
 
 
 def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(client, app, tmp_path):
