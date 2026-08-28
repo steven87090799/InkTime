@@ -53,9 +53,7 @@ class ThumbnailCache:
 
         shard = int(sha256(cache_key.encode("ascii")).hexdigest()[:8], 16) % self.LOCK_SHARDS
         shard_path = self.lock_root / f"shard-{shard:03d}.lock"
-        legacy_path = self.root / f".{cache_key}.lock"
         shard_descriptor = os.open(shard_path, os.O_RDWR | os.O_CREAT, 0o600)
-        legacy_descriptor: int | None = None
         acquired = False
         try:
             os.chmod(shard_path, 0o600)
@@ -65,29 +63,8 @@ class ThumbnailCache:
                 yield False
                 return
             acquired = True
-            # Rolling upgrades can leave an old per-key lock. Lock it as well,
-            # but never create or unlink one: deleting a live inode is unsafe.
-            try:
-                legacy_descriptor = os.open(legacy_path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
-            except FileNotFoundError:
-                legacy_descriptor = None
-            if legacy_descriptor is not None:
-                try:
-                    fcntl.flock(
-                        legacy_descriptor, fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
-                    )
-                except BlockingIOError:
-                    os.close(legacy_descriptor)
-                    legacy_descriptor = None
-                    fcntl.flock(shard_descriptor, fcntl.LOCK_UN)
-                    acquired = False
-                    yield False
-                    return
             yield True
         finally:
-            if legacy_descriptor is not None:
-                fcntl.flock(legacy_descriptor, fcntl.LOCK_UN)
-                os.close(legacy_descriptor)
             if acquired:
                 fcntl.flock(shard_descriptor, fcntl.LOCK_UN)
             os.close(shard_descriptor)

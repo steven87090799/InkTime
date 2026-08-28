@@ -37,7 +37,7 @@
 ### 根目錄與入口
 
 - [`../README.md`](../README.md)：中文專案首頁、完整資料流與快速入口。
-- [`../README.en.md`](../README.en.md)：英文 legacy README；僅供舊使用方式參考。
+- [`../README.en.md`](../README.en.md)：英文專案概覽與 Modern 啟動方式。
 - [`../USER_MANUAL.html`](../USER_MANUAL.html)：可瀏覽的專案規格與所有 Markdown 文件索引。
 
 ### Batch 與交付專項
@@ -69,7 +69,7 @@
 - [`architecture/ARCHITECTURE_TARGET.md`](architecture/ARCHITECTURE_TARGET.md)：架構責任與不變條件。
 - [`architecture/APPLICATION_FACTORY.md`](architecture/APPLICATION_FACTORY.md)：Web／Worker／Scheduler 的 Factory 與初始化順序。
 - [`architecture/RUNTIME_CONFIGURATION.md`](architecture/RUNTIME_CONFIGURATION.md)：RuntimeConfig 與部署設定邊界。
-- [`architecture/LEGACY_RETIREMENT_PLAN.md`](architecture/LEGACY_RETIREMENT_PLAN.md)：Legacy 相容與退休門檻。
+- [`architecture/LEGACY_RETIREMENT_PLAN.md`](architecture/LEGACY_RETIREMENT_PLAN.md)：Legacy runtime 已退休的資料保留紀錄。
 - [`architecture/VISUAL_ORIENTATION_CORRECTION.md`](architecture/VISUAL_ORIENTATION_CORRECTION.md)：EXIF、AI 與人工視覺方向規則。
 - [`architecture/TECH_DEBT_LOCAL_ONLY_ZH_TW.md`](architecture/TECH_DEBT_LOCAL_ONLY_ZH_TW.md)：Local-only 交付刻意未處理的技術債。
 
@@ -85,7 +85,7 @@
 - [`operations/PRODUCTION_PREFLIGHT_ZH_TW.md`](operations/PRODUCTION_PREFLIGHT_ZH_TW.md)：公開 URL、Cookie、Proxy 與 SQLite 掛載預檢。
 - [`operations/BACKUP_RESTORE_ZH_TW.md`](operations/BACKUP_RESTORE_ZH_TW.md)：備份內容、驗證與離線還原。
 - [`operations/SECRET_RECOVERY_ZH_TW.md`](operations/SECRET_RECOVERY_ZH_TW.md)：加密 Secret 的災難復原 Bundle。
-- [`operations/MIGRATION_GUIDE_ZH_TW.md`](operations/MIGRATION_GUIDE_ZH_TW.md)：舊版遷移與 `config.py` 匯入。
+- [`operations/MIGRATION_GUIDE_ZH_TW.md`](operations/MIGRATION_GUIDE_ZH_TW.md)：舊資料庫升級與相容性界線。
 - [`operations/MIGRATION_PLAN.md`](operations/MIGRATION_PLAN.md)：升級、回滾與資料相容原則。
 - [`operations/OPERATIONS_ZH_TW.md`](operations/OPERATIONS_ZH_TW.md)：Decision、Queue、保留與發布日常操作。
 

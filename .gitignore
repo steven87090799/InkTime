@@ -36,8 +36,6 @@ filelist.txt
 *.lock
 
 # Finder duplicate copies
-legacy_server 2.py
-scripts/import_legacy_config 2.py
 scripts/migrate 2.py
 scripts/performance_100k 2.py
 

@@ -122,7 +122,7 @@ flowchart LR
 - 僅本地策略的固定分數公式：同檔案的 `_local_result()`。
 - Worker 如何讀取設定：`inktime/app/workers/runner.py`。
 - 電子紙自動選片排序：`inktime/app/services/rendering.py`。
-- 舊版原始回憶分／美觀分細則仍保留在 `legacy_analyze_photos.py`；其有效規則已整理為新版預設。
+- 原始評分細則的有效規則已整理為 `inktime/app/domain/analysis/scoring.py` 的版本化預設；Modern runtime 不依賴退役 Analyzer。
 
 新規則只套用到之後的分析；既有照片保留當時的 `ranking_score` 與 `scoring_version_id`，不會在滑桿變動時悄悄改分。若要回溯比較，應另開重新分析工作。
 

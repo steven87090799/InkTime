@@ -196,7 +196,6 @@ def main() -> int:
             photo_dir=root / "photos",
             testing=True,
             development=False,
-            legacy_enabled=False,
             cookie_secure=False,
         )
         runtime.photo_dir.mkdir(parents=True)

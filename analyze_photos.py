@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""舊命令名稱的相容入口；實際工作走 InkTime 2.x 資料庫 Job 與 Worker。"""
+"""建立 InkTime 照片掃描／分析資料庫 Job，並由 Modern Worker 執行。"""
 
 from __future__ import annotations
 

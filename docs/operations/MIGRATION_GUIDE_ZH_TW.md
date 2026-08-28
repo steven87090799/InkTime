@@ -1,26 +1,15 @@
 # 從舊版 InkTime 遷移
 
-1. 停止舊分析與 cron，備份 `photos.db`、`config.py`、輸出與裝置設定。
+1. 停止舊分析與 cron，備份舊資料庫、設定、輸出與裝置設定；不要從目前 repository 啟動已退休 runtime。
 2. 執行 `python scripts/migrate.py --database <photos.db>`；舊 `photo_scores` 不會刪除。
-3. 啟動新版並建立管理員，再執行下列舊設定匯入工具。
+3. 啟動新版並建立管理員，再由 Web 設定頁手動填入時區、渲染門檻、Provider 與模型設定。
 4. 由「維護」掃描照片；SHA-256 可在路徑移動後保留結果，相同內容建立繼承來源。
 5. 升級 ESP32 韌體；新自製板依自動配對 request／實體配對碼／管理員核准／可恢復 claim-confirm 取得 Device Secret，既有 Legacy 裝置才建立相容 Token；驗證 Manifest 後才移除舊 URL 金鑰。
 6. 用小型本地／Mock 工作驗證，再恢復大量分析。
 
-回滾：停止三服務、驗證 pre-migration 備份、恢復舊 DB／映像／config，短期切回舊韌體。舊 API 有明確安全風險，只可在隔離網路使用。詳見 `MIGRATION_PLAN.md`。
+回滾：停止三服務、驗證 pre-migration 備份，再回復先前已驗證的 DB 與映像。目前 repository 不提供 Legacy runtime；若必須回復舊版，只能使用部署者自行保存且已驗證的舊映像，並限制在隔離網路。詳見 `MIGRATION_PLAN.md`。
 
-## 匯入舊 `config.py`
-
-先用 dry-run 確認範圍，再正式寫入：
-
-```bash
-python scripts/import_legacy_config.py ./config.py --database data/inktime.db --data-dir data --dry-run
-python scripts/import_legacy_config.py ./config.py --database data/inktime.db --data-dir data
-```
-
-工具會匯入時區、渲染門檻、顯示數量、字型、舊 API 開關與 `API_CHANNELS`。API Key 直接以目前 `session.key` 加密，不會輸出到 Console；若尚無該檔案，請先啟動一次或設定 `INKTIME_SECRET_KEY`。
-
-`DOWNLOAD_KEY` 不會轉成新版 Device Secret 或 Legacy Token。新自製板依實體配對碼與 claim-confirm 流程完成綁定；只有既有 Legacy 裝置才在裝置頁逐台建立相容 Token；舊 API 維持預設關閉。
+舊 `config.py` 不再由 repository 內腳本直接載入。請在離線環境人工核對非敏感值，再從 Modern Web 逐項設定；API Key 只透過 Provider 設定頁寫入加密 Secret。`DOWNLOAD_KEY` 不會轉成 Device Secret 或相容 Token。
 
 ## Migration 25：帳號正規化與 Session 撤銷
 

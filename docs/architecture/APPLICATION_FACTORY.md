@@ -3,8 +3,7 @@
 ## 正式入口與初始化順序
 
 正式 WSGI 入口保持 `server:app`，但 `server.py` 只呼叫
-`inktime.app.factory.create_app()`；它不再 import `legacy_server` 或借用任何
-Legacy Flask App。`factory.py` 被 import 時不建 App、不開 Database、不建立目錄，
+`inktime.app.factory.create_app()`；它只組裝 Modern Flask App。`factory.py` 被 import 時不建 App、不開 Database、不建立目錄，
 只有明確呼叫 `create_app()` 才執行下列 Bootstrap：
 
 1. 解析一次不可變 `RuntimeConfig`。
@@ -13,8 +12,7 @@ Legacy Flask App。`factory.py` 被 import 時不建 App、不開 Database、不
 4. 由 `bootstrap_services(..., role="web")` 建立 process-local Repository 與 Service。
 5. 設定 Session、CSRF、安全 Header、Auth 與錯誤處理。
 6. 只載入 Modern Template／Static 並註冊 Modern Blueprints。
-7. `legacy_enabled=true` 時才 lazy import、驗證資產碰撞並註冊 `/legacy/*`。
-8. Health Detail 使用相同 RuntimeConfig 遮蔽摘要；Web 才執行 Release reconciliation。
+7. Health Detail 使用相同 RuntimeConfig 遮蔽摘要；Web 才執行 Release reconciliation。
 
 `configure_web_application()` 對同一 App 的第二次初始化會明確失敗，避免重複
 Migration、Blueprint 或 Extension。每次 `create_app()` 都會產生不同 Database、
@@ -36,13 +34,10 @@ Worker、Scheduler 與 `analyze_photos.py` 不 import `server:app`，也不建�
 
 ## Template、Static 與錯誤處理
 
-Modern loader 只指向 `inktime/app/web/templates`；Legacy Blueprint 只指向
-`inktime/app/legacy/templates`，且所有 Legacy Template 使用 `legacy/` namespace。
-Static 分別使用 `/static/*` 與 `/legacy/static/*`。註冊 Legacy 前會比較兩側相對檔名，
-任何 Template／Static collision 都明確中止 Legacy 註冊，不依賴 loader 順序。
+Template loader 只指向 `inktime/app/web/templates`，Static 只使用 `/static/*`；應用程式不再註冊額外的相容頁面或資產路徑。
 
 Auth、CSRF 與 HTTP error handler 只由 Modern Root 註冊。Device Bearer API 保持 CSRF
-豁免；Legacy 不註冊 error handler，因此不能覆蓋 Modern HTML／JSON 行為。
+豁免；HTML／JSON 錯誤行為由 Modern Root 統一處理。
 
 ## Migration、測試與 Rollback
 
@@ -51,5 +46,5 @@ readiness，Migration lock、交易 rollback、pre-migration backup 與 integrit
 本重構不新增 Schema migration。
 
 回滾方式是停止三個 process、回復本 PR 的程式 commit，再以相同 Database 與 Release
-目錄啟動舊版。因未刪表、未改 Device API、未反向寫入 `photo_scores`，資料層不需要
+目錄啟動前一個程式版本。因未刪表、未改 Device API、未寫入 `photo_scores`，資料層不需要
 Down Migration。
