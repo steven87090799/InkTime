@@ -2,16 +2,31 @@
 {% block title %}儀表板｜InkTime{% endblock %}
 {% block content %}
 <div class="page-head"><div><p class="eyebrow">系統總覽</p><h1>儀表板</h1></div><span class="status {{ 'error' if system_status == '嚴重故障' else 'warn' if system_status != '正常' else 'ok' }}">{{ system_status }}</span></div>
-<section class="metrics dashboard-metrics" aria-label="系統摘要">
-  <article><span>照片總數</span><strong>{{ counts.photos }}</strong></article>
-  <article><span>已分析</span><strong>{{ counts.analyzed }}</strong></article>
-  <article><span>分析失敗</span><strong>{{ counts.failed }}</strong></article>
-  <article><span>重複照片</span><strong>{{ counts.duplicates }}</strong></article>
-  <article><span>執行中工作</span><strong>{{ counts.running_jobs }}</strong><a href="/activity">查看即時監控</a></article>
-  <article><span>今日 Token</span><strong>{{ counts.today_tokens }}</strong></article>
-  <article><span>本月成本</span><strong>US$ {{ '%.4f'|format(counts.month_cost) }}</strong></article>
-  <article><span>本月未定價 API 預留成本</span><strong>US$ {{ '%.4f'|format(counts.month_unknown_reserve) }}</strong></article>
-  <article><span>未解決警告／錯誤／嚴重</span><strong>{{ issues.get('warning', 0) }}/{{ issues.get('error', 0) }}/{{ issues.get('critical', 0) }}</strong></article>
+<section class="dashboard-summary" aria-label="系統摘要">
+  <article class="dashboard-summary-group">
+    <div class="dashboard-summary-head"><div><p>照片資料</p><h2>照片庫</h2></div><a href="/photos">查看照片</a></div>
+    <dl class="dashboard-summary-list">
+      <div><dt>照片總數</dt><dd>{{ counts.photos }}</dd></div>
+      <div><dt>已完成分析</dt><dd>{{ counts.analyzed }}</dd></div>
+      <div><dt>重複照片</dt><dd>{{ counts.duplicates }}</dd></div>
+    </dl>
+  </article>
+  <article class="dashboard-summary-group">
+    <div class="dashboard-summary-head"><div><p>分析狀態</p><h2>分析運行</h2></div><a href="/activity">即時監控</a></div>
+    <dl class="dashboard-summary-list">
+      <div><dt>執行中工作</dt><dd>{{ counts.running_jobs }}</dd></div>
+      <div class="{{ 'has-alert' if counts.failed else '' }}"><dt>分析失敗</dt><dd>{{ counts.failed }}</dd></div>
+      <div><dt>今日 Token</dt><dd>{{ counts.today_tokens }}</dd></div>
+    </dl>
+  </article>
+  <article class="dashboard-summary-group {{ 'has-alert' if issues.get('critical', 0) or issues.get('error', 0) else '' }}">
+    <div class="dashboard-summary-head"><div><p>費用與異常</p><h2>成本與告警</h2></div><a href="/costs">成本明細</a></div>
+    <dl class="dashboard-summary-list">
+      <div><dt>本月成本</dt><dd>US$ {{ '%.4f'|format(counts.month_cost) }}</dd></div>
+      <div class="{{ 'has-alert' if not counts.cost_complete else '' }}"><dt>未定價 API 預留</dt><dd>US$ {{ '%.4f'|format(counts.month_unknown_reserve) }}</dd></div>
+      <div><dt>未解決事件<small>警告／錯誤／嚴重</small></dt><dd>{{ issues.get('warning', 0) }}/{{ issues.get('error', 0) }}/{{ issues.get('critical', 0) }}</dd></div>
+    </dl>
+  </article>
 </section>
 {% if not counts.cost_complete %}<p class="notice warning">本月有 {{ counts.month_unknown_count }} 筆具備可計費證據但尚未完成定價的 API 使用量；上方成本未將其冒充為 US$ 0，預留金額按目前設定計算。</p>{% endif %}
 <section class="panel"><div class="panel-head"><h2>功能分類</h2><a href="/settings">所有設定</a></div>
