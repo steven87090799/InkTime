@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from inktime.app.providers.config import validate_base_url
+from inktime.app.providers.config import validate_base_url, validate_model_id
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
 
 
@@ -84,3 +84,20 @@ def test_provider_requests_disable_redirects_and_keep_authorization_bound():
     assert session.calls[0][1]["allow_redirects"] is False
     assert session.calls[0][1]["headers"]["Authorization"] == "Bearer test-key"
     provider.close()
+
+
+@pytest.mark.parametrize("model", ["openrouter/free", "openai/gpt-4o", "google/gemini-2.5-flash"])
+def test_openrouter_model_requires_and_accepts_full_provider_slug(model):
+    assert validate_model_id("openrouter", model, required=True) == model
+
+
+@pytest.mark.parametrize("model", ["gpt-4o", "/gpt-4o", "openai/", "openai/gpt 4o"])
+def test_openrouter_model_rejects_short_or_malformed_slug(model):
+    with pytest.raises(ValueError, match="PROVIDER-021"):
+        validate_model_id("openrouter", model, required=True)
+
+
+def test_blank_model_is_allowed_only_when_a_caller_has_a_fallback():
+    assert validate_model_id("openrouter", "") == ""
+    with pytest.raises(ValueError, match="PROVIDER-021"):
+        validate_model_id("openrouter", "", required=True)

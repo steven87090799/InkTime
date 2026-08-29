@@ -16,8 +16,8 @@
 
 1. **Base URL 要填 API 根路徑**，例如 `https://api.openai.com/v1`。不要填完整的 `/chat/completions` URL，否則「測試」按鈕可能會錯誤地組出 `/chat/completions/models`。
 2. 「類型」會影響 server-side capability 與安全政策。OpenRouter 使用正式 `kind=openrouter` request contract；Ollama 只允許本地／私有 HTTP；未知 kind 與未知 options 會被拒絕。所有相容端點仍必須自行提供 OpenAI Chat Completions 格式，InkTime 不會把 Gemini、Claude、Bedrock 等原生格式自動轉換。
-3. `model.low_model` 與 `model.high_model` 是**全系統共用**，不是每個 Provider 各自一組。若同時啟用 OpenAI 與 Gemini，InkTime 會把同一個模型 ID 傳給兩家；`gpt-4.1-mini` 在 Gemini 不存在，`gemini-...` 在 OpenAI 也不存在。因此目前建議一次只啟用一家直連廠商，或使用 OpenRouter 這類單一聚合端點。
-4. 「測試」只代表 API Key、Base URL 與 `GET /models` 可連線，不代表圖片、JSON Schema 或模型名稱一定可用。儲存後仍要到「評分」頁用單張照片測試。
+3. 每個 Provider 可設定自己的「預設模型 ID」，Vision 與 text-only repair 都優先使用它；留空才沿用全系統模型設定。OpenRouter 必須填 `provider/model` 完整 ID，短名稱會在送出外部請求前被拒絕。
+4. Provider 頁提供三層測試：Level 1 只檢查連線；Level 2 使用合成圖片檢查 Vision 與簡化 Schema；Level 3 使用合成圖片檢查完整 Schema，必要時最多一次 text-only repair。Level 2/3 可能產生 Provider 費用，但不會使用相簿照片。
 5. Provider 頁已有模型價格表單；若 Provider response 沒有真實成本，已填價格才會產生 `estimated`，否則 usage 是 `unknown`。unknown 不會被當作免費，且新的 AI request 會 fail-closed，直到補上價格或改用能回報成本的 Provider。
 
 ## 完整操作流程
@@ -41,6 +41,7 @@
 | 名稱 | `OpenAI 主線`、`Gemini`、`本機 Ollama` | 只是 InkTime 顯示名稱，可自行命名。 |
 | 類型 | 直連 OpenAI 選 `OpenAI`；OpenRouter 選 `OpenRouter（正式 API）`；其他雲端選 `OpenAI 相容 API`；Ollama／LM Studio 選 `本地 Ollama 相容端點` | kind 會影響 Batch、reasoning、routing 與 HTTP policy。 |
 | Base URL | 填到 `/v1` 或廠商指定的相容 API 根路徑 | 不要自行再加 `/chat/completions`。 |
+| 預設模型 ID | OpenRouter 可選 `openrouter/free`，或貼上 Models 頁的完整 ID | 留空沿用系統設定；OpenRouter 的 fallback 也必須有 provider 前綴。 |
 | API Key | 貼上廠商提供的完整 Key | InkTime 加密儲存且頁面只顯示遮罩。編輯既有 Provider 時留空會保留舊 Key。 |
 | 狀態 | 初次設定先選 `啟用` | 若同時設定不同廠商，先只啟用正在測試的一家。 |
 | 優先順序 | 第一家 `100`、備援 `200`、第三家 `300` | 數字越小越先使用。只有各家接受相同模型 ID 時才適合直接備援。 |
@@ -55,9 +56,9 @@
 
 儲存後按「測試」。看到「連線成功」後，還不能直接跑全相簿；請繼續完成模型名稱與單張照片測試。
 
-### 第 3 步：到「設定」頁填模型名稱
+### 第 3 步：確認 Provider 或全域模型名稱
 
-進入「設定」→「模型設定」：
+建議直接在每個 Provider 的「預設模型 ID」指定該端點接受的模型。只有欄位留空時，才會沿用「設定」→「模型設定」：
 
 | 欄位 | 用途 | 建議 |
 |---|---|---|
@@ -65,7 +66,7 @@
 | `model.analysis_model` | 新單次完整照片分析 | 填 Provider 能接受圖片與 Schema 的**完整模型 ID**，OpenRouter 必須包含 provider 前綴。 |
 | `model.repair_model` | 只接收文字的 JSON 修復 | 最多一次；不會收到圖片。預設 cap 1200 tokens。 |
 
-模型 ID 必須原樣複製，包含大小寫、斜線、冒號與版本尾碼。例如 OpenRouter 常見 `廠商/模型`，Ollama 常見 `模型:尺寸`。不要把模型的中文名稱或產品頁標題填進去。
+Provider 專屬模型會同時覆蓋 analysis 與 repair 的全域模型。模型 ID 必須原樣複製，包含大小寫、斜線、冒號與版本尾碼。例如 OpenRouter 常見 `廠商/模型`，Ollama 常見 `模型:尺寸`。不要把模型的中文名稱或產品頁標題填進去。
 
 接著在「成本設定」先保守填入：
 
@@ -148,6 +149,7 @@ OpenRouter 把多家模型正規化成一個 OpenAI 相容端點，最能避開 
 | 名稱 | `OpenRouter` |
 | 類型 | `OpenRouter（正式 API）` |
 | Base URL | `https://openrouter.ai/api/v1` |
+| 預設模型 ID | `openrouter/free` 或 Models 頁提供的完整 `provider/model` ID |
 | API Key | `sk-or-v1-...` |
 | 優先順序 | `100` |
 | 最大並行 | `1`，穩定後可試 `2` |
@@ -156,7 +158,7 @@ OpenRouter 把多家模型正規化成一個 OpenAI 相容端點，最能避開 
 | Batch | 不勾 |
 | 嚴格 JSON Schema | 所選模型明確支援 structured outputs 才勾 |
 
-模型 ID 要連同廠商前綴完整貼上，例如 `openai/...`、`google/...`、`anthropic/...`；不要只填尾端名稱。若 low/high 選不同廠商也沒問題，因為兩者仍由同一個 OpenRouter Base URL 處理。
+模型 ID 要連同廠商前綴完整貼上，例如 `openai/...`、`google/...`、`anthropic/...`；不要只填尾端名稱。若要切換模型，直接編輯這個 Provider 的「預設模型 ID」即可。
 
 OpenRouter 的 options、routing/privacy policy、reasoning、cache、成本來源與禁止 Batch 邊界，請一併閱讀 [OpenRouter 正式 Provider 與安全契約](../providers/OPENROUTER_ZH_TW.md)。離線比較模型與解析度時，使用 [Model Benchmark 規格](../providers/MODEL_BENCHMARK_ZH_TW.md)；預設模式不呼叫外部 Provider。
 

@@ -5,7 +5,12 @@ import json
 from typing import Any
 
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
-from inktime.app.providers.config import capabilities_for, effective_provider_kind, normalize_options
+from inktime.app.providers.config import (
+    capabilities_for,
+    effective_provider_kind,
+    normalize_options,
+    validate_model_id,
+)
 from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
 from inktime.app.repositories.providers import ProviderRepository
 from inktime.app.repositories.settings import SettingsRepository
@@ -26,7 +31,7 @@ class ProviderService:
         # ``None`` preserves the legacy "use the current route" behavior.  An
         # explicit empty snapshot is a frozen decision that no Provider may be
         # used; it must never discover a Provider added after the Job was made.
-        requested = self.route_snapshot() if route_snapshot is None else route_snapshot
+        requested = self.usable_route_snapshot() if route_snapshot is None else route_snapshot
         if not requested:
             return None
         channels = []
@@ -134,17 +139,32 @@ class ProviderService:
     def usable_route_snapshot(self) -> list[dict]:
         """Return enabled, configured Vision routes without making paid/network calls."""
 
-        usable_ids = {
-            str(row["id"])
-            for row in self.repository.list()
-            if bool(row.get("enabled"))
-            and bool(row.get("supports_vision"))
-            and bool(str(row.get("base_url") or "").strip())
-            and (
-                str(row.get("kind") or "").casefold() == "ollama"
-                or bool(row.get("api_key_configured"))
-            )
-        }
+        analysis_model = str(self.settings.get("model.analysis_model", "gpt-4o") or "").strip()
+        repair_model = str(self.settings.get("model.repair_model", "gpt-4o-mini") or "").strip()
+        usable_ids: set[str] = set()
+        for row in self.repository.list():
+            if not (
+                bool(row.get("enabled"))
+                and bool(row.get("supports_vision"))
+                and bool(str(row.get("base_url") or "").strip())
+                and (
+                    str(row.get("kind") or "").casefold() == "ollama"
+                    or bool(row.get("api_key_configured"))
+                )
+            ):
+                continue
+            try:
+                configured_model = str(row.get("model") or "").strip()
+                for model in (configured_model,) if configured_model else (analysis_model, repair_model):
+                    validate_model_id(
+                        str(row.get("kind") or "openai_compatible"),
+                        model,
+                        base_url=str(row.get("base_url") or ""),
+                        required=True,
+                    )
+            except ValueError:
+                continue
+            usable_ids.add(str(row["id"]))
         return [item for item in self.route_snapshot() if str(item["provider_id"]) in usable_ids]
 
     def identity_snapshot(self, provider_id: str) -> dict[str, str]:

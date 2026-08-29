@@ -16,7 +16,9 @@
 | 嚴格 JSON Schema | 依所選模型能力 | 只有模型／路由明確支援 structured outputs 才勾選。 |
 | 最大並行 | 先 `1` | 小批次驗收通過後再提高，並同步設定 RPM／TPM 保守上限。 |
 
-模型 ID 必須保留完整 provider 前綴，例如 `openai/...`、`google/...`、`openrouter/free` 或 Models 頁列出的其他完整 ID。在 `/providers` 的 Provider 編輯視窗填入「預設模型 ID」後，該 Provider 的 Vision 與 text-only repair 都會使用它；留白才會沿用系統的 analysis／repair model。InkTime 不會替你把不同 Provider 的短名稱轉換成 OpenRouter ID。
+模型 ID 必須保留完整 provider 前綴，例如 `openai/...`、`google/...`、`openrouter/free` 或 Models 頁列出的其他完整 ID。在 `/providers` 的 Provider 編輯視窗可直接輸入，或從建議值選擇「預設模型 ID」；該 Provider 的 Vision 與 text-only repair 都會使用它。留白會沿用系統 analysis model，但該值仍必須是完整 OpenRouter ID。InkTime 不會替短名稱自動補前綴；像 `gpt-4o` 這種短名稱會在產生工作、Provider 測試或外部請求前被拒絕，不會先送出可能付費的錯誤請求。
+
+若 OpenRouter 回傳 HTTP 400，Provider Contract 測試會顯示經過遮蔽與長度限制的錯誤代碼、HTTP 狀態和 provider message，方便判斷模型或請求格式問題；API Key、圖片資料與完整原始回應不會出現在畫面上。
 
 ## `options` JSON
 

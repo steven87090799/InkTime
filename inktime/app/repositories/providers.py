@@ -16,6 +16,7 @@ from inktime.app.providers.config import (
     is_openrouter_base_url,
     normalize_options,
     validate_base_url,
+    validate_model_id,
 )
 from inktime.app.providers.openai_compatible import calculate_usage_cost
 from inktime.app.repositories.settings import SecretStore
@@ -74,16 +75,10 @@ class ProviderRepository:
         raw_model = payload.get("model")
         if raw_model is not None and type(raw_model) is not str:
             raise ValueError("model 必須是字串")
-        model = str(raw_model or "").strip()
-        if (
-            len(model) > 200
-            or any(ord(char) < 0x20 or ord(char) == 0x7f for char in model)
-        ):
-            raise ValueError("model 必須是 1 至 200 字元")
-        model = model or None
         kind = effective_provider_kind(requested_kind, raw_base_url)
         options = normalize_options(kind, payload.get("options") or {})
         base_url = validate_base_url(kind, raw_base_url, options)
+        model = validate_model_id(kind, raw_model, base_url=base_url) or None
         capabilities = capabilities_for(
             kind, supports_json_schema=bool(json_bool(payload, "supports_json_schema", default=True))
         )

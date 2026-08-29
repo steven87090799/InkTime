@@ -70,6 +70,23 @@ class CostedRepairProvider(FakeContractProvider):
         )
 
 
+class RejectedVisionProvider(FakeContractProvider):
+    def analyze(self, **kwargs):
+        raise ProviderHTTPError(
+            "Provider rejected request",
+            "CONFIG_INVALID",
+            http_status=400,
+            provider_error_code="invalid_model",
+            response_info={
+                "provider_error_code": "invalid_model",
+                "provider_error_message": (
+                    "Unknown model api_key=super-secret data:image/png;base64,QUJDREVGRw=="
+                ),
+                "request_id": "safe-request-123",
+            },
+        )
+
+
 def test_level1_is_connection_only():
     provider = FakeContractProvider()
     result = run_provider_contract(provider, level=1, model="model")
@@ -149,3 +166,19 @@ def test_level3_repair_usage_is_aggregated_without_second_vision_image():
     assert result["usage"]["unknown_cost_count"] == 0
     assert "image_path" not in provider.repair_calls[0]
     assert len(provider.analyze_calls) == 1
+
+
+def test_contract_failure_returns_safe_actionable_provider_error():
+    result = run_provider_contract(RejectedVisionProvider(), level=2, model="openai/gpt-4o")
+
+    assert result["ok"] is False
+    assert result["provider_error"] == {
+        "error_code": "CONFIG_INVALID",
+        "http_status": 400,
+        "provider_error_code": "invalid_model",
+        "provider_error_message": "Unknown model api_key=[已遮蔽] [已遮蔽圖片資料]",
+        "request_id": "safe-request-123",
+    }
+    assert "CONFIG_INVALID / HTTP 400 / invalid_model / Unknown model" in result["message"]
+    assert "super-secret" not in str(result)
+    assert "QUJDREVGRw" not in str(result)

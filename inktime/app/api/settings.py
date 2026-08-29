@@ -27,6 +27,7 @@ from inktime.app.providers.config import (
     effective_provider_kind,
     normalize_options,
     validate_base_url,
+    validate_model_id,
 )
 from inktime.app.repositories.settings import (
     RANKING_WEIGHT_KEYS,
@@ -537,8 +538,24 @@ def import_settings():
 @bp.get("/providers")
 @login_required
 def providers_page():
+    providers = current_app.extensions["inktime_provider_repository"].list()
+    analysis_model = str(
+        current_app.extensions["inktime_settings_repository"].get("model.analysis_model", "gpt-4o")
+    ).strip()
+    for provider in providers:
+        effective_model = str(provider.get("model") or "").strip() or analysis_model
+        provider["effective_model"] = effective_model
+        try:
+            validate_model_id(
+                str(provider.get("kind") or "openai_compatible"),
+                effective_model,
+                base_url=str(provider.get("base_url") or ""),
+                required=True,
+            )
+        except ValueError as exc:
+            provider["model_validation_error"] = str(exc)
     return render_template(
-        "providers.html", providers=current_app.extensions["inktime_provider_repository"].list()
+        "providers.html", providers=providers
     )
 
 
@@ -591,12 +608,7 @@ def save_provider():
         payload["kind"] = kind
         payload["base_url"] = validate_base_url(kind, str(payload["base_url"]), options)
         if "model" in payload:
-            model = str(payload.get("model") or "").strip()
-            if (
-                len(model) > 200
-                or any(ord(char) < 0x20 or ord(char) == 0x7f for char in model)
-            ):
-                raise ValueError("model 必須是 1 至 200 字元")
+            model = validate_model_id(kind, payload.get("model"), base_url=payload["base_url"])
             payload["model"] = model or None
         payload["enabled"] = json_bool(payload, "enabled", default=True, error_prefix="SET-003")
         payload["supports_vision"] = json_bool(payload, "supports_vision", default=True, error_prefix="SET-003")
@@ -674,6 +686,12 @@ def test_provider(provider_id: str):
         model = configured_model or str(
             current_app.extensions["inktime_settings_repository"].get("model.analysis_model", "gpt-4o")
         ).strip()
+        model = validate_model_id(
+            kind,
+            model,
+            base_url=str(config.get("base_url") or ""),
+            required=True,
+        )
         result = run_provider_contract(provider, level=level, model=model)
     except (ValueError, KeyError) as exc:
         abort(400, description=f"SET-005 {exc}")

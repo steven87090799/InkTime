@@ -537,3 +537,22 @@ def test_provider_service_freezes_provider_model_and_invalidates_model_changes(a
     )
     with pytest.raises(ValueError, match="設定已變更"):
         service.build_router(snapshot)
+
+
+def test_usable_route_excludes_openrouter_with_short_global_model(app):
+    repository = app.extensions["inktime_provider_repository"]
+    service = app.extensions["inktime_provider_service"]
+    provider_id = repository.save(
+        {
+            "name": "legacy-openrouter",
+            "kind": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "test-secret",
+            "enabled": True,
+        },
+        user_id="test",
+    )
+
+    assert provider_id in {item["provider_id"] for item in service.route_snapshot()}
+    assert provider_id not in {item["provider_id"] for item in service.usable_route_snapshot()}
+    assert service.build_router() is None
