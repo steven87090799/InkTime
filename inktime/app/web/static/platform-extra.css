@@ -135,7 +135,7 @@ pre { white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow
 .settings-source-flow article:not(:last-child)::after { content: "→"; position: absolute; right: -9px; top: 50%; z-index: 1; transform: translateY(-50%); color: var(--muted); }
 .settings-source-flow strong, .settings-source-flow small { display: block; }
 .settings-source-flow small { margin-top: 6px; color: var(--muted); }
-.settings-toolbar { position: sticky; top: 82px; z-index: 4; }
+.settings-toolbar { position: static; }
 .settings-toolbar .panel-head { align-items: flex-start; gap: 18px; }
 .settings-toolbar .panel-head p { max-width: 760px; margin: 5px 0 0; color: var(--muted); }
 .settings-toolbar .panel-head > strong { flex: 0 0 auto; padding: 6px 10px; border-radius: 999px; background: var(--accent2); color: var(--accent); white-space: nowrap; }
