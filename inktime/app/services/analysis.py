@@ -37,7 +37,11 @@ from inktime.app.domain.analysis.scoring import (
 )
 from inktime.app.domain.analysis.schema import normalize_caption_controls
 from inktime.app.domain.photos import ThumbnailCache
-from inktime.app.domain.photos.quality_policy import FEATURE_VERSION, evaluate_local_quality
+from inktime.app.domain.photos.quality_policy import (
+    FEATURE_VERSION,
+    evaluate_local_quality,
+    is_confirmed_screenshot,
+)
 from inktime.app.providers.base import ProviderResponse, Usage, VisionAttemptState, VisionProvider
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.settings import SettingsRepository
@@ -1106,6 +1110,9 @@ class PhotoAnalysisService:
                     None,
                 )
         trace_id = _trace_id
+        # Budget/cache/trace checks can fail before a request is started.  Keep
+        # the attempt state available to the exception path in every case.
+        vision_attempt = VisionAttemptState()
         try:
             # A rejected budget has not entered the model-call lifecycle and
             # therefore must not create an empty observational Trace.
@@ -1120,7 +1127,6 @@ class PhotoAnalysisService:
                 analysis_fingerprint=analysis_fingerprint,
                 vision_request_fingerprint=request_fingerprint,
             )
-            vision_attempt = VisionAttemptState()
             # The only owner generates a JPEG, after both cache checks.
             with image_factory() as image:
                 result, raw, cost, usage, latency = self._perform_uncached_model_call(
@@ -1992,9 +1998,10 @@ class PhotoAnalysisService:
             )
             return {"analysis": result, "stage": "prefilter", "_actual_cost": 0}
 
+        confirmed_screenshot = is_confirmed_screenshot(photo)
         prefiltered = (
             None
-            if force_ai or self.settings is None
+            if (force_ai or self.settings is None) and not confirmed_screenshot
             else self._prefilter_result(photo, policy_settings=plan_prefilter)
         )
         if prefiltered is not None:

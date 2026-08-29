@@ -175,7 +175,7 @@ textarea:focus-visible {
 .dashboard-summary-list > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; min-height: 68px; padding: 13px 0; border-top: 1px solid var(--line); }
 .dashboard-summary-list dt { min-width: 0; color: var(--muted); font-size: 13px; }
 .dashboard-summary-list dt small { display: block; margin-top: 2px; font-size: 10px; }
-.dashboard-summary-list dd { margin: 0; font-size: 23px; font-weight: 800; line-height: 1.2; text-align: right; overflow-wrap: anywhere; }
+.dashboard-summary-list dd { margin: 0; font-size: clamp(17px, 1.55vw, 23px); font-weight: 800; line-height: 1.2; text-align: right; white-space: nowrap; }
 .dashboard-summary-list .has-alert dd { color: var(--danger); }
 .panel { padding: 24px; margin: 18px 0; }
 .panel.narrow { max-width: 560px; }

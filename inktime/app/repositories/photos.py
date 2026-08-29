@@ -22,6 +22,7 @@ from inktime.app.domain.photos.preprocessing import LocalPhotoFeatures
 from inktime.app.domain.photos.quality_policy import (
     FEATURE_VERSION,
     evaluate_local_quality,
+    is_confirmed_screenshot,
     local_candidate_score,
 )
 from inktime.app.domain.photos.dates import materialized_capture_fields, parse_photo_datetime
@@ -1454,7 +1455,12 @@ class PhotoRepository:
         origin: str = "",
         limit: int = 200,
     ) -> list:
-        clauses = ["p.exclusion_status != 'eligible'"]
+        # ``manually_restored`` is an audit state, not an exclusion.  Use the
+        # effective eligibility plus review states so a successful restore
+        # actually leaves this management page.
+        clauses = [
+            "(p.eligible=0 OR p.exclusion_status IN ('auto_excluded','manually_excluded','pending_review'))"
+        ]
         parameters: list = []
         if reason:
             clauses.append("p.reject_reason=?")
@@ -1473,7 +1479,7 @@ class PhotoRepository:
         elif kind == "duplicate":
             clauses.append("p.duplicate_group_id IS NOT NULL")
         if origin == "manual":
-            clauses.append("p.exclusion_status IN ('manually_excluded','manually_restored')")
+            clauses.append("p.exclusion_status='manually_excluded'")
         elif origin == "auto":
             clauses.append("p.exclusion_status='auto_excluded'")
         where = " AND ".join(clauses)
@@ -1508,6 +1514,20 @@ class PhotoRepository:
                 "SELECT COUNT(*) FROM photos WHERE lifecycle_status='active' AND eligible=1"
             ).fetchone()
         return int(row[0] or 0)
+
+    def confirmed_screenshot_ids(self, photo_ids: Sequence[str]) -> set[str]:
+        """Return explicit screenshot ids without reading image bytes."""
+        requested = list(dict.fromkeys(str(photo_id) for photo_id in photo_ids))
+        blocked: set[str] = set()
+        with self.database.session() as connection:
+            for chunk in _chunks(requested, 400):
+                placeholders = ",".join("?" for _ in chunk)
+                rows = connection.execute(
+                    f"SELECT id,relative_path,exif_json,screenshot_likelihood FROM photos WHERE id IN ({placeholders})",  # noqa: S608
+                    tuple(chunk),
+                ).fetchall()
+                blocked.update(str(row["id"]) for row in rows if is_confirmed_screenshot(row))
+        return blocked
 
     def active_hashes_for(self, cache_hashes: Sequence[str]) -> set[str]:
         """Look up only cache-visible SHA values; never materialize the photo library."""

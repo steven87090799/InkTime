@@ -77,6 +77,14 @@ def _setting(app, key, value):
     app.extensions["inktime_settings_repository"].update(key, value, changed_by="test", source_ip="127.0.0.1")
 
 
+def _manual_excluded_photo(app, tmp_path) -> str:
+    photo_id = _scan(app, tmp_path)[0]
+    app.extensions["inktime_photo_repository"].set_exclusion(
+        photo_id, action="exclude", changed_by="test"
+    )
+    return photo_id
+
+
 def _enable_fake_usable_provider(app) -> str:
     """Configure a usable route without making any external Provider request."""
 
@@ -106,6 +114,9 @@ def test_excluded_photo_is_shown_and_restore_is_selectable(client, app, tmp_path
     )
     assert restored["eligible"] == 1
     assert photo_id in app.extensions["inktime_photo_repository"].eligible_photo_ids()
+    assert photo_id not in {
+        str(row["id"]) for row in app.extensions["inktime_photo_repository"].search_exclusions()
+    }
 
 
 def test_manual_restore_does_not_immediately_reexclude(app, tmp_path):
@@ -164,7 +175,7 @@ def test_ai_off_does_not_call_provider(app, tmp_path):
 
 def test_force_ai_calls_provider_when_ai_is_off_and_preserves_exclusion_audit(app, tmp_path):
     actor = create_admin(app)
-    photo_id = _scan(app, tmp_path, screenshot=True)[0]
+    photo_id = _manual_excluded_photo(app, tmp_path)
     repository = app.extensions["inktime_photo_repository"]
     before = repository.get_with_path(photo_id)
     _setting(app, "analysis.ai_mode", "off")
@@ -225,11 +236,31 @@ def test_force_ai_calls_provider_when_ai_is_off_and_preserves_exclusion_audit(ap
     assert audit["model"] == plan["model"]
 
 
+def test_confirmed_screenshot_cannot_cross_force_ai_send_boundary(app, tmp_path):
+    actor = create_admin(app)
+    photo_id = _scan(app, tmp_path, screenshot=True)[0]
+    _setting(app, "analysis.execution_mode", "local_with_manual_ai")
+    provider = CountingProvider()
+
+    result = app.extensions["inktime_analysis_service"].analyze_photo(
+        photo_id=photo_id,
+        job_id=None,
+        provider=provider,
+        strategy="high_quality",
+        force_ai=True,
+        force_actor=actor,
+        force_recompute=True,
+    )
+
+    assert result["stage"] == "prefilter"
+    assert provider.analyze_calls == 0
+
+
 def test_force_ai_api_is_admin_exclusion_only_and_creates_fresh_job(client, app, tmp_path):
     create_admin(app)
     login(client)
     _enable_fake_usable_provider(app)
-    excluded_id = _scan(app, tmp_path, screenshot=True)[0]
+    excluded_id = _manual_excluded_photo(app, tmp_path)
     root = tmp_path / "eligible-parent"
     root.mkdir()
     eligible_id = _scan(app, root)[0]
@@ -255,11 +286,33 @@ def test_force_ai_api_is_admin_exclusion_only_and_creates_fresh_job(client, app,
     ]
 
 
+def test_confirmed_screenshot_ai_api_is_controlled_and_creates_no_job(client, app, tmp_path):
+    create_admin(app)
+    login(client)
+    _enable_fake_usable_provider(app)
+    photo_id = _scan(app, tmp_path, screenshot=True)[0]
+    _setting(app, "analysis.execution_mode", "local_with_manual_ai")
+    with app.extensions["inktime_database"].session() as connection:
+        before_jobs = int(connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0])
+
+    response = client.post(
+        f"/api/v1/photos/{photo_id}/ai", headers={"X-CSRF-Token": csrf(client)}
+    )
+
+    assert response.status_code == 409
+    assert response.json == {
+        "error_code": "VLM-008",
+        "message": "已確認為截圖；為保護隱私與額度，禁止送入 AI 模型",
+    }
+    with app.extensions["inktime_database"].session() as connection:
+        assert int(connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]) == before_jobs
+
+
 def test_manual_ai_idempotency_key_is_namespaced_per_endpoint(client, app, tmp_path):
     create_admin(app)
     login(client)
     _enable_fake_usable_provider(app)
-    excluded_id = _scan(app, tmp_path, screenshot=True)[0]
+    excluded_id = _manual_excluded_photo(app, tmp_path)
     _setting(app, "analysis.ai_mode", "off")
     _setting(app, "analysis.execution_mode", "local_with_manual_ai")
     headers = {"X-CSRF-Token": csrf(client), "Idempotency-Key": "shared-manual-key"}
@@ -284,10 +337,7 @@ def test_manual_ai_idempotency_conflict_has_stable_api_error_code(client, app, t
     second_root = tmp_path / "second-excluded"
     first_root.mkdir()
     second_root.mkdir()
-    first_ids = _scan(app, first_root, screenshot=True)
-    second_ids = _scan(app, second_root, screenshot=True)
-    second_id = next(photo_id for photo_id in second_ids if photo_id not in first_ids)
-    excluded_ids = [first_ids[0], second_id]
+    excluded_ids = [_manual_excluded_photo(app, first_root), _manual_excluded_photo(app, second_root)]
     _setting(app, "analysis.ai_mode", "off")
     _setting(app, "analysis.execution_mode", "local_with_manual_ai")
     headers = {"X-CSRF-Token": csrf(client), "Idempotency-Key": "manual-conflict-key"}
@@ -305,7 +355,7 @@ def test_single_excluded_photo_ai_without_provider_is_controlled_and_side_effect
 ):
     create_admin(app)
     login(client)
-    excluded_id = _scan(app, tmp_path, screenshot=True)[0]
+    excluded_id = _manual_excluded_photo(app, tmp_path)
     _setting(app, "analysis.ai_mode", "off")
     _setting(app, "analysis.execution_mode", "local_with_manual_ai")
     with app.extensions["inktime_database"].session() as connection:

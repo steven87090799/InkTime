@@ -28,7 +28,11 @@ from inktime.app.domain.analysis.scoring import (
     prepare_score_distribution,
     score_band,
 )
-from inktime.app.domain.photos.quality_policy import evaluate_local_quality, local_candidate_score
+from inktime.app.domain.photos.quality_policy import (
+    evaluate_local_quality,
+    is_confirmed_screenshot,
+    local_candidate_score,
+)
 from inktime.app.web.access import administrator_required, login_required
 from inktime.app.domain.photos.orientation import original_exif_orientation, resolve_effective_orientation
 
@@ -93,6 +97,10 @@ def _queue_ai(
     )
     if not selected:
         raise ValueError("沒有符合資格且可送入 AI 的照片")
+    screenshot_ids = _repository().confirmed_screenshot_ids(selected)
+    selected = [photo_id for photo_id in selected if photo_id not in screenshot_ids]
+    if not selected:
+        raise ValueError("已確認為截圖；為保護隱私與額度，禁止送入 AI 模型")
     strategy = str(settings.get("analysis.strategy", "single"))
     plan = analysis_plan if analysis_plan is not None else _build_analysis_plan(settings, strategy)
     idempotency_key_value = scoped_idempotency_key(idempotency_scope, created_by, idempotency_key)
@@ -124,7 +132,12 @@ def _queue_ai(
         force_recompute=force_ai,
         analysis_spec=plan,
     )
-    return {"id": job_id, "queued": len(selected), "detail_url": f"/jobs/{job_id}"}
+    return {
+        "id": job_id,
+        "queued": len(selected),
+        "screenshot_excluded": len(screenshot_ids),
+        "detail_url": f"/jobs/{job_id}",
+    }
 
 
 @bp.get("/photos")
@@ -255,7 +268,9 @@ def excluded_photos_page():
         "kind": request.args.get("kind", "").strip(),
         "origin": request.args.get("origin", "").strip(),
     }
-    rows = _repository().search_exclusions(**filters)
+    rows = [dict(row) for row in _repository().search_exclusions(**filters)]
+    for row in rows:
+        row["ai_blocked"] = is_confirmed_screenshot(row)
     reasons = sorted({str(row["reject_reason"]) for row in rows if row["reject_reason"]})
     return render_template("excluded_photos.html", photos=rows, filters=filters, reasons=reasons)
 
