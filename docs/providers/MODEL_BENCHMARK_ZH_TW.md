@@ -19,7 +19,7 @@ python scripts/benchmark_models.py
 
 ```bash
 python scripts/benchmark_models.py \
-  --models offline-synthetic \
+  --models offline/synthetic \
   --sample-count 10 \
   --image-sides 512,1024,1600 \
   --prompt-profiles default,advanced \

@@ -176,7 +176,7 @@ def test_contract_failure_returns_safe_actionable_provider_error():
         "error_code": "CONFIG_INVALID",
         "http_status": 400,
         "provider_error_code": "invalid_model",
-        "provider_error_message": "Unknown model api_key=[已遮蔽] [已遮蔽圖片資料]",
+        "provider_error_message": "Unknown model [已遮蔽] [已遮蔽圖片資料]",
         "request_id": "safe-request-123",
     }
     assert "CONFIG_INVALID / HTTP 400 / invalid_model / Unknown model" in result["message"]

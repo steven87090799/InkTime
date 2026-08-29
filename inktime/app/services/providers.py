@@ -31,7 +31,7 @@ class ProviderService:
         # ``None`` preserves the legacy "use the current route" behavior.  An
         # explicit empty snapshot is a frozen decision that no Provider may be
         # used; it must never discover a Provider added after the Job was made.
-        requested = self.usable_route_snapshot() if route_snapshot is None else route_snapshot
+        requested = self.route_snapshot() if route_snapshot is None else route_snapshot
         if not requested:
             return None
         channels = []

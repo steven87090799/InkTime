@@ -555,4 +555,4 @@ def test_usable_route_excludes_openrouter_with_short_global_model(app):
 
     assert provider_id in {item["provider_id"] for item in service.route_snapshot()}
     assert provider_id not in {item["provider_id"] for item in service.usable_route_snapshot()}
-    assert service.build_router() is None
+    assert service.build_router(service.usable_route_snapshot()) is None

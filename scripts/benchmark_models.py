@@ -32,7 +32,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="InkTime bounded model benchmark")
     parser.add_argument("--live", action="store_true", help="explicitly permit external Provider calls")
     parser.add_argument("--provider", default="offline-synthetic")
-    parser.add_argument("--models", default="offline-synthetic")
+    parser.add_argument("--models", default="offline/synthetic")
     parser.add_argument("--sample-count", type=int, default=3)
     parser.add_argument("--seed", default="inktime-benchmark-v1")
     parser.add_argument("--image-sides", default="512,1024,1600")
