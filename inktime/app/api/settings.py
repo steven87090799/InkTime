@@ -554,6 +554,7 @@ def save_provider():
                 "name",
                 "kind",
                 "base_url",
+                "model",
                 "api_key",
                 "enabled",
                 "priority",
@@ -574,6 +575,8 @@ def save_provider():
     for field in ("id", "name", "kind", "base_url", "api_key"):
         if field in payload and type(payload[field]) is not str:
             abort(400, description=f"SET-003 {field} 必須是字串")
+    if "model" in payload and payload["model"] is not None and type(payload["model"]) is not str:
+        abort(400, description="SET-003 model 必須是字串")
     if not payload.get("base_url") or not payload.get("name"):
         abort(400, description="SET-003 Provider 名稱與 URL 不可空白")
     if type(payload["name"]) is not str or not payload["name"].strip() or len(payload["name"].strip()) > 120:
@@ -587,6 +590,14 @@ def save_provider():
         payload["options"] = options
         payload["kind"] = kind
         payload["base_url"] = validate_base_url(kind, str(payload["base_url"]), options)
+        if "model" in payload:
+            model = str(payload.get("model") or "").strip()
+            if (
+                len(model) > 200
+                or any(ord(char) < 0x20 or ord(char) == 0x7f for char in model)
+            ):
+                raise ValueError("model 必須是 1 至 200 字元")
+            payload["model"] = model or None
         payload["enabled"] = json_bool(payload, "enabled", default=True, error_prefix="SET-003")
         payload["supports_vision"] = json_bool(payload, "supports_vision", default=True, error_prefix="SET-003")
         payload["supports_batch"] = json_bool(payload, "supports_batch", default=False, error_prefix="SET-003")
@@ -659,9 +670,10 @@ def test_provider(provider_id: str):
         ).reasoning,
     )
     try:
-        model = str(
+        configured_model = str(config.get("model") or "").strip()
+        model = configured_model or str(
             current_app.extensions["inktime_settings_repository"].get("model.analysis_model", "gpt-4o")
-        )
+        ).strip()
         result = run_provider_contract(provider, level=level, model=model)
     except (ValueError, KeyError) as exc:
         abort(400, description=f"SET-005 {exc}")

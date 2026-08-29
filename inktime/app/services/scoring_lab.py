@@ -73,11 +73,14 @@ class ScoringLabService:
         vision_request_state = VisionAttemptState()
 
         def refresh_provider_identity() -> None:
-            nonlocal selected_provider, provider_id, provider_name
+            nonlocal selected_provider, provider_id, provider_name, model
             selected = getattr(getattr(provider, "_local", None), "channel", None)
             selected_provider = selected.provider if selected is not None else provider
             provider_id = str(getattr(selected_provider, "provider_id", selected_provider.name))
             provider_name = str(getattr(selected_provider, "name", provider.name))
+            configured_model = str(getattr(selected, "model", "") or "").strip()
+            if configured_model:
+                model = configured_model
 
         def provider_request_metrics() -> dict:
             return dict(getattr(selected_provider, "last_request_metrics", {}) or {})
@@ -231,6 +234,7 @@ class ScoringLabService:
                 provider_request_context_id=provider_request_context_id,
             )
         except Exception as error:
+            refresh_provider_identity()
             request_started = bool(
                 vision_request_state.vision_started
                 or getattr(error, "vision_started", False)

@@ -60,6 +60,12 @@ def test_primary_management_pages_render(client, app):
     assert 'id="provider-action-status"' in providers
     assert "alert(" not in providers
 
+    jobs = client.get("/jobs").get_data(as_text=True)
+    assert 'type="submit" class="primary">確認建立' in jobs
+    assert "limit:'nullable-integer'" in jobs
+    assert "budget:'float'" in jobs
+    assert "if(body.limit===null)delete body.limit;" in jobs
+
 
 def test_shared_confirmation_dialog_resets_and_normalizes_cancel_state(client, app):
     create_admin(app)

@@ -848,6 +848,13 @@ class OpenAICompatibleProvider(VisionProvider):
         provider_request_context_id: str | None = None,
     ) -> dict[str, Any]:
         encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+        media_type = {
+            ".gif": "image/gif",
+            ".jpeg": "image/jpeg",
+            ".jpg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+        }.get(image_path.suffix.casefold(), "image/jpeg")
         body: dict[str, Any] = {
             "model": model,
             "messages": [
@@ -863,7 +870,7 @@ class OpenAICompatibleProvider(VisionProvider):
                         {"type": "text", "text": "分析這張照片。"},
                         {
                             "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{encoded}", "detail": detail},
+                            "image_url": {"url": f"data:{media_type};base64,{encoded}", "detail": detail},
                         },
                     ],
                 },

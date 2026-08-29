@@ -23,6 +23,46 @@ def test_provider_secret_is_encrypted_and_api_returns_only_mask(client, app):
     assert api_key not in str(provider)
 
 
+def test_provider_model_is_saved_rendered_and_used_by_contract_test(client, app, monkeypatch):
+    create_admin(app)
+    login(client)
+    response = client.post(
+        "/api/v1/providers",
+        json={
+            "name": "OpenRouter Free",
+            "kind": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "model": " openrouter/free ",
+            "api_key": "test-key",
+        },
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert response.status_code == 201
+    provider_id = response.json["id"]
+    provider = app.extensions["inktime_provider_repository"].get(provider_id)
+    assert provider["model"] == "openrouter/free"
+
+    captured = {}
+
+    def fake_contract(_provider, *, level, model):
+        captured.update(level=level, model=model)
+        return {"ok": True, "message": "ok"}
+
+    monkeypatch.setattr("inktime.app.api.settings.run_provider_contract", fake_contract)
+    tested = client.post(
+        f"/api/v1/providers/{provider_id}/test",
+        json={"level": 2},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert tested.status_code == 200
+    assert captured == {"level": 2, "model": "openrouter/free"}
+
+    page = client.get("/providers")
+    body = page.get_data(as_text=True)
+    assert 'name="model"' in body
+    assert "openrouter/free" in body
+
+
 def test_setting_change_is_audited_without_manual_file_edit(client, app):
     create_admin(app)
     login(client)

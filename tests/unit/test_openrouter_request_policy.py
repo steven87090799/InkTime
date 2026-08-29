@@ -70,6 +70,24 @@ def test_openrouter_analysis_and_repair_share_privacy_routing_usage_and_sticky_p
     assert analysis["session_id"] == repair["session_id"]
 
 
+@pytest.mark.parametrize(
+    ("filename", "expected_media_type"),
+    [("synthetic.jpg", "image/jpeg"), ("synthetic.png", "image/png")],
+)
+def test_analysis_data_url_matches_image_file_format(tmp_path: Path, filename, expected_media_type):
+    image = tmp_path / filename
+    image.write_bytes(b"synthetic image")
+    body = _provider().build_analysis_request_body(
+        image_path=image,
+        model="vision-model",
+        detail="high",
+        stage="single",
+    )
+
+    image_url = body["messages"][1]["content"][1]["image_url"]["url"]
+    assert image_url.startswith(f"data:{expected_media_type};base64,")
+
+
 def test_openai_compatible_request_does_not_receive_openrouter_provider_object(tmp_path: Path):
     image = tmp_path / "synthetic.jpg"
     image.write_bytes(b"synthetic image")

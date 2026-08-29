@@ -79,6 +79,7 @@ class ProviderService:
                     requests_per_minute=config["rate_limit_rpm"],
                     tokens_per_minute=config["token_limit_tpm"],
                     cooldown_seconds=config["cooldown_seconds"],
+                    model=str(config.get("model") or "").strip() or None,
                 )
             )
         return FailoverVisionProvider(channels) if channels else None
@@ -108,6 +109,9 @@ class ProviderService:
             "timeout_seconds": int(provider.get("timeout_seconds") or 0),
             "cooldown_seconds": int(provider.get("cooldown_seconds") or 0),
         }
+        configured_model = str(provider.get("model") or "").strip()
+        if configured_model:
+            fields["model"] = configured_model
         payload = json.dumps(fields, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return sha256(payload.encode("utf-8")).hexdigest()
 
@@ -118,6 +122,7 @@ class ProviderService:
                 "provider_id": str(row["id"]),
                 "display_name": str(row.get("name") or row["id"]),
                 "priority": int(row.get("priority") or 100),
+                "model": str(row.get("model") or "").strip(),
                 "config_revision": self.config_revision(row),
             }
             for row in sorted(

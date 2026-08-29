@@ -69,6 +69,17 @@ class ProviderRepository:
         api_key = str(payload.get("api_key") or "")
         requested_kind = str(payload.get("kind") or "openai_compatible").strip().lower()
         raw_base_url = str(payload.get("base_url") or "")
+        model_provided = "model" in payload
+        raw_model = payload.get("model")
+        if raw_model is not None and type(raw_model) is not str:
+            raise ValueError("model 必須是字串")
+        model = str(raw_model or "").strip()
+        if (
+            len(model) > 200
+            or any(ord(char) < 0x20 or ord(char) == 0x7f for char in model)
+        ):
+            raise ValueError("model 必須是 1 至 200 字元")
+        model = model or None
         kind = effective_provider_kind(requested_kind, raw_base_url)
         options = normalize_options(kind, payload.get("options") or {})
         base_url = validate_base_url(kind, raw_base_url, options)
@@ -81,13 +92,18 @@ class ProviderRepository:
         if api_key:
             self.secrets.set(secret_key, api_key, user_id)
         with self.database.session() as connection:
+            if not model_provided:
+                existing = connection.execute("SELECT model FROM providers WHERE id=?", (provider_id,)).fetchone()
+                if existing is not None:
+                    model = existing["model"]
             connection.execute(
                 """
-                INSERT INTO providers(id,name,kind,base_url,api_key_secret,enabled,priority,supports_vision,supports_batch,
+                INSERT INTO providers(id,name,kind,base_url,model,api_key_secret,enabled,priority,supports_vision,supports_batch,
                     supports_json_schema,rate_limit_rpm,token_limit_tpm,max_concurrency,timeout_seconds,cooldown_seconds,
                     options_json,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET name=excluded.name,kind=excluded.kind,base_url=excluded.base_url,
+                    model=excluded.model,
                     api_key_secret=COALESCE(providers.api_key_secret,excluded.api_key_secret),enabled=excluded.enabled,
                     priority=excluded.priority,supports_vision=excluded.supports_vision,supports_batch=excluded.supports_batch,
                     supports_json_schema=excluded.supports_json_schema,rate_limit_rpm=excluded.rate_limit_rpm,
@@ -100,6 +116,7 @@ class ProviderRepository:
                     str(payload.get("name", "Provider")),
                     kind,
                     base_url,
+                    model,
                     secret_key if api_key else None,
                     int(json_bool(payload, "enabled", default=True)),
                     int(payload.get("priority", 100)),
