@@ -2,7 +2,7 @@
 {% block title %}儀表板｜InkTime{% endblock %}
 {% block content %}
 <div class="page-head"><div><p class="eyebrow">系統總覽</p><h1>儀表板</h1></div><span class="status {{ 'error' if system_status == '嚴重故障' else 'warn' if system_status != '正常' else 'ok' }}">{{ system_status }}</span></div>
-<section class="metrics">
+<section class="metrics dashboard-metrics" aria-label="系統摘要">
   <article><span>照片總數</span><strong>{{ counts.photos }}</strong></article>
   <article><span>已分析</span><strong>{{ counts.analyzed }}</strong></article>
   <article><span>分析失敗</span><strong>{{ counts.failed }}</strong></article>
