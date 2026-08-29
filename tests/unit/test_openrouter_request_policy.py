@@ -62,7 +62,7 @@ def test_openrouter_analysis_and_repair_share_privacy_routing_usage_and_sticky_p
         assert body["provider"]["allow_fallbacks"] is False
         assert body["usage"] == {"include": True}
     assert analysis["reasoning"] == {"effort": "low"}
-    assert "reasoning" not in repair
+    assert repair["reasoning"] == {"effort": "none"}
     assert repair["messages"][1]["content"]
     assert "image_url" not in json.dumps(repair, ensure_ascii=False)
     assert "image_path" not in json.dumps(repair, ensure_ascii=False)

@@ -948,8 +948,10 @@ class OpenAICompatibleProvider(VisionProvider):
                     # Keep the legacy max input while using OpenRouter's
                     # current highest documented effort value on the wire.
                     normalized_effort = "xhigh"
-                if normalized_effort != "none":
-                    body["reasoning"] = {"effort": normalized_effort}
+                # OpenRouter may route an otherwise unspecified request to a
+                # reasoning model.  Send ``none`` explicitly so a bounded
+                # output budget remains available for the JSON response.
+                body["reasoning"] = {"effort": normalized_effort}
         elif self.supports_reasoning_effort and allow_reasoning and reasoning_effort is not None:
             body["reasoning_effort"] = normalize_reasoning_effort(reasoning_effort)
         return body
