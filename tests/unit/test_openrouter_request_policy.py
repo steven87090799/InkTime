@@ -62,12 +62,27 @@ def test_openrouter_analysis_and_repair_share_privacy_routing_usage_and_sticky_p
         assert body["provider"]["allow_fallbacks"] is False
         assert body["usage"] == {"include": True}
     assert analysis["reasoning"] == {"effort": "low"}
-    assert repair["reasoning"] == {"effort": "none"}
+    assert "reasoning" not in repair
     assert repair["messages"][1]["content"]
     assert "image_url" not in json.dumps(repair, ensure_ascii=False)
     assert "image_path" not in json.dumps(repair, ensure_ascii=False)
     assert provider.last_request_metrics["image_bytes"] == 0
     assert analysis["session_id"] == repair["session_id"]
+
+
+def test_openrouter_analysis_explicitly_disables_reasoning_when_requested(tmp_path: Path):
+    image = tmp_path / "synthetic.jpg"
+    image.write_bytes(b"synthetic image")
+
+    body = _provider().build_analysis_request_body(
+        image_path=image,
+        model="provider/vision-model",
+        detail="high",
+        stage="provider_contract_level2",
+        reasoning_effort="none",
+    )
+
+    assert body["reasoning"] == {"effort": "none"}
 
 
 @pytest.mark.parametrize(
