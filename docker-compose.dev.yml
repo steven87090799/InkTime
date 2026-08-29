@@ -3,19 +3,21 @@ services:
     environment:
       INKTIME_ENVIRONMENT: development
       INKTIME_COOKIE_SECURE: "0"
-      INKTIME_PUBLIC_URL: http://localhost:8765
+      INKTIME_PUBLIC_URL: ${INKTIME_DEV_PUBLIC_URL:-http://localhost:8765}
       INKTIME_ALLOW_INSECURE_HTTP: "1"
     ports:
-      - "127.0.0.1:${INKTIME_PORT:-8765}:8765"
+      # Development may bind to the Mac LAN for a physical ESP32. Production
+      # Compose files retain their loopback-safe defaults.
+      - "${INKTIME_DEV_BIND_ADDRESS:-0.0.0.0}:${INKTIME_PORT:-8765}:8765"
   inktime-worker:
     environment:
       INKTIME_ENVIRONMENT: development
       INKTIME_COOKIE_SECURE: "0"
-      INKTIME_PUBLIC_URL: http://localhost:8765
+      INKTIME_PUBLIC_URL: ${INKTIME_DEV_PUBLIC_URL:-http://localhost:8765}
       INKTIME_ALLOW_INSECURE_HTTP: "1"
   inktime-scheduler:
     environment:
       INKTIME_ENVIRONMENT: development
       INKTIME_COOKIE_SECURE: "0"
-      INKTIME_PUBLIC_URL: http://localhost:8765
+      INKTIME_PUBLIC_URL: ${INKTIME_DEV_PUBLIC_URL:-http://localhost:8765}
       INKTIME_ALLOW_INSECURE_HTTP: "1"

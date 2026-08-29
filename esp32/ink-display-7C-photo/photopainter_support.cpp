@@ -39,6 +39,7 @@ namespace inktime {
 // Only the two EPD-rail registers below may be mutated by this driver.
 constexpr uint8_t kPhotoPainterPmicAddress = 0x34;
 constexpr uint8_t kTg28Status1 = 0x00;
+constexpr uint8_t kTg28Status2 = 0x01;
 constexpr uint8_t kTg28BatteryVoltageHigh = 0x34;
 constexpr uint8_t kTg28LdoEnable0 = 0x90;
 constexpr uint8_t kTg28Aldo4Voltage = 0x95;
@@ -127,6 +128,25 @@ void drawPairingText(uint8_t* frame, size_t length, int x, int y, const String& 
 void setBoardIndicator(gpio_num_t pin, bool enabled) {
   // Rev2.0 PWR/ACT LEDs are active-low and independent of GPIO5 PWR.
   (void)gpio_set_level(pin, enabled ? 0 : 1);
+}
+
+bool waitForSecondUserButtonClick(int8_t pin) {
+  const uint32_t windowStartedMs = millis();
+  while (millis() - windowStartedMs < kUserButtonDoubleClickWindowMs) {
+    if (digitalRead(pin) != LOW) {
+      delay(10);
+      continue;
+    }
+    delay(kUserButtonDebounceMs);
+    if (digitalRead(pin) != LOW) continue;
+    const uint32_t releaseStartedMs = millis();
+    while (digitalRead(pin) == LOW
+           && millis() - releaseStartedMs < kForceNetworkRefreshHoldMs) {
+      delay(10);
+    }
+    return digitalRead(pin) != LOW;
+  }
+  return false;
 }
 
 void configureBoardIndicators() {
@@ -443,6 +463,9 @@ class ProbePowerManager final : public PowerManager {
 
   void refreshMeasurements() override {
     powerSourceState_ = PowerSourceState::Unknown;
+    batteryPresent_ = false;
+    charging_ = false;
+    chargeState_ = ChargeState::Unknown;
     batteryMillivolts_ = 0;
     batteryPercent_ = -1;
     if (type_ != PmicType::TG28) return;
@@ -450,9 +473,23 @@ class ProbePowerManager final : public PowerManager {
     if (!bus_.readRegister(kPhotoPainterPmicAddress, kTg28Status1, &status1, 1)) return;
     const bool batteryConnected = (status1 & (1U << 3U)) != 0;
     const bool vbusGood = (status1 & (1U << 5U)) != 0;
+    batteryPresent_ = batteryConnected;
     powerSourceState_ = vbusGood
         ? PowerSourceState::Usb
         : PowerSourceState::Battery;
+    uint8_t status2 = 0;
+    if (bus_.readRegister(kPhotoPainterPmicAddress, kTg28Status2, &status2, 1)) {
+      charging_ = ((status2 >> 5U) & 0x03U) == 0x01U;
+      switch (status2 & 0x07U) {
+        case 0x00U: chargeState_ = ChargeState::Trickle; break;
+        case 0x01U: chargeState_ = ChargeState::PreCharge; break;
+        case 0x02U: chargeState_ = ChargeState::ConstantCurrent; break;
+        case 0x03U: chargeState_ = ChargeState::ConstantVoltage; break;
+        case 0x04U: chargeState_ = ChargeState::Done; break;
+        case 0x05U: chargeState_ = ChargeState::NotCharging; break;
+        default: chargeState_ = ChargeState::Unknown; break;
+      }
+    }
     if (!batteryConnected) return;
     uint8_t voltage[2] = {0, 0};
     if (bus_.readRegister(
@@ -472,6 +509,9 @@ class ProbePowerManager final : public PowerManager {
   bool isUsbConnected() const override {
     return powerSourceState_ == PowerSourceState::Usb;
   }
+  bool batteryPresent() const override { return batteryPresent_; }
+  bool isCharging() const override { return charging_; }
+  ChargeState chargeState() const override { return chargeState_; }
   float batteryVoltage() const override { return batteryMillivolts_ / 1000.0f; }
   int batteryPercent() const override { return batteryPercent_; }
   void prepareForDeepSleep() override {
@@ -484,6 +524,9 @@ class ProbePowerManager final : public PowerManager {
   BoundedI2cBus& bus_;
   PmicType type_ = PmicType::None;
   PowerSourceState powerSourceState_ = PowerSourceState::Unknown;
+  bool batteryPresent_ = false;
+  bool charging_ = false;
+  ChargeState chargeState_ = ChargeState::Unknown;
   uint16_t batteryMillivolts_ = 0;
   int batteryPercent_ = -1;
   const char* lastError_ = "";
@@ -788,6 +831,11 @@ bool PhotoPainterSupport::begin() {
     forceNetworkRefresh_ = shouldForceNetworkRefresh(heldMs);
     recoveryServiceRequested_ = shouldRequestRecoveryService(heldMs);
     delay(30);
+    if (!forceNetworkRefresh_ && !recoveryServiceRequested_) {
+      // The first click woke EXT1. A second debounced click within the same
+      // window requests the read-only power page instead of a photo refresh.
+      batteryStatusRequested_ = waitForSecondUserButtonClick(board_.buttons.user);
+    }
   }
 
   const bool i2cLinesReady = recoverI2cBusLines(board_.i2c);
@@ -1654,7 +1702,8 @@ bool PhotoPainterSupport::displayPairingScreen(
     const char* ssid,
     const char* password,
     const char* setup_url,
-    const char* pairing_code
+    const char* pairing_code,
+    const char* footer
 ) {
   if (!hardwareReady_ || impl_ == nullptr) {
     lastError_ = "DEVICE-PAIRING-DISPLAY";
@@ -1672,7 +1721,58 @@ bool PhotoPainterSupport::displayPairingScreen(
   drawPairingText(frame, kPhotoPainterFrameBytes, 30, 182, String("AP PASSWORD: ") + String(password == nullptr ? "" : password), scale);
   drawPairingText(frame, kPhotoPainterFrameBytes, 30, 252, String("SETUP: ") + String(setup_url == nullptr ? "" : setup_url), scale);
   drawPairingText(frame, kPhotoPainterFrameBytes, 30, 322, String("CODE: ") + String(pairing_code == nullptr ? "" : pairing_code), scale);
-  drawPairingText(frame, kPhotoPainterFrameBytes, 30, 392, "VALID 5 MIN", scale);
+  drawPairingText(
+    frame,
+    kPhotoPainterFrameBytes,
+    30,
+    392,
+    String(footer == nullptr ? "" : footer),
+    scale
+  );
+  const bool displayed = displayFrame(frame, kPhotoPainterFrameBytes);
+  heap_caps_free(frame);
+  return displayed;
+}
+
+bool PhotoPainterSupport::displayPowerStatusScreen() {
+  if (!hardwareReady_ || impl_ == nullptr) {
+    lastError_ = "DEVICE-POWER-DISPLAY";
+    return false;
+  }
+  impl_->power.refreshMeasurements();
+  uint8_t* frame = allocateWireBuffer(kPhotoPainterFrameBytes);
+  if (frame == nullptr) {
+    lastError_ = "DEVICE-POWER-MEMORY";
+    return false;
+  }
+  memset(frame, 0x11, kPhotoPainterFrameBytes);
+  const uint8_t scale = 3;
+  const bool batteryPresent = impl_->power.batteryPresent();
+  const int percent = impl_->power.batteryPercent();
+  const float voltage = impl_->power.batteryVoltage();
+  const PowerSourceState source = impl_->power.powerSourceState();
+  const ChargeState charge = impl_->power.chargeState();
+  const String batteryText = batteryPresent && percent >= 0
+      ? String("BATTERY: ") + String(percent) + String(" PERCENT")
+      : String("BATTERY: UNKNOWN");
+  const String voltageText = batteryPresent && voltage > 0.0f
+      ? String("VOLTAGE: ") + String(voltage, 3) + String(" V")
+      : String("VOLTAGE: UNKNOWN");
+  const char* sourceName = source == PowerSourceState::Usb
+      ? "USB"
+      : (source == PowerSourceState::Battery ? "BATTERY" : "UNKNOWN");
+  const char* chargingName = charge == ChargeState::Unknown
+      ? "UNKNOWN"
+      : (impl_->power.isCharging() ? "YES" : "NO");
+  drawPairingText(frame, kPhotoPainterFrameBytes, 30, 42, "INKTIME POWER", scale);
+  drawPairingText(frame, kPhotoPainterFrameBytes, 30, 112, batteryText, scale);
+  drawPairingText(frame, kPhotoPainterFrameBytes, 30, 182, voltageText, scale);
+  drawPairingText(frame, kPhotoPainterFrameBytes, 30, 252,
+                  String("POWER: ") + String(sourceName), scale);
+  drawPairingText(frame, kPhotoPainterFrameBytes, 30, 322,
+                  String("CHARGING: ") + String(chargingName), scale);
+  drawPairingText(frame, kPhotoPainterFrameBytes, 30, 392,
+                  String("STATE: ") + String(chargeStateName(charge)), scale);
   const bool displayed = displayFrame(frame, kPhotoPainterFrameBytes);
   heap_caps_free(frame);
   return displayed;

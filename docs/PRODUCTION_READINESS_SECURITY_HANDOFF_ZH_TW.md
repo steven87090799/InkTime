@@ -7,7 +7,9 @@
 - 基準為最新 `origin/main`；正式 schema source 目前為 `Migration 33`。Migration 32 保存 Provider options/capabilities、usage 的 cache-write、成本來源與 request-size metrics；Migration 33 增加 Provider identity、OpenRouter legacy data fix 與成本回溯索引，舊 Migration 1–31 不修改。
 - Provider 路徑新增正式 OpenRouter contract、受控 routing/privacy options、reasoning／session routing 與 Batch hard guard；Vision 與 text-only JSON repair 共用 policy helper；成本來源分為 `provider_reported`、`estimated`、`unknown`，unknown 不當作零成本。
 - AI 請求固定 512／1024／1600 image side；完整、變體、文字修復分別受 2048／3072／1200 token cap 約束。repair policy 在 Analysis Plan 建立時 freeze，但不進 Vision fingerprint；每個 job 最多一次 repair，且 repair 不重新上傳圖片。
-- ESP32 backend transport 只接受有 trust anchor 的 HTTPS；HTTP 僅限明確的私有 LAN 開發設定，沒有 `setInsecure()` fallback。首次配網會在 AP 頁面與裝置畫面顯示一次性的隨機 AP 密碼。
+- ESP32 HTTPS 仍要求 trust anchor 且沒有 `setInsecure()` fallback；PhotoPainter 另可直接連
+  literal RFC1918 HTTP，其他 public IP／hostname HTTP 一律拒絕。首次配網使用每個 AP
+  session 重新產生的 8 位數字密碼，並在 AP 頁面與裝置畫面顯示同一值。
 - production Compose 預設 loopback bind、HTTPS public URL、Secure cookie 與禁止 insecure HTTP；`docker-compose.dev.yml` 才提供明確的本機開發覆寫。
 - Provider Level 1/2/3 只由管理員明確按鈕觸發；Level 2/3 使用 synthetic image 並有 request／cost 邊界。離線 benchmark 預設不呼叫外部 Provider、不寫 production analysis/release/history/cache；quality／ranking metrics 與 contract metrics 分開，Container workflow 另以 Syft 產生 SBOM、Trivy 掃描 High/Critical，結果由 current PR merge-ref GitHub Actions 決定。
 
