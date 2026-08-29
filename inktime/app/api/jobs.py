@@ -15,6 +15,7 @@ from inktime.app.core.json_values import (
 from inktime.app.core.idempotency import request_fingerprint, scoped_idempotency_key
 from inktime.app.domain.analysis.plan import canonical_json, fingerprint, normalize_analysis_strategy
 from inktime.app.domain.analysis.execution_mode import execution_mode, permits_automatic_ai
+from inktime.app.web.ai_readiness import ai_readiness_snapshot
 from inktime.app.services.jobs import InvalidJobTransition, JobService
 from inktime.app.web.access import administrator_required, login_required
 
@@ -90,15 +91,40 @@ def jobs_page():
         if str(g.user["role"]) == "administrator"
         else _repository().list_for_user(str(g.user["id"]))
     )
-    mode = execution_mode(current_app.extensions["inktime_settings_repository"])
-    model_provider_available = bool(
-        permits_automatic_ai(mode)
-        and current_app.extensions["inktime_provider_service"].usable_route_snapshot()
-    )
+    settings_repository = current_app.extensions["inktime_settings_repository"]
+    provider_service = current_app.extensions["inktime_provider_service"]
+    mode = execution_mode(settings_repository)
+    usable_routes = provider_service.usable_route_snapshot()
+    automatic_ai_enabled = permits_automatic_ai(mode)
+    model_provider_available = bool(automatic_ai_enabled and usable_routes)
+    if not automatic_ai_enabled:
+        mode_label = {
+            "disabled": "完全停用",
+            "local_only": "僅使用本機選片",
+            "local_with_manual_ai": "本機選片＋手動 AI",
+        }.get(mode, mode)
+        model_provider_message = (
+            f"目前分析執行模式是「{mode_label}」，因此不允許建立自動 Vision 工作。"
+        )
+        model_provider_action = ("前往設定並搜尋「分析執行模式」", "/settings?search=分析執行模式")
+    else:
+        model_provider_message = (
+            "分析模式已允許自動 AI，但目前沒有同時符合啟用、Vision 能力、Base URL，"
+            "以及 API Key（本機 Ollama 除外）的 Provider。"
+        )
+        model_provider_action = ("前往模型與 API", "/providers")
     return render_template(
         "jobs.html",
         jobs=jobs,
         model_provider_available=model_provider_available,
+        model_provider_message=model_provider_message if not model_provider_available else "",
+        model_provider_action=model_provider_action if not model_provider_available else None,
+        usable_provider_count=len(usable_routes),
+        ai_readiness=ai_readiness_snapshot(
+            settings_repository,
+            current_app.extensions["inktime_provider_repository"],
+            provider_service,
+        ),
     )
 
 

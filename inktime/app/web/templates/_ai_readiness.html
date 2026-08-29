@@ -1,0 +1,32 @@
+<section class="panel ai-readiness {{ 'is-ready' if ai_readiness.ready else 'needs-action' }}" aria-labelledby="ai-readiness-title">
+  <div class="panel-head">
+    <div>
+      <p class="eyebrow">AI 啟用檢查</p>
+      <h2 id="ai-readiness-title">{{ 'AI 設定已就緒' if ai_readiness.ready else 'AI 尚未完成啟用' }}</h2>
+      <p>{% if ai_readiness.ready %}建立 Vision 工作需要的靜態設定都已完成；正式大量分析前仍建議做一次實際連線與圖片契約測試。{% else %}完成下列全部必要項目後，「單次完整 Vision 分析」才會開放。每個未完成項目都附有直接處理入口。{% endif %}</p>
+    </div>
+    <span class="status {{ 'ok' if ai_readiness.ready else 'warning' }}">必要項目 {{ ai_readiness.ready_count }} / {{ ai_readiness.required_count }}</span>
+  </div>
+  <ol class="ai-readiness-checks">
+    {% for check in ai_readiness.checks %}
+    <li class="{{ 'is-ready' if check.ready else 'needs-action' }}">
+      <span class="ai-check-marker" aria-hidden="true">{{ '✓' if check.ready else '!' }}</span>
+      <div>
+        <strong>{{ check.label }}：{{ '完成' if check.ready else '需要調整' }}</strong>
+        <p><b>目前：</b>{{ check.current }}<br><b>啟用要求：</b>{{ check.required }}</p>
+        {% if check.key == 'provider' and ai_readiness.provider_details %}
+        <ul class="ai-provider-details">
+          {% for provider in ai_readiness.provider_details %}<li><strong>{{ provider.name }}</strong>（{{ provider.kind }}）：{{ '靜態設定就緒' if provider.ready else provider.issues|join('、') }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+      </div>
+      {% if not check.ready %}<a class="secondary" href="{{ check.action_url }}">{{ check.action_label }}</a>{% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+  <div class="notice ai-live-verification">
+    <strong>實際連線驗收不等於靜態設定就緒</strong>
+    <p>必要項目全數完成後，到「模型與 API」依序執行 Level 1 連線與 Vision Level 2 圖片測試。Level 2 會呼叫 Provider，可能產生少量費用；未實際測試前，畫面只會宣稱「設定已就緒」，不會宣稱模型已連線通過。</p>
+    <a href="/providers">前往執行 Provider 測試</a>
+  </div>
+</section>

@@ -35,6 +35,7 @@ from inktime.app.repositories.settings import (
     SETTINGS_SCHEMA_VERSION,
     SETTING_DEFINITIONS,
 )
+from inktime.app.web.ai_readiness import ai_readiness_snapshot
 from inktime.app.web.access import administrator_required, login_required
 from inktime.app.domain.rendering.system_presets import SYSTEM_PRESETS
 from inktime.app.services.provider_contracts import run_provider_contract
@@ -538,7 +539,9 @@ def import_settings():
 @bp.get("/providers")
 @login_required
 def providers_page():
-    providers = current_app.extensions["inktime_provider_repository"].list()
+    provider_repository = current_app.extensions["inktime_provider_repository"]
+    provider_service = current_app.extensions["inktime_provider_service"]
+    providers = provider_repository.list()
     analysis_model = str(
         current_app.extensions["inktime_settings_repository"].get("model.analysis_model", "gpt-4o")
     ).strip()
@@ -555,7 +558,13 @@ def providers_page():
         except ValueError as exc:
             provider["model_validation_error"] = str(exc)
     return render_template(
-        "providers.html", providers=providers
+        "providers.html",
+        providers=providers,
+        ai_readiness=ai_readiness_snapshot(
+            current_app.extensions["inktime_settings_repository"],
+            provider_repository,
+            provider_service,
+        ),
     )
 
 

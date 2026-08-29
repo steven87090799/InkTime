@@ -10,12 +10,34 @@
   </div>
   <div class="settings-head-actions">
     {% if g.user.role == 'administrator' %}
-    <a class="secondary" href="/api/v1/settings/export">匯出安全設定</a>
-    <button class="secondary" type="button" id="open-import">匯入設定</button>
-    <button class="primary" type="button" data-spectra6-preset>一鍵套用微雪 7.3 吋 Spectra 6 原廠色彩與演算法</button>
+    <a class="secondary" href="/api/v1/settings/export" data-help="下載可安全搬移的一般設定，不包含 API Key、Webhook Token 等秘密資料，也不會改變目前設定。">匯出安全設定</a>
+    <button class="secondary" type="button" id="open-import" data-help="先讀取匯出檔並顯示差異與風險；只有再次確認後才會寫入，不會匯入秘密資料。">匯入設定</button>
+    <button class="primary" type="button" data-spectra6-preset data-help="預覽並套用微雪 7.3 吋 Spectra 6 面板建議的色盤、抖動與渲染組合；套用前仍會顯示實際變更。">一鍵套用微雪 7.3 吋 Spectra 6 原廠色彩與演算法</button>
     {% endif %}
   </div>
 </div>
+
+<section class="panel settings-toolbar" aria-label="設定搜尋與篩選">
+  <div class="panel-head">
+    <div><p class="eyebrow">全部設定都在這裡</p><h2 data-help="搜尋會比對每張設定卡裡的中文名稱、完整說明、目前值、風險、生效方式與技術 Key，不會另外隱藏任何項目。">尋找設定</h2><p>輸入任何看得到的文字，或用分類、風險和生效方式縮小範圍。按 <kbd>/</kbd> 可直接開始搜尋。</p></div>
+    <strong id="settings-match-count" aria-live="polite">顯示 {{ setting_count }} / {{ setting_count }} 項</strong>
+  </div>
+  <div class="settings-filter-grid">
+    <label class="settings-search-field">搜尋全部設定內容
+      <input id="settings-search" type="search" placeholder="例如：照片、預算、重新啟動或技術 Key" autocomplete="off">
+    </label>
+    <label>分類
+      <select id="settings-category-filter"><option value="">全部分類</option>{% for category in categories %}<option value="{{ category }}">{{ category }}</option>{% endfor %}</select>
+    </label>
+    <label>風險
+      <select id="settings-risk-filter"><option value="">全部風險</option><option value="low">低風險</option><option value="medium">中風險</option><option value="high">高風險</option></select>
+    </label>
+    <label>生效方式
+      <select id="settings-scope-filter"><option value="">全部方式</option><option value="dynamic">立即動態生效</option><option value="next_job">下次工作生效</option><option value="next_render">下次渲染生效</option><option value="future_device_only">只影響之後新增的裝置</option><option value="restart">重新啟動生效</option><option value="not_wired">尚未接上 Runtime</option></select>
+    </label>
+    <button class="secondary settings-clear-filters" type="button" id="settings-clear-filters">清除搜尋與篩選</button>
+  </div>
+</section>
 
 <section class="panel settings-deployment">
   <div class="panel-head"><h2>部署邊界（唯讀）</h2><a href="/diagnostics">查看即時資源</a></div>
@@ -27,29 +49,6 @@
     <article><small>版本</small><strong>{{ deployment.revision }}</strong></article>
   </div>
   <p class="notice">上述項目只能在部署層修改。這裡顯示的是執行邊界，不代表 InkTime 的 <code>/data</code> 目錄占用等於整個檔案系統使用率。</p>
-</section>
-
-<section class="panel settings-toolbar" aria-label="設定搜尋與篩選">
-  <div class="panel-head"><h2>尋找設定</h2><span>共 {{ setting_count }} 項</span></div>
-  <div class="settings-filter-grid">
-    <label>搜尋
-      <input id="settings-search" type="search" placeholder="輸入中文名稱、說明或技術 Key" autocomplete="off">
-    </label>
-    <label>分類
-      <select id="settings-category-filter"><option value="">全部分類</option>{% for category in categories %}<option value="{{ category }}">{{ category }}</option>{% endfor %}</select>
-    </label>
-    <label>風險
-      <select id="settings-risk-filter"><option value="">全部風險</option><option value="low">低風險</option><option value="medium">中風險</option><option value="high">高風險</option></select>
-    </label>
-    <label>生效方式
-      <select id="settings-scope-filter"><option value="">全部方式</option><option value="dynamic">立即動態生效</option><option value="next_job">下次工作生效</option><option value="next_render">下次渲染生效</option><option value="future_device_only">只影響之後新增的裝置</option><option value="restart">重新啟動生效</option><option value="not_wired">尚未接上 Runtime</option></select>
-    </label>
-    <fieldset class="settings-mode-toggle">
-      <legend>顯示模式</legend>
-      <label><input type="radio" name="settings-mode" value="basic" checked> 基本</label>
-      <label><input type="radio" name="settings-mode" value="advanced"> 進階</label>
-    </fieldset>
-  </div>
 </section>
 
 <section class="panel">
@@ -84,7 +83,6 @@
         data-risk="{{ row.definition.risk }}"
         data-scope="{{ row.definition.effective_scope }}"
         data-writable="{{ 'true' if row.definition.runtime_wired and g.user.role == 'administrator' else 'false' }}"
-        data-advanced="{{ 'true' if row.definition.advanced else 'false' }}"
         data-default="{{ row.definition.default|tojson|forceescape }}"
         data-dependencies="{{ row.definition.dependencies|tojson|forceescape }}">
         <div class="setting-card-head">
@@ -131,8 +129,9 @@
           {% endif %}
         </dl>
         <p class="setting-risk-copy"><strong>調整風險：</strong>{{ row.definition.risk_description }}</p>
+        <p class="setting-dependency-note" hidden><strong>目前不可調整：</strong>這個項目的前置設定尚未啟用；內容仍保留在頁面中供搜尋與閱讀。</p>
         <details class="setting-advanced-info">
-          <summary>進階資訊</summary>
+          <summary>詳細技術與影響</summary>
           <dl>
             <div><dt>技術 Key</dt><dd><code>{{ row.key }}</code></dd></div>
             <div><dt>型別／範圍</dt><dd>{{ row.definition.type }}{% if row.definition.min is defined or row.definition.max is defined %}（{{ row.definition.min|default('—') }}～{{ row.definition.max|default('—') }}）{% endif %}</dd></div>
@@ -153,8 +152,8 @@
     <span><strong id="dirty-count">0</strong> 項未儲存變更</span>
     <label class="settings-reason">變更原因（選填）<input id="change-reason" maxlength="500" placeholder="例如：降低每日 AI 預算"></label>
     <button class="secondary" type="button" id="discard-settings" disabled>放棄變更</button>
-    <button class="secondary" type="button" id="preview-settings" disabled>預覽影響</button>
-    <button class="primary" type="submit" id="save-settings" disabled>儲存變更</button>
+    <button class="secondary" type="button" id="preview-settings" disabled data-help="只計算並顯示變更差異、驗證結果、是否需重啟、重分析、重渲染與可能成本，不會寫入設定。">預覽影響</button>
+    <button class="primary" type="submit" id="save-settings" disabled data-help="寫入目前所有未儲存的變更並建立 Snapshot；若有高風險影響，系統會要求再次確認。">儲存變更</button>
   </div>
   {% endif %}
 </form>
@@ -216,6 +215,8 @@
   const controls = new Map(cards.map(card => [card.dataset.key, card.querySelector('[name]')]));
   const baseline = new Map();
   const dirty = new Map();
+  const initialSearch = new URLSearchParams(location.search).get('search');
+  if (initialSearch) document.getElementById('settings-search').value = initialSearch;
   const typeOf = key => controls.get(key)?.type === 'number' ? 'number' : (controls.get(key)?.tagName === 'SELECT' && ['true','false'].includes(controls.get(key).value) ? 'boolean' : 'string');
   const read = key => {
     const control = controls.get(key);
@@ -247,7 +248,9 @@
         const value = read(rule.key);
         return Object.prototype.hasOwnProperty.call(rule,'equals') ? equal(value, rule.equals) : !equal(value, rule.not_equals);
       });
-      card.classList.toggle('dependency-hidden', !active);
+      card.classList.toggle('dependency-inactive', !active);
+      card.setAttribute('aria-disabled', String(!active));
+      card.querySelector('.setting-dependency-note').hidden = active;
       const control = card.querySelector('[name]');
       if (control && canEdit) control.disabled = !active || card.dataset.writable !== 'true';
     });
@@ -258,26 +261,42 @@
     const category = document.getElementById('settings-category-filter').value;
     const risk = document.getElementById('settings-risk-filter').value;
     const scope = document.getElementById('settings-scope-filter').value;
-    const mode = document.querySelector('[name="settings-mode"]:checked').value;
     let visibleCount = 0;
     cards.forEach(card => {
-      const haystack = `${card.dataset.label} ${card.dataset.description} ${card.dataset.key}`.toLocaleLowerCase('zh-Hant-TW');
+      const haystack = `${card.textContent} ${card.dataset.label} ${card.dataset.description} ${card.dataset.key}`.toLocaleLowerCase('zh-Hant-TW');
       const visible = (!query || haystack.includes(query)) && (!category || card.dataset.category === category) &&
-        (!risk || card.dataset.risk === risk) && (!scope || card.dataset.scope === scope) &&
-        (mode === 'advanced' || card.dataset.advanced !== 'true');
+        (!risk || card.dataset.risk === risk) && (!scope || card.dataset.scope === scope);
       card.classList.toggle('filter-hidden', !visible);
-      if (visible && !card.classList.contains('dependency-hidden')) visibleCount += 1;
+      if (visible) visibleCount += 1;
     });
     document.querySelectorAll('.settings-category').forEach(section => {
-      section.hidden = ![...section.querySelectorAll('.setting-card')].some(card => !card.classList.contains('filter-hidden') && !card.classList.contains('dependency-hidden'));
+      section.hidden = ![...section.querySelectorAll('.setting-card')].some(card => !card.classList.contains('filter-hidden'));
     });
+    document.getElementById('settings-match-count').textContent = `顯示 ${visibleCount} / ${cards.length} 項`;
     document.getElementById('settings-empty').hidden = visibleCount !== 0;
   };
 
   const refresh = () => { applyConditions(); refreshDirty(); applyFilters(); };
   controls.forEach(control => control?.addEventListener('input', refresh));
   ['settings-search','settings-category-filter','settings-risk-filter','settings-scope-filter'].forEach(id => document.getElementById(id).addEventListener('input', applyFilters));
-  document.querySelectorAll('[name="settings-mode"]').forEach(input => input.addEventListener('change', applyFilters));
+  document.getElementById('settings-clear-filters').addEventListener('click', () => {
+    document.getElementById('settings-search').value = '';
+    ['settings-category-filter','settings-risk-filter','settings-scope-filter'].forEach(id => { document.getElementById(id).value = ''; });
+    applyFilters();
+    document.getElementById('settings-search').focus();
+  });
+  document.addEventListener('keydown', event => {
+    const target = event.target;
+    const isEditing = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement;
+    if (event.key === '/' && !isEditing && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      event.preventDefault();
+      document.getElementById('settings-search').focus();
+    }
+    if (event.key === 'Escape' && target === document.getElementById('settings-search') && target.value) {
+      target.value = '';
+      applyFilters();
+    }
+  });
 
   const setControl = (key,value) => {
     const control = controls.get(key);

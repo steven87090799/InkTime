@@ -43,7 +43,15 @@ def test_primary_management_pages_render(client, app):
     ):
         response = client.get(path)
         assert response.status_code == 200, path
-        assert "zh-Hant-TW" in response.get_data(as_text=True)
+        body = response.get_data(as_text=True)
+        assert "zh-Hant-TW" in body
+        if path != "/virtual-display":
+            assert 'class="page-guide"' in body
+            assert "小提示與使用說明" in body
+
+    virtual_display = client.get("/virtual-display").get_data(as_text=True)
+    assert 'class="receiver-guide"' in virtual_display
+    assert "虛擬墨水屏怎麼使用" in virtual_display
 
     simulator = client.get("/simulator").get_data(as_text=True)
     for expected_control in ("舊微雪算法", "新算法", "A/B 預覽", "傳送到墨水屏測試"):
@@ -96,6 +104,17 @@ def test_shared_preview_retry_and_typed_job_contracts_are_rendered(client, app):
     assert "if(body.limit===null)delete body.limit" in jobs
     assert "pending_total??0" in jobs
     assert "limited_to??0" in jobs
+    assert "目前分析執行模式是「僅使用本機選片」" in jobs
+    assert '/settings?search=分析執行模式' in jobs
+    assert "目前沒有已啟用且設定完整的 Vision Provider" not in jobs
+    assert "AI 尚未完成啟用" in jobs
+    assert "必要項目 1 / 3" in jobs
+    assert "完成下列全部必要項目後" in jobs
+    assert "靜態設定就緒" in jobs
+
+    providers = client.get("/providers").get_data(as_text=True)
+    assert "AI 尚未完成啟用" in providers
+    assert "實際連線驗收不等於靜態設定就緒" in providers
     assert "window.inktimeFetchPreview(statusUrl" in rendering
     assert "window.inktimeFetchPreview(result.preview_url" in rendering
 

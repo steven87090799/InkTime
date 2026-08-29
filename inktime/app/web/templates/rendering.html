@@ -8,7 +8,7 @@
     <h1>電子紙渲染</h1>
     <p>可選直向或橫向排版；傳給面板的資料仍固定為 480×800，依 Profile 產生四色 2bpp 或六／七色 indexed4。</p>
   </div>
-  <div><a class="secondary" href="/simulator">開啟手動模擬器</a> <a class="secondary" href="/virtual-display" target="_blank" rel="noopener">開啟虛擬墨水屏</a>{% if g.user.role=='administrator' %} <button class="secondary" type="button" data-spectra6-preset>一鍵套用微雪 7.3 吋 Spectra 6 原廠色彩與演算法</button> <button class="primary" id="publish">發布目前 Profile</button> <button class="secondary" id="publish-all">發布全部 Profile</button>{% endif %}</div>
+  <div><a class="secondary" href="/simulator">開啟手動模擬器</a> <a class="secondary" href="/virtual-display" target="_blank" rel="noopener">開啟虛擬墨水屏</a>{% if g.user.role=='administrator' %} <button class="secondary" type="button" data-spectra6-preset data-help="預覽並套用 Spectra 6 建議色盤與抖動組合，不會直接發布 Release。">一鍵套用微雪 7.3 吋 Spectra 6 原廠色彩與演算法</button> <button class="primary" id="publish" data-help="使用目前選取的單一 Profile 建立正式 Release；完成後使用該 Profile 的裝置才會取得新內容。">發布目前 Profile</button> <button class="secondary" id="publish-all" data-help="依序為所有面板 Profile 建立正式 Release，影響範圍比單一發布大；請先確認每個 Profile 的版型、字型與色盤。">發布全部 Profile</button>{% endif %}</div>
 </div>
 {% if g.user.role=='administrator' %}<p id="release-action-status" role="status" aria-live="polite"></p>{% endif %}
 
@@ -93,7 +93,7 @@
       <label>水平裁切焦點 <output id="crop-x-value">50%</output><input id="crop-x" type="range" min="0" max="100" value="50"></label>
       <label>垂直裁切焦點 <output id="crop-y-value">50%</output><input id="crop-y" type="range" min="0" max="100" value="50"></label>
       <div class="composition-actions">
-        {% if g.user.role=='administrator' %}<button type="button" class="primary" id="save-crop">儲存此照片裁切</button><button type="button" class="secondary" id="auto-crop">恢復人臉／主體自動裁切</button>{% endif %}
+        {% if g.user.role=='administrator' %}<button type="button" class="primary" id="save-crop" data-help="只儲存這張照片在目前版型的人工焦點與縮放，不會修改原始照片檔案。">儲存此照片裁切</button><button type="button" class="secondary" id="auto-crop" data-help="移除這張照片的人工裁切覆寫，之後重新使用人臉或主體偵測決定焦點。">恢復人臉／主體自動裁切</button>{% endif %}
       </div>
       <p id="crop-method" class="notice"></p>
       <div class="e6-score-grid">
@@ -111,7 +111,7 @@
 
 {% if g.user.role=='administrator' and candidate_photos %}
 <section class="panel" id="dual-pair-compare">
-  <div class="panel-head"><div><h2>雙照片版型比較</h2><p>使用同一組照片、凍結 Caption A／B、Profile 與有效抖動，由正式背景 Renderer 一次產生四張結果。</p></div><button class="primary" type="button" id="dual-pair-compare-run">產生四種正式 Preview</button></div>
+  <div class="panel-head"><div><h2>雙照片版型比較</h2><p>使用同一組照片、凍結 Caption A／B、Profile 與有效抖動，由正式背景 Renderer 一次產生四張結果。</p></div><button class="primary" type="button" id="dual-pair-compare-run" data-help="用同一組輸入產生四種版型比較圖，方便排除照片、Caption 或抖動差異；只建立 Preview，不會正式發布。">產生四種正式 Preview</button></div>
   <p id="dual-pair-compare-status" class="notice">靜態比例提示不代表正式色盤輸出；請建立比較 Preview 查看正式 Renderer 結果。</p>
   <div id="dual-pair-compare-results" class="composition-grid" aria-live="polite"></div>
 </section>
@@ -129,7 +129,7 @@
     <label><input id="history-unseen" type="checkbox"> 只看未顯示過</label>
     <button type="button" class="primary" id="history-select">隨機一天</button>
   </div>
-  <div class="inline-form" style="margin-top:1rem"><label>同日模式<select id="history-reroll-mode"><option value="random">完全隨機</option><option value="weighted">依最終分數加權</option><option value="top_n">只從前 N 名</option><option value="prefer_unseen">偏好未顯示</option><option value="prefer_travel">偏好旅行</option><option value="prefer_person">偏好人物</option></select></label><label>前 N 名<input id="history-top-n" type="number" min="1" max="100" value="10"></label><button type="button" class="secondary" id="history-reroll" disabled>同日重抽</button><button type="button" class="secondary" id="history-publish" disabled>立即建立正式 Release</button><select id="history-device"><option value="">選擇測試裝置</option>{% for device in devices|default([]) if device.enabled %}<option value="{{ device.id }}">{{ device.name }}（{{ device.panel_profile }}）</option>{% endfor %}</select><button type="button" class="secondary" id="history-test" disabled>傳送到墨水屏測試</button></div>
+  <div class="inline-form" style="margin-top:1rem"><label data-help="控制在同一天的候選照片中如何重新抽選；加權偏好高分，前 N 名限制候選範圍，其他模式偏好特定內容但仍受資格規則限制。">同日模式<select id="history-reroll-mode"><option value="random">完全隨機</option><option value="weighted">依最終分數加權</option><option value="top_n">只從前 N 名</option><option value="prefer_unseen">偏好未顯示</option><option value="prefer_travel">偏好旅行</option><option value="prefer_person">偏好人物</option></select></label><label>前 N 名<input id="history-top-n" type="number" min="1" max="100" value="10"></label><button type="button" class="secondary" id="history-reroll" disabled>同日重抽</button><button type="button" class="secondary" id="history-publish" disabled data-help="把目前歷史今日選片建立為正式 Release，裝置可能在下次同步取得；這不是單純預覽。">立即建立正式 Release</button><select id="history-device"><option value="">選擇測試裝置</option>{% for device in devices|default([]) if device.enabled %}<option value="{{ device.id }}">{{ device.name }}（{{ device.panel_profile }}）</option>{% endfor %}</select><button type="button" class="secondary" id="history-test" disabled data-help="只把目前結果送到所選測試裝置，供實體面板驗收；不會替所有 Profile 建立正式發布。">傳送到墨水屏測試</button></div>
   <p class="notice" id="history-status" role="status">尚未選擇歷史照片。</p>
   <div id="history-detail" hidden></div>
 </section>
@@ -187,7 +187,7 @@
 <section class="panel">
   <h2>發布歷史</h2>
   <div class="table-wrap"><table><thead><tr><th>版本</th><th>建立時間</th><th>Profile／格式</th><th>檔案</th><th>操作</th></tr></thead><tbody>
-    {% for release in releases %}<tr><td><code>{{ release.release_id }}</code></td><td>{{ release.created_at }}</td><td>{{ release.render_profile|default('safe_4c') }}<small>{{ release.width }}×{{ release.height }} {{ release.pixel_format }}／{{ release.dither|default('none') }}</small></td><td>{{ release.files|length }}{% if release.files %}／<a href="/rendering/releases/{{ release.release_id }}/{{ release.files[0].preview }}" target="_blank">實際色盤預覽</a>{% endif %}</td><td>{% if g.user.role=='administrator' %}<button class="secondary rollback" data-id="{{ release.release_id }}">回滾此 Profile</button>{% endif %}</td></tr>
+    {% for release in releases %}<tr><td><code>{{ release.release_id }}</code></td><td>{{ release.created_at }}</td><td>{{ release.render_profile|default('safe_4c') }}<small>{{ release.width }}×{{ release.height }} {{ release.pixel_format }}／{{ release.dither|default('none') }}</small></td><td>{{ release.files|length }}{% if release.files %}／<a href="/rendering/releases/{{ release.release_id }}/{{ release.files[0].preview }}" target="_blank">實際色盤預覽</a>{% endif %}</td><td>{% if g.user.role=='administrator' %}<button class="secondary rollback" data-id="{{ release.release_id }}" data-help="把這個 Release 設為該 Profile 的目前正式版本；不刪除較新的 Release，但裝置後續會以回滾版本為準。">回滾此 Profile</button>{% endif %}</td></tr>
     {% else %}<tr><td colspan="5" class="empty">尚未發布版本。</td></tr>{% endfor %}
   </tbody></table></div>
 </section>

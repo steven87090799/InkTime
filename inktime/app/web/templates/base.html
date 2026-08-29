@@ -50,7 +50,25 @@
       <div class="notice {{ category }}" role="alert">{{ message }}</div>
     {% endfor %}
     {% block content %}{% endblock %}
+    {% if page_guide %}
+      <aside class="page-guide" aria-labelledby="page-guide-title">
+        <div class="page-guide-intro">
+          <p class="eyebrow">小提示與使用說明</p>
+          <h2 id="page-guide-title">{{ page_guide.title }}</h2>
+          <p>{{ page_guide.purpose }}</p>
+        </div>
+        <div class="page-guide-column">
+          <h3>怎麼使用</h3>
+          <ol>{% for step in page_guide.steps %}<li>{{ step }}</li>{% endfor %}</ol>
+        </div>
+        <div class="page-guide-column">
+          <h3>使用建議</h3>
+          <ul>{% for tip in page_guide.tips %}<li>{{ tip }}</li>{% endfor %}</ul>
+        </div>
+      </aside>
+    {% endif %}
   </main>
+  <div class="context-help-popover" id="context-help-popover" role="tooltip" hidden></div>
   <dialog id="inktime-confirm-dialog" aria-labelledby="inktime-confirm-title">
     <form method="dialog" class="form-stack">
       <h2 id="inktime-confirm-title">確認操作</h2>
@@ -205,6 +223,53 @@
       document.addEventListener('keydown', event => {
         if (event.key === 'Escape') menus.forEach(menu => { menu.open = false; });
       });
+    })();
+
+    (() => {
+      const popover = document.getElementById('context-help-popover');
+      let activeButton = null;
+
+      const close = () => {
+        popover.hidden = true;
+        if (activeButton) activeButton.setAttribute('aria-expanded', 'false');
+        activeButton = null;
+      };
+      const position = button => {
+        const rect = button.getBoundingClientRect();
+        const width = Math.min(360, window.innerWidth - 24);
+        const left = Math.max(12, Math.min(window.innerWidth - width - 12, rect.left));
+        popover.style.width = `${width}px`;
+        popover.style.left = `${left}px`;
+        popover.style.top = `${Math.max(12, Math.min(window.innerHeight - popover.offsetHeight - 12, rect.bottom + 8))}px`;
+      };
+
+      document.querySelectorAll('[data-help]').forEach((target, index) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'context-help-button';
+        button.textContent = '?';
+        button.setAttribute('aria-label', `查看「${target.textContent.trim().slice(0, 40) || '此項目'}」說明`);
+        button.setAttribute('aria-controls', 'context-help-popover');
+        button.setAttribute('aria-expanded', 'false');
+        button.dataset.helpIndex = String(index);
+        target.insertAdjacentElement('afterend', button);
+        button.addEventListener('click', event => {
+          event.stopPropagation();
+          if (activeButton === button && !popover.hidden) { close(); return; }
+          close();
+          activeButton = button;
+          popover.textContent = target.dataset.help;
+          popover.hidden = false;
+          button.setAttribute('aria-expanded', 'true');
+          position(button);
+        });
+      });
+      document.addEventListener('click', event => {
+        if (!event.target.closest('.context-help-popover, .context-help-button')) close();
+      });
+      document.addEventListener('keydown', event => { if (event.key === 'Escape') close(); });
+      window.addEventListener('resize', () => { if (activeButton) position(activeButton); });
+      window.addEventListener('scroll', close, {passive: true});
     })();
   </script>
   {% block scripts %}{% endblock %}

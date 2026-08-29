@@ -16,7 +16,7 @@
     <dt>目前照片路徑</dt><dd><code>{{ photo_dir }}</code></dd>
     <dt>接收端</dt><dd><a href="/virtual-display" target="_blank" rel="noopener">另開唯讀虛擬墨水屏</a></dd>
   </dl>
-  {% if g.user.role == 'administrator' %}<button class="primary" id="publish-virtual">掃描並送到虛擬墨水屏</button>{% endif %}
+  {% if g.user.role == 'administrator' %}<button class="primary" id="publish-virtual" data-help="建立一個背景工作：只掃描投放資料夾、做本機 480×800 渲染並發布給唯讀虛擬墨水屏；不呼叫 AI 模型。">掃描並送到虛擬墨水屏</button>{% endif %}
   <p class="test-status" id="virtual-status" role="status" aria-live="polite"></p>
 </section>
 
@@ -25,9 +25,9 @@
   <form id="scan-form" class="form-stack">
     <label>照片庫名稱<input name="library_name" value="主要照片庫"></label>
     <label>主機或容器內路徑<input name="root_path" value="{{ photo_dir }}" required></label>
-    <label>掃描模式<select name="mode"><option value="incremental">增量（建議）</option><option value="full">完整重算 Metadata 與本地特徵</option><option value="metadata-only">只補 Metadata</option><option value="local-features-only">只補本地特徵</option><option value="manual">手動增量</option></select></label>
+    <label data-help="增量只處理新增或變更檔案；完整會重算 Metadata 與本機特徵；其餘模式只補指定階段。掃描本身不會自動送入 AI。">掃描模式<select name="mode"><option value="incremental">增量（建議）</option><option value="full">完整重算 Metadata 與本地特徵</option><option value="metadata-only">只補 Metadata</option><option value="local-features-only">只補本地特徵</option><option value="manual">手動增量</option></select></label>
     <label><input type="checkbox" name="build_thumbnails" checked> 為新增或變更照片建立 512px 本地縮圖</label>
-    <button class="primary">建立增量掃描工作</button>
+    <button class="primary" data-help="把掃描要求加入背景工作佇列；按下後會前往工作詳情，原始照片不會被修改或刪除。">建立增量掃描工作</button>
   </form>
   <p id="scan-status" role="status" aria-live="polite"></p>
 </section>

@@ -1,16 +1,17 @@
 {% extends "base.html" %}
 {% block title %}分析工作｜InkTime{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">背景工作</p><h1>分析工作</h1><p>工作可暫停、續跑、取消，Docker 重啟後會從資料庫恢復。</p></div>{% if g.user.role == 'administrator' %}<button class="primary" id="new-job">建立工作</button>{% endif %}</div>
+<div class="page-head"><div><p class="eyebrow">背景工作</p><h1>分析工作</h1><p>工作可暫停、續跑、取消，Docker 重啟後會從資料庫恢復。</p></div>{% if g.user.role == 'administrator' %}<button class="primary" id="new-job" data-help="開啟建立工作精靈；送出前會先估算照片數量與模型成本，不會因為開啟精靈就開始分析。">建立工作</button>{% endif %}</div>
+{% include "_ai_readiness.html" %}
 <section class="panel"><div class="table-wrap"><table><thead><tr><th>名稱</th><th>狀態</th><th>進度</th><th>已花費</th><th>建立時間</th></tr></thead><tbody>
 {% for job in jobs %}<tr><td><a href="/jobs/{{ job.id }}"><strong>{{ job.name }}</strong></a><small>{{ job.strategy }}</small></td><td><span class="status">{{ job.status }}</span></td><td>{{ job.completed_items + job.failed_items }} / {{ job.total_items }}</td><td>US$ {{ '%.4f'|format(job.spent) }}</td><td>{{ job.created_at }}</td></tr>{% else %}<tr><td colspan="5" class="empty">尚未建立分析工作。</td></tr>{% endfor %}
 </tbody></table></div></section>
 <dialog id="job-wizard"><form id="job-form"><p class="eyebrow">四步驟精靈</p><h2>建立分析工作</h2><div class="form-stack">
 <label>工作名稱<input name="name" value="未分析照片智慧分析" required></label>
-<label>分析範圍<select name="selection_mode"><option value="pending">待分析照片</option><option value="stale_only">僅重新分析已過期規格</option><option value="force_all">全部符合資格照片（忽略快取）</option></select></label>
-<details><summary>進階：單次最高處理量（安全上限）</summary><label>留空代表不限制<select name="limit"><option value="">不限制</option><option value="500">500</option><option value="1000">1,000</option><option value="5000">5,000</option><option value="10000">10,000</option></select></label></details>
-<label>分析策略<select name="strategy"><option value="single" {% if not model_provider_available %}disabled{% endif %}>單次完整 Vision 分析{% if not model_provider_available %}（目前無可用 Provider）{% endif %}</option><option value="local" {% if not model_provider_available %}selected{% endif %}>僅本地分析</option></select></label>
-{% if not model_provider_available %}<p class="notice" role="status">目前沒有已啟用且設定完整的 Vision Provider；仍可建立僅本地分析工作。</p>{% endif %}
+<label data-help="待分析只處理尚無有效結果的照片；已過期規格只重做分析版本落後的照片；全部符合資格照片會忽略既有快取，影響最大。">分析範圍<select name="selection_mode"><option value="pending">待分析照片</option><option value="stale_only">僅重新分析已過期規格</option><option value="force_all">全部符合資格照片（忽略快取）</option></select></label>
+<details><summary>單次最高處理量（安全上限）</summary><p>限制這個工作最多納入幾張照片，適合先用小批量驗證規則與成本；留空才是不限制。</p><label>最高處理量<select name="limit"><option value="">不限制</option><option value="500">500</option><option value="1000">1,000</option><option value="5000">5,000</option><option value="10000">10,000</option></select></label></details>
+<label data-help="單次完整 Vision 會把符合條件的照片送到可用 Provider，可能產生費用；僅本地分析只計算本機 Metadata 與品質特徵，不呼叫模型。">分析策略<select name="strategy"><option value="single" {% if not model_provider_available %}disabled{% endif %}>單次完整 Vision 分析{% if not model_provider_available %}（目前不可用）{% endif %}</option><option value="local" {% if not model_provider_available %}selected{% endif %}>僅本地分析</option></select></label>
+{% if not model_provider_available %}<p class="notice" role="status">{{ model_provider_message }}仍可建立僅本地分析工作。 {% if model_provider_action %}<a href="{{ model_provider_action[1] }}">{{ model_provider_action[0] }}</a>{% endif %}</p>{% endif %}
 <label>單一工作預算上限（美元）<input name="budget" type="number" min="0" step="0.01" value="10"></label>
 <div id="estimate" class="notice"></div><p class="notice">模型策略會先套用「本機預篩選」設定；被判定為截圖或同時具有多項明顯品質缺陷的照片會留下 0 Token 排除紀錄。影片與動畫在照片掃描階段就不會加入分析工作，人工標記的最愛照片則略過預篩選。</p><button type="submit" class="primary">確認建立</button><button type="button" data-dialog-close>取消</button></div></form></dialog>
 {% endblock %}

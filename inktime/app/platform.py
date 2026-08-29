@@ -43,6 +43,7 @@ from inktime.app.core.runtime_config import RuntimeConfig
 from inktime.app.repositories.auth import AuthRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.web.access import csrf_token, verify_csrf
+from inktime.app.web.help_content import page_guide_for_endpoint
 
 
 LOGGER = logging.getLogger("platform")
@@ -111,7 +112,7 @@ def configure_web_application(
         return redirect(url_for("dashboard.dashboard"))
 
     @app.context_processor
-    def critical_alerts():
+    def shared_template_context():
         database = container.extensions["inktime_database"]
         try:
             with database.session() as connection:
@@ -125,6 +126,7 @@ def configure_web_application(
         return {
             "critical_alerts": rows,
             "csp_nonce": getattr(g, "csp_nonce", ""),
+            "page_guide": page_guide_for_endpoint(request.endpoint),
         }
 
     public_endpoints = {
