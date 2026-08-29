@@ -2635,6 +2635,7 @@ void startConfigPortal() {
 #if DEBUG_LOG
       DBG_PRINTLN("[AP] timeout: no config saved");
 #endif
+#if INKTIME_PHOTOPAINTER_ENABLED
       if (portalPowerPageVisible && apOk) {
         (void)photoPainter.displayPairingScreen(
           apSsid.c_str(),
@@ -2645,6 +2646,7 @@ void startConfigPortal() {
         );
         portalPowerPageVisible = false;
       }
+#endif
       uint32_t mins = minutesToNextRefreshFromLastEpoch(g_cfg);
 #if DEBUG_LOG
       DBG_PRINT("[AP] sleep to next refresh, minutes="); DBG_PRINTLN((int)mins);
