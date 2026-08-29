@@ -385,7 +385,10 @@ class ResilienceRepository:
                         now,
                     ),
                 )
-                feedback_id = int(inserted.lastrowid)
+                inserted_id = inserted.lastrowid
+                if inserted_id is None:
+                    raise RuntimeError("FEEDBACK-002 回饋已寫入但未取得識別碼")
+                feedback_id = int(inserted_id)
                 if kind == "NEVER_SHOW":
                     connection.execute(
                         "UPDATE photos SET eligible=0,exclusion_status='manually_excluded',reject_reason='USER_EXCLUDED',updated_at=? WHERE id=?",

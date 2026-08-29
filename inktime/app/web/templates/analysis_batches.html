@@ -26,8 +26,9 @@
         </select>
       </label>
       <label>Sample 數量 <input name="sample_count" type="number" min="1" max="100000" value="100"></label>
-      <button name="action" value="estimate" type="submit">估算</button>
-      <button name="action" value="submit" type="submit">提交</button>
+      <button name="action" value="estimate" type="submit" {% if not batch_provider_available %}disabled{% endif %}>估算</button>
+      <button name="action" value="submit" type="submit" {% if not batch_provider_available %}disabled{% endif %}>提交</button>
+      {% if not batch_provider_available %}<p class="notice" role="status">目前沒有已啟用、設定完整且支援 Batch 的 Provider。</p>{% endif %}
       <p id="batch-create-status" role="status" aria-live="polite"></p>
     </form>
   </section>

@@ -166,6 +166,16 @@ def test_review_state_invariants_survive_transitions_and_reanalysis(client, app)
     assert pending.status_code == 200
     assert pending.json["photo"]["review_state"] == "needs_review"
     assert pending.json["photo"]["candidate_pool"] is True
+    invalid_pending_pool = client.patch(
+        f"/api/v1/review/photos/{keep_photo}",
+        json={
+            "expected_version": pending.json["photo"]["review_version"],
+            "review_state": "needs_review",
+            "candidate_pool": False,
+        },
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert invalid_pending_pool.status_code == 400
     with app.extensions["inktime_database"].session() as connection:
         state = connection.execute(
             "SELECT eligible,exclusion_status,manual_override FROM photos WHERE id=?", (keep_photo,)

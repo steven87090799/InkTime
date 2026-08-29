@@ -303,7 +303,6 @@ def test_fresh_volume_restore_preserves_platform_identity_and_roles(tmp_path):
         photo_dir=fresh / "photos",
         testing=True,
         development=False,
-        legacy_enabled=False,
         cookie_secure=False,
     )
     app = create_app(runtime)

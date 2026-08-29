@@ -55,7 +55,6 @@ def test_bootstrap_accepts_injected_lock_provider(tmp_path: Path):
         release_dir=tmp_path / "releases",
         backup_dir=tmp_path / "backups",
         cache_dir=tmp_path / "cache",
-        legacy_enabled=False,
         cookie_secure=False,
     )
     provider = FakeLockProvider()

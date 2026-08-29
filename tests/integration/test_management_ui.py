@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
 
@@ -66,7 +67,6 @@ def test_primary_management_pages_render(client, app):
     assert "budget:'float'" in jobs
     assert "if(body.limit===null)delete body.limit;" in jobs
 
-
 def test_shared_confirmation_dialog_resets_and_normalizes_cancel_state(client, app):
     create_admin(app)
     login(client)
@@ -81,6 +81,23 @@ def test_shared_confirmation_dialog_resets_and_normalizes_cancel_state(client, a
     assert "dialog.removeEventListener('cancel', cancelled);" in body
     assert "dialog.returnValue === 'confirm'" in body
 
+def test_shared_preview_retry_and_typed_job_contracts_are_rendered(client, app):
+    create_admin(app)
+    login(client)
+
+    base = client.get("/dashboard").get_data(as_text=True)
+    jobs = client.get("/jobs").get_data(as_text=True)
+    rendering = client.get("/rendering").get_data(as_text=True)
+
+    assert "window.inktimeFetchPreview" in base
+    assert "response.headers.get('Retry-After')" in base
+    assert "預覽請求過於頻繁，請稍後再試" in base
+    assert "signal?.addEventListener('abort', cancel" in base
+    assert "if(body.limit===null)delete body.limit" in jobs
+    assert "pending_total??0" in jobs
+    assert "limited_to??0" in jobs
+    assert "window.inktimeFetchPreview(statusUrl" in rendering
+    assert "window.inktimeFetchPreview(result.preview_url" in rendering
 
 def test_job_detail_live_status_exposes_items_and_only_valid_actions(client, app):
     administrator_id = create_admin(app)
@@ -157,7 +174,7 @@ def test_simulator_superseded_compare_aborts_fetch_and_poll_delay(client, app):
     assert "let compareController = null" in body
     assert "compareController.abort()" in body
     assert "waitForJob(created,{signal:controller.signal})" in body
-    assert "window.inktimeFetch(created.status_url,{signal})" in body
+    assert "window.inktimeFetchPreview(created.status_url,{signal})" in body
     assert "await abortableDelay(750,signal)" in body
     assert "clearTimeout(timer);reject(abortError())" in body
     assert "error?.name!=='AbortError'" in body
@@ -368,10 +385,10 @@ def test_device_management_shows_offline_capability_without_secret_or_viewer_con
         )
 
     body = client.get("/devices").get_data(as_text=True)
-    assert "離線能力：unknown_12／Legacy／尚未確認，最多 12 slots" in body
-    assert "離線能力：confirmed_24／已確認 24-slot capability（最多 24 slots）" in body
-    assert "離線能力：legacy_ambiguous／最大 12 slots" in body
-    assert "舊資料能力不明，已隔離；請重新配對或 Repair 以確認 capability。" in body
+    assert "尚未回報離線排程能力（保守上限 12 個時段）" in body
+    assert "已確認支援 24 個離線時段（目前上限 24）" in body
+    assert "離線排程能力尚未確認（保守上限 12 個時段）" in body
+    assert "請重新配對或執行修復，以確認裝置能力。" in body
     assert ambiguous_token not in body
     assert malformed_token not in body
     assert 'data-offline-capability-state="legacy_ambiguous"' in body
@@ -909,7 +926,9 @@ def test_photo_cards_never_present_excluded_screenshot_or_severe_blur_as_high_sc
     listing = client.get("/photos").get_data(as_text=True)
     assert "選片分 0.0（已排除：截圖）" in listing
     assert "選片分 0.0（已排除：嚴重模糊／失焦）" in listing
-    assert "本機清晰度、對比與曝光品質分" in listing
+    assert "本機品質" in listing
+    assert "選片分只在正式排序分析完成後產生" in listing
+    assert "E6 不會將它救回" in listing
 
     detail = client.get(f"/photos/{blurry_id}").get_data(as_text=True)
     assert "本機品質分" in detail
@@ -987,6 +1006,7 @@ def test_review_thumbnail_accepts_string_root_and_rejects_invalid_sources(
     root = tmp_path / "review-source"
     root.mkdir()
     Image.new("RGB", (80, 60), "#527f99").save(root / "photo.jpg")
+    source_sha256 = sha256((root / "photo.jpg").read_bytes()).hexdigest()
     with app.extensions["inktime_database"].session() as connection:
         connection.execute(
             "UPDATE libraries SET root_path=? WHERE id=(SELECT library_id FROM photos WHERE id=?)",
@@ -994,7 +1014,7 @@ def test_review_thumbnail_accepts_string_root_and_rejects_invalid_sources(
         )
         connection.execute(
             "UPDATE photos SET relative_path='photo.jpg',sha256=? WHERE id=?",
-            ("a" * 64, photo_id),
+            (source_sha256, photo_id),
         )
 
     valid = client.get(f"/api/v1/review/photos/{photo_id}/thumbnail")

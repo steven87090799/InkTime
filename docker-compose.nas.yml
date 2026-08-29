@@ -29,7 +29,6 @@ x-common: &common
     INKTIME_LOG_FORMAT: ${INKTIME_LOG_FORMAT:-json}
     INKTIME_LOG_LEVEL: ${INKTIME_LOG_LEVEL:-INFO}
     INKTIME_ACCESS_LOG: ${INKTIME_ACCESS_LOG:-0}
-    INKTIME_ENABLE_LEGACY_WEBUI: ${INKTIME_ENABLE_LEGACY_WEBUI:-false}
   user: "10001:10001"
   volumes:
     # SQLite、Session Key、快取、備份與 Release 必須持久保存。

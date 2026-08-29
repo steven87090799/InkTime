@@ -69,6 +69,35 @@
       options.headers = Object.assign({'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]').content}, options.headers || {});
       return fetch(url, options);
     };
+    window.inktimeFetchPreview = async (url, options = {}, retry = {}) => {
+      const maxRetries = Number.isInteger(retry.maxRetries) ? Math.max(0, retry.maxRetries) : 2;
+      const signal = options.signal;
+      const abortError = () => new DOMException('Preview 已更新', 'AbortError');
+      const delay = milliseconds => new Promise((resolve, reject) => {
+        if (signal?.aborted) { reject(abortError()); return; }
+        const timer = setTimeout(() => { signal?.removeEventListener('abort', cancel); resolve(); }, milliseconds);
+        function cancel() { clearTimeout(timer); reject(abortError()); }
+        signal?.addEventListener('abort', cancel, {once: true});
+      });
+      const retryDelay = (response, attempt) => {
+        const raw = response.headers.get('Retry-After');
+        if (raw) {
+          const seconds = Number(raw);
+          if (Number.isFinite(seconds) && seconds >= 0) return Math.min(5000, seconds * 1000);
+          const date = Date.parse(raw);
+          if (Number.isFinite(date)) return Math.min(5000, Math.max(0, date - Date.now()));
+        }
+        return Math.min(5000, 1000 * (2 ** attempt));
+      };
+      for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+        if (signal?.aborted) throw abortError();
+        const response = await window.inktimeFetch(url, options);
+        if (response.status !== 429) return response;
+        if (attempt === maxRetries) throw new Error('預覽請求過於頻繁，請稍後再試');
+        await delay(retryDelay(response, attempt));
+      }
+      throw new Error('預覽請求過於頻繁，請稍後再試');
+    };
     window.inktimeDecodeJson = async response => {
       const text = await response.text();
       if (!text) return {};

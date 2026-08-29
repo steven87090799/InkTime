@@ -113,7 +113,6 @@ curl -fsS http://127.0.0.1:8765/health/ready
 | `INKTIME_PROXY_TRUST` | local `0` | 只信任實際存在的 Proxy hop，正式單層 Proxy 通常為 `1` |
 | `INKTIME_WEBHOOK_ALLOWLIST` | 空 | 僅在確實需要內網 Webhook 時填精確 hostname、`.example.com` 子網域、IP 或 CIDR；一般公開端點不需設定 |
 | `INKTIME_ACCESS_LOG` | `0` | 是否逐一輸出 HTTP request；正式環境維持關閉 |
-| `INKTIME_ENABLE_LEGACY_WEBUI` | `false` | 舊 `/review`、`/sim` 與相關 API；正式、開發、測試皆須明確設為 `true` 才開啟，且仍受平台登入／權限保護 |
 | `INKTIME_LOG_LEVEL` | `INFO` | 資料庫尚未初始化前的 bootstrap 層級；之後從 Web 控制 |
 | `INKTIME_LOG_MAX_SIZE` | `5m` | 每個 Docker Log 檔上限 |
 | `INKTIME_LOG_MAX_FILES` | `3` | 每個服務保留檔數；三服務預設總上限約 45 MiB |

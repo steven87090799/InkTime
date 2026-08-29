@@ -43,7 +43,7 @@ def test_activity_is_bounded_unifies_sources_and_redacts(client, app):
     assert "secret-token" not in str(response.json)
     first_cursor = response.json["next_cursor"]
     app.extensions["inktime_observability_service"].record("INFO", "test", "new_activity", "較新的事件")
-    new_only = client.get(f"/api/v1/activity?after={first_cursor}")
+    new_only = client.get(f"/api/v1/activity?job_id=activity-job&after={first_cursor}")
     assert new_only.status_code == 200
     assert all(event["source"] == "activity" for event in new_only.json["events"])
     page = client.get("/activity?job_id=activity-job")
@@ -57,7 +57,14 @@ def test_activity_is_bounded_unifies_sources_and_redacts(client, app):
     assert "next_cursor" in body
     assert "if(paused||document.hidden||!autoRefresh.checked)return" in body
     assert "if(paused){stopPoll();return;}" in body
-    assert "if(!autoRefresh.checked){stopPoll();return;}" in body
+    auto_refresh_start = body.index("if(!autoRefresh.checked){")
+    auto_refresh_end = body.index("}", auto_refresh_start)
+    auto_refresh_block = body[auto_refresh_start:auto_refresh_end]
+    assert "stopPoll();" in auto_refresh_block
+    assert "state.textContent='輪詢已暫停'" in auto_refresh_block
+    assert "return;" in auto_refresh_block
+    assert auto_refresh_block.index("stopPoll();") < auto_refresh_block.index("state.textContent")
+    assert auto_refresh_block.index("state.textContent") < auto_refresh_block.index("return;")
     assert "function stopPoll(){if(pollTimer)clearTimeout(pollTimer);pollTimer=null;}" in body
     assert "loadInFlight=true" in body
     assert "if(newOnly){if(events.length)" in body

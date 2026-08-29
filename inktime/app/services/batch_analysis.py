@@ -241,18 +241,22 @@ class BatchAnalysisService:
         return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
 
     def _provider_route(self) -> list[dict[str, Any]]:
+        usable_ids = {
+            str(item["provider_id"]) for item in self.provider_service.usable_route_snapshot()
+        }
         rows = [
             row
             for row in self.providers.list()
             if bool(row.get("enabled"))
             and bool(row.get("supports_batch"))
             and str(row.get("kind") or "").lower() != "openrouter"
+            and str(row.get("id")) in usable_ids
         ]
         rows.sort(key=lambda row: (int(row.get("priority") or 100), str(row.get("name") or row["id"])))
         if not rows:
             raise BatchLifecycleError("沒有已啟用且支援 Batch 的 Provider", "BATCH-PROVIDER-001")
         row = rows[0]
-        snapshot = self.provider_service.route_snapshot()
+        snapshot = self.provider_service.usable_route_snapshot()
         selected = next((item for item in snapshot if str(item["provider_id"]) == str(row["id"])), None)
         if selected is None:
             raise BatchLifecycleError("Batch Provider 不在目前的 Frozen Route", "BATCH-PROVIDER-002")

@@ -17,7 +17,6 @@ SQLite `settings` 的動態業務設定不參與這個優先序。
 | `port` | `int` | `INKTIME_PORT` | `8765` | 否 | 否 |
 | `timezone` | IANA `str` | `INKTIME_TIMEZONE`／`TZ` | `Asia/Taipei` | 否 | 否 |
 | `proxy_trust` | `int` | `INKTIME_PROXY_TRUST` | `0` | 否 | 否 |
-| `legacy_enabled` | `bool` | `INKTIME_ENABLE_LEGACY_WEBUI` | `false` | 否 | 否 |
 | `development` | `bool` | `INKTIME_DEVELOPMENT` | 依 environment | 否 | 否 |
 | `testing` | `bool` | `INKTIME_TESTING` | 依 environment | 否 | 否 |
 | `worker_concurrency` | `int` | `INKTIME_WORKER_CONCURRENCY` | `2` | 否 | 否 |

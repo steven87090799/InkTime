@@ -1033,7 +1033,7 @@
 <li>
                 <a href="#sec-7-1" class="toc-h3-link">
                     <i class="fa-solid fa-angle-right toc-bullet"></i>
-                    <span>7.1 EXIF 照片元資料 JSON 格式 (`photo_scores.exif_json`)</span>
+                    <span>7.1 EXIF 照片元資料 JSON 格式 (`photos.exif_json`)</span>
                 </a>
             </li>
 <li>
@@ -1242,7 +1242,7 @@
             <h1 id="inktime-墨水屏電子相框系統-終極百科全書級操作手冊與開發者指南" class="doc-h1">InkTime 墨水屏電子相框系統 終極百科全書級操作手冊與開發者指南</h1>
 <hr class="doc-divider">
 <h2 id="toc" class="doc-h2"><span class="h2-anchor-icon">#</span> 摘要目錄</h2>
-<ul class="doc-list"><li><a href="#sec-1" class="doc-link">一、 系統架構與設計哲學</a></li><li><a href="#sec-2" class="doc-link">二、 硬體選型、電路設計與面板選擇</a></li><li><a href="#sec-2-1" class="doc-link">2.1 三大彩色電子紙面板規格與光學特性</a></li><li><a href="#sec-2-2" class="doc-link">2.2 完整 GPIO 引腳映射與 SPI 時脈規範</a></li><li><a href="#sec-2-3" class="doc-link">2.3 電池功耗模型與 ADC 分壓量測電路</a></li><li><a href="#sec-3" class="doc-link">三、 ESP32 / ESP32-S3 韌體開發與刷機指南</a></li><li><a href="#sec-3-1" class="doc-link">3.1 PlatformIO 與 Arduino IDE 環境配置</a></li><li><a href="#sec-3-2" class="doc-link">3.2 韌體原始碼邏輯與驅動初始化序列</a></li><li><a href="#sec-3-3" class="doc-link">3.3 燒錄、Wi-Fi 配網與自動配對流程</a></li><li><a href="#sec-4" class="doc-link">四、 AI 大語言模型連接與組態指南</a></li><li><a href="#sec-4-1" class="doc-link">4.1 OpenAI 官方 Vision API 連接 (GPT-4o / GPT-4o-mini)</a></li><li><a href="#sec-4-2" class="doc-link">4.2 本機 LMStudio 視覺大模型連接 (Qwen2.5-VL / Qwen3-VL)</a></li><li><a href="#sec-4-3" class="doc-link">4.3 Ollama 本機模型相容介面連接 (LLaVA / Qwen-VL)</a></li><li><a href="#sec-4-4" class="doc-link">4.4 Azure OpenAI 與自訂相容 Vision 端點</a></li><li><a href="#sec-5" class="doc-link">五、 Web 控制台全頁面、按鈕與 API 介面深度解析</a></li><li><a href="#sec-5-1" class="doc-link">5.1 儀表板 (Dashboard)</a></li><li><a href="#sec-5-2" class="doc-link">5.2 照片庫與照片詳情 (Photos &amp; Photo Detail)</a></li><li><a href="#sec-5-3" class="doc-link">5.3 預篩選排除清單 (Excluded Photos)</a></li><li><a href="#sec-5-4" class="doc-link">5.4 照片分析與 AI 工作佇列 (Photo Analysis &amp; Jobs)</a></li><li><a href="#sec-5-5" class="doc-link">5.5 AI 提供者與成本控制 (Providers &amp; Budgets)</a></li><li><a href="#sec-5-6" class="doc-link">5.6 評分控制中心 (Scoring Lab)</a></li><li><a href="#sec-5-7" class="doc-link">5.7 渲染設定與 A/B 模擬器 (Rendering &amp; Simulator)</a></li><li><a href="#sec-5-8" class="doc-link">5.8 虛擬電子紙與畫面發布 (Virtual Display &amp; Release Publisher)</a></li><li><a href="#sec-5-9" class="doc-link">5.9 裝置管理與能量分析 (Devices &amp; Energy)</a></li><li><a href="#sec-5-10" class="doc-link">5.10 排程工作管理 (Schedules)</a></li><li><a href="#sec-5-11" class="doc-link">5.11 系統維護與決策韌性 (Maintenance &amp; Resilience)</a></li><li><a href="#sec-5-12" class="doc-link">5.12 熱備份與系統診斷 (Backups &amp; Diagnostics)</a></li><li><a href="#sec-6" class="doc-link">六、 DEBUG 模式、除錯診斷工具與測試清單</a></li><li><a href="#sec-6-1" class="doc-link">6.1 伺服器端 DEBUG 日誌模式切換</a></li><li><a href="#sec-6-2" class="doc-link">6.2 ESP32 Serial 串口監控與除錯訊息</a></li><li><a href="#sec-6-3" class="doc-link">6.3 系統日常維護與健康檢查 5 步清單</a></li><li><a href="#sec-7" class="doc-link">七、 4 大核心 JSON 資料格式與逐行註解範例集</a></li><li><a href="#sec-7-1" class="doc-link">7.1 EXIF 照片元資料 JSON 格式 (<code>photo_scores.exif_json</code>)</a></li><li><a href="#sec-7-2" class="doc-link">7.2 送往 Vision LLM 之 Request Input Payload JSON</a></li><li><a href="#sec-7-3" class="doc-link">7.3 Vision LLM 回傳之 Response JSON (<code>ANALYSIS_JSON_SCHEMA</code>)</a></li><li><a href="#sec-7-4" class="doc-link">7.4 ESP32 設備回報狀態 JSON (<code>report_status</code>)</a></li><li><a href="#sec-8" class="doc-link">八、 7 大畫布版型幾何佈局與渲染引擎細節</a></li><li><a href="#sec-9" class="doc-link">九、 10 種 Dithering 抖動演算法與色彩空間演算法數學原理</a></li><li><a href="#sec-10" class="doc-link">十、 SQLite 資料庫 13 張 Table 完全 Schema 規格</a></li><li><a href="#sec-11" class="doc-link">十一、 RESTful API 端點與 Error Code 錯誤碼完全對照表</a></li><li><a href="#sec-12" class="doc-link">十二、 Docker 部署、環境變數與生產環境配置</a></li><li><a href="#sec-12-1" class="doc-link">12.1 <code>docker-compose.yml</code> 逐行中文註解配置檔</a></li><li><a href="#sec-12-2" class="doc-link">12.2 全系統環境變數逐行詳細解析</a></li><li><a href="#sec-12-3" class="doc-link">12.3 初次設定「必須設定」的 5 大項目清單</a></li><li><a href="#sec-12-4" class="doc-link">12.4 進階「設定後會更好」的 8 大系統優化清單</a></li><li><a href="#sec-13" class="doc-link">十三、 系統設定參數 100% 完全對照表</a></li><li><a href="#sec-14" class="doc-link">十四、 全情境故障排除與問題診斷指南</a></li><li><a href="#sec-14-1" class="doc-link">14.1 網路連線與 ESP32 硬體故障排除</a></li><li><a href="#sec-14-2" class="doc-link">14.2 照片庫、磁碟與 NAS 掛載故障排除</a></li><li><a href="#sec-14-3" class="doc-link">14.3 AI 模型分析與 Token 成本故障排除</a></li><li><a href="#sec-14-4" class="doc-link">14.4 影像渲染與墨水屏顯示畫質故障排除</a></li><li><a href="#sec-14-5" class="doc-link">14.5 資料庫與鎖定競爭故障排除</a></li><li><a href="#sec-15" class="doc-link">十五、 文件地圖與 Markdown 索引</a></li><li><a href="#sec-15-1" class="doc-link">15.1 依工作情境找文件</a></li><li><a href="#sec-15-2" class="doc-link">15.2 完整 Markdown 檔案索引</a></li></ul>
+<ul class="doc-list"><li><a href="#sec-1" class="doc-link">一、 系統架構與設計哲學</a></li><li><a href="#sec-2" class="doc-link">二、 硬體選型、電路設計與面板選擇</a></li><li><a href="#sec-2-1" class="doc-link">2.1 三大彩色電子紙面板規格與光學特性</a></li><li><a href="#sec-2-2" class="doc-link">2.2 完整 GPIO 引腳映射與 SPI 時脈規範</a></li><li><a href="#sec-2-3" class="doc-link">2.3 電池功耗模型與 ADC 分壓量測電路</a></li><li><a href="#sec-3" class="doc-link">三、 ESP32 / ESP32-S3 韌體開發與刷機指南</a></li><li><a href="#sec-3-1" class="doc-link">3.1 PlatformIO 與 Arduino IDE 環境配置</a></li><li><a href="#sec-3-2" class="doc-link">3.2 韌體原始碼邏輯與驅動初始化序列</a></li><li><a href="#sec-3-3" class="doc-link">3.3 燒錄、Wi-Fi 配網與自動配對流程</a></li><li><a href="#sec-4" class="doc-link">四、 AI 大語言模型連接與組態指南</a></li><li><a href="#sec-4-1" class="doc-link">4.1 OpenAI 官方 Vision API 連接 (GPT-4o / GPT-4o-mini)</a></li><li><a href="#sec-4-2" class="doc-link">4.2 本機 LMStudio 視覺大模型連接 (Qwen2.5-VL / Qwen3-VL)</a></li><li><a href="#sec-4-3" class="doc-link">4.3 Ollama 本機模型相容介面連接 (LLaVA / Qwen-VL)</a></li><li><a href="#sec-4-4" class="doc-link">4.4 Azure OpenAI 與自訂相容 Vision 端點</a></li><li><a href="#sec-5" class="doc-link">五、 Web 控制台全頁面、按鈕與 API 介面深度解析</a></li><li><a href="#sec-5-1" class="doc-link">5.1 儀表板 (Dashboard)</a></li><li><a href="#sec-5-2" class="doc-link">5.2 照片庫與照片詳情 (Photos &amp; Photo Detail)</a></li><li><a href="#sec-5-3" class="doc-link">5.3 預篩選排除清單 (Excluded Photos)</a></li><li><a href="#sec-5-4" class="doc-link">5.4 照片分析與 AI 工作佇列 (Photo Analysis &amp; Jobs)</a></li><li><a href="#sec-5-5" class="doc-link">5.5 AI 提供者與成本控制 (Providers &amp; Budgets)</a></li><li><a href="#sec-5-6" class="doc-link">5.6 評分控制中心 (Scoring Lab)</a></li><li><a href="#sec-5-7" class="doc-link">5.7 渲染設定與 A/B 模擬器 (Rendering &amp; Simulator)</a></li><li><a href="#sec-5-8" class="doc-link">5.8 虛擬電子紙與畫面發布 (Virtual Display &amp; Release Publisher)</a></li><li><a href="#sec-5-9" class="doc-link">5.9 裝置管理與能量分析 (Devices &amp; Energy)</a></li><li><a href="#sec-5-10" class="doc-link">5.10 排程工作管理 (Schedules)</a></li><li><a href="#sec-5-11" class="doc-link">5.11 系統維護與決策韌性 (Maintenance &amp; Resilience)</a></li><li><a href="#sec-5-12" class="doc-link">5.12 熱備份與系統診斷 (Backups &amp; Diagnostics)</a></li><li><a href="#sec-6" class="doc-link">六、 DEBUG 模式、除錯診斷工具與測試清單</a></li><li><a href="#sec-6-1" class="doc-link">6.1 伺服器端 DEBUG 日誌模式切換</a></li><li><a href="#sec-6-2" class="doc-link">6.2 ESP32 Serial 串口監控與除錯訊息</a></li><li><a href="#sec-6-3" class="doc-link">6.3 系統日常維護與健康檢查 5 步清單</a></li><li><a href="#sec-7" class="doc-link">七、 4 大核心 JSON 資料格式與逐行註解範例集</a></li><li><a href="#sec-7-1" class="doc-link">7.1 EXIF 照片元資料 JSON 格式 (<code>photos.exif_json</code>)</a></li><li><a href="#sec-7-2" class="doc-link">7.2 送往 Vision LLM 之 Request Input Payload JSON</a></li><li><a href="#sec-7-3" class="doc-link">7.3 Vision LLM 回傳之 Response JSON (<code>ANALYSIS_JSON_SCHEMA</code>)</a></li><li><a href="#sec-7-4" class="doc-link">7.4 ESP32 設備回報狀態 JSON (<code>report_status</code>)</a></li><li><a href="#sec-8" class="doc-link">八、 7 大畫布版型幾何佈局與渲染引擎細節</a></li><li><a href="#sec-9" class="doc-link">九、 10 種 Dithering 抖動演算法與色彩空間演算法數學原理</a></li><li><a href="#sec-10" class="doc-link">十、 SQLite 資料庫 13 張 Table 完全 Schema 規格</a></li><li><a href="#sec-11" class="doc-link">十一、 RESTful API 端點與 Error Code 錯誤碼完全對照表</a></li><li><a href="#sec-12" class="doc-link">十二、 Docker 部署、環境變數與生產環境配置</a></li><li><a href="#sec-12-1" class="doc-link">12.1 <code>docker-compose.yml</code> 逐行中文註解配置檔</a></li><li><a href="#sec-12-2" class="doc-link">12.2 全系統環境變數逐行詳細解析</a></li><li><a href="#sec-12-3" class="doc-link">12.3 初次設定「必須設定」的 5 大項目清單</a></li><li><a href="#sec-12-4" class="doc-link">12.4 進階「設定後會更好」的 8 大系統優化清單</a></li><li><a href="#sec-13" class="doc-link">十三、 系統設定參數 100% 完全對照表</a></li><li><a href="#sec-14" class="doc-link">十四、 全情境故障排除與問題診斷指南</a></li><li><a href="#sec-14-1" class="doc-link">14.1 網路連線與 ESP32 硬體故障排除</a></li><li><a href="#sec-14-2" class="doc-link">14.2 照片庫、磁碟與 NAS 掛載故障排除</a></li><li><a href="#sec-14-3" class="doc-link">14.3 AI 模型分析與 Token 成本故障排除</a></li><li><a href="#sec-14-4" class="doc-link">14.4 影像渲染與墨水屏顯示畫質故障排除</a></li><li><a href="#sec-14-5" class="doc-link">14.5 資料庫與鎖定競爭故障排除</a></li><li><a href="#sec-15" class="doc-link">十五、 文件地圖與 Markdown 索引</a></li><li><a href="#sec-15-1" class="doc-link">15.1 依工作情境找文件</a></li><li><a href="#sec-15-2" class="doc-link">15.2 完整 Markdown 檔案索引</a></li></ul>
 <hr class="doc-divider">
 <h2 id="sec-1" class="doc-h2"><span class="h2-anchor-icon">#</span> 一、 系統架構與設計哲學</h2>
 <p class="doc-p">InkTime 採用 Clean Architecture（潔淨架構）設計，將領域邏輯 (Domain)、資料庫與儲存庫 (Repositories)、業務服務 (Services) 以及 Web API/介面 (API & Web) 嚴格解耦：</p>
@@ -1527,8 +1527,8 @@ lib_deps =
 <p class="doc-p">檢查 <code>/diagnostics</code> 頁面上的 CPU, RAM 與 WAL File Size。若 WAL 檔大於 100MB，建議重啟以觸發 Checkpoint。</p>
 <hr class="doc-divider">
 <h2 id="sec-7" class="doc-h2"><span class="h2-anchor-icon">#</span> 七、 4 大核心 JSON 資料格式與逐行註解範例集</h2>
-<h3 id="sec-7-1" class="doc-h3">7.1 EXIF 照片元資料 JSON 格式 (<code>photo_scores.exif_json</code>)</h3>
-<p class="doc-p">照片經過掃描解析後，儲存在 SQLite <code>photo_scores.exif_json</code> 欄位中的完整 JSON 實例（包含逐行詳細註解）：</p>
+<h3 id="sec-7-1" class="doc-h3">7.1 EXIF 照片元資料 JSON 格式 (<code>photos.exif_json</code>)</h3>
+<p class="doc-p">照片經過 Modern 掃描流程解析後，儲存在 SQLite <code>photos.exif_json</code> 欄位中的完整 JSON 實例（包含逐行詳細註解）：</p>
 <div class="code-wrapper">
                     <div class="code-header">
                         <span class="code-lang-tag"><i class="fa-solid fa-code"></i> JSON5</span>
@@ -1735,28 +1735,21 @@ CREATE TABLE users (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 2. 照片分析與評分表
-CREATE TABLE photo_scores (
-    path TEXT PRIMARY KEY,
-    exif_json TEXT,
-    side_caption TEXT,
-    memory_score REAL,
-    beauty_score REAL,
-    technical_score REAL,
-    emotion_score REAL,
-    composite_score REAL,
-    reason TEXT,
+-- 2. Modern 照片索引表（評分版本另存於 photo_analysis）
+CREATE TABLE photos (
+    id TEXT PRIMARY KEY,
+    library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE RESTRICT,
+    relative_path TEXT NOT NULL,
+    sha256 TEXT,
     width INTEGER,
     height INTEGER,
-    orientation INTEGER,
-    exif_gps_lat REAL,
-    exif_gps_lon REAL,
-    exif_city TEXT,
-    is_favorite INTEGER DEFAULT 0,
-    is_excluded INTEGER DEFAULT 0,
-    excluded_reason TEXT,
-    e6_suitability_score REAL,
-    used_at TIMESTAMP
+    status TEXT NOT NULL DEFAULT 'discovered',
+    favorite INTEGER NOT NULL DEFAULT 0,
+    exif_json TEXT,
+    captured_at TEXT,
+    gps_lat REAL,
+    gps_lon REAL,
+    UNIQUE(library_id, relative_path)
 );
 
 -- 3. 發布紀錄表

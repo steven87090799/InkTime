@@ -140,7 +140,7 @@ ExifTool 能提供 MIME、相機、軟體、拍攝時間與 GPS 等中繼資料�
 - 改模型評分規則或綜合權重：到「評分」頁儲存為新版本；下一次分析立即生效，既有照片不會自動重算。
 - 測試照片：在「評分」頁選一張照片並確認付費請求；暫存檔會在請求結束後刪除，Token、費用與延遲仍寫入成本紀錄。
 - 還原：版本歷史的「還原此版本」會建立一個新的目前版本，不會刪除或覆寫任何歷史。
-- 預設值已整理自舊版 `legacy_analyze_photos.py`，新版版本化預設位於 `inktime/app/domain/analysis/scoring.py`。
+- 評分預設位於 `inktime/app/domain/analysis/scoring.py`，並透過版本化規則保存修改歷史。
 - JSON Schema、繁體中文與不得虛構等固定約束不允許從網頁覆寫，位於 `inktime/app/providers/openai_compatible.py`。
 
 完整流程圖與程式入口見 [專案架構與評分流程](../architecture/ARCHITECTURE_ZH_TW.md)。

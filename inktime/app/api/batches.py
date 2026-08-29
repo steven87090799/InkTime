@@ -25,6 +25,19 @@ def _repository():
     return current_app.extensions["inktime_analysis_batch_repository"]
 
 
+def _batch_provider_available() -> bool:
+    usable_ids = {
+        str(item["provider_id"])
+        for item in current_app.extensions["inktime_provider_service"].usable_route_snapshot()
+    }
+    return any(
+        bool(row.get("supports_batch"))
+        and str(row.get("kind") or "").lower() != "openrouter"
+        and str(row.get("id")) in usable_ids
+        for row in current_app.extensions["inktime_provider_repository"].list()
+    )
+
+
 def _payload() -> dict:
     return json_object_payload(request, maximum_bytes=128 * 1024, error_prefix="BATCH-API-001")
 
@@ -103,7 +116,12 @@ def batches_page():
                 str(row["job_id"]), str(g.user["id"]), administrator=False
             )
         ]
-    return render_template("analysis_batches.html", batches=rows, operator_holds=holds)
+    return render_template(
+        "analysis_batches.html",
+        batches=rows,
+        operator_holds=holds,
+        batch_provider_available=_batch_provider_available(),
+    )
 
 
 @bp.post("/analysis/batches/action")
@@ -123,6 +141,7 @@ def batches_page_action():
                     batches=_repository().list(limit=100),
                     operator_holds=_repository().list_operator_holds(limit=100),
                     estimate=result,
+                    batch_provider_available=_batch_provider_available(),
                 )
             _service().submit(created_by=str(g.user["id"]), **_parameters(payload))
         elif action == "cancel":

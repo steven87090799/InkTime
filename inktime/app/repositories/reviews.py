@@ -506,6 +506,8 @@ class ReviewRepository:
             elif next_state == "needs_review":
                 # Pending review is an eligible, explicit selection candidate;
                 # it must never retain the permanent-exclude projection.
+                if "candidate_pool" in payload and not next_pool:
+                    raise ValueError("REVIEW-001 needs_review 必須保留在 candidate_pool")
                 next_pool = 1
             elif next_state == "unreviewed":
                 next_pool = 0

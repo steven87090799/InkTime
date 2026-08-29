@@ -77,6 +77,21 @@ def _setting(app, key, value):
     app.extensions["inktime_settings_repository"].update(key, value, changed_by="test", source_ip="127.0.0.1")
 
 
+def _enable_fake_usable_provider(app) -> str:
+    """Configure a usable route without making any external Provider request."""
+
+    return app.extensions["inktime_provider_repository"].save(
+        {
+            "name": "CI fake Vision Provider",
+            "kind": "openai_compatible",
+            "base_url": "https://provider.invalid/v1",
+            "api_key": "test-provider-secret",
+            "enabled": True,
+        },
+        user_id="test",
+    )
+
+
 def test_excluded_photo_is_shown_and_restore_is_selectable(client, app, tmp_path):
     user_id = create_admin(app)
     login(client)
@@ -101,6 +116,39 @@ def test_manual_restore_does_not_immediately_reexclude(app, tmp_path):
     unchanged = repository.set_exclusion(photo_id, action="reanalyze", changed_by=user_id)
     assert unchanged["exclusion_status"] == "manually_restored"
     assert unchanged["manual_override"] == 1
+
+
+def test_background_reanalysis_preserves_automatic_exclusion(app, tmp_path):
+    actor = create_admin(app)
+    photo_id = _scan(app, tmp_path, screenshot=True)[0]
+    repository = app.extensions["inktime_photo_repository"]
+    before = repository.get_with_path(photo_id)
+
+    after = repository.set_exclusion(photo_id, action="reanalyze", changed_by=actor)
+
+    assert after["eligible"] == before["eligible"] == 0
+    assert after["exclusion_status"] == before["exclusion_status"] == "auto_excluded"
+    assert after["reject_reason"] == before["reject_reason"]
+    assert after["reject_details_json"] == before["reject_details_json"]
+
+
+def test_reapply_rules_never_restores_manual_exclusion(app, tmp_path):
+    actor = create_admin(app)
+    photo_id = _scan(app, tmp_path)[0]
+    repository = app.extensions["inktime_photo_repository"]
+    repository.set_exclusion(photo_id, action="exclude", changed_by=actor)
+    before = repository.get_with_path(photo_id)
+
+    after = repository.set_exclusion(
+        photo_id,
+        action="reanalyze",
+        changed_by=actor,
+        reapply_rules=True,
+    )
+
+    assert after["eligible"] == 0
+    assert after["exclusion_status"] == "manually_excluded"
+    assert after["reject_reason"] == before["reject_reason"]
 
 
 def test_ai_off_does_not_call_provider(app, tmp_path):
@@ -180,6 +228,7 @@ def test_force_ai_calls_provider_when_ai_is_off_and_preserves_exclusion_audit(ap
 def test_force_ai_api_is_admin_exclusion_only_and_creates_fresh_job(client, app, tmp_path):
     create_admin(app)
     login(client)
+    _enable_fake_usable_provider(app)
     excluded_id = _scan(app, tmp_path, screenshot=True)[0]
     root = tmp_path / "eligible-parent"
     root.mkdir()
@@ -209,6 +258,7 @@ def test_force_ai_api_is_admin_exclusion_only_and_creates_fresh_job(client, app,
 def test_manual_ai_idempotency_key_is_namespaced_per_endpoint(client, app, tmp_path):
     create_admin(app)
     login(client)
+    _enable_fake_usable_provider(app)
     excluded_id = _scan(app, tmp_path, screenshot=True)[0]
     _setting(app, "analysis.ai_mode", "off")
     _setting(app, "analysis.execution_mode", "local_with_manual_ai")
@@ -229,6 +279,7 @@ def test_manual_ai_idempotency_key_is_namespaced_per_endpoint(client, app, tmp_p
 def test_manual_ai_idempotency_conflict_has_stable_api_error_code(client, app, tmp_path):
     create_admin(app)
     login(client)
+    _enable_fake_usable_provider(app)
     first_root = tmp_path / "first-excluded"
     second_root = tmp_path / "second-excluded"
     first_root.mkdir()
@@ -247,6 +298,43 @@ def test_manual_ai_idempotency_conflict_has_stable_api_error_code(client, app, t
     assert first.status_code == 201
     assert second.status_code == 409
     assert second.json["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+
+def test_single_excluded_photo_ai_without_provider_is_controlled_and_side_effect_free(
+    client, app, tmp_path
+):
+    create_admin(app)
+    login(client)
+    excluded_id = _scan(app, tmp_path, screenshot=True)[0]
+    _setting(app, "analysis.ai_mode", "off")
+    _setting(app, "analysis.execution_mode", "local_with_manual_ai")
+    with app.extensions["inktime_database"].session() as connection:
+        before_jobs = int(connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0])
+
+    response = client.post(
+        f"/api/v1/photos/{excluded_id}/ai", headers={"X-CSRF-Token": csrf(client)}
+    )
+    batch_response = client.post(
+        "/api/v1/photos/exclusions/ai",
+        json={"photo_ids": [excluded_id]},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    _setting(app, "analysis.execution_mode", "automatic_ai")
+    _setting(app, "analysis.ai_mode", "top_candidates")
+    automatic_response = client.post(
+        "/api/v1/photos/ai/run",
+        json={},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+
+    for rejected in (response, batch_response, automatic_response):
+        assert rejected.status_code == 409
+        assert rejected.json == {
+            "error_code": "VLM-008",
+            "message": "目前沒有已啟用且設定完整的 Vision Provider",
+        }
+    with app.extensions["inktime_database"].session() as connection:
+        assert int(connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]) == before_jobs
 
 
 def test_ai_cache_hit_does_not_call_provider_twice(app, tmp_path, monkeypatch):
@@ -602,6 +690,7 @@ def test_full_json_allows_missing_nonessential_fields_and_travel_bonus_is_indepe
 def test_full_library_confirmation_and_queue_count_only_active_eligible_photos(client, app):
     create_admin(app)
     login(client)
+    _enable_fake_usable_provider(app)
     now = datetime.now(timezone.utc).isoformat()
     library_id = str(uuid4())
     eligible_ids = [str(uuid4()) for _ in range(3)]
@@ -646,6 +735,7 @@ def test_full_library_confirmation_and_queue_count_only_active_eligible_photos(c
 def test_full_library_group_idempotency_is_bounded_replayable_and_conflict_safe(client, app, monkeypatch):
     create_admin(app)
     login(client)
+    _enable_fake_usable_provider(app)
     now = datetime.now(timezone.utc).isoformat()
     library_id = str(uuid4())
     initial_ids = [str(uuid4()), str(uuid4())]
@@ -766,6 +856,7 @@ def test_full_library_group_idempotency_is_bounded_replayable_and_conflict_safe(
 
 def test_full_library_concurrent_request_has_single_enumeration_owner(app, tmp_path, monkeypatch):
     create_admin(app)
+    _enable_fake_usable_provider(app)
     now = datetime.now(timezone.utc).isoformat()
     library_id = str(uuid4())
     photo_id = str(uuid4())
@@ -832,6 +923,7 @@ def test_full_library_concurrent_request_has_single_enumeration_owner(app, tmp_p
 def test_full_library_in_progress_ledger_resumes_partial_group_creation(client, app, monkeypatch):
     create_admin(app)
     login(client)
+    _enable_fake_usable_provider(app)
     now = datetime.now(timezone.utc).isoformat()
     library_id = str(uuid4())
     photo_ids = [str(uuid4()), str(uuid4())]
@@ -881,6 +973,70 @@ def test_full_library_in_progress_ledger_resumes_partial_group_creation(client, 
             "SELECT status FROM idempotency_requests WHERE scope_key LIKE 'idempotency:ai-mode-run/full-library-request:%'"
         ).fetchone()
     assert ledger["status"] == "completed"
+
+
+def test_full_library_without_provider_fails_before_enumeration_or_reservation(
+    client, app, monkeypatch
+):
+    create_admin(app)
+    login(client)
+    _setting(app, "analysis.ai_mode", "full_library")
+    photo_repository = app.extensions["inktime_photo_repository"]
+
+    def unexpected_enumeration(*_args, **_kwargs):
+        raise AssertionError("Provider gate must run before full-library enumeration")
+
+    monkeypatch.setattr(photo_repository, "eligible_photo_batches", unexpected_enumeration)
+    unconfirmed = client.post(
+        "/api/v1/photos/ai/run",
+        json={},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    response = client.post(
+        "/api/v1/photos/ai/run",
+        json={"confirm": True, "batch_by": "folder"},
+        headers={
+            "X-CSRF-Token": csrf(client),
+            "Idempotency-Key": "no-provider-full-library",
+        },
+    )
+
+    assert unconfirmed.status_code == 409
+    assert unconfirmed.json["error_code"] == "VLM-008"
+    assert response.status_code == 409
+    assert response.json == {
+        "error_code": "VLM-008",
+        "message": "目前沒有已啟用且設定完整的 Vision Provider",
+    }
+    with app.extensions["inktime_database"].session() as connection:
+        assert int(connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]) == 0
+        assert int(connection.execute("SELECT COUNT(*) FROM idempotency_requests").fetchone()[0]) == 0
+
+
+def test_concurrent_full_library_without_provider_is_deterministic_and_side_effect_free(app):
+    create_admin(app)
+    _setting(app, "analysis.ai_mode", "full_library")
+
+    def submit_request():
+        with app.test_client() as concurrent_client:
+            login(concurrent_client)
+            return concurrent_client.post(
+                "/api/v1/photos/ai/run",
+                json={"confirm": True, "batch_by": "folder"},
+                headers={
+                    "X-CSRF-Token": csrf(concurrent_client),
+                    "Idempotency-Key": "concurrent-no-provider",
+                },
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(lambda _index: submit_request(), range(2)))
+
+    assert {response.status_code for response in responses} == {409}
+    assert {response.json["error_code"] for response in responses} == {"VLM-008"}
+    with app.extensions["inktime_database"].session() as connection:
+        assert int(connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]) == 0
+        assert int(connection.execute("SELECT COUNT(*) FROM idempotency_requests").fetchone()[0]) == 0
 
 
 def test_thumbnail_cleanup_only_queries_hashes_visible_in_cache(app, tmp_path):
