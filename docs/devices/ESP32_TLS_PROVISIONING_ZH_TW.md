@@ -2,10 +2,13 @@
 
 目前 PhotoPainter 韌體的後端傳輸集中在 [`device_http_transport.h`](../../esp32/ink-display-7C-photo/device_http_transport.h)／[`device_http_transport.cpp`](../../esp32/ink-display-7C-photo/device_http_transport.cpp)。所有 Manifest、Queue、Payload、offline schedule、status、ACK 與檔案下載都必須經過同一個 transport；不得在功能函式內直接呼叫 `HTTPClient.begin(url)`。
 
-## Secure build 預設
+## Transport 預設
 
-- 正式建置 `INKTIME_ALLOW_INSECURE_DEVICE_HTTP=0`。
-- URL 必須是 HTTPS；公開 HTTP 永遠拒絕，HTTPS 沒有有效 trust anchor 也 fail-closed。
+- Waveshare PhotoPainter 預設可直連 literal RFC1918 IPv4 HTTP（`10/8`、`172.16/12`、
+  `192.168/16`），讓家用 Mac／NAS 不需要先配置 TLS Root CA；其他 ESP32 profile 仍以
+  `INKTIME_ALLOW_INSECURE_DEVICE_HTTP=0` 維持 HTTPS-only 預設。
+- 公開 IPv4、hostname、loopback、link-local 與 IPv6 HTTP 永遠拒絕；HTTPS 仍可使用
+  hostname，但沒有有效 trust anchor 時會 fail-closed。
 - 禁止 `WiFiClientSecure::setInsecure()`。
 - `HTTPClient` 停用 redirect follow；3xx 不會被裝置靜默導向其他 host。
 - HTTPS trust anchor 只能來自編譯期 `INKTIME_DEVICE_ROOT_CA` 或已驗證的 Root CA PEM 設定，不會從遠端 response 接受 CA。
@@ -21,26 +24,31 @@
 
 `saveConfig()` 會先驗證 CA policy，再以 generation、CRC、active pointer 與 read-only full-payload read-back 完成 A/B commit。格式或 CA policy 失敗回 `PAIRING-NVS-001`，NVS namespace 開啟失敗回 `PAIRING-NVS-002`，寫入後 full-payload read-back 不一致回 `PAIRING-NVS-003`；pointer／journal decode failure 使用 `PAIRING-NVS-004`／`PAIRING-NVS-005`，移除或 clear 後 read-only 檢查失敗回 `PAIRING-NVS-006`，pointer restore 本身失敗回 `PAIRING-NVS-007`。legacy cleanup 失敗時保留新的 canonical journal／A/B blob，等待下次 retry。任一正式 commit 失敗都不會切換舊 active pointer、清除 portal 或重啟裝置。空字串是正式值，會覆蓋舊 password、CA 或 backend hostport；Device Secret／Legacy credential 不由新配網表單重新輸入，Factory Reset 才會清除。
 
-## 受控 LAN development build
+## 受控 LAN HTTP
 
-只有明確編譯 `INKTIME_ALLOW_INSECURE_DEVICE_HTTP=1` 才允許 HTTP；預設只接受 literal RFC1918、loopback、link-local IPv4 或 IPv6 ULA/link-local 位址，hostname 只有在額外編譯旗標 `INKTIME_ALLOW_INSECURE_DEVICE_HTTP_HOSTNAMES=1` 時才放行。這不是正式部署替代方案：
+PhotoPainter 的一般建置已啟用嚴格 RFC1918 literal IPv4 HTTP；其他 profile 只有明確編譯
+`INKTIME_ALLOW_INSECURE_DEVICE_HTTP=1` 才啟用相同政策。這不是公開 Internet 部署替代方案：
 
 ```text
 -DINKTIME_ALLOW_INSECURE_DEVICE_HTTP=1
-# trusted-LAN backward-compatibility only; carries DNS rebinding／spoofing risk
--DINKTIME_ALLOW_INSECURE_DEVICE_HTTP_HOSTNAMES=1
 ```
 
-LAN build 的設定頁會顯示沒有 TLS 保護的警告。正式 production compose／ESP32 secure build 不應依賴這個旗標；CI 的 LAN smoke 只驗證隔離測試拓撲，不能作為真實網路安全證據。
+HTTP hostname 沒有相容開關，也不會因 DNS 結果落在私網而放行；請直接輸入 Mac／NAS 的
+RFC1918 IP。Production HTTPS、CA 驗證與 secure cookie 仍是跨網段／公開部署的必要路徑。
+CI 的 LAN contract 只驗證程式與隔離測試拓撲，不能作為真實網路安全證據。
 
 ## 首次配對流程
 
 當裝置沒有有效 Wi-Fi 設定時，`startConfigPortal()`：
 
-1. 產生隨機 AP SSID（`InkTime-<裝置短 ID>`）與隨機 24 字元十六進位 AP password；密碼不由 MAC、chip ID 或 SSID 推導。
+1. 產生 AP SSID（`InkTime-<裝置短 ID>`）與每個 AP session 重新產生的 8 位數字密碼；
+   密碼使用 ESP32 hardware random source，不由 MAC、chip ID、SSID 或 counter 推導。
 2. 啟動 AP 與 `http://192.168.4.1/` 設定頁；配對授權 secret、nonce、嘗試次數與五分鐘 expiry 仍由韌體限制。
 3. 電子紙（PhotoPainter 或 GxEPD2）會顯示 `INKTIME PAIRING`、Wi-Fi SSID、AP password、setup URL 與短效 pairing code，因此不必依賴序列埠才能完成配網。
-4. Web 表單可保存 Wi-Fi、HTTPS backend URL、Root CA PEM、時區、刷新時間與 180° 設定；新自製裝置的 Device Secret 由核准後 claim 一次交付，保存前會再次驗證 URL／CA，且 NVS write/read-back 必須成功。
+4. 一般畫面只保存 Wi-Fi、密碼、InkTime Server 與旋轉；`192.168.0.50:8765` 會自動
+   normalize 為 `http://192.168.0.50:8765`。備援時間／時區與 HTTPS Root CA 收在進階
+   設定，且 Root CA 只在 Server 使用 `https://` 時顯示。新自製裝置的 Device Secret
+   仍由核准後 claim 一次交付，保存前會再次驗證 URL／CA，且 NVS write/read-back 必須成功。
 5. 成功保存後停止 portal、清除 pairing secret／nonce 並重啟；超時或失敗嘗試達上限時進入 bounded sleep。
 
 AP password 是短期配網資訊，不是後端 credential。使用者完成設定後應讓 AP portal 結束，並在管理頁確認 pairing state、credential version 與 delivery mode。

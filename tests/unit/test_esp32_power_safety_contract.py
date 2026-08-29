@@ -197,6 +197,12 @@ def test_sleep_domains_and_tg28_epd_rail_remain_narrow_and_fail_closed():
         "PowerSourceState::Usb"
     )
     assert "PowerSourceState::Battery" in measurements
+    assert "kTg28Status2" in measurements
+    assert "status2 >> 5U" in measurements
+    assert "ChargeState::ConstantCurrent" in measurements
+    assert "ChargeState::ConstantVoltage" in measurements
+    assert "ChargeState::Done" in measurements
+    assert "ChargeState::NotCharging" in measurements
     assert "return powerSourceState_ == PowerSourceState::Usb;" in pmic
     assert "virtual PowerSourceState powerSourceState() const = 0;" in POWER_MANAGER.read_text(
         encoding="utf-8"
@@ -369,6 +375,93 @@ def test_max_awake_guard_is_independent_bounded_and_usb_exempt():
     assert "armMaxAwakeSupervisor();" in portal
 
 
+def test_pairing_portal_polls_active_low_key_without_driving_reserved_pins():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    portal = _between(
+        firmware,
+        "void startConfigPortal()",
+        "bool runUsbServiceMode(bool explicitRecoveryRequested)",
+    )
+    assert "digitalRead(kBoardConfig.buttons.user) == LOW" in portal
+    assert "inktime::kUserButtonDebounceMs" in portal
+    assert "inktime::kUserButtonDoubleClickWindowMs" in portal
+    assert "portalButtonClickArmed" in portal
+    assert "pairing_key_refresh_started" in portal
+    assert "pairing_key_refresh_ready" in portal
+    assert '"KEY REFRESH %lu"' in portal
+    assert "photoPainter.displayPairingScreen(" in portal
+    assert "photoPainter.displayPowerStatusScreen()" in portal
+    assert "power_status_refresh_ready" in portal
+    assert "enterMs = millis()" not in portal[portal.index("for (;;)") :]
+    assert "pinMode(kBoardConfig.buttons.user, OUTPUT)" not in portal
+    assert "digitalWrite(kBoardConfig.buttons.user" not in portal
+    assert "kBoardConfig.buttons.boot" not in portal
+    assert "kBoardConfig.buttons.power" not in portal
+
+
+def test_key_double_click_power_page_is_read_only_and_keeps_boot_reserved():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    support = SUPPORT.read_text(encoding="utf-8")
+    wake_core = WAKE_CORE.read_text(encoding="utf-8")
+    begin = _between(
+        support,
+        "bool PhotoPainterSupport::begin()",
+        "bool PhotoPainterSupport::loadCachedFrame",
+    )
+    power_page = _between(
+        support,
+        "bool PhotoPainterSupport::displayPowerStatusScreen()",
+        "bool PhotoPainterSupport::writeRtc",
+    )
+    setup = _between(firmware, "void setup()", "void loop()")
+    assert "kUserButtonDoubleClickWindowMs = 450U" in wake_core
+    assert "kUserButtonDebounceMs = 35U" in wake_core
+    assert "waitForSecondUserButtonClick(board_.buttons.user)" in begin
+    assert "batteryStatusRequested_" in begin
+    assert "photoPainter.batteryStatusRequested()" in setup
+    assert "photoPainter.displayPowerStatusScreen()" in setup
+    assert "delay(kPowerStatusDwellMs);" in setup
+    assert "restoreLastSuccessfulPhoto()" in setup
+    assert "power_status_restore_ready" in setup
+    assert "power_status_restore_fallback" in setup
+    assert "BATTERY: " in power_page
+    assert "VOLTAGE: " in power_page
+    assert "CHARGING: " in power_page
+    assert "STATE: " in power_page
+    assert "writeRegisters(" not in power_page
+    assert "board_.buttons.boot" not in begin
+    assert "board_.buttons.power" not in begin
+
+
+def test_power_page_restore_uses_only_verified_local_last_successful_frame():
+    firmware = FIRMWARE.read_text(encoding="utf-8")
+    restore = _between(
+        firmware,
+        "static bool restoreLastSuccessfulPhoto()",
+        "static bool shouldSkipCurrentDisplay",
+    )
+    assert "loadDisplayRecord()" in restore
+    assert "stored.valid" in restore and "stored.succeeded" in restore
+    assert "stored.boardProfile != String(kBoardConfig.name)" in restore
+    assert "photoPainter.loadFormalFrame(" in restore
+    assert "photoPainter.loadCachedFrame(" in restore
+    assert "inktime::sourceHash32(stored.sha256.c_str())" in restore
+    assert "photoPainter.displayFrame(" in restore
+    assert "WiFi" not in restore
+    assert "HTTP" not in restore
+    assert "writeRegisters(" not in restore
+
+    portal = _between(
+        firmware,
+        "void startConfigPortal()",
+        "bool runUsbServiceMode(bool explicitRecoveryRequested)",
+    )
+    assert "portalPowerPageVisible" in portal
+    assert "portalPowerRestoreAtMs = millis() + kPowerStatusDwellMs" in portal
+    assert "power_status_restore_ready" in portal
+    assert '"KEY READY"' in portal
+
+
 def test_explicit_recovery_precedes_normal_display_network_shutdown():
     firmware = FIRMWARE.read_text(encoding="utf-8")
     setup = _between(firmware, "void setup()", "void loop()")
@@ -445,12 +538,34 @@ def test_unexpected_loop_entry_sleeps_without_network_or_mutation():
 def test_existing_offline_timer_prefetch_and_key_actions_remain_routed():
     firmware = FIRMWARE.read_text(encoding="utf-8")
     setup = _between(firmware, "void setup()", "void loop()")
+    offline_cycle = _between(
+        firmware,
+        "static void runOfflineLocalCycle(bool selectNext = false)",
+        "void setup()",
+    )
+    assert offline_cycle.index("stopNetworkBeforeDisplay();") < offline_cycle.index(
+        "photoPainter.readRtc(rtcEpoch)"
+    )
+    for forbidden in (
+        "connectWiFi(",
+        "syncTime(",
+        "ensureWakeHttpSession(",
+        "downloadDailyPhotoBin(",
+    ):
+        assert forbidden not in offline_cycle
     local_key = _between(
         setup,
         "&& photoPainter.wokeFromUserButton()",
         "runOfflineLocalCycle(true);",
     )
     assert "&& !photoPainter.forceNetworkRefresh()" in local_key
+    for forbidden in (
+        "connectWiFi(",
+        "syncTime(",
+        "ensureWakeHttpSession(",
+        "downloadDailyPhotoBin(",
+    ):
+        assert forbidden not in local_key
     for marker in (
         'g_cfg.button_wake_action == "local_next"',
         "runOfflineLocalCycle(true);",

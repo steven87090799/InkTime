@@ -139,6 +139,20 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   1.2 秒但未滿 4 秒要求 bounded forced network refresh；刻意持續至少 4 秒才授權
   recovery/service。timer wake 仍獨立啟用，Enhanced timer wake 的本地排程只讀正式
   Frame，不呼叫 Wi-Fi、NTP 或 HTTP。睡前等待按鍵釋放以免重複喚醒。
+- 未完成配對而停留在五分鐘 Portal 時，韌體也會以 active-low、35 ms debounce 持續
+  讀取 GPIO 4；單擊會重畫同一組 SSID／AP 密碼／設定網址，頁尾以 `KEY REFRESH n`
+  顯示本次動作；450 ms 內雙擊則顯示 TG28 唯讀取得的電量百分比、電池電壓、USB
+  供電、是否充電與充電階段。從 deep sleep 由第一次 KEY 喚醒後，在同一時間窗第二次
+  點擊也會直接顯示電源頁。電源頁完成刷新後保留 30 秒，再從 SD 讀取並驗證最後成功
+  Frame，無網路刷回原照片；若本地 Frame 不存在或完整性失敗，才回到正常網路刷新。
+  未配對時則恢復同一組 Portal 配對頁。因 E6 每次 full refresh 約 30 秒，從雙擊到原圖
+  完全恢復通常約 90 秒；這段是使用者明確要求的有界醒著時間，仍受 10 分鐘 max-awake
+  保護。按鍵不會重啟 SoftAP、輪替密碼、重設 Portal 起始時間、清除 NVS 或驅動
+  GPIO 0／5／21；尚未配對時沒有正式照片可切換，完成配對後才恢復下一張／網路更新流程。
+- 原廠以 BOOT 雙擊顯示電池頁；InkTime 為完整保留 GPIO 0 的下載模式，不在 runtime
+  取樣 BOOT，而將相同唯讀功能放在 KEY1 雙擊。TG28 `REG00`、`REG01`、`REG34/35` 與
+  `REGA4` 只讀取，不照抄原廠對 `REG17` 的 fuel-gauge 寫入，也不以 AXP2101 identity
+  判斷 Rev2.0。電量百分比仍是 PMIC 估算值，不是容量校準證據。
 - GPIO 5 完全不作一般輸出；GPIO 0 不取樣、不驅動，完整保留原廠 BOOT／下載用途。
 - 開機後 PWR 紅燈維持亮起，電子紙傳輸期間 ACT 綠燈亮起；進入 deep sleep 前兩燈
   都會熄滅。燈號是狀態提示，不取代 BUSY cycle 與實際面板變化的刷新判定。
@@ -156,12 +170,11 @@ Stock 原始碼使用相對秒數 timer，不足以證明支援 InkTime 的任�
   max-awake supervisor，且設定服務最多五分鐘。
 - Manifest 必須是有限 Content-Length 的 JSON；圖片必須是精確長度的
   `application/octet-stream` 且 SHA-256 相符。
-- Backend transport 預設只接受有 compile-time 或 AP portal provisioning trust anchor
-  的 HTTPS；沒有 CA 會在建立連線前明確拒絕，不會進入 Arduino core 的 insecure TLS
-  路徑，也沒有 `setInsecure()` fallback。HTTP 只有在明確編譯
-  `INKTIME_ALLOW_INSECURE_DEVICE_HTTP=1` 且目標是私有 LAN host 時才允許；跨網路應
-  使用 HTTPS、VPN／IoT VLAN 與可驗證的 CA。首次配網的 AP SSID、隨機密碼與 URL 會
-  顯示在 portal 與 PhotoPainter 配對畫面，不會把密碼寫進 Serial log。
+- Backend transport 同時支援嚴格的 RFC1918 literal IPv4 HTTP 與有 compile-time／Portal
+  trust anchor 的 HTTPS；公開 IP、hostname、loopback、link-local、IPv6 HTTP 都拒絕。
+  HTTPS 沒有 CA 會在建立連線前明確拒絕，不會進入 Arduino core 的 insecure TLS 路徑，
+  也沒有 `setInsecure()` fallback。首次配網的 8 位隨機數字 AP 密碼會一致用於 SoftAP、
+  Portal 與 PhotoPainter 配對畫面，不會寫進 Serial log。
 - CA provisioning 的 build、portal 欄位、錯誤碼與人工驗收步驟見
   [ESP32 TLS／配網信任根配置](ESP32_TLS_PROVISIONING_ZH_TW.md)。
 - 韌體目前沒有 MQTT／Home Assistant client，因此沒有 Topic、Discovery entity 或

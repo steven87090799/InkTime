@@ -7,6 +7,8 @@ namespace inktime {
 constexpr uint32_t kForceNetworkRefreshHoldMs = 1200U;
 constexpr uint32_t kRecoveryServiceHoldMs = 4000U;
 constexpr uint32_t kUserButtonHoldMeasurementLimitMs = 5000U;
+constexpr uint32_t kUserButtonDoubleClickWindowMs = 450U;
+constexpr uint32_t kUserButtonDebounceMs = 35U;
 
 static_assert(kRecoveryServiceHoldMs < kUserButtonHoldMeasurementLimitMs,
               "PhotoPainter recovery hold must be reachable");
