@@ -20,7 +20,7 @@ from tests.unit.test_analysis_schema import valid_result
 def _axes():
     return ModelBenchmarkService.build_axes(
         provider="offline-synthetic",
-        models=["offline-model"],
+        models=["offline/offline-model"],
         image_sides=[512],
         prompt_profiles=["default"],
         variants=[False],

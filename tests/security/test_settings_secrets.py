@@ -23,6 +23,94 @@ def test_provider_secret_is_encrypted_and_api_returns_only_mask(client, app):
     assert api_key not in str(provider)
 
 
+def test_provider_model_is_saved_rendered_and_used_by_contract_test(client, app, monkeypatch):
+    create_admin(app)
+    login(client)
+    response = client.post(
+        "/api/v1/providers",
+        json={
+            "name": "OpenRouter Free",
+            "kind": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "model": " openrouter/free ",
+            "api_key": "test-key",
+        },
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert response.status_code == 201
+    provider_id = response.json["id"]
+    provider = app.extensions["inktime_provider_repository"].get(provider_id)
+    assert provider["model"] == "openrouter/free"
+
+    captured = {}
+
+    def fake_contract(_provider, *, level, model):
+        captured.update(level=level, model=model)
+        return {"ok": True, "message": "ok"}
+
+    monkeypatch.setattr("inktime.app.api.settings.run_provider_contract", fake_contract)
+    tested = client.post(
+        f"/api/v1/providers/{provider_id}/test",
+        json={"level": 2},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+    assert tested.status_code == 200
+    assert captured == {"level": 2, "model": "openrouter/free"}
+
+    page = client.get("/providers")
+    body = page.get_data(as_text=True)
+    assert 'name="model"' in body
+    assert "openrouter/free" in body
+
+
+def test_openrouter_short_model_is_rejected_before_save_or_contract_network_call(
+    client, app, monkeypatch
+):
+    create_admin(app)
+    login(client)
+    headers = {"X-CSRF-Token": csrf(client)}
+    rejected = client.post(
+        "/api/v1/providers",
+        json={
+            "name": "Bad OpenRouter",
+            "kind": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "model": "gpt-4o",
+            "api_key": "test-key",
+        },
+        headers=headers,
+    )
+    assert rejected.status_code == 400
+    assert rejected.json["error_code"] == "SET-003"
+    assert "OpenRouter 模型 ID" in rejected.json["message"]
+
+    provider_id = app.extensions["inktime_provider_repository"].save(
+        {
+            "name": "Legacy OpenRouter",
+            "kind": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "test-key",
+        },
+        user_id="test",
+    )
+    called = False
+
+    def fake_contract(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return {"ok": True, "message": "unexpected"}
+
+    monkeypatch.setattr("inktime.app.api.settings.run_provider_contract", fake_contract)
+    tested = client.post(
+        f"/api/v1/providers/{provider_id}/test",
+        json={"level": 2},
+        headers=headers,
+    )
+    assert tested.status_code == 400
+    assert "OpenRouter 模型 ID" in tested.json["message"]
+    assert called is False
+
+
 def test_setting_change_is_audited_without_manual_file_edit(client, app):
     create_admin(app)
     login(client)

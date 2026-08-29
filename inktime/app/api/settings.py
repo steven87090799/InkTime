@@ -27,6 +27,7 @@ from inktime.app.providers.config import (
     effective_provider_kind,
     normalize_options,
     validate_base_url,
+    validate_model_id,
 )
 from inktime.app.repositories.settings import (
     RANKING_WEIGHT_KEYS,
@@ -537,8 +538,24 @@ def import_settings():
 @bp.get("/providers")
 @login_required
 def providers_page():
+    providers = current_app.extensions["inktime_provider_repository"].list()
+    analysis_model = str(
+        current_app.extensions["inktime_settings_repository"].get("model.analysis_model", "gpt-4o")
+    ).strip()
+    for provider in providers:
+        effective_model = str(provider.get("model") or "").strip() or analysis_model
+        provider["effective_model"] = effective_model
+        try:
+            validate_model_id(
+                str(provider.get("kind") or "openai_compatible"),
+                effective_model,
+                base_url=str(provider.get("base_url") or ""),
+                required=True,
+            )
+        except ValueError as exc:
+            provider["model_validation_error"] = str(exc)
     return render_template(
-        "providers.html", providers=current_app.extensions["inktime_provider_repository"].list()
+        "providers.html", providers=providers
     )
 
 
@@ -554,6 +571,7 @@ def save_provider():
                 "name",
                 "kind",
                 "base_url",
+                "model",
                 "api_key",
                 "enabled",
                 "priority",
@@ -574,6 +592,8 @@ def save_provider():
     for field in ("id", "name", "kind", "base_url", "api_key"):
         if field in payload and type(payload[field]) is not str:
             abort(400, description=f"SET-003 {field} 必須是字串")
+    if "model" in payload and payload["model"] is not None and type(payload["model"]) is not str:
+        abort(400, description="SET-003 model 必須是字串")
     if not payload.get("base_url") or not payload.get("name"):
         abort(400, description="SET-003 Provider 名稱與 URL 不可空白")
     if type(payload["name"]) is not str or not payload["name"].strip() or len(payload["name"].strip()) > 120:
@@ -587,6 +607,9 @@ def save_provider():
         payload["options"] = options
         payload["kind"] = kind
         payload["base_url"] = validate_base_url(kind, str(payload["base_url"]), options)
+        if "model" in payload:
+            model = validate_model_id(kind, payload.get("model"), base_url=payload["base_url"])
+            payload["model"] = model or None
         payload["enabled"] = json_bool(payload, "enabled", default=True, error_prefix="SET-003")
         payload["supports_vision"] = json_bool(payload, "supports_vision", default=True, error_prefix="SET-003")
         payload["supports_batch"] = json_bool(payload, "supports_batch", default=False, error_prefix="SET-003")
@@ -659,8 +682,15 @@ def test_provider(provider_id: str):
         ).reasoning,
     )
     try:
-        model = str(
+        configured_model = str(config.get("model") or "").strip()
+        model = configured_model or str(
             current_app.extensions["inktime_settings_repository"].get("model.analysis_model", "gpt-4o")
+        ).strip()
+        model = validate_model_id(
+            kind,
+            model,
+            base_url=str(config.get("base_url") or ""),
+            required=True,
         )
         result = run_provider_contract(provider, level=level, model=model)
     except (ValueError, KeyError) as exc:

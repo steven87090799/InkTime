@@ -32,7 +32,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 51
+    assert CURRENT_SCHEMA_VERSION == 52
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -75,6 +75,9 @@ def test_fresh_database_is_migrated(tmp_path):
         job_columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
         }
+        provider_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(providers)").fetchall()
+        }
         pairing_tables = {
             row["name"]
             for row in connection.execute(
@@ -97,6 +100,7 @@ def test_fresh_database_is_migrated(tmp_path):
         }
     assert {"normalized_username", "session_version", "disabled_at"} <= columns
     assert "request_fingerprint" in job_columns
+    assert "model" in provider_columns
     assert {"current_displayed_at", "last_known_good_displayed_at"} <= queue_columns
     assert {
         "auth_mode",

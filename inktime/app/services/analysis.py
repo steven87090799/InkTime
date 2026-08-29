@@ -925,6 +925,16 @@ class PhotoAnalysisService:
                 raise ValueError("VLM-005 所有 Provider 暫時不可用或已達 Rate Limit")
             selected_channel = candidates[0]
             selected_provider = selected_channel.provider
+            provider_model = str(getattr(selected_channel, "model", "") or "").strip()
+            if provider_model:
+                # A Provider-specific model is authoritative for both the
+                # image request and its text-only repair.  Otherwise a
+                # frozen global repair_model could silently send a different
+                # (and unsupported) model to the configured Provider.
+                model = provider_model
+                if repair_policy is not None:
+                    repair_policy = dict(repair_policy)
+                    repair_policy["model"] = provider_model
         actual_provider = str(getattr(selected_provider, "provider_id", selected_provider.name))
 
         fingerprint_material = {

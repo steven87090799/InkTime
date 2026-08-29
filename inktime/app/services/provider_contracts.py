@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from PIL import Image, ImageDraw, ImageFont
 
+from inktime.app.core.ai_trace_payloads import bounded_text
 from inktime.app.domain.analysis import REPAIR_TOKEN_CAP
 from inktime.app.domain.analysis.schema import AnalysisValidationError, validate_analysis_result
 from inktime.app.providers.base import ProviderResponse, VisionAttemptState
@@ -86,6 +87,53 @@ def _privacy_policy_snapshot(provider: Any) -> dict[str, Any]:
     }
 
 
+def _provider_error_snapshot(exc: Exception) -> dict[str, Any] | None:
+    """Expose only bounded, redacted fields that are useful to an administrator."""
+
+    response_info = getattr(exc, "response_info", {})
+    response_info = response_info if isinstance(response_info, dict) else {}
+    values = {
+        "error_code": getattr(exc, "code", None),
+        "http_status": getattr(exc, "http_status", None),
+        "provider_error_code": (
+            getattr(exc, "provider_error_code", None) or response_info.get("provider_error_code")
+        ),
+        "provider_error_message": response_info.get("provider_error_message"),
+        "request_id": getattr(exc, "request_id", None) or response_info.get("request_id"),
+    }
+    result: dict[str, Any] = {}
+    for key, value in values.items():
+        if value is None or value == "":
+            continue
+        if key == "http_status":
+            try:
+                result[key] = int(value)
+            except (TypeError, ValueError):
+                continue
+        else:
+            result[key] = bounded_text(
+                value,
+                maximum_bytes=500 if key == "provider_error_message" else 128,
+            )
+    return result or None
+
+
+def _provider_failure_message(prefix: str, exc: Exception) -> tuple[str, dict[str, Any] | None]:
+    snapshot = _provider_error_snapshot(exc)
+    if snapshot is None:
+        return f"{prefix}: {exc.__class__.__name__}", None
+    details = []
+    if snapshot.get("error_code"):
+        details.append(str(snapshot["error_code"]))
+    if snapshot.get("http_status"):
+        details.append(f"HTTP {snapshot['http_status']}")
+    if snapshot.get("provider_error_code"):
+        details.append(str(snapshot["provider_error_code"]))
+    if snapshot.get("provider_error_message"):
+        details.append(str(snapshot["provider_error_message"]))
+    return f"{prefix}: {' / '.join(details) or exc.__class__.__name__}", snapshot
+
+
 def _checks(provider: Any, *, level: int, ok: bool, schema_valid: bool | None, usage: dict[str, Any] | None) -> dict[str, Any]:
     return {
         "connectivity": "pass" if (level == 1 and ok) or level >= 2 and usage is not None else "fail",
@@ -113,6 +161,7 @@ def _safe_failure(
     repair_attempted: bool = False,
     repair_completed: bool = False,
     usage: dict[str, Any] | None = None,
+    provider_error: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "level": level,
@@ -133,6 +182,8 @@ def _safe_failure(
         "schema_valid": False,
         "usage": usage,
     }
+    if provider_error is not None:
+        result["provider_error"] = provider_error
     result["checks"] = _checks(provider, level=level, ok=False, schema_valid=False, usage=usage)
     return result
 
@@ -166,13 +217,15 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
     if level == 1:
         try:
             valid, _ = provider.validate_config()
-        except Exception as exc:  # Keep transport details out of the API result.
+        except Exception as exc:
+            message, provider_error = _provider_failure_message("Level 1 connection failed", exc)
             return _safe_failure(
                 provider,
                 level,
-                f"Level 1 connection failed: {exc.__class__.__name__}",
+                message,
                 network_request_attempts=1,
                 network_responses=0,
+                provider_error=provider_error,
             )
         result: dict[str, Any] = {
             "level": level,
@@ -226,15 +279,19 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
             network_responses = 1
             vision_completed = True
         except Exception as exc:
+            message, provider_error = _provider_failure_message(
+                f"Level {level} synthetic Vision failed", exc
+            )
             return _safe_failure(
                 provider,
                 level,
-                f"Level {level} synthetic Vision failed: {exc.__class__.__name__}",
+                message,
                 vision_requests=vision_requests,
                 network_request_attempts=network_request_attempts,
                 network_responses=network_responses,
                 vision_started=vision_started,
                 vision_completed=vision_completed,
+                provider_error=provider_error,
             )
 
         usage = _usage_snapshot(provider, model, response)
@@ -316,14 +373,17 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
                 schema_valid = True
             except AnalysisValidationError:
                 schema_valid = False
-            except Exception:
+            except Exception as exc:
                 if usage is not None:
                     usage["unknown_cost_count"] += 1
                     usage["cost_source"] = "unknown"
+                message, provider_error = _provider_failure_message(
+                    "Level 3 text-only repair failed", exc
+                )
                 return _safe_failure(
                     provider,
                     level,
-                    "Level 3 text-only repair failed",
+                    message,
                     vision_requests=vision_requests,
                     repair_requests=repair_requests,
                     repair_attempts=repair_attempts,
@@ -335,6 +395,7 @@ def run_provider_contract(provider: Any, *, level: int, model: str) -> dict[str,
                     repair_attempted=repair_attempted,
                     repair_completed=repair_completed,
                     usage=usage,
+                    provider_error=provider_error,
                 )
 
         result = {

@@ -18,9 +18,11 @@ class StubProvider(VisionProvider):
         self.fails = fails
         self.calls = 0
         self.tokens = tokens
+        self.last_kwargs = {}
 
     def analyze(self, **kwargs):
         self.calls += 1
+        self.last_kwargs = dict(kwargs)
         if self.fails:
             raise RuntimeError("故障")
         return ProviderResponse("{}", Usage(input_tokens=self.tokens))
@@ -42,6 +44,18 @@ class StubProvider(VisionProvider):
 
     def validate_config(self):
         return True, "ok"
+
+
+def test_provider_channel_model_overrides_global_model_for_vision_and_repair():
+    provider = StubProvider("openrouter")
+    router = FailoverVisionProvider([ProviderChannel(provider, model="openrouter/free")])
+
+    router.analyze(image_path=Path("photo.jpg"), model="gpt-4o", detail="high", stage="single")
+    assert provider.last_kwargs["model"] == "openrouter/free"
+
+    router._local.channel = router.channels[0]
+    router.repair_json(invalid_content="{}", validation_error="invalid", model="gpt-4o-mini")
+    assert provider.last_kwargs["model"] == "openrouter/free"
 
 
 class TransportErrorVisionSession:
@@ -488,3 +502,57 @@ def test_provider_config_revision_ignores_secret_rotation_and_rejects_behavior_c
         connection.execute("DELETE FROM providers WHERE id=?", (provider_id,))
     with pytest.raises(ValueError, match="已刪除"):
         service.build_router(snapshot)
+
+
+def test_provider_service_freezes_provider_model_and_invalidates_model_changes(app):
+    repository = app.extensions["inktime_provider_repository"]
+    service = app.extensions["inktime_provider_service"]
+    provider_id = repository.save(
+        {
+            "name": "openrouter-free",
+            "base_url": "https://openrouter.ai/api/v1",
+            "model": "openrouter/free",
+            "api_key": "test-secret",
+            "enabled": True,
+        },
+        user_id="test",
+    )
+
+    snapshot = service.route_snapshot()
+    assert snapshot[0]["model"] == "openrouter/free"
+    router = service.build_router(snapshot)
+    assert router is not None
+    assert router.channels[0].model == "openrouter/free"
+
+    repository.save(
+        {
+            "id": provider_id,
+            "name": "openrouter-free",
+            "base_url": "https://openrouter.ai/api/v1",
+            "model": "openai/gpt-4o",
+            "api_key": "",
+            "enabled": True,
+        },
+        user_id="test",
+    )
+    with pytest.raises(ValueError, match="設定已變更"):
+        service.build_router(snapshot)
+
+
+def test_usable_route_excludes_openrouter_with_short_global_model(app):
+    repository = app.extensions["inktime_provider_repository"]
+    service = app.extensions["inktime_provider_service"]
+    provider_id = repository.save(
+        {
+            "name": "legacy-openrouter",
+            "kind": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "test-secret",
+            "enabled": True,
+        },
+        user_id="test",
+    )
+
+    assert provider_id in {item["provider_id"] for item in service.route_snapshot()}
+    assert provider_id not in {item["provider_id"] for item in service.usable_route_snapshot()}
+    assert service.build_router(service.usable_route_snapshot()) is None

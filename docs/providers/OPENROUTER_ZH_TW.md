@@ -10,12 +10,15 @@
 |---|---|---|
 | 類型 | `OpenRouter（正式 API）` | 這個 kind 會啟用 routing、reasoning、usage cost 與 Batch hard guard。 |
 | Base URL | `https://openrouter.ai/api/v1` | 必須是 HTTPS 根路徑；不要填 `/chat/completions`、query 或 fragment。 |
+| 預設模型 ID | `openrouter/free` 或完整模型 ID | 留白沿用系統模型設定；填寫後該 Provider 的 Vision／text-only repair 都使用此模型。 |
 | API Key | `sk-or-v1-...` | 只進入加密 Secret Store；不會放入分析計畫、Log 或診斷包。 |
 | Batch | 不勾選 | OpenRouter 在 InkTime 內只走即時 Chat Completions，Batch API 會 server-side 拒絕。 |
 | 嚴格 JSON Schema | 依所選模型能力 | 只有模型／路由明確支援 structured outputs 才勾選。 |
 | 最大並行 | 先 `1` | 小批次驗收通過後再提高，並同步設定 RPM／TPM 保守上限。 |
 
-模型 ID 必須保留完整 provider 前綴，例如 `openai/...`、`google/...` 或 Models 頁列出的其他完整 ID。InkTime 的 low／analysis／repair model 是設定中的模型名稱，不會替你把不同 Provider 的短名稱轉換成 OpenRouter ID。
+模型 ID 必須保留完整 provider 前綴，例如 `openai/...`、`google/...`、`openrouter/free` 或 Models 頁列出的其他完整 ID。在 `/providers` 的 Provider 編輯視窗可直接輸入，或從建議值選擇「預設模型 ID」；該 Provider 的 Vision 與 text-only repair 都會使用它。留白會沿用系統 analysis model，但該值仍必須是完整 OpenRouter ID。InkTime 不會替短名稱自動補前綴；像 `gpt-4o` 這種短名稱會在產生工作、Provider 測試或外部請求前被拒絕，不會先送出可能付費的錯誤請求。
+
+若 OpenRouter 回傳 HTTP 400，Provider Contract 測試會顯示經過遮蔽與長度限制的錯誤代碼、HTTP 狀態和 provider message，方便判斷模型或請求格式問題；API Key、圖片資料與完整原始回應不會出現在畫面上。
 
 ## `options` JSON
 

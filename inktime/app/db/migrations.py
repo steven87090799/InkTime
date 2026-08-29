@@ -2158,6 +2158,13 @@ MIGRATIONS = (
             "INSERT INTO data_retention_policies(data_type,enabled,retention_days,maximum_items,maximum_bytes,minimum_items_to_keep,cleanup_batch_size,dry_run,updated_at) VALUES ('ai_trace',1,30,NULL,NULL,0,200,0,datetime('now'))",
         ),
     ),
+    Migration(
+        52,
+        "加入 Provider 預設模型 ID",
+        (
+            "ALTER TABLE providers ADD COLUMN model TEXT",
+        ),
+    ),
 )
 
 

@@ -38,6 +38,9 @@ class ProviderChannel:
     requests_per_minute: int | None = None
     tokens_per_minute: int | None = None
     cooldown_seconds: int = 300
+    # Optional per-provider model override.  An empty value intentionally
+    # falls back to the frozen/global analysis model for compatibility.
+    model: str | None = None
     semaphore: threading.BoundedSemaphore = field(init=False)
     request_times: deque = field(default_factory=deque)
     token_events: deque = field(default_factory=deque)
@@ -65,6 +68,17 @@ class FailoverVisionProvider(VisionProvider):
     @name.setter
     def name(self, value: str) -> None:
         self._name = value
+
+    @staticmethod
+    def _call_kwargs(channel: ProviderChannel, method: str, kwargs: dict) -> dict:
+        call_kwargs = dict(kwargs)
+        if channel.model and method in {"analyze", "repair_json"}:
+            call_kwargs["model"] = channel.model
+        return call_kwargs
+
+    @staticmethod
+    def _effective_model(channel: ProviderChannel, kwargs: dict) -> str:
+        return str(channel.model or kwargs.get("model") or "")
 
     @staticmethod
     def _prune_quota_events(channel: ProviderChannel, now: float) -> None:
@@ -212,7 +226,9 @@ class FailoverVisionProvider(VisionProvider):
                 continue
             self._local.channel = channel
             try:
-                response = getattr(channel.provider, method)(**kwargs)
+                response = getattr(channel.provider, method)(
+                    **self._call_kwargs(channel, method, kwargs)
+                )
             except Exception as exc:
                 last_error = exc
                 self.release_channel(channel, error=exc)
@@ -247,7 +263,7 @@ class FailoverVisionProvider(VisionProvider):
                 provider=channel.provider.name,
                 provider_id=str(getattr(channel.provider, "provider_id", channel.provider.name)),
                 operation=method,
-                model=str(kwargs.get("model") or ""),
+                model=self._effective_model(channel, kwargs),
                 details={"priority": channel.priority},
             )
             return response
@@ -290,19 +306,20 @@ class FailoverVisionProvider(VisionProvider):
             raise ProviderHTTPError("指定 Provider 暫時不可用或已達 Rate Limit", "VLM-005")
         self._local.channel = channel
         try:
+            call_kwargs = self._call_kwargs(channel, method, kwargs)
             if boundary is None:
-                response = getattr(channel.provider, method)(**kwargs)
+                response = getattr(channel.provider, method)(**call_kwargs)
             else:
                 specification = channel.provider.process_spec()
                 if specification is None:
                     boundary.record_cooperative()
-                    response = getattr(channel.provider, method)(**kwargs)
+                    response = getattr(channel.provider, method)(**call_kwargs)
                 else:
                     response = boundary.call_provider(
                         specification,
                         method,
                         timeout_seconds=float(getattr(channel.provider, "timeout", 120)),
-                        kwargs=kwargs,
+                        kwargs=call_kwargs,
                     )
         except Exception as exc:
             self.release_channel(channel, error=exc)
@@ -322,16 +339,17 @@ class FailoverVisionProvider(VisionProvider):
                 continue
             self._local.channel = channel
             try:
+                call_kwargs = self._call_kwargs(channel, "analyze", kwargs)
                 specification = channel.provider.process_spec()
                 if specification is None:
                     boundary.record_cooperative()
-                    response = channel.provider.analyze(**kwargs)
+                    response = channel.provider.analyze(**call_kwargs)
                 else:
                     response = boundary.call_provider(
                         specification,
                         "analyze",
                         timeout_seconds=float(getattr(channel.provider, "timeout", 120)),
-                        kwargs=kwargs,
+                        kwargs=call_kwargs,
                     )
             except Exception as exc:
                 last_error = exc

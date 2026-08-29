@@ -107,15 +107,20 @@ def build_analysis_plan(
     high_side = int(high_image_max_side)
     if high_side not in {512, 1024, 1600}:
         high_side = 1024
-    route = [
-        {
+    route = []
+    for item in provider_route:
+        route_item = {
             "provider_id": str(item.get("provider_id") or item.get("id") or ""),
             "display_name": str(item.get("display_name") or item.get("name") or ""),
             "priority": int(item.get("priority", 100)),
             "config_revision": str(item.get("config_revision") or item.get("updated_at") or ""),
         }
-        for item in provider_route
-    ]
+        configured_model = str(item.get("model") or "").strip()
+        # Keep the historical plan shape/fingerprint unchanged when a
+        # Provider intentionally uses the global model fallback.
+        if configured_model:
+            route_item["model"] = configured_model
+        route.append(route_item)
     rules_sha256 = hashlib.sha256(str(scoring_rules).encode("utf-8")).hexdigest()
     high_input = {
         "detail": "high",

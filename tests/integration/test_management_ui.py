@@ -61,6 +61,11 @@ def test_primary_management_pages_render(client, app):
     assert 'id="provider-action-status"' in providers
     assert "alert(" not in providers
 
+    jobs = client.get("/jobs").get_data(as_text=True)
+    assert 'type="submit" class="primary">確認建立' in jobs
+    assert "limit:'nullable-integer'" in jobs
+    assert "budget:'float'" in jobs
+    assert "if(body.limit===null)delete body.limit;" in jobs
 
 def test_shared_confirmation_dialog_resets_and_normalizes_cancel_state(client, app):
     create_admin(app)
@@ -75,7 +80,6 @@ def test_shared_confirmation_dialog_resets_and_normalizes_cancel_state(client, a
     assert "const cancelled = () => { dialog.returnValue = 'cancel'; };" in body
     assert "dialog.removeEventListener('cancel', cancelled);" in body
     assert "dialog.returnValue === 'confirm'" in body
-
 
 def test_shared_preview_retry_and_typed_job_contracts_are_rendered(client, app):
     create_admin(app)
@@ -94,7 +98,6 @@ def test_shared_preview_retry_and_typed_job_contracts_are_rendered(client, app):
     assert "limited_to??0" in jobs
     assert "window.inktimeFetchPreview(statusUrl" in rendering
     assert "window.inktimeFetchPreview(result.preview_url" in rendering
-
 
 def test_job_detail_live_status_exposes_items_and_only_valid_actions(client, app):
     administrator_id = create_admin(app)

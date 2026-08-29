@@ -110,6 +110,37 @@ def effective_provider_kind(kind: str, base_url: str | None = None) -> str:
     return normalized_kind
 
 
+def validate_model_id(
+    kind: str,
+    model: Any,
+    *,
+    base_url: str | None = None,
+    required: bool = False,
+) -> str:
+    """Validate a model identifier before an external Provider request."""
+
+    if model is not None and not isinstance(model, str):
+        raise ValueError("PROVIDER-021 model 必須是字串")
+    value = str(model or "").strip()
+    if not value:
+        if required:
+            raise ValueError("PROVIDER-021 model 不可空白")
+        return ""
+    if len(value) > 200 or any(ord(char) < 0x20 or ord(char) == 0x7f for char in value):
+        raise ValueError("PROVIDER-021 model 必須是 1 至 200 字元且不可包含控制字元")
+    if effective_provider_kind(kind, base_url) == "openrouter" and (
+        "/" not in value
+        or value.startswith("/")
+        or value.endswith("/")
+        or any(char.isspace() for char in value)
+    ):
+        raise ValueError(
+            "PROVIDER-021 OpenRouter 模型 ID 必須包含 provider 前綴，"
+            "例如 openrouter/free 或 openai/gpt-4o"
+        )
+    return value
+
+
 def normalize_options(kind: str, options: Any, *, base_url: str | None = None) -> dict[str, Any]:
     normalized_kind = effective_provider_kind(kind, base_url)
     if normalized_kind not in PROVIDER_KINDS:

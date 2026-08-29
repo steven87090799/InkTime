@@ -27,6 +27,7 @@ from inktime.app.providers.config import (
     effective_provider_kind,
     normalize_options,
     validate_base_url,
+    validate_model_id,
 )
 from .base import ProviderCallTrace, ProviderResponse, Usage, VisionAttemptState, VisionProvider
 
@@ -510,14 +511,6 @@ class OpenAICompatibleProvider(VisionProvider):
                     "VLM-003",
                     http_status=status,
                 )
-            if status in {400, 404, 413, 422} and retry_policy == AMBIGUOUS_VISION_ANALYSIS:
-                raise ProviderHTTPError(
-                    self._redact(f"Provider 回應 HTTP {status}"),
-                    "CONFIG_INVALID",
-                    http_status=status,
-                    request_started=True,
-                    vision_started=True,
-                )
             if status == 429 or status >= 500:
                 if status == 429 and no_retry:
                     # A rate-limit response is a definite rejection of this
@@ -576,13 +569,20 @@ class OpenAICompatibleProvider(VisionProvider):
                     if isinstance(error, dict):
                         provider_error_code = str(error.get("code") or error.get("type") or "") or None
                         if provider_error_code:
-                            response_info["provider_error_code"] = provider_error_code[:120]
+                            provider_error_code = bounded_text(
+                                self._redact(provider_error_code), maximum_bytes=120
+                            )
+                            response_info["provider_error_code"] = provider_error_code
+                        provider_error_message = str(error.get("message") or "").strip()
+                        if provider_error_message:
+                            response_info["provider_error_message"] = bounded_text(
+                                self._redact(provider_error_message), maximum_bytes=500
+                            )
             except (ValueError, TypeError, json.JSONDecodeError):
                 pass
-            headers = getattr(response, "headers", {}) or {}
-            response_request_id = headers.get("x-request-id") or headers.get("x-openrouter-request-id")
+            response_request_id = self._provider_request_id(response)
             if response_request_id:
-                response_info["request_id"] = str(response_request_id)[:255]
+                response_info["request_id"] = response_request_id
             classified_code = (
                 "BATCH-RATE-LIMITED"
                 if status == 429 and str(error_code).startswith("BATCH")
@@ -603,7 +603,7 @@ class OpenAICompatibleProvider(VisionProvider):
                 response_info=response_info,
                 request_started=status >= 400 and str(error_code).startswith("VLM"),
                 vision_started=status >= 400 and str(error_code).startswith("VLM"),
-                request_id=str(response_request_id)[:255] if response_request_id else None,
+                request_id=response_request_id or None,
             )
         try:
             payload = response.json()
@@ -848,6 +848,13 @@ class OpenAICompatibleProvider(VisionProvider):
         provider_request_context_id: str | None = None,
     ) -> dict[str, Any]:
         encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+        media_type = {
+            ".gif": "image/gif",
+            ".jpeg": "image/jpeg",
+            ".jpg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+        }.get(image_path.suffix.casefold(), "image/jpeg")
         body: dict[str, Any] = {
             "model": model,
             "messages": [
@@ -863,7 +870,7 @@ class OpenAICompatibleProvider(VisionProvider):
                         {"type": "text", "text": "分析這張照片。"},
                         {
                             "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{encoded}", "detail": detail},
+                            "image_url": {"url": f"data:{media_type};base64,{encoded}", "detail": detail},
                         },
                     ],
                 },
@@ -927,6 +934,7 @@ class OpenAICompatibleProvider(VisionProvider):
         """
 
         if self.kind == "openrouter":
+            validate_model_id(self.kind, model, base_url=self.base_url, required=True)
             routing = {key: self.options[key] for key in OPENROUTER_ROUTING_KEYS if key in self.options}
             if routing:
                 body["provider"] = routing
@@ -940,8 +948,10 @@ class OpenAICompatibleProvider(VisionProvider):
                     # Keep the legacy max input while using OpenRouter's
                     # current highest documented effort value on the wire.
                     normalized_effort = "xhigh"
-                if normalized_effort != "none":
-                    body["reasoning"] = {"effort": normalized_effort}
+                # OpenRouter may route an otherwise unspecified request to a
+                # reasoning model.  Send ``none`` explicitly so a bounded
+                # output budget remains available for the JSON response.
+                body["reasoning"] = {"effort": normalized_effort}
         elif self.supports_reasoning_effort and allow_reasoning and reasoning_effort is not None:
             body["reasoning_effort"] = normalize_reasoning_effort(reasoning_effort)
         return body
