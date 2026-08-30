@@ -74,11 +74,11 @@
 .photo-privacy-row label { display: flex; align-items: center; gap: 7px; font-weight: 750; }
 .photo-overview-panel > .panel-head { align-items: flex-start; }
 .photo-overview-panel > .panel-head h2 { margin-top: 3px; }
-.photo-overview-layout { display: grid; grid-template-columns: minmax(320px, .85fr) minmax(0, 1.3fr); gap: 18px; align-items: start; margin-top: 18px; }
+.photo-overview-layout { display: grid; grid-template-columns: minmax(340px, .95fr) minmax(0, 1.1fr); gap: 18px; align-items: start; margin-top: 18px; }
 .photo-preview-column { min-width: 0; }
 .photo-preview-column > p { margin: 8px 0 0; color: var(--muted); font-size: 11px; text-align: center; }
 .photo-facts-column { min-width: 0; }
-.photo-facts-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.photo-facts-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0; }
 .photo-facts-grid > div { min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); }
 .photo-facts-grid > .photo-fact-wide { grid-column: 1 / -1; }
 .photo-facts-grid dt, .orientation-facts dt { font-size: 10px; font-weight: 800; }
@@ -218,6 +218,7 @@ pre { white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow
   .photo-edit-panel .form-stack > .primary { width: 100%; justify-self: stretch; }
   .photo-privacy-row { grid-template-columns: 1fr; gap: 11px; }
   .photo-privacy-row button { width: 100%; }
+  .photo-facts-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .orientation-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .photo-orientation-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .photo-orientation-actions .orientation-clear { grid-column: 1 / -1; }
