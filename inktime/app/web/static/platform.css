@@ -191,18 +191,22 @@ textarea:focus-visible {
 .dashboard-summary-list .has-alert dd { color: var(--danger); }
 .dashboard-head-actions { display: flex; align-items: center; gap: 14px; }
 .dashboard-health { display: grid; justify-items: end; gap: 5px; }
-.dashboard-health-badge { display: flex; align-items: center; gap: 9px; min-width: 178px; padding: 8px 10px; border: 1px solid currentColor; border-radius: 12px; color: var(--status-info); background: color-mix(in srgb, currentColor 9%, var(--card)); text-decoration: none; }
+.dashboard-health-badge { display: flex; align-items: center; gap: 7px; min-width: 168px; padding: 5px 8px; border: 1px solid currentColor; border-radius: 10px; color: var(--status-info); background: color-mix(in srgb, currentColor 9%, var(--card)); text-decoration: none; }
 .dashboard-health-badge:hover { background: color-mix(in srgb, currentColor 15%, var(--card)); }
 .dashboard-health-badge.health-ok { color: var(--accent); }
 .dashboard-health-badge.health-info { color: var(--status-info); }
 .dashboard-health-badge.health-warning { color: var(--status-warning); }
 .dashboard-health-badge.health-error { color: var(--status-error); }
-.dashboard-health-badge.health-critical { color: var(--status-critical); }
-.dashboard-health-dot { flex: 0 0 auto; width: 10px; height: 10px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 17%, transparent); }
+.dashboard-health-badge.health-critical { color: var(--status-critical); animation: dashboard-critical-alert 1.8s ease-in-out infinite; }
+.dashboard-health-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 17%, transparent); }
 .dashboard-health-badge span:nth-child(2) { display: grid; min-width: 0; line-height: 1.2; }
-.dashboard-health-badge small { color: var(--muted); font-size: 9px; }
-.dashboard-health-badge strong { margin-top: 2px; color: currentColor; font-size: 13px; }
-.dashboard-health-badge b { margin-left: auto; padding: 3px 6px; border-radius: 999px; background: color-mix(in srgb, currentColor 14%, transparent); font-size: 10px; white-space: nowrap; }
+.dashboard-health-badge small { margin: 0; color: var(--muted); font-size: 8px; line-height: 1.25; }
+.dashboard-health-badge strong { margin-top: 1px; color: currentColor; font-size: 12px; line-height: 1.2; }
+.dashboard-health-badge b { margin-left: auto; padding: 2px 5px; border-radius: 999px; background: color-mix(in srgb, currentColor 14%, transparent); font-size: 9px; line-height: 1.25; white-space: nowrap; }
+@keyframes dashboard-critical-alert {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 0%, transparent); }
+  50% { box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 24%, transparent); }
+}
 .dashboard-health-scale { display: flex; align-items: center; gap: 4px; padding-right: 3px; }
 .dashboard-health-scale::before { content: "低"; margin-right: 2px; color: var(--muted); font-size: 8px; }
 .dashboard-health-scale::after { content: "高"; margin-left: 2px; color: var(--muted); font-size: 8px; }
@@ -317,6 +321,7 @@ dialog pre { padding: 14px; background: var(--code-bg); white-space: pre-wrap; w
 
 @media (prefers-reduced-motion: reduce) {
   body, .topbar, .metrics article, .panel, .auth-card, input, select, textarea, dialog { transition: none; }
+  .dashboard-health-badge.health-critical { animation: none; }
 }
 
 @media (max-width: 1100px) {
