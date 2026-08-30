@@ -189,33 +189,24 @@ textarea:focus-visible {
 .dashboard-summary-list dt small { display: block; margin-top: 2px; font-size: 10px; }
 .dashboard-summary-list dd { margin: 0; font-size: clamp(17px, 1.55vw, 23px); font-weight: 800; line-height: 1.2; text-align: right; white-space: nowrap; }
 .dashboard-summary-list .has-alert dd { color: var(--danger); }
-.dashboard-head-actions { display: flex; align-items: center; gap: 14px; }
-.dashboard-health { display: grid; justify-items: end; gap: 5px; }
-.dashboard-health-badge { display: flex; align-items: center; gap: 7px; min-width: 168px; padding: 5px 8px; border: 1px solid currentColor; border-radius: 10px; color: var(--status-info); background: color-mix(in srgb, currentColor 9%, var(--card)); text-decoration: none; }
+.dashboard-page-head { align-items: center; }
+.dashboard-health { display: grid; justify-items: end; }
+.dashboard-health-badge { display: inline-flex; align-items: center; gap: 5px; min-width: 0; padding: 4px 7px; border: 1px solid currentColor; border-radius: 999px; color: var(--status-info); background: color-mix(in srgb, currentColor 9%, var(--card)); text-decoration: none; white-space: nowrap; }
 .dashboard-health-badge:hover { background: color-mix(in srgb, currentColor 15%, var(--card)); }
 .dashboard-health-badge.health-ok { color: var(--accent); }
 .dashboard-health-badge.health-info { color: var(--status-info); }
 .dashboard-health-badge.health-warning { color: var(--status-warning); }
 .dashboard-health-badge.health-error { color: var(--status-error); }
 .dashboard-health-badge.health-critical { color: var(--status-critical); animation: dashboard-critical-alert 1.8s ease-in-out infinite; }
-.dashboard-health-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 17%, transparent); }
-.dashboard-health-badge span:nth-child(2) { display: grid; min-width: 0; line-height: 1.2; }
-.page-head .dashboard-health-badge small { margin: 0; color: var(--muted); font-size: 8px; line-height: 1.25; }
-.dashboard-health-badge strong { margin-top: 1px; color: currentColor; font-size: 12px; line-height: 1.2; }
-.dashboard-health-badge b { margin-left: auto; padding: 2px 5px; border-radius: 999px; background: color-mix(in srgb, currentColor 14%, transparent); font-size: 9px; line-height: 1.25; white-space: nowrap; }
+.dashboard-health-dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 17%, transparent); }
+.page-head .dashboard-health-badge small { margin: 0; color: var(--muted); font-size: 8px; line-height: 1; }
+.dashboard-health-badge strong { color: currentColor; font-size: 11px; line-height: 1; }
+.dashboard-health-badge b { padding: 2px 4px; border-radius: 999px; background: color-mix(in srgb, currentColor 14%, transparent); font-size: 8px; line-height: 1; white-space: nowrap; }
 @keyframes dashboard-critical-alert {
   0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 0%, transparent); }
   50% { box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 24%, transparent); }
 }
-.dashboard-health-scale { display: flex; align-items: center; gap: 4px; padding-right: 3px; }
-.dashboard-health-scale::before { content: "低"; margin-right: 2px; color: var(--muted); font-size: 8px; }
-.dashboard-health-scale::after { content: "高"; margin-left: 2px; color: var(--muted); font-size: 8px; }
-.dashboard-health-scale i { width: 15px; height: 3px; border-radius: 99px; background: currentColor; opacity: .9; }
-.dashboard-health-scale .health-ok { color: var(--accent); }
-.dashboard-health-scale .health-info { color: var(--status-info); }
-.dashboard-health-scale .health-warning { color: var(--status-warning); }
-.dashboard-health-scale .health-error { color: var(--status-error); }
-.dashboard-health-scale .health-critical { color: var(--status-critical); }
+.dashboard-panel-links { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px 16px; }
 .setup-overview { scroll-margin-top: 88px; }
 .setup-overview-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
 .setup-overview-head h2 { margin: 2px 0 7px; }
@@ -345,8 +336,7 @@ dialog pre { padding: 14px; background: var(--code-bg); white-space: pre-wrap; w
   .page-head > .primary { margin-top: 16px; }
   .metrics { grid-template-columns: repeat(2, 1fr); }
   .dashboard-summary { grid-template-columns: 1fr; }
-  .dashboard-head-actions { margin-top: 14px; justify-content: space-between; }
-  .dashboard-health-badge { min-width: 165px; }
+  .dashboard-page-head .dashboard-health { margin-top: 12px; justify-items: start; }
   .setup-overview-head { display: grid; grid-template-columns: 1fr auto; }
   .setup-step { grid-template-columns: 34px minmax(0, 1fr); align-items: start; }
   .setup-step-action { grid-column: 2; justify-self: start; }

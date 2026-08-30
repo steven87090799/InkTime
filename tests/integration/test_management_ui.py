@@ -101,8 +101,9 @@ def test_dashboard_renders_one_page_setup_overview_with_direct_actions(client, a
     assert 'id="setup-overview"' in body
     assert "完整設定導覽" in body
     assert 'role="progressbar"' in body
-    assert "第 1 級 · 系統狀態" in body
-    assert "狀態等級由低到高：正常、提示、警告、錯誤、嚴重" in body
+    assert "第 1 級" in body
+    assert 'href="#setup-overview"' in body
+    assert "狀態等級由低到高：正常、提示、警告、錯誤、嚴重" not in body
     for title in (
         "照片來源與掃描",
         "分析方式",
