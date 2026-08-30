@@ -41,6 +41,7 @@ from inktime.app.core.logging import (
 from inktime.app.core.errors import ApplicationError
 from inktime.app.core.redirects import safe_local_redirect_target
 from inktime.app.core.runtime_config import RuntimeConfig
+from inktime.app.domain.analysis.traditional_chinese import to_taiwan_traditional
 from inktime.app.repositories.auth import AuthRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.web.access import csrf_token, verify_csrf
@@ -107,6 +108,7 @@ def configure_web_application(
     ):
         app.register_blueprint(blueprint)
     app.jinja_env.globals["csrf_token"] = csrf_token
+    app.jinja_env.filters["taiwan_traditional"] = to_taiwan_traditional
 
     @app.get("/")
     def modern_root():

@@ -142,6 +142,12 @@ def test_trace_pages_and_json_require_auth_and_viewer_cannot_read_raw(client, ap
     create_admin(app)
     app.extensions["inktime_auth_repository"].create_user("viewer", "viewer-passphrase-long", role="viewer")
     _seed_trace(app)
+    raw_output = '{"caption":"他们在复古小镇看着风景"}'
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "UPDATE ai_trace_attempts SET response_raw_sanitized=? WHERE trace_id='trace-test'",
+            (raw_output,),
+        )
     assert client.get("/api/v1/ai/traces").status_code == 401
     assert client.get("/ai/traces").status_code == 302
     login(client, "viewer", "viewer-passphrase-long")
@@ -158,7 +164,11 @@ def test_trace_pages_and_json_require_auth_and_viewer_cannot_read_raw(client, ap
     admin_detail = admin.get("/api/v1/ai/traces/trace-test")
     assert admin_detail.status_code == 200
     assert admin_detail.json["attempts"][0]["request_json_sanitized"]
-    assert admin_detail.json["attempts"][0]["response_raw_sanitized"] == "raw-output"
+    assert admin_detail.json["attempts"][0]["response_raw_sanitized"] == raw_output
+    admin_page = admin.get("/ai/traces/trace-test").get_data(as_text=True)
+    assert "他們在復古小鎮看著風景" in admin_page
+    assert "他们在复古小镇看着风景" not in admin_page
+    assert "資料庫仍保留 Provider 原始稽核內容" in admin_page
 
 
 def test_trace_attempt_preserves_requested_and_served_models(app):
