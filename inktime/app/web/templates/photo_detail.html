@@ -37,7 +37,7 @@
 </section>
 {% endif %}
 
-<div class="detail-grid">
+<div class="detail-grid photo-detail-grid">
   <section>
     <div class="panel">
       <img class="detail-photo" src="/api/v1/photos/{{ photo.id }}/image" alt="{{ photo.relative_path }}">
@@ -67,31 +67,6 @@
       {% if g.user.role == 'administrator' %}<div class="photo-orientation-actions" role="group" aria-label="照片旋轉設定"><button class="secondary orientation-set" type="button" data-rotation="0">不額外旋轉（0°）</button><button class="secondary orientation-set" type="button" data-rotation="90">順時針旋轉 90°</button><button class="secondary orientation-set" type="button" data-rotation="180">旋轉 180°</button><button class="secondary orientation-set" type="button" data-rotation="270">逆時針旋轉 90°</button><button class="secondary orientation-set orientation-clear" type="button" data-clear="1">清除人工設定</button></div>{% endif %}
     </div>
 
-    <div class="panel">
-      <div class="panel-head">
-        <h2>本機預篩選判斷</h2>
-        <span class="status {{ 'warning' if prefilter.excluded else 'ok' }}">{{ prefilter.summary }}</span>
-      </div>
-      <p class="prefilter-summary">模式：<strong>{{ prefilter.sensitivity }}</strong>；目前命中 {{ prefilter.defect_count }} 項。明確截圖或嚴重單項缺陷會直接排除；疑似缺陷只會降為低優先。{% if prefilter.favorite_bypass %}此照片因人工保護而略過排除。{% endif %}</p>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>判斷項目</th><th>實際數值</th><th>目前門檻</th><th>結果</th></tr></thead>
-          <tbody>
-            {% for check in prefilter.checks %}
-            <tr>
-              <td>{{ check.label }}</td>
-              <td><strong>{{ check.value }}</strong></td>
-              <td>{{ check.threshold }}</td>
-              <td class="{{ 'check-hit' if check.hit and check.enabled and prefilter.enabled else '' }}">
-                {% if not prefilter.enabled %}預篩選停用{% elif not check.enabled %}此規則停用{% elif check.hit %}命中{% else %}未命中{% endif %}
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-      <p><a href="/settings">調整預篩選模式與開關</a></p>
-    </div>
   </section>
 
   <section>
@@ -129,6 +104,32 @@
     </div>
     <div class="panel"><h2>錯誤記錄</h2>{% for e in errors %}<p><code>{{ e.error_code }}</code> {{ e.message }}</p>{% else %}<p class="empty">沒有錯誤。</p>{% endfor %}</div>
     <div class="panel"><h2>處理歷史</h2>{% for event in events %}<p>{{ event.created_at }} · {{ event.event }}<br><code>{{ event.changes_json }}</code></p>{% else %}<p class="empty">尚無人工修改。</p>{% endfor %}</div>
+  </section>
+
+  <section class="panel photo-prefilter-panel">
+    <div class="panel-head">
+      <h2>本機預篩選判斷</h2>
+      <span class="status {{ 'warning' if prefilter.excluded else 'ok' }}">{{ prefilter.summary }}</span>
+    </div>
+    <p class="prefilter-summary">模式：<strong>{{ prefilter.sensitivity }}</strong>；目前命中 {{ prefilter.defect_count }} 項。明確截圖或嚴重單項缺陷會直接排除；疑似缺陷只會降為低優先。{% if prefilter.favorite_bypass %}此照片因人工保護而略過排除。{% endif %}</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>判斷項目</th><th>實際數值</th><th>目前門檻</th><th>結果</th></tr></thead>
+        <tbody>
+          {% for check in prefilter.checks %}
+          <tr>
+            <td>{{ check.label }}</td>
+            <td><strong>{{ check.value }}</strong></td>
+            <td>{{ check.threshold }}</td>
+            <td class="{{ 'check-hit' if check.hit and check.enabled and prefilter.enabled else '' }}">
+              {% if not prefilter.enabled %}預篩選停用{% elif not check.enabled %}此規則停用{% elif check.hit %}命中{% else %}未命中{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p><a href="/settings">調整預篩選模式與開關</a></p>
   </section>
 </div>
 {% endblock %}

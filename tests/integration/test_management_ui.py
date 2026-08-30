@@ -950,6 +950,7 @@ def test_photo_console_shows_prefilter_metrics_model_text_and_generated_caption(
     body = detail.get_data(as_text=True)
     assert detail.status_code == 200
     assert "本機預篩選判斷" in body
+    assert 'class="panel photo-prefilter-panel"' in body
     assert "目前門檻" in body
     assert "模糊分數" in body
     assert "過曝占比" in body
