@@ -58,7 +58,6 @@
 .pagination-jump input[type="number"] { width: 76px; padding: 7px 8px; border: 1px solid var(--field-line); border-radius: 8px; background: var(--field); color: var(--ink); font: inherit; }
 .pagination-jump button { padding: 8px 12px; }
 .detail-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 18px; }
-.photo-detail-grid > .photo-prefilter-panel { grid-column: 1 / -1; }
 .photo-prefilter-panel table { table-layout: fixed; }
 .photo-prefilter-panel th:nth-child(1) { width: 24%; }
 .photo-prefilter-panel th:nth-child(2) { width: 22%; }

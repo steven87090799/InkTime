@@ -37,6 +37,32 @@
 </section>
 {% endif %}
 
+<section class="panel photo-prefilter-panel">
+  <div class="panel-head">
+    <h2>本機預篩選判斷</h2>
+    <span class="status {{ 'warning' if prefilter.excluded else 'ok' }}">{{ prefilter.summary }}</span>
+  </div>
+  <p class="prefilter-summary">模式：<strong>{{ prefilter.sensitivity }}</strong>；目前命中 {{ prefilter.defect_count }} 項。明確截圖或嚴重單項缺陷會直接排除；疑似缺陷只會降為低優先。{% if prefilter.favorite_bypass %}此照片因人工保護而略過排除。{% endif %}</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>判斷項目</th><th>實際數值</th><th>目前門檻</th><th>結果</th></tr></thead>
+      <tbody>
+        {% for check in prefilter.checks %}
+        <tr>
+          <td>{{ check.label }}</td>
+          <td><strong>{{ check.value }}</strong></td>
+          <td>{{ check.threshold }}</td>
+          <td class="{{ 'check-hit' if check.hit and check.enabled and prefilter.enabled else '' }}">
+            {% if not prefilter.enabled %}預篩選停用{% elif not check.enabled %}此規則停用{% elif check.hit %}命中{% else %}未命中{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p><a href="/settings">調整預篩選模式與開關</a></p>
+</section>
+
 <div class="detail-grid photo-detail-grid">
   <section>
     <div class="panel">
@@ -106,31 +132,6 @@
     <div class="panel"><h2>處理歷史</h2>{% for event in events %}<p>{{ event.created_at }} · {{ event.event }}<br><code>{{ event.changes_json }}</code></p>{% else %}<p class="empty">尚無人工修改。</p>{% endfor %}</div>
   </section>
 
-  <section class="panel photo-prefilter-panel">
-    <div class="panel-head">
-      <h2>本機預篩選判斷</h2>
-      <span class="status {{ 'warning' if prefilter.excluded else 'ok' }}">{{ prefilter.summary }}</span>
-    </div>
-    <p class="prefilter-summary">模式：<strong>{{ prefilter.sensitivity }}</strong>；目前命中 {{ prefilter.defect_count }} 項。明確截圖或嚴重單項缺陷會直接排除；疑似缺陷只會降為低優先。{% if prefilter.favorite_bypass %}此照片因人工保護而略過排除。{% endif %}</p>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>判斷項目</th><th>實際數值</th><th>目前門檻</th><th>結果</th></tr></thead>
-        <tbody>
-          {% for check in prefilter.checks %}
-          <tr>
-            <td>{{ check.label }}</td>
-            <td><strong>{{ check.value }}</strong></td>
-            <td>{{ check.threshold }}</td>
-            <td class="{{ 'check-hit' if check.hit and check.enabled and prefilter.enabled else '' }}">
-              {% if not prefilter.enabled %}預篩選停用{% elif not check.enabled %}此規則停用{% elif check.hit %}命中{% else %}未命中{% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    <p><a href="/settings">調整預篩選模式與開關</a></p>
-  </section>
 </div>
 {% endblock %}
 {% block scripts %}{% if g.user.role == 'administrator' %}<script nonce="{{ csp_nonce }}">const photoStatus=document.createElement('p');photoStatus.setAttribute('aria-live','polite');document.getElementById('photo-edit').after(photoStatus);document.getElementById('photo-edit').onsubmit=async event=>{event.preventDefault();const form=new FormData(event.target);const response=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({favorite:form.has('favorite'),captured_at:form.get('captured_at'),side_caption:form.get('side_caption'),types:form.getAll('types')})});if(response.ok)location.reload();else window.inktimeSetStatus(photoStatus,(await window.inktimeDecodeJson(response)).message||'更新失敗','error');};document.querySelectorAll('.orientation-set').forEach(b=>b.onclick=async()=>{const r=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}/orientation',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({rotation_cw:b.dataset.clear?null:Number(b.dataset.rotation)})});if(r.ok)location.reload();else window.inktimeSetStatus(photoStatus,(await window.inktimeDecodeJson(r)).message||'儲存失敗','error')});const privacyButton=document.getElementById('save-never-upload');if(privacyButton)privacyButton.onclick=async()=>{const r=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}/upload-privacy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({never_upload:document.getElementById('never-upload').checked})});if(r.ok)location.reload();else window.inktimeSetStatus(photoStatus,(await window.inktimeDecodeJson(r)).message||'儲存失敗','error')};</script>{% endif %}{% endblock %}
