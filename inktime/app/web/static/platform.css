@@ -200,7 +200,7 @@ textarea:focus-visible {
 .dashboard-health-badge.health-critical { color: var(--status-critical); animation: dashboard-critical-alert 1.8s ease-in-out infinite; }
 .dashboard-health-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 17%, transparent); }
 .dashboard-health-badge span:nth-child(2) { display: grid; min-width: 0; line-height: 1.2; }
-.dashboard-health-badge small { margin: 0; color: var(--muted); font-size: 8px; line-height: 1.25; }
+.page-head .dashboard-health-badge small { margin: 0; color: var(--muted); font-size: 8px; line-height: 1.25; }
 .dashboard-health-badge strong { margin-top: 1px; color: currentColor; font-size: 12px; line-height: 1.2; }
 .dashboard-health-badge b { margin-left: auto; padding: 2px 5px; border-radius: 999px; background: color-mix(in srgb, currentColor 14%, transparent); font-size: 9px; line-height: 1.25; white-space: nowrap; }
 @keyframes dashboard-critical-alert {
