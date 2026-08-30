@@ -36,6 +36,35 @@ LOGGER = logging.getLogger("provider_transport")
 SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
+def _without_schema_keyword(value: Any, keyword: str) -> Any:
+    """Return a provider-wire copy of a JSON Schema without one keyword."""
+
+    if isinstance(value, dict):
+        return {
+            key: _without_schema_keyword(item, keyword)
+            for key, item in value.items()
+            if key != keyword
+        }
+    if isinstance(value, list):
+        return [_without_schema_keyword(item, keyword) for item in value]
+    return value
+
+
+def _json_schema_for_provider(
+    kind: str,
+    stage: str,
+    *,
+    caption_controls: dict[str, Any] | None,
+) -> dict[str, Any]:
+    schema = json_schema_for_stage(stage, caption_controls=caption_controls)
+    if kind == "openrouter":
+        # OpenRouter's free router rejects ``uniqueItems`` even though it is a
+        # standard JSON Schema keyword.  Keep InkTime's local canonicalization
+        # and value validation, and omit only this unsupported wire constraint.
+        return _without_schema_keyword(schema, "uniqueItems")
+    return schema
+
+
 def _log_debug(message: str, *, event: str, **fields: Any) -> None:
     if not LOGGER.isEnabledFor(logging.DEBUG):
         return
@@ -880,8 +909,10 @@ class OpenAICompatibleProvider(VisionProvider):
         if self.supports_json_schema:
             body["response_format"] = {
                 "type": "json_schema",
-                "json_schema": json_schema_for_stage(
-                    stage, caption_controls=caption_controls or self.caption_controls
+                "json_schema": _json_schema_for_provider(
+                    self.kind,
+                    stage,
+                    caption_controls=caption_controls or self.caption_controls,
                 ),
             }
         if max_tokens is not None:
@@ -1006,8 +1037,10 @@ class OpenAICompatibleProvider(VisionProvider):
                         {
                             "invalid_json": invalid_content[:12000],
                             "error": validation_error,
-                            "schema": json_schema_for_stage(
-                                stage, caption_controls=caption_controls or self.caption_controls
+                            "schema": _json_schema_for_provider(
+                                self.kind,
+                                stage,
+                                caption_controls=caption_controls or self.caption_controls,
                             )["schema"],
                         },
                         ensure_ascii=False,
@@ -1019,8 +1052,10 @@ class OpenAICompatibleProvider(VisionProvider):
         if self.supports_json_schema:
             body["response_format"] = {
                 "type": "json_schema",
-                "json_schema": json_schema_for_stage(
-                    stage, caption_controls=caption_controls or self.caption_controls
+                "json_schema": _json_schema_for_provider(
+                    self.kind,
+                    stage,
+                    caption_controls=caption_controls or self.caption_controls,
                 ),
             }
         if max_tokens is not None:

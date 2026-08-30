@@ -327,6 +327,21 @@ def test_single_model_call_returns_all_fields_and_usage(app, tmp_path):
     assert tuple(attempt[:2]) == ("vision", "SUCCESS") and attempt["api_usage_id"] is not None
 
 
+def test_duplicate_model_types_are_normalized_without_paid_repair(app, tmp_path):
+    _, ids, service = prepare(app, tmp_path)
+    service.ai_traces = app.extensions["inktime_ai_trace_repository"]
+    duplicate_types = valid_result(types=["人物", "風景", "人物", "日常"])
+    provider = MockProvider([duplicate_types])
+
+    result = service.analyze_photo(
+        photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock"
+    )
+
+    assert result["analysis"]["types"] == ["人物", "風景", "日常"]
+    assert provider.analyze_calls == 1
+    assert provider.repair_calls == 0
+
+
 def test_trace_persistence_failure_cannot_retry_provider_or_change_analysis(app, tmp_path):
     class RaisingTraceRepository:
         def __getattr__(self, _name):

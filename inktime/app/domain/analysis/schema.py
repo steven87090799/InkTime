@@ -118,6 +118,14 @@ class AnalysisValidationError(ValueError):
     code = "VLM-004"
 
 
+def _deduplicate_string_list(value: Any) -> Any:
+    """Normalize set-like model arrays without hiding invalid element types."""
+
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        return value
+    return list(dict.fromkeys(value))
+
+
 ANALYSIS_JSON_SCHEMA = {
     "name": "inktime_photo_analysis",
     "strict": True,
@@ -455,6 +463,18 @@ def validate_analysis_result(raw: str | dict) -> dict:
             raise AnalysisValidationError("schema v3 缺少 confidence")
     if value.get("schema_version") == 3:
         value = _normalize_v3(value)
+    # Structured-output capable models can still repeat an otherwise valid
+    # enum item.  These fields are sets in InkTime's contract, so remove only
+    # exact duplicate strings before strict value and cardinality validation.
+    # Invalid values and non-string elements continue to fail below.
+    value["types"] = _deduplicate_string_list(value.get("types"))
+    if "reason_codes" in value:
+        value["reason_codes"] = _deduplicate_string_list(value.get("reason_codes"))
+    orientation_value = value.get("visual_orientation")
+    if isinstance(orientation_value, dict) and "evidence" in orientation_value:
+        orientation_value = dict(orientation_value)
+        orientation_value["evidence"] = _deduplicate_string_list(orientation_value.get("evidence"))
+        value["visual_orientation"] = orientation_value
     # v1 cache entries predate this additive field.  Keep them readable without
     # treating the missing value as a confident orientation recommendation.
     if value.get("schema_version") == 1 and "visual_orientation" not in value:

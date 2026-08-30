@@ -61,11 +61,13 @@ def test_openrouter_analysis_and_repair_share_privacy_routing_usage_and_sticky_p
         assert body["provider"]["require_parameters"] is True
         assert body["provider"]["allow_fallbacks"] is False
         assert body["usage"] == {"include": True}
+        assert "uniqueItems" not in json.dumps(body["response_format"], ensure_ascii=False)
     assert analysis["reasoning"] == {"effort": "low"}
     assert "reasoning" not in repair
     assert repair["messages"][1]["content"]
     assert "image_url" not in json.dumps(repair, ensure_ascii=False)
     assert "image_path" not in json.dumps(repair, ensure_ascii=False)
+    assert "uniqueItems" not in repair["messages"][1]["content"]
     assert provider.last_request_metrics["image_bytes"] == 0
     assert analysis["session_id"] == repair["session_id"]
 
@@ -114,6 +116,7 @@ def test_openai_compatible_request_does_not_receive_openrouter_provider_object(t
     )
     assert "provider" not in body
     assert "usage" not in body
+    assert "uniqueItems" in json.dumps(body["response_format"], ensure_ascii=False)
 
 
 def test_unknown_openrouter_option_is_rejected():

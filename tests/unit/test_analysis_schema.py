@@ -171,10 +171,8 @@ def test_caption_schema_and_validator_share_maximum(length, accepted):
         ({"confidence": True}, "confidence"),
         ({"confidence": 2.0}, "confidence"),
         ({"reason_codes": "not-a-list"}, "reason_codes"),
-        ({"reason_codes": ["duplicate", "duplicate"]}, "reason_codes"),
         ({"caption": "short", "side_caption": "too"}, "side_caption"),
         ({"reason": "x" * 101}, "reason"),
-        ({"types": ["人物", "人物"]}, "types"),
         (
             {
                 "details": {
@@ -193,6 +191,25 @@ def test_caption_schema_and_validator_share_maximum(length, accepted):
 def test_schema_v3_rejects_malformed_contract_boundaries(updates, match):
     with pytest.raises(AnalysisValidationError, match=match):
         validate_analysis_result(_v3_result(**updates))
+
+
+def test_set_like_model_arrays_remove_exact_duplicates_before_validation():
+    candidate = _v3_result(
+        types=["人物", "風景", "人物", "日常"],
+        reason_codes=["VISIBLE_PEOPLE", "VISIBLE_PEOPLE"],
+        visual_orientation={
+            "rotation_cw": 0,
+            "confidence": 0.9,
+            "ambiguous": False,
+            "evidence": ["faces_upright", "faces_upright"],
+        },
+    )
+
+    normalized = validate_analysis_result(candidate)
+
+    assert normalized["types"] == ["人物", "風景", "日常"]
+    assert normalized["reason_codes"] == ["VISIBLE_PEOPLE"]
+    assert normalized["visual_orientation"]["evidence"] == ["faces_upright"]
 
 
 def test_schema_v3_accepts_grade_container_aliases_and_rejects_invalid_grade():
