@@ -22,7 +22,12 @@ def _filters() -> dict[str, str]:
 @bp.get("/ai/traces")
 @login_required
 def trace_list_page():
-    return render_template("ai_traces.html")
+    with current_app.extensions["inktime_database"].session() as connection:
+        summary = connection.execute(
+            "SELECT COUNT(*) trace_count,COUNT(DISTINCT photo_id) photo_count,"
+            "COUNT(DISTINCT job_id) job_count FROM ai_trace_runs"
+        ).fetchone()
+    return render_template("ai_traces.html", trace_summary=dict(summary))
 
 
 @bp.get("/ai/traces/<trace_id>")

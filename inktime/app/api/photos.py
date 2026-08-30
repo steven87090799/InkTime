@@ -207,6 +207,7 @@ def photos_page():
             photo["raw_ranking_score"] = round(float(ranking_score), 1)
             photo["ranking_percentile"] = percentile
             photo["score_band"] = score_band(percentile, calibrated_score)
+            photo["distinguishing_score"] = calibrated_score
         photo["selection_score"] = None
         photo["model_score"] = round(float(ranking_score), 1) if ranking_score is not None else None
         photo["e6_display_score"] = round(float(e6_score), 1) if e6_score is not None else None
@@ -618,12 +619,17 @@ def photo_detail(photo_id: str):
         ),
     )
     with current_app.extensions["inktime_database"].session() as connection:
+        analysis_total = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM photo_analysis WHERE photo_id=?", (photo_id,)
+            ).fetchone()[0]
+        )
         analysis_rows = connection.execute(
             """
             SELECT a.*,v.name AS scoring_version_name
             FROM photo_analysis a
             LEFT JOIN scoring_rule_versions v ON v.id=a.scoring_version_id
-            WHERE a.photo_id=? ORDER BY a.created_at DESC
+            WHERE a.photo_id=? ORDER BY a.created_at DESC LIMIT 2
             """,
             (photo_id,),
         ).fetchall()
@@ -673,6 +679,7 @@ def photo_detail(photo_id: str):
         "photo_detail.html",
         photo=photo,
         analyses=analyses,
+        analysis_total=analysis_total,
         usage=usage,
         errors=errors,
         events=events,

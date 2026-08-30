@@ -6,10 +6,11 @@ from pathlib import Path
 
 from PIL import Image
 
+from inktime.app.repositories.settings import SETTING_DEFINITIONS
+from inktime.app.workers.runner import WorkerRunner
 from tests.conftest import create_admin, csrf, login
 from tests.integration.test_jobs import add_photos
 from tests.unit.test_analysis_schema import valid_result
-from inktime.app.workers.runner import WorkerRunner
 
 
 def test_primary_management_pages_render(client, app):
@@ -31,6 +32,7 @@ def test_primary_management_pages_render(client, app):
         "/energy",
         "/maintenance",
         "/settings",
+        "/help/controls",
         "/diagnostics",
         "/errors",
         "/backups",
@@ -76,6 +78,20 @@ def test_primary_management_pages_render(client, app):
     assert "if(body.limit===null)delete body.limit;" in jobs
 
 
+def test_login_replaces_page_guide_with_safe_version_and_status_summary(client, app):
+    create_admin(app)
+
+    body = client.get("/login").get_data(as_text=True)
+
+    assert "登入提示" not in body
+    assert 'class="page-guide"' not in body
+    assert "目前服務狀態" in body
+    assert "InkTime 版本" in body
+    assert "部署版本" in body
+    assert "執行環境" in body
+    assert "資料庫" in body
+
+
 def test_dashboard_renders_one_page_setup_overview_with_direct_actions(client, app):
     create_admin(app)
     login(client)
@@ -85,6 +101,8 @@ def test_dashboard_renders_one_page_setup_overview_with_direct_actions(client, a
     assert 'id="setup-overview"' in body
     assert "完整設定導覽" in body
     assert 'role="progressbar"' in body
+    assert "第 1 級 · 系統狀態" in body
+    assert "狀態等級由低到高：正常、提示、警告、錯誤、嚴重" in body
     for title in (
         "照片來源與掃描",
         "分析方式",
@@ -105,6 +123,29 @@ def test_dashboard_renders_one_page_setup_overview_with_direct_actions(client, a
         "/backups",
     ):
         assert f'href="{action_url}"' in body
+
+
+def test_control_glossary_lists_every_setting_options_actions_and_jumps(client, app):
+    create_admin(app)
+    login(client)
+
+    body = client.get("/help/controls").get_data(as_text=True)
+
+    assert "功能與設定說明大全" in body
+    assert 'id="glossary-search"' in body
+    assert 'id="glossary-kind-filter"' in body
+    assert "automatic_ai" in body
+    assert "自動 AI 分析" in body
+    assert "送入 AI／批次送入 AI" in body
+    assert "操作後的影響" in body
+    assert "秘密值只顯示設定狀態" in body
+    for key in SETTING_DEFINITIONS:
+        assert f'id="setting-{key.replace(".", "-")}"' in body
+
+    settings = client.get("/settings").get_data(as_text=True)
+    assert 'href="/help/controls"' in settings
+    assert 'id="setting-analysis-execution_mode"' in settings
+    assert 'href="/help/controls#setting-analysis-execution_mode"' in settings
 
 def test_shared_confirmation_dialog_resets_and_normalizes_cancel_state(client, app):
     create_admin(app)
@@ -943,8 +984,52 @@ def test_photo_cards_show_total_score_and_e6_estimate(client, app):
     body = client.get("/photos").get_data(as_text=True)
 
     assert "選片分 84.0（模型＋E6）" in body
+    assert "為什麼兩張都不錯的照片" in body
+    assert "相對鑑別分＝原始分 35%＋照片庫百分位 65%" in body
+    assert "排序原始分 80.0 → 相對鑑別 80.0" in body
     assert "選片分 —（尚未正式分析）" in body
     assert "E6 顯示適合度 91.9（暫估，未納入正式選片分）" in body
+
+
+def test_photo_detail_shows_only_two_latest_analyses_and_compact_type_picker(client, app):
+    create_admin(app)
+    login(client)
+    photo_id = add_photos(app, 1)[0]
+    for index in range(3):
+        result = valid_result(caption=f"第 {index + 1} 次分析")
+        app.extensions["inktime_photo_repository"].save_analysis(
+            photo_id,
+            None,
+            "local",
+            "local",
+            "local",
+            result,
+            "{}",
+            ranking_score=50 + index,
+        )
+
+    body = client.get(f"/photos/{photo_id}").get_data(as_text=True)
+
+    assert body.count('class="analysis-card"') == 2
+    assert "只顯示最新 2 / 3 筆" in body
+    assert "單純掃描不一定新增" in body
+    assert 'class="photo-type-picker"' in body
+    assert "第 3 次分析" in body
+    assert "第 2 次分析" in body
+    assert "第 1 次分析" not in body
+
+
+def test_ai_trace_page_explains_that_only_real_provider_calls_are_listed(client, app):
+    create_admin(app)
+    login(client)
+
+    body = client.get("/ai/traces").get_data(as_text=True)
+
+    assert "這裡不是照片庫" in body
+    assert "哪些照片會出現在這裡" in body
+    assert "真的開始呼叫外部或測試 Provider" in body
+    assert "在呼叫 Provider 之前就被預算或設定阻擋" in body
+    assert "不同照片" in body
 
 
 def test_photo_cards_never_present_excluded_screenshot_or_severe_blur_as_high_score(client, app):

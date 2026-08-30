@@ -23,9 +23,9 @@
     <label><input type="checkbox" name="favorite" {% if photo.favorite %}checked{% endif %}> 標記為最愛</label>
     <label>拍攝時間<input name="captured_at" value="{{ photo.captured_at or '' }}" placeholder="YYYY-MM-DDTHH:MM:SS"></label>
     <label>電子紙短文案<input name="side_caption" maxlength="120" value="{{ analyses[0].side_caption if analyses else '' }}"></label>
-    <fieldset>
+    <fieldset class="photo-type-picker">
       <legend>分類</legend>
-      {% for type in allowed_types %}<label><input type="checkbox" name="types" value="{{ type }}" {% if analyses and type in analyses[0].types_json %}checked{% endif %}> {{ type }}</label>{% endfor %}
+      <div>{% for type in allowed_types %}<label><input type="checkbox" name="types" value="{{ type }}" {% if analyses and type in analyses[0].types %}checked{% endif %}><span>{{ type }}</span></label>{% endfor %}</div>
     </fieldset>
     <button class="primary">儲存人工修正</button>
   </form>
@@ -96,12 +96,12 @@
 
   <section>
     <div class="panel">
-      <h2>模型與分析結果</h2>
+      <div class="panel-head"><div><h2>模型與分析結果</h2><p class="analysis-history-note">每次本機重分析、AI 工作或 Fallback 可能新增一筆；單純掃描不一定新增。</p></div><span>只顯示最新 {{ [analysis_total, 2]|min }} / {{ analysis_total }} 筆</span></div>
       {% for a in analyses %}
       <article class="analysis-card">
         <div class="panel-head">
           <strong>{{ a.origin_label }} · {{ a.stage }}</strong>
-          <span class="status {{ 'ok' if a.should_keep else 'warning' }}">該次模型判斷：{{ '建議保留' if a.should_keep else '建議排除' }}</span>
+          <span class="status {{ 'ok' if a.should_keep else 'warning' }}">該次{{ a.origin_label }}：{{ '建議保留' if a.should_keep else '建議排除' }}</span>
         </div>
         <p class="analysis-meta">{{ a.provider or '未知 Provider' }} / {{ a.model or '未知模型' }} · {{ a.created_at }}</p>
         <dl>

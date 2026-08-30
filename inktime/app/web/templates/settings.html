@@ -9,6 +9,7 @@
     <p>以繁體中文名稱、安全範圍與影響說明調整日常設定。硬體協議、部署密鑰、Docker 邊界與 Migration 版本不會開放修改。</p>
   </div>
   <div class="settings-head-actions">
+    <a class="secondary" href="/help/controls" data-help="開啟可搜尋的功能說明大全，查看所有設定、英文選項與按鈕的用途、影響和操作捷徑。">功能與設定說明大全</a>
     {% if g.user.role == 'administrator' %}
     <a class="secondary" href="/api/v1/settings/export" data-help="下載可安全搬移的一般設定，不包含 API Key、Webhook Token 等秘密資料，也不會改變目前設定。">匯出安全設定</a>
     <button class="secondary" type="button" id="open-import" data-help="先讀取匯出檔並顯示差異與風險；只有再次確認後才會寫入，不會匯入秘密資料。">匯入設定</button>
@@ -75,7 +76,7 @@
     </div>
     <div class="governed-settings-grid">
       {% for row in rows %}
-      <article class="setting-card"
+      <article class="setting-card" id="setting-{{ row.key|replace('.', '-') }}"
         data-key="{{ row.key }}"
         data-label="{{ row.definition.label_zh_tw }}"
         data-description="{{ row.definition.description }}"
@@ -92,6 +93,7 @@
           </div>
           <span class="setting-dirty-badge" hidden>已修改</span>
         </div>
+        <a class="setting-glossary-link" href="/help/controls#setting-{{ row.key|replace('.', '-') }}">看完整選項與影響說明</a>
         <div class="setting-badges" aria-label="設定狀態">
           <span class="status risk-{{ row.definition.risk }}">{{ {'low':'低風險','medium':'中風險','high':'高風險'}[row.definition.risk] }}</span>
           <span class="status scope-{{ row.definition.effective_scope }}">{{ {'dynamic':'立即生效','next_job':'下次工作','next_render':'下次渲染','future_device_only':'只影響之後新增的裝置','restart':'需重新啟動','not_wired':'尚未支援'}[row.definition.effective_scope] }}</span>

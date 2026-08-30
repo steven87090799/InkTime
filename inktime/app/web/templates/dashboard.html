@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}儀表板｜InkTime{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">系統總覽</p><h1>儀表板</h1></div><div class="dashboard-head-actions"><a href="#setup-overview">完整設定導覽</a><span class="status {{ 'error' if system_status == '嚴重故障' else 'warn' if system_status != '正常' else 'ok' }}">{{ system_status }}</span></div></div>
+<div class="page-head"><div><p class="eyebrow">系統總覽</p><h1>儀表板</h1></div><div class="dashboard-head-actions"><a href="#setup-overview">完整設定導覽</a><div class="dashboard-health"><a class="dashboard-health-badge health-{{ system_status.level }}" href="/errors" data-help="{{ system_status.description }} 點此查看未解決事件與處理狀態。"><span class="dashboard-health-dot" aria-hidden="true"></span><span><small>{{ system_status.rank }} · 系統狀態</small><strong>{{ system_status.label }}</strong></span>{% if system_status.count %}<b>{{ system_status.count }} 件</b>{% endif %}</a><div class="dashboard-health-scale" aria-label="狀態等級由低到高：正常、提示、警告、錯誤、嚴重"><i class="health-ok" title="第 1 級：正常"></i><i class="health-info" title="第 2 級：提示"></i><i class="health-warning" title="第 3 級：警告"></i><i class="health-error" title="第 4 級：錯誤"></i><i class="health-critical" title="第 5 級：嚴重故障"></i></div></div></div></div>
 <section class="dashboard-summary" aria-label="系統摘要">
   <article class="dashboard-summary-group">
     <div class="dashboard-summary-head"><div><p>照片資料</p><h2>照片庫</h2></div><a href="/photos">查看照片</a></div>

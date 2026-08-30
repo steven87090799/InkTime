@@ -37,6 +37,7 @@ from inktime.app.repositories.settings import (
 )
 from inktime.app.web.ai_readiness import ai_readiness_snapshot
 from inktime.app.web.access import administrator_required, login_required
+from inktime.app.web.control_glossary import action_entries, setting_entries
 from inktime.app.domain.rendering.system_presets import SYSTEM_PRESETS
 from inktime.app.services.provider_contracts import run_provider_contract
 
@@ -150,6 +151,23 @@ def settings_page():
             "revision": os.environ.get("INKTIME_GIT_REVISION", "unknown"),
         },
         webhook_token_configured=current_app.extensions["inktime_notification_service"].token_configured(),
+    )
+
+
+@bp.get("/help/controls")
+@login_required
+def control_glossary_page():
+    rows = current_app.extensions["inktime_settings_repository"].all(redact_sensitive=True)
+    settings = setting_entries(rows)
+    actions = action_entries()
+    categories = sorted({entry["category"] for entry in (*settings, *actions)})
+    return render_template(
+        "control_glossary.html",
+        setting_entries=settings,
+        action_entries=actions,
+        setting_count=len(settings),
+        action_count=len(actions),
+        categories=categories,
     )
 
 

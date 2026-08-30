@@ -2,6 +2,16 @@
 {% block title %}AI 即時追蹤｜InkTime{% endblock %}
 {% block content %}
 <div class="page-head"><div><p class="eyebrow">AI Analysis Inspector V2</p><h1>AI 即時追蹤</h1><p>只讀顯示真正送往 Provider 的已遮蔽請求、回應、解析、帳務與時間證據。</p></div><span class="status" id="poll-state">載入中</span></div>
+<section class="panel trace-explainer">
+  <div class="panel-head"><div><p class="eyebrow">這裡不是照片庫</p><h2>哪些照片會出現在這裡？</h2></div><a href="/photos">查看全部照片</a></div>
+  <p>只有<strong>真的開始呼叫外部或測試 Provider</strong>的照片才會產生 Trace。本機分析、掃描後未送 AI、預篩選排除，以及在呼叫 Provider 之前就被預算或設定阻擋的照片，都不會出現在這張表。</p>
+  <div class="trace-summary-grid">
+    <article><span>Trace 紀錄</span><strong>{{ trace_summary.trace_count }}</strong><small>一次實際 Provider 呼叫流程一筆</small></article>
+    <article><span>不同照片</span><strong>{{ trace_summary.photo_count }}</strong><small>同一照片重試或不同階段可有多筆</small></article>
+    <article><span>相關工作</span><strong>{{ trace_summary.job_count }}</strong><small>不是所有分析工作都會走到 Provider</small></article>
+  </div>
+  {% if trace_summary.trace_count and trace_summary.photo_count == 1 %}<p class="notice warning trace-single-photo">目前資料庫確實只有 1 張照片曾產生 AI Trace，所以清單只會看到同一張；這不代表其他照片遺失，而是其他照片沒有成功走到 Provider 呼叫階段。</p>{% endif %}
+</section>
 <section class="panel"><form id="trace-filters" class="form-stack"><div class="settings-grid">
   <label>狀態<select name="status"><option value="">全部</option>{% for value in ['RUNNING','SUCCESS','FAILED','TIMEOUT','AMBIGUOUS'] %}<option value="{{ value }}" {% if request.args.get('status')==value %}selected{% endif %}>{{ value }}</option>{% endfor %}</select></label>
   <label>Provider<input name="provider" maxlength="128" value="{{ request.args.get('provider','') }}"></label>

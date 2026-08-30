@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 import logging
+import os
 from pathlib import Path
 import re
 import secrets
@@ -114,6 +115,8 @@ def configure_web_application(
     @app.context_processor
     def shared_template_context():
         database = container.extensions["inktime_database"]
+        database_ready = False
+        migration_version = None
         try:
             with database.session() as connection:
                 rows = connection.execute(
@@ -121,12 +124,28 @@ def configure_web_application(
                     "WHERE resolved_at IS NULL AND lower(severity)='critical' "
                     "ORDER BY last_seen_at DESC LIMIT 3"
                 ).fetchall()
+                migration_row = connection.execute(
+                    "SELECT MAX(version) FROM schema_migrations"
+                ).fetchone()
+                migration_version = int(migration_row[0] or 0) if migration_row else 0
+                database_ready = True
         except Exception:
             rows = []
         return {
             "critical_alerts": rows,
             "csp_nonce": getattr(g, "csp_nonce", ""),
-            "page_guide": page_guide_for_endpoint(request.endpoint),
+            "page_guide": (
+                None if request.endpoint == "auth.login" else page_guide_for_endpoint(request.endpoint)
+            ),
+            "login_system_info": {
+                "status": "可登入" if database_ready else "部分異常",
+                "status_ok": database_ready,
+                "version": str(app.config["INKTIME_VERSION"]),
+                "revision": os.environ.get("INKTIME_GIT_REVISION", "開發版本")[:16],
+                "runtime": "Docker 容器" if Path("/.dockerenv").exists() else "原生程序",
+                "database": "已連線" if database_ready else "無法連線",
+                "schema": str(migration_version) if migration_version is not None else "未知",
+            },
         }
 
     public_endpoints = {

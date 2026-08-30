@@ -259,14 +259,31 @@ def dashboard():
     counts["month_unknown_reserve"] = int(counts["month_unknown_count"]) * reserve
     counts["cost_complete"] = int(counts["month_unknown_count"]) == 0
     issues = {str(row["severity"]): int(row["count"]) for row in severities}
-    status = (
-        "嚴重故障"
-        if issues.get("critical")
-        else "部分失敗"
-        if issues.get("error")
-        else "有警告"
-        if issues.get("warning")
-        else "正常"
+    status_levels = (
+        ("critical", "第 5 級", "嚴重故障", "需要立即處理，核心服務、儲存或資料安全可能受影響。"),
+        ("error", "第 4 級", "部分失敗", "已有功能失敗，但其他功能可能仍可使用。"),
+        ("warning", "第 3 級", "有警告", "目前仍可使用，但有狀態需要盡快檢查。"),
+        ("info", "第 2 級", "有提示", "沒有失敗；有一般事件或建議可查看。"),
+    )
+    status = next(
+        (
+            {
+                "level": level,
+                "rank": rank,
+                "label": label,
+                "description": description,
+                "count": int(issues.get(level, 0)),
+            }
+            for level, rank, label, description in status_levels
+            if issues.get(level)
+        ),
+        {
+            "level": "ok",
+            "rank": "第 1 級",
+            "label": "正常",
+            "description": "目前沒有未解決的警告、錯誤或嚴重故障。",
+            "count": 0,
+        },
     )
     return render_template(
         "dashboard.html",

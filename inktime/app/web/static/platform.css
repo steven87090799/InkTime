@@ -14,6 +14,10 @@
   --danger: #a33b31;
   --danger-bg: #fae5e2;
   --warning: #9a6500;
+  --status-info: #2868a9;
+  --status-warning: #a56a00;
+  --status-error: #c45120;
+  --status-critical: #a72d31;
   --topbar: #17261e;
   --topbar-ink: #dbe8df;
   --code-bg: #edf1ed;
@@ -38,6 +42,10 @@
   --danger: #f09a8e;
   --danger-bg: #3c211f;
   --warning: #e9b949;
+  --status-info: #76b7f2;
+  --status-warning: #f1c65b;
+  --status-error: #ff9a62;
+  --status-critical: #ff777d;
   --topbar: #0b110d;
   --topbar-ink: #dce8e0;
   --code-bg: #101611;
@@ -182,6 +190,28 @@ textarea:focus-visible {
 .dashboard-summary-list dd { margin: 0; font-size: clamp(17px, 1.55vw, 23px); font-weight: 800; line-height: 1.2; text-align: right; white-space: nowrap; }
 .dashboard-summary-list .has-alert dd { color: var(--danger); }
 .dashboard-head-actions { display: flex; align-items: center; gap: 14px; }
+.dashboard-health { display: grid; justify-items: end; gap: 5px; }
+.dashboard-health-badge { display: flex; align-items: center; gap: 9px; min-width: 178px; padding: 8px 10px; border: 1px solid currentColor; border-radius: 12px; color: var(--status-info); background: color-mix(in srgb, currentColor 9%, var(--card)); text-decoration: none; }
+.dashboard-health-badge:hover { background: color-mix(in srgb, currentColor 15%, var(--card)); }
+.dashboard-health-badge.health-ok { color: var(--accent); }
+.dashboard-health-badge.health-info { color: var(--status-info); }
+.dashboard-health-badge.health-warning { color: var(--status-warning); }
+.dashboard-health-badge.health-error { color: var(--status-error); }
+.dashboard-health-badge.health-critical { color: var(--status-critical); }
+.dashboard-health-dot { flex: 0 0 auto; width: 10px; height: 10px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 17%, transparent); }
+.dashboard-health-badge span:nth-child(2) { display: grid; min-width: 0; line-height: 1.2; }
+.dashboard-health-badge small { color: var(--muted); font-size: 9px; }
+.dashboard-health-badge strong { margin-top: 2px; color: currentColor; font-size: 13px; }
+.dashboard-health-badge b { margin-left: auto; padding: 3px 6px; border-radius: 999px; background: color-mix(in srgb, currentColor 14%, transparent); font-size: 10px; white-space: nowrap; }
+.dashboard-health-scale { display: flex; align-items: center; gap: 4px; padding-right: 3px; }
+.dashboard-health-scale::before { content: "低"; margin-right: 2px; color: var(--muted); font-size: 8px; }
+.dashboard-health-scale::after { content: "高"; margin-left: 2px; color: var(--muted); font-size: 8px; }
+.dashboard-health-scale i { width: 15px; height: 3px; border-radius: 99px; background: currentColor; opacity: .9; }
+.dashboard-health-scale .health-ok { color: var(--accent); }
+.dashboard-health-scale .health-info { color: var(--status-info); }
+.dashboard-health-scale .health-warning { color: var(--status-warning); }
+.dashboard-health-scale .health-error { color: var(--status-error); }
+.dashboard-health-scale .health-critical { color: var(--status-critical); }
 .setup-overview { scroll-margin-top: 88px; }
 .setup-overview-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
 .setup-overview-head h2 { margin: 2px 0 7px; }
@@ -219,6 +249,14 @@ textarea:focus-visible {
 .panel a { color: var(--accent); }
 .auth-card { max-width: 480px; margin: 8vh auto; padding: 36px; }
 .auth-card > p { color: var(--muted); }
+.login-system-card { max-width: 720px; margin: 38px auto 0; padding: 20px 22px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); box-shadow: var(--shadow); }
+.login-system-head { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.login-system-head h2 { margin: 3px 0 0; font-size: 18px; }
+.login-system-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; margin: 16px 0 12px; }
+.login-system-grid div { min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+.login-system-grid dt { color: var(--muted); font-size: 10px; }
+.login-system-grid dd { margin: 5px 0 0; overflow-wrap: anywhere; font-size: 12px; font-weight: 750; }
+.login-system-card > p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
 .form-stack { display: grid; gap: 17px; margin-top: 24px; }
 .form-stack label { font-weight: 650; }
 .form-stack input { display: block; width: 100%; margin-top: 7px; padding: 12px 13px; border: 1px solid var(--field-line); border-radius: 9px; background: var(--field); color: var(--ink); font: inherit; }
@@ -317,10 +355,13 @@ button.context-help-button {
   .metrics { grid-template-columns: repeat(2, 1fr); }
   .dashboard-summary { grid-template-columns: 1fr; }
   .dashboard-head-actions { margin-top: 14px; justify-content: space-between; }
+  .dashboard-health-badge { min-width: 165px; }
   .setup-overview-head { display: grid; grid-template-columns: 1fr auto; }
   .setup-step { grid-template-columns: 34px minmax(0, 1fr); align-items: start; }
   .setup-step-action { grid-column: 2; justify-self: start; }
   .auth-card { margin: 2vh auto; padding: 26px; }
+  .login-system-card { margin-top: 24px; padding: 18px; }
+  .login-system-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .page-guide { grid-template-columns: 1fr; padding: 21px; }
   .page-guide-column { padding: 16px 0 0; border-top: 1px solid var(--line); border-left: 0; }
 }
