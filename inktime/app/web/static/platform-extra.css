@@ -52,8 +52,7 @@
 .rendering-release-list { grid-template-columns: minmax(240px, 1.55fr) repeat(2, minmax(135px, 1fr)); }
 .rendering-action-item { display: flex; min-width: 0; align-items: center; gap: 6px; }
 .rendering-action-item > a,
-.rendering-action-item > button:not(.context-help-button) { display: inline-flex; flex: 1 1 auto; width: 100%; min-width: 0; min-height: 42px; align-items: center; justify-content: center; padding: 9px 12px; line-height: 1.35; text-align: center; white-space: normal; }
-.rendering-action-item > button.context-help-button { flex: 0 0 24px; margin-left: 0; }
+.rendering-action-item > button { display: inline-flex; flex: 1 1 auto; width: 100%; min-width: 0; min-height: 42px; align-items: center; justify-content: center; padding: 9px 12px; line-height: 1.35; text-align: center; white-space: normal; }
 .pagination { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 16px 20px; margin: 28px; }
 .pagination-jump, .pagination-jump label { display: flex; align-items: center; gap: 7px; }
 .pagination-jump input[type="number"] { width: 76px; padding: 7px 8px; border: 1px solid var(--field-line); border-radius: 8px; background: var(--field); color: var(--ink); font: inherit; }

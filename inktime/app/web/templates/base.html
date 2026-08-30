@@ -227,48 +227,67 @@
 
     (() => {
       const popover = document.getElementById('context-help-popover');
-      let activeButton = null;
+      const targets = [...document.querySelectorAll('[data-help]')];
+      const previousDescriptions = new WeakMap();
+      let activeTarget = null;
+      let openTimer = null;
+      let closeTimer = null;
 
       const close = () => {
+        window.clearTimeout(openTimer);
+        window.clearTimeout(closeTimer);
         popover.hidden = true;
-        if (activeButton) activeButton.setAttribute('aria-expanded', 'false');
-        activeButton = null;
+        if (activeTarget) {
+          const previous = previousDescriptions.get(activeTarget);
+          if (previous) activeTarget.setAttribute('aria-describedby', previous);
+          else activeTarget.removeAttribute('aria-describedby');
+        }
+        activeTarget = null;
       };
-      const position = button => {
-        const rect = button.getBoundingClientRect();
+      const position = target => {
+        const rect = target.getBoundingClientRect();
         const width = Math.min(360, window.innerWidth - 24);
-        const left = Math.max(12, Math.min(window.innerWidth - width - 12, rect.left));
+        const left = Math.max(12, Math.min(window.innerWidth - width - 12, rect.left + (rect.width - width) / 2));
         popover.style.width = `${width}px`;
         popover.style.left = `${left}px`;
         popover.style.top = `${Math.max(12, Math.min(window.innerHeight - popover.offsetHeight - 12, rect.bottom + 8))}px`;
       };
-
-      document.querySelectorAll('[data-help]').forEach((target, index) => {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'context-help-button';
-        button.textContent = '?';
-        button.setAttribute('aria-label', `查看「${target.textContent.trim().slice(0, 40) || '此項目'}」說明`);
-        button.setAttribute('aria-controls', 'context-help-popover');
-        button.setAttribute('aria-expanded', 'false');
-        button.dataset.helpIndex = String(index);
-        target.insertAdjacentElement('afterend', button);
-        button.addEventListener('click', event => {
-          event.stopPropagation();
-          if (activeButton === button && !popover.hidden) { close(); return; }
+      const open = target => {
+        window.clearTimeout(openTimer);
+        window.clearTimeout(closeTimer);
+        if (activeTarget && activeTarget !== target) close();
+        activeTarget = target;
+        if (!previousDescriptions.has(target)) previousDescriptions.set(target, target.getAttribute('aria-describedby'));
+        popover.textContent = target.dataset.help;
+        popover.hidden = false;
+        target.setAttribute('aria-describedby', 'context-help-popover');
+        position(target);
+      };
+      const scheduleOpen = target => {
+        window.clearTimeout(closeTimer);
+        window.clearTimeout(openTimer);
+        openTimer = window.setTimeout(() => open(target), 240);
+      };
+      const scheduleClose = () => {
+        window.clearTimeout(openTimer);
+        window.clearTimeout(closeTimer);
+        closeTimer = window.setTimeout(() => {
+          if (activeTarget && (activeTarget.matches(':hover') || activeTarget.contains(document.activeElement))) return;
           close();
-          activeButton = button;
-          popover.textContent = target.dataset.help;
-          popover.hidden = false;
-          button.setAttribute('aria-expanded', 'true');
-          position(button);
+        }, 80);
+      };
+
+      targets.forEach(target => {
+        target.classList.add('has-context-help');
+        target.addEventListener('pointerenter', () => scheduleOpen(target));
+        target.addEventListener('pointerleave', scheduleClose);
+        target.addEventListener('focusin', () => open(target));
+        target.addEventListener('focusout', event => {
+          if (!target.contains(event.relatedTarget)) scheduleClose();
         });
       });
-      document.addEventListener('click', event => {
-        if (!event.target.closest('.context-help-popover, .context-help-button')) close();
-      });
       document.addEventListener('keydown', event => { if (event.key === 'Escape') close(); });
-      window.addEventListener('resize', () => { if (activeButton) position(activeButton); });
+      window.addEventListener('resize', () => { if (activeTarget) position(activeTarget); });
       window.addEventListener('scroll', close, {passive: true});
     })();
   </script>

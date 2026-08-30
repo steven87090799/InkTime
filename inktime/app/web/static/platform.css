@@ -300,25 +300,11 @@ dialog pre { padding: 14px; background: var(--code-bg); white-space: pre-wrap; w
 .page-guide-column ol, .page-guide-column ul { margin: 10px 0 0; padding-left: 20px; }
 .page-guide-column li + li { margin-top: 6px; }
 
-button.context-help-button {
-  width: 24px;
-  height: 24px;
-  margin-left: 6px;
-  padding: 0;
-  border: 1px solid var(--accent);
-  border-radius: 50%;
-  background: var(--accent2);
-  color: var(--accent);
-  font: inherit;
-  font-size: 12px;
-  font-weight: 850;
-  line-height: 22px;
-  vertical-align: middle;
-  cursor: help;
-}
+.has-context-help:not(button):not(a) { cursor: help; }
 .context-help-popover {
   position: fixed;
   z-index: 80;
+  pointer-events: none;
   padding: 12px 14px;
   border: 1px solid var(--line);
   border-radius: 10px;
