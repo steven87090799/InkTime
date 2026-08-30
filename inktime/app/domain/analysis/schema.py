@@ -6,6 +6,7 @@ from copy import deepcopy
 from typing import Any, cast
 
 from inktime.app.domain.analysis.scoring import GRADE_TO_SCORE
+from inktime.app.domain.analysis.traditional_chinese import to_taiwan_traditional
 
 
 ALLOWED_TYPES = {
@@ -442,6 +443,11 @@ def validate_analysis_result(raw: str | dict) -> dict:
         error = AnalysisValidationError("模型回傳頂層必須是 JSON Object")
         error.code = "VLM-003"
         raise error
+    # The prompt asks for Traditional Chinese, but free-router models may still
+    # mix scripts.  Apply deterministic offline OpenCC conversion before any
+    # validation or persistence so captions, reasons, semantic details and raw
+    # normalized analysis JSON never retain Simplified Chinese output.
+    value = to_taiwan_traditional(value)
     if value.get("schema_version") == 3:
         details = value.get("details")
         if details is not None and not isinstance(details, dict):

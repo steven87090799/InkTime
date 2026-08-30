@@ -61,7 +61,8 @@ def test_advanced_schema_and_prompt_keep_legacy_variant_compatibility():
     prompt = OpenAICompatibleProvider(
         name="test", base_url="https://example.invalid", api_key="", caption_controls=controls
     ).system_prompt
-    assert "繁體中文" in prompt and "像是／彷彿／彷佛" in prompt and "世界" in prompt
+    assert "繁體中文" in prompt and "嚴禁簡體字" in prompt
+    assert "像是／彷彿／彷佛" in prompt and "世界" in prompt
 
 
 def test_single_caption_prompt_is_literary_compact_and_omits_empty_fields(tmp_path):

@@ -40,6 +40,26 @@ def test_strict_schema_accepts_expected_result():
     assert result["memory_score"] == 82
 
 
+def test_model_text_is_forced_to_taiwan_traditional_before_persistence():
+    candidate = valid_result(
+        caption="他们在复古小镇看着远处风景。",
+        side_caption="他们看着风景",
+        reason="画面里的年轻人关系亲近",
+        details={
+            "scene": "复古小镇街头",
+            "short_description": "树影下的年轻人合照",
+        },
+    )
+
+    normalized = validate_analysis_result(candidate)
+
+    assert normalized["caption"] == "他們在復古小鎮看著遠處風景。"
+    assert normalized["side_caption"] == "他們看著風景"
+    assert normalized["reason"] == "畫面裡的年輕人關係親近"
+    assert normalized["details"]["scene"] == "復古小鎮街頭"
+    assert normalized["details"]["short_description"] == "樹影下的年輕人合照"
+
+
 def test_schema_v1_missing_orientation_is_safely_upgraded():
     legacy = valid_result(schema_version=1)
     legacy.pop("visual_orientation")
