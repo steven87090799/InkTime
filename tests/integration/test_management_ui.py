@@ -969,8 +969,8 @@ def test_photo_console_shows_prefilter_metrics_model_text_and_generated_caption(
     assert "風把這一天留得很輕。" in body
     assert "測試 Provider / vision-model" in body
     assert body.index('class="photo-overview-layout"') < body.index('class="photo-analysis-grid"')
-    assert body.index('class="photo-analysis-grid"') < body.index('class="photo-runtime-grid"')
-    assert body.index('class="photo-runtime-grid"') < body.index('class="panel photo-prefilter-panel"')
+    assert body.index('class="photo-analysis-grid"') < body.index('class="panel photo-prefilter-panel"')
+    assert body.index('class="panel photo-prefilter-panel"') < body.index('class="photo-runtime-grid"')
 
     listing = client.get("/photos").get_data(as_text=True)
     assert "家人在公園散步。" in listing

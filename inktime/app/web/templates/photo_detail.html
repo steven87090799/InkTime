@@ -111,17 +111,6 @@
   </div>
 </section>
 
-<div class="photo-runtime-grid">
-  <section class="panel"><h2>Token 與成本</h2>{% for u in usage %}<p>{{ u.request_type }} · {{ u.model }} · {{ u.input_tokens + u.output_tokens }} Token · {% if u.cost_source == 'unknown' %}未定價成本（Provider 未回報且尚未設定價格）{% elif u.cost_source == 'provider_reported' %}Provider 成本 US$ {{ '%.6f'|format(u.actual_cost) }}{% else %}估算成本 US$ {{ '%.6f'|format(u.estimated_cost) }}{% endif %}</p>{% else %}<p class="empty">沒有 API 使用量；若被本機預篩選排除，這裡會維持 0 Token。</p>{% endfor %}</section>
-  <section class="panel"><h2>錯誤記錄</h2>{% for e in errors %}<p><code>{{ e.error_code }}</code> {{ e.message }}</p>{% else %}<p class="empty">沒有錯誤。</p>{% endfor %}</section>
-  <section class="panel photo-history-panel">
-    <div class="panel-head"><h2>處理歷史</h2><span>共 {{ events|length }} 筆，最新在前</span></div>
-    <div class="photo-history-list">
-      {% for event in events %}<article><time>{{ event.created_at }}</time><strong>{{ event.event }}</strong><code>{{ event.changes_json }}</code></article>{% else %}<p class="empty">尚無人工修改。</p>{% endfor %}
-    </div>
-  </section>
-</div>
-
 <section class="panel photo-prefilter-panel">
   <div class="panel-head">
     <div><p class="eyebrow">不會呼叫 AI</p><h2>本機預篩選判斷</h2></div>
@@ -144,5 +133,16 @@
   </ul>
   <div class="prefilter-footer"><span>這些判斷只讀取本機 Metadata 與影像特徵，不會把照片送給模型。</span><a href="/settings">調整預篩選模式與開關</a></div>
 </section>
+
+<div class="photo-runtime-grid">
+  <section class="panel"><h2>Token 與成本</h2>{% for u in usage %}<p>{{ u.request_type }} · {{ u.model }} · {{ u.input_tokens + u.output_tokens }} Token · {% if u.cost_source == 'unknown' %}未定價成本（Provider 未回報且尚未設定價格）{% elif u.cost_source == 'provider_reported' %}Provider 成本 US$ {{ '%.6f'|format(u.actual_cost) }}{% else %}估算成本 US$ {{ '%.6f'|format(u.estimated_cost) }}{% endif %}</p>{% else %}<p class="empty">沒有 API 使用量；若被本機預篩選排除，這裡會維持 0 Token。</p>{% endfor %}</section>
+  <section class="panel"><h2>錯誤記錄</h2>{% for e in errors %}<p><code>{{ e.error_code }}</code> {{ e.message }}</p>{% else %}<p class="empty">沒有錯誤。</p>{% endfor %}</section>
+  <section class="panel photo-history-panel">
+    <div class="panel-head"><h2>處理歷史</h2><span>共 {{ events|length }} 筆，最新在前</span></div>
+    <div class="photo-history-list">
+      {% for event in events %}<article><time>{{ event.created_at }}</time><strong>{{ event.event }}</strong><code>{{ event.changes_json }}</code></article>{% else %}<p class="empty">尚無人工修改。</p>{% endfor %}
+    </div>
+  </section>
+</div>
 {% endblock %}
 {% block scripts %}{% if g.user.role == 'administrator' %}<script nonce="{{ csp_nonce }}">const photoStatus=document.createElement('p');photoStatus.setAttribute('aria-live','polite');document.getElementById('photo-edit').after(photoStatus);document.getElementById('photo-edit').onsubmit=async event=>{event.preventDefault();const form=new FormData(event.target);const response=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({favorite:form.has('favorite'),captured_at:form.get('captured_at'),side_caption:form.get('side_caption'),types:form.getAll('types')})});if(response.ok)location.reload();else window.inktimeSetStatus(photoStatus,(await window.inktimeDecodeJson(response)).message||'更新失敗','error');};document.querySelectorAll('.orientation-set').forEach(b=>b.onclick=async()=>{const r=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}/orientation',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({rotation_cw:b.dataset.clear?null:Number(b.dataset.rotation)})});if(r.ok)location.reload();else window.inktimeSetStatus(photoStatus,(await window.inktimeDecodeJson(r)).message||'儲存失敗','error')});const privacyButton=document.getElementById('save-never-upload');if(privacyButton)privacyButton.onclick=async()=>{const r=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}/upload-privacy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({never_upload:document.getElementById('never-upload').checked})});if(r.ok)location.reload();else window.inktimeSetStatus(photoStatus,(await window.inktimeDecodeJson(r)).message||'儲存失敗','error')};</script>{% endif %}{% endblock %}
