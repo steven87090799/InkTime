@@ -1014,6 +1014,8 @@ def test_photo_detail_shows_only_two_latest_analyses_and_compact_type_picker(cli
     assert body.count('class="analysis-card"') == 2
     assert "只顯示最新 2 / 3 筆" in body
     assert "單純掃描不一定新增" in body
+    assert 'class="photo-orientation-actions"' in body
+    assert 'class="secondary orientation-set orientation-clear"' in body
     assert 'class="photo-type-picker"' in body
     assert "第 3 次分析" in body
     assert "第 2 次分析" in body

@@ -69,6 +69,9 @@ pre { white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow
 .analysis-card:first-of-type { margin-top: 14px; }
 .analysis-card h3 { margin: 18px 0 7px; font-size: 14px; color: var(--muted); }
 .analysis-history-note { margin: 5px 0 0; color: var(--muted); font-size: 11px; }
+.photo-orientation-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+.photo-orientation-actions button { width: 100%; min-width: 0; min-height: 38px; padding: 8px 10px; line-height: 1.3; white-space: normal; }
+.photo-orientation-actions .orientation-clear { grid-column: 1 / -1; margin-top: 2px; border-style: dashed; }
 .photo-type-picker { margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
 .photo-type-picker > div { display: flex; flex-wrap: wrap; gap: 7px; }
 .photo-type-picker label { position: relative; cursor: pointer; }
