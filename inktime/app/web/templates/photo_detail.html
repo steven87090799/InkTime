@@ -37,32 +37,6 @@
 </section>
 {% endif %}
 
-<section class="panel photo-prefilter-panel">
-  <div class="panel-head">
-    <h2>本機預篩選判斷</h2>
-    <span class="status {{ 'warning' if prefilter.excluded else 'ok' }}">{{ prefilter.summary }}</span>
-  </div>
-  <p class="prefilter-summary">模式：<strong>{{ prefilter.sensitivity }}</strong>；目前命中 {{ prefilter.defect_count }} 項。明確截圖或嚴重單項缺陷會直接排除；疑似缺陷只會降為低優先。{% if prefilter.favorite_bypass %}此照片因人工保護而略過排除。{% endif %}</p>
-  <div class="table-wrap">
-    <table>
-      <thead><tr><th>判斷項目</th><th>實際數值</th><th>目前門檻</th><th>結果</th></tr></thead>
-      <tbody>
-        {% for check in prefilter.checks %}
-        <tr>
-          <td>{{ check.label }}</td>
-          <td><strong>{{ check.value }}</strong></td>
-          <td>{{ check.threshold }}</td>
-          <td class="{{ 'check-hit' if check.hit and check.enabled and prefilter.enabled else '' }}">
-            {% if not prefilter.enabled %}預篩選停用{% elif not check.enabled %}此規則停用{% elif check.hit %}命中{% else %}未命中{% endif %}
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  <p><a href="/settings">調整預篩選模式與開關</a></p>
-</section>
-
 <div class="detail-grid photo-detail-grid">
   <section>
     <div class="panel">
@@ -133,5 +107,28 @@
   </section>
 
 </div>
+
+<section class="panel photo-prefilter-panel">
+  <div class="panel-head">
+    <div><p class="eyebrow">不會呼叫 AI</p><h2>本機預篩選判斷</h2></div>
+    <span class="status {{ 'warning' if prefilter.excluded else 'ok' }}">{{ prefilter.summary }}</span>
+  </div>
+  <div class="prefilter-overview">
+    <article><span>檢查模式</span><strong>{{ prefilter.sensitivity_label }}</strong><small>{{ prefilter.sensitivity }}</small></article>
+    <article class="{{ 'has-alert' if prefilter.defect_count else '' }}"><span>命中規則</span><strong>{{ prefilter.defect_count }} 項</strong><small>{{ '請查看下方紅色規則' if prefilter.defect_count else '沒有規則達到門檻' }}</small></article>
+    <article class="{{ 'has-alert' if prefilter.excluded else '' }}"><span>最終判斷</span><strong>{{ prefilter.decision_label }}</strong><small>{{ prefilter.reason_label }}</small></article>
+  </div>
+  <p class="prefilter-summary">明確截圖、解析度過低或嚴重單項缺陷會直接排除；疑似缺陷只會降低優先順序。{% if prefilter.favorite_bypass %}這張照片已有人工保護，因此不會被自動排除。{% endif %}</p>
+  <ul class="prefilter-rule-grid">
+    {% for check in prefilter.checks %}
+    <li class="prefilter-rule-card {{ 'is-hit' if check.hit and check.enabled and prefilter.enabled else 'is-disabled' if not prefilter.enabled or not check.enabled else 'is-clear' }}">
+      <div class="prefilter-rule-head"><strong>{{ check.label }}</strong><span>{% if not prefilter.enabled %}預篩選停用{% elif not check.enabled %}規則停用{% elif check.hit %}已命中{% else %}未命中{% endif %}</span></div>
+      <div class="prefilter-rule-value"><span>實際數值</span><b>{{ check.value }}</b></div>
+      <p><span>目前門檻</span>{{ check.threshold }}</p>
+    </li>
+    {% endfor %}
+  </ul>
+  <div class="prefilter-footer"><span>這些判斷只讀取本機 Metadata 與影像特徵，不會把照片送給模型。</span><a href="/settings">調整預篩選模式與開關</a></div>
+</section>
 {% endblock %}
 {% block scripts %}{% if g.user.role == 'administrator' %}<script nonce="{{ csp_nonce }}">const photoStatus=document.createElement('p');photoStatus.setAttribute('aria-live','polite');document.getElementById('photo-edit').after(photoStatus);document.getElementById('photo-edit').onsubmit=async event=>{event.preventDefault();const form=new FormData(event.target);const response=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({favorite:form.has('favorite'),captured_at:form.get('captured_at'),side_caption:form.get('side_caption'),types:form.getAll('types')})});if(response.ok)location.reload();else window.inktimeSetStatus(photoStatus,(await window.inktimeDecodeJson(response)).message||'更新失敗','error');};document.querySelectorAll('.orientation-set').forEach(b=>b.onclick=async()=>{const r=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}/orientation',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({rotation_cw:b.dataset.clear?null:Number(b.dataset.rotation)})});if(r.ok)location.reload();else window.inktimeSetStatus(photoStatus,(await window.inktimeDecodeJson(r)).message||'儲存失敗','error')});const privacyButton=document.getElementById('save-never-upload');if(privacyButton)privacyButton.onclick=async()=>{const r=await window.inktimeFetch('/api/v1/photos/{{ photo.id }}/upload-privacy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({never_upload:document.getElementById('never-upload').checked})});if(r.ok)location.reload();else window.inktimeSetStatus(photoStatus,(await window.inktimeDecodeJson(r)).message||'儲存失敗','error')};</script>{% endif %}{% endblock %}

@@ -361,6 +361,7 @@ class PhotoAnalysisService:
         policy = evaluate_local_quality(dict(photo), settings=policy_settings)
         labels = {
             "screenshot_strong": "明確截圖證據",
+            "screenshot_mixed_signal": "疑似截圖（多重信號）",
             "screenshot_score": "截圖信號分數",
             "screenshot_independent_signals": "截圖獨立信號",
             "document_token_with_evidence": "文件或掃描證據",
@@ -373,6 +374,32 @@ class PhotoAnalysisService:
             "exposure_low_priority": "曝光比例偏高",
             "social_export": "社群平台轉存",
             "e6_low": "E6 適合度過低",
+        }
+        sensitivity_labels = {
+            "conservative": "保守模式",
+            "balanced": "平衡模式",
+            "aggressive": "積極模式",
+        }
+        decision_labels = {
+            "auto_excluded": "自動排除",
+            "disabled": "預篩選停用",
+            "protected": "人工保護，繼續保留",
+            "low_priority": "保留，但降低優先順序",
+            "pass": "通過預篩選",
+        }
+        reason_labels = {
+            "passed": "沒有命中需要處理的規則",
+            "screenshot": "判定為截圖",
+            "resolution_too_low": "照片解析度過低",
+            "document_or_receipt": "判定為文件或收據",
+            "severe_blur": "照片嚴重模糊或失焦",
+            "tiny_nearly_blank": "檔案過小且畫面近乎空白",
+            "extreme_exposure_low_contrast": "曝光極端且對比不足",
+            "e6_below_threshold": "E6 六色顯示適合度不足",
+            "suspected_blur": "照片可能模糊",
+            "small_compressed": "檔案尺寸過小或壓縮明顯",
+            "exposure_low_priority": "曝光比例偏高",
+            "social_export": "疑似社群平台轉存",
         }
         evidence = policy["evidence"]
         thresholds = policy["thresholds"]
@@ -450,7 +477,10 @@ class PhotoAnalysisService:
             "checks": checks,
             "defect_count": len(enabled_hits),
             "favorite_bypass": policy["decision"] == "protected",
-            "summary": f"本機品質規則：{policy['decision']}（{policy['primary_reason']}）",
+            "sensitivity_label": sensitivity_labels.get(policy["sensitivity"], policy["sensitivity"]),
+            "decision_label": decision_labels.get(policy["decision"], policy["decision"]),
+            "reason_label": reason_labels.get(policy["primary_reason"], policy["primary_reason"]),
+            "summary": decision_labels.get(policy["decision"], policy["decision"]),
         }
 
     def _prefilter_result(self, photo, *, policy_settings: dict | None = None) -> dict | None:
