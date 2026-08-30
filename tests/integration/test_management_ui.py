@@ -75,6 +75,37 @@ def test_primary_management_pages_render(client, app):
     assert "budget:'float'" in jobs
     assert "if(body.limit===null)delete body.limit;" in jobs
 
+
+def test_dashboard_renders_one_page_setup_overview_with_direct_actions(client, app):
+    create_admin(app)
+    login(client)
+
+    body = client.get("/dashboard").get_data(as_text=True)
+
+    assert 'id="setup-overview"' in body
+    assert "完整設定導覽" in body
+    assert 'role="progressbar"' in body
+    for title in (
+        "照片來源與掃描",
+        "分析方式",
+        "Vision Provider 與模型",
+        "用量限制與預算保護",
+        "電子紙裝置",
+        "自動排程",
+        "備份與保留",
+    ):
+        assert title in body
+    for action_url in (
+        "/photos",
+        "/settings?search=分析執行模式",
+        "/providers",
+        "/settings?search=預算",
+        "/devices",
+        "/schedules",
+        "/backups",
+    ):
+        assert f'href="{action_url}"' in body
+
 def test_shared_confirmation_dialog_resets_and_normalizes_cancel_state(client, app):
     create_admin(app)
     login(client)

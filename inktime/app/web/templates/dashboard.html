@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}儀表板｜InkTime{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">系統總覽</p><h1>儀表板</h1></div><span class="status {{ 'error' if system_status == '嚴重故障' else 'warn' if system_status != '正常' else 'ok' }}">{{ system_status }}</span></div>
+<div class="page-head"><div><p class="eyebrow">系統總覽</p><h1>儀表板</h1></div><div class="dashboard-head-actions"><a href="#setup-overview">完整設定導覽</a><span class="status {{ 'error' if system_status == '嚴重故障' else 'warn' if system_status != '正常' else 'ok' }}">{{ system_status }}</span></div></div>
 <section class="dashboard-summary" aria-label="系統摘要">
   <article class="dashboard-summary-group">
     <div class="dashboard-summary-head"><div><p>照片資料</p><h2>照片庫</h2></div><a href="/photos">查看照片</a></div>
@@ -41,5 +41,29 @@
   {% if recent_errors %}<div class="table-wrap"><table><thead><tr><th>錯誤碼</th><th>內容</th><th>次數</th><th>最後發生</th></tr></thead><tbody>
   {% for error in recent_errors %}<tr><td><code>{{ error.error_code }}</code></td><td>{{ error.message }}</td><td>{{ error.occurrences }}</td><td>{{ error.last_seen_at }}</td></tr>{% endfor %}
   </tbody></table></div>{% else %}<p class="empty">目前沒有未解決錯誤。</p>{% endif %}
+</section>
+<section class="panel setup-overview" id="setup-overview">
+  <div class="setup-overview-head">
+    <div><p class="eyebrow">一頁看懂目前設定</p><h2>完整設定導覽</h2><p>從照片來源到備份依序檢查。打勾表示已完成設定；黃色項目代表已設定，但仍有狀態需要注意。</p></div>
+    <div class="setup-progress-summary" aria-label="已完成 {{ setup.completed }}／{{ setup.total }} 項">
+      <strong>{{ setup.completed }} / {{ setup.total }}</strong><span>已設定</span>
+    </div>
+  </div>
+  <div class="setup-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="{{ setup.total }}" aria-valuenow="{{ setup.completed }}"><span style="width: {{ setup.percent }}%"></span></div>
+  <p class="setup-overview-status">{% if setup.missing %}還有 {{ setup.missing }} 項尚未完成。{% else %}所有主要設定都已填妥。{% endif %}{% if setup.attention %}另有 {{ setup.attention }} 項已設定但需要注意。{% endif %}</p>
+  <div class="setup-runtime-strip"><span>環境 <strong>{{ setup.environment }}</strong></span><span>照片 <code>{{ setup.photo_dir }}</code></span><span>資料 <code>{{ setup.data_dir }}</code></span><span>時區 <strong>{{ setup.timezone }}</strong></span></div>
+  <ol class="setup-step-list">
+    {% for step in setup.steps %}
+    <li class="setup-step {{ 'is-attention' if step.attention else 'is-complete' if step.complete else 'is-missing' }}">
+      <div class="setup-step-marker" aria-hidden="true">{% if step.complete %}✓{% else %}{{ step.number }}{% endif %}</div>
+      <div class="setup-step-body">
+        <div class="setup-step-title"><h3>{{ step.number }}. {{ step.title }}</h3><span>{{ '必要設定' if step.required else '建議設定' }}</span><b>{% if step.attention %}已設定・需注意{% elif step.complete %}已完成{% else %}尚未完成{% endif %}</b></div>
+        <p class="setup-step-current">{{ step.current }}</p>
+        <p>{{ step.detail }}</p>
+      </div>
+      <a class="secondary setup-step-action" href="{{ step.action_url }}">{{ step.action_label }}</a>
+    </li>
+    {% endfor %}
+  </ol>
 </section>
 {% endblock %}
