@@ -474,6 +474,18 @@ def validate_analysis_result(raw: str | dict) -> dict:
     if isinstance(orientation_value, dict) and "evidence" in orientation_value:
         orientation_value = dict(orientation_value)
         orientation_value["evidence"] = _deduplicate_string_list(orientation_value.get("evidence"))
+        if (
+            value.get("schema_version") == 3
+            and orientation_value.get("rotation_cw") is None
+            and orientation_value.get("evidence") == ["insufficient_visual_cues"]
+        ):
+            # ``rotation_cw=null`` plus this sole evidence has one canonical
+            # meaning: there is no reliable visual orientation.  Free-router
+            # models occasionally contradict it with ``ambiguous=false`` or
+            # a high confidence, which is safe to normalize without inventing
+            # a rotation or paying for a second model call.
+            orientation_value["ambiguous"] = True
+            orientation_value["confidence"] = 0.0
         value["visual_orientation"] = orientation_value
     # v1 cache entries predate this additive field.  Keep them readable without
     # treating the missing value as a confident orientation recommendation.

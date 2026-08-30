@@ -973,16 +973,18 @@ class OpenAICompatibleProvider(VisionProvider):
             if self.options.get("session_sticky") and provider_request_context_id:
                 session_identity = f"{self.provider_id}|{provider_request_context_id}"
                 body["session_id"] = hashlib.sha256(session_identity.encode("utf-8")).hexdigest()[:32]
-            if allow_reasoning:
-                normalized_effort = normalize_reasoning_effort(reasoning_effort or "none")
-                if normalized_effort == "max":
-                    # Keep the legacy max input while using OpenRouter's
-                    # current highest documented effort value on the wire.
-                    normalized_effort = "xhigh"
-                # OpenRouter may route an otherwise unspecified request to a
-                # reasoning model.  Send ``none`` explicitly so a bounded
-                # output budget remains available for the JSON response.
-                body["reasoning"] = {"effort": normalized_effort}
+            normalized_effort = normalize_reasoning_effort(
+                (reasoning_effort or "none") if allow_reasoning else "none"
+            )
+            if normalized_effort == "max":
+                # Keep the legacy max input while using OpenRouter's
+                # current highest documented effort value on the wire.
+                normalized_effort = "xhigh"
+            # OpenRouter may route an otherwise unspecified request to a
+            # reasoning model.  Send ``none`` explicitly for calls that do
+            # not allow reasoning (including JSON repair), so the bounded
+            # output budget remains available for the JSON response.
+            body["reasoning"] = {"effort": normalized_effort}
         elif self.supports_reasoning_effort and allow_reasoning and reasoning_effort is not None:
             body["reasoning_effort"] = normalize_reasoning_effort(reasoning_effort)
         return body

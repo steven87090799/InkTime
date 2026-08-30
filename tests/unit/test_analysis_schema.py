@@ -212,6 +212,26 @@ def test_set_like_model_arrays_remove_exact_duplicates_before_validation():
     assert normalized["visual_orientation"]["evidence"] == ["faces_upright"]
 
 
+def test_schema_v3_canonicalizes_unknown_orientation_without_repair():
+    candidate = _v3_result(
+        visual_orientation={
+            "rotation_cw": None,
+            "confidence": 0.98,
+            "ambiguous": False,
+            "evidence": ["insufficient_visual_cues"],
+        }
+    )
+
+    normalized = validate_analysis_result(candidate)
+
+    assert normalized["visual_orientation"] == {
+        "rotation_cw": None,
+        "confidence": 0.0,
+        "ambiguous": True,
+        "evidence": ["insufficient_visual_cues"],
+    }
+
+
 def test_schema_v3_accepts_grade_container_aliases_and_rejects_invalid_grade():
     value = valid_result(
         schema_version=3,
