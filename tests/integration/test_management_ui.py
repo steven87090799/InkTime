@@ -949,6 +949,9 @@ def test_photo_console_shows_prefilter_metrics_model_text_and_generated_caption(
     detail = client.get(f"/photos/{photo_id}")
     body = detail.get_data(as_text=True)
     assert detail.status_code == 200
+    assert 'class="photo-overview-layout"' in body
+    assert 'class="photo-analysis-grid"' in body
+    assert 'class="photo-runtime-grid"' in body
     assert "本機預篩選判斷" in body
     assert 'class="panel photo-prefilter-panel"' in body
     assert 'class="prefilter-rule-grid"' in body
@@ -963,6 +966,9 @@ def test_photo_console_shows_prefilter_metrics_model_text_and_generated_caption(
     assert "產生的一句話（電子紙短文案）" in body
     assert "風把這一天留得很輕。" in body
     assert "測試 Provider / vision-model" in body
+    assert body.index('class="photo-overview-layout"') < body.index('class="photo-analysis-grid"')
+    assert body.index('class="photo-analysis-grid"') < body.index('class="photo-runtime-grid"')
+    assert body.index('class="photo-runtime-grid"') < body.index('class="panel photo-prefilter-panel"')
 
     listing = client.get("/photos").get_data(as_text=True)
     assert "家人在公園散步。" in listing
