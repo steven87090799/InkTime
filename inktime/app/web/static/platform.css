@@ -183,11 +183,12 @@ textarea:focus-visible {
 .dashboard-summary-head p { margin: 0; color: var(--accent); font-size: 11px; font-weight: 800; letter-spacing: .1em; }
 .dashboard-summary-head h2 { margin: 2px 0 0; font-size: 20px; }
 .dashboard-summary-head a { flex: 0 0 auto; padding-top: 3px; color: var(--accent); font-size: 12px; }
-.dashboard-summary-list { margin: 0; }
-.dashboard-summary-list > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; min-height: 68px; padding: 13px 0; border-top: 1px solid var(--line); }
+.dashboard-summary-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 14px; margin: 0; }
+.dashboard-summary-list > div { display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 6px; min-height: 78px; padding: 13px 0; border-top: 1px solid var(--line); }
+.dashboard-summary-list > div:nth-child(3) { grid-column: 1 / -1; min-height: 68px; }
 .dashboard-summary-list dt { min-width: 0; color: var(--muted); font-size: 13px; }
 .dashboard-summary-list dt small { display: block; margin-top: 2px; font-size: 10px; }
-.dashboard-summary-list dd { margin: 0; font-size: clamp(17px, 1.55vw, 23px); font-weight: 800; line-height: 1.2; text-align: right; white-space: nowrap; }
+.dashboard-summary-list dd { margin: 0; font-size: clamp(17px, 1.55vw, 23px); font-weight: 800; line-height: 1.2; text-align: left; white-space: nowrap; }
 .dashboard-summary-list .has-alert dd { color: var(--danger); }
 .dashboard-page-head { align-items: center; }
 .dashboard-health { display: grid; justify-items: end; }
