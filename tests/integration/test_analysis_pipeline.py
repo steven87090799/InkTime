@@ -18,7 +18,7 @@ from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.analysis import PhotoAnalysisService
-from inktime.app.services.budgets import BudgetExceeded, BudgetService
+from inktime.app.services.budgets import BudgetService
 from inktime.app.domain.analysis.plan import build_analysis_plan, fingerprint
 from inktime.app.domain.analysis.schema import AnalysisValidationError
 from inktime.app.workers.job_worker import BoundedJobWorker
@@ -446,8 +446,9 @@ def test_spawned_consumed_vision_timeout_is_terminal_and_billed_once(app, tmp_pa
         snapshot = budgets.snapshot(job_id=job_id, photo_id=photo_id)
         assert snapshot["photo_unknown_count"] == 1
         assert snapshot["job_unknown_count"] == 1
-        with pytest.raises(BudgetExceeded):
-            budgets.assert_request_allowed(job_id, photo_id)
+        # Unknown history remains auditable and reserved globally, but it no
+        # longer permanently blocks this photo or every later Job.
+        budgets.assert_request_allowed(job_id, photo_id)
     finally:
         boundary.shutdown()
         provider.close()

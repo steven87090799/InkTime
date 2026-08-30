@@ -173,3 +173,44 @@ def test_openrouter_400_is_not_retried_and_preserves_bounded_safe_error_details(
     assert error.call_trace is not None
     assert error.call_trace.http_status == 400
     provider.close()
+
+
+def test_openrouter_no_compatible_endpoint_404_is_retryable():
+    class Response:
+        status_code = 404
+        headers = {}
+        text = json.dumps(
+            {
+                "error": {
+                    "code": 404,
+                    "message": "No endpoints found that can handle the requested parameters.",
+                }
+            }
+        )
+
+        def json(self):
+            return json.loads(self.text)
+
+    class Session:
+        def post(self, _url, **_kwargs):
+            return Response()
+
+        def close(self):
+            return None
+
+    provider = OpenAICompatibleProvider(
+        name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="redacted-test-key",
+        kind="openrouter",
+        session=Session(),
+    )
+    with pytest.raises(ProviderHTTPError) as caught:
+        provider._post_completion({"model": "openrouter/free", "messages": []})
+
+    error = caught.value
+    assert error.code == "VLM-005"
+    assert error.http_status == 404
+    assert error.response_info["provider_error_code"] == "404"
+    assert "No endpoints found" in error.response_info["provider_error_message"]
+    provider.close()

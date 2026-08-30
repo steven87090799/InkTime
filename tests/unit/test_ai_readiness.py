@@ -78,9 +78,12 @@ def test_readiness_is_complete_only_with_automatic_ai_model_and_usable_provider(
                 }
             ]
         ),
-        FakeProviderService([{"provider_id": "provider-1"}]),
+        FakeProviderService(
+            [{"provider_id": "provider-1", "display_name": "Ready", "model": "fixed-vision"}]
+        ),
     )
 
     assert snapshot["ready"] is True
     assert snapshot["ready_count"] == 3
     assert snapshot["provider_details"][0]["ready"] is True
+    assert snapshot["checks"][2]["current"] == "Ready：fixed-vision"

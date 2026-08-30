@@ -280,6 +280,28 @@ def test_schema_v3_accepts_grade_container_aliases_and_rejects_invalid_grade():
         validate_analysis_result(invalid)
 
 
+def test_schema_v3_accepts_nullable_optional_display_grade():
+    candidate = _v3_result(
+        details={
+            "memory_grade": "A",
+            "beauty_grade": "B",
+            "technical_grade": "C",
+            "emotion_grade": "D",
+            "display_suitability_grade": None,
+            "animals": None,
+            "vehicles": None,
+            "landmark_candidates": None,
+            "search_keywords": None,
+            "confidence": 0.8,
+        }
+    )
+
+    normalized = validate_analysis_result(candidate)
+
+    assert normalized["details"]["display_suitability_grade"] is None
+    assert normalized["details"]["search_keywords"] is None
+
+
 @pytest.mark.parametrize("raw", [[], 1, True, None, "[]", "1"])
 def test_analysis_result_top_level_must_be_object(raw):
     with pytest.raises(AnalysisValidationError, match="頂層必須是 JSON Object"):

@@ -516,7 +516,15 @@ def validate_analysis_result(raw: str | dict) -> dict:
     if value["schema_version"] == 3:
         details = value.get("details") or {}
         for grade_field in (*V3_GRADE_FIELDS, "display_suitability_grade"):
-            if grade_field in details and details[grade_field] not in GRADE_VALUES:
+            # Detail fields are nullable in FULL_ANALYSIS_JSON_SCHEMA.  A null
+            # grade means the model could not determine it; it is not an
+            # invalid enum value and must not turn an otherwise valid photo
+            # analysis into VLM-004.
+            if (
+                grade_field in details
+                and details[grade_field] is not None
+                and details[grade_field] not in GRADE_VALUES
+            ):
                 raise AnalysisValidationError(f"{grade_field} 等級不合法")
         confidence = details.get("confidence")
         if confidence is None:
@@ -606,6 +614,11 @@ def validate_analysis_result(raw: str | dict) -> dict:
         ):
             raise AnalysisValidationError("details 欄位不合法")
         for field, detail in details.items():
+            # Every semantic detail is nullable in the published JSON Schema.
+            # Null means the model could not determine that optional fact and
+            # must remain valid instead of triggering a repair loop.
+            if detail is None:
+                continue
             if field == "caption_variants":
                 if not isinstance(detail, dict) or not set(detail) <= set(CAPTION_VARIANT_STYLES):
                     raise AnalysisValidationError("caption_variants 欄位不合法")

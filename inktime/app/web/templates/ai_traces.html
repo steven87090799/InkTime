@@ -9,7 +9,13 @@
     <article><span>Trace 紀錄</span><strong>{{ trace_summary.trace_count }}</strong><small>一次實際 Provider 呼叫流程一筆</small></article>
     <article><span>不同照片</span><strong>{{ trace_summary.photo_count }}</strong><small>同一照片重試或不同階段可有多筆</small></article>
     <article><span>相關工作</span><strong>{{ trace_summary.job_count }}</strong><small>不是所有分析工作都會走到 Provider</small></article>
+    <article><span>目前 Trace 文字量</span><strong>{{ trace_summary.payload_mib }} MiB</strong><small>{{ trace_summary.attempt_count }} 次模型／修復嘗試；不包含 SQLite 索引</small></article>
+    <article><span>10 萬筆粗估</span><strong>約 {{ trace_summary.estimated_100k_gib }} GiB</strong><small>依目前每筆平均內容線性估算；重試愈多會愈大</small></article>
   </div>
+  {% if trace_summary.retention %}
+    {% if trace_summary.retention.enabled %}<p class="notice success">AI Trace 保留策略已啟用：保留 {{ trace_summary.retention.retention_days }} 天，每次最多清理 {{ trace_summary.retention.cleanup_batch_size }} 筆。<a href="/retention">查看保留設定</a></p>
+    {% else %}<p class="notice warning"><strong>AI Trace 自動保留目前停用。</strong>資料會持續累積；前往<a href="/retention">資料保留</a>啟用 <code>ai_trace</code>，再由排程分批清理超過保留天數的紀錄。</p>{% endif %}
+  {% endif %}
   {% if trace_summary.trace_count and trace_summary.photo_count == 1 %}<p class="notice warning trace-single-photo">目前資料庫確實只有 1 張照片曾產生 AI Trace，所以清單只會看到同一張；這不代表其他照片遺失，而是其他照片沒有成功走到 Provider 呼叫階段。</p>{% endif %}
 </section>
 <section class="panel"><form id="trace-filters" class="form-stack"><div class="settings-grid">

@@ -82,12 +82,12 @@
 </section>
 
 <section class="panel photo-analysis-panel">
-  <div class="panel-head"><div><p class="eyebrow">最近分析</p><h2>模型與分析結果</h2><p class="analysis-history-note">每次本機重分析、AI 工作或 Fallback 可能新增一筆；單純掃描不一定新增。</p></div><span>只顯示最新 {{ [analysis_total, 2]|min }} / {{ analysis_total }} 筆</span></div>
+  <div class="panel-head"><div><p class="eyebrow">目前採用與歷史分析</p><h2>模型與分析結果</h2><p class="analysis-history-note">有模型結果時會優先顯示；之後新增的本機重掃或 Fallback 只保留為歷史，不會再蓋掉模型文案。</p></div><span>顯示優先結果與最近記錄，共 {{ [analysis_total, 2]|min }} / {{ analysis_total }} 筆</span></div>
   <div class="photo-analysis-grid">
     {% for a in analyses %}
     <article class="analysis-card">
       <div class="panel-head">
-        <strong>{{ a.origin_label }} · {{ a.stage }}</strong>
+        <strong>{% if a.is_preferred %}目前採用 · {% endif %}{{ a.origin_label }} · {{ a.stage_label }}</strong>
         <span class="status {{ 'ok' if a.should_keep else 'warning' }}">該次{{ a.origin_label }}：{{ '建議保留' if a.should_keep else '建議排除' }}</span>
       </div>
       <p class="analysis-meta">{{ a.provider or '未知 Provider' }} / {{ a.model or '未知模型' }} · {{ a.created_at }}</p>

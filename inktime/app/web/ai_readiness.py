@@ -17,10 +17,19 @@ def ai_readiness_snapshot(settings, provider_repository, provider_service) -> di
     """Describe every non-network condition required to create a Vision job."""
 
     mode = execution_mode(settings)
-    model = str(settings.get("model.analysis_model", "gpt-4o") or "").strip()
-    usable_ids = {
-        str(item["provider_id"]) for item in provider_service.usable_route_snapshot()
-    }
+    fallback_model = str(settings.get("model.analysis_model", "gpt-4o") or "").strip()
+    routes = provider_service.usable_route_snapshot()
+    usable_ids = {str(item["provider_id"]) for item in routes}
+    route_models = [
+        {
+            "provider": str(item.get("display_name") or item.get("provider_id") or "Provider"),
+            "model": str(item.get("model") or fallback_model).strip(),
+        }
+        for item in routes
+    ]
+    resolved_model_label = "、".join(
+        f"{item['provider']}：{item['model']}" for item in route_models if item["model"]
+    )
     provider_details = []
     for row in provider_repository.list():
         issues = []
@@ -39,6 +48,7 @@ def ai_readiness_snapshot(settings, provider_repository, provider_service) -> di
             {
                 "name": str(row.get("name") or row.get("id") or "未命名 Provider"),
                 "kind": str(row.get("kind") or "unknown"),
+                "model": str(row.get("model") or fallback_model or "未設定"),
                 "ready": str(row.get("id")) in usable_ids,
                 "issues": tuple(issues),
             }
@@ -65,12 +75,15 @@ def ai_readiness_snapshot(settings, provider_repository, provider_service) -> di
         },
         {
             "key": "model",
-            "label": "分析模型",
-            "ready": bool(model),
-            "current": model or "未設定",
-            "required": "必須指定 Provider 可使用的 Vision 模型名稱",
-            "action_label": "前往設定並直接搜尋",
-            "action_url": "/settings?search=分析模型",
+            "label": "實際路由模型",
+            "ready": bool(resolved_model_label or fallback_model),
+            "current": resolved_model_label or fallback_model or "未設定",
+            "required": (
+                "每個可用 Provider 都必須指定模型；"
+                "openrouter/free 代表由免費路由器於請求時選擇"
+            ),
+            "action_label": "前往選擇模型",
+            "action_url": "/providers",
         },
     )
     ready_count = sum(1 for check in checks if check["ready"])
@@ -80,6 +93,6 @@ def ai_readiness_snapshot(settings, provider_repository, provider_service) -> di
         "required_count": len(checks),
         "checks": checks,
         "provider_details": tuple(provider_details),
-        "model": model,
+        "model": resolved_model_label or fallback_model,
         "execution_mode": mode,
     }

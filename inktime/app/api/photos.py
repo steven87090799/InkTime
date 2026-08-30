@@ -35,6 +35,7 @@ from inktime.app.domain.photos.quality_policy import (
 )
 from inktime.app.web.access import administrator_required, login_required
 from inktime.app.domain.photos.orientation import original_exif_orientation, resolve_effective_orientation
+from inktime.app.repositories.photos import preferred_analysis_order_sql
 
 
 bp = Blueprint("photos", __name__)
@@ -548,6 +549,7 @@ def queue_ai_mode_run():
                         [str(photo_id) for photo_id in batch.get("photo_ids", [])],
                         created_by=actor,
                         name=f"完整照片庫 AI：{str(batch.get('group', '未知'))}",
+                        force_ai=True,
                         idempotency_scope="ai-mode-run",
                         idempotency_key=grouped_idempotency_key(request_key, str(batch.get("group", "未知"))),
                         analysis_plan=stored_plan,
@@ -577,6 +579,7 @@ def queue_ai_mode_run():
                     ids,
                     created_by=str(g.user["id"]),
                     name=f"完整照片庫 AI：{group}",
+                    force_ai=True,
                     idempotency_scope="ai-mode-run",
                     idempotency_key=grouped_idempotency_key(request_key, str(group)),
                     analysis_plan=analysis_plan,
@@ -624,12 +627,21 @@ def photo_detail(photo_id: str):
                 "SELECT COUNT(*) FROM photo_analysis WHERE photo_id=?", (photo_id,)
             ).fetchone()[0]
         )
-        analysis_rows = connection.execute(
+        preferred_analysis = connection.execute(
+            f"""
+            SELECT a.*,v.name AS scoring_version_name
+            FROM photo_analysis a
+            LEFT JOIN scoring_rule_versions v ON v.id=a.scoring_version_id
+            WHERE a.photo_id=? ORDER BY {preferred_analysis_order_sql('a')} LIMIT 1
+            """,  # noqa: S608 -- ordering is generated from a fixed repository helper.
+            (photo_id,),
+        ).fetchone()
+        latest_analyses = connection.execute(
             """
             SELECT a.*,v.name AS scoring_version_name
             FROM photo_analysis a
             LEFT JOIN scoring_rule_versions v ON v.id=a.scoring_version_id
-            WHERE a.photo_id=? ORDER BY a.created_at DESC LIMIT 2
+            WHERE a.photo_id=? ORDER BY a.created_at DESC,a.id DESC LIMIT 2
             """,
             (photo_id,),
         ).fetchall()
@@ -642,15 +654,34 @@ def photo_detail(photo_id: str):
         events = connection.execute(
             "SELECT * FROM photo_events WHERE photo_id=? ORDER BY created_at DESC LIMIT 100", (photo_id,)
         ).fetchall()
+    analysis_rows = []
+    if preferred_analysis is not None:
+        analysis_rows.append(preferred_analysis)
+    preferred_id = int(preferred_analysis["id"]) if preferred_analysis is not None else None
+    analysis_rows.extend(
+        row for row in latest_analyses if int(row["id"]) != preferred_id
+    )
+    analysis_rows = analysis_rows[:2]
     analyses = []
     score_distribution = prepare_score_distribution(_repository().score_population())
-    for row in analysis_rows:
+    for index, row in enumerate(analysis_rows):
         analysis = dict(row)
         try:
             analysis["types"] = json.loads(str(analysis.get("types_json") or "[]"))
         except json.JSONDecodeError:
             analysis["types"] = []
         analysis["origin_label"] = "本機判斷" if analysis.get("provider") == "local" else "模型判斷"
+        analysis["is_preferred"] = index == 0
+        analysis["stage_label"] = {
+            "single": "Vision 模型分析",
+            "stage_one": "Vision 第一階段",
+            "stage_two": "Vision 第二階段",
+            "cache": "模型快取",
+            "inherited": "沿用模型結果",
+            "local_fallback": "本機備援（未呼叫模型）",
+            "prefilter": "本機預篩選（未呼叫模型）",
+            "local": "本機分析（未呼叫模型）",
+        }.get(str(analysis.get("stage") or ""), str(analysis.get("stage") or "未知階段"))
         if analysis.get("ranking_score") is not None:
             calibrated, percentile = calculate_distinguishing_score(
                 float(analysis["ranking_score"]), score_distribution

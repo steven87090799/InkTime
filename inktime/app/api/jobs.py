@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 from flask import Blueprint, Response, abort, current_app, g, render_template, request, stream_with_context
 
@@ -21,6 +22,335 @@ from inktime.app.web.access import administrator_required, login_required
 
 
 bp = Blueprint("jobs", __name__)
+JOB_ITEM_PAGE_SIZE = 100
+
+
+JOB_STATUS_LABELS = {
+    "pending": "等待啟動",
+    "preparing": "準備中",
+    "running": "執行中",
+    "pausing": "正在暫停",
+    "paused": "已暫停",
+    "retrying": "正在重試",
+    "completed": "已完成",
+    "completed_with_errors": "已完成，但有失敗項目",
+    "failed": "執行失敗",
+    "cancelled": "已取消",
+    "budget_exceeded": "因成本安全規則暫停",
+}
+
+
+def _job_item_view(item) -> dict:
+    status = str(item["status"])
+    stage = str(item["stage"])
+    attempts = int(item["attempts"] or 0)
+    code = str(item["error_code"] or "")
+    if stage == "no_content":
+        return {
+            "explanation_title": "目前沒有可顯示照片",
+            "explanation_detail": "加入照片後，下次排程會再檢查。",
+            "explanation_tone": "neutral",
+        }
+    if status == "completed" and stage == "local_fallback":
+        return {
+            "explanation_title": "本機備援完成（未呼叫模型）",
+            "explanation_detail": (
+                "這張照片沒有進入 Vision 呼叫；當時的 AI 選片模式或每日／每月上限只允許部分照片，"
+                "所以工作改存本機品質結果。這不等於模型分析成功。"
+            ),
+            "explanation_tone": "warning",
+        }
+    if status == "completed" and stage == "prefilter":
+        return {
+            "explanation_title": "本機預篩選完成（未呼叫模型）",
+            "explanation_detail": "照片在送出前已被本機規則排除，因此沒有傳給 Vision 模型。",
+            "explanation_tone": "neutral",
+        }
+    if status == "completed" and stage == "local":
+        return {
+            "explanation_title": "本機分析完成（未呼叫模型）",
+            "explanation_detail": "這是一筆只使用本機影像特徵的結果，沒有 Provider Token 或模型文案。",
+            "explanation_tone": "neutral",
+        }
+    if status == "completed" and stage == "cache":
+        return {
+            "explanation_title": "已沿用模型快取",
+            "explanation_detail": "相同照片與分析設定已有模型結果；本次未重複呼叫 Provider。",
+            "explanation_tone": "success",
+        }
+    if status == "completed" and stage == "inherited":
+        return {
+            "explanation_title": "已沿用相同照片的模型結果",
+            "explanation_detail": "系統找到相同影像與分析設定的既有結果；本次未重複呼叫 Provider。",
+            "explanation_tone": "success",
+        }
+    if status == "completed":
+        return {
+            "explanation_title": "已成功",
+            "explanation_detail": (
+                f"過程中曾重試 {attempts - 1} 次；最後一次已成功，舊錯誤不影響結果。"
+                if attempts > 1
+                else "模型結果已成功儲存。"
+            ),
+            "explanation_tone": "success",
+        }
+    if status == "running":
+        return {
+            "explanation_title": "正在處理",
+            "explanation_detail": "Worker 已領取此照片，正在執行目前階段。",
+            "explanation_tone": "active",
+        }
+    if status == "pending" and not code:
+        return {
+            "explanation_title": "等待 Worker",
+            "explanation_detail": "此照片仍在 Queue，尚未送進模型。",
+            "explanation_tone": "neutral",
+        }
+    if status == "cancelled":
+        return {
+            "explanation_title": "已取消",
+            "explanation_detail": "此照片不會再送進模型。",
+            "explanation_tone": "neutral",
+        }
+
+    provider_message = ""
+    provider_response_text = str(item["latest_provider_response"] or "")
+    try:
+        provider_payload = json.loads(provider_response_text)
+        provider_error = provider_payload.get("error") if isinstance(provider_payload, dict) else None
+        if isinstance(provider_error, dict):
+            provider_message = str(provider_error.get("message") or "").strip()
+    except (json.JSONDecodeError, TypeError, ValueError):
+        provider_message = ""
+    http_status = int(item["latest_http_status"] or 0)
+    no_compatible_openrouter_endpoint = (
+        http_status == 404
+        and "no endpoints found that can handle the requested parameters"
+        in provider_message.lower()
+    )
+    if code == "VLM-005" and no_compatible_openrouter_endpoint:
+        return {
+            "explanation_title": "OpenRouter 免費路由暫時沒有相容模型",
+            "explanation_detail": (
+                "這次請求需要圖片理解與結構化輸出；OpenRouter 回覆 HTTP 404，"
+                "當下沒有免費端點可同時支援。可稍後重跑，或改用固定且支援 Vision／JSON Schema 的模型。"
+            ),
+            "explanation_tone": "error",
+        }
+    if code == "VLM-005":
+        return {
+            "explanation_title": "目前沒有可用的模型端點",
+            "explanation_detail": (
+                "Provider 可能正在冷卻、忙碌或已達 Rate Limit；稍後重跑，或改用較穩定的固定 Vision 模型。"
+            ),
+            "explanation_tone": "error",
+        }
+    raw_message = str(item["error_message"] or "").strip()
+    if code == "VLM-004" and "display_suitability_grade" in raw_message:
+        compact_provider_response = provider_response_text.replace(" ", "")
+        nullable_grade_was_rejected = (
+            '"display_suitability_grade":null' in compact_provider_response
+            or '\\"display_suitability_grade\\":null' in compact_provider_response
+        )
+        return {
+            "explanation_title": (
+                "舊版把『無法判斷 E6 等級』誤判為格式錯誤"
+                if nullable_grade_was_rejected
+                else "模型輸出的 E6 適合度等級格式錯誤"
+            ),
+            "explanation_detail": (
+                "模型回傳 null，表示無法判斷；舊版驗證器與 Schema 規則不一致而拒絕儲存。"
+                "目前版本已接受 null；照片檔本身沒有損壞，可重跑這筆舊失敗。"
+                if nullable_grade_was_rejected
+                else "模型回傳的 display_suitability_grade 不是允許的 S、A、B、C、D、E 或 unknown；"
+                "系統修復一次後仍不合格，因此拒絕儲存。照片檔本身沒有損壞。"
+            ),
+            "explanation_tone": "error",
+        }
+    if code == "VLM-004":
+        return {
+            "explanation_title": "模型輸出不符合分析格式",
+            "explanation_detail": f"模型修復一次後仍無法通過欄位驗證：{raw_message or '格式不合法'}。",
+            "explanation_tone": "error",
+        }
+    return {
+        "explanation_title": "處理失敗" if not code else f"處理失敗（{code}）",
+        "explanation_detail": (
+            "模型服務拒絕了請求；請查看模型呼叫紀錄取得 HTTP 狀態與 Provider 回覆。"
+            if raw_message == "ProviderHTTPError"
+            else raw_message or "請查看模型呼叫紀錄取得詳細原因。"
+        ),
+        "explanation_tone": "error",
+    }
+
+
+def _job_performance_view(job) -> dict:
+    settings_repository = current_app.extensions["inktime_settings_repository"]
+    runtime_config = current_app.extensions["inktime_runtime_config"]
+    try:
+        job_settings = json.loads(str(job["settings_json"] or "{}"))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        job_settings = {}
+    configured_concurrency = max(
+        1,
+        int(job_settings.get("concurrency", settings_repository.get("analysis.concurrency"))),
+    )
+    worker_cap = max(1, int(runtime_config.worker_concurrency))
+    effective_concurrency = min(configured_concurrency, worker_cap)
+    with current_app.extensions["inktime_database"].session() as connection:
+        timing = connection.execute(
+            """
+            SELECT COUNT(*) samples,
+                   AVG((julianday(completed_at)-julianday(started_at))*86400.0) average_seconds
+            FROM job_items
+            WHERE job_id=? AND status='completed'
+              AND stage IN ('single','stage_one','stage_two')
+              AND started_at IS NOT NULL AND completed_at IS NOT NULL
+            """,
+            (str(job["id"]),),
+        ).fetchone()
+    average_seconds = float(timing["average_seconds"] or 0)
+    estimated_days = (
+        average_seconds * 100_000 / effective_concurrency / 86_400 if average_seconds > 0 else None
+    )
+    return {
+        "configured_concurrency": configured_concurrency,
+        "worker_cap": worker_cap,
+        "effective_concurrency": effective_concurrency,
+        "samples": int(timing["samples"] or 0),
+        "average_seconds": round(average_seconds, 1) if average_seconds > 0 else None,
+        "estimated_100k_days": round(estimated_days, 1) if estimated_days is not None else None,
+    }
+
+
+def _job_status_view(job) -> dict:
+    job_id = str(job["id"])
+    status = str(job["status"])
+    with current_app.extensions["inktime_database"].session() as connection:
+        rows = connection.execute(
+            "SELECT status,stage,COUNT(*) count FROM job_items WHERE job_id=? GROUP BY status,stage",
+            (job_id,),
+        ).fetchall()
+        budget_candidate = connection.execute(
+            """
+            SELECT photo_id FROM job_items
+            WHERE job_id=? AND status='pending' AND started_at IS NOT NULL
+            ORDER BY started_at DESC,id DESC LIMIT 1
+            """,
+            (job_id,),
+        ).fetchone()
+        budget_unknown = (
+            connection.execute(
+                """
+                SELECT provider_id,provider,model FROM api_usage
+                WHERE photo_id=? AND cost_source='unknown'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (budget_candidate["photo_id"],),
+            ).fetchone()
+            if budget_candidate and budget_candidate["photo_id"]
+            else None
+        )
+    counts: dict[str, int] = {}
+    stage_counts: dict[tuple[str, str], int] = {}
+    for row in rows:
+        status_key = str(row["status"])
+        count = int(row["count"])
+        counts[status_key] = counts.get(status_key, 0) + count
+        stage_counts[(status_key, str(row["stage"]))] = count
+    model_completed = sum(
+        count
+        for (item_status, item_stage), count in stage_counts.items()
+        if item_status == "completed" and item_stage in {"single", "stage_one", "stage_two"}
+    )
+    local_completed = sum(
+        count
+        for (item_status, item_stage), count in stage_counts.items()
+        if item_status == "completed" and item_stage in {"local", "local_fallback", "prefilter"}
+    )
+    reused_completed = sum(
+        count
+        for (item_status, item_stage), count in stage_counts.items()
+        if item_status == "completed" and item_stage in {"cache", "inherited"}
+    )
+    completed = int(job["completed_items"] or 0)
+    failed = int(job["failed_items"] or 0)
+    total = int(job["total_items"] or 0)
+    processed = completed + failed
+    summary = {
+        "pending": "工作已建立，正在等待啟動。",
+        "preparing": "正在準備分析計畫與照片清單。",
+        "running": "Worker 正在處理照片；此頁每 3 秒自動更新。",
+        "pausing": "正在等目前的照片處理完成後暫停。",
+        "paused": "工作已由使用者暫停；按「繼續處理」可恢復。",
+        "retrying": "正在重新處理先前暫時失敗的項目。",
+        "completed": "所有工作項目都已處理完成。",
+        "completed_with_errors": "工作已結束，但仍有失敗項目可重跑。",
+        "failed": "工作無法繼續；請查看下方錯誤或 AI Trace。",
+        "cancelled": "工作已取消；尚未處理的照片不會送出。",
+        "budget_exceeded": "工作已由成本安全規則暫停，尚未完成的照片仍保留在 Queue。",
+    }.get(status, "工作狀態已更新。")
+    action_url = None
+    action_label = None
+    blocker_code = None
+    if status == "budget_exceeded":
+        snapshot = current_app.extensions["inktime_budget_service"].snapshot(
+            job_id,
+            (
+                str(budget_candidate["photo_id"])
+                if budget_candidate and budget_candidate["photo_id"]
+                else None
+            ),
+        )
+        if int(snapshot.get("photo_unknown_count", 0)) or int(snapshot.get("job_unknown_count", 0)):
+            blocker_code = "HISTORICAL-UNKNOWN"
+            unknown_label = (
+                f"{budget_unknown['provider']} / {budget_unknown['model']}"
+                if budget_unknown
+                else "先前模型請求"
+            )
+            summary = (
+                f"這個工作曾被舊版規則暫停：{unknown_label} 留下 unknown 成本。"
+                "unknown 現在只保留追蹤，不再阻斷照片；按「繼續處理」即可恢復。"
+            )
+        elif snapshot.get("job_limit") is not None and float(
+            snapshot.get("job_effective", 0)
+        ) >= float(snapshot["job_limit"]):
+            blocker_code = "BUDGET-001"
+            summary = "這個工作的預算上限已用完；提高預算或建立新工作後才能繼續。"
+        else:
+            blocker_code = "BUDGET-002"
+            summary = "每日、每月或單張照片的成本安全上限已觸發，工作已暫停。"
+            action_url = "/settings?search=budget"
+            action_label = "查看預算設定"
+    tone = (
+        "success"
+        if status == "completed"
+        else "error"
+        if status in {"failed", "completed_with_errors"}
+        else "warning"
+        if status in {"paused", "pausing", "budget_exceeded", "cancelled"}
+        else "active"
+        if status in {"running", "retrying", "preparing"}
+        else "neutral"
+    )
+    return {
+        "status": status,
+        "status_label": JOB_STATUS_LABELS.get(status, status),
+        "status_summary": summary,
+        "status_tone": tone,
+        "blocker_code": blocker_code,
+        "action_url": action_url,
+        "action_label": action_label,
+        "processed_items": processed,
+        "pending_items": counts.get("pending", 0),
+        "running_items": counts.get("running", 0),
+        "model_completed_items": model_completed,
+        "local_completed_items": local_completed,
+        "reused_items": reused_completed,
+        "progress_percent": round(processed * 100 / total) if total else 0,
+        "last_activity_at": job["heartbeat_at"] or job["created_at"],
+    }
 
 
 def _service() -> JobService:
@@ -116,6 +446,7 @@ def jobs_page():
     return render_template(
         "jobs.html",
         jobs=jobs,
+        job_status_labels=JOB_STATUS_LABELS,
         model_provider_available=model_provider_available,
         model_provider_message=model_provider_message if not model_provider_available else "",
         model_provider_action=model_provider_action if not model_provider_available else None,
@@ -132,13 +463,28 @@ def jobs_page():
 @login_required
 def job_detail(job_id: str):
     job = _job_or_404(job_id)
-    page = max(1, request.args.get("page", 1, type=int))
+    total_pages = max(1, math.ceil(int(job["total_items"] or 0) / JOB_ITEM_PAGE_SIZE))
+    page = min(max(1, request.args.get("page", 1, type=int)), total_pages)
+    items = [
+        {**dict(item), **_job_item_view(item)}
+        for item in _repository().list_items(
+            job_id,
+            limit=JOB_ITEM_PAGE_SIZE,
+            offset=(page - 1) * JOB_ITEM_PAGE_SIZE,
+        )
+    ]
     return render_template(
         "job_detail.html",
         job=job,
-        items=_repository().list_items(job_id, limit=100, offset=(page - 1) * 100),
+        items=items,
+        job_view=_job_status_view(job),
+        job_status_labels=JOB_STATUS_LABELS,
         available_actions=_available_job_actions(job),
+        performance=_job_performance_view(job),
         page=page,
+        total_pages=total_pages,
+        range_start=(page - 1) * JOB_ITEM_PAGE_SIZE + 1 if items else 0,
+        range_end=(page - 1) * JOB_ITEM_PAGE_SIZE + len(items),
     )
 
 
@@ -182,6 +528,12 @@ def create_job():
         strategy = normalize_analysis_strategy(payload.get("strategy", "single"))
     except ValueError as exc:
         return {"message": str(exc)}, 400
+    # Creating a Vision job is an explicit administrator action.  Every
+    # eligible photo frozen into that job must therefore cross the Provider
+    # boundary; the background top-candidate policy is for automatic runs and
+    # must not silently turn most manually queued items into local_fallback.
+    settings["force_ai"] = strategy != "local"
+    settings["source"] = "manual-job"
     if execution_mode(current_app.extensions["inktime_settings_repository"]) == "disabled":
         return {
             "error_code": "ANALYSIS-DISABLED",
@@ -308,7 +660,14 @@ def control_job(job_id: str, action: str):
 @login_required
 def job_status(job_id: str):
     job = _job_or_404(job_id)
-    items = _repository().list_items(job_id, limit=100)
+    total_pages = max(1, math.ceil(int(job["total_items"] or 0) / JOB_ITEM_PAGE_SIZE))
+    page = min(max(1, request.args.get("page", 1, type=int)), total_pages)
+    items = _repository().list_items(
+        job_id,
+        limit=JOB_ITEM_PAGE_SIZE,
+        offset=(page - 1) * JOB_ITEM_PAGE_SIZE,
+    )
+    view = _job_status_view(job)
     result = None
     error_code = None
     if items:
@@ -326,7 +685,11 @@ def job_status(job_id: str):
         "failed_items": int(job["failed_items"]),
         "total_items": int(job["total_items"]),
         "spent": float(job["spent"]),
+        "budget_limit": float(job["budget_limit"]) if job["budget_limit"] is not None else None,
         "available_actions": _available_job_actions(job),
+        "view": view,
+        "page": page,
+        "total_pages": total_pages,
         "items": [
             {
                 "id": str(item["id"]),
@@ -335,6 +698,8 @@ def job_status(job_id: str):
                 "stage": str(item["stage"]),
                 "attempts": int(item["attempts"]),
                 "error_code": str(item["error_code"]) if item["error_code"] is not None else None,
+                "error_message": str(item["error_message"]) if item["error_message"] is not None else None,
+                **_job_item_view(item),
             }
             for item in items
         ],

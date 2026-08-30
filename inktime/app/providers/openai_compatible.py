@@ -590,6 +590,7 @@ class OpenAICompatibleProvider(VisionProvider):
         status = int(getattr(response, "status_code", 0) or 0)
         if status >= 400:
             provider_error_code = None
+            provider_error_message = None
             response_info: dict[str, Any] = {}
             try:
                 body = response.json()
@@ -612,11 +613,19 @@ class OpenAICompatibleProvider(VisionProvider):
             response_request_id = self._provider_request_id(response)
             if response_request_id:
                 response_info["request_id"] = response_request_id
+            openrouter_route_temporarily_unavailable = (
+                self.openrouter_compatible
+                and status == 404
+                and "no endpoints found that can handle the requested parameters"
+                in str(provider_error_message or "").lower()
+            )
             classified_code = (
                 "BATCH-RATE-LIMITED"
                 if status == 429 and str(error_code).startswith("BATCH")
                 else "VLM-002"
                 if status == 429
+                else "VLM-005"
+                if openrouter_route_temporarily_unavailable
                 else "AUTH_REQUIRED"
                 if status in {401, 403} and str(error_code).startswith("VLM")
                 else "CONFIG_INVALID"

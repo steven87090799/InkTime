@@ -833,9 +833,20 @@ class JobRepository:
             return connection.execute(
                 """
                 SELECT ji.*,
-                       (SELECT je.message FROM job_errors je
+                       (SELECT CASE WHEN ji.status='completed' THEN NULL ELSE je.message END
+                        FROM job_errors je
                         WHERE je.job_item_id=ji.id
-                        ORDER BY je.last_seen_at DESC,je.id DESC LIMIT 1) AS error_message
+                        ORDER BY je.last_seen_at DESC,je.id DESC LIMIT 1) AS error_message,
+                       (SELECT ata.http_status
+                        FROM ai_trace_runs atr
+                        JOIN ai_trace_attempts ata ON ata.trace_id=atr.trace_id
+                        WHERE atr.job_id=ji.job_id AND atr.photo_id=ji.photo_id
+                        ORDER BY ata.created_at DESC,ata.id DESC LIMIT 1) AS latest_http_status,
+                       (SELECT ata.response_raw_sanitized
+                        FROM ai_trace_runs atr
+                        JOIN ai_trace_attempts ata ON ata.trace_id=atr.trace_id
+                        WHERE atr.job_id=ji.job_id AND atr.photo_id=ji.photo_id
+                        ORDER BY ata.created_at DESC,ata.id DESC LIMIT 1) AS latest_provider_response
                 FROM job_items ji WHERE ji.job_id=? ORDER BY ji.id LIMIT ? OFFSET ?
                 """,
                 (job_id, limit, offset),

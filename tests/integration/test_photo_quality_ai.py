@@ -18,6 +18,7 @@ from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
 from inktime.app.services import analysis as analysis_module
 from inktime.app.workers.scanner import PhotoScanner
 from tests.conftest import create_admin, csrf, login
+from tests.integration.test_jobs import add_photos
 from tests.unit.test_analysis_schema import valid_result
 
 
@@ -778,8 +779,36 @@ def test_full_library_confirmation_and_queue_count_only_active_eligible_photos(c
             str(row["photo_id"])
             for row in connection.execute("SELECT photo_id FROM job_items WHERE photo_id IS NOT NULL")
         }
+        job_settings = [
+            json.loads(str(row["settings_json"]))
+            for row in connection.execute("SELECT settings_json FROM jobs WHERE kind='analysis'")
+        ]
     assert photo_ids <= set(eligible_ids)
     assert excluded_id not in photo_ids
+    assert job_settings and all(settings["force_ai"] is True for settings in job_settings)
+
+
+def test_manual_vision_job_marks_every_selected_item_for_provider_call(client, app):
+    create_admin(app)
+    login(client)
+    _enable_fake_usable_provider(app)
+    photo_ids = add_photos(app, 3)
+
+    response = client.post(
+        "/api/v1/jobs",
+        json={"name": "手動完整 Vision", "strategy": "single", "photo_ids": photo_ids},
+        headers={"X-CSRF-Token": csrf(client)},
+    )
+
+    assert response.status_code == 201
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute(
+            "SELECT settings_json FROM jobs WHERE id=?", (response.json["id"],)
+        ).fetchone()
+    assert json.loads(str(row["settings_json"])) == {
+        "force_ai": True,
+        "source": "manual-job",
+    }
 
 
 def test_full_library_group_idempotency_is_bounded_replayable_and_conflict_safe(client, app, monkeypatch):

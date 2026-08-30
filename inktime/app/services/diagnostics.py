@@ -182,7 +182,22 @@ class DiagnosticsService:
         wal = Path(str(self.database.path) + "-wal")
         with self.database.session() as connection:
             queue = connection.execute(
-                "SELECT COUNT(*) FROM job_items WHERE status IN ('pending','running')"
+                """
+                SELECT COUNT(*)
+                FROM job_items AS item
+                JOIN jobs AS job ON job.id=item.job_id
+                WHERE item.status IN ('pending','running','retrying')
+                  AND job.status IN ('running','retrying')
+                """
+            ).fetchone()[0]
+            blocked_queue = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM job_items AS item
+                JOIN jobs AS job ON job.id=item.job_id
+                WHERE item.status IN ('pending','running','retrying')
+                  AND job.status NOT IN ('running','retrying')
+                """
             ).fetchone()[0]
             workers = connection.execute(
                 "SELECT COUNT(*) FROM jobs WHERE status IN ('running','retrying','pausing') AND heartbeat_at IS NOT NULL"
@@ -239,6 +254,7 @@ class DiagnosticsService:
             "docker": Path("/.dockerenv").exists(),
             "worker_count": workers,
             "queue_length": queue,
+            "blocked_queue_length": blocked_queue,
             "python_version": sys.version.split()[0],
             "platform": platform.platform(),
             "application_version": __version__,
