@@ -40,6 +40,20 @@
 .photo-card strong, .photo-card span { display: block; }
 .photo-card span { color: var(--muted); font-size: 12px; margin-top: 5px; }
 .page-head small { display: block; max-width: 780px; margin-top: 8px; color: var(--muted); line-height: 1.55; }
+
+/* 電子紙渲染頁：將預覽與正式發布分組，避免長按鈕和說明符號互相擠壓。 */
+.rendering-page-head { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; }
+.rendering-page-intro { max-width: 820px; }
+.rendering-head-actions { display: grid; grid-template-columns: minmax(280px, .78fr) minmax(510px, 1.55fr); gap: 12px; align-items: stretch; }
+.rendering-action-group { min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); box-shadow: var(--shadow); }
+.rendering-action-label { margin: 0 0 9px !important; color: var(--muted) !important; font-size: 11px; font-weight: 800; letter-spacing: .08em; }
+.rendering-action-list { display: grid; gap: 8px; }
+.rendering-preview-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.rendering-release-list { grid-template-columns: minmax(240px, 1.55fr) repeat(2, minmax(135px, 1fr)); }
+.rendering-action-item { display: flex; min-width: 0; align-items: center; gap: 6px; }
+.rendering-action-item > a,
+.rendering-action-item > button:not(.context-help-button) { display: inline-flex; flex: 1 1 auto; width: 100%; min-width: 0; min-height: 42px; align-items: center; justify-content: center; padding: 9px 12px; line-height: 1.35; text-align: center; white-space: normal; }
+.rendering-action-item > button.context-help-button { flex: 0 0 24px; margin-left: 0; }
 .pagination { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 16px 20px; margin: 28px; }
 .pagination-jump, .pagination-jump label { display: flex; align-items: center; gap: 7px; }
 .pagination-jump input[type="number"] { width: 76px; padding: 7px 8px; border: 1px solid var(--field-line); border-radius: 8px; background: var(--field); color: var(--ink); font: inherit; }
@@ -140,6 +154,16 @@ pre { white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow
   .frame-layout-grid { grid-template-columns: 1fr; }
   .e6-score-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .trace-summary-grid { grid-template-columns: 1fr; }
+  .rendering-head-actions { grid-template-columns: 1fr; }
+  .rendering-release-list { grid-template-columns: 1fr; }
+}
+
+@media (min-width: 801px) and (max-width: 980px) {
+  .rendering-head-actions { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 520px) {
+  .rendering-preview-list { grid-template-columns: 1fr; }
 }
 
 /* 版本化設定控制中心 */

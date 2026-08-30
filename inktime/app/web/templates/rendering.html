@@ -2,13 +2,31 @@
 {% block title %}電子紙渲染｜InkTime{% endblock %}
 {% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='font-library.css') }}"><script type="module" src="{{ url_for('static', filename='spectra6-preset.js') }}"></script>{% endblock %}
 {% block content %}
-<div class="page-head">
-  <div>
+<div class="page-head rendering-page-head">
+  <div class="rendering-page-intro">
     <p class="eyebrow">版本化多色發布</p>
     <h1>電子紙渲染</h1>
     <p>可選直向或橫向排版；傳給面板的資料仍固定為 480×800，依 Profile 產生四色 2bpp 或六／七色 indexed4。</p>
   </div>
-  <div><a class="secondary" href="/simulator">開啟手動模擬器</a> <a class="secondary" href="/virtual-display" target="_blank" rel="noopener">開啟虛擬墨水屏</a>{% if g.user.role=='administrator' %} <button class="secondary" type="button" data-spectra6-preset data-help="預覽並套用 Spectra 6 建議色盤與抖動組合，不會直接發布 Release。">一鍵套用微雪 7.3 吋 Spectra 6 原廠色彩與演算法</button> <button class="primary" id="publish" data-help="使用目前選取的單一 Profile 建立正式 Release；完成後使用該 Profile 的裝置才會取得新內容。">發布目前 Profile</button> <button class="secondary" id="publish-all" data-help="依序為所有面板 Profile 建立正式 Release，影響範圍比單一發布大；請先確認每個 Profile 的版型、字型與色盤。">發布全部 Profile</button>{% endif %}</div>
+  <div class="rendering-head-actions" aria-label="電子紙預覽與發布操作">
+    <section class="rendering-action-group" aria-labelledby="rendering-preview-actions">
+      <p class="rendering-action-label" id="rendering-preview-actions">預覽工具</p>
+      <div class="rendering-action-list rendering-preview-list">
+        <span class="rendering-action-item"><a class="secondary" href="/simulator">開啟手動模擬器</a></span>
+        <span class="rendering-action-item"><a class="secondary" href="/virtual-display" target="_blank" rel="noopener">開啟虛擬墨水屏</a></span>
+      </div>
+    </section>
+    {% if g.user.role=='administrator' %}
+    <section class="rendering-action-group" aria-labelledby="rendering-release-actions">
+      <p class="rendering-action-label" id="rendering-release-actions">面板設定與發布</p>
+      <div class="rendering-action-list rendering-release-list">
+        <span class="rendering-action-item rendering-action-item-preset"><button class="secondary" type="button" data-spectra6-preset data-help="預覽並套用 Spectra 6 建議色盤與抖動組合，不會直接發布 Release。">一鍵套用微雪 7.3 吋 Spectra 6 原廠色彩與演算法</button></span>
+        <span class="rendering-action-item"><button class="primary" id="publish" data-help="使用目前選取的單一 Profile 建立正式 Release；完成後使用該 Profile 的裝置才會取得新內容。">發布目前 Profile</button></span>
+        <span class="rendering-action-item"><button class="secondary" id="publish-all" data-help="依序為所有面板 Profile 建立正式 Release，影響範圍比單一發布大；請先確認每個 Profile 的版型、字型與色盤。">發布全部 Profile</button></span>
+      </div>
+    </section>
+    {% endif %}
+  </div>
 </div>
 {% if g.user.role=='administrator' %}<p id="release-action-status" role="status" aria-live="polite"></p>{% endif %}
 
