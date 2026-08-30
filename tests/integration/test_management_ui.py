@@ -952,6 +952,8 @@ def test_photo_console_shows_prefilter_metrics_model_text_and_generated_caption(
     assert 'class="photo-overview-layout"' in body
     assert 'class="photo-analysis-grid"' in body
     assert 'class="photo-runtime-grid"' in body
+    assert 'class="panel photo-history-panel"' in body
+    assert 'class="photo-history-list"' in body
     assert "本機預篩選判斷" in body
     assert 'class="panel photo-prefilter-panel"' in body
     assert 'class="prefilter-rule-grid"' in body

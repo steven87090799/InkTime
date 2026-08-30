@@ -95,9 +95,18 @@
 .photo-analysis-grid .analysis-card { min-width: 0; height: 100%; margin: 0; padding: 16px; border: 1px solid var(--line); border-radius: 11px; background: var(--paper); }
 .photo-analysis-grid .analysis-card:first-of-type { margin-top: 0; }
 .photo-analysis-grid .analysis-card dl { grid-template-columns: 108px minmax(0, 1fr); }
-.photo-runtime-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 18px 0; align-items: stretch; }
-.photo-runtime-grid > .panel { min-width: 0; height: 100%; margin: 0; }
+.photo-runtime-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 18px 0; align-items: start; }
+.photo-runtime-grid > .panel { min-width: 0; margin: 0; }
+.photo-runtime-grid > .panel:not(.photo-history-panel) { min-height: 150px; }
 .photo-runtime-grid > .panel p { overflow-wrap: anywhere; }
+.photo-history-panel { grid-column: 1 / -1; }
+.photo-history-panel .panel-head { align-items: baseline; }
+.photo-history-panel .panel-head > span { color: var(--muted); font-size: 11px; }
+.photo-history-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; max-height: 240px; margin-top: 14px; padding-right: 5px; overflow-y: auto; }
+.photo-history-list article { display: grid; align-content: start; gap: 5px; min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); }
+.photo-history-list time { color: var(--muted); font-size: 9px; overflow-wrap: anywhere; }
+.photo-history-list strong { font-size: 12px; overflow-wrap: anywhere; }
+.photo-history-list code { color: var(--muted); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; white-space: normal; }
 .photo-prefilter-panel { margin-top: 18px; }
 .photo-prefilter-panel .panel-head h2 { margin: 3px 0 0; }
 .prefilter-overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 18px 0 14px; }
@@ -215,6 +224,8 @@ pre { white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow
   .photo-state-strip, .photo-overview-layout, .photo-orientation-band { grid-template-columns: 1fr; }
   .photo-state-strip > p { padding: 13px 0 0; border-top: 1px solid var(--line); border-left: 0; }
   .photo-edit-fields, .photo-analysis-grid, .photo-runtime-grid { grid-template-columns: 1fr; }
+  .photo-history-panel { grid-column: auto; }
+  .photo-history-list { grid-template-columns: 1fr; }
   .photo-edit-panel .form-stack > .primary { width: 100%; justify-self: stretch; }
   .photo-privacy-row { grid-template-columns: 1fr; gap: 11px; }
   .photo-privacy-row button { width: 100%; }
