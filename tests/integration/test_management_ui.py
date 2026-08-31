@@ -1033,10 +1033,12 @@ def test_review_thumbnail_accepts_string_root_and_rejects_invalid_sources(
     Image.new("RGB", (80, 60), "#527f99").save(root / "photo.jpg")
     monkeypatch.setattr(
         app.extensions["inktime_thumbnail_cache"],
-        "get_or_create",
+        "_get_or_create_locked",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("thumbnail failed")),
     )
-    assert client.get(f"/api/v1/review/photos/{photo_id}/thumbnail").status_code == 422
+    unavailable = client.get(f"/api/v1/review/photos/{photo_id}/thumbnail")
+    assert unavailable.status_code == 503
+    assert unavailable.json["error_code"] == "THUMB-001"
 
 
 def test_rendering_console_exposes_layout_e6_and_manual_crop_controls(client, app, tmp_path):

@@ -78,7 +78,7 @@ services:
       # 左側是主機對外 Port，右側 8765 是容器內 Gunicorn Port。
       - "${INKTIME_BIND_ADDRESS:-127.0.0.1}:${INKTIME_PORT:-8765}:8765"
     cpus: ${INKTIME_WEB_CPUS:-0.75}
-    mem_limit: ${INKTIME_WEB_MEMORY:-384m}
+    mem_limit: ${INKTIME_WEB_MEMORY:-1g}
     pids_limit: ${INKTIME_WEB_PIDS:-128}
     tmpfs:
       - /tmp:size=128m,mode=1777
@@ -118,7 +118,7 @@ services:
       inktime-web:
         condition: service_healthy
     cpus: ${INKTIME_SCHEDULER_CPUS:-0.25}
-    mem_limit: ${INKTIME_SCHEDULER_MEMORY:-192m}
+    mem_limit: ${INKTIME_SCHEDULER_MEMORY:-1g}
     pids_limit: ${INKTIME_SCHEDULER_PIDS:-64}
     tmpfs:
       - /tmp:size=64m,mode=1777

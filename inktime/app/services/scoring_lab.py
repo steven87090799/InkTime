@@ -5,7 +5,7 @@ from pathlib import Path
 import time
 from uuid import uuid4
 
-from PIL import Image, ImageOps
+from inktime.app.domain.photos.formats import load_rgb
 
 from inktime.app.domain.analysis import AnalysisValidationError, validate_analysis_result
 from inktime.app.domain.analysis.scoring import calculate_ranking_score
@@ -18,7 +18,7 @@ from inktime.app.services.providers import ProviderService
 from inktime.app.services.usage_tracking import record_failed_unknown_usage
 
 
-MAX_TEST_PHOTO_PIXELS = 40_000_000
+
 
 
 class ScoringLabService:
@@ -38,15 +38,7 @@ class ScoringLabService:
 
     @staticmethod
     def normalize_image(source: Path, destination: Path) -> None:
-        if source.suffix.lower() in {".heic", ".heif"}:
-            from pillow_heif import register_heif_opener
-
-            register_heif_opener()
-        with Image.open(source) as opened:
-            if opened.width * opened.height > MAX_TEST_PHOTO_PIXELS:
-                raise ValueError("IMG-002 測試照片像素不可超過 4000 萬")
-            image = ImageOps.exif_transpose(opened).convert("RGB")
-            image.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
+        with load_rgb(source, 1600) as image:
             image.save(destination, "JPEG", quality=90, optimize=True)
 
     def analyze(self, image_path: Path) -> dict:

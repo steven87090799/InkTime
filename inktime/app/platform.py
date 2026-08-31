@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from inktime.app.domain.photos.formats import SUPPORTED_IMAGE_EXTENSIONS
+
 from datetime import timedelta
 import logging
 from pathlib import Path
@@ -105,6 +107,7 @@ def configure_web_application(
     ):
         app.register_blueprint(blueprint)
     app.jinja_env.globals["csrf_token"] = csrf_token
+    app.jinja_env.globals["image_source_accept"] = ",".join(sorted(SUPPORTED_IMAGE_EXTENSIONS))
 
     @app.get("/")
     def modern_root():

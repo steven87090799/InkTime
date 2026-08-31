@@ -17,6 +17,7 @@ from inktime.app.core.logging import log_event, should_log_rate_limited
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from inktime.app.core.paths import safe_join
+from inktime.app.domain.photos.formats import load_rgb
 from inktime.app.db import Database
 from inktime.app.domain.photos import LocationResolver, parse_photo_date
 from inktime.app.domain.rendering import (
@@ -72,9 +73,6 @@ FIT_MODES = {
     "cover": "填滿並裁切",
 }
 PORTRAIT_ONLY_LAYOUTS = {"calendar", "weather_sensor"}
-# Formal rendering accepts the same default source-pixel budget as the scanner
-# and reduces accepted originals before EXIF/RGB normalization.
-MAX_RENDER_INPUT_PIXELS = 60_000_000
 LOGGER = logging.getLogger("render")
 
 
@@ -1266,10 +1264,7 @@ class RenderService:
         needs_e6 = photo["e6_score"] is None
         if not needs_crop and not needs_e6:
             return photo
-        with Image.open(path) as opened:
-            opened.draft("RGB", (512, 512))
-            sample = ImageOps.exif_transpose(opened).convert("RGB")
-            sample.thumbnail((512, 512), Image.Resampling.LANCZOS)
+        with load_rgb(path, 512) as sample:
             if needs_crop:
                 self.photos.update_crop_analysis(str(photo["id"]), analyze_crop_focus(sample))
             if needs_e6:
@@ -1313,24 +1308,8 @@ class RenderService:
         target_size: tuple[int, int] | None = None,
     ) -> tuple[Image.Image, EffectiveOrientation]:
         """Bound source decoding before EXIF normalization and final fitting."""
-        decode_size = None
-        if target_size is not None:
-            decode_size = (
-                max(1, int(target_size[0])) * 2,
-                max(1, int(target_size[1])) * 2,
-            )
-        with Image.open(path) as opened:
-            if opened.width * opened.height > MAX_RENDER_INPUT_PIXELS:
-                raise OSError("RENDER-006 原始照片像素超過正式渲染安全上限")
-            if opened.format == "JPEG":
-                opened.draft("RGB", decode_size or (1600, 1600))
-            if decode_size is not None and (
-                opened.width > decode_size[0] or opened.height > decode_size[1]
-            ):
-                opened.thumbnail(decode_size, Image.Resampling.BOX)
-            image = ImageOps.exif_transpose(opened).convert("RGB")
-        if decode_size is not None:
-            image.thumbnail(decode_size, Image.Resampling.LANCZOS)
+        decode_size = (max(1, target_size[0]) * 2, max(1, target_size[1]) * 2) if target_size else 1600
+        image = load_rgb(path, decode_size)
         effective = self._orientation_for(photo)
         if effective.rotation_degrees:
             image = image.rotate(-effective.rotation_degrees, expand=True)

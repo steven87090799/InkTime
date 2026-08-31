@@ -65,6 +65,8 @@
 
 ### 架構與設計
 
+- [圖片格式與 HEIC/48MP 安全 contract](architecture/IMAGE_FORMAT_CONTRACT_ZH_TW.md)：來源格式、DNG/GIF、JPEG preview、解碼記憶體與 diagnostics。
+
 - [`architecture/ARCHITECTURE_ZH_TW.md`](architecture/ARCHITECTURE_ZH_TW.md)：現行執行架構、資料流、選片與 Release Coordinator。
 - [`architecture/ARCHITECTURE_TARGET.md`](architecture/ARCHITECTURE_TARGET.md)：架構責任與不變條件。
 - [`architecture/APPLICATION_FACTORY.md`](architecture/APPLICATION_FACTORY.md)：Web／Worker／Scheduler 的 Factory 與初始化順序。

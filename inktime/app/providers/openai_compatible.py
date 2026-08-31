@@ -847,14 +847,16 @@ class OpenAICompatibleProvider(VisionProvider):
         reasoning_effort: str | None = None,
         provider_request_context_id: str | None = None,
     ) -> dict[str, Any]:
-        encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
         media_type = {
             ".gif": "image/gif",
             ".jpeg": "image/jpeg",
             ".jpg": "image/jpeg",
             ".png": "image/png",
             ".webp": "image/webp",
-        }.get(image_path.suffix.casefold(), "image/jpeg")
+        }.get(image_path.suffix.casefold())
+        if media_type is None:
+            raise ValueError("AI-IMAGE-001 Vision requires a normalized browser-safe derivative")
+        encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
         body: dict[str, Any] = {
             "model": model,
             "messages": [

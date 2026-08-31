@@ -131,7 +131,7 @@ def test_single_photo_failure_is_persisted_without_stopping_scan(app, tmp_path):
             "SELECT stage,error_code,exception_type,retryable,masked_path FROM scan_errors"
         ).fetchone()
     assert error["stage"] == "preprocess"
-    assert error["error_code"] == "SCAN-PHOTO-001"
+    assert error["error_code"] == "IMG-CORRUPT"
     assert error["exception_type"]
     assert "private-family-name" not in error["masked_path"]
 

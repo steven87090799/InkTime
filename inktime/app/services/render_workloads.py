@@ -12,8 +12,7 @@ import tempfile
 from typing import BinaryIO, Any
 from uuid import uuid4
 
-from PIL import Image, ImageDraw
-from PIL import ImageOps
+from PIL import Image, ImageDraw, ImageOps
 
 from inktime.app.domain.rendering import (
     AtomicReleasePublisher,
@@ -39,8 +38,7 @@ from inktime.app.services.rendering import (
 from inktime.app.services.weather import WeatherService
 from inktime.app.workers.process_boundary import ProcessCallError
 
-
-MAX_INPUT_PIXELS = 40_000_000
+from inktime.app.domain.photos.formats import SUPPORTED_IMAGE_EXTENSIONS, safe_image_open, bounded_rgb
 
 
 def _atomic_png_file(path: Path, image: Image.Image) -> None:
@@ -57,19 +55,9 @@ def _atomic_png_file(path: Path, image: Image.Image) -> None:
 
 def _open_saved_upload(path_value: str, suffix: str) -> tuple[Image.Image, str]:
     path = Path(path_value)
-    if suffix in {".heic", ".heif"}:
-        from pillow_heif import register_heif_opener
-
-        register_heif_opener()
-    with Image.open(path) as opened:
-        if opened.width * opened.height > MAX_INPUT_PIXELS:
-            raise ValueError("IMG-002 照片像素不可超過 4000 萬")
+    with safe_image_open(path) as opened:
         source_size = f"{opened.width}x{opened.height}"
-        if opened.format == "JPEG":
-            opened.draft("RGB", (1600, 1600))
-        else:
-            opened.thumbnail((1600, 1600), Image.Resampling.BOX)
-        image = ImageOps.exif_transpose(opened).convert("RGB")
+        image = bounded_rgb(opened, 1600)
     return image, source_size
 
 
@@ -503,7 +491,7 @@ class RenderWorkloadService:
         return token, sha256(destination.read_bytes()).hexdigest()
 
     def save_upload(self, stream: BinaryIO, *, suffix: str, max_bytes: int) -> tuple[str, str]:
-        if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}:
+        if suffix not in SUPPORTED_IMAGE_EXTENSIONS:
             raise ValueError("IMG-002 照片格式不支援")
         token = uuid4().hex
         destination = self.input_root / f"{token}{suffix}"
@@ -539,7 +527,7 @@ class RenderWorkloadService:
 
     def input_path(self, token: str, *, suffix: str) -> Path:
         self._validate_token(token)
-        if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}:
+        if suffix not in SUPPORTED_IMAGE_EXTENSIONS:
             raise ValueError("invalid input suffix")
         return self.input_root / f"{token}{suffix}"
 

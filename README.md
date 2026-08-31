@@ -182,6 +182,8 @@ sequenceDiagram
 
 ### 2. 照片掃描與本地預處理生命週期
 
+HEIC/HEIF（含 iPhone 48MP）、JPEG、PNG、WEBP、TIFF、BMP 均為正式來源格式；Web/AI 使用伺服器產生的 JPEG，原始照片保持唯讀。iPhone ProRAW DNG 尚未支援，Live Photo 的 MOV 與 GIF 維持影片排除。詳見[圖片格式、安全限制與記憶體 contract](docs/architecture/IMAGE_FORMAT_CONTRACT_ZH_TW.md)。
+
 ```mermaid
 flowchart TD
     REQUEST["👤 維護頁要求掃描"] --> JOB["🗃️ 建立 scan maintenance job"]

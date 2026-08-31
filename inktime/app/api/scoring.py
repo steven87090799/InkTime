@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from inktime.app.domain.photos.formats import SUPPORTED_IMAGE_EXTENSIONS
+
 from pathlib import Path
 from statistics import median
 import tempfile
@@ -21,7 +23,8 @@ from inktime.app.web.access import administrator_required, login_required
 
 
 bp = Blueprint("scoring", __name__)
-ALLOWED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
+
+ALLOWED_IMAGE_SUFFIXES = SUPPORTED_IMAGE_EXTENSIONS
 MAX_TEST_PHOTO_BYTES = 25 * 1024 * 1024
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 

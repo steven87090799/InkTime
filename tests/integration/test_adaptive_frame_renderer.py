@@ -557,7 +557,11 @@ def test_formal_render_accepts_48mp_jpeg_and_bounds_before_exif(app, tmp_path, m
     virtual = VirtualLargeJpeg()
     original_exif_transpose = rendering_service.ImageOps.exif_transpose
 
-    def open_virtual(_path):
+    # The shared source boundary validates a real regular file before opening
+    # the controlled decoder; keep that filesystem security check in this test.
+    Image.new("RGB", (120, 90), "#4271a4").save(tmp_path / "virtual-48mp.jpg")
+
+    def open_virtual(_path, **_kwargs):
         return virtual
 
     def observe_before_exif(image, *args, **kwargs):

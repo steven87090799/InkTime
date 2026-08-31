@@ -70,6 +70,15 @@ def test_repair_policy_does_not_change_vision_input_contract():
     assert first["vision_input"] == second["vision_input"]
 
 
+def test_old_plan_pixel_version_upgrades_without_mutating_historical_plan():
+    old = _plan()
+    old["vision_input"]["preprocessing_version"] = "vision-input-v2"
+    executed = normalize_analysis_plan(old)
+    assert executed["vision_input"]["preprocessing_version"] == "vision-input-v3"
+    assert old["vision_input"]["preprocessing_version"] == "vision-input-v2"
+    assert fingerprint(old) != fingerprint(executed)
+
+
 def test_default_production_vision_input_is_1024_high_jpeg88_and_single_call():
     plan = _plan(high_image_max_side=1024, caption_controls={"caption_variants_enabled": False})
 
@@ -78,7 +87,7 @@ def test_default_production_vision_input_is_1024_high_jpeg88_and_single_call():
         "max_side": 1024,
         "jpeg_quality": AI_IMAGE_JPEG_QUALITY,
         "exif_transpose": True,
-        "preprocessing_version": "vision-input-v2",
+        "preprocessing_version": "vision-input-v3",
     }
     assert AI_IMAGE_JPEG_QUALITY == 88
     assert plan["analysis_call_policy"] == {
