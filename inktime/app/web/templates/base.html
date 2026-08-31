@@ -1,3 +1,4 @@
+{% from "components/error_notice.html" import error_notice with context %}
 <!doctype html>
 <html lang="zh-Hant-TW">
 <head>
@@ -35,7 +36,7 @@
           <details class="nav-menu{% if request.path.startswith(('/simulator','/virtual-display','/rendering')) %} active{% endif %}"><summary>墨水屏</summary><div class="nav-popover"><a href="/rendering">相框與發布<small>方向、版面、裁切與字型</small></a><a href="/simulator">快速模擬器<small>不上模型測試色盤</small></a><a href="/virtual-display">虛擬墨水屏<small>接收正式發布畫面</small></a></div></details>
           <details class="nav-menu{% if request.path.startswith(('/devices','/energy')) %} active{% endif %}"><summary>裝置</summary><div class="nav-popover"><a href="/devices">裝置管理<small>ESP32、配對與排程</small></a><a href="/energy">能源儀表板<small>電池、刷新與續航</small></a></div></details>
           <details class="nav-menu{% if request.path.startswith(('/decision-traces','/feedback','/shadow','/device-queues','/retention','/rollouts')) %} active{% endif %}"><summary>決策與韌性</summary><div class="nav-popover"><a href="/decision-traces">決策追蹤</a><a href="/feedback">使用者回饋</a><a href="/shadow">Shadow 比較</a><a href="/device-queues">裝置內容佇列</a><a href="/retention">資料保留</a><a href="/rollouts">Canary 發布</a></div></details>
-          <details class="nav-menu{% if request.path.startswith(('/activity','/maintenance','/schedules','/diagnostics','/errors','/backups','/settings','/account')) %} active{% endif %}"><summary>系統</summary><div class="nav-popover nav-popover-right"><a href="/activity">執行監控<small>工作進度、即時事件與卡住原因</small></a><a href="/settings">系統設定<small>依分類調整所有開關</small></a><a href="/maintenance">照片庫與維護<small>掃描、快取與發布測試</small></a><a href="/schedules">低資源排程<small>Scanner、AI、換圖與快取工作</small></a><a href="/diagnostics">系統診斷<small>資源、健康與診斷包</small></a><a href="/errors">錯誤中心<small>集中查看與處理問題</small></a><a href="/backups">備份與還原<small>建立、下載與保留備份</small></a><a href="/account/password">帳號安全<small>變更登入密碼</small></a><form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="link-button">登出 {{ g.user.username }}</button></form></div></details>
+          <details class="nav-menu{% if request.path.startswith(('/activity','/maintenance','/schedules','/diagnostics','/errors','/backups','/settings','/help','/account')) %} active{% endif %}"><summary>系統</summary><div class="nav-popover nav-popover-right"><a href="/help/controls">功能說明大全<small>查設定、英文選項與按鈕影響</small></a><a href="/activity">執行監控<small>工作進度、即時事件與卡住原因</small></a><a href="/settings">系統設定<small>依分類調整所有開關</small></a><a href="/maintenance">照片庫與維護<small>掃描、快取與發布測試</small></a><a href="/schedules">低資源排程<small>Scanner、AI、換圖與快取工作</small></a><a href="/diagnostics">系統診斷<small>資源、健康與診斷包</small></a><a href="/errors">錯誤中心<small>集中查看與處理問題</small></a><a href="/backups">備份與還原<small>建立、下載與保留備份</small></a><a href="/account/password">帳號安全<small>變更登入密碼</small></a><form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="link-button">登出 {{ g.user.username }}</button></form></div></details>
         </nav>
       {% endif %}
       <button class="theme-toggle" id="theme-toggle" type="button" aria-label="切換為深色模式" aria-pressed="false">
@@ -45,12 +46,31 @@
     </div>
   </header>
   <main class="shell">
-    {% if critical_alerts %}<div class="notice error" role="alert"><strong>嚴重故障{% if critical_alerts|length > 1 %}（{{ critical_alerts|length }}）{% endif %}</strong>｜{{ critical_alerts[0].component }}｜<code>{{ critical_alerts[0].error_code }}</code>｜{{ critical_alerts[0].message }}｜{{ critical_alerts[0].last_seen_at }}｜<a href="/activity?severity=CRITICAL">查看詳細資訊</a></div>{% endif %}
+    {% if critical_alerts %}<div class="notice error" role="alert"><strong>需要優先處理{% if critical_alerts|length > 1 %}（{{ critical_alerts|length }}）{% endif %}</strong>{{ error_notice(critical_alerts[0].error_code, critical_alerts[0].message) }}<small>{{ critical_alerts[0].last_seen_at }}</small> · <a href="/activity?severity=CRITICAL">查看相關事件</a></div>{% endif %}
     {% for category, message in get_flashed_messages(with_categories=true) %}
-      <div class="notice {{ category }}" role="alert">{{ message }}</div>
+      {% set flash_error_code = category[6:] if category.startswith('error:') else '' %}
+      <div class="notice {{ 'error' if flash_error_code else category }}" role="alert">{% if category == 'error' or flash_error_code %}{{ error_notice(message.code, message.message) if message is mapping else error_notice(flash_error_code, message) }}{% else %}{{ message }}{% endif %}</div>
     {% endfor %}
     {% block content %}{% endblock %}
+    {% if page_guide %}
+      <aside class="page-guide" aria-labelledby="page-guide-title">
+        <div class="page-guide-intro">
+          <p class="eyebrow">小提示與使用說明</p>
+          <h2 id="page-guide-title">{{ page_guide.title }}</h2>
+          <p>{{ page_guide.purpose }}</p>
+        </div>
+        <div class="page-guide-column">
+          <h3>怎麼使用</h3>
+          <ol>{% for step in page_guide.steps %}<li>{{ step }}</li>{% endfor %}</ol>
+        </div>
+        <div class="page-guide-column">
+          <h3>使用建議</h3>
+          <ul>{% for tip in page_guide.tips %}<li>{{ tip }}</li>{% endfor %}</ul>
+        </div>
+      </aside>
+    {% endif %}
   </main>
+  <div class="context-help-popover" id="context-help-popover" role="tooltip" hidden></div>
   <dialog id="inktime-confirm-dialog" aria-labelledby="inktime-confirm-title">
     <form method="dialog" class="form-stack">
       <h2 id="inktime-confirm-title">確認操作</h2>
@@ -64,6 +84,8 @@
       </div>
     </form>
   </dialog>
+  <script src="{{ url_for('error_catalog_script') }}"></script>
+  <script src="{{ url_for('static', filename='error-messages.js') }}"></script>
   <script nonce="{{ csp_nonce }}">
     window.inktimeFetch = (url, options = {}) => {
       options.headers = Object.assign({'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]').content}, options.headers || {});
@@ -98,15 +120,14 @@
       }
       throw new Error('預覽請求過於頻繁，請稍後再試');
     };
-    window.inktimeDecodeJson = async response => {
-      const text = await response.text();
-      if (!text) return {};
-      try { return JSON.parse(text); } catch (_error) { return {message: text.slice(0, 240)}; }
-    };
     window.inktimeSetStatus = (target, message, kind = '') => {
       const node = typeof target === 'string' ? document.querySelector(target) : target;
       if (!node) return;
-      node.textContent = String(message || '');
+      const text = String(message || '');
+      // Already-explained API messages contain the complete next step. Keep
+      // them intact; explain older code-only messages at this shared boundary.
+      node.textContent = kind === 'error' && (/^[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+/.test(text) || /Failed to fetch|NetworkError|ProviderHTTPError/.test(text))
+        ? window.inktimeErrorText('', text) : text;
       node.dataset.statusKind = kind;
       node.setAttribute('role', kind === 'error' ? 'alert' : 'status');
     };
@@ -205,6 +226,72 @@
       document.addEventListener('keydown', event => {
         if (event.key === 'Escape') menus.forEach(menu => { menu.open = false; });
       });
+    })();
+
+    (() => {
+      const popover = document.getElementById('context-help-popover');
+      const targets = [...document.querySelectorAll('[data-help]')];
+      const previousDescriptions = new WeakMap();
+      let activeTarget = null;
+      let openTimer = null;
+      let closeTimer = null;
+
+      const close = () => {
+        window.clearTimeout(openTimer);
+        window.clearTimeout(closeTimer);
+        popover.hidden = true;
+        if (activeTarget) {
+          const previous = previousDescriptions.get(activeTarget);
+          if (previous) activeTarget.setAttribute('aria-describedby', previous);
+          else activeTarget.removeAttribute('aria-describedby');
+        }
+        activeTarget = null;
+      };
+      const position = target => {
+        const rect = target.getBoundingClientRect();
+        const width = Math.min(360, window.innerWidth - 24);
+        const left = Math.max(12, Math.min(window.innerWidth - width - 12, rect.left + (rect.width - width) / 2));
+        popover.style.width = `${width}px`;
+        popover.style.left = `${left}px`;
+        popover.style.top = `${Math.max(12, Math.min(window.innerHeight - popover.offsetHeight - 12, rect.bottom + 8))}px`;
+      };
+      const open = target => {
+        window.clearTimeout(openTimer);
+        window.clearTimeout(closeTimer);
+        if (activeTarget && activeTarget !== target) close();
+        activeTarget = target;
+        if (!previousDescriptions.has(target)) previousDescriptions.set(target, target.getAttribute('aria-describedby'));
+        popover.textContent = target.dataset.help;
+        popover.hidden = false;
+        target.setAttribute('aria-describedby', 'context-help-popover');
+        position(target);
+      };
+      const scheduleOpen = target => {
+        window.clearTimeout(closeTimer);
+        window.clearTimeout(openTimer);
+        openTimer = window.setTimeout(() => open(target), 240);
+      };
+      const scheduleClose = () => {
+        window.clearTimeout(openTimer);
+        window.clearTimeout(closeTimer);
+        closeTimer = window.setTimeout(() => {
+          if (activeTarget && (activeTarget.matches(':hover') || activeTarget.contains(document.activeElement))) return;
+          close();
+        }, 80);
+      };
+
+      targets.forEach(target => {
+        target.classList.add('has-context-help');
+        target.addEventListener('pointerenter', () => scheduleOpen(target));
+        target.addEventListener('pointerleave', scheduleClose);
+        target.addEventListener('focusin', () => open(target));
+        target.addEventListener('focusout', event => {
+          if (!target.contains(event.relatedTarget)) scheduleClose();
+        });
+      });
+      document.addEventListener('keydown', event => { if (event.key === 'Escape') close(); });
+      window.addEventListener('resize', () => { if (activeTarget) position(activeTarget); });
+      window.addEventListener('scroll', close, {passive: true});
     })();
   </script>
   {% block scripts %}{% endblock %}

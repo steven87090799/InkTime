@@ -2165,6 +2165,11 @@ MIGRATIONS = (
             "ALTER TABLE providers ADD COLUMN model TEXT",
         ),
     ),
+    Migration(
+        53,
+        "統一既有 AI 分析為台灣繁體中文",
+        (),
+    ),
 )
 
 
@@ -2462,6 +2467,75 @@ def _apply_migration_48_data_fixes(connection: sqlite3.Connection) -> None:
         connection.execute(statement)
 
 
+def _traditional_json_text(value: object) -> str | None:
+    """Return converted JSON text only when the payload actually changes."""
+
+    if value is None:
+        return None
+    source = str(value)
+    try:
+        parsed = json.loads(source)
+    except (TypeError, ValueError):
+        return None
+
+    from inktime.app.domain.analysis.traditional_chinese import to_taiwan_traditional
+
+    converted = to_taiwan_traditional(parsed)
+    if converted == parsed:
+        return None
+    return json.dumps(converted, ensure_ascii=False, separators=(",", ":"))
+
+
+def _apply_migration_53_data_fixes(connection: sqlite3.Connection) -> None:
+    """Backfill user-visible AI output without rewriting raw Provider evidence."""
+
+    from inktime.app.domain.analysis.traditional_chinese import to_taiwan_traditional
+
+    rows = connection.execute(
+        "SELECT id,caption,side_caption,reason,types_json,raw_json,semantic_json FROM photo_analysis"
+    ).fetchall()
+    for row in rows:
+        updates: dict[str, object] = {}
+        for column in ("caption", "side_caption", "reason"):
+            source = row[column]
+            if source is None:
+                continue
+            converted = to_taiwan_traditional(str(source))
+            if converted != source:
+                updates[column] = converted
+        for column in ("types_json", "raw_json", "semantic_json"):
+            converted_json = _traditional_json_text(row[column])
+            if converted_json is not None:
+                updates[column] = converted_json
+        if updates:
+            assignments = ",".join(f"{column}=?" for column in updates)
+            connection.execute(
+                f"UPDATE photo_analysis SET {assignments} WHERE id=?",  # noqa: S608
+                (*updates.values(), row["id"]),
+            )
+
+    for table, id_column, json_columns in (
+        ("job_items", "id", ("result_json",)),
+        ("ai_analysis_cache", "rowid", ("result_json",)),
+        ("ai_trace_runs", "id", ("final_result_json",)),
+        ("ai_trace_attempts", "id", ("response_parsed_json",)),
+    ):
+        selected = ",".join((id_column, *json_columns))
+        rows = connection.execute(f"SELECT {selected} FROM {table}").fetchall()  # noqa: S608
+        for row in rows:
+            updates = {}
+            for column in json_columns:
+                converted_json = _traditional_json_text(row[column])
+                if converted_json is not None:
+                    updates[column] = converted_json
+            if updates:
+                assignments = ",".join(f"{column}=?" for column in updates)
+                connection.execute(
+                    f"UPDATE {table} SET {assignments} WHERE {id_column}=?",  # noqa: S608
+                    (*updates.values(), row[id_column]),
+                )
+
+
 def _applied_versions(database: Database) -> set[int]:
     with database.session() as connection:
         if not _table_exists(connection, "schema_migrations"):
@@ -2686,6 +2760,8 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
                         _apply_migration_43_data_fixes(connection)
                     if migration.version == 48:
                         _apply_migration_48_data_fixes(connection)
+                    if migration.version == 53:
+                        _apply_migration_53_data_fixes(connection)
                     connection.execute(
                         "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
                         (migration.version, migration.name, _utc_now()),

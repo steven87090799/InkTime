@@ -10,3 +10,4 @@ opencv-python-headless==4.13.0.92
 # 2.2.6 is the newest shared line verified with Python 3.10/3.12 and OpenCV 4.13.
 # Newer NumPy lines no longer share the project's complete supported interpreter matrix.
 numpy==2.2.6
+opencc==1.4.2

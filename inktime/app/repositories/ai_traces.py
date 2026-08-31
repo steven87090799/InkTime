@@ -279,7 +279,7 @@ class AITraceRepository:
             rows = connection.execute(
                 f"""
                 SELECT r.id,r.trace_id,r.job_id,r.photo_id,r.stage,r.status,r.started_at,r.completed_at,
-                       r.error_code,p.relative_path,p.width,p.height,
+                       r.error_code,r.error_message,p.relative_path,p.width,p.height,
                        COUNT(a.id) attempt_count,
                        (SELECT first_attempt.provider FROM ai_trace_attempts first_attempt
                         WHERE first_attempt.trace_id=r.trace_id
