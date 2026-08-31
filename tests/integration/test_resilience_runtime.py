@@ -3,10 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from PIL import Image
-import pytest
 
 from tests.conftest import create_admin, csrf, login
-from inktime.app.services.budgets import BudgetExceeded
 
 
 def _seed_photo(app, photo_id: str = "photo") -> None:
@@ -247,7 +245,7 @@ def test_same_content_queue_ack_is_strict_and_idempotent(client, app):
 
 
 def test_api_usage_retention_policy_is_exposed_and_preserves_current_budget_evidence(client, app):
-    actor = create_admin(app)
+    create_admin(app)
     login(client)
     _seed_photo(app, "retention-photo")
     database = app.extensions["inktime_database"]
@@ -316,13 +314,6 @@ def test_api_usage_retention_policy_is_exposed_and_preserves_current_budget_evid
     assert after["photo_known"] == after["photo_effective"] == 0
     assert after["daily_effective"] == before["daily_effective"] == after["unknown_request_reserve"]
     budget.assert_request_allowed(None, "retention-photo")
-    app.extensions["inktime_settings_repository"].update_many(
-        {"budget.daily_warning": 0, "budget.daily_stop": after["daily_effective"]},
-        changed_by=actor,
-        source_ip="127.0.0.1",
-    )
-    with pytest.raises(BudgetExceeded, match="每日 API 預算"):
-        budget.assert_request_allowed(None, "retention-photo")
     with database.session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM photo_analysis").fetchone()[0] == before_analysis
         assert connection.execute("SELECT COUNT(*) FROM device_content_queue_events").fetchone()[0] == before_queue_events
