@@ -99,6 +99,8 @@
       "pixelFormat": profile.pixel_format
     }
   }|tojson }}</script>
+  <script src="{{ url_for('error_catalog_script') }}"></script>
+  <script src="{{ url_for('static', filename='error-messages.js') }}"></script>
   <script src="{{ url_for('static', filename='virtual-display.js') }}"></script>
 </body>
 </html>

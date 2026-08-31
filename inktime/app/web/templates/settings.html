@@ -321,7 +321,7 @@
 
   const request = async (url, options={}) => {
     const response = await window.inktimeFetch(url, options);
-    const data = await response.json();
+    const data = await window.inktimeDecodeJson(response);
     if (!response.ok) throw new Error(data.message || '操作失敗');
     return data;
   };
@@ -330,11 +330,11 @@
   const scopeText = scope => ({dynamic:'立即生效',next_job:'下次工作生效',next_render:'下次渲染生效',future_device_only:'只影響之後新增的裝置',restart:'需重新啟動',not_wired:'尚未支援'}[scope] || '未知生效範圍');
   const validation = message => {
     const box = document.getElementById('settings-validation-summary');
-    box.textContent = message; box.hidden = !message;
+    window.inktimeSetStatus(box, message, 'error'); box.hidden = !message;
     if (message) box.focus();
   };
   const impactHtml = data => `
-    ${data.validation_errors?.length ? `<div class="notice error"><strong>驗證失敗</strong><ul>${data.validation_errors.map(item=>`<li>${esc(item)}</li>`).join('')}</ul></div>` : ''}
+    ${data.validation_errors?.length ? `<div class="notice error"><strong>驗證失敗</strong><ul>${data.validation_errors.map(item=>`<li>${window.inktimeErrorHtml('',item)}</li>`).join('')}</ul></div>` : ''}
     ${data.confirmation_reasons?.length ? `<div class="notice warning"><strong>需要二次確認</strong><ul>${data.confirmation_reasons.map(item=>`<li>${esc(item)}</li>`).join('')}</ul></div>` : ''}
     <dl class="impact-grid">
       <div><dt>變更項目</dt><dd>${data.changed_keys?.length || 0}</dd></div>

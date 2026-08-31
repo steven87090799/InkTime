@@ -301,10 +301,11 @@ def test_confirmed_screenshot_ai_api_is_controlled_and_creates_no_job(client, ap
     )
 
     assert response.status_code == 409
-    assert response.json == {
+    assert {key: response.json[key] for key in ("error_code", "message")} == {
         "error_code": "VLM-008",
         "message": "已確認為截圖；為保護隱私與額度，禁止送入 AI 模型",
     }
+    assert response.json["user_error"]["title"] == "這張照片不允許傳送給模型"
     with app.extensions["inktime_database"].session() as connection:
         assert int(connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]) == before_jobs
 
@@ -380,10 +381,11 @@ def test_single_excluded_photo_ai_without_provider_is_controlled_and_side_effect
 
     for rejected in (response, batch_response, automatic_response):
         assert rejected.status_code == 409
-        assert rejected.json == {
+        assert {key: rejected.json[key] for key in ("error_code", "message")} == {
             "error_code": "VLM-008",
             "message": "目前沒有已啟用且設定完整的 Vision Provider",
         }
+        assert "模型設定" in rejected.json["user_error"]["title"]
     with app.extensions["inktime_database"].session() as connection:
         assert int(connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]) == before_jobs
 
@@ -1083,10 +1085,11 @@ def test_full_library_without_provider_fails_before_enumeration_or_reservation(
     assert unconfirmed.status_code == 409
     assert unconfirmed.json["error_code"] == "VLM-008"
     assert response.status_code == 409
-    assert response.json == {
+    assert {key: response.json[key] for key in ("error_code", "message")} == {
         "error_code": "VLM-008",
         "message": "目前沒有已啟用且設定完整的 Vision Provider",
     }
+    assert "模型設定" in response.json["user_error"]["title"]
     with app.extensions["inktime_database"].session() as connection:
         assert int(connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]) == 0
         assert int(connection.execute("SELECT COUNT(*) FROM idempotency_requests").fetchone()[0]) == 0

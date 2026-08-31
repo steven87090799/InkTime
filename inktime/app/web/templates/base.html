@@ -1,3 +1,4 @@
+{% from "components/error_notice.html" import error_notice with context %}
 <!doctype html>
 <html lang="zh-Hant-TW">
 <head>
@@ -45,9 +46,9 @@
     </div>
   </header>
   <main class="shell">
-    {% if critical_alerts %}<div class="notice error" role="alert"><strong>嚴重故障{% if critical_alerts|length > 1 %}（{{ critical_alerts|length }}）{% endif %}</strong>｜{{ critical_alerts[0].component }}｜<code>{{ critical_alerts[0].error_code }}</code>｜{{ critical_alerts[0].message }}｜{{ critical_alerts[0].last_seen_at }}｜<a href="/activity?severity=CRITICAL">查看詳細資訊</a></div>{% endif %}
+    {% if critical_alerts %}<div class="notice error" role="alert"><strong>需要優先處理{% if critical_alerts|length > 1 %}（{{ critical_alerts|length }}）{% endif %}</strong>{{ error_notice(critical_alerts[0].error_code, critical_alerts[0].message) }}<small>{{ critical_alerts[0].last_seen_at }}</small> · <a href="/activity?severity=CRITICAL">查看相關事件</a></div>{% endif %}
     {% for category, message in get_flashed_messages(with_categories=true) %}
-      <div class="notice {{ category }}" role="alert">{{ message }}</div>
+      <div class="notice {{ category }}" role="alert">{% if category == 'error' %}{{ error_notice(message.code, message.message) if message is mapping else error_notice('', message) }}{% else %}{{ message }}{% endif %}</div>
     {% endfor %}
     {% block content %}{% endblock %}
     {% if page_guide %}
@@ -82,6 +83,8 @@
       </div>
     </form>
   </dialog>
+  <script src="{{ url_for('error_catalog_script') }}"></script>
+  <script src="{{ url_for('static', filename='error-messages.js') }}"></script>
   <script nonce="{{ csp_nonce }}">
     window.inktimeFetch = (url, options = {}) => {
       options.headers = Object.assign({'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]').content}, options.headers || {});
@@ -116,15 +119,14 @@
       }
       throw new Error('預覽請求過於頻繁，請稍後再試');
     };
-    window.inktimeDecodeJson = async response => {
-      const text = await response.text();
-      if (!text) return {};
-      try { return JSON.parse(text); } catch (_error) { return {message: text.slice(0, 240)}; }
-    };
     window.inktimeSetStatus = (target, message, kind = '') => {
       const node = typeof target === 'string' ? document.querySelector(target) : target;
       if (!node) return;
-      node.textContent = String(message || '');
+      const text = String(message || '');
+      // Already-explained API messages contain the complete next step. Keep
+      // them intact; explain older code-only messages at this shared boundary.
+      node.textContent = kind === 'error' && (/^[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+/.test(text) || /Failed to fetch|NetworkError|ProviderHTTPError/.test(text))
+        ? window.inktimeErrorText('', text) : text;
       node.dataset.statusKind = kind;
       node.setAttribute('role', kind === 'error' ? 'alert' : 'status');
     };

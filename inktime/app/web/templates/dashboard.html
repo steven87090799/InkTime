@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "components/error_notice.html" import error_notice with context %}
 {% block title %}儀表板｜InkTime{% endblock %}
 {% block content %}
 <div class="page-head dashboard-page-head"><div><p class="eyebrow">系統總覽</p><h1>儀表板</h1></div><div class="dashboard-health"><a class="dashboard-health-badge health-{{ system_status.level }}" href="/errors" aria-label="{{ system_status.rank }}，系統狀態{{ system_status.label }}{% if system_status.count %}，{{ system_status.count }} 件{% endif %}" data-help="{{ system_status.description }} 點此查看未解決事件與處理狀態。"><span class="dashboard-health-dot" aria-hidden="true"></span><small>{{ system_status.rank }}</small><strong>{{ system_status.label }}</strong>{% if system_status.count %}<b>{{ system_status.count }} 件</b>{% endif %}</a></div></div>
@@ -38,8 +39,8 @@
   </tbody></table></div>
 </section>
 <section class="panel"><div class="panel-head"><h2>最近錯誤</h2><a href="/errors">查看錯誤中心</a></div>
-  {% if recent_errors %}<div class="table-wrap"><table><thead><tr><th>錯誤碼</th><th>內容</th><th>次數</th><th>最後發生</th></tr></thead><tbody>
-  {% for error in recent_errors %}<tr><td><code>{{ error.error_code }}</code></td><td>{{ error.message }}</td><td>{{ error.occurrences }}</td><td>{{ error.last_seen_at }}</td></tr>{% endfor %}
+  {% if recent_errors %}<div class="table-wrap"><table><thead><tr><th>發生什麼事／如何處理</th><th>次數</th><th>最後發生</th></tr></thead><tbody>
+  {% for error in recent_errors %}<tr><td>{{ error_notice(error.error_code,error.message) }}</td><td>{{ error.occurrences }}</td><td>{{ error.last_seen_at }}</td></tr>{% endfor %}
   </tbody></table></div>{% else %}<p class="empty">目前沒有未解決錯誤。</p>{% endif %}
 </section>
 <section class="panel setup-overview" id="setup-overview">

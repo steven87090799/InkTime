@@ -471,3 +471,12 @@ pre { white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow
   .glossary-entry-badges { justify-content: flex-start; margin-top: 10px; }
   .glossary-jump { justify-self: stretch; }
 }
+/* Readable error explanations are shared by cards, tables and notifications. */
+.error-explanation { min-width: 0; overflow-wrap: anywhere; text-align: start; }
+.error-explanation-title { display: block; line-height: 1.5; }
+.error-explanation p { margin: .35rem 0; line-height: 1.65; }
+.error-next-step { color: var(--muted); font-size: .92rem; }
+.error-next-step > span { font-weight: 650; }
+.error-technical { margin-top: .5rem; font-size: .82rem; }
+.error-technical summary { cursor: pointer; }
+.error-technical pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 14rem; overflow: auto; }

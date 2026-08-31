@@ -19,6 +19,7 @@ from inktime.app.domain.analysis.execution_mode import execution_mode, permits_a
 from inktime.app.web.ai_readiness import ai_readiness_snapshot
 from inktime.app.services.jobs import InvalidJobTransition, JobService
 from inktime.app.web.access import administrator_required, login_required
+from inktime.app.web.error_messages import explain_error
 
 
 bp = Blueprint("jobs", __name__)
@@ -122,64 +123,16 @@ def _job_item_view(item) -> dict:
             provider_message = str(provider_error.get("message") or "").strip()
     except (json.JSONDecodeError, TypeError, ValueError):
         provider_message = ""
-    http_status = int(item["latest_http_status"] or 0)
-    no_compatible_openrouter_endpoint = (
-        http_status == 404
-        and "no endpoints found that can handle the requested parameters"
-        in provider_message.lower()
+    explanation = explain_error(
+        code,
+        "；".join(value for value in (str(item["error_message"] or ""), provider_message) if value),
+        item["latest_http_status"],
     )
-    if code == "VLM-005" and no_compatible_openrouter_endpoint:
-        return {
-            "explanation_title": "OpenRouter 免費路由暫時沒有相容模型",
-            "explanation_detail": (
-                "這次請求需要圖片理解與結構化輸出；OpenRouter 回覆 HTTP 404，"
-                "當下沒有免費端點可同時支援。可稍後重跑，或改用固定且支援 Vision／JSON Schema 的模型。"
-            ),
-            "explanation_tone": "error",
-        }
-    if code == "VLM-005":
-        return {
-            "explanation_title": "目前沒有可用的模型端點",
-            "explanation_detail": (
-                "Provider 可能正在冷卻、忙碌或已達 Rate Limit；稍後重跑，或改用較穩定的固定 Vision 模型。"
-            ),
-            "explanation_tone": "error",
-        }
-    raw_message = str(item["error_message"] or "").strip()
-    if code == "VLM-004" and "display_suitability_grade" in raw_message:
-        compact_provider_response = provider_response_text.replace(" ", "")
-        nullable_grade_was_rejected = (
-            '"display_suitability_grade":null' in compact_provider_response
-            or '\\"display_suitability_grade\\":null' in compact_provider_response
-        )
-        return {
-            "explanation_title": (
-                "舊版把『無法判斷 E6 等級』誤判為格式錯誤"
-                if nullable_grade_was_rejected
-                else "模型輸出的 E6 適合度等級格式錯誤"
-            ),
-            "explanation_detail": (
-                "模型回傳 null，表示無法判斷；舊版驗證器與 Schema 規則不一致而拒絕儲存。"
-                "目前版本已接受 null；照片檔本身沒有損壞，可重跑這筆舊失敗。"
-                if nullable_grade_was_rejected
-                else "模型回傳的 display_suitability_grade 不是允許的 S、A、B、C、D、E 或 unknown；"
-                "系統修復一次後仍不合格，因此拒絕儲存。照片檔本身沒有損壞。"
-            ),
-            "explanation_tone": "error",
-        }
-    if code == "VLM-004":
-        return {
-            "explanation_title": "模型輸出不符合分析格式",
-            "explanation_detail": f"模型修復一次後仍無法通過欄位驗證：{raw_message or '格式不合法'}。",
-            "explanation_tone": "error",
-        }
     return {
-        "explanation_title": "處理失敗" if not code else f"處理失敗（{code}）",
-        "explanation_detail": (
-            "模型服務拒絕了請求；請查看模型呼叫紀錄取得 HTTP 狀態與 Provider 回覆。"
-            if raw_message == "ProviderHTTPError"
-            else raw_message or "請查看模型呼叫紀錄取得詳細原因。"
-        ),
+        "explanation_title": explanation["title"],
+        "explanation_detail": explanation["detail"],
+        "explanation_action": explanation["action"],
+        "user_error": explanation,
         "explanation_tone": "error",
     }
 
