@@ -36,6 +36,13 @@ TERMINAL_NO_RETRY_CODES = frozenset(
         "VLM-AMBIGUOUS",
         "JOB-SHUTDOWN-AMBIGUOUS",
         "JOB-SOURCE-MISSING",
+        "IMG-MISSING",
+        "IMG-UNSUPPORTED",
+        "IMG-CORRUPT",
+        "IMG-HEIF-UNAVAILABLE",
+        "IMG-FILE-LIMIT",
+        "THUMB-004",
+        "THUMB-005",
     }
 )
 

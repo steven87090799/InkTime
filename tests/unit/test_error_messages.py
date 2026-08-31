@@ -22,7 +22,7 @@ NUMBERED_CODE = re.compile(r"\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-\d{3}\b")
 ERROR_PREFIXES = (
     "AI-", "ANALYSIS-", "BATCH-", "DEVICE-", "DISPLAY-", "JOB-", "SCAN-", "NOTIFY-",
     "QUEUE-", "VLM-", "SCHEDULE-", "RENDER-", "PAIR-", "DISK-", "HTTP-", "DB-",
-    "BUDGET-", "PREFLIGHT-", "RESTORE-", "RETENTION-",
+    "BUDGET-", "PREFLIGHT-", "RESTORE-", "RETENTION-", "IMG-",
 )
 
 
@@ -64,7 +64,8 @@ def test_every_source_numbered_error_and_named_error_family_has_an_explanation()
                 if (node.value.startswith(ERROR_PREFIXES)
                         and re.fullmatch(r"[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+", node.value)):
                     found.add(node.value)
-    assert not (found - CATALOG.keys() - {"SHA-256"})
+    missing = sorted(found - CATALOG.keys() - {"SHA-256"})
+    assert not missing, f"Missing error explanations: {missing}"
 
 
 @pytest.mark.parametrize("code", sorted(CATALOG))

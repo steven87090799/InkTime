@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from inktime.app.domain.photos.formats import MAX_FILE_BYTES, MAX_SOURCE_PIXELS, MAX_SOURCE_EDGE
+
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import base64
@@ -711,32 +713,32 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "scanner.max_file_bytes": {
         "category": "效能與待機",
-        "default": 209715200,
+        "default": MAX_FILE_BYTES,
         "type": "integer",
         "description": "Scanner 接受的單張檔案最大位元組數",
         "risk": "過大檔案會增加記憶體風險",
         "min": 1048576,
-        "max": 2147483648,
+        "max": MAX_FILE_BYTES,
         "restart": False,
     },
     "scanner.max_pixels": {
         "category": "效能與待機",
-        "default": 60000000,
+        "default": MAX_SOURCE_PIXELS,
         "type": "integer",
         "description": "Scanner 接受的單張像素上限",
         "risk": "提高會增加解壓縮炸彈風險",
         "min": 1000000,
-        "max": 500000000,
+        "max": MAX_SOURCE_PIXELS,
         "restart": False,
     },
     "scanner.max_edge_px": {
         "category": "效能與待機",
-        "default": 12000,
+        "default": MAX_SOURCE_EDGE,
         "type": "integer",
         "description": "Scanner 接受的單張影像邊長上限",
         "risk": "提高會增加記憶體風險",
         "min": 1000,
-        "max": 100000,
+        "max": MAX_SOURCE_EDGE,
         "restart": False,
     },
     "scanner.thumbnail_capacity_check_interval": {

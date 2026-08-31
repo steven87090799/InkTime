@@ -8,18 +8,20 @@ import re
 import tempfile
 import time
 
-from PIL import Image, ImageOps
+from PIL import Image
 
 from inktime.app.core.locks import fcntl
 from inktime.app.domain.analysis.plan import AI_IMAGE_JPEG_QUALITY
+from inktime.app.domain.photos.formats import (
+    DERIVATIVE_FORMAT, DERIVATIVE_SIZES, DERIVATIVE_VERSION, ImageSourceError, load_rgb,
+)
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-MAX_THUMBNAIL_INPUT_PIXELS = 40_000_000
 
 
 class ThumbnailCache:
-    ALLOWED_SIZES = {512, 1024, 1600}
+    ALLOWED_SIZES = DERIVATIVE_SIZES
     LOCK_SHARDS = 256
 
     def __init__(self, root: Path) -> None:
@@ -78,9 +80,9 @@ class ThumbnailCache:
                 width, height = image.size
                 if width <= 0 or height <= 0 or max(width, height) > size:
                     return False
-                image.verify()
+                image.load()  # JPEG verify() alone does not detect truncated pixel data.
             return True
-        except (OSError, ValueError):
+        except (OSError, ValueError, Image.DecompressionBombError):
             return False
 
     @staticmethod
@@ -105,7 +107,7 @@ class ThumbnailCache:
         normalized_hash = content_hash.casefold()
         if not _SHA256.fullmatch(normalized_hash):
             raise ValueError("THUMB-002 縮圖內容雜湊必須是 SHA-256")
-        return normalized_hash, self.root / f"{normalized_hash}-{size}.jpg"
+        return normalized_hash, self.root / f"{normalized_hash}-{DERIVATIVE_VERSION}-{size}.jpg"
 
     def _get_or_create_locked(self, source: Path, normalized_hash: str, destination: Path, size: int) -> Path:
         temporary: Path | None = None
@@ -125,25 +127,12 @@ class ThumbnailCache:
         temporary = Path(handle.name)
         handle.close()
         try:
-            with Image.open(source) as opened:
-                if opened.width * opened.height > MAX_THUMBNAIL_INPUT_PIXELS:
-                    raise OSError("THUMB-005 原始照片像素超過縮圖安全上限")
-                if opened.format == "JPEG":
-                    opened.draft("RGB", (size, size))
-                else:
-                    opened.thumbnail((size * 2, size * 2), Image.Resampling.BOX)
-                image = ImageOps.exif_transpose(opened).convert("RGB")
-                image.thumbnail((size, size), Image.Resampling.LANCZOS)
-                image.save(
-                    temporary,
-                    format="JPEG",
-                    quality=AI_IMAGE_JPEG_QUALITY,
-                    optimize=True,
-                )
+            with load_rgb(source, size) as image:
+                image.save(temporary, format=DERIVATIVE_FORMAT, quality=AI_IMAGE_JPEG_QUALITY, optimize=True)
             if self._content_sha256(source) != normalized_hash:
-                raise OSError("THUMB-004 原始照片內容已在縮圖建立期間改變")
+                raise ImageSourceError("THUMB-004", "原始照片內容已在縮圖建立期間改變", 409)
             if not self._validate(temporary, size):
-                raise OSError("THUMB-003 縮圖格式或尺寸驗證失敗")
+                raise ImageSourceError("THUMB-003", "縮圖格式或尺寸驗證失敗", 503)
             with temporary.open("rb") as stream:
                 os.fsync(stream.fileno())
             os.replace(temporary, destination)
@@ -157,7 +146,7 @@ class ThumbnailCache:
 
     def get_or_create(self, source: Path, content_hash: str, size: int) -> Path:
         normalized_hash, destination = self._destination(content_hash, size)
-        with self._generation_lock(f"{normalized_hash}-{size}") as acquired:
+        with self._generation_lock(destination.stem) as acquired:
             assert acquired
             return self._get_or_create_locked(source, normalized_hash, destination, size)
 
@@ -165,7 +154,7 @@ class ThumbnailCache:
     def acquire_for_use(self, source: Path, content_hash: str, size: int):
         """Keep this cache shard alive until the caller has finished reading it."""
         normalized_hash, destination = self._destination(content_hash, size)
-        with self._generation_lock(f"{normalized_hash}-{size}") as acquired:
+        with self._generation_lock(destination.stem) as acquired:
             assert acquired
             yield self._get_or_create_locked(source, normalized_hash, destination, size)
 

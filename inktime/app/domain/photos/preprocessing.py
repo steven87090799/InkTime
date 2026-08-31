@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from hashlib import sha256
 import json
 import math
 from pathlib import Path
 from typing import Any
 
-from PIL import ExifTags, Image, ImageOps, ImageStat
+from PIL import ExifTags, Image, ImageStat
 
 from inktime.app.domain.rendering.composition import (
     analyze_crop_focus,
@@ -15,12 +14,7 @@ from inktime.app.domain.rendering.composition import (
 from inktime.app.domain.rendering.composition import evaluate_e6_suitability
 from inktime.app.domain.photos.dates import materialized_capture_fields, parse_photo_datetime
 
-try:
-    from pillow_heif import register_heif_opener
-
-    register_heif_opener()
-except ImportError:  # pragma: no cover - requirements 正式環境會安裝，保留最小匯入能力。
-    pass
+from inktime.app.domain.photos.formats import bounded_rgb, safe_image_open
 
 
 _DCT_COS = tuple(
@@ -172,11 +166,8 @@ class PhotoPreprocessor:
         SHA-256、格式與尺寸永遠取得，因為它們是搬移／重複辨識與內容變更
         失效判斷的最低安全資料。
         """
-        digest = sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-        with Image.open(path) as opened:
+        with safe_image_open(path, hash_source=True) as opened:
+            content_hash = str(opened.info["inktime_source_sha256"])
             original_format = opened.format or path.suffix.lstrip(".").upper()
             original_width, original_height = opened.size
             exif = opened.getexif()
@@ -213,13 +204,13 @@ class PhotoPreprocessor:
                 _captured_date, _month_day, capture_date_status = materialized_capture_fields(
                     str(captured), warn=False
                 )
-            orientation = int(exif.get(274, 1) or 1)
+            orientation = int(opened.info.get("original_orientation") or exif.get(274, 1) or 1)
             camera_make = str(exif_named.get("Make", "")).strip() or None
             camera_model = str(exif_named.get("Model", "")).strip() or None
             lens_model = str(exif_named.get("LensModel", "")).strip() or None
             width, height = (
                 (original_height, original_width)
-                if orientation in {5, 6, 7, 8}
+                if orientation in {5, 6, 7, 8} and original_format not in {"TIFF", "HEIF"}
                 else (original_width, original_height)
             )
             serializable_exif = dict(exif_named) if include_metadata else None
@@ -236,11 +227,7 @@ class PhotoPreprocessor:
             crop_face_count = None
             e6_metrics = None
             if include_local_features:
-                # 所有品質特徵只需要小樣本。先要求 JPEG decoder 降採樣，再限制到 512px，
-                # 避免 24MP／48MP 原始圖在每個並行槽展開成數十至數百 MiB。
-                opened.draft("RGB", (512, 512))
-                opened.thumbnail((512, 512), Image.Resampling.LANCZOS)
-                image = ImageOps.exif_transpose(opened).convert("RGB")
+                image = bounded_rgb(opened, 512)
                 grayscale = image.convert("L")
                 crop = analyze_crop_focus(image)
                 stat = ImageStat.Stat(grayscale)
@@ -321,7 +308,7 @@ class PhotoPreprocessor:
                 e6_sample.thumbnail((512, 512), Image.Resampling.LANCZOS)
                 e6_metrics = evaluate_e6_suitability(e6_sample.convert("RGB"))
             return LocalPhotoFeatures(
-                sha256=digest.hexdigest(),
+                sha256=content_hash,
                 perceptual_hash=perceptual_hash,
                 difference_hash=difference_hash,
                 width=width,

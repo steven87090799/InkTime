@@ -23,7 +23,7 @@
 
 六色 GDEP 可選「Good Display 原廠相容」重現廠商固定色盤轉換，或選「照片平滑」先消除局部色塊與雜點，再套用相同固定色盤 Floyd–Steinberg。前者適合建立原廠基準，後者適合人像與 JPG 壓縮照片；兩者都應再以同一張照片做實體面板 A/B。
 
-此 API 不查照片資料庫、不建立 Job、不寫入 Release、不呼叫 Provider。上傳檔只存在單次請求的暫存目錄；最多 25 MiB／4000 萬像素，處理完成即刪除。回應的 `X-InkTime-Model: disabled` 可用於自動測試確認模型沒有介入。
+此 API 不查照片資料庫、不建立 Job、不寫入 Release、不呼叫 Provider。上傳檔只存在單次請求的暫存目錄；最多 25 MiB／6000 萬像素（任一邊最多 12000px；[共用圖片 contract](../architecture/IMAGE_FORMAT_CONTRACT_ZH_TW.md)），處理完成即刪除。回應的 `X-InkTime-Model: disabled` 可用於自動測試確認模型沒有介入。
 
 CSS 電子紙外框、紙張紋理與刷新動畫只協助觀察；下載的 PNG 不含這些裝飾。真正寫入面板的色彩與資料量則使用 `inktime/app/domain/rendering/palette.py` 的相同編碼器。
 

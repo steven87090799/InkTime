@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from inktime.app.domain.photos.formats import SUPPORTED_IMAGE_EXTENSIONS
+
 from datetime import timedelta
 from hashlib import sha256
 import logging
@@ -110,6 +112,7 @@ def configure_web_application(
     ):
         app.register_blueprint(blueprint)
     app.jinja_env.globals["csrf_token"] = csrf_token
+    app.jinja_env.globals["image_source_accept"] = ",".join(sorted(SUPPORTED_IMAGE_EXTENSIONS))
     app.jinja_env.filters["taiwan_traditional"] = to_taiwan_traditional
     app.jinja_env.globals.update(
         explain_error=explain_error,

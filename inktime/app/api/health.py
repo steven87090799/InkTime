@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from flask import Blueprint, current_app
 
 from inktime.app.web.access import administrator_required
+from inktime.app.domain.photos.formats import ensure_image_codecs_registered, image_capabilities
 
 
 bp = Blueprint("health", __name__)
@@ -32,6 +33,7 @@ def ready():
             ((datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),),
         ).fetchone()[0]
     checks = {
+        "heif_decoder": ensure_image_codecs_registered(),
         "database": database.integrity_check() == "ok",
         "release_directory": os.access(current_app.config["INKTIME_RELEASE_DIR"], os.R_OK | os.W_OK),
         "migrations": int(migrations or 0) >= 6,
@@ -68,6 +70,7 @@ def detail():
         "database_bytes": database.path.stat().st_size if database.path.exists() else 0,
         "version": current_app.config.get("INKTIME_VERSION"),
         "runtime_config": runtime_config.diagnostic_summary(),
+        "image_capabilities": image_capabilities(),
         "runtime_metrics": {
             "sqlite_writer_wait": database.observability(),
             "weather": current_app.extensions["inktime_weather_service"].observability(),

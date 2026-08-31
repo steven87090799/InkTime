@@ -8,6 +8,15 @@
   <title>{% block title %}InkTime{% endblock %}</title>
   <script nonce="{{ csp_nonce }}">
     (() => {
+      document.addEventListener('error', event => {
+        const image = event.target;
+        if (image?.tagName !== 'IMG' || !/\/api\/v1\/photos\/[^/]+\/(thumbnail|preview)(?:[?#]|$)/.test(image.getAttribute('src') || '')) return;
+        const placeholder = document.createElement('div');
+        placeholder.className = 'notice error';
+        placeholder.setAttribute('role', 'status');
+        placeholder.textContent = '縮圖無法產生，請稍後重試或查看執行監控。';
+        image.replaceWith(placeholder);
+      }, true);
       let savedTheme = null;
       try {
         savedTheme = localStorage.getItem('inktime-theme');
