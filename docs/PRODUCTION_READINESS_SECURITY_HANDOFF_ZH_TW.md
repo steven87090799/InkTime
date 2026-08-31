@@ -1,12 +1,14 @@
 # Security／Production Readiness 最終交接
 
+> 本頁保留 PR #53 的歷史安全交接與後續補充，並非最新 CI 成績單。2026-08-31 原始碼最高 Migration 為 52、韌體 2.8.6、Config Store v5；現行部署／模型／實板邊界見[版本基線](reference/CURRENT_STATE_ZH_TW.md)。下文日期、PASS、NOT RUN 與舊版本指當時交付，不推定目前部署狀態。
+
 本文件記錄 PR #53 安全強化分支最後一輪的操作契約與人工邊界。自動化測試通過不代表真實 NAS、正式憑證、OpenRouter 或電子紙硬體已驗證；未實際執行的項目必須標記 `NOT RUN`。Hosted provenance 必須區分 `PR_HEAD`、`TESTED_MERGE_REF`、`MERGE_GROUP` 與 optional `EXACT_HEAD_WORKFLOW_RUN`；最新 PR merge-ref required checks 是主要合併相容性證據。
 
 ## 本輪 One-shot hardening 範圍
 
-- 基準為最新 `origin/main`；正式 schema source 目前為 `Migration 33`。Migration 32 保存 Provider options/capabilities、usage 的 cache-write、成本來源與 request-size metrics；Migration 33 增加 Provider identity、OpenRouter legacy data fix 與成本回溯索引，舊 Migration 1–31 不修改。
+- 當時基準為該次 `origin/main`；正式 schema source 為 `Migration 33`。Migration 32 保存 Provider options/capabilities、usage 的 cache-write、成本來源與 request-size metrics；Migration 33 增加 Provider identity、OpenRouter legacy data fix 與成本回溯索引，舊 Migration 1–31 不修改。
 - Provider 路徑新增正式 OpenRouter contract、受控 routing/privacy options、reasoning／session routing 與 Batch hard guard；Vision 與 text-only JSON repair 共用 policy helper；成本來源分為 `provider_reported`、`estimated`、`unknown`，unknown 不當作零成本。
-- AI 請求固定 512／1024／1600 image side；完整、變體、文字修復分別受 2048／3072／1200 token cap 約束。repair policy 在 Analysis Plan 建立時 freeze，但不進 Vision fingerprint；每個 job 最多一次 repair，且 repair 不重新上傳圖片。
+- AI 請求固定 512／1024／1600 image side；完整、變體、文字修復分別受 2048／3072／1200 token cap 約束。repair policy 在 Analysis Plan 建立時 freeze，但不進 Vision fingerprint；每次分析最多一次 repair，且 repair 不重新上傳圖片。
 - ESP32 HTTPS 仍要求 trust anchor 且沒有 `setInsecure()` fallback；PhotoPainter 另可直接連
   literal RFC1918 HTTP，其他 public IP／hostname HTTP 一律拒絕。首次配網使用每個 AP
   session 重新產生的 8 位數字密碼，並在 AP 頁面與裝置畫面顯示同一值。
@@ -72,7 +74,7 @@ Webhook 採 at-least-once。每個事件持久化穩定 Event ID，所有後續 
 
 - 2026-07-29 GitHub push banner 與 alert #1 確認 `pytest` direct development dependency 受 GHSA-6w46-j5rx-g56g／CVE-2025-71176 影響（`<9.0.3`，UNIX tmpdir local privilege／DoS，runtime 不載入）；已將 `requirements-dev.txt` 升至首個修正版 9.0.3。`pip-audit -r requirements.txt` 的 runtime dependency 掃描無已知漏洞，最終仍以 current PR merge-ref CI 為準。
 - `actions/checkout` v7.0.1、`actions/setup-python` v7.0.0、`gitleaks-action` v3.0.0 已更新至官方 Node 24 版本並 pin commit SHA。
-- `arduino/setup-arduino-cli` 官方最新 v2.0.0 仍宣告 `node20`；保留官方 commit `81d310742121c928ea9c8bbd407b4217b432ae02`。移除條件：官方發布 Node 24 相容正式版並通過完整 ESP32 compile matrix。
+- `arduino/setup-arduino-cli` 當時固定 v2.0.0 仍宣告 `node20`；保留官方 commit `81d310742121c928ea9c8bbd407b4217b432ae02`。移除條件：官方發布 Node 24 相容正式版並通過完整 ESP32 compile matrix。
 
 ## OpenAI Batch 邊界
 

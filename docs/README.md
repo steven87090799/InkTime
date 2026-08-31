@@ -1,11 +1,14 @@
 # InkTime 文件地圖
 
-這是 InkTime 文件的單一入口。根目錄的 [`USER_MANUAL.html`](../USER_MANUAL.html) 提供可瀏覽的專案規格與完整文件連結；本頁則提供適合 GitHub、純文字閱讀器與程式碼審查的 Markdown 索引。
+核對日期：2026-08-31；主線 `48d2b8d`。先讀[現行版本與功能基線](reference/CURRENT_STATE_ZH_TW.md)，了解 Migration 52、AI Schema v3、韌體 2.8.6、local-only 預設與本次驗證範圍。
+
+這是 InkTime 文件的單一入口。根目錄的 [`USER_MANUAL.html`](../USER_MANUAL.html) 保留可瀏覽的說明與完整文件連結；現行操作契約以本次校對的 Markdown 為準；本頁則提供適合 GitHub、純文字閱讀器與程式碼審查的 Markdown 索引。
 
 ## 先從這裡開始
 
 | 你要做什麼 | 先讀 |
 |---|---|
+| 工作已完成但沒有文案／Worker 告警 | [Activity、工作與 AI Trace](guides/ACTIVITY_AI_TRACE_ZH_TW.md) |
 | 第一次啟動 Docker | [快速開始](getting-started/QUICK_START_ZH_TW.md) → [安裝指南](getting-started/INSTALLATION_ZH_TW.md) |
 | 了解程式如何運作 | [現行架構與流程](architecture/ARCHITECTURE_ZH_TW.md) → [Application Factory](architecture/APPLICATION_FACTORY.md) |
 | 管理照片、模型、裝置與設定 | [管理員指南](guides/ADMIN_GUIDE_ZH_TW.md) → [使用者指南](guides/USER_GUIDE_ZH_TW.md) |
@@ -29,16 +32,20 @@
 - `devices/`：ESP32、電子紙、傳輸與硬體驗收。
 - `resilience/`：Decision Trace、Shadow、離線 Queue、資料保留與 Canary。
 - `reference/`：穩定參考資訊，例如版本記錄與成本規則。
-- `reports/`：可重跑的現行量測輸出。
+- `reports/`：量測或校對報告；以各報告日期與原始碼版本為界線。
 - `archive/`：已完成的稽核與舊基線；它們是歷史證據，不代表目前行為。
 
 ## 完整文件索引
 
 ### 根目錄與入口
 
+- [`../AGENTS.md`](../AGENTS.md)：Hosted CI、Draft 交付與硬體安全規則；本次保留原規則。
+- [`CI_POLICY.md`](CI_POLICY.md)：CI 路由、source HEAD／merge-ref 與檢查結果判讀。
+- [`README.md`](README.md)：本文件地圖。
+
 - [`../README.md`](../README.md)：中文專案首頁、完整資料流與快速入口。
 - [`../README.en.md`](../README.en.md)：英文專案概覽與 Modern 啟動方式。
-- [`../USER_MANUAL.html`](../USER_MANUAL.html)：可瀏覽的專案規格與所有 Markdown 文件索引。
+- [`../USER_MANUAL.html`](../USER_MANUAL.html)：HTML 手冊與所有 Markdown 文件索引；舊章節請配合現行基線閱讀。
 
 ### Batch 與交付專項
 
@@ -54,6 +61,8 @@
 - [`getting-started/DEVELOPMENT_GUIDE_ZH_TW.md`](getting-started/DEVELOPMENT_GUIDE_ZH_TW.md)：分層規則、開發指令與測試原則。
 
 ### 使用指南
+
+- [`guides/ACTIVITY_AI_TRACE_ZH_TW.md`](guides/ACTIVITY_AI_TRACE_ZH_TW.md)：AI 啟用、工作／Worker 告警、attempts 與 usage 證據。
 
 - [`guides/ADMIN_GUIDE_ZH_TW.md`](guides/ADMIN_GUIDE_ZH_TW.md)：設定欄位、裝置、排程與管理界面責任。
 - [`guides/USER_GUIDE_ZH_TW.md`](guides/USER_GUIDE_ZH_TW.md)：照片、工作、渲染、發布與診斷操作。
@@ -76,6 +85,8 @@
 - [`architecture/TECH_DEBT_LOCAL_ONLY_ZH_TW.md`](architecture/TECH_DEBT_LOCAL_ONLY_ZH_TW.md)：Local-only 交付刻意未處理的技術債。
 
 ### 維運、安全與部署
+
+- [`operations/PHOTO_ANALYSIS_RETENTION_ZH_TW.md`](operations/PHOTO_ANALYSIS_RETENTION_ZH_TW.md)：分析歷史保護、dry-run digest 與逐批明確確認。
 
 - [`operations/DOCKER_GUIDE_ZH_TW.md`](operations/DOCKER_GUIDE_ZH_TW.md)：N100 Docker 部署、資源、健康檢查、更新與回滾。
 - [`operations/NAS_TAG_DEPLOYMENT_ZH_TW.md`](operations/NAS_TAG_DEPLOYMENT_ZH_TW.md)：Git Tag 發布 GHCR 映像、NAS 初次設定、單一 Tag 更新與固定版本回復。
@@ -117,6 +128,9 @@
 
 ### 參考資料與歷史紀錄
 
+- [`reference/CURRENT_STATE_ZH_TW.md`](reference/CURRENT_STATE_ZH_TW.md)：現行原始碼版本、預設與驗收界線。
+- [`reports/DOCUMENTATION_SYNC_20260831.md`](reports/DOCUMENTATION_SYNC_20260831.md)：本次全部 Markdown 盤點、校對依據與靜態驗證結果。
+
 - [`reference/TOKEN_COST_GUIDE_ZH_TW.md`](reference/TOKEN_COST_GUIDE_ZH_TW.md)：Token、預篩選、預算與成本邊界。
 - [`reference/CHANGELOG.md`](reference/CHANGELOG.md)：版本變更記錄。
 - [`archive/baselines/ARCHITECTURE_CURRENT.md`](archive/baselines/ARCHITECTURE_CURRENT.md)：2026-07-17 前的舊架構基線，非目前架構。
@@ -129,11 +143,13 @@
 - [`archive/reports/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md`](archive/reports/FINAL_CROSS_MODULE_HARDENING_REVIEW_ZH_TW.md)：2026-07-22 跨模組與硬體邊界報告。
 - [`archive/reports/N100_IMPLEMENTATION_REPORT_ZH_TW.md`](archive/reports/N100_IMPLEMENTATION_REPORT_ZH_TW.md)：2026-07-18 N100 實作／量測報告。
 - [`reports/PERFORMANCE_REPORT.md`](reports/PERFORMANCE_REPORT.md)：100,000 筆效能測試紀錄；測試腳本會更新此檔。
-- [`archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md`](archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md)：本輪 P1、Provider、AI、Release、Container、文件與 hosted CI 交接證據。
+- [`archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md`](archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md)：歷史 PR #53 的 P1、Provider、AI、Release、Container 與 hosted CI 交接證據。
 
 ### 元件旁文件
 
-- [`../esp32/ink-display-133C-photo/README.md`](../esp32/ink-display-133C-photo/README.md)：133C 韌體元件說明。
+- [`../esp32/ink-display-7C-photo/README.md`](../esp32/ink-display-7C-photo/README.md)：7C／PhotoPainter 韌體版本、閱讀順序與安全邊界。
+
+- [`../esp32/ink-display-133C-photo/README.md`](../esp32/ink-display-133C-photo/README.md)：133C 歷史 beta；未接入現行 Web Profile／Device API。
 - [`../esp32/ink-display-7C-photo/THIRD_PARTY_NOTICES.md`](../esp32/ink-display-7C-photo/THIRD_PARTY_NOTICES.md)：7C／PhotoPainter 韌體第三方授權聲明。
 - [`../inktime/app/domain/rendering/font_assets/README.md`](../inktime/app/domain/rendering/font_assets/README.md)：內建繁體中文字型資產說明。
 - [`../simulation_photos/README.md`](../simulation_photos/README.md)：模擬器照片投放資料夾說明。

@@ -1,5 +1,8 @@
 # InkTime PR #53 Final One-Shot Hardening Audit
 
+> **歷史紀錄**：下文保留原始分支、日期、測試與當時限制，不代表 2026-08-31 主線或部署狀態。現行功能見[版本基線](../../reference/CURRENT_STATE_ZH_TW.md)。
+
+
 ## 基線與範圍
 
 | 項目 | 值 |
