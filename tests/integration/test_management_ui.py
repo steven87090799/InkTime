@@ -6,10 +6,11 @@ from pathlib import Path
 
 from PIL import Image
 
+from inktime.app.repositories.settings import SETTING_DEFINITIONS
+from inktime.app.workers.runner import WorkerRunner
 from tests.conftest import create_admin, csrf, login
 from tests.integration.test_jobs import add_photos
 from tests.unit.test_analysis_schema import valid_result
-from inktime.app.workers.runner import WorkerRunner
 
 
 def test_primary_management_pages_render(client, app):
@@ -31,6 +32,7 @@ def test_primary_management_pages_render(client, app):
         "/energy",
         "/maintenance",
         "/settings",
+        "/help/controls",
         "/diagnostics",
         "/errors",
         "/backups",
@@ -43,7 +45,15 @@ def test_primary_management_pages_render(client, app):
     ):
         response = client.get(path)
         assert response.status_code == 200, path
-        assert "zh-Hant-TW" in response.get_data(as_text=True)
+        body = response.get_data(as_text=True)
+        assert "zh-Hant-TW" in body
+        if path != "/virtual-display":
+            assert 'class="page-guide"' in body
+            assert "小提示與使用說明" in body
+
+    virtual_display = client.get("/virtual-display").get_data(as_text=True)
+    assert 'class="receiver-guide"' in virtual_display
+    assert "虛擬墨水屏怎麼使用" in virtual_display
 
     simulator = client.get("/simulator").get_data(as_text=True)
     for expected_control in ("舊微雪算法", "新算法", "A/B 預覽", "傳送到墨水屏測試"):
@@ -60,12 +70,108 @@ def test_primary_management_pages_render(client, app):
     providers = client.get("/providers").get_data(as_text=True)
     assert 'id="provider-action-status"' in providers
     assert "alert(" not in providers
+    assert "尚未設定 Provider。" in providers
+    assert "要使用哪一個模型" in providers
+    assert 'name="model_mode"' in providers
 
     jobs = client.get("/jobs").get_data(as_text=True)
     assert 'type="submit" class="primary">確認建立' in jobs
     assert "limit:'nullable-integer'" in jobs
     assert "budget:'float'" in jobs
     assert "if(body.limit===null)delete body.limit;" in jobs
+
+
+def test_configured_provider_exposes_model_picker_and_current_model(client, app):
+    actor = create_admin(app)
+    login(client)
+    provider_id = app.extensions["inktime_provider_repository"].save(
+        {
+            "name": "CI model picker",
+            "kind": "openai_compatible",
+            "base_url": "https://provider.invalid/v1",
+            "model": "fixture-vision",
+            "enabled": False,
+        },
+        user_id=actor,
+    )
+
+    response = client.get("/providers")
+    assert response.status_code == 200
+    body = response.get_data(as_text=True)
+    assert f'class="primary model-provider" data-id="{provider_id}">選擇模型</button>' in body
+    assert "fixture-vision" in body
+    assert 'name="model_mode"' in body
+
+
+def test_login_replaces_page_guide_with_safe_version_and_status_summary(client, app):
+    create_admin(app)
+
+    body = client.get("/login").get_data(as_text=True)
+
+    assert "登入提示" not in body
+    assert 'class="page-guide"' not in body
+    assert "目前服務狀態" in body
+    assert "InkTime 版本" in body
+    assert "部署版本" in body
+    assert "執行環境" in body
+    assert "資料庫" in body
+
+
+def test_dashboard_renders_one_page_setup_overview_with_direct_actions(client, app):
+    create_admin(app)
+    login(client)
+
+    body = client.get("/dashboard").get_data(as_text=True)
+
+    assert 'id="setup-overview"' in body
+    assert "完整設定導覽" in body
+    assert 'role="progressbar"' in body
+    assert "第 1 級" in body
+    assert 'href="#setup-overview"' in body
+    assert "狀態等級由低到高：正常、提示、警告、錯誤、嚴重" not in body
+    for title in (
+        "照片來源與掃描",
+        "分析方式",
+        "Vision Provider 與模型",
+        "用量限制與預算保護",
+        "電子紙裝置",
+        "自動排程",
+        "備份與保留",
+    ):
+        assert title in body
+    for action_url in (
+        "/photos",
+        "/settings?search=分析執行模式",
+        "/providers",
+        "/settings?search=預算",
+        "/devices",
+        "/schedules",
+        "/backups",
+    ):
+        assert f'href="{action_url}"' in body
+
+
+def test_control_glossary_lists_every_setting_options_actions_and_jumps(client, app):
+    create_admin(app)
+    login(client)
+
+    body = client.get("/help/controls").get_data(as_text=True)
+
+    assert "功能與設定說明大全" in body
+    assert 'id="glossary-search"' in body
+    assert 'id="glossary-kind-filter"' in body
+    assert "automatic_ai" in body
+    assert "自動 AI 分析" in body
+    assert "送入 AI／批次送入 AI" in body
+    assert "操作後的影響" in body
+    assert "秘密值只顯示設定狀態" in body
+    for key in SETTING_DEFINITIONS:
+        assert f'id="setting-{key.replace(".", "-")}"' in body
+
+    settings = client.get("/settings").get_data(as_text=True)
+    assert 'href="/help/controls"' in settings
+    assert 'id="setting-analysis-execution_mode"' in settings
+    assert 'href="/help/controls#setting-analysis-execution_mode"' in settings
 
 def test_shared_confirmation_dialog_resets_and_normalizes_cancel_state(client, app):
     create_admin(app)
@@ -96,6 +202,17 @@ def test_shared_preview_retry_and_typed_job_contracts_are_rendered(client, app):
     assert "if(body.limit===null)delete body.limit" in jobs
     assert "pending_total??0" in jobs
     assert "limited_to??0" in jobs
+    assert "目前分析執行模式是「僅使用本機選片」" in jobs
+    assert '/settings?search=分析執行模式' in jobs
+    assert "目前沒有已啟用且設定完整的 Vision Provider" not in jobs
+    assert "AI 尚未完成啟用" in jobs
+    assert "必要項目 1 / 3" in jobs
+    assert "完成下列全部必要項目後" in jobs
+    assert "靜態設定就緒" in jobs
+
+    providers = client.get("/providers").get_data(as_text=True)
+    assert "AI 尚未完成啟用" in providers
+    assert "實際連線驗收不等於靜態設定就緒" in providers
     assert "window.inktimeFetchPreview(statusUrl" in rendering
     assert "window.inktimeFetchPreview(result.preview_url" in rendering
 
@@ -116,6 +233,8 @@ def test_job_detail_live_status_exposes_items_and_only_valid_actions(client, app
     assert page.status_code == 200
     assert 'id="job-items"' in body
     assert "狀態每 3 秒自動更新" in body
+    assert 'id="job-status-summary"' in body
+    assert 'id="job-progress"' in body
     assert item_id in body
     assert 'data-action="start"' in body
     assert 'data-action="pause" disabled' in body
@@ -123,6 +242,7 @@ def test_job_detail_live_status_exposes_items_and_only_valid_actions(client, app
     status = client.get(f"/api/v1/jobs/{job_id}")
     assert status.status_code == 200
     assert status.json["available_actions"] == ["start", "cancel"]
+    assert status.json["view"]["status_label"] == "等待啟動"
     assert status.json["items"] == [
         {
             "id": item_id,
@@ -131,8 +251,39 @@ def test_job_detail_live_status_exposes_items_and_only_valid_actions(client, app
             "stage": "queued",
             "attempts": 0,
             "error_code": None,
+            "error_message": None,
+            "explanation_title": "等待 Worker",
+            "explanation_detail": "此照片仍在 Queue，尚未送進模型。",
+            "explanation_tone": "neutral",
         }
     ]
+
+
+def test_job_detail_paginates_all_photo_items_without_polling_back_to_page_one(client, app):
+    administrator_id = create_admin(app)
+    login(client)
+    photo_ids = add_photos(app, 101)
+    job_id = app.extensions["inktime_job_service"].create_analysis_job(
+        name="大量照片分頁",
+        strategy="local",
+        settings={},
+        created_by=administrator_id,
+        budget_limit=None,
+        photo_ids=photo_ids,
+    )
+
+    page = client.get(f"/jobs/{job_id}?page=2")
+    api = client.get(f"/api/v1/jobs/{job_id}?page=2")
+
+    body = page.get_data(as_text=True)
+    assert page.status_code == 200
+    assert "目前顯示 101–101／總共 101 張" in body
+    assert "第 2 / 2 頁" in body
+    assert f"/api/v1/jobs/{job_id}?page=2" in body
+    assert api.status_code == 200
+    assert api.json["page"] == 2
+    assert api.json["total_pages"] == 2
+    assert len(api.json["items"]) == 1
 
 
 def test_retry_failed_control_restarts_the_job_in_one_action(client, app):
@@ -857,7 +1008,17 @@ def test_photo_console_shows_prefilter_metrics_model_text_and_generated_caption(
     detail = client.get(f"/photos/{photo_id}")
     body = detail.get_data(as_text=True)
     assert detail.status_code == 200
+    assert 'class="photo-overview-layout"' in body
+    assert 'class="photo-analysis-grid"' in body
+    assert 'class="photo-runtime-grid"' in body
+    assert 'class="panel photo-history-panel"' in body
+    assert 'class="photo-history-list"' in body
     assert "本機預篩選判斷" in body
+    assert 'class="panel photo-prefilter-panel"' in body
+    assert 'class="prefilter-rule-grid"' in body
+    assert "檢查模式" in body
+    assert "最終判斷" in body
+    assert "疑似截圖（多重信號）" in body
     assert "目前門檻" in body
     assert "模糊分數" in body
     assert "過曝占比" in body
@@ -866,6 +1027,9 @@ def test_photo_console_shows_prefilter_metrics_model_text_and_generated_caption(
     assert "產生的一句話（電子紙短文案）" in body
     assert "風把這一天留得很輕。" in body
     assert "測試 Provider / vision-model" in body
+    assert body.index('class="photo-overview-layout"') < body.index('class="photo-analysis-grid"')
+    assert body.index('class="photo-analysis-grid"') < body.index('class="panel photo-prefilter-panel"')
+    assert body.index('class="panel photo-prefilter-panel"') < body.index('class="photo-runtime-grid"')
 
     listing = client.get("/photos").get_data(as_text=True)
     assert "家人在公園散步。" in listing
@@ -893,8 +1057,95 @@ def test_photo_cards_show_total_score_and_e6_estimate(client, app):
     body = client.get("/photos").get_data(as_text=True)
 
     assert "選片分 84.0（模型＋E6）" in body
+    assert "為什麼兩張都不錯的照片" in body
+    assert "相對鑑別分＝原始分 35%＋照片庫百分位 65%" in body
+    assert "排序原始分 80.0 → 相對鑑別 80.0" in body
     assert "選片分 —（尚未正式分析）" in body
     assert "E6 顯示適合度 91.9（暫估，未納入正式選片分）" in body
+
+
+def test_photo_detail_shows_only_two_latest_analyses_and_compact_type_picker(client, app):
+    create_admin(app)
+    login(client)
+    photo_id = add_photos(app, 1)[0]
+    for index in range(3):
+        result = valid_result(caption=f"第 {index + 1} 次分析")
+        app.extensions["inktime_photo_repository"].save_analysis(
+            photo_id,
+            None,
+            "local",
+            "local",
+            "local",
+            result,
+            "{}",
+            ranking_score=50 + index,
+        )
+
+    body = client.get(f"/photos/{photo_id}").get_data(as_text=True)
+
+    assert body.count('class="analysis-card"') == 2
+    assert "顯示優先結果與最近記錄，共 2 / 3 筆" in body
+    assert "本機重掃或 Fallback 只保留為歷史" in body
+    assert 'class="photo-orientation-actions"' in body
+    assert 'class="secondary orientation-set orientation-clear"' in body
+    assert 'class="photo-type-picker"' in body
+    assert "第 3 次分析" in body
+    assert "第 2 次分析" in body
+    assert "第 1 次分析" not in body
+
+
+def test_model_analysis_stays_preferred_after_newer_local_fallback(client, app):
+    create_admin(app)
+    login(client)
+    photo_id = add_photos(app, 1)[0]
+    repository = app.extensions["inktime_photo_repository"]
+    model_result = valid_result(caption="完整模型判斷", side_caption="模型短句")
+    local_result = valid_result(caption="只有本機特徵", side_caption="")
+    repository.save_analysis(
+        photo_id,
+        None,
+        "single",
+        "測試 Vision Provider",
+        "vision-model",
+        model_result,
+        "{}",
+        ranking_score=88,
+    )
+    repository.save_analysis(
+        photo_id,
+        None,
+        "local_fallback",
+        "local",
+        "local-quality-v3",
+        local_result,
+        "{}",
+        ranking_score=20,
+    )
+
+    listing = client.get("/photos").get_data(as_text=True)
+    detail = client.get(f"/photos/{photo_id}").get_data(as_text=True)
+
+    assert "完整模型判斷" in listing
+    assert "模型短句" in listing
+    assert "只有本機特徵" not in listing
+    assert "目前採用 · 模型判斷 · Vision 模型分析" in detail
+    assert detail.index("完整模型判斷") < detail.index("只有本機特徵")
+
+
+def test_ai_trace_page_explains_that_only_real_provider_calls_are_listed(client, app):
+    create_admin(app)
+    login(client)
+
+    body = client.get("/ai/traces").get_data(as_text=True)
+
+    assert "這裡不是照片庫" in body
+    assert "哪些照片會出現在這裡" in body
+    assert "真的開始呼叫外部或測試 Provider" in body
+    assert "在呼叫 Provider 之前就被預算或設定阻擋" in body
+    assert "不同照片" in body
+    assert "10 萬筆粗估" in body
+    assert "AI Trace 保留策略已啟用" in body
+    assert 'href="/retention"' in body
 
 
 def test_photo_cards_never_present_excluded_screenshot_or_severe_blur_as_high_score(client, app):
@@ -934,7 +1185,7 @@ def test_photo_cards_never_present_excluded_screenshot_or_severe_blur_as_high_sc
     assert "本機品質分" in detail
     assert "模糊 44.54／對比 11.80" in detail
     assert "模糊 &lt; 60 且對比 &lt; 15" in detail
-    assert "明確截圖或嚴重單項缺陷會直接排除" in detail
+    assert "明確截圖、解析度過低或嚴重單項缺陷會直接排除" in detail
 
 
 def test_photo_cards_force_ineligible_selection_score_to_zero_but_keep_diagnostics(client, app):
@@ -960,7 +1211,7 @@ def test_photo_cards_force_ineligible_selection_score_to_zero_but_keep_diagnosti
     body = client.get("/photos").get_data(as_text=True)
 
     assert "選片分 0.0（已排除：" in body
-    assert "模型排序 98.0" in body
+    assert "排序原始分 98.0" in body
     assert "E6 顯示適合度 99.0" in body
 
 

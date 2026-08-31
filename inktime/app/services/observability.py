@@ -165,8 +165,13 @@ class ObservabilityService:
             self.alert(
                 "worker",
                 "QUEUE-NO-WORKER",
-                "Queue 有待處理項目，但沒有工作中的 Worker",
-                details={"retryable": True, "recommended_page": "/jobs"},
+                "可執行 Queue 尚有待處理項目，但工作沒有 heartbeat",
+                details={
+                    "explanation": "只有執行中或重試中的工作會觸發此警告；暫停、額度停止與尚未啟動的項目不會誤報",
+                    "runnable_queue": int(snapshot.get("queue_length", 0)),
+                    "retryable": True,
+                    "recommended_page": "/jobs",
+                },
             )
         else:
             self.recover("worker", "QUEUE-NO-WORKER", "Queue 或 Worker 已恢復")

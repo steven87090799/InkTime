@@ -4,7 +4,9 @@ import os
 
 import pytest
 
-sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
+playwright_api = pytest.importorskip("playwright.sync_api")
+sync_playwright = playwright_api.sync_playwright
+expect = playwright_api.expect
 
 
 @pytest.mark.skipif(not os.environ.get("INKTIME_E2E_URL"), reason="只在 E2E 環境執行")
@@ -44,16 +46,26 @@ def test_first_setup_login_and_primary_console_pages():
             page.goto(base + path)
             assert page.locator("html").get_attribute("lang") == "zh-Hant-TW", label
         page.goto(base + "/settings")
-        page.get_by_role("radio", name="進階").check()
-        # 新安裝預設為 local_only；這個 smoke flow 要驗證 AI 進階設定
-        # 可儲存，因此明確切到會啟用該欄位的自動 AI 模式。
+        expect(page.get_by_role("radio", name="進階", exact=True)).to_have_count(0)
+        concurrency_card = page.locator('.setting-card[data-key="analysis.concurrency"]')
+        concurrency = concurrency_card.locator('[name="analysis.concurrency"]')
+        # All settings remain visible/searchable even while their dependency is
+        # disabled. Enable AI before editing its concurrency; no model is called.
+        expect(concurrency_card).to_be_visible()
+        expect(concurrency).to_be_disabled()
         page.locator('[name="analysis.execution_mode"]').select_option("automatic_ai")
-        page.get_by_placeholder("輸入中文名稱、說明或技術 Key").fill("AI 分析並行")
-        page.locator('[name="analysis.concurrency"]').fill("3")
+        expect(concurrency).to_be_enabled()
+        page.locator('#settings-search').fill("AI 分析並行")
+        expect(concurrency_card).to_be_visible()
+        concurrency.fill("3")
         page.get_by_role("button", name="預覽影響").click()
-        page.get_by_role("dialog").get_by_role("button", name="確認並儲存").click()
-        page.wait_for_load_state("networkidle")
-        page.get_by_role("radio", name="進階").check()
-        assert page.locator('[name="analysis.concurrency"]').input_value() == "3"
+        with page.expect_response(
+            lambda response: response.url.endswith('/api/v1/settings') and response.request.method == 'POST'
+        ) as saved:
+            with page.expect_navigation(wait_until="domcontentloaded"):
+                page.get_by_role("dialog").get_by_role("button", name="確認並儲存").click()
+        assert saved.value.status == 200
+        expect(concurrency).to_have_value("3")
+        expect(page.locator('#dirty-count')).to_have_text("0")
         assert csp_violations == []
         browser.close()

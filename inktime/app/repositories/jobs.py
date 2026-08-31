@@ -78,7 +78,8 @@ class JobRepository:
                     SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM photo_analysis a WHERE a.photo_id=p.id) THEN 1 ELSE 0 END) AS never_analyzed,
                     SUM(CASE WHEN {current} THEN 1 ELSE 0 END) AS already_current,
                     SUM(CASE WHEN {queued} THEN 1 ELSE 0 END) AS already_queued,
-                    SUM(CASE WHEN p.eligible=1 AND {predicate} AND NOT ({queued}) THEN 1 ELSE 0 END) AS pending_total,
+                    SUM(CASE WHEN p.eligible=1 AND COALESCE(p.screenshot_likelihood,0)<0.95 AND {predicate} AND NOT ({queued}) THEN 1 ELSE 0 END) AS pending_total,
+                    SUM(CASE WHEN COALESCE(p.screenshot_likelihood,0)>=0.95 THEN 1 ELSE 0 END) AS screenshot_excluded,
                     SUM(CASE WHEN NOT ({current}) AND EXISTS (
                         SELECT 1 FROM job_items ji JOIN jobs j ON j.id=ji.job_id
                         WHERE ji.photo_id=p.id AND ji.status='failed'
@@ -142,7 +143,7 @@ class JobRepository:
                 params.extend([fingerprint, size])
                 rows = connection.execute(
                     f"SELECT p.id,COALESCE(p.local_candidate_score,-1) AS candidate_score FROM photos p "
-                    f"WHERE p.lifecycle_status='active' AND p.eligible=1 AND "
+                    f"WHERE p.lifecycle_status='active' AND p.eligible=1 AND COALESCE(p.screenshot_likelihood,0)<0.95 AND "
                     f"(COALESCE(p.local_candidate_score,-1) < ? OR (COALESCE(p.local_candidate_score,-1)=? AND p.id>?)) "
                     f"AND {predicate} AND NOT ({queued}) ORDER BY candidate_score DESC,p.id ASC LIMIT ?",
                     params,
@@ -830,7 +831,24 @@ class JobRepository:
     def list_items(self, job_id: str, *, limit: int = 100, offset: int = 0):
         with self.database.session() as connection:
             return connection.execute(
-                "SELECT * FROM job_items WHERE job_id=? ORDER BY id LIMIT ? OFFSET ?",
+                """
+                SELECT ji.*,
+                       (SELECT CASE WHEN ji.status='completed' THEN NULL ELSE je.message END
+                        FROM job_errors je
+                        WHERE je.job_item_id=ji.id
+                        ORDER BY je.last_seen_at DESC,je.id DESC LIMIT 1) AS error_message,
+                       (SELECT ata.http_status
+                        FROM ai_trace_runs atr
+                        JOIN ai_trace_attempts ata ON ata.trace_id=atr.trace_id
+                        WHERE atr.job_id=ji.job_id AND atr.photo_id=ji.photo_id
+                        ORDER BY ata.created_at DESC,ata.id DESC LIMIT 1) AS latest_http_status,
+                       (SELECT ata.response_raw_sanitized
+                        FROM ai_trace_runs atr
+                        JOIN ai_trace_attempts ata ON ata.trace_id=atr.trace_id
+                        WHERE atr.job_id=ji.job_id AND atr.photo_id=ji.photo_id
+                        ORDER BY ata.created_at DESC,ata.id DESC LIMIT 1) AS latest_provider_response
+                FROM job_items ji WHERE ji.job_id=? ORDER BY ji.id LIMIT ? OFFSET ?
+                """,
                 (job_id, limit, offset),
             ).fetchall()
 

@@ -119,11 +119,7 @@
   const testButton = testForm.querySelector('button[type="submit"]');
   const testButtonInitiallyEnabled = !testButton.disabled;
   let testInFlight = false;
-  const decodeJson = async response => {
-    const text = await response.text();
-    if (!text.trim()) return {};
-    try { return JSON.parse(text); } catch (_) { return {message: text.slice(0, 240)}; }
-  };
+  const decodeJson = window.inktimeDecodeJson;
   testForm.addEventListener('submit', async event => {
     event.preventDefault();
     if (testInFlight || !await window.inktimeConfirm('這會呼叫目前高品質模型並產生費用，確定測試？', {title: '確認付費模型測試'})) return;

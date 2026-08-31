@@ -1458,7 +1458,8 @@ def test_ui_contains_dirty_search_filter_snapshot_and_accessibility_contracts(cl
     for marker in (
         'id="settings-search"',
         'id="settings-category-filter"',
-        'name="settings-mode"',
+        'id="settings-clear-filters"',
+        'id="settings-match-count"',
         'id="dirty-count"',
         "beforeunload",
         "Object.fromEntries(dirty)",
@@ -1472,6 +1473,8 @@ def test_ui_contains_dirty_search_filter_snapshot_and_accessibility_contracts(cl
         "既有 Release 不會改變",
     ):
         assert marker in body
+    assert 'name="settings-mode"' not in body
+    assert "顯示模式" not in body
     assert "完整裝置群組覆寫" not in body
     assert "改變 Cache Fingerprint" in body
     assert SETTING_DEFINITIONS["analysis.ai_daily_photo_limit"]["advanced"] is True

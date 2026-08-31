@@ -6,6 +6,7 @@ from copy import deepcopy
 from typing import Any, cast
 
 from inktime.app.domain.analysis.scoring import GRADE_TO_SCORE
+from inktime.app.domain.analysis.traditional_chinese import to_taiwan_traditional
 
 
 ALLOWED_TYPES = {
@@ -116,6 +117,14 @@ def normalize_caption_controls(controls: dict[str, Any]) -> dict[str, Any]:
 
 class AnalysisValidationError(ValueError):
     code = "VLM-004"
+
+
+def _deduplicate_string_list(value: Any) -> Any:
+    """Normalize set-like model arrays without hiding invalid element types."""
+
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        return value
+    return list(dict.fromkeys(value))
 
 
 ANALYSIS_JSON_SCHEMA = {
@@ -434,6 +443,11 @@ def validate_analysis_result(raw: str | dict) -> dict:
         error = AnalysisValidationError("模型回傳頂層必須是 JSON Object")
         error.code = "VLM-003"
         raise error
+    # The prompt asks for Traditional Chinese, but free-router models may still
+    # mix scripts.  Apply deterministic offline OpenCC conversion before any
+    # validation or persistence so captions, reasons, semantic details and raw
+    # normalized analysis JSON never retain Simplified Chinese output.
+    value = to_taiwan_traditional(value)
     if value.get("schema_version") == 3:
         details = value.get("details")
         if details is not None and not isinstance(details, dict):
@@ -455,6 +469,30 @@ def validate_analysis_result(raw: str | dict) -> dict:
             raise AnalysisValidationError("schema v3 缺少 confidence")
     if value.get("schema_version") == 3:
         value = _normalize_v3(value)
+    # Structured-output capable models can still repeat an otherwise valid
+    # enum item.  These fields are sets in InkTime's contract, so remove only
+    # exact duplicate strings before strict value and cardinality validation.
+    # Invalid values and non-string elements continue to fail below.
+    value["types"] = _deduplicate_string_list(value.get("types"))
+    if "reason_codes" in value:
+        value["reason_codes"] = _deduplicate_string_list(value.get("reason_codes"))
+    orientation_value = value.get("visual_orientation")
+    if isinstance(orientation_value, dict) and "evidence" in orientation_value:
+        orientation_value = dict(orientation_value)
+        orientation_value["evidence"] = _deduplicate_string_list(orientation_value.get("evidence"))
+        if (
+            value.get("schema_version") == 3
+            and orientation_value.get("rotation_cw") is None
+            and orientation_value.get("evidence") == ["insufficient_visual_cues"]
+        ):
+            # ``rotation_cw=null`` plus this sole evidence has one canonical
+            # meaning: there is no reliable visual orientation.  Free-router
+            # models occasionally contradict it with ``ambiguous=false`` or
+            # a high confidence, which is safe to normalize without inventing
+            # a rotation or paying for a second model call.
+            orientation_value["ambiguous"] = True
+            orientation_value["confidence"] = 0.0
+        value["visual_orientation"] = orientation_value
     # v1 cache entries predate this additive field.  Keep them readable without
     # treating the missing value as a confident orientation recommendation.
     if value.get("schema_version") == 1 and "visual_orientation" not in value:
@@ -478,7 +516,15 @@ def validate_analysis_result(raw: str | dict) -> dict:
     if value["schema_version"] == 3:
         details = value.get("details") or {}
         for grade_field in (*V3_GRADE_FIELDS, "display_suitability_grade"):
-            if grade_field in details and details[grade_field] not in GRADE_VALUES:
+            # Detail fields are nullable in FULL_ANALYSIS_JSON_SCHEMA.  A null
+            # grade means the model could not determine it; it is not an
+            # invalid enum value and must not turn an otherwise valid photo
+            # analysis into VLM-004.
+            if (
+                grade_field in details
+                and details[grade_field] is not None
+                and details[grade_field] not in GRADE_VALUES
+            ):
                 raise AnalysisValidationError(f"{grade_field} 等級不合法")
         confidence = details.get("confidence")
         if confidence is None:
@@ -568,6 +614,11 @@ def validate_analysis_result(raw: str | dict) -> dict:
         ):
             raise AnalysisValidationError("details 欄位不合法")
         for field, detail in details.items():
+            # Every semantic detail is nullable in the published JSON Schema.
+            # Null means the model could not determine that optional fact and
+            # must remain valid instead of triggering a repair loop.
+            if detail is None:
+                continue
             if field == "caption_variants":
                 if not isinstance(detail, dict) or not set(detail) <= set(CAPTION_VARIANT_STYLES):
                     raise AnalysisValidationError("caption_variants 欄位不合法")

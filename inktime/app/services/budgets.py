@@ -77,8 +77,12 @@ class BudgetService:
             "unknown_request_reserve": reserve,
             "daily_effective": daily_known + daily_unknown * reserve,
             "monthly_effective": monthly_known + monthly_unknown * reserve,
-            "photo_effective": photo_known + photo_unknown * reserve,
-            "job_effective": job_known + job_unknown * reserve,
+            # Unknown usage stays visible and contributes to installation-wide
+            # daily/monthly risk.  It must not permanently poison one photo or
+            # a later Job, especially after routing moves to a different
+            # Provider that reports an authoritative cost.
+            "photo_effective": photo_known,
+            "job_effective": job_known,
             "job_limit": job_limit,
         }
         # Keep the old keys as effective values so existing callers enforce the
@@ -93,25 +97,27 @@ class BudgetService:
 
     def assert_request_allowed(self, job_id: str | None, photo_id: str | None) -> None:
         usage = self.snapshot(job_id, photo_id)
-        if (photo_id and usage["photo_unknown_count"]) or (job_id and usage["job_unknown_count"]):
-            error = BudgetExceeded(
-                "同一照片或工作已有 API 成本為 unknown；請先設定模型價格或完成 Provider 真實成本回報"
-            )
-            error.code = "BUDGET-003"
-            raise error
         checks = (
-            (usage["daily_effective"], float(self.settings.get("budget.daily_stop", 10)), "每日 API 預算已達停止值"),
+            (
+                usage["daily_effective"],
+                float(self.settings.get("budget.daily_stop", 10)),
+                "每日 API 預算已達停止值",
+            ),
             (
                 usage["monthly_effective"],
                 float(self.settings.get("budget.monthly_stop", 100)),
                 "每月 API 預算已達停止值",
             ),
-            (usage["photo_effective"], float(self.settings.get("budget.photo_max", 0.25)), "單張照片成本已達上限"),
+            (
+                usage["photo_known"],
+                float(self.settings.get("budget.photo_max", 0.25)),
+                "單張照片已確認成本達到上限",
+            ),
         )
         for current, maximum, message in checks:
             if maximum > 0 and current >= maximum:
                 raise BudgetExceeded(message)
-        if usage["job_limit"] is not None and usage["job_effective"] >= usage["job_limit"]:
+        if usage["job_limit"] is not None and usage["job_known"] >= usage["job_limit"]:
             error = BudgetExceeded("工作預算已達上限")
             error.code = "BUDGET-001"
             raise error

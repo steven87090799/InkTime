@@ -10,4 +10,17 @@
     <button class="primary">登入</button>
   </form>
 </section>
+<aside class="login-system-card" aria-label="InkTime 系統資訊">
+  <div class="login-system-head">
+    <div><p class="eyebrow">系統資訊</p><h2>目前服務狀態</h2></div>
+    <span class="status {{ 'ok' if login_system_info.status_ok else 'warning' }}">{{ login_system_info.status }}</span>
+  </div>
+  <dl class="login-system-grid">
+    <div><dt>InkTime 版本</dt><dd>v{{ login_system_info.version }}</dd></div>
+    <div><dt>部署版本</dt><dd><code>{{ login_system_info.revision }}</code></dd></div>
+    <div><dt>執行環境</dt><dd>{{ login_system_info.runtime }}</dd></div>
+    <div><dt>資料庫</dt><dd>{{ login_system_info.database }} · Schema {{ login_system_info.schema }}</dd></div>
+  </dl>
+  <p>登入後可在「總覽」查看完整設定進度，在「系統 → 功能說明大全」查詢每個設定、英文選項與按鈕影響。</p>
+</aside>
 {% endblock %}

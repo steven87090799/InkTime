@@ -29,9 +29,14 @@ from inktime.app.domain.analysis.scoring import (
     prepare_score_distribution,
     score_band,
 )
-from inktime.app.domain.photos.quality_policy import evaluate_local_quality, local_candidate_score
+from inktime.app.domain.photos.quality_policy import (
+    evaluate_local_quality,
+    is_confirmed_screenshot,
+    local_candidate_score,
+)
 from inktime.app.web.access import administrator_required, login_required
 from inktime.app.domain.photos.orientation import original_exif_orientation, resolve_effective_orientation
+from inktime.app.repositories.photos import preferred_analysis_order_sql
 
 
 bp = Blueprint("photos", __name__)
@@ -94,6 +99,10 @@ def _queue_ai(
     )
     if not selected:
         raise ValueError("沒有符合資格且可送入 AI 的照片")
+    screenshot_ids = _repository().confirmed_screenshot_ids(selected)
+    selected = [photo_id for photo_id in selected if photo_id not in screenshot_ids]
+    if not selected:
+        raise ValueError("已確認為截圖；為保護隱私與額度，禁止送入 AI 模型")
     strategy = str(settings.get("analysis.strategy", "single"))
     plan = analysis_plan if analysis_plan is not None else _build_analysis_plan(settings, strategy)
     idempotency_key_value = scoped_idempotency_key(idempotency_scope, created_by, idempotency_key)
@@ -125,7 +134,12 @@ def _queue_ai(
         force_recompute=force_ai,
         analysis_spec=plan,
     )
-    return {"id": job_id, "queued": len(selected), "detail_url": f"/jobs/{job_id}"}
+    return {
+        "id": job_id,
+        "queued": len(selected),
+        "screenshot_excluded": len(screenshot_ids),
+        "detail_url": f"/jobs/{job_id}",
+    }
 
 
 @bp.get("/photos")
@@ -195,6 +209,7 @@ def photos_page():
             photo["raw_ranking_score"] = round(float(ranking_score), 1)
             photo["ranking_percentile"] = percentile
             photo["score_band"] = score_band(percentile, calibrated_score)
+            photo["distinguishing_score"] = calibrated_score
         photo["selection_score"] = None
         photo["model_score"] = round(float(ranking_score), 1) if ranking_score is not None else None
         photo["e6_display_score"] = round(float(e6_score), 1) if e6_score is not None else None
@@ -256,7 +271,9 @@ def excluded_photos_page():
         "kind": request.args.get("kind", "").strip(),
         "origin": request.args.get("origin", "").strip(),
     }
-    rows = _repository().search_exclusions(**filters)
+    rows = [dict(row) for row in _repository().search_exclusions(**filters)]
+    for row in rows:
+        row["ai_blocked"] = is_confirmed_screenshot(row)
     reasons = sorted({str(row["reject_reason"]) for row in rows if row["reject_reason"]})
     return render_template("excluded_photos.html", photos=rows, filters=filters, reasons=reasons)
 
@@ -533,6 +550,7 @@ def queue_ai_mode_run():
                         [str(photo_id) for photo_id in batch.get("photo_ids", [])],
                         created_by=actor,
                         name=f"完整照片庫 AI：{str(batch.get('group', '未知'))}",
+                        force_ai=True,
                         idempotency_scope="ai-mode-run",
                         idempotency_key=grouped_idempotency_key(request_key, str(batch.get("group", "未知"))),
                         analysis_plan=stored_plan,
@@ -562,6 +580,7 @@ def queue_ai_mode_run():
                     ids,
                     created_by=str(g.user["id"]),
                     name=f"完整照片庫 AI：{group}",
+                    force_ai=True,
                     idempotency_scope="ai-mode-run",
                     idempotency_key=grouped_idempotency_key(request_key, str(group)),
                     analysis_plan=analysis_plan,
@@ -604,12 +623,26 @@ def photo_detail(photo_id: str):
         ),
     )
     with current_app.extensions["inktime_database"].session() as connection:
-        analysis_rows = connection.execute(
+        analysis_total = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM photo_analysis WHERE photo_id=?", (photo_id,)
+            ).fetchone()[0]
+        )
+        preferred_analysis = connection.execute(
+            f"""
+            SELECT a.*,v.name AS scoring_version_name
+            FROM photo_analysis a
+            LEFT JOIN scoring_rule_versions v ON v.id=a.scoring_version_id
+            WHERE a.photo_id=? ORDER BY {preferred_analysis_order_sql('a')} LIMIT 1
+            """,  # noqa: S608 -- ordering is generated from a fixed repository helper.
+            (photo_id,),
+        ).fetchone()
+        latest_analyses = connection.execute(
             """
             SELECT a.*,v.name AS scoring_version_name
             FROM photo_analysis a
             LEFT JOIN scoring_rule_versions v ON v.id=a.scoring_version_id
-            WHERE a.photo_id=? ORDER BY a.created_at DESC
+            WHERE a.photo_id=? ORDER BY a.created_at DESC,a.id DESC LIMIT 2
             """,
             (photo_id,),
         ).fetchall()
@@ -622,15 +655,34 @@ def photo_detail(photo_id: str):
         events = connection.execute(
             "SELECT * FROM photo_events WHERE photo_id=? ORDER BY created_at DESC LIMIT 100", (photo_id,)
         ).fetchall()
+    analysis_rows = []
+    if preferred_analysis is not None:
+        analysis_rows.append(preferred_analysis)
+    preferred_id = int(preferred_analysis["id"]) if preferred_analysis is not None else None
+    analysis_rows.extend(
+        row for row in latest_analyses if int(row["id"]) != preferred_id
+    )
+    analysis_rows = analysis_rows[:2]
     analyses = []
     score_distribution = prepare_score_distribution(_repository().score_population())
-    for row in analysis_rows:
+    for index, row in enumerate(analysis_rows):
         analysis = dict(row)
         try:
             analysis["types"] = json.loads(str(analysis.get("types_json") or "[]"))
         except json.JSONDecodeError:
             analysis["types"] = []
         analysis["origin_label"] = "本機判斷" if analysis.get("provider") == "local" else "模型判斷"
+        analysis["is_preferred"] = index == 0
+        analysis["stage_label"] = {
+            "single": "Vision 模型分析",
+            "stage_one": "Vision 第一階段",
+            "stage_two": "Vision 第二階段",
+            "cache": "模型快取",
+            "inherited": "沿用模型結果",
+            "local_fallback": "本機備援（未呼叫模型）",
+            "prefilter": "本機預篩選（未呼叫模型）",
+            "local": "本機分析（未呼叫模型）",
+        }.get(str(analysis.get("stage") or ""), str(analysis.get("stage") or "未知階段"))
         if analysis.get("ranking_score") is not None:
             calibrated, percentile = calculate_distinguishing_score(
                 float(analysis["ranking_score"]), score_distribution
@@ -659,6 +711,7 @@ def photo_detail(photo_id: str):
         "photo_detail.html",
         photo=photo,
         analyses=analyses,
+        analysis_total=analysis_total,
         usage=usage,
         errors=errors,
         events=events,

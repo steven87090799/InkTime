@@ -151,7 +151,7 @@
   let compareController = null;
   let compareTimer = null;
 
-  function setStatus(message, type='') { status.textContent = message; status.className = `simulator-status ${type}`.trim(); }
+  function setStatus(message, type='') { window.inktimeSetStatus(status, message, type); status.className = `simulator-status ${type}`.trim(); }
   function clearPreviewCards() {
     for (const key of ['original','legacy','new']) {
       const image = document.getElementById(`${key}-image`);
@@ -242,7 +242,7 @@
       const response=await window.inktimeFetchPreview(created.status_url,{signal}); const body=await window.inktimeDecodeJson(response);
       if(!response.ok) throw new Error(body.message||'無法取得背景工作狀態');
       if(body.status==='completed') return body.result;
-      if(['completed_with_errors','failed','cancelled','budget_exceeded'].includes(body.status)) throw new Error(body.error_code||'背景工作未完成');
+      if(['completed_with_errors','failed','cancelled','budget_exceeded'].includes(body.status)) throw new Error(window.inktimeErrorText(body.error_code,body.view?.status_summary||body.message||'背景工作未完成'));
       await abortableDelay(750,signal);
     }
     throw new Error('背景工作仍在執行，請稍後至工作中心查看');
@@ -307,7 +307,7 @@
   }
   async function savePreset() {
     const label=await window.inktimeConfirm('請輸入自訂 Preset 名稱。',{title:'儲存自訂 Preset',input:true,inputLabel:'Preset 名稱',defaultValue:'六色照片自訂'}); if(!label?.trim()) return;
-    const source=customPresets[preset.value]?.source_preset || preset.value; const response=await window.inktimeFetch('/api/v1/rendering/presets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label,source_preset:source,options:options(),palette:palette()})}); const body=await response.json(); if(!response.ok){setStatus(body.message||'儲存失敗','error');return;} setStatus(`已建立自訂副本：${body.label}`,'success');
+    const source=customPresets[preset.value]?.source_preset || preset.value; const response=await window.inktimeFetch('/api/v1/rendering/presets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label,source_preset:source,options:options(),palette:palette()})}); const body=await window.inktimeDecodeJson(response); if(!response.ok){setStatus(body.message||'儲存失敗','error');return;} setStatus(`已建立自訂副本：${body.label}`,'success');
   }
   async function sendStockTest() {
     if (!ensureCurrentPreview()) return;
@@ -317,11 +317,11 @@
       if(!await window.inktimeConfirm(`微雪官方韌體模式會先以目前來源、Preset、縮放、短文案與字型建立獨立測試 Release，再透過既有 Stock /dataUP 邊界傳送到「${target.deviceLabel}」。瀏覽器不會直連裝置；Stock 端無法回報持久完成狀態。確定？`,{title:'確認 Stock 實機測試'}))return;
       transportStatus.hidden=false; transportStatus.className='simulator-status'; transportStatus.textContent='正在以目前來源建立獨立 Stock 測試 Release…';
       const data=formData(); data.set('device_id',target.deviceId); data.set('profile',target.profileKey); data.set('transport','stock_direct'); data.set('delivery','next_wake'); data.set('one_time','false'); data.set('restore_formal','false'); data.set('save_preset','false');
-      const releaseResponse=await window.inktimeFetch('/api/v1/rendering/test-release',{method:'POST',body:data}); let created={}; try{created=await releaseResponse.json();}catch{}
+      const releaseResponse=await window.inktimeFetch('/api/v1/rendering/test-release',{method:'POST',body:data}); let created={}; try{created=await window.inktimeDecodeJson(releaseResponse);}catch{}
       if(!releaseResponse.ok)throw new Error(created.message||'Stock 測試 Release 建立失敗。');
       const body=await waitForJob(created); if(!body.release_id||!body.file_name)throw new Error('Stock 測試 Release Manifest 不完整，已停止傳送。');
       transportStatus.textContent=`目前來源已建立 Release ${body.release_id}；後端正在轉換並送往 Stock /dataUP…`;
-      const response=await window.inktimeFetch(`/api/v1/devices/${encodeURIComponent(target.deviceId)}/stock-photopainter/display`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({release_id:body.release_id,file_name:body.file_name,transport:'stock_direct'})}); let result={}; try{result=await response.json();}catch{}
+      const response=await window.inktimeFetch(`/api/v1/devices/${encodeURIComponent(target.deviceId)}/stock-photopainter/display`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({release_id:body.release_id,file_name:body.file_name,transport:'stock_direct'})}); let result={}; try{result=await window.inktimeDecodeJson(response);}catch{}
       if(!response.ok)throw new Error(result.message||'Stock PhotoPainter 傳送失敗。');
       if(result.upload_accepted!==true)throw new Error('Stock PhotoPainter 未接受圖片，未判定為完成。');
       if(String(result.release_id)!==String(body.release_id))throw new Error('Stock 回應的 Release 與本次來源不一致，已停止判定。');
@@ -333,7 +333,7 @@
     const select=document.getElementById('test-device'); if(!select.value){setStatus('請選擇測試裝置','error');return;} if(select.selectedOptions[0].dataset.profile!==profile.value){setStatus('裝置 Profile 與目前面板不相容','error');return;}
     if(document.getElementById('test-firmware-mode').value==='stock'){await sendStockTest();return;}
     const button=document.getElementById('send-test'); button.disabled=true; setStatus('Server 正式渲染並建立獨立測試 Release…');
-    try { const data=formData(); data.set('device_id',select.value); data.set('transport','custom'); data.set('delivery',document.getElementById('test-delivery').value); data.set('one_time',document.getElementById('one-time').checked); data.set('restore_formal',document.getElementById('restore-formal').checked); data.set('save_preset',document.getElementById('save-and-send').checked); data.set('preset_label','測試後儲存'); const response=await window.inktimeFetch('/api/v1/rendering/test-release',{method:'POST',body:data}); const created=await response.json(); if(!response.ok)throw new Error(created.message||'測試 Release 建立失敗'); const body=await waitForJob(created); const preset=body.preset_saved===false?` Preset 未儲存（${body.preset_error||'RENDER-PRESET-WRITE'}）。`:body.preset_saved?' Preset 已儲存。':''; setStatus(`測試 Release ${body.release_id} 已指派；正式排程未覆寫。${preset}`,'success'); } catch(error){setStatus(error.message||'測試傳送失敗','error');} finally{button.disabled=!lastResult||lastResultRevision!==compareRevision;}
+    try { const data=formData(); data.set('device_id',select.value); data.set('transport','custom'); data.set('delivery',document.getElementById('test-delivery').value); data.set('one_time',document.getElementById('one-time').checked); data.set('restore_formal',document.getElementById('restore-formal').checked); data.set('save_preset',document.getElementById('save-and-send').checked); data.set('preset_label','測試後儲存'); const response=await window.inktimeFetch('/api/v1/rendering/test-release',{method:'POST',body:data}); const created=await window.inktimeDecodeJson(response); if(!response.ok)throw new Error(created.message||'測試 Release 建立失敗'); const body=await waitForJob(created); const preset=body.preset_saved===false?` Preset 未儲存（${body.preset_error||'RENDER-PRESET-WRITE'}）。`:body.preset_saved?' Preset 已儲存。':''; setStatus(`測試 Release ${body.release_id} 已指派；正式排程未覆寫。${preset}`,'success'); } catch(error){setStatus(error.message||'測試傳送失敗','error');} finally{button.disabled=!lastResult||lastResultRevision!==compareRevision;}
   }
   const firmwareMode=document.getElementById('test-firmware-mode'),firmwareNote=document.getElementById('test-firmware-note');
   function updateFirmwareNote(){const stock=firmwareMode?.value==='stock',select=document.getElementById('test-device');if(select){for(const option of select.options){if(option.value)option.hidden=stock&&option.dataset.deliveryMode!=='stock_compat';}if(stock&&select.selectedOptions[0]?.dataset.deliveryMode!=='stock_compat')select.value='';}if(firmwareNote)firmwareNote.textContent=stock?'瀏覽器只呼叫 InkTime 後端的既有 Stock 邊界；後端驗證 LAN Host、轉換 /dataUP Payload，HTTP 2xx 僅代表接受，不代表實體刷新完成。':'瀏覽器只送到 InkTime 後端；自訂韌體保留 queue／delivery／一次性／恢復正式排程與 ACK 流程。';if(document.getElementById('save-and-send'))document.getElementById('save-and-send').disabled=stock;}

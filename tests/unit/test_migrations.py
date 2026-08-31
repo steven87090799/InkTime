@@ -32,7 +32,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 52
+    assert CURRENT_SCHEMA_VERSION == 53
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -299,6 +299,95 @@ def test_migration_50_adds_cleanup_audit_gc_indexes_idempotently(monkeypatch, tm
         "idx_data_cleanup_items_cleanup_run",
     }
     assert migrate(database) == []
+
+
+def test_migration_53_converts_existing_ai_output_to_taiwan_traditional(monkeypatch, tmp_path):
+    database = Database(tmp_path / "migration-53-traditional.db")
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS[:52])
+    assert migrate(database) == list(range(1, 53))
+
+    simplified = {
+        "caption": "他们在复古小镇看着风景。",
+        "side_caption": "他们看着风景",
+        "reason": "画面里的年轻人关系亲近",
+        "details": {"scene": "复古小镇街头"},
+    }
+    simplified_json = json.dumps(simplified, ensure_ascii=False)
+    with database.session() as connection:
+        connection.execute(
+            "INSERT INTO libraries(id,name,root_path,created_at,updated_at) "
+            "VALUES ('lib','測試','/photos',datetime('now'),datetime('now'))"
+        )
+        connection.execute(
+            "INSERT INTO photos(id,library_id,relative_path,status,created_at,updated_at) "
+            "VALUES ('photo','lib','photo.jpg','analyzed',datetime('now'),datetime('now'))"
+        )
+        connection.execute(
+            """
+            INSERT INTO photo_analysis(
+                photo_id,schema_version,stage,caption,types_json,side_caption,reason,
+                raw_json,semantic_json,created_at
+            ) VALUES ('photo',3,'single',?,'["人物"]',?,?,?,?,datetime('now'))
+            """,
+            (
+                simplified["caption"],
+                simplified["side_caption"],
+                simplified["reason"],
+                simplified_json,
+                json.dumps({"values": simplified["details"]}, ensure_ascii=False),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO ai_analysis_cache(
+                content_sha256,provider,model_name,prompt_version,schema_version,
+                schema_kind,result_json,raw_json,created_at
+            ) VALUES ('sha','provider','model','prompt',3,'full',?,?,datetime('now'))
+            """,
+            (simplified_json, simplified_json),
+        )
+        connection.execute(
+            """
+            INSERT INTO ai_trace_runs(
+                trace_id,photo_id,stage,status,started_at,final_result_json,created_at
+            ) VALUES ('trace','photo','single','SUCCESS',datetime('now'),?,datetime('now'))
+            """,
+            (simplified_json,),
+        )
+        connection.execute(
+            """
+            INSERT INTO ai_trace_attempts(
+                trace_id,attempt_number,attempt_kind,provider,requested_model,status,
+                response_raw_sanitized,response_parsed_json,created_at
+            ) VALUES ('trace',1,'vision','provider','model','SUCCESS',?,?,datetime('now'))
+            """,
+            (simplified_json, simplified_json),
+        )
+
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
+    assert migrate(database) == [53]
+    with database.session() as connection:
+        analysis = connection.execute(
+            "SELECT caption,side_caption,reason,raw_json,semantic_json FROM photo_analysis"
+        ).fetchone()
+        cached = connection.execute("SELECT result_json,raw_json FROM ai_analysis_cache").fetchone()
+        trace = connection.execute("SELECT final_result_json FROM ai_trace_runs").fetchone()
+        attempt = connection.execute(
+            "SELECT response_raw_sanitized,response_parsed_json FROM ai_trace_attempts"
+        ).fetchone()
+
+    assert tuple(analysis[:3]) == (
+        "他們在復古小鎮看著風景。",
+        "他們看著風景",
+        "畫面裡的年輕人關係親近",
+    )
+    assert json.loads(analysis["raw_json"])["details"]["scene"] == "復古小鎮街頭"
+    assert json.loads(analysis["semantic_json"])["values"]["scene"] == "復古小鎮街頭"
+    assert json.loads(cached["result_json"])["caption"] == "他們在復古小鎮看著風景。"
+    assert cached["raw_json"] == simplified_json
+    assert json.loads(trace["final_result_json"])["side_caption"] == "他們看著風景"
+    assert json.loads(attempt["response_parsed_json"])["reason"] == "畫面裡的年輕人關係親近"
+    assert attempt["response_raw_sanitized"] == simplified_json
 
 
 def test_migration_46_idempotency_ledger_is_upgrade_safe(monkeypatch, tmp_path):

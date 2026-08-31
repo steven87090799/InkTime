@@ -3,10 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from PIL import Image
-import pytest
 
 from tests.conftest import create_admin, csrf, login
-from inktime.app.services.budgets import BudgetExceeded
 
 
 def _seed_photo(app, photo_id: str = "photo") -> None:
@@ -285,7 +283,7 @@ def test_api_usage_retention_policy_is_exposed_and_preserves_current_budget_evid
                 (
                     "retention-photo",
                     0.20,
-                    (now - timedelta(hours=1)).isoformat(),
+                    now.isoformat(),
                     "completed",
                     "unknown",
                 ),
@@ -311,8 +309,11 @@ def test_api_usage_retention_policy_is_exposed_and_preserves_current_budget_evid
     after = budget.snapshot(photo_id="retention-photo")
     assert after["photo_unknown_count"] == 1
     assert photos.ai_limit_reached(daily_limit=1, monthly_limit=1) is True
-    with pytest.raises(BudgetExceeded):
-        budget.assert_request_allowed(None, "retention-photo")
+    # Unknown usage remains visible and reserves installation-wide budget; it
+    # no longer permanently blocks this photo merely because it lacks a price.
+    assert after["photo_known"] == after["photo_effective"] == 0
+    assert after["daily_effective"] == before["daily_effective"] == after["unknown_request_reserve"]
+    budget.assert_request_allowed(None, "retention-photo")
     with database.session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM photo_analysis").fetchone()[0] == before_analysis
         assert connection.execute("SELECT COUNT(*) FROM device_content_queue_events").fetchone()[0] == before_queue_events
