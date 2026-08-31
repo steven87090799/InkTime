@@ -70,7 +70,8 @@ def test_primary_management_pages_render(client, app):
     providers = client.get("/providers").get_data(as_text=True)
     assert 'id="provider-action-status"' in providers
     assert "alert(" not in providers
-    assert "選擇模型" in providers
+    assert "尚未設定 Provider。" in providers
+    assert "要使用哪一個模型" in providers
     assert 'name="model_mode"' in providers
 
     jobs = client.get("/jobs").get_data(as_text=True)
@@ -78,6 +79,28 @@ def test_primary_management_pages_render(client, app):
     assert "limit:'nullable-integer'" in jobs
     assert "budget:'float'" in jobs
     assert "if(body.limit===null)delete body.limit;" in jobs
+
+
+def test_configured_provider_exposes_model_picker_and_current_model(client, app):
+    actor = create_admin(app)
+    login(client)
+    provider_id = app.extensions["inktime_provider_repository"].save(
+        {
+            "name": "CI model picker",
+            "kind": "openai_compatible",
+            "base_url": "https://provider.invalid/v1",
+            "model": "fixture-vision",
+            "enabled": False,
+        },
+        user_id=actor,
+    )
+
+    response = client.get("/providers")
+    assert response.status_code == 200
+    body = response.get_data(as_text=True)
+    assert f'class="primary model-provider" data-id="{provider_id}">選擇模型</button>' in body
+    assert "fixture-vision" in body
+    assert 'name="model_mode"' in body
 
 
 def test_login_replaces_page_guide_with_safe_version_and_status_summary(client, app):
@@ -1162,7 +1185,7 @@ def test_photo_cards_never_present_excluded_screenshot_or_severe_blur_as_high_sc
     assert "本機品質分" in detail
     assert "模糊 44.54／對比 11.80" in detail
     assert "模糊 &lt; 60 且對比 &lt; 15" in detail
-    assert "明確截圖或嚴重單項缺陷會直接排除" in detail
+    assert "明確截圖、解析度過低或嚴重單項缺陷會直接排除" in detail
 
 
 def test_photo_cards_force_ineligible_selection_score_to_zero_but_keep_diagnostics(client, app):
@@ -1188,7 +1211,7 @@ def test_photo_cards_force_ineligible_selection_score_to_zero_but_keep_diagnosti
     body = client.get("/photos").get_data(as_text=True)
 
     assert "選片分 0.0（已排除：" in body
-    assert "模型排序 98.0" in body
+    assert "排序原始分 98.0" in body
     assert "E6 顯示適合度 99.0" in body
 
 

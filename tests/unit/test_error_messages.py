@@ -194,9 +194,16 @@ def test_error_pages_flash_and_error_center_show_words_with_codes_only_collapsed
     assert "找不到這項內容" in primary_text(missing.text)
     assert "HTTP-404" not in primary_text(missing.text)
     assert "HTTP-404" in missing.text
-    flashed = client.get("/test-flash-human-error", follow_redirects=True)
+    redirect = client.get("/test-flash-human-error")
+    assert redirect.status_code == 303
+    with client.session_transaction() as session:
+        assert session["_flashes"] == [
+            ("error:password_too_short", "密碼至少需要 12 個字元。")
+        ]
+    flashed = client.get(redirect.headers["Location"])
     assert "密碼至少需要 12 個字元" in primary_text(flashed.text)
     assert "password_too_short" not in primary_text(flashed.text)
+    assert 'class="notice error"' in flashed.text
     app.extensions["inktime_observability_service"].alert(
         "provider", "VLM-004", "display_suitability_grade 等級不合法", severity="ERROR",
     )
@@ -274,7 +281,7 @@ const response = (ok, text, status=ok?200:400)=>({ok,status,text:async()=>text})
     )
     completed = subprocess.run([node, "-"], input=script, text=True, capture_output=True, check=True, timeout=30)  # noqa: S603
     result = json.loads(completed.stdout)
-    for args, actual in zip(cases, result["explanations"]):
+    for args, actual in zip(cases, result["explanations"], strict=True):
         expected = explain_error(*args)
         for field in ("title", "detail", "action", "message", "code", "known"):
             assert actual[field] == expected[field], (args, field)

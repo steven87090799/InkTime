@@ -109,7 +109,6 @@ def evaluate_local_quality(
     fmt = str(_value(row, "format", "")).casefold()
     camera = bool(str(_value(row, "camera_make", "")).strip() or str(_value(row, "camera_model", "")).strip())
     software = _exif_software(row)
-    filename = Path(relative_path).name.casefold()
     screenshot_score = float(_value(row, "screenshot_likelihood", 0.0) or 0.0)
     blur_raw = _value(row, "blur_score")
     contrast_raw = _value(row, "contrast")

@@ -247,7 +247,7 @@ def test_same_content_queue_ack_is_strict_and_idempotent(client, app):
 
 
 def test_api_usage_retention_policy_is_exposed_and_preserves_current_budget_evidence(client, app):
-    create_admin(app)
+    actor = create_admin(app)
     login(client)
     _seed_photo(app, "retention-photo")
     database = app.extensions["inktime_database"]
@@ -285,7 +285,7 @@ def test_api_usage_retention_policy_is_exposed_and_preserves_current_budget_evid
                 (
                     "retention-photo",
                     0.20,
-                    (now - timedelta(hours=1)).isoformat(),
+                    now.isoformat(),
                     "completed",
                     "unknown",
                 ),
@@ -311,7 +311,17 @@ def test_api_usage_retention_policy_is_exposed_and_preserves_current_budget_evid
     after = budget.snapshot(photo_id="retention-photo")
     assert after["photo_unknown_count"] == 1
     assert photos.ai_limit_reached(daily_limit=1, monthly_limit=1) is True
-    with pytest.raises(BudgetExceeded):
+    # Unknown usage remains visible and reserves installation-wide budget; it
+    # no longer permanently blocks this photo merely because it lacks a price.
+    assert after["photo_known"] == after["photo_effective"] == 0
+    assert after["daily_effective"] == before["daily_effective"] == after["unknown_request_reserve"]
+    budget.assert_request_allowed(None, "retention-photo")
+    app.extensions["inktime_settings_repository"].update_many(
+        {"budget.daily_warning": 0, "budget.daily_stop": after["daily_effective"]},
+        changed_by=actor,
+        source_ip="127.0.0.1",
+    )
+    with pytest.raises(BudgetExceeded, match="每日 API 預算"):
         budget.assert_request_allowed(None, "retention-photo")
     with database.session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM photo_analysis").fetchone()[0] == before_analysis

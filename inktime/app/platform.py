@@ -400,7 +400,9 @@ def configure_web_application(
     def application_error(exc: ApplicationError):
         if request.path.startswith("/api/"):
             return exc.response_body(), exc.http_status
-        flash({"code": exc.code, "message": exc.public_message}, "error")
+        # Flask's message contract is text. Carry the stable identifier in the
+        # category so the template can explain it without exposing it as copy.
+        flash(exc.public_message, f"error:{exc.code}")
         target = safe_local_redirect_target(
             request.referrer,
             allowed_host=request.host,

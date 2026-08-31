@@ -49,9 +49,9 @@ def trace_list_page():
             "FROM data_retention_policies WHERE data_type='ai_trace'"
         ).fetchone()
     trace_summary = {**dict(summary), **dict(attempts)}
-    payload_bytes = int(trace_summary["run_payload_bytes"] or 0) + int(
-        trace_summary["attempt_payload_bytes"] or 0
-    )
+    # SUM(LENGTH(...)) with COALESCE already returns integers, including for an
+    # empty database. These are database aggregates, not request JSON scalars.
+    payload_bytes = trace_summary["run_payload_bytes"] + trace_summary["attempt_payload_bytes"]
     trace_count = int(trace_summary["trace_count"] or 0)
     average_bytes = payload_bytes / trace_count if trace_count else 0
     trace_summary.update(

@@ -48,7 +48,8 @@
   <main class="shell">
     {% if critical_alerts %}<div class="notice error" role="alert"><strong>需要優先處理{% if critical_alerts|length > 1 %}（{{ critical_alerts|length }}）{% endif %}</strong>{{ error_notice(critical_alerts[0].error_code, critical_alerts[0].message) }}<small>{{ critical_alerts[0].last_seen_at }}</small> · <a href="/activity?severity=CRITICAL">查看相關事件</a></div>{% endif %}
     {% for category, message in get_flashed_messages(with_categories=true) %}
-      <div class="notice {{ category }}" role="alert">{% if category == 'error' %}{{ error_notice(message.code, message.message) if message is mapping else error_notice('', message) }}{% else %}{{ message }}{% endif %}</div>
+      {% set flash_error_code = category[6:] if category.startswith('error:') else '' %}
+      <div class="notice {{ 'error' if flash_error_code else category }}" role="alert">{% if category == 'error' or flash_error_code %}{{ error_notice(message.code, message.message) if message is mapping else error_notice(flash_error_code, message) }}{% else %}{{ message }}{% endif %}</div>
     {% endfor %}
     {% block content %}{% endblock %}
     {% if page_guide %}

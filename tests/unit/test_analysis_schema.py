@@ -317,8 +317,9 @@ def test_analysis_result_top_level_must_be_object(raw):
             "rotation_cw": 0,
             "confidence": 1,
             "ambiguous": False,
-            "evidence": ["faces_upright", "faces_upright"],
+            "evidence": ["faces_upright", "invalid", "invalid"],
         },
+        {"rotation_cw": 0, "confidence": 1, "ambiguous": False, "evidence": ["faces_upright", 1]},
         {"rotation_cw": 0, "confidence": 1, "ambiguous": False, "evidence": ["invalid"]},
         {"rotation_cw": None, "confidence": 0, "ambiguous": False, "evidence": ["insufficient_visual_cues"]},
     ],
@@ -326,6 +327,19 @@ def test_analysis_result_top_level_must_be_object(raw):
 def test_schema_v2_rejects_invalid_visual_orientation(orientation):
     with pytest.raises(AnalysisValidationError):
         validate_analysis_result(valid_result(visual_orientation=orientation))
+
+
+def test_schema_v2_normalizes_duplicate_orientation_evidence_without_changing_input():
+    orientation = {
+        "rotation_cw": 0,
+        "confidence": 1,
+        "ambiguous": False,
+        "evidence": ["faces_upright", "faces_upright"],
+    }
+    normalized = validate_analysis_result(valid_result(visual_orientation=orientation))
+
+    assert normalized["visual_orientation"]["evidence"] == ["faces_upright"]
+    assert orientation["evidence"] == ["faces_upright", "faces_upright"]
 
 
 @pytest.mark.parametrize(

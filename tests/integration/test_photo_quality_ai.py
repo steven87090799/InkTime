@@ -65,23 +65,29 @@ def _scan(app, tmp_path, *, screenshot=False, duplicate=False):
     Image.effect_noise((900, 600), 90).convert("RGB").save(root / filename)
     if duplicate:
         (root / "copy.jpg").write_bytes((root / filename).read_bytes())
-    PhotoScanner(
+    scanned = PhotoScanner(
         app.extensions["inktime_photo_repository"],
         PhotoPreprocessor(),
         app.extensions["inktime_thumbnail_cache"],
     ).scan("測試照片", root, build_thumbnails=False)
     with app.extensions["inktime_database"].session() as connection:
-        return [str(row[0]) for row in connection.execute("SELECT id FROM photos ORDER BY relative_path")]
+        return [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT id FROM photos WHERE library_id=? ORDER BY relative_path",
+                (scanned["library_id"],),
+            )
+        ]
 
 
 def _setting(app, key, value):
     app.extensions["inktime_settings_repository"].update(key, value, changed_by="test", source_ip="127.0.0.1")
 
 
-def _manual_excluded_photo(app, tmp_path) -> str:
+def _manual_excluded_photo(app, tmp_path, *, actor: str) -> str:
     photo_id = _scan(app, tmp_path)[0]
     app.extensions["inktime_photo_repository"].set_exclusion(
-        photo_id, action="exclude", changed_by="test"
+        photo_id, action="exclude", changed_by=actor
     )
     return photo_id
 
@@ -176,7 +182,7 @@ def test_ai_off_does_not_call_provider(app, tmp_path):
 
 def test_force_ai_calls_provider_when_ai_is_off_and_preserves_exclusion_audit(app, tmp_path):
     actor = create_admin(app)
-    photo_id = _manual_excluded_photo(app, tmp_path)
+    photo_id = _manual_excluded_photo(app, tmp_path, actor=actor)
     repository = app.extensions["inktime_photo_repository"]
     before = repository.get_with_path(photo_id)
     _setting(app, "analysis.ai_mode", "off")
@@ -215,7 +221,7 @@ def test_force_ai_calls_provider_when_ai_is_off_and_preserves_exclusion_audit(ap
     assert provider.analyze_calls == 1
     after = repository.get_with_path(photo_id)
     assert after["eligible"] == before["eligible"] == 0
-    assert after["exclusion_status"] == before["exclusion_status"] == "auto_excluded"
+    assert after["exclusion_status"] == before["exclusion_status"] == "manually_excluded"
     assert after["reject_reason"] == before["reject_reason"]
     with app.extensions["inktime_database"].session() as connection:
         analysis = connection.execute(
@@ -258,13 +264,14 @@ def test_confirmed_screenshot_cannot_cross_force_ai_send_boundary(app, tmp_path)
 
 
 def test_force_ai_api_is_admin_exclusion_only_and_creates_fresh_job(client, app, tmp_path):
-    create_admin(app)
+    actor = create_admin(app)
     login(client)
     _enable_fake_usable_provider(app)
-    excluded_id = _manual_excluded_photo(app, tmp_path)
+    excluded_id = _manual_excluded_photo(app, tmp_path, actor=actor)
     root = tmp_path / "eligible-parent"
     root.mkdir()
     eligible_id = _scan(app, root)[0]
+    assert eligible_id != excluded_id
     with app.extensions["inktime_database"].session() as connection:
         connection.execute(
             "UPDATE photos SET eligible=1,exclusion_status='eligible',manual_override=0 WHERE id=?",
@@ -311,10 +318,10 @@ def test_confirmed_screenshot_ai_api_is_controlled_and_creates_no_job(client, ap
 
 
 def test_manual_ai_idempotency_key_is_namespaced_per_endpoint(client, app, tmp_path):
-    create_admin(app)
+    actor = create_admin(app)
     login(client)
     _enable_fake_usable_provider(app)
-    excluded_id = _manual_excluded_photo(app, tmp_path)
+    excluded_id = _manual_excluded_photo(app, tmp_path, actor=actor)
     _setting(app, "analysis.ai_mode", "off")
     _setting(app, "analysis.execution_mode", "local_with_manual_ai")
     headers = {"X-CSRF-Token": csrf(client), "Idempotency-Key": "shared-manual-key"}
@@ -332,14 +339,18 @@ def test_manual_ai_idempotency_key_is_namespaced_per_endpoint(client, app, tmp_p
 
 
 def test_manual_ai_idempotency_conflict_has_stable_api_error_code(client, app, tmp_path):
-    create_admin(app)
+    actor = create_admin(app)
     login(client)
     _enable_fake_usable_provider(app)
     first_root = tmp_path / "first-excluded"
     second_root = tmp_path / "second-excluded"
     first_root.mkdir()
     second_root.mkdir()
-    excluded_ids = [_manual_excluded_photo(app, first_root), _manual_excluded_photo(app, second_root)]
+    excluded_ids = [
+        _manual_excluded_photo(app, first_root, actor=actor),
+        _manual_excluded_photo(app, second_root, actor=actor),
+    ]
+    assert excluded_ids[0] != excluded_ids[1]
     _setting(app, "analysis.ai_mode", "off")
     _setting(app, "analysis.execution_mode", "local_with_manual_ai")
     headers = {"X-CSRF-Token": csrf(client), "Idempotency-Key": "manual-conflict-key"}
@@ -355,9 +366,9 @@ def test_manual_ai_idempotency_conflict_has_stable_api_error_code(client, app, t
 def test_single_excluded_photo_ai_without_provider_is_controlled_and_side_effect_free(
     client, app, tmp_path
 ):
-    create_admin(app)
+    actor = create_admin(app)
     login(client)
-    excluded_id = _manual_excluded_photo(app, tmp_path)
+    excluded_id = _manual_excluded_photo(app, tmp_path, actor=actor)
     _setting(app, "analysis.ai_mode", "off")
     _setting(app, "analysis.execution_mode", "local_with_manual_ai")
     with app.extensions["inktime_database"].session() as connection:
@@ -794,6 +805,7 @@ def test_manual_vision_job_marks_every_selected_item_for_provider_call(client, a
     create_admin(app)
     login(client)
     _enable_fake_usable_provider(app)
+    _setting(app, "analysis.execution_mode", "automatic_ai")
     photo_ids = add_photos(app, 3)
 
     response = client.post(
@@ -802,7 +814,7 @@ def test_manual_vision_job_marks_every_selected_item_for_provider_call(client, a
         headers={"X-CSRF-Token": csrf(client)},
     )
 
-    assert response.status_code == 201
+    assert response.status_code == 201, response.json
     with app.extensions["inktime_database"].session() as connection:
         row = connection.execute(
             "SELECT settings_json FROM jobs WHERE id=?", (response.json["id"],)
