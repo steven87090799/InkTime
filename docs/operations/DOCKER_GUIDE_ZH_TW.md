@@ -1,5 +1,7 @@
 # InkTime Docker 部署規格（Intel N100）
 
+> NAS 正式部署以[Git Tag／GHCR 更新指南](NAS_TAG_DEPLOYMENT_ZH_TW.md)為準：`.env.nas`＋`docker-compose.nas.yml`＋更新器，不在 NAS Build。以下原始碼建置指令只供受控建置／開發環境說明；一般開發仍遵守 [AGENTS.md](../../AGENTS.md) 的 Hosted CI 政策。
+
 OpenAI Batch 正式操作與故障排除另見 [OpenAI Batch 照片分析指南](../OPENAI_BATCH_ANALYSIS_ZH_TW.md)。`/data/batches` 必須與 SQLite 一起掛載持久化；Batch JSONL 不使用 `/tmp`，照片掛載仍保持唯讀。
 
 這份文件是正式部署契約。日常分析、排程、裝置、備份與 Log 層級都從 Web 管理；只有主機路徑、Port、映像版本、HTTPS 與容器 CPU／記憶體上限需要在容器外設定。
@@ -29,7 +31,7 @@ Intel N100 為 4 核心／4 執行緒、最高 3.4 GHz、6 W Processor Base Powe
 
 上限不是預先保留量。閒置時容器只保留 Python 程序與必要頁面，不會主動占滿設定值。若 Worker 因超大或損壞圖片觸發 OOM，先在 Web 將 `analysis.concurrency=1`、`worker.queue_multiplier=1`，再把 `INKTIME_WORKER_MEMORY` 提高到 `1536m`；不要先無限制提高並行。
 
-## 3. 首次部署：先選 LAN HTTP 或 Production HTTPS
+## 3. 部署模式與受控原始碼建置範例
 
 ```bash
 git clone <你的 InkTime 私有儲存庫 URL> InkTime
@@ -150,7 +152,7 @@ Compose 還啟用非 root、唯讀 root filesystem、`no-new-privileges`、PID �
 
 1. 「設定」：確認 `analysis.concurrency=1`、`worker.queue_multiplier=1`、`worker.poll_seconds=15`、`scheduler.poll_seconds=60`。
 2. 「模型」：新增 Provider、API Key、模型與逾時；先測試連線。
-3. 「維護」：以容器路徑 `/photos` 建立掃描工作。
+3. 「設定」：新安裝為 `local_only`；需要一般 AI 工作才明確選 `automatic_ai`。「維護」以容器路徑 `/photos` 建立掃描工作。
 4. 「工作」：先用 10～100 張與小額預算驗證，再增加數量。
 5. 「渲染」：預覽並選擇內建手寫／文青繁中字型，或上傳自訂字型，再發布 480×800 版本。
 6. 「裝置」：設定 ESP32 的時區／每日刷新／旋轉；新自製板由自動配對取得一次性 Device Secret，既有 Legacy 裝置才使用相容 Token。
@@ -176,7 +178,7 @@ docker stats --no-stream
 - `/health/live`：Web 程序可回應。
 - `/health/ready`：Migration、SQLite、發布目錄、設定與工作租約正常。
 - `/health/detail`：登入管理員後查看詳細版本。
-- Worker／Scheduler：Compose healthcheck 確認目標程序仍存在。
+- Worker／Scheduler：Compose healthcheck 只確認目標程序仍存在；工作進度仍須由 heartbeat、Job、Queue 與 Activity 判定。
 
 ## 7. HTTPS、Reverse Proxy 與網路
 
@@ -232,16 +234,11 @@ curl -fsS http://127.0.0.1:8765/health/ready
 - [ ] 待機 10 分鐘後 `docker stats --no-stream` CPU 接近 0%，沒有每 2 秒固定喚醒。
 - [ ] 建立 10 張掃描／分析工作，Docker Log 只有彙總進度而非逐張成功紀錄。
 - [ ] 重啟 Worker 後工作可從租約恢復。
-- [ ] ESP32 取得 Manifest、下載 96,000-byte 檔案、回報韌體與訊號。
+- [ ] ESP32 取得相符 Profile 的 Manifest，下載四色 96,000 或六／七色 192,000-byte 檔案，回報韌體、訊號與真正顯示結果。
 - [ ] 備份可下載並通過完整性檢查。
 
 ## 10. 純軟體長時間驗證
 
-CI 的 `workflow_dispatch` 可執行 30 分鐘、2 小時或 5 小時 bounded soak，並上傳不含 Token、認證資料或宿主路徑的 JSON summary。24 小時 soak 只在受控 LAN 主機本地執行：
-
-```bash
-python scripts/runtime_soak.py --duration-seconds 86400 \
-  --timeout-seconds 86520 --summary-json /tmp/inktime-soak-24h.json
-```
+CI 工作流程提供有界 soak 選項；一般開發由既定 Hosted CI 路由執行，不能為了取得綠燈自行 dispatch、重跑或改在本機執行。另行核准的長時間環境驗收需固定 source、資料範圍與時限，不能把舊報告當成新版本已完成。
 
 Soak 會檢查 RSS、FD、thread、SQLite connection／WAL、child process、pending async work、job age 與 Scheduler heartbeat；timeout、未清理資源或超過門檻皆非 PASS。

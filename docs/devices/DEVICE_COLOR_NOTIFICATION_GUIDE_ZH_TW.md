@@ -1,5 +1,7 @@
 # 裝置可靠性與六／七色渲染指南
 
+新安裝 `render.profile=gdep073e01_6c`、`render.dither=gooddisplay`；裝置 Profile 仍需匹配硬體。下表列主要抖動；完整 10 個支援值（含相容別名／無抖動）見[現行基線](../reference/CURRENT_STATE_ZH_TW.md)。
+
 本指南涵蓋 InkTime 的 GDEP073E01 六色、GDEY073D46 七色發布、抖動算法、裝置設定版本 ACK、離線／恢復通知與 Webhook。硬體接線、電源與燒錄步驟仍以 [ESP32 指南](ESP32_GUIDE_ZH_TW.md)為準。
 
 ## 1. Profile 與線上格式
@@ -33,7 +35,7 @@ indexed4 採 GxEPD2 的邏輯顏色順序。偶數 pixel 放在高 4 bits、奇�
 - `render.dither_strength`：0～2；1 是標準。建議先在 0.7～1.2 調整，過高會出現不必要色點。
 - `gooddisplay` 與 `photo_smooth` 固定採原廠標準 Floyd–Steinberg，不使用強度滑桿。
 - GDEP 的 `gooddisplay`／`photo_smooth` 使用原廠純色作為量化工作色盤與 PNG 預覽；Manifest 會攜帶同一份色盤，虛擬接收端不會再解碼成另一組顏色。
-- 抖動只在 Worker 正式發布時執行，不會讓 Web／Scheduler 待機持續耗 CPU。查表快取固定為每個 Profile 約 32 KiB，誤差擴散只保留 480-pixel 的兩至三列誤差，不建立整張浮點誤差圖。
+- 正式發布抖動由 Worker 執行；Web 模擬／預覽只有在明確請求時才運算，不會讓 Web／Scheduler 待機持續耗 CPU。查表快取固定為每個 Profile 約 32 KiB，誤差擴散只保留 480-pixel 的兩至三列誤差，不建立整張浮點誤差圖。
 
 色盤 RGB 是量化目標與螢幕預覽近似值，不是面板的色彩校正保證。電子紙實際顏色會受批次、溫度、老化、驅動 waveform、環境光與 adapter 供電影響；正式照片牆應以同批面板印出測試圖，再微調 Profile 目標值。
 
@@ -50,7 +52,7 @@ indexed4 採 GxEPD2 的邏輯顏色順序。偶數 pixel 放在高 4 bits、奇�
 
 ## 4. 離線、提醒與恢復
 
-韌體 2.6.0 也會把最後成功顯示的 SHA-256、Release、render profile、rotation、board profile 與成功標記寫入 NVS。再次取得相同且完整驗證的內容時可回報 `display_skipped=true`，省略實體刷新；forced refresh、任何 profile／rotation／board 改變或 NVS 損壞都會 fail closed 並重新刷新。這是軟體流程已接入，不代表真實面板的方向、殘影、色彩、BUSY 或功耗已驗證。
+目前韌體 2.8.6 會把最後成功顯示的 SHA-256、Release、render profile、rotation、board profile 與成功標記寫入 NVS。再次取得相同且完整驗證的內容時可回報 `display_skipped=true`，省略實體刷新；forced refresh、任何 profile／rotation／board 改變或 NVS 損壞都會 fail closed 並重新刷新。這是軟體流程已接入，不代表真實面板的方向、殘影、色彩、BUSY 或功耗已驗證。
 
 Scheduler 預設每 300 秒掃描一次，不為每次掃描輸出 INFO Log。啟用裝置最後狀態、最後 Manifest 驗證時間或建立時間超過 `notification.device_offline_hours`（預設 30 小時）才轉為離線。
 
@@ -99,7 +101,7 @@ Webhook URL 是 administrator 級設定，但預設仍拒絕內網、Loopback、
 
 ## 7. 升級與回滾順序
 
-建議順序：先備份資料庫與 `/data/releases` → 更新三個 Docker 服務並完成目前 Migration → 為每個實際面板發布對應 Profile → 燒錄 2.6.0 韌體 → 在裝置頁改成正確 Profile → 等待設定與 Queue ACK。
+建議順序：先備份資料庫與 `/data/releases` → 更新三個 Docker 服務並完成目前 Migration → 為每個實際面板發布對應 Profile → 以對應 source／Profile 的 2.8.6 artifact 升級韌體 → 在裝置頁改成正確 Profile → 等待設定與 Queue ACK。
 
 舊 2.1.0 韌體只認 schema v1／2bpp，2.2.x／2.4.x 不具備完整 Queue ACK 與同內容 NVS 契約。升級期間可把裝置留在 `safe_4c` 並發布四色版本；不要先把它切到六／七色。若新韌體異常，先將裝置 Profile 回到 `safe_4c`、發布四色並回滾韌體；設定版本會再次增加，需等待舊／相容韌體 ACK。
 

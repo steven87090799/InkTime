@@ -1,5 +1,7 @@
 # InkTime 內建繁體中文字型
 
+字型清單與 SHA-256 對應此目錄實際資產；由「渲染」頁選取，預設為 `builtin:iansui`。自訂 TTF／OTF／TTC 上傳上限 64 MiB，保存於 `/data/fonts`，不覆寫 repository 內建字型。正式發布逐字檢查 cmap，缺字會停止而不靜默 fallback。
+
 InkTime 只在電子紙短文案渲染時載入目前選取的字型，不會把兩套字型同時常駐記憶體。
 
 | 檔案 | Web 介面風格 | 固定版本 | 上游 | 授權 |

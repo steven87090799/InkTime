@@ -1,5 +1,7 @@
 # 模型 Benchmark：離線預設、有限 Live 與不污染正式資料
 
+此頁列出 benchmark 介面與隔離邊界；一般開發依[AGENTS.md](../../AGENTS.md)由 Hosted CI 執行 benchmark，不在本機重跑。live 模式需明確核准；範例模型 ID 必須換成帳號已驗證的值，不能把預設模型或離線成功當作 Provider 可用證據。
+
 入口是 [`scripts/benchmark_models.py`](../../scripts/benchmark_models.py)，服務實作是 [`inktime/app/services/model_benchmark.py`](../../inktime/app/services/model_benchmark.py)，純指標位於 [`inktime/app/services/benchmark_metrics.py`](../../inktime/app/services/benchmark_metrics.py)。Benchmark 明確分為 Contract Benchmark 與 Quality／Ranking Benchmark；它不是沒有 golden data 時的「準確率」宣稱，也不把舊版 `smart_two_stage` 假裝成另一種現行流程。
 
 ## 預設離線模式
@@ -64,7 +66,7 @@ INKTIME_BENCHMARK_API_KEY='只在受控 shell 注入' \
 python scripts/benchmark_models.py \
   --live \
   --provider openrouter \
-  --models openai/<完整模型 ID> \
+  --models 'openai/<完整模型 ID>' \
   --sample-count 20 \
   --seed inktime-benchmark-v1 \
   --dataset path/to/approved-golden-manifest.json \
@@ -82,7 +84,7 @@ Golden manifest 的每個 item 必須在 technical grade 的 `technical_grade` �
 Live 安全條件：
 
 - `max_requests` 最多 100，並同時受 `max-cost` bounded post-response stop 約束；`max_cost` 是收到上一個 response 後的累計停止線，不是數學上的絕對 pre-request ceiling。
-- `--live`、`--api-key`、`--dataset`、`--confirm-live-quality`、`--max-requests`、`--max-cost` 與 `--sample-count` 都是明確的安全邊界。
+- `--live`、受控環境中的 `INKTIME_BENCHMARK_API_KEY`（或 CLI 支援的 `--api-key`）、`--dataset`、`--confirm-live-quality`、`--max-requests`、`--max-cost` 與 `--sample-count` 都是明確的安全邊界。
 - 成本回報未知時增加 `unknown_cost_count` 並停止後續 Provider request；不得以零來掩蓋未知帳務。
 - JSON 修復最多一次且只傳文字，不會第二次上傳圖片。
 - 只寫明確指定的 JSON／Markdown artifact，不寫 `photo_analysis`、`releases`、`display_history` 或正式 AI Cache。

@@ -1,5 +1,7 @@
 # InkTime 專案架構與照片評分流程
 
+> 現行主線 Migration 52、AI Schema v3 與三程序基線見[版本參考](../reference/CURRENT_STATE_ZH_TW.md)。下文 Migration 22–24 是功能引入歷史，不是目前最高版本。
+
 > 決策與韌性擴充：Migration 22 加入 Decision Trace、回饋、Shadow、Queue、Retention 與 Canary 資料；Migration 23 補強決策關聯，Migration 24 補上分析／Vision Input 指紋。正式發布仍由 `RenderService → ReleaseCoordinator` 管理；追蹤或 Shadow 寫入失敗不會中斷正式 Release。
 
 這份文件是閱讀程式碼的入口。先看「執行架構」，再依要修改的功能查「模組地圖」；照片評分、模型與門檻集中在後半段。
@@ -61,6 +63,8 @@ flowchart TB
 | Token、成本與停止線 | `services/budgets.py` | `repositories/usage.py`、`repositories/settings.py` |
 | 電子紙渲染與發布 | `services/rendering.py` | `domain/rendering/`、`api/rendering.py` |
 | 裝置自動配對／Legacy Token 與下載 | `api/devices.py`、`api/device_pairing.py` | `repositories/devices.py`、`services/device_pairing.py`、`esp32/` |
+| AI 請求追蹤與活動時間軸 | `api/ai_traces.py`、`api/operations.py` | `repositories/ai_traces.py`、`services/observability.py` |
+| 安全分析歷史清理 | `repositories/photo_analysis_retention.py` | `api/operations.py` |
 | 管理介面 | `web/templates/` | `web/static/`、對應的 `api/*.py` |
 | Docker 與啟動 | `docker-compose.yml`、`Dockerfile` | `server.py`、`platform.py` |
 
@@ -74,9 +78,7 @@ flowchart LR
     DUP -->|"否"| STRATEGY{"分析策略"}
     STRATEGY -->|"local"| LOCAL_SCORE["本地固定公式"]
     STRATEGY -->|"single"| VISION["一次高細節 Vision 模型"]
-    STRATEGY -->|"local"| LOCAL_SCORE["本地固定公式"]
     VISION --> SAVE["保存四項原始分數、綜合分與規則版本"]
-    STAGE2 --> SAVE
     LOCAL_SCORE --> SAVE
     INHERIT --> SAVE
     SAVE --> PICK["回憶分通過門檻<br/>依綜合分排序"] --> RELEASE["480×800 四色／六色／七色 Release<br/>Profile + 抖動 + SHA-256"]
@@ -108,7 +110,7 @@ flowchart LR
 | `analysis.stage_two_threshold` | 舊版兩階段設定的讀取相容欄位 | 65 |
 | `render.memory_threshold` | 電子紙候選照片最低回憶分 | 70 |
 
-建立工作時可在「工作」頁選擇 `local` 或 `single`。`low_cost`、`smart`、`smart_two_stage`、`high_quality` 與 `single_high` 是舊輸入的讀取相容別名，會正規化為 `single`，不會再次啟用兩階段圖片請求。Provider、Base URL、API Key、價格與 `model.analysis_model` 在「模型」頁管理。
+建立工作時可在「工作」頁選擇 `local` 或 `single`。`low_cost`、`smart`、`smart_two_stage`、`high_quality` 與 `single_high` 是舊輸入的讀取相容別名，會正規化為 `single`，不會再次啟用兩階段圖片請求。Provider、Base URL、API Key、價格與 Provider 專屬 `model` 在「模型」頁管理；全域 `model.analysis_model` 在「設定」頁。一般 AI 工作另要求 `analysis.execution_mode=automatic_ai`，新安裝預設 `local_only`。
 
 ### 要改評分規則時看哪裡
 

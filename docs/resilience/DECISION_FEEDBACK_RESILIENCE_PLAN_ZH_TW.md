@@ -1,5 +1,8 @@
 # InkTime 決策、韌性與發布安全實作計畫
 
+此頁保留韌性功能的設計順序；現行主線已演進至 Migration 52，新增 AI Trace／Provider model／保留政策等功能，見[現行基線](../reference/CURRENT_STATE_ZH_TW.md)。Decision Trace、AI Trace 與 Job completed 分別代表選片、模型嘗試與工作狀態。
+
+
 ## 現有資料流與插入點
 
 既有流程為 `RenderService.select_candidates_details()` 選出合格照片，`RenderService.publish()` 產生影像，`ReleaseCoordinator` 以 SQLite 交易寫入 Release、指派裝置與顯示歷史；裝置再以自動配對 Device Secret／version 或 Legacy Token 取得 Manifest、下載 payload、回報狀態。Migration、WAL 與跨程序 single-writer 已由 `Database.transaction()` 集中管理。

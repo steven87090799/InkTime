@@ -1,5 +1,7 @@
 # PhotoPainter 交付模式與相容邊界
 
+本版 Enhanced 韌體 2.8.6 使用 Config Store v5；可用 12／24 slots 由配對能力決定。先讀[自動配對](ESP32_AUTOMATIC_PAIRING_ZH_TW.md)，不要將本機 schema、wire Manifest schema 與排程容量混為一個版本。
+
 本文件是目前程式碼、韌體與 Stock upstream 交叉核對後的操作契約。它把「既有 Online」、「Stock PhotoPainter 相容」與「InkTime Enhanced 離線排程」分開；三者不可用同一個預設值混淆。
 
 ## 1. 三種模式

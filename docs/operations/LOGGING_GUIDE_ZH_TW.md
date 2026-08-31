@@ -1,10 +1,13 @@
 # Docker Log 與問題追蹤指南
 
+若工作已完成卻沒有模型文字，或 Activity 顯示 Queue／Worker 告警，先依[Activity／AI Trace 判讀](../guides/ACTIVITY_AI_TRACE_ZH_TW.md)核對執行模式、attempts、usage 與時間，不單看 `completed` 或容器 healthy。
+
+
 ## 設計目標
 
 InkTime 以一套中央結構化 Log 契約串起 Web、資料庫、Migration、Worker、Scanner、Scheduler、Provider、分析、程序隔離邊界、Batch、渲染、Release、裝置 Queue／ACK 與 ESP32 韌體。Log 只能協助追蹤，任何格式化、遮蔽或輸出失敗都不得改變主要操作的成功、失敗、重試或持久化語意。
 
-stdout/stderr 仍由 Docker `json-file` 收集並輪替。應用 Log 與 HTTP access log 分開：應用 Log 可在 Web 動態改層級，access log 為部署層且預設關閉，避免健康檢查與裝置輪詢產生大量無用寫入。本次可觀測性擴充沒有新增資料表或 Migration；目前 Schema 仍依序套用至 Migration 50。
+stdout/stderr 仍由 Docker `json-file` 收集並輪替。應用 Log 與 HTTP access log 分開：應用 Log 可在 Web 動態改層級，access log 為部署層且預設關閉，避免健康檢查與裝置輪詢產生大量無用寫入。結構化 Log 與 AI Trace 是不同功能：主線目前依序套用至 Migration 52，其中 Migration 51 新增 AI Trace tables，Migration 52 新增 Provider 模型欄位。
 
 ## 層級與雜訊控制
 

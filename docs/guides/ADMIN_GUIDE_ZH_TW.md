@@ -1,5 +1,8 @@
 # 管理員指南
 
+設定表以新安裝預設為準，升級會保留管理員已存的設定。登入 administrator 後在 `/settings` 搜尋中文標籤或 key；本主線仍有「基本／進階」模式，找不到欄位時切到進階並清除篩選。一般 AI 工作必須先把「分析執行模式」設為 `automatic_ai`；只填 Key 或模型不會啟用。追查沒有文案或 Worker 告警見[Activity／AI Trace](ACTIVITY_AI_TRACE_ZH_TW.md)。
+
+
 ## 角色
 
 - administrator：設定、工作控制、Provider、裝置、發布、備份與錯誤處理。
@@ -10,6 +13,7 @@
 | 欄位 | 預設 | 合法範圍／建議 | 風險 | 重啟 |
 |---|---:|---|---|---|
 | `general.timezone` | Asia/Taipei | IANA 時區 | 影響跨日與排程 | 否 |
+| `analysis.execution_mode` | local_only | disabled／local_only／local_with_manual_ai／automatic_ai | 只有明確開啟 AI 才呼叫 Provider | 否 |
 | `analysis.strategy` | single | `local`／`single` | `single` 每張照片最多一次圖片模型請求 | 否 |
 | `analysis.stage_two_threshold` | 65 | 舊版讀取相容欄位 | 新工作不再使用，不會觸發第二次圖片請求 | 否 |
 | 本機預篩選 | 啟用 | 截圖／明顯低品質可分別停用 | 排除項目 0 Token；不刪原檔 | 否 |
@@ -21,7 +25,7 @@
 | 最愛照片加分 | 5 | 0–30 | 只加入綜合排序分 | 否 |
 | `analysis.concurrency` | 1 | 1–8，Intel N100 建議 1；確認 RSS 後最多先試 2 | 過高觸發限流／圖片記憶體尖峰 | 否 |
 | `worker.queue_multiplier` | 1 | 1–4，N100 建議 1 | 增加記憶體中 Future | 否 |
-| `worker.poll_seconds` | 15 | 1–300；低待機可設 30–60 | 越小待機喚醒越多 | 否 |
+| `worker.poll_seconds` | 15 | 1–60；低待機可設 30–60 | 越小待機喚醒越多 | 否 |
 | `worker.progress_items` | 50 | 5–10,000 | 越小 Docker Log 越多 | 否 |
 | `worker.progress_seconds` | 300 | 30–3,600 | 越小 Docker Log 越多 | 否 |
 | `scheduler.poll_seconds` | 60 | 30–3,600 | 越小 SQLite／CPU 喚醒越多 | 否 |
@@ -35,7 +39,7 @@
 | `budget.monthly_warning` | 50 | ≥0 美元 | 只警告 | 否 |
 | `budget.monthly_stop` | 100 | ≥0 美元 | 達到即停新請求 | 否 |
 | `budget.job_default` | 10 | ≥0 美元 | 工作達到後暫停 | 否 |
-| `budget.photo_max` | 0.25 | ≥0 美元 | 過低阻擋第二階段 | 否 |
+| `budget.photo_max` | 0.25 | ≥0 美元 | 過低會阻擋單次模型分析 | 否 |
 | `budget.max_tokens` | 8000 | 256–1,000,000 | 需符合模型能力 | 否 |
 | `render.memory_threshold` | 70 | 0–100 | 過高可能無候選 | 否 |
 | `render.quantity` | 5 | 1–50 | 增加下載量 | 否 |
@@ -43,35 +47,35 @@
 | `render.history_today_window_days` | 7 | 0–31 | 0 只接受完全相同月日 | 否 |
 | `render.history_today_fallback` | nearby_then_ranked | nearby_then_ranked／nearby_only／ranked／none | 限制越嚴格越可能沒有足量候選 | 否 |
 | `render.e6_weight` | 20 | 0–60% | 過高會讓面板顯示效果凌駕回憶分 | 否 |
-| `render.layout` | photo_info | full／postcard／photo_info／calendar／weather_sensor | 日曆與天氣版型的照片區較小 | 否 |
+| `render.layout` | photo_info | full／postcard／photo_info／photo_pair／photo_pair_caption／adaptive_memory／calendar／weather_sensor | 日曆與天氣版型的照片區較小 | 否 |
 | `render.show_capture_date` | true | true／false | EXIF 日期錯誤時也會跟著顯示 | 否 |
 | `render.font_path` | 內建芫荽 | 內建手寫／文青風格或已上傳 TTF／OTF／TTC | 缺字會停止發布，不會 fallback | 否 |
 | `render.show_location` | true | true／false | 只顯示最近城市，不顯示座標 | 否 |
 | `render.location_max_distance_km` | 80 | 1–500 公里 | 過大可能顯示不準確的鄰近城市 | 否 |
-| `render.profile` | safe_4c | 四色／GDEP 六色／GDEY 七色 | 必須與裝置面板相符 | 否 |
-| `render.dither` | floyd_steinberg | 原廠相容／照片平滑／Floyd／Atkinson／Bayer／none | 照片平滑可能柔化極細線；兩種新模式強度固定 | 否 |
+| `render.profile` | gdep073e01_6c | 四色／GDEP 六色／GDEY 七色 | 必須與裝置面板相符 | 否 |
+| `render.dither` | gooddisplay | 原廠相容／照片平滑／Floyd／Atkinson／Bayer／none | 照片平滑可能柔化極細線；兩種新模式強度固定 | 否 |
 | `render.dither_strength` | 1 | 0–2 | 過高會增加色點 | 否 |
 | `render.color_distance` | oklab | oklab／rgb | 切換會改變色彩映射 | 否 |
 | `render.weather_enabled` | false | 啟用前先填正確經緯度 | 需連外；失敗不阻擋照片發布 | 否 |
 | 天氣經緯度／顯示名稱 | 臺北市中心／所在地 | 緯度 -90–90、經度 -180–180 | 預設座標只是範例，啟用前必須修改 | 否 |
 | `render.sensor_device_id` | 空白 | PhotoPainter 裝置 ID；空白取最近回報 | 多裝置時可能抓到別的房間 | 否 |
-| `device.legacy_api_enabled` | false | 僅遷移期 | URL 金鑰不安全 | 是 |
+| `device.legacy_api_enabled` | false | 歷史相容設定；舊 Web 路由已移除 | 不能用此鍵恢復 URL 金鑰下載路由 | 不適用 |
 | `device.default_timezone` | Asia/Taipei | IANA 時區 | 影響新增裝置排程 | 否 |
 | `device.default_schedule` | 08:00 | 00:00–23:59 | 影響新增裝置刷新時間 | 否 |
 | `device.default_rotation` | 0 | 0／180 | 目前 7.3 吋正式韌體限制 | 否 |
-| `device.default_panel_profile` | safe_4c | 四色／GDEP 六色／GDEY 七色 | 型號錯誤會由韌體拒絕 | 否 |
+| `device.default_panel_profile` | gdep073e01_6c | 四色／GDEP 六色／GDEY 七色 | 型號錯誤會由韌體拒絕 | 否 |
 | 離線／恢復通知 | 30 小時／啟用 | 1–720 小時；掃描預設 300 秒 | 需大於裝置刷新週期 | 否 |
 | 離線重複提醒 | 停用／冷卻 24 小時 | 1–720 小時 | 過短會造成通知轟炸 | 否 |
-| Webhook | 停用 | 完整 HTTP(S) URL、2–30 秒逾時 | 只連可信端點；Token 加密保存 | 否 |
+| Webhook | 停用 | 預設只允許 HTTPS URL、2–30 秒逾時 | 只連可信端點；Token 加密保存 | 否 |
 | `system.log_level` | INFO | DEBUG／INFO／WARNING／ERROR／CRITICAL | DEBUG 增加磁碟寫入 | 否 |
 | `system.log_format` | json | human/json | 集中 Log 建議 json | 否 |
-| `system.diagnostics_cache_seconds` | 300 | 30–86,400 | 太小會反覆掃大型縮圖目錄 | 否 |
+| `system.diagnostics_cache_seconds` | 21600（6 小時） | 30–86,400 | 太小會反覆掃大型縮圖目錄 | 否 |
 | `security.session_minutes` | 30 | 5–1440 | 過長增加共用裝置風險 | 否 |
 | `backup.schedule_enabled` | true | true/false | 關閉後需手動備份 | 否 |
 | `backup.hour` | 3 | 0–23 | 避開大量分析 | 否 |
 | `backup.retention` | 14 | 1–365 | 過低縮短回復期 | 否 |
 
-所有修改寫入 `setting_history`，最近 100 筆直接顯示在設定頁；Secret 永不寫入摘要。Web、Worker、排程、Log 與 Session 的新設定均動態生效。只有舊版裝置 API 這類啟動時安全邊界仍需重啟。
+所有修改寫入 `setting_history`，最近 100 筆直接顯示在設定頁；Secret 永不寫入摘要。Web、Worker、排程、Log 與 Session 的新設定均動態生效。部署層 Cookie、Proxy、Port 與掛載仍需依部署流程重新啟動。
 
 新安裝的照片庫 `incremental_scan` 預設在每月 1 日 03:00 執行；`full_reconcile` 預設在每年 1 月 1 日 04:00 執行。這是為大型 NAS 照片庫降低 traversal、磁碟喚醒與 SQLite 活動的低頻政策，不是每日即時相簿。升級不會覆蓋既有管理員自訂 cron；需要立即納入照片或人工核對時，仍可從維護頁建立增量掃描或完整掃描工作。
 
@@ -107,11 +111,11 @@
 
 E6 適合度會在任何模型請求前，以正式 `gdep073e01_6c` 色盤、OKLab 色差與 Bayer 抖動建立 112 px 本機樣本，量測量化後對比保留、主體細節、膚色偏差與強邊緣／文字可讀性。總分低於 `analysis.e6_min_score` 時可直接排除，因此不新增 Token；最愛照片仍會略過排除。舊照片第一次進入候選或渲染時會自動補算，仍不呼叫模型。
 
-五種版型為全版照片、明信片、照片＋日期地點、月曆相框、天氣＋室內溫溼度。預覽可暫時切換版型，按「設為預設版型」才會改正式發布設定。天氣資料為選用功能，從 Open-Meteo 取得目前天氣、溼度與當日高低溫並快取 30 分鐘；外部服務失敗時照片仍正常發布。室內資料來自 PhotoPainter 裝置狀態回報；沒有感測值時畫面會明確顯示尚無回報。
+八種版型為全版照片、明信片、照片＋日期地點、純雙照片、雙照片各自一句話、智慧自適應回憶、月曆相框、天氣＋室內溫溼度；後兩種只支援直向。預覽可暫時切換版型，按「設為預設版型」才會改正式發布設定。天氣資料為選用功能，從 Open-Meteo 取得目前天氣、溼度與當日高低溫並快取 30 分鐘；外部服務失敗時照片仍正常發布。室內資料來自 PhotoPainter 裝置狀態回報；沒有感測值時畫面會明確顯示尚無回報。
 
 ## 歷年今日選片
 
-預設 `history_today` 不是單純挑最高分：依 `general.timezone` 的今天，先找「月、日相同且年份早於今年」的照片；不足時在預設前後 7 日內依日期距離補足，再依綜合排序回退。可把回退改成只接受鄰近日、直接採排名或完全不補圖，也可切換 `top_ranked`。手動指定照片發布時永遠採管理員選擇，不受自動選片規則限制。
+預設 `history_today` 不是單純挑最高分：依 `general.timezone` 的今天，先找「月、日相同且年份早於今年」的照片；不足時在預設前後 7 日內依日期距離補足，再依綜合排序回退。可把回退改成只接受鄰近日、直接採排名或完全不補圖，也可切換 `top_ranked`。手動指定不使用自動排名，但仍須符合 active／eligible、Library、原始檔、隱私與當前執行模式的來源資格。
 
 ## 本機預篩選與 ExifTool 邊界
 
@@ -149,7 +153,7 @@ ExifTool 能提供 MIME、相機、軟體、拍攝時間與 GPS 等中繼資料�
 
 `display_prepare` 支援且只支援 `display_times`、`lead_minutes`、`daily_count`、`device_ids`、`candidate_years`、`prefetch_count`、`ai_fallback`、`render_fallback`。未知欄位不會被靜默忽略。`device_ids` 解析為實際啟用裝置的 Profile；`daily_count × prefetch_count` 決定候選數量；年份會直接限制 SQL 候選。
 
-人工排除、自動排除、Missing、deleted、路徑逃逸、原始檔缺失或沒有最新分析的照片均不能正式發布。管理員明確指定這類照片會收到 `RENDER-009`，系統不會換成另一張照片。
+人工排除、自動排除、Missing、deleted、路徑逃逸、原始檔缺失的照片均不能正式發布；`automatic_ai` 另要求有效分析，允許本機來源的模式可使用已完成 Scanner 特徵的照片。管理員明確指定這類照片會收到 `RENDER-009`，系統不會換成另一張照片。
 
 ## PhotoPainter 跨日操作檢查
 
