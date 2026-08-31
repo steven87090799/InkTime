@@ -58,6 +58,24 @@ def _filename_tokens(relative_path: str) -> set[str]:
     return {token for token in _TOKEN_RE.split(stem) if token}
 
 
+def is_confirmed_screenshot(row: Mapping[str, Any]) -> bool:
+    """Return true only for explicit, high-confidence screenshot evidence.
+
+    This predicate is also used at the final AI send boundary.  It deliberately
+    excludes heuristic-only screen dimensions so an ordinary camera photo is
+    never blocked solely because it happens to share a phone aspect ratio.
+    """
+    relative_path = str(_value(row, "relative_path", ""))
+    filename = Path(relative_path).name.casefold()
+    software = _exif_software(row)
+    score = float(_value(row, "screenshot_likelihood", 0.0) or 0.0)
+    return (
+        any(word in filename for word in _SCREENSHOT_WORDS)
+        or any(word in software for word in _SCREENSHOT_WORDS)
+        or score >= 0.95
+    )
+
+
 def local_candidate_score(row: Mapping[str, Any], *, evaluation: Mapping[str, Any] | None = None) -> float:
     """One shared technical ranking score for scanner and analysis selection."""
     blur = max(0.0, float(_value(row, "blur_score", 0.0) or 0.0))
@@ -91,7 +109,6 @@ def evaluate_local_quality(
     fmt = str(_value(row, "format", "")).casefold()
     camera = bool(str(_value(row, "camera_make", "")).strip() or str(_value(row, "camera_model", "")).strip())
     software = _exif_software(row)
-    filename = Path(relative_path).name.casefold()
     screenshot_score = float(_value(row, "screenshot_likelihood", 0.0) or 0.0)
     blur_raw = _value(row, "blur_score")
     contrast_raw = _value(row, "contrast")
@@ -103,14 +120,7 @@ def evaluate_local_quality(
     under = float(under_raw or 0.0)
     file_size_raw = _value(row, "file_size")
     file_size = int(file_size_raw or 0)
-    strong_screen = (
-        any(word in filename for word in _SCREENSHOT_WORDS)
-        or any(word in software for word in _SCREENSHOT_WORDS)
-        # The preprocessor records explicit filename/software evidence as a
-        # near-certain probability.  Keep that evidence effective after a file
-        # is renamed or moved to a path without the original screenshot token.
-        or screenshot_score >= 0.95
-    )
+    strong_screen = is_confirmed_screenshot(row)
     screen_dimensions = (width, height) in {(1080, 1920), (1920, 1080), (1170, 2532), (2532, 1170)}
     screen_ratio = bool(width and height and abs(max(width, height) / min(width, height) - 16 / 9) < 0.035)
     independent = [
@@ -182,7 +192,7 @@ def evaluate_local_quality(
     excluded_reasons: list[str] = []
     if low_quality_enabled and checks["short_edge_under_240"]:
         excluded_reasons.append("resolution_too_low")
-    if screenshots_enabled and (checks["screenshot_strong"] or checks["screenshot_mixed_signal"]):
+    if checks["screenshot_strong"] or (screenshots_enabled and checks["screenshot_mixed_signal"]):
         excluded_reasons.append("screenshot")
     if low_quality_enabled and checks["document_token_with_evidence"]:
         excluded_reasons.append("document_or_receipt")
@@ -200,7 +210,9 @@ def evaluate_local_quality(
         if low_quality_enabled and checks[key]
     ]
     decision = (
-        "disabled"
+        "auto_excluded"
+        if checks["screenshot_strong"]
+        else "disabled"
         if not enabled
         else "protected"
         if protected

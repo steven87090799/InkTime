@@ -55,13 +55,16 @@ def test_activity_is_bounded_unifies_sources_and_redacts(client, app):
     assert "setInterval" not in body
     assert "cursor=''" in body
     assert "next_cursor" in body
+    assert 'aria-label="顯示的警告等級"' in body
+    assert 'data-severity="CRITICAL"' in body
+    assert "技術詳細資料" in body
     assert "if(paused||document.hidden||!autoRefresh.checked)return" in body
     assert "if(paused){stopPoll();return;}" in body
     auto_refresh_start = body.index("if(!autoRefresh.checked){")
     auto_refresh_end = body.index("}", auto_refresh_start)
     auto_refresh_block = body[auto_refresh_start:auto_refresh_end]
     assert "stopPoll();" in auto_refresh_block
-    assert "state.textContent='輪詢已暫停'" in auto_refresh_block
+    assert "state.textContent='自動更新已關閉'" in auto_refresh_block
     assert "return;" in auto_refresh_block
     assert auto_refresh_block.index("stopPoll();") < auto_refresh_block.index("state.textContent")
     assert auto_refresh_block.index("state.textContent") < auto_refresh_block.index("return;")

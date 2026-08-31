@@ -128,6 +128,42 @@ def test_lightweight_observability_tick_leaves_platform_diagnostics_to_platform_
     assert len(platform_calls) == 1
 
 
+def test_diagnostics_excludes_stopped_jobs_from_runnable_queue(tmp_path):
+    database = Database(tmp_path / "db.sqlite")
+    migrate(database)
+    settings = SettingsRepository(database)
+    settings.ensure_defaults()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    thumbnail_dir = tmp_path / "thumbnails"
+    thumbnail_dir.mkdir()
+    now = datetime.now(timezone.utc).isoformat()
+    with database.session() as connection:
+        connection.execute(
+            "INSERT INTO jobs(id,kind,name,status,strategy,settings_json,created_at,heartbeat_at) VALUES ('stopped','analysis','舊工作','budget_exceeded','single','{}',?,?)",
+            (now, now),
+        )
+        connection.execute(
+            "INSERT INTO job_items(id,job_id,status,stage,available_at) VALUES ('stopped-item','stopped','pending','queued',?)",
+            (now,),
+        )
+        connection.execute(
+            "INSERT INTO jobs(id,kind,name,status,strategy,settings_json,created_at,heartbeat_at) VALUES ('active','analysis','執行中','running','single','{}',?,?)",
+            (now, now),
+        )
+        connection.execute(
+            "INSERT INTO job_items(id,job_id,status,stage,available_at) VALUES ('active-item','active','pending','queued',?)",
+            (now,),
+        )
+
+    snapshot = DiagnosticsService(
+        database, data_dir, thumbnail_dir, settings_repository=settings
+    ).snapshot()
+
+    assert snapshot["queue_length"] == 1
+    assert snapshot["blocked_queue_length"] == 1
+
+
 def test_debug_is_off_by_default_and_sensitive_values_are_redacted(tmp_path):
     database, settings, service = _service(tmp_path)
     assert settings.get("observability.debug_enabled") is False

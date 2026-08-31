@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% block title %}功能與設定說明大全｜InkTime{% endblock %}
+{% block content %}
+<div class="page-head glossary-page-head">
+  <div>
+    <p class="eyebrow">看得懂再操作</p>
+    <h1>功能與設定說明大全</h1>
+    <p>集中說明每一項設定、英文選項與主要操作按鈕。你可以輸入畫面上看到的任何文字，讀完用途、影響與注意事項，再直接跳回原功能。</p>
+  </div>
+  <a class="secondary" href="/dashboard#setup-overview">查看完整設定進度</a>
+</div>
+
+<section class="glossary-summary" aria-label="說明內容統計">
+  <article><span>系統設定</span><strong>{{ setting_count }}</strong><small>包含目前值、預設值與生效方式</small></article>
+  <article><span>按鈕與操作</span><strong>{{ action_count }}</strong><small>依功能合併相同用途的操作</small></article>
+  <article><span>查詢範圍</span><strong>全部文字</strong><small>中文、英文、技術 Key、用途與風險</small></article>
+</section>
+
+<section class="panel glossary-toolbar" aria-label="說明搜尋與篩選">
+  <div class="panel-head">
+    <div>
+      <p class="eyebrow">不用記名詞</p>
+      <h2>搜尋說明</h2>
+      <p>例如輸入「automatic_ai」、「送入 AI」、「Token」、「裁切」或任何畫面文字。</p>
+    </div>
+    <strong id="glossary-match-count" aria-live="polite">顯示 {{ setting_count + action_count }} / {{ setting_count + action_count }} 項</strong>
+  </div>
+  <div class="glossary-filter-grid">
+    <label class="glossary-search-field">搜尋全部說明
+      <input id="glossary-search" type="search" placeholder="輸入中文、英文、按鈕、設定名稱或技術 Key" autocomplete="off">
+    </label>
+    <label>內容種類
+      <select id="glossary-kind-filter">
+        <option value="">全部內容</option>
+        <option value="setting">設定與選項</option>
+        <option value="action">按鈕與操作</option>
+      </select>
+    </label>
+    <label>功能頁／分類
+      <select id="glossary-category-filter"><option value="">全部分類</option>{% for category in categories %}<option value="{{ category }}">{{ category }}</option>{% endfor %}</select>
+    </label>
+    <button class="secondary" type="button" id="glossary-clear">清除搜尋與篩選</button>
+  </div>
+</section>
+
+<div class="panel glossary-empty" id="glossary-empty" hidden>
+  <h2>找不到符合的說明</h2>
+  <p>請縮短關鍵字，或清除內容種類與分類篩選。也可以直接輸入英文選項或技術 Key。</p>
+</div>
+
+<section class="glossary-results" aria-labelledby="setting-glossary-title" data-glossary-section>
+  <div class="glossary-section-head">
+    <div><p class="eyebrow">目前實際設定結構</p><h2 id="setting-glossary-title">設定與選項</h2></div>
+    <span>秘密值只顯示設定狀態，不顯示內容</span>
+  </div>
+  <div class="glossary-entry-list">
+    {% for entry in setting_entries %}
+    <article class="glossary-entry glossary-setting" id="{{ entry.id }}" data-glossary-entry data-kind="setting" data-category="{{ entry.category }}">
+      <div class="glossary-entry-main">
+        <div class="glossary-entry-title">
+          <div>
+            <p class="glossary-entry-category">{{ entry.category }} · 設定</p>
+            <h3>{{ entry.label }}</h3>
+            <code>{{ entry.key }}</code>
+          </div>
+          <div class="glossary-entry-badges">
+            <span class="status risk-{{ entry.risk }}">{{ entry.risk_label }}</span>
+            <span class="status {{ 'ok' if entry.editable else 'warning' }}">{{ '可調整' if entry.editable else '目前不可調整' }}</span>
+          </div>
+        </div>
+        <p class="glossary-purpose"><strong>這是做什麼：</strong>{{ entry.description }}</p>
+        <dl class="glossary-facts">
+          <div><dt>目前狀態</dt><dd>{{ entry.current }}</dd></div>
+          <div><dt>程式預設</dt><dd>{{ entry.default }}</dd></div>
+          <div><dt>何時生效</dt><dd>{{ entry.scope_label }}</dd></div>
+        </dl>
+        <p><strong>改了會怎樣：</strong>{{ entry.effect }}</p>
+        <p class="glossary-caution"><strong>注意事項：</strong>{{ entry.risk_description }}</p>
+        {% if entry.options %}
+        <details class="glossary-options">
+          <summary>查看 {{ entry.options|length }} 個可選值與差異</summary>
+          <div class="table-wrap"><table><thead><tr><th>畫面名稱</th><th>系統值／英文</th><th>選用後的效果</th></tr></thead><tbody>
+            {% for option in entry.options %}<tr><td><strong>{{ option.label }}</strong></td><td><code>{{ option.value }}</code></td><td>{{ option.effect }}</td></tr>{% endfor %}
+          </tbody></table></div>
+        </details>
+        {% endif %}
+      </div>
+      <a class="secondary glossary-jump" href="{{ entry.href }}">{{ entry.action_label }}</a>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="glossary-results" aria-labelledby="action-glossary-title" data-glossary-section>
+  <div class="glossary-section-head">
+    <div><p class="eyebrow">按之前先看影響</p><h2 id="action-glossary-title">按鈕與操作</h2></div>
+    <span>相同用途的按鈕會合併說明</span>
+  </div>
+  <div class="glossary-entry-list">
+    {% for entry in action_entries %}
+    <article class="glossary-entry glossary-action" id="{{ entry.id }}" data-glossary-entry data-kind="action" data-category="{{ entry.category }}">
+      <div class="glossary-entry-main">
+        <p class="glossary-entry-category">{{ entry.category }} · 按鈕／操作</p>
+        <h3>{{ entry.label }}</h3>
+        <p><strong>用途：</strong>{{ entry.purpose }}</p>
+        <p><strong>操作後的影響：</strong>{{ entry.effect }}</p>
+        <p class="glossary-caution"><strong>注意事項：</strong>{{ entry.caution }}</p>
+      </div>
+      <a class="secondary glossary-jump" href="{{ entry.href }}">前往「{{ entry.category }}」</a>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+
+<script nonce="{{ csp_nonce }}">
+(() => {
+  const search = document.getElementById('glossary-search');
+  const kind = document.getElementById('glossary-kind-filter');
+  const category = document.getElementById('glossary-category-filter');
+  const clear = document.getElementById('glossary-clear');
+  const count = document.getElementById('glossary-match-count');
+  const empty = document.getElementById('glossary-empty');
+  const entries = [...document.querySelectorAll('[data-glossary-entry]')];
+  const sections = [...document.querySelectorAll('[data-glossary-section]')];
+  const normalize = value => String(value || '').normalize('NFKC').toLocaleLowerCase('zh-Hant-TW').replace(/\s+/g, ' ').trim();
+  const params = new URLSearchParams(location.search);
+  search.value = params.get('search') || '';
+  kind.value = params.get('kind') || '';
+  category.value = params.get('category') || '';
+
+  const apply = () => {
+    const query = normalize(search.value);
+    let visible = 0;
+    entries.forEach(entry => {
+      const matches = (!query || normalize(entry.textContent).includes(query))
+        && (!kind.value || entry.dataset.kind === kind.value)
+        && (!category.value || entry.dataset.category === category.value);
+      entry.hidden = !matches;
+      if (matches) visible += 1;
+    });
+    sections.forEach(section => {
+      section.hidden = !section.querySelector('[data-glossary-entry]:not([hidden])');
+    });
+    count.textContent = `顯示 ${visible} / ${entries.length} 項`;
+    empty.hidden = visible !== 0;
+  };
+  [search, kind, category].forEach(control => control.addEventListener(control === search ? 'input' : 'change', apply));
+  clear.addEventListener('click', () => { search.value = ''; kind.value = ''; category.value = ''; apply(); search.focus(); });
+  document.addEventListener('keydown', event => {
+    if (event.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) {
+      event.preventDefault(); search.focus();
+    }
+    if (event.key === 'Escape' && document.activeElement === search) { search.value = ''; apply(); }
+  });
+  apply();
+  if (location.hash) requestAnimationFrame(() => document.querySelector(location.hash)?.scrollIntoView({block: 'start'}));
+})();
+</script>
+{% endblock %}

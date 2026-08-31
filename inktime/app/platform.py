@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from hashlib import sha256
 import logging
+import os
 from pathlib import Path
 import re
 import secrets
 import time
 
-from flask import Flask, flash, g, jsonify, redirect, request, session, url_for
+from flask import Flask, flash, g, jsonify, redirect, render_template, request, session, url_for
 from jinja2 import FileSystemLoader
 from werkzeug.exceptions import HTTPException
 
@@ -40,9 +42,12 @@ from inktime.app.core.logging import (
 from inktime.app.core.errors import ApplicationError
 from inktime.app.core.redirects import safe_local_redirect_target
 from inktime.app.core.runtime_config import RuntimeConfig
+from inktime.app.domain.analysis.traditional_chinese import to_taiwan_traditional
 from inktime.app.repositories.auth import AuthRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.web.access import csrf_token, verify_csrf
+from inktime.app.web.help_content import page_guide_for_endpoint
+from inktime.app.web.error_messages import CATALOG, DEFAULT, error_text, explain_error, plain_message
 
 
 LOGGER = logging.getLogger("platform")
@@ -105,14 +110,33 @@ def configure_web_application(
     ):
         app.register_blueprint(blueprint)
     app.jinja_env.globals["csrf_token"] = csrf_token
+    app.jinja_env.filters["taiwan_traditional"] = to_taiwan_traditional
+    app.jinja_env.globals.update(
+        explain_error=explain_error,
+        error_text=error_text,
+        plain_message=plain_message,
+    )
+    # Static, public explanations contain no runtime state or credentials.
+    # Cache separately so every page does not embed the entire catalogue again.
+    catalog_script = "window.inktimeErrorCatalog=" + app.json.dumps({"entries": CATALOG, "fallback": DEFAULT}) + ";"
+    catalog_etag = sha256(catalog_script.encode("utf-8")).hexdigest()
+
+    @app.get("/ui/error-catalog.js")
+    def error_catalog_script():
+        response = app.response_class(catalog_script, mimetype="application/javascript")
+        response.headers["Cache-Control"] = "public, max-age=0, must-revalidate"
+        response.set_etag(catalog_etag)
+        return response.make_conditional(request)
 
     @app.get("/")
     def modern_root():
         return redirect(url_for("dashboard.dashboard"))
 
     @app.context_processor
-    def critical_alerts():
+    def shared_template_context():
         database = container.extensions["inktime_database"]
+        database_ready = False
+        migration_version = None
         try:
             with database.session() as connection:
                 rows = connection.execute(
@@ -120,14 +144,32 @@ def configure_web_application(
                     "WHERE resolved_at IS NULL AND lower(severity)='critical' "
                     "ORDER BY last_seen_at DESC LIMIT 3"
                 ).fetchall()
+                migration_row = connection.execute(
+                    "SELECT MAX(version) FROM schema_migrations"
+                ).fetchone()
+                migration_version = int(migration_row[0] or 0) if migration_row else 0
+                database_ready = True
         except Exception:
             rows = []
         return {
             "critical_alerts": rows,
             "csp_nonce": getattr(g, "csp_nonce", ""),
+            "page_guide": (
+                None if request.endpoint == "auth.login" else page_guide_for_endpoint(request.endpoint)
+            ),
+            "login_system_info": {
+                "status": "可登入" if database_ready else "部分異常",
+                "status_ok": database_ready,
+                "version": str(app.config["INKTIME_VERSION"]),
+                "revision": os.environ.get("INKTIME_GIT_REVISION", "開發版本")[:16],
+                "runtime": "Docker 容器" if Path("/.dockerenv").exists() else "原生程序",
+                "database": "已連線" if database_ready else "無法連線",
+                "schema": str(migration_version) if migration_version is not None else "未知",
+            },
         }
 
     public_endpoints = {
+        "error_catalog_script",
         "auth.setup",
         "auth.login",
         "health.live",
@@ -205,6 +247,29 @@ def configure_web_application(
                 return {"error_code": "AUTH-003", "message": "請先登入"}, 401
             return redirect(url_for("auth.login", next=request.full_path))
         return None
+
+    @app.after_request
+    def explain_api_failure(response):
+        # Additive error-only metadata. Do not traverse/mutate successful device
+        # manifests, Batch payloads, nested historical records or raw AI JSON.
+        if (
+            response.status_code >= 400
+            and response.is_json
+            and not response.is_streamed
+            and not request.path.startswith(("/api/device/", "/health/"))
+        ):
+            body = response.get_json(silent=True)
+            if isinstance(body, dict):
+                nested = body.get("error") if isinstance(body.get("error"), dict) else {}
+                body["user_error"] = explain_error(
+                    body.get("error_code") or nested.get("code"),
+                    body.get("message") or nested.get("message") or (
+                        body.get("error") if isinstance(body.get("error"), str) else ""
+                    ),
+                    response.status_code,
+                )
+                response.set_data(app.json.dumps(body))
+        return response
 
     @app.after_request
     def security_headers(response):
@@ -310,12 +375,20 @@ def configure_web_application(
             session.pop("csrf_token", None)
             flash("安全驗證已更新，請重新送出表單。", "error")
             return redirect(request.path, code=303)
-        if not request.path.startswith("/api/"):
-            return exc
         description = str(exc.description)
         first, separator, remainder = description.partition(" ")
-        error_code = first if "-" in first else "HTTP-{:03d}".format(exc.code or 500)
-        message = remainder if separator else description
+        has_code = bool(re.fullmatch(r"[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+", first)) or first in CATALOG
+        error_code = first if has_code else "HTTP-{:03d}".format(exc.code or 500)
+        message = remainder if has_code and separator else description
+        if not request.path.startswith(("/api/", "/health/")):
+            response = exc.get_response()
+            response.set_data(render_template(
+                "error.html",
+                error=explain_error(error_code, message, exc.code),
+                status_code=exc.code or 500,
+            ))
+            response.mimetype = "text/html"
+            return response
         response = jsonify({"error_code": error_code, "message": message})
         response.status_code = exc.code or 500
         retry_after = exc.get_response().headers.get("Retry-After")
@@ -327,7 +400,9 @@ def configure_web_application(
     def application_error(exc: ApplicationError):
         if request.path.startswith("/api/"):
             return exc.response_body(), exc.http_status
-        flash(exc.public_message, "error")
+        # Flask's message contract is text. Carry the stable identifier in the
+        # category so the template can explain it without exposing it as copy.
+        flash(exc.public_message, f"error:{exc.code}")
         target = safe_local_redirect_target(
             request.referrer,
             allowed_host=request.host,

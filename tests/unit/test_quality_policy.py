@@ -55,6 +55,7 @@ def test_quality_policy_v5_preserves_explicit_screenshot_evidence_and_rejects_ob
     screenshot = evaluate_local_quality(renamed_screenshot)
     assert screenshot["decision"] == "auto_excluded"
     assert screenshot["primary_reason"] == "screenshot"
+    assert evaluate_local_quality({**renamed_screenshot, "favorite": True})["decision"] == "auto_excluded"
     assert local_candidate_score(renamed_screenshot, evaluation=screenshot) == 0
 
     observed_blurry_frame = {

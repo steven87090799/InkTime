@@ -84,6 +84,12 @@
     </section>
   </main>
 
+  <aside class="receiver-guide" aria-labelledby="receiver-guide-title">
+    <div><p>小提示與使用說明</p><h2 id="receiver-guide-title">虛擬墨水屏怎麼使用</h2><span>這是唯讀接收器，用來驗證正式 Release 的 Manifest、BIN、SHA-256 與色彩分布；它不會掃描照片、呼叫 AI 或觸發發布。</span></div>
+    <div><h3>使用步驟</h3><ol><li>先保持本頁開啟。</li><li>從「照片掃描與維護」執行「掃描並送到虛擬墨水屏」。</li><li>等待狀態變成已驗證，再切換畫面檢查內容。</li></ol></div>
+    <div><h3>相關建議</h3><ul><li>這裡通過只代表瀏覽器接收與解碼成功，不代表實體電子紙顏色已驗收。</li><li>若長時間停在等待發布，請到工作詳情與執行監控查看背景工作。</li></ul></div>
+  </aside>
+
   <script nonce="{{ csp_nonce }}" id="receiver-config" type="application/json">{{ {
     "manifestUrl": manifest_url,
     "pollSeconds": poll_seconds,
@@ -93,6 +99,8 @@
       "pixelFormat": profile.pixel_format
     }
   }|tojson }}</script>
+  <script src="{{ url_for('error_catalog_script') }}"></script>
+  <script src="{{ url_for('static', filename='error-messages.js') }}"></script>
   <script src="{{ url_for('static', filename='virtual-display.js') }}"></script>
 </body>
 </html>

@@ -1,20 +1,36 @@
 {% extends "base.html" %}
+{% from "components/error_notice.html" import error_notice with context %}
 {% block title %}儀表板｜InkTime{% endblock %}
 {% block content %}
-<div class="page-head"><div><p class="eyebrow">系統總覽</p><h1>儀表板</h1></div><span class="status {{ 'error' if system_status == '嚴重故障' else 'warn' if system_status != '正常' else 'ok' }}">{{ system_status }}</span></div>
-<section class="metrics">
-  <article><span>照片總數</span><strong>{{ counts.photos }}</strong></article>
-  <article><span>已分析</span><strong>{{ counts.analyzed }}</strong></article>
-  <article><span>分析失敗</span><strong>{{ counts.failed }}</strong></article>
-  <article><span>重複照片</span><strong>{{ counts.duplicates }}</strong></article>
-  <article><span>執行中工作</span><strong>{{ counts.running_jobs }}</strong><a href="/activity">查看即時監控</a></article>
-  <article><span>今日 Token</span><strong>{{ counts.today_tokens }}</strong></article>
-  <article><span>本月成本</span><strong>US$ {{ '%.4f'|format(counts.month_cost) }}</strong></article>
-  <article><span>本月未定價 API 預留成本</span><strong>US$ {{ '%.4f'|format(counts.month_unknown_reserve) }}</strong></article>
-  <article><span>未解決警告／錯誤／嚴重</span><strong>{{ issues.get('warning', 0) }}/{{ issues.get('error', 0) }}/{{ issues.get('critical', 0) }}</strong></article>
+<div class="page-head dashboard-page-head"><div><p class="eyebrow">系統總覽</p><h1>儀表板</h1></div><div class="dashboard-health"><a class="dashboard-health-badge health-{{ system_status.level }}" href="/errors" aria-label="{{ system_status.rank }}，系統狀態{{ system_status.label }}{% if system_status.count %}，{{ system_status.count }} 件{% endif %}" data-help="{{ system_status.description }} 點此查看未解決事件與處理狀態。"><span class="dashboard-health-dot" aria-hidden="true"></span><small>{{ system_status.rank }}</small><strong>{{ system_status.label }}</strong>{% if system_status.count %}<b>{{ system_status.count }} 件</b>{% endif %}</a></div></div>
+<section class="dashboard-summary" aria-label="系統摘要">
+  <article class="dashboard-summary-group">
+    <div class="dashboard-summary-head"><div><p>照片資料</p><h2>照片庫</h2></div><a href="/photos">查看照片</a></div>
+    <dl class="dashboard-summary-list">
+      <div><dt>照片總數</dt><dd>{{ counts.photos }}</dd></div>
+      <div><dt>已完成分析</dt><dd>{{ counts.analyzed }}</dd></div>
+      <div><dt>重複照片</dt><dd>{{ counts.duplicates }}</dd></div>
+    </dl>
+  </article>
+  <article class="dashboard-summary-group">
+    <div class="dashboard-summary-head"><div><p>分析狀態</p><h2>分析運行</h2></div><a href="/activity">即時監控</a></div>
+    <dl class="dashboard-summary-list">
+      <div><dt>執行中工作</dt><dd>{{ counts.running_jobs }}</dd></div>
+      <div class="{{ 'has-alert' if counts.failed else '' }}"><dt>分析失敗</dt><dd>{{ counts.failed }}</dd></div>
+      <div><dt>今日 Token</dt><dd>{{ counts.today_tokens }}</dd></div>
+    </dl>
+  </article>
+  <article class="dashboard-summary-group {{ 'has-alert' if issues.get('critical', 0) or issues.get('error', 0) else '' }}">
+    <div class="dashboard-summary-head"><div><p>費用與異常</p><h2>成本與告警</h2></div><a href="/costs">成本明細</a></div>
+    <dl class="dashboard-summary-list">
+      <div><dt>本月成本</dt><dd>US$ {{ '%.4f'|format(counts.month_cost) }}</dd></div>
+      <div class="{{ 'has-alert' if not counts.cost_complete else '' }}"><dt>未定價 API 預留</dt><dd>US$ {{ '%.4f'|format(counts.month_unknown_reserve) }}</dd></div>
+      <div><dt>未解決事件<small>警告／錯誤／嚴重</small></dt><dd>{{ issues.get('warning', 0) }}/{{ issues.get('error', 0) }}/{{ issues.get('critical', 0) }}</dd></div>
+    </dl>
+  </article>
 </section>
 {% if not counts.cost_complete %}<p class="notice warning">本月有 {{ counts.month_unknown_count }} 筆具備可計費證據但尚未完成定價的 API 使用量；上方成本未將其冒充為 US$ 0，預留金額按目前設定計算。</p>{% endif %}
-<section class="panel"><div class="panel-head"><h2>功能分類</h2><a href="/settings">所有設定</a></div>
+<section class="panel"><div class="panel-head"><h2>功能分類</h2><div class="dashboard-panel-links"><a href="#setup-overview">完整設定導覽</a><a href="/settings">所有設定</a></div></div>
   <div class="table-wrap"><table><thead><tr><th>分類</th><th>放置的功能</th></tr></thead><tbody>
     <tr><th>照片與分析</th><td class="category-link-list"><a href="/photos">照片庫</a><a href="/jobs">分析工作</a><a href="/providers">模型服務</a><a href="/scoring">評分規則</a><a href="/costs">成本</a></td></tr>
     <tr><th>墨水屏輸出</th><td class="category-link-list"><a href="/simulator">模擬器</a><a href="/virtual-display">虛擬屏</a><a href="/rendering">渲染與發布</a></td></tr>
@@ -23,8 +39,32 @@
   </tbody></table></div>
 </section>
 <section class="panel"><div class="panel-head"><h2>最近錯誤</h2><a href="/errors">查看錯誤中心</a></div>
-  {% if recent_errors %}<div class="table-wrap"><table><thead><tr><th>錯誤碼</th><th>內容</th><th>次數</th><th>最後發生</th></tr></thead><tbody>
-  {% for error in recent_errors %}<tr><td><code>{{ error.error_code }}</code></td><td>{{ error.message }}</td><td>{{ error.occurrences }}</td><td>{{ error.last_seen_at }}</td></tr>{% endfor %}
+  {% if recent_errors %}<div class="table-wrap"><table><thead><tr><th>發生什麼事／如何處理</th><th>次數</th><th>最後發生</th></tr></thead><tbody>
+  {% for error in recent_errors %}<tr><td>{{ error_notice(error.error_code,error.message) }}</td><td>{{ error.occurrences }}</td><td>{{ error.last_seen_at }}</td></tr>{% endfor %}
   </tbody></table></div>{% else %}<p class="empty">目前沒有未解決錯誤。</p>{% endif %}
+</section>
+<section class="panel setup-overview" id="setup-overview">
+  <div class="setup-overview-head">
+    <div><p class="eyebrow">一頁看懂目前設定</p><h2>完整設定導覽</h2><p>從照片來源到備份依序檢查。打勾表示已完成設定；黃色項目代表已設定，但仍有狀態需要注意。</p></div>
+    <div class="setup-progress-summary" aria-label="已完成 {{ setup.completed }}／{{ setup.total }} 項">
+      <strong>{{ setup.completed }} / {{ setup.total }}</strong><span>已設定</span>
+    </div>
+  </div>
+  <div class="setup-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="{{ setup.total }}" aria-valuenow="{{ setup.completed }}"><span style="width: {{ setup.percent }}%"></span></div>
+  <p class="setup-overview-status">{% if setup.missing %}還有 {{ setup.missing }} 項尚未完成。{% else %}所有主要設定都已填妥。{% endif %}{% if setup.attention %}另有 {{ setup.attention }} 項已設定但需要注意。{% endif %}</p>
+  <div class="setup-runtime-strip"><span>環境 <strong>{{ setup.environment }}</strong></span><span>照片 <code>{{ setup.photo_dir }}</code></span><span>資料 <code>{{ setup.data_dir }}</code></span><span>時區 <strong>{{ setup.timezone }}</strong></span></div>
+  <ol class="setup-step-list">
+    {% for step in setup.steps %}
+    <li class="setup-step {{ 'is-attention' if step.attention else 'is-complete' if step.complete else 'is-missing' }}">
+      <div class="setup-step-marker" aria-hidden="true">{% if step.complete %}✓{% else %}{{ step.number }}{% endif %}</div>
+      <div class="setup-step-body">
+        <div class="setup-step-title"><h3>{{ step.number }}. {{ step.title }}</h3><span>{{ '必要設定' if step.required else '建議設定' }}</span><b>{% if step.attention %}已設定・需注意{% elif step.complete %}已完成{% else %}尚未完成{% endif %}</b></div>
+        <p class="setup-step-current">{{ step.current }}</p>
+        <p>{{ step.detail }}</p>
+      </div>
+      <a class="secondary setup-step-action" href="{{ step.action_url }}">{{ step.action_label }}</a>
+    </li>
+    {% endfor %}
+  </ol>
 </section>
 {% endblock %}

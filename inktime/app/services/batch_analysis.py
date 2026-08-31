@@ -32,6 +32,7 @@ from inktime.app.domain.analysis import (
     validate_analysis_result,
 )
 from inktime.app.domain.analysis.plan import SCHEMA_VERSION, provider_prompt_contract_sha256
+from inktime.app.domain.photos.quality_policy import is_confirmed_screenshot
 from inktime.app.services.analysis import CAPTION_VARIANTS_TOKEN_CAP, FULL_ANALYSIS_TOKEN_CAP
 from inktime.app.providers.base import Usage
 from inktime.app.providers.openai_compatible import calculate_usage_cost
@@ -349,7 +350,7 @@ class BatchAnalysisService:
         if scope == "manual_selection":
             requested = list(dict.fromkeys(str(value) for value in (photo_ids or [])))
             if not requested:
-                return [], {"never_upload_excluded": 0, "cache_hits": 0, "sha_duplicates": 0}, None
+                return [], {"never_upload_excluded": 0, "confirmed_screenshot_excluded": 0, "cache_hits": 0, "sha_duplicates": 0}, None
             marks = ",".join("?" for _ in requested)
             query = query.replace(
                 "ORDER BY COALESCE(p.local_candidate_score,-1) DESC,\n                     COALESCE(p.captured_at,p.created_at),p.id",
@@ -367,7 +368,11 @@ class BatchAnalysisService:
                 ).fetchone()[0]
             )
         safe_rows: list[dict[str, Any]] = []
+        confirmed_screenshot_excluded = 0
         for row in rows:
+            if is_confirmed_screenshot(row):
+                confirmed_screenshot_excluded += 1
+                continue
             try:
                 source = safe_join(Path(str(row["root_path"])), str(row["relative_path"]))
             except (OSError, ValueError):
@@ -439,6 +444,7 @@ class BatchAnalysisService:
             candidates,
             {
                 "never_upload_excluded": never_upload,
+                "confirmed_screenshot_excluded": confirmed_screenshot_excluded,
                 "cache_hits": cache_hits,
                 "sha_duplicates": sha_duplicates,
             },
