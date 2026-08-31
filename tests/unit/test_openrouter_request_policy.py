@@ -61,11 +61,13 @@ def test_openrouter_analysis_and_repair_share_privacy_routing_usage_and_sticky_p
         assert body["provider"]["require_parameters"] is True
         assert body["provider"]["allow_fallbacks"] is False
         assert body["usage"] == {"include": True}
+        assert "uniqueItems" not in json.dumps(body["response_format"], ensure_ascii=False)
     assert analysis["reasoning"] == {"effort": "low"}
-    assert "reasoning" not in repair
+    assert repair["reasoning"] == {"effort": "none"}
     assert repair["messages"][1]["content"]
     assert "image_url" not in json.dumps(repair, ensure_ascii=False)
     assert "image_path" not in json.dumps(repair, ensure_ascii=False)
+    assert "uniqueItems" not in repair["messages"][1]["content"]
     assert provider.last_request_metrics["image_bytes"] == 0
     assert analysis["session_id"] == repair["session_id"]
 
@@ -114,6 +116,7 @@ def test_openai_compatible_request_does_not_receive_openrouter_provider_object(t
     )
     assert "provider" not in body
     assert "usage" not in body
+    assert "uniqueItems" in json.dumps(body["response_format"], ensure_ascii=False)
 
 
 def test_unknown_openrouter_option_is_rejected():
@@ -169,4 +172,45 @@ def test_openrouter_400_is_not_retried_and_preserves_bounded_safe_error_details(
     assert "QUJDREVGRw" not in str(error.response_info)
     assert error.call_trace is not None
     assert error.call_trace.http_status == 400
+    provider.close()
+
+
+def test_openrouter_no_compatible_endpoint_404_is_retryable():
+    class Response:
+        status_code = 404
+        headers = {}
+        text = json.dumps(
+            {
+                "error": {
+                    "code": 404,
+                    "message": "No endpoints found that can handle the requested parameters.",
+                }
+            }
+        )
+
+        def json(self):
+            return json.loads(self.text)
+
+    class Session:
+        def post(self, _url, **_kwargs):
+            return Response()
+
+        def close(self):
+            return None
+
+    provider = OpenAICompatibleProvider(
+        name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="redacted-test-key",
+        kind="openrouter",
+        session=Session(),
+    )
+    with pytest.raises(ProviderHTTPError) as caught:
+        provider._post_completion({"model": "openrouter/free", "messages": []})
+
+    error = caught.value
+    assert error.code == "VLM-005"
+    assert error.http_status == 404
+    assert error.response_info["provider_error_code"] == "404"
+    assert "No endpoints found" in error.response_info["provider_error_message"]
     provider.close()

@@ -22,6 +22,7 @@ from inktime.app.domain.photos.preprocessing import LocalPhotoFeatures
 from inktime.app.domain.photos.quality_policy import (
     FEATURE_VERSION,
     evaluate_local_quality,
+    is_confirmed_screenshot,
     local_candidate_score,
 )
 from inktime.app.domain.photos.dates import materialized_capture_fields, parse_photo_datetime
@@ -34,6 +35,21 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SCORE_POPULATION_TTL_SECONDS = 45.0
 _SCORE_POPULATION_LOCK = Lock()
 _SCORE_POPULATION_CACHE: tuple[str, float, tuple[float, ...]] | None = None
+
+
+def preferred_analysis_order_sql(alias: str = "") -> str:
+    """Prefer persisted model judgement over a newer local-only fallback.
+
+    Scanner and policy runs are allowed to append local evidence.  Those rows
+    remain useful history, but must not hide a previously completed Vision
+    result in photo-library read models.
+    """
+
+    prefix = f"{alias}." if alias else ""
+    return (
+        f"CASE WHEN COALESCE({prefix}provider,'local')='local' THEN 1 ELSE 0 END,"
+        f"{prefix}created_at DESC,{prefix}id DESC"
+    )
 
 
 def invalidate_score_population_cache() -> None:
@@ -1175,7 +1191,8 @@ class PhotoRepository:
         where = " AND ".join(clauses)
         latest_analysis = (
             "a.id=(SELECT latest.id FROM photo_analysis latest "
-            "WHERE latest.photo_id=p.id ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1)"
+            "WHERE latest.photo_id=p.id ORDER BY "
+            f"{preferred_analysis_order_sql('latest')} LIMIT 1)"
         )
         with self.database.session() as connection:
             total = int(
@@ -1454,7 +1471,12 @@ class PhotoRepository:
         origin: str = "",
         limit: int = 200,
     ) -> list:
-        clauses = ["p.exclusion_status != 'eligible'"]
+        # ``manually_restored`` is an audit state, not an exclusion.  Use the
+        # effective eligibility plus review states so a successful restore
+        # actually leaves this management page.
+        clauses = [
+            "(p.eligible=0 OR p.exclusion_status IN ('auto_excluded','manually_excluded','pending_review'))"
+        ]
         parameters: list = []
         if reason:
             clauses.append("p.reject_reason=?")
@@ -1473,7 +1495,7 @@ class PhotoRepository:
         elif kind == "duplicate":
             clauses.append("p.duplicate_group_id IS NOT NULL")
         if origin == "manual":
-            clauses.append("p.exclusion_status IN ('manually_excluded','manually_restored')")
+            clauses.append("p.exclusion_status='manually_excluded'")
         elif origin == "auto":
             clauses.append("p.exclusion_status='auto_excluded'")
         where = " AND ".join(clauses)
@@ -1483,7 +1505,8 @@ class PhotoRepository:
                 SELECT p.*,l.name AS library_name,a.provider,a.model,a.created_at AS analyzed_at
                 FROM photos p JOIN libraries l ON l.id=p.library_id
                 LEFT JOIN photo_analysis a ON a.id=(
-                    SELECT id FROM photo_analysis WHERE photo_id=p.id ORDER BY created_at DESC,id DESC LIMIT 1
+                    SELECT id FROM photo_analysis WHERE photo_id=p.id
+                    ORDER BY {preferred_analysis_order_sql()} LIMIT 1
                 )
                 WHERE {where}
                 ORDER BY p.rejected_at DESC,p.updated_at DESC,p.id DESC LIMIT ?
@@ -1508,6 +1531,20 @@ class PhotoRepository:
                 "SELECT COUNT(*) FROM photos WHERE lifecycle_status='active' AND eligible=1"
             ).fetchone()
         return int(row[0] or 0)
+
+    def confirmed_screenshot_ids(self, photo_ids: Sequence[str]) -> set[str]:
+        """Return explicit screenshot ids without reading image bytes."""
+        requested = list(dict.fromkeys(str(photo_id) for photo_id in photo_ids))
+        blocked: set[str] = set()
+        with self.database.session() as connection:
+            for chunk in _chunks(requested, 400):
+                placeholders = ",".join("?" for _ in chunk)
+                rows = connection.execute(
+                    f"SELECT id,relative_path,exif_json,screenshot_likelihood FROM photos WHERE id IN ({placeholders})",  # noqa: S608
+                    tuple(chunk),
+                ).fetchall()
+                blocked.update(str(row["id"]) for row in rows if is_confirmed_screenshot(row))
+        return blocked
 
     def active_hashes_for(self, cache_hashes: Sequence[str]) -> set[str]:
         """Look up only cache-visible SHA values; never materialize the photo library."""
@@ -1832,7 +1869,7 @@ class PhotoRepository:
                 if cursor.rowcount != 1:
                     raise KeyError(photo_id)
                 latest = connection.execute(
-                    "SELECT id FROM photo_analysis WHERE photo_id=? ORDER BY created_at DESC LIMIT 1",
+                    f"SELECT id FROM photo_analysis WHERE photo_id=? ORDER BY {preferred_analysis_order_sql()} LIMIT 1",
                     (photo_id,),
                 ).fetchone()
                 if latest:
@@ -2028,7 +2065,7 @@ class PhotoRepository:
                 connection.execute(
                     f"""
                 SELECT COUNT(*) FROM photos p
-                LEFT JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id ORDER BY created_at DESC LIMIT 1)
+                LEFT JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id ORDER BY {preferred_analysis_order_sql()} LIMIT 1)
                 WHERE {where}
                 """,
                     parameters,
@@ -2039,7 +2076,7 @@ class PhotoRepository:
                 SELECT p.*,l.name AS library_name,a.caption,a.types_json,a.memory_score,a.beauty_score,a.ranking_score,a.side_caption,
                        a.provider,a.model,a.raw_json,a.created_at AS analyzed_at
                 FROM photos p JOIN libraries l ON l.id=p.library_id
-                LEFT JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id ORDER BY created_at DESC LIMIT 1)
+                LEFT JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id ORDER BY {preferred_analysis_order_sql()} LIMIT 1)
                 WHERE {where} ORDER BY COALESCE(p.captured_at,p.created_at) DESC,p.id LIMIT ? OFFSET ?
                 """,
                 (*parameters, limit, offset),
@@ -2060,14 +2097,14 @@ class PhotoRepository:
                 return list(_SCORE_POPULATION_CACHE[2])
             with self.database.session() as connection:
                 rows = connection.execute(
-                    """
+                    f"""
                     SELECT a.ranking_score
                     FROM photo_analysis a
                     WHERE a.ranking_score IS NOT NULL
                       AND a.id=(
                         SELECT latest.id FROM photo_analysis latest
                         WHERE latest.photo_id=a.photo_id
-                        ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1
+                        ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1
                       )
                     """
                 ).fetchall()

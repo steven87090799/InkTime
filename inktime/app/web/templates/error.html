@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% from "components/error_notice.html" import error_notice with context %}
+{% block title %}操作未完成｜InkTime{% endblock %}
+{% block content %}
+<div class="page-head"><div><p class="eyebrow">需要處理</p><h1>操作未完成</h1></div></div>
+<section class="panel" role="alert">{{ error_notice(error.code, error.technical_message, status_code) }}</section>
+<p><a href="/dashboard">返回總覽</a> · <a href="/login">重新登入</a></p>
+{% endblock %}

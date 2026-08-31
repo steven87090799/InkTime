@@ -40,6 +40,26 @@ def test_strict_schema_accepts_expected_result():
     assert result["memory_score"] == 82
 
 
+def test_model_text_is_forced_to_taiwan_traditional_before_persistence():
+    candidate = valid_result(
+        caption="他们在复古小镇看着远处风景。",
+        side_caption="他们看着风景",
+        reason="画面里的年轻人关系亲近",
+        details={
+            "scene": "复古小镇街头",
+            "short_description": "树影下的年轻人合照",
+        },
+    )
+
+    normalized = validate_analysis_result(candidate)
+
+    assert normalized["caption"] == "他們在復古小鎮看著遠處風景。"
+    assert normalized["side_caption"] == "他們看著風景"
+    assert normalized["reason"] == "畫面裡的年輕人關係親近"
+    assert normalized["details"]["scene"] == "復古小鎮街頭"
+    assert normalized["details"]["short_description"] == "樹影下的年輕人合照"
+
+
 def test_schema_v1_missing_orientation_is_safely_upgraded():
     legacy = valid_result(schema_version=1)
     legacy.pop("visual_orientation")
@@ -171,10 +191,8 @@ def test_caption_schema_and_validator_share_maximum(length, accepted):
         ({"confidence": True}, "confidence"),
         ({"confidence": 2.0}, "confidence"),
         ({"reason_codes": "not-a-list"}, "reason_codes"),
-        ({"reason_codes": ["duplicate", "duplicate"]}, "reason_codes"),
         ({"caption": "short", "side_caption": "too"}, "side_caption"),
         ({"reason": "x" * 101}, "reason"),
-        ({"types": ["人物", "人物"]}, "types"),
         (
             {
                 "details": {
@@ -193,6 +211,45 @@ def test_caption_schema_and_validator_share_maximum(length, accepted):
 def test_schema_v3_rejects_malformed_contract_boundaries(updates, match):
     with pytest.raises(AnalysisValidationError, match=match):
         validate_analysis_result(_v3_result(**updates))
+
+
+def test_set_like_model_arrays_remove_exact_duplicates_before_validation():
+    candidate = _v3_result(
+        types=["人物", "風景", "人物", "日常"],
+        reason_codes=["VISIBLE_PEOPLE", "VISIBLE_PEOPLE"],
+        visual_orientation={
+            "rotation_cw": 0,
+            "confidence": 0.9,
+            "ambiguous": False,
+            "evidence": ["faces_upright", "faces_upright"],
+        },
+    )
+
+    normalized = validate_analysis_result(candidate)
+
+    assert normalized["types"] == ["人物", "風景", "日常"]
+    assert normalized["reason_codes"] == ["VISIBLE_PEOPLE"]
+    assert normalized["visual_orientation"]["evidence"] == ["faces_upright"]
+
+
+def test_schema_v3_canonicalizes_unknown_orientation_without_repair():
+    candidate = _v3_result(
+        visual_orientation={
+            "rotation_cw": None,
+            "confidence": 0.98,
+            "ambiguous": False,
+            "evidence": ["insufficient_visual_cues"],
+        }
+    )
+
+    normalized = validate_analysis_result(candidate)
+
+    assert normalized["visual_orientation"] == {
+        "rotation_cw": None,
+        "confidence": 0.0,
+        "ambiguous": True,
+        "evidence": ["insufficient_visual_cues"],
+    }
 
 
 def test_schema_v3_accepts_grade_container_aliases_and_rejects_invalid_grade():
@@ -223,6 +280,28 @@ def test_schema_v3_accepts_grade_container_aliases_and_rejects_invalid_grade():
         validate_analysis_result(invalid)
 
 
+def test_schema_v3_accepts_nullable_optional_display_grade():
+    candidate = _v3_result(
+        details={
+            "memory_grade": "A",
+            "beauty_grade": "B",
+            "technical_grade": "C",
+            "emotion_grade": "D",
+            "display_suitability_grade": None,
+            "animals": None,
+            "vehicles": None,
+            "landmark_candidates": None,
+            "search_keywords": None,
+            "confidence": 0.8,
+        }
+    )
+
+    normalized = validate_analysis_result(candidate)
+
+    assert normalized["details"]["display_suitability_grade"] is None
+    assert normalized["details"]["search_keywords"] is None
+
+
 @pytest.mark.parametrize("raw", [[], 1, True, None, "[]", "1"])
 def test_analysis_result_top_level_must_be_object(raw):
     with pytest.raises(AnalysisValidationError, match="頂層必須是 JSON Object"):
@@ -238,8 +317,9 @@ def test_analysis_result_top_level_must_be_object(raw):
             "rotation_cw": 0,
             "confidence": 1,
             "ambiguous": False,
-            "evidence": ["faces_upright", "faces_upright"],
+            "evidence": ["faces_upright", "invalid", "invalid"],
         },
+        {"rotation_cw": 0, "confidence": 1, "ambiguous": False, "evidence": ["faces_upright", 1]},
         {"rotation_cw": 0, "confidence": 1, "ambiguous": False, "evidence": ["invalid"]},
         {"rotation_cw": None, "confidence": 0, "ambiguous": False, "evidence": ["insufficient_visual_cues"]},
     ],
@@ -247,6 +327,19 @@ def test_analysis_result_top_level_must_be_object(raw):
 def test_schema_v2_rejects_invalid_visual_orientation(orientation):
     with pytest.raises(AnalysisValidationError):
         validate_analysis_result(valid_result(visual_orientation=orientation))
+
+
+def test_schema_v2_normalizes_duplicate_orientation_evidence_without_changing_input():
+    orientation = {
+        "rotation_cw": 0,
+        "confidence": 1,
+        "ambiguous": False,
+        "evidence": ["faces_upright", "faces_upright"],
+    }
+    normalized = validate_analysis_result(valid_result(visual_orientation=orientation))
+
+    assert normalized["visual_orientation"]["evidence"] == ["faces_upright"]
+    assert orientation["evidence"] == ["faces_upright", "faces_upright"]
 
 
 @pytest.mark.parametrize(

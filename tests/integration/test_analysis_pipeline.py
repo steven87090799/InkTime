@@ -18,7 +18,7 @@ from inktime.app.providers.router import FailoverVisionProvider, ProviderChannel
 from inktime.app.repositories.photos import PhotoRepository
 from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.analysis import PhotoAnalysisService
-from inktime.app.services.budgets import BudgetExceeded, BudgetService
+from inktime.app.services.budgets import BudgetService
 from inktime.app.domain.analysis.plan import build_analysis_plan, fingerprint
 from inktime.app.domain.analysis.schema import AnalysisValidationError
 from inktime.app.workers.job_worker import BoundedJobWorker
@@ -327,6 +327,21 @@ def test_single_model_call_returns_all_fields_and_usage(app, tmp_path):
     assert tuple(attempt[:2]) == ("vision", "SUCCESS") and attempt["api_usage_id"] is not None
 
 
+def test_duplicate_model_types_are_normalized_without_paid_repair(app, tmp_path):
+    _, ids, service = prepare(app, tmp_path)
+    service.ai_traces = app.extensions["inktime_ai_trace_repository"]
+    duplicate_types = valid_result(types=["人物", "風景", "人物", "日常"])
+    provider = MockProvider([duplicate_types])
+
+    result = service.analyze_photo(
+        photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock"
+    )
+
+    assert result["analysis"]["types"] == ["人物", "風景", "日常"]
+    assert provider.analyze_calls == 1
+    assert provider.repair_calls == 0
+
+
 def test_trace_persistence_failure_cannot_retry_provider_or_change_analysis(app, tmp_path):
     class RaisingTraceRepository:
         def __getattr__(self, _name):
@@ -431,8 +446,9 @@ def test_spawned_consumed_vision_timeout_is_terminal_and_billed_once(app, tmp_pa
         snapshot = budgets.snapshot(job_id=job_id, photo_id=photo_id)
         assert snapshot["photo_unknown_count"] == 1
         assert snapshot["job_unknown_count"] == 1
-        with pytest.raises(BudgetExceeded):
-            budgets.assert_request_allowed(job_id, photo_id)
+        # Unknown history remains auditable and reserved globally, but it no
+        # longer permanently blocks this photo or every later Job.
+        budgets.assert_request_allowed(job_id, photo_id)
     finally:
         boundary.shutdown()
         provider.close()

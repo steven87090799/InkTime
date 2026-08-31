@@ -1,0 +1,16 @@
+{% macro error_notice(code='', message='', http_status=none) -%}
+{% if code or message or http_status %}
+{% set explanation = explain_error(code, message, http_status) %}
+<div class="error-explanation">
+  <strong class="error-explanation-title">{{ explanation.title }}</strong>
+  <p>{{ explanation.detail }}</p>
+  <p class="error-next-step"><span>可以怎麼處理：</span>{{ explanation.action }}</p>
+  {% if explanation.code or explanation.technical_message %}
+  <details class="error-technical"><summary>技術資料（供查詢紀錄）</summary>
+    {% if explanation.code %}<p>識別代碼：<code>{{ explanation.code }}</code></p>{% endif %}
+    {% if explanation.technical_message %}<pre>{{ explanation.technical_message }}</pre>{% endif %}
+  </details>
+  {% endif %}
+</div>
+{% else %}<span class="muted">沒有錯誤</span>{% endif %}
+{%- endmacro %}

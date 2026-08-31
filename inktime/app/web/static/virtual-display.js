@@ -112,7 +112,7 @@
     levelNode.className = `debug-level ${level}`;
     detail.className = 'debug-message';
     time.textContent = timeFormatter.format(new Date());
-    levelNode.textContent = level === 'error' ? 'ERROR' : level === 'warn' ? 'WARN' : 'INFO';
+    levelNode.textContent = level === 'error' ? '錯誤' : level === 'warn' ? '警告' : '資訊';
     detail.textContent = message;
     item.append(time, levelNode, detail);
     elements.debug.prepend(item);
@@ -121,10 +121,10 @@
 
   async function responseMessage(response) {
     try {
-      const payload = await response.json();
-      return payload.message || payload.error_code || `HTTP ${response.status}`;
+      const payload = await window.inktimeDecodeJson(response);
+      return payload.message || window.inktimeErrorText(payload.error_code, "", response.status);
     } catch (_error) {
-      return `HTTP ${response.status}`;
+      return window.inktimeErrorText("", "", response.status);
     }
   }
 
@@ -295,7 +295,7 @@
       state.errors += 1;
       setConnection('error', '切換失敗');
       updateStats();
-      debug('error', error instanceof Error ? error.message : String(error));
+      debug('error', window.inktimePlainMessage(error instanceof Error ? error.message : String(error)));
     }
   }
 
@@ -329,7 +329,7 @@
       state.errors += 1;
       setConnection('error', '接收錯誤');
       updateStats();
-      debug('error', error instanceof Error ? error.message : String(error));
+      debug('error', window.inktimePlainMessage(error instanceof Error ? error.message : String(error)));
     } finally {
       window.setTimeout(receive, pollMilliseconds);
     }

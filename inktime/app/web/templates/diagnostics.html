@@ -9,8 +9,9 @@
   <article><span>主機記憶體</span><strong>{{ diagnostics.memory.percent }}%</strong></article>
   <article><span>Swap</span><strong>{{ diagnostics.swap.percent }}%</strong></article>
   <article><span>磁碟</span><strong>{{ diagnostics.disk.percent }}%</strong></article>
-  <article><span>Job Queue</span><strong>{{ diagnostics.queue_length }}</strong></article>
-  <article><span>Worker</span><strong>{{ diagnostics.worker_count }}</strong></article>
+  <article><span>可執行 Queue</span><strong>{{ diagnostics.queue_length }}</strong><small>執行中／重試中的工作</small></article>
+  <article><span>已擱置項目</span><strong>{{ diagnostics.blocked_queue_length }}</strong><small>未啟動、暫停、額度停止或已結束</small></article>
+  <article><span>執行中的 Job</span><strong>{{ diagnostics.worker_count }}</strong></article>
 </section>
 <section class="panel"><h2>N100 低資源設定</h2><div class="table-wrap"><table><tbody>
   <tr><th>分析並行／預取倍數</th><td>{{ diagnostics.runtime_profile.analysis_concurrency }}／{{ diagnostics.runtime_profile.queue_multiplier }}</td></tr>

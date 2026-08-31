@@ -288,12 +288,11 @@ def test_create_user_api_uses_stable_validation_error(client, app):
     )
 
     assert response.status_code == 400
-    assert response.get_json() == {
-        "error": {
-            "code": "password_too_short",
-            "message": "密碼至少需要 12 個字元。",
-        }
+    assert response.get_json()["error"] == {
+        "code": "password_too_short",
+        "message": "密碼至少需要 12 個字元。",
     }
+    assert "至少需要 12 個字元" in response.json["user_error"]["detail"]
 
 
 def _user_state(app, user_id: str):
@@ -435,12 +434,11 @@ def test_last_admin_api_rejection_uses_stable_conflict_error(client, app):
     )
 
     assert response.status_code == 409
-    assert response.get_json() == {
-        "error": {
-            "code": "last_administrator_required",
-            "message": "系統至少必須保留一位啟用中的管理員。",
-        }
+    assert response.get_json()["error"] == {
+        "code": "last_administrator_required",
+        "message": "系統至少必須保留一位啟用中的管理員。",
     }
+    assert "管理員" in response.json["user_error"]["title"]
     assert tuple(_user_state(app, user_id)) == (1, "administrator", 1)
 
 
