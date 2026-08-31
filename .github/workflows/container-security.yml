@@ -235,11 +235,14 @@ jobs:
         shell: bash
         run: |
           set +e
+          # Use official registries: mirror.gcr.io can return 403, which does
+          # not trigger Trivy's automatic fallback for transient 429/5xx errors.
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "${PWD}/artifacts:/artifacts" \
             -v "${PWD}/.trivyignore:/trivyignore:ro" \
             aquasec/trivy:0.60.0 image \
+            --db-repository ghcr.io/aquasecurity/trivy-db:2,public.ecr.aws/aquasecurity/trivy-db:2 \
             --format json \
             --output "/artifacts/inktime-trivy-${GITHUB_SHA}.json" \
             --ignorefile /trivyignore \
@@ -252,6 +255,7 @@ jobs:
             -v "${PWD}/artifacts:/artifacts" \
             -v "${PWD}/.trivyignore:/trivyignore:ro" \
             aquasec/trivy:0.60.0 image \
+            --db-repository ghcr.io/aquasecurity/trivy-db:2,public.ecr.aws/aquasecurity/trivy-db:2 \
             --format table \
             --output "/artifacts/inktime-trivy-${GITHUB_SHA}.txt" \
             --ignorefile /trivyignore \
