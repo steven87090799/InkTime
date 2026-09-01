@@ -27,9 +27,10 @@ class RenderCandidateRepository:
     SQL_PREDICATE = """
         p.status='analyzed'
         AND p.eligible=1
+        AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')
         AND p.lifecycle_status='active'
         AND l.enabled=1
-        AND a.id IS NOT NULL
+        AND a.id IS NOT NULL AND a.schema_version=4
     """
     MAX_REQUESTED = 200
 
@@ -52,8 +53,8 @@ class RenderCandidateRepository:
                 JOIN libraries l ON l.id=p.library_id
                 LEFT JOIN photo_analysis a ON a.id=(
                     SELECT latest.id FROM photo_analysis latest
-                    WHERE latest.photo_id=p.id
-                    ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1
+                    WHERE latest.photo_id=p.id AND latest.schema_version=4
+                    ORDER BY CASE WHEN latest.provider='local' THEN 1 ELSE 0 END,latest.created_at DESC,latest.id DESC LIMIT 1
                 )
                 WHERE p.id=? AND {self.SQL_PREDICATE}
                 """,  # noqa: S608 -- predicate is a fixed class constant
@@ -128,8 +129,8 @@ class RenderCandidateRepository:
                 LEFT JOIN libraries l ON l.id=p.library_id
                 LEFT JOIN photo_analysis a ON a.id=(
                     SELECT latest.id FROM photo_analysis latest
-                    WHERE latest.photo_id=p.id
-                    ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1
+                    WHERE latest.photo_id=p.id AND latest.schema_version=4
+                    ORDER BY CASE WHEN latest.provider='local' THEN 1 ELSE 0 END,latest.created_at DESC, latest.id DESC LIMIT 1
                 )
                 WHERE p.id IN ({placeholders})
                 """,  # noqa: S608 -- placeholders are generated only from the bounded input list.

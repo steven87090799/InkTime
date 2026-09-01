@@ -14,10 +14,12 @@ from uuid import uuid4
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.db import Database
 from inktime.app.domain.analysis.scoring import (
-    DEFAULT_FAVORITE_BONUS,
-    DEFAULT_RANKING_WEIGHTS,
-    calculate_ranking_score,
+    RANKING_RULE_VERSION,
+    ranking_components,
+    rarity_features,
 )
+from inktime.app.domain.analysis.content_filter import CONTENT_FILTER_DEFAULTS, evaluate_content_filter
+from inktime.app.domain.analysis.schema import REQUIRED_FIELDS, validate_analysis_result
 from inktime.app.domain.photos.preprocessing import LocalPhotoFeatures
 from inktime.app.domain.photos.quality_policy import (
     FEATURE_VERSION,
@@ -47,6 +49,7 @@ def preferred_analysis_order_sql(alias: str = "") -> str:
 
     prefix = f"{alias}." if alias else ""
     return (
+        f"CASE WHEN {prefix}schema_version=4 THEN 0 ELSE 1 END,"
         f"CASE WHEN COALESCE({prefix}provider,'local')='local' THEN 1 ELSE 0 END,"
         f"{prefix}created_at DESC,{prefix}id DESC"
     )
@@ -780,7 +783,6 @@ class PhotoRepository:
                 # a manual decision unless the content itself changed.
                 protected = _must_preserve_exclusion(existing) or (
                     bool(existing)
-                    and not plan["content_changed"]
                     and (
                         bool(existing.get("favorite"))
                         or bool(existing.get("manual_override"))
@@ -882,6 +884,7 @@ class PhotoRepository:
                     """,  # noqa: S608
                     chunk,
                 )
+        invalidate_score_population_cache()
         return results
 
     def record_scan_errors(self, scan_id: str, errors: Sequence[dict]) -> None:
@@ -1087,6 +1090,7 @@ class PhotoRepository:
                 JOIN photos source ON source.sha256=target.sha256 AND source.id<>target.id
                 JOIN photo_analysis a ON a.photo_id=source.id
                 WHERE target.id=?
+                  AND a.schema_version=4
                   AND (?='' OR a.analysis_fingerprint=?)
                 ORDER BY a.created_at DESC,a.id DESC LIMIT 1
                 """,
@@ -1094,32 +1098,9 @@ class PhotoRepository:
             ).fetchone()
         if row is None:
             return None
-        import json
-
-        result = {
-            "schema_version": row["schema_version"],
-            "caption": row["caption"],
-            "types": json.loads(row["types_json"]),
-            "memory_score": row["memory_score"],
-            "beauty_score": row["beauty_score"],
-            "technical_quality_score": row["technical_quality_score"],
-            "emotion_score": row["emotion_score"],
-            "side_caption": row["side_caption"],
-            "should_keep": bool(row["should_keep"]),
-            "sensitive": bool(row["sensitive"]),
-            "reason": row["reason"],
-            "ranking_score": row["ranking_score"],
-            "visual_orientation": {
-                "rotation_cw": row["visual_orientation_rotation_cw"],
-                "confidence": row["visual_orientation_confidence"]
-                if row["visual_orientation_confidence"] is not None
-                else 0.0,
-                "ambiguous": bool(row["visual_orientation_ambiguous"]),
-                "evidence": json.loads(
-                    row["visual_orientation_evidence_json"] or '["insufficient_visual_cues"]'
-                ),
-            },
-        }
+        if row["schema_version"] != 4:
+            return None
+        result = validate_analysis_result(row["raw_json"])
         self.save_analysis(
             photo_id,
             job_id,
@@ -1182,8 +1163,8 @@ class PhotoRepository:
                 clauses.append("p.captured_month_day=?")
                 parameters.append(month_day)
         orderings = {
-            "memory": "COALESCE(a.memory_score,-1) DESC,COALESCE(a.beauty_score,-1) DESC,p.id",
-            "beauty": "COALESCE(a.beauty_score,-1) DESC,COALESCE(a.memory_score,-1) DESC,p.id",
+            "memory": "COALESCE(a.memory_score,-1) DESC,COALESCE(a.visual_score,-1) DESC,p.id",
+            "beauty": "COALESCE(a.visual_score,-1) DESC,COALESCE(a.memory_score,-1) DESC,p.id",
             "time_new": "(p.captured_date IS NULL),p.captured_date DESC,p.id",
             "time_old": "(p.captured_date IS NULL),p.captured_date ASC,p.id",
         }
@@ -1206,7 +1187,7 @@ class PhotoRepository:
                 SELECT p.id,p.relative_path,p.width,p.height,p.orientation,p.captured_date,
                        p.captured_month_day,p.gps_lat,p.gps_lon,p.exif_json,
                        l.name AS library_name,a.caption,a.types_json,a.memory_score,
-                       a.beauty_score,a.technical_quality_score,a.emotion_score,
+                       a.visual_score,a.local_quality_score,
                        a.ranking_score,a.side_caption,a.reason,a.created_at AS analyzed_at
                 FROM photos p JOIN libraries l ON l.id=p.library_id
                 LEFT JOIN photo_analysis a ON {latest_analysis}
@@ -1291,10 +1272,17 @@ class PhotoRepository:
                         "candidate_pool": action == "candidate",
                     }
                 elif action == "reanalyze":
-                    exclusion = _stored_exclusion(photo)
+                    evaluation_photo = {**photo, "manual_override": 0, "favorite": 0, "exclusion_status": "eligible"} if reapply_rules else photo
+                    exclusion = _stored_exclusion(evaluation_photo)
+                    if reapply_rules and exclusion is None:
+                        analysis = connection.execute("SELECT content_filter_json FROM photo_analysis WHERE photo_id=? AND schema_version=4 AND provider!='local' ORDER BY created_at DESC,id DESC LIMIT 1", (photo_id,)).fetchone()
+                        if analysis and analysis["content_filter_json"]:
+                            content = evaluate_content_filter(json.loads(analysis["content_filter_json"]), self._content_settings(connection))
+                            if content["decision"] == "auto_excluded":
+                                exclusion = content["primary_reason"], content
                     protected = _must_preserve_exclusion(
                         photo, reapply_rules=reapply_rules
-                    ) or (bool(photo.get("manual_override")) and not reapply_rules)
+                    ) or ((bool(photo.get("manual_override")) or photo.get("exclusion_status") == "manually_restored") and not reapply_rules)
                     if protected:
                         connection.execute(
                             "UPDATE photos SET local_candidate_score=?,feature_version=?,updated_at=? WHERE id=?",
@@ -1328,8 +1316,8 @@ class PhotoRepository:
                             """,
                             (
                                 reason,
-                                LOCAL_QUALITY_RULE,
-                                LOCAL_QUALITY_RULE_VERSION,
+                                evidence.get("rule", LOCAL_QUALITY_RULE),
+                                evidence.get("rule_version", LOCAL_QUALITY_RULE_VERSION),
                                 details,
                                 now,
                                 LOCAL_QUALITY_RULE_VERSION,
@@ -1348,6 +1336,8 @@ class PhotoRepository:
                     "INSERT INTO photo_events(photo_id,event,changes_json,changed_by,created_at) VALUES (?,?,?,?,?)",
                     (photo_id, event, json.dumps(changes, ensure_ascii=False), changed_by, now),
                 )
+                self._refresh_library_ranking(connection, photo["library_id"])
+                self._refresh_favorite_ranking(connection, photo_id)
                 result = dict(connection.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone())
                 connection.execute("COMMIT")
                 invalidate_score_population_cache()
@@ -1391,6 +1381,7 @@ class PhotoRepository:
                     photo_id,
                 ),
             )
+        invalidate_score_population_cache()
 
     def record_force_ai_event(
         self, photo_id: str, *, job_id: str | None, provider: str, provider_name: str, model: str, actor: str
@@ -1877,53 +1868,7 @@ class PhotoRepository:
                         "UPDATE photo_analysis SET types_json=?,side_caption=? WHERE id=?",
                         (json.dumps(types, ensure_ascii=False), side_caption, latest["id"]),
                     )
-                    analysis = connection.execute(
-                        """
-                        SELECT a.memory_score,a.beauty_score,a.technical_quality_score,
-                               a.emotion_score,v.memory_weight,v.beauty_weight,
-                               v.technical_weight,v.emotion_weight,v.favorite_bonus
-                        FROM photo_analysis a
-                        LEFT JOIN scoring_rule_versions v ON v.id=a.scoring_version_id
-                        WHERE a.id=?
-                        """,
-                        (latest["id"],),
-                    ).fetchone()
-                    weights = {
-                        "memory": float(
-                            analysis["memory_weight"]
-                            if analysis["memory_weight"] is not None
-                            else DEFAULT_RANKING_WEIGHTS["memory"]
-                        ),
-                        "beauty": float(
-                            analysis["beauty_weight"]
-                            if analysis["beauty_weight"] is not None
-                            else DEFAULT_RANKING_WEIGHTS["beauty"]
-                        ),
-                        "technical_quality": float(
-                            analysis["technical_weight"]
-                            if analysis["technical_weight"] is not None
-                            else DEFAULT_RANKING_WEIGHTS["technical_quality"]
-                        ),
-                        "emotion": float(
-                            analysis["emotion_weight"]
-                            if analysis["emotion_weight"] is not None
-                            else DEFAULT_RANKING_WEIGHTS["emotion"]
-                        ),
-                    }
-                    ranking_score = calculate_ranking_score(
-                        analysis,
-                        weights,
-                        favorite=favorite,
-                        favorite_bonus=float(
-                            analysis["favorite_bonus"]
-                            if analysis["favorite_bonus"] is not None
-                            else DEFAULT_FAVORITE_BONUS
-                        ),
-                    )
-                    connection.execute(
-                        "UPDATE photo_analysis SET ranking_score=? WHERE id=?",
-                        (ranking_score, latest["id"]),
-                    )
+                    self._refresh_favorite_ranking(connection, photo_id)
                 connection.execute(
                     "INSERT INTO photo_events(photo_id,event,changes_json,changed_by,created_at) VALUES (?,'manual_update',?,?,?)",
                     (photo_id, json.dumps(changes, ensure_ascii=False), changed_by, now),
@@ -2065,7 +2010,7 @@ class PhotoRepository:
                 connection.execute(
                     f"""
                 SELECT COUNT(*) FROM photos p
-                LEFT JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id ORDER BY {preferred_analysis_order_sql()} LIMIT 1)
+                LEFT JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id AND schema_version=4 ORDER BY {preferred_analysis_order_sql()} LIMIT 1)
                 WHERE {where}
                 """,
                     parameters,
@@ -2073,20 +2018,20 @@ class PhotoRepository:
             )
             rows = connection.execute(
                 f"""
-                SELECT p.*,l.name AS library_name,a.caption,a.types_json,a.memory_score,a.beauty_score,a.ranking_score,a.side_caption,
+                SELECT p.*,l.name AS library_name,a.caption,a.types_json,a.memory_score,a.visual_score,a.ranking_score,a.side_caption,
                        a.provider,a.model,a.raw_json,a.created_at AS analyzed_at
                 FROM photos p JOIN libraries l ON l.id=p.library_id
-                LEFT JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id ORDER BY {preferred_analysis_order_sql()} LIMIT 1)
+                LEFT JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id AND schema_version=4 ORDER BY {preferred_analysis_order_sql()} LIMIT 1)
                 WHERE {where} ORDER BY COALESCE(p.captured_at,p.created_at) DESC,p.id LIMIT ? OFFSET ?
                 """,
                 (*parameters, limit, offset),
             ).fetchall()
         return rows, total
 
-    def score_population(self) -> list[float]:
+    def score_population(self, library_id: str | None = None) -> list[float]:
         """回傳每張照片最新一次有效排序分，供相對鑑別校準使用。"""
         global _SCORE_POPULATION_CACHE
-        cache_key = str(self.database.path)
+        cache_key = f"{self.database.path}:{library_id or 'all'}"
         now = time.monotonic()
         with _SCORE_POPULATION_LOCK:
             if (
@@ -2095,22 +2040,89 @@ class PhotoRepository:
                 and now - _SCORE_POPULATION_CACHE[1] < _SCORE_POPULATION_TTL_SECONDS
             ):
                 return list(_SCORE_POPULATION_CACHE[2])
-            with self.database.session() as connection:
+            with self.database.transaction() as connection:
+                libraries = connection.execute("SELECT id FROM libraries WHERE enabled=1 AND (? IS NULL OR id=?)", (library_id, library_id)).fetchall()
+                for library in libraries:
+                    self._refresh_library_ranking(connection, library["id"])
                 rows = connection.execute(
                     f"""
                     SELECT a.ranking_score
                     FROM photo_analysis a
-                    WHERE a.ranking_score IS NOT NULL
+                    JOIN photos p ON p.id=a.photo_id
+                    JOIN libraries l ON l.id=p.library_id
+                    WHERE a.ranking_score IS NOT NULL AND a.schema_version=4 AND a.provider!='local'
+                      AND p.eligible=1 AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')
+                      AND p.lifecycle_status='active' AND l.enabled=1
+                      AND (? IS NULL OR p.library_id=?)
                       AND a.id=(
                         SELECT latest.id FROM photo_analysis latest
                         WHERE latest.photo_id=a.photo_id
                         ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1
                       )
-                    """
+                    """, (library_id, library_id)
                 ).fetchall()
             values = tuple(float(row["ranking_score"]) for row in rows)
             _SCORE_POPULATION_CACHE = (cache_key, time.monotonic(), values)
             return list(values)
+
+    @staticmethod
+    def _local_quality_settings(connection) -> dict:
+        rows = connection.execute("SELECT key,value_json FROM settings WHERE key IN ('analysis.prefilter_enabled','analysis.prefilter_screenshots','analysis.prefilter_low_quality','analysis.prefilter_sensitivity')").fetchall()
+        return {row["key"]: json.loads(row["value_json"]) for row in rows} | {"analysis.e6_prefilter_enabled": False}
+
+    @staticmethod
+    def _content_settings(connection) -> dict:
+        rows = connection.execute("SELECT key,value_json FROM settings WHERE key IN (?,?,?,?,?)", tuple(CONTENT_FILTER_DEFAULTS)).fetchall()
+        return CONTENT_FILTER_DEFAULTS | {row["key"]: json.loads(row["value_json"]) for row in rows}
+
+    @staticmethod
+    def _apply_content_exclusion(connection, photo_id, evaluation, now) -> None:
+        connection.execute(
+            "UPDATE photos SET eligible=0,exclusion_status='auto_excluded',reject_reason=?,reject_rule=?,reject_rule_version=?,reject_details_json=?,rejected_at=?,updated_at=? WHERE id=?",
+            (evaluation["primary_reason"], evaluation["rule"], evaluation["rule_version"], json.dumps(evaluation), now, now, photo_id),
+        )
+        connection.execute("INSERT INTO photo_events(photo_id,event,changes_json,created_at) VALUES (?,'automatic_exclusion',?,?)", (photo_id, json.dumps(evaluation), now))
+
+    @staticmethod
+    def _refresh_library_ranking(connection, library_id: str) -> None:
+        """Recompute from the current library, independent of analysis arrival order.
+
+        Only aggregate feature counts and a 500-row chunk live in Python.  Rows
+        whose level/score did not change incur no additional database writes.
+        """
+        peers = """SELECT a.*,p.favorite FROM photos p
+            JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id AND schema_version=4 AND provider!='local' ORDER BY created_at DESC,id DESC LIMIT 1)
+            WHERE p.library_id=? AND p.eligible=1 AND p.lifecycle_status='active'
+              AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')"""
+        rows = connection.execute(
+            f"""WITH peers AS ({peers}), features AS (
+                SELECT 'type:' || j.value AS feature FROM peers,json_each(peers.types_json) j
+                UNION ALL SELECT 'special:' || j.value FROM peers,json_each(peers.special_codes_json) j
+                UNION ALL SELECT 'people:' || CASE WHEN people_count=0 THEN '0' WHEN people_count=1 THEN '1' WHEN people_count<=5 THEN '2-5' WHEN people_count<=15 THEN '6-15' ELSE '16+' END FROM peers
+            ) SELECT feature,COUNT(*) AS n FROM features GROUP BY feature
+            UNION ALL SELECT '__total__',COUNT(*) FROM peers""", (library_id,)
+        ).fetchall()
+        counts = {row["feature"]: int(row["n"]) for row in rows}
+        total = counts.pop("__total__", 0)
+        cursor = connection.execute(peers, (library_id,))
+        while batch := cursor.fetchmany(500):
+            updates = []
+            for row in batch:
+                analysis = dict(row)
+                analysis.update(types=json.loads(row["types_json"]), special_codes=json.loads(row["special_codes_json"]))
+                rarity = int(total >= 21 and any((counts.get(feature, 0) - 1) / (total - 1) <= .05 for feature in rarity_features(analysis)))
+                scores = ranking_components(analysis, favorite=bool(row["favorite"]), rarity_adjustment=rarity)
+                if rarity != row["library_rarity_adjustment"] or scores["ranking_score"] != row["ranking_score"] or scores["effective_special_level"] != row["effective_special_level"]:
+                    updates.append((rarity, scores["effective_special_level"], scores["ranking_score"], scores["ranking_score"], scores["base_ranking_score"], row["id"]))
+            connection.executemany("UPDATE photo_analysis SET library_rarity_adjustment=?,effective_special_level=?,ranking_score=?,final_ranking_score=?,base_ranking_score=? WHERE id=?", updates)
+
+    @staticmethod
+    def _refresh_favorite_ranking(connection, photo_id: str) -> None:
+        row = connection.execute("SELECT a.*,p.favorite FROM photo_analysis a JOIN photos p ON p.id=a.photo_id WHERE a.photo_id=? AND a.schema_version=4 ORDER BY CASE WHEN a.provider='local' THEN 1 ELSE 0 END,a.created_at DESC,a.id DESC LIMIT 1", (photo_id,)).fetchone()
+        if row is None or row["provider"] == "local":
+            return
+        scores = ranking_components(dict(row), favorite=bool(row["favorite"]), rarity_adjustment=int(row["library_rarity_adjustment"]))
+        connection.execute("UPDATE photo_analysis SET ranking_score=?,final_ranking_score=?,base_ranking_score=?,effective_special_level=? WHERE id=?", (scores["ranking_score"], scores["ranking_score"], scores["base_ranking_score"], scores["effective_special_level"], row["id"]))
 
     def save_analysis(
         self,
@@ -2130,8 +2142,6 @@ class PhotoRepository:
         semantic_score: float | None = None,
         base_ranking_score: float | None = None,
         final_ranking_score: float | None = None,
-        travel_bonus: float = 0.0,
-        location_rule_version: str | None = None,
         prompt_version: str = "photo-quality-v3",
         analysis_fingerprint: str | None = None,
         analysis_spec_json: str | None = None,
@@ -2192,62 +2202,54 @@ class PhotoRepository:
                         # rather than inventing a non-existent system account.
                         (photo_id, event, json.dumps(changes, ensure_ascii=False), None, now),
                     )
-                connection.execute(
-                    """
-                    INSERT INTO photo_analysis(photo_id,job_id,schema_version,stage,provider,model,caption,types_json,
-                        memory_score,beauty_score,technical_quality_score,emotion_score,side_caption,should_keep,
-                        sensitive,reason,raw_json,analysis_source,ranking_score,scoring_version_id,created_at,
-                        schema_kind,semantic_json,local_score,semantic_score,base_ranking_score,final_ranking_score,
-                        ranking_rule_version,travel_bonus,location_rule_version,prompt_version,
-                        analysis_fingerprint,analysis_spec_json,vision_request_fingerprint,vision_input_spec_json)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    """,
-                    (
-                        photo_id,
-                        job_id,
-                        result["schema_version"],
-                        stage,
-                        provider,
-                        model,
-                        result["caption"],
-                        json.dumps(result["types"], ensure_ascii=False),
-                        result["memory_score"],
-                        result["beauty_score"],
-                        result["technical_quality_score"],
-                        result["emotion_score"],
-                        result["side_caption"],
-                        int(result["should_keep"]),
-                        int(result["sensitive"]),
-                        result["reason"],
-                        raw_json,
-                        analysis_source,
-                        ranking_score,
-                        scoring_version_id,
-                        now,
-                        schema_kind,
-                        json.dumps(
-                            {
-                                "source": "local" if provider == "local" else "model",
-                                "confidence": (result.get("details") or {}).get("confidence"),
-                                "values": result.get("details") or {},
-                                **({"inherited_from": inherited_from} if inherited_from else {}),
-                            },
-                            ensure_ascii=False,
-                        ),
-                        local_score,
-                        semantic_score,
-                        base_ranking_score,
-                        final_ranking_score if final_ranking_score is not None else ranking_score,
-                        "ranking-v2",
-                        travel_bonus,
-                        location_rule_version,
-                        prompt_version,
-                        analysis_fingerprint,
-                        analysis_spec_json,
-                        vision_request_fingerprint,
-                        vision_input_spec_json,
-                    ),
-                )
+                canonical = validate_analysis_result({key: result[key] for key in REQUIRED_FIELDS})
+                current = dict(connection.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone())
+                content_evaluation = evaluate_content_filter(canonical["content_filter"], self._content_settings(connection))
+                protected = bool(current["manual_override"] or current["favorite"]) or current["exclusion_status"] in {"manually_restored", "manually_excluded"}
+                if provider != "local" and content_evaluation["decision"] == "auto_excluded" and not protected:
+                    self._apply_content_exclusion(connection, photo_id, content_evaluation, now)
+                    current["eligible"] = 0
+                    current["exclusion_status"] = "auto_excluded"
+                quality = local_candidate_score(current, evaluation=evaluate_local_quality(current, settings=self._local_quality_settings(connection)))
+                rarity = 0
+                result.update(canonical, local_quality_score=quality)
+                result.update(ranking_components(result, favorite=bool(current["favorite"]), rarity_adjustment=rarity))
+                if provider == "local":
+                    result.update(base_ranking_score=quality, raw_ranking_score=quality, ranking_score=quality, final_ranking_score=quality)
+                result["local_score"] = quality
+                result["selection_score"] = result["ranking_score"] if current["eligible"] and current["exclusion_status"] not in EXCLUDED_STATUSES else 0.0
+                semantic = {
+                    "source": "local" if provider == "local" else "model",
+                    "values": {key: canonical[key] for key in ("people_count", "subject_position", "text_safe_area", "special_level", "special_codes", "content_filter")},
+                    **({"inherited_from": inherited_from} if inherited_from else {}),
+                }
+                record = {
+                    "photo_id": photo_id, "job_id": job_id, "schema_version": 4,
+                    "stage": stage, "provider": provider, "model": model,
+                    "caption": canonical["caption"], "types_json": json.dumps(canonical["types"], ensure_ascii=False),
+                    "memory_score": canonical["memory_score"], "visual_score": canonical["visual_score"],
+                    "local_quality_score": quality, "special_level": canonical["special_level"],
+                    "special_codes_json": json.dumps(canonical["special_codes"]), "people_count": canonical["people_count"],
+                    "content_filter_json": json.dumps(canonical["content_filter"]),
+                    "effective_special_level": result["effective_special_level"], "library_rarity_adjustment": rarity,
+                    "side_caption": canonical["side_caption"], "raw_json": json.dumps(canonical, ensure_ascii=False),
+                    "analysis_source": analysis_source, "ranking_score": result["ranking_score"],
+                    "scoring_version_id": scoring_version_id, "created_at": now, "schema_kind": schema_kind,
+                    "semantic_json": json.dumps(semantic, ensure_ascii=False), "local_score": quality,
+                    "semantic_score": canonical["memory_score"] * .5 + canonical["visual_score"] * .25,
+                    "base_ranking_score": result["base_ranking_score"], "final_ranking_score": result["ranking_score"],
+                    "ranking_rule_version": RANKING_RULE_VERSION, "prompt_version": prompt_version,
+                    "analysis_fingerprint": analysis_fingerprint, "analysis_spec_json": analysis_spec_json,
+                    "vision_request_fingerprint": vision_request_fingerprint, "vision_input_spec_json": vision_input_spec_json,
+                }
+                columns = ",".join(record)
+                placeholders = ",".join("?" for _ in record)
+                connection.execute(f"INSERT INTO photo_analysis ({columns}) VALUES ({placeholders})", tuple(record.values()))  # noqa: S608 -- fixed internal column names
+                if provider != "local":
+                    self._refresh_library_ranking(connection, current["library_id"])
+                    stored = connection.execute("SELECT library_rarity_adjustment,effective_special_level,ranking_score FROM photo_analysis WHERE photo_id=? ORDER BY id DESC LIMIT 1", (photo_id,)).fetchone()
+                    result.update(ranking_components(result, favorite=bool(current["favorite"]), rarity_adjustment=int(stored["library_rarity_adjustment"])))
+                    result["selection_score"] = result["ranking_score"] if current["eligible"] and current["exclusion_status"] not in EXCLUDED_STATUSES else 0.0
                 connection.execute(
                     "UPDATE photos SET status='analyzed',updated_at=? WHERE id=?", (now, photo_id)
                 )

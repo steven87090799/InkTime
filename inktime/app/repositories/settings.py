@@ -19,8 +19,6 @@ from inktime import __version__
 from inktime.app.db import Database
 from inktime.app.core.security import register_secret
 from inktime.app.domain.analysis.scoring import (
-    DEFAULT_FAVORITE_BONUS,
-    DEFAULT_RANKING_WEIGHTS,
     DEFAULT_SCORING_RULES,
 )
 from inktime.app.domain.analysis.schema import (
@@ -163,21 +161,21 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "analysis.caption_min_chars": {
         "category": "照片描述與相框文案",
-        "default": 120,
+        "default": 30,
         "type": "integer",
         "description": "詳細照片描述最少字元數",
         "risk": "必須與目標、上限保持 min ≤ target ≤ max",
-        "min": 0,
+        "min": 30,
         "max": CAPTION_MAX_CHARS,
         "restart": False,
     },
     "analysis.caption_target_chars": {
         "category": "照片描述與相框文案",
-        "default": 160,
+        "default": 60,
         "type": "integer",
         "description": "詳細照片描述的大致目標字元數，不要求模型精確湊字數",
         "risk": "必須與最少、上限保持 min ≤ target ≤ max",
-        "min": 0,
+        "min": 30,
         "max": CAPTION_MAX_CHARS,
         "restart": False,
     },
@@ -187,7 +185,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": "integer",
         "description": "詳細照片描述最多字元數",
         "risk": "必須與最少、目標保持 min ≤ target ≤ max",
-        "min": 0,
+        "min": 30,
         "max": CAPTION_MAX_CHARS,
         "restart": False,
     },
@@ -394,103 +392,6 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "max": 1000000,
         "restart": False,
     },
-    "travel_bonus_enabled": {
-        "category": "旅行加權",
-        "default": True,
-        "type": "boolean",
-        "description": "在模型原始回憶等級之外，依 GPS 與地點稀有度加入獨立旅行排序分",
-        "risk": "缺少 GPS 或可信國家資訊時不臆測跨國，該項加分為 0",
-        "restart": False,
-    },
-    "home_latitude": {
-        "category": "旅行加權",
-        "default": 25.033,
-        "type": "number",
-        "description": "住家緯度，只用於距離計算，不會傳送給模型",
-        "risk": "這是敏感位置資訊，僅限管理員設定",
-        "min": -90,
-        "max": 90,
-        "restart": False,
-    },
-    "home_longitude": {
-        "category": "旅行加權",
-        "default": 121.5654,
-        "type": "number",
-        "description": "住家經度，只用於距離計算，不會傳送給模型",
-        "risk": "這是敏感位置資訊，僅限管理員設定",
-        "min": -180,
-        "max": 180,
-        "restart": False,
-    },
-    "home_radius_km": {
-        "category": "旅行加權",
-        "default": 60.0,
-        "type": "number",
-        "description": "住家半徑內不給旅行加分",
-        "risk": "過小會放大日常外出加分",
-        "min": 0,
-        "max": 1000,
-        "restart": False,
-    },
-    "travel_bonus_near": {
-        "category": "旅行加權",
-        "default": 2.0,
-        "type": "number",
-        "description": "離家 60 至 200 km 的旅行加分",
-        "risk": "只影響最終排序，不修改模型原始回憶等級",
-        "min": 0,
-        "max": 20,
-        "restart": False,
-    },
-    "travel_bonus_far": {
-        "category": "旅行加權",
-        "default": 4.0,
-        "type": "number",
-        "description": "離家 200 至 1,000 km 的旅行加分",
-        "risk": "只影響最終排序，不修改模型原始回憶等級",
-        "min": 0,
-        "max": 20,
-        "restart": False,
-    },
-    "foreign_country_bonus": {
-        "category": "旅行加權",
-        "default": 6.0,
-        "type": "number",
-        "description": "可信國家候選顯示跨國時的旅行加分",
-        "risk": "未知國家不加分，避免模型臆測地標造成偏差",
-        "min": 0,
-        "max": 20,
-        "restart": False,
-    },
-    "rare_location_bonus": {
-        "category": "旅行加權",
-        "default": 2.0,
-        "type": "number",
-        "description": "同一粗略 GPS 地點在照片庫中罕見時的額外加分",
-        "risk": "GPS 漂移與缺失會降低這項判斷的可靠度",
-        "min": 0,
-        "max": 20,
-        "restart": False,
-    },
-    "max_total_bonus": {
-        "category": "旅行加權",
-        "default": 8.0,
-        "type": "number",
-        "description": "旅行與罕見地點加分的總上限",
-        "risk": "過高會壓過模型的語意與技術評分",
-        "min": 0,
-        "max": 40,
-        "restart": False,
-    },
-    "location_rule_version": {
-        "category": "旅行加權",
-        "default": "travel-v1",
-        "type": "string",
-        "description": "旅行加分規則版本，保留舊照片的可追溯性",
-        "risk": "修改版本名稱不會自動重算既有分析",
-        "max_length": 80,
-        "restart": False,
-    },
     "analysis.stage_two_threshold": {
         "category": "分析設定",
         "default": 65,
@@ -519,6 +420,11 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "choices": [1024, 1600],
         "restart": False,
     },
+    'analysis.exclude_sexualized_content': {'category': 'AI 內容排除', 'default': True, 'type': 'boolean', 'description': '排除偏色情／性感照片', 'label': '排除偏色情／性感照片', 'risk': '依模型分類與信心套用；普通旅遊、自拍與生活照不因單人女性而排除。人工恢復受保護，重新套用規則才會覆寫。', 'restart': False},
+    'analysis.exclude_explicit_nudity': {'category': 'AI 內容排除', 'default': True, 'type': 'boolean', 'description': '排除成人裸露照片', 'label': '排除成人裸露照片', 'risk': '依模型分類與信心套用；普通旅遊、自拍與生活照不因單人女性而排除。人工恢復受保護，重新套用規則才會覆寫。', 'restart': False},
+    'analysis.exclude_female_glamour_portraits': {'category': 'AI 內容排除', 'default': True, 'type': 'boolean', 'description': '排除女性單人寫真', 'label': '排除女性單人寫真', 'risk': '依模型分類與信心套用；普通旅遊、自拍與生活照不因單人女性而排除。人工恢復受保護，重新套用規則才會覆寫。', 'restart': False},
+    'analysis.content_filter_min_confidence': {'category': 'AI 內容排除', 'default': 0.85, 'type': 'number', 'description': '內容排除最低信心', 'label': '內容排除最低信心', 'risk': '依模型分類與信心套用；普通旅遊、自拍與生活照不因單人女性而排除。人工恢復受保護，重新套用規則才會覆寫。', 'restart': False, 'min': 0, 'max': 1},
+    'analysis.female_glamour_min_confidence': {'category': 'AI 內容排除', 'default': 0.9, 'type': 'number', 'description': '女性寫真最低信心', 'label': '女性寫真最低信心', 'risk': '依模型分類與信心套用；普通旅遊、自拍與生活照不因單人女性而排除。人工恢復受保護，重新套用規則才會覆寫。', 'restart': False, 'min': 0, 'max': 1},
     "analysis.prefilter_enabled": {
         "category": "本機預篩選",
         "default": True,
@@ -582,61 +488,6 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "min_length": 100,
         "max_length": 12000,
         "full_width": True,
-        "control_center": True,
-    },
-    "analysis.ranking_memory_weight": {
-        "category": "評分控制中心",
-        "default": DEFAULT_RANKING_WEIGHTS["memory"],
-        "type": "number",
-        "description": "綜合排序分的回憶分權重",
-        "risk": "四項權重合計必須為 100%",
-        "min": 0,
-        "max": 100,
-        "restart": False,
-        "control_center": True,
-    },
-    "analysis.ranking_beauty_weight": {
-        "category": "評分控制中心",
-        "default": DEFAULT_RANKING_WEIGHTS["beauty"],
-        "type": "number",
-        "description": "綜合排序分的美觀分權重",
-        "risk": "四項權重合計必須為 100%",
-        "min": 0,
-        "max": 100,
-        "restart": False,
-        "control_center": True,
-    },
-    "analysis.ranking_technical_weight": {
-        "category": "評分控制中心",
-        "default": DEFAULT_RANKING_WEIGHTS["technical_quality"],
-        "type": "number",
-        "description": "綜合排序分的技術品質權重",
-        "risk": "四項權重合計必須為 100%",
-        "min": 0,
-        "max": 100,
-        "restart": False,
-        "control_center": True,
-    },
-    "analysis.ranking_emotion_weight": {
-        "category": "評分控制中心",
-        "default": DEFAULT_RANKING_WEIGHTS["emotion"],
-        "type": "number",
-        "description": "綜合排序分的情緒分權重",
-        "risk": "四項權重合計必須為 100%",
-        "min": 0,
-        "max": 100,
-        "restart": False,
-        "control_center": True,
-    },
-    "analysis.ranking_favorite_bonus": {
-        "category": "評分控制中心",
-        "default": DEFAULT_FAVORITE_BONUS,
-        "type": "number",
-        "description": "最愛照片加入綜合排序分的額外分數",
-        "risk": "過高可能讓低品質最愛照片排在最前面",
-        "min": 0,
-        "max": 30,
-        "restart": False,
         "control_center": True,
     },
     "analysis.concurrency": {
@@ -1000,22 +851,22 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "budget.full_analysis_max_tokens": {
         "category": "成本設定",
-        "default": 2048,
+        "default": 1200,
         "type": "integer",
         "description": "單次完整 Vision 分析的硬上限",
         "risk": "過高會增加成本；實際值仍受 budget.max_tokens 夾制",
         "min": 256,
-        "max": 2048,
+        "max": 1200,
         "restart": False,
     },
     "budget.caption_variants_max_tokens": {
         "category": "成本設定",
-        "default": 3072,
+        "default": 1200,
         "type": "integer",
-        "description": "一次產生多風格相框候選的硬上限",
-        "risk": "候選只允許同一次圖片請求，實際值仍受 budget.max_tokens 夾制",
+        "description": "Schema v4 相框短句輸出上限",
+        "risk": "固定只產生一個 side_caption，實際值仍受 budget.max_tokens 夾制",
         "min": 256,
-        "max": 3072,
+        "max": 1200,
         "restart": False,
     },
     "budget.repair_max_tokens": {
@@ -1527,12 +1378,6 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
 
 SETTINGS_SCHEMA_VERSION = 1
 SETTINGS_SNAPSHOT_LIMIT = 100
-RANKING_WEIGHT_KEYS = (
-    "analysis.ranking_memory_weight",
-    "analysis.ranking_beauty_weight",
-    "analysis.ranking_technical_weight",
-    "analysis.ranking_emotion_weight",
-)
 PRIVATE_LOCATION_KEYS = {
     "home_latitude",
     "home_longitude",
@@ -1712,8 +1557,6 @@ def _metadata_dependencies(key: str) -> list[dict[str, Any]]:
 def _validation_group(key: str) -> str | None:
     if key.startswith(("analysis.caption_", "analysis.side_caption_")):
         return "caption_ranges"
-    if key in RANKING_WEIGHT_KEYS:
-        return "ranking_weights"
     if key.startswith("budget."):
         return "budget_limits"
     if key.startswith("observability."):
@@ -2238,9 +2081,6 @@ class SettingsRepository:
     @staticmethod
     def _validate_all(values: dict[str, Any]) -> None:
         SettingsRepository._validate_caption_ranges(values)
-        total = sum(float(values[key]) for key in RANKING_WEIGHT_KEYS)
-        if abs(total - 100.0) > 0.001:
-            raise ValueError("四項排序權重合計必須為 100%")
         if float(values["budget.daily_warning"]) > float(values["budget.daily_stop"]):
             raise ValueError("每日預算警告值不可高於停止值")
         if float(values["budget.monthly_warning"]) > float(values["budget.monthly_stop"]):
@@ -2300,10 +2140,10 @@ class SettingsRepository:
         caption_minimum = int(values["analysis.caption_min_chars"])
         caption_target = int(values["analysis.caption_target_chars"])
         caption_upper = int(values["analysis.caption_max_chars"])
-        if not 0 <= caption_minimum <= caption_target <= caption_upper <= CAPTION_MAX_CHARS:
+        if not 30 <= caption_minimum <= caption_target <= caption_upper <= CAPTION_MAX_CHARS:
             raise ValueError(
                 "analysis.caption 長度必須符合 "
-                f"0 ≤ min ≤ target ≤ max ≤ {CAPTION_MAX_CHARS}"
+                f"30 ≤ min ≤ target ≤ max ≤ {CAPTION_MAX_CHARS}"
             )
         side_minimum = int(values["analysis.side_caption_min_chars"])
         side_target = int(values["analysis.side_caption_target_chars"])

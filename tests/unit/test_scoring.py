@@ -19,25 +19,24 @@ from tests.unit.test_analysis_schema import valid_result
 
 SCORES = {
     "memory_score": 80,
-    "beauty_score": 70,
-    "technical_quality_score": 60,
-    "emotion_score": 90,
+    "visual_score": 70,
+    "local_quality_score": 60,
+    "special_level": 0,
 }
 WEIGHTS = {
     "memory": 50,
-    "beauty": 20,
-    "technical_quality": 10,
-    "emotion": 20,
+    "visual": 25,
+    "local_quality": 25,
 }
 
 
 def test_ranking_score_preserves_components_and_applies_favorite_bonus():
-    assert calculate_ranking_score(SCORES, WEIGHTS) == 78
-    assert calculate_ranking_score(SCORES, WEIGHTS, favorite=True, favorite_bonus=5) == 83
+    assert calculate_ranking_score(SCORES, WEIGHTS) == 72.5
+    assert calculate_ranking_score(SCORES, WEIGHTS, favorite=True, favorite_bonus=5) == 74.5
 
 
 def test_ranking_weights_must_total_one_hundred():
-    with pytest.raises(ValueError, match="100%"):
+    with pytest.raises(ValueError, match="固定"):
         validate_ranking_weights({**WEIGHTS, "memory": 49})
 
 
@@ -77,21 +76,15 @@ def test_scoring_profile_create_and_restore_are_versioned(app):
     created = repository.create(
         name="家庭照片優先",
         rules=rules,
-        weights={
-            "memory": 55,
-            "beauty": 15,
-            "technical_quality": 10,
-            "emotion": 20,
-        },
-        favorite_bonus=8,
+        weights=WEIGHTS,
+        favorite_bonus=1,
         created_by=user_id,
         source_ip="127.0.0.1",
     )
 
     assert created["is_active"] == 1
-    assert created["memory_weight"] == 55
+    assert created["memory_weight"] == 50
     assert repository.get(str(initial["id"]))["is_active"] == 0
-    assert app.extensions["inktime_settings_repository"].get("analysis.ranking_memory_weight") == 55
     with app.extensions["inktime_database"].session() as connection:
         history_count = connection.execute(
             "SELECT COUNT(*) FROM setting_history WHERE changed_by=?", (user_id,)
@@ -99,7 +92,7 @@ def test_scoring_profile_create_and_restore_are_versioned(app):
         snapshot_count = connection.execute(
             "SELECT COUNT(*) FROM settings_snapshots WHERE actor_id=?", (user_id,)
         ).fetchone()[0]
-    assert history_count == 4
+    assert history_count == 1
     assert snapshot_count == 1
 
     restored = repository.restore(str(initial["id"]), created_by=user_id, source_ip="127.0.0.1")

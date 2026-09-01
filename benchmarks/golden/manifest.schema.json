@@ -4,17 +4,41 @@
   "title": "InkTime Golden Benchmark Manifest",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "dataset", "items"],
+  "required": [
+    "version",
+    "dataset",
+    "items"
+  ],
   "properties": {
-    "version": {"type": "string", "const": "inktime-golden-v1"},
+    "version": {
+      "type": "string",
+      "const": "inktime-golden-v1"
+    },
     "dataset": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "source", "privacy"],
+      "required": [
+        "id",
+        "source",
+        "privacy"
+      ],
       "properties": {
-        "id": {"type": "string", "minLength": 1, "maxLength": 120},
-        "source": {"type": "string", "enum": ["committed_fixture", "synthetic"]},
-        "privacy": {"type": "string", "const": "non_private"}
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "committed_fixture",
+            "synthetic"
+          ]
+        },
+        "privacy": {
+          "type": "string",
+          "const": "non_private"
+        }
       }
     },
     "items": {
@@ -22,62 +46,159 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "image", "expected"],
+        "required": [
+          "id",
+          "image",
+          "expected"
+        ],
         "properties": {
-          "id": {"type": "string", "minLength": 1, "maxLength": 160},
-          "image": {"type": "string", "minLength": 1, "maxLength": 300},
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "image": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
           "expected": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["memory_grade", "beauty_grade", "emotion_grade", "types", "should_keep"],
+            "required": [
+              "memory_score",
+              "visual_score",
+              "special_level",
+              "types",
+              "should_keep"
+            ],
             "properties": {
-              "memory_grade": {"type": "string", "enum": ["E", "D", "C", "B", "A", "S", "unknown"]},
-              "beauty_grade": {"type": "string", "enum": ["E", "D", "C", "B", "A", "S", "unknown"]},
-              "technical_grade": {"type": "string", "enum": ["E", "D", "C", "B", "A", "S", "unknown"]},
-              "technical_quality_grade": {"type": "string", "enum": ["E", "D", "C", "B", "A", "S", "unknown"]},
-              "emotion_grade": {"type": "string", "enum": ["E", "D", "C", "B", "A", "S", "unknown"]},
-              "types": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
-              "should_keep": {"type": "boolean"},
-              "rotation_cw": {"type": ["integer", "null"], "enum": [0, 90, 180, 270, null]},
-              "ambiguous": {"type": "boolean"},
+              "types": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "uniqueItems": true
+              },
+              "should_keep": {
+                "type": "boolean"
+              },
+              "rotation_cw": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "enum": [
+                  0,
+                  90,
+                  180,
+                  270,
+                  null
+                ]
+              },
+              "ambiguous": {
+                "type": "boolean"
+              },
               "visual_orientation": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["rotation_cw", "ambiguous"],
+                "required": [
+                  "rotation_cw",
+                  "ambiguous"
+                ],
                 "properties": {
-                  "rotation_cw": {"type": ["integer", "null"], "enum": [0, 90, 180, 270, null]},
-                  "ambiguous": {"type": "boolean"}
+                  "rotation_cw": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "enum": [
+                      0,
+                      90,
+                      180,
+                      270,
+                      null
+                    ]
+                  },
+                  "ambiguous": {
+                    "type": "boolean"
+                  }
                 }
+              },
+              "memory_score": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "visual_score": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "special_level": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4
               }
             },
             "allOf": [
               {
                 "oneOf": [
-                  {"required": ["technical_grade"], "not": {"required": ["technical_quality_grade"]}},
-                  {"required": ["technical_quality_grade"], "not": {"required": ["technical_grade"]}}
-                ]
-              },
-              {
-                "oneOf": [
                   {
-                    "required": ["visual_orientation"],
-                    "not": {"anyOf": [{"required": ["rotation_cw"]}, {"required": ["ambiguous"]}]}
+                    "required": [
+                      "visual_orientation"
+                    ],
+                    "not": {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "rotation_cw"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "ambiguous"
+                          ]
+                        }
+                      ]
+                    }
                   },
                   {
-                    "required": ["rotation_cw", "ambiguous"],
-                    "not": {"required": ["visual_orientation"]}
+                    "required": [
+                      "rotation_cw",
+                      "ambiguous"
+                    ],
+                    "not": {
+                      "required": [
+                        "visual_orientation"
+                      ]
+                    }
                   }
                 ]
               }
             ]
           },
-          "expected_rank": {"type": "number"},
-          "expected_score": {"type": "number"},
-          "never_upload": {"type": "boolean"},
-          "inactive": {"type": "boolean"},
-          "ineligible": {"type": "boolean"},
-          "missing": {"type": "boolean"},
-          "manually_excluded": {"type": "boolean"}
+          "expected_rank": {
+            "type": "number"
+          },
+          "expected_score": {
+            "type": "number"
+          },
+          "never_upload": {
+            "type": "boolean"
+          },
+          "inactive": {
+            "type": "boolean"
+          },
+          "ineligible": {
+            "type": "boolean"
+          },
+          "missing": {
+            "type": "boolean"
+          },
+          "manually_excluded": {
+            "type": "boolean"
+          }
         }
       }
     }

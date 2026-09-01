@@ -270,9 +270,8 @@ class BatchAnalysisService:
         scoring = getattr(self, "scoring", None) or {
             "id": "",
             "memory_weight": 25,
-            "beauty_weight": 25,
-            "technical_weight": 25,
-            "emotion_weight": 25,
+            "visual_weight": 25,
+            "local_weight": 25,
             "favorite_bonus": 0,
         }
         scoring_repository = getattr(self, "scoring_repository", None)
@@ -2159,7 +2158,6 @@ class BatchAnalysisService:
                 analysis_spec_json=canonical_json(plan),
                 vision_request_fingerprint=str(item["vision_request_fingerprint"]),
                 vision_input_spec_json=str(item["vision_input_spec_json"]),
-                travel_policy=dict(plan.get("travel_policy") or {}),
                 analysis_source="analysis_batch",
                 connection=connection,
             )
@@ -2225,6 +2223,8 @@ class BatchAnalysisService:
                     connection=connection,
                 )
 
+        from inktime.app.repositories.photos import invalidate_score_population_cache
+        invalidate_score_population_cache()
         return "imported"
 
     def _read_results(

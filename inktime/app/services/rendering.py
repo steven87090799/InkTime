@@ -34,6 +34,7 @@ from inktime.app.domain.rendering import (
     resolve_layout_geometry,
 )
 from inktime.app.domain.analysis.execution_mode import execution_mode
+from inktime.app.domain.analysis.scoring import prepare_score_distribution, calculate_distinguishing_score
 from inktime.app.services.local_selection import LocalSelectionPolicy
 from inktime.app.domain.rendering.system_presets import DEFAULT_RENDER_DITHER, DEFAULT_RENDER_PROFILE
 from inktime.app.domain.photos.orientation import (
@@ -1036,8 +1037,8 @@ class RenderService:
                               AND dh.displayed_at>=datetime('now','-14 days')) recently_displayed
                 FROM photos p JOIN libraries l ON l.id=p.library_id
                 JOIN photo_analysis a ON a.id=(
-                    SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id
-                    ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1
+                    SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id AND latest.schema_version=4
+                    ORDER BY CASE WHEN latest.provider='local' THEN 1 ELSE 0 END,latest.created_at DESC,latest.id DESC LIMIT 1
                 )
                 WHERE {RenderCandidateRepository.SQL_PREDICATE}
                   AND p.id<>? AND ({orientation_sql}) AND ({recent_sql}) AND ({where_sql})
@@ -2244,6 +2245,10 @@ class RenderService:
     ) -> list[dict[str, Any]]:
         memory_threshold = float(self.settings.get("render.memory_threshold", 70))
         weight = float(self.settings.get("render.e6_weight", 20)) / 100.0
+        self.photos.score_population()
+        with self.database.session() as connection:
+            library_ids = [row[0] for row in connection.execute("SELECT id FROM libraries WHERE enabled=1")]
+        distributions = {library_id: prepare_score_distribution(self.photos.score_population(library_id)) for library_id in library_ids}
         result: list[dict[str, Any]] = []
         last_score: float | None = None
         last_id = ""
@@ -2253,10 +2258,11 @@ class RenderService:
         # existing burst-proximity signal consumed by LocalSelectionPolicy.
         while len(result) < max(limit, 1):
             with self.database.session() as connection:
+                connection.create_function("inktime_distinguishing_score", 2, lambda value, library_id: calculate_distinguishing_score(value, distributions[library_id])[0], deterministic=True)
                 rows = connection.execute(
                     f"""
                     WITH ranked_candidates AS (
-                    SELECT p.id,p.relative_path,p.captured_at,p.captured_date,p.captured_month_day,
+                    SELECT p.id,p.library_id,p.relative_path,p.captured_at,p.captured_date,p.captured_month_day,
                            p.sha256,p.perceptual_hash,p.difference_hash,p.duplicate_group_id,p.gps_lat,p.gps_lon,
                            p.e6_score,p.e6_contrast_score,
                            p.e6_subject_score,p.e6_skin_score,p.e6_text_score,
@@ -2266,13 +2272,13 @@ class RenderService:
                            a.memory_score,
                            (SELECT count(*) FROM display_history dh WHERE dh.photo_id=p.id) display_count,
                            (SELECT max(displayed_at) FROM display_history dh WHERE dh.photo_id=p.id) last_displayed_at,
-                           (COALESCE(a.final_ranking_score,a.ranking_score,a.memory_score,0) * ?
+                           (inktime_distinguishing_score(COALESCE(a.final_ranking_score,a.ranking_score,a.memory_score,0),p.library_id) * ?
                             + COALESCE(p.e6_score,50) * ?) combined_score
                     FROM photos p
                     JOIN libraries l ON l.id=p.library_id
                     JOIN photo_analysis a ON a.id=(
-                        SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id
-                        ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1
+                        SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id AND latest.schema_version=4
+                        ORDER BY CASE WHEN latest.provider='local' THEN 1 ELSE 0 END,latest.created_at DESC,latest.id DESC LIMIT 1
                     )
                     WHERE {RenderCandidateRepository.SQL_PREDICATE}
                       AND a.memory_score>=?
@@ -2349,9 +2355,12 @@ class RenderService:
             stored_ranking = row.get("ranking_score")
             ranking = float(stored_ranking) if isinstance(stored_ranking, (int, float, str)) else 0.0
             row["raw_ranking_score"] = ranking
-            row["ranking_percentile"] = None
-            row["distinguishing_score"] = ranking
-            raw_combined = float(row["combined_score"])
+            distinguishing, percentile = calculate_distinguishing_score(ranking, distributions[row["library_id"]])
+            row["ranking_percentile"] = percentile
+            row["distinguishing_score"] = distinguishing
+            e6 = row["e6_score"] if row.get("e6_score") is not None else 50.0
+            raw_combined = distinguishing * (1.0 - weight) + float(e6) * weight
+            row["display_score"] = round(raw_combined, 2)
             adjustments = self._selection_adjustments(row, target=target, now=now)
             row["raw_combined_score"] = round(raw_combined, 2)
             row["score_components"] = {"base_combined_score": round(raw_combined, 2), **adjustments}
@@ -2554,14 +2563,14 @@ class RenderService:
                        p.local_candidate_score,p.exclusion_status,
                        p.manual_override,l.root_path,p.e6_score,
                        a.provider,a.model,a.prompt_version,a.schema_version,a.ranking_rule_version,
-                       a.memory_score,a.beauty_score,a.technical_quality_score,a.final_ranking_score,
-                       a.ranking_score,a.travel_bonus,a.location_rule_version,a.types_json,a.semantic_json,
+                       a.memory_score,a.visual_score,a.local_quality_score,a.final_ranking_score,
+                       a.ranking_score,a.effective_special_level,a.types_json,a.semantic_json,
                        COALESCE(a.final_ranking_score,a.ranking_score,a.memory_score,p.local_candidate_score,0) AS final_score
                 FROM photos p
                 JOIN libraries l ON l.id=p.library_id
                 JOIN photo_analysis a ON a.id=(
                     SELECT latest.id FROM photo_analysis latest
-                    WHERE latest.photo_id=p.id ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1
+                    WHERE latest.photo_id=p.id AND latest.schema_version=4 ORDER BY CASE WHEN latest.provider='local' THEN 1 ELSE 0 END,latest.created_at DESC,latest.id DESC LIMIT 1
                 )
                 WHERE {where}
                 )
@@ -2647,7 +2656,7 @@ class RenderService:
         analysis_join = (
             "JOIN libraries l ON l.id=p.library_id "
             "JOIN photo_analysis a ON a.id=(SELECT latest.id FROM photo_analysis latest "
-            "WHERE latest.photo_id=p.id ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1)"
+            "WHERE latest.photo_id=p.id AND latest.schema_version=4 ORDER BY CASE WHEN latest.provider='local' THEN 1 ELSE 0 END,latest.created_at DESC,latest.id DESC LIMIT 1)"
         )
         with self.database.session() as connection:
             rows = connection.execute(

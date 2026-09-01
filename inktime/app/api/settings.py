@@ -30,7 +30,6 @@ from inktime.app.providers.config import (
     validate_model_id,
 )
 from inktime.app.repositories.settings import (
-    RANKING_WEIGHT_KEYS,
     SENSITIVE_STATUS_KEYS,
     SETTINGS_SCHEMA_VERSION,
     SETTING_DEFINITIONS,
@@ -230,7 +229,6 @@ def _impact(changed: dict[str, object]) -> dict[str, object]:
     cache_changed = any(bool(definition["cache_impact"]) for definition in definitions)
     reanalysis = any(bool(definition["reanalysis_impact"]) for definition in definitions)
     rerender = any(bool(definition["rerender_impact"]) for definition in definitions)
-    ranking_only = bool(known) and set(known).issubset(set(RANKING_WEIGHT_KEYS))
     counts = _bounded_counts()
     warnings = [
         f"{SETTING_DEFINITIONS[key]['label_zh_tw']}目前尚未接上 runtime 動態讀取"
@@ -257,8 +255,8 @@ def _impact(changed: dict[str, object]) -> dict[str, object]:
         "restart_required": any(bool(definition["restart_required"]) for definition in definitions),
         "affects_new_jobs": any(definition["effective_scope"] == "next_job" for definition in definitions),
         "cache_fingerprint_changed": cache_changed,
-        "ranking_only": ranking_only,
-        "reanalysis_required": reanalysis and not ranking_only,
+        "ranking_only": False,
+        "reanalysis_required": reanalysis,
         "rerender_required": rerender,
         **counts,
         "estimated_ai_requests": estimated_requests,

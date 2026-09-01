@@ -2170,6 +2170,29 @@ MIGRATIONS = (
         "統一既有 AI 分析為台灣繁體中文",
         (),
     ),
+    Migration(
+        54,
+        "Vision schema v4 與本機特殊程度排序",
+        (
+            "ALTER TABLE photo_analysis ADD COLUMN visual_score REAL CHECK(visual_score BETWEEN 0 AND 100)",
+            "ALTER TABLE photo_analysis ADD COLUMN local_quality_score REAL CHECK(local_quality_score BETWEEN 0 AND 100)",
+            "ALTER TABLE photo_analysis ADD COLUMN special_level INTEGER CHECK(special_level BETWEEN 0 AND 4)",
+            "ALTER TABLE photo_analysis ADD COLUMN special_codes_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE photo_analysis ADD COLUMN people_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE photo_analysis ADD COLUMN content_filter_json TEXT",
+            "ALTER TABLE photo_analysis ADD COLUMN effective_special_level INTEGER",
+            "ALTER TABLE photo_analysis ADD COLUMN library_rarity_adjustment INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE scoring_rule_versions RENAME COLUMN beauty_weight TO visual_weight",
+            "ALTER TABLE scoring_rule_versions RENAME COLUMN technical_weight TO local_weight",
+            "UPDATE scoring_rule_versions SET is_active=0",
+            "DELETE FROM settings WHERE key LIKE 'analysis.ranking_%'",
+            "DELETE FROM settings WHERE key='analysis.scoring_rules' AND updated_by IS NULL",
+            "UPDATE settings SET value_json='30' WHERE key='analysis.caption_min_chars'",
+            "UPDATE settings SET value_json='60' WHERE key='analysis.caption_target_chars'",
+            "UPDATE settings SET value_json='100' WHERE key='analysis.caption_max_chars'",
+            "UPDATE settings SET value_json='1200' WHERE key IN ('budget.full_analysis_max_tokens','budget.caption_variants_max_tokens') AND CAST(value_json AS INTEGER)>1200",
+        ),
+    ),
 )
 
 

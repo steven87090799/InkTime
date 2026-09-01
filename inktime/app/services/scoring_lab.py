@@ -8,7 +8,10 @@ from uuid import uuid4
 from PIL import Image, ImageOps
 
 from inktime.app.domain.analysis import AnalysisValidationError, validate_analysis_result
-from inktime.app.domain.analysis.scoring import calculate_ranking_score
+from inktime.app.domain.analysis.scoring import calculate_ranking_score, DEFAULT_RANKING_WEIGHTS
+from inktime.app.services.analysis import FULL_ANALYSIS_TOKEN_CAP
+from inktime.app.domain.photos.preprocessing import PhotoPreprocessor
+from inktime.app.domain.photos.quality_policy import evaluate_local_quality, local_candidate_score
 from inktime.app.repositories.scoring import ScoringProfileRepository
 from inktime.app.repositories.settings import SettingsRepository
 from inktime.app.repositories.usage import UsageRepository
@@ -64,7 +67,7 @@ class ScoringLabService:
         self.budgets.assert_request_allowed(None, None)
         profile = self.profiles.current()
         model = str(self.settings.get("model.high_model", "gpt-4o"))
-        max_tokens = max(256, min(int(self.settings.get("budget.max_tokens", 8000)), 2048))
+        max_tokens = max(256, min(int(self.settings.get("budget.max_tokens", 8000)), FULL_ANALYSIS_TOKEN_CAP))
         provider_request_context_id = f"scoring_test|{uuid4()}"
         selected_provider = provider
         provider_id = ""
@@ -313,12 +316,9 @@ class ScoringLabService:
         total_input = sum(int(item["input_tokens"]) for item in attempt_summary)
         total_output = sum(int(item["output_tokens"]) for item in attempt_summary)
         total_cached = sum(int(item["cached_tokens"]) for item in attempt_summary)
-        weights = {
-            "memory": float(profile["memory_weight"]),
-            "beauty": float(profile["beauty_weight"]),
-            "technical_quality": float(profile["technical_weight"]),
-            "emotion": float(profile["emotion_weight"]),
-        }
+        weights = dict(DEFAULT_RANKING_WEIGHTS)
+        features = PhotoPreprocessor().analyze(image_path).as_dict()
+        result["local_quality_score"] = local_candidate_score(features, evaluation=evaluate_local_quality(features))
         return {
             "analysis": result,
             "ranking_score": calculate_ranking_score(

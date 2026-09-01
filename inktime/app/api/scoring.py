@@ -7,10 +7,11 @@ import tempfile
 from flask import Blueprint, abort, current_app, g, render_template, request
 from PIL import UnidentifiedImageError
 
-from inktime.app.core.json_values import JsonScalarError, json_float, json_object_payload
+from inktime.app.core.json_values import JsonScalarError, json_object_payload
 from inktime.app.domain.analysis import AnalysisValidationError
 from inktime.app.domain.analysis.scoring import (
     DISTINCTIVE_SCORING_RULES,
+    DEFAULT_RANKING_WEIGHTS,
     calculate_distinguishing_score,
     prepare_score_distribution,
     score_band,
@@ -61,15 +62,8 @@ def create_profile():
         profile = current_app.extensions["inktime_scoring_repository"].create(
             name=str(payload.get("name", "")),
             rules=str(payload.get("rules", "")),
-            weights={
-                "memory": json_float(payload, "memory_weight", default=0, minimum=0, maximum=100),
-                "beauty": json_float(payload, "beauty_weight", default=0, minimum=0, maximum=100),
-                "technical_quality": json_float(
-                    payload, "technical_weight", default=0, minimum=0, maximum=100
-                ),
-                "emotion": json_float(payload, "emotion_weight", default=0, minimum=0, maximum=100),
-            },
-            favorite_bonus=json_float(payload, "favorite_bonus", default=0, minimum=-100, maximum=100),
+            weights=dict(DEFAULT_RANKING_WEIGHTS),
+            favorite_bonus=1,
             created_by=str(g.user["id"]),
             source_ip=request.remote_addr or "unknown",
         )

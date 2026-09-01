@@ -39,7 +39,7 @@ class PhotoAnalysisRetentionRepository:
             FROM providers ORDER BY id
             """,
             """
-            SELECT id,rules,memory_weight,beauty_weight,technical_weight,emotion_weight,
+            SELECT id,rules,memory_weight,visual_weight,local_weight,
                    favorite_bonus,is_active,created_at
             FROM scoring_rule_versions ORDER BY id
             """,

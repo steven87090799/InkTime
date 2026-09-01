@@ -21,25 +21,24 @@
 <section class="panel calibration-panel">
   <div class="panel-head"><div><h2>照片庫相對鑑別分</h2><p>解決模型常把照片集中打在相近區間、肉眼難以比較的問題。</p></div><span class="status {{ 'ok' if distribution.calibration_ready else 'muted' }}">{{ '校準已啟用' if distribution.calibration_ready else '等待更多照片' }}</span></div>
   <div class="calibration-explainer">
-    <article><strong>1. 保留原始分</strong><p>回憶、美觀、技術、情緒與綜合排序都不覆寫，仍可追溯模型判斷。</p></article>
+    <article><strong>1. 保留原始分</strong><p>回憶、視覺、技術、情緒與綜合排序都不覆寫，仍可追溯模型判斷。</p></article>
     <article><strong>2. 比較整個照片庫</strong><p>至少 5 張且有 3 種分數後，以同分平均名次計算相對百分位。</p></article>
     <article><strong>3. 顯示更有差異</strong><p>鑑別分以 35% 原始分＋65% 相對百分位呈現，排序方向不變。</p></article>
   </div>
   <p class="calibration-range">目前原始綜合分：{{ distribution.minimum if distribution.minimum is not none else '—' }}～{{ distribution.maximum if distribution.maximum is not none else '—' }}。照片庫、照片詳情與單張測試會同時標示原始分、鑑別分及「精選／推薦／一般／較弱」。</p>
-  <details class="scoring-research"><summary>為什麼採用這個方向？</summary><p>GitHub 上的 NIMA 將美感與技術品質分開，Siamese NIMA 用相對配對強化細微排序；Facet 也採多維品質與照片剔除。InkTime 保留現有輕量部署，不強制下載大型 PyTorch／TensorFlow 模型，先採同樣的「多維＋相對排序」原則。</p><p><a href="https://github.com/idealo/image-quality-assessment" target="_blank" rel="noopener noreferrer">NIMA 實作</a> · <a href="https://github.com/ryanfwy/image-quality" target="_blank" rel="noopener noreferrer">Siamese NIMA</a> · <a href="https://github.com/ncoevoet/facet" target="_blank" rel="noopener noreferrer">Facet</a></p></details>
+  <details class="scoring-research"><summary>為什麼採用這個方向？</summary><p>GitHub 上的 NIMA 將美感與本機品質分開，Siamese NIMA 用相對配對強化細微排序；Facet 也採多維品質與照片剔除。InkTime 保留現有輕量部署，不強制下載大型 PyTorch／TensorFlow 模型，先採同樣的「多維＋相對排序」原則。</p><p><a href="https://github.com/idealo/image-quality-assessment" target="_blank" rel="noopener noreferrer">NIMA 實作</a> · <a href="https://github.com/ryanfwy/image-quality" target="_blank" rel="noopener noreferrer">Siamese NIMA</a> · <a href="https://github.com/ncoevoet/facet" target="_blank" rel="noopener noreferrer">Facet</a></p></details>
 </section>
 
 <section class="panel">
-  <div class="panel-head"><div><h2>規則與綜合權重</h2><p>四項權重合計必須是 100%。儲存會建立新版本，不會覆蓋歷史。</p></div><div class="scoring-panel-actions">{% if g.user.role == 'administrator' %}<button class="secondary" type="button" id="distinctive-preset">套用高鑑別度範本</button>{% endif %}<strong id="weight-total" class="weight-total">100%</strong></div></div>
+  <div class="panel-head"><div><h2>規則與綜合權重</h2><p>固定公式：回憶 50%＋視覺 25%＋本機品質 25%，再加 Special；最愛提升 1 級。儲存會建立新版本，不會覆蓋歷史。</p></div><div class="scoring-panel-actions">{% if g.user.role == 'administrator' %}<button class="secondary" type="button" id="distinctive-preset">套用高鑑別度範本</button>{% endif %}<strong id="weight-total" class="weight-total">100%</strong></div></div>
   {% if g.user.role == 'administrator' %}
   <form id="scoring-profile-form" class="scoring-form">
     <label class="profile-name">版本名稱<input name="name" maxlength="80" value="{{ current_profile.name }} 的調整" required></label>
     <div class="weight-grid">
-      <label>回憶價值 <output data-output="memory_weight">{{ current_profile.memory_weight }}%</output><input type="range" name="memory_weight" min="0" max="100" step="1" value="{{ current_profile.memory_weight }}"></label>
-      <label>美觀 <output data-output="beauty_weight">{{ current_profile.beauty_weight }}%</output><input type="range" name="beauty_weight" min="0" max="100" step="1" value="{{ current_profile.beauty_weight }}"></label>
-      <label>技術品質 <output data-output="technical_weight">{{ current_profile.technical_weight }}%</output><input type="range" name="technical_weight" min="0" max="100" step="1" value="{{ current_profile.technical_weight }}"></label>
-      <label>情緒與故事 <output data-output="emotion_weight">{{ current_profile.emotion_weight }}%</output><input type="range" name="emotion_weight" min="0" max="100" step="1" value="{{ current_profile.emotion_weight }}"></label>
-      <label>最愛照片額外加分 <output data-output="favorite_bonus">+{{ current_profile.favorite_bonus }}</output><input type="range" name="favorite_bonus" min="0" max="30" step="1" value="{{ current_profile.favorite_bonus }}"></label>
+      <label>回憶價值 <output data-output="memory_weight">{{ current_profile.memory_weight }}%</output><input type="range" disabled name="memory_weight" min="0" max="100" step="1" value="{{ current_profile.memory_weight }}"></label>
+      <label>視覺 <output data-output="visual_weight">{{ current_profile.visual_weight }}%</output><input type="range" disabled name="visual_weight" min="0" max="100" step="1" value="{{ current_profile.visual_weight }}"></label>
+      <label>本機品質 <output data-output="local_weight">{{ current_profile.local_weight }}%</output><input type="range" disabled name="local_weight" min="0" max="100" step="1" value="{{ current_profile.local_weight }}"></label>
+      <label>最愛提升特殊程度 <output data-output="favorite_bonus">+{{ current_profile.favorite_bonus }}</output><input type="range" disabled name="favorite_bonus" min="0" max="30" step="1" value="{{ current_profile.favorite_bonus }}"></label>
     </div>
     <label class="rules-editor">照片高低分規則<small>高鑑別度範本會要求模型使用完整 0～100 範圍，避免不確定時一律給 75～80 分。</small><textarea name="rules" rows="28" minlength="100" maxlength="12000" required>{{ current_profile.rules }}</textarea></label>
     <button class="primary" type="submit">儲存為新版本</button><span id="scoring-profile-status" role="status" aria-live="polite"></span>
@@ -63,9 +62,9 @@
 
 <section class="panel">
   <h2>規則版本歷史</h2>
-  <div class="table-wrap"><table><thead><tr><th>版本</th><th>權重（回憶／美觀／技術／情緒）</th><th>最愛</th><th>建立時間</th><th>操作</th></tr></thead><tbody>
+  <div class="table-wrap"><table><thead><tr><th>版本</th><th>權重（回憶／視覺／技術／情緒）</th><th>最愛</th><th>建立時間</th><th>操作</th></tr></thead><tbody>
   {% for version in versions %}
-    <tr><td><strong>{{ version.name }}</strong>{% if version.is_active %}<small>目前使用中</small>{% endif %}</td><td>{{ version.memory_weight }}／{{ version.beauty_weight }}／{{ version.technical_weight }}／{{ version.emotion_weight }}</td><td>+{{ version.favorite_bonus }}</td><td>{{ version.created_at }}</td><td>{% if g.user.role == 'administrator' and not version.is_active %}<button class="secondary restore-profile" data-id="{{ version.id }}">還原此版本</button>{% else %}—{% endif %}</td></tr>
+    <tr><td><strong>{{ version.name }}</strong>{% if version.is_active %}<small>目前使用中</small>{% endif %}</td><td>{{ version.memory_weight }}／{{ version.visual_weight }}／{{ version.local_weight }}</td><td>+{{ version.favorite_bonus }}</td><td>{{ version.created_at }}</td><td>{% if g.user.role == 'administrator' and not version.is_active %}<button class="secondary restore-profile" data-id="{{ version.id }}">還原此版本</button>{% else %}—{% endif %}</td></tr>
   {% endfor %}
   </tbody></table></div>
 </section>
@@ -75,7 +74,7 @@
 <script nonce="{{ csp_nonce }}">
 (() => {
   const profileForm = document.getElementById('scoring-profile-form');
-  const weightNames = ['memory_weight', 'beauty_weight', 'technical_weight', 'emotion_weight'];
+  const weightNames = ['memory_weight', 'visual_weight', 'local_weight'];
   const total = document.getElementById('weight-total');
   const updateWeights = () => {
     let sum = 0;
@@ -94,10 +93,10 @@
   profileForm.addEventListener('submit', async event => {
     event.preventDefault();
     const profileStatus = document.getElementById('scoring-profile-status');
-    if (updateWeights() !== 100) return window.inktimeSetStatus(profileStatus, '四項權重合計必須等於 100%', 'error');
+    if (updateWeights() !== 100) return window.inktimeSetStatus(profileStatus, '三項權重合計必須等於 100%', 'error');
     const body = window.inktimeFormJson(profileForm, {
-      memory_weight: 'integer', beauty_weight: 'integer', technical_weight: 'integer',
-      emotion_weight: 'integer', favorite_bonus: 'integer'
+      memory_weight: 'integer', visual_weight: 'integer', local_weight: 'integer',
+      favorite_bonus: 'integer'
     });
     const response = await window.inktimeFetch('/api/v1/scoring/profiles', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
@@ -147,7 +146,7 @@
         return node;
       };
       const cards = element('div', '', 'score-cards');
-      [['鑑別分', data.distinguishing_score], ['原始綜合', data.ranking_score], ['回憶', analysis.memory_score], ['美觀', analysis.beauty_score], ['技術', analysis.technical_quality_score], ['情緒', analysis.emotion_score]].forEach(([label, value]) => {
+      [['鑑別分', data.distinguishing_score], ['原始綜合', data.ranking_score], ['回憶', analysis.memory_score], ['視覺', analysis.visual_score], ['技術', analysis.local_quality_score]].forEach(([label, value]) => {
         const card = document.createElement('article');
         card.append(element('span', label), element('strong', String(value)));
         cards.append(card);
@@ -176,7 +175,7 @@
       result.replaceChildren(
         cards,
         element('h3', `${data.score_band}｜${analysis.caption}`),
-        element('p', analysis.reason),
+        element('p', JSON.stringify(analysis.content_filter)),
         element('p', `類型：${(analysis.types || []).join('、')}`),
         element('small', `${data.profile.name} · ${usage.provider}/${usage.model} · ${usage.input_tokens + usage.output_tokens} Token · ${costSummary} · ${usage.latency_ms} ms`),
         usageRows

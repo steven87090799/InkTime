@@ -10,10 +10,7 @@ from typing import Any, Mapping, Sequence
 VISION_INPUT_VERSION = "vision-input-v2"
 PROVIDER_PROMPT_CONTRACT_VERSION = "provider-prompt-contract-v1"
 AI_IMAGE_JPEG_QUALITY = 88
-# v1/v2 remain readable for historical cache rows.  New model requests use
-# the additive v3 grade/confidence contract and are normalized to the stable
-# numeric fields before persistence.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 SINGLE_ANALYSIS_STRATEGIES = {"single", "single_high", "high_quality"}
 LEGACY_ANALYSIS_STRATEGIES = {"custom", "low_cost", "smart", "smart_two_stage"}
@@ -90,7 +87,6 @@ def build_analysis_plan(
     caption_display_controls: Mapping[str, Any] | None = None,
     prefilter: Mapping[str, Any] | None = None,
     execution_policy: Mapping[str, Any] | None = None,
-    travel_policy: Mapping[str, Any] | None = None,
     scoring_rules: str = "",
     reasoning_effort: str = "none",
     repair_policy: Mapping[str, Any] | None = None,
@@ -154,13 +150,8 @@ def build_analysis_plan(
         "provider_route": route,
         "favorite_override": bool(favorite_override),
         "scoring_profile_id": str(scoring_profile.get("id", "")),
-        "ranking_weights": {
-            "memory": float(scoring_profile.get("memory_weight", 0)),
-            "beauty": float(scoring_profile.get("beauty_weight", 0)),
-            "technical_quality": float(scoring_profile.get("technical_weight", 0)),
-            "emotion": float(scoring_profile.get("emotion_weight", 0)),
-        },
-        "favorite_bonus": float(scoring_profile.get("favorite_bonus", 0)),
+        "ranking_weights": {"memory": 50.0, "visual": 25.0, "local_quality": 25.0},
+        "favorite_bonus": 1,
         "scoring_rules_sha256": rules_sha256,
         "scoring_rules": str(scoring_rules),
         "provider_behavior_revision": behavior_revision,
@@ -179,7 +170,6 @@ def build_analysis_plan(
         "vision_input": high_input,
         "prefilter": dict(prefilter or {}),
         "ai_execution_policy": dict(execution_policy or {}),
-        "travel_policy": dict(travel_policy or {}),
         "reasoning_effort": normalized_effort,
         "repair_policy": {
             "enabled": bool(configured_repair.get("enabled", True)),
@@ -231,7 +221,7 @@ def normalize_analysis_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
     raw["caption_display_controls"] = display_controls
     raw["strategy"] = strategy
     raw["schema_kind"] = "basic" if strategy == "local" else "full"
-    raw["schema_version"] = int(raw.get("schema_version", SCHEMA_VERSION))
+    raw["schema_version"] = SCHEMA_VERSION
     has_scoring_contract = "scoring_rules" in raw or "scoring_rules_sha256" in raw
     if has_scoring_contract:
         scoring_rules = str(raw.get("scoring_rules", ""))

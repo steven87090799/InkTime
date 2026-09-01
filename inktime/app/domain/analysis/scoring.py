@@ -6,16 +6,10 @@ import math
 from typing import Iterable, Mapping
 
 
-DEFAULT_RANKING_WEIGHTS = {
-    "memory": 50.0,
-    "beauty": 20.0,
-    "technical_quality": 10.0,
-    "emotion": 20.0,
-}
-DEFAULT_FAVORITE_BONUS = 5.0
-RANKING_RULE_VERSION = "ranking-v2"
-LOCATION_RULE_VERSION = "travel-v1"
-GRADE_TO_SCORE = {"S": 95.0, "A": 85.0, "B": 70.0, "C": 55.0, "D": 35.0, "E": 15.0}
+DEFAULT_RANKING_WEIGHTS = {"memory": 50.0, "visual": 25.0, "local_quality": 25.0}
+DEFAULT_FAVORITE_BONUS = 1
+RANKING_RULE_VERSION = "ranking-v4"
+SPECIAL_BONUSES = (0, 2, 5, 9, 14)
 
 
 @dataclass(frozen=True)
@@ -77,124 +71,84 @@ def score_band(percentile: float | None, score: float) -> str:
 
 
 def validate_ranking_weights(weights: Mapping[str, float]) -> dict[str, float]:
-    required = set(DEFAULT_RANKING_WEIGHTS)
-    if set(weights) != required:
-        raise ValueError("綜合評分權重欄位不完整")
-    normalized = {key: float(value) for key, value in weights.items()}
-    if any(value < 0 or value > 100 for value in normalized.values()):
-        raise ValueError("每項權重必須介於 0 到 100")
-    if abs(sum(normalized.values()) - 100.0) > 0.001:
-        raise ValueError("四項權重合計必須等於 100%")
-    return normalized
+    if dict(weights) != DEFAULT_RANKING_WEIGHTS:
+        raise ValueError("排序權重固定為回憶 50%、視覺 25%、本機品質 25%")
+    return dict(DEFAULT_RANKING_WEIGHTS)
+
+
+def ranking_components(analysis: Mapping, *, favorite: bool = False, rarity_adjustment: int = 0) -> dict:
+    base = (
+        float(analysis["memory_score"]) * 0.50
+        + float(analysis["visual_score"]) * 0.25
+        + float(analysis["local_quality_score"]) * 0.25
+    )
+    base = round(base, 2)
+    effective = max(0, min(4, int(analysis["special_level"]) + int(bool(rarity_adjustment)) + int(favorite)))
+    raw = round(max(0.0, min(100.0, base + SPECIAL_BONUSES[effective])), 2)
+    return {
+        "base_ranking_score": round(base, 2),
+        "effective_special_level": effective,
+        "library_rarity_adjustment": int(bool(rarity_adjustment)),
+        "favorite_adjustment": int(favorite),
+        "special_bonus": SPECIAL_BONUSES[effective],
+        "raw_ranking_score": raw,
+        "final_ranking_score": raw,
+        "ranking_score": raw,
+    }
 
 
 def calculate_ranking_score(
-    analysis: Mapping[str, float | int],
-    weights: Mapping[str, float],
+    analysis: Mapping,
+    weights: Mapping[str, float] | None = None,
     *,
     favorite: bool = False,
     favorite_bonus: float = DEFAULT_FAVORITE_BONUS,
+    rarity_adjustment: int = 0,
 ) -> float:
-    values = validate_ranking_weights(weights)
-    score = (
-        float(analysis["memory_score"]) * values["memory"]
-        + float(analysis["beauty_score"]) * values["beauty"]
-        + float(analysis["technical_quality_score"]) * values["technical_quality"]
-        + float(analysis["emotion_score"]) * values["emotion"]
-    ) / 100.0
-    if favorite:
-        score += max(0.0, min(100.0, float(favorite_bonus)))
-    return round(max(0.0, min(100.0, score)), 2)
+    if weights is not None:
+        validate_ranking_weights(weights)
+    return ranking_components(analysis, favorite=favorite, rarity_adjustment=rarity_adjustment)[
+        "raw_ranking_score"
+    ]
 
 
-def grade_to_score(value: str | None, fallback: float) -> float:
-    """模型只能交付等級；數字映射固定在程式，便於版本化與重算。"""
-    return GRADE_TO_SCORE.get(str(value or "").upper(), float(fallback))
+def rarity_features(analysis: Mapping) -> set[str]:
+    """Only library-observable categories, never inferred personal importance."""
+    people = int(analysis.get("people_count") or 0)
+    bucket = (
+        "0"
+        if people == 0
+        else "1"
+        if people == 1
+        else "2-5"
+        if people <= 5
+        else "6-15"
+        if people <= 15
+        else "16+"
+    )
+    return {
+        *(f"type:{value}" for value in analysis.get("types", [])),
+        *(f"special:{value}" for value in analysis.get("special_codes", [])),
+        f"people:{bucket}",
+    }
 
 
-def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    radius = 6371.0
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    delta_phi, delta_lon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
-    value = math.sin(delta_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lon / 2) ** 2
-    return radius * 2 * math.atan2(math.sqrt(value), math.sqrt(max(0.0, 1.0 - value)))
+def library_rarity_adjustment(analysis: Mapping, population: Iterable[Mapping]) -> int:
+    rows = list(population)
+    if len(rows) < 20:
+        return 0
+    features = rarity_features(analysis)
+    counts = {feature: 0 for feature in features}
+    for row in rows:
+        for feature in features & rarity_features(row):
+            counts[feature] += 1
+    # A small library is insufficient evidence; rare means at most 5% of peers.
+    return int(any(count / len(rows) <= 0.05 for count in counts.values()))
 
 
-def calculate_travel_bonus(
-    *,
-    latitude: float | None,
-    longitude: float | None,
-    home_latitude: float | None,
-    home_longitude: float | None,
-    home_radius_km: float,
-    near_bonus: float,
-    far_bonus: float,
-    foreign_bonus: float,
-    rare_bonus: float,
-    foreign_country: bool = False,
-    rare_location: bool = False,
-    maximum: float = 8.0,
-) -> tuple[float, float | None]:
-    if latitude is None or longitude is None or home_latitude is None or home_longitude is None:
-        return 0.0, None
-    distance = _distance_km(float(latitude), float(longitude), float(home_latitude), float(home_longitude))
-    bonus = 0.0
-    if distance > max(0.0, float(home_radius_km)):
-        if distance <= 200:
-            bonus += near_bonus
-        elif distance <= 1000:
-            bonus += far_bonus
-        elif foreign_country:
-            bonus += foreign_bonus
-        else:
-            # 超過 1,000 km 但沒有可信國家資訊時不臆測跨國；保留遠行基本加分。
-            bonus += far_bonus
-    if foreign_country:
-        bonus = max(bonus, foreign_bonus)
-    if rare_location:
-        bonus += rare_bonus
-    return round(max(0.0, min(float(maximum), bonus)), 2), round(distance, 2)
-
-
-DISTINCTIVE_SCORING_RULES = """【共通評分方法】
-不要把普通照片全部放在 70～85 分。每一項都先從 50 分的「可用但普通」開始，只依畫面中能確認的證據加減分，並使用完整的 0～100 範圍：
-- 0～19：幾乎不可用、嚴重失敗或完全沒有保留價值。
-- 20～39：明顯較差，缺陷或低價值證據很多。
-- 40～54：低於一般，勉強可用但沒有突出優點。
-- 55～69：一般到不錯，有明確優點但仍常見。
-- 70～82：明顯優秀，能具體指出兩項以上強項。
-- 83～92：非常突出、少見且值得優先保留。
-- 93～100：極少數代表作；沒有壓倒性證據不可使用。
-相鄰照片若品質不同，分數至少拉開 5 分；不要因為不確定就一律給 75～80 分。
-
-【回憶分 memory_score】
-只評估值得回看與保留的程度，題材普通且沒有事件、互動或稀缺性時應落在 40～60 分，而不是自動給高分。
-
-以下條件可疊加提高回憶分：
-- 人物與關係：清楚且占比足夠的人臉、人物互動或合照，大幅提高評分。
-- 事件性：生日、聚會、儀式、舞台或其他明確活動，提高評分。
-- 稀缺性：難以重現、錯過便不再有的瞬間，大幅提高評分。
-- 情緒強度：笑、哭、驚喜、擁抱、互動或強烈氛圍，提高評分。
-- 資訊密度：畫面能清楚說明當時發生什麼，略微提高評分。
-- 優美風景：壯麗自然風光、精緻或有秩序感的構圖，提高評分。
-- 旅行意義：異地、地標或明確旅途情境，提高評分。
-- 孩子、貓咪或其他寵物：通常具有較高個人回憶價值，先以約 75 分為基準，再依互動、事件與稀缺性調整。
-
-以下條件降低回憶分：
-- 模糊、失焦、殘影、主體被遮擋或曝光嚴重失敗，降低評分。
-- 收據、帳單、廣告、螢幕截圖、測試圖片、隨手拍雜物或其他低價值記錄，應為 0～25 分，最高不可超過 39 分。
-
-【美觀分 beauty_score】
-只評估視覺品質，包括構圖、光線、清晰度、色彩與主體是否突出。人物、孩子、貓咪、寵物、旅行等主題本身不代表美觀分較高。
-
-【技術品質分 technical_quality_score】
-依對焦、曝光、動態模糊、雜訊、解析度與可用構圖評分，不因題材具有回憶價值而提高。
-
-【情緒分 emotion_score】
-依可觀察到的表情、互動、故事性與氛圍強度評分；不得臆測人物關係、身份、地點或未出現在畫面中的事件。
-
-【輸出前自我校準】
-輸出前重新檢查四項分數：若四項全落在 70～85，必須逐項找出具體證據；證據不足的項目回到 40～60。美觀、技術、情緒與回憶是獨立維度，不得只因題材討喜就全部給高分。"""
-
-
-DEFAULT_SCORING_RULES = DISTINCTIVE_SCORING_RULES
+DEFAULT_SCORING_RULES = """memory_score、visual_score 各為 0～100 數字，普通照片約 40～60，使用完整範圍。
+memory 評一般情況下值得回看的程度：人物、互動、活動、日常紀錄與故事資訊量；不猜對使用者本人的重要性。重大事件、里程碑、大型合照與極罕見瞬間主要放 special_level，避免重複加分。
+visual 只評構圖、光線、主體突出、色彩明暗、平衡及整體吸引力；女性、男性、孩子、寵物或旅行題材本身不加分。模糊、曝光、解析度與技術品質由本機計算。
+special_level：0 普通；1 稍有特色；2 明確活動、合照、旅行紀錄或難得互動；3 重要典禮、舞台、大型合照或難重現事件；4 極罕見人生里程碑或無法重現的重要紀錄。非常保守使用 3、4，只填 level，不輸出 bonus。
+special_codes 最多 2 個。group_photo 必須整群人為主體、共同面向鏡頭或明顯共同合影；夜市、觀眾、車站及街道人潮不算合照。people_count 只依可見人數。不宣稱照片在使用者照片庫少見，library rarity 由本機判定。"""
+DISTINCTIVE_SCORING_RULES = DEFAULT_SCORING_RULES

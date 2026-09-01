@@ -31,9 +31,7 @@ from inktime.app.domain.analysis.execution_mode import (
 from inktime.app.domain.analysis.scoring import (
     DEFAULT_FAVORITE_BONUS,
     DEFAULT_RANKING_WEIGHTS,
-    calculate_ranking_score,
-    calculate_travel_bonus,
-    grade_to_score,
+    ranking_components,
 )
 from inktime.app.domain.analysis.schema import normalize_caption_controls
 from inktime.app.domain.photos import ThumbnailCache
@@ -41,6 +39,7 @@ from inktime.app.domain.photos.quality_policy import (
     FEATURE_VERSION,
     evaluate_local_quality,
     is_confirmed_screenshot,
+    local_candidate_score,
 )
 from inktime.app.providers.base import ProviderResponse, Usage, VisionAttemptState, VisionProvider
 from inktime.app.repositories.photos import PhotoRepository
@@ -59,9 +58,12 @@ class AnalysisDisabledError(RuntimeError):
     code = "ANALYSIS-DISABLED"
 
 
-PROMPT_VERSION = "photo-quality-v6-caption-rubric"
-FULL_ANALYSIS_TOKEN_CAP = 2048
-CAPTION_VARIANTS_TOKEN_CAP = 3072
+PROMPT_VERSION = "photo-analysis-v4-content-special"
+# Maximum bounded response: 100 caption + 16 side-caption characters, five
+# types, two codes, six orientation evidence codes and JSON keys.  1200 tokens
+# leaves headroom for multi-token Traditional Chinese and provider formatting.
+FULL_ANALYSIS_TOKEN_CAP = 1200
+CAPTION_VARIANTS_TOKEN_CAP = FULL_ANALYSIS_TOKEN_CAP
 LOGGER = logging.getLogger("analysis")
 
 
@@ -170,9 +172,9 @@ class PhotoAnalysisService:
             return [line.strip() for line in str(settings.get(key, "")).splitlines() if line.strip()]
 
         return normalize_caption_controls({
-            "caption_min_chars": int(settings.get("analysis.caption_min_chars", 120)),
-            "caption_target_chars": int(settings.get("analysis.caption_target_chars", 160)),
-            "caption_max_chars": int(settings.get("analysis.caption_max_chars", 200)),
+            "caption_min_chars": int(settings.get("analysis.caption_min_chars", 30)),
+            "caption_target_chars": int(settings.get("analysis.caption_target_chars", 60)),
+            "caption_max_chars": int(settings.get("analysis.caption_max_chars", 100)),
             "side_caption_min_chars": int(settings.get("analysis.side_caption_min_chars", 8)),
             "side_caption_target_chars": int(settings.get("analysis.side_caption_target_chars", 12)),
             "side_caption_max_chars": int(settings.get("analysis.side_caption_max_chars", 16)),
@@ -231,18 +233,6 @@ class PhotoAnalysisService:
             "daily_photo_limit": int(settings.get("analysis.ai_daily_photo_limit", 50)),
             "monthly_photo_limit": int(settings.get("analysis.ai_monthly_photo_limit", 500)),
         }
-        travel_policy = {
-            "enabled": bool(settings.get("travel_bonus_enabled", True)),
-            "home_latitude": settings.get("home_latitude"),
-            "home_longitude": settings.get("home_longitude"),
-            "home_radius_km": float(settings.get("home_radius_km", 60)),
-            "near_bonus": float(settings.get("travel_bonus_near", 2)),
-            "far_bonus": float(settings.get("travel_bonus_far", 4)),
-            "foreign_bonus": float(settings.get("foreign_country_bonus", 6)),
-            "rare_bonus": float(settings.get("rare_location_bonus", 2)),
-            "maximum_bonus": float(settings.get("max_total_bonus", 8)),
-            "location_rule_version": str(settings.get("location_rule_version", "travel-v1")),
-        }
         analysis_model_value = settings.get("model.analysis_model", None)
         legacy_model_value = settings.get("model.high_model", None)
         # Existing installations may have a customized legacy high model.  A
@@ -284,7 +274,6 @@ class PhotoAnalysisService:
             caption_display_controls=display_controls,
             prefilter=prefilter,
             execution_policy=execution_policy,
-            travel_policy=travel_policy,
             scoring_rules=str(settings.get("analysis.scoring_rules", "")),
             reasoning_effort="none",
             repair_policy=repair_policy,
@@ -301,50 +290,25 @@ class PhotoAnalysisService:
 
     @staticmethod
     def _apply_caption_variant(result: dict, caption_controls: dict | None) -> dict:
-        if not caption_controls or not caption_controls["caption_variants_enabled"]:
-            return result
-        variants = (result.get("details") or {}).get("caption_variants") or {}
-        style = str(caption_controls["copy_default_style"])
-        selected = (
-            variants.get(style)
-            or variants.get("natural")
-            or result.get("side_caption")
-            or "畫面把此刻收好了。"
-        )
-        result["side_caption"] = str(selected).strip()
         return result
 
     @staticmethod
     def _local_result(photo) -> dict:
-        quality = max(0.0, min(100.0, float(photo["blur_score"] or 0) ** 0.5 * 4))
-        screenshot = float(photo["screenshot_likelihood"] or 0) >= 0.65
         return {
-            "schema_version": 2,
-            "caption": "已完成本地影像特徵分析，未將照片傳送至模型。",
-            "types": ["截圖" if screenshot else "其他"],
-            "memory_score": 10.0 if screenshot else 50.0,
-            "beauty_score": quality,
-            "technical_quality_score": quality,
-            "emotion_score": 0.0,
-            "side_caption": "",
-            "should_keep": not screenshot,
-            "sensitive": False,
-            "reason": "依本地清晰度、曝光與截圖特徵判定",
+            "schema_version": SCHEMA_VERSION,
+            "caption": "已完成本機清晰度、曝光、解析度與影像特徵分析，未將照片傳送至模型。",
+            "types": ["截圖" if is_confirmed_screenshot(photo) else "其他"],
+            "memory_score": 0.0, "visual_score": 0.0,
+            "special_level": 0, "special_codes": [], "people_count": 0,
+            "side_caption": "畫面把此刻收好了。",
+            "content_filter": {"exclude_code": "uncertain", "confidence": 0.0},
+            "subject_position": "unknown", "text_safe_area": "unknown",
             "visual_orientation": _unknown_visual_orientation(),
         }
 
     @staticmethod
     def _local_quality(photo) -> float:
-        blur = max(0.0, float(photo["blur_score"] or 0))
-        contrast = max(0.0, min(100.0, float(photo["contrast"] or 0)))
-        exposure_penalty = max(
-            float(photo["overexposed_ratio"] or 0),
-            float(photo["underexposed_ratio"] or 0),
-        )
-        return round(
-            max(0.0, min(100.0, blur**0.5 * 3.2 + contrast * 0.8 - exposure_penalty * 45)),
-            2,
-        )
+        return local_candidate_score(photo, evaluation=evaluate_local_quality(photo, settings={"analysis.e6_prefilter_enabled": False}))
 
     def prefilter_snapshot(self, photo, *, policy_settings: dict | None = None) -> dict:
         policy_settings = policy_settings or {
@@ -488,36 +452,7 @@ class PhotoAnalysisService:
         if not evaluation["excluded"]:
             return None
 
-        quality = self._local_quality(photo)
-        if evaluation["primary_reason"] == "screenshot":
-            label = "截圖"
-            reasons = ["本機截圖特徵達排除門檻"]
-            memory_score = 5.0
-            types = ["截圖"]
-        elif evaluation["primary_reason"] == "e6_below_threshold":
-            label = "不適合 E6 六色顯示的照片"
-            reasons = ["六色量化後對比、主體、膚色或細節保留不足"]
-            memory_score = 20.0
-            types = ["其他"]
-        else:
-            label = "明顯低品質照片"
-            reasons = evaluation["matched_checks"]
-            memory_score = 15.0
-            types = ["其他"]
-        return {
-            "schema_version": 2,
-            "caption": f"本機預篩選已排除{label}，未將圖片傳送至模型。",
-            "types": types,
-            "memory_score": memory_score,
-            "beauty_score": quality,
-            "technical_quality_score": quality,
-            "emotion_score": 0.0,
-            "side_caption": "",
-            "should_keep": False,
-            "sensitive": False,
-            "reason": "、".join(reasons),
-            "visual_orientation": _unknown_visual_orientation(),
-        }
+        return self._local_result(photo)
 
     def _ensure_e6_suitability(self, photo_id: str, photo, source: Path):
         # E6 is a bounded Scanner feature.  Analysis must not reopen the
@@ -570,79 +505,11 @@ class PhotoAnalysisService:
         *,
         ranking_weights: dict[str, float],
         favorite_bonus: float,
-        travel_policy: dict | None = None,
     ) -> dict:
-        details = result.get("details") or {}
-        for target, grade_key in (
-            ("memory_score", "memory_grade"),
-            ("beauty_score", "beauty_grade"),
-            ("technical_quality_score", "technical_grade"),
-            ("emotion_score", "emotion_grade"),
-        ):
-            fallback_grade = "aesthetic_grade" if grade_key == "beauty_grade" else grade_key
-            result[target] = grade_to_score(
-                details.get(grade_key, details.get(fallback_grade)), float(result[target])
-            )
-        base = calculate_ranking_score(
-            result,
-            ranking_weights,
-            favorite=bool(photo["favorite"]),
-            favorite_bonus=favorite_bonus,
-        )
-        travel_bonus = 0.0
-        location_rule_version = None
-        policy = travel_policy or {}
-        travel_enabled = (
-            bool(policy.get("enabled"))
-            if policy
-            else (self.settings is not None and bool(self.settings.get("travel_bonus_enabled", True)))
-        )
-        if travel_enabled:
-            country = str(details.get("country_candidate") or "").strip().casefold()
-            foreign = bool(country) and country not in {"tw", "taiwan", "台灣", "臺灣", "中華民國"}
-            visits = self.photos.location_visit_count(photo["gps_lat"], photo["gps_lon"])
-            if policy:
-                home_latitude = policy.get("home_latitude")
-                home_longitude = policy.get("home_longitude")
-                home_radius_km = float(policy.get("home_radius_km", 60))
-                near_bonus = float(policy.get("near_bonus", 2))
-                far_bonus = float(policy.get("far_bonus", 4))
-                foreign_bonus = float(policy.get("foreign_bonus", 6))
-                rare_bonus = float(policy.get("rare_bonus", 2))
-                maximum_bonus = float(policy.get("maximum_bonus", 8))
-                location_rule_version = str(policy.get("location_rule_version", "travel-v1"))
-            else:
-                assert self.settings is not None
-                home_latitude = self.settings.get("home_latitude")
-                home_longitude = self.settings.get("home_longitude")
-                home_radius_km = float(self.settings.get("home_radius_km", 60))
-                near_bonus = float(self.settings.get("travel_bonus_near", 2))
-                far_bonus = float(self.settings.get("travel_bonus_far", 4))
-                foreign_bonus = float(self.settings.get("foreign_country_bonus", 6))
-                rare_bonus = float(self.settings.get("rare_location_bonus", 2))
-                maximum_bonus = float(self.settings.get("max_total_bonus", 8))
-                location_rule_version = str(self.settings.get("location_rule_version", "travel-v1"))
-            travel_bonus, _distance = calculate_travel_bonus(
-                latitude=photo["gps_lat"],
-                longitude=photo["gps_lon"],
-                home_latitude=home_latitude,
-                home_longitude=home_longitude,
-                home_radius_km=home_radius_km,
-                near_bonus=near_bonus,
-                far_bonus=far_bonus,
-                foreign_bonus=foreign_bonus,
-                rare_bonus=rare_bonus,
-                foreign_country=foreign,
-                rare_location=0 < visits <= 3,
-                maximum=maximum_bonus,
-            )
-        result["local_score"] = float(photo["local_candidate_score"] or 0.0)
-        result["semantic_score"] = base
-        result["base_ranking_score"] = base
-        result["travel_bonus"] = travel_bonus
-        result["final_ranking_score"] = round(min(100.0, base + travel_bonus), 2)
-        result["ranking_score"] = result["final_ranking_score"]
-        result["location_rule_version"] = location_rule_version
+        result["local_quality_score"] = self._local_quality(photo)
+        result.update(ranking_components(result, favorite=bool(photo["favorite"])))
+        result["local_score"] = result["local_quality_score"]
+        result["semantic_score"] = result["memory_score"] * 0.5 + result["visual_score"] * 0.25
         return result
 
     def _save_result(
@@ -666,7 +533,6 @@ class PhotoAnalysisService:
         vision_request_fingerprint: str | None = None,
         vision_input_spec_json: str | None = None,
         prefilter_evaluation: dict | None = None,
-        travel_policy: dict | None = None,
         analysis_source: str = "direct",
         connection=None,
     ) -> dict:
@@ -675,7 +541,6 @@ class PhotoAnalysisService:
             photo,
             ranking_weights=ranking_weights,
             favorite_bonus=favorite_bonus,
-            travel_policy=travel_policy,
         )
         self.photos.save_analysis(
             photo_id,
@@ -693,8 +558,6 @@ class PhotoAnalysisService:
             semantic_score=ranked["semantic_score"],
             base_ranking_score=ranked["base_ranking_score"],
             final_ranking_score=ranked["final_ranking_score"],
-            travel_bonus=ranked["travel_bonus"],
-            location_rule_version=ranked["location_rule_version"],
             prompt_version=prompt_version,
             analysis_fingerprint=analysis_fingerprint,
             analysis_spec_json=analysis_spec_json,
@@ -985,51 +848,25 @@ class PhotoAnalysisService:
         request_fingerprint = fingerprint(
             {
                 **fingerprint_material,
-                "schema_version": SCHEMA_VERSION if schema_kind == "full" else 2,
+                "schema_version": SCHEMA_VERSION,
             }
         )
-        # Before the v3 contract, full analyses used schema_version=2 in the
-        # request fingerprint.  Keep that exact identity for backward lookup;
-        # new successful writes still use the canonical v3 fingerprint.
-        legacy_v2_fingerprint = fingerprint({**fingerprint_material, "schema_version": 2})
-        # Legacy schema constrains this column to basic/full; the v4 Vision
-        # Request Fingerprint is the authoritative additional cache dimension.
         cache_schema_kind = schema_kind
-        has_prompt_contract = bool(provider_prompt_contract_sha256)
-        cache_schema_versions: tuple[int, ...]
-        if has_prompt_contract:
-            cache_schema_versions = (SCHEMA_VERSION,) if schema_kind == "full" else (2,)
-        else:
-            cache_schema_versions = (SCHEMA_VERSION, 2) if schema_kind == "full" else (2,)
-        cache_schema_version = SCHEMA_VERSION if has_prompt_contract and schema_kind == "full" else None
+        cache_schema_version = SCHEMA_VERSION
         vision_json = canonical_json(vision_input)
 
         def get_cache() -> dict | None:
-            for cache_schema_version in cache_schema_versions:
-                fingerprints = (
-                    (request_fingerprint,)
-                    if has_prompt_contract or cache_schema_version != 2
-                    else (request_fingerprint, legacy_v2_fingerprint)
-                )
-                for cache_fingerprint in fingerprints:
-                    cached_row = self.photos.get_ai_cache(
-                        content_sha256=content_sha256,
-                        provider=actual_provider,
-                        model_name=model,
-                        prompt_version=prompt_version,
-                        schema_version=cache_schema_version,
-                        schema_kind=cache_schema_kind,
-                        vision_request_fingerprint=cache_fingerprint,
-                    )
-                    if cached_row is not None:
-                        try:
-                            validate_analysis_result(cached_row["result"])
-                        except (AnalysisValidationError, KeyError, TypeError, ValueError):
-                            # A corrupt/old cache entry is a miss, never a
-                            # worker-fatal exception or an infinite retry.
-                            continue
-                        return cached_row
-            return None
+            cached = self.photos.get_ai_cache(
+                content_sha256=content_sha256, provider=actual_provider, model_name=model,
+                prompt_version=prompt_version, schema_version=SCHEMA_VERSION,
+                schema_kind=cache_schema_kind, vision_request_fingerprint=request_fingerprint,
+            )
+            if cached is not None:
+                try:
+                    validate_analysis_result(cached["result"])
+                except (AnalysisValidationError, KeyError, TypeError, ValueError):
+                    return None
+            return cached
 
         baseline_cache_created_at: str | None = None
         if force_recompute:
@@ -1319,20 +1156,8 @@ class PhotoAnalysisService:
         started_perf = time.perf_counter()
         settings = self.budgets.settings if self.budgets else self.settings
         global_token_cap = int(settings.get("budget.max_tokens", 8000)) if settings else 8000
-        requested_token_cap = int(
-            settings.get(
-                "budget.caption_variants_max_tokens"
-                if caption_controls and caption_controls.get("caption_variants_enabled")
-                else "budget.full_analysis_max_tokens",
-                3072 if caption_controls and caption_controls.get("caption_variants_enabled") else 2048,
-            )
-        ) if settings else 2048
-        hard_cap = (
-            CAPTION_VARIANTS_TOKEN_CAP
-            if caption_controls and caption_controls.get("caption_variants_enabled")
-            else FULL_ANALYSIS_TOKEN_CAP
-        )
-        max_tokens = max(256, min(global_token_cap, requested_token_cap, hard_cap))
+        requested_token_cap = int(settings.get("budget.full_analysis_max_tokens", FULL_ANALYSIS_TOKEN_CAP)) if settings else FULL_ANALYSIS_TOKEN_CAP
+        max_tokens = max(256, min(global_token_cap, requested_token_cap, FULL_ANALYSIS_TOKEN_CAP))
         actual_call_provider = selected_channel.provider if selected_channel is not None else provider
         vision_attempt_id = self._trace_write(
             "start_attempt",
@@ -1853,9 +1678,8 @@ class PhotoAnalysisService:
                 scoring_profile={
                     "id": scoring_version_id or "",
                     "memory_weight": (ranking_weights or DEFAULT_RANKING_WEIGHTS)["memory"],
-                    "beauty_weight": (ranking_weights or DEFAULT_RANKING_WEIGHTS)["beauty"],
-                    "technical_weight": (ranking_weights or DEFAULT_RANKING_WEIGHTS)["technical_quality"],
-                    "emotion_weight": (ranking_weights or DEFAULT_RANKING_WEIGHTS)["emotion"],
+                    "visual_weight": 25.0,
+                    "local_weight": 25.0,
                     "favorite_bonus": favorite_bonus,
                 },
                 caption_controls=self._caption_generation_controls(self._caption_controls()),
@@ -1931,7 +1755,6 @@ class PhotoAnalysisService:
             "analysis.e6_min_score": float(analysis_spec.get("prefilter", {}).get("e6_min_score", 25)),
         }
         execution_policy = dict(analysis_spec.get("ai_execution_policy") or {})
-        travel_policy = dict(analysis_spec.get("travel_policy") or {})
         if str(execution_policy.get("execution_mode", "automatic_ai")) == "disabled":
             raise AnalysisDisabledError("目前分析執行模式為完全停用，不會建立新的分析結果")
 
@@ -1956,7 +1779,6 @@ class PhotoAnalysisService:
                     }
                 ),
                 "vision_input_spec_json": input_json,
-                "travel_policy": travel_policy,
             }
 
         self._activity(
@@ -2009,7 +1831,6 @@ class PhotoAnalysisService:
             result = validate_analysis_result(
                 self._prefilter_result(photo, policy_settings=plan_prefilter) or self._local_result(photo)
             )
-            result["should_keep"] = False
             raw = json.dumps(result, ensure_ascii=False)
             result = self._save_result(
                 photo_id=photo_id,
@@ -2147,7 +1968,6 @@ class PhotoAnalysisService:
                 analysis_spec_json=analysis_spec_json,
                 vision_request_fingerprint=request_fingerprint,
                 vision_input_spec_json=input_spec_json,
-                travel_policy=travel_policy,
             )
         except Exception as persist_error:
             self._trace_write(
