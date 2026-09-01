@@ -163,11 +163,11 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "analysis.caption_min_chars": {
         "category": "照片描述與相框文案",
-        "default": 30,
+        "default": 10,
         "type": "integer",
         "description": "詳細照片描述最少字元數",
         "risk": "必須與目標、上限保持 min ≤ target ≤ max",
-        "min": 30,
+        "min": 10,
         "max": CAPTION_MAX_CHARS,
         "restart": False,
     },
@@ -177,7 +177,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": "integer",
         "description": "詳細照片描述的大致目標字元數，不要求模型精確湊字數",
         "risk": "必須與最少、上限保持 min ≤ target ≤ max",
-        "min": 30,
+        "min": 10,
         "max": CAPTION_MAX_CHARS,
         "restart": False,
     },
@@ -187,7 +187,7 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": "integer",
         "description": "詳細照片描述最多字元數",
         "risk": "必須與最少、目標保持 min ≤ target ≤ max",
-        "min": 30,
+        "min": 10,
         "max": CAPTION_MAX_CHARS,
         "restart": False,
     },
@@ -464,16 +464,16 @@ SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
         "category": "本機預篩選",
         "default": True,
         "type": "boolean",
-        "description": "呼叫模型前模擬 PhotoPainter 六色量化，排除在 E6 面板上嚴重失真的照片",
-        "risk": "最愛照片會略過；這是電子紙適合度，不代表原始照片本身不好看",
+        "description": "舊版設定；E6 現在只影響電子紙顯示順位，不影響照片價值與 AI eligibility",
+        "risk": "保留供既有設定畫面辨識，不再套用於本機預篩選",
         "restart": False,
     },
     "analysis.e6_min_score": {
         "category": "本機預篩選",
         "default": 25,
         "type": "number",
-        "description": "E6 六色適合度低於此分數時，不呼叫模型",
-        "risk": "建議先維持 20–35；提高門檻可節省 Token，但會排除更多色彩細膩的照片",
+        "description": "舊版門檻；E6 現在只影響電子紙顯示順位，不影響照片價值與 AI eligibility",
+        "risk": "保留供既有設定畫面辨識，不再套用於本機預篩選",
         "min": 0,
         "max": 100,
         "restart": False,
@@ -2142,10 +2142,10 @@ class SettingsRepository:
         caption_minimum = int(values["analysis.caption_min_chars"])
         caption_target = int(values["analysis.caption_target_chars"])
         caption_upper = int(values["analysis.caption_max_chars"])
-        if not 30 <= caption_minimum <= caption_target <= caption_upper <= CAPTION_MAX_CHARS:
+        if not 10 <= caption_minimum <= caption_target <= caption_upper <= CAPTION_MAX_CHARS:
             raise ValueError(
                 "analysis.caption 長度必須符合 "
-                f"30 ≤ min ≤ target ≤ max ≤ {CAPTION_MAX_CHARS}"
+                f"10 ≤ min ≤ target ≤ max ≤ {CAPTION_MAX_CHARS}"
             )
         side_minimum = int(values["analysis.side_caption_min_chars"])
         side_target = int(values["analysis.side_caption_target_chars"])

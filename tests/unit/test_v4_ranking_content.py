@@ -41,6 +41,14 @@ def test_rarity_is_local_and_requires_enough_peers():
     assert library_rarity_adjustment(ordinary, [ordinary] * 20) == 0
 
 
+def test_people_count_cannot_trigger_rarity_without_a_meaningful_code():
+    ordinary = valid_result(types=["風景"], special_codes=[], people_count=0)
+    crowd = valid_result(types=["活動"], special_codes=[], people_count=30)
+    group = valid_result(types=["活動"], special_codes=["group_photo"], people_count=30)
+    assert library_rarity_adjustment(crowd, [ordinary] * 20) == 0
+    assert library_rarity_adjustment(group, [ordinary] * 20) == 1
+
+
 @pytest.mark.parametrize("code", list(CONTENT_FILTER_SWITCHES))
 @pytest.mark.parametrize(
     "confidence,enabled,excluded", [(0.95, True, True), (0.8, True, False), (0.95, False, False)]
@@ -86,3 +94,4 @@ def test_percentile_then_e6_contract():
     assert percentile == 50
     assert distinguishing == 57.7
     assert distinguishing * 0.8 + 90 * 0.2 == pytest.approx(64.16)
+    assert distinguishing * 0.8 + 10 * 0.2 == pytest.approx(48.16)

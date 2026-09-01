@@ -32,7 +32,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 53
+    assert CURRENT_SCHEMA_VERSION == 55
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -62,6 +62,7 @@ def test_fresh_database_is_migrated(tmp_path):
         "idempotency_requests",
         "ai_trace_runs",
         "ai_trace_attempts",
+        "library_ranking_state",
     } <= tables
     assert tuple(history) == (CURRENT_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION)
     with database.session() as connection:

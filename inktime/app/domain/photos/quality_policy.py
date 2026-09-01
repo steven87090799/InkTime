@@ -152,13 +152,10 @@ def evaluate_local_quality(
     enabled = bool(config.get("analysis.prefilter_enabled", True))
     screenshots_enabled = bool(config.get("analysis.prefilter_screenshots", True))
     low_quality_enabled = bool(config.get("analysis.prefilter_low_quality", True))
-    e6_enabled = bool(config.get("analysis.e6_prefilter_enabled", True))
-    e6_threshold = float(config.get("analysis.e6_min_score", 25))
     sensitivity = str(config.get("analysis.prefilter_sensitivity", "conservative"))
     protected = bool(_value(row, "favorite", False) or _value(row, "manual_override", False)) or str(
         _value(row, "exclusion_status", "")
     ) in {"manually_restored", "manually_excluded"}
-    e6_score = _value(row, "e6_score")
     screenshot_threshold = {"conservative": 0.90, "balanced": 0.75, "aggressive": 0.60}.get(sensitivity, 0.90)
     checks = {
         "screenshot_strong": strong_screen,
@@ -186,7 +183,6 @@ def evaluate_local_quality(
         and contrast < 8,
         "exposure_low_priority": (over_raw is not None or under_raw is not None) and exposure >= 0.60,
         "social_export": social,
-        "e6_low": e6_score is not None and float(e6_score) < e6_threshold,
     }
     matched = [key for key, hit in checks.items() if hit]
     excluded_reasons: list[str] = []
@@ -202,8 +198,6 @@ def evaluate_local_quality(
         excluded_reasons.append("tiny_nearly_blank")
     if low_quality_enabled and checks["extreme_exposure_low_contrast"]:
         excluded_reasons.append("extreme_exposure_low_contrast")
-    if e6_enabled and checks["e6_low"]:
-        excluded_reasons.append("e6_below_threshold")
     low_reasons = [
         key
         for key in ("suspected_blur", "small_compressed", "exposure_low_priority", "social_export")
@@ -234,12 +228,9 @@ def evaluate_local_quality(
             "severe_blur": [60, 15],
             "suspected_blur": [120, 18],
             "exposure_low_priority": 0.60,
-            "e6_min_score": e6_threshold,
         },
         "sensitivity": sensitivity,
         "feature_version": FEATURE_VERSION,
-        "e6_feature_version": "e6-prefilter-v1",
-        "e6_threshold": e6_threshold,
         "evidence": {
             "width": width,
             "height": height,

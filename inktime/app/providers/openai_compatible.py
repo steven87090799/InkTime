@@ -99,7 +99,7 @@ COMMON_PROMPT = """你是 InkTime 照片分析器。只輸出符合 Schema v4 �
 每張圖片必須回 content_filter 和 visual_orientation，排除內容也不得省略方向。方向以完成 EXIF transpose 後送入的圖片為準：rotation_cw 是仍需順時針旋轉的角度 0/90/180/270/null。依人臉、文字、水平線、重力物件或建築，不依長寬比。null 必須 ambiguous=true；無可靠線索時 evidence=[insufficient_visual_cues] 且 confidence<=0.5。
 content_filter 只分類與信心，不決定排除。sexualized_content：性感或性暗示姿勢、胸臀胯為主要焦點、成人性感寫真，明顯以性感呈現為主要目的。explicit_nudity：明顯成人裸體、敏感部位裸露或明確色情。一般泳裝、海灘、運動服、短裙、普通人體藝術與生活情境不自動視為色情。
 female_glamour_portrait 必須高信心同時符合：單一主要人物、可見偏女性 presentation、刻意擺拍、明顯 portrait/glamour/寫真攝影，且外貌造型或身材呈現為主要目的、非生活紀錄。不推論真實性別身份。女性+單人絕不直接成立；普通女性旅遊照、普通自拍、日常、家庭、工作、畢業、活動紀錄、自然抓拍與運動照片不因單人女性而排除。不確定填 none 或 uncertain。
-caption 只寫主體、場景、重要動作活動及一項搜尋特色，30～100 字、目標 60，避免流水帳。side_caption 8～16 字，自然含蓄，不虛構故事。subject_position 與 text_safe_area 依畫面位置填 enum，不確定用 unknown。"""
+caption 只寫主體、場景、重要動作活動及一項搜尋特色，10～100 字、目標 60；簡單照片可以簡短，不需要為了湊字數添加不可確認內容。side_caption 8～16 字，自然含蓄，不虛構故事。subject_position 與 text_safe_area 依畫面位置填 enum，不確定用 unknown。"""
 SYSTEM_PROMPT = COMMON_PROMPT
 PROVIDER_CONTRACT_PROMPT = """這是 Provider Vision capability contract。只輸出 JSON：vision_ok 必須是 true，detected_shapes 必須包含 rectangle 與 circle；不要輸出照片分析 Schema 的其他欄位。"""
 CAPTION_STYLE_INSTRUCTIONS = {
@@ -339,7 +339,7 @@ class OpenAICompatibleProvider(VisionProvider):
         return (
             f"{prompt}\n\n【進階照片描述與相框文案】\n"
             f"caption 只准用繁體中文客觀描述可確認內容，嚴禁簡體字，約 {int(controls['caption_target_chars'])} 字，"
-            f"限 {int(controls['caption_min_chars'])}～{int(controls['caption_max_chars'])} 字。\n"
+            f"限 {int(controls['caption_min_chars'])}～{int(controls['caption_max_chars'])} 字；簡單照片可以簡短，不需要為了湊字數添加不可確認內容。\n"
             "side_caption 是相框短句，從可見光線、動作、季節或互動提煉氣氛；自然含蓄，不重述畫面、不用「這張照片」起句、不寫雞湯或人生結論。\n"
             f"單一 side_caption 風格：{style}（{style_instruction}）；約 "
             f"{int(controls['side_caption_target_chars'])} 字，限 {int(controls['side_caption_min_chars'])}～"

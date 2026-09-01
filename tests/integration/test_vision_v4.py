@@ -7,7 +7,7 @@ from PIL import Image
 
 from tests.conftest import create_admin, login
 from tests.integration.test_photo_quality_ai import CountingProvider, _scan
-from tests.integration.test_jobs import add_photos
+from tests.integration.test_jobs import add_photos, create_job
 from tests.unit.test_analysis_schema import valid_result
 from inktime.app.domain.analysis.scoring import calculate_distinguishing_score
 from inktime.app.domain.analysis.content_filter import CONTENT_FILTER_SWITCHES
@@ -32,7 +32,7 @@ def test_defaults_and_settings_ui(app, client):
         assert settings.get(key) is True
     assert settings.get("analysis.content_filter_min_confidence") == 0.85
     assert settings.get("analysis.female_glamour_min_confidence") == 0.9
-    assert [settings.get(f"analysis.caption_{x}_chars") for x in ("min", "target", "max")] == [30, 60, 100]
+    assert [settings.get(f"analysis.caption_{x}_chars") for x in ("min", "target", "max")] == [10, 60, 100]
     assert settings.get("render.e6_weight") == 20
     response = client.get("/settings?mode=all")
     assert response.status_code == 200
@@ -165,7 +165,7 @@ def test_real_service_uses_v4_and_content_policy(app, tmp_path):
     )
 
 
-def test_render_percentile_precedes_e6_and_excluded_is_never_selected(app, tmp_path):
+def test_render_percentile_precedes_e6_and_excluded_is_never_selected(app, tmp_path, monkeypatch):
     repo = app.extensions["inktime_photo_repository"]
     ids = add_photos(app, 6)
     for i in range(6):
@@ -178,6 +178,9 @@ def test_render_percentile_precedes_e6_and_excluded_is_never_selected(app, tmp_p
     for i, photo_id in enumerate(ids):
         save(repo, photo_id, memory_score=70 + i, special_level=0)
     save(repo, ids[-1], content_filter={"exclude_code": "female_glamour_portrait", "confidence": 0.95})
+    monkeypatch.setattr(
+        repo, "_refresh_library_ranking", lambda *_args, **_kwargs: pytest.fail("render refreshed rarity")
+    )
     render = app.extensions["inktime_render_service"]
     rows = render._candidate_query(target=date(2026, 9, 1), month_days=None, older_only=False, limit=10)
     assert len(rows) == 5 and ids[-1] not in {row["id"] for row in rows}
@@ -205,7 +208,7 @@ def test_reapply_uses_current_switch_and_duplicate_inheritance_respects_favorite
     inherited = repo.inherit_existing_analysis(ids[1], None)
     assert inherited["content_filter"]["exclude_code"] == "female_glamour_portrait"
     assert inherited["special_level"] == 2 and inherited["effective_special_level"] == 3
-    assert repo.get_with_path(ids[1])["eligible"] == 1
+    assert repo.get_with_path(ids[1])["eligible"] == 0
     app.extensions["inktime_settings_repository"].update(
         "analysis.exclude_female_glamour_portraits", False, changed_by=actor, source_ip="test"
     )
@@ -218,7 +221,13 @@ def test_rarity_saved_from_same_library_only_and_excludes_rejected_peers(app):
     ids = add_photos(app, 21)
     for photo_id in ids[:-1]:
         save(repo, photo_id, types=["風景"], people_count=0, special_codes=[], special_level=0)
-    result = save(repo, ids[-1], types=["活動"], people_count=20, special_codes=["ceremony"], special_level=2)
+    save(repo, ids[-1], types=["活動"], people_count=20, special_codes=["ceremony"], special_level=2)
+    repo.refresh_library_ranking(str(repo.get_with_path(ids[-1])["library_id"]))
+    with repo.database.session() as connection:
+        result = connection.execute(
+            "SELECT library_rarity_adjustment,effective_special_level FROM photo_analysis WHERE photo_id=? ORDER BY id DESC LIMIT 1",
+            (ids[-1],),
+        ).fetchone()
     assert result["library_rarity_adjustment"] == 1 and result["effective_special_level"] == 3
     other = add_photos(app, 1)[0]
     result = save(repo, other, types=["活動"], people_count=20, special_codes=["ceremony"], special_level=2)
@@ -254,6 +263,7 @@ def test_rarity_does_not_depend_on_analysis_arrival_order(app):
                 people_count=20 if rare else 0,
                 special_level=2,
             )
+        repo.refresh_library_ranking(str(repo.get_with_path(ids[0])["library_id"]))
     with repo.database.session() as connection:
         rows = connection.execute(
             "SELECT library_rarity_adjustment,ranking_score FROM photo_analysis WHERE photo_id IN (?,?)",
@@ -262,3 +272,90 @@ def test_rarity_does_not_depend_on_analysis_arrival_order(app):
     assert [row["library_rarity_adjustment"] for row in rows] == [1, 1]
     assert rows[0]["ranking_score"] == rows[1]["ranking_score"]
     assert len(repo.score_population(repo.get_with_path(rare_ids[0])["library_id"])) == 21
+
+
+@pytest.mark.parametrize(
+    "code", ["explicit_nudity", "sexualized_content", "female_glamour_portrait"]
+)
+def test_favorite_never_bypasses_ai_content_exclusion(app, code):
+    repo = app.extensions["inktime_photo_repository"]
+    photo_id = add_photos(app, 1)[0]
+    with repo.database.session() as connection:
+        connection.execute("UPDATE photos SET favorite=1 WHERE id=?", (photo_id,))
+    save(repo, photo_id, content_filter={"exclude_code": code, "confidence": 0.99})
+    photo = repo.get_with_path(photo_id)
+    assert photo["eligible"] == 0 and photo["exclusion_status"] == "auto_excluded"
+
+
+def test_save_marks_dirty_without_refresh_and_refresh_state_is_failure_safe(app, monkeypatch):
+    repo = app.extensions["inktime_photo_repository"]
+    photo_id = add_photos(app, 1)[0]
+    library_id = str(repo.get_with_path(photo_id)["library_id"])
+    original = repo._refresh_library_ranking
+    monkeypatch.setattr(
+        repo, "_refresh_library_ranking", lambda *_args: pytest.fail("save refreshed full library")
+    )
+    save(repo, photo_id)
+    assert repo.ranking_state(library_id)["dirty"] == 1
+    monkeypatch.setattr(repo, "_refresh_library_ranking", original)
+    assert repo.refresh_library_ranking(library_id) is True
+    assert repo.ranking_state(library_id)["dirty"] == 0
+    save(repo, photo_id, memory_score=73)
+    def fail_refresh(*_args):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(repo, "_refresh_library_ranking", fail_refresh)
+    with pytest.raises(RuntimeError, match="boom"):
+        repo.refresh_library_ranking(library_id)
+    assert repo.ranking_state(library_id)["dirty"] == 1
+
+
+def test_score_population_and_photos_get_are_read_only(app, client, monkeypatch):
+    create_admin(app)
+    login(client)
+    repo = app.extensions["inktime_photo_repository"]
+    photo_id = add_photos(app, 1)[0]
+    save(repo, photo_id)
+    state_before = repo.ranking_state(str(repo.get_with_path(photo_id)["library_id"]))
+    monkeypatch.setattr(
+        repo, "_refresh_library_ranking", lambda *_args: pytest.fail("read path refreshed rarity")
+    )
+    assert repo.score_population()
+    assert client.get("/photos").status_code == 200
+    assert repo.ranking_state(str(repo.get_with_path(photo_id)["library_id"])) == state_before
+
+
+def test_job_completion_refreshes_one_library_once_for_100_plus_items(app, monkeypatch):
+    _service, _jobs, job_id = create_job(app, 101)
+    repo = app.extensions["inktime_photo_repository"]
+    with repo.database.session() as connection:
+        photo_ids = [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT photo_id FROM job_items WHERE job_id=? ORDER BY id", (job_id,)
+            )
+        ]
+    for photo_id in photo_ids:
+        result = valid_result()
+        repo.save_analysis(photo_id, job_id, "single", "mock", "mock", result, json.dumps(result))
+    calls = []
+    original = repo._refresh_library_ranking
+    def count_refresh(connection, library_id):
+        calls.append(library_id)
+        return original(connection, library_id)
+
+    monkeypatch.setattr(repo, "_refresh_library_ranking", count_refresh)
+    assert repo.refresh_dirty_libraries_for_job(job_id) == 1
+    assert len(calls) == 1
+
+
+def test_local_analysis_ui_labels_semantic_scores_as_unanalyzed(app, client):
+    create_admin(app)
+    login(client)
+    repo = app.extensions["inktime_photo_repository"]
+    photo_id = add_photos(app, 1)[0]
+    result = valid_result(memory_score=0, visual_score=0, special_level=0, special_codes=[])
+    repo.save_analysis(photo_id, None, "local", "local", "local", result, json.dumps(result))
+    text = client.get(f"/photos/{photo_id}").get_data(as_text=True)
+    assert "AI 語意評分：尚未分析" in text
+    assert "回憶 0" not in text and "視覺 0" not in text

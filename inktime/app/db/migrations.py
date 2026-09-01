@@ -2193,6 +2193,24 @@ MIGRATIONS = (
             "UPDATE settings SET value_json='1200' WHERE key IN ('budget.full_analysis_max_tokens','budget.caption_variants_max_tokens') AND CAST(value_json AS INTEGER)>1200",
         ),
     ),
+    Migration(
+        55,
+        "持久化照片庫排序待重算狀態",
+        (
+            """
+            CREATE TABLE library_ranking_state (
+                library_id TEXT PRIMARY KEY REFERENCES libraries(id) ON DELETE CASCADE,
+                dirty INTEGER NOT NULL DEFAULT 1 CHECK(dirty IN (0,1)),
+                updated_at TEXT NOT NULL,
+                last_refreshed_at TEXT
+            )
+            """,
+            "INSERT INTO library_ranking_state(library_id,dirty,updated_at) SELECT id,1,datetime('now') FROM libraries",
+            "UPDATE settings SET value_json='10' WHERE key='analysis.caption_min_chars'",
+            "UPDATE settings SET value_json='60' WHERE key='analysis.caption_target_chars'",
+            "UPDATE settings SET value_json='100' WHERE key='analysis.caption_max_chars'",
+        ),
+    ),
 )
 
 

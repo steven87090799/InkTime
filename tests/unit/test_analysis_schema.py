@@ -90,6 +90,7 @@ def test_only_v4_is_supported(version):
         ("people_count", False),
         ("types", []),
         ("types", ["人物", "人物"]),
+        ("types", ["人物", "日常", "活動", "旅行"]),
         ("special_codes", ["group_photo", "milestone", "ceremony"]),
         ("special_codes", ["rare_in_your_library"]),
         ("caption", "短"),
@@ -116,6 +117,7 @@ def test_invalid_values_fail(field, value):
         (90, 0.95, False, ["faces_upright"], True),
         (270, 0.9, False, ["text_upright"], True),
         (None, 0.5, True, ["insufficient_visual_cues"], True),
+        (0, 0.2, False, ["insufficient_visual_cues"], False),
         (180, 0.9, False, ["insufficient_visual_cues"], False),
         (0, 0.7, False, ["insufficient_visual_cues", "faces_upright"], False),
     ],
@@ -157,4 +159,4 @@ def test_caption_controls_cannot_publish_a_contract_the_validator_rejects():
     schema = json_schema_for_stage('full', caption_controls={
         'caption_min_chars': 0, 'caption_target_chars': 10, 'caption_max_chars': 20,
     })['schema']['properties']['caption']
-    assert schema['minLength'] == 30 and schema['maxLength'] == 30
+    assert schema['minLength'] == 10 and schema['maxLength'] == 20

@@ -399,7 +399,7 @@ class ReviewRepository:
         now = _now()
         with self.database.transaction() as connection:
             photo = connection.execute(
-                "SELECT id,lifecycle_status FROM photos WHERE id=?", (photo_id,)
+                "SELECT id,library_id,lifecycle_status FROM photos WHERE id=?", (photo_id,)
             ).fetchone()
             if photo is None or str(photo["lifecycle_status"]) in {"deleted", "archived"}:
                 raise KeyError(photo_id)
@@ -591,9 +591,12 @@ class ReviewRepository:
                 connection.execute("UPDATE photos SET eligible=1,exclusion_status='pending_review',reject_reason='REVIEW_PENDING',manual_override=1,updated_at=? WHERE id=?", (now, photo_id))
             elif next_state == "unreviewed":
                 connection.execute("UPDATE photos SET eligible=1,exclusion_status='eligible',reject_reason=NULL,manual_override=0,updated_at=? WHERE id=?", (now, photo_id))
+            from inktime.app.repositories.photos import PhotoRepository, invalidate_score_population_cache
+            PhotoRepository._mark_library_ranking_dirty(
+                connection, str(photo["library_id"]), now
+            )
             if next_favorite is not None:
                 connection.execute("UPDATE photos SET favorite=?,updated_at=? WHERE id=?", (next_favorite, now, photo_id))
-                from inktime.app.repositories.photos import PhotoRepository, invalidate_score_population_cache
                 PhotoRepository._refresh_favorite_ranking(connection, photo_id)
                 invalidate_score_population_cache()
             current_after = connection.execute(
@@ -623,7 +626,6 @@ class ReviewRepository:
                     now,
                 ),
             )
-        from inktime.app.repositories.photos import invalidate_score_population_cache
         invalidate_score_population_cache()
         return self.get(photo_id) or after
 

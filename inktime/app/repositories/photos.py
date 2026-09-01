@@ -145,6 +145,7 @@ class PhotoRepository:
                 "INSERT INTO libraries(id,name,root_path,created_at,updated_at) VALUES (?,?,?,?,?)",
                 (library_id, name, root, now, now),
             )
+            self._mark_library_ranking_dirty(connection, library_id, now)
             return library_id
 
     def signatures_for_paths(
@@ -240,6 +241,11 @@ class PhotoRepository:
                 """,
                 [(scan_id, now, photo_id) for photo_id in unique_ids],
             )
+            scan = connection.execute(
+                "SELECT library_id FROM scan_runs WHERE id=?", (scan_id,)
+            ).fetchone()
+            if scan is not None:
+                self._mark_library_ranking_dirty(connection, str(scan["library_id"]), now)
 
     def mark_processing_failed_batch(self, scan_id: str, failures: Sequence[tuple[str, bool, bool]]) -> None:
         """保留既有照片資料，但把本次未完成區段標成 failed 供增量重試。"""
@@ -265,6 +271,11 @@ class PhotoRepository:
                     for photo_id, metadata, local in failures
                 ],
             )
+            scan = connection.execute(
+                "SELECT library_id FROM scan_runs WHERE id=?", (scan_id,)
+            ).fetchone()
+            if scan is not None:
+                self._mark_library_ranking_dirty(connection, str(scan["library_id"]), now)
 
     @staticmethod
     def _path_is_still_present(root: Path, relative_path: str) -> bool:
@@ -884,6 +895,7 @@ class PhotoRepository:
                     """,  # noqa: S608
                     chunk,
                 )
+            self._mark_library_ranking_dirty(connection, library_id, now)
         invalidate_score_population_cache()
         return results
 
@@ -984,6 +996,8 @@ class PhotoRepository:
                 )
                 marked = int(cursor.rowcount)
                 reconciliation = "applied"
+                if marked:
+                    self._mark_library_ranking_dirty(connection, str(scan["library_id"]), now)
             connection.execute(
                 """
                 UPDATE scan_runs SET status=?,full_census=?,cancelled=?,major_io_errors=?,
@@ -1064,6 +1078,8 @@ class PhotoRepository:
                 """,
                 (now, now, scan_id),
             )
+            if cursor.rowcount:
+                self._mark_library_ranking_dirty(connection, str(scan["library_id"]), now)
             connection.execute(
                 """
                 UPDATE scan_runs SET status='completed',reconciliation_status='confirmed',
@@ -1256,21 +1272,23 @@ class PhotoRepository:
                     )
                     event = "manual_exclude"
                     changes = {"eligible": False, "reason": "manual_permanent_exclusion"}
-                elif action in {"favorite", "candidate"}:
-                    exclusion_status = "manually_restored" if action == "favorite" else "pending_review"
+                elif action == "favorite":
+                    connection.execute(
+                        "UPDATE photos SET favorite=1,updated_at=? WHERE id=?",
+                        (now, photo_id),
+                    )
+                    event = "added_to_favorites"
+                    changes = {"favorite": True}
+                elif action == "candidate":
                     connection.execute(
                         """
-                        UPDATE photos SET favorite=?,eligible=1,exclusion_status=?,manual_override=1,
+                        UPDATE photos SET eligible=1,exclusion_status='pending_review',manual_override=1,
                             updated_at=? WHERE id=?
                         """,
-                        (int(action == "favorite"), exclusion_status, now, photo_id),
+                        (now, photo_id),
                     )
-                    event = "added_to_favorites" if action == "favorite" else "added_to_candidate_pool"
-                    changes = {
-                        "eligible": True,
-                        "favorite": action == "favorite",
-                        "candidate_pool": action == "candidate",
-                    }
+                    event = "added_to_candidate_pool"
+                    changes = {"eligible": True, "candidate_pool": True}
                 elif action == "reanalyze":
                     evaluation_photo = {**photo, "manual_override": 0, "favorite": 0, "exclusion_status": "eligible"} if reapply_rules else photo
                     exclusion = _stored_exclusion(evaluation_photo)
@@ -1336,8 +1354,8 @@ class PhotoRepository:
                     "INSERT INTO photo_events(photo_id,event,changes_json,changed_by,created_at) VALUES (?,?,?,?,?)",
                     (photo_id, event, json.dumps(changes, ensure_ascii=False), changed_by, now),
                 )
-                self._refresh_library_ranking(connection, photo["library_id"])
                 self._refresh_favorite_ranking(connection, photo_id)
+                self._mark_library_ranking_dirty(connection, photo["library_id"], now)
                 result = dict(connection.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone())
                 connection.execute("COMMIT")
                 invalidate_score_population_cache()
@@ -1366,7 +1384,10 @@ class PhotoRepository:
             sort_keys=True,
         )
         with self.database.transaction() as connection:
-            connection.execute(
+            row = connection.execute(
+                "SELECT library_id FROM photos WHERE id=?", (photo_id,)
+            ).fetchone()
+            cursor = connection.execute(
                 """UPDATE photos SET eligible=0,exclusion_status='auto_excluded',reject_reason=?,
                    reject_rule=?,reject_rule_version=?,reject_details_json=?,rejected_at=?,updated_at=?
                    WHERE id=? AND favorite=0 AND manual_override=0
@@ -1381,6 +1402,8 @@ class PhotoRepository:
                     photo_id,
                 ),
             )
+            if cursor.rowcount and row is not None:
+                self._mark_library_ranking_dirty(connection, str(row["library_id"]), now)
         invalidate_score_population_cache()
 
     def record_force_ai_event(
@@ -1869,6 +1892,10 @@ class PhotoRepository:
                         (json.dumps(types, ensure_ascii=False), side_caption, latest["id"]),
                     )
                     self._refresh_favorite_ranking(connection, photo_id)
+                library = connection.execute(
+                    "SELECT library_id FROM photos WHERE id=?", (photo_id,)
+                ).fetchone()
+                self._mark_library_ranking_dirty(connection, str(library["library_id"]), now)
                 connection.execute(
                     "INSERT INTO photo_events(photo_id,event,changes_json,changed_by,created_at) VALUES (?,'manual_update',?,?,?)",
                     (photo_id, json.dumps(changes, ensure_ascii=False), changed_by, now),
@@ -2029,7 +2056,7 @@ class PhotoRepository:
         return rows, total
 
     def score_population(self, library_id: str | None = None) -> list[float]:
-        """回傳每張照片最新一次有效排序分，供相對鑑別校準使用。"""
+        """Pure read of materialized scores for relative calibration."""
         global _SCORE_POPULATION_CACHE
         cache_key = f"{self.database.path}:{library_id or 'all'}"
         now = time.monotonic()
@@ -2040,10 +2067,7 @@ class PhotoRepository:
                 and now - _SCORE_POPULATION_CACHE[1] < _SCORE_POPULATION_TTL_SECONDS
             ):
                 return list(_SCORE_POPULATION_CACHE[2])
-            with self.database.transaction() as connection:
-                libraries = connection.execute("SELECT id FROM libraries WHERE enabled=1 AND (? IS NULL OR id=?)", (library_id, library_id)).fetchall()
-                for library in libraries:
-                    self._refresh_library_ranking(connection, library["id"])
+            with self.database.session() as connection:
                 rows = connection.execute(
                     f"""
                     SELECT a.ranking_score
@@ -2084,6 +2108,62 @@ class PhotoRepository:
         connection.execute("INSERT INTO photo_events(photo_id,event,changes_json,created_at) VALUES (?,'automatic_exclusion',?,?)", (photo_id, json.dumps(evaluation), now))
 
     @staticmethod
+    def _mark_library_ranking_dirty(connection, library_id: str, now: str | None = None) -> None:
+        timestamp = now or datetime.now(timezone.utc).isoformat()
+        connection.execute(
+            """INSERT INTO library_ranking_state(library_id,dirty,updated_at)
+               VALUES (?,1,?)
+               ON CONFLICT(library_id) DO UPDATE SET dirty=1,updated_at=excluded.updated_at""",
+            (library_id, timestamp),
+        )
+
+    def ranking_state(self, library_id: str) -> dict | None:
+        with self.database.session() as connection:
+            row = connection.execute(
+                "SELECT library_id,dirty,updated_at,last_refreshed_at FROM library_ranking_state WHERE library_id=?",
+                (library_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def refresh_library_ranking(self, library_id: str, *, connection=None) -> bool:
+        """Refresh one dirty library once; a failure leaves its durable flag set."""
+        context = self.database.transaction() if connection is None else nullcontext(connection)
+        with context as active_connection:
+            row = active_connection.execute(
+                "SELECT dirty FROM library_ranking_state WHERE library_id=?", (library_id,)
+            ).fetchone()
+            if row is None or not bool(row["dirty"]):
+                return False
+            self._refresh_library_ranking(active_connection, library_id)
+            now = datetime.now(timezone.utc).isoformat()
+            active_connection.execute(
+                "UPDATE library_ranking_state SET dirty=0,updated_at=?,last_refreshed_at=? WHERE library_id=?",
+                (now, now, library_id),
+            )
+        invalidate_score_population_cache()
+        return True
+
+    def refresh_dirty_libraries_for_job(self, job_id: str, *, connection=None) -> int:
+        """Refresh each library touched by a completed Job at most once."""
+        context = self.database.transaction() if connection is None else nullcontext(connection)
+        with context as active_connection:
+            rows = active_connection.execute(
+                """SELECT DISTINCT p.library_id
+                   FROM job_items ji
+                   JOIN photos p ON p.id=ji.photo_id
+                   JOIN library_ranking_state state ON state.library_id=p.library_id
+                   WHERE ji.job_id=? AND state.dirty=1
+                   ORDER BY p.library_id""",
+                (job_id,),
+            ).fetchall()
+            refreshed = 0
+            for row in rows:
+                refreshed += int(
+                    self.refresh_library_ranking(str(row["library_id"]), connection=active_connection)
+                )
+        return refreshed
+
+    @staticmethod
     def _refresh_library_ranking(connection, library_id: str) -> None:
         """Recompute from the current library, independent of analysis arrival order.
 
@@ -2096,9 +2176,16 @@ class PhotoRepository:
               AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')"""
         rows = connection.execute(
             f"""WITH peers AS ({peers}), features AS (
-                SELECT 'type:' || j.value AS feature FROM peers,json_each(peers.types_json) j
-                UNION ALL SELECT 'special:' || j.value FROM peers,json_each(peers.special_codes_json) j
-                UNION ALL SELECT 'people:' || CASE WHEN people_count=0 THEN '0' WHEN people_count=1 THEN '1' WHEN people_count<=5 THEN '2-5' WHEN people_count<=15 THEN '6-15' ELSE '16+' END FROM peers
+                SELECT 'special:' || special.value AS feature
+                FROM peers,json_each(peers.special_codes_json) special
+                UNION ALL
+                SELECT 'special:' || special.value || '|type:' || photo_type.value
+                FROM peers,json_each(peers.special_codes_json) special,json_each(peers.types_json) photo_type
+                UNION ALL
+                SELECT 'special:group_photo|people:16+' FROM peers
+                WHERE people_count>=16 AND EXISTS (
+                    SELECT 1 FROM json_each(peers.special_codes_json) WHERE value='group_photo'
+                )
             ) SELECT feature,COUNT(*) AS n FROM features GROUP BY feature
             UNION ALL SELECT '__total__',COUNT(*) FROM peers""", (library_id,)
         ).fetchall()
@@ -2167,14 +2254,13 @@ class PhotoRepository:
                     ).fetchone()
                     protected = (
                         current is None
-                        or bool(current["favorite"])
                         or bool(current["manual_override"])
                         or str(current["exclusion_status"] or "")
                         in {"manually_restored", "manually_excluded"}
                     )
                     if protected:
                         event = "automatic_exclusion_skipped"
-                        changes = {"reason": "manual_override_or_favorite"}
+                        changes = {"reason": "manual_override"}
                     else:
                         details = json.dumps(prefilter_evaluation, ensure_ascii=False, sort_keys=True)
                         connection.execute(
@@ -2205,7 +2291,7 @@ class PhotoRepository:
                 canonical = validate_analysis_result({key: result[key] for key in REQUIRED_FIELDS})
                 current = dict(connection.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone())
                 content_evaluation = evaluate_content_filter(canonical["content_filter"], self._content_settings(connection))
-                protected = bool(current["manual_override"] or current["favorite"]) or current["exclusion_status"] in {"manually_restored", "manually_excluded"}
+                protected = bool(current["manual_override"]) or current["exclusion_status"] in {"manually_restored", "manually_excluded"}
                 if provider != "local" and content_evaluation["decision"] == "auto_excluded" and not protected:
                     self._apply_content_exclusion(connection, photo_id, content_evaluation, now)
                     current["eligible"] = 0
@@ -2245,11 +2331,11 @@ class PhotoRepository:
                 columns = ",".join(record)
                 placeholders = ",".join("?" for _ in record)
                 connection.execute(f"INSERT INTO photo_analysis ({columns}) VALUES ({placeholders})", tuple(record.values()))  # noqa: S608 -- fixed internal column names
-                if provider != "local":
-                    self._refresh_library_ranking(connection, current["library_id"])
-                    stored = connection.execute("SELECT library_rarity_adjustment,effective_special_level,ranking_score FROM photo_analysis WHERE photo_id=? ORDER BY id DESC LIMIT 1", (photo_id,)).fetchone()
-                    result.update(ranking_components(result, favorite=bool(current["favorite"]), rarity_adjustment=int(stored["library_rarity_adjustment"])))
-                    result["selection_score"] = result["ranking_score"] if current["eligible"] and current["exclusion_status"] not in EXCLUDED_STATUSES else 0.0
+                if provider != "local" or (
+                    prefilter_evaluation
+                    and prefilter_evaluation.get("decision") == "auto_excluded"
+                ):
+                    self._mark_library_ranking_dirty(connection, current["library_id"], now)
                 connection.execute(
                     "UPDATE photos SET status='analyzed',updated_at=? WHERE id=?", (now, photo_id)
                 )

@@ -43,26 +43,20 @@ def test_caption_feature_defaults_enable_one_literary_caption():
     assert SETTING_DEFINITIONS["analysis.copy_default_style"]["default"] == "literary"
     assert SETTING_DEFINITIONS["analysis.copy_poetic_level"]["default"] == 2
     assert SETTING_DEFINITIONS["render.caption_wrap_enabled"]["default"] is False
-    assert json_schema_for_stage("single_high") is FULL_ANALYSIS_JSON_SCHEMA
+    assert json_schema_for_stage("single_high") == FULL_ANALYSIS_JSON_SCHEMA
     assert PhotoAnalysisService._prompt_version(None) == PROMPT_VERSION
 
 
 def test_advanced_schema_and_prompt_keep_legacy_variant_compatibility():
     controls = _controls(caption_variants_enabled=True)
     schema = json_schema_for_stage("single_high", caption_controls=controls)
-    assert schema["schema"]["properties"]["caption"]["minLength"] == 120
-    assert set(schema["schema"]["properties"]["details"]["properties"]["caption_variants"]["properties"]) == {
-        "natural",
-        "warm",
-        "literary",
-        "humorous",
-        "minimal",
-    }
+    assert schema["schema"]["properties"]["caption"]["minLength"] == 100
+    assert "details" not in schema["schema"]["properties"]
     prompt = OpenAICompatibleProvider(
         name="test", base_url="https://example.invalid", api_key="", caption_controls=controls
     ).system_prompt
     assert "繁體中文" in prompt and "嚴禁簡體字" in prompt
-    assert "像是／彷彿／彷佛" in prompt and "世界" in prompt
+    assert "世界" in prompt
 
 
 def test_single_caption_prompt_is_literary_compact_and_omits_empty_fields(tmp_path):
@@ -71,14 +65,9 @@ def test_single_caption_prompt_is_literary_compact_and_omits_empty_fields(tmp_pa
         name="test", base_url="https://example.invalid", api_key="", caption_controls=controls
     )
     prompt = provider.system_prompt
-    assert "不是照片說明" in prompt
-    assert "不要只重述畫面" in prompt
-    assert "自然文氣" in prompt
-    assert "雞湯" in prompt and "AI 模板" in prompt
-    assert "不得虛構" in prompt
-    assert "四項 Grade 獨立判斷" in prompt
-    assert "人物互動或合照，大幅提高評分" not in prompt
-    assert prompt.count("唯一一次圖片分析") == 1
+    assert "不需要為了湊字數" in prompt
+    assert "不可確認內容" in prompt
+    assert "不虛構" in prompt
     assert "禁止詞：無" not in prompt
     assert "禁止句型：無" not in prompt
     assert "自訂規則：無" not in prompt
@@ -111,7 +100,7 @@ def test_legacy_caption_limits_are_normalized_before_schema_generation():
     )
     schema = json_schema_for_stage("single", caption_controls=controls)
     properties = schema["schema"]["properties"]
-    assert properties["caption"]["maxLength"] == 200
+    assert properties["caption"]["maxLength"] == 100
     assert properties["side_caption"] == {
         "type": "string",
         "minLength": 8,
@@ -132,4 +121,4 @@ def test_caption_settings_change_cache_fingerprint_and_legacy_variant_fallback()
         result,
         _controls(copy_default_style="literary", caption_variants_enabled=True),
     )
-    assert selected["side_caption"] == "自然短句"
+    assert selected["side_caption"] == "既有短句"

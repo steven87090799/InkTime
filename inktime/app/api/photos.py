@@ -152,7 +152,6 @@ def photos_page():
         "minimum_score": request.args.get("score", type=float),
         "duplicate_only": request.args.get("duplicates") == "1",
     }
-    _repository().score_population()  # refresh deterministic library rarity before reading rows
     _empty_rows, total = _repository().search(**search_parameters, limit=0, offset=0)
     total_pages = max(1, math.ceil(total / PHOTO_PAGE_SIZE))
     page = min(max(1, request.args.get("page", 1, type=int)), total_pages)

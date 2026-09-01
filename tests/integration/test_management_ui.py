@@ -1069,7 +1069,7 @@ def test_photo_detail_shows_only_two_latest_analyses_and_compact_type_picker(cli
     login(client)
     photo_id = add_photos(app, 1)[0]
     for index in range(3):
-        result = valid_result(caption=f"第 {index + 1} 次分析")
+        result = valid_result(caption=f"第 {index + 1} 次分析這張照片完整內容")
         app.extensions["inktime_photo_repository"].save_analysis(
             photo_id,
             None,
@@ -1099,8 +1099,8 @@ def test_model_analysis_stays_preferred_after_newer_local_fallback(client, app):
     login(client)
     photo_id = add_photos(app, 1)[0]
     repository = app.extensions["inktime_photo_repository"]
-    model_result = valid_result(caption="完整模型判斷", side_caption="模型短句")
-    local_result = valid_result(caption="只有本機特徵", side_caption="")
+    model_result = valid_result(caption="完整模型判斷這張照片內容", side_caption="模型短句保留完整內容")
+    local_result = valid_result(caption="只有本機特徵尚未模型分析")
     repository.save_analysis(
         photo_id,
         None,

@@ -2559,6 +2559,8 @@ class BatchAnalysisService:
             ),
             cleanup_status=cleanup_status if cleanup_status in {"completed", "not_required"} else None,
         )
+        if batch["job_id"]:
+            self.photos.refresh_dirty_libraries_for_job(str(batch["job_id"]))
         self._activity(
             "INFO" if final_status == "completed" else "WARNING",
             "batch_completed" if final_status.startswith("completed") else "batch_failed",

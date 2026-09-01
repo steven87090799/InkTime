@@ -98,13 +98,13 @@ ANALYSIS_JSON_SCHEMA = {
     "schema": _object(
         {
             "schema_version": {"type": "integer", "const": SCHEMA_VERSION},
-            "types": _enum_array(ALLOWED_TYPES, 1, 5),
+            "types": _enum_array(ALLOWED_TYPES, 1, 3),
             "memory_score": {"type": "number", "minimum": 0, "maximum": 100},
             "visual_score": {"type": "number", "minimum": 0, "maximum": 100},
             "special_level": {"type": "integer", "minimum": 0, "maximum": 4},
             "special_codes": _enum_array(SPECIAL_CODES, 0, 2),
             "people_count": {"type": "integer", "minimum": 0, "maximum": 10000},
-            "caption": {"type": "string", "minLength": 30, "maxLength": CAPTION_MAX_CHARS},
+            "caption": {"type": "string", "minLength": 10, "maxLength": CAPTION_MAX_CHARS},
             "side_caption": {
                 "type": "string",
                 "minLength": SIDE_CAPTION_MIN_CHARS,
@@ -159,9 +159,9 @@ PROVIDER_CONTRACT_JSON_SCHEMA = {
 def normalize_caption_controls(controls: dict[str, Any]) -> dict[str, Any]:
     """Bound persisted caption settings to the v4 schema/validator contract."""
     normalized = dict(controls)
-    caption_upper = max(30, min(CAPTION_MAX_CHARS, int(controls.get("caption_max_chars", CAPTION_MAX_CHARS))))
-    caption_target = max(30, min(caption_upper, int(controls.get("caption_target_chars", 60))))
-    caption_minimum = max(30, min(caption_target, int(controls.get("caption_min_chars", 30))))
+    caption_upper = max(10, min(CAPTION_MAX_CHARS, int(controls.get("caption_max_chars", CAPTION_MAX_CHARS))))
+    caption_target = max(10, min(caption_upper, int(controls.get("caption_target_chars", 60))))
+    caption_minimum = max(10, min(caption_target, int(controls.get("caption_min_chars", 10))))
     side_upper = max(
         SIDE_CAPTION_MIN_CHARS,
         min(SIDE_CAPTION_MAX_CHARS, int(controls.get("side_caption_max_chars", SIDE_CAPTION_MAX_CHARS))),
@@ -264,8 +264,15 @@ def validate_analysis_result(raw: str | dict) -> dict:
         raise AnalysisValidationError("rotation_cw=null 必須 ambiguous=true")
     evidence = orientation["evidence"]
     if "insufficient_visual_cues" in evidence:
-        if len(evidence) != 1 or orientation["confidence"] > 0.5:
-            raise AnalysisValidationError("insufficient_visual_cues 必須獨立且 confidence <= 0.5")
+        if (
+            len(evidence) != 1
+            or orientation["rotation_cw"] is not None
+            or not orientation["ambiguous"]
+            or orientation["confidence"] > 0.5
+        ):
+            raise AnalysisValidationError(
+                "insufficient_visual_cues 必須獨立、rotation_cw=null、ambiguous=true 且 confidence <= 0.5"
+            )
     for key in ("caption", "side_caption"):
         value[key] = value[key].strip()
     return value

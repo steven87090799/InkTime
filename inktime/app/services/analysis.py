@@ -172,7 +172,7 @@ class PhotoAnalysisService:
             return [line.strip() for line in str(settings.get(key, "")).splitlines() if line.strip()]
 
         return normalize_caption_controls({
-            "caption_min_chars": int(settings.get("analysis.caption_min_chars", 30)),
+            "caption_min_chars": int(settings.get("analysis.caption_min_chars", 10)),
             "caption_target_chars": int(settings.get("analysis.caption_target_chars", 60)),
             "caption_max_chars": int(settings.get("analysis.caption_max_chars", 100)),
             "side_caption_min_chars": int(settings.get("analysis.side_caption_min_chars", 8)),
@@ -337,7 +337,6 @@ class PhotoAnalysisService:
             "extreme_exposure_low_contrast": "極端曝光且低對比",
             "exposure_low_priority": "曝光比例偏高",
             "social_export": "社群平台轉存",
-            "e6_low": "E6 適合度過低",
         }
         sensitivity_labels = {
             "conservative": "保守模式",
@@ -359,7 +358,6 @@ class PhotoAnalysisService:
             "severe_blur": "照片嚴重模糊或失焦",
             "tiny_nearly_blank": "檔案過小且畫面近乎空白",
             "extreme_exposure_low_contrast": "曝光極端且對比不足",
-            "e6_below_threshold": "E6 六色顯示適合度不足",
             "suspected_blur": "照片可能模糊",
             "small_compressed": "檔案尺寸過小或壓縮明顯",
             "exposure_low_priority": "曝光比例偏高",
@@ -386,7 +384,6 @@ class PhotoAnalysisService:
                 f"{max(evidence['overexposed_ratio'], evidence['underexposed_ratio']) * 100:.2f}%"
             ),
             "social_export": "是" if evidence["checks"]["social_export"] else "否",
-            "e6_low": f"{float(photo['e6_score']):.1f}" if photo["e6_score"] is not None else "無資料",
         }
         check_thresholds = {
             "screenshot_strong": "明確檔名／軟體證據，或機率 ≥ 0.95",
@@ -405,7 +402,6 @@ class PhotoAnalysisService:
             "extreme_exposure_low_contrast": "曝光 ≥ 92% 且對比 < 8",
             "exposure_low_priority": f"曝光 ≥ {thresholds['exposure_low_priority'] * 100:.0f}%",
             "social_export": "社群軟體或常見輸出尺寸",
-            "e6_low": f"< {thresholds['e6_min_score']:.0f}",
         }
         screenshot_checks = {"screenshot_strong", "screenshot_mixed_signal"}
         checks = [
@@ -418,8 +414,6 @@ class PhotoAnalysisService:
                 "enabled": bool(
                     policy_settings["analysis.prefilter_screenshots"]
                     if key in screenshot_checks
-                    else policy_settings["analysis.e6_prefilter_enabled"]
-                    if key == "e6_low"
                     else policy_settings["analysis.prefilter_low_quality"]
                 ),
             }
@@ -435,8 +429,6 @@ class PhotoAnalysisService:
             "primary_reason": policy["primary_reason"],
             "matched_checks": policy["matched_checks"],
             "thresholds": policy["thresholds"],
-            "e6_threshold": policy["e6_threshold"],
-            "e6_feature_version": policy["e6_feature_version"],
             "evidence": policy["evidence"],
             "checks": checks,
             "defect_count": len(enabled_hits),
@@ -1801,6 +1793,8 @@ class PhotoAnalysisService:
             analysis_context={"analysis_fingerprint": analysis_fingerprint},
         )
         if inherited is not None:
+            if job_id is None:
+                self.photos.refresh_library_ranking(str(photo["library_id"]))
             return {"analysis": inherited, "stage": "inherited", "_actual_cost": 0}
         if strategy == "local":
             result = validate_analysis_result(self._local_result(photo))
@@ -1979,6 +1973,8 @@ class PhotoAnalysisService:
             )
             raise
         persisted_at = datetime.now(timezone.utc).isoformat()
+        if job_id is None:
+            self.photos.refresh_library_ranking(str(photo["library_id"]))
         self._trace_write(
             "complete_run",
             ai_trace_id,

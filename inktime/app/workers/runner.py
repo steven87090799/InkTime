@@ -426,6 +426,12 @@ class WorkerRunner:
                 settings=settings,
                 runtime_settings=runtime_settings,
             ) -> None:
+                if str(job["kind"]) == "analysis":
+                    self.app.extensions[
+                        "inktime_photo_repository"
+                    ].refresh_dirty_libraries_for_job(
+                        finalized_job_id, connection=connection
+                    )
                 offline_prepare = settings.get("offline_prepare")
                 offline_schedules = self.app.extensions["inktime_offline_schedule_repository"]
                 scheduled_task = settings.get("scheduled_task")

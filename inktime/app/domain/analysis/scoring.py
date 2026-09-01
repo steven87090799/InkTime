@@ -113,24 +113,19 @@ def calculate_ranking_score(
 
 
 def rarity_features(analysis: Mapping) -> set[str]:
-    """Only library-observable categories, never inferred personal importance."""
+    """Return value-bearing semantic rarity features.
+
+    People count only refines an existing group-photo signal.  A statistically
+    unusual crowd is not by itself evidence that a photo deserves a bonus.
+    """
     people = int(analysis.get("people_count") or 0)
-    bucket = (
-        "0"
-        if people == 0
-        else "1"
-        if people == 1
-        else "2-5"
-        if people <= 5
-        else "6-15"
-        if people <= 15
-        else "16+"
-    )
-    return {
-        *(f"type:{value}" for value in analysis.get("types", [])),
-        *(f"special:{value}" for value in analysis.get("special_codes", [])),
-        f"people:{bucket}",
-    }
+    codes = {str(value) for value in analysis.get("special_codes", [])}
+    features = {f"special:{value}" for value in codes}
+    types = {str(value) for value in analysis.get("types", [])}
+    features.update(f"special:{code}|type:{value}" for code in codes for value in types)
+    if "group_photo" in codes and people >= 16:
+        features.add("special:group_photo|people:16+")
+    return features
 
 
 def library_rarity_adjustment(analysis: Mapping, population: Iterable[Mapping]) -> int:
