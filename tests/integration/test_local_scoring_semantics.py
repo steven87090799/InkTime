@@ -90,7 +90,7 @@ def _save_semantic(app, photo_id: str, score: float) -> None:
 
 def _save_local(app, photo_id: str, score: float) -> None:
     photos = app.extensions["inktime_photo_repository"]
-    result = valid_result(caption="本機候選")
+    result = valid_result(caption="這是一段本機候選品質測試說明文字。")
     photos.save_analysis(
         photo_id,
         None,
@@ -296,7 +296,7 @@ def test_semantic_selection_survives_newer_local_history(app, tmp_path):
         "local_fallback",
         "local",
         "local-quality-v3",
-        valid_result(caption="本機備援結果"),
+        valid_result(caption="這是一段本機備援結果測試說明文字。"),
         "{}",
         score_kind=LOCAL_QUALITY_SCORE_KIND,
         ranking_score=55,

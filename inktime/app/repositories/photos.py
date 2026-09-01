@@ -14,7 +14,6 @@ from uuid import uuid4
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.db import Database
 from inktime.app.domain.analysis.scoring import (
-    LOCAL_QUALITY_SCORE_KIND,
     RANKING_RULE_VERSION,
     SEMANTIC_SCORE_KIND,
     preferred_analysis_order_sql,
@@ -1126,6 +1125,7 @@ class PhotoRepository:
             provider=row["provider"],
             stage=row["stage"],
         )
+        semantic_available = source_kind == SEMANTIC_SCORE_KIND
         result = validate_analysis_result(row["raw_json"])
         self.save_analysis(
             photo_id,

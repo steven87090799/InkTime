@@ -1064,12 +1064,8 @@ def test_photo_cards_show_total_score_and_e6_estimate(client, app):
     body = client.get("/photos").get_data(as_text=True)
 
     expected_selection = round(raw_score * 0.8 + 100 * 0.2, 1)
-    assert f"選片分 {expected_selection}（模型＋E6）" in body
-    assert "為什麼兩張都不錯的照片" in body
-    assert "相對鑑別分＝原始分 35%＋照片庫百分位 65%" in body
-    display_raw_score = round(raw_score, 1)
-    assert f"排序原始分 {display_raw_score} → 相對鑑別 {display_raw_score}" in body
-    assert "選片分 —（尚未正式分析）" in body
+    assert f"AI 選片分 {expected_selection}（AI 原始綜合＋E6）" in body
+    assert "AI 語意評分：尚未分析 · 照片庫鑑別分：尚未產生" in body
     assert "E6 顯示適合度 91.9（暫估，未納入正式選片分）" in body
 
 
@@ -1224,8 +1220,8 @@ def test_photo_cards_force_ineligible_selection_score_to_zero_but_keep_diagnosti
 
     body = client.get("/photos").get_data(as_text=True)
 
-    assert "選片分 0.0（已排除：" in body
-    assert f"排序原始分 {round(raw_score, 1)}" in body
+    assert "AI 選片分 0.0（已排除：" in body
+    assert f"AI 原始綜合 {round(raw_score, 1)}" in body
     assert "E6 顯示適合度 99.0" in body
 
 

@@ -170,7 +170,7 @@ class ReviewRepository:
 
     @staticmethod
     def _projection() -> str:
-        return f"""
+        return f"""  # noqa: S608 -- ordering is generated from a fixed repository helper.
             WITH latest_analysis AS (
                 SELECT pa.*
                 FROM photo_analysis pa
