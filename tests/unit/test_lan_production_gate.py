@@ -26,4 +26,4 @@ def test_lan_production_gate_loads_without_application_site_packages():
         text=True,
     )
 
-    assert completed.stdout.strip() == "55"
+    assert completed.stdout.strip() == "56"

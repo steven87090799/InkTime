@@ -35,7 +35,13 @@ from inktime.app.domain.rendering import (
     resolve_layout_geometry,
 )
 from inktime.app.domain.analysis.execution_mode import execution_mode
-from inktime.app.domain.analysis.scoring import prepare_score_distribution, calculate_distinguishing_score
+from inktime.app.domain.analysis.scoring import (
+    LOCAL_QUALITY_SCORE_KIND,
+    SEMANTIC_SCORE_KIND,
+    calculate_distinguishing_score,
+    preferred_analysis_order_sql,
+    prepare_score_distribution,
+)
 from inktime.app.services.local_selection import LocalSelectionPolicy
 from inktime.app.domain.rendering.system_presets import DEFAULT_RENDER_DITHER, DEFAULT_RENDER_PROFILE
 from inktime.app.domain.photos.orientation import (
@@ -587,10 +593,10 @@ class RenderService:
 
         with self.database.session() as connection:
             analysis = connection.execute(
-                """
+                f"""
                 SELECT id,side_caption,semantic_json,created_at
                 FROM photo_analysis WHERE photo_id=?
-                ORDER BY created_at DESC,id DESC LIMIT 1
+                ORDER BY {preferred_analysis_order_sql()} LIMIT 1
                 """,
                 (photo_id,),
             ).fetchone()
@@ -761,11 +767,11 @@ class RenderService:
         with self.database.session() as connection:
             rows = connection.execute(
                 f"""
-                SELECT a.photo_id,a.side_caption,a.semantic_json,a.provider,a.model,a.stage,
+                SELECT a.photo_id,a.side_caption,a.semantic_json,a.provider,a.model,a.stage,a.score_kind,
                        a.prompt_version,a.schema_version,a.created_at,a.analysis_source
                 FROM photo_analysis a
                 WHERE a.photo_id IN ({placeholders})
-                ORDER BY a.photo_id,a.created_at DESC,a.id DESC
+                ORDER BY a.photo_id,{preferred_analysis_order_sql('a')}
                 """,  # noqa: S608 -- placeholders are generated from a small in-memory list.
                 ids,
             ).fetchall()
@@ -861,7 +867,9 @@ class RenderService:
         override = self._photo_level_caption_override(photo_id)
         caption = "" if override is not None else self._caption_text(photo_id, analysis)
         provider = str((analysis or {}).get("provider") or "").strip()
-        is_ai_caption = bool(caption and provider and provider != "local")
+        is_ai_caption = bool(
+            caption and str((analysis or {}).get("score_kind") or "") == SEMANTIC_SCORE_KIND
+        )
         source_detail = (
             {
                 "provider_id": provider,
@@ -916,7 +924,7 @@ class RenderService:
         """Compatibility implementation retained for old call sites during migration."""
         with self.database.session() as connection:
             row = connection.execute(
-                "SELECT side_caption,semantic_json FROM photo_analysis WHERE photo_id=? ORDER BY created_at DESC,id DESC LIMIT 1",
+                f"SELECT side_caption,semantic_json FROM photo_analysis WHERE photo_id=? ORDER BY {preferred_analysis_order_sql()} LIMIT 1",
                 (photo_id,),
             ).fetchone()
         if row is None:
@@ -1014,6 +1022,7 @@ class RenderService:
         order_sql: str,
         limit: int,
         recent_mode: str,
+        score_kind: str = SEMANTIC_SCORE_KIND,
     ) -> list[Any]:
         orientation_sql = self._adaptive_orientation_sql(frame_orientation)
         recent_exists_sql = """
@@ -1026,6 +1035,11 @@ class RenderService:
             recent_sql = recent_exists_sql
         else:
             raise ValueError(f"Unsupported adaptive recent mode: {recent_mode}")
+        predicate = (
+            RenderCandidateRepository.SEMANTIC_SQL_PREDICATE
+            if score_kind == SEMANTIC_SCORE_KIND
+            else RenderCandidateRepository.LOCAL_SQL_PREDICATE
+        )
         with self.database.session() as connection:
             rows = connection.execute(
                 f"""
@@ -1035,10 +1049,10 @@ class RenderService:
                               AND dh.displayed_at>=datetime('now','-14 days')) recently_displayed
                 FROM photos p JOIN libraries l ON l.id=p.library_id
                 JOIN photo_analysis a ON a.id=(
-                    SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id AND latest.schema_version=4
-                    ORDER BY CASE WHEN latest.provider='local' THEN 1 ELSE 0 END,latest.created_at DESC,latest.id DESC LIMIT 1
+                    SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id
+                    ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1
                 )
-                WHERE {RenderCandidateRepository.SQL_PREDICATE}
+                WHERE {predicate}
                   AND p.id<>? AND ({orientation_sql}) AND ({recent_sql}) AND ({where_sql})
                 ORDER BY {order_sql} LIMIT ?
                 """,
@@ -1049,7 +1063,7 @@ class RenderService:
     def _adaptive_pair_metadata(self, primary: dict[str, Any]) -> None:
         with self.database.session() as connection:
             primary_analysis = connection.execute(
-                "SELECT types_json,semantic_json FROM photo_analysis WHERE photo_id=? ORDER BY created_at DESC,id DESC LIMIT 1",
+                f"SELECT types_json,semantic_json FROM photo_analysis WHERE photo_id=? ORDER BY {preferred_analysis_order_sql()} LIMIT 1",
                 (str(primary["id"]),),
             ).fetchone()
         if primary_analysis is not None:
@@ -1060,6 +1074,22 @@ class RenderService:
                 primary["types"] = json.loads(str(primary_analysis["types_json"] or "[]"))
             except (TypeError, ValueError, json.JSONDecodeError):
                 pass
+
+    def _selection_score_kind(self) -> str:
+        """Choose the domain for a single-domain history or pair query."""
+        if execution_mode(self.settings) in {"local_only", "local_with_manual_ai", "disabled"}:
+            return LOCAL_QUALITY_SCORE_KIND
+        return (
+            SEMANTIC_SCORE_KIND
+            if self.candidates.has_semantic_candidates()
+            else LOCAL_QUALITY_SCORE_KIND
+        )
+
+    def _photo_score_kind(self, photo: dict[str, Any]) -> str:
+        value = str(photo.get("score_kind") or photo.get("latest_score_kind") or "").strip()
+        if value in {SEMANTIC_SCORE_KIND, LOCAL_QUALITY_SCORE_KIND}:
+            return value
+        return self._selection_score_kind()
 
     def _available_adaptive_candidates(self, rows: list[Any]) -> list[dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
@@ -1081,6 +1111,7 @@ class RenderService:
         self, primary: dict[str, Any], *, frame_orientation: str
     ) -> dict[str, Any] | None:
         """Select fresh first through bounded date and nearest-any-date SQL phases."""
+        score_kind = self._photo_score_kind(primary)
         self._adaptive_pair_metadata(primary)
         primary_date_text = str(primary.get("captured_date") or primary.get("captured_at") or "")[:10]
         try:
@@ -1103,6 +1134,7 @@ class RenderService:
             if primary_date is None:
                 rows = self._adaptive_candidate_rows(
                     frame_orientation=frame_orientation,
+                    score_kind=score_kind,
                     where_sql="1=1",
                     parameters=(primary_id,),
                     order_sql="p.captured_at DESC,p.id DESC",
@@ -1148,6 +1180,7 @@ class RenderService:
             for where_sql, parameters, order_sql in phases:
                 rows = self._adaptive_candidate_rows(
                     frame_orientation=frame_orientation,
+                    score_kind=score_kind,
                     where_sql=where_sql,
                     parameters=parameters,
                     order_sql=order_sql,
@@ -1159,6 +1192,7 @@ class RenderService:
 
             older = self._adaptive_candidate_rows(
                 frame_orientation=frame_orientation,
+                score_kind=score_kind,
                 where_sql=f"{captured_date_sql}<?",
                 parameters=(primary_id, lower_seven),
                 order_sql=f"{captured_date_sql} DESC,p.id DESC",
@@ -1167,6 +1201,7 @@ class RenderService:
             )
             newer = self._adaptive_candidate_rows(
                 frame_orientation=frame_orientation,
+                score_kind=score_kind,
                 where_sql=f"{captured_date_sql}>?",
                 parameters=(primary_id, upper_seven),
                 order_sql=f"{captured_date_sql} ASC,p.id DESC",
@@ -1178,6 +1213,7 @@ class RenderService:
 
             undated = self._adaptive_candidate_rows(
                 frame_orientation=frame_orientation,
+                score_kind=score_kind,
                 where_sql="p.captured_date IS NULL AND p.captured_at IS NULL",
                 parameters=(primary_id,),
                 order_sql="p.id DESC",
@@ -1868,6 +1904,7 @@ class RenderService:
         device_configs: dict[str, dict[str, Any]] | None = None,
         activate_pointers: bool = True,
         assign_device_releases: bool = True,
+        allow_local_fallback: bool = False,
     ) -> dict:
         publish_started = time.monotonic()
         log_event(
@@ -1891,10 +1928,15 @@ class RenderService:
         layout_key = str(self.settings.get("render.layout", "photo_info"))
         source_limit = quantity * 2 if layout_key in {"photo_pair", "photo_pair_caption"} else quantity
         selected = photo_ids[:source_limit]
+        automatically_selected = not selected
         if not selected:
             selected = self.select_candidates(source_limit)
         # 明確指定與自動選片都必須在發布前重新驗證；不得使用過期候選或遺失來源契約。
-        required = self.candidates.require_for_execution_mode(selected, execution_mode(self.settings))
+        required = self.candidates.require_for_execution_mode(
+            selected,
+            execution_mode(self.settings),
+            allow_local_fallback=allow_local_fallback or automatically_selected,
+        )
         selected = [str(row["id"]) for row in required]
         eligibility_sources = {str(row["id"]): str(row["eligibility_source"]) for row in required}
         if device_ids:
@@ -2221,13 +2263,41 @@ class RenderService:
         older_only: bool,
         limit: int,
         candidate_years: list[int] | None = None,
+        score_kind: str = SEMANTIC_SCORE_KIND,
     ) -> list[dict[str, Any]]:
+        if score_kind not in {SEMANTIC_SCORE_KIND, LOCAL_QUALITY_SCORE_KIND}:
+            raise ValueError("RENDER-005 不支援的選片評分來源")
+        semantic_selection = score_kind == SEMANTIC_SCORE_KIND
         memory_threshold = float(self.settings.get("render.memory_threshold", 70))
         weight = float(self.settings.get("render.e6_weight", 20)) / 100.0
-        self.photos.score_population()
+        predicate = (
+            RenderCandidateRepository.SEMANTIC_SQL_PREDICATE
+            if semantic_selection
+            else RenderCandidateRepository.LOCAL_SQL_PREDICATE
+        )
+        score_expression = (
+            "COALESCE(a.final_ranking_score,a.ranking_score,a.semantic_score,0)"
+            if semantic_selection
+            else "COALESCE(a.local_score,p.local_candidate_score,0)"
+        )
         with self.database.session() as connection:
-            library_ids = [row[0] for row in connection.execute("SELECT id FROM libraries WHERE enabled=1")]
-        distributions = {library_id: prepare_score_distribution(self.photos.score_population(library_id)) for library_id in library_ids}
+            library_ids = [
+                str(row["id"])
+                for row in connection.execute("SELECT id FROM libraries ORDER BY id").fetchall()
+            ]
+        distributions = {
+            library_id: prepare_score_distribution(self.photos.score_population(library_id))
+            for library_id in library_ids
+        }
+        combined_expression = (
+            f"(inktime_distinguishing_score({score_expression},p.library_id) * ? + "
+            "COALESCE(p.e6_score,50) * ?)"
+            if semantic_selection
+            else score_expression
+        )
+        score_parameters: tuple[Any, ...] = (1.0 - weight, weight) if semantic_selection else ()
+        memory_parameters: tuple[Any, ...] = (memory_threshold,) if semantic_selection else ()
+        memory_clause = "AND a.memory_score>=?" if semantic_selection else ""
         result: list[dict[str, Any]] = []
         last_score: float | None = None
         last_id = ""
@@ -2237,7 +2307,15 @@ class RenderService:
         # existing burst-proximity signal consumed by LocalSelectionPolicy.
         while len(result) < max(limit, 1):
             with self.database.session() as connection:
-                connection.create_function("inktime_distinguishing_score", 2, lambda value, library_id: calculate_distinguishing_score(value, distributions[library_id])[0], deterministic=True)
+                connection.create_function(
+                    "inktime_distinguishing_score",
+                    2,
+                    lambda value, library_id: calculate_distinguishing_score(
+                        value,
+                        distributions.get(str(library_id), prepare_score_distribution(())),
+                    )[0],
+                    deterministic=True,
+                )
                 rows = connection.execute(
                     f"""
                     WITH ranked_candidates AS (
@@ -2247,20 +2325,21 @@ class RenderService:
                            p.e6_subject_score,p.e6_skin_score,p.e6_text_score,
                            p.crop_focus_x,p.crop_focus_y,p.crop_manual_x,p.crop_manual_y,
                            p.crop_method,p.crop_face_count,l.root_path,
-                           COALESCE(a.final_ranking_score,a.ranking_score,a.memory_score,0) ranking_score,
+                           CASE WHEN a.score_kind='{SEMANTIC_SCORE_KIND}' THEN {score_expression} END ranking_score,
+                           {score_expression} selection_score,
                            a.memory_score,
+                           a.score_kind,a.local_score,p.local_candidate_score,
                            (SELECT count(*) FROM display_history dh WHERE dh.photo_id=p.id) display_count,
                            (SELECT max(displayed_at) FROM display_history dh WHERE dh.photo_id=p.id) last_displayed_at,
-                           (inktime_distinguishing_score(COALESCE(a.final_ranking_score,a.ranking_score,a.memory_score,0),p.library_id) * ?
-                            + COALESCE(p.e6_score,50) * ?) combined_score
+                           {combined_expression} combined_score
                     FROM photos p
                     JOIN libraries l ON l.id=p.library_id
                     JOIN photo_analysis a ON a.id=(
-                        SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id AND latest.schema_version=4
-                        ORDER BY CASE WHEN latest.provider='local' THEN 1 ELSE 0 END,latest.created_at DESC,latest.id DESC LIMIT 1
+                        SELECT latest.id FROM photo_analysis latest WHERE latest.photo_id=p.id
+                        ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1
                     )
-                    WHERE {RenderCandidateRepository.SQL_PREDICATE}
-                      AND a.memory_score>=?
+                    WHERE {predicate}
+                      {memory_clause}
                       AND (?=0 OR p.captured_month_day IN (SELECT value FROM json_each(?)))
                       AND (?=0 OR (
                           p.captured_date IS NOT NULL
@@ -2274,9 +2353,8 @@ class RenderService:
                     ORDER BY combined_score DESC,id LIMIT 250
                     """,  # noqa: S608 -- eligibility predicate is a fixed class constant
                     (
-                        1.0 - weight,
-                        weight,
-                        memory_threshold,
+                        *score_parameters,
+                        *memory_parameters,
                         int(month_days is not None),
                         json.dumps(month_days or []),
                         int(older_only),
@@ -2334,12 +2412,25 @@ class RenderService:
             stored_ranking = row.get("ranking_score")
             ranking = float(stored_ranking) if isinstance(stored_ranking, (int, float, str)) else 0.0
             row["raw_ranking_score"] = ranking
-            distinguishing, percentile = calculate_distinguishing_score(ranking, distributions[row["library_id"]])
-            row["ranking_percentile"] = percentile
-            row["distinguishing_score"] = distinguishing
-            e6 = row["e6_score"] if row.get("e6_score") is not None else 50.0
-            raw_combined = distinguishing * (1.0 - weight) + float(e6) * weight
-            row["display_score"] = round(raw_combined, 2)
+            if semantic_selection:
+                distinguishing, percentile = calculate_distinguishing_score(
+                    ranking,
+                    distributions.get(
+                        str(row["library_id"]), prepare_score_distribution(())
+                    ),
+                )
+                row["ranking_percentile"] = percentile
+                row["distinguishing_score"] = distinguishing
+                e6 = row["e6_score"] if row.get("e6_score") is not None else 50.0
+                raw_combined = distinguishing * (1.0 - weight) + float(e6) * weight
+                row["display_score"] = round(raw_combined, 2)
+                row["local_quality_score"] = None
+            else:
+                raw_combined = float(row.get("selection_score") or 0.0)
+                row["ranking_percentile"] = None
+                row["distinguishing_score"] = None
+                row["display_score"] = round(raw_combined, 2)
+                row["local_quality_score"] = round(raw_combined, 2)
             adjustments = self._selection_adjustments(row, target=target, now=now)
             row["raw_combined_score"] = round(raw_combined, 2)
             row["score_components"] = {"base_combined_score": round(raw_combined, 2), **adjustments}
@@ -2357,39 +2448,43 @@ class RenderService:
             ),
         )
 
-    def select_candidates_details(
+    def _select_candidates_for_score_kind(
         self,
-        quantity: int | None = None,
         *,
-        target_date: date | None = None,
-        candidate_years: list[int] | None = None,
+        target: date,
+        limit: int,
+        candidate_years: list[int] | None,
+        score_kind: str,
+        already_selected: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        limit = quantity if quantity is not None else int(self.settings.get("render.quantity", 5))
-        limit = max(1, min(int(limit), 50))
-        target = target_date or self._today()
-        if execution_mode(self.settings) in {"local_only", "local_with_manual_ai"}:
-            result = LocalSelectionPolicy(
-                self.database, self.settings, self.resilience, self.locations
-            ).select(
-                target=target,
-                orientation=str(self.settings.get("render.frame_orientation", "portrait")),
-                quantity=limit,
-                layout=str(self.settings.get("render.layout", "photo_info")),
-            )
-            return result["selected"][:limit]
+        """Select one scoring domain using the existing staged fallback contract.
+
+        ``already_selected`` is only diversity context.  Semantic and local
+        scores are never compared or combined; callers decide the tier order.
+        """
         mode = str(self.settings.get("render.selection_mode", "history_today"))
+        context = list(already_selected or [])
+        selected: list[dict[str, Any]] = []
+        selected_ids = {str(row["id"]) for row in context}
+
         if mode == "top_ranked":
             rows = self._candidate_query(
-                target=target, month_days=None, older_only=False, limit=500, candidate_years=candidate_years
+                target=target,
+                month_days=None,
+                older_only=False,
+                limit=500,
+                candidate_years=candidate_years,
+                score_kind=score_kind,
             )
-            selected_top = self._pick_diverse_candidates(rows, limit=limit)
-            for row in selected_top:
+            selected = self._pick_diverse_candidates(
+                [row for row in rows if str(row["id"]) not in selected_ids],
+                limit=limit,
+                already_selected=context,
+            )
+            for row in selected:
                 row["match_type"] = "top_ranked"
                 row["day_distance"] = None
-            return selected_top
-
-        selected: list[dict[str, Any]] = []
-        selected_ids: set[str] = set()
+            return selected
 
         def append(rows: list[dict[str, Any]], match_type: str, distances=None) -> None:
             available = [row for row in rows if str(row["id"]) not in selected_ids]
@@ -2397,7 +2492,7 @@ class RenderService:
                 available,
                 limit=limit - len(selected),
                 distances=distances,
-                already_selected=selected,
+                already_selected=[*context, *selected],
             ):
                 photo_id = str(row["id"])
                 if photo_id in selected_ids or len(selected) >= limit:
@@ -2414,6 +2509,7 @@ class RenderService:
             older_only=True,
             limit=max(100, limit * 10),
             candidate_years=candidate_years,
+            score_kind=score_kind,
         )
         append(exact, "exact_day")
         fallback = str(self.settings.get("render.history_today_fallback", "nearby_then_ranked"))
@@ -2430,6 +2526,7 @@ class RenderService:
                 older_only=True,
                 limit=max(300, limit * 30),
                 candidate_years=candidate_years,
+                score_kind=score_kind,
             )
             nearby.sort(
                 key=lambda row: (
@@ -2440,10 +2537,62 @@ class RenderService:
             append(nearby, "nearby_day", distances)
         if len(selected) < limit and fallback in {"nearby_then_ranked", "ranked"}:
             ranked = self._candidate_query(
-                target=target, month_days=None, older_only=False, limit=500, candidate_years=candidate_years
+                target=target,
+                month_days=None,
+                older_only=False,
+                limit=500,
+                candidate_years=candidate_years,
+                score_kind=score_kind,
             )
             append(ranked, "ranked_fallback")
         return selected
+
+    def select_candidates_details(
+        self,
+        quantity: int | None = None,
+        *,
+        target_date: date | None = None,
+        candidate_years: list[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        limit = quantity if quantity is not None else int(self.settings.get("render.quantity", 5))
+        limit = max(1, min(int(limit), 50))
+        target = target_date or self._today()
+        mode = execution_mode(self.settings)
+        if mode in {"local_only", "local_with_manual_ai", "disabled"}:
+            result = LocalSelectionPolicy(
+                self.database, self.settings, self.resilience, self.locations
+            ).select(
+                target=target,
+                orientation=str(self.settings.get("render.frame_orientation", "portrait")),
+                quantity=limit,
+                layout=str(self.settings.get("render.layout", "photo_info")),
+            )
+            return result["selected"][:limit]
+
+        if mode == "automatic_ai":
+            semantic = self._select_candidates_for_score_kind(
+                target=target,
+                limit=limit,
+                candidate_years=candidate_years,
+                score_kind=SEMANTIC_SCORE_KIND,
+            )
+            if len(semantic) < limit:
+                local = self._select_candidates_for_score_kind(
+                    target=target,
+                    limit=limit - len(semantic),
+                    candidate_years=candidate_years,
+                    score_kind=LOCAL_QUALITY_SCORE_KIND,
+                    already_selected=semantic,
+                )
+                return [*semantic, *local][:limit]
+            return semantic
+
+        return self._select_candidates_for_score_kind(
+            target=target,
+            limit=limit,
+            candidate_years=candidate_years,
+            score_kind=self._selection_score_kind(),
+        )
 
     def select_candidates(self, quantity: int | None = None) -> list[str]:
         return [str(row["id"]) for row in self.select_candidates_details(quantity)]
@@ -2459,8 +2608,14 @@ class RenderService:
     def _history_where(
         self, filters: dict[str, Any], *, month_day: str | None = None
     ) -> tuple[str, list[Any]]:
+        score_kind = self._selection_score_kind()
+        predicate = (
+            RenderCandidateRepository.SEMANTIC_SQL_PREDICATE
+            if score_kind == SEMANTIC_SCORE_KIND
+            else RenderCandidateRepository.LOCAL_SQL_PREDICATE
+        )
         clauses = [
-            RenderCandidateRepository.SQL_PREDICATE,
+            predicate,
             "p.captured_date IS NOT NULL",
         ]
         params: list[Any] = []
@@ -2508,6 +2663,12 @@ class RenderService:
         order_by: str = "p.captured_at,p.id",
     ):
         """Fetch one bounded keyset page; never decode image contents here."""
+        score_kind = self._selection_score_kind()
+        score_expression = (
+            "COALESCE(a.final_ranking_score,a.ranking_score,a.semantic_score,0)"
+            if score_kind == SEMANTIC_SCORE_KIND
+            else "COALESCE(a.local_score,p.local_candidate_score,0)"
+        )
         where, params = self._history_where(filters, month_day=month_day)
         if history_date:
             where += " AND p.captured_date=?"
@@ -2543,13 +2704,14 @@ class RenderService:
                        p.manual_override,l.root_path,p.e6_score,
                        a.provider,a.model,a.prompt_version,a.schema_version,a.ranking_rule_version,
                        a.memory_score,a.visual_score,a.local_quality_score,a.final_ranking_score,
-                       a.ranking_score,a.effective_special_level,a.types_json,a.semantic_json,
-                       COALESCE(a.final_ranking_score,a.ranking_score,a.memory_score,p.local_candidate_score,0) AS final_score
+                       a.ranking_score,a.effective_special_level,a.local_score,a.score_kind,
+                       a.types_json,a.semantic_json,
+                       {score_expression} AS final_score
                 FROM photos p
                 JOIN libraries l ON l.id=p.library_id
                 JOIN photo_analysis a ON a.id=(
                     SELECT latest.id FROM photo_analysis latest
-                    WHERE latest.photo_id=p.id AND latest.schema_version=4 ORDER BY CASE WHEN latest.provider='local' THEN 1 ELSE 0 END,latest.created_at DESC,latest.id DESC LIMIT 1
+                    WHERE latest.photo_id=p.id ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1
                 )
                 WHERE {where}
                 )
@@ -2576,6 +2738,12 @@ class RenderService:
                 row["city"] = values.get("city_candidate")
                 row["country"] = values.get("country_candidate")
                 row["types"] = json.loads(str(row.get("types_json") or "[]"))
+                if str(row.get("score_kind") or "") == LOCAL_QUALITY_SCORE_KIND:
+                    row["local_quality_score"] = round(float(row.get("final_score") or 0.0), 2)
+                    row["distinguishing_score"] = None
+                    row["ranking_percentile"] = None
+                else:
+                    row["local_quality_score"] = None
                 usable.append(row)
         return usable
 
@@ -2635,7 +2803,7 @@ class RenderService:
         analysis_join = (
             "JOIN libraries l ON l.id=p.library_id "
             "JOIN photo_analysis a ON a.id=(SELECT latest.id FROM photo_analysis latest "
-            "WHERE latest.photo_id=p.id AND latest.schema_version=4 ORDER BY CASE WHEN latest.provider='local' THEN 1 ELSE 0 END,latest.created_at DESC,latest.id DESC LIMIT 1)"
+            f"WHERE latest.photo_id=p.id ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1)"
         )
         with self.database.session() as connection:
             rows = connection.execute(

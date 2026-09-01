@@ -25,8 +25,11 @@ from inktime.app.domain.analysis.schema import ALLOWED_TYPES
 from inktime.app.domain.analysis.plan import fingerprint
 from inktime.app.domain.analysis.execution_mode import execution_mode, permits_automatic_ai, permits_manual_ai
 from inktime.app.domain.analysis.scoring import (
+    LOCAL_QUALITY_SCORE_KIND,
+    SEMANTIC_SCORE_KIND,
     calculate_distinguishing_score,
     prepare_score_distribution,
+    resolve_score_kind,
     score_band,
 )
 from inktime.app.domain.photos.quality_policy import (
@@ -192,7 +195,8 @@ def photos_page():
     photos = []
     for stored_row in rows:
         photo = dict(stored_row)
-        ranking_score = photo.get("ranking_score")
+        score_kind = str(photo.get("score_kind") or "")
+        ranking_score = photo.get("ranking_score") if score_kind == SEMANTIC_SCORE_KIND else None
         e6_score = photo.get("e6_score")
         quality = evaluate_local_quality(photo, settings=quality_settings)
         stored_exclusion = str(photo.get("exclusion_status") or "eligible")
@@ -216,30 +220,48 @@ def photos_page():
         photo["selection_score"] = None
         photo["model_score"] = round(float(ranking_score), 1) if ranking_score is not None else None
         photo["e6_display_score"] = round(float(e6_score), 1) if e6_score is not None else None
+        photo["score_kind"] = score_kind
+        photo["local_quality_score"] = None
         if hard_excluded:
             reason = str(photo.get("reject_reason") or quality["primary_reason"])
             photo.pop("score_band", None)
             photo["total_score"] = 0.0
             photo["selection_score"] = 0.0
-            photo["total_score_source"] = f"已排除：{exclusion_labels.get(reason, reason)}"
+            if score_kind != SEMANTIC_SCORE_KIND and str(photo.get("local_features_status") or "") == "complete":
+                photo["score_kind"] = LOCAL_QUALITY_SCORE_KIND
+                photo["local_quality_score"] = local_candidate_score(photo, evaluation=quality)
+                photo["total_score_source"] = f"本機候選品質（已排除：{exclusion_labels.get(reason, reason)}）"
+            else:
+                photo["total_score_source"] = f"已排除：{exclusion_labels.get(reason, reason)}"
         elif ranking_score is not None and e6_score is not None:
             photo["total_score"] = round(
                 float(calibrated_score) * (1.0 - e6_weight) + float(e6_score) * e6_weight,
                 1,
             )
             photo["selection_score"] = photo["total_score"]
-            photo["total_score_source"] = "相對校準＋E6" if percentile is not None else "模型＋E6"
+            photo["total_score_source"] = (
+                "AI 相對評分＋E6" if percentile is not None else "AI 原始綜合＋E6"
+            )
         elif ranking_score is not None:
             photo["total_score"] = calibrated_score
             photo["selection_score"] = calibrated_score
-            photo["total_score_source"] = "相對校準" if percentile is not None else "模型"
+            photo["total_score_source"] = "AI 相對評分" if percentile is not None else "AI 原始綜合"
+        elif score_kind == LOCAL_QUALITY_SCORE_KIND or str(photo.get("local_features_status") or "") == "complete":
+            photo["local_quality_score"] = (
+                round(float(photo.get("local_score")), 2)
+                if photo.get("local_score") is not None
+                else local_candidate_score(photo, evaluation=quality)
+            )
+            photo["total_score"] = photo["local_quality_score"]
+            photo["selection_score"] = photo["local_quality_score"]
+            photo["total_score_source"] = "本機候選品質"
+            photo["score_kind"] = LOCAL_QUALITY_SCORE_KIND
+        elif e6_score is not None:
+            photo["total_score"] = round(float(e6_score), 1)
+            photo["selection_score"] = photo["total_score"]
+            photo["total_score_source"] = "E6 暫估（尚未產生本機候選品質）"
         else:
             photo["total_score"] = None
-            photo["local_quality_score"] = (
-                local_candidate_score(photo, evaluation=quality)
-                if str(photo.get("local_features_status") or "") == "complete"
-                else None
-            )
             photo["total_score_source"] = "尚未完成正式排序分析"
         photos.append(photo)
 
@@ -674,7 +696,6 @@ def photo_detail(photo_id: str):
             analysis["types"] = json.loads(str(analysis.get("types_json") or "[]"))
         except json.JSONDecodeError:
             analysis["types"] = []
-        analysis["origin_label"] = "本機判斷" if analysis.get("provider") == "local" else "模型判斷"
         analysis["is_preferred"] = index == 0
         analysis["stage_label"] = {
             "single": "Vision 模型分析",
@@ -686,13 +707,39 @@ def photo_detail(photo_id: str):
             "prefilter": "本機預篩選（未呼叫模型）",
             "local": "本機分析（未呼叫模型）",
         }.get(str(analysis.get("stage") or ""), str(analysis.get("stage") or "未知階段"))
-        if analysis.get("ranking_score") is not None:
+        score_kind = resolve_score_kind(
+            analysis.get("score_kind"),
+            provider=analysis.get("provider"),
+            stage=analysis.get("stage"),
+        )
+        analysis["score_kind"] = score_kind
+        analysis["semantic_scores_available"] = score_kind == SEMANTIC_SCORE_KIND
+        analysis["origin_label"] = {
+            SEMANTIC_SCORE_KIND: "模型判斷",
+            LOCAL_QUALITY_SCORE_KIND: "本機影像分析",
+        }.get(score_kind, "歷史分析（來源不明）")
+        if score_kind == SEMANTIC_SCORE_KIND and analysis.get("ranking_score") is not None:
             calibrated, percentile = calculate_distinguishing_score(
                 float(analysis["ranking_score"]), score_distribution
             )
             analysis["distinguishing_score"] = calibrated
             analysis["ranking_percentile"] = percentile
             analysis["score_band"] = score_band(percentile, calibrated)
+        elif score_kind == LOCAL_QUALITY_SCORE_KIND:
+            try:
+                payload = json.loads(str(analysis.get("semantic_json") or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = {}
+            analysis["local_quality"] = (
+                payload.get("local_quality") if isinstance(payload, dict) else None
+            )
+            if not isinstance(analysis["local_quality"], dict):
+                analysis["local_quality"] = evaluate_local_quality(dict(photo))
+            analysis["local_quality_score"] = (
+                float(analysis["local_score"])
+                if analysis.get("local_score") is not None
+                else local_candidate_score(dict(photo), evaluation=analysis["local_quality"])
+            )
         analyses.append(analysis)
     prefilter = current_app.extensions["inktime_analysis_service"].prefilter_snapshot(photo)
     orientation = resolve_effective_orientation(

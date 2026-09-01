@@ -92,6 +92,7 @@
         <span class="status">{{ a.origin_label }} · Schema {{ a.schema_version }}</span>
       </div>
       <p class="analysis-meta">{{ a.provider or '未知 Provider' }} / {{ a.model or '未知模型' }} · {{ a.created_at }}</p>
+      {% if a.score_kind == 'semantic' %}
       <dl>
         <dt>照片分類</dt><dd>{{ a.types|join('、') if a.types else '未分類' }}</dd>
         <dt>照片庫鑑別分</dt><dd>{% if a.distinguishing_score is defined %}<strong>{{ a.distinguishing_score }}（{{ a.score_band }}）</strong>{% if a.ranking_percentile is not none %} · 優於約 {{ '%.0f'|format(a.ranking_percentile) }}% 已評分照片{% else %} · 照片不足，暫用原始分{% endif %}{% else %}—{% endif %}</dd>
@@ -100,6 +101,23 @@
         <dt>內容分類</dt><dd>{{ a.content_filter_json }}</dd>
         <dt>評分版本</dt><dd>{{ a.scoring_version_name or '舊版／未記錄' }}</dd>
       </dl>
+      {% else %}
+      <dl>
+        <dt>本機候選品質分</dt><dd>{% if a.score_kind == 'local_quality' and a.local_quality_score is not none %}<strong>{{ '%.1f'|format(a.local_quality_score) }}</strong>{% else %}尚未產生{% endif %}</dd>
+        <dt>清晰度／Blur score</dt><dd>{{ '%.2f'|format(photo.blur_score) if photo.blur_score is not none else '無資料' }}</dd>
+        <dt>對比</dt><dd>{{ '%.2f'|format(photo.contrast) if photo.contrast is not none else '無資料' }}</dd>
+        <dt>曝光</dt><dd>過曝 {{ '%.2f%%'|format(photo.overexposed_ratio * 100) if photo.overexposed_ratio is not none else '無資料' }}；欠曝 {{ '%.2f%%'|format(photo.underexposed_ratio * 100) if photo.underexposed_ratio is not none else '無資料' }}</dd>
+        <dt>解析度</dt><dd>{{ photo.width }} × {{ photo.height }}（短邊 {{ [photo.width or 0, photo.height or 0]|min }} px）</dd>
+        <dt>截圖機率</dt><dd>{{ '%.2f'|format(photo.screenshot_likelihood) if photo.screenshot_likelihood is not none else '無資料' }}</dd>
+        <dt>E6 適合度</dt><dd>{{ '%.1f'|format(photo.e6_score) if photo.e6_score is not none else '無資料' }}</dd>
+        <dt>AI 語意評分</dt><dd>{% if a.score_kind == 'local_quality' %}尚未進行{% else %}無法可靠判定（歷史來源不明）{% endif %}</dd>
+        <dt>照片庫鑑別分</dt><dd>尚未產生</dd>
+        <dt>原始綜合排序</dt><dd>尚未產生</dd>
+        <dt>判斷理由</dt><dd>{{ a.reason }}</dd>
+        <dt>評分版本</dt><dd>{{ (a.local_quality.feature_version if a.local_quality else none) or a.ranking_rule_version or '本機品質規則' }}</dd>
+      </dl>
+      <p>此結果僅為本機影像品質分析，不等同 AI 回憶與視覺評分。</p>
+      {% endif %}
       <h3>{{ a.origin_label }}文字結果</h3>
       <p class="analysis-copy">{{ a.caption }}</p>
       <h3>產生的一句話（電子紙短文案）</h3>

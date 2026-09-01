@@ -36,7 +36,7 @@ Special bonus 固定為 `0 / 2 / 5 / 9 / 14`。最愛提升 1 級。本機 rarit
 
 ## 儲存與輸出
 
-Migration 54 加入 v4 儲存欄位；舊資料僅作歷史稽核，不正規化、不進新排名，需重新分析。原圖與人工決定不會因 migration 刪除。既有 SQLite 歷史欄位保留，新分析不填 AI technical/emotion/reason；歷史 scoring profile 的舊 SQL 約束以固定零維持，不參與新公式。
+Migration 54 加入 v4 儲存欄位，Migration 55 持久化照片庫排名重算狀態，Migration 56 加入 `score_kind` 並分離 semantic 與 local quality。舊資料僅作歷史稽核，不正規化、不進新排名，需重新分析。原圖與人工決定不會因 migration 刪除。既有 SQLite 歷史欄位保留，新分析不填 AI technical/emotion/reason；歷史 scoring profile 的舊 SQL 約束以固定零維持，不參與新公式。
 
 Caption 預設 30／60／100 字，side_caption 8–16 字；全分析上限 1200 tokens（含最大 100 字描述、16 字短句、有限陣列、JSON 鍵與格式餘裕）。預設 rubric 只送一次，管理員確實自訂時才追加規則。
 

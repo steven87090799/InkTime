@@ -5,6 +5,11 @@ from typing import Any, Iterable
 
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.db import Database
+from inktime.app.domain.analysis.scoring import (
+    LOCAL_QUALITY_SCORE_KIND,
+    SEMANTIC_SCORE_KIND,
+    preferred_analysis_order_sql,
+)
 
 
 class IneligiblePhotoError(ValueError):
@@ -24,13 +29,26 @@ class RenderCandidateRepository:
     或逃逸 Library Root 的檔案。
     """
 
-    SQL_PREDICATE = """
+    _BASE_SQL_PREDICATE = """
         p.status='analyzed'
         AND p.eligible=1
         AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')
         AND p.lifecycle_status='active'
         AND l.enabled=1
         AND a.id IS NOT NULL AND a.schema_version=4
+    """
+    SQL_PREDICATE = f"""
+        {_BASE_SQL_PREDICATE}
+        AND a.score_kind IN ('{SEMANTIC_SCORE_KIND}','{LOCAL_QUALITY_SCORE_KIND}')
+    """
+    SEMANTIC_SQL_PREDICATE = f"""
+        {_BASE_SQL_PREDICATE}
+        AND a.score_kind='{SEMANTIC_SCORE_KIND}'
+        AND a.ranking_score IS NOT NULL
+    """
+    LOCAL_SQL_PREDICATE = f"""
+        {_BASE_SQL_PREDICATE}
+        AND a.score_kind='{LOCAL_QUALITY_SCORE_KIND}'
     """
     MAX_REQUESTED = 200
 
@@ -48,13 +66,14 @@ class RenderCandidateRepository:
         with self.database.session() as connection:
             row = connection.execute(
                 f"""
-                SELECT p.*,l.root_path,l.enabled AS library_enabled,a.id AS latest_analysis_id
+                SELECT p.*,l.root_path,l.enabled AS library_enabled,a.id AS latest_analysis_id,
+                       a.score_kind,a.ranking_score,a.local_score,a.final_ranking_score
                 FROM photos p
                 JOIN libraries l ON l.id=p.library_id
                 LEFT JOIN photo_analysis a ON a.id=(
                     SELECT latest.id FROM photo_analysis latest
-                    WHERE latest.photo_id=p.id AND latest.schema_version=4
-                    ORDER BY CASE WHEN latest.provider='local' THEN 1 ELSE 0 END,latest.created_at DESC,latest.id DESC LIMIT 1
+                    WHERE latest.photo_id=p.id
+                    ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1
                 )
                 WHERE p.id=? AND {self.SQL_PREDICATE}
                 """,  # noqa: S608 -- predicate is a fixed class constant
@@ -63,6 +82,25 @@ class RenderCandidateRepository:
         if row is None or not self.available(row):
             return None
         return dict(row)
+
+    def has_semantic_candidates(self) -> bool:
+        """Return whether the current library has at least one AI-ranked row."""
+        with self.database.session() as connection:
+            row = connection.execute(
+                f"""
+                SELECT 1
+                FROM photos p
+                JOIN libraries l ON l.id=p.library_id
+                JOIN photo_analysis a ON a.id=(
+                    SELECT latest.id FROM photo_analysis latest
+                    WHERE latest.photo_id=p.id
+                    ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1
+                )
+                WHERE {self.SEMANTIC_SQL_PREDICATE}
+                LIMIT 1
+                """,  # noqa: S608 -- the predicate is a fixed repository constant.
+            ).fetchone()
+        return row is not None
 
     def require(self, photo_ids: Iterable[str]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -105,13 +143,21 @@ class RenderCandidateRepository:
             rows.append(row)
         return rows
 
-    def require_for_execution_mode(self, photo_ids: Iterable[str], execution: str) -> list[dict[str, Any]]:
+    def require_for_execution_mode(
+        self,
+        photo_ids: Iterable[str],
+        execution: str,
+        *,
+        allow_local_fallback: bool = False,
+    ) -> list[dict[str, Any]]:
         """Resolve one release contract per requested photo, without N+1 queries.
 
         Non-automatic modes deliberately accept a mix of old, fully analysed
         photos and scanner-only photos.  A contract is never chosen for the
         whole batch: doing so made a valid old photo fail merely because a
-        second photo had only local features (and vice versa).
+        second photo had only local features (and vice versa).  Automatic AI
+        callers remain strict for explicitly supplied IDs; the opt-in local
+        fallback is reserved for IDs produced by the tiered selector.
         """
         ids = list(dict.fromkeys(str(value).strip() for value in photo_ids if str(value).strip()))
         if len(ids) > self.MAX_REQUESTED:
@@ -124,13 +170,13 @@ class RenderCandidateRepository:
             rows = connection.execute(
                 f"""
                 SELECT p.*, l.root_path, l.enabled AS library_enabled,
-                       a.id AS latest_analysis_id
+                       a.id AS latest_analysis_id,a.score_kind,a.ranking_score
                 FROM photos p
                 LEFT JOIN libraries l ON l.id=p.library_id
                 LEFT JOIN photo_analysis a ON a.id=(
                     SELECT latest.id FROM photo_analysis latest
-                    WHERE latest.photo_id=p.id AND latest.schema_version=4
-                    ORDER BY CASE WHEN latest.provider='local' THEN 1 ELSE 0 END,latest.created_at DESC, latest.id DESC LIMIT 1
+                    WHERE latest.photo_id=p.id
+                    ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1
                 )
                 WHERE p.id IN ({placeholders})
                 """,  # noqa: S608 -- placeholders are generated only from the bounded input list.
@@ -157,14 +203,19 @@ class RenderCandidateRepository:
                 str(row.get("status") or "") == "analyzed"
                 and bool(row.get("eligible"))
                 and row.get("latest_analysis_id") is not None
+                and str(row.get("score_kind") or "") == SEMANTIC_SCORE_KIND
+                and row.get("ranking_score") is not None
             )
             local_eligible = (
                 bool(row.get("eligible")) and str(row.get("local_features_status") or "") == "complete"
             )
             if execution == "automatic_ai":
-                if not analysis_eligible:
+                if analysis_eligible:
+                    source = "analysis"
+                elif allow_local_fallback and local_eligible:
+                    source = "local"
+                else:
                     raise IneligiblePhotoError(photo_id, "PHOTO-ELIGIBILITY-007 缺少有效正式分析")
-                source = "analysis"
             elif analysis_eligible:
                 source = "analysis"
             elif local_eligible:

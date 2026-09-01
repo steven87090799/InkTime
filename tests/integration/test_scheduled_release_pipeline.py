@@ -4,6 +4,7 @@ from PIL import Image
 import pytest
 import sqlite3
 
+from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 from tests.unit.test_analysis_schema import valid_result
 
 
@@ -44,8 +45,8 @@ def test_schedule_resolves_devices_limits_years_and_commits_history_after_publis
         photos.save_analysis(
             photo_id,
             None,
-            "local",
-            "local",
+            "single",
+            "test-ai",
             "scheduled-test",
             valid_result(
                 caption="這是一段排程測試說明文字。",
@@ -55,6 +56,7 @@ def test_schedule_resolves_devices_limits_years_and_commits_history_after_publis
                 side_caption="這是一段測試回憶短句。",
             ),
             "{}",
+            score_kind=SEMANTIC_SCORE_KIND,
             ranking_score=90 - index,
             final_ranking_score=90 - index,
         )
@@ -126,8 +128,8 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
         photos.save_analysis(
             photo_id,
             None,
-            "local",
-            "local",
+            "single",
+            "test-ai",
             "offline-scheduled-test",
             valid_result(
                 caption="這是一段離線排程測試說明。",
@@ -137,6 +139,7 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
                 side_caption="這是一段測試回憶短句。",
             ),
             "{}",
+            score_kind=SEMANTIC_SCORE_KIND,
             ranking_score=100 - index,
             final_ranking_score=100 - index,
         )
@@ -260,8 +263,8 @@ def test_enhanced_prepare_fails_closed_when_device_config_changes_before_commit(
     photos.save_analysis(
         photo_id,
         None,
-        "local",
-        "local",
+        "single",
+        "test-ai",
         "offline-race",
         valid_result(
             caption="這是一段競態照片測試說明。",
@@ -271,6 +274,7 @@ def test_enhanced_prepare_fails_closed_when_device_config_changes_before_commit(
             side_caption="這是一段測試回憶短句。",
         ),
         "{}",
+        score_kind=SEMANTIC_SCORE_KIND,
         ranking_score=90,
         final_ranking_score=90,
     )

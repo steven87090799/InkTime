@@ -7,7 +7,9 @@ from inktime.app.domain.analysis.scoring import (
     calculate_distinguishing_score,
     calculate_library_percentile,
     calculate_ranking_score,
+    LOCAL_QUALITY_SCORE_KIND,
     prepare_score_distribution,
+    resolve_score_kind,
     score_band,
     validate_ranking_weights,
 )
@@ -38,6 +40,12 @@ def test_ranking_score_preserves_components_and_applies_favorite_bonus():
 def test_ranking_weights_must_total_one_hundred():
     with pytest.raises(ValueError, match="固定"):
         validate_ranking_weights({**WEIGHTS, "memory": 49})
+
+
+def test_score_kind_does_not_misclassify_a_real_local_ai_provider():
+    assert resolve_score_kind(provider="local-ollama", stage="single") == "semantic"
+    assert resolve_score_kind(provider="local", stage="single") == LOCAL_QUALITY_SCORE_KIND
+    assert resolve_score_kind(provider="test-ai", stage="prefilter") == LOCAL_QUALITY_SCORE_KIND
 
 
 def test_library_percentile_spreads_narrow_scores_without_changing_order():

@@ -32,7 +32,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 55
+    assert CURRENT_SCHEMA_VERSION == 56
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -366,7 +366,7 @@ def test_migration_53_converts_existing_ai_output_to_taiwan_traditional(monkeypa
         )
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database) == [53, 54, 55]
+    assert migrate(database) == [53, 54, 55, 56]
     with database.session() as connection:
         analysis = connection.execute(
             "SELECT caption,side_caption,reason,raw_json,semantic_json FROM photo_analysis"
@@ -479,6 +479,70 @@ def test_migration_48_makes_unknown_cost_nullable_and_preserves_api_usage_contra
     assert "idx_api_usage_batch_item_once" in index_names
     assert tuple(legacy) == (17, "legacy", 3, 0.125, None, "estimated")
     assert auto_id > 900
+    assert migrate(database) == []
+
+
+def test_migration_56_classifies_v4_history_without_rewriting_rows(monkeypatch, tmp_path):
+    database = Database(tmp_path / "migration-56-score-kind.db")
+    all_migrations = migrations_module.MIGRATIONS
+    before_56 = tuple(migration for migration in all_migrations if migration.version < 56)
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", before_56)
+    assert migrate(database) == list(range(1, 56))
+    now = "2026-08-30T00:00:00+00:00"
+    with database.transaction() as connection:
+        connection.execute(
+            "INSERT INTO libraries(id,name,root_path,created_at,updated_at) VALUES (?,?,?,?,?)",
+            ("score-kind-library", "Score kind", str(tmp_path), now, now),
+        )
+        connection.executemany(
+            "INSERT INTO photos(id,library_id,relative_path,status,created_at,updated_at) VALUES (?,?,?,'analyzed',?,?)",
+            [
+                ("historical-local", "score-kind-library", "local.jpg", now, now),
+                ("historical-ai", "score-kind-library", "ai.jpg", now, now),
+                ("historical-unknown", "score-kind-library", "unknown.jpg", now, now),
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT INTO photo_analysis(
+                photo_id,schema_version,stage,provider,model,caption,types_json,
+                memory_score,visual_score,local_quality_score,special_level,
+                side_caption,raw_json,analysis_source,ranking_score,created_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            [
+                (
+                    "historical-local", 4, "local", "local", "local-quality-v3", "local",
+                    "[]", 50, 50, 55, 0, "", '{"legacy":true}', "direct", 55, now,
+                ),
+                (
+                    "historical-ai", 4, "single", "openai", "vision", "ai", "[]",
+                    78, 83, 91, 2, "", '{"semantic":true}', "direct", 78, now,
+                ),
+                (
+                    "historical-unknown", 4, "unknown", None, None, "unknown", "[]",
+                    50, 50, 50, 1, "", '{"legacy":true}', "direct", 50, now,
+                ),
+            ],
+        )
+        before_raw = connection.execute(
+            "SELECT raw_json,ranking_score FROM photo_analysis WHERE photo_id='historical-local'"
+        ).fetchone()
+
+    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", all_migrations)
+    assert migrate(database) == [56]
+    with database.session() as connection:
+        rows = {
+            str(row["photo_id"]): dict(row)
+            for row in connection.execute(
+                "SELECT photo_id,score_kind,ranking_score,raw_json FROM photo_analysis ORDER BY photo_id"
+            ).fetchall()
+        }
+    assert rows["historical-local"]["score_kind"] == "local_quality"
+    assert rows["historical-ai"]["score_kind"] == "semantic"
+    assert rows["historical-unknown"]["score_kind"] == "legacy"
+    assert rows["historical-local"]["ranking_score"] == before_raw["ranking_score"] == 55
+    assert rows["historical-local"]["raw_json"] == before_raw["raw_json"]
     assert migrate(database) == []
 
 

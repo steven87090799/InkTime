@@ -2211,6 +2211,36 @@ MIGRATIONS = (
             "UPDATE settings SET value_json='100' WHERE key='analysis.caption_max_chars'",
         ),
     ),
+    Migration(
+        56,
+        "分離本機品質與 Vision v4 語意排序來源",
+        (
+            """
+            ALTER TABLE photo_analysis ADD COLUMN score_kind TEXT NOT NULL DEFAULT 'legacy'
+                CHECK(score_kind IN ('semantic','local_quality','legacy'))
+            """,
+            """
+            UPDATE photo_analysis
+            SET score_kind='local_quality'
+            WHERE lower(COALESCE(provider,'')) IN (
+                    'local','local-prefilter','local-quality-v3','virtual-display-local'
+                )
+               OR lower(COALESCE(stage,'')) IN ('local','local_fallback','prefilter')
+            """,
+            """
+            UPDATE photo_analysis
+            SET score_kind='semantic'
+            WHERE score_kind='legacy'
+              AND schema_version=4
+              AND ranking_score IS NOT NULL
+              AND memory_score IS NOT NULL
+              AND visual_score IS NOT NULL
+              AND length(trim(COALESCE(provider,''))) > 0
+              AND lower(provider) <> 'inherited'
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_photo_analysis_score_kind_ranking ON photo_analysis(score_kind,ranking_score DESC,photo_id)",
+        ),
+    ),
 )
 
 
@@ -2904,6 +2934,13 @@ def migrate(database: Database, backup_dir: Path | None = None) -> list[int]:
                     "migration_name": migration.name,
                 },
             )
+        if 54 in applied or 56 in applied:
+            # Migrations 54 and 56 change which historical rows are eligible for the
+            # semantic population.  Clear an already-loaded process-local
+            # distribution before any caller can reuse it.
+            from inktime.app.repositories.photos import invalidate_score_population_cache
+
+            invalidate_score_population_cache()
         return applied
 
 

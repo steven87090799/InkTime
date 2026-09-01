@@ -31,7 +31,10 @@ from inktime.app.domain.analysis.execution_mode import (
 from inktime.app.domain.analysis.scoring import (
     DEFAULT_FAVORITE_BONUS,
     DEFAULT_RANKING_WEIGHTS,
+    LOCAL_QUALITY_SCORE_KIND,
+    SEMANTIC_SCORE_KIND,
     ranking_components,
+    resolve_score_kind,
 )
 from inktime.app.domain.analysis.schema import normalize_caption_controls
 from inktime.app.domain.photos import ThumbnailCache
@@ -519,6 +522,7 @@ class PhotoAnalysisService:
         favorite_bonus: float,
         scoring_version_id: str | None,
         schema_kind: str,
+        score_kind: str | None = None,
         prompt_version: str = PROMPT_VERSION,
         analysis_fingerprint: str | None = None,
         analysis_spec_json: str | None = None,
@@ -528,12 +532,21 @@ class PhotoAnalysisService:
         analysis_source: str = "direct",
         connection=None,
     ) -> dict:
+        score_kind = resolve_score_kind(score_kind, provider=provider, stage=stage)
         ranked = self._score_result(
             result,
             photo,
             ranking_weights=ranking_weights,
             favorite_bonus=favorite_bonus,
         )
+        semantic_available = score_kind == SEMANTIC_SCORE_KIND
+        ranked["score_kind"] = score_kind
+        ranked["semantic_scores_available"] = semantic_available
+        if not semantic_available:
+            ranked["ranking_score"] = None
+            ranked["base_ranking_score"] = None
+            ranked["final_ranking_score"] = None
+            ranked["semantic_score"] = None
         self.photos.save_analysis(
             photo_id,
             job_id,
@@ -546,6 +559,7 @@ class PhotoAnalysisService:
             ranking_score=ranked["ranking_score"],
             scoring_version_id=scoring_version_id,
             schema_kind=schema_kind,
+            score_kind=score_kind,
             local_score=ranked["local_score"],
             semantic_score=ranked["semantic_score"],
             base_ranking_score=ranked["base_ranking_score"],
@@ -1812,6 +1826,7 @@ class PhotoAnalysisService:
                 favorite_bonus=favorite_bonus,
                 scoring_version_id=scoring_version_id,
                 schema_kind="basic",
+                score_kind=LOCAL_QUALITY_SCORE_KIND,
                 **local_context("basic"),
             )
             return {"analysis": result, "stage": "local", "_actual_cost": 0}
@@ -1839,6 +1854,7 @@ class PhotoAnalysisService:
                 favorite_bonus=favorite_bonus,
                 scoring_version_id=scoring_version_id,
                 schema_kind="basic",
+                score_kind=LOCAL_QUALITY_SCORE_KIND,
                 **local_context("basic"),
             )
             return {"analysis": result, "stage": "prefilter", "_actual_cost": 0}
@@ -1866,6 +1882,7 @@ class PhotoAnalysisService:
                 favorite_bonus=favorite_bonus,
                 scoring_version_id=scoring_version_id,
                 schema_kind="basic",
+                score_kind=LOCAL_QUALITY_SCORE_KIND,
                 **local_context("basic"),
                 prefilter_evaluation=prefilter_evaluation,
             )
@@ -1889,6 +1906,7 @@ class PhotoAnalysisService:
                 favorite_bonus=favorite_bonus,
                 scoring_version_id=scoring_version_id,
                 schema_kind="basic",
+                score_kind=LOCAL_QUALITY_SCORE_KIND,
                 **local_context("basic"),
             )
             return {"analysis": result, "stage": "local_fallback", "_actual_cost": 0}
@@ -1957,6 +1975,7 @@ class PhotoAnalysisService:
                 favorite_bonus=favorite_bonus,
                 scoring_version_id=scoring_version_id,
                 schema_kind="full",
+                score_kind=SEMANTIC_SCORE_KIND,
                 prompt_version=prompt_version,
                 analysis_fingerprint=analysis_fingerprint,
                 analysis_spec_json=analysis_spec_json,

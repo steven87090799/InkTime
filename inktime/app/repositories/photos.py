@@ -14,9 +14,13 @@ from uuid import uuid4
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.db import Database
 from inktime.app.domain.analysis.scoring import (
+    LOCAL_QUALITY_SCORE_KIND,
     RANKING_RULE_VERSION,
+    SEMANTIC_SCORE_KIND,
+    preferred_analysis_order_sql,
     ranking_components,
     rarity_features,
+    resolve_score_kind,
 )
 from inktime.app.domain.analysis.content_filter import CONTENT_FILTER_DEFAULTS, evaluate_content_filter
 from inktime.app.domain.analysis.schema import REQUIRED_FIELDS, validate_analysis_result
@@ -37,22 +41,6 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SCORE_POPULATION_TTL_SECONDS = 45.0
 _SCORE_POPULATION_LOCK = Lock()
 _SCORE_POPULATION_CACHE: tuple[str, float, tuple[float, ...]] | None = None
-
-
-def preferred_analysis_order_sql(alias: str = "") -> str:
-    """Prefer persisted model judgement over a newer local-only fallback.
-
-    Scanner and policy runs are allowed to append local evidence.  Those rows
-    remain useful history, but must not hide a previously completed Vision
-    result in photo-library read models.
-    """
-
-    prefix = f"{alias}." if alias else ""
-    return (
-        f"CASE WHEN {prefix}schema_version=4 THEN 0 ELSE 1 END,"
-        f"CASE WHEN COALESCE({prefix}provider,'local')='local' THEN 1 ELSE 0 END,"
-        f"{prefix}created_at DESC,{prefix}id DESC"
-    )
 
 
 def invalidate_score_population_cache() -> None:
@@ -909,8 +897,10 @@ class PhotoRepository:
                     """,  # noqa: S608
                     chunk,
                 )
-            self._mark_library_ranking_dirty(connection, library_id, now)
-        invalidate_score_population_cache()
+            if changed_ids:
+                self._mark_library_ranking_dirty(connection, library_id, now)
+        if changed_ids:
+            invalidate_score_population_cache()
         return results
 
     def record_scan_errors(self, scan_id: str, errors: Sequence[dict]) -> None:
@@ -1114,15 +1104,16 @@ class PhotoRepository:
         required_fingerprint = str((analysis_context or {}).get("analysis_fingerprint") or "")
         with self.database.session() as connection:
             row = connection.execute(
-                """
-                SELECT a.*,source.visual_orientation_rotation_cw,source.visual_orientation_confidence,
+                f"""
+                SELECT a.*,source.local_candidate_score AS source_local_candidate_score,
+                       source.visual_orientation_rotation_cw,source.visual_orientation_confidence,
                        source.visual_orientation_ambiguous,source.visual_orientation_evidence_json FROM photos target
                 JOIN photos source ON source.sha256=target.sha256 AND source.id<>target.id
                 JOIN photo_analysis a ON a.photo_id=source.id
                 WHERE target.id=?
                   AND a.schema_version=4
                   AND (?='' OR a.analysis_fingerprint=?)
-                ORDER BY a.created_at DESC,a.id DESC LIMIT 1
+                ORDER BY {preferred_analysis_order_sql('a')} LIMIT 1
                 """,
                 (photo_id, required_fingerprint, required_fingerprint),
             ).fetchone()
@@ -1130,6 +1121,11 @@ class PhotoRepository:
             return None
         if row["schema_version"] != 4:
             return None
+        source_kind = resolve_score_kind(
+            row["score_kind"] if "score_kind" in row.keys() else None,
+            provider=row["provider"],
+            stage=row["stage"],
+        )
         result = validate_analysis_result(row["raw_json"])
         self.save_analysis(
             photo_id,
@@ -1142,6 +1138,11 @@ class PhotoRepository:
             "inherited",
             ranking_score=row["ranking_score"],
             scoring_version_id=row["scoring_version_id"],
+            score_kind=source_kind,
+            local_score=result.get("local_score"),
+            semantic_score=row["semantic_score"] if semantic_available else None,
+            base_ranking_score=row["base_ranking_score"] if semantic_available else None,
+            final_ranking_score=row["final_ranking_score"] if semantic_available else None,
             prompt_version=str(
                 (analysis_context or {}).get("prompt_version") or row["prompt_version"] or "photo-quality-v3"
             ),
@@ -1165,8 +1166,15 @@ class PhotoRepository:
     def get_with_path(self, photo_id: str):
         with self.database.session() as connection:
             return connection.execute(
-                """
-                SELECT p.*, l.root_path FROM photos p JOIN libraries l ON l.id=p.library_id WHERE p.id=?
+                f"""
+                SELECT p.*, l.root_path,
+                       (SELECT latest.score_kind FROM photo_analysis latest
+                        WHERE latest.photo_id=p.id
+                        ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1) AS latest_score_kind,
+                       (SELECT latest.ranking_score FROM photo_analysis latest
+                        WHERE latest.photo_id=p.id
+                        ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1) AS latest_ranking_score
+                FROM photos p JOIN libraries l ON l.id=p.library_id WHERE p.id=?
                 """,
                 (photo_id,),
             ).fetchone()
@@ -1198,7 +1206,9 @@ class PhotoRepository:
             "time_new": "(p.captured_date IS NULL),p.captured_date DESC,p.id",
             "time_old": "(p.captured_date IS NULL),p.captured_date ASC,p.id",
         }
-        ordering = orderings.get(sort, orderings["memory"])
+        ordering_key = sort if sort in orderings else "memory"
+        ordering = orderings[ordering_key]
+        order_parameters: tuple[object, ...] = ()
         where = " AND ".join(clauses)
         latest_analysis = (
             "a.id=(SELECT latest.id FROM photo_analysis latest "
@@ -1223,7 +1233,7 @@ class PhotoRepository:
                 LEFT JOIN photo_analysis a ON {latest_analysis}
                 WHERE {where} ORDER BY {ordering} LIMIT ? OFFSET ?
                 """,  # noqa: S608 -- every fragment is selected from a fixed allowlist.
-                (*parameters, bounded_limit, bounded_offset),
+                (*parameters, *order_parameters, bounded_limit, bounded_offset),
             ).fetchall()
         return rows, total
 
@@ -1307,7 +1317,12 @@ class PhotoRepository:
                     evaluation_photo = {**photo, "manual_override": 0, "favorite": 0, "exclusion_status": "eligible"} if reapply_rules else photo
                     exclusion = _stored_exclusion(evaluation_photo)
                     if reapply_rules and exclusion is None:
-                        analysis = connection.execute("SELECT content_filter_json FROM photo_analysis WHERE photo_id=? AND schema_version=4 AND provider!='local' ORDER BY created_at DESC,id DESC LIMIT 1", (photo_id,)).fetchone()
+                        analysis = connection.execute(
+                            "SELECT content_filter_json FROM photo_analysis "
+                            "WHERE photo_id=? AND schema_version=4 AND score_kind=? "
+                            "ORDER BY created_at DESC,id DESC LIMIT 1",
+                            (photo_id, SEMANTIC_SCORE_KIND),
+                        ).fetchone()
                         if analysis and analysis["content_filter_json"]:
                             content = evaluate_content_filter(json.loads(analysis["content_filter_json"]), self._content_settings(connection))
                             if content["decision"] == "auto_excluded":
@@ -2041,7 +2056,8 @@ class PhotoRepository:
             clauses.append("a.types_json LIKE ?")
             parameters.append(f'%"{photo_type}"%')
         if minimum_score is not None:
-            clauses.append("a.memory_score>=?")
+            clauses.append("a.score_kind=? AND a.memory_score>=?")
+            parameters.append(SEMANTIC_SCORE_KIND)
             parameters.append(minimum_score)
         if duplicate_only:
             clauses.append("p.duplicate_group_id IS NOT NULL")
@@ -2059,8 +2075,10 @@ class PhotoRepository:
             )
             rows = connection.execute(
                 f"""
-                SELECT p.*,l.name AS library_name,a.caption,a.types_json,a.memory_score,a.visual_score,a.ranking_score,a.side_caption,
-                       a.provider,a.model,a.raw_json,a.created_at AS analyzed_at
+                SELECT p.*,l.name AS library_name,a.caption,a.types_json,a.memory_score,
+                       a.visual_score,a.local_quality_score,a.ranking_score,a.side_caption,
+                       a.local_score,a.score_kind,a.provider,a.model,a.raw_json,
+                       a.created_at AS analyzed_at
                 FROM photos p JOIN libraries l ON l.id=p.library_id
                 LEFT JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id AND schema_version=4 ORDER BY {preferred_analysis_order_sql()} LIMIT 1)
                 WHERE {where} ORDER BY COALESCE(p.captured_at,p.created_at) DESC,p.id LIMIT ? OFFSET ?
@@ -2070,7 +2088,7 @@ class PhotoRepository:
         return rows, total
 
     def score_population(self, library_id: str | None = None) -> list[float]:
-        """Pure read of materialized scores for relative calibration."""
+        """Pure read of active, eligible Vision v4 semantic scores for one library."""
         global _SCORE_POPULATION_CACHE
         cache_key = f"{self.database.path}:{library_id or 'all'}"
         now = time.monotonic()
@@ -2088,7 +2106,8 @@ class PhotoRepository:
                     FROM photo_analysis a
                     JOIN photos p ON p.id=a.photo_id
                     JOIN libraries l ON l.id=p.library_id
-                    WHERE a.ranking_score IS NOT NULL AND a.schema_version=4 AND a.provider!='local'
+                    WHERE a.ranking_score IS NOT NULL AND a.schema_version=4
+                      AND a.score_kind=?
                       AND p.eligible=1 AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')
                       AND p.lifecycle_status='active' AND l.enabled=1
                       AND (? IS NULL OR p.library_id=?)
@@ -2097,7 +2116,7 @@ class PhotoRepository:
                         WHERE latest.photo_id=a.photo_id
                         ORDER BY {preferred_analysis_order_sql('latest')} LIMIT 1
                       )
-                    """, (library_id, library_id)
+                    """, (SEMANTIC_SCORE_KIND, library_id, library_id)
                 ).fetchall()
             values = tuple(float(row["ranking_score"]) for row in rows)
             _SCORE_POPULATION_CACHE = (cache_key, time.monotonic(), values)
@@ -2185,7 +2204,7 @@ class PhotoRepository:
         whose level/score did not change incur no additional database writes.
         """
         peers = """SELECT a.*,p.favorite FROM photos p
-            JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id AND schema_version=4 AND provider!='local' ORDER BY created_at DESC,id DESC LIMIT 1)
+            JOIN photo_analysis a ON a.id=(SELECT id FROM photo_analysis WHERE photo_id=p.id AND schema_version=4 AND score_kind=? ORDER BY created_at DESC,id DESC LIMIT 1)
             WHERE p.library_id=? AND p.eligible=1 AND p.lifecycle_status='active'
               AND p.exclusion_status NOT IN ('auto_excluded','manually_excluded')"""
         rows = connection.execute(
@@ -2201,11 +2220,12 @@ class PhotoRepository:
                     SELECT 1 FROM json_each(peers.special_codes_json) WHERE value='group_photo'
                 )
             ) SELECT feature,COUNT(*) AS n FROM features GROUP BY feature
-            UNION ALL SELECT '__total__',COUNT(*) FROM peers""", (library_id,)
+            UNION ALL SELECT '__total__',COUNT(*) FROM peers""",
+            (SEMANTIC_SCORE_KIND, library_id),
         ).fetchall()
         counts = {row["feature"]: int(row["n"]) for row in rows}
         total = counts.pop("__total__", 0)
-        cursor = connection.execute(peers, (library_id,))
+        cursor = connection.execute(peers, (SEMANTIC_SCORE_KIND, library_id))
         while batch := cursor.fetchmany(500):
             updates = []
             for row in batch:
@@ -2219,8 +2239,13 @@ class PhotoRepository:
 
     @staticmethod
     def _refresh_favorite_ranking(connection, photo_id: str) -> None:
-        row = connection.execute("SELECT a.*,p.favorite FROM photo_analysis a JOIN photos p ON p.id=a.photo_id WHERE a.photo_id=? AND a.schema_version=4 ORDER BY CASE WHEN a.provider='local' THEN 1 ELSE 0 END,a.created_at DESC,a.id DESC LIMIT 1", (photo_id,)).fetchone()
-        if row is None or row["provider"] == "local":
+        row = connection.execute(
+            "SELECT a.*,p.favorite FROM photo_analysis a JOIN photos p ON p.id=a.photo_id "
+            "WHERE a.photo_id=? AND a.schema_version=4 AND a.score_kind=? "
+            "ORDER BY a.created_at DESC,a.id DESC LIMIT 1",
+            (photo_id, SEMANTIC_SCORE_KIND),
+        ).fetchone()
+        if row is None:
             return
         scores = ranking_components(dict(row), favorite=bool(row["favorite"]), rarity_adjustment=int(row["library_rarity_adjustment"]))
         connection.execute("UPDATE photo_analysis SET ranking_score=?,final_ranking_score=?,base_ranking_score=?,effective_special_level=? WHERE id=?", (scores["ranking_score"], scores["ranking_score"], scores["base_ranking_score"], scores["effective_special_level"], row["id"]))
@@ -2239,6 +2264,7 @@ class PhotoRepository:
         ranking_score: float | None = None,
         scoring_version_id: str | None = None,
         schema_kind: str = "basic",
+        score_kind: str | None = None,
         local_score: float | None = None,
         semantic_score: float | None = None,
         base_ranking_score: float | None = None,
@@ -2262,6 +2288,7 @@ class PhotoRepository:
             if own_transaction:
                 connection.execute("BEGIN IMMEDIATE")
             try:
+                score_kind = resolve_score_kind(score_kind, provider=provider, stage=stage)
                 if prefilter_evaluation and prefilter_evaluation.get("decision") == "auto_excluded":
                     current = connection.execute(
                         "SELECT favorite,manual_override,exclusion_status FROM photos WHERE id=?", (photo_id,)
@@ -2313,30 +2340,78 @@ class PhotoRepository:
                 quality = local_candidate_score(current, evaluation=evaluate_local_quality(current, settings=self._local_quality_settings(connection)))
                 rarity = 0
                 result.update(canonical, local_quality_score=quality)
-                result.update(ranking_components(result, favorite=bool(current["favorite"]), rarity_adjustment=rarity))
-                if provider == "local":
-                    result.update(base_ranking_score=quality, raw_ranking_score=quality, ranking_score=quality, final_ranking_score=quality)
+                semantic_available = score_kind == SEMANTIC_SCORE_KIND
+                if semantic_available:
+                    result.update(
+                        ranking_components(
+                            result,
+                            favorite=bool(current["favorite"]),
+                            rarity_adjustment=rarity,
+                        )
+                    )
+                else:
+                    result.update(
+                        base_ranking_score=None,
+                        raw_ranking_score=None,
+                        ranking_score=None,
+                        final_ranking_score=None,
+                        effective_special_level=None,
+                    )
                 result["local_score"] = quality
-                result["selection_score"] = result["ranking_score"] if current["eligible"] and current["exclusion_status"] not in EXCLUDED_STATUSES else 0.0
+                result["selection_score"] = (
+                    result["ranking_score"]
+                    if semantic_available
+                    and current["eligible"]
+                    and current["exclusion_status"] not in EXCLUDED_STATUSES
+                    else quality
+                    if not semantic_available
+                    else 0.0
+                )
                 semantic = {
-                    "source": "local" if provider == "local" else "model",
-                    "values": {key: canonical[key] for key in ("people_count", "subject_position", "text_safe_area", "special_level", "special_codes", "content_filter")},
+                    "source": "model" if semantic_available else "local",
+                    "score_kind": score_kind,
+                    "semantic_scores_available": semantic_available,
+                    "values": (
+                        {
+                            key: canonical[key]
+                            for key in (
+                                "people_count",
+                                "subject_position",
+                                "text_safe_area",
+                                "special_level",
+                                "special_codes",
+                                "content_filter",
+                            )
+                        }
+                        if semantic_available
+                        else {}
+                    ),
                     **({"inherited_from": inherited_from} if inherited_from else {}),
                 }
                 record = {
                     "photo_id": photo_id, "job_id": job_id, "schema_version": 4,
                     "stage": stage, "provider": provider, "model": model,
                     "caption": canonical["caption"], "types_json": json.dumps(canonical["types"], ensure_ascii=False),
-                    "memory_score": canonical["memory_score"], "visual_score": canonical["visual_score"],
+                    "memory_score": canonical["memory_score"] if semantic_available else None,
+                    "visual_score": canonical["visual_score"] if semantic_available else None,
                     "local_quality_score": quality, "special_level": canonical["special_level"],
                     "special_codes_json": json.dumps(canonical["special_codes"]), "people_count": canonical["people_count"],
                     "content_filter_json": json.dumps(canonical["content_filter"]),
-                    "effective_special_level": result["effective_special_level"], "library_rarity_adjustment": rarity,
+                    "effective_special_level": result["effective_special_level"],
+                    "library_rarity_adjustment": rarity,
                     "side_caption": canonical["side_caption"], "raw_json": json.dumps(canonical, ensure_ascii=False),
-                    "analysis_source": analysis_source, "ranking_score": result["ranking_score"],
-                    "scoring_version_id": scoring_version_id, "created_at": now, "schema_kind": schema_kind,
+                    "analysis_source": analysis_source,
+                    "ranking_score": result["ranking_score"],
+                    "scoring_version_id": scoring_version_id if semantic_available else None,
+                    "created_at": now,
+                    "schema_kind": schema_kind,
+                    "score_kind": score_kind,
                     "semantic_json": json.dumps(semantic, ensure_ascii=False), "local_score": quality,
-                    "semantic_score": canonical["memory_score"] * .5 + canonical["visual_score"] * .25,
+                    "semantic_score": (
+                        canonical["memory_score"] * .5 + canonical["visual_score"] * .25
+                        if semantic_available
+                        else None
+                    ),
                     "base_ranking_score": result["base_ranking_score"], "final_ranking_score": result["ranking_score"],
                     "ranking_rule_version": RANKING_RULE_VERSION, "prompt_version": prompt_version,
                     "analysis_fingerprint": analysis_fingerprint, "analysis_spec_json": analysis_spec_json,
@@ -2345,7 +2420,7 @@ class PhotoRepository:
                 columns = ",".join(record)
                 placeholders = ",".join("?" for _ in record)
                 connection.execute(f"INSERT INTO photo_analysis ({columns}) VALUES ({placeholders})", tuple(record.values()))  # noqa: S608 -- fixed internal column names
-                if provider != "local" or (
+                if semantic_available or (
                     prefilter_evaluation
                     and prefilter_evaluation.get("decision") == "auto_excluded"
                 ):
@@ -2355,12 +2430,7 @@ class PhotoRepository:
                 )
                 # Local quality/fallback rows have no visual model judgement and must
                 # never erase the latest provider result.
-                is_provider_result = provider not in {
-                    "local",
-                    "local_fallback",
-                    "local-prefilter",
-                    "local-quality-v3",
-                }
+                is_provider_result = score_kind == SEMANTIC_SCORE_KIND
                 if is_provider_result:
                     visual = result.get("visual_orientation") or {}
                     connection.execute(

@@ -10,6 +10,7 @@ import shutil
 from PIL import Image
 import pytest
 
+from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 from inktime.app.domain.rendering.fonts import FontCoverageError
 from inktime.app.domain.rendering.palette import encode_image
 from inktime.app.domain.rendering.release import (
@@ -910,8 +911,8 @@ def test_all_photo_frame_layouts_render_at_panel_size(app, tmp_path):
     photos.save_analysis(
         "layout-photo",
         None,
-        "test",
-        "local",
+        "single",
+        "test-ai",
         "test",
         valid_result(
             caption="這是一段旅行回憶版型測試說明。",
@@ -921,12 +922,13 @@ def test_all_photo_frame_layouts_render_at_panel_size(app, tmp_path):
             side_caption="把這一天留在相框。",
         ),
         "{}",
+        score_kind=SEMANTIC_SCORE_KIND,
     )
     photos.save_analysis(
         "layout-photo-2",
         None,
-        "test",
-        "local",
+        "single",
+        "test-ai",
         "test",
         valid_result(
             caption="這是一段第二張回憶版型測試說明。",
@@ -936,6 +938,7 @@ def test_all_photo_frame_layouts_render_at_panel_size(app, tmp_path):
             side_caption="一起填滿這個相框。",
         ),
         "{}",
+        score_kind=SEMANTIC_SCORE_KIND,
     )
     service = app.extensions["inktime_render_service"]
     for layout in (
@@ -1001,8 +1004,8 @@ def test_formal_caption_uses_builtin_traditional_font_without_fallback(app, tmp_
     photos.save_analysis(
         "caption-photo",
         None,
-        "test",
-        "local",
+        "single",
+        "test-ai",
         "test",
         valid_result(
             caption="這是一段內建繁中字型測試說明。",
@@ -1012,6 +1015,7 @@ def test_formal_caption_uses_builtin_traditional_font_without_fallback(app, tmp_
             side_caption="把今天寫進明日回憶。",
         ),
         "{}",
+        score_kind=SEMANTIC_SCORE_KIND,
     )
 
     render_service = app.extensions["inktime_render_service"]
@@ -1042,8 +1046,8 @@ def test_formal_render_shows_nearest_city_when_photo_has_gps(app, tmp_path):
     photos.save_analysis(
         "location-photo",
         None,
-        "test",
-        "local",
+        "single",
+        "test-ai",
         "test",
         valid_result(
             caption="這是一段臺北地點顯示測試說明。",
@@ -1053,6 +1057,7 @@ def test_formal_render_shows_nearest_city_when_photo_has_gps(app, tmp_path):
             side_caption="這是一段測試回憶短句。",
         ),
         "{}",
+        score_kind=SEMANTIC_SCORE_KIND,
     )
     render_service = app.extensions["inktime_render_service"]
     photo = photos.get_with_path("location-photo")

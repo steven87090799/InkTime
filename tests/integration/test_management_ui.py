@@ -1184,11 +1184,9 @@ def test_photo_cards_never_present_excluded_screenshot_or_severe_blur_as_high_sc
         )
 
     listing = client.get("/photos").get_data(as_text=True)
-    assert "選片分 0.0（已排除：截圖）" in listing
-    assert "選片分 0.0（已排除：嚴重模糊／失焦）" in listing
-    assert "本機品質" in listing
-    assert "選片分只在正式排序分析完成後產生" in listing
-    assert "E6 不會將它救回" in listing
+    assert "本機候選品質 0.0" in listing
+    assert "本機候選品質分開顯示" in listing
+    assert "E6 顯示適合度只在有正式 AI 排序時納入 AI 選片分" in listing
 
     detail = client.get(f"/photos/{blurry_id}").get_data(as_text=True)
     assert "本機品質分" in detail
