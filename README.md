@@ -224,15 +224,15 @@ flowchart TD
     PATH -->|是| INHERIT{"相同 SHA-256 已有可繼承分析？"}
     INHERIT -->|是| COPY["♻️ 繼承結果；成本 0"]
     INHERIT -->|否| STRATEGY{"分析策略"}
-    STRATEGY -->|local| LOCAL["🧮 本地固定公式"]
+    STRATEGY -->|local| LOCAL["🧮 本機影像品質分析"]
     STRATEGY -->|low_cost / smart| LOW["512px 第一階段"]
     STRATEGY -->|high_quality| HIGH["1600px 高品質階段"]
 
     LOW --> PREFILTER{"照片已被本地安全規則排除？"}
     HIGH --> PREFILTER
-    PREFILTER -->|是| LOCAL_ONLY["🚫 保存本地排除結果；不送 AI"]
+    PREFILTER -->|是| LOCAL_ONLY["🚫 保存本機品質結果；不送 AI"]
     PREFILTER -->|否| BUDGET{"💰 每日／每月／工作／單張預算允許？"}
-    BUDGET -->|否| BUDGET_STOP["⏸️ 本地 fallback 或 budget_exceeded"]
+    BUDGET -->|否| BUDGET_STOP["⏸️ 本機 fallback 或 budget_exceeded"]
     BUDGET -->|是| KEY["建立 Cache Key：內容 SHA、Provider、Model、Prompt、Schema、Stage"]
     KEY --> HIT{"🗃️ AI Cache 命中？"}
     HIT -->|是| CACHE["✅ 回傳 Cache；不重複請求、不重複計費"]
@@ -249,12 +249,14 @@ flowchart TD
     VALID2 -->|否| MODEL_FAIL["❌ 穩定錯誤；不無限重試修復"]
     VALID2 -->|是| PUT_CACHE["保存 AI Cache 與一次用量"]
     VALID -->|是| PUT_CACHE
-    PUT_CACHE --> SCORE["保存四項原始分數、ranking_score、規則版本"]
+    PUT_CACHE --> SCORE["保存 semantic 四項分數、ranking_score、規則版本"]
     LOW --> GATE{"smart：回憶分達門檻，或人物／最愛？"}
     GATE -->|是| HIGH
     GATE -->|否| SCORE
-    LOCAL --> SCORE
-    LOCAL_ONLY --> SCORE
+    LOCAL --> LOCAL_QUALITY["保存 local_score；semantic ranking=NULL"]
+    LOCAL_ONLY --> LOCAL_QUALITY
+    BUDGET_STOP --> LOCAL_QUALITY
+    LOCAL_QUALITY --> DONE
     COPY --> DONE["✅ Item 完成"]
     CACHE --> SCORE
     SCORE --> DONE
@@ -546,6 +548,8 @@ erDiagram
         float memory_score
         float ranking_score
         float final_ranking_score
+        float local_score
+        string score_kind
         string scoring_version_id FK
     }
     JOBS {
@@ -703,7 +707,7 @@ Production 預設且建議使用 `INKTIME_COOKIE_SECURE=1`、`INKTIME_ALLOW_INSE
 - `analysis.stage_two_threshold`：第一階段的回憶分達到多少才升級到高品質分析；人物或最愛照片也會升級。
 - `render.memory_threshold`：電子紙歷史今日選片的最低回憶分門檻。
 
-四項模型原始分數 `memory_score`、`beauty_score`、`technical_quality_score`、`emotion_score` 永遠保留；系統另以版本化權重計算 `ranking_score`，預設為回憶 50%、美觀 20%、技術 10%、情緒 20%，最愛照片再加 5 分（最高 100）。新規則只影響之後的分析；每筆分析會記住使用的規則版本。測試台照片只在暫存目錄停留，但模型 Token 與費用仍會記入成本頁。完整資料流見 [專案架構與評分流程](docs/architecture/ARCHITECTURE_ZH_TW.md)。
+真正完成 AI 語意分析的資料列以 `score_kind=semantic` 標記，保存模型輸出的四項原始分數，並以版本化權重計算 `ranking_score`；預設為回憶 50%、美觀 20%、技術 10%、情緒 20%，最愛照片再加 5 分（最高 100）。本機影像分析以 `score_kind=local_quality` 標記，只保存 `local_score` 與本機特徵，`semantic_score`、`base_ranking_score`、`final_ranking_score`、`ranking_score` 與正式四項語意分數皆為 `NULL`。為相容舊版 JSON 形狀，本機結果可能保留中性 placeholder，但會標記 `semantic_scores_available=false`，不會進入語意 percentile。無法可靠辨識的歷史列標為 `legacy`。新規則只影響之後的分析；每筆分析會記住使用的規則版本。測試台照片只在暫存目錄停留，但模型 Token 與費用仍會記入成本頁。完整資料流見 [專案架構與評分流程](docs/architecture/ARCHITECTURE_ZH_TW.md)。
 
 ## Token 與成本控制
 

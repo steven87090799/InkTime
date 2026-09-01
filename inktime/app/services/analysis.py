@@ -31,9 +31,12 @@ from inktime.app.domain.analysis.execution_mode import (
 from inktime.app.domain.analysis.scoring import (
     DEFAULT_FAVORITE_BONUS,
     DEFAULT_RANKING_WEIGHTS,
+    LOCAL_QUALITY_SCORE_KIND,
+    SEMANTIC_SCORE_KIND,
     calculate_ranking_score,
     calculate_travel_bonus,
     grade_to_score,
+    resolve_score_kind,
 )
 from inktime.app.domain.analysis.schema import normalize_caption_controls
 from inktime.app.domain.photos import ThumbnailCache
@@ -41,6 +44,7 @@ from inktime.app.domain.photos.quality_policy import (
     FEATURE_VERSION,
     evaluate_local_quality,
     is_confirmed_screenshot,
+    local_candidate_score,
 )
 from inktime.app.providers.base import ProviderResponse, Usage, VisionAttemptState, VisionProvider
 from inktime.app.repositories.photos import PhotoRepository
@@ -316,35 +320,24 @@ class PhotoAnalysisService:
 
     @staticmethod
     def _local_result(photo) -> dict:
-        quality = max(0.0, min(100.0, float(photo["blur_score"] or 0) ** 0.5 * 4))
         screenshot = float(photo["screenshot_likelihood"] or 0) >= 0.65
         return {
             "schema_version": 2,
             "caption": "已完成本地影像特徵分析，未將照片傳送至模型。",
             "types": ["截圖" if screenshot else "其他"],
-            "memory_score": 10.0 if screenshot else 50.0,
-            "beauty_score": quality,
-            "technical_quality_score": quality,
-            "emotion_score": 0.0,
+            # These are compatibility values required by the historical v2
+            # provider shape.  They are never persisted as semantic scores;
+            # ``semantic_scores_available`` is added by _save_result.
+            "memory_score": 50.0,
+            "beauty_score": 50.0,
+            "technical_quality_score": 50.0,
+            "emotion_score": 50.0,
             "side_caption": "",
             "should_keep": not screenshot,
             "sensitive": False,
-            "reason": "依本地清晰度、曝光與截圖特徵判定",
+            "reason": "依本機清晰度、對比、曝光、解析度與截圖特徵進行預篩選",
             "visual_orientation": _unknown_visual_orientation(),
         }
-
-    @staticmethod
-    def _local_quality(photo) -> float:
-        blur = max(0.0, float(photo["blur_score"] or 0))
-        contrast = max(0.0, min(100.0, float(photo["contrast"] or 0)))
-        exposure_penalty = max(
-            float(photo["overexposed_ratio"] or 0),
-            float(photo["underexposed_ratio"] or 0),
-        )
-        return round(
-            max(0.0, min(100.0, blur**0.5 * 3.2 + contrast * 0.8 - exposure_penalty * 45)),
-            2,
-        )
 
     def prefilter_snapshot(self, photo, *, policy_settings: dict | None = None) -> dict:
         policy_settings = policy_settings or {
@@ -488,34 +481,31 @@ class PhotoAnalysisService:
         if not evaluation["excluded"]:
             return None
 
-        quality = self._local_quality(photo)
         if evaluation["primary_reason"] == "screenshot":
             label = "截圖"
             reasons = ["本機截圖特徵達排除門檻"]
-            memory_score = 5.0
             types = ["截圖"]
         elif evaluation["primary_reason"] == "e6_below_threshold":
             label = "不適合 E6 六色顯示的照片"
             reasons = ["六色量化後對比、主體、膚色或細節保留不足"]
-            memory_score = 20.0
             types = ["其他"]
         else:
             label = "明顯低品質照片"
             reasons = evaluation["matched_checks"]
-            memory_score = 15.0
             types = ["其他"]
         return {
             "schema_version": 2,
             "caption": f"本機預篩選已排除{label}，未將圖片傳送至模型。",
             "types": types,
-            "memory_score": memory_score,
-            "beauty_score": quality,
-            "technical_quality_score": quality,
-            "emotion_score": 0.0,
+            "memory_score": 50.0,
+            "beauty_score": 50.0,
+            "technical_quality_score": 50.0,
+            "emotion_score": 50.0,
             "side_caption": "",
             "should_keep": False,
             "sensitive": False,
-            "reason": "、".join(reasons),
+            "reason": "依本機清晰度、對比、曝光、解析度與截圖特徵進行預篩選；"
+            + "、".join(reasons),
             "visual_orientation": _unknown_visual_orientation(),
         }
 
@@ -660,6 +650,7 @@ class PhotoAnalysisService:
         favorite_bonus: float,
         scoring_version_id: str | None,
         schema_kind: str,
+        score_kind: str | None = None,
         prompt_version: str = PROMPT_VERSION,
         analysis_fingerprint: str | None = None,
         analysis_spec_json: str | None = None,
@@ -670,13 +661,69 @@ class PhotoAnalysisService:
         analysis_source: str = "direct",
         connection=None,
     ) -> dict:
-        ranked = self._score_result(
-            result,
-            photo,
-            ranking_weights=ranking_weights,
-            favorite_bonus=favorite_bonus,
-            travel_policy=travel_policy,
-        )
+        score_kind = resolve_score_kind(score_kind, provider=provider, stage=stage)
+        if score_kind == LOCAL_QUALITY_SCORE_KIND:
+            photo_dict = dict(photo)
+            local_quality = evaluate_local_quality(photo_dict)
+            local_score = photo_dict.get("local_candidate_score")
+            if local_score is None:
+                local_score = local_candidate_score(photo_dict, evaluation=local_quality)
+            ranked = dict(result)
+            ranked.update(
+                {
+                    "score_kind": LOCAL_QUALITY_SCORE_KIND,
+                    "semantic_scores_available": False,
+                    "local_score": round(float(local_score), 2),
+                    "local_quality": local_quality,
+                    "semantic_score": None,
+                    "base_ranking_score": None,
+                    "final_ranking_score": None,
+                    "ranking_score": None,
+                }
+            )
+            raw = json.dumps(ranked, ensure_ascii=False)
+            stored_ranking_score = None
+            stored_semantic_score = None
+            stored_base_score = None
+            stored_final_score = None
+            stored_travel_bonus = 0.0
+            stored_location_rule_version = None
+        elif score_kind == SEMANTIC_SCORE_KIND:
+            ranked = self._score_result(
+                result,
+                photo,
+                ranking_weights=ranking_weights,
+                favorite_bonus=favorite_bonus,
+                travel_policy=travel_policy,
+            )
+            ranked["score_kind"] = SEMANTIC_SCORE_KIND
+            ranked["semantic_scores_available"] = True
+            stored_ranking_score = ranked["ranking_score"]
+            stored_semantic_score = ranked["semantic_score"]
+            stored_base_score = ranked["base_ranking_score"]
+            stored_final_score = ranked["final_ranking_score"]
+            stored_travel_bonus = ranked["travel_bonus"]
+            stored_location_rule_version = ranked["location_rule_version"]
+        else:
+            ranked = dict(result)
+            ranked.update(
+                {
+                    "score_kind": score_kind,
+                    "semantic_scores_available": False,
+                    "local_score": None,
+                    "semantic_score": None,
+                    "base_ranking_score": None,
+                    "final_ranking_score": None,
+                    "ranking_score": None,
+                }
+            )
+            raw = json.dumps(ranked, ensure_ascii=False)
+            stored_ranking_score = None
+            stored_semantic_score = None
+            stored_base_score = None
+            stored_final_score = None
+            stored_travel_bonus = 0.0
+            stored_location_rule_version = None
         self.photos.save_analysis(
             photo_id,
             job_id,
@@ -686,15 +733,16 @@ class PhotoAnalysisService:
             ranked,
             raw,
             analysis_source,
-            ranking_score=ranked["ranking_score"],
+            ranking_score=stored_ranking_score,
             scoring_version_id=scoring_version_id,
             schema_kind=schema_kind,
+            score_kind=score_kind,
             local_score=ranked["local_score"],
-            semantic_score=ranked["semantic_score"],
-            base_ranking_score=ranked["base_ranking_score"],
-            final_ranking_score=ranked["final_ranking_score"],
-            travel_bonus=ranked["travel_bonus"],
-            location_rule_version=ranked["location_rule_version"],
+            semantic_score=stored_semantic_score,
+            base_ranking_score=stored_base_score,
+            final_ranking_score=stored_final_score,
+            travel_bonus=stored_travel_bonus,
+            location_rule_version=stored_location_rule_version,
             prompt_version=prompt_version,
             analysis_fingerprint=analysis_fingerprint,
             analysis_spec_json=analysis_spec_json,
@@ -1996,6 +2044,7 @@ class PhotoAnalysisService:
                 favorite_bonus=favorite_bonus,
                 scoring_version_id=scoring_version_id,
                 schema_kind="basic",
+                score_kind=LOCAL_QUALITY_SCORE_KIND,
                 **local_context("basic"),
             )
             return {"analysis": result, "stage": "local", "_actual_cost": 0}
@@ -2024,6 +2073,7 @@ class PhotoAnalysisService:
                 favorite_bonus=favorite_bonus,
                 scoring_version_id=scoring_version_id,
                 schema_kind="basic",
+                score_kind=LOCAL_QUALITY_SCORE_KIND,
                 **local_context("basic"),
             )
             return {"analysis": result, "stage": "prefilter", "_actual_cost": 0}
@@ -2051,6 +2101,7 @@ class PhotoAnalysisService:
                 favorite_bonus=favorite_bonus,
                 scoring_version_id=scoring_version_id,
                 schema_kind="basic",
+                score_kind=LOCAL_QUALITY_SCORE_KIND,
                 **local_context("basic"),
                 prefilter_evaluation=prefilter_evaluation,
             )
@@ -2074,6 +2125,7 @@ class PhotoAnalysisService:
                 favorite_bonus=favorite_bonus,
                 scoring_version_id=scoring_version_id,
                 schema_kind="basic",
+                score_kind=LOCAL_QUALITY_SCORE_KIND,
                 **local_context("basic"),
             )
             return {"analysis": result, "stage": "local_fallback", "_actual_cost": 0}
@@ -2142,6 +2194,7 @@ class PhotoAnalysisService:
                 favorite_bonus=favorite_bonus,
                 scoring_version_id=scoring_version_id,
                 schema_kind="full",
+                score_kind=SEMANTIC_SCORE_KIND,
                 prompt_version=prompt_version,
                 analysis_fingerprint=analysis_fingerprint,
                 analysis_spec_json=analysis_spec_json,

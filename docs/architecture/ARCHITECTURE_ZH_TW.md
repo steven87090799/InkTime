@@ -72,20 +72,20 @@ flowchart LR
     LOCAL --> DUP{"相同 SHA-256<br/>已有分析？"}
     DUP -->|"是"| INHERIT["繼承結果<br/>不呼叫模型"]
     DUP -->|"否"| STRATEGY{"分析策略"}
-    STRATEGY -->|"local"| LOCAL_SCORE["本地固定公式"]
+    STRATEGY -->|"local"| LOCAL_SCORE["本機影像品質分析"]
     STRATEGY -->|"single"| VISION["一次高細節 Vision 模型"]
-    STRATEGY -->|"local"| LOCAL_SCORE["本地固定公式"]
-    VISION --> SAVE["保存四項原始分數、綜合分與規則版本"]
+    VISION --> SAVE["保存 semantic 四項分數、綜合分與規則版本"]
     STAGE2 --> SAVE
-    LOCAL_SCORE --> SAVE
+    LOCAL_SCORE --> LOCAL_SAVE["保存 local_score；semantic ranking=NULL"]
     INHERIT --> SAVE
-    SAVE --> PICK["回憶分通過門檻<br/>依綜合分排序"] --> RELEASE["480×800 四色／六色／七色 Release<br/>Profile + 抖動 + SHA-256"]
+    SAVE --> PICK["回憶分通過門檻<br/>依 semantic 綜合分排序"] --> RELEASE["480×800 四色／六色／七色 Release<br/>Profile + 抖動 + SHA-256"]
+    LOCAL_SAVE --> LOCAL_PICK["依本機候選品質選片"] --> RELEASE
     RELEASE --> DEVICE["ESP32 驗證 SHA-256 後顯示"]
 ```
 
 ## 評分與「權重」的實際狀態
 
-模型一次回傳四個獨立分數：
+真正的 AI 語意分析一次回傳四個獨立分數：
 
 | 分數 | 意義 | 現在由誰決定 |
 |---|---|---|
@@ -94,7 +94,7 @@ flowchart LR
 | `technical_quality_score` | 清晰、曝光、構圖等技術品質 | 視覺模型依固定 Prompt 判斷 |
 | `emotion_score` | 情緒與故事性 | 視覺模型依固定 Prompt 判斷 |
 
-`memory_score` 不是加權總分；它是模型直接輸出的回憶分。系統另外保存 `ranking_score`：預設以回憶 50%、美觀 20%、技術品質 10%、情緒 20% 計算，最愛照片再加 5 分並限制在 0–100。管理員可在「評分」頁調整權重；四項必須合計 100%。`analysis.stage_two_threshold` 僅是舊設定讀取相容欄位，`render.memory_threshold` 才是電子紙候選的最低回憶分門檻。
+`memory_score` 不是加權總分；它是模型直接輸出的回憶分。只有 `score_kind=semantic` 的分析才保存正式四項語意分數與 `ranking_score`；系統另外以版本化權重計算 `ranking_score`，預設以回憶 50%、美觀 20%、技術品質 10%、情緒 20% 計算，最愛照片再加 5 分並限制在 0–100。`score_kind=local_quality` 只表示本機影像品質候選分，正式 semantic ranking 欄位為 `NULL`，不參與照片庫 percentile；`legacy` 表示來源無法可靠判定。管理員可在「評分」頁調整權重；四項必須合計 100%。`analysis.stage_two_threshold` 僅是舊設定讀取相容欄位，`render.memory_threshold` 才是電子紙候選的最低回憶分門檻。
 
 ### 不改程式碼可以調整的項目
 
@@ -119,7 +119,7 @@ flowchart LR
 - 不可由網頁覆寫的 JSON／語言／防虛構指令：`inktime/app/providers/openai_compatible.py` 的 `SYSTEM_PROMPT`。
 - 分數欄位、型別與 0–100 範圍：`inktime/app/domain/analysis/schema.py`。
 - 單次圖片請求與文字修復界線：`inktime/app/services/analysis.py`；每張照片最多一次圖片請求，JSON 修復只允許文字請求。
-- 僅本地策略的固定分數公式：同檔案的 `_local_result()`。
+- 本機影像品質與候選分：`inktime/app/domain/photos/quality_policy.py` 的 `evaluate_local_quality()` 與 `local_candidate_score()`；不再由 `_local_result()` 產生 semantic ranking。
 - Worker 如何讀取設定：`inktime/app/workers/runner.py`。
 - 電子紙自動選片排序：`inktime/app/services/rendering.py`。
 - 原始評分細則的有效規則已整理為 `inktime/app/domain/analysis/scoring.py` 的版本化預設；Modern runtime 不依賴退役 Analyzer。

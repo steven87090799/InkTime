@@ -17,6 +17,65 @@ RANKING_RULE_VERSION = "ranking-v2"
 LOCATION_RULE_VERSION = "travel-v1"
 GRADE_TO_SCORE = {"S": 95.0, "A": 85.0, "B": 70.0, "C": 55.0, "D": 35.0, "E": 15.0}
 
+# ``score_kind`` is an explicit data contract.  A provider name alone is not
+# sufficient to tell consumers whether a row contains model semantics or only
+# local image-quality evidence (and historical rows may have neither reliably).
+SEMANTIC_SCORE_KIND = "semantic"
+LOCAL_QUALITY_SCORE_KIND = "local_quality"
+LEGACY_SCORE_KIND = "legacy"
+SCORE_KINDS = frozenset(
+    {SEMANTIC_SCORE_KIND, LOCAL_QUALITY_SCORE_KIND, LEGACY_SCORE_KIND}
+)
+LOCAL_ANALYSIS_STAGES = frozenset({"local", "local_fallback", "prefilter"})
+LOCAL_ANALYSIS_PROVIDERS = frozenset(
+    {"local", "local-prefilter", "local-quality-v3", "virtual-display-local"}
+)
+
+
+def preferred_analysis_order_sql(alias: str = "") -> str:
+    """Prefer semantic analysis over newer local-only evidence in read models.
+
+    Scanner and policy runs may append local evidence after a model result.  A
+    source-aware order keeps that evidence available as history without making
+    it hide a completed semantic result from selection and rendering readers.
+    ``alias`` is a server-controlled SQL alias, never user input.
+    """
+
+    prefix = f"{alias}." if alias else ""
+    return (
+        f"CASE WHEN lower(COALESCE({prefix}score_kind,''))='{SEMANTIC_SCORE_KIND}' THEN 0 "
+        f"WHEN lower(COALESCE({prefix}provider,'')) IN "
+        "('local','local-prefilter','local-quality-v3','virtual-display-local') "
+        f"OR lower(COALESCE({prefix}stage,'')) IN ('local','local_fallback','prefilter') THEN 1 ELSE 2 END,"
+        f"{prefix}created_at DESC,{prefix}id DESC"
+    )
+
+
+def resolve_score_kind(
+    score_kind: str | None = None,
+    *,
+    provider: str | None = None,
+    stage: str | None = None,
+) -> str:
+    """Resolve a persisted score source while keeping old call sites safe.
+
+    Explicit values always win.  For pre-migration callers, known local
+    stages/providers are local quality; a named non-local provider is treated
+    as semantic because that is how the historical AI write path identified a
+    successful model result.  Empty or ambiguous identities remain legacy.
+    """
+
+    requested = str(score_kind or "").strip().casefold()
+    if requested in SCORE_KINDS:
+        return requested
+    provider_name = str(provider or "").strip().casefold()
+    stage_name = str(stage or "").strip().casefold()
+    if provider_name in LOCAL_ANALYSIS_PROVIDERS or stage_name in LOCAL_ANALYSIS_STAGES:
+        return LOCAL_QUALITY_SCORE_KIND
+    if provider_name and provider_name != "inherited":
+        return SEMANTIC_SCORE_KIND
+    return LEGACY_SCORE_KIND
+
 
 @dataclass(frozen=True)
 class ScoreDistribution:

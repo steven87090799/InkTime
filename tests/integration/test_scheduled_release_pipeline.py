@@ -4,6 +4,7 @@ from PIL import Image
 import pytest
 import sqlite3
 
+from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 
 def test_schedule_resolves_devices_limits_years_and_commits_history_after_publish(app, tmp_path):
     app.extensions["inktime_settings_repository"].update(
@@ -42,8 +43,8 @@ def test_schedule_resolves_devices_limits_years_and_commits_history_after_publis
         photos.save_analysis(
             photo_id,
             None,
-            "local",
-            "local",
+            "single",
+            "test-ai",
             "scheduled-test",
             {
                 "schema_version": 1,
@@ -59,6 +60,7 @@ def test_schedule_resolves_devices_limits_years_and_commits_history_after_publis
                 "reason": "測試",
             },
             "{}",
+            score_kind=SEMANTIC_SCORE_KIND,
             ranking_score=90 - index,
             final_ranking_score=90 - index,
         )
@@ -130,8 +132,8 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
         photos.save_analysis(
             photo_id,
             None,
-            "local",
-            "local",
+            "single",
+            "test-ai",
             "offline-scheduled-test",
             {
                 "schema_version": 1,
@@ -147,6 +149,7 @@ def test_enhanced_device_preparation_publishes_one_release_per_slot_and_is_idemp
                 "reason": "測試",
             },
             "{}",
+            score_kind=SEMANTIC_SCORE_KIND,
             ranking_score=100 - index,
             final_ranking_score=100 - index,
         )
@@ -270,8 +273,8 @@ def test_enhanced_prepare_fails_closed_when_device_config_changes_before_commit(
     photos.save_analysis(
         photo_id,
         None,
-        "local",
-        "local",
+        "single",
+        "test-ai",
         "offline-race",
         {
             "schema_version": 1,
@@ -287,6 +290,7 @@ def test_enhanced_prepare_fails_closed_when_device_config_changes_before_commit(
             "reason": "測試",
         },
         "{}",
+        score_kind=SEMANTIC_SCORE_KIND,
         ranking_score=90,
         final_ranking_score=90,
     )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from PIL import Image
 
+from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 from tests.conftest import create_admin, csrf, login
 
 
@@ -22,7 +23,7 @@ def _candidate(app, root, photo_id: str, *, eligible: int = 1, lifecycle: str = 
     photos.save_analysis(
         photo_id,
         None,
-        "local",
+        "test-model",
         "local",
         "test",
         {
@@ -39,6 +40,7 @@ def _candidate(app, root, photo_id: str, *, eligible: int = 1, lifecycle: str = 
             "reason": "測試",
         },
         "{}",
+        score_kind=SEMANTIC_SCORE_KIND,
         ranking_score=99,
         final_ranking_score=99,
     )

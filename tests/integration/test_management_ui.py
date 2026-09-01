@@ -1056,11 +1056,8 @@ def test_photo_cards_show_total_score_and_e6_estimate(client, app):
 
     body = client.get("/photos").get_data(as_text=True)
 
-    assert "選片分 84.0（模型＋E6）" in body
-    assert "為什麼兩張都不錯的照片" in body
-    assert "相對鑑別分＝原始分 35%＋照片庫百分位 65%" in body
-    assert "排序原始分 80.0 → 相對鑑別 80.0" in body
-    assert "選片分 —（尚未正式分析）" in body
+    assert "AI 選片分 84.0（AI 原始綜合＋E6）" in body
+    assert "AI 語意評分：尚未分析 · 照片庫鑑別分：尚未產生" in body
     assert "E6 顯示適合度 91.9（暫估，未納入正式選片分）" in body
 
 
@@ -1175,11 +1172,9 @@ def test_photo_cards_never_present_excluded_screenshot_or_severe_blur_as_high_sc
         )
 
     listing = client.get("/photos").get_data(as_text=True)
-    assert "選片分 0.0（已排除：截圖）" in listing
-    assert "選片分 0.0（已排除：嚴重模糊／失焦）" in listing
-    assert "本機品質" in listing
-    assert "選片分只在正式排序分析完成後產生" in listing
-    assert "E6 不會將它救回" in listing
+    assert "本機候選品質 0.0" in listing
+    assert "本機候選品質分開顯示" in listing
+    assert "E6 顯示適合度只在有正式 AI 排序時納入 AI 選片分" in listing
 
     detail = client.get(f"/photos/{blurry_id}").get_data(as_text=True)
     assert "本機品質分" in detail
@@ -1211,7 +1206,7 @@ def test_photo_cards_force_ineligible_selection_score_to_zero_but_keep_diagnosti
     body = client.get("/photos").get_data(as_text=True)
 
     assert "選片分 0.0（已排除：" in body
-    assert "排序原始分 98.0" in body
+    assert "AI 原始綜合 98.0" in body
     assert "E6 顯示適合度 99.0" in body
 
 

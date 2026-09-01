@@ -17,6 +17,7 @@ from uuid import uuid4
 from inktime.app.core.json_values import json_bool, json_int, nullable_json_int
 from inktime.app.core.logging import log_event, should_log_rate_limited
 from inktime.app.db import Database
+from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 
 
 LOGGER = logging.getLogger("resilience")
@@ -227,8 +228,9 @@ class ResilienceRepository:
 
     @staticmethod
     def score_components(item: dict[str, Any]) -> dict[str, float]:
-        model = float(item.get("ranking_score") or item.get("final_ranking_score") or 0)
-        quality = float(item.get("local_candidate_score") or 0)
+        semantic = str(item.get("score_kind") or "") == SEMANTIC_SCORE_KIND
+        model = float(item.get("ranking_score") or item.get("final_ranking_score") or 0) if semantic else 0.0
+        quality = float(item.get("local_candidate_score") or item.get("local_score") or 0)
         return {
             "model_score": model,
             "quality_score": quality,
@@ -236,7 +238,7 @@ class ResilienceRepository:
             "novelty_adjustment": 0.0,
             "diversity_adjustment": 0.0,
             "contextual_adjustment": 0.0,
-            "final_score": float(item.get("combined_score") or model),
+            "final_score": float(item.get("combined_score") or (model if semantic else quality)),
         }
 
     def attach_release(self, trace_id: str, release_id: str) -> None:

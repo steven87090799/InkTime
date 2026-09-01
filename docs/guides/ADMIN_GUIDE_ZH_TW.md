@@ -132,7 +132,7 @@ ExifTool 能提供 MIME、相機、軟體、拍攝時間與 GPS 等中繼資料�
 
 ## 照片評分與門檻
 
-模型一次輸出回憶、美觀、技術品質與情緒四個 0–100 原始分數。系統另用「評分」頁的四項權重算出 `ranking_score`，並在最愛照片上加入設定的額外分數；原始四項分數不會被覆寫。`analysis.stage_two_threshold` 僅保留舊設定讀取相容，`render.memory_threshold` 才是電子紙候選的最低回憶分門檻。
+真正完成 AI 語意分析時，模型輸出回憶、美觀、技術品質與情緒四個 0–100 原始分數；這些資料列以 `score_kind=semantic` 標記，系統再用「評分」頁的四項權重算出 `ranking_score`，並在最愛照片上加入設定的額外分數。本機影像分析則以 `score_kind=local_quality` 標記，只保存本機品質特徵與 `local_score`，不會產生或參與 semantic `ranking_score`、percentile；舊資料無法可靠辨識時標為 `legacy`。`analysis.stage_two_threshold` 僅保留舊設定讀取相容，`render.memory_threshold` 才是電子紙候選的最低回憶分門檻。
 
 - 改模型：在「設定」調整 `model.analysis_model`，並在「模型」頁設定 Provider。
 - 舊版 `model.low_model`／`model.high_model` 與 `analysis.stage_two_threshold` 僅供相容讀取，不會恢復第二次圖片請求。
@@ -140,7 +140,7 @@ ExifTool 能提供 MIME、相機、軟體、拍攝時間與 GPS 等中繼資料�
 - 改模型評分規則或綜合權重：到「評分」頁儲存為新版本；下一次分析立即生效，既有照片不會自動重算。
 - 測試照片：在「評分」頁選一張照片並確認付費請求；暫存檔會在請求結束後刪除，Token、費用與延遲仍寫入成本紀錄。
 - 還原：版本歷史的「還原此版本」會建立一個新的目前版本，不會刪除或覆寫任何歷史。
-- 評分預設位於 `inktime/app/domain/analysis/scoring.py`，並透過版本化規則保存修改歷史。
+- AI 語意評分預設位於 `inktime/app/domain/analysis/scoring.py`，本機品質規則位於 `inktime/app/domain/photos/quality_policy.py`；兩者分開並透過版本化規則保存修改歷史。
 - JSON Schema、繁體中文與不得虛構等固定約束不允許從網頁覆寫，位於 `inktime/app/providers/openai_compatible.py`。
 
 完整流程圖與程式入口見 [專案架構與評分流程](../architecture/ARCHITECTURE_ZH_TW.md)。

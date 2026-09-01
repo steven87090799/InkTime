@@ -321,6 +321,13 @@ class PhotoAnalysisRetentionRepository:
                 (*parameters, batch_size),
             )
             deleted_rows = int(connection.execute("SELECT changes()").fetchone()[0])
+        if deleted_rows:
+            # Retention can remove the latest semantic row for a photo, which
+            # changes the percentile population even though no new analysis is
+            # inserted.
+            from inktime.app.repositories.photos import invalidate_score_population_cache
+
+            invalidate_score_population_cache()
         after = self.inventory(current_fingerprints=fingerprints, current_specs=specs)
         return {
             "dry_run": False,
