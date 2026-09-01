@@ -1,4 +1,3 @@
-# ruff: noqa: S608
 """Keyset-paginated review workbench persistence.
 
 The workbench never exposes source paths or original files.  It returns a
@@ -14,7 +13,7 @@ import json
 from typing import Any
 
 from inktime.app.db import Database
-from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND, preferred_analysis_order_sql
+from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 
 
 REVIEW_STATES = {"unreviewed", "keep", "exclude", "needs_review"}
@@ -171,14 +170,22 @@ class ReviewRepository:
 
     @staticmethod
     def _projection() -> str:
-        return f"""
+        return """
             WITH latest_analysis AS (
                 SELECT pa.*
                 FROM photo_analysis pa
                 WHERE pa.id=(
                     SELECT preferred.id FROM photo_analysis preferred
                     WHERE preferred.photo_id=pa.photo_id
-                    ORDER BY {preferred_analysis_order_sql('preferred')} LIMIT 1
+                    ORDER BY
+                        CASE preferred.score_kind
+                            WHEN 'semantic' THEN 0
+                            WHEN 'local_quality' THEN 1
+                            ELSE 2
+                        END,
+                        preferred.created_at DESC,
+                        preferred.id DESC
+                    LIMIT 1
                 )
             )
             SELECT p.id,p.library_id,p.width,p.height,p.format,p.sha256,p.favorite,p.eligible,
