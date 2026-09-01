@@ -163,6 +163,7 @@ INTEGRATION_TEST_OWNER_SUITES: dict[str, tuple[str, ...]] = {
     "tests/integration/test_dual_photo_caption_layout.py": ("render_release_owner",),
     "tests/integration/test_final_review_history.py": ("persistence_owner",),
     "tests/integration/test_local_only_mode.py": ("provider_analysis_owner",),
+    "tests/integration/test_local_scoring_semantics.py": ("provider_analysis_owner",),
     "tests/integration/test_photo_quality_ai.py": (
         "provider_analysis_owner",
         "scanner_photos_owner",

@@ -22,6 +22,7 @@ from inktime.app.domain.photos import PhotoPreprocessor
 from inktime.app.domain.photos.formats import MAX_FILE_BYTES, MAX_SOURCE_PIXELS, MAX_SOURCE_EDGE
 from inktime.app.services.analysis import AnalysisDisabledError, ProviderUnavailableError
 from inktime.app.domain.analysis.execution_mode import permits_automatic_ai, permits_manual_ai
+from inktime.app.domain.analysis.scoring import LOCAL_QUALITY_SCORE_KIND
 
 
 LOGGER = logging.getLogger("worker")
@@ -378,8 +379,7 @@ class WorkerRunner:
                                 "reason": "本機無模型發布",
                             },
                             "{}",
-                            ranking_score=50,
-                            final_ranking_score=50,
+                            score_kind=LOCAL_QUALITY_SCORE_KIND,
                         )
                     release = self.app.extensions["inktime_render_service"].publish(
                         photo_ids,

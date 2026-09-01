@@ -13,6 +13,7 @@ import json
 from typing import Any
 
 from inktime.app.db import Database
+from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 
 
 REVIEW_STATES = {"unreviewed", "keep", "exclude", "needs_review"}
@@ -151,12 +152,12 @@ class ReviewRepository:
             params.append(0 if bool(filters["excluded"]) else 1)
         score_min = filters.get("score_min")
         if score_min not in {None, ""}:
-            clauses.append("COALESCE(a.ranking_score,0)>=?")
-            params.append(float(str(score_min)))
+            clauses.append("a.score_kind=? AND a.ranking_score>=?")
+            params.extend([SEMANTIC_SCORE_KIND, float(str(score_min))])
         score_max = filters.get("score_max")
         if score_max not in {None, ""}:
-            clauses.append("COALESCE(a.ranking_score,0)<=?")
-            params.append(float(str(score_max)))
+            clauses.append("a.score_kind=? AND a.ranking_score<=?")
+            params.extend([SEMANTIC_SCORE_KIND, float(str(score_max))])
         confidence = (
             "COALESCE(json_extract(a.semantic_json,'$.confidence.overall'),"
             "json_extract(a.semantic_json,'$.confidence'))"
@@ -200,7 +201,7 @@ class ReviewRepository:
                    a.provider AS analysis_provider,a.model AS analysis_model,a.prompt_version,
                    a.analysis_fingerprint,a.created_at AS analysis_created_at,a.caption,a.side_caption,
                    a.types_json,a.memory_score,a.beauty_score,a.technical_quality_score,
-                   a.emotion_score,a.ranking_score,a.local_score,a.final_ranking_score,a.semantic_json,
+                   a.emotion_score,a.ranking_score,a.local_score,a.final_ranking_score,a.score_kind,a.semantic_json,
                    p.visual_orientation_rotation_cw,p.visual_orientation_confidence,
                    p.visual_orientation_ambiguous,p.visual_orientation_evidence_json
             FROM photos p

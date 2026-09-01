@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from PIL import Image
 
+from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 from tests.conftest import create_admin, csrf, login
 
 
@@ -22,7 +23,7 @@ def _candidate(app, root, photo_id: str, *, eligible: int = 1, lifecycle: str = 
     photos.save_analysis(
         photo_id,
         None,
-        "local",
+        "test-model",
         "local",
         "test",
         {
@@ -39,6 +40,7 @@ def _candidate(app, root, photo_id: str, *, eligible: int = 1, lifecycle: str = 
             "reason": "測試",
         },
         "{}",
+        score_kind=SEMANTIC_SCORE_KIND,
         ranking_score=99,
         final_ranking_score=99,
     )
@@ -158,7 +160,7 @@ def test_automatic_local_selection_records_per_photo_eligibility_sources(app, tm
     assert plan["secondary_eligibility_source"] == "local"
 
 
-def test_automatic_ai_revalidates_automatic_local_only_selection(app, tmp_path):
+def test_automatic_ai_revalidates_explicit_local_only_selection(app, tmp_path):
     root = tmp_path / "automatic-ai"
     root.mkdir()
     Image.new("RGB", (640, 480), "white").save(root / "local.jpg")
@@ -177,7 +179,7 @@ def test_automatic_ai_revalidates_automatic_local_only_selection(app, tmp_path):
     service = app.extensions["inktime_render_service"]
     service.select_candidates = lambda _limit: ["automatic-local-only"]
     try:
-        service.publish([], "test")
+        service.publish(["automatic-local-only"], "test")
     except ValueError as exc:
         assert "automatic-local-only" in str(exc)
         assert "正式分析" in str(exc)

@@ -10,6 +10,7 @@ import shutil
 from PIL import Image
 import pytest
 
+from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 from inktime.app.domain.rendering.fonts import FontCoverageError
 from inktime.app.domain.rendering.palette import encode_image
 from inktime.app.domain.rendering.release import (
@@ -819,7 +820,17 @@ def test_automatic_release_candidates_respect_configured_memory_threshold(app, t
             "sensitive": False,
             "reason": "測試",
         }
-        photos.save_analysis(photo_id, None, "test", "test", "test", result, "{}")
+        photos.save_analysis(
+            photo_id,
+            None,
+            "single",
+            "test-ai",
+            "test",
+            result,
+            "{}",
+            score_kind=SEMANTIC_SCORE_KIND,
+            ranking_score=memory_score,
+        )
 
     render_service = app.extensions["inktime_render_service"]
     assert render_service.select_candidates() == ["photo-80", "photo-70"]
@@ -872,7 +883,17 @@ def test_history_today_is_selected_before_higher_ranked_fallback(app, tmp_path):
             "sensitive": False,
             "reason": "選片測試",
         }
-        photos.save_analysis(photo_id, None, "test", "local", "test", result, "{}", ranking_score=score)
+        photos.save_analysis(
+            photo_id,
+            None,
+            "single",
+            "test-ai",
+            "test",
+            result,
+            "{}",
+            score_kind=SEMANTIC_SCORE_KIND,
+            ranking_score=score,
+        )
 
     details = app.extensions["inktime_render_service"].select_candidates_details(
         2, target_date=date(2026, 7, 20)
@@ -921,8 +942,8 @@ def test_all_photo_frame_layouts_render_at_panel_size(app, tmp_path):
     photos.save_analysis(
         "layout-photo",
         None,
-        "test",
-        "local",
+        "single",
+        "test-ai",
         "test",
         {
             "schema_version": 1,
@@ -938,12 +959,13 @@ def test_all_photo_frame_layouts_render_at_panel_size(app, tmp_path):
             "reason": "版型測試",
         },
         "{}",
+        score_kind=SEMANTIC_SCORE_KIND,
     )
     photos.save_analysis(
         "layout-photo-2",
         None,
-        "test",
-        "local",
+        "single",
+        "test-ai",
         "test",
         {
             "schema_version": 1,
@@ -959,6 +981,7 @@ def test_all_photo_frame_layouts_render_at_panel_size(app, tmp_path):
             "reason": "雙照片版型測試",
         },
         "{}",
+        score_kind=SEMANTIC_SCORE_KIND,
     )
     service = app.extensions["inktime_render_service"]
     for layout in (
@@ -1024,8 +1047,8 @@ def test_formal_caption_uses_builtin_traditional_font_without_fallback(app, tmp_
     photos.save_analysis(
         "caption-photo",
         None,
-        "test",
-        "local",
+        "single",
+        "test-ai",
         "test",
         {
             "schema_version": "1.0",
@@ -1041,6 +1064,7 @@ def test_formal_caption_uses_builtin_traditional_font_without_fallback(app, tmp_
             "reason": "測試內建繁中字型",
         },
         "{}",
+        score_kind=SEMANTIC_SCORE_KIND,
     )
 
     render_service = app.extensions["inktime_render_service"]
@@ -1071,8 +1095,8 @@ def test_formal_render_shows_nearest_city_when_photo_has_gps(app, tmp_path):
     photos.save_analysis(
         "location-photo",
         None,
-        "test",
-        "local",
+        "single",
+        "test-ai",
         "test",
         {
             "schema_version": 1,
@@ -1088,6 +1112,7 @@ def test_formal_render_shows_nearest_city_when_photo_has_gps(app, tmp_path):
             "reason": "測試地點顯示",
         },
         "{}",
+        score_kind=SEMANTIC_SCORE_KIND,
     )
     render_service = app.extensions["inktime_render_service"]
     photo = photos.get_with_path("location-photo")

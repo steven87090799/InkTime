@@ -5,6 +5,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 import pytest
 
+from inktime.app.domain.analysis.scoring import SEMANTIC_SCORE_KIND
 from inktime.app.domain.rendering import Rect
 from inktime.app.services import rendering as rendering_service
 
@@ -35,7 +36,7 @@ def _analyzed_photo(
         photo_id,
         None,
         "local",
-        "local",
+        "test-ai",
         "test",
         {
             "schema_version": 1,
@@ -52,6 +53,7 @@ def _analyzed_photo(
             "reason": "測試",
         },
         "{}",
+        score_kind=SEMANTIC_SCORE_KIND,
         ranking_score=99,
         final_ranking_score=99,
     )
