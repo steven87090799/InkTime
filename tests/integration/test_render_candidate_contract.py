@@ -160,7 +160,7 @@ def test_automatic_local_selection_records_per_photo_eligibility_sources(app, tm
     assert plan["secondary_eligibility_source"] == "local"
 
 
-def test_automatic_ai_revalidates_automatic_local_only_selection(app, tmp_path):
+def test_automatic_ai_revalidates_explicit_local_only_selection(app, tmp_path):
     root = tmp_path / "automatic-ai"
     root.mkdir()
     Image.new("RGB", (640, 480), "white").save(root / "local.jpg")
@@ -179,7 +179,7 @@ def test_automatic_ai_revalidates_automatic_local_only_selection(app, tmp_path):
     service = app.extensions["inktime_render_service"]
     service.select_candidates = lambda _limit: ["automatic-local-only"]
     try:
-        service.publish([], "test")
+        service.publish(["automatic-local-only"], "test")
     except ValueError as exc:
         assert "automatic-local-only" in str(exc)
         assert "正式分析" in str(exc)

@@ -44,7 +44,7 @@ def _insert_photo(app, root: Path, photo_id: str, *, local_score: float = 55) ->
         )
 
 
-def _save_semantic(app, photo_id: str, score: float) -> None:
+def _save_semantic(app, photo_id: str, score: float, *, travel_bonus: float = 0.0) -> None:
     result = valid_result(
         memory_score=score,
         beauty_score=score,
@@ -63,8 +63,37 @@ def _save_semantic(app, photo_id: str, score: float) -> None:
         ranking_score=score,
         semantic_score=score,
         base_ranking_score=score,
-        final_ranking_score=score,
+        final_ranking_score=min(100.0, score + travel_bonus),
+        travel_bonus=travel_bonus,
     )
+
+
+def _save_local(app, photo_id: str, score: float) -> None:
+    photos = app.extensions["inktime_photo_repository"]
+    result = valid_result(caption="本機候選")
+    photos.save_analysis(
+        photo_id,
+        None,
+        "local_fallback",
+        "local",
+        "local-quality-v5",
+        result,
+        "{}",
+        score_kind=LOCAL_QUALITY_SCORE_KIND,
+        local_score=score,
+    )
+
+
+def _set_capture_date(app, photo_id: str, captured_at: str) -> None:
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            """
+            UPDATE photos
+            SET captured_at=?,captured_date=?,captured_month_day=?,capture_date_status='valid'
+            WHERE id=?
+            """,
+            (captured_at, captured_at[:10], captured_at[5:10], photo_id),
+        )
 
 
 def test_local_analysis_persists_quality_only_and_no_semantic_ranking(app, tmp_path):
@@ -159,6 +188,86 @@ def test_semantic_population_cache_invalidates_after_ai_write(app, tmp_path):
     _insert_photo(app, root, "ai-90")
     _save_semantic(app, "ai-90", 90)
     assert sorted(repository.score_population()) == [70.0, 80.0, 90.0]
+
+
+def test_manual_update_preserves_existing_travel_bonus(app, tmp_path):
+    root = tmp_path / "manual-travel"
+    _insert_photo(app, root, "manual-travel")
+    _save_semantic(app, "manual-travel", 80, travel_bonus=4)
+    user_id = create_admin(app)
+
+    app.extensions["inktime_photo_repository"].update_manual(
+        "manual-travel",
+        favorite=False,
+        captured_at=None,
+        types=[],
+        side_caption="更新說明",
+        changed_by=user_id,
+    )
+
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute(
+            """
+            SELECT semantic_score,base_ranking_score,travel_bonus,final_ranking_score,ranking_score
+            FROM photo_analysis WHERE photo_id=? ORDER BY id DESC LIMIT 1
+            """,
+            ("manual-travel",),
+        ).fetchone()
+    assert tuple(row) == (80.0, 80.0, 4.0, 84.0, 84.0)
+
+
+def test_manual_favorite_update_keeps_favorite_plus_travel_bonus(app, tmp_path):
+    root = tmp_path / "manual-favorite-travel"
+    _insert_photo(app, root, "manual-favorite-travel")
+    _save_semantic(app, "manual-favorite-travel", 80, travel_bonus=4)
+    user_id = create_admin(app)
+
+    app.extensions["inktime_photo_repository"].update_manual(
+        "manual-favorite-travel",
+        favorite=True,
+        captured_at=None,
+        types=[],
+        side_caption="標記收藏",
+        changed_by=user_id,
+    )
+
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute(
+            """
+            SELECT semantic_score,base_ranking_score,travel_bonus,final_ranking_score,ranking_score
+            FROM photo_analysis WHERE photo_id=? ORDER BY id DESC LIMIT 1
+            """,
+            ("manual-favorite-travel",),
+        ).fetchone()
+    assert tuple(row) == (85.0, 85.0, 4.0, 89.0, 89.0)
+
+
+def test_local_manual_update_keeps_semantic_ranking_null(app, tmp_path):
+    photo_id = _scan_one(app, tmp_path / "local-manual")
+    app.extensions["inktime_analysis_service"].analyze_photo(
+        photo_id=photo_id,
+        job_id=None,
+        provider=None,
+        strategy="local",
+    )
+    user_id = create_admin(app)
+
+    app.extensions["inktime_photo_repository"].update_manual(
+        photo_id,
+        favorite=True,
+        captured_at=None,
+        types=["日常"],
+        side_caption="本機更新",
+        changed_by=user_id,
+    )
+
+    with app.extensions["inktime_database"].session() as connection:
+        row = connection.execute(
+            "SELECT score_kind,semantic_score,base_ranking_score,final_ranking_score,ranking_score FROM photo_analysis WHERE photo_id=? ORDER BY id DESC LIMIT 1",
+            (photo_id,),
+        ).fetchone()
+    assert row["score_kind"] == LOCAL_QUALITY_SCORE_KIND
+    assert all(row[field] is None for field in ("semantic_score", "base_ranking_score", "final_ranking_score", "ranking_score"))
 
 
 def test_semantic_selection_survives_newer_local_history(app, tmp_path):
@@ -264,6 +373,71 @@ def test_local_only_and_ai_disabled_use_local_selection_without_semantic_rank(ap
     assert row["ranking_score"] is None
     assert row["semantic_score"] is None
     assert row["local_score"] is not None
+
+
+def test_automatic_ai_selects_semantic_then_local_fallback_by_tier(app, tmp_path):
+    settings = app.extensions["inktime_settings_repository"]
+    settings.update("analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="test")
+    settings.update("render.selection_mode", "top_ranked", changed_by="test", source_ip="test")
+    root = tmp_path / "tiered-selection"
+    for index in range(1, 4):
+        photo_id = f"tier-semantic-{index}"
+        _insert_photo(app, root, photo_id, local_score=40)
+        _save_semantic(app, photo_id, 80 - index)
+    for index in range(1, 11):
+        photo_id = f"tier-local-{index}"
+        _insert_photo(app, root, photo_id, local_score=99 - index)
+        _save_local(app, photo_id, 99 - index)
+
+    selected = app.extensions["inktime_render_service"].select_candidates_details(5)
+
+    assert len(selected) == 5
+    assert [row["score_kind"] for row in selected[:3]] == [SEMANTIC_SCORE_KIND] * 3
+    assert [row["score_kind"] for row in selected[3:]] == [LOCAL_QUALITY_SCORE_KIND] * 2
+
+
+def test_history_today_uses_local_fallback_to_fill_semantic_shortage(app, tmp_path):
+    settings = app.extensions["inktime_settings_repository"]
+    settings.update("analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="test")
+    root = tmp_path / "history-tiered-selection"
+    _insert_photo(app, root, "history-semantic", local_score=40)
+    _set_capture_date(app, "history-semantic", "2020-07-20T10:00:00")
+    _save_semantic(app, "history-semantic", 80)
+    for index in range(1, 4):
+        photo_id = f"history-local-{index}"
+        _insert_photo(app, root, photo_id, local_score=90 - index)
+        _set_capture_date(app, photo_id, "2020-07-20T10:00:00")
+        _save_local(app, photo_id, 90 - index)
+
+    selected = app.extensions["inktime_render_service"].select_candidates_details(
+        4, target_date=date(2026, 7, 20)
+    )
+
+    assert len(selected) == 4
+    assert [row["score_kind"] for row in selected] == [
+        SEMANTIC_SCORE_KIND,
+        LOCAL_QUALITY_SCORE_KIND,
+        LOCAL_QUALITY_SCORE_KIND,
+        LOCAL_QUALITY_SCORE_KIND,
+    ]
+    assert [row["match_type"] for row in selected] == ["exact_day"] * 4
+
+
+def test_automatic_ai_never_compares_local_score_with_semantic_score(app, tmp_path):
+    settings = app.extensions["inktime_settings_repository"]
+    settings.update("analysis.execution_mode", "automatic_ai", changed_by="test", source_ip="test")
+    settings.update("render.selection_mode", "top_ranked", changed_by="test", source_ip="test")
+    settings.update("render.memory_threshold", 0, changed_by="test", source_ip="test")
+    root = tmp_path / "tiered-score-domain"
+    _insert_photo(app, root, "semantic-60", local_score=20)
+    _save_semantic(app, "semantic-60", 60)
+    _insert_photo(app, root, "local-99", local_score=99)
+    _save_local(app, "local-99", 99)
+
+    selected = app.extensions["inktime_render_service"].select_candidates_details(1)
+
+    assert [row["id"] for row in selected] == ["semantic-60"]
+    assert selected[0]["score_kind"] == SEMANTIC_SCORE_KIND
 
 
 def test_semantic_detail_retains_ranking_percentile_and_four_scores(client, app, tmp_path):

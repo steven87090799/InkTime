@@ -1968,7 +1968,7 @@ class PhotoRepository:
                             ),
                         )
                         previous_travel = float(analysis["travel_bonus"] or 0.0)
-                        base_score = round(max(0.0, ranking_score - min(100.0, previous_travel)), 2)
+                        base_score = round(max(0.0, min(100.0, ranking_score)), 2)
                         final_score = round(min(100.0, base_score + previous_travel), 2)
                         connection.execute(
                             """

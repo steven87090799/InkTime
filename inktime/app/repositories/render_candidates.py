@@ -142,13 +142,21 @@ class RenderCandidateRepository:
             rows.append(row)
         return rows
 
-    def require_for_execution_mode(self, photo_ids: Iterable[str], execution: str) -> list[dict[str, Any]]:
+    def require_for_execution_mode(
+        self,
+        photo_ids: Iterable[str],
+        execution: str,
+        *,
+        allow_local_fallback: bool = False,
+    ) -> list[dict[str, Any]]:
         """Resolve one release contract per requested photo, without N+1 queries.
 
         Non-automatic modes deliberately accept a mix of old, fully analysed
         photos and scanner-only photos.  A contract is never chosen for the
         whole batch: doing so made a valid old photo fail merely because a
-        second photo had only local features (and vice versa).
+        second photo had only local features (and vice versa).  Automatic AI
+        callers remain strict for explicitly supplied IDs; the opt-in local
+        fallback is reserved for IDs produced by the tiered selector.
         """
         ids = list(dict.fromkeys(str(value).strip() for value in photo_ids if str(value).strip()))
         if len(ids) > self.MAX_REQUESTED:
@@ -201,9 +209,12 @@ class RenderCandidateRepository:
                 bool(row.get("eligible")) and str(row.get("local_features_status") or "") == "complete"
             )
             if execution == "automatic_ai":
-                if not analysis_eligible:
+                if analysis_eligible:
+                    source = "analysis"
+                elif allow_local_fallback and local_eligible:
+                    source = "local"
+                else:
                     raise IneligiblePhotoError(photo_id, "PHOTO-ELIGIBILITY-007 缺少有效正式分析")
-                source = "analysis"
             elif analysis_eligible:
                 source = "analysis"
             elif local_eligible:

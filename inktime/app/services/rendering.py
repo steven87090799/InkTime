@@ -1076,7 +1076,7 @@ class RenderService:
                 pass
 
     def _selection_score_kind(self) -> str:
-        """Choose one scoring domain for an automatic selection run."""
+        """Choose the domain for a single-domain history or pair query."""
         if execution_mode(self.settings) in {"local_only", "local_with_manual_ai", "disabled"}:
             return LOCAL_QUALITY_SCORE_KIND
         return (
@@ -1904,6 +1904,7 @@ class RenderService:
         device_configs: dict[str, dict[str, Any]] | None = None,
         activate_pointers: bool = True,
         assign_device_releases: bool = True,
+        allow_local_fallback: bool = False,
     ) -> dict:
         publish_started = time.monotonic()
         log_event(
@@ -1927,10 +1928,15 @@ class RenderService:
         layout_key = str(self.settings.get("render.layout", "photo_info"))
         source_limit = quantity * 2 if layout_key in {"photo_pair", "photo_pair_caption"} else quantity
         selected = photo_ids[:source_limit]
+        automatically_selected = not selected
         if not selected:
             selected = self.select_candidates(source_limit)
         # 明確指定與自動選片都必須在發布前重新驗證；不得使用過期候選或遺失來源契約。
-        required = self.candidates.require_for_execution_mode(selected, execution_mode(self.settings))
+        required = self.candidates.require_for_execution_mode(
+            selected,
+            execution_mode(self.settings),
+            allow_local_fallback=allow_local_fallback or automatically_selected,
+        )
         selected = [str(row["id"]) for row in required]
         eligibility_sources = {str(row["id"]): str(row["eligibility_source"]) for row in required}
         if device_ids:
@@ -2421,28 +2427,25 @@ class RenderService:
             ),
         )
 
-    def select_candidates_details(
+    def _select_candidates_for_score_kind(
         self,
-        quantity: int | None = None,
         *,
-        target_date: date | None = None,
-        candidate_years: list[int] | None = None,
+        target: date,
+        limit: int,
+        candidate_years: list[int] | None,
+        score_kind: str,
+        already_selected: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        limit = quantity if quantity is not None else int(self.settings.get("render.quantity", 5))
-        limit = max(1, min(int(limit), 50))
-        target = target_date or self._today()
-        if execution_mode(self.settings) in {"local_only", "local_with_manual_ai", "disabled"}:
-            result = LocalSelectionPolicy(
-                self.database, self.settings, self.resilience, self.locations
-            ).select(
-                target=target,
-                orientation=str(self.settings.get("render.frame_orientation", "portrait")),
-                quantity=limit,
-                layout=str(self.settings.get("render.layout", "photo_info")),
-            )
-            return result["selected"][:limit]
-        score_kind = self._selection_score_kind()
+        """Select one scoring domain using the existing staged fallback contract.
+
+        ``already_selected`` is only diversity context.  Semantic and local
+        scores are never compared or combined; callers decide the tier order.
+        """
         mode = str(self.settings.get("render.selection_mode", "history_today"))
+        context = list(already_selected or [])
+        selected: list[dict[str, Any]] = []
+        selected_ids = {str(row["id"]) for row in context}
+
         if mode == "top_ranked":
             rows = self._candidate_query(
                 target=target,
@@ -2452,14 +2455,15 @@ class RenderService:
                 candidate_years=candidate_years,
                 score_kind=score_kind,
             )
-            selected_top = self._pick_diverse_candidates(rows, limit=limit)
-            for row in selected_top:
+            selected = self._pick_diverse_candidates(
+                [row for row in rows if str(row["id"]) not in selected_ids],
+                limit=limit,
+                already_selected=context,
+            )
+            for row in selected:
                 row["match_type"] = "top_ranked"
                 row["day_distance"] = None
-            return selected_top
-
-        selected: list[dict[str, Any]] = []
-        selected_ids: set[str] = set()
+            return selected
 
         def append(rows: list[dict[str, Any]], match_type: str, distances=None) -> None:
             available = [row for row in rows if str(row["id"]) not in selected_ids]
@@ -2467,7 +2471,7 @@ class RenderService:
                 available,
                 limit=limit - len(selected),
                 distances=distances,
-                already_selected=selected,
+                already_selected=[*context, *selected],
             ):
                 photo_id = str(row["id"])
                 if photo_id in selected_ids or len(selected) >= limit:
@@ -2521,6 +2525,53 @@ class RenderService:
             )
             append(ranked, "ranked_fallback")
         return selected
+
+    def select_candidates_details(
+        self,
+        quantity: int | None = None,
+        *,
+        target_date: date | None = None,
+        candidate_years: list[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        limit = quantity if quantity is not None else int(self.settings.get("render.quantity", 5))
+        limit = max(1, min(int(limit), 50))
+        target = target_date or self._today()
+        mode = execution_mode(self.settings)
+        if mode in {"local_only", "local_with_manual_ai", "disabled"}:
+            result = LocalSelectionPolicy(
+                self.database, self.settings, self.resilience, self.locations
+            ).select(
+                target=target,
+                orientation=str(self.settings.get("render.frame_orientation", "portrait")),
+                quantity=limit,
+                layout=str(self.settings.get("render.layout", "photo_info")),
+            )
+            return result["selected"][:limit]
+
+        if mode == "automatic_ai":
+            semantic = self._select_candidates_for_score_kind(
+                target=target,
+                limit=limit,
+                candidate_years=candidate_years,
+                score_kind=SEMANTIC_SCORE_KIND,
+            )
+            if len(semantic) < limit:
+                local = self._select_candidates_for_score_kind(
+                    target=target,
+                    limit=limit - len(semantic),
+                    candidate_years=candidate_years,
+                    score_kind=LOCAL_QUALITY_SCORE_KIND,
+                    already_selected=semantic,
+                )
+                return [*semantic, *local][:limit]
+            return semantic
+
+        return self._select_candidates_for_score_kind(
+            target=target,
+            limit=limit,
+            candidate_years=candidate_years,
+            score_kind=self._selection_score_kind(),
+        )
 
     def select_candidates(self, quantity: int | None = None) -> list[str]:
         return [str(row["id"]) for row in self.select_candidates_details(quantity)]
