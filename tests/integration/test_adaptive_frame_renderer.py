@@ -7,6 +7,7 @@ import pytest
 
 from inktime.app.domain.rendering import Rect
 from inktime.app.services import rendering as rendering_service
+from tests.unit.test_analysis_schema import valid_result
 
 
 def _analyzed_photo(
@@ -37,20 +38,14 @@ def _analyzed_photo(
         "local",
         "local",
         "test",
-        {
-            "schema_version": 1,
-            "caption": "測試",
-            "types": types or ["人物"],
-            "memory_score": 99,
-            "beauty_score": 99,
-            "technical_quality_score": 99,
-            "emotion_score": 99,
-            "side_caption": side_caption
-            or "這是一段足夠長的相框回憶短句，用來驗證文字會被安全截斷。",
-            "should_keep": True,
-            "sensitive": False,
-            "reason": "測試",
-        },
+        valid_result(
+            caption="這是一段足夠長的相框測試說明文字。",
+            types=types or ["人物"],
+            memory_score=99,
+            visual_score=99,
+            side_caption=side_caption
+            or "這是一段相框回憶短句。",
+        ),
         "{}",
         ranking_score=99,
         final_ranking_score=99,
@@ -84,7 +79,7 @@ def test_adaptive_landscape_pair_contains_portraits_with_left_caption_columns(ap
         "primary",
         (900, 1600),
         "2024-07-01T10:00:00+00:00",
-        side_caption="A文字",
+        side_caption="A側相框回憶文字",
     )
     _analyzed_photo(
         app,
@@ -92,7 +87,7 @@ def test_adaptive_landscape_pair_contains_portraits_with_left_caption_columns(ap
         "secondary",
         (900, 1600),
         "2024-07-01T10:30:00+00:00",
-        side_caption="B文字",
+        side_caption="B側相框回憶文字",
     )
     image = app.extensions["inktime_render_service"].render_photo(
         "primary", layout="adaptive_memory", orientation="landscape"
@@ -139,7 +134,7 @@ def test_adaptive_pair_plans_bind_orientation_geometry_and_caption_identity(app,
         "portrait-a",
         (900, 1600),
         "2026-08-10T10:00:00+00:00",
-        side_caption="A文字",
+        side_caption="A側相框回憶文字",
     )
     _analyzed_photo(
         app,
@@ -147,7 +142,7 @@ def test_adaptive_pair_plans_bind_orientation_geometry_and_caption_identity(app,
         "portrait-b",
         (900, 1600),
         "2026-08-12T10:00:00+00:00",
-        side_caption="B文字",
+        side_caption="B側相框回憶文字",
     )
     _analyzed_photo(
         app,
@@ -155,7 +150,7 @@ def test_adaptive_pair_plans_bind_orientation_geometry_and_caption_identity(app,
         "landscape-a",
         (1600, 900),
         "2026-08-10T10:00:00+00:00",
-        side_caption="上方文字",
+        side_caption="上方相框回憶文字",
     )
     _analyzed_photo(
         app,
@@ -163,7 +158,7 @@ def test_adaptive_pair_plans_bind_orientation_geometry_and_caption_identity(app,
         "landscape-b",
         (1600, 900),
         "2026-08-16T10:00:00+00:00",
-        side_caption="下方文字",
+        side_caption="下方相框回憶文字",
     )
     service = app.extensions["inktime_render_service"]
 
@@ -228,7 +223,7 @@ def test_adaptive_caption_draw_regions_keep_a_and_b_records_unswapped(
         "a",
         (900, 1600),
         "2026-08-10T10:00:00+00:00",
-        side_caption="A文字",
+        side_caption="A側相框回憶文字",
     )
     _analyzed_photo(
         app,
@@ -236,7 +231,7 @@ def test_adaptive_caption_draw_regions_keep_a_and_b_records_unswapped(
         "b",
         (900, 1600),
         "2026-08-12T10:00:00+00:00",
-        side_caption="B文字",
+        side_caption="B側相框回憶文字",
     )
     service = app.extensions["inktime_render_service"]
     plan = service.resolve_render_plan("a", layout="adaptive_memory", orientation="landscape")
@@ -250,7 +245,7 @@ def test_adaptive_caption_draw_regions_keep_a_and_b_records_unswapped(
     monkeypatch.setattr(service, "_draw_adaptive_pair_caption", capture)
     service._render_plan_image(plan)
 
-    assert [(item[0], item[1]) for item in observed] == [("a", "A文字"), ("b", "B文字")]
+    assert [(item[0], item[1]) for item in observed] == [("a", "A側相框回憶文字"), ("b", "B側相框回憶文字")]
     assert all(item[3] is True for item in observed)
     assert observed[0][2] == plan["geometry"]["primary_caption"]
     assert observed[1][2] == plan["geometry"]["secondary_caption"]
@@ -280,12 +275,12 @@ def test_landscape_side_caption_draws_upright_glyphs_without_rotating_text_strip
 
     service._draw_adaptive_pair_caption(
         canvas,
-        {"photo_id": "primary", "text": "A文字"},
+        {"photo_id": "primary", "text": "A側相框回憶文字"},
         box,
         left_side=True,
     )
 
-    assert [text for text, _xy in text_calls] == ["A", "文", "字"]
+    assert [text for text, _xy in text_calls] == list("A側相框回憶文字")
     assert [xy[1] for _text, xy in text_calls] == sorted(
         xy[1] for _text, xy in text_calls
     )
@@ -591,7 +586,7 @@ def test_device_releases_keep_profile_manifest_and_independent_layouts(app, tmp_
         "primary",
         (900, 1600),
         "2024-07-01T10:00:00+00:00",
-        side_caption="A文字",
+        side_caption="A側相框回憶文字",
     )
     _analyzed_photo(
         app,
@@ -599,7 +594,7 @@ def test_device_releases_keep_profile_manifest_and_independent_layouts(app, tmp_
         "secondary",
         (900, 1600),
         "2024-07-01T10:30:00+00:00",
-        side_caption="B文字",
+        side_caption="B側相框回憶文字",
     )
     devices = app.extensions["inktime_device_repository"]
     portrait_id, _ = devices.create("直向", frame_orientation="portrait", layout_mode="adaptive_memory")

@@ -92,7 +92,7 @@ def _enum_array(values, minimum=0, maximum=5) -> dict:
     }
 
 
-ANALYSIS_JSON_SCHEMA = {
+ANALYSIS_JSON_SCHEMA: dict[str, Any] = {
     "name": "inktime_photo_analysis",
     "strict": True,
     "schema": _object(
@@ -135,7 +135,7 @@ FULL_ANALYSIS_JSON_SCHEMA = ANALYSIS_JSON_SCHEMA
 REQUIRED_FIELDS = set(ANALYSIS_JSON_SCHEMA["schema"]["required"])
 
 
-PROVIDER_CONTRACT_JSON_SCHEMA = {
+PROVIDER_CONTRACT_JSON_SCHEMA: dict[str, Any] = {
     "name": "inktime_provider_vision_contract",
     "strict": True,
     "schema": {
@@ -188,7 +188,9 @@ class AnalysisValidationError(ValueError):
     code = "VLM-004"
 
 
-def json_schema_for_stage(stage: str, *, caption_controls: dict[str, Any] | None = None) -> dict:
+def json_schema_for_stage(
+    stage: str, *, caption_controls: dict[str, Any] | None = None
+) -> dict[str, Any]:
     if stage == "provider_contract_level2":
         return deepcopy(PROVIDER_CONTRACT_JSON_SCHEMA)
     schema = deepcopy(ANALYSIS_JSON_SCHEMA)
@@ -201,7 +203,7 @@ def json_schema_for_stage(stage: str, *, caption_controls: dict[str, Any] | None
     return schema
 
 
-def _validate(value: Any, schema: dict, path: str) -> None:
+def _validate(value: Any, schema: dict[str, Any], path: str) -> None:
     if "anyOf" in schema:
         for choice in schema["anyOf"]:
             try:
@@ -259,6 +261,8 @@ def validate_analysis_result(raw: str | dict) -> dict:
             raise error from exc
     value = to_taiwan_traditional(deepcopy(raw))
     _validate(value, ANALYSIS_JSON_SCHEMA["schema"], "analysis")
+    if not isinstance(value, dict):  # Narrow the type after the schema validator accepts it.
+        raise AnalysisValidationError("analysis 必須是 object")
     orientation = value["visual_orientation"]
     if orientation["rotation_cw"] is None and not orientation["ambiguous"]:
         raise AnalysisValidationError("rotation_cw=null 必須 ambiguous=true")

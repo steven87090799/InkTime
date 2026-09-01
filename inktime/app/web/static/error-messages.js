@@ -43,8 +43,6 @@
       entry = {...(catalog['ANALYSIS-DISABLED'] || fallback)};
     } else if (/no endpoints found that can handle/i.test(raw)) {
       entry = {title:'模型路由目前沒有相容端點',detail:'模型服務找不到能同時支援本次圖片與輸出格式的端點。',action:'稍後再試，或改用固定且支援圖片與結構化輸出的模型；增加 Worker 不會解除這個限制。'};
-    } else if (raw.includes('display_suitability_grade')) {
-      entry = {title:'模型回覆的電子紙適合度格式不正確',detail:'這是模型欄位格式問題，不是照片損壞；合法值為 S、A、B、C、D、E、unknown 或 null（無法判斷）。',action:'舊版曾誤拒絕 null，目前已修正；若仍失敗，查看技術資料中的實際回覆再重試。'};
     } else if ((String(httpStatus) === '429' || /\b429\b/.test(raw)) && /^(VLM|AI-PROVIDER)/.test(key)) {
       entry = {...(catalog['VLM-002'] || fallback)};
     } else if (/^(VLM|AI-PROVIDER)/.test(key) && ['401','403'].includes(String(httpStatus))) {

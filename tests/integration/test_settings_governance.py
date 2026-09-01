@@ -907,19 +907,19 @@ def test_cross_field_validation_uses_current_plus_partial_update(client, app):
     invalid = _post(
         client,
         "/api/v1/settings/preview",
-        {"analysis.caption_min_chars": 199},
+        {"analysis.caption_min_chars": 99},
     )
     assert invalid.status_code == 200
     assert invalid.json["valid"] is False
     assert "min ≤ target ≤ max" in invalid.json["validation_errors"][0]
-    assert app.extensions["inktime_settings_repository"].get("analysis.caption_min_chars") == 120
+    assert app.extensions["inktime_settings_repository"].get("analysis.caption_min_chars") == 10
 
     valid = client.post(
         "/api/v1/settings",
         json={
-            "analysis.caption_min_chars": 180,
-            "analysis.caption_target_chars": 190,
-            "analysis.caption_max_chars": 200,
+            "analysis.caption_min_chars": 50,
+            "analysis.caption_target_chars": 70,
+            "analysis.caption_max_chars": 100,
         },
         headers={
             "X-CSRF-Token": csrf(client),
@@ -948,7 +948,7 @@ def test_legacy_ai_limits_normalize_and_explicit_advanced_disable_is_preserved(a
 
     settings.ensure_defaults()
 
-    assert settings.get("analysis.caption_max_chars") == 200
+    assert settings.get("analysis.caption_max_chars") == 100
     assert settings.get("analysis.image_max_side") == 1024
     assert settings.get("analysis.advanced_caption_enabled") is False
 
@@ -999,30 +999,34 @@ def test_transaction_failure_leaves_no_setting_snapshot_or_history(app):
         assert connection.execute("SELECT COUNT(*) FROM setting_history").fetchone()[0] == 0
 
 
-def test_private_locations_are_redacted_from_snapshot_and_export(client, app):
+def test_sensitive_settings_are_redacted_from_snapshot_and_export(client, app):
     create_admin(app)
     login(client)
     response = _post(
         client,
         "/api/v1/settings",
         {
-            "home_latitude": 24.987654,
             "render.font_path": "/Users/example/private-font.ttf",
+            "notification.webhook_url": "https://hooks.example.test/private",
         },
         confirm=True,
     )
     snapshot = app.extensions["inktime_settings_repository"].snapshot(response.json["snapshot_id"])
-    assert "home_latitude" not in snapshot["before"]
-    assert "home_latitude" not in snapshot["after"]
-    assert all(item["old_value"] == {"status": "已設定"} for item in snapshot["items"])
+    assert "render.font_path" not in snapshot["before"]
+    assert "render.font_path" not in snapshot["after"]
+    old_status = {item["key"]: item["old_value"] for item in snapshot["items"]}
+    assert old_status == {
+        "notification.webhook_url": {"status": "未設定"},
+        "render.font_path": {"status": "已設定"},
+    }
     assert all(item["new_value"] == {"status": "已變更"} for item in snapshot["items"])
 
     exported = client.get("/api/v1/settings/export")
     assert exported.status_code == 200
     document = json.loads(exported.get_data(as_text=True))
-    assert "home_latitude" not in document["settings"]
-    assert document["sensitive_status"]["home_latitude"] == {"configured": True}
     assert "render.font_path" not in document["settings"]
+    assert document["sensitive_status"]["render.font_path"] == {"configured": True}
+    assert document["sensitive_status"]["notification.webhook_url"] == {"configured": True}
     assert "/Users/example/private-font.ttf" not in exported.get_data(as_text=True)
     assert "webhook.bearer_token" not in exported.get_data(as_text=True)
     assert exported.headers["Cache-Control"] == "no-store"
@@ -1031,14 +1035,12 @@ def test_private_locations_are_redacted_from_snapshot_and_export(client, app):
 def test_viewer_html_and_snapshot_apis_never_receive_sensitive_values(client, app):
     create_admin(app)
     login(client)
-    exact_latitude = 24.987654
     exact_font_path = "/Users/example/private-font-unique.ttf"
     exact_webhook = "https://hooks.example.test/private/path?token=unique-token"
     changed = _post(
         client,
         "/api/v1/settings",
         {
-            "home_latitude": exact_latitude,
             "render.font_path": exact_font_path,
             "notification.webhook_url": exact_webhook,
         },
@@ -1057,7 +1059,6 @@ def test_viewer_html_and_snapshot_apis_never_receive_sensitive_values(client, ap
     metadata = client.get("/api/v1/settings/metadata").get_data(as_text=True)
 
     for secret in (
-        str(exact_latitude),
         exact_font_path,
         exact_webhook,
         "unique-token",
@@ -1066,7 +1067,6 @@ def test_viewer_html_and_snapshot_apis_never_receive_sensitive_values(client, ap
         assert secret not in settings_html
         assert secret not in snapshot_body
         assert secret not in snapshot_list
-    assert str(exact_latitude) not in metadata
     assert exact_font_path not in metadata
     assert "source_ip" not in snapshot_body
     assert "source_ip" not in snapshot_list
@@ -1267,7 +1267,7 @@ def test_sensitive_snapshot_keys_require_manual_rollback(client, app):
         client,
         "/api/v1/settings",
         {
-            "home_latitude": 23.456789,
+            "render.font_path": "/Users/example/manual-font.ttf",
             "notification.webhook_url": "https://example.test/hook?token=manual",
         },
         confirm=True,
@@ -1279,8 +1279,8 @@ def test_sensitive_snapshot_keys_require_manual_rollback(client, app):
     )
     assert preview.status_code == 200
     assert preview.json["sensitive_unrestorable_keys"] == [
-        "home_latitude",
         "notification.webhook_url",
+        "render.font_path",
     ]
     assert preview.json["updates"] == {}
     assert preview.json["changed_keys"] == []

@@ -228,7 +228,7 @@ def _live_manifest(tmp_path: Path) -> Path:
     items = []
     for index in range(2):
         image_name = f"live-{index}.jpg"
-        Image.new("RGB", (2, 2), "white").save(tmp_path / image_name, format="JPEG")
+        Image.new("RGB", (32, 32), "white").save(tmp_path / image_name, format="JPEG")
         items.append(
             {
                 "id": f"live-{index}",

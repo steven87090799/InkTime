@@ -229,22 +229,26 @@ class PhotoRepository:
         now = datetime.now(timezone.utc).isoformat()
         unique_ids = list(dict.fromkeys(photo_ids))
         with self.database.transaction() as connection:
-            connection.executemany(
-                """
-                UPDATE photos SET
-                    last_seen_scan_id=?,
-                    lifecycle_status=CASE WHEN lifecycle_status='missing' THEN 'active' ELSE lifecycle_status END,
-                    missing_since=CASE WHEN lifecycle_status='missing' THEN NULL ELSE missing_since END,
-                    missing_reason=CASE WHEN lifecycle_status='missing' THEN NULL ELSE missing_reason END,
-                    updated_at=CASE WHEN lifecycle_status='missing' THEN ? ELSE updated_at END
-                WHERE id=?
-                """,
-                [(scan_id, now, photo_id) for photo_id in unique_ids],
-            )
+            restored = 0
+            for chunk in _chunks(unique_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                cursor = connection.execute(
+                    f"""
+                    UPDATE photos SET lifecycle_status='active',missing_since=NULL,
+                        missing_reason=NULL,updated_at=?
+                    WHERE lifecycle_status='missing' AND id IN ({placeholders})
+                    """,  # noqa: S608 -- placeholders are generated; values remain bound
+                    (now, *chunk),
+                )
+                restored += int(cursor.rowcount)
+                connection.execute(
+                    f"UPDATE photos SET last_seen_scan_id=? WHERE id IN ({placeholders})",
+                    (scan_id, *chunk),
+                )
             scan = connection.execute(
                 "SELECT library_id FROM scan_runs WHERE id=?", (scan_id,)
             ).fetchone()
-            if scan is not None:
+            if scan is not None and restored:
                 self._mark_library_ranking_dirty(connection, str(scan["library_id"]), now)
 
     def mark_processing_failed_batch(self, scan_id: str, failures: Sequence[tuple[str, bool, bool]]) -> None:
@@ -254,13 +258,23 @@ class PhotoRepository:
             return
         now = datetime.now(timezone.utc).isoformat()
         with self.database.transaction() as connection:
+            photo_ids = list(dict.fromkeys(photo_id for photo_id, _metadata, _local in failures))
+            restored = 0
+            for chunk in _chunks(photo_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                cursor = connection.execute(
+                    f"""
+                    UPDATE photos SET lifecycle_status='active',missing_since=NULL,
+                        missing_reason=NULL,updated_at=?
+                    WHERE lifecycle_status='missing' AND id IN ({placeholders})
+                    """,  # noqa: S608 -- placeholders are generated; values remain bound
+                    (now, *chunk),
+                )
+                restored += int(cursor.rowcount)
             connection.executemany(
                 """
                 UPDATE photos SET
                     last_seen_scan_id=?,
-                    lifecycle_status=CASE WHEN lifecycle_status='missing' THEN 'active' ELSE lifecycle_status END,
-                    missing_since=CASE WHEN lifecycle_status='missing' THEN NULL ELSE missing_since END,
-                    missing_reason=CASE WHEN lifecycle_status='missing' THEN NULL ELSE missing_reason END,
                     metadata_status=CASE WHEN ? THEN 'failed' ELSE metadata_status END,
                     local_features_status=CASE WHEN ? THEN 'failed' ELSE local_features_status END,
                     updated_at=?
@@ -274,7 +288,7 @@ class PhotoRepository:
             scan = connection.execute(
                 "SELECT library_id FROM scan_runs WHERE id=?", (scan_id,)
             ).fetchone()
-            if scan is not None:
+            if scan is not None and restored:
                 self._mark_library_ranking_dirty(connection, str(scan["library_id"]), now)
 
     @staticmethod

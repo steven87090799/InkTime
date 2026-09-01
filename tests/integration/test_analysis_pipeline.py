@@ -20,6 +20,7 @@ from inktime.app.repositories.usage import UsageRepository
 from inktime.app.services.analysis import PhotoAnalysisService
 from inktime.app.services.budgets import BudgetService
 from inktime.app.domain.analysis.plan import build_analysis_plan, fingerprint
+from inktime.app.domain.analysis.scoring import SPECIAL_BONUSES
 from inktime.app.domain.analysis.schema import AnalysisValidationError
 from inktime.app.workers.job_worker import BoundedJobWorker
 from inktime.app.workers.scanner import PhotoScanner
@@ -327,11 +328,13 @@ def test_single_model_call_returns_all_fields_and_usage(app, tmp_path):
     assert tuple(attempt[:2]) == ("vision", "SUCCESS") and attempt["api_usage_id"] is not None
 
 
-def test_duplicate_model_types_are_normalized_without_paid_repair(app, tmp_path):
+def test_more_than_three_model_types_require_one_text_repair(app, tmp_path):
     _, ids, service = prepare(app, tmp_path)
     service.ai_traces = app.extensions["inktime_ai_trace_repository"]
     duplicate_types = valid_result(types=["人物", "風景", "人物", "日常"])
-    provider = MockProvider([duplicate_types])
+    provider = MockProvider(
+        [duplicate_types, valid_result(types=["人物", "風景", "日常"])]
+    )
 
     result = service.analyze_photo(
         photo_id=ids[0], job_id=None, provider=provider, strategy="high_quality", high_model="mock"
@@ -339,7 +342,7 @@ def test_duplicate_model_types_are_normalized_without_paid_repair(app, tmp_path)
 
     assert result["analysis"]["types"] == ["人物", "風景", "日常"]
     assert provider.analyze_calls == 1
-    assert provider.repair_calls == 0
+    assert provider.repair_calls == 1
 
 
 def test_trace_persistence_failure_cannot_retry_provider_or_change_analysis(app, tmp_path):
@@ -877,7 +880,8 @@ def test_favorite_change_recalculates_latest_ranking_with_original_version(app, 
     repository = app.extensions["inktime_photo_repository"]
     with app.extensions["inktime_database"].session() as connection:
         before = connection.execute(
-            "SELECT ranking_score,scoring_version_id FROM photo_analysis WHERE photo_id=?",
+            "SELECT ranking_score,scoring_version_id,effective_special_level "
+            "FROM photo_analysis WHERE photo_id=?",
             (ids[0],),
         ).fetchone()
 
@@ -892,10 +896,17 @@ def test_favorite_change_recalculates_latest_ranking_with_original_version(app, 
 
     with app.extensions["inktime_database"].session() as connection:
         after = connection.execute(
-            "SELECT ranking_score,scoring_version_id FROM photo_analysis WHERE photo_id=?",
+            "SELECT ranking_score,scoring_version_id,effective_special_level "
+            "FROM photo_analysis WHERE photo_id=?",
             (ids[0],),
         ).fetchone()
-    assert after["ranking_score"] == before["ranking_score"] + profile["favorite_bonus"]
+    assert after["effective_special_level"] == min(
+        4, before["effective_special_level"] + 1
+    )
+    assert after["ranking_score"] == before["ranking_score"] + (
+        SPECIAL_BONUSES[after["effective_special_level"]]
+        - SPECIAL_BONUSES[before["effective_special_level"]]
+    )
     assert after["scoring_version_id"] == before["scoring_version_id"]
 
 
@@ -1242,13 +1253,17 @@ def test_cloud_strategy_prefilters_screenshot_without_token_usage(app, tmp_path)
     )
 
     assert result["stage"] == "prefilter"
-    assert result["analysis"]["should_keep"] is False
+    assert result["analysis"]["content_filter"]["exclude_code"] == "uncertain"
     assert snapshot["decision"] == "auto_excluded"
     assert snapshot["primary_reason"] == "screenshot"
     assert any(check["key"] == "screenshot_strong" and check["hit"] for check in snapshot["checks"])
     assert provider.analyze_calls == 0
     with app.extensions["inktime_database"].session() as connection:
         assert connection.execute("SELECT COUNT(*) FROM api_usage").fetchone()[0] == 0
+        photo = connection.execute(
+            "SELECT eligible,exclusion_status FROM photos WHERE id=?", (photo_id,)
+        ).fetchone()
+    assert tuple(photo) == (0, "auto_excluded")
 
 
 def test_prefilter_persists_photo_analysis_and_audit_in_one_transaction(app, tmp_path):

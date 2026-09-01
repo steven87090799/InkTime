@@ -12,6 +12,7 @@ from PIL import Image
 import pytest
 
 from tests.conftest import create_admin, csrf, login
+from tests.unit.test_analysis_schema import valid_result
 from inktime.app.workers.runner import WorkerRunner
 from inktime.app.domain.rendering import DeviceTestReleaseStore
 from inktime.app.workers.process_boundary import ProcessCallError, ProcessCallTimeout
@@ -56,19 +57,13 @@ def _library_photo(app, root: Path, photo_id: str = "preview-photo") -> str:
         "local",
         "local",
         "test",
-        {
-            "schema_version": 1,
-            "caption": "Preview 測試",
-            "types": ["其他"],
-            "memory_score": 80,
-            "beauty_score": 80,
-            "technical_quality_score": 80,
-            "emotion_score": 80,
-            "side_caption": "Preview 必須由背景工作產生。",
-            "should_keep": True,
-            "sensitive": False,
-            "reason": "test",
-        },
+        valid_result(
+            caption="這是一段 Preview 測試說明文字。",
+            types=["其他"],
+            memory_score=80,
+            visual_score=80,
+            side_caption="Preview 背景產生。",
+        ),
         "{}",
         ranking_score=80,
     )

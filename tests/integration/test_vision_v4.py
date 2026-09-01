@@ -322,6 +322,7 @@ def test_score_population_and_photos_get_are_read_only(app, client, monkeypatch)
     )
     assert repo.score_population()
     assert client.get("/photos").status_code == 200
+    assert client.get(f"/photos/{photo_id}").status_code == 200
     assert repo.ranking_state(str(repo.get_with_path(photo_id)["library_id"])) == state_before
 
 

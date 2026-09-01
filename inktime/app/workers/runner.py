@@ -423,6 +423,7 @@ class WorkerRunner:
                 finalized_job_id: str,
                 target: str,
                 *,
+                job=job,
                 settings=settings,
                 runtime_settings=runtime_settings,
             ) -> None:

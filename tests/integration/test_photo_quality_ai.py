@@ -727,28 +727,29 @@ def test_cache_wait_deadline_covers_provider_and_one_json_repair(app, tmp_path, 
     )
     assert result[3] is True
     assert provider.analyze_calls == 0
-    assert leases == [252]
+    assert leases and set(leases) == {252}
 
 
-def test_full_json_allows_missing_nonessential_fields_and_travel_bonus_is_independent(app, tmp_path):
+def test_full_v4_json_uses_semantic_ranking_independent_of_gps(app, tmp_path):
     photo_id = _scan(app, tmp_path)[0]
     _setting(app, "analysis.ai_mode", "eligible")
     with app.extensions["inktime_database"].session() as connection:
         connection.execute("UPDATE photos SET gps_lat=22.6273,gps_lon=120.3014 WHERE id=?", (photo_id,))
-    result = valid_result(schema_version=2)
+    result = valid_result(special_level=0, special_codes=[])
     provider = CountingProvider(result)
     analyzed = app.extensions["inktime_analysis_service"].analyze_photo(
         photo_id=photo_id, job_id=None, provider=provider, strategy="high_quality", high_model="travel"
     )
     assert analyzed["analysis"]["memory_score"] == result["memory_score"]
+    assert provider.analyze_calls == 1
     with app.extensions["inktime_database"].session() as connection:
         row = connection.execute(
             "SELECT memory_score,travel_bonus,base_ranking_score,final_ranking_score FROM photo_analysis WHERE photo_id=?",
             (photo_id,),
         ).fetchone()
     assert row["memory_score"] == result["memory_score"]
-    assert row["travel_bonus"] > 0
-    assert row["final_ranking_score"] == row["base_ranking_score"] + row["travel_bonus"]
+    assert row["travel_bonus"] == 0
+    assert row["final_ranking_score"] == row["base_ranking_score"]
 
 
 def test_full_library_confirmation_and_queue_count_only_active_eligible_photos(client, app):

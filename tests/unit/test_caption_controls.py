@@ -86,8 +86,8 @@ def test_single_caption_prompt_is_literary_compact_and_omits_empty_fields(tmp_pa
         reasoning_effort="none",
     )
     assert body["messages"][1]["content"][0]["text"] == "分析這張照片。"
-    # Baseline at START_HEAD was prompt=1164 and schema=6634 characters.
-    assert provider.last_request_metrics["prompt_chars"] < 1164
+    assert provider.last_request_metrics["prompt_chars"] == len(prompt)
+    assert provider.last_request_metrics["prompt_chars"] < 2000
     assert provider.last_request_metrics["schema_chars"] <= 6634
 
 

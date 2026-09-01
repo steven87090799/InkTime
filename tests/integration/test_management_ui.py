@@ -747,7 +747,7 @@ def test_scoring_rules_and_weights_create_a_new_version(client, app):
     login(client)
     page = client.get("/scoring").get_data(as_text=True)
     assert 'textarea name="rules"' in page
-    assert "人物互動或合照，大幅提高評分" in page
+    assert "memory_score、visual_score 各為 0～100 數字" in page
 
     current = app.extensions["inktime_scoring_repository"].current()
     custom_rules = str(current["rules"]) + "\n- 家庭合照再額外提高回憶價值。"
@@ -1023,17 +1023,17 @@ def test_photo_console_shows_prefilter_metrics_model_text_and_generated_caption(
     assert "模糊分數" in body
     assert "過曝占比" in body
     assert "模型判斷文字結果" in body
-    assert "家人在公園散步。" in body
+    assert result["caption"] in body
     assert "產生的一句話（電子紙短文案）" in body
-    assert "風把這一天留得很輕。" in body
+    assert result["side_caption"] in body
     assert "測試 Provider / vision-model" in body
     assert body.index('class="photo-overview-layout"') < body.index('class="photo-analysis-grid"')
     assert body.index('class="photo-analysis-grid"') < body.index('class="panel photo-prefilter-panel"')
     assert body.index('class="panel photo-prefilter-panel"') < body.index('class="photo-runtime-grid"')
 
     listing = client.get("/photos").get_data(as_text=True)
-    assert "家人在公園散步。" in listing
-    assert "風把這一天留得很輕。" in listing
+    assert result["caption"] in listing
+    assert result["side_caption"] in listing
 
 
 def test_photo_cards_show_total_score_and_e6_estimate(client, app):
@@ -1053,13 +1053,22 @@ def test_photo_cards_show_total_score_and_e6_estimate(client, app):
         "{}",
         ranking_score=80,
     )
+    with app.extensions["inktime_database"].session() as connection:
+        raw_score = float(
+            connection.execute(
+                "SELECT final_ranking_score FROM photo_analysis WHERE photo_id=?",
+                (analyzed_id,),
+            ).fetchone()[0]
+        )
 
     body = client.get("/photos").get_data(as_text=True)
 
-    assert "選片分 84.0（模型＋E6）" in body
+    expected_selection = round(raw_score * 0.8 + 100 * 0.2, 1)
+    assert f"選片分 {expected_selection}（模型＋E6）" in body
     assert "為什麼兩張都不錯的照片" in body
     assert "相對鑑別分＝原始分 35%＋照片庫百分位 65%" in body
-    assert "排序原始分 80.0 → 相對鑑別 80.0" in body
+    display_raw_score = round(raw_score, 1)
+    assert f"排序原始分 {display_raw_score} → 相對鑑別 {display_raw_score}" in body
     assert "選片分 —（尚未正式分析）" in body
     assert "E6 顯示適合度 91.9（暫估，未納入正式選片分）" in body
 
@@ -1207,11 +1216,18 @@ def test_photo_cards_force_ineligible_selection_score_to_zero_but_keep_diagnosti
         "{}",
         ranking_score=98,
     )
+    with app.extensions["inktime_database"].session() as connection:
+        raw_score = float(
+            connection.execute(
+                "SELECT final_ranking_score FROM photo_analysis WHERE photo_id=?",
+                (photo_id,),
+            ).fetchone()[0]
+        )
 
     body = client.get("/photos").get_data(as_text=True)
 
     assert "選片分 0.0（已排除：" in body
-    assert "排序原始分 98.0" in body
+    assert f"排序原始分 {round(raw_score, 1)}" in body
     assert "E6 顯示適合度 99.0" in body
 
 
