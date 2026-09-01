@@ -19,6 +19,7 @@ from inktime.app.domain.jobs.failure_policy import (
 from inktime.app.workers.job_worker import BoundedJobWorker
 from inktime.app.workers.scanner import PhotoScanner
 from inktime.app.domain.photos import PhotoPreprocessor
+from inktime.app.domain.photos.formats import MAX_FILE_BYTES, MAX_SOURCE_PIXELS, MAX_SOURCE_EDGE
 from inktime.app.services.analysis import AnalysisDisabledError, ProviderUnavailableError
 from inktime.app.domain.analysis.execution_mode import permits_automatic_ai, permits_manual_ai
 
@@ -93,9 +94,9 @@ class WorkerRunner:
                 float(runtime_settings.get("scanner.missing_threshold_percent", 10)) / 100
             )
             scanner_safety = {
-                "max_file_bytes": int(runtime_settings.get("scanner.max_file_bytes", 200 * 1024 * 1024)),
-                "max_pixels": int(runtime_settings.get("scanner.max_pixels", 60_000_000)),
-                "max_edge_px": int(runtime_settings.get("scanner.max_edge_px", 12_000)),
+                "max_file_bytes": int(runtime_settings.get("scanner.max_file_bytes", MAX_FILE_BYTES)),
+                "max_pixels": int(runtime_settings.get("scanner.max_pixels", MAX_SOURCE_PIXELS)),
+                "max_edge_px": int(runtime_settings.get("scanner.max_edge_px", MAX_SOURCE_EDGE)),
                 "thumbnail_capacity_check_interval": int(
                     runtime_settings.get("scanner.thumbnail_capacity_check_interval", 5_000)
                 ),

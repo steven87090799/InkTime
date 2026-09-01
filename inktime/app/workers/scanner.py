@@ -8,11 +8,13 @@ from pathlib import Path
 import time
 from typing import Callable, Iterable, Iterator, Sequence
 
-from PIL import Image
-
 from inktime.app.core.logging import log_event, should_log_sample
 from inktime.app.domain.photos import PhotoPreprocessor, ThumbnailCache
 from inktime.app.domain.photos.quality_policy import FEATURE_VERSION
+from inktime.app.domain.photos.formats import (
+    SUPPORTED_IMAGE_EXTENSIONS, UNSUPPORTED_RAW_EXTENSIONS, MAX_SOURCE_PIXELS,
+    MAX_SOURCE_EDGE, MAX_FILE_BYTES, ImageSourceError, safe_image_open, log_image_error,
+)
 from inktime.app.repositories.photos import (
     BatchPhotoResult,
     PhotoRepository,
@@ -21,7 +23,7 @@ from inktime.app.repositories.photos import (
 )
 
 
-SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".tif", ".tiff", ".bmp"}
+SUPPORTED_EXTENSIONS = SUPPORTED_IMAGE_EXTENSIONS
 VIDEO_EXTENSIONS = {
     ".3gp",
     ".avi",
@@ -68,6 +70,8 @@ def iter_media(
             suffix = path.suffix.lower()
             if suffix in SUPPORTED_EXTENSIONS:
                 yield path, "image"
+            elif suffix in UNSUPPORTED_RAW_EXTENSIONS:
+                yield path, "unsupported_raw"
             elif suffix in VIDEO_EXTENSIONS:
                 yield path, "video"
 
@@ -117,6 +121,7 @@ def _scan_error(
         "exception_type": type(exc).__name__,
         "retryable": retryable,
         "masked_path": _masked_path(relative_path),
+        "format": Path(relative_path).suffix.lower()[:12],
     }
 
 
@@ -154,10 +159,8 @@ class PhotoScanner:
         # Reject bombs from metadata before the full feature pipeline decodes
         # pixels.  MemoryError/RecursionError remain fatal by design.
         if isinstance(self.preprocessor, PhotoPreprocessor):
-            with Image.open(entry.path) as image:
-                width, height = image.size
-                if width * height > self.max_pixels or max(width, height) > self.max_edge_px:
-                    raise Image.DecompressionBombError("scanner image dimensions exceed configured limit")
+            with safe_image_open(entry.path, max_pixels=self.max_pixels, max_edge=self.max_edge_px):
+                pass
         try:
             return self.preprocessor.analyze(
                 entry.path,
@@ -186,9 +189,9 @@ class PhotoScanner:
         progress_callback: Callable[[dict], None] | None = None,
         progress_interval_items: int = 50,
         progress_interval_seconds: int = 300,
-        max_file_bytes: int = 200 * 1024 * 1024,
-        max_pixels: int = 60_000_000,
-        max_edge_px: int = 12_000,
+        max_file_bytes: int = MAX_FILE_BYTES,
+        max_pixels: int = MAX_SOURCE_PIXELS,
+        max_edge_px: int = MAX_SOURCE_EDGE,
         thumbnail_capacity_check_interval: int = 5_000,
         thumbnail_max_bytes: int = 5 * 1024 * 1024 * 1024,
         thumbnail_retention_days: int = 30,
@@ -210,9 +213,9 @@ class PhotoScanner:
 
         disk_batch_size = max(100, min(int(disk_batch_size), 10_000))
         write_batch_size = max(100, min(int(write_batch_size), 2_000))
-        self.max_pixels = max(1_000_000, int(max_pixels))
-        self.max_edge_px = max(1_000, int(max_edge_px))
-        max_file_bytes = max(1_024 * 1_024, int(max_file_bytes))
+        self.max_pixels = min(MAX_SOURCE_PIXELS, max(1_000_000, int(max_pixels)))
+        self.max_edge_px = min(MAX_SOURCE_EDGE, max(1_000, int(max_edge_px)))
+        max_file_bytes = min(MAX_FILE_BYTES, max(1_024 * 1_024, int(max_file_bytes)))
         thumbnail_capacity_check_interval = max(1, int(thumbnail_capacity_check_interval))
         thumbnail_max_bytes = max(0, int(thumbnail_max_bytes))
         thumbnail_retention_days = max(0, int(thumbnail_retention_days))
@@ -247,6 +250,7 @@ class PhotoScanner:
             "inherited": 0,
             "failed": 0,
             "excluded_videos": 0,
+            "unsupported_raw": 0,
         }
         last_progress_at = time.monotonic()
         major_io_errors = 0
@@ -298,6 +302,13 @@ class PhotoScanner:
                 if cancel_requested():
                     cancelled = True
                     break
+                if media_type == "unsupported_raw":
+                    counts["unsupported_raw"] += 1
+                    if should_log_sample(counts["unsupported_raw"], first=1, every=0):
+                        log_event(LOGGER, logging.WARNING, "iPhone ProRAW .DNG 尚未支援",
+                                  event="image_source_unsupported", error_code="IMG-UNSUPPORTED",
+                                  operation="photo_scan", details={"format": ".dng"})
+                    continue
                 if media_type == "video":
                     counts["excluded_videos"] += 1
                     continue
@@ -335,7 +346,7 @@ class PhotoScanner:
                             stage="stat",
                             error_code="SCAN-IO-001",
                             exc=exc,
-                            retryable=isinstance(exc, OSError),
+                            retryable=getattr(exc, "retryable", isinstance(exc, OSError)),
                         )
                     )
             if cancelled:
@@ -393,6 +404,9 @@ class PhotoScanner:
                 except (MemoryError, RecursionError):
                     raise
                 except Exception as exc:
+                    if isinstance(exc, ImageSourceError):
+                        log_image_error(exc, photo_id=stored.id if stored else "",
+                                        stage="preprocess", suffix=entry.path.suffix)
                     if stored is not None:
                         processing_failures.append((stored.id, metadata, local))
                     counts["failed"] += 1
@@ -400,9 +414,9 @@ class PhotoScanner:
                         _scan_error(
                             entry.relative_path,
                             stage="preprocess",
-                            error_code="SCAN-PHOTO-001",
+                            error_code=getattr(exc, "code", "SCAN-PHOTO-001"),
                             exc=exc,
-                            retryable=isinstance(exc, OSError),
+                            retryable=getattr(exc, "retryable", isinstance(exc, OSError)),
                             photo_id=stored.id if stored else None,
                         )
                     )
@@ -499,14 +513,17 @@ class PhotoScanner:
                                         inventory=inventory,
                                     )
                         except Exception as exc:
+                            if isinstance(exc, ImageSourceError):
+                                log_image_error(exc, photo_id=batch_result.photo_id,
+                                                stage="thumbnail", suffix=item.source.suffix)
                             counts["failed"] += 1
                             errors.append(
                                 _scan_error(
                                     item.relative_path,
                                     stage="thumbnail",
-                                    error_code="THUMB-001",
+                                    error_code=getattr(exc, "code", "THUMB-001"),
                                     exc=exc,
-                                    retryable=isinstance(exc, OSError),
+                                    retryable=getattr(exc, "retryable", isinstance(exc, OSError)),
                                     photo_id=batch_result.photo_id,
                                 )
                             )
@@ -544,6 +561,8 @@ class PhotoScanner:
             "warning_code": scan["warning_code"],
             "cancelled": bool(scan["cancelled"]),
         }
+        log_event(LOGGER, logging.DEBUG, "Supported image source census", event="image_source_supported",
+                  operation="photo_scan", details={"checked": counts["checked"], "processed": counts["processed"]})
         log_event(
             LOGGER,
             logging.WARNING
@@ -567,6 +586,8 @@ class PhotoScanner:
                     "moved",
                     "restored",
                     "duplicates",
+                    "unsupported_raw",
+                    "excluded_videos",
                     "reconciliation_status",
                     "candidate_missing",
                     "missing_marked",

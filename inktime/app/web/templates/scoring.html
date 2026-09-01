@@ -52,7 +52,7 @@
   <div class="panel-head"><div><h2>單張照片測試台</h2><p>照片只存於暫存目錄，測試完成即刪除；模型請求仍會產生 Token 與費用。</p></div></div>
   {% if g.user.role == 'administrator' %}
   <form id="scoring-test-form" class="test-upload">
-    <input type="file" name="photo" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" required>
+    <input type="file" name="photo" accept="{{ image_source_accept }}" required>
     <button class="secondary" type="submit" {% if provider_count == 0 %}disabled title="請先設定 Provider"{% endif %}>使用目前規則測試</button>
   </form>
   <div id="scoring-test-status" class="test-status" role="status" aria-live="polite"></div>

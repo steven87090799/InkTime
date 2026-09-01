@@ -19,6 +19,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from PIL import Image, ImageDraw
+from inktime.app.domain.photos.formats import load_rgb
 
 from inktime.app.domain.analysis import REPAIR_TOKEN_CAP
 from inktime.app.domain.photos.preprocessing import PhotoPreprocessor
@@ -439,9 +440,7 @@ def _resize_fixture_images(images: Iterable[Path], directory: Path, max_side: in
     resized: list[Path] = []
     for index, source in enumerate(images):
         target = directory / f"fixture-{index:04d}.jpg"
-        with Image.open(source) as original:
-            image = original.convert("RGB")
-            image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+        with load_rgb(source, max_side) as image:
             image.save(target, format="JPEG", quality=88, optimize=False)
         resized.append(target)
     return resized

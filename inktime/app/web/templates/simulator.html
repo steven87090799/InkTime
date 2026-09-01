@@ -19,7 +19,7 @@
         <span class="drop-icon" aria-hidden="true">＋</span>
         <strong>選擇或拖放原始照片</strong>
         <small>JPG、PNG、WebP、HEIC，最多 25 MiB；測試傳送會重新上傳此檔</small>
-        <input id="photo-input" name="photo" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif">
+        <input id="photo-input" name="photo" type="file" accept="{{ image_source_accept }}">
       </label>
 
       <div class="simulator-fields">

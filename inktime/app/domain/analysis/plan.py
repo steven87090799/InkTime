@@ -7,7 +7,7 @@ import json
 from typing import Any, Mapping, Sequence
 
 
-VISION_INPUT_VERSION = "vision-input-v2"
+VISION_INPUT_VERSION = "vision-input-v3"
 PROVIDER_PROMPT_CONTRACT_VERSION = "provider-prompt-contract-v1"
 AI_IMAGE_JPEG_QUALITY = 88
 SCHEMA_VERSION = 4
@@ -210,7 +210,10 @@ def normalize_analysis_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
         max_side=max_side,
         jpeg_quality=int(vision.get("jpeg_quality", AI_IMAGE_JPEG_QUALITY)),
         exif_transpose=bool(vision.get("exif_transpose", True)),
-        preprocessing_version=str(vision.get("preprocessing_version", VISION_INPUT_VERSION)),
+        # Pixel generation is owned by the running decoder, not a user/model
+        # setting. Upgrade the execution copy so an old frozen plan cannot
+        # label a newly generated v2 derivative as historical Vision pixels.
+        preprocessing_version=VISION_INPUT_VERSION,
     )
     raw["vision_input"] = vision
     raw_controls = dict(raw.get("caption_controls") or {})

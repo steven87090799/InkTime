@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from inktime.app.domain.photos.formats import SUPPORTED_IMAGE_EXTENSIONS
+
 from datetime import datetime, timezone
 from hashlib import sha256
 from io import BytesIO
@@ -37,7 +39,8 @@ from inktime.app.domain.analysis.execution_mode import execution_mode
 
 
 bp = Blueprint("rendering", __name__)
-SIMULATOR_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
+
+SIMULATOR_IMAGE_SUFFIXES = SUPPORTED_IMAGE_EXTENSIONS
 MAX_SIMULATOR_PHOTO_BYTES = 25 * 1024 * 1024
 MAX_FONT_BYTES = 64 * 1024 * 1024
 UPLOAD_CHUNK_BYTES = 1024 * 1024

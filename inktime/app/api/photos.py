@@ -19,6 +19,7 @@ from inktime.app.core.idempotency import (
     request_fingerprint,
     scoped_idempotency_key,
 )
+from inktime.app.api.photo_derivatives import photo_derivative_response
 from inktime.app.core.paths import UnsafePathError, safe_join
 from inktime.app.domain.analysis.schema import ALLOWED_TYPES
 from inktime.app.domain.analysis.plan import fingerprint
@@ -829,7 +830,10 @@ def photo_image(photo_id: str):
     photo = _repository().get_with_path(photo_id)
     if photo is None:
         abort(404)
-    path = safe_join(Path(photo["root_path"]), photo["relative_path"])
+    try:
+        path = safe_join(Path(photo["root_path"]), photo["relative_path"])
+    except UnsafePathError:
+        abort(404)
     if not path.is_file():
         abort(404)
     return send_file(path, conditional=True, max_age=300)
@@ -838,19 +842,13 @@ def photo_image(photo_id: str):
 @bp.get("/api/v1/photos/<photo_id>/thumbnail")
 @login_required
 def photo_thumbnail(photo_id: str):
-    photo = _repository().get_with_path(photo_id)
-    if photo is None or not str(photo["sha256"] or ""):
-        abort(404)
-    try:
-        path = safe_join(Path(photo["root_path"]), photo["relative_path"])
-    except UnsafePathError:
-        abort(404)
-    if not path.is_file():
-        abort(404)
-    thumbnail = current_app.extensions["inktime_thumbnail_cache"].get_or_create(
-        path, str(photo["sha256"]), 512
-    )
-    return send_file(thumbnail, mimetype="image/jpeg", conditional=True, max_age=300)
+    return photo_derivative_response(photo_id, 512)
+
+
+@bp.get("/api/v1/photos/<photo_id>/preview")
+@login_required
+def photo_preview(photo_id: str):
+    return photo_derivative_response(photo_id, 1600)
 
 
 @bp.post("/api/v1/cache/clear")

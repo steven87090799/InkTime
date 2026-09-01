@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+import subprocess
 
 from inktime.app.core.security import redact
 from inktime.app.db import Database, migrate
@@ -34,9 +35,15 @@ def test_diagnostics_caches_git_revision_per_service(tmp_path, monkeypatch):
     monkeypatch.delenv("INKTIME_GIT_REVISION", raising=False)
     monkeypatch.setattr("inktime.app.services.diagnostics.shutil.which", lambda _name: "/usr/bin/git")
 
+    real_run = subprocess.run
+
     def fake_run(*args, **kwargs):
-        calls.append((args, kwargs))
-        return SimpleNamespace(stdout="abc123\n")
+        # macOS platform.platform() may also invoke `file`; mock only the Git
+        # query this regression owns, preserving bytes/text behavior elsewhere.
+        if args and args[0] == ["/usr/bin/git", "rev-parse", "--short", "HEAD"]:
+            calls.append((args, kwargs))
+            return SimpleNamespace(stdout="abc123\n")
+        return real_run(*args, **kwargs)
 
     monkeypatch.setattr("inktime.app.services.diagnostics.subprocess.run", fake_run)
 
