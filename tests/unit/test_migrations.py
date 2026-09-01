@@ -366,7 +366,7 @@ def test_migration_53_converts_existing_ai_output_to_taiwan_traditional(monkeypa
         )
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database) == [53]
+    assert migrate(database) == [53, 54, 55]
     with database.session() as connection:
         analysis = connection.execute(
             "SELECT caption,side_caption,reason,raw_json,semantic_json FROM photo_analysis"

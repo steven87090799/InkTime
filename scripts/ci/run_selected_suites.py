@@ -122,6 +122,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_incremental_scan.py",
         "tests/integration/test_safe_scanner.py",
         "tests/integration/test_photo_quality_ai.py",
+        "tests/integration/test_vision_v4.py",
     ),
     "notifications_observability_owner": (
         "tests/unit/test_observability.py",
@@ -149,6 +150,7 @@ RUNNER_SUITE_TEST_PATHS: dict[str, tuple[str, ...]] = {
         "tests/integration/test_photo_quality_ai.py",
         "tests/integration/test_photo_analysis_retention_api.py",
         "tests/integration/test_review_workbench.py",
+        "tests/integration/test_vision_v4.py",
     ),
     "backup_restore_owner": ("tests/unit/test_backups.py",),
     "unit_owner": ("tests/unit",),

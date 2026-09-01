@@ -28,6 +28,18 @@ def _axes():
     )
 
 
+def _golden_expected():
+    return {
+        "memory_score": 80,
+        "visual_score": 75,
+        "special_level": 1,
+        "types": ["風景"],
+        "should_keep": True,
+        "rotation_cw": 0,
+        "ambiguous": False,
+    }
+
+
 def test_live_benchmark_requires_explicit_confirmation():
     with pytest.raises(BenchmarkError, match="confirm-live-quality"):
         ModelBenchmarkService().run_live(
@@ -58,16 +70,7 @@ def test_benchmark_excludes_never_upload_and_ineligible_records():
 
 
 def test_golden_manifest_uses_canonical_exclusion_flags_before_network(tmp_path):
-    expected = {
-        "memory_grade": "A",
-        "beauty_grade": "A",
-        "technical_grade": "A",
-        "emotion_grade": "A",
-        "types": ["風景"],
-        "should_keep": True,
-        "rotation_cw": 0,
-        "ambiguous": False,
-    }
+    expected = _golden_expected()
     (tmp_path / "inactive.jpg").write_bytes(b"fixture")
     (tmp_path / "eligible.jpg").write_bytes(b"fixture")
     (tmp_path / "private.jpg").write_bytes(b"fixture")
@@ -109,16 +112,7 @@ def test_golden_manifest_uses_canonical_exclusion_flags_before_network(tmp_path)
 
 
 def test_golden_manifest_missing_flag_is_excluded_without_existing_image(tmp_path):
-    expected = {
-        "memory_grade": "A",
-        "beauty_grade": "A",
-        "technical_grade": "A",
-        "emotion_grade": "A",
-        "types": ["風景"],
-        "should_keep": True,
-        "rotation_cw": 0,
-        "ambiguous": False,
-    }
+    expected = _golden_expected()
     path = tmp_path / "manifest.json"
     path.write_text(
         json.dumps(
@@ -152,16 +146,7 @@ def test_golden_manifest_unknown_field_fails_closed_before_network(tmp_path):
                 "id": "item",
                 "image": "item.jpg",
                 "active": True,
-                "expected": {
-                    "memory_grade": "A",
-                    "beauty_grade": "A",
-                    "technical_grade": "A",
-                    "emotion_grade": "A",
-                    "types": ["風景"],
-                    "should_keep": True,
-                    "rotation_cw": 0,
-                    "ambiguous": False,
-                },
+                "expected": _golden_expected() | {"unexpected": True},
             }
         ],
     }
@@ -176,15 +161,15 @@ def test_golden_manifest_unknown_field_fails_closed_before_network(tmp_path):
 def test_benchmark_ranking_uses_production_weighted_ordering():
     lower_weighted = {
         "memory_score": 0,
-        "beauty_score": 100,
-        "technical_quality_score": 100,
-        "emotion_score": 100,
+        "visual_score": 100,
+        "local_quality_score": 50,
+        "special_level": 0,
     }
     memory_weighted = {
         "memory_score": 100,
-        "beauty_score": 0,
-        "technical_quality_score": 0,
-        "emotion_score": 10,
+        "visual_score": 0,
+        "local_quality_score": 0,
+        "special_level": 0,
     }
     assert sum(lower_weighted.values()) > sum(memory_weighted.values())
     assert _production_ranking_score(lower_weighted) < _production_ranking_score(memory_weighted)
@@ -197,12 +182,11 @@ def test_offline_benchmark_reports_no_network_or_production_mutation():
     assert report["production_mutations"] == 0
     assert report["quality_metrics"] is None
     assert report["ranking_metrics"] is None
-    assert report["ranking_policy"]["ranking_rule_version"] == "ranking-v2"
+    assert report["ranking_policy"]["ranking_rule_version"] == "ranking-v4"
     assert report["ranking_policy"]["ranking_weights"] == {
         "memory": 50.0,
-        "beauty": 20.0,
-        "technical_quality": 10.0,
-        "emotion": 20.0,
+        "visual": 25.0,
+        "local_quality": 25.0,
     }
     assert report["ranking_policy"]["favorite_bonus_policy"]["applied"] is False
 
@@ -240,16 +224,7 @@ class _UnknownCostFailureProvider(_LiveMetricProvider):
 
 
 def _live_manifest(tmp_path: Path) -> Path:
-    expected = {
-        "memory_grade": "A",
-        "beauty_grade": "A",
-        "technical_grade": "A",
-        "emotion_grade": "A",
-        "types": ["風景"],
-        "should_keep": True,
-        "rotation_cw": 0,
-        "ambiguous": False,
-    }
+    expected = _golden_expected()
     items = []
     for index in range(2):
         image_name = f"live-{index}.jpg"
@@ -372,17 +347,9 @@ def test_live_unknown_cost_failure_stops_subsequent_provider_requests(tmp_path):
     assert len(report["axes"]) == 1
 
 
-def test_golden_manifest_rejects_duplicate_ids_and_mixed_aliases_before_provider(tmp_path):
-    expected = {
-        "memory_grade": "A",
-        "beauty_grade": "A",
-        "technical_grade": "A",
-        "technical_quality_grade": "A",
-        "emotion_grade": "A",
-        "types": ["風景"],
-        "should_keep": True,
-        "visual_orientation": {"rotation_cw": 0, "ambiguous": False},
-    }
+def test_golden_manifest_rejects_duplicate_ids_and_unknown_fields_before_provider(tmp_path):
+    expected = _golden_expected()
+    expected["unexpected"] = True
     (tmp_path / "one.jpg").write_bytes(b"fixture")
     (tmp_path / "two.jpg").write_bytes(b"fixture")
     path = tmp_path / "manifest.json"
@@ -399,10 +366,10 @@ def test_golden_manifest_rejects_duplicate_ids_and_mixed_aliases_before_provider
         ),
         encoding="utf-8",
     )
-    with pytest.raises(BenchmarkError, match="只包含一個 technical grade alias"):
+    with pytest.raises(BenchmarkError, match="未知欄位"):
         _load_golden_records(path)
 
-    expected.pop("technical_quality_grade")
+    expected.pop("unexpected")
     path.write_text(
         json.dumps(
             {
@@ -459,11 +426,10 @@ def test_golden_manifest_rejects_incomplete_or_mixed_orientation_aliases(tmp_pat
         _load_golden_records(path)
 
 
-def test_golden_manifest_legacy_aliases_are_loaded_as_canonical_fields(tmp_path):
+def test_golden_manifest_flat_orientation_is_loaded_as_canonical_fields(tmp_path):
     path = _live_manifest(tmp_path)
     payload = json.loads(path.read_text(encoding="utf-8"))
     expected = payload["items"][0]["expected"]
-    expected["technical_quality_grade"] = expected.pop("technical_grade")
     expected["visual_orientation"] = {
         "rotation_cw": expected.pop("rotation_cw"),
         "ambiguous": expected.pop("ambiguous"),
@@ -471,6 +437,4 @@ def test_golden_manifest_legacy_aliases_are_loaded_as_canonical_fields(tmp_path)
     path.write_text(json.dumps(payload), encoding="utf-8")
     records = _load_golden_records(path)
     canonical = records[0]["expected"]
-    assert canonical["technical_grade"] == "A"
-    assert "technical_quality_grade" not in canonical
     assert canonical["visual_orientation"] == {"rotation_cw": 0, "ambiguous": False}

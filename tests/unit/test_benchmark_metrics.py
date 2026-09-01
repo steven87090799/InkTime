@@ -4,8 +4,8 @@ import pytest
 
 from inktime.app.services.benchmark_metrics import (
     calculate_benchmark_metrics,
-    grade_agreement,
     orientation_metrics,
+    score_agreement,
     should_keep_metrics,
     spearman_rank,
     top_k_overlap,
@@ -13,11 +13,10 @@ from inktime.app.services.benchmark_metrics import (
 )
 
 
-def test_grade_agreement_reports_exact_within_one_and_mae():
-    result = grade_agreement(["S", "A", "E"], ["S", "B", "D"])
-    assert round(result["exact"], 6) == round(1 / 3, 6)
-    assert round(result["within_one"], 6) == 1
-    assert round(result["mae"], 6) == round(2 / 3, 6)
+def test_score_agreement_reports_numeric_mae():
+    result = score_agreement([100, 80, 0], [100, 70, 10])
+    assert result["count"] == 3
+    assert result["mae"] == pytest.approx(20 / 3)
 
 
 def test_type_f1_and_should_keep_metrics_are_bounded():
@@ -72,19 +71,17 @@ def test_benchmark_metrics_keep_quality_and_ranking_separate():
             {
                 "id": "a",
                 "expected": {
-                    "memory_grade": "A",
-                    "beauty_grade": "A",
-                    "technical_grade": "B",
-                    "emotion_grade": "A",
+                    "memory_score": 90,
+                    "visual_score": 80,
+                    "special_level": 2,
                     "types": ["人物"],
                     "should_keep": True,
                     "visual_orientation": {"rotation_cw": 0, "ambiguous": False},
                 },
                 "predicted": {
-                    "memory_grade": "A",
-                    "beauty_grade": "B",
-                    "technical_grade": "B",
-                    "emotion_grade": "A",
+                    "memory_score": 90,
+                    "visual_score": 75,
+                    "special_level": 2,
                     "types": ["人物"],
                     "should_keep": True,
                     "visual_orientation": {"rotation_cw": 0, "ambiguous": False},
@@ -95,19 +92,17 @@ def test_benchmark_metrics_keep_quality_and_ranking_separate():
             {
                 "id": "b",
                 "expected": {
-                    "memory_grade": "B",
-                    "beauty_grade": "B",
-                    "technical_grade": "B",
-                    "emotion_grade": "B",
+                    "memory_score": 60,
+                    "visual_score": 60,
+                    "special_level": 0,
                     "types": ["風景"],
                     "should_keep": False,
                     "visual_orientation": {"rotation_cw": 0, "ambiguous": False},
                 },
                 "predicted": {
-                    "memory_grade": "B",
-                    "beauty_grade": "B",
-                    "technical_grade": "B",
-                    "emotion_grade": "B",
+                    "memory_score": 60,
+                    "visual_score": 60,
+                    "special_level": 0,
                     "types": ["風景"],
                     "should_keep": False,
                     "visual_orientation": {"rotation_cw": 0, "ambiguous": False},
@@ -119,29 +114,27 @@ def test_benchmark_metrics_keep_quality_and_ranking_separate():
     )
     assert "quality_metrics" in result
     assert "ranking_metrics" in result
-    assert result["quality_metrics"]["grades"]["memory_grade"]["exact_grade_accuracy"] == 1
+    assert result["quality_metrics"]["scores"]["memory_score"]["mae"] == 0
     assert result["ranking_metrics"]["spearman_rank_correlation"] == 1
 
 
-def test_quality_metrics_accept_manual_golden_field_aliases():
+def test_quality_metrics_use_v4_scores_and_orientation():
     result = calculate_benchmark_metrics(
         [
             {
                 "expected": {
-                    "memory_grade": "A",
-                    "beauty_grade": "A",
-                    "technical_quality_grade": "B",
-                    "emotion_grade": "A",
+                    "memory_score": 80,
+                    "visual_score": 70,
+                    "special_level": 1,
                     "types": ["風景"],
                     "should_keep": True,
                     "rotation_cw": 90,
                     "ambiguous": False,
                 },
                 "predicted": {
-                    "memory_grade": "A",
-                    "beauty_grade": "A",
-                    "technical_grade": "B",
-                    "emotion_grade": "A",
+                    "memory_score": 80,
+                    "visual_score": 70,
+                    "special_level": 1,
                     "types": ["風景"],
                     "should_keep": True,
                     "visual_orientation": {"rotation_cw": 90, "ambiguous": False},
@@ -149,7 +142,7 @@ def test_quality_metrics_accept_manual_golden_field_aliases():
             }
         ]
     )
-    assert result["quality_metrics"]["grades"]["technical_grade"]["exact_grade_accuracy"] == 1
+    assert result["quality_metrics"]["scores"]["visual_score"]["mae"] == 0
     assert result["quality_metrics"]["orientation"]["rotation_exact_accuracy"] == 1
 
 

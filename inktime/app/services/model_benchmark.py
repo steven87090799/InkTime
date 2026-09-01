@@ -114,9 +114,9 @@ class BenchmarkAxis:
 
 def _caption_controls(variants_enabled: bool) -> dict[str, Any]:
     return {
-        "caption_min_chars": 120,
-        "caption_target_chars": 160,
-        "caption_max_chars": 200,
+        "caption_min_chars": 10,
+        "caption_target_chars": 60,
+        "caption_max_chars": 100,
         "side_caption_min_chars": 8,
         "side_caption_target_chars": 12,
         "side_caption_max_chars": 16,
