@@ -1,3 +1,4 @@
+# ruff: noqa: S608
 """Keyset-paginated review workbench persistence.
 
 The workbench never exposes source paths or original files.  It returns a
@@ -170,7 +171,7 @@ class ReviewRepository:
 
     @staticmethod
     def _projection() -> str:
-        return f"""  # noqa: S608 -- ordering is generated from a fixed repository helper.
+        return f"""
             WITH latest_analysis AS (
                 SELECT pa.*
                 FROM photo_analysis pa
