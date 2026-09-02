@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from inktime.app.db.migrations import MIGRATIONS
+
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 
@@ -26,4 +28,6 @@ def test_lan_production_gate_loads_without_application_site_packages():
         text=True,
     )
 
-    assert completed.stdout.strip() == "56"
+    # Compare the dependency-free script with the application's migration registry.
+    expected_version = max(migration.version for migration in MIGRATIONS)
+    assert completed.stdout.strip() == str(expected_version)
