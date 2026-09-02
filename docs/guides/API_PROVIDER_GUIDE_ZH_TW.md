@@ -1,6 +1,6 @@
 # InkTime 模型 API 接入與控制台填寫指南
 
-> 適用於目前 InkTime Web 管理介面，資料核對日期：2026-08-04。模型名稱、費率與 Rate Limit 會隨廠商調整；正式啟用前，請以各廠商控制台顯示的最新資料為準。
+> 適用於目前 InkTime Web 管理介面，專案程式核對日期：2026-09-03（`51309e2`）。廠商段落是接入範例，不表示本次已驗證帳號權限、即時模型清單或費率。模型名稱、費率與 Rate Limit 會隨廠商調整；正式啟用前，請以各廠商控制台顯示的最新資料為準。
 
 這份文件說明如何把雲端或本地視覺模型接入 InkTime，以及「模型」與「設定」頁的每個欄位應該怎麼填。InkTime 目前使用 **OpenAI Chat Completions 相容格式**傳送 JPEG 圖片，模型必須能同時完成：
 
@@ -44,7 +44,7 @@
 | 預設模型 ID | OpenRouter 可選 `openrouter/free`，或貼上 Models 頁的完整 ID | 留空沿用系統設定；OpenRouter 的 fallback 也必須有 provider 前綴。 |
 | API Key | 貼上廠商提供的完整 Key | InkTime 加密儲存且頁面只顯示遮罩。編輯既有 Provider 時留空會保留舊 Key。 |
 | 狀態 | 初次設定先選 `啟用` | 若同時設定不同廠商，先只啟用正在測試的一家。 |
-| 優先順序 | 第一家 `100`、備援 `200`、第三家 `300` | 數字越小越先使用。只有各家接受相同模型 ID 時才適合直接備援。 |
+| 優先順序 | 第一家 `100`、備援 `200`、第三家 `300` | 數字越小越先使用。各家可使用自己的預設模型 ID；仍需逐家確認圖片／Schema 與隱私政策。 |
 | 最大並行數 | 先填 `1` | 通過實際測試後再提高到 `2`；Intel N100 與免費 API 層不建議一開始開高。 |
 | 每分鐘 Request 上限 | 不確定就留空；知道方案限制才填 | 這是 InkTime 自己的保守限流，不會自動向廠商讀取。建議略低於廠商上限。 |
 | 每分鐘 Token 上限 | 不確定就留空；知道方案限制才填 | 同上；填太低會讓工作等待，填太高仍可能收到廠商 429。 |
@@ -62,7 +62,7 @@
 
 | 欄位 | 用途 | 建議 |
 |---|---|---|
-| `model.low_model` | 舊版設定讀取相容欄位 | 新工作 canonical 為一次完整 Vision；512／1024／1600 由 `analysis.image_max_side` 控制，不會建立 legacy 第二次圖片請求。 |
+| `model.low_model` | 舊版設定讀取相容欄位 | 新工作 canonical 為一次完整 Vision；Web `analysis.image_max_side` 提供 1024／1600；512 另由底層 plan／benchmark 支援，不會建立 legacy 第二次圖片請求。 |
 | `model.analysis_model` | 新單次完整照片分析 | 填 Provider 能接受圖片與 Schema 的**完整模型 ID**，OpenRouter 必須包含 provider 前綴。 |
 | `model.repair_model` | 只接收文字的 JSON 修復 | 最多一次；不會收到圖片。預設 cap 1200 tokens。 |
 
@@ -80,11 +80,13 @@ Provider 專屬模型會同時覆蓋 analysis 與 repair 的全域模型。模�
 
 這些數值只是首次測試範例，幣別為美元。Provider 頁可輸入標準 Input、Cached Input、Output 與 Batch multiplier 價格；若 Provider 沒有回報真實成本，系統只會在價格完整時標成 `estimated`，否則標成 `unknown` 並停止會增加未確認成本的工作。廠商控制台的金額上限與用量通知仍是最終帳務防線。
 
-### 第 4 步：做真正的單張驗收
+### 第 4 步：開啟執行模式並做單張驗收
+
+在「設定」搜尋 `analysis.execution_mode`／「分析執行模式」：一般背景 AI 工作要求 `automatic_ai`；只做明確單張手動 AI 可用 `local_with_manual_ai`。新安裝 `local_only` 不會因為 Key／Provider 已設定就開始送圖。找不到欄位時清除分類、風險與生效方式篩選。
 
 1. 到「評分」頁上傳一張不敏感、內容清楚的測試照片。
 2. 按「使用目前規則測試」。
-3. 確認回傳繁體中文描述、`side_caption`、照片分類與四項 0–100 分數。
+3. 確認回傳繁體中文描述、`side_caption`、照片分類與回憶／視覺兩項 0–100 分數、特殊程度、內容分類與必要方向欄位。
 4. 到「成本」頁確認 Provider、模型名稱、Token 與請求紀錄有出現。
 5. 再建立 5–10 張照片的小工作；確認沒有 400、401、404、429、Schema 錯誤或無限等待。
 6. 小批次穩定後，才提高並行數或處理完整照片庫。
@@ -112,7 +114,7 @@ Provider 專屬模型會同時覆蓋 analysis 與 repair 的全域模型。模�
 | Batch | 確認 `/files`、`/batches`、結果／錯誤檔下載與刪除權限後勾選；完整生命週期由 Batch 管理頁執行 |
 | 嚴格 JSON Schema | 勾選 |
 
-「設定」頁可先填一組目前帳號確實有權限、支援圖片與 Chat Completions 的模型；Batch 頁的 `batch.model` 預設是 `gpt-5.6-luna`，每張照片只做一次完整 `single_high/full` 分析，不建立 Stage Two。Provider 價格頁可填標準 Input `0.20`、Cached Input `0.02`、Output `1.20` USD／1M，Batch multiplier `0.5`，也可改成管理員實際價格。若模型或端點不支援 Chat Completions 圖片與 JSON Schema，請先不要勾選 Batch。
+「設定」頁可先填一組目前帳號確實有權限、支援圖片與 Chat Completions 的模型；Batch 頁的 `batch.model` 預設是 `gpt-5.6-luna`，每張照片只做一次完整 `single_high/full` 分析，不建立 Stage Two。Provider 價格頁中的預設值只是專案初始化值，不是當期報價；請填入所選模型實際的 Input／Cached Input／Output 與 Batch 價格。若模型或端點不支援 Chat Completions 圖片與 JSON Schema，請先不要勾選 Batch。
 
 ### 2. Google Gemini API：使用 Google AI Studio Key
 
@@ -131,11 +133,11 @@ Provider 專屬模型會同時覆蓋 analysis 與 repair 的全域模型。模�
 | Batch | 不勾 |
 | 嚴格 JSON Schema | 可先勾；若實際照片請求回 400，再取消後測試 |
 
-模型名稱從 Gemini 官方模型清單複製。官方相容文件目前以 `gemini-3.5-flash` 示範圖片輸入，可先把 low/high 都設成帳號中實際可用的同一個 Flash 視覺模型，再依需求把 high 改成品質較高的視覺模型。
+模型名稱從 Gemini 官方模型清單複製。在該 Provider 的「預設模型 ID」填帳號實際可用、支援圖片與相容 Schema 的完整 ID；不再設定低／高兩階段。
 
 ### 3. OpenRouter：最適合一把 Key 使用多家模型
 
-OpenRouter 把多家模型正規化成一個 OpenAI 相容端點，最能避開 InkTime「模型名稱全域共用」的限制。到 [OpenRouter Keys](https://openrouter.ai/settings/keys) 建立 Key，並設定 Credit Limit，再從 [Models](https://openrouter.ai/models) 篩選：
+OpenRouter 把多家模型正規化成一個 OpenAI 相容端點，InkTime 也已支援每個 Provider 分別設定模型，不再要求多家共用同一個模型名稱。到 [OpenRouter Keys](https://openrouter.ai/settings/keys) 建立 Key，並設定 Credit Limit，再從 [Models](https://openrouter.ai/models) 篩選：
 
 - Input modalities 包含 image。
 - 支援 `structured_outputs`／`response_format`。
@@ -194,7 +196,7 @@ OpenRouter 的 options、routing/privacy policy、reasoning、cache、成本來�
 | Batch | 不勾 |
 | 嚴格 JSON Schema | 先勾；若所選模型拒絕 InkTime Schema，再取消 |
 
-官方目前列出的 Vision 型號包含 Mistral Small／Medium／Large 與 Ministral 的特定版本。可先把 low/high 都填成控制台仍可用的 `mistral-small-latest`；若 alias 行為或能力改變，改用 Models 頁所列的固定版本 ID。
+從控制台選擇仍可用的 Vision 模型，填入該 Provider 的「預設模型 ID」；alias 能力可能改變，需要可重現結果時使用已驗證的固定版本。
 
 ### 6. Groq：必須先確認目前仍有可用 Vision 模型
 
@@ -246,7 +248,7 @@ Groq 模型上下架速度較快，而且曾下架多個 Llama Vision 型號。�
 | Batch | 不勾 |
 | 嚴格 JSON Schema | 所選 Chat 模型明確支援時勾；首次可先取消以降低相容風險 |
 
-模型必須從 xAI Models 頁選支援 image input 與 Chat Completions 的型號。官方圖片文件目前示範 `grok-4.5`，但仍應以你的帳號權限與當期型號為準。
+模型必須從 xAI Models 頁選支援 image input 與 Chat Completions 的型號。請以帳號權限與當期模型能力為準，不以文件中的舊示範 ID 推定可用。
 
 ### 9. Alibaba Cloud Model Studio／Qwen：注意地區與 Workspace URL
 
@@ -294,7 +296,7 @@ ollama pull qwen3-vl:8b
 - Ollama 與 InkTime 都在同一個 Compose network：填 Ollama service 名稱，例如 `http://ollama:11434/v1`。
 - Linux：需先替容器設定可解析的 host gateway，或使用同一 Compose network；不要為了方便把 Ollama 無驗證地暴露到公網。
 
-「設定」頁把 low/high 都填成 `ollama list` 顯示的完整 Vision 模型名稱，例如 `qwen3-vl:8b`。只有文字模型即使能通過 `/models` 測試，也無法完成 InkTime 照片分析。
+在 Provider 的「預設模型 ID」填 `ollama list` 顯示的完整 Vision 模型名稱；留白才沿用全域 `model.analysis_model`。只有文字模型即使能通過 `/models` 測試，也無法完成 InkTime 照片分析。
 
 ### 11. LM Studio：本機 GUI 模型伺服器
 
@@ -351,22 +353,15 @@ Fireworks、NVIDIA NIM、自架 vLLM、LiteLLM Proxy 或其他平台若同時滿
 
 ## 多 Provider、優先順序與備援的正確用法
 
-目前只有下列情況適合同時啟用多個 Provider：
+每個 Provider 可指定自己的預設模型。路由依優先順序、啟用狀態、限流與熔斷決定候選；實際模型採該 Provider 的 `model`，留白才沿用凍結分析計畫／全域模型。不同廠商不必共用同一 ID，但每條路由都須具備相同的 Vision／Schema 輸出能力。
 
-- 多個 Provider 都接受完全相同的 low/high 模型 ID。
-- 多個自架端點載入相同模型並使用相同別名。
-- 主要與備援都由相同聚合平台／相容 Gateway 統一模型命名。
+1. 在每個 Provider 填入該端點接受的完整模型 ID；OpenRouter 必須保留前綴。
+2. 逐家做 Level 1，再以明確允許的合成圖片做 Level 2／3，核對 usage 與成本。
+3. 確認每家資料保留／隱私政策都可接受；備援不會自動比較畫質或選出最便宜模型。
+4. 修改設定後建立小量新工作。既有工作有凍結 plan，不把 UI 新值當作舊工作已切換的證據。
+5. 在 AI Trace 核對 requested／served model 與 Provider，成本頁按實際模型帳務檢查。
 
-不建議直接同時啟用 OpenAI、Gemini、Claude 三家，因為模型 ID 不共通。若要切換廠商：
-
-1. 暫停正在執行的模型工作。
-2. 在「模型」頁停用舊 Provider、啟用新 Provider。
-3. 到「設定」修改 low/high 模型 ID。
-4. 執行新 Provider 的連線測試。
-5. 到「評分」做單張實際測試。
-6. 確認成功後再恢復或建立工作。
-
-優先順序數字越小越先使用。發生 Provider 錯誤、429 或熔斷後才會嘗試下一個；它不會自動比較價格、畫質或隱私政策。
+優先順序數字越小越先使用；不是所有錯誤都允許 failover。可能已送達的請求、未知成本與不可安全重送的 side effect 仍依 fail-closed 契約處理。
 
 ## 常見錯誤排查
 
@@ -378,7 +373,7 @@ Fireworks、NVIDIA NIM、自架 vLLM、LiteLLM Proxy 或其他平台若同時滿
 | 回傳 VLM-003／VLM-004 | 模型輸出不是合法 JSON 或不符合 InkTime Schema | 使用支援 Structured Outputs 的模型；降低並行；不要選太小或不擅長指令遵循的本地模型。 |
 | 回傳 429 | 廠商 Rate Limit／餘額限制 | 將最大並行降到 1，設定較低 RPM／TPM，提高冷卻秒數，或升級廠商方案。 |
 | 本地端點無法連線 | Docker 容器內的 localhost 指錯位置，或本地服務只監聽 loopback | Docker 改用 service name／`host.docker.internal`，並檢查防火牆與服務監聽位址。 |
-| 模型不存在 | 把顯示名稱當 ID、模型已下架、區域不提供、Provider 收到別家模型 ID | 從該 Provider 的 Models 頁重新複製 exact ID；一次只啟用一家直連廠商。 |
+| 模型不存在 | 把顯示名稱當 ID、模型已下架、區域不提供、Provider 收到別家模型 ID | 從該 Provider 的 Models 頁重新複製 exact ID；逐家核對 Provider 專屬模型與全域 fallback。 |
 | 成本顯示 `unknown` | Provider 沒有回報成本，且價格欄位不完整或未設定 | 不要把 unknown 當免費；補齊 Provider 價格、改用能回報成本的 Provider，或先停止會增加未確認成本的工作。 |
 | Key 編輯後仍顯示遮罩 | 正常安全行為 | 編輯時 Key 留空會保留舊 Key；只有要更換時才貼新 Key。 |
 
@@ -387,13 +382,13 @@ Fireworks、NVIDIA NIM、自架 vLLM、LiteLLM Proxy 或其他平台若同時滿
 - [ ] API Key 是 InkTime 專用，已設定廠商端金額限制與通知。
 - [ ] 已確認照片資料保留、訓練使用、地區與隱私政策。
 - [ ] Base URL 填根路徑，不含 `/chat/completions`。
-- [ ] 目前只啟用模型 ID 相容的 Provider。
-- [ ] low/high 都是完整、仍有效、支援圖片的模型 ID。
+- [ ] 每個已啟用 Provider 都有該端點支援的模型與相容輸出契約。
+- [ ] Provider 專屬模型與全域 fallback 均已核對；一般 AI 工作已啟用 `automatic_ai`。
 - [ ] 「測試」顯示連線成功。
-- [ ] 「評分」單張照片能回繁體中文描述、分類、四項分數與短文案。
+- [ ] 「評分」單張照片能回繁體中文描述、分類、回憶／視覺兩項分數、內容分類與必要方向欄位與短文案。
 - [ ] 「成本」頁有 Token／Provider／模型紀錄；`provider_reported`、`estimated`、`unknown` 已按實際情況核對。
 - [ ] 已用 5–10 張照片的小工作驗證，而不是直接跑完整相簿。
 - [ ] 免費層、本地模型或 N100 的最大並行先維持 1。
 - [ ] 僅在已完成 Base URL、模型、價格與 100 張 Sample 驗收後啟用 Batch；完整生命週期由「Batch 照片分析」管理頁執行。
 
-完成以上檢查後，再依實際 429、延遲、記憶體與費用逐步提高並行或改用兩階段模型。任何 Provider 只通過 `/models` 測試，都不能算完成接入；**單張圖片 Schema 驗收與小批次工作成功才算真正可用**。
+完成以上檢查後，再依實際 429、延遲、記憶體與費用逐步調整單次圖片解析度、模型或並行。任何 Provider 只通過 `/models` 測試，都不能算完成接入；**單張圖片 Schema 驗收與小批次工作成功才算真正可用**。

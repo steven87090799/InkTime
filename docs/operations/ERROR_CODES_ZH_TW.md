@@ -46,6 +46,9 @@
 | `VLM-003` | 模型回傳無效 JSON | 工作會進行一次修復；仍失敗則進錯誤佇列 |
 | `VLM-004` | 模型輸出不符合 Schema | 檢查模型 JSON Schema 能力與允許類型 |
 | `VLM-005` | Provider 熔斷 | 等候冷卻或確認故障轉移 Provider |
+| `CONFIG_INVALID` | Provider／模型設定不符合契約，例如 OpenRouter 短模型 ID | 在 Provider 填入該端點完整模型 ID，再做分級測試 |
+| `RETENTION-003` | Photo Analysis 清理 inventory 已改變 | 重新 dry-run 並檢查 digest；不沿用舊確認送出刪除 |
+| `AI-TRACE-404` | 找不到指定 Trace | 核對 Trace ID、保留期與分析路徑；不推定模型未執行 |
 | `BUDGET-001` | 工作預算超限 | 工作已暫停，不會再送出新請求 |
 | `BUDGET-002` | 每日或每月預算超限 | 調整預算或等候下一週期 |
 | `JOB-001` | 工作狀態轉換不合法 | 重新整理工作狀態後再操作 |

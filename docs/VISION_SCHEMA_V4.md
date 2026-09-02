@@ -1,6 +1,6 @@
 # Vision Schema v4：內容排除與排序
 
-來源基準：GitHub `steven87090799/InkTime` main `3f169ac`。
+來源基準：GitHub `steven87090799/InkTime` main `51309e2`（2026-09-03 核對）。
 
 模型只輸出 Schema v4：兩個 0–100 分數（memory、visual）、special_level（0–4）、最多兩個 special_codes、types、people_count、caption、side_caption、content_filter、subject_position、text_safe_area、visual_orientation。每個物件禁止額外欄位；不接受 v1/v2/v3 或 Grade 正規化。
 

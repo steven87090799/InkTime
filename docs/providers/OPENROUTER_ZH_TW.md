@@ -69,7 +69,7 @@ OpenRouter request 與一般 OpenAI 相容 Provider 的差異集中在 adapter�
 }
 ```
 
-目前 OpenRouter 的推理欄位使用 `reasoning: {"effort": ...}`；InkTime 的 legacy `max` 會轉成 OpenRouter 公開欄位使用的 `xhigh`，不會把 OpenAI 專用的 `reasoning_effort` 原樣送給 OpenRouter。可參考 [OpenRouter reasoning tokens](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens) 與 [Provider routing](https://openrouter.ai/docs/guides/routing/provider-selection)。
+InkTime 對 Vision 一律明確送出 `reasoning: {"effort": ...}`；選擇 `none` 時也送 `{"effort":"none"}`，避免聚合路由自行開啟推理而耗盡有界輸出預算。InkTime 的 legacy `max` 會轉成 OpenRouter 公開欄位使用的 `xhigh`，不會把 OpenAI 專用的 `reasoning_effort` 原樣送給 OpenRouter。可參考 [OpenRouter reasoning tokens](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens) 與 [Provider routing](https://openrouter.ai/docs/guides/routing/provider-selection)。
 
 ### JSON repair 也必須遵守同一份 policy
 
@@ -104,4 +104,4 @@ OpenRouter 的本地 AI Cache 仍是 InkTime 自己的內容／Provider／模型
 4. 需要完整 Schema、usage 與 cost contract 時，再按「Full Contract Level 3」；最多一次 Vision 加一次 text-only repair，不讀 production photo。結果以 `request_counting_policy=conservative_attempted_calls` 回報 `repair_attempts`／`repair_responses`／`network_request_attempts`／`network_responses`；repair timeout、HTTP 500 或 connection reset 仍算 attempted call，沒有 repair usage 時成本為 `unknown`。
 5. 在成本頁確認是 `provider_reported`、`estimated` 或 `unknown`，不要只看顯示的美元數字；真實 OpenRouter 與付費行為仍需另行核准。
 
-本分支的 hosted CI 只驗證 request contract、Fake／offline 路徑與安全邊界；真實 OpenRouter API、付費請求、家庭照片與正式資料保留驗證維持 `NOT RUN`，需由人工依正式環境核准後另行執行。
+專案的 hosted CI 範圍只驗證 request contract、Fake／offline 路徑與安全邊界；本次文件同步未執行真實 OpenRouter API、付費請求、家庭照片與正式資料保留驗證（`NOT RUN`），需由人工依正式環境核准後另行執行。

@@ -122,8 +122,12 @@ sudo ./scripts/update_nas.sh --accept-path-change v1.2.4
 
 `latest` 是可移動別名，預設拒絕。只有已接受不可重現風險時，才在 `.env.nas` 明確設定後使用：
 
-```bash
+```dotenv
+# 寫入 .env.nas，不是只 export 到父 shell。
 INKTIME_ALLOW_MUTABLE_IMAGE_TAG=1
+```
+
+```bash
 sudo ./scripts/update_nas.sh latest
 ```
 
@@ -138,11 +142,11 @@ sudo ./scripts/update_nas.sh latest
 更新後確認：
 
 ```bash
-docker compose --env-file .env.nas -f docker-compose.nas.yml ps
-curl -fsS http://127.0.0.1:8765/health/ready
+INKTIME_IMAGE_TAG=vX.Y.Z docker compose --env-file .env.nas -f docker-compose.nas.yml ps
+INKTIME_IMAGE_TAG=vX.Y.Z docker compose --env-file .env.nas -f docker-compose.nas.yml images
 ```
 
-三個服務都應為 `healthy`。診斷頁顯示的 Git revision 應等於 GitHub Tag 指向的 Commit；容器映像可另外用 `docker compose images` 查核。
+把 `vX.Y.Z` 換成本次實際 Tag；更新器的命令列 Tag 不會自動留在之後的 shell。三個服務都應為 `healthy`，再從實際部署 Origin 的 `/health/ready` 與登入後「診斷」核對 Git revision。LAN bind 不一定監聽 `127.0.0.1`，不要將 loopback 無回應誤判為服務停止。
 
 ## 6. 固定版本與回復
 

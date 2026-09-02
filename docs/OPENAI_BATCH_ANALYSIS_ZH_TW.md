@@ -1,5 +1,7 @@
 # OpenAI Batch 照片分析操作指南
 
+Batch 是明確啟用的 AI 路徑：先核對 `analysis.execution_mode`、Provider Batch 能力、模型、價格與預算。新安裝本機模式不等於已準備好 Batch；OpenRouter／Ollama 不進入這條 Files／Batches 路徑。先做文末 1–3 張非敏感 smoke，再考慮 100 張 sample。
+
 InkTime 的 Batch 是「一行一個獨立 Chat Completions Request」，不是把 100 張照片塞進同一個 Prompt。每一行都有匿名 `custom_id`，結果檔可能亂序，匯入一定以 `custom_id` 對應 SQLite 的 Batch Item；不以輸出順序或檔名對應照片。
 
 ## 正式生命週期
@@ -37,7 +39,7 @@ JSONL、metadata 與匿名 ID 不含原始檔名、relative path、絕對路徑�
 
 ## 成本、Cache 與恢復
 
-Provider 頁可設定標準 Input、Cached Input、Output、Batch Multiplier 或 Batch 專用價格；預設管理值為標準 0.20／0.02／1.20 USD 每百萬 Token、Batch 倍率 0.5。提交前依估算停止超過 Job Budget 的新分片；實際匯入以每個 Batch Item 的 API Usage 記帳，避免同時記 Batch 聚合與逐張 Usage。
+Provider 頁可設定標準 Input、Cached Input、Output、Batch Multiplier 或 Batch 專用價格；初始化管理值為標準 0.20／0.02／1.20 USD 每百萬 Token、Batch 倍率 0.5；這些不是當期費率或模型可用性保證，提交前必須依實際帳號／模型核對。提交前依估算停止超過 Job Budget 的新分片；實際匯入以每個 Batch Item 的 API Usage 記帳，避免同時記 Batch 聚合與逐張 Usage。
 
 `batch.reasoning_effort` 預設為 `none`，可選 `none`、`low`、`medium`、`high`、`xhigh`、`max`。只有 Provider 類型為官方 `OpenAI` 且明確支援時才送出 Chat Completions 的 `reasoning_effort`；一般 OpenAI-compatible Provider 不會收到未知欄位。這個值會進入 Analysis Fingerprint 與 Vision Request Fingerprint，改變推理強度會形成新的 Cache 身分。
 

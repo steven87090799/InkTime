@@ -1,6 +1,8 @@
 # 合併後實機與外部服務驗收邊界
 
-本文件把 software CI、hosted compile、simulator/mock 與真實外部環境分開。當前報告狀態如下：
+> 以下 PR #62／2.8.0／Migration 36 與 PASS／NOT RUN 表為歷史合併基線，不是目前主線驗收。2026-09-03 原始碼為 Migration 57、韌體 2.8.6、Config Store v5，見[現行基線](reference/CURRENT_STATE_ZH_TW.md)。PhotoPainter 後續局部實板證據見[Rev2.0 交接](devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md)，不以舊表否認已記錄的冷啟動／KEY1 結果。
+
+本文件把 software CI、hosted compile、simulator/mock 與真實外部環境分開。歷史報告狀態如下：
 
 ## 2.8 合併基線
 

@@ -1,5 +1,8 @@
 # 備份與還原
 
+本頁的 Web metadata backup 與 NAS updater recovery point 不同：後者另外保存含 Secrets 的 DB、受保護的 `session.key` 與映像身分。一般 ZIP 不包含這些憑證，不可把兩者混為同一備份範圍。NAS 操作必須指定 `.env.nas`、`docker-compose.nas.yml` 及實際相容 Tag；下列不帶檔名的 Compose 範例僅適用原始碼部署。
+
+
 ## 備份內容
 
 Web「備份與還原」建立的 ZIP 使用 SQLite online backup API 取得一致快照，並包含：

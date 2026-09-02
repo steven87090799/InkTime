@@ -1059,7 +1059,7 @@
 <li class="toc-group">
         <a href="#sec-8" class="toc-h2-link">
             <i class="fa-solid fa-folder-open toc-folder"></i>
-            <span>八、 7 大畫布版型幾何佈局與渲染引擎細節</span>
+            <span>八、 8 大畫布版型幾何佈局與渲染引擎細節</span>
         </a>
 </li>
 <li class="toc-group">
@@ -1085,7 +1085,7 @@
 <li class="toc-group">
         <a href="#sec-10" class="toc-h2-link">
             <i class="fa-solid fa-folder-open toc-folder"></i>
-            <span>十、 SQLite 資料庫 13 張 Table 完全 Schema 規格</span>
+            <span>十、 SQLite 資料庫主要表與 Migration 規格</span>
         </a>
 </li>
 <li class="toc-group">
@@ -1143,7 +1143,7 @@
 <li class="toc-group">
         <a href="#sec-13" class="toc-h2-link">
             <i class="fa-solid fa-folder-open toc-folder"></i>
-            <span>十三、 系統設定參數 100% 完全對照表</span>
+            <span>十三、 系統設定參數對照表</span>
         </a>
 </li>
 <li class="toc-group">
@@ -1240,9 +1240,12 @@
     <main class="main-content">
         <article class="markdown-body" id="content">
             <h1 id="inktime-墨水屏電子相框系統-終極百科全書級操作手冊與開發者指南" class="doc-h1">InkTime 墨水屏電子相框系統 終極百科全書級操作手冊與開發者指南</h1>
+<p class="doc-p"><strong>2026-09-03 文件同步：</strong>功能基準為 main <code>51309e2</code>，Migration 57、嚴格 AI Schema v4、ESP32 2.8.6，新增安裝預設 <code>local_only</code>。章節與索引維持原位置，部署、評分與設定範例依目前程式校正。版本與驗證範圍見<a class="doc-link" href="docs/reference/CURRENT_STATE_ZH_TW.md">現行基線</a>；歷史 CI 與實板量測保留原日期。</p>
+
+
 <hr class="doc-divider">
 <h2 id="toc" class="doc-h2"><span class="h2-anchor-icon">#</span> 摘要目錄</h2>
-<ul class="doc-list"><li><a href="#sec-1" class="doc-link">一、 系統架構與設計哲學</a></li><li><a href="#sec-2" class="doc-link">二、 硬體選型、電路設計與面板選擇</a></li><li><a href="#sec-2-1" class="doc-link">2.1 三大彩色電子紙面板規格與光學特性</a></li><li><a href="#sec-2-2" class="doc-link">2.2 完整 GPIO 引腳映射與 SPI 時脈規範</a></li><li><a href="#sec-2-3" class="doc-link">2.3 電池功耗模型與 ADC 分壓量測電路</a></li><li><a href="#sec-3" class="doc-link">三、 ESP32 / ESP32-S3 韌體開發與刷機指南</a></li><li><a href="#sec-3-1" class="doc-link">3.1 PlatformIO 與 Arduino IDE 環境配置</a></li><li><a href="#sec-3-2" class="doc-link">3.2 韌體原始碼邏輯與驅動初始化序列</a></li><li><a href="#sec-3-3" class="doc-link">3.3 燒錄、Wi-Fi 配網與自動配對流程</a></li><li><a href="#sec-4" class="doc-link">四、 AI 大語言模型連接與組態指南</a></li><li><a href="#sec-4-1" class="doc-link">4.1 OpenAI 官方 Vision API 連接 (GPT-4o / GPT-4o-mini)</a></li><li><a href="#sec-4-2" class="doc-link">4.2 本機 LMStudio 視覺大模型連接 (Qwen2.5-VL / Qwen3-VL)</a></li><li><a href="#sec-4-3" class="doc-link">4.3 Ollama 本機模型相容介面連接 (LLaVA / Qwen-VL)</a></li><li><a href="#sec-4-4" class="doc-link">4.4 Azure OpenAI 與自訂相容 Vision 端點</a></li><li><a href="#sec-5" class="doc-link">五、 Web 控制台全頁面、按鈕與 API 介面深度解析</a></li><li><a href="#sec-5-1" class="doc-link">5.1 儀表板 (Dashboard)</a></li><li><a href="#sec-5-2" class="doc-link">5.2 照片庫與照片詳情 (Photos &amp; Photo Detail)</a></li><li><a href="#sec-5-3" class="doc-link">5.3 預篩選排除清單 (Excluded Photos)</a></li><li><a href="#sec-5-4" class="doc-link">5.4 照片分析與 AI 工作佇列 (Photo Analysis &amp; Jobs)</a></li><li><a href="#sec-5-5" class="doc-link">5.5 AI 提供者與成本控制 (Providers &amp; Budgets)</a></li><li><a href="#sec-5-6" class="doc-link">5.6 評分控制中心 (Scoring Lab)</a></li><li><a href="#sec-5-7" class="doc-link">5.7 渲染設定與 A/B 模擬器 (Rendering &amp; Simulator)</a></li><li><a href="#sec-5-8" class="doc-link">5.8 虛擬電子紙與畫面發布 (Virtual Display &amp; Release Publisher)</a></li><li><a href="#sec-5-9" class="doc-link">5.9 裝置管理與能量分析 (Devices &amp; Energy)</a></li><li><a href="#sec-5-10" class="doc-link">5.10 排程工作管理 (Schedules)</a></li><li><a href="#sec-5-11" class="doc-link">5.11 系統維護與決策韌性 (Maintenance &amp; Resilience)</a></li><li><a href="#sec-5-12" class="doc-link">5.12 熱備份與系統診斷 (Backups &amp; Diagnostics)</a></li><li><a href="#sec-6" class="doc-link">六、 DEBUG 模式、除錯診斷工具與測試清單</a></li><li><a href="#sec-6-1" class="doc-link">6.1 伺服器端 DEBUG 日誌模式切換</a></li><li><a href="#sec-6-2" class="doc-link">6.2 ESP32 Serial 串口監控與除錯訊息</a></li><li><a href="#sec-6-3" class="doc-link">6.3 系統日常維護與健康檢查 5 步清單</a></li><li><a href="#sec-7" class="doc-link">七、 4 大核心 JSON 資料格式與逐行註解範例集</a></li><li><a href="#sec-7-1" class="doc-link">7.1 EXIF 照片元資料 JSON 格式 (<code>photos.exif_json</code>)</a></li><li><a href="#sec-7-2" class="doc-link">7.2 送往 Vision LLM 之 Request Input Payload JSON</a></li><li><a href="#sec-7-3" class="doc-link">7.3 Vision LLM 回傳之 Response JSON (<code>ANALYSIS_JSON_SCHEMA</code>)</a></li><li><a href="#sec-7-4" class="doc-link">7.4 ESP32 設備回報狀態 JSON (<code>report_status</code>)</a></li><li><a href="#sec-8" class="doc-link">八、 7 大畫布版型幾何佈局與渲染引擎細節</a></li><li><a href="#sec-9" class="doc-link">九、 10 種 Dithering 抖動演算法與色彩空間演算法數學原理</a></li><li><a href="#sec-10" class="doc-link">十、 SQLite 資料庫 13 張 Table 完全 Schema 規格</a></li><li><a href="#sec-11" class="doc-link">十一、 RESTful API 端點與 Error Code 錯誤碼完全對照表</a></li><li><a href="#sec-12" class="doc-link">十二、 Docker 部署、環境變數與生產環境配置</a></li><li><a href="#sec-12-1" class="doc-link">12.1 <code>docker-compose.yml</code> 逐行中文註解配置檔</a></li><li><a href="#sec-12-2" class="doc-link">12.2 全系統環境變數逐行詳細解析</a></li><li><a href="#sec-12-3" class="doc-link">12.3 初次設定「必須設定」的 5 大項目清單</a></li><li><a href="#sec-12-4" class="doc-link">12.4 進階「設定後會更好」的 8 大系統優化清單</a></li><li><a href="#sec-13" class="doc-link">十三、 系統設定參數 100% 完全對照表</a></li><li><a href="#sec-14" class="doc-link">十四、 全情境故障排除與問題診斷指南</a></li><li><a href="#sec-14-1" class="doc-link">14.1 網路連線與 ESP32 硬體故障排除</a></li><li><a href="#sec-14-2" class="doc-link">14.2 照片庫、磁碟與 NAS 掛載故障排除</a></li><li><a href="#sec-14-3" class="doc-link">14.3 AI 模型分析與 Token 成本故障排除</a></li><li><a href="#sec-14-4" class="doc-link">14.4 影像渲染與墨水屏顯示畫質故障排除</a></li><li><a href="#sec-14-5" class="doc-link">14.5 資料庫與鎖定競爭故障排除</a></li><li><a href="#sec-15" class="doc-link">十五、 文件地圖與 Markdown 索引</a></li><li><a href="#sec-15-1" class="doc-link">15.1 依工作情境找文件</a></li><li><a href="#sec-15-2" class="doc-link">15.2 完整 Markdown 檔案索引</a></li></ul>
+<ul class="doc-list"><li><a href="#sec-1" class="doc-link">一、 系統架構與設計哲學</a></li><li><a href="#sec-2" class="doc-link">二、 硬體選型、電路設計與面板選擇</a></li><li><a href="#sec-2-1" class="doc-link">2.1 三大彩色電子紙面板規格與光學特性</a></li><li><a href="#sec-2-2" class="doc-link">2.2 完整 GPIO 引腳映射與 SPI 時脈規範</a></li><li><a href="#sec-2-3" class="doc-link">2.3 電池功耗模型與 ADC 分壓量測電路</a></li><li><a href="#sec-3" class="doc-link">三、 ESP32 / ESP32-S3 韌體開發與刷機指南</a></li><li><a href="#sec-3-1" class="doc-link">3.1 PlatformIO 與 Arduino IDE 環境配置</a></li><li><a href="#sec-3-2" class="doc-link">3.2 韌體原始碼邏輯與驅動初始化序列</a></li><li><a href="#sec-3-3" class="doc-link">3.3 燒錄、Wi-Fi 配網與自動配對流程</a></li><li><a href="#sec-4" class="doc-link">四、 AI 大語言模型連接與組態指南</a></li><li><a href="#sec-4-1" class="doc-link">4.1 OpenAI 官方 Vision API 連接 (GPT-4o / GPT-4o-mini)</a></li><li><a href="#sec-4-2" class="doc-link">4.2 本機 LMStudio 視覺大模型連接 (Qwen2.5-VL / Qwen3-VL)</a></li><li><a href="#sec-4-3" class="doc-link">4.3 Ollama 本機模型相容介面連接 (LLaVA / Qwen-VL)</a></li><li><a href="#sec-4-4" class="doc-link">4.4 Azure OpenAI 與自訂相容 Vision 端點</a></li><li><a href="#sec-5" class="doc-link">五、 Web 控制台全頁面、按鈕與 API 介面深度解析</a></li><li><a href="#sec-5-1" class="doc-link">5.1 儀表板 (Dashboard)</a></li><li><a href="#sec-5-2" class="doc-link">5.2 照片庫與照片詳情 (Photos &amp; Photo Detail)</a></li><li><a href="#sec-5-3" class="doc-link">5.3 預篩選排除清單 (Excluded Photos)</a></li><li><a href="#sec-5-4" class="doc-link">5.4 照片分析與 AI 工作佇列 (Photo Analysis &amp; Jobs)</a></li><li><a href="#sec-5-5" class="doc-link">5.5 AI 提供者與成本控制 (Providers &amp; Budgets)</a></li><li><a href="#sec-5-6" class="doc-link">5.6 評分控制中心 (Scoring Lab)</a></li><li><a href="#sec-5-7" class="doc-link">5.7 渲染設定與 A/B 模擬器 (Rendering &amp; Simulator)</a></li><li><a href="#sec-5-8" class="doc-link">5.8 虛擬電子紙與畫面發布 (Virtual Display &amp; Release Publisher)</a></li><li><a href="#sec-5-9" class="doc-link">5.9 裝置管理與能量分析 (Devices &amp; Energy)</a></li><li><a href="#sec-5-10" class="doc-link">5.10 排程工作管理 (Schedules)</a></li><li><a href="#sec-5-11" class="doc-link">5.11 系統維護與決策韌性 (Maintenance &amp; Resilience)</a></li><li><a href="#sec-5-12" class="doc-link">5.12 熱備份與系統診斷 (Backups &amp; Diagnostics)</a></li><li><a href="#sec-6" class="doc-link">六、 DEBUG 模式、除錯診斷工具與測試清單</a></li><li><a href="#sec-6-1" class="doc-link">6.1 伺服器端 DEBUG 日誌模式切換</a></li><li><a href="#sec-6-2" class="doc-link">6.2 ESP32 Serial 串口監控與除錯訊息</a></li><li><a href="#sec-6-3" class="doc-link">6.3 系統日常維護與健康檢查 5 步清單</a></li><li><a href="#sec-7" class="doc-link">七、 4 大核心 JSON 資料格式與逐行註解範例集</a></li><li><a href="#sec-7-1" class="doc-link">7.1 EXIF 照片元資料 JSON 格式 (<code>photos.exif_json</code>)</a></li><li><a href="#sec-7-2" class="doc-link">7.2 送往 Vision LLM 之 Request Input Payload JSON</a></li><li><a href="#sec-7-3" class="doc-link">7.3 Vision LLM 回傳之 Response JSON (<code>ANALYSIS_JSON_SCHEMA</code>)</a></li><li><a href="#sec-7-4" class="doc-link">7.4 ESP32 設備回報狀態 JSON (<code>report_status</code>)</a></li><li><a href="#sec-8" class="doc-link">八、 8 大畫布版型幾何佈局與渲染引擎細節</a></li><li><a href="#sec-9" class="doc-link">九、 10 種 Dithering 抖動演算法與色彩空間演算法數學原理</a></li><li><a href="#sec-10" class="doc-link">十、 SQLite 資料庫主要表與 Migration 規格</a></li><li><a href="#sec-11" class="doc-link">十一、 RESTful API 端點與 Error Code 錯誤碼完全對照表</a></li><li><a href="#sec-12" class="doc-link">十二、 Docker 部署、環境變數與生產環境配置</a></li><li><a href="#sec-12-1" class="doc-link">12.1 <code>docker-compose.yml</code> 逐行中文註解配置檔</a></li><li><a href="#sec-12-2" class="doc-link">12.2 全系統環境變數逐行詳細解析</a></li><li><a href="#sec-12-3" class="doc-link">12.3 初次設定「必須設定」的 5 大項目清單</a></li><li><a href="#sec-12-4" class="doc-link">12.4 進階「設定後會更好」的 8 大系統優化清單</a></li><li><a href="#sec-13" class="doc-link">十三、 系統設定參數對照表</a></li><li><a href="#sec-14" class="doc-link">十四、 全情境故障排除與問題診斷指南</a></li><li><a href="#sec-14-1" class="doc-link">14.1 網路連線與 ESP32 硬體故障排除</a></li><li><a href="#sec-14-2" class="doc-link">14.2 照片庫、磁碟與 NAS 掛載故障排除</a></li><li><a href="#sec-14-3" class="doc-link">14.3 AI 模型分析與 Token 成本故障排除</a></li><li><a href="#sec-14-4" class="doc-link">14.4 影像渲染與墨水屏顯示畫質故障排除</a></li><li><a href="#sec-14-5" class="doc-link">14.5 資料庫與鎖定競爭故障排除</a></li><li><a href="#sec-15" class="doc-link">十五、 文件地圖與 Markdown 索引</a></li><li><a href="#sec-15-1" class="doc-link">15.1 依工作情境找文件</a></li><li><a href="#sec-15-2" class="doc-link">15.2 完整 Markdown 檔案索引</a></li></ul>
 <hr class="doc-divider">
 <h2 id="sec-1" class="doc-h2"><span class="h2-anchor-icon">#</span> 一、 系統架構與設計哲學</h2>
 <p class="doc-p">InkTime 採用 Clean Architecture（潔淨架構）設計，將領域邏輯 (Domain)、資料庫與儲存庫 (Repositories)、業務服務 (Services) 以及 Web API/介面 (API & Web) 嚴格解耦：</p>
@@ -1299,118 +1302,32 @@
 <ul class="doc-list"><li><strong>支援色彩</strong>：Black, White, Green, Blue, Red, Yellow, Orange (<code>#F06E14</code>)</li><li><strong>像素格式</strong>：<code>indexed4</code> ($192,000\text{ Bytes}$)</li><li><strong>物理特性</strong>：增加了橙色（Orange）粒子，風景落日與膚色過渡更為平滑。</li></ul>
 <hr class="doc-divider">
 <h3 id="sec-2-2" class="doc-h3">2.2 完整 GPIO 引腳映射與 SPI 時脈規範</h3>
-<h4 id="a-標準-esp32-existing-default-板型" class="doc-h4">(A) 標準 ESP32 (Existing Default 板型)</h4>
-<div class="mermaid-box"><pre class="mermaid">flowchart LR
-    subgraph MCU ["ESP32 Dev Module"]
-        GPIO11["GPIO 11 (CS)"]
-        GPIO10["GPIO 10 (SCK)"]
-        GPIO9["GPIO 9 (MOSI)"]
-        GPIO12["GPIO 12 (DC)"]
-        GPIO13["GPIO 13 (RST)"]
-        GPIO14["GPIO 14 (BUSY)"]
-    end
-
-    subgraph EPD ["E-Paper Driver Board"]
-        CS["CS Pin"]
-        SCK["SCK Pin"]
-        MOSI["MOSI Pin"]
-        DC["DC Pin"]
-        RST["RST Pin"]
-        BUSY["BUSY Pin"]
-    end
-
-    GPIO11 --&gt; CS
-    GPIO10 --&gt; SCK
-    GPIO9 --&gt; MOSI
-    GPIO12 --&gt; DC
-    GPIO13 --&gt; RST
-    BUSY --&gt; GPIO14</pre></div>
-<ul class="doc-list"><li><strong>SPI 傳輸頻率</strong>：預設 $4.0\text{ MHz}$（受限於面板驅動 IC 之最大訊號邊緣上升時間）。</li><li><strong>BUSY 引腳觸發</strong>：Active Low (平時高電位，刷新時下拉為低電位)。</li></ul>
-<h4 id="b-waveshare-esp32-s3-photopainter-專用板型" class="doc-h4">(B) Waveshare ESP32-S3 PhotoPainter 專用板型</h4>
-<ul class="doc-list"><li><strong>Display SPI</strong>：<code>CS: GPIO 9</code>, <code>SCK: GPIO 10</code>, <code>MOSI: GPIO 11</code>, <code>DC: GPIO 8</code>, <code>RST: GPIO 12</code>, <code>BUSY: GPIO 13</code></li><li><strong>SD Card SPI</strong> (獨立第二匯流排)：<code>CS: GPIO 38</code>, <code>SCK: GPIO 39</code>, <code>MISO: GPIO 40</code>, <code>MOSI: GPIO 41</code> (時脈 $20\text{ MHz}$)</li><li><strong>I2C Bus</strong>：<code>SDA: GPIO 47</code>, <code>SCL: GPIO 48</code> (連接 SHTC3 溫溼度晶片與 PCF8563 RTC)</li><li><strong>Power Button</strong>：<code>GPIO 5</code>；<strong>User Key</strong>：<code>GPIO 4</code>；<strong>Status LED</strong>：<code>GPIO 2</code></li></ul>
+<p class="doc-p">GPIO 依 compile-time Board Profile 固定，不能把 ESP32-S3 的接線套到另一款板。完整對照以 <a class="doc-link" href="esp32/ink-display-7C-photo/hardware_profile.h">hardware_profile.h</a> 與 <a class="doc-link" href="docs/devices/ESP32_GUIDE_ZH_TW.md">ESP32 指南</a> 為準。</p>
+<p class="doc-p">PhotoPainter：EPD DC 8、CS 9、SCK 10、MOSI 11、RST 12、BUSY 13（active-low），SPI 10 MHz；SD CS 38、SCK 39、MISO 40、MOSI 41，20 MHz 失敗後以 4 MHz 重試；I²C SDA 47、SCL 48，100 kHz。KEY1 GPIO4、PWR 紅燈 GPIO45、ACT 綠燈 GPIO42；GPIO0 BOOT、GPIO5 PWR 與 GPIO21 TG28 IRQ 保持原用途。</p>
+<p class="doc-p">Rev2.0 TG28 的電子紙電源為 ALDO4；只允許既有 narrow read-modify-write，不擴大至其他電源軌。操作前閱讀 <a class="doc-link" href="docs/devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md">實板交接</a>。</p>
 <hr class="doc-divider">
 <h3 id="sec-2-3" class="doc-h3">2.3 電池功耗模型與 ADC 分壓量測電路</h3>
-<h4 id="電池量測電路-resistor-divider" class="doc-h4">電池量測電路 (Resistor Divider)</h4>
-<p class="doc-p">ESP32 ADC1 (GPIO 34 / GPIO 1) 透過兩個 $100\text{ k}\Omega$ 精密金屬膜電阻對 3.7V 鋰電池分壓：</p>
-<p class="doc-p">$$V_{\text{ADC}} = V_{\text{BAT}} \times \frac{100\text{k}}{100\text{k} + 100\text{k}} = \frac{V_{\text{BAT}}}{2}$$</p>
-<p class="doc-p">電壓計算公式：</p>
-<div class="code-wrapper">
-                    <div class="code-header">
-                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> CPP</span>
-                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
-                    </div>
-                    <pre><code class="language-cpp">uint32_t raw_adc = analogRead(BATTERY_ADC_PIN);
-float voltage_mv = (float)raw_adc * (3300.0f / 4095.0f) * 2.0f * ADC_CALIBRATION_FACTOR;</code></pre>
-                </div>
-<h4 id="工作功耗統計模型" class="doc-h4">工作功耗統計模型：</h4>
-<ul class="doc-list"><li><strong>Deep Sleep 待機電流</strong>：$\approx 10 \sim 15\,\mu\text{A}$</li><li><strong>Wi-Fi 連線與 HTTP 下載</strong>：$120 \sim 240\,\text{mA}$ (持續 $2 \sim 4$ 秒)</li><li><strong>墨水屏 SPI 刷新寫入</strong>：$40 \sim 80\,\text{mA}$ (持續 $15 \sim 25$ 秒)</li><li><strong>單次刷新總能耗</strong>：$\approx 2.5\,\text{mAh}$。若搭配 $3000\,\text{mAh}$ 鋰電池且每日刷新 1 次，理論續航可達 <strong>8 ~ 12 個月</strong>。</li></ul>
+<p class="doc-p">PhotoPainter 電池與 USB 資訊由 TG28 唯讀遙測取得，不能套用一般 ESP32 ADC 分壓電路或 AXP2101 假設。KEY1 雙擊顯示電源頁，停留 30 秒後驗證 SD 最後成功 frame 並恢復原圖。百分比為 PMIC 估算；睡眠電流與電池壽命尚需實測，燈號熄滅不能證明全機斷電。板級供電與剩餘驗收見 <a class="doc-link" href="docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md">PhotoPainter 指南</a>。</p>
 <hr class="doc-divider">
 <h2 id="sec-3" class="doc-h2"><span class="h2-anchor-icon">#</span> 三、 ESP32 / ESP32-S3 韌體開發與刷機指南</h2>
 <h3 id="sec-3-1" class="doc-h3">3.1 PlatformIO 與 Arduino IDE 環境配置</h3>
-<h4 id="platformio-專案配置範例-platformio-ini" class="doc-h4">PlatformIO 專案配置範例 (<code>platformio.ini</code>)：</h4>
-<div class="code-wrapper">
-                    <div class="code-header">
-                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> INI</span>
-                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
-                    </div>
-                    <pre><code class="language-ini">[env:esp32s3_photopainter]
-platform = espressif32 @ 6.5.0
-board = esp32-s3-devkitc-1
-framework = arduino
-board_build.mcu = esp32s3
-board_build.f_cpu = 240000000L
-board_build.f_flash = 80000000L
-board_build.flash_mode = qio
-board_build.arduino.memory_type = qio_opi
-board_upload.flash_size = 16MB
-board_build.partitions = default_16MB.csv
-
-build_flags =
-    -D DEVICE_PROFILE=2
-    -D INKTIME_PANEL_GDEP073E01=1
-    -D BOARD_HAS_PSRAM
-    -D CONFIG_SPIRAM_MODE_OCT=1
-    -D ARDUINO_USB_CDC_ON_BOOT=1
-
-lib_deps =
-    bblanchon/ArduinoJson @ ^6.21.3
-    zinonthefly/GxEPD2 @ ^1.5.2</code></pre>
-                </div>
+<p class="doc-p">目前韌體入口為 <a class="doc-link" href="esp32/ink-display-7C-photo/README.md">7C README</a>，正式建置使用 repository 的 Arduino CLI 設定與 Hosted CI；不要使用舊手冊自製的 PlatformIO 配方。PhotoPainter 必須選 ESP32-S3、16 MiB Flash、8 MiB OPI PSRAM 與相符的 Board Profile。工具版本、依賴與完整命令見 <a class="doc-link" href="docs/devices/ESP32_GUIDE_ZH_TW.md">ESP32 開發指南</a>。</p>
 <hr class="doc-divider">
 <h3 id="sec-3-2" class="doc-h3">3.2 韌體原始碼邏輯與驅動初始化序列</h3>
-<p class="doc-p"><code>ink-display-7C-photo.ino</code> 執行流程圖：</p>
-<div class="mermaid-box"><pre class="mermaid">flowchart TD
-    Boot["系統開機 (Boot)"] --&gt; InitHW["初始化硬體 (Pins / SPI / ADC)"]
-    InitHW --&gt; ConnWiFi{"連接 Wi-Fi"}
-    ConnWiFi --&gt;|失敗| LaunchAP["開啟 AP 配網熱點 (180 秒)"]
-    ConnWiFi --&gt;|成功| Fetch["發送 HTTP GET /devices/latest_release"]
-    LaunchAP --&gt; ConnWiFi
-    Fetch --&gt; Stream["流式讀取 Payload 寫入 EPD SPI"]
-    Stream --&gt; Refresh["面板驅動發射與粒子排列 (0x12)"]
-    Refresh --&gt; Sleep["進入 Deep Sleep 休眠"]</pre></div>
-<h4 id="e-paper-驅動核心指令-command-sequences" class="doc-h4">E-Paper 驅動核心指令 (Command Sequences)</h4>
-<ul class="doc-list"><li><code>0x01</code> (POWER SETTING)：設定內部 VCOM、VGH、VGL 驅動電壓。</li><li><code>0x06</code> (BOOSTER SOFT START)：設定電荷泵軟啟動參數。</li><li><code>0x04</code> (POWER ON)：啟動高壓發射。</li><li><code>0x12</code> (DISPLAY REFRESH)：觸發物理粒子排列與色彩塗佈（阻塞直到 BUSY 腳位拉高）。</li><li><code>0x02</code> (POWER OFF)：切斷高壓驅動。</li><li><code>0x07</code> (DEEP SLEEP)：使面板進入 $1\,\mu\text{A}$ 休眠狀態。</li></ul>
+<p class="doc-p">現行韌體先驗證 Board Profile、持久設定與啟動原因；Enhanced timer wake 可從已驗證 SD frame 完成離線排程，其他路徑依配對與交付模式存取 Manifest／Queue。下載必須驗證尺寸、雜湊、方向與內容身分，再刷新並回報真正顯示結果；不能把收到 HTTP 200 當成顯示完成。</p>
+<p class="doc-p">PhotoPainter 沿用已驗證的 POWER_ON、booster、DISPLAY_REFRESH、POWER_OFF 順序，BUSY 等待有上限；不套用另一面板的 DEEP_SLEEP 指令，也不關閉 ALDO4。失敗保留最後可用畫面，細節見 <a class="doc-link" href="docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md">顯示與恢復契約</a>。</p>
 <hr class="doc-divider">
 <h3 id="sec-3-3" class="doc-h3">3.3 燒錄、Wi-Fi 配網與自動配對流程</h3>
 <ul class="doc-list"><li><strong>燒錄韌體</strong>：</li></ul>
 <p class="doc-p">使用 <code>esptool.py</code> 燒錄編譯產出的 <code>.bin</code>：</p>
-<div class="code-wrapper">
-                    <div class="code-header">
-                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> BASH</span>
-                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
-                    </div>
-                    <pre><code class="language-bash">   esptool.py --chip esp32s3 --port /dev/ttyACM0 --baud 921600 \
-     write_flash -z \
-     0x0000 bootloader.bin \
-     0x8000 partitions.bin \
-     0x10000 ink-display-7C-photo.bin</code></pre>
-                </div>
+<p class="doc-p">刷機前先完成全 Flash 可恢復備份、雜湊與板型核對，使用 <a class="doc-link" href="docs/devices/ESP32_GUIDE_ZH_TW.md">對應板型的建置／刷機流程</a>；此處不提供可誤套到其他板的固定 offset 命令。</p>
+
 <ul class="doc-list"><li><strong>連線熱點配網</strong>：</li><li>ESP32 首次啟動會廣播 Wi-Fi 熱點：<code>InkTime-XXXXXX</code>；SSID 尾碼來自裝置識別，AP 密碼為每次啟動重新產生的隨機值，請以面板或序列設定畫面顯示為準。</li><li>使用手機連線後，瀏覽器登入 <code>http://192.168.4.1</code>。</li><li>輸入家中的 Wi-Fi SSID 與密碼，以及 InkTime 伺服器網址（例如 <code>http://192.168.1.100:8765</code>）。</li><li>新自製裝置不要輸入 Token；儲存後由韌體向 <code>/api/device/v1/pairing/request</code> 取得短期配對碼，並在面板顯示。</li><li>管理員在 Web「裝置」頁核對配對碼後按「核准配對」；韌體 claim 成功後只接收一次 Device Secret 與 credential version，寫入既有 A/B NVS。</li><li><strong>完成綁定</strong>：裝置之後以 Device Secret／version 呼叫 Manifest、Queue 與 Status，不需要登入 Session；撤銷或重新配對時 fail-closed。既有 Legacy Token 與 PhotoPainter Stock `/dataUP` 維持相容分流。</li></ul>
 <hr class="doc-divider">
 <h2 id="sec-4" class="doc-h2"><span class="h2-anchor-icon">#</span> 四、 AI 大語言模型連接與組態指南</h2>
 <h3 id="sec-4-1" class="doc-h3">4.1 OpenAI 官方 Vision API 連接 (GPT-4o / GPT-4o-mini)</h3>
-<p class="doc-p">進入 Web 控制台 <code>AI 提供者</code> (<code>/providers</code>) 點擊 <code>[新增 Provider]</code>，設定如下：</p>
-<ul class="doc-list"><li><strong>名稱 (Name)</strong>：<code>OpenAI-Official</code></li><li><strong>Base URL</strong>：<code>https://api.openai.com/v1</code></li><li><strong>API Key</strong>：輸入 OpenAI 專用 <code>sk-proj-...</code> 金鑰（儲存時將自動經 Fernet 密碼學加密）</li><li><strong>模型名稱 (Model Name)</strong>：</li><li>低成本第一階段模型：<code>gpt-4o-mini</code></li><li>高品質第二階段模型：<code>gpt-4o</code></li><li><strong>Token 價格設定</strong>：</li><li><code>gpt-4o-mini</code>：Input <code>$0.00015</code> / 1k tokens, Output <code>$0.0006</code> / 1k tokens</li><li><code>gpt-4o</code>：Input <code>$0.0025</code> / 1k tokens, Output <code>$0.01</code> / 1k tokens</li></ul>
+<p class="doc-p">在 <code>/providers</code> 新增 OpenAI 類型，Base URL 為 <code>https://api.openai.com/v1</code>，填入 API Key 與帳號可用的完整 Vision 模型 ID。Provider 專屬模型優先，留白才沿用全域設定；新工作只做一次完整 Vision，不分低成本／高品質兩階段。</p>
+<p class="doc-p">Input／Cached Input／Output 價格以供應商當時資料填寫；本次文件校對不驗證即時模型清單與費率。以 Level 1 檢查連線，再用可能計費的 Level 2／3 合成圖片確認能力。完整操作見 <a class="doc-link" href="docs/guides/API_PROVIDER_GUIDE_ZH_TW.md">模型 API 接入指南</a>。</p>
 <hr class="doc-divider">
 <h3 id="sec-4-2" class="doc-h3">4.2 本機 LMStudio 視覺大模型連接 (Qwen2.5-VL / Qwen3-VL)</h3>
 <p class="doc-p">若不想使用雲端付費 API，可透過 LMStudio 本機執行開源視覺大模型：</p>
@@ -1426,66 +1343,54 @@ lib_deps =
 <hr class="doc-divider">
 <h2 id="sec-5" class="doc-h2"><span class="h2-anchor-icon">#</span> 五、 Web 控制台全頁面、按鈕與 API 介面深度解析</h2>
 <h3 id="sec-5-1" class="doc-h3">5.1 儀表板 (Dashboard)</h3>
-<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/</code> (GET)</li><li><strong>畫面指標</strong>：</li><li><strong>照片總數卡片</strong>：顯示目前庫存照片數、Missing 丟失數與偏遠路徑照片數。</li><li><strong>最新發布畫面預覽</strong>：顯示正發布給 ESP32 的 480x800 圖像縮圖。</li><li><strong>近期背景 Job 狀態</strong>：顯示正在進行中的 Task 數量與進度條。</li><li><strong>頁面控制按鈕</strong>：</li><li><code>[立即觸發照片分析]</code>：發送 POST 至 <code>/api/v1/jobs/analysis</code> 建立緊急分析任務。</li><li><code>[手動發布新畫面]</code>：發送 POST 至 <code>/api/v1/rendering/publish-now</code> 靜態選取最高分/歷史今日照片並渲染最新畫面集。</li></ul>
+<p class="doc-p">儀表板 <code>/</code> 顯示照片、工作、Token、成本與最近錯誤，並提供管理頁入口。照片分析與發布必須經對應操作頁的權限、預算與候選驗證，不能直接呼叫舊手冊中的虛構捷徑端點。功能與操作見 <a class="doc-link" href="docs/guides/USER_GUIDE_ZH_TW.md">使用者指南</a>。</p>
 <hr class="doc-divider">
 <h3 id="sec-5-2" class="doc-h3">5.2 照片庫與照片詳情 (Photos & Photo Detail)</h3>
-<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/photos</code> (GET) 與 <code>/photos/{photo_id}</code> (GET)</li><li><strong>畫面指標與列表</strong>：</li><li>照片縮圖牆（支援無限捲動與分頁）。</li><li>每張照片顯示本機預篩選狀態、最愛狀態、EXIF 日期與 AI 綜合評分。</li><li><strong>頁面控制按鈕</strong>：</li><li><code>[標記/取消最愛 (Heart)]</code>：呼叫 <code>PATCH /api/v1/photos/{id}</code> 修改 <code>is_favorite</code> 屬性。最愛照片會享有 +10 分加分並略過本機預篩選。</li><li><code>[手動變更拍攝日期]</code>：彈出 Modal 輸入 <code>YYYY-MM-DD HH:MM:SS</code>，修正遺失的 EXIF 日期。</li><li><code>[強制重新評分]</code>：呼叫 <code>POST /api/v1/photos/{id}/reanalyze</code> 清除分數並送入佇列。</li></ul>
+<p class="doc-p">照片庫位於 <code>/photos</code>，使用分頁、路徑／描述搜尋與篩選；詳細頁保留 EXIF、分析歷史、成本、方向與人工修正。AI 語意、本機品質與歷史結果各自標示來源，不跨母體比較。</p>
+<p class="doc-p">最愛使 v4 特殊程度提升一級，最多 level 4，並沿用本機品質規則的最愛保護；它不繞過 AI 內容排除。人工改日期、方向與裁切不修改原圖。重新分析建立新工作及歷史紀錄，操作與 API 以 <a class="doc-link" href="docs/guides/USER_GUIDE_ZH_TW.md">使用者指南</a>、<a class="doc-link" href="inktime/app/api/photos.py">photos.py</a> 為準。</p>
 <hr class="doc-divider">
 <h3 id="sec-5-3" class="doc-h3">5.3 預篩選排除清單 (Excluded Photos)</h3>
-<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/photos/excluded</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>分類顯示因「截圖標籤」、「品質瑕疵（模糊/過曝）」與「E6 面板嚴重失真」被本機過濾的照片。</li><li><strong>頁面控制按鈕</strong>：</li><li><code>[還原照片]</code>：呼叫 <code>POST /api/v1/photos/{id}/restore</code>，允許其重新參加分析與發布。</li><li><code>[批次忽略標籤]</code>：永久跳過該照片的預篩選。</li></ul>
+<p class="doc-p">排除清單位於 <code>/photos/excluded</code>，可查本機截圖／品質證據以及 AI 內容分類。E6 不再作自動排除門檻。AI 的 sexualized_content、explicit_nudity、female_glamour_portrait 各自套用開關與信心門檻；普通女性旅遊、自拍與生活照不能只因人物性別被當成寫真。</p>
+<p class="doc-p">人工恢復可覆寫內容排除；一般重掃與重新分析保留人工決定，只有明確重新套用自動規則才重新評估。完整契約見 <a class="doc-link" href="docs/VISION_SCHEMA_V4.md">Vision Schema v4</a>。</p>
 <hr class="doc-divider">
 <h3 id="sec-5-4" class="doc-h3">5.4 照片分析與 AI 工作佇列 (Photo Analysis & Jobs)</h3>
-<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/jobs</code> (GET) 與 <code>/jobs/{job_id}</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>任務佇列狀態（<code>pending</code>, <code>running</code>, <code>pausing</code>, <code>paused</code>, <code>completed</code>, <code>failed</code>, <code>budget_exceeded</code>）。</li><li>實時 Token 消耗量、處理速度（照片/分鐘）與預估剩餘時間。</li><li><strong>頁面控制按鈕</strong>：</li><li><code>[建立新工作]</code>：彈出對話框設定分析模式（<code>smart_two_stage</code> / <code>low_cost</code> / <code>high_quality</code>）、預算上限 ($USD) 與並行數量。</li><li><code>[暫停 (Pause)]</code>：發送 <code>POST /api/v1/jobs/{id}/pause</code>。</li><li><code>[恢復 (Resume)]</code>：發送 <code>POST /api/v1/jobs/{id}/resume</code>。</li><li><code>[重試失敗項目]</code>：發送 <code>POST /api/v1/jobs/{id}/retry-failed</code>。</li></ul>
+<p class="doc-p"><code>/jobs</code> 與工作詳細頁可建立、暫停、續跑、取消和重跑失敗項目。新策略為 <code>local</code>／<code>single</code>；舊名稱只正規化為 single，不恢復第二次 Vision。執行仍受 execution_mode、Provider、預算與照片資格限制。</p>
+<p class="doc-p"><code>pausing</code> 會等待已送出的工作收尾；<code>completed</code> 不等於呼叫過模型。請用 <a class="doc-link" href="docs/guides/ACTIVITY_AI_TRACE_ZH_TW.md">Activity／AI Trace</a>、usage 與時間戳交叉核對。</p>
 <hr class="doc-divider">
-<p class="doc-p"><strong>本版本分析策略更正：</strong>新工作只提供 <code>local</code> 與 <code>single</code>；每張照片最多一次圖片 Vision 請求。<code>low_cost</code>、<code>smart</code>、<code>smart_two_stage</code>、<code>high_quality</code> 與 <code>single_high</code> 只作舊工作／API 的讀取相容別名，會正規化為 <code>single</code>，不會再執行低成本到高品質的第二次圖片上傳。</p>
 <h3 id="sec-5-5" class="doc-h3">5.5 AI 提供者與成本控制 (Providers & Budgets)</h3>
 <ul class="doc-list"><li><strong>URL 路由</strong>：<code>/providers</code> (GET) 與 <code>/costs</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>當月與每日 Token 累積費用折線圖與模型費用比例圓餅圖。</li><li><strong>頁面控制按鈕與設定</strong>：</li><li><code>[新增 Provider]</code>：輸入 Name, Base URL, API Key（Fernet 加密）、Model Name (如 <code>gpt-4o-mini</code>, <code>qwen-vl-max</code>) 與 Prompt 單價。</li><li><code>[Level 1／連線]</code>：只做設定／<code>/models</code> capability check，不送圖片。</li><li><code>[Vision Level 2]</code>：使用 256px deterministic synthetic image，最多一次 Vision、<code>max_tokens≤256</code>、不做 repair；按下前會確認可能費用。</li><li><code>[Full Contract Level 3]</code>：使用 synthetic image 驗證完整 Schema、usage、cost 與 OpenRouter policy，最多一次 Vision 加一次 text-only repair；不讀 production photo。</li><li>Level 2/3 不會因為開啟頁面自動執行。</li><li><strong>成本門檻欄位</strong>：</li><li><code>budget.daily_warning</code> ($USD)：每日警告門檻。</li><li><code>budget.daily_stop</code> ($USD)：每日熔斷停止門檻。</li></ul>
 <hr class="doc-divider">
 <h3 id="sec-5-6" class="doc-h3">5.6 評分控制中心 (Scoring Lab)</h3>
-<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/scoring</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>實時預覽照片綜合排序分數（Final Composite Score）公式：</li></ul>
-<p class="doc-p">$$\text{Score} = w_m \cdot S_m + w_b \cdot S_b + w_t \cdot S_t + w_e \cdot S_e + \text{Bonus}_{\text{fav}} + \text{Bonus}_{\text{travel}}$$</p>
-<ul class="doc-list"><li><strong>控制按鈕與滑桿</strong>：</li><li><strong>四項權重滑桿</strong>：<code>Memory</code> ($w_m$), <code>Beauty</code> ($w_b$), <code>Technical</code> ($w_t$), <code>Emotion</code> ($w_e$)，實時限制總和為 100%。</li><li><strong>最愛加分 (Favorite Bonus)</strong>：設定最愛照片獲得的額外加分 (0 ~ 30 分)。</li><li><strong>旅行加分 (Travel Bonus)</strong>：設定離家距離 60-200km、>200km 及跨國旅行的加分權重。</li></ul>
+<p class="doc-p"><code>/scoring</code> 提供 v4 規則、固定排名公式、版本歷史與單張測試；已移除舊四權重及旅行加分滑桿。</p>
+<div class="code-wrapper"><pre><code class="language-text">base = memory * 0.50 + visual * 0.25 + local_quality * 0.25
+effective_special_level = clamp(ai_special_level + rarity_adjustment + favorite_adjustment, 0, 4)
+special_bonus = [0, 2, 5, 9, 14][effective_special_level]
+raw = clamp(base + special_bonus, 0, 100)
+</code></pre></div>
+<p class="doc-p">語意 percentile 在同照片庫合格 v4 母體計算；E6 只參與最後顯示分數，本機 fallback 與歷史資料不混入語意排名。細節與人工恢復見 <a class="doc-link" href="docs/VISION_SCHEMA_V4.md">Vision v4</a>。</p>
 <hr class="doc-divider">
 <h3 id="sec-5-7" class="doc-h3">5.7 渲染設定與 A/B 模擬器 (Rendering & Simulator)</h3>
-<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/rendering</code> (GET) 與 <code>/simulator</code> (GET)</li><li><strong>畫面指標與模擬器</strong>：</li><li><strong>A/B 畫面對照區</strong>：左側與右側可選擇不同 Preset、版型與 Dither 演算法，實時比對渲染效果。</li><li><strong>頁面控制按鈕與下拉選單</strong>：</li><li><strong>版型選擇 (Layout)</strong>：<code>full</code>, <code>postcard</code>, <code>photo_info</code>, <code>photo_pair</code>, <code>adaptive_memory</code>, <code>calendar</code>, <code>weather_sensor</code>。</li><li><strong>抖動模式 (Dither)</strong>：<code>floyd_steinberg</code>, <code>gooddisplay</code>, <code>photo_smooth</code>, <code>atkinson</code>, <code>bayer4</code>, <code>bayer8</code>, <code>serpentine_floyd_steinberg</code> 等 10 種。</li><li><code>[儲存為預設發布設定]</code>：將當前參數寫入 <code>render.layout</code> 與 <code>render.dither</code>。</li></ul>
+<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/rendering</code> (GET) 與 <code>/simulator</code> (GET)</li><li><strong>畫面指標與模擬器</strong>：</li><li><strong>A/B 畫面對照區</strong>：左側與右側可選擇不同 Preset、版型與 Dither 演算法，實時比對渲染效果。</li><li><strong>頁面控制按鈕與下拉選單</strong>：</li><li><strong>版型選擇 (Layout)</strong>：<code>full</code>, <code>postcard</code>, <code>photo_info</code>, <code>photo_pair</code>, <code>photo_pair_caption</code>, <code>adaptive_memory</code>, <code>calendar</code>, <code>weather_sensor</code>。</li><li><strong>抖動模式 (Dither)</strong>：<code>floyd_steinberg</code>, <code>gooddisplay</code>, <code>photo_smooth</code>, <code>atkinson</code>, <code>bayer4</code>, <code>bayer8</code>, <code>serpentine_floyd_steinberg</code> 等 10 種。</li><li><code>[儲存為預設發布設定]</code>：將當前參數寫入 <code>render.layout</code> 與 <code>render.dither</code>。</li></ul>
 <hr class="doc-divider">
 <h3 id="sec-5-8" class="doc-h3">5.8 虛擬電子紙與畫面發布 (Virtual Display & Release Publisher)</h3>
-<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/virtual-display</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>Canvas 擬真渲染器，呈現電子紙微膠囊物理粒子邊緣與反光質感。</li><li><strong>頁面控制按鈕</strong>：</li><li><code>[模擬實體刷新 (Simulate Refresh)]</code>：觸發網頁端 15 秒物理 Flash 閃爍動畫（黑->白->紅->黃->綠->藍）。</li><li><code>[下載 .bin Payload]</code>：導出 192,000 Bytes 原始二進位檔。</li><li><code>[下載 .h Header]</code>：導出包含 <code>const unsigned char gImage_photo[]</code> 之 C 語言頭文件。</li></ul>
+<p class="doc-p"><code>/virtual-display</code> 顯示虛擬電子紙目前發布狀態與畫面，可用於預覽與本機流程核對。Release payload 依 Profile 為 96,000 或 192,000 bytes，不能把虛擬動畫當成實板顯示成功。模擬、測試 Release 與正式發布的邊界見 <a class="doc-link" href="docs/guides/EPAPER_SIMULATOR_ZH_TW.md">電子紙模擬器指南</a>。</p>
 <hr class="doc-divider">
 <h3 id="sec-5-9" class="doc-h3">5.9 裝置管理與能量分析 (Devices & Energy)</h3>
-<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/devices</code> (GET) 與 <code>/devices/energy</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>列表顯示所有已綁定之 ESP32 設備、MAC 位址、韌體版本、最後心跳時間、電池電量 (mV) 與 Wi-Fi RSSI。</li><li><strong>頁面控制按鈕</strong>：</li><li><code>[新增裝置]</code>：設定 Device Name, Display Profile (<code>safe_4c</code> / <code>gdep073e01_6c</code>), Rotation (<code>0°</code> / <code>180°</code>)；新自製裝置不建立或顯示手動 Token。</li><li><code>[核准配對]</code>：管理員核對短期配對碼後核准裝置 claim；Device Secret 只交付給裝置一次，不顯示在 UI、URL 或 Activity。</li><li><code>[撤銷憑證]</code>／<code>[啟用重新配對]</code>：讓自動配對裝置 fail-closed 或回到新的配對請求；Stock 模式不提供這些控制。</li><li><code>[電量圖表]</code>：檢視過去 30 天電量下降曲線與預估剩餘壽命。</li></ul>
+<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/devices</code> (GET) 與 <code>/energy</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>列表顯示所有已綁定之 ESP32 設備、MAC 位址、韌體版本、最後心跳時間、電池電量 (mV) 與 Wi-Fi RSSI。</li><li><strong>頁面控制按鈕</strong>：</li><li><code>[新增裝置]</code>：設定 Device Name, Display Profile (<code>safe_4c</code> / <code>gdep073e01_6c</code>), Rotation (<code>0°</code> / <code>180°</code>)；新自製裝置不建立或顯示手動 Token。</li><li><code>[核准配對]</code>：管理員核對短期配對碼後核准裝置 claim；Device Secret 只交付給裝置一次，不顯示在 UI、URL 或 Activity。</li><li><code>[撤銷憑證]</code>／<code>[啟用重新配對]</code>：讓自動配對裝置 fail-closed 或回到新的配對請求；Stock 模式不提供這些控制。</li><li><code>[電量圖表]</code>：檢視過去 30 天電量下降曲線與預估剩餘壽命。</li></ul>
 <hr class="doc-divider">
 <h3 id="sec-5-10" class="doc-h3">5.10 排程工作管理 (Schedules)</h3>
-<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/schedules</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>顯示 4 大核心系統排程（照片庫掃描、每日自動照片發布、AI 批次分析、系統資料庫備份）之下一執行時間。</li><li><strong>頁面控制按鈕</strong>：</li><li><code>[編輯 Cron 視窗]</code>：設定每日觸發時間 <code>HH:MM</code> 與允許視窗 <code>window_start</code> / <code>window_end</code>。</li><li><code>[高負載延後開關]</code>：當 <code>delay_high_load=true</code> 時，若主機 Load Average > 85% 自動延後 15 分鐘。</li></ul>
+<p class="doc-p"><code>/schedules</code> 管理照片掃描、分析與發布等排程，按目前表單設定執行時間、工作參數與啟用狀態。Scheduler 只排入有界工作，由 Worker 執行；裝置離線排程另有 Slot、準備截止時間與 ACK。流程見 <a class="doc-link" href="README.md#6-排程設定如何真正進入-worker">排程到 Worker</a> 及 <a class="doc-link" href="docs/resilience/OFFLINE_QUEUE_ZH_TW.md">離線 Queue</a>。</p>
 <hr class="doc-divider">
 <h3 id="sec-5-11" class="doc-h3">5.11 系統維護與決策韌性 (Maintenance & Resilience)</h3>
-<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/maintenance</code> (GET) 與 <code>/resilience</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>顯示離線佇列 (Device Queue Manifest) 與影子選片 (Shadow Selection) 偏差統計。</li><li><strong>頁面控制按鈕</strong>：</li><li><code>[清理過期離線佇列]</code>：清除已超時未存取的發布快取。</li><li><code>[執行影子演算法比對]</code>：對比當前選片邏輯與基準演算法之決策重疊率 (Jaccard Index)。</li></ul>
+<p class="doc-p">「維護」可掃描與處理保留政策；韌性功能包含 Decision Trace、Shadow、回饋、Canary 與 Queue，依管理員明確設定啟用。破壞性清理需對照 dry-run 結果與確認，影子計算不直接改正式 Release。詳見 <a class="doc-link" href="docs/resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md">韌性指南</a> 與 <a class="doc-link" href="docs/operations/PHOTO_ANALYSIS_RETENTION_ZH_TW.md">分析歷史保留</a>。</p>
 <hr class="doc-divider">
 <h3 id="sec-5-12" class="doc-h3">5.12 熱備份與系統診斷 (Backups & Diagnostics)</h3>
-<ul class="doc-list"><li><strong>URL 路由</strong>：<code>/backups</code> (GET) 與 <code>/diagnostics</code> (GET)</li><li><strong>畫面指標</strong>：</li><li>顯示即時 CPU, Memory, Disk Space, SQLite WAL 檔案大小與長交易統計。</li><li><strong>頁面控制按鈕</strong>：</li><li><code>[建立熱備份]</code>：呼叫 <code>BackupService.create()</code> 在線上發送 <code>VACUUM INTO</code> 備份。</li><li><code>[一鍵離線還原]</code>：取得 Exclusive Runtime Lock 並還原 SQLite 資料庫。</li><li><code>[執行完整性檢查 (Integrity Check)]</code>：發送 <code>PRAGMA integrity_check</code> 至 SQLite。</li></ul>
+<p class="doc-p"><code>/backups</code> 建立與管理備份，<code>/diagnostics</code> 顯示資料庫、WAL、Worker、程序與容器資源。一般 Web 備份和 NAS updater recovery point 的內容不同；含 Secrets 的資料庫必須搭配原 Session Key 才能復原。還原前停止寫入並依 <a class="doc-link" href="docs/operations/BACKUP_RESTORE_ZH_TW.md">備份還原指南</a> 核對，不把 UI 操作描述為無條件一鍵還原。</p>
 <hr class="doc-divider">
 <h2 id="sec-6" class="doc-h2"><span class="h2-anchor-icon">#</span> 六、 DEBUG 模式、除錯診斷工具與測試清單</h2>
 <h3 id="sec-6-1" class="doc-h3">6.1 伺服器端 DEBUG 日誌模式切換</h3>
-<p class="doc-p">若要追蹤詳細的分析請求與交易流程，可將系統日誌層級切換為 <code>DEBUG</code>：</p>
-<ul class="doc-list"><li><strong>環境變數切換</strong>：</li></ul>
-<p class="doc-p">在 <code>.env</code> 或 Docker 中設定：<code>INKTIME_LOG_LEVEL=DEBUG</code></p>
-<ul class="doc-list"><li><strong>網頁控制台動態切換</strong>：</li></ul>
-<p class="doc-p">進入 <code>/settings</code> 頁面，找到 <code>log.level</code> 組態，切換為 <code>DEBUG</code> 並點擊儲存（動態生效，無需重啟）。</p>
-<ul class="doc-list"><li><strong>Log 輸出追蹤</strong>：</li></ul>
-<p class="doc-p">所有日誌均為 JSON Structured Log 格式，範例：</p>
-<div class="code-wrapper">
-                    <div class="code-header">
-                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> JSON</span>
-                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
-                    </div>
-                    <pre><code class="language-json">   {
-     "timestamp": "2026-07-24T15:30:00Z",
-     "logger": "platform",
-     "level": "DEBUG",
-     "event": "vlm_request_sent",
-     "details": {"photo": "/photos/vacation.jpg", "provider": "OpenAI-Official", "tokens": 420}
-   }</code></pre>
-                </div>
+<p class="doc-p">在 <code>.env</code> 設定 <code>INKTIME_LOG_LEVEL=DEBUG</code>，並核對 Web 設定 <code>system.log_level=DEBUG</code>。已有資料庫保存值時，它會覆蓋程序啟動預設；Web 立即套用，Worker／Scheduler 在輪詢時更新。<code>INKTIME_ENVIRONMENT=development</code> 與開發 Compose 另控制本機 HTTP 模式。</p>
+<p class="doc-p">Log 格式由 <code>system.log_format</code>／<code>INKTIME_LOG_FORMAT</code> 控制，容器預設 JSON；access log 預設關閉。Activity 暫時 Debug 事件與 AI Trace 是其他功能，見 <a class="doc-link" href="docs/operations/LOGGING_GUIDE_ZH_TW.md">Log 指南</a>。</p>
 <hr class="doc-divider">
 <h3 id="sec-6-2" class="doc-h3">6.2 ESP32 Serial 串口監控與除錯訊息</h3>
 <p class="doc-p">將 ESP32 透過 USB 連接至電腦，開啟 Serial Monitor (Baud Rate: <code>115200</code> 或 <code>921600</code>)：</p>
@@ -1557,102 +1462,66 @@ lib_deps =
                 </div>
 <hr class="doc-divider">
 <h3 id="sec-7-2" class="doc-h3">7.2 送往 Vision LLM 之 Request Input Payload JSON</h3>
-<p class="doc-p">背景 Worker 透過 HTTP 發送給 OpenAI / LMStudio 大模型時的完整 Request Payload JSON（包含逐行詳細註解）：</p>
-<div class="code-wrapper">
-                    <div class="code-header">
-                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> JSON5</span>
-                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
-                    </div>
-                    <pre><code class="language-json5">{
-  "model": "gpt-4o-mini",              // 指定使用的 Vision LLM 大模型名稱 (例如 gpt-4o-mini 或 qwen2.5-vl-7b-instruct)
-  "temperature": 0.2,                  // 生成隨機性溫度 (0.2 代表高度確定性，減少模型妄想)
-  "max_tokens": 1000,                  // 模型最大回傳 Token 數量上限
-  "response_format": {                 // 強制模型輸出格式區塊
-    "type": "json_object"              // 要求模型嚴格回傳可解析的 JSON 物件 (Structured Output)
-  },
-  "messages": [                        // 對話訊息陣列 (包含 System 提示詞與 User 圖片資料)
-    {
-      "role": "system",                // 系統角色設定 (賦予 AI 評審員人格)
-      "content": "You are a professional photo memory &amp; aesthetics reviewer. Response MUST follow the strict JSON schema." // System Prompt 提示詞指引說明
-    },
-    {
-      "role": "user",                  // 使用者角色請求
-      "content": [                     // 混合內容陣列 (包含文字說明與 Base64 縮圖)
-        {
-          "type": "text",              // 內容類型: 純文字
-          "text": "Analyze this photo for an e-paper photo frame display." // 要求模型分析這張相片的指令
-        },
-        {
-          "type": "image_url",         // 內容類型: 圖片 Data URI
-          "image_url": {               // 圖片網址/資料物件
-            "url": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBD..." // 經過本機縮放至 512px 並編碼的 JPEG Base64 字串
-          }
-        }
-      ]
-    }
-  ]
-}</code></pre>
-                </div>
+<p class="doc-p">Provider adapter 依供應商能力建立請求，以下是欄位概念，實際 prompt／strict Schema 由 <a class="doc-link" href="inktime/app/domain/analysis/plan.py">Analysis Plan</a> 與 <a class="doc-link" href="inktime/app/providers/openai_compatible.py">Provider adapter</a> 產生。每 plan 最多一次圖片 Vision，失敗時最多一次純文字修復；Web 縮圖預設 1024，支援 1600，底層另支援 512。</p>
+<div class="code-wrapper"><pre><code class="language-text">model: Provider 專屬完整模型 ID，留白才使用全域模型
+image: 經方向處理且有界的 JPEG 縮圖
+response_format: 依 Provider 能力選用的結構化 JSON 契約
+max completion tokens: 1200 上限
+output schema: 嚴格 v4，繁體中文描述與短文案
+</code></pre></div>
 <hr class="doc-divider">
 <h3 id="sec-7-3" class="doc-h3">7.3 Vision LLM 回傳之 Response JSON (<code>ANALYSIS_JSON_SCHEMA</code>)</h3>
-<p class="doc-p">AI 模型回應並通過本機 Schema 校驗（<code>validate_analysis_result</code>）後的標準分析 JSON 實例（包含逐行詳細註解）：</p>
-<div class="code-wrapper">
-                    <div class="code-header">
-                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> JSON5</span>
-                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
-                    </div>
-                    <pre><code class="language-json5">{
-  "schema_version": 1,                 // Schema 版本號 (固定為 1)
-  "caption": "家族暑假於花蓮海岸線旅行，陽光照射在波光粼粼的大海與笑容滿面的孩童臉龐上。", // AI 對照片內容的詳細自然語言描述 (1000字內)
-  "types": ["家庭", "旅行", "人物", "風景"], // 照片分類標籤陣列 (必選 1 個以上允許的標籤)
-  "memory_score": 88.5,               // 回憶價值分數 (0-100分，越高代表回憶價值越高)
-  "beauty_score": 92.0,               // 美學與構圖分數 (0-100分，評估光影與色彩)
-  "technical_quality_score": 85.0,     // 技術品質分數 (0-100分，評估對焦、清晰度與雜訊)
-  "emotion_score": 95.0,               // 情感共鳴分數 (0-100分，評估人物表情與氛圍感)
-  "side_caption": "夏日花蓮海角 ‧ 2024",  // 印在墨水屏相框畫面的手寫風短文案 (120字內)
-  "should_keep": true,                 // 是否值得保留在相框展示 (true=保留, false=不展示)
-  "sensitive": false,                  // 是否包含敏感或私密內容 (true=敏感不公開)
-  "reason": "表情自然生動，色彩層次豐富，構圖平衡且具有高度的家庭回憶價值。", // AI 給予此評分的具體原因說明 (240字內)
-  "details": {                         // 第二階段詳細分析延伸屬性區塊 (完整 Schema 包含)
-    "memory_grade": "S",               // 回憶等級 (S/A/B/C/D/E)
-    "aesthetic_grade": "S",            // 美學等級 (S/A/B/C/D/E)
-    "technical_grade": "A",            // 技術等級 (S/A/B/C/D/E)
-    "emotion_grade": "S",              // 情感等級 (S/A/B/C/D/E)
-    "display_suitability_grade": "S",   // 電子紙顯示適合度等級 (S/A/B/C/D/E)
-    "scene": "Ocean Beach",            // 照片場景名稱 (如海灘、公園、客廳)
-    "setting": "outdoor",              // 室內外環境 (outdoor=戶外, indoor=室內)
-    "time_of_day": "day",              // 拍攝時間段 (day=白天, night=夜晚)
-    "weather": "sunny",                // 天氣狀況 (sunny=晴天, rainy=雨天)
-    "people_count": 3,                 // 照片中出現的人數統計
-    "primary_subject": "Family members laughing at the beach", // 主要主角事物描述
-    "crop_safe": "safe",               // 裁切安全度 (safe=安全不切頭, risk=裁切有風險)
-    "face_crop_risk": "low",           // 人臉裁切風險 (low=低風險, high=高風險)
-    "epaper_suitability": "high_contrast_vivid", // 電子紙適合度特徵描述
-    "recommended_preset": "portrait_clear"       // 系統推薦採用的渲染 Preset 設定
+<p class="doc-p">以下為嚴格 v4 回應範例，欄位與額外屬性限制以 <a class="doc-link" href="inktime/app/domain/analysis/schema.py">ANALYSIS_JSON_SCHEMA</a> 為準。模型回傳分類證據，Server 決定排除與本機排名，不接收模型自行決定的 should_keep。</p>
+<div class="code-wrapper"><pre><code class="language-json">{
+  &quot;schema_version&quot;: 4,
+  &quot;types&quot;: [
+    &quot;家庭&quot;,
+    &quot;旅行&quot;,
+    &quot;人物&quot;
+  ],
+  &quot;memory_score&quot;: 88.5,
+  &quot;visual_score&quot;: 92,
+  &quot;special_level&quot;: 2,
+  &quot;special_codes&quot;: [
+    &quot;family_moment&quot;,
+    &quot;travel_memory&quot;
+  ],
+  &quot;people_count&quot;: 3,
+  &quot;caption&quot;: &quot;一家人在海岸邊合照，陽光照亮海面，也照著孩子開心的笑容。&quot;,
+  &quot;side_caption&quot;: &quot;海風吹來一家人的笑聲&quot;,
+  &quot;content_filter&quot;: {
+    &quot;sexualized_content&quot;: {
+      &quot;detected&quot;: false,
+      &quot;confidence&quot;: 0.98
+    },
+    &quot;explicit_nudity&quot;: {
+      &quot;detected&quot;: false,
+      &quot;confidence&quot;: 0.98
+    },
+    &quot;female_glamour_portrait&quot;: {
+      &quot;detected&quot;: false,
+      &quot;confidence&quot;: 0.98
+    }
+  },
+  &quot;subject_position&quot;: &quot;center&quot;,
+  &quot;text_safe_area&quot;: &quot;bottom&quot;,
+  &quot;visual_orientation&quot;: {
+    &quot;rotation_cw&quot;: 0,
+    &quot;confidence&quot;: 0.95,
+    &quot;ambiguous&quot;: false,
+    &quot;evidence&quot;: [
+      &quot;faces_upright&quot;,
+      &quot;horizon_level&quot;
+    ]
   }
-}</code></pre>
-                </div>
+}</code></pre></div>
 <hr class="doc-divider">
 <h3 id="sec-7-4" class="doc-h3">7.4 ESP32 設備回報狀態 JSON (<code>report_status</code>)</h3>
-<p class="doc-p">ESP32 每次刷屏或定時喚醒時，發送至伺服器 <code>POST /devices/report_status</code> 的 JSON 實例（包含逐行詳細註解）：</p>
-<div class="code-wrapper">
-                    <div class="code-header">
-                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> JSON5</span>
-                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
-                    </div>
-                    <pre><code class="language-json5">{
-  "device_id": "dev_esp32s3_photopainter_01", // 發送回報的 ESP32 裝置唯一識別碼 ID
-  "battery_mv": 4120,                        // 電池目前電量 (單位: mV 毫伏特，4120mV = 4.12V 滿電)
-  "wifi_rssi": -62,                          // Wi-Fi 訊號接收強度 (單位: dBm，越高越好，-62 為良好)
-  "firmware_version": "v2.4.1",              // ESP32 硬體目前運行的韌體版本號
-  "status_msg": "Display updated successfully", // 硬體刷屏狀態訊息 (如 Update OK 或 WiFi Error)
-  "uptime_seconds": 12,                      // ESP32 本次開機後已運行的時間 (單位: 秒)
-  "free_heap_bytes": 184320                  // ESP32 內部目前剩餘的可用動態記憶體 (單位: Bytes)
-}</code></pre>
-                </div>
+<p class="doc-p">裝置依交付模式回報狀態與 Queue／offline schedule ACK。自動配對使用 Device Secret 及 credential version，不能把 Web Session 或 URL 金鑰混用。實際 payload 依 <a class="doc-link" href="inktime/app/api/devices.py">裝置端點</a> 和 <a class="doc-link" href="docs/devices/DEVICE_PROTOCOL_ZH_TW.md">裝置 Queue 協定</a>；只有 DISPLAY_COMPLETED 代表真正顯示完成。</p>
+<p class="doc-p">Online Queue ACK 必須包含 <code>queue_item_id</code>、<code>event</code> 與穩定 <code>idempotency_key</code>；Enhanced 使用自己的 offline schedule 契約，不套用 generic Queue。</p>
 <hr class="doc-divider">
-<h2 id="sec-8" class="doc-h2"><span class="h2-anchor-icon">#</span> 八、 7 大畫布版型幾何佈局與渲染引擎細節</h2>
-<p class="doc-p">所有版型解析度統一為 $480 \times 800$ 像素（直向）或 $800 \times 480$ 像素（橫向）：</p>
+<h2 id="sec-8" class="doc-h2"><span class="h2-anchor-icon">#</span> 八、 8 大畫布版型幾何佈局與渲染引擎細節</h2>
+<p class="doc-p">以下尺寸圖為概念示意，實際幾何依 Renderer、字型與文字內容決定；calendar 與 weather_sensor 僅支援直向。畫布解析度為 $480 \times 800$ 像素（直向）或 $800 \times 480$ 像素（橫向）：</p>
 <div class="code-wrapper">
                     <div class="code-header">
                         <span class="code-lang-tag"><i class="fa-solid fa-code"></i> TEXT</span>
@@ -1720,162 +1589,115 @@ lib_deps =
 <p class="doc-p">$$d_{\text{OKLab}} = \sqrt{\Delta L^2 + \Delta a^2 + \Delta b^2}$$</p>
 <ul class="doc-list"><li><strong>優勢</strong>：在墨水屏有限的 4 色 / 6 色面板上，相片人像膚色過渡更加自然，不會出現突兀的色彩塊斑。</li></ul>
 <hr class="doc-divider">
-<h2 id="sec-10" class="doc-h2"><span class="h2-anchor-icon">#</span> 十、 SQLite 資料庫 13 張 Table 完全 Schema 規格</h2>
-<div class="code-wrapper">
-                    <div class="code-header">
-                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> SQL</span>
-                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
-                    </div>
-                    <pre><code class="language-sql">-- 1. 使用者表
-CREATE TABLE users (
-    id TEXT PRIMARY KEY,
-    username TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'user',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- 2. Modern 照片索引表（評分版本另存於 photo_analysis）
-CREATE TABLE photos (
-    id TEXT PRIMARY KEY,
-    library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE RESTRICT,
-    relative_path TEXT NOT NULL,
-    sha256 TEXT,
-    width INTEGER,
-    height INTEGER,
-    status TEXT NOT NULL DEFAULT 'discovered',
-    favorite INTEGER NOT NULL DEFAULT 0,
-    exif_json TEXT,
-    captured_at TEXT,
-    gps_lat REAL,
-    gps_lon REAL,
-    UNIQUE(library_id, relative_path)
-);
-
--- 3. 發布紀錄表
-CREATE TABLE render_releases (
-    id TEXT PRIMARY KEY,
-    release_dir TEXT NOT NULL,
-    photo_paths_json TEXT NOT NULL,
-    profile_key TEXT NOT NULL,
-    layout_name TEXT NOT NULL,
-    dither_algorithm TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- 4. 裝置管理表
-CREATE TABLE devices (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    secret_hash TEXT NOT NULL,
-    display_profile TEXT NOT NULL,
-    rotation INTEGER DEFAULT 0,
-    timezone TEXT DEFAULT 'Asia/Taipei',
-    refresh_schedule TEXT DEFAULT '08:00',
-    last_seen_at TIMESTAMP,
-    battery_mv INTEGER,
-    wifi_rssi INTEGER,
-    firmware_version TEXT
-);
-
--- 5. 裝置狀態日誌表
-CREATE TABLE device_status_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    device_id TEXT NOT NULL,
-    battery_mv INTEGER,
-    wifi_rssi INTEGER,
-    status_msg TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE
-);
-
--- 6. 分析工作表
-CREATE TABLE jobs (
-    id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL,
-    status TEXT NOT NULL,
-    strategy TEXT,
-    budget_limit REAL,
-    spent REAL DEFAULT 0.0,
-    priority INTEGER DEFAULT 3,
-    created_by TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- 7. 工作子項目表
-CREATE TABLE job_items (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_id TEXT NOT NULL,
-    photo_path TEXT NOT NULL,
-    status TEXT NOT NULL,
-    attempts INTEGER DEFAULT 0,
-    error_code TEXT,
-    error_msg TEXT,
-    actual_cost REAL DEFAULT 0.0,
-    FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
-);
-
--- 8. 排程工作表
-CREATE TABLE scheduled_tasks (
-    key TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    cron_expression TEXT,
-    next_run TIMESTAMP,
-    config_json TEXT NOT NULL,
-    enabled INTEGER DEFAULT 1
-);
-
--- 9. AI 提供者表
-CREATE TABLE ai_providers (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    base_url TEXT NOT NULL,
-    api_key_encrypted TEXT NOT NULL,
-    model_name TEXT NOT NULL,
-    cost_per_input_token REAL DEFAULT 0.0,
-    cost_per_output_token REAL DEFAULT 0.0,
-    enabled INTEGER DEFAULT 1
-);
-
--- 10. API 使用量計費表
-CREATE TABLE usage_records (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    provider_id TEXT NOT NULL,
-    photo_path TEXT,
-    prompt_tokens INTEGER,
-    completion_tokens INTEGER,
-    cost_usd REAL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- 11. 決策韌性與事件表
-CREATE TABLE resilience_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_type TEXT NOT NULL,
-    details_json TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- 12. 系統設定與稽核表
-CREATE TABLE settings_audit_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    key TEXT NOT NULL,
-    old_value TEXT,
-    new_value TEXT,
-    changed_by TEXT,
-    source_ip TEXT,
-    changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- 13. 資料庫 Migration 追蹤表
-CREATE TABLE schema_migrations (
-    version INTEGER PRIMARY KEY,
-    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);</code></pre>
-                </div>
+<h2 id="sec-10" class="doc-h2"><span class="h2-anchor-icon">#</span> 十、 SQLite 資料庫主要表與 Migration 規格</h2>
+<p class="doc-p">目前 Migration 連續 1–57；資料表會隨 immutable migrations 擴充，不能以本章概覽手工建立完整資料庫。Schema、索引與約束由 <a class="doc-link" href="inktime/app/db/migrations.py">migrations.py</a> 唯一管理，升級順序與備份見 <a class="doc-link" href="docs/operations/MIGRATION_GUIDE_ZH_TW.md">遷移指南</a>。</p>
+<div class="code-wrapper"><pre><code class="language-text">users：帳號、密碼雜湊、角色、正規化名稱與 session_version
+settings／settings_snapshots：設定值、版本、稽核與可還原快照
+providers／secrets／model_pricing：模型供應商、加密憑證與價格
+libraries／photos／photo_analysis：照片來源、分析歷史與 score_kind
+jobs／job_items：工作狀態、租約與重試
+api_usage：Token、成本來源與帳務
+render_releases：不可變發布及內容資訊
+devices／device_content_queues：裝置、內容交付與顯示 ACK
+analysis_batches／analysis_batch_items：OpenAI Batch 生命週期
+library_ranking_state：照片庫排名待重算狀態
+</code></pre></div>
+<p class="doc-p">v1–v3 分析保留原始 JSON，Migration 57 將其語意排序身分改為 legacy；v4 欄位、舊權重保留與精準 E6 恢復見 <a class="doc-link" href="docs/VISION_SCHEMA_V4.md">Vision v4 儲存契約</a>。</p>
 <hr class="doc-divider">
 <h2 id="sec-11" class="doc-h2"><span class="h2-anchor-icon">#</span> 十一、 RESTful API 端點與 Error Code 錯誤碼完全對照表</h2>
+<p class="doc-p">下表依目前主要 API 模組列出路由；欄位、權限、CSRF、確認與錯誤回應以連結中的原始碼為準，錯誤碼另見 <a class="doc-link" href="docs/operations/ERROR_CODES_ZH_TW.md">錯誤碼指南</a>。</p>
+<div class="table-wrapper"><table class="doc-table"><thead><tr><th>方法</th><th>路徑</th><th>契約來源</th></tr></thead><tbody>
+<tr><td>POST</td><td><code>/logout</code></td><td><a class="doc-link" href="inktime/app/api/auth.py">auth.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/users</code></td><td><a class="doc-link" href="inktime/app/api/auth.py">auth.py</a></td></tr>
+<tr><td>PATCH</td><td><code>/api/v1/users/&lt;user_id&gt;</code></td><td><a class="doc-link" href="inktime/app/api/auth.py">auth.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/users/&lt;user_id&gt;/password</code></td><td><a class="doc-link" href="inktime/app/api/auth.py">auth.py</a></td></tr>
+<tr><td>GET</td><td><code>/photos</code></td><td><a class="doc-link" href="inktime/app/api/photos.py">photos.py</a></td></tr>
+<tr><td>GET</td><td><code>/photos/excluded</code></td><td><a class="doc-link" href="inktime/app/api/photos.py">photos.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/photos/&lt;photo_id&gt;/exclusion</code></td><td><a class="doc-link" href="inktime/app/api/photos.py">photos.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/photos/&lt;photo_id&gt;/upload-privacy</code></td><td><a class="doc-link" href="inktime/app/api/photos.py">photos.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/photos/exclusions/batch</code></td><td><a class="doc-link" href="inktime/app/api/photos.py">photos.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/photos/&lt;photo_id&gt;/ai</code></td><td><a class="doc-link" href="inktime/app/api/photos.py">photos.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/photos/exclusions/ai</code></td><td><a class="doc-link" href="inktime/app/api/photos.py">photos.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/photos/ai/run</code></td><td><a class="doc-link" href="inktime/app/api/photos.py">photos.py</a></td></tr>
+<tr><td>GET</td><td><code>/photos/&lt;photo_id&gt;</code></td><td><a class="doc-link" href="inktime/app/api/photos.py">photos.py</a></td></tr>
+<tr><td>PATCH</td><td><code>/api/v1/photos/&lt;photo_id&gt;</code></td><td><a class="doc-link" href="inktime/app/api/photos.py">photos.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/v1/photos/&lt;photo_id&gt;/orientation</code></td><td><a class="doc-link" href="inktime/app/api/photos.py">photos.py</a></td></tr>
+<tr><td>PUT</td><td><code>/api/v1/photos/&lt;photo_id&gt;/orientation</code></td><td><a class="doc-link" href="inktime/app/api/photos.py">photos.py</a></td></tr>
+<tr><td>PATCH</td><td><code>/api/v1/photos/&lt;photo_id&gt;/crop</code></td><td><a class="doc-link" href="inktime/app/api/photos.py">photos.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/v1/photos/&lt;photo_id&gt;/image</code></td><td><a class="doc-link" href="inktime/app/api/photos.py">photos.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/v1/photos/&lt;photo_id&gt;/thumbnail</code></td><td><a class="doc-link" href="inktime/app/api/photos.py">photos.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/v1/photos/&lt;photo_id&gt;/preview</code></td><td><a class="doc-link" href="inktime/app/api/photos.py">photos.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/cache/clear</code></td><td><a class="doc-link" href="inktime/app/api/photos.py">photos.py</a></td></tr>
+<tr><td>GET</td><td><code>/jobs</code></td><td><a class="doc-link" href="inktime/app/api/jobs.py">jobs.py</a></td></tr>
+<tr><td>GET</td><td><code>/jobs/&lt;job_id&gt;</code></td><td><a class="doc-link" href="inktime/app/api/jobs.py">jobs.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/jobs</code></td><td><a class="doc-link" href="inktime/app/api/jobs.py">jobs.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/jobs/selection-preview</code></td><td><a class="doc-link" href="inktime/app/api/jobs.py">jobs.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/jobs/&lt;job_id&gt;/&lt;action&gt;</code></td><td><a class="doc-link" href="inktime/app/api/jobs.py">jobs.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/v1/jobs/&lt;job_id&gt;</code></td><td><a class="doc-link" href="inktime/app/api/jobs.py">jobs.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/jobs/estimate</code></td><td><a class="doc-link" href="inktime/app/api/jobs.py">jobs.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/v1/jobs/&lt;job_id&gt;/export</code></td><td><a class="doc-link" href="inktime/app/api/jobs.py">jobs.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/v1/settings/presets</code></td><td><a class="doc-link" href="inktime/app/api/settings.py">settings.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/settings/presets/&lt;key&gt;/preview</code></td><td><a class="doc-link" href="inktime/app/api/settings.py">settings.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/settings/presets/&lt;key&gt;/apply</code></td><td><a class="doc-link" href="inktime/app/api/settings.py">settings.py</a></td></tr>
+<tr><td>GET</td><td><code>/settings</code></td><td><a class="doc-link" href="inktime/app/api/settings.py">settings.py</a></td></tr>
+<tr><td>GET</td><td><code>/help/controls</code></td><td><a class="doc-link" href="inktime/app/api/settings.py">settings.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/settings</code></td><td><a class="doc-link" href="inktime/app/api/settings.py">settings.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/settings/preview</code></td><td><a class="doc-link" href="inktime/app/api/settings.py">settings.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/v1/settings/snapshots</code></td><td><a class="doc-link" href="inktime/app/api/settings.py">settings.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/v1/settings/metadata</code></td><td><a class="doc-link" href="inktime/app/api/settings.py">settings.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/v1/settings/snapshots/&lt;snapshot_id&gt;</code></td><td><a class="doc-link" href="inktime/app/api/settings.py">settings.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/settings/snapshots/&lt;snapshot_id&gt;/rollback-preview</code></td><td><a class="doc-link" href="inktime/app/api/settings.py">settings.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/settings/snapshots/&lt;snapshot_id&gt;/rollback</code></td><td><a class="doc-link" href="inktime/app/api/settings.py">settings.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/v1/settings/export</code></td><td><a class="doc-link" href="inktime/app/api/settings.py">settings.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/settings/import-preview</code></td><td><a class="doc-link" href="inktime/app/api/settings.py">settings.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/settings/import</code></td><td><a class="doc-link" href="inktime/app/api/settings.py">settings.py</a></td></tr>
+<tr><td>GET</td><td><code>/providers</code></td><td><a class="doc-link" href="inktime/app/api/settings.py">settings.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/providers</code></td><td><a class="doc-link" href="inktime/app/api/settings.py">settings.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/providers/&lt;provider_id&gt;/test</code></td><td><a class="doc-link" href="inktime/app/api/settings.py">settings.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/providers/&lt;provider_id&gt;/pricing</code></td><td><a class="doc-link" href="inktime/app/api/settings.py">settings.py</a></td></tr>
+<tr><td>GET</td><td><code>/costs</code></td><td><a class="doc-link" href="inktime/app/api/settings.py">settings.py</a></td></tr>
+<tr><td>GET</td><td><code>/scoring</code></td><td><a class="doc-link" href="inktime/app/api/scoring.py">scoring.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/scoring/profiles</code></td><td><a class="doc-link" href="inktime/app/api/scoring.py">scoring.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/scoring/profiles/&lt;version_id&gt;/restore</code></td><td><a class="doc-link" href="inktime/app/api/scoring.py">scoring.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/scoring/test</code></td><td><a class="doc-link" href="inktime/app/api/scoring.py">scoring.py</a></td></tr>
+<tr><td>GET</td><td><code>/rendering</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>GET</td><td><code>/simulator</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>GET</td><td><code>/virtual-display</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/v1/virtual-display/manifest</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/v1/virtual-display/releases/&lt;release_id&gt;/files/&lt;path:filename&gt;</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/rendering/simulate</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/rendering/compare</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/rendering/presets</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/rendering/test-release</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/rendering/dual-pair-compare</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/v1/rendering/preview/&lt;photo_id&gt;</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/v1/rendering/background-results/&lt;token&gt;/&lt;name&gt;.png</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/releases</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/rendering/history/select</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/rendering/history/reroll</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/rendering/history/test-release</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>GET</td><td><code>/rendering/releases/&lt;release_id&gt;/&lt;filename&gt;</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/releases/&lt;release_id&gt;/rollback</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/v1/fonts/preview</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/fonts/select</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/fonts</code></td><td><a class="doc-link" href="inktime/app/api/rendering.py">rendering.py</a></td></tr>
+<tr><td>GET</td><td><code>/devices</code></td><td><a class="doc-link" href="inktime/app/api/devices.py">devices.py</a></td></tr>
+<tr><td>GET</td><td><code>/energy</code></td><td><a class="doc-link" href="inktime/app/api/devices.py">devices.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/v1/devices/&lt;device_id&gt;/energy</code></td><td><a class="doc-link" href="inktime/app/api/devices.py">devices.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/v1/devices/&lt;device_id&gt;/runtime-summary</code></td><td><a class="doc-link" href="inktime/app/api/devices.py">devices.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/devices</code></td><td><a class="doc-link" href="inktime/app/api/devices.py">devices.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/devices/&lt;device_id&gt;/token</code></td><td><a class="doc-link" href="inktime/app/api/devices.py">devices.py</a></td></tr>
+<tr><td>PATCH</td><td><code>/api/v1/devices/&lt;device_id&gt;</code></td><td><a class="doc-link" href="inktime/app/api/devices.py">devices.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/device/v1/releases/latest</code></td><td><a class="doc-link" href="inktime/app/api/devices.py">devices.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/device/v1/stock/dataUP</code></td><td><a class="doc-link" href="inktime/app/api/devices.py">devices.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/devices/&lt;device_id&gt;/stock-photopainter/display</code></td><td><a class="doc-link" href="inktime/app/api/devices.py">devices.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/devices/&lt;device_id&gt;/offline-schedule/prepare</code></td><td><a class="doc-link" href="inktime/app/api/devices.py">devices.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/v1/devices/&lt;device_id&gt;/offline-schedule/&lt;schedule_id&gt;/slots/&lt;int:slot_index&gt;</code></td><td><a class="doc-link" href="inktime/app/api/devices.py">devices.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/device/v1/offline-schedule</code></td><td><a class="doc-link" href="inktime/app/api/devices.py">devices.py</a></td></tr>
+<tr><td>GET</td><td><code>/api/device/v1/releases/&lt;release_id&gt;/files/&lt;path:filename&gt;</code></td><td><a class="doc-link" href="inktime/app/api/devices.py">devices.py</a></td></tr>
+<tr><td>POST</td><td><code>/api/device/v1/status</code></td><td><a class="doc-link" href="inktime/app/api/devices.py">devices.py</a></td></tr>
+</tbody></table></div>
+<hr class="doc-divider">
 <h3 id="11-1-主要-rest-api-端點總覽" class="doc-h3">11.1 主要 REST API 端點總覽</h3>
 <div class="table-wrapper"><table><thead><tr><th>HTTP Method</th><th>API 端點 (URL Path)</th><th>功能說明</th><th>必填參數 / Payload 範例</th></tr></thead><tbody><tr class="even"><td><code>POST</code></td><td><code>/api/v1/auth/login</code></td><td>管理員登入</td><td><code>{"username": "admin", "password": "..."}</code></td></tr><tr class="odd"><td><code>GET</code></td><td><code>/api/v1/photos</code></td><td>查詢照片列表 (分頁)</td><td><code>?page=1&limit=50&sort=memory</code></td></tr><tr class="even"><td><code>PATCH</code></td><td><code>/api/v1/photos/{id}</code></td><td>更新照片標籤/最愛</td><td><code>{"is_favorite": true, "date": "2024-01-01"}</code></td></tr><tr class="odd"><td><code>POST</code></td><td><code>/api/v1/jobs/analysis</code></td><td>建立新分析工作</td><td><code>{"strategy": "smart_two_stage", "budget": 10.0}</code></td></tr><tr class="even"><td><code>POST</code></td><td><code>/api/v1/jobs/{id}/pause</code></td><td>暫停指定工作</td><td>無</td></tr><tr class="odd"><td><code>POST</code></td><td><code>/api/v1/jobs/{id}/resume</code></td><td>恢復指定工作</td><td>無</td></tr><tr class="even"><td><code>POST</code></td><td><code>/api/v1/rendering/publish-now</code></td><td>綜合選片並發布</td><td><code>{"layout": "photo_info", "dither": "floyd_steinberg"}</code></td></tr><tr class="odd"><td><code>GET</code></td><td><code>/api/v1/devices</code></td><td>取得所有 ESP32 裝置</td><td>無</td></tr><tr class="even"><td><code>POST</code></td><td><code>/api/v1/devices</code></td><td>註冊新 ESP32 裝置</td><td><code>{"name": "LivingRoom", "profile": "gdep073e01_6c"}</code></td></tr><tr class="odd"><td><code>GET</code></td><td><code>/devices/latest_release</code></td><td>ESP32 下載最新 release</td><td><code>Header: Authorization: Bearer <Token></code></td></tr><tr class="even"><td><code>POST</code></td><td><code>/devices/report_status</code></td><td>ESP32 上報狀態與電量</td><td><code>{"battery_mv": 4120, "wifi_rssi": -65}</code></td></tr><tr class="odd"><td><code>POST</code></td><td><code>/api/v1/settings</code></td><td>批次更新系統設定</td><td><code>{"analysis.concurrency": 2, "render.layout": "full"}</code></td></tr><tr class="even"><td><code>POST</code></td><td><code>/api/v1/backups/create</code></td><td>建立 SQLite 線上熱備份</td><td>無</td></tr></tbody></table></div>
 <hr class="doc-divider">
@@ -1885,119 +1707,322 @@ CREATE TABLE schema_migrations (
 <hr class="doc-divider">
 <h2 id="sec-12" class="doc-h2"><span class="h2-anchor-icon">#</span> 十二、 Docker 部署、環境變數與生產環境配置</h2>
 <h3 id="sec-12-1" class="doc-h3">12.1 <code>docker-compose.yml</code> 逐行中文註解配置檔</h3>
-<p class="doc-p"><code>docker-compose.yml</code> 包含 3 個核心容器服務：Web 介面 (web)、背景 Worker (worker) 與排程計時器 (scheduler)，以下為完整逐行註解檔：</p>
-<div class="code-wrapper">
-                    <div class="code-header">
-                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> YAML</span>
-                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
-                    </div>
-                    <pre><code class="language-yaml">version: '3.8' # Docker Compose 設定檔規格版本
+<p class="doc-p">目前本機 Compose 的三服務、共用掛載與限制如下；正式 NAS 使用 <a class="doc-link" href="docker-compose.nas.yml">NAS Compose</a> 與 <a class="doc-link" href="docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md">Tag 更新器</a>，開發環境另疊加 <a class="doc-link" href="docker-compose.dev.yml">開發 override</a>。</p>
+<div class="code-wrapper"><pre><code class="language-yaml">name: inktime
+
+# 三個服務共用同一套映像、環境變數、資料掛載與安全設定。
+# YAML anchor 只減少重複內容，不會另外建立名為 common 的容器。
+x-common: &amp;common
+  # 本機預設使用 inktime:local；正式部署可由 .env 指定固定 Tag。
+  image: inktime:${INKTIME_IMAGE_TAG:-local}
+  # 異常退出或主機重開後自動恢復，手動停止時不強制重啟。
+  restart: unless-stopped
+  init: true
+  stop_grace_period: 45s
+  environment:
+    # The base file is production-safe. Development uses docker-compose.dev.yml.
+    INKTIME_ENVIRONMENT: ${INKTIME_ENVIRONMENT:-production}
+    INKTIME_DATA_DIR: /data
+    INKTIME_DATABASE: /data/inktime.db
+    INKTIME_PHOTO_DIR: /photos
+    INKTIME_RELEASE_DIR: /data/releases
+    INKTIME_BACKUP_DIR: /data/backups
+    INKTIME_CACHE_DIR: /data/cache
+    INKTIME_HOST: 0.0.0.0
+    INKTIME_PORT: 8765
+    INKTIME_TIMEZONE: ${TZ:-Asia/Taipei}
+    INKTIME_PROXY_TRUST: ${INKTIME_PROXY_TRUST:-0}
+    INKTIME_WORKER_CONCURRENCY: ${INKTIME_WORKER_CONCURRENCY:-2}
+    INKTIME_SCHEDULER_IDENTITY: ${INKTIME_SCHEDULER_IDENTITY:-inktime-scheduler}
+    # 所有排程、歷史今日與 Log 時間使用的時區。
+    TZ: ${TZ:-Asia/Taipei}
+    # Production defaults require an HTTPS public URL and secure cookies.
+    INKTIME_COOKIE_SECURE: ${INKTIME_COOKIE_SECURE:-1}
+    INKTIME_PUBLIC_URL: ${INKTIME_PUBLIC_URL:-https://localhost}
+    INKTIME_ALLOW_INSECURE_HTTP: ${INKTIME_ALLOW_INSECURE_HTTP:-0}
+    INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE: ${INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE:-0}
+    # 僅供 CI 驗證保留的 .test LAN hostname；正式部署保持 0。
+    INKTIME_LAN_TEST_MODE: ${INKTIME_LAN_TEST_MODE:-0}
+    # 容器預設輸出 JSON Log，方便 NAS 或集中式 Log 系統收集。
+    INKTIME_LOG_FORMAT: ${INKTIME_LOG_FORMAT:-json}
+    # 應用 Log 啟動預設；服務啟動後可在 Web 設定頁動態調整。
+    INKTIME_LOG_LEVEL: ${INKTIME_LOG_LEVEL:-INFO}
+    # Gunicorn HTTP access log 預設關閉，避免健康檢查與裝置輪詢寫滿 Log。
+    INKTIME_ACCESS_LOG: ${INKTIME_ACCESS_LOG:-0}
+  volumes:
+    # 可寫資料：SQLite、Session Key、縮圖、字型、備份與發布版本。
+    - type: bind
+      source: ${INKTIME_DATA_PATH:-./data}
+      target: /data
+    # 原始照片只讀掛載；容器內一律從 /photos 存取，避免誤刪 NAS 照片。
+    - type: bind
+      source: ${INKTIME_PHOTO_PATH:-./simulation_photos}
+      target: /photos
+      read_only: true
+  # 容器 Root filesystem 唯讀；需要的暫存空間另外掛在 /tmp。
+  read_only: true
+  tmpfs:
+    - /tmp:size=256m,mode=1777
+  security_opt:
+    # 即使程序遭利用，也禁止透過 setuid 等方式取得更高權限。
+    - no-new-privileges:true
+  logging:
+    # 限制單一 Log 檔大小與保留數量，避免填滿 NAS 磁碟。
+    driver: json-file
+    options:
+      max-size: ${INKTIME_LOG_MAX_SIZE:-5m}
+      max-file: ${INKTIME_LOG_MAX_FILES:-3}
 
 services:
-  # 1. Web 服務容器 (負責提供 Web 控制台介面與 ESP32 下載 API)
+  # Web 管理介面、健康檢查與 ESP32 下載 API；不執行長時間照片分析。
   inktime-web:
-    image: inktime:latest # 使用的 Docker 鏡像名稱與 Tag
-    container_name: inktime-web # 運行中的容器固定名稱
-    restart: unless-stopped # 重啟策略：除非手動停止，否則遭遇 Crash 或開機時自動重啟
+    &lt;&lt;: *common
+    # 只建置一次；Worker 與 Scheduler 直接重用完全相同的映像。
+    build:
+      context: .
+      args:
+        # 顯示在診斷頁的版本資訊；未提供時使用 unknown。
+        INKTIME_GIT_REVISION: ${INKTIME_GIT_REVISION:-unknown}
+        INKTIME_BUILD_TIME: ${INKTIME_BUILD_TIME:-unknown}
     ports:
-      - "8765:8765" # 埠號映射：將主機的 8765 埠對映到容器內部的 8765 埠
-    environment:
-      - INKTIME_HOST=0.0.0.0 # 監聽網卡位址 (0.0.0.0 代表允許所有外網/局域網 IP 連線)
-      - INKTIME_PORT=8765 # Web 服務執行的 Port 號
-      - INKTIME_DATA_DIR=/app/data # 容器內部的資料與快取根目錄絕對路徑
-      - INKTIME_PHOTO_DIR=/photos # 容器內部的照片庫掃描根目錄絕對路徑
-      - INKTIME_DATABASE=/app/data/photos.db # 容器內部的 SQLite 資料庫檔案路徑
-      - INKTIME_SECRET_KEY=change-this-to-a-very-long-random-secret-key # Session 與 API Key 加密主金鑰 (生產環境請替換為長隨機字串)
-      - INKTIME_COOKIE_SECURE=0 # Cookie 安全傳輸標記 (純 HTTP 設 0，HTTPS 反向代理下請設 1)
-    volumes:
-      - ./data:/app/data # 磁碟區掛載：將主機當前目錄下的 ./data 掛載至容器 /app/data (持久化資料庫與快取)
-      - /Volume1/PhotoArchive:/photos:ro # 磁碟區掛載：將主機/NAS的照片目錄掛載至容器 /photos (只讀權限 :ro，保護原始照片)
-    healthcheck: # 容器健康檢查機制
-      test: ["CMD", "curl", "-f", "http://localhost:8765/health/live"] # 健康檢查命令
-      interval: 30s # 每 30 秒執行一次健康檢查
-      timeout: 5s # 檢查請求超時時間 5 秒
-      retries: 3 # 連續失敗 3 次標記容器為 unhealth
+      # 左側是主機對外 Port，右側 8765 是容器內 Gunicorn Port。
+      - &quot;${INKTIME_BIND_ADDRESS:-127.0.0.1}:${INKTIME_PORT:-8765}:8765&quot;
+    cpus: ${INKTIME_WEB_CPUS:-0.75}
+    mem_limit: ${INKTIME_WEB_MEMORY:-1g}
+    pids_limit: ${INKTIME_WEB_PIDS:-128}
+    tmpfs:
+      - /tmp:size=128m,mode=1777
 
-  # 2. 背景 Worker 服務容器 (負責執行照片庫掃描與 Vision LLM 大模型分析)
+  # 背景 Worker：照片掃描、預處理、模型分析、重試與渲染工作。
   inktime-worker:
-    image: inktime:latest # 採用與 Web 相同的基礎鏡像
-    container_name: inktime-worker # 容器固定名稱
-    restart: unless-stopped # 保持重啟策略
-    command: ["python", "-m", "inktime.app.workers.runner"] # 容器啟動命令：執行 Worker 背景處理程式
-    environment:
-      - INKTIME_DATA_DIR=/app/data # 共用相同的資料路徑
-      - INKTIME_PHOTO_DIR=/photos # 共用照片庫目錄
-      - INKTIME_DATABASE=/app/data/photos.db # 共用 SQLite 資料庫
-    volumes:
-      - ./data:/app/data # 掛載相同的資料磁碟區
-      - /Volume1/PhotoArchive:/photos:ro # 掛載相同的相片唯讀磁碟區
+    &lt;&lt;: *common
+    command: [&quot;python&quot;, &quot;-m&quot;, &quot;inktime.app.workers.runner&quot;]
+    healthcheck:
+      test: [&quot;CMD&quot;, &quot;python&quot;, &quot;scripts/container_health.py&quot;, &quot;worker&quot;]
+      interval: 2m
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    depends_on:
+      # 等 Web 完成 Migration 且健康後才開始領取工作。
+      inktime-web:
+        condition: service_healthy
+    cpus: ${INKTIME_WORKER_CPUS:-2.0}
+    mem_limit: ${INKTIME_WORKER_MEMORY:-1g}
+    pids_limit: ${INKTIME_WORKER_PIDS:-192}
+    tmpfs:
+      - /tmp:size=256m,mode=1777
 
-  # 3. 排程計時器服務容器 (負責每日定時照片選片發布、備份與通知)
+  # Scheduler：週期性工作、逾期租約回收、自動備份與保留策略。
   inktime-scheduler:
-    image: inktime:latest # 採用相同的基礎鏡像
-    container_name: inktime-scheduler # 容器固定名稱
-    restart: unless-stopped # 保持重啟策略
-    command: ["python", "-m", "inktime.app.workers.scheduler"] # 容器啟動命令：執行 Cron 定時排程程式
-    environment:
-      - INKTIME_DATA_DIR=/app/data # 共用資料目錄
-      - INKTIME_DATABASE=/app/data/photos.db # 共用 SQLite 資料庫
-    volumes:
-      - ./data:/app/data # 掛載資料磁碟區</code></pre>
-                </div>
+    &lt;&lt;: *common
+    command: [&quot;python&quot;, &quot;-m&quot;, &quot;inktime.app.workers.scheduler&quot;]
+    healthcheck:
+      test: [&quot;CMD&quot;, &quot;python&quot;, &quot;scripts/container_health.py&quot;, &quot;scheduler&quot;]
+      interval: 2m
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    depends_on:
+      # Migration 完成前不可執行排程或修改資料庫。
+      inktime-web:
+        condition: service_healthy
+    cpus: ${INKTIME_SCHEDULER_CPUS:-0.25}
+    mem_limit: ${INKTIME_SCHEDULER_MEMORY:-1g}
+    pids_limit: ${INKTIME_SCHEDULER_PIDS:-64}
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+</code></pre></div>
 <hr class="doc-divider">
 <h3 id="sec-12-2" class="doc-h3">12.2 全系統環境變數逐行詳細解析</h3>
-<p class="doc-p">以下為 InkTime 支援的所有環境變數及其用途與設定範例：</p>
-<div class="code-wrapper">
-                    <div class="code-header">
-                        <span class="code-lang-tag"><i class="fa-solid fa-code"></i> BASH</span>
-                        <button class="copy-btn" onclick="copyCode(this)"><i class="fa-regular fa-copy"></i> 複製內容</button>
-                    </div>
-                    <pre><code class="language-bash"># Web 伺服器監聽位址 (本機測試設 127.0.0.1，Docker/生產環境設 0.0.0.0)
-INKTIME_HOST=0.0.0.0
-
-# Web 伺服器 HTTP 連接埠 (預設 8765)
+<p class="doc-p">下列為版本控制中的 <a class="doc-link" href=".env.example">環境變數範例</a>。<code>INKTIME_DATA_PATH</code> 與 <code>INKTIME_PHOTO_PATH</code> 是主機掛載來源；容器內固定為 <code>/data</code> 和唯讀 <code>/photos</code>。本機／LAN 開發另見 <a class="doc-link" href=".env.local.example">開發範例</a>，NAS 使用 <a class="doc-link" href=".env.nas.example">NAS 範例</a>。</p>
+<div class="code-wrapper"><pre><code class="language-bash">TZ=Asia/Taipei
 INKTIME_PORT=8765
-
-# 資料與快取主目錄 (包含 SQLite DB、縮圖快取、字型檔與 Release 產出物)
-INKTIME_DATA_DIR=/app/data
-
-# 原始照片庫掃描目錄 (指定 NAS 相片路徑，建議以唯讀模式掛載)
-INKTIME_PHOTO_DIR=/Volume1/PhotoArchive
-
-# SQLite 資料庫檔案完整絕對路徑 (預設為 INKTIME_DATA_DIR/photos.db)
-INKTIME_DATABASE=/app/data/photos.db
-
-# 預渲染 .bin 與 .h 檔案之輸出目錄
-INKTIME_RELEASE_DIR=/app/data/releases
-
-# 平台密碼學與 Session 主金鑰 (預設會自動生成並寫入 session.key；生產環境建議自行設定 64 字元字串)
-INKTIME_SECRET_KEY=eb98f21a48c...
-
-# Session Cookie 安全標記 (0 = 允許 HTTP 連線；1 = 強制 HTTPS 傳輸)
+INKTIME_DATA_PATH=./data
+INKTIME_PHOTO_PATH=./simulation_photos
+INKTIME_ENVIRONMENT=development
+INKTIME_PUBLIC_URL=http://localhost:8765
 INKTIME_COOKIE_SECURE=0
+INKTIME_ALLOW_INSECURE_HTTP=1
+INKTIME_ALLOW_UNSAFE_NETWORK_DATABASE=0
+INKTIME_LOG_FORMAT=json
+INKTIME_LOG_LEVEL=INFO
+INKTIME_ACCESS_LOG=0
+INKTIME_LOG_MAX_SIZE=5m
+INKTIME_LOG_MAX_FILES=3
+INKTIME_IMAGE_TAG=local
 
-# 系統 Structured Log 日誌輸出層級 (INFO / DEBUG / WARNING / ERROR)
-INKTIME_LOG_LEVEL=INFO</code></pre>
-                </div>
+# Intel N100 低資源預設；這些是容器啟動邊界，日常工作並行與輪詢請在 Web 設定頁調整。
+INKTIME_WEB_CPUS=0.75
+INKTIME_WEB_MEMORY=1g
+INKTIME_WEB_PIDS=128
+INKTIME_WORKER_CPUS=2.0
+INKTIME_WORKER_MEMORY=1g
+INKTIME_WORKER_PIDS=192
+INKTIME_SCHEDULER_CPUS=0.25
+INKTIME_SCHEDULER_MEMORY=1g
+INKTIME_SCHEDULER_PIDS=64
+INKTIME_WEB_WORKERS=1
+INKTIME_WEB_THREADS=2
+INKTIME_GUNICORN_LOG_LEVEL=warning
+</code></pre></div>
+<p class="doc-p">保留原本 <code>/data/session.key</code> 與資料庫，才能沿用加密 API Key、帳號與登入設定。Session Key 不應在重建時更換；一般模型與操作設定由 Web／DB 管理，完整部署變數見實際 Compose 與 <a class="doc-link" href="inktime/app/core/runtime_config.py">程序設定</a>。</p>
 <hr class="doc-divider">
 <h3 id="sec-12-3" class="doc-h3">12.3 初次設定「必須設定」的 5 大項目清單</h3>
-<p class="doc-p">一開始部署完系統並首次登入 Web 控制台時，<strong>一般使用者必須完成設定的 5 個核心項目</strong>：</p>
-<div class="mermaid-box"><pre class="mermaid">flowchart TD
-    Step1["1. 時區與語言設定 (general.timezone)"] --&gt; Step2["2. 照片庫目錄掛載 (INKTIME_PHOTO_DIR)"]
-    Step2 --&gt; Step3["3. 配置 AI 模型 Key (/providers)"]
-    Step3 --&gt; Step4["4. 住家 GPS 座標 (home_latitude/longitude)"]
-    Step4 --&gt; Step5["5. ESP32 自動配對與管理員核准 (/devices)"]</pre></div>
-<ul class="doc-list"><li><strong>時區設定 (<code>general.timezone</code>)</strong>：</li><li>進入 <code>/settings</code> 頁面，將時區修改為 <code>Asia/Taipei</code>（或所在地的 IANA 時區）。若未設定，歷史上的今天選片與定時排程會出現跨日時差偏移。</li><li><strong>照片庫目錄掛載 (<code>INKTIME_PHOTO_DIR</code>)</strong>：</li><li>確認 Docker 或 <code>.env</code> 中的 <code>INKTIME_PHOTO_DIR</code> 正確指向本機或 NAS 的相片資料夾（如 <code>/Volume1/PhotoArchive</code>）。進入 <code>/schedules</code> 點擊照片庫掃描以寫入最初相片索引。</li><li><strong>新增 AI 模型提供者 API Key (<code>/providers</code>)</strong>：</li><li>進入 <code>/providers</code> 頁面，點擊 <code>[新增 Provider]</code>。填入 OpenAI API Key (<code>sk-...</code>) 或本機 LMStudio 網址 (<code>http://127.0.0.1:1234/v1</code>)，確保系統具備分析評分能力。</li><li><strong>設定住家 GPS 座標 (<code>home_latitude</code> / <code>home_longitude</code>)</strong>：</li><li>進入 <code>/settings</code> 頁面，設定住家的經緯度（如台北市中心 <code>25.033</code>, <code>121.5654</code>）。此座標僅在伺服器本機用於計算相片離家距離並給予旅行加分，<strong>絕不會傳送給外部 AI 大模型</strong>。</li><li><strong>ESP32 自動配對與管理員核准 (<code>/devices</code>)</strong>：</li><li>新自製韌體不必先按 <code>[新增裝置]</code>；裝置首次連線會自動建立等待配對資料列，顯示短效六位數配對碼。管理員在 <code>/devices</code> 核對裝置與 Profile 後按核准，韌體只領取一次 Device Secret；Legacy Token 與 Stock PhotoPainter 維持各自相容路徑。</li></ul>
+<p class="doc-p">首次安裝依以下順序完成五項核對；重建既有環境沿用帳號與 /data，不重新執行管理員設定。</p>
+<ol class="doc-list"><li>選正式 NAS 或本機開發部署，核對 public URL、HTTP／HTTPS 與資料掛載。</li><li>首次安裝才建立管理員，確認時區、備份與復原位置。</li><li>掃描唯讀照片庫，以預設 local_only 預覽；需要 AI 時再明確啟用 automatic_ai，設定 Provider、模型、Key 與價格。</li><li>選擇與實體面板相符的 Profile、方向、版型與字型，確認預覽。</li><li>按裝置模式完成配對與 ACK，確認實際面板顯示。</li></ol>
+<p class="doc-p">逐步命令見 <a class="doc-link" href="docs/operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md">完整上線指南</a>。</p>
 <hr class="doc-divider">
 <h3 id="sec-12-4" class="doc-h3">12.4 進階「設定後會更好」的 8 大系統優化清單</h3>
-<p class="doc-p"><strong>分析流程注意：</strong>本版本不再啟用兩階段圖片分析。請設定 <code>analysis.strategy=single</code> 與 <code>model.analysis_model</code>；本機 E6 預篩選仍在模型請求前執行，若通過則只送一次圖片 Vision 請求。</p>
-<p class="doc-p">當系統基礎運作正常後，完成以下 <strong>8 項進階優化設定</strong>，將能獲得最佳的顯示畫質、極速下載與 100% 穩定度：</p>
-<ul class="doc-list"><li><strong>開啟背景預先渲染機制 (Pre-rendering Queue)</strong>：</li><li>在 <code>/schedules</code> 開啟「每日自動發布排程」。系統會在半夜提前將未來 1~3 天的照片渲染成 <code>.bin</code> 檔案。ESP32 喚醒時可從現場 5 秒渲染降至 <strong>0.2 秒極速下載</strong>，電池續航提升 5 倍以上。</li><li><strong>開啟 Open-Meteo 天氣與氣象版型 (<code>render.weather_enabled=true</code>)</strong>：</li><li>在 <code>/settings</code> 將 <code>render.weather_enabled</code> 設定為 <code>true</code>，並設定當地的緯度 (<code>render.weather_latitude</code>) 與經度 (<code>render.weather_longitude</code>)。版型切換為 <code>weather_sensor</code> 後，電子紙相框將實時呈現當日高低溫與氣象圖示。</li><li><strong>啟用兩階段智能分析策略 (<code>smart_two_stage</code>)</strong>：</li><li>在 <code>/settings</code> 將 <code>analysis.strategy</code> 設定為 <code>smart_two_stage</code>。先以低成本模型 (<code>gpt-4o-mini</code>) 進行快速預篩選，只有超過 65 分的優秀相片才會進入高品質模型 (<code>gpt-4o</code>)，<strong>節省高達 80% 的 AI API 費用</strong>。</li><li><strong>開啟 E6 六色適合度過濾 (<code>analysis.e6_prefilter_enabled=true</code>)</strong>：</li><li>在 <code>/settings</code> 開啟 <code>analysis.e6_prefilter_enabled</code>。系統會在送往 AI 之前先模擬六色墨水屏量化，自動過濾掉那些在電子紙上會產生嚴重色塊失真的相片。</li><li><strong>設定定時熱備份與留存天數 (<code>backup.retention=14</code>)</strong>：</li><li>在 <code>/settings</code> 確保 <code>backup.schedule_enabled=true</code> 且留存天數為 <code>14</code> 天。系統將在每天凌晨 03:00 自動執行 SQLite WAL 線上熱備份，保護寶貴的照片分析資料。</li><li><strong>開啟高負載自動延後關關 (<code>delay_high_load=true</code>)</strong>：</li><li>在 <code>/schedules</code> 中開啟高負載保護。當主機或 NAS CPU 負載超過 85% 時，排程會自動延後 15 分鐘，避免與 NAS 備份或媒體轉檔搶奪 CPU 資源。</li><li><strong>開啟 HTTPS Cookie 安全保護 (<code>INKTIME_COOKIE_SECURE=1</code>)</strong>：</li><li>若通過 Synology Reverse Proxy, Nginx 或 Cloudflare 提供 HTTPS 外網連線，在 <code>/settings</code> 或 <code>.env</code> 設定 <code>INKTIME_COOKIE_SECURE=1</code>，確保 Session Cookie 具備 Strict & Secure 屬性，防範 Cookie 竊取。</li><li><strong>設定 Webhook 通知與退避重試 (<code>/notifications</code>)</strong>：</li><li>進入 <code>/settings</code> 輸入 Webhook Secret Token，設定當 ESP32 電量低於 3.6V 或發布完成時發送通知至 Home Assistant、Telegram 或 Discord Bot。</li></ul>
+<p class="doc-p">依實際需求調整以下項目，效能與續航需在目標環境量測。</p>
+<ol class="doc-list"><li>依交付模式設定每日發布與 Enhanced 離線排程，核對準備時間與裝置 Slot 能力。</li><li>需要天氣才啟用 weather_enabled 並填實際天氣位置。</li><li>AI 分析先以小批 single 工作確認結果與 usage，維持明確預算停止線。</li><li>以 E6 預覽改善顯示效果；E6 分數不作自動排除門檻。</li><li>設定備份與保留政策，並保護含 Secrets 的復原檔。</li><li>依 N100 資源規格與實際 RSS 調整並行、輪詢和 Log。</li><li>正式環境維持 HTTPS、Secure cookie 與正確代理信任設定。</li><li>依裝置離線／恢復需求設定通知與 Webhook，核對重試結果。</li></ol>
+<p class="doc-p">控制項是否已接入 runtime、需不需要重啟，以設定頁 metadata 與 <a class="doc-link" href="docs/guides/ADMIN_GUIDE_ZH_TW.md">管理員指南</a> 為準。</p>
 <hr class="doc-divider">
-<p class="doc-p"><strong>設定表相容說明：</strong>本版本正式設定鍵為 <code>analysis.strategy=single</code> 或 <code>local</code>，Vision 模型使用 <code>model.analysis_model</code>；表中舊的兩階段與低／高模型文字僅代表歷史資料相容，不會恢復第二次圖片請求。<code>analysis.caption_variants_enabled</code> 仍可讀取，但已移至進階設定。</p>
-<h2 id="sec-13" class="doc-h2"><span class="h2-anchor-icon">#</span> 十三、 系統設定參數 100% 完全對照表</h2>
-<p class="doc-p">本章節完整收錄 InkTime 的 <strong>所有 48 項系統組態設定</strong>，逐一列出對應鍵名、預設值、數據型態、選擇範圍、控制功能與風險提示：</p>
-<div class="table-wrapper"><table><thead><tr><th>設定鍵名 (<code>Setting Key</code>)</th><th>分類</th><th>預設值</th><th>可選項目 / 範圍</th><th>控制功能與影響</th><th>風險與注意事項</th></tr></thead><tbody><tr class="even"><td><code>general.timezone</code></td><td>一般設定</td><td><code>Asia/Taipei</code></td><td>IANA 時區字串</td><td>歷史上的今天與排程時間計算</td><td>錯誤時區會造成跨日選片偏移</td></tr><tr class="odd"><td><code>analysis.strategy</code></td><td>分析設定</td><td><code>smart_two_stage</code></td><td><code>local</code>, <code>low_cost</code>, <code>smart_two_stage</code>, <code>high_quality</code></td><td>新工作的預設分析策略</td><td>高品質策略會增加 AI API 成本</td></tr><tr class="even"><td><code>analysis.ai_mode</code></td><td>AI 模式</td><td><code>top_candidates</code></td><td><code>off</code>, <code>top_candidates</code>, <code>eligible</code>, <code>full_library</code>, <code>on_demand</code></td><td>決定哪些照片允許送往 AI 大模型分析</td><td><code>full_library</code> 會對完整相簿呼叫 AI，成本較高</td></tr><tr class="odd"><td><code>analysis.ai_top_n</code></td><td>AI 模式</td><td><code>50</code></td><td>1 ~ 10,000</td><td>「前 N 張候選」模式下，每次允許進 AI 的最高本機候選數</td><td>提高數值會增加 Token 消耗</td></tr><tr class="even"><td><code>analysis.ai_daily_photo_limit</code></td><td>AI 模式</td><td><code>50</code></td><td>1 ~ 100,000</td><td>每日可實際送往 AI 的不同照片上限</td><td>達到上限時退回本機選片</td></tr><tr class="odd"><td><code>analysis.ai_monthly_photo_limit</code></td><td>AI 模式</td><td><code>500</code></td><td>1 ~ 1,000,000</td><td>每月可實際送往 AI 的不同照片上限</td><td>達到上限時暫停模型呼叫</td></tr><tr class="even"><td><code>travel_bonus_enabled</code></td><td>旅行加權</td><td><code>true</code></td><td><code>true</code>, <code>false</code></td><td>啟用依 GPS 與地點稀有度的獨立旅行排序加分</td><td>缺少 GPS 時加分為 0</td></tr><tr class="odd"><td><code>home_latitude</code></td><td>旅行加權</td><td><code>25.033</code></td><td>-90 ~ 90</td><td>住家緯度（僅本機計算距離，不傳送給模型）</td><td>敏感位置資訊，僅限管理員修改</td></tr><tr class="even"><td><code>home_longitude</code></td><td>旅行加權</td><td><code>121.5654</code></td><td>-180 ~ 180</td><td>住家經度（僅本機計算距離，不傳送給模型）</td><td>敏感位置資訊，僅限管理員修改</td></tr><tr class="odd"><td><code>home_radius_km</code></td><td>旅行加權</td><td><code>60.0</code></td><td>0 ~ 1,000</td><td>住家半徑（公里），在此範圍內不給予旅行加分</td><td>設太小會放大日常外出加分</td></tr><tr class="even"><td><code>travel_bonus_near</code></td><td>旅行加權</td><td><code>2.0</code></td><td>0 ~ 20</td><td>離家 60 至 200 km 的旅行加分</td><td>僅影響排序，不改模型原始評分</td></tr><tr class="odd"><td><code>travel_bonus_far</code></td><td>旅行加權</td><td><code>4.0</code></td><td>0 ~ 20</td><td>離家 200 至 1,000 km 的旅行加分</td><td>僅影響排序，不改模型原始評分</td></tr><tr class="even"><td><code>foreign_country_bonus</code></td><td>旅行加權</td><td><code>6.0</code></td><td>0 ~ 20</td><td>可信國家候選顯示跨國時的旅行加分</td><td>未知國家不加分</td></tr><tr class="odd"><td><code>rare_location_bonus</code></td><td>旅行加權</td><td><code>2.0</code></td><td>0 ~ 20</td><td>同一 GPS 地點在相簿中罕見時的加分</td><td>GPS 漂移會降低判斷可靠度</td></tr><tr class="even"><td><code>max_total_bonus</code></td><td>旅行加權</td><td><code>8.0</code></td><td>0 ~ 40</td><td>旅行與罕見地點加分的總合上限</td><td>過高會壓過模型的語意評分</td></tr><tr class="odd"><td><code>location_rule_version</code></td><td>旅行加權</td><td><code>travel-v1</code></td><td>字串 (最長 80)</td><td>旅行加分規則版本標籤</td><td>修改名稱不會自動重算既有照片</td></tr><tr class="even"><td><code>analysis.stage_two_threshold</code></td><td>分析設定</td><td><code>65</code></td><td>0 ~ 100</td><td>兩階段分析中，進入第二階段高品質模型的回憶門檻分</td><td>數值越低，模型成本越高</td></tr><tr class="odd"><td><code>analysis.prefilter_enabled</code></td><td>本機預篩選</td><td><code>true</code></td><td><code>true</code>, <code>false</code></td><td>呼叫模型前先用本機特徵排除截圖與低品質照片</td><td>最愛照片會自動略過預篩選</td></tr><tr class="even"><td><code>analysis.prefilter_screenshots</code></td><td>本機預篩選</td><td><code>true</code></td><td><code>true</code>, <code>false</code></td><td>依檔名、尺寸與 EXIF 判定並排除截圖</td><td>手機螢幕尺寸裁切照可能被誤判</td></tr><tr class="odd"><td><code>analysis.prefilter_low_quality</code></td><td>本機預篩選</td><td><code>true</code></td><td><code>true</code>, <code>false</code></td><td>同時出現模糊/過曝/欠曝等兩項瑕疵時排除</td><td>僅判斷技術缺陷，無法判斷構圖</td></tr><tr class="even"><td><code>analysis.prefilter_sensitivity</code></td><td>本機預篩選</td><td><code>conservative</code></td><td><code>conservative</code>, <code>balanced</code>, <code>aggressive</code></td><td>預篩選敏感度</td><td>越積極節省更多 Token，但誤排率較高</td></tr><tr class="odd"><td><code>analysis.e6_prefilter_enabled</code></td><td>本機預篩選</td><td><code>true</code></td><td><code>true</code>, <code>false</code></td><td>模擬 E6 六色量化，排除在電子紙上嚴重失真的照片</td><td>僅代表電子紙適合度，不代表原圖不好看</td></tr><tr class="even"><td><code>analysis.e6_min_score</code></td><td>本機預篩選</td><td><code>25</code></td><td>0 ~ 100</td><td>E6 六色適合度門檻分</td><td>建議 20-35，過高會排除細膩照片</td></tr><tr class="odd"><td><code>analysis.scoring_rules</code></td><td>照片評分規則</td><td>Prompt 範本</td><td>文字區塊 (多行)</td><td>傳送給 Vision LLM 的評分提示詞 Prompt 指引</td><td>修改後僅影響新分析照片</td></tr><tr class="even"><td><code>analysis.ranking_memory_weight</code></td><td>評分控制中心</td><td><code>40</code></td><td>0 ~ 100</td><td>綜合排序分的回憶分權重 (%)</td><td>四項權重合計須為 100%</td></tr><tr class="odd"><td><code>analysis.ranking_beauty_weight</code></td><td>評分控制中心</td><td><code>30</code></td><td>0 ~ 100</td><td>綜合排序分的美觀分權重 (%)</td><td>四項權重合計須為 100%</td></tr><tr class="even"><td><code>analysis.ranking_technical_weight</code></td><td>評分控制中心</td><td><code>15</code></td><td>0 ~ 100</td><td>綜合排序分的技術品質權重 (%)</td><td>四項權重合計須為 100%</td></tr><tr class="odd"><td><code>analysis.ranking_emotion_weight</code></td><td>評分控制中心</td><td><code>15</code></td><td>0 ~ 100</td><td>綜合排序分的情緒分權重 (%)</td><td>四項權重合計須為 100%</td></tr><tr class="even"><td><code>analysis.ranking_favorite_bonus</code></td><td>評分控制中心</td><td><code>10.0</code></td><td>0 ~ 30</td><td>最愛照片加入綜合排序分的額外分數</td><td>過高可能使低品質最愛照片排最前</td></tr><tr class="odd"><td><code>analysis.concurrency</code></td><td>分析設定</td><td><code>1</code></td><td>1 ~ 8</td><td>背景 Worker 最大並行數</td><td>過高可能觸發 API Rate Limit</td></tr><tr class="even"><td><code>worker.queue_multiplier</code></td><td>效能與待機</td><td><code>1</code></td><td>1 ~ 4</td><td>每個並行槽預先排入記憶體的工作數</td><td>提高增加吞吐，但佔用更多記憶體</td></tr><tr class="odd"><td><code>worker.poll_seconds</code></td><td>效能與待機</td><td><code>15</code></td><td>1 ~ 300</td><td>無工作時 Worker 檢查新工作的秒數</td><td>數值越小反應越快，但增加 DB 讀取</td></tr><tr class="even"><td><code>worker.progress_items</code></td><td>效能與待機</td><td><code>50</code></td><td>5 ~ 10,000</td><td>每完成多少項目輸出一次彙總 Log</td><td>太小會產生大量 Log</td></tr><tr class="odd"><td><code>worker.progress_seconds</code></td><td>效能與待機</td><td><code>300</code></td><td>30 ~ 3,600</td><td>兩次進度 Log 的最長秒數</td><td>太小會增加 Log 量</td></tr><tr class="even"><td><code>scanner.disk_batch_size</code></td><td>效能與待機</td><td><code>1000</code></td><td>100 ~ 10,000</td><td>照片掃描每批從磁碟讀取的路徑數</td><td>提高增加記憶體，降低增加 SQL 次數</td></tr><tr class="odd"><td><code>scanner.write_batch_size</code></td><td>效能與待機</td><td><code>500</code></td><td>100 ~ 2,000</td><td>掃描器單一 SQLite 批次交易的照片數</td><td>提高會延長寫入鎖定時間</td></tr><tr class="even"><td><code>scanner.missing_threshold_percent</code></td><td>效能與待機</td><td><code>10</code></td><td>0 ~ 100</td><td>單次掃描可自動標記 Missing 的最大照片比例</td><td>超過比例會停止並要求管理員確認</td></tr><tr class="odd"><td><code>scheduler.poll_seconds</code></td><td>效能與待機</td><td><code>60</code></td><td>30 ~ 3,600</td><td>Scheduler 檢查備份與逾期租約的秒數</td><td>不建議低於 30 秒</td></tr><tr class="even"><td><code>analysis.max_retries</code></td><td>分析設定</td><td><code>3</code></td><td>0 ~ 10</td><td>單一照片項目 API 失敗時的最大重試次數</td><td>重試會增加成本</td></tr><tr class="odd"><td><code>model.low_model</code></td><td>模型設定</td><td><code>gpt-4o-mini</code></td><td>模型名稱字串</td><td>第一階段低成本模型</td><td>必須支援圖片與 JSON Schema</td></tr><tr class="even"><td><code>model.high_model</code></td><td>模型設定</td><td><code>gpt-4o</code></td><td>模型名稱字串</td><td>第二階段高品質模型</td><td>請確認 Provider 價格</td></tr><tr class="odd"><td><code>budget.daily_warning</code></td><td>成本設定</td><td><code>5.0</code></td><td>0 ~ 100,000</td><td>每日成本警告門檻（美元）</td><td>僅警告，不停止</td></tr><tr class="even"><td><code>budget.daily_stop</code></td><td>成本設定</td><td><code>10.0</code></td><td>0 ~ 100,000</td><td>每日成本熔斷停止門檻（美元）</td><td>達到後暫停新模型呼叫</td></tr><tr class="odd"><td><code>budget.monthly_warning</code></td><td>成本設定</td><td><code>50.0</code></td><td>0 ~ 1,000,000</td><td>每月成本警告門檻（美元）</td><td>僅警告，不停止</td></tr><tr class="even"><td><code>budget.monthly_stop</code></td><td>成本設定</td><td><code>100.0</code></td><td>0 ~ 1,000,000</td><td>每月成本熔斷停止門檻（美元）</td><td>達到後暫停新模型呼叫</td></tr><tr class="odd"><td><code>budget.job_default</code></td><td>成本設定</td><td><code>10.0</code></td><td>0 ~ 100,000</td><td>單一工作的預設預算上限（美元）</td><td>達到後工作自動暫停</td></tr><tr class="even"><td><code>budget.photo_max</code></td><td>成本設定</td><td><code>0.25</code></td><td>0 ~ 1,000</td><td>單張照片成本上限（美元）</td><td>過低可能使高品質分析無法執行</td></tr><tr class="odd"><td><code>budget.max_tokens</code></td><td>成本設定</td><td><code>8000</code></td><td>256 ~ 1,000,000</td><td>單次請求最大 Token 估算上限</td><td>需與 Provider 模型能力相容</td></tr><tr class="even"><td><code>render.memory_threshold</code></td><td>渲染設定</td><td><code>70</code></td><td>0 ~ 100</td><td>歷史上的今天自動選片最低回憶分數</td><td>過高可能找不到符合照片</td></tr><tr class="odd"><td><code>render.quantity</code></td><td>渲染設定</td><td><code>5</code></td><td>1 ~ 50</td><td>每次發布集包含的畫面總數</td><td>增加會增加 ESP32 下載量</td></tr><tr class="even"><td><code>render.selection_mode</code></td><td>渲染設定</td><td><code>history_today</code></td><td><code>history_today</code>, <code>top_ranked</code></td><td>發布選片模式 (歷年同日 vs 最高分)</td><td>照片無日期時會依退回規則補足</td></tr><tr class="odd"><td><code>render.history_today_window_days</code></td><td>渲染設定</td><td><code>7</code></td><td>0 ~ 31</td><td>歷年同日不足時，向前/後尋找的寬限天數</td><td>設 0 僅接受完全同月同日</td></tr><tr class="even"><td><code>render.history_today_fallback</code></td><td>渲染設定</td><td><code>nearby_then_ranked</code></td><td><code>nearby_only</code>, <code>ranked</code>, <code>none</code></td><td>歷年同日數量不足時的退回補圖規則</td><td><code>none</code> 可能產生空發布集</td></tr><tr class="odd"><td><code>render.e6_weight</code></td><td>渲染設定</td><td><code>20</code></td><td>0 ~ 60</td><td>選片時 E6 六色適合度占最終排序的百分比</td><td>過高會忽視回憶與情緒分數</td></tr><tr class="even"><td><code>render.layout</code></td><td>渲染設定</td><td><code>photo_info</code></td><td><code>full</code>, <code>postcard</code>, <code>photo_info</code>, <code>photo_pair</code>, <code>adaptive_memory</code>, <code>calendar</code>, <code>weather_sensor</code></td><td>正式發布使用的相框版型</td><td>日曆與天氣版型會縮小照片區域</td></tr><tr class="odd"><td><code>render.frame_orientation</code></td><td>渲染設定</td><td><code>portrait</code></td><td><code>portrait</code>, <code>landscape</code></td><td>相框實際擺放方向 (直向 vs 橫向)</td><td>日曆/天氣版型固定直向</td></tr><tr class="even"><td><code>render.fit_mode</code></td><td>渲染設定</td><td><code>contain</code></td><td><code>contain</code>, <code>cover</code></td><td>照片縮放適應方式</td><td><code>contain</code> 完整顯示，<code>cover</code> 填滿裁切</td></tr><tr class="odd"><td><code>render.show_capture_date</code></td><td>渲染設定</td><td><code>true</code></td><td><code>true</code>, <code>false</code></td><td>是否在版型中顯示拍攝日期</td><td>日期錯誤可於照片詳情人工修正</td></tr><tr class="even"><td><code>render.weather_enabled</code></td><td>相框天氣</td><td><code>false</code></td><td><code>true</code>, <code>false</code></td><td>開啟從 Open-Meteo 取得所在地天氣</td><td>需伺服器可連外網</td></tr><tr class="odd"><td><code>render.weather_latitude</code></td><td>相框天氣</td><td><code>25.033</code></td><td>-90 ~ 90</td><td>天氣查詢緯度</td><td>需手動修改為實際居住地</td></tr><tr class="even"><td><code>render.weather_longitude</code></td><td>相框天氣</td><td><code>121.5654</code></td><td>-180 ~ 180</td><td>天氣查詢經度</td><td>需手動修改為實際居住地</td></tr><tr class="odd"><td><code>render.weather_location_name</code></td><td>相框天氣</td><td><code>所在地</code></td><td>文字字串</td><td>版型上顯示的天氣地點名稱</td><td>僅影響標示，不改經緯度</td></tr><tr class="even"><td><code>render.sensor_device_id</code></td><td>相框天氣</td><td><code>""</code></td><td>裝置 ID 字串</td><td>指定室內溫溼度採用的感測裝置</td><td>留空時採用最新回報的裝置</td></tr><tr class="odd"><td><code>render.font_path</code></td><td>渲染設定</td><td><code>builtin:iansui</code></td><td>字型名稱或路徑</td><td>繁體中文字型 (內建手寫/文青體)</td><td>缺字時禁止發布，不以預設字取代</td></tr><tr class="even"><td><code>render.show_location</code></td><td>渲染設定</td><td><code>true</code></td><td><code>true</code>, <code>false</code></td><td>照片含 GPS 時顯示最近城市名稱</td><td>僅顯示粗略地名，不顯示座標</td></tr><tr class="odd"><td><code>render.location_max_distance_km</code></td><td>渲染設定</td><td><code>80</code></td><td>1 ~ 500</td><td>GPS 距離最近城市在此公里數內才顯示</td><td>過大會顯示較不準確的鄰近城市</td></tr><tr class="even"><td><code>render.profile</code></td><td>渲染設定</td><td><code>safe_4c</code></td><td><code>safe_4c</code>, <code>gdep073e01_6c</code>, <code>gdey073d46_7c</code></td><td>發布使用的電子紙面板色彩 Profile</td><td>必須與 ESP32 實際面板型號一致</td></tr><tr class="odd"><td><code>render.dither</code></td><td>渲染設定</td><td><code>floyd_steinberg</code></td><td>10 種 Dither 演算法</td><td>有限色電子紙的抖動演算模式</td><td>切換後色彩與點陣分布不同</td></tr><tr class="even"><td><code>render.dither_strength</code></td><td>渲染設定</td><td><code>1.0</code></td><td>0 ~ 2.0</td><td>抖動誤差/閾值強度</td><td>過高會增加畫面顆粒雜點</td></tr><tr class="odd"><td><code>render.color_distance</code></td><td>渲染設定</td><td><code>oklab</code></td><td><code>oklab</code>, <code>rgb</code></td><td>色盤映射距離計算空間</td><td>OKLab 較符合人眼感知色彩</td></tr><tr class="even"><td><code>device.legacy_api_enabled</code></td><td>裝置設定</td><td><code>false</code></td><td><code>true</code>, <code>false</code></td><td>允許舊版 URL 金鑰下載模式</td><td>停用更安全 (修改需重啟)</td></tr><tr class="odd"><td><code>device.default_timezone</code></td><td>裝置設定</td><td><code>Asia/Taipei</code></td><td>IANA 時區</td><td>新增 ESP32 裝置時預設套用的時區</td><td>錯誤時區使每日喚醒時間偏移</td></tr><tr class="even"><td><code>device.default_schedule</code></td><td>裝置設定</td><td><code>08:00</code></td><td><code>HH:MM</code> 格式</td><td>新增 ESP32 裝置時預設套用的刷新時間</td><td>刷新時會短暫提高耗電</td></tr><tr class="odd"><td><code>device.default_rotation</code></td><td>裝置設定</td><td><code>0</code></td><td><code>0</code>, <code>180</code></td><td>新增 7.3 吋裝置時套用的畫面旋轉角度</td><td>韌體目前支援 0° 與 180°</td></tr></tbody></table></div>
+<h2 id="sec-13" class="doc-h2"><span class="h2-anchor-icon">#</span> 十三、 系統設定參數對照表</h2>
+<p class="doc-p">以下 141 個註冊設定依目前 <a class="doc-link" href="inktime/app/repositories/settings.py">SETTING_DEFINITIONS</a> 列出新安裝預設；「尚未接入 runtime」的欄位不能當作已生效功能。舊資料庫內已退休的 key 仍可保存，但不列為現行設定，也不匯出到新快照。</p>
+<div class="table-wrapper"><table class="doc-table"><thead><tr><th>設定鍵名</th><th>分類</th><th>預設值</th><th>選項／範圍</th><th>用途</th><th>注意事項</th></tr></thead><tbody>
+<tr><td>general.timezone</td><td>一般設定</td><td>Asia/Taipei</td><td>string</td><td>歷史今日與排程使用的時區</td><td>錯誤時區會造成跨日選片偏移</td></tr>
+<tr><td>observability.debug_enabled</td><td>系統監控與除錯</td><td>false</td><td>boolean</td><td>Debug 事件記錄；到期自動關閉</td><td>只用於短期診斷，避免增加 SQLite 寫入</td></tr>
+<tr><td>observability.debug_level</td><td>系統監控與除錯</td><td>normal</td><td>normal／detailed</td><td>Debug 詳細程度</td><td>detailed 只限短期使用；尚未接入 runtime</td></tr>
+<tr><td>observability.debug_components</td><td>系統監控與除錯</td><td></td><td>string</td><td>Debug 元件，每行一項；留空為全部</td><td>不記錄密鑰、Token、未遮蔽路徑或 GPS；尚未接入 runtime</td></tr>
+<tr><td>observability.debug_auto_disable_minutes</td><td>系統監控與除錯</td><td>60</td><td>1 ~ 1440</td><td>Debug 自動關閉分鐘數</td><td>到期後僅保留 WARNING 以上與重要工作狀態</td></tr>
+<tr><td>observability.activity_retention_days</td><td>系統監控與除錯</td><td>14</td><td>1 ~ 365</td><td>WARNING 以上與重要事件保留天數</td><td>DEBUG 採較短保留，避免資料庫膨脹</td></tr>
+<tr><td>observability.debug_retention_hours</td><td>系統監控與除錯</td><td>24</td><td>1 ~ 168</td><td>DEBUG 事件保留小時</td><td>短期診斷完成後自動清理</td></tr>
+<tr><td>observability.activity_max_rows</td><td>系統監控與除錯</td><td>50000</td><td>1000 ~ 500000</td><td>Activity 最大列數</td><td>超過時優先清理最舊 DEBUG/INFO</td></tr>
+<tr><td>observability.activity_poll_seconds</td><td>系統監控與除錯</td><td>5</td><td>3 ~ 60</td><td>監控頁有界輪詢秒數</td><td>最小 3 秒以避免 NAS 待機寫入或 CPU 壓力；尚未接入 runtime</td></tr>
+<tr><td>observability.stuck_job_minutes</td><td>系統監控與除錯</td><td>5</td><td>1 ~ 120</td><td>工作 heartbeat 過期告警門檻</td><td>過低可能誤判長時間模型請求</td></tr>
+<tr><td>observability.ai_trace_enabled</td><td>系統監控與除錯</td><td>true</td><td>boolean</td><td>保存已遮蔽且有界的 AI 實際請求與回應追蹤</td><td>停用後不影響模型、帳務、快取、重試或分析結果</td></tr>
+<tr><td>analysis.strategy</td><td>分析設定</td><td>single</td><td>local／single</td><td>新工作的預設分析策略；每張照片最多一次圖片模型請求</td><td>模型請求仍受本機預篩選、預算與每日上限約束</td></tr>
+<tr><td>analysis.advanced_caption_enabled</td><td>照片描述與相框文案</td><td>true</td><td>boolean</td><td>進階照片描述與相框文案；新安裝預設啟用，既有明確設定維持不變</td><td>啟用後的新分析會使用文案設定產生不同快取；不會改寫舊分析</td></tr>
+<tr><td>analysis.caption_variants_enabled</td><td>照片描述與相框文案</td><td>false</td><td>boolean</td><td>舊版相框候選顯示相容；新分析固定只產生一個 side_caption</td><td>開啟只影響既有 semantic_json 候選的顯示，不會要求模型產生新候選</td></tr>
+<tr><td>analysis.caption_min_chars</td><td>照片描述與相框文案</td><td>10</td><td>10 ~ 100</td><td>詳細照片描述最少字元數</td><td>必須與目標、上限保持 min ≤ target ≤ max</td></tr>
+<tr><td>analysis.caption_target_chars</td><td>照片描述與相框文案</td><td>60</td><td>10 ~ 100</td><td>詳細照片描述的大致目標字元數，不要求模型精確湊字數</td><td>必須與最少、上限保持 min ≤ target ≤ max</td></tr>
+<tr><td>analysis.caption_max_chars</td><td>照片描述與相框文案</td><td>100</td><td>10 ~ 100</td><td>詳細照片描述最多字元數</td><td>必須與最少、目標保持 min ≤ target ≤ max</td></tr>
+<tr><td>analysis.side_caption_min_chars</td><td>照片描述與相框文案</td><td>8</td><td>8 ~ 16</td><td>相框一句話最少字元數</td><td>必須與目標、上限保持 min ≤ target ≤ max</td></tr>
+<tr><td>analysis.side_caption_target_chars</td><td>照片描述與相框文案</td><td>12</td><td>8 ~ 16</td><td>相框一句話的大致目標字元數</td><td>必須與最少、上限保持 min ≤ target ≤ max</td></tr>
+<tr><td>analysis.side_caption_max_chars</td><td>照片描述與相框文案</td><td>16</td><td>8 ~ 16</td><td>相框一句話最多字元數</td><td>必須與最少、目標保持 min ≤ target ≤ max</td></tr>
+<tr><td>analysis.copy_default_style</td><td>照片描述與相框文案</td><td>literary</td><td>natural／warm／literary／humorous／minimal</td><td>單一相框文案的生成風格；有舊候選時也用於選擇顯示版本</td><td>修改後的新分析會使用不同文案風格與快取指紋</td></tr>
+<tr><td>analysis.copy_humor_level</td><td>照片描述與相框文案</td><td>1</td><td>0 ~ 5</td><td>相框文案幽默程度（0 為不刻意幽默）</td><td>過高可能降低正式場合的適用性</td></tr>
+<tr><td>analysis.copy_poetic_level</td><td>照片描述與相框文案</td><td>2</td><td>0 ~ 5</td><td>相框文案詩意程度（0 為最直白）</td><td>過高可能讓文案較含蓄</td></tr>
+<tr><td>analysis.copy_avoid_cliche</td><td>照片描述與相框文案</td><td>true</td><td>boolean</td><td>避免雞湯、濫情、空泛與模板句</td><td>會限制模型可使用的常見文案語氣</td></tr>
+<tr><td>analysis.copy_avoid_direct_description</td><td>照片描述與相框文案</td><td>true</td><td>boolean</td><td>相框一句話避免只是直接重述照片內容</td><td>仍以照片可確認內容為界，不可虛構故事</td></tr>
+<tr><td>analysis.copy_forbid_exclamation</td><td>照片描述與相框文案</td><td>true</td><td>boolean</td><td>相框一句話不使用驚嘆號</td><td>降低強烈語氣</td></tr>
+<tr><td>analysis.copy_forbid_like_phrase</td><td>照片描述與相框文案</td><td>true</td><td>boolean</td><td>避免使用像是、彷彿、彷佛等比喻起手式</td><td>限制部分文學修辭</td></tr>
+<tr><td>analysis.copy_max_commas</td><td>照片描述與相框文案</td><td>2</td><td>0 ~ 10</td><td>相框一句話最多逗號數</td><td>過低會讓長句較不易閱讀</td></tr>
+<tr><td>analysis.copy_avoid_abstract_ending</td><td>照片描述與相框文案</td><td>true</td><td>boolean</td><td>避免以空泛人生結論收尾</td><td>限制總結式文案</td></tr>
+<tr><td>analysis.copy_banned_words</td><td>照片描述與相框文案</td><td>世界<br>時光<br>歲月<br>治癒<br>剛剛好<br>悄悄<br>慢慢<br>值得珍藏<br>美好瞬間<br>時光定格<br>歲月靜好<br>生活中的小確幸<br>一切都是最好的安排</td><td>string</td><td>每行一個禁止詞；只在進階文案啟用時套用</td><td>過多禁止詞可能使文案選詞受限</td></tr>
+<tr><td>analysis.copy_banned_patterns</td><td>照片描述與相框文案</td><td></td><td>string</td><td>每行一個禁止句型；只在進階文案啟用時套用</td><td>請使用可理解的文字片段，非正規表示式</td></tr>
+<tr><td>analysis.copy_custom_rules</td><td>照片描述與相框文案</td><td></td><td>string</td><td>額外文案規則；只在進階文案啟用時傳給模型</td><td>不可要求模型猜測人物關係、地點或事件</td></tr>
+<tr><td>analysis.execution_mode</td><td>分析執行模式</td><td>local_only</td><td>disabled／local_only／local_with_manual_ai／automatic_ai</td><td>分析執行模式；本機選片不會讀取 Provider 或產生模型費用</td><td>自動 AI 分析才會依既有排程與 Provider 設定執行模型工作</td></tr>
+<tr><td>analysis.ai_mode</td><td>AI 模式</td><td>top_candidates</td><td>off／top_candidates／eligible／full_library／on_demand</td><td>預設僅分析本機候選分最高的前 N 張；關閉時絕不呼叫模型</td><td>完整照片庫必須在工作建立時確認，並依年份或資料夾分批處理</td></tr>
+<tr><td>analysis.ai_top_n</td><td>AI 模式</td><td>50</td><td>1 ~ 10000</td><td>前 N 張候選模式每次允許進入 AI 的最高本機候選數</td><td>提高數值會增加 Token 與成本；不會影響已快取結果</td></tr>
+<tr><td>analysis.ai_daily_photo_limit</td><td>AI 模式</td><td>50</td><td>1 ~ 100000</td><td>每日可實際送往 AI 的不同照片上限，快取命中不計入</td><td>達到上限時會退回本機選片，隔日可續跑</td></tr>
+<tr><td>analysis.ai_monthly_photo_limit</td><td>AI 模式</td><td>500</td><td>1 ~ 1000000</td><td>每月可實際送往 AI 的不同照片上限</td><td>達到上限時會退回本機選片，需調整後才會再送出</td></tr>
+<tr><td>analysis.stage_two_threshold</td><td>分析設定</td><td>65</td><td>0 ~ 100</td><td>舊版兩階段工作的讀取相容欄位；新工作不再使用</td><td>僅保留歷史設定，不會增加新照片的圖片模型請求</td></tr>
+<tr><td>analysis.high_image_max_side</td><td>分析設定</td><td>1024</td><td>1024／1600</td><td>高品質 Vision 輸入最長邊</td><td>1600 會增加成本與延遲</td></tr>
+<tr><td>analysis.image_max_side</td><td>分析設定</td><td>1024</td><td>1024／1600</td><td>單次完整 Vision 分析輸入圖片最長邊</td><td>1600 會增加成本、記憶體與延遲</td></tr>
+<tr><td>analysis.exclude_sexualized_content</td><td>AI 內容排除</td><td>true</td><td>boolean</td><td>排除偏色情／性感照片</td><td>依模型分類與信心套用；普通旅遊、自拍與生活照不因單人女性而排除。人工恢復受保護，重新套用規則才會覆寫。</td></tr>
+<tr><td>analysis.exclude_explicit_nudity</td><td>AI 內容排除</td><td>true</td><td>boolean</td><td>排除成人裸露照片</td><td>依模型分類與信心套用；普通旅遊、自拍與生活照不因單人女性而排除。人工恢復受保護，重新套用規則才會覆寫。</td></tr>
+<tr><td>analysis.exclude_female_glamour_portraits</td><td>AI 內容排除</td><td>true</td><td>boolean</td><td>排除女性單人寫真</td><td>依模型分類與信心套用；普通旅遊、自拍與生活照不因單人女性而排除。人工恢復受保護，重新套用規則才會覆寫。</td></tr>
+<tr><td>analysis.content_filter_min_confidence</td><td>AI 內容排除</td><td>0.85</td><td>0 ~ 1</td><td>內容排除最低信心</td><td>依模型分類與信心套用；普通旅遊、自拍與生活照不因單人女性而排除。人工恢復受保護，重新套用規則才會覆寫。</td></tr>
+<tr><td>analysis.female_glamour_min_confidence</td><td>AI 內容排除</td><td>0.9</td><td>0 ~ 1</td><td>女性寫真最低信心</td><td>依模型分類與信心套用；普通旅遊、自拍與生活照不因單人女性而排除。人工恢復受保護，重新套用規則才會覆寫。</td></tr>
+<tr><td>analysis.prefilter_enabled</td><td>本機預篩選</td><td>true</td><td>boolean</td><td>呼叫模型前先用本機特徵排除截圖與明顯低品質照片</td><td>最愛照片會略過預篩選；排除結果保留在照片分析紀錄且不會刪除原檔</td></tr>
+<tr><td>analysis.prefilter_screenshots</td><td>本機預篩選</td><td>true</td><td>boolean</td><td>依檔名、圖片尺寸、格式與相機 EXIF 判定並排除截圖</td><td>裁切成手機螢幕尺寸的相機照片可能被判定為截圖；可降低敏感度或停用</td></tr>
+<tr><td>analysis.prefilter_low_quality</td><td>本機預篩選</td><td>true</td><td>boolean</td><td>至少同時出現兩項明顯缺陷時排除，例如模糊、過曝、欠曝、低對比或低解析度</td><td>本機規則只能判斷技術缺陷，不能可靠理解構圖、人物或回憶價值</td></tr>
+<tr><td>analysis.prefilter_sensitivity</td><td>本機預篩選</td><td>conservative</td><td>conservative／balanced／aggressive</td><td>預篩選敏感度：conservative 保守、balanced 平衡、aggressive 積極</td><td>越積極可節省更多 Token，但誤排除夜景、極簡構圖或舊照片的機率越高</td></tr>
+<tr><td>analysis.e6_prefilter_enabled</td><td>本機預篩選</td><td>true</td><td>boolean</td><td>舊版設定；E6 現在只影響電子紙顯示順位，不影響照片價值與 AI eligibility</td><td>保留供既有設定畫面辨識，不再套用於本機預篩選</td></tr>
+<tr><td>analysis.e6_min_score</td><td>本機預篩選</td><td>25</td><td>0 ~ 100</td><td>舊版門檻；E6 現在只影響電子紙顯示順位，不影響照片價值與 AI eligibility</td><td>保留供既有設定畫面辨識，不再套用於本機預篩選</td></tr>
+<tr><td>analysis.scoring_rules</td><td>照片評分規則</td><td>內建 Schema v4 規則（見 scoring.py）</td><td>string</td><td>模型判斷哪些照片應取得較高或較低分的規則</td><td>修改後會影響新分析結果；既有照片分數不會自動重算</td></tr>
+<tr><td>analysis.concurrency</td><td>分析設定</td><td>1</td><td>1 ~ 8</td><td>Worker 最大並行數</td><td>Intel N100 建議 1；過高可能觸發 Rate Limit 或造成圖片解碼記憶體尖峰</td></tr>
+<tr><td>worker.queue_multiplier</td><td>效能與待機</td><td>1</td><td>1 ~ 4</td><td>每個並行槽預先排入記憶體的工作數</td><td>數值越高吞吐可能略增，但同時保留更多圖片與 Future</td></tr>
+<tr><td>worker.poll_seconds</td><td>效能與待機</td><td>15</td><td>1 ~ 60</td><td>沒有工作時 Worker 的自適應檢查基準秒數（15→30→60，上限 60）</td><td>數值越小反應越快，但會增加待機喚醒與 SQLite 讀取；沒有跨程序 wake signal 時不可超過 60 秒</td></tr>
+<tr><td>worker.progress_items</td><td>效能與待機</td><td>50</td><td>5 ~ 10000</td><td>每完成多少項目輸出一次彙總進度 Log</td><td>設為太小會產生大量 Docker Log；不會逐張輸出</td></tr>
+<tr><td>worker.progress_seconds</td><td>效能與待機</td><td>300</td><td>30 ~ 3600</td><td>工作進行時兩次彙總進度 Log 的最長秒數</td><td>設為太小會增加 Log 量</td></tr>
+<tr><td>scanner.disk_batch_size</td><td>效能與待機</td><td>1000</td><td>100 ~ 10000</td><td>照片掃描每批從磁碟送入比對的路徑數</td><td>N100／16 GB 建議 1,000；提高會增加單批記憶體，降低會增加 SQL 次數</td></tr>
+<tr><td>scanner.write_batch_size</td><td>效能與待機</td><td>200</td><td>100 ~ 2000</td><td>Scanner 單一 SQLite 批次交易的照片數</td><td>建議 200；提高會延長單次 writer 鎖時間</td></tr>
+<tr><td>scanner.max_file_bytes</td><td>效能與待機</td><td>209715200</td><td>1048576 ~ 209715200</td><td>Scanner 接受的單張檔案最大位元組數</td><td>過大檔案會增加記憶體風險</td></tr>
+<tr><td>scanner.max_pixels</td><td>效能與待機</td><td>60000000</td><td>1000000 ~ 60000000</td><td>Scanner 接受的單張像素上限</td><td>提高會增加解壓縮炸彈風險</td></tr>
+<tr><td>scanner.max_edge_px</td><td>效能與待機</td><td>12000</td><td>1000 ~ 12000</td><td>Scanner 接受的單張影像邊長上限</td><td>提高會增加記憶體風險</td></tr>
+<tr><td>scanner.thumbnail_capacity_check_interval</td><td>效能與待機</td><td>500</td><td>50 ~ 10000</td><td>建立縮圖後檢查容量的間隔</td><td>過低會增加檔案系統讀取</td></tr>
+<tr><td>thumbnail_cache.max_bytes</td><td>效能與待機</td><td>5368709120</td><td>104857600 ~ 107374182400</td><td>縮圖快取容量上限</td><td>超過上限只清理縮圖</td></tr>
+<tr><td>thumbnail_cache.retention_days</td><td>效能與待機</td><td>30</td><td>1 ~ 3650</td><td>縮圖快取保留天數</td><td>較短會增加重新生成頻率</td></tr>
+<tr><td>scanner.missing_threshold_percent</td><td>效能與待機</td><td>10</td><td>0 ~ 100</td><td>單次完整掃描可自動標記 Missing 的最大照片比例（%）</td><td>超過此比例會停止更新並要求管理員確認；不建議高於 10%</td></tr>
+<tr><td>scheduler.poll_seconds</td><td>效能與待機</td><td>60</td><td>30 ~ 3600</td><td>Scheduler 檢查備份與逾期租約的秒數</td><td>數值越小會增加待機喚醒；不建議低於 30 秒</td></tr>
+<tr><td>offline.server_prefetch_margin_minutes</td><td>效能與待機</td><td>15</td><td>0 ~ 60</td><td>離線排程在裝置 Prefetch 前預留的伺服器準備緩衝（分鐘）</td><td>過短可能來不及完成渲染；過長會增加暫存內容保留時間</td></tr>
+<tr><td>offline.future_schedule_prepare_hour_local</td><td>效能與待機</td><td>20</td><td>0 ~ 23</td><td>裝置本地時間到達此時後，Scheduler 預先準備下一個本地日排程</td><td>過晚可能縮短渲染緩衝；過早會增加未來 Slot 暫存時間</td></tr>
+<tr><td>analysis.max_retries</td><td>分析設定</td><td>3</td><td>0 ~ 10</td><td>單一項目最大嘗試次數</td><td>重試會增加成本</td></tr>
+<tr><td>model.low_model</td><td>模型設定</td><td>gpt-4o-mini</td><td>string</td><td>第一階段低成本模型</td><td>模型必須支援圖片與 JSON Schema</td></tr>
+<tr><td>model.analysis_model</td><td>模型設定</td><td>gpt-4o</td><td>string</td><td>新單次照片分析使用的 Vision 模型</td><td>模型必須支援圖片與 JSON Schema；價格與上下文限制由管理員確認</td></tr>
+<tr><td>model.repair_model</td><td>模型設定</td><td>gpt-4o-mini</td><td>string</td><td>只接收文字的 JSON 修復模型；不會收到圖片</td><td>修復模型不可取代主 Vision 分析，也不可重新上傳照片</td></tr>
+<tr><td>model.high_model</td><td>模型設定</td><td>gpt-4o</td><td>string</td><td>舊版高品質模型的讀取相容欄位；新工作由 model.analysis_model 取代</td><td>僅保留歷史工作相容性，不會啟用第二次圖片請求</td></tr>
+<tr><td>batch.model</td><td>Batch 分析</td><td>gpt-5.6-luna</td><td>string</td><td>OpenAI Batch 完整照片分析模型</td><td>模型必須在已啟用且支援 Batch 的 Provider 上可用</td></tr>
+<tr><td>batch.reasoning_effort</td><td>Batch 分析</td><td>none</td><td>none／low／medium／high／xhigh／max</td><td>官方 OpenAI GPT-5.6 Luna 的推理強度</td><td>提高推理強度會增加成本與延遲；相容 Provider 不會收到此欄位</td></tr>
+<tr><td>batch.max_items_per_shard</td><td>Batch 分析</td><td>500</td><td>1 ~ 50000</td><td>單一本機 JSONL 分片最多請求數</td><td>較大值會增加 NAS 記憶體與磁碟壓力</td></tr>
+<tr><td>batch.max_jsonl_bytes</td><td>Batch 分析</td><td>157286400</td><td>1048576 ~ 209715200</td><td>單一本機 JSONL 分片最多 bytes（預設 150 MiB）</td><td>不可超過 OpenAI 200 MB 硬限制</td></tr>
+<tr><td>batch.poll_seconds</td><td>Batch 分析</td><td>300</td><td>60 ~ 3600</td><td>Batch 遠端狀態輪詢間隔秒數</td><td>過小會增加 API 請求；過大會延遲匯入</td></tr>
+<tr><td>batch.output_expires_after_seconds</td><td>Batch 分析</td><td>86400</td><td>3600 ~ 2592000</td><td>請求遠端結果檔保留秒數</td><td>必須足夠讓 Worker 完成匯入</td></tr>
+<tr><td>batch.local_retention_days</td><td>Batch 分析</td><td>7</td><td>0 ~ 3650</td><td>本機 Batch JSONL 結果檔保留天數</td><td>保留太久會增加 NAS 磁碟使用量</td></tr>
+<tr><td>budget.daily_warning</td><td>成本設定</td><td>5.0</td><td>0 ~ 100000</td><td>每日成本警告值（美元）</td><td>只警告，不會停止；尚未接入 runtime</td></tr>
+<tr><td>budget.daily_stop</td><td>成本設定</td><td>10.0</td><td>0 ~ 100000</td><td>每日成本停止值（美元）</td><td>達到後新模型請求會暫停</td></tr>
+<tr><td>budget.monthly_warning</td><td>成本設定</td><td>50.0</td><td>0 ~ 1000000</td><td>每月成本警告值（美元）</td><td>只警告，不會停止；尚未接入 runtime</td></tr>
+<tr><td>budget.monthly_stop</td><td>成本設定</td><td>100.0</td><td>0 ~ 1000000</td><td>每月成本停止值（美元）</td><td>達到後新模型請求會暫停</td></tr>
+<tr><td>budget.job_default</td><td>成本設定</td><td>10.0</td><td>0 ~ 100000</td><td>單一工作的預設預算</td><td>工作達到後自動暫停；尚未接入 runtime</td></tr>
+<tr><td>budget.photo_max</td><td>成本設定</td><td>0.25</td><td>0 ~ 1000</td><td>單張照片成本上限</td><td>過低可能使高品質分析無法執行</td></tr>
+<tr><td>budget.unknown_request_reserve</td><td>成本設定</td><td>0.25</td><td>0.01 ~ 100</td><td>每筆尚未完成成本定價的請求預留金額（美元）</td><td>只對有可計費證據的 unknown 請求計入；同照片或同工作仍會阻擋重試</td></tr>
+<tr><td>budget.max_tokens</td><td>成本設定</td><td>8000</td><td>256 ~ 1000000</td><td>單次請求最大 Token 估算上限</td><td>需與 Provider 模型能力相容</td></tr>
+<tr><td>budget.full_analysis_max_tokens</td><td>成本設定</td><td>1200</td><td>256 ~ 1200</td><td>單次完整 Vision 分析的硬上限</td><td>過高會增加成本；實際值仍受 budget.max_tokens 夾制</td></tr>
+<tr><td>budget.caption_variants_max_tokens</td><td>成本設定</td><td>1200</td><td>256 ~ 1200</td><td>Schema v4 相框短句輸出上限</td><td>固定只產生一個 side_caption，實際值仍受 budget.max_tokens 夾制</td></tr>
+<tr><td>budget.repair_max_tokens</td><td>成本設定</td><td>1200</td><td>256 ~ 1200</td><td>文字 JSON 修復請求的硬上限</td><td>修復不可重新上傳圖片；實際值仍受 budget.max_tokens 夾制</td></tr>
+<tr><td>render.memory_threshold</td><td>渲染設定</td><td>70</td><td>0 ~ 100</td><td>歷史今日選片最低回憶分數</td><td>過高可能沒有候選照片</td></tr>
+<tr><td>render.caption_wrap_enabled</td><td>照片描述與相框文案</td><td>false</td><td>boolean</td><td>相框文案依實際字型像素寬度換行；預設關閉並維持既有單行截斷</td><td>啟用後最多兩行，必要時縮小字型；完整原文不會被修改</td></tr>
+<tr><td>render.caption_max_lines</td><td>照片描述與相框文案</td><td>2</td><td>1 ~ 2</td><td>相框文案開啟換行時的最大行數</td><td>Footer 空間不足時仍會縮小或截斷</td></tr>
+<tr><td>render.caption_min_font_size</td><td>照片描述與相框文案</td><td>17</td><td>10 ~ 24</td><td>相框文案開啟換行時可縮小到的最小字型大小</td><td>字型過小會影響電子紙可讀性</td></tr>
+<tr><td>render.quantity</td><td>渲染設定</td><td>5</td><td>1 ~ 50</td><td>每次發布畫面數</td><td>增加數量會增加裝置下載量；雙照片拼版每個畫面會使用兩張候選照片</td></tr>
+<tr><td>render.selection_mode</td><td>渲染設定</td><td>history_today</td><td>history_today／top_ranked</td><td>自動發布的選片方式；history_today 先選歷年同月同日</td><td>照片缺少拍攝日期時只能依回退規則補足</td></tr>
+<tr><td>render.history_today_window_days</td><td>渲染設定</td><td>7</td><td>0 ~ 31</td><td>歷年同日不足時，可向前後尋找的日數</td><td>設為 0 只接受完全相同月日</td></tr>
+<tr><td>render.history_today_fallback</td><td>渲染設定</td><td>nearby_then_ranked</td><td>nearby_then_ranked／nearby_only／ranked／none</td><td>歷年同日數量不足時的補圖規則</td><td>none 可能產生沒有照片可發布的工作</td></tr>
+<tr><td>render.local_candidate_limit</td><td>渲染設定</td><td>200</td><td>20 ~ 1000</td><td>本機選片每次最多由 SQLite 取出的候選數</td><td>提高數值會增加本機排序與配對成本，不會呼叫模型</td></tr>
+<tr><td>render.e6_weight</td><td>渲染設定</td><td>20</td><td>0 ~ 60</td><td>自動選片時 E6 六色適合度占最終排序的百分比</td><td>過高會讓面板顯示效果凌駕回憶與情緒分數</td></tr>
+<tr><td>render.layout</td><td>渲染設定</td><td>photo_info</td><td>full／postcard／photo_info／photo_pair／photo_pair_caption／adaptive_memory／calendar／weather_sensor</td><td>正式發布使用的相框版型</td><td>日曆與天氣版型會縮小照片顯示區域</td></tr>
+<tr><td>render.frame_orientation</td><td>渲染設定</td><td>portrait</td><td>portrait／landscape</td><td>相框實際擺放方向</td><td>月曆與天氣版型固定使用直向；其他版型會依此重新排版</td></tr>
+<tr><td>render.fit_mode</td><td>渲染設定</td><td>stretch_fill</td><td>stretch_fill／contain／cover</td><td>照片縮放方式</td><td>填滿照片區不裁切但可能微變形；完整顯示會保留留白；填滿裁切可能裁掉照片邊緣</td></tr>
+<tr><td>render.show_capture_date</td><td>渲染設定</td><td>true</td><td>boolean</td><td>在支援文字的版型顯示照片拍攝日期</td><td>照片 EXIF 日期錯誤時會顯示錯誤日期，可在照片詳情人工修正</td></tr>
+<tr><td>render.weather_enabled</td><td>相框天氣與感測</td><td>false</td><td>boolean</td><td>天氣版型從 Open-Meteo 取得所在地目前天氣與今日高低溫</td><td>需要 Worker 可連外；失敗時仍會發布，但畫面標示天氣暫時無法取得</td></tr>
+<tr><td>render.weather_latitude</td><td>相框天氣與感測</td><td>25.033</td><td>-90 ~ 90</td><td>天氣位置緯度（預設臺北市中心，啟用前請修改）</td><td>位置不正確會取得錯誤天氣</td></tr>
+<tr><td>render.weather_longitude</td><td>相框天氣與感測</td><td>121.5654</td><td>-180 ~ 180</td><td>天氣位置經度（預設臺北市中心，啟用前請修改）</td><td>位置不正確會取得錯誤天氣</td></tr>
+<tr><td>render.weather_location_name</td><td>相框天氣與感測</td><td>所在地</td><td>string</td><td>天氣版型顯示的地點名稱</td><td>只影響畫面標示，不會自動修改經緯度</td></tr>
+<tr><td>render.sensor_device_id</td><td>相框天氣與感測</td><td></td><td>string</td><td>室內溫溼度使用的裝置 ID；留空時採用最近回報的裝置</td><td>多台裝置時建議指定，避免顯示另一個房間的感測值</td></tr>
+<tr><td>render.font_path</td><td>渲染設定</td><td>builtin:iansui</td><td>string</td><td>繁體中文字型；可選內建手寫／文青風格或管理員上傳字型</td><td>正式渲染會逐段檢查字元，缺字時禁止發布且不使用預設字型替代</td></tr>
+<tr><td>render.show_location</td><td>渲染設定</td><td>true</td><td>boolean</td><td>照片含 GPS 時，在電子紙短文案下方顯示最近城市</td><td>只顯示離線城市索引的粗略地名，不顯示精確座標；停用可從電子紙畫面隱藏</td></tr>
+<tr><td>render.location_max_distance_km</td><td>渲染設定</td><td>80</td><td>1 ~ 500</td><td>GPS 距離最近城市在此公里數內才顯示地名</td><td>數值過大可能顯示不夠準確的鄰近城市</td></tr>
+<tr><td>render.profile</td><td>渲染設定</td><td>gdep073e01_6c</td><td>safe_4c／gdep073e01_6c／gdey073d46_7c</td><td>正式發布使用的電子紙面板色彩 Profile</td><td>必須與裝置頁設定的面板型號一致；不一致時韌體會拒絕更新</td></tr>
+<tr><td>render.dither</td><td>渲染設定</td><td>gooddisplay</td><td>none／floyd_steinberg／gooddisplay／photo_smooth／atkinson／bayer4／bayer8／nearest／bayer_ordered／serpentine_floyd_steinberg</td><td>有限色電子紙的抖動算法；可選 GDEP 原廠相容或減少色塊與雜點的照片平滑模式</td><td>原廠相容與照片平滑固定使用標準強度；照片平滑可能略微柔化極細線條</td></tr>
+<tr><td>render.auto_photo_smooth_enabled</td><td>渲染設定</td><td>false</td><td>boolean</td><td>高暗部風險照片自動使用 photo_smooth</td><td>需待 Spectra 6 實機校正</td></tr>
+<tr><td>render.dither_strength</td><td>渲染設定</td><td>1.0</td><td>0 ~ 2</td><td>抖動誤差或閾值強度；0 為關閉、1 為標準；原廠相容與照片平滑固定為 1</td><td>過高會增加顆粒與色點；Good Display 原廠相容與照片平滑不使用此值</td></tr>
+<tr><td>render.color_distance</td><td>渲染設定</td><td>oklab</td><td>oklab／rgb</td><td>一般算法的色盤映射距離；OKLab 較符合人眼感知，RGB 較接近舊版</td><td>照片平滑與原廠相容固定使用 RGB；其他模式切換後色彩分布會不同</td></tr>
+<tr><td>render.custom_photo_presets</td><td>渲染設定</td><td>{}</td><td>string</td><td>六色照片 Renderer 的自訂 Preset（由 A/B 預覽頁管理）</td><td>內建 Preset 不會被覆寫；修改內建值時會另存自訂副本</td></tr>
+<tr><td>device.legacy_api_enabled</td><td>裝置設定</td><td>false</td><td>boolean</td><td>舊版 URL 金鑰下載模式</td><td>不安全；Token 可能進入 URL 與 Log；尚未接入 runtime；需重啟</td></tr>
+<tr><td>device.default_timezone</td><td>裝置設定</td><td>Asia/Taipei</td><td>string</td><td>新增 ESP32 裝置時套用的 IANA 時區</td><td>錯誤時區會使每日喚醒時間偏移</td></tr>
+<tr><td>device.default_schedule</td><td>裝置設定</td><td>08:00</td><td>string</td><td>新增 ESP32 裝置時套用的每日刷新時間（HH:MM）</td><td>刷新時電子紙與 Wi-Fi 會短暫提高耗電</td></tr>
+<tr><td>device.default_rotation</td><td>裝置設定</td><td>0</td><td>0／180</td><td>新增 7.3 吋裝置時套用的畫面方向</td><td>目前正式韌體只支援 0° 與 180°</td></tr>
+<tr><td>device.default_panel_profile</td><td>裝置設定</td><td>gdep073e01_6c</td><td>safe_4c／gdep073e01_6c／gdey073d46_7c</td><td>新增 ESP32 裝置時套用的面板 Profile</td><td>請依實際面板型號選擇；選錯會由韌體安全拒絕</td></tr>
+<tr><td>notification.device_offline_enabled</td><td>裝置通知</td><td>true</td><td>boolean</td><td>裝置超過門檻未連線時建立站內通知</td><td>若裝置刷新週期長於離線門檻會誤報</td></tr>
+<tr><td>notification.device_offline_hours</td><td>裝置通知</td><td>30</td><td>1 ~ 720</td><td>距離最後連線多久後判定離線（小時）</td><td>每日喚醒裝置建議至少 26–30 小時</td></tr>
+<tr><td>notification.device_recovery_enabled</td><td>裝置通知</td><td>true</td><td>boolean</td><td>曾離線的裝置重新回報後建立恢復通知</td><td>停用後仍會清除離線狀態，但不建立恢復訊息</td></tr>
+<tr><td>notification.device_offline_repeat_enabled</td><td>裝置通知</td><td>false</td><td>boolean</td><td>離線期間是否依冷卻時間重複提醒</td><td>啟用可能增加外部 Webhook 通知量</td></tr>
+<tr><td>notification.device_offline_cooldown_hours</td><td>裝置通知</td><td>24</td><td>1 ~ 720</td><td>同一裝置重複離線提醒的最短間隔（小時）</td><td>過短會造成通知轟炸</td></tr>
+<tr><td>notification.scan_seconds</td><td>裝置通知</td><td>300</td><td>60 ~ 3600</td><td>Scheduler 掃描裝置離線與恢復狀態的秒數</td><td>過短會增加待機 SQLite 讀取</td></tr>
+<tr><td>notification.webhook_enabled</td><td>裝置通知</td><td>false</td><td>boolean</td><td>將新通知以 JSON POST 到外部 Webhook</td><td>Webhook 端點會收到裝置名稱與狀態；Token 另以加密欄位保存</td></tr>
+<tr><td>notification.webhook_url</td><td>裝置通知</td><td></td><td>string</td><td>接收通知的完整 https:// URL</td><td>只允許 DNS-pinned HTTPS；內部位址需明確 Allowlist</td></tr>
+<tr><td>notification.webhook_timeout_seconds</td><td>裝置通知</td><td>10</td><td>2 ~ 30</td><td>Webhook 單次連線與回應逾時秒數</td><td>過長會延後 Scheduler 的其他低頻工作</td></tr>
+<tr><td>system.log_level</td><td>Log 與診斷</td><td>INFO</td><td>DEBUG／INFO／WARNING／ERROR／CRITICAL</td><td>應用程式最低 Log 層級；建議正式環境使用 INFO 或 WARNING</td><td>DEBUG 可能包含大量技術細節並增加磁碟寫入</td></tr>
+<tr><td>system.log_format</td><td>Log 與診斷</td><td>json</td><td>human／json</td><td>Console Log 格式（human/json）</td><td>JSON 適合集中式 Log</td></tr>
+<tr><td>system.diagnostics_cache_seconds</td><td>Log 與診斷</td><td>21600</td><td>30 ~ 86400</td><td>診斷頁重算縮圖目錄大小前的快取秒數；預設 6 小時</td><td>數值太小會在大型快取目錄產生頻繁磁碟掃描</td></tr>
+<tr><td>security.session_minutes</td><td>安全設定</td><td>30</td><td>5 ~ 1440</td><td>管理介面閒置 Session 分鐘數</td><td>過長會增加共用裝置風險</td></tr>
+<tr><td>backup.schedule_enabled</td><td>備份設定</td><td>true</td><td>boolean</td><td>每日自動建立資料庫備份</td><td>需預留備份空間</td></tr>
+<tr><td>backup.hour</td><td>備份設定</td><td>3</td><td>0 ~ 23</td><td>依系統時區執行備份的小時</td><td>請避開大量分析時段</td></tr>
+<tr><td>backup.retention</td><td>備份設定</td><td>14</td><td>1 ~ 365</td><td>保留的自動備份數量</td><td>過低會縮短可回復時間</td></tr>
+</tbody></table></div>
 <hr class="doc-divider">
 <h2 id="sec-14" class="doc-h2"><span class="h2-anchor-icon">#</span> 十四、 全情境故障排除與問題診斷指南</h2>
 <h3 id="sec-14-1" class="doc-h3">14.1 網路連線與 ESP32 硬體故障排除</h3>
@@ -2006,7 +2031,7 @@ INKTIME_LOG_LEVEL=INFO</code></pre>
 <h4 id="現象-2-esp32-下載時回傳-http-404-not-found" class="doc-h4">現象 2：ESP32 下載時回傳 <code>HTTP 404 Not Found</code></h4>
 <ul class="doc-list"><li><strong>可能原因</strong>：</li><li>伺服器資料庫 <code>render_releases</code> 中尚未產生任何發布集。</li><li>ESP32 裝置設定的面板 Profile（如 <code>safe_4c</code>）與伺服器目前渲染發布的 Profile（如 <code>gdep073e01_6c</code>）不一致。</li><li><strong>排除步驟與診斷</strong>：</li><li>進入 Web 控制台 <code>/</code> (儀表板) 點擊 <code>[手動發布新畫面]</code>，強制生成一組最新發布集。</li><li>進入 <code>/devices</code> 檢查 ESP32 裝置的 Profile 設定，並至 <code>/settings</code> 確保 <code>render.profile</code> 設定兩者完全一致。</li></ul>
 <h4 id="現象-3-esp32-開機後不斷自動重啟-serial-輸出-heap-allocation-failed" class="doc-h4">現象 3：ESP32 開機後不斷自動重啟，Serial 輸出 <code>Heap Allocation Failed</code></h4>
-<ul class="doc-list"><li><strong>可能原因</strong>：</li><li>編譯韌體時未啟用 <code>PSRAM</code>，導致 ESP32 SRAM 空間不足以容納 192KB 的圖片 Buffer。</li><li>韌體中將 HTTP Client 設定為一次性將整份檔案 <code>getString()</code> 載入記憶體。</li><li><strong>排除步驟與診斷</strong>：</li><li>檢查 Arduino IDE 工具選單或 <code>platformio.ini</code>，確保選擇了 <code>OPI PSRAM</code> 與 <code>16MB Flash</code>。</li><li>確認韌體使用流式（Streaming/Chunked）讀取，分批透過 SPI 將 Payload 寫入墨水屏驅動 IC。</li></ul>
+<ul class="doc-list"><li><strong>可能原因</strong>：</li><li>編譯韌體時未啟用 <code>PSRAM</code>，導致 ESP32 SRAM 空間不足以容納 192KB 的圖片 Buffer。</li><li>韌體中將 HTTP Client 設定為一次性將整份檔案 <code>getString()</code> 載入記憶體。</li><li><strong>排除步驟與診斷</strong>：</li><li>檢查 Arduino IDE 工具選單或 Arduino CLI 的板型參數，確保選擇了 <code>OPI PSRAM</code> 與 <code>16MB Flash</code>。</li><li>確認韌體使用流式（Streaming/Chunked）讀取，分批透過 SPI 將 Payload 寫入墨水屏驅動 IC。</li></ul>
 <h4 id="現象-4-esp32-鋰電池續航不到-1-週即告耗盡" class="doc-h4">現象 4：ESP32 鋰電池續航不到 1 週即告耗盡</h4>
 <ul class="doc-list"><li><strong>可能原因</strong>：</li><li>伺服器現場渲染速度過慢（> 5 秒），導致 ESP32 WiFi 保持全功率發射時間過長。</li><li>ESP32 刷屏完畢後未正確呼叫 <code>esp_deep_sleep_start()</code> 進入休眠。</li><li><strong>排除步驟與診斷</strong>：</li><li>檢查背景 Scheduler 的 Pre-rendering 預先編譯功能是否正常，確保 ESP32 可在 0.2 秒內完成 HTTP 下載。</li><li>連接 Serial Monitor，確認刷屏結束後有印出 <code>Entering Deep Sleep for X seconds</code> 訊息。</li></ul>
 <hr class="doc-divider">
@@ -2014,7 +2039,7 @@ INKTIME_LOG_LEVEL=INFO</code></pre>
 <h4 id="現象-1-相片庫顯示-missing-照片數暴增-或掃描器停止並警示-超過-missing-門檻" class="doc-h4">現象 1：相片庫顯示 Missing 照片數暴增，或掃描器停止並警示「超過 Missing 門檻」</h4>
 <ul class="doc-list"><li><strong>可能原因</strong>：</li><li>NAS 網路硬碟 (SMB / AFP) 掉盤或網路連線中斷，導致 <code>INKTIME_PHOTO_DIR</code> 變成空目錄。</li><li>相片磁碟資料夾存取權限變更（例如 Docker 容器內無權限讀取 <code>/photos</code>）。</li><li><strong>排除步驟與診斷</strong>：</li><li>進入 <code>/diagnostics</code> 檢查照片路徑存取狀態，重新掛載 NAS 磁碟。</li><li>在 <code>/settings</code> 檢查 <code>scanner.missing_threshold_percent</code> 預設 10% 安全門檻；確定磁碟掛載正常後，於 <code>/schedules</code> 手動觸發照片庫掃描。</li></ul>
 <h4 id="現象-2-歷史上的今天永遠找不到照片-或特定格式的照片被忽視" class="doc-h4">現象 2：歷史上的今天永遠找不到照片，或特定格式的照片被忽視</h4>
-<ul class="doc-list"><li><strong>可能原因</strong>：</li><li>照片的 EXIF 日期格式非標準 <code>YYYY:MM:DD</code>（如使用 ISO 8601 或斜線 <code>YYYY/MM/DD</code>），造成日期解析傳回空字串。</li><li>照片被本機預篩選（截圖識別/低品質瑕疵/E6 面板失真）自動排除。</li><li><strong>排除步驟與診斷</strong>：</li><li>點擊該照片詳情頁 <code>/photos/{photo_id}</code>，檢視 EXIF 欄位並點擊 <code>[手動變更拍攝日期]</code>。</li><li>進入 <code>/photos/excluded</code> 檢查排除列表，點擊 <code>[還原照片]</code> 移除排除標記。</li></ul>
+<ul class="doc-list"><li><strong>可能原因</strong>：</li><li>照片的 EXIF 日期格式非標準 <code>YYYY:MM:DD</code>（如使用 ISO 8601 或斜線 <code>YYYY/MM/DD</code>），造成日期解析傳回空字串。</li><li>照片被本機預篩選（截圖識別／低品質瑕疵）自動排除。</li><li><strong>排除步驟與診斷</strong>：</li><li>點擊該照片詳情頁 <code>/photos/{photo_id}</code>，檢視 EXIF 欄位並點擊 <code>[手動變更拍攝日期]</code>。</li><li>進入 <code>/photos/excluded</code> 檢查排除列表，點擊 <code>[還原照片]</code> 移除排除標記。</li></ul>
 <hr class="doc-divider">
 <h3 id="sec-14-3" class="doc-h3">14.3 AI 模型分析與 Token 成本故障排除</h3>
 <h4 id="現象-1-背景分析工作狀態顯示-budget_exceeded-並自動暫停" class="doc-h4">現象 1：背景分析工作狀態顯示 <code>budget_exceeded</code> 並自動暫停</h4>
@@ -2053,14 +2078,13 @@ INKTIME_LOG_LEVEL=INFO</code></pre>
 </tbody></table></div>
 
 <p class="doc-p">首次部署可依<a href="docs/operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md" class="doc-link">完整上線指南</a>，完成 NAS、Web、ESP32 配對與顯示驗收。</p>
-
 <h3 id="sec-15-2" class="doc-h3">15.2 完整 Markdown 檔案索引</h3>
-<p class="doc-p">以下 Markdown 文件路徑均以專案根目錄為起點；點擊檔名即可開啟原始文件。新增或移動文件時，必須同步更新本索引與 <a href="docs/README.md" class="doc-link">docs/README.md</a>。Provider Level 1/2/3、benchmark quality／ranking、ESP32 自動配對與 CA persistence 的操作細節分別見對應文件。</p>
+<p class="doc-p">以下列出維護中的 Markdown 文件，路徑均以專案根目錄為起點；點擊檔名即可開啟原始文件。新增或移動文件時，必須同步更新本索引與 <a href="docs/README.md" class="doc-link">docs/README.md</a>。Provider Level 1/2/3、benchmark quality／ranking、ESP32 自動配對與 CA persistence 的操作細節分別見對應文件。</p>
 
 <h4 class="doc-h4">專案入口</h4>
 <ul class="doc-list">
 <li><a href="README.md" class="doc-link"><code>README.md</code></a>：中文專案首頁、完整資料流與快速入口。</li>
-<li><a href="README.en.md" class="doc-link"><code>README.en.md</code></a>：英文舊版概要；現行資訊請以中文首頁與本手冊為準。</li>
+<li><a href="README.en.md" class="doc-link"><code>README.en.md</code></a>：英文專案概覽，與 2026-09-03 主線原始碼同步。</li>
 <li><a href="docs/README.md" class="doc-link"><code>docs/README.md</code></a>：Markdown 版文件地圖、分類規則與維護方式。</li>
 </ul>
 
@@ -2086,8 +2110,8 @@ INKTIME_LOG_LEVEL=INFO</code></pre>
 <ul class="doc-list">
 <li><a href="docs/OPENAI_BATCH_ANALYSIS_ZH_TW.md" class="doc-link"><code>docs/OPENAI_BATCH_ANALYSIS_ZH_TW.md</code></a>：Batch 輸入快照、隱私、生命週期、成本與實際人工 smoke 邊界。</li>
 <li><a href="docs/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md" class="doc-link"><code>docs/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md</code></a>：正式環境安全、LAN、持久化與交接檢查。</li>
-<li><a href="docs/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md" class="doc-link"><code>docs/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md</code></a>：本輪 P1、Provider、AI、Release、Container、文件與 hosted CI 交接證據。</li>
-<li><a href="docs/branch-consolidation-report.md" class="doc-link"><code>docs/branch-consolidation-report.md</code></a>：分支整併、Migration 26、CI 與遠端分支清理證據。</li>
+<li><a href="docs/archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md" class="doc-link"><code>docs/archive/reports/FINAL_ONE_SHOT_HARDENING_AUDIT.md</code></a>：本輪 P1、Provider、AI、Release、Container、文件與 hosted CI 交接證據。</li>
+<li><a href="docs/archive/reports/branch-consolidation-report.md" class="doc-link"><code>docs/archive/reports/branch-consolidation-report.md</code></a>：分支整併、Migration 26、CI 與遠端分支清理證據。</li>
 <li><a href="docs/post-merge-hardware-validation.md" class="doc-link"><code>docs/post-merge-hardware-validation.md</code></a>：軟體／hosted PASS 與真實 OpenAI、NAS、ESP32 驗收的 NOT RUN 邊界。</li>
 </ul>
 
@@ -2104,7 +2128,7 @@ INKTIME_LOG_LEVEL=INFO</code></pre>
 
 <h4 class="doc-h4">維運、安全與部署（<code>docs/operations/</code>）</h4>
 <ul class="doc-list">
-<li><a href="docs/operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md" class="doc-link"><code>docs/operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md</code></a>：NAS、Web、ESP32 完整上線與更新復原流程。</li>
+<li><a href="docs/operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md" class="doc-link"><code>docs/operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md</code></a>：NAS、Web、ESP32 完整上線與更新復原。</li>
 <li><a href="docs/operations/DOCKER_GUIDE_ZH_TW.md" class="doc-link"><code>docs/operations/DOCKER_GUIDE_ZH_TW.md</code></a>：N100 Docker 部署、資源、健康檢查、更新與回滾。</li>
 <li><a href="docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md" class="doc-link"><code>docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md</code></a>：Git Tag 發布 GHCR 映像、NAS 初次設定、單一 Tag 更新與固定版本回復。</li>
 <li><a href="docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md" class="doc-link"><code>docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md</code></a>：N100 容量與低功耗調校。</li>
@@ -2172,10 +2196,22 @@ INKTIME_LOG_LEVEL=INFO</code></pre>
 <h4 class="doc-h4">元件旁文件</h4>
 <ul class="doc-list">
 <li><a href="esp32/ink-display-133C-photo/README.md" class="doc-link"><code>esp32/ink-display-133C-photo/README.md</code></a>：133C 韌體元件說明。</li>
-<li><a href="esp32/ink-display-7C-photo/README.md" class="doc-link"><code>esp32/ink-display-7C-photo/README.md</code></a>：7.3 吋／PhotoPainter 現行韌體入口。</li>
 <li><a href="esp32/ink-display-7C-photo/THIRD_PARTY_NOTICES.md" class="doc-link"><code>esp32/ink-display-7C-photo/THIRD_PARTY_NOTICES.md</code></a>：7C／PhotoPainter 韌體第三方授權聲明。</li>
 <li><a href="inktime/app/domain/rendering/font_assets/README.md" class="doc-link"><code>inktime/app/domain/rendering/font_assets/README.md</code></a>：內建繁體中文字型資產說明。</li>
 <li><a href="simulation_photos/README.md" class="doc-link"><code>simulation_photos/README.md</code></a>：模擬器照片投放資料夾說明。</li>
+</ul>
+
+<h4 class="doc-h4">現行基線、規則與補充文件（2026-09-03）</h4>
+<p class="doc-p"><a class="doc-link" href="docs/architecture/IMAGE_FORMAT_CONTRACT_ZH_TW.md">docs/architecture/IMAGE_FORMAT_CONTRACT_ZH_TW.md</a>：靜態照片、HEIC／HEIF 解碼與原檔保護契約。</p>
+
+<ul class="doc-list">
+<li><a href="AGENTS.md" class="doc-link"><code>AGENTS.md</code></a>：Hosted CI and delivery policy。</li>
+<li><a href="docs/CI_POLICY.md" class="doc-link"><code>docs/CI_POLICY.md</code></a>：InkTime CI policy。</li>
+<li><a href="docs/devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md" class="doc-link"><code>docs/devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md</code></a>：PhotoPainter Rev2.0 TG28 實板除錯交接紀錄。</li>
+<li><a href="docs/guides/ACTIVITY_AI_TRACE_ZH_TW.md" class="doc-link"><code>docs/guides/ACTIVITY_AI_TRACE_ZH_TW.md</code></a>：Activity、工作與 AI Trace 判讀。</li>
+<li><a href="docs/operations/PHOTO_ANALYSIS_RETENTION_ZH_TW.md" class="doc-link"><code>docs/operations/PHOTO_ANALYSIS_RETENTION_ZH_TW.md</code></a>：Photo Analysis 歷史資料保留與安全清理。</li>
+<li><a href="docs/reports/DOCUMENTATION_SYNC_20260831.md" class="doc-link"><code>docs/reports/DOCUMENTATION_SYNC_20260831.md</code></a>：2026-08-31 全專案 Markdown 校對紀錄。</li>
+<li><a href="esp32/ink-display-7C-photo/README.md" class="doc-link"><code>esp32/ink-display-7C-photo/README.md</code></a>：7.3 吋／PhotoPainter 韌體入口。</li>
 </ul>
         </article>
     </main>

@@ -4,13 +4,14 @@
 
 ## 0. 目前韌體與 Config Store 版本
 
-- 目前自製 InkTime 韌體版本：`2.8.3`。
-- Config Store 目前寫入 schema：`4`。
-- Config Store 相容讀取舊 schema：`1`、`2`、`3`。
+- 目前自製 InkTime 韌體版本：`2.8.6`。
+- Config Store 目前寫入 schema：`5`。
+- Config Store 相容讀取舊 schema：`1`、`2`、`3`、`4`。
 - `2.8.2` 將連續 max-awake 故障退避改為 `1h → 6h → 24h → 每日一次`；每次退避後只允許一次 probation，正常完成睡眠或 GPIO4 明確 recovery 會清除故障狀態。此機制不寫 NVS，也不改 TG28／EPD 電源軌。
 - `2.8.3` 讓 PhotoPainter 可用嚴格 RFC1918 IP 的 LAN HTTP 直接配對，將 AP 密碼縮為
   每個 session 重新產生的 8 位隨機數字，並簡化手機 Portal；HTTPS CA 驗證、Automatic
   Pairing、Device Secret 與 A/B Config Store 不變。
+- Schema 5 將新能力容量提高至 24 slots；舊 schema 最多 12，Server 仍依配對確認的 capability 決定上限，不能只改版本字串。2.8.6 另加入 KEY1 電源頁停留後驗證 SD 原圖恢復，見[PhotoPainter 指南](WAVESHARE_PHOTOPAINTER_ZH_TW.md)。
 - Schema 4 新增同步策略欄位：`sync_strategy` 與 `sync_time`。`first_display_lead` 沿用既有 `prefetch_lead_minutes`，`sync_time` 必須為空；`fixed_daily` 則必須提供合法的 `HH:MM`。
 
 ## 1. 三種裝置認證模式
@@ -18,7 +19,7 @@
 | 模式 | 後端 `auth_mode` | 認證材料 | 是否進入自動配對 |
 |---|---|---|---|
 | 自製 InkTime 韌體 | `automatic` | claim／confirm 後取得的長效 `Device Secret`＋`X-InkTime-Credential-Version` | 是 |
-| 舊版裝置相容 | `legacy_token` | 既有 Bearer Token | 否；保留舊 API 行為 |
+| 舊版裝置相容 | `legacy_token` | 既有 Bearer Token | 否；保留現行 Device API 的 Token 相容行為 |
 | Stock PhotoPainter | `stock` | 既有 Stock 相容路徑使用的 Bearer Token／伺服器推送 | 否；不得由配對 API 建立 |
 
 管理介面新增自製裝置時不再回傳手動 Token，也不顯示 Token 輸入框。Stock 裝置仍由伺服器主動送到設定的 Stock Host；不要把 Stock 裝置改刷自製 InkTime 自動配對韌體，兩條路徑不可混用。
@@ -27,7 +28,7 @@
 
 1. 新自製裝置不必先按「新增裝置」：第一次 pairing request 只建立待處理 enrollment，不建立或啟用 `devices` 正式資料列。管理員可在 `/devices` 的待處理列輸入實體相框顯示的配對碼，並設定名稱、面板 Profile、交付模式、時區與排程；頁面不回傳 Secret 或配對碼。
 2. ESP32 進入 AP 設定頁，只填 Wi-Fi、Backend Origin 與 TLS Root CA。既有 `device_token` 若存在會保留為 Legacy 相容資料，但不再提供手動輸入欄位。
-3. ESP32 先把新的高熵 `pairing_nonce` 寫入 A/B Config，再將唯一 `device_id` 與該 nonce POST 到 `/api/device/v1/pairing/request`。若 request 已送達但 response 在掉電中遺失，下一次喚醒會重用同一 nonce 取回原 enrollment metadata；production 必須使用 HTTPS，Body 必須是精確的 `application/json` object。
+3. ESP32 先把新的高熵 `pairing_nonce` 寫入 A/B Config，再將唯一 `device_id` 與該 nonce POST 到 `/api/device/v1/pairing/request`。若 request 已送達但 response 在掉電中遺失，下一次喚醒會重用同一 nonce 取回原 enrollment metadata；production 預設使用 HTTPS；明確允許的可信任 LAN production 可用 HTTP，Body 必須是精確的 `application/json` object。
 4. Server 只保存 nonce HMAC 與配對碼 HMAC；配對碼短效 5 分鐘，且錯誤核准最多 5 次。Response 的六位數碼只供裝置顯示在 pairing screen（PhotoPainter 或 GxEPD2），不能寫入 Log、URL、DOM、Audit 或可逆欄位。
 5. 管理員在 `/devices` 的待處理表輸入實體相框上的六位數配對碼，再核對裝置名稱、Firmware、Profile、Capabilities 並按「核准」。管理頁永遠不顯示伺服器已知的配對碼；核准 API 是管理員 Session，仍需要 CSRF；Viewer 不可核准、拒絕、撤銷或允許重新配對。
 6. ESP32 每 3 秒 POST `/api/device/v1/pairing/claim`，單次喚醒最多輪詢約 30 秒。未核准回 `202` 並附 `Retry-After: 3`；核准後回傳可重試的短效 credential envelope 內容。ESP32 若在 claim 或 confirm 中斷，下一次喚醒會以同一 `pairing_id`、nonce 取回相同 credential，不建立新的 request。
@@ -46,7 +47,7 @@
   "device_id": "esp32-ABC123",
   "pairing_nonce": "高熵隨機字串",
   "firmware_identity": "ESP32-S3-PhotoPainter",
-  "firmware_version": "2.8.3",
+  "firmware_version": "2.8.6",
   "panel_profile": "safe_4c",
   "capabilities": {
     "automatic_pairing": true,
@@ -112,7 +113,7 @@ Automatic credential 缺少版本、版本不符、裝置未處於 `paired`、�
 
 - `device_secret`、`device_id`、`auth_state`、`credential_version`；
 - `pairing_id`、`pairing_nonce`、`pairing_expires_at_epoch`、`pairing_retry_at_epoch`、`pairing_retry_attempt`；
-- Config Store 目前寫入 payload schema `4`；deserialize 相容讀取舊 schema `1`、`2`、`3`；
+- Config Store 目前寫入 payload schema `5`；deserialize 相容讀取舊 schema `1`、`2`、`3`、`4`；
 - schema 4 的 `sync_strategy` 支援 `first_display_lead` 與 `fixed_daily`；前者使用既有 `prefetch_lead_minutes` 且 `sync_time` 為空，後者要求合法 `HH:MM` 的 `sync_time`；
 - Config Store 仍執行 slot CRC、generation、pointer recovery、prepare／commit read-back；
 - 不新增散落的明文 `Preferences` credential key；Factory Reset 會清除新的正式 A/B payload 與既有 legacy 設定。

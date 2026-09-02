@@ -1,8 +1,10 @@
 # InkTime｜照片分析與電子紙回憶管理平台
 
-[English README](README.en.md) · [專案規格與文件入口](USER_MANUAL.html) · [完整 Markdown 文件地圖](docs/README.md) · [完整程式流程圖](#完整程式流程圖從啟動照片分析到電子紙顯示) · [快速開始](docs/getting-started/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/guides/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/operations/DOCKER_GUIDE_ZH_TW.md) · [完整上線指南](docs/operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md) · [NAS Tag 更新](docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md) · [ESP32／電子紙指南](docs/devices/ESP32_GUIDE_ZH_TW.md) · [ESP32 自動配對與憑證](docs/devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) · [Waveshare PhotoPainter](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) · [ESP32 TLS／配網信任根](docs/devices/ESP32_TLS_PROVISIONING_ZH_TW.md) · [OpenRouter Provider](docs/providers/OPENROUTER_ZH_TW.md) · [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md) · [資源與低功耗](docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/operations/LOGGING_GUIDE_ZH_TW.md)
+> 原始碼核對：2026-09-03，主線 `51309e2`。SQLite Migration 57、AI Schema v4、ESP32 2.8.6；詳細版本、預設值與驗收邊界見[現行基線](docs/reference/CURRENT_STATE_ZH_TW.md)。
 
-InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複與低價值照片，再以可控預算的視覺模型產生繁體中文描述、分類、分數與電子紙短文案。所有工作、模型、成本、裝置、渲染、備份與診斷都能由登入後的 Web 管理介面操作。
+[English README](README.en.md) · [HTML 手冊與文件入口](USER_MANUAL.html) · [完整 Markdown 文件地圖](docs/README.md) · [完整程式流程圖](#完整程式流程圖從啟動照片分析到電子紙顯示) · [快速開始](docs/getting-started/QUICK_START_ZH_TW.md) · [電子紙模擬器](docs/guides/EPAPER_SIMULATOR_ZH_TW.md) · [N100 Docker 部署規格](docs/operations/DOCKER_GUIDE_ZH_TW.md) · [完整上線指南](docs/operations/PRODUCTION_DEPLOYMENT_GUIDE_ZH_TW.md) · [NAS Tag 更新](docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md) · [ESP32／電子紙指南](docs/devices/ESP32_GUIDE_ZH_TW.md) · [ESP32 自動配對與憑證](docs/devices/ESP32_AUTOMATIC_PAIRING_ZH_TW.md) · [Waveshare PhotoPainter](docs/devices/WAVESHARE_PHOTOPAINTER_ZH_TW.md) · [ESP32 TLS／配網信任根](docs/devices/ESP32_TLS_PROVISIONING_ZH_TW.md) · [OpenRouter Provider](docs/providers/OPENROUTER_ZH_TW.md) · [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md) · [資源與低功耗](docs/operations/N100_RESOURCE_GUIDE_ZH_TW.md) · [Log 指南](docs/operations/LOGGING_GUIDE_ZH_TW.md)
+
+InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先辨識重複與不適合顯示的照片。新安裝預設只做本機選片；明確啟用 AI 後，才以可控預算的視覺模型產生繁體中文描述、分類、分數與電子紙短文案。所有工作、模型、成本、裝置、渲染、備份與診斷都能由登入後的 Web 管理介面操作。
 
 決策追蹤、回饋閉環、Shadow Mode、離線內容 Queue、資料保留與 Canary 發布皆為可選功能，預設不會改變既有配對裝置、正式 Release 或選片。啟用與故障處理請見 [實作計畫](docs/resilience/DECISION_FEEDBACK_RESILIENCE_PLAN_ZH_TW.md)、[決策追蹤](docs/resilience/DECISION_TRACE_ZH_TW.md)、[Shadow Mode](docs/resilience/SHADOW_MODE_ZH_TW.md)、[離線 Queue](docs/resilience/OFFLINE_QUEUE_ZH_TW.md)、[資料保留](docs/resilience/DATA_RETENTION_ZH_TW.md)、[Canary](docs/resilience/CANARY_ROLLOUT_ZH_TW.md)。
 
@@ -12,19 +14,19 @@ InkTime 會在本地掃描相簿、擷取 EXIF 與品質特徵，先去除重複
 
 - 以 SHA-256、pHash、dHash、EXIF、亮度、對比、模糊與曝光做本地預處理；相同內容不重複呼叫模型。
 - 512／1024／1600px 內容雜湊縮圖快取；預設不傳原始 4K／8K 圖片。
-- 單一分析請求同時回傳描述、類型、四種分數、短文案與敏感判斷；JSON 最多純文字修復一次。
+- 單一分析請求同時回傳描述、類型、回憶與視覺兩項分數、特殊程度、短文案、內容分類與必要方向欄位；JSON 最多純文字修復一次。
 - 正式 OpenRouter Provider contract：受控 routing／privacy options、reasoning 與 session routing；OpenRouter 不進入 InkTime Batch 路徑。完整設定見 [OpenRouter Provider 文件](docs/providers/OPENROUTER_ZH_TW.md)。
 - 每筆 usage 區分 `provider_reported`／`estimated`／`unknown`；unknown 不會被當作 US$0，預算與新請求採 fail-closed。Token、cache 與 request-size 指標見 [Token 與成本指南](docs/reference/TOKEN_COST_GUIDE_ZH_TW.md)。
 - 提供預設 offline、bounded、可重現的 [模型 Benchmark](docs/providers/MODEL_BENCHMARK_ZH_TW.md)；不會修改 production DB、analysis、release 或 AI cache。
 - 支援同步 Vision 與 OpenAI Batch。OpenAI Files Batch lifecycle 已接入背景工作，支援 JSONL preparation、upload、submission、poll、result import 與 remote cleanup；同時支援 `upload_unknown`／`submission_unknown` 人工 Recovery、Cancel／Abandon、CAS、lease、attempt identity，以及 Job／Batch／Item transaction invariants。Fake lifecycle 與 CI 已覆蓋；真實 OpenAI API live smoke 仍為 `NOT RUN`，正式啟用前應先用 1–3 張非敏感圖片進行 gated live smoke。完整操作見 [OpenAI Batch 照片分析指南](docs/OPENAI_BATCH_ANALYSIS_ZH_TW.md)。
 - 持久化 Job、逐張狀態、有界佇列、暫停、續跑、取消、失敗重跑、重啟恢復與成本停止線。
 - administrator／viewer、Session、CSRF、登入限制與每台 ESP32 的自動配對 Device Secret；既有 Legacy Bearer Token 與 PhotoPainter Stock 相容模式分流保留。
-- 480×800 四色 2bpp 與完整六／七色 indexed4 版本化發布；OKLab／RGB 色差、五種抖動、Profile 獨立 latest、SHA-256 與回滾。
+- 480×800 四色 2bpp 與完整六／七色 indexed4 版本化發布；OKLab／RGB 色差、10 個抖動選項（含別名／無抖動）、Profile 獨立 latest、SHA-256 與回滾。
 - 裝置設定版本 ACK、離線／恢復站內通知、去重／冷卻與三次持久化 Webhook 重試。
 - 繁體中文管理介面、動態 Log 層級、節流進度、錯誤中心、程序／cgroup／SQLite／Worker 診斷與已遮蔽診斷包。
 - Intel N100 低資源預設：單 Web worker、圖片特徵最大 512px 樣本、有界 Future、15 秒閒置輪詢與容器 CPU／RAM／PID 上限。
 
-正式部署採 loopback bind、Secure cookie、HTTPS public URL 與禁止 insecure HTTP；本機開發請明確使用 [`docker-compose.dev.yml`](docker-compose.dev.yml)。PhotoPainter 可用嚴格 RFC1918 IP 直連家用 InkTime，HTTPS 仍要求 trust anchor；8 位隨機數字配網密碼只顯示在 portal／裝置畫面。實體板、正式 NAS、真實 OpenRouter／OpenAI API 驗證仍標記 `NOT RUN`，交接詳見 [Production readiness handoff](docs/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md)。
+正式部署採 loopback bind、Secure cookie、HTTPS public URL 與禁止 insecure HTTP；本機開發請明確使用 [`docker-compose.dev.yml`](docker-compose.dev.yml)。PhotoPainter 可用嚴格 RFC1918 IP 直連家用 InkTime，HTTPS 仍要求 trust anchor；8 位隨機數字配網密碼只顯示在 portal／裝置畫面。本次未重跑實體板、正式 NAS 或真實 OpenRouter／OpenAI API 驗證；既有局部實板結果保留於[Rev2.0 交接](docs/devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md)，交接詳見 [Production readiness handoff](docs/PRODUCTION_READINESS_SECURITY_HANDOFF_ZH_TW.md)。
 
 ## 架構
 
@@ -270,15 +272,15 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    CANDIDATE["🖼️ 候選 Photo ID"] --> S1{"status = analyzed？"}
+    CANDIDATE["🖼️ 候選 Photo ID"] --> S1{"已有有效分析，或執行模式允許本機特徵？"}
     S1 -->|否| REJECT["🚫 不可發布"]
-    S1 -->|是| S2{"eligible = 1？"}
+    S1 -->|是| S2{"eligible = 1，且未被禁止顯示／人工排除？"}
     S2 -->|否| REJECT
     S2 -->|是| S3{"lifecycle_status = active？"}
     S3 -->|否：Missing／Archived| REJECT
     S3 -->|是| S4{"所屬 Library enabled？"}
     S4 -->|否| REJECT
-    S4 -->|是| S5{"最新一筆 photo_analysis 存在？"}
+    S4 -->|是| S5{"凍結來源為有效 analysis 或完成的 local features？"}
     S5 -->|否| REJECT
     S5 -->|是| S6{"safe_join 後仍位於 Library Root？"}
     S6 -->|否：越界／非法路徑| REJECT
@@ -631,7 +633,7 @@ flowchart LR
 flowchart TD
     FAILURE{"任何步驟失敗"} --> KIND{"失敗位置"}
     KIND -->|掃描／NAS 暫時離線| KEEP_PHOTO["保留舊照片資料；不大量標 Missing"]
-    KIND -->|AI／Budget／Timeout| KEEP_ANALYSIS["不重複計費；保留可診斷狀態與既有分析"]
+    KIND -->|AI／Budget／Timeout| KEEP_ANALYSIS["保留可診斷狀態與既有分析；未知請求先核帳"]
     KIND -->|Renderer| KEEP_RELEASE["保留目前正式 Release 與電子紙舊畫面"]
     KIND -->|多 Profile pointer／DB history| COMPENSATE["還原全部舊 pointer；標記 staged_failed"]
     KIND -->|裝置下載／SHA／BUSY| KEEP_DISPLAY["不覆寫最後成功顯示狀態；測試 Assignment 可重試"]
@@ -643,48 +645,44 @@ flowchart TD
 
 ## Docker 快速安裝
 
-需求：Docker Engine 24+ 與 Compose v2。請先選擇部署模式，不要混用 HTTP 與 Secure Cookie 設定。
+需求：Docker Engine 24+ 與 Compose v2。先選擇正式 NAS 或本機開發流程。
 
-可信任 LAN Production HTTP（僅可信任 LAN／IoT VLAN）：
-
-```bash
-cp .env.lan.production.example .env
-# 換成實際 LAN URL、絕對 data/photos 路徑與 immutable Git SHA。
-python scripts/production_preflight.py --mode lan --env-file .env
-scripts/build_release_image.sh
-docker compose up -d
-```
-
-這個模式仍是 `INKTIME_ENVIRONMENT=production`，使用 `INKTIME_COOKIE_SECURE=0` 與明確的 `INKTIME_ALLOW_INSECURE_HTTP=1`。Health／diagnostics 會顯示 `transport=trusted-lan-http`、`security_state=degraded`、`tls_enabled=false` 與 `secure_cookie=false`；不可直接公開到 Internet。`.env.local.example` 只供 development／模擬。
-
-正式 HTTPS Reverse Proxy：
+NAS 正式部署依[NAS Tag 指南](docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md)準備同版部署檔、`.env.nas`、已存在且互不巢狀的 canonical 資料／照片目錄與實際 URL；確認 GHCR 版本已發布後執行：
 
 ```bash
-cp .env.production.example .env
-# 必須先把範例網域改成實際 HTTPS 網址，並確認 Proxy Trust。
-docker compose up -d --build
+# vX.Y.Z 必須換成實際已發布版本；首次納管才加 --initialize。
+sudo ./scripts/update_nas.sh --initialize vX.Y.Z
+# 日後更新：sudo ./scripts/update_nas.sh vX.Y.Z
 ```
 
-Production 預設且建議使用 `INKTIME_COOKIE_SECURE=1`、`INKTIME_ALLOW_INSECURE_HTTP=0`。若在特殊受控環境明確改成 `INKTIME_ALLOW_INSECURE_HTTP=1`／`INKTIME_COOKIE_SECURE=0`，系統可用 break-glass HTTP 啟動，但 Health／Preflight 會標示 degraded；此模式不可公開至 Internet，且沒有 Secure Cookie、HSTS 或 TLS 保證。不合理組合、localhost／範例 Production 網域、URL 內帳密或路徑會讓啟動明確失敗。首次管理員帳號需 3–64 個 ASCII 識別字元，密碼需 12–128 字元；密碼前後空白會被保留。
+更新器會檢查 marker、lock、部署契約與 recovery point，再以 `--no-build` 重建。NAS 不使用原始碼 Build，也不以手動 Compose up 繞過更新器。可信任 LAN HTTP 要一併設定 `INKTIME_COOKIE_SECURE=0`、`INKTIME_ALLOW_INSECURE_HTTP=1`、`INKTIME_PROXY_TRUST=0`，並使用實際 LAN IP；此模式會標示 degraded，不能公開至 Internet。HTTPS 使用 Secure Cookie 與正確反向代理。
 
-三個服務使用同一映像檔：
+本機開發／模擬使用：
+
+```bash
+cp .env.local.example .env
+# 填入實際 INKTIME_DEV_PUBLIC_URL、綁定位址與資料／照片路徑。
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+```
+
+開發 override 預設向 LAN 開放 Web；只在本機測試時把 `INKTIME_DEV_BIND_ADDRESS` 改成 `127.0.0.1`。以上是部署者操作範例；本儲存庫的一般開發測試與建置由 Hosted CI 執行，見 [AGENTS.md](AGENTS.md)。
+
+三個服務共用同一映像與 `/data`，原始照片掛載為 `/photos:ro`：
 
 - `inktime-web`：Gunicorn 管理介面與裝置 API。
 - `inktime-worker`：照片掃描、分析、重試與渲染工作。
-- `inktime-scheduler`：租約回收、每日備份與保留策略。
+- `inktime-scheduler`：排程、租約回收、備份與保留策略。
 
-若 NAS 不想每次拉原始碼或重新 Build，可在 `main` 建立 `vX.Y.Z` Git Tag，由 GitHub Actions 發布 `ghcr.io/steven87090799/inktime:vX.Y.Z`；NAS 端只需執行 `./scripts/update_nas.sh vX.Y.Z`。完整首次設定、私有 GHCR 登入、固定版本與回復方式見 [NAS 以 Git Tag 更新 Docker](docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md)。
-
-完整 N100 資源上限、Volume 權限、健康檢查、HTTPS、更新與回滾見 [Docker 部署規格](docs/operations/DOCKER_GUIDE_ZH_TW.md)。
+完整資源上限、Volume 權限、健康檢查、HTTPS 與回滾見 [Docker 部署規格](docs/operations/DOCKER_GUIDE_ZH_TW.md)。
 
 ## 首次使用
 
 1. 建立管理員並登入。
 2. 尚未準備模型或電子紙時，可將照片放進 `simulation_photos/`，到「維護」按「掃描並送到虛擬墨水屏」，再用獨立的 `/virtual-display` 接收正式 Manifest 與 BIN；這個流程不會呼叫模型。
-3. 要啟用智慧選片時，到「模型」新增 OpenAI、OpenAI 相容或本地端點；API Key 加密儲存且只顯示遮罩。
+3. 要啟用 AI 時，到「設定」搜尋「分析執行模式」，選 `automatic_ai`；再到「模型」設定 Provider 專屬模型、Key 與價格。本機選片不必設定模型。
 4. 到「維護」輸入容器內照片路徑（Compose 預設 `/photos`），建立背景掃描工作。
-5. 到「工作」建立兩階段智慧分析，確認照片數、Token、費用範圍與工作預算後啟動。
-6. 到「渲染」預覽並選擇內建的手寫／文青繁中字型，測試渲染後發布 2bpp 版本；需要時仍可上傳其他字型。
+5. 到「工作」以少量非敏感照片建立 `single` 分析，確認預算後啟動；從 [Activity／AI Trace](docs/guides/ACTIVITY_AI_TRACE_ZH_TW.md) 與成本核對是否真的呼叫模型。
+6. 到「渲染」預覽並選擇內建的手寫／文青繁中字型，測試渲染後發布與面板一致的四色／六色／七色版本；需要時仍可上傳其他字型。
 7. 新自製板不必先在「裝置」建立資料列：AP 設定頁只填 Wi-Fi／InkTime URL，裝置首次連線會取得短期配對碼並顯示在實體面板，管理員在 Web 輸入該碼核准；裝置以可恢復 claim／confirm 取得 Device Secret，confirm 後才建立正式資料列。既有 Legacy 或 Stock 裝置依相容模式操作。
 8. 到「備份」建立並下載第一份備份。
 
@@ -711,7 +709,7 @@ Production 預設且建議使用 `INKTIME_COOKIE_SECURE=1`、`INKTIME_ALLOW_INSE
 
 ## Token 與成本控制
 
-建議預設使用「兩階段智慧分析」：512px 低成本初篩，只有回憶分數達門檻、人物或最愛照片才使用 1600px 高品質模型。相同 SHA-256 繼承既有結果；短文案與所有分數在同一階段圖片請求輸出。管理介面提供每日、每月、單工作與單張照片停止值。詳見 [Token 成本指南](docs/reference/TOKEN_COST_GUIDE_ZH_TW.md)。
+新工作使用「單次完整分析」：本機預篩後只送一次圖片 Vision，必要時最多一次純文字 JSON 修復。相同 SHA-256 的可相容結果可繼承；短文案與所有分數在同一次圖片請求輸出。管理介面提供每日、每月、單工作與單張照片停止值。詳見 [Token 成本指南](docs/reference/TOKEN_COST_GUIDE_ZH_TW.md)。
 
 ## ESP32 配對與可靠性
 
@@ -725,11 +723,14 @@ Production 預設且建議使用 `INKTIME_COOKIE_SECURE=1`、`INKTIME_ALLOW_INSE
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python server.py                 # 僅本機開發
+python server.py                 # 僅本機開發；保持此終端執行
+# 另開終端，使用相同環境／路徑：
 python -m inktime.app.workers.runner
+# 再開一個終端：
+python -m inktime.app.workers.scheduler
 ```
 
-正式環境不可使用 Flask Development Server；請使用 Docker 或 `gunicorn server:app`。`analyze_photos.py` 是建立新版持久化分析工作的相容命令；分析、評分、渲染與發布都由 Modern Web／Worker／Scheduler 流程處理。
+正式環境不可使用 Flask Development Server；請使用 Docker 或 `gunicorn server:app`。原生程序不會自動載入 Compose 的 `.env`；使用 `INKTIME_DATA_DIR`／`INKTIME_PHOTO_DIR` 等 RuntimeConfig 環境變數。`analyze_photos.py` 是建立新版持久化工作並執行一輪 Worker 的相容命令；分析、評分、渲染與發布都由 Modern Web／Worker／Scheduler 流程處理。
 
 ## 安全注意事項
 
@@ -739,14 +740,14 @@ python -m inktime.app.workers.runner
 - Reverse Proxy 必須只傳入可信任來源的 `Host`、`X-Forwarded-Proto` 與 `X-Forwarded-For`，且 `INKTIME_PROXY_TRUST` 要等於實際 Proxy hop 數。
 - Webhook 會把通知內容送到外部服務；目的地只允許 DNS-pinned HTTPS、禁止 redirect 與內部位址，Bearer Token 仍應視為高敏感 Secret。
 - Device Secret 只在自動配對 claim 回應中交付一次；Legacy Token 仍只存於裝置受保護設定。兩者都不要放進 URL、Log、截圖或文件。
-- 舊 `/static/inktime/<key>/...` API 預設關閉；只有隔離網路短期遷移才可明確開啟。
+- Legacy Web／Analyzer／Renderer 與 `/static/inktime/<key>/...` 路由已退休；保留的 Legacy Device Token 認證不代表舊 URL 路由仍可啟用。
 - viewer 只能查看，不能修改設定、建立／控制工作、管理配對／憑證、發布或備份。
 
 詳見 [安全指南](docs/operations/SECURITY_GUIDE_ZH_TW.md)與[錯誤碼](docs/operations/ERROR_CODES_ZH_TW.md)。
 
 ## 更新、遷移與回滾
 
-更新前先從介面建立備份，再拉取映像並執行 `docker compose up -d --build`。Migration 使用版本、狀態歷史、單一交易、升級前備份與完整 `integrity_check`；任何失敗或未完成狀態都會停止啟動。回滾時停止三個服務，使用離線還原工具驗證並原子恢復舊資料庫與映像。詳細步驟見 [遷移指南](docs/operations/MIGRATION_GUIDE_ZH_TW.md)與[備份還原](docs/operations/BACKUP_RESTORE_ZH_TW.md)。
+更新前先從介面建立備份；NAS 依 [Tag 指南](docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md)執行更新器，開發環境才依其 Compose 流程重建。Migration 使用版本、狀態歷史、單一交易、升級前備份與完整 `integrity_check`；任何失敗或未完成狀態都會停止啟動。回滾時停止三個服務，使用離線還原工具驗證並原子恢復舊資料庫與映像。詳細步驟見 [遷移指南](docs/operations/MIGRATION_GUIDE_ZH_TW.md)與[備份還原](docs/operations/BACKUP_RESTORE_ZH_TW.md)。
 
 ## 常見問題
 
@@ -760,7 +761,7 @@ python -m inktime.app.workers.runner
 
 ## 正式發布與裝置安全邊界
 
-- 一般發布、歷史選片與排程共用同一候選資格：已分析、可選、active、最新分析存在，而且原始檔仍位於啟用的 Library Root。
+- 一般發布、歷史選片與排程共用候選資格：可選、active、未禁止顯示，且原始檔仍位於啟用的 Library Root。`automatic_ai` 要求有效分析；允許本機來源的模式可使用完成 Scanner 特徵的照片，來源逐張凍結於 Render Plan。
 - Release 先產生 staged 檔案並驗證 Manifest／大小／SHA-256，再以補償式流程切換 Profile pointer、提交 DB 與 `display_history`。啟動時標記漂移，失效 pointer 可回復到同 Profile 最新完整版本，但不自動刪除未知 Release。
 - 裝置仍使用 `Authorization: Bearer`；自動模式另帶 `X-InkTime-Credential-Version`，Legacy 模式維持相容 Token。Device Secret／Bearer Token 不會加密 HTTP；HTTP 只適合隔離 IoT VLAN，跨網路必須使用已驗證 CA 的 HTTPS 或 VPN。
 - 六／七色 Profile 明確宣告不支援 Partial Refresh；正式韌體已實作經驗證的相同內容跳過刷新，但真實面板的 BUSY、方向、殘影、色彩與功耗仍須實體驗收。

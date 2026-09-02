@@ -1,5 +1,7 @@
 # 本機無 AI 選片與雙照片文字版型
 
+操作入口：administrator →「設定」`/settings` → 搜尋「分析執行模式」或 `analysis.execution_mode`；找不到時切換進階並清除篩選。切換後建立新工作，既有已完成的本機工作不會自動變成 AI 工作。
+
 InkTime 的 `analysis.execution_mode` 是分析行為的權威設定。新安裝預設為
 `local_only`：Scanner 仍會擷取 EXIF、方向、本機品質與 E6 適合度，但不建立
 Provider Router、不讀取 Provider Secret、不保留 AI Cache、不建立模型請求，也不寫入模型費用。

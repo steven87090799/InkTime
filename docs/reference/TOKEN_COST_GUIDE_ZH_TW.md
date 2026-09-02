@@ -1,10 +1,12 @@
 # Token 與成本指南
 
-成本節省順序：掃描時排除影片／動畫 → SHA-256 相同內容繼承 → pHash 近似群組 → 本機截圖／明顯品質缺陷預篩選 → E6 六色適合度模擬 → 512px 第一階段 → 規則門檻 → 1600px 第二階段。主要分析一次輸出所有欄位，不再另傳圖片產生短文案。
+新安裝 `local_only` 不產生模型費用；一般 AI 工作必須明確啟用 `automatic_ai`。`single` 不代表供應商永遠只計一次費：新建重跑工作、允許的重試與文字修復可能增加帳務，應以 usage／Provider 對帳。
+
+成本節省順序：掃描時排除影片／動畫 → SHA-256 相同內容繼承 → pHash 近似群組 → 本機截圖／明顯品質缺陷預篩選 → E6 六色適合度模擬 → 同一 plan／Vision fingerprint 的快取 → 一次圖片 Vision（Web 預設 1024px、可選 1600px）。主要分析一次輸出所有欄位，不再另傳圖片產生短文案。
 
 本機預篩選預設採 `conservative`：截圖達門檻即可排除，一般照片需同時符合至少兩項模糊、低對比、極端曝光或低解析度訊號。排除結果以 `prefilter / local-prefilter` 保存，`api_usage` 不會新增紀錄，因此是 0 Token、0 API 成本；原檔不會刪除。若誤判，可先標記最愛再重新建立分析工作，或在「設定」降低敏感度／停用對應規則。
 
-E6 預篩選同樣完全在本機執行：以正式六色色盤量測量化後對比、主體細節、膚色與文字／強邊緣保留。低於 `analysis.e6_min_score` 才排除，且畫面會把它標為「電子紙適合度」，不代表原始照片品質差。可停用 `analysis.e6_prefilter_enabled`；最愛照片永遠略過。舊照片補算 E6 指標也不會呼叫 Provider。
+E6 適合度完全在本機計算，量測正式六色色盤量化後的對比、主體、膚色與文字／邊緣保留；只參與顯示分數，不再作自動排除門檻，也不計入本機品質分。補算 E6 不會呼叫 Provider。Migration 57 只解除符合舊 E6 規則且未人工覆寫的自動排除；其他排除與人工決定保留。
 
 每次 response usage 寫入 provider、model、job、photo、request type、input/output/cached Token、成本、延遲、狀態與重試。JSON 修復只傳文字且最多一次。
 
@@ -30,8 +32,8 @@ Migration 33 不會依照完全為零的 token、prompt／schema／request／ima
 
 | 請求 | 影像邊長 | 最大 completion tokens | 備註 |
 |---|---:|---:|---|
-| 完整分析 | 512／1024／1600 | 2048 | 一次輸出分數、分類、原因與顯示文案欄位 |
-| 變體分析 | 512／1024／1600 | 3072 | 僅在明確指定變體時使用 |
+| 完整分析 | 512／1024／1600 | 1200 | 一次輸出分數、分類、原因與顯示文案欄位 |
+| 變體分析 | 512／1024／1600 | 1200 | 僅在明確指定變體時使用 |
 | JSON 修復 | 無圖片 | 1200 | 最多一次，repair model 只接收文字 |
 
 每次 request 另保存 `prompt_chars`、`schema_chars`、`request_body_bytes` 與 `image_bytes`，讓圖片尺寸、Prompt、Schema 與傳輸大小可被分開追蹤；這些指標不是 Provider billing 的替代品。

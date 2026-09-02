@@ -1,5 +1,7 @@
 # InkTime · E-Ink Memory Frame
 
+> Source baseline: 2026-09-03, `51309e2`. Migration 57, AI Schema v4 and ESP32 2.8.6 are separate version contracts. See the [current-state reference](docs/reference/CURRENT_STATE_ZH_TW.md).
+
 > For complete Web/Worker/Scheduler setup, device queues, resilience features, and the document map, also see the [Chinese README](README.md), the [documentation portal](USER_MANUAL.html), and [docs/README.md](docs/README.md).
 
 [中文](README.md) | **English**
@@ -12,9 +14,9 @@ InkTime is an e-ink photo frame project that brings forgotten memories back from
 
 It does not show random photos, and it is not a simple chronological slideshow. Instead, it:
 
-- Uses AI to understand what each photo is about
+- Uses local metadata and quality features by default, with optional AI analysis
 - Scores photos by "memory value" and visual quality
-- Writes a short, spontaneous caption for each photo
+- Uses existing or local date/location captions; AI captions require an explicitly enabled provider
 - Picks the most meaningful photo from "on this day" every day
 - Pushes it to an ESP32-powered e-ink display
 
@@ -24,7 +26,7 @@ It does not show random photos, and it is not a simple chronological slideshow. 
 InkTime has three main parts:
 
 1. **Photo analysis (Python)**  
-   Scan photo library -> call a vision model -> classify, score, and caption photos -> store results in a database
+   Scan photo library -> compute local features -> optionally call an enabled vision provider -> store results in SQLite
 
 2. **Image rendering (Python)**  
    Select high-scoring "on this day" photos from the database -> render `.bin` files that the ESP32 can display directly
@@ -37,7 +39,7 @@ InkTime has three main parts:
 
 ### 1. Python
 
-Python 3.10+ is recommended.
+Python 3.10+ is required; the production image uses Python 3.12.
 
 Using a virtual environment is recommended:
 
@@ -47,51 +49,23 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Install exiftool (optional)
+### 2. Image metadata
 
-InkTime can run without exiftool, but it may not be able to extract complete GPS information from EXIF metadata.
-
-exiftool is recommended for GPS metadata:
-
-macOS (Homebrew): ```brew install exiftool```  
-Linux: ```sudo apt-get install -y libimage-exiftool-perl```
+The current scanner reads EXIF/GPS with Pillow and HEIF support. ExifTool is not required and is not invoked by the production pipeline.
 
 ### 3. Configure the runtime
 
-```bash
-cp .env.local.example .env
-# Set INKTIME_PHOTO_PATH and other deployment paths in .env.
-```
+For local Docker development, copy `.env.local.example` to `.env`, set the actual paths and LAN URL, then use both `docker-compose.yml` and `docker-compose.dev.yml`. The development override exposes the Web port to the LAN by default; use a loopback bind for local-only access.
 
-Start InkTime, create the first administrator, then configure providers and analysis settings in the Web console. API keys are stored through the encrypted settings flow; do not put them in `.env` or source files.
-
-InkTime supports OpenAI, OpenRouter, OpenAI-compatible endpoints, and local providers. New custom devices use the physical pairing flow to receive a one-time Device Secret; do not place credentials in URLs.
+Native Python processes do not load the Compose `.env` automatically. Export `INKTIME_DATA_DIR`, `INKTIME_PHOTO_DIR` and other [runtime settings](docs/architecture/RUNTIME_CONFIGURATION.md) consistently in each process. Create the first administrator at `/setup`. API keys belong in the encrypted Web settings flow, not source files or deployment examples.
 
 ## Analyze Photos
 
-Before analyzing photos, make sure:
+New installations default to `analysis.execution_mode=local_only`; scanning, local selection and rendering do not require an AI provider. To run ordinary AI jobs, an administrator must explicitly select `automatic_ai` in `/settings`, configure a provider, its model and pricing, then create a small `single` job in `/jobs`. `local_with_manual_ai` permits explicit manual AI operations only.
 
-- LM Studio, or your cloud VLM service, is running
-- the photo library is mounted and a provider is configured in the Web console
+The current pipeline sends one Vision image request per analysis plan, with at most one text-only JSON repair. Old two-stage strategy names normalize to `single`. Results include descriptions, photo types, scores and captions; new responses must satisfy strict Schema v4, including memory and visual scores, content filters and visual orientation. Stored v1–v3 results remain historical records and need reanalysis to enter v4 ranking.
 
-Run:
-
-```bash
-python3 analyze_photos.py
-```
-
-The vision model will read and understand all files in your photo library, generating:
-
-- Scene description
-- Photo type
-- Memory value / visual quality scores
-- One-line caption
-
-Photo inventory and analysis results are stored in the Modern SQLite schema under the configured data directory. Use the Scoring page to adjust versioned scoring rules and caption guidance.
-
-The process is resumable. Photos that have already been processed will not be analyzed again, so you can process a large photo library across multiple runs.
-
-*Choose a model that fits your available compute. The author's qwen3-vl-30b setup already produces very solid captions.*
+`analyze_photos.py` is a compatibility CLI that creates persisted jobs and executes one Worker iteration. It is not the retired standalone analyzer; remaining work requires the Worker service. A completed local job, prefilter result, inherited analysis or cache hit does not prove a new provider call. Check [Activity and AI Trace](docs/guides/ACTIVITY_AI_TRACE_ZH_TW.md) together with usage and timestamps.
 
 ## Render the Daily "On This Day" Photo for ESP32
 
@@ -99,61 +73,29 @@ Use the Rendering page to preview and publish a release. The Scheduler and Worke
 
 ## Start the ESP32 Download Server and Web UI
 
-Run:
+For native development, run these in separate terminals with the same environment and paths:
 
 ```bash
 python3 server.py
+python3 -m inktime.app.workers.runner
+python3 -m inktime.app.workers.scheduler
 ```
 
-#### Web UI:
-
-The server provides a simple visual frontend for reviewing processed photo descriptions and captions, and for previewing the simulated e-ink rendering result.
-
-Open in your browser:
-
-```text
-http://127.0.0.1:8765/photos
-```
-
-Use `/simulator` for e-ink previews and `/rendering` to publish immutable releases.
+Open `/setup` first, then `/photos`, `/rendering`, `/simulator`, `/activity` or `/ai/traces`. Production uses Gunicorn (`gunicorn --config gunicorn.conf.py server:app`) for Web, plus the Worker and Scheduler processes; Flask's development server is not a production service.
 
 ## Server Deployment and Scheduled Task Example (optional)
 
-Create a systemd service:
+Production NAS deployment uses published GHCR images and `scripts/update_nas.sh`, not a local source build. Follow the [NAS deployment guide](docs/operations/NAS_TAG_DEPLOYMENT_ZH_TW.md) to prepare `.env.nas`, real canonical paths, UID/GID 10001 permissions, transport settings and a published version tag.
 
 ```bash
-sudo vi /etc/systemd/system/inktime-server.service
+# Replace vX.Y.Z with an already published release.
+sudo ./scripts/update_nas.sh --initialize vX.Y.Z
+# Subsequent updates omit --initialize.
 ```
 
-Example, update the project path for your environment:
+The updater checks the deployment marker, lock, contract and recovery point before recreating all three services without a build. HTTPS and secure cookies are the production default. Trusted-LAN HTTP is an explicit degraded mode and must not be exposed to the Internet. Configure daily schedules in the Web console; no legacy render cron is required.
 
-```ini
-[Unit]
-Description=InkTime Server
-After=network.target
-
-[Service]
-Type=simple
-# Change this to your project path
-WorkingDirectory=/path/to/InkTime
-ExecStart=/path/to/InkTime/venv/bin/python server.py
-Restart=always
-RestartSec=3
-User=inktime
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable inktime-server
-sudo systemctl start inktime-server
-```
-
-For production, deploy the Web, Worker, and Scheduler services together with Docker Compose. Configure daily schedules in the Web console; no separate rendering cron script is required.
+For development validation, follow [AGENTS.md](AGENTS.md) and [CI policy](docs/CI_POLICY.md): tests, builds, browser suites and firmware compilation run in Hosted CI.
 
 ---
 
@@ -161,23 +103,25 @@ For production, deploy the Web, Worker, and Scheduler services together with Doc
 
 ## Hardware and Pins
 
+The custom PCB details below apply to the generic board profile, not the PhotoPainter pin map or button behavior.
+
 #### MCU
 
 This project uses the Espressif ESP32-S3-N8R8 module.
 
-You can also use any off-the-shelf ESP32 development board. If you use a different board or module, make sure it has PSRAM enabled and at least 384K PSRAM available.
+Use a supported compile-time board profile. GPIO, flash partitions, PSRAM and panel drivers must match the actual board; arbitrary ESP32 boards are not interchangeable.
 
 #### Display
 
-This project uses a 7.3-inch four-color e-ink display, model EL073TS3 (49-pin), driven by the GxEPD2 library (`GxEPD2_730c_GDEY073D46`).
+The current server provides three 480×800 wire profiles: safe four-color, GDEP073E01 six-color and GDEY073D46 seven-color. The matching compile-time driver and physical adapter are described in the ESP32 guide; PhotoPainter uses its dedicated board adapter.
 
-For other sizes or models, update the display constructor according to the hardware support list in GxEPD2.
+Adding another size or model requires matching server payload, firmware driver, memory and hardware validation; changing only the display constructor is insufficient.
 
 #### E-Ink Adapter Board
 
 This project uses the 49-pin seven-color EPD adapter board made by the Bilibili creator "记得带马扎".
 
-Most 24-pin e-ink displays with SPI adapter boards should also be compatible.
+Connector pin count alone does not prove compatibility. Match the controller, voltage, pinout and selected panel profile before connecting hardware.
 
 #### Pin Definitions
 
@@ -217,13 +161,11 @@ Example PCB:
 
 ## Build and Flash
 
-Arduino IDE is recommended.
+The shared 7C/PhotoPainter source currently declares firmware **2.8.6**. Use the exact Hosted CI profile, pinned dependencies and repository-owned partition table described in the [ESP32 guide](docs/devices/ESP32_GUIDE_ZH_TW.md).
 
-1. Install ESP32 Arduino Core.
-2. Select the ESP32-S3 board and enable PSRAM.
-3. Install dependencies:
-   - `GxEPD2`
-4. Open and build/flash `esp32/ink-display-7C-photo/ink-display-7C-photo.ino`.
+PhotoPainter Rev2.0 requires 16 MiB flash, 8 MiB OPI PSRAM, TG28 ALDO4 power handling and its own GPIO map. Read the [hardware handoff](docs/devices/PHOTOPAINTER_REV2_TG28_HARDWARE_HANDOFF_ZH_TW.md) before flashing. Preserve a full local flash backup; an app-only binary belongs at `0x10000`, never `0x0`. GPIO0 remains BOOT and GPIO5 remains the factory PWR button.
+
+The 13.3-inch beta sketch uses a retired download protocol and is not integrated with the current Web release profiles.
 
 ### Custom Fonts (optional)
 
@@ -234,17 +176,17 @@ InkTime includes two offline Traditional Chinese choices in the Rendering page: 
 On startup, the device tries to read saved Wi-Fi credentials from NVS. If credentials are missing or Wi-Fi connection fails, it automatically enters AP configuration mode:
 
 - The device starts an AP hotspot: `InkTime-xxxx`
-- The current ESP32-S3 PhotoPainter firmware generates a new AP password at runtime when configuration mode starts: a 24-character uppercase hexadecimal value made from 12 bytes of `esp_random()`. It is not a fixed default and is not derived from the SSID, MAC address, or chip ID; the password is shown on the device pairing/configuration screen.
+- The current ESP32-S3 PhotoPainter firmware generates a new AP password at runtime when configuration mode starts: an 8-digit random numeric value. It is not a fixed default and is not derived from the SSID, MAC address, or chip ID; the password is shown on the device pairing/configuration screen.
 - Connect to the AP and open the configuration page in a browser: `http://192.168.4.1/`
-- Configure Wi-Fi, server address, and scheduled update time, then save. The device will restart and enter the normal workflow.
+- Configure Wi-Fi and the InkTime server address. Approve the short-lived physical pairing code in the Web Devices page; the device completes recoverable claim/confirm before its normal workflow. Configure regular schedules in the Web console.
 
 ## Refresh and Sleep
 
-- The device downloads the daily generated image from the server at the configured update time and refreshes the e-ink screen.
-- After a successful refresh, it enters deep sleep until the next wake-up.
-- If download times out, 60 seconds by default, it also enters long sleep to avoid abnormal battery drain.
-- Press RESET at any time to force a restart and immediately download/refresh the image.
-- Long-sleep standby current is below 1mA. With two 18650 cells and about 5000mAh capacity, battery life can reach roughly half a year.
+Online devices validate a Queue or Release Manifest, exact payload length and SHA-256 before refreshing. `safe_4c` uses 96,000-byte 2bpp payloads; the six/seven-color profiles use 192,000-byte indexed4 payloads. Enhanced PhotoPainter can cache verified schedules on SD and use RTC-first offline slots. Identical validated content may skip a physical refresh while retaining the protocol ACK behavior.
+
+PhotoPainter KEY1 double-click opens a read-only power page, holds it for 30 seconds after refresh, then restores the verified last successful SD frame. Long holds request forced network refresh or recovery as described in the device guide. GPIO0/5/21 are not repurposed for these actions.
+
+Timeouts and the max-awake supervisor bound failure handling. Historical cold-start/KEY1 checks are documented separately; sleep current, timer accuracy and battery lifetime require measurements and are not guaranteed by source or CI.
 
 ## Related Projects
 

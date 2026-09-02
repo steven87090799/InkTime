@@ -10,7 +10,7 @@
 - Webhook 預設只允許 HTTPS，禁止 userinfo、fragment、redirect、private／loopback／link-local／reserved IPv4/IPv6；DNS 驗證後實際連線固定使用同一 IP，TLS SNI 與憑證驗證仍以原 hostname 執行。TCP connect 與 TLS handshake 受 connect timeout 限制；連線後 socket 另套 read timeout。只有 request 尚未開始送出前才能切換已驗證 IP；一旦 request 可能已全部或部分送達，任何 timeout、reset、broken pipe、remote disconnect 或 HTTP parse error 都不會在同一次 delivery 中換 IP 重送。Webhook 採 at-least-once 語意，所有後續重試都重用穩定的 `Idempotency-Key`／`X-InkTime-Event-ID`，接收端必須依 Key 去重。內網例外只能由部署者透過 `INKTIME_WEBHOOK_ALLOWLIST` 明確設定 hostname、子網域、IP 或 CIDR。
 - JSON API 的 Boolean 只接受 `true`／`false`；不接受字串、0/1、集合或 null。整數拒絕 Boolean、字串與小數；浮點必須有限且在契約範圍內。這會拒絕過去可能被 truthy coercion 接受的模糊輸入。
 - CSP 使用每個 response 獨立的密碼學 nonce，`script-src` 不允許 `unsafe-inline`；Production HTTPS 才送出 HSTS。
-- 舊裝置 API 預設關閉。Production 預設且建議 HTTPS；明確的 insecure HTTP break-glass 只供受控環境，Health／Preflight 會 degraded，且不得公開至公網。
+- Legacy Web 與 URL-key 下載路由已移除；Legacy Device Token 仍可用於現行相容 Device API，不能混淆兩者。Production 預設且建議 HTTPS；明確的 insecure HTTP break-glass 只供受控環境，Health／Preflight 會 degraded，且不得公開至公網。
 
 若主密鑰／`session.key` 遺失，既有 Secret 無法解密；應從備份恢復或重新輸入 Provider Key。疑似自動配對 Secret 洩漏時立即撤銷並由管理員啟用重新配對；Legacy Token 則重新產生並查看最後 IP／連線時間。
 

@@ -16,7 +16,7 @@ InkTime 適合單台 Intel N100 長期執行。正式預設以「低待機喚醒
 | 模糊度建立最多約 65k Python 整數 list | 每並行槽額外記憶體 | Welford 串流變異數 |
 | 100k 工作建立全部 Future | 記憶體線性增長風險 | `concurrency × queue_multiplier` 有界 Future |
 | 三容器每次啟動都做 SQLite 備份 | 重複 I/O 與磁碟占用 | 僅存在待套用 Migration 時備份一次 |
-| 診斷頁每次掃整個縮圖目錄 | 100k 檔案時 I/O 尖峰 | 目錄大小預設快取 300 秒 |
+| 診斷頁每次掃整個縮圖目錄 | 100k 檔案時 I/O 尖峰 | 目錄大小新安裝預設快取 21,600 秒（6 小時），保留管理員自訂值 |
 | Gunicorn access log 記錄所有 probe | 無用 Log 與磁碟寫入 | 預設關閉；應用事件獨立分級 |
 
 ## 建議 Web 設定
