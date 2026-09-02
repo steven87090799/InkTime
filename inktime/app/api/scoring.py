@@ -86,6 +86,8 @@ def restore_profile(version_id: str):
         )
     except KeyError:
         abort(404)
+    except ValueError as exc:
+        abort(400, description=f"SET-002 {exc}")
     return {"id": profile["id"], "name": profile["name"]}, 201
 
 

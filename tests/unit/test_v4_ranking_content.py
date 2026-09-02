@@ -11,7 +11,7 @@ from inktime.app.domain.analysis.schema import validate_analysis_result
 from inktime.app.providers.openai_compatible import OpenAICompatibleProvider
 from inktime.app.domain.analysis.scoring import DEFAULT_SCORING_RULES
 from inktime.app.services.analysis import FULL_ANALYSIS_TOKEN_CAP
-from tests.unit.test_analysis_schema import valid_result
+from tests.unit.test_analysis_schema import content_filter_result, valid_result
 
 
 @pytest.mark.parametrize("level,bonus", list(enumerate((0, 2, 5, 9, 14))))
@@ -55,17 +55,17 @@ def test_people_count_cannot_trigger_rarity_without_a_meaningful_code():
 )
 def test_settings_control_each_content_threshold(code, confidence, enabled, excluded):
     value = validate_analysis_result(
-        valid_result(content_filter={"exclude_code": code, "confidence": confidence})
+        valid_result(content_filter=content_filter_result(code, confidence))
     )
     policy = evaluate_content_filter(value["content_filter"], {CONTENT_FILTER_SWITCHES[code]: enabled})
     assert (policy["decision"] == "auto_excluded") == excluded
     assert value["visual_orientation"]["rotation_cw"] == 0
 
 
-@pytest.mark.parametrize("code", ["none", "uncertain"])
-def test_ordinary_single_person_photos_have_no_gender_heuristic(code):
+@pytest.mark.parametrize("confidence", [0.2, 1.0])
+def test_ordinary_single_person_photos_have_no_gender_heuristic(confidence):
     value = valid_result(
-        types=["人物", "旅行"], people_count=1, content_filter={"exclude_code": code, "confidence": 1}
+        types=["人物", "旅行"], people_count=1, content_filter=content_filter_result(confidence=confidence)
     )
     assert evaluate_content_filter(value["content_filter"])["decision"] == "pass"
 
@@ -95,3 +95,27 @@ def test_percentile_then_e6_contract():
     assert distinguishing == 57.7
     assert distinguishing * 0.8 + 90 * 0.2 == pytest.approx(64.16)
     assert distinguishing * 0.8 + 10 * 0.2 == pytest.approx(48.16)
+
+
+@pytest.mark.parametrize("switch_mask", range(8))
+def test_overlapping_content_uses_every_enabled_classification(switch_mask):
+    codes = list(CONTENT_FILTER_SWITCHES)
+    settings = {CONTENT_FILTER_SWITCHES[code]: bool(switch_mask & (1 << index)) for index, code in enumerate(codes)}
+    content = {code: {"detected": True, "confidence": 0.95} for code in codes}
+    policy = evaluate_content_filter(content, settings)
+    expected = [code for code in codes if settings[CONTENT_FILTER_SWITCHES[code]]]
+    assert policy["matched_codes"] == expected
+    assert policy["decision"] == ("auto_excluded" if expected else "pass")
+    assert policy["primary_reason"] == (expected[0] if expected else "passed")
+
+
+def test_thresholds_and_detected_flags_are_independent_for_overlapping_content():
+    content = content_filter_result(
+        sexualized_content={"detected": False, "confidence": 1},
+        explicit_nudity={"detected": True, "confidence": 0.85},
+        female_glamour_portrait={"detected": True, "confidence": 0.89},
+    )
+    assert evaluate_content_filter(content)["matched_codes"] == ["explicit_nudity"]
+    assert evaluate_content_filter(content, {"analysis.exclude_explicit_nudity": False})["decision"] == "pass"
+    content["female_glamour_portrait"]["confidence"] = 0.9
+    assert evaluate_content_filter(content)["matched_codes"] == ["explicit_nudity", "female_glamour_portrait"]

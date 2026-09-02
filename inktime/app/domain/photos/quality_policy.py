@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-FEATURE_VERSION = "local-quality-v5"
+FEATURE_VERSION = "local-quality-v6"
+QUALITY_POLICY_VERSION = "local-quality-policy-v2"
 _SCREENSHOT_WORDS = {
     "screenshot",
     "screen shot",
@@ -231,6 +232,7 @@ def evaluate_local_quality(
         },
         "sensitivity": sensitivity,
         "feature_version": FEATURE_VERSION,
+        "policy_version": QUALITY_POLICY_VERSION,
         "evidence": {
             "width": width,
             "height": height,

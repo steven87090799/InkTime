@@ -22,6 +22,7 @@ from inktime.app.domain.analysis import (
     normalize_reasoning_effort,
     validate_analysis_result,
 )
+from inktime.app.domain.analysis.content_filter import CONTENT_FILTER_SWITCHES
 from inktime.app.domain.analysis.json_repair import extract_json_value
 from inktime.app.domain.analysis.execution_mode import (
     execution_mode,
@@ -304,7 +305,7 @@ class PhotoAnalysisService:
             "memory_score": 0.0, "visual_score": 0.0,
             "special_level": 0, "special_codes": [], "people_count": 0,
             "side_caption": "畫面把此刻收好了。",
-            "content_filter": {"exclude_code": "uncertain", "confidence": 0.0},
+            "content_filter": {code: {"detected": False, "confidence": 0.0} for code in CONTENT_FILTER_SWITCHES},
             "subject_position": "unknown", "text_safe_area": "unknown",
             "visual_orientation": _unknown_visual_orientation(),
         }
@@ -427,6 +428,7 @@ class PhotoAnalysisService:
             "enabled": bool(policy_settings["analysis.prefilter_enabled"]),
             "sensitivity": policy["sensitivity"],
             "feature_version": policy["feature_version"],
+            "policy_version": policy["policy_version"],
             "decision": policy["decision"],
             "excluded": policy["decision"] == "auto_excluded",
             "primary_reason": policy["primary_reason"],

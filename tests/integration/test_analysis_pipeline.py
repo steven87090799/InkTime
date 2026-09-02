@@ -1253,7 +1253,7 @@ def test_cloud_strategy_prefilters_screenshot_without_token_usage(app, tmp_path)
     )
 
     assert result["stage"] == "prefilter"
-    assert result["analysis"]["content_filter"]["exclude_code"] == "uncertain"
+    assert all(item == {"detected": False, "confidence": 0.0} for item in result["analysis"]["content_filter"].values())
     assert snapshot["decision"] == "auto_excluded"
     assert snapshot["primary_reason"] == "screenshot"
     assert any(check["key"] == "screenshot_strong" and check["hit"] for check in snapshot["checks"])

@@ -45,11 +45,9 @@ SPECIAL_CODES = {
     "performance",
 }
 CONTENT_FILTER_CODES = {
-    "none",
     "sexualized_content",
     "explicit_nudity",
     "female_glamour_portrait",
-    "uncertain",
 }
 ORIENTATION_EVIDENCE = {
     "faces_upright",
@@ -112,8 +110,11 @@ ANALYSIS_JSON_SCHEMA: dict[str, Any] = {
             },
             "content_filter": _object(
                 {
-                    "exclude_code": {"type": "string", "enum": sorted(CONTENT_FILTER_CODES)},
-                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    code: _object({
+                        "detected": {"type": "boolean"},
+                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    })
+                    for code in sorted(CONTENT_FILTER_CODES)
                 }
             ),
             "subject_position": {"type": "string", "enum": POSITIONS},

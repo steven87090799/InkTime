@@ -12,6 +12,15 @@ from inktime.app.domain.analysis.schema import (
 )
 
 
+def content_filter_result(code=None, confidence=0.97, **updates):
+    value = {
+        category: {"detected": category == code, "confidence": confidence}
+        for category in ("sexualized_content", "explicit_nudity", "female_glamour_portrait")
+    }
+    value.update(updates)
+    return value
+
+
 def valid_result(**updates):
     value = {
         "schema_version": 4,
@@ -23,7 +32,7 @@ def valid_result(**updates):
         "people_count": 1,
         "caption": "男子在河畔持釣竿，背景為開闊天空與河岸，身旁草地上的釣具清楚可見。",
         "side_caption": "釣竿伸向雲層深處。",
-        "content_filter": {"exclude_code": "none", "confidence": 0.97},
+        "content_filter": content_filter_result(),
         "subject_position": "center",
         "text_safe_area": "bottom_right",
         "visual_orientation": {
@@ -100,7 +109,7 @@ def test_only_v4_is_supported(version):
         ("text_safe_area", None),
         ("content_filter", {"exclude_code": "screenshot", "confidence": 0.99}),
         ("content_filter", {"exclude_code": "none", "confidence": 0.99, "exclude": True}),
-        ("content_filter", {"exclude_code": "none", "confidence": float("nan")}),
+        ("content_filter", {"exclude_code": "none", "confidence": 0.99}),
     ],
 )
 def test_invalid_values_fail(field, value):
@@ -160,3 +169,25 @@ def test_caption_controls_cannot_publish_a_contract_the_validator_rejects():
         'caption_min_chars': 0, 'caption_target_chars': 10, 'caption_max_chars': 20,
     })['schema']['properties']['caption']
     assert schema['minLength'] == 10 and schema['maxLength'] == 20
+
+
+@pytest.mark.parametrize("code", ["sexualized_content", "explicit_nudity", "female_glamour_portrait"])
+@pytest.mark.parametrize("invalid", [
+    {"detected": True},
+    {"detected": "true", "confidence": 0.95},
+    {"detected": 1, "confidence": 0.95},
+    {"detected": True, "confidence": float("nan")},
+    {"detected": False, "confidence": 1.1},
+    {"detected": True, "confidence": 0.95, "exclude": True},
+])
+def test_each_content_classification_is_strict(code, invalid):
+    with pytest.raises(AnalysisValidationError):
+        validate_analysis_result(valid_result(content_filter=content_filter_result(**{code: invalid})))
+
+
+@pytest.mark.parametrize("code", ["sexualized_content", "explicit_nudity", "female_glamour_portrait"])
+def test_no_content_classification_can_be_omitted(code):
+    content = content_filter_result()
+    del content[code]
+    with pytest.raises(AnalysisValidationError):
+        validate_analysis_result(valid_result(content_filter=content))

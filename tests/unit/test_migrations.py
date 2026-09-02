@@ -32,7 +32,7 @@ def _run_capture_date_backfill(database_path: str, start, results) -> None:
 
 
 def test_fresh_database_is_migrated(tmp_path):
-    assert CURRENT_SCHEMA_VERSION == 56
+    assert CURRENT_SCHEMA_VERSION == 57
     database = Database(tmp_path / "inktime.db")
     assert migrate(database) == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     assert database.integrity_check() == "ok"
@@ -366,7 +366,7 @@ def test_migration_53_converts_existing_ai_output_to_taiwan_traditional(monkeypa
         )
 
     monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", MIGRATIONS)
-    assert migrate(database) == [53, 54, 55, 56]
+    assert migrate(database) == list(range(53, CURRENT_SCHEMA_VERSION + 1))
     with database.session() as connection:
         analysis = connection.execute(
             "SELECT caption,side_caption,reason,raw_json,semantic_json FROM photo_analysis"
@@ -482,68 +482,99 @@ def test_migration_48_makes_unknown_cost_nullable_and_preserves_api_usage_contra
     assert migrate(database) == []
 
 
-def test_migration_56_classifies_v4_history_without_rewriting_rows(monkeypatch, tmp_path):
-    database = Database(tmp_path / "migration-56-score-kind.db")
-    all_migrations = migrations_module.MIGRATIONS
-    before_56 = tuple(migration for migration in all_migrations if migration.version < 56)
-    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", before_56)
-    assert migrate(database) == list(range(1, 56))
+def test_deployed_main_schema54_upgrades_without_rewriting_history(monkeypatch, tmp_path):
+    # Frozen SQL from deployed main, not a schema54 assembled from the new branch.
+    frozen = json.loads((Path(__file__).parents[1] / "fixtures/main_schema54_migration.json").read_text())
+    deployed54 = Migration(54, frozen["name"], tuple(frozen["statements"]))
+    assert MIGRATIONS[53] == deployed54
+    database = Database(tmp_path / "deployed-main-54.db")
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS[:53])
+    migrate(database)
     now = "2026-08-30T00:00:00+00:00"
     with database.transaction() as connection:
         connection.execute(
-            "INSERT INTO libraries(id,name,root_path,created_at,updated_at) VALUES (?,?,?,?,?)",
-            ("score-kind-library", "Score kind", str(tmp_path), now, now),
+            "INSERT INTO libraries(id,name,root_path,created_at,updated_at) VALUES ('lib','main54',?,?,?)",
+            (str(tmp_path), now, now),
         )
         connection.executemany(
-            "INSERT INTO photos(id,library_id,relative_path,status,created_at,updated_at) VALUES (?,?,?,'analyzed',?,?)",
-            [
-                ("historical-local", "score-kind-library", "local.jpg", now, now),
-                ("historical-ai", "score-kind-library", "ai.jpg", now, now),
-                ("historical-unknown", "score-kind-library", "unknown.jpg", now, now),
-            ],
+            "INSERT INTO photos(id,library_id,relative_path,status,created_at,updated_at) VALUES (?,'lib',?,'analyzed',?,?)",
+            [(key, f"{key}.jpg", now, now) for key in (
+                "e6", "manual", "restored", "override", "blur", "content", "local", "unknown"
+            )],
+        )
+        connection.execute(
+            "UPDATE photos SET eligible=0,exclusion_status='auto_excluded',"
+            "reject_reason='e6_below_threshold',reject_rule='local-quality',"
+            "reject_rule_version='local-quality-v5',reject_details_json='{\"e6_score\":10}',"
+            "feature_version='local-quality-v5' WHERE id IN ('e6','manual','restored','override')"
+        )
+        connection.execute("UPDATE photos SET exclusion_status='manually_excluded' WHERE id='manual'")
+        connection.execute("UPDATE photos SET eligible=1,exclusion_status='manually_restored',manual_override=1 WHERE id='restored'")
+        connection.execute("UPDATE photos SET manual_override=1 WHERE id='override'")
+        connection.execute("UPDATE photos SET eligible=0,exclusion_status='auto_excluded',reject_reason='severe_blur',reject_rule='local-quality' WHERE id='blur'")
+        connection.execute("UPDATE photos SET eligible=0,exclusion_status='auto_excluded',reject_reason='explicit_nudity',reject_rule='content-filter' WHERE id='content'")
+        connection.execute(
+            "INSERT INTO scoring_rule_versions(id,name,rules,memory_weight,beauty_weight,technical_weight,"
+            "emotion_weight,favorite_bonus,is_active,created_at) VALUES ('legacy','legacy rules','original',20,30,40,10,9,1,?)",
+            (now,),
         )
         connection.executemany(
-            """
-            INSERT INTO photo_analysis(
-                photo_id,schema_version,stage,provider,model,caption,types_json,
-                memory_score,visual_score,local_quality_score,special_level,
-                side_caption,raw_json,analysis_source,ranking_score,created_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            [
-                (
-                    "historical-local", 4, "local", "local", "local-quality-v3", "local",
-                    "[]", 50, 50, 55, 0, "", '{"legacy":true}', "direct", 55, now,
-                ),
-                (
-                    "historical-ai", 4, "single", "openai", "vision", "ai", "[]",
-                    78, 83, 91, 2, "", '{"semantic":true}', "direct", 78, now,
-                ),
-                (
-                    "historical-unknown", 4, "unknown", None, None, "unknown", "[]",
-                    50, 50, 50, 1, "", '{"legacy":true}', "direct", 50, now,
-                ),
-            ],
+            "INSERT INTO photo_analysis(photo_id,schema_version,stage,provider,model,caption,types_json,"
+            "memory_score,beauty_score,technical_quality_score,emotion_score,raw_json,ranking_score,scoring_version_id,created_at) "
+            "VALUES (?,3,?,?,'old-model','old caption','[]',70,80,90,60,?,75,'legacy',?)",
+            [(key, stage, provider, raw, now) for key, stage, provider, raw in (
+                ("e6", "single", "openai", '{"schema_version":3,"original":true}'),
+                ("local", "local", "local", '{"local":true}'),
+                ("unknown", "unknown", None, '{"unknown":true}'),
+            )],
         )
-        before_raw = connection.execute(
-            "SELECT raw_json,ranking_score FROM photo_analysis WHERE photo_id='historical-local'"
-        ).fetchone()
-
-    monkeypatch.setattr("inktime.app.db.migrations.MIGRATIONS", all_migrations)
-    assert migrate(database) == [56]
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS[:53] + (deployed54,))
+    assert migrate(database) == [54]
     with database.session() as connection:
-        rows = {
-            str(row["photo_id"]): dict(row)
-            for row in connection.execute(
-                "SELECT photo_id,score_kind,ranking_score,raw_json FROM photo_analysis ORDER BY photo_id"
-            ).fetchall()
-        }
-    assert rows["historical-local"]["score_kind"] == "local_quality"
-    assert rows["historical-ai"]["score_kind"] == "semantic"
-    assert rows["historical-unknown"]["score_kind"] == "legacy"
-    assert rows["historical-local"]["ranking_score"] == before_raw["ranking_score"] == 55
-    assert rows["historical-local"]["raw_json"] == before_raw["raw_json"]
+        analyses_before = [dict(row) for row in connection.execute("SELECT * FROM photo_analysis ORDER BY id")]
+        profile_before = dict(connection.execute("SELECT * FROM scoring_rule_versions WHERE id='legacy'").fetchone())
+        protected_before = [dict(row) for row in connection.execute("SELECT * FROM photos WHERE id<>'e6' ORDER BY id")]
+    assert [row["score_kind"] for row in analyses_before] == ["semantic", "local_quality", "legacy"]
+
+    monkeypatch.setattr(migrations_module, "MIGRATIONS", MIGRATIONS)
+    assert migrate(database, tmp_path / "backups") == [55, 56, 57]
     assert migrate(database) == []
+    assert database.integrity_check() == "ok"
+    with database.session() as connection:
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        columns = [row["name"] for row in connection.execute("PRAGMA table_info(photo_analysis)")]
+        assert columns.count("score_kind") == 1
+        assert {"visual_score", "content_filter_json", "local_quality_score"} <= set(columns)
+        for before in analyses_before:
+            after = dict(connection.execute("SELECT * FROM photo_analysis WHERE id=?", (before["id"],)).fetchone())
+            assert after["score_kind"] == ("local_quality" if before["photo_id"] == "local" else "legacy")
+            assert {key: after[key] for key in before if key != "score_kind"} == {key: value for key, value in before.items() if key != "score_kind"}
+            assert after["visual_score"] is None and after["local_quality_score"] is None
+        profile = dict(connection.execute("SELECT * FROM scoring_rule_versions WHERE id='legacy'").fetchone())
+        assert {key: profile[key] for key in profile_before if key != "is_active"} == {key: value for key, value in profile_before.items() if key != "is_active"}
+        assert profile["is_active"] == 0 and profile["ranking_contract_version"] == 3
+        assert profile["visual_weight"] is None and profile["local_weight"] is None
+        assert [dict(row) for row in connection.execute("SELECT * FROM photos WHERE id<>'e6' ORDER BY id")] == protected_before
+        e6 = connection.execute("SELECT * FROM photos WHERE id='e6'").fetchone()
+        assert e6["eligible"] == 1 and e6["exclusion_status"] == "eligible"
+        assert e6["reject_reason"] is None and e6["manual_override"] == 0
+        events = connection.execute("SELECT changes_json FROM photo_events WHERE event='automatic_exclusion_retired'").fetchall()
+        assert len(events) == 1
+        assert json.loads(json.loads(events[0][0])["previous_reject_details"]) == {"e6_score": 10}
+        assert connection.execute("SELECT dirty FROM library_ranking_state WHERE library_id='lib'").fetchone()[0] == 1
+    from inktime.app.repositories.scoring import ScoringProfileRepository
+    from inktime.app.repositories.settings import SettingsRepository
+
+    settings = SettingsRepository(database)
+    settings.ensure_defaults()
+    profiles = ScoringProfileRepository(database, settings)
+    current = profiles.current()
+    assert current["ranking_contract_version"] == 4
+    assert (current["memory_weight"], current["visual_weight"], current["local_weight"]) == (50, 25, 25)
+    assert profiles.get("legacy")["beauty_weight"] == 30
+    with pytest.raises(ValueError, match="舊版評分契約"):
+        profiles.restore("legacy", created_by="unused", source_ip="test")
+    assert profiles.current()["id"] == current["id"]
 
 
 def test_migration_39_quarantines_legacy_ambiguous_offline_slot_rows(monkeypatch, tmp_path):

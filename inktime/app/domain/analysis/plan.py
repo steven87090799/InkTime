@@ -8,7 +8,7 @@ from typing import Any, Mapping, Sequence
 
 
 VISION_INPUT_VERSION = "vision-input-v3"
-PROVIDER_PROMPT_CONTRACT_VERSION = "provider-prompt-contract-v1"
+PROVIDER_PROMPT_CONTRACT_VERSION = "provider-prompt-contract-v2"
 AI_IMAGE_JPEG_QUALITY = 88
 SCHEMA_VERSION = 4
 REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")

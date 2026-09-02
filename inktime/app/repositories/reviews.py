@@ -158,7 +158,11 @@ class ReviewRepository:
         if score_max not in {None, ""}:
             clauses.append("a.score_kind=? AND a.ranking_score<=?")
             params.extend([SEMANTIC_SCORE_KIND, float(str(score_max))])
-        confidence = "json_extract(a.content_filter_json,'$.confidence')"
+        confidence = (
+            "min(json_extract(a.content_filter_json,'$.sexualized_content.confidence'),"
+            "json_extract(a.content_filter_json,'$.explicit_nudity.confidence'),"
+            "json_extract(a.content_filter_json,'$.female_glamour_portrait.confidence'))"
+        )
         if filters.get("low_confidence"):
             clauses.append(f"{confidence} IS NOT NULL AND CAST({confidence} AS REAL)<?")
             params.append(LOW_CONFIDENCE_THRESHOLD)
@@ -238,7 +242,11 @@ class ReviewRepository:
                 semantic = {}
         else:
             semantic = {}
-        value["confidence"] = ((semantic.get("values") or {}).get("content_filter") or {}).get("confidence")
+        classifications = (semantic.get("values") or {}).get("content_filter") or {}
+        confidences = [classifications.get(code, {}).get("confidence") for code in (
+            "sexualized_content", "explicit_nudity", "female_glamour_portrait"
+        )]
+        value["confidence"] = min(confidences) if all(type(c) in (int, float) for c in confidences) else None
         value["analysis_details"] = semantic.get("values") if isinstance(semantic.get("values"), dict) else {}
         confidence = value.get("confidence")
         try:

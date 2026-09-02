@@ -26,6 +26,7 @@ from inktime.app.domain.analysis.schema import REQUIRED_FIELDS, validate_analysi
 from inktime.app.domain.photos.preprocessing import LocalPhotoFeatures
 from inktime.app.domain.photos.quality_policy import (
     FEATURE_VERSION,
+    QUALITY_POLICY_VERSION,
     evaluate_local_quality,
     is_confirmed_screenshot,
     local_candidate_score,
@@ -34,7 +35,7 @@ from inktime.app.domain.photos.dates import materialized_capture_fields, parse_p
 
 
 LOCAL_QUALITY_RULE = "local-quality"
-LOCAL_QUALITY_RULE_VERSION = FEATURE_VERSION
+LOCAL_QUALITY_RULE_VERSION = QUALITY_POLICY_VERSION
 EXCLUDED_STATUSES = frozenset({"auto_excluded", "manually_excluded"})
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SCORE_POPULATION_TTL_SECONDS = 45.0
@@ -783,16 +784,16 @@ class PhotoRepository:
                     date_updates,
                 )
 
-            # 本機品質決策屬於掃描產物，不等待也不觸發大型模型。已人工處理的照片
-            # 只在內容 SHA 改變時才重新套用規則，避免「恢復後立刻又被排除」。
+            # Local quality decisions preserve manual decisions across rescans.
+            # Favorites retain the existing local-quality protection only;
+            # AI content exclusion is independently enforced when saving analysis.
             quality_updates = []
             for plan in plans:
                 features = plan["item"].features
                 if not features.local_features_complete:
                     continue
                 existing = plan["existing"]
-                # Automatic rules are never allowed to overwrite a favourite or
-                # a manual decision unless the content itself changed.
+                # Preserve content exclusions and explicit manual decisions.
                 protected = _must_preserve_exclusion(existing) or (
                     bool(existing)
                     and (
@@ -847,7 +848,7 @@ class PhotoRepository:
                             features.as_dict(),
                             evaluation=policy,
                         ),
-                        LOCAL_QUALITY_RULE_VERSION,
+                        FEATURE_VERSION,
                         features.orientation,
                         int(plan["content_changed"]),
                         features.orientation,
@@ -1335,7 +1336,7 @@ class PhotoRepository:
                             "UPDATE photos SET local_candidate_score=?,feature_version=?,updated_at=? WHERE id=?",
                             (
                                 local_candidate_score(photo),
-                                LOCAL_QUALITY_RULE_VERSION,
+                                FEATURE_VERSION,
                                 now,
                                 photo_id,
                             ),
@@ -1347,7 +1348,7 @@ class PhotoRepository:
                                 reject_rule=NULL,reject_rule_version=NULL,reject_details_json=NULL,
                                 rejected_at=NULL,manual_override=0,feature_version=?,updated_at=? WHERE id=?
                             """,
-                            (LOCAL_QUALITY_RULE_VERSION, now, photo_id),
+                            (FEATURE_VERSION, now, photo_id),
                         )
                     else:
                         reason, evidence = exclusion
@@ -1367,7 +1368,7 @@ class PhotoRepository:
                                 evidence.get("rule_version", LOCAL_QUALITY_RULE_VERSION),
                                 details,
                                 now,
-                                LOCAL_QUALITY_RULE_VERSION,
+                                FEATURE_VERSION,
                                 now,
                                 photo_id,
                             ),
@@ -1407,6 +1408,7 @@ class PhotoRepository:
                 "thresholds": evaluation["thresholds"],
                 "e6_threshold": evaluation.get("e6_threshold"),
                 "feature_version": evaluation["feature_version"],
+                "policy_version": evaluation["policy_version"],
                 "evidence": evaluation["evidence"],
             },
             ensure_ascii=False,
@@ -1424,7 +1426,7 @@ class PhotoRepository:
                 (
                     evaluation["primary_reason"],
                     LOCAL_QUALITY_RULE,
-                    FEATURE_VERSION,
+                    QUALITY_POLICY_VERSION,
                     details,
                     now,
                     now,
@@ -2310,7 +2312,7 @@ class PhotoRepository:
                             (
                                 prefilter_evaluation["primary_reason"],
                                 LOCAL_QUALITY_RULE,
-                                FEATURE_VERSION,
+                                QUALITY_POLICY_VERSION,
                                 details,
                                 now,
                                 now,

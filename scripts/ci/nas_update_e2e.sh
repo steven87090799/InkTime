@@ -177,7 +177,7 @@ photos.save_analysis(
      "types": ["日常"], "memory_score": 88, "visual_score": 77,
      "special_level": 0, "special_codes": [], "people_count": 0,
      "side_caption": "相框留住此刻的光影。", "subject_position": "center", "text_safe_area": "bottom_right",
-     "content_filter": {"exclude_code": "none", "confidence": 1},
+     "content_filter": {code: {"detected": False, "confidence": 1} for code in ("sexualized_content", "explicit_nudity", "female_glamour_portrait")},
      "visual_orientation": {"rotation_cw": None, "confidence": 0, "ambiguous": True, "evidence": ["insufficient_visual_cues"]}},
     '{"ci":true}',
 )

@@ -92,6 +92,8 @@ def test_scoring_profile_create_and_restore_are_versioned(app):
 
     assert created["is_active"] == 1
     assert created["memory_weight"] == 50
+    assert created["ranking_contract_version"] == 4
+    assert (created["visual_weight"], created["local_weight"]) == (25, 25)
     assert repository.get(str(initial["id"]))["is_active"] == 0
     with app.extensions["inktime_database"].session() as connection:
         history_count = connection.execute(

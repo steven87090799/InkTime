@@ -382,7 +382,7 @@ def test_incremental_scan_reapplies_changed_local_quality_policy_version(app, tm
     assert result["processed"] == 1
     assert processor.calls == 2
     with app.extensions["inktime_database"].session() as connection:
-        assert connection.execute("SELECT feature_version FROM photos").fetchone()[0] == "local-quality-v5"
+        assert connection.execute("SELECT feature_version FROM photos").fetchone()[0] == "local-quality-v6"
 
 
 def test_newer_scan_blocks_confirmation_of_saved_old_missing_candidates(app, tmp_path):

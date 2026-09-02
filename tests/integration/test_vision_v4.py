@@ -8,7 +8,7 @@ from PIL import Image
 from tests.conftest import create_admin, login
 from tests.integration.test_photo_quality_ai import CountingProvider, _scan
 from tests.integration.test_jobs import add_photos, create_job
-from tests.unit.test_analysis_schema import valid_result
+from tests.unit.test_analysis_schema import content_filter_result, valid_result
 from inktime.app.domain.analysis.scoring import calculate_distinguishing_score
 from inktime.app.domain.analysis.content_filter import CONTENT_FILTER_SWITCHES
 from inktime.app.domain.photos import PhotoPreprocessor
@@ -58,7 +58,7 @@ def test_authoritative_exclusion_retains_analysis_orientation(app, code, confide
     settings.update(CONTENT_FILTER_SWITCHES[code], enabled, changed_by=actor, source_ip="test")
     repo = app.extensions["inktime_photo_repository"]
     photo_id = add_photos(app, 1)[0]
-    result = save(repo, photo_id, content_filter={"exclude_code": code, "confidence": confidence})
+    result = save(repo, photo_id, content_filter=content_filter_result(code, confidence))
     photo = repo.get_with_path(photo_id)
     assert bool(photo["eligible"]) is not excluded
     assert (photo["exclusion_status"] == "auto_excluded") == excluded
@@ -73,7 +73,7 @@ def test_authoritative_exclusion_retains_analysis_orientation(app, code, confide
         row = connection.execute("SELECT * FROM photo_analysis WHERE photo_id=?", (photo_id,)).fetchone()
         assert (
             row["schema_version"] == 4
-            and json.loads(row["raw_json"])["content_filter"]["exclude_code"] == code
+            and json.loads(row["raw_json"])["content_filter"][code] == {"detected": True, "confidence": confidence}
         )
         assert (
             row["reason"] is None and row["technical_quality_score"] is None and row["emotion_score"] is None
@@ -84,7 +84,7 @@ def test_restore_rescan_reanalysis_and_explicit_reapply(app, tmp_path):
     actor = create_admin(app)
     photo_id = _scan(app, tmp_path)[0]
     repo = app.extensions["inktime_photo_repository"]
-    content = {"exclude_code": "female_glamour_portrait", "confidence": 0.95}
+    content = content_filter_result("female_glamour_portrait", 0.95)
     save(repo, photo_id, content_filter=content)
     repo.set_exclusion(photo_id, action="restore", changed_by=actor)
     # Scan changed bytes too: only explicit reapply may reset a manual restore.
@@ -138,7 +138,7 @@ def test_local_quality_favorite_population_and_caption_search(app):
             row["ranking_score"] == round(old_score + 2, 2) == row["final_ranking_score"]
             and row["effective_special_level"] == 1
         )
-    save(repo, ids[-1], content_filter={"exclude_code": "sexualized_content", "confidence": 0.99})
+    save(repo, ids[-1], content_filter=content_filter_result("sexualized_content", 0.99))
     assert len(repo.score_population()) == 5
     rows, count = repo.search(query="釣具")
     assert count == 6 and len(rows) == 6  # excluded analysis remains searchable
@@ -147,7 +147,7 @@ def test_local_quality_favorite_population_and_caption_search(app):
 def test_real_service_uses_v4_and_content_policy(app, tmp_path):
     photo_id = _scan(app, tmp_path)[0]
     provider = CountingProvider(
-        valid_result(content_filter={"exclude_code": "explicit_nudity", "confidence": 0.95})
+        valid_result(content_filter=content_filter_result("explicit_nudity", 0.95))
     )
     actor = create_admin(app)
     app.extensions["inktime_settings_repository"].update(
@@ -177,7 +177,7 @@ def test_render_percentile_precedes_e6_and_excluded_is_never_selected(app, tmp_p
         )
     for i, photo_id in enumerate(ids):
         save(repo, photo_id, memory_score=70 + i, special_level=0)
-    save(repo, ids[-1], content_filter={"exclude_code": "female_glamour_portrait", "confidence": 0.95})
+    save(repo, ids[-1], content_filter=content_filter_result("female_glamour_portrait", 0.95))
     monkeypatch.setattr(
         repo, "_refresh_library_ranking", lambda *_args, **_kwargs: pytest.fail("render refreshed rarity")
     )
@@ -192,7 +192,7 @@ def test_render_percentile_precedes_e6_and_excluded_is_never_selected(app, tmp_p
         assert row["display_score"] == round(distinguishing * 0.8 + 90 * 0.2, 2)
 
 
-def test_reapply_uses_current_switch_and_duplicate_inheritance_respects_favorite(app):
+def test_reapply_uses_current_switch_and_favorite_inheritance_still_excludes(app):
     actor = create_admin(app)
     repo = app.extensions["inktime_photo_repository"]
     ids = add_photos(app, 2)
@@ -202,11 +202,11 @@ def test_reapply_uses_current_switch_and_duplicate_inheritance_respects_favorite
     save(
         repo,
         ids[0],
-        content_filter={"exclude_code": "female_glamour_portrait", "confidence": 0.95},
+        content_filter=content_filter_result("female_glamour_portrait", 0.95),
         special_level=2,
     )
     inherited = repo.inherit_existing_analysis(ids[1], None)
-    assert inherited["content_filter"]["exclude_code"] == "female_glamour_portrait"
+    assert inherited["content_filter"]["female_glamour_portrait"]["detected"] is True
     assert inherited["special_level"] == 2 and inherited["effective_special_level"] == 3
     assert repo.get_with_path(ids[1])["eligible"] == 0
     app.extensions["inktime_settings_repository"].update(
@@ -282,7 +282,7 @@ def test_favorite_never_bypasses_ai_content_exclusion(app, code):
     photo_id = add_photos(app, 1)[0]
     with repo.database.session() as connection:
         connection.execute("UPDATE photos SET favorite=1 WHERE id=?", (photo_id,))
-    save(repo, photo_id, content_filter={"exclude_code": code, "confidence": 0.99})
+    save(repo, photo_id, content_filter=content_filter_result(code, 0.99))
     photo = repo.get_with_path(photo_id)
     assert photo["eligible"] == 0 and photo["exclusion_status"] == "auto_excluded"
 
@@ -360,3 +360,97 @@ def test_local_analysis_ui_labels_semantic_scores_as_unanalyzed(app, client):
     text = client.get(f"/photos/{photo_id}").get_data(as_text=True)
     assert "AI 語意評分：尚未分析" in text
     assert "回憶 0" not in text and "視覺 0" not in text
+
+
+def test_overlapping_content_persists_all_reasons_and_reapply_uses_other_enabled_rule(app):
+    actor = create_admin(app)
+    repo = app.extensions["inktime_photo_repository"]
+    settings = app.extensions["inktime_settings_repository"]
+    photo_id = add_photos(app, 1)[0]
+    content = {code: {"detected": True, "confidence": 0.99} for code in CONTENT_FILTER_SWITCHES}
+    save(repo, photo_id, content_filter=content)
+    details = json.loads(repo.get_with_path(photo_id)["reject_details_json"])
+    assert set(details["matched_codes"]) == set(CONTENT_FILTER_SWITCHES)
+    repo.set_exclusion(photo_id, action="restore", changed_by=actor)
+    save(repo, photo_id, content_filter=content)
+    assert repo.get_with_path(photo_id)["eligible"] == 1
+    for key in ("analysis.exclude_sexualized_content", "analysis.exclude_female_glamour_portraits"):
+        settings.update(key, False, changed_by=actor, source_ip="test")
+    repo.set_exclusion(photo_id, action="reanalyze", reapply_rules=True, changed_by=actor)
+    photo = repo.get_with_path(photo_id)
+    assert photo["eligible"] == 0 and photo["reject_reason"] == "explicit_nudity"
+    assert json.loads(photo["reject_details_json"])["matched_codes"] == ["explicit_nudity"]
+
+
+def test_favorite_added_after_exclusion_does_not_restore_photo(app):
+    actor = create_admin(app)
+    repo = app.extensions["inktime_photo_repository"]
+    photo_id = add_photos(app, 1)[0]
+    save(repo, photo_id, content_filter=content_filter_result("explicit_nudity", 0.99))
+    repo.update_manual(photo_id, favorite=True, captured_at=None, types=[], side_caption="", changed_by=actor)
+    photo = repo.get_with_path(photo_id)
+    assert photo["favorite"] == 1 and photo["eligible"] == 0
+    assert photo["reject_reason"] == "explicit_nudity"
+
+
+@pytest.mark.parametrize("manual", [False, True])
+def test_unchanged_v5_scan_after_e6_migration_preserves_manual_decisions(app, tmp_path, manual):
+    from inktime.app.db.migrations import MIGRATIONS
+    from inktime.app.domain.photos.quality_policy import FEATURE_VERSION
+
+    photo_id = _scan(app, tmp_path)[0]
+    repo = app.extensions["inktime_photo_repository"]
+    with repo.database.session() as connection:
+        connection.execute(
+            "UPDATE photos SET eligible=0,exclusion_status=?,reject_reason='e6_below_threshold',"
+            "reject_rule='local-quality',feature_version='local-quality-v5' WHERE id=?",
+            ("manually_excluded" if manual else "auto_excluded", photo_id),
+        )
+        # Apply the E6 transition to the old state before the unchanged-file scan.
+        for statement in next(m for m in MIGRATIONS if m.version == 57).statements:
+            connection.execute(statement)
+    result = PhotoScanner(repo, PhotoPreprocessor(), app.extensions["inktime_thumbnail_cache"]).scan(
+        "測試照片", tmp_path / "photos", build_thumbnails=False
+    )
+    assert result["processed"] == 1
+    photo = repo.get_with_path(photo_id)
+    assert photo["feature_version"] == FEATURE_VERSION
+    assert photo["eligible"] == (0 if manual else 1)
+    if manual:
+        assert photo["exclusion_status"] == "manually_excluded"
+    else:
+        assert photo["reject_reason"] is None
+        assert photo["local_candidate_score"] > 0
+
+
+def test_review_confidence_uses_all_content_classifications_and_unknown_stays_null(app, client):
+    create_admin(app)
+    login(client)
+    repo = app.extensions["inktime_photo_repository"]
+    low, high, unknown = add_photos(app, 3)
+    save(repo, low, content_filter=content_filter_result(
+        explicit_nudity={"detected": False, "confidence": 0.2}
+    ))
+    save(repo, high)
+    rows = client.get("/api/v1/review/photos?low_confidence=1").json["items"]
+    assert [row["id"] for row in rows] == [low]
+    assert rows[0]["confidence"] == 0.2 and rows[0]["low_confidence"] is True
+    assert client.get(f"/api/v1/review/photos/{high}").json["confidence"] == 0.97
+    assert client.get(f"/api/v1/review/photos/{unknown}").json["confidence"] is None
+
+
+def test_scoring_history_displays_legacy_weights_without_offering_v4_restore(app, client):
+    create_admin(app)
+    login(client)
+    with app.extensions["inktime_database"].session() as connection:
+        connection.execute(
+            "INSERT INTO scoring_rule_versions(id,name,rules,memory_weight,beauty_weight,technical_weight,"
+            "emotion_weight,favorite_bonus,created_at) VALUES ('legacy-profile','舊版歷史','original',20,30,40,10,9,datetime('now'))"
+        )
+    page = client.get("/scoring")
+    assert page.status_code == 200
+    text = page.get_data(as_text=True)
+    assert "美感 30.0／技術 40.0／情緒 10.0" in text
+    assert "Vision v4：回憶 50.0／視覺 25.0／本機品質 25.0" in text
+    assert 'data-id="legacy-profile"' not in text
+    assert "原始四項模型分數" not in text

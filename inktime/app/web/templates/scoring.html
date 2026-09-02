@@ -5,7 +5,7 @@
   <div>
     <p class="eyebrow">可版本化的照片排序</p>
     <h1>評分控制中心</h1>
-    <p>用清楚的評分錨點拉開模型原始分，再依照片庫相對分布產生鑑別分；原始四項模型分數永遠保留。</p>
+    <p>AI 提供回憶與視覺分數，本機計算品質分數；依照片庫相對分布產生鑑別分，並保留原始分析。</p>
   </div>
 </div>
 
@@ -21,7 +21,7 @@
 <section class="panel calibration-panel">
   <div class="panel-head"><div><h2>照片庫相對鑑別分</h2><p>解決模型常把照片集中打在相近區間、肉眼難以比較的問題。</p></div><span class="status {{ 'ok' if distribution.calibration_ready else 'muted' }}">{{ '校準已啟用' if distribution.calibration_ready else '等待更多照片' }}</span></div>
   <div class="calibration-explainer">
-    <article><strong>1. 保留原始分</strong><p>回憶、視覺、技術、情緒與綜合排序都不覆寫，仍可追溯模型判斷。</p></article>
+    <article><strong>1. 保留原始分</strong><p>保留 AI 回憶與視覺分數、本機品質與綜合排序，並區分各自來源。</p></article>
     <article><strong>2. 比較整個照片庫</strong><p>至少 5 張且有 3 種分數後，以同分平均名次計算相對百分位。</p></article>
     <article><strong>3. 顯示更有差異</strong><p>鑑別分以 35% 原始分＋65% 相對百分位呈現，排序方向不變。</p></article>
   </div>
@@ -30,7 +30,7 @@
 </section>
 
 <section class="panel">
-  <div class="panel-head"><div><h2>規則與綜合權重</h2><p>固定公式：回憶 50%＋視覺 25%＋本機品質 25%，再加 Special；最愛提升 1 級。儲存會建立新版本，不會覆蓋歷史。</p></div><div class="scoring-panel-actions">{% if g.user.role == 'administrator' %}<button class="secondary" type="button" id="distinctive-preset">套用高鑑別度範本</button>{% endif %}<strong id="weight-total" class="weight-total">100%</strong></div></div>
+  <div class="panel-head"><div><h2>規則與綜合權重</h2><p>固定公式：回憶 50%＋視覺 25%＋本機品質 25%，再加 Special；最愛提升 1 級，仍受內容排除；人工恢復可覆寫排除。儲存會建立新版本，不會覆蓋歷史。</p></div><div class="scoring-panel-actions">{% if g.user.role == 'administrator' %}<button class="secondary" type="button" id="distinctive-preset">套用高鑑別度範本</button>{% endif %}<strong id="weight-total" class="weight-total">100%</strong></div></div>
   {% if g.user.role == 'administrator' %}
   <form id="scoring-profile-form" class="scoring-form">
     <label class="profile-name">版本名稱<input name="name" maxlength="80" value="{{ current_profile.name }} 的調整" required></label>
@@ -62,9 +62,9 @@
 
 <section class="panel">
   <h2>規則版本歷史</h2>
-  <div class="table-wrap"><table><thead><tr><th>版本</th><th>權重（回憶／視覺／技術／情緒）</th><th>最愛</th><th>建立時間</th><th>操作</th></tr></thead><tbody>
+  <div class="table-wrap"><table><thead><tr><th>版本</th><th>契約與權重</th><th>最愛</th><th>建立時間</th><th>操作</th></tr></thead><tbody>
   {% for version in versions %}
-    <tr><td><strong>{{ version.name }}</strong>{% if version.is_active %}<small>目前使用中</small>{% endif %}</td><td>{{ version.memory_weight }}／{{ version.visual_weight }}／{{ version.local_weight }}</td><td>+{{ version.favorite_bonus }}</td><td>{{ version.created_at }}</td><td>{% if g.user.role == 'administrator' and not version.is_active %}<button class="secondary restore-profile" data-id="{{ version.id }}">還原此版本</button>{% else %}—{% endif %}</td></tr>
+    <tr><td><strong>{{ version.name }}</strong>{% if version.is_active %}<small>目前使用中</small>{% endif %}</td><td>{% if version.ranking_contract_version == 4 %}Vision v4：回憶 {{ version.memory_weight }}／視覺 {{ version.visual_weight }}／本機品質 {{ version.local_weight }}{% else %}舊版：回憶 {{ version.memory_weight }}／美感 {{ version.beauty_weight }}／技術 {{ version.technical_weight }}／情緒 {{ version.emotion_weight }}{% endif %}</td><td>+{{ version.favorite_bonus }} {{ '級' if version.ranking_contract_version == 4 else '分' }}</td><td>{{ version.created_at }}</td><td>{% if g.user.role == 'administrator' and not version.is_active and version.ranking_contract_version == 4 %}<button class="secondary restore-profile" data-id="{{ version.id }}">還原此版本</button>{% else %}—{% endif %}</td></tr>
   {% endfor %}
   </tbody></table></div>
 </section>
@@ -146,7 +146,7 @@
         return node;
       };
       const cards = element('div', '', 'score-cards');
-      [['鑑別分', data.distinguishing_score], ['原始綜合', data.ranking_score], ['回憶', analysis.memory_score], ['視覺', analysis.visual_score], ['技術', analysis.local_quality_score]].forEach(([label, value]) => {
+      [['鑑別分', data.distinguishing_score], ['原始綜合', data.ranking_score], ['回憶', analysis.memory_score], ['視覺', analysis.visual_score], ['本機品質', analysis.local_quality_score]].forEach(([label, value]) => {
         const card = document.createElement('article');
         card.append(element('span', label), element('strong', String(value)));
         cards.append(card);

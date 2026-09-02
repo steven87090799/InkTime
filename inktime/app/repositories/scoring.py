@@ -9,6 +9,8 @@ from inktime.app.domain.analysis.scoring import DEFAULT_RANKING_WEIGHTS, validat
 from inktime.app.repositories.settings import SettingsRepository
 
 
+# Legacy beauty/technical values in new rows only satisfy the original SQL
+# constraint. Contract 4 consumers use visual_weight/local_weight exclusively.
 SETTING_KEYS = {"rules": "analysis.scoring_rules"}
 
 class ScoringProfileRepository:
@@ -39,9 +41,10 @@ class ScoringProfileRepository:
                 connection.execute(
                     """
                     INSERT INTO scoring_rule_versions(
-                        id,name,rules,memory_weight,visual_weight,local_weight,emotion_weight,
+                        id,name,rules,memory_weight,visual_weight,local_weight,
+                        beauty_weight,technical_weight,emotion_weight,ranking_contract_version,
                         favorite_bonus,is_active,created_by,created_at
-                    ) VALUES (?,?,?,?,?,?,0,?,1,NULL,?)
+                    ) VALUES (?,?,?,?,?,?,25,25,0,4,?,1,NULL,?)
                     """,
                     (
                         version_id,
@@ -149,9 +152,10 @@ class ScoringProfileRepository:
                 connection.execute(
                     """
                     INSERT INTO scoring_rule_versions(
-                        id,name,rules,memory_weight,visual_weight,local_weight,emotion_weight,
+                        id,name,rules,memory_weight,visual_weight,local_weight,
+                        beauty_weight,technical_weight,emotion_weight,ranking_contract_version,
                         favorite_bonus,is_active,created_by,created_at
-                    ) VALUES (?,?,?,?,?,?,0,?,1,?,?)
+                    ) VALUES (?,?,?,?,?,?,25,25,0,4,?,1,?,?)
                     """,
                     (
                         version_id,
@@ -183,6 +187,8 @@ class ScoringProfileRepository:
 
     def restore(self, version_id: str, *, created_by: str, source_ip: str) -> dict:
         version = self.get(version_id)
+        if version["ranking_contract_version"] != 4:
+            raise ValueError("舊版評分契約僅供歷史查閱，請以 Vision v4 規則建立新版本")
         return self.create(
             name=f"還原：{version['name']}",
             rules=str(version["rules"]),
